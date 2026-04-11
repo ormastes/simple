@@ -408,6 +408,7 @@ pub(crate) fn call_extern_function(
         "rt_sha1_write" => crypto::rt_sha1_write(&evaluated),
         "rt_sha1_finish" => crypto::rt_sha1_finish(&evaluated),
         "rt_sha1_finish_bytes" => crypto::rt_sha1_finish_bytes(&evaluated),
+        "rt_sha1_finish_base64" => crypto::rt_sha1_finish_base64(&evaluated),
         "rt_sha1_reset" => crypto::rt_sha1_reset(&evaluated),
         "rt_sha1_free" => crypto::rt_sha1_free(&evaluated),
         // Base64 encoding/decoding

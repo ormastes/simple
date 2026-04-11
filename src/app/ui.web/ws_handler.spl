@@ -7,15 +7,17 @@ use std.nogc_sync_mut.io.tcp.{TcpStream}
 use common.ui.widget.{UIState, UIEvent}
 use common.string_core.{char_from_code}
 use app.ui.render.widgets.{render_html_tree}
-use std.infra.hash.{Sha1Hasher}
-
-extern fn rt_base64_encode(data: text) -> text
+# Use runtime SHA-1/base64 directly to avoid as_bytes() interpreter limitation
+extern fn rt_sha1_new() -> i64
+extern fn rt_sha1_write(handle: i64, data: text) -> i64
+extern fn rt_sha1_finish_base64(handle: i64) -> text
+extern fn rt_sha1_free(handle: i64)
 
 # =========================================================================
 # WebSocket Upgrade
 # =========================================================================
 
-val WS_MAGIC: text = "258EAFA5-E914-47DA-95CA-5AB5A0085731"
+val WS_MAGIC: text = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
 
 fn is_ws_upgrade_request(headers: text) -> bool:
     return headers.contains("Upgrade: websocket")
@@ -55,14 +57,14 @@ fn extract_ws_key(headers: text) -> text:
 
 fn compute_ws_accept(key: text) -> text:
     """Compute the Sec-WebSocket-Accept value.
-    WebSocket spec requires: base64(SHA-1(key + magic)) using raw SHA-1 bytes."""
-    val combined = "{key}{WS_MAGIC}"
-    var hasher = Sha1Hasher.new()
-    hasher = hasher.write_str(combined)
-    val raw_bytes = hasher.finish_bytes()
-    hasher.free()
-    # rt_base64_encode operates on raw bytes (text is byte-transparent)
-    return rt_base64_encode(raw_bytes)
+    WebSocket spec requires: base64(SHA-1(key + magic)).
+    Uses runtime functions directly to avoid as_bytes() interpreter limitation."""
+    val combined = key + WS_MAGIC
+    val handle = rt_sha1_new()
+    rt_sha1_write(handle, combined)
+    val result = rt_sha1_finish_base64(handle)
+    rt_sha1_free(handle)
+    return result
 
 # =========================================================================
 # WebSocket Frame Operations

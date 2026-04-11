@@ -117,6 +117,24 @@ pub fn rt_sha1_free(args: &[Value]) -> Result<Value, CompileError> {
     Ok(Value::Nil)
 }
 
+pub fn rt_sha1_finish_base64(args: &[Value]) -> Result<Value, CompileError> {
+    let handle = match args.first() {
+        Some(Value::Int(h)) => *h,
+        _ => return Ok(Value::Nil),
+    };
+    let mut state = SHA1_STATE.lock().unwrap();
+    if let Some(data) = state.remove(&handle) {
+        let mut hasher = Sha1::new();
+        hasher.update(&data);
+        let result = hasher.finalize();
+        let bytes: Vec<u8> = result.to_vec();
+        let encoded = base64::engine::general_purpose::STANDARD.encode(&bytes);
+        Ok(Value::Str(encoded))
+    } else {
+        Ok(Value::Nil)
+    }
+}
+
 pub fn rt_base64_encode(args: &[Value]) -> Result<Value, CompileError> {
     let data = match args.first() {
         Some(Value::Str(s)) => s.as_bytes().to_vec(),
