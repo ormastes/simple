@@ -16,8 +16,10 @@ const os = require('os');
 let mainWindow = null;
 let simpleProcess = null;
 let lineBuffer = '';
-const childWindows = {};  // windowId → BrowserWindow
-const webContentsToWindowId = new Map();  // webContents.id → windowId
+// childWindows/webContentsToWindowId were used by the old openWindow
+// handler that spawned separate BrowserWindow instances. The WM now
+// runs in the main renderer (wm.js) so there are no child BrowserWindows.
+const webContentsToWindowId = new Map();  // webContents.id → windowId (main only)
 const debugLogPath = '/tmp/simple-ui-captures/electron-shell-debug.log';
 const dumpHtmlPath = process.env.SIMPLE_UI_DUMP_HTML_PATH || '';
 const projectRoot = path.resolve(__dirname, '..', '..');
@@ -124,95 +126,24 @@ function handleSimpleMessage(line) {
                 }
                 break;
 
+            // Window manager messages — previously these created separate
+            // BrowserWindow instances floating OUTSIDE the main window. They
+            // are now forwarded to the main renderer so SimpleWindowManager
+            // (src/app/ui.web/wm.js, symlinked here as wm.js) draws them as
+            // floating divs INSIDE the main Electron window.
             case 'openWindow':
-                if (mainWindow) {
-                    const winId = msg.windowId || `win_${Date.now()}`;
-                    const child = new BrowserWindow({
-                        width: msg.width || 400,
-                        height: msg.height || 300,
-                        x: msg.x,
-                        y: msg.y,
-                        parent: mainWindow,
-                        backgroundColor: '#0A0A0F',
-                        show: true,
-                        webPreferences: {
-                            nodeIntegration: false,
-                            contextIsolation: true,
-                            preload: path.join(__dirname, 'preload.js')
-                        },
-                        title: msg.title || 'Simple Window'
-                    });
-                    child.loadFile(path.join(__dirname, 'index.html'));
-                    child.webContents.on('did-finish-load', () => {
-                        if (msg.html) {
-                            child.webContents.send('render', msg.html);
-                        }
-                    });
-                    child.on('closed', () => {
-                        webContentsToWindowId.delete(child.webContents.id);
-                        delete childWindows[winId];
-                        sendToSimple({ type: 'windowClosed', windowId: winId });
-                    });
-                    child.on('move', () => {
-                        if (!child.isDestroyed()) {
-                            const [cx, cy] = child.getPosition();
-                            sendToSimple({ type: 'windowMoved', windowId: winId, x: cx, y: cy });
-                        }
-                    });
-                    child.on('resize', () => {
-                        if (!child.isDestroyed()) {
-                            const [cw, ch] = child.getContentSize();
-                            sendToSimple({ type: 'windowResized', windowId: winId, width: cw, height: ch });
-                        }
-                    });
-                    child.on('focus', () => {
-                        sendToSimple({ type: 'windowFocused', windowId: winId });
-                    });
-                    child.on('blur', () => {
-                        sendToSimple({ type: 'windowBlurred', windowId: winId });
-                    });
-                    childWindows[winId] = child;
-                    webContentsToWindowId.set(child.webContents.id, winId);
-                    debugLog(`opened child window id=${winId}`);
-                    sendToSimple({ type: 'windowOpened', windowId: winId });
-                }
-                break;
-
             case 'closeWindow':
-                if (msg.windowId && childWindows[msg.windowId]) {
-                    childWindows[msg.windowId].close();
-                    delete childWindows[msg.windowId];
-                    debugLog(`closed child window id=${msg.windowId}`);
-                }
-                break;
-
             case 'renderWindow':
-                if (msg.windowId && childWindows[msg.windowId]) {
-                    childWindows[msg.windowId].webContents.send('render', msg.html || '');
-                }
-                break;
-
             case 'moveWindow':
-                if (msg.windowId && childWindows[msg.windowId]) {
-                    childWindows[msg.windowId].setPosition(msg.x || 0, msg.y || 0);
-                }
-                break;
-
             case 'resizeWindow':
-                if (msg.windowId && childWindows[msg.windowId]) {
-                    childWindows[msg.windowId].setSize(msg.width || 400, msg.height || 300);
-                }
-                break;
-
             case 'focusWindow':
-                if (msg.windowId && childWindows[msg.windowId]) {
-                    childWindows[msg.windowId].focus();
-                }
-                break;
-
             case 'minimizeWindow':
-                if (msg.windowId && childWindows[msg.windowId]) {
-                    childWindows[msg.windowId].minimize();
+                if (mainWindow && !mainWindow.isDestroyed()) {
+                    mainWindow.webContents.send('wm-message', msg);
+                    debugLog(`forwarded wm message type=${msg.type} id=${msg.windowId || '-'}`);
+                    if (msg.type === 'openWindow') {
+                        sendToSimple({ type: 'windowOpened', windowId: msg.windowId });
+                    }
                 }
                 break;
 
@@ -338,7 +269,8 @@ app.whenReady().then(() => {
         height: 840,
         minWidth: 1024,
         minHeight: 640,
-        backgroundColor: isMac ? '#00000000' : '#0A0A0F',
+        // Stitch Obsidian neutral override #060612 — matches glass_obsidian_dark()
+        backgroundColor: isMac ? '#00000000' : '#060612',
         transparent: isMac,
         show: false,
         titleBarStyle: isMac ? 'hiddenInset' : 'default',

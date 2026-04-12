@@ -247,6 +247,18 @@ mcp__stitch__generate_variants(
 )
 ```
 
+### Post-generation: Snapshot Stitch state
+
+**After generating screens:** run `/theme_sync pull` to snapshot the new Stitch state.
+This keeps `doc/05_design/stitch_snapshots/` in sync with what was just created in the cloud.
+
+```
+# Invokes Phase 1 of the theme_sync skill
+/theme_sync pull
+```
+
+Snapshots land under `doc/05_design/stitch_snapshots/<project_id>/`. Commit the updated SDN files.
+
 ## Screen Prompt Templates
 
 ### Desktop / Launcher

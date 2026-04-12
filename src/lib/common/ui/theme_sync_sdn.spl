@@ -1,0 +1,608 @@
+# Theme Sync SDN — Serializer and parser for StitchDesignSystem ↔ SDN
+#
+# Converts StitchDesignSystem to the SDN schema emitted by `dump-local`.
+# Also parses that same schema back to a ParsedStitchDesignSystem (for diff).
+#
+# SDN schema emitted:
+#   display_name: <text>
+#   pulled_from: <text>
+#   pulled_at: <text>
+#   theme:
+#       color_mode: <text>
+#       ... metadata fields ...
+#       named_colors:
+#           <key>: <value>   (47 alphabetized entries)
+#
+# design_md is NOT emitted — stays in the stitch skill.
+# notes is NOT emitted — only present in pulled snapshots.
+
+use common.ui.glass_tokens.{StitchDesignSystem, StitchMetadata, StitchMd3Colors}
+
+# =========================================================================
+# Parsed Design System (plain data structs, immutable after construction)
+# =========================================================================
+
+class ParsedStitchMd3Colors:
+    background: text
+    error: text
+    error_container: text
+    inverse_on_surface: text
+    inverse_primary: text
+    inverse_surface: text
+    on_background: text
+    on_error: text
+    on_error_container: text
+    on_primary: text
+    on_primary_container: text
+    on_primary_fixed: text
+    on_primary_fixed_variant: text
+    on_secondary: text
+    on_secondary_container: text
+    on_secondary_fixed: text
+    on_secondary_fixed_variant: text
+    on_surface: text
+    on_surface_variant: text
+    on_tertiary: text
+    on_tertiary_container: text
+    on_tertiary_fixed: text
+    on_tertiary_fixed_variant: text
+    outline: text
+    outline_variant: text
+    primary: text
+    primary_container: text
+    primary_fixed: text
+    primary_fixed_dim: text
+    secondary: text
+    secondary_container: text
+    secondary_fixed: text
+    secondary_fixed_dim: text
+    surface: text
+    surface_bright: text
+    surface_container: text
+    surface_container_high: text
+    surface_container_highest: text
+    surface_container_low: text
+    surface_container_lowest: text
+    surface_dim: text
+    surface_tint: text
+    surface_variant: text
+    tertiary: text
+    tertiary_container: text
+    tertiary_fixed: text
+    tertiary_fixed_dim: text
+
+    static fn empty() -> ParsedStitchMd3Colors:
+        ParsedStitchMd3Colors(
+            background: "", error: "", error_container: "",
+            inverse_on_surface: "", inverse_primary: "", inverse_surface: "",
+            on_background: "", on_error: "", on_error_container: "",
+            on_primary: "", on_primary_container: "",
+            on_primary_fixed: "", on_primary_fixed_variant: "",
+            on_secondary: "", on_secondary_container: "",
+            on_secondary_fixed: "", on_secondary_fixed_variant: "",
+            on_surface: "", on_surface_variant: "",
+            on_tertiary: "", on_tertiary_container: "",
+            on_tertiary_fixed: "", on_tertiary_fixed_variant: "",
+            outline: "", outline_variant: "",
+            primary: "", primary_container: "",
+            primary_fixed: "", primary_fixed_dim: "",
+            secondary: "", secondary_container: "",
+            secondary_fixed: "", secondary_fixed_dim: "",
+            surface: "", surface_bright: "",
+            surface_container: "", surface_container_high: "",
+            surface_container_highest: "",
+            surface_container_low: "", surface_container_lowest: "",
+            surface_dim: "", surface_tint: "", surface_variant: "",
+            tertiary: "", tertiary_container: "",
+            tertiary_fixed: "", tertiary_fixed_dim: ""
+        )
+
+class ParsedStitchMetadata:
+    display_name: text
+    pulled_from: text
+    pulled_at: text
+    color_mode: text
+    color_variant: text
+    custom_color: text
+    roundness: text
+    spacing_scale: text
+    font: text
+    headline_font: text
+    body_font: text
+    label_font: text
+    override_primary_color: text
+    override_secondary_color: text
+    override_tertiary_color: text
+    override_neutral_color: text
+
+    static fn empty() -> ParsedStitchMetadata:
+        ParsedStitchMetadata(
+            display_name: "", pulled_from: "", pulled_at: "",
+            color_mode: "", color_variant: "", custom_color: "",
+            roundness: "", spacing_scale: "", font: "",
+            headline_font: "", body_font: "", label_font: "",
+            override_primary_color: "", override_secondary_color: "",
+            override_tertiary_color: "", override_neutral_color: ""
+        )
+
+class ParsedStitchDesignSystem:
+    metadata: ParsedStitchMetadata
+    md3: ParsedStitchMd3Colors
+
+    static fn empty() -> ParsedStitchDesignSystem:
+        ParsedStitchDesignSystem(
+            metadata: ParsedStitchMetadata.empty(),
+            md3: ParsedStitchMd3Colors.empty()
+        )
+
+# =========================================================================
+# Serializer helpers
+# =========================================================================
+
+fn _sdn_quoted(val_text: text) -> text:
+    if val_text.starts_with("\""):
+        return val_text
+    return "\"{val_text}\""
+
+fn _emit_field(key: text, value: text) -> text:
+    """Root-level field: quoted value (display_name, pulled_from, pulled_at)."""
+    return "{key}: {_sdn_quoted(value)}\n"
+
+fn _emit_theme_field_quoted(key: text, value: text) -> text:
+    """Theme-level field with quoted value (hex colors like custom_color, overrides)."""
+    return "    {key}: {_sdn_quoted(value)}\n"
+
+fn _emit_theme_field_bare(key: text, value: text) -> text:
+    """Theme-level field with bare/unquoted value (enums like color_mode, font names)."""
+    return "    {key}: {value}\n"
+
+fn _emit_color_field(key: text, value: text) -> text:
+    """Named-color entry: quoted hex value."""
+    return "        {key}: {_sdn_quoted(value)}\n"
+
+# =========================================================================
+# Serializer: StitchDesignSystem → SDN text
+# =========================================================================
+
+fn dump_stitch_design_system_sdn(ds: StitchDesignSystem, pulled_from: text, pulled_at: text) -> text:
+    """Serialize a StitchDesignSystem to the canonical SDN format.
+
+    pulled_from: e.g. "local/glass_tokens.spl StitchDesignSystem.obsidian()"
+    pulled_at:   e.g. "2026-04-12"
+    """
+    val m = ds.metadata
+    val c = ds.md3
+
+    var out = ""
+
+    out = "{out}{_emit_field("display_name", m.display_name)}"
+    out = "{out}{_emit_field("pulled_from", pulled_from)}"
+    out = "{out}{_emit_field("pulled_at", pulled_at)}"
+    out = "{out}\n"
+    out = "{out}theme:\n"
+    out = "{out}{_emit_theme_field_bare("color_mode", m.color_mode)}"
+    out = "{out}{_emit_theme_field_bare("color_variant", m.color_variant)}"
+    out = "{out}{_emit_theme_field_quoted("custom_color", m.custom_color)}"
+    out = "{out}{_emit_theme_field_bare("roundness", m.roundness)}"
+    out = "{out}    spacing_scale: {m.spacing_scale}\n"
+    out = "{out}{_emit_theme_field_bare("font", m.font)}"
+    out = "{out}{_emit_theme_field_bare("headline_font", m.headline_font)}"
+    out = "{out}{_emit_theme_field_bare("body_font", m.body_font)}"
+    out = "{out}{_emit_theme_field_bare("label_font", m.label_font)}"
+    out = "{out}{_emit_theme_field_quoted("override_primary_color", m.override_primary_color)}"
+    out = "{out}{_emit_theme_field_quoted("override_secondary_color", m.override_secondary_color)}"
+    out = "{out}{_emit_theme_field_quoted("override_tertiary_color", m.override_tertiary_color)}"
+    out = "{out}{_emit_theme_field_quoted("override_neutral_color", m.override_neutral_color)}"
+    out = "{out}    named_colors:\n"
+    out = "{out}{_emit_color_field("background", c.background)}"
+    out = "{out}{_emit_color_field("error", c.error)}"
+    out = "{out}{_emit_color_field("error_container", c.error_container)}"
+    out = "{out}{_emit_color_field("inverse_on_surface", c.inverse_on_surface)}"
+    out = "{out}{_emit_color_field("inverse_primary", c.inverse_primary)}"
+    out = "{out}{_emit_color_field("inverse_surface", c.inverse_surface)}"
+    out = "{out}{_emit_color_field("on_background", c.on_background)}"
+    out = "{out}{_emit_color_field("on_error", c.on_error)}"
+    out = "{out}{_emit_color_field("on_error_container", c.on_error_container)}"
+    out = "{out}{_emit_color_field("on_primary", c.on_primary)}"
+    out = "{out}{_emit_color_field("on_primary_container", c.on_primary_container)}"
+    out = "{out}{_emit_color_field("on_primary_fixed", c.on_primary_fixed)}"
+    out = "{out}{_emit_color_field("on_primary_fixed_variant", c.on_primary_fixed_variant)}"
+    out = "{out}{_emit_color_field("on_secondary", c.on_secondary)}"
+    out = "{out}{_emit_color_field("on_secondary_container", c.on_secondary_container)}"
+    out = "{out}{_emit_color_field("on_secondary_fixed", c.on_secondary_fixed)}"
+    out = "{out}{_emit_color_field("on_secondary_fixed_variant", c.on_secondary_fixed_variant)}"
+    out = "{out}{_emit_color_field("on_surface", c.on_surface)}"
+    out = "{out}{_emit_color_field("on_surface_variant", c.on_surface_variant)}"
+    out = "{out}{_emit_color_field("on_tertiary", c.on_tertiary)}"
+    out = "{out}{_emit_color_field("on_tertiary_container", c.on_tertiary_container)}"
+    out = "{out}{_emit_color_field("on_tertiary_fixed", c.on_tertiary_fixed)}"
+    out = "{out}{_emit_color_field("on_tertiary_fixed_variant", c.on_tertiary_fixed_variant)}"
+    out = "{out}{_emit_color_field("outline", c.outline)}"
+    out = "{out}{_emit_color_field("outline_variant", c.outline_variant)}"
+    out = "{out}{_emit_color_field("primary", c.primary)}"
+    out = "{out}{_emit_color_field("primary_container", c.primary_container)}"
+    out = "{out}{_emit_color_field("primary_fixed", c.primary_fixed)}"
+    out = "{out}{_emit_color_field("primary_fixed_dim", c.primary_fixed_dim)}"
+    out = "{out}{_emit_color_field("secondary", c.secondary)}"
+    out = "{out}{_emit_color_field("secondary_container", c.secondary_container)}"
+    out = "{out}{_emit_color_field("secondary_fixed", c.secondary_fixed)}"
+    out = "{out}{_emit_color_field("secondary_fixed_dim", c.secondary_fixed_dim)}"
+    out = "{out}{_emit_color_field("surface", c.surface)}"
+    out = "{out}{_emit_color_field("surface_bright", c.surface_bright)}"
+    out = "{out}{_emit_color_field("surface_container", c.surface_container)}"
+    out = "{out}{_emit_color_field("surface_container_high", c.surface_container_high)}"
+    out = "{out}{_emit_color_field("surface_container_highest", c.surface_container_highest)}"
+    out = "{out}{_emit_color_field("surface_container_low", c.surface_container_low)}"
+    out = "{out}{_emit_color_field("surface_container_lowest", c.surface_container_lowest)}"
+    out = "{out}{_emit_color_field("surface_dim", c.surface_dim)}"
+    out = "{out}{_emit_color_field("surface_tint", c.surface_tint)}"
+    out = "{out}{_emit_color_field("surface_variant", c.surface_variant)}"
+    out = "{out}{_emit_color_field("tertiary", c.tertiary)}"
+    out = "{out}{_emit_color_field("tertiary_container", c.tertiary_container)}"
+    out = "{out}{_emit_color_field("tertiary_fixed", c.tertiary_fixed)}"
+    out = "{out}{_emit_color_field("tertiary_fixed_dim", c.tertiary_fixed_dim)}"
+
+    out
+
+# =========================================================================
+# Parser helpers
+# =========================================================================
+
+fn _count_leading_spaces(line: text) -> i32:
+    var count = 0
+    var i = 0
+    while i < line.len():
+        if line[i] == " ":
+            count = count + 1
+        else:
+            return count
+        i = i + 1
+    count
+
+fn _strip_sdn_quotes(value: text) -> text:
+    val v = value.trim()
+    if v.len() >= 2 and v.starts_with("\"") and v.ends_with("\""):
+        return v[1:v.len() - 1]
+    v
+
+fn _split_kv(line: text) -> [text]:
+    """Split 'key: value' into [key, value]. Returns [] if no colon found."""
+    var ci = -1
+    var i = 0
+    while i < line.len():
+        if line[i] == ":":
+            ci = i
+            return [line[:ci].trim(), line[ci + 1:].trim()]
+        i = i + 1
+    []
+
+# =========================================================================
+# Parser: SDN text → ParsedStitchDesignSystem
+# =========================================================================
+# State machine:
+#   section 0 = root fields
+#   section 1 = inside theme: block
+#   section 2 = inside named_colors: block
+# Multiline `|` values (design_md, notes) are skipped.
+# Unknown fields are ignored (tolerant parsing per plan).
+
+fn parse_stitch_design_system_sdn(sdn_text: text) -> ParsedStitchDesignSystem:
+    """Parse SDN text into ParsedStitchDesignSystem. Tolerates unknown fields."""
+    # Mutable accumulator fields — Simple immutable structs require rebuilding.
+    # Use vars for each field, build struct at end.
+    var display_name = ""
+    var pulled_from = ""
+    var pulled_at = ""
+    var color_mode = ""
+    var color_variant = ""
+    var custom_color = ""
+    var roundness = ""
+    var spacing_scale = ""
+    var font = ""
+    var headline_font = ""
+    var body_font = ""
+    var label_font = ""
+    var override_primary_color = ""
+    var override_secondary_color = ""
+    var override_tertiary_color = ""
+    var override_neutral_color = ""
+    # MD3 named colors
+    var nc_background = ""
+    var nc_error = ""
+    var nc_error_container = ""
+    var nc_inverse_on_surface = ""
+    var nc_inverse_primary = ""
+    var nc_inverse_surface = ""
+    var nc_on_background = ""
+    var nc_on_error = ""
+    var nc_on_error_container = ""
+    var nc_on_primary = ""
+    var nc_on_primary_container = ""
+    var nc_on_primary_fixed = ""
+    var nc_on_primary_fixed_variant = ""
+    var nc_on_secondary = ""
+    var nc_on_secondary_container = ""
+    var nc_on_secondary_fixed = ""
+    var nc_on_secondary_fixed_variant = ""
+    var nc_on_surface = ""
+    var nc_on_surface_variant = ""
+    var nc_on_tertiary = ""
+    var nc_on_tertiary_container = ""
+    var nc_on_tertiary_fixed = ""
+    var nc_on_tertiary_fixed_variant = ""
+    var nc_outline = ""
+    var nc_outline_variant = ""
+    var nc_primary = ""
+    var nc_primary_container = ""
+    var nc_primary_fixed = ""
+    var nc_primary_fixed_dim = ""
+    var nc_secondary = ""
+    var nc_secondary_container = ""
+    var nc_secondary_fixed = ""
+    var nc_secondary_fixed_dim = ""
+    var nc_surface = ""
+    var nc_surface_bright = ""
+    var nc_surface_container = ""
+    var nc_surface_container_high = ""
+    var nc_surface_container_highest = ""
+    var nc_surface_container_low = ""
+    var nc_surface_container_lowest = ""
+    var nc_surface_dim = ""
+    var nc_surface_tint = ""
+    var nc_surface_variant = ""
+    var nc_tertiary = ""
+    var nc_tertiary_container = ""
+    var nc_tertiary_fixed = ""
+    var nc_tertiary_fixed_dim = ""
+
+    var section = 0
+    var skip_multiline = false
+    var skip_indent = 0
+
+    val lines = sdn_text.split("\n")
+    var i = 0
+    while i < lines.len():
+        val raw_line = lines[i]
+        val indent = _count_leading_spaces(raw_line)
+        val line = raw_line.trim()
+
+        if line == "" or line.starts_with("#"):
+            i = i + 1
+            continue
+
+        if skip_multiline:
+            if indent > skip_indent:
+                i = i + 1
+                continue
+            else:
+                skip_multiline = false
+
+        val kv = _split_kv(line)
+        if kv.len() < 2:
+            i = i + 1
+            continue
+
+        val key = kv[0]
+        val raw_val = kv[1]
+
+        # Multiline block start
+        if raw_val == "|":
+            skip_multiline = true
+            skip_indent = indent
+            i = i + 1
+            continue
+
+        # Section headers (empty value after colon, or "{}")
+        if raw_val == "" or raw_val == "{}":
+            if key == "theme":
+                section = 1
+            elif key == "named_colors":
+                section = 2
+            i = i + 1
+            continue
+
+        val value = _strip_sdn_quotes(raw_val)
+
+        if section == 0:
+            if key == "display_name":
+                display_name = value
+            elif key == "pulled_from":
+                pulled_from = value
+            elif key == "pulled_at":
+                pulled_at = value
+
+        elif section == 1:
+            if key == "color_mode":
+                color_mode = value
+            elif key == "color_variant":
+                color_variant = value
+            elif key == "custom_color":
+                custom_color = value
+            elif key == "roundness":
+                roundness = value
+            elif key == "spacing_scale":
+                spacing_scale = value
+            elif key == "font":
+                font = value
+            elif key == "headline_font":
+                headline_font = value
+            elif key == "body_font":
+                body_font = value
+            elif key == "label_font":
+                label_font = value
+            elif key == "override_primary_color":
+                override_primary_color = value
+            elif key == "override_secondary_color":
+                override_secondary_color = value
+            elif key == "override_tertiary_color":
+                override_tertiary_color = value
+            elif key == "override_neutral_color":
+                override_neutral_color = value
+
+        elif section == 2:
+            if key == "background":
+                nc_background = value
+            elif key == "error":
+                nc_error = value
+            elif key == "error_container":
+                nc_error_container = value
+            elif key == "inverse_on_surface":
+                nc_inverse_on_surface = value
+            elif key == "inverse_primary":
+                nc_inverse_primary = value
+            elif key == "inverse_surface":
+                nc_inverse_surface = value
+            elif key == "on_background":
+                nc_on_background = value
+            elif key == "on_error":
+                nc_on_error = value
+            elif key == "on_error_container":
+                nc_on_error_container = value
+            elif key == "on_primary":
+                nc_on_primary = value
+            elif key == "on_primary_container":
+                nc_on_primary_container = value
+            elif key == "on_primary_fixed":
+                nc_on_primary_fixed = value
+            elif key == "on_primary_fixed_variant":
+                nc_on_primary_fixed_variant = value
+            elif key == "on_secondary":
+                nc_on_secondary = value
+            elif key == "on_secondary_container":
+                nc_on_secondary_container = value
+            elif key == "on_secondary_fixed":
+                nc_on_secondary_fixed = value
+            elif key == "on_secondary_fixed_variant":
+                nc_on_secondary_fixed_variant = value
+            elif key == "on_surface":
+                nc_on_surface = value
+            elif key == "on_surface_variant":
+                nc_on_surface_variant = value
+            elif key == "on_tertiary":
+                nc_on_tertiary = value
+            elif key == "on_tertiary_container":
+                nc_on_tertiary_container = value
+            elif key == "on_tertiary_fixed":
+                nc_on_tertiary_fixed = value
+            elif key == "on_tertiary_fixed_variant":
+                nc_on_tertiary_fixed_variant = value
+            elif key == "outline":
+                nc_outline = value
+            elif key == "outline_variant":
+                nc_outline_variant = value
+            elif key == "primary":
+                nc_primary = value
+            elif key == "primary_container":
+                nc_primary_container = value
+            elif key == "primary_fixed":
+                nc_primary_fixed = value
+            elif key == "primary_fixed_dim":
+                nc_primary_fixed_dim = value
+            elif key == "secondary":
+                nc_secondary = value
+            elif key == "secondary_container":
+                nc_secondary_container = value
+            elif key == "secondary_fixed":
+                nc_secondary_fixed = value
+            elif key == "secondary_fixed_dim":
+                nc_secondary_fixed_dim = value
+            elif key == "surface":
+                nc_surface = value
+            elif key == "surface_bright":
+                nc_surface_bright = value
+            elif key == "surface_container":
+                nc_surface_container = value
+            elif key == "surface_container_high":
+                nc_surface_container_high = value
+            elif key == "surface_container_highest":
+                nc_surface_container_highest = value
+            elif key == "surface_container_low":
+                nc_surface_container_low = value
+            elif key == "surface_container_lowest":
+                nc_surface_container_lowest = value
+            elif key == "surface_dim":
+                nc_surface_dim = value
+            elif key == "surface_tint":
+                nc_surface_tint = value
+            elif key == "surface_variant":
+                nc_surface_variant = value
+            elif key == "tertiary":
+                nc_tertiary = value
+            elif key == "tertiary_container":
+                nc_tertiary_container = value
+            elif key == "tertiary_fixed":
+                nc_tertiary_fixed = value
+            elif key == "tertiary_fixed_dim":
+                nc_tertiary_fixed_dim = value
+
+        i = i + 1
+
+    val meta = ParsedStitchMetadata(
+        display_name: display_name,
+        pulled_from: pulled_from,
+        pulled_at: pulled_at,
+        color_mode: color_mode,
+        color_variant: color_variant,
+        custom_color: custom_color,
+        roundness: roundness,
+        spacing_scale: spacing_scale,
+        font: font,
+        headline_font: headline_font,
+        body_font: body_font,
+        label_font: label_font,
+        override_primary_color: override_primary_color,
+        override_secondary_color: override_secondary_color,
+        override_tertiary_color: override_tertiary_color,
+        override_neutral_color: override_neutral_color
+    )
+    val colors = ParsedStitchMd3Colors(
+        background: nc_background,
+        error: nc_error,
+        error_container: nc_error_container,
+        inverse_on_surface: nc_inverse_on_surface,
+        inverse_primary: nc_inverse_primary,
+        inverse_surface: nc_inverse_surface,
+        on_background: nc_on_background,
+        on_error: nc_on_error,
+        on_error_container: nc_on_error_container,
+        on_primary: nc_on_primary,
+        on_primary_container: nc_on_primary_container,
+        on_primary_fixed: nc_on_primary_fixed,
+        on_primary_fixed_variant: nc_on_primary_fixed_variant,
+        on_secondary: nc_on_secondary,
+        on_secondary_container: nc_on_secondary_container,
+        on_secondary_fixed: nc_on_secondary_fixed,
+        on_secondary_fixed_variant: nc_on_secondary_fixed_variant,
+        on_surface: nc_on_surface,
+        on_surface_variant: nc_on_surface_variant,
+        on_tertiary: nc_on_tertiary,
+        on_tertiary_container: nc_on_tertiary_container,
+        on_tertiary_fixed: nc_on_tertiary_fixed,
+        on_tertiary_fixed_variant: nc_on_tertiary_fixed_variant,
+        outline: nc_outline,
+        outline_variant: nc_outline_variant,
+        primary: nc_primary,
+        primary_container: nc_primary_container,
+        primary_fixed: nc_primary_fixed,
+        primary_fixed_dim: nc_primary_fixed_dim,
+        secondary: nc_secondary,
+        secondary_container: nc_secondary_container,
+        secondary_fixed: nc_secondary_fixed,
+        secondary_fixed_dim: nc_secondary_fixed_dim,
+        surface: nc_surface,
+        surface_bright: nc_surface_bright,
+        surface_container: nc_surface_container,
+        surface_container_high: nc_surface_container_high,
+        surface_container_highest: nc_surface_container_highest,
+        surface_container_low: nc_surface_container_low,
+        surface_container_lowest: nc_surface_container_lowest,
+        surface_dim: nc_surface_dim,
+        surface_tint: nc_surface_tint,
+        surface_variant: nc_surface_variant,
+        tertiary: nc_tertiary,
+        tertiary_container: nc_tertiary_container,
+        tertiary_fixed: nc_tertiary_fixed,
+        tertiary_fixed_dim: nc_tertiary_fixed_dim
+    )
+
+    ParsedStitchDesignSystem(metadata: meta, md3: colors)

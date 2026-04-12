@@ -1,0 +1,261 @@
+# Theme Sync CLI — subcommand implementation
+#
+# Entry point for `bin/simple theme-sync <subcommand> [options]`.
+# Mirrors the dispatch pattern of src/app/cli/debug_ui.spl.
+#
+# Subcommands:
+#   dump-local [--theme=<name>] [--out=<path>]
+#   diff --local=<sdn> --remote=<sdn> [--no-color]
+#   list [--root=<dir>]
+#   render-wm    (Phase 4 stub)
+#   render-app   (Phase 4 stub)
+
+use common.ui.glass_tokens.{StitchDesignSystem}
+use common.ui.theme_sync_sdn.{dump_stitch_design_system_sdn, parse_stitch_design_system_sdn}
+use common.ui.theme_sync_diff.{diff_stitch_design_systems, format_drift_report}
+
+extern fn rt_file_read_text(path: text) -> text
+extern fn rt_file_write_text(path: text, content: text) -> bool
+extern fn rt_file_exists(path: text) -> bool
+extern fn rt_dir_list(path: text) -> [text]
+extern fn rt_dir_exists(path: text) -> bool
+
+# =========================================================================
+# Date helper — static for Phase 2 (no date extern needed)
+# =========================================================================
+
+fn _today() -> text:
+    "2026-04-12"
+
+# =========================================================================
+# Argument parsing helpers
+# =========================================================================
+
+fn _flag_value(args: [text], prefix: text) -> text:
+    """Extract --flag=value from args. Returns "" if not found."""
+    var i = 0
+    while i < args.len():
+        val arg = args[i]
+        if arg.starts_with(prefix):
+            return arg[prefix.len():]
+        i = i + 1
+    ""
+
+fn _has_flag(args: [text], flag: text) -> bool:
+    var i = 0
+    while i < args.len():
+        if args[i] == flag:
+            return true
+        i = i + 1
+    false
+
+# =========================================================================
+# Usage
+# =========================================================================
+
+fn print_theme_sync_usage():
+    print "Usage: simple theme-sync <subcommand> [options]"
+    print ""
+    print "Subcommands:"
+    print "  dump-local [--theme=<name>] [--out=<path>]"
+    print "      Serialize local design system to SDN. Themes: obsidian (default), glass, celestial_ether."
+    print "      --out: write to file instead of stdout."
+    print ""
+    print "  diff --local=<sdn> --remote=<sdn> [--no-color]"
+    print "      Compare two SDN snapshots. Exit 0 = no drift, 2 = drift detected."
+    print ""
+    print "  list [--root=<dir>]"
+    print "      List known Stitch snapshots. Default root: doc/05_design/stitch_snapshots."
+    print ""
+    print "  render-wm   (Phase 4 — not yet implemented)"
+    print "  render-app  (Phase 4 — not yet implemented)"
+
+# =========================================================================
+# dump-local subcommand
+# =========================================================================
+
+fn cmd_dump_local(theme: text, out_path: text) -> i32:
+    """Serialize StitchDesignSystem.<theme>() to SDN.
+    theme ∈ {obsidian, glass, celestial_ether}. out_path="" = stdout."""
+    var ds_theme = theme
+    if ds_theme == "":
+        ds_theme = "obsidian"
+
+    var ds = StitchDesignSystem.obsidian()
+    var pulled_from = "local/glass_tokens.spl StitchDesignSystem.obsidian()"
+
+    if ds_theme == "glass":
+        ds = StitchDesignSystem.glass()
+        pulled_from = "local/glass_tokens.spl StitchDesignSystem.glass()"
+    elif ds_theme == "celestial_ether":
+        print "Error: celestial_ether does not have a full MD3 color set yet (no factory). Use obsidian or glass."
+        return 1
+    elif ds_theme != "obsidian":
+        print "Error: unknown theme '{ds_theme}'. Available: obsidian (default), glass, celestial_ether."
+        return 1
+
+    val sdn = dump_stitch_design_system_sdn(ds, pulled_from, _today())
+
+    if out_path == "":
+        print sdn
+        return 0
+
+    val ok = rt_file_write_text(out_path, sdn)
+    if not ok:
+        print "Error: failed to write to '{out_path}'"
+        return 1
+
+    return 0
+
+# =========================================================================
+# diff subcommand
+# =========================================================================
+
+fn cmd_diff(local_path: text, remote_path: text, color: bool) -> i32:
+    """Parse two SDN files and report token drift.
+    Exit 0 = no drift, 2 = drift detected."""
+    if local_path == "":
+        print "Error: --local=<path> is required"
+        return 1
+    if remote_path == "":
+        print "Error: --remote=<path> is required"
+        return 1
+
+    if not rt_file_exists(local_path):
+        print "Error: local file not found: {local_path}"
+        return 1
+    if not rt_file_exists(remote_path):
+        print "Error: remote file not found: {remote_path}"
+        return 1
+
+    val local_text = rt_file_read_text(local_path)
+    val remote_text = rt_file_read_text(remote_path)
+
+    val local_ds = parse_stitch_design_system_sdn(local_text)
+    val remote_ds = parse_stitch_design_system_sdn(remote_text)
+
+    val report = diff_stitch_design_systems(local_ds, remote_ds)
+    val output = format_drift_report(report, color)
+    print output
+
+    if report.has_drift:
+        return 2
+    return 0
+
+# =========================================================================
+# list subcommand
+# =========================================================================
+
+fn _read_sdn_value(content: text, key: text) -> text:
+    """Extract a top-level simple `key: value` from SDN content."""
+    val lines = content.split("\n")
+    var i = 0
+    while i < lines.len():
+        val line = lines[i].trim()
+        val prefix = "{key}: "
+        if line.starts_with(prefix):
+            val raw = line[prefix.len():]
+            if raw.starts_with("\"") and raw.ends_with("\"") and raw.len() >= 2:
+                return raw[1:raw.len() - 1]
+            return raw
+        i = i + 1
+    ""
+
+fn cmd_list(snapshots_root: text) -> i32:
+    """List known Stitch snapshots from projects.sdn."""
+    var root = snapshots_root
+    if root == "":
+        root = "doc/05_design/stitch_snapshots"
+
+    val projects_path = "{root}/projects.sdn"
+    if not rt_file_exists(projects_path):
+        print "Error: projects.sdn not found at {projects_path}"
+        return 1
+
+    val projects_content = rt_file_read_text(projects_path)
+
+    # Read sync_mode
+    val sync_mode_path = "{root}/sync_mode.sdn"
+    var sync_mode = "unknown"
+    if rt_file_exists(sync_mode_path):
+        val sm_content = rt_file_read_text(sync_mode_path)
+        val sm = _read_sdn_value(sm_content, "mode")
+        if sm != "":
+            sync_mode = sm
+
+    print "Stitch Snapshots — root: {root}"
+    print "Sync mode: {sync_mode}"
+    print ""
+
+    # Walk project IDs from the directory listing
+    val entries = rt_dir_list(root)
+    var i = 0
+    while i < entries.len():
+        val entry = entries[i]
+        # Project directories are numeric IDs
+        val project_dir = "{root}/{entry}"
+        if rt_dir_exists(project_dir):
+            val ds_dir = "{project_dir}/design_systems"
+            print "Project: {entry}"
+            if rt_dir_exists(ds_dir):
+                val ds_entries = rt_dir_list(ds_dir)
+                var j = 0
+                while j < ds_entries.len():
+                    val ds_file = ds_entries[j]
+                    if ds_file.ends_with(".sdn"):
+                        val ds_path = "{ds_dir}/{ds_file}"
+                        val ds_content = rt_file_read_text(ds_path)
+                        val ds_name = _read_sdn_value(ds_content, "display_name")
+                        val ds_pulled_at = _read_sdn_value(ds_content, "pulled_at")
+                        print "  design_system: {ds_file}  name={ds_name}  pulled_at={ds_pulled_at}"
+                    j = j + 1
+            # Check for last_pull.sdn in the project dir
+            val last_pull_path = "{project_dir}/last_pull.sdn"
+            if rt_file_exists(last_pull_path):
+                val lp_content = rt_file_read_text(last_pull_path)
+                val lp_time = _read_sdn_value(lp_content, "pulled_at")
+                print "  last_pull: {lp_time}"
+            print ""
+        i = i + 1
+
+    return 0
+
+# =========================================================================
+# CLI entry point
+# =========================================================================
+
+fn cli_theme_sync(args: [text]) -> i32:
+    """Handle `bin/simple theme-sync <subcommand> [options]`."""
+    if args.len() < 1:
+        print_theme_sync_usage()
+        return 1
+
+    val subcmd = args[0]
+
+    if subcmd == "dump-local":
+        val theme = _flag_value(args, "--theme=")
+        val out_path = _flag_value(args, "--out=")
+        return cmd_dump_local(theme, out_path)
+
+    if subcmd == "diff":
+        val local_path = _flag_value(args, "--local=")
+        val remote_path = _flag_value(args, "--remote=")
+        val no_color = _has_flag(args, "--no-color")
+        return cmd_diff(local_path, remote_path, not no_color)
+
+    if subcmd == "list":
+        val root = _flag_value(args, "--root=")
+        return cmd_list(root)
+
+    if subcmd == "render-wm":
+        print "theme-sync render-wm: implemented in Phase 4"
+        return 0
+
+    if subcmd == "render-app":
+        print "theme-sync render-app: implemented in Phase 4"
+        return 0
+
+    print "Error: unknown subcommand '{subcmd}'"
+    print ""
+    print_theme_sync_usage()
+    return 1

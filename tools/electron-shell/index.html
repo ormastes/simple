@@ -11,12 +11,16 @@
             padding: 0;
             box-sizing: border-box;
         }
+        /* Stitch Obsidian deep-space gradient (pulled from project 12496218458601315145).
+           #060612 top, #1A0830 bottom — matches StitchMetadata.obsidian overrides and
+           glass_obsidian_dark() in src/lib/common/ui/glass_theme.spl. */
         body {
-            background: radial-gradient(circle at top left, rgba(255,255,255,0.10), transparent 36%),
-                        radial-gradient(circle at 82% 0%, rgba(10,132,255,0.18), transparent 32%),
-                        linear-gradient(160deg, #0b0e14 0%, #141925 45%, #1a2231 100%);
-            color: #eef1ff;
-            font-family: "SF Pro Text", "SF Pro Display", "Helvetica Neue", "Segoe UI Variable Text", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+            background:
+                radial-gradient(circle at top left, rgba(255,255,255,0.08), transparent 42%),
+                radial-gradient(circle at 78% 10%, rgba(198,198,200,0.10), transparent 36%),
+                linear-gradient(180deg, #060612 0%, #0e0820 45%, #1A0830 100%);
+            color: #E3E0F3;
+            font-family: "Space Grotesk", "Manrope", "Inter", "SF Pro Text", -apple-system, BlinkMacSystemFont, sans-serif;
             font-size: 15px;
             line-height: 1.5;
             overflow: hidden;
@@ -28,29 +32,65 @@
         #app {
             width: 100%;
             height: 100%;
-            padding: 10px;
-            overflow: auto;
+            position: relative;
+            overflow: hidden;
         }
         #app.loading {
             display: flex;
             align-items: center;
             justify-content: center;
-            border-radius: 16px;
-            color: rgba(240, 245, 255, 0.86);
+            color: rgba(227, 224, 243, 0.86);
             font-size: 16px;
             letter-spacing: 0.01em;
-            background: rgba(20, 28, 40, 0.36);
-            border: 1px solid rgba(255,255,255,0.10);
-            backdrop-filter: blur(18px) saturate(160%);
-            -webkit-backdrop-filter: blur(18px) saturate(160%);
+        }
+        /* The WM draws here. electron_wm.spl ships the system bar / dock via
+           the `render` IPC message; floating windows arrive via `wm-add-window`
+           forwards and are rendered as absolute-positioned divs inside. */
+        #wm-chrome {
+            position: absolute;
+            inset: 0;
+            pointer-events: auto;
+            z-index: 1;
+        }
+        #wm-desktop {
+            position: absolute;
+            inset: 0;
+            pointer-events: auto;
+            z-index: 2;
+        }
+        #wm-taskbar {
+            position: fixed;
+            bottom: 6px;
+            left: 50%;
+            transform: translateX(-50%);
+            display: flex;
+            gap: 4px;
+            z-index: 10000;
+            pointer-events: auto;
         }
     </style>
 </head>
 <body>
-    <div id="app" class="loading">Loading...</div>
+    <div id="app" class="loading">
+        <div id="wm-chrome"></div>
+        <div id="wm-desktop"></div>
+        <div id="wm-taskbar"></div>
+        <div id="wm-loading-text">Loading...</div>
+    </div>
+    <script src="./wm.js"></script>
     <script>
         const appEl = document.getElementById('app');
+        const chromeEl = document.getElementById('wm-chrome');
+        const desktopEl = document.getElementById('wm-desktop');
+        const taskbarEl = document.getElementById('wm-taskbar');
+        const loadingEl = document.getElementById('wm-loading-text');
         const runtimeStyleId = 'simple-ui-runtime-style';
+
+        // SimpleWindowManager ships WebSocket-shaped handleMessage() — we
+        // stub out its _sendEvent so it stops trying to reach a ws server
+        // when running inside Electron's stdin/stdout IPC path.
+        window.simpleWM = new SimpleWindowManager();
+        window.simpleWM._sendEvent = function() { /* no-op under Electron */ };
 
         function applyRuntimeStyle(cssText) {
             let styleEl = document.getElementById(runtimeStyleId);
@@ -85,13 +125,30 @@
             }
         }
 
-        // Receive rendered HTML from the Simple process
+        // Receive rendered HTML from the Simple process. Render output is the
+        // desktop chrome (system bar, dock, background) — NOT the floating
+        // windows. Floating windows arrive via `wm-add-window`.
         if (window.simpleUI && typeof window.simpleUI.onRender === 'function') {
             window.simpleUI.onRender(function(html) {
                 var normalized = normalizeRenderedHtml(html);
                 applyRuntimeStyle(normalized.css);
                 appEl.classList.remove('loading');
-                appEl.innerHTML = normalized.html;
+                if (loadingEl && loadingEl.parentNode) loadingEl.parentNode.removeChild(loadingEl);
+                chromeEl.innerHTML = normalized.html;
+            });
+        }
+
+        // WM message handlers — forwarded from main.js (previously created
+        // separate BrowserWindow instances; now routed to SimpleWindowManager
+        // so windows draw as floating divs inside the main Electron window).
+        if (window.simpleUI && typeof window.simpleUI.onWmMessage === 'function') {
+            window.simpleUI.onWmMessage(function(msg) {
+                if (!window.simpleWM || !msg || !msg.type) return;
+                try {
+                    window.simpleWM.handleMessage(msg);
+                } catch (err) {
+                    console.error('wm handleMessage failed', err, msg);
+                }
             });
         }
 

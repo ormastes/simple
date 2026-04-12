@@ -25,22 +25,54 @@ This agent requires the following MCP server (not loaded by default — enable w
 
 ## Stitch MCP Tools
 
-This agent uses Google Stitch via the `stitch` MCP server to generate and retrieve UI designs.
+This agent uses Google Stitch via the `stitch` MCP server (proxied through `@_davideast/stitch-mcp`) to generate, retrieve, and sync UI designs.
 
 ### Available MCP Tools
 
+Read-only (pull / inspect):
+
 | Tool | Purpose |
 |------|---------|
-| `mcp__stitch__build_site` | Build a full site from a Stitch project — maps screens to routes, returns design HTML per page |
-| `mcp__stitch__get_screen_code` | Retrieve a single screen's HTML/CSS code from Stitch |
+| `mcp__stitch__list_projects` | List all Stitch projects (filter: `view=owned` or `view=shared`) |
+| `mcp__stitch__get_project` | Fetch a project by resource name (`projects/<id>`) — returns full designTheme + screen list |
+| `mcp__stitch__list_design_systems` | List design systems for a project |
+| `mcp__stitch__get_screen` | Fetch a screen's HTML/CSS code — requires resource name `projects/<pid>/screens/<sid>` |
+
+Mutating (create / update / generate):
+
+| Tool | Purpose |
+|------|---------|
+| `mcp__stitch__create_project` | Bootstrap a new Stitch project |
+| `mcp__stitch__create_design_system` | Attach a new design system to a project |
+| `mcp__stitch__update_design_system` | Replace an existing design system (full rewrite, not patch) |
+| `mcp__stitch__apply_design_system` | Re-skin selected screens with a design system |
+| `mcp__stitch__generate_screen_from_text` | Generate a new screen from a prompt (1–3 min; use `GEMINI_3_1_PRO`, `deviceType: DESKTOP`) |
+| `mcp__stitch__edit_screens` | Focused prompt-based edits of existing screens (no raw HTML push) |
+| `mcp__stitch__generate_variants` | Color / layout / typography variants for screens |
+
+### Known Projects
+
+| ID | Title | Active theme | Asset IDs |
+|----|-------|--------------|-----------|
+| `12496218458601315145` | Simple OS UI | SimpleOS Obsidian (FIDELITY, ROUND_EIGHT) | `fafd2be98b5d434ca0d9ab6c3c5d2598` (Obsidian), `8fe8c918253a418db456fc51badcaffe` (Celestial Ether) |
+| `14134637940805933672` | Simple OS UI | SimpleOS Glass (TONAL_SPOT, ROUND_TWELVE) | `365508527354896466` |
+
+Snapshot: `doc/05_design/stitch_snapshots/` (pulled 2026-04-12, mode `reconcile`).
 
 ### Workflow
 
-1. **Describe** — User provides a UI description (layout, components, style)
-2. **Generate** — Use Stitch MCP to generate the design as production HTML/CSS
-3. **Retrieve** — Fetch screen code with `get_screen_code`
-4. **Integrate** — Place generated HTML into the project (e.g., `src/app/web/`, `examples/`)
-5. **Refine** — Iterate on the design based on user feedback
+1. **Describe** — User provides a UI description or theme change request
+2. **Pull baseline** — `list_projects` then `get_project` for each known ID; save results under `doc/05_design/stitch_snapshots/`
+3. **Generate or edit** — `generate_screen_from_text` for new screens, `edit_screens` for focused changes
+4. **Retrieve code** — `get_screen` returns HTML/CSS
+5. **Integrate** — place generated HTML into the project or sync tokens into `src/lib/common/ui/glass_tokens.spl`
+6. **Refine** — iterate on feedback; re-apply design system via `apply_design_system`
+
+### Caveats
+
+- **No raw HTML push-back.** `edit_screens` takes a natural-language prompt, not code. Local HTML edits cannot be round-tripped.
+- **Design systems are atomic.** `update_design_system` replaces the whole object — not a per-field patch.
+- **Screen generation is slow.** Each `generate_screen_from_text` takes 1–3 minutes. Do not retry on timeout — check with `get_project` first.
 
 ### Environment
 

@@ -30,6 +30,19 @@
 STITCH_API_KEY="$STITCH_API_KEY" npx -y @_davideast/stitch-mcp proxy
 ```
 
+## Theme Consistency Check
+
+**Before generating new mockups:** run `/theme_sync diff` to verify local tokens match Stitch.
+Drift will cause rendered mockups to disagree with the Electron shell.
+
+```
+bin/simple theme-sync dump-local --theme=obsidian --out=/tmp/local_obsidian.sdn
+bin/simple theme-sync diff --local=/tmp/local_obsidian.sdn \
+    --remote=doc/05_design/stitch_snapshots/12496218458601315145/design_systems/obsidian_active.sdn
+```
+
+If drift is detected, resolve it via `/theme_sync` before proceeding.
+
 ## Workflow
 
 1. **TUI mockups** (box-drawing, ANSI colors): `doc/05_design/<feature>_tui.md`
