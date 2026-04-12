@@ -52,6 +52,7 @@ const vscode = __importStar(require("vscode"));
 const katex_1 = __importDefault(require("katex"));
 const blockDetector_1 = require("./blockDetector");
 const imageResolver_1 = require("./imageResolver");
+const mathConverter_1 = require("./mathConverter");
 // ── Math rendering (KaTeX) ───────────────────────────────────────────
 const katexCache = new Map();
 function renderKatexInline(latex) {
@@ -72,33 +73,6 @@ function renderKatexInline(latex) {
     }
     katexCache.set(latex, html);
     return html;
-}
-/** Minimal Simple→LaTeX conversion for common patterns. */
-function simpleToLatex(content) {
-    let s = content;
-    // Greek letters
-    const greeks = [
-        'alpha', 'beta', 'gamma', 'delta', 'epsilon', 'zeta', 'eta', 'theta',
-        'iota', 'kappa', 'lambda', 'mu', 'nu', 'xi', 'pi', 'rho', 'sigma',
-        'tau', 'upsilon', 'phi', 'chi', 'psi', 'omega',
-        'Gamma', 'Delta', 'Theta', 'Lambda', 'Xi', 'Pi', 'Sigma', 'Phi', 'Psi', 'Omega',
-    ];
-    for (const g of greeks) {
-        s = s.replace(new RegExp(`\\b${g}\\b`, 'g'), `\\${g}`);
-    }
-    // Functions
-    s = s.replace(/\bfrac\(([^,]+),\s*([^)]+)\)/g, '\\frac{$1}{$2}');
-    s = s.replace(/\bsqrt\(([^)]+)\)/g, '\\sqrt{$1}');
-    s = s.replace(/\bsum\b/g, '\\sum');
-    s = s.replace(/\bprod\b/g, '\\prod');
-    s = s.replace(/\bint\b/g, '\\int');
-    s = s.replace(/\blim\b/g, '\\lim');
-    s = s.replace(/\binf\b/g, '\\infty');
-    // Trig/log
-    for (const fn of ['sin', 'cos', 'tan', 'log', 'ln', 'exp', 'det', 'max', 'min']) {
-        s = s.replace(new RegExp(`\\b${fn}\\b`, 'g'), `\\${fn}`);
-    }
-    return s;
 }
 // ── Block rendering ──────────────────────────────────────────────────
 function renderDetectedBlocks(blocks, documentUri, webview) {
@@ -126,7 +100,7 @@ function renderDetectedBlocks(blocks, documentUri, webview) {
             };
         }
         // Math/loss/nograd/graph — render via KaTeX
-        const latex = simpleToLatex(block.content);
+        const latex = (0, mathConverter_1.simpleToLatex)(block.content);
         const html = renderKatexInline(latex);
         return {
             ...block,
@@ -135,6 +109,13 @@ function renderDetectedBlocks(blocks, documentUri, webview) {
             status: 'ok',
         };
     });
+}
+function getRichEditorSettings() {
+    const config = vscode.workspace.getConfiguration('simple.richEditor');
+    return {
+        showBlockBorders: config.get('showBlockBorders', false),
+        centerLineNumbers: config.get('centerLineNumbers', true),
+    };
 }
 // ── HTML builder ─────────────────────────────────────────────────────
 function buildRichEditorHtml(katexCssUri, richEditorJsUri, cspSource, nonce) {
@@ -238,7 +219,7 @@ class RichCustomEditorProvider {
 <h2>Simple Rich Editor bundle missing</h2>
 <p>Expected webview bundle at:</p>
 <pre>${richEditorBundleUri.fsPath}</pre>
-<p>Run <code>npm run compile</code> in <code>src/app/vscode_rich_editor</code> and reopen the editor.</p>
+<p>Run <code>npm run compile</code> in <code>src/app/vscode_extension</code> and reopen the editor.</p>
 </body>
 </html>`;
             return;
@@ -268,6 +249,7 @@ class RichCustomEditorProvider {
                 selectionStart,
                 selectionEnd,
                 blocks,
+                settings: getRichEditorSettings(),
             });
         };
         webviewPanel.webview.html = buildRichEditorHtml(katexCssUri, richEditorJsUri, webviewPanel.webview.cspSource, nonce);
@@ -276,6 +258,12 @@ class RichCustomEditorProvider {
                 return;
             }
             void postSync();
+        });
+        const configurationSubscription = vscode.workspace.onDidChangeConfiguration((event) => {
+            if (event.affectsConfiguration('simple.richEditor.showBlockBorders')
+                || event.affectsConfiguration('simple.richEditor.centerLineNumbers')) {
+                void postSync();
+            }
         });
         const messageSubscription = webviewPanel.webview.onDidReceiveMessage(async (message) => {
             if (message.type === 'ready' || message.type === 'requestSync') {
@@ -311,6 +299,7 @@ class RichCustomEditorProvider {
         });
         webviewPanel.onDidDispose(() => {
             changeDocumentSubscription.dispose();
+            configurationSubscription.dispose();
             messageSubscription.dispose();
         });
     }

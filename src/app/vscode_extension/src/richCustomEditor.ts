@@ -14,6 +14,7 @@ import * as vscode from 'vscode';
 import katex from 'katex';
 import { detectBlocks, type BlockKind, type DetectedBlock } from './blockDetector';
 import { parseImageContent, resolveImageUri } from './imageResolver';
+import { simpleToLatex } from './mathConverter';
 
 // ── Types ────────────────────────────────────────────────────────────
 
@@ -30,6 +31,11 @@ export interface RenderableBlock {
     errorMessage?: string;
 }
 
+interface RichEditorSettings {
+    showBlockBorders: boolean;
+    centerLineNumbers: boolean;
+}
+
 type WebviewMessage =
     | { type: 'ready' }
     | { type: 'editAll'; source: string; selectionStart: number; selectionEnd: number }
@@ -37,7 +43,14 @@ type WebviewMessage =
     | { type: 'requestSync' };
 
 type HostMessage =
-    | { type: 'sync'; sourceText: string; selectionStart: number; selectionEnd: number; blocks: RenderableBlock[] }
+    | {
+        type: 'sync';
+        sourceText: string;
+        selectionStart: number;
+        selectionEnd: number;
+        blocks: RenderableBlock[];
+        settings: RichEditorSettings;
+    }
     | { type: 'error'; message: string };
 
 // ── Math rendering (KaTeX) ───────────────────────────────────────────
@@ -60,34 +73,6 @@ function renderKatexInline(latex: string): string {
     }
     katexCache.set(latex, html);
     return html;
-}
-
-/** Minimal Simple→LaTeX conversion for common patterns. */
-function simpleToLatex(content: string): string {
-    let s = content;
-    // Greek letters
-    const greeks = [
-        'alpha', 'beta', 'gamma', 'delta', 'epsilon', 'zeta', 'eta', 'theta',
-        'iota', 'kappa', 'lambda', 'mu', 'nu', 'xi', 'pi', 'rho', 'sigma',
-        'tau', 'upsilon', 'phi', 'chi', 'psi', 'omega',
-        'Gamma', 'Delta', 'Theta', 'Lambda', 'Xi', 'Pi', 'Sigma', 'Phi', 'Psi', 'Omega',
-    ];
-    for (const g of greeks) {
-        s = s.replace(new RegExp(`\\b${g}\\b`, 'g'), `\\${g}`);
-    }
-    // Functions
-    s = s.replace(/\bfrac\(([^,]+),\s*([^)]+)\)/g, '\\frac{$1}{$2}');
-    s = s.replace(/\bsqrt\(([^)]+)\)/g, '\\sqrt{$1}');
-    s = s.replace(/\bsum\b/g, '\\sum');
-    s = s.replace(/\bprod\b/g, '\\prod');
-    s = s.replace(/\bint\b/g, '\\int');
-    s = s.replace(/\blim\b/g, '\\lim');
-    s = s.replace(/\binf\b/g, '\\infty');
-    // Trig/log
-    for (const fn of ['sin', 'cos', 'tan', 'log', 'ln', 'exp', 'det', 'max', 'min']) {
-        s = s.replace(new RegExp(`\\b${fn}\\b`, 'g'), `\\${fn}`);
-    }
-    return s;
 }
 
 // ── Block rendering ──────────────────────────────────────────────────
@@ -131,6 +116,14 @@ function renderDetectedBlocks(
             status: 'ok' as const,
         };
     });
+}
+
+function getRichEditorSettings(): RichEditorSettings {
+    const config = vscode.workspace.getConfiguration('simple.richEditor');
+    return {
+        showBlockBorders: config.get<boolean>('showBlockBorders', false),
+        centerLineNumbers: config.get<boolean>('centerLineNumbers', true),
+    };
 }
 
 // ── HTML builder ─────────────────────────────────────────────────────
@@ -251,7 +244,7 @@ export class RichCustomEditorProvider implements vscode.CustomTextEditorProvider
 <h2>Simple Rich Editor bundle missing</h2>
 <p>Expected webview bundle at:</p>
 <pre>${richEditorBundleUri.fsPath}</pre>
-<p>Run <code>npm run compile</code> in <code>src/app/vscode_rich_editor</code> and reopen the editor.</p>
+<p>Run <code>npm run compile</code> in <code>src/app/vscode_extension</code> and reopen the editor.</p>
 </body>
 </html>`;
             return;
@@ -289,6 +282,7 @@ export class RichCustomEditorProvider implements vscode.CustomTextEditorProvider
                 selectionStart,
                 selectionEnd,
                 blocks,
+                settings: getRichEditorSettings(),
             } satisfies HostMessage);
         };
 
@@ -304,6 +298,15 @@ export class RichCustomEditorProvider implements vscode.CustomTextEditorProvider
                 return;
             }
             void postSync();
+        });
+
+        const configurationSubscription = vscode.workspace.onDidChangeConfiguration((event) => {
+            if (
+                event.affectsConfiguration('simple.richEditor.showBlockBorders')
+                || event.affectsConfiguration('simple.richEditor.centerLineNumbers')
+            ) {
+                void postSync();
+            }
         });
 
         const messageSubscription = webviewPanel.webview.onDidReceiveMessage(async (message: WebviewMessage) => {
@@ -344,6 +347,7 @@ export class RichCustomEditorProvider implements vscode.CustomTextEditorProvider
 
         webviewPanel.onDidDispose(() => {
             changeDocumentSubscription.dispose();
+            configurationSubscription.dispose();
             messageSubscription.dispose();
         });
     }

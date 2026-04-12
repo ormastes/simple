@@ -2634,7 +2634,7 @@ var RichEditorWebview = (() => {
   EditorState.transactionFilter = transactionFilter;
   EditorState.transactionExtender = transactionExtender;
   Compartment.reconfigure = /* @__PURE__ */ StateEffect.define();
-  function combineConfig(configs, defaults2, combine = {}) {
+  function combineConfig(configs, defaults3, combine = {}) {
     let result = {};
     for (let config2 of configs)
       for (let key of Object.keys(config2)) {
@@ -2647,9 +2647,9 @@ var RichEditorWebview = (() => {
         else
           throw new Error("Config merge conflict for field " + key);
       }
-    for (let key in defaults2)
+    for (let key in defaults3)
       if (result[key] === void 0)
-        result[key] = defaults2[key];
+        result[key] = defaults3[key];
     return result;
   }
   var RangeValue = class {
@@ -13308,7 +13308,23 @@ var RichEditorWebview = (() => {
   GutterMarker.prototype.point = true;
   var gutterLineClass = /* @__PURE__ */ Facet.define();
   var gutterWidgetClass = /* @__PURE__ */ Facet.define();
+  var defaults = {
+    class: "",
+    renderEmptyElements: false,
+    elementStyle: "",
+    markers: () => RangeSet.empty,
+    lineMarker: () => null,
+    widgetMarker: () => null,
+    lineMarkerChange: null,
+    initialSpacer: null,
+    updateSpacer: null,
+    domEventHandlers: {},
+    side: "before"
+  };
   var activeGutters = /* @__PURE__ */ Facet.define();
+  function gutter(config2) {
+    return [gutters(), activeGutters.of({ ...defaults, ...config2 })];
+  }
   var unfixGutters = /* @__PURE__ */ Facet.define({
     combine: (values) => values.some((x) => x)
   });
@@ -13645,80 +13661,6 @@ var RichEditorWebview = (() => {
       if (!a[i].compare(b[i]))
         return false;
     return true;
-  }
-  var lineNumberMarkers = /* @__PURE__ */ Facet.define();
-  var lineNumberWidgetMarker = /* @__PURE__ */ Facet.define();
-  var lineNumberConfig = /* @__PURE__ */ Facet.define({
-    combine(values) {
-      return combineConfig(values, { formatNumber: String, domEventHandlers: {} }, {
-        domEventHandlers(a, b) {
-          let result = Object.assign({}, a);
-          for (let event in b) {
-            let exists = result[event], add2 = b[event];
-            result[event] = exists ? (view, line, event2) => exists(view, line, event2) || add2(view, line, event2) : add2;
-          }
-          return result;
-        }
-      });
-    }
-  });
-  var NumberMarker = class extends GutterMarker {
-    constructor(number2) {
-      super();
-      this.number = number2;
-    }
-    eq(other) {
-      return this.number == other.number;
-    }
-    toDOM() {
-      return document.createTextNode(this.number);
-    }
-  };
-  function formatNumber(view, number2) {
-    return view.state.facet(lineNumberConfig).formatNumber(number2, view.state);
-  }
-  var lineNumberGutter = /* @__PURE__ */ activeGutters.compute([lineNumberConfig], (state) => ({
-    class: "cm-lineNumbers",
-    renderEmptyElements: false,
-    markers(view) {
-      return view.state.facet(lineNumberMarkers);
-    },
-    lineMarker(view, line, others) {
-      if (others.some((m) => m.toDOM))
-        return null;
-      return new NumberMarker(formatNumber(view, view.state.doc.lineAt(line.from).number));
-    },
-    widgetMarker: (view, widget, block) => {
-      for (let m of view.state.facet(lineNumberWidgetMarker)) {
-        let result = m(view, widget, block);
-        if (result)
-          return result;
-      }
-      return null;
-    },
-    lineMarkerChange: (update) => update.startState.facet(lineNumberConfig) != update.state.facet(lineNumberConfig),
-    initialSpacer(view) {
-      return new NumberMarker(formatNumber(view, maxLineNumber(view.state.doc.lines)));
-    },
-    updateSpacer(spacer, update) {
-      let max = formatNumber(update.view, maxLineNumber(update.view.state.doc.lines));
-      return max == spacer.number ? spacer : new NumberMarker(max);
-    },
-    domEventHandlers: state.facet(lineNumberConfig).domEventHandlers,
-    side: "before"
-  }));
-  function lineNumbers(config2 = {}) {
-    return [
-      lineNumberConfig.of(config2),
-      gutters(),
-      lineNumberGutter
-    ];
-  }
-  function maxLineNumber(lines) {
-    let last = 9;
-    while (last < lines)
-      last = last * 10 + 9;
-    return last;
   }
   var activeLineGutterMarker = /* @__PURE__ */ new class extends GutterMarker {
     constructor() {
@@ -21239,7 +21181,7 @@ var RichEditorWebview = (() => {
       "&:after": { content: "'abc'", fontSize: "50%", verticalAlign: "middle" }
     }
   });
-  var defaults = {
+  var defaults2 = {
     brackets: ["(", "[", "{", "'", '"'],
     before: ")]}:;>",
     stringPrefixes: []
@@ -21281,7 +21223,7 @@ var RichEditorWebview = (() => {
     return fromCodePoint(ch < 128 ? ch : ch + 1);
   }
   function config(state, pos) {
-    return state.languageDataAt("closeBrackets", pos)[0] || defaults;
+    return state.languageDataAt("closeBrackets", pos)[0] || defaults2;
   }
   var android = typeof navigator == "object" && /* @__PURE__ */ /Android\b/.test(navigator.userAgent);
   var inputHandler2 = /* @__PURE__ */ EditorView.inputHandler.of((view, from, to, insert2) => {
@@ -21300,7 +21242,7 @@ var RichEditorWebview = (() => {
     if (state.readOnly)
       return false;
     let conf = config(state, state.selection.main.head);
-    let tokens = conf.brackets || defaults.brackets;
+    let tokens = conf.brackets || defaults2.brackets;
     let dont = null, changes = state.changeByRange((range) => {
       if (range.empty) {
         let before = prevChar(state.doc, range.head);
@@ -21323,11 +21265,11 @@ var RichEditorWebview = (() => {
   ];
   function insertBracket(state, bracket2) {
     let conf = config(state, state.selection.main.head);
-    let tokens = conf.brackets || defaults.brackets;
+    let tokens = conf.brackets || defaults2.brackets;
     for (let tok of tokens) {
       let closed = closing(codePointAt2(tok, 0));
       if (bracket2 == tok)
-        return closed == tok ? handleSame(state, tok, tokens.indexOf(tok + tok + tok) > -1, conf) : handleOpen(state, tok, closed, conf.before || defaults.before);
+        return closed == tok ? handleSame(state, tok, tokens.indexOf(tok + tok + tok) > -1, conf) : handleOpen(state, tok, closed, conf.before || defaults2.before);
       if (bracket2 == closed && closedBracketAt(state, state.selection.main.from))
         return handleClose(state, tok, closed);
     }
@@ -21386,7 +21328,7 @@ var RichEditorWebview = (() => {
     });
   }
   function handleSame(state, token, allowTriple, config2) {
-    let stringPrefixes = config2.stringPrefixes || defaults.stringPrefixes;
+    let stringPrefixes = config2.stringPrefixes || defaults2.stringPrefixes;
     let dont = null, changes = state.changeByRange((range) => {
       if (!range.empty)
         return {
@@ -21876,6 +21818,67 @@ var RichEditorWebview = (() => {
   }
 
   // src/webview/richEditorWebview.ts
+  function applyEditorSettings(settings) {
+    const root = document.documentElement;
+    const showBlockBorders = settings?.showBlockBorders ?? false;
+    const centerLineNumbers = settings?.centerLineNumbers ?? true;
+    root.style.setProperty(
+      "--simple-rich-block-border",
+      showBlockBorders ? "color-mix(in srgb, var(--vscode-editor-foreground) 18%, transparent)" : "transparent"
+    );
+    root.style.setProperty(
+      "--simple-rich-label-bg",
+      showBlockBorders ? "color-mix(in srgb, var(--vscode-editor-foreground) 10%, transparent)" : "transparent"
+    );
+    root.classList.toggle("simple-rich-center-line-numbers", centerLineNumbers);
+  }
+  var RichLineNumberWidgetMarker = class extends GutterMarker {
+    constructor(lineNumber, height) {
+      super();
+      this.lineNumber = lineNumber;
+      this.height = height;
+    }
+    eq(other) {
+      return this.lineNumber === other.lineNumber && Math.round(this.height) === Math.round(other.height);
+    }
+    toDOM() {
+      const wrap = document.createElement("div");
+      wrap.className = "cm-rich-line-number-marker";
+      wrap.textContent = this.lineNumber;
+      if (this.height > 0) {
+        wrap.style.height = `${this.height}px`;
+      }
+      return wrap;
+    }
+  };
+  function maxLineNumber(lines) {
+    let last = 9;
+    while (last < lines) {
+      last = last * 10 + 9;
+    }
+    return String(last);
+  }
+  function createRichLineNumberGutter() {
+    return gutter({
+      class: "cm-lineNumbers",
+      lineMarker(view, line, otherMarkers) {
+        if (otherMarkers.some((marker) => marker.toDOM)) {
+          return null;
+        }
+        return new RichLineNumberWidgetMarker(
+          String(view.state.doc.lineAt(line.from).number),
+          line.height
+        );
+      },
+      initialSpacer(view) {
+        return new RichLineNumberWidgetMarker(maxLineNumber(view.state.doc.lines), 0);
+      },
+      updateSpacer(spacer, update) {
+        const max = maxLineNumber(update.view.state.doc.lines);
+        return max === spacer.lineNumber ? spacer : new RichLineNumberWidgetMarker(max, 0);
+      }
+    });
+  }
   var vsCodeTheme = EditorView.theme({
     "&": {
       height: "100%",
@@ -21902,6 +21905,16 @@ var RichEditorWebview = (() => {
       color: "var(--vscode-editorLineNumber-foreground)",
       border: "none"
     },
+    ".cm-rich-line-number-marker": {
+      display: "flex",
+      alignItems: "flex-start",
+      justifyContent: "flex-end",
+      width: "100%",
+      boxSizing: "border-box"
+    },
+    "&.simple-rich-center-line-numbers .cm-rich-line-number-marker": {
+      alignItems: "center"
+    },
     ".cm-activeLineGutter": {
       backgroundColor: "var(--vscode-editor-lineHighlightBackground)",
       color: "var(--vscode-editorLineNumber-activeForeground)"
@@ -21924,13 +21937,21 @@ var RichEditorWebview = (() => {
       padding: "4px 8px",
       margin: "2px 0",
       borderRadius: "4px",
-      backgroundColor: "color-mix(in srgb, var(--vscode-editor-foreground) 8%, transparent)",
-      border: "1px solid color-mix(in srgb, var(--vscode-editor-foreground) 15%, transparent)",
+      backgroundColor: "transparent",
+      border: "1px solid var(--simple-rich-block-border)",
       verticalAlign: "middle",
       cursor: "pointer"
     },
     ".cm-math-rendered": {
-      display: "inline-block"
+      display: "inline-block",
+      color: "var(--vscode-editor-foreground)"
+    },
+    ".cm-math-rendered .katex": {
+      color: "inherit"
+    },
+    ".cm-math-rendered .frac-line": {
+      borderBottomWidth: "0.09em !important",
+      minHeight: "0.09em"
     },
     ".cm-math-label": {
       fontSize: "0.75em",
@@ -21938,7 +21959,7 @@ var RichEditorWebview = (() => {
       color: "var(--vscode-editorLineNumber-foreground)",
       padding: "0 4px",
       borderRadius: "3px",
-      backgroundColor: "color-mix(in srgb, var(--vscode-editor-foreground) 12%, transparent)"
+      backgroundColor: "var(--simple-rich-label-bg)"
     },
     // Image widget
     ".cm-image-widget": {
@@ -21948,8 +21969,8 @@ var RichEditorWebview = (() => {
       padding: "6px 8px",
       margin: "2px 0",
       borderRadius: "6px",
-      backgroundColor: "color-mix(in srgb, var(--vscode-editor-foreground) 4%, transparent)",
-      border: "1px solid color-mix(in srgb, var(--vscode-editor-foreground) 10%, transparent)",
+      backgroundColor: "transparent",
+      border: "1px solid var(--simple-rich-block-border)",
       textAlign: "center",
       maxWidth: "100%"
     },
@@ -21971,7 +21992,8 @@ var RichEditorWebview = (() => {
       display: "inline-block",
       padding: "2px 6px",
       borderRadius: "4px",
-      backgroundColor: "color-mix(in srgb, var(--vscode-editor-foreground) 5%, transparent)",
+      backgroundColor: "transparent",
+      border: "1px solid var(--simple-rich-block-border)",
       color: "var(--vscode-descriptionForeground)",
       fontStyle: "italic",
       fontSize: "0.9em"
@@ -22006,7 +22028,7 @@ var RichEditorWebview = (() => {
       }
     });
     const extensions = [
-      lineNumbers(),
+      createRichLineNumberGutter(),
       highlightActiveLineGutter(),
       highlightSpecialChars(),
       history(),
@@ -22087,6 +22109,7 @@ var RichEditorWebview = (() => {
     window.addEventListener("message", (event) => {
       const msg = event.data;
       if (msg.type === "sync") {
+        applyEditorSettings(msg.settings);
         renderedBlocksRef.current.clear();
         if (msg.blocks) {
           for (const block of msg.blocks) {

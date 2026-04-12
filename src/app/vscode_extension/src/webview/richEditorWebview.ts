@@ -11,8 +11,8 @@
 
 import {
     EditorView, keymap, drawSelection, highlightActiveLine,
-    highlightSpecialChars, lineNumbers, highlightActiveLineGutter,
-    type Extension,
+    highlightSpecialChars, highlightActiveLineGutter,
+    gutter, GutterMarker, type BlockInfo, type Extension,
 } from '@codemirror/view';
 import { EditorState } from '@codemirror/state';
 import { defaultKeymap, history, historyKeymap, indentWithTab } from '@codemirror/commands';
@@ -38,6 +38,10 @@ interface SyncMessage {
     sourceText: string;
     selectionStart: number;
     selectionEnd: number;
+    settings: {
+        showBlockBorders: boolean;
+        centerLineNumbers: boolean;
+    };
     blocks: Array<{
         kind: string;
         from: number;
@@ -53,6 +57,80 @@ interface SyncMessage {
 }
 
 type HostMessage = SyncMessage | { type: 'error'; message: string };
+
+function applyEditorSettings(settings?: SyncMessage['settings']): void {
+    const root = document.documentElement;
+    const showBlockBorders = settings?.showBlockBorders ?? false;
+    const centerLineNumbers = settings?.centerLineNumbers ?? true;
+
+    root.style.setProperty(
+        '--simple-rich-block-border',
+        showBlockBorders
+            ? 'color-mix(in srgb, var(--vscode-editor-foreground) 18%, transparent)'
+            : 'transparent',
+    );
+    root.style.setProperty(
+        '--simple-rich-label-bg',
+        showBlockBorders
+            ? 'color-mix(in srgb, var(--vscode-editor-foreground) 10%, transparent)'
+            : 'transparent',
+    );
+    root.classList.toggle('simple-rich-center-line-numbers', centerLineNumbers);
+}
+
+class RichLineNumberWidgetMarker extends GutterMarker {
+    constructor(
+        readonly lineNumber: string,
+        readonly height: number,
+    ) {
+        super();
+    }
+
+    eq(other: RichLineNumberWidgetMarker): boolean {
+        return this.lineNumber === other.lineNumber
+            && Math.round(this.height) === Math.round(other.height);
+    }
+
+    toDOM(): Node {
+        const wrap = document.createElement('div');
+        wrap.className = 'cm-rich-line-number-marker';
+        wrap.textContent = this.lineNumber;
+        if (this.height > 0) {
+            wrap.style.height = `${this.height}px`;
+        }
+        return wrap;
+    }
+}
+
+function maxLineNumber(lines: number): string {
+    let last = 9;
+    while (last < lines) {
+        last = last * 10 + 9;
+    }
+    return String(last);
+}
+
+function createRichLineNumberGutter(): Extension {
+    return gutter({
+        class: 'cm-lineNumbers',
+        lineMarker(view, line: BlockInfo, otherMarkers) {
+            if (otherMarkers.some((marker) => marker.toDOM)) {
+                return null;
+            }
+            return new RichLineNumberWidgetMarker(
+                String(view.state.doc.lineAt(line.from).number),
+                line.height,
+            );
+        },
+        initialSpacer(view) {
+            return new RichLineNumberWidgetMarker(maxLineNumber(view.state.doc.lines), 0);
+        },
+        updateSpacer(spacer, update) {
+            const max = maxLineNumber(update.view.state.doc.lines);
+            return max === spacer.lineNumber ? spacer : new RichLineNumberWidgetMarker(max, 0);
+        },
+    });
+}
 
 // ── VS Code theme for CodeMirror ─────────────────────────────────────
 
@@ -82,6 +160,16 @@ const vsCodeTheme = EditorView.theme({
         color: 'var(--vscode-editorLineNumber-foreground)',
         border: 'none',
     },
+    '.cm-rich-line-number-marker': {
+        display: 'flex',
+        alignItems: 'flex-start',
+        justifyContent: 'flex-end',
+        width: '100%',
+        boxSizing: 'border-box',
+    },
+    '&.simple-rich-center-line-numbers .cm-rich-line-number-marker': {
+        alignItems: 'center',
+    },
     '.cm-activeLineGutter': {
         backgroundColor: 'var(--vscode-editor-lineHighlightBackground)',
         color: 'var(--vscode-editorLineNumber-activeForeground)',
@@ -104,13 +192,21 @@ const vsCodeTheme = EditorView.theme({
         padding: '4px 8px',
         margin: '2px 0',
         borderRadius: '4px',
-        backgroundColor: 'color-mix(in srgb, var(--vscode-editor-foreground) 8%, transparent)',
-        border: '1px solid color-mix(in srgb, var(--vscode-editor-foreground) 15%, transparent)',
+        backgroundColor: 'transparent',
+        border: '1px solid var(--simple-rich-block-border)',
         verticalAlign: 'middle',
         cursor: 'pointer',
     },
     '.cm-math-rendered': {
         display: 'inline-block',
+        color: 'var(--vscode-editor-foreground)',
+    },
+    '.cm-math-rendered .katex': {
+        color: 'inherit',
+    },
+    '.cm-math-rendered .frac-line': {
+        borderBottomWidth: '0.09em !important',
+        minHeight: '0.09em',
     },
     '.cm-math-label': {
         fontSize: '0.75em',
@@ -118,7 +214,7 @@ const vsCodeTheme = EditorView.theme({
         color: 'var(--vscode-editorLineNumber-foreground)',
         padding: '0 4px',
         borderRadius: '3px',
-        backgroundColor: 'color-mix(in srgb, var(--vscode-editor-foreground) 12%, transparent)',
+        backgroundColor: 'var(--simple-rich-label-bg)',
     },
     // Image widget
     '.cm-image-widget': {
@@ -128,8 +224,8 @@ const vsCodeTheme = EditorView.theme({
         padding: '6px 8px',
         margin: '2px 0',
         borderRadius: '6px',
-        backgroundColor: 'color-mix(in srgb, var(--vscode-editor-foreground) 4%, transparent)',
-        border: '1px solid color-mix(in srgb, var(--vscode-editor-foreground) 10%, transparent)',
+        backgroundColor: 'transparent',
+        border: '1px solid var(--simple-rich-block-border)',
         textAlign: 'center',
         maxWidth: '100%',
     },
@@ -151,7 +247,8 @@ const vsCodeTheme = EditorView.theme({
         display: 'inline-block',
         padding: '2px 6px',
         borderRadius: '4px',
-        backgroundColor: 'color-mix(in srgb, var(--vscode-editor-foreground) 5%, transparent)',
+        backgroundColor: 'transparent',
+        border: '1px solid var(--simple-rich-block-border)',
         color: 'var(--vscode-descriptionForeground)',
         fontStyle: 'italic',
         fontSize: '0.9em',
@@ -204,7 +301,7 @@ function createEditor(
     });
 
     const extensions: Extension[] = [
-        lineNumbers(),
+        createRichLineNumberGutter(),
         highlightActiveLineGutter(),
         highlightSpecialChars(),
         history(),
@@ -305,6 +402,7 @@ export function boot(vsCodeApi?: { postMessage(msg: unknown): void }): void {
         const msg = event.data as HostMessage;
 
         if (msg.type === 'sync') {
+            applyEditorSettings(msg.settings);
             // Update rendered blocks cache
             renderedBlocksRef.current.clear();
             if (msg.blocks) {
