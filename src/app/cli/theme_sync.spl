@@ -76,6 +76,9 @@ fn print_theme_sync_usage():
     print "  build-push-payload --project=<pid> --design-system=<asset_id> --local=<sdn_path> [--out=<path>]"
     print "      Serialize a local SDN into a Stitch update_design_system payload."
     print "      Default out: doc/05_design/stitch_snapshots/<pid>/_pending_update_<asset_id>.sdn"
+    print ""
+    print "  build-verify-report --wm=<png> --app-html=<html> [--app-png=<png>] [--stitch-dir=<dir>] --out-dir=<dir>"
+    print "      Emit a side-by-side HTML comparison (WM / App / Stitch) at <out-dir>/index.html."
 
 # =========================================================================
 # dump-local subcommand
@@ -359,6 +362,80 @@ fn cmd_build_push_payload(project_id: text, design_system_id: text, local_path: 
     return 0
 
 # =========================================================================
+# build-verify-report subcommand (Phase 4)
+# =========================================================================
+
+fn cmd_build_verify_report(wm_png: text, app_html: text, app_png: text, stitch_dir: text, out_dir: text) -> i32:
+    """Emit a side-by-side HTML comparison (WM / App / Stitch) as <out_dir>/index.html.
+
+    - wm_png      : path to the local WM screenshot (required)
+    - app_html    : path to the local Electron app HTML snapshot (required)
+    - app_png     : optional path to a rendered PNG of the app (empty = skip)
+    - stitch_dir  : optional directory of stitch HTML snapshots (empty = placeholder)
+    - out_dir     : existing output directory (required)
+    """
+    if wm_png == "":
+        print "Error: --wm=<png> is required"
+        return 1
+    if app_html == "":
+        print "Error: --app-html=<html> is required"
+        return 1
+    if out_dir == "":
+        print "Error: --out-dir=<dir> is required"
+        return 1
+
+    if not rt_file_exists(wm_png):
+        print "Error: --wm file not found: {wm_png}"
+        return 1
+    if not rt_file_exists(app_html):
+        print "Error: --app-html file not found: {app_html}"
+        return 1
+    if app_png != "" and not rt_file_exists(app_png):
+        print "Error: --app-png file not found: {app_png}"
+        return 1
+    if stitch_dir != "" and not rt_dir_exists(stitch_dir):
+        print "Error: --stitch-dir does not exist: {stitch_dir}"
+        return 1
+    if not rt_dir_exists(out_dir):
+        print "Error: --out-dir does not exist: {out_dir}"
+        return 1
+
+    # Build the App column body (iframe + optional img).
+    var app_body = "<iframe sandbox src=\"{app_html}\"></iframe>\n    <div class=\"caption\">{app_html}</div>"
+    if app_png != "":
+        app_body = "{app_body}\n    <img src=\"{app_png}\">\n    <div class=\"caption\">{app_png}</div>"
+
+    # Build the Stitch column body — iterate *.html in stitch_dir if provided.
+    var stitch_body = "<div class=\"caption\">(no stitch-dir given)</div>"
+    if stitch_dir != "":
+        var pieces = ""
+        val entries = rt_dir_list(stitch_dir)
+        var i = 0
+        while i < entries.len():
+            val entry = entries[i]
+            if entry.ends_with(".html"):
+                val src = "{stitch_dir}/{entry}"
+                val block = "<iframe sandbox src=\"{src}\"></iframe>\n    <div class=\"caption\">{entry}</div>\n    "
+                pieces = "{pieces}{block}"
+            i = i + 1
+        if pieces == "":
+            stitch_body = "<div class=\"caption\">(no *.html files in {stitch_dir})</div>"
+        else:
+            stitch_body = pieces
+
+    val today = _today()
+    val html = "<!DOCTYPE html>\n<html>\n<head>\n<meta charset=\"utf-8\">\n<title>Theme Verify Report</title>\n<style>\n  body {{ font-family: -apple-system, system-ui, sans-serif; background: #060612; color: #E3E0F3; margin: 0; padding: 20px; }}\n  h1 {{ font-size: 18px; margin: 0 0 16px 0; color: #0A84FF; }}\n  .grid {{ display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 16px; }}\n  .col {{ border: 1px solid rgba(255,255,255,0.08); border-radius: 8px; padding: 12px; background: rgba(255,255,255,0.03); }}\n  .col h2 {{ font-size: 11px; text-transform: uppercase; letter-spacing: 1.2px; color: #0A84FF; margin: 0 0 12px 0; }}\n  .col iframe, .col img {{ width: 100%; border: 0; background: #0e0820; border-radius: 4px; }}\n  .col iframe {{ height: 520px; }}\n  .caption {{ font-size: 10px; color: rgba(227,224,243,0.6); margin-top: 6px; font-family: monospace; }}\n</style>\n</head>\n<body>\n<h1>Theme Verify Report — {today}</h1>\n<div class=\"grid\">\n  <div class=\"col\">\n    <h2>Local WM</h2>\n    <img src=\"{wm_png}\">\n    <div class=\"caption\">{wm_png}</div>\n  </div>\n  <div class=\"col\">\n    <h2>Local App</h2>\n    {app_body}\n  </div>\n  <div class=\"col\">\n    <h2>Stitch</h2>\n    {stitch_body}\n  </div>\n</div>\n</body>\n</html>\n"
+
+    val out_path = "{out_dir}/index.html"
+    val ok = rt_file_write_text(out_path, html)
+    if not ok:
+        print "Error: failed to write verify report to '{out_path}'"
+        return 2
+
+    print "Verify report written: {out_path}"
+    return 0
+
+# =========================================================================
 # CLI entry point
 # =========================================================================
 
@@ -403,6 +480,14 @@ fn cli_theme_sync(args: [text]) -> i32:
         val local_path = _flag_value(args, "--local=")
         val out_path = _flag_value(args, "--out=")
         return cmd_build_push_payload(project_id, design_system_id, local_path, out_path)
+
+    if subcmd == "build-verify-report":
+        val wm_png = _flag_value(args, "--wm=")
+        val app_html = _flag_value(args, "--app-html=")
+        val app_png = _flag_value(args, "--app-png=")
+        val stitch_dir = _flag_value(args, "--stitch-dir=")
+        val out_dir = _flag_value(args, "--out-dir=")
+        return cmd_build_verify_report(wm_png, app_html, app_png, stitch_dir, out_dir)
 
     print "Error: unknown subcommand '{subcmd}'"
     print ""
