@@ -122,16 +122,20 @@ const vsCodeTheme = EditorView.theme({
     },
     // Image widget
     '.cm-image-widget': {
-        display: 'block',
-        padding: '8px',
-        margin: '4px 0',
+        display: 'inline-flex',
+        verticalAlign: 'middle',
+        alignItems: 'center',
+        padding: '6px 8px',
+        margin: '2px 0',
         borderRadius: '6px',
         backgroundColor: 'color-mix(in srgb, var(--vscode-editor-foreground) 4%, transparent)',
         border: '1px solid color-mix(in srgb, var(--vscode-editor-foreground) 10%, transparent)',
         textAlign: 'center',
+        maxWidth: '100%',
     },
     '.cm-image-widget img': {
         borderRadius: '4px',
+        boxShadow: '0 1px 4px color-mix(in srgb, black 20%, transparent)',
     },
     // Error & placeholder
     '.cm-image-error': {

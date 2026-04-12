@@ -9,6 +9,7 @@
  */
 
 import * as crypto from 'crypto';
+import * as fs from 'fs';
 import * as vscode from 'vscode';
 import katex from 'katex';
 import { detectBlocks, type BlockKind, type DetectedBlock } from './blockDetector';
@@ -168,13 +169,50 @@ function buildRichEditorHtml(
             width: 100%;
             overflow: auto;
         }
+        .boot-error {
+            margin: 24px;
+            padding: 16px 18px;
+            border-radius: 10px;
+            border: 1px solid color-mix(in srgb, var(--vscode-errorForeground) 30%, transparent);
+            background: color-mix(in srgb, var(--vscode-errorForeground) 10%, transparent);
+            color: var(--vscode-editor-foreground);
+            line-height: 1.5;
+        }
+        .boot-error strong {
+            display: block;
+            margin-bottom: 8px;
+            color: var(--vscode-errorForeground);
+        }
+        .boot-error code {
+            font-family: var(--vscode-editor-font-family);
+            font-size: 0.95em;
+        }
     </style>
 </head>
 <body>
     <div id="editor-container"></div>
     <script nonce="${nonce}" src="${richEditorJsUri}"></script>
     <script nonce="${nonce}">
-        RichEditorWebview.boot();
+        (() => {
+            const container = document.getElementById('editor-container');
+            try {
+                if (!globalThis.RichEditorWebview || typeof globalThis.RichEditorWebview.boot !== 'function') {
+                    throw new Error('richEditor.js did not expose RichEditorWebview.boot()');
+                }
+                globalThis.RichEditorWebview.boot();
+            } catch (error) {
+                console.error('Simple Rich Editor boot failed', error);
+                if (container) {
+                    const message = error instanceof Error ? error.message : String(error);
+                    container.innerHTML =
+                        '<div class="boot-error">' +
+                        '<strong>Simple Rich Editor failed to start.</strong>' +
+                        '<div>Check that the webview bundle exists and compiled successfully.</div>' +
+                        '<div><code>' + message.replace(/</g, '&lt;') + '</code></div>' +
+                        '</div>';
+                }
+            }
+        })();
     </script>
 </body>
 </html>`;
@@ -204,6 +242,20 @@ export class RichCustomEditorProvider implements vscode.CustomTextEditorProvider
     ): Promise<void> {
         const katexDistUri = vscode.Uri.joinPath(this.extensionUri, 'node_modules', 'katex', 'dist');
         const webviewOutUri = vscode.Uri.joinPath(this.extensionUri, 'out', 'webview');
+        const richEditorBundleUri = vscode.Uri.joinPath(webviewOutUri, 'richEditor.js');
+
+        if (!fs.existsSync(richEditorBundleUri.fsPath)) {
+            webviewPanel.webview.html = `<!DOCTYPE html>
+<html lang="en">
+<body style="font-family: sans-serif; padding: 24px;">
+<h2>Simple Rich Editor bundle missing</h2>
+<p>Expected webview bundle at:</p>
+<pre>${richEditorBundleUri.fsPath}</pre>
+<p>Run <code>npm run compile</code> in <code>src/app/vscode_rich_editor</code> and reopen the editor.</p>
+</body>
+</html>`;
+            return;
+        }
 
         webviewPanel.webview.options = {
             enableScripts: true,
@@ -219,7 +271,7 @@ export class RichCustomEditorProvider implements vscode.CustomTextEditorProvider
             vscode.Uri.joinPath(katexDistUri, 'katex.min.css'),
         ).toString();
         const richEditorJsUri = webviewPanel.webview.asWebviewUri(
-            vscode.Uri.joinPath(webviewOutUri, 'richEditor.js'),
+            richEditorBundleUri,
         ).toString();
         const nonce = crypto.randomBytes(16).toString('base64url');
 

@@ -1,6 +1,7 @@
 /**
  * CodeMirror 6 widget for rendered images.
- * Replaces img{} blocks with actual <img> elements at natural dimensions.
+ * Replaces img{} blocks with inline images whose intrinsic aspect ratio drives
+ * the rendered height, allowing the containing editor line to grow naturally.
  */
 
 import { WidgetType } from '@codemirror/view';
@@ -18,14 +19,18 @@ export class ImageWidget extends WidgetType {
     }
 
     toDOM(): HTMLElement {
-        const wrap = document.createElement('div');
+        const wrap = document.createElement('span');
         wrap.className = 'cm-image-widget';
+        wrap.setAttribute('aria-label', `Embedded image: ${this.path}`);
 
         const img = document.createElement('img');
         img.src = this.uri;
         img.alt = this.path;
-        img.style.maxWidth = '100%';
-        img.style.maxHeight = '400px';
+        img.style.display = 'block';
+        img.style.width = 'auto';
+        img.style.height = 'auto';
+        img.style.maxWidth = 'min(24em, 100%)';
+        img.style.maxHeight = 'none';
         img.style.objectFit = 'contain';
         img.draggable = false;
 
