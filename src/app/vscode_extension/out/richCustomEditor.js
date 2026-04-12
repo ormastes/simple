@@ -46,10 +46,10 @@ exports.RichCustomEditorProvider = void 0;
 const crypto = __importStar(require("crypto"));
 const fs = __importStar(require("fs"));
 const vscode = __importStar(require("vscode"));
+const simpleAnalysisIndex_1 = require("./analysis/simpleAnalysisIndex");
 const blockDetector_1 = require("./blockDetector");
 const imageResolver_1 = require("./imageResolver");
 const mathPreview_1 = require("./mathPreview");
-const simpleSymbolProviders_1 = require("./symbols/simpleSymbolProviders");
 const testDiscovery_1 = require("./testing/testDiscovery");
 function escapeForHtml(text) {
     return text
@@ -204,7 +204,7 @@ function fullDocumentRange(document) {
     return new vscode.Range(new vscode.Position(0, 0), end);
 }
 function buildRichEditorSymbols(document) {
-    return (0, simpleSymbolProviders_1.indexDocumentSymbols)(document).map((symbol) => ({
+    return (0, simpleAnalysisIndex_1.indexDocumentSymbols)(document).map((symbol) => ({
         name: symbol.name,
         kind: vscode.SymbolKind[symbol.kind],
         detail: symbol.detail,

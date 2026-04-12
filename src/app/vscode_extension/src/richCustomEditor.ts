@@ -11,10 +11,10 @@
 import * as crypto from 'crypto';
 import * as fs from 'fs';
 import * as vscode from 'vscode';
+import { indexDocumentSymbols } from './analysis/simpleAnalysisIndex';
 import { detectBlocks, type BlockKind, type DetectedBlock } from './blockDetector';
 import { parseImageContent, resolveImageUri } from './imageResolver';
 import { buildMathPreview } from './mathPreview';
-import { indexDocumentSymbols } from './symbols/simpleSymbolProviders';
 import type { EditorMarkerState } from './testing/editorMarkers';
 import { detectTestBlocks } from './testing/testDiscovery';
 

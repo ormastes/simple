@@ -1,6 +1,7 @@
 import * as vscode from 'vscode';
 import { type DetectedBlock } from './blockDetector';
 export declare class NativeMathProvider implements vscode.HoverProvider, vscode.Disposable {
+    private lspRunning;
     private readonly openDecoration;
     private readonly closeDecoration;
     private readonly contentDecoration;
@@ -8,6 +9,7 @@ export declare class NativeMathProvider implements vscode.HoverProvider, vscode.
     private readonly disposables;
     constructor();
     provideHover(document: vscode.TextDocument, position: vscode.Position): vscode.Hover | undefined;
+    setLspRunning(running: boolean): void;
     findMathBlockAtPosition(document: vscode.TextDocument, position: vscode.Position): DetectedBlock | undefined;
     dispose(): void;
     private refreshVisibleEditors;

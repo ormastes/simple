@@ -35,7 +35,7 @@ var __importStar = (this && this.__importStar) || (function () {
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.SimpleOutlineProvider = void 0;
 const vscode = __importStar(require("vscode"));
-const simpleSymbolProviders_1 = require("../symbols/simpleSymbolProviders");
+const simpleAnalysisIndex_1 = require("../analysis/simpleAnalysisIndex");
 class OutlineItem extends vscode.TreeItem {
     constructor(document, symbol) {
         super(symbol.name, vscode.TreeItemCollapsibleState.None);
@@ -71,7 +71,7 @@ class SimpleOutlineProvider {
         if (!this.activeDocument) {
             return [];
         }
-        return (0, simpleSymbolProviders_1.indexDocumentSymbols)(this.activeDocument).map((symbol) => new OutlineItem(this.activeDocument, symbol));
+        return (0, simpleAnalysisIndex_1.indexDocumentSymbols)(this.activeDocument).map((symbol) => new OutlineItem(this.activeDocument, symbol));
     }
 }
 exports.SimpleOutlineProvider = SimpleOutlineProvider;

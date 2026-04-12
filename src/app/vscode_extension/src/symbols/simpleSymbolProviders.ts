@@ -1,30 +1,7 @@
 import * as vscode from 'vscode';
+import { indexDocumentSymbols, type IndexedSymbol } from '../analysis/simpleAnalysisIndex';
 import { detectBlocks } from '../blockDetector';
 import { isMathLikeBlock } from '../mathPreview';
-
-interface IndexedSymbol {
-    name: string;
-    kind: vscode.SymbolKind;
-    range: vscode.Range;
-    selectionRange: vscode.Range;
-    detail: string;
-    uri: vscode.Uri;
-}
-
-const SYMBOL_PATTERNS: Array<{
-    regex: RegExp;
-    kind: vscode.SymbolKind;
-    detail: string;
-}> = [
-    { regex: /^(\s*)fn\s+([A-Za-z_][A-Za-z0-9_]*)/gm, kind: vscode.SymbolKind.Function, detail: 'fn' },
-    { regex: /^(\s*)class\s+([A-Za-z_][A-Za-z0-9_]*)/gm, kind: vscode.SymbolKind.Class, detail: 'class' },
-    { regex: /^(\s*)struct\s+([A-Za-z_][A-Za-z0-9_]*)/gm, kind: vscode.SymbolKind.Struct, detail: 'struct' },
-    { regex: /^(\s*)enum\s+([A-Za-z_][A-Za-z0-9_]*)/gm, kind: vscode.SymbolKind.Enum, detail: 'enum' },
-    { regex: /^(\s*)trait\s+([A-Za-z_][A-Za-z0-9_]*)/gm, kind: vscode.SymbolKind.Interface, detail: 'trait' },
-    { regex: /^(\s*)describe\s+"([^"]+)"/gm, kind: vscode.SymbolKind.Namespace, detail: 'describe' },
-    { regex: /^(\s*)context\s+"([^"]+)"/gm, kind: vscode.SymbolKind.Namespace, detail: 'context' },
-    { regex: /^(\s*)it\s+"([^"]+)"/gm, kind: vscode.SymbolKind.Method, detail: 'it' },
-];
 
 function wordRange(document: vscode.TextDocument, position: vscode.Position): vscode.Range | undefined {
     return document.getWordRangeAtPosition(position, /[A-Za-z_][A-Za-z0-9_]*/);
@@ -48,39 +25,13 @@ function exactSymbolMatches(symbols: IndexedSymbol[], name: string): IndexedSymb
     return symbols.filter((symbol) => symbol.name === name);
 }
 
-export function indexDocumentSymbols(document: vscode.TextDocument): IndexedSymbol[] {
-    const text = document.getText();
-    const symbols: IndexedSymbol[] = [];
-
-    for (const pattern of SYMBOL_PATTERNS) {
-        pattern.regex.lastIndex = 0;
-        let match: RegExpExecArray | null;
-        while ((match = pattern.regex.exec(text)) !== null) {
-            const symbolName = match[2];
-            const start = document.positionAt(match.index + match[0].lastIndexOf(symbolName));
-            const end = start.translate(0, symbolName.length);
-            const line = document.lineAt(start.line);
-            symbols.push({
-                name: symbolName,
-                kind: pattern.kind,
-                range: line.range,
-                selectionRange: new vscode.Range(start, end),
-                detail: pattern.detail,
-                uri: document.uri,
-            });
-        }
-    }
-
-    return symbols.sort((left, right) => {
-        if (left.uri.toString() !== right.uri.toString()) {
-            return left.uri.toString().localeCompare(right.uri.toString());
-        }
-        return left.range.start.line - right.range.start.line;
-    });
-}
-
 export class SimpleDocumentSymbolProvider implements vscode.DocumentSymbolProvider {
+    private enabled = true;
+
     public provideDocumentSymbols(document: vscode.TextDocument): vscode.DocumentSymbol[] {
+        if (!this.enabled) {
+            return [];
+        }
         return indexDocumentSymbols(document).map((symbol) => new vscode.DocumentSymbol(
             symbol.name,
             symbol.detail,
@@ -89,10 +40,19 @@ export class SimpleDocumentSymbolProvider implements vscode.DocumentSymbolProvid
             symbol.selectionRange,
         ));
     }
+
+    public setEnabled(enabled: boolean): void {
+        this.enabled = enabled;
+    }
 }
 
 export class SimpleWorkspaceSymbolProvider implements vscode.WorkspaceSymbolProvider<vscode.SymbolInformation> {
+    private enabled = true;
+
     public async provideWorkspaceSymbols(query: string): Promise<vscode.SymbolInformation[]> {
+        if (!this.enabled) {
+            return [];
+        }
         const symbols = await collectWorkspaceSymbols(query);
         return symbols.map((symbol) => new vscode.SymbolInformation(
             symbol.name,
@@ -101,10 +61,19 @@ export class SimpleWorkspaceSymbolProvider implements vscode.WorkspaceSymbolProv
             new vscode.Location(symbol.uri, symbol.selectionRange),
         ));
     }
+
+    public setEnabled(enabled: boolean): void {
+        this.enabled = enabled;
+    }
 }
 
 export class SimpleDefinitionProvider implements vscode.DefinitionProvider {
+    private enabled = true;
+
     public async provideDefinition(document: vscode.TextDocument, position: vscode.Position): Promise<vscode.Definition | undefined> {
+        if (!this.enabled) {
+            return undefined;
+        }
         const range = wordRange(document, position);
         if (!range) {
             return undefined;
@@ -120,14 +89,23 @@ export class SimpleDefinitionProvider implements vscode.DefinitionProvider {
         const exact = exactSymbolMatches(workspaceHits, word);
         return exact.map((symbol) => new vscode.Location(symbol.uri, symbol.selectionRange));
     }
+
+    public setEnabled(enabled: boolean): void {
+        this.enabled = enabled;
+    }
 }
 
 export class SimpleReferenceProvider implements vscode.ReferenceProvider {
+    private enabled = true;
+
     public async provideReferences(
         document: vscode.TextDocument,
         position: vscode.Position,
         context: vscode.ReferenceContext,
     ): Promise<vscode.Location[]> {
+        if (!this.enabled) {
+            return [];
+        }
         const range = wordRange(document, position);
         if (!range) {
             return [];
@@ -155,10 +133,19 @@ export class SimpleReferenceProvider implements vscode.ReferenceProvider {
 
         return locations.filter((location) => !location.range.isEqual(range) || location.uri.toString() !== document.uri.toString());
     }
+
+    public setEnabled(enabled: boolean): void {
+        this.enabled = enabled;
+    }
 }
 
 export class SimpleHoverProvider implements vscode.HoverProvider {
+    private enabled = true;
+
     public async provideHover(document: vscode.TextDocument, position: vscode.Position): Promise<vscode.Hover | undefined> {
+        if (!this.enabled) {
+            return undefined;
+        }
         const offset = document.offsetAt(position);
         const isInsideMath = detectBlocks(document.getText()).some((block) =>
             isMathLikeBlock(block.kind) && offset >= block.from && offset <= block.to,
@@ -187,5 +174,9 @@ export class SimpleHoverProvider implements vscode.HoverProvider {
         markdown.appendMarkdown(`Kind: \`${vscode.SymbolKind[symbol.kind]}\`\n\n`);
         markdown.appendMarkdown(`Source: \`${symbol.uri.fsPath}\`:${symbol.selectionRange.start.line + 1}`);
         return new vscode.Hover(markdown, range);
+    }
+
+    public setEnabled(enabled: boolean): void {
+        this.enabled = enabled;
     }
 }

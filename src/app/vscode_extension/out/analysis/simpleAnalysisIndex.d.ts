@@ -1,0 +1,20 @@
+import * as vscode from 'vscode';
+export interface IndexedSymbol {
+    name: string;
+    kind: vscode.SymbolKind;
+    range: vscode.Range;
+    selectionRange: vscode.Range;
+    detail: string;
+    uri: vscode.Uri;
+    indent: number;
+}
+export type TestBlockKind = 'describe' | 'context' | 'it' | 'sdoctest';
+export interface TestBlock {
+    kind: TestBlockKind;
+    label: string;
+    line: number;
+    indent: number;
+}
+export declare function indexDocumentSymbols(document: vscode.TextDocument): IndexedSymbol[];
+export declare function detectTestBlocks(document: vscode.TextDocument): TestBlock[];
+export declare function collectFoldingRanges(document: vscode.TextDocument): vscode.FoldingRange[];

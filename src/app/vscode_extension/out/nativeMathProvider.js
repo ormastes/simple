@@ -111,6 +111,7 @@ function buildMathHoverMarkdown(block, preview) {
 }
 class NativeMathProvider {
     constructor() {
+        this.lspRunning = false;
         this.openDecoration = vscode.window.createTextEditorDecorationType({
             opacity: '0',
         });
@@ -143,6 +144,9 @@ class NativeMathProvider {
         this.refreshVisibleEditors();
     }
     provideHover(document, position) {
+        if (this.lspRunning) {
+            return undefined;
+        }
         const config = vscode.workspace.getConfiguration('simple.math');
         if (!config.get('enabled', true) || !config.get('previewOnHover', true)) {
             return undefined;
@@ -167,6 +171,9 @@ class NativeMathProvider {
             return undefined;
         }
         return new vscode.Hover(markdown, makeRange(document, block.from, block.to));
+    }
+    setLspRunning(running) {
+        this.lspRunning = running;
     }
     findMathBlockAtPosition(document, position) {
         const offset = document.offsetAt(position);

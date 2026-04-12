@@ -53,8 +53,12 @@ const BUILTIN_TYPES = new Set([
 export class SimpleSemanticTokensProvider implements vscode.DocumentSemanticTokensProvider {
     private readonly emitter = new vscode.EventEmitter<void>();
     public readonly onDidChangeSemanticTokens = this.emitter.event;
+    private enabled = true;
 
-    public provideDocumentSemanticTokens(document: vscode.TextDocument): vscode.SemanticTokens {
+    public provideDocumentSemanticTokens(document: vscode.TextDocument): vscode.SemanticTokens | null {
+        if (!this.enabled) {
+            return null;
+        }
         const builder = new vscode.SemanticTokensBuilder(TOKEN_LEGEND);
         const lines = document.getText().split('\n');
 
@@ -66,6 +70,14 @@ export class SimpleSemanticTokensProvider implements vscode.DocumentSemanticToke
         }
 
         return builder.build();
+    }
+
+    public setEnabled(enabled: boolean): void {
+        if (this.enabled === enabled) {
+            return;
+        }
+        this.enabled = enabled;
+        this.emitter.fire();
     }
 
     private tokenizeLine(line: string, lineNumber: number): TokenMatch[] {

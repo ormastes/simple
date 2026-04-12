@@ -15,5 +15,6 @@ var __exportStar = (this && this.__exportStar) || function(m, exports) {
 };
 Object.defineProperty(exports, "__esModule", { value: true });
 __exportStar(require("./simpleLspCompatibility"), exports);
+__exportStar(require("./simpleLspClientLifecycle"), exports);
 __exportStar(require("../services/simpleLspServerResolver"), exports);
 //# sourceMappingURL=index.js.map

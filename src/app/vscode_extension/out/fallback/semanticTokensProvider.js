@@ -75,8 +75,12 @@ class SimpleSemanticTokensProvider {
     constructor() {
         this.emitter = new vscode.EventEmitter();
         this.onDidChangeSemanticTokens = this.emitter.event;
+        this.enabled = true;
     }
     provideDocumentSemanticTokens(document) {
+        if (!this.enabled) {
+            return null;
+        }
         const builder = new vscode.SemanticTokensBuilder(exports.TOKEN_LEGEND);
         const lines = document.getText().split('\n');
         for (let lineNumber = 0; lineNumber < lines.length; lineNumber++) {
@@ -86,6 +90,13 @@ class SimpleSemanticTokensProvider {
             }
         }
         return builder.build();
+    }
+    setEnabled(enabled) {
+        if (this.enabled === enabled) {
+            return;
+        }
+        this.enabled = enabled;
+        this.emitter.fire();
     }
     tokenizeLine(line, lineNumber) {
         const matches = [];

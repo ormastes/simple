@@ -4,6 +4,7 @@ export class SimpleDiagnosticsProvider implements vscode.Disposable {
     private readonly diagnosticCollection = vscode.languages.createDiagnosticCollection('simple-rich-fallback');
     private readonly disposables: vscode.Disposable[] = [];
     private readonly debounceTimers = new Map<string, ReturnType<typeof setTimeout>>();
+    private enabled = true;
 
     public constructor() {
         this.disposables.push(
@@ -36,6 +37,10 @@ export class SimpleDiagnosticsProvider implements vscode.Disposable {
     }
 
     public diagnose(document: vscode.TextDocument): void {
+        if (!this.enabled) {
+            this.diagnosticCollection.delete(document.uri);
+            return;
+        }
         const diagnostics: vscode.Diagnostic[] = [];
         const text = document.getText();
 
@@ -44,6 +49,22 @@ export class SimpleDiagnosticsProvider implements vscode.Disposable {
         this.checkRenderableBlockSyntax(document, diagnostics);
 
         this.diagnosticCollection.set(document.uri, diagnostics);
+    }
+
+    public setEnabled(enabled: boolean): void {
+        if (this.enabled === enabled) {
+            return;
+        }
+        this.enabled = enabled;
+        if (!enabled) {
+            this.diagnosticCollection.clear();
+            return;
+        }
+        for (const document of vscode.workspace.textDocuments) {
+            if (document.languageId === 'simple') {
+                this.diagnose(document);
+            }
+        }
     }
 
     public dispose(): void {

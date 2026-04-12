@@ -60,15 +60,48 @@ const SIMPLE_SELECTOR = [
     { scheme: 'file', language: 'simple' },
     { scheme: 'untitled', language: 'simple' },
 ];
+let activeLspSurface;
 async function activate(context) {
     const services = new extensionHostServices_1.ExtensionHostServices();
     context.subscriptions.push(services);
     const lspSurface = (0, lsp_1.createSimpleLspCompatibilitySurface)(context);
+    activeLspSurface = lspSurface;
     context.subscriptions.push(lspSurface);
-    services.markDegraded('lsp', 'Compatibility surface ready; client lifecycle not attached yet', 'fallback');
     const outlineProvider = new simpleOutlineProvider_1.SimpleOutlineProvider();
     const editorMarkerManager = new editorMarkers_1.EditorMarkerManager();
     const mathProvider = new nativeMathProvider_1.NativeMathProvider();
+    const diagnosticsProvider = new diagnosticsProvider_1.SimpleDiagnosticsProvider();
+    const semanticTokensProvider = new semanticTokensProvider_1.SimpleSemanticTokensProvider();
+    const documentSymbolProvider = new simpleSymbolProviders_1.SimpleDocumentSymbolProvider();
+    const workspaceSymbolProvider = new simpleSymbolProviders_1.SimpleWorkspaceSymbolProvider();
+    const definitionProvider = new simpleSymbolProviders_1.SimpleDefinitionProvider();
+    const referenceProvider = new simpleSymbolProviders_1.SimpleReferenceProvider();
+    const hoverProvider = new simpleSymbolProviders_1.SimpleHoverProvider();
+    const setFallbackProvidersEnabled = (enabled) => {
+        diagnosticsProvider.setEnabled(enabled);
+        semanticTokensProvider.setEnabled(enabled);
+        documentSymbolProvider.setEnabled(enabled);
+        workspaceSymbolProvider.setEnabled(enabled);
+        definitionProvider.setEnabled(enabled);
+        referenceProvider.setEnabled(enabled);
+        hoverProvider.setEnabled(enabled);
+    };
+    lspSurface.setClientBootstrap((0, lsp_1.createSimpleLspClientBootstrap)({
+        services,
+        onRunningStateChanged: (running) => {
+            mathProvider.setLspRunning?.(running);
+        },
+        fallbackControls: [
+            diagnosticsProvider,
+            semanticTokensProvider,
+            documentSymbolProvider,
+            workspaceSymbolProvider,
+            definitionProvider,
+            referenceProvider,
+            hoverProvider,
+        ],
+    }));
+    services.markDegraded('lsp', 'Compatibility surface ready; bootstrapping native client', 'fallback');
     let currentOutlineDocument = vscode.window.activeTextEditor?.document;
     const updateOutline = (document) => {
         currentOutlineDocument = document;
@@ -130,7 +163,6 @@ async function activate(context) {
             }),
         ];
     }, context.subscriptions);
-    services.markDegraded('lsp', 'Compatibility commands ready; no client lifecycle attached', 'fallback');
     await services.safeRegister('editor', 'custom editor provider', () => {
         return [
             vscode.window.registerCustomEditorProvider(richCustomEditor_1.RichCustomEditorProvider.viewType, new richCustomEditor_1.RichCustomEditorProvider(context.extensionUri, updateOutline, (documentUri) => editorMarkerManager.getState(documentUri)), {
@@ -147,18 +179,18 @@ async function activate(context) {
         ];
     }, context.subscriptions);
     await services.safeRegister('diagnostics', 'fallback diagnostics', () => {
-        return new diagnosticsProvider_1.SimpleDiagnosticsProvider();
+        return diagnosticsProvider;
     }, context.subscriptions);
     await services.safeRegister('semanticTokens', 'fallback semantic tokens', () => {
-        return vscode.languages.registerDocumentSemanticTokensProvider(SIMPLE_SELECTOR, new semanticTokensProvider_1.SimpleSemanticTokensProvider(), semanticTokensProvider_1.TOKEN_LEGEND);
+        return vscode.languages.registerDocumentSemanticTokensProvider(SIMPLE_SELECTOR, semanticTokensProvider, semanticTokensProvider_1.TOKEN_LEGEND);
     }, context.subscriptions);
     await services.safeRegister('symbols', 'fallback symbol providers', () => {
         return [
-            vscode.languages.registerDocumentSymbolProvider(SIMPLE_SELECTOR, new simpleSymbolProviders_1.SimpleDocumentSymbolProvider()),
-            vscode.languages.registerWorkspaceSymbolProvider(new simpleSymbolProviders_1.SimpleWorkspaceSymbolProvider()),
-            vscode.languages.registerDefinitionProvider(SIMPLE_SELECTOR, new simpleSymbolProviders_1.SimpleDefinitionProvider()),
-            vscode.languages.registerReferenceProvider(SIMPLE_SELECTOR, new simpleSymbolProviders_1.SimpleReferenceProvider()),
-            vscode.languages.registerHoverProvider(SIMPLE_SELECTOR, new simpleSymbolProviders_1.SimpleHoverProvider()),
+            vscode.languages.registerDocumentSymbolProvider(SIMPLE_SELECTOR, documentSymbolProvider),
+            vscode.languages.registerWorkspaceSymbolProvider(workspaceSymbolProvider),
+            vscode.languages.registerDefinitionProvider(SIMPLE_SELECTOR, definitionProvider),
+            vscode.languages.registerReferenceProvider(SIMPLE_SELECTOR, referenceProvider),
+            vscode.languages.registerHoverProvider(SIMPLE_SELECTOR, hoverProvider),
             vscode.languages.registerHoverProvider(SIMPLE_SELECTOR, mathProvider),
             vscode.languages.registerFoldingRangeProvider(SIMPLE_SELECTOR, new nativeFoldingProvider_1.SimpleFoldingRangeProvider()),
             mathProvider,
@@ -312,6 +344,28 @@ async function activate(context) {
             documentSelector: SIMPLE_SELECTOR,
         });
     }, context.subscriptions);
+    context.subscriptions.push(vscode.workspace.onDidChangeConfiguration((event) => {
+        if (!event.affectsConfiguration('simple.lsp')) {
+            return;
+        }
+        void vscode.window.showInformationMessage('Simple LSP configuration changed. Restart the client to apply changes.', 'Restart LSP').then(async (selection) => {
+            if (selection === 'Restart LSP') {
+                const result = await lspSurface.bootstrapClient(vscode.window.activeTextEditor?.document.uri.fsPath);
+                if (!result.ok) {
+                    void vscode.window.showWarningMessage(`Simple LSP: ${result.message}`);
+                }
+            }
+        });
+    }));
+    setFallbackProvidersEnabled(true);
+    void lspSurface.bootstrapClient(vscode.window.activeTextEditor?.document.uri.fsPath).then((result) => {
+        if (!result.ok) {
+            services.markDegraded('lsp', result.message, 'fallback', result.detail);
+        }
+    });
 }
-function deactivate() { }
+function deactivate() {
+    void activeLspSurface?.dispose();
+    activeLspSurface = undefined;
+}
 //# sourceMappingURL=extension.js.map

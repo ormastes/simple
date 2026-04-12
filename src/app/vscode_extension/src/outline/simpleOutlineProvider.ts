@@ -1,10 +1,10 @@
 import * as vscode from 'vscode';
-import { indexDocumentSymbols } from '../symbols/simpleSymbolProviders';
+import { indexDocumentSymbols, type IndexedSymbol } from '../analysis/simpleAnalysisIndex';
 
 class OutlineItem extends vscode.TreeItem {
     public constructor(
         public readonly document: vscode.TextDocument,
-        public readonly symbol: ReturnType<typeof indexDocumentSymbols>[number],
+        public readonly symbol: IndexedSymbol,
     ) {
         super(symbol.name, vscode.TreeItemCollapsibleState.None);
         this.description = symbol.detail;

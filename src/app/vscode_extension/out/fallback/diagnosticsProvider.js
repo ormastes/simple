@@ -40,6 +40,7 @@ class SimpleDiagnosticsProvider {
         this.diagnosticCollection = vscode.languages.createDiagnosticCollection('simple-rich-fallback');
         this.disposables = [];
         this.debounceTimers = new Map();
+        this.enabled = true;
         this.disposables.push(vscode.workspace.onDidChangeTextDocument((event) => {
             if (event.document.languageId === 'simple') {
                 this.debounceDiagnose(event.document);
@@ -64,12 +65,31 @@ class SimpleDiagnosticsProvider {
         }
     }
     diagnose(document) {
+        if (!this.enabled) {
+            this.diagnosticCollection.delete(document.uri);
+            return;
+        }
         const diagnostics = [];
         const text = document.getText();
         this.checkBrackets(text, document, diagnostics);
         this.checkBasicSyntax(text, diagnostics);
         this.checkRenderableBlockSyntax(document, diagnostics);
         this.diagnosticCollection.set(document.uri, diagnostics);
+    }
+    setEnabled(enabled) {
+        if (this.enabled === enabled) {
+            return;
+        }
+        this.enabled = enabled;
+        if (!enabled) {
+            this.diagnosticCollection.clear();
+            return;
+        }
+        for (const document of vscode.workspace.textDocuments) {
+            if (document.languageId === 'simple') {
+                this.diagnose(document);
+            }
+        }
     }
     dispose() {
         this.diagnosticCollection.dispose();

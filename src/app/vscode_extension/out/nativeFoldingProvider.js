@@ -1,95 +1,10 @@
 "use strict";
-var __createBinding = (this && this.__createBinding) || (Object.create ? (function(o, m, k, k2) {
-    if (k2 === undefined) k2 = k;
-    var desc = Object.getOwnPropertyDescriptor(m, k);
-    if (!desc || ("get" in desc ? !m.__esModule : desc.writable || desc.configurable)) {
-      desc = { enumerable: true, get: function() { return m[k]; } };
-    }
-    Object.defineProperty(o, k2, desc);
-}) : (function(o, m, k, k2) {
-    if (k2 === undefined) k2 = k;
-    o[k2] = m[k];
-}));
-var __setModuleDefault = (this && this.__setModuleDefault) || (Object.create ? (function(o, v) {
-    Object.defineProperty(o, "default", { enumerable: true, value: v });
-}) : function(o, v) {
-    o["default"] = v;
-});
-var __importStar = (this && this.__importStar) || (function () {
-    var ownKeys = function(o) {
-        ownKeys = Object.getOwnPropertyNames || function (o) {
-            var ar = [];
-            for (var k in o) if (Object.prototype.hasOwnProperty.call(o, k)) ar[ar.length] = k;
-            return ar;
-        };
-        return ownKeys(o);
-    };
-    return function (mod) {
-        if (mod && mod.__esModule) return mod;
-        var result = {};
-        if (mod != null) for (var k = ownKeys(mod), i = 0; i < k.length; i++) if (k[i] !== "default") __createBinding(result, mod, k[i]);
-        __setModuleDefault(result, mod);
-        return result;
-    };
-})();
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.SimpleFoldingRangeProvider = void 0;
-const vscode = __importStar(require("vscode"));
-function leadingIndent(text) {
-    const match = text.match(/^\s*/);
-    return match ? match[0].length : 0;
-}
-function findIndentedBlockEnd(document, startLine, baseIndent) {
-    let endLine = startLine;
-    for (let line = startLine + 1; line < document.lineCount; line++) {
-        const text = document.lineAt(line).text;
-        const trimmed = text.trim();
-        if (!trimmed) {
-            endLine = line;
-            continue;
-        }
-        const indent = leadingIndent(text);
-        if (indent <= baseIndent) {
-            break;
-        }
-        endLine = line;
-    }
-    return endLine;
-}
-function findTripleStringEnd(document, startLine) {
-    for (let line = startLine + 1; line < document.lineCount; line++) {
-        if (document.lineAt(line).text.includes('"""')) {
-            return line;
-        }
-    }
-    return undefined;
-}
+const simpleAnalysisIndex_1 = require("./analysis/simpleAnalysisIndex");
 class SimpleFoldingRangeProvider {
     provideFoldingRanges(document) {
-        const folds = [];
-        for (let line = 0; line < document.lineCount; line++) {
-            const text = document.lineAt(line).text;
-            const trimmed = text.trim();
-            if (!trimmed) {
-                continue;
-            }
-            if (trimmed.startsWith('"""')) {
-                const end = findTripleStringEnd(document, line);
-                if (typeof end === 'number' && end > line) {
-                    folds.push(new vscode.FoldingRange(line, end, vscode.FoldingRangeKind.Region));
-                    line = end;
-                }
-                continue;
-            }
-            if (!trimmed.endsWith(':')) {
-                continue;
-            }
-            const endLine = findIndentedBlockEnd(document, line, leadingIndent(text));
-            if (endLine > line) {
-                folds.push(new vscode.FoldingRange(line, endLine, vscode.FoldingRangeKind.Region));
-            }
-        }
-        return folds;
+        return (0, simpleAnalysisIndex_1.collectFoldingRanges)(document);
     }
 }
 exports.SimpleFoldingRangeProvider = SimpleFoldingRangeProvider;

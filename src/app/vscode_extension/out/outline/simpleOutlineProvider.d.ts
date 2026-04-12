@@ -1,9 +1,9 @@
 import * as vscode from 'vscode';
-import { indexDocumentSymbols } from '../symbols/simpleSymbolProviders';
+import { type IndexedSymbol } from '../analysis/simpleAnalysisIndex';
 declare class OutlineItem extends vscode.TreeItem {
     readonly document: vscode.TextDocument;
-    readonly symbol: ReturnType<typeof indexDocumentSymbols>[number];
-    constructor(document: vscode.TextDocument, symbol: ReturnType<typeof indexDocumentSymbols>[number]);
+    readonly symbol: IndexedSymbol;
+    constructor(document: vscode.TextDocument, symbol: IndexedSymbol);
 }
 export declare class SimpleOutlineProvider implements vscode.TreeDataProvider<OutlineItem> {
     private readonly emitter;
