@@ -1125,12 +1125,27 @@ pub(crate) fn evaluate_method_call_with_self_update(
     // For non-objects (Array, Dict, String, etc.), check if the method returns a mutated value
     let result = evaluate_method_call(receiver, method, args, env, functions, classes, enums, impl_methods)?;
 
-    // Only propagate self-update when the result type matches the receiver type.
-    // Mutating `me` methods (e.g., push, pop) return the same type (Array → Array).
-    // Non-mutating methods (e.g., len, contains) return a different type (Array → Int).
-    // Returning Some(result) for non-mutating methods corrupts the variable's type
-    // when the Identifier handler in calls.rs reassigns it back to env.
-    let updated_self = if std::mem::discriminant(&result) == std::mem::discriminant(&recv_val) {
+    // Only propagate self-update for an allow-list of known in-place mutating methods.
+    // Previously this used a type-discriminant heuristic ("same type in/out = mutating"),
+    // but that wrongly treated non-mutating methods that happen to return the same type
+    // (e.g. `String.slice`, `String.trim`, `String.replace`, `Array.slice`,
+    // `Array.filter`, `Array.map`) as mutations, clobbering the receiver variable with
+    // the returned sub-value. Strings in Simple are value types with NO mutating
+    // methods — every "mutating" string op returns a new string. Arrays and dicts have
+    // a small fixed set of mutators, listed below.
+    const MUTATING_METHODS: &[&str] = &[
+        // Array / Vec / List in-place mutators
+        "push", "push_back", "push_front", "pop", "pop_back", "pop_front",
+        "append", "prepend", "insert", "remove", "remove_at", "remove_first",
+        "remove_last", "clear", "extend", "sort", "sort_by", "sort_by_key",
+        "reverse", "shuffle", "dedup", "retain", "resize", "fill", "swap",
+        "rotate_left", "rotate_right", "truncate", "drain",
+        // Dict / Map in-place mutators
+        "update", "set", "set_default", "merge", "delete",
+    ];
+    let updated_self = if MUTATING_METHODS.contains(&method)
+        && std::mem::discriminant(&result) == std::mem::discriminant(&recv_val)
+    {
         Some(result.clone())
     } else {
         None

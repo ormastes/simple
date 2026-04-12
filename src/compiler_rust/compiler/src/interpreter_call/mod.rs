@@ -747,6 +747,28 @@ pub(crate) fn evaluate_call(
             if let Some(func) = functions.get(&mangled_path_name).cloned() {
                 return core::exec_function(&func, args, env, functions, classes, enums, impl_methods, None);
             }
+
+            // Fallback: if segments[0] is bound as a value (e.g. a module-level
+            // `var POS_AGENTS: [...] = ...`), the parser produces a Path expression
+            // because the identifier is uppercase, even though the user wrote
+            // `POS_AGENTS.len()` (an instance method call). Reconstruct as a
+            // MethodCall and dispatch through the value-receiver path so builtins
+            // like .len(), .push(), etc. work on module-level vars.
+            let is_value = env.get(type_name).is_some()
+                || crate::interpreter::MODULE_GLOBALS.with(|cell| cell.borrow().contains_key(type_name));
+            if is_value {
+                let receiver = Box::new(Expr::Identifier(type_name.clone()));
+                return crate::interpreter::interpreter_method::evaluate_method_call(
+                    &receiver,
+                    method_name,
+                    args,
+                    env,
+                    functions,
+                    classes,
+                    enums,
+                    impl_methods,
+                );
+            }
         }
 
         let ctx = ErrorContext::new()

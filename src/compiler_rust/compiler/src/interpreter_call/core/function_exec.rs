@@ -324,6 +324,69 @@ fn exec_function_inner(
         true,
     );
 
+    // Bug #19 fix: write back mutable-container parameters to caller's bindings.
+    //
+    // When a function is called with a simple identifier argument (e.g., `f(a)`)
+    // and the parameter is a mutable container type (Array / Dict / Object /
+    // Tuple), any mutation the callee performed to its local parameter binding
+    // should be observed by the caller. The interpreter stores arrays / dicts /
+    // objects as `Arc<_>` with copy-on-write semantics, so mutations inside the
+    // callee produce a new Arc in the callee's local env and are NOT visible to
+    // the caller unless we explicitly propagate the final callee value back.
+    //
+    // This is only done for identifier arguments (pass-by-name) and only for
+    // container types; primitives keep value semantics.
+    if result.is_ok() {
+        let params_to_bind: Vec<_> = func
+            .params
+            .iter()
+            .filter(|p| !(self_ctx.is_some() && p.name == METHOD_SELF))
+            .collect();
+        let mut positional_idx = 0usize;
+        for arg in args {
+            // Skip spread expressions — they don't map 1:1 to a caller binding.
+            if matches!(&arg.value, simple_parser::ast::Expr::Spread(_)) {
+                positional_idx += 1;
+                continue;
+            }
+            let (caller_name, param_name) = if let Some(name) = &arg.name {
+                // Named argument: match param by name
+                if let simple_parser::ast::Expr::Identifier(caller) = &arg.value {
+                    (caller.clone(), name.clone())
+                } else {
+                    continue;
+                }
+            } else {
+                let param = match params_to_bind.get(positional_idx) {
+                    Some(p) => p,
+                    None => {
+                        positional_idx += 1;
+                        continue;
+                    }
+                };
+                positional_idx += 1;
+                if let simple_parser::ast::Expr::Identifier(caller) = &arg.value {
+                    (caller.clone(), param.name.clone())
+                } else {
+                    continue;
+                }
+            };
+            if caller_name == METHOD_SELF {
+                continue;
+            }
+            if let Some(callee_val) = local_env.get(&param_name) {
+                if matches!(
+                    callee_val,
+                    Value::Array(_) | Value::Dict(_) | Value::Object { .. } | Value::Tuple(_)
+                ) && outer_env.contains_key(&caller_name)
+                {
+                    let new_val = callee_val.clone();
+                    outer_env.insert(caller_name, new_val);
+                }
+            }
+        }
+    }
+
     // Runtime profiler return hook
     if crate::runtime_profile::is_profiling_active() {
         crate::runtime_profile::record_full_return(None);

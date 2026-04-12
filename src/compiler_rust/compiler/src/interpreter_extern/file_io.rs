@@ -149,6 +149,10 @@ pub fn rt_file_canonicalize(args: &[Value]) -> Result<Value, CompileError> {
 }
 
 /// Read file as text
+///
+/// Returns plain `Value::Str` (not Option-wrapped) to match the runtime
+/// `rt_file_read_text` ABI and the `extern fn rt_file_read_text(path: text) -> text`
+/// declarations used throughout the codebase. Returns an empty string on failure.
 pub fn rt_file_read_text(args: &[Value]) -> Result<Value, CompileError> {
     let path = extract_path(args, 0)?;
     match fs::read_to_string(&path) {
@@ -159,9 +163,9 @@ pub fn rt_file_read_text(args: &[Value]) -> Result<Value, CompileError> {
             } else {
                 content
             };
-            Ok(make_some(Value::Str(content)))
+            Ok(Value::Str(content))
         }
-        Err(_) => Ok(make_none()),
+        Err(_) => Ok(Value::Str(String::new())),
     }
 }
 

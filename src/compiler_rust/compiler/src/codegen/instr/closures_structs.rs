@@ -228,10 +228,36 @@ pub(crate) fn compile_method_call_static<M: Module>(
                 None
             };
 
+            // Exclude the currently-compiled function from candidates so that
+            // bare `method(...)` inside `Type.method` (or `self.field.method`
+            // where `self.field` has unknown type) does not resolve to the
+            // enclosing method itself. The "pick shortest candidate" fallback
+            // would otherwise produce infinite recursion for delegating
+            // wrappers like
+            //   fn draw_rect_filled(self, ...):
+            //     self.backend.draw_rect_filled(...)
+            // where `self.backend` has no concrete type at the call site.
+            //
+            // `ctx.func.name` is the short form "Type.method" or a bare
+            // function name; `func_ids` keys are mangled
+            // ("module__Type_dot_method"). A candidate is considered the
+            // current function if its mangled name equals or ends with the
+            // sanitized short form.
+            let current_fn_name: &str = ctx.func.name.as_str();
+            let current_fn_sanitized = current_fn_name.replace('.', "_dot_");
+            let current_fn_tail_dot = format!("__{}", current_fn_name);
+            let current_fn_tail_sanitized = format!("__{}", current_fn_sanitized);
             let candidates: Vec<_> = ctx
                 .func_ids
                 .iter()
                 .filter(|(k, _)| k.ends_with(&dot_suffix) || k.ends_with(&underscore_suffix))
+                .filter(|(k, _)| {
+                    let ks = k.as_str();
+                    ks != current_fn_name
+                        && ks != current_fn_sanitized
+                        && !ks.ends_with(&current_fn_tail_dot)
+                        && !ks.ends_with(&current_fn_tail_sanitized)
+                })
                 .collect();
 
             if let Some(tq) = type_qualifier {
@@ -244,6 +270,15 @@ pub(crate) fn compile_method_call_static<M: Module>(
                 {
                     return Some(v);
                 }
+                // No candidate matches the type qualifier — return None so
+                // that the cross-module use_map/import_map path runs below.
+                // Without this, the "pick shortest" fallback at the bottom
+                // would match a candidate from an unrelated type (e.g. the
+                // enclosing class's own method of the same name), causing
+                // infinite recursion for `self.field.method()` calls where
+                // `self.field`'s concrete type is not in the current
+                // compilation unit's func_ids.
+                return None;
             }
 
             if candidates.len() > 1 {

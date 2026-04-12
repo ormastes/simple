@@ -219,6 +219,89 @@ pub(super) fn exec_while(
 
     // Normal while loop
     // For while~ (is_suspend), await the condition value before checking truthiness
+    //
+    // OPTIMIZATION: Loop-invariant hoisting for patterns like
+    //   `while i < arr.len():` / `while i < text.len():`
+    // When the receiver is a bare local that is NOT mutated anywhere in the loop
+    // body (and the body has no function calls that could alias it), we evaluate
+    // the `.len()` / `.size()` / `.count()` once before the loop and compare
+    // against the cached integer each iteration. See `try_hoist_loop_invariant_len`
+    // and `body_may_mutate_var` below.
+    let hoist = if !while_stmt.is_suspend {
+        try_hoist_loop_invariant_len(&while_stmt.condition, &while_stmt.body, env, functions, classes, enums, impl_methods)?
+    } else {
+        None
+    };
+
+    if let Some(hoisted) = hoist {
+        loop {
+            check_interrupt!();
+            check_execution_limit!();
+            check_timeout!();
+
+            // Evaluate only the "other" (variant) side of the comparison and
+            // compare against the cached length integer directly.
+            let other_val = evaluate_expr(&hoisted.other_expr, env, functions, classes, enums, impl_methods)?;
+            let other_int = match other_val {
+                Value::Int(n) => n,
+                _ => {
+                    // Variant side didn't evaluate to an int — bail out of the fast path
+                    // and re-run this iteration with the slow path semantics.
+                    // This should be very rare; fall through to a full condition eval.
+                    let cond_val = evaluate_expr(&while_stmt.condition, env, functions, classes, enums, impl_methods)?;
+                    let decision_result = cond_val.truthy();
+                    record_decision_coverage_ffi("<source>", while_stmt.span.line, while_stmt.span.column, decision_result);
+                    if !decision_result { break; }
+                    let ctrl = exec_block(&while_stmt.body, env, functions, classes, enums, impl_methods)?;
+                    if let Some(result) = handle_loop_control_labeled(ctrl, &while_stmt.label) {
+                        return result;
+                    }
+                    continue;
+                }
+            };
+
+            let cached = hoisted.cached_len;
+            // Compare: the cached value is always on `side_is_right` side of the op.
+            // If cached is on right: lhs op rhs  == other_int op cached
+            // If cached is on left:  lhs op rhs  == cached op other_int
+            let decision_result = if hoisted.cached_on_right {
+                match hoisted.op {
+                    HoistOp::Lt => other_int < cached,
+                    HoistOp::LtEq => other_int <= cached,
+                    HoistOp::Gt => other_int > cached,
+                    HoistOp::GtEq => other_int >= cached,
+                    HoistOp::Eq => other_int == cached,
+                    HoistOp::NotEq => other_int != cached,
+                }
+            } else {
+                match hoisted.op {
+                    HoistOp::Lt => cached < other_int,
+                    HoistOp::LtEq => cached <= other_int,
+                    HoistOp::Gt => cached > other_int,
+                    HoistOp::GtEq => cached >= other_int,
+                    HoistOp::Eq => cached == other_int,
+                    HoistOp::NotEq => cached != other_int,
+                }
+            };
+
+            record_decision_coverage_ffi(
+                "<source>",
+                while_stmt.span.line,
+                while_stmt.span.column,
+                decision_result,
+            );
+
+            if !decision_result {
+                break;
+            }
+            let ctrl = exec_block(&while_stmt.body, env, functions, classes, enums, impl_methods)?;
+            if let Some(result) = handle_loop_control_labeled(ctrl, &while_stmt.label) {
+                return result;
+            }
+        }
+        return Ok(Control::Next);
+    }
+
     loop {
         check_interrupt!();
         check_execution_limit!();
@@ -249,6 +332,296 @@ pub(super) fn exec_while(
         }
     }
     Ok(Control::Next)
+}
+
+/// Result of analyzing a while-loop condition for loop-invariant `.len()` hoisting.
+struct HoistedLenLoop<'a> {
+    /// The precomputed cached length (evaluated once before loop entry).
+    cached_len: i64,
+    /// The non-cached side of the comparison (still evaluated each iteration).
+    other_expr: &'a Expr,
+    /// True if the cached value was on the right-hand side of the original Binary.
+    cached_on_right: bool,
+    /// Which comparison operator was used.
+    op: HoistOp,
+}
+
+#[derive(Clone, Copy)]
+enum HoistOp {
+    Lt,
+    LtEq,
+    Gt,
+    GtEq,
+    Eq,
+    NotEq,
+}
+
+/// Try to detect and precompute a loop-invariant `.len()`/`.size()`/`.count()`
+/// call in the condition of a while loop.
+///
+/// Safe to fire ONLY if:
+/// - The condition is a `Binary { op: comparison, left, right }`.
+/// - Exactly one side is a `MethodCall` on a bare `Identifier(name)` receiver,
+///   with method name in {len, size, count}, zero args, zero generic args.
+/// - The body contains NO assignments to `name`, no mutating method calls on
+///   `name` (push/pop/append/insert/remove/clear/extend/sort/reverse), no index
+///   assignments to `name[_]`, and no general function calls (which could
+///   mutate via aliasing — conservative bail-out).
+///
+/// Returns `Some(HoistedLenLoop)` with the precomputed length on success,
+/// `None` to fall back to the slow path.
+fn try_hoist_loop_invariant_len<'a>(
+    condition: &'a Expr,
+    body: &simple_parser::ast::Block,
+    env: &mut Env,
+    functions: &mut HashMap<String, Arc<FunctionDef>>,
+    classes: &mut HashMap<String, Arc<ClassDef>>,
+    enums: &Enums,
+    impl_methods: &ImplMethods,
+) -> Result<Option<HoistedLenLoop<'a>>, CompileError> {
+    use simple_parser::ast::BinOp;
+
+    // Condition must be a binary comparison.
+    let (op, left, right) = match condition {
+        Expr::Binary { op, left, right } => (*op, left.as_ref(), right.as_ref()),
+        _ => return Ok(None),
+    };
+    let hop = match op {
+        BinOp::Lt => HoistOp::Lt,
+        BinOp::LtEq => HoistOp::LtEq,
+        BinOp::Gt => HoistOp::Gt,
+        BinOp::GtEq => HoistOp::GtEq,
+        BinOp::Eq => HoistOp::Eq,
+        BinOp::NotEq => HoistOp::NotEq,
+        _ => return Ok(None),
+    };
+
+    // Check if either side is a hoistable method call and capture the receiver name.
+    fn as_hoistable_len_call(e: &Expr) -> Option<&str> {
+        if let Expr::MethodCall { receiver, method, args, generic_args } = e {
+            if !args.is_empty() || !generic_args.is_empty() {
+                return None;
+            }
+            if method != "len" && method != "size" && method != "count" {
+                return None;
+            }
+            if let Expr::Identifier(name) = receiver.as_ref() {
+                return Some(name.as_str());
+            }
+        }
+        None
+    }
+
+    let (recv_name, other_expr, cached_on_right) =
+        if let Some(name) = as_hoistable_len_call(right) {
+            (name, left, true)
+        } else if let Some(name) = as_hoistable_len_call(left) {
+            (name, right, false)
+        } else {
+            return Ok(None);
+        };
+
+    // Conservative body scan: bail on any mutation of `recv_name` or any function call.
+    if body_may_mutate_var(&body.statements, recv_name) {
+        return Ok(None);
+    }
+
+    // Evaluate the `.len()` once. Re-use evaluate_expr on a fresh synthetic call by
+    // evaluating the receiver identifier and extracting length directly. We avoid
+    // re-calling evaluate_expr on the MethodCall to keep the cost minimal.
+    let recv_val = match env.get(recv_name) {
+        Some(v) => v.clone(),
+        None => return Ok(None),
+    };
+    let cached_len: i64 = match &recv_val {
+        Value::Array(a) => a.len() as i64,
+        Value::FrozenArray(a) => a.len() as i64,
+        Value::FixedSizeArray { data, .. } => data.len() as i64,
+        Value::Str(s) => s.chars().count() as i64,
+        Value::Tuple(t) => t.len() as i64,
+        _ => return Ok(None), // dict/other — bail; user might mean something custom
+    };
+
+    Ok(Some(HoistedLenLoop {
+        cached_len,
+        other_expr,
+        cached_on_right,
+        op: hop,
+    }))
+}
+
+/// Returns true if any statement in `stmts` (recursively) may mutate the variable
+/// named `var` or could call a function (worst-case aliasing).
+///
+/// Conservative: err on the side of returning `true` (= no hoisting).
+fn body_may_mutate_var(stmts: &[simple_parser::ast::Node], var: &str) -> bool {
+    use simple_parser::ast::Node;
+    for s in stmts {
+        if node_may_mutate_var(s, var) {
+            return true;
+        }
+    }
+    false
+}
+
+fn node_may_mutate_var(node: &simple_parser::ast::Node, var: &str) -> bool {
+    use simple_parser::ast::{AssignOp, Node};
+    match node {
+        Node::Let(l) => {
+            // Conservative: if the `let` binds a pattern that shadows `var`, treat as mutation.
+            if pattern_binds_var(&l.pattern, var) {
+                return true;
+            }
+            if let Some(v) = &l.value {
+                if expr_may_mutate_var(v, var) { return true; }
+            }
+            false
+        }
+        Node::Assignment(a) => {
+            // Any assignment whose target is `var` (or `var[...]`, or a field/index of `var`)
+            // or uses any AugAssign form on `var` is a mutation.
+            if assign_target_touches_var(&a.target, var) {
+                return true;
+            }
+            // += / -= etc. to anything involving var (e.g. `var += [x]`) also mutates.
+            if !matches!(a.op, AssignOp::Assign) && assign_target_touches_var(&a.target, var) {
+                return true;
+            }
+            if expr_may_mutate_var(&a.value, var) { return true; }
+            false
+        }
+        Node::Expression(e) => expr_may_mutate_var(e, var),
+        Node::Return(r) => {
+            if let Some(v) = &r.value { expr_may_mutate_var(v, var) } else { false }
+        }
+        Node::If(iff) => {
+            if expr_may_mutate_var(&iff.condition, var) { return true; }
+            if body_may_mutate_var(&iff.then_block.statements, var) { return true; }
+            for (_pat, cond, blk) in &iff.elif_branches {
+                if expr_may_mutate_var(cond, var) { return true; }
+                if body_may_mutate_var(&blk.statements, var) { return true; }
+            }
+            if let Some(eb) = &iff.else_block {
+                if body_may_mutate_var(&eb.statements, var) { return true; }
+            }
+            false
+        }
+        Node::While(w) => {
+            if expr_may_mutate_var(&w.condition, var) { return true; }
+            body_may_mutate_var(&w.body.statements, var)
+        }
+        Node::For(f) => {
+            if expr_may_mutate_var(&f.iterable, var) { return true; }
+            body_may_mutate_var(&f.body.statements, var)
+        }
+        Node::Loop(l) => body_may_mutate_var(&l.body.statements, var),
+        Node::Match(m) => {
+            if expr_may_mutate_var(&m.subject, var) { return true; }
+            for arm in &m.arms {
+                if let Some(g) = &arm.guard { if expr_may_mutate_var(g, var) { return true; } }
+                if body_may_mutate_var(&arm.body.statements, var) { return true; }
+            }
+            false
+        }
+        // Anything else (Defer, complex constructs, break/continue/pass): assume unsafe.
+        Node::Break(_) | Node::Continue(_) | Node::Pass(_) => false,
+        _ => true,
+    }
+}
+
+fn pattern_binds_var(pat: &simple_parser::ast::Pattern, var: &str) -> bool {
+    use simple_parser::ast::Pattern;
+    match pat {
+        Pattern::Identifier(n) | Pattern::MutIdentifier(n) | Pattern::MoveIdentifier(n) => n == var,
+        Pattern::Tuple(ps) | Pattern::Array(ps) | Pattern::Or(ps) => {
+            ps.iter().any(|p| pattern_binds_var(p, var))
+        }
+        Pattern::Struct { fields, .. } => fields.iter().any(|(_, p)| pattern_binds_var(p, var)),
+        Pattern::Enum { payload: Some(ps), .. } => ps.iter().any(|p| pattern_binds_var(p, var)),
+        Pattern::Typed { pattern, .. } => pattern_binds_var(pattern, var),
+        _ => false,
+    }
+}
+
+fn assign_target_touches_var(target: &Expr, var: &str) -> bool {
+    match target {
+        Expr::Identifier(n) => n == var,
+        Expr::Index { receiver, .. } => assign_target_touches_var(receiver, var),
+        Expr::FieldAccess { receiver, .. } => assign_target_touches_var(receiver, var),
+        Expr::TupleIndex { receiver, .. } => assign_target_touches_var(receiver, var),
+        _ => false,
+    }
+}
+
+/// Returns true if `e` contains:
+/// - any `Call { ... }` (function call — worst-case, could mutate via captured refs)
+/// - any `MethodCall` on `var` with a mutating method name
+/// - any `MethodCall` on anything else (conservative: could invoke user code)
+/// - any reference to `var` as the receiver of a mutating op
+///
+/// For read-only patterns like `arr[j]` and `arr.len()` in the RHS of `sum + arr[j]`,
+/// this returns false.
+fn expr_may_mutate_var(e: &Expr, var: &str) -> bool {
+    match e {
+        // Plain reads.
+        Expr::Integer(_) | Expr::Float(_) | Expr::TypedInteger(_, _) | Expr::TypedFloat(_, _)
+        | Expr::String(_) | Expr::TypedString(_, _) | Expr::Bool(_) | Expr::Nil
+        | Expr::Symbol(_) | Expr::Atom(_) | Expr::Identifier(_) | Expr::Path(_)
+        | Expr::ContractResult => false,
+
+        Expr::Binary { left, right, .. } => {
+            expr_may_mutate_var(left, var) || expr_may_mutate_var(right, var)
+        }
+        Expr::Unary { operand, .. } => expr_may_mutate_var(operand, var),
+
+        Expr::Index { receiver, index } => {
+            expr_may_mutate_var(receiver, var) || expr_may_mutate_var(index, var)
+        }
+        Expr::FieldAccess { receiver, .. } => expr_may_mutate_var(receiver, var),
+        Expr::TupleIndex { receiver, .. } => expr_may_mutate_var(receiver, var),
+
+        // Any function call: conservative bail-out.
+        Expr::Call { .. } => true,
+        Expr::KernelLaunch { .. } => true,
+        Expr::MacroInvocation { .. } => true,
+
+        // Method calls: only allow-list read-only methods on our tracked var;
+        // any other method call is assumed unsafe.
+        Expr::MethodCall { receiver, method, args, .. } => {
+            // Read-only methods on the tracked var that we know cannot mutate it.
+            const RO: &[&str] = &["len", "size", "count", "is_empty"];
+            let receiver_is_var_ident = matches!(receiver.as_ref(), Expr::Identifier(n) if n == var);
+            if receiver_is_var_ident && RO.contains(&method.as_str()) && args.is_empty() {
+                return false;
+            }
+            // Anything else: assume it might mutate or run arbitrary code.
+            true
+        }
+        Expr::OptionalMethodCall { .. } => true,
+
+        Expr::Array(items) | Expr::Tuple(items) | Expr::VecLiteral(items) => {
+            items.iter().any(|x| expr_may_mutate_var(x, var))
+        }
+        Expr::ArrayRepeat { value, count } => {
+            expr_may_mutate_var(value, var) || expr_may_mutate_var(count, var)
+        }
+        Expr::Dict(pairs) => pairs.iter().any(|(k, v)| expr_may_mutate_var(k, var) || expr_may_mutate_var(v, var)),
+
+        Expr::If { condition, then_branch, else_branch, .. } => {
+            expr_may_mutate_var(condition, var)
+                || expr_may_mutate_var(then_branch, var)
+                || else_branch.as_ref().map_or(false, |e| expr_may_mutate_var(e, var))
+        }
+
+        Expr::Cast { expr, .. } => expr_may_mutate_var(expr, var),
+        Expr::Range { start, end, .. } => {
+            start.as_ref().map_or(false, |e| expr_may_mutate_var(e, var))
+                || end.as_ref().map_or(false, |e| expr_may_mutate_var(e, var))
+        }
+
+        // Anything exotic: bail.
+        _ => true,
+    }
 }
 
 pub(super) fn exec_loop(
