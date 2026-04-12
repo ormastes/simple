@@ -10,17 +10,22 @@ export class MathWidget extends WidgetType {
         readonly html: string,
         readonly prefix: string,
         readonly content: string,
+        readonly displayMode: 'inline' | 'block' = 'inline',
     ) {
         super();
     }
 
     eq(other: MathWidget): boolean {
-        return this.html === other.html && this.prefix === other.prefix;
+        return this.html === other.html
+            && this.prefix === other.prefix
+            && this.displayMode === other.displayMode;
     }
 
     toDOM(): HTMLElement {
-        const wrap = document.createElement('span');
-        wrap.className = 'cm-math-widget';
+        const wrap = document.createElement(this.displayMode === 'block' ? 'div' : 'span');
+        wrap.className = this.displayMode === 'block'
+            ? 'cm-math-widget cm-math-widget-block'
+            : 'cm-math-widget';
 
         // Prefix indicator for loss/nograd
         if (this.prefix !== 'm') {

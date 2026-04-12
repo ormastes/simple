@@ -2634,7 +2634,7 @@ var RichEditorWebview = (() => {
   EditorState.transactionFilter = transactionFilter;
   EditorState.transactionExtender = transactionExtender;
   Compartment.reconfigure = /* @__PURE__ */ StateEffect.define();
-  function combineConfig(configs, defaults3, combine = {}) {
+  function combineConfig(configs, defaults2, combine = {}) {
     let result = {};
     for (let config2 of configs)
       for (let key of Object.keys(config2)) {
@@ -2647,9 +2647,9 @@ var RichEditorWebview = (() => {
         else
           throw new Error("Config merge conflict for field " + key);
       }
-    for (let key in defaults3)
+    for (let key in defaults2)
       if (result[key] === void 0)
-        result[key] = defaults3[key];
+        result[key] = defaults2[key];
     return result;
   }
   var RangeValue = class {
@@ -13308,23 +13308,7 @@ var RichEditorWebview = (() => {
   GutterMarker.prototype.point = true;
   var gutterLineClass = /* @__PURE__ */ Facet.define();
   var gutterWidgetClass = /* @__PURE__ */ Facet.define();
-  var defaults = {
-    class: "",
-    renderEmptyElements: false,
-    elementStyle: "",
-    markers: () => RangeSet.empty,
-    lineMarker: () => null,
-    widgetMarker: () => null,
-    lineMarkerChange: null,
-    initialSpacer: null,
-    updateSpacer: null,
-    domEventHandlers: {},
-    side: "before"
-  };
   var activeGutters = /* @__PURE__ */ Facet.define();
-  function gutter(config2) {
-    return [gutters(), activeGutters.of({ ...defaults, ...config2 })];
-  }
   var unfixGutters = /* @__PURE__ */ Facet.define({
     combine: (values) => values.some((x) => x)
   });
@@ -13661,6 +13645,80 @@ var RichEditorWebview = (() => {
       if (!a[i].compare(b[i]))
         return false;
     return true;
+  }
+  var lineNumberMarkers = /* @__PURE__ */ Facet.define();
+  var lineNumberWidgetMarker = /* @__PURE__ */ Facet.define();
+  var lineNumberConfig = /* @__PURE__ */ Facet.define({
+    combine(values) {
+      return combineConfig(values, { formatNumber: String, domEventHandlers: {} }, {
+        domEventHandlers(a, b) {
+          let result = Object.assign({}, a);
+          for (let event in b) {
+            let exists = result[event], add2 = b[event];
+            result[event] = exists ? (view, line, event2) => exists(view, line, event2) || add2(view, line, event2) : add2;
+          }
+          return result;
+        }
+      });
+    }
+  });
+  var NumberMarker = class extends GutterMarker {
+    constructor(number2) {
+      super();
+      this.number = number2;
+    }
+    eq(other) {
+      return this.number == other.number;
+    }
+    toDOM() {
+      return document.createTextNode(this.number);
+    }
+  };
+  function formatNumber(view, number2) {
+    return view.state.facet(lineNumberConfig).formatNumber(number2, view.state);
+  }
+  var lineNumberGutter = /* @__PURE__ */ activeGutters.compute([lineNumberConfig], (state) => ({
+    class: "cm-lineNumbers",
+    renderEmptyElements: false,
+    markers(view) {
+      return view.state.facet(lineNumberMarkers);
+    },
+    lineMarker(view, line, others) {
+      if (others.some((m) => m.toDOM))
+        return null;
+      return new NumberMarker(formatNumber(view, view.state.doc.lineAt(line.from).number));
+    },
+    widgetMarker: (view, widget, block) => {
+      for (let m of view.state.facet(lineNumberWidgetMarker)) {
+        let result = m(view, widget, block);
+        if (result)
+          return result;
+      }
+      return null;
+    },
+    lineMarkerChange: (update) => update.startState.facet(lineNumberConfig) != update.state.facet(lineNumberConfig),
+    initialSpacer(view) {
+      return new NumberMarker(formatNumber(view, maxLineNumber(view.state.doc.lines)));
+    },
+    updateSpacer(spacer, update) {
+      let max = formatNumber(update.view, maxLineNumber(update.view.state.doc.lines));
+      return max == spacer.number ? spacer : new NumberMarker(max);
+    },
+    domEventHandlers: state.facet(lineNumberConfig).domEventHandlers,
+    side: "before"
+  }));
+  function lineNumbers(config2 = {}) {
+    return [
+      lineNumberConfig.of(config2),
+      gutters(),
+      lineNumberGutter
+    ];
+  }
+  function maxLineNumber(lines) {
+    let last = 9;
+    while (last < lines)
+      last = last * 10 + 9;
+    return last;
   }
   var activeLineGutterMarker = /* @__PURE__ */ new class extends GutterMarker {
     constructor() {
@@ -21181,7 +21239,7 @@ var RichEditorWebview = (() => {
       "&:after": { content: "'abc'", fontSize: "50%", verticalAlign: "middle" }
     }
   });
-  var defaults2 = {
+  var defaults = {
     brackets: ["(", "[", "{", "'", '"'],
     before: ")]}:;>",
     stringPrefixes: []
@@ -21223,7 +21281,7 @@ var RichEditorWebview = (() => {
     return fromCodePoint(ch < 128 ? ch : ch + 1);
   }
   function config(state, pos) {
-    return state.languageDataAt("closeBrackets", pos)[0] || defaults2;
+    return state.languageDataAt("closeBrackets", pos)[0] || defaults;
   }
   var android = typeof navigator == "object" && /* @__PURE__ */ /Android\b/.test(navigator.userAgent);
   var inputHandler2 = /* @__PURE__ */ EditorView.inputHandler.of((view, from, to, insert2) => {
@@ -21242,7 +21300,7 @@ var RichEditorWebview = (() => {
     if (state.readOnly)
       return false;
     let conf = config(state, state.selection.main.head);
-    let tokens = conf.brackets || defaults2.brackets;
+    let tokens = conf.brackets || defaults.brackets;
     let dont = null, changes = state.changeByRange((range) => {
       if (range.empty) {
         let before = prevChar(state.doc, range.head);
@@ -21265,11 +21323,11 @@ var RichEditorWebview = (() => {
   ];
   function insertBracket(state, bracket2) {
     let conf = config(state, state.selection.main.head);
-    let tokens = conf.brackets || defaults2.brackets;
+    let tokens = conf.brackets || defaults.brackets;
     for (let tok of tokens) {
       let closed = closing(codePointAt2(tok, 0));
       if (bracket2 == tok)
-        return closed == tok ? handleSame(state, tok, tokens.indexOf(tok + tok + tok) > -1, conf) : handleOpen(state, tok, closed, conf.before || defaults2.before);
+        return closed == tok ? handleSame(state, tok, tokens.indexOf(tok + tok + tok) > -1, conf) : handleOpen(state, tok, closed, conf.before || defaults.before);
       if (bracket2 == closed && closedBracketAt(state, state.selection.main.from))
         return handleClose(state, tok, closed);
     }
@@ -21328,7 +21386,7 @@ var RichEditorWebview = (() => {
     });
   }
   function handleSame(state, token, allowTriple, config2) {
-    let stringPrefixes = config2.stringPrefixes || defaults2.stringPrefixes;
+    let stringPrefixes = config2.stringPrefixes || defaults.stringPrefixes;
     let dont = null, changes = state.changeByRange((range) => {
       if (!range.empty)
         return {
@@ -21608,18 +21666,19 @@ var RichEditorWebview = (() => {
 
   // src/webview/widgets/mathWidget.ts
   var MathWidget = class extends WidgetType {
-    constructor(html, prefix, content2) {
+    constructor(html, prefix, content2, displayMode = "inline") {
       super();
       this.html = html;
       this.prefix = prefix;
       this.content = content2;
+      this.displayMode = displayMode;
     }
     eq(other) {
-      return this.html === other.html && this.prefix === other.prefix;
+      return this.html === other.html && this.prefix === other.prefix && this.displayMode === other.displayMode;
     }
     toDOM() {
-      const wrap = document.createElement("span");
-      wrap.className = "cm-math-widget";
+      const wrap = document.createElement(this.displayMode === "block" ? "div" : "span");
+      wrap.className = this.displayMode === "block" ? "cm-math-widget cm-math-widget-block" : "cm-math-widget";
       if (this.prefix !== "m") {
         const label = document.createElement("span");
         label.className = "cm-math-label";
@@ -21733,6 +21792,13 @@ var RichEditorWebview = (() => {
 
   // src/webview/decorationPlugin.ts
   var BLOCK_REGEX = /\b(?<prefix>m|loss|nograd|img|graph)\{([^}]*(?:\{[^}]*\}[^}]*)*)\}/gs;
+  function isWholeTrimmedLine(view, from, to) {
+    const line = view.state.doc.lineAt(from);
+    const text = view.state.doc.sliceString(line.from, line.to);
+    const leading = text.length - text.trimStart().length;
+    const trailing = text.length - text.trimEnd().length;
+    return line.from + leading === from && line.to - trailing === to;
+  }
   function detectBlockRanges(text) {
     const blocks = [];
     BLOCK_REGEX.lastIndex = 0;
@@ -21758,6 +21824,9 @@ var RichEditorWebview = (() => {
       }
       const key = `${block.prefix}:${block.content}`;
       const info = renderedBlocks.get(key);
+      if (block.prefix !== "img" && info?.renderedHtml && isWholeTrimmedLine(view, block.from, block.to)) {
+        continue;
+      }
       if (info && info.kind === "img") {
         if (info.status === "ok" && info.imageUri) {
           builder.add(
@@ -21818,6 +21887,9 @@ var RichEditorWebview = (() => {
   }
 
   // src/webview/richEditorWebview.ts
+  var ENABLE_TEST_LINE_WIDGETS = false;
+  var ENABLE_SYMBOL_HOVER = false;
+  var ENABLE_FULL_LINE_BLOCK_MATH = true;
   function applyEditorSettings(settings) {
     const root = document.documentElement;
     const showBlockBorders = settings?.showBlockBorders ?? false;
@@ -21851,33 +21923,215 @@ var RichEditorWebview = (() => {
       return wrap;
     }
   };
-  function maxLineNumber(lines) {
-    let last = 9;
-    while (last < lines) {
-      last = last * 10 + 9;
+  var TestRunWidget = class extends WidgetType {
+    constructor(test, onRun) {
+      super();
+      this.test = test;
+      this.onRun = onRun;
     }
-    return String(last);
+    eq(other) {
+      return this.test.kind === other.test.kind && this.test.label === other.test.label && this.test.line === other.test.line;
+    }
+    toDOM() {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "cm-test-run-widget";
+      button.textContent = this.test.kind === "sdoctest" ? "\u25B6 doctest" : "\u25B6 run";
+      button.title = `Run ${this.test.kind}: ${this.test.label}`;
+      button.addEventListener("click", (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        this.onRun(this.test);
+      });
+      return button;
+    }
+    ignoreEvent() {
+      return true;
+    }
+  };
+  var MATH_BLOCK_REGEX = /\b(?<prefix>m|loss|nograd|img|graph)\{([^}]*(?:\{[^}]*\}[^}]*)*)\}/gs;
+  function detectFullLineMathBlocks(state) {
+    const blocks = [];
+    const text = state.doc.toString();
+    MATH_BLOCK_REGEX.lastIndex = 0;
+    let match;
+    while ((match = MATH_BLOCK_REGEX.exec(text)) !== null) {
+      const line = state.doc.lineAt(match.index);
+      const lineText = state.doc.sliceString(line.from, line.to);
+      const leading = lineText.length - lineText.trimStart().length;
+      const trailing = lineText.length - lineText.trimEnd().length;
+      const from = match.index;
+      const to = match.index + match[0].length;
+      if (match.groups?.prefix === "img") {
+        continue;
+      }
+      if (line.from + leading !== from || line.to - trailing !== to) {
+        continue;
+      }
+      blocks.push({
+        from,
+        to,
+        lineFrom: line.from,
+        lineTo: line.to,
+        content: match[2].trim(),
+        prefix: match.groups?.prefix ?? "m"
+      });
+    }
+    return blocks;
   }
-  function createRichLineNumberGutter() {
-    return gutter({
-      class: "cm-lineNumbers",
-      lineMarker(view, line, otherMarkers) {
-        if (otherMarkers.some((marker) => marker.toDOM)) {
+  var refreshRenderedBlocksEffect = StateEffect.define();
+  function buildFullLineMathDecorations(state, renderedBlocks) {
+    const builder = new RangeSetBuilder();
+    const cursor = state.selection.main.head;
+    for (const block of detectFullLineMathBlocks(state)) {
+      if (cursor >= block.from && cursor <= block.to) {
+        continue;
+      }
+      const key = `${block.prefix}:${block.content}`;
+      const info = renderedBlocks.get(key);
+      if (!info?.renderedHtml) {
+        continue;
+      }
+      builder.add(
+        block.lineFrom,
+        block.lineTo,
+        Decoration.replace({
+          widget: new MathWidget(info.renderedHtml, block.prefix, block.content, "block"),
+          block: true
+        })
+      );
+    }
+    return builder.finish();
+  }
+  function createFullLineMathField(getRenderedBlocks) {
+    return StateField.define({
+      create(state) {
+        return buildFullLineMathDecorations(state, getRenderedBlocks());
+      },
+      update(value, tr) {
+        if (tr.docChanged || tr.selection || tr.effects.some((effect) => effect.is(refreshRenderedBlocksEffect))) {
+          return buildFullLineMathDecorations(tr.state, getRenderedBlocks());
+        }
+        return value;
+      },
+      provide: (field) => EditorView.decorations.from(field)
+    });
+  }
+  function createMathAwareLineNumberSetup() {
+    return [
+      lineNumbers(),
+      lineNumberWidgetMarker.of((view, widget, block) => {
+        if (!(widget instanceof MathWidget) || widget.displayMode !== "block") {
           return null;
         }
-        return new RichLineNumberWidgetMarker(
-          String(view.state.doc.lineAt(line.from).number),
-          line.height
-        );
-      },
-      initialSpacer(view) {
-        return new RichLineNumberWidgetMarker(maxLineNumber(view.state.doc.lines), 0);
-      },
-      updateSpacer(spacer, update) {
-        const max = maxLineNumber(update.view.state.doc.lines);
-        return max === spacer.lineNumber ? spacer : new RichLineNumberWidgetMarker(max, 0);
+        const lineNumber = String(view.state.doc.lineAt(block.from).number);
+        return new RichLineNumberWidgetMarker(lineNumber, block.height);
+      })
+    ];
+  }
+  function buildTestRunDecorations(state, tests, onRunTest) {
+    const builder = new RangeSetBuilder();
+    for (const test of tests) {
+      const lineNumber = test.line + 1;
+      if (lineNumber < 1 || lineNumber > state.doc.lines) {
+        continue;
       }
+      const line = state.doc.line(lineNumber);
+      builder.add(
+        line.from,
+        line.from,
+        Decoration.widget({
+          widget: new TestRunWidget(test, onRunTest),
+          side: -1
+        })
+      );
+    }
+    return builder.finish();
+  }
+  function createTestRunField(getTests, onRunTest) {
+    return StateField.define({
+      create(state) {
+        return buildTestRunDecorations(state, getTests(), onRunTest);
+      },
+      update(value, tr) {
+        if (tr.docChanged || tr.effects.some((effect) => effect.is(refreshRenderedBlocksEffect))) {
+          return buildTestRunDecorations(tr.state, getTests(), onRunTest);
+        }
+        return value;
+      },
+      provide: (field) => EditorView.decorations.from(field)
     });
+  }
+  function isIdentifierChar(char) {
+    return !!char && /[A-Za-z0-9_]/.test(char);
+  }
+  function readIdentifierAt(state, pos) {
+    const line = state.doc.lineAt(pos);
+    const localPos = pos - line.from;
+    const text = line.text;
+    let start = localPos;
+    if (!isIdentifierChar(text[start]) && isIdentifierChar(text[start - 1])) {
+      start -= 1;
+    }
+    if (!isIdentifierChar(text[start])) {
+      return null;
+    }
+    let end = start;
+    while (start > 0 && isIdentifierChar(text[start - 1])) {
+      start -= 1;
+    }
+    while (end < text.length && isIdentifierChar(text[end])) {
+      end += 1;
+    }
+    return {
+      word: text.slice(start, end),
+      from: line.from + start,
+      to: line.from + end
+    };
+  }
+  function attachHoverOverlay(view, parent, getSymbols) {
+    const tooltip = document.createElement("div");
+    tooltip.className = "simple-rich-hover-tooltip";
+    tooltip.hidden = true;
+    parent.appendChild(tooltip);
+    const hide = () => {
+      tooltip.hidden = true;
+    };
+    const onMouseMove = (event) => {
+      const pos = view.posAtCoords({ x: event.clientX, y: event.clientY });
+      if (pos === null) {
+        hide();
+        return;
+      }
+      const ident = readIdentifierAt(view.state, pos);
+      if (!ident) {
+        hide();
+        return;
+      }
+      const symbol = getSymbols().find((candidate) => candidate.name === ident.word);
+      if (!symbol) {
+        hide();
+        return;
+      }
+      tooltip.innerHTML = `
+            <strong>${symbol.name}</strong>
+            <div>${symbol.detail} \xB7 ${symbol.kind}</div>
+            <div>line ${symbol.line + 1}</div>
+        `;
+      const parentRect = parent.getBoundingClientRect();
+      tooltip.style.left = `${event.clientX - parentRect.left + 12}px`;
+      tooltip.style.top = `${event.clientY - parentRect.top + 16}px`;
+      tooltip.hidden = false;
+    };
+    view.dom.addEventListener("mousemove", onMouseMove);
+    view.dom.addEventListener("mouseleave", hide);
+    view.dom.addEventListener("mousedown", hide);
+    return () => {
+      view.dom.removeEventListener("mousemove", onMouseMove);
+      view.dom.removeEventListener("mouseleave", hide);
+      view.dom.removeEventListener("mousedown", hide);
+      tooltip.remove();
+    };
   }
   var vsCodeTheme = EditorView.theme({
     "&": {
@@ -21890,6 +22144,10 @@ var RichEditorWebview = (() => {
     ".cm-content": {
       caretColor: "var(--vscode-editorCursor-foreground)",
       lineHeight: "1.5"
+    },
+    ".cm-line": {
+      paddingTop: "0",
+      paddingBottom: "0"
     },
     ".cm-cursor, .cm-dropCursor": {
       borderLeftColor: "var(--vscode-editorCursor-foreground)"
@@ -21934,13 +22192,25 @@ var RichEditorWebview = (() => {
       display: "inline-flex",
       alignItems: "center",
       gap: "4px",
-      padding: "4px 8px",
-      margin: "2px 0",
+      padding: "1px 8px",
+      margin: "0",
       borderRadius: "4px",
       backgroundColor: "transparent",
       border: "1px solid var(--simple-rich-block-border)",
       verticalAlign: "middle",
       cursor: "pointer"
+    },
+    ".cm-math-widget-block": {
+      display: "flex",
+      width: "fit-content",
+      maxWidth: "100%",
+      margin: "0",
+      paddingTop: "0",
+      paddingBottom: "0",
+      minHeight: "0"
+    },
+    ".cm-math-widget-block .katex-display": {
+      margin: "0"
     },
     ".cm-math-rendered": {
       display: "inline-block",
@@ -21997,6 +22267,35 @@ var RichEditorWebview = (() => {
       color: "var(--vscode-descriptionForeground)",
       fontStyle: "italic",
       fontSize: "0.9em"
+    },
+    ".cm-test-run-widget": {
+      marginRight: "8px",
+      padding: "1px 6px",
+      borderRadius: "999px",
+      border: "1px solid color-mix(in srgb, var(--vscode-button-background) 65%, transparent)",
+      backgroundColor: "color-mix(in srgb, var(--vscode-button-background) 18%, transparent)",
+      color: "var(--vscode-button-foreground)",
+      fontSize: "0.75em",
+      fontWeight: "600",
+      cursor: "pointer"
+    },
+    ".cm-test-run-widget:hover": {
+      backgroundColor: "var(--vscode-button-hoverBackground)"
+    },
+    ".simple-rich-hover-tooltip": {
+      position: "absolute",
+      zIndex: "20",
+      minWidth: "140px",
+      maxWidth: "240px",
+      padding: "8px 10px",
+      borderRadius: "6px",
+      border: "1px solid color-mix(in srgb, var(--vscode-editorHoverWidget-border) 70%, transparent)",
+      backgroundColor: "var(--vscode-editorHoverWidget-background)",
+      color: "var(--vscode-editorHoverWidget-foreground)",
+      boxShadow: "0 6px 20px color-mix(in srgb, black 25%, transparent)",
+      pointerEvents: "none",
+      fontSize: "12px",
+      lineHeight: "1.4"
     }
   }, { dark: true });
   var simpleHighlightStyle = HighlightStyle.define([
@@ -22010,10 +22309,12 @@ var RichEditorWebview = (() => {
     { tag: tags.bracket, color: "var(--vscode-editorBracketHighlight-foreground1, #ffd700)" },
     { tag: tags.atom, color: "var(--vscode-symbolIcon-constantForeground, #569cd6)", fontStyle: "italic" }
   ]);
-  function createEditor(parent, initialText, renderedBlocksRef, onEdit, onSelectionChange) {
+  function createEditor(parent, initialText, renderedBlocksRef, symbolsRef, testsRef, onEdit, onSelectionChange, onRunTest) {
     let isApplyingSync = false;
     let editTimer = null;
     const decorationPlugin = createDecorationPlugin(() => renderedBlocksRef.current);
+    const fullLineMathField = ENABLE_FULL_LINE_BLOCK_MATH ? createFullLineMathField(() => renderedBlocksRef.current) : null;
+    const testRunField = ENABLE_TEST_LINE_WIDGETS ? createTestRunField(() => testsRef.current, onRunTest) : null;
     const editListener = EditorView.updateListener.of((update) => {
       if (isApplyingSync) return;
       if (update.docChanged) {
@@ -22028,7 +22329,9 @@ var RichEditorWebview = (() => {
       }
     });
     const extensions = [
-      createRichLineNumberGutter(),
+      ...createMathAwareLineNumberSetup(),
+      ...fullLineMathField ? [fullLineMathField] : [],
+      ...testRunField ? [testRunField] : [],
       highlightActiveLineGutter(),
       highlightSpecialChars(),
       history(),
@@ -22054,17 +22357,27 @@ var RichEditorWebview = (() => {
       decorationPlugin,
       editListener
     ];
+    const state = EditorState.create({
+      doc: initialText,
+      extensions
+    });
     const view = new EditorView({
-      state: EditorState.create({
-        doc: initialText,
-        extensions
-      }),
+      state,
       parent
     });
+    if (ENABLE_SYMBOL_HOVER) {
+      try {
+        attachHoverOverlay(view, parent, () => symbolsRef.current);
+      } catch (error) {
+        console.error("Simple Rich Editor: hover overlay disabled after initialization failure", error);
+      }
+    }
     return {
       view,
       refreshDecorations() {
-        view.dispatch({});
+        view.dispatch({
+          effects: [refreshRenderedBlocksEffect.of()]
+        });
       },
       setDoc(text, selStart, selEnd) {
         if (view.state.doc.toString() === text && selStart === void 0) return;
@@ -22089,17 +22402,29 @@ var RichEditorWebview = (() => {
     const renderedBlocksRef = {
       current: /* @__PURE__ */ new Map()
     };
+    const symbolsRef = { current: [] };
+    const testsRef = { current: [] };
     let editor = null;
     function initEditor(text, selStart, selEnd) {
       editor = createEditor(
         editorContainer,
         text,
         renderedBlocksRef,
+        symbolsRef,
+        testsRef,
         (source, sStart, sEnd) => {
           vscode.postMessage({ type: "editAll", source, selectionStart: sStart, selectionEnd: sEnd });
         },
         (sStart, sEnd) => {
           vscode.postMessage({ type: "selectionChanged", selectionStart: sStart, selectionEnd: sEnd });
+        },
+        (test) => {
+          vscode.postMessage({
+            type: "runTestFromLine",
+            line: test.line,
+            kind: test.kind,
+            label: test.label
+          });
         }
       );
       if (selStart > 0 || selEnd > 0) {
@@ -22111,6 +22436,8 @@ var RichEditorWebview = (() => {
       if (msg.type === "sync") {
         applyEditorSettings(msg.settings);
         renderedBlocksRef.current.clear();
+        symbolsRef.current = msg.symbols ?? [];
+        testsRef.current = msg.tests ?? [];
         if (msg.blocks) {
           for (const block of msg.blocks) {
             const key = `${block.prefix}:${block.content}`;
@@ -22127,6 +22454,7 @@ var RichEditorWebview = (() => {
     });
     vscode.postMessage({ type: "ready" });
   }
+  globalThis.RichEditorWebview = { boot };
   return __toCommonJS(richEditorWebview_exports);
 })();
 //# sourceMappingURL=richEditor.js.map

@@ -33,6 +33,14 @@ export interface RenderableBlockInfo {
 
 const BLOCK_REGEX = /\b(?<prefix>m|loss|nograd|img|graph)\{([^}]*(?:\{[^}]*\}[^}]*)*)\}/gs;
 
+function isWholeTrimmedLine(view: EditorView, from: number, to: number): boolean {
+    const line = view.state.doc.lineAt(from);
+    const text = view.state.doc.sliceString(line.from, line.to);
+    const leading = text.length - text.trimStart().length;
+    const trailing = text.length - text.trimEnd().length;
+    return line.from + leading === from && line.to - trailing === to;
+}
+
 function detectBlockRanges(text: string): Array<{ from: number; to: number; content: string; prefix: string }> {
     const blocks: Array<{ from: number; to: number; content: string; prefix: string }> = [];
     BLOCK_REGEX.lastIndex = 0;
@@ -67,6 +75,10 @@ function buildDecorations(
 
         const key = `${block.prefix}:${block.content}`;
         const info = renderedBlocks.get(key);
+
+        if (block.prefix !== 'img' && info?.renderedHtml && isWholeTrimmedLine(view, block.from, block.to)) {
+            continue;
+        }
 
         if (info && info.kind === 'img') {
             if (info.status === 'ok' && info.imageUri) {

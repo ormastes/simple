@@ -15,6 +15,8 @@ import katex from 'katex';
 import { detectBlocks, type BlockKind, type DetectedBlock } from './blockDetector';
 import { parseImageContent, resolveImageUri } from './imageResolver';
 import { simpleToLatex } from './mathConverter';
+import { indexDocumentSymbols } from './symbols/simpleSymbolProviders';
+import { detectTestBlocks } from './testing/testDiscovery';
 
 // ── Types ────────────────────────────────────────────────────────────
 
@@ -36,11 +38,29 @@ interface RichEditorSettings {
     centerLineNumbers: boolean;
 }
 
+interface RichEditorSymbol {
+    name: string;
+    kind: string;
+    detail: string;
+    line: number;
+    from: number;
+    to: number;
+}
+
+interface RichEditorTestBlock {
+    kind: string;
+    label: string;
+    line: number;
+    from: number;
+    to: number;
+}
+
 type WebviewMessage =
     | { type: 'ready' }
     | { type: 'editAll'; source: string; selectionStart: number; selectionEnd: number }
     | { type: 'selectionChanged'; selectionStart: number; selectionEnd: number }
-    | { type: 'requestSync' };
+    | { type: 'requestSync' }
+    | { type: 'runTestFromLine'; line: number; kind: string; label: string };
 
 type HostMessage =
     | {
@@ -50,6 +70,8 @@ type HostMessage =
         selectionEnd: number;
         blocks: RenderableBlock[];
         settings: RichEditorSettings;
+        symbols: RichEditorSymbol[];
+        tests: RichEditorTestBlock[];
     }
     | { type: 'error'; message: string };
 
@@ -130,7 +152,7 @@ function getRichEditorSettings(): RichEditorSettings {
 
 function buildRichEditorHtml(
     katexCssUri: string,
-    richEditorJsUri: string,
+    richEditorBundleSource: string,
     cspSource: string,
     nonce: string,
 ): string {
@@ -144,7 +166,7 @@ function buildRichEditorHtml(
                    style-src ${cspSource} 'unsafe-inline';
                    font-src ${cspSource};
                    img-src ${cspSource} data: https:;
-                   script-src 'nonce-${nonce}';">
+                   script-src ${cspSource} 'nonce-${nonce}';">
     <title>Simple Rich Editor</title>
     <link rel="stylesheet" href="${katexCssUri}">
     <style nonce="${nonce}">
@@ -161,6 +183,7 @@ function buildRichEditorHtml(
             height: 100%;
             width: 100%;
             overflow: auto;
+            position: relative;
         }
         .boot-error {
             margin: 24px;
@@ -184,7 +207,15 @@ function buildRichEditorHtml(
 </head>
 <body>
     <div id="editor-container"></div>
-    <script nonce="${nonce}" src="${richEditorJsUri}"></script>
+    <script nonce="${nonce}">
+window.__simpleRichEditorBundleStage = 'inline-script-start';
+window.addEventListener('error', (event) => {
+    const detail = event?.error?.message || event?.message || 'unknown script error';
+    window.__simpleRichEditorLastError = String(detail);
+});
+${richEditorBundleSource}
+window.__simpleRichEditorBundleStage = 'bundle-finished';
+    </script>
     <script nonce="${nonce}">
         (() => {
             const container = document.getElementById('editor-container');
@@ -197,11 +228,15 @@ function buildRichEditorHtml(
                 console.error('Simple Rich Editor boot failed', error);
                 if (container) {
                     const message = error instanceof Error ? error.message : String(error);
+                    const bundleStage = String(globalThis.__simpleRichEditorBundleStage ?? 'missing');
+                    const lastError = String(globalThis.__simpleRichEditorLastError ?? 'none');
                     container.innerHTML =
                         '<div class="boot-error">' +
                         '<strong>Simple Rich Editor failed to start.</strong>' +
                         '<div>Check that the webview bundle exists and compiled successfully.</div>' +
                         '<div><code>' + message.replace(/</g, '&lt;') + '</code></div>' +
+                        '<div><code>bundle stage: ' + bundleStage.replace(/</g, '&lt;') + '</code></div>' +
+                        '<div><code>last error: ' + lastError.replace(/</g, '&lt;') + '</code></div>' +
                         '</div>';
                 }
             }
@@ -221,18 +256,43 @@ function fullDocumentRange(document: vscode.TextDocument): vscode.Range {
     return new vscode.Range(new vscode.Position(0, 0), end);
 }
 
+function buildRichEditorSymbols(document: vscode.TextDocument): RichEditorSymbol[] {
+    return indexDocumentSymbols(document).map((symbol) => ({
+        name: symbol.name,
+        kind: vscode.SymbolKind[symbol.kind],
+        detail: symbol.detail,
+        line: symbol.selectionRange.start.line,
+        from: document.offsetAt(symbol.selectionRange.start),
+        to: document.offsetAt(symbol.selectionRange.end),
+    }));
+}
+
+function buildRichEditorTests(document: vscode.TextDocument): RichEditorTestBlock[] {
+    return detectTestBlocks(document).map((block) => ({
+        kind: block.kind,
+        label: block.label,
+        line: block.line,
+        from: document.offsetAt(new vscode.Position(block.line, 0)),
+        to: document.offsetAt(new vscode.Position(block.line, document.lineAt(block.line).text.length)),
+    }));
+}
+
 // ── Provider ─────────────────────────────────────────────────────────
 
 export class RichCustomEditorProvider implements vscode.CustomTextEditorProvider {
     public static readonly viewType = 'simple.richSourceEditor';
 
-    public constructor(private readonly extensionUri: vscode.Uri) {}
+    public constructor(
+        private readonly extensionUri: vscode.Uri,
+        private readonly onActiveDocument?: (document: vscode.TextDocument) => void,
+    ) {}
 
     public async resolveCustomTextEditor(
         document: vscode.TextDocument,
         webviewPanel: vscode.WebviewPanel,
         _token: vscode.CancellationToken,
     ): Promise<void> {
+        this.onActiveDocument?.(document);
         const katexDistUri = vscode.Uri.joinPath(this.extensionUri, 'node_modules', 'katex', 'dist');
         const webviewOutUri = vscode.Uri.joinPath(this.extensionUri, 'out', 'webview');
         const richEditorBundleUri = vscode.Uri.joinPath(webviewOutUri, 'richEditor.js');
@@ -263,10 +323,9 @@ export class RichCustomEditorProvider implements vscode.CustomTextEditorProvider
         const katexCssUri = webviewPanel.webview.asWebviewUri(
             vscode.Uri.joinPath(katexDistUri, 'katex.min.css'),
         ).toString();
-        const richEditorJsUri = webviewPanel.webview.asWebviewUri(
-            richEditorBundleUri,
-        ).toString();
         const nonce = crypto.randomBytes(16).toString('base64url');
+        const richEditorBundleSource = fs.readFileSync(richEditorBundleUri.fsPath, 'utf8')
+            .replace(/<\/script>/gi, '<\\\\/script>');
 
         let selectionStart = 0;
         let selectionEnd = 0;
@@ -283,12 +342,14 @@ export class RichCustomEditorProvider implements vscode.CustomTextEditorProvider
                 selectionEnd,
                 blocks,
                 settings: getRichEditorSettings(),
+                symbols: buildRichEditorSymbols(document),
+                tests: buildRichEditorTests(document),
             } satisfies HostMessage);
         };
 
         webviewPanel.webview.html = buildRichEditorHtml(
             katexCssUri,
-            richEditorJsUri,
+            richEditorBundleSource,
             webviewPanel.webview.cspSource,
             nonce,
         );
@@ -321,7 +382,10 @@ export class RichCustomEditorProvider implements vscode.CustomTextEditorProvider
                 return;
             }
 
-            // editAll
+            if (message.type !== 'editAll') {
+                return;
+            }
+
             selectionStart = message.selectionStart;
             selectionEnd = message.selectionEnd;
 
@@ -343,12 +407,23 @@ export class RichCustomEditorProvider implements vscode.CustomTextEditorProvider
             } finally {
                 isApplyingEdit = false;
             }
+            return;
+        });
+
+        const runTestSubscription = webviewPanel.webview.onDidReceiveMessage(async (message: WebviewMessage) => {
+            if (message.type !== 'runTestFromLine') {
+                return;
+            }
+
+            const command = message.kind === 'sdoctest' ? 'simple.test.runSdoctest' : 'simple.test.runFile';
+            await vscode.commands.executeCommand(command, document.uri);
         });
 
         webviewPanel.onDidDispose(() => {
             changeDocumentSubscription.dispose();
             configurationSubscription.dispose();
             messageSubscription.dispose();
+            runTestSubscription.dispose();
         });
     }
 }

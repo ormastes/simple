@@ -12,9 +12,9 @@
 import {
     EditorView, keymap, drawSelection, highlightActiveLine,
     highlightSpecialChars, highlightActiveLineGutter,
-    gutter, GutterMarker, type BlockInfo, type Extension,
+    Decoration, GutterMarker, WidgetType, lineNumbers, lineNumberWidgetMarker, type BlockInfo, type DecorationSet, type Extension,
 } from '@codemirror/view';
-import { EditorState } from '@codemirror/state';
+import { EditorState, RangeSetBuilder, StateEffect, StateField } from '@codemirror/state';
 import { defaultKeymap, history, historyKeymap, indentWithTab } from '@codemirror/commands';
 import { bracketMatching, indentOnInput, syntaxHighlighting, defaultHighlightStyle, HighlightStyle } from '@codemirror/language';
 import { searchKeymap, highlightSelectionMatches } from '@codemirror/search';
@@ -22,6 +22,7 @@ import { autocompletion, closeBrackets, closeBracketsKeymap } from '@codemirror/
 import { tags } from '@lezer/highlight';
 import { simpleLanguage } from './simpleLang';
 import { createDecorationPlugin, type RenderableBlockInfo } from './decorationPlugin';
+import { MathWidget } from './widgets/mathWidget';
 
 // ── VS Code API ──────────────────────────────────────────────────────
 
@@ -54,9 +55,28 @@ interface SyncMessage {
         status: 'ok' | 'error';
         errorMessage?: string;
     }>;
+    symbols: Array<{
+        name: string;
+        kind: string;
+        detail: string;
+        line: number;
+        from: number;
+        to: number;
+    }>;
+    tests: Array<{
+        kind: string;
+        label: string;
+        line: number;
+        from: number;
+        to: number;
+    }>;
 }
 
 type HostMessage = SyncMessage | { type: 'error'; message: string };
+
+const ENABLE_TEST_LINE_WIDGETS = false;
+const ENABLE_SYMBOL_HOVER = false;
+const ENABLE_FULL_LINE_BLOCK_MATH = true;
 
 function applyEditorSettings(settings?: SyncMessage['settings']): void {
     const root = document.documentElement;
@@ -102,34 +122,298 @@ class RichLineNumberWidgetMarker extends GutterMarker {
     }
 }
 
-function maxLineNumber(lines: number): string {
-    let last = 9;
-    while (last < lines) {
-        last = last * 10 + 9;
-    }
-    return String(last);
+interface RichEditorSymbol {
+    name: string;
+    kind: string;
+    detail: string;
+    line: number;
+    from: number;
+    to: number;
 }
 
-function createRichLineNumberGutter(): Extension {
-    return gutter({
-        class: 'cm-lineNumbers',
-        lineMarker(view, line: BlockInfo, otherMarkers) {
-            if (otherMarkers.some((marker) => marker.toDOM)) {
+interface RichEditorTestBlock {
+    kind: string;
+    label: string;
+    line: number;
+    from: number;
+    to: number;
+}
+
+class TestRunWidget extends WidgetType {
+    constructor(
+        readonly test: RichEditorTestBlock,
+        readonly onRun: (test: RichEditorTestBlock) => void,
+    ) {
+        super();
+    }
+
+    eq(other: TestRunWidget): boolean {
+        return this.test.kind === other.test.kind
+            && this.test.label === other.test.label
+            && this.test.line === other.test.line;
+    }
+
+    toDOM(): HTMLElement {
+        const button = document.createElement('button');
+        button.type = 'button';
+        button.className = 'cm-test-run-widget';
+        button.textContent = this.test.kind === 'sdoctest' ? '▶ doctest' : '▶ run';
+        button.title = `Run ${this.test.kind}: ${this.test.label}`;
+        button.addEventListener('click', (event) => {
+            event.preventDefault();
+            event.stopPropagation();
+            this.onRun(this.test);
+        });
+        return button;
+    }
+
+    ignoreEvent(): boolean {
+        return true;
+    }
+}
+
+const MATH_BLOCK_REGEX = /\b(?<prefix>m|loss|nograd|img|graph)\{([^}]*(?:\{[^}]*\}[^}]*)*)\}/gs;
+
+interface FullLineMathBlock {
+    from: number;
+    to: number;
+    lineFrom: number;
+    lineTo: number;
+    content: string;
+    prefix: string;
+}
+
+function detectFullLineMathBlocks(state: EditorState): FullLineMathBlock[] {
+    const blocks: FullLineMathBlock[] = [];
+    const text = state.doc.toString();
+    MATH_BLOCK_REGEX.lastIndex = 0;
+
+    let match: RegExpExecArray | null;
+    while ((match = MATH_BLOCK_REGEX.exec(text)) !== null) {
+        const line = state.doc.lineAt(match.index);
+        const lineText = state.doc.sliceString(line.from, line.to);
+        const leading = lineText.length - lineText.trimStart().length;
+        const trailing = lineText.length - lineText.trimEnd().length;
+        const from = match.index;
+        const to = match.index + match[0].length;
+        if (match.groups?.prefix === 'img') {
+            continue;
+        }
+        if (line.from + leading !== from || line.to - trailing !== to) {
+            continue;
+        }
+        blocks.push({
+            from,
+            to,
+            lineFrom: line.from,
+            lineTo: line.to,
+            content: match[2].trim(),
+            prefix: match.groups?.prefix ?? 'm',
+        });
+    }
+
+    return blocks;
+}
+
+const refreshRenderedBlocksEffect = StateEffect.define<void>();
+
+function buildFullLineMathDecorations(
+    state: EditorState,
+    renderedBlocks: Map<string, RenderableBlockInfo>,
+): DecorationSet {
+    const builder = new RangeSetBuilder<Decoration>();
+    const cursor = state.selection.main.head;
+
+    for (const block of detectFullLineMathBlocks(state)) {
+        if (cursor >= block.from && cursor <= block.to) {
+            continue;
+        }
+
+        const key = `${block.prefix}:${block.content}`;
+        const info = renderedBlocks.get(key);
+        if (!info?.renderedHtml) {
+            continue;
+        }
+
+        builder.add(
+            block.lineFrom,
+            block.lineTo,
+            Decoration.replace({
+                widget: new MathWidget(info.renderedHtml, block.prefix, block.content, 'block'),
+                block: true,
+            }),
+        );
+    }
+
+    return builder.finish();
+}
+
+function createFullLineMathField(
+    getRenderedBlocks: () => Map<string, RenderableBlockInfo>,
+): StateField<DecorationSet> {
+    return StateField.define<DecorationSet>({
+        create(state) {
+            return buildFullLineMathDecorations(state, getRenderedBlocks());
+        },
+        update(value, tr) {
+            if (
+                tr.docChanged
+                || tr.selection
+                || tr.effects.some((effect) => effect.is(refreshRenderedBlocksEffect))
+            ) {
+                return buildFullLineMathDecorations(tr.state, getRenderedBlocks());
+            }
+            return value;
+        },
+        provide: (field) => EditorView.decorations.from(field),
+    });
+}
+
+function createMathAwareLineNumberSetup(): Extension[] {
+    return [
+        lineNumbers(),
+        lineNumberWidgetMarker.of((view: EditorView, widget: WidgetType, block: BlockInfo) => {
+            if (!(widget instanceof MathWidget) || widget.displayMode !== 'block') {
                 return null;
             }
-            return new RichLineNumberWidgetMarker(
-                String(view.state.doc.lineAt(line.from).number),
-                line.height,
-            );
+            const lineNumber = String(view.state.doc.lineAt(block.from).number);
+            return new RichLineNumberWidgetMarker(lineNumber, block.height);
+        }),
+    ];
+}
+
+function buildTestRunDecorations(
+    state: EditorState,
+    tests: RichEditorTestBlock[],
+    onRunTest: (test: RichEditorTestBlock) => void,
+): DecorationSet {
+    const builder = new RangeSetBuilder<Decoration>();
+    for (const test of tests) {
+        const lineNumber = test.line + 1;
+        if (lineNumber < 1 || lineNumber > state.doc.lines) {
+            continue;
+        }
+        const line = state.doc.line(lineNumber);
+        builder.add(
+            line.from,
+            line.from,
+            Decoration.widget({
+                widget: new TestRunWidget(test, onRunTest),
+                side: -1,
+            }),
+        );
+    }
+    return builder.finish();
+}
+
+function createTestRunField(
+    getTests: () => RichEditorTestBlock[],
+    onRunTest: (test: RichEditorTestBlock) => void,
+): StateField<DecorationSet> {
+    return StateField.define<DecorationSet>({
+        create(state) {
+            return buildTestRunDecorations(state, getTests(), onRunTest);
         },
-        initialSpacer(view) {
-            return new RichLineNumberWidgetMarker(maxLineNumber(view.state.doc.lines), 0);
+        update(value, tr) {
+            if (
+                tr.docChanged
+                || tr.effects.some((effect) => effect.is(refreshRenderedBlocksEffect))
+            ) {
+                return buildTestRunDecorations(tr.state, getTests(), onRunTest);
+            }
+            return value;
         },
-        updateSpacer(spacer, update) {
-            const max = maxLineNumber(update.view.state.doc.lines);
-            return max === spacer.lineNumber ? spacer : new RichLineNumberWidgetMarker(max, 0);
-        },
+        provide: (field) => EditorView.decorations.from(field),
     });
+}
+
+function isIdentifierChar(char: string | undefined): boolean {
+    return !!char && /[A-Za-z0-9_]/.test(char);
+}
+
+function readIdentifierAt(state: EditorState, pos: number): { word: string; from: number; to: number } | null {
+    const line = state.doc.lineAt(pos);
+    const localPos = pos - line.from;
+    const text = line.text;
+
+    let start = localPos;
+    if (!isIdentifierChar(text[start]) && isIdentifierChar(text[start - 1])) {
+        start -= 1;
+    }
+    if (!isIdentifierChar(text[start])) {
+        return null;
+    }
+
+    let end = start;
+    while (start > 0 && isIdentifierChar(text[start - 1])) {
+        start -= 1;
+    }
+    while (end < text.length && isIdentifierChar(text[end])) {
+        end += 1;
+    }
+
+    return {
+        word: text.slice(start, end),
+        from: line.from + start,
+        to: line.from + end,
+    };
+}
+
+function attachHoverOverlay(
+    view: EditorView,
+    parent: HTMLElement,
+    getSymbols: () => RichEditorSymbol[],
+): () => void {
+    const tooltip = document.createElement('div');
+    tooltip.className = 'simple-rich-hover-tooltip';
+    tooltip.hidden = true;
+    parent.appendChild(tooltip);
+
+    const hide = () => {
+        tooltip.hidden = true;
+    };
+
+    const onMouseMove = (event: MouseEvent) => {
+        const pos = view.posAtCoords({ x: event.clientX, y: event.clientY });
+        if (pos === null) {
+            hide();
+            return;
+        }
+
+        const ident = readIdentifierAt(view.state, pos);
+        if (!ident) {
+            hide();
+            return;
+        }
+
+        const symbol = getSymbols().find((candidate) => candidate.name === ident.word);
+        if (!symbol) {
+            hide();
+            return;
+        }
+
+        tooltip.innerHTML = `
+            <strong>${symbol.name}</strong>
+            <div>${symbol.detail} · ${symbol.kind}</div>
+            <div>line ${symbol.line + 1}</div>
+        `;
+
+        const parentRect = parent.getBoundingClientRect();
+        tooltip.style.left = `${event.clientX - parentRect.left + 12}px`;
+        tooltip.style.top = `${event.clientY - parentRect.top + 16}px`;
+        tooltip.hidden = false;
+    };
+
+    view.dom.addEventListener('mousemove', onMouseMove);
+    view.dom.addEventListener('mouseleave', hide);
+    view.dom.addEventListener('mousedown', hide);
+
+    return () => {
+        view.dom.removeEventListener('mousemove', onMouseMove);
+        view.dom.removeEventListener('mouseleave', hide);
+        view.dom.removeEventListener('mousedown', hide);
+        tooltip.remove();
+    };
 }
 
 // ── VS Code theme for CodeMirror ─────────────────────────────────────
@@ -145,6 +429,10 @@ const vsCodeTheme = EditorView.theme({
     '.cm-content': {
         caretColor: 'var(--vscode-editorCursor-foreground)',
         lineHeight: '1.5',
+    },
+    '.cm-line': {
+        paddingTop: '0',
+        paddingBottom: '0',
     },
     '.cm-cursor, .cm-dropCursor': {
         borderLeftColor: 'var(--vscode-editorCursor-foreground)',
@@ -189,13 +477,25 @@ const vsCodeTheme = EditorView.theme({
         display: 'inline-flex',
         alignItems: 'center',
         gap: '4px',
-        padding: '4px 8px',
-        margin: '2px 0',
+        padding: '1px 8px',
+        margin: '0',
         borderRadius: '4px',
         backgroundColor: 'transparent',
         border: '1px solid var(--simple-rich-block-border)',
         verticalAlign: 'middle',
         cursor: 'pointer',
+    },
+    '.cm-math-widget-block': {
+        display: 'flex',
+        width: 'fit-content',
+        maxWidth: '100%',
+        margin: '0',
+        paddingTop: '0',
+        paddingBottom: '0',
+        minHeight: '0',
+    },
+    '.cm-math-widget-block .katex-display': {
+        margin: '0',
     },
     '.cm-math-rendered': {
         display: 'inline-block',
@@ -253,6 +553,35 @@ const vsCodeTheme = EditorView.theme({
         fontStyle: 'italic',
         fontSize: '0.9em',
     },
+    '.cm-test-run-widget': {
+        marginRight: '8px',
+        padding: '1px 6px',
+        borderRadius: '999px',
+        border: '1px solid color-mix(in srgb, var(--vscode-button-background) 65%, transparent)',
+        backgroundColor: 'color-mix(in srgb, var(--vscode-button-background) 18%, transparent)',
+        color: 'var(--vscode-button-foreground)',
+        fontSize: '0.75em',
+        fontWeight: '600',
+        cursor: 'pointer',
+    },
+    '.cm-test-run-widget:hover': {
+        backgroundColor: 'var(--vscode-button-hoverBackground)',
+    },
+    '.simple-rich-hover-tooltip': {
+        position: 'absolute',
+        zIndex: '20',
+        minWidth: '140px',
+        maxWidth: '240px',
+        padding: '8px 10px',
+        borderRadius: '6px',
+        border: '1px solid color-mix(in srgb, var(--vscode-editorHoverWidget-border) 70%, transparent)',
+        backgroundColor: 'var(--vscode-editorHoverWidget-background)',
+        color: 'var(--vscode-editorHoverWidget-foreground)',
+        boxShadow: '0 6px 20px color-mix(in srgb, black 25%, transparent)',
+        pointerEvents: 'none',
+        fontSize: '12px',
+        lineHeight: '1.4',
+    },
 }, { dark: true });
 
 const simpleHighlightStyle = HighlightStyle.define([
@@ -273,8 +602,11 @@ function createEditor(
     parent: HTMLElement,
     initialText: string,
     renderedBlocksRef: { current: Map<string, RenderableBlockInfo> },
+    symbolsRef: { current: RichEditorSymbol[] },
+    testsRef: { current: RichEditorTestBlock[] },
     onEdit: (text: string, selStart: number, selEnd: number) => void,
     onSelectionChange: (selStart: number, selEnd: number) => void,
+    onRunTest: (test: RichEditorTestBlock) => void,
 ): {
     view: EditorView;
     refreshDecorations: () => void;
@@ -284,6 +616,12 @@ function createEditor(
     let editTimer: ReturnType<typeof setTimeout> | null = null;
 
     const decorationPlugin = createDecorationPlugin(() => renderedBlocksRef.current);
+    const fullLineMathField = ENABLE_FULL_LINE_BLOCK_MATH
+        ? createFullLineMathField(() => renderedBlocksRef.current)
+        : null;
+    const testRunField = ENABLE_TEST_LINE_WIDGETS
+        ? createTestRunField(() => testsRef.current, onRunTest)
+        : null;
 
     const editListener = EditorView.updateListener.of((update) => {
         if (isApplyingSync) return;
@@ -301,7 +639,9 @@ function createEditor(
     });
 
     const extensions: Extension[] = [
-        createRichLineNumberGutter(),
+        ...createMathAwareLineNumberSetup(),
+        ...(fullLineMathField ? [fullLineMathField] : []),
+        ...(testRunField ? [testRunField] : []),
         highlightActiveLineGutter(),
         highlightSpecialChars(),
         history(),
@@ -328,20 +668,29 @@ function createEditor(
         editListener,
     ];
 
+    const state = EditorState.create({
+        doc: initialText,
+        extensions,
+    });
     const view = new EditorView({
-        state: EditorState.create({
-            doc: initialText,
-            extensions,
-        }),
+        state,
         parent,
     });
+    if (ENABLE_SYMBOL_HOVER) {
+        try {
+            attachHoverOverlay(view, parent, () => symbolsRef.current);
+        } catch (error) {
+            console.error('Simple Rich Editor: hover overlay disabled after initialization failure', error);
+        }
+    }
 
     return {
         view,
 
         refreshDecorations() {
-            // Force decoration rebuild by dispatching empty transaction
-            view.dispatch({});
+            view.dispatch({
+                effects: [refreshRenderedBlocksEffect.of()],
+            });
         },
 
         setDoc(text: string, selStart?: number, selEnd?: number) {
@@ -378,6 +727,8 @@ export function boot(vsCodeApi?: { postMessage(msg: unknown): void }): void {
     const renderedBlocksRef: { current: Map<string, RenderableBlockInfo> } = {
         current: new Map(),
     };
+    const symbolsRef: { current: RichEditorSymbol[] } = { current: [] };
+    const testsRef: { current: RichEditorTestBlock[] } = { current: [] };
 
     let editor: ReturnType<typeof createEditor> | null = null;
 
@@ -386,11 +737,21 @@ export function boot(vsCodeApi?: { postMessage(msg: unknown): void }): void {
             editorContainer!,
             text,
             renderedBlocksRef,
+            symbolsRef,
+            testsRef,
             (source, sStart, sEnd) => {
                 vscode.postMessage({ type: 'editAll', source, selectionStart: sStart, selectionEnd: sEnd });
             },
             (sStart, sEnd) => {
                 vscode.postMessage({ type: 'selectionChanged', selectionStart: sStart, selectionEnd: sEnd });
+            },
+            (test) => {
+                vscode.postMessage({
+                    type: 'runTestFromLine',
+                    line: test.line,
+                    kind: test.kind,
+                    label: test.label,
+                });
             },
         );
         if (selStart > 0 || selEnd > 0) {
@@ -403,8 +764,9 @@ export function boot(vsCodeApi?: { postMessage(msg: unknown): void }): void {
 
         if (msg.type === 'sync') {
             applyEditorSettings(msg.settings);
-            // Update rendered blocks cache
             renderedBlocksRef.current.clear();
+            symbolsRef.current = msg.symbols ?? [];
+            testsRef.current = msg.tests ?? [];
             if (msg.blocks) {
                 for (const block of msg.blocks) {
                     const key = `${block.prefix}:${block.content}`;
@@ -424,3 +786,5 @@ export function boot(vsCodeApi?: { postMessage(msg: unknown): void }): void {
     // Request initial state
     vscode.postMessage({ type: 'ready' });
 }
+
+(globalThis as typeof globalThis & { RichEditorWebview?: { boot: typeof boot } }).RichEditorWebview = { boot };

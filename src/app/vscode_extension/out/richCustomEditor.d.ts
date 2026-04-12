@@ -23,7 +23,8 @@ export interface RenderableBlock {
 }
 export declare class RichCustomEditorProvider implements vscode.CustomTextEditorProvider {
     private readonly extensionUri;
+    private readonly onActiveDocument?;
     static readonly viewType = "simple.richSourceEditor";
-    constructor(extensionUri: vscode.Uri);
+    constructor(extensionUri: vscode.Uri, onActiveDocument?: ((document: vscode.TextDocument) => void) | undefined);
     resolveCustomTextEditor(document: vscode.TextDocument, webviewPanel: vscode.WebviewPanel, _token: vscode.CancellationToken): Promise<void>;
 }

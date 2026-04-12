@@ -53,6 +53,8 @@ const katex_1 = __importDefault(require("katex"));
 const blockDetector_1 = require("./blockDetector");
 const imageResolver_1 = require("./imageResolver");
 const mathConverter_1 = require("./mathConverter");
+const simpleSymbolProviders_1 = require("./symbols/simpleSymbolProviders");
+const testDiscovery_1 = require("./testing/testDiscovery");
 // ── Math rendering (KaTeX) ───────────────────────────────────────────
 const katexCache = new Map();
 function renderKatexInline(latex) {
@@ -118,7 +120,7 @@ function getRichEditorSettings() {
     };
 }
 // ── HTML builder ─────────────────────────────────────────────────────
-function buildRichEditorHtml(katexCssUri, richEditorJsUri, cspSource, nonce) {
+function buildRichEditorHtml(katexCssUri, richEditorBundleSource, cspSource, nonce) {
     return `<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -129,7 +131,7 @@ function buildRichEditorHtml(katexCssUri, richEditorJsUri, cspSource, nonce) {
                    style-src ${cspSource} 'unsafe-inline';
                    font-src ${cspSource};
                    img-src ${cspSource} data: https:;
-                   script-src 'nonce-${nonce}';">
+                   script-src ${cspSource} 'nonce-${nonce}';">
     <title>Simple Rich Editor</title>
     <link rel="stylesheet" href="${katexCssUri}">
     <style nonce="${nonce}">
@@ -146,6 +148,7 @@ function buildRichEditorHtml(katexCssUri, richEditorJsUri, cspSource, nonce) {
             height: 100%;
             width: 100%;
             overflow: auto;
+            position: relative;
         }
         .boot-error {
             margin: 24px;
@@ -169,7 +172,15 @@ function buildRichEditorHtml(katexCssUri, richEditorJsUri, cspSource, nonce) {
 </head>
 <body>
     <div id="editor-container"></div>
-    <script nonce="${nonce}" src="${richEditorJsUri}"></script>
+    <script nonce="${nonce}">
+window.__simpleRichEditorBundleStage = 'inline-script-start';
+window.addEventListener('error', (event) => {
+    const detail = event?.error?.message || event?.message || 'unknown script error';
+    window.__simpleRichEditorLastError = String(detail);
+});
+${richEditorBundleSource}
+window.__simpleRichEditorBundleStage = 'bundle-finished';
+    </script>
     <script nonce="${nonce}">
         (() => {
             const container = document.getElementById('editor-container');
@@ -182,11 +193,15 @@ function buildRichEditorHtml(katexCssUri, richEditorJsUri, cspSource, nonce) {
                 console.error('Simple Rich Editor boot failed', error);
                 if (container) {
                     const message = error instanceof Error ? error.message : String(error);
+                    const bundleStage = String(globalThis.__simpleRichEditorBundleStage ?? 'missing');
+                    const lastError = String(globalThis.__simpleRichEditorLastError ?? 'none');
                     container.innerHTML =
                         '<div class="boot-error">' +
                         '<strong>Simple Rich Editor failed to start.</strong>' +
                         '<div>Check that the webview bundle exists and compiled successfully.</div>' +
                         '<div><code>' + message.replace(/</g, '&lt;') + '</code></div>' +
+                        '<div><code>bundle stage: ' + bundleStage.replace(/</g, '&lt;') + '</code></div>' +
+                        '<div><code>last error: ' + lastError.replace(/</g, '&lt;') + '</code></div>' +
                         '</div>';
                 }
             }
@@ -203,12 +218,33 @@ function fullDocumentRange(document) {
         : new vscode.Position(0, 0);
     return new vscode.Range(new vscode.Position(0, 0), end);
 }
+function buildRichEditorSymbols(document) {
+    return (0, simpleSymbolProviders_1.indexDocumentSymbols)(document).map((symbol) => ({
+        name: symbol.name,
+        kind: vscode.SymbolKind[symbol.kind],
+        detail: symbol.detail,
+        line: symbol.selectionRange.start.line,
+        from: document.offsetAt(symbol.selectionRange.start),
+        to: document.offsetAt(symbol.selectionRange.end),
+    }));
+}
+function buildRichEditorTests(document) {
+    return (0, testDiscovery_1.detectTestBlocks)(document).map((block) => ({
+        kind: block.kind,
+        label: block.label,
+        line: block.line,
+        from: document.offsetAt(new vscode.Position(block.line, 0)),
+        to: document.offsetAt(new vscode.Position(block.line, document.lineAt(block.line).text.length)),
+    }));
+}
 // ── Provider ─────────────────────────────────────────────────────────
 class RichCustomEditorProvider {
-    constructor(extensionUri) {
+    constructor(extensionUri, onActiveDocument) {
         this.extensionUri = extensionUri;
+        this.onActiveDocument = onActiveDocument;
     }
     async resolveCustomTextEditor(document, webviewPanel, _token) {
+        this.onActiveDocument?.(document);
         const katexDistUri = vscode.Uri.joinPath(this.extensionUri, 'node_modules', 'katex', 'dist');
         const webviewOutUri = vscode.Uri.joinPath(this.extensionUri, 'out', 'webview');
         const richEditorBundleUri = vscode.Uri.joinPath(webviewOutUri, 'richEditor.js');
@@ -234,8 +270,9 @@ class RichCustomEditorProvider {
             ],
         };
         const katexCssUri = webviewPanel.webview.asWebviewUri(vscode.Uri.joinPath(katexDistUri, 'katex.min.css')).toString();
-        const richEditorJsUri = webviewPanel.webview.asWebviewUri(richEditorBundleUri).toString();
         const nonce = crypto.randomBytes(16).toString('base64url');
+        const richEditorBundleSource = fs.readFileSync(richEditorBundleUri.fsPath, 'utf8')
+            .replace(/<\/script>/gi, '<\\\\/script>');
         let selectionStart = 0;
         let selectionEnd = 0;
         let isApplyingEdit = false;
@@ -250,9 +287,11 @@ class RichCustomEditorProvider {
                 selectionEnd,
                 blocks,
                 settings: getRichEditorSettings(),
+                symbols: buildRichEditorSymbols(document),
+                tests: buildRichEditorTests(document),
             });
         };
-        webviewPanel.webview.html = buildRichEditorHtml(katexCssUri, richEditorJsUri, webviewPanel.webview.cspSource, nonce);
+        webviewPanel.webview.html = buildRichEditorHtml(katexCssUri, richEditorBundleSource, webviewPanel.webview.cspSource, nonce);
         const changeDocumentSubscription = vscode.workspace.onDidChangeTextDocument(event => {
             if (event.document.uri.toString() !== document.uri.toString() || isApplyingEdit) {
                 return;
@@ -275,7 +314,9 @@ class RichCustomEditorProvider {
                 selectionEnd = message.selectionEnd;
                 return;
             }
-            // editAll
+            if (message.type !== 'editAll') {
+                return;
+            }
             selectionStart = message.selectionStart;
             selectionEnd = message.selectionEnd;
             if (message.source === document.getText()) {
@@ -296,11 +337,20 @@ class RichCustomEditorProvider {
             finally {
                 isApplyingEdit = false;
             }
+            return;
+        });
+        const runTestSubscription = webviewPanel.webview.onDidReceiveMessage(async (message) => {
+            if (message.type !== 'runTestFromLine') {
+                return;
+            }
+            const command = message.kind === 'sdoctest' ? 'simple.test.runSdoctest' : 'simple.test.runFile';
+            await vscode.commands.executeCommand(command, document.uri);
         });
         webviewPanel.onDidDispose(() => {
             changeDocumentSubscription.dispose();
             configurationSubscription.dispose();
             messageSubscription.dispose();
+            runTestSubscription.dispose();
         });
     }
 }
