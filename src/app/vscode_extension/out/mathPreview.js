@@ -28,8 +28,39 @@ function labelForMathKind(kind) {
             return 'm{}';
     }
 }
+function hasBalancedDelimiters(source) {
+    const stack = [];
+    const closingFor = {
+        '(': ')',
+        '[': ']',
+        '{': '}',
+    };
+    const openingFor = {
+        ')': '(',
+        ']': '[',
+        '}': '{',
+    };
+    for (let index = 0; index < source.length; index++) {
+        const char = source[index];
+        if (closingFor[char]) {
+            stack.push(char);
+            continue;
+        }
+        if (openingFor[char]) {
+            const expected = openingFor[char];
+            const actual = stack.pop();
+            if (actual !== expected) {
+                return false;
+            }
+        }
+    }
+    return stack.length === 0;
+}
 function buildMathPreview(block) {
     if (!isMathLikeBlock(block.kind)) {
+        return undefined;
+    }
+    if (!hasBalancedDelimiters(block.content)) {
         return undefined;
     }
     const indicator = indicatorForMathKind(block.kind);

@@ -35,8 +35,42 @@ export function labelForMathKind(kind: Extract<BlockKind, 'math' | 'loss' | 'nog
     }
 }
 
+function hasBalancedDelimiters(source: string): boolean {
+    const stack: string[] = [];
+    const closingFor: Record<string, string> = {
+        '(': ')',
+        '[': ']',
+        '{': '}',
+    };
+    const openingFor: Record<string, string> = {
+        ')': '(',
+        ']': '[',
+        '}': '{',
+    };
+
+    for (let index = 0; index < source.length; index++) {
+        const char = source[index];
+        if (closingFor[char]) {
+            stack.push(char);
+            continue;
+        }
+        if (openingFor[char]) {
+            const expected = openingFor[char];
+            const actual = stack.pop();
+            if (actual !== expected) {
+                return false;
+            }
+        }
+    }
+
+    return stack.length === 0;
+}
+
 export function buildMathPreview(block: Pick<DetectedBlock, 'kind' | 'content'>): MathPreview | undefined {
     if (!isMathLikeBlock(block.kind)) {
+        return undefined;
+    }
+    if (!hasBalancedDelimiters(block.content)) {
         return undefined;
     }
     const indicator = indicatorForMathKind(block.kind);

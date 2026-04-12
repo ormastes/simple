@@ -77,6 +77,38 @@ function diagnosticDecorationForRange(diagnostics, range) {
     }
     return undefined;
 }
+function hasBlockingDiagnostic(diagnostics, range) {
+    return diagnostics.some((diagnostic) => rangesOverlap(diagnostic.range, range)
+        && (diagnostic.severity === vscode.DiagnosticSeverity.Error
+            || diagnostic.severity === vscode.DiagnosticSeverity.Warning));
+}
+function selectionIntersectsBlock(document, selections, block) {
+    for (const selection of selections) {
+        const selectionStart = document.offsetAt(selection.start);
+        const selectionEnd = document.offsetAt(selection.end);
+        if (selection.isEmpty) {
+            if (selectionStart >= block.from && selectionStart <= block.to) {
+                return true;
+            }
+            continue;
+        }
+        if (selectionStart < block.to && selectionEnd > block.from) {
+            return true;
+        }
+    }
+    return false;
+}
+function buildMathHoverMarkdown(block, preview) {
+    if (!preview) {
+        return undefined;
+    }
+    const markdown = new vscode.MarkdownString(undefined, true);
+    markdown.appendMarkdown(`**${preview.label}**\n\n`);
+    markdown.appendCodeblock(block.content, 'simple');
+    markdown.appendMarkdown('\n');
+    markdown.appendMarkdown(`Preview: \`${preview.displayText}\``);
+    return markdown;
+}
 class NativeMathProvider {
     constructor() {
         this.openDecoration = vscode.window.createTextEditorDecorationType({
@@ -123,11 +155,17 @@ class NativeMathProvider {
         if (!preview) {
             return undefined;
         }
-        const markdown = new vscode.MarkdownString(undefined, true);
-        markdown.appendMarkdown(`**${preview.label}**\n\n`);
-        markdown.appendCodeblock(block.content, 'simple');
-        markdown.appendMarkdown('\n');
-        markdown.appendMarkdown(`Pretty: \`${preview.displayText}\``);
+        const activeEditor = vscode.window.activeTextEditor;
+        if (activeEditor?.document.uri.toString() !== document.uri.toString()) {
+            return undefined;
+        }
+        if (!selectionIntersectsBlock(document, activeEditor.selections, block)) {
+            return undefined;
+        }
+        const markdown = buildMathHoverMarkdown(block, preview);
+        if (!markdown) {
+            return undefined;
+        }
         return new vscode.Hover(markdown, makeRange(document, block.from, block.to));
     }
     findMathBlockAtPosition(document, position) {
@@ -163,7 +201,6 @@ class NativeMathProvider {
         const openDecorations = [];
         const closeDecorations = [];
         const contentDecorations = [];
-        const cursorLines = new Set(editor.selections.map((selection) => selection.active.line));
         const diagnostics = vscode.languages.getDiagnostics(editor.document.uri);
         for (const block of (0, blockDetector_1.detectBlocks)(editor.document.getText())) {
             const decoration = asDecorationBlock(editor.document, block);
@@ -171,20 +208,15 @@ class NativeMathProvider {
             if (!decoration || !preview) {
                 continue;
             }
-            const startLine = decoration.openRange.start.line;
-            const endLine = decoration.closeRange.end.line;
-            let reveal = false;
-            for (let line = startLine; line <= endLine; line++) {
-                if (cursorLines.has(line)) {
-                    reveal = true;
-                    break;
-                }
+            if (hasBlockingDiagnostic(diagnostics, decoration.fullRange)) {
+                continue;
             }
-            if (reveal) {
+            if (selectionIntersectsBlock(editor.document, editor.selections, block)) {
                 continue;
             }
             openDecorations.push({
                 range: decoration.openRange,
+                hoverMessage: buildMathHoverMarkdown(block, preview),
                 renderOptions: {
                     before: {
                         contentText: preview.displayText,

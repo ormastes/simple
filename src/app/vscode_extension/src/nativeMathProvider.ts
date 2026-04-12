@@ -58,6 +58,53 @@ function diagnosticDecorationForRange(
     return undefined;
 }
 
+function hasBlockingDiagnostic(
+    diagnostics: readonly vscode.Diagnostic[],
+    range: vscode.Range,
+): boolean {
+    return diagnostics.some((diagnostic) =>
+        rangesOverlap(diagnostic.range, range)
+        && (diagnostic.severity === vscode.DiagnosticSeverity.Error
+            || diagnostic.severity === vscode.DiagnosticSeverity.Warning),
+    );
+}
+
+function selectionIntersectsBlock(
+    document: vscode.TextDocument,
+    selections: readonly vscode.Selection[],
+    block: DetectedBlock,
+): boolean {
+    for (const selection of selections) {
+        const selectionStart = document.offsetAt(selection.start);
+        const selectionEnd = document.offsetAt(selection.end);
+        if (selection.isEmpty) {
+            if (selectionStart >= block.from && selectionStart <= block.to) {
+                return true;
+            }
+            continue;
+        }
+        if (selectionStart < block.to && selectionEnd > block.from) {
+            return true;
+        }
+    }
+    return false;
+}
+
+function buildMathHoverMarkdown(
+    block: DetectedBlock,
+    preview: ReturnType<typeof buildMathPreview>,
+): vscode.MarkdownString | undefined {
+    if (!preview) {
+        return undefined;
+    }
+    const markdown = new vscode.MarkdownString(undefined, true);
+    markdown.appendMarkdown(`**${preview.label}**\n\n`);
+    markdown.appendCodeblock(block.content, 'simple');
+    markdown.appendMarkdown('\n');
+    markdown.appendMarkdown(`Preview: \`${preview.displayText}\``);
+    return markdown;
+}
+
 export class NativeMathProvider implements vscode.HoverProvider, vscode.Disposable {
     private readonly openDecoration = vscode.window.createTextEditorDecorationType({
         opacity: '0',
@@ -124,11 +171,18 @@ export class NativeMathProvider implements vscode.HoverProvider, vscode.Disposab
             return undefined;
         }
 
-        const markdown = new vscode.MarkdownString(undefined, true);
-        markdown.appendMarkdown(`**${preview.label}**\n\n`);
-        markdown.appendCodeblock(block.content, 'simple');
-        markdown.appendMarkdown('\n');
-        markdown.appendMarkdown(`Pretty: \`${preview.displayText}\``);
+        const activeEditor = vscode.window.activeTextEditor;
+        if (activeEditor?.document.uri.toString() !== document.uri.toString()) {
+            return undefined;
+        }
+        if (!selectionIntersectsBlock(document, activeEditor.selections, block)) {
+            return undefined;
+        }
+
+        const markdown = buildMathHoverMarkdown(block, preview);
+        if (!markdown) {
+            return undefined;
+        }
         return new vscode.Hover(markdown, makeRange(document, block.from, block.to));
     }
 
@@ -172,7 +226,6 @@ export class NativeMathProvider implements vscode.HoverProvider, vscode.Disposab
         const openDecorations: vscode.DecorationOptions[] = [];
         const closeDecorations: vscode.Range[] = [];
         const contentDecorations: vscode.Range[] = [];
-        const cursorLines = new Set(editor.selections.map((selection) => selection.active.line));
         const diagnostics = vscode.languages.getDiagnostics(editor.document.uri);
 
         for (const block of detectBlocks(editor.document.getText())) {
@@ -182,21 +235,17 @@ export class NativeMathProvider implements vscode.HoverProvider, vscode.Disposab
                 continue;
             }
 
-            const startLine = decoration.openRange.start.line;
-            const endLine = decoration.closeRange.end.line;
-            let reveal = false;
-            for (let line = startLine; line <= endLine; line++) {
-                if (cursorLines.has(line)) {
-                    reveal = true;
-                    break;
-                }
+            if (hasBlockingDiagnostic(diagnostics, decoration.fullRange)) {
+                continue;
             }
-            if (reveal) {
+
+            if (selectionIntersectsBlock(editor.document, editor.selections, block)) {
                 continue;
             }
 
             openDecorations.push({
                 range: decoration.openRange,
+                hoverMessage: buildMathHoverMarkdown(block, preview),
                 renderOptions: {
                     before: {
                         contentText: preview.displayText,
