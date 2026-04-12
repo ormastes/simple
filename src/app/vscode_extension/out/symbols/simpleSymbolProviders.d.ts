@@ -17,6 +17,9 @@ export declare class SimpleWorkspaceSymbolProvider implements vscode.WorkspaceSy
 export declare class SimpleDefinitionProvider implements vscode.DefinitionProvider {
     provideDefinition(document: vscode.TextDocument, position: vscode.Position): Promise<vscode.Definition | undefined>;
 }
+export declare class SimpleReferenceProvider implements vscode.ReferenceProvider {
+    provideReferences(document: vscode.TextDocument, position: vscode.Position, context: vscode.ReferenceContext): Promise<vscode.Location[]>;
+}
 export declare class SimpleHoverProvider implements vscode.HoverProvider {
     provideHover(document: vscode.TextDocument, position: vscode.Position): Promise<vscode.Hover | undefined>;
 }

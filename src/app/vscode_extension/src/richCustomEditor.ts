@@ -11,10 +11,9 @@
 import * as crypto from 'crypto';
 import * as fs from 'fs';
 import * as vscode from 'vscode';
-import katex from 'katex';
 import { detectBlocks, type BlockKind, type DetectedBlock } from './blockDetector';
 import { parseImageContent, resolveImageUri } from './imageResolver';
-import { simpleToLatex } from './mathConverter';
+import { buildMathPreview } from './mathPreview';
 import { indexDocumentSymbols } from './symbols/simpleSymbolProviders';
 import type { EditorMarkerState } from './testing/editorMarkers';
 import { detectTestBlocks } from './testing/testDiscovery';
@@ -58,6 +57,8 @@ interface RichEditorTestBlock {
 
 interface RichEditorMarkers {
     breakpoints: number[];
+    bookmarks: number[];
+    pointerLine: number | null;
 }
 
 type WebviewMessage =
@@ -66,7 +67,11 @@ type WebviewMessage =
     | { type: 'selectionChanged'; selectionStart: number; selectionEnd: number }
     | { type: 'requestSync' }
     | { type: 'runTestFromLine'; line: number; kind: string; label: string }
-    | { type: 'toggleBreakpointFromLine'; line: number };
+    | { type: 'toggleBreakpointFromLine'; line: number }
+    | { type: 'revealDefinition'; offset: number }
+    | { type: 'showReferences'; offset: number }
+    | { type: 'revealDefinitionForSymbol'; symbol: string }
+    | { type: 'showReferencesForSymbol'; symbol: string };
 
 type HostMessage =
     | {
@@ -82,26 +87,13 @@ type HostMessage =
     }
     | { type: 'error'; message: string };
 
-// ── Math rendering (KaTeX) ───────────────────────────────────────────
-
-const katexCache = new Map<string, string>();
-
-function renderKatexInline(latex: string): string {
-    const cached = katexCache.get(latex);
-    if (cached !== undefined) return cached;
-    let html: string;
-    try {
-        html = katex.renderToString(latex, {
-            displayMode: true,
-            throwOnError: false,
-            output: 'html',
-            trust: false,
-        });
-    } catch {
-        html = '<span style="color: var(--vscode-errorForeground)">[math error]</span>';
-    }
-    katexCache.set(latex, html);
-    return html;
+function escapeForHtml(text: string): string {
+    return text
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#039;');
 }
 
 // ── Block rendering ──────────────────────────────────────────────────
@@ -135,9 +127,11 @@ function renderDetectedBlocks(
             };
         }
 
-        // Math/loss/nograd/graph — render via KaTeX
-        const latex = simpleToLatex(block.content);
-        const html = renderKatexInline(latex);
+        const preview = buildMathPreview(block);
+        const label = preview
+            ? preview.displayText
+            : block.content;
+        const html = `<span class="cm-math-pretty-text">${escapeForHtml(label)}</span>`;
         return {
             ...block,
             renderedHtml: html,
@@ -354,7 +348,7 @@ export class RichCustomEditorProvider implements vscode.CustomTextEditorProvider
                 tests: buildRichEditorTests(document),
                 markers: this.getMarkerState
                     ? this.getMarkerState(document.uri)
-                    : { breakpoints: [] },
+                    : { breakpoints: [], bookmarks: [], pointerLine: null },
             } satisfies HostMessage);
         };
 
@@ -439,12 +433,85 @@ export class RichCustomEditorProvider implements vscode.CustomTextEditorProvider
             await postSync();
         });
 
+        const navigationSubscription = webviewPanel.webview.onDidReceiveMessage(async (message: WebviewMessage) => {
+            if (
+                message.type !== 'revealDefinition'
+                && message.type !== 'showReferences'
+                && message.type !== 'revealDefinitionForSymbol'
+                && message.type !== 'showReferencesForSymbol'
+            ) {
+                return;
+            }
+
+            const documentText = document.getText();
+            const symbolOffset = ('symbol' in message)
+                ? documentText.search(new RegExp(`\\b${message.symbol.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`))
+                : -1;
+            const offset = 'offset' in message
+                ? message.offset
+                : symbolOffset;
+            if (offset < 0) {
+                return;
+            }
+            const position = document.positionAt(Math.max(0, Math.min(offset, documentText.length)));
+
+            if (message.type === 'revealDefinition' || message.type === 'revealDefinitionForSymbol') {
+                const rawLocations = await vscode.commands.executeCommand<Array<vscode.Location | vscode.LocationLink>>(
+                    'vscode.executeDefinitionProvider',
+                    document.uri,
+                    position,
+                );
+                const locations = (rawLocations ?? []).map((item) => item instanceof vscode.Location
+                    ? item
+                    : new vscode.Location(item.targetUri, item.targetSelectionRange ?? item.targetRange));
+                if (locations.length === 0) {
+                    return;
+                }
+
+                if (locations.length === 1) {
+                    await vscode.window.showTextDocument(locations[0].uri, {
+                        preview: false,
+                        selection: locations[0].range,
+                    });
+                    return;
+                }
+
+                const editor = await vscode.window.showTextDocument(document, {
+                    preview: false,
+                    selection: new vscode.Range(position, position),
+                });
+                await vscode.commands.executeCommand('editor.action.goToLocations', editor.document.uri, position, locations, 'goto', 'No definition found');
+                return;
+            }
+
+            const references = await vscode.commands.executeCommand<vscode.Location[]>(
+                'vscode.executeReferenceProvider',
+                document.uri,
+                position,
+            );
+            if (!references || references.length === 0) {
+                return;
+            }
+
+            await vscode.window.showTextDocument(document, {
+                preview: false,
+                selection: new vscode.Range(position, position),
+            });
+            await vscode.commands.executeCommand(
+                'editor.action.showReferences',
+                document.uri,
+                position,
+                references,
+            );
+        });
+
         webviewPanel.onDidDispose(() => {
             changeDocumentSubscription.dispose();
             configurationSubscription.dispose();
             messageSubscription.dispose();
             runTestSubscription.dispose();
             markerSubscription.dispose();
+            navigationSubscription.dispose();
         });
     }
 }

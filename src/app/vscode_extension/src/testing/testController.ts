@@ -111,6 +111,9 @@ export class SimpleTestController implements vscode.Disposable {
         fileItem.children.replace([]);
 
         for (const block of detectTestBlocks(document)) {
+            if (!isDoctestBlock(block)) {
+                continue;
+            }
             const child = this.controller.createTestItem(
                 createTestId(document.uri, block.label, block.line),
                 block.label,

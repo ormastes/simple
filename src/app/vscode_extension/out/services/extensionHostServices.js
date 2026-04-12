@@ -37,6 +37,9 @@ exports.ExtensionHostServices = void 0;
 const vscode = __importStar(require("vscode"));
 const SERVICE_LABELS = {
     editor: 'Editor',
+    math: 'Math',
+    lsp: 'LSP',
+    ai: 'AI',
     symbols: 'Symbols',
     diagnostics: 'Diagnostics',
     semanticTokens: 'Semantic Tokens',
@@ -51,6 +54,9 @@ class ExtensionHostServices {
         this.statusBar.command = 'simple.richEditor.showOutputChannel';
         this.statusBar.show();
         this.setStatus('editor', { health: 'starting', source: 'native', message: 'Booting rich editor host' });
+        this.setStatus('math', { health: 'idle', source: 'fallback', message: 'Not registered yet' });
+        this.setStatus('lsp', { health: 'idle', source: 'fallback', message: 'Compatibility surface not registered yet' });
+        this.setStatus('ai', { health: 'idle', source: 'native', message: 'Not registered yet' });
         this.setStatus('symbols', { health: 'idle', source: 'fallback', message: 'Not registered yet' });
         this.setStatus('diagnostics', { health: 'idle', source: 'fallback', message: 'Not registered yet' });
         this.setStatus('semanticTokens', { health: 'idle', source: 'fallback', message: 'Not registered yet' });
@@ -79,7 +85,7 @@ class ExtensionHostServices {
     async safeRegister(name, message, register, subscriptions) {
         this.setStatus(name, { health: 'starting', source: 'native', message });
         try {
-            const result = register();
+            const result = await register();
             if (Array.isArray(result)) {
                 subscriptions.push(...result);
             }

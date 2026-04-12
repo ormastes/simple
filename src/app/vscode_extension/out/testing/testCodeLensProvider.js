@@ -47,14 +47,14 @@ class TestCodeLensProvider {
         if (document.languageId !== 'simple') {
             return [];
         }
-        return (0, testDiscovery_1.detectTestBlocks)(document).map((block) => {
+        return (0, testDiscovery_1.detectTestBlocks)(document)
+            .filter((block) => block.kind === 'describe' || block.kind === 'sdoctest')
+            .map((block) => {
             const range = new vscode.Range(block.line, 0, block.line, 0);
             const command = block.kind === 'sdoctest' ? 'simple.test.runSdoctest' : 'simple.test.runFile';
             const title = block.kind === 'sdoctest'
                 ? '$(play) Run Doctest'
-                : block.kind === 'describe'
-                    ? '$(play) Run File'
-                    : '$(play) Run Test';
+                : '$(play) Run File';
             return new vscode.CodeLens(range, {
                 title,
                 command,

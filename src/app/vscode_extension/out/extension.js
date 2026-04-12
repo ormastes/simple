@@ -39,8 +39,13 @@ Object.defineProperty(exports, "__esModule", { value: true });
 exports.activate = activate;
 exports.deactivate = deactivate;
 const vscode = __importStar(require("vscode"));
+const ai_1 = require("./ai");
 const diagnosticsProvider_1 = require("./fallback/diagnosticsProvider");
 const semanticTokensProvider_1 = require("./fallback/semanticTokensProvider");
+const lsp_1 = require("./lsp");
+const math_1 = require("./math");
+const nativeFoldingProvider_1 = require("./nativeFoldingProvider");
+const nativeMathProvider_1 = require("./nativeMathProvider");
 const richCustomEditor_1 = require("./richCustomEditor");
 const simpleOutlineProvider_1 = require("./outline/simpleOutlineProvider");
 const extensionHostServices_1 = require("./services/extensionHostServices");
@@ -50,31 +55,38 @@ const testCodeLensProvider_1 = require("./testing/testCodeLensProvider");
 const testController_1 = require("./testing/testController");
 const editorMarkers_1 = require("./testing/editorMarkers");
 const testWorkspacePanel_1 = require("./testing/testWorkspacePanel");
+const testDiscovery_1 = require("./testing/testDiscovery");
 const SIMPLE_SELECTOR = [
     { scheme: 'file', language: 'simple' },
     { scheme: 'untitled', language: 'simple' },
 ];
-async function reopenActiveSimpleDocumentWithRichEditor() {
-    const editor = vscode.window.activeTextEditor;
-    if (!editor) {
-        return;
-    }
-    const document = editor.document;
-    const isSimpleFile = document.languageId === 'simple' || document.uri.fsPath.endsWith('.spl');
-    if (!isSimpleFile) {
-        return;
-    }
-    await vscode.commands.executeCommand('vscode.openWith', document.uri, richCustomEditor_1.RichCustomEditorProvider.viewType);
-}
 async function activate(context) {
     const services = new extensionHostServices_1.ExtensionHostServices();
     context.subscriptions.push(services);
+    const lspSurface = (0, lsp_1.createSimpleLspCompatibilitySurface)(context);
+    context.subscriptions.push(lspSurface);
+    services.markDegraded('lsp', 'Compatibility surface ready; client lifecycle not attached yet', 'fallback');
     const outlineProvider = new simpleOutlineProvider_1.SimpleOutlineProvider();
     const editorMarkerManager = new editorMarkers_1.EditorMarkerManager();
+    const mathProvider = new nativeMathProvider_1.NativeMathProvider();
     let currentOutlineDocument = vscode.window.activeTextEditor?.document;
     const updateOutline = (document) => {
         currentOutlineDocument = document;
         outlineProvider.setActiveDocument(document);
+    };
+    const maybeAutoOpenMathSyncPanel = (editor) => {
+        if (!editor || editor.document.languageId !== 'simple') {
+            return;
+        }
+        if (!vscode.workspace.getConfiguration('simple.math').get('syncPanel.autoOpen', false)) {
+            return;
+        }
+        if (math_1.MathSyncPanel.isVisible()) {
+            return;
+        }
+        if ((0, math_1.findMathBlockAtPosition)(editor.document, editor.selection.active)) {
+            math_1.MathSyncPanel.show();
+        }
     };
     const cli = new simpleCliService_1.SimpleCliService(services);
     const runCliTestCommand = async (args, resolveFrom) => {
@@ -97,22 +109,6 @@ async function activate(context) {
             preview: false,
             selection: range,
         });
-    }), vscode.commands.registerCommand('simple.editor.toggleBreakpoint', async (uri, line) => {
-        const targetUri = uri ?? vscode.window.activeTextEditor?.document.uri;
-        if (!targetUri) {
-            return;
-        }
-        const targetLine = typeof line === 'number'
-            ? line
-            : vscode.window.activeTextEditor?.selection.active.line;
-        if (typeof targetLine !== 'number') {
-            return;
-        }
-        editorMarkerManager.toggleBreakpoint(targetUri, targetLine);
-        const active = currentOutlineDocument;
-        if (active && active.uri.toString() === targetUri.toString()) {
-            updateOutline(active);
-        }
     }), vscode.window.registerTreeDataProvider('simpleOutline', outlineProvider), vscode.window.onDidChangeActiveTextEditor((editor) => {
         updateOutline(editor?.document);
     }), vscode.workspace.onDidChangeTextDocument((event) => {
@@ -121,6 +117,20 @@ async function activate(context) {
         }
     }));
     updateOutline(vscode.window.activeTextEditor?.document);
+    await services.safeRegister('lsp', 'LSP compatibility commands', () => {
+        return [
+            vscode.commands.registerCommand('simple.lsp.showOutputChannel', () => {
+                lspSurface.showOutputChannel();
+            }),
+            vscode.commands.registerCommand('simple.lsp.restart', async () => {
+                const result = await lspSurface.restartClient();
+                if (!result.ok) {
+                    void vscode.window.showWarningMessage(`Simple LSP: ${result.message}`);
+                }
+            }),
+        ];
+    }, context.subscriptions);
+    services.markDegraded('lsp', 'Compatibility commands ready; no client lifecycle attached', 'fallback');
     await services.safeRegister('editor', 'custom editor provider', () => {
         return [
             vscode.window.registerCustomEditorProvider(richCustomEditor_1.RichCustomEditorProvider.viewType, new richCustomEditor_1.RichCustomEditorProvider(context.extensionUri, updateOutline, (documentUri) => editorMarkerManager.getState(documentUri)), {
@@ -128,7 +138,11 @@ async function activate(context) {
                 supportsMultipleEditorsPerDocument: false,
             }),
             vscode.commands.registerCommand('simple.richEditor.open', () => {
-                void reopenActiveSimpleDocumentWithRichEditor();
+                const editor = vscode.window.activeTextEditor;
+                if (!editor) {
+                    return;
+                }
+                void vscode.commands.executeCommand('vscode.openWith', editor.document.uri, richCustomEditor_1.RichCustomEditorProvider.viewType);
             }),
         ];
     }, context.subscriptions);
@@ -143,7 +157,37 @@ async function activate(context) {
             vscode.languages.registerDocumentSymbolProvider(SIMPLE_SELECTOR, new simpleSymbolProviders_1.SimpleDocumentSymbolProvider()),
             vscode.languages.registerWorkspaceSymbolProvider(new simpleSymbolProviders_1.SimpleWorkspaceSymbolProvider()),
             vscode.languages.registerDefinitionProvider(SIMPLE_SELECTOR, new simpleSymbolProviders_1.SimpleDefinitionProvider()),
+            vscode.languages.registerReferenceProvider(SIMPLE_SELECTOR, new simpleSymbolProviders_1.SimpleReferenceProvider()),
             vscode.languages.registerHoverProvider(SIMPLE_SELECTOR, new simpleSymbolProviders_1.SimpleHoverProvider()),
+            vscode.languages.registerHoverProvider(SIMPLE_SELECTOR, mathProvider),
+            vscode.languages.registerFoldingRangeProvider(SIMPLE_SELECTOR, new nativeFoldingProvider_1.SimpleFoldingRangeProvider()),
+            mathProvider,
+        ];
+    }, context.subscriptions);
+    await services.safeRegister('math', 'math preview and sync panels', () => {
+        return [
+            vscode.commands.registerCommand('simple.math.togglePreview', () => {
+                if (math_1.MathPreviewPanel.isVisible()) {
+                    math_1.MathPreviewPanel.close();
+                }
+                else {
+                    math_1.MathPreviewPanel.show();
+                }
+            }),
+            vscode.commands.registerCommand('simple.math.toggleSyncPanel', () => {
+                if (math_1.MathSyncPanel.isVisible()) {
+                    math_1.MathSyncPanel.close();
+                }
+                else {
+                    math_1.MathSyncPanel.show();
+                }
+            }),
+            vscode.window.onDidChangeActiveTextEditor((editor) => {
+                maybeAutoOpenMathSyncPanel(editor ?? undefined);
+            }),
+            vscode.window.onDidChangeTextEditorSelection((event) => {
+                maybeAutoOpenMathSyncPanel(event.textEditor);
+            }),
         ];
     }, context.subscriptions);
     await services.safeRegister('tests', 'test runner UI', () => {
@@ -160,6 +204,21 @@ async function activate(context) {
                     return;
                 }
                 await runCliTestCommand(['test', target.fsPath], target.fsPath);
+            }),
+            vscode.commands.registerCommand('simple.test.runAtCursor', async () => {
+                const editor = vscode.window.activeTextEditor;
+                if (!editor || editor.document.languageId !== 'simple') {
+                    void vscode.window.showWarningMessage('No Simple file is active');
+                    return;
+                }
+                const block = (0, testDiscovery_1.detectTestBlocks)(editor.document)
+                    .filter((candidate) => candidate.line <= editor.selection.active.line)
+                    .pop();
+                if (block?.kind === 'sdoctest') {
+                    await runCliTestCommand(['test', '--sdoctest', editor.document.uri.fsPath], editor.document.uri.fsPath);
+                    return;
+                }
+                await runCliTestCommand(['test', editor.document.uri.fsPath], editor.document.uri.fsPath);
             }),
             vscode.commands.registerCommand('simple.test.runSdoctest', async (uri) => {
                 const target = uri ?? vscode.window.activeTextEditor?.document.uri;
@@ -183,9 +242,76 @@ async function activate(context) {
                     testWorkspacePanel_1.TestWorkspacePanel.show(context.extensionUri).openLatestArtifacts();
                 }
             }),
+            vscode.commands.registerTextEditorCommand('simple.editor.toggleBreakpoint', (editor, _edit, uri, line) => {
+                const targetUri = uri ?? editor.document.uri;
+                const targetLine = typeof line === 'number'
+                    ? line
+                    : editor.selection.active.line;
+                if (!targetUri || typeof targetLine !== 'number') {
+                    return;
+                }
+                editorMarkerManager.toggleBreakpoint(targetUri, targetLine);
+            }),
+            vscode.commands.registerTextEditorCommand('simple.editor.toggleBookmark', (editor, _edit, uri, line) => {
+                const targetUri = uri ?? editor.document.uri;
+                const targetLine = typeof line === 'number'
+                    ? line
+                    : editor.selection.active.line;
+                if (!targetUri || typeof targetLine !== 'number') {
+                    return;
+                }
+                editorMarkerManager.toggleBookmark(targetUri, targetLine);
+            }),
+            vscode.commands.registerTextEditorCommand('simple.editor.togglePointer', (editor, _edit, uri, line) => {
+                const targetUri = uri ?? editor.document.uri;
+                const targetLine = typeof line === 'number'
+                    ? line
+                    : editor.selection.active.line;
+                if (!targetUri || typeof targetLine !== 'number') {
+                    return;
+                }
+                editorMarkerManager.togglePointer(targetUri, targetLine);
+            }),
+            vscode.commands.registerTextEditorCommand('simple.editor.clearPointer', (editor, _edit, uri) => {
+                const targetUri = uri ?? editor.document.uri;
+                if (!targetUri) {
+                    return;
+                }
+                editorMarkerManager.clearPointer(targetUri);
+            }),
+            vscode.commands.registerCommand('simple.editor.nextBookmark', () => {
+                const editor = vscode.window.activeTextEditor;
+                if (editor) {
+                    editorMarkerManager.jumpToNextBookmark(editor);
+                }
+            }),
+            vscode.commands.registerCommand('simple.editor.prevBookmark', () => {
+                const editor = vscode.window.activeTextEditor;
+                if (editor) {
+                    editorMarkerManager.jumpToPreviousBookmark(editor);
+                }
+            }),
+            vscode.commands.registerCommand('simple.math.openCustomEditor', () => {
+                const editor = vscode.window.activeTextEditor;
+                if (!editor) {
+                    return;
+                }
+                void vscode.commands.executeCommand('vscode.openWith', editor.document.uri, richCustomEditor_1.RichCustomEditorProvider.viewType);
+            }),
+            vscode.commands.registerCommand('simple.math.toggleInlineRender', async () => {
+                const config = vscode.workspace.getConfiguration('simple.math');
+                const current = config.get('renderInline', true);
+                await config.update('renderInline', !current, vscode.ConfigurationTarget.Global);
+                void vscode.window.showInformationMessage(`Simple inline math rendering ${!current ? 'enabled' : 'disabled'}`);
+            }),
         ];
     }, context.subscriptions);
-    void reopenActiveSimpleDocumentWithRichEditor();
+    await services.safeRegister('ai', 'AI feature surface', async () => {
+        return (0, ai_1.registerSimpleAiSlice)(context, {
+            extensionUri: context.extensionUri,
+            documentSelector: SIMPLE_SELECTOR,
+        });
+    }, context.subscriptions);
 }
 function deactivate() { }
 //# sourceMappingURL=extension.js.map

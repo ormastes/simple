@@ -11,6 +11,9 @@ export interface ServiceStatus {
 
 export type ServiceName =
     | 'editor'
+    | 'math'
+    | 'lsp'
+    | 'ai'
     | 'symbols'
     | 'diagnostics'
     | 'semanticTokens'
@@ -19,6 +22,9 @@ export type ServiceName =
 
 const SERVICE_LABELS: Record<ServiceName, string> = {
     editor: 'Editor',
+    math: 'Math',
+    lsp: 'LSP',
+    ai: 'AI',
     symbols: 'Symbols',
     diagnostics: 'Diagnostics',
     semanticTokens: 'Semantic Tokens',
@@ -38,6 +44,9 @@ export class ExtensionHostServices implements vscode.Disposable {
         this.statusBar.show();
 
         this.setStatus('editor', { health: 'starting', source: 'native', message: 'Booting rich editor host' });
+        this.setStatus('math', { health: 'idle', source: 'fallback', message: 'Not registered yet' });
+        this.setStatus('lsp', { health: 'idle', source: 'fallback', message: 'Compatibility surface not registered yet' });
+        this.setStatus('ai', { health: 'idle', source: 'native', message: 'Not registered yet' });
         this.setStatus('symbols', { health: 'idle', source: 'fallback', message: 'Not registered yet' });
         this.setStatus('diagnostics', { health: 'idle', source: 'fallback', message: 'Not registered yet' });
         this.setStatus('semanticTokens', { health: 'idle', source: 'fallback', message: 'Not registered yet' });
@@ -72,12 +81,12 @@ export class ExtensionHostServices implements vscode.Disposable {
     public async safeRegister(
         name: ServiceName,
         message: string,
-        register: () => vscode.Disposable | readonly vscode.Disposable[] | void,
+        register: () => Promise<vscode.Disposable | readonly vscode.Disposable[] | void> | vscode.Disposable | readonly vscode.Disposable[] | void,
         subscriptions: vscode.Disposable[],
     ): Promise<void> {
         this.setStatus(name, { health: 'starting', source: 'native', message });
         try {
-            const result = register();
+            const result = await register();
             if (Array.isArray(result)) {
                 subscriptions.push(...result);
             } else if (result) {

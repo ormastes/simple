@@ -6,7 +6,7 @@ export interface ServiceStatus {
     message?: string;
     lastError?: string;
 }
-export type ServiceName = 'editor' | 'symbols' | 'diagnostics' | 'semanticTokens' | 'tests' | 'cli';
+export type ServiceName = 'editor' | 'math' | 'lsp' | 'ai' | 'symbols' | 'diagnostics' | 'semanticTokens' | 'tests' | 'cli';
 export declare class ExtensionHostServices implements vscode.Disposable {
     readonly outputChannel: vscode.LogOutputChannel;
     private readonly statusBar;
@@ -17,7 +17,7 @@ export declare class ExtensionHostServices implements vscode.Disposable {
     markDegraded(name: ServiceName, message: string, source?: ServiceStatus['source'], lastError?: string): void;
     markFailed(name: ServiceName, message: string, lastError?: string): void;
     showOutputChannel(): void;
-    safeRegister(name: ServiceName, message: string, register: () => vscode.Disposable | readonly vscode.Disposable[] | void, subscriptions: vscode.Disposable[]): Promise<void>;
+    safeRegister(name: ServiceName, message: string, register: () => Promise<vscode.Disposable | readonly vscode.Disposable[] | void> | vscode.Disposable | readonly vscode.Disposable[] | void, subscriptions: vscode.Disposable[]): Promise<void>;
     dispose(): void;
     private renderStatusBar;
 }

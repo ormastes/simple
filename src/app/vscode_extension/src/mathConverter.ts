@@ -1,9 +1,9 @@
 /**
  * Math Expression Converter
  *
- * Converts Simple math block syntax to LaTeX for rich-editor rendering.
- * This is migrated from the legacy VS Code extension so the custom editor
- * can render representative Simple math blocks before the WASM bridge exists.
+ * Converts Simple math block syntax to both LaTeX and Unicode previews.
+ * The Unicode path is the shared "char-based" preview used by the native
+ * VS Code source editor and the rich custom editor.
  */
 
 /** Map of Greek letter names to LaTeX commands */
@@ -17,6 +17,26 @@ const GREEK_TO_LATEX: Record<string, string> = {
     Gamma: '\\Gamma', Delta: '\\Delta', Theta: '\\Theta', Lambda: '\\Lambda',
     Xi: '\\Xi', Pi: '\\Pi', Sigma: '\\Sigma', Phi: '\\Phi',
     Psi: '\\Psi', Omega: '\\Omega',
+};
+
+/** Map of Greek letter names to Unicode characters */
+const GREEK_TO_UNICODE: Record<string, string> = {
+    alpha: '\u03B1', beta: '\u03B2', gamma: '\u03B3', delta: '\u03B4',
+    epsilon: '\u03B5', zeta: '\u03B6', eta: '\u03B7', theta: '\u03B8',
+    iota: '\u03B9', kappa: '\u03BA', lambda: '\u03BB', mu: '\u03BC',
+    nu: '\u03BD', xi: '\u03BE', pi: '\u03C0', rho: '\u03C1',
+    sigma: '\u03C3', tau: '\u03C4', upsilon: '\u03C5', phi: '\u03C6',
+    chi: '\u03C7', psi: '\u03C8', omega: '\u03C9',
+    Gamma: '\u0393', Delta: '\u0394', Theta: '\u0398', Lambda: '\u039B',
+    Xi: '\u039E', Pi: '\u03A0', Sigma: '\u03A3', Phi: '\u03A6',
+    Psi: '\u03A8', Omega: '\u03A9',
+};
+
+/** Superscript digit map */
+const SUPERSCRIPT_DIGITS: Record<string, string> = {
+    '0': '\u2070', '1': '\u00B9', '2': '\u00B2', '3': '\u00B3',
+    '4': '\u2074', '5': '\u2075', '6': '\u2076', '7': '\u2077',
+    '8': '\u2078', '9': '\u2079', 'n': '\u207F', 'i': '\u2071',
 };
 
 /** Known math function names that get \cmd treatment in LaTeX */
@@ -254,6 +274,87 @@ export function simpleToLatex(source: string): string {
     result = result.replace(/\.\*/g, '\\odot');
     result = result.replace(/\.\//g, '\\oslash');
     result = result.replace(/\s*\*\s*/g, ' \\cdot ');
+
+    return result;
+}
+
+export function simpleToUnicode(source: string): string {
+    let result = source;
+
+    result = replaceBalancedCall(result, 'frac', (args) => {
+        const [a, b] = splitAtTopLevelComma(args);
+        if (!b) {
+            return `(${simpleToUnicode(a)})/()`;
+        }
+        return `(${simpleToUnicode(a)})/(${simpleToUnicode(b)})`;
+    });
+
+    result = replaceBalancedCall(result, 'sqrt', (args) => {
+        return `\u221A(${simpleToUnicode(args)})`;
+    });
+
+    result = replaceBalancedCall(result, 'sum', (args) => {
+        const [expr, bounds] = splitAtTopLevelComma(args);
+        const boundsMatch = bounds.match(/^(\w+)=(.+)\.\.(.+)$/);
+        if (boundsMatch) {
+            const [, v, lo, hi] = boundsMatch;
+            return `\u2211(${simpleToUnicode(v)}=${simpleToUnicode(lo)}..${simpleToUnicode(hi)}) ${simpleToUnicode(expr)}`;
+        }
+        return `\u2211 ${simpleToUnicode(expr)}`;
+    });
+
+    result = replaceBalancedCall(result, 'product', (args) => {
+        const [expr, bounds] = splitAtTopLevelComma(args);
+        const boundsMatch = bounds.match(/^(\w+)=(.+)\.\.(.+)$/);
+        if (boundsMatch) {
+            const [, v, lo, hi] = boundsMatch;
+            return `\u220F(${simpleToUnicode(v)}=${simpleToUnicode(lo)}..${simpleToUnicode(hi)}) ${simpleToUnicode(expr)}`;
+        }
+        return `\u220F ${simpleToUnicode(expr)}`;
+    });
+
+    result = replaceBalancedCall(result, 'integral', (args) => {
+        const [expr, bounds] = splitAtTopLevelComma(args);
+        const boundsMatch = bounds.match(/^(\w+)=(.+)\.\.(.+)$/);
+        if (boundsMatch) {
+            const [, v, lo, hi] = boundsMatch;
+            return `\u222B(${simpleToUnicode(v)}=${simpleToUnicode(lo)}..${simpleToUnicode(hi)}) ${simpleToUnicode(expr)}`;
+        }
+        return `\u222B ${simpleToUnicode(expr)}`;
+    });
+
+    for (const [name, ch] of Object.entries(GREEK_TO_UNICODE)) {
+        const regex = new RegExp(`\\b${name}\\b`, 'g');
+        result = result.replace(regex, ch);
+    }
+
+    result = result.replace(/\^(\d)/g, (_match, digit) => {
+        return SUPERSCRIPT_DIGITS[digit] || `^${digit}`;
+    });
+    result = result.replace(/\^([ni])/g, (_match, ch) => {
+        return SUPERSCRIPT_DIGITS[ch] || `^${ch}`;
+    });
+
+    result = result.replace(/\bsqrt\b/g, '\u221A');
+    result = result.replace(/\s*\*\s*/g, '\u00B7');
+    result = result.replace(/\s*@\s*/g, '\u2297');
+    result = result.replace(/\.\+/g, '\u2295');
+    result = result.replace(/\.\-/g, '\u2296');
+    result = result.replace(/\.\*/g, '\u2299');
+    result = result.replace(/\.\//g, '\u2298');
+    result = result.replace(/\bpartial\b/g, '\u2202');
+    result = result.replace(/\bnabla\b/g, '\u2207');
+    result = result.replace(/\binfinity\b/g, '\u221E');
+    result = result.replace(/\bto\b/g, '\u2192');
+    result = result.replace(/\bleq\b/g, '\u2264');
+    result = result.replace(/\bgeq\b/g, '\u2265');
+    result = result.replace(/\bneq\b/g, '\u2260');
+    result = result.replace(/\bapprox\b/g, '\u2248');
+    result = result.replace(/\bmid\b/g, '|');
+    result = result.replace(/\bsim\b/g, '~');
+    result = result.replace(/\bin\b/g, '\u2208');
+    result = result.replace(/\bforall\b/g, '\u2200');
+    result = result.replace(/\bexists\b/g, '\u2203');
 
     return result;
 }

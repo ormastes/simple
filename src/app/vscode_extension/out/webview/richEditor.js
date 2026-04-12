@@ -13020,6 +13020,278 @@ var RichEditorWebview = (() => {
   var showTooltip = /* @__PURE__ */ Facet.define({
     enables: [tooltipPlugin, baseTheme]
   });
+  var showHoverTooltip = /* @__PURE__ */ Facet.define({
+    combine: (inputs) => inputs.reduce((a, i) => a.concat(i), [])
+  });
+  var HoverTooltipHost = class _HoverTooltipHost {
+    // Needs to be static so that host tooltip instances always match
+    static create(view) {
+      return new _HoverTooltipHost(view);
+    }
+    constructor(view) {
+      this.view = view;
+      this.mounted = false;
+      this.dom = document.createElement("div");
+      this.dom.classList.add("cm-tooltip-hover");
+      this.manager = new TooltipViewManager(view, showHoverTooltip, (t2, p) => this.createHostedView(t2, p), (t2) => t2.dom.remove());
+    }
+    createHostedView(tooltip, prev) {
+      let hostedView = tooltip.create(this.view);
+      hostedView.dom.classList.add("cm-tooltip-section");
+      this.dom.insertBefore(hostedView.dom, prev ? prev.dom.nextSibling : this.dom.firstChild);
+      if (this.mounted && hostedView.mount)
+        hostedView.mount(this.view);
+      return hostedView;
+    }
+    mount(view) {
+      for (let hostedView of this.manager.tooltipViews) {
+        if (hostedView.mount)
+          hostedView.mount(view);
+      }
+      this.mounted = true;
+    }
+    positioned(space) {
+      for (let hostedView of this.manager.tooltipViews) {
+        if (hostedView.positioned)
+          hostedView.positioned(space);
+      }
+    }
+    update(update) {
+      this.manager.update(update);
+    }
+    destroy() {
+      var _a2;
+      for (let t2 of this.manager.tooltipViews)
+        (_a2 = t2.destroy) === null || _a2 === void 0 ? void 0 : _a2.call(t2);
+    }
+    passProp(name2) {
+      let value = void 0;
+      for (let view of this.manager.tooltipViews) {
+        let given = view[name2];
+        if (given !== void 0) {
+          if (value === void 0)
+            value = given;
+          else if (value !== given)
+            return void 0;
+        }
+      }
+      return value;
+    }
+    get offset() {
+      return this.passProp("offset");
+    }
+    get getCoords() {
+      return this.passProp("getCoords");
+    }
+    get overlap() {
+      return this.passProp("overlap");
+    }
+    get resize() {
+      return this.passProp("resize");
+    }
+  };
+  var showHoverTooltipHost = /* @__PURE__ */ showTooltip.compute([showHoverTooltip], (state) => {
+    let tooltips = state.facet(showHoverTooltip);
+    if (tooltips.length === 0)
+      return null;
+    return {
+      pos: Math.min(...tooltips.map((t2) => t2.pos)),
+      end: Math.max(...tooltips.map((t2) => {
+        var _a2;
+        return (_a2 = t2.end) !== null && _a2 !== void 0 ? _a2 : t2.pos;
+      })),
+      create: HoverTooltipHost.create,
+      above: tooltips[0].above,
+      arrow: tooltips.some((t2) => t2.arrow)
+    };
+  });
+  var HoverPlugin = class {
+    constructor(view, source, field, setHover, hoverTime) {
+      this.view = view;
+      this.source = source;
+      this.field = field;
+      this.setHover = setHover;
+      this.hoverTime = hoverTime;
+      this.hoverTimeout = -1;
+      this.restartTimeout = -1;
+      this.pending = null;
+      this.lastMove = { x: 0, y: 0, target: view.dom, time: 0 };
+      this.checkHover = this.checkHover.bind(this);
+      view.dom.addEventListener("mouseleave", this.mouseleave = this.mouseleave.bind(this));
+      view.dom.addEventListener("mousemove", this.mousemove = this.mousemove.bind(this));
+    }
+    update() {
+      if (this.pending) {
+        this.pending = null;
+        clearTimeout(this.restartTimeout);
+        this.restartTimeout = setTimeout(() => this.startHover(), 20);
+      }
+    }
+    get active() {
+      return this.view.state.field(this.field);
+    }
+    checkHover() {
+      this.hoverTimeout = -1;
+      if (this.active.length)
+        return;
+      let hovered = Date.now() - this.lastMove.time;
+      if (hovered < this.hoverTime)
+        this.hoverTimeout = setTimeout(this.checkHover, this.hoverTime - hovered);
+      else
+        this.startHover();
+    }
+    startHover() {
+      clearTimeout(this.restartTimeout);
+      let { view, lastMove } = this;
+      let tile = view.docView.tile.nearest(lastMove.target);
+      if (!tile)
+        return;
+      let pos, side = 1;
+      if (tile.isWidget()) {
+        pos = tile.posAtStart;
+      } else {
+        pos = view.posAtCoords(lastMove);
+        if (pos == null)
+          return;
+        let posCoords = view.coordsAtPos(pos);
+        if (!posCoords || lastMove.y < posCoords.top || lastMove.y > posCoords.bottom || lastMove.x < posCoords.left - view.defaultCharacterWidth || lastMove.x > posCoords.right + view.defaultCharacterWidth)
+          return;
+        let bidi = view.bidiSpans(view.state.doc.lineAt(pos)).find((s) => s.from <= pos && s.to >= pos);
+        let rtl = bidi && bidi.dir == Direction.RTL ? -1 : 1;
+        side = lastMove.x < posCoords.left ? -rtl : rtl;
+      }
+      let open = this.source(view, pos, side);
+      if (open === null || open === void 0 ? void 0 : open.then) {
+        let pending = this.pending = { pos };
+        open.then((result) => {
+          if (this.pending == pending) {
+            this.pending = null;
+            if (result && !(Array.isArray(result) && !result.length))
+              view.dispatch({ effects: this.setHover.of(Array.isArray(result) ? result : [result]) });
+          }
+        }, (e) => logException(view.state, e, "hover tooltip"));
+      } else if (open && !(Array.isArray(open) && !open.length)) {
+        view.dispatch({ effects: this.setHover.of(Array.isArray(open) ? open : [open]) });
+      }
+    }
+    get tooltip() {
+      let plugin = this.view.plugin(tooltipPlugin);
+      let index = plugin ? plugin.manager.tooltips.findIndex((t2) => t2.create == HoverTooltipHost.create) : -1;
+      return index > -1 ? plugin.manager.tooltipViews[index] : null;
+    }
+    mousemove(event) {
+      var _a2, _b;
+      this.lastMove = { x: event.clientX, y: event.clientY, target: event.target, time: Date.now() };
+      if (this.hoverTimeout < 0)
+        this.hoverTimeout = setTimeout(this.checkHover, this.hoverTime);
+      let { active, tooltip } = this;
+      if (active.length && tooltip && !isInTooltip(tooltip.dom, event) || this.pending) {
+        let { pos } = active[0] || this.pending, end = (_b = (_a2 = active[0]) === null || _a2 === void 0 ? void 0 : _a2.end) !== null && _b !== void 0 ? _b : pos;
+        if (pos == end ? this.view.posAtCoords(this.lastMove) != pos : !isOverRange(this.view, pos, end, event.clientX, event.clientY)) {
+          this.view.dispatch({ effects: this.setHover.of([]) });
+          this.pending = null;
+        }
+      }
+    }
+    mouseleave(event) {
+      clearTimeout(this.hoverTimeout);
+      this.hoverTimeout = -1;
+      let { active } = this;
+      if (active.length) {
+        let { tooltip } = this;
+        let inTooltip = tooltip && tooltip.dom.contains(event.relatedTarget);
+        if (!inTooltip)
+          this.view.dispatch({ effects: this.setHover.of([]) });
+        else
+          this.watchTooltipLeave(tooltip.dom);
+      }
+    }
+    watchTooltipLeave(tooltip) {
+      let watch = (event) => {
+        tooltip.removeEventListener("mouseleave", watch);
+        if (this.active.length && !this.view.dom.contains(event.relatedTarget))
+          this.view.dispatch({ effects: this.setHover.of([]) });
+      };
+      tooltip.addEventListener("mouseleave", watch);
+    }
+    destroy() {
+      clearTimeout(this.hoverTimeout);
+      clearTimeout(this.restartTimeout);
+      this.view.dom.removeEventListener("mouseleave", this.mouseleave);
+      this.view.dom.removeEventListener("mousemove", this.mousemove);
+    }
+  };
+  var tooltipMargin = 4;
+  function isInTooltip(tooltip, event) {
+    let { left, right, top: top2, bottom } = tooltip.getBoundingClientRect(), arrow;
+    if (arrow = tooltip.querySelector(".cm-tooltip-arrow")) {
+      let arrowRect = arrow.getBoundingClientRect();
+      top2 = Math.min(arrowRect.top, top2);
+      bottom = Math.max(arrowRect.bottom, bottom);
+    }
+    return event.clientX >= left - tooltipMargin && event.clientX <= right + tooltipMargin && event.clientY >= top2 - tooltipMargin && event.clientY <= bottom + tooltipMargin;
+  }
+  function isOverRange(view, from, to, x, y, margin) {
+    let rect = view.scrollDOM.getBoundingClientRect();
+    let docBottom = view.documentTop + view.documentPadding.top + view.contentHeight;
+    if (rect.left > x || rect.right < x || rect.top > y || Math.min(rect.bottom, docBottom) < y)
+      return false;
+    let pos = view.posAtCoords({ x, y }, false);
+    return pos >= from && pos <= to;
+  }
+  function hoverTooltip(source, options = {}) {
+    let setHover = StateEffect.define();
+    let hoverState = StateField.define({
+      create() {
+        return [];
+      },
+      update(value, tr) {
+        if (value.length) {
+          if (options.hideOnChange && (tr.docChanged || tr.selection))
+            value = [];
+          else if (options.hideOn)
+            value = value.filter((v) => !options.hideOn(tr, v));
+          if (tr.docChanged) {
+            let mapped = [];
+            for (let tooltip of value) {
+              let newPos = tr.changes.mapPos(tooltip.pos, -1, MapMode.TrackDel);
+              if (newPos != null) {
+                let copy = Object.assign(/* @__PURE__ */ Object.create(null), tooltip);
+                copy.pos = newPos;
+                if (copy.end != null)
+                  copy.end = tr.changes.mapPos(copy.end);
+                mapped.push(copy);
+              }
+            }
+            value = mapped;
+          }
+        }
+        for (let effect of tr.effects) {
+          if (effect.is(setHover))
+            value = effect.value;
+          if (effect.is(closeHoverTooltipEffect))
+            value = [];
+        }
+        return value;
+      },
+      provide: (f) => showHoverTooltip.from(f)
+    });
+    return {
+      active: hoverState,
+      extension: [
+        hoverState,
+        ViewPlugin.define((view) => new HoverPlugin(
+          view,
+          source,
+          hoverState,
+          setHover,
+          options.hoverTime || 300
+          /* Hover.Time */
+        )),
+        showHoverTooltipHost
+      ]
+    };
+  }
   function getTooltip(view, tooltip) {
     let plugin = view.plugin(tooltipPlugin);
     if (!plugin)
@@ -13027,6 +13299,7 @@ var RichEditorWebview = (() => {
     let found = plugin.manager.tooltips.indexOf(tooltip);
     return found < 0 ? null : plugin.manager.tooltipViews[found];
   }
+  var closeHoverTooltipEffect = /* @__PURE__ */ StateEffect.define();
   var panelConfig = /* @__PURE__ */ Facet.define({
     combine(configs) {
       let topContainer, bottomContainer;
@@ -16887,6 +17160,338 @@ var RichEditorWebview = (() => {
       return changes.length ? [tr, { changes, sequential: true }] : tr;
     });
   }
+  var foldService = /* @__PURE__ */ Facet.define();
+  var foldNodeProp = /* @__PURE__ */ new NodeProp();
+  function syntaxFolding(state, start, end) {
+    let tree = syntaxTree(state);
+    if (tree.length < end)
+      return null;
+    let stack = tree.resolveStack(end, 1);
+    let found = null;
+    for (let iter = stack; iter; iter = iter.next) {
+      let cur2 = iter.node;
+      if (cur2.to <= end || cur2.from > end)
+        continue;
+      if (found && cur2.from < start)
+        break;
+      let prop = cur2.type.prop(foldNodeProp);
+      if (prop && (cur2.to < tree.length - 50 || tree.length == state.doc.length || !isUnfinished(cur2))) {
+        let value = prop(cur2, state);
+        if (value && value.from <= end && value.from >= start && value.to > end)
+          found = value;
+      }
+    }
+    return found;
+  }
+  function isUnfinished(node) {
+    let ch = node.lastChild;
+    return ch && ch.to == node.to && ch.type.isError;
+  }
+  function foldable(state, lineStart, lineEnd) {
+    for (let service of state.facet(foldService)) {
+      let result = service(state, lineStart, lineEnd);
+      if (result)
+        return result;
+    }
+    return syntaxFolding(state, lineStart, lineEnd);
+  }
+  function mapRange(range, mapping) {
+    let from = mapping.mapPos(range.from, 1), to = mapping.mapPos(range.to, -1);
+    return from >= to ? void 0 : { from, to };
+  }
+  var foldEffect = /* @__PURE__ */ StateEffect.define({ map: mapRange });
+  var unfoldEffect = /* @__PURE__ */ StateEffect.define({ map: mapRange });
+  function selectedLines(view) {
+    let lines = [];
+    for (let { head } of view.state.selection.ranges) {
+      if (lines.some((l) => l.from <= head && l.to >= head))
+        continue;
+      lines.push(view.lineBlockAt(head));
+    }
+    return lines;
+  }
+  var foldState = /* @__PURE__ */ StateField.define({
+    create() {
+      return Decoration.none;
+    },
+    update(folded, tr) {
+      if (tr.isUserEvent("delete"))
+        tr.changes.iterChangedRanges((fromA, toA) => folded = clearTouchedFolds(folded, fromA, toA));
+      folded = folded.map(tr.changes);
+      for (let e of tr.effects) {
+        if (e.is(foldEffect) && !foldExists(folded, e.value.from, e.value.to)) {
+          let { preparePlaceholder } = tr.state.facet(foldConfig);
+          let widget = !preparePlaceholder ? foldWidget : Decoration.replace({ widget: new PreparedFoldWidget(preparePlaceholder(tr.state, e.value)) });
+          folded = folded.update({ add: [widget.range(e.value.from, e.value.to)] });
+        } else if (e.is(unfoldEffect)) {
+          folded = folded.update({
+            filter: (from, to) => e.value.from != from || e.value.to != to,
+            filterFrom: e.value.from,
+            filterTo: e.value.to
+          });
+        }
+      }
+      if (tr.selection)
+        folded = clearTouchedFolds(folded, tr.selection.main.head);
+      return folded;
+    },
+    provide: (f) => EditorView.decorations.from(f),
+    toJSON(folded, state) {
+      let ranges = [];
+      folded.between(0, state.doc.length, (from, to) => {
+        ranges.push(from, to);
+      });
+      return ranges;
+    },
+    fromJSON(value) {
+      if (!Array.isArray(value) || value.length % 2)
+        throw new RangeError("Invalid JSON for fold state");
+      let ranges = [];
+      for (let i = 0; i < value.length; ) {
+        let from = value[i++], to = value[i++];
+        if (typeof from != "number" || typeof to != "number")
+          throw new RangeError("Invalid JSON for fold state");
+        ranges.push(foldWidget.range(from, to));
+      }
+      return Decoration.set(ranges, true);
+    }
+  });
+  function clearTouchedFolds(folded, from, to = from) {
+    let touched = false;
+    folded.between(from, to, (a, b) => {
+      if (a < to && b > from)
+        touched = true;
+    });
+    return !touched ? folded : folded.update({
+      filterFrom: from,
+      filterTo: to,
+      filter: (a, b) => a >= to || b <= from
+    });
+  }
+  function findFold(state, from, to) {
+    var _a2;
+    let found = null;
+    (_a2 = state.field(foldState, false)) === null || _a2 === void 0 ? void 0 : _a2.between(from, to, (from2, to2) => {
+      if (!found || found.from > from2)
+        found = { from: from2, to: to2 };
+    });
+    return found;
+  }
+  function foldExists(folded, from, to) {
+    let found = false;
+    folded.between(from, from, (a, b) => {
+      if (a == from && b == to)
+        found = true;
+    });
+    return found;
+  }
+  function maybeEnable(state, other) {
+    return state.field(foldState, false) ? other : other.concat(StateEffect.appendConfig.of(codeFolding()));
+  }
+  var foldCode = (view) => {
+    for (let line of selectedLines(view)) {
+      let range = foldable(view.state, line.from, line.to);
+      if (range) {
+        view.dispatch({ effects: maybeEnable(view.state, [foldEffect.of(range), announceFold(view, range)]) });
+        return true;
+      }
+    }
+    return false;
+  };
+  var unfoldCode = (view) => {
+    if (!view.state.field(foldState, false))
+      return false;
+    let effects = [];
+    for (let line of selectedLines(view)) {
+      let folded = findFold(view.state, line.from, line.to);
+      if (folded)
+        effects.push(unfoldEffect.of(folded), announceFold(view, folded, false));
+    }
+    if (effects.length)
+      view.dispatch({ effects });
+    return effects.length > 0;
+  };
+  function announceFold(view, range, fold = true) {
+    let lineFrom = view.state.doc.lineAt(range.from).number, lineTo = view.state.doc.lineAt(range.to).number;
+    return EditorView.announce.of(`${view.state.phrase(fold ? "Folded lines" : "Unfolded lines")} ${lineFrom} ${view.state.phrase("to")} ${lineTo}.`);
+  }
+  var foldAll = (view) => {
+    let { state } = view, effects = [];
+    for (let pos = 0; pos < state.doc.length; ) {
+      let line = view.lineBlockAt(pos), range = foldable(state, line.from, line.to);
+      if (range)
+        effects.push(foldEffect.of(range));
+      pos = (range ? view.lineBlockAt(range.to) : line).to + 1;
+    }
+    if (effects.length)
+      view.dispatch({ effects: maybeEnable(view.state, effects) });
+    return !!effects.length;
+  };
+  var unfoldAll = (view) => {
+    let field = view.state.field(foldState, false);
+    if (!field || !field.size)
+      return false;
+    let effects = [];
+    field.between(0, view.state.doc.length, (from, to) => {
+      effects.push(unfoldEffect.of({ from, to }));
+    });
+    view.dispatch({ effects });
+    return true;
+  };
+  var foldKeymap = [
+    { key: "Ctrl-Shift-[", mac: "Cmd-Alt-[", run: foldCode },
+    { key: "Ctrl-Shift-]", mac: "Cmd-Alt-]", run: unfoldCode },
+    { key: "Ctrl-Alt-[", run: foldAll },
+    { key: "Ctrl-Alt-]", run: unfoldAll }
+  ];
+  var defaultConfig = {
+    placeholderDOM: null,
+    preparePlaceholder: null,
+    placeholderText: "\u2026"
+  };
+  var foldConfig = /* @__PURE__ */ Facet.define({
+    combine(values) {
+      return combineConfig(values, defaultConfig);
+    }
+  });
+  function codeFolding(config2) {
+    let result = [foldState, baseTheme$12];
+    if (config2)
+      result.push(foldConfig.of(config2));
+    return result;
+  }
+  function widgetToDOM(view, prepared) {
+    let { state } = view, conf = state.facet(foldConfig);
+    let onclick = (event) => {
+      let line = view.lineBlockAt(view.posAtDOM(event.target));
+      let folded = findFold(view.state, line.from, line.to);
+      if (folded)
+        view.dispatch({ effects: unfoldEffect.of(folded) });
+      event.preventDefault();
+    };
+    if (conf.placeholderDOM)
+      return conf.placeholderDOM(view, onclick, prepared);
+    let element = document.createElement("span");
+    element.textContent = conf.placeholderText;
+    element.setAttribute("aria-label", state.phrase("folded code"));
+    element.title = state.phrase("unfold");
+    element.className = "cm-foldPlaceholder";
+    element.onclick = onclick;
+    return element;
+  }
+  var foldWidget = /* @__PURE__ */ Decoration.replace({ widget: /* @__PURE__ */ new class extends WidgetType {
+    toDOM(view) {
+      return widgetToDOM(view, null);
+    }
+  }() });
+  var PreparedFoldWidget = class extends WidgetType {
+    constructor(value) {
+      super();
+      this.value = value;
+    }
+    eq(other) {
+      return this.value == other.value;
+    }
+    toDOM(view) {
+      return widgetToDOM(view, this.value);
+    }
+  };
+  var foldGutterDefaults = {
+    openText: "\u2304",
+    closedText: "\u203A",
+    markerDOM: null,
+    domEventHandlers: {},
+    foldingChanged: () => false
+  };
+  var FoldMarker = class extends GutterMarker {
+    constructor(config2, open) {
+      super();
+      this.config = config2;
+      this.open = open;
+    }
+    eq(other) {
+      return this.config == other.config && this.open == other.open;
+    }
+    toDOM(view) {
+      if (this.config.markerDOM)
+        return this.config.markerDOM(this.open);
+      let span = document.createElement("span");
+      span.textContent = this.open ? this.config.openText : this.config.closedText;
+      span.title = view.state.phrase(this.open ? "Fold line" : "Unfold line");
+      return span;
+    }
+  };
+  function foldGutter(config2 = {}) {
+    let fullConfig = { ...foldGutterDefaults, ...config2 };
+    let canFold = new FoldMarker(fullConfig, true), canUnfold = new FoldMarker(fullConfig, false);
+    let markers = ViewPlugin.fromClass(class {
+      constructor(view) {
+        this.from = view.viewport.from;
+        this.markers = this.buildMarkers(view);
+      }
+      update(update) {
+        if (update.docChanged || update.viewportChanged || update.startState.facet(language) != update.state.facet(language) || update.startState.field(foldState, false) != update.state.field(foldState, false) || syntaxTree(update.startState) != syntaxTree(update.state) || fullConfig.foldingChanged(update))
+          this.markers = this.buildMarkers(update.view);
+      }
+      buildMarkers(view) {
+        let builder = new RangeSetBuilder();
+        for (let line of view.viewportLineBlocks) {
+          let mark = findFold(view.state, line.from, line.to) ? canUnfold : foldable(view.state, line.from, line.to) ? canFold : null;
+          if (mark)
+            builder.add(line.from, line.from, mark);
+        }
+        return builder.finish();
+      }
+    });
+    let { domEventHandlers } = fullConfig;
+    return [
+      markers,
+      gutter({
+        class: "cm-foldGutter",
+        markers(view) {
+          var _a2;
+          return ((_a2 = view.plugin(markers)) === null || _a2 === void 0 ? void 0 : _a2.markers) || RangeSet.empty;
+        },
+        initialSpacer() {
+          return new FoldMarker(fullConfig, false);
+        },
+        domEventHandlers: {
+          ...domEventHandlers,
+          click: (view, line, event) => {
+            if (domEventHandlers.click && domEventHandlers.click(view, line, event))
+              return true;
+            let folded = findFold(view.state, line.from, line.to);
+            if (folded) {
+              view.dispatch({ effects: unfoldEffect.of(folded) });
+              return true;
+            }
+            let range = foldable(view.state, line.from, line.to);
+            if (range) {
+              view.dispatch({ effects: foldEffect.of(range) });
+              return true;
+            }
+            return false;
+          }
+        }
+      }),
+      codeFolding()
+    ];
+  }
+  var baseTheme$12 = /* @__PURE__ */ EditorView.baseTheme({
+    ".cm-foldPlaceholder": {
+      backgroundColor: "#eee",
+      border: "1px solid #ddd",
+      color: "#888",
+      borderRadius: ".2em",
+      margin: "0 1px",
+      padding: "0 1px",
+      cursor: "pointer"
+    },
+    ".cm-foldGutter span": {
+      padding: "0 1px",
+      cursor: "pointer"
+    }
+  });
   var HighlightStyle = class _HighlightStyle {
     constructor(specs, options) {
       this.specs = specs;
@@ -22064,6 +22669,9 @@ var RichEditorWebview = (() => {
   function buildTestRunMarkers(state, tests) {
     const builder = new RangeSetBuilder();
     for (const test of tests) {
+      if (test.kind !== "describe" && test.kind !== "sdoctest") {
+        continue;
+      }
       const lineNumber = test.line + 1;
       if (lineNumber < 1 || lineNumber > state.doc.lines) {
         continue;
@@ -22157,49 +22765,176 @@ var RichEditorWebview = (() => {
       to: line.from + end
     };
   }
-  function attachHoverOverlay(view, parent, getSymbols) {
-    const tooltip = document.createElement("div");
-    tooltip.className = "simple-rich-hover-tooltip";
-    tooltip.hidden = true;
-    parent.appendChild(tooltip);
-    const hide = () => {
-      tooltip.hidden = true;
-    };
-    const onMouseMove = (event) => {
-      const pos = view.posAtCoords({ x: event.clientX, y: event.clientY });
-      if (pos === null) {
-        hide();
-        return;
-      }
+  function buildSymbolActionMarkup(symbol) {
+    return `
+        <strong>${symbol.name}</strong>
+        <div>${symbol.detail} \xB7 ${symbol.kind}</div>
+        <div>line ${symbol.line + 1}</div>
+        <div class="simple-rich-hover-actions">
+            <button type="button" data-nav="definition" data-symbol="${symbol.name}">Definition</button>
+            <button type="button" data-nav="references" data-symbol="${symbol.name}">References</button>
+        </div>
+    `;
+  }
+  function wireSymbolActionButtons(root, ident, onNavigate, onNavigateSymbol, onClose) {
+    root.querySelectorAll("button[data-nav]").forEach((button) => {
+      button.onclick = (clickEvent) => {
+        clickEvent.preventDefault();
+        clickEvent.stopPropagation();
+        const action = button.dataset.nav === "references" ? "references" : "definition";
+        const symbolName = button.dataset.symbol;
+        if (symbolName) {
+          onNavigateSymbol(symbolName, action);
+        } else {
+          onNavigate(ident.from, action);
+        }
+        onClose?.();
+      };
+    });
+  }
+  function createSymbolHoverTooltip(getSymbols, onNavigate, onNavigateSymbol) {
+    return hoverTooltip((view, pos) => {
       const ident = readIdentifierAt(view.state, pos);
       if (!ident) {
-        hide();
-        return;
+        return null;
       }
       const symbol = getSymbols().find((candidate) => candidate.name === ident.word);
       if (!symbol) {
-        hide();
-        return;
+        return null;
       }
-      tooltip.innerHTML = `
-            <strong>${symbol.name}</strong>
-            <div>${symbol.detail} \xB7 ${symbol.kind}</div>
-            <div>line ${symbol.line + 1}</div>
-        `;
-      const parentRect = parent.getBoundingClientRect();
-      tooltip.style.left = `${event.clientX - parentRect.left + 12}px`;
-      tooltip.style.top = `${event.clientY - parentRect.top + 16}px`;
-      tooltip.hidden = false;
+      return {
+        pos: ident.from,
+        end: ident.to,
+        above: true,
+        create() {
+          const dom = document.createElement("div");
+          dom.className = "simple-rich-hover-tooltip";
+          dom.innerHTML = buildSymbolActionMarkup(symbol);
+          wireSymbolActionButtons(dom, ident, onNavigate, onNavigateSymbol);
+          return { dom };
+        }
+      };
+    }, {
+      hoverTime: 250,
+      hideOnChange: "touch"
+    });
+  }
+  function createActionMenu(parent, onNavigate, onNavigateSymbol) {
+    const menu = document.createElement("div");
+    menu.className = "simple-rich-action-menu";
+    menu.hidden = true;
+    parent.appendChild(menu);
+    const hide = () => {
+      menu.hidden = true;
     };
-    view.dom.addEventListener("mousemove", onMouseMove);
-    view.dom.addEventListener("mouseleave", hide);
-    view.dom.addEventListener("mousedown", hide);
-    return () => {
-      view.dom.removeEventListener("mousemove", onMouseMove);
-      view.dom.removeEventListener("mouseleave", hide);
-      view.dom.removeEventListener("mousedown", hide);
-      tooltip.remove();
+    const dismissOnWindowMouseDown = (event) => {
+      if (!menu.contains(event.target)) {
+        hide();
+      }
     };
+    window.addEventListener("mousedown", dismissOnWindowMouseDown, true);
+    return {
+      show(clientX, clientY, ident, symbol) {
+        const resolved = symbol ?? {
+          name: ident.word,
+          kind: "symbol",
+          detail: "identifier",
+          line: 0,
+          from: ident.from,
+          to: ident.to
+        };
+        menu.innerHTML = buildSymbolActionMarkup(resolved);
+        wireSymbolActionButtons(menu, ident, onNavigate, onNavigateSymbol, hide);
+        const parentRect = parent.getBoundingClientRect();
+        menu.style.left = `${clientX - parentRect.left + 10}px`;
+        menu.style.top = `${clientY - parentRect.top + 10}px`;
+        menu.hidden = false;
+      },
+      hide,
+      destroy() {
+        window.removeEventListener("mousedown", dismissOnWindowMouseDown, true);
+        menu.remove();
+      }
+    };
+  }
+  function createNavigationKeymap(onNavigate) {
+    return keymap.of([
+      {
+        key: "F12",
+        run(view) {
+          onNavigate(view.state.selection.main.head, "definition");
+          return true;
+        }
+      },
+      {
+        key: "Shift-F12",
+        run(view) {
+          onNavigate(view.state.selection.main.head, "references");
+          return true;
+        }
+      }
+    ]);
+  }
+  function computeIndentLevel(text) {
+    let indent = 0;
+    for (const char of text) {
+      if (char === " ") indent += 1;
+      else if (char === "	") indent += 4;
+      else break;
+    }
+    return indent;
+  }
+  function computeFoldRange(state, lineStart) {
+    const line = state.doc.lineAt(lineStart);
+    const trimmed = line.text.trim();
+    if (!trimmed) {
+      return null;
+    }
+    if (trimmed.startsWith('"""')) {
+      for (let number2 = line.number + 1; number2 <= state.doc.lines; number2 += 1) {
+        const candidate = state.doc.line(number2);
+        if (candidate.text.trim().startsWith('"""')) {
+          return candidate.from > line.to ? { from: line.to, to: candidate.from } : null;
+        }
+      }
+      return null;
+    }
+    if (!trimmed.endsWith(":")) {
+      return null;
+    }
+    const baseIndent = computeIndentLevel(line.text);
+    let firstBodyLine = null;
+    let lastBodyLine = null;
+    for (let number2 = line.number + 1; number2 <= state.doc.lines; number2 += 1) {
+      const candidate = state.doc.line(number2);
+      const candidateTrimmed = candidate.text.trim();
+      if (!candidateTrimmed) {
+        if (firstBodyLine !== null) {
+          lastBodyLine = number2;
+        }
+        continue;
+      }
+      const candidateIndent = computeIndentLevel(candidate.text);
+      if (candidateIndent <= baseIndent) {
+        break;
+      }
+      if (firstBodyLine === null) {
+        firstBodyLine = number2;
+      }
+      lastBodyLine = number2;
+    }
+    if (firstBodyLine === null || lastBodyLine === null) {
+      return null;
+    }
+    const lastLine = state.doc.line(lastBodyLine);
+    return lastLine.to > line.to ? { from: line.to, to: lastLine.to } : null;
+  }
+  function createSimpleFoldExtensions() {
+    return [
+      codeFolding(),
+      foldGutter(),
+      foldService.of((state, lineStart) => computeFoldRange(state, lineStart))
+    ];
   }
   var vsCodeTheme = EditorView.theme({
     "&": {
@@ -22340,6 +23075,18 @@ var RichEditorWebview = (() => {
       width: "16px",
       minWidth: "16px"
     },
+    ".cm-foldGutter": {
+      width: "16px",
+      minWidth: "16px"
+    },
+    ".cm-foldGutter .cm-gutterElement": {
+      width: "16px",
+      padding: "0 2px",
+      display: "flex",
+      alignItems: "center",
+      justifyContent: "center",
+      color: "var(--vscode-editorLineNumber-foreground)"
+    },
     ".cm-breakpoint-gutter .cm-gutterElement, .cm-test-run-gutter .cm-gutterElement": {
       width: "16px",
       padding: "0 2px",
@@ -22375,7 +23122,6 @@ var RichEditorWebview = (() => {
       backgroundColor: "transparent"
     },
     ".simple-rich-hover-tooltip": {
-      position: "absolute",
       zIndex: "20",
       minWidth: "140px",
       maxWidth: "240px",
@@ -22385,9 +23131,39 @@ var RichEditorWebview = (() => {
       backgroundColor: "var(--vscode-editorHoverWidget-background)",
       color: "var(--vscode-editorHoverWidget-foreground)",
       boxShadow: "0 6px 20px color-mix(in srgb, black 25%, transparent)",
-      pointerEvents: "none",
+      pointerEvents: "auto",
       fontSize: "12px",
       lineHeight: "1.4"
+    },
+    ".simple-rich-action-menu": {
+      position: "absolute",
+      zIndex: "24",
+      minWidth: "160px",
+      maxWidth: "260px",
+      padding: "8px 10px",
+      borderRadius: "6px",
+      border: "1px solid color-mix(in srgb, var(--vscode-editorHoverWidget-border) 70%, transparent)",
+      backgroundColor: "var(--vscode-editorHoverWidget-background)",
+      color: "var(--vscode-editorHoverWidget-foreground)",
+      boxShadow: "0 6px 20px color-mix(in srgb, black 25%, transparent)"
+    },
+    ".simple-rich-hover-actions": {
+      display: "flex",
+      gap: "6px",
+      marginTop: "8px"
+    },
+    ".simple-rich-hover-actions button": {
+      border: "1px solid color-mix(in srgb, var(--vscode-button-border, transparent) 80%, transparent)",
+      borderRadius: "4px",
+      backgroundColor: "var(--vscode-button-secondaryBackground, color-mix(in srgb, var(--vscode-button-background) 30%, transparent))",
+      color: "var(--vscode-button-secondaryForeground, var(--vscode-button-foreground))",
+      padding: "2px 8px",
+      fontSize: "11px",
+      cursor: "pointer",
+      pointerEvents: "auto"
+    },
+    ".simple-rich-hover-actions button:hover": {
+      backgroundColor: "var(--vscode-button-secondaryHoverBackground, var(--vscode-button-hoverBackground))"
     }
   }, { dark: true });
   var simpleHighlightStyle = HighlightStyle.define([
@@ -22401,14 +23177,15 @@ var RichEditorWebview = (() => {
     { tag: tags.bracket, color: "var(--vscode-editorBracketHighlight-foreground1, #ffd700)" },
     { tag: tags.atom, color: "var(--vscode-symbolIcon-constantForeground, #569cd6)", fontStyle: "italic" }
   ]);
-  function createEditor(parent, initialText, renderedBlocksRef, symbolsRef, testsRef, markersRef, onEdit, onSelectionChange, onRunTest, onToggleBreakpoint) {
+  function createEditor(parent, initialText, renderedBlocksRef, symbolsRef, testsRef, markersRef, onEdit, onSelectionChange, onRunTest, onToggleBreakpoint, onNavigate, onNavigateSymbol) {
     let isApplyingSync = false;
     let editTimer = null;
-    let hoverCleanup = null;
     const decorationPlugin = createDecorationPlugin(() => renderedBlocksRef.current);
     const fullLineMathField = ENABLE_FULL_LINE_BLOCK_MATH ? createFullLineMathField(() => renderedBlocksRef.current) : null;
     const testRunGutter = ENABLE_TEST_LINE_WIDGETS ? createTestRunGutter(() => testsRef.current, onRunTest) : null;
     const breakpointGutter = createBreakpointGutter(() => markersRef.current, onToggleBreakpoint);
+    const symbolHover = ENABLE_SYMBOL_HOVER ? createSymbolHoverTooltip(() => symbolsRef.current, onNavigate, onNavigateSymbol) : null;
+    const actionMenu = createActionMenu(parent, onNavigate, onNavigateSymbol);
     const editListener = EditorView.updateListener.of((update) => {
       if (isApplyingSync) return;
       if (update.docChanged) {
@@ -22422,9 +23199,41 @@ var RichEditorWebview = (() => {
         onSelectionChange(sel.anchor, sel.head);
       }
     });
+    const navigationClickHandler = EditorView.domEventHandlers({
+      mousedown(event, view2) {
+        const wantsDefinition = event.metaKey || event.ctrlKey;
+        if (!wantsDefinition) {
+          return false;
+        }
+        const pos = view2.posAtCoords({ x: event.clientX, y: event.clientY });
+        if (pos === null || !readIdentifierAt(view2.state, pos)) {
+          return false;
+        }
+        event.preventDefault();
+        const ident = readIdentifierAt(view2.state, pos);
+        const symbol = symbolsRef.current.find((candidate) => candidate.name === ident.word);
+        actionMenu.show(event.clientX, event.clientY, ident, symbol);
+        return true;
+      },
+      contextmenu(event, view2) {
+        const pos = view2.posAtCoords({ x: event.clientX, y: event.clientY });
+        if (pos === null) {
+          return false;
+        }
+        const ident = readIdentifierAt(view2.state, pos);
+        if (!ident) {
+          return false;
+        }
+        event.preventDefault();
+        const symbol = symbolsRef.current.find((candidate) => candidate.name === ident.word);
+        actionMenu.show(event.clientX, event.clientY, ident, symbol);
+        return true;
+      }
+    });
     const extensions = [
       breakpointGutter,
       ...testRunGutter ? [testRunGutter] : [],
+      ...createSimpleFoldExtensions(),
       ...createMathAwareLineNumberSetup(),
       ...fullLineMathField ? [fullLineMathField] : [],
       highlightActiveLineGutter(),
@@ -22443,14 +23252,18 @@ var RichEditorWebview = (() => {
         ...defaultKeymap,
         ...searchKeymap,
         ...historyKeymap,
+        ...foldKeymap,
         indentWithTab
       ]),
+      createNavigationKeymap(onNavigate),
       simpleLanguage,
       vsCodeTheme,
       syntaxHighlighting(simpleHighlightStyle),
       syntaxHighlighting(defaultHighlightStyle, { fallback: true }),
       decorationPlugin,
-      editListener
+      editListener,
+      navigationClickHandler,
+      ...symbolHover ? [symbolHover] : []
     ];
     const state = EditorState.create({
       doc: initialText,
@@ -22481,15 +23294,9 @@ var RichEditorWebview = (() => {
           isApplyingSync = false;
         }
       },
-      enableHoverOverlay() {
-        if (!ENABLE_SYMBOL_HOVER || hoverCleanup || symbolsRef.current.length === 0) {
-          return;
-        }
-        try {
-          hoverCleanup = attachHoverOverlay(view, parent, () => symbolsRef.current);
-        } catch (error) {
-          console.error("Simple Rich Editor: hover overlay disabled after initialization failure", error);
-        }
+      destroy() {
+        actionMenu.destroy();
+        view.destroy();
       }
     };
   }
@@ -22531,6 +23338,18 @@ var RichEditorWebview = (() => {
             type: "toggleBreakpointFromLine",
             line
           });
+        },
+        (offset, action) => {
+          vscode.postMessage({
+            type: action === "definition" ? "revealDefinition" : "showReferences",
+            offset
+          });
+        },
+        (symbol, action) => {
+          vscode.postMessage({
+            type: action === "definition" ? "revealDefinitionForSymbol" : "showReferencesForSymbol",
+            symbol
+          });
         }
       );
       if (selStart > 0 || selEnd > 0) {
@@ -22556,7 +23375,6 @@ var RichEditorWebview = (() => {
         } else {
           editor.setDoc(msg.sourceText, msg.selectionStart, msg.selectionEnd);
         }
-        editor.enableHoverOverlay();
         editor.refreshDecorations();
       }
     });

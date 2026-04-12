@@ -41,40 +41,23 @@ var __importStar = (this && this.__importStar) || (function () {
         return result;
     };
 })();
-var __importDefault = (this && this.__importDefault) || function (mod) {
-    return (mod && mod.__esModule) ? mod : { "default": mod };
-};
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.RichCustomEditorProvider = void 0;
 const crypto = __importStar(require("crypto"));
 const fs = __importStar(require("fs"));
 const vscode = __importStar(require("vscode"));
-const katex_1 = __importDefault(require("katex"));
 const blockDetector_1 = require("./blockDetector");
 const imageResolver_1 = require("./imageResolver");
-const mathConverter_1 = require("./mathConverter");
+const mathPreview_1 = require("./mathPreview");
 const simpleSymbolProviders_1 = require("./symbols/simpleSymbolProviders");
 const testDiscovery_1 = require("./testing/testDiscovery");
-// ── Math rendering (KaTeX) ───────────────────────────────────────────
-const katexCache = new Map();
-function renderKatexInline(latex) {
-    const cached = katexCache.get(latex);
-    if (cached !== undefined)
-        return cached;
-    let html;
-    try {
-        html = katex_1.default.renderToString(latex, {
-            displayMode: true,
-            throwOnError: false,
-            output: 'html',
-            trust: false,
-        });
-    }
-    catch {
-        html = '<span style="color: var(--vscode-errorForeground)">[math error]</span>';
-    }
-    katexCache.set(latex, html);
-    return html;
+function escapeForHtml(text) {
+    return text
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#039;');
 }
 // ── Block rendering ──────────────────────────────────────────────────
 function renderDetectedBlocks(blocks, documentUri, webview) {
@@ -101,9 +84,11 @@ function renderDetectedBlocks(blocks, documentUri, webview) {
                 errorMessage: uri ? undefined : `Image not found: ${parsed.path}`,
             };
         }
-        // Math/loss/nograd/graph — render via KaTeX
-        const latex = (0, mathConverter_1.simpleToLatex)(block.content);
-        const html = renderKatexInline(latex);
+        const preview = (0, mathPreview_1.buildMathPreview)(block);
+        const label = preview
+            ? preview.displayText
+            : block.content;
+        const html = `<span class="cm-math-pretty-text">${escapeForHtml(label)}</span>`;
         return {
             ...block,
             renderedHtml: html,
@@ -292,7 +277,7 @@ class RichCustomEditorProvider {
                 tests: buildRichEditorTests(document),
                 markers: this.getMarkerState
                     ? this.getMarkerState(document.uri)
-                    : { breakpoints: [] },
+                    : { breakpoints: [], bookmarks: [], pointerLine: null },
             });
         };
         webviewPanel.webview.html = buildRichEditorHtml(katexCssUri, richEditorBundleSource, webviewPanel.webview.cspSource, nonce);
@@ -357,12 +342,63 @@ class RichCustomEditorProvider {
             await vscode.commands.executeCommand('simple.editor.toggleBreakpoint', document.uri, message.line);
             await postSync();
         });
+        const navigationSubscription = webviewPanel.webview.onDidReceiveMessage(async (message) => {
+            if (message.type !== 'revealDefinition'
+                && message.type !== 'showReferences'
+                && message.type !== 'revealDefinitionForSymbol'
+                && message.type !== 'showReferencesForSymbol') {
+                return;
+            }
+            const documentText = document.getText();
+            const symbolOffset = ('symbol' in message)
+                ? documentText.search(new RegExp(`\\b${message.symbol.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`))
+                : -1;
+            const offset = 'offset' in message
+                ? message.offset
+                : symbolOffset;
+            if (offset < 0) {
+                return;
+            }
+            const position = document.positionAt(Math.max(0, Math.min(offset, documentText.length)));
+            if (message.type === 'revealDefinition' || message.type === 'revealDefinitionForSymbol') {
+                const rawLocations = await vscode.commands.executeCommand('vscode.executeDefinitionProvider', document.uri, position);
+                const locations = (rawLocations ?? []).map((item) => item instanceof vscode.Location
+                    ? item
+                    : new vscode.Location(item.targetUri, item.targetSelectionRange ?? item.targetRange));
+                if (locations.length === 0) {
+                    return;
+                }
+                if (locations.length === 1) {
+                    await vscode.window.showTextDocument(locations[0].uri, {
+                        preview: false,
+                        selection: locations[0].range,
+                    });
+                    return;
+                }
+                const editor = await vscode.window.showTextDocument(document, {
+                    preview: false,
+                    selection: new vscode.Range(position, position),
+                });
+                await vscode.commands.executeCommand('editor.action.goToLocations', editor.document.uri, position, locations, 'goto', 'No definition found');
+                return;
+            }
+            const references = await vscode.commands.executeCommand('vscode.executeReferenceProvider', document.uri, position);
+            if (!references || references.length === 0) {
+                return;
+            }
+            await vscode.window.showTextDocument(document, {
+                preview: false,
+                selection: new vscode.Range(position, position),
+            });
+            await vscode.commands.executeCommand('editor.action.showReferences', document.uri, position, references);
+        });
         webviewPanel.onDidDispose(() => {
             changeDocumentSubscription.dispose();
             configurationSubscription.dispose();
             messageSubscription.dispose();
             runTestSubscription.dispose();
             markerSubscription.dispose();
+            navigationSubscription.dispose();
         });
     }
 }

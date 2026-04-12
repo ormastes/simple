@@ -33,9 +33,11 @@ var __importStar = (this && this.__importStar) || (function () {
     };
 })();
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.SimpleHoverProvider = exports.SimpleDefinitionProvider = exports.SimpleWorkspaceSymbolProvider = exports.SimpleDocumentSymbolProvider = void 0;
+exports.SimpleHoverProvider = exports.SimpleReferenceProvider = exports.SimpleDefinitionProvider = exports.SimpleWorkspaceSymbolProvider = exports.SimpleDocumentSymbolProvider = void 0;
 exports.indexDocumentSymbols = indexDocumentSymbols;
 const vscode = __importStar(require("vscode"));
+const blockDetector_1 = require("../blockDetector");
+const mathPreview_1 = require("../mathPreview");
 const SYMBOL_PATTERNS = [
     { regex: /^(\s*)fn\s+([A-Za-z_][A-Za-z0-9_]*)/gm, kind: vscode.SymbolKind.Function, detail: 'fn' },
     { regex: /^(\s*)class\s+([A-Za-z_][A-Za-z0-9_]*)/gm, kind: vscode.SymbolKind.Class, detail: 'class' },
@@ -61,6 +63,9 @@ async function collectWorkspaceSymbols(query) {
     }
     const lowered = query.toLowerCase();
     return symbols.filter((symbol) => symbol.name.toLowerCase().includes(lowered));
+}
+function exactSymbolMatches(symbols, name) {
+    return symbols.filter((symbol) => symbol.name === name);
 }
 function indexDocumentSymbols(document) {
     const text = document.getText();
@@ -115,13 +120,45 @@ class SimpleDefinitionProvider {
             return new vscode.Location(currentDocumentHit.uri, currentDocumentHit.selectionRange);
         }
         const workspaceHits = await collectWorkspaceSymbols(word);
-        const exact = workspaceHits.filter((symbol) => symbol.name === word);
+        const exact = exactSymbolMatches(workspaceHits, word);
         return exact.map((symbol) => new vscode.Location(symbol.uri, symbol.selectionRange));
     }
 }
 exports.SimpleDefinitionProvider = SimpleDefinitionProvider;
+class SimpleReferenceProvider {
+    async provideReferences(document, position, context) {
+        const range = wordRange(document, position);
+        if (!range) {
+            return [];
+        }
+        const word = document.getText(range);
+        const workspaceHits = exactSymbolMatches(await collectWorkspaceSymbols(word), word);
+        const currentDocumentHits = exactSymbolMatches(indexDocumentSymbols(document), word);
+        const merged = [...currentDocumentHits, ...workspaceHits];
+        const seen = new Set();
+        const locations = [];
+        for (const symbol of merged) {
+            const key = `${symbol.uri.toString()}:${symbol.selectionRange.start.line}:${symbol.selectionRange.start.character}`;
+            if (seen.has(key)) {
+                continue;
+            }
+            seen.add(key);
+            locations.push(new vscode.Location(symbol.uri, symbol.selectionRange));
+        }
+        if (context.includeDeclaration) {
+            return locations;
+        }
+        return locations.filter((location) => !location.range.isEqual(range) || location.uri.toString() !== document.uri.toString());
+    }
+}
+exports.SimpleReferenceProvider = SimpleReferenceProvider;
 class SimpleHoverProvider {
     async provideHover(document, position) {
+        const offset = document.offsetAt(position);
+        const isInsideMath = (0, blockDetector_1.detectBlocks)(document.getText()).some((block) => (0, mathPreview_1.isMathLikeBlock)(block.kind) && offset >= block.from && offset <= block.to);
+        if (isInsideMath) {
+            return undefined;
+        }
         const range = wordRange(document, position);
         if (!range) {
             return undefined;

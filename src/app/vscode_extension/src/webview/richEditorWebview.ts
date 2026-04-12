@@ -12,11 +12,11 @@
 import {
     EditorView, keymap, drawSelection, highlightActiveLine,
     highlightSpecialChars, highlightActiveLineGutter,
-    Decoration, GutterMarker, WidgetType, gutter, lineNumbers, lineNumberWidgetMarker, type BlockInfo, type DecorationSet, type Extension, type ViewUpdate,
+    Decoration, GutterMarker, WidgetType, gutter, hoverTooltip, lineNumbers, lineNumberWidgetMarker, type BlockInfo, type DecorationSet, type Extension, type Tooltip, type ViewUpdate,
 } from '@codemirror/view';
 import { EditorState, RangeSetBuilder, StateEffect, StateField } from '@codemirror/state';
 import { defaultKeymap, history, historyKeymap, indentWithTab } from '@codemirror/commands';
-import { bracketMatching, indentOnInput, syntaxHighlighting, defaultHighlightStyle, HighlightStyle } from '@codemirror/language';
+import { bracketMatching, codeFolding, foldGutter, foldKeymap, foldService, indentOnInput, syntaxHighlighting, defaultHighlightStyle, HighlightStyle } from '@codemirror/language';
 import { searchKeymap, highlightSelectionMatches } from '@codemirror/search';
 import { autocompletion, closeBrackets, closeBracketsKeymap } from '@codemirror/autocomplete';
 import { tags } from '@lezer/highlight';
@@ -76,6 +76,8 @@ interface SyncMessage {
 }
 
 type HostMessage = SyncMessage | { type: 'error'; message: string };
+type NavigationAction = 'definition' | 'references';
+type SymbolNavigation = (symbol: string, action: NavigationAction) => void;
 
 const ENABLE_TEST_LINE_WIDGETS = true;
 const ENABLE_SYMBOL_HOVER = true;
@@ -313,6 +315,9 @@ function buildTestRunMarkers(
 ): RangeSetBuilder<GutterMarker> {
     const builder = new RangeSetBuilder<GutterMarker>();
     for (const test of tests) {
+        if (test.kind !== 'describe' && test.kind !== 'sdoctest') {
+            continue;
+        }
         const lineNumber = test.line + 1;
         if (lineNumber < 1 || lineNumber > state.doc.lines) {
             continue;
@@ -426,61 +431,217 @@ function readIdentifierAt(state: EditorState, pos: number): { word: string; from
     };
 }
 
-function attachHoverOverlay(
-    view: EditorView,
-    parent: HTMLElement,
+function buildSymbolActionMarkup(symbol: RichEditorSymbol): string {
+    return `
+        <strong>${symbol.name}</strong>
+        <div>${symbol.detail} · ${symbol.kind}</div>
+        <div>line ${symbol.line + 1}</div>
+        <div class="simple-rich-hover-actions">
+            <button type="button" data-nav="definition" data-symbol="${symbol.name}">Definition</button>
+            <button type="button" data-nav="references" data-symbol="${symbol.name}">References</button>
+        </div>
+    `;
+}
+
+function wireSymbolActionButtons(
+    root: ParentNode,
+    ident: { word: string; from: number; to: number },
+    onNavigate: (offset: number, action: NavigationAction) => void,
+    onNavigateSymbol: SymbolNavigation,
+    onClose?: () => void,
+): void {
+    root.querySelectorAll<HTMLButtonElement>('button[data-nav]').forEach((button) => {
+        button.onclick = (clickEvent) => {
+            clickEvent.preventDefault();
+            clickEvent.stopPropagation();
+            const action = button.dataset.nav === 'references' ? 'references' : 'definition';
+            const symbolName = button.dataset.symbol;
+            if (symbolName) {
+                onNavigateSymbol(symbolName, action);
+            } else {
+                onNavigate(ident.from, action);
+            }
+            onClose?.();
+        };
+    });
+}
+
+function createSymbolHoverTooltip(
     getSymbols: () => RichEditorSymbol[],
-): () => void {
-    const tooltip = document.createElement('div');
-    tooltip.className = 'simple-rich-hover-tooltip';
-    tooltip.hidden = true;
-    parent.appendChild(tooltip);
-
-    const hide = () => {
-        tooltip.hidden = true;
-    };
-
-    const onMouseMove = (event: MouseEvent) => {
-        const pos = view.posAtCoords({ x: event.clientX, y: event.clientY });
-        if (pos === null) {
-            hide();
-            return;
-        }
-
+    onNavigate: (offset: number, action: NavigationAction) => void,
+    onNavigateSymbol: SymbolNavigation,
+): Extension {
+    return hoverTooltip((view, pos): Tooltip | null => {
         const ident = readIdentifierAt(view.state, pos);
         if (!ident) {
-            hide();
-            return;
+            return null;
         }
 
         const symbol = getSymbols().find((candidate) => candidate.name === ident.word);
         if (!symbol) {
-            hide();
-            return;
+            return null;
         }
 
-        tooltip.innerHTML = `
-            <strong>${symbol.name}</strong>
-            <div>${symbol.detail} · ${symbol.kind}</div>
-            <div>line ${symbol.line + 1}</div>
-        `;
+        return {
+            pos: ident.from,
+            end: ident.to,
+            above: true,
+            create() {
+                const dom = document.createElement('div');
+                dom.className = 'simple-rich-hover-tooltip';
+                dom.innerHTML = buildSymbolActionMarkup(symbol);
+                wireSymbolActionButtons(dom, ident, onNavigate, onNavigateSymbol);
+                return { dom };
+            },
+        };
+    }, {
+        hoverTime: 250,
+        hideOnChange: 'touch',
+    });
+}
 
-        const parentRect = parent.getBoundingClientRect();
-        tooltip.style.left = `${event.clientX - parentRect.left + 12}px`;
-        tooltip.style.top = `${event.clientY - parentRect.top + 16}px`;
-        tooltip.hidden = false;
+function createActionMenu(
+    parent: HTMLElement,
+    onNavigate: (offset: number, action: NavigationAction) => void,
+    onNavigateSymbol: SymbolNavigation,
+): {
+    show: (clientX: number, clientY: number, ident: { word: string; from: number; to: number }, symbol?: RichEditorSymbol) => void;
+    hide: () => void;
+    destroy: () => void;
+} {
+    const menu = document.createElement('div');
+    menu.className = 'simple-rich-action-menu';
+    menu.hidden = true;
+    parent.appendChild(menu);
+
+    const hide = () => {
+        menu.hidden = true;
     };
 
-    view.dom.addEventListener('mousemove', onMouseMove);
-    view.dom.addEventListener('mouseleave', hide);
-    view.dom.addEventListener('mousedown', hide);
-
-    return () => {
-        view.dom.removeEventListener('mousemove', onMouseMove);
-        view.dom.removeEventListener('mouseleave', hide);
-        view.dom.removeEventListener('mousedown', hide);
-        tooltip.remove();
+    const dismissOnWindowMouseDown = (event: MouseEvent) => {
+        if (!menu.contains(event.target as Node)) {
+            hide();
+        }
     };
+
+    window.addEventListener('mousedown', dismissOnWindowMouseDown, true);
+
+    return {
+        show(clientX, clientY, ident, symbol) {
+            const resolved = symbol ?? {
+                name: ident.word,
+                kind: 'symbol',
+                detail: 'identifier',
+                line: 0,
+                from: ident.from,
+                to: ident.to,
+            };
+            menu.innerHTML = buildSymbolActionMarkup(resolved);
+            wireSymbolActionButtons(menu, ident, onNavigate, onNavigateSymbol, hide);
+            const parentRect = parent.getBoundingClientRect();
+            menu.style.left = `${clientX - parentRect.left + 10}px`;
+            menu.style.top = `${clientY - parentRect.top + 10}px`;
+            menu.hidden = false;
+        },
+        hide,
+        destroy() {
+            window.removeEventListener('mousedown', dismissOnWindowMouseDown, true);
+            menu.remove();
+        },
+    };
+}
+
+function createNavigationKeymap(
+    onNavigate: (offset: number, action: NavigationAction) => void,
+): Extension {
+    return keymap.of([
+        {
+            key: 'F12',
+            run(view) {
+                onNavigate(view.state.selection.main.head, 'definition');
+                return true;
+            },
+        },
+        {
+            key: 'Shift-F12',
+            run(view) {
+                onNavigate(view.state.selection.main.head, 'references');
+                return true;
+            },
+        },
+    ]);
+}
+
+function computeIndentLevel(text: string): number {
+    let indent = 0;
+    for (const char of text) {
+        if (char === ' ') indent += 1;
+        else if (char === '\t') indent += 4;
+        else break;
+    }
+    return indent;
+}
+
+function computeFoldRange(state: EditorState, lineStart: number): { from: number; to: number } | null {
+    const line = state.doc.lineAt(lineStart);
+    const trimmed = line.text.trim();
+    if (!trimmed) {
+        return null;
+    }
+
+    if (trimmed.startsWith('"""')) {
+        for (let number = line.number + 1; number <= state.doc.lines; number += 1) {
+            const candidate = state.doc.line(number);
+            if (candidate.text.trim().startsWith('"""')) {
+                return candidate.from > line.to ? { from: line.to, to: candidate.from } : null;
+            }
+        }
+        return null;
+    }
+
+    if (!trimmed.endsWith(':')) {
+        return null;
+    }
+
+    const baseIndent = computeIndentLevel(line.text);
+    let firstBodyLine: number | null = null;
+    let lastBodyLine: number | null = null;
+
+    for (let number = line.number + 1; number <= state.doc.lines; number += 1) {
+        const candidate = state.doc.line(number);
+        const candidateTrimmed = candidate.text.trim();
+        if (!candidateTrimmed) {
+            if (firstBodyLine !== null) {
+                lastBodyLine = number;
+            }
+            continue;
+        }
+
+        const candidateIndent = computeIndentLevel(candidate.text);
+        if (candidateIndent <= baseIndent) {
+            break;
+        }
+
+        if (firstBodyLine === null) {
+            firstBodyLine = number;
+        }
+        lastBodyLine = number;
+    }
+
+    if (firstBodyLine === null || lastBodyLine === null) {
+        return null;
+    }
+
+    const lastLine = state.doc.line(lastBodyLine);
+    return lastLine.to > line.to ? { from: line.to, to: lastLine.to } : null;
+}
+
+function createSimpleFoldExtensions(): Extension[] {
+    return [
+        codeFolding(),
+        foldGutter(),
+        foldService.of((state, lineStart) => computeFoldRange(state, lineStart)),
+    ];
 }
 
 // ── VS Code theme for CodeMirror ─────────────────────────────────────
@@ -624,6 +785,18 @@ const vsCodeTheme = EditorView.theme({
         width: '16px',
         minWidth: '16px',
     },
+    '.cm-foldGutter': {
+        width: '16px',
+        minWidth: '16px',
+    },
+    '.cm-foldGutter .cm-gutterElement': {
+        width: '16px',
+        padding: '0 2px',
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        color: 'var(--vscode-editorLineNumber-foreground)',
+    },
     '.cm-breakpoint-gutter .cm-gutterElement, .cm-test-run-gutter .cm-gutterElement': {
         width: '16px',
         padding: '0 2px',
@@ -659,7 +832,6 @@ const vsCodeTheme = EditorView.theme({
         backgroundColor: 'transparent',
     },
     '.simple-rich-hover-tooltip': {
-        position: 'absolute',
         zIndex: '20',
         minWidth: '140px',
         maxWidth: '240px',
@@ -669,9 +841,39 @@ const vsCodeTheme = EditorView.theme({
         backgroundColor: 'var(--vscode-editorHoverWidget-background)',
         color: 'var(--vscode-editorHoverWidget-foreground)',
         boxShadow: '0 6px 20px color-mix(in srgb, black 25%, transparent)',
-        pointerEvents: 'none',
+        pointerEvents: 'auto',
         fontSize: '12px',
         lineHeight: '1.4',
+    },
+    '.simple-rich-action-menu': {
+        position: 'absolute',
+        zIndex: '24',
+        minWidth: '160px',
+        maxWidth: '260px',
+        padding: '8px 10px',
+        borderRadius: '6px',
+        border: '1px solid color-mix(in srgb, var(--vscode-editorHoverWidget-border) 70%, transparent)',
+        backgroundColor: 'var(--vscode-editorHoverWidget-background)',
+        color: 'var(--vscode-editorHoverWidget-foreground)',
+        boxShadow: '0 6px 20px color-mix(in srgb, black 25%, transparent)',
+    },
+    '.simple-rich-hover-actions': {
+        display: 'flex',
+        gap: '6px',
+        marginTop: '8px',
+    },
+    '.simple-rich-hover-actions button': {
+        border: '1px solid color-mix(in srgb, var(--vscode-button-border, transparent) 80%, transparent)',
+        borderRadius: '4px',
+        backgroundColor: 'var(--vscode-button-secondaryBackground, color-mix(in srgb, var(--vscode-button-background) 30%, transparent))',
+        color: 'var(--vscode-button-secondaryForeground, var(--vscode-button-foreground))',
+        padding: '2px 8px',
+        fontSize: '11px',
+        cursor: 'pointer',
+        pointerEvents: 'auto',
+    },
+    '.simple-rich-hover-actions button:hover': {
+        backgroundColor: 'var(--vscode-button-secondaryHoverBackground, var(--vscode-button-hoverBackground))',
     },
 }, { dark: true });
 
@@ -700,15 +902,16 @@ function createEditor(
     onSelectionChange: (selStart: number, selEnd: number) => void,
     onRunTest: (test: RichEditorTestBlock) => void,
     onToggleBreakpoint: (line: number) => void,
+    onNavigate: (offset: number, action: NavigationAction) => void,
+    onNavigateSymbol: (symbol: string, action: NavigationAction) => void,
 ): {
     view: EditorView;
     refreshDecorations: () => void;
     setDoc: (text: string, selStart?: number, selEnd?: number) => void;
-    enableHoverOverlay: () => void;
+    destroy: () => void;
 } {
     let isApplyingSync = false;
     let editTimer: ReturnType<typeof setTimeout> | null = null;
-    let hoverCleanup: (() => void) | null = null;
 
     const decorationPlugin = createDecorationPlugin(() => renderedBlocksRef.current);
     const fullLineMathField = ENABLE_FULL_LINE_BLOCK_MATH
@@ -718,6 +921,10 @@ function createEditor(
         ? createTestRunGutter(() => testsRef.current, onRunTest)
         : null;
     const breakpointGutter = createBreakpointGutter(() => markersRef.current, onToggleBreakpoint);
+    const symbolHover = ENABLE_SYMBOL_HOVER
+        ? createSymbolHoverTooltip(() => symbolsRef.current, onNavigate, onNavigateSymbol)
+        : null;
+    const actionMenu = createActionMenu(parent, onNavigate, onNavigateSymbol);
 
     const editListener = EditorView.updateListener.of((update) => {
         if (isApplyingSync) return;
@@ -734,9 +941,44 @@ function createEditor(
         }
     });
 
+    const navigationClickHandler = EditorView.domEventHandlers({
+        mousedown(event, view) {
+            const wantsDefinition = event.metaKey || event.ctrlKey;
+            if (!wantsDefinition) {
+                return false;
+            }
+
+            const pos = view.posAtCoords({ x: event.clientX, y: event.clientY });
+            if (pos === null || !readIdentifierAt(view.state, pos)) {
+                return false;
+            }
+
+            event.preventDefault();
+            const ident = readIdentifierAt(view.state, pos)!;
+            const symbol = symbolsRef.current.find((candidate) => candidate.name === ident.word);
+            actionMenu.show(event.clientX, event.clientY, ident, symbol);
+            return true;
+        },
+        contextmenu(event, view) {
+            const pos = view.posAtCoords({ x: event.clientX, y: event.clientY });
+            if (pos === null) {
+                return false;
+            }
+            const ident = readIdentifierAt(view.state, pos);
+            if (!ident) {
+                return false;
+            }
+            event.preventDefault();
+            const symbol = symbolsRef.current.find((candidate) => candidate.name === ident.word);
+            actionMenu.show(event.clientX, event.clientY, ident, symbol);
+            return true;
+        },
+    });
+
     const extensions: Extension[] = [
         breakpointGutter,
         ...(testRunGutter ? [testRunGutter] : []),
+        ...createSimpleFoldExtensions(),
         ...createMathAwareLineNumberSetup(),
         ...(fullLineMathField ? [fullLineMathField] : []),
         highlightActiveLineGutter(),
@@ -755,14 +997,18 @@ function createEditor(
             ...defaultKeymap,
             ...searchKeymap,
             ...historyKeymap,
+            ...foldKeymap,
             indentWithTab,
         ]),
+        createNavigationKeymap(onNavigate),
         simpleLanguage,
         vsCodeTheme,
         syntaxHighlighting(simpleHighlightStyle),
         syntaxHighlighting(defaultHighlightStyle, { fallback: true }),
         decorationPlugin,
         editListener,
+        navigationClickHandler,
+        ...(symbolHover ? [symbolHover] : []),
     ];
 
     const state = EditorState.create({
@@ -803,16 +1049,9 @@ function createEditor(
                 isApplyingSync = false;
             }
         },
-
-        enableHoverOverlay() {
-            if (!ENABLE_SYMBOL_HOVER || hoverCleanup || symbolsRef.current.length === 0) {
-                return;
-            }
-            try {
-                hoverCleanup = attachHoverOverlay(view, parent, () => symbolsRef.current);
-            } catch (error) {
-                console.error('Simple Rich Editor: hover overlay disabled after initialization failure', error);
-            }
+        destroy() {
+            actionMenu.destroy();
+            view.destroy();
         },
     };
 }
@@ -861,6 +1100,18 @@ export function boot(vsCodeApi?: { postMessage(msg: unknown): void }): void {
                     line,
                 });
             },
+            (offset, action) => {
+                vscode.postMessage({
+                    type: action === 'definition' ? 'revealDefinition' : 'showReferences',
+                    offset,
+                });
+            },
+            (symbol, action) => {
+                vscode.postMessage({
+                    type: action === 'definition' ? 'revealDefinitionForSymbol' : 'showReferencesForSymbol',
+                    symbol,
+                });
+            },
         );
         if (selStart > 0 || selEnd > 0) {
             editor.setDoc(text, selStart, selEnd);
@@ -888,7 +1139,6 @@ export function boot(vsCodeApi?: { postMessage(msg: unknown): void }): void {
             } else {
                 editor.setDoc(msg.sourceText, msg.selectionStart, msg.selectionEnd);
             }
-            editor!.enableHoverOverlay();
             editor!.refreshDecorations();
         }
     });

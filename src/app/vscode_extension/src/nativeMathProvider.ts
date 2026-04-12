@@ -1,0 +1,218 @@
+import * as vscode from 'vscode';
+import { detectBlocks, type DetectedBlock } from './blockDetector';
+import { buildMathPreview, isMathLikeBlock } from './mathPreview';
+
+interface MathBlockDecoration {
+    block: DetectedBlock;
+    fullRange: vscode.Range;
+    openRange: vscode.Range;
+    contentRange: vscode.Range;
+    closeRange: vscode.Range;
+}
+
+function makeRange(document: vscode.TextDocument, from: number, to: number): vscode.Range {
+    return new vscode.Range(document.positionAt(from), document.positionAt(to));
+}
+
+function asDecorationBlock(document: vscode.TextDocument, block: DetectedBlock): MathBlockDecoration | undefined {
+    if (!isMathLikeBlock(block.kind)) {
+        return undefined;
+    }
+    const fullRange = makeRange(document, block.from, block.to);
+    const openRange = makeRange(document, block.from, block.prefixEnd);
+    const contentRange = makeRange(document, block.prefixEnd, block.to - 1);
+    const closeRange = makeRange(document, block.to - 1, block.to);
+    return { block, fullRange, openRange, contentRange, closeRange };
+}
+
+function rangesOverlap(a: vscode.Range, b: vscode.Range): boolean {
+    return !(a.end.isBeforeOrEqual(b.start) || b.end.isBeforeOrEqual(a.start));
+}
+
+function diagnosticDecorationForRange(
+    diagnostics: readonly vscode.Diagnostic[],
+    range: vscode.Range,
+): string | undefined {
+    let severity: vscode.DiagnosticSeverity | undefined;
+    for (const diagnostic of diagnostics) {
+        if (!rangesOverlap(diagnostic.range, range)) {
+            continue;
+        }
+        if (severity === undefined || diagnostic.severity < severity) {
+            severity = diagnostic.severity;
+        }
+    }
+
+    if (severity === vscode.DiagnosticSeverity.Error) {
+        return 'text-decoration: underline wavy var(--vscode-editorError-foreground);';
+    }
+    if (severity === vscode.DiagnosticSeverity.Warning) {
+        return 'text-decoration: underline wavy var(--vscode-editorWarning-foreground);';
+    }
+    if (severity === vscode.DiagnosticSeverity.Information) {
+        return 'text-decoration: underline dotted var(--vscode-editorInfo-foreground);';
+    }
+    if (severity === vscode.DiagnosticSeverity.Hint) {
+        return 'text-decoration: underline dotted var(--vscode-editorHint-foreground);';
+    }
+    return undefined;
+}
+
+export class NativeMathProvider implements vscode.HoverProvider, vscode.Disposable {
+    private readonly openDecoration = vscode.window.createTextEditorDecorationType({
+        opacity: '0',
+    });
+
+    private readonly closeDecoration = vscode.window.createTextEditorDecorationType({
+        opacity: '0',
+    });
+
+    private readonly contentDecoration = vscode.window.createTextEditorDecorationType({
+        opacity: '0',
+    });
+
+    private readonly previewDecoration = vscode.window.createTextEditorDecorationType({});
+
+    private readonly disposables: vscode.Disposable[] = [];
+
+    public constructor() {
+        this.disposables.push(
+            vscode.window.onDidChangeActiveTextEditor((editor) => {
+                if (editor) {
+                    this.refreshEditor(editor);
+                }
+            }),
+            vscode.window.onDidChangeTextEditorSelection((event) => {
+                this.refreshEditor(event.textEditor);
+            }),
+            vscode.workspace.onDidChangeTextDocument((event) => {
+                for (const editor of vscode.window.visibleTextEditors) {
+                    if (editor.document.uri.toString() === event.document.uri.toString()) {
+                        this.refreshEditor(editor);
+                    }
+                }
+            }),
+            vscode.workspace.onDidChangeConfiguration((event) => {
+                if (
+                    event.affectsConfiguration('simple.math.enabled') ||
+                    event.affectsConfiguration('simple.math.renderInline')
+                ) {
+                    this.refreshVisibleEditors();
+                }
+            }),
+        );
+
+        this.refreshVisibleEditors();
+    }
+
+    public provideHover(
+        document: vscode.TextDocument,
+        position: vscode.Position,
+    ): vscode.Hover | undefined {
+        const config = vscode.workspace.getConfiguration('simple.math');
+        if (!config.get<boolean>('enabled', true) || !config.get<boolean>('previewOnHover', true)) {
+            return undefined;
+        }
+
+        const block = this.findMathBlockAtPosition(document, position);
+        if (!block) {
+            return undefined;
+        }
+
+        const preview = buildMathPreview(block);
+        if (!preview) {
+            return undefined;
+        }
+
+        const markdown = new vscode.MarkdownString(undefined, true);
+        markdown.appendMarkdown(`**${preview.label}**\n\n`);
+        markdown.appendCodeblock(block.content, 'simple');
+        markdown.appendMarkdown('\n');
+        markdown.appendMarkdown(`Pretty: \`${preview.displayText}\``);
+        return new vscode.Hover(markdown, makeRange(document, block.from, block.to));
+    }
+
+    public findMathBlockAtPosition(document: vscode.TextDocument, position: vscode.Position): DetectedBlock | undefined {
+        const offset = document.offsetAt(position);
+        return detectBlocks(document.getText()).find((block) =>
+            isMathLikeBlock(block.kind) && offset >= block.from && offset <= block.to,
+        );
+    }
+
+    public dispose(): void {
+        this.openDecoration.dispose();
+        this.closeDecoration.dispose();
+        this.contentDecoration.dispose();
+        this.previewDecoration.dispose();
+        for (const disposable of this.disposables) {
+            disposable.dispose();
+        }
+    }
+
+    private refreshVisibleEditors(): void {
+        for (const editor of vscode.window.visibleTextEditors) {
+            this.refreshEditor(editor);
+        }
+    }
+
+    private refreshEditor(editor: vscode.TextEditor): void {
+        if (editor.document.languageId !== 'simple') {
+            return;
+        }
+
+        const config = vscode.workspace.getConfiguration('simple.math');
+        if (!config.get<boolean>('enabled', true) || !config.get<boolean>('renderInline', true)) {
+            editor.setDecorations(this.openDecoration, []);
+            editor.setDecorations(this.closeDecoration, []);
+            editor.setDecorations(this.contentDecoration, []);
+            editor.setDecorations(this.previewDecoration, []);
+            return;
+        }
+
+        const openDecorations: vscode.DecorationOptions[] = [];
+        const closeDecorations: vscode.Range[] = [];
+        const contentDecorations: vscode.Range[] = [];
+        const cursorLines = new Set(editor.selections.map((selection) => selection.active.line));
+        const diagnostics = vscode.languages.getDiagnostics(editor.document.uri);
+
+        for (const block of detectBlocks(editor.document.getText())) {
+            const decoration = asDecorationBlock(editor.document, block);
+            const preview = buildMathPreview(block);
+            if (!decoration || !preview) {
+                continue;
+            }
+
+            const startLine = decoration.openRange.start.line;
+            const endLine = decoration.closeRange.end.line;
+            let reveal = false;
+            for (let line = startLine; line <= endLine; line++) {
+                if (cursorLines.has(line)) {
+                    reveal = true;
+                    break;
+                }
+            }
+            if (reveal) {
+                continue;
+            }
+
+            openDecorations.push({
+                range: decoration.openRange,
+                renderOptions: {
+                    before: {
+                        contentText: preview.displayText,
+                        color: new vscode.ThemeColor('editorLineNumber.foreground'),
+                        margin: '0 0.25rem 0 0',
+                        textDecoration: diagnosticDecorationForRange(diagnostics, decoration.fullRange),
+                    },
+                },
+            });
+            closeDecorations.push(decoration.closeRange);
+            contentDecorations.push(decoration.contentRange);
+        }
+
+        editor.setDecorations(this.openDecoration, openDecorations);
+        editor.setDecorations(this.closeDecoration, closeDecorations);
+        editor.setDecorations(this.contentDecoration, contentDecorations);
+        editor.setDecorations(this.previewDecoration, []);
+    }
+}

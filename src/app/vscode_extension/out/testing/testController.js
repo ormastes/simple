@@ -117,6 +117,9 @@ class SimpleTestController {
         this.controller.items.add(fileItem);
         fileItem.children.replace([]);
         for (const block of (0, testDiscovery_1.detectTestBlocks)(document)) {
+            if (!isDoctestBlock(block)) {
+                continue;
+            }
             const child = this.controller.createTestItem(createTestId(document.uri, block.label, block.line), block.label, document.uri);
             child.range = new vscode.Range(block.line, 0, block.line, document.lineAt(block.line).text.length);
             fileItem.children.add(child);
