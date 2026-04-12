@@ -18,7 +18,7 @@ var RichEditorWebview = (() => {
   };
   var __toCommonJS = (mod) => __copyProps(__defProp({}, "__esModule", { value: true }), mod);
 
-  // ../vscode_rich_editor/src/webview/richEditorWebview.ts
+  // src/webview/richEditorWebview.ts
   var richEditorWebview_exports = {};
   __export(richEditorWebview_exports, {
     boot: () => boot
@@ -21491,7 +21491,7 @@ var RichEditorWebview = (() => {
   ];
   var completionKeymapExt = /* @__PURE__ */ Prec.highest(/* @__PURE__ */ keymap.computeN([completionConfig], (state) => state.facet(completionConfig).defaultKeymap ? [completionKeymap] : []));
 
-  // ../vscode_rich_editor/src/webview/simpleLang.ts
+  // src/webview/simpleLang.ts
   var KEYWORDS = /* @__PURE__ */ new Set([
     "fn",
     "class",
@@ -21664,7 +21664,7 @@ var RichEditorWebview = (() => {
     }
   });
 
-  // ../vscode_rich_editor/src/webview/widgets/mathWidget.ts
+  // src/webview/widgets/mathWidget.ts
   var MathWidget = class extends WidgetType {
     constructor(html, prefix, content2) {
       super();
@@ -21695,7 +21695,7 @@ var RichEditorWebview = (() => {
     }
   };
 
-  // ../vscode_rich_editor/src/webview/widgets/imageWidget.ts
+  // src/webview/widgets/imageWidget.ts
   var ImageWidget = class extends WidgetType {
     constructor(uri, path) {
       super();
@@ -21706,13 +21706,17 @@ var RichEditorWebview = (() => {
       return this.uri === other.uri;
     }
     toDOM() {
-      const wrap = document.createElement("div");
+      const wrap = document.createElement("span");
       wrap.className = "cm-image-widget";
+      wrap.setAttribute("aria-label", `Embedded image: ${this.path}`);
       const img = document.createElement("img");
       img.src = this.uri;
       img.alt = this.path;
-      img.style.maxWidth = "100%";
-      img.style.maxHeight = "400px";
+      img.style.display = "block";
+      img.style.width = "auto";
+      img.style.height = "auto";
+      img.style.maxWidth = "min(24em, 100%)";
+      img.style.maxHeight = "none";
       img.style.objectFit = "contain";
       img.draggable = false;
       img.onerror = () => {
@@ -21727,7 +21731,7 @@ var RichEditorWebview = (() => {
     }
   };
 
-  // ../vscode_rich_editor/src/webview/widgets/placeholderWidget.ts
+  // src/webview/widgets/placeholderWidget.ts
   var MathPlaceholderWidget = class extends WidgetType {
     constructor(content2, prefix) {
       super();
@@ -21785,7 +21789,7 @@ var RichEditorWebview = (() => {
     }
   };
 
-  // ../vscode_rich_editor/src/webview/decorationPlugin.ts
+  // src/webview/decorationPlugin.ts
   var BLOCK_REGEX = /\b(?<prefix>m|loss|nograd|img|graph)\{([^}]*(?:\{[^}]*\}[^}]*)*)\}/gs;
   function detectBlockRanges(text) {
     const blocks = [];
@@ -21871,7 +21875,7 @@ var RichEditorWebview = (() => {
     });
   }
 
-  // ../vscode_rich_editor/src/webview/richEditorWebview.ts
+  // src/webview/richEditorWebview.ts
   var vsCodeTheme = EditorView.theme({
     "&": {
       height: "100%",
@@ -21938,16 +21942,20 @@ var RichEditorWebview = (() => {
     },
     // Image widget
     ".cm-image-widget": {
-      display: "block",
-      padding: "8px",
-      margin: "4px 0",
+      display: "inline-flex",
+      verticalAlign: "middle",
+      alignItems: "center",
+      padding: "6px 8px",
+      margin: "2px 0",
       borderRadius: "6px",
       backgroundColor: "color-mix(in srgb, var(--vscode-editor-foreground) 4%, transparent)",
       border: "1px solid color-mix(in srgb, var(--vscode-editor-foreground) 10%, transparent)",
-      textAlign: "center"
+      textAlign: "center",
+      maxWidth: "100%"
     },
     ".cm-image-widget img": {
-      borderRadius: "4px"
+      borderRadius: "4px",
+      boxShadow: "0 1px 4px color-mix(in srgb, black 20%, transparent)"
     },
     // Error & placeholder
     ".cm-image-error": {
