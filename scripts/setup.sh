@@ -379,9 +379,21 @@ generate_mcp_launcher "simple_mcp_server" \
   "src/app/mcp/main.spl" "" ""
 echo "  simple_mcp_server"
 
-generate_mcp_launcher "simple_lsp_mcp_server" \
-  "src/app/simple_lsp_mcp/main.spl" "" ""
-echo "  simple_lsp_mcp_server"
+# simple_lsp_mcp_server is now a standalone native binary built via
+# `simple native-build --runtime-bundle auto`. Prefer the prebuilt
+# binary at build/native/simple_lsp_mcp_native if it exists; otherwise
+# fall back to the shell-launcher path.
+lsp_mcp_native_src="${repo_root}/build/native/simple_lsp_mcp_native"
+lsp_mcp_target="${mcp_release_dir}/simple_lsp_mcp_server"
+if [ -f "${lsp_mcp_native_src}" ]; then
+  cp "${lsp_mcp_native_src}" "${lsp_mcp_target}"
+  chmod +x "${lsp_mcp_target}"
+  echo "  simple_lsp_mcp_server (native binary)"
+else
+  generate_mcp_launcher "simple_lsp_mcp_server" \
+    "src/app/simple_lsp_mcp/main.spl" "" ""
+  echo "  simple_lsp_mcp_server (shell wrapper — run 'simple native-build ...' for a native binary)"
+fi
 
 cat > "${mcp_release_dir}/t32_mcp_server" <<'T32_MCP_EOF'
 #!/bin/sh

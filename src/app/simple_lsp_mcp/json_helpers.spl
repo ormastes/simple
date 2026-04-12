@@ -20,10 +20,10 @@ fn Q() -> text:
     "\""
 
 fn LB() -> text:
-    (123 as char).to_string()
+    "{"
 
 fn RB() -> text:
-    (125 as char).to_string()
+    "}"
 
 fn SB_L() -> text:
     "["
@@ -56,58 +56,100 @@ fn jo3(p1: text, p2: text, p3: text) -> text:
     LB() + p1 + "," + p2 + "," + p3 + RB()
 
 # --- JSON parsing helpers ---
+#
+# NOTE: These helpers use manual character scanning rather than
+# `text.index_of()` + `match Some(i)`. There is a Cranelift codegen
+# bug where `match idx_opt: Some(i): ... nil: ...` on the result of
+# `index_of()` segfaults at runtime in native binaries. The manual
+# scanner pattern below is the same one used successfully in
+# examples/10_tooling/trace32_tools/t32_mcp/frontend_cold.spl.
+# Do NOT re-introduce `match Some(i)` on `index_of` results here.
+
+fn _char_at(s: text, i: i64) -> text:
+    s.substring(i, i + 1)
+
+fn _is_ws(ch: text) -> bool:
+    ch == " " or ch == "\n" or ch == "\r" or ch == "\t"
+
+fn _find_json_value_start(json: text, key: text) -> i64:
+    val search = Q() + key + Q()
+    var offset = 0
+    while offset + search.len() <= json.len():
+        var matches = true
+        var j = 0
+        while j < search.len():
+            if json.substring(offset + j, offset + j + 1) != search.substring(j, j + 1):
+                matches = false
+                break
+            j = j + 1
+        if not matches:
+            offset = offset + 1
+            continue
+        var value_start = offset + search.len()
+        while value_start < json.len() and _is_ws(_char_at(json, value_start)):
+            value_start = value_start + 1
+        if value_start < json.len() and _char_at(json, value_start) == ":":
+            value_start = value_start + 1
+            while value_start < json.len() and _is_ws(_char_at(json, value_start)):
+                value_start = value_start + 1
+            return value_start
+        offset = offset + search.len()
+    return -1
 
 fn extract_field(json: text, key: text) -> text:
-    val search = Q() + key + Q() + ":"
-    val idx_opt = json.index_of(search)
-    var idx = -1
-    match idx_opt:
-        Some(i): idx = i
-        nil: return ""
-    val start = idx + search.len()
-    val after = json.substring(start).trim()
-    if after.starts_with(Q()):
-        val rest = after.substring(1)
-        val end_opt = rest.index_of(Q())
-        var end_idx = -1
-        match end_opt:
-            Some(i): end_idx = i
-            nil: return ""
-        if end_idx >= 0:
-            return rest.substring(0, end_idx)
-    # Non-string values
-    var parts: [text] = []
-    for ch in after:
-        if ch == "," or ch == RB() or ch == "]" or ch == " " or ch == "\n" or ch == "\r":
+    val start = _find_json_value_start(json, key)
+    if start < 0 or start >= json.len():
+        return ""
+    val first = _char_at(json, start)
+    if first == Q():
+        var i = start + 1
+        var escaped = false
+        while i < json.len():
+            val ch = _char_at(json, i)
+            if escaped:
+                escaped = false
+            elif ch == "\\":
+                escaped = true
+            elif ch == Q():
+                return json.substring(start + 1, i)
+            i = i + 1
+        return ""
+    var end = start
+    while end < json.len():
+        val ch = _char_at(json, end)
+        if ch == "," or ch == RB() or ch == "]" or _is_ws(ch):
             break
-        parts.push(ch)
-    parts.join("")
+        end = end + 1
+    return json.substring(start, end)
 
 fn extract_id(json: text) -> text:
-    val search = Q() + "id" + Q() + ":"
-    val idx_opt = json.index_of(search)
-    var idx = -1
-    match idx_opt:
-        Some(i): idx = i
-        nil: return "null"
-    val start = idx + search.len()
-    val after = json.substring(start).trim()
-    if after.starts_with(Q()):
-        val rest = after.substring(1)
-        val end_opt = rest.index_of(Q())
-        var end_idx = -1
-        match end_opt:
-            Some(i): end_idx = i
-            nil: return "null"
-        if end_idx >= 0:
-            return Q() + rest.substring(0, end_idx) + Q()
-    # Numeric id
-    var parts: [text] = []
-    for ch in after:
-        if ch == "," or ch == RB() or ch == "]" or ch == " " or ch == "\n" or ch == "\r":
+    val start = _find_json_value_start(json, "id")
+    if start < 0 or start >= json.len():
+        return "null"
+    val first = _char_at(json, start)
+    if first == Q():
+        var i = start + 1
+        var escaped = false
+        while i < json.len():
+            val ch = _char_at(json, i)
+            if escaped:
+                escaped = false
+            elif ch == "\\":
+                escaped = true
+            elif ch == Q():
+                return json.substring(start, i + 1)
+            i = i + 1
+        return "null"
+    var end = start
+    while end < json.len():
+        val ch = _char_at(json, end)
+        if ch == "," or ch == RB() or ch == "]" or _is_ws(ch):
             break
-        parts.push(ch)
-    parts.join("")
+        end = end + 1
+    val raw = json.substring(start, end)
+    if raw == "":
+        return "null"
+    return raw
 
 # --- JSON-RPC builders ---
 

@@ -6,15 +6,10 @@
 # --- Safe string helpers (workaround for 2-arg substring bug) ---
 
 fn strip_last(s: text) -> text:
-    var parts: [text] = []
-    var count = 0
-    val limit = s.length() - 1
-    for ch in s:
-        if count >= limit:
-            break
-        parts.push(ch)
-        count = count + 1
-    parts.join("")
+    val n = s.len()
+    if n <= 0:
+        return ""
+    s.substring(0, n - 1)
 
 fn strip_first_last(s: text) -> text:
     strip_last(s.substring(1))
@@ -81,90 +76,134 @@ fn jo3(p1: text, p2: text, p3: text) -> text:
 fn jo4(p1: text, p2: text, p3: text, p4: text) -> text:
     LB() + p1 + "," + p2 + "," + p3 + "," + p4 + RB()
 
-fn extract_field(json: text, key: text) -> text:
-    val search = Q() + key + Q() + ":"
-    val idx_result = json.index_of(search)
-    var idx = -1
-    match idx_result:
-        Some(i): idx = i
-        nil: return ""
-    if idx < 0:
-        return ""
-    val start = idx + search.len()
-    val after = json.substring(start)
-    val trimmed = after.trim()
-    if trimmed.starts_with(Q()):
-        val after_quote = trimmed.substring(1)
-        var parts: [text] = []
-        for ch in after_quote:
-            if ch == Q():
-                break
-            parts.push(ch)
-        return parts.join("")
-    else:
-        var parts: [text] = []
-        for ch in trimmed:
-            if ch == "," or ch == RB() or ch == SB_R() or ch == " " or ch == "\n":
-                break
-            parts.push(ch)
-        return parts.join("")
+# Manual JSON value scanner.
+#
+# NOTE: These helpers use manual character scanning rather than
+# `text.index_of()` + `match Some(i)`. There is a Cranelift codegen
+# bug where `match idx_opt: Some(i): ... nil: ...` on the result of
+# `index_of()` segfaults at runtime in native binaries. The manual
+# scanner pattern below is the same one used successfully in
+# examples/10_tooling/trace32_tools/t32_mcp/frontend_cold.spl.
+# Do NOT re-introduce `match Some(i)` on `index_of` results here.
 
-fn extract_field_raw(json: text, key: text) -> text:
-    val search = Q() + key + Q() + ":"
-    val idx_result = json.index_of(search)
-    var idx = -1
-    match idx_result:
-        Some(i): idx = i
-        nil: return "null"
-    if idx < 0:
-        return "null"
-    var start = idx + search.len()
-    if start >= json.len():
-        return "null"
-    var rest = json.substring(start)
-    rest = rest.trim()
-    if rest == "":
-        return "null"
-    if rest.starts_with(Q()):
-        var out: [text] = [Q()]
+fn _char_at(s: text, i: i64) -> text:
+    s.substring(i, i + 1)
+
+fn _is_ws(ch: text) -> bool:
+    ch == " " or ch == "\n" or ch == "\r" or ch == "\t"
+
+fn _find_json_value_start(json: text, key: text) -> i64:
+    val search = Q() + key + Q()
+    var offset = 0
+    while offset + search.len() <= json.len():
+        var matches = true
+        var j = 0
+        while j < search.len():
+            if json.substring(offset + j, offset + j + 1) != search.substring(j, j + 1):
+                matches = false
+                break
+            j = j + 1
+        if not matches:
+            offset = offset + 1
+            continue
+        var value_start = offset + search.len()
+        while value_start < json.len() and _is_ws(_char_at(json, value_start)):
+            value_start = value_start + 1
+        if value_start < json.len() and _char_at(json, value_start) == ":":
+            value_start = value_start + 1
+            while value_start < json.len() and _is_ws(_char_at(json, value_start)):
+                value_start = value_start + 1
+            return value_start
+        offset = offset + search.len()
+    return -1
+
+fn extract_field(json: text, key: text) -> text:
+    val start = _find_json_value_start(json, key)
+    if start < 0 or start >= json.len():
+        return ""
+    val first = _char_at(json, start)
+    if first == Q():
+        var i = start + 1
         var escaped = false
-        var first = true
-        for ch in rest:
-            if first:
-                first = false
-                continue
-            out.push(ch)
+        while i < json.len():
+            val ch = _char_at(json, i)
             if escaped:
                 escaped = false
             elif ch == "\\":
                 escaped = true
             elif ch == Q():
-                break
-        return out.join("")
-    var parts: [text] = []
-    for ch in rest:
-        if ch == "," or ch == RB() or ch == SB_R() or ch == " " or ch == "\n":
+                return json.substring(start + 1, i)
+            i = i + 1
+        return ""
+    var end = start
+    while end < json.len():
+        val ch = _char_at(json, end)
+        if ch == "," or ch == RB() or ch == SB_R() or _is_ws(ch):
             break
-        parts.push(ch)
-    val raw = parts.join("")
+        end = end + 1
+    return json.substring(start, end)
+
+fn extract_field_raw(json: text, key: text) -> text:
+    val start = _find_json_value_start(json, key)
+    if start < 0 or start >= json.len():
+        return "null"
+    val first = _char_at(json, start)
+    if first == Q():
+        var i2 = start + 1
+        var escaped = false
+        while i2 < json.len():
+            val ch = _char_at(json, i2)
+            if escaped:
+                escaped = false
+            elif ch == "\\":
+                escaped = true
+            elif ch == Q():
+                return json.substring(start, i2 + 1)
+            i2 = i2 + 1
+        return "null"
+    if first == LB() or first == SB_L():
+        var depth = 0
+        var i3 = start
+        var in_str = false
+        var esc = false
+        while i3 < json.len():
+            val ch = _char_at(json, i3)
+            if in_str:
+                if esc:
+                    esc = false
+                elif ch == "\\":
+                    esc = true
+                elif ch == Q():
+                    in_str = false
+            else:
+                if ch == Q():
+                    in_str = true
+                elif ch == LB() or ch == SB_L():
+                    depth = depth + 1
+                elif ch == RB() or ch == SB_R():
+                    depth = depth - 1
+                    if depth == 0:
+                        return json.substring(start, i3 + 1)
+            i3 = i3 + 1
+        return "null"
+    var end = start
+    while end < json.len():
+        val ch = _char_at(json, end)
+        if ch == "," or ch == RB() or ch == SB_R() or _is_ws(ch):
+            break
+        end = end + 1
+    val raw = json.substring(start, end)
     if raw == "":
         return "null"
-    raw
+    return raw
 
 fn extract_id(json: text) -> text:
     extract_field_raw(json, "id")
 
 fn extract_nested(json: text, key: text) -> text:
-    val params_search = Q() + "params" + Q() + ":"
-    val params_idx_result = json.index_of(params_search)
-    var params_idx = -1
-    match params_idx_result:
-        Some(i): params_idx = i
-        nil: return ""
-    if params_idx < 0:
+    val params = extract_field_raw(json, "params")
+    if params == "null":
         return ""
-    val params_start = params_idx + params_search.len()
-    val params = json.substring(params_start)
     extract_field(params, key)
 
 fn make_json_result(id: text, result: text) -> text:

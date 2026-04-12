@@ -5,6 +5,17 @@
 
 extern fn stdin_read_char() -> text
 
+# NOTE: These caches used to live in main.spl but cross-module var
+# references don't resolve correctly in native builds — reading them
+# from main_lazy_protocol.spl returned nil. Moving them into this
+# module (same file as the readers/writers) fixes it.
+var _PROTO_USE_JSON_LINES = false
+var _PROTO_INIT_CACHE = ""
+var _PROTO_TOOLS_CACHE = ""
+val _PROTO_SERVER_NAME = "simple-mcp-full"
+val _PROTO_SERVER_VERSION = "4.0.0"
+val _PROTO_NL = "\n"
+
 # --- Protocol I/O ---
 
 fn mcp_read_line() -> text:
@@ -49,7 +60,7 @@ fn read_stdin_message() -> text:
         elif line.ends_with("\r"):
             line = strip_last(line)
         if line.starts_with(LB()):
-            USE_JSON_LINES = true
+            _PROTO_USE_JSON_LINES = true
             return line
         if line.starts_with("Content-Length:"):
             var len_str = line.replace("Content-Length:", "")
@@ -60,19 +71,19 @@ fn read_stdin_message() -> text:
     mcp_read_chars(content_length)
 
 fn write_stdout_message(body: text):
-    if USE_JSON_LINES:
-        print_raw(body + NL)
+    if _PROTO_USE_JSON_LINES:
+        print_raw(body + _PROTO_NL)
     else:
         val byte_count = text_byte_len(body)
-        var header = "Content-Length: " + str(byte_count) + "\r" + NL + "\r" + NL
+        var header = "Content-Length: " + str(byte_count) + "\r" + _PROTO_NL + "\r" + _PROTO_NL
         print_raw(header)
         print_raw(body)
 
 # --- Initialize response ---
 
 fn make_init_response(id: text) -> text:
-    if INIT_CACHE != "":
-        return make_json_result(id, INIT_CACHE)
+    if _PROTO_INIT_CACHE != "":
+        return make_json_result(id, _PROTO_INIT_CACHE)
     var tools_cap = jo1(jp("listChanged", "true"))
     var resources_cap = jo2(jp("subscribe", "true"), jp("listChanged", "true"))
     var prompts_cap = jo1(jp("listChanged", "true"))
@@ -83,8 +94,8 @@ fn make_init_response(id: text) -> text:
     )
     caps = strip_last(caps) + "," + jp("logging", LB() + RB()) + "," + jp("completions", LB() + RB()) + "," + jp("roots", jo1(jp("listChanged", "false"))) + RB()
     val server_info = jo2(
-        jp("name", js(SERVER_NAME)),
-        jp("version", js(SERVER_VERSION))
+        jp("name", js(_PROTO_SERVER_NAME)),
+        jp("version", js(_PROTO_SERVER_VERSION))
     )
     val result = jo4(
         jp("protocolVersion", js("2025-06-18")),
@@ -92,14 +103,14 @@ fn make_init_response(id: text) -> text:
         jp("instructions", js("Full-featured MCP server with table-driven tool dispatch. ~100 tools available (CLI passthrough + in-process handlers). Long-running tools return task handles for async polling.")),
         jp("serverInfo", server_info)
     )
-    INIT_CACHE = result
-    make_json_result(id, result)
+    _PROTO_INIT_CACHE = result
+    return make_json_result(id, result)
 
 # --- Tools list — generated from tool table ---
 
 fn make_tools_list(id: text) -> text:
-    if TOOLS_CACHE != "":
-        return make_json_result(id, TOOLS_CACHE)
+    if _PROTO_TOOLS_CACHE != "":
+        return make_json_result(id, _PROTO_TOOLS_CACHE)
 
     val table = get_tool_table()
     var tool_parts: [text] = []
@@ -108,8 +119,8 @@ fn make_tools_list(id: text) -> text:
 
     val tools = SB_L() + tool_parts.join(",") + SB_R()
     val result = jo1(jp("tools", tools))
-    TOOLS_CACHE = result
-    make_json_result(id, result)
+    _PROTO_TOOLS_CACHE = result
+    return make_json_result(id, result)
 
 fn _build_tool_schema_from_entry(entry: McpToolEntry) -> text:
     var schema = LB()

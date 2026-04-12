@@ -4,7 +4,7 @@
 #
 # Uses shared mcp_sdk for JSON, shell helpers, and tool result building.
 
-use app.simple_lsp_mcp.json_helpers.{Q, LB, RB, SB_L, SB_R, jp, js, jo1, jo2, extract_field, escape_json, jsonrpc_result, jsonrpc_error, find_simple_binary, clean_command_output, strip_ansi, run_command_text, make_tool_result, make_tool_error, has_method}
+use app.simple_lsp_mcp.json_helpers.{Q, LB, RB, SB_L, SB_R, jp, js, jo1, jo2, extract_field, escape_json, jsonrpc_result, jsonrpc_error, find_simple_binary, clean_command_output, strip_ansi, run_command_text, make_tool_result, make_tool_error, has_method, _char_at, _is_ws, _find_json_value_start}
 
 extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
 
@@ -127,50 +127,34 @@ fn handle_logging_set_level(id: text, body: text) -> text:
     jsonrpc_result(id, jo1(jp("level", js(level))))
 
 fn arg_field(args: text, key: text) -> text:
-    val search1 = Q() + key + Q() + ":" + Q()
-    val search2 = Q() + key + Q() + ": " + Q()
-    val idx1_result = args.index_of(search1)
-    match idx1_result:
-        Some(i):
-            val start = i + search1.len()
-            var parts: [text] = []
-            var pos = start
-            while pos < args.len():
-                val ch = args.substring(pos, pos + 1)
-                if ch == Q():
-                    return parts.join("")
-                parts.push(ch)
-                pos = pos + 1
-        nil: pass_dn
-    val idx2_result = args.index_of(search2)
-    match idx2_result:
-        Some(i):
-            val start = i + search2.len()
-            var parts: [text] = []
-            var pos = start
-            while pos < args.len():
-                val ch = args.substring(pos, pos + 1)
-                if ch == Q():
-                    return parts.join("")
-                parts.push(ch)
-                pos = pos + 1
-        nil: pass_dn
-    val search_num = Q() + key + Q() + ":"
-    val idx_num_result = args.index_of(search_num)
-    match idx_num_result:
-        Some(i):
-            val start = i + search_num.len()
-            var parts: [text] = []
-            var pos = start
-            while pos < args.len():
-                val ch = args.substring(pos, pos + 1)
-                if ch == "," or ch == "}" or ch == "]" or ch == " " or ch == "\n" or ch == "\r" or ch == "\t":
-                    break
-                parts.push(ch)
-                pos = pos + 1
-            return parts.join("")
-        nil: pass_dn
-    ""
+    # Manual scanner — avoids the Cranelift `match Some(i)` codegen bug.
+    # _find_json_value_start already handles whitespace after the colon,
+    # so the three original search variants (no-space, with-space,
+    # numeric) collapse into a single call.
+    val start = _find_json_value_start(args, key)
+    if start < 0 or start >= args.len():
+        return ""
+    val first = _char_at(args, start)
+    if first == Q():
+        var i = start + 1
+        var escaped = false
+        while i < args.len():
+            val ch = _char_at(args, i)
+            if escaped:
+                escaped = false
+            elif ch == "\\":
+                escaped = true
+            elif ch == Q():
+                return args.substring(start + 1, i)
+            i = i + 1
+        return ""
+    var end = start
+    while end < args.len():
+        val ch = _char_at(args, end)
+        if ch == "," or ch == RB() or ch == "]" or _is_ws(ch):
+            break
+        end = end + 1
+    args.substring(start, end)
 
 fn detect_tool_name(body: text) -> text:
     # Original 5 tools

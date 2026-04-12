@@ -7,9 +7,31 @@ extern fn sys_get_args() -> [text]
 extern fn rt_process_run(program: text, args: [text]) -> (text, text, i64)
 extern fn rt_process_spawn_async(cmd: text, args: [text]) -> i64
 extern fn rt_process_wait(pid: i64, timeout_ms: i64) -> i64
+extern fn rt_file_exists(path: text) -> bool
+extern fn rt_file_stat(path: text) -> i32
+extern fn rt_dir_list(path: text) -> [text]
+
+val LSP_MCP_SIZE_CEILING: i32 = 20971520
 
 # Stored exit code from main(). -1 = not yet run.
 var _exit_code = -1
+
+fn check_binary_sizes() -> i64:
+    val bin_release = "bin/release"
+    if not rt_file_exists(bin_release):
+        return 0
+    val triples = rt_dir_list(bin_release) ?? []
+    val targets = ["simple_lsp_mcp_server", "simple_mcp_server"]
+    var failed: i64 = 0
+    for triple in triples:
+        for name in targets:
+            val path = bin_release + "/" + triple + "/" + name
+            if rt_file_exists(path):
+                val sz = rt_file_stat(path)
+                if sz > LSP_MCP_SIZE_CEILING:
+                    print "ERROR: {path} = {sz} bytes > 20 MB ceiling ({LSP_MCP_SIZE_CEILING})"
+                    failed = 1
+    failed
 
 fn delegate_full(args: [text]) -> i64:
     val script = "src/compiler/80.driver/build/cli_entry_full.spl"
@@ -63,11 +85,15 @@ fn run_check() -> i64:
         print test_stdout
     if test_stderr.?:
         print test_stderr
+    print "\n=== Checking binary sizes ==="
+    val size_code = check_binary_sizes()
     # Overall
     if lint_code != 0:
         return lint_code
     if fmt_code != 0:
         return fmt_code
+    if size_code != 0:
+        return size_code
     test_code
 
 fn handle_build(args: [text]) -> i64:
