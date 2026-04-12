@@ -11,12 +11,11 @@
 import * as crypto from 'crypto';
 import * as fs from 'fs';
 import * as vscode from 'vscode';
-import { indexDocumentSymbols } from './analysis/simpleAnalysisIndex';
+import { analyzeDocument } from './analysis/simpleAnalysisIndex';
 import { detectBlocks, type BlockKind, type DetectedBlock } from './blockDetector';
 import { parseImageContent, resolveImageUri } from './imageResolver';
 import { buildMathPreview } from './mathPreview';
 import type { EditorMarkerState } from './testing/editorMarkers';
-import { detectTestBlocks } from './testing/testDiscovery';
 
 // ── Types ────────────────────────────────────────────────────────────
 
@@ -100,9 +99,20 @@ function escapeForHtml(text: string): string {
 
 function renderDetectedBlocks(
     blocks: DetectedBlock[],
-    documentUri: vscode.Uri,
+    document: vscode.TextDocument,
     webview: vscode.Webview,
 ): RenderableBlock[] {
+    const diagnostics = vscode.languages.getDiagnostics(document.uri);
+
+    const hasBlockingDiagnostic = (block: DetectedBlock): boolean => {
+        const blockRange = new vscode.Range(document.positionAt(block.from), document.positionAt(block.to));
+        return diagnostics.some((diagnostic) =>
+            !(diagnostic.range.end.isBeforeOrEqual(blockRange.start) || blockRange.end.isBeforeOrEqual(diagnostic.range.start))
+            && (diagnostic.severity === vscode.DiagnosticSeverity.Error
+                || diagnostic.severity === vscode.DiagnosticSeverity.Warning),
+        );
+    };
+
     return blocks.map(block => {
         if (block.kind === 'img') {
             const parsed = parseImageContent(block.content);
@@ -116,7 +126,7 @@ function renderDetectedBlocks(
                     errorMessage: 'Invalid image path',
                 };
             }
-            const uri = resolveImageUri(parsed.path, documentUri, webview);
+            const uri = resolveImageUri(parsed.path, document.uri, webview);
             return {
                 ...block,
                 renderedHtml: '',
@@ -128,6 +138,15 @@ function renderDetectedBlocks(
         }
 
         const preview = buildMathPreview(block);
+        if (!preview || hasBlockingDiagnostic(block)) {
+            return {
+                ...block,
+                renderedHtml: '',
+                displayMode: 'inline' as const,
+                status: 'error' as const,
+                errorMessage: !preview ? 'Invalid block syntax' : 'Block has warning or error',
+            };
+        }
         const label = preview
             ? preview.displayText
             : block.content;
@@ -258,7 +277,7 @@ function fullDocumentRange(document: vscode.TextDocument): vscode.Range {
 }
 
 function buildRichEditorSymbols(document: vscode.TextDocument): RichEditorSymbol[] {
-    return indexDocumentSymbols(document).map((symbol) => ({
+    return analyzeDocument(document).symbols.map((symbol) => ({
         name: symbol.name,
         kind: vscode.SymbolKind[symbol.kind],
         detail: symbol.detail,
@@ -269,7 +288,7 @@ function buildRichEditorSymbols(document: vscode.TextDocument): RichEditorSymbol
 }
 
 function buildRichEditorTests(document: vscode.TextDocument): RichEditorTestBlock[] {
-    return detectTestBlocks(document).map((block) => ({
+    return analyzeDocument(document).tests.map((block) => ({
         kind: block.kind,
         label: block.label,
         line: block.line,
@@ -336,7 +355,7 @@ export class RichCustomEditorProvider implements vscode.CustomTextEditorProvider
         const postSync = async (): Promise<void> => {
             const text = document.getText();
             const detected = detectBlocks(text);
-            const blocks = renderDetectedBlocks(detected, document.uri, webviewPanel.webview);
+            const blocks = renderDetectedBlocks(detected, document, webviewPanel.webview);
             await webviewPanel.webview.postMessage({
                 type: 'sync',
                 sourceText: text,

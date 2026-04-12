@@ -93,7 +93,7 @@ class SimpleOutlineProvider {
         if (element) {
             return element.children;
         }
-        const items = (0, simpleAnalysisIndex_1.indexDocumentSymbols)(this.activeDocument)
+        const items = (0, simpleAnalysisIndex_1.analyzeDocument)(this.activeDocument).symbols
             .map((symbol) => new OutlineItem(this.activeDocument, symbol));
         const byId = new Map(items.map((item) => [item.symbol.id, item]));
         const roots = [];

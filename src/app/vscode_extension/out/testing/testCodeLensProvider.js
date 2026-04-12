@@ -35,7 +35,7 @@ var __importStar = (this && this.__importStar) || (function () {
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.TestCodeLensProvider = void 0;
 const vscode = __importStar(require("vscode"));
-const testDiscovery_1 = require("./testDiscovery");
+const simpleAnalysisIndex_1 = require("../analysis/simpleAnalysisIndex");
 class TestCodeLensProvider {
     constructor() {
         this.disposables = [];
@@ -47,7 +47,7 @@ class TestCodeLensProvider {
         if (document.languageId !== 'simple') {
             return [];
         }
-        return (0, testDiscovery_1.detectTestBlocks)(document)
+        return (0, simpleAnalysisIndex_1.analyzeDocument)(document).tests
             .filter((block) => block.runnableScope === 'file' || block.runnableScope === 'doctest')
             .map((block) => {
             const range = new vscode.Range(block.line, 0, block.line, 0);

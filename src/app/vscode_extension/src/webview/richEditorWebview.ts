@@ -243,10 +243,25 @@ function buildFullLineMathDecorations(
     renderedBlocks: Map<string, RenderableBlockInfo>,
 ): DecorationSet {
     const builder = new RangeSetBuilder<Decoration>();
-    const cursor = state.selection.main.head;
+    const intersectsSelection = (from: number, to: number): boolean => {
+        for (const range of state.selection.ranges) {
+            const start = Math.min(range.anchor, range.head);
+            const end = Math.max(range.anchor, range.head);
+            if (range.empty) {
+                if (start >= from && start <= to) {
+                    return true;
+                }
+                continue;
+            }
+            if (start < to && end > from) {
+                return true;
+            }
+        }
+        return false;
+    };
 
     for (const block of detectFullLineMathBlocks(state)) {
-        if (cursor >= block.from && cursor <= block.to) {
+        if (intersectsSelection(block.from, block.to)) {
             continue;
         }
 

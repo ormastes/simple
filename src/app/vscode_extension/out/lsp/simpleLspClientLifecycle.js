@@ -37,18 +37,12 @@ exports.createSimpleLspClientBootstrap = createSimpleLspClientBootstrap;
 const vscode = __importStar(require("vscode"));
 const child_process_1 = require("child_process");
 const node_1 = require("vscode-languageclient/node");
+const wasmLspBridge_1 = require("../wasm/wasmLspBridge");
+const WASM_LSP_PATH = 'wasm/simple-lsp.wasm';
 function createSimpleLspClientBootstrap(options) {
     return async (request) => {
         const watcher = vscode.workspace.createFileSystemWatcher(request.clientOptions.synchronize.fileEvents);
         const outputChannel = options.services.outputChannel;
-        const serverOptions = {
-            command: request.server.command,
-            args: request.server.args,
-            transport: node_1.TransportKind.stdio,
-            options: {
-                env: request.server.environment,
-            },
-        };
         const clientOptions = {
             documentSelector: request.clientOptions.documentSelector,
             synchronize: {
@@ -64,7 +58,8 @@ function createSimpleLspClientBootstrap(options) {
                 closed: () => ({ action: node_1.CloseAction.DoNotRestart, handled: true }),
             },
         };
-        const client = new node_1.LanguageClient('simple-lsp', 'Simple Language Server', serverOptions, clientOptions);
+        let client;
+        let activeSource = request.server.usingWasm ? 'wasm' : 'native';
         const setFallbackEnabled = (enabled) => {
             for (const control of options.fallbackControls ?? []) {
                 control.setEnabled(enabled);
@@ -72,7 +67,7 @@ function createSimpleLspClientBootstrap(options) {
         };
         const syncState = (state) => {
             if (state === node_1.State.Running) {
-                options.services.markReady('lsp', 'Simple LSP server running', 'native');
+                options.services.markReady('lsp', 'Simple LSP server running', activeSource);
                 setFallbackEnabled(false);
                 options.onRunningStateChanged?.(true);
                 return;
@@ -80,8 +75,8 @@ function createSimpleLspClientBootstrap(options) {
             if (state === node_1.State.Starting) {
                 options.services.setStatus('lsp', {
                     health: 'starting',
-                    source: 'native',
-                    message: 'Starting Simple LSP server',
+                    source: activeSource,
+                    message: `Starting Simple LSP server (${activeSource})`,
                 });
                 options.onRunningStateChanged?.(false);
                 return;
@@ -90,33 +85,44 @@ function createSimpleLspClientBootstrap(options) {
             setFallbackEnabled(true);
             options.onRunningStateChanged?.(false);
         };
-        client.onDidChangeState((event) => {
-            outputChannel.info(`Simple LSP state changed: ${node_1.State[event.oldState]} -> ${node_1.State[event.newState]}`);
-            syncState(event.newState);
-        });
-        syncState(node_1.State.Starting);
         return {
             start: async () => {
-                const probe = (0, child_process_1.spawnSync)(request.server.command, request.server.args, {
-                    env: request.server.environment,
-                    encoding: 'utf-8',
-                    timeout: 500,
-                });
-                const probeOutput = [probe.stdout, probe.stderr].filter(Boolean).join('\n').trim();
-                const exitedQuicklyWithError = probe.status !== null && probe.status !== 0;
-                const timedOut = probe.error && 'code' in probe.error && probe.error.code === 'ETIMEDOUT';
-                if (exitedQuicklyWithError && !timedOut) {
+                const resolved = await resolveServerOptions(request, outputChannel);
+                if (!resolved.ok) {
                     setFallbackEnabled(true);
                     options.onRunningStateChanged?.(false);
-                    options.services.markDegraded('lsp', 'Simple LSP command exits immediately; fallback providers active', 'fallback', probeOutput || `exit ${probe.status}`);
+                    options.services.markDegraded('lsp', resolved.message, 'fallback', resolved.detail);
                     return;
                 }
-                const initializeProbe = await probeInitializeHandshake(request.server.command, request.server.args, request.server.environment);
-                if (!initializeProbe.ok) {
-                    setFallbackEnabled(true);
-                    options.onRunningStateChanged?.(false);
-                    options.services.markDegraded('lsp', 'Simple LSP initialize probe failed; fallback providers active', 'fallback', initializeProbe.detail);
-                    return;
+                activeSource = resolved.source;
+                client = new node_1.LanguageClient('simple-lsp', 'Simple Language Server', resolved.serverOptions, clientOptions);
+                client.onDidChangeState((event) => {
+                    outputChannel.info(`Simple LSP state changed: ${node_1.State[event.oldState]} -> ${node_1.State[event.newState]}`);
+                    syncState(event.newState);
+                });
+                syncState(node_1.State.Starting);
+                if (activeSource === 'native') {
+                    const probe = (0, child_process_1.spawnSync)(request.server.command, request.server.args, {
+                        env: request.server.environment,
+                        encoding: 'utf-8',
+                        timeout: 500,
+                    });
+                    const probeOutput = [probe.stdout, probe.stderr].filter(Boolean).join('\n').trim();
+                    const exitedQuicklyWithError = probe.status !== null && probe.status !== 0;
+                    const timedOut = probe.error && 'code' in probe.error && probe.error.code === 'ETIMEDOUT';
+                    if (exitedQuicklyWithError && !timedOut) {
+                        setFallbackEnabled(true);
+                        options.onRunningStateChanged?.(false);
+                        options.services.markDegraded('lsp', 'Simple LSP command exits immediately; fallback providers active', 'fallback', probeOutput || `exit ${probe.status}`);
+                        return;
+                    }
+                    const initializeProbe = await probeInitializeHandshake(request.server.command, request.server.args, request.server.environment);
+                    if (!initializeProbe.ok) {
+                        setFallbackEnabled(true);
+                        options.onRunningStateChanged?.(false);
+                        options.services.markDegraded('lsp', 'Simple LSP initialize probe failed; fallback providers active', 'fallback', initializeProbe.detail);
+                        return;
+                    }
                 }
                 try {
                     await client.start();
@@ -130,20 +136,73 @@ function createSimpleLspClientBootstrap(options) {
                 }
             },
             restart: async () => {
+                if (!client) {
+                    return;
+                }
                 await client.restart();
             },
             stop: async () => {
                 setFallbackEnabled(true);
                 options.onRunningStateChanged?.(false);
-                await client.stop();
+                if (client) {
+                    await client.stop();
+                }
             },
             dispose: async () => {
                 setFallbackEnabled(true);
                 options.onRunningStateChanged?.(false);
                 watcher.dispose();
-                await client.stop();
+                if (client) {
+                    await client.stop();
+                }
             },
         };
+    };
+}
+async function resolveServerOptions(request, outputChannel) {
+    if (request.server.usingWasm) {
+        const wasmAvailable = await (0, wasmLspBridge_1.isWasmLspAvailable)(request.context, WASM_LSP_PATH);
+        if (wasmAvailable) {
+            const wasmOptions = await (0, wasmLspBridge_1.createWasmServerOptions)({
+                wasmPath: WASM_LSP_PATH,
+                context: request.context,
+                outputChannel,
+            });
+            if (wasmOptions.serverOptions) {
+                return {
+                    ok: true,
+                    serverOptions: wasmOptions.serverOptions,
+                    source: 'wasm',
+                };
+            }
+            if (request.configuration.mode === 'wasm') {
+                return {
+                    ok: false,
+                    message: 'Simple LSP WASM mode is enabled but the WASM runtime is unavailable; fallback providers active',
+                    detail: wasmOptions.detail ?? `Expected ${WASM_LSP_PATH}`,
+                };
+            }
+        }
+        if (request.configuration.mode === 'wasm') {
+            return {
+                ok: false,
+                message: 'Simple LSP WASM mode is enabled but the WASM server is unavailable; fallback providers active',
+                detail: wasmAvailable ? undefined : `Expected ${WASM_LSP_PATH}`,
+            };
+        }
+        outputChannel.warn('Simple LSP WASM mode unavailable; falling back to native subprocess.');
+    }
+    return {
+        ok: true,
+        source: 'native',
+        serverOptions: {
+            command: request.server.command,
+            args: request.server.args,
+            transport: node_1.TransportKind.stdio,
+            options: {
+                env: request.server.environment,
+            },
+        },
     };
 }
 function createJsonRpcMessage(payload) {

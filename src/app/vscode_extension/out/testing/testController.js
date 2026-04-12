@@ -35,7 +35,7 @@ var __importStar = (this && this.__importStar) || (function () {
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.SimpleTestController = void 0;
 const vscode = __importStar(require("vscode"));
-const testDiscovery_1 = require("./testDiscovery");
+const simpleAnalysisIndex_1 = require("../analysis/simpleAnalysisIndex");
 function collectItems(collection) {
     const items = [];
     collection.forEach((item) => {
@@ -118,7 +118,8 @@ class SimpleTestController {
                 this.itemScopes.delete(key);
             }
         }
-        for (const block of (0, testDiscovery_1.detectTestBlocks)(document)) {
+        const tests = (0, simpleAnalysisIndex_1.analyzeDocument)(document).tests;
+        for (const block of tests) {
             const child = this.controller.createTestItem(block.id, block.label, document.uri);
             child.range = new vscode.Range(block.line, 0, block.line, document.lineAt(block.line).text.length);
             child.canResolveChildren = false;
@@ -130,7 +131,7 @@ class SimpleTestController {
             blockItems.set(block.id, child);
             this.itemScopes.set(block.id, { scope: block.runnableScope, fileId });
         }
-        for (const block of (0, testDiscovery_1.detectTestBlocks)(document)) {
+        for (const block of tests) {
             const child = blockItems.get(block.id);
             if (!child) {
                 continue;

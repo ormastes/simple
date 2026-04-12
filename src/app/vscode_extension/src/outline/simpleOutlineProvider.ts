@@ -1,5 +1,5 @@
 import * as vscode from 'vscode';
-import { indexDocumentSymbols, type IndexedSymbol } from '../analysis/simpleAnalysisIndex';
+import { analyzeDocument, type IndexedSymbol } from '../analysis/simpleAnalysisIndex';
 
 class OutlineItem extends vscode.TreeItem {
     public readonly children: OutlineItem[] = [];
@@ -67,7 +67,7 @@ export class SimpleOutlineProvider implements vscode.TreeDataProvider<OutlineIte
             return element.children;
         }
 
-        const items = indexDocumentSymbols(this.activeDocument)
+        const items = analyzeDocument(this.activeDocument).symbols
             .map((symbol) => new OutlineItem(this.activeDocument!, symbol));
         const byId = new Map(items.map((item) => [item.symbol.id, item]));
         const roots: OutlineItem[] = [];

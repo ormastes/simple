@@ -50,7 +50,6 @@ const simpleAnalysisIndex_1 = require("./analysis/simpleAnalysisIndex");
 const blockDetector_1 = require("./blockDetector");
 const imageResolver_1 = require("./imageResolver");
 const mathPreview_1 = require("./mathPreview");
-const testDiscovery_1 = require("./testing/testDiscovery");
 function escapeForHtml(text) {
     return text
         .replace(/&/g, '&amp;')
@@ -60,7 +59,14 @@ function escapeForHtml(text) {
         .replace(/'/g, '&#039;');
 }
 // ── Block rendering ──────────────────────────────────────────────────
-function renderDetectedBlocks(blocks, documentUri, webview) {
+function renderDetectedBlocks(blocks, document, webview) {
+    const diagnostics = vscode.languages.getDiagnostics(document.uri);
+    const hasBlockingDiagnostic = (block) => {
+        const blockRange = new vscode.Range(document.positionAt(block.from), document.positionAt(block.to));
+        return diagnostics.some((diagnostic) => !(diagnostic.range.end.isBeforeOrEqual(blockRange.start) || blockRange.end.isBeforeOrEqual(diagnostic.range.start))
+            && (diagnostic.severity === vscode.DiagnosticSeverity.Error
+                || diagnostic.severity === vscode.DiagnosticSeverity.Warning));
+    };
     return blocks.map(block => {
         if (block.kind === 'img') {
             const parsed = (0, imageResolver_1.parseImageContent)(block.content);
@@ -74,7 +80,7 @@ function renderDetectedBlocks(blocks, documentUri, webview) {
                     errorMessage: 'Invalid image path',
                 };
             }
-            const uri = (0, imageResolver_1.resolveImageUri)(parsed.path, documentUri, webview);
+            const uri = (0, imageResolver_1.resolveImageUri)(parsed.path, document.uri, webview);
             return {
                 ...block,
                 renderedHtml: '',
@@ -85,6 +91,15 @@ function renderDetectedBlocks(blocks, documentUri, webview) {
             };
         }
         const preview = (0, mathPreview_1.buildMathPreview)(block);
+        if (!preview || hasBlockingDiagnostic(block)) {
+            return {
+                ...block,
+                renderedHtml: '',
+                displayMode: 'inline',
+                status: 'error',
+                errorMessage: !preview ? 'Invalid block syntax' : 'Block has warning or error',
+            };
+        }
         const label = preview
             ? preview.displayText
             : block.content;
@@ -204,7 +219,7 @@ function fullDocumentRange(document) {
     return new vscode.Range(new vscode.Position(0, 0), end);
 }
 function buildRichEditorSymbols(document) {
-    return (0, simpleAnalysisIndex_1.indexDocumentSymbols)(document).map((symbol) => ({
+    return (0, simpleAnalysisIndex_1.analyzeDocument)(document).symbols.map((symbol) => ({
         name: symbol.name,
         kind: vscode.SymbolKind[symbol.kind],
         detail: symbol.detail,
@@ -214,7 +229,7 @@ function buildRichEditorSymbols(document) {
     }));
 }
 function buildRichEditorTests(document) {
-    return (0, testDiscovery_1.detectTestBlocks)(document).map((block) => ({
+    return (0, simpleAnalysisIndex_1.analyzeDocument)(document).tests.map((block) => ({
         kind: block.kind,
         label: block.label,
         line: block.line,
@@ -265,7 +280,7 @@ class RichCustomEditorProvider {
         const postSync = async () => {
             const text = document.getText();
             const detected = (0, blockDetector_1.detectBlocks)(text);
-            const blocks = renderDetectedBlocks(detected, document.uri, webviewPanel.webview);
+            const blocks = renderDetectedBlocks(detected, document, webviewPanel.webview);
             await webviewPanel.webview.postMessage({
                 type: 'sync',
                 sourceText: text,

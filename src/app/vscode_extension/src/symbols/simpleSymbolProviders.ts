@@ -1,5 +1,5 @@
 import * as vscode from 'vscode';
-import { indexDocumentSymbols, type IndexedSymbol } from '../analysis/simpleAnalysisIndex';
+import { analyzeDocument, type IndexedSymbol } from '../analysis/simpleAnalysisIndex';
 import { detectBlocks } from '../blockDetector';
 import { isMathLikeBlock } from '../mathPreview';
 
@@ -12,7 +12,7 @@ async function collectWorkspaceSymbols(query?: string): Promise<IndexedSymbol[]>
     const symbols: IndexedSymbol[] = [];
     for (const uri of uris) {
         const document = await vscode.workspace.openTextDocument(uri);
-        symbols.push(...indexDocumentSymbols(document));
+        symbols.push(...analyzeDocument(document).symbols);
     }
     if (!query) {
         return symbols;
@@ -32,7 +32,7 @@ export class SimpleDocumentSymbolProvider implements vscode.DocumentSymbolProvid
         if (!this.enabled) {
             return [];
         }
-        const indexedSymbols = indexDocumentSymbols(document);
+        const indexedSymbols = analyzeDocument(document).symbols;
         const symbols = indexedSymbols.map((symbol) => new vscode.DocumentSymbol(
             symbol.name,
             symbol.detail,
@@ -97,7 +97,7 @@ export class SimpleDefinitionProvider implements vscode.DefinitionProvider {
         }
 
         const word = document.getText(range);
-        const currentDocumentHit = indexDocumentSymbols(document).find((symbol) => symbol.name === word);
+        const currentDocumentHit = analyzeDocument(document).symbols.find((symbol) => symbol.name === word);
         if (currentDocumentHit) {
             return new vscode.Location(currentDocumentHit.uri, currentDocumentHit.selectionRange);
         }
@@ -130,7 +130,7 @@ export class SimpleReferenceProvider implements vscode.ReferenceProvider {
 
         const word = document.getText(range);
         const workspaceHits = exactSymbolMatches(await collectWorkspaceSymbols(word), word);
-        const currentDocumentHits = exactSymbolMatches(indexDocumentSymbols(document), word);
+        const currentDocumentHits = exactSymbolMatches(analyzeDocument(document).symbols, word);
         const merged = [...currentDocumentHits, ...workspaceHits];
         const seen = new Set<string>();
         const locations: vscode.Location[] = [];
@@ -178,7 +178,7 @@ export class SimpleHoverProvider implements vscode.HoverProvider {
 
         const word = document.getText(range);
         const allSymbols = [
-            ...indexDocumentSymbols(document),
+            ...analyzeDocument(document).symbols,
             ...(await collectWorkspaceSymbols(word)),
         ];
         const symbol = allSymbols.find((candidate) => candidate.name === word);

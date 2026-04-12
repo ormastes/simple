@@ -103,10 +103,16 @@ function buildMathHoverMarkdown(block, preview) {
         return undefined;
     }
     const markdown = new vscode.MarkdownString(undefined, true);
-    markdown.appendMarkdown(`**${preview.label}**\n\n`);
-    markdown.appendCodeblock(block.content, 'simple');
+    markdown.isTrusted = true;
+    markdown.supportHtml = true;
+    markdown.appendMarkdown(`**Math Block** \`${preview.label}\`\n\n`);
+    markdown.appendMarkdown('---\n\n');
+    markdown.appendCodeblock(preview.displayText, 'text');
     markdown.appendMarkdown('\n');
-    markdown.appendMarkdown(`Preview: \`${preview.displayText}\``);
+    markdown.appendMarkdown(`**Pretty:** ${preview.pretty}\n\n`);
+    markdown.appendMarkdown(`**Source:** \`${block.content}\`\n\n`);
+    markdown.appendMarkdown('[Open Math Preview Panel](command:simple.math.togglePreview)\n\n');
+    markdown.appendMarkdown('[Open Synced Math Panel](command:simple.math.toggleSyncPanel)');
     return markdown;
 }
 class NativeMathProvider {
@@ -144,9 +150,6 @@ class NativeMathProvider {
         this.refreshVisibleEditors();
     }
     provideHover(document, position) {
-        if (this.lspRunning) {
-            return undefined;
-        }
         const config = vscode.workspace.getConfiguration('simple.math');
         if (!config.get('enabled', true) || !config.get('previewOnHover', true)) {
             return undefined;
@@ -157,13 +160,6 @@ class NativeMathProvider {
         }
         const preview = (0, mathPreview_1.buildMathPreview)(block);
         if (!preview) {
-            return undefined;
-        }
-        const activeEditor = vscode.window.activeTextEditor;
-        if (activeEditor?.document.uri.toString() !== document.uri.toString()) {
-            return undefined;
-        }
-        if (!selectionIntersectsBlock(document, activeEditor.selections, block)) {
             return undefined;
         }
         const markdown = buildMathHoverMarkdown(block, preview);

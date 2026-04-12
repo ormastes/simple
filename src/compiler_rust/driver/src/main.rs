@@ -884,6 +884,7 @@ fn dispatch_to_simple_app(app_relative_path: &str, args: &[String], gc_log: bool
         && app_relative_path != "src/app/office/mod.spl"
         && app_relative_path != "src/app/cli/bootstrap_main.spl"
         && app_relative_path != "src/app/dashboard/main.spl"
+        && app_relative_path != "src/app/lsp/main.spl"
         && app_relative_path != "src/compiler/90.tools/ffi_gen/main.spl"
         && app_relative_path != "src/app/plugin/main.spl"
         && app_relative_path != "src/app/wrapper_gen/mod.spl"

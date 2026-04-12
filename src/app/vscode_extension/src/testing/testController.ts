@@ -1,7 +1,7 @@
 import * as vscode from 'vscode';
 import { ExtensionHostServices } from '../services/extensionHostServices';
 import { SimpleCliService } from '../services/simpleCliService';
-import { detectTestBlocks, type TestBlock } from './testDiscovery';
+import { analyzeDocument, type TestBlock } from '../analysis/simpleAnalysisIndex';
 
 function collectItems(collection: vscode.TestItemCollection): vscode.TestItem[] {
     const items: vscode.TestItem[] = [];
@@ -110,7 +110,8 @@ export class SimpleTestController implements vscode.Disposable {
             }
         }
 
-        for (const block of detectTestBlocks(document)) {
+        const tests = analyzeDocument(document).tests;
+        for (const block of tests) {
             const child = this.controller.createTestItem(
                 block.id,
                 block.label,
@@ -127,7 +128,7 @@ export class SimpleTestController implements vscode.Disposable {
             this.itemScopes.set(block.id, { scope: block.runnableScope, fileId });
         }
 
-        for (const block of detectTestBlocks(document)) {
+        for (const block of tests) {
             const child = blockItems.get(block.id);
             if (!child) {
                 continue;

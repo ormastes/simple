@@ -100,11 +100,12 @@ export class SimpleLspCompatibilitySurface implements vscode.Disposable {
         }
 
         const server = this.resolveServerCommand(resolveFrom);
+        const configuration = this.configuration;
         const request: SimpleLspBootstrapRequest = {
             context: this.context,
-            configuration: this.configuration,
-            initializationOptions: this.initializationOptions,
-            clientOptions: this.clientOptions,
+            configuration,
+            initializationOptions: buildSimpleLspInitializationOptions(configuration, server.usingWasm),
+            clientOptions: buildSimpleLspClientOptions(configuration, server.usingWasm),
             server,
         };
 

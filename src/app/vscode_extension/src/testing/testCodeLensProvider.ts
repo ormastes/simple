@@ -1,5 +1,5 @@
 import * as vscode from 'vscode';
-import { detectTestBlocks } from './testDiscovery';
+import { analyzeDocument } from '../analysis/simpleAnalysisIndex';
 
 export class TestCodeLensProvider implements vscode.CodeLensProvider, vscode.Disposable {
     private readonly disposables: vscode.Disposable[] = [];
@@ -17,7 +17,7 @@ export class TestCodeLensProvider implements vscode.CodeLensProvider, vscode.Dis
             return [];
         }
 
-        return detectTestBlocks(document)
+        return analyzeDocument(document).tests
             .filter((block) => block.runnableScope === 'file' || block.runnableScope === 'doctest')
             .map((block) => {
             const range = new vscode.Range(block.line, 0, block.line, 0);

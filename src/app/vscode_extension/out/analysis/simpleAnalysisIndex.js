@@ -36,6 +36,7 @@ Object.defineProperty(exports, "__esModule", { value: true });
 exports.indexDocumentSymbols = indexDocumentSymbols;
 exports.detectTestBlocks = detectTestBlocks;
 exports.collectFoldingRanges = collectFoldingRanges;
+exports.analyzeDocument = analyzeDocument;
 const vscode = __importStar(require("vscode"));
 const SYMBOL_PATTERNS = [
     { regex: /^(\s*)fn\s+([A-Za-z_][A-Za-z0-9_]*)/gm, kind: vscode.SymbolKind.Function, detail: 'fn' },
@@ -187,5 +188,12 @@ function collectFoldingRanges(document) {
         }
     }
     return folds;
+}
+function analyzeDocument(document) {
+    return {
+        symbols: indexDocumentSymbols(document),
+        tests: detectTestBlocks(document),
+        folds: collectFoldingRanges(document),
+    };
 }
 //# sourceMappingURL=simpleAnalysisIndex.js.map

@@ -25,6 +25,12 @@ export interface TestBlock {
     runnableScope: TestRunnableScope;
 }
 
+export interface AnalysisIndex {
+    symbols: IndexedSymbol[];
+    tests: TestBlock[];
+    folds: vscode.FoldingRange[];
+}
+
 const SYMBOL_PATTERNS: Array<{
     regex: RegExp;
     kind: vscode.SymbolKind;
@@ -200,4 +206,12 @@ export function collectFoldingRanges(document: vscode.TextDocument): vscode.Fold
     }
 
     return folds;
+}
+
+export function analyzeDocument(document: vscode.TextDocument): AnalysisIndex {
+    return {
+        symbols: indexDocumentSymbols(document),
+        tests: detectTestBlocks(document),
+        folds: collectFoldingRanges(document),
+    };
 }

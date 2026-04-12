@@ -46,7 +46,7 @@ async function collectWorkspaceSymbols(query) {
     const symbols = [];
     for (const uri of uris) {
         const document = await vscode.workspace.openTextDocument(uri);
-        symbols.push(...(0, simpleAnalysisIndex_1.indexDocumentSymbols)(document));
+        symbols.push(...(0, simpleAnalysisIndex_1.analyzeDocument)(document).symbols);
     }
     if (!query) {
         return symbols;
@@ -65,7 +65,7 @@ class SimpleDocumentSymbolProvider {
         if (!this.enabled) {
             return [];
         }
-        const indexedSymbols = (0, simpleAnalysisIndex_1.indexDocumentSymbols)(document);
+        const indexedSymbols = (0, simpleAnalysisIndex_1.analyzeDocument)(document).symbols;
         const symbols = indexedSymbols.map((symbol) => new vscode.DocumentSymbol(symbol.name, symbol.detail, symbol.kind, symbol.range, symbol.selectionRange));
         const byId = new Map();
         const roots = [];
@@ -118,7 +118,7 @@ class SimpleDefinitionProvider {
             return undefined;
         }
         const word = document.getText(range);
-        const currentDocumentHit = (0, simpleAnalysisIndex_1.indexDocumentSymbols)(document).find((symbol) => symbol.name === word);
+        const currentDocumentHit = (0, simpleAnalysisIndex_1.analyzeDocument)(document).symbols.find((symbol) => symbol.name === word);
         if (currentDocumentHit) {
             return new vscode.Location(currentDocumentHit.uri, currentDocumentHit.selectionRange);
         }
@@ -145,7 +145,7 @@ class SimpleReferenceProvider {
         }
         const word = document.getText(range);
         const workspaceHits = exactSymbolMatches(await collectWorkspaceSymbols(word), word);
-        const currentDocumentHits = exactSymbolMatches((0, simpleAnalysisIndex_1.indexDocumentSymbols)(document), word);
+        const currentDocumentHits = exactSymbolMatches((0, simpleAnalysisIndex_1.analyzeDocument)(document).symbols, word);
         const merged = [...currentDocumentHits, ...workspaceHits];
         const seen = new Set();
         const locations = [];
@@ -186,7 +186,7 @@ class SimpleHoverProvider {
         }
         const word = document.getText(range);
         const allSymbols = [
-            ...(0, simpleAnalysisIndex_1.indexDocumentSymbols)(document),
+            ...(0, simpleAnalysisIndex_1.analyzeDocument)(document).symbols,
             ...(await collectWorkspaceSymbols(word)),
         ];
         const symbol = allSymbols.find((candidate) => candidate.name === word);

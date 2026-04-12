@@ -53,16 +53,16 @@ fn _find_simple_binary() -> text:
 fn _fast_query_cmd(subcmd: text) -> text:
     # Lightweight query — only imports query_engine (no compiler). Fast startup.
     val bin = _find_simple_binary()
-    "timeout 30 " + bin + " run src/lib/nogc_sync_mut/lsp/lsp_query.spl " + subcmd
+    "timeout 30 " + bin + " src/app/lsp/lsp_query.spl " + subcmd
 
 fn _heavy_query_cmd(subcmd: text) -> text:
     # Full query — imports compiler for check/diagnostics. Slow startup.
     val bin = _find_simple_binary()
-    "timeout 60 " + bin + " run src/app/cli/query.spl " + subcmd
+    "timeout 60 " + bin + " src/app/cli/query.spl " + subcmd
 
 fn _visibility_query_cmd(subcmd: text) -> text:
     val bin = _find_simple_binary()
-    "timeout 60 " + bin + " run src/app/cli/query_visibility.spl " + subcmd
+    "timeout 60 " + bin + " src/app/cli/query_visibility.spl " + subcmd
 
 fn _shell_cmd(command: text) -> (text, i64):
     var stdout = ""
@@ -510,6 +510,40 @@ fn lsp_handle_workspace_symbol(id: text, body: text) -> text:
     if exit_code != 0 or out.trim() == "":
         return make_json_result(id, SB_L() + SB_R())
     make_json_result(id, out.trim())
+
+fn lsp_handle_folding_range(id: text, body: text) -> text:
+    val uri = _extract_uri(body)
+    val file_path = _uri_to_path(uri)
+    if file_path == "":
+        return make_json_result(id, SB_L() + SB_R())
+    var cmd = _fast_query_cmd("folding-range " + file_path)
+    var out = ""
+    var exit_code: i64 = 0
+    (out, exit_code) = _shell_cmd(cmd)
+    if exit_code != 0 or out.trim() == "":
+        return make_json_result(id, SB_L() + SB_R())
+    val lines = out.split("\n")
+    var ranges: [text] = []
+    for raw_line in lines:
+        val line = raw_line.trim()
+        if line == "" or line.starts_with("No ") or line.starts_with("Error"):
+            continue
+        val parts = line.split(":")
+        if parts.len() < 2:
+            continue
+        var start_line = int(parts[0]) - 1
+        var end_line = int(parts[1]) - 1
+        if start_line < 0:
+            start_line = 0
+        if end_line < start_line:
+            continue
+        var range_parts: [text] = []
+        range_parts.push(jp("startLine", str(start_line)))
+        range_parts.push(jp("endLine", str(end_line)))
+        if parts.len() >= 3 and parts[2].trim() != "":
+            range_parts.push(jp("kind", js(parts[2].trim())))
+        ranges.push(LB() + range_parts.join(",") + RB())
+    make_json_result(id, SB_L() + ranges.join(",") + SB_R())
 
 fn lsp_handle_semantic_tokens_full(id: text, body: text) -> text:
     val uri = _extract_uri(body)

@@ -90,11 +90,12 @@ class SimpleLspCompatibilitySurface {
             return this.fail('Client bootstrap hook is not registered.');
         }
         const server = this.resolveServerCommand(resolveFrom);
+        const configuration = this.configuration;
         const request = {
             context: this.context,
-            configuration: this.configuration,
-            initializationOptions: this.initializationOptions,
-            clientOptions: this.clientOptions,
+            configuration,
+            initializationOptions: (0, simpleLspServerResolver_1.buildSimpleLspInitializationOptions)(configuration, server.usingWasm),
+            clientOptions: (0, simpleLspServerResolver_1.buildSimpleLspClientOptions)(configuration, server.usingWasm),
             server,
         };
         try {

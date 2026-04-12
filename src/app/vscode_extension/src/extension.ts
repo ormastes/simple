@@ -25,7 +25,7 @@ import { TestCodeLensProvider } from './testing/testCodeLensProvider';
 import { SimpleTestController } from './testing/testController';
 import { EditorMarkerManager } from './testing/editorMarkers';
 import { TestWorkspacePanel } from './testing/testWorkspacePanel';
-import { detectTestBlocks } from './testing/testDiscovery';
+import { analyzeDocument } from './analysis/simpleAnalysisIndex';
 
 const SIMPLE_SELECTOR: vscode.DocumentSelector = [
     { scheme: 'file', language: 'simple' },
@@ -66,6 +66,8 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
             mathProvider.setLspRunning?.(running);
         },
         fallbackControls: [
+            diagnosticsProvider,
+            semanticTokensProvider,
             documentSymbolProvider,
             workspaceSymbolProvider,
             definitionProvider,
@@ -73,7 +75,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
             hoverProvider,
         ],
     }));
-    services.markDegraded('lsp', 'Compatibility surface ready; bootstrapping native client', 'fallback');
+    services.markDegraded('lsp', 'Compatibility surface ready; bootstrapping configured client', 'fallback');
     let currentOutlineDocument = vscode.window.activeTextEditor?.document;
     const updateOutline = (document?: vscode.TextDocument) => {
         currentOutlineDocument = document;
@@ -241,7 +243,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
                     void vscode.window.showWarningMessage('No Simple file is active');
                     return;
                 }
-                const block = detectTestBlocks(editor.document)
+                const block = analyzeDocument(editor.document).tests
                     .filter((candidate) => candidate.line <= editor.selection.active.line)
                     .pop();
                 if (block?.runnableScope === 'doctest') {
@@ -366,7 +368,6 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
         }),
     );
 
-    setFallbackProvidersEnabled(true);
     void lspSurface.bootstrapClient(vscode.window.activeTextEditor?.document.uri.fsPath).then((result) => {
         if (!result.ok) {
             services.markDegraded('lsp', result.message, 'fallback', result.detail);

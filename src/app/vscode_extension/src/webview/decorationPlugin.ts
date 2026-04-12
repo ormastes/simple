@@ -76,6 +76,10 @@ function buildDecorations(
         const key = `${block.prefix}:${block.content}`;
         const info = renderedBlocks.get(key);
 
+        if (block.prefix !== 'img' && info?.status === 'error') {
+            continue;
+        }
+
         if (block.prefix !== 'img' && info?.renderedHtml && isWholeTrimmedLine(view, block.from, block.to)) {
             continue;
         }
@@ -107,7 +111,7 @@ function buildDecorations(
                     widget: new MathWidget(info.renderedHtml, block.prefix, block.content),
                 }),
             );
-        } else {
+        } else if (block.prefix === 'img') {
             // Placeholder until host sends rendered content
             builder.add(block.from, block.to,
                 Decoration.replace({
