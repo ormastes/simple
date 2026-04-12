@@ -1,6 +1,7 @@
 import * as vscode from 'vscode';
 
 export interface IndexedSymbol {
+    id: string;
     name: string;
     kind: vscode.SymbolKind;
     range: vscode.Range;
@@ -8,15 +9,20 @@ export interface IndexedSymbol {
     detail: string;
     uri: vscode.Uri;
     indent: number;
+    parentId?: string;
 }
 
 export type TestBlockKind = 'describe' | 'context' | 'it' | 'sdoctest';
+export type TestRunnableScope = 'file' | 'doctest' | 'exact' | 'none';
 
 export interface TestBlock {
+    id: string;
     kind: TestBlockKind;
     label: string;
     line: number;
     indent: number;
+    parentId?: string;
+    runnableScope: TestRunnableScope;
 }
 
 const SYMBOL_PATTERNS: Array<{
@@ -85,6 +91,7 @@ export function indexDocumentSymbols(document: vscode.TextDocument): IndexedSymb
             const end = start.translate(0, symbolName.length);
             const line = document.lineAt(start.line);
             symbols.push({
+                id: `${document.uri.toString()}::symbol::${pattern.detail}::${symbolName}::${start.line}`,
                 name: symbolName,
                 kind: pattern.kind,
                 range: line.range,
@@ -96,33 +103,68 @@ export function indexDocumentSymbols(document: vscode.TextDocument): IndexedSymb
         }
     }
 
-    return symbols.sort((left, right) => left.range.start.line - right.range.start.line);
+    const sorted = symbols.sort((left, right) => left.range.start.line - right.range.start.line);
+    const stack: Array<{ id: string; indent: number }> = [];
+    for (const symbol of sorted) {
+        while (stack.length > 0 && stack[stack.length - 1].indent >= symbol.indent) {
+            stack.pop();
+        }
+        symbol.parentId = stack[stack.length - 1]?.id;
+        stack.push({ id: symbol.id, indent: symbol.indent });
+    }
+    return sorted;
 }
 
 export function detectTestBlocks(document: vscode.TextDocument): TestBlock[] {
     const blocks: TestBlock[] = [];
+    const stack: Array<{ id: string; indent: number; kind: TestBlockKind }> = [];
+
+    const syncParent = (indent: number): string | undefined => {
+        while (stack.length > 0 && stack[stack.length - 1].indent >= indent) {
+            stack.pop();
+        }
+        return stack[stack.length - 1]?.id;
+    };
+
+    const createId = (kind: TestBlockKind, label: string, line: number): string =>
+        `${document.uri.toString()}::${kind}::${label}::${line}`;
+
     for (let line = 0; line < document.lineCount; line++) {
         const text = document.lineAt(line).text;
         let match = text.match(DESCRIBE_RE);
         if (match) {
-            blocks.push({ kind: 'describe', label: match[3], line, indent: match[1].length });
+            const indent = match[1].length;
+            const id = createId('describe', match[3], line);
+            const parentId = syncParent(indent);
+            blocks.push({ id, kind: 'describe', label: match[3], line, indent, parentId, runnableScope: 'file' });
+            stack.push({ id, indent, kind: 'describe' });
             continue;
         }
 
         match = text.match(CONTEXT_RE);
         if (match) {
-            blocks.push({ kind: 'context', label: match[3], line, indent: match[1].length });
+            const indent = match[1].length;
+            const id = createId('context', match[3], line);
+            const parentId = syncParent(indent);
+            blocks.push({ id, kind: 'context', label: match[3], line, indent, parentId, runnableScope: 'none' });
+            stack.push({ id, indent, kind: 'context' });
             continue;
         }
 
         match = text.match(IT_RE);
         if (match) {
-            blocks.push({ kind: 'it', label: match[3], line, indent: match[1].length });
+            const indent = match[1].length;
+            const id = createId('it', match[3], line);
+            const parentId = syncParent(indent);
+            blocks.push({ id, kind: 'it', label: match[3], line, indent, parentId, runnableScope: 'none' });
             continue;
         }
 
         if (SDOCTEST_RE.test(text)) {
-            blocks.push({ kind: 'sdoctest', label: 'sdoctest', line, indent: leadingIndent(text) });
+            const indent = leadingIndent(text);
+            const id = createId('sdoctest', 'sdoctest', line);
+            const parentId = syncParent(indent);
+            blocks.push({ id, kind: 'sdoctest', label: 'sdoctest', line, indent, parentId, runnableScope: 'doctest' });
         }
     }
     return blocks;

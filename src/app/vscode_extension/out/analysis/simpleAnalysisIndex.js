@@ -93,6 +93,7 @@ function indexDocumentSymbols(document) {
             const end = start.translate(0, symbolName.length);
             const line = document.lineAt(start.line);
             symbols.push({
+                id: `${document.uri.toString()}::symbol::${pattern.detail}::${symbolName}::${start.line}`,
                 name: symbolName,
                 kind: pattern.kind,
                 range: line.range,
@@ -103,29 +104,60 @@ function indexDocumentSymbols(document) {
             });
         }
     }
-    return symbols.sort((left, right) => left.range.start.line - right.range.start.line);
+    const sorted = symbols.sort((left, right) => left.range.start.line - right.range.start.line);
+    const stack = [];
+    for (const symbol of sorted) {
+        while (stack.length > 0 && stack[stack.length - 1].indent >= symbol.indent) {
+            stack.pop();
+        }
+        symbol.parentId = stack[stack.length - 1]?.id;
+        stack.push({ id: symbol.id, indent: symbol.indent });
+    }
+    return sorted;
 }
 function detectTestBlocks(document) {
     const blocks = [];
+    const stack = [];
+    const syncParent = (indent) => {
+        while (stack.length > 0 && stack[stack.length - 1].indent >= indent) {
+            stack.pop();
+        }
+        return stack[stack.length - 1]?.id;
+    };
+    const createId = (kind, label, line) => `${document.uri.toString()}::${kind}::${label}::${line}`;
     for (let line = 0; line < document.lineCount; line++) {
         const text = document.lineAt(line).text;
         let match = text.match(DESCRIBE_RE);
         if (match) {
-            blocks.push({ kind: 'describe', label: match[3], line, indent: match[1].length });
+            const indent = match[1].length;
+            const id = createId('describe', match[3], line);
+            const parentId = syncParent(indent);
+            blocks.push({ id, kind: 'describe', label: match[3], line, indent, parentId, runnableScope: 'file' });
+            stack.push({ id, indent, kind: 'describe' });
             continue;
         }
         match = text.match(CONTEXT_RE);
         if (match) {
-            blocks.push({ kind: 'context', label: match[3], line, indent: match[1].length });
+            const indent = match[1].length;
+            const id = createId('context', match[3], line);
+            const parentId = syncParent(indent);
+            blocks.push({ id, kind: 'context', label: match[3], line, indent, parentId, runnableScope: 'none' });
+            stack.push({ id, indent, kind: 'context' });
             continue;
         }
         match = text.match(IT_RE);
         if (match) {
-            blocks.push({ kind: 'it', label: match[3], line, indent: match[1].length });
+            const indent = match[1].length;
+            const id = createId('it', match[3], line);
+            const parentId = syncParent(indent);
+            blocks.push({ id, kind: 'it', label: match[3], line, indent, parentId, runnableScope: 'none' });
             continue;
         }
         if (SDOCTEST_RE.test(text)) {
-            blocks.push({ kind: 'sdoctest', label: 'sdoctest', line, indent: leadingIndent(text) });
+            const indent = leadingIndent(text);
+            const id = createId('sdoctest', 'sdoctest', line);
+            const parentId = syncParent(indent);
+            blocks.push({ id, kind: 'sdoctest', label: 'sdoctest', line, indent, parentId, runnableScope: 'doctest' });
         }
     }
     return blocks;

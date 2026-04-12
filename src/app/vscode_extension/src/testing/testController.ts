@@ -3,14 +3,6 @@ import { ExtensionHostServices } from '../services/extensionHostServices';
 import { SimpleCliService } from '../services/simpleCliService';
 import { detectTestBlocks, type TestBlock } from './testDiscovery';
 
-function createTestId(uri: vscode.Uri, label: string, line: number): string {
-    return `${uri.toString()}::${label}::${line}`;
-}
-
-function isDoctestBlock(block: TestBlock): boolean {
-    return block.kind === 'sdoctest';
-}
-
 function collectItems(collection: vscode.TestItemCollection): vscode.TestItem[] {
     const items: vscode.TestItem[] = [];
     collection.forEach((item) => {
@@ -24,6 +16,7 @@ export class SimpleTestController implements vscode.Disposable {
     private readonly output = vscode.window.createOutputChannel('Simple Test Runner');
     private readonly profile: vscode.TestRunProfile;
     private readonly disposables: vscode.Disposable[] = [];
+    private readonly itemScopes = new Map<string, { scope: 'file' | 'doctest' | 'exact' | 'none'; fileId: string }>();
 
     public constructor(
         private readonly cli: SimpleCliService,
@@ -109,31 +102,53 @@ export class SimpleTestController implements vscode.Disposable {
         fileItem.canResolveChildren = false;
         this.controller.items.add(fileItem);
         fileItem.children.replace([]);
+        this.itemScopes.set(fileId, { scope: 'file', fileId });
+        const blockItems = new Map<string, vscode.TestItem>();
+        for (const key of Array.from(this.itemScopes.keys())) {
+            if (key.startsWith(`${fileId}::`)) {
+                this.itemScopes.delete(key);
+            }
+        }
 
         for (const block of detectTestBlocks(document)) {
-            if (!isDoctestBlock(block)) {
-                continue;
-            }
             const child = this.controller.createTestItem(
-                createTestId(document.uri, block.label, block.line),
+                block.id,
                 block.label,
                 document.uri,
             );
             child.range = new vscode.Range(block.line, 0, block.line, document.lineAt(block.line).text.length);
-            fileItem.children.add(child);
+            child.canResolveChildren = false;
+            child.description = block.kind === 'sdoctest'
+                ? 'doctest'
+                : block.runnableScope === 'file'
+                    ? 'runs file'
+                    : 'structure only';
+            blockItems.set(block.id, child);
+            this.itemScopes.set(block.id, { scope: block.runnableScope, fileId });
+        }
+
+        for (const block of detectTestBlocks(document)) {
+            const child = blockItems.get(block.id);
+            if (!child) {
+                continue;
+            }
+            const parent = block.parentId
+                ? blockItems.get(block.parentId)
+                : fileItem;
+            (parent ?? fileItem).children.add(child);
         }
     }
 
     private async runTests(request: vscode.TestRunRequest, token: vscode.CancellationToken): Promise<void> {
         const run = this.controller.createTestRun(request);
-        const fileItems = this.collectFileItems(request);
+        const targets = this.collectRunnableTargets(request, run);
 
         try {
             this.services.setStatus('tests', { health: 'starting', source: 'native', message: 'Running Simple tests' });
-            for (const fileItem of fileItems) {
-                await this.runFileItem(fileItem, run, token);
+            for (const target of targets) {
+                await this.runTarget(target, run, token);
             }
-            this.services.markReady('tests', `Ran ${fileItems.length} test file(s)`);
+            this.services.markReady('tests', `Ran ${targets.length} test target(s)`);
         } catch (error) {
             const detail = error instanceof Error ? error.message : String(error);
             this.services.markDegraded('tests', 'Test run failed', 'native', detail);
@@ -142,38 +157,55 @@ export class SimpleTestController implements vscode.Disposable {
         }
     }
 
-    private collectFileItems(request: vscode.TestRunRequest): vscode.TestItem[] {
+    private collectRunnableTargets(
+        request: vscode.TestRunRequest,
+        run: vscode.TestRun,
+    ): Array<{ anchorItem: vscode.TestItem; fileItem: vscode.TestItem; mode: 'file' | 'doctest' }> {
         const included = request.include && request.include.length > 0
             ? request.include
             : collectItems(this.controller.items);
-        const fileMap = new Map<string, vscode.TestItem>();
+        const targets = new Map<string, { anchorItem: vscode.TestItem; fileItem: vscode.TestItem; mode: 'file' | 'doctest' }>();
 
         for (const item of included) {
-            const fileItem = item.parent ?? item;
-            fileMap.set(fileItem.id, fileItem);
+            const scope = this.itemScopes.get(item.id)?.scope ?? 'file';
+            let fileItem = item;
+            while (fileItem.parent) {
+                fileItem = fileItem.parent;
+            }
+            if (scope === 'none' || scope === 'exact') {
+                run.appendOutput('Exact test execution is not implemented yet. Run the file or doctest node instead.\n', undefined, item);
+                run.skipped(item);
+                continue;
+            }
+            const mode = scope === 'doctest' ? 'doctest' : 'file';
+            targets.set(`${fileItem.id}::${mode}`, { anchorItem: item, fileItem, mode });
         }
 
-        return Array.from(fileMap.values()).filter((item) => item.uri);
+        return Array.from(targets.values()).filter((target) => target.fileItem.uri);
     }
 
-    private async runFileItem(fileItem: vscode.TestItem, run: vscode.TestRun, token: vscode.CancellationToken): Promise<void> {
-        const childItems = collectItems(fileItem.children);
-        run.enqueued(fileItem);
-        run.started(fileItem);
+    private async runTarget(
+        target: { anchorItem: vscode.TestItem; fileItem: vscode.TestItem; mode: 'file' | 'doctest' },
+        run: vscode.TestRun,
+        token: vscode.CancellationToken,
+    ): Promise<void> {
+        const targetItem = target.anchorItem;
+        const childItems = this.collectDescendants(targetItem);
+        run.enqueued(targetItem);
+        run.started(targetItem);
         for (const child of childItems) {
             run.enqueued(child);
             run.started(child);
         }
 
-        const hasDoctestOnlyChildren = childItems.length > 0 && childItems.every((child) => child.label === 'sdoctest');
-        const args = hasDoctestOnlyChildren
-            ? ['test', '--sdoctest', fileItem.uri!.fsPath]
-            : ['test', fileItem.uri!.fsPath];
+        const args = target.mode === 'doctest'
+            ? ['test', '--sdoctest', target.fileItem.uri!.fsPath]
+            : ['test', target.fileItem.uri!.fsPath];
 
         const result = await this.cli.run(args, {
             cwd: vscode.workspace.workspaceFolders?.[0]?.uri.fsPath,
             token,
-            resolveFrom: fileItem.uri!.fsPath,
+            resolveFrom: target.fileItem.uri!.fsPath,
         });
         const duration = Math.max(1, result.combined.length > 0 ? result.combined.length : 1);
         this.output.appendLine(`$ simple ${args.join(' ')}`);
@@ -183,19 +215,30 @@ export class SimpleTestController implements vscode.Disposable {
         if (result.stderr.trim()) {
             this.output.appendLine(result.stderr.trim());
         }
-        run.appendOutput(`${result.combined || '(no output)'}\n`, undefined, fileItem);
+        run.appendOutput(`${result.combined || '(no output)'}\n`, undefined, targetItem);
 
         if (result.exitCode === 0) {
-            run.passed(fileItem, duration);
+            run.passed(targetItem, duration);
             for (const child of childItems) {
                 run.passed(child, duration);
             }
         } else {
             const message = new vscode.TestMessage(result.combined || 'Simple test command failed');
-            run.failed(fileItem, message, duration);
+            run.failed(targetItem, message, duration);
             for (const child of childItems) {
                 run.failed(child, message, duration);
             }
         }
+    }
+
+    private collectDescendants(root: vscode.TestItem): vscode.TestItem[] {
+        const items: vscode.TestItem[] = [];
+        const pending = collectItems(root.children);
+        while (pending.length > 0) {
+            const item = pending.shift()!;
+            items.push(item);
+            pending.push(...collectItems(item.children));
+        }
+        return items;
     }
 }

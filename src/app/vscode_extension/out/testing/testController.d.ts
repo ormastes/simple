@@ -8,6 +8,7 @@ export declare class SimpleTestController implements vscode.Disposable {
     private readonly output;
     private readonly profile;
     private readonly disposables;
+    private readonly itemScopes;
     constructor(cli: SimpleCliService, services: ExtensionHostServices);
     getController(): vscode.TestController;
     refreshWorkspace(): Promise<void>;
@@ -15,6 +16,7 @@ export declare class SimpleTestController implements vscode.Disposable {
     private refreshUri;
     private refreshDocument;
     private runTests;
-    private collectFileItems;
-    private runFileItem;
+    private collectRunnableTargets;
+    private runTarget;
+    private collectDescendants;
 }

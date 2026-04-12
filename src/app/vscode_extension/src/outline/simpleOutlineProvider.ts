@@ -2,18 +2,39 @@ import * as vscode from 'vscode';
 import { indexDocumentSymbols, type IndexedSymbol } from '../analysis/simpleAnalysisIndex';
 
 class OutlineItem extends vscode.TreeItem {
+    public readonly children: OutlineItem[] = [];
+
     public constructor(
         public readonly document: vscode.TextDocument,
         public readonly symbol: IndexedSymbol,
     ) {
         super(symbol.name, vscode.TreeItemCollapsibleState.None);
         this.description = symbol.detail;
-        this.iconPath = new vscode.ThemeIcon('symbol-method');
+        this.iconPath = new vscode.ThemeIcon(OutlineItem.iconFor(symbol.kind));
         this.command = {
             command: 'simple.outline.revealSymbol',
             title: 'Reveal Symbol',
             arguments: [document.uri, symbol.selectionRange],
         };
+    }
+
+    public static iconFor(kind: vscode.SymbolKind): string {
+        switch (kind) {
+            case vscode.SymbolKind.Class:
+                return 'symbol-class';
+            case vscode.SymbolKind.Struct:
+                return 'symbol-struct';
+            case vscode.SymbolKind.Enum:
+                return 'symbol-enum';
+            case vscode.SymbolKind.Interface:
+                return 'symbol-interface';
+            case vscode.SymbolKind.Namespace:
+                return 'symbol-namespace';
+            case vscode.SymbolKind.Method:
+                return 'symbol-method';
+            default:
+                return 'symbol-function';
+        }
     }
 }
 
@@ -37,11 +58,28 @@ export class SimpleOutlineProvider implements vscode.TreeDataProvider<OutlineIte
         return element;
     }
 
-    public getChildren(): OutlineItem[] {
+    public getChildren(element?: OutlineItem): OutlineItem[] {
         if (!this.activeDocument) {
             return [];
         }
 
-        return indexDocumentSymbols(this.activeDocument).map((symbol) => new OutlineItem(this.activeDocument!, symbol));
+        if (element) {
+            return element.children;
+        }
+
+        const items = indexDocumentSymbols(this.activeDocument)
+            .map((symbol) => new OutlineItem(this.activeDocument!, symbol));
+        const byId = new Map(items.map((item) => [item.symbol.id, item]));
+        const roots: OutlineItem[] = [];
+        for (const item of items) {
+            const parent = item.symbol.parentId ? byId.get(item.symbol.parentId) : undefined;
+            if (parent) {
+                parent.children.push(item);
+                parent.collapsibleState = vscode.TreeItemCollapsibleState.Collapsed;
+                continue;
+            }
+            roots.push(item);
+        }
+        return roots;
     }
 }

@@ -3,7 +3,9 @@ import { type IndexedSymbol } from '../analysis/simpleAnalysisIndex';
 declare class OutlineItem extends vscode.TreeItem {
     readonly document: vscode.TextDocument;
     readonly symbol: IndexedSymbol;
+    readonly children: OutlineItem[];
     constructor(document: vscode.TextDocument, symbol: IndexedSymbol);
+    static iconFor(kind: vscode.SymbolKind): string;
 }
 export declare class SimpleOutlineProvider implements vscode.TreeDataProvider<OutlineItem> {
     private readonly emitter;
@@ -12,6 +14,6 @@ export declare class SimpleOutlineProvider implements vscode.TreeDataProvider<Ou
     setActiveDocument(document: vscode.TextDocument | undefined): void;
     refresh(): void;
     getTreeItem(element: OutlineItem): vscode.TreeItem;
-    getChildren(): OutlineItem[];
+    getChildren(element?: OutlineItem): OutlineItem[];
 }
 export {};

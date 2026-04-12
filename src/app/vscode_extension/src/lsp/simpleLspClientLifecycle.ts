@@ -1,10 +1,11 @@
 import * as vscode from 'vscode';
-import { spawnSync } from 'child_process';
+import { spawn, spawnSync } from 'child_process';
 import {
     CloseAction,
     ErrorAction,
     LanguageClient,
     LanguageClientOptions,
+    RevealOutputChannelOn,
     ServerOptions,
     State,
     TransportKind,
@@ -44,10 +45,12 @@ export function createSimpleLspClientBootstrap(
             },
             outputChannel,
             traceOutputChannel: outputChannel,
+            revealOutputChannelOn: RevealOutputChannelOn.Never,
             initializationOptions: request.initializationOptions,
+            initializationFailedHandler: () => false,
             errorHandler: {
-                error: () => ({ action: ErrorAction.Shutdown }),
-                closed: () => ({ action: CloseAction.DoNotRestart }),
+                error: () => ({ action: ErrorAction.Shutdown, handled: true }),
+                closed: () => ({ action: CloseAction.DoNotRestart, handled: true }),
             },
         };
 
@@ -115,6 +118,18 @@ export function createSimpleLspClientBootstrap(
                     );
                     return;
                 }
+                const initializeProbe = await probeInitializeHandshake(request.server.command, request.server.args, request.server.environment);
+                if (!initializeProbe.ok) {
+                    setFallbackEnabled(true);
+                    options.onRunningStateChanged?.(false);
+                    options.services.markDegraded(
+                        'lsp',
+                        'Simple LSP initialize probe failed; fallback providers active',
+                        'fallback',
+                        initializeProbe.detail,
+                    );
+                    return;
+                }
                 try {
                     await client.start();
                 } catch (error) {
@@ -141,4 +156,123 @@ export function createSimpleLspClientBootstrap(
             },
         };
     };
+}
+
+interface LspInitializeProbeResult {
+    ok: boolean;
+    detail?: string;
+}
+
+function createJsonRpcMessage(payload: unknown): string {
+    const body = JSON.stringify(payload);
+    return `Content-Length: ${Buffer.byteLength(body, 'utf8')}\r\n\r\n${body}`;
+}
+
+function tryReadJsonRpcBody(buffer: string): unknown | undefined {
+    const marker = '\r\n\r\n';
+    const headerEnd = buffer.indexOf(marker);
+    if (headerEnd < 0) {
+        return undefined;
+    }
+    const header = buffer.slice(0, headerEnd);
+    const match = header.match(/Content-Length:\s*(\d+)/i);
+    if (!match) {
+        return undefined;
+    }
+    const contentLength = Number(match[1]);
+    const bodyStart = headerEnd + marker.length;
+    const body = buffer.slice(bodyStart);
+    if (Buffer.byteLength(body, 'utf8') < contentLength) {
+        return undefined;
+    }
+    return JSON.parse(body.slice(0, contentLength));
+}
+
+async function probeInitializeHandshake(
+    command: string,
+    args: string[],
+    environment: NodeJS.ProcessEnv,
+): Promise<LspInitializeProbeResult> {
+    return await new Promise<LspInitializeProbeResult>((resolve) => {
+        const child = spawn(command, args, {
+            env: environment,
+            stdio: 'pipe',
+        });
+        let settled = false;
+        let stdout = '';
+        let stderr = '';
+        const timeout = setTimeout(() => {
+            finish({
+                ok: false,
+                detail: 'initialize timeout',
+            });
+        }, 1500);
+
+        const finish = (result: LspInitializeProbeResult): void => {
+            if (settled) {
+                return;
+            }
+            settled = true;
+            clearTimeout(timeout);
+            child.kill('SIGKILL');
+            resolve(result);
+        };
+
+        child.on('error', (error) => {
+            finish({ ok: false, detail: error.message });
+        });
+        child.on('exit', (code, signal) => {
+            if (settled) {
+                return;
+            }
+            finish({
+                ok: false,
+                detail: [stderr.trim(), stdout.trim()].filter(Boolean).join('\n') || `exit ${code ?? signal ?? 'unknown'}`,
+            });
+        });
+        child.stdout.setEncoding('utf8');
+        child.stderr.setEncoding('utf8');
+        child.stdout.on('data', (chunk: string) => {
+            stdout += chunk;
+            try {
+                const payload = tryReadJsonRpcBody(stdout) as { error?: { message?: string; code?: number } } | undefined;
+                if (!payload) {
+                    return;
+                }
+                if (payload.error) {
+                    finish({
+                        ok: false,
+                        detail: `${payload.error.message ?? 'initialize failed'}${typeof payload.error.code === 'number' ? ` (${payload.error.code})` : ''}`,
+                    });
+                    return;
+                }
+                finish({ ok: true });
+            } catch (error) {
+                finish({
+                    ok: false,
+                    detail: error instanceof Error ? error.message : String(error),
+                });
+            }
+        });
+        child.stderr.on('data', (chunk: string) => {
+            stderr += chunk;
+        });
+
+        const initializeRequest = createJsonRpcMessage({
+            jsonrpc: '2.0',
+            id: 1,
+            method: 'initialize',
+            params: {
+                processId: process.pid,
+                clientInfo: { name: 'simple-vscode-probe', version: '0.1.0' },
+                rootUri: vscode.workspace.workspaceFolders?.[0]?.uri.toString() ?? null,
+                capabilities: {},
+                workspaceFolders: (vscode.workspace.workspaceFolders ?? []).map((folder) => ({
+                    uri: folder.uri.toString(),
+                    name: folder.name,
+                })),
+            },
+        });
+        child.stdin.write(initializeRequest);
+    });
 }

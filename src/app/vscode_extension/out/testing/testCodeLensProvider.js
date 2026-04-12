@@ -48,18 +48,20 @@ class TestCodeLensProvider {
             return [];
         }
         return (0, testDiscovery_1.detectTestBlocks)(document)
-            .filter((block) => block.kind === 'describe' || block.kind === 'sdoctest')
+            .filter((block) => block.runnableScope === 'file' || block.runnableScope === 'doctest')
             .map((block) => {
             const range = new vscode.Range(block.line, 0, block.line, 0);
-            const command = block.kind === 'sdoctest' ? 'simple.test.runSdoctest' : 'simple.test.runFile';
-            const title = block.kind === 'sdoctest'
+            const command = block.runnableScope === 'doctest' ? 'simple.test.runSdoctest' : 'simple.test.runFile';
+            const title = block.runnableScope === 'doctest'
                 ? '$(play) Run Doctest'
                 : '$(play) Run File';
             return new vscode.CodeLens(range, {
                 title,
                 command,
                 arguments: [document.uri],
-                tooltip: `Run ${block.kind} from ${document.fileName}`,
+                tooltip: block.runnableScope === 'doctest'
+                    ? `Run doctests from ${document.fileName}`
+                    : `Run ${document.fileName} from this scope`,
             });
         });
     }

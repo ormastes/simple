@@ -65,7 +65,24 @@ class SimpleDocumentSymbolProvider {
         if (!this.enabled) {
             return [];
         }
-        return (0, simpleAnalysisIndex_1.indexDocumentSymbols)(document).map((symbol) => new vscode.DocumentSymbol(symbol.name, symbol.detail, symbol.kind, symbol.range, symbol.selectionRange));
+        const indexedSymbols = (0, simpleAnalysisIndex_1.indexDocumentSymbols)(document);
+        const symbols = indexedSymbols.map((symbol) => new vscode.DocumentSymbol(symbol.name, symbol.detail, symbol.kind, symbol.range, symbol.selectionRange));
+        const byId = new Map();
+        const roots = [];
+        for (let i = 0; i < indexedSymbols.length; i++) {
+            byId.set(indexedSymbols[i].id, symbols[i]);
+        }
+        for (let i = 0; i < indexedSymbols.length; i++) {
+            const symbol = indexedSymbols[i];
+            const node = symbols[i];
+            const parent = symbol.parentId ? byId.get(symbol.parentId) : undefined;
+            if (parent) {
+                parent.children.push(node);
+                continue;
+            }
+            roots.push(node);
+        }
+        return roots;
     }
     setEnabled(enabled) {
         this.enabled = enabled;

@@ -92,8 +92,6 @@ async function activate(context) {
             mathProvider.setLspRunning?.(running);
         },
         fallbackControls: [
-            diagnosticsProvider,
-            semanticTokensProvider,
             documentSymbolProvider,
             workspaceSymbolProvider,
             definitionProvider,
@@ -246,8 +244,12 @@ async function activate(context) {
                 const block = (0, testDiscovery_1.detectTestBlocks)(editor.document)
                     .filter((candidate) => candidate.line <= editor.selection.active.line)
                     .pop();
-                if (block?.kind === 'sdoctest') {
+                if (block?.runnableScope === 'doctest') {
                     await runCliTestCommand(['test', '--sdoctest', editor.document.uri.fsPath], editor.document.uri.fsPath);
+                    return;
+                }
+                if (block && block.runnableScope !== 'file') {
+                    void vscode.window.showWarningMessage('Exact test execution is not implemented yet. Run the file or doctest scope instead.');
                     return;
                 }
                 await runCliTestCommand(['test', editor.document.uri.fsPath], editor.document.uri.fsPath);
@@ -350,7 +352,7 @@ async function activate(context) {
         }
         void vscode.window.showInformationMessage('Simple LSP configuration changed. Restart the client to apply changes.', 'Restart LSP').then(async (selection) => {
             if (selection === 'Restart LSP') {
-                const result = await lspSurface.bootstrapClient(vscode.window.activeTextEditor?.document.uri.fsPath);
+                const result = await lspSurface.restartClient();
                 if (!result.ok) {
                     void vscode.window.showWarningMessage(`Simple LSP: ${result.message}`);
                 }

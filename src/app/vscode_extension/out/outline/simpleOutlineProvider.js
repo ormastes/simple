@@ -41,13 +41,32 @@ class OutlineItem extends vscode.TreeItem {
         super(symbol.name, vscode.TreeItemCollapsibleState.None);
         this.document = document;
         this.symbol = symbol;
+        this.children = [];
         this.description = symbol.detail;
-        this.iconPath = new vscode.ThemeIcon('symbol-method');
+        this.iconPath = new vscode.ThemeIcon(OutlineItem.iconFor(symbol.kind));
         this.command = {
             command: 'simple.outline.revealSymbol',
             title: 'Reveal Symbol',
             arguments: [document.uri, symbol.selectionRange],
         };
+    }
+    static iconFor(kind) {
+        switch (kind) {
+            case vscode.SymbolKind.Class:
+                return 'symbol-class';
+            case vscode.SymbolKind.Struct:
+                return 'symbol-struct';
+            case vscode.SymbolKind.Enum:
+                return 'symbol-enum';
+            case vscode.SymbolKind.Interface:
+                return 'symbol-interface';
+            case vscode.SymbolKind.Namespace:
+                return 'symbol-namespace';
+            case vscode.SymbolKind.Method:
+                return 'symbol-method';
+            default:
+                return 'symbol-function';
+        }
     }
 }
 class SimpleOutlineProvider {
@@ -67,11 +86,27 @@ class SimpleOutlineProvider {
     getTreeItem(element) {
         return element;
     }
-    getChildren() {
+    getChildren(element) {
         if (!this.activeDocument) {
             return [];
         }
-        return (0, simpleAnalysisIndex_1.indexDocumentSymbols)(this.activeDocument).map((symbol) => new OutlineItem(this.activeDocument, symbol));
+        if (element) {
+            return element.children;
+        }
+        const items = (0, simpleAnalysisIndex_1.indexDocumentSymbols)(this.activeDocument)
+            .map((symbol) => new OutlineItem(this.activeDocument, symbol));
+        const byId = new Map(items.map((item) => [item.symbol.id, item]));
+        const roots = [];
+        for (const item of items) {
+            const parent = item.symbol.parentId ? byId.get(item.symbol.parentId) : undefined;
+            if (parent) {
+                parent.children.push(item);
+                parent.collapsibleState = vscode.TreeItemCollapsibleState.Collapsed;
+                continue;
+            }
+            roots.push(item);
+        }
+        return roots;
     }
 }
 exports.SimpleOutlineProvider = SimpleOutlineProvider;
