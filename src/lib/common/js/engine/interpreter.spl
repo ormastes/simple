@@ -36,11 +36,11 @@ class JsInterpreter:
     functions: [JsFunction]
     logger: Logger
     return_value: JsValue
-    has_return: bool
-    has_break: bool
-    has_continue: bool
+    control_return: bool
+    control_break: bool
+    control_continue: bool
     thrown_value: JsValue
-    has_thrown: bool
+    control_thrown: bool
     native_id_map: [Pair<i64, i64>]
     class_proto_fns: [i64]
     class_proto_ids: [i64]
@@ -56,11 +56,11 @@ class JsInterpreter:
             functions: [],
             logger: logger,
             return_value: JsValue.Undefined,
-            has_return: false,
-            has_break: false,
-            has_continue: false,
+            control_return: false,
+            control_break: false,
+            control_continue: false,
             thrown_value: JsValue.Undefined,
-            has_thrown: false,
+            control_thrown: false,
             native_id_map: [],
             class_proto_fns: [],
             class_proto_ids: [],
@@ -230,7 +230,7 @@ class JsInterpreter:
         while i < len:
             val stmt = program.get(i)
             result = self.exec_statement(stmt, self.global_env)?
-            if self.has_return:
+            if self.control_return:
                 break
             i = i + 1
         Ok(result)
@@ -257,7 +257,7 @@ class JsInterpreter:
                 val slen = stmts.len()
                 while idx < slen:
                     result = self.exec_statement(stmts.get(idx), block_env)?
-                    if self.has_return or self.has_break or self.has_continue or self.has_thrown:
+                    if self.control_return or self.control_break or self.control_continue or self.control_thrown:
                         break
                     idx = idx + 1
                 return Ok(result)
@@ -274,10 +274,10 @@ class JsInterpreter:
             Statement.ThrowStmt(expr):
                 return self.exec_throw(expr, env)
             Statement.BreakStmt:
-                self.has_break = true
+                self.control_break = true
                 return Ok(JsValue.Undefined)
             Statement.ContinueStmt:
-                self.has_continue = true
+                self.control_continue = true
                 return Ok(JsValue.Undefined)
             Statement.ClassDecl(name, parent_name, constructor, methods):
                 return self.exec_class_decl(name, parent_name, constructor, methods, env)
@@ -355,13 +355,13 @@ class JsInterpreter:
             var bi = 0
             while bi < body.len():
                 result = self.exec_statement(body.get(bi), loop_env)?
-                if self.has_return or self.has_thrown:
+                if self.control_return or self.control_thrown:
                     return Ok(result)
-                if self.has_break:
-                    self.has_break = false
+                if self.control_break:
+                    self.control_break = false
                     return Ok(result)
-                if self.has_continue:
-                    self.has_continue = false
+                if self.control_continue:
+                    self.control_continue = false
                     break
                 bi = bi + 1
             val cond_val = self.eval_expression(cond, env)?
@@ -378,7 +378,7 @@ class JsInterpreter:
             val len = then_body.len()
             while i < len:
                 result = self.exec_statement(then_body.get(i), then_env)?
-                if self.has_return:
+                if self.control_return:
                     break
                 i = i + 1
         else:
@@ -388,7 +388,7 @@ class JsInterpreter:
                 val len = else_body.len()
                 while i < len:
                     result = self.exec_statement(else_body.get(i), else_env)?
-                    if self.has_return:
+                    if self.control_return:
                         break
                     i = i + 1
         Ok(result)
@@ -407,13 +407,13 @@ class JsInterpreter:
             val len = body.len()
             while i < len:
                 result = self.exec_statement(body.get(i), loop_env)?
-                if self.has_return or self.has_thrown:
+                if self.control_return or self.control_thrown:
                     return Ok(result)
-                if self.has_break:
-                    self.has_break = false
+                if self.control_break:
+                    self.control_break = false
                     return Ok(result)
-                if self.has_continue:
-                    self.has_continue = false
+                if self.control_continue:
+                    self.control_continue = false
                     break
                 i = i + 1
             iteration = iteration + 1
@@ -439,13 +439,13 @@ class JsInterpreter:
             val len = body.len()
             while i < len:
                 result = self.exec_statement(body.get(i), iter_env)?
-                if self.has_return or self.has_thrown:
+                if self.control_return or self.control_thrown:
                     return Ok(result)
-                if self.has_break:
-                    self.has_break = false
+                if self.control_break:
+                    self.control_break = false
                     return Ok(result)
-                if self.has_continue:
-                    self.has_continue = false
+                if self.control_continue:
+                    self.control_continue = false
                     break
                 i = i + 1
             self.eval_expression(update, for_env)?
@@ -458,7 +458,7 @@ class JsInterpreter:
     me exec_return(value: Expression, env: i64) -> BrowserResult<JsValue>:
         val result = self.eval_expression(value, env)?
         self.return_value = result
-        self.has_return = true
+        self.control_return = true
         Ok(result)
 
     # Function declaration — store in function registry
@@ -480,15 +480,15 @@ class JsInterpreter:
         val tlen = try_body.len()
         while i < tlen:
             result = self.exec_statement(try_body.get(i), try_env)?
-            if self.has_return or self.has_break or self.has_continue:
+            if self.control_return or self.control_break or self.control_continue:
                 break
-            if self.has_thrown:
+            if self.control_thrown:
                 break
             i = i + 1
 
         # If exception was thrown, execute catch body
-        if self.has_thrown and catch_body.len() > 0:
-            self.has_thrown = false
+        if self.control_thrown and catch_body.len() > 0:
+            self.control_thrown = false
             val caught_value = self.thrown_value
             self.thrown_value = JsValue.Undefined
             val catch_env = self.env_stack.create_env(env)
@@ -498,7 +498,7 @@ class JsInterpreter:
             val clen = catch_body.len()
             while ci < clen:
                 result = self.exec_statement(catch_body.get(ci), catch_env)?
-                if self.has_return or self.has_break or self.has_continue or self.has_thrown:
+                if self.control_return or self.control_break or self.control_continue or self.control_thrown:
                     break
                 ci = ci + 1
 
@@ -509,7 +509,7 @@ class JsInterpreter:
             val flen = finally_body.len()
             while fi < flen:
                 self.exec_statement(finally_body.get(fi), finally_env)?
-                if self.has_return or self.has_break or self.has_continue or self.has_thrown:
+                if self.control_return or self.control_break or self.control_continue or self.control_thrown:
                     break
                 fi = fi + 1
 
@@ -538,13 +538,13 @@ class JsInterpreter:
                 val slen = sc.consequent.len()
                 while si < slen:
                     val stmt_result = self.exec_statement(sc.consequent.get(si), case_env)?
-                    if self.has_break:
-                        self.has_break = false
+                    if self.control_break:
+                        self.control_break = false
                         return Ok(result)
                     result = stmt_result
-                    if self.has_return or self.has_thrown:
+                    if self.control_return or self.control_thrown:
                         return Ok(result)
-                    if self.has_continue:
+                    if self.control_continue:
                         return Ok(result)
                     si = si + 1
             ci = ci + 1
@@ -568,13 +568,13 @@ class JsInterpreter:
                         val blen = body.len()
                         while bi < blen:
                             result = self.exec_statement(body.get(bi), iter_env)?
-                            if self.has_return or self.has_thrown:
+                            if self.control_return or self.control_thrown:
                                 return Ok(result)
-                            if self.has_break:
-                                self.has_break = false
+                            if self.control_break:
+                                self.control_break = false
                                 return Ok(result)
-                            if self.has_continue:
-                                self.has_continue = false
+                            if self.control_continue:
+                                self.control_continue = false
                                 break
                             bi = bi + 1
                     i = i + 1
@@ -598,13 +598,13 @@ class JsInterpreter:
                     val blen = body.len()
                     while bi < blen:
                         result = self.exec_statement(body.get(bi), iter_env)?
-                        if self.has_return or self.has_thrown:
+                        if self.control_return or self.control_thrown:
                             return Ok(result)
-                        if self.has_break:
-                            self.has_break = false
+                        if self.control_break:
+                            self.control_break = false
                             return Ok(result)
-                        if self.has_continue:
-                            self.has_continue = false
+                        if self.control_continue:
+                            self.control_continue = false
                             break
                         bi = bi + 1
                     i = i + 1
@@ -616,7 +616,7 @@ class JsInterpreter:
     me exec_throw(expr: Expression, env: i64) -> BrowserResult<JsValue>:
         val value = self.eval_expression(expr, env)?
         self.thrown_value = value
-        self.has_thrown = true
+        self.control_thrown = true
         Ok(value)
 
     # Class declaration — register constructor and methods as functions on a prototype object
@@ -789,16 +789,16 @@ class JsInterpreter:
                     self.env_stack.define_var(fn_env, "this", this_val)
                     val frame = CallFrame(function_name: js_fn.name, env_id: fn_env, line: 0, this_value: this_val)
                     self.call_stack.push(frame)
-                    val saved = self.has_return
-                    self.has_return = false
+                    val saved = self.control_return
+                    self.control_return = false
                     var bi = 0
                     while bi < js_fn.body.len():
                         self.exec_statement(js_fn.body.get(bi), fn_env)?
-                        if self.has_return:
+                        if self.control_return:
                             break
                         bi = bi + 1
                     self.call_stack.pop()
-                    self.has_return = saved
+                    self.control_return = saved
                 return Ok(this_val)
             _:
                 return Ok(JsValue.Undefined)
@@ -1005,17 +1005,17 @@ class JsInterpreter:
                                 self.env_stack.define_var(fn_env, "this", new_obj)
                                 val frame = CallFrame(function_name: js_fn.name, env_id: fn_env, line: 0, this_value: new_obj)
                                 self.call_stack.push(frame)
-                                val saved = self.has_return
-                                self.has_return = false
+                                val saved = self.control_return
+                                self.control_return = false
                                 var bi = 0
                                 val blen = js_fn.body.len()
                                 while bi < blen:
                                     self.exec_statement(js_fn.body.get(bi), fn_env)?
-                                    if self.has_return:
+                                    if self.control_return:
                                         break
                                     bi = bi + 1
                                 self.call_stack.pop()
-                                self.has_return = saved
+                                self.control_return = saved
                         _: pass_dn
                     return Ok(new_obj)
                 _:
@@ -1281,21 +1281,21 @@ class JsInterpreter:
                     self.call_stack.push(frame)
 
                     # Execute body
-                    val saved_has_return = self.has_return
-                    self.has_return = false
+                    val saved_control_return = self.control_return
+                    self.control_return = false
                     var result = JsValue.Undefined
                     var bi = 0
                     val blen = js_fn.body.len()
                     while bi < blen:
                         result = self.exec_statement(js_fn.body.get(bi), fn_env)?
-                        if self.has_return:
+                        if self.control_return:
                             result = self.return_value
                             break
                         bi = bi + 1
 
                     # Pop call frame and reset return flag
                     self.call_stack.pop()
-                    self.has_return = saved_has_return
+                    self.control_return = saved_control_return
 
                     return Ok(result)
                 self.logger.warn("Invalid function id: {fn_id}")
@@ -1336,7 +1336,7 @@ class JsInterpreter:
         # TypeError: Cannot read properties of undefined/null
         if tv == "undefined" or strict_equals(obj_val, JsValue.Null):
             self.thrown_value = JsValue.String(v: "TypeError: Cannot read properties of " + tv)
-            self.has_thrown = true
+            self.control_thrown = true
             return Ok(JsValue.Undefined)
         Ok(JsValue.Undefined)
 
@@ -2306,16 +2306,16 @@ class JsInterpreter:
         self.env_stack.define_var(fn_env, "this", JsValue.Undefined)
         val frame = CallFrame(function_name: js_fn.name, env_id: fn_env, line: 0, this_value: JsValue.Undefined)
         self.call_stack.push(frame)
-        val saved = self.has_return
-        self.has_return = false
+        val saved = self.control_return
+        self.control_return = false
         var result = JsValue.Undefined
         var bi = 0
         while bi < js_fn.body.len():
             result = self.exec_statement(js_fn.body.get(bi), fn_env)?
-            if self.has_return:
+            if self.control_return:
                 result = self.return_value
                 break
             bi = bi + 1
         self.call_stack.pop()
-        self.has_return = saved
+        self.control_return = saved
         Ok(result)
