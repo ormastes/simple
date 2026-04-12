@@ -48,6 +48,7 @@ const simpleCliService_1 = require("./services/simpleCliService");
 const simpleSymbolProviders_1 = require("./symbols/simpleSymbolProviders");
 const testCodeLensProvider_1 = require("./testing/testCodeLensProvider");
 const testController_1 = require("./testing/testController");
+const editorMarkers_1 = require("./testing/editorMarkers");
 const testWorkspacePanel_1 = require("./testing/testWorkspacePanel");
 const SIMPLE_SELECTOR = [
     { scheme: 'file', language: 'simple' },
@@ -69,15 +70,19 @@ async function activate(context) {
     const services = new extensionHostServices_1.ExtensionHostServices();
     context.subscriptions.push(services);
     const outlineProvider = new simpleOutlineProvider_1.SimpleOutlineProvider();
+    const editorMarkerManager = new editorMarkers_1.EditorMarkerManager();
     let currentOutlineDocument = vscode.window.activeTextEditor?.document;
     const updateOutline = (document) => {
         currentOutlineDocument = document;
         outlineProvider.setActiveDocument(document);
     };
     const cli = new simpleCliService_1.SimpleCliService(services);
-    const runCliTestCommand = async (args) => {
+    const runCliTestCommand = async (args, resolveFrom) => {
         try {
-            await cli.run(args, { cwd: vscode.workspace.workspaceFolders?.[0]?.uri.fsPath });
+            await cli.run(args, {
+                cwd: vscode.workspace.workspaceFolders?.[0]?.uri.fsPath,
+                resolveFrom,
+            });
         }
         catch (error) {
             const detail = error instanceof Error ? error.message : String(error);
@@ -92,6 +97,22 @@ async function activate(context) {
             preview: false,
             selection: range,
         });
+    }), vscode.commands.registerCommand('simple.editor.toggleBreakpoint', async (uri, line) => {
+        const targetUri = uri ?? vscode.window.activeTextEditor?.document.uri;
+        if (!targetUri) {
+            return;
+        }
+        const targetLine = typeof line === 'number'
+            ? line
+            : vscode.window.activeTextEditor?.selection.active.line;
+        if (typeof targetLine !== 'number') {
+            return;
+        }
+        editorMarkerManager.toggleBreakpoint(targetUri, targetLine);
+        const active = currentOutlineDocument;
+        if (active && active.uri.toString() === targetUri.toString()) {
+            updateOutline(active);
+        }
     }), vscode.window.registerTreeDataProvider('simpleOutline', outlineProvider), vscode.window.onDidChangeActiveTextEditor((editor) => {
         updateOutline(editor?.document);
     }), vscode.workspace.onDidChangeTextDocument((event) => {
@@ -102,7 +123,7 @@ async function activate(context) {
     updateOutline(vscode.window.activeTextEditor?.document);
     await services.safeRegister('editor', 'custom editor provider', () => {
         return [
-            vscode.window.registerCustomEditorProvider(richCustomEditor_1.RichCustomEditorProvider.viewType, new richCustomEditor_1.RichCustomEditorProvider(context.extensionUri, updateOutline), {
+            vscode.window.registerCustomEditorProvider(richCustomEditor_1.RichCustomEditorProvider.viewType, new richCustomEditor_1.RichCustomEditorProvider(context.extensionUri, updateOutline, (documentUri) => editorMarkerManager.getState(documentUri)), {
                 webviewOptions: { retainContextWhenHidden: true },
                 supportsMultipleEditorsPerDocument: false,
             }),
@@ -138,7 +159,7 @@ async function activate(context) {
                     void vscode.window.showWarningMessage('No Simple file is active');
                     return;
                 }
-                await runCliTestCommand(['test', target.fsPath]);
+                await runCliTestCommand(['test', target.fsPath], target.fsPath);
             }),
             vscode.commands.registerCommand('simple.test.runSdoctest', async (uri) => {
                 const target = uri ?? vscode.window.activeTextEditor?.document.uri;
@@ -146,7 +167,7 @@ async function activate(context) {
                     void vscode.window.showWarningMessage('No Simple file is active');
                     return;
                 }
-                await runCliTestCommand(['test', '--sdoctest', target.fsPath]);
+                await runCliTestCommand(['test', '--sdoctest', target.fsPath], target.fsPath);
             }),
             vscode.commands.registerCommand('simple.test.openWorkspace', () => {
                 testWorkspacePanel_1.TestWorkspacePanel.show(context.extensionUri);

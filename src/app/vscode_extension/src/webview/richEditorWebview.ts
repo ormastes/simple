@@ -12,7 +12,7 @@
 import {
     EditorView, keymap, drawSelection, highlightActiveLine,
     highlightSpecialChars, highlightActiveLineGutter,
-    Decoration, GutterMarker, WidgetType, lineNumbers, lineNumberWidgetMarker, type BlockInfo, type DecorationSet, type Extension,
+    Decoration, GutterMarker, WidgetType, gutter, lineNumbers, lineNumberWidgetMarker, type BlockInfo, type DecorationSet, type Extension, type ViewUpdate,
 } from '@codemirror/view';
 import { EditorState, RangeSetBuilder, StateEffect, StateField } from '@codemirror/state';
 import { defaultKeymap, history, historyKeymap, indentWithTab } from '@codemirror/commands';
@@ -70,12 +70,15 @@ interface SyncMessage {
         from: number;
         to: number;
     }>;
+    markers: {
+        breakpoints: number[];
+    };
 }
 
 type HostMessage = SyncMessage | { type: 'error'; message: string };
 
-const ENABLE_TEST_LINE_WIDGETS = false;
-const ENABLE_SYMBOL_HOVER = false;
+const ENABLE_TEST_LINE_WIDGETS = true;
+const ENABLE_SYMBOL_HOVER = true;
 const ENABLE_FULL_LINE_BLOCK_MATH = true;
 
 function applyEditorSettings(settings?: SyncMessage['settings']): void {
@@ -139,36 +142,52 @@ interface RichEditorTestBlock {
     to: number;
 }
 
-class TestRunWidget extends WidgetType {
-    constructor(
-        readonly test: RichEditorTestBlock,
-        readonly onRun: (test: RichEditorTestBlock) => void,
-    ) {
+interface RichEditorMarkers {
+    breakpoints: number[];
+}
+
+class TestRunGutterMarker extends GutterMarker {
+    constructor(readonly test: RichEditorTestBlock | null) {
         super();
     }
 
-    eq(other: TestRunWidget): boolean {
-        return this.test.kind === other.test.kind
-            && this.test.label === other.test.label
-            && this.test.line === other.test.line;
+    eq(other: TestRunGutterMarker): boolean {
+        return this.test?.kind === other.test?.kind
+            && this.test?.label === other.test?.label
+            && this.test?.line === other.test?.line;
     }
 
     toDOM(): HTMLElement {
-        const button = document.createElement('button');
-        button.type = 'button';
-        button.className = 'cm-test-run-widget';
-        button.textContent = this.test.kind === 'sdoctest' ? '▶ doctest' : '▶ run';
-        button.title = `Run ${this.test.kind}: ${this.test.label}`;
-        button.addEventListener('click', (event) => {
-            event.preventDefault();
-            event.stopPropagation();
-            this.onRun(this.test);
-        });
-        return button;
+        const node = document.createElement('span');
+        node.className = 'cm-test-gutter-icon';
+        if (this.test) {
+            node.title = `Run ${this.test.kind}: ${this.test.label}`;
+            node.setAttribute('aria-label', node.title);
+        } else {
+            node.classList.add('cm-test-gutter-icon-spacer');
+            node.setAttribute('aria-hidden', 'true');
+        }
+        return node;
+    }
+}
+
+class BreakpointGutterMarker extends GutterMarker {
+    constructor(readonly active: boolean) {
+        super();
     }
 
-    ignoreEvent(): boolean {
-        return true;
+    eq(other: BreakpointGutterMarker): boolean {
+        return this.active === other.active;
+    }
+
+    toDOM(): HTMLElement {
+        const node = document.createElement('span');
+        node.className = `cm-breakpoint-gutter-icon${this.active ? ' cm-breakpoint-gutter-icon-active' : ''}`;
+        if (!this.active) {
+            node.classList.add('cm-breakpoint-gutter-icon-spacer');
+            node.setAttribute('aria-hidden', 'true');
+        }
+        return node;
     }
 }
 
@@ -282,48 +301,96 @@ function createMathAwareLineNumberSetup(): Extension[] {
     ];
 }
 
-function buildTestRunDecorations(
+function shouldRefreshGutterMarkers(update: ViewUpdate): boolean {
+    return update.docChanged
+        || update.transactions.some((transaction) =>
+            transaction.effects.some((effect) => effect.is(refreshRenderedBlocksEffect)));
+}
+
+function buildTestRunMarkers(
     state: EditorState,
     tests: RichEditorTestBlock[],
-    onRunTest: (test: RichEditorTestBlock) => void,
-): DecorationSet {
-    const builder = new RangeSetBuilder<Decoration>();
+): RangeSetBuilder<GutterMarker> {
+    const builder = new RangeSetBuilder<GutterMarker>();
     for (const test of tests) {
         const lineNumber = test.line + 1;
         if (lineNumber < 1 || lineNumber > state.doc.lines) {
             continue;
         }
         const line = state.doc.line(lineNumber);
-        builder.add(
-            line.from,
-            line.from,
-            Decoration.widget({
-                widget: new TestRunWidget(test, onRunTest),
-                side: -1,
-            }),
-        );
+        builder.add(line.from, line.from, new TestRunGutterMarker(test));
     }
-    return builder.finish();
+    return builder;
 }
 
-function createTestRunField(
+function createTestRunGutter(
     getTests: () => RichEditorTestBlock[],
     onRunTest: (test: RichEditorTestBlock) => void,
-): StateField<DecorationSet> {
-    return StateField.define<DecorationSet>({
-        create(state) {
-            return buildTestRunDecorations(state, getTests(), onRunTest);
+): Extension {
+    return gutter({
+        class: 'cm-test-run-gutter',
+        markers(view) {
+            return buildTestRunMarkers(view.state, getTests()).finish();
         },
-        update(value, tr) {
-            if (
-                tr.docChanged
-                || tr.effects.some((effect) => effect.is(refreshRenderedBlocksEffect))
-            ) {
-                return buildTestRunDecorations(tr.state, getTests(), onRunTest);
-            }
-            return value;
+        lineMarkerChange(update) {
+            return shouldRefreshGutterMarkers(update);
         },
-        provide: (field) => EditorView.decorations.from(field),
+        initialSpacer() {
+            return new TestRunGutterMarker(null);
+        },
+        domEventHandlers: {
+            mousedown(view, line, event) {
+                const test = getTests().find((candidate) => candidate.line === view.state.doc.lineAt(line.from).number - 1);
+                if (!test) {
+                    return false;
+                }
+                event.preventDefault();
+                onRunTest(test);
+                return true;
+            },
+        },
+    });
+}
+
+function buildBreakpointMarkers(
+    state: EditorState,
+    markers: RichEditorMarkers,
+): RangeSetBuilder<GutterMarker> {
+    const builder = new RangeSetBuilder<GutterMarker>();
+    const activeBreakpoints = new Set(markers.breakpoints);
+
+    for (let lineNumber = 1; lineNumber <= state.doc.lines; lineNumber += 1) {
+        const line = state.doc.line(lineNumber);
+        if (activeBreakpoints.has(lineNumber - 1)) {
+            builder.add(line.from, line.from, new BreakpointGutterMarker(true));
+        }
+    }
+
+    return builder;
+}
+
+function createBreakpointGutter(
+    getMarkers: () => RichEditorMarkers,
+    onToggleBreakpoint: (line: number) => void,
+): Extension {
+    return gutter({
+        class: 'cm-breakpoint-gutter',
+        markers(view) {
+            return buildBreakpointMarkers(view.state, getMarkers()).finish();
+        },
+        lineMarkerChange(update) {
+            return shouldRefreshGutterMarkers(update);
+        },
+        initialSpacer() {
+            return new BreakpointGutterMarker(false);
+        },
+        domEventHandlers: {
+            mousedown(view, line, event) {
+                event.preventDefault();
+                onToggleBreakpoint(view.state.doc.lineAt(line.from).number - 1);
+                return true;
+            },
+        },
     });
 }
 
@@ -553,19 +620,43 @@ const vsCodeTheme = EditorView.theme({
         fontStyle: 'italic',
         fontSize: '0.9em',
     },
-    '.cm-test-run-widget': {
-        marginRight: '8px',
-        padding: '1px 6px',
-        borderRadius: '999px',
-        border: '1px solid color-mix(in srgb, var(--vscode-button-background) 65%, transparent)',
-        backgroundColor: 'color-mix(in srgb, var(--vscode-button-background) 18%, transparent)',
-        color: 'var(--vscode-button-foreground)',
-        fontSize: '0.75em',
-        fontWeight: '600',
-        cursor: 'pointer',
+    '.cm-breakpoint-gutter, .cm-test-run-gutter': {
+        width: '16px',
+        minWidth: '16px',
     },
-    '.cm-test-run-widget:hover': {
-        backgroundColor: 'var(--vscode-button-hoverBackground)',
+    '.cm-breakpoint-gutter .cm-gutterElement, .cm-test-run-gutter .cm-gutterElement': {
+        width: '16px',
+        padding: '0 2px',
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+    },
+    '.cm-test-gutter-icon': {
+        display: 'inline-block',
+        width: '0',
+        height: '0',
+        borderTop: '4px solid transparent',
+        borderBottom: '4px solid transparent',
+        borderLeft: '7px solid var(--vscode-testing-runAction, var(--vscode-debugIcon-startForeground, var(--vscode-terminal-ansiGreen, #89d185)))',
+        opacity: '0.95',
+    },
+    '.cm-test-gutter-icon-spacer': {
+        borderLeftColor: 'transparent',
+        opacity: '0',
+    },
+    '.cm-breakpoint-gutter-icon': {
+        display: 'inline-block',
+        width: '8px',
+        height: '8px',
+        borderRadius: '50%',
+        backgroundColor: 'transparent',
+    },
+    '.cm-breakpoint-gutter-icon-active': {
+        backgroundColor: 'var(--vscode-debugIcon-breakpointForeground, var(--vscode-editorError-foreground, #e51400))',
+        boxShadow: '0 0 0 1px color-mix(in srgb, black 15%, transparent)',
+    },
+    '.cm-breakpoint-gutter-icon-spacer': {
+        backgroundColor: 'transparent',
     },
     '.simple-rich-hover-tooltip': {
         position: 'absolute',
@@ -604,24 +695,29 @@ function createEditor(
     renderedBlocksRef: { current: Map<string, RenderableBlockInfo> },
     symbolsRef: { current: RichEditorSymbol[] },
     testsRef: { current: RichEditorTestBlock[] },
+    markersRef: { current: RichEditorMarkers },
     onEdit: (text: string, selStart: number, selEnd: number) => void,
     onSelectionChange: (selStart: number, selEnd: number) => void,
     onRunTest: (test: RichEditorTestBlock) => void,
+    onToggleBreakpoint: (line: number) => void,
 ): {
     view: EditorView;
     refreshDecorations: () => void;
     setDoc: (text: string, selStart?: number, selEnd?: number) => void;
+    enableHoverOverlay: () => void;
 } {
     let isApplyingSync = false;
     let editTimer: ReturnType<typeof setTimeout> | null = null;
+    let hoverCleanup: (() => void) | null = null;
 
     const decorationPlugin = createDecorationPlugin(() => renderedBlocksRef.current);
     const fullLineMathField = ENABLE_FULL_LINE_BLOCK_MATH
         ? createFullLineMathField(() => renderedBlocksRef.current)
         : null;
-    const testRunField = ENABLE_TEST_LINE_WIDGETS
-        ? createTestRunField(() => testsRef.current, onRunTest)
+    const testRunGutter = ENABLE_TEST_LINE_WIDGETS
+        ? createTestRunGutter(() => testsRef.current, onRunTest)
         : null;
+    const breakpointGutter = createBreakpointGutter(() => markersRef.current, onToggleBreakpoint);
 
     const editListener = EditorView.updateListener.of((update) => {
         if (isApplyingSync) return;
@@ -639,9 +735,10 @@ function createEditor(
     });
 
     const extensions: Extension[] = [
+        breakpointGutter,
+        ...(testRunGutter ? [testRunGutter] : []),
         ...createMathAwareLineNumberSetup(),
         ...(fullLineMathField ? [fullLineMathField] : []),
-        ...(testRunField ? [testRunField] : []),
         highlightActiveLineGutter(),
         highlightSpecialChars(),
         history(),
@@ -676,14 +773,6 @@ function createEditor(
         state,
         parent,
     });
-    if (ENABLE_SYMBOL_HOVER) {
-        try {
-            attachHoverOverlay(view, parent, () => symbolsRef.current);
-        } catch (error) {
-            console.error('Simple Rich Editor: hover overlay disabled after initialization failure', error);
-        }
-    }
-
     return {
         view,
 
@@ -714,6 +803,17 @@ function createEditor(
                 isApplyingSync = false;
             }
         },
+
+        enableHoverOverlay() {
+            if (!ENABLE_SYMBOL_HOVER || hoverCleanup || symbolsRef.current.length === 0) {
+                return;
+            }
+            try {
+                hoverCleanup = attachHoverOverlay(view, parent, () => symbolsRef.current);
+            } catch (error) {
+                console.error('Simple Rich Editor: hover overlay disabled after initialization failure', error);
+            }
+        },
     };
 }
 
@@ -729,6 +829,7 @@ export function boot(vsCodeApi?: { postMessage(msg: unknown): void }): void {
     };
     const symbolsRef: { current: RichEditorSymbol[] } = { current: [] };
     const testsRef: { current: RichEditorTestBlock[] } = { current: [] };
+    const markersRef: { current: RichEditorMarkers } = { current: { breakpoints: [] } };
 
     let editor: ReturnType<typeof createEditor> | null = null;
 
@@ -739,6 +840,7 @@ export function boot(vsCodeApi?: { postMessage(msg: unknown): void }): void {
             renderedBlocksRef,
             symbolsRef,
             testsRef,
+            markersRef,
             (source, sStart, sEnd) => {
                 vscode.postMessage({ type: 'editAll', source, selectionStart: sStart, selectionEnd: sEnd });
             },
@@ -751,6 +853,12 @@ export function boot(vsCodeApi?: { postMessage(msg: unknown): void }): void {
                     line: test.line,
                     kind: test.kind,
                     label: test.label,
+                });
+            },
+            (line) => {
+                vscode.postMessage({
+                    type: 'toggleBreakpointFromLine',
+                    line,
                 });
             },
         );
@@ -767,6 +875,7 @@ export function boot(vsCodeApi?: { postMessage(msg: unknown): void }): void {
             renderedBlocksRef.current.clear();
             symbolsRef.current = msg.symbols ?? [];
             testsRef.current = msg.tests ?? [];
+            markersRef.current = msg.markers ?? { breakpoints: [] };
             if (msg.blocks) {
                 for (const block of msg.blocks) {
                     const key = `${block.prefix}:${block.content}`;
@@ -779,6 +888,7 @@ export function boot(vsCodeApi?: { postMessage(msg: unknown): void }): void {
             } else {
                 editor.setDoc(msg.sourceText, msg.selectionStart, msg.selectionEnd);
             }
+            editor!.enableHoverOverlay();
             editor!.refreshDecorations();
         }
     });

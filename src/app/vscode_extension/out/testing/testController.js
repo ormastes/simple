@@ -163,7 +163,11 @@ class SimpleTestController {
         const args = hasDoctestOnlyChildren
             ? ['test', '--sdoctest', fileItem.uri.fsPath]
             : ['test', fileItem.uri.fsPath];
-        const result = await this.cli.run(args, { cwd: vscode.workspace.workspaceFolders?.[0]?.uri.fsPath, token });
+        const result = await this.cli.run(args, {
+            cwd: vscode.workspace.workspaceFolders?.[0]?.uri.fsPath,
+            token,
+            resolveFrom: fileItem.uri.fsPath,
+        });
         const duration = Math.max(1, result.combined.length > 0 ? result.combined.length : 1);
         this.output.appendLine(`$ simple ${args.join(' ')}`);
         if (result.stdout.trim()) {

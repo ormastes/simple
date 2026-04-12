@@ -2634,7 +2634,7 @@ var RichEditorWebview = (() => {
   EditorState.transactionFilter = transactionFilter;
   EditorState.transactionExtender = transactionExtender;
   Compartment.reconfigure = /* @__PURE__ */ StateEffect.define();
-  function combineConfig(configs, defaults2, combine = {}) {
+  function combineConfig(configs, defaults3, combine = {}) {
     let result = {};
     for (let config2 of configs)
       for (let key of Object.keys(config2)) {
@@ -2647,9 +2647,9 @@ var RichEditorWebview = (() => {
         else
           throw new Error("Config merge conflict for field " + key);
       }
-    for (let key in defaults2)
+    for (let key in defaults3)
       if (result[key] === void 0)
-        result[key] = defaults2[key];
+        result[key] = defaults3[key];
     return result;
   }
   var RangeValue = class {
@@ -13308,7 +13308,23 @@ var RichEditorWebview = (() => {
   GutterMarker.prototype.point = true;
   var gutterLineClass = /* @__PURE__ */ Facet.define();
   var gutterWidgetClass = /* @__PURE__ */ Facet.define();
+  var defaults = {
+    class: "",
+    renderEmptyElements: false,
+    elementStyle: "",
+    markers: () => RangeSet.empty,
+    lineMarker: () => null,
+    widgetMarker: () => null,
+    lineMarkerChange: null,
+    initialSpacer: null,
+    updateSpacer: null,
+    domEventHandlers: {},
+    side: "before"
+  };
   var activeGutters = /* @__PURE__ */ Facet.define();
+  function gutter(config2) {
+    return [gutters(), activeGutters.of({ ...defaults, ...config2 })];
+  }
   var unfixGutters = /* @__PURE__ */ Facet.define({
     combine: (values) => values.some((x) => x)
   });
@@ -21239,7 +21255,7 @@ var RichEditorWebview = (() => {
       "&:after": { content: "'abc'", fontSize: "50%", verticalAlign: "middle" }
     }
   });
-  var defaults = {
+  var defaults2 = {
     brackets: ["(", "[", "{", "'", '"'],
     before: ")]}:;>",
     stringPrefixes: []
@@ -21281,7 +21297,7 @@ var RichEditorWebview = (() => {
     return fromCodePoint(ch < 128 ? ch : ch + 1);
   }
   function config(state, pos) {
-    return state.languageDataAt("closeBrackets", pos)[0] || defaults;
+    return state.languageDataAt("closeBrackets", pos)[0] || defaults2;
   }
   var android = typeof navigator == "object" && /* @__PURE__ */ /Android\b/.test(navigator.userAgent);
   var inputHandler2 = /* @__PURE__ */ EditorView.inputHandler.of((view, from, to, insert2) => {
@@ -21300,7 +21316,7 @@ var RichEditorWebview = (() => {
     if (state.readOnly)
       return false;
     let conf = config(state, state.selection.main.head);
-    let tokens = conf.brackets || defaults.brackets;
+    let tokens = conf.brackets || defaults2.brackets;
     let dont = null, changes = state.changeByRange((range) => {
       if (range.empty) {
         let before = prevChar(state.doc, range.head);
@@ -21323,11 +21339,11 @@ var RichEditorWebview = (() => {
   ];
   function insertBracket(state, bracket2) {
     let conf = config(state, state.selection.main.head);
-    let tokens = conf.brackets || defaults.brackets;
+    let tokens = conf.brackets || defaults2.brackets;
     for (let tok of tokens) {
       let closed = closing(codePointAt2(tok, 0));
       if (bracket2 == tok)
-        return closed == tok ? handleSame(state, tok, tokens.indexOf(tok + tok + tok) > -1, conf) : handleOpen(state, tok, closed, conf.before || defaults.before);
+        return closed == tok ? handleSame(state, tok, tokens.indexOf(tok + tok + tok) > -1, conf) : handleOpen(state, tok, closed, conf.before || defaults2.before);
       if (bracket2 == closed && closedBracketAt(state, state.selection.main.from))
         return handleClose(state, tok, closed);
     }
@@ -21386,7 +21402,7 @@ var RichEditorWebview = (() => {
     });
   }
   function handleSame(state, token, allowTriple, config2) {
-    let stringPrefixes = config2.stringPrefixes || defaults.stringPrefixes;
+    let stringPrefixes = config2.stringPrefixes || defaults2.stringPrefixes;
     let dont = null, changes = state.changeByRange((range) => {
       if (!range.empty)
         return {
@@ -21887,8 +21903,8 @@ var RichEditorWebview = (() => {
   }
 
   // src/webview/richEditorWebview.ts
-  var ENABLE_TEST_LINE_WIDGETS = false;
-  var ENABLE_SYMBOL_HOVER = false;
+  var ENABLE_TEST_LINE_WIDGETS = true;
+  var ENABLE_SYMBOL_HOVER = true;
   var ENABLE_FULL_LINE_BLOCK_MATH = true;
   function applyEditorSettings(settings) {
     const root = document.documentElement;
@@ -21923,30 +21939,43 @@ var RichEditorWebview = (() => {
       return wrap;
     }
   };
-  var TestRunWidget = class extends WidgetType {
-    constructor(test, onRun) {
+  var TestRunGutterMarker = class extends GutterMarker {
+    constructor(test) {
       super();
       this.test = test;
-      this.onRun = onRun;
     }
     eq(other) {
-      return this.test.kind === other.test.kind && this.test.label === other.test.label && this.test.line === other.test.line;
+      return this.test?.kind === other.test?.kind && this.test?.label === other.test?.label && this.test?.line === other.test?.line;
     }
     toDOM() {
-      const button = document.createElement("button");
-      button.type = "button";
-      button.className = "cm-test-run-widget";
-      button.textContent = this.test.kind === "sdoctest" ? "\u25B6 doctest" : "\u25B6 run";
-      button.title = `Run ${this.test.kind}: ${this.test.label}`;
-      button.addEventListener("click", (event) => {
-        event.preventDefault();
-        event.stopPropagation();
-        this.onRun(this.test);
-      });
-      return button;
+      const node = document.createElement("span");
+      node.className = "cm-test-gutter-icon";
+      if (this.test) {
+        node.title = `Run ${this.test.kind}: ${this.test.label}`;
+        node.setAttribute("aria-label", node.title);
+      } else {
+        node.classList.add("cm-test-gutter-icon-spacer");
+        node.setAttribute("aria-hidden", "true");
+      }
+      return node;
     }
-    ignoreEvent() {
-      return true;
+  };
+  var BreakpointGutterMarker = class extends GutterMarker {
+    constructor(active) {
+      super();
+      this.active = active;
+    }
+    eq(other) {
+      return this.active === other.active;
+    }
+    toDOM() {
+      const node = document.createElement("span");
+      node.className = `cm-breakpoint-gutter-icon${this.active ? " cm-breakpoint-gutter-icon-active" : ""}`;
+      if (!this.active) {
+        node.classList.add("cm-breakpoint-gutter-icon-spacer");
+        node.setAttribute("aria-hidden", "true");
+      }
+      return node;
     }
   };
   var MATH_BLOCK_REGEX = /\b(?<prefix>m|loss|nograd|img|graph)\{([^}]*(?:\{[^}]*\}[^}]*)*)\}/gs;
@@ -22029,7 +22058,10 @@ var RichEditorWebview = (() => {
       })
     ];
   }
-  function buildTestRunDecorations(state, tests, onRunTest) {
+  function shouldRefreshGutterMarkers(update) {
+    return update.docChanged || update.transactions.some((transaction) => transaction.effects.some((effect) => effect.is(refreshRenderedBlocksEffect)));
+  }
+  function buildTestRunMarkers(state, tests) {
     const builder = new RangeSetBuilder();
     for (const test of tests) {
       const lineNumber = test.line + 1;
@@ -22037,29 +22069,65 @@ var RichEditorWebview = (() => {
         continue;
       }
       const line = state.doc.line(lineNumber);
-      builder.add(
-        line.from,
-        line.from,
-        Decoration.widget({
-          widget: new TestRunWidget(test, onRunTest),
-          side: -1
-        })
-      );
+      builder.add(line.from, line.from, new TestRunGutterMarker(test));
     }
-    return builder.finish();
+    return builder;
   }
-  function createTestRunField(getTests, onRunTest) {
-    return StateField.define({
-      create(state) {
-        return buildTestRunDecorations(state, getTests(), onRunTest);
+  function createTestRunGutter(getTests, onRunTest) {
+    return gutter({
+      class: "cm-test-run-gutter",
+      markers(view) {
+        return buildTestRunMarkers(view.state, getTests()).finish();
       },
-      update(value, tr) {
-        if (tr.docChanged || tr.effects.some((effect) => effect.is(refreshRenderedBlocksEffect))) {
-          return buildTestRunDecorations(tr.state, getTests(), onRunTest);
+      lineMarkerChange(update) {
+        return shouldRefreshGutterMarkers(update);
+      },
+      initialSpacer() {
+        return new TestRunGutterMarker(null);
+      },
+      domEventHandlers: {
+        mousedown(view, line, event) {
+          const test = getTests().find((candidate) => candidate.line === view.state.doc.lineAt(line.from).number - 1);
+          if (!test) {
+            return false;
+          }
+          event.preventDefault();
+          onRunTest(test);
+          return true;
         }
-        return value;
+      }
+    });
+  }
+  function buildBreakpointMarkers(state, markers) {
+    const builder = new RangeSetBuilder();
+    const activeBreakpoints = new Set(markers.breakpoints);
+    for (let lineNumber = 1; lineNumber <= state.doc.lines; lineNumber += 1) {
+      const line = state.doc.line(lineNumber);
+      if (activeBreakpoints.has(lineNumber - 1)) {
+        builder.add(line.from, line.from, new BreakpointGutterMarker(true));
+      }
+    }
+    return builder;
+  }
+  function createBreakpointGutter(getMarkers, onToggleBreakpoint) {
+    return gutter({
+      class: "cm-breakpoint-gutter",
+      markers(view) {
+        return buildBreakpointMarkers(view.state, getMarkers()).finish();
       },
-      provide: (field) => EditorView.decorations.from(field)
+      lineMarkerChange(update) {
+        return shouldRefreshGutterMarkers(update);
+      },
+      initialSpacer() {
+        return new BreakpointGutterMarker(false);
+      },
+      domEventHandlers: {
+        mousedown(view, line, event) {
+          event.preventDefault();
+          onToggleBreakpoint(view.state.doc.lineAt(line.from).number - 1);
+          return true;
+        }
+      }
     });
   }
   function isIdentifierChar(char) {
@@ -22268,19 +22336,43 @@ var RichEditorWebview = (() => {
       fontStyle: "italic",
       fontSize: "0.9em"
     },
-    ".cm-test-run-widget": {
-      marginRight: "8px",
-      padding: "1px 6px",
-      borderRadius: "999px",
-      border: "1px solid color-mix(in srgb, var(--vscode-button-background) 65%, transparent)",
-      backgroundColor: "color-mix(in srgb, var(--vscode-button-background) 18%, transparent)",
-      color: "var(--vscode-button-foreground)",
-      fontSize: "0.75em",
-      fontWeight: "600",
-      cursor: "pointer"
+    ".cm-breakpoint-gutter, .cm-test-run-gutter": {
+      width: "16px",
+      minWidth: "16px"
     },
-    ".cm-test-run-widget:hover": {
-      backgroundColor: "var(--vscode-button-hoverBackground)"
+    ".cm-breakpoint-gutter .cm-gutterElement, .cm-test-run-gutter .cm-gutterElement": {
+      width: "16px",
+      padding: "0 2px",
+      display: "flex",
+      alignItems: "center",
+      justifyContent: "center"
+    },
+    ".cm-test-gutter-icon": {
+      display: "inline-block",
+      width: "0",
+      height: "0",
+      borderTop: "4px solid transparent",
+      borderBottom: "4px solid transparent",
+      borderLeft: "7px solid var(--vscode-testing-runAction, var(--vscode-debugIcon-startForeground, var(--vscode-terminal-ansiGreen, #89d185)))",
+      opacity: "0.95"
+    },
+    ".cm-test-gutter-icon-spacer": {
+      borderLeftColor: "transparent",
+      opacity: "0"
+    },
+    ".cm-breakpoint-gutter-icon": {
+      display: "inline-block",
+      width: "8px",
+      height: "8px",
+      borderRadius: "50%",
+      backgroundColor: "transparent"
+    },
+    ".cm-breakpoint-gutter-icon-active": {
+      backgroundColor: "var(--vscode-debugIcon-breakpointForeground, var(--vscode-editorError-foreground, #e51400))",
+      boxShadow: "0 0 0 1px color-mix(in srgb, black 15%, transparent)"
+    },
+    ".cm-breakpoint-gutter-icon-spacer": {
+      backgroundColor: "transparent"
     },
     ".simple-rich-hover-tooltip": {
       position: "absolute",
@@ -22309,12 +22401,14 @@ var RichEditorWebview = (() => {
     { tag: tags.bracket, color: "var(--vscode-editorBracketHighlight-foreground1, #ffd700)" },
     { tag: tags.atom, color: "var(--vscode-symbolIcon-constantForeground, #569cd6)", fontStyle: "italic" }
   ]);
-  function createEditor(parent, initialText, renderedBlocksRef, symbolsRef, testsRef, onEdit, onSelectionChange, onRunTest) {
+  function createEditor(parent, initialText, renderedBlocksRef, symbolsRef, testsRef, markersRef, onEdit, onSelectionChange, onRunTest, onToggleBreakpoint) {
     let isApplyingSync = false;
     let editTimer = null;
+    let hoverCleanup = null;
     const decorationPlugin = createDecorationPlugin(() => renderedBlocksRef.current);
     const fullLineMathField = ENABLE_FULL_LINE_BLOCK_MATH ? createFullLineMathField(() => renderedBlocksRef.current) : null;
-    const testRunField = ENABLE_TEST_LINE_WIDGETS ? createTestRunField(() => testsRef.current, onRunTest) : null;
+    const testRunGutter = ENABLE_TEST_LINE_WIDGETS ? createTestRunGutter(() => testsRef.current, onRunTest) : null;
+    const breakpointGutter = createBreakpointGutter(() => markersRef.current, onToggleBreakpoint);
     const editListener = EditorView.updateListener.of((update) => {
       if (isApplyingSync) return;
       if (update.docChanged) {
@@ -22329,9 +22423,10 @@ var RichEditorWebview = (() => {
       }
     });
     const extensions = [
+      breakpointGutter,
+      ...testRunGutter ? [testRunGutter] : [],
       ...createMathAwareLineNumberSetup(),
       ...fullLineMathField ? [fullLineMathField] : [],
-      ...testRunField ? [testRunField] : [],
       highlightActiveLineGutter(),
       highlightSpecialChars(),
       history(),
@@ -22365,13 +22460,6 @@ var RichEditorWebview = (() => {
       state,
       parent
     });
-    if (ENABLE_SYMBOL_HOVER) {
-      try {
-        attachHoverOverlay(view, parent, () => symbolsRef.current);
-      } catch (error) {
-        console.error("Simple Rich Editor: hover overlay disabled after initialization failure", error);
-      }
-    }
     return {
       view,
       refreshDecorations() {
@@ -22392,6 +22480,16 @@ var RichEditorWebview = (() => {
         } finally {
           isApplyingSync = false;
         }
+      },
+      enableHoverOverlay() {
+        if (!ENABLE_SYMBOL_HOVER || hoverCleanup || symbolsRef.current.length === 0) {
+          return;
+        }
+        try {
+          hoverCleanup = attachHoverOverlay(view, parent, () => symbolsRef.current);
+        } catch (error) {
+          console.error("Simple Rich Editor: hover overlay disabled after initialization failure", error);
+        }
       }
     };
   }
@@ -22404,6 +22502,7 @@ var RichEditorWebview = (() => {
     };
     const symbolsRef = { current: [] };
     const testsRef = { current: [] };
+    const markersRef = { current: { breakpoints: [] } };
     let editor = null;
     function initEditor(text, selStart, selEnd) {
       editor = createEditor(
@@ -22412,6 +22511,7 @@ var RichEditorWebview = (() => {
         renderedBlocksRef,
         symbolsRef,
         testsRef,
+        markersRef,
         (source, sStart, sEnd) => {
           vscode.postMessage({ type: "editAll", source, selectionStart: sStart, selectionEnd: sEnd });
         },
@@ -22424,6 +22524,12 @@ var RichEditorWebview = (() => {
             line: test.line,
             kind: test.kind,
             label: test.label
+          });
+        },
+        (line) => {
+          vscode.postMessage({
+            type: "toggleBreakpointFromLine",
+            line
           });
         }
       );
@@ -22438,6 +22544,7 @@ var RichEditorWebview = (() => {
         renderedBlocksRef.current.clear();
         symbolsRef.current = msg.symbols ?? [];
         testsRef.current = msg.tests ?? [];
+        markersRef.current = msg.markers ?? { breakpoints: [] };
         if (msg.blocks) {
           for (const block of msg.blocks) {
             const key = `${block.prefix}:${block.content}`;
@@ -22449,6 +22556,7 @@ var RichEditorWebview = (() => {
         } else {
           editor.setDoc(msg.sourceText, msg.selectionStart, msg.selectionEnd);
         }
+        editor.enableHoverOverlay();
         editor.refreshDecorations();
       }
     });

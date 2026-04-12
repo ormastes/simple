@@ -38,11 +38,29 @@ const child_process_1 = require("child_process");
 const fs = __importStar(require("fs"));
 const path = __importStar(require("path"));
 const vscode = __importStar(require("vscode"));
+function collectSearchRoots(fileOrDir) {
+    if (!fileOrDir) {
+        return [];
+    }
+    const roots = [];
+    let current = fs.existsSync(fileOrDir) && fs.statSync(fileOrDir).isDirectory()
+        ? fileOrDir
+        : path.dirname(fileOrDir);
+    while (true) {
+        roots.push(current);
+        const parent = path.dirname(current);
+        if (parent === current) {
+            break;
+        }
+        current = parent;
+    }
+    return roots;
+}
 class SimpleCliService {
     constructor(services) {
         this.services = services;
     }
-    resolveSimpleCommand() {
+    resolveSimpleCommand(resolveFrom) {
         const cliConfig = vscode.workspace.getConfiguration('simple.cli');
         const explicitPath = cliConfig.get('path', '').trim();
         if (explicitPath) {
@@ -64,10 +82,16 @@ class SimpleCliService {
                 }
             }
         }
+        for (const root of collectSearchRoots(resolveFrom)) {
+            const candidate = path.join(root, 'bin', 'simple');
+            if (fs.existsSync(candidate)) {
+                return candidate;
+            }
+        }
         return 'simple';
     }
     async run(args, options) {
-        const command = this.resolveSimpleCommand();
+        const command = this.resolveSimpleCommand(options?.resolveFrom);
         this.services.setStatus('cli', {
             health: 'starting',
             source: 'native',

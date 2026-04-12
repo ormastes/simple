@@ -9,6 +9,7 @@
  */
 import * as vscode from 'vscode';
 import { type BlockKind } from './blockDetector';
+import type { EditorMarkerState } from './testing/editorMarkers';
 export interface RenderableBlock {
     kind: BlockKind;
     from: number;
@@ -24,7 +25,8 @@ export interface RenderableBlock {
 export declare class RichCustomEditorProvider implements vscode.CustomTextEditorProvider {
     private readonly extensionUri;
     private readonly onActiveDocument?;
+    private readonly getMarkerState?;
     static readonly viewType = "simple.richSourceEditor";
-    constructor(extensionUri: vscode.Uri, onActiveDocument?: ((document: vscode.TextDocument) => void) | undefined);
+    constructor(extensionUri: vscode.Uri, onActiveDocument?: ((document: vscode.TextDocument) => void) | undefined, getMarkerState?: ((documentUri: vscode.Uri) => EditorMarkerState) | undefined);
     resolveCustomTextEditor(document: vscode.TextDocument, webviewPanel: vscode.WebviewPanel, _token: vscode.CancellationToken): Promise<void>;
 }

@@ -9,9 +9,10 @@ export interface CliRunResult {
 export declare class SimpleCliService {
     private readonly services;
     constructor(services: ExtensionHostServices);
-    resolveSimpleCommand(): string;
+    resolveSimpleCommand(resolveFrom?: string): string;
     run(args: string[], options?: {
         cwd?: string;
         token?: vscode.CancellationToken;
+        resolveFrom?: string;
     }): Promise<CliRunResult>;
 }

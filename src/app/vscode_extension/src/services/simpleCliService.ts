@@ -11,10 +11,32 @@ export interface CliRunResult {
     combined: string;
 }
 
+function collectSearchRoots(fileOrDir?: string): string[] {
+    if (!fileOrDir) {
+        return [];
+    }
+
+    const roots: string[] = [];
+    let current = fs.existsSync(fileOrDir) && fs.statSync(fileOrDir).isDirectory()
+        ? fileOrDir
+        : path.dirname(fileOrDir);
+
+    while (true) {
+        roots.push(current);
+        const parent = path.dirname(current);
+        if (parent === current) {
+            break;
+        }
+        current = parent;
+    }
+
+    return roots;
+}
+
 export class SimpleCliService {
     public constructor(private readonly services: ExtensionHostServices) {}
 
-    public resolveSimpleCommand(): string {
+    public resolveSimpleCommand(resolveFrom?: string): string {
         const cliConfig = vscode.workspace.getConfiguration('simple.cli');
         const explicitPath = cliConfig.get<string>('path', '').trim();
         if (explicitPath) {
@@ -39,11 +61,18 @@ export class SimpleCliService {
             }
         }
 
+        for (const root of collectSearchRoots(resolveFrom)) {
+            const candidate = path.join(root, 'bin', 'simple');
+            if (fs.existsSync(candidate)) {
+                return candidate;
+            }
+        }
+
         return 'simple';
     }
 
-    public async run(args: string[], options?: { cwd?: string; token?: vscode.CancellationToken }): Promise<CliRunResult> {
-        const command = this.resolveSimpleCommand();
+    public async run(args: string[], options?: { cwd?: string; token?: vscode.CancellationToken; resolveFrom?: string }): Promise<CliRunResult> {
+        const command = this.resolveSimpleCommand(options?.resolveFrom);
         this.services.setStatus('cli', {
             health: 'starting',
             source: 'native',

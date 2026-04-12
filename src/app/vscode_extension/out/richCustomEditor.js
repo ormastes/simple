@@ -239,9 +239,10 @@ function buildRichEditorTests(document) {
 }
 // ── Provider ─────────────────────────────────────────────────────────
 class RichCustomEditorProvider {
-    constructor(extensionUri, onActiveDocument) {
+    constructor(extensionUri, onActiveDocument, getMarkerState) {
         this.extensionUri = extensionUri;
         this.onActiveDocument = onActiveDocument;
+        this.getMarkerState = getMarkerState;
     }
     async resolveCustomTextEditor(document, webviewPanel, _token) {
         this.onActiveDocument?.(document);
@@ -289,6 +290,9 @@ class RichCustomEditorProvider {
                 settings: getRichEditorSettings(),
                 symbols: buildRichEditorSymbols(document),
                 tests: buildRichEditorTests(document),
+                markers: this.getMarkerState
+                    ? this.getMarkerState(document.uri)
+                    : { breakpoints: [] },
             });
         };
         webviewPanel.webview.html = buildRichEditorHtml(katexCssUri, richEditorBundleSource, webviewPanel.webview.cspSource, nonce);
@@ -346,11 +350,19 @@ class RichCustomEditorProvider {
             const command = message.kind === 'sdoctest' ? 'simple.test.runSdoctest' : 'simple.test.runFile';
             await vscode.commands.executeCommand(command, document.uri);
         });
+        const markerSubscription = webviewPanel.webview.onDidReceiveMessage(async (message) => {
+            if (message.type !== 'toggleBreakpointFromLine') {
+                return;
+            }
+            await vscode.commands.executeCommand('simple.editor.toggleBreakpoint', document.uri, message.line);
+            await postSync();
+        });
         webviewPanel.onDidDispose(() => {
             changeDocumentSubscription.dispose();
             configurationSubscription.dispose();
             messageSubscription.dispose();
             runTestSubscription.dispose();
+            markerSubscription.dispose();
         });
     }
 }

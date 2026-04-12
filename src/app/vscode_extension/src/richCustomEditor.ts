@@ -16,6 +16,7 @@ import { detectBlocks, type BlockKind, type DetectedBlock } from './blockDetecto
 import { parseImageContent, resolveImageUri } from './imageResolver';
 import { simpleToLatex } from './mathConverter';
 import { indexDocumentSymbols } from './symbols/simpleSymbolProviders';
+import type { EditorMarkerState } from './testing/editorMarkers';
 import { detectTestBlocks } from './testing/testDiscovery';
 
 // ── Types ────────────────────────────────────────────────────────────
@@ -55,12 +56,17 @@ interface RichEditorTestBlock {
     to: number;
 }
 
+interface RichEditorMarkers {
+    breakpoints: number[];
+}
+
 type WebviewMessage =
     | { type: 'ready' }
     | { type: 'editAll'; source: string; selectionStart: number; selectionEnd: number }
     | { type: 'selectionChanged'; selectionStart: number; selectionEnd: number }
     | { type: 'requestSync' }
-    | { type: 'runTestFromLine'; line: number; kind: string; label: string };
+    | { type: 'runTestFromLine'; line: number; kind: string; label: string }
+    | { type: 'toggleBreakpointFromLine'; line: number };
 
 type HostMessage =
     | {
@@ -72,6 +78,7 @@ type HostMessage =
         settings: RichEditorSettings;
         symbols: RichEditorSymbol[];
         tests: RichEditorTestBlock[];
+        markers: RichEditorMarkers;
     }
     | { type: 'error'; message: string };
 
@@ -285,6 +292,7 @@ export class RichCustomEditorProvider implements vscode.CustomTextEditorProvider
     public constructor(
         private readonly extensionUri: vscode.Uri,
         private readonly onActiveDocument?: (document: vscode.TextDocument) => void,
+        private readonly getMarkerState?: (documentUri: vscode.Uri) => EditorMarkerState,
     ) {}
 
     public async resolveCustomTextEditor(
@@ -344,6 +352,9 @@ export class RichCustomEditorProvider implements vscode.CustomTextEditorProvider
                 settings: getRichEditorSettings(),
                 symbols: buildRichEditorSymbols(document),
                 tests: buildRichEditorTests(document),
+                markers: this.getMarkerState
+                    ? this.getMarkerState(document.uri)
+                    : { breakpoints: [] },
             } satisfies HostMessage);
         };
 
@@ -419,11 +430,21 @@ export class RichCustomEditorProvider implements vscode.CustomTextEditorProvider
             await vscode.commands.executeCommand(command, document.uri);
         });
 
+        const markerSubscription = webviewPanel.webview.onDidReceiveMessage(async (message: WebviewMessage) => {
+            if (message.type !== 'toggleBreakpointFromLine') {
+                return;
+            }
+
+            await vscode.commands.executeCommand('simple.editor.toggleBreakpoint', document.uri, message.line);
+            await postSync();
+        });
+
         webviewPanel.onDidDispose(() => {
             changeDocumentSubscription.dispose();
             configurationSubscription.dispose();
             messageSubscription.dispose();
             runTestSubscription.dispose();
+            markerSubscription.dispose();
         });
     }
 }
