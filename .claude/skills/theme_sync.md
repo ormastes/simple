@@ -81,30 +81,46 @@ Drift categories: `TYPOGRAPHY`, `SHAPE`, `COLOR (named)`, `COLOR (overrides)`, `
 
 Executes for all fields where `[Local-wins]` was chosen (either manually in reconcile mode, or automatically in push_only mode).
 
-For each drifting design system:
+The push flow is a **two-step handoff**: the Simple CLI builds a pending payload file, then this skill session reads it and dispatches the MCP calls. The CLI never makes network calls.
+
 ```
-payload = parse /tmp/local_<theme>.sdn
-           + inject design_md from .claude/skills/stitch.md designMd section
-mcp__stitch__update_design_system(
-    project_id,
-    design_system_id,
-    display_name,
-    color_mode,
-    headline_font,
-    body_font,
-    label_font,
-    roundness,
-    color_variant,
-    custom_color,
-    override_primary_color,
-    override_secondary_color,
-    override_tertiary_color,
-    override_neutral_color,
-    spacing_scale,
-    named_colors,
-    design_md
-)
-mcp__stitch__apply_design_system(project_id, design_system_id)  # re-skins all screens
+1. Confirm mode: read doc/05_design/stitch_snapshots/sync_mode.sdn
+   If mode != push_only: STOP with message
+       "run /theme_sync reconcile first, then flip sync_mode.sdn"
+
+2. For each drift-flagged design system from Phase 2 diff output:
+   bin/simple theme-sync build-push-payload \
+       --project=<pid> --design-system=<asset_id> --local=/tmp/local_<theme>.sdn
+   # Default output: doc/05_design/stitch_snapshots/<pid>/_pending_update_<asset_id>.sdn
+   # Override with --out=<path> if needed.
+
+3. For each generated pending file <pid>/_pending_update_<asset_id>.sdn:
+   - Read the SDN (flat field layout, ends with `design_md: |` block)
+   - Parse each root-level field: display_name, color_mode, headline_font,
+     body_font, label_font, roundness, color_variant, custom_color,
+     spacing_scale, override_primary_color, override_secondary_color,
+     override_tertiary_color, override_neutral_color, named_colors (map),
+     and the multi-line design_md body
+   - Call mcp__stitch__update_design_system(
+         project_id=pid,
+         design_system_id=asset_id,
+         display_name=..., color_mode=...,
+         headline_font=..., body_font=..., label_font=...,
+         roundness=..., color_variant=..., custom_color=...,
+         spacing_scale=...,
+         override_primary_color=..., override_secondary_color=...,
+         override_tertiary_color=..., override_neutral_color=...,
+         named_colors={...},
+         design_md=<full multi-line body>
+     )
+   - On success: mcp__stitch__apply_design_system(
+         project_id=pid, design_system_id=asset_id
+     )  # re-skins all screens in the project
+   - Delete the pending file
+
+4. Re-pull and diff: Phase 1 pull → Phase 2 diff must return exit 0 (clean)
+
+5. Render & verify via render-wm/render-app (optional side-by-side visual)
 ```
 
 `edit_screens` is NOT called — `apply_design_system` handles reskinning wholesale.

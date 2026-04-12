@@ -64,11 +64,7 @@ class SimpleWindowManager {
         content.className = 'wm-content';
         content.id = 'wm-content-' + id;
         if (html) {
-            try {
-                this._setContent(content, html);
-            } catch (err) {
-                console.warn('wm.addWindow: _setContent failed for ' + id + ', window will render empty', err);
-            }
+            this._setContent(content, html);
         }
 
         // Resize handles
@@ -395,52 +391,41 @@ class SimpleWindowManager {
     // -- Internal helpers ---------------------------------------------------
 
     _setContent(el, html) {
-        try {
-            // Extract styles from the HTML and inject into content
-            const parser = new DOMParser();
-            const doc = parser.parseFromString(html, 'text/html');
-            const styles = doc.querySelectorAll('style');
-            const body = doc.body;
+        // Extract styles from the HTML and inject into content
+        const parser = new DOMParser();
+        const doc = parser.parseFromString(html, 'text/html');
+        const styles = doc.querySelectorAll('style');
+        const body = doc.body;
 
-            // Remove existing injected styles in content
-            el.querySelectorAll('style.wm-injected').forEach(s => s.remove());
+        // Remove existing injected styles in content
+        el.querySelectorAll('style.wm-injected').forEach(s => s.remove());
 
-            // Inject styles
+        // Inject styles
+        styles.forEach(style => {
+            const s = document.createElement('style');
+            s.className = 'wm-injected';
+            s.textContent = style.textContent;
+            el.appendChild(s);
+        });
+
+        // Set body content
+        if (body) {
+            // Check for #app wrapper
+            const appDiv = body.querySelector('#app');
+            el.innerHTML = '';
             styles.forEach(style => {
                 const s = document.createElement('style');
                 s.className = 'wm-injected';
                 s.textContent = style.textContent;
                 el.appendChild(s);
             });
-
-            // Set body content
-            if (body) {
-                // Check for #app wrapper
-                const appDiv = body.querySelector('#app');
-                el.innerHTML = '';
-                styles.forEach(style => {
-                    const s = document.createElement('style');
-                    s.className = 'wm-injected';
-                    s.textContent = style.textContent;
-                    el.appendChild(s);
-                });
-                if (appDiv) {
-                    el.insertAdjacentHTML('beforeend', appDiv.innerHTML);
-                } else {
-                    el.insertAdjacentHTML('beforeend', body.innerHTML);
-                }
+            if (appDiv) {
+                el.insertAdjacentHTML('beforeend', appDiv.innerHTML);
             } else {
-                el.innerHTML = html;
+                el.insertAdjacentHTML('beforeend', body.innerHTML);
             }
-        } catch (err) {
-            console.warn('wm._setContent DOMParser path failed, falling back to innerHTML', err);
-            try {
-                el.innerHTML = '';
-                el.insertAdjacentHTML('beforeend', html);
-            } catch (innerErr) {
-                console.error('wm._setContent fallback also failed', innerErr);
-                el.textContent = '[content render failed]';
-            }
+        } else {
+            el.innerHTML = html;
         }
     }
 
