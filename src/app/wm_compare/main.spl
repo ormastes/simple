@@ -19,14 +19,15 @@
 #       [--width=320 --height=240]
 
 use std.cli.cli_util.{get_cli_args}
-use std.nogc_sync_mut.ffi.io.{file_read_bytes, file_write_text, file_write_bytes, dir_create_all}
+use std.nogc_sync_mut.ffi.io.{file_read_bytes, file_write_text, file_write_bytes, dir_create_all, file_exists}
 
 use os.compositor.wm_scene.{WmSceneSpec, SceneElement}
 use os.compositor.electron_capture.{CaptureResult, capture_electron, capture_electron_scene, capture_error}
 use os.compositor.qemu_capture.{capture_qemu_vm}
 use os.compositor.screenshot_compare.{
-    ComparisonResult, ChannelDiffResult,
-    compare_exact, compare_per_channel}
+    ComparisonResult, ChannelDiffResult, DiffRegion,
+    compare_exact, compare_per_channel, compare_pixel_buffers,
+    find_diff_regions, generate_diff_image}
 use os.compositor.perceptual_compare.{PerceptualResult, compare_perceptual}
 use os.compositor.tolerance_profile.{
     ToleranceProfile,
@@ -52,10 +53,11 @@ struct CliOpts:
     width: i32
     height: i32
     help: bool
-    mode: text               # "" (default offline) | "live_b" (Phase 1) | "bit-compare" (Phase 5)
+    mode: text               # "" (default offline) | "live_b" | "bit-compare" | "live_bd_compare"
     source_a_path: text      # --source-a=<path> for bit-compare mode
     source_b_path: text      # --source-b=<path> for bit-compare mode
     out_dir: text            # --out-dir=<dir> for bit-compare mode
+    qmp_socket: text         # --qmp-socket=<path> for live_bd_compare mode
 
 fn default_opts() -> CliOpts:
     CliOpts(
@@ -69,7 +71,8 @@ fn default_opts() -> CliOpts:
         mode: "",
         source_a_path: "",
         source_b_path: "",
-        out_dir: ""
+        out_dir: "",
+        qmp_socket: ""
     )
 
 fn _parse_kv(arg: text, key: text) -> text:
@@ -123,6 +126,10 @@ fn parse_opts(args: [text]) -> CliOpts:
                                             val v_out = _parse_kv(arg, "--out-dir")
                                             if v_out != "":
                                                 opts.out_dir = v_out
+                                            else:
+                                                val v_qmp = _parse_kv(arg, "--qmp-socket")
+                                                if v_qmp != "":
+                                                    opts.qmp_socket = v_qmp
     opts
 
 fn print_help():
@@ -140,6 +147,9 @@ fn print_help():
     print "  --tolerance=<profile>    strict (default) | text_tolerant | aa_aware"
     print "  --width=<n>              Capture width (default 320)"
     print "  --height=<n>             Capture height (default 240)"
+    print "  --mode=<mode>            live_b | bit-compare | live_bd_compare"
+    print "  --qmp-socket=<path>      QMP socket (live_bd_compare, default /tmp/simpleos_engine2d_qmp.sock)"
+    print "  --out-dir=<dir>          Override output dir for bit/live_bd compare"
     print "  -h, --help               Show this help"
     print ""
     print "Registered scenes:"
@@ -723,6 +733,230 @@ fn run_bit_compare_mode(opts: CliOpts) -> i64:
         print "[wm_compare] (Phase 5 expected outcome — see report note.)"
         return 0
 
+fn _count_region_diffs(a: [u32], b: [u32], full_w: i32, full_h: i32,
+                       rx: i32, ry: i32, rw: i32, rh: i32) -> (i64, i32):
+    """Count pixels that differ inside rect (rx,ry,rw,rh) of full_w x full_h
+    buffers. Returns (differing_pixels, max_channel_diff). Buffers must be
+    identically sized to full_w*full_h."""
+    var diff: i64 = 0
+    var max_ch: i32 = 0
+    val n: i32 = (a.len() as i32)
+    val nb: i32 = (b.len() as i32)
+    val y0 = if ry < 0: 0 else: ry
+    val x0 = if rx < 0: 0 else: rx
+    val y1 = if ry + rh > full_h: full_h else: ry + rh
+    val x1 = if rx + rw > full_w: full_w else: rx + rw
+    var y = y0
+    while y < y1:
+        var x = x0
+        while x < x1:
+            val idx = y * full_w + x
+            if idx < n and idx < nb:
+                val pa = a[idx]
+                val pb = b[idx]
+                if pa != pb:
+                    diff = diff + 1
+                    val ra: i32 = ((pa >> 16) & 0xFF) as i32
+                    val ga: i32 = ((pa >> 8) & 0xFF) as i32
+                    val ba: i32 = (pa & 0xFF) as i32
+                    val rb_: i32 = ((pb >> 16) & 0xFF) as i32
+                    val gb_: i32 = ((pb >> 8) & 0xFF) as i32
+                    val bb_: i32 = (pb & 0xFF) as i32
+                    val dr = abs_i32_local(ra - rb_)
+                    val dg = abs_i32_local(ga - gb_)
+                    val db = abs_i32_local(ba - bb_)
+                    val m = if dr > dg: dr else: dg
+                    val m2 = if m > db: m else: db
+                    if m2 > max_ch:
+                        max_ch = m2
+            x = x + 1
+        y = y + 1
+    (diff, max_ch)
+
+fn abs_i32_local(x: i32) -> i32:
+    if x < 0: -x else: x
+
+fn _rescale_to(pixels: [u32], src_w: i32, src_h: i32,
+               dst_w: i32, dst_h: i32) -> [u32]:
+    """Nearest-neighbor downsample/upsample src buffer to dst_w x dst_h.
+    If dims already match, returns the input unchanged."""
+    if src_w == dst_w and src_h == dst_h:
+        return pixels
+    var out: [u32] = []
+    var y = 0
+    while y < dst_h:
+        val sy = (y * src_h) / dst_h
+        var x = 0
+        while x < dst_w:
+            val sx = (x * src_w) / dst_w
+            val idx = sy * src_w + sx
+            if idx < (pixels.len() as i32):
+                out = out + [pixels[idx]]
+            else:
+                out = out + [0xFF000000 as u32]
+            x = x + 1
+        y = y + 1
+    out
+
+fn run_live_bd_compare_mode(opts: CliOpts) -> i64:
+    """Phase 5 live harness: capture B (host WM) and D (QEMU) in-process
+    and perform a bit-level compare. Narrows divergence to known regions
+    (title bar, body, traffic lights) if exact match fails and writes
+    findings to doc/08_tracking/wm_compare/divergence.md.
+
+    Exit codes:
+      0  success (exact match or report written)
+      1  argument/config error
+      2  infrastructure unavailable (QMP socket missing)
+    """
+    val scene_name = if opts.scene != "": opts.scene else: "four_windows"
+    val width = opts.width
+    val height = opts.height
+    val qmp_sock = if opts.qmp_socket != "":
+                       opts.qmp_socket
+                   else:
+                       "/tmp/simpleos_engine2d_qmp.sock"
+    val out_dir = if opts.out_dir != "":
+                      opts.out_dir
+                  else:
+                      "test/baselines/wm_compare/{scene_name}"
+    dir_create_all(out_dir)
+
+    print "[wm_compare] Phase 5 live B vs D bit-compare"
+    print "[wm_compare]   scene:     {scene_name}"
+    print "[wm_compare]   size:      {width}x{height}"
+    print "[wm_compare]   qmp sock:  {qmp_sock}"
+    print "[wm_compare]   out dir:   {out_dir}"
+
+    # Resolve scene
+    val entry_opt = resolve_scene(scene_name, width, height)
+    if entry_opt == nil:
+        print "[wm_compare]   FAIL: unknown scene '{scene_name}'"
+        return 1
+    val entry = entry_opt
+
+    # ----- Source B capture (in-process) -----
+    print "[wm_compare] Capturing source B (host Simple WM, in-process)..."
+    val cap_b = capture_source_b(entry, width, height)
+    if not cap_b.success:
+        print "[wm_compare]   FAIL: source B: {cap_b.error}"
+        return 1
+    print "[wm_compare]   B ok  {cap_b.width}x{cap_b.height} pixels={cap_b.pixels.len()}"
+
+    # ----- Source D capture (QEMU via QMP) -----
+    if not file_exists(qmp_sock):
+        print ""
+        print "[wm_compare] INFRA UNAVAILABLE: QMP socket '{qmp_sock}' not found."
+        print "[wm_compare] Phase 5 requires a live QEMU Simple OS guest running with"
+        print "[wm_compare] -qmp unix:{qmp_sock},server,nowait and the Engine2D GUI entry."
+        print ""
+        print "[wm_compare] To spawn the guest:"
+        print "[wm_compare]   1. Build kernel:  bin/simple test test/system/engine2d_in_qemu_spec.spl"
+        print "[wm_compare]      (first `it` block builds gui_entry_engine2d.spl)"
+        print "[wm_compare]   2. Boot in background with a QMP socket:"
+        print "[wm_compare]      qemu-system-x86_64 -machine q35 -cpu qemu64 -m 2G \\"
+        print "[wm_compare]         -kernel build/os/simpleos_engine2d_x86_64.elf \\"
+        print "[wm_compare]         -vga std -qmp unix:{qmp_sock},server,nowait &"
+        print "[wm_compare]   3. Re-run this command."
+        print ""
+        print "[wm_compare] Exiting with code 2 (infra unavailable, not a failure)."
+        return 2
+
+    print "[wm_compare] Capturing source D (QEMU Simple OS via QMP)..."
+    val cap_d = capture_qemu_vm(qmp_sock, "{out_dir}/D_raw.ppm")
+    if not cap_d.success:
+        print "[wm_compare]   FAIL: source D: {cap_d.error}"
+        return 1
+    print "[wm_compare]   D ok  {cap_d.width}x{cap_d.height} pixels={cap_d.pixels.len()}"
+
+    # Align D to (width, height) if guest framebuffer is a different size.
+    var pixels_d: [u32] = cap_d.pixels
+    if cap_d.width != width or cap_d.height != height:
+        print "[wm_compare]   D dimensions differ — nearest-neighbor resample to {width}x{height}"
+        pixels_d = _rescale_to(cap_d.pixels, cap_d.width, cap_d.height, width, height)
+
+    # ----- Full-frame compare -----
+    val profile = profile_strict()
+    val full = compare_pixel_buffers(cap_b.pixels, pixels_d, width, height, 0)
+    val exact = full.different_pixels == 0
+    if exact:
+        print "[wm_compare] Phase 5 PASS: byte-identical ({width}x{height})"
+        return 0
+
+    print "[wm_compare] NOT byte-identical: {full.different_pixels} px differ"
+    print "[wm_compare]   match pct (10000): {full.match_percentage}"
+    print "[wm_compare]   max channel diff:  {full.max_channel_diff}"
+
+    # Heat-map dump
+    dir_create_all(out_dir)
+    val diff_img = generate_diff_image(cap_b.pixels, pixels_d, width, height)
+    val diff_path = "{out_dir}/bit_diff_B_vs_D.ppm"
+    export_comparison_ppm(diff_img, width, height, diff_path)
+    print "[wm_compare]   heat-map: {diff_path}"
+
+    # Find diff regions (auto-clustered)
+    val regions = find_diff_regions(cap_b.pixels, pixels_d, width, height, 0)
+    print "[wm_compare]   auto-detected diff regions: {regions.len()}"
+
+    # Narrow to named sub-regions: title bar (top 30 rows), body (below),
+    # traffic lights (top-left 60x30). Counts are over the full frame.
+    val title_h: i32 = 30
+    val (title_diff, title_max) = _count_region_diffs(
+        cap_b.pixels, pixels_d, width, height, 0, 0, width, title_h)
+    val (body_diff, body_max) = _count_region_diffs(
+        cap_b.pixels, pixels_d, width, height, 0, title_h, width, height - title_h)
+    val (tl_diff, tl_max) = _count_region_diffs(
+        cap_b.pixels, pixels_d, width, height, 0, 0, 60, 30)
+
+    print "[wm_compare]   title-bar region (0,0 {width}x{title_h}): {title_diff} diff, max ch {title_max}"
+    print "[wm_compare]   body region       (0,{title_h} {width}x{height - title_h}): {body_diff} diff, max ch {body_max}"
+    print "[wm_compare]   traffic-lights    (0,0 60x30):         {tl_diff} diff, max ch {tl_max}"
+
+    # Write findings md
+    val md_dir = "doc/08_tracking/wm_compare"
+    dir_create_all(md_dir)
+    val md_path = "{md_dir}/divergence.md"
+    var md = "# WM Compare Phase 5 — B vs D Divergence\n\n"
+    md = md + "Generated by `src/app/wm_compare/main.spl --mode=live_bd_compare`.\n\n"
+    md = md + "## Scene\n\n"
+    md = md + "- Name: `{scene_name}`\n"
+    md = md + "- Size: {width}x{height}\n\n"
+    md = md + "## Sources\n\n"
+    md = md + "- **B**: host Simple WM (in-process `capture_source_b`, backend `{cap_b.backend_name}`)\n"
+    md = md + "- **D**: QEMU Simple OS via QMP socket `{qmp_sock}`\n"
+    md = md + "    - native framebuffer: {cap_d.width}x{cap_d.height}\n"
+    md = md + "    - resampled: {_bool_text(cap_d.width != width or cap_d.height != height)}\n\n"
+    md = md + "## Full-frame\n\n"
+    md = md + "- Differing pixels: {full.different_pixels}\n"
+    md = md + "- Match % (x10000): {full.match_percentage}\n"
+    md = md + "- Max channel diff: {full.max_channel_diff}\n"
+    md = md + "- Auto-detected diff clusters: {regions.len()}\n"
+    md = md + "- Heat-map PPM: `{diff_path}`\n\n"
+    md = md + "## Per-region pixel deltas\n\n"
+    md = md + "| Region        | Rect                  | Diff px | Max ch diff |\n"
+    md = md + "|---------------|-----------------------|---------|-------------|\n"
+    md = md + "| title bar     | (0,0 {width}x{title_h})    | {title_diff} | {title_max} |\n"
+    md = md + "| body          | (0,{title_h} {width}x{height - title_h}) | {body_diff} | {body_max} |\n"
+    md = md + "| traffic lights| (0,0 60x30)           | {tl_diff} | {tl_max} |\n\n"
+    md = md + "## Recommended next step\n\n"
+    if full.max_channel_diff <= 2:
+        md = md + "Max per-channel delta <= 2 LSB. Consider promoting to a `bit_tolerant` "
+        md = md + "profile in `tolerance_profile.spl` and gating on that instead of strict.\n"
+    elif title_diff == 0 and body_diff > 0:
+        md = md + "Title bar matches byte-for-byte; divergence is in the body. Inspect the "
+        md = md + "body rasterizer path (likely text / glass effects).\n"
+    elif title_diff > 0 and body_diff == 0:
+        md = md + "Body matches; divergence is in the title bar. Inspect decoration/traffic-light "
+        md = md + "code paths in `src/os/compositor/decorations.spl`.\n"
+    else:
+        md = md + "Divergence spans both regions. Start by diffing the raw scene element "
+        md = md + "list vs the guest Engine2D verification scene to ensure they are rendering "
+        md = md + "the same scene, not different scenes.\n"
+
+    file_write_text(md_path, md)
+    print "[wm_compare]   findings: {md_path}"
+    return 0
+
 fn capture_one(source: text, scene: SceneEntry, width: i32, height: i32) -> CaptureResult:
     """Dispatch a single-source capture."""
     if source == "A":
@@ -772,6 +1006,12 @@ fn main() -> i64:
     # paths — it does not require --source or --scene to be set.
     if opts.mode == "bit-compare":
         return run_bit_compare_mode(opts)
+
+    # Phase 5 live B vs D bit-level compare — in-process captures both
+    # sources and runs the compare pipeline end-to-end. Requires a live
+    # QEMU guest with a QMP socket (exits 2 with instructions if missing).
+    if opts.mode == "live_bd_compare":
+        return run_live_bd_compare_mode(opts)
 
     if opts.source == "":
         print "Error: --source=A|B|D|all is required"

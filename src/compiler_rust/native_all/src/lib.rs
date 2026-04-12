@@ -1495,3 +1495,33 @@ pub extern "C" fn rt_run_tests(args: RuntimeValue, gc_log: i64, gc_off: i64) -> 
         }
     }
 }
+
+// ============================================================================
+// CLI `run` FFI — executes a single .spl source file in-process via the Rust
+// seed's interpreter. Replaces the runtime-side stub (gated out by the
+// `driver-hooks` feature on simple-runtime) so the self-hosted binary can
+// service `simple run <file>` without recursing through a subprocess.
+// ============================================================================
+
+/// Run a Simple source file in-process.
+///
+/// Simple-side declaration:
+///   extern fn rt_cli_run_file(path: text, args: [text], gc_log: bool, gc_off: bool) -> i64
+#[no_mangle]
+pub extern "C" fn rt_cli_run_file(
+    path: RuntimeValue,
+    args: RuntimeValue,
+    gc_log: u8,
+    gc_off: u8,
+) -> i64 {
+    let path_str = match extract_rt_string(path) {
+        Some(s) => s,
+        None => {
+            eprintln!("error: rt_cli_run_file: invalid path argument");
+            return 1;
+        }
+    };
+    let args_vec = extract_rt_string_array(args);
+    let path = std::path::Path::new(&path_str);
+    simple_driver::cli::basic::run_file_with_args(path, gc_log != 0, gc_off != 0, args_vec) as i64
+}

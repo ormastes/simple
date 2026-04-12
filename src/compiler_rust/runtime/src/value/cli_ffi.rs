@@ -212,6 +212,7 @@ pub extern "C" fn rt_cli_run_code(_code: RuntimeValue, _gc_log: u8, _gc_off: u8)
     not_implemented("rt_cli_run_code")
 }
 
+#[cfg(not(feature = "driver-hooks"))]
 #[no_mangle]
 pub extern "C" fn rt_cli_run_file(_path: RuntimeValue, _args: RuntimeValue, _gc_log: u8, _gc_off: u8) -> i64 {
     not_implemented("rt_cli_run_file")

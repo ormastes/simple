@@ -15,7 +15,8 @@
 #   - Shorthand properties: flex, border, background, margin multi-value
 
 use std.gc_async_mut.gpu.browser_engine.dom.{BeDomNode,
-    be_dom_get_tag, be_dom_get_id, be_dom_get_classes, be_dom_get_children, be_dom_get_is_text, be_dom_set_style}
+    be_dom_get_tag, be_dom_get_id, be_dom_get_classes, be_dom_get_children,
+    be_dom_get_is_text, be_dom_set_style, be_dom_set_children, be_dom_get_bg_color}
 use std.gc_async_mut.gpu.browser_engine.css.{parse_css_value, BoxEdges,
     BorderProps, CssValue}
 
@@ -312,12 +313,12 @@ fn simple_selector_matches(selector: text, node: BeDomNode, nth: i32) -> bool:
     # ID selector: #foo
     if sel.starts_with("#"):
         val id = sel.slice(1, sel.len())
-        return node.id == id
+        return be_dom_get_id(node) == id
 
     # Class selector: .foo
     if sel.starts_with("."):
         val cls = sel.slice(1, sel.len())
-        return node.has_class(cls)
+        return sb_has_class(node, cls)
 
     # Compound: tag.class or tag#id
     val dot_pos = sb_find(sel, ".", 0)
@@ -325,7 +326,7 @@ fn simple_selector_matches(selector: text, node: BeDomNode, nth: i32) -> bool:
         val tag = sel.slice(0, dot_pos)
         val cls = sel.slice(dot_pos + 1, sel.len())
         val ntag = be_dom_get_tag(node)
-        return ntag == tag and node.has_class(cls)
+        return ntag == tag and sb_has_class(node, cls)
 
     val hash_pos = sb_find(sel, "#", 0)
     if hash_pos > 0 and hash_pos < 999999999:
@@ -338,6 +339,14 @@ fn simple_selector_matches(selector: text, node: BeDomNode, nth: i32) -> bool:
     # Plain tag selector
     val ntag3 = be_dom_get_tag(node)
     ntag3 == sel
+
+fn sb_has_class(node: BeDomNode, name: text) -> bool:
+    """Cross-module class membership check using be_dom_get_classes accessor."""
+    val classes = be_dom_get_classes(node)
+    for cls in classes:
+        if cls == name:
+            return true
+    false
 
 # =========================================================================
 # Apply rules to DOM tree
@@ -366,16 +375,24 @@ fn apply_rules_to_node(node: BeDomNode, rules: [CssRule], parent: BeDomNode?, nt
                 dc_idx = dc_idx + 1
                 be_dom_set_style(node, decl.property, decl.value)
 
-    # Recurse to children with nth tracking
+    # Recurse to children with nth tracking, rebuilding the children array.
+    # The interpreter copies class instances on array index/push, so the
+    # `child` we fetch from children[i] is a detached copy. We style it,
+    # recurse (which rebuilds its grandchildren in turn), then push the
+    # styled copy into a new array and write the new array back via
+    # be_dom_set_children so the parent sees the changes.
     var child_nth = 1
     val sb_kids = be_dom_get_children(node)
+    var new_kids: [BeDomNode] = []
     var sc_idx = 0
     while sc_idx < sb_kids.len():
-        val child = sb_kids[sc_idx]
+        var child = sb_kids[sc_idx]
         sc_idx = sc_idx + 1
         apply_rules_to_node(child, rules, node, child_nth)
-        if child.is_element():
+        new_kids.push(child)
+        if not be_dom_get_is_text(child):
             child_nth = child_nth + 1
+    be_dom_set_children(node, new_kids)
 
 # =========================================================================
 # Public API: process HTML with <style> blocks
