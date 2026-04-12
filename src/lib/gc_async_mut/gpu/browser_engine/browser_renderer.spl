@@ -12,7 +12,7 @@ use common.ui.widget.{WidgetNode, UITree, UIState}
 use std.gc_async_mut.gpu.browser_engine.dom.{BeDomNode,
     be_dom_get_tag, be_dom_get_id, be_dom_get_classes, be_dom_get_is_text,
     be_dom_get_children, be_dom_get_style, be_dom_get_text,
-    be_dom_set_style, be_dom_add_child}
+    be_dom_set_style, be_dom_add_child, be_dom_get_bg_color}
 use std.gc_async_mut.gpu.browser_engine.css.{be_default_style, CssValue, BoxEdges, StyleProps, BorderProps}
 use std.gc_async_mut.gpu.browser_engine.layout.{BeLayoutBox, layout_tree,
     layout_get_height, layout_get_width, layout_get_content_width, layout_get_content_height,
@@ -20,7 +20,7 @@ use std.gc_async_mut.gpu.browser_engine.layout.{BeLayoutBox, layout_tree,
 use std.gc_async_mut.gpu.browser_engine.paint.{PaintCommand,
     generate_paint_list, paint_commands_to_scene}
 use std.gc_async_mut.gpu.browser_engine.style_block.{process_style_blocks}
-use common.render_scene.scene.{RenderScene, SceneCommand}
+use common.render_scene.scene.{RenderScene, SceneCommand, rgba_to_argb}
 use common.render_scene.executor.{execute_scene_to_buffer, select_effect_engine}
 use common.render_scene.engine2d_executor.{execute_scene_to_engine2d,
     execute_scene_to_engine2d_pixels}
@@ -184,10 +184,15 @@ class BrowserRenderer:
         if val Some(e) = self.engine:
             pixels = execute_scene_to_engine2d_pixels(scene, e)
         else:
+            # Propagate body's background-color to the full canvas per CSS
+            # "canvas background" spec: body's bg fills the viewport, not
+            # just body's layout box.
+            val body_rgba = _find_body_bg_color(root)
+            val fill_argb = if body_rgba != 0x00000000: rgba_to_argb(body_rgba) else: self.bg_color
             val pixel_count = self.viewport_w * self.viewport_h
             var i = 0
             while i < pixel_count:
-                pixels.push(self.bg_color)
+                pixels.push(fill_argb)
                 i = i + 1
             # Bug H: capture the returned buffer because `[u32]` params are
             # passed by value under the seed interpreter.
@@ -277,6 +282,24 @@ fn count_nodes(node: BeDomNode) -> i32:
         kids_idx = kids_idx + 1
         count = count + count_nodes(child)
     return count
+
+fn _find_body_bg_color(node: BeDomNode) -> u32:
+    """Find the first <body> element in the DOM and return its bg color (RGBA).
+
+    Implements CSS "canvas background" propagation: body's background fills
+    the viewport. Returns 0 if no body is found or body has no explicit bg.
+    """
+    if be_dom_get_tag(node) == "body":
+        return be_dom_get_bg_color(node)
+    val kids = be_dom_get_children(node)
+    var idx = 0
+    while idx < kids.len():
+        val child = kids[idx]
+        idx = idx + 1
+        val bg = _find_body_bg_color(child)
+        if bg != 0x00000000:
+            return bg
+    return 0x00000000
 
 fn browser_renderer_ui_tree_to_dom(tree: UITree, state: UIState) -> BeDomNode:
     """Local UITree conversion avoids an extra cross-module symbol in standalone SMF runs."""
@@ -431,8 +454,7 @@ pub fn render_html_to_pixel_array(html: text, width: i32, height: i32) -> [u32]:
     while i < pixel_count:
         pixels.push(0xFFFFFFFF)
         i = i + 1
-    # Bug H: capture returned buffer (seed interpreter passes `[u32]` by value).
-    pixels = execute_scene_to_buffer(scene, pixels, width, height)
+    execute_scene_to_buffer(scene, pixels, width, height)
     pixels
 
 @allow(primitive_api)
@@ -446,16 +468,12 @@ fn br_stack_pop_and_add(stack: [BeDomNode]) -> [BeDomNode]:
     if stack.len() <= 1:
         return stack
     val completed = stack[stack.len() - 1]
-    var new_stack: [BeDomNode] = []
-    var si = 0
-    while si < stack.len() - 1:
-        new_stack.push(stack[si])
-        si = si + 1
-    if new_stack.len() > 0:
-        var new_parent = new_stack[new_stack.len() - 1]
+    stack.pop()
+    if stack.len() > 0:
+        var new_parent = stack[stack.len() - 1]
         new_parent.add_child(completed)
-        new_stack[new_stack.len() - 1] = new_parent
-    new_stack
+        stack[stack.len() - 1] = new_parent
+    stack
 
 fn browser_renderer_html_string_to_dom(html: text) -> BeDomNode:
     var root = BeDomNode.element("div")
@@ -469,12 +487,12 @@ fn browser_renderer_html_string_to_dom(html: text) -> BeDomNode:
     val len = html.len()
 
     while pos < len:
-        val ch = br_char_at(html, pos)
+        val ch = html.slice(pos, pos + 1)
         if ch == "<":
             # Check for HTML comment <!-- ... -->
             var is_comment = false
             if pos + 3 < len:
-                val comment_prefix = br_substr(html, pos, pos + 4)
+                val comment_prefix = html.slice(pos, pos + 4)
                 if comment_prefix == "<!--":
                     val comment_end = br_find_str(html, "-->", pos + 4)
                     if comment_end < 999999999:
@@ -487,7 +505,7 @@ fn browser_renderer_html_string_to_dom(html: text) -> BeDomNode:
 
             val tag_end = browser_renderer_find_char(html, ">", pos)
             if tag_end >= 999999999:
-                val remaining = br_substr(html, pos, len)
+                val remaining = html.slice(pos, len)
                 val txt = BeDomNode.text(remaining)
                 if stack.len() > 0:
                     var parent = stack[stack.len() - 1]
@@ -495,7 +513,7 @@ fn browser_renderer_html_string_to_dom(html: text) -> BeDomNode:
                     stack[stack.len() - 1] = parent
                 break
 
-            val tag_content = br_substr(html, pos + 1, tag_end)
+            val tag_content = html.slice(pos + 1, tag_end)
 
             # Skip <!DOCTYPE ...>
             if tag_content.starts_with("!DOCTYPE") or tag_content.starts_with("!doctype"):
@@ -503,42 +521,14 @@ fn browser_renderer_html_string_to_dom(html: text) -> BeDomNode:
                 continue
 
             if tag_content.starts_with("/"):
-                # Close tag
-                val close_raw = br_substr(tag_content, 1, tag_content.len())
-                val close_trimmed = close_raw.trim()
-                val close_tag = close_trimmed.to_lower()
-                if close_tag == "html" or close_tag == "head" or close_tag == "body" or close_tag == "style":
-                    pos = tag_end + 1
-                    continue
-                if stack.len() > 1:
-                    stack = br_stack_pop_and_add(stack)
-                pos = tag_end + 1
+                pos = br_handle_close_tag_and_pop(tag_content, tag_end, stack)
             else:
-                val open_result = br_handle_open_tag(tag_content, html, tag_end, len, stack)
-                pos = open_result.new_pos
-                if open_result.action == "push":
-                    stack.push(open_result.node)
-                elif open_result.action == "attach_void":
-                    if stack.len() > 0:
-                        var parent_v = stack[stack.len() - 1]
-                        parent_v.add_child(open_result.node)
-                        stack[stack.len() - 1] = parent_v
+                pos = br_handle_open_tag(tag_content, html, tag_end, len, stack)
         else:
-            # Text content — inline
-            val text_end = browser_renderer_find_char(html, "<", pos)
-            val end_pos = if text_end >= 999999999: len else: text_end
-            val text_raw = br_substr(html, pos, end_pos)
-            val text_content = text_raw.trim()
-            if text_content.len() > 0:
-                val txt = BeDomNode.text(text_content)
-                if stack.len() > 0:
-                    var parent = stack[stack.len() - 1]
-                    parent.add_child(txt)
-                    stack[stack.len() - 1] = parent
-            pos = end_pos
+            pos = br_handle_text(html, pos, len, stack)
 
     while stack.len() > 1:
-        stack = br_stack_pop_and_add(stack)
+        br_stack_pop_and_add(stack)
 
     var result = root
     if stack.len() > 0:
@@ -550,46 +540,33 @@ fn browser_renderer_html_string_to_dom(html: text) -> BeDomNode:
 
     result
 
-fn br_handle_close_tag(tag_content: text, tag_end: i64) -> i64:
-    """Handle a closing tag. Returns positive pos if tag is skipped,
-    or negative pos (negate to get real pos) if a stack pop is needed."""
+fn br_handle_close_tag_and_pop(tag_content: text, tag_end: i64, stack: [BeDomNode]) -> i64:
+    """Handle a closing tag: pop and attach the completed node. Returns new pos."""
     val close_raw = tag_content.slice(1, tag_content.len())
     val close_trimmed = close_raw.trim()
     val close_tag = close_trimmed.to_lower()
     # Skip closing structural tags
-    if close_tag == "html" or close_tag == "head" or close_tag == "body":
+    if close_tag == "html" or close_tag == "head" or close_tag == "body" or close_tag == "style":
         return tag_end + 1
-    # Skip </style> (content already consumed)
-    if close_tag == "style":
-        return tag_end + 1
-    # Signal stack pop needed with negative value
-    return 0 - (tag_end + 1)
+    if stack.len() > 1:
+        val completed = stack[stack.len() - 1]
+        stack.pop()
+        var new_parent = stack[stack.len() - 1]
+        new_parent.add_child(completed)
+        stack[stack.len() - 1] = new_parent
+    return tag_end + 1
 
-class BrOpenTagResult:
-    """Result of parsing an opening tag.
-
-    Fields:
-        new_pos  - next position in html after handling the tag
-        action   - one of "skip", "push", "attach_void"
-        node     - the node to push or attach (nil when action == "skip")
-    """
-    new_pos: i64
-    action: text
-    node: BeDomNode
-
-fn br_handle_open_tag(tag_content: text, html: text, tag_end: i64, len: i64, stack: [BeDomNode]) -> BrOpenTagResult:
-    """Handle an opening tag. Returns the position advance, action code,
-    and node (if any) for the caller to apply to the stack."""
+fn br_handle_open_tag(tag_content: text, html: text, tag_end: i64, len: i64, stack: [BeDomNode]) -> i64:
+    """Handle an opening tag, mutating stack directly. Returns new pos."""
     val is_self_closing = tag_content.ends_with("/")
     var clean_content = tag_content.trim()
     if is_self_closing:
-        val trimmed_sc = br_substr(tag_content, 0, tag_content.len() - 1)
+        val trimmed_sc = tag_content.slice(0, tag_content.len() - 1)
         clean_content = trimmed_sc.trim()
 
     var new_node = browser_renderer_parse_tag(clean_content)
     val raw_tag = be_dom_get_tag(new_node)
     val tag_lower = raw_tag.to_lower()
-    val skip_node = BeDomNode.element("skip")
 
     # Skip html/head and non-visual metadata tags
     if tag_lower == "html" or tag_lower == "head" or tag_lower == "title" or tag_lower == "link" or tag_lower == "meta" or tag_lower == "script":
@@ -600,35 +577,33 @@ fn br_handle_open_tag(tag_content: text, html: text, tag_end: i64, len: i64, sta
             if close_pos < 999999999:
                 val close_end = browser_renderer_find_char(html, ">", close_pos)
                 if close_end < 999999999:
-                    return BrOpenTagResult(new_pos: close_end + 1, action: "skip", node: skip_node)
-                else:
-                    return BrOpenTagResult(new_pos: close_pos + 8, action: "skip", node: skip_node)
-            else:
-                return BrOpenTagResult(new_pos: tag_end + 1, action: "skip", node: skip_node)
-        else:
-            return BrOpenTagResult(new_pos: tag_end + 1, action: "skip", node: skip_node)
+                    return close_end + 1
+                return close_pos + 8
+            return tag_end + 1
+        return tag_end + 1
 
     # For body: don't add to tree, but apply its inline styles to root
     if tag_lower == "body":
         if stack.len() > 0:
-            val root_node = stack[0]
+            var root_node = stack[0]
             val body_parts = browser_renderer_split_tag_parts(clean_content)
             var bi = 1
             while bi < body_parts.len():
                 val bpart = body_parts[bi]
                 val beq = browser_renderer_find_char(bpart, "=", 0)
                 if beq > 0:
-                    val bkey = br_substr(bpart, 0, beq)
-                    var bval = br_substr(bpart, beq + 1, bpart.len())
+                    val bkey = bpart.slice(0, beq)
+                    var bval = bpart.slice(beq + 1, bpart.len())
                     if bval.starts_with("\"") and bval.ends_with("\""):
-                        bval = br_substr(bval, 1, bval.len() - 1)
+                        bval = bval.slice(1, bval.len() - 1)
                     elif bval.starts_with("'") and bval.ends_with("'"):
-                        bval = br_substr(bval, 1, bval.len() - 1)
+                        bval = bval.slice(1, bval.len() - 1)
                     if bkey == "style":
                         browser_renderer_apply_inline_style(root_node, bval)
                 bi = bi + 1
             root_node.tag = "body"
-        return BrOpenTagResult(new_pos: tag_end + 1, action: "skip", node: skip_node)
+            stack[0] = root_node
+        return tag_end + 1
 
     # <style> is a raw-text element — skip ahead to </style>
     if tag_lower == "style":
@@ -637,16 +612,19 @@ fn br_handle_open_tag(tag_content: text, html: text, tag_end: i64, len: i64, sta
         if style_close < 999999999:
             val style_tag_end = browser_renderer_find_char(html, ">", style_close)
             if style_tag_end < 999999999:
-                return BrOpenTagResult(new_pos: style_tag_end + 1, action: "skip", node: skip_node)
-            else:
-                return BrOpenTagResult(new_pos: style_close + 8, action: "skip", node: skip_node)
-        else:
-            return BrOpenTagResult(new_pos: len, action: "skip", node: skip_node)
+                return style_tag_end + 1
+            return style_close + 8
+        return len
 
     val node_tag_for_void = be_dom_get_tag(new_node)
     if is_self_closing or browser_renderer_is_void_element(node_tag_for_void):
-        return BrOpenTagResult(new_pos: tag_end + 1, action: "attach_void", node: new_node)
-    return BrOpenTagResult(new_pos: tag_end + 1, action: "push", node: new_node)
+        if stack.len() > 0:
+            var parent_v = stack[stack.len() - 1]
+            parent_v.add_child(new_node)
+            stack[stack.len() - 1] = parent_v
+        return tag_end + 1
+    stack.push(new_node)
+    return tag_end + 1
 
 fn br_handle_text(html: text, pos: i64, len: i64, stack: [BeDomNode]) -> i64:
     """Handle text content between tags. Returns new pos."""
@@ -658,7 +636,7 @@ fn br_handle_text(html: text, pos: i64, len: i64, stack: [BeDomNode]) -> i64:
         val txt = BeDomNode.text(text_content)
         if stack.len() > 0:
             var parent = stack[stack.len() - 1]
-            be_dom_add_child(parent,txt)
+            parent.add_child(txt)
             stack[stack.len() - 1] = parent
     return end_pos
 
@@ -674,12 +652,12 @@ fn browser_renderer_parse_tag(content: text) -> BeDomNode:
         val part = parts[i]
         val eq_pos = browser_renderer_find_char(part, "=", 0)
         if eq_pos > 0:
-            val key = br_substr(part, 0, eq_pos)
-            var value = br_substr(part, eq_pos + 1, part.len())
+            val key = part.slice(0, eq_pos)
+            var value = part.slice(eq_pos + 1, part.len())
             if value.starts_with("\"") and value.ends_with("\""):
-                value = br_substr(value, 1, value.len() - 1)
+                value = value.slice(1, value.len() - 1)
             elif value.starts_with("'") and value.ends_with("'"):
-                value = br_substr(value, 1, value.len() - 1)
+                value = value.slice(1, value.len() - 1)
 
             if key == "id":
                 node.id = value
@@ -694,46 +672,51 @@ fn browser_renderer_parse_tag(content: text) -> BeDomNode:
 
 fn browser_renderer_split_tag_parts(s: text) -> [text]:
     var parts: [text] = []
-    var current = ""
     var in_quote = false
     var quote_char = ""
+    var segment_start = -1
     var idx_1 = 0
-    while idx_1 < s.len():
-        val ch = br_char_at(s, idx_1)
+    val len = s.len()
+    while idx_1 < len:
+        val ch = s.slice(idx_1, idx_1 + 1)
         if in_quote:
-            current = "{current}{ch}"
             if ch == quote_char:
                 in_quote = false
         elif ch == "\"" or ch == "'":
+            if segment_start < 0:
+                segment_start = idx_1
             in_quote = true
             quote_char = ch
-            current = "{current}{ch}"
-        elif ch == " ":
-            if current.len() > 0:
-                parts.push(current)
-                current = ""
         else:
-            current = "{current}{ch}"
+            val is_whitespace = ch == " " or ch == "\t" or ch == "\n" or ch == "\r"
+            if is_whitespace:
+                if segment_start >= 0:
+                    parts.push(s.slice(segment_start, idx_1))
+                    segment_start = -1
+            elif segment_start < 0:
+                segment_start = idx_1
         idx_1 = idx_1 + 1
-    if current.len() > 0:
-        parts.push(current)
+    if segment_start >= 0:
+        parts.push(s.slice(segment_start, len))
     parts
 
 fn browser_renderer_split_spaces(s: text) -> [text]:
     var parts: [text] = []
-    var current = ""
+    var segment_start = -1
     var idx_2 = 0
-    while idx_2 < s.len():
-        val ch = br_char_at(s, idx_2)
-        if ch == " " or ch == "\t":
-            if current.len() > 0:
-                parts.push(current)
-                current = ""
-        else:
-            current = "{current}{ch}"
+    val len = s.len()
+    while idx_2 < len:
+        val ch = s.slice(idx_2, idx_2 + 1)
+        val is_whitespace = ch == " " or ch == "\t" or ch == "\n" or ch == "\r"
+        if is_whitespace:
+            if segment_start >= 0:
+                parts.push(s.slice(segment_start, idx_2))
+                segment_start = -1
+        elif segment_start < 0:
+            segment_start = idx_2
         idx_2 = idx_2 + 1
-    if current.len() > 0:
-        parts.push(current)
+    if segment_start >= 0:
+        parts.push(s.slice(segment_start, len))
     parts
 
 fn browser_renderer_apply_inline_style(node: BeDomNode, style_str: text):
@@ -744,44 +727,37 @@ fn browser_renderer_apply_inline_style(node: BeDomNode, style_str: text):
         decl_idx = decl_idx + 1
         val colon_pos = browser_renderer_find_char(decl, ":", 0)
         if colon_pos > 0:
-            val prop_raw = br_substr(decl, 0, colon_pos)
+            val prop_raw = decl.slice(0, colon_pos)
             val prop = prop_raw.trim()
-            val value_raw = br_substr(decl, colon_pos + 1, decl.len())
+            val value_raw = decl.slice(colon_pos + 1, decl.len())
             val value = value_raw.trim()
             be_dom_set_style(node,prop, value)
 
 fn browser_renderer_split_semicolons(s: text) -> [text]:
     var parts: [text] = []
-    var current = ""
+    var segment_start = 0
     var idx_3 = 0
-    while idx_3 < s.len():
-        val ch = br_char_at(s, idx_3)
+    val len = s.len()
+    while idx_3 < len:
+        val ch = s.slice(idx_3, idx_3 + 1)
         if ch == ";":
-            if current.trim().len() > 0:
-                parts.push(current.trim())
-            current = ""
-        else:
-            current = "{current}{ch}"
+            val raw = s.slice(segment_start, idx_3)
+            val trimmed = raw.trim()
+            if trimmed.len() > 0:
+                parts.push(trimmed)
+            segment_start = idx_3 + 1
         idx_3 = idx_3 + 1
-    if current.trim().len() > 0:
-        parts.push(current.trim())
+    val tail = s.slice(segment_start, len)
+    val tail_trimmed = tail.trim()
+    if tail_trimmed.len() > 0:
+        parts.push(tail_trimmed)
     parts
-
-fn br_char_at(s: text, i: i64) -> text:
-    """Return single-char slice at index i. Helper-call forces fresh arg eval to
-    dodge a seed-interpreter bug where `s.slice(i, i+1)` inside a while loop
-    returns '' for i>=1."""
-    s.slice(i, i + 1)
-
-fn br_substr(s: text, start: i64, end: i64) -> text:
-    """Return substring [start, end). Same rationale as br_char_at."""
-    s.slice(start, end)
 
 fn browser_renderer_find_char(s: text, target: text, start: i64) -> i64:
     var i = start
     val slen = s.len()
     while i < slen:
-        val c = br_char_at(s, i)
+        val c = s.slice(i, i + 1)
         if c == target:
             return i
         i = i + 1
@@ -803,7 +779,7 @@ fn br_find_str(s: text, needle: text, start: i64) -> i64:
     var i = start
     val slen = s.len()
     while i + nlen <= slen:
-        if br_substr(s, i, i + nlen) == needle:
+        if s.slice(i, i + nlen) == needle:
             return i
         i = i + 1
     999999999
