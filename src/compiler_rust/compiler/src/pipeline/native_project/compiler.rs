@@ -162,8 +162,32 @@ pub(crate) fn compile_file_to_object(
     let mut lowerer = Lowerer::with_module_resolver(resolver, file_path.to_path_buf());
     lowerer.set_strict_mode(false);
     lowerer.set_lenient_types(true);
-    // Pass empty struct defs -- the ambiguous field name search causes wrong byte offsets
-    lowerer.set_global_struct_defs(std::sync::Arc::new(std::collections::HashMap::new()));
+    // Pass a filtered view of struct defs to the lowerer: only single-field
+    // wrapper structs (e.g. `PhysAddr { addr: u64 }`). For these, field_index
+    // is always 0, so the `get_field_info` "most fields wins" heuristic cannot
+    // pick the wrong byte offset. Multi-field structs are intentionally excluded
+    // for two reasons:
+    //   (1) Full-project bootstrap builds hit the BeDomNode cross-struct
+    //       ambiguity (cf800979c6) where `children` matches both BeDomNode and
+    //       BeLayoutBox and the heuristic returns wrong byte offsets.
+    //   (2) For multi-field structs with ANY-typed receivers, the existing
+    //       MethodCall fallback already works: the mangle pass resolves the
+    //       method name (e.g. `width`) to an actual accessor function.
+    // The single-field case is the one the MethodCall fallback cannot rescue
+    // because single-field wrappers have no accessor method — the `.addr`
+    // access falls through to `rt_function_not_found("addr")` at link time.
+    // Gated on `--entry-closure` to avoid any risk to self-host bootstrap.
+    if imports.populate_global_struct_defs {
+        let filtered: std::collections::HashMap<String, Vec<(String, String)>> = imports
+            .struct_defs
+            .iter()
+            .filter(|(_, fields)| fields.len() == 1)
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
+        lowerer.set_global_struct_defs(std::sync::Arc::new(filtered));
+    } else {
+        lowerer.set_global_struct_defs(std::sync::Arc::new(std::collections::HashMap::new()));
+    }
     let hir = lowerer
         .lower_module(&ast)
         .map_err(|e| format!("{}: hir: {e}", file_path.display()))?;

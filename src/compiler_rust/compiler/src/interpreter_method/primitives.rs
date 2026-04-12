@@ -3,6 +3,7 @@
 use std::sync::Arc;
 use super::super::{eval_arg, eval_arg_int, eval_arg_usize, evaluate_expr, Enums, ImplMethods};
 use crate::error::CompileError;
+use crate::semantics::{cast_float_to_numeric, cast_int_to_numeric, CastNumericResult, NumericType};
 use crate::value::{Env, Value};
 use simple_parser::ast::{Argument, ClassDef, FunctionDef};
 use std::collections::HashMap;
@@ -28,6 +29,19 @@ pub fn handle_int_methods(
         "is_even" => Value::Bool(n % 2 == 0),
         "is_odd" => Value::Bool(n % 2 != 0),
         "to_float" | "to_f64" => Value::Float(n as f64),
+        "to_f32" => Value::Float(n as f32 as f64),
+        "to_i8" | "to_i16" | "to_i32" | "to_i64"
+        | "to_u8" | "to_u16" | "to_u32" | "to_u64" => {
+            // Strip "to_" prefix -> numeric type name. Reuse the same cast
+            // rules as `expr as <T>` so behavior is consistent.
+            let tname = &method[3..];
+            let nt = NumericType::from_name(tname)
+                .expect("handled by match arm above");
+            match cast_int_to_numeric(n, nt) {
+                CastNumericResult::Int(v) => Value::Int(v),
+                CastNumericResult::Float(v) => Value::Float(v),
+            }
+        }
         "to_string" | "to_text" => Value::Str(n.to_string()),
         "clamp" => {
             let min = eval_arg(
@@ -254,6 +268,18 @@ pub fn handle_float_methods(
         "is_infinite" => Value::Bool(f.is_infinite()),
         "is_finite" => Value::Bool(f.is_finite()),
         "to_int" | "truncate" => Value::Int(f.trunc() as i64),
+        "to_f64" => Value::Float(f),
+        "to_f32" => Value::Float(f as f32 as f64),
+        "to_i8" | "to_i16" | "to_i32" | "to_i64"
+        | "to_u8" | "to_u16" | "to_u32" | "to_u64" => {
+            let tname = &method[3..];
+            let nt = NumericType::from_name(tname)
+                .expect("handled by match arm above");
+            match cast_float_to_numeric(f, nt) {
+                CastNumericResult::Int(v) => Value::Int(v),
+                CastNumericResult::Float(v) => Value::Float(v),
+            }
+        }
         "to_string" | "to_text" => Value::Str(f.to_string()),
         "floor" => Value::Float(f.floor()),
         "ceil" => Value::Float(f.ceil()),

@@ -14,8 +14,6 @@ use common.render_scene.scene.{SceneCommand, RenderScene, render_scene,
     scene_gradient_rect, scene_image, rgba_to_argb}
 use common.text_layout.font_renderer.{FontRenderer}
 
-extern fn rt_array_push(arr, val)
-
 # =========================================================================
 # Paint Command
 # =========================================================================
@@ -141,13 +139,13 @@ fn paint_layout_box(box: BeLayoutBox, commands: [PaintCommand]) -> [PaintCommand
                     )
                     s_cmd.opacity = style.opacity * alpha_factor
                     s_cmd.border_radius = style.border_radius
-                    rt_array_push(cmds, s_cmd)
+                    cmds.push(s_cmd)
                     si = si - 1
             else:
                 var s_cmd = PaintCommand.rect(sx, sy, sw, sh, shadow.color)
                 s_cmd.opacity = style.opacity
                 s_cmd.border_radius = style.border_radius
-                rt_array_push(cmds, s_cmd)
+                cmds.push(s_cmd)
 
     # 0b. Backdrop blur (before background, blurs existing content behind element)
     if style.backdrop_filter_blur > 0:
@@ -161,7 +159,7 @@ fn paint_layout_box(box: BeLayoutBox, commands: [PaintCommand]) -> [PaintCommand
             border_width: 0, border_color: 0,
             opacity: 1.0
         )
-        rt_array_push(cmds, blur_cmd)
+        cmds.push(blur_cmd)
 
     # 1. Background (gradient or solid)
     if style.has_gradient:
@@ -179,7 +177,7 @@ fn paint_layout_box(box: BeLayoutBox, commands: [PaintCommand]) -> [PaintCommand
             border_color: style.gradient_color2,
             opacity: style.opacity
         )
-        rt_array_push(cmds, grad_cmd)
+        cmds.push(grad_cmd)
 
     if style.background_color != 0x00000000:
         var bg_cmd = PaintCommand.rect(
@@ -191,7 +189,7 @@ fn paint_layout_box(box: BeLayoutBox, commands: [PaintCommand]) -> [PaintCommand
         )
         bg_cmd.border_radius = style.border_radius
         bg_cmd.opacity = style.opacity
-        rt_array_push(cmds, bg_cmd)
+        cmds.push(bg_cmd)
 
     # 2. Border
     if style.border.width > 0 and style.border.style != "none":
@@ -200,7 +198,7 @@ fn paint_layout_box(box: BeLayoutBox, commands: [PaintCommand]) -> [PaintCommand
             style.border.width, style.border.color,
             style.border_radius
         )
-        rt_array_push(cmds, b_cmd)
+        cmds.push(b_cmd)
 
     # 3. Text content
     if node.is_text_node() and node.text_content.len() > 0:
@@ -208,7 +206,7 @@ fn paint_layout_box(box: BeLayoutBox, commands: [PaintCommand]) -> [PaintCommand
             box.content_x, box.content_y,
             node.text_content, style.font_size, style.color
         )
-        rt_array_push(cmds, t_cmd)
+        cmds.push(t_cmd)
 
         # 3b. Text decoration (underline, overline, line-through)
         if style.text_decoration != "none" and style.text_decoration != "":
@@ -218,13 +216,13 @@ fn paint_layout_box(box: BeLayoutBox, commands: [PaintCommand]) -> [PaintCommand
             val line_h = 1  # 1px decoration line
             if style.text_decoration == "underline":
                 val deco_y = box.content_y + style.font_size + 2
-                rt_array_push(cmds, PaintCommand.rect(box.content_x, deco_y, text_width, line_h, style.color))
+                cmds.push(PaintCommand.rect(box.content_x, deco_y, text_width, line_h, style.color))
             else if style.text_decoration == "overline":
                 val deco_y = box.content_y - 1
-                rt_array_push(cmds, PaintCommand.rect(box.content_x, deco_y, text_width, line_h, style.color))
+                cmds.push(PaintCommand.rect(box.content_x, deco_y, text_width, line_h, style.color))
             else if style.text_decoration == "line-through":
                 val deco_y = box.content_y + style.font_size / 2
-                rt_array_push(cmds, PaintCommand.rect(box.content_x, deco_y, text_width, line_h, style.color))
+                cmds.push(PaintCommand.rect(box.content_x, deco_y, text_width, line_h, style.color))
 
     # 4. Children
     var child_idx = 0
@@ -257,15 +255,15 @@ fn paint_commands_to_scene(commands: [PaintCommand], viewport_w: i32, viewport_h
             "rect" =>
                 val argb_color = apply_opacity_to_argb(rgba_to_argb(cmd.color), cmd.opacity)
                 if cmd.border_radius > 0:
-                    rt_array_push(scene_cmds, scene_rounded_rect(cmd.x, cmd.y, cmd.width, cmd.height, argb_color, cmd.border_radius))
+                    scene_cmds.push(scene_rounded_rect(cmd.x, cmd.y, cmd.width, cmd.height, argb_color, cmd.border_radius))
                 else:
-                    rt_array_push(scene_cmds, scene_fill_rect(cmd.x, cmd.y, cmd.width, cmd.height, argb_color))
+                    scene_cmds.push(scene_fill_rect(cmd.x, cmd.y, cmd.width, cmd.height, argb_color))
             "text" =>
                 val argb_color = rgba_to_argb(cmd.color)
-                rt_array_push(scene_cmds, scene_text(cmd.x, cmd.y, cmd.text_val, argb_color, cmd.font_size))
+                scene_cmds.push(scene_text(cmd.x, cmd.y, cmd.text_val, argb_color, cmd.font_size))
             "border" =>
                 val argb_color = rgba_to_argb(cmd.border_color)
-                rt_array_push(scene_cmds, scene_stroke_rect(cmd.x, cmd.y, cmd.width, cmd.height, argb_color, cmd.border_width))
+                scene_cmds.push(scene_stroke_rect(cmd.x, cmd.y, cmd.width, cmd.height, argb_color, cmd.border_width))
             "gradient" =>
                 val c1 = apply_opacity_to_argb(rgba_to_argb(cmd.color), cmd.opacity)
                 val c2 = apply_opacity_to_argb(rgba_to_argb(cmd.border_color), cmd.opacity)
@@ -273,9 +271,9 @@ fn paint_commands_to_scene(commands: [PaintCommand], viewport_w: i32, viewport_h
                 if cmd.border_radius > 0:
                     # For rounded gradients, use rounded rect with first color as approximation
                     # then overlay gradient (imperfect but reasonable)
-                    rt_array_push(scene_cmds, scene_gradient_rect(cmd.x, cmd.y, cmd.width, cmd.height, c1, c2))
+                    scene_cmds.push(scene_gradient_rect(cmd.x, cmd.y, cmd.width, cmd.height, c1, c2))
                 else:
-                    rt_array_push(scene_cmds, scene_gradient_rect(cmd.x, cmd.y, cmd.width, cmd.height, c1, c2))
+                    scene_cmds.push(scene_gradient_rect(cmd.x, cmd.y, cmd.width, cmd.height, c1, c2))
             "backdrop_blur" =>
                 # Emit a blur_rect scene command — the executor reads the existing
                 # pixel buffer, applies box blur, and writes back
@@ -291,7 +289,7 @@ fn paint_commands_to_scene(commands: [PaintCommand], viewport_w: i32, viewport_h
                     color2: 0, opacity: 1.0,
                     pixels: [], pixel_width: 0, pixel_height: 0
                 )
-                rt_array_push(scene_cmds, blur_scene)
+                scene_cmds.push(blur_scene)
             "image" =>
                 pass_dn
             _ =>

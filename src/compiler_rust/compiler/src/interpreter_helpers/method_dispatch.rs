@@ -1,6 +1,7 @@
 //! Method dispatch and method_missing hooks
 
 use crate::error::{codes, CompileError, ErrorContext};
+use crate::semantics::{cast_float_to_numeric, cast_int_to_numeric, CastNumericResult, NumericType};
 use crate::value::{Env, OptionVariant, ResultVariant, Value, METHOD_MISSING};
 use simple_parser::ast::{ClassDef, EnumDef, Expr, FunctionDef};
 use std::collections::HashMap;
@@ -336,7 +337,18 @@ pub(crate) fn call_method_on_value(
         // Int methods
         Value::Int(n) => match method {
             "abs" => return Ok(Value::Int(n.abs())),
-            "to_string" => return Ok(Value::Str(n.to_string())),
+            "to_string" | "to_text" => return Ok(Value::Str(n.to_string())),
+            "to_float" | "to_f64" => return Ok(Value::Float(*n as f64)),
+            "to_f32" => return Ok(Value::Float(*n as f32 as f64)),
+            "to_i8" | "to_i16" | "to_i32" | "to_i64"
+            | "to_u8" | "to_u16" | "to_u32" | "to_u64" => {
+                let tname = &method[3..];
+                let nt = NumericType::from_name(tname).expect("handled above");
+                return Ok(match cast_int_to_numeric(*n, nt) {
+                    CastNumericResult::Int(v) => Value::Int(v),
+                    CastNumericResult::Float(v) => Value::Float(v),
+                });
+            }
             _ => {}
         },
 
@@ -346,7 +358,19 @@ pub(crate) fn call_method_on_value(
             "floor" => return Ok(Value::Float(f.floor())),
             "ceil" => return Ok(Value::Float(f.ceil())),
             "round" => return Ok(Value::Float(f.round())),
-            "to_string" => return Ok(Value::Str(f.to_string())),
+            "to_string" | "to_text" => return Ok(Value::Str(f.to_string())),
+            "to_int" | "truncate" => return Ok(Value::Int(f.trunc() as i64)),
+            "to_f64" => return Ok(Value::Float(*f)),
+            "to_f32" => return Ok(Value::Float(*f as f32 as f64)),
+            "to_i8" | "to_i16" | "to_i32" | "to_i64"
+            | "to_u8" | "to_u16" | "to_u32" | "to_u64" => {
+                let tname = &method[3..];
+                let nt = NumericType::from_name(tname).expect("handled above");
+                return Ok(match cast_float_to_numeric(*f, nt) {
+                    CastNumericResult::Int(v) => Value::Int(v),
+                    CastNumericResult::Float(v) => Value::Float(v),
+                });
+            }
             _ => {}
         },
 

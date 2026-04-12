@@ -110,11 +110,29 @@ impl Lowerer {
                             _ => {}
                         }
                     }
+                    // Enum short-circuit: if receiver is a bare identifier naming
+                    // an enum type, return the enum type id for variant access.
+                    // Mirrors access.rs:62-96 so cross-module EnumName.Variant
+                    // expressions inside collection literals don't blow up here.
+                    if let Some(type_id) = self.module.types.lookup(recv_name) {
+                        if matches!(self.module.types.get(type_id), Some(HirType::Enum { .. })) {
+                            return Ok(type_id);
+                        }
+                    }
                 }
-                // Infer field type from struct type
+                // Infer field type from struct type, with the same fallback
+                // access.rs:140 uses for struct field accesses: a missing field
+                // becomes TypeId::ANY (dynamic dispatch downstream) instead of
+                // a hard error. Required after cf800979c6 emptied the global
+                // struct field registry — without this fallback any cross-module
+                // field/variant lookup that doesn't resolve in the local module
+                // crashes the build.
                 let struct_ty = self.infer_type(receiver, ctx)?;
-                let (_idx, field_ty) = self.get_field_info(struct_ty, field)?;
-                Ok(field_ty)
+                match self.get_field_info(struct_ty, field) {
+                    Ok((_idx, field_ty)) => Ok(field_ty),
+                    Err(LowerError::CannotInferFieldType { .. }) => Ok(TypeId::ANY),
+                    Err(e) => Err(e),
+                }
             }
             Expr::MethodCall { receiver, method, .. } => {
                 // Handle SIMD intrinsics: this.index(), this.thread_index(), this.group_index()

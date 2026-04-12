@@ -485,6 +485,85 @@ fn exec_assignment(
             }
         }
 
+        // Fast path: `arr = arr + [e1, e2, ...]` on a Value::Array — push elements
+        // in place instead of allocating a fresh array and copying both sides.
+        // Mirrors the `arr += [..]` AugAssign fast path so the plain-assign form
+        // has the same amortized O(N) behavior. See `try_array_append_in_place`.
+        // Also handles `s = s + rhs` on Value::Str via try_string_append_in_place.
+        if let Expr::Binary { op: BinOp::Add, left, right } = &assign.value {
+            if let Expr::Identifier(lname) = left.as_ref() {
+                if lname == name {
+                    let items: Option<&[Expr]> = match right.as_ref() {
+                        Expr::Array(v) | Expr::VecLiteral(v) => Some(v.as_slice()),
+                        _ => None,
+                    };
+                    if let Some(items) = items {
+                        if try_array_append_in_place(name, items, env, functions, classes, enums, impl_methods)? {
+                            // Also sync to MODULE_GLOBALS if this name lives there.
+                            MODULE_GLOBALS.with(|cell| {
+                                let mut globals = cell.borrow_mut();
+                                if globals.contains_key(name) {
+                                    if let Some(v) = env.get(name) {
+                                        globals.insert(name.clone(), v.clone());
+                                    }
+                                }
+                            });
+                            return Ok(Control::Next);
+                        }
+                    }
+                    // String fast path: `s = s + rhs` where LHS is a Value::Str
+                    // and RHS evaluates to a Value::Str. If the helper returns
+                    // None, the in-place append fired. If it returns Some(val),
+                    // the RHS wasn't a string — but we've still evaluated it
+                    // exactly once, so complete the plain assignment using the
+                    // value to preserve side-effect ordering with the slow path.
+                    if matches!(env.get(name), Some(Value::Str(_))) {
+                        match try_string_append_in_place(
+                            name, right.as_ref(), env, functions, classes, enums, impl_methods,
+                        )? {
+                            None => {
+                                MODULE_GLOBALS.with(|cell| {
+                                    let mut globals = cell.borrow_mut();
+                                    if globals.contains_key(name) {
+                                        if let Some(v) = env.get(name) {
+                                            globals.insert(name.clone(), v.clone());
+                                        }
+                                    }
+                                });
+                                return Ok(Control::Next);
+                            }
+                            Some(rhs_val) => {
+                                // Non-string RHS: fall back to generic `lhs + rhs`.
+                                // LHS is still the Value::Str that was there before.
+                                // Compute `lhs + rhs_val` using the binary op evaluator
+                                // via a temporary variable binding so side effects of
+                                // the RHS don't run twice.
+                                let temp_name = "__plain_rhs_temp__".to_string();
+                                env.insert(temp_name.clone(), rhs_val);
+                                let binary_expr = Expr::Binary {
+                                    op: BinOp::Add,
+                                    left: Box::new(Expr::Identifier(name.clone())),
+                                    right: Box::new(Expr::Identifier(temp_name.clone())),
+                                };
+                                let result = evaluate_expr(&binary_expr, env, functions, classes, enums, impl_methods)?;
+                                env.remove(&temp_name);
+                                env.insert(name.clone(), result);
+                                MODULE_GLOBALS.with(|cell| {
+                                    let mut globals = cell.borrow_mut();
+                                    if globals.contains_key(name) {
+                                        if let Some(v) = env.get(name) {
+                                            globals.insert(name.clone(), v.clone());
+                                        }
+                                    }
+                                });
+                                return Ok(Control::Next);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         // Handle method calls on objects - need to persist mutations to self
         let (value, update) =
             handle_method_call_with_self_update(&assign.value, env, functions, classes, enums, impl_methods)?;
@@ -1121,6 +1200,96 @@ fn exec_assignment(
     }
 }
 
+/// Fast-path helper: `arr = arr + [e1, e2, ...]` / `arr += [e1, e2, ...]` on a
+/// `Value::Array` — push elements in place instead of allocating a fresh array
+/// and copying both sides. Turns the idiomatic append loop from O(N^2) into
+/// amortized O(N). Shared by both `exec_assignment` (plain assign) and
+/// `exec_augmented_assignment` (AddAssign).
+///
+/// Returns `Ok(true)` if the fast path fired (caller is done), `Ok(false)` if
+/// the shape didn't match (caller should take its normal path), or an error if
+/// one of the RHS element evaluations failed.
+fn try_array_append_in_place(
+    name: &str,
+    items: &[Expr],
+    env: &mut Env,
+    functions: &mut HashMap<String, Arc<FunctionDef>>,
+    classes: &mut HashMap<String, Arc<ClassDef>>,
+    enums: &Enums,
+    impl_methods: &ImplMethods,
+) -> Result<bool, CompileError> {
+    // Reject array literals containing spread elements — they need the slow path.
+    if items.iter().any(|e| matches!(e, Expr::Spread(_))) {
+        return Ok(false);
+    }
+    // Only fire when the current binding is a Value::Array.
+    if !matches!(env.get(name), Some(Value::Array(_))) {
+        return Ok(false);
+    }
+    // Evaluate all RHS elements first (so any side effects run before we take
+    // ownership of the LHS array).
+    let mut evaluated: Vec<Value> = Vec::with_capacity(items.len());
+    for item in items {
+        evaluated.push(evaluate_expr(item, env, functions, classes, enums, impl_methods)?);
+    }
+    // Re-check after side effects in case RHS evaluation rebound `name`.
+    if let Some(Value::Array(arc)) = env.remove(name) {
+        let mut arc = arc;
+        let v = Arc::make_mut(&mut arc);
+        v.reserve(evaluated.len());
+        for val in evaluated {
+            v.push(val);
+        }
+        env.insert(name.to_string(), Value::Array(arc));
+        return Ok(true);
+    }
+    Ok(false)
+}
+
+/// Fast-path helper: `s = s + rhs` / `s += rhs` on a `Value::Str` — append the
+/// RHS string in place instead of allocating a fresh `String` via `format!`.
+/// Turns the idiomatic `while: s += "x"` loop from O(N^2) into amortized O(N).
+/// Shared by both `exec_assignment` (plain assign) and `exec_augmented_assignment`
+/// (AddAssign).
+///
+/// `rhs` is an arbitrary expression and may have side effects — they are
+/// evaluated before we take ownership of the LHS. Returns `Ok(Some(rhs_value))`
+/// if the RHS did not evaluate to a `Value::Str` (caller should take its normal
+/// path using the already-evaluated value), `Ok(None)` if the fast path fired
+/// (caller is done), or an error if RHS evaluation failed.
+fn try_string_append_in_place(
+    name: &str,
+    rhs: &Expr,
+    env: &mut Env,
+    functions: &mut HashMap<String, Arc<FunctionDef>>,
+    classes: &mut HashMap<String, Arc<ClassDef>>,
+    enums: &Enums,
+    impl_methods: &ImplMethods,
+) -> Result<Option<Value>, CompileError> {
+    // Only fire when the current binding is a Value::Str.
+    if !matches!(env.get(name), Some(Value::Str(_))) {
+        return Ok(Some(evaluate_expr(rhs, env, functions, classes, enums, impl_methods)?));
+    }
+    // Evaluate RHS first so any side effects run before we take ownership of
+    // the LHS string.
+    let rhs_val = evaluate_expr(rhs, env, functions, classes, enums, impl_methods)?;
+    let Value::Str(rhs_str) = rhs_val else {
+        // Not a string-string concat — the generic path needs to handle the
+        // non-string-plus-string cases (e.g. `s + i` → display coercion).
+        return Ok(Some(rhs_val));
+    };
+    // Re-check after side effects in case RHS evaluation rebound `name`.
+    if let Some(Value::Str(mut s)) = env.remove(name) {
+        s.push_str(&rhs_str);
+        env.insert(name.to_string(), Value::Str(s));
+        Ok(None)
+    } else {
+        // RHS side effect rebound `name` to a non-string. Return the RHS value
+        // so the caller can fall back to the generic combine path.
+        Ok(Some(Value::Str(rhs_str)))
+    }
+}
+
 // Helper function for augmented assignment
 fn exec_augmented_assignment(
     assign: &simple_parser::ast::AssignmentStmt,
@@ -1166,8 +1335,46 @@ fn exec_augmented_assignment(
             return Err(crate::error::factory::cannot_assign_to_const(name));
         }
 
-        // Evaluate the RHS
-        let mut rhs_value = evaluate_expr(&assign.value, env, functions, classes, enums, impl_methods)?;
+        // Fast path: `arr += [e1, e2, ...]` on a Value::Array — push elements in place
+        // instead of allocating a fresh array and copying both sides. This turns the
+        // idiomatic `arr += [item]` loop from O(N^2) into amortized O(N).
+        // Only the non-suspending AddAssign case qualifies: the semantics of `~+=`
+        // on arrays are not defined and field/index targets are handled below.
+        if matches!(assign.op, AssignOp::AddAssign) {
+            let items: Option<&[Expr]> = match &assign.value {
+                Expr::Array(v) | Expr::VecLiteral(v) => Some(v.as_slice()),
+                _ => None,
+            };
+            if let Some(items) = items {
+                if try_array_append_in_place(name, items, env, functions, classes, enums, impl_methods)? {
+                    return Ok(Control::Next);
+                }
+            }
+        }
+
+        // Fast path: `s += expr` on a Value::Str — append in place (O(N)) if
+        // the RHS evaluates to a Value::Str. Otherwise we get back the
+        // already-evaluated RHS value so we don't double-run side effects.
+        let mut pre_evaluated_rhs: Option<Value> = None;
+        if matches!(assign.op, AssignOp::AddAssign) {
+            match try_string_append_in_place(name, &assign.value, env, functions, classes, enums, impl_methods)? {
+                None => return Ok(Control::Next),
+                Some(val) => {
+                    // Only stash if the LHS was a string (meaning RHS was already
+                    // evaluated). If LHS wasn't a string, the helper returned the
+                    // freshly evaluated RHS too, but we can't easily distinguish.
+                    // Since evaluate_expr below would re-run side effects, we must
+                    // always use the returned value.
+                    pre_evaluated_rhs = Some(val);
+                }
+            }
+        }
+
+        // Evaluate the RHS (unless the string fast path already did it)
+        let mut rhs_value = match pre_evaluated_rhs {
+            Some(v) => v,
+            None => evaluate_expr(&assign.value, env, functions, classes, enums, impl_methods)?,
+        };
 
         // If suspension, await the value
         if is_suspend {

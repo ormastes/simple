@@ -1,0 +1,133 @@
+# x86_64 GUI Entry — Engine2D variant
+#
+# Same boot path as gui_entry.spl, but instantiates the Engine2D
+# (via the BaremetalBackend over the BGA framebuffer) before handing
+# the framebuffer off to the compositor. This proves Engine2D actually
+# initializes and renders inside the QEMU baremetal guest.
+#
+# Backend selection: baremetal (wraps FramebufferDriver). The "software"
+# backend would allocate its own disconnected pixel buffer and not paint
+# the real screen, so for baremetal the BaremetalBackend is the correct
+# no-GPU path.
+#
+# Boot sequence:
+#   1. Serial init
+#   2. BGA framebuffer init
+#   3. Create FramebufferDriver
+#   4. Create Engine2D via create_fb_engine(fb)
+#   5. Exercise Engine2D: clear + draw rectangles + present
+#      (This is the Engine2D verification — the captured framebuffer
+#       must show the Engine2D-painted scene.)
+#   6. Hand fb to Compositor + DesktopShell as usual
+#
+# Compositor still takes a FramebufferDriver directly because
+# Compositor.new(fb, keyboard, mouse) does not currently accept an
+# Engine2D. Modifying the compositor signature is out of scope for
+# this verification phase.
+
+use os.kernel.arch.x86_64.console.{serial_init, serial_writeln}
+use os.drivers.framebuffer.bga_init.{bga_init_framebuffer}
+use os.kernel.boot.ports.{BootOutputPort, BootMemoryRegion, MemoryRegionKind, FramebufferInfo}
+use os.kernel.types.memory_types.{PhysAddr, VirtAddr}
+use os.kernel.arch.arch_context.{Architecture}
+use os.drivers.framebuffer.fb_driver.{FramebufferDriver, Color}
+use os.drivers.input.ps2_keyboard.{Ps2Keyboard}
+use os.drivers.input.ps2_mouse.{Ps2Mouse}
+use os.compositor.compositor.{Compositor}
+use os.compositor.engine2d_display.{create_fb_engine}
+use std.gc_async_mut.gpu.engine2d.engine.{Engine2D}
+use os.desktop.shell.{DesktopShell}
+
+extern fn serial_println(msg: text)
+extern fn rt_gui_set_fb(addr: u64, width: u64)
+
+fn spl_start():
+    """x86_64 GUI entry — Engine2D variant.
+
+    Initializes the BGA framebuffer, creates an Engine2D over it via
+    BaremetalBackend, paints a verification scene through Engine2D,
+    then boots the standard compositor + desktop shell.
+    """
+    serial_init()
+    serial_writeln("SimpleOS x86_64 GUI boot (BGA mode, Engine2D variant)")
+    serial_writeln("[BOOT] COM1 serial initialized at 0x3F8")
+
+    # BGA framebuffer
+    serial_writeln("[BOOT] Initializing BGA framebuffer (1024x768x32)...")
+    val fb_info = bga_init_framebuffer(1024, 768, 32)
+    serial_writeln("[BOOT] BGA framebuffer ready")
+
+    # C runtime hook for rt_gui_* glass rendering
+    serial_println("[GUI] Setting up C runtime framebuffer...")
+    rt_gui_set_fb(fb_info.addr.addr, fb_info.width.to_u64())
+    serial_println("[GUI] rt_gui_set_fb done")
+
+    # FramebufferDriver
+    serial_println("[GUI] Creating FramebufferDriver...")
+    var fb = FramebufferDriver.from_boot_info(fb_info)
+    serial_println("[GUI] FramebufferDriver created")
+
+    # ---- Engine2D verification ----
+    serial_println("[E2D] Creating Engine2D via create_fb_engine (BaremetalBackend)...")
+    var engine = create_fb_engine(fb)
+    serial_println("[E2D] Engine2D created, backend={engine.backend_name()}")
+    serial_println("[E2D] dims: {engine.width()}x{engine.height()}")
+
+    # Paint a verification scene through Engine2D so the captured
+    # framebuffer is provably non-blank and provably came from Engine2D.
+    serial_println("[E2D] Clearing to dark blue...")
+    engine.clear(0xFF0A2540)
+
+    serial_println("[E2D] Drawing 3 colored window rectangles...")
+    # Three "windows" — red, green, blue title bars + dark bodies
+    engine.draw_rect_filled(60, 60, 280, 180, 0xFF1E1E2E)
+    engine.draw_rect_filled(60, 60, 280, 24, 0xFFE74C3C)
+
+    engine.draw_rect_filled(380, 120, 280, 180, 0xFF1E1E2E)
+    engine.draw_rect_filled(380, 120, 280, 24, 0xFF27AE60)
+
+    engine.draw_rect_filled(220, 320, 280, 180, 0xFF1E1E2E)
+    engine.draw_rect_filled(220, 320, 280, 24, 0xFF2980B9)
+
+    serial_println("[E2D] Drawing label text...")
+    engine.draw_text(80, 540, "Engine2D in QEMU: baremetal backend OK", 0xFFFFFFFF, 14)
+
+    serial_println("[E2D] Calling present()...")
+    engine.present()
+    serial_println("[E2D] Engine2D verification frame painted")
+
+    # --- Input devices ---
+    serial_println("[GUI] Initializing PS/2 keyboard...")
+    var keyboard = Ps2Keyboard.new()
+    keyboard.init()
+    serial_println("[GUI] PS/2 keyboard initialized")
+
+    serial_println("[GUI] Initializing PS/2 mouse...")
+    var mouse = Ps2Mouse.create(fb.width.to_i64(), fb.height.to_i64())
+    mouse.init()
+    serial_println("[GUI] PS/2 mouse initialized")
+
+    # --- Compositor ---
+    # NOTE: Compositor.new currently takes a FramebufferDriver, not an
+    # Engine2D. Routing the compositor through Engine2D requires changing
+    # the compositor signature, which is out of scope. The Engine2D-painted
+    # frame above stays on screen until the compositor draws over it.
+    serial_println("[GUI] Creating compositor (still takes raw FramebufferDriver)...")
+    var compositor = Compositor.new(fb, keyboard, mouse)
+    serial_println("[GUI] Compositor created")
+
+    # --- Desktop Shell ---
+    serial_println("[GUI] Creating desktop shell...")
+    var shell = DesktopShell.new(compositor)
+    shell.init()
+    serial_println("[GUI] Desktop shell initialized (taskbar, app launcher)")
+
+    serial_println("[GUI] App launching skipped (builder DSL unavailable in baremetal)")
+    serial_println("[GUI] Desktop ready with compositor + input")
+
+    serial_println("[GUI] Entering desktop event loop")
+    serial_println("[GUI] Keyboard shortcuts: Alt+Tab=cycle, Alt+F4=close, Alt+F5=minimize")
+    serial_println("[GUI] Mouse: click title bar to drag, click close button to close")
+    shell.run()
+
+    serial_println("[GUI] Desktop shell exited")

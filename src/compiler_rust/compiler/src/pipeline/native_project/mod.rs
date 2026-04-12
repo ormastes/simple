@@ -99,6 +99,14 @@ pub(crate) struct ModuleImports {
     /// Global struct definitions: struct_name -> [(field_name, field_type_name)].
     /// Shared across all compilation units for consistent cross-module field offsets.
     pub struct_defs: std::sync::Arc<std::collections::HashMap<String, Vec<(String, String)>>>,
+    /// When true, pass `struct_defs` to the HIR lowerer so cross-module field
+    /// accesses (e.g. `fb_info.addr.addr`) can resolve to real FieldGet instructions
+    /// instead of falling through to dynamic MethodCall (which becomes
+    /// `rt_function_not_found`). Safe only when the compiled file set is small
+    /// enough that the "most fields wins" ambiguity heuristic in
+    /// `get_field_info` is unlikely to mis-resolve — currently set only for
+    /// `--entry-closure` builds.
+    pub populate_global_struct_defs: bool,
 }
 
 /// Configuration for native project builds.
@@ -441,6 +449,7 @@ impl NativeProjectBuilder {
                 all_mangled: std::sync::Arc::new(result.all_mangled),
                 re_exports: std::sync::Arc::new(result.re_exports),
                 struct_defs: std::sync::Arc::new(result.struct_defs),
+                populate_global_struct_defs: self.config.entry_closure,
             }
         } else {
             ModuleImports {
@@ -449,6 +458,7 @@ impl NativeProjectBuilder {
                 all_mangled: std::sync::Arc::new(std::collections::HashMap::new()),
                 re_exports: std::sync::Arc::new(std::collections::HashMap::new()),
                 struct_defs: std::sync::Arc::new(std::collections::HashMap::new()),
+                populate_global_struct_defs: false,
             }
         };
 

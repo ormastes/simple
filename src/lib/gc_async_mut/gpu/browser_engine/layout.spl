@@ -8,12 +8,8 @@
 #
 # Set SIMPLE_DEBUG_LAYOUT=1 for debug output.
 
-extern fn rt_getenv(name: text) -> text
-val _LAYOUT_DEBUG = rt_getenv("SIMPLE_DEBUG_LAYOUT") == "1"
-
 fn _ld(msg: text):
-    if _LAYOUT_DEBUG:
-        print msg
+    pass_do_nothing
 
 use std.gc_async_mut.gpu.browser_engine.dom.{BeDomNode, be_dom_get_style,
     be_dom_get_bg_color, be_dom_get_display, be_dom_get_visibility, be_dom_get_opacity,
@@ -32,8 +28,6 @@ use common.render_scene.scene.{SceneCommand, RenderScene, render_scene,
     scene_fill_rect, scene_stroke_rect, scene_text, scene_rounded_rect,
     scene_gradient_rect, scene_blur_rect, rgba_to_argb}
 # extern fn serial_println(msg: text)  # disabled for native builds
-
-extern fn rt_array_push(arr, val)
 
 # =========================================================================
 # Layout Box
@@ -211,7 +205,7 @@ fn layout_block(node: BeDomNode, container: BeLayoutBox, style: StyleProps) -> B
             _ld("[LB] container created")
             val child_box = layout_node(child, child_container, s)
             _ld("[LB] child laid out")
-            rt_array_push(child_boxes, child_box)
+            child_boxes.push(child_box)
             cursor_y = cursor_y + child_box.height
 
     # Resolve height
@@ -329,7 +323,7 @@ fn layout_flex(node: BeDomNode, container: BeLayoutBox, style: StyleProps) -> Be
         # Use accessor to avoid cross-module FieldGet bug on StyleProps.display
         val child_flex_disp = be_dom_get_display(child)
         if child_flex_disp != "none":
-            rt_array_push(visible_children, child)
+            visible_children.push(child)
 
     val visible_count = visible_children.len()
     val total_gaps = if visible_count > 1: gap * (visible_count - 1) else: 0
@@ -357,9 +351,9 @@ fn layout_flex(node: BeDomNode, container: BeLayoutBox, style: StyleProps) -> Be
         elif not is_row and not cs.height.is_auto():
             base = cs.height.resolve_px(0)
 
-        rt_array_push(child_bases, base)
-        rt_array_push(child_grows, cs.flex_grow)
-        rt_array_push(child_shrinks, cs.flex_shrink)
+        child_bases.push(base)
+        child_grows.push(cs.flex_grow)
+        child_shrinks.push(cs.flex_shrink)
         total_grow = total_grow + cs.flex_grow
         total_shrink = total_shrink + cs.flex_shrink
         total_base = total_base + base
@@ -383,12 +377,12 @@ fn layout_flex(node: BeDomNode, container: BeLayoutBox, style: StyleProps) -> Be
             # If no grow/shrink and base is 0, divide equally
             if sz == 0 and total_grow == 0.0 and total_base == 0:
                 sz = (main_avail - total_gaps) / visible_count
-            rt_array_push(child_sizes, sz)
+            child_sizes.push(sz)
             idx = idx + 1
     else:
         var idx = 0
         while idx < visible_count:
-            rt_array_push(child_sizes, child_bases[idx])
+            child_sizes.push(child_bases[idx])
             idx = idx + 1
 
     # Phase 3: Layout each child with its allocated size
@@ -421,7 +415,7 @@ fn layout_flex(node: BeDomNode, container: BeLayoutBox, style: StyleProps) -> Be
             )
 
         val child_box = layout_node(child, child_container, style)
-        rt_array_push(child_boxes, child_box)
+        child_boxes.push(child_box)
 
         if is_row:
             cursor_x = cursor_x + child_box.width + gap
@@ -718,12 +712,12 @@ fn _paint_box(box: BeLayoutBox, commands: [SceneCommand]) -> [SceneCommand]:
                     val alpha_factor = 1.0 / (si + 1).to_f32()
                     val s_argb = _apply_opacity(rgba_to_argb(shadow.color), opacity * alpha_factor)
                     if border_radius > 0:
-                        rt_array_push(cmds, scene_rounded_rect(
+                        cmds.push(scene_rounded_rect(
                             sx - expand, sy - expand,
                             sw + expand * 2, sh + expand * 2,
                             s_argb, border_radius))
                     else:
-                        rt_array_push(cmds, scene_fill_rect(
+                        cmds.push(scene_fill_rect(
                             sx - expand, sy - expand,
                             sw + expand * 2, sh + expand * 2,
                             s_argb))
@@ -731,14 +725,14 @@ fn _paint_box(box: BeLayoutBox, commands: [SceneCommand]) -> [SceneCommand]:
             else:
                 val s_argb = _apply_opacity(rgba_to_argb(shadow.color), opacity)
                 if border_radius > 0:
-                    rt_array_push(cmds, scene_rounded_rect(sx, sy, sw, sh, s_argb, border_radius))
+                    cmds.push(scene_rounded_rect(sx, sy, sw, sh, s_argb, border_radius))
                 else:
-                    rt_array_push(cmds, scene_fill_rect(sx, sy, sw, sh, s_argb))
+                    cmds.push(scene_fill_rect(sx, sy, sw, sh, s_argb))
 
     # 0b. Backdrop blur (before background, blurs existing content behind element)
     val backdrop_blur = be_dom_get_backdrop_blur(node)
     if backdrop_blur > 0:
-        rt_array_push(cmds, scene_blur_rect(box.x, box.y, box.width, box.height, backdrop_blur, border_radius))
+        cmds.push(scene_blur_rect(box.x, box.y, box.width, box.height, backdrop_blur, border_radius))
 
     # 1. Background color (via accessor)
     val bg_color = be_dom_get_bg_color(node)
@@ -746,12 +740,12 @@ fn _paint_box(box: BeLayoutBox, commands: [SceneCommand]) -> [SceneCommand]:
     if bg_color != 0x00000000:
         val bg_argb = _apply_opacity(rgba_to_argb(bg_color), opacity)
         if border_radius > 0:
-            rt_array_push(cmds, scene_rounded_rect(
+            cmds.push(scene_rounded_rect(
                 box.content_x - pad_left, box.content_y - pad_top,
                 box.content_width + pad_h, box.content_height + pad_v,
                 bg_argb, border_radius))
         else:
-            rt_array_push(cmds, scene_fill_rect(
+            cmds.push(scene_fill_rect(
                 box.content_x - pad_left, box.content_y - pad_top,
                 box.content_width + pad_h, box.content_height + pad_v,
                 bg_argb))
@@ -761,7 +755,7 @@ fn _paint_box(box: BeLayoutBox, commands: [SceneCommand]) -> [SceneCommand]:
     if has_grad:
         val c1 = _apply_opacity(rgba_to_argb(be_dom_get_gradient_c1(node)), opacity)
         val c2 = _apply_opacity(rgba_to_argb(be_dom_get_gradient_c2(node)), opacity)
-        rt_array_push(cmds, scene_gradient_rect(
+        cmds.push(scene_gradient_rect(
             box.content_x - pad_left, box.content_y - pad_top,
             box.content_width + pad_h, box.content_height + pad_v, c1, c2))
 
@@ -770,7 +764,7 @@ fn _paint_box(box: BeLayoutBox, commands: [SceneCommand]) -> [SceneCommand]:
     val bs = be_dom_get_border_style(node)
     if bw > 0 and bs != "none":
         val bc = rgba_to_argb(be_dom_get_border_color(node))
-        rt_array_push(cmds, scene_stroke_rect(box.x, box.y, box.width, box.height, bc, bw))
+        cmds.push(scene_stroke_rect(box.x, box.y, box.width, box.height, bc, bw))
 
     # Text content
     if be_dom_get_is_text(node):
@@ -778,7 +772,7 @@ fn _paint_box(box: BeLayoutBox, commands: [SceneCommand]) -> [SceneCommand]:
         if txt.len() > 0:
             val tc = rgba_to_argb(be_dom_get_color(node))
             val fs = be_dom_get_font_size(node)
-            rt_array_push(cmds, scene_text(box.content_x, box.content_y, txt, tc, fs))
+            cmds.push(scene_text(box.content_x, box.content_y, txt, tc, fs))
 
             # Text decoration (underline, overline, line-through)
             val text_deco = be_dom_get_text_decoration(node)
@@ -789,13 +783,13 @@ fn _paint_box(box: BeLayoutBox, commands: [SceneCommand]) -> [SceneCommand]:
                 val line_h = 1
                 if text_deco == "underline":
                     val deco_y = box.content_y + fs + 2
-                    rt_array_push(cmds, scene_fill_rect(box.content_x, deco_y, text_width, line_h, tc))
+                    cmds.push(scene_fill_rect(box.content_x, deco_y, text_width, line_h, tc))
                 else if text_deco == "overline":
                     val deco_y = box.content_y - 1
-                    rt_array_push(cmds, scene_fill_rect(box.content_x, deco_y, text_width, line_h, tc))
+                    cmds.push(scene_fill_rect(box.content_x, deco_y, text_width, line_h, tc))
                 else if text_deco == "line-through":
                     val deco_y = box.content_y + fs / 2
-                    rt_array_push(cmds, scene_fill_rect(box.content_x, deco_y, text_width, line_h, tc))
+                    cmds.push(scene_fill_rect(box.content_x, deco_y, text_width, line_h, tc))
 
     # Children (same-module access to BeLayoutBox.children)
     var bc_idx = 0

@@ -35,6 +35,11 @@ if (!htmlInput && !displayPpmPath) {
 
 // Disable GPU for headless operation
 app.disableHardwareAcceleration();
+// Force 1x device pixel ratio so the captured bitmap matches the
+// requested width/height exactly (otherwise HiDPI macOS yields a 2x
+// bitmap, breaking the wm_compare 320x240 baseline harness).
+app.commandLine.appendSwitch('force-device-scale-factor', '1');
+app.commandLine.appendSwitch('high-dpi-support', '1');
 
 app.whenReady().then(async () => {
     // --display-ppm mode: show pre-rendered PPM in a visible window
@@ -108,7 +113,14 @@ app.whenReady().then(async () => {
         // Wait a brief moment for rendering to complete
         await new Promise(resolve => setTimeout(resolve, 200));
 
-        const image = await win.webContents.capturePage();
+        let image = await win.webContents.capturePage();
+        // Force the captured bitmap to the requested logical resolution
+        // (HiDPI macOS otherwise yields a 2x bitmap, breaking baseline
+        // dimensions in the wm_compare harness).
+        const capSize = image.getSize();
+        if (capSize.width !== width || capSize.height !== height) {
+            image = image.resize({ width: width, height: height, quality: 'best' });
+        }
 
         if (outputPath.endsWith('.ppm')) {
             // PPM P6 output: raw RGB bytes, no compression
