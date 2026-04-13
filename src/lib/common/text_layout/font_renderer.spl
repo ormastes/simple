@@ -1,4 +1,6 @@
 #![allow(unnamed_duplicate_typed_args)]
+use std.nogc_sync_mut.ffi.spl_fonts.{FontRasterizer, GlyphBitmap}
+
 # Shared Font Renderer — unified text rendering for both OS and browser
 #
 # Provides buffer-based text rendering using three font backends:
@@ -70,13 +72,15 @@ class FontRenderer:
     ttf_handle: i64     # TrueType font handle (0 = not loaded)
     use_vector: bool     # enable vector font fallback
     use_bitmap: bool     # enable bitmap font fallback
+    ttf_rasterizer: FontRasterizer?  # Phase 3b: SFFI spl_fonts TTF backend (nil = disabled)
 
     static fn new() -> FontRenderer:
         FontRenderer(
             cache: GlyphCache.new(512),
             ttf_handle: 0,
             use_vector: true,
-            use_bitmap: true
+            use_bitmap: true,
+            ttf_rasterizer: nil
         )
 
     static fn with_ttf(handle: i64) -> FontRenderer:
@@ -84,11 +88,31 @@ class FontRenderer:
             cache: GlyphCache.new(512),
             ttf_handle: handle,
             use_vector: true,
-            use_bitmap: true
+            use_bitmap: true,
+            ttf_rasterizer: nil
         )
 
     fn has_ttf() -> bool:
         self.ttf_handle != 0
+
+    # -----------------------------------------------------------------------
+    # Phase 3b: opt-in SFFI spl_fonts TrueType backend
+    # -----------------------------------------------------------------------
+    # Attempts to load `dylib_path` and initialize it with `ttf_path`. On
+    # success the renderer will prefer the SFFI spl_fonts rasterizer for
+    # glyphs (highest-priority backend). On any failure the renderer stays
+    # in its default state and callers fall through to the vector/bitmap
+    # paths unchanged. Caller opt-in only — default FontRenderer.new()
+    # instances behave exactly as before.
+    me try_enable_ttf(dylib_path: text, ttf_path: text) -> bool:
+        val r = FontRasterizer.load(dylib_path, ttf_path)
+        if r != nil:
+            self.ttf_rasterizer = r
+            return true
+        false
+
+    fn has_sffi_ttf() -> bool:
+        self.ttf_rasterizer != nil
 
     # -----------------------------------------------------------------------
     # Get glyph (cached) — returns rasterized alpha bitmap
@@ -102,7 +126,22 @@ class FontRenderer:
         # Rasterize
         var glyph = CachedGlyph.empty(codepoint, font_size)
 
-        if self.has_ttf():
+        # Phase 3b: prefer SFFI spl_fonts TrueType backend when the caller
+        # has opted in via try_enable_ttf(). Any failure falls through to
+        # the existing vector/bitmap path unchanged. Under the interpreter,
+        # static-fn Option<T> returns are typed as T directly, so we use
+        # `!= nil` rather than `if val Some(x) =` destructuring.
+        var handled = false
+        val rast = self.ttf_rasterizer
+        if rast != nil:
+            val gb = rast.rasterize(codepoint.to_i64(), font_size.to_i64())
+            if gb != nil:
+                glyph = _sffi_glyph_to_cached(gb, codepoint, font_size)
+                handled = true
+
+        if handled:
+            pass_do_nothing
+        else if self.has_ttf():
             glyph = rasterize_ttf(self.ttf_handle, codepoint, font_size)
         else if self.use_vector:
             val vector_cmds = vf_glyph_commands(codepoint)
@@ -145,6 +184,39 @@ class FontRenderer:
             if glyph.width > 0 and glyph.height > 0:
                 blit_glyph(buffer, buf_w, buf_h, cx, y, glyph, color)
             cx = cx + glyph.advance
+
+# ============================================================================
+# Phase 3b: SFFI spl_fonts GlyphBitmap → CachedGlyph adapter
+# ============================================================================
+#
+# Converts the (i64-typed) GlyphBitmap returned by the typed spl_fonts
+# wrapper into the ([u8]-pixel) CachedGlyph used by the renderer's cache
+# and blit path. Alpha values are guaranteed 0..255 by the Rust dylib, so
+# the .to_i32().to_u8() chain (same pattern used for rt_font_bitmap_get_pixel
+# and the vector rasterizer) is safe here.
+
+fn _sffi_glyph_to_cached(gb: GlyphBitmap, codepoint: i32, font_size: i32) -> CachedGlyph:
+    val w = gb.width.to_i32()
+    val h = gb.height.to_i32()
+    val adv_raw = gb.advance.to_i32()
+    val adv = if adv_raw > 0: adv_raw else: w + 1
+
+    var pixels: [u8] = []
+    val total = gb.pixels.len()
+    var i = 0
+    while i < total:
+        val alpha = gb.pixels[i]
+        pixels = pixels + [alpha.to_i32().to_u8()]
+        i = i + 1
+
+    CachedGlyph(
+        codepoint: codepoint,
+        font_size: font_size,
+        width: w,
+        height: h,
+        advance: adv,
+        pixels: pixels
+    )
 
 # ============================================================================
 # TrueType Rasterization (via FFI)
