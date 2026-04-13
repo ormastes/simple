@@ -46,12 +46,13 @@ extern fn spl_wffi_call_i64(fptr: i64, args: [i64], nargs: i64) -> i64
 extern fn spl_str_ptr(s: text) -> i64
 
 # ============================================================================
-# GlyphBitmap — metrics + a live reference to the internal glyph slot
+# GlyphBitmap — metrics + an owned snapshot of the glyph pixel coverage
 # ============================================================================
 #
-# `handle` is the value returned by rt_fonts_rasterize_glyph (Phase 1 always
-# returns 1). `pixel_fp` is the cached rt_fonts_glyph_pixel function pointer,
-# carried along so alpha_at stays O(1) and self-contained.
+# Phase 3a: GlyphBitmap owns its pixel data. `rasterize()` eagerly copies
+# width*height alpha samples out of the dylib's single-slot buffer into
+# `pixels` before returning, so subsequent rasterize calls cannot silently
+# clobber this glyph's bitmap. `handle` is retained only for diagnostics.
 
 class GlyphBitmap:
     width: i64
@@ -60,17 +61,18 @@ class GlyphBitmap:
     bearing_x: i64
     bearing_y: i64
     handle: i64
-    pixel_fp: i64
+    pixels: [i64]
 
 impl GlyphBitmap:
     # Alpha coverage (0..255) at pixel (x,y) in the rasterized glyph.
-    # Out-of-bounds reads return 0 (native side clamps).
+    # Out-of-bounds coordinates return 0 (no panic, no dylib round-trip).
     fn alpha_at(x: i64, y: i64) -> i64:
-        var args: [i64] = []
-        args.push(self.handle)
-        args.push(x)
-        args.push(y)
-        spl_wffi_call_i64(self.pixel_fp, args, 3)
+        if x < 0 or y < 0:
+            return 0
+        if x >= self.width or y >= self.height:
+            return 0
+        val idx = y * self.width + x
+        self.pixels[idx]
 
 # ============================================================================
 # FontRasterizer — holds the dylib handle + cached symbol pointers for a
@@ -134,13 +136,15 @@ impl FontRasterizer:
         spl_wffi_call_i64(self.metric_fp, args, 2)
 
     # Rasterize the given Unicode codepoint at the given pixel size.
-    # Returns a GlyphBitmap with metrics and a pixel accessor, or nil on
-    # failure (invalid codepoint, non-positive size, not yet initialized).
+    # Returns a GlyphBitmap with metrics and an OWNED pixel snapshot, or nil
+    # on failure (invalid codepoint, non-positive size, not yet initialized).
     #
-    # NOTE: Phase 1 uses a single global glyph slot inside the dylib — each
-    # call to rasterize overwrites the previous glyph. So GlyphBitmap values
-    # are NOT snapshots; you must read all pixels before calling rasterize
-    # again. Phase 3/4 should grow a proper handle table on the native side.
+    # Phase 3a: even though the Phase 1 dylib still uses a single global
+    # glyph slot, we eagerly copy the entire w*h alpha buffer into the
+    # returned GlyphBitmap. Subsequent rasterize calls clobber the dylib
+    # slot but leave previously returned GlyphBitmaps untouched, so callers
+    # can safely interleave rasterize/read. A 0x0 glyph (whitespace) still
+    # yields a valid GlyphBitmap with an empty `pixels` array.
     fn rasterize(codepoint: i64, size_px: i64) -> GlyphBitmap?:
         var args: [i64] = []
         args.push(codepoint)
@@ -153,6 +157,22 @@ impl FontRasterizer:
         val adv = self._metric(handle, 2)
         val bx = self._metric(handle, 3)
         val by = self._metric(handle, 4)
+        # Eagerly copy the glyph slot's alpha buffer into an owned array
+        # so it cannot be aliased out from under the caller by a later
+        # rasterize() that overwrites the global slot in the dylib.
+        var pixels: [i64] = []
+        var y: i64 = 0
+        while y < h:
+            var x: i64 = 0
+            while x < w:
+                var pa: [i64] = []
+                pa.push(handle)
+                pa.push(x)
+                pa.push(y)
+                val alpha = spl_wffi_call_i64(self.pixel_fp, pa, 3)
+                pixels.push(alpha)
+                x = x + 1
+            y = y + 1
         GlyphBitmap(
             width: w,
             height: h,
@@ -160,7 +180,7 @@ impl FontRasterizer:
             bearing_x: bx,
             bearing_y: by,
             handle: handle,
-            pixel_fp: self.pixel_fp,
+            pixels: pixels,
         )
 
     # Release the dynamic library handle. The typed wrapper becomes unusable
