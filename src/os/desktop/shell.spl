@@ -15,6 +15,7 @@ use common.ui.builder.{
 }
 use os.compositor.compositor.{Compositor, WindowSurface}
 use os.drivers.framebuffer.fb_driver.{Color}
+use std.gc_async_mut.gpu.engine2d.engine.{Engine2D}
 use os.desktop.app_manifest.{AppManifest, load_app_manifests, search_apps}
 use os.services.wm.wm_service.{WmService, WmAction}
 use os.services.launcher.launcher.{launcher_shortcut_dispatch}
@@ -92,6 +93,7 @@ class DesktopShell:
     launcher_id: u64
     clock_text: text
     shortcuts: [KeyboardShortcut]
+    baremetal_apps: [text]
 
 impl DesktopShell:
 
@@ -115,7 +117,8 @@ impl DesktopShell:
             launcher_visible: false,
             launcher_id: 0,
             clock_text: "00:00",
-            shortcuts: []
+            shortcuts: [],
+            baremetal_apps: []
         )
 
     me init():
@@ -311,6 +314,113 @@ impl DesktopShell:
         while self.compositor.running:
             self.compositor.handle_input()
             self.compositor.render_all()
+
+    me launch_app_baremetal(name: text):
+        """Baremetal-safe app launch: record the app name so the
+        direct-render overlay draws a fake window for it.
+
+        The widget builder DSL crashes in baremetal (WidgetNode.new
+        is auto-stubbed), so we bypass it entirely.
+        """
+        self.baremetal_apps = self.baremetal_apps.push(name)
+        serial_println("[shell] launched (baremetal): {name}")
+
+    me run_baremetal(engine: Engine2D):
+        """Baremetal event loop with direct Engine2D overlay.
+
+        Draws the taskbar, app launcher grid, and any launched app
+        windows directly through Engine2D — no compositor surfaces,
+        no widget tree, no builder DSL. The compositor still polls
+        input so Esc/Alt-F4 continue to work.
+        """
+        serial_println("[shell] entering baremetal event loop...")
+        self.compositor.running = true
+        val screen_w = self.compositor.screen_width
+        val screen_h = self.compositor.screen_height
+
+        while self.compositor.running:
+            self.compositor.handle_input()
+            # Clear desktop — dark blue background, matches the
+            # Engine2D verification scene in gui_entry_engine2d.
+            engine.clear(0xFF0A2540)
+            _draw_baremetal_overlay(engine, self.baremetal_apps, screen_w, screen_h, self.clock_text)
+            engine.present()
+
+# ============================================================================
+# Baremetal Overlay (direct Engine2D, no WidgetNode DSL)
+# ============================================================================
+
+fn _draw_baremetal_overlay(engine: Engine2D, apps: [text], screen_w: i32, screen_h: i32, clock: text):
+    """Draw the taskbar, launcher grid, and launched-app windows directly
+    via Engine2D. Bypasses the widget builder DSL that crashes in baremetal.
+
+    Layout:
+      - Top: title banner
+      - Middle: launcher grid with each app as a colored tile
+      - Bottom: taskbar with clock and list of running apps
+    """
+    # --- Title banner ---
+    engine.draw_rect_filled(0, 0, screen_w, 28, 0xFF1E1E2E)
+    engine.draw_text(12, 6, "SimpleOS Desktop", 0xFFFFFFFF, 14)
+
+    # --- Launcher grid (4 apps per row) ---
+    val grid_x0: i32 = 40
+    val grid_y0: i32 = 60
+    val tile_w: i32 = 140
+    val tile_h: i32 = 60
+    val gap: i32 = 16
+
+    val demo_apps: [text] = [
+        "Terminal", "Editor", "File Manager", "Calculator",
+        "Clock", "Memo", "Settings", "Browser"
+    ]
+
+    var idx: i32 = 0
+    for app_name in demo_apps:
+        val col = idx % 4
+        val row_i = idx / 4
+        val tx = grid_x0 + col * (tile_w + gap)
+        val ty = grid_y0 + row_i * (tile_h + gap)
+        # Tile body + accent header
+        engine.draw_rect_filled(tx, ty, tile_w, tile_h, 0xFF2E2E3E)
+        engine.draw_rect_filled(tx, ty, tile_w, 18, 0xFF3498DB)
+        engine.draw_text(tx + 8, ty + 2, app_name, 0xFFFFFFFF, 12)
+        idx = idx + 1
+
+    # --- Launched app "windows" (stacked cascading) ---
+    val win_w: i32 = 300
+    val win_h: i32 = 160
+    var win_idx: i32 = 0
+    for name in apps:
+        val wx = 300 + win_idx * 24
+        val wy = 220 + win_idx * 24
+        # Drop shadow
+        engine.draw_rect_filled(wx + 4, wy + 4, win_w, win_h, 0xFF000000)
+        # Body
+        engine.draw_rect_filled(wx, wy, win_w, win_h, 0xFF1E1E2E)
+        # Title bar
+        engine.draw_rect_filled(wx, wy, win_w, 22, 0xFFE74C3C)
+        engine.draw_text(wx + 8, wy + 4, name, 0xFFFFFFFF, 12)
+        engine.draw_text(wx + 12, wy + 36, "Welcome to {name}", 0xFFCCCCCC, 12)
+        win_idx = win_idx + 1
+
+    # --- Taskbar at the bottom ---
+    val tb_h: i32 = 32
+    val tb_y = screen_h - tb_h
+    engine.draw_rect_filled(0, tb_y, screen_w, tb_h, 0xFF1E1E2E)
+    engine.draw_rect_filled(0, tb_y, 60, tb_h, 0xFF3498DB)
+    engine.draw_text(10, tb_y + 8, "Apps", 0xFFFFFFFF, 14)
+
+    # Running-app labels after the launcher button
+    var tb_x: i32 = 70
+    for name in apps:
+        engine.draw_rect_filled(tb_x, tb_y + 4, 110, tb_h - 8, 0xFF2E2E3E)
+        engine.draw_text(tb_x + 6, tb_y + 8, name, 0xFFFFFFFF, 12)
+        tb_x = tb_x + 118
+
+    # Clock on the right
+    val clock_x = screen_w - 80
+    engine.draw_text(clock_x, tb_y + 8, clock, 0xFFFFFFFF, 14)
 
 # ============================================================================
 # Taskbar Builder

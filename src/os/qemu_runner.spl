@@ -216,6 +216,23 @@ fn get_browser_soft_target() -> OsTarget:
         gui_mode: false
     )
 
+fn get_browser_probe_target() -> OsTarget:
+    """Returns the x86_64 wrapper target for the browser probe."""
+    OsTarget(
+        arch: Architecture.X86_64,
+        entry: "examples/simple_os/arch/x86_64/browser_probe_entry.spl",
+        linker_script: "examples/simple_os/arch/x86_64/linker.ld",
+        target_triple: "x86_64-unknown-none",
+        output: "build/os/simpleos_browser_probe_32.elf",
+        qemu_system: "qemu-system-x86_64",
+        qemu_machine: "q35",
+        qemu_cpu: "qemu64",
+        qemu_memory: "128M",
+        qemu_bios: "",
+        qemu_extra: ["-device", "isa-debug-exit,iobase=0xf4,iosize=0x04"],
+        gui_mode: false
+    )
+
 fn get_desktop_browser_target() -> OsTarget:
     """Returns the x86_64 wrapper target for Browser Demo desktop E2E."""
     OsTarget(
@@ -228,6 +245,23 @@ fn get_desktop_browser_target() -> OsTarget:
         qemu_machine: "q35",
         qemu_cpu: "qemu64",
         qemu_memory: "512M",
+        qemu_bios: "",
+        qemu_extra: ["-device", "isa-debug-exit,iobase=0xf4,iosize=0x04"],
+        gui_mode: false
+    )
+
+fn get_desktop_probe_target() -> OsTarget:
+    """Returns the x86_64 wrapper target for the desktop probe."""
+    OsTarget(
+        arch: Architecture.X86_64,
+        entry: "examples/simple_os/arch/x86_64/desktop_probe_entry.spl",
+        linker_script: "examples/simple_os/arch/x86_64/linker.ld",
+        target_triple: "x86_64-unknown-none",
+        output: "build/os/simpleos_desktop_probe_32.elf",
+        qemu_system: "qemu-system-x86_64",
+        qemu_machine: "q35",
+        qemu_cpu: "qemu64",
+        qemu_memory: "128M",
         qemu_bios: "",
         qemu_extra: ["-device", "isa-debug-exit,iobase=0xf4,iosize=0x04"],
         gui_mode: false
@@ -284,19 +318,28 @@ fn build_os(target: OsTarget) -> bool:
 
     Runs the native-build command via rt_process_run_timeout. Returns true on success.
     """
-    val args = [
-        "native-build",
-        "--source", "src",
-        "--source", "examples",
-        "--backend", "cranelift",
-        "--entry-closure",
-        "--entry", target.entry,
-        "--target", target.target_triple,
-        "-o", target.output,
-        "--linker-script", target.linker_script
-    ]
+    var args: [text] = ["native-build"]
+    for source in _build_sources(target):
+        args.push("--source")
+        args.push(source)
+    args.push("--backend")
+    args.push("cranelift")
+    args.push("--entry-closure")
+    args.push("--entry")
+    args.push(target.entry)
+    args.push("--target")
+    args.push(target.target_triple)
+    args.push("-o")
+    args.push(target.output)
+    args.push("--linker-script")
+    args.push(target.linker_script)
     val objcopy_prefix = _objcopy_path_prefix()
-    if objcopy_prefix == "":
+    if _needs_elf32_wrap(target) and objcopy_prefix == "":
+        print "[build] FAILED: llvm-objcopy not found for {target.entry}"
+        return false
+
+    val env_prefix = _build_env_prefix(target, objcopy_prefix)
+    if env_prefix == "":
         print "[build] {arch_display_name(target.arch)}: bin/simple {args.join(" ")}"
         val (stdout, stderr, exit_code) = rt_process_run_timeout("bin/simple", args, 60000)
         if exit_code != 0:
@@ -308,7 +351,7 @@ fn build_os(target: OsTarget) -> bool:
             return false
         return true
 
-    val shell_cmd = "PATH=\"{objcopy_prefix}:$PATH\" bin/simple {args.join(" ")}"
+    val shell_cmd = "{env_prefix} bin/simple {args.join(" ")}"
     print "[build] {arch_display_name(target.arch)}: {shell_cmd}"
     val (stdout, stderr, exit_code) = rt_process_run_timeout("/bin/sh", ["-c", shell_cmd], 60000)
     if exit_code != 0:
@@ -326,6 +369,36 @@ fn _objcopy_path_prefix() -> text:
     if rt_file_exists("/usr/local/opt/llvm/bin/llvm-objcopy"):
         return "/usr/local/opt/llvm/bin"
     ""
+
+fn _build_sources(target: OsTarget) -> [text]:
+    if _is_browser_wrapper_target(target):
+        return ["src/lib", "examples/simple_os"]
+    if _is_desktop_wrapper_target(target):
+        return ["src/os", "src/lib", "examples/simple_os"]
+    ["src", "examples"]
+
+fn _build_env_prefix(target: OsTarget, objcopy_prefix: text) -> text:
+    var envs: [text] = []
+    if _uses_baremetal_wrapper_profile(target):
+        envs.push("SIMPLE_BOOTSTRAP=1")
+        envs.push("SIMPLE_LIB=\"$(pwd)/src\"")
+    if objcopy_prefix != "":
+        envs.push("PATH=\"{objcopy_prefix}:$PATH\"")
+    envs.join(" ")
+
+fn _needs_elf32_wrap(target: OsTarget) -> bool:
+    _uses_baremetal_wrapper_profile(target)
+
+fn _uses_baremetal_wrapper_profile(target: OsTarget) -> bool:
+    _is_browser_wrapper_target(target) or _is_desktop_wrapper_target(target)
+
+fn _is_browser_wrapper_target(target: OsTarget) -> bool:
+    target.entry == "examples/simple_os/arch/x86_64/browser_soft_entry.spl" or
+        target.entry == "examples/simple_os/arch/x86_64/browser_probe_entry.spl"
+
+fn _is_desktop_wrapper_target(target: OsTarget) -> bool:
+    target.entry == "examples/simple_os/arch/x86_64/desktop_e2e_entry.spl" or
+        target.entry == "examples/simple_os/arch/x86_64/desktop_probe_entry.spl"
 
 # ===========================================================================
 # QEMU Command Construction

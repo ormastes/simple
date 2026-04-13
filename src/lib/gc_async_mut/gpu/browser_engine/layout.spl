@@ -181,11 +181,21 @@ fn layout_block(node: BeDomNode, container: BeLayoutBox, style: StyleProps) -> B
     val cont_y = box_y + border_w + s_padding.top
 
     # Lay out children vertically (block flow). Adjacent vertical sibling
-    # margins collapse to max(prev.bottom, cur.top) per CSS 2.1 §8.3.1.
+    # margins collapse to max(prev.bottom, cur.top) per CSS 2.1 §8.3.1 rule 1.
+    # Parent-child collapsing (rule 2): if the parent has no top
+    # border/padding, the first in-flow child's top margin collapses with
+    # the parent's top margin. We implement this by starting cursor_y a bit
+    # above cont_y for the first child so its outer box (which already
+    # carries its own margin.top) overlaps with the parent's margin region.
+    # The symmetric bottom collapse is applied after the loop via
+    # last_child_mb.
+    val can_top_collapse = border_w == 0 and s_padding.top == 0
+    val can_bot_collapse = border_w == 0 and s_padding.bottom == 0
     var child_boxes: [BeLayoutBox] = []
     var cursor_y = cont_y
     var prev_bottom_margin: i32 = 0
     var seen_child = false
+    var last_child_mb: i32 = 0
     val block_kids = be_dom_get_children(node)
     var bk_idx = 0
     val bk_len = block_kids.len()
@@ -204,6 +214,11 @@ fn layout_block(node: BeDomNode, container: BeLayoutBox, style: StyleProps) -> B
             if seen_child:
                 val collapse = if prev_bottom_margin < child_mt: prev_bottom_margin else: child_mt
                 cursor_y = cursor_y - collapse
+            else:
+                # Parent-child top margin collapse (rule 2, top side).
+                if can_top_collapse and s_margin.top >= 0 and child_mt >= 0:
+                    val top_collapse = if s_margin.top < child_mt: s_margin.top else: child_mt
+                    cursor_y = cursor_y - top_collapse
             val child_container = BeLayoutBox(
                 x: cont_x, y: cursor_y,
                 width: content_w, height: 0,
@@ -217,7 +232,17 @@ fn layout_block(node: BeDomNode, container: BeLayoutBox, style: StyleProps) -> B
             child_boxes.push(child_box)
             cursor_y = cursor_y + child_box.height
             prev_bottom_margin = child_mb
+            last_child_mb = child_mb
             seen_child = true
+
+    # CSS 2.1 §8.3.1 rule 2, bottom side: if parent has no bottom
+    # border/padding, parent.margin.bottom collapses with the last in-flow
+    # child's margin.bottom. The child's bottom margin is already inside
+    # content_h via cursor_y, and parent.margin.bottom is added via
+    # s_margin.vertical() below, so we remove the overlap from content_h.
+    if seen_child and can_bot_collapse and s_margin.bottom >= 0 and last_child_mb >= 0:
+        val bot_collapse = if s_margin.bottom < last_child_mb: s_margin.bottom else: last_child_mb
+        cursor_y = cursor_y - bot_collapse
 
     # Resolve height
     var content_h = cursor_y - cont_y
@@ -626,13 +651,11 @@ fn layout_text(node: BeDomNode, container: BeLayoutBox, parent_style: StyleProps
     val font_size = parent_style.font_size
     # CSS "line-height: normal" ≈ 1.2×font-size. text_line_height() returns
     # a flat 18 for any fs > 8 which massively over-sizes small-font blocks
-    # and pushes ancestor borders down. Use font-proportional metrics with
-    # round-to-nearest: floor lost 1px on font_size=14 (16 vs Chrome's 17),
-    # producing ~300-px row-offset errors in 14_border diff analysis.
+    # and pushes ancestor borders down. Use font-proportional metrics.
     val line_h = if font_size <= 8:
         text_line_height(font_size)
     else:
-        (font_size * 12 + 5) / 10
+        font_size + font_size / 5  # 1.2× (floor)
 
     # Use font renderer for proportional width measurement
     var renderer = get_layout_font_renderer()

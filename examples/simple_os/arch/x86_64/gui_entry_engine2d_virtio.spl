@@ -1,0 +1,150 @@
+# x86_64 GUI Entry — Engine2D over VirtIO-GPU variant
+#
+# Sibling of gui_entry_engine2d.spl, but instantiates the Engine2D
+# through the VirtioGpuBackend instead of the BGA-backed BaremetalBackend.
+# This proves the VirtioGpuBackend path works end-to-end in QEMU.
+#
+# Backend selection: virtio-gpu (wraps an initialized VirtioGpuDriver).
+#
+# Boot sequence:
+#   1. Serial init
+#   2. PCI scan + locate VirtIO-GPU device
+#   3. VirtioGpuDriver.init_from_grant()
+#   4. Create Engine2D via create_virtio_gpu_engine(gpu)
+#   5. Assert backend_name() == "virtio-gpu" (verification gate)
+#   6. Exercise Engine2D: clear + draw rectangles + present
+#   7. Halt (compositor hand-off intentionally deferred — A1 will wire it)
+#
+# NOTE on the assert value: the backend's name() returns "virtio-gpu"
+# (hyphen), not "virtio_gpu" (underscore). We assert against the actual
+# backend string so the gate passes when everything is wired correctly.
+
+use os.kernel.arch.x86_64.console.{serial_init, serial_writeln}
+use os.drivers.pci.pci.{PciBus, PciDevice}
+use os.drivers.virtio.virtio_gpu.{VirtioGpuDriver}
+use os.kernel.types.device_mem_types.{DeviceGrant}
+use os.compositor.engine2d_display.{create_virtio_gpu_engine}
+use std.gc_async_mut.gpu.engine2d.engine.{Engine2D}
+
+extern fn serial_println(msg: text)
+
+# ============================================================================
+# Helper — build a DeviceGrant from a discovered PciDevice
+# (Duplicated from src/os/drivers/gpu/virtio_gpu_entry.spl so this boot
+#  entry stays self-contained within the 2-file scope cap.)
+# ============================================================================
+
+fn grant_from_pci(dev: PciDevice) -> DeviceGrant:
+    """Construct a DeviceGrant for VirtIO PCI transport."""
+    var bar0_phys: u64 = dev.bar0.to_u64()
+    if bar0_phys == 0:
+        bar0_phys = (dev.bar1 & 0xFFFFFFF0).to_u64()
+    serial_println("[grant] bar0={dev.bar0} bar1={dev.bar1} using=0x{bar0_phys}")
+
+    val bar0_size: u64 = 4096
+
+    DeviceGrant(
+        pci_vendor: dev.vendor_id,
+        pci_device: dev.device_id,
+        pci_bus: dev.bus,
+        pci_dev: dev.device,
+        pci_func: dev.func,
+        pci_class: dev.class_code,
+        pci_subclass: dev.subclass,
+        bar0_phys: bar0_phys,
+        bar0_size: bar0_size,
+        bar0_cap: 0,
+        irq_vector: dev.irq_line.to_u32(),
+        irq_notification_id: 0,
+        irq_notification_bit: 0,
+        irq_cap: 0,
+        dma_device_addr: 0,
+        dma_host_addr: 0,
+        dma_size: 0,
+        dma_cap: 0,
+        iommu_domain_id: 0,
+        iommu_cap: 0
+    )
+
+fn halt_forever():
+    """Spin halt — end-of-entry gate when we don't want to continue booting."""
+    while true:
+        pass_dn
+
+fn spl_start():
+    """x86_64 GUI entry — Engine2D over VirtIO-GPU variant.
+
+    Initializes a VirtIO-GPU device, wraps it in an Engine2D via
+    VirtioGpuBackend, asserts the active backend is virtio-gpu, paints
+    the 3-rect verification scene, calls present(), and halts.
+    """
+    serial_init()
+    serial_writeln("SimpleOS x86_64 GUI boot (VirtIO-GPU mode, Engine2D variant)")
+    serial_writeln("[BOOT] COM1 serial initialized at 0x3F8")
+
+    # --- PCI scan ---
+    serial_println("[BOOT] Scanning PCI for VirtIO-GPU...")
+    var pci = PciBus.new()
+    pci.scan()
+    serial_println("[BOOT] PCI scan complete: {pci.device_count()} devices")
+
+    var gpu_dev: PciDevice? = nil
+    val display_devs = pci.find_by_class(0x03, 0x80)
+    if display_devs.len() > 0:
+        gpu_dev = display_devs[0]
+    else:
+        val disp00 = pci.find_by_class(0x03, 0x00)
+        if disp00.len() > 0:
+            gpu_dev = disp00[0]
+
+    if val Some(found_dev) = gpu_dev:
+        serial_println("[BOOT] Found GPU: {found_dev.description()}")
+
+        # --- VirtIO-GPU driver init ---
+        val grant = grant_from_pci(found_dev)
+        var gpu = VirtioGpuDriver.new()
+        if val Ok(_ok) = gpu.init_from_grant(grant):
+            serial_println("[BOOT] VirtIO-GPU initialized: {gpu.get_width()}x{gpu.get_height()}")
+
+            # --- Engine2D verification ---
+            serial_println("[E2D] Creating Engine2D via create_virtio_gpu_engine...")
+            var engine = create_virtio_gpu_engine(gpu)
+            serial_println("[E2D] Engine2D created, backend={engine.backend_name()}")
+            serial_println("[E2D] dims: {engine.width()}x{engine.height()}")
+
+            # Backend verification gate
+            if engine.backend_name() == "virtio-gpu":
+                serial_println("[E2D] GATE OK: backend is virtio-gpu")
+            else:
+                serial_println("[E2D] GATE FAIL: expected virtio-gpu, got {engine.backend_name()}")
+                halt_forever()
+
+            # Paint the same 3-rect scene as gui_entry_engine2d.spl for
+            # cross-compare parity with the BGA path.
+            serial_println("[E2D] Clearing to dark blue...")
+            engine.clear(0xFF0A2540)
+
+            serial_println("[E2D] Drawing 3 colored window rectangles...")
+            engine.draw_rect_filled(60, 60, 280, 180, 0xFF1E1E2E)
+            engine.draw_rect_filled(60, 60, 280, 24, 0xFFE74C3C)
+
+            engine.draw_rect_filled(380, 120, 280, 180, 0xFF1E1E2E)
+            engine.draw_rect_filled(380, 120, 280, 24, 0xFF27AE60)
+
+            engine.draw_rect_filled(220, 320, 280, 180, 0xFF1E1E2E)
+            engine.draw_rect_filled(220, 320, 280, 24, 0xFF2980B9)
+
+            serial_println("[E2D] Drawing label text...")
+            engine.draw_text(80, 540, "Engine2D in QEMU: virtio-gpu backend OK", 0xFFFFFFFF, 14)
+
+            serial_println("[E2D] Calling present()...")
+            engine.present()
+            serial_println("[E2D] Engine2D verification frame painted")
+        else:
+            serial_println("[BOOT] VirtIO-GPU init failed")
+    else:
+        serial_println("[BOOT] NO VIRTIO-GPU FOUND")
+
+    # Compositor hand-off deferred — this entry only proves the engine path.
+    serial_println("[BOOT] Halting (compositor wiring is follow-up work)")
+    halt_forever()

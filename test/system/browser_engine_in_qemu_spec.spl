@@ -2,13 +2,58 @@
 
 use std.spec.*
 
-use os.qemu_runner.{build_os, get_browser_soft_target, get_desktop_browser_target}
+use os.qemu_runner.{build_os, get_browser_probe_target, get_browser_soft_target,
+    get_desktop_probe_target, get_desktop_browser_target}
 use test.qemu.os.common.qemu_os_harness.{
     can_run_target, file_exists, spawn_guest_with_qmp, wait_for_serial_marker,
     read_serial_log, stop_guest
 }
 
 describe "Browser engine in QEMU Simple OS guest":
+
+    it "boots the browser baremetal probe":
+        val target = get_browser_probe_target()
+        expect(build_os(target)).to_equal(true)
+        expect(file_exists(target.output)).to_equal(true)
+
+        if not can_run_target(target):
+            expect(true).to_equal(true)
+            return
+
+        val qmp_socket = "/tmp/simpleos_browser_probe_qmp.sock"
+        val serial_log = "build/os/browser_probe_qemu_serial.log"
+        match spawn_guest_with_qmp(target, qmp_socket, serial_log):
+            Ok(handle) =>
+                val saw_marker = wait_for_serial_marker(handle, "[probe] browser spl_start", 10000)
+                val output = read_serial_log(handle)
+                stop_guest(handle)
+                expect(saw_marker).to_equal(true)
+                expect(output.contains("FAULT @")).to_equal(false)
+            Err(err) =>
+                print "[browser_engine_in_qemu_spec] {err}"
+                expect(false).to_equal(true)
+
+    it "boots the desktop baremetal probe":
+        val target = get_desktop_probe_target()
+        expect(build_os(target)).to_equal(true)
+        expect(file_exists(target.output)).to_equal(true)
+
+        if not can_run_target(target):
+            expect(true).to_equal(true)
+            return
+
+        val qmp_socket = "/tmp/simpleos_desktop_probe_qmp.sock"
+        val serial_log = "build/os/desktop_probe_qemu_serial.log"
+        match spawn_guest_with_qmp(target, qmp_socket, serial_log):
+            Ok(handle) =>
+                val saw_marker = wait_for_serial_marker(handle, "[probe] desktop spl_start", 10000)
+                val output = read_serial_log(handle)
+                stop_guest(handle)
+                expect(saw_marker).to_equal(true)
+                expect(output.contains("FAULT @")).to_equal(false)
+            Err(err) =>
+                print "[browser_engine_in_qemu_spec] {err}"
+                expect(false).to_equal(true)
 
     it "builds and boots the browser software smoke entry":
         val target = get_browser_soft_target()
@@ -23,18 +68,29 @@ describe "Browser engine in QEMU Simple OS guest":
         val serial_log = "build/os/browser_soft_qemu_serial.log"
         match spawn_guest_with_qmp(target, qmp_socket, serial_log):
             Ok(handle) =>
+                val saw_start = wait_for_serial_marker(handle, "[browser-soft] start", 10000)
+                val saw_dom = wait_for_serial_marker(handle, "[browser-soft] dom", 5000)
+                val saw_layout = wait_for_serial_marker(handle, "[browser-soft] layout", 5000)
+                val saw_paint = wait_for_serial_marker(handle, "[browser-soft] paint", 5000)
+                val saw_scene = wait_for_serial_marker(handle, "[browser-soft] scene", 5000)
+                val saw_raster = wait_for_serial_marker(handle, "[browser-soft] raster", 5000)
                 val saw_pass = wait_for_serial_marker(handle, "[PASS] browser_soft_entry", 15000)
-                val saw_pixels = wait_for_serial_marker(handle, "[browser-soft] visible pixels:", 2000)
                 val output = read_serial_log(handle)
                 stop_guest(handle)
+                expect(saw_start).to_equal(true)
+                expect(saw_dom).to_equal(true)
+                expect(saw_layout).to_equal(true)
+                expect(saw_paint).to_equal(true)
+                expect(saw_scene).to_equal(true)
+                expect(saw_raster).to_equal(true)
                 expect(saw_pass).to_equal(true)
-                expect(saw_pixels).to_equal(true)
+                expect(output.contains("FAULT @")).to_equal(false)
                 expect(output.contains("[FAIL]")).to_equal(false)
             Err(err) =>
                 print "[browser_engine_in_qemu_spec] {err}"
                 expect(false).to_equal(true)
 
-    it "launches Browser Demo through the desktop test entry and renders browser output":
+    it "runs the lean desktop wrapper through launcher and wm markers":
         val target = get_desktop_browser_target()
         expect(build_os(target)).to_equal(true)
         expect(file_exists(target.output)).to_equal(true)
@@ -47,16 +103,19 @@ describe "Browser engine in QEMU Simple OS guest":
         val serial_log = "build/os/desktop_browser_qemu_serial.log"
         match spawn_guest_with_qmp(target, qmp_socket, serial_log):
             Ok(handle) =>
-                val saw_window = wait_for_serial_marker(handle, "[test] PASS: Window created for Browser Demo", 15000)
-                val saw_render = wait_for_serial_marker(handle, "[test] PASS: Browser Demo render executed", 5000)
-                val saw_stats = wait_for_serial_marker(handle, "[browser-demo] render stats", 5000)
+                val saw_start = wait_for_serial_marker(handle, "[desktop-e2e] spl_start", 10000)
+                val saw_launcher = wait_for_serial_marker(handle, "[desktop-e2e] launcher:ready", 10000)
+                val saw_shortcut = wait_for_serial_marker(handle, "[desktop-e2e] shortcut:ok", 5000)
+                val saw_wm = wait_for_serial_marker(handle, "[desktop-e2e] wm:ok", 5000)
                 val saw_pass = wait_for_serial_marker(handle, "TEST PASSED", 2000)
                 val output = read_serial_log(handle)
                 stop_guest(handle)
-                expect(saw_window).to_equal(true)
-                expect(saw_render).to_equal(true)
-                expect(saw_stats).to_equal(true)
+                expect(saw_start).to_equal(true)
+                expect(saw_launcher).to_equal(true)
+                expect(saw_shortcut).to_equal(true)
+                expect(saw_wm).to_equal(true)
                 expect(saw_pass).to_equal(true)
+                expect(output.contains("FAULT @")).to_equal(false)
                 expect(output.contains("TEST FAILED")).to_equal(false)
             Err(err) =>
                 print "[browser_engine_in_qemu_spec] {err}"

@@ -18,12 +18,9 @@
 #   5. Exercise Engine2D: clear + draw rectangles + present
 #      (This is the Engine2D verification — the captured framebuffer
 #       must show the Engine2D-painted scene.)
-#   6. Hand fb to Compositor + DesktopShell as usual
-#
-# Compositor still takes a FramebufferDriver directly because
-# Compositor.new(fb, keyboard, mouse) does not currently accept an
-# Engine2D. Modifying the compositor signature is out of scope for
-# this verification phase.
+#   6. Build a CompositorEngine2D (Engine2D-backed CompositorBackend)
+#      and hand its `.inner` Compositor to DesktopShell. Every paint
+#      call the compositor issues now goes through the Engine2D facade.
 
 use os.kernel.arch.x86_64.console.{serial_init, serial_writeln}
 use os.drivers.framebuffer.bga_init.{bga_init_framebuffer}
@@ -34,6 +31,7 @@ use os.drivers.framebuffer.fb_driver.{FramebufferDriver, Color}
 use os.drivers.input.ps2_keyboard.{Ps2Keyboard}
 use os.drivers.input.ps2_mouse.{Ps2Mouse}
 use os.compositor.compositor.{Compositor}
+use os.compositor.compositor_engine2d.{CompositorEngine2D}
 use os.compositor.engine2d_display.{create_fb_engine}
 use std.gc_async_mut.gpu.engine2d.engine.{Engine2D}
 use os.desktop.shell.{DesktopShell}
@@ -108,13 +106,16 @@ fn spl_start():
     serial_println("[GUI] PS/2 mouse initialized")
 
     # --- Compositor ---
-    # NOTE: Compositor.new currently takes a FramebufferDriver, not an
-    # Engine2D. Routing the compositor through Engine2D requires changing
-    # the compositor signature, which is out of scope. The Engine2D-painted
-    # frame above stays on screen until the compositor draws over it.
-    serial_println("[GUI] Creating compositor (still takes raw FramebufferDriver)...")
-    var compositor = Compositor.new(fb, keyboard, mouse)
-    serial_println("[GUI] Compositor created")
+    # Engine2D-backed compositor: every paint-leaf call (clear, fill_rect,
+    # draw_text, put_pixel, draw_char_8x16, gradient_v, present) routes
+    # through the Engine2D facade we just built above. The underlying
+    # Compositor struct is still a `Compositor` — we just built it via
+    # `Compositor.with_backends(engine2d_backend, ...)` — so DesktopShell
+    # (which hard-types `compositor: Compositor`) accepts it unchanged.
+    serial_println("[GUI] Creating Engine2D-backed compositor...")
+    var ce2d = CompositorEngine2D.new(engine, keyboard, mouse)
+    var compositor = ce2d.inner
+    serial_println("[GUI] CompositorEngine2D ready — render path now drives Engine2D")
 
     # --- Desktop Shell ---
     serial_println("[GUI] Creating desktop shell...")
@@ -122,12 +123,16 @@ fn spl_start():
     shell.init()
     serial_println("[GUI] Desktop shell initialized (taskbar, app launcher)")
 
-    serial_println("[GUI] App launching skipped (builder DSL unavailable in baremetal)")
-    serial_println("[GUI] Desktop ready with compositor + input")
+    # --- App launching (baremetal-safe, no builder DSL) ---
+    serial_println("[GUI] Launching demo apps via baremetal direct-render path...")
+    shell.launch_app_baremetal("Terminal")
+    shell.launch_app_baremetal("Editor")
+    shell.launch_app_baremetal("Calculator")
+    serial_println("[GUI] Desktop ready with compositor + input + 3 apps")
 
-    serial_println("[GUI] Entering desktop event loop")
+    serial_println("[GUI] Entering desktop event loop (baremetal overlay)")
     serial_println("[GUI] Keyboard shortcuts: Alt+Tab=cycle, Alt+F4=close, Alt+F5=minimize")
     serial_println("[GUI] Mouse: click title bar to drag, click close button to close")
-    shell.run()
+    shell.run_baremetal(engine)
 
     serial_println("[GUI] Desktop shell exited")
