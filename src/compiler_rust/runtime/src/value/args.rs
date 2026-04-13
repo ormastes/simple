@@ -52,24 +52,28 @@ fn install_parent_death_watchdog() {
     if !enabled {
         return;
     }
-    let initial_ppid = unsafe { libc::getppid() };
-    if initial_ppid <= 1 {
-        // Already orphaned or invalid — nothing to watch.
-        return;
+    // getppid() is only available on Unix (libc crate is cfg(unix)-only).
+    #[cfg(unix)]
+    {
+        let initial_ppid = unsafe { libc::getppid() };
+        if initial_ppid <= 1 {
+            // Already orphaned or invalid — nothing to watch.
+            return;
+        }
+        let _ = std::thread::Builder::new()
+            .name("simple-parent-death-watchdog".into())
+            .spawn(move || loop {
+                std::thread::sleep(std::time::Duration::from_secs(1));
+                let current_ppid = unsafe { libc::getppid() };
+                if current_ppid == 1 || current_ppid != initial_ppid {
+                    eprintln!(
+                        "[simple-runtime] parent died (ppid {} -> {}), exiting",
+                        initial_ppid, current_ppid
+                    );
+                    std::process::exit(0);
+                }
+            });
     }
-    let _ = std::thread::Builder::new()
-        .name("simple-parent-death-watchdog".into())
-        .spawn(move || loop {
-            std::thread::sleep(std::time::Duration::from_secs(1));
-            let current_ppid = unsafe { libc::getppid() };
-            if current_ppid == 1 || current_ppid != initial_ppid {
-                eprintln!(
-                    "[simple-runtime] parent died (ppid {} -> {}), exiting",
-                    initial_ppid, current_ppid
-                );
-                std::process::exit(0);
-            }
-        });
 }
 
 /// Set program arguments from argc/argv (called once at startup).
