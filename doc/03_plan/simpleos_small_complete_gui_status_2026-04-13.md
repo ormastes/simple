@@ -1,141 +1,291 @@
-# SimpleOS Small Complete GUI Status
+# SimpleOS Small Complete GUI Plan
 
 ## Goal
 
-Define the smallest GUI slice that is still meaningfully complete on the real x86_64 path.
+Define the smallest x86_64 SimpleOS milestone that is honestly complete as a GUI OS on the real QEMU framebuffer path.
 
-For this repo, "small but complete GUI" should mean:
+For this repo, "small complete GUI OS" means:
 
-- one bootable desktop path with compositor, WM, shell, launcher, keyboard, and mouse wired together
-- one real single-window launcher-spawned app (`Hello World`)
-- one real multi-window launcher-spawned app (`Browser Demo`)
-- stable launcher-owned `app_id` shared across launcher, WM, shell, and compositor
-- close, terminate, and crash cleanup proven on the live desktop path
-- one repeatable QEMU regression lane that exercises the real remote-window flow
+- one repeatable `x86_64` QEMU boot path that lands in the desktop without relying only on hosted mode
+- one usable desktop shell with compositor, WM, launcher, taskbar or dock, keyboard, and mouse active together
+- one single-window real app and one multi-window real app launched through the real launcher path
+- stable app ownership across launcher, shell, WM, and compositor
+- close, terminate, graceful exit, and crash cleanup proven on the live desktop path
+- one real GUI-output regression lane based on QEMU framebuffer capture, not just serial logs
 
-This is intentionally narrower than "full desktop feature complete". It is the minimum slice that proves the GUI architecture actually joins up under process ownership.
+This is intentionally narrower than "full feature-complete desktop OS". It is the minimum bar for saying SimpleOS is a complete GUI OS in a small but credible form.
+
+## Minimum Needed Features
+
+### 1. Boot and platform
+
+- `x86_64` GUI entry that boots under QEMU into the desktop path
+- serial-enabled debug lane for the same GUI build
+- one supported framebuffer path with repeatable resolution and stable boot markers
+- build and run path wired through `bin/simple os build|run|test`
+
+Current anchors:
+
+- `examples/simple_os/arch/x86_64/gui_entry.spl`
+- `src/os/qemu_runner.spl`
+- `src/os/cli.spl`
+
+### 2. Desktop shell
+
+- shell initializes launcher, WM, compositor, app registry, and desktop chrome
+- launcher can enumerate and start built-in GUI apps
+- desktop shows a taskbar or dock and an app/window list
+- shell can reconcile launcher state with remote windows
+
+Current anchors:
+
+- `src/os/desktop/shell.spl`
+- `src/os/desktop/app_manifest.spl`
+- `src/os/services/launcher/launcher.spl`
+
+### 3. Window management and compositor
+
+- create, focus, move, close, and destroy windows on the real desktop path
+- z-order and active-window state are visible
+- remote-window ownership is tied to stable launcher-owned `app_id`
+- multi-window grouping works even when titles change
+- cursor, decorations, wallpaper, and app content all render on the framebuffer
+
+Current anchors:
+
+- `src/os/compositor/compositor.spl`
+- `src/os/compositor/desktop_chrome.spl`
+- `src/os/compositor/app_content.spl`
+- `src/os/services/wm/wm_service.spl`
+
+### 4. Input
+
+- keyboard events reach launcher and shell shortcuts
+- mouse events reach compositor hit-testing and focus routing
+- one launcher shortcut is proven on the real path
+
+Current anchors:
+
+- `src/os/gui/input_event.spl`
+- `src/os/gui/shortcut.spl`
+- compositor input handling in `src/os/compositor/compositor.spl`
+
+### 5. Minimum app set
+
+Required for the milestone:
+
+- `Hello World` as the single-window proof
+- `Browser Demo` as the multi-window proof
+- one shell or terminal surface visible from the desktop stack
+
+Useful but not required for the milestone:
+
+- file manager
+- editor
+- settings
+- calculator or clock
+
+Rationale:
+
+- the minimum bar is proving the GUI OS joins up under real process and window ownership
+- a larger app catalog is valuable, but it should not block the first complete milestone
+
+### 6. Persistence and file access
+
+Minimum required:
+
+- enough VFS or storage support for launcher and app startup to behave consistently
+- no requirement yet for full disk-management UX before the milestone is declared complete
+
+Required before claiming a broader desktop OS milestone:
+
+- file manager backed by real storage
+- write path verified on a real disk image or equivalent persistent medium
+
+### 7. Debuggability and observability
+
+- serial markers for boot, shell ready, launcher ready, app launch, window create, cleanup, and pass or fail
+- QEMU QMP-based framebuffer capture path for visual assertions
+- baseline artifacts stored for the visual lane
 
 ## What Already Exists
 
-### Real desktop boot path
+### Real desktop and app path pieces
 
-- [desktop_e2e_entry.spl](/home/ormastes/dev/pub/simple/examples/simple_os/arch/x86_64/desktop_e2e_entry.spl) now boots a minimal real desktop stack
-- it launches `Browser Demo` through the shell and launcher
-- it waits for two remote windows grouped under `/sys/apps/browser_demo`
+- `examples/simple_os/arch/x86_64/desktop_e2e_entry.spl` boots a real launcher-driven desktop test path
+- `src/os/apps/hello_world/hello_world.spl` and `src/os/apps/browser_demo/browser_demo.spl` provide real remote-window app entrypoints
+- `src/os/services/launcher/launcher.spl`, `src/os/services/wm/wm_service.spl`, and `src/os/desktop/shell.spl` already contain the ownership-join logic for launcher, WM, and shell
 
-### Real remote-window app paths
+### Existing QEMU and GUI infrastructure
 
-- [hello_world.spl](/home/ormastes/dev/pub/simple/src/os/apps/hello_world/hello_world.spl) has a built-in remote app runner
-- [browser_demo.spl](/home/ormastes/dev/pub/simple/src/os/apps/browser_demo/browser_demo.spl) has a built-in remote app runner that creates multiple windows
-- [launcher.spl](/home/ormastes/dev/pub/simple/src/os/services/launcher/launcher.spl) spawns those built-in app entrypoints and keeps launcher-owned process identity
+- `src/os/qemu_runner.spl` already exposes GUI and desktop test scenarios
+- `src/os/compositor/qemu_capture.spl` already supports QMP screendump capture and PPM decode
+- `test/system/engine2d_in_qemu_spec.spl` already proves the serial-marker-plus-framebuffer-compare pattern
 
-### Identity and ownership joining
+### Existing useful coverage
 
-- [wm_service.spl](/home/ormastes/dev/pub/simple/src/os/services/wm/wm_service.spl) resolves missing window `app_id` from launcher process truth before falling back to title-derived identity
-- [shell.spl](/home/ormastes/dev/pub/simple/src/os/desktop/shell.spl) drains WM actions in normal desktop runtime and avoids local placeholder windows for remote-owned apps
-- launcher, WM, shell, and compositor now have a consistent path for remote window ownership by manifest app identity
+- `test/unit/os/desktop/shell_remote_window_spec.spl`
+- `test/unit/os/services/wm/wm_service_metadata_spec.spl`
+- `test/unit/os/services/launcher/launcher_spec.spl`
+- `test/system/browser_engine_in_qemu_spec.spl`
+- `test/system/os/hosted_wm_system_test.spl`
 
-### Scenario routing
+## Remaining Gaps
 
-- [qemu_runner.spl](/home/ormastes/dev/pub/simple/src/os/qemu_runner.spl), [cli.spl](/home/ormastes/dev/pub/simple/src/os/cli.spl), and [main.spl](/home/ormastes/dev/pub/simple/src/app/cli/main.spl) route `./bin/simple os run --scenario=x64-desktop-test` to the dedicated desktop test target
+### Gap 1. The desktop system spec is still placeholder-heavy
 
-## System-Level Tests That Exist
+`test/system/os_desktop_integration_spec.spl` currently documents the intended system tests, but the assertions are still placeholders. It should not be treated as milestone proof until it becomes a real QEMU-backed spec or is replaced by a real one.
 
-### Relevant live or system specs
+### Gap 2. `x64-desktop-test` is not yet the final GUI-proof lane
 
-- [engine2d_in_qemu_spec.spl](/home/ormastes/dev/pub/simple/test/system/engine2d_in_qemu_spec.spl)
-  - covers Engine2D/QEMU rendering path
-- [os_desktop_integration_spec.spl](/home/ormastes/dev/pub/simple/test/system/os_desktop_integration_spec.spl)
-  - covers broader desktop integration expectations
-- [browser_engine_in_qemu_spec.spl](/home/ormastes/dev/pub/simple/test/system/browser_engine_in_qemu_spec.spl)
-  - covers browser rendering path in QEMU
-- [hosted_wm_system_test.spl](/home/ormastes/dev/pub/simple/test/system/os/hosted_wm_system_test.spl)
-  - covers WM behavior in hosted mode
+The scenario routing exists, but the current path still behaves like a serial-driven integration lane more than a full GUI-output proof lane. The milestone needs both:
 
-### High-value unit/regression coverage already added
+- a serial assertion lane for fast diagnosis
+- a framebuffer capture lane for visual proof
 
-- [shell_remote_window_spec.spl](/home/ormastes/dev/pub/simple/test/unit/os/desktop/shell_remote_window_spec.spl)
-  - remote window grouping by launcher-owned app identity
-  - launcher window-count updates
-  - dead-process cleanup path
-- [wm_service_metadata_spec.spl](/home/ormastes/dev/pub/simple/test/unit/os/services/wm/wm_service_metadata_spec.spl)
-  - WM fallback from PID to launcher-owned app identity
-- [launcher_spec.spl](/home/ormastes/dev/pub/simple/test/unit/os/services/launcher/launcher_spec.spl)
-  - launcher process and window ownership behavior
-- [window_spec.spl](/home/ormastes/dev/pub/simple/test/unit/os/userlib/window_spec.spl)
-  - window client behavior relevant to remote-window creation
+### Gap 3. GUI-output proof is split across unrelated specs
 
-## Important Gap In Current Coverage
+Right now the repo has real framebuffer capture proof for Engine2D and browser rendering, but not one explicit desktop-shell milestone test that captures the actual complete GUI OS result.
 
-[desktop_e2e_test.spl](/home/ormastes/dev/pub/simple/src/os/test/desktop_e2e_test.spl) is still on the older synthetic path and still calls `wm_notify_app_launched()`.
+### Gap 4. Exit and crash cleanup are not yet proven end to end
 
-That means the repo currently has:
+Targeted unit coverage exists, but one live desktop scenario still needs to prove:
 
-- strong targeted unit coverage for identity and cleanup logic
-- partial system coverage for graphics, desktop, and browser paths
-- a newer real baremetal desktop entry that exercises the right launcher-driven flow
-- but not yet one finished live regression lane that proves the full joined path end to end under the current desktop-test harness
+- graceful exit
+- terminate from shell
+- crash or nonzero exit cleanup
 
-## What Remains
+### Gap 5. Persistent-storage proof is still weaker than the GUI core
 
-### 1. Unblock the live desktop-test build
+The first milestone can defer a rich storage UX, but any claim beyond "small complete GUI OS" needs real persistence validation on a disk image path.
 
-Current blocker:
+## Required System Tests
 
-- `./bin/simple os run --scenario=x64-desktop-test` reaches the correct target, but build execution is blocked by missing host toolchain support such as `llvm-objcopy`
+The minimum system-test set for this milestone is:
 
-Until this is fixed, the real QEMU lane cannot be treated as reliable regression coverage.
+### ST-001 QEMU GUI boot smoke
 
-### 2. Align or replace the old desktop test harness
+- boot the `x86_64` GUI target in QEMU
+- assert serial markers for boot, shell-ready, and desktop-ready
+- fail on `FAULT @`, panic, or timeout
 
-- update [desktop_e2e_test.spl](/home/ormastes/dev/pub/simple/src/os/test/desktop_e2e_test.spl) to match the real launcher -> WM -> shell path
-- or retire it if [desktop_e2e_entry.spl](/home/ormastes/dev/pub/simple/examples/simple_os/arch/x86_64/desktop_e2e_entry.spl) is now the authoritative live lane
+### ST-002 Desktop shell join test
 
-The current mismatch is a maintenance risk because the repo now has two different stories for the same desktop scenario.
+- assert launcher, shell, WM, and compositor all initialize on the real path
+- assert at least one launcher shortcut is handled
+- assert the desktop creates the expected root or chrome surfaces
 
-### 3. Prove the minimum complete app set live
+### ST-003 Single-window app live test
 
-- live-launch `Hello World` as the single-window proof
-- live-launch `Browser Demo` as the multi-window proof
-- verify manifest-owned `app_id` grouping survives title changes and stays stable across compositor and WM ownership views
+- launch `Hello World` through the real launcher path
+- assert launcher state, WM ownership, and one visible window agree on the same app identity
 
-### 4. Prove cleanup behavior live
+### ST-004 Multi-window app live test
 
-Need one live lane that shows:
+- launch `Browser Demo` through the real launcher path
+- assert at least two windows appear
+- assert both windows group under one stable `app_id`
+- assert title changes do not break grouping
 
-- graceful app exit removes or invalidates owned windows correctly
-- shell terminate path updates launcher state and removes owned windows
-- crash path lands in `crashed` and does not leave orphaned ownership or stale grouped windows
+### ST-005 Cleanup and lifecycle live test
 
-### 5. Freeze one regression lane
+- graceful exit removes or invalidates owned windows
+- shell terminate updates launcher state and removes owned windows
+- crash path lands in `crashed` and leaves no orphaned ownership
 
-Once the above is working, keep one debug-friendly desktop QEMU scenario as the stable regression target for:
+### ST-006 GUI framebuffer baseline compare
 
-- launch
-- remote `create_window`
-- identity join
-- multi-window grouping
-- exit / terminate / crash cleanup
+- boot a real QEMU guest with GUI enabled
+- wait for a stable paint marker
+- capture framebuffer with QMP screendump
+- compare against a baseline with a tolerance profile
 
-## Recommended Order
+### ST-007 Disk-backed smoke for the broader OS claim
 
-1. Fix the host build/toolchain blocker for `x64-desktop-test`.
-2. Make `desktop_e2e_test.spl` match the real launcher-driven path or delete the duplicate path.
-3. Prove `Hello World` live as the minimum single-window app.
-4. Prove `Browser Demo` live as the minimum multi-window app.
-5. Add live assertions for graceful exit, terminate, and crash cleanup.
-6. Treat that lane as the minimum complete GUI regression target.
+- boot with the intended disk-image path
+- prove launcher and one app still work with the real storage-backed environment
 
-## Overall Assessment
+This test is recommended for the next milestone, but it is not required to close the first "small complete GUI OS" slice if the GUI stack itself is otherwise proven.
 
-The architecture is close.
+## QEMU and GUI Output Test Strategy
 
-The repo already has most of the hard joining logic:
+### Lane A. Fast serial-only regression
 
-- launcher-owned process truth
-- WM identity fallback
-- shell-side reconciliation
-- real remote-window app entrypoints
-- a real desktop-test boot path
+Purpose:
 
-What is still missing is not another large design pass. The missing piece is one finished live-system proof that the current pieces work together under QEMU on the real path, plus cleanup coverage strong enough to call the GUI slice complete.
+- catch boot and integration regressions quickly
+- keep failure output easy to diagnose
+
+Expected path:
+
+- `bin/simple os test --scenario=x64-desktop-test`
+
+Assertions:
+
+- serial markers only
+- no framebuffer compare required
+
+### Lane B. Real GUI-output verification
+
+Purpose:
+
+- prove the desktop really rendered on the guest framebuffer
+- catch visual regressions that serial logs cannot see
+
+Expected pattern:
+
+1. boot GUI guest under QEMU with QMP enabled
+2. wait for a paint marker that indicates the frame is ready
+3. use `src/os/compositor/qemu_capture.spl` to capture the framebuffer
+4. compare captured PPM against a checked-in baseline with an agreed tolerance profile
+
+Recommended starting point:
+
+- copy the structure of `test/system/engine2d_in_qemu_spec.spl`
+- retarget it to the complete desktop-shell milestone entry rather than the Engine2D entry
+
+### Lane C. Manual debug GUI lane
+
+Purpose:
+
+- inspect failures visually while keeping serial output available
+
+Expected path:
+
+- `bin/simple os run --arch=x86_64 --debug-gui`
+
+### Baseline policy
+
+- first capture or `UPDATE_BASELINE=1` should record the baseline artifact
+- baseline updates require an intentional visual review
+- the first desktop baseline should contain desktop chrome plus the minimum app proof state
+
+## Recommended Execution Order
+
+1. Fix the remaining host build and toolchain issues that block the real desktop lane.
+2. Decide whether `src/os/test/desktop_e2e_test.spl` is upgraded or replaced by the newer real desktop entry.
+3. Add a real `Hello World` live desktop test.
+4. Add a real `Browser Demo` multi-window live desktop test.
+5. Add live graceful-exit, terminate, and crash cleanup assertions.
+6. Add one QMP framebuffer capture desktop spec and record its baseline.
+7. Use the serial lane plus the visual lane together as the milestone gate.
+
+## Out of Scope for This Milestone
+
+- non-`x86_64` GUI parity
+- polished typography or macOS-level visual quality
+- large bundled app catalog as a release gate
+- advanced storage management UX
+- hardware validation beyond the supported QEMU path
+
+## Exit Criteria
+
+The milestone is complete when all of the following are true:
+
+- `x86_64` GUI boot works reliably under QEMU
+- desktop shell, launcher, WM, compositor, keyboard, and mouse are joined on the real path
+- `Hello World` and `Browser Demo` both launch through the real launcher path
+- single-window and multi-window ownership are stable by `app_id`
+- graceful exit, terminate, and crash cleanup are proven live
+- one serial regression lane passes
+- one framebuffer capture regression lane passes
