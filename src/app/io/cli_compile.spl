@@ -108,7 +108,7 @@ fn cli_compile(args: [text]) -> i64:
             print "Usage: simple compile [options] <source.spl>"
             print ""
             print "Options:"
-            print "  --target=<target>     Target: baremetal-x86, baremetal-arm, etc."
+            print "  --target=<target>     Target: baremetal-x86, x86_64-simpleos, etc."
             print "  --emit=<format>       Output: llvm-ir, object, elf (default: elf)"
             print "  --format=<fmt>        Output: native, smf, self-contained (sc), both"
             print "  --native              Compile to native binary via C codegen + gcc"
@@ -236,6 +236,10 @@ fn cli_compile(args: [text]) -> i64:
 
     if target.starts_with("baremetal-"):
         return compile_baremetal(source_file, target, emit, output_file, verbose)
+
+    # SimpleOS targets — route through Pure Simple compiler (bare-metal ELF)
+    if target.contains("simpleos"):
+        return compile_simpleos(source_file, target, emit, output_file, verbose)
 
     if output_format != "":
         if output_format != "native" and output_format != "smf" and output_format != "self-contained" and output_format != "sc" and output_format != "both":
@@ -378,6 +382,133 @@ fn compile_baremetal(source_file: text, target: text, emit: text, output_file: t
         _cli_eprint("Note: Linker script should be at: {linker_script}")
         _cli_eprint("Generate it using: simple linker-gen resources/boards/qemu_x86.sdn")
         return 1
+
+    if verbose:
+        print "  Generated: {elf_file}"
+
+    print "Success: {elf_file}"
+    return 0
+
+# ============================================================================
+# SimpleOS Target Compilation
+# ============================================================================
+
+fn compile_simpleos(source_file: text, target: text, emit: text, output_file: text, verbose: bool) -> i64:
+    """Compile for SimpleOS targets (bare-metal ELF with SimpleOS conventions).
+
+    Supported target strings:
+    - x86_64-simpleos, x86_64-unknown-simpleos, simpleos  -> x86_64-unknown-none-elf
+    """
+    # Parse architecture from target string
+    val arch = if target == "simpleos" or target == "x86_64-simpleos" or target == "x86_64-unknown-simpleos":
+        "x86_64"
+    else:
+        _cli_eprint("Error: Unknown SimpleOS target: {target}")
+        _cli_eprint("Supported: x86_64-simpleos, x86_64-unknown-simpleos, simpleos")
+        return 1
+
+    val target_triple = "{arch}-unknown-none-elf"
+
+    if verbose:
+        print "Compiling {source_file} for SimpleOS ({target})"
+        print "  Architecture: {arch}"
+        print "  Target triple: {target_triple}"
+        print "  Emit: {emit}"
+        if output_file != "":
+            print "  Output: {output_file}"
+
+    if not _cli_dir_create_impl("build/simpleos", true):
+        _cli_eprint("Error: Failed to create build/simpleos directory")
+        return 1
+
+    val (llvm_ir, compile_err, compile_exit) = rt_compile_to_llvm_ir(source_file, target_triple, true)
+
+    if compile_exit != 0 or llvm_ir == "":
+        _cli_eprint("Error: LLVM IR generation failed for SimpleOS target")
+        if compile_err != "":
+            _cli_eprint(compile_err)
+        return 1
+
+    val base_name = "simpleos_kernel"
+    val ir_file = "build/simpleos/{base_name}.ll"
+    if not _cli_file_write_impl(ir_file, llvm_ir):
+        _cli_eprint("Error: Failed to write LLVM IR to {ir_file}")
+        return 1
+
+    if verbose:
+        print "  Generated: {ir_file}"
+
+    if emit == "llvm-ir":
+        if output_file != "":
+            if not _cli_file_copy_impl(ir_file, output_file):
+                _cli_eprint("Error: Failed to copy to {output_file}")
+                return 1
+            print "Output: {output_file}"
+        else:
+            print "Output: {ir_file}"
+        return 0
+
+    if verbose:
+        print "Compiling LLVM IR -> Object file..."
+
+    val obj_file = "build/simpleos/{base_name}.o"
+    val (llc_out, llc_err, llc_exit) = _cli_process_run("llc", [
+        "--filetype=obj",
+        "--relocation-model=static",
+        ir_file,
+        "-o", obj_file
+    ])
+
+    if llc_exit != 0:
+        _cli_eprint("Error: llc compilation failed")
+        _cli_eprint(llc_err)
+        return 1
+
+    if verbose:
+        print "  Generated: {obj_file}"
+
+    if emit == "object":
+        if output_file != "":
+            if not _cli_file_copy_impl(obj_file, output_file):
+                _cli_eprint("Error: Failed to copy to {output_file}")
+                return 1
+            print "Output: {output_file}"
+        else:
+            print "Output: {obj_file}"
+        return 0
+
+    if verbose:
+        print "Linking Object -> ELF binary (SimpleOS)..."
+
+    val elf_file = if output_file != "":
+        output_file
+    else:
+        "build/simpleos/kernel.elf"
+
+    # Use ld.lld for SimpleOS (matches toolchain_simpleos_x86_64 in llvm_cross_target.spl)
+    val linker = "ld.lld"
+    val (ld_out, ld_err, ld_exit) = _cli_process_run(linker, [
+        "--no-relax",
+        "-nostdlib",
+        "--entry=_start",
+        obj_file,
+        "-o", elf_file
+    ])
+
+    if ld_exit != 0:
+        # Fallback to ld if ld.lld is not available
+        val (ld2_out, ld2_err, ld2_exit) = _cli_process_run("ld", [
+            "-nostdlib",
+            "--entry=_start",
+            obj_file,
+            "-o", elf_file
+        ])
+        if ld2_exit != 0:
+            _cli_eprint("Error: Linking failed for SimpleOS target")
+            _cli_eprint(ld2_err)
+            _cli_eprint("")
+            _cli_eprint("Install: apt install lld (provides ld.lld)")
+            return 1
 
     if verbose:
         print "  Generated: {elf_file}"

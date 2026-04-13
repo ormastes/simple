@@ -178,8 +178,13 @@ pub unsafe extern "C" fn rt_eprintln_str(ptr: *const u8, len: u64) {
 }
 
 /// Print a RuntimeValue to stdout (converts to display string first).
+/// Nil values are silently skipped to prevent stdout pollution
+/// (e.g., MCP JSON-RPC servers, binary protocol output).
 #[no_mangle]
 pub extern "C" fn rt_print_value(v: RuntimeValue) {
+    if v.is_nil() {
+        return;
+    }
     let s = value_to_display_string(v);
     unsafe {
         rt_print_str(s.as_ptr(), s.len() as u64);
@@ -187,8 +192,15 @@ pub extern "C" fn rt_print_value(v: RuntimeValue) {
 }
 
 /// Print a RuntimeValue to stdout with newline.
+/// Nil values print just a newline (matching `print` with no args behavior).
 #[no_mangle]
 pub extern "C" fn rt_println_value(v: RuntimeValue) {
+    if v.is_nil() {
+        unsafe {
+            rt_println_str(b"".as_ptr(), 0);
+        }
+        return;
+    }
     let s = value_to_display_string(v);
     unsafe {
         rt_println_str(s.as_ptr(), s.len() as u64);
@@ -196,8 +208,12 @@ pub extern "C" fn rt_println_value(v: RuntimeValue) {
 }
 
 /// Print a RuntimeValue to stderr.
+/// Nil values are silently skipped.
 #[no_mangle]
 pub extern "C" fn rt_eprint_value(v: RuntimeValue) {
+    if v.is_nil() {
+        return;
+    }
     let s = value_to_display_string(v);
     unsafe {
         rt_eprint_str(s.as_ptr(), s.len() as u64);
@@ -205,8 +221,15 @@ pub extern "C" fn rt_eprint_value(v: RuntimeValue) {
 }
 
 /// Print a RuntimeValue to stderr with newline.
+/// Nil values print just a newline.
 #[no_mangle]
 pub extern "C" fn rt_eprintln_value(v: RuntimeValue) {
+    if v.is_nil() {
+        unsafe {
+            rt_eprintln_str(b"".as_ptr(), 0);
+        }
+        return;
+    }
     let s = value_to_display_string(v);
     unsafe {
         rt_eprintln_str(s.as_ptr(), s.len() as u64);
@@ -811,7 +834,8 @@ mod tests {
         rt_capture_stdout_start();
         rt_print_value(RuntimeValue::NIL);
         let output = rt_capture_stdout_stop();
-        assert_eq!(output, "nil");
+        // Nil values are silently skipped to prevent stdout pollution
+        assert_eq!(output, "");
     }
 
     #[test]

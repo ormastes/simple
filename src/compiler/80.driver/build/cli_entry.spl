@@ -13,6 +13,95 @@ extern fn rt_dir_list(path: text) -> [text]
 
 val LSP_MCP_SIZE_CEILING: i32 = 20971520
 
+# ============================================================================
+# Platform Triple Detection (for build mcp)
+# ============================================================================
+
+fn detect_host_arch() -> text:
+    val (out, _, code) = rt_process_run("uname", ["-m"])
+    if code != 0:
+        # uname failed — likely Windows without MSYS
+        return "x86_64"
+    val raw = out.trim()
+    match raw:
+        case "x86_64" | "amd64":
+            return "x86_64"
+        case "aarch64" | "arm64":
+            return "aarch64"
+        case "i686" | "i386":
+            return "i686"
+        case "riscv64":
+            return "riscv64"
+        case _:
+            return "x86_64"
+    "x86_64"
+
+fn detect_host_triple() -> text:
+    val arch = detect_host_arch()
+    val (out, _, code) = rt_process_run("uname", ["-s"])
+    if code != 0:
+        # uname failed — try Windows detection
+        val (win_out, _, win_code) = rt_process_run("cmd", ["/c", "ver"])
+        if win_code == 0 and win_out.contains("Windows"):
+            return arch + "-pc-windows-msvc"
+        return arch + "-unknown-linux-gnu"
+    val os_raw = out.trim()
+    if os_raw.starts_with("Linux"):
+        return arch + "-unknown-linux-gnu"
+    if os_raw.starts_with("Darwin"):
+        return arch + "-apple-darwin-macho"
+    if os_raw.starts_with("FreeBSD"):
+        return arch + "-unknown-freebsd-elf"
+    if os_raw.starts_with("MINGW") or os_raw.starts_with("MSYS") or os_raw.starts_with("CYGWIN"):
+        return arch + "-pc-windows-msvc"
+    arch + "-unknown-linux-gnu"
+
+# ============================================================================
+# Build MCP Servers
+# ============================================================================
+
+fn build_one_mcp(triple: text, entry: text, output_name: text) -> i64:
+    val output_path = "build/native/" + triple + "/" + output_name
+    print "Building {output_name} -> {output_path}"
+    val args = [
+        "native-build",
+        "--source", "src/compiler",
+        "--source", "src/app",
+        "--source", "src/lib",
+        "--entry-closure",
+        "--entry", entry,
+        "-o", output_path
+    ]
+    val (stdout, stderr, exit_code) = rt_process_run("bin/simple", args)
+    if stdout.?:
+        print stdout
+    if stderr.?:
+        print stderr
+    if exit_code == 0:
+        print "  OK: {output_name}"
+    else:
+        print "  FAILED: {output_name} (exit code {exit_code})"
+    exit_code
+
+fn run_build_mcp() -> i64:
+    val triple = detect_host_triple()
+    print "=== Building MCP servers for {triple} ==="
+    print ""
+
+    val code1 = build_one_mcp(triple, "src/app/mcp/main.spl", "simple_mcp_server")
+    print ""
+    val code2 = build_one_mcp(triple, "src/app/simple_lsp_mcp/main.spl", "simple_lsp_mcp_server")
+    print ""
+
+    if code1 != 0:
+        print "=== MCP build finished with errors ==="
+        return code1
+    if code2 != 0:
+        print "=== MCP build finished with errors ==="
+        return code2
+    print "=== MCP build complete: 2/2 succeeded ==="
+    0
+
 # Stored exit code from main(). -1 = not yet run.
 var _exit_code = -1
 
@@ -110,6 +199,8 @@ fn handle_build(args: [text]) -> i64:
             return run_fmt()
         case "check":
             return run_check()
+        case "mcp":
+            return run_build_mcp()
         case _:
             return delegate_full(args)
     0
