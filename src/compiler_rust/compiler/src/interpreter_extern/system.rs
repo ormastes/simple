@@ -4,9 +4,66 @@
 
 use crate::error::CompileError;
 use crate::value::Value;
+use std::io::Read;
+use std::process::Child;
 
 fn clear_simple_child_stack_env(command: &mut std::process::Command) {
     command.env_remove("_SIMPLE_STACK_SET");
+}
+
+fn finish_child_output_with_timeout(
+    mut child: Child,
+    timeout_ms: i64,
+) -> Result<(String, String, i64), ()> {
+    let stdout_handle = child.stdout.take().map(|mut pipe| {
+        std::thread::spawn(move || {
+            let mut buf = String::new();
+            let _ = pipe.read_to_string(&mut buf);
+            buf
+        })
+    });
+    let stderr_handle = child.stderr.take().map(|mut pipe| {
+        std::thread::spawn(move || {
+            let mut buf = String::new();
+            let _ = pipe.read_to_string(&mut buf);
+            buf
+        })
+    });
+
+    let timeout = std::time::Duration::from_millis(timeout_ms as u64);
+    let start = std::time::Instant::now();
+    let poll_interval = std::time::Duration::from_millis(10);
+
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break Ok(status),
+            Ok(None) => {
+                if start.elapsed() >= timeout {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    break Err(());
+                }
+                std::thread::sleep(poll_interval);
+            }
+            Err(_) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                break Err(());
+            }
+        }
+    };
+
+    let stdout = stdout_handle
+        .map(|handle| handle.join().unwrap_or_default())
+        .unwrap_or_default();
+    let stderr = stderr_handle
+        .map(|handle| handle.join().unwrap_or_default())
+        .unwrap_or_default();
+
+    match status {
+        Ok(exit_status) => Ok((stdout, stderr, exit_status.code().unwrap_or(-1) as i64)),
+        Err(()) => Err(()),
+    }
 }
 use crate::value_bridge::runtime_to_value;
 
@@ -458,61 +515,17 @@ pub fn rt_process_run_timeout(args: &[Value]) -> Result<Value, CompileError> {
         }
     };
 
-    // Poll-based timeout
-    let timeout = std::time::Duration::from_millis(timeout_ms as u64);
-    let start = std::time::Instant::now();
-    let poll_interval = std::time::Duration::from_millis(10);
-
-    let status = loop {
-        match child.try_wait() {
-            Ok(Some(status)) => break Some(status),
-            Ok(None) => {
-                if start.elapsed() >= timeout {
-                    break None;
-                }
-                std::thread::sleep(poll_interval);
-            }
-            Err(_) => break None,
-        }
-    };
-
-    match status {
-        Some(exit_status) => {
-            let stdout = child
-                .stdout
-                .take()
-                .map(|mut s| {
-                    let mut buf = String::new();
-                    std::io::Read::read_to_string(&mut s, &mut buf).ok();
-                    buf
-                })
-                .unwrap_or_default();
-            let stderr = child
-                .stderr
-                .take()
-                .map(|mut s| {
-                    let mut buf = String::new();
-                    std::io::Read::read_to_string(&mut s, &mut buf).ok();
-                    buf
-                })
-                .unwrap_or_default();
-            let exit_code = exit_status.code().unwrap_or(-1) as i64;
-            Ok(Value::Tuple(vec![
-                Value::Str(stdout),
-                Value::Str(stderr),
-                Value::Int(exit_code),
-            ]))
-        }
-        None => {
-            // Timeout - kill the child
-            let _ = child.kill();
-            let _ = child.wait();
-            Ok(Value::Tuple(vec![
-                Value::Str(String::new()),
-                Value::Str("Process timed out".to_string()),
-                Value::Int(-1),
-            ]))
-        }
+    match finish_child_output_with_timeout(child, timeout_ms) {
+        Ok((stdout, stderr, exit_code)) => Ok(Value::Tuple(vec![
+            Value::Str(stdout),
+            Value::Str(stderr),
+            Value::Int(exit_code),
+        ])),
+        Err(()) => Ok(Value::Tuple(vec![
+            Value::Str(String::new()),
+            Value::Str("Process timed out".to_string()),
+            Value::Int(-1),
+        ])),
     }
 }
 

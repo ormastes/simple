@@ -16,9 +16,15 @@ use common.ui.builder.{
 use os.compositor.compositor.{Compositor, WindowSurface}
 use os.drivers.framebuffer.fb_driver.{Color}
 use std.gc_async_mut.gpu.engine2d.engine.{Engine2D}
-use os.desktop.app_manifest.{AppManifest, load_app_manifests, search_apps}
+use os.desktop.app_manifest.{AppManifest, load_app_manifests, search_apps, manifest_categories}
 use os.services.wm.wm_service.{WmService, WmAction}
-use os.services.launcher.launcher.{launcher_shortcut_dispatch}
+use os.services.launcher.launcher.{
+    launcher_init, launcher_launch, launcher_shortcut_dispatch, launcher_register, launcher_terminate,
+    launcher_get_app_name, launcher_get_process_app_index, launcher_get_process_app_id_for_pid,
+    launcher_get_process_count, launcher_get_process_name, launcher_get_process_pid,
+    launcher_get_process_state, launcher_get_process_window_count, launcher_get_process_is_headless,
+    launcher_note_window_opened, launcher_note_window_closed, launcher_poll_processes, MOD_META
+}
 
 extern fn serial_println(msg: text)
 
@@ -73,6 +79,16 @@ struct KeyboardShortcut:
     key: text           # e.g. "h", "t"
     action: text        # e.g. "launch_Hello World"
 
+struct ShellProcessRow:
+    """Read-only shell projection of launcher-owned process state."""
+    process_index: u64
+    name: text
+    pid: u64
+    state: text
+    windows: u64
+    headless: bool
+    app_id: text
+
 # ============================================================================
 # Desktop Shell
 # ============================================================================
@@ -94,6 +110,9 @@ class DesktopShell:
     clock_text: text
     shortcuts: [KeyboardShortcut]
     baremetal_apps: [text]
+    launcher_initialized: bool
+    selected_process_idx: i64
+    task_reaper_enabled: bool
 
 impl DesktopShell:
 
@@ -117,9 +136,20 @@ impl DesktopShell:
             launcher_visible: false,
             launcher_id: 0,
             clock_text: "00:00",
-            shortcuts: [],
-            baremetal_apps: []
+            shortcuts: _default_shortcuts(),
+            baremetal_apps: [],
+            launcher_initialized: false,
+            selected_process_idx: 0,
+            task_reaper_enabled: true
         )
+
+    me set_task_reaper_enabled(enabled: bool):
+        """Toggle kernel-backed task polling inside `reconcile_dead_process_windows`.
+
+        Unit tests should disable this to keep fake PIDs alive; real
+        baremetal shells leave it on so dead tasks are reaped each frame.
+        """
+        self.task_reaper_enabled = enabled
 
     me init():
         """Initialize the desktop shell.
@@ -127,6 +157,16 @@ impl DesktopShell:
         WORKAROUND: Skip builder DSL and taskbar creation in baremetal.
         The compositor handles rendering directly.
         """
+        if not self.wm.initialized:
+            if self.wm.init():
+                serial_println("[shell] init: wm service initialized")
+            else:
+                serial_println("[shell] init: wm service init failed")
+        if not self.launcher_initialized:
+            launcher_init()
+            _sync_launcher_registry_with_manifests()
+            self.launcher_initialized = true
+            serial_println("[shell] init: launcher initialized")
         serial_println("[shell] init: skipping taskbar (builder DSL unavailable in baremetal)")
         serial_println("[shell] init: desktop shell initialized")
 
@@ -200,22 +240,42 @@ impl DesktopShell:
 
         Places the window in a cascading position.
         """
-        # Calculate cascading position
-        val win_count = self.compositor.window_count()
-        val cascade_offset = (win_count - 1) * 30
-        val app_x = 50 + cascade_offset
-        val app_y = 50 + cascade_offset
-        val app_w = 400
-        val app_h = 300
+        if not self.launcher_initialized:
+            launcher_init()
+            _sync_launcher_registry_with_manifests()
+            self.launcher_initialized = true
 
-        # Build a default app tree
-        val tree = _build_app_tree(name)
-        self.compositor.create_window_with_tree(
-            name,
-            app_x, app_y,
-            app_w, app_h,
-            tree
-        )
+        val pid = launcher_launch(name)
+        if _app_uses_remote_window(name):
+            if pid >= 0:
+                serial_println("[shell] launch_app: waiting for remote window from {name} (PID {pid.to_u64()})")
+            else:
+                serial_println("[shell] launch_app: launcher spawn failed for {name}")
+        else:
+            # Calculate cascading position
+            val win_count = self.compositor.window_count()
+            val cascade_offset = (win_count - 1) * 30
+            val app_x = 50 + cascade_offset
+            val app_y = 50 + cascade_offset
+            val app_w = 400
+            val app_h = 300
+
+            # Build a default app tree
+            val tree = _build_app_tree(name)
+            val wid = self.compositor.create_window_with_tree(
+                name,
+                app_x, app_y,
+                app_w, app_h,
+                tree
+            )
+            if pid >= 0:
+                val process_id = pid.to_u64()
+                val app_id = launcher_get_process_app_id_for_pid(process_id)
+                self.compositor.set_window_identity(wid, process_id, app_id)
+                self.wm.register_window_owner_with_identity(wid, 0, process_id, app_id)
+                launcher_note_window_opened(process_id)
+            else:
+                serial_println("[shell] launch_app: launcher spawn failed for {name}, keeping local window only")
 
         # Close launcher if open
         if self.launcher_visible:
@@ -223,7 +283,7 @@ impl DesktopShell:
 
         self.update_taskbar()
 
-    me handle_shortcut(modifier: text, key: text):
+    me handle_shortcut(modifier: text, key: text, baremetal: bool):
         """Match a modifier+key combination against registered shortcuts.
 
         If a matching shortcut's action starts with "launch_" the
@@ -234,7 +294,20 @@ impl DesktopShell:
                 val action = shortcut.action
                 if action.starts_with("launch_"):
                     val app_name = action.slice(7, action.len())
-                    self.launch_app(app_name)
+                    if baremetal:
+                        self.launch_app_baremetal(app_name)
+                    else:
+                        self.launch_app(app_name)
+                elif action == "process_prev":
+                    self.select_prev_process()
+                elif action == "process_next":
+                    self.select_next_process()
+                elif action == "process_focus":
+                    self.focus_selected_process()
+                elif action == "process_terminate":
+                    self.terminate_selected_process()
+                elif action == "process_relaunch":
+                    self.relaunch_selected_process(baremetal)
                 return
 
     me handle_taskbar_action(action: text):
@@ -261,17 +334,33 @@ impl DesktopShell:
         """
         match action.kind:
             "create_window":
+                var app_id = action.app_id
+                if action.process_id > 0:
+                    val launcher_app_id = launcher_get_process_app_id_for_pid(action.process_id)
+                    if launcher_app_id != "":
+                        app_id = launcher_app_id
                 val wid = self.compositor.create_remote_window(
                     action.title, action.x, action.y,
                     action.width, action.height, action.owner_port)
-                # Track ownership in the WM service
-                self.wm.register_window_owner(wid, action.owner_port)
+                # Preserve launcher/WM identity at the shell boundary.
+                self.compositor.set_window_identity(wid, action.process_id, app_id)
+                self.wm.register_window_owner_with_identity(
+                    wid,
+                    action.owner_port,
+                    action.process_id,
+                    app_id
+                )
+                if action.process_id > 0:
+                    launcher_note_window_opened(action.process_id)
                 # Send reply with window_id back to the app
                 self.wm.send_create_reply(action.src_port, wid)
                 serial_println("[shell] Created window {wid} for port {action.src_port}: '{action.title}'")
             "destroy_window":
+                val process_id = self.wm.window_owner_process_id(action.window_id)
                 self.compositor.destroy_window(action.window_id)
                 self.wm.remove_owner(action.window_id)
+                if process_id > 0:
+                    launcher_note_window_closed(process_id)
                 self.wm.send_status_reply(action.src_port, 0)
                 serial_println("[shell] Destroyed window {action.window_id}")
             "focus":
@@ -312,7 +401,10 @@ impl DesktopShell:
         serial_println("[shell] entering event loop...")
         self.compositor.running = true
         while self.compositor.running:
+            self.drain_wm_actions()
             self.compositor.handle_input()
+            self.handle_pending_shell_input(false)
+            self.reconcile_dead_process_windows()
             self.compositor.render_all()
 
     me launch_app_baremetal(name: text):
@@ -322,8 +414,17 @@ impl DesktopShell:
         The widget builder DSL crashes in baremetal (WidgetNode.new
         is auto-stubbed), so we bypass it entirely.
         """
-        self.baremetal_apps = self.baremetal_apps.push(name)
-        serial_println("[shell] launched (baremetal): {name}")
+        if not self.launcher_initialized:
+            launcher_init()
+            _sync_launcher_registry_with_manifests()
+            self.launcher_initialized = true
+        val pid = launcher_launch(name)
+        if pid >= 0:
+            serial_println("[shell] launched (baremetal): {name} pid={pid}")
+        else:
+            serial_println("[shell] launcher launch failed for {name}, keeping overlay-only window")
+        if not _contains_text(self.baremetal_apps, name):
+            self.baremetal_apps = self.baremetal_apps.push(name)
 
     me run_baremetal(engine: Engine2D):
         """Baremetal event loop with direct Engine2D overlay.
@@ -339,18 +440,152 @@ impl DesktopShell:
         val screen_h = self.compositor.screen_height
 
         while self.compositor.running:
+            self.drain_wm_actions()
             self.compositor.handle_input()
+            self.handle_pending_shell_input(true)
+            self.reconcile_dead_process_windows()
+            val visible_apps = _window_overlay_rows()
+            self.baremetal_apps = visible_apps
+            val process_rows = _process_panel_rows()
             # Clear desktop — dark blue background, matches the
             # Engine2D verification scene in gui_entry_engine2d.
             engine.clear(0xFF0A2540)
-            _draw_baremetal_overlay(engine, self.baremetal_apps, screen_w, screen_h, self.clock_text)
+            _draw_baremetal_overlay(
+                engine,
+                visible_apps,
+                process_rows,
+                self.selected_process_idx,
+                screen_w,
+                screen_h,
+                self.clock_text
+            )
             engine.present()
+
+    me drain_wm_actions():
+        """Drain pending WM IPC requests into the compositor-owned shell state."""
+        while true:
+            val action = self.wm.poll_once()
+            if action == nil:
+                return
+            val next_action = action
+            if next_action.kind == "none":
+                continue
+            self.apply_wm_action(next_action)
+
+    me handle_pending_shell_input(baremetal: bool):
+        """Consume compositor-owned global shortcuts and route them into shell actions."""
+        val meta_key = self.compositor.consume_pending_meta_key()
+        if meta_key > 0:
+            val launched = launcher_shortcut_dispatch(meta_key.to_u32(), MOD_META)
+            if launched and self.launcher_visible:
+                self.close_launcher()
+
+        val shortcut_key = self.compositor.consume_pending_shortcut()
+        if shortcut_key != "":
+            self.handle_shortcut("Ctrl+Alt", shortcut_key.to_lower(), baremetal)
+
+    me select_next_process():
+        val rows = _process_rows()
+        if rows.len() == 0:
+            self.selected_process_idx = 0
+            return
+        val current = _normalized_process_selection(self.selected_process_idx, rows.len())
+        self.selected_process_idx = ((current + 1) % rows.len()).to_i64()
+
+    me select_prev_process():
+        val rows = _process_rows()
+        if rows.len() == 0:
+            self.selected_process_idx = 0
+            return
+        val current = _normalized_process_selection(self.selected_process_idx, rows.len())
+        var next = current - 1
+        if next < 0:
+            next = rows.len() - 1
+        self.selected_process_idx = next.to_i64()
+
+    me focus_selected_process():
+        val selected = _selected_process_row(self.selected_process_idx)
+        if selected == nil:
+            return
+        val row = selected
+        val window_ids = self.wm.window_ids_for_process(row.pid)
+        if window_ids.len() == 0:
+            serial_println("[shell] focus_selected_process: pid {row.pid} has no owned windows")
+            return
+        self.compositor.focus_window(window_ids[0])
+
+    me terminate_selected_process():
+        val selected = _selected_process_row(self.selected_process_idx)
+        if selected == nil:
+            return
+        val row = selected
+        if launcher_terminate(row.pid):
+            serial_println("[shell] terminate_selected_process: pid {row.pid}")
+
+    me relaunch_selected_process(baremetal: bool):
+        val selected = _selected_process_row(self.selected_process_idx)
+        if selected == nil:
+            return
+        val row = selected
+        if _process_is_live(row.state):
+            self.focus_selected_process()
+            return
+        var app_name = row.name
+        val app_index = launcher_get_process_app_index(row.process_index)
+        if app_index >= 0:
+            val launcher_name = launcher_get_app_name(app_index.to_u64())
+            if launcher_name != "":
+                app_name = launcher_name
+        if baremetal:
+            self.launch_app_baremetal(app_name)
+        else:
+            self.launch_app(app_name)
+
+    me reconcile_dead_process_windows():
+        """Keep launcher/WM window state aligned with compositor-owned surfaces.
+
+        Step 1 reaps any tasks that have exited or crashed since the last
+        tick (so their process rows flip to `exited`/`crashed`/`terminated`
+        before step 2 purges their windows). Step 2 walks every tracked
+        process row and realigns launcher/WM/compositor bookkeeping.
+        """
+        if self.task_reaper_enabled:
+            launcher_poll_processes()
+        val rows = _process_rows()
+        for row in rows:
+            val compositor_windows = self.compositor.windows_for_process(row.pid)
+            val owned_windows = self.wm.window_ids_for_process(row.pid)
+            for window_id in owned_windows:
+                if not _contains_u64(compositor_windows, window_id):
+                    self.wm.remove_owner(window_id)
+
+            if _process_is_live(row.state):
+                val actual_window_count = compositor_windows.len().to_u64()
+                var tracked_window_count = row.windows
+                while tracked_window_count > actual_window_count:
+                    launcher_note_window_closed(row.pid)
+                    tracked_window_count = tracked_window_count - 1
+                while tracked_window_count < actual_window_count:
+                    launcher_note_window_opened(row.pid)
+                    tracked_window_count = tracked_window_count + 1
+                continue
+            for window_id in compositor_windows:
+                self.compositor.destroy_window(window_id)
+                self.wm.remove_owner(window_id)
 
 # ============================================================================
 # Baremetal Overlay (direct Engine2D, no WidgetNode DSL)
 # ============================================================================
 
-fn _draw_baremetal_overlay(engine: Engine2D, apps: [text], screen_w: i32, screen_h: i32, clock: text):
+fn _draw_baremetal_overlay(
+    engine: Engine2D,
+    apps: [text],
+    process_rows: [text],
+    selected_process_idx: i64,
+    screen_w: i32,
+    screen_h: i32,
+    clock: text
+):
     """Draw the taskbar, launcher grid, and launched-app windows directly
     via Engine2D. Bypasses the widget builder DSL that crashes in baremetal.
 
@@ -370,13 +605,10 @@ fn _draw_baremetal_overlay(engine: Engine2D, apps: [text], screen_w: i32, screen
     val tile_h: i32 = 60
     val gap: i32 = 16
 
-    val demo_apps: [text] = [
-        "Terminal", "Editor", "File Manager", "Calculator",
-        "Clock", "Memo", "Settings", "Browser"
-    ]
+    val demo_apps = load_app_manifests()
 
     var idx: i32 = 0
-    for app_name in demo_apps:
+    for manifest in demo_apps:
         val col = idx % 4
         val row_i = idx / 4
         val tx = grid_x0 + col * (tile_w + gap)
@@ -384,15 +616,19 @@ fn _draw_baremetal_overlay(engine: Engine2D, apps: [text], screen_w: i32, screen
         # Tile body + accent header
         engine.draw_rect_filled(tx, ty, tile_w, tile_h, 0xFF2E2E3E)
         engine.draw_rect_filled(tx, ty, tile_w, 18, 0xFF3498DB)
-        engine.draw_text(tx + 8, ty + 2, app_name, 0xFFFFFFFF, 12)
+        engine.draw_text(tx + 8, ty + 2, manifest.name, 0xFFFFFFFF, 12)
+        engine.draw_text(tx + 8, ty + 26, manifest.icon, 0xFF8BD3FF, 12)
+        engine.draw_text(tx + 28, ty + 26, manifest.category, 0xFFB8D8D8, 11)
         idx = idx + 1
+        if idx >= 12:
+            break
 
     # --- Launched app "windows" (stacked cascading) ---
-    val win_w: i32 = 300
+    val win_w: i32 = 280
     val win_h: i32 = 160
     var win_idx: i32 = 0
     for name in apps:
-        val wx = 300 + win_idx * 24
+        val wx = 260 + win_idx * 20
         val wy = 220 + win_idx * 24
         # Drop shadow
         engine.draw_rect_filled(wx + 4, wy + 4, win_w, win_h, 0xFF000000)
@@ -403,6 +639,29 @@ fn _draw_baremetal_overlay(engine: Engine2D, apps: [text], screen_w: i32, screen
         engine.draw_text(wx + 8, wy + 4, name, 0xFFFFFFFF, 12)
         engine.draw_text(wx + 12, wy + 36, "Welcome to {name}", 0xFFCCCCCC, 12)
         win_idx = win_idx + 1
+
+    # --- Process panel (all launched processes, including headless) ---
+    val panel_w: i32 = 250
+    val panel_x = screen_w - panel_w - 20
+    val panel_y: i32 = 60
+    val panel_h = screen_h - panel_y - 60
+    engine.draw_rect_filled(panel_x, panel_y, panel_w, panel_h, 0xFF182430)
+    engine.draw_rect_filled(panel_x, panel_y, panel_w, 22, 0xFF16A085)
+    engine.draw_text(panel_x + 8, panel_y + 4, "Process Manager", 0xFFFFFFFF, 12)
+    engine.draw_text(panel_x + 12, panel_y + 30, "all launched processes", 0xFFB8D8D8, 11)
+    var row_y = panel_y + 52
+    var proc_idx: u64 = 0
+    while proc_idx < process_rows.len() and proc_idx < 8:
+        val row_color = if proc_idx.to_i64() == selected_process_idx: 0xFF2E5266 else: 0xFF22313F
+        engine.draw_rect_filled(panel_x + 10, row_y, panel_w - 20, 26, row_color)
+        engine.draw_text(panel_x + 16, row_y + 6, process_rows[proc_idx], 0xFFFFFFFF, 11)
+        row_y = row_y + 32
+        proc_idx = proc_idx + 1
+    if process_rows.len() == 0:
+        engine.draw_text(panel_x + 12, panel_y + 60, "no running processes", 0xFF9AA5B1, 11)
+    else:
+        engine.draw_text(panel_x + 12, panel_h + panel_y - 34, "Ctrl+Alt J/K select  F focus", 0xFF9AA5B1, 10)
+        engine.draw_text(panel_x + 12, panel_h + panel_y - 20, "Ctrl+Alt X terminate  R relaunch", 0xFF9AA5B1, 10)
 
     # --- Taskbar at the bottom ---
     val tb_h: i32 = 32
@@ -421,6 +680,43 @@ fn _draw_baremetal_overlay(engine: Engine2D, apps: [text], screen_w: i32, screen
     # Clock on the right
     val clock_x = screen_w - 80
     engine.draw_text(clock_x, tb_y + 8, clock, 0xFFFFFFFF, 14)
+
+fn _contains_text(items: [text], value: text) -> bool:
+    for item in items:
+        if item == value:
+            return true
+    false
+
+fn _contains_u64(items: [u64], value: u64) -> bool:
+    for item in items:
+        if item == value:
+            return true
+    false
+
+fn _process_panel_rows() -> [text]:
+    """Public shell view over launcher-owned process state.
+
+    MDSOC boundary:
+    - launcher layer owns process truth
+    - shell layer consumes read-only query helpers and renders them
+    """
+    var rows: [text] = []
+    for row in _process_rows():
+        val headless_tag = if row.headless: " headless" else: ""
+        rows = rows.push("{row.name} pid {row.pid} {row.state} w{row.windows}{headless_tag}")
+    rows
+
+fn _window_overlay_rows() -> [text]:
+    """Visible top-level app windows for the baremetal demo overlay.
+
+    The shell still draws simplified demo windows directly, but the list is
+    derived from launcher process/window state rather than a second registry.
+    """
+    var rows: [text] = []
+    for row in _process_rows():
+        if row.windows > 0:
+            rows = rows.push(row.name)
+    rows
 
 # ============================================================================
 # Taskbar Builder
@@ -488,7 +784,7 @@ fn _build_launcher_tree() -> UITree:
     app_buttons = app_buttons.push(label("launcher_title", "Applications"))
 
     # Group by category
-    var categories: [text] = ["System", "Utilities", "Development", "Settings"]
+    val categories = manifest_categories(manifests)
     for category in categories:
         var cat_apps: [AppManifest] = []
         for m in manifests:
@@ -499,7 +795,7 @@ fn _build_launcher_tree() -> UITree:
             for app in cat_apps:
                 val action = "launch_{app.name}"
                 app_buttons = app_buttons.push(
-                    button("launcher_app_{app.name}", app.name, action)
+                    button("launcher_app_{app.name}", "{app.icon} {app.name}", action)
                 )
 
     val root = column("launcher_root", app_buttons)
@@ -642,6 +938,9 @@ fn _build_app_tree(name: text) -> UITree:
             ])
             return build_tree_with_title(root, name, "dark")
 
+fn _app_uses_remote_window(name: text) -> bool:
+    name == "Hello World" or name == "Browser Demo"
+
 # ============================================================================
 # Default Keyboard Shortcuts
 # ============================================================================
@@ -650,8 +949,80 @@ fn _default_shortcuts() -> [KeyboardShortcut]:
     """Return default global keyboard shortcuts."""
     [
         KeyboardShortcut(modifier: "Ctrl+Alt", key: "h", action: "launch_Hello World"),
-        KeyboardShortcut(modifier: "Ctrl+Alt", key: "t", action: "launch_Terminal")
+        KeyboardShortcut(modifier: "Ctrl+Alt", key: "t", action: "launch_Terminal"),
+        KeyboardShortcut(modifier: "Ctrl+Alt", key: "j", action: "process_next"),
+        KeyboardShortcut(modifier: "Ctrl+Alt", key: "k", action: "process_prev"),
+        KeyboardShortcut(modifier: "Ctrl+Alt", key: "f", action: "process_focus"),
+        KeyboardShortcut(modifier: "Ctrl+Alt", key: "x", action: "process_terminate"),
+        KeyboardShortcut(modifier: "Ctrl+Alt", key: "r", action: "process_relaunch")
     ]
+
+fn _process_rows() -> [ShellProcessRow]:
+    """Return launcher-backed process rows in render order."""
+    var rows: [ShellProcessRow] = []
+    val process_count = launcher_get_process_count()
+    var idx: u64 = 0
+    while idx < process_count.to_u64():
+        val name = launcher_get_process_name(idx)
+        val pid = launcher_get_process_pid(idx)
+        if name != "" and pid > 0:
+            rows = rows.push(ShellProcessRow(
+                process_index: idx,
+                name: name,
+                pid: pid,
+                state: launcher_get_process_state(idx),
+                windows: launcher_get_process_window_count(idx),
+                headless: launcher_get_process_is_headless(idx),
+                app_id: launcher_get_process_app_id_for_pid(pid)
+            ))
+        idx = idx + 1
+    rows
+
+fn _selected_process_row(selected_process_idx: i64) -> ShellProcessRow?:
+    val rows = _process_rows()
+    if rows.len() == 0:
+        return nil
+    val idx = _normalized_process_selection(selected_process_idx, rows.len())
+    rows[idx]
+
+fn _normalized_process_selection(selected_process_idx: i64, row_count: i32) -> i32:
+    if row_count <= 0:
+        return 0
+    if selected_process_idx < 0:
+        return 0
+    if selected_process_idx >= row_count.to_i64():
+        return row_count - 1
+    selected_process_idx.to_i32()
+
+fn _process_is_live(state: text) -> bool:
+    state == "running" or state == "launching" or state == "terminating"
+
+fn _sync_launcher_registry_with_manifests():
+    """Ensure launcher registry is manifest-backed instead of a hardcoded demo list."""
+    val manifests = load_app_manifests()
+    for manifest in manifests:
+        launcher_register(
+            manifest.name,
+            manifest.binary,
+            manifest.icon,
+            _manifest_shortcut_key(manifest.name),
+            _manifest_shortcut_mod(manifest.name)
+        )
+
+fn _manifest_shortcut_key(name: text) -> u32:
+    match name:
+        "Hello World": 0x48
+        "File Manager": 0x46
+        "Terminal": 0x54
+        "Browser Demo": 0x42
+        _: 0
+
+fn _manifest_shortcut_mod(name: text) -> u32:
+    match name:
+        "Hello World" | "File Manager" | "Terminal" | "Browser Demo":
+            MOD_META
+        _:
+            0
 
 # ============================================================================
 # Remote Window Tree Builder

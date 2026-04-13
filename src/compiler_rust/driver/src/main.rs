@@ -672,6 +672,16 @@ const COMMAND_TABLE: &[CommandEntry] = &[
         env_override: "SIMPLE_RUN_RUST",
         needs_rust_flags: &[],
     },
+    CommandEntry {
+        name: "os",
+        app_path: "src/app/os/main.spl",
+        rust_handler: Handler::Custom(|_| {
+            eprintln!("error: os app not found (install Simple or run from project root)");
+            1
+        }),
+        env_override: "",
+        needs_rust_flags: &[],
+    },
     // Native build (compile .spl project to native binary via Cranelift)
     CommandEntry {
         name: "native-build",
@@ -852,11 +862,19 @@ pub(crate) fn resolve_app_path(relative_path: &str) -> Option<PathBuf> {
             if exe_relative.exists() {
                 return Some(exe_relative);
             }
-            // Try ../../ from target/debug/ (development layout)
-            if let Some(project_root) = exe_dir.parent().and_then(|p| p.parent()) {
-                let project_relative = project_root.join(relative_path);
+            // Walk a few ancestors so both `target/debug/simple` and
+            // `target/debug/deps/*` test binaries can resolve repo-local apps.
+            let mut ancestor = Some(exe_dir);
+            let mut depth = 0;
+            while let Some(dir) = ancestor {
+                let project_relative = dir.join(relative_path);
                 if project_relative.exists() {
                     return Some(project_relative);
+                }
+                ancestor = dir.parent();
+                depth += 1;
+                if depth >= 6 {
+                    break;
                 }
             }
         }
@@ -883,6 +901,8 @@ fn dispatch_to_simple_app(app_relative_path: &str, args: &[String], gc_log: bool
         && app_relative_path != "src/app/ui.tauri/tauri_entry.spl"
         && app_relative_path != "src/app/office/mod.spl"
         && app_relative_path != "src/app/cli/bootstrap_main.spl"
+        && app_relative_path != "src/app/cli/main.spl"
+        && app_relative_path != "src/app/os/main.spl"
         && app_relative_path != "src/app/dashboard/main.spl"
         && app_relative_path != "src/app/lsp/main.spl"
         && app_relative_path != "src/compiler/90.tools/ffi_gen/main.spl"

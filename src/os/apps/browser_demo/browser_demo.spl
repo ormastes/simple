@@ -22,11 +22,14 @@ use common.ui.builder.{
 }
 use common.ui.widget.{WidgetNode, UITree, UIEvent}
 use common.ui.session.{UISession}
+use common.window_protocol.window_protocol.{WM_EVENT_CLOSE}
 use std.gc_async_mut.gpu.browser_engine.dom.{BeDomNode}
 use std.gc_async_mut.gpu.browser_engine.css.{default_style}
 use std.gc_async_mut.gpu.browser_engine.browser_renderer.{BrowserRenderer, BeRenderResult}
 use common.render_scene.scene.{RenderScene, SceneCommand}
 use common.render_scene.executor.{execute_scene_to_buffer}
+use os.userlib.window.{WindowClient}
+use os.userlib.process.{yield_, exit_}
 
 extern fn serial_println(msg: text)
 
@@ -288,3 +291,62 @@ fn _count_nodes(node: BeDomNode) -> i32:
     for child in node.children:
         count = count + _count_nodes(child)
     return count
+
+# =========================================================================
+# Remote Window Entry
+# =========================================================================
+
+fn browser_demo_remote_main():
+    """Launch Browser Demo as a real multi-window remote app."""
+    var main_client = WindowClient.new()
+    main_client.set_app_identity("/sys/apps/browser_demo")
+    if not main_client.connect():
+        exit_(1)
+        return
+
+    val main_wid = main_client.create_window("Browser Demo", 120, 90, 460, 260)
+    if main_wid == 0:
+        main_client.disconnect()
+        exit_(1)
+        return
+
+    var inspector_client = WindowClient.new()
+    inspector_client.set_app_identity("/sys/apps/browser_demo")
+    if not inspector_client.connect():
+        main_client.destroy_window()
+        main_client.disconnect()
+        exit_(1)
+        return
+
+    val inspector_wid = inspector_client.create_window("Browser Demo Inspector", 620, 120, 320, 220)
+    if inspector_wid == 0:
+        inspector_client.disconnect()
+        main_client.destroy_window()
+        main_client.disconnect()
+        exit_(1)
+        return
+
+    main_client.update_content(
+        "Browser Demo\n\nPrimary window owned by launcher app identity.\nA second inspector window should group under the same process."
+    )
+    inspector_client.update_content(
+        "Inspector\n\napp_id: /sys/apps/browser_demo\nwindow: secondary"
+    )
+
+    var running = true
+    while running:
+        val main_event = main_client.poll_event()
+        if main_event != nil and main_event.event_type == WM_EVENT_CLOSE:
+            running = false
+
+        val inspector_event = inspector_client.poll_event()
+        if inspector_event != nil and inspector_event.event_type == WM_EVENT_CLOSE:
+            running = false
+
+        yield_()
+
+    inspector_client.destroy_window()
+    inspector_client.disconnect()
+    main_client.destroy_window()
+    main_client.disconnect()
+    exit_(0)

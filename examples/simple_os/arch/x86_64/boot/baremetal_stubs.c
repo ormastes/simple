@@ -17,7 +17,7 @@
  *  8b. NVMe controller + sector read
  *  8b-fat32. FAT32 file system driver
  *  8c-net. VirtIO-net driver + ARP/ICMP responder
- *   9. _start_c (serial init, call spl_start, isa-debug-exit)
+ *   9. _start (serial init, call spl_start, isa-debug-exit)
  *  10. No-op stubs (~200 runtime functions)
  *  11. Real x86_64 port-I/O and MMIO overrides
  */
@@ -41,51 +41,45 @@ typedef int64_t RuntimeValue;
 
 #if defined(__x86_64__) || defined(__i386__)
 
-static inline __attribute__((always_inline)) void outb(uint16_t port, uint8_t val)
+static inline void outb(uint16_t port, uint8_t val)
 {
     __asm__ volatile("outb %0, %1" : : "a"(val), "Nd"(port));
 }
 
-static inline __attribute__((always_inline)) uint8_t inb(uint16_t port)
+static inline uint8_t inb(uint16_t port)
 {
     uint8_t r;
     __asm__ volatile("inb %1, %0" : "=a"(r) : "Nd"(port));
     return r;
 }
 
-static inline __attribute__((always_inline)) void outw(uint16_t port, uint16_t val)
+static inline void outw(uint16_t port, uint16_t val)
 {
     __asm__ volatile("outw %0, %1" : : "a"(val), "Nd"(port));
 }
 
-static inline __attribute__((always_inline)) uint16_t inw(uint16_t port)
+static inline uint16_t inw(uint16_t port)
 {
     uint16_t r;
     __asm__ volatile("inw %1, %0" : "=a"(r) : "Nd"(port));
     return r;
 }
 
-static inline __attribute__((always_inline)) void outl(uint16_t port, uint32_t val)
+static inline void outl(uint16_t port, uint32_t val)
 {
     __asm__ volatile("outl %0, %1" : : "a"(val), "Nd"(port));
 }
 
-static inline __attribute__((always_inline)) uint32_t inl(uint16_t port)
+static inline uint32_t inl(uint16_t port)
 {
     uint32_t r;
     __asm__ volatile("inl %1, %0" : "=a"(r) : "Nd"(port));
     return r;
 }
 
-static inline __attribute__((always_inline)) void io_wait(void)
+static inline void io_wait(void)
 {
     outb(0x80, 0);
-}
-
-static inline __attribute__((always_inline)) void serial_marker_raw(char c)
-{
-    while (!(inb(0x3F8 + 5) & 0x20)) {}
-    outb(0x3F8, (uint8_t)c);
 }
 
 #else
@@ -97,18 +91,12 @@ static inline uint16_t inw(uint16_t p) { (void)p; return 0; }
 static inline void outl(uint16_t p, uint32_t v) { (void)p; (void)v; }
 static inline uint32_t inl(uint16_t p) { (void)p; return 0; }
 static inline void io_wait(void) {}
-static inline void serial_marker_raw(char c) { (void)c; }
 #endif
 
-static inline __attribute__((always_inline)) void serial_putchar(char c)
+static void serial_putchar(char c)
 {
-    /* Early baremetal boot can observe unreliable LSR readiness after handoff.
-     * Spin briefly, then fall back to a direct write so boot diagnostics keep moving.
-     */
-    int spins = 0;
-    while (!(inb(0x3F8 + 5) & 0x20) && spins < 100000) {
-        spins++;
-    }
+    /* Wait until transmit holding register is empty (bit 5 of LSR) */
+    while (!(inb(0x3F8 + 5) & 0x20)) {}
     outb(0x3F8, (uint8_t)c);
 }
 
@@ -125,7 +113,7 @@ static char serial_getchar(void)
     return (char)inb(0x3F8);
 }
 
-static inline __attribute__((always_inline)) void serial_puts(const char *s)
+static void serial_puts(const char *s)
 {
     while (*s) {
         if (*s == '\n') serial_putchar('\r');
@@ -5415,10 +5403,10 @@ int64_t rt_pci_get_field(int64_t index, int64_t field)
 }
 
 /* ===================================================================
- * 9. _start_c — serial init, spl_start, isa-debug-exit
+ * 9. _start — serial init, spl_start, isa-debug-exit
  * =================================================================== */
 
-static inline __attribute__((always_inline)) void _serial_init(void)
+static void _serial_init(void)
 {
     /* Disable interrupts */
     outb(0x3F8 + 1, 0x00);
@@ -5677,7 +5665,7 @@ RuntimeValue rt_gui_render_desktop(RuntimeValue unused1, RuntimeValue unused2)
 }
 
 /* ===================================================================
- * 9d. _start_c — serial init, then spl_start
+ * 9d. _start — serial init, then spl_start
  * =================================================================== */
 
 /* ===================================================================
@@ -5807,69 +5795,16 @@ static void serial_puthex(uint32_t v) {
 
 extern void spl_start(void) __attribute__((weak));
 
-void _start_c(void)
+void _start(void)
 {
-    /* Earliest C-entry probe: inline raw COM1 write, no helper calls. */
-    __asm__ volatile(
-        "movw $0x3FD, %%dx\n"
-        "1:\n"
-        "inb %%dx, %%al\n"
-        "testb $0x20, %%al\n"
-        "jz 1b\n"
-        "movw $0x3F8, %%dx\n"
-        "movb $'S', %%al\n"
-        "outb %%al, %%dx\n"
-        :
-        :
-        : "rax", "rdx", "cc"
-    );
-
-    /* Disable all PIC IRQs using raw port I/O first, before helper-call diagnostics. */
-    __asm__ volatile(
-        "movw $0x21, %%dx\n"
-        "movb $0xFF, %%al\n"
-        "outb %%al, %%dx\n"
-        "movw $0xA1, %%dx\n"
-        "outb %%al, %%dx\n"
-        :
-        :
-        : "rax", "rdx"
-    );
+    /* Disable all PIC IRQs to prevent timer interrupts during rendering.
+     * Mask all IRQs on both PICs (master 0x21, slave 0xA1). */
+    outb(0x21, 0xFF);
+    outb(0xA1, 0xFF);
     /* Also disable APIC timer if APIC is present */
     __asm__ volatile("cli");
 
-    __asm__ volatile(
-        "movw $0x3FD, %%dx\n"
-        "1:\n"
-        "inb %%dx, %%al\n"
-        "testb $0x20, %%al\n"
-        "jz 1b\n"
-        "movw $0x3F8, %%dx\n"
-        "movb $'0', %%al\n"
-        "outb %%al, %%dx\n"
-        :
-        :
-        : "rax", "rdx", "cc"
-    );
-
-    /* COM1 is already usable before C entry; reinitializing it here currently stalls output. */
-    __asm__ volatile(
-        "movw $0x3F8, %%dx\n"
-        "movb $'1', %%al\n"
-        "outb %%al, %%dx\n"
-        :
-        :
-        : "rax", "rdx"
-    );
-
-    __asm__ volatile(
-        "movw $0x3F8, %%dx\n"
-        "movb $'2', %%al\n"
-        "outb %%al, %%dx\n"
-        :
-        :
-        : "rax", "rdx"
-    );
+    _serial_init();
 
     /* For Simple baremetal app lanes, the validated minimum boot path is:
      * long-mode handoff -> basic IRQ masking -> direct spl_start().
@@ -5899,15 +5834,6 @@ void _start_c(void)
     }
 
     serial_puts("SimpleOS x86_64 boot\r\n");
-
-    __asm__ volatile(
-        "movw $0x3F8, %%dx\n"
-        "movb $'3', %%al\n"
-        "outb %%al, %%dx\n"
-        :
-        :
-        : "rax", "rdx"
-    );
     serial_puts("[BOOT] COM1 serial initialized at 115200 baud\r\n");
     serial_puts("[BOOT] Heap: 512 MB bump allocator\r\n");
     serial_puts("[BOOT] RuntimeValue: tagged 64-bit (int/heap/float/special)\r\n");
@@ -6089,12 +6015,9 @@ void _start_c(void)
     }
 
     if (spl_start) {
-        serial_puts("[BOOT] spl_start ptr=");
-        serial_put_hex((uint64_t)(uintptr_t)spl_start);
-        serial_puts("\r\n");
-        serial_puts("[BOOT] before spl_start()\r\n");
+        serial_puts("[BOOT] Calling spl_start()...\r\n");
         spl_start();
-        serial_puts("[BOOT] after spl_start()\r\n");
+        serial_puts("[BOOT] spl_start() returned\r\n");
     } else {
         serial_puts("[BOOT] No spl_start() found (weak symbol)\r\n");
     }

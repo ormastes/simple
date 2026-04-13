@@ -13,6 +13,7 @@
 #
 # Payload encoding per method:
 #   COMP_CREATE_WINDOW:  title_len(u32) | title(bytes) | x(i32) | y(i32) | w(i32) | h(i32)
+#                        | process_id(u64)? | app_id_len(u32)? | app_id(bytes)?
 #   COMP_DESTROY_WINDOW: window_id(u64)
 #   COMP_UPDATE_TREE:    window_id(u64) | tree_data(bytes)
 #   COMP_FOCUS:          window_id(u64)
@@ -29,6 +30,7 @@
 use os.userlib.ipc_protocol.{COMP_CREATE_WINDOW, COMP_DESTROY_WINDOW, COMP_UPDATE_TREE, COMP_FOCUS, COMP_RESIZE, COMP_MOVE, COMP_SET_TITLE, COMP_MINIMIZE, COMP_MAXIMIZE, COMP_RESTORE, COMP_INPUT_EVENT, COMP_CLOSE_REQUEST, COMP_FOCUS_CHANGED}
 use os.userlib.syscall_raw.{syscall}
 use common.window_protocol.window_protocol.{WmCreateRequest, WmCreateResponse, WmInputEvent, WmCloseRequest, WmResizeRequest, WmMoveRequest, WmFocusEvent, WM_STATUS_OK, WM_STATUS_ERROR, WM_STATUS_NO_SPACE, WM_EVENT_CLOSE, WM_EVENT_FOCUS, wm_input_event, wm_focus_event}
+use os.services.launcher.launcher.{launcher_get_process_app_id_for_pid}
 
 extern fn serial_println(msg: text)
 
@@ -68,20 +70,25 @@ struct WmAction:
     width: i32
     height: i32
     content: text        # for update_tree
+    process_id: u64      # owning process identity (launch PID or IPC identity)
+    app_id: text         # stable app grouping identifier
     owner_port: u64      # for create_window (remote app's reply port)
     src_port: u64        # sender's port for reply routing
 
 fn wm_action_none() -> WmAction:
-    WmAction(kind: "none", window_id: 0, title: "", x: 0, y: 0, width: 0, height: 0, content: "", owner_port: 0, src_port: 0)
+    WmAction(kind: "none", window_id: 0, title: "", x: 0, y: 0, width: 0, height: 0, content: "", process_id: 0, app_id: "", owner_port: 0, src_port: 0)
 
 # ============================================================================
 # Window Owner Entry — maps window_id to the owning app's reply port
+# and records launch/process metadata for shell queries.
 # ============================================================================
 
 struct WindowOwner:
     """Tracks which IPC port owns a given window."""
     window_id: u64
     owner_port: u64
+    process_id: u64
+    app_id: text
 
 # ============================================================================
 # Window Manager Service
@@ -239,6 +246,7 @@ impl WmService:
         """Parse COMP_CREATE_WINDOW into a WmAction.
 
         Payload: title_len(u32) | title(bytes) | x(i32) | y(i32) | w(i32) | h(i32)
+                 | process_id(u64)? | app_id_len(u32)? | app_id(bytes)?
         """
         if self.window_owners.len() >= self.max_windows:
             serial_println("[wm-service] Max windows reached, rejecting create")
@@ -255,9 +263,26 @@ impl WmService:
         val y = _read_i32(payload_addr + fields_offset + 4)
         val w = _read_i32(payload_addr + fields_offset + 8)
         val h = _read_i32(payload_addr + fields_offset + 12)
+        var process_id = src_port
+        var app_id = ""
+        val identity_offset = fields_offset + 16
+        if payload_len.to_u64() >= identity_offset + 8:
+            process_id = _read_u64(payload_addr + identity_offset)
+            if payload_len.to_u64() >= identity_offset + 12:
+                val app_id_len = _read_u32(payload_addr + identity_offset + 8)
+                if app_id_len > 0 and payload_len.to_u64() >= identity_offset + 12 + app_id_len.to_u64():
+                    app_id = _read_text(payload_addr + identity_offset + 12, app_id_len)
+        if process_id == 0:
+            process_id = src_port
+        if app_id == "":
+            val launcher_app_id = launcher_get_process_app_id_for_pid(process_id)
+            if launcher_app_id != "":
+                app_id = launcher_app_id
+            else:
+                app_id = title
 
-        serial_println("[wm-service] Parsed create_window from port {src_port}: '{title}' ({w}x{h})")
-        WmAction(kind: "create_window", window_id: 0, title: title, x: x, y: y, width: w, height: h, content: "", owner_port: src_port, src_port: src_port)
+        serial_println("[wm-service] Parsed create_window from port {src_port}: '{title}' ({w}x{h}) pid={process_id} app_id='{app_id}'")
+        WmAction(kind: "create_window", window_id: 0, title: title, x: x, y: y, width: w, height: h, content: "", process_id: process_id, app_id: app_id, owner_port: src_port, src_port: src_port)
 
     me parse_destroy_window(src_port: u64, payload_addr: u64, payload_len: u32) -> WmAction:
         """Parse COMP_DESTROY_WINDOW into a WmAction.
@@ -273,7 +298,7 @@ impl WmService:
             self.send_status_reply(src_port, STATUS_ERR)
             return wm_action_none()
 
-        WmAction(kind: "destroy_window", window_id: window_id, title: "", x: 0, y: 0, width: 0, height: 0, content: "", owner_port: 0, src_port: src_port)
+        WmAction(kind: "destroy_window", window_id: window_id, title: "", x: 0, y: 0, width: 0, height: 0, content: "", process_id: 0, app_id: "", owner_port: 0, src_port: src_port)
 
     me parse_update_tree(src_port: u64, payload_addr: u64, payload_len: u32) -> WmAction:
         """Parse COMP_UPDATE_TREE into a WmAction.
@@ -291,7 +316,7 @@ impl WmService:
         if content_len > 0 and payload_len.to_i32() >= 12 + content_len:
             content = _read_text(payload_addr + 12, content_len.to_u32())
 
-        WmAction(kind: "update_tree", window_id: window_id, title: "", x: 0, y: 0, width: 0, height: 0, content: content, owner_port: 0, src_port: src_port)
+        WmAction(kind: "update_tree", window_id: window_id, title: "", x: 0, y: 0, width: 0, height: 0, content: content, process_id: 0, app_id: "", owner_port: 0, src_port: src_port)
 
     fn parse_focus(src_port: u64, payload_addr: u64, payload_len: u32) -> WmAction:
         """Parse COMP_FOCUS into a WmAction.
@@ -299,7 +324,7 @@ impl WmService:
         Payload: window_id(u64)
         """
         val window_id = _read_u64(payload_addr)
-        WmAction(kind: "focus", window_id: window_id, title: "", x: 0, y: 0, width: 0, height: 0, content: "", owner_port: 0, src_port: src_port)
+        WmAction(kind: "focus", window_id: window_id, title: "", x: 0, y: 0, width: 0, height: 0, content: "", process_id: 0, app_id: "", owner_port: 0, src_port: src_port)
 
     me parse_resize(src_port: u64, payload_addr: u64, payload_len: u32) -> WmAction:
         """Parse COMP_RESIZE into a WmAction.
@@ -315,7 +340,7 @@ impl WmService:
             self.send_status_reply(src_port, STATUS_ERR)
             return wm_action_none()
 
-        WmAction(kind: "resize", window_id: window_id, title: "", x: 0, y: 0, width: width, height: height, content: "", owner_port: 0, src_port: src_port)
+        WmAction(kind: "resize", window_id: window_id, title: "", x: 0, y: 0, width: width, height: height, content: "", process_id: 0, app_id: "", owner_port: 0, src_port: src_port)
 
     me parse_move(src_port: u64, payload_addr: u64, payload_len: u32) -> WmAction:
         """Parse COMP_MOVE into a WmAction.
@@ -331,7 +356,7 @@ impl WmService:
             self.send_status_reply(src_port, STATUS_ERR)
             return wm_action_none()
 
-        WmAction(kind: "move", window_id: window_id, title: "", x: x, y: y, width: 0, height: 0, content: "", owner_port: 0, src_port: src_port)
+        WmAction(kind: "move", window_id: window_id, title: "", x: x, y: y, width: 0, height: 0, content: "", process_id: 0, app_id: "", owner_port: 0, src_port: src_port)
 
     me parse_set_title(src_port: u64, payload_addr: u64, payload_len: u32) -> WmAction:
         """Parse COMP_SET_TITLE into a WmAction.
@@ -347,7 +372,7 @@ impl WmService:
             self.send_status_reply(src_port, STATUS_ERR)
             return wm_action_none()
 
-        WmAction(kind: "set_title", window_id: window_id, title: title, x: 0, y: 0, width: 0, height: 0, content: "", owner_port: 0, src_port: src_port)
+        WmAction(kind: "set_title", window_id: window_id, title: title, x: 0, y: 0, width: 0, height: 0, content: "", process_id: 0, app_id: "", owner_port: 0, src_port: src_port)
 
     me parse_minimize(src_port: u64, payload_addr: u64, payload_len: u32) -> WmAction:
         """Parse COMP_MINIMIZE into a WmAction.
@@ -360,7 +385,7 @@ impl WmService:
             self.send_status_reply(src_port, STATUS_ERR)
             return wm_action_none()
 
-        WmAction(kind: "minimize", window_id: window_id, title: "", x: 0, y: 0, width: 0, height: 0, content: "", owner_port: 0, src_port: src_port)
+        WmAction(kind: "minimize", window_id: window_id, title: "", x: 0, y: 0, width: 0, height: 0, content: "", process_id: 0, app_id: "", owner_port: 0, src_port: src_port)
 
     me parse_maximize(src_port: u64, payload_addr: u64, payload_len: u32) -> WmAction:
         """Parse COMP_MAXIMIZE into a WmAction.
@@ -373,7 +398,7 @@ impl WmService:
             self.send_status_reply(src_port, STATUS_ERR)
             return wm_action_none()
 
-        WmAction(kind: "maximize", window_id: window_id, title: "", x: 0, y: 0, width: 0, height: 0, content: "", owner_port: 0, src_port: src_port)
+        WmAction(kind: "maximize", window_id: window_id, title: "", x: 0, y: 0, width: 0, height: 0, content: "", process_id: 0, app_id: "", owner_port: 0, src_port: src_port)
 
     me parse_restore(src_port: u64, payload_addr: u64, payload_len: u32) -> WmAction:
         """Parse COMP_RESTORE into a WmAction.
@@ -386,7 +411,7 @@ impl WmService:
             self.send_status_reply(src_port, STATUS_ERR)
             return wm_action_none()
 
-        WmAction(kind: "restore", window_id: window_id, title: "", x: 0, y: 0, width: 0, height: 0, content: "", owner_port: 0, src_port: src_port)
+        WmAction(kind: "restore", window_id: window_id, title: "", x: 0, y: 0, width: 0, height: 0, content: "", process_id: 0, app_id: "", owner_port: 0, src_port: src_port)
 
     # -- Outbound Event Delivery ---------------------------------------------
 
@@ -503,6 +528,53 @@ impl WmService:
         self.window_owners = remaining
         to_destroy
 
+    fn window_owner_process_id(window_id: u64) -> u64:
+        for entry in self.window_owners:
+            if entry.window_id == window_id:
+                return entry.process_id
+        0
+
+    fn window_owner_app_id(window_id: u64) -> text:
+        for entry in self.window_owners:
+            if entry.window_id == window_id:
+                return entry.app_id
+        ""
+
+    fn window_ids_for_owner_port(port: u64) -> [u64]:
+        var ids: [u64] = []
+        for entry in self.window_owners:
+            if entry.owner_port == port:
+                ids = ids.push(entry.window_id)
+        ids
+
+    fn window_ids_for_process(process_id: u64) -> [u64]:
+        var ids: [u64] = []
+        for entry in self.window_owners:
+            if entry.process_id == process_id:
+                ids = ids.push(entry.window_id)
+        ids
+
+    fn window_ids_for_app(app_id: text) -> [u64]:
+        var ids: [u64] = []
+        for entry in self.window_owners:
+            if entry.app_id == app_id:
+                ids = ids.push(entry.window_id)
+        ids
+
+    fn window_count_for_owner_port(port: u64) -> i32:
+        var count: i32 = 0
+        for entry in self.window_owners:
+            if entry.owner_port == port:
+                count = count + 1
+        count
+
+    fn window_count_for_process(process_id: u64) -> i32:
+        var count: i32 = 0
+        for entry in self.window_owners:
+            if entry.process_id == process_id:
+                count = count + 1
+        count
+
     # -- Shell Integration (called by DesktopShell after applying actions) ----
 
     me register_window_owner(window_id: u64, owner_port: u64):
@@ -513,8 +585,34 @@ impl WmService:
         """
         self.window_owners = self.window_owners.push(WindowOwner(
             window_id: window_id,
-            owner_port: owner_port
+            owner_port: owner_port,
+            process_id: owner_port,
+            app_id: ""
         ))
+
+    me register_window_owner_with_identity(window_id: u64, owner_port: u64, process_id: u64, app_id: text):
+        """Register ownership plus launch identity metadata."""
+        self.window_owners = self.window_owners.push(WindowOwner(
+            window_id: window_id,
+            owner_port: owner_port,
+            process_id: process_id,
+            app_id: app_id
+        ))
+
+    me set_window_owner_identity(window_id: u64, process_id: u64, app_id: text):
+        """Update the identity metadata for an already-owned window."""
+        var updated: [WindowOwner] = []
+        for entry in self.window_owners:
+            if entry.window_id == window_id:
+                updated = updated.push(WindowOwner(
+                    window_id: entry.window_id,
+                    owner_port: entry.owner_port,
+                    process_id: process_id,
+                    app_id: app_id
+                ))
+            else:
+                updated = updated.push(entry)
+        self.window_owners = updated
 
     fn send_create_reply(dst_port: u64, window_id: u64):
         """Send a successful create-window reply with the new window ID.

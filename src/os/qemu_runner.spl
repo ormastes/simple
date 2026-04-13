@@ -11,8 +11,64 @@ use os.machine_profile.{MachineProfile, get_machine_profile, riscv32_machine_pro
 
 extern fn rt_process_run_timeout(cmd: text, args: [text], timeout_ms: i64) -> (text, text, i32)
 extern fn rt_file_exists(path: text) -> bool
-extern fn rt_env_get(name: text) -> text
+extern fn rt_env_get(key: text) -> text?
+extern fn rt_time_now_unix_micros() -> i64
 
+# Default native-build timeout for `os build` lane.
+# Rationale: a cold full-tree native-build on current CI hardware routinely
+# lands in the 5–10 minute range (see simpleos_process_shell_followup_plan_2026-04-13.md
+# item #1). The previous hardcoded 60s ceiling reported a generic "Process timed out"
+# before the compiler had meaningfully started its LLVM/Cranelift backend, hiding the
+# real phase. 900_000 ms (15 min) gives enough headroom for the slowest target
+# (x86_64 desktop wrapper) while still bounding stuck subprocesses. Override with
+# SIMPLE_OS_BUILD_TIMEOUT_MS at runtime when tracing regressions.
+val _OS_BUILD_DEFAULT_TIMEOUT_MS: i64 = 900000
+
+fn _parse_timeout_ms(raw: text, default_ms: i64) -> i64:
+    """Parse a positive integer ms value from env, falling back to default on empty/bad input."""
+    if raw == "":
+        return default_ms
+    var result: i64 = 0
+    var found_digit = false
+    for ch in raw:
+        if ch >= "0" and ch <= "9":
+            val digit = (ch.to_i32() - "0".to_i32()) as i64
+            result = result * 10 + digit
+            found_digit = true
+        else:
+            return default_ms
+    if not found_digit:
+        return default_ms
+    if result <= 0:
+        return default_ms
+    result
+
+fn _os_build_timeout_ms() -> i64:
+    """Resolve the active native-build timeout, honoring SIMPLE_OS_BUILD_TIMEOUT_MS.
+
+    rt_env_get returns NIL when the variable is unset; coerce to empty string so
+    the parser takes the empty/default branch instead of failing to iterate NIL.
+    """
+    val raw = rt_env_get("SIMPLE_OS_BUILD_TIMEOUT_MS") ?? ""
+    _parse_timeout_ms(raw, _OS_BUILD_DEFAULT_TIMEOUT_MS)
+
+fn _now_ms() -> i64:
+    rt_time_now_unix_micros() / 1000
+
+fn _tail_lines(s: text, n: i64) -> text:
+    """Return the last n newline-delimited lines of s, for compact diagnostic prints."""
+    if s == "":
+        return ""
+    val lines = s.split("\n")
+    val total = lines.len() as i64
+    if total <= n:
+        return s
+    var out: text = ""
+    var i: i64 = total - n
+    while i < total:
+        out = out + lines[i as i32] + "\n"
+        i = i + 1
+    out
 fn is_qemu_success(target: OsTarget, exit_code: i32) -> bool:
     """Interpret QEMU exit code based on architecture.
 
@@ -42,6 +98,16 @@ class OsTarget:
     qemu_bios: text
     qemu_extra: [text]
     gui_mode: bool
+
+class QemuRunOptions:
+    """Run-time launch knobs that do not change the compiled target."""
+    debug_gui_serial: bool
+
+fn qemu_run_options_default() -> QemuRunOptions:
+    QemuRunOptions(debug_gui_serial: false)
+
+fn qemu_run_options_debug_gui() -> QemuRunOptions:
+    QemuRunOptions(debug_gui_serial: true)
 
 fn profile_to_target(profile: MachineProfile) -> OsTarget:
     OsTarget(
@@ -196,73 +262,11 @@ fn get_tools_test_target() -> OsTarget:
         gui_mode: false
     )
 
-fn get_browser_probe_target_x86_32() -> OsTarget:
-    """Returns the explicit x86_32 browser probe lane.
-
-    This is the conservative Multiboot/BIOS-compatible probe lane.
-    """
-    OsTarget(
-        arch: Architecture.X86,
-        entry: "examples/simple_os/arch/x86_32/browser_probe_entry.spl",
-        linker_script: "examples/simple_os/arch/x86_32/linker.ld",
-        target_triple: "i686-unknown-none",
-        output: "build/os/simpleos_browser_probe_x86_32.elf",
-        qemu_system: "qemu-system-i386",
-        qemu_machine: "pc",
-        qemu_cpu: "qemu32",
-        qemu_memory: "128M",
-        qemu_bios: "",
-        qemu_extra: ["-device", "isa-debug-exit,iobase=0xf4,iosize=0x04"],
-        gui_mode: false
-    )
-
-fn get_desktop_probe_target_x86_32() -> OsTarget:
-    """Returns the explicit x86_32 desktop probe lane.
-
-    This is a minimal visibility lane, not the full desktop runtime lane.
-    """
-    OsTarget(
-        arch: Architecture.X86,
-        entry: "examples/simple_os/arch/x86_32/desktop_probe_entry.spl",
-        linker_script: "examples/simple_os/arch/x86_32/linker.ld",
-        target_triple: "i686-unknown-none",
-        output: "build/os/simpleos_desktop_probe_x86_32.elf",
-        qemu_system: "qemu-system-i386",
-        qemu_machine: "pc",
-        qemu_cpu: "qemu32",
-        qemu_memory: "128M",
-        qemu_bios: "",
-        qemu_extra: ["-device", "isa-debug-exit,iobase=0xf4,iosize=0x04"],
-        gui_mode: false
-    )
-
-fn get_browser_soft_target_x86_32() -> OsTarget:
-    """Returns the explicit x86_32 browser-soft lane.
-
-    This lane is declared separately from x86_64 so the architecture split is
-    visible even before the current i686 compiler/runtime path is stabilized.
-    """
-    OsTarget(
-        arch: Architecture.X86,
-        entry: "examples/simple_os/arch/x86_32/browser_soft_entry.spl",
-        linker_script: "examples/simple_os/arch/x86_32/linker.ld",
-        target_triple: "i686-unknown-none",
-        output: "build/os/simpleos_browser_soft_x86_32.elf",
-        qemu_system: "qemu-system-i386",
-        qemu_machine: "pc",
-        qemu_cpu: "qemu32",
-        qemu_memory: "128M",
-        qemu_bios: "",
-        qemu_extra: ["-device", "isa-debug-exit,iobase=0xf4,iosize=0x04"],
-        gui_mode: false
-    )
-
-fn get_browser_soft_target_x86_64() -> OsTarget:
-    """Returns the explicit x86_64 wrapper lane for the browser software smoke test.
+fn get_browser_soft_target() -> OsTarget:
+    """Returns the x86_64 wrapper target for the browser software smoke test.
 
     The x86_64 baremetal build is post-processed to ELF32 so QEMU -kernel
-    can boot the multiboot image. This remains an investigation lane until
-    native x86_64 wrapper/runtime stability is restored.
+    can boot the multiboot image.
     """
     OsTarget(
         arch: Architecture.X86_64,
@@ -279,8 +283,8 @@ fn get_browser_soft_target_x86_64() -> OsTarget:
         gui_mode: false
     )
 
-fn get_browser_probe_target_x86_64() -> OsTarget:
-    """Returns the explicit x86_64 browser probe investigation lane."""
+fn get_browser_probe_target() -> OsTarget:
+    """Returns the x86_64 wrapper target for the browser probe."""
     OsTarget(
         arch: Architecture.X86_64,
         entry: "examples/simple_os/arch/x86_64/browser_probe_entry.spl",
@@ -296,8 +300,8 @@ fn get_browser_probe_target_x86_64() -> OsTarget:
         gui_mode: false
     )
 
-fn get_desktop_browser_target_x86_64() -> OsTarget:
-    """Returns the explicit x86_64 desktop wrapper/runtime lane."""
+fn get_desktop_browser_target() -> OsTarget:
+    """Returns the x86_64 wrapper target for Browser Demo desktop E2E."""
     OsTarget(
         arch: Architecture.X86_64,
         entry: "examples/simple_os/arch/x86_64/desktop_e2e_entry.spl",
@@ -313,8 +317,8 @@ fn get_desktop_browser_target_x86_64() -> OsTarget:
         gui_mode: false
     )
 
-fn get_desktop_probe_target_x86_64() -> OsTarget:
-    """Returns the explicit x86_64 desktop probe investigation lane."""
+fn get_desktop_probe_target() -> OsTarget:
+    """Returns the x86_64 wrapper target for the desktop probe."""
     OsTarget(
         arch: Architecture.X86_64,
         entry: "examples/simple_os/arch/x86_64/desktop_probe_entry.spl",
@@ -329,22 +333,6 @@ fn get_desktop_probe_target_x86_64() -> OsTarget:
         qemu_extra: ["-device", "isa-debug-exit,iobase=0xf4,iosize=0x04"],
         gui_mode: false
     )
-
-fn get_browser_soft_target() -> OsTarget:
-    """Compatibility alias for the x86_64 browser software wrapper lane."""
-    get_browser_soft_target_x86_64()
-
-fn get_browser_probe_target() -> OsTarget:
-    """Compatibility alias for the x86_64 browser probe lane."""
-    get_browser_probe_target_x86_64()
-
-fn get_desktop_browser_target() -> OsTarget:
-    """Compatibility alias for the x86_64 desktop browser wrapper lane."""
-    get_desktop_browser_target_x86_64()
-
-fn get_desktop_probe_target() -> OsTarget:
-    """Compatibility alias for the x86_64 desktop probe lane."""
-    get_desktop_probe_target_x86_64()
 
 fn get_all_targets() -> [OsTarget]:
     """Returns all 6 architecture targets."""
@@ -396,13 +384,21 @@ fn build_os(target: OsTarget) -> bool:
     """Builds the OS kernel for the given target.
 
     Runs the native-build command via rt_process_run_timeout. Returns true on success.
+
+    Phase-level diagnostics are printed so a stalled build identifies which phase
+    ran long rather than surfacing as a generic 'Process timed out'. The timeout
+    defaults to 15 minutes and can be overridden with SIMPLE_OS_BUILD_TIMEOUT_MS.
     """
+    val arch_label = arch_display_name(target.arch)
+    val timeout_ms = _os_build_timeout_ms()
+
+    print "[build][{arch_label}] phase=plan entry={target.entry} target={target.target_triple}"
     var args: [text] = ["native-build"]
     for source in _build_sources(target):
         args.push("--source")
         args.push(source)
     args.push("--backend")
-    args.push(_build_backend(target))
+    args.push("cranelift")
     args.push("--entry-closure")
     args.push("--entry")
     args.push(target.entry)
@@ -414,33 +410,39 @@ fn build_os(target: OsTarget) -> bool:
     args.push(target.linker_script)
     val objcopy_prefix = _objcopy_path_prefix()
     if _needs_elf32_wrap(target) and objcopy_prefix == "":
-        print "[build] FAILED: llvm-objcopy not found for {target.entry}"
+        print "[build][{arch_label}] phase=tooling FAILED: llvm-objcopy not found for {target.entry}"
         return false
 
     val simple_bin = _find_simple_binary()
     val env_prefix = _build_env_prefix(target, objcopy_prefix)
+    val started_ms = _now_ms()
+    print "[build][{arch_label}] phase=spawn timeout_ms={timeout_ms}"
     if env_prefix == "":
-        print "[build] {arch_display_name(target.arch)}: {simple_bin} {args.join(" ")}"
-        val (stdout, stderr, exit_code) = rt_process_run_timeout(simple_bin, args, 60000)
+        print "[build][{arch_label}] cmd: {simple_bin} {args.join(" ")}"
+        val (stdout, stderr, exit_code) = rt_process_run_timeout(simple_bin, args, timeout_ms)
+        val elapsed_ms = _now_ms() - started_ms
         if exit_code != 0:
-            print "[build] FAILED (exit code {exit_code})"
+            print "[build][{arch_label}] phase=native-build FAILED exit={exit_code} elapsed_ms={elapsed_ms} timeout_ms={timeout_ms}"
             if stdout != "":
-                print "[build] stdout: {stdout}"
+                print "[build][{arch_label}] stdout tail:\n{_tail_lines(stdout, 20)}"
             if stderr != "":
-                print "[build] stderr: {stderr}"
+                print "[build][{arch_label}] stderr tail:\n{_tail_lines(stderr, 40)}"
             return false
+        print "[build][{arch_label}] phase=native-build OK elapsed_ms={elapsed_ms}"
         return true
 
     val shell_cmd = "{env_prefix} {simple_bin} {args.join(" ")}"
-    print "[build] {arch_display_name(target.arch)}: {shell_cmd}"
-    val (stdout, stderr, exit_code) = rt_process_run_timeout("/bin/sh", ["-c", shell_cmd], 60000)
+    print "[build][{arch_label}] cmd: {shell_cmd}"
+    val (stdout, stderr, exit_code) = rt_process_run_timeout("/bin/sh", ["-c", shell_cmd], timeout_ms)
+    val elapsed_ms = _now_ms() - started_ms
     if exit_code != 0:
-        print "[build] FAILED (exit code {exit_code})"
+        print "[build][{arch_label}] phase=native-build FAILED exit={exit_code} elapsed_ms={elapsed_ms} timeout_ms={timeout_ms}"
         if stdout != "":
-            print "[build] stdout: {stdout}"
+            print "[build][{arch_label}] stdout tail:\n{_tail_lines(stdout, 20)}"
         if stderr != "":
-            print "[build] stderr: {stderr}"
+            print "[build][{arch_label}] stderr tail:\n{_tail_lines(stderr, 40)}"
         return false
+    print "[build][{arch_label}] phase=native-build OK elapsed_ms={elapsed_ms}"
     true
 
 fn _objcopy_path_prefix() -> text:
@@ -479,11 +481,6 @@ fn _build_sources(target: OsTarget) -> [text]:
         return ["src/os", "src/lib", "examples/simple_os"]
     ["src", "examples"]
 
-fn _build_backend(target: OsTarget) -> text:
-    if _is_browser_soft_target_x86_32(target):
-        return "llvm"
-    "cranelift"
-
 fn _build_env_prefix(target: OsTarget, objcopy_prefix: text) -> text:
     var envs: [text] = []
     if _uses_baremetal_wrapper_profile(target):
@@ -503,9 +500,6 @@ fn _is_browser_wrapper_target(target: OsTarget) -> bool:
     target.entry == "examples/simple_os/arch/x86_64/browser_soft_entry.spl" or
         target.entry == "examples/simple_os/arch/x86_64/browser_probe_entry.spl"
 
-fn _is_browser_soft_target_x86_32(target: OsTarget) -> bool:
-    target.entry == "examples/simple_os/arch/x86_32/browser_soft_entry.spl"
-
 fn _is_desktop_wrapper_target(target: OsTarget) -> bool:
     target.entry == "examples/simple_os/arch/x86_64/desktop_e2e_entry.spl" or
         target.entry == "examples/simple_os/arch/x86_64/desktop_probe_entry.spl"
@@ -515,9 +509,12 @@ fn _is_desktop_wrapper_target(target: OsTarget) -> bool:
 # ===========================================================================
 
 fn build_qemu_command(target: OsTarget) -> [text]:
+    build_qemu_command_with_options(target, qemu_run_options_default())
+
+fn build_qemu_command_with_options(target: OsTarget, options: QemuRunOptions) -> [text]:
     """Returns QEMU command line as a list of strings.
 
-    Includes machine, cpu, memory, serial stdio, no display, no reboot,
+    Includes machine, cpu, memory, serial routing, display mode, no reboot,
     optional BIOS flags, kernel path, and extra architecture-specific flags.
     """
     var args: [text] = []
@@ -535,9 +532,14 @@ fn build_qemu_command(target: OsTarget) -> [text]:
     args.push("-m")
     args.push(target.qemu_memory)
 
-    # Serial output to stdio
+    # Serial routing:
+    # - headless/test lanes keep serial on stdio
+    # - GUI lanes hide boot logs for a macOS-style windowed startup
     args.push("-serial")
-    args.push("stdio")
+    if target.gui_mode and not options.debug_gui_serial:
+        args.push("none")
+    else:
+        args.push("stdio")
 
     # Display mode: headless for text-mode, show window for GUI
     if not target.gui_mode:
@@ -570,6 +572,12 @@ fn build_qemu_command(target: OsTarget) -> [text]:
 # ===========================================================================
 
 fn run_os(target: OsTarget) -> bool:
+    run_os_with_options(target, qemu_run_options_default())
+
+fn run_os_debug_gui(target: OsTarget) -> bool:
+    run_os_with_options(target, qemu_run_options_debug_gui())
+
+fn run_os_with_options(target: OsTarget, options: QemuRunOptions) -> bool:
     """Runs QEMU with the built kernel for the given target.
 
     Checks that the binary exists, then spawns QEMU. Returns true on success.
@@ -578,9 +586,11 @@ fn run_os(target: OsTarget) -> bool:
         print "[run] ERROR: kernel binary not found: {target.output}"
         print "[run] Run 'bin/simple os build --arch={arch_display_name(target.arch)}' first"
         return false
-    val cmd_parts = build_qemu_command(target)
+    val cmd_parts = build_qemu_command_with_options(target, options)
     val qemu_bin = cmd_parts[0]
     val qemu_args = cmd_parts.slice(1)
+    if target.gui_mode and options.debug_gui_serial:
+        print "[run] GUI debug lane enabled: serial output is attached to stdio"
     print "[run] {arch_display_name(target.arch)}: {cmd_parts.join(" ")}"
     val timeout: i64 = if target.gui_mode: 600000 else: 30000
     val (stdout, stderr, exit_code) = rt_process_run_timeout(qemu_bin, qemu_args, timeout)
@@ -933,6 +943,12 @@ fn get_scenario(name: text) -> QemuScenario?:
             return s
     nil
 
+fn scenario_target(scenario: QemuScenario) -> OsTarget:
+    """Resolve which kernel target should be built for a named scenario."""
+    if scenario.name == "x64-desktop-test":
+        return get_desktop_browser_target()
+    get_target(scenario.arch)
+
 fn build_scenario_command(scenario: QemuScenario, kernel_path: text) -> [text]:
     """Build QEMU command line from a scenario."""
     val qemu_bin = match scenario.arch:
@@ -961,3 +977,49 @@ fn build_scenario_command(scenario: QemuScenario, kernel_path: text) -> [text]:
     for extra in scenario.qemu_extra:
         args.push(extra)
     args
+
+fn build_scenario(scenario: QemuScenario) -> bool:
+    """Build the kernel image required by a named scenario."""
+    val target = scenario_target(scenario)
+    build_os(target)
+
+fn run_scenario(scenario: QemuScenario) -> bool:
+    """Build and run a named QEMU scenario."""
+    val target = scenario_target(scenario)
+    if not rt_file_exists(target.output):
+        print "[run] ERROR: kernel binary not found: {target.output}"
+        print "[run] Run 'bin/simple os build --scenario={scenario.name}' first"
+        return false
+    val cmd_parts = build_scenario_command(scenario, target.output)
+    val qemu_bin = cmd_parts[0]
+    val qemu_args = cmd_parts.slice(1)
+    print "[run] {scenario.name}: {cmd_parts.join(" ")}"
+    val timeout: i64 = if scenario.gui_mode: 600000 else: 30000
+    val (stdout, stderr, exit_code) = rt_process_run_timeout(qemu_bin, qemu_args, timeout)
+    if stdout != "":
+        print "[run] serial output:\n{stdout}"
+    if stderr != "":
+        print "[run] stderr:\n{stderr}"
+    val success = exit_code == 0 or exit_code == 1
+    if not success:
+        print "[run] FAILED (exit code {exit_code})"
+    success
+
+fn test_scenario(scenario: QemuScenario, timeout_ms: u64) -> bool:
+    """Run a named QEMU scenario as a smoke/integration test."""
+    val target = scenario_target(scenario)
+    if not rt_file_exists(target.output):
+        print "[test] ERROR: kernel binary not found: {target.output}"
+        print "[test] Run 'bin/simple os build --scenario={scenario.name}' first"
+        return false
+    val cmd_parts = build_scenario_command(scenario, target.output)
+    val qemu_bin = cmd_parts[0]
+    val qemu_args = cmd_parts.slice(1)
+    print "[test] {scenario.name} (timeout: {timeout_ms}ms): {cmd_parts.join(" ")}"
+    val (stdout, stderr, exit_code) = rt_process_run_timeout(qemu_bin, qemu_args, timeout_ms as i64)
+    val serial_output = stdout + stderr
+    print "[test] serial output:\n{serial_output}"
+    val success = serial_output.contains("TEST PASSED") and (exit_code == 0 or exit_code == 1)
+    if not success:
+        print "[test] FAILED: scenario {scenario.name} did not report TEST PASSED"
+    success

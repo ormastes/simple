@@ -17,6 +17,7 @@ use os.kernel.ipc.notif_global.{g_notification_table}
 use os.kernel.log.klog.{KernelLog}
 use os.kernel.loader.executable_source.{resolve_executable_bytes}
 use os.kernel.loader.process_image.{build_user_process_image}
+use os.kernel.loader.builtin_binary_registry.{resolve_builtin_binary}
 use os.kernel.arch.arch_context.{Architecture}
 use os.kernel.memory.vmm.{vmm_map_page, vmm_unmap_page, vmm_verify_user_write, vmm_read_pte, PAGE_SIZE, PTE_ADDR_MASK}
 use os.kernel.memory.pmm.{pmm_alloc_page, pmm_free_page}
@@ -549,6 +550,20 @@ fn _handle_spawn_binary(args: SyscallArgs, scheduler: Scheduler, klog: KernelLog
     val arch = _current_exec_arch()
     val bytes_result = resolve_executable_bytes(path, arch)
     if bytes_result.is_err():
+        val builtin_entry = resolve_builtin_binary(path)
+        if builtin_entry != nil:
+            val priority = _u64_to_priority(args.arg2)
+            val caps = CapabilitySet.full()
+            var sched = scheduler
+            val task_id = sched.create_task(builtin_entry.unwrap(), priority, caps)
+            if task_id.id == 0:
+                return SyscallResult(value: -12)
+
+            var blog = klog
+            blog.write(6, 1, task_id.id, "spawn_binary launched builtin {path}")
+            return SyscallResult(value: task_id.id.to_i64())
+        }
+
         var log = klog
         log.write(3, 1, 0, "spawn_binary rejected unknown binary: {path}")
         return SyscallResult(value: -2)

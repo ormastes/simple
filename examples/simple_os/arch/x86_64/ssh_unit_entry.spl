@@ -21,9 +21,9 @@ use os.posix.signal_compat.{signal_init}
 
 use os.crypto.ed25519.{ed25519_self_test, ed25519_keypair_from_seed}
 use os.crypto.random.{random_bytes}
-use os.apps.sshd.ssh_packet.{ssh_packet_build, ssh_packet_read, SshPacket, SshPacketResult, SshStringResult, SshTextResult, ssh_put_u32, ssh_get_u32, ssh_put_text, ssh_get_text, ssh_put_string, ssh_get_string, ssh_put_bool, ssh_put_byte}
+use os.apps.sshd.ssh_packet.{ssh_packet_build, ssh_packet_read, SshPacket, SshPacketResult, SshStringResult, SshTextResult, ssh_put_u32, ssh_get_u32, ssh_put_text, ssh_get_text, ssh_put_string, ssh_get_string, ssh_put_bool, ssh_put_byte, ssh_put_mpint}
 use os.apps.sshd.ssh_auth.{SshUserDb, ssh_parse_auth_request, ssh_build_auth_success, ssh_build_auth_failure, ssh_build_auth_banner, SSH_MSG_USERAUTH_REQUEST, sshd_create_default_users}
-use os.apps.sshd.ssh_channel.{ChannelTable, ChannelType, ChannelState, DEFAULT_WINDOW_SIZE, DEFAULT_MAX_PACKET, ssh_build_channel_open_confirmation}
+use os.apps.sshd.ssh_channel.{ChannelTable, ChannelType, ChannelState, DEFAULT_WINDOW_SIZE, DEFAULT_MAX_PACKET, ssh_build_channel_open_confirmation, ssh_build_channel_open_failure, ssh_build_channel_data, ssh_build_channel_window_adjust, ssh_build_channel_eof, ssh_build_channel_close, ssh_build_channel_success, ssh_build_channel_failure}
 use os.apps.sshd.ssh_transport.{ssh_build_version_string, ssh_parse_version_string, ssh_build_kexinit, ssh_parse_kexinit, ssh_build_service_accept, ssh_parse_service_request, ssh_build_disconnect}
 use os.apps.sshd.sshd.{SshDaemon}
 
@@ -464,7 +464,7 @@ fn _start():
     var f6_p2: u16 = d2.port
     _t(f6_p1 == 22 and f6_p2 == 2222, "F6: Two daemons independent")
 
-    # ===== G. Message Builders (4 tests) =====
+    # ===== G. Message Builders (13 tests) =====
     serial_println("--- G. Message Builders ---")
 
     var ms = ssh_build_auth_success()
@@ -483,6 +483,111 @@ fn _start():
     var mc = ssh_build_channel_open_confirmation(0, 0, DEFAULT_WINDOW_SIZE, DEFAULT_MAX_PACKET)
     var mc_type: u8 = mc[0]
     _t(mc_type == 91, "G4: CHANNEL_OPEN_CONFIRMATION type == 91")
+
+    # G5: CHANNEL_OPEN_FAILURE type == 92
+    var mof = ssh_build_channel_open_failure(7, 1, "denied")
+    var mof_len: u64 = mof.len()
+    var mof_t: u8 = mof[0]
+    _t(mof_t == 92 and mof_len > 1, "G5: CHANNEL_OPEN_FAILURE type == 92")
+
+    # G6: CHANNEL_DATA type == 94
+    var md_payload: [u8] = rt_build_byte_range(8)
+    var md = ssh_build_channel_data(3, md_payload)
+    var md_t: u8 = md[0]
+    _t(md_t == 94, "G6: CHANNEL_DATA type == 94")
+
+    # G7: CHANNEL_WINDOW_ADJUST type == 93
+    var mw = ssh_build_channel_window_adjust(3, 4096)
+    var mw_t: u8 = mw[0]
+    _t(mw_t == 93, "G7: CHANNEL_WINDOW_ADJUST type == 93")
+
+    # G8: CHANNEL_EOF type == 96
+    var meo = ssh_build_channel_eof(3)
+    var meo_t: u8 = meo[0]
+    var meo_len: u64 = meo.len()
+    _t(meo_t == 96 and meo_len == 5, "G8: CHANNEL_EOF == [96, id]")
+
+    # G9: CHANNEL_CLOSE type == 97
+    var mcc = ssh_build_channel_close(3)
+    var mcc_t: u8 = mcc[0]
+    var mcc_len: u64 = mcc.len()
+    _t(mcc_t == 97 and mcc_len == 5, "G9: CHANNEL_CLOSE == [97, id]")
+
+    # G10: CHANNEL_SUCCESS type == 99
+    var mcs = ssh_build_channel_success(3)
+    var mcs_t: u8 = mcs[0]
+    _t(mcs_t == 99, "G10: CHANNEL_SUCCESS type == 99")
+
+    # G11: CHANNEL_FAILURE type == 100
+    var mcf = ssh_build_channel_failure(3)
+    var mcf_t: u8 = mcf[0]
+    _t(mcf_t == 100, "G11: CHANNEL_FAILURE type == 100")
+
+    # G12: SERVICE_ACCEPT carries service name string
+    var g12_sa = ssh_build_service_accept("ssh-userauth")
+    var g12_sa_t: u8 = g12_sa[0]
+    var g12_sa_len: u64 = g12_sa.len()
+    _t(g12_sa_t == 6 and g12_sa_len > 5, "G12: SERVICE_ACCEPT non-empty")
+
+    # G13: DISCONNECT type == 1 + reason + description
+    var g13_dc = ssh_build_disconnect(11, "bye")
+    var g13_dc_t: u8 = g13_dc[0]
+    var g13_dc_len: u64 = g13_dc.len()
+    _t(g13_dc_t == 1 and g13_dc_len > 5, "G13: DISCONNECT non-empty")
+
+    # ===== M. mpint Encoding (5 tests) =====
+    serial_println("--- M. mpint ---")
+
+    # M1: mpint of zero -> 4-byte length prefix == 0, no body
+    var m1_buf: [u8] = []
+    var m1_val: [u8] = []
+    ssh_put_mpint(m1_buf, m1_val)
+    var m1_len: u64 = m1_buf.len()
+    var m1_b0: u8 = m1_buf[0]
+    var m1_b1: u8 = m1_buf[1]
+    var m1_b2: u8 = m1_buf[2]
+    var m1_b3: u8 = m1_buf[3]
+    _t(m1_len == 4 and m1_b0 == 0 and m1_b1 == 0 and m1_b2 == 0 and m1_b3 == 0, "M1: mpint(0) == 4-byte zero length")
+
+    # M2: mpint of positive small value (0x01) -> length 1, body [0x01]
+    var m2_buf: [u8] = []
+    var m2_val: [u8] = [0x01]
+    ssh_put_mpint(m2_buf, m2_val)
+    var m2_len: u64 = m2_buf.len()
+    var m2_b3: u8 = m2_buf[3]
+    var m2_b4: u8 = m2_buf[4]
+    _t(m2_len == 5 and m2_b3 == 1 and m2_b4 == 0x01, "M2: mpint(0x01) == len=1, body=[0x01]")
+
+    # M3: mpint with high bit set -> needs leading zero pad (positive two's complement)
+    var m3_buf: [u8] = []
+    var m3_val: [u8] = [0x80]
+    ssh_put_mpint(m3_buf, m3_val)
+    var m3_len: u64 = m3_buf.len()
+    var m3_b3: u8 = m3_buf[3]
+    var m3_b4: u8 = m3_buf[4]
+    var m3_b5: u8 = m3_buf[5]
+    _t(m3_len == 6 and m3_b3 == 2 and m3_b4 == 0x00 and m3_b5 == 0x80, "M3: mpint(0x80) pads leading zero")
+
+    # M4: mpint multi-byte with no high bit
+    var m4_buf: [u8] = []
+    var m4_val: [u8] = [0x12, 0x34, 0x56]
+    ssh_put_mpint(m4_buf, m4_val)
+    var m4_len: u64 = m4_buf.len()
+    var m4_b3: u8 = m4_buf[3]
+    var m4_b4: u8 = m4_buf[4]
+    var m4_b5: u8 = m4_buf[5]
+    var m4_b6: u8 = m4_buf[6]
+    _t(m4_len == 7 and m4_b3 == 3 and m4_b4 == 0x12 and m4_b5 == 0x34 and m4_b6 == 0x56, "M4: mpint([0x12,0x34,0x56]) round-trip")
+
+    # M5: mpint with leading zero byte — strip, then body_len decreases by one
+    # rt_build_byte_range(32) = [0,1,2,...,31]; strip leading 0x00 -> 31 bytes, no high bit
+    var m5_buf: [u8] = []
+    var m5_val: [u8] = rt_build_byte_range(32)
+    ssh_put_mpint(m5_buf, m5_val)
+    var m5_len: u64 = m5_buf.len()
+    var m5_b3: u8 = m5_buf[3]
+    var m5_b4: u8 = m5_buf[4]
+    _t(m5_len == 35 and m5_b3 == 31 and m5_b4 == 0x01, "M5: mpint strips leading zero byte")
 
     # ===== Summary =====
     serial_println("")

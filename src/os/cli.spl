@@ -14,7 +14,8 @@
 #   bin/simple os targets                   # List supported architectures
 
 use os.qemu_runner.{get_target, get_all_targets, arch_from_name,
-    build_os, run_os, test_os, test_all_architectures, arch_display_name}
+    build_os, run_os, run_os_debug_gui, test_os, test_all_architectures, arch_display_name,
+    get_scenario, build_scenario, run_scenario, test_scenario}
 
 # ===========================================================================
 # Argument Parsing
@@ -45,6 +46,18 @@ fn has_flag(args: [text], flag: text) -> bool:
             return true
     false
 
+fn parse_scenario_arg(args: [text]) -> text:
+    """Extract --scenario=<name> or --scenario <name> from args."""
+    for arg in args:
+        if arg.starts_with("--scenario="):
+            return arg[11:]
+    var i = 0
+    while i < args.len() - 1:
+        if args[i] == "--scenario":
+            return args[i + 1]
+        i = i + 1
+    ""
+
 # ===========================================================================
 # Help
 # ===========================================================================
@@ -65,6 +78,8 @@ fn print_os_help():
     print "  --arch=<name>      Target architecture (default: x86_64)"
     print "  --target=<name>    Alias for --arch"
     print "  --all              Test all architectures (with 'test' command)"
+    print "  --scenario=<name>  Named QEMU scenario (for run/test/build)"
+    print "  --debug-gui        Keep GUI targets windowed while exposing serial logs"
     print ""
     print "Architectures:"
     print "  x86_64   x86_32   riscv64   riscv32   arm64   arm32"
@@ -91,10 +106,19 @@ fn print_os_targets():
 
 fn handle_os_build(args: [text]) -> i64:
     """Handle `os build` — compile the OS kernel for the specified architecture."""
+    val scenario_name = parse_scenario_arg(args)
+    if scenario_name != "":
+        val scenario = get_scenario(scenario_name)
+        if scenario == nil:
+            print "Error: unknown scenario '{scenario_name}'"
+            return 1
+        val ok = build_scenario(scenario)
+        return if ok: 0 else: 1
+
     val arch_name = parse_arch_arg(args)
     val arch = arch_from_name(arch_name)
     if arch.?:
-        val target = get_target(arch.unwrap())
+        val target = get_target(arch)
         val ok = build_os(target)
         if ok: 0 else: 1
     else:
@@ -104,15 +128,29 @@ fn handle_os_build(args: [text]) -> i64:
 
 fn handle_os_run(args: [text]) -> i64:
     """Handle `os run` — build and run the OS in QEMU."""
+    val scenario_name = parse_scenario_arg(args)
+    if scenario_name != "":
+        val scenario = get_scenario(scenario_name)
+        if scenario == nil:
+            print "Error: unknown scenario '{scenario_name}'"
+            return 1
+        val built = build_scenario(scenario)
+        if not built:
+            print "Error: build failed for scenario {scenario_name}"
+            return 1
+        val ok = run_scenario(scenario)
+        return if ok: 0 else: 1
+
     val arch_name = parse_arch_arg(args)
+    val debug_gui = has_flag(args, "--debug-gui")
     val arch = arch_from_name(arch_name)
     if arch.?:
-        val target = get_target(arch.unwrap())
+        val target = get_target(arch)
         val built = build_os(target)
         if not built:
             print "Error: build failed for {arch_display_name(target.arch)}"
             return 1
-        val ok = run_os(target)
+        val ok = if debug_gui: run_os_debug_gui(target) else: run_os(target)
         if ok: 0 else: 1
     else:
         print "Error: unknown architecture '{arch_name}'"
@@ -125,10 +163,23 @@ fn handle_os_test(args: [text]) -> i64:
         val ok = test_all_architectures()
         if ok: 0 else: 1
     else:
+        val scenario_name = parse_scenario_arg(args)
+        if scenario_name != "":
+            val scenario = get_scenario(scenario_name)
+            if scenario == nil:
+                print "Error: unknown scenario '{scenario_name}'"
+                return 1
+            val built = build_scenario(scenario)
+            if not built:
+                print "Error: build failed for scenario {scenario_name}"
+                return 1
+            val ok = test_scenario(scenario, 10000)
+            return if ok: 0 else: 1
+
         val arch_name = parse_arch_arg(args)
         val arch = arch_from_name(arch_name)
         if arch.?:
-            val target = get_target(arch.unwrap())
+            val target = get_target(arch)
             val built = build_os(target)
             if not built:
                 print "Error: build failed for {arch_display_name(target.arch)}"

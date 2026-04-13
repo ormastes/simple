@@ -70,7 +70,7 @@ struct WindowSurface:
     """A managed window in the compositor.
 
     Each surface has its own UISession containing the widget tree,
-    plus position/size and rendering state.
+    plus position/size, rendering state, and process/app identity.
 
     owner_port: IPC port of the owning application.
       0 = local in-process window (UI dispatched directly to UISession)
@@ -86,6 +86,8 @@ struct WindowSurface:
     session: UISession?
     dirty: bool
     owner_port: u64
+    process_id: u64
+    app_id: text
 
 # ============================================================================
 # Pre-maximize saved geometry — for restore after maximize
@@ -314,7 +316,9 @@ impl Compositor:
             visible: true,
             session: session,
             dirty: true,
-            owner_port: 0
+            owner_port: 0,
+            process_id: 0,
+            app_id: ""
         )
 
         self.surfaces = self.surfaces.push(surface)
@@ -362,7 +366,9 @@ impl Compositor:
             visible: true,
             session: nil,
             dirty: true,
-            owner_port: 0
+            owner_port: 0,
+            process_id: 0,
+            app_id: ""
         )
 
         self.surfaces = self.surfaces.push(surface)
@@ -387,7 +393,9 @@ impl Compositor:
             visible: true,
             session: session,
             dirty: true,
-            owner_port: 0
+            owner_port: 0,
+            process_id: 0,
+            app_id: ""
         )
 
         self.surfaces = self.surfaces.push(surface)
@@ -455,7 +463,9 @@ impl Compositor:
                     width: s.width, height: s.height,
                     visible: s.visible, session: s.session,
                     dirty: true,
-                    owner_port: s.owner_port
+                    owner_port: s.owner_port,
+                    process_id: s.process_id,
+                    app_id: s.app_id
                 ))
             else:
                 updated = updated.push(s)
@@ -472,7 +482,9 @@ impl Compositor:
                     width: new_w, height: new_h,
                     visible: s.visible, session: s.session,
                     dirty: true,
-                    owner_port: s.owner_port
+                    owner_port: s.owner_port,
+                    process_id: s.process_id,
+                    app_id: s.app_id
                 ))
             else:
                 updated = updated.push(s)
@@ -504,7 +516,9 @@ impl Compositor:
             visible: true,
             session: session,
             dirty: true,
-            owner_port: owner_port
+            owner_port: owner_port,
+            process_id: owner_port,
+            app_id: title
         )
 
         self.surfaces = self.surfaces.push(surface)
@@ -526,7 +540,9 @@ impl Compositor:
                     width: s.width, height: s.height,
                     visible: s.visible, session: s.session,
                     dirty: true,
-                    owner_port: s.owner_port
+                    owner_port: s.owner_port,
+                    process_id: s.process_id,
+                    app_id: s.app_id
                 ))
             else:
                 updated = updated.push(s)
@@ -548,7 +564,9 @@ impl Compositor:
                     width: s.width, height: s.height,
                     visible: s.visible, session: s.session,
                     dirty: true,
-                    owner_port: s.owner_port
+                    owner_port: s.owner_port,
+                    process_id: s.process_id,
+                    app_id: s.app_id
                 ))
             else:
                 updated = updated.push(s)
@@ -603,7 +621,9 @@ impl Compositor:
                     width: s.width, height: s.height,
                     visible: false, session: s.session,
                     dirty: true,
-                    owner_port: s.owner_port
+                    owner_port: s.owner_port,
+                    process_id: s.process_id,
+                    app_id: s.app_id
                 ))
             else:
                 updated = updated.push(s)
@@ -677,7 +697,9 @@ impl Compositor:
                         width: s.width, height: s.height,
                         visible: true, session: s.session,
                         dirty: true,
-                        owner_port: s.owner_port
+                        owner_port: s.owner_port,
+                        process_id: s.process_id,
+                        app_id: s.app_id
                     ))
                 else:
                     updated = updated.push(s)
@@ -694,7 +716,9 @@ impl Compositor:
                     width: s.width, height: s.height,
                     visible: s.visible, session: s.session,
                     dirty: true,
-                    owner_port: s.owner_port
+                    owner_port: s.owner_port,
+                    process_id: s.process_id,
+                    app_id: s.app_id
                 ))
             else:
                 updated = updated.push(s)
@@ -743,6 +767,74 @@ impl Compositor:
         for s in self.surfaces:
             titles = titles.push(s.title)
         return titles
+
+    fn window_owner_port(id: u64) -> u64:
+        val surface = self.get_surface(id)
+        if surface == nil:
+            return 0
+        val s = surface
+        s.owner_port
+
+    fn window_process_id(id: u64) -> u64:
+        val surface = self.get_surface(id)
+        if surface == nil:
+            return 0
+        val s = surface
+        s.process_id
+
+    fn window_app_id(id: u64) -> text:
+        val surface = self.get_surface(id)
+        if surface == nil:
+            return ""
+        val s = surface
+        s.app_id
+
+    fn windows_for_process(process_id: u64) -> [u64]:
+        var ids: [u64] = []
+        for s in self.surfaces:
+            if s.process_id == process_id:
+                ids = ids.push(s.id)
+        ids
+
+    fn windows_for_app(app_id: text) -> [u64]:
+        var ids: [u64] = []
+        for s in self.surfaces:
+            if s.app_id == app_id:
+                ids = ids.push(s.id)
+        ids
+
+    fn window_count_for_process(process_id: u64) -> i32:
+        var count: i32 = 0
+        for s in self.surfaces:
+            if s.process_id == process_id:
+                count = count + 1
+        count
+
+    fn window_count_for_app(app_id: text) -> i32:
+        var count: i32 = 0
+        for s in self.surfaces:
+            if s.app_id == app_id:
+                count = count + 1
+        count
+
+    me set_window_identity(id: u64, process_id: u64, app_id: text):
+        """Attach process/app identity metadata to a surface."""
+        var updated: [WindowSurface] = []
+        for s in self.surfaces:
+            if s.id == id:
+                updated = updated.push(WindowSurface(
+                    id: s.id, title: s.title,
+                    x: s.x, y: s.y,
+                    width: s.width, height: s.height,
+                    visible: s.visible, session: s.session,
+                    dirty: true,
+                    owner_port: s.owner_port,
+                    process_id: process_id,
+                    app_id: app_id
+                ))
+            else:
+                updated = updated.push(s)
+        self.surfaces = updated
 
     # -- Rendering -----------------------------------------------------------
 
@@ -1227,7 +1319,9 @@ impl Compositor:
                                 x: s.x, y: s.y,
                                 width: s.width, height: s.height,
                                 visible: true, session: s.session,
-                                dirty: true, owner_port: s.owner_port
+                                dirty: true, owner_port: s.owner_port,
+                                process_id: s.process_id,
+                                app_id: s.app_id
                             ))
                         else:
                             restored = restored.push(s)
@@ -1285,7 +1379,9 @@ impl Compositor:
                             width: s.width, height: s.height,
                             visible: s.visible, session: s.session,
                             dirty: true,
-                            owner_port: s.owner_port
+                            owner_port: s.owner_port,
+                            process_id: s.process_id,
+                            app_id: s.app_id
                         ))
                     else:
                         updated = updated.push(s)
@@ -1654,7 +1750,9 @@ impl Compositor:
                     width: s.width, height: s.height,
                     visible: not s.visible, session: s.session,
                     dirty: true,
-                    owner_port: s.owner_port
+                    owner_port: s.owner_port,
+                    process_id: s.process_id,
+                    app_id: s.app_id
                 ))
             else:
                 updated = updated.push(s)

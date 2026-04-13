@@ -1,268 +1,84 @@
 # x86_64 Desktop E2E Baremetal Entry
 #
-# Lean wrapper that boots the baremetal runtime, exercises launcher/WM
-# integration, and exits QEMU through ISA debug-exit.
+# Boots a minimal real desktop stack, launches Browser Demo through the
+# launcher/shell path, and exits only after the shell observes the remote
+# windows grouped under the launcher-owned manifest app identity.
 
-extern fn rt_port_inb(port: u64) -> u64
+use os.kernel.arch.x86_64.console.{serial_init, serial_writeln}
+use os.drivers.framebuffer.bga_init.{bga_init_framebuffer}
+use os.drivers.framebuffer.fb_driver.{FramebufferDriver}
+use os.drivers.input.ps2_keyboard.{Ps2Keyboard}
+use os.drivers.input.ps2_mouse.{Ps2Mouse}
+use os.compositor.compositor_engine2d.{CompositorEngine2D}
+use os.compositor.engine2d_display.{create_fb_engine}
+use os.desktop.shell.{DesktopShell}
+use os.services.launcher.launcher.{launcher_get_pid, launcher_get_process_window_count}
+use os.userlib.process.{yield_}
+
+extern fn serial_println(msg: text)
+extern fn rt_gui_set_fb(addr: u64, width: u64)
 extern fn rt_port_outb(port: u64, value: u64)
 
-use os.services.launcher.launcher.{launcher_init, launcher_shortcut_dispatch, launcher_get_app_count, MOD_META}
-use os.services.wm.wm_service.{wm_notify_app_launched}
-
-val SERIAL_DATA: u64 = 0x3F8
-val SERIAL_LSR: u64 = 0x3FD
 val DEBUG_EXIT: u64 = 0xF4
+val BROWSER_APP_ID: text = "/sys/apps/browser_demo"
+val BROWSER_PROCESS_SLOT: u64 = 0
+val MAX_SPINS: i32 = 1200
 
-fn serial_wait_ready():
-    var guard: i64 = 100000
-    while guard > 0:
-        if (rt_port_inb(SERIAL_LSR) & 0x20) != 0:
-            return
-        guard = guard - 1
+fn desktop_e2e_main() -> bool:
+    serial_println("[desktop-e2e] boot:start")
 
-fn serial_put(ch: u64):
-    serial_wait_ready()
-    rt_port_outb(SERIAL_DATA, ch)
+    val fb_info = bga_init_framebuffer(1024, 768, 32)
+    rt_gui_set_fb(fb_info.addr.addr, fb_info.width.to_u64())
+    var fb = FramebufferDriver.from_boot_info(fb_info)
+    var engine = create_fb_engine(fb)
 
-fn serial_newline():
-    serial_put(13)
-    serial_put(10)
+    var keyboard = Ps2Keyboard.new()
+    keyboard.init()
+    var mouse = Ps2Mouse.create(fb.width.to_i64(), fb.height.to_i64())
+    mouse.init()
 
-fn write_desktop_spl_start():
-    serial_put(91)
-    serial_put(100)
-    serial_put(101)
-    serial_put(115)
-    serial_put(107)
-    serial_put(116)
-    serial_put(111)
-    serial_put(112)
-    serial_put(45)
-    serial_put(101)
-    serial_put(50)
-    serial_put(101)
-    serial_put(93)
-    serial_put(32)
-    serial_put(115)
-    serial_put(112)
-    serial_put(108)
-    serial_put(95)
-    serial_put(115)
-    serial_put(116)
-    serial_put(97)
-    serial_put(114)
-    serial_put(116)
-    serial_newline()
+    var ce2d = CompositorEngine2D.new(engine, keyboard, mouse)
+    var shell = DesktopShell.new(ce2d.inner)
+    shell.init()
+    serial_println("[desktop-e2e] shell:ready")
 
-fn write_desktop_main_start():
-    serial_put(91)
-    serial_put(100)
-    serial_put(101)
-    serial_put(115)
-    serial_put(107)
-    serial_put(116)
-    serial_put(111)
-    serial_put(112)
-    serial_put(45)
-    serial_put(101)
-    serial_put(50)
-    serial_put(101)
-    serial_put(93)
-    serial_put(32)
-    serial_put(109)
-    serial_put(97)
-    serial_put(105)
-    serial_put(110)
-    serial_put(58)
-    serial_put(115)
-    serial_put(116)
-    serial_put(97)
-    serial_put(114)
-    serial_put(116)
-    serial_newline()
+    shell.launch_app("Browser Demo")
+    serial_println("[desktop-e2e] launch:browser-demo")
 
-fn write_desktop_launcher_init():
-    serial_put(91)
-    serial_put(100)
-    serial_put(101)
-    serial_put(115)
-    serial_put(107)
-    serial_put(116)
-    serial_put(111)
-    serial_put(112)
-    serial_put(45)
-    serial_put(101)
-    serial_put(50)
-    serial_put(101)
-    serial_put(93)
-    serial_put(32)
-    serial_put(108)
-    serial_put(97)
-    serial_put(117)
-    serial_put(110)
-    serial_put(99)
-    serial_put(104)
-    serial_put(101)
-    serial_put(114)
-    serial_put(58)
-    serial_put(105)
-    serial_put(110)
-    serial_put(105)
-    serial_put(116)
-    serial_newline()
+    var spins: i32 = 0
+    while spins < MAX_SPINS:
+        shell.drain_wm_actions()
+        shell.reconcile_dead_process_windows()
+        shell.compositor.render_all()
 
-fn write_desktop_launcher_ready():
-    serial_put(91)
-    serial_put(100)
-    serial_put(101)
-    serial_put(115)
-    serial_put(107)
-    serial_put(116)
-    serial_put(111)
-    serial_put(112)
-    serial_put(45)
-    serial_put(101)
-    serial_put(50)
-    serial_put(101)
-    serial_put(93)
-    serial_put(32)
-    serial_put(108)
-    serial_put(97)
-    serial_put(117)
-    serial_put(110)
-    serial_put(99)
-    serial_put(104)
-    serial_put(101)
-    serial_put(114)
-    serial_put(58)
-    serial_put(114)
-    serial_put(101)
-    serial_put(97)
-    serial_put(100)
-    serial_put(121)
-    serial_newline()
+        val pid = launcher_get_pid(3)
+        val grouped = shell.compositor.window_count_for_app(BROWSER_APP_ID)
+        val launcher_windows = launcher_get_process_window_count(BROWSER_PROCESS_SLOT)
 
-fn write_desktop_shortcut_ok():
-    serial_put(91)
-    serial_put(100)
-    serial_put(101)
-    serial_put(115)
-    serial_put(107)
-    serial_put(116)
-    serial_put(111)
-    serial_put(112)
-    serial_put(45)
-    serial_put(101)
-    serial_put(50)
-    serial_put(101)
-    serial_put(93)
-    serial_put(32)
-    serial_put(115)
-    serial_put(104)
-    serial_put(111)
-    serial_put(114)
-    serial_put(116)
-    serial_put(99)
-    serial_put(117)
-    serial_put(116)
-    serial_put(58)
-    serial_put(111)
-    serial_put(107)
-    serial_newline()
+        if pid > 0 and grouped >= 2 and launcher_windows >= 2:
+            val ids = shell.compositor.windows_for_app(BROWSER_APP_ID)
+            if ids.len() >= 2:
+                val first = ids[0]
+                val second = ids[1]
+                if shell.compositor.window_process_id(first) == pid and
+                   shell.compositor.window_process_id(second) == pid and
+                   shell.wm.window_owner_app_id(first) == BROWSER_APP_ID and
+                   shell.wm.window_owner_app_id(second) == BROWSER_APP_ID:
+                    serial_println("[desktop-e2e] remote-grouping:ok pid={pid} windows={ids.len()}")
+                    return true
+        yield_()
+        spins = spins + 1
 
-fn write_desktop_wm_ok():
-    serial_put(91)
-    serial_put(100)
-    serial_put(101)
-    serial_put(115)
-    serial_put(107)
-    serial_put(116)
-    serial_put(111)
-    serial_put(112)
-    serial_put(45)
-    serial_put(101)
-    serial_put(50)
-    serial_put(101)
-    serial_put(93)
-    serial_put(32)
-    serial_put(119)
-    serial_put(109)
-    serial_put(58)
-    serial_put(111)
-    serial_put(107)
-    serial_newline()
-
-fn write_desktop_done():
-    serial_put(91)
-    serial_put(100)
-    serial_put(101)
-    serial_put(115)
-    serial_put(107)
-    serial_put(116)
-    serial_put(111)
-    serial_put(112)
-    serial_put(45)
-    serial_put(101)
-    serial_put(50)
-    serial_put(101)
-    serial_put(93)
-    serial_put(32)
-    serial_put(100)
-    serial_put(111)
-    serial_put(110)
-    serial_put(101)
-    serial_newline()
-
-fn write_desktop_test_passed():
-    serial_put(84)
-    serial_put(69)
-    serial_put(83)
-    serial_put(84)
-    serial_put(32)
-    serial_put(80)
-    serial_put(65)
-    serial_put(83)
-    serial_put(83)
-    serial_put(69)
-    serial_put(68)
-    serial_newline()
-
-fn write_desktop_test_failed():
-    serial_put(84)
-    serial_put(69)
-    serial_put(83)
-    serial_put(84)
-    serial_put(32)
-    serial_put(70)
-    serial_put(65)
-    serial_put(73)
-    serial_put(76)
-    serial_put(69)
-    serial_put(68)
-    serial_newline()
-
-fn desktop_e2e_main():
-    write_desktop_main_start()
-    launcher_init()
-    write_desktop_launcher_init()
-    val app_count = launcher_get_app_count()
-    if app_count < 4:
-        write_desktop_test_failed()
-        return
-    write_desktop_launcher_ready()
-
-    val launched = launcher_shortcut_dispatch(0x42, MOD_META)
-    if not launched:
-        write_desktop_test_failed()
-        return
-    write_desktop_shortcut_ok()
-
-    wm_notify_app_launched("Browser Demo", 4)
-    write_desktop_wm_ok()
-    write_desktop_test_passed()
+    serial_println("[desktop-e2e] remote-grouping:timeout")
+    false
 
 fn spl_start():
-    write_desktop_spl_start()
-    desktop_e2e_main()
-    write_desktop_done()
+    serial_init()
+    serial_writeln("SimpleOS x86_64 desktop E2E boot")
+
+    if desktop_e2e_main():
+        serial_println("TEST PASSED")
+    else:
+        serial_println("TEST FAILED")
+
     rt_port_outb(DEBUG_EXIT, 0)

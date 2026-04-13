@@ -252,6 +252,59 @@ unsafe fn extract_string(val: RuntimeValue) -> Option<String> {
     Some(String::from_utf8_lossy(slice).into_owned())
 }
 
+fn spawn_output_reader<R>(reader: Option<R>) -> std::thread::JoinHandle<Vec<u8>>
+where
+    R: std::io::Read + Send + 'static,
+{
+    std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        if let Some(mut pipe) = reader {
+            let _ = pipe.read_to_end(&mut buf);
+        }
+        buf
+    })
+}
+
+fn finish_child_output(
+    mut child: std::process::Child,
+    timeout_ms: i64,
+) -> std::io::Result<(Vec<u8>, Vec<u8>, i64)> {
+    use std::time::{Duration, Instant};
+
+    let stdout_handle = spawn_output_reader(child.stdout.take());
+    let stderr_handle = spawn_output_reader(child.stderr.take());
+
+    let status = if timeout_ms <= 0 {
+        child.wait()?
+    } else {
+        let deadline = Instant::now() + Duration::from_millis(timeout_ms as u64);
+        loop {
+            if let Some(status) = child.try_wait()? {
+                break status;
+            }
+            if Instant::now() >= deadline {
+                #[cfg(unix)]
+                {
+                    unsafe {
+                        libc::kill(-(child.id() as i32), libc::SIGKILL);
+                    }
+                }
+                #[cfg(not(unix))]
+                {
+                    let _ = child.kill();
+                }
+                let _ = child.wait();
+                return Err(std::io::Error::new(std::io::ErrorKind::TimedOut, "TIMEOUT"));
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    };
+
+    let stdout = stdout_handle.join().unwrap_or_default();
+    let stderr = stderr_handle.join().unwrap_or_default();
+    Ok((stdout, stderr, status.code().unwrap_or(-1) as i64))
+}
+
 /// Execute a command and capture output
 /// Returns tuple (stdout: String, stderr: String, exit_code: Int)
 #[no_mangle]
@@ -564,9 +617,6 @@ pub unsafe extern "C" fn rt_process_run_timeout(
     timeout_ms: i64,
 ) -> RuntimeValue {
     use std::process::Command;
-    use std::sync::mpsc;
-    use std::thread;
-    use std::time::Duration;
 
     if cmd_ptr.is_null() {
         let empty_str = rt_string_new(b"".as_ptr(), 0);
@@ -603,7 +653,7 @@ pub unsafe extern "C" fn rt_process_run_timeout(
         }
     }
 
-    let mut child = match command
+    let child = match command
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
@@ -620,22 +670,10 @@ pub unsafe extern "C" fn rt_process_run_timeout(
         }
     };
 
-    // Store child PID so we can kill it on timeout
-    let child_id = child.id();
-
-    let (tx, rx) = mpsc::channel();
-    let handle = thread::spawn(move || {
-        let output = child.wait_with_output();
-        let _ = tx.send(output);
-    });
-
-    let timeout_dur = Duration::from_millis(timeout_ms as u64);
-    match rx.recv_timeout(timeout_dur) {
-        Ok(Ok(output)) => {
-            let _ = handle.join();
-            let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-            let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-            let exit_code = output.status.code().unwrap_or(-1) as i64;
+    match finish_child_output(child, timeout_ms) {
+        Ok((stdout_bytes, stderr_bytes, exit_code)) => {
+            let stdout = String::from_utf8_lossy(&stdout_bytes).to_string();
+            let stderr = String::from_utf8_lossy(&stderr_bytes).to_string();
 
             let stdout_val = rt_string_new(stdout.as_ptr(), stdout.len() as u64);
             let stderr_val = rt_string_new(stderr.as_ptr(), stderr.len() as u64);
@@ -646,30 +684,21 @@ pub unsafe extern "C" fn rt_process_run_timeout(
             rt_tuple_set(tuple, 2, RuntimeValue::from_int(exit_code));
             tuple
         }
-        _ => {
-            // Timeout or error - kill the child process
-            #[cfg(unix)]
-            {
-                // Kill the entire process group to clean up child processes
-                unsafe {
-                    libc::kill(-(child_id as i32), libc::SIGKILL);
-                }
-            }
-            #[cfg(not(unix))]
-            {
-                // Fallback: try to kill by PID (best effort)
-                let _ = std::process::Command::new("taskkill")
-                    .args(["/F", "/PID", &child_id.to_string()])
-                    .output();
-            }
-            let _ = handle.join();
-
+        Err(err) if err.kind() == std::io::ErrorKind::TimedOut => {
             let timeout_msg = b"TIMEOUT";
             let timeout_str = rt_string_new(timeout_msg.as_ptr(), timeout_msg.len() as u64);
             let empty_str = rt_string_new(b"".as_ptr(), 0);
             let tuple = rt_tuple_new(3);
             rt_tuple_set(tuple, 0, empty_str);
             rt_tuple_set(tuple, 1, timeout_str);
+            rt_tuple_set(tuple, 2, RuntimeValue::from_int(-1));
+            tuple
+        }
+        Err(_) => {
+            let empty_str = rt_string_new(b"".as_ptr(), 0);
+            let tuple = rt_tuple_new(3);
+            rt_tuple_set(tuple, 0, empty_str);
+            rt_tuple_set(tuple, 1, empty_str);
             rt_tuple_set(tuple, 2, RuntimeValue::from_int(-1));
             tuple
         }
@@ -796,47 +825,15 @@ pub unsafe extern "C" fn rt_process_run_with_limits(
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
 
-    let mut child = match command.spawn() {
+    let child = match command.spawn() {
         Ok(c) => c,
         Err(_) => return make_error_tuple(),
     };
 
-    // If no timeout, just wait
-    if timeout_ms <= 0 {
-        match child.wait_with_output() {
-            Ok(output) => {
-                let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-                let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-                let exit_code = output.status.code().unwrap_or(-1) as i64;
-
-                let stdout_val = rt_string_new(stdout.as_ptr(), stdout.len() as u64);
-                let stderr_val = rt_string_new(stderr.as_ptr(), stderr.len() as u64);
-
-                let tuple = rt_tuple_new(3);
-                rt_tuple_set(tuple, 0, stdout_val);
-                rt_tuple_set(tuple, 1, stderr_val);
-                rt_tuple_set(tuple, 2, RuntimeValue::from_int(exit_code));
-                return tuple;
-            }
-            Err(_) => return make_error_tuple(),
-        }
-    }
-
-    // With timeout: spawn monitoring thread
-    let child_id = child.id();
-    let (tx, rx) = std::sync::mpsc::channel();
-    let handle = std::thread::spawn(move || {
-        let output = child.wait_with_output();
-        let _ = tx.send(output);
-    });
-
-    let timeout_dur = std::time::Duration::from_millis(timeout_ms as u64);
-    match rx.recv_timeout(timeout_dur) {
-        Ok(Ok(output)) => {
-            let _ = handle.join();
-            let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-            let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-            let exit_code = output.status.code().unwrap_or(-1) as i64;
+    match finish_child_output(child, timeout_ms) {
+        Ok((stdout_bytes, stderr_bytes, exit_code)) => {
+            let stdout = String::from_utf8_lossy(&stdout_bytes).to_string();
+            let stderr = String::from_utf8_lossy(&stderr_bytes).to_string();
 
             let stdout_val = rt_string_new(stdout.as_ptr(), stdout.len() as u64);
             let stderr_val = rt_string_new(stderr.as_ptr(), stderr.len() as u64);
@@ -847,20 +844,7 @@ pub unsafe extern "C" fn rt_process_run_with_limits(
             rt_tuple_set(tuple, 2, RuntimeValue::from_int(exit_code));
             tuple
         }
-        _ => {
-            // Timeout - kill the child process
-            #[cfg(unix)]
-            {
-                libc::kill(-(child_id as i32), libc::SIGKILL);
-            }
-            #[cfg(not(unix))]
-            {
-                let _ = std::process::Command::new("taskkill")
-                    .args(["/F", "/PID", &child_id.to_string()])
-                    .output();
-            }
-            let _ = handle.join();
-
+        Err(err) if err.kind() == std::io::ErrorKind::TimedOut => {
             let timeout_msg = b"TIMEOUT";
             let timeout_str = rt_string_new(timeout_msg.as_ptr(), timeout_msg.len() as u64);
             let empty_str = rt_string_new(b"".as_ptr(), 0);
@@ -870,6 +854,7 @@ pub unsafe extern "C" fn rt_process_run_with_limits(
             rt_tuple_set(tuple, 2, RuntimeValue::from_int(-1));
             tuple
         }
+        Err(_) => make_error_tuple(),
     }
 }
 
@@ -1027,12 +1012,39 @@ mod tests {
         String::from_utf8_lossy(slice).to_string()
     }
 
+    unsafe fn runtime_args(args: &[&str]) -> RuntimeValue {
+        let array = rt_array_new(args.len() as u64);
+        for arg in args {
+            let value = rt_string_new(arg.as_ptr(), arg.len() as u64);
+            assert!(rt_array_push(array, value));
+        }
+        array
+    }
+
     #[test]
     fn test_coverage_probes() {
         // Coverage probes are stubs and should not panic
         rt_decision_probe(1, true);
         rt_condition_probe(1, 0, false);
         rt_path_probe(1, 0);
+    }
+
+    #[test]
+    fn test_process_run_timeout_drains_large_stderr() {
+        unsafe {
+            let cmd = "/bin/sh";
+            let args = runtime_args(&[
+                "-c",
+                "python3 - <<'PY'\nimport sys\nsys.stderr.write('x' * 200000)\nPY",
+            ]);
+            let result = rt_process_run_timeout(cmd.as_ptr(), cmd.len() as u64, args, 5_000);
+            let stderr = extract_string_test(rt_tuple_get(result, 1));
+            let exit_code = rt_tuple_get(result, 2).as_int();
+
+            assert_eq!(exit_code, 0);
+            assert!(stderr.len() >= 200000);
+            assert_ne!(stderr, "TIMEOUT");
+        }
     }
 
     #[test]
