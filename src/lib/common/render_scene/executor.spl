@@ -141,8 +141,71 @@ fn draw_fill_rect(buffer: [u32], buf_w: i32, buf_h: i32, x: i32, y: i32, w: i32,
             col = col + 1
         row = row + 1
 
+fn with_alpha(color: u32, a: u32) -> u32:
+    """Return color with its alpha channel replaced by `a` (0-255)."""
+    (color & 0x00FFFFFF) | ((a & 0xFF) << 24)
+
+fn draw_aa_hspan(buffer: [u32], buf_w: i32, buf_h: i32, x0: i32, x1: i32, y: i32, color: u32, clip_stack: [ClipRect]):
+    """Blend a horizontal span [x0, x1) at row y using put_pixel_blend."""
+    var x: i32 = x0
+    while x < x1:
+        put_pixel_blend(buffer, buf_w, buf_h, x, y, color, clip_stack)
+        x = x + 1
+
+fn draw_aa_vspan(buffer: [u32], buf_w: i32, buf_h: i32, x: i32, y0: i32, y1: i32, color: u32, clip_stack: [ClipRect]):
+    """Blend a vertical span [y0, y1) at column x using put_pixel_blend."""
+    var y: i32 = y0
+    while y < y1:
+        put_pixel_blend(buffer, buf_w, buf_h, x, y, color, clip_stack)
+        y = y + 1
+
 fn draw_stroke_rect(buffer: [u32], buf_w: i32, buf_h: i32, x: i32, y: i32, w: i32, h: i32, color: u32, sw: i32, clip_stack: [ClipRect]):
-    """Draw an outlined rectangle with the given stroke width."""
+    """Draw an outlined rectangle with the given stroke width.
+
+    For sw == 1 we emulate Chrome's 1px border edge anti-aliasing by drawing
+    the main edge at ~90% opacity and bleeding a ~7% fringe into the adjacent
+    outside/inside rows.  This matches Chrome's sub-pixel-positioned 1px
+    borders (see doc/08_tracking/wm_compare/phase2_report.md)."""
+    if sw == 1 and w >= 2 and h >= 2:
+        val aa_main = with_alpha(color, 230)    # ~0.90 coverage
+        val aa_fringe = with_alpha(color, 18)   # ~0.07 coverage
+
+        val x0 = x
+        val x1 = x + w            # exclusive
+        val yt = y                # top main row
+        val yb = y + h - 1        # bottom main row
+
+        # Horizontal edges: fringe above/below the main row over full width
+        draw_aa_hspan(buffer, buf_w, buf_h, x0, x1, yt - 1, aa_fringe, clip_stack)  # top outside
+        draw_aa_hspan(buffer, buf_w, buf_h, x0, x1, yt,     aa_main,   clip_stack)  # top main
+        draw_aa_hspan(buffer, buf_w, buf_h, x0, x1, yt + 1, aa_fringe, clip_stack)  # top inside
+        draw_aa_hspan(buffer, buf_w, buf_h, x0, x1, yb - 1, aa_fringe, clip_stack)  # bottom inside
+        draw_aa_hspan(buffer, buf_w, buf_h, x0, x1, yb,     aa_main,   clip_stack)  # bottom main
+        draw_aa_hspan(buffer, buf_w, buf_h, x0, x1, yb + 1, aa_fringe, clip_stack)  # bottom outside
+
+        # Vertical edges: fringes span full height (outside cols never collide
+        # with horizontal main rows because they're at x-1/x+w); main and
+        # inside fringes are drawn only on rows strictly between top/bottom
+        # mains to avoid double-blending the 4 corner main pixels.
+        val xl = x                # left main col
+        val xr = x + w - 1        # right main col
+        val ytop_in = y + 1
+        val ybot_in = y + h - 1   # exclusive end for vertical spans
+
+        # Left outside fringe: full height (column is x-1, outside the box)
+        draw_aa_vspan(buffer, buf_w, buf_h, xl - 1, y, y + h, aa_fringe, clip_stack)
+        # Right outside fringe: full height
+        draw_aa_vspan(buffer, buf_w, buf_h, xr + 1, y, y + h, aa_fringe, clip_stack)
+        # Left main (skip top/bottom main rows)
+        draw_aa_vspan(buffer, buf_w, buf_h, xl, ytop_in, ybot_in, aa_main, clip_stack)
+        # Right main (skip top/bottom main rows)
+        draw_aa_vspan(buffer, buf_w, buf_h, xr, ytop_in, ybot_in, aa_main, clip_stack)
+        # Left inside fringe (skip top/bottom main rows)
+        draw_aa_vspan(buffer, buf_w, buf_h, xl + 1, ytop_in, ybot_in, aa_fringe, clip_stack)
+        # Right inside fringe (skip top/bottom main rows)
+        draw_aa_vspan(buffer, buf_w, buf_h, xr - 1, ytop_in, ybot_in, aa_fringe, clip_stack)
+        return
+
     # Top edge
     draw_fill_rect(buffer, buf_w, buf_h, x, y, w, sw, color, clip_stack)
     # Bottom edge
