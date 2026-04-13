@@ -370,6 +370,96 @@ done
 echo
 
 # ─────────────────────────────────────────────────────────
+# 8. Cross-platform bin/ entry audit
+# ─────────────────────────────────────────────────────────
+printf "${BOLD}--- 8. Cross-platform bin/ entry audit ---${NC}\n"
+# Every executable file/symlink directly under bin/ must work on all platforms.
+# Rules:
+#   - Symlinks (Unix native binaries) MUST have a matching .cmd wrapper for Windows
+#   - Shell scripts (#!/bin/sh or #!/usr/bin/env) are cross-platform via sh/bash
+#   - .js/.spl scripts are cross-platform via their runtimes
+#   - Non-executable files (FILE.md, .a, .spl data) are exempt
+#   - Directories are exempt
+
+# Files/patterns exempt from cross-platform check
+EXEMPT_BIN="FILE.md libsimple_runtime.a mcp_stdio_proxy.spl simple-stub"
+
+for entry in "${REPO_ROOT}"/bin/*; do
+  [ -e "$entry" ] || [ -L "$entry" ] || continue
+  name="$(basename "$entry")"
+
+  # Skip directories
+  [ -d "$entry" ] && continue
+
+  # Skip .cmd files (they ARE the Windows counterpart)
+  case "$name" in *.cmd) continue ;; esac
+
+  # Skip exempt files
+  if is_allowed "$name" $EXEMPT_BIN; then
+    continue
+  fi
+
+  check
+
+  if [ -L "$entry" ]; then
+    # Symlink → native binary. Must have a .cmd counterpart for Windows.
+    cmd_name="${name}.cmd"
+    cmd_path="${REPO_ROOT}/bin/${cmd_name}"
+    # Also check in the release dir
+    link_target="$(readlink "$entry")"
+    release_cmd=""
+    case "$link_target" in
+      release/*)
+        release_cmd="${REPO_ROOT}/bin/${link_target}.cmd"
+        ;;
+    esac
+
+    if [ -f "$cmd_path" ]; then
+      ok "bin/${name} — symlink + .cmd wrapper (cross-platform)"
+    elif [ -n "$release_cmd" ] && [ -f "$release_cmd" ]; then
+      ok "bin/${name} — symlink + release .cmd (cross-platform)"
+    else
+      warning "bin/${name} — symlink but NO .cmd wrapper for Windows" \
+        "Add bin/${cmd_name} or bin/release/<triple>/${cmd_name}"
+    fi
+  elif [ -x "$entry" ]; then
+    # Executable regular file — check if it's a cross-platform script
+    first_line="$(head -c 128 "$entry" 2>/dev/null | head -1)"
+    case "$first_line" in
+      '#!'*)
+        # Shebang script — check interpreter
+        case "$first_line" in
+          *node*|*python*|*env\ node*|*env\ python*)
+            ok "bin/${name} — script (cross-platform interpreter)" ;;
+          *sh*|*bash*|*zsh*)
+            warning "bin/${name} — shell script (not native on Windows)" \
+              "Add bin/${name}.cmd wrapper or convert to .spl" ;;
+          *)
+            warning "bin/${name} — script with unknown interpreter" \
+              "Verify cross-platform: ${first_line}" ;;
+        esac
+        ;;
+      *)
+        # Executable without shebang — likely a compiled binary that shouldn't be here
+        case "$name" in
+          *.js)
+            ok "bin/${name} — JavaScript (cross-platform)" ;;
+          *.spl)
+            ok "bin/${name} — Simple script (cross-platform)" ;;
+          *)
+            warning "bin/${name} — executable without shebang or symlink" \
+              "Should be a symlink to release/<triple>/ or a cross-platform script" ;;
+        esac
+        ;;
+    esac
+  else
+    # Non-executable regular file — generally fine
+    info "bin/${name} — non-executable file"
+  fi
+done
+echo
+
+# ─────────────────────────────────────────────────────────
 # Summary
 # ─────────────────────────────────────────────────────────
 printf "${BOLD}=== Summary ===${NC}\n"
