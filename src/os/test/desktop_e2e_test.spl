@@ -1,19 +1,21 @@
 # Desktop End-to-End Test
 #
-# Tests the full desktop stack: boot -> services -> launcher -> app launch
+# Tests the browser-focused desktop stack: boot -> launcher -> WM notify ->
+# Browser Demo render
 # Run with QEMU scenario: x64-desktop-test
 #
 # Expected serial output:
 #   [init] Services started
-#   [launcher] Registered 3 apps
-#   [test] Launching Hello World via shortcut...
-#   [launcher] Started Hello World (PID N)
-#   [test] Window created for Hello World
-#   [test] Closing window...
+#   [launcher] Registered 4 apps
+#   [test] Launching Browser Demo via shortcut...
+#   [launcher] Started Browser Demo (PID N)
+#   [test] Window created for Browser Demo
+#   [browser-demo] render stats nodes=N pixels=N
 #   TEST PASSED
 
 use os.services.launcher.launcher.{launcher_init, launcher_shortcut_dispatch, launcher_list, launcher_get_app_count, launcher_is_running, MOD_META}
 use os.services.wm.wm_service.{wm_notify_app_launched}
+use os.apps.browser_demo.browser_demo.{BrowserDemoApp}
 
 extern fn serial_println(msg: text)
 
@@ -25,17 +27,17 @@ fn test_main():
     serial_println("[test] Step 1: Initialize launcher...")
     launcher_init()
     val app_count = launcher_get_app_count()
-    if app_count < 3:
-        serial_println("[test] FAIL: Expected >= 3 registered apps, got {app_count}")
+    if app_count < 4:
+        serial_println("[test] FAIL: Expected >= 4 registered apps, got {app_count}")
         serial_println("TEST FAILED")
         return
     serial_println("[test] PASS: {app_count} apps registered")
     launcher_list()
 
-    # Step 2: Simulate Meta+H shortcut
+    # Step 2: Simulate Meta+B shortcut
     serial_println("")
-    serial_println("[test] Step 2: Simulate Meta+H shortcut...")
-    val launched = launcher_shortcut_dispatch(0x48, MOD_META)  # H key + Meta
+    serial_println("[test] Step 2: Simulate Meta+B shortcut...")
+    val launched = launcher_shortcut_dispatch(0x42, MOD_META)  # B key + Meta
     if not launched:
         serial_println("[test] FAIL: Shortcut dispatch returned false")
         serial_println("TEST FAILED")
@@ -44,28 +46,38 @@ fn test_main():
 
     # Step 3: Verify app is running
     serial_println("")
-    serial_println("[test] Step 3: Verify Hello World is running...")
-    val running = launcher_is_running(0)  # index 0 = Hello World
+    serial_println("[test] Step 3: Verify Browser Demo is running...")
+    val running = launcher_is_running(3)
     if not running:
         serial_println("[test] WARN: App not marked as running (spawn may be async)")
     else:
-        serial_println("[test] PASS: Hello World is running")
+        serial_println("[test] PASS: Browser Demo is running")
 
     # Step 4: Notify WM of app launch
     serial_println("")
     serial_println("[test] Step 4: Notify WM of app launch...")
-    wm_notify_app_launched("Hello World", 1)
-    serial_println("[test] PASS: WM notified")
+    wm_notify_app_launched("Browser Demo", 4)
+    serial_println("[test] PASS: Window created for Browser Demo")
 
-    # Step 5: Verify launcher list after launch
+    # Step 5: Run Browser Demo render and verify browser pipeline
     serial_println("")
-    serial_println("[test] Step 5: Verify launcher state after launch...")
-    val count_after = launcher_get_app_count()
-    if count_after < 3:
-        serial_println("[test] FAIL: App count dropped to {count_after}")
+    serial_println("[test] Step 5: Run Browser Demo render...")
+    var app = BrowserDemoApp.new()
+    app.run_browser_render()
+    if not app.render_done:
+        serial_println("[test] FAIL: Browser Demo render did not complete")
         serial_println("TEST FAILED")
         return
-    serial_println("[test] PASS: App registry intact ({count_after} apps)")
+    if app.node_count <= 0:
+        serial_println("[test] FAIL: Browser Demo node_count={app.node_count}")
+        serial_println("TEST FAILED")
+        return
+    if app.pixel_count <= 0:
+        serial_println("[test] FAIL: Browser Demo pixel_count={app.pixel_count}")
+        serial_println("TEST FAILED")
+        return
+    serial_println("[test] PASS: Browser Demo render executed")
+    serial_println("[test] PASS: Browser Demo stats nodes={app.node_count} pixels={app.pixel_count}")
 
     serial_println("")
     serial_println("=== All desktop tests passed ===")

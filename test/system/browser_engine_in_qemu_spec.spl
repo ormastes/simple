@@ -1,0 +1,96 @@
+# @tag:system
+
+use std.spec.*
+
+use os.qemu_runner.{OsTarget, build_os}
+use os.kernel.arch.arch_context.{Architecture}
+use test.qemu.os.common.qemu_os_harness.{
+    can_run_target, file_exists, spawn_guest_with_qmp, wait_for_serial_marker,
+    read_serial_log, stop_guest
+}
+
+fn _browser_soft_target() -> OsTarget:
+    OsTarget(
+        arch: Architecture.X86_64,
+        entry: "examples/simple_os/arch/x86_64/browser_soft_entry.spl",
+        linker_script: "examples/simple_os/arch/x86_64/linker.ld",
+        target_triple: "x86_64-unknown-none",
+        output: "build/os/simpleos_browser_soft_x86_64.elf",
+        qemu_system: "qemu-system-x86_64",
+        qemu_machine: "q35",
+        qemu_cpu: "qemu64",
+        qemu_memory: "256M",
+        qemu_bios: "",
+        qemu_extra: ["-device", "isa-debug-exit,iobase=0xf4,iosize=0x04"],
+        gui_mode: false
+    )
+
+fn _desktop_browser_target() -> OsTarget:
+    OsTarget(
+        arch: Architecture.X86_64,
+        entry: "examples/simple_os/arch/x86_64/desktop_e2e_entry.spl",
+        linker_script: "examples/simple_os/arch/x86_64/linker.ld",
+        target_triple: "x86_64-unknown-none",
+        output: "build/os/simpleos_desktop_browser_e2e_x86_64.elf",
+        qemu_system: "qemu-system-x86_64",
+        qemu_machine: "q35",
+        qemu_cpu: "qemu64",
+        qemu_memory: "512M",
+        qemu_bios: "",
+        qemu_extra: ["-device", "isa-debug-exit,iobase=0xf4,iosize=0x04"],
+        gui_mode: false
+    )
+
+describe "Browser engine in QEMU Simple OS guest":
+
+    it "builds and boots the browser software smoke entry":
+        val target = _browser_soft_target()
+        expect(build_os(target)).to_equal(true)
+        expect(file_exists(target.output)).to_equal(true)
+
+        if not can_run_target(target):
+            expect(true).to_equal(true)
+            return
+
+        val qmp_socket = "/tmp/simpleos_browser_soft_qmp.sock"
+        val serial_log = "build/os/browser_soft_qemu_serial.log"
+        match spawn_guest_with_qmp(target, qmp_socket, serial_log):
+            Ok(handle) =>
+                val saw_pass = wait_for_serial_marker(handle, "[PASS] browser_soft_entry", 15000)
+                val saw_pixels = wait_for_serial_marker(handle, "[browser-soft] visible pixels:", 2000)
+                val output = read_serial_log(handle)
+                stop_guest(handle)
+                expect(saw_pass).to_equal(true)
+                expect(saw_pixels).to_equal(true)
+                expect(output.contains("[FAIL]")).to_equal(false)
+            Err(err) =>
+                print "[browser_engine_in_qemu_spec] {err}"
+                expect(false).to_equal(true)
+
+    it "launches Browser Demo through the desktop test entry and renders browser output":
+        val target = _desktop_browser_target()
+        expect(build_os(target)).to_equal(true)
+        expect(file_exists(target.output)).to_equal(true)
+
+        if not can_run_target(target):
+            expect(true).to_equal(true)
+            return
+
+        val qmp_socket = "/tmp/simpleos_desktop_browser_qmp.sock"
+        val serial_log = "build/os/desktop_browser_qemu_serial.log"
+        match spawn_guest_with_qmp(target, qmp_socket, serial_log):
+            Ok(handle) =>
+                val saw_window = wait_for_serial_marker(handle, "[test] PASS: Window created for Browser Demo", 15000)
+                val saw_render = wait_for_serial_marker(handle, "[test] PASS: Browser Demo render executed", 5000)
+                val saw_stats = wait_for_serial_marker(handle, "[browser-demo] render stats", 5000)
+                val saw_pass = wait_for_serial_marker(handle, "TEST PASSED", 2000)
+                val output = read_serial_log(handle)
+                stop_guest(handle)
+                expect(saw_window).to_equal(true)
+                expect(saw_render).to_equal(true)
+                expect(saw_stats).to_equal(true)
+                expect(saw_pass).to_equal(true)
+                expect(output.contains("TEST FAILED")).to_equal(false)
+            Err(err) =>
+                print "[browser_engine_in_qemu_spec] {err}"
+                expect(false).to_equal(true)

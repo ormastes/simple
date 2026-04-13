@@ -14,7 +14,28 @@ use os.qemu_runner.{OsTarget, get_target, arch_display_name, build_qemu_command}
 use os.kernel.arch.arch_context.{Architecture}
 
 extern fn rt_process_run_timeout(cmd: text, args: [text], timeout_ms: i64) -> (text, text, i32)
+extern fn rt_process_spawn_async(cmd: text, args: [text]) -> i64
+extern fn rt_process_wait(pid: i64, timeout_ms: i64) -> i64
+extern fn rt_process_is_running(pid: i64) -> bool
+extern fn rt_process_kill(pid: i64) -> bool
+extern fn rt_file_read_text(path: text) -> text
+extern fn rt_file_delete(path: text) -> bool
 extern fn rt_file_exists(path: text) -> bool
+extern fn rt_sleep_ms(ms: i64)
+
+class QemuGuestHandle:
+    pid: i64
+    qmp_socket: text
+    serial_log: text
+    qemu_bin: text
+
+    static fn create(pid: i64, qmp_socket: text, serial_log: text, qemu_bin: text) -> QemuGuestHandle:
+        QemuGuestHandle(
+            pid: pid,
+            qmp_socket: qmp_socket,
+            serial_log: serial_log,
+            qemu_bin: qemu_bin
+        )
 
 # ===========================================================================
 # Prerequisites
@@ -28,8 +49,7 @@ fn can_run_test(arch: Architecture) -> bool:
     val target = get_target(arch)
 
     # Check QEMU binary
-    val qemu_check = rt_process_run_timeout("which", [target.qemu_system], 5000)
-    if qemu_check[2] != 0:
+    if not qemu_available(target.qemu_system):
         print "SKIP: {target.qemu_system} not found on PATH"
         return false
 
@@ -43,6 +63,19 @@ fn can_run_test(arch: Architecture) -> bool:
 fn file_exists(path: text) -> bool:
     """Check if a file exists at the given path."""
     rt_file_exists(path)
+
+fn qemu_available(qemu_system: text) -> bool:
+    val qemu_check = rt_process_run_timeout("which", [qemu_system], 5000)
+    qemu_check[2] == 0
+
+fn can_run_target(target: OsTarget) -> bool:
+    if not qemu_available(target.qemu_system):
+        print "SKIP: {target.qemu_system} not found on PATH"
+        return false
+    if not rt_file_exists(target.output):
+        print "SKIP: Kernel not built: {target.output}"
+        return false
+    true
 
 # ===========================================================================
 # QEMU Execution
@@ -79,6 +112,51 @@ fn run_os_qemu_with_target(target: OsTarget, timeout_ms: i64) -> (text, text, i3
     for i in 1..cmd_parts.len():
         args.push(cmd_parts[i])
     rt_process_run_timeout(qemu_bin, args, timeout_ms)
+
+fn spawn_guest_with_qmp(target: OsTarget, qmp_socket: text, serial_log: text) -> Result<QemuGuestHandle, text>:
+    if rt_file_exists(qmp_socket):
+        rt_file_delete(qmp_socket)
+    if rt_file_exists(serial_log):
+        rt_file_delete(serial_log)
+
+    val target_with_qmp = _target_with_qmp(target, qmp_socket)
+    val cmd_parts = build_qemu_command(target_with_qmp)
+    val qemu_bin = cmd_parts[0]
+    val shell_cmd = _shell_command_with_redirect(cmd_parts, serial_log)
+    val pid = rt_process_spawn_async("/bin/sh", ["-c", shell_cmd])
+    if pid <= 0:
+        return Err("failed to spawn {qemu_bin}")
+    if not wait_for_qmp_socket(qmp_socket, 10000):
+        rt_process_kill(pid)
+        rt_process_wait(pid, 2000)
+        return Err("QMP socket did not appear at {qmp_socket}")
+    Ok(QemuGuestHandle.create(pid, qmp_socket, serial_log, qemu_bin))
+
+fn wait_for_serial_marker(handle: QemuGuestHandle, marker: text, timeout_ms: i64) -> bool:
+    var waited = 0
+    while waited <= timeout_ms:
+        val serial_output = read_serial_log(handle)
+        if serial_output.contains(marker):
+            return true
+        if not rt_process_is_running(handle.pid):
+            return serial_output.contains(marker)
+        rt_sleep_ms(100)
+        waited = waited + 100
+    read_serial_log(handle).contains(marker)
+
+fn read_serial_log(handle: QemuGuestHandle) -> text:
+    if not rt_file_exists(handle.serial_log):
+        return ""
+    rt_file_read_text(handle.serial_log) ?? ""
+
+fn stop_guest(handle: QemuGuestHandle) -> bool:
+    var stopped = true
+    if handle.pid > 0 and rt_process_is_running(handle.pid):
+        stopped = rt_process_kill(handle.pid)
+        rt_process_wait(handle.pid, 2000)
+    if rt_file_exists(handle.qmp_socket):
+        rt_file_delete(handle.qmp_socket)
+    stopped
 
 # ===========================================================================
 # Output Parsing
@@ -148,3 +226,45 @@ fn run_cross_arch_test(test_name: text, timeout_ms: i64, check_fn: fn(text) -> b
             failed = failed + 1
 
     (passed, failed, skipped)
+
+fn wait_for_qmp_socket(socket_path: text, timeout_ms: i64) -> bool:
+    var waited = 0
+    while waited <= timeout_ms:
+        if rt_file_exists(socket_path):
+            return true
+        rt_sleep_ms(100)
+        waited = waited + 100
+    false
+
+fn _target_with_qmp(target: OsTarget, qmp_socket: text) -> OsTarget:
+    var extras = target.qemu_extra
+    extras.push("-qmp")
+    extras.push("unix:{qmp_socket},server,nowait")
+    OsTarget(
+        arch: target.arch,
+        entry: target.entry,
+        linker_script: target.linker_script,
+        target_triple: target.target_triple,
+        output: target.output,
+        qemu_system: target.qemu_system,
+        qemu_machine: target.qemu_machine,
+        qemu_cpu: target.qemu_cpu,
+        qemu_memory: target.qemu_memory,
+        qemu_bios: target.qemu_bios,
+        qemu_extra: extras,
+        gui_mode: target.gui_mode
+    )
+
+fn _shell_command_with_redirect(cmd_parts: [text], serial_log: text) -> text:
+    var shell_cmd = ""
+    var idx = 0
+    while idx < cmd_parts.len():
+        if idx > 0:
+            shell_cmd = shell_cmd + " "
+        shell_cmd = shell_cmd + _shell_quote(cmd_parts[idx])
+        idx = idx + 1
+    "{shell_cmd} > {_shell_quote(serial_log)} 2>&1"
+
+fn _shell_quote(value: text) -> text:
+    val escaped = value.replace("'", "'\"'\"'")
+    "'{escaped}'"
