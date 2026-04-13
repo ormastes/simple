@@ -536,13 +536,13 @@ impl Target {
             (TargetArch::Arm, TargetOS::None) => "armv7a-unknown-none-eabihf",
             (TargetArch::Riscv64, TargetOS::None) => "riscv64gc-unknown-none-elf",
             (TargetArch::Riscv32, TargetOS::None) => "riscv32gc-unknown-none-elf",
-            // SimpleOS targets (custom OS, ELF format)
-            (TargetArch::X86_64, TargetOS::SimpleOS) => "x86_64-unknown-simpleos",
-            (TargetArch::Aarch64, TargetOS::SimpleOS) => "aarch64-unknown-simpleos",
-            (TargetArch::Riscv64, TargetOS::SimpleOS) => "riscv64gc-unknown-simpleos",
-            (TargetArch::Riscv32, TargetOS::SimpleOS) => "riscv32imac-unknown-simpleos",
-            (TargetArch::X86, TargetOS::SimpleOS) => "i686-unknown-simpleos",
-            (TargetArch::Arm, TargetOS::SimpleOS) => "armv7-unknown-simpleos-eabihf",
+            // SimpleOS targets (bare-metal ELF — LLVM doesn't recognize "simpleos")
+            (TargetArch::X86_64, TargetOS::SimpleOS) => "x86_64-unknown-none-elf",
+            (TargetArch::Aarch64, TargetOS::SimpleOS) => "aarch64-unknown-none-elf",
+            (TargetArch::Riscv64, TargetOS::SimpleOS) => "riscv64gc-unknown-none-elf",
+            (TargetArch::Riscv32, TargetOS::SimpleOS) => "riscv32imac-unknown-none-elf",
+            (TargetArch::X86, TargetOS::SimpleOS) => "i686-unknown-none-elf",
+            (TargetArch::Arm, TargetOS::SimpleOS) => "armv7a-unknown-none-eabihf",
             // OS-aware targets
             (TargetArch::X86_64, TargetOS::Linux) => "x86_64-unknown-linux-gnu",
             (TargetArch::X86_64, TargetOS::Windows) => "x86_64-pc-windows-msvc",
@@ -806,7 +806,7 @@ mod tests {
         );
         assert_eq!(
             Target::new(TargetArch::Aarch64, TargetOS::None).triple_str(),
-            "aarch64-unknown-none"
+            "aarch64-unknown-none-elf"
         );
         assert_eq!(
             Target::new(TargetArch::Riscv64, TargetOS::None).triple_str(),
@@ -873,27 +873,27 @@ mod tests {
     fn test_simpleos_triple_str() {
         assert_eq!(
             Target::new(TargetArch::X86_64, TargetOS::SimpleOS).triple_str(),
-            "x86_64-unknown-simpleos"
+            "x86_64-unknown-none-elf"
         );
         assert_eq!(
             Target::new(TargetArch::Aarch64, TargetOS::SimpleOS).triple_str(),
-            "aarch64-unknown-simpleos"
+            "aarch64-unknown-none-elf"
         );
         assert_eq!(
             Target::new(TargetArch::Riscv64, TargetOS::SimpleOS).triple_str(),
-            "riscv64gc-unknown-simpleos"
+            "riscv64gc-unknown-none-elf"
         );
         assert_eq!(
             Target::new(TargetArch::Riscv32, TargetOS::SimpleOS).triple_str(),
-            "riscv32imac-unknown-simpleos"
+            "riscv32imac-unknown-none-elf"
         );
         assert_eq!(
             Target::new(TargetArch::X86, TargetOS::SimpleOS).triple_str(),
-            "i686-unknown-simpleos"
+            "i686-unknown-none-elf"
         );
         assert_eq!(
             Target::new(TargetArch::Arm, TargetOS::SimpleOS).triple_str(),
-            "armv7-unknown-simpleos-eabihf"
+            "armv7a-unknown-none-eabihf"
         );
     }
 
