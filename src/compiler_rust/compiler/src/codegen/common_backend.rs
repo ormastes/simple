@@ -635,6 +635,26 @@ impl<M: Module> CodegenBackend<M> {
             );
         }
 
+        if std::env::var("SIMPLE_DUMP_STACK_SLOTS").is_ok() {
+            let slot_count = self.ctx.func.sized_stack_slots.len();
+            let dynamic_slot_count = self.ctx.func.dynamic_stack_slots.len();
+            let slot_bytes: u32 = self.ctx.func.sized_stack_slots.values().map(|ss| ss.size).sum();
+            if slot_count > 0 || dynamic_slot_count > 0 {
+                eprintln!(
+                    "[STACK-SLOTS] {}: sized={} bytes={} dynamic={}",
+                    func.name, slot_count, slot_bytes, dynamic_slot_count
+                );
+                for (slot, data) in self.ctx.func.sized_stack_slots.iter() {
+                    eprintln!(
+                        "[STACK-SLOTS]   {:?}: kind={:?} size={} align_shift={}",
+                        slot, data.kind, data.size, data.align_shift
+                    );
+                }
+            } else {
+                eprintln!("[STACK-SLOTS] {}: sized=0 bytes=0 dynamic=0", func.name);
+            }
+        }
+
         // Define the function (may fail if verifier errors are critical)
         match self.module.define_function(func_id, &mut self.ctx) {
             Ok(()) => {}

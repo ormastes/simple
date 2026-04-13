@@ -6,7 +6,7 @@ use cranelift_module::Module;
 
 use crate::mir::{FStringPart, VReg};
 
-use super::helpers::{adapted_call, get_vreg_or_default};
+use super::helpers::{adapted_call, create_string_constant, get_vreg_or_default};
 use super::{InstrContext, InstrResult};
 
 /// Helper to create a string literal in stack slot and get ptr/len
@@ -410,19 +410,20 @@ pub(crate) fn compile_const_string<M: Module>(
     builder: &mut FunctionBuilder,
     dest: VReg,
     value: &str,
-) {
+) -> InstrResult<()> {
     let string_new_id = ctx.runtime_funcs["rt_string_new"];
     let string_new_ref = ctx.module.declare_func_in_func(string_new_id, builder.func);
 
     let (ptr, len_val) = if value.is_empty() {
         (builder.ins().iconst(types::I64, 0), builder.ins().iconst(types::I64, 0))
     } else {
-        create_stack_string(builder, value)
+        create_string_constant(ctx, builder, value)?
     };
 
     let call = adapted_call(builder, string_new_ref, &[ptr, len_val]);
     let result = builder.inst_results(call)[0];
     ctx.vreg_values.insert(dest, result);
+    Ok(())
 }
 
 pub(crate) fn compile_fstring_format<M: Module>(
@@ -430,7 +431,7 @@ pub(crate) fn compile_fstring_format<M: Module>(
     builder: &mut FunctionBuilder,
     dest: VReg,
     parts: &[FStringPart],
-) {
+) -> InstrResult<()> {
     let string_new_id = ctx.runtime_funcs["rt_string_new"];
     let string_new_ref = ctx.module.declare_func_in_func(string_new_id, builder.func);
     let string_concat_id = ctx.runtime_funcs["rt_string_concat"];
@@ -447,7 +448,7 @@ pub(crate) fn compile_fstring_format<M: Module>(
                 if s.is_empty() {
                     continue;
                 }
-                let (ptr, len_val) = create_stack_string(builder, s);
+                let (ptr, len_val) = create_string_constant(ctx, builder, s)?;
                 let call = adapted_call(builder, string_new_ref, &[ptr, len_val]);
                 builder.inst_results(call)[0]
             }
@@ -462,7 +463,7 @@ pub(crate) fn compile_fstring_format<M: Module>(
             FStringPart::ExprWithFormat(vreg, format_spec) => {
                 // Convert expression value to formatted string using format specifier
                 let val = ctx.vreg_values[vreg];
-                let (fmt_ptr, fmt_len) = create_stack_string(builder, format_spec);
+                let (fmt_ptr, fmt_len) = create_string_constant(ctx, builder, format_spec)?;
                 let fmt_id = ctx.runtime_funcs["rt_value_format_string"];
                 let fmt_ref = ctx.module.declare_func_in_func(fmt_id, builder.func);
                 let call = adapted_call(builder, fmt_ref, &[val, fmt_ptr, fmt_len]);
@@ -475,4 +476,5 @@ pub(crate) fn compile_fstring_format<M: Module>(
     }
 
     ctx.vreg_values.insert(dest, result);
+    Ok(())
 }

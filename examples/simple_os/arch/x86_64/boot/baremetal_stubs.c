@@ -5871,6 +5871,33 @@ void _start_c(void)
         : "rax", "rdx"
     );
 
+    /* For Simple baremetal app lanes, the validated minimum boot path is:
+     * long-mode handoff -> basic IRQ masking -> direct spl_start().
+     * Skip the heavyweight C boot diagnostics/probing until the boot lane is stable.
+     */
+    if (spl_start) {
+        __asm__ volatile(
+            "movw $0x3F8, %%dx\n"
+            "movb $'4', %%al\n"
+            "outb %%al, %%dx\n"
+            :
+            :
+            : "rax", "rdx"
+        );
+        spl_start();
+        __asm__ volatile(
+            "movw $0x3F8, %%dx\n"
+            "movb $'5', %%al\n"
+            "outb %%al, %%dx\n"
+            :
+            :
+            : "rax", "rdx"
+        );
+        for (;;) {
+            __asm__ volatile("hlt");
+        }
+    }
+
     serial_puts("SimpleOS x86_64 boot\r\n");
 
     __asm__ volatile(
@@ -8239,8 +8266,25 @@ RuntimeValue rt_port_io_wait_real(void)
     return 0;
 }
 
-/* Expose as the primary symbols (linker sees these).
- * Use inline wrappers instead of __attribute__((alias)) for Mach-O compat. */
+/* Expose as the primary symbols seen by Simple extern calls.
+ * Baremetal target images are ELF, so prefer direct aliases there.
+ * Keep wrapper bodies as the host-side fallback for Mach-O toolchains. */
+#if defined(__ELF__)
+RuntimeValue rt_port_outb(RuntimeValue port, RuntimeValue val)
+    __attribute__((alias("rt_port_outb_real")));
+RuntimeValue rt_port_outw(RuntimeValue port, RuntimeValue val)
+    __attribute__((alias("rt_port_outw_real")));
+RuntimeValue rt_port_outl(RuntimeValue port, RuntimeValue val)
+    __attribute__((alias("rt_port_outl_real")));
+RuntimeValue rt_port_inb(RuntimeValue port)
+    __attribute__((alias("rt_port_inb_real")));
+RuntimeValue rt_port_inw(RuntimeValue port)
+    __attribute__((alias("rt_port_inw_real")));
+RuntimeValue rt_port_inl(RuntimeValue port)
+    __attribute__((alias("rt_port_inl_real")));
+RuntimeValue rt_port_io_wait(void)
+    __attribute__((alias("rt_port_io_wait_real")));
+#else
 RuntimeValue rt_port_outb(RuntimeValue port, RuntimeValue val) {
     return rt_port_outb_real(port, val);
 }
@@ -8261,6 +8305,88 @@ RuntimeValue rt_port_inl(RuntimeValue port) {
 }
 RuntimeValue rt_port_io_wait(void) {
     return rt_port_io_wait_real();
+}
+#endif
+
+RuntimeValue rt_debug_serial_R(void)
+{
+    outb((uint16_t)0x3F8, (uint8_t)'R');
+    return 0;
+}
+
+RuntimeValue rt_debug_exit_success(void)
+{
+    outb((uint16_t)0xF4, (uint8_t)0);
+    return 0;
+}
+
+RuntimeValue rt_debug_serial_R_hang(void)
+{
+    outb((uint16_t)0x3F8, (uint8_t)'R');
+    for (;;) {
+        __asm__ volatile("hlt");
+    }
+    return 0;
+}
+
+RuntimeValue rt_debug_return_addr_hang(void)
+{
+    uintptr_t ra = (uintptr_t)__builtin_return_address(0);
+    outb((uint16_t)0x3F8, (uint8_t)'A');
+    serial_puthex((uint32_t)ra);
+    serial_putchar('\r');
+    serial_putchar('\n');
+    for (;;) {
+        __asm__ volatile("hlt");
+    }
+    return 0;
+}
+
+__attribute__((naked)) RuntimeValue rt_debug_naked_show_return_hang(void)
+{
+    __asm__ volatile(
+        "movq (%rsp), %rbx\n"
+        "movw $0x3F8, %dx\n"
+        "movb $'R', %al\n"
+        "outb %al, %dx\n"
+        "leaq 9f(%rip), %rsi\n"
+        "movl $16, %ecx\n"
+        "2:\n"
+        "movq %rbx, %rax\n"
+        "shrq $60, %rax\n"
+        "andq $0xF, %rax\n"
+        "movb (%rsi,%rax,1), %al\n"
+        "3:\n"
+        "movw $0x3FD, %dx\n"
+        "inb %dx, %al\n"
+        "testb $0x20, %al\n"
+        "jz 3b\n"
+        "movw $0x3F8, %dx\n"
+        "movb (%rsi,%rax,1), %al\n"
+        "outb %al, %dx\n"
+        "shlq $4, %rbx\n"
+        "decl %ecx\n"
+        "jnz 2b\n"
+        "movb $0x0D, %al\n"
+        "outb %al, %dx\n"
+        "4:\n"
+        "movw $0x3FD, %dx\n"
+        "inb %dx, %al\n"
+        "testb $0x20, %al\n"
+        "jz 4b\n"
+        "movw $0x3F8, %dx\n"
+        "movb $0x0A, %al\n"
+        "outb %al, %dx\n"
+        "1:\n"
+        "hlt\n"
+        "jmp 1b\n"
+        ".balign 16\n"
+        "9:\n"
+        ".ascii \"0123456789abcdef\"\n"
+        :
+        :
+        : "rax", "rbx", "rcx", "rdx", "rsi", "cc", "memory"
+    );
 }
 
 /* --- MMIO: real x86_64 implementations (raw i64 args) --- */

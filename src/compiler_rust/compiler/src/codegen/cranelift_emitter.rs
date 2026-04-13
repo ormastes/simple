@@ -43,8 +43,7 @@ impl<M: Module> CodegenEmitter for CraneliftEmitter<'_, '_, M> {
         super::instr::constants::compile_const_bool(self.ctx, self.builder, dest, value)
     }
     fn emit_const_string(&mut self, dest: VReg, value: &str) -> Result<(), String> {
-        super::instr::collections::compile_const_string(self.ctx, self.builder, dest, value);
-        Ok(())
+        super::instr::collections::compile_const_string(self.ctx, self.builder, dest, value)
     }
     fn emit_const_symbol(&mut self, dest: VReg, value: &str) -> Result<(), String> {
         super::instr::constants::compile_const_symbol(self.ctx, self.builder, dest, value)
@@ -218,8 +217,7 @@ impl<M: Module> CodegenEmitter for CraneliftEmitter<'_, '_, M> {
         Ok(())
     }
     fn emit_fstring_format(&mut self, dest: VReg, parts: &[FStringPart]) -> Result<(), String> {
-        super::instr::collections::compile_fstring_format(self.ctx, self.builder, dest, parts);
-        Ok(())
+        super::instr::collections::compile_fstring_format(self.ctx, self.builder, dest, parts)
     }
 
     // =========================================================================

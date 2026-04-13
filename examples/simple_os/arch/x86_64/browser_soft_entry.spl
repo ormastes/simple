@@ -30,7 +30,6 @@ fn serial_wait_ready():
         guard = guard - 1
 
 fn serial_put(ch: u64):
-    serial_wait_ready()
     rt_port_outb(SERIAL_DATA, ch)
 
 fn serial_newline():
@@ -292,30 +291,42 @@ fn count_non_background_pixels(buffer: [u32], bg: u32) -> i32:
         i = i + 1
     return count
 
-fn spl_start():
-    write_browser_start()
-
+fn run_browser_pipeline() -> i32:
     val dom = build_dom()
-    write_browser_stage_dom()
+    rt_port_outb(SERIAL_DATA, 99)
 
     val layout = layout_tree(dom, VIEWPORT_W, VIEWPORT_H)
-    write_browser_stage_layout()
+    rt_port_outb(SERIAL_DATA, 100)
 
     val commands = generate_paint_list(layout)
-    write_browser_stage_paint()
+    rt_port_outb(SERIAL_DATA, 101)
 
     val scene = paint_commands_to_scene(commands, VIEWPORT_W, VIEWPORT_H)
-    write_browser_stage_scene()
+    rt_port_outb(SERIAL_DATA, 102)
 
     var buffer = init_buffer(VIEWPORT_W, VIEWPORT_H, BG_COLOR)
+    rt_port_outb(SERIAL_DATA, 103)
     execute_scene_to_buffer(scene, buffer, VIEWPORT_W, VIEWPORT_H)
-    write_browser_stage_raster()
+    rt_port_outb(SERIAL_DATA, 104)
 
     val visible = count_non_background_pixels(buffer, BG_COLOR)
+    return visible
 
+fn browser_soft_leaf_probe() -> i32:
+    rt_port_outb(SERIAL_DATA, 98)
+    return 1
+
+fn spl_start():
+    write_browser_start()
+    val leaf_ok = browser_soft_leaf_probe()
+    if leaf_ok == 0:
+        write_browser_fail()
+        rt_port_outb(DEBUG_EXIT, 0)
+        return
+
+    val visible = run_browser_pipeline()
     if visible > 0:
         write_browser_pass()
     else:
         write_browser_fail()
-
     rt_port_outb(DEBUG_EXIT, 0)

@@ -11,6 +11,7 @@ use os.machine_profile.{MachineProfile, get_machine_profile, riscv32_machine_pro
 
 extern fn rt_process_run_timeout(cmd: text, args: [text], timeout_ms: i64) -> (text, text, i32)
 extern fn rt_file_exists(path: text) -> bool
+extern fn rt_env_get(name: text) -> text
 
 fn is_qemu_success(target: OsTarget, exit_code: i32) -> bool:
     """Interpret QEMU exit code based on architecture.
@@ -416,10 +417,11 @@ fn build_os(target: OsTarget) -> bool:
         print "[build] FAILED: llvm-objcopy not found for {target.entry}"
         return false
 
+    val simple_bin = _find_simple_binary()
     val env_prefix = _build_env_prefix(target, objcopy_prefix)
     if env_prefix == "":
-        print "[build] {arch_display_name(target.arch)}: bin/simple {args.join(" ")}"
-        val (stdout, stderr, exit_code) = rt_process_run_timeout("bin/simple", args, 60000)
+        print "[build] {arch_display_name(target.arch)}: {simple_bin} {args.join(" ")}"
+        val (stdout, stderr, exit_code) = rt_process_run_timeout(simple_bin, args, 60000)
         if exit_code != 0:
             print "[build] FAILED (exit code {exit_code})"
             if stdout != "":
@@ -429,7 +431,7 @@ fn build_os(target: OsTarget) -> bool:
             return false
         return true
 
-    val shell_cmd = "{env_prefix} bin/simple {args.join(" ")}"
+    val shell_cmd = "{env_prefix} {simple_bin} {args.join(" ")}"
     print "[build] {arch_display_name(target.arch)}: {shell_cmd}"
     val (stdout, stderr, exit_code) = rt_process_run_timeout("/bin/sh", ["-c", shell_cmd], 60000)
     if exit_code != 0:
@@ -447,6 +449,28 @@ fn _objcopy_path_prefix() -> text:
     if rt_file_exists("/usr/local/opt/llvm/bin/llvm-objcopy"):
         return "/usr/local/opt/llvm/bin"
     ""
+
+fn _find_simple_binary() -> text:
+    val env_bin = rt_env_get("SIMPLE_BINARY") ?? ""
+    if env_bin != "":
+        return env_bin
+    if rt_file_exists("src/compiler_rust/target/release/simple"):
+        return "src/compiler_rust/target/release/simple"
+    if rt_file_exists("src/compiler_rust/target/bootstrap/simple"):
+        return "src/compiler_rust/target/bootstrap/simple"
+    if rt_file_exists("bin/simple"):
+        return "bin/simple"
+    if rt_file_exists("bin/release/aarch64-apple-darwin-macho/simple"):
+        return "bin/release/aarch64-apple-darwin-macho/simple"
+    if rt_file_exists("bin/release/macos-arm64/simple"):
+        return "bin/release/macos-arm64/simple"
+    if rt_file_exists("bin/release/darwin-aarch64/simple"):
+        return "bin/release/darwin-aarch64/simple"
+    if rt_file_exists("bin/release/macos-x86_64/simple"):
+        return "bin/release/macos-x86_64/simple"
+    if rt_file_exists("bin/release/linux-x86_64/simple"):
+        return "bin/release/linux-x86_64/simple"
+    "bin/simple"
 
 fn _build_sources(target: OsTarget) -> [text]:
     if _is_browser_wrapper_target(target):

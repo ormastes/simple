@@ -450,7 +450,7 @@ pub fn compile_instruction<M: Module>(
         }
 
         MirInst::ConstString { dest, value } => {
-            compile_const_string(ctx, builder, *dest, value);
+            compile_const_string(ctx, builder, *dest, value)?;
         }
 
         MirInst::ConstSymbol { dest, value } => {
@@ -458,7 +458,7 @@ pub fn compile_instruction<M: Module>(
         }
 
         MirInst::FStringFormat { dest, parts } => {
-            compile_fstring_format(ctx, builder, *dest, parts);
+            compile_fstring_format(ctx, builder, *dest, parts)?;
         }
 
         MirInst::ClosureCreate {
