@@ -39,6 +39,7 @@ Options:
   --backend=<name>   Backend for stage2/stage3 (default: llvm-lib)
   --output=<dir>     Output directory (default: build/bootstrap)
   --deploy           Compile full CLI and deploy to bin/release/<triple>/simple.exe
+  --no-mcp           Skip MCP server builds (Stage 5)
   --msvc             Force MSVC toolchain
   --mingw            Force MinGW toolchain
   --help             Show this help
@@ -48,6 +49,7 @@ EOF
 backend=""
 output_dir="build/bootstrap"
 deploy=0
+build_mcp=1
 force_toolchain=""
 
 while (($#)); do
@@ -55,6 +57,7 @@ while (($#)); do
     --backend=*) backend="${1#*=}" ;;
     --output=*)  output_dir="${1#*=}" ;;
     --deploy)    deploy=1 ;;
+    --no-mcp)    build_mcp=0 ;;
     --msvc)      force_toolchain="msvc" ;;
     --mingw)     force_toolchain="mingw" ;;
     --help|-h)   usage; exit 0 ;;
@@ -308,12 +311,70 @@ fi
 
 echo "Full CLI binary: ${full_bin}"
 
+# ===========================================================================
+# Stage 5: Compile MCP servers (optional, skip with --no-mcp)
+# ===========================================================================
+
+mcp_build_ok=1
+if (( build_mcp )); then
+  echo ""
+  echo "=== Stage 5: compiling MCP servers ==="
+
+  # Build each MCP server with non-blocking failure.
+  # Note: run commands directly (not via run_logged) because run_logged
+  # calls exit on failure, and MCP build failure must be non-blocking.
+  mcp_stage=0
+  for mcp_entry in "simple_mcp_server:src/app/mcp/main.spl" \
+                    "simple_lsp_mcp_server:src/app/simple_lsp_mcp/main.spl"; do
+    mcp_stage=$((mcp_stage + 1))
+    mcp_name="${mcp_entry%%:*}"
+    mcp_spl="${mcp_entry#*:}"
+    mcp_log="stage5${mcp_stage}-mcp-native-build"
+
+    echo "  Stage 5${mcp_stage}: ${mcp_name}"
+    rm -rf .simple/native_cache/
+    set +e
+    "${stage3_bin}" native-build \
+      --source src/compiler --source src/lib --source src/app \
+      --entry-closure \
+      --entry "${mcp_spl}" \
+      "${backend_flag[@]}" \
+      -o "${full_dir}/${mcp_name}.exe" \
+      --clean \
+      >"${log_dir}/${mcp_log}.log" 2>&1
+    mcp_status=$?
+    set -e
+    echo "  ${mcp_log} log: ${log_dir}/${mcp_log}.log"
+    if [[ "${mcp_status}" -ne 0 ]]; then
+      mcp_build_ok=0
+      echo "  WARNING: ${mcp_name} build failed (exit ${mcp_status})"
+    elif [[ ! -s "${full_dir}/${mcp_name}.exe" ]]; then
+      mcp_build_ok=0
+      echo "  WARNING: ${mcp_name} produced a zero-byte file"
+    else
+      echo "  ${mcp_name}: ${full_dir}/${mcp_name}.exe"
+    fi
+  done
+else
+  echo "Skipping MCP server builds (--no-mcp)"
+fi
+
 if (( deploy )); then
   # Deploy to triple-specific directory
   deploy_dir="bin/release/${PLATFORM}"
   mkdir -p "${deploy_dir}"
   cp "${full_bin}" "${deploy_dir}/simple.exe"
   echo "Deployed full CLI binary to ${deploy_dir}/simple.exe"
+
+  # Deploy MCP servers if they were built successfully
+  if (( build_mcp )) && (( mcp_build_ok )); then
+    for mcp_bin_name in simple_mcp_server simple_lsp_mcp_server; do
+      if [[ -f "${full_dir}/${mcp_bin_name}.exe" ]] && [[ -s "${full_dir}/${mcp_bin_name}.exe" ]]; then
+        cp "${full_dir}/${mcp_bin_name}.exe" "${deploy_dir}/${mcp_bin_name}.exe"
+        echo "Deployed ${mcp_bin_name} to ${deploy_dir}/${mcp_bin_name}.exe"
+      fi
+    done
+  fi
 
   # Recreate symlinks
   cmd.exe /c "${repo_root}\\scripts\\setup.cmd" || true

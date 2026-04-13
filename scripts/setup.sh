@@ -381,7 +381,10 @@ echo "Generating MCP launcher scripts in ${mcp_release_dir#${repo_root}/}:"
 # --runtime-path src/compiler_rust/target/release/deps`.
 mcp_native_src="${repo_root}/build/native/simple_mcp_native"
 mcp_target="${mcp_release_dir}/simple_mcp_server"
-if [ -f "${mcp_native_src}" ]; then
+if [ -s "${mcp_target}" ] && ! head -c 2 "${mcp_target}" | grep -q '#!'; then
+  # Target is already a non-empty native binary (deployed by bootstrap), keep it
+  echo "  simple_mcp_server (native binary — already deployed)"
+elif [ -f "${mcp_native_src}" ]; then
   cp "${mcp_native_src}" "${mcp_target}"
   chmod +x "${mcp_target}"
   echo "  simple_mcp_server (native binary)"
@@ -397,7 +400,10 @@ fi
 # fall back to the shell-launcher path.
 lsp_mcp_native_src="${repo_root}/build/native/simple_lsp_mcp_native"
 lsp_mcp_target="${mcp_release_dir}/simple_lsp_mcp_server"
-if [ -f "${lsp_mcp_native_src}" ]; then
+if [ -s "${lsp_mcp_target}" ] && ! head -c 2 "${lsp_mcp_target}" | grep -q '#!'; then
+  # Target is already a non-empty native binary (deployed by bootstrap), keep it
+  echo "  simple_lsp_mcp_server (native binary — already deployed)"
+elif [ -f "${lsp_mcp_native_src}" ]; then
   cp "${lsp_mcp_native_src}" "${lsp_mcp_target}"
   chmod +x "${lsp_mcp_target}"
   echo "  simple_lsp_mcp_server (native binary)"

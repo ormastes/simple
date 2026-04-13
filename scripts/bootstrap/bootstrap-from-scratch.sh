@@ -31,6 +31,7 @@ Options:
   --target=<triple>  Target platform (freebsd-x86_64 dispatches to FreeBSD flow)
   --verbose          Accepted for compatibility
   --jobs=<n>         Accepted for compatibility
+  --no-mcp           Skip MCP server builds (Stage 5)
   --keep-artifacts   Accepted for compatibility; artifacts are kept
   --no-verify        Accepted for compatibility; hash verification still runs
   --help             Show this help
@@ -40,6 +41,7 @@ EOF
 backend="llvm-lib"
 output_dir="build/bootstrap"
 deploy=0
+build_mcp=1
 target=""
 verbose=0
 jobs=""
@@ -63,6 +65,9 @@ while [ "$#" -gt 0 ]; do
       ;;
     --verbose)
       verbose=1
+      ;;
+    --no-mcp)
+      build_mcp=0
       ;;
     --keep-artifacts|--no-verify)
       ;;
@@ -348,6 +353,55 @@ fi
 echo "Full CLI binary: ${full_bin}"
 
 # ===========================================================================
+# Stage 5: Compile MCP servers (optional, skip with --no-mcp)
+# ===========================================================================
+
+mcp_build_ok=1
+if [ "${build_mcp}" -eq 1 ]; then
+  echo "Stage 5: compiling MCP servers..."
+
+  # Build each MCP server with non-blocking failure.
+  # Note: run commands directly (not via run_logged) because run_logged
+  # calls exit on failure, and MCP build failure must be non-blocking.
+  mcp_stage=0
+  for mcp_entry in "simple_mcp_server:src/app/mcp/main.spl" \
+                    "simple_lsp_mcp_server:src/app/simple_lsp_mcp/main.spl"; do
+    mcp_stage=$((mcp_stage + 1))
+    mcp_name="${mcp_entry%%:*}"
+    mcp_spl="${mcp_entry#*:}"
+    mcp_log="stage5${mcp_stage}-mcp-native-build"
+
+    echo "  Stage 5${mcp_stage}: ${mcp_name}"
+    rm -rf .simple/native_cache/
+    set +e
+    env RUST_LOG="${RUST_LOG:-error}" \
+      LLVM_DISABLE_ABI_BREAKING_CHECKS_ENFORCING=1 \
+      "${stage_for_build}" native-build \
+      --backend "${stage4_backend}" \
+      --source src/compiler --source src/app --source src/lib \
+      --entry-closure \
+      --entry "${mcp_spl}" \
+      --runtime-path "$(pwd)/src/compiler_rust/target/bootstrap" \
+      -o "${full_dir}/${mcp_name}" \
+      >"${log_dir}/${mcp_log}.log" 2>&1
+    mcp_status=$?
+    set -e
+    echo "  ${mcp_log} log: ${log_dir}/${mcp_log}.log"
+    if [ "${mcp_status}" -ne 0 ]; then
+      mcp_build_ok=0
+      echo "  WARNING: ${mcp_name} build failed (exit ${mcp_status})"
+    elif [ ! -s "${full_dir}/${mcp_name}" ]; then
+      mcp_build_ok=0
+      echo "  WARNING: ${mcp_name} produced a zero-byte file"
+    else
+      echo "  ${mcp_name}: ${full_dir}/${mcp_name}"
+    fi
+  done
+else
+  echo "Skipping MCP server builds (--no-mcp)"
+fi
+
+# ===========================================================================
 # Deploy
 # ===========================================================================
 
@@ -356,6 +410,16 @@ if [ "${deploy}" -eq 1 ]; then
   mkdir -p "${deploy_dir}"
   install -m755 "${full_bin}" "${deploy_dir}/simple"
   echo "Deployed full CLI binary to ${deploy_dir}/simple"
+
+  # Deploy MCP servers if they were built successfully
+  if [ "${build_mcp}" -eq 1 ] && [ "${mcp_build_ok}" -eq 1 ]; then
+    for mcp_bin_name in simple_mcp_server simple_lsp_mcp_server; do
+      if [ -x "${full_dir}/${mcp_bin_name}" ] && [ -s "${full_dir}/${mcp_bin_name}" ]; then
+        install -m755 "${full_dir}/${mcp_bin_name}" "${deploy_dir}/${mcp_bin_name}"
+        echo "Deployed ${mcp_bin_name} to ${deploy_dir}/${mcp_bin_name}"
+      fi
+    done
+  fi
 
   # Recreate symlinks (bin/simple → release/<platform>/simple)
   "${repo_root}/scripts/setup.sh"
