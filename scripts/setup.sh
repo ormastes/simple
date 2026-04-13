@@ -279,6 +279,13 @@ if [ "${dry_run}" -eq 1 ]; then
       echo "  bin/release/<platform>/simple → ${release_bin}"
     fi
   fi
+  echo "  bin/simple_mcp_server.cmd      (copied from scripts/setup/bin_cmd_wrappers/)"
+  echo "  bin/simple_lsp_mcp_server.cmd  (copied from scripts/setup/bin_cmd_wrappers/)"
+  echo "  bin/t32_mcp_server.cmd         (copied from scripts/setup/bin_cmd_wrappers/)"
+  echo "  bin/t32_lsp_mcp_server.cmd     (copied from scripts/setup/bin_cmd_wrappers/)"
+  echo "  bin/bug  → ../tools/bug-cli/bin/bug"
+  echo "  bin/jira → ../tools/jira-cli/bin/jira"
+  echo "  bin/mail → ../tools/mail-cli/bin/mail"
   exit 0
 fi
 
@@ -830,6 +837,36 @@ for mcp_name in simple_mcp_server simple_lsp_mcp_server t32_mcp_server t32_lsp_m
   esac
 done
 echo "  Linked bin/*_mcp_server → release/${mcp_release_subdir}/*"
+
+# ===========================================================================
+# Windows .cmd wrappers — copy from scripts/setup/bin_cmd_wrappers/ to bin/
+# ===========================================================================
+
+cmd_template_dir="${repo_root}/scripts/setup/bin_cmd_wrappers"
+if [ -d "${cmd_template_dir}" ]; then
+  for cmd_name in simple_mcp_server.cmd simple_lsp_mcp_server.cmd t32_mcp_server.cmd t32_lsp_mcp_server.cmd; do
+    src_cmd="${cmd_template_dir}/${cmd_name}"
+    dst_cmd="${bin_dir}/${cmd_name}"
+    if [ -f "${src_cmd}" ]; then
+      cp -f "${src_cmd}" "${dst_cmd}"
+    fi
+  done
+  echo "  Copied bin/*.cmd wrappers from scripts/setup/bin_cmd_wrappers/"
+fi
+
+# ===========================================================================
+# In-repo tool symlinks (bin/<name> → ../tools/<name>-cli/bin/<name>)
+# ===========================================================================
+
+for tool_name in bug jira mail; do
+  tool_target="../tools/${tool_name}-cli/bin/${tool_name}"
+  resolved_tool="${repo_root}/tools/${tool_name}-cli/bin/${tool_name}"
+  if [ -e "${resolved_tool}" ]; then
+    create_link "${tool_target}" "${tool_name}"
+  else
+    echo "  [WARN] tools/${tool_name}-cli/bin/${tool_name} missing — skipping bin/${tool_name} symlink" >&2
+  fi
+done
 
 if [ -f "${repo_root}/bin/codex_chrome_devtools_mcp.js" ]; then
   chmod +x "${repo_root}/bin/codex_chrome_devtools_mcp.js"
