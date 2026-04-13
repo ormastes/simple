@@ -29,6 +29,12 @@ use common.render_scene.scene.{SceneCommand, RenderScene, render_scene,
     scene_gradient_rect, scene_blur_rect, rgba_to_argb}
 # extern fn serial_println(msg: text)  # disabled for native builds
 
+# Phase 3c: opt-in SFFI TTF path via env vars. Reads
+# SIMPLE_TTF_DYLIB and SIMPLE_TTF_PATH; when both are non-empty the
+# shared layout FontRenderer attempts to enable the spl_fonts
+# rasterizer. SIMPLE_TTF_DEBUG toggles the one-line diagnostic.
+extern fn rt_env_get(key: text) -> text
+
 # =========================================================================
 # Layout Box
 # =========================================================================
@@ -636,6 +642,23 @@ fn get_layout_font_renderer() -> FontRenderer:
     if val Some(r) = _layout_font_renderer:
         return r
     val r = FontRenderer.new()
+    # Phase 3c: opt-in TTF backend. Both env vars must be set; any
+    # failure inside try_enable_ttf leaves the renderer in its default
+    # vector/bitmap state, so callers see no behavior change unless
+    # the user explicitly asked for TTF.
+    val dylib = rt_env_get("SIMPLE_TTF_DYLIB")
+    val ttf = rt_env_get("SIMPLE_TTF_PATH")
+    val debug = rt_env_get("SIMPLE_TTF_DEBUG")
+    val have_dylib = dylib != nil and dylib != ""
+    val have_ttf = ttf != nil and ttf != ""
+    val want_debug = debug != nil and debug != ""
+    if (have_dylib and have_ttf):
+        val ok = r.try_enable_ttf(dylib, ttf)
+        if want_debug:
+            if ok:
+                print("[layout] ttf enabled")
+            else:
+                print("[layout] ttf unavailable, using fallback")
     _layout_font_renderer = r
     r
 
