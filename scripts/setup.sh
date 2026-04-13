@@ -283,6 +283,13 @@ if [ "${dry_run}" -eq 1 ]; then
   echo "  bin/simple_lsp_mcp_server.cmd  (copied from scripts/setup/bin_cmd_wrappers/)"
   echo "  bin/t32_mcp_server.cmd         (copied from scripts/setup/bin_cmd_wrappers/)"
   echo "  bin/t32_lsp_mcp_server.cmd     (copied from scripts/setup/bin_cmd_wrappers/)"
+  echo "  bin/codex_chrome_devtools_mcp.js (copied from scripts/setup/bin_scripts/)"
+  echo "  bin/codex_stitch_mcp.js          (copied from scripts/setup/bin_scripts/)"
+  echo "  bin/mcp_stdio_proxy.spl          (copied from scripts/setup/bin_scripts/)"
+  echo "  bin/obsidian_lsp_mcp_server      (copied from scripts/setup/bin_scripts/)"
+  echo "  bin/simple-torch                 (copied from scripts/setup/bin_scripts/)"
+  echo "  bin/simple_lsp_server            (copied from scripts/setup/bin_scripts/)"
+  echo "  bin/task                         (copied from scripts/setup/bin_scripts/)"
   echo "  bin/bug  → ../tools/bug-cli/bin/bug"
   echo "  bin/jira → ../tools/jira-cli/bin/jira"
   echo "  bin/mail → ../tools/mail-cli/bin/mail"
@@ -852,6 +859,32 @@ if [ -d "${cmd_template_dir}" ]; then
     fi
   done
   echo "  Copied bin/*.cmd wrappers from scripts/setup/bin_cmd_wrappers/"
+fi
+
+# ===========================================================================
+# Hand-authored bin/ scripts — copy from scripts/setup/bin_scripts/ to bin/
+# ===========================================================================
+
+bin_scripts_template_dir="${repo_root}/scripts/setup/bin_scripts"
+if [ -d "${bin_scripts_template_dir}" ]; then
+  for bin_script_name in \
+      codex_chrome_devtools_mcp.js \
+      codex_stitch_mcp.js \
+      mcp_stdio_proxy.spl \
+      obsidian_lsp_mcp_server \
+      simple-torch \
+      simple_lsp_server \
+      task; do
+    src_bin_script="${bin_scripts_template_dir}/${bin_script_name}"
+    dst_bin_script="${bin_dir}/${bin_script_name}"
+    if [ -f "${src_bin_script}" ]; then
+      cp -f "${src_bin_script}" "${dst_bin_script}"
+      if [ -x "${src_bin_script}" ]; then
+        chmod +x "${dst_bin_script}"
+      fi
+    fi
+  done
+  echo "  Copied bin/ hand-authored scripts from scripts/setup/bin_scripts/"
 fi
 
 # ===========================================================================
