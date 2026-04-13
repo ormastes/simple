@@ -167,6 +167,11 @@ pub(crate) fn generate_stub_object(
         "Generating {} stub functions for unresolved symbols...",
         needs_stub.len()
     );
+    if std::env::var("SIMPLE_TRACE_STUBS").is_ok() {
+        for s in &needs_stub {
+            eprintln!("  STUB: {}", s);
+        }
+    }
 
     #[cfg(target_os = "windows")]
     {
