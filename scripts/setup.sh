@@ -375,9 +375,21 @@ LAUNCHER_EOF
 echo ""
 echo "Generating MCP launcher scripts in ${mcp_release_dir#${repo_root}/}:"
 
-generate_mcp_launcher "simple_mcp_server" \
-  "src/app/mcp/main.spl" "" ""
-echo "  simple_mcp_server"
+# simple_mcp_server is also a standalone native binary when
+# build/native/simple_mcp_native exists. Build it the same way as
+# simple_lsp_mcp_server: `simple native-build --runtime-bundle auto
+# --runtime-path src/compiler_rust/target/release/deps`.
+mcp_native_src="${repo_root}/build/native/simple_mcp_native"
+mcp_target="${mcp_release_dir}/simple_mcp_server"
+if [ -f "${mcp_native_src}" ]; then
+  cp "${mcp_native_src}" "${mcp_target}"
+  chmod +x "${mcp_target}"
+  echo "  simple_mcp_server (native binary)"
+else
+  generate_mcp_launcher "simple_mcp_server" \
+    "src/app/mcp/main.spl" "" ""
+  echo "  simple_mcp_server (shell wrapper — run 'simple native-build ...' for a native binary)"
+fi
 
 # simple_lsp_mcp_server is now a standalone native binary built via
 # `simple native-build --runtime-bundle auto`. Prefer the prebuilt

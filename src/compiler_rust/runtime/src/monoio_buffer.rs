@@ -72,9 +72,12 @@ impl SimpleBuf {
         let arr_ptr = ptr as *const RuntimeArray;
         let capacity = (*arr_ptr).capacity as usize;
 
-        // Get pointer to data area (elements are RuntimeValue, 8 bytes each)
-        // For byte buffers, we treat the entire capacity as byte storage
-        let data_ptr = (arr_ptr as *const RuntimeArray).add(1) as *mut u8;
+        // The element buffer lives in a separate allocation referenced by
+        // `data`. Byte-buffer consumers treat the whole element slab as bytes.
+        let data_ptr = (*arr_ptr).data as *mut u8;
+        if data_ptr.is_null() {
+            return None;
+        }
 
         Some(Self {
             data_ptr,
@@ -100,7 +103,10 @@ impl SimpleBuf {
         }
 
         let arr_ptr = ptr as *const RuntimeArray;
-        let data_ptr = (arr_ptr as *const RuntimeArray).add(1) as *mut u8;
+        let data_ptr = (*arr_ptr).data as *mut u8;
+        if data_ptr.is_null() {
+            return None;
+        }
 
         Some(Self {
             data_ptr,
@@ -118,7 +124,7 @@ impl SimpleBuf {
         unsafe {
             let ptr = array.as_heap_ptr();
             let arr_ptr = ptr as *const RuntimeArray;
-            let data_ptr = (arr_ptr as *const RuntimeArray).add(1) as *mut u8;
+            let data_ptr = (*arr_ptr).data as *mut u8;
 
             Self {
                 data_ptr,
@@ -400,11 +406,12 @@ pub extern "C" fn rt_simplebuf_sync_to_array(array: RuntimeValue, bytes_read: i6
         let capacity = (*arr_ptr).capacity as usize;
         let bytes_to_sync = (bytes_read as usize).min(capacity);
 
-        // Get pointer to data area as bytes
-        let data_ptr = (arr_ptr as *const RuntimeArray).add(1) as *const u8;
-
-        // Get pointer to elements as RuntimeValue
-        let elements_ptr = (arr_ptr as *mut RuntimeArray).add(1) as *mut RuntimeValue;
+        // Element buffer lives in a separate allocation.
+        let elements_ptr = (*arr_ptr).data;
+        if elements_ptr.is_null() {
+            return RuntimeValue::from_int(0);
+        }
+        let data_ptr = elements_ptr as *const u8;
 
         // Convert bytes to RuntimeValue integers
         for i in 0..bytes_to_sync {
@@ -438,11 +445,12 @@ pub extern "C" fn rt_simplebuf_sync_from_array(array: RuntimeValue, max_len: i64
         let arr_ptr = ptr as *const RuntimeArray;
         let len = ((*arr_ptr).len as usize).min(max_len as usize);
 
-        // Get pointer to elements as RuntimeValue
-        let elements_ptr = (arr_ptr as *const RuntimeArray).add(1) as *const RuntimeValue;
-
-        // Get pointer to data area as bytes
-        let data_ptr = (arr_ptr as *mut RuntimeArray).add(1) as *mut u8;
+        // Element buffer lives in a separate allocation.
+        let elements_ptr = (*arr_ptr).data as *const RuntimeValue;
+        if elements_ptr.is_null() {
+            return RuntimeValue::from_int(0);
+        }
+        let data_ptr = elements_ptr as *mut u8;
 
         // Convert RuntimeValue integers to bytes
         for i in 0..len {

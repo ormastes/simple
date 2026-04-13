@@ -101,15 +101,26 @@ unsafe fn alloc_runtime_string(len: u64) -> Option<*mut RuntimeString> {
     Some(ptr)
 }
 
-/// A heap-allocated array
+/// A heap-allocated array.
+///
+/// The element storage lives in a SEPARATE heap allocation referenced by
+/// `data`. This matters for `rt_array_push_grow`: when the backing buffer
+/// needs to grow, only the element buffer is reallocated (and may move),
+/// while the `RuntimeArray` header stays at a stable address. Caller-side
+/// SSA values that hold the array pointer therefore remain valid across
+/// growths. See the 2026-04-13 codegen bug fix in native_mcp_servers.md:
+/// previously the data was laid out inline after the header and `realloc`
+/// could move the whole allocation, leaving every caller holding a dangling
+/// pointer — that silently corrupted every growable array in native builds.
 #[repr(C)]
 pub struct RuntimeArray {
     pub header: HeapHeader,
     /// Number of elements
     pub len: u64,
-    /// Capacity (allocated slots)
+    /// Capacity (allocated slots in `data`)
     pub capacity: u64,
-    // Followed by RuntimeValue elements
+    /// Pointer to the element buffer (separate allocation).
+    pub data: *mut RuntimeValue,
 }
 
 impl RuntimeArray {
@@ -118,8 +129,10 @@ impl RuntimeArray {
     /// # Safety
     /// The caller must ensure the RuntimeArray was properly allocated.
     pub unsafe fn as_slice(&self) -> &[RuntimeValue] {
-        let data_ptr = (self as *const Self).add(1) as *const RuntimeValue;
-        std::slice::from_raw_parts(data_ptr, self.len as usize)
+        if self.data.is_null() {
+            return &[];
+        }
+        std::slice::from_raw_parts(self.data, self.len as usize)
     }
 
     /// Get the elements as a mutable slice
@@ -127,9 +140,29 @@ impl RuntimeArray {
     /// # Safety
     /// The caller must ensure the RuntimeArray was properly allocated.
     pub unsafe fn as_mut_slice(&mut self) -> &mut [RuntimeValue] {
-        let data_ptr = (self as *mut Self).add(1) as *mut RuntimeValue;
-        std::slice::from_raw_parts_mut(data_ptr, self.len as usize)
+        if self.data.is_null() {
+            return &mut [];
+        }
+        std::slice::from_raw_parts_mut(self.data, self.len as usize)
     }
+
+    /// Pointer to the element buffer (returns null if not allocated).
+    #[inline]
+    pub fn data_ptr(&self) -> *mut RuntimeValue {
+        self.data
+    }
+}
+
+/// Layout used for the element storage of a `RuntimeArray` with the given
+/// capacity. Capacity 0 is treated as 1 to satisfy the allocator's min-size
+/// requirement.
+fn array_data_layout(capacity: u64) -> std::alloc::Layout {
+    let cap = capacity.max(1) as usize;
+    std::alloc::Layout::from_size_align(
+        cap * std::mem::size_of::<RuntimeValue>(),
+        std::mem::align_of::<RuntimeValue>(),
+    )
+    .expect("valid array data layout")
 }
 
 /// A heap-allocated tuple (fixed-size array)
@@ -159,23 +192,32 @@ impl RuntimeTuple {
 // ============================================================================
 
 /// Allocate a new array with the given capacity.
-/// Minimum capacity is 4 to allow push-without-realloc on empty arrays
-/// (rt_array_push mutates in-place and cannot reallocate).
+/// Minimum capacity is 4 to allow a few pushes before the first grow.
+/// The element buffer is allocated separately from the header, so later
+/// growths do not move the header — callers' pointers stay valid.
 #[no_mangle]
 pub extern "C" fn rt_array_new(capacity: u64) -> RuntimeValue {
     let capacity = capacity.max(4);
-    let size = std::mem::size_of::<RuntimeArray>() + capacity as usize * std::mem::size_of::<RuntimeValue>();
-    let layout = std::alloc::Layout::from_size_align(size, 8).unwrap();
+    let header_size = std::mem::size_of::<RuntimeArray>();
+    let header_layout = std::alloc::Layout::from_size_align(header_size, 8).unwrap();
 
     unsafe {
-        let ptr = std::alloc::alloc_zeroed(layout) as *mut RuntimeArray;
+        let ptr = std::alloc::alloc_zeroed(header_layout) as *mut RuntimeArray;
         if ptr.is_null() {
             return RuntimeValue::NIL;
         }
 
-        (*ptr).header = HeapHeader::new(HeapObjectType::Array, size as u32);
+        let data_layout = array_data_layout(capacity);
+        let data = std::alloc::alloc_zeroed(data_layout) as *mut RuntimeValue;
+        if data.is_null() {
+            std::alloc::dealloc(ptr as *mut u8, header_layout);
+            return RuntimeValue::NIL;
+        }
+
+        (*ptr).header = HeapHeader::new(HeapObjectType::Array, header_size as u32);
         (*ptr).len = 0;
         (*ptr).capacity = capacity;
+        (*ptr).data = data;
 
         RuntimeValue::from_heap_ptr(ptr as *mut HeapHeader)
     }
@@ -225,46 +267,39 @@ pub extern "C" fn rt_array_push(array: RuntimeValue, value: RuntimeValue) -> boo
 
 /// Push an element to an array, growing the array if necessary.
 /// This is the default push behavior - arrays automatically grow.
+///
+/// The `RuntimeArray` header lives in a stable allocation; only the element
+/// buffer (`data`) is reallocated on grow. The caller's array pointer stays
+/// valid.
 #[no_mangle]
 pub extern "C" fn rt_array_push_grow(array: RuntimeValue, value: RuntimeValue) -> bool {
     let arr = as_typed_ptr!(mut array, HeapObjectType::Array, RuntimeArray, false);
     unsafe {
         if (*arr).len >= (*arr).capacity {
-            // Grow in-place: double capacity (min 4).
-            // We use realloc which may move memory. Since RuntimeValue is passed
-            // by value, the caller's pointer won't update — but if the allocation
-            // doesn't move (common case), this works. If it moves, we update the
-            // header pointer and the caller sees stale data. To handle this safely,
-            // we grow into the SAME allocation by using excess capacity only.
-            // If truly at capacity with no room, we must reallocate.
-            let new_cap = ((*arr).capacity * 2).max(4);
-            let old_size =
-                std::mem::size_of::<RuntimeArray>() + (*arr).capacity as usize * std::mem::size_of::<RuntimeValue>();
-            let new_size = std::mem::size_of::<RuntimeArray>() + new_cap as usize * std::mem::size_of::<RuntimeValue>();
-            let old_layout = std::alloc::Layout::from_size_align(old_size, 8).unwrap();
-            let new_ptr = std::alloc::realloc(arr as *mut u8, old_layout, new_size);
-            if new_ptr.is_null() {
+            let old_cap = (*arr).capacity;
+            let new_cap = (old_cap * 2).max(4);
+            let old_layout = array_data_layout(old_cap);
+            let new_size = array_data_layout(new_cap).size();
+            let new_data = if (*arr).data.is_null() {
+                std::alloc::alloc_zeroed(array_data_layout(new_cap)) as *mut RuntimeValue
+            } else {
+                std::alloc::realloc((*arr).data as *mut u8, old_layout, new_size) as *mut RuntimeValue
+            };
+            if new_data.is_null() {
                 return false;
             }
-            if new_ptr != arr as *mut u8 {
-                // realloc moved memory — can't update caller's pointer.
-                // This is a limitation. Copy data back to old location if possible,
-                // or just update in the new location (caller has stale pointer).
-                // For now, we accept this and update the new location.
-                // The caller's next access will segfault if the old memory is freed.
-                // TODO: Return new pointer via out-param or wrapper.
+            // Zero-init the newly grown tail so later reads of unwritten slots
+            // return NIL instead of leaked memory.
+            let old_len_bytes = old_cap as usize * std::mem::size_of::<RuntimeValue>();
+            let new_tail_bytes = new_size - old_len_bytes;
+            if new_tail_bytes > 0 {
+                std::ptr::write_bytes((new_data as *mut u8).add(old_len_bytes), 0, new_tail_bytes);
             }
-            let arr = new_ptr as *mut RuntimeArray;
+            (*arr).data = new_data;
             (*arr).capacity = new_cap;
-            (*arr).header = HeapHeader::new(HeapObjectType::Array, new_size as u32);
-            let data_ptr = (arr.add(1)) as *mut RuntimeValue;
-            *data_ptr.add((*arr).len as usize) = value;
-            (*arr).len += 1;
-            return true;
         }
 
-        let data_ptr = (arr.add(1)) as *mut RuntimeValue;
-        *data_ptr.add((*arr).len as usize) = value;
+        *(*arr).data.add((*arr).len as usize) = value;
         (*arr).len += 1;
         true
     }
@@ -275,11 +310,10 @@ pub extern "C" fn rt_array_push_grow(array: RuntimeValue, value: RuntimeValue) -
 pub extern "C" fn rt_array_push_no_grow(array: RuntimeValue, value: RuntimeValue) -> bool {
     let arr = as_typed_ptr!(mut array, HeapObjectType::Array, RuntimeArray, false);
     unsafe {
-        if (*arr).len >= (*arr).capacity {
+        if (*arr).len >= (*arr).capacity || (*arr).data.is_null() {
             return false;
         }
-        let data_ptr = (arr.add(1)) as *mut RuntimeValue;
-        *data_ptr.add((*arr).len as usize) = value;
+        *(*arr).data.add((*arr).len as usize) = value;
         (*arr).len += 1;
         true
     }
@@ -290,12 +324,11 @@ pub extern "C" fn rt_array_push_no_grow(array: RuntimeValue, value: RuntimeValue
 pub extern "C" fn rt_array_pop(array: RuntimeValue) -> RuntimeValue {
     let arr = as_typed_ptr!(mut array, HeapObjectType::Array, RuntimeArray, RuntimeValue::NIL);
     unsafe {
-        if (*arr).len == 0 {
+        if (*arr).len == 0 || (*arr).data.is_null() {
             return RuntimeValue::NIL;
         }
         (*arr).len -= 1;
-        let data_ptr = (arr.add(1)) as *const RuntimeValue;
-        *data_ptr.add((*arr).len as usize)
+        *(*arr).data.add((*arr).len as usize)
     }
 }
 
@@ -337,9 +370,14 @@ pub fn rt_array_create_from_slice(values: &[RuntimeValue]) -> RuntimeValue {
 pub extern "C" fn rt_array_free(array: RuntimeValue) {
     let ptr = as_typed_ptr!(mut array, HeapObjectType::Array, RuntimeArray, ());
     unsafe {
-        let size = std::mem::size_of::<RuntimeArray>() + (*ptr).capacity as usize * std::mem::size_of::<RuntimeValue>();
-        let layout = std::alloc::Layout::from_size_align(size, 8).unwrap();
-        std::alloc::dealloc(ptr as *mut u8, layout);
+        if !(*ptr).data.is_null() {
+            let data_layout = array_data_layout((*ptr).capacity);
+            std::alloc::dealloc((*ptr).data as *mut u8, data_layout);
+            (*ptr).data = std::ptr::null_mut();
+        }
+        let header_layout =
+            std::alloc::Layout::from_size_align(std::mem::size_of::<RuntimeArray>(), 8).unwrap();
+        std::alloc::dealloc(ptr as *mut u8, header_layout);
     }
 }
 

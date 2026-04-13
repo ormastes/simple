@@ -348,8 +348,11 @@ pub(crate) fn copy_to_buffer(buffer: RuntimeValue, data: &[u8]) -> i64 {
         // Determine how many bytes we can copy
         let copy_len = data.len().min(capacity);
 
-        // Get pointer to data area (after the header), using capacity not len
-        let data_ptr = (arr_ptr as *mut RuntimeArray).add(1) as *mut RuntimeValue;
+        // Get pointer to data area via the array's heap-allocated data buffer.
+        let data_ptr = (*arr_ptr).data;
+        if data_ptr.is_null() {
+            return -1;
+        }
         let slice = std::slice::from_raw_parts_mut(data_ptr, capacity);
 
         // Copy data as RuntimeValue integers

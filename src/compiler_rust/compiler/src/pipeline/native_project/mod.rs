@@ -329,9 +329,6 @@ impl NativeProjectBuilder {
         }
         if self.config.verbose {
             eprintln!("Found {} .spl files", files.len());
-            if std::env::var("SIMPLE_TRACE_DISCOVERY").is_ok() {
-                for p in &files { eprintln!("  DISC: {}", p.display()); }
-            }
         }
 
         // 2. Set up incremental state
@@ -388,7 +385,18 @@ impl NativeProjectBuilder {
                 // Always recompile the entry file (its main->spl_main renaming depends on is_entry)
                 let is_entry = is_entry_file(path, &canon_entry_for_cache);
                 if !is_entry {
-                    let hash = object_cache_key(source, is_entry, &self.config.backend, self.config.no_mangle);
+                    let per_file_root = self.effective_source_root_for(path);
+                    let module_prefix = crate::codegen::common_backend::module_prefix_from_path(
+                        path,
+                        &per_file_root,
+                    );
+                    let hash = object_cache_key(
+                        source,
+                        is_entry,
+                        &self.config.backend,
+                        self.config.no_mangle,
+                        &module_prefix,
+                    );
                     let cached_o = objects_dir.join(format!("{:016x}.o", hash));
                     if cached_o.exists() {
                         // Cache hit: copy to temp dir
@@ -589,7 +597,18 @@ impl NativeProjectBuilder {
             for (idx, obj_path) in &freshly_compiled {
                 if let Some((path, source)) = file_sources.get(*idx) {
                     let is_entry = is_entry_file(path, &canonical_entry);
-                    let hash = object_cache_key(source, is_entry, &self.config.backend, self.config.no_mangle);
+                    let per_file_root = self.effective_source_root_for(path);
+                    let module_prefix = crate::codegen::common_backend::module_prefix_from_path(
+                        path,
+                        &per_file_root,
+                    );
+                    let hash = object_cache_key(
+                        source,
+                        is_entry,
+                        &self.config.backend,
+                        self.config.no_mangle,
+                        &module_prefix,
+                    );
                     let cached_o = objects_dir.join(format!("{:016x}.o", hash));
                     let _ = std::fs::copy(obj_path, cached_o);
                 }
@@ -681,13 +700,27 @@ pub(crate) fn content_hash(content: &str) -> u64 {
 /// no-mangle mode changes symbol emission. All of that must be part of the
 /// cache key or an object from a previous build can be linked under the wrong
 /// role.
-pub(crate) fn object_cache_key(content: &str, is_entry: bool, backend: &str, no_mangle: bool) -> u64 {
+///
+/// The `module_prefix` is also part of the key: two files with identical
+/// content but different paths (e.g. `src/app/mcp/startup_log.spl` and
+/// `src/app/simple_lsp_mcp/startup_log.spl`) produce different mangled
+/// symbol names, so their cached objects cannot be shared. Without this,
+/// building one app after the other would reuse the other app's object and
+/// leave all cross-module calls unresolved (linked as stubs returning nil).
+pub(crate) fn object_cache_key(
+    content: &str,
+    is_entry: bool,
+    backend: &str,
+    no_mangle: bool,
+    module_prefix: &str,
+) -> u64 {
     use std::hash::{Hash, Hasher};
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     content.hash(&mut hasher);
     is_entry.hash(&mut hasher);
     backend.hash(&mut hasher);
     no_mangle.hash(&mut hasher);
+    module_prefix.hash(&mut hasher);
     hasher.finish()
 }
 

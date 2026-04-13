@@ -62,6 +62,11 @@ pub struct Lowerer {
     pub(super) imported_function_names: HashSet<String>,
     /// Global struct definitions from all compilation units for cross-module field resolution.
     pub(super) global_struct_defs: Option<std::sync::Arc<std::collections::HashMap<String, Vec<(String, String)>>>>,
+    /// Field names that appear in more than one globally-known struct.
+    /// Cross-module lookups skip these to avoid picking the wrong struct's
+    /// byte offset (see the BeDomNode/BeLayoutBox `children` collision that
+    /// originally motivated the old "single-field structs only" filter).
+    pub(super) ambiguous_field_names: Option<std::sync::Arc<std::collections::HashSet<String>>>,
 }
 
 impl Lowerer {
@@ -95,6 +100,7 @@ impl Lowerer {
             extern_fn_names: HashSet::new(),
             imported_function_names: HashSet::new(),
             global_struct_defs: None,
+            ambiguous_field_names: None,
         }
     }
 
@@ -127,6 +133,7 @@ impl Lowerer {
             extern_fn_names: HashSet::new(),
             imported_function_names: HashSet::new(),
             global_struct_defs: None,
+            ambiguous_field_names: None,
         }
     }
 
@@ -182,6 +189,7 @@ impl Lowerer {
             extern_fn_names: HashSet::new(),
             imported_function_names: HashSet::new(),
             global_struct_defs: None,
+            ambiguous_field_names: None,
         }
     }
 
@@ -223,6 +231,26 @@ impl Lowerer {
     /// Get global struct definitions (if set).
     pub fn global_struct_defs(&self) -> Option<&std::collections::HashMap<String, Vec<(String, String)>>> {
         self.global_struct_defs.as_deref()
+    }
+
+    /// Set the blacklist of ambiguous field names. Any field name on this
+    /// list is skipped by the cross-module field lookup fallback in
+    /// `get_field_info`, which falls back to a method call instead. See the
+    /// comment on `global_struct_defs` and the `native_project/compiler.rs`
+    /// setup site for background.
+    pub fn set_ambiguous_field_names(
+        &mut self,
+        names: std::sync::Arc<std::collections::HashSet<String>>,
+    ) {
+        self.ambiguous_field_names = Some(names);
+    }
+
+    /// Check whether a field name is globally ambiguous (defined in more
+    /// than one known struct).
+    pub(super) fn is_ambiguous_global_field(&self, name: &str) -> bool {
+        self.ambiguous_field_names
+            .as_ref()
+            .is_some_and(|s| s.contains(name))
     }
 
     /// Take ownership of the memory warnings

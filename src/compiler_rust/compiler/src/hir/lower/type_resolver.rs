@@ -30,25 +30,43 @@ impl Lowerer {
                         });
                     }
                 }
-                self.module
-                    .types
-                    .lookup(name)
-                    .ok_or_else(|| {
-                        // Gather available type names for suggestions
-                        let available_types = self.module.types.all_type_names();
-                        LowerError::UnknownType {
-                            type_name: name.clone(),
-                            available_types,
-                        }
-                    })
-                    .or_else(|e| {
-                        if self.lenient_types {
-                            // In lenient mode, treat unknown types as ANY to allow compilation to proceed
-                            Ok(TypeId::ANY)
-                        } else {
-                            Err(e)
-                        }
-                    })
+                if let Some(id) = self.module.types.lookup(name) {
+                    return Ok(id);
+                }
+                // Fall back to cross-module struct definitions. This handles
+                // files that use a struct type by name (e.g. as a parameter
+                // annotation) without an explicit `use` statement — common
+                // when a module is split across sibling files that share a
+                // single top-level main.spl. Registering the struct locally
+                // turns ANY-typed receivers into proper struct types so
+                // `entry.name` lowers to a FieldGet instead of a method call.
+                if let Some(ref global_defs) = self.global_struct_defs.clone() {
+                    if let Some(field_specs) = global_defs.get(name) {
+                        let hir_fields: Vec<(String, TypeId)> = field_specs
+                            .iter()
+                            .map(|(fname, _ftype)| (fname.clone(), TypeId::ANY))
+                            .collect();
+                        let struct_ty = HirType::Struct {
+                            name: name.clone(),
+                            fields: hir_fields,
+                            has_snapshot: false,
+                            generic_params: vec![],
+                            is_generic_template: false,
+                            type_bindings: std::collections::HashMap::new(),
+                        };
+                        let id = self.module.types.register_named(name.clone(), struct_ty);
+                        return Ok(id);
+                    }
+                }
+                if self.lenient_types {
+                    // In lenient mode, treat unknown types as ANY to allow compilation to proceed
+                    return Ok(TypeId::ANY);
+                }
+                let available_types = self.module.types.all_type_names();
+                Err(LowerError::UnknownType {
+                    type_name: name.clone(),
+                    available_types,
+                })
             }
             Type::Pointer { kind, inner } => {
                 let inner_id = self.resolve_type(inner)?;
@@ -299,7 +317,17 @@ impl Lowerer {
             if let Some((idx, ty, _)) = best {
                 return Ok((idx, ty));
             }
-            // Search global struct definitions from other compilation units
+            // Search global struct definitions from other compilation units.
+            // Skip names that are known to be ambiguous across multiple
+            // structs — those must fall back to method-call resolution so
+            // we don't silently pick the wrong byte offset.
+            if self.is_ambiguous_global_field(field) {
+                return Err(LowerError::CannotInferFieldType {
+                    struct_name: "ANY".to_string(),
+                    field: field.to_string(),
+                    available_fields: vec![],
+                });
+            }
             if let Some(ref global_defs) = self.global_struct_defs {
                 let mut best_global: Option<(usize, usize, String)> = None;
                 for (sname, fields) in global_defs.iter() {
@@ -313,14 +341,19 @@ impl Lowerer {
                     }
                 }
                 if let Some((idx, count, sname)) = best_global {
-                    let fpath = self
-                        .current_file
-                        .as_ref()
-                        .and_then(|p| p.file_name())
-                        .and_then(|n| n.to_str())
-                        .unwrap_or("unknown");
-                    let msg = format!("[FIELD-TRACE] ANY/{field} -> global {sname}[{idx}] (count={count}) in {fpath}");
-                    eprintln!("{msg}");
+                    if std::env::var("SIMPLE_TRACE_FIELD_GET").is_ok() {
+                        let fpath = self
+                            .current_file
+                            .as_ref()
+                            .and_then(|p| p.file_name())
+                            .and_then(|n| n.to_str())
+                            .unwrap_or("unknown");
+                        eprintln!(
+                            "[FIELD-TRACE] ANY/{field} -> global {sname}[{idx}] (count={count}) in {fpath}"
+                        );
+                    }
+                    let _ = count;
+                    let _ = sname;
                     return Ok((idx, TypeId::ANY));
                 }
             }
@@ -416,6 +449,14 @@ impl Lowerer {
                             return Ok((idx, ty));
                         }
                         // Search global struct definitions from other modules.
+                        // Skip ambiguous names — see the ANY branch above.
+                        if self.is_ambiguous_global_field(field) {
+                            return Err(LowerError::CannotInferFieldType {
+                                struct_name: "wildcard".to_string(),
+                                field: field.to_string(),
+                                available_fields: vec![],
+                            });
+                        }
                         if let Some(ref global_defs) = self.global_struct_defs {
                             let mut best_global: Option<(usize, usize, String)> = None;
                             for (sname, fields) in global_defs.iter() {
@@ -429,14 +470,19 @@ impl Lowerer {
                                 }
                             }
                             if let Some((idx, count, sname)) = best_global {
-                                let fpath = self
-                                    .current_file
-                                    .as_ref()
-                                    .and_then(|p| p.file_name())
-                                    .and_then(|n| n.to_str())
-                                    .unwrap_or("unknown");
-                                let msg = format!("[FIELD-TRACE] wildcard/{field} -> global {sname}[{idx}] (count={count}) in {fpath}");
-                                eprintln!("{msg}");
+                                if std::env::var("SIMPLE_TRACE_FIELD_GET").is_ok() {
+                                    let fpath = self
+                                        .current_file
+                                        .as_ref()
+                                        .and_then(|p| p.file_name())
+                                        .and_then(|n| n.to_str())
+                                        .unwrap_or("unknown");
+                                    eprintln!(
+                                        "[FIELD-TRACE] wildcard/{field} -> global {sname}[{idx}] (count={count}) in {fpath}"
+                                    );
+                                }
+                                let _ = count;
+                                let _ = sname;
                                 return Ok((idx, TypeId::ANY));
                             }
                         }

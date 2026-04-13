@@ -21,9 +21,8 @@ fn get_array(val: RuntimeValue) -> Option<*const RuntimeArray> {
 #[inline]
 fn array_get_element(arr: *const RuntimeArray, index: usize) -> RuntimeValue {
     unsafe {
-        if index < (*arr).len as usize {
-            let data_ptr = arr.add(1) as *const RuntimeValue;
-            *data_ptr.add(index)
+        if index < (*arr).len as usize && !(*arr).data.is_null() {
+            *(*arr).data.add(index)
         } else {
             RuntimeValue::NIL
         }
