@@ -1,5 +1,5 @@
 import * as vscode from 'vscode';
-import { ServerOptions } from 'vscode-languageclient/node';
+import type { ServerOptions } from 'vscode-languageclient/node';
 export interface WasmLspOptions {
     wasmPath: string;
     context: vscode.ExtensionContext;

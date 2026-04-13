@@ -1,5 +1,5 @@
 import * as vscode from 'vscode';
-import { ServerOptions } from 'vscode-languageclient/node';
+import type { ServerOptions } from 'vscode-languageclient/node';
 import { getWasiPreopens } from './uriConverter';
 
 const WASM_WASI_CORE_EXTENSION_ID = 'ms-vscode.wasm-wasi-core';

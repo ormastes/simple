@@ -47,10 +47,16 @@ class TestCodeLensProvider {
         if (document.languageId !== 'simple') {
             return [];
         }
-        return (0, simpleAnalysisIndex_1.analyzeDocument)(document).tests
-            .filter((block) => block.runnableScope === 'file' || block.runnableScope === 'doctest')
-            .map((block) => {
+        return (0, simpleAnalysisIndex_1.analyzeDocument)(document).tests.map((block) => {
             const range = new vscode.Range(block.line, 0, block.line, 0);
+            if (block.runnableScope !== 'file' && block.runnableScope !== 'doctest') {
+                return new vscode.CodeLens(range, {
+                    title: '$(circle-large-outline) Structure only',
+                    command: 'simple.test.showScopeInfo',
+                    arguments: [block.kind],
+                    tooltip: `${block.kind} is discovered for structure and navigation, but exact-node execution is not implemented yet.`,
+                });
+            }
             const command = block.runnableScope === 'doctest' ? 'simple.test.runSdoctest' : 'simple.test.runFile';
             const title = block.runnableScope === 'doctest'
                 ? '$(play) Run Doctest'

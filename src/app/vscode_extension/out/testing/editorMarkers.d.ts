@@ -5,10 +5,14 @@ export interface EditorMarkerState {
     pointerLine: number | null;
 }
 export declare class EditorMarkerManager implements vscode.Disposable {
+    private readonly storage?;
+    private static readonly storageKey;
     private readonly decorations;
     private readonly states;
     private readonly disposables;
-    constructor();
+    private readonly didChangeStateEmitter;
+    readonly onDidChangeState: vscode.Event<vscode.Uri>;
+    constructor(storage?: vscode.Memento | undefined);
     toggleBreakpoint(documentUri: vscode.Uri, line: number): EditorMarkerState;
     toggleBookmark(documentUri: vscode.Uri, line: number): EditorMarkerState;
     togglePointer(documentUri: vscode.Uri, line: number): EditorMarkerState;
@@ -22,4 +26,6 @@ export declare class EditorMarkerManager implements vscode.Disposable {
     private getOrCreateState;
     private toggleLine;
     private jumpToBookmark;
+    private restorePersistedState;
+    private persistState;
 }

@@ -6,6 +6,11 @@ export interface EditorMarkerState {
     pointerLine: number | null;
 }
 
+interface PersistedMarkerEntry {
+    bookmarks: number[];
+    pointerLine: number | null;
+}
+
 interface DecorationSet {
     breakpoint: vscode.TextEditorDecorationType;
     bookmark: vscode.TextEditorDecorationType;
@@ -32,11 +37,14 @@ function makePointerSvg(fill: string, stroke: string): string {
 }
 
 export class EditorMarkerManager implements vscode.Disposable {
+    private static readonly storageKey = 'simple.editorMarkers.v1';
     private readonly decorations: DecorationSet;
     private readonly states = new Map<string, EditorMarkerState>();
     private readonly disposables: vscode.Disposable[] = [];
+    private readonly didChangeStateEmitter = new vscode.EventEmitter<vscode.Uri>();
+    public readonly onDidChangeState = this.didChangeStateEmitter.event;
 
-    public constructor() {
+    public constructor(private readonly storage?: vscode.Memento) {
         this.decorations = {
             breakpoint: vscode.window.createTextEditorDecorationType({
                 gutterIconPath: svgDataUri(makeGutterSvg('#d73a49', '#8b1d2c', '<circle cx="8" cy="8" r="2.7" fill="#ffffff"/>')),
@@ -69,17 +77,25 @@ export class EditorMarkerManager implements vscode.Disposable {
                 }
             }),
         );
+
+        this.restorePersistedState();
+        for (const editor of vscode.window.visibleTextEditors) {
+            this.refresh(editor);
+        }
     }
 
     public toggleBreakpoint(documentUri: vscode.Uri, line: number): EditorMarkerState {
         this.toggleLine(documentUri.toString(), line, 'breakpoint');
         this.refreshVisible(documentUri);
+        this.didChangeStateEmitter.fire(documentUri);
         return this.getState(documentUri);
     }
 
     public toggleBookmark(documentUri: vscode.Uri, line: number): EditorMarkerState {
         this.toggleLine(documentUri.toString(), line, 'bookmark');
+        void this.persistState();
         this.refreshVisible(documentUri);
+        this.didChangeStateEmitter.fire(documentUri);
         return this.getState(documentUri);
     }
 
@@ -87,13 +103,17 @@ export class EditorMarkerManager implements vscode.Disposable {
         const key = documentUri.toString();
         const state = this.getOrCreateState(key);
         state.pointerLine = state.pointerLine === line ? null : line;
+        void this.persistState();
         this.refreshVisible(documentUri);
+        this.didChangeStateEmitter.fire(documentUri);
         return this.getState(documentUri);
     }
 
     public clearPointer(documentUri: vscode.Uri): EditorMarkerState {
         this.getOrCreateState(documentUri.toString()).pointerLine = null;
+        void this.persistState();
         this.refreshVisible(documentUri);
+        this.didChangeStateEmitter.fire(documentUri);
         return this.getState(documentUri);
     }
 
@@ -144,6 +164,7 @@ export class EditorMarkerManager implements vscode.Disposable {
             disposable.dispose();
         }
         this.disposables.length = 0;
+        this.didChangeStateEmitter.dispose();
         this.states.clear();
     }
 
@@ -207,5 +228,42 @@ export class EditorMarkerManager implements vscode.Disposable {
         const position = new vscode.Position(target, 0);
         editor.selection = new vscode.Selection(position, position);
         editor.revealRange(new vscode.Range(position, position));
+    }
+
+    private restorePersistedState(): void {
+        const persisted = this.storage?.get<Record<string, PersistedMarkerEntry>>(EditorMarkerManager.storageKey);
+        if (!persisted) {
+            return;
+        }
+
+        for (const [uri, entry] of Object.entries(persisted)) {
+            if ((entry.bookmarks?.length ?? 0) === 0 && entry.pointerLine === null) {
+                continue;
+            }
+            this.states.set(uri, {
+                breakpoints: [],
+                bookmarks: [...(entry.bookmarks ?? [])].sort((a, b) => a - b),
+                pointerLine: entry.pointerLine ?? null,
+            });
+        }
+    }
+
+    private async persistState(): Promise<void> {
+        if (!this.storage) {
+            return;
+        }
+
+        const persisted: Record<string, PersistedMarkerEntry> = {};
+        for (const [uri, state] of this.states.entries()) {
+            if (state.bookmarks.length === 0 && state.pointerLine === null) {
+                continue;
+            }
+            persisted[uri] = {
+                bookmarks: [...state.bookmarks],
+                pointerLine: state.pointerLine,
+            };
+        }
+
+        await this.storage.update(EditorMarkerManager.storageKey, persisted);
     }
 }

@@ -41,30 +41,19 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     activeLspSurface = lspSurface;
     context.subscriptions.push(lspSurface);
     const outlineProvider = new SimpleOutlineProvider();
-    const editorMarkerManager = new EditorMarkerManager();
+    const editorMarkerManager = new EditorMarkerManager(context.workspaceState);
     const mathProvider = new NativeMathProvider();
     const diagnosticsProvider = new SimpleDiagnosticsProvider();
     const semanticTokensProvider = new SimpleSemanticTokensProvider();
+    const foldingProvider = new SimpleFoldingRangeProvider();
     const documentSymbolProvider = new SimpleDocumentSymbolProvider();
     const workspaceSymbolProvider = new SimpleWorkspaceSymbolProvider();
     const definitionProvider = new SimpleDefinitionProvider();
     const referenceProvider = new SimpleReferenceProvider();
     const hoverProvider = new SimpleHoverProvider();
-    const setFallbackProvidersEnabled = (enabled: boolean): void => {
-        diagnosticsProvider.setEnabled(enabled);
-        semanticTokensProvider.setEnabled(enabled);
-        documentSymbolProvider.setEnabled(enabled);
-        workspaceSymbolProvider.setEnabled(enabled);
-        definitionProvider.setEnabled(enabled);
-        referenceProvider.setEnabled(enabled);
-        hoverProvider.setEnabled(enabled);
-    };
 
     lspSurface.setClientBootstrap(createSimpleLspClientBootstrap({
         services,
-        onRunningStateChanged: (running) => {
-            mathProvider.setLspRunning?.(running);
-        },
         fallbackControls: [
             diagnosticsProvider,
             semanticTokensProvider,
@@ -73,6 +62,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
             definitionProvider,
             referenceProvider,
             hoverProvider,
+            foldingProvider,
         ],
     }));
     services.markDegraded('lsp', 'Compatibility surface ready; bootstrapping configured client', 'fallback');
@@ -98,6 +88,8 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     };
 
     const cli = new SimpleCliService(services);
+    const codeLensProvider = new TestCodeLensProvider();
+    const testController = new SimpleTestController(cli, services);
     const runCliTestCommand = async (args: string[], resolveFrom?: string): Promise<void> => {
         try {
             await cli.run(args, {
@@ -155,6 +147,9 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
                     context.extensionUri,
                     updateOutline,
                     (documentUri) => editorMarkerManager.getState(documentUri),
+                    editorMarkerManager.onDidChangeState,
+                    (documentUri) => testController.getStatesForDocument(documentUri),
+                    testController.onDidChangeTestStates,
                 ),
                 {
                     webviewOptions: { retainContextWhenHidden: true },
@@ -191,7 +186,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
             vscode.languages.registerReferenceProvider(SIMPLE_SELECTOR, referenceProvider),
             vscode.languages.registerHoverProvider(SIMPLE_SELECTOR, hoverProvider),
             vscode.languages.registerHoverProvider(SIMPLE_SELECTOR, mathProvider),
-            vscode.languages.registerFoldingRangeProvider(SIMPLE_SELECTOR, new SimpleFoldingRangeProvider()),
+            vscode.languages.registerFoldingRangeProvider(SIMPLE_SELECTOR, foldingProvider),
             mathProvider,
         ];
     }, context.subscriptions);
@@ -222,9 +217,6 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     }, context.subscriptions);
 
     await services.safeRegister('tests', 'test runner UI', () => {
-        const codeLensProvider = new TestCodeLensProvider();
-        const testController = new SimpleTestController(cli, services);
-
         return [
             codeLensProvider,
             testController,
@@ -276,6 +268,11 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
                 } else {
                     TestWorkspacePanel.show(context.extensionUri).openLatestArtifacts();
                 }
+            }),
+            vscode.commands.registerCommand('simple.test.showScopeInfo', (kind?: string) => {
+                void vscode.window.showInformationMessage(
+                    `${kind ?? 'This test node'} is discovered for structure and navigation, but exact-node execution is not implemented yet.`,
+                );
             }),
             vscode.commands.registerTextEditorCommand('simple.editor.toggleBreakpoint', (editor, _edit, uri?: vscode.Uri, line?: number) => {
                 const targetUri = uri ?? editor.document.uri;

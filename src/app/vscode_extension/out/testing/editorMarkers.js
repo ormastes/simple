@@ -52,9 +52,12 @@ function makePointerSvg(fill, stroke) {
 </svg>`.trim();
 }
 class EditorMarkerManager {
-    constructor() {
+    constructor(storage) {
+        this.storage = storage;
         this.states = new Map();
         this.disposables = [];
+        this.didChangeStateEmitter = new vscode.EventEmitter();
+        this.onDidChangeState = this.didChangeStateEmitter.event;
         this.decorations = {
             breakpoint: vscode.window.createTextEditorDecorationType({
                 gutterIconPath: svgDataUri(makeGutterSvg('#d73a49', '#8b1d2c', '<circle cx="8" cy="8" r="2.7" fill="#ffffff"/>')),
@@ -83,27 +86,38 @@ class EditorMarkerManager {
                 this.refresh(editor);
             }
         }));
+        this.restorePersistedState();
+        for (const editor of vscode.window.visibleTextEditors) {
+            this.refresh(editor);
+        }
     }
     toggleBreakpoint(documentUri, line) {
         this.toggleLine(documentUri.toString(), line, 'breakpoint');
         this.refreshVisible(documentUri);
+        this.didChangeStateEmitter.fire(documentUri);
         return this.getState(documentUri);
     }
     toggleBookmark(documentUri, line) {
         this.toggleLine(documentUri.toString(), line, 'bookmark');
+        void this.persistState();
         this.refreshVisible(documentUri);
+        this.didChangeStateEmitter.fire(documentUri);
         return this.getState(documentUri);
     }
     togglePointer(documentUri, line) {
         const key = documentUri.toString();
         const state = this.getOrCreateState(key);
         state.pointerLine = state.pointerLine === line ? null : line;
+        void this.persistState();
         this.refreshVisible(documentUri);
+        this.didChangeStateEmitter.fire(documentUri);
         return this.getState(documentUri);
     }
     clearPointer(documentUri) {
         this.getOrCreateState(documentUri.toString()).pointerLine = null;
+        void this.persistState();
         this.refreshVisible(documentUri);
+        this.didChangeStateEmitter.fire(documentUri);
         return this.getState(documentUri);
     }
     jumpToNextBookmark(editor) {
@@ -147,6 +161,7 @@ class EditorMarkerManager {
             disposable.dispose();
         }
         this.disposables.length = 0;
+        this.didChangeStateEmitter.dispose();
         this.states.clear();
     }
     refreshVisible(documentUri) {
@@ -206,6 +221,39 @@ class EditorMarkerManager {
         editor.selection = new vscode.Selection(position, position);
         editor.revealRange(new vscode.Range(position, position));
     }
+    restorePersistedState() {
+        const persisted = this.storage?.get(EditorMarkerManager.storageKey);
+        if (!persisted) {
+            return;
+        }
+        for (const [uri, entry] of Object.entries(persisted)) {
+            if ((entry.bookmarks?.length ?? 0) === 0 && entry.pointerLine === null) {
+                continue;
+            }
+            this.states.set(uri, {
+                breakpoints: [],
+                bookmarks: [...(entry.bookmarks ?? [])].sort((a, b) => a - b),
+                pointerLine: entry.pointerLine ?? null,
+            });
+        }
+    }
+    async persistState() {
+        if (!this.storage) {
+            return;
+        }
+        const persisted = {};
+        for (const [uri, state] of this.states.entries()) {
+            if (state.bookmarks.length === 0 && state.pointerLine === null) {
+                continue;
+            }
+            persisted[uri] = {
+                bookmarks: [...state.bookmarks],
+                pointerLine: state.pointerLine,
+            };
+        }
+        await this.storage.update(EditorMarkerManager.storageKey, persisted);
+    }
 }
 exports.EditorMarkerManager = EditorMarkerManager;
+EditorMarkerManager.storageKey = 'simple.editorMarkers.v1';
 //# sourceMappingURL=editorMarkers.js.map

@@ -14,7 +14,7 @@ import * as vscode from 'vscode';
 import { analyzeDocument } from './analysis/simpleAnalysisIndex';
 import { detectBlocks, type BlockKind, type DetectedBlock } from './blockDetector';
 import { parseImageContent, resolveImageUri } from './imageResolver';
-import { buildMathPreview } from './mathPreview';
+import { resolveMathRenderPolicy } from './mathRenderPolicy';
 import type { EditorMarkerState } from './testing/editorMarkers';
 
 // ── Types ────────────────────────────────────────────────────────────
@@ -47,11 +47,14 @@ interface RichEditorSymbol {
 }
 
 interface RichEditorTestBlock {
+    id: string;
     kind: string;
     label: string;
     line: number;
     from: number;
     to: number;
+    runnableScope: 'file' | 'doctest' | 'exact' | 'none';
+    status: 'idle' | 'running' | 'passed' | 'failed' | 'skipped';
 }
 
 interface RichEditorMarkers {
@@ -67,10 +70,10 @@ type WebviewMessage =
     | { type: 'requestSync' }
     | { type: 'runTestFromLine'; line: number; kind: string; label: string }
     | { type: 'toggleBreakpointFromLine'; line: number }
+    | { type: 'toggleBookmarkFromLine'; line: number }
+    | { type: 'togglePointerFromLine'; line: number }
     | { type: 'revealDefinition'; offset: number }
-    | { type: 'showReferences'; offset: number }
-    | { type: 'revealDefinitionForSymbol'; symbol: string }
-    | { type: 'showReferencesForSymbol'; symbol: string };
+    | { type: 'showReferences'; offset: number };
 
 type HostMessage =
     | {
@@ -104,15 +107,6 @@ function renderDetectedBlocks(
 ): RenderableBlock[] {
     const diagnostics = vscode.languages.getDiagnostics(document.uri);
 
-    const hasBlockingDiagnostic = (block: DetectedBlock): boolean => {
-        const blockRange = new vscode.Range(document.positionAt(block.from), document.positionAt(block.to));
-        return diagnostics.some((diagnostic) =>
-            !(diagnostic.range.end.isBeforeOrEqual(blockRange.start) || blockRange.end.isBeforeOrEqual(diagnostic.range.start))
-            && (diagnostic.severity === vscode.DiagnosticSeverity.Error
-                || diagnostic.severity === vscode.DiagnosticSeverity.Warning),
-        );
-    };
-
     return blocks.map(block => {
         if (block.kind === 'img') {
             const parsed = parseImageContent(block.content);
@@ -137,19 +131,17 @@ function renderDetectedBlocks(
             };
         }
 
-        const preview = buildMathPreview(block);
-        if (!preview || hasBlockingDiagnostic(block)) {
+        const renderPolicy = resolveMathRenderPolicy(document, block, diagnostics);
+        if (!renderPolicy?.shouldRender || !renderPolicy.preview) {
             return {
                 ...block,
                 renderedHtml: '',
                 displayMode: 'inline' as const,
                 status: 'error' as const,
-                errorMessage: !preview ? 'Invalid block syntax' : 'Block has warning or error',
+                errorMessage: renderPolicy?.errorMessage ?? 'Invalid block syntax',
             };
         }
-        const label = preview
-            ? preview.displayText
-            : block.content;
+        const label = renderPolicy.preview.displayText;
         const html = `<span class="cm-math-pretty-text">${escapeForHtml(label)}</span>`;
         return {
             ...block,
@@ -289,11 +281,14 @@ function buildRichEditorSymbols(document: vscode.TextDocument): RichEditorSymbol
 
 function buildRichEditorTests(document: vscode.TextDocument): RichEditorTestBlock[] {
     return analyzeDocument(document).tests.map((block) => ({
+        id: block.id,
         kind: block.kind,
         label: block.label,
         line: block.line,
         from: document.offsetAt(new vscode.Position(block.line, 0)),
         to: document.offsetAt(new vscode.Position(block.line, document.lineAt(block.line).text.length)),
+        runnableScope: block.runnableScope,
+        status: 'idle',
     }));
 }
 
@@ -306,6 +301,9 @@ export class RichCustomEditorProvider implements vscode.CustomTextEditorProvider
         private readonly extensionUri: vscode.Uri,
         private readonly onActiveDocument?: (document: vscode.TextDocument) => void,
         private readonly getMarkerState?: (documentUri: vscode.Uri) => EditorMarkerState,
+        private readonly onDidChangeMarkers?: vscode.Event<vscode.Uri>,
+        private readonly getTestStates?: (documentUri: vscode.Uri) => ReadonlyMap<string, 'idle' | 'running' | 'passed' | 'failed' | 'skipped'>,
+        private readonly onDidChangeTestStates?: vscode.Event<vscode.Uri>,
     ) {}
 
     public async resolveCustomTextEditor(
@@ -356,6 +354,7 @@ export class RichCustomEditorProvider implements vscode.CustomTextEditorProvider
             const text = document.getText();
             const detected = detectBlocks(text);
             const blocks = renderDetectedBlocks(detected, document, webviewPanel.webview);
+            const testStates = this.getTestStates?.(document.uri);
             await webviewPanel.webview.postMessage({
                 type: 'sync',
                 sourceText: text,
@@ -364,7 +363,10 @@ export class RichCustomEditorProvider implements vscode.CustomTextEditorProvider
                 blocks,
                 settings: getRichEditorSettings(),
                 symbols: buildRichEditorSymbols(document),
-                tests: buildRichEditorTests(document),
+                tests: buildRichEditorTests(document).map((test) => ({
+                    ...test,
+                    status: testStates?.get(test.id) ?? 'idle',
+                })),
                 markers: this.getMarkerState
                     ? this.getMarkerState(document.uri)
                     : { breakpoints: [], bookmarks: [], pointerLine: null },
@@ -390,6 +392,16 @@ export class RichCustomEditorProvider implements vscode.CustomTextEditorProvider
                 event.affectsConfiguration('simple.richEditor.showBlockBorders')
                 || event.affectsConfiguration('simple.richEditor.centerLineNumbers')
             ) {
+                void postSync();
+            }
+        });
+        const markerChangeSubscription = this.onDidChangeMarkers?.((changedUri) => {
+            if (changedUri.toString() === document.uri.toString()) {
+                void postSync();
+            }
+        });
+        const testStateChangeSubscription = this.onDidChangeTestStates?.((changedUri) => {
+            if (changedUri.toString() === document.uri.toString()) {
                 void postSync();
             }
         });
@@ -444,37 +456,38 @@ export class RichCustomEditorProvider implements vscode.CustomTextEditorProvider
         });
 
         const markerSubscription = webviewPanel.webview.onDidReceiveMessage(async (message: WebviewMessage) => {
-            if (message.type !== 'toggleBreakpointFromLine') {
+            if (message.type === 'toggleBreakpointFromLine') {
+                await vscode.commands.executeCommand('simple.editor.toggleBreakpoint', document.uri, message.line);
+                await postSync();
                 return;
             }
-
-            await vscode.commands.executeCommand('simple.editor.toggleBreakpoint', document.uri, message.line);
-            await postSync();
+            if (message.type === 'toggleBookmarkFromLine') {
+                await vscode.commands.executeCommand('simple.editor.toggleBookmark', document.uri, message.line);
+                await postSync();
+                return;
+            }
+            if (message.type === 'togglePointerFromLine') {
+                await vscode.commands.executeCommand('simple.editor.togglePointer', document.uri, message.line);
+                await postSync();
+            }
         });
 
         const navigationSubscription = webviewPanel.webview.onDidReceiveMessage(async (message: WebviewMessage) => {
             if (
                 message.type !== 'revealDefinition'
                 && message.type !== 'showReferences'
-                && message.type !== 'revealDefinitionForSymbol'
-                && message.type !== 'showReferencesForSymbol'
             ) {
                 return;
             }
 
             const documentText = document.getText();
-            const symbolOffset = ('symbol' in message)
-                ? documentText.search(new RegExp(`\\b${message.symbol.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`))
-                : -1;
-            const offset = 'offset' in message
-                ? message.offset
-                : symbolOffset;
+            const offset = message.offset;
             if (offset < 0) {
                 return;
             }
             const position = document.positionAt(Math.max(0, Math.min(offset, documentText.length)));
 
-            if (message.type === 'revealDefinition' || message.type === 'revealDefinitionForSymbol') {
+            if (message.type === 'revealDefinition') {
                 const rawLocations = await vscode.commands.executeCommand<Array<vscode.Location | vscode.LocationLink>>(
                     'vscode.executeDefinitionProvider',
                     document.uri,
@@ -527,6 +540,8 @@ export class RichCustomEditorProvider implements vscode.CustomTextEditorProvider
         webviewPanel.onDidDispose(() => {
             changeDocumentSubscription.dispose();
             configurationSubscription.dispose();
+            markerChangeSubscription?.dispose();
+            testStateChangeSubscription?.dispose();
             messageSubscription.dispose();
             runTestSubscription.dispose();
             markerSubscription.dispose();

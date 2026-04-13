@@ -329,6 +329,9 @@ impl NativeProjectBuilder {
         }
         if self.config.verbose {
             eprintln!("Found {} .spl files", files.len());
+            if std::env::var("SIMPLE_TRACE_DISCOVERY").is_ok() {
+                for p in &files { eprintln!("  DISC: {}", p.display()); }
+            }
         }
 
         // 2. Set up incremental state

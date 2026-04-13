@@ -1,6 +1,7 @@
 import * as vscode from 'vscode';
 import { detectBlocks, type DetectedBlock } from './blockDetector';
 import { buildMathPreview, isMathLikeBlock } from './mathPreview';
+import { resolveMathRenderPolicy } from './mathRenderPolicy';
 
 interface MathBlockDecoration {
     block: DetectedBlock;
@@ -58,17 +59,6 @@ function diagnosticDecorationForRange(
     return undefined;
 }
 
-function hasBlockingDiagnostic(
-    diagnostics: readonly vscode.Diagnostic[],
-    range: vscode.Range,
-): boolean {
-    return diagnostics.some((diagnostic) =>
-        rangesOverlap(diagnostic.range, range)
-        && (diagnostic.severity === vscode.DiagnosticSeverity.Error
-            || diagnostic.severity === vscode.DiagnosticSeverity.Warning),
-    );
-}
-
 function selectionIntersectsBlock(
     document: vscode.TextDocument,
     selections: readonly vscode.Selection[],
@@ -112,7 +102,6 @@ function buildMathHoverMarkdown(
 }
 
 export class NativeMathProvider implements vscode.HoverProvider, vscode.Disposable {
-    private lspRunning = false;
     private readonly openDecoration = vscode.window.createTextEditorDecorationType({
         opacity: '0',
     });
@@ -185,10 +174,6 @@ export class NativeMathProvider implements vscode.HoverProvider, vscode.Disposab
         return new vscode.Hover(markdown, makeRange(document, block.from, block.to));
     }
 
-    public setLspRunning(running: boolean): void {
-        this.lspRunning = running;
-    }
-
     public findMathBlockAtPosition(document: vscode.TextDocument, position: vscode.Position): DetectedBlock | undefined {
         const offset = document.offsetAt(position);
         return detectBlocks(document.getText()).find((block) =>
@@ -230,15 +215,16 @@ export class NativeMathProvider implements vscode.HoverProvider, vscode.Disposab
         const closeDecorations: vscode.Range[] = [];
         const contentDecorations: vscode.Range[] = [];
         const diagnostics = vscode.languages.getDiagnostics(editor.document.uri);
+        const previewOnHover = config.get<boolean>('previewOnHover', true);
 
         for (const block of detectBlocks(editor.document.getText())) {
             const decoration = asDecorationBlock(editor.document, block);
-            const preview = buildMathPreview(block);
-            if (!decoration || !preview) {
+            if (!decoration) {
                 continue;
             }
 
-            if (hasBlockingDiagnostic(diagnostics, decoration.fullRange)) {
+            const renderPolicy = resolveMathRenderPolicy(editor.document, block, diagnostics);
+            if (!renderPolicy?.shouldRender || !renderPolicy.preview) {
                 continue;
             }
 
@@ -248,10 +234,10 @@ export class NativeMathProvider implements vscode.HoverProvider, vscode.Disposab
 
             openDecorations.push({
                 range: decoration.openRange,
-                hoverMessage: buildMathHoverMarkdown(block, preview),
+                hoverMessage: previewOnHover ? buildMathHoverMarkdown(block, renderPolicy.preview) : undefined,
                 renderOptions: {
                     before: {
-                        contentText: preview.displayText,
+                        contentText: renderPolicy.preview.displayText,
                         color: new vscode.ThemeColor('editorLineNumber.foreground'),
                         margin: '0 0.25rem 0 0',
                         textDecoration: diagnosticDecorationForRange(diagnostics, decoration.fullRange),

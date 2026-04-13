@@ -16,8 +16,8 @@ use app.ui.render.widgets.{render_html_tree}
 use app.ui.web.html.{generate_css}
 use app.ui.browser.event_bridge.{translate_key_event, translate_mouse_event, hit_test}
 
-# GPU backend imports for device selection
-use std.gpu.{preferred_backend, gpu_cuda, gpu_vulkan, gpu_none, Gpu, GpuBackend}
+# Runtime FFI for snapshot writing (P3 ASCII PPM)
+extern fn rt_file_write_text(path: text, content: text) -> bool
 
 # =========================================================================
 # Framebuffer — CPU-side pixel buffer for software and GPU readback
@@ -192,6 +192,33 @@ class BrowserBackend:
     fn find_widget_at(x: i32, y: i32) -> text:
         """Hit-test: find the widget id at pixel coordinates."""
         return hit_test_entries(self.layout_cache, x, y)
+
+    fn snapshot_ppm(path: text) -> bool:
+        """Write the current framebuffer to a PPM (P3 ASCII) file.
+
+        Uses the P3 ASCII variant so the body is plain text and can be
+        written via rt_file_write_text without corrupting arbitrary bytes.
+        Returns true on success, false otherwise.
+        """
+        val w = self.framebuffer.width
+        val h = self.framebuffer.height
+        val pixels = self.framebuffer.pixels
+        var parts: [text] = ["P3\n{w} {h}\n255\n"]
+        var y = 0
+        while y < h:
+            var x = 0
+            while x < w:
+                val idx = y * w + x
+                val p = pixels[idx]
+                val r = (p / 65536) % 256
+                val g = (p / 256) % 256
+                val b = p % 256
+                parts = parts.push("{r} {g} {b} ")
+                x = x + 1
+            parts = parts.push("\n")
+            y = y + 1
+        val body = parts.join("")
+        return rt_file_write_text(path, body)
 
 # =========================================================================
 # LayoutEntry — flat list for fast hit testing
@@ -383,17 +410,14 @@ fn paint_rect(fb: Framebuffer, x: f64, y: f64, w: f64, h: f64, color: i32):
 # =========================================================================
 
 fn resolve_gpu_backend(name: text) -> text:
-    """Resolve a backend name string to a canonical GPU backend name."""
+    """Resolve a backend name string to a canonical GPU backend name.
+
+    Currently the framebuffer is always CPU-painted; the GPU name is
+    plumbed through for future use but never drives a real device path.
+    """
     match name:
         "cuda" => "cuda"
         "vulkan" => "vulkan"
-        "cpu" | "software" => "software"
-        "auto" =>
-            val detected = preferred_backend()
-            match detected:
-                GpuBackend.Cuda => "cuda"
-                GpuBackend.Vulkan => "vulkan"
-                GpuBackend.Metal => "metal"
-                GpuBackend.Rocm => "rocm"
-                _ => "software"
+        "metal" => "metal"
+        "rocm" => "rocm"
         _ => "software"

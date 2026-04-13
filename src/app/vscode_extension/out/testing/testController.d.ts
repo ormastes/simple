@@ -9,8 +9,12 @@ export declare class SimpleTestController implements vscode.Disposable {
     private readonly profile;
     private readonly disposables;
     private readonly itemScopes;
+    private readonly itemStates;
+    private readonly didChangeTestStatesEmitter;
+    readonly onDidChangeTestStates: vscode.Event<vscode.Uri>;
     constructor(cli: SimpleCliService, services: ExtensionHostServices);
     getController(): vscode.TestController;
+    getStatesForDocument(documentUri: vscode.Uri): ReadonlyMap<string, 'idle' | 'running' | 'passed' | 'failed' | 'skipped'>;
     refreshWorkspace(): Promise<void>;
     dispose(): void;
     private refreshUri;
@@ -19,4 +23,5 @@ export declare class SimpleTestController implements vscode.Disposable {
     private collectRunnableTargets;
     private runTarget;
     private collectDescendants;
+    private updateItemState;
 }

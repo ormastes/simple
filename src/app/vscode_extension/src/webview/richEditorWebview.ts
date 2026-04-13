@@ -64,20 +64,24 @@ interface SyncMessage {
         to: number;
     }>;
     tests: Array<{
+        id: string;
         kind: string;
         label: string;
         line: number;
         from: number;
         to: number;
+        runnableScope: 'file' | 'doctest' | 'exact' | 'none';
+        status: 'idle' | 'running' | 'passed' | 'failed' | 'skipped';
     }>;
     markers: {
         breakpoints: number[];
+        bookmarks: number[];
+        pointerLine: number | null;
     };
 }
 
 type HostMessage = SyncMessage | { type: 'error'; message: string };
 type NavigationAction = 'definition' | 'references';
-type SymbolNavigation = (symbol: string, action: NavigationAction) => void;
 
 const ENABLE_TEST_LINE_WIDGETS = true;
 const ENABLE_SYMBOL_HOVER = true;
@@ -137,15 +141,20 @@ interface RichEditorSymbol {
 }
 
 interface RichEditorTestBlock {
+    id: string;
     kind: string;
     label: string;
     line: number;
     from: number;
     to: number;
+    runnableScope: 'file' | 'doctest' | 'exact' | 'none';
+    status: 'idle' | 'running' | 'passed' | 'failed' | 'skipped';
 }
 
 interface RichEditorMarkers {
     breakpoints: number[];
+    bookmarks: number[];
+    pointerLine: number | null;
 }
 
 class TestRunGutterMarker extends GutterMarker {
@@ -163,7 +172,21 @@ class TestRunGutterMarker extends GutterMarker {
         const node = document.createElement('span');
         node.className = 'cm-test-gutter-icon';
         if (this.test) {
-            node.title = `Run ${this.test.kind}: ${this.test.label}`;
+            if (this.test.status === 'running') {
+                node.title = `${this.test.kind}: ${this.test.label} (running)`;
+                node.classList.add('cm-test-gutter-icon-running');
+            } else if (this.test.status === 'passed') {
+                node.title = `${this.test.kind}: ${this.test.label} (passed)`;
+                node.classList.add('cm-test-gutter-icon-passed');
+            } else if (this.test.status === 'failed') {
+                node.title = `${this.test.kind}: ${this.test.label} (failed)`;
+                node.classList.add('cm-test-gutter-icon-failed');
+            } else if (this.test.runnableScope === 'file' || this.test.runnableScope === 'doctest') {
+                node.title = `Run ${this.test.kind}: ${this.test.label}`;
+            } else {
+                node.title = `${this.test.kind}: ${this.test.label} (structure only)`;
+                node.classList.add('cm-test-gutter-icon-structure');
+            }
             node.setAttribute('aria-label', node.title);
         } else {
             node.classList.add('cm-test-gutter-icon-spacer');
@@ -187,6 +210,46 @@ class BreakpointGutterMarker extends GutterMarker {
         node.className = `cm-breakpoint-gutter-icon${this.active ? ' cm-breakpoint-gutter-icon-active' : ''}`;
         if (!this.active) {
             node.classList.add('cm-breakpoint-gutter-icon-spacer');
+            node.setAttribute('aria-hidden', 'true');
+        }
+        return node;
+    }
+}
+
+class BookmarkGutterMarker extends GutterMarker {
+    constructor(readonly active: boolean) {
+        super();
+    }
+
+    eq(other: BookmarkGutterMarker): boolean {
+        return this.active === other.active;
+    }
+
+    toDOM(): HTMLElement {
+        const node = document.createElement('span');
+        node.className = `cm-bookmark-gutter-icon${this.active ? ' cm-bookmark-gutter-icon-active' : ''}`;
+        if (!this.active) {
+            node.classList.add('cm-bookmark-gutter-icon-spacer');
+            node.setAttribute('aria-hidden', 'true');
+        }
+        return node;
+    }
+}
+
+class PointerGutterMarker extends GutterMarker {
+    constructor(readonly active: boolean) {
+        super();
+    }
+
+    eq(other: PointerGutterMarker): boolean {
+        return this.active === other.active;
+    }
+
+    toDOM(): HTMLElement {
+        const node = document.createElement('span');
+        node.className = `cm-pointer-gutter-icon${this.active ? ' cm-pointer-gutter-icon-active' : ''}`;
+        if (!this.active) {
+            node.classList.add('cm-pointer-gutter-icon-spacer');
             node.setAttribute('aria-hidden', 'true');
         }
         return node;
@@ -330,7 +393,7 @@ function buildTestRunMarkers(
 ): RangeSetBuilder<GutterMarker> {
     const builder = new RangeSetBuilder<GutterMarker>();
     for (const test of tests) {
-        if (test.kind !== 'describe' && test.kind !== 'sdoctest') {
+        if (!['describe', 'context', 'it', 'sdoctest'].includes(test.kind)) {
             continue;
         }
         const lineNumber = test.line + 1;
@@ -361,7 +424,7 @@ function createTestRunGutter(
         domEventHandlers: {
             mousedown(view, line, event) {
                 const test = getTests().find((candidate) => candidate.line === view.state.doc.lineAt(line.from).number - 1);
-                if (!test) {
+                if (!test || (test.runnableScope !== 'file' && test.runnableScope !== 'doctest')) {
                     return false;
                 }
                 event.preventDefault();
@@ -414,6 +477,92 @@ function createBreakpointGutter(
     });
 }
 
+function buildBookmarkMarkers(
+    state: EditorState,
+    markers: RichEditorMarkers,
+): RangeSetBuilder<GutterMarker> {
+    const builder = new RangeSetBuilder<GutterMarker>();
+    const activeBookmarks = new Set(markers.bookmarks);
+
+    for (let lineNumber = 1; lineNumber <= state.doc.lines; lineNumber += 1) {
+        const line = state.doc.line(lineNumber);
+        if (activeBookmarks.has(lineNumber - 1)) {
+            builder.add(line.from, line.from, new BookmarkGutterMarker(true));
+        }
+    }
+
+    return builder;
+}
+
+function createBookmarkGutter(
+    getMarkers: () => RichEditorMarkers,
+    onToggleBookmark: (line: number) => void,
+): Extension {
+    return gutter({
+        class: 'cm-bookmark-gutter',
+        markers(view) {
+            return buildBookmarkMarkers(view.state, getMarkers()).finish();
+        },
+        lineMarkerChange(update) {
+            return shouldRefreshGutterMarkers(update);
+        },
+        initialSpacer() {
+            return new BookmarkGutterMarker(false);
+        },
+        domEventHandlers: {
+            mousedown(view, line, event) {
+                event.preventDefault();
+                onToggleBookmark(view.state.doc.lineAt(line.from).number - 1);
+                return true;
+            },
+        },
+    });
+}
+
+function buildPointerMarkers(
+    state: EditorState,
+    markers: RichEditorMarkers,
+): RangeSetBuilder<GutterMarker> {
+    const builder = new RangeSetBuilder<GutterMarker>();
+    if (markers.pointerLine === null) {
+        return builder;
+    }
+
+    const lineNumber = markers.pointerLine + 1;
+    if (lineNumber < 1 || lineNumber > state.doc.lines) {
+        return builder;
+    }
+
+    const line = state.doc.line(lineNumber);
+    builder.add(line.from, line.from, new PointerGutterMarker(true));
+    return builder;
+}
+
+function createPointerGutter(
+    getMarkers: () => RichEditorMarkers,
+    onTogglePointer: (line: number) => void,
+): Extension {
+    return gutter({
+        class: 'cm-pointer-gutter',
+        markers(view) {
+            return buildPointerMarkers(view.state, getMarkers()).finish();
+        },
+        lineMarkerChange(update) {
+            return shouldRefreshGutterMarkers(update);
+        },
+        initialSpacer() {
+            return new PointerGutterMarker(false);
+        },
+        domEventHandlers: {
+            mousedown(view, line, event) {
+                event.preventDefault();
+                onTogglePointer(view.state.doc.lineAt(line.from).number - 1);
+                return true;
+            },
+        },
+    });
+}
+
 function isIdentifierChar(char: string | undefined): boolean {
     return !!char && /[A-Za-z0-9_]/.test(char);
 }
@@ -452,17 +601,34 @@ function buildSymbolActionMarkup(symbol: RichEditorSymbol): string {
         <div>${symbol.detail} · ${symbol.kind}</div>
         <div>line ${symbol.line + 1}</div>
         <div class="simple-rich-hover-actions">
-            <button type="button" data-nav="definition" data-symbol="${symbol.name}">Definition</button>
-            <button type="button" data-nav="references" data-symbol="${symbol.name}">References</button>
+            <button type="button" data-nav="definition">Definition</button>
+            <button type="button" data-nav="references">References</button>
         </div>
     `;
+}
+
+function resolveSymbolForIdentifier(
+    symbols: RichEditorSymbol[],
+    ident: { word: string; from: number; to: number },
+): RichEditorSymbol | undefined {
+    const containing = symbols
+        .filter((candidate) => candidate.from <= ident.from && candidate.to >= ident.to)
+        .sort((left, right) => (left.to - left.from) - (right.to - right.from));
+    if (containing.length > 0) {
+        return containing[0];
+    }
+
+    return symbols.find((candidate) =>
+        candidate.name === ident.word
+        && candidate.from === ident.from
+        && candidate.to === ident.to,
+    ) ?? symbols.find((candidate) => candidate.name === ident.word);
 }
 
 function wireSymbolActionButtons(
     root: ParentNode,
     ident: { word: string; from: number; to: number },
     onNavigate: (offset: number, action: NavigationAction) => void,
-    onNavigateSymbol: SymbolNavigation,
     onClose?: () => void,
 ): void {
     root.querySelectorAll<HTMLButtonElement>('button[data-nav]').forEach((button) => {
@@ -470,12 +636,7 @@ function wireSymbolActionButtons(
             clickEvent.preventDefault();
             clickEvent.stopPropagation();
             const action = button.dataset.nav === 'references' ? 'references' : 'definition';
-            const symbolName = button.dataset.symbol;
-            if (symbolName) {
-                onNavigateSymbol(symbolName, action);
-            } else {
-                onNavigate(ident.from, action);
-            }
+            onNavigate(ident.from, action);
             onClose?.();
         };
     });
@@ -484,7 +645,6 @@ function wireSymbolActionButtons(
 function createSymbolHoverTooltip(
     getSymbols: () => RichEditorSymbol[],
     onNavigate: (offset: number, action: NavigationAction) => void,
-    onNavigateSymbol: SymbolNavigation,
 ): Extension {
     return hoverTooltip((view, pos): Tooltip | null => {
         const ident = readIdentifierAt(view.state, pos);
@@ -492,7 +652,7 @@ function createSymbolHoverTooltip(
             return null;
         }
 
-        const symbol = getSymbols().find((candidate) => candidate.name === ident.word);
+        const symbol = resolveSymbolForIdentifier(getSymbols(), ident);
         if (!symbol) {
             return null;
         }
@@ -505,7 +665,7 @@ function createSymbolHoverTooltip(
                 const dom = document.createElement('div');
                 dom.className = 'simple-rich-hover-tooltip';
                 dom.innerHTML = buildSymbolActionMarkup(symbol);
-                wireSymbolActionButtons(dom, ident, onNavigate, onNavigateSymbol);
+                wireSymbolActionButtons(dom, ident, onNavigate);
                 return { dom };
             },
         };
@@ -518,7 +678,6 @@ function createSymbolHoverTooltip(
 function createActionMenu(
     parent: HTMLElement,
     onNavigate: (offset: number, action: NavigationAction) => void,
-    onNavigateSymbol: SymbolNavigation,
 ): {
     show: (clientX: number, clientY: number, ident: { word: string; from: number; to: number }, symbol?: RichEditorSymbol) => void;
     hide: () => void;
@@ -552,7 +711,7 @@ function createActionMenu(
                 to: ident.to,
             };
             menu.innerHTML = buildSymbolActionMarkup(resolved);
-            wireSymbolActionButtons(menu, ident, onNavigate, onNavigateSymbol, hide);
+            wireSymbolActionButtons(menu, ident, onNavigate, hide);
             const parentRect = parent.getBoundingClientRect();
             menu.style.left = `${clientX - parentRect.left + 10}px`;
             menu.style.top = `${clientY - parentRect.top + 10}px`;
@@ -796,7 +955,7 @@ const vsCodeTheme = EditorView.theme({
         fontStyle: 'italic',
         fontSize: '0.9em',
     },
-    '.cm-breakpoint-gutter, .cm-test-run-gutter': {
+    '.cm-breakpoint-gutter, .cm-bookmark-gutter, .cm-pointer-gutter, .cm-test-run-gutter': {
         width: '16px',
         minWidth: '16px',
     },
@@ -812,7 +971,7 @@ const vsCodeTheme = EditorView.theme({
         justifyContent: 'center',
         color: 'var(--vscode-editorLineNumber-foreground)',
     },
-    '.cm-breakpoint-gutter .cm-gutterElement, .cm-test-run-gutter .cm-gutterElement': {
+    '.cm-breakpoint-gutter .cm-gutterElement, .cm-bookmark-gutter .cm-gutterElement, .cm-pointer-gutter .cm-gutterElement, .cm-test-run-gutter .cm-gutterElement': {
         width: '16px',
         padding: '0 2px',
         display: 'flex',
@@ -832,6 +991,37 @@ const vsCodeTheme = EditorView.theme({
         borderLeftColor: 'transparent',
         opacity: '0',
     },
+    '.cm-test-gutter-icon-structure': {
+        width: '8px',
+        height: '8px',
+        border: '1px solid var(--vscode-editorLineNumber-foreground)',
+        borderRadius: '50%',
+        borderTop: '1px solid var(--vscode-editorLineNumber-foreground)',
+        borderBottom: '1px solid var(--vscode-editorLineNumber-foreground)',
+        borderLeft: '1px solid var(--vscode-editorLineNumber-foreground)',
+        opacity: '0.75',
+    },
+    '.cm-test-gutter-icon-running': {
+        width: '8px',
+        height: '8px',
+        border: '1px solid var(--vscode-testing-runAction, var(--vscode-debugIcon-startForeground, var(--vscode-terminal-ansiGreen, #89d185)))',
+        borderRadius: '50%',
+        backgroundColor: 'color-mix(in srgb, var(--vscode-testing-runAction, var(--vscode-debugIcon-startForeground, var(--vscode-terminal-ansiGreen, #89d185))) 18%, transparent)',
+    },
+    '.cm-test-gutter-icon-passed': {
+        width: '8px',
+        height: '8px',
+        border: '1px solid var(--vscode-testing-iconPassed, var(--vscode-terminal-ansiGreen, #89d185))',
+        borderRadius: '50%',
+        backgroundColor: 'var(--vscode-testing-iconPassed, var(--vscode-terminal-ansiGreen, #89d185))',
+    },
+    '.cm-test-gutter-icon-failed': {
+        width: '8px',
+        height: '8px',
+        border: '1px solid var(--vscode-testing-iconFailed, var(--vscode-errorForeground, #f14c4c))',
+        borderRadius: '50%',
+        backgroundColor: 'var(--vscode-testing-iconFailed, var(--vscode-errorForeground, #f14c4c))',
+    },
     '.cm-breakpoint-gutter-icon': {
         display: 'inline-block',
         width: '8px',
@@ -845,6 +1035,33 @@ const vsCodeTheme = EditorView.theme({
     },
     '.cm-breakpoint-gutter-icon-spacer': {
         backgroundColor: 'transparent',
+    },
+    '.cm-bookmark-gutter-icon': {
+        display: 'inline-block',
+        width: '10px',
+        height: '10px',
+        backgroundColor: 'transparent',
+        clipPath: 'polygon(50% 0%, 61% 35%, 98% 35%, 68% 57%, 79% 92%, 50% 70%, 21% 92%, 32% 57%, 2% 35%, 39% 35%)',
+    },
+    '.cm-bookmark-gutter-icon-active': {
+        backgroundColor: 'var(--vscode-editorInfo-foreground, #0969da)',
+    },
+    '.cm-bookmark-gutter-icon-spacer': {
+        backgroundColor: 'transparent',
+    },
+    '.cm-pointer-gutter-icon': {
+        display: 'inline-block',
+        width: '0',
+        height: '0',
+        borderTop: '5px solid transparent',
+        borderBottom: '5px solid transparent',
+        borderLeft: '8px solid transparent',
+    },
+    '.cm-pointer-gutter-icon-active': {
+        borderLeftColor: 'var(--vscode-debugIcon-continueForeground, var(--vscode-terminal-ansiYellow, #f2cc60))',
+    },
+    '.cm-pointer-gutter-icon-spacer': {
+        opacity: '0',
     },
     '.simple-rich-hover-tooltip': {
         zIndex: '20',
@@ -917,8 +1134,9 @@ function createEditor(
     onSelectionChange: (selStart: number, selEnd: number) => void,
     onRunTest: (test: RichEditorTestBlock) => void,
     onToggleBreakpoint: (line: number) => void,
+    onToggleBookmark: (line: number) => void,
+    onTogglePointer: (line: number) => void,
     onNavigate: (offset: number, action: NavigationAction) => void,
-    onNavigateSymbol: (symbol: string, action: NavigationAction) => void,
 ): {
     view: EditorView;
     refreshDecorations: () => void;
@@ -936,10 +1154,12 @@ function createEditor(
         ? createTestRunGutter(() => testsRef.current, onRunTest)
         : null;
     const breakpointGutter = createBreakpointGutter(() => markersRef.current, onToggleBreakpoint);
+    const bookmarkGutter = createBookmarkGutter(() => markersRef.current, onToggleBookmark);
+    const pointerGutter = createPointerGutter(() => markersRef.current, onTogglePointer);
     const symbolHover = ENABLE_SYMBOL_HOVER
-        ? createSymbolHoverTooltip(() => symbolsRef.current, onNavigate, onNavigateSymbol)
+        ? createSymbolHoverTooltip(() => symbolsRef.current, onNavigate)
         : null;
-    const actionMenu = createActionMenu(parent, onNavigate, onNavigateSymbol);
+    const actionMenu = createActionMenu(parent, onNavigate);
 
     const editListener = EditorView.updateListener.of((update) => {
         if (isApplyingSync) return;
@@ -970,7 +1190,7 @@ function createEditor(
 
             event.preventDefault();
             const ident = readIdentifierAt(view.state, pos)!;
-            const symbol = symbolsRef.current.find((candidate) => candidate.name === ident.word);
+            const symbol = resolveSymbolForIdentifier(symbolsRef.current, ident);
             actionMenu.show(event.clientX, event.clientY, ident, symbol);
             return true;
         },
@@ -984,7 +1204,7 @@ function createEditor(
                 return false;
             }
             event.preventDefault();
-            const symbol = symbolsRef.current.find((candidate) => candidate.name === ident.word);
+            const symbol = resolveSymbolForIdentifier(symbolsRef.current, ident);
             actionMenu.show(event.clientX, event.clientY, ident, symbol);
             return true;
         },
@@ -992,6 +1212,8 @@ function createEditor(
 
     const extensions: Extension[] = [
         breakpointGutter,
+        bookmarkGutter,
+        pointerGutter,
         ...(testRunGutter ? [testRunGutter] : []),
         ...createSimpleFoldExtensions(),
         ...createMathAwareLineNumberSetup(),
@@ -1083,7 +1305,7 @@ export function boot(vsCodeApi?: { postMessage(msg: unknown): void }): void {
     };
     const symbolsRef: { current: RichEditorSymbol[] } = { current: [] };
     const testsRef: { current: RichEditorTestBlock[] } = { current: [] };
-    const markersRef: { current: RichEditorMarkers } = { current: { breakpoints: [] } };
+    const markersRef: { current: RichEditorMarkers } = { current: { breakpoints: [], bookmarks: [], pointerLine: null } };
 
     let editor: ReturnType<typeof createEditor> | null = null;
 
@@ -1115,16 +1337,22 @@ export function boot(vsCodeApi?: { postMessage(msg: unknown): void }): void {
                     line,
                 });
             },
+            (line) => {
+                vscode.postMessage({
+                    type: 'toggleBookmarkFromLine',
+                    line,
+                });
+            },
+            (line) => {
+                vscode.postMessage({
+                    type: 'togglePointerFromLine',
+                    line,
+                });
+            },
             (offset, action) => {
                 vscode.postMessage({
                     type: action === 'definition' ? 'revealDefinition' : 'showReferences',
                     offset,
-                });
-            },
-            (symbol, action) => {
-                vscode.postMessage({
-                    type: action === 'definition' ? 'revealDefinitionForSymbol' : 'showReferencesForSymbol',
-                    symbol,
                 });
             },
         );
@@ -1141,7 +1369,7 @@ export function boot(vsCodeApi?: { postMessage(msg: unknown): void }): void {
             renderedBlocksRef.current.clear();
             symbolsRef.current = msg.symbols ?? [];
             testsRef.current = msg.tests ?? [];
-            markersRef.current = msg.markers ?? { breakpoints: [] };
+            markersRef.current = msg.markers ?? { breakpoints: [], bookmarks: [], pointerLine: null };
             if (msg.blocks) {
                 for (const block of msg.blocks) {
                     const key = `${block.prefix}:${block.content}`;

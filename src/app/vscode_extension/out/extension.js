@@ -68,29 +68,18 @@ async function activate(context) {
     activeLspSurface = lspSurface;
     context.subscriptions.push(lspSurface);
     const outlineProvider = new simpleOutlineProvider_1.SimpleOutlineProvider();
-    const editorMarkerManager = new editorMarkers_1.EditorMarkerManager();
+    const editorMarkerManager = new editorMarkers_1.EditorMarkerManager(context.workspaceState);
     const mathProvider = new nativeMathProvider_1.NativeMathProvider();
     const diagnosticsProvider = new diagnosticsProvider_1.SimpleDiagnosticsProvider();
     const semanticTokensProvider = new semanticTokensProvider_1.SimpleSemanticTokensProvider();
+    const foldingProvider = new nativeFoldingProvider_1.SimpleFoldingRangeProvider();
     const documentSymbolProvider = new simpleSymbolProviders_1.SimpleDocumentSymbolProvider();
     const workspaceSymbolProvider = new simpleSymbolProviders_1.SimpleWorkspaceSymbolProvider();
     const definitionProvider = new simpleSymbolProviders_1.SimpleDefinitionProvider();
     const referenceProvider = new simpleSymbolProviders_1.SimpleReferenceProvider();
     const hoverProvider = new simpleSymbolProviders_1.SimpleHoverProvider();
-    const setFallbackProvidersEnabled = (enabled) => {
-        diagnosticsProvider.setEnabled(enabled);
-        semanticTokensProvider.setEnabled(enabled);
-        documentSymbolProvider.setEnabled(enabled);
-        workspaceSymbolProvider.setEnabled(enabled);
-        definitionProvider.setEnabled(enabled);
-        referenceProvider.setEnabled(enabled);
-        hoverProvider.setEnabled(enabled);
-    };
     lspSurface.setClientBootstrap((0, lsp_1.createSimpleLspClientBootstrap)({
         services,
-        onRunningStateChanged: (running) => {
-            mathProvider.setLspRunning?.(running);
-        },
         fallbackControls: [
             diagnosticsProvider,
             semanticTokensProvider,
@@ -99,6 +88,7 @@ async function activate(context) {
             definitionProvider,
             referenceProvider,
             hoverProvider,
+            foldingProvider,
         ],
     }));
     services.markDegraded('lsp', 'Compatibility surface ready; bootstrapping configured client', 'fallback');
@@ -122,6 +112,8 @@ async function activate(context) {
         }
     };
     const cli = new simpleCliService_1.SimpleCliService(services);
+    const codeLensProvider = new testCodeLensProvider_1.TestCodeLensProvider();
+    const testController = new testController_1.SimpleTestController(cli, services);
     const runCliTestCommand = async (args, resolveFrom) => {
         try {
             await cli.run(args, {
@@ -165,7 +157,7 @@ async function activate(context) {
     }, context.subscriptions);
     await services.safeRegister('editor', 'custom editor provider', () => {
         return [
-            vscode.window.registerCustomEditorProvider(richCustomEditor_1.RichCustomEditorProvider.viewType, new richCustomEditor_1.RichCustomEditorProvider(context.extensionUri, updateOutline, (documentUri) => editorMarkerManager.getState(documentUri)), {
+            vscode.window.registerCustomEditorProvider(richCustomEditor_1.RichCustomEditorProvider.viewType, new richCustomEditor_1.RichCustomEditorProvider(context.extensionUri, updateOutline, (documentUri) => editorMarkerManager.getState(documentUri), editorMarkerManager.onDidChangeState, (documentUri) => testController.getStatesForDocument(documentUri), testController.onDidChangeTestStates), {
                 webviewOptions: { retainContextWhenHidden: true },
                 supportsMultipleEditorsPerDocument: false,
             }),
@@ -192,7 +184,7 @@ async function activate(context) {
             vscode.languages.registerReferenceProvider(SIMPLE_SELECTOR, referenceProvider),
             vscode.languages.registerHoverProvider(SIMPLE_SELECTOR, hoverProvider),
             vscode.languages.registerHoverProvider(SIMPLE_SELECTOR, mathProvider),
-            vscode.languages.registerFoldingRangeProvider(SIMPLE_SELECTOR, new nativeFoldingProvider_1.SimpleFoldingRangeProvider()),
+            vscode.languages.registerFoldingRangeProvider(SIMPLE_SELECTOR, foldingProvider),
             mathProvider,
         ];
     }, context.subscriptions);
@@ -223,8 +215,6 @@ async function activate(context) {
         ];
     }, context.subscriptions);
     await services.safeRegister('tests', 'test runner UI', () => {
-        const codeLensProvider = new testCodeLensProvider_1.TestCodeLensProvider();
-        const testController = new testController_1.SimpleTestController(cli, services);
         return [
             codeLensProvider,
             testController,
@@ -277,6 +267,9 @@ async function activate(context) {
                 else {
                     testWorkspacePanel_1.TestWorkspacePanel.show(context.extensionUri).openLatestArtifacts();
                 }
+            }),
+            vscode.commands.registerCommand('simple.test.showScopeInfo', (kind) => {
+                void vscode.window.showInformationMessage(`${kind ?? 'This test node'} is discovered for structure and navigation, but exact-node execution is not implemented yet.`);
             }),
             vscode.commands.registerTextEditorCommand('simple.editor.toggleBreakpoint', (editor, _edit, uri, line) => {
                 const targetUri = uri ?? editor.document.uri;

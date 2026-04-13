@@ -37,6 +37,7 @@ exports.NativeMathProvider = void 0;
 const vscode = __importStar(require("vscode"));
 const blockDetector_1 = require("./blockDetector");
 const mathPreview_1 = require("./mathPreview");
+const mathRenderPolicy_1 = require("./mathRenderPolicy");
 function makeRange(document, from, to) {
     return new vscode.Range(document.positionAt(from), document.positionAt(to));
 }
@@ -77,11 +78,6 @@ function diagnosticDecorationForRange(diagnostics, range) {
     }
     return undefined;
 }
-function hasBlockingDiagnostic(diagnostics, range) {
-    return diagnostics.some((diagnostic) => rangesOverlap(diagnostic.range, range)
-        && (diagnostic.severity === vscode.DiagnosticSeverity.Error
-            || diagnostic.severity === vscode.DiagnosticSeverity.Warning));
-}
 function selectionIntersectsBlock(document, selections, block) {
     for (const selection of selections) {
         const selectionStart = document.offsetAt(selection.start);
@@ -117,7 +113,6 @@ function buildMathHoverMarkdown(block, preview) {
 }
 class NativeMathProvider {
     constructor() {
-        this.lspRunning = false;
         this.openDecoration = vscode.window.createTextEditorDecorationType({
             opacity: '0',
         });
@@ -168,9 +163,6 @@ class NativeMathProvider {
         }
         return new vscode.Hover(markdown, makeRange(document, block.from, block.to));
     }
-    setLspRunning(running) {
-        this.lspRunning = running;
-    }
     findMathBlockAtPosition(document, position) {
         const offset = document.offsetAt(position);
         return (0, blockDetector_1.detectBlocks)(document.getText()).find((block) => (0, mathPreview_1.isMathLikeBlock)(block.kind) && offset >= block.from && offset <= block.to);
@@ -205,13 +197,14 @@ class NativeMathProvider {
         const closeDecorations = [];
         const contentDecorations = [];
         const diagnostics = vscode.languages.getDiagnostics(editor.document.uri);
+        const previewOnHover = config.get('previewOnHover', true);
         for (const block of (0, blockDetector_1.detectBlocks)(editor.document.getText())) {
             const decoration = asDecorationBlock(editor.document, block);
-            const preview = (0, mathPreview_1.buildMathPreview)(block);
-            if (!decoration || !preview) {
+            if (!decoration) {
                 continue;
             }
-            if (hasBlockingDiagnostic(diagnostics, decoration.fullRange)) {
+            const renderPolicy = (0, mathRenderPolicy_1.resolveMathRenderPolicy)(editor.document, block, diagnostics);
+            if (!renderPolicy?.shouldRender || !renderPolicy.preview) {
                 continue;
             }
             if (selectionIntersectsBlock(editor.document, editor.selections, block)) {
@@ -219,10 +212,10 @@ class NativeMathProvider {
             }
             openDecorations.push({
                 range: decoration.openRange,
-                hoverMessage: buildMathHoverMarkdown(block, preview),
+                hoverMessage: previewOnHover ? buildMathHoverMarkdown(block, renderPolicy.preview) : undefined,
                 renderOptions: {
                     before: {
-                        contentText: preview.displayText,
+                        contentText: renderPolicy.preview.displayText,
                         color: new vscode.ThemeColor('editorLineNumber.foreground'),
                         margin: '0 0.25rem 0 0',
                         textDecoration: diagnosticDecorationForRange(diagnostics, decoration.fullRange),
