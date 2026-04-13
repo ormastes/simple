@@ -475,6 +475,7 @@ pub(super) fn eval_collection_expr(
                 }
                 Value::Str(s) => {
                     let raw_idx = require_integer_index_value(&idx_val, "string")?;
+                    let preview: String = s.chars().take(60).collect::<String>().replace('\n', "\\n");
                     // Fast path: if string is ASCII-only, use byte indexing O(1)
                     // instead of chars().nth() which is O(n)
                     if s.is_ascii() {
@@ -489,10 +490,13 @@ pub(super) fn eval_collection_expr(
                         } else {
                             let ctx = ErrorContext::new()
                                 .with_code(codes::INDEX_OUT_OF_BOUNDS)
-                                .with_help(format!("string has {} character(s)", len))
+                                .with_help(format!("string has {} character(s); preview={:?}", len, preview))
                                 .with_note("ensure the index is within bounds");
                             Err(CompileError::semantic_with_context(
-                                format!("string index out of bounds: index is {} but length is {}", raw_idx, len),
+                                format!(
+                                    "string index out of bounds: index is {} but length is {} (preview={:?})",
+                                    raw_idx, len, preview
+                                ),
                                 ctx,
                             ))
                         }
@@ -508,10 +512,13 @@ pub(super) fn eval_collection_expr(
                             // E3002 - Index Out Of Bounds
                             let ctx = ErrorContext::new()
                                 .with_code(codes::INDEX_OUT_OF_BOUNDS)
-                                .with_help(format!("string has {} character(s)", len))
+                                .with_help(format!("string has {} character(s); preview={:?}", len, preview))
                                 .with_note("ensure the index is within bounds");
                             CompileError::semantic_with_context(
-                                format!("string index out of bounds: index is {} but length is {}", raw_idx, len),
+                                format!(
+                                    "string index out of bounds: index is {} but length is {} (preview={:?})",
+                                    raw_idx, len, preview
+                                ),
                                 ctx,
                             )
                         })
