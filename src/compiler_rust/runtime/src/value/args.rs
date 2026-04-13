@@ -18,6 +18,7 @@
 
 use parking_lot::Mutex;
 use std::ffi::CStr;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use super::{rt_array_new, rt_array_push, rt_string_new, RuntimeValue};
 
@@ -28,6 +29,48 @@ use super::{rt_array_new, rt_array_push, rt_string_new, RuntimeValue};
 ///
 /// Uses `parking_lot::Mutex` for lock-free fast path (uncontended case).
 static PROGRAM_ARGS: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
+/// Install-once guard for the parent-death watchdog thread.
+static WATCHDOG_INSTALLED: AtomicBool = AtomicBool::new(false);
+
+/// Install a background thread that exits the process if our parent dies.
+///
+/// Opt-in via `SIMPLE_PARENT_DEATH_EXIT=1`. Polls `getppid()` at 1 Hz and
+/// exits when the original parent is gone (ppid changed, or reparented to
+/// init/launchd = pid 1). Idempotent: subsequent calls are no-ops.
+///
+/// Motivation: MCP server daemons launched by a CLI parent (Claude Code,
+/// codex) must self-terminate when that parent is SIGKILLed. macOS has no
+/// PR_SET_PDEATHSIG, so polling is the portable approach.
+fn install_parent_death_watchdog() {
+    if WATCHDOG_INSTALLED.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    let enabled = std::env::var("SIMPLE_PARENT_DEATH_EXIT")
+        .map(|v| matches!(v.to_lowercase().as_str(), "1" | "true" | "yes" | "on"))
+        .unwrap_or(false);
+    if !enabled {
+        return;
+    }
+    let initial_ppid = unsafe { libc::getppid() };
+    if initial_ppid <= 1 {
+        // Already orphaned or invalid — nothing to watch.
+        return;
+    }
+    let _ = std::thread::Builder::new()
+        .name("simple-parent-death-watchdog".into())
+        .spawn(move || loop {
+            std::thread::sleep(std::time::Duration::from_secs(1));
+            let current_ppid = unsafe { libc::getppid() };
+            if current_ppid == 1 || current_ppid != initial_ppid {
+                eprintln!(
+                    "[simple-runtime] parent died (ppid {} -> {}), exiting",
+                    initial_ppid, current_ppid
+                );
+                std::process::exit(0);
+            }
+        });
+}
 
 /// Set program arguments from argc/argv (called once at startup).
 ///
@@ -54,6 +97,7 @@ static PROGRAM_ARGS: Mutex<Vec<String>> = Mutex::new(Vec::new());
 /// ```
 #[no_mangle]
 pub extern "C" fn rt_set_args(argc: i32, argv: *const *const u8) {
+    install_parent_death_watchdog();
     let mut args = Vec::new();
 
     // Validate inputs
@@ -108,6 +152,7 @@ pub extern "C" fn rt_set_args(argc: i32, argv: *const *const u8) {
 /// rt_set_args_vec(&args);
 /// ```
 pub fn rt_set_args_vec(args: &[String]) {
+    install_parent_death_watchdog();
     *PROGRAM_ARGS.lock() = args.to_vec();
     tracing::debug!(arg_count = args.len(), "Program arguments set from Vec");
 }
