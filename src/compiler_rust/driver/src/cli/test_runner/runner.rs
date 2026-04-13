@@ -712,9 +712,13 @@ fn execute_test_files(
             }
             TestExecutionMode::Interpreter => {
                 // Fast path: use static analysis to count tests.
-                // Interpreter mode doesn't execute `it` block bodies — it only
-                // verifies file loading. Static analysis catches parse errors
-                // and gives accurate test counts without interpreter overhead.
+                //
+                // gh#6 WARNING: Interpreter mode does NOT execute `it` block bodies —
+                // it only parses the file and statically counts `describe`/`it` nodes.
+                // A file full of failing `expect(...)` calls reports PASS under this
+                // path. This is a documented limitation (see .claude/rules/testing.md).
+                // Use SMF or Native mode, or run individual files with `--safe-mode`,
+                // for actual assertion execution.
                 if !options.safe_mode {
                     let mut static_reg = StaticTestRegistry::new();
                     match static_reg.add_file(path) {
@@ -724,6 +728,18 @@ fn execute_test_files(
                                 Some(m) => (m.total_tests.saturating_sub(m.skipped_count), m.skipped_count),
                                 None => (0, 0),
                             };
+                            // gh#6: Loud warning banner — every interpreter-mode test
+                            // run emits this so users cannot mistake a static-count
+                            // PASS for real assertion execution. The banner goes to
+                            // stderr once per file.
+                            eprintln!(
+                                "[WARN gh#6] {}: interpreter mode only STATIC-COUNTS \
+                                 `it` blocks ({} counted); assertion bodies are NOT \
+                                 executed. Failing expect() calls WILL report as PASS. \
+                                 Use SMF/Native mode or --safe-mode for real execution.",
+                                path.display(),
+                                passed + skipped
+                            );
                             TestFileResult {
                                 path: path.to_path_buf(),
                                 passed,
@@ -737,6 +753,7 @@ fn execute_test_files(
                         }
                         Err(e) => {
                             // Parse error — fall back to interpreter for full error reporting
+                            let _ = e;
                             super::execution::run_test_file_with_options(path, options)
                         }
                     }

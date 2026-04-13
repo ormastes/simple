@@ -411,7 +411,18 @@ pub fn run_test_file(path: &Path, options: &super::types::TestOptions) -> TestFi
                 let s = individual_results.iter().filter(|r| r.skipped).count();
                 (p, f, s)
             } else if exit_code == 0 {
-                (1, 0, 0)
+                // gh#6: The file loaded successfully, but the BDD registry is empty —
+                // no describe/it bodies were actually executed (or this file contains no
+                // spec blocks at all). Previously this was silently reported as 1 passed,
+                // which meant a broken spec file with failing expectations would report
+                // PASS. Now we warn loudly and report it as a failure instead.
+                eprintln!(
+                    "[WARN] {}: test file loaded but no `it` blocks were recorded — \
+                     reporting as failure (gh#6). Interpreter mode requires describe/it \
+                     blocks to be evaluated at module top level.",
+                    path.display()
+                );
+                (0, 1, 0)
             } else {
                 (0, 1, 0)
             };
@@ -530,7 +541,15 @@ pub fn run_test_file_safe_mode(path: &Path, options: &super::types::TestOptions)
                 let (p, f) = parse_test_output(&combined_output);
                 if p == 0 && f == 0 {
                     if exit_code == 0 {
-                        (1, 0, 0)
+                        // gh#6: File loaded cleanly but no BDD tests were recorded and
+                        // no "N examples" summary line was found — report as failure
+                        // instead of silently claiming 1 passed.
+                        eprintln!(
+                            "[WARN] {}: test file loaded but no `it` blocks were recorded — \
+                             reporting as failure (gh#6).",
+                            path.display()
+                        );
+                        (0, 1, 0)
                     } else {
                         (0, 1, 0)
                     }
