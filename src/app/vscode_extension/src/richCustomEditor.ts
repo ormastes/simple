@@ -12,25 +12,9 @@ import * as crypto from 'crypto';
 import * as fs from 'fs';
 import * as vscode from 'vscode';
 import { analyzeDocument } from './analysis/simpleAnalysisIndex';
-import { detectBlocks, type BlockKind, type DetectedBlock } from './blockDetector';
-import { parseImageContent, resolveImageUri } from './imageResolver';
-import { resolveMathRenderPolicy } from './mathRenderPolicy';
+import { detectBlocks } from './blockDetector';
+import { createWebviewImageResolver, renderRichBlocks, type RenderableBlock } from './richBlockRendering';
 import type { EditorMarkerState } from './testing/editorMarkers';
-
-// ── Types ────────────────────────────────────────────────────────────
-
-export interface RenderableBlock {
-    kind: BlockKind;
-    from: number;
-    to: number;
-    content: string;
-    prefix: string;
-    renderedHtml: string;
-    imageUri?: string;
-    displayMode: 'inline' | 'block';
-    status: 'ok' | 'error';
-    errorMessage?: string;
-}
 
 interface RichEditorSettings {
     showBlockBorders: boolean;
@@ -88,69 +72,6 @@ type HostMessage =
         markers: RichEditorMarkers;
     }
     | { type: 'error'; message: string };
-
-function escapeForHtml(text: string): string {
-    return text
-        .replace(/&/g, '&amp;')
-        .replace(/</g, '&lt;')
-        .replace(/>/g, '&gt;')
-        .replace(/"/g, '&quot;')
-        .replace(/'/g, '&#039;');
-}
-
-// ── Block rendering ──────────────────────────────────────────────────
-
-function renderDetectedBlocks(
-    blocks: DetectedBlock[],
-    document: vscode.TextDocument,
-    webview: vscode.Webview,
-): RenderableBlock[] {
-    const diagnostics = vscode.languages.getDiagnostics(document.uri);
-
-    return blocks.map(block => {
-        if (block.kind === 'img') {
-            const parsed = parseImageContent(block.content);
-            if (!parsed) {
-                return {
-                    ...block,
-                    renderedHtml: '',
-                    imageUri: undefined,
-                    displayMode: 'block' as const,
-                    status: 'error' as const,
-                    errorMessage: 'Invalid image path',
-                };
-            }
-            const uri = resolveImageUri(parsed.path, document.uri, webview);
-            return {
-                ...block,
-                renderedHtml: '',
-                imageUri: uri ?? undefined,
-                displayMode: 'block' as const,
-                status: uri ? 'ok' as const : 'error' as const,
-                errorMessage: uri ? undefined : `Image not found: ${parsed.path}`,
-            };
-        }
-
-        const renderPolicy = resolveMathRenderPolicy(document, block, diagnostics);
-        if (!renderPolicy?.shouldRender || !renderPolicy.preview) {
-            return {
-                ...block,
-                renderedHtml: '',
-                displayMode: 'inline' as const,
-                status: 'error' as const,
-                errorMessage: renderPolicy?.errorMessage ?? 'Invalid block syntax',
-            };
-        }
-        const label = renderPolicy.preview.displayText;
-        const html = `<span class="cm-math-pretty-text">${escapeForHtml(label)}</span>`;
-        return {
-            ...block,
-            renderedHtml: html,
-            displayMode: 'inline' as const,
-            status: 'ok' as const,
-        };
-    });
-}
 
 function getRichEditorSettings(): RichEditorSettings {
     const config = vscode.workspace.getConfiguration('simple.richEditor');
@@ -353,7 +274,11 @@ export class RichCustomEditorProvider implements vscode.CustomTextEditorProvider
         const postSync = async (): Promise<void> => {
             const text = document.getText();
             const detected = detectBlocks(text);
-            const blocks = renderDetectedBlocks(detected, document, webviewPanel.webview);
+            const blocks = renderRichBlocks({
+                blocks: detected,
+                document,
+                resolveImageUri: createWebviewImageResolver(webviewPanel.webview),
+            });
             const testStates = this.getTestStates?.(document.uri);
             await webviewPanel.webview.postMessage({
                 type: 'sync',

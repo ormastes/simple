@@ -48,62 +48,7 @@ const fs = __importStar(require("fs"));
 const vscode = __importStar(require("vscode"));
 const simpleAnalysisIndex_1 = require("./analysis/simpleAnalysisIndex");
 const blockDetector_1 = require("./blockDetector");
-const imageResolver_1 = require("./imageResolver");
-const mathRenderPolicy_1 = require("./mathRenderPolicy");
-function escapeForHtml(text) {
-    return text
-        .replace(/&/g, '&amp;')
-        .replace(/</g, '&lt;')
-        .replace(/>/g, '&gt;')
-        .replace(/"/g, '&quot;')
-        .replace(/'/g, '&#039;');
-}
-// ── Block rendering ──────────────────────────────────────────────────
-function renderDetectedBlocks(blocks, document, webview) {
-    const diagnostics = vscode.languages.getDiagnostics(document.uri);
-    return blocks.map(block => {
-        if (block.kind === 'img') {
-            const parsed = (0, imageResolver_1.parseImageContent)(block.content);
-            if (!parsed) {
-                return {
-                    ...block,
-                    renderedHtml: '',
-                    imageUri: undefined,
-                    displayMode: 'block',
-                    status: 'error',
-                    errorMessage: 'Invalid image path',
-                };
-            }
-            const uri = (0, imageResolver_1.resolveImageUri)(parsed.path, document.uri, webview);
-            return {
-                ...block,
-                renderedHtml: '',
-                imageUri: uri ?? undefined,
-                displayMode: 'block',
-                status: uri ? 'ok' : 'error',
-                errorMessage: uri ? undefined : `Image not found: ${parsed.path}`,
-            };
-        }
-        const renderPolicy = (0, mathRenderPolicy_1.resolveMathRenderPolicy)(document, block, diagnostics);
-        if (!renderPolicy?.shouldRender || !renderPolicy.preview) {
-            return {
-                ...block,
-                renderedHtml: '',
-                displayMode: 'inline',
-                status: 'error',
-                errorMessage: renderPolicy?.errorMessage ?? 'Invalid block syntax',
-            };
-        }
-        const label = renderPolicy.preview.displayText;
-        const html = `<span class="cm-math-pretty-text">${escapeForHtml(label)}</span>`;
-        return {
-            ...block,
-            renderedHtml: html,
-            displayMode: 'inline',
-            status: 'ok',
-        };
-    });
-}
+const richBlockRendering_1 = require("./richBlockRendering");
 function getRichEditorSettings() {
     const config = vscode.workspace.getConfiguration('simple.richEditor');
     return {
@@ -278,7 +223,11 @@ class RichCustomEditorProvider {
         const postSync = async () => {
             const text = document.getText();
             const detected = (0, blockDetector_1.detectBlocks)(text);
-            const blocks = renderDetectedBlocks(detected, document, webviewPanel.webview);
+            const blocks = (0, richBlockRendering_1.renderRichBlocks)({
+                blocks: detected,
+                document,
+                resolveImageUri: (0, richBlockRendering_1.createWebviewImageResolver)(webviewPanel.webview),
+            });
             const testStates = this.getTestStates?.(document.uri);
             await webviewPanel.webview.postMessage({
                 type: 'sync',

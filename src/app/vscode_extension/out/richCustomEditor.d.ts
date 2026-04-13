@@ -8,20 +8,7 @@
  * - Bi-directional sync with VSCode TextDocument
  */
 import * as vscode from 'vscode';
-import { type BlockKind } from './blockDetector';
 import type { EditorMarkerState } from './testing/editorMarkers';
-export interface RenderableBlock {
-    kind: BlockKind;
-    from: number;
-    to: number;
-    content: string;
-    prefix: string;
-    renderedHtml: string;
-    imageUri?: string;
-    displayMode: 'inline' | 'block';
-    status: 'ok' | 'error';
-    errorMessage?: string;
-}
 export declare class RichCustomEditorProvider implements vscode.CustomTextEditorProvider {
     private readonly extensionUri;
     private readonly onActiveDocument?;
