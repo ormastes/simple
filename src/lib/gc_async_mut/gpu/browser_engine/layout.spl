@@ -122,7 +122,7 @@ fn layout_node(node: BeDomNode, container: BeLayoutBox, parent_style: StyleProps
     if disp == "flex":
         return layout_flex(node, container, s)
     if be_dom_get_is_text(node):
-        return layout_text(node, container)
+        return layout_text(node, container, parent_style)
     _ld("[LN] calling layout_block")
     return layout_block(node, container, s)
 
@@ -614,13 +614,23 @@ fn get_layout_font_renderer() -> FontRenderer:
     _layout_font_renderer = r
     r
 
-fn layout_text(node: BeDomNode, container: BeLayoutBox) -> BeLayoutBox:
+fn layout_text(node: BeDomNode, container: BeLayoutBox, parent_style: StyleProps) -> BeLayoutBox:
     """Lay out a text node using font renderer metrics.
     Uses vector/bitmap font with proportional width when available.
+
+    Text nodes don't carry their own computed font_size (they keep the
+    default 16), so use the parent element's font_size — which is the
+    CSS-inheritable value the text actually renders at.
     """
     val ns = be_dom_get_style(node)
-    val font_size = ns.font_size
-    val line_h = text_line_height(font_size)
+    val font_size = parent_style.font_size
+    # CSS "line-height: normal" ≈ 1.2×font-size. text_line_height() returns
+    # a flat 18 for any fs > 8 which massively over-sizes small-font blocks
+    # and pushes ancestor borders down. Use font-proportional metrics.
+    val line_h = if font_size <= 8:
+        text_line_height(font_size)
+    else:
+        font_size + font_size / 5  # 1.2× (floor)
 
     # Use font renderer for proportional width measurement
     var renderer = get_layout_font_renderer()
