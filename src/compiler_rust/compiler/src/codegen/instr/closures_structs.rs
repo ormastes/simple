@@ -1,6 +1,6 @@
 // Closure and struct initialization helpers.
 
-use cranelift_codegen::ir::{types, AbiParam, InstBuilder, MemFlags, Signature};
+use cranelift_codegen::ir::{types, AbiParam, InstBuilder, MemFlags, Opcode, Signature};
 use cranelift_frontend::FunctionBuilder;
 use cranelift_module::{Linkage, Module};
 
@@ -11,6 +11,24 @@ use super::super::shared::platform_call_conv;
 use super::super::types_util::type_id_to_cranelift;
 use super::helpers::{adapted_call, create_string_constant, get_vreg_or_default, indirect_call_with_result};
 use super::{InstrContext, InstrResult};
+
+fn log_zeroish_value<M: Module>(
+    ctx: &InstrContext<'_, M>,
+    builder: &FunctionBuilder,
+    label: &str,
+    value: cranelift_codegen::ir::Value,
+) {
+    let Some(inst) = builder.func.dfg.value_def(value).inst() else {
+        return;
+    };
+    if builder.func.dfg.insts[inst].opcode() != Opcode::Iconst {
+        return;
+    }
+    let rendered = builder.func.dfg.display_value_inst(value).to_string();
+    if rendered.ends_with(" 0") {
+        eprintln!("[WARN] {}: {} -> {}", ctx.func.name, label, rendered);
+    }
+}
 
 pub(crate) fn compile_closure_create<M: Module>(
     ctx: &mut InstrContext<'_, M>,
@@ -83,6 +101,10 @@ pub(crate) fn compile_closure_create<M: Module>(
                     builder.ins().store(MemFlags::new(), fn_addr, closure_ptr, 0);
                 }
                 Err(_) => {
+                    eprintln!(
+                        "[WARN] {}: closure target '{}' resolved to a declaration failure; storing NULL fn ptr",
+                        ctx.func.name, func_name
+                    );
                     let null = builder.ins().iconst(types::I64, 0);
                     builder.ins().store(MemFlags::new(), null, closure_ptr, 0);
                 }
@@ -132,6 +154,12 @@ pub(crate) fn compile_indirect_call<M: Module>(
     let sig_ref = builder.import_signature(sig);
 
     let mut call_args = vec![closure_ptr];
+    log_zeroish_value(
+        ctx,
+        builder,
+        &format!("indirect callee '{}' lowered to a zero-like value", ctx.func.name),
+        closure_ptr,
+    );
     for arg in args {
         call_args.push(get_vreg_or_default(ctx, builder, arg));
     }

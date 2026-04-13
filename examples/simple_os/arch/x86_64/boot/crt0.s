@@ -196,7 +196,16 @@ long_mode_entry:
     /* Pass multiboot info pointer as first arg (rdi) -- zero-extend ESI */
     movl %esi, %edi
 
-    /* Call Simple compiler entry point */
+    /* Marker: reached the C handoff point. */
+    movw $0x3FD, %dx
+.handoff_wait: inb %dx, %al
+    testb $0x20, %al
+    jz .handoff_wait
+    movw $0x3F8, %dx
+    movb $'>', %al
+    outb %al, %dx
+
+    /* Call the assembly startup wrapper */
     call _start
 
     /* Halt if it returns */
@@ -204,6 +213,20 @@ long_mode_entry:
     cli
     hlt
     jmp .halt64
+
+/* Assembly wrapper around the C boot stub.
+ * This separates "entered _start wrapper" from "entered C _start body".
+ */
+.align 16
+_start:
+    movw $0x3FD, %dx
+.start_wait: inb %dx, %al
+    testb $0x20, %al
+    jz .start_wait
+    movw $0x3F8, %dx
+    movb $'@', %al
+    outb %al, %dx
+    jmp _start_c
 
 /* Recoverable fault handler: prints fault address and returns RAX=0x3 (nil).
  *
@@ -230,6 +253,15 @@ _fault_handler:
     pushq %rdx
     pushq %rcx
     pushq %rsi
+
+    /* Marker: entered the fault path before the report loop. */
+    movw $0x3FD, %dx
+.fault_mark_wait: inb %dx, %al
+    testb $0x20, %al
+    jz .fault_mark_wait
+    movw $0x3F8, %dx
+    movb $'!', %al
+    outb %al, %dx
 
     /* Wait for UART TX ready then send char — inline for each byte */
     movw $0x3FD, %dx
