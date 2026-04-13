@@ -195,6 +195,44 @@ fn get_tools_test_target() -> OsTarget:
         gui_mode: false
     )
 
+fn get_browser_soft_target() -> OsTarget:
+    """Returns the x86_64 wrapper target for the browser software smoke test.
+
+    The x86_64 baremetal build is post-processed to ELF32 so QEMU -kernel
+    can boot the multiboot image.
+    """
+    OsTarget(
+        arch: Architecture.X86_64,
+        entry: "examples/simple_os/arch/x86_64/browser_soft_entry.spl",
+        linker_script: "examples/simple_os/arch/x86_64/linker.ld",
+        target_triple: "x86_64-unknown-none",
+        output: "build/os/simpleos_browser_soft_32.elf",
+        qemu_system: "qemu-system-x86_64",
+        qemu_machine: "q35",
+        qemu_cpu: "qemu64",
+        qemu_memory: "256M",
+        qemu_bios: "",
+        qemu_extra: ["-device", "isa-debug-exit,iobase=0xf4,iosize=0x04"],
+        gui_mode: false
+    )
+
+fn get_desktop_browser_target() -> OsTarget:
+    """Returns the x86_64 wrapper target for Browser Demo desktop E2E."""
+    OsTarget(
+        arch: Architecture.X86_64,
+        entry: "examples/simple_os/arch/x86_64/desktop_e2e_entry.spl",
+        linker_script: "examples/simple_os/arch/x86_64/linker.ld",
+        target_triple: "x86_64-unknown-none",
+        output: "build/os/simpleos_desktop_e2e_32.elf",
+        qemu_system: "qemu-system-x86_64",
+        qemu_machine: "q35",
+        qemu_cpu: "qemu64",
+        qemu_memory: "512M",
+        qemu_bios: "",
+        qemu_extra: ["-device", "isa-debug-exit,iobase=0xf4,iosize=0x04"],
+        gui_mode: false
+    )
+
 fn get_all_targets() -> [OsTarget]:
     """Returns all 6 architecture targets."""
     [
@@ -257,8 +295,22 @@ fn build_os(target: OsTarget) -> bool:
         "-o", target.output,
         "--linker-script", target.linker_script
     ]
-    print "[build] {arch_display_name(target.arch)}: bin/simple {args.join(" ")}"
-    val (stdout, stderr, exit_code) = rt_process_run_timeout("bin/simple", args, 60000)
+    val objcopy_prefix = _objcopy_path_prefix()
+    if objcopy_prefix == "":
+        print "[build] {arch_display_name(target.arch)}: bin/simple {args.join(" ")}"
+        val (stdout, stderr, exit_code) = rt_process_run_timeout("bin/simple", args, 60000)
+        if exit_code != 0:
+            print "[build] FAILED (exit code {exit_code})"
+            if stdout != "":
+                print "[build] stdout: {stdout}"
+            if stderr != "":
+                print "[build] stderr: {stderr}"
+            return false
+        return true
+
+    val shell_cmd = "PATH=\"{objcopy_prefix}:$PATH\" bin/simple {args.join(" ")}"
+    print "[build] {arch_display_name(target.arch)}: {shell_cmd}"
+    val (stdout, stderr, exit_code) = rt_process_run_timeout("/bin/sh", ["-c", shell_cmd], 60000)
     if exit_code != 0:
         print "[build] FAILED (exit code {exit_code})"
         if stdout != "":
@@ -267,6 +319,13 @@ fn build_os(target: OsTarget) -> bool:
             print "[build] stderr: {stderr}"
         return false
     true
+
+fn _objcopy_path_prefix() -> text:
+    if rt_file_exists("/opt/homebrew/opt/llvm/bin/llvm-objcopy"):
+        return "/opt/homebrew/opt/llvm/bin"
+    if rt_file_exists("/usr/local/opt/llvm/bin/llvm-objcopy"):
+        return "/usr/local/opt/llvm/bin"
+    ""
 
 # ===========================================================================
 # QEMU Command Construction

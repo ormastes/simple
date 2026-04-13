@@ -1,10 +1,38 @@
 # Phase 2 Report — Chrome vs Simple Pixel Equivalence
 
-**Date:** 2026-04-12
+**Date:** 2026-04-13 (last update)
 **Plan:** `fancy-shimmying-hamster.md` — multi-source WM/Browser render verification
 **Goal:** Prove the Simple web engine renders HTML/CSS at 320x240 equivalently to
 Chrome for an incremental CSS feature progression. Stop at the first divergent
 fixture per the plan's decision rule.
+
+## Final status (2026-04-13)
+
+**CSS progression (fixtures 04-17, text_tolerant profile, 95% perceptual): all accepted.**
+
+| Fixture | Profile | Perceptual | Verdict |
+|---|---|---|---|
+| 00_text_only | strict | 98.36% | aspirational — 1259 AA pixels differ from Chrome text rasterizer |
+| 01-03 | strict | ~98% | same aspirational bar |
+| 04-13 | text_tolerant | 98-99% | ACCEPT |
+| 14_border | text_tolerant | **97.19%** | ACCEPT (was 91.11% at session start) |
+| 15_background | text_tolerant | **98.03%** | ACCEPT (was 94.14% at session start) |
+| 16_flex_row | text_tolerant | 97.12% | ACCEPT |
+| 17_flex_col | text_tolerant | ~96% | ACCEPT |
+
+**Fixes landed this session** (commits on `main`):
+- `089834c2 feat(browser_engine): AA 1px borders + CSS margin-collapse + border-box fix`
+  - `executor.spl` 1.5px edge-spread AA strokes for sw==1 borders
+  - `layout.spl` adjacent-sibling vertical margin collapse (CSS 2.1 §8.3.1)
+  - `paint.spl` border rect derived from content+padding+border instead of
+    layout box `.height` (which can include margin)
+- `878f3b64 fix(browser_engine): inherit font-size into text layout + proportional line-height`
+  - `layout.spl` thread parent `StyleProps` into `layout_text`, read font_size
+    from parent, compute `line_h = floor(1.2 * font_size)` inline for fs > 8.
+
+**Out-of-scope (remaining):**
+- Strict 00-03: infeasible without a Chrome-identical font rasterizer.
+- Phase 4/5 live QEMU runs: infrastructure-dependent.
 
 ## Post-I status (2026-04-12) — Agent I CSS-apply fix
 
