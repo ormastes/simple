@@ -13,6 +13,8 @@ use common.render_scene.engine_float.{FloatEffectEngine, float_effect_engine}
 use common.display_protocol.display_protocol.{DamageRect, damage_rect}
 use common.text_layout.font_renderer.{FontRenderer, blit_glyph}
 
+extern fn rt_env_get(key: text) -> text
+
 # ============================================================================
 # Effect engine selection
 # ============================================================================
@@ -535,6 +537,19 @@ fn get_font_renderer() -> FontRenderer:
     if val Some(r) = _font_renderer:
         return r
     val r = FontRenderer.new()
+    # SFFI TTF opt-in: when both SIMPLE_TTF_DYLIB and SIMPLE_TTF_PATH are
+    # set, load the Phase 1/2 spl_fonts dylib and enable the TrueType path.
+    # Failure silently falls through to vector/bitmap (same as before).
+    val ttf_dylib = rt_env_get("SIMPLE_TTF_DYLIB")
+    val ttf_path = rt_env_get("SIMPLE_TTF_PATH")
+    if ttf_dylib != nil and ttf_dylib != "" and ttf_path != nil and ttf_path != "":
+        val ok = r.try_enable_ttf(ttf_dylib, ttf_path)
+        val dbg = rt_env_get("SIMPLE_TTF_DEBUG")
+        if dbg != nil and dbg != "":
+            if ok:
+                print("[executor] ttf enabled")
+            else:
+                print("[executor] ttf unavailable, using fallback")
     _font_renderer = r
     r
 
@@ -572,7 +587,14 @@ fn execute_scene_to_buffer(scene: RenderScene, buffer: [u32], buf_w: i32, buf_h:
             draw_stroke_rect(buffer, buf_w, buf_h, cmd.x, cmd.y, cmd.width, cmd.height, cmd.color, sw, clip_stack)
 
         if cmd.kind == "text":
-            draw_text_to_buffer(buffer, buf_w, buf_h, cmd.x, cmd.y, cmd.text_val, cmd.color, clip_stack)
+            # Route through FontRenderer when SFFI TTF is opt-in enabled; else
+            # keep the legacy 8x16 bitmap path for backward compatibility.
+            val _ttf_dy = rt_env_get("SIMPLE_TTF_DYLIB")
+            if _ttf_dy != nil and _ttf_dy != "":
+                val _fs = if cmd.font_size > 0: cmd.font_size else: 16
+                draw_text_scaled(buffer, buf_w, buf_h, cmd.x, cmd.y, cmd.text_val, cmd.color, _fs, clip_stack)
+            else:
+                draw_text_to_buffer(buffer, buf_w, buf_h, cmd.x, cmd.y, cmd.text_val, cmd.color, clip_stack)
 
         if cmd.kind == "line":
             # x/y = start, width/height = end point
