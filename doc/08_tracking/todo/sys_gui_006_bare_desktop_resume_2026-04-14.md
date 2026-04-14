@@ -5,6 +5,18 @@ TWO upstream regressions, not one. The Round-7 single-bug story was
 optimistic — γ's parser fix alone is insufficient, and the live lane
 that used to reach `desktop-ready` regressed.
 
+> **Round-10 update (2026-04-14):** Blocker 1 below is now **CLEARED** by
+> commit `e516e2a0f484 fix(interpreter): add GLOBAL_ENUMS fallback for
+> cross-module enum variant lookup`. Verified by re-running the spec
+> from `/home/ormastes/dev/pub/simple` — zero `method \`X86_64\` not found`
+> errors, kernel build `it{}` passes (`phase=native-build OK`,
+> ~33s elapsed). Blocker 2 (`launcher:fail registered=0` before
+> `desktop-ready`) remains active; it gates the live-lane `it{}` via the
+> `wait_for_serial_marker(..., "[desktop-e2e] desktop-ready", 60000)` in
+> the spec. See
+> `doc/08_tracking/todo/sys_gui_006_round10_status_2026-04-14.md` for
+> evidence and Blocker 2 handoff instructions.
+
 ## One-command retry
 
 Once both blockers below are cleared, a single command records and
@@ -23,7 +35,16 @@ must also exceed 95% — otherwise the capture is non-deterministic and
 must be investigated (masking the unstable region via tolerance profile
 or freezing the clock/cursor at boot), NOT masked by lowering the gate.
 
-## Blocker 1 — Interpreter `std.spec` load chain still broken
+## Blocker 1 — Interpreter `std.spec` load chain still broken  [CLEARED 2026-04-14, Round-10]
+
+> **Round-10 status:** CLEARED by commit `e516e2a0f484`. The fix added a
+> `GLOBAL_ENUMS` fallback in the interpreter's enum variant lookup
+> (`src/compiler_rust/compiler/src/interpreter/expr/calls.rs:428`,
+> `src/compiler_rust/compiler/src/interpreter_call/mod.rs:302,454,676`,
+> populated from `interpreter_call/block_execution.rs:595-596,1069-1070`)
+> so cross-module enum references resolve even when the defining
+> module is loaded out of order. The historical analysis below is
+> retained for archival reference.
 
 **Territory:** Agent γ / Z2 (`src/compiler_rust/**`)
 

@@ -6,6 +6,17 @@
 **Tag:** `@tag:pending_until_shortcut_fix`
 **Status at 2026-04-14:** PENDING — blockers not landed during Agent zeta's slice
 
+> **Round-10 update (2026-04-14):** The shared interpreter blocker
+> (`semantic: method X86_64 not found on type Architecture`) is now
+> **CLEARED** by commit `e516e2a0f484 fix(interpreter): add GLOBAL_ENUMS
+> fallback for cross-module enum variant lookup`. The with-apps spec is
+> still PENDING because the live-boot blockers below (shortcut:fail /
+> launcher:fail) remain active and still gate
+> `[desktop-e2e] remote-grouping:ok`. See
+> `doc/08_tracking/todo/sys_gui_006_round10_status_2026-04-14.md` for
+> the bare-lane verification evidence and Blocker 2 handoff details —
+> the same OS-side fix will unblock both variants.
+
 ## Blockers (from Agents alpha + beta)
 
 Both blockers must land before this spec can capture a real baseline:
@@ -25,6 +36,10 @@ In addition, on 2026-04-14 the spec fails in interpreter mode with
 error, so this is a shared upstream state that the blocker fixes are
 expected to clear along with the live boot. Do NOT try to fix it from the
 with-apps spec side.
+
+> **Round-10 update:** The `Architecture.X86_64` interpreter error
+> described in the preceding paragraph is CLEARED on `main@origin`. The
+> live-boot blockers #1 and #2 above remain active.
 
 ## Tolerance Profile Decision
 

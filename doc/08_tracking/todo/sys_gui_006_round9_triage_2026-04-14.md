@@ -6,6 +6,12 @@
 tickets (SYS-GUI-007 disk lane, SYS-GUI-008 virtio-gpu baseline) can
 make forward progress without waiting on a single monolithic resume.
 
+> **Round-10 update (2026-04-14):** Blocker 1 below is now **CLEARED** by
+> commit `e516e2a0f484 fix(interpreter): add GLOBAL_ENUMS fallback for
+> cross-module enum variant lookup` on `main@origin`. Blocker 2 remains
+> active. See `doc/08_tracking/todo/sys_gui_006_round10_status_2026-04-14.md`
+> for the verification evidence and OS-side handoff.
+
 This note supersedes nothing. It sits alongside:
 
 - `doc/08_tracking/todo/sys_gui_006_bare_desktop_resume_2026-04-14.md`
@@ -34,10 +40,19 @@ close the gate. SYS-GUI-008 must either:
 
 ## Blocker state (re-verified against round-13 working copy)
 
-### Blocker 1 — Interpreter semantic cascade on `Architecture.X86_64`
+### Blocker 1 — Interpreter semantic cascade on `Architecture.X86_64`  [CLEARED 2026-04-14, Round-10]
+
+> **Round-10 status:** CLEARED by `e516e2a0f484`. Verified by running
+> `bin/simple test test/system/simpleos_desktop_framebuffer_spec.spl --mode interpreter`
+> from `/home/ormastes/dev/pub/simple`: zero occurrences of
+> `method \`X86_64\` not found`, `build_os(target)` succeeds
+> (`phase=native-build OK elapsed_ms≈33s`), first `it{}` passes.
+> The `std.spec.*` export warnings still emit at module-load but no
+> longer cascade into a hard semantic failure. Historical context
+> retained below for archival reference.
 
 - **Territory:** `src/compiler_rust/**` (Agent γ / Z2).
-- **Symptom:**
+- **Symptom (historical):**
   `bin/simple test test/system/simpleos_desktop_framebuffer_spec.spl --mode interpreter`
   emits ~60 "Export statement references undefined symbol" warnings
   from `std.spec.*`, then hard-fails at
