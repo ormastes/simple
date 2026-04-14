@@ -142,6 +142,7 @@ mod tests {
         let module = MirModule {
             name: Some("test_empty".to_string()),
             functions: vec![],
+            ..MirModule::default()
         };
 
         let result = backend.compile(&module);
@@ -164,6 +165,7 @@ mod tests {
         let module = MirModule {
             name: Some("my_gpu_module".to_string()),
             functions: vec![],
+            ..MirModule::default()
         };
 
         let result = backend.compile(&module);
@@ -178,6 +180,7 @@ mod tests {
         let module = MirModule {
             name: Some("test_multi".to_string()),
             functions: vec![],
+            ..MirModule::default()
         };
 
         // Compile same module multiple times
@@ -201,6 +204,7 @@ mod tests {
         let module = MirModule {
             name: Some("test_header".to_string()),
             functions: vec![],
+            ..MirModule::default()
         };
 
         let spirv = backend.compile(&module).unwrap();
@@ -264,6 +268,7 @@ mod tests {
         let module = MirModule {
             name: Some("determinism_test".to_string()),
             functions: vec![],
+            ..MirModule::default()
         };
 
         let spirv1 = backend1.compile(&module).unwrap();
@@ -283,6 +288,7 @@ mod tests {
         let module = MirModule {
             name: Some("size_test".to_string()),
             functions: vec![],
+            ..MirModule::default()
         };
 
         let spirv = backend.compile(&module).unwrap();

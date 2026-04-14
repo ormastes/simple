@@ -315,6 +315,11 @@ pub struct MirModule {
     /// These are globals that hold function pointers and need special handling
     /// in the codegen to initialize with the function's import address.
     pub extern_fn_names: std::collections::HashSet<String>,
+    /// Vtable impl records: one entry per `impl Trait for Struct` in this module.
+    /// Each entry is (struct_name, vtable_symbol, method_fn_names_in_slot_order).
+    /// vtable_symbol = "__vtable__StructName__for__TraitName"
+    /// method_fn_names_in_slot_order = function names ordered by vtable slot index.
+    pub vtable_impls: Vec<(String, String, Vec<String>)>,
 }
 
 impl MirModule {
@@ -327,6 +332,7 @@ impl MirModule {
             global_init_strings: std::collections::HashMap::new(),
             local_globals: std::collections::HashSet::new(),
             extern_fn_names: std::collections::HashSet::new(),
+            vtable_impls: Vec::new(),
         }
     }
 }
