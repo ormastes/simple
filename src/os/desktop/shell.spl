@@ -21,6 +21,7 @@ use os.services.wm.wm_service.{WmService, WmAction}
 use os.services.launcher.launcher.{
     launcher_init, launcher_launch, launcher_shortcut_dispatch, launcher_register, launcher_terminate,
     launcher_get_app_name, launcher_get_process_app_index, launcher_get_process_app_id_for_pid,
+    launcher_get_app_launch_state, launcher_find_by_name,
     launcher_get_process_count, launcher_get_process_name, launcher_get_process_pid,
     launcher_get_process_state, launcher_get_process_window_count, launcher_get_process_is_headless,
     launcher_note_window_opened, launcher_note_window_closed, launcher_poll_processes, MOD_META
@@ -32,7 +33,7 @@ use os.apps.calculator.calculator.{Calculator}
 use os.apps.clock.clock.{ClockApp}
 use os.apps.terminal.terminal.{Terminal}
 use os.apps.hello_world.hello_world.{HelloWorldApp}
-use os.apps.browser_demo.browser_demo.{BrowserDemoApp}
+use os.apps.browser_demo.browser_demo.{BrowserDemoApp, render_demo_stats}
 use os.apps.editor.editor.{TextEditor}
 use os.apps.memo.memo.{MemoApp}
 use os.apps.paint.paint.{PaintApp}
@@ -68,6 +69,93 @@ val APP_LAUNCHER_WIDTH: i32 = 200
 val APP_LAUNCHER_HEIGHT: i32 = 300
 val CLOCK_WIDTH: i32 = 80
 val SYSTEM_TRAY_WIDTH: i32 = 120
+val APP_ID_BROWSER_DEMO: text = "/sys/apps/browser_demo"
+val APP_ID_HELLO_WORLD: text = "/sys/apps/hello_world"
+val APP_ID_FILE_MANAGER: text = "/sys/apps/file_manager"
+val APP_ID_SHELL: text = "/sys/apps/shell"
+
+fn _resident_app_id(name: text) -> text:
+    match name:
+        case "Browser Demo":
+            APP_ID_BROWSER_DEMO
+        case "Hello World":
+            APP_ID_HELLO_WORLD
+        case "File Manager":
+            APP_ID_FILE_MANAGER
+        case "Terminal":
+            APP_ID_SHELL
+        case _:
+            ""
+
+fn _materialize_resident_manifest_launch(shell: DesktopShell, name: text, pid: u64) -> bool:
+    """Create packaged app windows in the shell/compositor for resident launches."""
+    val app_id = _resident_app_id(name)
+    if app_id == "":
+        return false
+
+    match name:
+        case "Browser Demo":
+            val (node_count, pixel_count) = render_demo_stats(600, 400)
+            serial_println("[shell] resident-launch app={name} pid={pid} nodes={node_count} pixels={pixel_count}")
+            val main_tree = build_tree_with_title(column("browser_demo_remote_root", [
+                text_widget("browser_demo_title", "Browser Demo"),
+                text_widget("browser_demo_body", "app_id: {app_id}\nwindow: main\nnodes: {node_count}\npixels: {pixel_count}")
+            ]), "Browser Demo", "dark")
+            val inspector_tree = build_tree_with_title(column("browser_demo_remote_inspector_root", [
+                text_widget("browser_demo_inspector_title", "Browser Demo Inspector"),
+                text_widget("browser_demo_inspector_body", "app_id: {app_id}\nwindow: secondary\nnodes: {node_count}\npixels: {pixel_count}")
+            ]), "Browser Demo Inspector", "dark")
+            val main_wid = shell.compositor.create_window_with_tree("Browser Demo", 120, 90, 460, 260, main_tree)
+            if main_wid == 0:
+                return false
+            val inspector_wid = shell.compositor.create_window_with_tree("Browser Demo Inspector", 620, 120, 320, 220, inspector_tree)
+            if inspector_wid == 0:
+                return false
+            shell.compositor.set_window_identity(main_wid, pid, app_id)
+            shell.compositor.set_window_identity(inspector_wid, pid, app_id)
+            shell.wm.register_window_owner_with_identity(main_wid, 0, pid, app_id)
+            shell.wm.register_window_owner_with_identity(inspector_wid, 0, pid, app_id)
+            launcher_note_window_opened(pid)
+            launcher_note_window_opened(pid)
+            true
+        case "Hello World":
+            val tree = build_tree_with_title(column("hello_world_remote_root", [
+                text_widget("hello_world_title", "Hello World"),
+                text_widget("hello_world_body", "This window was loaded from the packaged disk manifest.")
+            ]), "Hello World", "dark")
+            val wid = shell.compositor.create_window_with_tree("Hello World", 80, 80, 420, 220, tree)
+            if wid == 0:
+                return false
+            shell.compositor.set_window_identity(wid, pid, app_id)
+            shell.wm.register_window_owner_with_identity(wid, 0, pid, app_id)
+            launcher_note_window_opened(pid)
+            true
+        case "File Manager":
+            val tree = build_tree_with_title(column("file_manager_remote_root", [
+                text_widget("file_manager_title", "File Manager"),
+                text_widget("file_manager_body", "/\n  bin/\n  etc/\n  home/\n  usr/")
+            ]), "File Manager", "dark")
+            val wid = shell.compositor.create_window_with_tree("File Manager", 100, 100, 640, 400, tree)
+            if wid == 0:
+                return false
+            shell.compositor.set_window_identity(wid, pid, app_id)
+            shell.wm.register_window_owner_with_identity(wid, 0, pid, app_id)
+            launcher_note_window_opened(pid)
+            true
+        case "Terminal":
+            val tree = build_tree_with_title(column("shell_remote_root", [
+                text_widget("shell_title", "SimpleOS Shell"),
+                text_widget("shell_body", "$ ")
+            ]), "Terminal", "dark")
+            val wid = shell.compositor.create_window_with_tree("Terminal", 80, 80, 600, 360, tree)
+            if wid == 0:
+                return false
+            shell.compositor.set_window_identity(wid, pid, app_id)
+            shell.wm.register_window_owner_with_identity(wid, 0, pid, app_id)
+            launcher_note_window_opened(pid)
+            true
+        case _:
+            false
 
 # ============================================================================
 # Keyboard Shortcut
@@ -255,7 +343,10 @@ impl DesktopShell:
         val pid = launcher_launch(name)
         if _app_uses_remote_window(name):
             if pid >= 0:
-                serial_println("[shell] launch_app: waiting for remote window from {name} (PID {pid.to_u64()})")
+                if self.materialize_resident_launch(name, pid.to_u64()):
+                    serial_println("[shell] launch_app: materialized resident launch for {name} (PID {pid.to_u64()})")
+                else:
+                    serial_println("[shell] launch_app: waiting for remote window from {name} (PID {pid.to_u64()})")
             else:
                 serial_println("[shell] launch_app: launcher spawn failed for {name}")
         else:
@@ -289,6 +380,20 @@ impl DesktopShell:
             self.close_launcher()
 
         self.update_taskbar()
+
+    me materialize_resident_launch(name: text, pid: u64) -> bool:
+        """Materialize a packaged resident app into compositor-owned windows."""
+        val app_idx = launcher_find_by_name(name)
+        if app_idx < 0:
+            serial_println("[shell] resident-launch missing app={name} pid={pid}")
+            return false
+        if launcher_get_app_launch_state(app_idx.to_u64()) != "resident-manifest":
+            serial_println("[shell] resident-launch skipped app={name} pid={pid} state={launcher_get_app_launch_state(app_idx.to_u64())}")
+            return false
+        val launched = _materialize_resident_manifest_launch(self, name, pid)
+        if launched:
+            serial_println("[shell] resident-launch materialized app={name} pid={pid}")
+        launched
 
     me handle_shortcut(modifier: text, key: text, baremetal: bool):
         """Match a modifier+key combination against registered shortcuts.

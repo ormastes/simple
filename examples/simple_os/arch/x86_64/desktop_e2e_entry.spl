@@ -142,7 +142,10 @@ fn desktop_e2e_main() -> bool:
     # same code path the input handler uses for real keyboard events.
     val dispatched = launcher_shortcut_dispatch(KEY_B, META_MODIFIER)
     var browser_local_fallback = false
+    var browser_resident_manifest = false
     var browser_pid: u64 = launcher_get_pid(BROWSER_APP_INDEX)
+    if browser_pid == 0:
+        browser_pid = launcher_get_process_pid(BROWSER_PROCESS_SLOT)
     if not dispatched:
         if not _launch_browser_demo_local(shell):
             serial_println("[desktop-e2e] shortcut:fail")
@@ -151,12 +154,18 @@ fn desktop_e2e_main() -> bool:
         browser_pid = LOCAL_BROWSER_PID
         serial_println("[desktop-e2e] shortcut:ok key=meta+b app=browser_demo mode=local-fallback")
     else:
-        serial_println("[desktop-e2e] shortcut:ok key=meta+b app=browser_demo")
+        if browser_pid > 0 and shell.materialize_resident_launch("Browser Demo", browser_pid):
+            browser_resident_manifest = true
+            serial_println("[desktop-e2e] shortcut:ok key=meta+b app=browser_demo mode=resident-manifest")
+        else:
+            serial_println("[desktop-e2e] shortcut:ok key=meta+b app=browser_demo")
 
     # The shell owns the compositor + wm services; drain its WM action queue
     # so the launcher spawn is observable as a wm join on the real path.
     shell.drain_wm_actions()
-    if browser_pid == 0 or not launcher_is_running(BROWSER_APP_INDEX):
+    if browser_resident_manifest:
+        serial_println("[desktop-e2e] wm:ok pid={browser_pid} app={BROWSER_APP_ID} mode=resident-manifest")
+    elif browser_pid == 0 or not launcher_is_running(BROWSER_APP_INDEX):
         if browser_local_fallback:
             serial_println("[desktop-e2e] wm:ok pid={browser_pid} app={BROWSER_APP_ID} mode=local-fallback")
         elif not _launch_browser_demo_local(shell):
@@ -177,6 +186,11 @@ fn desktop_e2e_main() -> bool:
     # body for SYS-GUI-007.
     val hello_dispatched = launcher_shortcut_dispatch(KEY_H, META_MODIFIER)
     if hello_dispatched:
+        var hello_pid = launcher_get_pid(0)
+        if hello_pid == 0:
+            hello_pid = launcher_get_process_pid(1)
+        if hello_pid > 0:
+            shell.materialize_resident_launch("Hello World", hello_pid)
         serial_println("[desktop-e2e] hello:shortcut:ok key=meta+h app=hello_world")
     else:
         serial_println("[desktop-e2e] hello:shortcut:fail")
