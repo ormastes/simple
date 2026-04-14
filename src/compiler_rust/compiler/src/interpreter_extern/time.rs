@@ -354,6 +354,25 @@ pub fn rt_time_ms_fn(_args: &[Value]) -> Result<Value, CompileError> {
     Ok(Value::Float(ms))
 }
 
+/// Sleep for the given number of milliseconds
+///
+/// Callable from Simple as: `rt_sleep_ms(ms)`
+///
+/// # Arguments
+/// * `args` - One i64 argument: number of milliseconds to sleep
+///
+/// # Returns
+/// * `Value::Nil`
+pub fn rt_sleep_ms(args: &[Value]) -> Result<Value, CompileError> {
+    use std::time::Duration;
+    let ms = match args.first() {
+        Some(Value::Int(m)) => *m as u64,
+        _ => return Err(CompileError::semantic("rt_sleep_ms requires i64 argument")),
+    };
+    std::thread::sleep(Duration::from_millis(ms));
+    Ok(Value::Nil)
+}
+
 // ============================================================================
 // Profiler FFI Stubs (no-op in interpreter mode)
 // ============================================================================

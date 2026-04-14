@@ -1,5 +1,5 @@
 #!/bin/sh
-# Cross-compile LLVM/Clang for SimpleOS x86_64
+# Cross-compile LLVM/Clang for SimpleOS — all supported target triples.
 #
 # Prerequisites:
 #   - LLVM source at $LLVM_SRC (default: ~/llvm-project)
@@ -7,13 +7,23 @@
 #   - CMake, ninja
 #   - SimpleOS libc built (src/os/libc/libsimpleos_c.a)
 #
+# Environment:
+#   LLVM_SRC                Path to llvm-project checkout
+#   SIMPLEOS_TARGET_TRIPLE  Target triple (default x86_64-unknown-simpleos)
+#   SIMPLE_TARGET           Alias honoured by build.spl — if set and
+#                           SIMPLEOS_TARGET_TRIPLE is unset, it is used.
+#
 # Usage:
-#   sh src/os/port/llvm/build.shs              # all stages
+#   sh src/os/port/llvm/build.shs              # all stages (single triple)
 #   sh src/os/port/llvm/build.shs host-tools   # stage 1 only
 #   sh src/os/port/llvm/build.shs cross        # stage 2 only
-#   sh src/os/port/llvm/build.shs compiler-rt  # stage 3 only
+#   sh src/os/port/llvm/build.shs compiler-rt  # stage 3 only (per target)
 #
-# Output: build/os/llvm/ with clang, lld, compiler-rt
+# Output:
+#   build/os/llvm/host-tools/           shared tblgen tools
+#   build/os/llvm/cross-<triple>/       per-target cross LLVM+clang+lld
+#   build/os/llvm/compiler-rt-<triple>/ per-target compiler-rt builtins
+#   build/os/sysroot/lib/clang/<ver>/lib/<triple>/*.a  staged builtins
 
 set -e
 
@@ -24,6 +34,39 @@ BUILD_DIR="$REPO_ROOT/build/os/llvm"
 SYSROOT="$REPO_ROOT/build/os/sysroot"
 LIBC_DIR="$REPO_ROOT/src/os/libc"
 TOOLCHAIN="$REPO_ROOT/src/os/toolchain/llvm/simpleos_cross_toolchain.cmake"
+
+# Target triple — SIMPLEOS_TARGET_TRIPLE wins, SIMPLE_TARGET is an alias,
+# default is the original x86_64 value so single-target invocations keep
+# working unchanged. Non-SimpleOS triples are rejected; build.spl gates
+# callers so only *-simpleos triples get here.
+TRIPLE="${SIMPLEOS_TARGET_TRIPLE:-${SIMPLE_TARGET:-x86_64-unknown-simpleos}}"
+
+case "$TRIPLE" in
+    *-simpleos) : ;;
+    *)
+        echo "[llvm] ERROR: target triple '$TRIPLE' is not a SimpleOS triple"
+        exit 1
+        ;;
+esac
+
+# Map triple -> LLVM_TARGETS_TO_BUILD arch.
+case "$TRIPLE" in
+    x86_64-*)   LLVM_ARCH="X86" ;;
+    aarch64-*)  LLVM_ARCH="AArch64" ;;
+    riscv64*)   LLVM_ARCH="RISCV" ;;
+    riscv32*)   LLVM_ARCH="RISCV" ;;
+    *)
+        echo "[llvm] ERROR: Unknown arch for triple: $TRIPLE"
+        exit 1
+        ;;
+esac
+
+CROSS_DIR="$BUILD_DIR/cross-$TRIPLE"
+RT_DIR="$BUILD_DIR/compiler-rt-$TRIPLE"
+RT_CMAKE="$SCRIPT_DIR/compiler_rt_cmake.cmake"
+# Clang resource dir layout: lib/clang/<major>/lib/<triple>/
+CLANG_RES_VERSION="${CLANG_RES_VERSION:-19}"
+RES_LIB_DIR="$SYSROOT/lib/clang/$CLANG_RES_VERSION/lib/$TRIPLE"
 
 # Validate prerequisites
 check_prereqs() {
@@ -69,9 +112,9 @@ stage1_host_tools() {
     echo "[llvm] Stage 1 complete: host tblgen tools built"
 }
 
-# Stage 2: Cross-compile LLVM + Clang + LLD for SimpleOS
+# Stage 2: Cross-compile LLVM + Clang + LLD for SimpleOS (per-triple).
 stage2_cross_llvm() {
-    echo "[llvm] Stage 2: Cross-compiling LLVM for SimpleOS..."
+    echo "[llvm] Stage 2: Cross-compiling LLVM for SimpleOS target $TRIPLE..."
 
     # Ensure sysroot exists before cross-compile
     if [ ! -d "$SYSROOT/lib" ]; then
@@ -85,20 +128,20 @@ stage2_cross_llvm() {
         exit 1
     fi
 
-    mkdir -p "$BUILD_DIR/cross"
+    mkdir -p "$CROSS_DIR"
     cmake -G Ninja \
         -S "$LLVM_SRC/llvm" \
-        -B "$BUILD_DIR/cross" \
+        -B "$CROSS_DIR" \
         -DCMAKE_TOOLCHAIN_FILE="$TOOLCHAIN" \
         -DSIMPLEOS_SYSROOT="$SYSROOT" \
-        -DSIMPLEOS_TARGET_TRIPLE="x86_64-unknown-simpleos" \
+        -DSIMPLEOS_TARGET_TRIPLE="$TRIPLE" \
         -DCMAKE_BUILD_TYPE=Release \
         -DLLVM_TABLEGEN="$BUILD_DIR/host-tools/bin/llvm-tblgen" \
         -DCLANG_TABLEGEN="$BUILD_DIR/host-tools/bin/clang-tblgen" \
-        -DLLVM_TARGETS_TO_BUILD="X86" \
+        -DLLVM_TARGETS_TO_BUILD="$LLVM_ARCH" \
         -DLLVM_ENABLE_PROJECTS="clang;lld" \
-        -DLLVM_DEFAULT_TARGET_TRIPLE="x86_64-unknown-simpleos" \
-        -DLLVM_HOST_TRIPLE="x86_64-unknown-simpleos" \
+        -DLLVM_DEFAULT_TARGET_TRIPLE="$TRIPLE" \
+        -DLLVM_HOST_TRIPLE="$TRIPLE" \
         -DBUILD_SHARED_LIBS=OFF \
         -DLLVM_BUILD_LLVM_DYLIB=OFF \
         -DLLVM_INCLUDE_TESTS=OFF \
@@ -110,44 +153,52 @@ stage2_cross_llvm() {
         -DLLVM_ENABLE_TERMINFO=OFF \
         -DLLVM_ENABLE_LIBXML2=OFF \
         -DLLVM_ENABLE_LIBEDIT=OFF
-    ninja -C "$BUILD_DIR/cross" clang lld
-    echo "[llvm] Stage 2 complete: cross-compiled clang and lld"
+    ninja -C "$CROSS_DIR" clang lld
+    echo "[llvm] Stage 2 complete: cross-compiled clang and lld in $CROSS_DIR"
 }
 
-# Stage 3: Build compiler-rt builtins for SimpleOS
+# Stage 3: Build compiler-rt builtins for the current SimpleOS triple.
+# Uses compiler_rt_cmake.cmake for the builtin-only knobs and stages the
+# resulting archives into $SYSROOT/lib/clang/<ver>/lib/<triple>/ where the
+# clang driver discovers them.
 stage3_compiler_rt() {
-    echo "[llvm] Stage 3: Building compiler-rt builtins..."
+    echo "[llvm] Stage 3: Building compiler-rt builtins for $TRIPLE..."
 
     if [ ! -d "$LLVM_SRC/compiler-rt" ]; then
         echo "[llvm] ERROR: compiler-rt source not found at $LLVM_SRC/compiler-rt"
         exit 1
     fi
 
-    mkdir -p "$BUILD_DIR/compiler-rt"
+    # Require the per-target cross clang from stage 2 so builtins link against the
+    # same headers / runtime expectations as the rest of the toolchain.
+    CROSS_CLANG="$CROSS_DIR/bin/clang"
+    CROSS_CLANGXX="$CROSS_DIR/bin/clang++"
+    if [ ! -x "$CROSS_CLANG" ]; then
+        echo "[llvm] ERROR: cross clang not found at $CROSS_CLANG — run stage 'cross' first"
+        exit 1
+    fi
+
+    mkdir -p "$RT_DIR"
     cmake -G Ninja \
         -S "$LLVM_SRC/compiler-rt" \
-        -B "$BUILD_DIR/compiler-rt" \
+        -B "$RT_DIR" \
+        -C "$RT_CMAKE" \
         -DCMAKE_TOOLCHAIN_FILE="$TOOLCHAIN" \
         -DSIMPLEOS_SYSROOT="$SYSROOT" \
-        -DSIMPLEOS_TARGET_TRIPLE="x86_64-unknown-simpleos" \
+        -DSIMPLEOS_TARGET_TRIPLE="$TRIPLE" \
+        -DTRIPLE="$TRIPLE" \
+        -DCROSS_CLANG="$CROSS_CLANG" \
+        -DCROSS_CLANGXX="$CROSS_CLANGXX" \
         -DCMAKE_BUILD_TYPE=Release \
-        -DCOMPILER_RT_BUILD_BUILTINS=ON \
-        -DCOMPILER_RT_BUILTINS_ONLY=ON \
-        -DCOMPILER_RT_DEFAULT_TARGET_TRIPLE="x86_64-unknown-simpleos" \
-        -DCMAKE_C_COMPILER_TARGET="x86_64-unknown-simpleos" \
-        -DCOMPILER_RT_BAREMETAL_BUILD=ON \
-        -DCOMPILER_RT_BUILD_SANITIZERS=OFF \
-        -DCOMPILER_RT_BUILD_XRAY=OFF \
-        -DCOMPILER_RT_BUILD_LIBFUZZER=OFF \
-        -DCOMPILER_RT_BUILD_PROFILE=OFF
-    ninja -C "$BUILD_DIR/compiler-rt"
-    echo "[llvm] Stage 3 complete: compiler-rt builtins built"
+        -DCOMPILER_RT_DEFAULT_TARGET_TRIPLE="$TRIPLE" \
+        -DCMAKE_C_COMPILER_TARGET="$TRIPLE"
+    ninja -C "$RT_DIR"
+    echo "[llvm] Stage 3 complete: compiler-rt builtins built in $RT_DIR"
 
-    # Copy builtins into sysroot if it exists
-    if [ -d "$SYSROOT/lib" ]; then
-        find "$BUILD_DIR/compiler-rt" -name "*.a" -exec cp {} "$SYSROOT/lib/" \;
-        echo "[llvm] Copied compiler-rt builtins to sysroot"
-    fi
+    # Install into clang resource dir so the driver picks them up automatically.
+    mkdir -p "$RES_LIB_DIR"
+    find "$RT_DIR" -name "*.a" -exec cp {} "$RES_LIB_DIR/" \;
+    echo "[llvm] Installed compiler-rt builtins into $RES_LIB_DIR"
 }
 
 # Main dispatch
@@ -168,13 +219,16 @@ case "${1:-all}" in
         stage1_host_tools
         stage2_cross_llvm
         stage3_compiler_rt
-        echo "[llvm] Full build complete. Output: $BUILD_DIR/"
+        echo "[llvm] Full build complete for $TRIPLE. Output: $BUILD_DIR/"
         echo "[llvm]   host-tools: $BUILD_DIR/host-tools/bin/"
-        echo "[llvm]   cross:      $BUILD_DIR/cross/bin/"
-        echo "[llvm]   builtins:   $BUILD_DIR/compiler-rt/"
+        echo "[llvm]   cross:      $CROSS_DIR/bin/"
+        echo "[llvm]   builtins:   $RT_DIR/"
+        echo "[llvm]   staged at:  $RES_LIB_DIR/"
         ;;
     *)
-        echo "Usage: $0 {all|host-tools|cross|compiler-rt}"
+        echo "Usage: SIMPLE_TARGET=<triple> $0 {all|host-tools|cross|compiler-rt}"
+        echo "  Triples: x86_64-unknown-simpleos, aarch64-unknown-simpleos,"
+        echo "           riscv64gc-unknown-simpleos, riscv32imac-unknown-simpleos"
         exit 1
         ;;
 esac

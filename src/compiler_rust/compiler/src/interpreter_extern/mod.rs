@@ -300,6 +300,7 @@ pub(crate) fn call_extern_function(
         "rt_time_monotonic_ns" => time::rt_time_monotonic_ns(&evaluated),
         "rt_timestamp_iso8601" => time::rt_timestamp_iso8601(&evaluated),
         "rt_time_ms" => time::rt_time_ms_fn(&evaluated),
+        "rt_sleep_ms" => time::rt_sleep_ms(&evaluated),
 
         // ====================================================================
         // DateTime Operations (11 functions)
