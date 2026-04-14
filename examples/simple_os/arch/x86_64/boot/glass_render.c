@@ -1,6 +1,19 @@
 /*
  * Glass Rendering Primitives for SimpleOS
  *
+ * Portable reference impl, per doc/06_spec/runtime/rt_gui_glass_contract.md
+ * (ARGB8888 straight-alpha, exclusive right/bottom, 5-pass separable box blur).
+ *
+ * SHARED ACROSS ARCHES: this translation unit is the canonical source for the
+ * `rt_gui_*` glass symbols. Both arm64 and riscv64 reference it via symlink
+ * (`arch/arm64/boot/glass_render.c` -> `../../x86_64/boot/glass_render.c`,
+ *  `arch/riscv64/boot/glass_render.c` -> `../../x86_64/boot/glass_render.c`).
+ * Keep this file free of x86-specific intrinsics or inline asm — it is
+ * compiled under arm64 and riscv64 baremetal toolchains unmodified.
+ * Decision: Approach A (shared source via symlink), matching the existing
+ * arm64 precedent; portable C (stdint.h + stddef.h only), no arch-specific
+ * code paths, so a single implementation serves all three arches.
+ *
  * Alpha blending, box blur, gradients, and shadows for glassmorphism UI.
  *
  * ACCELERATION STRATEGY:

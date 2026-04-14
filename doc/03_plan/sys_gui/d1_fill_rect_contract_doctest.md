@@ -2,7 +2,7 @@
 
 **Date:** 2026-04-14
 **Parent:** `doc/03_plan/sys_gui/gui_layer_contract_fix_plan.md` (item D1)
-**Status:** ready to execute
+**Status:** implemented 2026-04-14 — trait docstrings landed on `CompositorBackend.fill_rect` (`src/os/compositor/display_backend.spl`) and `RenderBackend.draw_rect_filled` (`src/lib/gc_async_mut/gpu/engine2d/backend.spl`); positive edge-semantics comment added above `Engine2dCompositorBackend.fill_rect` (`src/os/compositor/compositor_engine2d.spl`); cross-backend pin at `test/unit/common/ui/fill_rect_edges_spec.spl` exercises `BrowserCompositorBackend` per §5. Commit intent: `docs(sys-gui-d1): lock fill_rect exclusive-edge contract + pixel regression spec`.
 
 ## 1. Scope
 

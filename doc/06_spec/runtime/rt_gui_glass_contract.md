@@ -115,6 +115,19 @@ Rows = backend. Columns = `blend_fill` · `box_blur` · `gradient_v` · `read_pi
 | `BrowserCompositorBackend` (`browser_compositor_backend.spl:95,129,214,238`) | compliant — pure Simple srcOver | **approximate** — HVHVH native, matches C pass count | compliant | compliant |
 | `Engine2dCompositorBackend` (`compositor_engine2d.spl:137-157`) | **bypassed** — routes through `rt_gui_blend_fill` which paints the baremetal FB, not Engine2D's backend. Broken under Vulkan/Metal wraps. | bypassed, same defect | compliant — uses `engine.draw_gradient_rect` | bypassed — `rt_gui_read_pixel` reads baremetal FB |
 
+### Arch-layer glass C source status
+
+| Arch | `arch/<arch>/boot/glass_render.c` | Status |
+|---|---|---|
+| x86_64  | regular file (~3630 lines) — canonical source | compliant |
+| arm64   | symlink → `../../x86_64/boot/glass_render.c` | compliant (shared) |
+| riscv64 | symlink → `../../x86_64/boot/glass_render.c` | compliant (shared) |
+
+Shared via symlink rather than a fork — the source is portable C (uses only
+`<stdint.h>` and `<stddef.h>`, no inline asm, no x86 intrinsics, no
+`__builtin_*` gating) and the arm64/riscv64 `RuntimeValue` ABI matches
+(`int64_t`).
+
 ## 5. Divergences to fix in D2 Phase 2
 
 - **GpuCompositorBackend**: replace all four C-stub calls with a virtio-GPU
@@ -132,12 +145,19 @@ Rows = backend. Columns = `blend_fill` · `box_blur` · `gradient_v` · `read_pi
   currently says **3 passes minimum, 5 passes reference**; specs MUST NOT
   snapshot-compare blur output across backends without a tolerance.
 - **Browser**: already re-implements HVHVH natively — covered. Keep.
-- **arm64**: `examples/simple_os/arch/arm64/boot/glass_render.c:348/554/626/737`
-  is a full fork of the x86_64 source (same line numbers, same bodies) —
-  verify they are kept in lock-step or dedup via a shared translation unit.
-- **riscv64**: **no `glass_render.c` exists** at `examples/simple_os/arch/riscv64/boot/`.
-  Glass effects are unresolved on riscv64 today. Phase 2 must either port
-  the C or land the native Fb impl as the riscv64 path.
+- **arm64**: ~~`examples/simple_os/arch/arm64/boot/glass_render.c:348/554/626/737`
+  is a full fork of the x86_64 source~~ — **resolved**: file is a symlink to
+  `../../x86_64/boot/glass_render.c` (verified 2026-04-14), so there is one
+  canonical translation unit and no lock-step hazard. The earlier "fork"
+  characterisation was inaccurate (same line numbers because it is the same
+  file via symlink).
+- **riscv64**: ~~no `glass_render.c` exists at `examples/simple_os/arch/riscv64/boot/`~~ —
+  **resolved**: added `arch/riscv64/boot/glass_render.c` as a symlink to
+  `../../x86_64/boot/glass_render.c`, matching the arm64 precedent. Source
+  is portable C (`stdint.h`/`stddef.h` only), so a single shared impl covers
+  all three baremetal arches. D2 Phase 2 may still replace this with a
+  `CompositorGlassCapable` native-Fb impl, but glass effects are no longer
+  unresolved on riscv64.
 
 ## 6. Acceptance test outline
 
@@ -154,9 +174,9 @@ Suggested path: `test/unit/os/compositor/glass_contract_spec.spl`. Cases:
 
 ## 7. References
 
-- C reference impl (x86_64): `examples/simple_os/arch/x86_64/boot/glass_render.c:298,319,348,554,575-579,626,737`.
-- C reference impl (arm64 fork): `examples/simple_os/arch/arm64/boot/glass_render.c:348,554,626,737`.
-- C reference impl (riscv64): **absent** — `examples/simple_os/arch/riscv64/boot/` has no `glass_render.c`.
+- C reference impl (x86_64, canonical): `examples/simple_os/arch/x86_64/boot/glass_render.c:298,319,348,554,575-579,626,737`.
+- C reference impl (arm64): `examples/simple_os/arch/arm64/boot/glass_render.c` → symlink to x86_64 canonical source.
+- C reference impl (riscv64): `examples/simple_os/arch/riscv64/boot/glass_render.c` → symlink to x86_64 canonical source.
 - Hosted winit analogue: `src/compiler_rust/compiler/src/interpreter_extern/winit_ffi.rs:1487,1507,1551,1646`.
 - Simple-side externs and callers: `src/os/compositor/display_backend.spl:43-46,120-138,221-240`; `src/os/compositor/compositor_engine2d.spl:58-60,137-157`; `src/os/compositor/glass_effects.spl:11-18`.
 - Hosted Simple-side: `src/os/compositor/hosted_backend.spl:23-26,136-163`.
