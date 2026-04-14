@@ -95,7 +95,7 @@ Rollback: revert the doc-comment edits and delete the new spec file. The new spe
 | `src/os/compositor/hosted_backend.spl` | Move the `blend_rect` / `blur_region` / `gradient_v` / `read_pixel` methods out of the `CompositorBackend` impl block and into a separate `impl CompositorGlassCapable for HostedCompositorBackend:` block. No body changes — they already use `rt_winit_buffer_*`. |
 | `src/os/compositor/browser_compositor_backend.spl` | Same restructuring: glass methods move to `impl CompositorGlassCapable`. Bodies (already pure-Simple per-pixel) unchanged. |
 | `src/os/compositor/glass_effects.spl` | Currently the only non-backend caller of `rt_gui_*`. Replace direct extern calls with a generic helper `apply_glass(backend: CompositorGlassCapable, …)` that the caller obtains from the active compositor. If the compositor's backend does not implement the subtrait, fall back to opaque fill (the current Engine2D wrapper case). |
-| `src/runtime/gui/glass.rs` (or wherever `rt_gui_blend_fill` is defined — confirm during impl) | Mark the four `rt_gui_*` symbols as deprecated; keep the bodies for one cycle so out-of-tree callers do not break, then delete after `FbCompositorBackend` is verified. |
+| `examples/simple_os/arch/{x86_64,arm64,riscv64}/boot/{baremetal_stubs,glass_render}.c` — the four `rt_gui_*` symbols are C stubs, not Rust externs (see [d2_unresolved_loose_ends.md](./d2_unresolved_loose_ends.md) §B). | Mark the four `rt_gui_*` symbols as deprecated; keep the bodies for one cycle so out-of-tree callers do not break, then delete after `FbCompositorBackend` is verified. |
 
 ### 2.2 Change sketch
 

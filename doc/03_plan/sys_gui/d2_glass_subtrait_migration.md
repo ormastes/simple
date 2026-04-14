@@ -220,4 +220,4 @@ Verified on `origin/main`:
 - `src/os/compositor/browser_compositor_backend.spl` — exists, glass methods present.
 - `src/os/compositor/glass_effects.spl`, `glass_effects_pure.spl`, `glass_port.spl`, `window_effects.spl` — exist.
 - `src/os/desktop/shell.spl` — exists, but has **zero** direct `.blend_rect`/`.blur_region`/`.gradient_v`/`.read_pixel` calls (all glass routes through `glass_effects*`). Earlier plan note suggesting `compositor.backend.blend_rect(...)` edits to `shell.spl` is out-of-date; no `shell.spl` edit needed.
-- No `src/runtime/gui/glass.rs` hit on `origin/main`; the Rust-side `rt_gui_*` definition file is not in the path suggested by the parent plan — flag to locate during impl.
+- `src/runtime/gui/glass.rs` does not exist on `origin/main`. `rt_gui_*` are **C stubs**, not Rust externs — located at `examples/simple_os/arch/{x86_64,arm64,riscv64}/boot/{baremetal_stubs,glass_render}.c`. See [d2_unresolved_loose_ends.md](./d2_unresolved_loose_ends.md) §B.

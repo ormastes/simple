@@ -146,8 +146,10 @@ Ordered by unlock value. Each item ends with the artifact that proves it.
   Current modules favor both; pick per-platform default.~~
   **DECIDED — Metal on macOS, Vulkan on Linux + Windows + FreeBSD.** See
   [v2_gpu_defaults_2026-04-14.md](../01_research/domain/v2_gpu_defaults_2026-04-14.md).
-- **Electron packaging:** Are we shipping Electron as a first-class target
-  or only as a dev preview? This changes whether V4 is in CI.
+- ~~**Electron packaging:** Are we shipping Electron as a first-class target
+  or only as a dev preview? This changes whether V4 is in CI.~~
+  **DECIDED — dev-preview only.** See
+  [v4_electron_packaging_2026-04-14.md](../01_research/domain/v4_electron_packaging_2026-04-14.md).
 
 ## 6. Non-goals
 
