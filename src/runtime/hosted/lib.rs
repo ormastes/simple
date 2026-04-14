@@ -1,10 +1,11 @@
 //! Simple Hosted-Surface Runtime Bindings (Row 3 — Phase C)
 //!
-//! This crate exposes the `rt_cocoa_*` / `rt_win32_*` / `rt_hosted_select_surface`
-//! SFFI symbols consumed by
+//! This crate exposes the `rt_cocoa_*` / `rt_win32_*` /
+//! `rt_hosted_select_surface` / `rt_webgpu_*` SFFI symbols consumed by
 //!   - `src/os/compositor/hosted_backend_cocoa.spl`
 //!   - `src/os/compositor/hosted_backend_win32.spl`
 //!   - `src/os/compositor/hosted_backend.spl`
+//!   - `src/lib/gc_async_mut/gpu/engine2d/backend_webgpu.spl`
 //!
 //! The goal is:
 //!   1. Symbols exist on every host so the Simple link step resolves.
@@ -19,6 +20,10 @@
 //!   - `cocoa`  — `rt_cocoa_window_*` / `rt_cocoa_layer_*` / `rt_cocoa_event_pump`
 //!   - `win32`  — `rt_win32_window_*` / `rt_win32_dib_*` / `rt_win32_message_pump`
 //!   - `select` — `rt_hosted_select_surface`
+//!   - `webgpu` — `rt_webgpu_is_available` / `rt_webgpu_init` /
+//!                `rt_webgpu_shutdown` / `rt_webgpu_create_surface` /
+//!                `rt_webgpu_destroy_surface` / `rt_webgpu_upload_pixels` /
+//!                `rt_webgpu_present`
 //!
 //! All extern "C" symbols live inside the submodules via `#[no_mangle]` so
 //! their names are exported verbatim to the Simple linker (same pattern as
@@ -28,4 +33,5 @@
 
 pub mod cocoa;
 pub mod select;
+pub mod webgpu;
 pub mod win32;
