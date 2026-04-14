@@ -16,10 +16,12 @@
 #   - No new FFI; reuses existing `rt_winit_*` surface.
 
 use app.ui.chromium.backend.{ChromiumBackend}
+use app.ui.chromium.engine_merge.{ChromiumEngine, engine_merge_root, engine_merge_panel}
 use app.ui.chromium.event_bridge.{ChromiumEventBridge}
 use common.ui.widget.{UIEvent}
 use os.compositor.compositor.{Compositor}
 use os.compositor.hosted_input_backend.{HostedInputBackend}
+use std.gc_async_mut.gpu.browser_engine.dom.{BeDomNode, be_dom_add_child}
 
 extern fn rt_winit_event_loop_new() -> i64
 extern fn rt_winit_window_new(el: i64, w: i64, h: i64, title: text) -> i64
@@ -51,6 +53,7 @@ class ChromiumApp:
     backend: ChromiumBackend
     compositor: Compositor
     input_bridge: ChromiumEventBridge
+    engine: ChromiumEngine
     running: bool
 
 impl ChromiumApp:
@@ -93,12 +96,34 @@ impl ChromiumApp:
         # placeholder windows for the same reason.
         compositor.create_window("Taskbar", 0, h32 - 32, w32, 32)
 
+        # M4: build the merged browser engine entry point. All DOM /
+        # layout / paint work from here on goes through the canonical
+        # `std.gc_async_mut.gpu.browser_engine` path per ADR-002. The
+        # `ChromiumEngine` wrapper is the only place the shell touches
+        # engine internals, so M7 (WebGPU engine2d) can swap backends
+        # without editing app.spl.
+        val engine = ChromiumEngine.new(w32, h32)
+
+        # Warm the canonical pipeline once at startup so a crash in the
+        # merged engine surface the linker wired would show up here,
+        # not on the first user interaction. The resulting scene is
+        # discarded — the compositor owns the real frame buffer.
+        var warm_root: BeDomNode = engine_merge_root("#1E1E1EFF")
+        val warm_panel = engine_merge_panel(
+            w32.to_text() + "px",
+            "32px",
+            "#2D2D2DFF"
+        )
+        be_dom_add_child(warm_root, warm_panel)
+        val _warm_scene = engine.render_dom_to_scene(warm_root)
+
         return Ok(ChromiumApp(
             event_loop: event_loop,
             window: window,
             backend: backend,
             compositor: compositor,
             input_bridge: ChromiumEventBridge.new(),
+            engine: engine,
             running: true
         ))
 
