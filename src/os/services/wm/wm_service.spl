@@ -574,13 +574,20 @@ impl WmService:
     fn window_count_for_process(process_id: u64) -> i32:
         var count: i32 = 0
         for entry in self.window_owners:
-            if entry.process_id == process_id:
+            if entry.process_id.value == process_id:
+                count = count + 1
+        count
+
+    fn window_count_for_app(app_id: text) -> i32:
+        var count: i32 = 0
+        for entry in self.window_owners:
+            if entry.app_id.value == app_id:
                 count = count + 1
         count
 
     # -- Shell Integration (called by DesktopShell after applying actions) ----
 
-    me register_window_owner(window_id: u64, owner_port: u64):
+    me register_window_owner(window_id: WindowId, owner_port: u64):
         """Register ownership of a window after the shell creates it.
 
         Called by the shell after it calls compositor.create_remote_window()
@@ -589,51 +596,51 @@ impl WmService:
         self.window_owners = self.window_owners.push(WindowOwner(
             window_id: window_id,
             owner_port: owner_port,
-            process_id: owner_port,
-            app_id: ""
+            process_id: ProcessId(value: owner_port),
+            app_id: AppId(value: "")
         ))
 
-    me register_window_owner_with_identity(window_id: u64, owner_port: u64, process_id: u64, app_id: text):
+    me register_window_owner_with_identity(window_id: WindowId, owner_port: u64, process_id: u64, app_id: text):
         """Register ownership plus launch identity metadata."""
         self.window_owners = self.window_owners.push(WindowOwner(
             window_id: window_id,
             owner_port: owner_port,
-            process_id: process_id,
-            app_id: app_id
+            process_id: ProcessId(value: process_id),
+            app_id: AppId(value: app_id)
         ))
 
-    me set_window_owner_identity(window_id: u64, process_id: u64, app_id: text):
+    me set_window_owner_identity(window_id: WindowId, process_id: u64, app_id: text):
         """Update the identity metadata for an already-owned window."""
         var updated: [WindowOwner] = []
         for entry in self.window_owners:
-            if entry.window_id == window_id:
+            if entry.window_id.value == window_id.value:
                 updated = updated.push(WindowOwner(
                     window_id: entry.window_id,
                     owner_port: entry.owner_port,
-                    process_id: process_id,
-                    app_id: app_id
+                    process_id: ProcessId(value: process_id),
+                    app_id: AppId(value: app_id)
                 ))
             else:
                 updated = updated.push(entry)
         self.window_owners = updated
 
-    fn send_create_reply(dst_port: u64, window_id: u64):
+    fn send_create_reply(dst_port: u64, window_id: WindowId):
         """Send a successful create-window reply with the new window ID.
 
         Called by the shell after creating the window on its compositor.
         """
         var buf: [u8] = []
         _push_i32(buf, WM_STATUS_OK)
-        _push_u64(buf, window_id)
+        _push_u64(buf, window_id.value)
         _ipc_send(dst_port, self.port_id, buf)
 
     # -- Reply Helpers -------------------------------------------------------
 
-    fn send_create_response(dst_port: u64, window_id: u64, status: i32):
+    fn send_create_response(dst_port: u64, window_id: WindowId, status: WmStatus):
         """Send a COMP_CREATE_WINDOW response: status(i32) | window_id(u64)."""
         var buf: [u8] = []
-        _push_i32(buf, status)
-        _push_u64(buf, window_id)
+        _push_i32(buf, status.value)
+        _push_u64(buf, window_id.value)
         _ipc_send(dst_port, self.port_id, buf)
 
     fn send_status_reply(dst_port: u64, status: i32):
