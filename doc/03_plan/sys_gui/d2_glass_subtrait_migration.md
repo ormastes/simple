@@ -6,6 +6,23 @@
 `gradient_v`, `read_pixel`) out of `CompositorBackend` into a new optional subtrait
 `CompositorGlassCapable`.
 
+**Status: Phase 1 implemented 2026-04-14.** Trait split landed; `as_glass_capable()`
+added on core trait; `HostedCompositorBackend`, `BrowserCompositorBackend`,
+`FbCompositorBackend` implement `CompositorGlassCapable`; `GpuCompositorBackend`
+and `Engine2dCompositorBackend` opt out (return `nil`). Callers outside backends
+route glass through new `os.compositor.glass_dispatch.{cap_blend_rect,
+cap_blur_region, cap_gradient_v, cap_read_pixel}` helpers that degrade to opaque
+`fill_rect` when the active backend is not glass-capable. Files touched:
+`src/os/compositor/display_backend.spl`, `hosted_backend.spl`,
+`browser_compositor_backend.spl`, `compositor_engine2d.spl`, `glass_effects_pure.spl`,
+`glass_dispatch.spl` (new), `glass_port.spl`, `window_effects.spl`, `desktop_chrome.spl`,
+`app_content.spl`, `render_extras.spl`, `compositor.spl`, `cursor.spl`,
+`boot_splash.spl`, `rendering_primitives.spl`, `text_render.spl`, `wm_scene.spl`,
+and `test/unit/common/ui/fill_rect_edges_spec.spl`. **Phase 2 (native
+CompositorGlassCapable impls for `Engine2dCompositorBackend` and
+`GpuCompositorBackend`) remains open; `glass_effects.spl` is unchanged in Phase 1
+and targeted for deletion in Phase 3.**
+
 ---
 
 ## 1. Scope

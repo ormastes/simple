@@ -7,6 +7,14 @@
 # Two implementations:
 #   - FbCompositorBackend:  wraps FramebufferDriver (software double-buffer)
 #   - GpuCompositorBackend: wraps VirtioGpuDriver (DMA framebuffer + GPU flush)
+#
+# Trait split (D2 Phase 1 — 2026-04-14): the glass effect methods
+# (blend_rect / blur_region / gradient_v / read_pixel) live on an optional
+# subtrait `CompositorGlassCapable`. Backends implement it when their
+# per-surface pixel path can safely do alpha/blur/gradient; backends whose
+# only available path is `rt_gui_*` against the raw framebuffer opt out
+# and callers must feature-detect via `as_glass_capable()`.
+# See doc/03_plan/sys_gui/d2_glass_subtrait_migration.md.
 
 use os.drivers.framebuffer.fb_driver.{FramebufferDriver, Color, get_glyph_8x16}
 use os.drivers.virtio.virtio_gpu.{VirtioGpuDriver}
@@ -35,6 +43,20 @@ trait CompositorBackend:
     fn put_pixel(x: i32, y: i32, color: u32)
     fn present()
     fn present_rect(x: i32, y: i32, w: i32, h: i32)
+    # Optional glass-capable view onto this backend. Returns `nil` on
+    # backends that cannot safely paint alpha/blur/gradient into their
+    # own surface; callers must degrade to opaque fill.
+    fn as_glass_capable() -> CompositorGlassCapable?
+
+trait CompositorGlassCapable:
+    """Optional subtrait for backends that can paint glass effects into
+    their own surface. Backends that can't (or don't yet) omit the impl;
+    callers must degrade to opaque fill via
+    `os.compositor.glass_dispatch.cap_blend_rect` (and siblings).
+
+    See doc/03_plan/sys_gui/d2_glass_subtrait_migration.md and
+    doc/06_spec/runtime/rt_gui_glass_contract.md.
+    """
     fn blend_rect(x: i32, y: i32, w: i32, h: i32, color: u32, alpha: u8)
     fn blur_region(x: i32, y: i32, w: i32, h: i32, radius: u32)
     fn gradient_v(x: i32, y: i32, w: i32, h: i32, color1: u32, color2: u32)
@@ -120,6 +142,13 @@ impl CompositorBackend for FbCompositorBackend:
         # FramebufferDriver only has full-frame swap_buffers, so
         # present_rect degrades to a full present.
         self.fb.swap_buffers()
+
+    fn as_glass_capable() -> CompositorGlassCapable?:
+        # Fb backend opts IN to CompositorGlassCapable; the rt_gui_* externs
+        # paint the baremetal framebuffer which IS the surface we own.
+        self
+
+impl CompositorGlassCapable for FbCompositorBackend:
 
     me blend_rect(x: i32, y: i32, w: i32, h: i32, color: u32, alpha: u8):
         val xy = pack(clamp_u64(x), clamp_u64(y))
@@ -222,25 +251,14 @@ impl CompositorBackend for GpuCompositorBackend:
         """Flush a rectangular region of the GPU framebuffer."""
         self.gpu.flush_rect(x.to_u32(), y.to_u32(), w.to_u32(), h.to_u32())
 
-    me blend_rect(x: i32, y: i32, w: i32, h: i32, color: u32, alpha: u8):
-        val xy = pack(clamp_u64(x), clamp_u64(y))
-        val wh = pack(clamp_u64(w), clamp_u64(h))
-        rt_gui_blend_fill(xy, wh, color.to_u64(), alpha.to_u64())
-
-    me blur_region(x: i32, y: i32, w: i32, h: i32, radius: u32):
-        val xy = pack(clamp_u64(x), clamp_u64(y))
-        val wh = pack(clamp_u64(w), clamp_u64(h))
-        rt_gui_box_blur(xy, wh, radius.to_u64(), 0)
-
-    me gradient_v(x: i32, y: i32, w: i32, h: i32, color1: u32, color2: u32):
-        val xy = pack(clamp_u64(x), clamp_u64(y))
-        val wh = pack(clamp_u64(w), clamp_u64(h))
-        rt_gui_gradient_v(xy, wh, color1.to_u64(), color2.to_u64())
-
-    fn read_pixel(x: i32, y: i32) -> u32:
-        val xy = pack(clamp_u64(x), clamp_u64(y))
-        val result = rt_gui_read_pixel(xy, 0, 0, 0)
-        result.to_u32()
+    # Glass disabled in Phase 1 — D2 migration. `rt_gui_*` paint into the
+    # raw baremetal framebuffer; under non-identity virtio-GPU mappings
+    # (guest buffer != host framebuffer) those writes miss the active
+    # surface and corrupt memory. Re-enable via a native
+    # CompositorGlassCapable impl using VirtioGpuDriver cmd streams in
+    # Phase 2; see doc/03_plan/sys_gui/d2_glass_subtrait_migration.md.
+    fn as_glass_capable() -> CompositorGlassCapable?:
+        nil
 
 impl GpuCompositorBackend:
 

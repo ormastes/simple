@@ -31,12 +31,14 @@
 #     Engine2D.draw_rect_filled(x, y, 1, 1, color). This matches how
 #     GpuCompositorBackend implements the same calls.
 #   - present / present_rect call engine.present().
-#   - blend_rect / blur_region / read_pixel use the rt_gui_* glass
-#     runtime helpers directly (same as FbCompositorBackend) because
-#     Engine2D does not expose alpha blend / blur / single-pixel read.
-#     These extern helpers target the same baremetal framebuffer that
-#     the BaremetalBackend underneath this Engine2D is painting to, so
-#     the effect is consistent.
+#   - blend_rect / blur_region / gradient_v / read_pixel: OPT OUT in
+#     D2 Phase 1 (2026-04-14). Glass is disabled for this backend because
+#     the `rt_gui_*` externs paint the raw baremetal framebuffer; when the
+#     underlying RenderBackend is not baremetal (Vulkan, Metal, non-identity
+#     virtio-GPU), those writes hit the wrong surface. Re-enable via a
+#     native `CompositorGlassCapable` impl once Engine2D's `RenderBackend`
+#     grows blend/blur primitives — see
+#     doc/03_plan/sys_gui/d2_glass_subtrait_migration.md (Phase 2).
 #
 # Milestone unlocked: the compositor's render loop now runs through
 # Engine2D. Every surface fill, title bar, text glyph, and cursor blit
@@ -47,25 +49,9 @@ use os.drivers.framebuffer.fb_driver.{get_glyph_8x16}
 use os.drivers.input.ps2_keyboard.{Ps2Keyboard}
 use os.drivers.input.ps2_mouse.{Ps2Mouse}
 use os.compositor.compositor.{Compositor}
-use os.compositor.display_backend.{CompositorBackend}
+use os.compositor.display_backend.{CompositorBackend, CompositorGlassCapable}
 use os.compositor.input_backend.{InputBackend, Ps2InputBackend}
 use std.gc_async_mut.gpu.engine2d.engine.{Engine2D}
-
-# Glass runtime helpers — same externs used by FbCompositorBackend. They
-# paint directly to the underlying hardware framebuffer (the same buffer
-# the BaremetalBackend beneath Engine2D renders to), so calling them here
-# stays consistent with the Engine2D-painted scene.
-extern fn rt_gui_blend_fill(xy: u64, wh: u64, color: u64, alpha: u64)
-extern fn rt_gui_box_blur(xy: u64, wh: u64, radius: u64, unused: u64)
-extern fn rt_gui_read_pixel(x_y: u64, unused1: u64, unused2: u64, unused3: u64) -> u64
-
-fn _pack(hi: u64, lo: u64) -> u64:
-    (hi << 32) | (lo & 0xFFFFFFFF)
-
-fn _clamp_u64(v: i32) -> u64:
-    if v < 0:
-        return 0
-    v.to_u64()
 
 # ============================================================================
 # Engine2D Compositor Backend
@@ -135,27 +121,13 @@ impl CompositorBackend for Engine2dCompositorBackend:
         # (same as FbCompositorBackend).
         self.engine.present()
 
-    me blend_rect(x: i32, y: i32, w: i32, h: i32, color: u32, alpha: u8):
-        # Glass blending is not part of Engine2D's public API. The glass
-        # runtime paints directly to the underlying framebuffer, which
-        # is the same buffer BaremetalBackend renders to, so this stays
-        # consistent with the Engine2D-painted scene.
-        val xy = _pack(_clamp_u64(x), _clamp_u64(y))
-        val wh = _pack(_clamp_u64(w), _clamp_u64(h))
-        rt_gui_blend_fill(xy, wh, color.to_u64(), alpha.to_u64())
-
-    me blur_region(x: i32, y: i32, w: i32, h: i32, radius: u32):
-        val xy = _pack(_clamp_u64(x), _clamp_u64(y))
-        val wh = _pack(_clamp_u64(w), _clamp_u64(h))
-        rt_gui_box_blur(xy, wh, radius.to_u64(), 0)
-
-    me gradient_v(x: i32, y: i32, w: i32, h: i32, color1: u32, color2: u32):
-        self.engine.draw_gradient_rect(x, y, w, h, color1, color2)
-
-    fn read_pixel(x: i32, y: i32) -> u32:
-        val xy = _pack(_clamp_u64(x), _clamp_u64(y))
-        val result = rt_gui_read_pixel(xy, 0, 0, 0)
-        result.to_u32()
+    # D2 Phase 1 opt-out: no `impl CompositorGlassCapable for
+    # Engine2dCompositorBackend` exists. `rt_gui_*` writes would paint the
+    # wrong surface when the underlying RenderBackend is not baremetal.
+    # Callers degrade to opaque `fill_rect` via
+    # `os.compositor.glass_dispatch` helpers.
+    fn as_glass_capable() -> CompositorGlassCapable?:
+        nil
 
 impl Engine2dCompositorBackend:
 

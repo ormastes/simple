@@ -6,6 +6,7 @@
 # All rendering through CompositorBackend trait — works on all backends.
 
 use os.compositor.display_backend.{CompositorBackend}
+use os.compositor.glass_dispatch.{cap_blend_rect, cap_blur_region, cap_gradient_v, cap_read_pixel}
 
 # ============================================================================
 # Integer Square Root (for corner calculations)
@@ -38,7 +39,7 @@ fn rounded_rect_aa(backend: CompositorBackend, x: i32, y: i32, w: i32, h: i32,
         return
     val r = if radius > w / 2: w / 2 else: if radius > h / 2: h / 2 else: radius
     if r <= 0:
-        backend.blend_rect(x, y, w, h, color, alpha)
+        cap_blend_rect(backend, x, y, w, h, color, alpha)
         return
 
     # Delegate to superellipse for radii that fit i32 (r⁴ ≤ 2.1B → r ≤ 215)
@@ -77,11 +78,11 @@ fn rounded_rect_aa(backend: CompositorBackend, x: i32, y: i32, w: i32, h: i32,
         val rw = w - inset * 2
         if rw > 0:
             # Draw main row
-            backend.blend_rect(rx, y + row, rw, 1, color, alpha)
+            cap_blend_rect(backend, rx, y + row, rw, 1, color, alpha)
             # Soften edges (1px on each side at reduced alpha)
             if inset > 0 and edge_alpha < alpha:
-                backend.blend_rect(rx - 1, y + row, 1, 1, color, edge_alpha)
-                backend.blend_rect(rx + rw, y + row, 1, 1, color, edge_alpha)
+                cap_blend_rect(backend, rx - 1, y + row, 1, 1, color, edge_alpha)
+                cap_blend_rect(backend, rx + rw, y + row, 1, 1, color, edge_alpha)
         row = row + 1
 
 # ============================================================================
@@ -100,14 +101,14 @@ fn draw_line(backend: CompositorBackend, x1: i32, y1: i32, x2: i32, y2: i32,
     val abs_dy = if dy < 0: 0 - dy else: dy
     val steps = if abs_dx > abs_dy: abs_dx else: abs_dy
     if steps <= 0:
-        backend.blend_rect(x1, y1, thickness, thickness, color, alpha)
+        cap_blend_rect(backend, x1, y1, thickness, thickness, color, alpha)
         return
 
     var i: i32 = 0
     while i <= steps:
         val px = x1 + dx * i / steps
         val py = y1 + dy * i / steps
-        backend.blend_rect(px, py, thickness, thickness, color, alpha)
+        cap_blend_rect(backend, px, py, thickness, thickness, color, alpha)
         i = i + 1
 
 # ============================================================================
@@ -138,7 +139,7 @@ fn gradient_h(backend: CompositorBackend, x: i32, y: i32, w: i32, h: i32,
             val t: u8 = if max_seg > 0: 255 * s / max_seg else: 0
             backend.fill_rect(sx, y, sw, h, color1)
             if t > 0:
-                backend.blend_rect(sx, y, sw, h, color2, t)
+                cap_blend_rect(backend, sx, y, sw, h, color2, t)
         s = s + 1
 
 # ============================================================================
@@ -156,7 +157,7 @@ fn filled_circle(backend: CompositorBackend, cx: i32, cy: i32, r: i32, color: u3
         val abs_dy = if dy < 0: 0 - dy else: dy
         val hw = _isqrt(r * r - abs_dy * abs_dy)
         if hw > 0:
-            backend.blend_rect(cx - hw, cy + dy, hw * 2, 1, color, alpha)
+            cap_blend_rect(backend, cx - hw, cy + dy, hw * 2, 1, color, alpha)
         dy = dy + 1
 
 # ============================================================================
@@ -178,9 +179,9 @@ fn draw_ring(backend: CompositorBackend, cx: i32, cy: i32, r: i32,
         val left_w = hw_outer - hw_inner
         if left_w > 0:
             # Left arc
-            backend.blend_rect(cx - hw_outer, cy + dy, left_w, 1, color, alpha)
+            cap_blend_rect(backend, cx - hw_outer, cy + dy, left_w, 1, color, alpha)
             # Right arc
-            backend.blend_rect(cx + hw_inner, cy + dy, left_w, 1, color, alpha)
+            cap_blend_rect(backend, cx + hw_inner, cy + dy, left_w, 1, color, alpha)
         dy = dy + 1
 
 # ============================================================================
@@ -221,13 +222,13 @@ fn draw_vignette(backend: CompositorBackend, x: i32, y: i32, w: i32, h: i32, max
         val rh = h - dy * 2
         if rw > 0 and rh > 0:
             # Top edge
-            backend.blend_rect(x + dx, y + dy, rw, 1, 0x00000000, a)
+            cap_blend_rect(backend, x + dx, y + dy, rw, 1, 0x00000000, a)
             # Bottom edge
-            backend.blend_rect(x + dx, y + h - 1 - dy, rw, 1, 0x00000000, a)
+            cap_blend_rect(backend, x + dx, y + h - 1 - dy, rw, 1, 0x00000000, a)
             # Left edge
-            backend.blend_rect(x + dx, y + dy, 1, rh, 0x00000000, a)
+            cap_blend_rect(backend, x + dx, y + dy, 1, rh, 0x00000000, a)
             # Right edge
-            backend.blend_rect(x + w - 1 - dx, y + dy, 1, rh, 0x00000000, a)
+            cap_blend_rect(backend, x + w - 1 - dx, y + dy, 1, rh, 0x00000000, a)
         step = step + 1
 
 # ============================================================================
@@ -244,7 +245,7 @@ fn superellipse_rect(backend: CompositorBackend, x: i32, y: i32, w: i32, h: i32,
         return
     val r = if radius > 200: 200 else: if radius > w / 2: w / 2 else: if radius > h / 2: h / 2 else: radius
     if r <= 0:
-        backend.blend_rect(x, y, w, h, color, alpha)
+        cap_blend_rect(backend, x, y, w, h, color, alpha)
         return
 
     val r2 = r * r
@@ -277,11 +278,11 @@ fn superellipse_rect(backend: CompositorBackend, x: i32, y: i32, w: i32, h: i32,
         val rx = x + inset
         val rw = w - inset * 2
         if rw > 0:
-            backend.blend_rect(rx, y + row, rw, 1, color, alpha)
+            cap_blend_rect(backend, rx, y + row, rw, 1, color, alpha)
             # Anti-alias: soften outer pixels on corner rows
             if inset > 0:
-                backend.blend_rect(rx - 1, y + row, 1, 1, color, alpha / 3)
-                backend.blend_rect(rx + rw, y + row, 1, 1, color, alpha / 3)
+                cap_blend_rect(backend, rx - 1, y + row, 1, 1, color, alpha / 3)
+                cap_blend_rect(backend, rx + rw, y + row, 1, 1, color, alpha / 3)
         row = row + 1
 
 fn _fourth_root_i32(n: i32) -> i32:

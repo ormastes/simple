@@ -31,6 +31,7 @@ use common.window_protocol.window_protocol.{WmInputEvent, wm_input_event, WM_EVE
 use os.compositor.display_backend.{CompositorBackend, FbCompositorBackend}
 use os.compositor.input_backend.{InputBackend, Ps2InputBackend}
 use common.render_scene.executor.{select_effect_engine}
+use os.compositor.glass_dispatch.{cap_blend_rect, cap_blur_region, cap_gradient_v, cap_read_pixel}
 # NOTE: Shared shortcut table lives in os.gui.shortcut (ShortcutHandler,
 # uart_char_to_action).  The compositor keeps its own Alt+key handling below
 # because non-shortcut keys must route to focused windows -- importing
@@ -927,17 +928,17 @@ impl Compositor:
             val usable_h = self.screen_height - bar_h - dock_h
             val half_w = self.screen_width / 2
             if self.snap_zone == 1:
-                self.backend.blend_rect(0, bar_h, half_w, usable_h, gc.accent_color, 30)
+                cap_blend_rect(self.backend, 0, bar_h, half_w, usable_h, gc.accent_color, 30)
                 # Left edge highlight
-                self.backend.blend_rect(0, bar_h, 3, usable_h, gc.accent_color, 80)
+                cap_blend_rect(self.backend, 0, bar_h, 3, usable_h, gc.accent_color, 80)
             else if self.snap_zone == 2:
-                self.backend.blend_rect(half_w, bar_h, half_w, usable_h, gc.accent2_color, 30)
+                cap_blend_rect(self.backend, half_w, bar_h, half_w, usable_h, gc.accent2_color, 30)
                 # Right edge highlight
-                self.backend.blend_rect(self.screen_width - 3, bar_h, 3, usable_h, gc.accent2_color, 80)
+                cap_blend_rect(self.backend, self.screen_width - 3, bar_h, 3, usable_h, gc.accent2_color, 80)
             else if self.snap_zone == 3:
-                self.backend.blend_rect(0, bar_h, self.screen_width, usable_h, 0x0030D158, 20)
+                cap_blend_rect(self.backend, 0, bar_h, self.screen_width, usable_h, 0x0030D158, 20)
                 # Top edge highlight
-                self.backend.blend_rect(0, bar_h, self.screen_width, 3, 0x0030D158, 80)
+                cap_blend_rect(self.backend, 0, bar_h, self.screen_width, 3, 0x0030D158, 80)
 
         # 2. Windows (back-to-front Z-order) with animation
         val active_idx = self.focused_idx
@@ -1035,8 +1036,8 @@ impl Compositor:
         draw_dock(self.backend, cfg, active_idx, self.cursor.x, self.cursor.y, bounce_icon, bounce_prog)
 
         # 4. Global accent tint + bottom edge line
-        self.backend.blend_rect(0, self.screen_height - 2, self.screen_width, 2, 0x00000000, 20)
-        self.backend.blend_rect(0, 0, self.screen_width, self.screen_height, gc.accent_color, 2)
+        cap_blend_rect(self.backend, 0, self.screen_height - 2, self.screen_width, 2, 0x00000000, 20)
+        cap_blend_rect(self.backend, 0, 0, self.screen_width, self.screen_height, gc.accent_color, 2)
 
         # Alt+Tab switcher overlay
         if self.switcher_active and self.focused_idx >= 0:
@@ -1045,13 +1046,13 @@ impl Compositor:
             val ox = (self.screen_width - ow) / 2
             val oy = (self.screen_height - oh) / 2
             # Glass background
-            self.backend.blur_region(ox, oy, ow, oh, 16)
-            self.backend.blend_rect(ox, oy, ow, oh, gc.surface_color, gc.surface_alpha)
+            cap_blur_region(self.backend, ox, oy, ow, oh, 16)
+            cap_blend_rect(self.backend, ox, oy, ow, oh, gc.surface_color, gc.surface_alpha)
             # Border
-            self.backend.blend_rect(ox, oy, ow, 1, gc.border_color, gc.border_alpha)
-            self.backend.blend_rect(ox, oy + oh - 1, ow, 1, gc.border_color, gc.border_alpha)
-            self.backend.blend_rect(ox, oy, 1, oh, gc.border_color, gc.border_alpha)
-            self.backend.blend_rect(ox + ow - 1, oy, 1, oh, gc.border_color, gc.border_alpha)
+            cap_blend_rect(self.backend, ox, oy, ow, 1, gc.border_color, gc.border_alpha)
+            cap_blend_rect(self.backend, ox, oy + oh - 1, ow, 1, gc.border_color, gc.border_alpha)
+            cap_blend_rect(self.backend, ox, oy, 1, oh, gc.border_color, gc.border_alpha)
+            cap_blend_rect(self.backend, ox + ow - 1, oy, 1, oh, gc.border_color, gc.border_alpha)
             # Window title
             if self.focused_idx < self.surfaces.len():
                 val title = self.surfaces[self.focused_idx].title
@@ -1063,9 +1064,9 @@ impl Compositor:
             while wi < self.surfaces.len():
                 val dot_x = dot_start + wi * 16
                 if wi == self.focused_idx:
-                    self.backend.blend_rect(dot_x, dot_y, 8, 8, gc.accent_color, 200)
+                    cap_blend_rect(self.backend, dot_x, dot_y, 8, 8, gc.accent_color, 200)
                 else:
-                    self.backend.blend_rect(dot_x, dot_y, 8, 8, 0x00FFFFFF, 60)
+                    cap_blend_rect(self.backend, dot_x, dot_y, 8, 8, 0x00FFFFFF, 60)
                 wi = wi + 1
 
         # Desktop right-click context menu
@@ -1075,21 +1076,21 @@ impl Compositor:
             val cm_x = self.context_menu_x
             val cm_y = self.context_menu_y
             # Glass background
-            self.backend.blur_region(cm_x, cm_y, cm_w, cm_h, 16)
-            self.backend.blend_rect(cm_x, cm_y, cm_w, cm_h, gc.surface_color, gc.surface_alpha)
+            cap_blur_region(self.backend, cm_x, cm_y, cm_w, cm_h, 16)
+            cap_blend_rect(self.backend, cm_x, cm_y, cm_w, cm_h, gc.surface_color, gc.surface_alpha)
             # Border
-            self.backend.blend_rect(cm_x, cm_y, cm_w, 1, gc.border_color, gc.border_alpha)
-            self.backend.blend_rect(cm_x, cm_y + cm_h - 1, cm_w, 1, gc.border_color, gc.border_alpha)
-            self.backend.blend_rect(cm_x, cm_y, 1, cm_h, gc.border_color, gc.border_alpha)
-            self.backend.blend_rect(cm_x + cm_w - 1, cm_y, 1, cm_h, gc.border_color, gc.border_alpha)
+            cap_blend_rect(self.backend, cm_x, cm_y, cm_w, 1, gc.border_color, gc.border_alpha)
+            cap_blend_rect(self.backend, cm_x, cm_y + cm_h - 1, cm_w, 1, gc.border_color, gc.border_alpha)
+            cap_blend_rect(self.backend, cm_x, cm_y, 1, cm_h, gc.border_color, gc.border_alpha)
+            cap_blend_rect(self.backend, cm_x + cm_w - 1, cm_y, 1, cm_h, gc.border_color, gc.border_alpha)
             # Highlight selected item
             val sel_y = cm_y + 4 + self.context_menu_sel * 26
-            self.backend.blend_rect(cm_x + 2, sel_y, cm_w - 4, 22, gc.accent_color, 40)
+            cap_blend_rect(self.backend, cm_x + 2, sel_y, cm_w - 4, 22, gc.accent_color, 40)
             # Menu items
             self.backend.draw_text(cm_x + 12, cm_y + 8, "New Window", 0xFFE0E0F0, 0x00000000)
-            self.backend.blend_rect(cm_x + 4, cm_y + 28, cm_w - 8, 1, gc.border_color, gc.border_alpha)
+            cap_blend_rect(self.backend, cm_x + 4, cm_y + 28, cm_w - 8, 1, gc.border_color, gc.border_alpha)
             self.backend.draw_text(cm_x + 12, cm_y + 34, "Theme", 0xFFE0E0F0, 0x00000000)
-            self.backend.blend_rect(cm_x + 4, cm_y + 54, cm_w - 8, 1, gc.border_color, gc.border_alpha)
+            cap_blend_rect(self.backend, cm_x + 4, cm_y + 54, cm_w - 8, 1, gc.border_color, gc.border_alpha)
             self.backend.draw_text(cm_x + 12, cm_y + 60, "About", 0xFFA0A0B0, 0x00000000)
 
         # Spotlight search overlay
@@ -1098,17 +1099,17 @@ impl Compositor:
             val sp_h: i32 = 44
             val sp_x = (self.screen_width - sp_w) / 2
             val sp_y = self.screen_height / 4
-            self.backend.blur_region(sp_x, sp_y, sp_w, sp_h, 16)
-            self.backend.blend_rect(sp_x, sp_y, sp_w, sp_h, gc.surface_color, gc.surface_alpha)
+            cap_blur_region(self.backend, sp_x, sp_y, sp_w, sp_h, 16)
+            cap_blend_rect(self.backend, sp_x, sp_y, sp_w, sp_h, gc.surface_color, gc.surface_alpha)
             # Border
-            self.backend.blend_rect(sp_x, sp_y, sp_w, 1, gc.accent_color, 120)
-            self.backend.blend_rect(sp_x, sp_y + sp_h - 1, sp_w, 1, gc.accent_color, 120)
-            self.backend.blend_rect(sp_x, sp_y, 1, sp_h, gc.accent_color, 120)
-            self.backend.blend_rect(sp_x + sp_w - 1, sp_y, 1, sp_h, gc.accent_color, 120)
+            cap_blend_rect(self.backend, sp_x, sp_y, sp_w, 1, gc.accent_color, 120)
+            cap_blend_rect(self.backend, sp_x, sp_y + sp_h - 1, sp_w, 1, gc.accent_color, 120)
+            cap_blend_rect(self.backend, sp_x, sp_y, 1, sp_h, gc.accent_color, 120)
+            cap_blend_rect(self.backend, sp_x + sp_w - 1, sp_y, 1, sp_h, gc.accent_color, 120)
             # Search icon + text
             self.backend.draw_text(sp_x + 12, sp_y + 14, "Search...", 0xFF808090, 0x00000000)
             # Accent underline
-            self.backend.blend_rect(sp_x + 8, sp_y + sp_h - 4, sp_w - 16, 2, gc.accent_color, 80)
+            cap_blend_rect(self.backend, sp_x + 8, sp_y + sp_h - 4, sp_w - 16, 2, gc.accent_color, 80)
 
         # 5. Cursor + present
         draw_cursor(self.backend, self.screen_width, self.screen_height, self.cursor)
@@ -1117,9 +1118,9 @@ impl Compositor:
         if self.theme_transitioning:
             val fade_alpha: u8 = if self.theme_progress < 50: self.theme_progress * 5 else: (100 - self.theme_progress) * 5
             if self.theme_target_dark:
-                self.backend.blend_rect(0, 0, self.screen_width, self.screen_height, 0x00000000, fade_alpha)
+                cap_blend_rect(self.backend, 0, 0, self.screen_width, self.screen_height, 0x00000000, fade_alpha)
             else:
-                self.backend.blend_rect(0, 0, self.screen_width, self.screen_height, 0x00FFFFFF, fade_alpha)
+                cap_blend_rect(self.backend, 0, 0, self.screen_width, self.screen_height, 0x00FFFFFF, fade_alpha)
             # Switch theme at midpoint
             if self.theme_progress >= 50 and self.theme_progress < 60:
                 if self.theme_target_dark:

@@ -110,10 +110,10 @@ Rows = backend. Columns = `blend_fill` · `box_blur` · `gradient_v` · `read_pi
 | Backend | blend_fill | box_blur | gradient_v | read_pixel |
 |---|---|---|---|---|
 | `FbCompositorBackend` (`display_backend.spl:120-138`) | compliant via C | compliant via C | compliant via C | compliant via C |
-| `GpuCompositorBackend` (`display_backend.spl:221-240`) | **approximate** — paints the baremetal FB, which happens to be the virtio-GPU DMA backing, so correct today by coincidence | same | same | same |
+| `GpuCompositorBackend` (`display_backend.spl`) | **opt-out in Phase 1; native impl deferred to Phase 2** — no `impl CompositorGlassCapable`; callers degrade to opaque `fill_rect` via `glass_dispatch.cap_*`. | same | same | same |
 | `HostedCompositorBackend` (`hosted_backend.spl:136-163`) | compliant via `rt_winit_buffer_blend_rect` (winit_ffi.rs:1507-1549) | compliant via `rt_winit_buffer_blur` (winit_ffi.rs:1551-1644), **3-pass** not 5-pass | compliant via `rt_winit_buffer_gradient_v` (winit_ffi.rs:1646-1687) | compliant via `rt_winit_buffer_read_pixel` (winit_ffi.rs:1487-1505) |
 | `BrowserCompositorBackend` (`browser_compositor_backend.spl:95,129,214,238`) | compliant — pure Simple srcOver | **approximate** — HVHVH native, matches C pass count | compliant | compliant |
-| `Engine2dCompositorBackend` (`compositor_engine2d.spl:137-157`) | **bypassed** — routes through `rt_gui_blend_fill` which paints the baremetal FB, not Engine2D's backend. Broken under Vulkan/Metal wraps. | bypassed, same defect | compliant — uses `engine.draw_gradient_rect` | bypassed — `rt_gui_read_pixel` reads baremetal FB |
+| `Engine2dCompositorBackend` (`compositor_engine2d.spl`) | **opt-out in Phase 1; native impl deferred to Phase 2** — no `impl CompositorGlassCapable`; extern block and glass method impls deleted. Callers degrade to opaque `fill_rect` via `glass_dispatch.cap_*`. | same | same | same |
 
 ### Arch-layer glass C source status
 

@@ -86,6 +86,16 @@ Rollback: revert the doc-comment edits and delete the new spec file. The new spe
 
 ## 2. D2 — Move glass effects out of `CompositorBackend`
 
+**Status: Phase 1 implemented 2026-04-14** — trait split in
+`src/os/compositor/display_backend.spl`, opt-in by `FbCompositorBackend`,
+`HostedCompositorBackend`, `BrowserCompositorBackend`; opt-out by
+`GpuCompositorBackend` and `Engine2dCompositorBackend` (no
+`CompositorGlassCapable` impl; `as_glass_capable()` returns `nil`).
+Callers degrade via `os.compositor.glass_dispatch.cap_*` helpers.
+Phase 2 (native per-surface glass impls for Engine2d/Gpu) and Phase 3
+(`glass_effects.spl` deletion) remain open. Details in
+`doc/03_plan/sys_gui/d2_glass_subtrait_migration.md`.
+
 ### 2.1 Files changed
 
 | Path | Reason |
