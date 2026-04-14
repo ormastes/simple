@@ -151,6 +151,20 @@ Priority:
 
 - next milestone
 
+Status (2026-04-14):
+
+- [x] disk-lane boot-green. Direct QEMU boot of
+  `build/os/simpleos_desktop_e2e_32.elf` with `build/os/fat32.img`
+  attached as an NVMe `-drive`+`-device nvme` emits, in order,
+  `[vfs] mounted fat32 device=nvme0 volume=simpleos`,
+  `[desktop-e2e] desktop-ready`, and `[desktop-e2e] launcher-ready apps=4`.
+  Baselines under `doc/08_tracking/baselines/sys_gui_007_disk.{serial.txt,ppm}`.
+  Spec at `test/system/simpleos_desktop_disk_boot_spec.spl`.
+- [ ] per-app launcher spawn marker is still blocked by `shortcut:fail`
+  (SYS-GUI-002, owned by Agent SF). Scoped out of the disk-lane
+  assertion — tracked in
+  `doc/08_tracking/todo/sys_gui_007_live_blocker_2026-04-14.md`.
+
 ## Recommended Artifacts
 
 - serial logs under `build/os/*_serial.log`

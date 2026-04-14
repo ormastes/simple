@@ -86,9 +86,29 @@ fn pcimgr_init():
 # ============================================================================
 
 fn pcimgr_find_by_class(class_code: u8, subclass: u8) -> i64:
-    """Find first device by PCI class/subclass via C cache. Returns index or -1."""
+    """Find first device by PCI class/subclass via C cache. Returns index or -1.
+
+    Delegates to the i64 variant. Direct `u8 == i64` equality silently
+    never matches in the baremetal Cranelift backend (SYS-GUI-007), so
+    the real loop lives in pcimgr_find_by_class_i64 and callers that
+    need the widened comparison (e.g. vfs_init.spl) call it directly.
+    """
+    pcimgr_find_by_class_i64(class_code, subclass)
+
+fn pcimgr_find_by_class_i64(class_code: i64, subclass: i64) -> i64:
+    """Find first device by PCI class/subclass via C cache. Returns index or -1.
+
+    Iterates via rt_pci_device_count() directly so this works even when
+    pcimgr_init() was skipped on baremetal (see vfs_init.spl TODO about
+    the LLVM extern fn resolution collision). The C side lazily runs
+    _pci_scan() on the first rt_pci_* call, so the C cache is always
+    populated at the point this function runs — we just need to avoid
+    relying on the Simple-side `dev_count` mirror which may still be 0.
+    Both parameters are i64 to avoid the u8==i64 equality mismatch.
+    """
+    val count = rt_pci_device_count()
     var i: i64 = 0
-    while i < dev_count:
+    while i < count:
         val cls = rt_pci_get_field(i, 3)
         val sub = rt_pci_get_field(i, 4)
         if cls == class_code and sub == subclass:

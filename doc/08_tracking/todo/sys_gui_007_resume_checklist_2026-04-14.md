@@ -4,6 +4,21 @@ Agent epsilon prep slice. Disk image + spec wiring verified; live lane
 currently blocked by interpreter enum-variant resolution (same class of bug
 Agents alpha/beta/delta are fixing).
 
+**Closed out by Agent G7 (2026-04-14).** Live disk-lane boot is green:
+`[vfs] mounted fat32 device=nvme0 volume=simpleos`, `[desktop-e2e]
+desktop-ready`, and `[desktop-e2e] launcher-ready apps=4` all fire with
+the FAT32 NVMe drive attached. Baselines at
+`doc/08_tracking/baselines/sys_gui_007_disk.{serial.txt,ppm}`. The
+disk-lane-specific blocker was a u8/i64 integer-width mismatch in
+`src/os/services/pcimgr/pcimgr.spl :: pcimgr_find_by_class` that caused
+the NVMe lookup to silently fail; fix landed alongside an
+`pcimgr_find_by_class_i64` sibling and a switched call in
+`src/os/services/vfs/vfs_init.spl`. Remaining cross-cutting blockers
+(SF's `shortcut:fail` and the interpreter enum-variant path) are
+triaged in
+`doc/08_tracking/todo/sys_gui_007_live_blocker_2026-04-14.md` and are
+not disk-lane-specific.
+
 ## Environment (verified on this host)
 
 Tooling present:
