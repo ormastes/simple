@@ -9,6 +9,7 @@
 ##   bin/simple run src/os/port/initramfs_pack.spl -- --help
 ##   bin/simple run src/os/port/initramfs_pack.spl -- build
 ##   bin/simple run src/os/port/initramfs_pack.spl -- build --output build/os/initramfs.img.zst
+##   bin/simple run src/os/port/initramfs_pack.spl -- build --payload /usr/bin/clang:/usr/bin/clang
 ##   bin/simple run src/os/port/initramfs_pack.spl -- validate build/os/initramfs.img.zst
 
 use std.fs
@@ -29,6 +30,13 @@ val LLVM_TOOLS: [text] = [
     "llvm-ranlib", "llvm-objdump", "llvm-objcopy", "llvm-strip",
 ]
 
+## A payload injection entry: a host path (file or directory) to be staged
+## at guest_path inside the initramfs. is_dir=true triggers recursive copy.
+class PayloadEntry:
+    host_path: text
+    guest_path: text
+    is_dir: bool
+
 class PackConfig:
     simple_binary: text
     llvm_prefix: text
@@ -36,6 +44,7 @@ class PackConfig:
     source_tree: text
     output: text
     staging: text
+    payloads: List<PayloadEntry>
 
 fn usage():
     print "Usage: bin/simple run src/os/port/initramfs_pack.spl -- <command> [options]"
@@ -52,6 +61,8 @@ fn usage():
     print "  --source-tree <p>        Source tree (default: {DEFAULT_SOURCE_TREE})"
     print "  --output <p>             Output image (default: {DEFAULT_OUTPUT})"
     print "  --staging <p>            Staging dir (default: {DEFAULT_STAGING})"
+    print "  --payload HOST:GUEST     Inject host file/dir at GUEST path (repeatable)"
+    print "                           If HOST is a directory, it is copied recursively."
 
 fn parse_args(args: List<text>) -> (text, PackConfig, text):
     """Return (command, config, validate_arg)."""
@@ -63,6 +74,7 @@ fn parse_args(args: List<text>) -> (text, PackConfig, text):
     var source_tree = DEFAULT_SOURCE_TREE
     var output = DEFAULT_OUTPUT
     var staging = DEFAULT_STAGING
+    var payloads: List<PayloadEntry> = []
 
     var i = 0
     while i < args.len():
@@ -95,6 +107,17 @@ fn parse_args(args: List<text>) -> (text, PackConfig, text):
         else if arg == "--staging":
             i = i + 1
             staging = args[i]
+        else if arg == "--payload":
+            i = i + 1
+            val spec = args[i]
+            val colon_idx = spec.index_of(":")
+            if colon_idx < 0:
+                print "error: --payload must be HOST:GUEST, got: {spec}"
+                process.exit(2)
+            val host_path = spec.slice(0, colon_idx)
+            val guest_path = spec.slice(colon_idx + 1, spec.len())
+            val is_dir = fs.dir_exists(host_path)
+            payloads.push(PayloadEntry(host_path: host_path, guest_path: guest_path, is_dir: is_dir))
         i = i + 1
 
     if command == "":
@@ -109,6 +132,7 @@ fn parse_args(args: List<text>) -> (text, PackConfig, text):
         source_tree: source_tree,
         output: output,
         staging: staging,
+        payloads: payloads,
     )
     (command, config, validate_arg)
 
@@ -146,6 +170,53 @@ fn stage_tree(src: text, dst: text, optional: bool):
         print "error: failed to copy tree {src} -> {dst}"
         print result.stderr
         process.exit(1)
+
+## add_payload appends a single host file into the entries list at the given
+## guest path inside the staging directory.
+##
+## Parameters:
+##   staging    - root of the staging tree (absolute or relative)
+##   host_path  - absolute path to the file on the build host
+##   guest_path - destination path inside the initramfs (e.g. "/usr/bin/clang")
+##
+## The guest_path is treated as relative to staging; a leading "/" is stripped.
+fn add_payload(staging: text, host_path: text, guest_path: text):
+    var rel = guest_path
+    if rel.starts_with("/"):
+        rel = rel.slice(1, rel.len())
+    val dst = "{staging}/{rel}"
+    print "[pack] payload: {host_path} -> /{rel}"
+    stage_file(src: host_path, dst: dst, optional: false)
+
+## add_payload_dir recursively copies a host directory tree into the staging
+## area at the given guest path.
+##
+## Parameters:
+##   staging   - root of the staging tree
+##   host_dir  - directory on the build host to copy
+##   guest_dir - destination directory path inside the initramfs
+fn add_payload_dir(staging: text, host_dir: text, guest_dir: text):
+    var rel = guest_dir
+    if rel.starts_with("/"):
+        rel = rel.slice(1, rel.len())
+    val dst = "{staging}/{rel}"
+    print "[pack] payload dir: {host_dir} -> /{rel}"
+    stage_tree(src: host_dir, dst: dst, optional: false)
+
+## compress_zstd compresses data in memory by piping it through the host
+## `zstd` binary at level -19. Returns the compressed bytes.
+##
+## If `zstd` is not available on the host the process.run call will fail
+## and this function will print an error and exit. The file-based run_zstd
+## function below is the primary compression path for the build command;
+## this function is exported for callers that already have data in memory.
+fn compress_zstd(data: [u8]) -> [u8]:
+    val result = process.run("zstd", ["-19", "-f", "-c"], stdin: data)
+    if result.exit_code != 0:
+        print "error: zstd compress_zstd failed"
+        print result.stderr
+        process.exit(1)
+    result.stdout_bytes
 
 fn write_stub_init(path: text):
     """Write a tiny /sbin/init placeholder (shell stub)."""
@@ -212,6 +283,13 @@ fn populate_staging(config: PackConfig):
     # /sbin/init
     write_stub_init("{s}/sbin/init")
 
+    # Inject external payload entries supplied via --payload HOST:GUEST
+    for entry in config.payloads:
+        if entry.is_dir:
+            add_payload_dir(staging: s, host_dir: entry.host_path, guest_dir: entry.guest_path)
+        else:
+            add_payload(staging: s, host_path: entry.host_path, guest_path: entry.guest_path)
+
 fn run_cpio(staging: text, cpio_path: text):
     """Invoke cpio via sh -c so we can pipe `find`. The shell is used
     only for the pipeline; no logic lives here."""
@@ -266,6 +344,8 @@ fn cmd_build(config: PackConfig):
     print "  sysroot: {config.sysroot}"
     print "  src:    {config.source_tree}"
     print "  output: {config.output}"
+    if config.payloads.len() > 0:
+        print "  payloads: {config.payloads.len()} extra entries"
 
     populate_staging(config)
 
