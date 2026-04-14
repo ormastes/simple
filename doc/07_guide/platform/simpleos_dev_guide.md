@@ -444,7 +444,7 @@ SimpleOS now has two intentionally separate launch proofs:
 Current status:
 
 - `Browser Demo`, `Hello World`, `File Manager`, and `Shell` are represented in
-  the FAT32 manifest table for the disk-backed lane
+  the FAT32 manifest table for the disk-backed resident-manifest lane
 - `spawn_binary()` resolves disk-backed packaged apps first, then resolves direct
   ELF bytes, and still contains a transitional resident-entry fallback
 - `browser_engine_in_qemu_spec.spl` is the right place for direct ELF boot

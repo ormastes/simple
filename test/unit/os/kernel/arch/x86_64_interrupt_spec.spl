@@ -1,0 +1,59 @@
+use std.spec
+use os.kernel.arch.x86_64.interrupt.{X86Interrupt, x86_install_runtime, x86_runtime_installed, x86_dispatch_installed_syscall, x86_read_trap_log}
+use os.kernel.arch.x86_64.trap_runtime.{X86TrapRuntime}
+use os.kernel.scheduler.scheduler.{Scheduler}
+use os.kernel.ipc.ipc.{IpcManager}
+use os.kernel.log.klog.{KernelLog}
+use os.kernel.types.syscall_types.{SyscallArgs}
+
+describe "x86_64 interrupt runtime bridge":
+    it "reports missing runtime until installed":
+        expect(x86_runtime_installed()).to_equal(false)
+
+    it "fails cleanly when syscall dispatch runs without runtime":
+        val result = x86_dispatch_installed_syscall(SyscallArgs(
+            id: 4,
+            arg0: 0,
+            arg1: 0,
+            arg2: 0,
+            arg3: 0,
+            arg4: 0,
+            arg5: 0
+        ))
+        expect(result.is_err()).to_equal(true)
+        expect(result.err().unwrap()).to_contain("runtime is not installed")
+
+        val entries = x86_read_trap_log(0, 0, 4)
+        expect(entries.len()).to_equal(0)
+
+    it "allows direct runtime installation":
+        x86_install_runtime(Scheduler.new(), IpcManager.new(), KernelLog.new(16))
+        expect(x86_runtime_installed()).to_equal(true)
+
+    it "allows the interrupt HAL to own runtime installation":
+        X86Interrupt.install_runtime(Scheduler.new(), IpcManager.new(), KernelLog.new(8))
+        expect(X86Interrupt.runtime_installed()).to_equal(true)
+
+    it "accepts a precomposed trap runtime bundle":
+        val runtime = X86TrapRuntime.new(Scheduler.new(), IpcManager.new(), KernelLog.new(8))
+        X86Interrupt.install_runtime_bundle(runtime)
+        expect(X86Interrupt.runtime_installed()).to_equal(true)
+
+    it "accepts a bootstrap runtime install":
+        X86Interrupt.install_bootstrap_runtime(8)
+        expect(X86Interrupt.runtime_installed()).to_equal(true)
+
+    it "dispatches a syscall through installed runtime objects":
+        x86_install_runtime(Scheduler.new(), IpcManager.new(), KernelLog.new(16))
+
+        val result = x86_dispatch_installed_syscall(SyscallArgs(
+            id: 4,
+            arg0: 0,
+            arg1: 0,
+            arg2: 0,
+            arg3: 0,
+            arg4: 0,
+            arg5: 0
+        ))
+        expect(result.is_err()).to_equal(false)
+        expect(result.unwrap().value).to_equal(0)

@@ -4,20 +4,20 @@
 
 This note separates the three launch paths that are easy to conflate:
 
-1. packaged disk-backed app launch
+1. disk-backed resident-manifest launch
 2. resident-manifest fallback
 3. true arbitrary x86_64 binary execution
 
-## 1. Packaged disk-backed app launch
+## 1. Disk-backed resident-manifest launch
 
 This is the production path for `x64-desktop-disk`.
 
-The syscall path in `src/os/kernel/ipc/syscall.spl` resolves packaged apps from the FAT32 disk through `resolve_disk_launch_entry(path)`. The launcher then uses manifest-backed metadata from `src/os/desktop/app_manifest.spl`.
+The syscall path in `src/os/kernel/ipc/syscall.spl` resolves resident-manifest entries from the FAT32 disk through `resolve_disk_launch_entry(path)`. The launcher then uses manifest-backed metadata from `src/os/desktop/app_manifest.spl`.
 
 Use this lane to prove:
 - FAT32 mount
 - launcher registration from manifests
-- packaged app execution from disk-backed paths such as `/sys/apps/hello_world`
+- resident-manifest execution from disk-backed paths such as `/sys/apps/hello_world`
 
 ## 2. Resident-manifest fallback
 
@@ -46,3 +46,23 @@ Use this lane to prove:
 - Browser Demo is still not a pure packaged-app launch path; it is still reachable through resident-manifest fallback and shell seeding.
 - The desktop E2E Browser Demo path still carries a test-only local fallback.
 - The kernel-side x86_64 ELF execution path is no longer the blocker; the remaining work is to remove Browser Demo-specific fallback dependencies and let the packaged disk-backed route stand on its own.
+
+## Recommendation
+
+The clean next step is an **exported syscall bridge**, not a scheduler bootstrap change and not an in-process exec bridge.
+
+- `create_user_task(...)` is already in the scheduler.
+- `resolve_executable_bytes(...)` already feeds the x86_64 ELF path.
+- `spawn_binary(path, ...)` is already the userspace/kernel boundary that can carry disk-backed packaged launch and direct ELF launch.
+
+So the missing work is to standardize launcher-facing app start on the syscall bridge and retire Browser Demo-specific local fallback behavior separately. The scheduler should stay focused on task creation, not on launch-policy plumbing.
+
+## x86_64 Runtime Status
+
+The x86_64 baremetal boot path now installs an explicit trap-runtime bundle during boot.
+
+- `examples/simple_os/arch/x86_64/os_entry.spl` installs `X86Interrupt.install_bootstrap_runtime(...)`
+- `src/os/kernel/arch/x86_64/trap_runtime.spl` owns `Scheduler`, `IpcManager`, and `KernelLog`
+- `src/os/kernel/arch/x86_64/interrupt.spl` exposes runtime installation/query helpers
+
+This makes runtime ownership explicit, but it does **not** mean x86_64 arbitrary exec is complete. The remaining gap is still the callable syscall/trap bridge from the baremetal C side into the installed runtime.

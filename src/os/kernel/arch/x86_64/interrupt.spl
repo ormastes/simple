@@ -13,7 +13,13 @@ use os.kernel.interrupts.apic.{apic_init, apic_eoi, apic_write, apic_read,
     APIC_BASE, APIC_REG_EOI}
 use os.kernel.interrupts.pic.{pic_disable}
 use os.kernel.arch.x86_64.cpu.{cli, sti}
+use os.kernel.arch.x86_64.trap_runtime.{X86TrapRuntime}
 use os.kernel.types.task_types.{TaskContext}
+use os.kernel.types.syscall_types.{SyscallArgs, SyscallResult, KLogEntry}
+use os.kernel.scheduler.scheduler.{Scheduler}
+use os.kernel.ipc.ipc.{IpcManager}
+use os.kernel.log.klog.{KernelLog}
+use os.kernel.ipc.syscall.{syscall_handler}
 use std.baremetal.x86.io.{outb, inb}
 
 # ============================================================================
@@ -39,6 +45,13 @@ struct X86Interrupt:
     """
     pass_dn
 
+# ============================================================================
+# Runtime Ownership
+# ============================================================================
+
+var g_trap_runtime_installed: bool = false
+var g_trap_runtime: X86TrapRuntime? = nil
+
 impl X86Interrupt:
     fn init():
         """Initialize IDT with 256 entries, remap and disable legacy PIC,
@@ -53,6 +66,22 @@ impl X86Interrupt:
         # APIC init handles: PIC disable, APIC enable via MSR, SVR setup,
         # TPR=0, ESR clear, initial EOI, mask all LVT, calibrate timer
         apic_init()
+
+    fn install_runtime(scheduler: Scheduler, ipc: IpcManager, klog: KernelLog):
+        """Install the runtime objects used by trap/syscall dispatch."""
+        x86_install_runtime(scheduler, ipc, klog)
+
+    fn install_runtime_bundle(runtime: X86TrapRuntime):
+        """Install a precomposed runtime bundle for trap dispatch."""
+        x86_install_runtime_bundle(runtime)
+
+    fn install_bootstrap_runtime(log_capacity: u64):
+        """Install the minimal early-boot runtime bundle."""
+        x86_install_bootstrap_runtime(log_capacity)
+
+    fn runtime_installed() -> bool:
+        """Report whether the x86_64 trap runtime has been installed."""
+        x86_runtime_installed()
 
     fn enable():
         """Enable maskable interrupts (STI instruction)."""
@@ -149,3 +178,45 @@ fn _default_unhandled(ctx: TaskContext):
     Silently ignores the interrupt.
     """
     pass_dn
+
+fn _log_bridge_failure(message: text):
+    """Record x86 bridge/runtime failures in the installed kernel log."""
+    if g_trap_runtime != nil:
+        var runtime = g_trap_runtime.unwrap()
+        runtime.klog.write(3, 0, 0, message)
+        g_trap_runtime = Some(runtime)
+
+fn x86_install_runtime(scheduler: Scheduler, ipc: IpcManager, klog: KernelLog):
+    """Install the kernel runtime objects used by the x86_64 trap bridge."""
+    g_trap_runtime = Some(X86TrapRuntime.new(scheduler, ipc, klog))
+    g_trap_runtime_installed = true
+
+fn x86_install_runtime_bundle(runtime: X86TrapRuntime):
+    """Install a precomposed runtime bundle for x86_64 trap dispatch."""
+    g_trap_runtime = Some(runtime)
+    g_trap_runtime_installed = true
+
+fn x86_install_bootstrap_runtime(log_capacity: u64):
+    """Install the minimal early-boot runtime bundle."""
+    g_trap_runtime = Some(X86TrapRuntime.bootstrap(log_capacity))
+    g_trap_runtime_installed = true
+
+fn x86_runtime_installed() -> bool:
+    """Report whether the x86_64 trap bridge has runtime objects installed."""
+    g_trap_runtime_installed and g_trap_runtime != nil
+
+fn x86_read_trap_log(min_level: u8, offset: u64, max_count: u64) -> [KLogEntry]:
+    """Read entries from the installed x86_64 trap runtime log buffer."""
+    if g_trap_runtime == nil:
+        return []
+    g_trap_runtime.unwrap().klog.read(min_level, offset, max_count)
+
+fn x86_dispatch_installed_syscall(args: SyscallArgs) -> Result<SyscallResult, text>:
+    """Dispatch syscall arguments through the installed x86_64 runtime."""
+    if not x86_runtime_installed():
+        val message = "x86 trap runtime is not installed"
+        _log_bridge_failure(message)
+        return Err(message)
+
+    val runtime = g_trap_runtime.unwrap()
+    Ok(syscall_handler(args, runtime.scheduler, runtime.ipc, runtime.klog))
