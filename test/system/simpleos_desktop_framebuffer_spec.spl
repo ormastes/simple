@@ -78,6 +78,7 @@ use test.qemu.os.common.qemu_os_harness.{
 
 extern fn rt_env_get(name: text) -> text
 extern fn rt_thread_sleep(ms: i64)
+extern fn rt_get_cwd() -> text
 
 # ===========================================================================
 # Helpers
@@ -210,7 +211,11 @@ describe "SimpleOS desktop framebuffer baseline (SYS-GUI-006)":
 
         val qmp_socket = "/tmp/simpleos_desktop_qmp.sock"
         val serial_log = "build/os/simpleos_desktop_qemu_serial.log"
-        val capture_ppm = "build/os/simpleos_desktop_capture.ppm"
+        # Round-15 fix: QEMU cwd is restricted — screendump with a relative
+        # path returns "Permission denied". Use an absolute path so QEMU can
+        # write the PPM regardless of its working directory.
+        val _cwd = rt_get_cwd()
+        val capture_ppm = "{_cwd}/build/os/simpleos_desktop_capture.ppm"
         val baseline_dir = "test/baselines/simpleos_desktop_framebuffer"
         val baseline_path = "{baseline_dir}/desktop_scene.ppm"
 
@@ -312,8 +317,11 @@ describe "SimpleOS desktop framebuffer baseline (SYS-GUI-006)":
                 # still a zero-byte placeholder, record it now and pass.
                 # Self-healing bootstrap on a fresh checkout — the next
                 # run exercises real compare.
-                val baseline_bytes = file_read_bytes(baseline_path)
-                if (not file_exists(baseline_path)) or baseline_bytes.len() == 0:
+                # Round-15: check file_exists first to avoid calling
+                # file_read_bytes on a missing file — the interpreter-level
+                # rt_file_read_bytes returns Option<[u8]> for missing files,
+                # causing .len() to fail on the enum value.
+                if not file_exists(baseline_path):
                     val wrote = _write_ppm_local(
                         result.pixels, result.width, result.height, baseline_path)
                     print "[simpleos_desktop_fb_spec] no baseline found, recorded: {baseline_path} (ok={wrote})"

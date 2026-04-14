@@ -110,6 +110,18 @@ impl<'a> MirLowerer<'a> {
             // G5: `StructFoo { x: 1 }.method()` — the StructInit payload
             // already carries the target TypeId.
             HirExprKind::StructInit { ty, .. } => Some(*ty),
+            // G1: `global_var.method()` — the Global expr's ty was resolved
+            // from the globals table during HIR lowering; return it directly.
+            HirExprKind::Global(_) => Some(expr.ty),
+            // G7: `(&x).method()` — the Ref expr has type Pointer { inner: T };
+            // strip one Pointer layer to recover T as the dispatch receiver type.
+            HirExprKind::Ref(_inner) => {
+                let registry = self.type_registry?;
+                match registry.get(expr.ty)? {
+                    HirType::Pointer { inner, .. } => Some(*inner),
+                    _ => None,
+                }
+            }
             // G9: `(x as Foo).method()` — the cast target is the receiver
             // type the dispatcher should qualify against.
             HirExprKind::Cast { target, .. } => Some(*target),

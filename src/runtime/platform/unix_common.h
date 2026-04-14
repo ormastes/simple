@@ -535,8 +535,30 @@ int64_t rt_process_wait(int64_t pid, int64_t timeout_ms) {
 bool rt_process_is_running(int64_t pid) {
     if (pid <= 0) return false;
 
-    /* Use kill(pid, 0) to check if process exists */
-    return kill((pid_t)pid, 0) == 0;
+    /* Try waitpid(WNOHANG) first: this correctly handles direct children.
+     * - Returns 0: child still running.
+     * - Returns pid: child has exited (zombie reaped); process is NOT running.
+     * - Returns -1/ECHILD: pid is not our child — fall through to kill(pid,0).
+     * This fixes the bug where a zombie child (exited but not yet reaped) was
+     * reported as running because kill(pid,0) returns 0 for zombies. */
+    int status;
+    pid_t result = waitpid((pid_t)pid, &status, WNOHANG);
+    if (result == (pid_t)pid) {
+        /* Child exited; we just reaped it. */
+        return false;
+    }
+    if (result == 0) {
+        /* waitpid returned 0: child exists and has NOT exited yet. */
+        return true;
+    }
+    /* result == -1: ECHILD means pid is not our child (async-spawned grandchild,
+     * or pid was already reaped). Use kill(pid,0) as fallback:
+     * - Returns 0 or -1/EPERM: process exists and is running.
+     * - Returns -1/ESRCH: process does not exist. */
+    if (kill((pid_t)pid, 0) == 0) {
+        return true;
+    }
+    return (errno == EPERM);
 }
 
 bool rt_process_kill(int64_t pid) {
