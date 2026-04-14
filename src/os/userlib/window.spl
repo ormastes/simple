@@ -22,6 +22,7 @@
 use os.userlib.syscall_raw.{syscall}
 use os.userlib.ipc_protocol.{COMP_CREATE_WINDOW, COMP_DESTROY_WINDOW, COMP_UPDATE_TREE, COMP_FOCUS, COMP_RESIZE, COMP_MOVE, COMP_SET_TITLE, COMP_MINIMIZE, COMP_MAXIMIZE, COMP_RESTORE, COMP_INPUT_EVENT, COMP_CLOSE_REQUEST, COMP_FOCUS_CHANGED}
 use common.window_protocol.window_protocol.{WmCreateRequest, WmCreateResponse, WmInputEvent, WmCloseRequest, WmResizeRequest, WmMoveRequest, WmFocusEvent, WM_STATUS_OK, WM_STATUS_ERROR, WM_EVENT_CLOSE, WM_EVENT_FOCUS, WM_EVENT_RESIZE, wm_input_event}
+use common.window_protocol.geometry.{WindowId, Point, Px, KeyCode, Modifiers, WmEventType}
 use os.userlib.process.{getpid}
 
 extern fn serial_println(msg: text)
@@ -182,7 +183,7 @@ impl WindowClient:
         val status = _decode_i32(reply, 0)
         val wid = _decode_u64(reply, 4)
 
-        if status == WM_STATUS_OK and wid > 0:
+        if status == WM_STATUS_OK.value and wid > 0:
             self.window_id = wid
             serial_println("[window-client] Created window {wid}: '{title}' ({width}x{height})")
             return wid
@@ -393,13 +394,23 @@ impl WindowClient:
         val msg_raw = syscall(SYS_IPC_RECV, self.app_port, 0xFFFFFFFF, 0, 0, 0)
         if msg_raw <= 0:
             # Error: synthesize a close event
-            return wm_input_event(self.window_id, WM_EVENT_CLOSE, 0, 0, 0)
+            return wm_input_event(
+                WindowId(value: self.window_id),
+                WM_EVENT_CLOSE,
+                KeyCode(value: 0),
+                Point.xy(0, 0)
+            )
 
         val event = self._parse_incoming_event(msg_raw.to_u64())
         if event != nil:
             return event
         # Fallback: synthetic close event
-        return wm_input_event(self.window_id, WM_EVENT_CLOSE, 0, 0, 0)
+        return wm_input_event(
+            WindowId(value: self.window_id),
+            WM_EVENT_CLOSE,
+            KeyCode(value: 0),
+            Point.xy(0, 0)
+        )
 
     # -- Queries -------------------------------------------------------------
 
@@ -484,24 +495,33 @@ impl WindowClient:
                 if payload_len >= 32:
                     modifiers = _read_u32_at(payload_addr + 28)
                 return WmInputEvent(
-                    window_id: wid,
-                    event_type: event_type,
-                    key_code: key_code,
-                    mouse_x: mouse_x,
-                    mouse_y: mouse_y,
-                    modifiers: modifiers
+                    window_id: WindowId(value: wid),
+                    event_type: WmEventType(value: event_type),
+                    key_code: KeyCode(value: key_code),
+                    mouse_pos: Point.xy(mouse_x, mouse_y),
+                    modifiers: Modifiers(value: modifiers)
                 )
             COMP_CLOSE_REQUEST:
                 if payload_len < 12:
                     return nil
                 val wid = _read_u64_at(payload_addr + 4)
-                return wm_input_event(wid, WM_EVENT_CLOSE, 0, 0, 0)
+                return wm_input_event(
+                    WindowId(value: wid),
+                    WM_EVENT_CLOSE,
+                    KeyCode(value: 0),
+                    Point.xy(0, 0)
+                )
             COMP_FOCUS_CHANGED:
                 if payload_len < 13:
                     return nil
                 val wid = _read_u64_at(payload_addr + 4)
                 val focused_byte = _read_u8_at(payload_addr + 12)
-                return wm_input_event(wid, WM_EVENT_FOCUS, focused_byte.to_u32(), 0, 0)
+                return wm_input_event(
+                    WindowId(value: wid),
+                    WM_EVENT_FOCUS,
+                    KeyCode(value: focused_byte.to_u32()),
+                    Point.xy(0, 0)
+                )
             _:
                 serial_println("[window-client] Unknown event method {method}")
                 return nil

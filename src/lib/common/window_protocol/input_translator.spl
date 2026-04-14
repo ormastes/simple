@@ -1,0 +1,123 @@
+# Input Translator — shared native-event → WmInputEvent → UIEvent translation.
+#
+# Single source of truth for how host and SimpleOS WM stacks turn raw
+# keyboard and mouse events into the wrapper-typed wire protocol, and how
+# wire events map to the widget-tree `UIEvent` enum. Used by:
+#   - `os/compositor/compositor.spl` key/mouse handlers (SimpleOS path)
+#   - `os/compositor/host_compositor_entry.spl` (host path)
+#
+# Keeps exactly one translation layer so host and guest behave identically.
+
+use common.window_protocol.geometry.{
+    WindowId, Point, Px, KeyCode, Modifiers
+}
+use common.window_protocol.window_protocol.{
+    WmInputEvent, wm_input_event, wm_input_event_with_mods,
+    WM_EVENT_KEY_PRESS, WM_EVENT_KEY_RELEASE,
+    WM_EVENT_MOUSE_MOVE, WM_EVENT_MOUSE_CLICK, WM_EVENT_MOUSE_RELEASE
+}
+use os.drivers.input.ps2_keyboard.{Key, KeyEvent}
+use os.drivers.input.ps2_mouse.{MouseEvent}
+use common.ui.widget.{UIEvent}
+
+# ============================================================================
+# Key → KeyCode
+# ============================================================================
+
+fn key_to_keycode(key: Key) -> KeyCode:
+    """Pack a Key enum into the `KeyCode` wire wrapper. Numeric layout
+    mirrors a subset of the USB HID usage table for portability."""
+    match key:
+        Key.Escape: KeyCode(value: 0x29)
+        Key.Backspace: KeyCode(value: 0x2A)
+        Key.Tab: KeyCode(value: 0x2B)
+        Key.Enter: KeyCode(value: 0x28)
+        Key.Space: KeyCode(value: 0x2C)
+        Key.Up: KeyCode(value: 0x52)
+        Key.Down: KeyCode(value: 0x51)
+        Key.Left: KeyCode(value: 0x50)
+        Key.Right: KeyCode(value: 0x4F)
+        Key.Insert: KeyCode(value: 0x49)
+        Key.Delete: KeyCode(value: 0x4C)
+        Key.Home: KeyCode(value: 0x4A)
+        Key.End: KeyCode(value: 0x4D)
+        Key.PageUp: KeyCode(value: 0x4B)
+        Key.PageDown: KeyCode(value: 0x4E)
+        _: KeyCode(value: 0)
+
+# ============================================================================
+# Native → WmInputEvent
+# ============================================================================
+
+fn key_event_to_wm(target: WindowId, ev: KeyEvent, mods: Modifiers) -> WmInputEvent:
+    """Translate a driver `KeyEvent` into the wire `WmInputEvent`."""
+    match ev:
+        KeyEvent.Press(key):
+            wm_input_event_with_mods(
+                target,
+                WM_EVENT_KEY_PRESS,
+                key_to_keycode(key),
+                Point.xy(0, 0),
+                mods
+            )
+        KeyEvent.Release(key):
+            wm_input_event_with_mods(
+                target,
+                WM_EVENT_KEY_RELEASE,
+                key_to_keycode(key),
+                Point.xy(0, 0),
+                mods
+            )
+
+fn mouse_event_to_wm(target: WindowId, ev: MouseEvent, mods: Modifiers) -> WmInputEvent:
+    """Translate a driver `MouseEvent` into the wire `WmInputEvent`.
+    Edge-triggered button presses map to `WM_EVENT_MOUSE_CLICK`; releases
+    map to `WM_EVENT_MOUSE_RELEASE`; everything else is a move."""
+    val pos = Point.xy(ev.x.to_i32(), ev.y.to_i32())
+    if ev.left_just_pressed:
+        return wm_input_event_with_mods(target, WM_EVENT_MOUSE_CLICK, KeyCode(value: 0), pos, mods)
+    if ev.left_just_released:
+        return wm_input_event_with_mods(target, WM_EVENT_MOUSE_RELEASE, KeyCode(value: 0), pos, mods)
+    wm_input_event_with_mods(target, WM_EVENT_MOUSE_MOVE, KeyCode(value: 0), pos, mods)
+
+# ============================================================================
+# Key → UIEvent (widget-tree event)
+# ============================================================================
+
+fn key_to_ui_event(key: Key, shift_held: bool, printable: text?) -> UIEvent?:
+    """Map a raw Key (plus shift state and a pre-computed printable-char
+    lookup) into the widget-tree `UIEvent`. Returns `nil` for keys that
+    should not be propagated."""
+    match key:
+        Key.Up: UIEvent.KeyPress("up")
+        Key.Down: UIEvent.KeyPress("down")
+        Key.Left: UIEvent.KeyPress("left")
+        Key.Right: UIEvent.KeyPress("right")
+        Key.Enter: UIEvent.KeyPress("enter")
+        Key.Backspace: UIEvent.KeyPress("backspace")
+        Key.Delete: UIEvent.KeyPress("delete")
+        Key.Tab: if shift_held: UIEvent.FocusPrev else: UIEvent.FocusNext
+        Key.Escape: UIEvent.KeyPress("escape")
+        Key.Home: UIEvent.KeyPress("home")
+        Key.End: UIEvent.KeyPress("end")
+        Key.PageUp: UIEvent.KeyPress("pageup")
+        Key.PageDown: UIEvent.KeyPress("pagedown")
+        Key.Space: UIEvent.KeyPress(" ")
+        _:
+            if printable != nil:
+                UIEvent.KeyPress(printable)
+            else:
+                nil
+
+fn wm_to_ui_event(ev: WmInputEvent) -> UIEvent?:
+    """Map a wire `WmInputEvent` to a widget-tree `UIEvent`. Mouse moves
+    return nil (handled by compositor, not widget tree). Clicks and
+    releases map to Touch* variants."""
+    val etype = ev.event_type.value
+    if etype == WM_EVENT_MOUSE_CLICK.value:
+        return UIEvent.TouchPress(ev.mouse_pos.x.value, ev.mouse_pos.y.value)
+    if etype == WM_EVENT_MOUSE_RELEASE.value:
+        return UIEvent.TouchRelease(ev.mouse_pos.x.value, ev.mouse_pos.y.value)
+    if etype == WM_EVENT_MOUSE_MOVE.value:
+        return UIEvent.TouchMove(ev.mouse_pos.x.value, ev.mouse_pos.y.value)
+    nil
