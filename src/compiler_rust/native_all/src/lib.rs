@@ -14,6 +14,16 @@ pub use simple_compiler;
 pub use simple_runtime;
 pub use simple_driver;
 
+// Row 3 hosted-compositor SFFI bindings. This `extern crate` is the
+// load-bearing reference that forces rustc to link the staticlib's
+// object files into `libsimple_native_all.a`, exporting the
+// `rt_cocoa_*` / `rt_win32_*` / `rt_hosted_select_surface` symbols.
+// The crate itself compiles as "stubs only" on all hosts by default;
+// real Cocoa / Win32 code is gated behind its `cocoa-real` / `win32-real`
+// features.
+#[allow(unused_extern_crates)]
+extern crate spl_hosted_runtime;
+
 use std::path::PathBuf;
 
 use simple_compiler::pipeline::{NativeBuildConfig, NativeProjectBuilder};
