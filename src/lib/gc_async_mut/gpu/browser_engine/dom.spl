@@ -10,6 +10,7 @@
 # lookups.
 
 use std.gc_async_mut.gpu.browser_engine.css.{StyleProps, CssValue, BorderProps, BoxShadow, BoxEdges, be_default_style, parse_css_value}
+use app.ui.chromium.css_ext.{parse_float_keyword, parse_clear_keyword, parse_outline_style, calc_apply, calc_resolve, CalcValue, CALC_OP_ADD, CALC_OP_SUB, CALC_OP_MUL, CALC_OP_DIV}
 
 class BeDomNode:
     """A DOM node in the browser engine's simplified tree.
@@ -66,9 +67,9 @@ class BeDomNode:
             "display" =>
                 s.display = value
             "width" =>
-                s.width = parse_css_value(value)
+                s.width = parse_length_or_calc(value)
             "height" =>
-                s.height = parse_css_value(value)
+                s.height = parse_length_or_calc(value)
             "min-width" =>
                 s.min_width = parse_css_value(value)
             "max-width" =>
@@ -164,13 +165,13 @@ class BeDomNode:
             "position" =>
                 s.position = value
             "top" =>
-                s.top = parse_css_value(value)
+                s.top = parse_length_or_calc(value)
             "right" =>
-                s.right = parse_css_value(value)
+                s.right = parse_length_or_calc(value)
             "bottom" =>
-                s.bottom = parse_css_value(value)
+                s.bottom = parse_length_or_calc(value)
             "left" =>
-                s.left = parse_css_value(value)
+                s.left = parse_length_or_calc(value)
             "opacity" =>
                 s.opacity = parse_float_value(value)
             "visibility" =>
@@ -233,9 +234,15 @@ class BeDomNode:
             "list-style-type" =>
                 pass_dn
             "float" =>
-                pass_dn  # accept but not implemented in layout
+                # Routed via css_ext::parse_float_keyword.
+                val fc = parse_float_keyword(value.trim())
+                if fc >= 0:
+                    s.float_code = fc
             "clear" =>
-                pass_dn
+                # Routed via css_ext::parse_clear_keyword.
+                val cc = parse_clear_keyword(value.trim())
+                if cc >= 0:
+                    s.clear_code = cc
             "text-indent" =>
                 pass_dn
             "vertical-align" =>
@@ -255,13 +262,31 @@ class BeDomNode:
             "direction" =>
                 pass_dn
             "outline" =>
-                pass_dn
+                # Shorthand: width style color (any order). Route style keyword
+                # through css_ext::parse_outline_style and length/color through
+                # the existing helpers.
+                val oparts = sb_dom_split_ws(value)
+                for op in oparts:
+                    val os_code = parse_outline_style(op)
+                    if os_code >= 0:
+                        s.outline_style = op
+                    elif op.ends_with("px") or op.ends_with("em"):
+                        val ocv = parse_css_value(op)
+                        s.outline_width = ocv.value_as_i32()
+                    else:
+                        s.outline_color = parse_color_value(op)
             "outline-color" =>
-                pass_dn
+                s.outline_color = parse_color_value(value)
             "outline-style" =>
-                pass_dn
+                val os_code2 = parse_outline_style(value.trim())
+                if os_code2 >= 0:
+                    s.outline_style = value.trim()
             "outline-width" =>
-                pass_dn
+                val ocv2 = parse_css_value(value)
+                s.outline_width = ocv2.value_as_i32()
+            "outline-offset" =>
+                val ocv3 = parse_css_value(value)
+                s.outline_offset = ocv3.value_as_i32()
             "border-spacing" =>
                 pass_dn
             "box-shadow" =>
@@ -1506,3 +1531,158 @@ fn find_substr(haystack: text, needle: text) -> i32:
             return i
         i = i + 1
     return 999999999
+
+# =========================================================================
+# calc() wiring — routes length-valued properties through css_ext::calc_resolve
+# =========================================================================
+
+pub fn parse_length_or_calc(value: text) -> CssValue:
+    """Length/percentage parser with a `calc(...)` fast path.
+
+    Detects the `calc(` prefix and delegates to `css_ext::calc_resolve`; on
+    success yields a pixel-valued `CssValue`. Any parse failure — malformed
+    expression, divide-by-zero, mixed units — falls back to the plain
+    `parse_css_value` path so unrelated declarations keep working.
+    """
+    val trimmed = value.trim()
+    val lower = trimmed.to_lower()
+    if lower.starts_with("calc("):
+        val end = find_char_in(trimmed, ")", 5)
+        if end < 999999999:
+            val inner_raw = trimmed.slice(5, end)
+            val inner = inner_raw.trim()
+            val resolved = calc_resolve_text(inner)
+            if resolved.ok:
+                return CssValue.px(resolved.pixels.to_f32())
+    parse_css_value(value)
+
+fn calc_resolve_text(expr: text) -> CalcValue:
+    """Tokenise a linear calc() expression into the (values, ops) streams
+    that `css_ext::calc_resolve` expects.
+
+    Supports integer-px, unitless-int, `+`, `-`, `*`, `/`. Mixed units or
+    unknown tokens produce a failed `CalcValue` so the caller falls back.
+    """
+    val toks = calc_tokenize(expr)
+    if toks.len() == 0:
+        return CalcValue.failed()
+    var values: [i32] = []
+    var ops: [i32] = []
+    var expect_value = true
+    var ti = 0
+    while ti < toks.len():
+        val tok = toks[ti]
+        ti = ti + 1
+        if expect_value:
+            val px = calc_parse_length_px(tok)
+            if px < -999999:
+                return CalcValue.failed()
+            values = values + [px]
+            expect_value = false
+        else:
+            if tok == "+":
+                ops = ops + [CALC_OP_ADD]
+            elif tok == "-":
+                ops = ops + [CALC_OP_SUB]
+            elif tok == "*":
+                ops = ops + [CALC_OP_MUL]
+            elif tok == "/":
+                ops = ops + [CALC_OP_DIV]
+            else:
+                return CalcValue.failed()
+            expect_value = true
+    if expect_value:
+        return CalcValue.failed()
+    calc_resolve(values, ops)
+
+fn calc_tokenize(expr: text) -> [text]:
+    """Split a calc() body into whitespace-separated tokens.
+
+    The CSS spec requires whitespace around `+` / `-` but allows none
+    around `*` / `/`, so we split on spaces and then peel leading/trailing
+    `*` and `/` off each token.
+    """
+    var raw: [text] = []
+    var cur = ""
+    var i = 0
+    val n = expr.len()
+    while i < n:
+        val ch = expr.slice(i, i + 1)
+        if ch == " " or ch == "\t" or ch == "\n" or ch == "\r":
+            if cur.len() > 0:
+                raw.push(cur)
+                cur = ""
+        else:
+            cur = "{cur}{ch}"
+        i = i + 1
+    if cur.len() > 0:
+        raw.push(cur)
+    # Secondary split: peel `*` and `/` that are glued to operands.
+    var out: [text] = []
+    var ri = 0
+    while ri < raw.len():
+        val r = raw[ri]
+        ri = ri + 1
+        calc_split_muldiv(r, out)
+    out
+
+fn calc_split_muldiv(tok: text, out: [text]):
+    """Split a single token on `*` / `/` boundaries, preserving order."""
+    var buf = ""
+    var i = 0
+    val n = tok.len()
+    while i < n:
+        val ch = tok.slice(i, i + 1)
+        if ch == "*" or ch == "/":
+            if buf.len() > 0:
+                out.push(buf)
+                buf = ""
+            out.push(ch)
+        else:
+            buf = "{buf}{ch}"
+        i = i + 1
+    if buf.len() > 0:
+        out.push(buf)
+
+fn calc_parse_length_px(tok: text) -> i32:
+    """Parse a calc() operand into integer pixels.
+
+    Accepts `<n>px` and bare integers (used as scalars by `*` / `/`).
+    Returns a sentinel < -999999 on unknown input so the caller can fail.
+    """
+    val t = tok.trim()
+    if t.len() == 0:
+        return -1000000
+    var body = t
+    if t.ends_with("px"):
+        body = t.slice(0, t.len() - 2)
+    var neg = false
+    var start = 0
+    if body.slice(0, 1) == "-":
+        neg = true
+        start = 1
+    elif body.slice(0, 1) == "+":
+        start = 1
+    var result = 0
+    var idx = start
+    val blen = body.len()
+    while idx < blen:
+        val ch = body.slice(idx, idx + 1)
+        var digit = -1
+        if ch == "0": digit = 0
+        elif ch == "1": digit = 1
+        elif ch == "2": digit = 2
+        elif ch == "3": digit = 3
+        elif ch == "4": digit = 4
+        elif ch == "5": digit = 5
+        elif ch == "6": digit = 6
+        elif ch == "7": digit = 7
+        elif ch == "8": digit = 8
+        elif ch == "9": digit = 9
+        if digit < 0:
+            return -1000000
+        result = result * 10 + digit
+        idx = idx + 1
+    if neg:
+        return 0 - result
+    result
