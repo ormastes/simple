@@ -318,6 +318,34 @@ pub(super) fn eval_call_expr(
                                 }));
                             }
                         }
+                        // Fallback: when a struct and an enum share the same name
+                        // (e.g., `std.spec.arch.Architecture` struct shadowing
+                        // `os.kernel.arch.arch_context.Architecture` enum), try the
+                        // enum variant path before erroring. Class lookup wins first
+                        // for normal static-method resolution; this fallback only
+                        // kicks in when the class has no matching method.
+                        {
+                            let enum_def = enums.get(class_name).cloned().or_else(|| {
+                                BLOCK_SCOPED_ENUMS.with(|cell| cell.borrow().get(class_name).cloned())
+                            });
+                            if let Some(enum_def) = enum_def {
+                                if let Some(variant) = enum_def.variants.iter().find(|v| v.name == *field) {
+                                    let has_fields = variant.fields.as_ref().is_some_and(|f| !f.is_empty());
+                                    if !has_fields {
+                                        return Ok(Some(Value::Enum {
+                                            enum_name: class_name.clone(),
+                                            variant: field.clone(),
+                                            payload: None,
+                                        }));
+                                    } else {
+                                        return Ok(Some(Value::EnumVariantConstructor {
+                                            enum_name: class_name.clone(),
+                                            variant_name: field.clone(),
+                                        }));
+                                    }
+                                }
+                            }
+                        }
                         {
                             // E1013 - Unknown Method (static method on class)
                             // Collect methods from both class body and impl blocks

@@ -432,32 +432,42 @@ sh scripts/make_os_disk.shs
 That script now has a host-independent Python fallback seeder, so it can
 populate a formatted FAT32 image even when `mtools` and loop-mount are missing.
 
-#### Current x86_64 desktop limitation
+#### Current x86_64 launch status
 
-On the x86_64 baremetal desktop lane, booting the guest image works and the
-disk-backed FAT32 path works, but desktop app spawning is not fully native yet.
+SimpleOS now has two intentionally separate launch proofs:
+
+- `x64-desktop-disk` proves disk-backed packaged app launch through FAT32
+  manifests and the launcher path
+- `browser_engine_in_qemu_spec.spl` proves arbitrary baremetal ELF execution via
+  directly built `native-build` outputs
 
 Current status:
 
-- `Browser Demo`, `Hello World`, `File Manager`, and `Shell` have disk-backed
-  resident manifest metadata in the FAT32 image
-- the desktop guest mounts FAT32 successfully on the `x64-desktop-disk` lane
-- `posix_spawn()` for those apps still returns `-38` on this lane because the
-  x86_64 baremetal syscall shim does not yet implement syscall `13`
-  (`SpawnBinary`)
+- `Browser Demo`, `Hello World`, `File Manager`, and `Shell` are represented in
+  the FAT32 manifest table for the disk-backed lane
+- `spawn_binary()` resolves disk-backed packaged apps first, then resolves direct
+  ELF bytes, and still contains a transitional resident-entry fallback
+- `browser_engine_in_qemu_spec.spl` is the right place for direct ELF boot
+  coverage, not for packaged disk launch coverage
+- `simpleos_desktop_disk_boot_spec.spl` is the right place for packaged app
+  launch coverage, not for arbitrary ELF execution
 
 That means:
 
-- building and booting native SimpleOS entrypoints is supported
-- disk-backed app metadata is supported
-- true launched user processes on the x86_64 baremetal desktop path are not yet
-  fully wired end-to-end
+- the launcher/manifest path and the direct ELF path are now documented as
+  different execution modes
+- Browser Demo is still transitional because it appears in the packaged manifest
+  path and in legacy resident fallback code
+- the next cleanup step is to remove Browser Demo from the fallback path once the
+  packaged-app route is the only supported launch form for that app
 
 If you need a working proof lane today, use:
 
-- `bin/simple os test --scenario=x64-desktop-disk` for disk + desktop boot proof
+- `bin/simple os test --scenario=x64-desktop-disk` for the disk-backed packaged
+  app lane
+- `bin/simple test test/system/browser_engine_in_qemu_spec.spl` for the direct
+  ELF lane
 - `bin/simple os test --scenario=x64-desktop-test` for the lighter desktop lane
-- direct `native-build` for custom baremetal entrypoint experiments
 
 ---
 

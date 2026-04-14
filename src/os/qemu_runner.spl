@@ -7,6 +7,7 @@
 #   bin/simple os test --arch=all
 
 use os.kernel.arch.arch_context.{Architecture}
+use os.packages.os_packages.{os_version}
 use os.machine_profile.{MachineProfile, get_machine_profile, riscv32_machine_profile, riscv64_machine_profile}
 
 extern fn rt_process_run_timeout(cmd: text, args: [text], timeout_ms: i64) -> (text, text, i32)
@@ -242,7 +243,7 @@ fn get_gpu_test_target() -> OsTarget:
     )
 
 fn get_tools_test_target() -> OsTarget:
-    """Returns x86_64 tools test target with NVMe + FAT32 for full tool testing."""
+    """Returns x86_64 tools test target with release-first NVMe + FAT32 media."""
     OsTarget(
         arch: Architecture.X86_64,
         entry: "examples/simple_os/arch/x86_64/tools_test_entry.spl",
@@ -254,11 +255,7 @@ fn get_tools_test_target() -> OsTarget:
         qemu_cpu: "qemu64",
         qemu_memory: "512M",
         qemu_bios: "",
-        qemu_extra: [
-            "-drive", "file=build/os/fat32.img,if=none,id=nvm,format=raw",
-            "-device", "nvme,serial=deadbeef,drive=nvm",
-            "-device", "isa-debug-exit,iobase=0xf4,iosize=0x04"
-        ],
+        qemu_extra: _x64_nvme_disk_args() + ["-device", "isa-debug-exit,iobase=0xf4,iosize=0x04"],
         gui_mode: false
     )
 
@@ -813,10 +810,7 @@ fn scenario_x64_ssh() -> QemuScenario:
         machine: "q35",
         cpu: "qemu64",
         memory: "2G",
-        qemu_extra: [
-            "-device", "isa-debug-exit,iobase=0xf4,iosize=0x04",
-            "-drive", "file=build/os/fat32.img,if=none,id=nvm,format=raw",
-            "-device", "nvme,serial=deadbeef,drive=nvm",
+        qemu_extra: ["-device", "isa-debug-exit,iobase=0xf4,iosize=0x04"] + _x64_nvme_disk_args() + [
             "-netdev", "user,id=n0,hostfwd=tcp::2222-:22",
             "-device", "virtio-net-pci,netdev=n0"
         ],
@@ -887,33 +881,35 @@ fn scenario_x64_wm_input_test() -> QemuScenario:
     )
 
 fn scenario_x64_nvme_fat32() -> QemuScenario:
-    """x86_64 with NVMe + FAT32 disk image for file I/O testing."""
+    """x86_64 with NVMe + FAT32 disk image for file I/O testing.
+
+    Prefers the release/installer-built disk artifact when available and
+    falls back to the legacy build fixture for older lanes.
+    """
     QemuScenario(
         name: "x64-nvme-fat32",
         arch: Architecture.X86_64,
         machine: "q35",
         cpu: "qemu64",
         memory: "256M",
-        qemu_extra: [
-            "-drive", "file=build/os/fat32.img,if=none,id=nvm,format=raw",
-            "-device", "nvme,serial=deadbeef,drive=nvm",
-            "-device", "isa-debug-exit,iobase=0xf4,iosize=0x04"
-        ],
+        qemu_extra: _x64_nvme_disk_args() + ["-device", "isa-debug-exit,iobase=0xf4,iosize=0x04"],
         gui_mode: false,
         description: "x86_64 with NVMe + FAT32 disk image for file I/O testing"
     )
 
 fn scenario_x64_full_stack() -> QemuScenario:
-    """x86_64 with NVMe + VirtIO-net + VirtIO-GPU — full driver stack."""
+    """x86_64 with NVMe + VirtIO-net + VirtIO-GPU — full driver stack.
+
+    Uses the same release-first disk artifact selection as the other disk
+    lanes so the QEMU surface stays aligned with installed/release media.
+    """
     QemuScenario(
         name: "x64-full-stack",
         arch: Architecture.X86_64,
         machine: "q35",
         cpu: "qemu64",
         memory: "512M",
-        qemu_extra: [
-            "-drive", "file=build/os/fat32.img,if=none,id=nvm,format=raw",
-            "-device", "nvme,serial=deadbeef,drive=nvm",
+        qemu_extra: _x64_nvme_disk_args() + [
             "-netdev", "user,id=n0",
             "-device", "virtio-net-pci,netdev=n0",
             "-device", "virtio-gpu,disable-modern=on,disable-legacy=off",
@@ -980,29 +976,76 @@ fn scenario_target(scenario: QemuScenario) -> OsTarget:
         return get_desktop_browser_target()
     get_target(scenario.arch)
 
+fn _desktop_release_version() -> text:
+    os_version().to_text()
+
+fn desktop_release_disk_image_path_in(release_root: text) -> text:
+    val arch_name = "x86_64"
+    val ver_str = _desktop_release_version()
+    "{release_root}/{arch_name}/images/simpleos-{ver_str}-{arch_name}.img"
+
+fn desktop_release_disk_image_path() -> text:
+    desktop_release_disk_image_path_in("release")
+
+fn desktop_release_installer_iso_path_in(release_root: text) -> text:
+    val arch_name = "x86_64"
+    val ver_str = _desktop_release_version()
+    "{release_root}/{arch_name}/images/simpleos-{ver_str}-{arch_name}-installer.iso"
+
+fn desktop_release_installer_iso_path() -> text:
+    desktop_release_installer_iso_path_in("release")
+
+fn desktop_disk_image_candidates_in(release_root: text) -> [text]:
+    [
+        desktop_release_disk_image_path_in(release_root),
+        "build/os/fat32.img"
+    ]
+
+fn desktop_disk_image_candidates() -> [text]:
+    desktop_disk_image_candidates_in("release")
+
+fn desktop_installer_iso_candidates_in(release_root: text) -> [text]:
+    [desktop_release_installer_iso_path_in(release_root)]
+
+fn desktop_installer_iso_candidates() -> [text]:
+    desktop_installer_iso_candidates_in("release")
+
+fn desktop_disk_image_path_in(release_root: text) -> text:
+    val release_path = desktop_release_disk_image_path_in(release_root)
+    if rt_file_exists(release_path):
+        return release_path
+    "build/os/fat32.img"
+
+fn desktop_disk_image_path() -> text:
+    desktop_disk_image_path_in("release")
+
+fn desktop_installer_iso_path_in(release_root: text) -> text?:
+    val iso_path = desktop_release_installer_iso_path_in(release_root)
+    if rt_file_exists(iso_path):
+        return iso_path
+    nil
+
+fn desktop_installer_iso_path() -> text?:
+    desktop_installer_iso_path_in("release")
+
+fn _x64_nvme_disk_args() -> [text]:
+    val img_path = desktop_disk_image_path()
+    [
+        "-drive", "file={img_path},if=none,id=nvm,format=raw",
+        "-device", "nvme,serial=deadbeef,drive=nvm"
+    ]
+
 # ===========================================================================
-# SYS-GUI-007 scaffold — storage-backed desktop lane (next milestone)
-# Owned by Agent 4. Appended after scenario_target to keep diffs additive and
-# avoid line-level conflicts with the serial lane owned by Agent 1. The full
-# storage proof is deferred to the next milestone; this scaffold only wires a
-# disk-attached QEMU shape + a helper that materializes build/os/fat32.img via
-# scripts/make_os_disk.shs so the scenario is self-sufficient when invoked.
+# Storage-backed desktop lane — release-first disk artifact selection
 # ===========================================================================
 
 fn scenario_x64_desktop_disk() -> QemuScenario:
-    """x86_64 desktop lane with a FAT32 disk image attached (SYS-GUI-007).
+    """x86_64 desktop lane with release-first disk image selection.
 
-    Boots the same desktop_e2e entry as x64-desktop-test but also attaches
-    build/os/fat32.img as an NVMe drive so the guest can reach VFS/FAT32
-    from the real desktop path. The disk image is the one produced by
-    scripts/make_os_disk.shs (the same recipe x64-nvme-fat32 and
-    x64-full-stack already rely on — single source of truth).
-
-    Status: scaffold. The live capture step is deferred to the next
-    milestone; ensure_desktop_disk_image() materializes the image on
-    demand so the scenario can run end-to-end once the desktop entry
-    learns to exercise storage. TODO(next-milestone): drive one real
-    app-launch that touches FAT32 via VFS.
+    Boots the same desktop_e2e entry as x64-desktop-test but attaches the
+    preferred release/installer-built disk artifact when it exists. The
+    helper still falls back to the legacy FAT32 fixture when a release image
+    is not available, which keeps the lane usable before the rollout lands.
     """
     QemuScenario(
         name: "x64-desktop-disk",
@@ -1010,28 +1053,24 @@ fn scenario_x64_desktop_disk() -> QemuScenario:
         machine: "q35",
         cpu: "qemu64",
         memory: "512M",
-        qemu_extra: [
-            "-device", "isa-debug-exit,iobase=0xf4,iosize=0x04",
-            "-vga", "std",
-            "-drive", "file=build/os/fat32.img,if=none,id=nvm,format=raw",
-            "-device", "nvme,serial=deadbeef,drive=nvm"
-        ],
+        qemu_extra: ["-device", "isa-debug-exit,iobase=0xf4,iosize=0x04", "-vga", "std"] + _x64_nvme_disk_args(),
         gui_mode: false,
-        description: "x86_64 SimpleOS desktop with NVMe+FAT32 disk (SYS-GUI-007 scaffold)"
+        description: "x86_64 SimpleOS desktop with release-first NVMe+FAT32 disk"
     )
 
 fn ensure_desktop_disk_image() -> bool:
-    """Ensure build/os/fat32.img exists, invoking scripts/make_os_disk.shs
-    if it is missing. Returns true when the image is present at the end.
+    """Ensure a preferred disk image exists for the desktop storage lane.
 
-    This is the wiring point between the existing disk-image recipe
-    (scripts/make_os_disk.shs) and the SYS-GUI-007 lane — no parallel
-    toolchain, no duplicated mkfs logic. Callers (test/system specs or
-    qemu runner consumers) should invoke this before building the
-    x64-desktop-disk scenario so the NVMe -drive file=... arg resolves.
+    Release builds are preferred when present. Otherwise, fall back to the
+    legacy `build/os/fat32.img` fixture and materialize it via
+    `scripts/make_os_disk.shs` if needed.
     """
+    val release_img = desktop_release_disk_image_path()
+    if rt_file_exists(release_img):
+        print "[ensure_desktop_disk_image] using release disk image {release_img}"
+        return true
     val img_path = "build/os/fat32.img"
-    if rt_file_exists(img_path) and _desktop_disk_image_has_browser_manifest(img_path):
+    if rt_file_exists(img_path) and _desktop_disk_image_has_required_manifests(img_path):
         return true
     print "[ensure_desktop_disk_image] {img_path} missing or incomplete, invoking scripts/make_os_disk.shs"
     val (stdout, stderr, exit_code) = rt_process_run_timeout(
@@ -1045,22 +1084,33 @@ fn ensure_desktop_disk_image() -> bool:
         return false
     if not rt_file_exists(img_path):
         return false
-    if not _desktop_disk_image_has_browser_manifest(img_path):
-        print "[ensure_desktop_disk_image] image exists but browser manifest marker is missing"
+    if not _desktop_disk_image_has_required_manifests(img_path):
+        print "[ensure_desktop_disk_image] image exists but required app manifest markers are missing"
         return false
     true
 
-fn _desktop_disk_image_has_browser_manifest(img_path: text) -> bool:
+fn _desktop_disk_image_has_required_manifests(img_path: text) -> bool:
     """Best-effort host-side validation that the disk image is populated.
 
-    The browser launch path currently packages a plain-text manifest whose
-    body contains `browser_demo_remote_main`. Grepping for that marker keeps
-    the validation lightweight and host-portable while avoiding false-positive
-    success on an empty FAT32 image.
+    The desktop disk lane currently packages plain-text resident manifests
+    for the remote-capable desktop apps. Grepping for each entry symbol is
+    lightweight and avoids false-positive success on an empty FAT32 image.
     """
-    val shell_cmd = "grep -a -q 'browser_demo_remote_main' \"{img_path}\""
-    val (_stdout, _stderr, exit_code) = rt_process_run_timeout("/bin/sh", ["-c", shell_cmd], 5000)
-    exit_code == 0
+    val markers = [
+        "browser_demo_remote_main",
+        "hello_world_remote_main",
+        "file_manager_remote_main",
+        "shell_remote_main"
+    ]
+    var i: u64 = 0
+    while i < markers.len():
+        val marker = markers[i]
+        val shell_cmd = "grep -a -q '{marker}' \"{img_path}\""
+        val (_stdout, _stderr, exit_code) = rt_process_run_timeout("/bin/sh", ["-c", shell_cmd], 5000)
+        if exit_code != 0:
+            return false
+        i = i + 1
+    true
 
 fn build_scenario_command(scenario: QemuScenario, kernel_path: text) -> [text]:
     """Build QEMU command line from a scenario."""

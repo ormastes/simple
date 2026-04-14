@@ -1,6 +1,6 @@
 #!/bin/sh
 # Build a FAT32 disk image for SimpleOS QEMU testing.
-# Usage: sh scripts/make_os_disk.shs [size_mb] [output_path]
+# Usage: sh scripts/make_os_disk.shs [size_mb] [output_path] [seed_dir]
 #
 # Creates a FAT32-formatted disk image with test fixture files.
 # Required by QEMU scenarios: x64-nvme-fat32, x64-full-stack
@@ -16,6 +16,7 @@
 
 SIZE_MB="${1:-64}"
 OUTPUT="${2:-build/os/fat32.img}"
+SEED_DIR="${3:-}"
 POPULATED=0
 
 # Ensure output directory exists
@@ -99,69 +100,92 @@ cp "$TMPDIR/HELLO.APP" "$TMPDIR/SYS/APPS/HELLO.APP"
 cp "$TMPDIR/FILEMAN.APP" "$TMPDIR/SYS/APPS/FILEMAN.APP"
 cp "$TMPDIR/SHELL.APP" "$TMPDIR/SYS/APPS/SHELL.APP"
 
+mkdir -p "$TMPDIR/boot" "$TMPDIR/etc/pkg" "$TMPDIR/etc/shell" "$TMPDIR/bin" "$TMPDIR/sbin"
+mkdir -p "$TMPDIR/usr/bin" "$TMPDIR/usr/sbin" "$TMPDIR/usr/lib" "$TMPDIR/usr/libexec/simpleos-installer"
+mkdir -p "$TMPDIR/usr/local/bin" "$TMPDIR/usr/local/lib" "$TMPDIR/usr/local/share/themes"
+mkdir -p "$TMPDIR/var/db/pkg/installed" "$TMPDIR/var/cache/pkg" "$TMPDIR/var/log" "$TMPDIR/home"
+
+cat > "$TMPDIR/boot/kernel.elf" << 'EOFBOOT'
+# staged kernel placeholder for disk deployment
+arch = "x86_64"
+EOFBOOT
+
+cat > "$TMPDIR/etc/fstab" << 'EOFFSTAB'
+# SimpleOS filesystem table
+/dev/root / auto defaults 0 1
+/dev/efi /boot/efi fat32 defaults 0 2
+EOFFSTAB
+
+cat > "$TMPDIR/etc/rc.conf" << 'EOFRC'
+hostname="simpleos"
+simpleos_desktop="YES"
+EOFRC
+
+cat > "$TMPDIR/etc/pkg/repos.sdn" << 'EOFPKG'
+[repositories]
+local = "/var/cache/pkg/local"
+EOFPKG
+
+cat > "$TMPDIR/etc/shell/profile.sdn" << 'EOFSHELL'
+shell = "/bin/shell"
+EOFSHELL
+
+cat > "$TMPDIR/sbin/init" << 'EOFINIT'
+#!/bin/simple-init
+print("SIMPLEOS_INIT_OK")
+EOFINIT
+
+cat > "$TMPDIR/bin/shell" << 'EOFBIN'
+# shell placeholder
+EOFBIN
+
+cat > "$TMPDIR/usr/sbin/pkg" << 'EOFPKGBIN'
+# pkg placeholder
+EOFPKGBIN
+
+cat > "$TMPDIR/usr/local/bin/wget" << 'EOFWGET'
+# wget placeholder
+EOFWGET
+
+cat > "$TMPDIR/usr/bin/hello-world" << 'EOFHELLO'
+# hello-world app placeholder
+EOFHELLO
+
+cat > "$TMPDIR/var/db/pkg/installed/simpleos-shell.sdn" << 'EOFPKGDB'
+[package]
+name = "simpleos-shell"
+EOFPKGDB
+
+cat > "$TMPDIR/deployed-files.sdn" << 'EOFMANIFEST'
+[artifact]
+kind = "disk-image"
+layout = "freebsd-like"
+EOFMANIFEST
+
+if [ -n "$SEED_DIR" ] && [ -d "$SEED_DIR" ]; then
+    cp -R "$SEED_DIR"/. "$TMPDIR"/
+fi
+
 # Method 1: mtools (works on macOS and Linux without root)
 if command -v mcopy >/dev/null 2>&1; then
-    mcopy -i "$OUTPUT" "$TMPDIR/hello.txt"   ::hello.txt
-    mcopy -i "$OUTPUT" "$TMPDIR/numbers.txt" ::numbers.txt
-    mcopy -i "$OUTPUT" "$TMPDIR/hello.spl"   ::hello.spl
-    mcopy -i "$OUTPUT" "$TMPDIR/config.sdn"  ::config.sdn
-    mcopy -i "$OUTPUT" "$TMPDIR/BROWSER.APP" ::BROWSER.APP
-    mcopy -i "$OUTPUT" "$TMPDIR/HELLO.APP"   ::HELLO.APP
-    mcopy -i "$OUTPUT" "$TMPDIR/FILEMAN.APP" ::FILEMAN.APP
-    mcopy -i "$OUTPUT" "$TMPDIR/SHELL.APP"   ::SHELL.APP
-    echo "[make_os_disk] Added fixture files (mtools)"
-
-    # Create test directories
-    mmd -i "$OUTPUT" ::testdir 2>/dev/null || true
-    mmd -i "$OUTPUT" ::SYS 2>/dev/null || true
-    mmd -i "$OUTPUT" ::SYS/APPS 2>/dev/null || true
-    mcopy -i "$OUTPUT" "$TMPDIR/SYS/APPS/BROWSER.APP" ::SYS/APPS/BROWSER.APP
-    mcopy -i "$OUTPUT" "$TMPDIR/SYS/APPS/HELLO.APP"   ::SYS/APPS/HELLO.APP
-    mcopy -i "$OUTPUT" "$TMPDIR/SYS/APPS/FILEMAN.APP" ::SYS/APPS/FILEMAN.APP
-    mcopy -i "$OUTPUT" "$TMPDIR/SYS/APPS/SHELL.APP"   ::SYS/APPS/SHELL.APP
-    echo "[make_os_disk] Added testdir/"
+    mcopy -s -i "$OUTPUT" "$TMPDIR"/* ::
+    echo "[make_os_disk] Added filesystem tree (mtools)"
     POPULATED=1
 
 # Method 2: loop mount (Linux only, requires root or sudo)
 elif [ "$(uname -s)" = "Linux" ]; then
     MOUNTDIR="$(mktemp -d)"
     if mount -o loop "$OUTPUT" "$MOUNTDIR" 2>/dev/null; then
-        cp "$TMPDIR/hello.txt"   "$MOUNTDIR/hello.txt"
-        cp "$TMPDIR/numbers.txt" "$MOUNTDIR/numbers.txt"
-        cp "$TMPDIR/hello.spl"   "$MOUNTDIR/hello.spl"
-        cp "$TMPDIR/config.sdn"  "$MOUNTDIR/config.sdn"
-        cp "$TMPDIR/BROWSER.APP" "$MOUNTDIR/BROWSER.APP"
-        cp "$TMPDIR/HELLO.APP"   "$MOUNTDIR/HELLO.APP"
-        cp "$TMPDIR/FILEMAN.APP" "$MOUNTDIR/FILEMAN.APP"
-        cp "$TMPDIR/SHELL.APP"   "$MOUNTDIR/SHELL.APP"
-        mkdir -p "$MOUNTDIR/testdir"
-        mkdir -p "$MOUNTDIR/SYS/APPS"
-        cp "$TMPDIR/SYS/APPS/BROWSER.APP" "$MOUNTDIR/SYS/APPS/BROWSER.APP"
-        cp "$TMPDIR/SYS/APPS/HELLO.APP" "$MOUNTDIR/SYS/APPS/HELLO.APP"
-        cp "$TMPDIR/SYS/APPS/FILEMAN.APP" "$MOUNTDIR/SYS/APPS/FILEMAN.APP"
-        cp "$TMPDIR/SYS/APPS/SHELL.APP" "$MOUNTDIR/SYS/APPS/SHELL.APP"
+        cp -R "$TMPDIR"/. "$MOUNTDIR"/
         sync
         umount "$MOUNTDIR"
-        echo "[make_os_disk] Added fixture files (loop mount)"
+        echo "[make_os_disk] Added filesystem tree (loop mount)"
         POPULATED=1
     elif sudo mount -o loop "$OUTPUT" "$MOUNTDIR" 2>/dev/null; then
-        sudo cp "$TMPDIR/hello.txt"   "$MOUNTDIR/hello.txt"
-        sudo cp "$TMPDIR/numbers.txt" "$MOUNTDIR/numbers.txt"
-        sudo cp "$TMPDIR/hello.spl"   "$MOUNTDIR/hello.spl"
-        sudo cp "$TMPDIR/config.sdn"  "$MOUNTDIR/config.sdn"
-        sudo cp "$TMPDIR/BROWSER.APP" "$MOUNTDIR/BROWSER.APP"
-        sudo cp "$TMPDIR/HELLO.APP"   "$MOUNTDIR/HELLO.APP"
-        sudo cp "$TMPDIR/FILEMAN.APP" "$MOUNTDIR/FILEMAN.APP"
-        sudo cp "$TMPDIR/SHELL.APP"   "$MOUNTDIR/SHELL.APP"
-        sudo mkdir -p "$MOUNTDIR/testdir"
-        sudo mkdir -p "$MOUNTDIR/SYS/APPS"
-        sudo cp "$TMPDIR/SYS/APPS/BROWSER.APP" "$MOUNTDIR/SYS/APPS/BROWSER.APP"
-        sudo cp "$TMPDIR/SYS/APPS/HELLO.APP" "$MOUNTDIR/SYS/APPS/HELLO.APP"
-        sudo cp "$TMPDIR/SYS/APPS/FILEMAN.APP" "$MOUNTDIR/SYS/APPS/FILEMAN.APP"
-        sudo cp "$TMPDIR/SYS/APPS/SHELL.APP" "$MOUNTDIR/SYS/APPS/SHELL.APP"
+        sudo cp -R "$TMPDIR"/. "$MOUNTDIR"/
         sudo sync
         sudo umount "$MOUNTDIR"
-        echo "[make_os_disk] Added fixture files (sudo loop mount)"
+        echo "[make_os_disk] Added filesystem tree (sudo loop mount)"
         POPULATED=1
     else
         echo "[make_os_disk] WARNING: loop mount failed -- no fixture files added"

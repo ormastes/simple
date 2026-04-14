@@ -1,0 +1,101 @@
+## Spec for src/os/kernel/loader/stack_builder.spl
+##
+## Verifies:
+##   * compute_stack_size() clamps image-size-scaled values between 8 MB
+##     and 128 MB.
+##   * build_initial_stack() produces a 16-byte-aligned sp, the argc
+##     header, and argv pointers in ascending order pointing into the
+##     string pool region at the top of the stack.
+##
+## Run:
+##   bin/simple test test/os/kernel/loader/stack_builder_spec.spl
+
+use std.spec
+use os.kernel.loader.stack_builder.{
+    AuxEntry,
+    DEFAULT_USER_STACK_SIZE,
+    MAX_USER_STACK_SIZE,
+    build_initial_stack,
+    compute_stack_size
+}
+
+val STACK_TOP: u64 = 0x0000008000000000
+
+fn _read_u64_le(bytes: [u8], off: i64) -> u64:
+    var v: u64 = 0
+    var i: i64 = 7
+    while i >= 0:
+        v = (v << 8) | (bytes[off + i] as u64)
+        i = i - 1
+    v
+
+describe "kernel.loader.stack_builder.compute_stack_size":
+    """Image-size-to-stack-size scaling."""
+
+    it "returns 8 MB for zero-sized images":
+        val sz = compute_stack_size(0)
+        expect(sz).to_equal(DEFAULT_USER_STACK_SIZE)
+
+    it "returns 8 MB (floor) for small images":
+        val sz = compute_stack_size(1024)
+        expect(sz).to_equal(DEFAULT_USER_STACK_SIZE)
+
+    it "caps at 128 MB for huge images (clang-class binaries)":
+        val sz = compute_stack_size(1_000_000_000 as u64)
+        expect(sz).to_equal(MAX_USER_STACK_SIZE)
+
+    it "scales by image_size/8 between the floor and the cap":
+        # 80 MB binary -> 10 MB stack (above 8 MB floor, below 128 MB cap)
+        val sz = compute_stack_size(80 * 1024 * 1024)
+        expect(sz).to_equal(10 * 1024 * 1024)
+
+describe "kernel.loader.stack_builder.build_initial_stack":
+    """SysV initial stack frame layout."""
+
+    it "writes argc=1 as the first u64 for a one-arg invocation":
+        val result = build_initial_stack(STACK_TOP, ["/bin/x"], [], [])
+        val argc = _read_u64_le(result.bytes, 0)
+        expect(argc).to_equal(1 as u64)
+
+    it "aligns sp to 16 bytes":
+        val result = build_initial_stack(STACK_TOP, ["/bin/x"], [], [])
+        expect(result.sp & 0xf).to_equal(0 as u64)
+
+    it "places argv pointers in ascending address order":
+        # argv[0]=a (2 bytes), argv[1]=bb (3 bytes), argv[2]=ccc (4 bytes).
+        # argv[0] is deposited highest in the string pool, argv[N-1] lowest.
+        val result = build_initial_stack(STACK_TOP, ["a", "bb", "ccc"], [], [])
+        val argc = _read_u64_le(result.bytes, 0)
+        expect(argc).to_equal(3 as u64)
+        val ptr0 = _read_u64_le(result.bytes, 8)
+        val ptr1 = _read_u64_le(result.bytes, 16)
+        val ptr2 = _read_u64_le(result.bytes, 24)
+        val nullptr = _read_u64_le(result.bytes, 32)
+        expect(ptr0 > ptr1).to_be_true()
+        expect(ptr1 > ptr2).to_be_true()
+        expect(nullptr).to_equal(0 as u64)
+        # All three pointers must fall inside the serialized blob region,
+        # which spans [sp, STACK_TOP).
+        expect(ptr0 < STACK_TOP).to_be_true()
+        expect(ptr2 >= result.sp).to_be_true()
+
+    it "terminates argv and envp with NULL and auxv with AT_NULL":
+        val result = build_initial_stack(STACK_TOP, ["/bin/x"], [], [])
+        # Layout: argc, argv[0], argv_null, envp_null, aux[0].type ...
+        val argv_null = _read_u64_le(result.bytes, 16)
+        val envp_null = _read_u64_le(result.bytes, 24)
+        expect(argv_null).to_equal(0 as u64)
+        expect(envp_null).to_equal(0 as u64)
+
+    it "honors caller-supplied auxv entries before AT_NULL":
+        val extra: [AuxEntry] = [AuxEntry(aux_type: 9 as u64, val: 0xdead as u64)]
+        val result = build_initial_stack(STACK_TOP, ["/bin/x"], [], extra)
+        # The blob must contain the 0xdead value somewhere in the aux region.
+        var found: bool = false
+        var off: i64 = 0
+        val n = result.bytes.len()
+        while off + 8 <= n:
+            if _read_u64_le(result.bytes, off) == (0xdead as u64):
+                found = true
+            off = off + 8
+        expect(found).to_be_true()

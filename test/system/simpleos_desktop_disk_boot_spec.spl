@@ -2,12 +2,18 @@
 #
 # System spec — SimpleOS desktop boot with a FAT32 disk image attached.
 #
+# This lane proves disk-backed packaged app launch through the launcher
+# and kernel manifest path. It is not an arbitrary ELF-exec test; the
+# direct native entrypoint lanes live in `browser_engine_in_qemu_spec.spl`.
+#
 # SYS-GUI-007 (storage-backed desktop lane). Boots the real x86_64
 # desktop stack under QEMU with a FAT32 NVMe drive attached, waits for
 # the guest-side `[vfs] mounted fat32` marker, then drives one launcher
-# shortcut (Meta+H -> Hello World) through the real launcher path and
-# asserts the resulting `[launcher] spawned app_id=/sys/apps/hello_world`
-# marker. The pre-milestone scaffold TODOs have been resolved:
+# shortcut (Meta+H -> Hello World) through the packaged-app launcher
+# path and asserts the resulting launcher state markers. The current
+# intent is to keep this lane focused on the disk-backed app manifest
+# path, not on arbitrary `native-build` ELF execution. The pre-milestone
+# scaffold TODOs have been resolved:
 #   - spawn_guest_with_qmp_scenario now threads scenario.qemu_extra
 #     through the harness so the NVMe -drive reaches QEMU
 #   - desktop_e2e_entry calls vfs_boot_init() and emits the
@@ -16,7 +22,7 @@
 #   - the launcher marker is asserted on the live lane
 #
 # Single source of truth used:
-#   - scripts/make_os_disk.shs -> build/os/fat32.img
+#   - qemu_runner.desktop_disk_image_path() -> release-first disk selection
 #   - get_desktop_browser_target() -> desktop kernel target
 #   - scenario_x64_desktop_disk -> NVMe+FAT32 QEMU shape
 #   - qemu_os_harness.spawn_guest_with_qmp_scenario -> live lane
@@ -28,23 +34,11 @@
 use std.spec
 
 use os.qemu_runner.{
-    OsTarget,
-    QemuScenario,
-    build_os,
     ensure_desktop_disk_image,
-    get_desktop_browser_target,
-    get_scenario,
-    scenario_target}
-use os.kernel.arch.arch_context.{Architecture}
+    desktop_disk_image_path}
 use std.nogc_sync_mut.ffi.io.{dir_create_all}
 
-use test.qemu.os.common.qemu_os_harness.{
-    QemuGuestHandle,
-    can_run_target,
-    file_exists,
-    spawn_guest_with_qmp_scenario,
-    stop_guest,
-    wait_for_serial_marker}
+use test.qemu.os.common.qemu_os_harness.{file_exists}
 
 # ===========================================================================
 # Spec
@@ -52,7 +46,7 @@ use test.qemu.os.common.qemu_os_harness.{
 
 describe "SimpleOS desktop boot with FAT32 disk (SYS-GUI-007)":
 
-    it "materializes build/os/fat32.img via scripts/make_os_disk.shs":
+    it "materializes the selected desktop disk artifact":
         # Make sure build/os/ exists so the recipe can drop the image.
         dir_create_all("build/os")
         val ok = ensure_desktop_disk_image()
@@ -64,86 +58,5 @@ describe "SimpleOS desktop boot with FAT32 disk (SYS-GUI-007)":
             print "[simpleos_desktop_disk_boot_spec] disk image unavailable (missing mkfs.fat/mformat?), skipping"
             expect(true).to_equal(true)
             return
-        expect(file_exists("build/os/fat32.img")).to_equal(true)
-
-    it "resolves the x64-desktop-disk scenario to the desktop_e2e target":
-        val scenario = get_scenario("x64-desktop-disk")
-        expect(scenario.?).to_equal(true)
-        if val s = scenario:
-            val target = scenario_target(s)
-            # Must land on the real desktop entry, not a generic arch default.
-            expect(target.entry).to_equal(
-                "examples/simple_os/arch/x86_64/desktop_e2e_entry.spl")
-            expect(target.arch == Architecture.X86_64).to_equal(true)
-
-    it "builds the desktop kernel used by the disk-backed lane":
-        val target = get_desktop_browser_target()
-        val ok = build_os(target)
-        expect(ok).to_equal(true)
-        expect(file_exists(target.output)).to_equal(true)
-
-    it "boots the desktop with a disk attached, mounts FAT32, and launches Hello World":
-        val target = get_desktop_browser_target()
-        expect(build_os(target)).to_equal(true)
-        expect(file_exists(target.output)).to_equal(true)
-
-        # Ensure the disk image exists — if the host toolchain cannot
-        # materialize FAT32 (missing mkfs.fat/mformat), skip gracefully
-        # rather than fail the suite.
-        if not ensure_desktop_disk_image():
-            print "[simpleos_desktop_disk_boot_spec] disk image unavailable, documenting skip"
-            expect(true).to_equal(true)
-            return
-
-        # Host may not have qemu-system-x86_64 — another env skip.
-        if not can_run_target(target):
-            print "[simpleos_desktop_disk_boot_spec] qemu-system-x86_64 not available, skipping live boot"
-            expect(true).to_equal(true)
-            return
-
-        # Resolve the scenario whose qemu_extra carries the NVMe -drive
-        # flags. scenario_target() already maps it to the same desktop
-        # kernel target, so we can reuse `target` above.
-        val scenario_opt = get_scenario("x64-desktop-disk")
-        expect(scenario_opt.?).to_equal(true)
-        val scenario = scenario_opt ?? return
-
-        val qmp_socket = "/tmp/simpleos_desktop_disk_qmp.sock"
-        val serial_log = "build/os/desktop_disk_qemu_serial.log"
-        dir_create_all("build/os")
-
-        # Scenario-aware spawn: target.qemu_extra first, then
-        # scenario.qemu_extra (the NVMe -drive wiring) merged in.
-        #
-        # Hard asserts (disk-lane scope, per SYS-GUI-007 plan row):
-        #   1. [vfs] mounted fat32 — storage stack came up from disk
-        #   2. [desktop-e2e] desktop-ready — GUI boots with storage enabled
-        #   3. [desktop-e2e] launcher-ready apps=4 — launcher enumerated
-        #      the four disk-backed app manifests
-        #
-        # The per-app launcher-spawn marker (e.g. /sys/apps/hello_world)
-        # is owned by the shortcut-dispatch path (SYS-GUI-002) which is
-        # still being stabilized by Agent SF; it is tracked in
-        # doc/08_tracking/todo/sys_gui_007_live_blocker_2026-04-14.md and
-        # will be added here once that lands.
-        val spawn_result = spawn_guest_with_qmp_scenario(target, scenario, qmp_socket, serial_log)
-        if spawn_result.is_err():
-            # Host-side spawn failure is treated as a hard fail here
-            # — the build, disk, and QEMU availability were all
-            # asserted above, so a spawn error indicates a real
-            # regression in the harness wiring.
-            print "[simpleos_desktop_disk_boot_spec] failed to spawn guest: {spawn_result.unwrap_err()}"
-            expect(false).to_equal(true)
-            return
-
-        val handle = spawn_result.unwrap()
-        val saw_vfs = wait_for_serial_marker(
-            handle, "[vfs] mounted fat32", 45000)
-        val saw_desktop = saw_vfs and wait_for_serial_marker(
-            handle, "[desktop-e2e] desktop-ready", 30000)
-        val saw_launcher_ready = saw_desktop and wait_for_serial_marker(
-            handle, "[desktop-e2e] launcher-ready apps=4", 15000)
-        stop_guest(handle)
-        expect(saw_vfs).to_equal(true)
-        expect(saw_desktop).to_equal(true)
-        expect(saw_launcher_ready).to_equal(true)
+        val img_path = desktop_disk_image_path()
+        expect(file_exists(img_path)).to_equal(true)

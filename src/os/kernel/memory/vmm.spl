@@ -24,6 +24,7 @@
 #   [11:0]  Page offset  (12 bits, 4KB)
 
 use os.kernel.types.memory_types.{PhysAddr, VirtAddr, PageFrame, VmFlags}
+use os.kernel.types.task_types.{AddressSpace}
 use os.kernel.boot.mmio.{mmio_read64, mmio_write64}
 use os.kernel.memory.pmm.{PhysMemManager}
 
@@ -138,6 +139,11 @@ var g_vmm: VirtMemManager = VirtMemManager(
     pml4_phys: 0,
     hhdm_offset: 0
 )
+
+# Monotonic address-space id counter. 0 is reserved for the kernel AS;
+# the first user address space created gets id 1. Wraps only after ~2^64
+# creations, so safe to treat as unique for debug/logging purposes.
+var g_next_as_id: u64 = 1
 
 fn _phys_to_virt(phys: u64) -> u64:
     """Convert physical to virtual address via HHDM."""
@@ -491,6 +497,69 @@ fn vmm_create_address_space() -> u64:
 fn vmm_switch_address_space(pml4_phys: u64):
     """Switch to a different address space by loading CR3."""
     _load_cr3(pml4_phys)
+
+# ============================================================================
+# Per-Process Address Space API (Phase 1)
+# ============================================================================
+#
+# These wrappers return the richer `AddressSpace` handle used by the scheduler
+# and by later phases (ELF segment mapper, process image builder). They reuse
+# the existing PML4 primitives above and add a monotonic id for debugging.
+
+fn create_user_address_space() -> AddressSpace:
+    """Allocate a fresh per-process address space.
+
+    Allocates a new PML4 page, copies the kernel-half entries (indices
+    256..511) from the kernel PML4 so the kernel remains mapped in every
+    user address space, and returns an `AddressSpace` handle carrying the
+    physical root and a monotonic id.
+
+    If the PMM is not yet online (e.g. early boot before `vmm_init`
+    completes) the allocation returns 0; in that case we fall back to
+    `phys_root = 1` (the legacy sentinel) and log a single line so the
+    kernel keeps booting instead of panicking.
+    """
+    val phys = vmm_create_address_space()
+    if phys == 0:
+        # PMM not ready (or out of memory). Legacy sentinel keeps boot alive.
+        serial_println("[VMM] create_user_address_space: alloc failed — legacy AS=1")
+        return AddressSpace(phys_root: 1, id: 0)
+
+    val id = g_next_as_id
+    g_next_as_id = g_next_as_id + 1
+    AddressSpace(phys_root: phys, id: id)
+
+fn destroy_user_address_space(space: AddressSpace):
+    """Release page-table pages owned by a user address space.
+
+    Frees the top-level PML4 page. Intermediate tables (PDPT/PD/PT) that
+    were allocated by `vmm_map_page` for user-half mappings are NOT yet
+    walked and freed here — that requires a PTE-tree walker. Kernel-half
+    entries (indices 256..511) are shared and must never be freed.
+
+    TODO(phase-1.1): Implement a full PTE-tree walker so intermediate
+    user-half tables are reclaimed. Next action: add
+    `_free_user_half_subtree(pml4_virt)` that walks indices 0..255 and
+    frees any present intermediate tables via `pmm_free_page`.
+    """
+    if space.phys_root == 0 or space.phys_root == 1:
+        # Legacy sentinel or never-allocated — nothing to free.
+        return
+
+    val frame = PageFrame.from_phys_addr(PhysAddr(addr: space.phys_root))
+    pmm_free_page(frame)
+
+fn activate_user_address_space(space: AddressSpace):
+    """Install a user address space on the current CPU.
+
+    Writes CR3 (x86_64) / SATP (riscv64 via the arch-adapter in
+    `vmm_switch_address_space`). Safe to call on the legacy sentinel
+    (phys_root == 1): the call is skipped so early boot does not trap.
+    """
+    if space.phys_root == 0 or space.phys_root == 1:
+        # Not a real address space — skip the CR3/SATP write.
+        return
+    vmm_switch_address_space(space.phys_root)
 
 fn vmm_map_framebuffer(fb_phys: PhysAddr, fb_virt: VirtAddr, size: u64):
     """Map framebuffer as write-combining, non-executable memory.

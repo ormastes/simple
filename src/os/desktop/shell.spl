@@ -21,7 +21,6 @@ use os.services.wm.wm_service.{WmService, WmAction}
 use os.services.launcher.launcher.{
     launcher_init, launcher_launch, launcher_shortcut_dispatch, launcher_register, launcher_terminate,
     launcher_get_app_name, launcher_get_process_app_index, launcher_get_process_app_id_for_pid,
-    launcher_get_app_launch_state, launcher_find_by_name,
     launcher_get_process_count, launcher_get_process_name, launcher_get_process_pid,
     launcher_get_process_state, launcher_get_process_window_count, launcher_get_process_is_headless,
     launcher_note_window_opened, launcher_note_window_closed, launcher_poll_processes, MOD_META
@@ -96,19 +95,20 @@ fn _materialize_resident_manifest_launch(shell: DesktopShell, name: text, pid: u
     match name:
         case "Browser Demo":
             val (node_count, pixel_count) = render_demo_stats(600, 400)
-            serial_println("[shell] resident-launch app={name} pid={pid} nodes={node_count} pixels={pixel_count}")
-            val main_tree = build_tree_with_title(column("browser_demo_remote_root", [
+            serial_println("[browser_demo] render stats nodes={node_count} pixels={pixel_count} mode=resident-manifest pid={pid}")
+            val main_tree = build_tree_with_title(column("browser_demo_resident_main", [
                 text_widget("browser_demo_title", "Browser Demo"),
-                text_widget("browser_demo_body", "app_id: {app_id}\nwindow: main\nnodes: {node_count}\npixels: {pixel_count}")
+                text_widget("browser_demo_body", "packaged resident-manifest launch")
             ]), "Browser Demo", "dark")
-            val inspector_tree = build_tree_with_title(column("browser_demo_remote_inspector_root", [
+            val inspector_tree = build_tree_with_title(column("browser_demo_resident_inspector", [
                 text_widget("browser_demo_inspector_title", "Browser Demo Inspector"),
-                text_widget("browser_demo_inspector_body", "app_id: {app_id}\nwindow: secondary\nnodes: {node_count}\npixels: {pixel_count}")
+                text_widget("browser_demo_inspector_body", "resident-manifest")
             ]), "Browser Demo Inspector", "dark")
             val main_wid = shell.compositor.create_window_with_tree("Browser Demo", 120, 90, 460, 260, main_tree)
             if main_wid == 0:
                 return false
-            val inspector_wid = shell.compositor.create_window_with_tree("Browser Demo Inspector", 620, 120, 320, 220, inspector_tree)
+            val inspector_wid = shell.compositor.create_window_with_tree(
+                "Browser Demo Inspector", 620, 120, 320, 220, inspector_tree)
             if inspector_wid == 0:
                 return false
             shell.compositor.set_window_identity(main_wid, pid, app_id)
@@ -119,9 +119,9 @@ fn _materialize_resident_manifest_launch(shell: DesktopShell, name: text, pid: u
             launcher_note_window_opened(pid)
             true
         case "Hello World":
-            val tree = build_tree_with_title(column("hello_world_remote_root", [
+            val tree = build_tree_with_title(column("hello_world_resident", [
                 text_widget("hello_world_title", "Hello World"),
-                text_widget("hello_world_body", "This window was loaded from the packaged disk manifest.")
+                text_widget("hello_world_body", "packaged resident-manifest launch")
             ]), "Hello World", "dark")
             val wid = shell.compositor.create_window_with_tree("Hello World", 80, 80, 420, 220, tree)
             if wid == 0:
@@ -131,11 +131,10 @@ fn _materialize_resident_manifest_launch(shell: DesktopShell, name: text, pid: u
             launcher_note_window_opened(pid)
             true
         case "File Manager":
-            val tree = build_tree_with_title(column("file_manager_remote_root", [
+            val wid = shell.compositor.create_window_with_tree("File Manager", 100, 100, 640, 400, build_tree_with_title(column("file_manager_resident", [
                 text_widget("file_manager_title", "File Manager"),
-                text_widget("file_manager_body", "/\n  bin/\n  etc/\n  home/\n  usr/")
-            ]), "File Manager", "dark")
-            val wid = shell.compositor.create_window_with_tree("File Manager", 100, 100, 640, 400, tree)
+                text_widget("file_manager_body", "packaged resident-manifest launch")
+            ]), "File Manager", "dark"))
             if wid == 0:
                 return false
             shell.compositor.set_window_identity(wid, pid, app_id)
@@ -143,11 +142,10 @@ fn _materialize_resident_manifest_launch(shell: DesktopShell, name: text, pid: u
             launcher_note_window_opened(pid)
             true
         case "Terminal":
-            val tree = build_tree_with_title(column("shell_remote_root", [
-                text_widget("shell_title", "SimpleOS Shell"),
-                text_widget("shell_body", "$ ")
-            ]), "Terminal", "dark")
-            val wid = shell.compositor.create_window_with_tree("Terminal", 80, 80, 600, 360, tree)
+            val wid = shell.compositor.create_window_with_tree("Terminal", 80, 80, 600, 360, build_tree_with_title(column("terminal_resident", [
+                text_widget("terminal_title", "SimpleOS Shell"),
+                text_widget("terminal_body", "$ ")
+            ]), "Terminal", "dark"))
             if wid == 0:
                 return false
             shell.compositor.set_window_identity(wid, pid, app_id)
@@ -383,12 +381,9 @@ impl DesktopShell:
 
     me materialize_resident_launch(name: text, pid: u64) -> bool:
         """Materialize a packaged resident app into compositor-owned windows."""
-        val app_idx = launcher_find_by_name(name)
-        if app_idx < 0:
+        val app_id = _resident_app_id(name)
+        if app_id == "" or pid == 0:
             serial_println("[shell] resident-launch missing app={name} pid={pid}")
-            return false
-        if launcher_get_app_launch_state(app_idx.to_u64()) != "resident-manifest":
-            serial_println("[shell] resident-launch skipped app={name} pid={pid} state={launcher_get_app_launch_state(app_idx.to_u64())}")
             return false
         val launched = _materialize_resident_manifest_launch(self, name, pid)
         if launched:

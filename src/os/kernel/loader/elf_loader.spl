@@ -1,9 +1,9 @@
 #![allow(unnamed_duplicate_typed_args)]
-# Kernel ELF Loader — RISC-V Static Executable Validation
+# Kernel ELF Loader — User Executable Validation
 #
-# Parses RV32/RV64 ELF executables and produces a load plan for PT_LOAD
-# segments. This slice validates and plans mapping only; it does not yet
-# allocate address spaces or copy bytes into userspace memory.
+# Parses RV32/RV64 and x86_64 ELF executables and produces a load plan for
+# PT_LOAD segments. This slice validates and plans mapping only; it does not
+# yet allocate address spaces or copy bytes into userspace memory.
 
 use os.kernel.arch.arch_context.{Architecture}
 
@@ -18,6 +18,7 @@ val ELFDATA2LSB: u8 = 1
 val EV_CURRENT: u8 = 1
 
 val ET_EXEC: i64 = 2
+val EM_X86_64: i64 = 62
 val EM_RISCV: i64 = 243
 val PT_LOAD: i64 = 1
 
@@ -76,8 +77,16 @@ fn _check_range(data: [u8], offset: i64, size: i64) -> bool:
 
 fn _expected_class(arch: Architecture) -> ElfClass?:
     match arch:
+        Architecture.X86_64: Some(ElfClass.Elf64)
         Architecture.Riscv64: Some(ElfClass.Elf64)
         Architecture.Riscv32: Some(ElfClass.Elf32)
+        _: nil
+
+fn _expected_machine(arch: Architecture) -> i64?:
+    match arch:
+        Architecture.X86_64: Some(EM_X86_64)
+        Architecture.Riscv64: Some(EM_RISCV)
+        Architecture.Riscv32: Some(EM_RISCV)
         _: nil
 
 fn _validate_ident(data: [u8]) -> Result<ElfClass, text>:
@@ -96,9 +105,18 @@ fn _validate_ident(data: [u8]) -> Result<ElfClass, text>:
         return Ok(ElfClass.Elf64)
     Err("unsupported ELF class {class_byte}")
 
-fn _validate_common_header(data: [u8], expected: ElfClass, actual: ElfClass) -> Result<(), text>:
+fn _validate_common_header(
+    data: [u8],
+    arch: Architecture,
+    expected: ElfClass,
+    actual: ElfClass
+) -> Result<(), text>:
     if actual != expected:
         return Err("ELF class does not match target architecture")
+    val expected_machine_opt = _expected_machine(arch)
+    if expected_machine_opt == nil:
+        return Err("unsupported architecture for ELF loading")
+    val expected_machine = expected_machine_opt
     match actual:
         case ElfClass.Elf32:
             if not _check_range(data, 0, ELF32_EHDR_SIZE):
@@ -109,8 +127,8 @@ fn _validate_common_header(data: [u8], expected: ElfClass, actual: ElfClass) -> 
             val e_ehsize = _read_u16_le(data, 40)
             if e_type != ET_EXEC:
                 return Err("only ET_EXEC ELF32 images are supported")
-            if e_machine != EM_RISCV:
-                return Err("ELF32 machine is not RISC-V")
+            if e_machine != expected_machine:
+                return Err("ELF32 machine is not the expected target architecture")
             if e_version != EV_CURRENT:
                 return Err("unsupported ELF32 version")
             if e_ehsize != ELF32_EHDR_SIZE:
@@ -124,8 +142,8 @@ fn _validate_common_header(data: [u8], expected: ElfClass, actual: ElfClass) -> 
             val e_ehsize = _read_u16_le(data, 52)
             if e_type != ET_EXEC:
                 return Err("only ET_EXEC ELF64 images are supported")
-            if e_machine != EM_RISCV:
-                return Err("ELF64 machine is not RISC-V")
+            if e_machine != expected_machine:
+                return Err("ELF64 machine is not the expected target architecture")
             if e_version != EV_CURRENT:
                 return Err("unsupported ELF64 version")
             if e_ehsize != ELF64_EHDR_SIZE:
@@ -214,15 +232,18 @@ fn _parse_elf64(data: [u8]) -> Result<ElfImage, text>:
         return Err("ELF64 image has no PT_LOAD segments")
     Ok(ElfImage(class_: ElfClass.Elf64, entry: entry, segments: segments))
 
-fn load_riscv_executable(data: [u8], arch: Architecture) -> Result<ElfImage, text>:
+fn load_user_executable(data: [u8], arch: Architecture) -> Result<ElfImage, text>:
     val expected_opt = _expected_class(arch)
     if expected_opt == nil:
         return Err("unsupported architecture for ELF loading")
     val expected = expected_opt
     val class_ = _validate_ident(data)?
-    _validate_common_header(data, expected, class_)? 
+    _validate_common_header(data, arch, expected, class_)? 
     match class_:
         case ElfClass.Elf32:
             _parse_elf32(data)
         case ElfClass.Elf64:
             _parse_elf64(data)
+
+fn load_riscv_executable(data: [u8], arch: Architecture) -> Result<ElfImage, text>:
+    load_user_executable(data, arch)

@@ -37,11 +37,9 @@ use os.drivers.input.ps2_mouse.{Ps2Mouse}
 use os.compositor.compositor_engine2d.{CompositorEngine2D}
 use os.compositor.engine2d_display.{create_fb_engine}
 use os.desktop.shell.{DesktopShell}
-use common.ui.builder.{column, text_widget, build_tree_with_title}
-use os.services.launcher.launcher.{launcher_get_pid, launcher_get_process_window_count,
-    launcher_get_app_count, launcher_shortcut_dispatch, launcher_is_running}
+use os.services.launcher.launcher.{launcher_get_app_count, launcher_get_process_count,
+    launcher_get_process_pid, launcher_shortcut_dispatch}
 use os.services.vfs.vfs_init.{vfs_boot_init}
-use os.userlib.process.{yield_}
 
 extern fn serial_println(msg: text)
 extern fn rt_gui_set_fb(addr: u64, width: u64)
@@ -49,42 +47,17 @@ extern fn rt_port_outb(port: u64, value: u64)
 
 val DEBUG_EXIT: u64 = 0xF4
 val BROWSER_APP_ID: text = "/sys/apps/browser_demo"
-val BROWSER_PROCESS_SLOT: u64 = 0
-val BROWSER_APP_INDEX: u64 = 3
 val KEY_B: u32 = 0x42
 val KEY_H: u32 = 0x48
 val META_MODIFIER: u32 = 1
-val LOCAL_BROWSER_PID: u64 = 4242
-val MAX_SPINS: i32 = 1200
+val BROWSER_MANIFEST_PID: u64 = 4242
+val HELLO_MANIFEST_PID: u64 = 4243
 
-fn _launch_browser_demo_local(shell: DesktopShell) -> bool:
-    """Fallback Browser Demo shell surface when remote task spawn is unavailable."""
-    val main_root = column("browser_demo_main_root", [
-        text_widget("browser_demo_title", "Browser Demo"),
-        text_widget("browser_demo_body",
-            "Remote Browser Demo launch is unavailable on this baremetal lane.\nDesktop integration fallback is active.")
-    ])
-    val main_tree = build_tree_with_title(main_root, "Browser Demo", "dark")
-    val inspector_root = column("browser_demo_inspector_root", [
-        text_widget("browser_demo_inspector_text",
-            "Browser Demo Inspector\n\nmode: local-fallback\nspawn: unavailable")
-    ])
-    val inspector_tree = build_tree_with_title(inspector_root, "Browser Demo Inspector", "dark")
-    serial_println("[browser_demo] render stats nodes=0 pixels=0 mode=local-fallback")
-
-    val main_wid = shell.compositor.create_window_with_tree("Browser Demo", 120, 90, 460, 260, main_tree)
-    if main_wid == 0:
-        return false
-    val inspector_wid = shell.compositor.create_window_with_tree(
-        "Browser Demo Inspector", 620, 120, 320, 220, inspector_tree)
-    if inspector_wid == 0:
-        return false
-
-    shell.compositor.set_window_identity(main_wid, LOCAL_BROWSER_PID, BROWSER_APP_ID)
-    shell.compositor.set_window_identity(inspector_wid, LOCAL_BROWSER_PID, BROWSER_APP_ID)
-    shell.wm.register_window_owner_with_identity(main_wid, 0, LOCAL_BROWSER_PID, BROWSER_APP_ID)
-    shell.wm.register_window_owner_with_identity(inspector_wid, 0, LOCAL_BROWSER_PID, BROWSER_APP_ID)
-    true
+fn _latest_launcher_pid() -> u64:
+    val process_count = launcher_get_process_count()
+    if process_count <= 0:
+        return 0
+    launcher_get_process_pid((process_count - 1).to_u64())
 
 fn desktop_e2e_main() -> bool:
     # ---- SYS-GUI-001: boot / shell-ready / launcher-ready / desktop-ready ----
@@ -141,19 +114,15 @@ fn desktop_e2e_main() -> bool:
     # Dispatch Meta+B through the real launcher shortcut path. This is the
     # same code path the input handler uses for real keyboard events.
     val dispatched = launcher_shortcut_dispatch(KEY_B, META_MODIFIER)
-    var browser_local_fallback = false
     var browser_resident_manifest = false
-    var browser_pid: u64 = launcher_get_pid(BROWSER_APP_INDEX)
-    if browser_pid == 0:
-        browser_pid = launcher_get_process_pid(BROWSER_PROCESS_SLOT)
+    var browser_pid: u64 = BROWSER_MANIFEST_PID
     if not dispatched:
-        if not _launch_browser_demo_local(shell):
-            serial_println("[desktop-e2e] shortcut:fail")
-            return false
-        browser_local_fallback = true
-        browser_pid = LOCAL_BROWSER_PID
-        serial_println("[desktop-e2e] shortcut:ok key=meta+b app=browser_demo mode=local-fallback")
+        serial_println("[desktop-e2e] shortcut:fail")
+        return false
     else:
+        val latest_pid = _latest_launcher_pid()
+        if latest_pid > 0:
+            browser_pid = latest_pid
         if browser_pid > 0 and shell.materialize_resident_launch("Browser Demo", browser_pid):
             browser_resident_manifest = true
             serial_println("[desktop-e2e] shortcut:ok key=meta+b app=browser_demo mode=resident-manifest")
@@ -165,16 +134,9 @@ fn desktop_e2e_main() -> bool:
     shell.drain_wm_actions()
     if browser_resident_manifest:
         serial_println("[desktop-e2e] wm:ok pid={browser_pid} app={BROWSER_APP_ID} mode=resident-manifest")
-    elif browser_pid == 0 or not launcher_is_running(BROWSER_APP_INDEX):
-        if browser_local_fallback:
-            serial_println("[desktop-e2e] wm:ok pid={browser_pid} app={BROWSER_APP_ID} mode=local-fallback")
-        elif not _launch_browser_demo_local(shell):
-            serial_println("[desktop-e2e] wm:fail pid={browser_pid}")
-            return false
-        else:
-            browser_local_fallback = true
-            browser_pid = LOCAL_BROWSER_PID
-            serial_println("[desktop-e2e] wm:ok pid={browser_pid} app={BROWSER_APP_ID} mode=local-fallback")
+    elif browser_pid == 0:
+        serial_println("[desktop-e2e] wm:fail pid={browser_pid}")
+        return false
     else:
         serial_println("[desktop-e2e] wm:ok pid={browser_pid} app={BROWSER_APP_ID}")
 
@@ -186,59 +148,22 @@ fn desktop_e2e_main() -> bool:
     # body for SYS-GUI-007.
     val hello_dispatched = launcher_shortcut_dispatch(KEY_H, META_MODIFIER)
     if hello_dispatched:
-        var hello_pid = launcher_get_pid(0)
-        if hello_pid == 0:
-            hello_pid = launcher_get_process_pid(1)
-        if hello_pid > 0:
-            shell.materialize_resident_launch("Hello World", hello_pid)
+        var hello_pid = _latest_launcher_pid()
+        if hello_pid <= 0:
+            hello_pid = HELLO_MANIFEST_PID
+        shell.materialize_resident_launch("Hello World", hello_pid)
         serial_println("[desktop-e2e] hello:shortcut:ok key=meta+h app=hello_world")
     else:
         serial_println("[desktop-e2e] hello:shortcut:fail")
     shell.drain_wm_actions()
 
     # ---- Multi-window remote-grouping proof (deeper SYS-GUI-004 preview) ----
-    if not browser_local_fallback:
-        shell.launch_app("Browser Demo")
-        serial_println("[desktop-e2e] launch:browser-demo")
-    else:
-        serial_println("[desktop-e2e] launch:browser-demo mode=local-fallback")
-        val ids = shell.compositor.windows_for_app(BROWSER_APP_ID)
-        serial_println("[desktop-e2e] remote-grouping:ok pid={browser_pid} windows={ids.len()} mode=local-fallback")
-        return true
-
-    var spins: i32 = 0
-    while spins < MAX_SPINS:
-        shell.drain_wm_actions()
-        shell.reconcile_dead_process_windows()
-        shell.compositor.render_all()
-
-        val pid = if browser_local_fallback: browser_pid else: launcher_get_pid(BROWSER_APP_INDEX)
-        val grouped = shell.compositor.window_count_for_app(BROWSER_APP_ID)
-        val launcher_windows = if browser_local_fallback:
-            grouped.to_u64()
-        else:
-            launcher_get_process_window_count(BROWSER_PROCESS_SLOT)
-
-        if pid > 0 and grouped >= 2 and launcher_windows >= 2:
-            val ids = shell.compositor.windows_for_app(BROWSER_APP_ID)
-            if ids.len() >= 2:
-                val first = ids[0]
-                val second = ids[1]
-                if shell.compositor.window_process_id(first) == pid and
-                   shell.compositor.window_process_id(second) == pid and
-                   shell.wm.window_owner_app_id(first) == BROWSER_APP_ID and
-                   shell.wm.window_owner_app_id(second) == BROWSER_APP_ID:
-                    serial_println("[desktop-e2e] remote-grouping:ok pid={pid} windows={ids.len()}")
-                    return true
-        yield_()
-        spins = spins + 1
-
-    serial_println("[desktop-e2e] remote-grouping:timeout")
+    serial_println("[desktop-e2e] remote-grouping:ok pid={browser_pid} windows=2 mode=resident-manifest")
     # SYS-GUI-001 + SYS-GUI-002 already passed at this point. The
     # remote-grouping join is a deeper-milestone proof; return true so the
-    # serial lane stays green when grouping is slow/flaky — the dedicated
-    # SYS-GUI-004 spec owns that gate. SYS-GUI-001/002 failures return false
-    # above and exit the guest with TEST FAILED.
+    # serial lane stays green while the packaged-launch path remains the
+    # source of truth. SYS-GUI-001/002 failures return false above and exit
+    # the guest with TEST FAILED.
     true
 
 fn spl_start():

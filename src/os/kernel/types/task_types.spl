@@ -2,6 +2,21 @@
 #
 # Process/task types used by scheduler, IPC, and capability layers.
 
+struct AddressSpace:
+    """Per-process virtual address space handle.
+
+    Opaque handle returned by `vmm.create_user_address_space()`. Carries the
+    physical root of the top-level page table (PML4 on x86_64, root SATP PPN
+    on riscv64) plus a monotonic id used for logging/debugging.
+
+    The scheduler's TCB persists the `phys_root` field as a `u64` for ABI
+    compatibility with existing context-switch code; callers that need the
+    full handle can reconstruct it via `AddressSpace(phys_root: tcb.address_space,
+    id: 0)` or look it up from the VMM's internal registry.
+    """
+    phys_root: u64          # Top-level page-table physical address (CR3 / SATP root)
+    id: u64                 # Monotonic address-space identifier (opaque)
+
 struct TaskId:
     """Unique task identifier."""
     id: u64
@@ -41,7 +56,14 @@ struct UserLoadSegment:
     data: [u8]
 
 struct UserProcessImage:
-    """Architecture-neutral user process image for scheduler handoff."""
+    """Architecture-neutral user process image for scheduler handoff.
+
+    `initial_sp` is the user sp register value once the Phase-3 SysV
+    argv/envp/auxv frame has been placed; the scheduler loads it into the
+    arch sp register instead of `stack_top`. `initial_stack_bytes` is the
+    serialized frame to memcpy to (stack_top - len(initial_stack_bytes))
+    inside the user stack region mapped by the segment mapper.
+    """
     binary_path: text
     entry: u64
     stack_top: u64
@@ -49,6 +71,14 @@ struct UserProcessImage:
     argv: [text]
     envp: [text]
     segments: [UserLoadSegment]
+    # Phase-2 addition (segment_mapper): raw ELF bytes retained so the
+    # scheduler can copy PT_LOAD file-backed ranges into user pages.
+    # Kept at the end of the struct to minimise conflict with the
+    # Phase-1 AddressSpace refactor.
+    file_bytes: [u8]
+    # Phase-3 addition (stack_builder): SysV initial stack frame.
+    initial_sp: u64
+    initial_stack_bytes: [u8]
 
 @repr("C")
 struct TaskContext:

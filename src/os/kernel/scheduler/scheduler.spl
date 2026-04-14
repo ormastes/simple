@@ -6,10 +6,11 @@
 # Consumes: SchedulerInputPort (interrupts, memory)
 # Produces: SchedulerOutputPort (task lifecycle, blocking)
 
-use os.kernel.types.task_types.{TaskId, TaskState, TaskPriority, TaskContext, BlockReason, UserProcessImage}
+use os.kernel.types.task_types.{TaskId, TaskState, TaskPriority, TaskContext, BlockReason, UserProcessImage, AddressSpace}
 use os.kernel.types.capability_types.{CapabilitySet}
-use os.kernel.arch.arch_context.{Riscv64Context}
-use os.kernel.arch.riscv64.trap_model.{create_rv64_user_context}
+use os.kernel.arch.x86_64.context.{X86ContextSwitch}
+use os.kernel.memory.vmm.{create_user_address_space}
+use os.kernel.loader.segment_mapper.{map_all}
 
 # ============================================================================
 # Configuration
@@ -36,7 +37,7 @@ struct TaskControlBlock:
     is_user: bool
     entry_point: u64
     context: TaskContext             # Saved CPU state
-    user_context: Riscv64Context?    # RV64 user-mode handoff state
+    user_context: TaskContext?       # x86_64 user-mode handoff state
     address_space: u64              # PML4 physical address
     kernel_stack: u64               # Kernel stack top
     user_stack: u64                 # User stack top
@@ -233,7 +234,7 @@ impl Scheduler:
         """Create a transitional user task from a user process image.
 
         The scheduler keeps the legacy TaskContext slot for compatibility, but
-        the RV64 user-mode handoff is represented explicitly in user_context.
+        the x86_64 user-mode handoff is represented explicitly in user_context.
         """
         val id = TaskId(id: self.next_task_id)
         self.next_task_id = self.next_task_id + 1
@@ -242,18 +243,35 @@ impl Scheduler:
         if slot < 0:
             return TaskId(id: 0)
 
-        val user_ctx = create_rv64_user_context(image.entry, image.stack_top, 0)
-        val legacy_ctx = TaskContext(
-            rax: 0, rbx: 0, rcx: 0, rdx: 0,
-            rsi: 0, rdi: 0, rbp: 0, rsp: 0,
-            r8: 0, r9: 0, r10: 0, r11: 0,
-            r12: 0, r13: 0, r14: 0, r15: 0,
-            rip: image.entry,
-            rflags: 0x202,
-            cs: 0x23,
-            ss: 0x1B,
-            fpu_state: 0
+        val user_sp = image.initial_sp & 0xFFFFFFFFFFFFFFF0
+        val arch_user_ctx = X86ContextSwitch.create(image.entry, user_sp, true)
+        val user_ctx = TaskContext(
+            rax: arch_user_ctx.rax, rbx: arch_user_ctx.rbx,
+            rcx: arch_user_ctx.rcx, rdx: arch_user_ctx.rdx,
+            rsi: arch_user_ctx.rsi, rdi: arch_user_ctx.rdi,
+            rbp: arch_user_ctx.rbp, rsp: arch_user_ctx.rsp,
+            r8: arch_user_ctx.r8, r9: arch_user_ctx.r9,
+            r10: arch_user_ctx.r10, r11: arch_user_ctx.r11,
+            r12: arch_user_ctx.r12, r13: arch_user_ctx.r13,
+            r14: arch_user_ctx.r14, r15: arch_user_ctx.r15,
+            rip: arch_user_ctx.rip,
+            rflags: arch_user_ctx.rflags,
+            cs: arch_user_ctx.cs,
+            ss: arch_user_ctx.ss,
+            fpu_state: arch_user_ctx.fpu_state
         )
+
+        val user_as: AddressSpace = create_user_address_space()
+
+        # Phase 2: populate the user address space with PT_LOAD pages before
+        # enqueueing. On failure we return TaskId(id: 0) to match the existing
+        # error-signalling convention (see _find_empty_slot above).
+        val map_result = map_all(user_as, image.segments, image.file_bytes)
+        match map_result:
+            case Err(_):
+                return TaskId(id: 0)
+            case Ok(_):
+                ()
 
         val tcb = TaskControlBlock(
             id: id,
@@ -261,9 +279,9 @@ impl Scheduler:
             priority: priority,
             is_user: true,
             entry_point: image.entry,
-            context: legacy_ctx,
+            context: user_ctx,
             user_context: Some(user_ctx),
-            address_space: 1,
+            address_space: user_as.phys_root,
             kernel_stack: 0,
             user_stack: image.stack_top,
             capabilities: caps,
@@ -279,8 +297,8 @@ impl Scheduler:
 
         id
 
-    fn get_user_context(self, task_id: TaskId) -> Riscv64Context?:
-        """Retrieve the RV64 user-mode context for a task, if it exists."""
+    fn get_user_context(self, task_id: TaskId) -> TaskContext?:
+        """Retrieve the x86_64 user-mode context for a task, if it exists."""
         val slot = self._find_slot(task_id)
         if slot < 0:
             return nil
