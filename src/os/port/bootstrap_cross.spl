@@ -29,6 +29,99 @@ val RUST_SEED_DIR = "src/compiler_rust"
 val DEFAULT_BUILD_DIR = "build/os/bootstrap"
 val DEFAULT_SYSROOT = "build/os/sysroot"
 
+# Subtrees dropped from `--source` when cross-building for `-simpleos` targets.
+# These modules are dominated by host-only externs (GPU, TLS, CUDA, Torch) with
+# no SimpleOS implementation, producing the bulk of ~2367 auto-stubs at link
+# time. Paths are matched against each emitted `--source` entry.
+#
+# Layout note: the repo does not have a flat `src/lib/std/<subsystem>/` tree.
+# Subsystems are sharded across mutability tiers
+# (common/, nogc_sync_mut/, nogc_async_mut/, gc_async_mut/), so we list every
+# tier-qualified path that actually exists on disk. Phantom paths from the
+# original plan (db, gfx, vulkan, opencl — no such dirs) are omitted.
+val SIMPLEOS_EXCLUDED_SOURCE_SUBTREES: [text] = [
+    # gpu
+    "src/lib/common/gpu",
+    "src/lib/gc_async_mut/gpu",
+    "src/lib/nogc_async_mut/gpu",
+    "src/lib/nogc_sync_mut/gpu",
+    # net/tls (TLS lives as a sibling of net/, not under it)
+    "src/lib/nogc_sync_mut/tls",
+    # cuda
+    "src/lib/gc_async_mut/cuda",
+    "src/lib/nogc_async_mut/cuda",
+    "src/lib/nogc_sync_mut/cuda",
+    # torch
+    "src/lib/common/torch",
+    "src/lib/gc_async_mut/torch",
+    "src/lib/nogc_async_mut/torch",
+    "src/lib/nogc_sync_mut/torch",
+]
+
+fn is_simpleos_excluded(path: text) -> bool:
+    """True when `path` is (or lives under) a SimpleOS-excluded subtree.
+
+    Matches both bare (`src/lib/...`) and prefixed (`./src/lib/...`,
+    `/abs/path/src/lib/...`) forms by checking `ends_with(excluded)` and
+    `contains(excluded + "/")`.
+    """
+    for excluded in SIMPLEOS_EXCLUDED_SOURCE_SUBTREES:
+        if path == excluded or path.starts_with(excluded + "/"):
+            return true
+        if path.ends_with("/" + excluded):
+            return true
+        if path.contains("/" + excluded + "/"):
+            return true
+    false
+
+fn filter_simpleos_sources(paths: [text], target: text) -> [text]:
+    """Drop GPU/TLS/CUDA/Torch subtrees when target ends in `-simpleos`.
+
+    For host targets returns `paths` unchanged — host builds are byte-identical.
+    """
+    if not target.ends_with("-simpleos"):
+        return paths
+    var kept: [text] = []
+    for p in paths:
+        if not is_simpleos_excluded(p):
+            kept.push(p)
+        else:
+            print "[bootstrap-cross] excluding from SimpleOS build: {p}"
+    kept
+
+fn expand_lib_sources(src_root: text) -> [text]:
+    """Expand `{src_root}/src/lib` into concrete subtrees so the SimpleOS
+    filter can drop specific nested subsystems (gpu/, tls/, cuda/, torch/).
+
+    Returns top-level children of `src/lib` (common, gc_async_mut, …) with
+    mutability-tier dirs further expanded one level, so entries like
+    `src/lib/gc_async_mut/gpu` appear directly in the list.
+    """
+    var out: [text] = []
+    val lib_root = "{src_root}/src/lib"
+    val top = fs.list_dir(lib_root)
+    if not top.is_ok():
+        # Fall back to the un-expanded path; filter becomes a no-op.
+        out.push(lib_root)
+        return out
+    for entry in top.unwrap():
+        val top_path = "{lib_root}/{entry}"
+        if not fs.dir_exists(top_path):
+            continue
+        val children = fs.list_dir(top_path)
+        if not children.is_ok():
+            out.push(top_path)
+        else:
+            var any_sub = false
+            for sub in children.unwrap():
+                val sub_path = "{top_path}/{sub}"
+                if fs.dir_exists(sub_path):
+                    out.push(sub_path)
+                    any_sub = true
+            if not any_sub:
+                out.push(top_path)
+    out
+
 struct CrossConfig:
     target: text              # Target triple (e.g. x86_64-simpleos)
     build_dir: text           # Build output directory
@@ -312,10 +405,25 @@ fn build_stage_cross(config: CrossConfig, stage: i64, compiler: text) -> bool:
     if output_dir != nil:
         fs.mkdir_p(output_dir.0)
 
-    # Build args
+    # Build args.
+    #
+    # For `-simpleos` targets, expand `{src}/src/lib` into concrete subtrees
+    # and drop host-only subsystems (GPU, TLS, CUDA, Torch) that would
+    # otherwise generate ~2367 auto-stubs. Host targets pass `src/lib`
+    # through unchanged, so host builds remain byte-identical.
+    var lib_sources: [text] = []
+    if config.target.ends_with("-simpleos"):
+        lib_sources = filter_simpleos_sources(
+            expand_lib_sources(src),
+            config.target
+        )
+    else:
+        lib_sources.push("{src}/src/lib")
     var args = "native-build" +
-        " --source {src}/src/compiler" +
-        " --source {src}/src/lib" +
+        " --source {src}/src/compiler"
+    for s in lib_sources:
+        args = args + " --source {s}"
+    args = args +
         " --source {src}/src/app" +
         " --entry {src}/src/app/cli/main.spl" +
         " -o {output}"
