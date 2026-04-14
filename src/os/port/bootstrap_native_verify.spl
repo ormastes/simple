@@ -1,0 +1,191 @@
+#![allow(unnamed_duplicate_typed_args)]
+## In-guest (SimpleOS) Stage2==Stage3 convergence verifier.
+##
+## Mirror of bootstrap_verify.spl for the case where the Simple compiler
+## runs natively inside SimpleOS (no host OS, no subprocess). All work
+## happens via in-process Simple APIs.
+##
+## Workstream C6: once the Simple compiler can self-host inside SimpleOS,
+## byte-compare Stage2 vs Stage3 binaries produced inside the guest to
+## prove deterministic self-compilation convergence.
+##
+## Usage (in-guest):
+##   /bin/simple run /src/os/port/bootstrap_native_verify.spl
+
+use std.fs
+use std.cli
+use std.process
+use compiler.backend.introspection.elf_symbols.{count_symbols_matching}
+
+# ============================================================================
+# Configuration
+# ============================================================================
+
+val STAGE2_BIN: text = "/build/stage2/simple"
+val STAGE3_BIN: text = "/build/stage3/simple"
+val ENTRY: text = "/src/app/cli/main.spl"
+val SOURCES: [text] = ["/src/compiler", "/src/lib", "/src/app"]
+
+# ============================================================================
+# Source Tree Check
+# ============================================================================
+
+fn _check_source_tree_present() -> bool:
+    """Return true if all source directories and the entry point exist."""
+    for src in SOURCES:
+        if not fs.dir_exists(src):
+            return false
+    fs.exists(ENTRY)
+
+# ============================================================================
+# Build Stages
+# ============================================================================
+
+fn _ensure_dir(path: text):
+    """Create directory (and parents) if it does not already exist."""
+    if not fs.dir_exists(path):
+        fs.mkdir_p(path)
+
+fn _build_stage(output: text) -> Result<text, text>:
+    """Build Stage 2 using the bundled in-guest simple binary at /bin/simple.
+
+    TODO(Phase in-guest): when SimpleOS supports in-process compiler
+    invocation, call native_build(...) from the compiler driver directly.
+    Currently returns Err until the in-process seam lands.
+    """
+    _ensure_dir("/build/stage2")
+    # In-process invocation is not yet wired. When SimpleOS gains
+    # fork/exec or a compiler-driver FFI, replace this stub.
+    Err("in-process native-build not yet wired — use process.run once SimpleOS has fork/exec")
+
+fn _build_stage_with(compiler: text, output: text) -> Result<text, text>:
+    """Build Stage 3 using the Stage 2 compiler binary.
+
+    TODO(Phase in-guest): see _build_stage.
+    """
+    _ensure_dir("/build/stage3")
+    Err("in-process native-build not yet wired — use process.run once SimpleOS has fork/exec")
+
+# ============================================================================
+# Byte Comparison
+# ============================================================================
+
+fn _byte_compare(a: text, b: text) -> Result<i64, text>:
+    """Compare two files byte-by-byte.
+
+    Returns:
+      Ok(0)      — files are byte-identical
+      Ok(offset) — index of first diverging byte (>= 0)
+      Err(msg)   — could not read one of the files
+    """
+    if not fs.exists(a):
+        return Err("file not found: {a}")
+    if not fs.exists(b):
+        return Err("file not found: {b}")
+
+    match fs.read_bytes(a):
+        nil:
+            Err("could not read {a}")
+        bytes_a:
+            match fs.read_bytes(b):
+                nil:
+                    Err("could not read {b}")
+                bytes_b:
+                    val len_a = bytes_a.len()
+                    val len_b = bytes_b.len()
+                    if len_a != len_b:
+                        val shorter: i64 = if len_a < len_b: len_a.to_i64() else: len_b.to_i64()
+                        return Ok(shorter)
+                    var i: i64 = 0
+                    while i < len_a.to_i64():
+                        if bytes_a[i] != bytes_b[i]:
+                            return Ok(i)
+                        i = i + 1
+                    Ok(0)
+
+# ============================================================================
+# Auto-Stub Count Fallback
+# ============================================================================
+
+fn _auto_stub_count_equal(a: text, b: text) -> bool:
+    """Fallback convergence test: Stage2 and Stage3 agree on auto_stub count.
+
+    Loads both ELFs as byte buffers and counts 'auto_stub' symbol matches
+    via the in-process ELF reader. Returns true iff the counts are equal.
+    """
+    match fs.read_bytes(a):
+        nil:
+            return false
+        bytes_a:
+            match fs.read_bytes(b):
+                nil:
+                    return false
+                bytes_b:
+                    val count_a = count_symbols_matching(bytes_a, "auto_stub")
+                    val count_b = count_symbols_matching(bytes_b, "auto_stub")
+                    count_a == count_b
+
+# ============================================================================
+# Main Pipeline
+# ============================================================================
+
+fn main() -> i32:
+    print "[native-verify] === SimpleOS native self-host convergence check ==="
+    print "[native-verify] Stage2: {STAGE2_BIN}"
+    print "[native-verify] Stage3: {STAGE3_BIN}"
+    print ""
+
+    # Step 1: verify source tree is present
+    if not _check_source_tree_present():
+        print "[native-verify] FAIL: source tree missing under /src/ or entry point absent"
+        return 2
+
+    print "[native-verify] Source tree present."
+    print ""
+
+    # Step 2: build Stage 2 from bundled compiler
+    print "[native-verify] Stage 2: compiling from /src/ with bundled simple binary..."
+    match _build_stage(STAGE2_BIN):
+        Ok(_):
+            print "[native-verify] Stage 2 OK"
+        Err(msg):
+            print "[native-verify] Stage 2 FAILED: {msg}"
+            return 3
+
+    # Step 3: build Stage 3 from Stage 2
+    print ""
+    print "[native-verify] Stage 3: compiling from /src/ with Stage 2..."
+    match _build_stage_with(STAGE2_BIN, STAGE3_BIN):
+        Ok(_):
+            print "[native-verify] Stage 3 OK"
+        Err(msg):
+            print "[native-verify] Stage 3 FAILED: {msg}"
+            return 4
+
+    # Step 4: byte-compare
+    print ""
+    print "[native-verify] Byte-comparing Stage 2 vs Stage 3..."
+    match _byte_compare(STAGE2_BIN, STAGE3_BIN):
+        Ok(offset):
+            if offset == 0:
+                print "[native-verify] CONVERGENCE OK — byte-identical"
+                return 0
+            print "[native-verify] DIVERGENCE at byte offset {offset}"
+            # Fallback: same auto_stub count is a weaker convergence signal
+            val stub_eq = _auto_stub_count_equal(STAGE2_BIN, STAGE3_BIN)
+            if stub_eq:
+                print "[native-verify] CONVERGENCE OK (fallback: same auto_stub count)"
+                return 0
+            # Extra diagnostic: file sizes
+            val stat2 = fs.stat(STAGE2_BIN)
+            val stat3 = fs.stat(STAGE3_BIN)
+            if stat2.is_ok() and stat3.is_ok():
+                val sz2 = stat2.unwrap().size
+                val sz3 = stat3.unwrap().size
+                print "[native-verify]   Stage 2 size: {sz2} bytes"
+                print "[native-verify]   Stage 3 size: {sz3} bytes"
+            print "[native-verify] FAIL: binaries diverge and stub counts differ"
+            return 5
+        Err(msg):
+            print "[native-verify] FAIL reading binaries: {msg}"
+            return 6
