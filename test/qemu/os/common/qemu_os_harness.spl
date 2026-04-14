@@ -10,7 +10,7 @@
 #   2. Launch QEMU: run_os_qemu(arch, timeout)
 #   3. Assert: expect(output).to_contain("[PASS] test_name")
 
-use os.qemu_runner.{OsTarget, get_target, arch_display_name, build_qemu_command}
+use os.qemu_runner.{OsTarget, QemuScenario, get_target, arch_display_name, build_qemu_command}
 use os.kernel.arch.arch_context.{Architecture}
 
 extern fn rt_process_run_timeout(cmd: text, args: [text], timeout_ms: i64) -> (text, text, i32)
@@ -114,12 +114,52 @@ fn run_os_qemu_with_target(target: OsTarget, timeout_ms: i64) -> (text, text, i3
     rt_process_run_timeout(qemu_bin, args, timeout_ms)
 
 fn spawn_guest_with_qmp(target: OsTarget, qmp_socket: text, serial_log: text) -> Result<QemuGuestHandle, text>:
+    """Spawn a QEMU guest using only the target's own qemu_extra.
+
+    Backward-compatible entry point for callers that do not need any
+    scenario-specific extras (empty list of scenario extras).
+    """
+    val no_extras: [text] = []
+    _spawn_guest_with_qmp_extras(
+        target,
+        qmp_socket: qmp_socket,
+        serial_log: serial_log,
+        scenario_extras: no_extras)
+
+fn spawn_guest_with_qmp_scenario(
+    target: OsTarget,
+    scenario: QemuScenario,
+    qmp_socket: text,
+    serial_log: text
+) -> Result<QemuGuestHandle, text>:
+    """Spawn a QEMU guest merging target.qemu_extra followed by
+    scenario.qemu_extra.
+
+    Merge rule: target extras are placed first (they typically carry
+    baseline device wiring for the kernel), then scenario extras are
+    appended so scenario-specific arguments (e.g. -drive for SYS-GUI-007)
+    reach QEMU. The QMP socket args are appended last by
+    _target_with_qmp so they always land at the end of the command line.
+    """
+    _spawn_guest_with_qmp_extras(
+        target,
+        qmp_socket: qmp_socket,
+        serial_log: serial_log,
+        scenario_extras: scenario.qemu_extra)
+
+fn _spawn_guest_with_qmp_extras(
+    target: OsTarget,
+    qmp_socket: text,
+    serial_log: text,
+    scenario_extras: [text]
+) -> Result<QemuGuestHandle, text>:
     if rt_file_exists(qmp_socket):
         rt_file_delete(qmp_socket)
     if rt_file_exists(serial_log):
         rt_file_delete(serial_log)
 
-    val target_with_qmp = _target_with_qmp(target, qmp_socket)
+    val target_with_extras = _target_with_merged_extras(target, scenario_extras)
+    val target_with_qmp = _target_with_qmp(target_with_extras, qmp_socket)
     val cmd_parts = build_qemu_command(target_with_qmp)
     val qemu_bin = cmd_parts[0]
     val shell_cmd = _shell_command_with_redirect(cmd_parts, serial_log)
@@ -131,6 +171,34 @@ fn spawn_guest_with_qmp(target: OsTarget, qmp_socket: text, serial_log: text) ->
         rt_process_wait(pid, 2000)
         return Err("QMP socket did not appear at {qmp_socket}")
     Ok(QemuGuestHandle.create(pid, qmp_socket, serial_log, qemu_bin))
+
+fn _target_with_merged_extras(target: OsTarget, scenario_extras: [text]) -> OsTarget:
+    """Return a target whose qemu_extra = target.qemu_extra ++ scenario_extras.
+
+    Preserves backward compat for scenarios with empty qemu_extra —
+    in that case the returned target is effectively unchanged.
+    """
+    if scenario_extras.len() == 0:
+        return target
+    var merged = target.qemu_extra
+    var idx = 0
+    while idx < scenario_extras.len():
+        merged.push(scenario_extras[idx])
+        idx = idx + 1
+    OsTarget(
+        arch: target.arch,
+        entry: target.entry,
+        linker_script: target.linker_script,
+        target_triple: target.target_triple,
+        output: target.output,
+        qemu_system: target.qemu_system,
+        qemu_machine: target.qemu_machine,
+        qemu_cpu: target.qemu_cpu,
+        qemu_memory: target.qemu_memory,
+        qemu_bios: target.qemu_bios,
+        qemu_extra: merged,
+        gui_mode: target.gui_mode
+    )
 
 fn wait_for_serial_marker(handle: QemuGuestHandle, marker: text, timeout_ms: i64) -> bool:
     var waited = 0

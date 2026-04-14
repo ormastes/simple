@@ -41,9 +41,12 @@ val LAUNCHER_SHORTCUT: u32 = 4
 # Syscall IDs
 # ============================================================================
 
+# Canonical values from src/os/kernel/ipc/syscall.spl dispatcher cases 20..23.
+# Keep in sync with test/unit/os/kernel/ipc/syscall_number_consistency_spec.spl.
+val SYS_IPC_SEND: u64 = 20
 val SYS_IPC_RECV: u64 = 21
 val SYS_IPC_CREATE_PORT: u64 = 22
-val SYS_IPC_SEND: u64 = 23
+val SYS_IPC_CONNECT: u64 = 23
 val SIGTERM: i32 = 15
 
 # ============================================================================
@@ -104,70 +107,37 @@ fn _builtin_remote_app_entry(path: text) -> u64?:
             nil
 
 fn _app_name(idx: u64) -> text:
-    if idx == 0:
-        "Hello World"
-    elif idx == 1:
-        "File Manager"
-    elif idx == 2:
-        "Terminal"
-    elif idx == 3:
-        "Browser Demo"
-    else:
-        ""
+    if idx >= app_count:
+        return ""
+    app_name[idx]
 
 fn _app_path(idx: u64) -> text:
-    if idx == 0:
-        "/sys/apps/hello_world"
-    elif idx == 1:
-        "/sys/apps/file_manager"
-    elif idx == 2:
-        "/sys/apps/shell"
-    elif idx == 3:
-        "/sys/apps/browser_demo"
-    else:
-        ""
+    if idx >= app_count:
+        return ""
+    app_path[idx]
 
 fn _app_icon(idx: u64) -> text:
-    if idx == 0:
-        "H"
-    elif idx == 1:
-        "F"
-    elif idx == 2:
-        ">"
-    elif idx == 3:
-        "B"
-    else:
-        ""
+    if idx >= app_count:
+        return ""
+    app_icon[idx]
 
 fn _app_key(idx: u64) -> u32:
-    if idx == 0:
-        0x48
-    elif idx == 1:
-        0x46
-    elif idx == 2:
-        0x54
-    elif idx == 3:
-        0x42
-    else:
-        0
+    if idx >= app_count:
+        return 0
+    app_shortcut_key[idx]
 
 fn _app_mod(idx: u64) -> u32:
-    if idx < 4:
-        MOD_META
-    else:
-        0
+    if idx >= app_count:
+        return 0
+    app_shortcut_mod[idx]
 
 fn _app_index_by_name(name: text) -> i64:
-    if name == "Hello World":
-        0
-    elif name == "File Manager":
-        1
-    elif name == "Terminal":
-        2
-    elif name == "Browser Demo":
-        3
-    else:
-        -1
+    var i: u64 = 0
+    while i < app_count:
+        if app_name[i] == name:
+            return i.to_i64()
+        i = i + 1
+    -1
 
 fn _app_index_by_pid(pid: u64) -> i64:
     var i: u64 = 0
@@ -487,7 +457,9 @@ fn launcher_launch(name: text) -> i64:
     app_last_pid[slot] = pid
     _sync_app_slot(slot, pid, "running", 0, 0, true)
     launcher_record_process(pid, slot.to_i64(), "running", 0, 0, true)
+    val app_id = _default_app_identity(slot)
     serial_println("[launcher] Started {name} (PID {pid})")
+    serial_println("[launcher] spawned app_id={app_id} pid={pid} name={name}")
     pid.to_i64()
 
 fn launcher_launch_by_index(idx: u64) -> i64:
@@ -631,12 +603,14 @@ fn launcher_mark_exited_with_code(pid: u64, exit_code: i32):
     var app_idx = _app_index_by_pid(pid)
     if app_idx >= 0:
         val slot = app_idx.to_u64()
+        val app_id = _default_app_identity(slot)
         if final_state == "terminated":
             serial_println("[launcher] Process terminated: {app_name[slot]} (PID {pid}, code {exit_code})")
         elif final_state == "crashed":
             serial_println("[launcher] Process crashed: {app_name[slot]} (PID {pid}, code {exit_code})")
         else:
             serial_println("[launcher] Process exited: {app_name[slot]} (PID {pid}, code {exit_code})")
+        serial_println("[launcher] exited app_id={app_id} pid={pid} state={final_state} code={exit_code}")
         _clear_app_slot_by_pid(pid, final_state, exit_code)
         return
 
@@ -646,19 +620,45 @@ fn launcher_mark_exited_with_code(pid: u64, exit_code: i32):
         serial_println("[launcher] Process crashed: PID {pid} (code {exit_code})")
     else:
         serial_println("[launcher] Process exited: PID {pid} (code {exit_code})")
+    serial_println("[launcher] exited app_id= pid={pid} state={final_state} code={exit_code}")
 
 fn launcher_terminate(pid: u64) -> bool:
-    """Request process termination via SIGTERM."""
-    val result = posix_kill(pid, SIGTERM)
-    if result != 0:
-        serial_println("[launcher] Failed to terminate PID {pid}: {result}")
+    """Request forced termination of a tracked process.
+
+    Flips the tracked state to `terminating` *before* invoking the
+    kernel kill so that when `launcher_poll_processes` /
+    `launcher_note_task_probe` later observes the death, classification
+    via `_classify_final_state` resolves to `terminated` rather than
+    `exited` or `crashed`.
+
+    Returns `true` if the termination request was recorded. A return of
+    `false` means the PID was not tracked as live, so no kill was sent.
+    A kernel-side kill delivery failure is logged but does not unwind
+    the state flip — the operator intent is already captured, and the
+    reaper will finalize to `terminated` on the next probe regardless of
+    whether the signal delivery path was available.
+    """
+    var process_idx = _process_index_by_pid(pid)
+    if process_idx < 0:
+        serial_println("[launcher] Terminate ignored: PID {pid} not tracked")
+        return false
+    val pslot = process_idx.to_u64()
+    if not _is_running_state(process_state[pslot]):
+        serial_println("[launcher] Terminate ignored: PID {pid} already in state {process_state[pslot]}")
         return false
 
+    # Record the terminate intent first so that the reaper's subsequent
+    # liveness probe classifies the death as `terminated`.
     _update_process_state(pid, "terminating", 0)
     var app_idx = _app_index_by_pid(pid)
     if app_idx >= 0:
         app_launch_state[app_idx.to_u64()] = "terminating"
-    serial_println("[launcher] Terminate sent to PID {pid}")
+
+    val result = posix_kill(pid, SIGTERM)
+    if result != 0:
+        serial_println("[launcher] posix_kill SIGTERM failed for PID {pid}: {result} (state kept as terminating)")
+    else:
+        serial_println("[launcher] Terminate sent to PID {pid}")
     true
 
 fn launcher_note_task_probe(pid: u64, alive: bool, exit_code: i32):

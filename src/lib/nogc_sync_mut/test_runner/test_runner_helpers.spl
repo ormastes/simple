@@ -121,6 +121,54 @@ fn categorize_test_file(file_path: text) -> text:
     "Unknown"
 
 # =========================================================================
+# System-spec predicate (mirror of Rust driver's is_system_spec check)
+# =========================================================================
+#
+# MIRROR: src/compiler_rust/driver/src/cli/test_runner/runner.rs:733
+#
+# In the Rust driver, the interpreter-mode execution path has a
+# static-analysis fast path that counts `it{}` blocks without executing
+# them. That's safe for unit/feature/integration specs, but system specs
+# under test/system/** MUST actually execute their it-block bodies —
+# they drive QEMU guests, capture framebuffers, and check serial markers.
+# The Rust runner gates the fast-path on !is_system_spec to avoid silent
+# false-positives.
+#
+# The pure-Simple runner in src/app/test_runner_new/ currently has NO
+# static fast-path — every test file goes through the real interpreter
+# path — so there is no immediate behavioral drift vs. the Rust driver.
+# This predicate is the peer of the Rust check, ready to gate any future
+# static/safe-mode optimization the Simple runner adds (e.g. SIMPLE_TEST_SAFE
+# fast counts), so that when it lands it won't silently bypass QEMU specs.
+#
+# Matches the Rust semantics: `test` and `system` both appear as path
+# components (either slash or OS-separator). Works for:
+#   test/system/foo_spec.spl      -> true
+#   ./test/system/nested/bar.spl  -> true
+#   test/unit/foo_spec.spl        -> false
+#   system_test/foo.spl           -> false  (no test/ ancestor)
+fn is_system_spec(file_path: text) -> bool:
+    """Return true when file_path sits under a test/system/** tree.
+
+    Peer of the Rust driver's runner.rs is_system_spec path check. Used
+    to gate any future static-analysis fast-path in the pure-Simple test
+    runner so system specs always execute their it{} bodies.
+    """
+    # Plain slash form: covers POSIX paths and the canonical repo layout.
+    if file_path.contains("/test/system/"):
+        return true
+    # Unprefixed leading "test/system/" (e.g. relative path from repo root).
+    if file_path.starts_with("test/system/"):
+        return true
+    # Windows-style separators, mirror for completeness with the Rust
+    # Path::components() semantics.
+    if file_path.contains("\\test\\system\\"):
+        return true
+    if file_path.starts_with("test\\system\\"):
+        return true
+    false
+
+# =========================================================================
 # Closure Warnings Display
 # =========================================================================
 

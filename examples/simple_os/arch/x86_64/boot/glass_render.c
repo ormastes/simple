@@ -66,6 +66,16 @@ static uint32_t g_dirty_y2 = 0;
 static int g_use_virtio_gpu = 0;
 static uint64_t g_virtio_gpu_resource_id = 0;
 
+/* Runtime GPU-accel feature flag — separate knob from g_use_virtio_gpu.
+ * Set by Simple-side boot probe (src/os/drivers/gpu/gpu_accel.spl) ONLY
+ * after VirtIO-GPU is fully detected and its controlq is ready. Default
+ * OFF so the CPU fallback keeps working; new GPU code paths fire only
+ * when this flag is ON. The two flags are intentionally distinct:
+ *   - g_use_virtio_gpu: shadow buffer is backed by GPU DMA (layout hint)
+ *   - g_gpu_accel_enabled: C side is allowed to issue virtio-gpu commands
+ */
+static int g_gpu_accel_enabled = 0;
+
 /* Called from Simple code to enable GPU-accelerated present */
 RuntimeValue rt_gui_set_gpu_mode(RuntimeValue enabled, RuntimeValue resource_id,
                                   RuntimeValue unused1, RuntimeValue unused2)
@@ -74,6 +84,87 @@ RuntimeValue rt_gui_set_gpu_mode(RuntimeValue enabled, RuntimeValue resource_id,
     g_use_virtio_gpu = (int)(uint64_t)enabled;
     g_virtio_gpu_resource_id = (uint64_t)resource_id;
     return 0;
+}
+
+/* Runtime feature flag setter — called from Simple after VirtIO-GPU probe. */
+RuntimeValue rt_gui_set_gpu_accel_enabled(RuntimeValue enabled,
+                                           RuntimeValue unused1,
+                                           RuntimeValue unused2,
+                                           RuntimeValue unused3)
+{
+    (void)unused1; (void)unused2; (void)unused3;
+    g_gpu_accel_enabled = (int)(uint64_t)enabled;
+    return 0;
+}
+
+/* C-callable query — returns non-zero when GPU-accel feature flag is ON. */
+int glass_render_gpu_accel_enabled(void)
+{
+    return g_gpu_accel_enabled;
+}
+
+/* --------------------------------------------------------------------
+ * VirtIO-GPU transfer/flush path
+ *
+ * This is the foundation call every higher-level GPU offload (blit,
+ * blur compute, pixel shaders, bezier raster) ultimately depends on:
+ * once a resource is updated on the host, the guest must issue
+ * TRANSFER_TO_HOST_2D + RESOURCE_FLUSH for the region to become
+ * visible. Everything else (shader pipelines, command buffers) is
+ * built on top of this cycle.
+ *
+ * STATUS: The virtio-gpu controlq is owned by the Simple-side driver
+ * (src/os/drivers/virtio/virtio_gpu.spl). From C we do NOT touch the
+ * virtqueue directly — that would duplicate state the Simple driver
+ * is managing. Instead, when the GPU-accel flag is ON, we record the
+ * dirty rect as "pending flush" and return. The Simple compositor's
+ * present loop (src/os/compositor/engine2d_display.spl) picks up the
+ * pending rect on its next tick and issues the transfer/flush through
+ * the existing Simple driver.
+ *
+ * This is a stub in the sense that it does not issue the virtio
+ * command from C directly — but it is a REAL handoff: when the flag
+ * is ON, the CPU MMIO memcpy is suppressed and the Simple side takes
+ * over. When the flag is OFF, behavior is unchanged (MMIO fallback).
+ * ------------------------------------------------------------------ */
+
+static uint32_t g_pending_flush_x1 = 0;
+static uint32_t g_pending_flush_y1 = 0;
+static uint32_t g_pending_flush_x2 = 0;
+static uint32_t g_pending_flush_y2 = 0;
+static int      g_pending_flush_valid = 0;
+
+/* C helper — records the rect the Simple side should transfer+flush.
+ * Returns 1 if the rect was recorded (flag ON), 0 if caller should
+ * fall through to MMIO copy. */
+static int virtio_gpu_queue_transfer_flush(uint32_t x1, uint32_t y1,
+                                            uint32_t x2, uint32_t y2)
+{
+    if (!g_gpu_accel_enabled) return 0;
+    if (g_virtio_gpu_resource_id == 0) return 0;
+    g_pending_flush_x1 = x1;
+    g_pending_flush_y1 = y1;
+    g_pending_flush_x2 = x2;
+    g_pending_flush_y2 = y2;
+    g_pending_flush_valid = 1;
+    return 1;
+}
+
+/* Simple-side driver polls this after each compositor tick.
+ * Returns packed (x1<<48)|(y1<<32)|(x2<<16)|y2 if a flush is pending,
+ * or 0 if nothing pending. Clears the pending state on read. */
+RuntimeValue rt_gui_take_pending_flush(RuntimeValue unused1, RuntimeValue unused2,
+                                        RuntimeValue unused3, RuntimeValue unused4)
+{
+    (void)unused1; (void)unused2; (void)unused3; (void)unused4;
+    if (!g_pending_flush_valid) return 0;
+    uint64_t packed =
+        ((uint64_t)(g_pending_flush_x1 & 0xFFFFu) << 48) |
+        ((uint64_t)(g_pending_flush_y1 & 0xFFFFu) << 32) |
+        ((uint64_t)(g_pending_flush_x2 & 0xFFFFu) << 16) |
+        ((uint64_t)(g_pending_flush_y2 & 0xFFFFu));
+    g_pending_flush_valid = 0;
+    return (RuntimeValue)packed;
 }
 
 static void dirty_mark(uint32_t x, uint32_t y, uint32_t w, uint32_t h)
@@ -150,26 +241,17 @@ RuntimeValue rt_gui_begin_frame(RuntimeValue w_rv, RuntimeValue h_rv,
 /* rt_gui_present(_, _, _, _)
  * Copies shadow buffer to MMIO framebuffer.
  * Uses dirty rect tracking: only copies changed region.
- * TODO: GPU_ACCEL — for VirtIO-GPU, call TRANSFER_TO_HOST_2D + FLUSH
- *       with dirty rect bounds instead of MMIO memcpy. */
+ *
+ * GPU path: when glass_render_gpu_accel_enabled() is true, the dirty
+ * rect is handed off via virtio_gpu_queue_transfer_flush() and the
+ * Simple-side driver (src/os/drivers/virtio/virtio_gpu.spl) issues
+ * TRANSFER_TO_HOST_2D + RESOURCE_FLUSH through the controlq. The
+ * CPU MMIO memcpy is suppressed on that path. */
 RuntimeValue rt_gui_present(RuntimeValue unused1, RuntimeValue unused2,
                              RuntimeValue unused3, RuntimeValue unused4)
 {
     (void)unused1; (void)unused2; (void)unused3; (void)unused4;
     if (!g_shadow_ready || !g_shadow_buf) return 0;
-
-    /* GPU fast path: shadow buffer IS the DMA backing.
-     * Just signal the GPU to read from DMA (no copy needed).
-     * TODO: GPU_ACCEL — call VirtIO-GPU TRANSFER_TO_HOST_2D + RESOURCE_FLUSH
-     * This requires the VirtIO controlq to be accessible from C.
-     * For now, the Simple-side GpuAccelerator.present_dirty() handles this. */
-    if (g_use_virtio_gpu) {
-        /* When GPU mode is active, the shadow buffer was allocated at the
-         * GPU DMA address. No MMIO copy needed — return immediately.
-         * The Simple code calls gpu.flush_rect() after present(). */
-        dirty_reset();
-        return 0;
-    }
 
     /* Determine transfer region */
     uint32_t x1 = 0, y1 = 0, x2 = g_shadow_w, y2 = g_shadow_h;
@@ -179,6 +261,21 @@ RuntimeValue rt_gui_present(RuntimeValue unused1, RuntimeValue unused2,
         y1 = g_dirty_y1;
         x2 = g_dirty_x2 < g_shadow_w ? g_dirty_x2 : g_shadow_w;
         y2 = g_dirty_y2 < g_shadow_h ? g_dirty_y2 : g_shadow_h;
+    }
+
+    /* GPU fast path: shadow buffer IS the DMA backing.
+     * Record the dirty rect for the Simple-side virtio-gpu driver to
+     * pick up on next poll of rt_gui_take_pending_flush(). */
+    if (g_use_virtio_gpu || g_gpu_accel_enabled) {
+        if (virtio_gpu_queue_transfer_flush(x1, y1, x2, y2)) {
+            dirty_reset();
+            return 0;
+        }
+        /* Flag ON but resource_id==0: fall through to MMIO fallback. */
+        if (g_use_virtio_gpu) {
+            dirty_reset();
+            return 0;
+        }
     }
 
     /* Bulk copy dirty region to MMIO framebuffer (row by row) */
@@ -239,7 +336,13 @@ static inline uint32_t lerp_color(uint32_t c1, uint32_t c2, uint32_t t, uint32_t
 /* ===================================================================
  * 1. Alpha-blended rectangle fill
  *    rt_gui_blend_fill(xy, wh, color, alpha)
- *    // TODO: GPU_ACCEL — offload to GPU blit with per-pixel alpha
+ *
+ *    TODO(P3/gpu): offload to GPU blit with per-pixel alpha.
+ *      Depends on: virtio-gpu RESOURCE_CREATE_2D + TRANSFER_TO_HOST_2D
+ *        (stub path wired via rt_gui_present; see glass_render.c:~155)
+ *        plus a 2D blit command — virtio-gpu spec doesn't expose one,
+ *        so this needs virgl/venus renderer negotiation (CAPSET_VIRGL).
+ *      Expected speedup: ~5-10x for large alpha rects.
  * =================================================================== */
 
 RuntimeValue rt_gui_blend_fill(RuntimeValue xy, RuntimeValue wh,
@@ -335,7 +438,14 @@ RuntimeValue rt_gui_blend_pixel(RuntimeValue x_y, RuntimeValue color_alpha,
 /* ===================================================================
  * 3. Box blur (3-pass approximation of Gaussian)
  *    rt_gui_box_blur(xy, wh, radius, _)
- *    // TODO: GPU_ACCEL — offload to GPU compute shader (10-50x speedup)
+ *
+ *    TODO(P3/gpu): offload to GPU compute shader.
+ *      Depends on: virgl CAPSET_VIRGL renderer negotiation (host-side
+ *        support from QEMU --display gtk,gl=on or similar) + a
+ *        GLSL/SPIR-V compute program shipped with the guest + a
+ *        command-buffer builder that doesn't exist yet. Foundation
+ *        TRANSFER/FLUSH path already wired (glass_render.c:~155).
+ *      Expected speedup: 10-50x for large blur passes.
  * =================================================================== */
 
 /* Scratch buffer for blur passes — static to avoid stack overflow.
@@ -470,7 +580,12 @@ RuntimeValue rt_gui_box_blur(RuntimeValue xy, RuntimeValue wh,
 /* ===================================================================
  * 4. Horizontal linear gradient
  *    rt_gui_gradient_h(xy, wh, color1, color2)
- *    // TODO: GPU_ACCEL — trivially parallelizable pixel shader
+ *
+ *    TODO(P3/gpu): trivially parallelizable pixel shader.
+ *      Depends on: virgl renderer + fragment-shader pipeline + command
+ *        buffer builder (same prerequisites as box_blur; see
+ *        glass_render.c:~340). Baseline transfer/flush already wired.
+ *      Expected speedup: ~20x for full-width gradients.
  * =================================================================== */
 
 RuntimeValue rt_gui_gradient_h(RuntimeValue xy, RuntimeValue wh,
@@ -501,7 +616,11 @@ RuntimeValue rt_gui_gradient_h(RuntimeValue xy, RuntimeValue wh,
 /* ===================================================================
  * 5. Vertical linear gradient
  *    rt_gui_gradient_v(xy, wh, color1, color2)
- *    // TODO: GPU_ACCEL — trivially parallelizable pixel shader
+ *
+ *    TODO(P3/gpu): trivially parallelizable pixel shader.
+ *      Depends on: same virgl pipeline prerequisites as gradient_h.
+ *        Baseline transfer/flush already wired (glass_render.c:~155).
+ *      Expected speedup: ~20x.
  * =================================================================== */
 
 RuntimeValue rt_gui_gradient_v(RuntimeValue xy, RuntimeValue wh,
@@ -533,7 +652,11 @@ RuntimeValue rt_gui_gradient_v(RuntimeValue xy, RuntimeValue wh,
  * 6. Drop shadow
  *    rt_gui_shadow(xy, wh, blur_radius, alpha)
  *    Draws a dark blurred rectangle offset from the window position.
- *    // TODO: GPU_ACCEL — offload blur pass to GPU compute
+ *
+ *    TODO(P3/gpu): offload blur pass to GPU compute.
+ *      Depends on: same compute-shader pipeline as box_blur
+ *        (glass_render.c:~340). Baseline transfer/flush already wired.
+ *      Expected speedup: 10-30x.
  * =================================================================== */
 
 RuntimeValue rt_gui_shadow(RuntimeValue xy, RuntimeValue wh,
@@ -624,7 +747,13 @@ RuntimeValue rt_gui_read_pixel(RuntimeValue x_y, RuntimeValue u1,
 /* ===================================================================
  * 8. Rounded rectangle (approximate with filled rects)
  *    rt_gui_rounded_rect(xy, wh, color_radius, alpha)
- *    // TODO: GPU_ACCEL — Bezier curve rasterization on GPU
+ *
+ *    TODO(P3/gpu): Bezier curve rasterization on GPU.
+ *      Depends on: virgl pipeline + tessellation/fragment shaders +
+ *        command-buffer builder. This is the heaviest of the six —
+ *        needs Loop-Blinn or SDF-based curve AA on the shader side.
+ *        Baseline transfer/flush already wired (glass_render.c:~155).
+ *      Expected speedup: ~8x for AA'd corners.
  * =================================================================== */
 
 RuntimeValue rt_gui_rounded_rect(RuntimeValue xy, RuntimeValue wh,

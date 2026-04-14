@@ -109,6 +109,13 @@ extern size_t strlen(const char *s);
 extern void serial_puts(const char *s);
 extern void serial_putchar(char c);
 
+/* serial_puthex is `static` in baremetal_stubs.c and not linkable from here.
+ * The rt_tuple_/rt_closure_ diagnostic prints below are debug-only, so stub
+ * them out locally rather than teaching the other TU to export the helper.
+ * Silently dropping this .c from the boot link (which was Agent E's
+ * x64-desktop-test fault cause) is worse than losing debug spew. */
+#define serial_puthex(x) ((void)(x))
+
 /* Functions defined in baremetal_stubs.c that we delegate to */
 extern RuntimeValue rt_string_from_cstr(const char *cstr);
 extern RuntimeValue rt_string_new(RuntimeValue data, RuntimeValue len_val);

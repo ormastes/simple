@@ -446,32 +446,57 @@ fn build_os(target: OsTarget) -> bool:
     true
 
 fn _objcopy_path_prefix() -> text:
+    # macOS Homebrew locations
     if rt_file_exists("/opt/homebrew/opt/llvm/bin/llvm-objcopy"):
         return "/opt/homebrew/opt/llvm/bin"
     if rt_file_exists("/usr/local/opt/llvm/bin/llvm-objcopy"):
         return "/usr/local/opt/llvm/bin"
+    # Linux system locations (Debian/Ubuntu packaged LLVM)
+    if rt_file_exists("/usr/bin/llvm-objcopy"):
+        return "/usr/bin"
+    if rt_file_exists("/usr/lib/llvm-20/bin/llvm-objcopy"):
+        return "/usr/lib/llvm-20/bin"
+    if rt_file_exists("/usr/lib/llvm-19/bin/llvm-objcopy"):
+        return "/usr/lib/llvm-19/bin"
+    if rt_file_exists("/usr/lib/llvm-18/bin/llvm-objcopy"):
+        return "/usr/lib/llvm-18/bin"
+    if rt_file_exists("/usr/lib/llvm-17/bin/llvm-objcopy"):
+        return "/usr/lib/llvm-17/bin"
     ""
+
+fn _simple_binary_is_valid(candidate: text) -> bool:
+    """Validate a candidate `simple` binary by running `<candidate> --version`.
+
+    Requires exit code 0 and non-empty stdout. Guards against stale or
+    corrupt bootstrap binaries (e.g. ones that segfault on startup, which
+    the Linux bootstrap binary at src/compiler_rust/target/release/simple
+    was observed to do on 2026-04-13).
+    """
+    if not rt_file_exists(candidate):
+        return false
+    val (stdout, _stderr, exit_code) = rt_process_run_timeout(candidate, ["--version"], 5000)
+    exit_code == 0 and stdout != ""
 
 fn _find_simple_binary() -> text:
     val env_bin = rt_env_get("SIMPLE_BINARY") ?? ""
     if env_bin != "":
         return env_bin
-    if rt_file_exists("src/compiler_rust/target/release/simple"):
-        return "src/compiler_rust/target/release/simple"
-    if rt_file_exists("src/compiler_rust/target/bootstrap/simple"):
-        return "src/compiler_rust/target/bootstrap/simple"
-    if rt_file_exists("bin/simple"):
-        return "bin/simple"
-    if rt_file_exists("bin/release/aarch64-apple-darwin-macho/simple"):
-        return "bin/release/aarch64-apple-darwin-macho/simple"
-    if rt_file_exists("bin/release/macos-arm64/simple"):
-        return "bin/release/macos-arm64/simple"
-    if rt_file_exists("bin/release/darwin-aarch64/simple"):
-        return "bin/release/darwin-aarch64/simple"
-    if rt_file_exists("bin/release/macos-x86_64/simple"):
-        return "bin/release/macos-x86_64/simple"
-    if rt_file_exists("bin/release/linux-x86_64/simple"):
-        return "bin/release/linux-x86_64/simple"
+    # Probe in priority order. Each candidate is validated via
+    # `<candidate> --version` (exit 0 + non-empty stdout) so a stale or
+    # segfaulting bootstrap binary falls through to the next option.
+    val candidates: [text] = [
+        "src/compiler_rust/target/release/simple",
+        "src/compiler_rust/target/bootstrap/simple",
+        "bin/simple",
+        "bin/release/aarch64-apple-darwin-macho/simple",
+        "bin/release/macos-arm64/simple",
+        "bin/release/darwin-aarch64/simple",
+        "bin/release/macos-x86_64/simple",
+        "bin/release/linux-x86_64/simple",
+    ]
+    for cand in candidates:
+        if _simple_binary_is_valid(cand):
+            return cand
     "bin/simple"
 
 fn _build_sources(target: OsTarget) -> [text]:
@@ -900,10 +925,13 @@ fn scenario_x64_full_stack() -> QemuScenario:
     )
 
 fn scenario_x64_desktop_test() -> QemuScenario:
-    """x86_64 desktop integration test.
+    """x86_64 desktop integration serial lane (SYS-GUI-001/002).
 
-    Same as x64-gui but with the desktop E2E test entry point.
-    Tests the full desktop stack: launcher, dock, WM integration.
+    Boots examples/simple_os/arch/x86_64/desktop_e2e_entry.spl under QEMU with
+    the BGA framebuffer and serial routed to stdio. The entry point drives the
+    real shell + launcher + wm path and emits canonical markers:
+      boot / shell-ready / launcher-ready / desktop-ready / shortcut:ok / wm:ok
+    which test/system/os_desktop_integration_spec.spl asserts on.
     """
     QemuScenario(
         name: "x64-desktop-test",
@@ -916,7 +944,7 @@ fn scenario_x64_desktop_test() -> QemuScenario:
             "-vga", "std"
         ],
         gui_mode: false,
-        description: "x86_64 desktop integration test (launcher + dock + WM)"
+        description: "x86_64 SimpleOS desktop integration (SYS-GUI-001/002 serial lane)"
     )
 
 fn get_all_scenarios() -> [QemuScenario]:
@@ -933,7 +961,8 @@ fn get_all_scenarios() -> [QemuScenario]:
         scenario_x64_wm_input_test(),
         scenario_x64_nvme_fat32(),
         scenario_x64_full_stack(),
-        scenario_x64_desktop_test()
+        scenario_x64_desktop_test(),
+        scenario_x64_desktop_disk()
     ]
 
 fn get_scenario(name: text) -> QemuScenario?:
@@ -947,7 +976,74 @@ fn scenario_target(scenario: QemuScenario) -> OsTarget:
     """Resolve which kernel target should be built for a named scenario."""
     if scenario.name == "x64-desktop-test":
         return get_desktop_browser_target()
+    if scenario.name == "x64-desktop-disk":
+        return get_desktop_browser_target()
     get_target(scenario.arch)
+
+# ===========================================================================
+# SYS-GUI-007 scaffold — storage-backed desktop lane (next milestone)
+# Owned by Agent 4. Appended after scenario_target to keep diffs additive and
+# avoid line-level conflicts with the serial lane owned by Agent 1. The full
+# storage proof is deferred to the next milestone; this scaffold only wires a
+# disk-attached QEMU shape + a helper that materializes build/os/fat32.img via
+# scripts/make_os_disk.shs so the scenario is self-sufficient when invoked.
+# ===========================================================================
+
+fn scenario_x64_desktop_disk() -> QemuScenario:
+    """x86_64 desktop lane with a FAT32 disk image attached (SYS-GUI-007).
+
+    Boots the same desktop_e2e entry as x64-desktop-test but also attaches
+    build/os/fat32.img as an NVMe drive so the guest can reach VFS/FAT32
+    from the real desktop path. The disk image is the one produced by
+    scripts/make_os_disk.shs (the same recipe x64-nvme-fat32 and
+    x64-full-stack already rely on — single source of truth).
+
+    Status: scaffold. The live capture step is deferred to the next
+    milestone; ensure_desktop_disk_image() materializes the image on
+    demand so the scenario can run end-to-end once the desktop entry
+    learns to exercise storage. TODO(next-milestone): drive one real
+    app-launch that touches FAT32 via VFS.
+    """
+    QemuScenario(
+        name: "x64-desktop-disk",
+        arch: Architecture.X86_64,
+        machine: "q35",
+        cpu: "qemu64",
+        memory: "512M",
+        qemu_extra: [
+            "-device", "isa-debug-exit,iobase=0xf4,iosize=0x04",
+            "-vga", "std",
+            "-drive", "file=build/os/fat32.img,if=none,id=nvm,format=raw",
+            "-device", "nvme,serial=deadbeef,drive=nvm"
+        ],
+        gui_mode: false,
+        description: "x86_64 SimpleOS desktop with NVMe+FAT32 disk (SYS-GUI-007 scaffold)"
+    )
+
+fn ensure_desktop_disk_image() -> bool:
+    """Ensure build/os/fat32.img exists, invoking scripts/make_os_disk.shs
+    if it is missing. Returns true when the image is present at the end.
+
+    This is the wiring point between the existing disk-image recipe
+    (scripts/make_os_disk.shs) and the SYS-GUI-007 lane — no parallel
+    toolchain, no duplicated mkfs logic. Callers (test/system specs or
+    qemu runner consumers) should invoke this before building the
+    x64-desktop-disk scenario so the NVMe -drive file=... arg resolves.
+    """
+    val img_path = "build/os/fat32.img"
+    if rt_file_exists(img_path):
+        return true
+    print "[ensure_desktop_disk_image] {img_path} missing, invoking scripts/make_os_disk.shs"
+    val (stdout, stderr, exit_code) = rt_process_run_timeout(
+        "/bin/sh", ["scripts/make_os_disk.shs"], 60000)
+    if stdout != "":
+        print "[ensure_desktop_disk_image] stdout:\n{stdout}"
+    if stderr != "":
+        print "[ensure_desktop_disk_image] stderr:\n{stderr}"
+    if exit_code != 0:
+        print "[ensure_desktop_disk_image] make_os_disk.shs exited {exit_code}"
+        return false
+    rt_file_exists(img_path)
 
 fn build_scenario_command(scenario: QemuScenario, kernel_path: text) -> [text]:
     """Build QEMU command line from a scenario."""

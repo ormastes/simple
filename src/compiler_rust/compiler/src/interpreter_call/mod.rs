@@ -75,16 +75,26 @@ pub(crate) fn evaluate_call(
             return Ok(result);
         }
 
-        // Priority 3: Check regular functions (user-defined) — most common case
-        // Moved before BDD/mock/env to avoid 3 failed lookups on the hot path
-        if let Some(func) = functions.get(name).cloned() {
-            return core::exec_function(&func, args, env, functions, classes, enums, impl_methods, None);
-        }
-
-        // Priority 4: Try BDD framework (imported DSL functions lack captured_env
-        // for module-level state like group_stack)
+        // Priority 3: Try BDD framework for spec DSL names (describe/it/before_each/…).
+        //
+        // This MUST run before `functions.get(name)` below because the spec DSL in
+        // `std/spec/dsl.spl` defines overloaded functions (e.g. `fn it(desc, block)` and
+        // `fn it(desc, enabled, block)`) and the interpreter's function registry is a
+        // flat `HashMap<String, Arc<FunctionDef>>` that overwrites prior entries on
+        // name collision. That makes the 2-arg variants unreachable via
+        // `functions.get`, causing `bind_args` to fail with
+        // "function expects argument for parameter 'block'" whenever a system spec
+        // reaches the interpreter via `run_file_interpreted`. The BDD builtin path
+        // short-circuits this by handling the DSL names directly and only returns
+        // `Some` for names it actually recognizes, so non-DSL calls still fall
+        // through to the user-function lookup unchanged.
         if let Some(result) = bdd::eval_bdd_builtin(name, args, env, functions, classes, enums, impl_methods)? {
             return Ok(result);
+        }
+
+        // Priority 4: Check regular functions (user-defined) — most common case
+        if let Some(func) = functions.get(name).cloned() {
+            return core::exec_function(&func, args, env, functions, classes, enums, impl_methods, None);
         }
 
         // Try mock library

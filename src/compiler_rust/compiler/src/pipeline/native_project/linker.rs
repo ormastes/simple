@@ -3,7 +3,7 @@
 use std::path::{Path, PathBuf};
 
 use super::{effective_target, safe_canonicalize, ModuleImports, NativeProjectBuilder};
-use super::stubs::generate_stub_object;
+use super::stubs::{generate_stub_object, generate_stub_object_freestanding};
 use super::tools::{
     find_archive_tool, find_c_compiler, find_cxx_compiler, find_native_all_library, find_runtime_library,
     strip_llvm_constructors, is_system_symbol,
@@ -539,6 +539,7 @@ int main(int argc, char** argv) {
         };
 
         let mut boot_objects: Vec<PathBuf> = Vec::new();
+        let mut boot_compile_failures: usize = 0;
         if let Some(ref entry) = self.entry_file {
             let boot_dir = entry.parent().unwrap_or(std::path::Path::new(".")).join("boot");
             if boot_dir.is_dir() {
@@ -567,6 +568,8 @@ int main(int argc, char** argv) {
                                 let stem = path.file_stem().unwrap_or_default().to_string_lossy();
                                 let out = temp_dir.join(format!("_boot_{}.o", stem));
                                 let mut assembled = false;
+                                let mut last_stderr = String::new();
+                                let mut last_code: Option<i32> = None;
                                 for asm_cc in &asm_compilers {
                                     let mut asm_cmd = std::process::Command::new(asm_cc);
                                     asm_cmd
@@ -580,16 +583,40 @@ int main(int argc, char** argv) {
                                     if !mabi.is_empty() {
                                         asm_cmd.arg(mabi);
                                     }
-                                    if let Ok(r) = asm_cmd.output() {
-                                        if r.status.success() {
-                                            boot_objects.push(out.clone());
-                                            assembled = true;
-                                            break;
+                                    match asm_cmd.output() {
+                                        Ok(r) => {
+                                            if r.status.success() {
+                                                boot_objects.push(out.clone());
+                                                assembled = true;
+                                                break;
+                                            } else {
+                                                last_code = r.status.code();
+                                                last_stderr =
+                                                    String::from_utf8_lossy(&r.stderr).into_owned();
+                                            }
+                                        }
+                                        Err(e) => {
+                                            last_stderr = format!("spawn error: {}", e);
                                         }
                                     }
                                 }
-                                if !assembled && self.config.verbose {
-                                    eprintln!("  WARNING: failed to assemble {}", path.display());
+                                if !assembled {
+                                    boot_compile_failures += 1;
+                                    let tail: String = last_stderr
+                                        .lines()
+                                        .rev()
+                                        .take(20)
+                                        .collect::<Vec<_>>()
+                                        .into_iter()
+                                        .rev()
+                                        .collect::<Vec<_>>()
+                                        .join("\n");
+                                    eprintln!(
+                                        "  ERROR: failed to assemble {} (exit={:?})\n--- stderr tail ---\n{}\n--- end stderr ---",
+                                        path.display(),
+                                        last_code,
+                                        tail
+                                    );
                                 }
                             }
                         }
@@ -613,16 +640,55 @@ int main(int argc, char** argv) {
                             if !march.is_empty() {
                                 c_cmd.args([march, mabi, "-mcmodel=medany"]);
                             }
-                            if let Ok(r) = c_cmd.output() {
-                                if r.status.success() {
-                                    boot_objects.push(out);
+                            match c_cmd.output() {
+                                Ok(r) => {
+                                    if r.status.success() {
+                                        boot_objects.push(out);
+                                    } else {
+                                        boot_compile_failures += 1;
+                                        let stderr_str =
+                                            String::from_utf8_lossy(&r.stderr).into_owned();
+                                        let tail: String = stderr_str
+                                            .lines()
+                                            .rev()
+                                            .take(20)
+                                            .collect::<Vec<_>>()
+                                            .into_iter()
+                                            .rev()
+                                            .collect::<Vec<_>>()
+                                            .join("\n");
+                                        eprintln!(
+                                            "  ERROR: failed to compile {} (exit={:?})\n--- stderr tail ---\n{}\n--- end stderr ---",
+                                            path.display(),
+                                            r.status.code(),
+                                            tail
+                                        );
+                                    }
+                                }
+                                Err(e) => {
+                                    boot_compile_failures += 1;
+                                    eprintln!(
+                                        "  ERROR: failed to spawn clang for {}: {}",
+                                        path.display(),
+                                        e
+                                    );
                                 }
                             }
                         }
                     }
                 }
+                if boot_compile_failures > 0 {
+                    eprintln!(
+                        "  WARNING: {} boot source file(s) failed to compile; resulting ELF may have undefined refs",
+                        boot_compile_failures
+                    );
+                }
                 if self.config.verbose {
-                    eprintln!("  Boot objects: {} files", boot_objects.len());
+                    eprintln!(
+                        "  Boot objects: {} files ({} compile failures)",
+                        boot_objects.len(),
+                        boot_compile_failures
+                    );
                 }
             }
         }
@@ -691,6 +757,34 @@ int main(int argc, char** argv) {
             ordered
         };
 
+        // Blocker A fix: mirror the hosted-path `generate_stub_object` injection for
+        // freestanding links. Without this, 174+ undefined Simple class-method symbols
+        // (apps__installer_gui__..., common__render_scene__executor__..., etc.) were
+        // being accepted by `--unresolved-symbols=ignore-all` and resolved to address 0
+        // — calling them at runtime produced the `FAULT @ 0x950a` cascade through the
+        // legacy VGA MMIO region. The freestanding stub generator emits weak `return 0`
+        // definitions compiled with the cross `--target=<triple>` so every unresolved
+        // ref lands on a harmless no-op instead of null. We KEEP --unresolved-symbols=
+        // ignore-all as a belt-and-suspenders safety net for this commit; removing it
+        // can be a follow-up slice once stub coverage is proven across arches.
+        let freestanding_stub_obj = match generate_stub_object_freestanding(
+            temp_dir,
+            object_paths,
+            &boot_objects,
+            triple,
+            march,
+            mabi,
+        ) {
+            Ok(p) => Some(p),
+            Err(e) => {
+                eprintln!(
+                    "  WARNING: freestanding stub generation failed: {} (link will proceed with ignore-all fallback)",
+                    e
+                );
+                None
+            }
+        };
+
         let mut cmd = if let Some(ref lld_path) = use_direct_lld {
             let mut c = std::process::Command::new(lld_path);
             if let Some(ref ls) = self.config.linker_script {
@@ -702,6 +796,9 @@ int main(int argc, char** argv) {
             }
             for obj in &ordered_objects {
                 c.arg(obj.as_os_str());
+            }
+            if let Some(ref stub_o) = freestanding_stub_obj {
+                c.arg(stub_o);
             }
             c
         } else {
@@ -722,6 +819,9 @@ int main(int argc, char** argv) {
             }
             for obj in &ordered_objects {
                 c.arg(obj.as_os_str());
+            }
+            if let Some(ref stub_o) = freestanding_stub_obj {
+                c.arg(stub_o);
             }
             c
         };

@@ -249,10 +249,19 @@ RuntimeValue rt_string_format(RuntimeValue fmt, RuntimeValue val);
 void rt_print_value(RuntimeValue val);
 
 /* ===================================================================
- * 4. Heap allocator — bump allocator, 16 MB
+ * 4. Heap allocator — bump allocator, 128 MB
+ *
+ * NOTE: keep this within the QEMU scenario RAM budget minus a safety
+ * margin for kernel code/rodata/data, linker-script .heap/.stack, and
+ * page tables. x64-desktop-test runs with -m 512M, so the kernel must
+ * fit (code ~5 MB + rodata/data ~1 MB + BSS ~0.3 MB + _heap 128 MB +
+ * linker .heap 16 MB + .stack 8 MB = ~158 MB; stack top lands at
+ * ~0x0A000000, well inside 0x20000000). Bumping this above ~300 MB
+ * pushes _stack_top beyond physical RAM and every push/call silently
+ * drops to unmapped memory — the cause of Agent M's 0x950a fault.
  * =================================================================== */
 
-static char   _heap[512ULL * 1024ULL * 1024ULL] __attribute__((aligned(16)));
+static char   _heap[128ULL * 1024ULL * 1024ULL] __attribute__((aligned(16)));
 static size_t _heap_off = 0;
 
 void *malloc(size_t sz)
@@ -3457,6 +3466,22 @@ int64_t userlib__syscall_raw__syscall(uint64_t id, uint64_t a0, uint64_t a1,
             return _ipc_send_handler(a0, a1, a2, a3, a4);
         case 21: /* IPC_RECV: a0=port, a1=reply_buf, a2=max_len */
             return _ipc_recv_handler(a0, a1, a2);
+        case 22: /* SYS_IPC_CREATE_PORT: a0=name_ptr, a1=name_len — baremetal
+                  * has a single implicit port (_ipc_reply) shared by all
+                  * services, so we return a non-zero pseudo-id that passes
+                  * the 'port < 0' failure check in service init() paths.
+                  * See Agent R research 2026-04-13 (ipc_error_38). */
+            (void)a0; (void)a1;
+            return 1;
+        case 23: /* SYS_IPC_SEND (service-id variant used by wm/launcher/vfs):
+                  * routes to the same in-process _ipc_send_handler as case 20.
+                  * a0=port, a1=method, a2=flags, a3=buf, a4=len */
+            return _ipc_send_handler(a0, a1, a2, a3, a4);
+        case 24: /* SYS_IPC_CONNECT: a0=name_ptr, a1=name_len — baremetal
+                  * has the same single implicit port, so connect succeeds
+                  * by returning the same pseudo-id as create_port. */
+            (void)a0; (void)a1;
+            return 1;
         case 90: /* NetInit: initialize VirtIO-net, set IP 10.0.2.15 */
             return (int64_t)_virtio_net_init();
         case 91: /* NetPoll: process incoming frames (ARP/ICMP auto-reply) */
@@ -8267,49 +8292,17 @@ RuntimeValue rt_debug_return_addr_hang(void)
 
 __attribute__((naked)) RuntimeValue rt_debug_naked_show_return_hang(void)
 {
-    __asm__ volatile(
-        "movq (%rsp), %rbx\n"
-        "movw $0x3F8, %dx\n"
-        "movb $'R', %al\n"
-        "outb %al, %dx\n"
-        "leaq 9f(%rip), %rsi\n"
-        "movl $16, %ecx\n"
-        "2:\n"
-        "movq %rbx, %rax\n"
-        "shrq $60, %rax\n"
-        "andq $0xF, %rax\n"
-        "movb (%rsi,%rax,1), %al\n"
-        "3:\n"
-        "movw $0x3FD, %dx\n"
-        "inb %dx, %al\n"
-        "testb $0x20, %al\n"
-        "jz 3b\n"
-        "movw $0x3F8, %dx\n"
-        "movb (%rsi,%rax,1), %al\n"
-        "outb %al, %dx\n"
-        "shlq $4, %rbx\n"
-        "decl %ecx\n"
-        "jnz 2b\n"
-        "movb $0x0D, %al\n"
-        "outb %al, %dx\n"
-        "4:\n"
-        "movw $0x3FD, %dx\n"
-        "inb %dx, %al\n"
-        "testb $0x20, %al\n"
-        "jz 4b\n"
-        "movw $0x3F8, %dx\n"
-        "movb $0x0A, %al\n"
-        "outb %al, %dx\n"
-        "1:\n"
-        "hlt\n"
-        "jmp 1b\n"
-        ".balign 16\n"
-        "9:\n"
-        ".ascii \"0123456789abcdef\"\n"
-        :
-        :
-        : "rax", "rbx", "rcx", "rdx", "rsi", "cc", "memory"
-    );
+    /* Debug helper — halt the CPU. The previous extended-asm hex-dump body
+     * mixed `%reg` references with extended-asm `:` output/clobber sections,
+     * which clang rejects ("invalid % escape in inline assembly string") and
+     * clang also refuses extended asm inside a naked function. Silently
+     * failing compilation here was dropping baremetal_stubs.o out of the
+     * boot link, leaving `_start` undefined and the guest jumping into low
+     * memory at boot (Agent E x64-desktop-test fault trace 0x6783..0x69b3).
+     *
+     * A simple `hlt` loop is sufficient for this debug entry point. */
+    __asm__ volatile("1: hlt\n\t"
+                     "jmp 1b\n\t");
 }
 
 /* --- MMIO: real x86_64 implementations (raw i64 args) --- */

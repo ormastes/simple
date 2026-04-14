@@ -58,16 +58,23 @@ SECTIONS
         __bss_end = .;
     }
 
-    /* Heap (grows upward) */
-    .heap ALIGN(4K) :
+    /* Heap (grows upward) — NOLOAD so ld emits SHT_NOBITS and QEMU's
+     * multiboot loader does not have to read/write megabytes of zero
+     * content out of the ELF file. */
+    .heap ALIGN(4K) (NOLOAD) :
     {
         __heap_start = .;
-        . = . + 16M;  /* 16MB heap */
+        . = . + 16M;  /* 16MB linker-script heap (in addition to _heap[]) */
         __heap_end = .;
     }
 
-    /* Stack (grows downward) */
-    .stack ALIGN(4K) :
+    /* Stack (grows downward) — NOLOAD for the same reason. Without this
+     * ld marks the section PROGBITS, inflates the ELF file by the stack
+     * size, and QEMU either truncates the kernel load or extends the
+     * kernel image beyond the configured -m memory. The resulting
+     * stack-pointer-above-physical-RAM was the root cause of Agent M's
+     * 0x950a cascading fault. */
+    .stack ALIGN(4K) (NOLOAD) :
     {
         . = . + 8M;  /* 8MB stack — Simple code uses large stack frames */
         _stack_top = .;

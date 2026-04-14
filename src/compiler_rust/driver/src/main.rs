@@ -7,6 +7,61 @@
 //!   simple -c "code"    - Run code string
 //!   simple compile src.spl [-o out.smf]  - Compile to SMF
 //!   simple watch file.spl  - Watch and auto-recompile
+//!
+//! TODO(P2/driver): port this whole Rust driver crate to pure Simple.
+//! Per CLAUDE.md, all code must live in .spl/.shs — this crate is the
+//! bootstrap seed only. The production binary is self-hosted at bin/simple
+//! and built from src/app/cli/main.spl + src/app/test_runner_new/**.
+//! Until the port lands, fixes here (e.g. test_runner/runner.rs system-spec
+//! fast-path bypass) must be mirrored on the pure-Simple side or the seed
+//! and production binaries drift. Tracked under area=driver in doc/TODO.md.
+//!
+//! --- Port inventory (2026-04-13, Agent Q beachhead) ---
+//!
+//! ALREADY PORTED (Rust copy is seed-only; MIRROR comments added):
+//!   * cli/** command dispatch           -> src/app/cli/main.spl (+ app.io.cli_ops)
+//!   * cli/test_runner/runner.rs         -> src/app/test_runner_new/** (full runner
+//!                                           already powers `bin/simple test`; the
+//!                                           static fast-path bypass is N/A on the
+//!                                           Simple side — there is no static fast
+//!                                           path there yet)
+//!   * string_interner.rs                -> src/app/test_runner_new/string_interner.spl
+//!   * dependency_cache.rs               -> src/app/watch/deps.spl
+//!                                         + src/app/watch/watcher.spl
+//!   * todo_parser.rs (consumer)         -> src/app/todo_scan/main.spl
+//!   * cli/code_quality (lint/fmt)       -> src/app/lint, src/app/formatter
+//!   * cli/check                         -> src/app/cli/check.spl
+//!   * cli/repl                          -> src/app/repl, app.io.cli_ops.cli_run_repl
+//!   * cli/llm_tools (mcp/diff/ctx)      -> src/app/mcp, src/app/diff, src/app/context
+//!   * cli/doc_gen (todo/feature/task)   -> src/app/todo_gen, src/app/feature_gen,
+//!                                           src/app/task_gen, src/app/sspec_docgen
+//!   * cli/help + version                -> src/app/cli/main.spl (inline)
+//!
+//! NEW PEER ADDED THIS SLICE:
+//!   * is_system_spec predicate          -> src/app/test_runner_new/test_runner_helpers.spl
+//!                                         (mirrors runner.rs:733 system-spec gate)
+//!
+//! REMAINING (Rust-only, not yet ported — pick next for future slices):
+//!   * auth_db.rs / oauth_flow.rs (OAuth/user auth DB)            313/404 LOC
+//!   * bug_db.rs                                                  837 LOC
+//!   * feature_db.rs                                             1130 LOC
+//!   * todo_db.rs                                                 990 LOC
+//!   * unified_db.rs                                              595 LOC
+//!   * test_db/** (Rust test record DB)                           large
+//!   * signature.rs (qualified-ignore SHA256 sign/verify)         297 LOC
+//!   * simple_test.rs / exec_core.rs (bootstrap test exec)        730/779 LOC
+//!   * startup_metrics.rs + prefetch.rs                           326/350 LOC
+//!   * gpu_init.rs + resource_manager.rs                          556/397 LOC
+//!   * early_startup.rs + lazy_init.rs                            272/408 LOC
+//!   * log.rs (tracing_subscriber init)                           167 LOC
+//!   * db_lock.rs / jj_state.rs / task_db.rs                      156/260/276 LOC
+//!   * compile_options.rs (already half-wrapped)                  588 LOC
+//!   * interpreter.rs (Rust interpreter glue; the Simple interpreter
+//!     itself already lives under src/compiler/runtime_interp)    540 LOC
+//!
+//! Next realistic slice: pick one of `log.rs`, `startup_metrics.rs`, or
+//! `db_lock.rs` — they're small, self-contained, and have no pure-Simple
+//! peer yet. See doc/TODO.md area=driver for ordering.
 
 use std::path::PathBuf;
 

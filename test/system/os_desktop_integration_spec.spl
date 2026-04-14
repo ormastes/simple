@@ -1,94 +1,104 @@
-# SimpleOS Desktop Integration Test Specification
+# SimpleOS Desktop Integration — Serial Regression Lane
 #
-# @cover src/os/kernel/boot/os_main.spl 70%
-# @cover src/os/services/launcher/launcher.spl 80%
-# @cover src/os/services/wm/wm_service.spl 60%
-# @cover src/os/desktop/shell.spl 50%
+# @tag:system
 #
-# Tests desktop stack: shell init, compositor, WM, launcher, Hello World app.
+# Implements the serial halves of:
+#   SYS-GUI-001 Boot to desktop
+#   SYS-GUI-002 Launcher and shortcut join
 #
-# These tests use placeholder assertions. Real testing requires QEMU serial
-# capture with framebuffer and input injection — see os_full_stack_spec.spl
-# for the baremetal testing pattern.
+# See doc/03_plan/sys_test/simpleos_small_complete_gui.md and
+# doc/03_plan/simpleos_small_complete_gui_status_2026-04-13.md Lane A.
+#
+# This spec replaces the previous placeholder-assertion version. It is the
+# authoritative serial-only regression lane for the x86_64 SimpleOS desktop
+# integration path. The framebuffer-capture lane (SYS-GUI-006) is owned by
+# test/system/engine2d_in_qemu_spec.spl style coverage and Agent 3.
+#
+# Canonical markers emitted by examples/simple_os/arch/x86_64/desktop_e2e_entry.spl:
+#   [desktop-e2e] spl_start
+#   [desktop-e2e] boot
+#   [desktop-e2e] shell-ready
+#   [desktop-e2e] launcher-ready
+#   [desktop-e2e] desktop-ready
+#   [desktop-e2e] shortcut:ok
+#   [desktop-e2e] wm:ok
+#   TEST PASSED
+#
+# @cover examples/simple_os/arch/x86_64/desktop_e2e_entry.spl 90%
+# @cover src/os/desktop/shell.spl 40%
+# @cover src/os/services/launcher/launcher.spl 50%
 
-use std.spec.{describe, it, expect}
+use std.spec.*
 
-describe "SimpleOS Desktop Integration":
+use os.qemu_runner.{build_os, get_desktop_browser_target}
+use test.qemu.os.common.qemu_os_harness.{
+    can_run_target, file_exists, spawn_guest_with_qmp, wait_for_serial_marker,
+    read_serial_log, stop_guest
+}
 
-    describe "Tier 4 — Shell and POSIX":
-        it "os_main enters cooperative main loop":
-            # os_main.spl boots kernel, inits services, then enters main loop
-            # Real test: QEMU serial output shows "[BOOT] main loop entered"
+describe "SimpleOS desktop integration (serial lane)":
+
+    it "SYS-GUI-001 boots the x86_64 desktop target to desktop-ready":
+        val target = get_desktop_browser_target()
+        expect(build_os(target)).to_equal(true)
+        expect(file_exists(target.output)).to_equal(true)
+
+        if not can_run_target(target):
+            # QEMU not available in this environment — the build+link check
+            # above is the most this lane can assert here. Parent agents
+            # must run this on a QEMU-capable host for full coverage.
             expect(true).to_equal(true)
+            return
 
-        it "POSIX fd_table initializes stdin/stdout/stderr on serial":
-            # fd 0/1/2 are wired to serial console at boot
-            # Real test: posix_write(1, ...) produces serial output in QEMU
-            expect(true).to_equal(true)
+        val qmp_socket = "/tmp/simpleos_sys_gui_001_qmp.sock"
+        val serial_log = "build/os/sys_gui_001_serial.log"
+        match spawn_guest_with_qmp(target, qmp_socket, serial_log):
+            Ok(handle) =>
+                val saw_spl_start    = wait_for_serial_marker(handle, "[desktop-e2e] spl_start", 10000)
+                val saw_boot         = wait_for_serial_marker(handle, "[desktop-e2e] boot", 10000)
+                val saw_shell_ready  = wait_for_serial_marker(handle, "[desktop-e2e] shell-ready", 15000)
+                val saw_launcher     = wait_for_serial_marker(handle, "[desktop-e2e] launcher-ready", 10000)
+                val saw_desktop      = wait_for_serial_marker(handle, "[desktop-e2e] desktop-ready", 10000)
+                val output = read_serial_log(handle)
+                stop_guest(handle)
+                expect(saw_spl_start).to_equal(true)
+                expect(saw_boot).to_equal(true)
+                expect(saw_shell_ready).to_equal(true)
+                expect(saw_launcher).to_equal(true)
+                expect(saw_desktop).to_equal(true)
+                expect(output.contains("FAULT @")).to_equal(false)
+                expect(output.contains("panic")).to_equal(false)
+            Err(err) =>
+                print "[os_desktop_integration_spec] SYS-GUI-001 spawn failed: {err}"
+                expect(false).to_equal(true)
 
-        it "shell accepts serial input":
-            # ShellApp.with_vfs() processes commands from serial
-            # Real test: inject "echo hello\n" via QEMU monitor, check output
-            expect(true).to_equal(true)
+    it "SYS-GUI-002 drives the launcher shortcut and observes a wm join":
+        val target = get_desktop_browser_target()
+        expect(build_os(target)).to_equal(true)
+        expect(file_exists(target.output)).to_equal(true)
 
-        it "shell builtin commands are registered":
-            # ls, cat, echo, pwd, cd, mkdir, help, env, exit
-            # Real test: "help" lists all builtins on serial
+        if not can_run_target(target):
             expect(true).to_equal(true)
+            return
 
-    describe "Tier 5 — Compositor and Window Manager":
-        it "compositor initializes with framebuffer backend":
-            # BGA framebuffer (1024x768x32) mapped via PCI BAR
-            # Real test: QEMU -device VGA shows non-black framebuffer
-            expect(true).to_equal(true)
-
-        it "WM creates root window":
-            # wm_service.spl creates a root Window covering entire screen
-            # Real test: serial log shows "[WM] root window 1024x768"
-            expect(true).to_equal(true)
-
-        it "WM handles window create and destroy lifecycle":
-            # create_window() allocates id, destroy_window() reclaims it
-            # Real test: serial log shows matching create/destroy ids
-            expect(true).to_equal(true)
-
-        it "launcher service registers default apps":
-            # launcher.spl scans app manifests and registers entries
-            # Real test: serial log shows "[LAUNCHER] registered N apps"
-            expect(true).to_equal(true)
-
-        it "Meta+H shortcut dispatches to launcher":
-            # Input event with Meta modifier + 'H' opens launcher overlay
-            # Real test: inject keypress via QEMU monitor, check serial
-            expect(true).to_equal(true)
-
-        it "Hello World window is created and rendered":
-            # Default app renders "Hello SimpleOS!" in a window
-            # Real test: framebuffer screenshot comparison after boot
-            expect(true).to_equal(true)
-
-        it "app switcher lists running windows":
-            # app_switcher.spl maintains list of open windows
-            # Real test: serial log shows window list after Alt+Tab
-            expect(true).to_equal(true)
-
-    describe "Tier 5 — Desktop Components":
-        it "dock renders at screen bottom":
-            # dock.spl draws horizontal bar with app icons
-            # Real test: framebuffer row check at y=height-48
-            expect(true).to_equal(true)
-
-        it "notification center queues and displays messages":
-            # notification_center.spl stores messages, shows popup
-            # Real test: post_notification() then check serial output
-            expect(true).to_equal(true)
-
-        it "app manifest declares name and icon path":
-            # app_manifest.spl parses SDN manifest files
-            # Real test: load fixture manifest, check fields
-            expect(true).to_equal(true)
-
-        it "desktop shell module initializes all components":
-            # desktop/shell.spl orchestrates dock + switcher + notifications
-            # Real test: serial log shows "[DESKTOP] shell ready"
-            expect(true).to_equal(true)
+        val qmp_socket = "/tmp/simpleos_sys_gui_002_qmp.sock"
+        val serial_log = "build/os/sys_gui_002_serial.log"
+        match spawn_guest_with_qmp(target, qmp_socket, serial_log):
+            Ok(handle) =>
+                val saw_desktop   = wait_for_serial_marker(handle, "[desktop-e2e] desktop-ready", 20000)
+                val saw_shortcut  = wait_for_serial_marker(handle, "[desktop-e2e] shortcut:ok", 10000)
+                val saw_wm_join   = wait_for_serial_marker(handle, "[desktop-e2e] wm:ok", 10000)
+                val saw_pass      = wait_for_serial_marker(handle, "TEST PASSED", 15000)
+                val output = read_serial_log(handle)
+                stop_guest(handle)
+                expect(saw_desktop).to_equal(true)
+                expect(saw_shortcut).to_equal(true)
+                expect(saw_wm_join).to_equal(true)
+                expect(saw_pass).to_equal(true)
+                expect(output.contains("TEST FAILED")).to_equal(false)
+                expect(output.contains("[desktop-e2e] shortcut:fail")).to_equal(false)
+                expect(output.contains("[desktop-e2e] wm:fail")).to_equal(false)
+                expect(output.contains("FAULT @")).to_equal(false)
+            Err(err) =>
+                print "[os_desktop_integration_spec] SYS-GUI-002 spawn failed: {err}"
+                expect(false).to_equal(true)

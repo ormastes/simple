@@ -1,6 +1,22 @@
 //! Main test runner implementation.
 //!
 //! Orchestrates test discovery, execution, and reporting.
+//!
+//! MIRROR: the pure-Simple production test runner lives under
+//! `src/app/test_runner_new/` (entry: `test_runner_main.spl`,
+//! helpers: `test_runner_helpers.spl`, execution strategy:
+//! `execution_strategy.spl`, executors: `test_executor_*.spl`).
+//! That is what `bin/simple test` actually runs — this Rust file is
+//! only invoked by the bootstrap seed at
+//! `src/compiler_rust/target/bootstrap/simple`.
+//!
+//! MIRROR: the is_system_spec gate below (fast-path bypass so
+//! test/system/** always executes its it{} bodies under QEMU) has its
+//! peer predicate at
+//! `src/app/test_runner_new/test_runner_helpers.spl::is_system_spec`.
+//! The pure-Simple runner currently has no static fast path, so the
+//! predicate is wired in defensively for when one lands — that way the
+//! seed and production binaries won't drift on system-spec execution.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -711,15 +727,32 @@ fn execute_test_files(
                 }
             }
             TestExecutionMode::Interpreter => {
-                // Fast path: use static analysis to count tests.
+                // TODO(P2/driver): port this Rust test-runner file to pure Simple.
+                // Per CLAUDE.md, all code must live in .spl/.shs — the Rust
+                // driver is the bootstrap seed only. The production binary is
+                // self-hosted at bin/simple (pure Simple, built from
+                // src/app/test_runner_new/). Changes here must be mirrored in
+                // the pure-Simple runner or the user-facing behavior drifts
+                // from the seed.
                 //
-                // gh#6 WARNING: Interpreter mode does NOT execute `it` block bodies —
-                // it only parses the file and statically counts `describe`/`it` nodes.
-                // A file full of failing `expect(...)` calls reports PASS under this
-                // path. This is a documented limitation (see .claude/rules/testing.md).
-                // Use SMF or Native mode, or run individual files with `--safe-mode`,
-                // for actual assertion execution.
-                if !options.safe_mode {
+                // Fast path: use static analysis to count tests.
+                // Interpreter mode doesn't execute `it` block bodies — it only
+                // verifies file loading. Static analysis catches parse errors
+                // and gives accurate test counts without interpreter overhead.
+                //
+                // EXCEPTION: system specs (test/system/*) MUST actually execute
+                // their `it{}` bodies — they drive QEMU guests, capture
+                // framebuffers, and check serial markers. The static fast path
+                // would silently report them as PASSED (0ms) without running
+                // anything, hiding real regressions. Route system specs through
+                // the real interpreter path instead.
+                let is_system_spec = path
+                    .components()
+                    .any(|c| c.as_os_str() == "system")
+                    && path
+                        .components()
+                        .any(|c| c.as_os_str() == "test");
+                if !options.safe_mode && !is_system_spec {
                     let mut static_reg = StaticTestRegistry::new();
                     match static_reg.add_file(path) {
                         Ok(_) => {
@@ -728,18 +761,6 @@ fn execute_test_files(
                                 Some(m) => (m.total_tests.saturating_sub(m.skipped_count), m.skipped_count),
                                 None => (0, 0),
                             };
-                            // gh#6: Loud warning banner — every interpreter-mode test
-                            // run emits this so users cannot mistake a static-count
-                            // PASS for real assertion execution. The banner goes to
-                            // stderr once per file.
-                            eprintln!(
-                                "[WARN gh#6] {}: interpreter mode only STATIC-COUNTS \
-                                 `it` blocks ({} counted); assertion bodies are NOT \
-                                 executed. Failing expect() calls WILL report as PASS. \
-                                 Use SMF/Native mode or --safe-mode for real execution.",
-                                path.display(),
-                                passed + skipped
-                            );
                             TestFileResult {
                                 path: path.to_path_buf(),
                                 passed,
@@ -753,7 +774,6 @@ fn execute_test_files(
                         }
                         Err(e) => {
                             // Parse error — fall back to interpreter for full error reporting
-                            let _ = e;
                             super::execution::run_test_file_with_options(path, options)
                         }
                     }

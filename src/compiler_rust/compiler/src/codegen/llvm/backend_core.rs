@@ -332,6 +332,8 @@ impl LlvmBackend {
     /// Emit object code from the module (feature-gated)
     #[cfg(feature = "llvm")]
     pub fn emit_object(&self, _module: &MirModule) -> Result<Vec<u8>, CompileError> {
+        use simple_common::target::{TargetArch, TargetOS};
+
         // Initialize LLVM targets
         LlvmTarget::initialize_all(&InitializationConfig::default());
 
@@ -348,22 +350,49 @@ impl LlvmBackend {
         let target = LlvmTarget::from_triple(&target_triple)
             .map_err(|e| crate::error::factory::llvm_target_failed(&triple, &e))?;
 
-        // Create target machine
-        // For WASM targets, use static relocation mode (no PIC needed)
-        let reloc_mode = if triple.contains("wasm") {
+        // Select relocation and code model based on target.
+        // - WASM: static (no PIC needed, no GOT in wasm).
+        // - Freestanding / baremetal ELF (SimpleOS, None): MUST be static.
+        //   PIC on freestanding riscv32 emits R_RISCV_GOT_HI20 / %pcrel_hi pairs that
+        //   resolve incorrectly when there is no .got section in the final link — the
+        //   auipc+jalr pair for function-pointer/indirect array calls collapses to a
+        //   self-call. Static reloc + medany code model matches the `-mcmodel=medany
+        //   -fno-pie` that the freestanding stub compile and linker already pass.
+        // - Hosted OSes: keep PIC.
+        let is_freestanding = matches!(self.target.os, TargetOS::SimpleOS | TargetOS::None);
+        let reloc_mode = if triple.contains("wasm") || is_freestanding {
             RelocMode::Static
         } else {
             RelocMode::PIC
+        };
+
+        // RISC-V freestanding needs the "medany" (Medium) code model so that PC-relative
+        // symbol addressing can reach any address; the small/default model assumes the
+        // link range is [−2GiB, +2GiB] around address 0, which breaks at 0x8000_0000.
+        let is_riscv = matches!(self.target.arch, TargetArch::Riscv32 | TargetArch::Riscv64);
+        let code_model = if is_freestanding && is_riscv {
+            CodeModel::Medium
+        } else {
+            CodeModel::Default
+        };
+
+        // Pass RISC-V extension features so that TargetMachine lowering matches the
+        // linker's -march=rv32imac / -march=rv64imac expectation (avoid rv32i-only
+        // sequences that reference absent atomics/multiplier helpers).
+        let features = match self.target.arch {
+            TargetArch::Riscv32 => "+m,+a,+c",
+            TargetArch::Riscv64 => "+m,+a,+c",
+            _ => "",
         };
 
         let target_machine = target
             .create_target_machine(
                 &target_triple,
                 "generic",
-                "",
+                features,
                 OptimizationLevel::Default,
                 reloc_mode,
-                CodeModel::Default,
+                code_model,
             )
             .ok_or_else(crate::error::factory::llvm_target_machine_failed)?;
 

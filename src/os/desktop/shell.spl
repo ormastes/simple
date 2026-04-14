@@ -128,6 +128,18 @@ impl DesktopShell:
         val wm = WmService.new()
         serial_println("[shell] new: WmService created")
 
+        # AGENT V WORKAROUND (2026-04-13): me init() method body never
+        # executes on x86_64 baremetal Cranelift, so launcher_init() is
+        # never called and launcher_get_app_count() returns 0. Inline the
+        # critical side-effects here so the live x64-desktop-test lane can
+        # reach [desktop-e2e] desktop-ready. Proper fix belongs in the
+        # compiler (me-method dispatch in static-linked baremetal ELFs).
+        serial_println("[shell] new: before launcher_init call")
+        launcher_init()
+        serial_println("[shell] new: after launcher_init call")
+        _sync_launcher_registry_with_manifests()
+        serial_println("[shell] new: launcher bootstrapped from constructor")
+
         DesktopShell(
             compositor: compositor,
             wm: wm,
@@ -138,7 +150,7 @@ impl DesktopShell:
             clock_text: "00:00",
             shortcuts: _default_shortcuts(),
             baremetal_apps: [],
-            launcher_initialized: false,
+            launcher_initialized: true,
             selected_process_idx: 0,
             task_reaper_enabled: true
         )
@@ -569,9 +581,12 @@ impl DesktopShell:
                     launcher_note_window_opened(row.pid)
                     tracked_window_count = tracked_window_count + 1
                 continue
+            val reaped_count = compositor_windows.len().to_u64()
             for window_id in compositor_windows:
                 self.compositor.destroy_window(window_id)
                 self.wm.remove_owner(window_id)
+            if reaped_count > 0 or row.windows > 0:
+                serial_println("[shell] reaped pid={row.pid} app_id={row.app_id} state={row.state} windows={reaped_count}")
 
 # ============================================================================
 # Baremetal Overlay (direct Engine2D, no WidgetNode DSL)

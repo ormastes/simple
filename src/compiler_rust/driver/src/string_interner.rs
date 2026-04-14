@@ -1,4 +1,10 @@
 // String interner for deduplicating strings
+//
+// MIRROR: ported to `src/app/test_runner_new/string_interner.spl`.
+// That pure-Simple module is used by `bin/simple`'s test DB and SDN
+// serializer; this Rust copy is retained only for the bootstrap seed
+// and the in-tree Rust test_db path (`src/compiler_rust/driver/src/test_db/`).
+// Do not extend this file without mirroring the change in the .spl peer.
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 

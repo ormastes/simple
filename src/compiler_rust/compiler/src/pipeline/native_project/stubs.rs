@@ -1,9 +1,142 @@
 //! Stub object generation for unresolved symbols during linking.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use super::{effective_target, ModuleImports};
-use super::tools::{find_native_all_library, find_runtime_library, is_system_symbol};
+use super::tools::{find_c_compiler, find_native_all_library, find_runtime_library, is_system_symbol};
+
+/// Generate a stub object file for a FREESTANDING (cross) target.
+///
+/// Unlike `generate_stub_object`, this does not emit asm using host instructions
+/// and does not scan host system libraries. It discovers unresolved symbols across
+/// the provided `object_paths` (and any boot objects), filters out symbols defined
+/// elsewhere in that same object set, and emits weak C stub definitions compiled
+/// with the cross `--target=<triple>` so that undefined Simple class/method symbols
+/// resolve to harmless `return 0` functions instead of null-address jumps.
+///
+/// This is the fix for the SimpleOS `0x950a` null-call cascade: without it, the
+/// link still succeeds (because `--unresolved-symbols=ignore-all` is set) but any
+/// call through an unresolved symbol traps on address 0 at runtime.
+pub(crate) fn generate_stub_object_freestanding(
+    temp_dir: &Path,
+    object_paths: &[PathBuf],
+    boot_objects: &[PathBuf],
+    triple: &str,
+    march: &str,
+    mabi: &str,
+) -> Result<PathBuf, String> {
+    use std::collections::{BTreeSet, HashSet};
+
+    let mut defined: HashSet<String> = HashSet::new();
+    let mut undefined: BTreeSet<String> = BTreeSet::new();
+
+    // Scan both Simple object_paths AND any boot_objects (boot .c/.s may define
+    // or reference symbols that must not be stubbed over).
+    let scan_iter = object_paths.iter().chain(boot_objects.iter());
+    for path in scan_iter {
+        let output = match std::process::Command::new("nm").arg("-g").arg("-p").arg(path).output() {
+            Ok(o) => o,
+            Err(_) => continue,
+        };
+        if !output.status.success() {
+            continue;
+        }
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        for line in stdout.lines() {
+            let parts: Vec<&str> = line.split_whitespace().collect();
+            match parts.as_slice() {
+                [sym_type, name] if *sym_type == "U" => {
+                    undefined.insert((*name).to_string());
+                }
+                [_addr, sym_type, name] if *sym_type != "U" => {
+                    defined.insert((*name).to_string());
+                }
+                _ => {}
+            }
+        }
+    }
+
+    // Only stub symbols that are genuinely unresolved in the link set.
+    // Exclude obvious system/dyld/C++ runtime mangled names.
+    let needs_stub: Vec<String> = undefined
+        .into_iter()
+        .filter(|s| !defined.contains(s))
+        .filter(|s| !s.is_empty())
+        .filter(|s| s.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '$' || c == '.'))
+        .filter(|s| !s.starts_with("_dyld_"))
+        .filter(|s| !s.starts_with("_ZSt") && !s.starts_with("_ZNSt"))
+        .filter(|s| !is_system_symbol(s))
+        .filter(|s| s != "main" && s != "_main")
+        .collect();
+
+    eprintln!(
+        "Freestanding stub generation: {} unresolved symbol(s) to stub",
+        needs_stub.len()
+    );
+    if std::env::var("SIMPLE_TRACE_STUBS").is_ok() {
+        for s in needs_stub.iter().take(20) {
+            eprintln!("  STUB: {}", s);
+        }
+        if needs_stub.len() > 20 {
+            eprintln!("  ... ({} more)", needs_stub.len() - 20);
+        }
+    }
+
+    // Always emit the stubs.c file even if empty — callers still link it.
+    let stub_c = temp_dir.join("_stubs_freestanding.c");
+    let mut code =
+        String::from("/* Auto-generated freestanding stubs — weak definitions return 0 */\n");
+    code.push_str("typedef long long __stub_i64;\n\n");
+    for (i, sym) in needs_stub.iter().enumerate() {
+        // Sanitize C identifier for the wrapper name; keep the external symbol
+        // name exact via an __asm__ label so the linker sees the mangled form.
+        let wrapper = format!("__stub_fs_{}", i);
+        code.push_str(&format!(
+            "__attribute__((weak)) __stub_i64 {wrap}(void) __asm__(\"{sym}\");\n\
+             __attribute__((weak)) __stub_i64 {wrap}(void) {{ return 0; }}\n\n",
+            wrap = wrapper,
+            sym = sym
+        ));
+    }
+
+    std::fs::write(&stub_c, &code).map_err(|e| format!("write freestanding stubs: {e}"))?;
+
+    let stub_o = temp_dir.join("_stubs_freestanding.o");
+    let cc = find_c_compiler();
+    let mut cmd = std::process::Command::new(&cc);
+    cmd.args(["-c", "-ffreestanding", "-nostdlib", "-fno-pie"])
+        .arg("-ffunction-sections")
+        .arg("-fdata-sections")
+        .arg("-o")
+        .arg(&stub_o)
+        .arg(&stub_c)
+        .arg(format!("--target={}", triple));
+    if triple.contains("x86_64") {
+        cmd.arg("-mno-red-zone");
+    }
+    if !march.is_empty() {
+        cmd.arg(march);
+    }
+    if !mabi.is_empty() {
+        cmd.arg(mabi);
+    }
+    // For RISC-V, medany needed for freestanding.
+    if march.contains("rv") {
+        cmd.arg("-mcmodel=medany");
+    }
+
+    let output = cmd
+        .output()
+        .map_err(|e| format!("compile freestanding stubs ({cc}): {e}"))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!(
+            "failed to compile freestanding stubs ({}): {}",
+            cc, stderr
+        ));
+    }
+    Ok(stub_o)
+}
 
 /// Generate a stub object file that provides weak definitions for all unresolved symbols.
 #[cfg(any(

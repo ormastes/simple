@@ -1,3 +1,15 @@
+// MIRROR: ported to pure Simple in `src/app/watch/` —
+//   - `analyze_source` / `analyze_source_str` (import extraction)
+//       -> `src/app/watch/deps.spl::extract_imports` / `build_dep_graph`
+//   - `current_mtime` (file modification time)
+//       -> `src/app/watch/watcher.spl::collect_snapshot` via
+//          extern `rt_file_modified_time`
+//   - `BuildCache::dependents_of` (reverse dep lookup)
+//       -> `src/app/watch/deps.spl::find_dependents`
+// Persistent disk cache (`simple_watch_cache.json`) has no pure-Simple
+// peer because `src/app/watch/runner.spl` rebuilds the dep graph live
+// every poll; if persistence becomes necessary, add it to
+// `src/app/watch/deps.spl` and retire this file.
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};

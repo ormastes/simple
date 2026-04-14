@@ -283,8 +283,15 @@ fn run_tests(options: TestOptions) -> TestRunResult:
         if updated_options.self_protect and tests_run % 50 == 0 and tests_run > 0:
             checkpoint_save(completed_files, total_passed, total_failed, total_skipped, "periodic")
 
-        # Check change-detection cache before running
-        if use_result_cache:
+        # Check change-detection cache before running.
+        # EXCEPTION: system specs (test/system/*) MUST actually execute their
+        # `it{}` bodies — they drive QEMU guests, capture framebuffers, and
+        # check serial markers. The change-detection cache would replay a
+        # silent PASSED (0ms) from an earlier interpreter-mode load, hiding
+        # real regressions. Route system specs through the real execution
+        # path instead. Mirrors the Rust seed `is_system_spec` bypass in
+        # src/compiler_rust/driver/src/cli/test_runner/runner.rs.
+        if use_result_cache and not file_path.contains("test/system/"):
             val cached_entry = incremental_state.check_freshness(file_path)
             if cached_entry.result_status != -1:
                 val cached_result = TestFileResult(
@@ -314,8 +321,9 @@ fn run_tests(options: TestOptions) -> TestRunResult:
         val result = run_single_test(file_path, updated_options)
         print_result(result, updated_options.format)
 
-        # Record result in cache
-        if use_result_cache:
+        # Record result in cache (system specs skip the cache entirely so
+        # a stale interpreter-mode load never replays as a silent 0ms pass)
+        if use_result_cache and not file_path.contains("test/system/"):
             incremental_state.record_runner_result(file_path, result.passed, result.failed, result.skipped, result.duration_ms)
 
         total_passed = total_passed + result.passed
@@ -379,6 +387,12 @@ fn run_tests_parallel_mode(
 
     if use_result_cache:
         for file_path in files:
+            # System specs (test/system/*) bypass the change-detection cache
+            # so they always go through real execution. See the sequential
+            # mode comment above for the rationale.
+            if file_path.contains("test/system/"):
+                uncached_files.push(file_path)
+                continue
             val cached_entry = incremental_state.check_freshness(file_path)
             if cached_entry.result_status != -1:
                 val cached_result = TestFileResult(
@@ -495,8 +509,8 @@ fn run_tests_parallel_mode(
         total_duration_ms = total_duration_ms + result.duration_ms
         all_results.push(result)
 
-        # Record result in cache
-        if use_result_cache:
+        # Record result in cache (system specs skip caching — see sequential mode)
+        if use_result_cache and not result.path.contains("test/system/"):
             incremental_state.record_runner_result(result.path, result.passed, result.failed, result.skipped, result.duration_ms)
 
     for result in qemu_results:
@@ -521,7 +535,7 @@ fn run_tests_parallel_mode(
         total_duration_ms = total_duration_ms + result.duration_ms
         all_results.push(result)
 
-        if use_result_cache:
+        if use_result_cache and not result.path.contains("test/system/"):
             incremental_state.record_runner_result(result.path, result.passed, result.failed, result.skipped, result.duration_ms)
 
     # Save cache

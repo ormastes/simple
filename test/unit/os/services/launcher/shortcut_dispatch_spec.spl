@@ -1,0 +1,68 @@
+"""
+# Launcher Shortcut Dispatch Specification
+
+Regression coverage for `launcher_shortcut_dispatch(key, modifiers)`.
+
+The x86_64 desktop_e2e baremetal entry dispatches Meta+B and Meta+H
+through this path to drive the real launcher shortcut flow. The
+dispatch must find the registered Browser Demo / Hello World slots
+and return true. A previous bug hardcoded the `_app_key` / `_app_mod`
+/ `_app_name` / `_app_index_by_name` helpers so `launcher_register`
+always hit the "existing" branch and `app_count` stayed at 0, which
+made the dispatch loop (`while i < app_count`) never match anything
+— this spec locks that behaviour down.
+"""
+
+use std.spec
+use os.services.launcher.launcher.{
+    launcher_init, launcher_register, launcher_shortcut_dispatch,
+    launcher_get_app_count, launcher_get_app_name, launcher_find_by_name,
+    MOD_META
+}
+
+val KEY_B: u32 = 0x42
+val KEY_H: u32 = 0x48
+val KEY_UNUSED: u32 = 0x5A   # 'Z' — no default binding
+
+describe "Launcher shortcut dispatch":
+    it "seeds four default apps with non-zero app_count":
+        launcher_init()
+        expect(launcher_get_app_count()).to_equal(4)
+        expect(launcher_get_app_name(0)).to_equal("Hello World")
+        expect(launcher_get_app_name(3)).to_equal("Browser Demo")
+
+    it "dispatches Meta+B to the Browser Demo slot":
+        launcher_init()
+        val dispatched = launcher_shortcut_dispatch(KEY_B, MOD_META)
+        expect(dispatched).to_equal(true)
+
+    it "dispatches Meta+H to the Hello World slot":
+        launcher_init()
+        val dispatched = launcher_shortcut_dispatch(KEY_H, MOD_META)
+        expect(dispatched).to_equal(true)
+
+    it "returns false for an unregistered shortcut":
+        launcher_init()
+        val dispatched = launcher_shortcut_dispatch(KEY_UNUSED, MOD_META)
+        expect(dispatched).to_equal(false)
+
+    it "returns false when only the modifier matches but not the key":
+        launcher_init()
+        # Modifier matches Meta, but 0x00 is not a registered key.
+        val dispatched = launcher_shortcut_dispatch(0x00, MOD_META)
+        expect(dispatched).to_equal(false)
+
+    it "returns false when only the key matches but not the modifier":
+        launcher_init()
+        # Key matches Browser Demo's 'B', but no modifier means no match.
+        val dispatched = launcher_shortcut_dispatch(KEY_B, 0)
+        expect(dispatched).to_equal(false)
+
+    it "dispatches to a dynamically registered shortcut":
+        launcher_init()
+        val registered = launcher_register("Demo App", "/apps/demo", "D", 0x44, MOD_META)
+        expect(registered).to_equal(true)
+        expect(launcher_get_app_count()).to_equal(5)
+        expect(launcher_find_by_name("Demo App")).to_equal(4)
+        val dispatched = launcher_shortcut_dispatch(0x44, MOD_META)
+        expect(dispatched).to_equal(true)
