@@ -5853,6 +5853,7 @@ void _start(void)
             :
             : "rax", "rdx"
         );
+        __asm__ volatile("cli");
         for (;;) {
             __asm__ volatile("hlt");
         }
