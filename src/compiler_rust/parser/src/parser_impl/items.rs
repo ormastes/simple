@@ -462,8 +462,22 @@ impl<'a> Parser<'a> {
                 Ok(node)
             }
             TokenKind::Mod => self.parse_mod(Visibility::Public, attributes),
+            TokenKind::Enum => {
+                let mut node = self.parse_enum_with_attrs(attributes)?;
+                if let Node::Enum(ref mut e) = node {
+                    e.visibility = Visibility::Public;
+                }
+                Ok(node)
+            }
+            TokenKind::Union => {
+                let mut node = self.parse_union_with_attrs(attributes)?;
+                if let Node::Enum(ref mut e) = node {
+                    e.visibility = Visibility::Public;
+                }
+                Ok(node)
+            }
             _ => Err(ParseError::unexpected_token(
-                "fn, struct, class, mixin, or mod after pub with attributes",
+                "fn, struct, class, mixin, mod, enum, or union after pub with attributes",
                 format!("{:?}", self.current.kind),
                 self.current.span,
             )),
