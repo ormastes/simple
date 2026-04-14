@@ -391,28 +391,63 @@ _fault_handler:
     iretq
 
 /* ==================================================================
- * 64-bit GDT (minimal: null, code64, data64)
+ * 64-bit GDT (5 entries for SYSCALL/SYSRET support)
+ *
+ * Selector layout required by MSR_STAR (Intel SDM Vol 3A §5.8.8):
+ *   0x00: null
+ *   0x08: kernel CS  — SYSCALL loads CS=0x08, SS=0x10
+ *   0x10: kernel SS/DS
+ *   0x18: user CS 32-bit compat — SYSRET compat loads CS=0x1B (0x18|3)
+ *   0x20: user SS/DS            — SYSRET loads SS=0x23 (0x20|3)
+ *   0x28: user CS 64-bit        — SYSRET 64-bit loads CS=0x2B (0x28|3)
+ *
+ * MSR_STAR value: (USER_CS_32 | 3) << 48 | KERNEL_CS << 32
+ *              = 0x001B_0008_0000_0000
  * ================================================================== */
 .section .rodata
 .align 16
 gdt64:
     .quad 0                    /* 0x00: null descriptor */
 
-    /* 0x08: 64-bit code segment */
+    /* 0x08: kernel CS — 64-bit code segment, DPL=0 */
     .word 0xFFFF               /* limit low */
     .word 0x0000               /* base low */
     .byte 0x00                 /* base mid */
-    .byte 0x9A                 /* access: present, ring 0, code, exec/read */
-    .byte 0xAF                 /* flags: 4K granularity, long mode; limit hi */
+    .byte 0x9A                 /* access: present, DPL=0, code, exec/read */
+    .byte 0xAF                 /* flags: G=1, L=1 (64-bit); limit hi=0xF */
     .byte 0x00                 /* base high */
 
-    /* 0x10: 64-bit data segment */
+    /* 0x10: kernel SS/DS — 64-bit data segment, DPL=0 */
     .word 0xFFFF
     .word 0x0000
     .byte 0x00
-    .byte 0x92                 /* access: present, ring 0, data, read/write */
-    .byte 0xCF                 /* flags: 4K granularity, 32-bit (ignored in long mode) */
+    .byte 0x92                 /* access: present, DPL=0, data, read/write */
+    .byte 0xCF                 /* flags: G=1, D=1 (ignored in 64-bit mode) */
     .byte 0x00
+
+    /* 0x18: user CS 32-bit compat — SYSRET compat target, DPL=3 */
+    .word 0xFFFF               /* limit low */
+    .word 0x0000               /* base low */
+    .byte 0x00                 /* base mid */
+    .byte 0xFA                 /* access: present, DPL=3, code, exec/read */
+    .byte 0xCF                 /* flags: G=1, D=1, L=0 (32-bit compat) */
+    .byte 0x00                 /* base high */
+
+    /* 0x20: user SS/DS — user data segment, DPL=3 */
+    .word 0xFFFF               /* limit low */
+    .word 0x0000               /* base low */
+    .byte 0x00                 /* base mid */
+    .byte 0xF2                 /* access: present, DPL=3, data, read/write */
+    .byte 0xCF                 /* flags: G=1, D=1 */
+    .byte 0x00                 /* base high */
+
+    /* 0x28: user CS 64-bit — SYSRET 64-bit target, DPL=3 */
+    .word 0xFFFF               /* limit low */
+    .word 0x0000               /* base low */
+    .byte 0x00                 /* base mid */
+    .byte 0xFA                 /* access: present, DPL=3, code, exec/read */
+    .byte 0xAF                 /* flags: G=1, L=1, D=0 (64-bit) */
+    .byte 0x00                 /* base high */
 
 gdt64_end:
 

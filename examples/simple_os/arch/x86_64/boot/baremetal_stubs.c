@@ -8506,6 +8506,283 @@ RuntimeValue rt_read_cr3(RuntimeValue a) { return rt_read_cr3_real(a); }
 RuntimeValue rt_write_cr3(RuntimeValue a) { return rt_write_cr3_real(a); }
 RuntimeValue rt_read_cr2(RuntimeValue a) { return rt_read_cr2_real(a); }
 
+/* rt_install_idt — Wave 7C: load kernel IDT from entries array address.
+ *
+ * Simple cannot reliably take the address of a struct variable (& on a
+ * global struct gives the value, not the address). This C helper receives
+ * the raw address of the idt_entries array, builds a properly packed
+ * 10-byte IDTR descriptor on the C stack (limit=4095, base=entries_addr),
+ * and executes lidt — bypassing the IdtPtr struct layout issue entirely.
+ *
+ * Called from idt.spl:_idt_load() as:
+ *   rt_install_idt(entries_addr: u64) -> unit
+ */
+RuntimeValue rt_install_idt(RuntimeValue entries_addr_rv)
+{
+    uint64_t base = (uint64_t)DECODE_INT(entries_addr_rv);
+    /* Build packed 10-byte IDTR: [limit:u16][base:u64] */
+    struct __attribute__((packed)) { uint16_t limit; uint64_t base; } idtr;
+    idtr.limit = 4095;   /* 256 * 16 - 1 */
+    idtr.base  = base;
+    __asm__ volatile("lidt %0" : : "m"(idtr) : "memory");
+    serial_puts("[fault] IDT loaded via rt_install_idt\r\n");
+    return NIL_VALUE;
+}
+
+/* rt_patch_live_idt — Wave 7C rich fault dumper.
+ *
+ * Reads the live IDTR via sidt to get the current IDT base address, then
+ * patches gate entries for vectors 6 (#UD), 8 (#DF), 13 (#GP), 14 (#PF)
+ * with the provided Simple handler function addresses.
+ *
+ * This bypasses all Simple struct/address-of limitations by operating
+ * entirely in C on the live CPU IDT.
+ *
+ * Gate format (64-bit interrupt gate, 16 bytes):
+ *   [0..1]  offset_low   (bits 0-15 of handler addr)
+ *   [2..3]  selector     (kernel CS = 0x08)
+ *   [4]     ist          (0 = default stack)
+ *   [5]     type_attr    (0x8E = present, DPL=0, interrupt gate)
+ *   [6..7]  offset_mid   (bits 16-31 of handler addr)
+ *   [8..11] offset_high  (bits 32-63 of handler addr)
+ *   [12..15] reserved    (zero)
+ *
+ * handler_addrs: array of 4 tagged-int Simple function addresses:
+ *   [0]=vec6_ud, [1]=vec8_df, [2]=vec13_gp, [3]=vec14_pf
+ */
+typedef struct __attribute__((packed)) {
+    uint16_t offset_low;
+    uint16_t selector;
+    uint8_t  ist;
+    uint8_t  type_attr;
+    uint16_t offset_mid;
+    uint32_t offset_high;
+    uint32_t reserved;
+} IdtGate64;
+
+static void _patch_idt_gate(IdtGate64 *idt, int vec, uint64_t handler_addr)
+{
+    idt[vec].offset_low  = (uint16_t)(handler_addr & 0xFFFF);
+    idt[vec].selector    = 0x08;   /* kernel CS */
+    idt[vec].ist         = 0;
+    idt[vec].type_attr   = 0x8E;   /* P=1, DPL=0, interrupt gate */
+    idt[vec].offset_mid  = (uint16_t)((handler_addr >> 16) & 0xFFFF);
+    idt[vec].offset_high = (uint32_t)((handler_addr >> 32) & 0xFFFFFFFF);
+    idt[vec].reserved    = 0;
+}
+
+RuntimeValue rt_patch_live_idt(RuntimeValue ud_rv, RuntimeValue df_rv,
+                                RuntimeValue gp_rv, RuntimeValue pf_rv)
+{
+    serial_puts("[fault] rt_patch_live_idt entered\r\n");
+    /* Read live IDTR */
+    struct __attribute__((packed)) { uint16_t limit; uint64_t base; } idtr;
+    __asm__ volatile("sidt %0" : "=m"(idtr));
+    serial_puts("[fault] sidt done\r\n");
+
+    IdtGate64 *idt = (IdtGate64 *)(uintptr_t)idtr.base;
+
+    /* Simple passes function addresses as raw machine-code pointers, NOT as
+     * tagged integers. Cast RuntimeValue directly to uint64_t. */
+    _patch_idt_gate(idt,  6, (uint64_t)ud_rv);
+    _patch_idt_gate(idt,  8, (uint64_t)df_rv);
+    _patch_idt_gate(idt, 13, (uint64_t)gp_rv);
+    _patch_idt_gate(idt, 14, (uint64_t)pf_rv);
+
+    serial_puts("[fault] IDT vectors 6/8/13/14 patched via rt_patch_live_idt\r\n");
+    return NIL_VALUE;
+}
+
+/* _serial_puthex64: print 64-bit value as 0x-prefixed hex, no heap. */
+static void _serial_puthex64(uint64_t v) {
+    static const char hex[] = "0123456789abcdef";
+    serial_puts("0x");
+    for (int i = 60; i >= 0; i -= 4)
+        serial_putchar(hex[(v >> i) & 0xF]);
+}
+
+/* -----------------------------------------------------------------------
+ * Wave 7C Rich Fault Hook — patches crt0's _fault_handler in-memory.
+ *
+ * Strategy: overwrite the first 5 bytes of _fault_handler with a
+ * `jmp rel32` that redirects to _rich_fault_entry (defined below).
+ * _rich_fault_entry reads the interrupt frame from RSP, prints the rich
+ * frame, then executes the same recovery as crt0 (RAX=3, advance RIP,
+ * iretq). Falls back to terse output if called before init.
+ *
+ * All output uses direct port I/O (no heap, no malloc).
+ * ----------------------------------------------------------------------- */
+
+/* _rich_fault_entry: naked ISR-style entry point.
+ *
+ * On CPU entry to _fault_handler the stack is one of:
+ *   No errcode: [RIP, CS, RFLAGS, RSP, SS]        (CS = 0x08 at [rsp+8])
+ *   Errcode:    [errcode, RIP, CS, RFLAGS, RSP, SS] (CS = 0x08 at [rsp+16])
+ *
+ * Detection (mirrors crt0): after saving N registers, the first frame slot
+ * is at [rsp + N*8]. The SECOND slot is at [rsp + N*8 + 8]. If that second
+ * slot == 0x08 (kernel CS), then the first slot IS the RIP (no errcode).
+ * Otherwise the first slot is errcode and the second is RIP.
+ *
+ * After 9 pushes (72 bytes):
+ *   [rsp+72]  = first frame slot  (RIP or errcode)
+ *   [rsp+80]  = second frame slot (CS=0x08 if no errcode, else RIP)
+ *
+ * System V AMD64 calling convention: rdi, rsi, rdx, rcx, r8, r9
+ * _rich_fault_print(rip, errcode, cs, rflags, cr2, cr3)
+ *   => rdi=rip, rsi=errcode, rdx=cs, rcx=rflags, r8=cr2, r9=cr3
+ */
+__attribute__((naked)) static void _rich_fault_entry(void)
+{
+    __asm__ volatile(
+        /* Save scratch registers */
+        "pushq %%rax\n\t"
+        "pushq %%rdx\n\t"
+        "pushq %%rcx\n\t"
+        "pushq %%rsi\n\t"
+        "pushq %%rdi\n\t"
+        "pushq %%r8\n\t"
+        "pushq %%r9\n\t"
+        "pushq %%r10\n\t"
+        "pushq %%r11\n\t"
+        /* 9 pushes = 72 bytes. [rsp+72] = first frame slot, [rsp+80] = second.
+         * If [rsp+80] == 0x08 (CS), there is NO error code. */
+        "cmpq $0x08, 80(%%rsp)\n\t"
+        "je 1f\n\t"
+        /* Error code present: [rsp+72]=errcode, [rsp+80]=RIP, [rsp+88]=CS, [rsp+96]=RFLAGS */
+        "movq 80(%%rsp), %%rdi\n\t"   /* arg0: RIP */
+        "movq 72(%%rsp), %%rsi\n\t"   /* arg1: errcode */
+        "movq 88(%%rsp), %%rdx\n\t"   /* arg2: CS */
+        "movq 96(%%rsp), %%rcx\n\t"   /* arg3: RFLAGS */
+        "jmp 2f\n\t"
+        "1:\n\t"
+        /* No error code: [rsp+72]=RIP, [rsp+80]=CS, [rsp+88]=RFLAGS */
+        "movq 72(%%rsp), %%rdi\n\t"   /* arg0: RIP */
+        "xorq %%rsi, %%rsi\n\t"       /* arg1: errcode = 0 */
+        "movq 80(%%rsp), %%rdx\n\t"   /* arg2: CS */
+        "movq 88(%%rsp), %%rcx\n\t"   /* arg3: RFLAGS */
+        "2:\n\t"
+        /* arg4: CR2 (page-fault address), arg5: CR3 (page table base) */
+        "movq %%cr2, %%r8\n\t"
+        "movq %%cr3, %%r9\n\t"
+        /* Call _rich_fault_print(rip, errcode, cs, rflags, cr2, cr3) */
+        "callq _rich_fault_print\n\t"
+        /* Restore scratch registers */
+        "popq %%r11\n\t"
+        "popq %%r10\n\t"
+        "popq %%r9\n\t"
+        "popq %%r8\n\t"
+        "popq %%rdi\n\t"
+        "popq %%rsi\n\t"
+        "popq %%rcx\n\t"
+        "popq %%rdx\n\t"
+        "popq %%rax\n\t"
+        /* Recovery (mirrors crt0 .fault_recover_silent):
+         * After pops, [rsp] = first frame slot, [rsp+8] = second.
+         * If [rsp+8] == 0x08 (CS), no error code was pushed. */
+        "cmpq $0x08, 8(%%rsp)\n\t"
+        "je 3f\n\t"
+        /* Error code present: advance RIP (at [rsp+8]), pop errcode, iretq */
+        "addq $2, 8(%%rsp)\n\t"
+        "movq $0x3, %%rax\n\t"
+        "addq $8, %%rsp\n\t"
+        "iretq\n\t"
+        "3:\n\t"
+        /* No error code: advance RIP (at [rsp]), iretq */
+        "addq $2, (%%rsp)\n\t"
+        "movq $0x3, %%rax\n\t"
+        "iretq\n\t"
+        : : : "memory"
+    );
+}
+
+/* _rich_fault_print: C-level heap-free printer called from _rich_fault_entry */
+void _rich_fault_print(uint64_t rip, uint64_t errcode, uint64_t cs,
+                        uint64_t rflags, uint64_t cr2, uint64_t cr3)
+{
+    serial_puts("\r\n[fault] *** EXCEPTION FRAME ***\r\n");
+    serial_puts("[fault] rip=");     _serial_puthex64(rip);     serial_puts("\r\n");
+    serial_puts("[fault] errcode="); _serial_puthex64(errcode); serial_puts("\r\n");
+    serial_puts("[fault] cs=");      _serial_puthex64(cs);      serial_puts("\r\n");
+    serial_puts("[fault] rflags=");  _serial_puthex64(rflags);  serial_puts("\r\n");
+    serial_puts("[fault] cr2=");     _serial_puthex64(cr2);     serial_puts("\r\n");
+    serial_puts("[fault] cr3=");     _serial_puthex64(cr3);     serial_puts("\r\n");
+    serial_puts("[fault] *** END FRAME (recovering) ***\r\n");
+}
+
+/* rt_install_rich_fault_hook — Wave 7C: called from Simple arch_init.
+ *
+ * Strategy: read the IDTR via sidt, decode gate 0 to find the address of
+ * crt0's _fault_handler, then overwrite its first 5 bytes with a jmp rel32
+ * to _rich_fault_entry. All 256 IDT vectors point at _fault_handler so this
+ * upgrades ALL fault output without needing _fault_handler to be exported
+ * from crt0.s and without touching the IDT entries themselves.
+ *
+ * The IdtGate64 struct is already defined above (rt_patch_live_idt section).
+ */
+RuntimeValue rt_install_rich_fault_hook(void)
+{
+    /* Read IDTR */
+    struct __attribute__((packed)) { uint16_t limit; uint64_t base; } idtr;
+    __asm__ volatile("sidt %0" : "=m"(idtr));
+
+    if (idtr.base == 0 || idtr.limit < 15) {
+        serial_puts("[fault] WARNING: IDTR invalid, skipping hook\r\n");
+        return NIL_VALUE;
+    }
+
+    /* Decode IDT gate 0 to find the handler address (= crt0's _fault_handler).
+     * IDT gate 64-bit format (16 bytes):
+     *   [1:0]   offset_low  (bits 15:0)
+     *   [3:2]   selector
+     *   [4]     ist
+     *   [5]     type_attr
+     *   [7:6]   offset_mid  (bits 31:16)
+     *   [11:8]  offset_high (bits 63:32)
+     *   [15:12] reserved
+     */
+    IdtGate64 *idt = (IdtGate64 *)(uintptr_t)idtr.base;
+    uint64_t handler_addr =
+        ((uint64_t)idt[0].offset_low)        |
+        ((uint64_t)idt[0].offset_mid  << 16) |
+        ((uint64_t)idt[0].offset_high << 32);
+
+    if (handler_addr == 0) {
+        serial_puts("[fault] WARNING: IDT gate 0 handler is NULL, skipping hook\r\n");
+        return NIL_VALUE;
+    }
+
+    serial_puts("[fault] _fault_handler addr=");
+    _serial_puthex64(handler_addr);
+    serial_puts("\r\n");
+
+    uint8_t *target = (uint8_t *)(uintptr_t)handler_addr;
+    uint8_t *hook   = (uint8_t *)(uintptr_t)_rich_fault_entry;
+
+    /* Write: E9 <rel32> (jmp rel32, 5 bytes) */
+    int64_t rel = (int64_t)(hook - target - 5);
+    target[0] = 0xE9;
+    target[1] = (uint8_t)( rel        & 0xFF);
+    target[2] = (uint8_t)((rel >>  8) & 0xFF);
+    target[3] = (uint8_t)((rel >> 16) & 0xFF);
+    target[4] = (uint8_t)((rel >> 24) & 0xFF);
+
+    serial_puts("[fault] _fault_handler patched -> _rich_fault_entry\r\n");
+    return NIL_VALUE;
+}
+
+/* rt_dump_fault_frame — legacy stub kept for API compatibility. */
+RuntimeValue rt_dump_fault_frame(RuntimeValue vec_rv, RuntimeValue rip_rv,
+                                  RuntimeValue rsp_rv, RuntimeValue rbp_rv,
+                                  RuntimeValue rax_rv, RuntimeValue cs_rv,
+                                  RuntimeValue rflags_rv)
+{
+    (void)vec_rv; (void)rsp_rv; (void)rbp_rv; (void)rax_rv;
+    _rich_fault_print((uint64_t)rip_rv, 0, (uint64_t)cs_rv,
+                      (uint64_t)rflags_rv, 0, 0);
+    return NIL_VALUE;
+}
+
 /* =========================================================================
  * SSH Auth Database — C-side workaround for Cranelift struct field access
  * bug that corrupts text comparisons in Simple-compiled authenticate_password.
@@ -8896,6 +9173,584 @@ int64_t rt_verify_kexinit_roundtrip(RuntimeValue data_rv)
 
     return 0; /* success */
 }
+
+/* ============================================================================
+ * Weak C-ABI shims for SYSCALL dispatch (Wave 10B)
+ *
+ * Each spl_handle_* is declared weak and returns -38 (ENOSYS) by default.
+ * A future Simple-emitted ABI shim will override these with strong symbols
+ * that forward into the Simple-side handler functions (_handle_* etc.).
+ *
+ * Syscall number mapping mirrors src/os/kernel/ipc/syscall.spl:
+ *   0  = exit          1  = yield         2  = spawn
+ *   3  = wait          4  = getpid        5  = list_tasks
+ *   6  = get_task_info 7  = signal        8  = set_priority
+ *   9  = get_parent_pid 10 = mmap         11 = munmap
+ *  12  = mprotect      13 = spawn_binary  20 = ipc_send
+ *  21  = ipc_recv      22 = ipc_create_port 23 = ipc_connect
+ *  24  = notification_create  25 = notification_signal
+ *  26  = notification_wait    27 = notification_poll
+ *  28  = notification_destroy 29 = notification_wait_any
+ *  30  = file_open     31 = file_read     32 = file_write
+ *  33  = file_close    34 = file_stat     35 = file_mkdir
+ *  36  = file_readdir  37 = mount         38 = unmount
+ *  39  = unlink        40 = pledge        41 = unveil
+ *  42  = cap_grant     43 = ftruncate     44 = rename
+ *  45  = rmdir         46 = lseek         47 = getcwd
+ *  48  = chdir         50 = clock_gettime 51 = sleep
+ *  60  = debug_write   70 = net_socket    71 = net_bind
+ *  72  = net_listen    73 = net_connect   74 = net_accept
+ *  75  = net_send_to   76 = net_recv_from 77 = net_if_config
+ *  80  = dev_enumerate 81 = dev_get_info  82 = device_grant
+ *  83  = map_bar       84 = alloc_dma     85 = free_dma
+ *  90  = log_write     91 = log_read      95 = sysinfo
+ *  96  = get_hostname  97 = set_hostname
+ * ============================================================================
+ */
+
+/* Forward declarations for all spl_handle_* weak stubs */
+__attribute__((weak)) int64_t spl_handle_exit(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
+__attribute__((weak)) int64_t spl_handle_yield(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
+__attribute__((weak)) int64_t spl_handle_spawn(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
+__attribute__((weak)) int64_t spl_handle_wait(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
+__attribute__((weak)) int64_t spl_handle_getpid(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
+__attribute__((weak)) int64_t spl_handle_list_tasks(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
+__attribute__((weak)) int64_t spl_handle_get_task_info(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
+__attribute__((weak)) int64_t spl_handle_signal(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
+__attribute__((weak)) int64_t spl_handle_set_priority(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
+__attribute__((weak)) int64_t spl_handle_get_parent_pid(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
+__attribute__((weak)) int64_t spl_handle_mmap(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
+__attribute__((weak)) int64_t spl_handle_munmap(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
+__attribute__((weak)) int64_t spl_handle_mprotect(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
+__attribute__((weak)) int64_t spl_handle_spawn_binary(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
+__attribute__((weak)) int64_t spl_handle_ipc_send(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
+__attribute__((weak)) int64_t spl_handle_ipc_recv(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
+__attribute__((weak)) int64_t spl_handle_ipc_create_port(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
+__attribute__((weak)) int64_t spl_handle_ipc_connect(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
+__attribute__((weak)) int64_t spl_handle_notification_create(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
+__attribute__((weak)) int64_t spl_handle_notification_signal(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
+__attribute__((weak)) int64_t spl_handle_notification_wait(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
+__attribute__((weak)) int64_t spl_handle_notification_poll(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
+__attribute__((weak)) int64_t spl_handle_notification_destroy(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
+__attribute__((weak)) int64_t spl_handle_notification_wait_any(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
+__attribute__((weak)) int64_t spl_handle_file_open(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
+__attribute__((weak)) int64_t spl_handle_file_read(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
+__attribute__((weak)) int64_t spl_handle_file_write(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
+__attribute__((weak)) int64_t spl_handle_file_close(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
+__attribute__((weak)) int64_t spl_handle_file_stat(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
+__attribute__((weak)) int64_t spl_handle_file_mkdir(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
+__attribute__((weak)) int64_t spl_handle_file_readdir(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
+__attribute__((weak)) int64_t spl_handle_mount(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
+__attribute__((weak)) int64_t spl_handle_unmount(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
+__attribute__((weak)) int64_t spl_handle_unlink(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
+__attribute__((weak)) int64_t spl_handle_pledge(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
+__attribute__((weak)) int64_t spl_handle_unveil(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
+__attribute__((weak)) int64_t spl_handle_cap_grant(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
+__attribute__((weak)) int64_t spl_handle_ftruncate(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
+__attribute__((weak)) int64_t spl_handle_rename(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
+__attribute__((weak)) int64_t spl_handle_rmdir(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
+__attribute__((weak)) int64_t spl_handle_lseek(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
+__attribute__((weak)) int64_t spl_handle_getcwd(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
+__attribute__((weak)) int64_t spl_handle_chdir(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
+__attribute__((weak)) int64_t spl_handle_clock_gettime(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
+__attribute__((weak)) int64_t spl_handle_sleep(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
+__attribute__((weak)) int64_t spl_handle_debug_write(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
+__attribute__((weak)) int64_t spl_handle_net_socket(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
+__attribute__((weak)) int64_t spl_handle_net_bind(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
+__attribute__((weak)) int64_t spl_handle_net_listen(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
+__attribute__((weak)) int64_t spl_handle_net_connect(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
+__attribute__((weak)) int64_t spl_handle_net_accept(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
+__attribute__((weak)) int64_t spl_handle_net_send_to(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
+__attribute__((weak)) int64_t spl_handle_net_recv_from(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
+__attribute__((weak)) int64_t spl_handle_net_if_config(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
+__attribute__((weak)) int64_t spl_handle_dev_enumerate(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
+__attribute__((weak)) int64_t spl_handle_dev_get_info(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
+__attribute__((weak)) int64_t spl_handle_device_grant(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
+__attribute__((weak)) int64_t spl_handle_map_bar(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
+__attribute__((weak)) int64_t spl_handle_alloc_dma(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
+__attribute__((weak)) int64_t spl_handle_free_dma(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
+__attribute__((weak)) int64_t spl_handle_log_write(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
+__attribute__((weak)) int64_t spl_handle_log_read(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
+__attribute__((weak)) int64_t spl_handle_sysinfo(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
+__attribute__((weak)) int64_t spl_handle_get_hostname(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
+__attribute__((weak)) int64_t spl_handle_set_hostname(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
+
+/* ----------------------------------------------------------------------------
+ * rt_syscall_dispatch — called from syscall_entry.s trampoline
+ *
+ * Forwards to spl_handle_* weak stubs (or future strong overrides).
+ * Returns -38 (ENOSYS) for unknown syscall numbers.
+ * -------------------------------------------------------------------------- */
+int64_t rt_syscall_dispatch(uint64_t num, uint64_t a0, uint64_t a1, uint64_t a2,
+                            uint64_t a3, uint64_t a4, uint64_t a5) {
+    switch (num) {
+        case 0:  return spl_handle_exit(a0, a1, a2, a3, a4, a5);
+        case 1:  return spl_handle_yield(a0, a1, a2, a3, a4, a5);
+        case 2:  return spl_handle_spawn(a0, a1, a2, a3, a4, a5);
+        case 3:  return spl_handle_wait(a0, a1, a2, a3, a4, a5);
+        case 4:  return spl_handle_getpid(a0, a1, a2, a3, a4, a5);
+        case 5:  return spl_handle_list_tasks(a0, a1, a2, a3, a4, a5);
+        case 6:  return spl_handle_get_task_info(a0, a1, a2, a3, a4, a5);
+        case 7:  return spl_handle_signal(a0, a1, a2, a3, a4, a5);
+        case 8:  return spl_handle_set_priority(a0, a1, a2, a3, a4, a5);
+        case 9:  return spl_handle_get_parent_pid(a0, a1, a2, a3, a4, a5);
+        case 10: return spl_handle_mmap(a0, a1, a2, a3, a4, a5);
+        case 11: return spl_handle_munmap(a0, a1, a2, a3, a4, a5);
+        case 12: return spl_handle_mprotect(a0, a1, a2, a3, a4, a5);
+        case 13: return spl_handle_spawn_binary(a0, a1, a2, a3, a4, a5);
+        case 20: return spl_handle_ipc_send(a0, a1, a2, a3, a4, a5);
+        case 21: return spl_handle_ipc_recv(a0, a1, a2, a3, a4, a5);
+        case 22: return spl_handle_ipc_create_port(a0, a1, a2, a3, a4, a5);
+        case 23: return spl_handle_ipc_connect(a0, a1, a2, a3, a4, a5);
+        case 24: return spl_handle_notification_create(a0, a1, a2, a3, a4, a5);
+        case 25: return spl_handle_notification_signal(a0, a1, a2, a3, a4, a5);
+        case 26: return spl_handle_notification_wait(a0, a1, a2, a3, a4, a5);
+        case 27: return spl_handle_notification_poll(a0, a1, a2, a3, a4, a5);
+        case 28: return spl_handle_notification_destroy(a0, a1, a2, a3, a4, a5);
+        case 29: return spl_handle_notification_wait_any(a0, a1, a2, a3, a4, a5);
+        case 30: return spl_handle_file_open(a0, a1, a2, a3, a4, a5);
+        case 31: return spl_handle_file_read(a0, a1, a2, a3, a4, a5);
+        case 32: return spl_handle_file_write(a0, a1, a2, a3, a4, a5);
+        case 33: return spl_handle_file_close(a0, a1, a2, a3, a4, a5);
+        case 34: return spl_handle_file_stat(a0, a1, a2, a3, a4, a5);
+        case 35: return spl_handle_file_mkdir(a0, a1, a2, a3, a4, a5);
+        case 36: return spl_handle_file_readdir(a0, a1, a2, a3, a4, a5);
+        case 37: return spl_handle_mount(a0, a1, a2, a3, a4, a5);
+        case 38: return spl_handle_unmount(a0, a1, a2, a3, a4, a5);
+        case 39: return spl_handle_unlink(a0, a1, a2, a3, a4, a5);
+        case 40: return spl_handle_pledge(a0, a1, a2, a3, a4, a5);
+        case 41: return spl_handle_unveil(a0, a1, a2, a3, a4, a5);
+        case 42: return spl_handle_cap_grant(a0, a1, a2, a3, a4, a5);
+        case 43: return spl_handle_ftruncate(a0, a1, a2, a3, a4, a5);
+        case 44: return spl_handle_rename(a0, a1, a2, a3, a4, a5);
+        case 45: return spl_handle_rmdir(a0, a1, a2, a3, a4, a5);
+        case 46: return spl_handle_lseek(a0, a1, a2, a3, a4, a5);
+        case 47: return spl_handle_getcwd(a0, a1, a2, a3, a4, a5);
+        case 48: return spl_handle_chdir(a0, a1, a2, a3, a4, a5);
+        case 50: return spl_handle_clock_gettime(a0, a1, a2, a3, a4, a5);
+        case 51: return spl_handle_sleep(a0, a1, a2, a3, a4, a5);
+        case 60: return spl_handle_debug_write(a0, a1, a2, a3, a4, a5);
+        case 70: return spl_handle_net_socket(a0, a1, a2, a3, a4, a5);
+        case 71: return spl_handle_net_bind(a0, a1, a2, a3, a4, a5);
+        case 72: return spl_handle_net_listen(a0, a1, a2, a3, a4, a5);
+        case 73: return spl_handle_net_connect(a0, a1, a2, a3, a4, a5);
+        case 74: return spl_handle_net_accept(a0, a1, a2, a3, a4, a5);
+        case 75: return spl_handle_net_send_to(a0, a1, a2, a3, a4, a5);
+        case 76: return spl_handle_net_recv_from(a0, a1, a2, a3, a4, a5);
+        case 77: return spl_handle_net_if_config(a0, a1, a2, a3, a4, a5);
+        case 80: return spl_handle_dev_enumerate(a0, a1, a2, a3, a4, a5);
+        case 81: return spl_handle_dev_get_info(a0, a1, a2, a3, a4, a5);
+        case 82: return spl_handle_device_grant(a0, a1, a2, a3, a4, a5);
+        case 83: return spl_handle_map_bar(a0, a1, a2, a3, a4, a5);
+        case 84: return spl_handle_alloc_dma(a0, a1, a2, a3, a4, a5);
+        case 85: return spl_handle_free_dma(a0, a1, a2, a3, a4, a5);
+        case 90: return spl_handle_log_write(a0, a1, a2, a3, a4, a5);
+        case 91: return spl_handle_log_read(a0, a1, a2, a3, a4, a5);
+        case 95: return spl_handle_sysinfo(a0, a1, a2, a3, a4, a5);
+        case 96: return spl_handle_get_hostname(a0, a1, a2, a3, a4, a5);
+        case 97: return spl_handle_set_hostname(a0, a1, a2, a3, a4, a5);
+        default: return -38; /* ENOSYS */
+    }
+}
+
+/* ----------------------------------------------------------------------------
+ * Weak stub definitions — each returns -38 (ENOSYS) unless overridden.
+ * -------------------------------------------------------------------------- */
+
+__attribute__((weak)) int64_t spl_handle_exit(uint64_t a0, uint64_t a1, uint64_t a2,
+                                               uint64_t a3, uint64_t a4, uint64_t a5) {
+    (void)a1; (void)a2; (void)a3; (void)a4; (void)a5;
+    (void)a0;
+    /* Best effort: halt so exit is semi-functional until Strong override lands */
+    __asm__ __volatile__("cli; hlt");
+    return -38;
+}
+
+__attribute__((weak)) int64_t spl_handle_yield(uint64_t a0, uint64_t a1, uint64_t a2,
+                                                uint64_t a3, uint64_t a4, uint64_t a5) {
+    (void)a0; (void)a1; (void)a2; (void)a3; (void)a4; (void)a5;
+    return -38;
+}
+
+__attribute__((weak)) int64_t spl_handle_spawn(uint64_t a0, uint64_t a1, uint64_t a2,
+                                                uint64_t a3, uint64_t a4, uint64_t a5) {
+    (void)a0; (void)a1; (void)a2; (void)a3; (void)a4; (void)a5;
+    return -38;
+}
+
+__attribute__((weak)) int64_t spl_handle_wait(uint64_t a0, uint64_t a1, uint64_t a2,
+                                               uint64_t a3, uint64_t a4, uint64_t a5) {
+    (void)a0; (void)a1; (void)a2; (void)a3; (void)a4; (void)a5;
+    return -38;
+}
+
+__attribute__((weak)) int64_t spl_handle_getpid(uint64_t a0, uint64_t a1, uint64_t a2,
+                                                 uint64_t a3, uint64_t a4, uint64_t a5) {
+    (void)a0; (void)a1; (void)a2; (void)a3; (void)a4; (void)a5;
+    return -38;
+}
+
+__attribute__((weak)) int64_t spl_handle_list_tasks(uint64_t a0, uint64_t a1, uint64_t a2,
+                                                     uint64_t a3, uint64_t a4, uint64_t a5) {
+    (void)a0; (void)a1; (void)a2; (void)a3; (void)a4; (void)a5;
+    return -38;
+}
+
+__attribute__((weak)) int64_t spl_handle_get_task_info(uint64_t a0, uint64_t a1, uint64_t a2,
+                                                        uint64_t a3, uint64_t a4, uint64_t a5) {
+    (void)a0; (void)a1; (void)a2; (void)a3; (void)a4; (void)a5;
+    return -38;
+}
+
+__attribute__((weak)) int64_t spl_handle_signal(uint64_t a0, uint64_t a1, uint64_t a2,
+                                                 uint64_t a3, uint64_t a4, uint64_t a5) {
+    (void)a0; (void)a1; (void)a2; (void)a3; (void)a4; (void)a5;
+    return -38;
+}
+
+__attribute__((weak)) int64_t spl_handle_set_priority(uint64_t a0, uint64_t a1, uint64_t a2,
+                                                       uint64_t a3, uint64_t a4, uint64_t a5) {
+    (void)a0; (void)a1; (void)a2; (void)a3; (void)a4; (void)a5;
+    return -38;
+}
+
+__attribute__((weak)) int64_t spl_handle_get_parent_pid(uint64_t a0, uint64_t a1, uint64_t a2,
+                                                         uint64_t a3, uint64_t a4, uint64_t a5) {
+    (void)a0; (void)a1; (void)a2; (void)a3; (void)a4; (void)a5;
+    return -38;
+}
+
+__attribute__((weak)) int64_t spl_handle_mmap(uint64_t a0, uint64_t a1, uint64_t a2,
+                                               uint64_t a3, uint64_t a4, uint64_t a5) {
+    (void)a0; (void)a1; (void)a2; (void)a3; (void)a4; (void)a5;
+    return -38;
+}
+
+__attribute__((weak)) int64_t spl_handle_munmap(uint64_t a0, uint64_t a1, uint64_t a2,
+                                                 uint64_t a3, uint64_t a4, uint64_t a5) {
+    (void)a0; (void)a1; (void)a2; (void)a3; (void)a4; (void)a5;
+    return -38;
+}
+
+__attribute__((weak)) int64_t spl_handle_mprotect(uint64_t a0, uint64_t a1, uint64_t a2,
+                                                   uint64_t a3, uint64_t a4, uint64_t a5) {
+    (void)a0; (void)a1; (void)a2; (void)a3; (void)a4; (void)a5;
+    return -38;
+}
+
+__attribute__((weak)) int64_t spl_handle_spawn_binary(uint64_t a0, uint64_t a1, uint64_t a2,
+                                                       uint64_t a3, uint64_t a4, uint64_t a5) {
+    (void)a0; (void)a1; (void)a2; (void)a3; (void)a4; (void)a5;
+    return -38;
+}
+
+__attribute__((weak)) int64_t spl_handle_ipc_send(uint64_t a0, uint64_t a1, uint64_t a2,
+                                                   uint64_t a3, uint64_t a4, uint64_t a5) {
+    (void)a0; (void)a1; (void)a2; (void)a3; (void)a4; (void)a5;
+    return -38;
+}
+
+__attribute__((weak)) int64_t spl_handle_ipc_recv(uint64_t a0, uint64_t a1, uint64_t a2,
+                                                   uint64_t a3, uint64_t a4, uint64_t a5) {
+    (void)a0; (void)a1; (void)a2; (void)a3; (void)a4; (void)a5;
+    return -38;
+}
+
+__attribute__((weak)) int64_t spl_handle_ipc_create_port(uint64_t a0, uint64_t a1, uint64_t a2,
+                                                          uint64_t a3, uint64_t a4, uint64_t a5) {
+    (void)a0; (void)a1; (void)a2; (void)a3; (void)a4; (void)a5;
+    return -38;
+}
+
+__attribute__((weak)) int64_t spl_handle_ipc_connect(uint64_t a0, uint64_t a1, uint64_t a2,
+                                                      uint64_t a3, uint64_t a4, uint64_t a5) {
+    (void)a0; (void)a1; (void)a2; (void)a3; (void)a4; (void)a5;
+    return -38;
+}
+
+__attribute__((weak)) int64_t spl_handle_notification_create(uint64_t a0, uint64_t a1, uint64_t a2,
+                                                              uint64_t a3, uint64_t a4, uint64_t a5) {
+    (void)a0; (void)a1; (void)a2; (void)a3; (void)a4; (void)a5;
+    return -38;
+}
+
+__attribute__((weak)) int64_t spl_handle_notification_signal(uint64_t a0, uint64_t a1, uint64_t a2,
+                                                              uint64_t a3, uint64_t a4, uint64_t a5) {
+    (void)a0; (void)a1; (void)a2; (void)a3; (void)a4; (void)a5;
+    return -38;
+}
+
+__attribute__((weak)) int64_t spl_handle_notification_wait(uint64_t a0, uint64_t a1, uint64_t a2,
+                                                            uint64_t a3, uint64_t a4, uint64_t a5) {
+    (void)a0; (void)a1; (void)a2; (void)a3; (void)a4; (void)a5;
+    return -38;
+}
+
+__attribute__((weak)) int64_t spl_handle_notification_poll(uint64_t a0, uint64_t a1, uint64_t a2,
+                                                            uint64_t a3, uint64_t a4, uint64_t a5) {
+    (void)a0; (void)a1; (void)a2; (void)a3; (void)a4; (void)a5;
+    return -38;
+}
+
+__attribute__((weak)) int64_t spl_handle_notification_destroy(uint64_t a0, uint64_t a1, uint64_t a2,
+                                                               uint64_t a3, uint64_t a4, uint64_t a5) {
+    (void)a0; (void)a1; (void)a2; (void)a3; (void)a4; (void)a5;
+    return -38;
+}
+
+__attribute__((weak)) int64_t spl_handle_notification_wait_any(uint64_t a0, uint64_t a1, uint64_t a2,
+                                                                uint64_t a3, uint64_t a4, uint64_t a5) {
+    (void)a0; (void)a1; (void)a2; (void)a3; (void)a4; (void)a5;
+    return -38;
+}
+
+__attribute__((weak)) int64_t spl_handle_file_open(uint64_t a0, uint64_t a1, uint64_t a2,
+                                                    uint64_t a3, uint64_t a4, uint64_t a5) {
+    (void)a0; (void)a1; (void)a2; (void)a3; (void)a4; (void)a5;
+    return -38;
+}
+
+__attribute__((weak)) int64_t spl_handle_file_read(uint64_t a0, uint64_t a1, uint64_t a2,
+                                                    uint64_t a3, uint64_t a4, uint64_t a5) {
+    (void)a0; (void)a1; (void)a2; (void)a3; (void)a4; (void)a5;
+    return -38;
+}
+
+__attribute__((weak)) int64_t spl_handle_file_write(uint64_t a0, uint64_t a1, uint64_t a2,
+                                                     uint64_t a3, uint64_t a4, uint64_t a5) {
+    (void)a0; (void)a1; (void)a2; (void)a3; (void)a4; (void)a5;
+    return -38;
+}
+
+__attribute__((weak)) int64_t spl_handle_file_close(uint64_t a0, uint64_t a1, uint64_t a2,
+                                                     uint64_t a3, uint64_t a4, uint64_t a5) {
+    (void)a0; (void)a1; (void)a2; (void)a3; (void)a4; (void)a5;
+    return -38;
+}
+
+__attribute__((weak)) int64_t spl_handle_file_stat(uint64_t a0, uint64_t a1, uint64_t a2,
+                                                    uint64_t a3, uint64_t a4, uint64_t a5) {
+    (void)a0; (void)a1; (void)a2; (void)a3; (void)a4; (void)a5;
+    return -38;
+}
+
+__attribute__((weak)) int64_t spl_handle_file_mkdir(uint64_t a0, uint64_t a1, uint64_t a2,
+                                                     uint64_t a3, uint64_t a4, uint64_t a5) {
+    (void)a0; (void)a1; (void)a2; (void)a3; (void)a4; (void)a5;
+    return -38;
+}
+
+__attribute__((weak)) int64_t spl_handle_file_readdir(uint64_t a0, uint64_t a1, uint64_t a2,
+                                                       uint64_t a3, uint64_t a4, uint64_t a5) {
+    (void)a0; (void)a1; (void)a2; (void)a3; (void)a4; (void)a5;
+    return -38;
+}
+
+__attribute__((weak)) int64_t spl_handle_mount(uint64_t a0, uint64_t a1, uint64_t a2,
+                                                uint64_t a3, uint64_t a4, uint64_t a5) {
+    (void)a0; (void)a1; (void)a2; (void)a3; (void)a4; (void)a5;
+    return -38;
+}
+
+__attribute__((weak)) int64_t spl_handle_unmount(uint64_t a0, uint64_t a1, uint64_t a2,
+                                                  uint64_t a3, uint64_t a4, uint64_t a5) {
+    (void)a0; (void)a1; (void)a2; (void)a3; (void)a4; (void)a5;
+    return -38;
+}
+
+__attribute__((weak)) int64_t spl_handle_unlink(uint64_t a0, uint64_t a1, uint64_t a2,
+                                                 uint64_t a3, uint64_t a4, uint64_t a5) {
+    (void)a0; (void)a1; (void)a2; (void)a3; (void)a4; (void)a5;
+    return -38;
+}
+
+__attribute__((weak)) int64_t spl_handle_pledge(uint64_t a0, uint64_t a1, uint64_t a2,
+                                                 uint64_t a3, uint64_t a4, uint64_t a5) {
+    (void)a0; (void)a1; (void)a2; (void)a3; (void)a4; (void)a5;
+    return -38;
+}
+
+__attribute__((weak)) int64_t spl_handle_unveil(uint64_t a0, uint64_t a1, uint64_t a2,
+                                                 uint64_t a3, uint64_t a4, uint64_t a5) {
+    (void)a0; (void)a1; (void)a2; (void)a3; (void)a4; (void)a5;
+    return -38;
+}
+
+__attribute__((weak)) int64_t spl_handle_cap_grant(uint64_t a0, uint64_t a1, uint64_t a2,
+                                                    uint64_t a3, uint64_t a4, uint64_t a5) {
+    (void)a0; (void)a1; (void)a2; (void)a3; (void)a4; (void)a5;
+    return -38;
+}
+
+__attribute__((weak)) int64_t spl_handle_ftruncate(uint64_t a0, uint64_t a1, uint64_t a2,
+                                                    uint64_t a3, uint64_t a4, uint64_t a5) {
+    (void)a0; (void)a1; (void)a2; (void)a3; (void)a4; (void)a5;
+    return -38;
+}
+
+__attribute__((weak)) int64_t spl_handle_rename(uint64_t a0, uint64_t a1, uint64_t a2,
+                                                 uint64_t a3, uint64_t a4, uint64_t a5) {
+    (void)a0; (void)a1; (void)a2; (void)a3; (void)a4; (void)a5;
+    return -38;
+}
+
+__attribute__((weak)) int64_t spl_handle_rmdir(uint64_t a0, uint64_t a1, uint64_t a2,
+                                                uint64_t a3, uint64_t a4, uint64_t a5) {
+    (void)a0; (void)a1; (void)a2; (void)a3; (void)a4; (void)a5;
+    return -38;
+}
+
+__attribute__((weak)) int64_t spl_handle_lseek(uint64_t a0, uint64_t a1, uint64_t a2,
+                                                uint64_t a3, uint64_t a4, uint64_t a5) {
+    (void)a0; (void)a1; (void)a2; (void)a3; (void)a4; (void)a5;
+    return -38;
+}
+
+__attribute__((weak)) int64_t spl_handle_getcwd(uint64_t a0, uint64_t a1, uint64_t a2,
+                                                 uint64_t a3, uint64_t a4, uint64_t a5) {
+    (void)a0; (void)a1; (void)a2; (void)a3; (void)a4; (void)a5;
+    return -38;
+}
+
+__attribute__((weak)) int64_t spl_handle_chdir(uint64_t a0, uint64_t a1, uint64_t a2,
+                                                uint64_t a3, uint64_t a4, uint64_t a5) {
+    (void)a0; (void)a1; (void)a2; (void)a3; (void)a4; (void)a5;
+    return -38;
+}
+
+__attribute__((weak)) int64_t spl_handle_clock_gettime(uint64_t a0, uint64_t a1, uint64_t a2,
+                                                        uint64_t a3, uint64_t a4, uint64_t a5) {
+    (void)a0; (void)a1; (void)a2; (void)a3; (void)a4; (void)a5;
+    return -38;
+}
+
+__attribute__((weak)) int64_t spl_handle_sleep(uint64_t a0, uint64_t a1, uint64_t a2,
+                                                uint64_t a3, uint64_t a4, uint64_t a5) {
+    (void)a0; (void)a1; (void)a2; (void)a3; (void)a4; (void)a5;
+    return -38;
+}
+
+__attribute__((weak)) int64_t spl_handle_debug_write(uint64_t a0, uint64_t a1, uint64_t a2,
+                                                      uint64_t a3, uint64_t a4, uint64_t a5) {
+    (void)a0; (void)a1; (void)a2; (void)a3; (void)a4; (void)a5;
+    return -38;
+}
+
+__attribute__((weak)) int64_t spl_handle_net_socket(uint64_t a0, uint64_t a1, uint64_t a2,
+                                                     uint64_t a3, uint64_t a4, uint64_t a5) {
+    (void)a0; (void)a1; (void)a2; (void)a3; (void)a4; (void)a5;
+    return -38;
+}
+
+__attribute__((weak)) int64_t spl_handle_net_bind(uint64_t a0, uint64_t a1, uint64_t a2,
+                                                   uint64_t a3, uint64_t a4, uint64_t a5) {
+    (void)a0; (void)a1; (void)a2; (void)a3; (void)a4; (void)a5;
+    return -38;
+}
+
+__attribute__((weak)) int64_t spl_handle_net_listen(uint64_t a0, uint64_t a1, uint64_t a2,
+                                                     uint64_t a3, uint64_t a4, uint64_t a5) {
+    (void)a0; (void)a1; (void)a2; (void)a3; (void)a4; (void)a5;
+    return -38;
+}
+
+__attribute__((weak)) int64_t spl_handle_net_connect(uint64_t a0, uint64_t a1, uint64_t a2,
+                                                      uint64_t a3, uint64_t a4, uint64_t a5) {
+    (void)a0; (void)a1; (void)a2; (void)a3; (void)a4; (void)a5;
+    return -38;
+}
+
+__attribute__((weak)) int64_t spl_handle_net_accept(uint64_t a0, uint64_t a1, uint64_t a2,
+                                                     uint64_t a3, uint64_t a4, uint64_t a5) {
+    (void)a0; (void)a1; (void)a2; (void)a3; (void)a4; (void)a5;
+    return -38;
+}
+
+__attribute__((weak)) int64_t spl_handle_net_send_to(uint64_t a0, uint64_t a1, uint64_t a2,
+                                                      uint64_t a3, uint64_t a4, uint64_t a5) {
+    (void)a0; (void)a1; (void)a2; (void)a3; (void)a4; (void)a5;
+    return -38;
+}
+
+__attribute__((weak)) int64_t spl_handle_net_recv_from(uint64_t a0, uint64_t a1, uint64_t a2,
+                                                        uint64_t a3, uint64_t a4, uint64_t a5) {
+    (void)a0; (void)a1; (void)a2; (void)a3; (void)a4; (void)a5;
+    return -38;
+}
+
+__attribute__((weak)) int64_t spl_handle_net_if_config(uint64_t a0, uint64_t a1, uint64_t a2,
+                                                        uint64_t a3, uint64_t a4, uint64_t a5) {
+    (void)a0; (void)a1; (void)a2; (void)a3; (void)a4; (void)a5;
+    return -38;
+}
+
+__attribute__((weak)) int64_t spl_handle_dev_enumerate(uint64_t a0, uint64_t a1, uint64_t a2,
+                                                        uint64_t a3, uint64_t a4, uint64_t a5) {
+    (void)a0; (void)a1; (void)a2; (void)a3; (void)a4; (void)a5;
+    return -38;
+}
+
+__attribute__((weak)) int64_t spl_handle_dev_get_info(uint64_t a0, uint64_t a1, uint64_t a2,
+                                                       uint64_t a3, uint64_t a4, uint64_t a5) {
+    (void)a0; (void)a1; (void)a2; (void)a3; (void)a4; (void)a5;
+    return -38;
+}
+
+__attribute__((weak)) int64_t spl_handle_device_grant(uint64_t a0, uint64_t a1, uint64_t a2,
+                                                       uint64_t a3, uint64_t a4, uint64_t a5) {
+    (void)a0; (void)a1; (void)a2; (void)a3; (void)a4; (void)a5;
+    return -38;
+}
+
+__attribute__((weak)) int64_t spl_handle_map_bar(uint64_t a0, uint64_t a1, uint64_t a2,
+                                                  uint64_t a3, uint64_t a4, uint64_t a5) {
+    (void)a0; (void)a1; (void)a2; (void)a3; (void)a4; (void)a5;
+    return -38;
+}
+
+__attribute__((weak)) int64_t spl_handle_alloc_dma(uint64_t a0, uint64_t a1, uint64_t a2,
+                                                    uint64_t a3, uint64_t a4, uint64_t a5) {
+    (void)a0; (void)a1; (void)a2; (void)a3; (void)a4; (void)a5;
+    return -38;
+}
+
+__attribute__((weak)) int64_t spl_handle_free_dma(uint64_t a0, uint64_t a1, uint64_t a2,
+                                                   uint64_t a3, uint64_t a4, uint64_t a5) {
+    (void)a0; (void)a1; (void)a2; (void)a3; (void)a4; (void)a5;
+    return -38;
+}
+
+__attribute__((weak)) int64_t spl_handle_log_write(uint64_t a0, uint64_t a1, uint64_t a2,
+                                                    uint64_t a3, uint64_t a4, uint64_t a5) {
+    (void)a0; (void)a1; (void)a2; (void)a3; (void)a4; (void)a5;
+    return -38;
+}
+
+__attribute__((weak)) int64_t spl_handle_log_read(uint64_t a0, uint64_t a1, uint64_t a2,
+                                                   uint64_t a3, uint64_t a4, uint64_t a5) {
+    (void)a0; (void)a1; (void)a2; (void)a3; (void)a4; (void)a5;
+    return -38;
+}
+
+__attribute__((weak)) int64_t spl_handle_sysinfo(uint64_t a0, uint64_t a1, uint64_t a2,
+                                                  uint64_t a3, uint64_t a4, uint64_t a5) {
+    (void)a0; (void)a1; (void)a2; (void)a3; (void)a4; (void)a5;
+    return -38;
+}
+
+__attribute__((weak)) int64_t spl_handle_get_hostname(uint64_t a0, uint64_t a1, uint64_t a2,
+                                                       uint64_t a3, uint64_t a4, uint64_t a5) {
+    (void)a0; (void)a1; (void)a2; (void)a3; (void)a4; (void)a5;
+    return -38;
+}
+
+__attribute__((weak)) int64_t spl_handle_set_hostname(uint64_t a0, uint64_t a1, uint64_t a2,
+                                                       uint64_t a3, uint64_t a4, uint64_t a5) {
+    (void)a0; (void)a1; (void)a2; (void)a3; (void)a4; (void)a5;
+    return -38;
+}
+
+/* End of Wave 10B: spl_handle_* weak shims and rt_syscall_dispatch */
 
 #endif /* __x86_64__ || __i386__ */
 
