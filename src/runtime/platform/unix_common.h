@@ -580,4 +580,63 @@ bool rt_process_kill(int64_t pid) {
     return true;
 }
 
+/* ----------------------------------------------------------------
+ * QMP Unix-Socket Primitives (persistent connection for QMP protocol)
+ * ---------------------------------------------------------------- */
+
+#include <sys/socket.h>
+#include <sys/un.h>
+
+/* Connect to a Unix-domain stream socket. Returns fd >= 0 on success, -1 on error. */
+int64_t rt_unix_socket_connect(const char* path) {
+    if (!path) return -1;
+
+    int fd = socket(AF_UNIX, SOCK_STREAM, 0);
+    if (fd < 0) return -1;
+
+    struct sockaddr_un addr;
+    memset(&addr, 0, sizeof(addr));
+    addr.sun_family = AF_UNIX;
+    strncpy(addr.sun_path, path, sizeof(addr.sun_path) - 1);
+
+    if (connect(fd, (struct sockaddr*)&addr, sizeof(addr)) != 0) {
+        close(fd);
+        return -1;
+    }
+    return (int64_t)fd;
+}
+
+/* Write data to an open fd. Returns bytes written or -1. */
+int64_t rt_fd_write(int64_t fd, const char* data, int64_t len) {
+    if (fd < 0 || !data || len <= 0) return -1;
+    ssize_t n = write((int)fd, data, (size_t)len);
+    return (int64_t)n;
+}
+
+/* Read up to max bytes from fd, stopping when stop_byte is seen or max reached.
+ * Returns a null-terminated heap string (caller must treat as borrowed — runtime GC owns it).
+ * Returns "" on error or EOF with no data. */
+const char* rt_fd_read_until(int64_t fd, uint8_t stop_byte, int64_t max) {
+    if (fd < 0 || max <= 0) return "";
+
+    char* buf = (char*)malloc((size_t)max + 1);
+    if (!buf) return "";
+
+    int64_t total = 0;
+    while (total < max) {
+        ssize_t n = read((int)fd, buf + total, 1);
+        if (n <= 0) break;  /* EOF or error */
+        total++;
+        if ((uint8_t)buf[total - 1] == stop_byte) break;
+    }
+    buf[total] = '\0';
+    return buf;  /* leaked intentionally — matches runtime text ownership model */
+}
+
+/* Close an fd. Returns true on success. */
+bool rt_fd_close(int64_t fd) {
+    if (fd < 0) return false;
+    return close((int)fd) == 0;
+}
+
 #endif /* SPL_UNIX_COMMON_H */

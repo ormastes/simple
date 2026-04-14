@@ -374,6 +374,13 @@ const char* rt_driver_backend_name(int64_t handle);
 bool        rt_driver_supports_sendfile(int64_t handle);
 bool        rt_driver_supports_zero_copy(int64_t handle);
 
+/* ===== QMP Unix-Socket Primitives ===== */
+
+int64_t     rt_unix_socket_connect(const char* path);
+int64_t     rt_fd_write(int64_t fd, const char* data, int64_t len);
+const char* rt_fd_read_until(int64_t fd, uint8_t stop_byte, int64_t max);
+bool        rt_fd_close(int64_t fd);
+
 /* ===== Legacy epoll/socket FFI (event_loop.spl) ===== */
 
 int64_t     rt_epoll_create(void);

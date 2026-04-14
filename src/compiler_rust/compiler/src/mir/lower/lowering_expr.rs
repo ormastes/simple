@@ -156,6 +156,14 @@ impl<'a> MirLowerer<'a> {
             // G13: `(let x = v in expr).method()` — the expression type comes
             // from the body; recurse into it.
             HirExprKind::LetIn { body, .. } => self.recover_receiver_type(body),
+            // G3: `f(x).method()` — the Call expr's `ty` is already set to the
+            // function's return type by the HIR lowerer; return it directly.
+            // If the return type is unnamed (Any), `get_type_name` will return
+            // None at the call site and dispatch falls back gracefully.
+            HirExprKind::Call { .. } => Some(expr.ty),
+            // G4: `obj.a().b()` — the inner MethodCall expr's `ty` is the
+            // return type of `.a()`; return it so `.b()` qualifies correctly.
+            HirExprKind::MethodCall { .. } => Some(expr.ty),
             _ => None,
         }
     }
