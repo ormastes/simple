@@ -10,7 +10,60 @@ regression lane for the SimpleOS "Small Complete GUI" milestone.
   on a clean `x64-desktop-test` guest run. On a fresh checkout this
   may be a zero-byte placeholder (see below).
 
-## Current status (Agent Z3 / Round 7, 2026-04-13)
+## Current status (Agent η / Round 8, 2026-04-14)
+
+The committed `desktop_scene.ppm` is still a **zero-byte placeholder**.
+
+**SYS-GUI-006 is NOT yet LIVE-PROVEN.** Round-7 was optimistic — the
+single-blocker story is wrong. Round-8 verified TWO independent
+blockers on main, either of which would stop capture:
+
+1. **Interpreter `std.spec` load chain is still broken** even with
+   γ's `pub enum` after `@allow` parser fix applied. γ's fix IS
+   present in the working copy at
+   `src/compiler_rust/parser/src/parser_impl/items.rs`
+   (`parse_pub_item_with_attrs` now branches on `TokenKind::Enum`
+   and `TokenKind::Union`), and the `Failed to parse module .../core/json.spl`
+   error is gone. But ~60 "Export statement references undefined
+   symbol" warnings still fire against `std.spec`, `std.spec.matchers`,
+   `std.spec.config`, and the spec body still dies with
+   `semantic: method X86_64 not found on type Architecture` at
+   `build_os(target)`. The parser fix is necessary but not sufficient;
+   something else in the interpreter module loader also corrupts the
+   `std.spec` symbol table. Agent γ / Z2 must continue.
+
+2. **Live lane regression.** The `x64-desktop-test` scenario that
+   Round-7 README said reached `[desktop-e2e] desktop-ready` now
+   stops at `[desktop-e2e] launcher:fail registered=0` before ever
+   emitting `desktop-ready`. Reproduced 2026-04-14 03:40 UTC:
+
+   ```
+   [shell] new: WmService created
+   [desktop-e2e] shell-ready
+   [desktop-e2e] launcher:fail registered=0
+   TEST FAILED
+   ```
+
+   Something landed between Round-7 and Round-8 that broke the
+   launcher's default-apps registration. Agent α / δ must fix
+   `src/os/desktop/shell.spl` or
+   `examples/simple_os/arch/x86_64/desktop_e2e_entry.spl` so
+   `register_default_apps` runs before the `desktop-ready` emit.
+   Even if blocker 1 clears, `wait_for_serial_marker(handle,
+   "[desktop-e2e] desktop-ready", 60000)` will time out at 60 s
+   and the spec will hard-fail (by design — DO NOT soften the gate).
+
+Both blockers must land before `UPDATE_BASELINE=1 bin/simple test
+test/system/simpleos_desktop_framebuffer_spec.spl --mode interpreter`
+records a real PPM. No spec-side fix is required — the spec already
+waits on the right marker, uses the right tolerance profile, and
+self-heals from the zero-byte placeholder on first UPDATE_BASELINE
+run. Full resume checklist with reproducers and verification
+sequence:
+
+- `doc/08_tracking/todo/sys_gui_006_bare_desktop_resume_2026-04-14.md`
+
+## Previous status (Agent Z3 / Round 7, 2026-04-13)
 
 The committed `desktop_scene.ppm` is still a **zero-byte placeholder**.
 
