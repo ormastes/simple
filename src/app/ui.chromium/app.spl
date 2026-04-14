@@ -241,6 +241,28 @@ impl ChromiumApp:
             running: true
         ))
 
+    me render_active_tab():
+        """M6 wire-up: route the active tab's dirty flag through the compositor.
+
+        On each frame the compositor renders only when the active tab is
+        marked dirty (or no tabs are open, in which case the last frame
+        remains on screen). After the compositor consumes the frame the
+        tab's dirty flag is cleared so subsequent frames are skipped until
+        the engine or an event marks it dirty again.
+
+        Offscreen (inactive) tabs are not rendered — their pixel buffers
+        are preserved but the compositor is not asked to process them.
+        """
+        if self.tab_manager.is_empty():
+            self.compositor.render_all()
+            self.backend.present_to_window()
+            return
+        val tab = self.tab_manager.active_tab()
+        if tab.dirty:
+            self.compositor.render_all()
+            self.backend.present_to_window()
+            self.tab_manager.active_tab().clear_dirty()
+
     me run():
         """Render-and-present loop.
 
@@ -248,13 +270,17 @@ impl ChromiumApp:
         event queue so the user can close the window cleanly. Each
         iteration:
           1. drain pending winit events; quit on Close
-          2. compositor.render_all()  -> writes BrowserCompositorBackend
+          2. render_active_tab()      -> compositor only if active tab dirty
           3. backend.present_to_window() -> blits to the host window
           4. sleep ~16ms (~60 FPS cap)
+
+        M6 wire-up: the render path now goes through `render_active_tab()`
+        so each frame respects the active tab's dirty flag. Offscreen tabs
+        are skipped; the compositor only runs when there is work to do.
         """
         # Initial frame so the window is not blank before the first event.
-        self.compositor.render_all()
-        self.backend.present_to_window()
+        # The initial tab created in `new()` starts dirty, so this is safe.
+        self.render_active_tab()
 
         while self.running:
             var ev = rt_winit_event_loop_poll_events(self.event_loop, 100)
@@ -287,8 +313,7 @@ impl ChromiumApp:
                 ev = rt_winit_event_loop_poll_events(self.event_loop, 100)
 
             if self.running:
-                self.compositor.render_all()
-                self.backend.present_to_window()
+                self.render_active_tab()
                 rt_thread_sleep(16)
 
         self.shutdown()
