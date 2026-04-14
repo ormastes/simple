@@ -19,6 +19,7 @@
 # See doc/03_plan/sys_test/wm_compare_v1_v2_parity.md for the full plan.
 
 use os.drivers.framebuffer.fb_driver.{FramebufferDriver, Color}
+use os.compositor.browser_compositor_backend.{BrowserCompositorBackend}
 
 # ============================================================================
 # Public result type
@@ -270,6 +271,63 @@ fn render_v2(scene: ParityScene) -> [u32]:
     buf
 
 # ============================================================================
+# V3 path — render through BrowserCompositorBackend (the in-tree browser
+# compositor software backend used by the `ui.chromium` shell). Mirrors the
+# same CompositorBackend trait surface V1's fb_driver and V2's stub both
+# expose, so the same ParityOp sequence can be replayed through it.
+#
+# We drive BrowserCompositorBackend directly (no winit, no presenting to a
+# real window) so the spec stays interpreter-runnable, matching the V1/V2
+# pattern. `ChromiumBackend.present_to_window` is intentionally not exercised
+# here — Row 5 M5 is about rendering parity, not about the winit blit.
+# ============================================================================
+
+fn render_v3(scene: ParityScene) -> [u32]:
+    """Render `scene` through `BrowserCompositorBackend` — the V3 simple_browser
+    shell's pixel path — and return the resulting ARGB8888 buffer.
+
+    Uses the exact same CompositorBackend trait methods (`clear`,
+    `fill_rect`, `draw_char_8x16`) plus the `CompositorGlassCapable`
+    `blend_rect` that V1's `fb_driver` and V2's stub implement, so the
+    logical scene description reaches V3 unchanged. `get_pixel_buffer()`
+    exposes the backing [u32] that the winit presenter would otherwise
+    ship to the host window via `rt_winit_window_present_rgba`.
+
+    Note on types: BrowserCompositorBackend's trait surface uses `i32`
+    coordinates (top-left origin), whereas ParityOp uses `u32`. The u32
+    → i32 casts are safe because parity scenes are all 32x16."""
+    var bcb = BrowserCompositorBackend.new(scene.width.to_i32(), scene.height.to_i32())
+    # Match render_v1/v2 preamble: start from a fully-zeroed buffer so
+    # pre-clear ops behave identically on all three paths.
+    bcb.clear(0u32)
+    for op in scene.ops:
+        val packed = _pack_argb(op.a, op.r, op.g, op.b)
+        val packed_bg = _pack_argb(op.bg_a, op.bg_r, op.bg_g, op.bg_b)
+        if op.kind == "clear":
+            bcb.clear(packed)
+        elif op.kind == "fill_rect":
+            bcb.fill_rect(
+                op.x.to_i32(), op.y.to_i32(),
+                op.w.to_i32(), op.h.to_i32(),
+                packed
+            )
+        elif op.kind == "draw_char":
+            bcb.draw_char_8x16(
+                op.x.to_i32(), op.y.to_i32(),
+                op.ch, packed, packed_bg
+            )
+        elif op.kind == "blend_rect":
+            # BrowserCompositorBackend.blend_rect takes a packed color + alpha
+            # (CompositorGlassCapable contract); V2's stub takes loose components,
+            # but the math is the same.
+            bcb.blend_rect(
+                op.x.to_i32(), op.y.to_i32(),
+                op.w.to_i32(), op.h.to_i32(),
+                packed, op.alpha
+            )
+    bcb.get_pixel_buffer()
+
+# ============================================================================
 # Diff
 # ============================================================================
 
@@ -332,6 +390,17 @@ fn run_parity(scene: ParityScene) -> ParityResult:
     val v1 = render_v1(scene)
     val v2 = render_v2(scene)
     diff_buffers(scene.name, scene.width, scene.height, v1, v2)
+
+fn run_parity_v3(scene: ParityScene) -> ParityResult:
+    """Render `scene` through V1 and V3 (`BrowserCompositorBackend`), then
+    diff. Row 5 M5 gate: V3 must stay within the same ≤1% perceptual
+    budget Row 2 locked for V1/V2. The returned `ParityResult` reuses the
+    `v2_pixels` field to carry the V3 buffer — the struct shape is shared
+    with `run_parity` so `diff_buffers`, PPM dumps, and the golden-gate
+    runner all work unchanged."""
+    val v1 = render_v1(scene)
+    val v3 = render_v3(scene)
+    diff_buffers(scene.name, scene.width, scene.height, v1, v3)
 
 # ============================================================================
 # Stock parity scenes — used by the spec
