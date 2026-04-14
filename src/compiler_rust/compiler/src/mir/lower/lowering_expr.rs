@@ -122,6 +122,9 @@ impl<'a> MirLowerer<'a> {
                     _ => None,
                 }
             }
+            // G2: `(-x).method()` — unary ops preserve the operand's type;
+            // recurse into the operand so the caller can dispatch correctly.
+            HirExprKind::Unary { operand, .. } => self.recover_receiver_type(operand),
             // G9: `(x as Foo).method()` — the cast target is the receiver
             // type the dispatcher should qualify against.
             HirExprKind::Cast { target, .. } => Some(*target),
