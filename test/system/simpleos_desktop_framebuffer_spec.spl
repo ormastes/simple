@@ -163,6 +163,21 @@ fn _update_baseline_requested() -> bool:
     val v = rt_env_get("UPDATE_BASELINE") ?? ""
     v == "1" or v == "true"
 
+# Round-12 harness-race fix: build the kernel at most once per spec run.
+# The first it{} block builds unconditionally; subsequent it{} blocks reuse
+# the artifact on disk via file_exists() instead of calling build_os again.
+# Both Round-11 it{} blocks previously spent ~24s + ~27s rebuilding which
+# left only ~1.4s of the 60s wait_for_serial_marker budget for actual QEMU
+# boot. The serial log proved the desktop-ready marker *was* emitted but
+# after the harness timed out. Skipping the redundant rebuild in the second
+# it{} gives the guest the full 60s budget (now raised to 180s as belt-and-
+# suspenders in case CI machines are slower than the dev box).
+fn _build_once(target: OsTarget) -> bool:
+    if file_exists(target.output):
+        true
+    else:
+        build_os(target)
+
 # ===========================================================================
 # Spec
 # ===========================================================================
@@ -177,7 +192,10 @@ describe "SimpleOS desktop framebuffer baseline (SYS-GUI-006)":
 
     it "boots desktop, captures framebuffer via QMP, and matches baseline":
         val target = _desktop_target()
-        expect(build_os(target)).to_equal(true)
+        # Reuse the artifact produced by the first it{} block when present —
+        # see Round-12 comment above. Falls back to a fresh build if the
+        # previous it{} was skipped for any reason.
+        expect(_build_once(target)).to_equal(true)
         expect(file_exists(target.output)).to_equal(true)
 
         # Host may not have qemu-system-x86_64 installed — skip the live
@@ -211,11 +229,60 @@ describe "SimpleOS desktop framebuffer baseline (SYS-GUI-006)":
                 # (shortcut:ok / remote-grouping:ok) is still unstable.
                 # The "with apps" variant lives in the sibling spec and
                 # waits on remote-grouping:ok instead.
+                # Round-12: raised from 60000 → 180000ms. Combined with the
+                # _build_once() fix above this is overkill (build no longer
+                # burns the budget), but it also covers slower CI hardware
+                # where QEMU cold-boot + desktop paint may exceed 60s.
                 val saw_ready = wait_for_serial_marker(
-                    handle, "[desktop-e2e] desktop-ready", 60000)
+                    handle, "[desktop-e2e] desktop-ready", 180000)
                 if not saw_ready:
-                    print "[simpleos_desktop_fb_spec] desktop paint-ready marker not seen within 60s"
+                    # Round-12 harness-race workaround: wait_for_serial_marker
+                    # polls every 100ms, and on this spec QEMU exits only
+                    # ~244ms after emitting desktop-ready (it crashes on the
+                    # subsequent launcher_shortcut_dispatch → shortcut:fail
+                    # → return false → isa-debug-exit path in the baremetal
+                    # kernel with no NVMe). That makes the harness's inner
+                    # early-exit — `if not rt_process_is_running: return
+                    # serial_output.contains(marker)` — read a stale
+                    # pre-flush serial_output and return false, even though
+                    # the post-exit flushed log on disk *does* contain the
+                    # marker. Re-read the log directly here to get a
+                    # non-flaky verdict; if the marker is present after the
+                    # flush we continue along the capture path. If not, the
+                    # OS genuinely failed to reach desktop-ready.
+                    val raw = file_read_bytes(serial_log)
+                    var marker_bytes: [u8] = []
+                    val marker_text = "[desktop-e2e] desktop-ready"
+                    for ch in marker_text:
+                        marker_bytes = marker_bytes + [ch as u8]
+                    var marker_present = false
+                    if raw.len() >= marker_bytes.len():
+                        var i = 0
+                        val limit = raw.len() - marker_bytes.len() + 1
+                        while i < limit:
+                            var j = 0
+                            var match_ok = true
+                            while j < marker_bytes.len():
+                                if raw[i + j] != marker_bytes[j]:
+                                    match_ok = false
+                                    j = marker_bytes.len()
+                                else:
+                                    j = j + 1
+                            if match_ok:
+                                marker_present = true
+                                i = limit
+                            else:
+                                i = i + 1
+                    if marker_present:
+                        print "[simpleos_desktop_fb_spec] desktop-ready present in flushed log ({raw.len()} bytes) — harness wait returned false due to flush-race after early QEMU exit"
+                    else:
+                        print "[simpleos_desktop_fb_spec] desktop paint-ready marker not seen within 180s (and absent from flushed log — true kernel failure)"
                     stop_guest(handle)
+                    # LIVE-GREEN via QMP screendump requires QEMU to still
+                    # be alive. The bare-desktop kernel exits ~244ms after
+                    # desktop-ready due to the downstream shortcut:fail
+                    # crash path, so capture cannot succeed here. Fail
+                    # loudly rather than record a stale baseline.
                     expect(false).to_equal(true)
                     return
 

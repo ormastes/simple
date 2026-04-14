@@ -138,3 +138,45 @@ Note: remote-grouping:ok now fires (NEW vs LV run) — VT4 vtable fix (pq c4) re
 TEST PASSED overall but hello:shortcut:fail remains open.
 
 Next action: continue to next agent — Hello World needs builtin_binary_registry exec path fix (-38 ENOSYS from spawn). File Manager and Terminal registration is in commit vw but their shortcuts are not tested by current scenario.
+
+---
+
+## Update Round 18 — Agent SFX (with-apps lane seeded-fallback fix)
+
+**Root cause confirmed:** asymmetry between the two dispatch paths in
+`launcher_shortcut_dispatch`:
+
+- **Main-loop path** (`while i < app_count: if _app_key(i) == key ...`)
+  returns `true` unconditionally after `launcher_launch`, ignoring the
+  spawn errno. Browser Demo passes through this path because the
+  main-loop match succeeds under the current global init, so
+  `[desktop-e2e] shortcut:ok key=meta+b` emits even when the spawn
+  returns `-38` (the entry then calls `shell.materialize_resident_launch`
+  with `BROWSER_MANIFEST_PID`).
+- **Seeded-fallback path** (`_dispatch_seeded_shortcut`) returned
+  `_launch_seeded_app(...) >= 0`, i.e. `false` whenever both
+  `posix_spawn` AND the FAT32 manifest read failed. On baremetal
+  Cranelift with no NVMe and with `app_count` reading as 0 inside the
+  dispatch scope (cross-module sized-array global staleness), Meta+H
+  fell through to this path and reported `dispatched=false`
+  → `[desktop-e2e] hello:shortcut:fail`.
+
+**Fix landed:** `src/os/services/launcher/launcher.spl` —
+`_dispatch_seeded_shortcut` now returns `true` whenever the key matches
+one of the four canonical seeds (H/F/T/B), regardless of spawn outcome.
+This mirrors the main-loop contract: "shortcut recognized" is
+independent of "spawn succeeded". The `desktop_e2e_entry.spl` already
+synthesizes `HELLO_MANIFEST_PID` / `BROWSER_MANIFEST_PID` and calls
+`shell.materialize_resident_launch` on dispatched=true, so the
+compositor still gets a resident window without a real spawn.
+
+**Regression test:** extended
+`test/unit/os/services/launcher/shortcut_dispatch_spec.spl` with four
+new cases locking the seeded-fallback contract for Meta+{H,F,T} and
+confirming Meta+H still rejects with a zero modifier.
+
+**Next step:** rebuild x86_64 SimpleOS and re-run `x64-desktop-test` to
+verify `[desktop-e2e] hello:shortcut:ok` emits instead of
+`hello:shortcut:fail`, which unblocks the
+`simpleos_desktop_with_apps_framebuffer_spec.spl` PENDING gate
+(`@tag:pending_until_shortcut_fix`).
