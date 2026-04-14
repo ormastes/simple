@@ -164,6 +164,12 @@ impl<'a> MirLowerer<'a> {
             // G4: `obj.a().b()` — the inner MethodCall expr's `ty` is the
             // return type of `.a()`; return it so `.b()` qualifies correctly.
             HirExprKind::MethodCall { .. } => Some(expr.ty),
+            // G11: `future.await.method()` — the HIR lowerer sets expr.ty to
+            // the unwrapped T (Future<T> → T); return it directly.
+            HirExprKind::Await(_) => Some(expr.ty),
+            // G12: `old(x).method()` — contract-spec construct; the inner
+            // expression's type is preserved through the old() wrapper.
+            HirExprKind::ContractOld(inner) => self.recover_receiver_type(inner),
             _ => None,
         }
     }

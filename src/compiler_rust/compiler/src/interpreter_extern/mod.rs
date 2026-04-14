@@ -90,6 +90,7 @@ pub mod dynamic_ffi;
 #[cfg(feature = "gui")]
 pub mod winit_ffi;
 pub mod rapier2d_ffi;
+pub mod qmp_socket;
 
 // Import parent interpreter types
 type Enums = HashMap<String, Arc<EnumDef>>;
@@ -786,6 +787,11 @@ pub(crate) fn call_extern_function(
         "rt_file_open" => file_io::rt_file_open(&evaluated),
         "rt_file_get_size" => file_io::rt_file_get_size(&evaluated),
         "rt_file_close" => file_io::rt_file_close(&evaluated),
+        // QMP Unix-socket externs (qmp_client.spl)
+        "rt_unix_socket_connect" => qmp_socket::rt_unix_socket_connect(&evaluated),
+        "rt_fd_write" => qmp_socket::rt_fd_write(&evaluated),
+        "rt_fd_read_until" => qmp_socket::rt_fd_read_until(&evaluated),
+        "rt_fd_close" => qmp_socket::rt_fd_close(&evaluated),
         // Path operations
         "rt_path_basename" => file_io::rt_path_basename(&evaluated),
         "rt_path_dirname" => file_io::rt_path_dirname(&evaluated),
