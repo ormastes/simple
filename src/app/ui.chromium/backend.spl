@@ -1,0 +1,82 @@
+# Chromium Compositor Backend Adapter (V3 simple_browser shell — M1)
+#
+# Wraps `BrowserCompositorBackend` from `os.compositor.browser_compositor_backend`
+# so the compositor can render through the in-tree browser engine pipeline,
+# and exposes a thin helper for blitting the produced [u32] pixel buffer
+# into a winit window via `rt_winit_window_present_rgba`.
+#
+# Pixel path (M1 acceptance criterion):
+#   compositor.render_all() -> BrowserCompositorBackend.[u32] pixel_buffer
+#                           -> pack to [i64]
+#                           -> rt_winit_window_present_rgba(window, w, h, [i64])
+#
+# No new Rust FFI is introduced — only the existing
+# `rt_winit_window_new`, `rt_winit_window_present_rgba`, `rt_winit_window_free`
+# surface listed in `doc/04_architecture/cross_platform_wm.md`.
+
+use os.compositor.browser_compositor_backend.{BrowserCompositorBackend}
+
+extern fn rt_winit_window_present_rgba(win: i64, w: i64, h: i64, pixels: [i64])
+
+# ============================================================================
+# ChromiumBackend
+# ============================================================================
+
+class ChromiumBackend:
+    """V3 chromium shell backend adapter.
+
+    Owns a `BrowserCompositorBackend` and the winit window handle, and
+    knows how to push the pixel buffer to the host window.
+    """
+    inner: BrowserCompositorBackend
+    window_id: i64
+    w: i32
+    h: i32
+
+impl ChromiumBackend:
+
+    static fn new(window_id: i64, width: i32, height: i32) -> ChromiumBackend:
+        """Create a new chromium backend bound to an existing winit window.
+
+        The pixel buffer starts black (0xFF000000). The compositor will
+        clear it on the first `render_all()` call.
+        """
+        val inner = BrowserCompositorBackend.new(width, height)
+        ChromiumBackend(
+            inner: inner,
+            window_id: window_id,
+            w: width,
+            h: height
+        )
+
+    fn display_backend() -> BrowserCompositorBackend:
+        """Return the underlying `BrowserCompositorBackend` for use as the
+        compositor's `CompositorBackend` trait object."""
+        self.inner
+
+    fn width() -> i32:
+        self.w
+
+    fn height() -> i32:
+        self.h
+
+    me present_to_window():
+        """Pack the inner [u32] pixel buffer into [i64] and present it
+        to the winit window via `rt_winit_window_present_rgba`.
+
+        This is the only place in the chromium shell that touches the
+        host pixel surface — keeping the FFI footprint to a single call.
+        """
+        val src = self.inner.get_pixel_buffer()
+        val total = self.w * self.h
+        var packed: [i64] = []
+        var i: i32 = 0
+        while i < total:
+            packed = packed + [src[i].to_i64()]
+            i = i + 1
+        rt_winit_window_present_rgba(
+            self.window_id,
+            self.w.to_i64(),
+            self.h.to_i64(),
+            packed
+        )
