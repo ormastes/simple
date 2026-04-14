@@ -107,6 +107,34 @@ impl<'a> MirLowerer<'a> {
                     _ => None,
                 }
             }
+            // G5: `StructFoo { x: 1 }.method()` — the StructInit payload
+            // already carries the target TypeId.
+            HirExprKind::StructInit { ty, .. } => Some(*ty),
+            // G9: `(x as Foo).method()` — the cast target is the receiver
+            // type the dispatcher should qualify against.
+            HirExprKind::Cast { target, .. } => Some(*target),
+            // G8: `(*ptr).method()` — the inner expression has some
+            // `Pointer { inner: T }` type; strip one Pointer layer and
+            // return `T`. If the inner's own `ty` is unnamed, recurse so
+            // chains like `(*(*pp)).init()` still resolve. Mirrors the
+            // pointer-strip pattern used by FieldAccess / Index.
+            HirExprKind::Deref(inner) => {
+                let inner_ty = if self
+                    .type_registry
+                    .and_then(|r| r.get_type_name(inner.ty))
+                    .is_some()
+                {
+                    Some(inner.ty)
+                } else {
+                    self.recover_receiver_type(inner)
+                }
+                .unwrap_or(inner.ty);
+                let registry = self.type_registry?;
+                match registry.get(inner_ty)? {
+                    HirType::Pointer { inner, .. } => Some(*inner),
+                    _ => None,
+                }
+            }
             _ => None,
         }
     }
