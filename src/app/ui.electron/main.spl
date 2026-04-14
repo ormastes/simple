@@ -1,0 +1,187 @@
+# Electron Main-Process Entry Point (V4, Row 6)
+#
+# Owns the Electron BrowserWindow lifecycle from the Simple side and wires
+# the renderer process into the `electron_capture` compositor backend so
+# that the pixels shown in the BrowserWindow come from exactly the same
+# `BrowserCompositorBackend` the wm_compare pipeline uses for V2/V3 parity.
+#
+# Dev-preview only — per
+# `doc/01_research/domain/v4_electron_packaging_2026-04-14.md` Electron is
+# not shipped as a first-class target and must not be added to CI.
+#
+# The real Electron process is launched out-of-band via
+# `tools/electron-shell/` (node + screenshot.js). The functions declared
+# `extern` below are SFFI placeholders — the concrete node-bindings will
+# land behind a capability flag in a later round. For the V4 dev preview
+# they are safe no-ops that simply record lifecycle state so the
+# compile-only smoke spec can exercise the wire-up.
+#
+# Depends on:
+#   - os.compositor.electron_capture       (scene capture entry points)
+#   - os.compositor.wm_scene                (WmSceneSpec)
+#   - app.ui.electron.backend               (ElectronBackend)
+#   - app.ui.ipc.protocol                   (IPC bridges: FS + notification)
+
+use os.compositor.electron_capture.{
+    CaptureResult,
+    capture_electron_scene,
+    display_in_electron,
+    capture_error}
+use os.compositor.wm_scene.{WmSceneSpec}
+use app.ui.electron.backend.{ElectronBackend}
+use app.ui.ipc.protocol.{
+    build_ipc_window_control,
+    build_ipc_file_dialog,
+    build_ipc_notification}
+
+# =========================================================================
+# SFFI Placeholders — Electron main-process node bindings
+# =========================================================================
+#
+# TODO(v4-dev-preview): replace these extern stubs with real node bindings
+# under a capability gate. The Electron process is spawned by
+# tools/electron-shell/screenshot.js; these hooks are what a future native
+# binding would expose to the Simple main process so BrowserWindow lifetime
+# and renderer-process IPC are owned from Simple code.
+
+extern fn rt_electron_browser_window_create(width: i32, height: i32, title: text) -> i64
+extern fn rt_electron_browser_window_show(window_id: i64) -> bool
+extern fn rt_electron_browser_window_close(window_id: i64) -> bool
+extern fn rt_electron_renderer_post_message(window_id: i64, json: text) -> bool
+
+# =========================================================================
+# ElectronMain — owns BrowserWindow + compositor backend wiring
+# =========================================================================
+
+class ElectronMain:
+    backend: ElectronBackend
+    window_id: i64
+    width: i32
+    height: i32
+    title: text
+    running: bool
+    compositor_wired: bool
+
+    static fn new(width: i32, height: i32, title: text, port: i32)
+            -> Result<ElectronMain, text>:
+        val be = ElectronBackend.new(port)
+        match be:
+            Ok(backend):
+                return Ok(ElectronMain(
+                    backend: backend,
+                    window_id: 0,
+                    width: width,
+                    height: height,
+                    title: title,
+                    running: false,
+                    compositor_wired: false))
+            Err(e):
+                return Err("ElectronMain: backend init failed: {e}")
+
+    # ---- Lifecycle ----
+
+    me start() -> Result<bool, text>:
+        val init_res = self.backend.init()
+        match init_res:
+            Err(e):
+                return Err("ElectronMain: backend init failed: {e}")
+            _:
+                pass_dn
+        # TODO(v4-dev-preview): real BrowserWindow creation goes here.
+        self.window_id = rt_electron_browser_window_create(
+            self.width, self.height, self.title)
+        rt_electron_browser_window_show(self.window_id)
+        self.running = true
+        # Wire the renderer to the electron_capture compositor path so
+        # the BrowserWindow displays pixels produced by the shared
+        # BrowserCompositorBackend — the exact same path wm_compare uses
+        # for its A/B parity screenshots.
+        self.compositor_wired = self._wire_compositor_backend()
+        return Ok(self.compositor_wired)
+
+    me stop():
+        if self.running:
+            rt_electron_browser_window_close(self.window_id)
+            self.backend.shutdown()
+            self.running = false
+            self.compositor_wired = false
+
+    # ---- Compositor wire-up (renderer <-> electron_capture) ----
+
+    me _wire_compositor_backend() -> bool:
+        """Hand the renderer process over to electron_capture.
+
+        The renderer does NOT draw its own DOM when running in V4 parity
+        mode — instead it receives a pixel buffer produced by
+        BrowserCompositorBackend and blits it into a <canvas>. This keeps
+        V4 bit-identical with V2/V3 in wm_compare.
+        """
+        # TODO(v4-dev-preview): post a 'bind_compositor' control message
+        # telling the renderer to switch into canvas-blit mode.
+        val ctrl = build_ipc_window_control("bind_compositor")
+        rt_electron_renderer_post_message(self.window_id, ctrl)
+        true
+
+    me present_scene(scene: WmSceneSpec) -> CaptureResult:
+        """Render `scene` through BrowserCompositorBackend and display it
+        in the Electron BrowserWindow.
+
+        This is the V4 hot path the wm_compare source-A pipeline exercises
+        when --source=A is requested.
+        """
+        if not self.compositor_wired:
+            return capture_error(
+                "electron_main", self.width, self.height,
+                "compositor backend not wired — call start() first")
+        val capture = capture_electron_scene(scene)
+        if capture.success:
+            display_in_electron(capture.pixels, capture.width, capture.height)
+        return capture
+
+    # ---- ui.ipc bridges (filesystem + notifications) ----
+
+    me notify(title: text, body: text) -> bool:
+        """Forward a native notification request through ui.ipc."""
+        # TODO(v4-dev-preview): the renderer relays this to the OS
+        # notification center via Electron's Notification API.
+        val msg = build_ipc_notification(title, body)
+        return rt_electron_renderer_post_message(self.window_id, msg)
+
+    me open_file_dialog(kind: text, filters: text) -> bool:
+        """Forward an open/save dialog request through ui.ipc."""
+        # TODO(v4-dev-preview): bridge to Electron dialog.showOpenDialog /
+        # dialog.showSaveDialog in the main process.
+        val msg = build_ipc_file_dialog(kind, filters)
+        return rt_electron_renderer_post_message(self.window_id, msg)
+
+    # ---- Introspection (used by the smoke spec) ----
+
+    me is_compositor_wired() -> bool:
+        return self.compositor_wired
+
+    me backend_name() -> text:
+        return self.backend.backend_name()
+
+# =========================================================================
+# Entry Point
+# =========================================================================
+
+fn run_electron_main(width: i32, height: i32, title: text, port: i32) -> i64:
+    """Dev-preview entry point — creates an ElectronMain, wires the
+    compositor backend, and returns a status code. Not used in CI."""
+    val res = ElectronMain.new(width, height, title, port)
+    match res:
+        Err(e):
+            print "[ui.electron.main] {e}"
+            return 1
+        Ok(app):
+            val start_res = app.start()
+            match start_res:
+                Err(e):
+                    print "[ui.electron.main] start failed: {e}"
+                    return 1
+                Ok(wired):
+                    if not wired:
+                        print "[ui.electron.main] compositor not wired"
+                        return 1
+                    return 0
