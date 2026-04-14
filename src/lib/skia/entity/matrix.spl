@@ -1,0 +1,97 @@
+@allow(primitive_api)
+# Skia Matrix — Matrix3x3 for 2D transforms
+#
+# Represents an affine/projective 3x3 transform matrix.
+# Row-major convention: row m[row][col] → m{row}{col}.
+#
+# Usage:
+#   val t = Matrix3x3.translate(tx: 10.0, ty: 20.0)
+#   val s = Matrix3x3.scale(sx: 2.0, sy: 3.0)
+#   val r = Matrix3x3.rotate_degrees(deg: 45.0)
+
+use std.common.math.{MATH_PI}
+
+# ============================================================================
+# Private trig helpers (Taylor series — no SFFI required)
+# ============================================================================
+
+fn _sin_taylor(x: f64) -> f64:
+    """Sine via Taylor series. Reduces angle to [-PI, PI] first."""
+    var a = x
+    val two_pi = MATH_PI * 2.0
+    while a > MATH_PI:
+        a = a - two_pi
+    while a < -MATH_PI:
+        a = a + two_pi
+    val x2 = a * a
+    val x3 = a * x2
+    val x5 = x3 * x2
+    val x7 = x5 * x2
+    val x9 = x7 * x2
+    val x11 = x9 * x2
+    val x13 = x11 * x2
+    val x15 = x13 * x2
+    a - x3 / 6.0 + x5 / 120.0 - x7 / 5040.0 + x9 / 362880.0 - x11 / 39916800.0 + x13 / 6227020800.0 - x15 / 1307674368000.0
+
+fn _cos_taylor(x: f64) -> f64:
+    """Cosine via sine identity: cos(x) = sin(x + PI/2)."""
+    _sin_taylor(x + MATH_PI / 2.0)
+
+# ============================================================================
+# Matrix3x3
+# ============================================================================
+
+class Matrix3x3:
+    m00: f64
+    m01: f64
+    m02: f64
+    m10: f64
+    m11: f64
+    m12: f64
+    m20: f64
+    m21: f64
+    m22: f64
+
+    static fn identity() -> Matrix3x3:
+        Matrix3x3(
+            m00: 1.0, m01: 0.0, m02: 0.0,
+            m10: 0.0, m11: 1.0, m12: 0.0,
+            m20: 0.0, m21: 0.0, m22: 1.0
+        )
+
+    static fn translate(tx: f64, ty: f64) -> Matrix3x3:
+        Matrix3x3(
+            m00: 1.0, m01: 0.0, m02: tx,
+            m10: 0.0, m11: 1.0, m12: ty,
+            m20: 0.0, m21: 0.0, m22: 1.0
+        )
+
+    static fn scale(sx: f64, sy: f64) -> Matrix3x3:
+        Matrix3x3(
+            m00: sx,  m01: 0.0, m02: 0.0,
+            m10: 0.0, m11: sy,  m12: 0.0,
+            m20: 0.0, m21: 0.0, m22: 1.0
+        )
+
+    static fn rotate_degrees(deg: f64) -> Matrix3x3:
+        val rad = deg * 0.017453292519943295
+        val c = _cos_taylor(rad)
+        val s = _sin_taylor(rad)
+        Matrix3x3(
+            m00: c,   m01: -s,  m02: 0.0,
+            m10: s,   m11:  c,  m12: 0.0,
+            m20: 0.0, m21: 0.0, m22: 1.0
+        )
+
+    fn mul(other: Matrix3x3) -> Matrix3x3:
+        Matrix3x3(
+            m00: self.m00 * other.m00 + self.m01 * other.m10 + self.m02 * other.m20,
+            m01: self.m00 * other.m01 + self.m01 * other.m11 + self.m02 * other.m21,
+            m02: self.m00 * other.m02 + self.m01 * other.m12 + self.m02 * other.m22,
+            m10: self.m10 * other.m00 + self.m11 * other.m10 + self.m12 * other.m20,
+            m11: self.m10 * other.m01 + self.m11 * other.m11 + self.m12 * other.m21,
+            m12: self.m10 * other.m02 + self.m11 * other.m12 + self.m12 * other.m22,
+            m20: self.m20 * other.m00 + self.m21 * other.m10 + self.m22 * other.m20,
+            m21: self.m20 * other.m01 + self.m21 * other.m11 + self.m22 * other.m21,
+            m22: self.m20 * other.m02 + self.m21 * other.m12 + self.m22 * other.m22
+        )

@@ -1,0 +1,134 @@
+# Skia blend mode specification tests
+
+use std.sspec.*
+use std.skia.entity.color.{SkColor4f}
+use std.skia.entity.enums.{SkBlendMode}
+use std.skia.feature.blend.porter_duff.{
+    blend_clear, blend_src, blend_dst,
+    blend_src_over, blend_plus, blend_modulate, blend_screen
+}
+use std.skia.feature.blend.hsl.{blend_multiply}
+use std.skia.feature.blend.blend_compose.{compose}
+
+fn _white() -> SkColor4f:
+    SkColor4f(r: 1.0, g: 1.0, b: 1.0, a: 1.0)
+
+fn _black() -> SkColor4f:
+    SkColor4f(r: 0.0, g: 0.0, b: 0.0, a: 0.0)
+
+fn _red() -> SkColor4f:
+    SkColor4f(r: 1.0, g: 0.0, b: 0.0, a: 1.0)
+
+fn _approx(a: f64, b: f64) -> bool:
+    val d = a - b
+    val ad = if d < 0.0: -d else: d
+    ad < 0.0001
+
+describe "Porter-Duff: blend_clear":
+    it "returns all-zero regardless of inputs":
+        val r = blend_clear(_white(), _red())
+        expect r.r to_equal 0.0
+        expect r.g to_equal 0.0
+        expect r.b to_equal 0.0
+        expect r.a to_equal 0.0
+
+describe "Porter-Duff: blend_src":
+    it "returns src unchanged, ignores dst":
+        val r = blend_src(_red(), _white())
+        expect r.r to_equal 1.0
+        expect r.g to_equal 0.0
+        expect r.b to_equal 0.0
+        expect r.a to_equal 1.0
+
+describe "Porter-Duff: blend_dst":
+    it "returns dst unchanged, ignores src":
+        val r = blend_dst(_red(), _white())
+        expect r.r to_equal 1.0
+        expect r.g to_equal 1.0
+        expect r.b to_equal 1.0
+        expect r.a to_equal 1.0
+
+describe "Porter-Duff: blend_src_over":
+    it "with fully opaque src returns src":
+        val r = blend_src_over(_red(), _white())
+        expect r.r to_equal 1.0
+        expect r.g to_equal 0.0
+        expect r.b to_equal 0.0
+        expect r.a to_equal 1.0
+
+    it "with fully transparent src returns dst":
+        val transparent = SkColor4f(r: 0.5, g: 0.3, b: 0.1, a: 0.0)
+        val dst = _red()
+        val r = blend_src_over(transparent, dst)
+        expect _approx(r.r, 1.0) to_equal true
+        expect _approx(r.g, 0.0) to_equal true
+        expect _approx(r.a, 1.0) to_equal true
+
+    it "with half-alpha blends proportionally":
+        val src = SkColor4f(r: 0.0, g: 0.0, b: 1.0, a: 0.5)
+        val dst = SkColor4f(r: 1.0, g: 0.0, b: 0.0, a: 1.0)
+        val r = blend_src_over(src, dst)
+        expect _approx(r.b, 0.5) to_equal true
+        expect _approx(r.r, 0.5) to_equal true
+
+describe "Porter-Duff: blend_plus":
+    it "caps summed channels at 1.0":
+        val r = blend_plus(_white(), _white())
+        expect r.r to_equal 1.0
+        expect r.a to_equal 1.0
+
+    it "adds channels below 1.0":
+        val a = SkColor4f(r: 0.3, g: 0.3, b: 0.3, a: 0.3)
+        val b = SkColor4f(r: 0.4, g: 0.4, b: 0.4, a: 0.4)
+        val r = blend_plus(a, b)
+        expect _approx(r.r, 0.7) to_equal true
+
+describe "Porter-Duff: blend_modulate":
+    it "multiplies channels per-component":
+        val a = SkColor4f(r: 0.5, g: 0.5, b: 0.5, a: 1.0)
+        val b = SkColor4f(r: 0.5, g: 0.5, b: 0.5, a: 1.0)
+        val r = blend_modulate(a, b)
+        expect _approx(r.r, 0.25) to_equal true
+
+describe "Porter-Duff: blend_screen":
+    it "with black src returns dst":
+        val r = blend_screen(_black(), _red())
+        expect _approx(r.r, 1.0) to_equal true
+
+    it "screen formula: s + d - s*d":
+        val a = SkColor4f(r: 0.5, g: 0.5, b: 0.5, a: 1.0)
+        val b = SkColor4f(r: 0.5, g: 0.5, b: 0.5, a: 1.0)
+        val r = blend_screen(a, b)
+        # 0.5 + 0.5 - 0.25 = 0.75
+        expect _approx(r.r, 0.75) to_equal true
+
+describe "Compose dispatcher":
+    it "SrcOver routes correctly":
+        val r = compose(_red(), _white(), SkBlendMode.SrcOver)
+        expect r.r to_equal 1.0
+        expect r.g to_equal 0.0
+
+    it "Clear routes to all-zero":
+        val r = compose(_white(), _white(), SkBlendMode.Clear)
+        expect r.r to_equal 0.0
+        expect r.a to_equal 0.0
+
+    it "Multiply routes to multiply mode":
+        val a = SkColor4f(r: 0.5, g: 0.5, b: 0.5, a: 1.0)
+        val b = SkColor4f(r: 0.5, g: 0.5, b: 0.5, a: 1.0)
+        val direct = blend_multiply(a, b)
+        val via_compose = compose(a, b, SkBlendMode.Multiply)
+        expect _approx(direct.r, via_compose.r) to_equal true
+
+    it "Screen routes to screen mode":
+        val r = compose(_black(), _red(), SkBlendMode.Screen)
+        expect _approx(r.r, 1.0) to_equal true
+
+    it "Src routes to src":
+        val r = compose(_red(), _white(), SkBlendMode.Src)
+        expect r.r to_equal 1.0
+        expect r.g to_equal 0.0
+
+    it "Dst routes to dst":
+        val r = compose(_red(), _white(), SkBlendMode.Dst)
+        expect r.g to_equal 1.0
