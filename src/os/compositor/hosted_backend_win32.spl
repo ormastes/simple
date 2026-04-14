@@ -1,0 +1,234 @@
+# Hosted Compositor Backend — Win32 / Windows surface shim
+#
+# Row 3 of the GUI drawing-layer work matrix (2026-04-14).
+# Phase C of `doc/03_plan/v2_hosted_engine2d_rewiring.md`.
+#
+# Plumbs `CompositorBackend` through to a Win32 HWND + DIB-section
+# (BitBlt) backbuffer. Direct2D / D3D11 are an optional future swap
+# behind the same trait — see TODO at the bottom. The SFFI bodies are
+# placeholder declarations against `rt_win32_*` runtime symbols that the
+# next agent will fill in.
+#
+# Selection: routed by `hosted_backend.spl::select_hosted_backend()`
+# at construct time (see that file's dispatch comment). When `win32`
+# is selected, `HostedWin32Backend` is instantiated in place of the
+# winit-backed `HostedCompositorBackend`.
+#
+# Trait-method mapping for Row 3:
+#   - create  : RegisterClassExW + CreateWindowExW + CreateDIBSection
+#               (rt_win32_window_new + rt_win32_dib_create)
+#   - resize  : WM_SIZE handler -> reallocate DIB section
+#               (rt_win32_dib_resize)
+#   - present : StretchDIBits / BitBlt to the window DC
+#               (rt_win32_dib_present)
+#   - pump    : PeekMessage / TranslateMessage / DispatchMessage loop
+#               (rt_win32_message_pump) — driven from
+#               `hosted_input_backend`.
+#
+# TODO(next-agent): implement these in `src/runtime/hosted/win32.rs`
+# (windows-rs crate). Until then the externs link to runtime stubs that
+# return -1 / false. A future iteration may add a parallel
+# `rt_win32_d2d_*` family for Direct2D acceleration; the trait surface
+# stays identical.
+
+use os.compositor.display_backend.{CompositorBackend, CompositorGlassCapable}
+use os.drivers.framebuffer.fb_driver.{get_glyph_8x16}
+
+# ============================================================================
+# Win32 Surface SFFI Declarations (placeholders — see TODO above)
+# ============================================================================
+
+extern fn rt_win32_window_new(w: i64, h: i64, title: text) -> i64
+extern fn rt_win32_window_resize(hwnd: i64, w: i64, h: i64) -> bool
+extern fn rt_win32_window_close(hwnd: i64) -> bool
+extern fn rt_win32_dib_create(hwnd: i64, w: i64, h: i64, fill_color: i64) -> i64
+extern fn rt_win32_dib_fill_rect(dib: i64, x: i64, y: i64, w: i64, h: i64, color: i64) -> bool
+extern fn rt_win32_dib_present(hwnd: i64, dib: i64) -> bool
+extern fn rt_win32_dib_present_rect(hwnd: i64, dib: i64, x: i64, y: i64, w: i64, h: i64) -> bool
+extern fn rt_win32_dib_free(dib: i64) -> bool
+extern fn rt_win32_dib_resize(dib: i64, w: i64, h: i64) -> bool
+extern fn rt_win32_dib_read_pixel(dib: i64, x: i64, y: i64) -> i64
+extern fn rt_win32_dib_blend_rect(dib: i64, x: i64, y: i64, w: i64, h: i64, color: i64, alpha: i64) -> bool
+extern fn rt_win32_dib_blur(dib: i64, x: i64, y: i64, w: i64, h: i64, radius: i64) -> bool
+extern fn rt_win32_dib_gradient_v(dib: i64, x: i64, y: i64, w: i64, h: i64, c1: i64, c2: i64) -> bool
+extern fn rt_win32_message_pump(hwnd: i64) -> i64
+
+# Module-level state (interpreter-safe — same pattern as `hosted_backend.spl`).
+var _win32_hwnd: i64 = 0
+var _win32_dib_id: i64 = 0
+var _win32_w: i32 = 0
+var _win32_h: i32 = 0
+
+# ============================================================================
+# HostedWin32Backend
+# ============================================================================
+
+class HostedWin32Backend:
+    """CompositorBackend that targets a Win32 HWND with a DIB-section
+    backbuffer.
+
+    The DIB section is a top-down BGRA8 bitmap (negative biHeight) so
+    the runtime can blit it straight to the window DC with `StretchDIBits`.
+    `present()` is a single BitBlt; `present_rect()` blits a sub-region.
+
+    Colors are u32 ARGB (0xAARRGGBB); the runtime swizzles to BGRA on
+    write so callers don't have to think about it.
+    """
+    hwnd: i64
+    dib_id: i64
+    w: i32
+    h: i32
+
+# ============================================================================
+# CompositorBackend Trait Implementation
+# ============================================================================
+
+impl CompositorBackend for HostedWin32Backend:
+
+    fn width() -> i32:
+        _win32_w
+
+    fn height() -> i32:
+        _win32_h
+
+    me clear(color: u32):
+        val w_i: i64 = _win32_w
+        val h_i: i64 = _win32_h
+        val c: i64 = color
+        rt_win32_dib_fill_rect(_win32_dib_id, 0, 0, w_i, h_i, c)
+
+    me fill_rect(x: i32, y: i32, w: i32, h: i32, color: u32):
+        val xi: i64 = x
+        val yi: i64 = y
+        val wi: i64 = w
+        val hi: i64 = h
+        val c: i64 = color
+        rt_win32_dib_fill_rect(_win32_dib_id, xi, yi, wi, hi, c)
+
+    me draw_text(x: i32, y: i32, text_str: text, fg: u32, bg: u32):
+        var cx = x
+        for ch in text_str:
+            val code = ch.ord()
+            val ch_byte: u8 = code
+            self.draw_char_8x16(cx, y, ch_byte, fg, bg)
+            cx = cx + 8
+
+    me draw_char_8x16(x: i32, y: i32, ch: u8, fg: u32, bg: u32):
+        val glyph = get_glyph_8x16(ch)
+        val fg_i: i64 = fg
+        val bg_i: i64 = bg
+        var row: i64 = 0
+        while row < 16:
+            val bits: i64 = glyph[row]
+            var col: i64 = 0
+            while col < 8:
+                val mask: i64 = 0x80 >> col
+                val color = if (bits & mask) != 0: fg_i else: bg_i
+                val px: i64 = x + col
+                val py: i64 = y + row
+                rt_win32_dib_fill_rect(_win32_dib_id, px, py, 1, 1, color)
+                col = col + 1
+            row = row + 1
+
+    me put_pixel(x: i32, y: i32, color: u32):
+        val xi: i64 = x
+        val yi: i64 = y
+        val c: i64 = color
+        rt_win32_dib_fill_rect(_win32_dib_id, xi, yi, 1, 1, c)
+
+    me present():
+        rt_win32_dib_present(_win32_hwnd, _win32_dib_id)
+
+    me present_rect(x: i32, y: i32, w: i32, h: i32):
+        val xi: i64 = x
+        val yi: i64 = y
+        val wi: i64 = w
+        val hi: i64 = h
+        rt_win32_dib_present_rect(_win32_hwnd, _win32_dib_id, xi, yi, wi, hi)
+
+    fn as_glass_capable() -> CompositorGlassCapable?:
+        # The DIB section is our own pixel buffer, safe for blend/blur/gradient.
+        self
+
+# ============================================================================
+# CompositorGlassCapable Trait Implementation
+# ============================================================================
+
+impl CompositorGlassCapable for HostedWin32Backend:
+
+    me blend_rect(x: i32, y: i32, w: i32, h: i32, color: u32, alpha: u8):
+        val xi: i64 = x
+        val yi: i64 = y
+        val wi: i64 = w
+        val hi: i64 = h
+        val c: i64 = color
+        val a: i64 = alpha
+        rt_win32_dib_blend_rect(_win32_dib_id, xi, yi, wi, hi, c, a)
+
+    me blur_region(x: i32, y: i32, w: i32, h: i32, radius: u32):
+        val xi: i64 = x
+        val yi: i64 = y
+        val wi: i64 = w
+        val hi: i64 = h
+        val ri: i64 = radius
+        rt_win32_dib_blur(_win32_dib_id, xi, yi, wi, hi, ri)
+
+    me gradient_v(x: i32, y: i32, w: i32, h: i32, color1: u32, color2: u32):
+        val xi: i64 = x
+        val yi: i64 = y
+        val wi: i64 = w
+        val hi: i64 = h
+        val c1: i64 = color1
+        val c2: i64 = color2
+        rt_win32_dib_gradient_v(_win32_dib_id, xi, yi, wi, hi, c1, c2)
+
+    fn read_pixel(x: i32, y: i32) -> u32:
+        val xi: i64 = x
+        val yi: i64 = y
+        val result = rt_win32_dib_read_pixel(_win32_dib_id, xi, yi)
+        result.to_u32()
+
+# ============================================================================
+# Lifecycle — create / resize / pump / free
+# ============================================================================
+
+impl HostedWin32Backend:
+
+    static fn new(hwnd: i64, dib_id: i64, w: i32, h: i32) -> HostedWin32Backend:
+        """Wrap pre-existing Win32 handles (test seam)."""
+        HostedWin32Backend(hwnd: hwnd, dib_id: dib_id, w: w, h: h)
+
+    static fn create(w: i32, h: i32, title: text, fill_color: u32) -> HostedWin32Backend:
+        """Allocate an HWND + DIB-section pair sized w×h."""
+        val w64: i64 = w
+        val h64: i64 = h
+        val fc64: i64 = fill_color
+        val hwnd = rt_win32_window_new(w64, h64, title)
+        val dib = rt_win32_dib_create(hwnd, w64, h64, fc64)
+        _win32_hwnd = hwnd
+        _win32_dib_id = dib
+        _win32_w = w
+        _win32_h = h
+        HostedWin32Backend(hwnd: hwnd, dib_id: dib, w: w, h: h)
+
+    me resize(new_w: i32, new_h: i32) -> bool:
+        """React to a WM_SIZE event. Reallocates the DIB section so the
+        next `present()` matches the new client area."""
+        val w64: i64 = new_w
+        val h64: i64 = new_h
+        val ok_win = rt_win32_window_resize(_win32_hwnd, w64, h64)
+        val ok_dib = rt_win32_dib_resize(_win32_dib_id, w64, h64)
+        if ok_win and ok_dib:
+            _win32_w = new_w
+            _win32_h = new_h
+        ok_win and ok_dib
+
+    me pump() -> i64:
+        """Drain queued window messages (PeekMessage / Translate / Dispatch).
+        Non-blocking — returns the number of messages handled."""
+        rt_win32_message_pump(_win32_hwnd)
+
+    me free():
+        """Release the DIB section and destroy the window. Idempotent."""
+        rt_win32_dib_free(self.dib_id)
+        rt_win32_window_close(self.hwnd)

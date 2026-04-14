@@ -10,7 +10,31 @@
 # where array-based pixel manipulation would be too slow.
 
 use os.compositor.display_backend.{CompositorBackend, CompositorGlassCapable}
+use os.compositor.hosted_backend_cocoa.{HostedCocoaBackend}
+use os.compositor.hosted_backend_win32.{HostedWin32Backend}
 use os.drivers.framebuffer.fb_driver.{get_glyph_8x16}
+
+# ============================================================================
+# Platform Routing (Row 3 / Phase C)
+# ============================================================================
+#
+# `select_hosted_backend()` is the single dispatch site that picks
+# between the cross-platform winit path (this file's
+# `HostedCompositorBackend`), the macOS Cocoa shim
+# (`hosted_backend_cocoa.spl::HostedCocoaBackend`), and the Windows
+# Win32 shim (`hosted_backend_win32.spl::HostedWin32Backend`).
+#
+# Selection precedence:
+#   1. `SIMPLE_HOSTED_SURFACE` env var: `winit` | `cocoa` | `win32` | `auto`
+#   2. Host triple from the runtime (when env is `auto` or unset):
+#        - `*-apple-darwin*` -> `cocoa`
+#        - `*-pc-windows-*`  -> `win32`
+#        - everything else   -> `winit`
+#
+# The actual host-triple detection lives in `src/runtime/hosted/select.rs`
+# (TODO for the next agent — until that lands, `select_hosted_backend`
+# falls through to the winit path on every host, matching today's
+# behaviour). Document any divergence in the runtime stub.
 
 # ============================================================================
 # Winit Buffer FFI Declarations
@@ -222,3 +246,28 @@ impl HostedCompositorBackend:
         backend remains the sole site that touches the raw winit FFI.
         """
         rt_winit_buffer_save_bmp(_hosted_buffer_id, path)
+
+# ============================================================================
+# Platform-routed hosted backend constructor (Row 3 / Phase C)
+# ============================================================================
+
+extern fn rt_hosted_select_surface() -> i64
+
+fn select_hosted_backend(window_id: i64, w: i32, h: i32, fill_color: u32) -> CompositorBackend:
+    """Return the right `CompositorBackend` for this host.
+
+    Reads the runtime's `rt_hosted_select_surface()` selector:
+      0 = winit (default / fallback / Linux / BSD / unknown)
+      1 = cocoa (macOS — see `hosted_backend_cocoa.spl`)
+      2 = win32 (Windows — see `hosted_backend_win32.spl`)
+
+    The runtime is responsible for honouring `SIMPLE_HOSTED_SURFACE` and
+    falling back to the winit path on probe failure. See the comment at
+    the top of this file for the full precedence rules.
+    """
+    val sel = rt_hosted_select_surface()
+    if sel == 1:
+        return HostedCocoaBackend.create(w, h, "Simple Hosted", fill_color)
+    if sel == 2:
+        return HostedWin32Backend.create(w, h, "Simple Hosted", fill_color)
+    HostedCompositorBackend.create(window_id, w, h, fill_color)
