@@ -125,23 +125,27 @@ Gaps:
 
 Ordered by unlock value. Each item ends with the artifact that proves it.
 
-| # | Task | Variation | Artifact |
-|---|------|-----------|----------|
-| 1 | Lock `Compositor` + `Engine2D` trait surfaces; mark unstable methods | all | `doc/04_architecture/gui_layer_contract.md` |
-| 2 | Expand `wm_compare` to run the same scene through V1/V2 and diff | V1, V2 | `test/sys/wm_compare/v1_v2_parity_spec.spl` |
-| 3 | Land Cocoa + Win32 hosted surfaces behind `hosted_backend` | V2 | `src/os/compositor/hosted_backend_cocoa.spl`, `_win32.spl` |
-| 4 | virtio-gpu accelerated path in QEMU for V1 | V1 | `sys-gui-008` baseline in `doc/08_tracking/todo/` |
-| 5 | CEF or simple_browser shell driving `browser_compositor_backend` | V3 | `src/app/ui.chromium/main.spl` + parity screenshots |
-| 6 | Electron main/renderer split using `electron_capture` + `ui.ipc` | V4 | `src/app/ui.electron/main.spl` green in `wm_compare` |
-| 7 | Shared input-event conformance suite across all four | all | `test/unit/common/ui/input_event_conformance_spec.spl` |
-| 8 | Golden-image gate: same app, 4 backends, ≤1% perceptual diff | all | `doc/06_spec/app/compiler/feature/windows_spec.md` update |
+| # | Task | Variation | Artifact | Plan |
+|---|------|-----------|----------|------|
+| 1 | Lock `Compositor` + `Engine2D` trait surfaces; mark unstable methods | all | `doc/04_architecture/gui_layer_contract.md` | [gui_layer_contract.md](../04_architecture/gui_layer_contract.md) (locked); fix plan: [sys_gui/gui_layer_contract_fix_plan.md](./sys_gui/gui_layer_contract_fix_plan.md) |
+| 2 | Expand `wm_compare` to run the same scene through V1/V2 and diff | V1, V2 | `test/sys/wm_compare/v1_v2_parity_spec.spl` | [sys_test/wm_compare_v1_v2_parity.md](./sys_test/wm_compare_v1_v2_parity.md) |
+| 3 | Land Cocoa + Win32 hosted surfaces behind `hosted_backend` | V2 | `src/os/compositor/hosted_backend_cocoa.spl`, `_win32.spl` | [v2_hosted_engine2d_rewiring.md](./v2_hosted_engine2d_rewiring.md) (Phase C) |
+| 4 | virtio-gpu accelerated path in QEMU for V1 | V1 | `sys-gui-008` baseline in `doc/08_tracking/todo/` | not yet planned (sys-gui-008 tracker) |
+| 5 | CEF or simple_browser shell driving `browser_compositor_backend` | V3 | `src/app/ui.chromium/main.spl` + parity screenshots | [v3_simple_browser_milestones.md](./v3_simple_browser_milestones.md) — Option B chosen per [v3_shell_choice_2026-04-14.md](../01_research/domain/v3_shell_choice_2026-04-14.md) |
+| 6 | Electron main/renderer split using `electron_capture` + `ui.ipc` | V4 | `src/app/ui.electron/main.spl` green in `wm_compare` | not yet planned |
+| 7 | Shared input-event conformance suite across all four | all | `test/unit/common/ui/input_event_conformance_spec.spl` | [sys_test/input_event_conformance.md](./sys_test/input_event_conformance.md) |
+| 8 | Golden-image gate: same app, 4 backends, ≤1% perceptual diff | all | `doc/06_spec/app/compiler/feature/windows_spec.md` update | not yet planned (depends on row 2) |
 
 ## 5. Decisions still open
 
-- **V3 shell choice:** CEF embedding vs. growing `examples/browser` into
-  a usable Chromium-class shell. See memory `project_browser_platform`.
-- **GPU path for V2:** Vulkan everywhere vs. native (Metal/DX) per OS.
-  Current modules favor both; pick per-platform default.
+- ~~**V3 shell choice:** CEF embedding vs. growing `examples/browser` into
+  a usable Chromium-class shell. See memory `project_browser_platform`.~~
+  **DECIDED — Option B (simple_browser).** See
+  [v3_shell_choice_2026-04-14.md](../01_research/domain/v3_shell_choice_2026-04-14.md).
+- ~~**GPU path for V2:** Vulkan everywhere vs. native (Metal/DX) per OS.
+  Current modules favor both; pick per-platform default.~~
+  **DECIDED — Metal on macOS, Vulkan on Linux + Windows + FreeBSD.** See
+  [v2_gpu_defaults_2026-04-14.md](../01_research/domain/v2_gpu_defaults_2026-04-14.md).
 - **Electron packaging:** Are we shipping Electron as a first-class target
   or only as a dev preview? This changes whether V4 is in CI.
 
@@ -153,9 +157,39 @@ Ordered by unlock value. Each item ends with the artifact that proves it.
 - TUI variations — `ui.tui` / `ui.tui_web` already live under their own
   track and are not part of the drawing-layer story.
 
+## Sub-plan index
+
+This plan spawned the following sub-plans and research docs:
+
+### Decided / locked
+- Plan doc: this file (2026-04-14)
+- Arch doc: [cross_platform_wm.md](../04_architecture/cross_platform_wm.md) — widened 2026-04-14
+- Contract: [gui_layer_contract.md](../04_architecture/gui_layer_contract.md) — locked 2026-04-14
+- Guide: [ui_stack_guide.md](../07_guide/ui_stack_guide.md)
+
+### Decisions
+- V3 shell choice → [v3_shell_choice_2026-04-14.md](../01_research/domain/v3_shell_choice_2026-04-14.md) — Option B
+- V2 GPU defaults → [v2_gpu_defaults_2026-04-14.md](../01_research/domain/v2_gpu_defaults_2026-04-14.md)
+
+### Implementation plans
+- Contract fix plan → [gui_layer_contract_fix_plan.md](./sys_gui/gui_layer_contract_fix_plan.md)
+- V2 hosted rewiring → [v2_hosted_engine2d_rewiring.md](./v2_hosted_engine2d_rewiring.md)
+- V3 simple_browser milestones → [v3_simple_browser_milestones.md](./v3_simple_browser_milestones.md)
+- wm_compare V1/V2 parity → [sys_test/wm_compare_v1_v2_parity.md](./sys_test/wm_compare_v1_v2_parity.md)
+- Input-event conformance → [sys_test/input_event_conformance.md](./sys_test/input_event_conformance.md)
+
 ## 7. References
 
-- `doc/04_architecture/cross_platform_wm.md`
+- [cross_platform_wm.md](../04_architecture/cross_platform_wm.md)
+- [gui_layer_contract.md](../04_architecture/gui_layer_contract.md)
+- [ui_stack_guide.md](../07_guide/ui_stack_guide.md)
+- [v3_shell_choice_2026-04-14.md](../01_research/domain/v3_shell_choice_2026-04-14.md)
+- [v2_gpu_defaults_2026-04-14.md](../01_research/domain/v2_gpu_defaults_2026-04-14.md)
+- [sys_gui/gui_layer_contract_fix_plan.md](./sys_gui/gui_layer_contract_fix_plan.md)
+- [v2_hosted_engine2d_rewiring.md](./v2_hosted_engine2d_rewiring.md)
+- [v3_simple_browser_milestones.md](./v3_simple_browser_milestones.md)
+- [sys_test/wm_compare_v1_v2_parity.md](./sys_test/wm_compare_v1_v2_parity.md)
+- [sys_test/input_event_conformance.md](./sys_test/input_event_conformance.md)
 - `doc/03_plan/sys_test/simpleos_small_complete_gui.md`
 - `doc/03_plan/os_gui_hello_world.md`
 - `doc/03_plan/ELECTRON_VSCODE_WASM_PLAN.md`
