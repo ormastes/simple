@@ -83,6 +83,12 @@ pub struct CodegenBackend<M: Module> {
     /// style constants get registered as function imports and `GlobalLoad`
     /// returns the symbol's address instead of its value.
     pub data_exports: std::sync::Arc<std::collections::HashSet<String>>,
+    /// Vtable data object IDs: struct_name -> DataId for each trait-impl struct.
+    /// Used by compile_struct_init to write vtable_ptr at offset 0.
+    pub vtable_data_ids: BTreeMap<String, cranelift_module::DataId>,
+    /// Vtable data object IDs by TypeId (HIR TypeId -> DataId).
+    /// Used by MirInst::StructInit dispatch which has type_id, not struct_name.
+    pub vtable_type_ids: BTreeMap<crate::hir::TypeId, cranelift_module::DataId>,
 }
 
 /// Settings for creating a codegen backend
@@ -248,6 +254,8 @@ impl<M: Module> CodegenBackend<M> {
             ambiguous_names: std::sync::Arc::new(std::collections::HashSet::new()),
             use_map: std::collections::HashMap::new(),
             data_exports: std::sync::Arc::new(std::collections::HashSet::new()),
+            vtable_data_ids: BTreeMap::new(),
+            vtable_type_ids: BTreeMap::new(),
         })
     }
 
@@ -659,6 +667,8 @@ impl<M: Module> CodegenBackend<M> {
             &self.global_ids,
             &self.import_map,
             &self.use_map,
+            &self.vtable_data_ids,
+            &self.vtable_type_ids,
         )
         .map_err(|e| {
             eprintln!("[CODEGEN BODY] Function '{}' body compilation failed: {}", func.name, e);
@@ -709,6 +719,64 @@ impl<M: Module> CodegenBackend<M> {
         Ok(())
     }
 
+    /// Emit one static vtable data object per `impl Trait for Struct` entry.
+    ///
+    /// Each data object is named `__vtable__StructName__for__TraitName` and contains
+    /// one 8-byte pointer per vtable slot (in slot index order). The pointer at slot i
+    /// is a relocation to the implementing function for that method.
+    ///
+    /// After this call, `self.vtable_data_ids` maps struct_name → DataId so that
+    /// `compile_struct_init` can write the vtable_ptr at offset 0.
+    fn emit_vtable_data_objects(
+        &mut self,
+        vtable_impls: &[(crate::hir::TypeId, String, String, Vec<String>)],
+    ) -> BackendResult<()> {
+        for (struct_type_id, struct_name, vtable_sym, method_fns) in vtable_impls {
+            let n = method_fns.len();
+            if n == 0 {
+                continue;
+            }
+
+            // Declare the vtable data object (local, read-only, not thread-local)
+            let data_id = self
+                .module
+                .declare_data(vtable_sym, Linkage::Local, false, false)
+                .map_err(|e| BackendError::ModuleError(e.to_string()))?;
+
+            let mut data_desc = cranelift_module::DataDescription::new();
+            data_desc.define_zeroinit(n * 8);
+
+            // For each method slot, write a relocation pointing to the implementing function.
+            for (slot, fn_name) in method_fns.iter().enumerate() {
+                // Look up the func_id — try both mangled and unmangled names.
+                let func_id_opt = self
+                    .func_ids
+                    .get(fn_name)
+                    .copied()
+                    .or_else(|| {
+                        // Try with _dot_ mangling (StructName_dot_methodName)
+                        let mangled = fn_name.replace('.', "_dot_");
+                        self.func_ids.get(&mangled).copied()
+                    });
+
+                if let Some(func_id) = func_id_opt {
+                    let func_ref = self.module.declare_func_in_data(func_id, &mut data_desc);
+                    data_desc.write_function_addr((slot * 8) as u32, func_ref);
+                }
+                // If func_id not found (cross-module impl), slot stays zero — runtime will fault.
+            }
+
+            self.module
+                .define_data(data_id, &data_desc)
+                .map_err(|e| BackendError::ModuleError(e.to_string()))?;
+
+            // Record struct_name → DataId and struct_type_id → DataId for compile_struct_init
+            self.vtable_data_ids.insert(struct_name.clone(), data_id);
+            self.vtable_type_ids.insert(*struct_type_id, data_id);
+        }
+        Ok(())
+    }
+
     /// Compile all functions from a MIR module (with outlining expansion)
     pub fn compile_all_functions(&mut self, mir: &MirModule) -> BackendResult<Vec<MirFunction>> {
         // Expand with outlined functions for body_block users
@@ -735,6 +803,13 @@ impl<M: Module> CodegenBackend<M> {
             &mir.global_init_values,
             &mir.local_globals,
         )?;
+
+        // Vtable pass: emit one static data object per impl Trait for Struct.
+        // Each data object is N * 8 bytes (one pointer per vtable slot).
+        // The pointer at slot i is the address of the i-th method function.
+        // The struct_name entry in vtable_data_ids is used by compile_struct_init
+        // to write vtable_ptr at offset 0.
+        self.emit_vtable_data_objects(&mir.vtable_impls)?;
 
         // Second pass: compile function bodies
         // Track functions that fail compilation so we can create stubs

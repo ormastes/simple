@@ -147,6 +147,7 @@ pub(crate) fn compile_struct_init<M: Module>(
     field_offsets: &[u32],
     field_types: &[TypeId],
     field_values: &[VReg],
+    vtable_data_id: Option<cranelift_module::DataId>,
 ) {
     let alloc_id = ctx.runtime_funcs["rt_alloc"];
     let alloc_ref = ctx.module.declare_func_in_func(alloc_id, builder.func);
@@ -154,6 +155,13 @@ pub(crate) fn compile_struct_init<M: Module>(
     let size_val = builder.ins().iconst(types::I64, struct_size as i64);
     let call = adapted_call(builder, alloc_ref, &[size_val]);
     let ptr = builder.inst_results(call)[0];
+
+    // Write vtable pointer at offset 0 if this struct implements a trait
+    if let Some(data_id) = vtable_data_id {
+        let vtable_global = ctx.module.declare_data_in_func(data_id, builder.func);
+        let vtable_ptr = builder.ins().global_value(types::I64, vtable_global);
+        builder.ins().store(MemFlags::new(), vtable_ptr, ptr, 0);
+    }
 
     for (i, (offset, field_type)) in field_offsets.iter().zip(field_types.iter()).enumerate() {
         // Handle case where field_values has fewer elements than field_offsets/types

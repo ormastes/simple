@@ -116,6 +116,12 @@ pub struct InstrContext<'a, M: Module> {
     pub import_map: &'a std::sync::Arc<std::collections::HashMap<String, String>>,
     /// Per-module use map: local imported name → mangled name from `use` statements.
     pub use_map: &'a std::collections::HashMap<String, String>,
+    /// Vtable data IDs: struct_name → DataId for trait-impl structs.
+    /// Used by compile_struct_init to write vtable_ptr at offset 0.
+    pub vtable_data_ids: &'a std::collections::BTreeMap<String, cranelift_module::DataId>,
+    /// Vtable data IDs by TypeId (HIR TypeId → DataId).
+    /// Used by MirInst::StructInit which has type_id, not struct_name.
+    pub vtable_type_ids: &'a std::collections::BTreeMap<crate::hir::TypeId, cranelift_module::DataId>,
 }
 
 impl<'a, M: Module> InstrContext<'a, M> {
@@ -534,14 +540,31 @@ pub fn compile_instruction<M: Module>(
                     ctx.vreg_values.insert(*dest, arg_val);
                 }
             } else {
+                // Check if this struct type has a vtable (implements a trait)
+                let vtable_data_id = ctx.vtable_type_ids.get(type_id).copied();
+                // If has_vtable, field offsets from MIR are 0,8,16,... but must be +8 at codegen
+                let shifted_offsets: Vec<u32>;
+                let effective_offsets = if vtable_data_id.is_some() {
+                    shifted_offsets = field_offsets.iter().map(|o| o + 8).collect();
+                    shifted_offsets.as_slice()
+                } else {
+                    field_offsets.as_slice()
+                };
+                // Adjust struct_size to include vtable ptr slot
+                let effective_size = if vtable_data_id.is_some() {
+                    *struct_size as usize + 8
+                } else {
+                    *struct_size as usize
+                };
                 compile_struct_init(
                     ctx,
                     builder,
                     *dest,
-                    *struct_size as usize,
-                    field_offsets,
+                    effective_size,
+                    effective_offsets,
                     field_types,
                     field_values,
+                    vtable_data_id,
                 );
             }
         }

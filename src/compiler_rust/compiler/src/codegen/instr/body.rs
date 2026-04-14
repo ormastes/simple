@@ -95,6 +95,8 @@ pub fn compile_function_body<M: Module>(
     global_ids: &std::collections::BTreeMap<String, cranelift_module::DataId>,
     import_map: &std::sync::Arc<std::collections::HashMap<String, String>>,
     use_map: &std::collections::HashMap<String, String>,
+    vtable_data_ids: &std::collections::BTreeMap<String, cranelift_module::DataId>,
+    vtable_type_ids: &std::collections::BTreeMap<crate::hir::TypeId, cranelift_module::DataId>,
 ) -> InstrResult<()> {
     let mut func_ctx = FunctionBuilderContext::new();
     let mut builder = FunctionBuilder::new(cranelift_func, &mut func_ctx);
@@ -448,6 +450,8 @@ pub fn compile_function_body<M: Module>(
                     async_state_map: &async_state_map,
                     import_map,
                     use_map,
+                    vtable_data_ids,
+                    vtable_type_ids,
                 };
                 compile_yield(&mut instr_ctx, &mut builder, *value)?;
                 // Sync vreg_values → Variables after yield
@@ -473,6 +477,8 @@ pub fn compile_function_body<M: Module>(
                     async_state_map: &async_state_map,
                     import_map,
                     use_map,
+                    vtable_data_ids,
+                    vtable_type_ids,
                 };
                 compile_instruction(&mut instr_ctx, &mut builder, inst)?;
                 // Ensure all vreg values are i64 (extend smaller int types)

@@ -555,6 +555,10 @@ impl<'a> MirLowerer<'a> {
     pub fn lower_module(mut self, hir: &'a HirModule) -> MirLowerResult<MirModule> {
         // Store reference to type registry for unit type bound checks
         self.type_registry = Some(&hir.types);
+        // Store reference to trait_infos for vtable slot resolution and vtable_impls construction
+        if !hir.trait_infos.is_empty() {
+            self.trait_infos = Some(&hir.trait_infos);
+        }
         self.inject_functions.clear();
         self.singleton_cache.clear(); // Clear singleton cache for each module
         self.dependency_graph = crate::di::DependencyGraph::default(); // Reset dependency graph per module (#1009)
@@ -731,6 +735,7 @@ impl<'a> MirLowerer<'a> {
                         let method_fns: Vec<String> =
                             slot_fns.into_iter().map(|(_, fn_name)| fn_name).collect();
                         module.vtable_impls.push((
+                            hir_impl.type_id,
                             hir_impl.type_name.clone(),
                             vtable_sym,
                             method_fns,
