@@ -1,0 +1,93 @@
+# Identity text shaper: codepoints -> ShapedRun -> SkTextBlob
+
+use std.skia.entity.textblob.{SkTextBlob, SkGlyphRun}
+use std.skia.entity.font.{SkFont}
+use std.skia.entity.geometry.{SkPoint}
+use std.skia.feature.shaper.script_detect.{Script, script_of, script_is_rtl}
+use std.skia.feature.shaper.feature_tags.{OpenTypeFeature}
+use std.skia.feature.shaper.font_fallback.{FallbackChain, fallback_chain_font_for_script}
+
+class ShapedRun:
+    script: Script
+    glyph_ids: [u32]
+    positions: [SkPoint]
+    font_handle: i64
+    is_rtl: bool
+
+class Shaper:
+    fallback: FallbackChain
+    features_enabled: [OpenTypeFeature]
+
+fn shaper_new(fallback: FallbackChain) -> Shaper:
+    Shaper(fallback: fallback, features_enabled: [])
+
+fn shaper_with_features(shaper: Shaper, features: [OpenTypeFeature]) -> Shaper:
+    Shaper(fallback: shaper.fallback, features_enabled: features)
+
+fn ascii_to_codepoints(s: text) -> [u32]:
+    # Byte-by-byte ASCII conversion; byte_at takes i64
+    val n = s.len()
+    var cps: [u32] = []
+    var i: i64 = 0
+    while i < n:
+        val b = s.byte_at(i)
+        cps.push(b as u32)
+        i = i + 1
+    cps
+
+fn _build_run(codepoints: [u32], start: i64, end_idx: i64, scr: Script, font: SkFont, start_x: f64, start_y: f64) -> ShapedRun:
+    val rtl = script_is_rtl(scr)
+    var glyph_ids: [u32] = []
+    var positions: [SkPoint] = []
+    val advance = font.size * 0.6
+    var idx: i64 = start
+    while idx < end_idx:
+        glyph_ids.push(codepoints[idx])
+        val offset = (idx - start).to_f64() * advance
+        val px = start_x + offset
+        positions.push(SkPoint(x: px, y: start_y))
+        idx = idx + 1
+    if rtl:
+        var rev_ids: [u32] = []
+        var ri: i64 = glyph_ids.len() - 1
+        while ri >= 0:
+            rev_ids.push(glyph_ids[ri])
+            ri = ri - 1
+        ShapedRun(script: scr, glyph_ids: rev_ids, positions: positions, font_handle: 0, is_rtl: true)
+    else:
+        ShapedRun(script: scr, glyph_ids: glyph_ids, positions: positions, font_handle: 0, is_rtl: false)
+
+fn shaper_shape(shaper: Shaper, codepoints: [u32], font: SkFont, start_x: f64, start_y: f64) -> [ShapedRun]:
+    val n = codepoints.len()
+    var runs: [ShapedRun] = []
+    if n == 0:
+        runs
+    else:
+        var run_start: i64 = 0
+        var run_script = script_of(codepoints[0])
+        var i: i64 = 1
+        while i < n:
+            val cp = codepoints[i]
+            val s = script_of(cp)
+            if s != run_script:
+                val run_font = fallback_chain_font_for_script(shaper.fallback, run_script)
+                val run = _build_run(codepoints, run_start, i, run_script, run_font, start_x, start_y)
+                runs.push(run)
+                run_start = i
+                run_script = s
+            i = i + 1
+        val last_font = fallback_chain_font_for_script(shaper.fallback, run_script)
+        val last_run = _build_run(codepoints, run_start, n, run_script, last_font, start_x, start_y)
+        runs.push(last_run)
+        runs
+
+fn shaped_runs_to_text_blob(runs: [ShapedRun], font: SkFont) -> SkTextBlob:
+    # Convert ShapedRuns to SkTextBlob. SkGlyphRun.glyphs is [i64].
+    var sk_runs: [SkGlyphRun] = []
+    for run in runs:
+        var glyphs_i64: [i64] = []
+        for gid in run.glyph_ids:
+            glyphs_i64.push(gid as i64)
+        val sk_run = SkGlyphRun(font: font, glyphs: glyphs_i64, positions: run.positions)
+        sk_runs.push(sk_run)
+    SkTextBlob(runs: sk_runs)
