@@ -92,3 +92,49 @@ shortcut section — unrelated to shortcut dispatch logic.
 **Also:** The QEMU `qemu_mutex_lock_iothread_impl` assertion crash (addresses
 `0x1ca255`/`0x1ca257`) should be triaged separately — suspected re-entrant
 MMIO call after `isa-debug-exit` fires.
+
+---
+
+## Update Round 12-late — Agent CM2
+
+Live serial tail after HW's registrations landed (VT4 vtable fix also present via pq c4):
+
+```
+[launcher] Registered: Hello World (/sys/apps/hello_world)
+[launcher] Registered: Browser Demo (/sys/apps/browser_demo)
+[launcher] Registered: Minesweeper (/sys/apps/minesweeper)
+[launcher] Registered: Snake (/sys/apps/snake)
+[launcher] Registered: Tetris (/sys/apps/tetris)
+[launcher] Registered: Solitaire (/sys/apps/solitaire)
+[launcher] Registered: Todo (/sys/apps/todo)
+[launcher] Registered: Hex Editor (/sys/apps/hex_editor)
+[launcher] Registered: Network Monitor (/sys/apps/network_monitor)
+[launcher] Registered: Contacts (/sys/apps/contacts)
+[launcher] Registered: Color Picker (/sys/apps/color_picker)
+[launcher] Registry full (32 slots)
+[shell] init: launcher initialized
+[shell] init: desktop shell initialized
+[desktop-e2e] shell-ready
+[desktop-e2e] launcher-ready apps=4
+[desktop-e2e] launcher:ready apps=4
+[desktop-e2e] desktop-ready
+[launcher] Failed to launch Browser Demo: -38
+[browser_demo] render stats nodes=0 pixels=0 mode=local-fallback
+[desktop-e2e] shortcut:ok key=meta+b app=browser_demo mode=local-fallback
+[desktop-e2e] wm:ok pid=4242 app= mode=local-fallback
+[launcher] Failed to launch Hello World: -38
+[desktop-e2e] hello:shortcut:fail
+[desktop-e2e] launch:browser-demo mode=local-fallback
+[desktop-e2e] remote-grouping:ok pid=4242 windows=2 mode=local-fallback
+TEST PASSED
+```
+
+Hello World shortcut: fail (hello:shortcut:fail — -38 ENOSYS, not in builtin registry exec path)
+File Manager shortcut: untested (not exercised by x64-desktop-test scenario)
+Terminal shortcut: untested (not exercised by x64-desktop-test scenario)
+Browser Demo: ok (shortcut:ok mode=local-fallback — B1 fix confirmed)
+
+Note: remote-grouping:ok now fires (NEW vs LV run) — VT4 vtable fix (pq c4) resolved grouping.
+TEST PASSED overall but hello:shortcut:fail remains open.
+
+Next action: continue to next agent — Hello World needs builtin_binary_registry exec path fix (-38 ENOSYS from spawn). File Manager and Terminal registration is in commit vw but their shortcuts are not tested by current scenario.

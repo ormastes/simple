@@ -137,7 +137,31 @@ impl Lowerer {
                     ty: field_ty,
                 })
             }
-            Err(LowerError::CannotInferFieldType { .. }) => {
+            Err(LowerError::CannotInferFieldType { struct_name, .. }) => {
+                // Try to resolve field type via struct name lookup before falling back.
+                // This preserves the real TypeId for self.field.method() chains — without
+                // this, the field node gets ty=ANY which causes MIR to mangle the wrong
+                // method name and emit a recursive self-call (phase4 STOP marker).
+                if let Some(field_ty) = self.try_resolve_field_type_by_name(&struct_name, field) {
+                    if let Ok((field_index, _)) = self.get_field_info(recv_hir.ty, field) {
+                        return Ok(HirExpr {
+                            kind: HirExprKind::FieldAccess {
+                                receiver: recv_hir,
+                                field_index,
+                            },
+                            ty: field_ty,
+                        });
+                    }
+                    // Index unknown but type known — emit FieldAccess at 0 with correct type.
+                    // MIR will use the type for dispatch; layout offset will be resolved later.
+                    return Ok(HirExpr {
+                        kind: HirExprKind::FieldAccess {
+                            receiver: recv_hir,
+                            field_index: 0,
+                        },
+                        ty: field_ty,
+                    });
+                }
                 // Field not found - treat as no-paren method call
                 // This handles cases like container.resolve where resolve is a method
                 Ok(HirExpr {
@@ -152,6 +176,32 @@ impl Lowerer {
             }
             Err(e) => Err(e),
         }
+    }
+
+    /// Resolve the TypeId of a named field on a named struct type.
+    ///
+    /// Used as a fallback in `lower_field_access` when `get_field_info` returns
+    /// `CannotInferFieldType` because the receiver's TypeId is ANY (or otherwise
+    /// unresolved) but we know the struct name from the error payload.  By looking
+    /// up the struct in the type registry by name we can recover the field's real
+    /// TypeId and avoid emitting `ty: TypeId::ANY` on the HIR FieldAccess node —
+    /// which would cause MIR to mangle the wrong method name downstream.
+    fn try_resolve_field_type_by_name(&self, struct_name: &str, field_name: &str) -> Option<TypeId> {
+        // Walk the type registry looking for a Struct whose name matches.
+        for (_, hir_ty) in self.module.types.iter() {
+            if let HirType::Struct { name, fields, .. } = hir_ty {
+                if name == struct_name {
+                    for (fname, fty) in fields.iter() {
+                        if fname == field_name {
+                            return Some(*fty);
+                        }
+                    }
+                    // Struct found but field not present — no point searching further.
+                    return None;
+                }
+            }
+        }
+        None
     }
 
     /// Lower thread_group field access to GPU intrinsics

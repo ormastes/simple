@@ -9,6 +9,9 @@ Two independent pieces land together:
 2. **A libstd PAL** under `library/std/src/sys/pal/simpleos/` that backs the
    primitives libsimpleos_c exposes: allocator, argv, getenv, exit,
    stdio/fs, clock_gettime. Threads/process/pipe/net are Unsupported stubs.
+3. **The public `std::os::simpleos` module** under
+   `library/std/src/os/simpleos/` (ffi + raw type aliases). Mirrors the
+   shape of `std::os::hermit`.
 
 ## Workflow
 

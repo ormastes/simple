@@ -38,6 +38,13 @@ for f in mod.rs alloc.rs args.rs env.rs exit.rs fs.rs io.rs stdio.rs time.rs \
     copy "$HERE/library/std/src/sys/pal/simpleos/$f" "$PAL_DST/$f"
 done
 
+# --- libstd public os::simpleos module -------------------------------------
+OS_DST="$RUST_SRC/library/std/src/os/simpleos"
+mkdir -p "$OS_DST"
+for f in mod.rs ffi.rs raw.rs; do
+    copy "$HERE/library/std/src/os/simpleos/$f" "$OS_DST/$f"
+done
+
 cat <<'NOTE'
 
 --- manual follow-up required -----------------------------------------------
@@ -46,14 +53,22 @@ cat <<'NOTE'
    compiler/rustc_target/src/spec/mod.rs.patch.md in this patch set).
 
 2. Edit library/std/src/sys/pal/mod.rs and add a cfg arm so the new PAL is
-   selected when `target_os = "simpleos"`:
+   selected when `target_os = "simpleos"` (see
+   library/std/src/sys/pal/mod.rs.patch.md in this patch set):
 
        } else if #[cfg(target_os = "simpleos")] {
            mod simpleos;
            pub use self::simpleos::*;
        }
 
-3. Rebuild stage0 and then:
+3. Edit library/std/src/os/mod.rs and add the public re-export so
+   `std::os::simpleos` is reachable from user code (see
+   library/std/src/os/mod.rs.patch.md in this patch set):
+
+       #[cfg(target_os = "simpleos")]
+       pub mod simpleos;
+
+4. Rebuild stage0 and then:
        rustc --target x86_64-unknown-simpleos examples/hello.rs
 -----------------------------------------------------------------------------
 NOTE
