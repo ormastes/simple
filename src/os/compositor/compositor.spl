@@ -17,8 +17,12 @@ use os.drivers.framebuffer.fb_driver.{FramebufferDriver, Color}
 use os.drivers.input.ps2_keyboard.{Ps2Keyboard, KeyEvent, Key}
 use os.drivers.input.ps2_mouse.{Ps2Mouse, MouseEvent}
 use os.compositor.decorations.{draw_window_frame, draw_glass_window_frame, draw_glass_window_frame_enhanced, TITLE_BAR_HEIGHT, BORDER_WIDTH, client_area_x, client_area_y, client_area_width, client_area_height, is_in_title_bar, is_in_close_button}
-use os.compositor.glass_effects.{GlassConfig, glass_begin_frame, glass_present, glass_gradient_v, draw_glass_rect}
-# glass_effects_pure.GlassConfig not imported — we use GlassPortConfig for pure Simple path
+use os.compositor.glass_effects_pure.{GlassConfig, glass_begin_frame_pure, glass_present_pure, glass_gradient_v_pure, draw_glass_rect_pure}
+# D2 Phase 3 (2026-04-14): glass_effects.spl removed; pure-Simple GlassConfig
+# (u32/u8/i32 fields sourced from glass_numeric_tokens) is now the only
+# compositor glass-config type. The legacy C-FFI baremetal path below now
+# routes through `glass_dispatch` so it degrades gracefully when the active
+# backend opts out of CompositorGlassCapable.
 use os.compositor.glass_port.{GlassPort, GlassPortConfig, glass_port_name, register_pure_glass, gp_begin_frame, gp_present, gp_gradient_v, gp_draw_rect, gp_draw_text, gp_fill}
 use os.compositor.cursor.{CursorState, default_cursor_state, draw_cursor}
 use os.compositor.fb_backend.{_render_tree, resolve_theme, CHAR_W, CHAR_H}
@@ -855,11 +859,13 @@ impl Compositor:
                 # Pure Simple glass path — uses CompositorBackend trait via DI port
                 self._render_glass_pure()
             else:
-                # C FFI glass path (baremetal QEMU)
-                val sw = self.screen_width.to_u64()
-                val sh = self.screen_height.to_u64()
-                glass_begin_frame(sw, sh)
-                glass_gradient_v(0, 0, sw, sh, self.glass_config.bg_top, self.glass_config.bg_bottom)
+                # Backend-routed glass path (baremetal QEMU + any other non-pure
+                # port). Goes through `glass_effects_pure` / `glass_dispatch`
+                # so backends that opted out of CompositorGlassCapable
+                # (Engine2d, Gpu in D2 Phase 1) silently degrade to opaque fill.
+                glass_begin_frame_pure(self.backend, self.screen_width, self.screen_height)
+                glass_gradient_v_pure(self.backend, 0, 0, self.screen_width, self.screen_height,
+                                      self.glass_config.bg_top, self.glass_config.bg_bottom)
 
                 var idx: i32 = 0
                 for surface in self.surfaces:
@@ -869,7 +875,7 @@ impl Compositor:
                     idx = idx + 1
 
                 draw_cursor(self.backend, self.screen_width, self.screen_height, self.cursor)
-                glass_present()
+                glass_present_pure(self.backend)
         else:
             # Standard compositing path
             self.backend.clear(self.desktop_bg)
@@ -895,25 +901,14 @@ impl Compositor:
         All via CompositorBackend trait — works on hosted + baremetal.
         """
         val gc = self.glass_config
-        # Convert u64 GlassConfig to u32/u8/i32 GlassPortConfig for pure Simple path
-        val sc: u32 = gc.surface_color
-        val sa: u8 = gc.surface_alpha
-        val br: u32 = gc.blur_radius
-        val bc: u32 = gc.border_color
-        val ba: u8 = gc.border_alpha
-        val so: i32 = gc.shadow_offset
-        val sb: u32 = gc.shadow_blur
-        val sha: u8 = gc.shadow_alpha
-        val ac: u32 = gc.accent_color
-        val ac2: u32 = gc.accent2_color
-        val bgt: u32 = gc.bg_top
-        val bgb: u32 = gc.bg_bottom
+        # GlassConfig (post-D2 Phase 3) already carries u32/u8/i32 fields,
+        # matching GlassPortConfig directly — no narrowing needed.
         val cfg = GlassPortConfig(
-            surface_color: sc, surface_alpha: sa,
-            blur_radius: br, border_color: bc, border_alpha: ba,
-            shadow_offset: so, shadow_blur: sb, shadow_alpha: sha,
-            accent_color: ac, accent2_color: ac2,
-            bg_top: bgt, bg_bottom: bgb
+            surface_color: gc.surface_color, surface_alpha: gc.surface_alpha,
+            blur_radius: gc.blur_radius, border_color: gc.border_color, border_alpha: gc.border_alpha,
+            shadow_offset: gc.shadow_offset, shadow_blur: gc.shadow_blur, shadow_alpha: gc.shadow_alpha,
+            accent_color: gc.accent_color, accent2_color: gc.accent2_color,
+            bg_top: gc.bg_top, bg_bottom: gc.bg_bottom
         )
 
         # 1. Enhanced wallpaper with stars, vignette, tech grid
@@ -1916,8 +1911,8 @@ fn _render_window(backend: CompositorBackend, surface: WindowSurface, focused: b
 fn _render_glass_window(backend: CompositorBackend, surface: WindowSurface, focused: bool, config: GlassConfig):
     """Render a single window with glassmorphism decorations + client area.
 
-    Uses glass_effects for the window frame, then renders client content
-    on top of the glass surface.
+    Uses glass_effects_pure (via glass_dispatch) for the window frame,
+    then renders client content on top of the glass surface.
     """
     draw_glass_window_frame(backend, surface.x, surface.y, surface.width, surface.height, surface.title, focused, config)
 

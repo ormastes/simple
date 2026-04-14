@@ -1,6 +1,23 @@
 /*
  * Glass Rendering Primitives for SimpleOS
  *
+ * DEPRECATED 2026-04-14 (D2 Phase 3): the in-tree compositor facade
+ * `src/os/compositor/glass_effects.spl` has been deleted, so the only
+ * remaining in-tree callers of the `rt_gui_blend_fill / box_blur /
+ * gradient_v / read_pixel / shadow / shadow_fill / gradient_h /
+ * begin_frame / present` symbols implemented below are:
+ *   - `src/os/compositor/display_backend.spl` (FbCompositorBackend's
+ *     CompositorGlassCapable impl) — kept until D2 Phase 2 reimplements
+ *     blend/blur natively against FramebufferDriver.
+ *   - The standalone arch-layer entry points `wm_entry.spl`,
+ *     `desktop_entry.spl`, `gpu_render_test_entry.spl` — out of D2 scope.
+ * Once D2 Phase 2 lands and FbCompositorBackend is verified on the native
+ * impl, this translation unit becomes safe to delete (next cycle). Kept
+ * for one cycle so out-of-tree callers (if any) do not break.
+ *
+ * NOTE: arm64 and riscv64 reach this same source via symlink — the
+ * deprecation note above applies to all three baremetal arches.
+ *
  * Portable reference impl, per doc/06_spec/runtime/rt_gui_glass_contract.md
  * (ARGB8888 straight-alpha, exclusive right/bottom, 5-pass separable box blur).
  *

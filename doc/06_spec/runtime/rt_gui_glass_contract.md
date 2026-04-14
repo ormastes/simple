@@ -107,6 +107,21 @@ remain C-only during Phase 2.
 
 Rows = backend. Columns = `blend_fill` · `box_blur` · `gradient_v` · `read_pixel`. Cell = current state on main.
 
+**D2 Phase 3 update (2026-04-14):** the legacy `src/os/compositor/glass_effects.spl`
+facade — which wrapped the deprecated `rt_gui_*` externs and was the historical
+"u64-typed" entry point — is now **deleted**. All in-tree callers now go through
+`glass_effects_pure.spl` → `glass_dispatch.cap_*` → `CompositorGlassCapable`, so
+each backend's compliance is determined entirely by its `CompositorGlassCapable`
+impl (or absence thereof). The `rt_gui_blend_fill / box_blur / gradient_v /
+read_pixel` C symbols now have only two in-tree consumers: (a) `FbCompositorBackend`'s
+own `CompositorGlassCapable` impl in `display_backend.spl:156-170` (kept until
+D2 Phase 2 reimplements blend/blur natively against `FramebufferDriver`), and
+(b) the standalone arch-layer entry points `examples/simple_os/arch/{arm64,
+x86_64}/wm_entry.spl`, `arch/x86_64/desktop_entry.spl`, and
+`arch/x86_64/gpu_render_test_entry.spl`, which are out of D2 scope. The
+deprecated facade row that previously said "any caller via `glass_effects.spl`
+→ rt_gui_*" can be retired — there are zero such callers as of Phase 3.
+
 | Backend | blend_fill | box_blur | gradient_v | read_pixel |
 |---|---|---|---|---|
 | `FbCompositorBackend` (`display_backend.spl:120-138`) | compliant via C | compliant via C | compliant via C | compliant via C |
@@ -114,6 +129,7 @@ Rows = backend. Columns = `blend_fill` · `box_blur` · `gradient_v` · `read_pi
 | `HostedCompositorBackend` (`hosted_backend.spl:136-163`) | compliant via `rt_winit_buffer_blend_rect` (winit_ffi.rs:1507-1549) | compliant via `rt_winit_buffer_blur` (winit_ffi.rs:1551-1644), **3-pass** not 5-pass | compliant via `rt_winit_buffer_gradient_v` (winit_ffi.rs:1646-1687) | compliant via `rt_winit_buffer_read_pixel` (winit_ffi.rs:1487-1505) |
 | `BrowserCompositorBackend` (`browser_compositor_backend.spl:95,129,214,238`) | compliant — pure Simple srcOver | **approximate** — HVHVH native, matches C pass count | compliant | compliant |
 | `Engine2dCompositorBackend` (`compositor_engine2d.spl`) | **opt-out in Phase 1; native impl deferred to Phase 2** — no `impl CompositorGlassCapable`; extern block and glass method impls deleted. Callers degrade to opaque `fill_rect` via `glass_dispatch.cap_*`. | same | same | same |
+| ~~`glass_effects.spl` u64 facade~~ (deleted Phase 3) | n/a — removed 2026-04-14 | n/a | n/a | n/a |
 
 ### Arch-layer glass C source status
 

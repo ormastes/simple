@@ -23,6 +23,22 @@ CompositorGlassCapable impls for `Engine2dCompositorBackend` and
 `GpuCompositorBackend`) remains open; `glass_effects.spl` is unchanged in Phase 1
 and targeted for deletion in Phase 3.**
 
+**Status: Phase 3 implemented 2026-04-14.** `src/os/compositor/glass_effects.spl`
+deleted; the four importers (`compositor.spl`, `decorations.spl`, `mod.spl`, plus
+`test/unit/lib/common/glass_token_unification_spec.spl`) migrated to
+`glass_effects_pure.spl` (which now also exposes `obsidian_dark()` and sources
+all factory values from `common.ui.glass_numeric_tokens` so AC-7 token
+unification is preserved). The legacy "C-FFI baremetal" branch in
+`Compositor.render()` now routes through `glass_begin_frame_pure` /
+`glass_gradient_v_pure` / `glass_present_pure`, which go via `glass_dispatch`
+and degrade gracefully on backends that opted out of `CompositorGlassCapable`.
+The deprecated `rt_gui_blend_fill / box_blur / gradient_v / read_pixel`
+extern declarations in `display_backend.spl` (for `FbCompositorBackend`'s
+`CompositorGlassCapable` impl) and the standalone
+`examples/simple_os/arch/*/wm_entry.spl`, `desktop_entry.spl`,
+`gpu_render_test_entry.spl` remain — those callers are out of D2 scope and
+will be removed once Phase 2 lands native per-backend glass.
+
 ---
 
 ## 1. Scope

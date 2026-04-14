@@ -189,3 +189,27 @@ production entry and must stay minimal.
 - [ ] `examples/simple_os/hosted/hosted_wm_compare.spl` and `hosted_wm_verify.spl` run green under `SIMPLE_GUI=1 bin/simple run ...` with no `extern fn rt_winit_buffer_*` in their source.
 - [ ] `dual_backend.spl` no longer declares `extern fn rt_winit_buffer_*`; its two call sites at `:83` and `:93` route through `self.native_backend.*`.
 - [ ] `test/system/os/hosted_wm_system_test.spl` renders the same BMP as before (byte-identical or pixel-diff < 1), proving the trait path is behavior-preserving vs. the raw-FFI path.
+
+---
+
+## 8. Status: app-layer migration implemented 2026-04-14
+
+App-layer + `src/os/compositor/dual_backend.spl` migration landed in this pass.
+
+**Migrated (R4 + R6):**
+- `src/os/compositor/hosted_backend.spl` — added `fn save_bmp(path: text) -> bool` (R4) and the `extern fn rt_winit_buffer_save_bmp` decl alongside the existing winit buffer extern block. `HostedCompositorBackend` now exposes the full method surface listed in §7.
+- `src/os/compositor/dual_backend.spl:83` — `rt_winit_buffer_get_pixels(self.native_backend.buffer_id)` → `self.native_backend.get_pixels()`.
+- `src/os/compositor/dual_backend.spl:93` — `rt_winit_buffer_save_bmp(self.native_backend.buffer_id, native_path)` → `self.native_backend.save_bmp(native_path)`.
+- `src/os/compositor/dual_backend.spl:18-19` — both `extern fn rt_winit_buffer_*` decls deleted. The remaining `extern fn rt_winit_save_pixels_bmp` decl (different family — operates on a Simple `[u32]`, not a winit buffer handle) is intentionally kept; out of scope for this catalog.
+- `src/app/**` — verified zero `rt_winit_buffer_*` hits (matches §6 ordering note); no app-layer files needed migration.
+
+**Deferred to follow-up passes:**
+- `examples/simple_os/hosted/hosted_wm_compare.spl` (3 externs + 3 call sites, R1/R2/R3).
+- `examples/simple_os/hosted/hosted_wm_verify.spl` (4 externs + 5 call sites, R1/R3/R4) — `save_bmp` method now available, unblocked.
+- `test/system/os/hosted_wm_system_test.spl` (5 externs + 11 call sites) — test-fixture pass.
+- `test/system/os/simpleos_capabilities_test.spl` — keep raw FFI per §2 (intentional FFI probe).
+- R5 (`hosted_entry.spl` create-fold) — optional tightening, not done here.
+
+**FFI surface:** `rt_winit_buffer_save_bmp` already exists in
+`src/compiler_rust/compiler/src/interpreter_extern/winit_ffi.rs:1431`. No
+Rust-side FFI changes were needed.
