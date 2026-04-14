@@ -13,6 +13,7 @@ use std.fs
 use std.process
 use std.text
 use std.cli
+use std.env
 
 # ============================================================================
 # Configuration
@@ -28,6 +29,28 @@ val SUPPORTED_TARGETS = [
 val RUST_SEED_DIR = "src/compiler_rust"
 val DEFAULT_BUILD_DIR = "build/os/bootstrap"
 val DEFAULT_SYSROOT = "build/os/sysroot"
+val IN_GUEST_SYSROOT = "/usr/sysroot"
+
+# Maximum attempts for a transient cross-link invocation before giving up.
+val CROSS_LINK_MAX_ATTEMPTS = 3
+
+fn effective_sysroot(config_sysroot: text, target: text) -> text:
+    """Resolve the sysroot path, respecting SIMPLE_SYSROOT env and in-guest
+    layout.
+
+    Resolution order:
+      1. `SIMPLE_SYSROOT` env var, if set (explicit override).
+      2. `/usr/sysroot` when running in-guest (target ends `-simpleos`
+         AND the in-guest sysroot actually exists on disk).
+      3. The caller-supplied `config_sysroot` (host-relative default
+         `build/os/sysroot`).
+    """
+    val env_sysroot = env.get("SIMPLE_SYSROOT")
+    if env_sysroot != "" :
+        return env_sysroot
+    if target.ends_with("-simpleos") and fs.dir_exists(IN_GUEST_SYSROOT):
+        return IN_GUEST_SYSROOT
+    config_sysroot
 
 # Subtrees dropped from `--source` when cross-building for `-simpleos` targets.
 # These modules are dominated by host-only externs (GPU, TLS, CUDA, Torch) with
@@ -332,15 +355,17 @@ fn cross_compile_seed(config: CrossConfig) -> bool:
         # Fallback: use the triple directly and hope rustc knows it
         print "[seed] WARNING: target spec {target_spec} not found, using triple directly"
 
-    # Linker flags for SimpleOS
+    # Linker flags for SimpleOS -- resolve sysroot via effective_sysroot()
+    # so that SIMPLE_SYSROOT / in-guest /usr/sysroot overrides are honored.
+    val sysroot = effective_sysroot(config_sysroot: config.sysroot_dir, target: config.target)
     val linker_flags = [
         "-nostdlib",
         "-ffreestanding",
         "-static",
-        "-T", "{config.sysroot_dir}/share/simpleos/simpleos.ld",
-        "-L", "{config.sysroot_dir}/lib",
+        "-T", "{sysroot}/share/simpleos/simpleos.ld",
+        "-L", "{sysroot}/lib",
         "-lsimpleos_c",
-        "{config.sysroot_dir}/lib/crt0.o",
+        "{sysroot}/lib/crt0.o",
     ]
     val link_args = linker_flags.join(" ")
 
@@ -387,6 +412,24 @@ fn cross_compile_seed(config: CrossConfig) -> bool:
 # ============================================================================
 # Build Stages
 # ============================================================================
+
+fn build_stage_cross_with_retry(config: CrossConfig, stage: i64, compiler: text) -> bool:
+    """Retry wrapper around `build_stage_cross`.
+
+    Cross-link invocations can fail transiently (filesystem races on tmpfs,
+    cargo/rustc lock contention under `-j`, NFS hiccups). We retry up to
+    `CROSS_LINK_MAX_ATTEMPTS` times, logging the attempt number so a human
+    can tell a retry from a fresh build.
+    """
+    var attempt = 1
+    while attempt <= CROSS_LINK_MAX_ATTEMPTS:
+        if attempt > 1:
+            print "[stage {stage}] Retrying cross-link (attempt {attempt}/{CROSS_LINK_MAX_ATTEMPTS})"
+        if build_stage_cross(config, stage, compiler):
+            return true
+        attempt = attempt + 1
+    print "[stage {stage}] FAILED after {CROSS_LINK_MAX_ATTEMPTS} attempts"
+    false
 
 fn build_stage_cross(config: CrossConfig, stage: i64, compiler: text) -> bool:
     """Build one stage of the bootstrap.
@@ -507,12 +550,32 @@ fn package_bootstrap(config: CrossConfig) -> bool:
         print "[package] ERROR: tar failed"
         return false
 
+    # Archive validation: re-open the tarball and confirm it lists at least
+    # the binary + verification script we just put in. A corrupt gzip or a
+    # truncated tar would slip past the exit code above on some systems.
+    val verify_cmd = "tar -tzf {archive}"
+    val verify = process.run("sh", ["-c", verify_cmd])
+    if verify.exit_code != 0:
+        print "[package] ERROR: archive verification failed (tar -tzf)"
+        if verify.stderr.len() > 0:
+            print verify.stderr
+        return false
+    val listing = verify.stdout
+    if not listing.contains("bin/simple") or not listing.contains("bootstrap_verify.spl"):
+        print "[package] ERROR: archive is missing expected entries"
+        print "[package]   wanted: bin/simple, bootstrap_verify.spl"
+        return false
+    val entry_count = listing.split("\n").len()
+    if entry_count < 2:
+        print "[package] ERROR: archive entry count ({entry_count}) below expected"
+        return false
+
     val stat = fs.stat(archive)
     if stat.is_ok():
         val size_mb = stat.unwrap().size / (1024 * 1024)
-        print "[package] Archive ready: {archive} ({size_mb} MB)"
+        print "[package] Archive ready: {archive} ({size_mb} MB, {entry_count} entries)"
     else:
-        print "[package] Archive ready: {archive}"
+        print "[package] Archive ready: {archive} ({entry_count} entries)"
 
     true
 
@@ -545,17 +608,17 @@ fn run_cross_bootstrap(config: CrossConfig) -> bool:
 
     val seed = config.seed_output_path()
 
-    # Step 2: Stage 1 (seed -> Stage 1)
+    # Step 2: Stage 1 (seed -> Stage 1) -- retry transient cross-link fails.
     print ""
     print "--- Step 2: Stage 1 (seed -> compiler) ---"
-    if not build_stage_cross(config, 1, seed):
+    if not build_stage_cross_with_retry(config, 1, seed):
         print "FAILED at Stage 1"
         return false
 
-    # Step 3: Stage 2 (Stage 1 -> Stage 2)
+    # Step 3: Stage 2 (Stage 1 -> Stage 2) -- retry transient cross-link fails.
     print ""
     print "--- Step 3: Stage 2 (self-compile) ---"
-    if not build_stage_cross(config, 2, config.stage_path(1)):
+    if not build_stage_cross_with_retry(config, 2, config.stage_path(1)):
         print "FAILED at Stage 2"
         return false
 

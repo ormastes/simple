@@ -1,0 +1,328 @@
+## Initramfs image packager for SimpleOS QEMU boot.
+##
+## Bundles the Simple compiler binary, the source tree, LLVM cross tools,
+## a sysroot, and a /sbin/init placeholder into a newc cpio archive
+## compressed with zstd. The resulting image is loaded by QEMU via
+## `-initrd build/os/initramfs.img.zst`.
+##
+## Usage:
+##   bin/simple run src/os/port/initramfs_pack.spl -- --help
+##   bin/simple run src/os/port/initramfs_pack.spl -- build
+##   bin/simple run src/os/port/initramfs_pack.spl -- build --output build/os/initramfs.img.zst
+##   bin/simple run src/os/port/initramfs_pack.spl -- validate build/os/initramfs.img.zst
+
+use std.fs
+use std.process
+use std.text
+use std.cli
+
+val DEFAULT_SIMPLE_BINARY = "build/bootstrap/stage3/simple_simpleos"
+val DEFAULT_LLVM_PREFIX = "build/os/llvm/cross/bin"
+val DEFAULT_SYSROOT = "build/os/sysroot"
+val DEFAULT_SOURCE_TREE = "src"
+val DEFAULT_OUTPUT = "build/os/initramfs.img.zst"
+val DEFAULT_STAGING = "build/os/initramfs-staging"
+val CLANG_RESOURCE_VER = "19"  # clang resource dir version
+
+val LLVM_TOOLS: [text] = [
+    "clang", "lld", "llvm-ar", "llvm-nm",
+    "llvm-ranlib", "llvm-objdump", "llvm-objcopy", "llvm-strip",
+]
+
+class PackConfig:
+    simple_binary: text
+    llvm_prefix: text
+    sysroot: text
+    source_tree: text
+    output: text
+    staging: text
+
+fn usage():
+    print "Usage: bin/simple run src/os/port/initramfs_pack.spl -- <command> [options]"
+    print ""
+    print "Commands:"
+    print "  build                    Build an initramfs image"
+    print "  validate <image>         Validate an existing image"
+    print "  --help                   Show this help"
+    print ""
+    print "Build options:"
+    print "  --simple-binary <p>      Simple compiler binary (default: {DEFAULT_SIMPLE_BINARY})"
+    print "  --llvm-prefix <p>        LLVM bin dir (default: {DEFAULT_LLVM_PREFIX})"
+    print "  --sysroot <p>            Sysroot dir (default: {DEFAULT_SYSROOT})"
+    print "  --source-tree <p>        Source tree (default: {DEFAULT_SOURCE_TREE})"
+    print "  --output <p>             Output image (default: {DEFAULT_OUTPUT})"
+    print "  --staging <p>            Staging dir (default: {DEFAULT_STAGING})"
+
+fn parse_args(args: List<text>) -> (text, PackConfig, text):
+    """Return (command, config, validate_arg)."""
+    var command = ""
+    var validate_arg = ""
+    var simple_binary = DEFAULT_SIMPLE_BINARY
+    var llvm_prefix = DEFAULT_LLVM_PREFIX
+    var sysroot = DEFAULT_SYSROOT
+    var source_tree = DEFAULT_SOURCE_TREE
+    var output = DEFAULT_OUTPUT
+    var staging = DEFAULT_STAGING
+
+    var i = 0
+    while i < args.len():
+        val arg = args[i]
+        if arg == "--help" or arg == "-h":
+            usage()
+            process.exit(0)
+        else if arg == "build" and command == "":
+            command = "build"
+        else if arg == "validate" and command == "":
+            command = "validate"
+            if i + 1 < args.len():
+                i = i + 1
+                validate_arg = args[i]
+        else if arg == "--simple-binary":
+            i = i + 1
+            simple_binary = args[i]
+        else if arg == "--llvm-prefix":
+            i = i + 1
+            llvm_prefix = args[i]
+        else if arg == "--sysroot":
+            i = i + 1
+            sysroot = args[i]
+        else if arg == "--source-tree":
+            i = i + 1
+            source_tree = args[i]
+        else if arg == "--output":
+            i = i + 1
+            output = args[i]
+        else if arg == "--staging":
+            i = i + 1
+            staging = args[i]
+        i = i + 1
+
+    if command == "":
+        print "error: no command given"
+        usage()
+        process.exit(2)
+
+    val config = PackConfig(
+        simple_binary: simple_binary,
+        llvm_prefix: llvm_prefix,
+        sysroot: sysroot,
+        source_tree: source_tree,
+        output: output,
+        staging: staging,
+    )
+    (command, config, validate_arg)
+
+fn ensure_dir(path: text):
+    if not fs.dir_exists(path):
+        fs.create_dir_all(path)
+
+fn stage_file(src: text, dst: text, optional: bool):
+    """Copy a single file into the staging tree. If optional=true and
+    src is missing, skip with a warning."""
+    if not fs.exists(src):
+        if optional:
+            print "[pack]   skip (missing): {src}"
+            return
+        print "error: required file missing: {src}"
+        process.exit(1)
+    ensure_dir(fs.parent(dst))
+    val result = process.run("cp", [src, dst])
+    if result.exit_code != 0:
+        print "error: failed to copy {src} -> {dst}"
+        print result.stderr
+        process.exit(1)
+
+fn stage_tree(src: text, dst: text, optional: bool):
+    """Recursively copy a directory tree into the staging area."""
+    if not fs.dir_exists(src):
+        if optional:
+            print "[pack]   skip (missing dir): {src}"
+            return
+        print "error: required directory missing: {src}"
+        process.exit(1)
+    ensure_dir(fs.parent(dst))
+    val result = process.run("cp", ["-a", src, dst])
+    if result.exit_code != 0:
+        print "error: failed to copy tree {src} -> {dst}"
+        print result.stderr
+        process.exit(1)
+
+fn write_stub_init(path: text):
+    """Write a tiny /sbin/init placeholder (shell stub)."""
+    ensure_dir(fs.parent(path))
+    val body = "#!/bin/sh\n# SimpleOS init placeholder\nexec /bin/simple run /src/app/simpleos/init.spl\n"
+    fs.write_text(path, body)
+    process.run_checked("chmod", ["+x", path])
+
+fn write_hello_c(path: text):
+    ensure_dir(fs.parent(path))
+    fs.write_text(path, "int main(void) { return 0; }\n")
+
+fn populate_staging(config: PackConfig):
+    """Copy all desired payloads into the staging directory."""
+    val s = config.staging
+    print "[pack] populating staging dir: {s}"
+
+    # Clean + recreate
+    if fs.dir_exists(s):
+        process.run_checked("rm", ["-rf", s])
+    ensure_dir(s)
+
+    # /bin/simple
+    stage_file(src: config.simple_binary, dst: "{s}/bin/simple", optional: false)
+
+    # /usr/bin/<llvm tools>
+    for tool in LLVM_TOOLS:
+        val src_path = "{config.llvm_prefix}/{tool}"
+        stage_file(src: src_path, dst: "{s}/usr/bin/{tool}", optional: true)
+
+    # /usr/include
+    stage_tree(src: "{config.sysroot}/include", dst: "{s}/usr/include", optional: true)
+
+    # /usr/lib libraries from sysroot
+    stage_file(
+        src: "{config.sysroot}/lib/libsimpleos_c.a",
+        dst: "{s}/usr/lib/libsimpleos_c.a",
+        optional: true,
+    )
+    stage_file(
+        src: "{config.sysroot}/lib/crt0.o",
+        dst: "{s}/usr/lib/crt0.o",
+        optional: true,
+    )
+
+    # /usr/lib/clang/<ver>/lib/simpleos/libclang_rt.builtins-x86_64.a
+    val rt_src = "{config.sysroot}/lib/clang/{CLANG_RESOURCE_VER}/lib/simpleos/libclang_rt.builtins-x86_64.a"
+    val rt_dst = "{s}/usr/lib/clang/{CLANG_RESOURCE_VER}/lib/simpleos/libclang_rt.builtins-x86_64.a"
+    stage_file(src: rt_src, dst: rt_dst, optional: true)
+
+    # /usr/share/simpleos/simpleos.ld
+    stage_file(
+        src: "{config.sysroot}/share/simpleos/simpleos.ld",
+        dst: "{s}/usr/share/simpleos/simpleos.ld",
+        optional: true,
+    )
+
+    # /src  (full source tree)
+    stage_tree(src: config.source_tree, dst: "{s}/src", optional: false)
+
+    # /usr/share/test/hello.c
+    write_hello_c("{s}/usr/share/test/hello.c")
+
+    # /sbin/init
+    write_stub_init("{s}/sbin/init")
+
+fn run_cpio(staging: text, cpio_path: text):
+    """Invoke cpio via sh -c so we can pipe `find`. The shell is used
+    only for the pipeline; no logic lives here."""
+    ensure_dir(fs.parent(cpio_path))
+    val abs_cpio = fs.absolute(cpio_path)
+    val cmd = "cd \"{staging}\" && find . -print0 | cpio --null -o -H newc > \"{abs_cpio}\""
+    print "[pack] running cpio: {cmd}"
+    val result = process.run("sh", ["-c", cmd])
+    if result.exit_code != 0:
+        print "error: cpio failed"
+        print result.stderr
+        process.exit(1)
+
+fn run_zstd(cpio_path: text, zst_path: text):
+    print "[pack] compressing with zstd -19: {zst_path}"
+    val result = process.run("zstd", ["-19", "-f", cpio_path, "-o", zst_path])
+    if result.exit_code != 0:
+        print "error: zstd failed"
+        print result.stderr
+        process.exit(1)
+
+fn emit_manifest(staging: text, output: text):
+    """Emit <output>.sdn listing every staged entry with its size."""
+    val manifest = "{output}.sdn"
+    ensure_dir(fs.parent(manifest))
+    val cmd = "cd \"{staging}\" && find . -type f -printf \"%p %s\\n\""
+    val result = process.run("sh", ["-c", cmd])
+    if result.exit_code != 0:
+        print "warning: manifest find failed; skipping"
+        return
+
+    var text = "initramfs_manifest {\n"
+    text = text + "  image: \"{output}\"\n"
+    text = text + "  entries: [\n"
+    for line in result.stdout.split("\n"):
+        val trimmed = line.trim()
+        if trimmed != "":
+            val parts = trimmed.split(" ")
+            if parts.len() >= 2:
+                val path = parts[0]
+                val size = parts[parts.len() - 1]
+                text = text + "    { path: \"{path}\", size: {size} }\n"
+    text = text + "  ]\n"
+    text = text + "}\n"
+    fs.write_text(manifest, text)
+    print "[pack] manifest: {manifest}"
+
+fn cmd_build(config: PackConfig):
+    print "=== initramfs build ==="
+    print "  simple: {config.simple_binary}"
+    print "  llvm:   {config.llvm_prefix}"
+    print "  sysroot: {config.sysroot}"
+    print "  src:    {config.source_tree}"
+    print "  output: {config.output}"
+
+    populate_staging(config)
+
+    val cpio_path = "{config.staging}.cpio"
+    run_cpio(staging: config.staging, cpio_path: cpio_path)
+    run_zstd(cpio_path: cpio_path, zst_path: config.output)
+    emit_manifest(staging: config.staging, output: config.output)
+
+    if fs.exists(config.output):
+        val size = fs.size(config.output)
+        print "[pack] image size: {size} bytes"
+    else:
+        print "error: output file missing after pack"
+        process.exit(1)
+    print "=== initramfs build complete ==="
+
+fn validate_image(image: text) -> bool:
+    if not fs.exists(image):
+        print "validate: FAIL — image missing: {image}"
+        return false
+    val size = fs.size(image)
+    if size == 0:
+        print "validate: FAIL — image is empty: {image}"
+        return false
+    print "validate: image size {size} bytes"
+
+    # Decompress + list entries. We require zstd + cpio on the host.
+    val cmd = "zstd -d -c \"{image}\" | cpio -tv 2>&1"
+    val result = process.run("sh", ["-c", cmd])
+    if result.exit_code != 0:
+        print "validate: FAIL — zstd|cpio listing failed"
+        print result.stderr
+        return false
+
+    val listing = result.stdout
+    var ok = true
+    val required: [text] = ["bin/simple", "usr/bin/clang", "src"]
+    for entry in required:
+        if not listing.contains(entry):
+            print "validate: FAIL — missing entry: {entry}"
+            ok = false
+
+    if ok:
+        print "validate: PASS"
+    ok
+
+fn main():
+    val raw_args = cli.args()
+    val (command, config, validate_arg) = parse_args(raw_args)
+
+    if command == "build":
+        cmd_build(config)
+    else if command == "validate":
+        val target = if validate_arg != "": validate_arg else: config.output
+        val ok = validate_image(target)
+        if not ok:
+            process.exit(1)
+    else:
+        usage()
+        process.exit(2)

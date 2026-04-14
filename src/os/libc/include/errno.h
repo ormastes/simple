@@ -53,6 +53,7 @@ extern int errno;
 #define ENOTEMPTY   39   /* Directory not empty */
 #define ELOOP       40   /* Too many symbolic links */
 #define ENOMSG      42   /* No message of desired type */
+#define EILSEQ      84   /* Illegal byte sequence */
 
 /* Network error codes (extended) */
 #define ENOTSOCK     88  /* Socket operation on non-socket */

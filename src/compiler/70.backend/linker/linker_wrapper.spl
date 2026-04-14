@@ -22,6 +22,7 @@ use std.io_runtime.{ShellResult, shell, shell_output, file_exists, file_copy, fi
 use std.log.{debug, info}
 use std.string_builder.{StringBuilder}
 
+use compiler.backend.linker.lld_ffi.{LldResult, lld_elf_link}
 use compiler.backend.linker.mold.{MoldBackend, MoldConfig, find_linker, LinkerType, execute_linker, create_temp_dir, cleanup_temp_dir, linker_file_size}
 use compiler.backend.linker.object_provider.{ObjectProvider, ObjectProviderConfig}
 use compiler.backend.linker.object_code_unit.{ObjectCodeUnit}
@@ -75,6 +76,12 @@ struct CrtFiles:
     dynamic_linker: text # e.g., /lib64/ld-linux-x86-64.so[2]
     lib_dirs: [text]     # System library search paths
     found: bool
+
+fn is_simpleos_target() -> bool:
+    val t = env_get("SIMPLE_TARGET")
+    if t == nil:
+        return false
+    t.ends_with("-simpleos")
 
 fn detect_preferred_backend(extra_flags: [text]) -> text:
     for flag in extra_flags:
@@ -261,6 +268,19 @@ fn link_native_unix(object_files: [text], output: text, config: NativeLinkConfig
     # CRT epilogue: crtend.o, crtn.o (after libs)
     args.push(crt.crtend)
     args.push(crt.crtn)
+
+    # SimpleOS: link in-process via LLD FFI — no fork/exec available on guest.
+    if is_simpleos_target():
+        var lld_args: [text] = ["ld.lld"]
+        for a in args:
+            lld_args.push(a)
+        val lld_res = lld_elf_link(lld_args)
+        if lld_res.exit_code != 0:
+            return Err("in-process lld failed: {lld_res.stderr_text}")
+        if config.verbose:
+            val size = linker_file_size(output)
+            print "[linker-wrapper] Native binary (in-process lld): {output} ({size} bytes)"
+        return Ok(output)
 
     # Execute linker
     val exec_result = execute_linker(linker_path, args)

@@ -7,8 +7,9 @@
  * Syscall numbers (from src/os/kernel/ipc/syscall.spl):
  *   30  = Open         31  = Read          32  = Write         33  = Close
  *   34  = Stat         35  = Mkdir         36  = Readdir
- *   39  = Unlink       44  = Rename        45  = Rmdir
- *   46  = Lseek        47  = Getcwd        48  = Chdir
+ *   39  = Unlink       43  = Ftruncate     44  = Rename
+ *   45  = Rmdir        46  = Lseek         47  = Getcwd
+ *   48  = Chdir
  */
 
 #include "include/stdio.h"
@@ -355,6 +356,12 @@ off_t lseek(int fd, off_t offset, int whence) {
     int64_t r = simpleos_syscall(46, fd, (int64_t)offset, whence, 0, 0);
     if (r < 0) { errno = (int)(-r); return (off_t)-1; }
     return (off_t)r;
+}
+
+int ftruncate(int fd, off_t length) {
+    int64_t r = simpleos_syscall(43, fd, (int64_t)length, 0, 0, 0);
+    if (r < 0) { errno = (int)(-r); return -1; }
+    return 0;
 }
 
 int dup(int oldfd) {
