@@ -1,0 +1,142 @@
+# Skia image filter specification tests
+
+use std.sspec.*
+use std.skia.entity.color.{SkColor4f}
+use std.skia.feature.filter.gaussian_blur.{ImageBuffer, gaussian_kernel, blur_horizontal, gaussian_blur}
+use std.skia.feature.filter.color_matrix.{apply_color_matrix}
+use std.skia.feature.filter.drop_shadow.{drop_shadow}
+
+fn _black_buf(w: i32, h: i32) -> ImageBuffer:
+    var px: [SkColor4f] = []
+    var i = 0
+    while i < w * h:
+        px = px + [SkColor4f(r: 0.0, g: 0.0, b: 0.0, a: 0.0)]
+        i = i + 1
+    ImageBuffer(width: w, height: h, pixels: px)
+
+fn _white_center_5x5() -> ImageBuffer:
+    var px: [SkColor4f] = []
+    var y = 0
+    while y < 5:
+        var x = 0
+        while x < 5:
+            val v = if (x == 2 and y == 2): 1.0 else: 0.0
+            px = px + [SkColor4f(r: v, g: v, b: v, a: v)]
+            x = x + 1
+        y = y + 1
+    ImageBuffer(width: 5, height: 5, pixels: px)
+
+fn _sum_kernel(k: [f64]) -> f64:
+    var s = 0.0
+    var i = 0
+    while i < k.len().to_i32():
+        s = s + k[i.to_i64()]
+        i = i + 1
+    s
+
+fn _approx(a: f64, b: f64) -> bool:
+    val d = a - b
+    val ad = if d < 0.0: -d else: d
+    ad < 0.000001
+
+fn _identity_matrix() -> [f64]:
+    [1.0, 0.0, 0.0, 0.0, 0.0,
+     0.0, 1.0, 0.0, 0.0, 0.0,
+     0.0, 0.0, 1.0, 0.0, 0.0,
+     0.0, 0.0, 0.0, 1.0, 0.0]
+
+describe "Gaussian kernel":
+    it "sums to approximately 1.0 for sigma=1.0":
+        val k = gaussian_kernel(1.0)
+        val s = _sum_kernel(k)
+        expect _approx(s, 1.0) to_equal true
+
+    it "sums to approximately 1.0 for sigma=2.0":
+        val k = gaussian_kernel(2.0)
+        val s = _sum_kernel(k)
+        expect _approx(s, 1.0) to_equal true
+
+    it "returns single element [1.0] for sigma=0.0":
+        val k = gaussian_kernel(0.0)
+        expect k.len() to_equal 1
+
+    it "kernel is symmetric for sigma=1.5":
+        val k = gaussian_kernel(1.5)
+        val n = k.len().to_i32()
+        var ok = true
+        var i = 0
+        while i < n / 2:
+            val diff = k[i.to_i64()] - k[(n - 1 - i).to_i64()]
+            val ad = if diff < 0.0: -diff else: diff
+            if ad > 0.000001:
+                ok = false
+            i = i + 1
+        expect ok to_equal true
+
+describe "Horizontal blur":
+    it "spreads color to neighbors from single white pixel":
+        val buf = _white_center_5x5()
+        val blurred = blur_horizontal(buf, 1.0)
+        val center = blurred.pixels[12]
+        val neighbor = blurred.pixels[11]
+        expect center.r < 1.0 to_equal true
+        expect neighbor.r > 0.0 to_equal true
+
+    it "preserves buffer dimensions":
+        val buf = _white_center_5x5()
+        val blurred = blur_horizontal(buf, 1.0)
+        expect blurred.width to_equal 5
+        expect blurred.height to_equal 5
+
+describe "Color matrix filter":
+    it "identity matrix returns input unchanged":
+        val src = SkColor4f(r: 0.4, g: 0.6, b: 0.2, a: 1.0)
+        val buf = ImageBuffer(width: 1, height: 1, pixels: [src])
+        val result = apply_color_matrix(buf, _identity_matrix())
+        expect _approx(result.pixels[0].r, 0.4) to_equal true
+        expect _approx(result.pixels[0].g, 0.6) to_equal true
+        expect _approx(result.pixels[0].b, 0.2) to_equal true
+        expect _approx(result.pixels[0].a, 1.0) to_equal true
+
+    it "clamps results to 1.0 when matrix doubles channels":
+        val matrix = [2.0, 0.0, 0.0, 0.0, 0.0,
+                      0.0, 2.0, 0.0, 0.0, 0.0,
+                      0.0, 0.0, 2.0, 0.0, 0.0,
+                      0.0, 0.0, 0.0, 2.0, 0.0]
+        val src = SkColor4f(r: 0.8, g: 0.8, b: 0.8, a: 0.8)
+        val buf = ImageBuffer(width: 1, height: 1, pixels: [src])
+        val result = apply_color_matrix(buf, matrix)
+        expect result.pixels[0].r to_equal 1.0
+
+    it "clamps results to 0.0 when matrix negates channels":
+        val matrix = [-1.0, 0.0, 0.0, 0.0, 0.0,
+                       0.0, -1.0, 0.0, 0.0, 0.0,
+                       0.0, 0.0, -1.0, 0.0, 0.0,
+                       0.0, 0.0, 0.0, 1.0, 0.0]
+        val src = SkColor4f(r: 0.5, g: 0.5, b: 0.5, a: 1.0)
+        val buf = ImageBuffer(width: 1, height: 1, pixels: [src])
+        val result = apply_color_matrix(buf, matrix)
+        expect result.pixels[0].r to_equal 0.0
+
+describe "Drop shadow":
+    it "result has same dimensions as source":
+        val src = _white_center_5x5()
+        val shadow_color = SkColor4f(r: 0.0, g: 0.0, b: 0.0, a: 1.0)
+        val result = drop_shadow(src, 1.0, 1.0, 0.5, 0.5, shadow_color)
+        expect result.width to_equal 5
+        expect result.height to_equal 5
+
+    it "result pixel count matches source":
+        val src = _white_center_5x5()
+        val shadow_color = SkColor4f(r: 1.0, g: 0.0, b: 0.0, a: 1.0)
+        val result = drop_shadow(src, 1.0, 1.0, 0.3, 0.3, shadow_color)
+        expect result.pixels.len() to_equal 25
+
+describe "Gaussian blur end-to-end":
+    it "two-pass blur spreads energy from single white pixel":
+        val buf = _white_center_5x5()
+        val result = gaussian_blur(buf, 1.0, 1.0)
+        val center = result.pixels[12]
+        val corner = result.pixels[0]
+        expect center.r < 1.0 to_equal true
+        expect corner.r > 0.0 to_equal true

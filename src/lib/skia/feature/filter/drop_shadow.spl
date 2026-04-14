@@ -1,0 +1,53 @@
+# Drop shadow filter: alpha-tint, translate, blur, composite src over shadow
+
+use std.skia.entity.color.{SkColor4f}
+use std.skia.entity.enums.{SkBlendMode}
+use std.skia.feature.filter.gaussian_blur.{ImageBuffer, gaussian_blur}
+use std.skia.feature.blend.blend_compose.{compose}
+
+fn _build_shadow(src: ImageBuffer, shadow_color: SkColor4f) -> ImageBuffer:
+    var out: [SkColor4f] = []
+    var i = 0
+    while i < src.pixels.len().to_i32():
+        val p = src.pixels[i.to_i64()]
+        val sa = p.a * shadow_color.a
+        out = out + [SkColor4f(r: shadow_color.r * sa,
+                               g: shadow_color.g * sa,
+                               b: shadow_color.b * sa,
+                               a: sa)]
+        i = i + 1
+    ImageBuffer(width: src.width, height: src.height, pixels: out)
+
+fn _translate_buf(buf: ImageBuffer, dx: i32, dy: i32) -> ImageBuffer:
+    val w = buf.width
+    val h = buf.height
+    var out: [SkColor4f] = []
+    var y = 0
+    while y < h:
+        var x = 0
+        while x < w:
+            val sx = x - dx
+            val sy = y - dy
+            val p = if (sx >= 0 and sx < w and sy >= 0 and sy < h):
+                buf.pixels[(sy * w + sx).to_i64()]
+            else:
+                SkColor4f(r: 0.0, g: 0.0, b: 0.0, a: 0.0)
+            out = out + [p]
+            x = x + 1
+        y = y + 1
+    ImageBuffer(width: w, height: h, pixels: out)
+
+fn drop_shadow(src: ImageBuffer, dx: f64, dy: f64,
+               sigma_x: f64, sigma_y: f64,
+               shadow_color: SkColor4f) -> ImageBuffer:
+    val shadow_raw = _build_shadow(src, shadow_color)
+    val shadow_shifted = _translate_buf(shadow_raw, dx.to_i32(), dy.to_i32())
+    val shadow_blurred = gaussian_blur(shadow_shifted, sigma_x, sigma_y)
+    var out: [SkColor4f] = []
+    var i = 0
+    while i < src.pixels.len().to_i32():
+        val sp = src.pixels[i.to_i64()]
+        val shp = shadow_blurred.pixels[i.to_i64()]
+        out = out + [compose(sp, shp, SkBlendMode.SrcOver)]
+        i = i + 1
+    ImageBuffer(width: src.width, height: src.height, pixels: out)

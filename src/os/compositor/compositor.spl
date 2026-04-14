@@ -32,6 +32,7 @@ use os.compositor.render_extras.{draw_wallpaper_enhanced}
 use os.compositor.app_content.{render_app_content, render_app_content_stateful, AppState, app_state_new, handle_app_input, handle_app_click}
 use os.compositor.easing.{bounce_offset, ease_out_cubic, ease_in_cubic}
 use common.window_protocol.window_protocol.{WmInputEvent, wm_input_event, WM_EVENT_KEY_PRESS, WM_EVENT_MOUSE_CLICK, WM_EVENT_MOUSE_MOVE, WM_EVENT_MOUSE_RELEASE}
+use common.window_protocol.geometry.{WindowId, ProcessId, AppId, Px, Point, Size, Rect, Argb32, Alpha, BlurRadius, KeyCode, Modifiers, WmEventType, WmStatus}
 use os.compositor.display_backend.{CompositorBackend, FbCompositorBackend}
 use os.compositor.input_backend.{InputBackend, Ps2InputBackend}
 use common.render_scene.executor.{select_effect_engine}
@@ -81,18 +82,15 @@ struct WindowSurface:
       0 = local in-process window (UI dispatched directly to UISession)
       >0 = remote app's IPC port (input queued for IPC delivery)
     """
-    id: u64
+    id: WindowId
     title: text
-    x: i32
-    y: i32
-    width: i32
-    height: i32
+    bounds: Rect
     visible: bool
     session: UISession?
     dirty: bool
     owner_port: u64
-    process_id: u64
-    app_id: text
+    process_id: ProcessId
+    app_id: AppId
 
 # ============================================================================
 # Pre-maximize saved geometry — for restore after maximize
@@ -100,11 +98,8 @@ struct WindowSurface:
 
 struct SavedGeometry:
     """Saved window geometry before maximize, used to restore."""
-    window_id: u64
-    x: i32
-    y: i32
-    width: i32
-    height: i32
+    window_id: WindowId
+    bounds: Rect
 
 # ============================================================================
 # Compositor
@@ -129,7 +124,7 @@ class Compositor:
     screen_height: i32
     running: bool
     dragging: bool
-    drag_window_id: u64
+    drag_window_id: WindowId
     drag_offset_x: i32
     drag_offset_y: i32
     pending_shortcut_key: text
@@ -160,7 +155,7 @@ class Compositor:
     theme_target_dark: bool
     # Edge resize state
     resizing: bool
-    resize_window_id: u64
+    resize_window_id: WindowId
     resize_edge: i32        # 0=none, 1=left, 2=right, 3=top, 4=bottom, 5=TL, 6=TR, 7=BL, 8=BR
     resize_start_mx: i32    # mouse x at resize start
     resize_start_my: i32    # mouse y at resize start
@@ -229,7 +224,7 @@ impl Compositor:
             screen_height: sh,
             running: false,
             dragging: false,
-            drag_window_id: 0,
+            drag_window_id: WindowId(value: 0),
             drag_offset_x: 0,
             drag_offset_y: 0,
             pending_shortcut_key: "",
@@ -255,7 +250,7 @@ impl Compositor:
             theme_progress: 0,
             theme_target_dark: true,
             resizing: false,
-            resize_window_id: 0,
+            resize_window_id: WindowId(value: 0),
             resize_edge: 0,
             resize_start_mx: 0,
             resize_start_my: 0,
@@ -297,16 +292,17 @@ impl Compositor:
 
     # -- Window Management ---------------------------------------------------
 
-    me create_window(title: text, x: i32, y: i32, w: i32, h: i32) -> u64:
+    me create_window(title: text, x: i32, y: i32, w: i32, h: i32) -> WindowId:
         """Create a new window surface and return its ID.
 
         The window gets a default widget tree (empty column).
         """
-        val id = self.next_id
+        val raw_id = self.next_id
         self.next_id = self.next_id + 1
+        val id = WindowId(value: raw_id)
 
-        val root = column("win_{id}_root", [
-            text_widget("win_{id}_content", "")
+        val root = column("win_{raw_id}_root", [
+            text_widget("win_{raw_id}_content", "")
         ])
         val tree = UITree.new(root)
         val session = new_session(tree)
@@ -314,16 +310,13 @@ impl Compositor:
         val surface = WindowSurface(
             id: id,
             title: title,
-            x: x,
-            y: y,
-            width: w,
-            height: h,
+            bounds: Rect.xywh(x, y, w, h),
             visible: true,
             session: session,
             dirty: true,
             owner_port: 0,
-            process_id: 0,
-            app_id: ""
+            process_id: ProcessId(value: 0),
+            app_id: AppId(value: "")
         )
 
         self.surfaces = self.surfaces.push(surface)
@@ -352,28 +345,26 @@ impl Compositor:
 
         return id
 
-    me add_surface(title: text, x: i32, y: i32, w: i32, h: i32) -> u64:
+    me add_surface(title: text, x: i32, y: i32, w: i32, h: i32) -> WindowId:
         """Create a lightweight window surface without a UISession widget tree.
 
         For baremetal use where the UI builder DSL is auto-stubbed.
         Windows are rendered as solid rectangles with title bars.
         """
-        val id = self.next_id
+        val raw_id = self.next_id
         self.next_id = self.next_id + 1
+        val id = WindowId(value: raw_id)
 
         val surface = WindowSurface(
             id: id,
             title: title,
-            x: x,
-            y: y,
-            width: w,
-            height: h,
+            bounds: Rect.xywh(x, y, w, h),
             visible: true,
             session: nil,
             dirty: true,
             owner_port: 0,
-            process_id: 0,
-            app_id: ""
+            process_id: ProcessId(value: 0),
+            app_id: AppId(value: "")
         )
 
         self.surfaces = self.surfaces.push(surface)
@@ -381,39 +372,37 @@ impl Compositor:
         self.focused_idx = self.surfaces.len() - 1
         return id
 
-    me create_window_with_tree(title: text, x: i32, y: i32, w: i32, h: i32, tree: UITree) -> u64:
+    me create_window_with_tree(title: text, x: i32, y: i32, w: i32, h: i32, tree: UITree) -> WindowId:
         """Create a new window with a pre-built widget tree."""
-        val id = self.next_id
+        val raw_id = self.next_id
         self.next_id = self.next_id + 1
+        val id = WindowId(value: raw_id)
 
         val session = new_session(tree)
 
         val surface = WindowSurface(
             id: id,
             title: title,
-            x: x,
-            y: y,
-            width: w,
-            height: h,
+            bounds: Rect.xywh(x, y, w, h),
             visible: true,
             session: session,
             dirty: true,
             owner_port: 0,
-            process_id: 0,
-            app_id: ""
+            process_id: ProcessId(value: 0),
+            app_id: AppId(value: "")
         )
 
         self.surfaces = self.surfaces.push(surface)
         self.focused_idx = self.surfaces.len() - 1
         return id
 
-    me destroy_window(id: u64):
+    me destroy_window(id: WindowId):
         """Remove a window by ID."""
         var updated: [WindowSurface] = []
         var updated_states: [AppState] = []
         var i: i32 = 0
         while i < self.surfaces.len():
-            if self.surfaces[i].id != id:
+            if self.surfaces[i].id.value != id.value:
                 updated = updated.push(self.surfaces[i])
                 if i < self.app_states.len():
                     updated_states = updated_states.push(self.app_states[i])
@@ -427,12 +416,12 @@ impl Compositor:
         elif self.focused_idx >= self.surfaces.len():
             self.focused_idx = self.surfaces.len() - 1
 
-    me focus_window(id: u64):
+    me focus_window(id: WindowId):
         """Bring a window to focus (front of Z-order)."""
         var target_idx: i32 = -1
         var idx: i32 = 0
         for s in self.surfaces:
-            if s.id == id:
+            if s.id.value == id.value:
                 target_idx = idx
             idx = idx + 1
 
@@ -446,7 +435,7 @@ impl Compositor:
         var reordered_states: [AppState] = []
         var j: i32 = 0
         while j < self.surfaces.len():
-            if self.surfaces[j].id != id:
+            if self.surfaces[j].id.value != id.value:
                 reordered = reordered.push(self.surfaces[j])
                 if j < self.app_states.len():
                     reordered_states = reordered_states.push(self.app_states[j])
@@ -457,15 +446,14 @@ impl Compositor:
         self.app_states = reordered_states
         self.focused_idx = self.surfaces.len() - 1
 
-    me move_window(id: u64, new_x: i32, new_y: i32):
+    me move_window(id: WindowId, new_x: i32, new_y: i32):
         """Move a window to a new position."""
         var updated: [WindowSurface] = []
         for s in self.surfaces:
-            if s.id == id:
+            if s.id.value == id.value:
                 updated = updated.push(WindowSurface(
                     id: s.id, title: s.title,
-                    x: new_x, y: new_y,
-                    width: s.width, height: s.height,
+                    bounds: Rect.xywh(new_x, new_y, s.bounds.size.width.value, s.bounds.size.height.value),
                     visible: s.visible, session: s.session,
                     dirty: true,
                     owner_port: s.owner_port,
@@ -476,15 +464,14 @@ impl Compositor:
                 updated = updated.push(s)
         self.surfaces = updated
 
-    me resize_window(id: u64, new_w: i32, new_h: i32):
+    me resize_window(id: WindowId, new_w: i32, new_h: i32):
         """Resize a window."""
         var updated: [WindowSurface] = []
         for s in self.surfaces:
-            if s.id == id:
+            if s.id.value == id.value:
                 updated = updated.push(WindowSurface(
                     id: s.id, title: s.title,
-                    x: s.x, y: s.y,
-                    width: new_w, height: new_h,
+                    bounds: Rect.xywh(s.bounds.origin.x.value, s.bounds.origin.y.value, new_w, new_h),
                     visible: s.visible, session: s.session,
                     dirty: true,
                     owner_port: s.owner_port,
@@ -495,18 +482,19 @@ impl Compositor:
                 updated = updated.push(s)
         self.surfaces = updated
 
-    me create_remote_window(title: text, x: i32, y: i32, w: i32, h: i32, owner_port: u64) -> u64:
+    me create_remote_window(title: text, x: i32, y: i32, w: i32, h: i32, owner_port: u64) -> WindowId:
         """Create a new window surface owned by a remote app process.
 
         The owner_port identifies the IPC port of the owning application.
         Input events for this window will be queued in pending_remote_events
         instead of dispatched directly to the UISession.
         """
-        val id = self.next_id
+        val raw_id = self.next_id
         self.next_id = self.next_id + 1
+        val id = WindowId(value: raw_id)
 
-        val root = column("win_{id}_root", [
-            text_widget("win_{id}_content", "")
+        val root = column("win_{raw_id}_root", [
+            text_widget("win_{raw_id}_content", "")
         ])
         val tree = UITree.new(root)
         val session = new_session(tree)
@@ -514,23 +502,20 @@ impl Compositor:
         val surface = WindowSurface(
             id: id,
             title: title,
-            x: x,
-            y: y,
-            width: w,
-            height: h,
+            bounds: Rect.xywh(x, y, w, h),
             visible: true,
             session: session,
             dirty: true,
             owner_port: owner_port,
-            process_id: owner_port,
-            app_id: title
+            process_id: ProcessId(value: owner_port),
+            app_id: AppId(value: title)
         )
 
         self.surfaces = self.surfaces.push(surface)
         self.focused_idx = self.surfaces.len() - 1
         return id
 
-    me mark_window_dirty(id: u64):
+    me mark_window_dirty(id: WindowId):
         """Mark a window as needing re-render.
 
         Sets the dirty flag on the WindowSurface so the compositor
@@ -538,11 +523,10 @@ impl Compositor:
         """
         var updated: [WindowSurface] = []
         for s in self.surfaces:
-            if s.id == id:
+            if s.id.value == id.value:
                 updated = updated.push(WindowSurface(
                     id: s.id, title: s.title,
-                    x: s.x, y: s.y,
-                    width: s.width, height: s.height,
+                    bounds: s.bounds,
                     visible: s.visible, session: s.session,
                     dirty: true,
                     owner_port: s.owner_port,
@@ -553,7 +537,7 @@ impl Compositor:
                 updated = updated.push(s)
         self.surfaces = updated
 
-    me update_window_tree(id: u64, new_tree: UITree):
+    me update_window_tree(id: WindowId, new_tree: UITree):
         """Replace the widget tree of a window and mark it dirty.
 
         Used by the WM service to apply remote tree updates received
@@ -561,12 +545,11 @@ impl Compositor:
         """
         var updated: [WindowSurface] = []
         for s in self.surfaces:
-            if s.id == id:
+            if s.id.value == id.value:
                 s.session.update_tree(new_tree)
                 updated = updated.push(WindowSurface(
                     id: s.id, title: s.title,
-                    x: s.x, y: s.y,
-                    width: s.width, height: s.height,
+                    bounds: s.bounds,
                     visible: s.visible, session: s.session,
                     dirty: true,
                     owner_port: s.owner_port,
@@ -577,7 +560,7 @@ impl Compositor:
                 updated = updated.push(s)
         self.surfaces = updated
 
-    me lower_window(id: u64):
+    me lower_window(id: WindowId):
         """Send a window to the back of the Z-order.
 
         The window becomes the backmost surface but remains visible.
@@ -585,7 +568,7 @@ impl Compositor:
         var target_idx: i32 = -1
         var idx: i32 = 0
         for s in self.surfaces:
-            if s.id == id:
+            if s.id.value == id.value:
                 target_idx = idx
             idx = idx + 1
 
@@ -596,7 +579,7 @@ impl Compositor:
         val target = self.surfaces[target_idx]
         var reordered: [WindowSurface] = [target]
         for s in self.surfaces:
-            if s.id != id:
+            if s.id.value != id.value:
                 reordered = reordered.push(s)
         self.surfaces = reordered
 
@@ -611,7 +594,7 @@ impl Compositor:
             # Focused window moved down one slot
             self.focused_idx = self.focused_idx - 1
 
-    me minimize_window(id: u64):
+    me minimize_window(id: WindowId):
         """Minimize a window (hide it).
 
         Sets visible=false. The window remains in the surface list
@@ -619,11 +602,10 @@ impl Compositor:
         """
         var updated: [WindowSurface] = []
         for s in self.surfaces:
-            if s.id == id:
+            if s.id.value == id.value:
                 updated = updated.push(WindowSurface(
                     id: s.id, title: s.title,
-                    x: s.x, y: s.y,
-                    width: s.width, height: s.height,
+                    bounds: s.bounds,
                     visible: false, session: s.session,
                     dirty: true,
                     owner_port: s.owner_port,
@@ -634,26 +616,23 @@ impl Compositor:
                 updated = updated.push(s)
         self.surfaces = updated
 
-    me maximize_window(id: u64):
+    me maximize_window(id: WindowId):
         """Maximize a window to fill the screen (minus taskbar).
 
         Saves the current geometry so it can be restored later.
         """
         # Find current geometry and save it
         for s in self.surfaces:
-            if s.id == id:
+            if s.id.value == id.value:
                 # Save geometry before maximizing
                 val saved = SavedGeometry(
                     window_id: id,
-                    x: s.x,
-                    y: s.y,
-                    width: s.width,
-                    height: s.height
+                    bounds: s.bounds
                 )
                 # Replace existing saved geometry for this window
                 var new_saved: [SavedGeometry] = []
                 for g in self.saved_geometries:
-                    if g.window_id != id:
+                    if g.window_id.value != id.value:
                         new_saved = new_saved.push(g)
                 new_saved = new_saved.push(saved)
                 self.saved_geometries = new_saved
@@ -665,7 +644,7 @@ impl Compositor:
         self.move_window(id, zero, zero)
         self.resize_window(id, max_w, max_h)
 
-    me restore_window(id: u64):
+    me restore_window(id: WindowId):
         """Restore a window from minimized or maximized state.
 
         If the window was maximized, restores to its pre-maximize geometry.
@@ -674,32 +653,31 @@ impl Compositor:
         # Check if we have saved geometry (was maximized)
         var found_geo: SavedGeometry? = nil
         for g in self.saved_geometries:
-            if g.window_id == id:
+            if g.window_id.value == id.value:
                 found_geo = g
 
         if found_geo != nil:
             val geo = found_geo
-            val gx = geo.x
-            val gy = geo.y
-            val gw = geo.width
-            val gh = geo.height
+            val gx = geo.bounds.origin.x.value
+            val gy = geo.bounds.origin.y.value
+            val gw = geo.bounds.size.width.value
+            val gh = geo.bounds.size.height.value
             self.move_window(id, gx, gy)
             self.resize_window(id, gw, gh)
             # Remove saved geometry
             var remaining: [SavedGeometry] = []
             for g in self.saved_geometries:
-                if g.window_id != id:
+                if g.window_id.value != id.value:
                     remaining = remaining.push(g)
             self.saved_geometries = remaining
         else:
             # Was minimized — just make visible
             var updated: [WindowSurface] = []
             for s in self.surfaces:
-                if s.id == id:
+                if s.id.value == id.value:
                     updated = updated.push(WindowSurface(
                         id: s.id, title: s.title,
-                        x: s.x, y: s.y,
-                        width: s.width, height: s.height,
+                        bounds: s.bounds,
                         visible: true, session: s.session,
                         dirty: true,
                         owner_port: s.owner_port,
@@ -710,15 +688,14 @@ impl Compositor:
                     updated = updated.push(s)
             self.surfaces = updated
 
-    me set_window_title(id: u64, new_title: text):
+    me set_window_title(id: WindowId, new_title: text):
         """Change the title of a window."""
         var updated: [WindowSurface] = []
         for s in self.surfaces:
-            if s.id == id:
+            if s.id.value == id.value:
                 updated = updated.push(WindowSurface(
                     id: s.id, title: new_title,
-                    x: s.x, y: s.y,
-                    width: s.width, height: s.height,
+                    bounds: s.bounds,
                     visible: s.visible, session: s.session,
                     dirty: true,
                     owner_port: s.owner_port,
@@ -755,14 +732,14 @@ impl Compositor:
             count = count + 1
         return count
 
-    fn focused_window_id() -> u64:
+    fn focused_window_id() -> WindowId:
         if self.focused_idx >= 0 and self.focused_idx < self.surfaces.len():
             return self.surfaces[self.focused_idx].id
-        return 0
+        return WindowId(value: 0)
 
-    fn get_surface(id: u64) -> WindowSurface?:
+    fn get_surface(id: WindowId) -> WindowSurface?:
         for s in self.surfaces:
-            if s.id == id:
+            if s.id.value == id.value:
                 return s
         return nil
 
@@ -773,64 +750,63 @@ impl Compositor:
             titles = titles.push(s.title)
         return titles
 
-    fn window_owner_port(id: u64) -> u64:
+    fn window_owner_port(id: WindowId) -> u64:
         val surface = self.get_surface(id)
         if surface == nil:
             return 0
         val s = surface
         s.owner_port
 
-    fn window_process_id(id: u64) -> u64:
+    fn window_process_id(id: WindowId) -> ProcessId:
         val surface = self.get_surface(id)
         if surface == nil:
-            return 0
+            return ProcessId(value: 0)
         val s = surface
         s.process_id
 
-    fn window_app_id(id: u64) -> text:
+    fn window_app_id(id: WindowId) -> AppId:
         val surface = self.get_surface(id)
         if surface == nil:
-            return ""
+            return AppId(value: "")
         val s = surface
         s.app_id
 
-    fn windows_for_process(process_id: u64) -> [u64]:
-        var ids: [u64] = []
+    fn windows_for_process(process_id: ProcessId) -> [WindowId]:
+        var ids: [WindowId] = []
         for s in self.surfaces:
-            if s.process_id == process_id:
+            if s.process_id.value == process_id.value:
                 ids = ids.push(s.id)
         ids
 
-    fn windows_for_app(app_id: text) -> [u64]:
-        var ids: [u64] = []
+    fn windows_for_app(app_id: AppId) -> [WindowId]:
+        var ids: [WindowId] = []
         for s in self.surfaces:
-            if s.app_id == app_id:
+            if s.app_id.value == app_id.value:
                 ids = ids.push(s.id)
         ids
 
-    fn window_count_for_process(process_id: u64) -> i32:
+    fn window_count_for_process(process_id: ProcessId) -> i32:
         var count: i32 = 0
         for s in self.surfaces:
-            if s.process_id == process_id:
+            if s.process_id.value == process_id.value:
                 count = count + 1
         count
 
-    fn window_count_for_app(app_id: text) -> i32:
+    fn window_count_for_app(app_id: AppId) -> i32:
         var count: i32 = 0
         for s in self.surfaces:
-            if s.app_id == app_id:
+            if s.app_id.value == app_id.value:
                 count = count + 1
         count
 
-    me set_window_identity(id: u64, process_id: u64, app_id: text):
+    me set_window_identity(id: WindowId, process_id: ProcessId, app_id: AppId):
         """Attach process/app identity metadata to a surface."""
         var updated: [WindowSurface] = []
         for s in self.surfaces:
-            if s.id == id:
+            if s.id.value == id.value:
                 updated = updated.push(WindowSurface(
                     id: s.id, title: s.title,
-                    x: s.x, y: s.y,
-                    width: s.width, height: s.height,
+                    bounds: s.bounds,
                     visible: s.visible, session: s.session,
                     dirty: true,
                     owner_port: s.owner_port,
