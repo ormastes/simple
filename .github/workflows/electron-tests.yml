@@ -1,166 +1,121 @@
-name: Electron Tests
+# ============================================================================
+# Electron Tests - DEV-PREVIEW ADVISORY LANE (not a release gate)
+# ============================================================================
+# Per doc/01_research/domain/v4_electron_packaging_2026-04-14.md (Sec.4, Sec.5):
+#   V4 Electron is dev-preview only. electron_capture.spl stays wired into
+#   wm_compare as the Source-A reference renderer, but Electron parity is
+#   NOT a required check on `main`, and no release installers are produced.
+#
+# This workflow:
+#   - Triggers only when real Electron code is touched (paths below).
+#   - Runs advisory-only: the job sets continue-on-error: true so a red
+#     run never blocks other CI or branch-protection gates.
+#   - Does lint + compile-check of the .spl files and a syntax smoke of
+#     the tools/electron-shell/ bridge scripts. No heavy e2e - full
+#     Electron runtime e2e is out-of-scope until work-plan Sec.4 item 6
+#     re-opens.
+#
+# Proposed (not applied) follow-up diff to
+# doc/01_research/domain/v4_electron_packaging_2026-04-14.md Sec.5:
+#
+#   -- **CI:** `.github/workflows/electron-tests.yml` is declared stale.
+#   --   Either retire it or rewrite its `paths:` filter to watch the real
+#   --   Electron tree ...
+#   ++ **CI:** `.github/workflows/electron-tests.yml` rewritten to watch
+#   ++   the real Electron tree (`src/app/ui.electron/**`,
+#   ++   `src/os/compositor/electron_capture.spl`,
+#   ++   `src/app/wm_compare/{html_compat,live_capture}.spl`,
+#   ++   `tools/electron-shell/**`) and marked advisory-only
+#   ++   (`continue-on-error: true`). Excluded from the required-check set.
+# ============================================================================
+
+name: Electron Tests (dev-preview, advisory)
 
 on:
   push:
-    branches: [ main, develop ]
+    branches: [main]
     paths:
-      - 'simple/std_lib/src/electron/**'
-      - 'simple/std_lib/test/electron/**'
-      - 'simple/std_lib/test/examples/electron_*.spl'
+      - 'src/app/ui.electron/**'
+      - 'src/os/compositor/electron_capture.spl'
+      - 'src/app/wm_compare/html_compat.spl'
+      - 'src/app/wm_compare/live_capture.spl'
+      - 'tools/electron-shell/**'
       - '.github/workflows/electron-tests.yml'
   pull_request:
-    branches: [ main, develop ]
+    branches: [main]
     paths:
-      - 'simple/std_lib/src/electron/**'
-      - 'simple/std_lib/test/electron/**'
-      - 'simple/std_lib/test/examples/electron_*.spl'
+      - 'src/app/ui.electron/**'
+      - 'src/os/compositor/electron_capture.spl'
+      - 'src/app/wm_compare/html_compat.spl'
+      - 'src/app/wm_compare/live_capture.spl'
+      - 'tools/electron-shell/**'
       - '.github/workflows/electron-tests.yml'
+  workflow_dispatch:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
-  test:
-    name: Electron Tests on ${{ matrix.os }}
-    runs-on: ${{ matrix.os }}
-    strategy:
-      matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
-        node-version: [18.x, 20.x]
+  dev-preview:
+    name: Electron dev-preview check (advisory)
+    runs-on: ubuntu-latest
+    # Advisory-only: failures here MUST NOT block `main` merges.
+    continue-on-error: true
+    timeout-minutes: 10
 
     steps:
-      - name: Checkout repository
+      - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Setup Node.js ${{ matrix.node-version }}
+      - name: Setup Node.js (for tools/electron-shell bridge)
         uses: actions/setup-node@v4
         with:
-          node-version: ${{ matrix.node-version }}
-          cache: 'npm'
-          cache-dependency-path: simple/std_lib/test/electron/package.json
+          node-version: '20'
 
-      - name: Setup Rust
-        uses: actions-rs/toolchain@v1
-        with:
-          toolchain: stable
-          profile: minimal
-          override: true
-
-      - name: Cache Cargo dependencies
-        uses: actions/cache@v3
-        with:
-          path: |
-            ~/.cargo/bin/
-            ~/.cargo/registry/index/
-            ~/.cargo/registry/cache/
-            ~/.cargo/git/db/
-            target/
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
-
-      - name: Build Simple compiler
-        run: cargo build --release
-
-      - name: Install Electron test dependencies
-        working-directory: simple/std_lib/test/electron
-        run: npm ci
-
-      - name: Setup xvfb (Linux only)
-        if: runner.os == 'Linux'
+      - name: Verify Electron source tree exists
         run: |
-          sudo apt-get update
-          sudo apt-get install -y xvfb
+          set -eu
+          missing=0
+          for p in \
+            src/app/ui.electron \
+            src/os/compositor/electron_capture.spl \
+            tools/electron-shell/package.json ; do
+            if [ ! -e "$p" ]; then
+              echo "::warning::missing $p"
+              missing=1
+            fi
+          done
+          if [ "$missing" -eq 1 ]; then
+            echo "Some Electron paths missing; continuing advisory run."
+          else
+            echo "Electron source tree present."
+          fi
 
-      - name: Run Electron tests (Linux)
-        if: runner.os == 'Linux'
-        working-directory: simple/std_lib/test/electron
-        run: xvfb-run -a npm test
-        env:
-          CI: true
+      - name: Syntax-check electron-shell bridge scripts
+        working-directory: tools/electron-shell
+        run: |
+          for f in main.js preload.js screenshot.js wm.js bridge.js export_snapshot.js ; do
+            if [ -f "$f" ]; then
+              node --check "$f" && echo "ok: $f" || echo "::warning::syntax: $f"
+            fi
+          done
 
-      - name: Run Electron tests (macOS/Windows)
-        if: runner.os != 'Linux'
-        working-directory: simple/std_lib/test/electron
-        run: npm test
-        env:
-          CI: true
+      - name: Compile-check src/app/ui.electron/*.spl
+        run: |
+          if [ -x bin/simple ]; then
+            bin/simple --version || true
+            bin/simple build --check src/app/ui.electron \
+              || echo "::warning::ui.electron compile-check failed (advisory)"
+          else
+            echo "::notice::bin/simple not present in CI seed; skip compile-check"
+          fi
 
-      - name: Upload test results
+      - name: Summary
         if: always()
-        uses: actions/upload-artifact@v3
-        with:
-          name: electron-test-results-${{ matrix.os }}-node${{ matrix.node-version }}
-          path: simple/std_lib/test/electron/test-results/
-
-      - name: Upload screenshots on failure
-        if: failure()
-        uses: actions/upload-artifact@v3
-        with:
-          name: electron-screenshots-${{ matrix.os }}-node${{ matrix.node-version }}
-          path: simple/std_lib/test/electron/test-results/screenshots/
-
-  lint:
-    name: Lint Electron Code
-    runs-on: ubuntu-latest
-
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: '20.x'
-
-      - name: Install dependencies
-        working-directory: simple/std_lib/test/electron
-        run: npm ci
-
-      - name: Run ESLint
-        working-directory: simple/std_lib/test/electron
-        run: npm run lint --if-present
-
-  coverage:
-    name: Test Coverage
-    runs-on: ubuntu-latest
-
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: '20.x'
-
-      - name: Setup Rust
-        uses: actions-rs/toolchain@v1
-        with:
-          toolchain: stable
-          profile: minimal
-          override: true
-
-      - name: Build Simple compiler
-        run: cargo build --release
-
-      - name: Install dependencies
-        working-directory: simple/std_lib/test/electron
-        run: npm ci
-
-      - name: Setup xvfb
         run: |
-          sudo apt-get update
-          sudo apt-get install -y xvfb
-
-      - name: Run tests with coverage
-        working-directory: simple/std_lib/test/electron
-        run: xvfb-run -a npm run test:coverage --if-present
-        env:
-          CI: true
-
-      - name: Upload coverage to Codecov
-        uses: codecov/codecov-action@v3
-        with:
-          files: simple/std_lib/test/electron/coverage/coverage-final.json
-          flags: electron-tests
-          name: electron-coverage
+          {
+            echo "### Electron dev-preview advisory summary"
+            echo "Advisory lane per v4_electron_packaging_2026-04-14.md."
+            echo "Red runs here MUST NOT block main."
+          } >> "$GITHUB_STEP_SUMMARY"
