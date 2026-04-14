@@ -706,6 +706,40 @@ impl<'a> MirLowerer<'a> {
             }
         }
 
+        // Build vtable_impls from hir.impls (trait impl metadata)
+        // For each impl Trait for Struct, record (struct_name, vtable_sym, method_fn_names_in_slot_order)
+        if let Some(trait_infos) = self.trait_infos {
+            for hir_impl in &hir.impls {
+                if let Some(ref trait_name) = hir_impl.trait_name {
+                    if let Some(trait_info) = trait_infos.get(trait_name) {
+                        let vtable_sym = format!(
+                            "__vtable__{}__for__{}",
+                            hir_impl.type_name, trait_name
+                        );
+                        // Build method function names in vtable slot order
+                        let mut slot_fns: Vec<(u32, String)> = trait_info
+                            .methods
+                            .iter()
+                            .filter_map(|(method_name, sig)| {
+                                hir_impl
+                                    .methods
+                                    .get(method_name)
+                                    .map(|fn_name| (sig.vtable_slot, fn_name.clone()))
+                            })
+                            .collect();
+                        slot_fns.sort_by_key(|(slot, _)| *slot);
+                        let method_fns: Vec<String> =
+                            slot_fns.into_iter().map(|(_, fn_name)| fn_name).collect();
+                        module.vtable_impls.push((
+                            hir_impl.type_name.clone(),
+                            vtable_sym,
+                            method_fns,
+                        ));
+                    }
+                }
+            }
+        }
+
         Ok(module)
     }
 
