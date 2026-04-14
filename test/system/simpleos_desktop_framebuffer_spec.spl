@@ -163,6 +163,7 @@ fn _update_baseline_requested() -> bool:
     val v = rt_env_get("UPDATE_BASELINE") ?? ""
     v == "1" or v == "true"
 
+
 # Round-12 harness-race fix: build the kernel at most once per spec run.
 # The first it{} block builds unconditionally; subsequent it{} blocks reuse
 # the artifact on disk via file_exists() instead of calling build_os again.
@@ -236,53 +237,24 @@ describe "SimpleOS desktop framebuffer baseline (SYS-GUI-006)":
                 val saw_ready = wait_for_serial_marker(
                     handle, "[desktop-e2e] desktop-ready", 180000)
                 if not saw_ready:
-                    # Round-12 harness-race workaround: wait_for_serial_marker
-                    # polls every 100ms, and on this spec QEMU exits only
-                    # ~244ms after emitting desktop-ready (it crashes on the
+                    # Round-12 analysis: wait_for_serial_marker polls every
+                    # 100ms, and on this spec QEMU exits only ~244ms after
+                    # emitting desktop-ready (kernel crashes on the
                     # subsequent launcher_shortcut_dispatch → shortcut:fail
                     # → return false → isa-debug-exit path in the baremetal
-                    # kernel with no NVMe). That makes the harness's inner
-                    # early-exit — `if not rt_process_is_running: return
-                    # serial_output.contains(marker)` — read a stale
-                    # pre-flush serial_output and return false, even though
-                    # the post-exit flushed log on disk *does* contain the
-                    # marker. Re-read the log directly here to get a
-                    # non-flaky verdict; if the marker is present after the
-                    # flush we continue along the capture path. If not, the
-                    # OS genuinely failed to reach desktop-ready.
-                    val raw = file_read_bytes(serial_log)
-                    var marker_bytes: [u8] = []
-                    val marker_text = "[desktop-e2e] desktop-ready"
-                    for ch in marker_text:
-                        marker_bytes = marker_bytes + [ch as u8]
-                    var marker_present = false
-                    if raw.len() >= marker_bytes.len():
-                        var i = 0
-                        val limit = raw.len() - marker_bytes.len() + 1
-                        while i < limit:
-                            var j = 0
-                            var match_ok = true
-                            while j < marker_bytes.len():
-                                if raw[i + j] != marker_bytes[j]:
-                                    match_ok = false
-                                    j = marker_bytes.len()
-                                else:
-                                    j = j + 1
-                            if match_ok:
-                                marker_present = true
-                                i = limit
-                            else:
-                                i = i + 1
-                    if marker_present:
-                        print "[simpleos_desktop_fb_spec] desktop-ready present in flushed log ({raw.len()} bytes) — harness wait returned false due to flush-race after early QEMU exit"
-                    else:
-                        print "[simpleos_desktop_fb_spec] desktop paint-ready marker not seen within 180s (and absent from flushed log — true kernel failure)"
+                    # kernel with no NVMe). The harness's inner early-exit
+                    # branch reads a stale pre-flush serial_output and
+                    # returns false even when the post-exit flushed log
+                    # contains the marker. See
+                    # doc/08_tracking/todo/sys_gui_006_round12_status_2026-04-14.md
+                    # for the full race analysis and measured window.
+                    # LIVE-GREEN via QMP screendump is architecturally
+                    # impossible without an OS-side fix: the kernel must
+                    # stop crashing after desktop-ready so QEMU stays
+                    # alive long enough for screendump. That OS change
+                    # is out of scope for this spec-only round.
+                    print "[simpleos_desktop_fb_spec] desktop paint-ready marker not seen within 180s (harness race + early QEMU exit — see Round-12 status)"
                     stop_guest(handle)
-                    # LIVE-GREEN via QMP screendump requires QEMU to still
-                    # be alive. The bare-desktop kernel exits ~244ms after
-                    # desktop-ready due to the downstream shortcut:fail
-                    # crash path, so capture cannot succeed here. Fail
-                    # loudly rather than record a stale baseline.
                     expect(false).to_equal(true)
                     return
 

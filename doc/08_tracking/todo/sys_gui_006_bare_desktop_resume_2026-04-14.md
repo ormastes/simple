@@ -203,6 +203,19 @@ given up.
 it to a shared before-all step, or raise the wait budget. Any one fix
 is sufficient.
 
+> **Round-12 update (2026-04-14):** Duplicate `build_os` collapsed via
+> `_build_once(target)` helper + wait budget raised to 180 s. Wall-clock
+> dropped from 52 s → 28 s (verified). **BUT** the race was not the
+> whole story — direct QEMU timing shows the guest is alive only
+> ~250–300 ms after emitting `desktop-ready` before `isa-debug-exit`
+> fires (kernel FAULTs in the downstream `launcher_shortcut_dispatch`
+> path on no-NVMe and returns false → `TEST FAILED`). LIVE-GREEN via
+> QMP screendump is therefore blocked on an OS-side fix, not harness.
+> See `sys_gui_006_round12_status_2026-04-14.md` Track A / Track B for
+> the proposed Round-13 plans. Row 4 of
+> `doc/03_plan/gui_drawing_layer_variations.md` remains gated on a
+> future round that lands LIVE-GREEN.
+
 ## Verification sequence once the harness race is resolved
 
 1. `bin/simple os test --scenario=x64-desktop-test` — must emit
