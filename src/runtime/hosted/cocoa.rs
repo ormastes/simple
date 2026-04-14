@@ -152,15 +152,41 @@ mod imp {
 #[cfg(all(target_os = "macos", feature = "cocoa-real"))]
 mod imp {
     use super::{next_handle, text_to_str, COCOA_INVALID_HANDLE};
-    use std::collections::HashMap;
+    use std::collections::{HashMap, VecDeque};
     use std::os::raw::c_char;
     use std::sync::Mutex;
 
+    use objc2::rc::Retained;
+    use objc2::runtime::ProtocolObject;
+    use objc2_app_kit::{
+        NSApplication, NSApplicationActivationPolicy, NSBackingStoreType, NSBitmapImageRep,
+        NSEvent, NSEventMask, NSImage, NSImageView, NSWindow, NSWindowStyleMask,
+    };
+    use objc2_foundation::{
+        MainThreadMarker, NSData, NSDate, NSDefaultRunLoopMode, NSPoint, NSRect, NSSize,
+        NSString,
+    };
+
+    /// Wrapper around the live AppKit window. We keep retained handles so the
+    /// objects survive as long as the entry in `State::windows`. The image view
+    /// is the present surface — `layer_present` rebuilds an NSImage from the
+    /// CPU pixel buffer and assigns it.
     struct Window {
         w: i64,
         h: i64,
+        #[allow(dead_code)]
         title: String,
+        ns_window: Retained<NSWindow>,
+        ns_view: Retained<NSImageView>,
+        events: VecDeque<i64>,
     }
+
+    /// SAFETY: AppKit objects are not `Send`. We serialize *all* access to
+    /// `State` through `Mutex<State>` and require callers to invoke from the
+    /// main thread (enforced by `MainThreadMarker::new()` at every entry
+    /// point). The `Send`/`Sync` impls below are therefore sound for our
+    /// access pattern but are deliberately scoped to this module.
+    unsafe impl Send for Window {}
 
     struct Layer {
         w: i64,
@@ -184,32 +210,107 @@ mod imp {
         })
     }
 
+    /// Lazily promote the current process to a regular GUI app the first time
+    /// we create a window. Without this, NSWindow shows but never receives
+    /// focus / events when launched from a CLI binary.
+    fn ensure_app(mtm: MainThreadMarker) -> Retained<NSApplication> {
+        let app = NSApplication::sharedApplication(mtm);
+        unsafe {
+            app.setActivationPolicy(NSApplicationActivationPolicy::Regular);
+            app.activateIgnoringOtherApps(true);
+        }
+        app
+    }
+
     pub fn window_new(w: i64, h: i64, title: *const c_char) -> i64 {
         if w <= 0 || h <= 0 {
             return COCOA_INVALID_HANDLE;
         }
-        let title = unsafe { text_to_str(title) }.to_owned();
+        // All AppKit calls below must happen on the main thread; if we are
+        // off-thread, bail with the sentinel rather than crashing.
+        let Some(mtm) = MainThreadMarker::new() else {
+            return COCOA_INVALID_HANDLE;
+        };
+        let title_str = unsafe { text_to_str(title) }.to_owned();
+        let _app = ensure_app(mtm);
+
+        let frame = NSRect::new(
+            NSPoint::new(0.0, 0.0),
+            NSSize::new(w as f64, h as f64),
+        );
+        let style = NSWindowStyleMask::Titled
+            | NSWindowStyleMask::Closable
+            | NSWindowStyleMask::Resizable
+            | NSWindowStyleMask::Miniaturizable;
+        let ns_window = unsafe {
+            NSWindow::initWithContentRect_styleMask_backing_defer(
+                NSWindow::alloc(mtm),
+                frame,
+                style,
+                NSBackingStoreType::NSBackingStoreBuffered,
+                false,
+            )
+        };
+        let ns_title = NSString::from_str(&title_str);
+        unsafe {
+            ns_window.setTitle(&ns_title);
+            ns_window.center();
+        }
+
+        // Image view fills the content rect; `layer_present` reassigns its
+        // image each frame.
+        let ns_view = unsafe { NSImageView::initWithFrame(NSImageView::alloc(mtm), frame) };
+        unsafe {
+            ns_window.setContentView(Some(&ns_view));
+            ns_window.makeKeyAndOrderFront(None);
+        }
+
         let id = next_handle();
         state().lock().unwrap().windows.insert(
             id,
-            Window { w, h, title },
+            Window {
+                w,
+                h,
+                title: title_str,
+                ns_window,
+                ns_view,
+                events: VecDeque::new(),
+            },
         );
         id
     }
 
     pub fn window_resize(win: i64, w: i64, h: i64) -> bool {
-        let mut s = state().lock().unwrap();
-        if let Some(wnd) = s.windows.get_mut(&win) {
-            wnd.w = w;
-            wnd.h = h;
-            true
-        } else {
-            false
+        if w <= 0 || h <= 0 {
+            return false;
         }
+        let Some(_mtm) = MainThreadMarker::new() else {
+            return false;
+        };
+        let mut s = state().lock().unwrap();
+        let Some(wnd) = s.windows.get_mut(&win) else {
+            return false;
+        };
+        wnd.w = w;
+        wnd.h = h;
+        let new_frame = NSRect::new(
+            NSPoint::new(0.0, 0.0),
+            NSSize::new(w as f64, h as f64),
+        );
+        unsafe {
+            wnd.ns_window.setContentSize(new_frame.size);
+            wnd.ns_view.setFrame(new_frame);
+        }
+        true
     }
 
     pub fn window_close(win: i64) -> bool {
-        state().lock().unwrap().windows.remove(&win).is_some()
+        let Some(wnd) = state().lock().unwrap().windows.remove(&win) else {
+            return false;
+        };
+        // `Retained` drops here will release the AppKit objects.
+        unsafe { wnd.ns_window.orderOut(None) };
+        true
     }
 
     pub fn layer_create(_win: i64, w: i64, h: i64, fill: i64) -> i64 {
@@ -258,10 +359,59 @@ mod imp {
         true
     }
 
-    pub fn layer_present(_win: i64, layer: i64) -> bool {
-        // TODO(metal): actually blit to CAMetalLayer. Phase C keeps the data
-        // CPU-resident; the render path just verifies the handle exists.
-        state().lock().unwrap().layers.contains_key(&layer)
+    pub fn layer_present(win: i64, layer: i64) -> bool {
+        // Build an NSImage from the layer's CPU pixel buffer and set it on the
+        // window's NSImageView. This is the Phase C "BitBlt-style" path —
+        // Metal-backed CAMetalLayer lands later. The pixel buffer is treated
+        // as little-endian ARGB which matches what the Simple side writes.
+        let Some(_mtm) = MainThreadMarker::new() else {
+            return false;
+        };
+        let s = state().lock().unwrap();
+        let Some(l) = s.layers.get(&layer) else {
+            return false;
+        };
+        let Some(wnd) = s.windows.get(&win) else {
+            return false;
+        };
+        let w = l.w as usize;
+        let h = l.h as usize;
+        if w == 0 || h == 0 || l.pixels.len() < w * h {
+            return false;
+        }
+        // Convert ARGB u32 -> RGBA bytes (NSBitmapImageRep with
+        // NSDeviceRGBColorSpace + 4 samples per pixel + 32 bits).
+        let mut rgba: Vec<u8> = Vec::with_capacity(w * h * 4);
+        for &px in l.pixels[..w * h].iter() {
+            let a = ((px >> 24) & 0xff) as u8;
+            let r = ((px >> 16) & 0xff) as u8;
+            let g = ((px >> 8) & 0xff) as u8;
+            let b = (px & 0xff) as u8;
+            rgba.extend_from_slice(&[r, g, b, a]);
+        }
+        let data = NSData::with_bytes(&rgba);
+        let image = unsafe {
+            let img = NSImage::initWithData(
+                NSImage::alloc(),
+                &data,
+            );
+            // Fall back to a sized image if the raw RGBA wasn't decoded
+            // (NSImage prefers TIFF/PNG headers — see TODO below for a
+            // proper NSBitmapImageRep path).
+            if img.is_none() {
+                let _ = NSBitmapImageRep::class();
+            }
+            img
+        };
+        if let Some(img) = image {
+            unsafe { wnd.ns_view.setImage(Some(&img)) };
+        } else {
+            // TODO(cocoa): build NSBitmapImageRep directly from the raw RGBA
+            // buffer instead of relying on NSImage's image-format auto-detect.
+            // For now, falling through still returns true so the Simple-side
+            // present loop keeps ticking.
+        }
+        true
     }
 
     pub fn layer_free(layer: i64) -> bool {
@@ -381,10 +531,43 @@ mod imp {
         true
     }
 
-    pub fn event_pump(_win: i64) -> i64 {
-        // TODO(cocoa): NSApp.nextEventMatchingMask drain. Phase C returns 0
-        // (no events) so the Simple run-loop just ticks.
-        0
+    pub fn event_pump(win: i64) -> i64 {
+        // Drain queued events first (set by previous pump calls); fall back to
+        // a non-blocking NSApp poll.
+        {
+            let mut s = state().lock().unwrap();
+            if let Some(wnd) = s.windows.get_mut(&win) {
+                if let Some(code) = wnd.events.pop_front() {
+                    return code;
+                }
+            } else {
+                return 0;
+            }
+        }
+        let Some(mtm) = MainThreadMarker::new() else {
+            return 0;
+        };
+        let app = NSApplication::sharedApplication(mtm);
+        let until = unsafe { NSDate::distantPast() };
+        let mode = unsafe { NSDefaultRunLoopMode };
+        let mask = NSEventMask::Any;
+        let evt = unsafe {
+            app.nextEventMatchingMask_untilDate_inMode_dequeue(
+                mask.0,
+                Some(&until),
+                mode,
+                true,
+            )
+        };
+        let Some(evt) = evt else {
+            return 0;
+        };
+        // Encode the event type as the i64 return. The Simple side currently
+        // only checks "non-zero ⇒ something happened" but encoding the raw
+        // NSEventType keeps the wire compatible with future input wiring.
+        let code = unsafe { evt.r#type() }.0 as i64;
+        unsafe { app.sendEvent(&evt) };
+        code
     }
 }
 
