@@ -18,7 +18,7 @@
 
 use os.drivers.framebuffer.fb_driver.{FramebufferDriver, Color, get_glyph_8x16}
 use os.drivers.virtio.virtio_gpu.{VirtioGpuDriver}
-use os.kernel.boot.mmio.{mmio_write32}
+use os.kernel.boot.mmio.{mmio_write32, mmio_read32}
 
 # ============================================================================
 # Compositor Backend Trait
@@ -251,14 +251,237 @@ impl CompositorBackend for GpuCompositorBackend:
         """Flush a rectangular region of the GPU framebuffer."""
         self.gpu.flush_rect(x.to_u32(), y.to_u32(), w.to_u32(), h.to_u32())
 
-    # Glass disabled in Phase 1 — D2 migration. `rt_gui_*` paint into the
-    # raw baremetal framebuffer; under non-identity virtio-GPU mappings
-    # (guest buffer != host framebuffer) those writes miss the active
-    # surface and corrupt memory. Re-enable via a native
-    # CompositorGlassCapable impl using VirtioGpuDriver cmd streams in
-    # Phase 2; see doc/03_plan/sys_gui/d2_glass_subtrait_migration.md.
+    # D2 Phase 2 Gpu re-adoption (2026-04-14): glass ops land natively on
+    # the VirtIO-GPU DMA framebuffer. `VirtioGpuDriver` owns a guest-visible
+    # DMA region at `fb_virt`; `flush` / `flush_rect` emit the cmd-stream
+    # TRANSFER_TO_HOST_2D + RESOURCE_FLUSH pair that ships those pixels to
+    # the host. We do blend / blur / gradient / read as guest-side pixel
+    # work on the DMA buffer BEFORE the next flush, so the result rides the
+    # existing cmd-stream path and there is no surface-mismatch hazard from
+    # Phase 1. No `rt_gui_*` — every pixel write goes through the same
+    # `mmio_write32` on `fb_virt` that `put_pixel` / `fill_rect` use.
     fn as_glass_capable() -> CompositorGlassCapable?:
-        nil
+        self
+
+impl CompositorGlassCapable for GpuCompositorBackend:
+
+    me blend_rect(x: i32, y: i32, w: i32, h: i32, color: u32, alpha: u8):
+        """Alpha-blend a solid ARGB source over the DMA framebuffer rect.
+
+        Reads each destination pixel straight out of `gpu.fb_virt` via
+        `mmio_read32`, runs Porter-Duff source-over with the caller's RGB
+        and the explicit `alpha` factor, and writes the result back with
+        `mmio_write32`. No flush is issued — `present` / `present_rect`
+        still ships the pixels to the host as part of the next frame.
+        """
+        if w <= 0 or h <= 0:
+            return
+        val fb_w = self.w
+        val fb_h = self.h
+        var rx = x
+        var ry = y
+        var rw = w
+        var rh = h
+        if rx < 0:
+            rw = rw + rx
+            rx = 0
+        if ry < 0:
+            rh = rh + ry
+            ry = 0
+        if rx + rw > fb_w:
+            rw = fb_w - rx
+        if ry + rh > fb_h:
+            rh = fb_h - ry
+        if rw <= 0 or rh <= 0:
+            return
+
+        val sr = ((color >> 16) & 0xFF).to_i32()
+        val sg = ((color >> 8) & 0xFF).to_i32()
+        val sb = (color & 0xFF).to_i32()
+        val a = alpha.to_i32()
+        val inv_a = 255 - a
+        val stride = self.gpu.width.to_u64()
+        val base = self.gpu.fb_virt
+        var row: i32 = 0
+        while row < rh:
+            var col: i32 = 0
+            while col < rw:
+                val px = (rx + col).to_u64()
+                val py = (ry + row).to_u64()
+                val offset = (py * stride + px) * 4
+                val dst = mmio_read32(base + offset)
+                val dr = ((dst >> 16) & 0xFF).to_i32()
+                val dg = ((dst >> 8) & 0xFF).to_i32()
+                val db = (dst & 0xFF).to_i32()
+                val mr = (sr * a + dr * inv_a) / 255
+                val mg = (sg * a + dg * inv_a) / 255
+                val mb = (sb * a + db * inv_a) / 255
+                val out = (0xFFu32 << 24)
+                    | (mr.to_u32() << 16)
+                    | (mg.to_u32() << 8)
+                    | mb.to_u32()
+                mmio_write32(base + offset, out)
+                col = col + 1
+            row = row + 1
+
+    me blur_region(x: i32, y: i32, w: i32, h: i32, radius: u32):
+        """Native 3x3 box blur passes on the VirtIO-GPU DMA framebuffer.
+
+        TRADEOFF: mirrors the Engine2d Phase 2 strategy — `radius` is
+        honoured as a pass count (1 for <2, 2 for <4, else 3), not as a
+        kernel width. A full separable Gaussian would need a scratch DMA
+        buffer per frame; the box-blur pass is strictly better than the
+        Phase 1 opaque-fill fallback and ships pixels through the same
+        cmd-stream flush as every other paint on this backend.
+        """
+        if w <= 0 or h <= 0:
+            return
+        val fb_w = self.w
+        val fb_h = self.h
+        var rx = x
+        var ry = y
+        var rw = w
+        var rh = h
+        if rx < 0:
+            rw = rw + rx
+            rx = 0
+        if ry < 0:
+            rh = rh + ry
+            ry = 0
+        if rx + rw > fb_w:
+            rw = fb_w - rx
+        if ry + rh > fb_h:
+            rh = fb_h - ry
+        if rw <= 0 or rh <= 0:
+            return
+
+        var passes: i32 = 1
+        if radius >= 2u32:
+            passes = 2
+        if radius >= 4u32:
+            passes = 3
+
+        val stride = self.gpu.width.to_u64()
+        val base = self.gpu.fb_virt
+        var pass_i: i32 = 0
+        while pass_i < passes:
+            # Snapshot the region into a local scratch buffer so the blur
+            # kernel samples the pre-pass state.
+            var src: [u32] = [0u32; rw * rh]
+            var row: i32 = 0
+            while row < rh:
+                var col: i32 = 0
+                while col < rw:
+                    val sx = (rx + col).to_u64()
+                    val sy = (ry + row).to_u64()
+                    val off = (sy * stride + sx) * 4
+                    src[row * rw + col] = mmio_read32(base + off)
+                    col = col + 1
+                row = row + 1
+            var row2: i32 = 0
+            while row2 < rh:
+                var col2: i32 = 0
+                while col2 < rw:
+                    var sumR: i32 = 0
+                    var sumG: i32 = 0
+                    var sumB: i32 = 0
+                    var n: i32 = 0
+                    var dy: i32 = -1
+                    while dy <= 1:
+                        var dx: i32 = -1
+                        while dx <= 1:
+                            val nx = col2 + dx
+                            val ny = row2 + dy
+                            if nx >= 0 and nx < rw and ny >= 0 and ny < rh:
+                                val p = src[ny * rw + nx]
+                                sumR = sumR + ((p >> 16) & 0xFF).to_i32()
+                                sumG = sumG + ((p >> 8) & 0xFF).to_i32()
+                                sumB = sumB + (p & 0xFF).to_i32()
+                                n = n + 1
+                            dx = dx + 1
+                        dy = dy + 1
+                    if n > 0:
+                        val avgR = (sumR / n).to_u32() & 0xFF
+                        val avgG = (sumG / n).to_u32() & 0xFF
+                        val avgB = (sumB / n).to_u32() & 0xFF
+                        val out = (0xFFu32 << 24) | (avgR << 16) | (avgG << 8) | avgB
+                        val px = (rx + col2).to_u64()
+                        val py = (ry + row2).to_u64()
+                        mmio_write32(base + (py * stride + px) * 4, out)
+                    col2 = col2 + 1
+                row2 = row2 + 1
+            pass_i = pass_i + 1
+
+    me gradient_v(x: i32, y: i32, w: i32, h: i32, color1: u32, color2: u32):
+        """Vertical gradient — linear interpolate color1..color2 along Y.
+
+        Issues per-pixel writes directly on the VirtIO-GPU DMA framebuffer.
+        An alternative implementation could emit one `fill_rect` command
+        per scanline, but the guest-side path is simpler and uses the same
+        primitive (`mmio_write32` on `fb_virt`) as every other draw op.
+        """
+        if w <= 0 or h <= 0:
+            return
+        val fb_w = self.w
+        val fb_h = self.h
+        var rx = x
+        var ry = y
+        var rw = w
+        var rh = h
+        if rx < 0:
+            rw = rw + rx
+            rx = 0
+        if ry < 0:
+            rh = rh + ry
+            ry = 0
+        if rx + rw > fb_w:
+            rw = fb_w - rx
+        if ry + rh > fb_h:
+            rh = fb_h - ry
+        if rw <= 0 or rh <= 0:
+            return
+
+        val r1 = ((color1 >> 16) & 0xFF).to_i32()
+        val g1 = ((color1 >> 8) & 0xFF).to_i32()
+        val b1 = (color1 & 0xFF).to_i32()
+        val a1 = ((color1 >> 24) & 0xFF).to_i32()
+        val r2 = ((color2 >> 16) & 0xFF).to_i32()
+        val g2 = ((color2 >> 8) & 0xFF).to_i32()
+        val b2 = (color2 & 0xFF).to_i32()
+        val a2 = ((color2 >> 24) & 0xFF).to_i32()
+        val stride = self.gpu.width.to_u64()
+        val base = self.gpu.fb_virt
+        var row: i32 = 0
+        val span = if rh > 1: rh - 1 else: 1
+        while row < rh:
+            val r = r1 + ((r2 - r1) * row) / span
+            val g = g1 + ((g2 - g1) * row) / span
+            val b = b1 + ((b2 - b1) * row) / span
+            val a = a1 + ((a2 - a1) * row) / span
+            val line = (a.to_u32() << 24) | (r.to_u32() << 16) | (g.to_u32() << 8) | b.to_u32()
+            var col: i32 = 0
+            while col < rw:
+                val px = (rx + col).to_u64()
+                val py = (ry + row).to_u64()
+                mmio_write32(base + (py * stride + px) * 4, line)
+                col = col + 1
+            row = row + 1
+
+    fn read_pixel(x: i32, y: i32) -> u32:
+        """Single-pixel read from the VirtIO-GPU DMA framebuffer.
+
+        Direct `mmio_read32` on `fb_virt`; the guest-visible DMA region is
+        the live staging buffer for the next cmd-stream flush, so the
+        result matches whatever the host will see on the next present.
+        """
+        if x < 0 or y < 0:
+            return 0u32
+        if x >= self.w or y >= self.h:
+            return 0u32
+        val stride = self.gpu.width.to_u64()
+        val px = x.to_u64()
+        val py = y.to_u64()
+        mmio_read32(self.gpu.fb_virt + (py * stride + px) * 4)
 
 impl GpuCompositorBackend:
 
