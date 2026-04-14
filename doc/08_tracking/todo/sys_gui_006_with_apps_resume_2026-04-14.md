@@ -16,6 +16,21 @@
 > `doc/08_tracking/todo/sys_gui_006_round10_status_2026-04-14.md` for
 > the bare-lane verification evidence and Blocker 2 handoff details —
 > the same OS-side fix will unblock both variants.
+>
+> **Round-11 update (2026-04-14):** The bare-desktop `launcher:fail
+> registered=0` half of the live-boot blocker is now **CLEARED** by
+> compiler commit `f940 fix(codegen): qualify MIR method calls via
+> MirLocal type when receiver.ty is unnamed`. Verified via serial log
+> from `test/system/simpleos_desktop_framebuffer_spec.spl` —
+> `[launcher] Registered 4 default apps`,
+> `[desktop-e2e] launcher-ready apps=4`, and
+> `[desktop-e2e] desktop-ready` all now emit. The with-apps variant
+> remains PENDING because `[desktop-e2e] shortcut:fail` (browser_demo
+> manifest read failure on `/sys/apps/browser_demo/BROWSER.APP`) still
+> prevents `remote-grouping:ok` from firing — the manifest-loading
+> path still requires VFS access that the baremetal NVMe lane lacks.
+> See `doc/08_tracking/todo/sys_gui_006_round11_status_2026-04-14.md`
+> for the bare-lane evidence and the remaining harness race.
 
 ## Blockers (from Agents alpha + beta)
 

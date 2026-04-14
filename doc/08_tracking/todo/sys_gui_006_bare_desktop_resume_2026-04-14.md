@@ -16,6 +16,22 @@ that used to reach `desktop-ready` regressed.
 > the spec. See
 > `doc/08_tracking/todo/sys_gui_006_round10_status_2026-04-14.md` for
 > evidence and Blocker 2 handoff instructions.
+>
+> **Round-11 update (2026-04-14):** Blocker 2 is now **CLEARED** in the
+> kernel image. Commit `f940 fix(codegen): qualify MIR method calls via
+> MirLocal type when receiver.ty is unnamed` correctly routes
+> `shell.init()` to `DesktopShell.init`. Live QEMU serial log
+> (`build/os/simpleos_desktop_qemu_serial.log`) now emits every expected
+> marker: `[shell] init: wm service initialized`,
+> `[launcher] Initializing app launcher...`,
+> `[launcher] Registered 4 default apps`,
+> `[desktop-e2e] launcher-ready apps=4`, and
+> `[desktop-e2e] desktop-ready`. **However**, the spec still fails
+> because the harness-side `wait_for_serial_marker` races against
+> sequential `build_os` calls that burn ~51 s of the 60 s budget before
+> QEMU even spawns. Not an OS/compiler regression — a spec/harness
+> issue. See `sys_gui_006_round11_status_2026-04-14.md` for full
+> evidence and Round-12 remediation plan.
 
 ## One-command retry
 
@@ -102,7 +118,15 @@ interpreter-local.
 `bin/simple test --mode interpreter` fails identically. Any fix that
 unblocks us also unblocks SYS-ENGINE2D.
 
-## Blocker 2 — Live lane regression: `launcher:fail` before `desktop-ready`
+## Blocker 2 — Live lane regression: `launcher:fail` before `desktop-ready` [CLEARED 2026-04-14, Round-11]
+
+> **Round-11 status:** CLEARED by compiler commit `f940 fix(codegen):
+> qualify MIR method calls via MirLocal type when receiver.ty is
+> unnamed`. Live serial log now contains `[desktop-e2e] desktop-ready`
+> along with all prerequisite shell/launcher markers. The Blocker 2
+> diagnostic in `launcher_module_storage_fix_plan_2026-04-14.md`
+> correctly identified `(A) Method-dispatch mis-selection` as the
+> root cause. Historical analysis below retained for archive.
 
 **Territory:** Agent α / δ (`src/os/**`, `examples/simple_os/**`)
 
@@ -163,11 +187,27 @@ launcher builder invocation between `shell-ready` and `desktop-ready`.
   (η does not own that tree). γ must commit it as part of the
   blocker-1 fix.
 
-## Verification sequence once both blockers land
+## Remaining blocker (Round-11) — harness marker-wait race
+
+**Territory:** test harness (`test/system/simpleos_desktop_framebuffer_spec.spl` plus
+`_wait_for_serial_marker` under `src/lib/.../qemu_runner.spl`).
+
+The spec currently calls `build_os(target)` twice (once per `it{}`), each
+taking ~24–28 s, before `spawn_guest_with_qmp` runs. Total wall time is
+~52 s, leaving < 2 s of the 60 s `wait_for_serial_marker` budget to run
+against a QEMU that has only just started booting. Serial log on disk
+confirms `desktop-ready` is emitted, but after the spec has already
+given up.
+
+**Remediation (Round-12):** collapse duplicate `build_os` call, or lift
+it to a shared before-all step, or raise the wait budget. Any one fix
+is sufficient.
+
+## Verification sequence once the harness race is resolved
 
 1. `bin/simple os test --scenario=x64-desktop-test` — must emit
    `[desktop-e2e] desktop-ready` on the serial log (proves
-   blocker 2 is cleared).
+   blocker 2 is cleared — **already verified 2026-04-14 Round-11**).
 2. `bin/simple test test/system/simpleos_desktop_framebuffer_spec.spl --mode interpreter`
    — must execute `it{}` bodies without the "Export statement
    references undefined symbol" cascade (proves blocker 1 is
