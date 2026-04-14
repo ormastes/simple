@@ -10,6 +10,107 @@ use crate::mir::effects::CallTarget;
 use crate::mir::instructions::{MirInst, VReg};
 
 impl<'a> MirLowerer<'a> {
+    /// Recover a named type for a method-call receiver whose own
+    /// `receiver.ty` does not resolve to a named class via
+    /// `TypeRegistry::get_type_name`.
+    ///
+    /// Round-16 introduced the Local-idx case (receiver is a bare local
+    /// whose MIR local-table entry carries the user's `: T` annotation).
+    /// Round-17 widens this to structural receivers whose sub-expression
+    /// type is already registered:
+    ///
+    /// - `HirExprKind::FieldAccess { receiver, field_index }` — look up
+    ///   `field_index` on `HirType::Struct { fields }` (also handles the
+    ///   tuple-projection case `pair.0`, since tuples lower to
+    ///   `FieldAccess` with a numeric index over `HirType::Tuple`).
+    /// - `HirExprKind::Index { receiver, .. }` — element type of the
+    ///   base's `HirType::Array` / `HirType::Simd` / `HirType::Pointer`.
+    ///
+    /// Each variant recurses: the base of a field access may itself be a
+    /// field access (`self.a.b.init()`) or an array index
+    /// (`containers[i].widget.init()`). A `Pointer` layer is transparently
+    /// dereferenced because Simple classes are frequently passed by
+    /// pointer at the MIR boundary.
+    ///
+    /// Returns `None` when no structural hop leads to a registered type —
+    /// callers fall back to the bare method name, matching pre-Round-17
+    /// behaviour.
+    fn recover_receiver_type(&mut self, expr: &HirExpr) -> Option<TypeId> {
+        match &expr.kind {
+            HirExprKind::Local(idx) => {
+                let lookup_idx = *idx;
+                self.with_func(|func, _| {
+                    let nparams = func.params.len();
+                    // Local indices include params first, then locals.
+                    if lookup_idx < nparams {
+                        Some(func.params[lookup_idx].ty)
+                    } else {
+                        let li = lookup_idx - nparams;
+                        func.locals.get(li).map(|l| l.ty)
+                    }
+                })
+                .ok()
+                .flatten()
+            }
+            HirExprKind::FieldAccess {
+                receiver: base,
+                field_index,
+            } => {
+                // Base's own ty is preferred; if unnamed, walk through
+                // another structural hop.
+                let base_ty = if self
+                    .type_registry
+                    .and_then(|r| r.get_type_name(base.ty))
+                    .is_some()
+                {
+                    Some(base.ty)
+                } else {
+                    self.recover_receiver_type(base)
+                }?;
+                let registry = self.type_registry?;
+                // Follow a single pointer layer — classes are commonly
+                // wrapped in `Pointer { inner, .. }` at the MIR boundary.
+                let mut ty = registry.get(base_ty)?;
+                if let HirType::Pointer { inner, .. } = ty {
+                    ty = registry.get(*inner)?;
+                }
+                match ty {
+                    HirType::Struct { fields, .. } => {
+                        fields.get(*field_index).map(|(_, fty)| *fty)
+                    }
+                    HirType::Tuple(elems) => elems.get(*field_index).copied(),
+                    _ => None,
+                }
+            }
+            HirExprKind::Index {
+                receiver: base,
+                ..
+            } => {
+                let base_ty = if self
+                    .type_registry
+                    .and_then(|r| r.get_type_name(base.ty))
+                    .is_some()
+                {
+                    Some(base.ty)
+                } else {
+                    self.recover_receiver_type(base)
+                }?;
+                let registry = self.type_registry?;
+                let mut ty = registry.get(base_ty)?;
+                if let HirType::Pointer { inner, .. } = ty {
+                    ty = registry.get(*inner)?;
+                }
+                match ty {
+                    HirType::Array { element, .. } => Some(*element),
+                    HirType::Simd { element, .. } => Some(*element),
+                    HirType::Pointer { inner, .. } => Some(*inner),
+                    _ => None,
+                }
+            }
+            _ => None,
+        }
+    }
+
     pub(super) fn lower_expr(&mut self, expr: &HirExpr) -> MirLowerResult<VReg> {
         let expr_ty = expr.ty;
 
@@ -1378,24 +1479,21 @@ impl<'a> MirLowerer<'a> {
                 // this fallback the typed-receiver workaround at
                 // `desktop_e2e_entry.spl:97` was being silently undone for
                 // the very call site (`shell.init()`) it was meant to fix.
+                //
+                // Round-17 widening (T58 follow-up): non-Local receivers —
+                // `self.widget.init()`, `container.pair.0.init()`,
+                // `arr[i].init()` — would still mis-dispatch because their
+                // `receiver.ty` is likewise Unknown/Any in the same
+                // cross-module constructor scenarios. Recover the type by
+                // walking one structural hop into the sub-expression: look
+                // up the field's type on the struct type of the base, the
+                // tuple element type at the given index, or the array/vec
+                // element type. Each hop uses only registered type info
+                // from `TypeRegistry` — no synthesis — and the recursion
+                // terminates at a Local (or an expression whose own `ty`
+                // is already named).
                 let receiver_local_ty: Option<TypeId> =
-                    if let HirExprKind::Local(idx) = &receiver.kind {
-                        let lookup_idx = *idx;
-                        self.with_func(|func, _| {
-                            let nparams = func.params.len();
-                            // Local indices include params first, then locals.
-                            if lookup_idx < nparams {
-                                Some(func.params[lookup_idx].ty)
-                            } else {
-                                let li = lookup_idx - nparams;
-                                func.locals.get(li).map(|l| l.ty)
-                            }
-                        })
-                        .ok()
-                        .flatten()
-                    } else {
-                        None
-                    };
+                    self.recover_receiver_type(receiver);
 
                 let func_name = if let Some(registry) = self.type_registry {
                     if let Some(type_name) = registry.get_type_name(receiver.ty) {
