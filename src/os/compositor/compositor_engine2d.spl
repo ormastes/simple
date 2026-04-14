@@ -31,14 +31,17 @@
 #     Engine2D.draw_rect_filled(x, y, 1, 1, color). This matches how
 #     GpuCompositorBackend implements the same calls.
 #   - present / present_rect call engine.present().
-#   - blend_rect / blur_region / gradient_v / read_pixel: OPT OUT in
-#     D2 Phase 1 (2026-04-14). Glass is disabled for this backend because
-#     the `rt_gui_*` externs paint the raw baremetal framebuffer; when the
-#     underlying RenderBackend is not baremetal (Vulkan, Metal, non-identity
-#     virtio-GPU), those writes hit the wrong surface. Re-enable via a
-#     native `CompositorGlassCapable` impl once Engine2D's `RenderBackend`
-#     grows blend/blur primitives — see
-#     doc/03_plan/sys_gui/d2_glass_subtrait_migration.md (Phase 2).
+#   - blend_rect / blur_region / gradient_v / read_pixel: NATIVE Engine2D
+#     in D2 Phase 2 (2026-04-14). The backend implements
+#     `CompositorGlassCapable` directly and routes every glass op through
+#     existing Engine2D primitives (`draw_gradient_rect`, `read_pixels`,
+#     `draw_image`) — there are NO `rt_gui_*` calls on this path, so the
+#     Phase 1 surface-mismatch hazard is gone. The blur path uses a simple
+#     1–3 pass 3x3 box kernel (radius collapsed to pass count) — a
+#     deliberate tradeoff documented inline; a faithful Gaussian would
+#     require adding a scratch buffer to every Engine2D backend.
+#     Gpu (virtio_gpu) is still opt-out — that path lands later with
+#     command-stream work. See doc/03_plan/sys_gui/d2_glass_subtrait_migration.md.
 #
 # Milestone unlocked: the compositor's render loop now runs through
 # Engine2D. Every surface fill, title bar, text glyph, and cursor blit
@@ -52,6 +55,7 @@ use os.compositor.compositor.{Compositor}
 use os.compositor.display_backend.{CompositorBackend, CompositorGlassCapable}
 use os.compositor.input_backend.{InputBackend, Ps2InputBackend}
 use std.gc_async_mut.gpu.engine2d.engine.{Engine2D}
+use std.gc_async_mut.gpu.engine2d.color.{rgba, blend, color_r, color_g, color_b, color_a}
 
 # ============================================================================
 # Engine2D Compositor Backend
@@ -61,8 +65,9 @@ class Engine2dCompositorBackend:
     """CompositorBackend that routes every paint call through Engine2D.
 
     The backing Engine2D is expected to be created via
-    `create_fb_engine(fb)` (or any other Engine2D factory that ultimately
-    paints the same framebuffer the glass rt_gui_* helpers target).
+    `create_fb_engine(fb)` (or any other Engine2D factory). In Phase 2
+    the glass ops also paint through this Engine2D — no separate
+    `rt_gui_*` write path is taken.
     """
     engine: Engine2D
     w: i32
@@ -120,13 +125,167 @@ impl CompositorBackend for Engine2dCompositorBackend:
         # (same as FbCompositorBackend).
         self.engine.present()
 
-    # D2 Phase 1 opt-out: no `impl CompositorGlassCapable for
-    # Engine2dCompositorBackend` exists. `rt_gui_*` writes would paint the
-    # wrong surface when the underlying RenderBackend is not baremetal.
-    # Callers degrade to opaque `fill_rect` via
-    # `os.compositor.glass_dispatch` helpers.
+    # D2 Phase 2 opt-in: Engine2D has the primitives we need
+    # (`draw_gradient_rect`, `read_pixels`, `draw_image`) so we paint glass
+    # natively through the backing Engine2D — NO `rt_gui_*` calls. Glass
+    # writes hit the same surface every other Engine2D draw goes to, so
+    # the surface-mismatch hazard from Phase 1 is eliminated.
     fn as_glass_capable() -> CompositorGlassCapable?:
-        nil
+        self
+
+impl CompositorGlassCapable for Engine2dCompositorBackend:
+
+    me blend_rect(x: i32, y: i32, w: i32, h: i32, color: u32, alpha: u8):
+        """Alpha-blend a solid colour over the rect.
+
+        Reads the affected region from Engine2D, runs Porter-Duff source-over
+        per pixel using `std.gpu.engine2d.color.blend`, then writes the result
+        back via `draw_image`. Pure Engine2D primitives — no rt_gui_*.
+        """
+        if w <= 0 or h <= 0:
+            return
+        # Build the source colour with the requested alpha applied to the
+        # caller's RGB. The incoming `color` is treated as an opaque triple;
+        # `alpha` is the over factor.
+        val sr = color_r(color)
+        val sg = color_g(color)
+        val sb = color_b(color)
+        val src = rgba(sr, sg, sb, alpha.to_i32())
+
+        val full = self.engine.read_pixels()
+        val fb_w = self.engine.width()
+        val fb_h = self.engine.height()
+        # Clip to framebuffer.
+        var rx = x
+        var ry = y
+        var rw = w
+        var rh = h
+        if rx < 0:
+            rw = rw + rx
+            rx = 0
+        if ry < 0:
+            rh = rh + ry
+            ry = 0
+        if rx + rw > fb_w:
+            rw = fb_w - rx
+        if ry + rh > fb_h:
+            rh = fb_h - ry
+        if rw <= 0 or rh <= 0:
+            return
+
+        var region: [u32] = [0u32; rw * rh]
+        var row: i32 = 0
+        while row < rh:
+            var col: i32 = 0
+            while col < rw:
+                val dst = full[(ry + row) * fb_w + (rx + col)]
+                # Force result alpha to 255 so draw_image's own blend path
+                # treats it as an opaque overwrite.
+                val mixed = blend(src, dst)
+                val mr = color_r(mixed)
+                val mg = color_g(mixed)
+                val mb = color_b(mixed)
+                region[row * rw + col] = rgba(mr, mg, mb, 255)
+                col = col + 1
+            row = row + 1
+        self.engine.draw_image(rx, ry, rw, rh, region)
+
+    me blur_region(x: i32, y: i32, w: i32, h: i32, radius: u32):
+        """Native blur via a simple 3x3 box kernel.
+
+        TRADEOFF: the `radius` parameter is honoured as "box-blur passes"
+        with a hard cap of 3 (1 pass for radius 0/1, 2 for radius 2/3,
+        3 otherwise). A faithful separable Gaussian would mean adding a
+        scratch buffer to every Engine2D backend, which is over-engineering
+        for the Phase 2 step. The render result is still strictly nicer
+        than the Phase 1 opaque fill fallback.
+        """
+        if w <= 0 or h <= 0:
+            return
+        val fb_w = self.engine.width()
+        val fb_h = self.engine.height()
+        var rx = x
+        var ry = y
+        var rw = w
+        var rh = h
+        if rx < 0:
+            rw = rw + rx
+            rx = 0
+        if ry < 0:
+            rh = rh + ry
+            ry = 0
+        if rx + rw > fb_w:
+            rw = fb_w - rx
+        if ry + rh > fb_h:
+            rh = fb_h - ry
+        if rw <= 0 or rh <= 0:
+            return
+
+        var passes: i32 = 1
+        if radius >= 2u32:
+            passes = 2
+        if radius >= 4u32:
+            passes = 3
+
+        var src_full = self.engine.read_pixels()
+        var pass_i: i32 = 0
+        while pass_i < passes:
+            var out: [u32] = [0u32; rw * rh]
+            var row: i32 = 0
+            while row < rh:
+                var col: i32 = 0
+                while col < rw:
+                    var sumR: i32 = 0
+                    var sumG: i32 = 0
+                    var sumB: i32 = 0
+                    var n: i32 = 0
+                    var dy: i32 = -1
+                    while dy <= 1:
+                        var dx: i32 = -1
+                        while dx <= 1:
+                            val sx = rx + col + dx
+                            val sy = ry + row + dy
+                            if sx >= 0 and sx < fb_w and sy >= 0 and sy < fb_h:
+                                val p = src_full[sy * fb_w + sx]
+                                sumR = sumR + color_r(p)
+                                sumG = sumG + color_g(p)
+                                sumB = sumB + color_b(p)
+                                n = n + 1
+                            dx = dx + 1
+                        dy = dy + 1
+                    if n > 0:
+                        out[row * rw + col] = rgba(sumR / n, sumG / n, sumB / n, 255)
+                    else:
+                        out[row * rw + col] = src_full[(ry + row) * fb_w + (rx + col)]
+                    col = col + 1
+                row = row + 1
+            self.engine.draw_image(rx, ry, rw, rh, out)
+            # Re-read for the next pass (cheap and guarantees correctness
+            # even on backends where draw_image has its own quirks).
+            if pass_i + 1 < passes:
+                src_full = self.engine.read_pixels()
+            pass_i = pass_i + 1
+
+    me gradient_v(x: i32, y: i32, w: i32, h: i32, color1: u32, color2: u32):
+        """Vertical gradient via the Engine2D facade primitive."""
+        self.engine.draw_gradient_rect(x, y, w, h, color1, color2)
+
+    fn read_pixel(x: i32, y: i32) -> u32:
+        """Single-pixel read via Engine2D.read_pixels.
+
+        `read_pixels` returns a full-frame copy; for hot read paths a
+        per-pixel backend method would be cheaper, but for the compositor's
+        glass overlay use case (a handful of probes per frame) the extra
+        copy is acceptable and avoids touching the RenderBackend trait.
+        """
+        if x < 0 or y < 0:
+            return 0u32
+        val w = self.engine.width()
+        val h = self.engine.height()
+        if x >= w or y >= h:
+            return 0u32
+        val pixels = self.engine.read_pixels()
+        pixels[y * w + x]
 
 impl Engine2dCompositorBackend:
 
