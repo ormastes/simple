@@ -1,5 +1,14 @@
 # Cross-Platform Window Manager — Architecture
 
+> **Scope note.** This doc covers the full GUI drawing stack — not just
+> baremetal SimpleOS. All five compositor backends (Fb, GPU, Hosted,
+> Browser, Electron) share the same `Compositor` + `InputBackend` traits
+> and the same widget/session layer. For the work plan that maps the four
+> stack variations (SimpleOS / host OS / Chromium / Electron) onto these
+> modules, see [`doc/03_plan/gui_drawing_layer_variations.md`](../03_plan/gui_drawing_layer_variations.md).
+> For the dev-facing "which backend do I pick" guide, see
+> [`doc/07_guide/ui_stack_guide.md`](../07_guide/ui_stack_guide.md).
+
 ## Current State
 
 ```
@@ -30,29 +39,91 @@ Separate (not integrated):
 2. Hosted desktop duplicates rendering logic
 3. No shared input abstraction between PS/2 and winit
 
+> **Status note (2026-04-14).** Problems 1–3 have been resolved. The
+> `CompositorBackend` / `InputBackend` traits and their Fb / GPU /
+> Hosted / Browser / Electron implementations all live under
+> `src/os/compositor/` (see File Layout below). This section is kept
+> for historical context only.
+
 ## Target Architecture
 
 ```
-┌─────────────────────────────────────────────────────────┐
-│                    DesktopShell                          │
-│  (taskbar, app launcher, shortcuts, WM service)         │
-│  UNCHANGED — works on all platforms                     │
-├─────────────────────────────────────────────────────────┤
-│                    Compositor                            │
-│  (Z-order, input routing, drag, focus)                  │
-│  Uses: CompositorBackend + InputBackend (traits)        │
-├─────────────────────────────────────────────────────────┤
-│  InputBackend (trait)          CompositorBackend (trait) │
-│  ┌───────────┬──────────┐     ┌────────┬─────┬───────┐ │
-│  │Ps2Input   │HostedInput│    │  Fb    │ GPU │Hosted │ │
-│  │(baremetal)│(winit)    │    │Backend │Back.│Backend│ │
-│  └───────────┴──────────┘     └────────┴─────┴───────┘ │
-├─────────────────────────────────────────────────────────┤
-│                    Platform Layer                        │
-│  Baremetal: PS/2 ports, MMIO framebuffer, VirtIO GPU    │
-│  Hosted: winit+softbuffer (macOS/Linux/Windows/FreeBSD) │
-└─────────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────────┐
+│                          Application                             │
+│   os.apps.* · examples/* — imports only common.ui.* (GUI Lib)    │
+├──────────────────────────────────────────────────────────────────┤
+│                          GUI Lib                                  │
+│   common.ui.widget · builder · session (UISession) · layout ·    │
+│   diff · changelog · lifecycle · surface · profile · capability  │
+│   — single entry for CLI, TUI, and GUI backends                  │
+├──────────────────────────────────────────────────────────────────┤
+│                   Window Manager Service                          │
+│   os.services.wm · lib.nogc_sync_mut.play.wm · window_protocol   │
+├──────────────────────────────────────────────────────────────────┤
+│                          Compositor                               │
+│   (Z-order, input routing, drag, focus, decorations, cursor)     │
+│   Uses: CompositorBackend + InputBackend (traits)                │
+├──────────────────────────────────────────────────────────────────┤
+│  InputBackend (trait)           CompositorBackend (trait)        │
+│  ┌──────────┬───────────┐      ┌─────┬─────┬──────┬─────┬─────┐ │
+│  │Ps2Input  │HostedInput│      │ Fb  │ GPU │Hosted│Brwsr│Elec.│ │
+│  │(baremet.)│(winit)    │      │Back.│Back.│Back. │Back.│Back.│ │
+│  ├──────────┴───────────┤      └─────┴─────┴──────┴─────┴─────┘ │
+│  │BrowserInput│ElectronInput│                                    │
+│  │(DOM events)│(ipc events) │                                    │
+│  └──────────┴───────────┘                                        │
+├──────────────────────────────────────────────────────────────────┤
+│                        2D Engine                                  │
+│   lib.common.render_scene · lib.gc_async_mut.gpu.engine2d        │
+│   backends: cpu · software · vulkan · metal · opengl · virtio_   │
+│             gpu · cuda · rocm · intel · baremetal               │
+├──────────────────────────────────────────────────────────────────┤
+│                       Platform Layer                              │
+│  Baremetal : PS/2 ports, MMIO framebuffer, VirtIO-GPU            │
+│  Hosted    : winit+softbuffer (macOS/Linux/Windows/FreeBSD)      │
+│  Browser   : HTMLCanvas / WebGPU surface in Chromium/CEF         │
+│  Electron  : BrowserWindow via main+renderer IPC                 │
+└──────────────────────────────────────────────────────────────────┘
 ```
+
+### UISession is the single entry for CLI, TUI, and GUI
+
+All front-ends — textual and graphical — funnel through `UISession`
+(`src/lib/common/ui/session.spl`). Its docstring is the contract:
+
+> *"Central shared-state container that owns UIState, WidgetStore,
+> Viewport, ChangeLog, LifecycleRegistry, and SurfaceManager. All state
+> transitions flow through the session, enabling shared state across
+> CLI, TUI, and GUI backends."*
+
+Concretely, the siblings under `src/app/ui.*` are all **UISession
+backends**, not a separate stack:
+
+| Family | `ui.*` apps | Renders to |
+|--------|-------------|-----------|
+| Headless / test | `ui.none`, `ui.test_api`, `ui.render` | buffer / snapshot |
+| CLI | `ui.cli`, `ui.ipc`, `ui.mcp`, `ui.vscode` | stdio / socket / LSP |
+| TUI | `ui.tui`, `ui.tui_web` | terminal cells |
+| GUI (pure Simple) | via `os.compositor` + `hosted_backend` / `fb_backend` | winit / framebuffer |
+| GUI (web host) | `ui.browser`, `ui.web` | HTMLCanvas |
+| GUI (desktop host) | `ui.electron`, `ui.tauri` | BrowserWindow |
+
+A backend implements the `backend.spl` trait (`common.ui.backend`) plus
+the usual event-loop integration. The widget tree, diff, lifecycle, and
+capability policy are identical for every backend — which is why the
+CLI-mode observer in `ui.cli/observer.spl` and the baremetal compositor
+consume the same `UIEvent` stream.
+
+**Consequence for the four drawing-layer variations** (plan doc):
+
+- V1 (SimpleOS baremetal) and V2 (host OS) differ only below the
+  `Compositor` line — swap `fb_backend` + `Ps2InputBackend` for
+  `hosted_backend` + `HostedInputBackend`.
+- V3 (Chromium) and V4 (Electron) swap the backend pair for
+  `browser_compositor_backend` / `electron_capture` and translate DOM
+  or IPC events into `os.gui.input_event`.
+- The app, GUI Lib, WM service, and 2D engine are unchanged across all
+  four. That is the invariant this doc defends.
 
 ## Component Design
 
@@ -186,36 +257,70 @@ shell.run()
 
 ```
 src/os/compositor/
-  compositor.spl              # Refactored: uses traits
-  display_backend.spl         # Existing: CompositorBackend trait + Fb/Gpu impls
-  hosted_backend.spl          # NEW: HostedCompositorBackend
-  input_backend.spl           # NEW: InputBackend trait + Ps2InputBackend
-  hosted_input_backend.spl    # NEW: HostedInputBackend (winit)
-  decorations.spl             # Unchanged
-  cursor.spl                  # Unchanged
-  fb_backend.spl              # Unchanged (widget renderer)
-  layout_manager.spl          # Unchanged
-  snap.spl                    # Unchanged
+  compositor.spl                   # Uses CompositorBackend + InputBackend traits
+  display_backend.spl              # CompositorBackend trait + Fb/Gpu impls
+  fb_backend.spl                   # V1: baremetal framebuffer backend
+  hosted_backend.spl               # V2: HostedCompositorBackend (winit+softbuffer)
+  hosted_input_backend.spl         # V2: HostedInputBackend (winit events)
+  browser_backend.spl              # V3: Chromium/browser drawing backend
+  browser_compositor_backend.spl   # V3: compositor wrapper for Browser
+  electron_capture.spl             # V4: Electron BrowserWindow bridge
+  input_backend.spl                # InputBackend trait + Ps2InputBackend
+  compositor_engine2d.spl          # Bridge to lib.gc_async_mut.gpu.engine2d
+  engine2d_display.spl             # Engine2D → display backend adapter
+  decorations.spl · cursor.spl · layout_manager.spl · snap.spl
+  glass_effects.spl · glass_effects_pure.spl · glass_port.spl
+  wm_scene.spl · wm_consistency_runner.spl
+  perceptual_compare.spl · screenshot_compare.spl · diff_export.spl
+  qemu_capture.spl                 # Capture for sys-gui baselines
 
-src/os/hosted/
-  hosted_entry.spl            # NEW: hosted desktop entry point
-  mod.spl                     # NEW: module declaration
+src/os/gui/
+  mod.spl · render.spl · input_event.spl · shortcut.spl
 
-examples/simple_os/hosted/
-  gui_test.spl                # Development test (existing)
-  hosted_main.spl             # Legacy (keep for reference)
+src/os/desktop/
+  shell.spl · dock.spl · app_switcher.spl
+  app_manifest.spl · notification_center.spl · mod.spl
+
+src/lib/common/ui/                 # GUI Lib — shared by all backends
+  session.spl · widget.spl · widget_store.spl · builder.spl
+  layout.spl · layout_engine.spl · diff.spl · patch.spl
+  state.spl · event.spl · lifecycle.spl · changelog.spl
+  surface.spl · viewport.spl · profile.spl · capability.spl
+  capability_policy.spl · theme · async_* · backend.spl · backend_factory.spl
+
+src/lib/common/render_scene/       # 2D engine trait + executor
+  engine_trait.spl · engine_float.spl · engine_int.spl
+  engine2d_executor.spl · executor.spl · scene.spl
+
+src/lib/gc_async_mut/gpu/engine2d/ # 2D engine backends
+  engine.spl · compositor.spl · color.spl · glyph.spl
+  backend_cpu.spl · backend_software.spl · backend_baremetal.spl
+  backend_virtio_gpu.spl · backend_vulkan.spl · backend_metal.spl
+  backend_opengl.spl · backend_cuda.spl · backend_rocm.spl · backend_intel.spl
+
+src/app/ui.*                       # UISession backends (see table above)
+  ui.none · ui.cli · ui.tui · ui.tui_web · ui.render · ui.test_api
+  ui.browser · ui.web · ui.electron · ui.tauri · ui.ipc · ui.mcp · ui.vscode
+
+src/app/wm_compare/                # Cross-backend parity harness
+  main.spl · scene_registry.spl · live_capture.spl · html_compat.spl
 ```
 
 ## Platform Support Matrix
 
-| Platform | Backend | Input | Window | Status |
-|----------|---------|-------|--------|--------|
-| Baremetal x86_64 | FbCompositorBackend | Ps2InputBackend | BGA/VirtIO | Existing |
-| Baremetal x86_64 | GpuCompositorBackend | Ps2InputBackend | VirtIO-GPU | Existing |
-| macOS | HostedCompositorBackend | HostedInputBackend | winit+softbuffer | **New** |
-| Linux | HostedCompositorBackend | HostedInputBackend | winit+softbuffer | **New** |
-| Windows | HostedCompositorBackend | HostedInputBackend | winit+softbuffer | **New** |
-| FreeBSD | HostedCompositorBackend | HostedInputBackend | winit+softbuffer | **New** |
+| Variation | Platform | Compositor Backend | Input Backend | Surface | 2D Engine Backend | Status |
+|-----------|----------|--------------------|---------------|---------|-------------------|--------|
+| V1 | Baremetal x86_64 | `fb_backend` | `Ps2InputBackend` | BGA framebuffer | `backend_software` / `backend_baremetal` | sys-gui-006 baseline |
+| V1 | Baremetal x86_64 + VirtIO | `display_backend` (GPU) | `Ps2InputBackend` | VirtIO-GPU | `backend_virtio_gpu` | sys-gui-007 in progress |
+| V2 | macOS | `hosted_backend` | `hosted_input_backend` | winit+softbuffer → Cocoa | `backend_metal` / `backend_cpu` | hosted path green; Metal WIP |
+| V2 | Linux | `hosted_backend` | `hosted_input_backend` | winit+softbuffer → X11/Wayland | `backend_vulkan` / `backend_cpu` | hosted path green |
+| V2 | Windows | `hosted_backend` | `hosted_input_backend` | winit+softbuffer → Win32 | `backend_cpu` (DX WIP) | hosted shim WIP |
+| V2 | FreeBSD | `hosted_backend` | `hosted_input_backend` | winit+softbuffer → Xlib | `backend_cpu` | exists, untested |
+| V3 | Chromium / CEF | `browser_compositor_backend` + `browser_backend` | DOM → `input_event` | HTMLCanvas (WebGPU WIP) | `backend_software` | browser harness only; real CEF shell TBD |
+| V4 | Electron | `browser_compositor_backend` + `electron_capture` | IPC → `input_event` | BrowserWindow (main+renderer) | `backend_software` | `ui.electron` exists; CI not wired |
+
+See [`doc/03_plan/gui_drawing_layer_variations.md`](../03_plan/gui_drawing_layer_variations.md)
+for the gap-by-gap work plan.
 
 ## Winit FFI Functions Used
 
@@ -230,10 +335,25 @@ No new Rust FFI needed — existing functions cover all requirements.
 
 ## Migration Plan
 
-1. Create `InputBackend` trait + `Ps2InputBackend` adapter
-2. Create `HostedInputBackend` wrapping winit events
-3. Create `HostedCompositorBackend` wrapping winit buffer functions
-4. Refactor `Compositor` to use trait objects instead of concrete types
-5. Create `hosted_entry.spl` that wires hosted backends to Compositor+DesktopShell
-6. Verify all existing apps (Calculator, Terminal, etc.) work unchanged
-7. Test on macOS, Linux, Windows, FreeBSD
+Steps 1–7 below describe the original V1↔V2 cutover and are **done**.
+The active tracker for V3/V4 and remaining V2 host surfaces lives in
+[`doc/03_plan/gui_drawing_layer_variations.md`](../03_plan/gui_drawing_layer_variations.md).
+
+1. ✅ Create `InputBackend` trait + `Ps2InputBackend` adapter
+2. ✅ Create `HostedInputBackend` wrapping winit events
+3. ✅ Create `HostedCompositorBackend` wrapping winit buffer functions
+4. ✅ Refactor `Compositor` to use trait objects instead of concrete types
+5. ✅ Create `hosted_entry.spl` that wires hosted backends to Compositor+DesktopShell
+6. ◻ Verify all existing apps (Calculator, Terminal, etc.) work unchanged on V2
+7. ◻ Test on macOS, Linux, Windows, FreeBSD — tracked per platform in sys-gui-*
+
+### Next phases (tracked in the plan doc)
+
+8. Lock `Compositor` + `Engine2D` trait surfaces; document in `gui_layer_contract.md`
+9. Expand `wm_compare` to run the same scene through V1/V2 and diff
+10. Land Cocoa + Win32 hosted surfaces behind `hosted_backend`
+11. virtio-gpu accelerated path in QEMU for V1 (sys-gui-008)
+12. CEF or simple_browser shell driving `browser_compositor_backend` (V3)
+13. Electron main/renderer split via `electron_capture` + `ui.ipc` (V4)
+14. Shared input-event conformance suite across all four variations
+15. Golden-image gate: same app, 4 backends, ≤1% perceptual diff
