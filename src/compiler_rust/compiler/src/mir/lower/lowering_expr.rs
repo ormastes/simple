@@ -1356,10 +1356,30 @@ impl<'a> MirLowerer<'a> {
                 }
 
                 // Try to qualify method name with receiver type (e.g., "TreeSitter.expect")
+                // When `receiver.ty` is `Any` (which happens for cross-module
+                // `var x = Imported.new()` where type inference cannot reach
+                // into the imported constructor), `get_type_name` returns
+                // None and the func_name falls through to the bare method
+                // name. The native-build codegen then picks the shortest
+                // `.<method>` symbol in the whole module — a silent miscall
+                // that caused `shell.init()` to dispatch to `Ps2Keyboard.init`
+                // on the x86_64 baremetal desktop lane (see Agent V's
+                // 2026-04-13 workaround). Set SIMPLE_DEBUG_METHOD_DISPATCH=1
+                // to dump these bare-name dispatches at compile time.
                 let func_name = if let Some(registry) = self.type_registry {
                     if let Some(type_name) = registry.get_type_name(receiver.ty) {
                         format!("{}.{}", type_name, method)
                     } else {
+                        if std::env::var("SIMPLE_DEBUG_METHOD_DISPATCH").is_ok() {
+                            let ty_desc = registry
+                                .get(receiver.ty)
+                                .map(|t| format!("{:?}", t))
+                                .unwrap_or_else(|| format!("<missing tid={:?}>", receiver.ty));
+                            eprintln!(
+                                "[MIR-METHOD-DISPATCH] bare '{}' call: receiver ty = {}",
+                                method, ty_desc
+                            );
+                        }
                         method.clone()
                     }
                 } else {

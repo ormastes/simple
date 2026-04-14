@@ -308,7 +308,41 @@ pub(crate) fn compile_method_call_static<M: Module>(
                 }
             }
 
-            // Fallback: pick shortest name (most specific)
+            // Fallback: pick shortest name (most specific).
+            //
+            // SAFETY NOTE (Agent δ, 2026-04-13): when `lookup_name` is a bare
+            // unqualified method name (no dot) and `candidates.len() > 1`,
+            // "pick shortest" silently dispatches one class's method call to
+            // another class's method of the same name — this is what caused
+            // `DesktopShell.init()` to be emitted as a call to
+            // `Ps2Keyboard.init()` (or `Ps2Mouse.init()` depending on module
+            // order) on the x86_64 baremetal desktop lane. See Agent V's
+            // 2026-04-13 `launcher_init()`-in-`new()` workaround. When this
+            // ambiguity hits with no type hint we now emit a compile-time
+            // diagnostic (loud, via `[CODEGEN-AMBIGUOUS-METHOD]`) and return
+            // None so the outer path falls back to a cross-module use_map
+            // lookup (or `rt_method_not_found` if that also fails) instead
+            // of silently picking a random wrong target. Set
+            // `SIMPLE_STRICT_METHOD_DISPATCH=1` to turn the diagnostic into
+            // a hard error. For qualified lookups (with type_qualifier) we
+            // keep the existing behaviour — the dot-prefix already picked
+            // the right candidate above, and the tail here is only a
+            // one-candidate fallthrough.
+            if type_qualifier.is_none() && candidates.len() > 1 {
+                let cand_names: Vec<&str> = candidates.iter().map(|(k, _)| k.as_str()).collect();
+                eprintln!(
+                    "[CODEGEN-AMBIGUOUS-METHOD] bare method '{}' has {} candidates: [{}] — refusing to pick shortest (would silently miscall). Qualify the receiver type (e.g. `var x: Type = ...`) or import only one matching method.",
+                    method_part,
+                    candidates.len(),
+                    cand_names.join(", ")
+                );
+                if std::env::var("SIMPLE_STRICT_METHOD_DISPATCH").is_ok() {
+                    return None;
+                }
+                // Back-compat: still pick shortest for non-strict mode so
+                // existing (possibly-working-by-accident) call sites keep
+                // compiling, but now with a visible warning.
+            }
             candidates.iter().min_by_key(|(k, _)| k.len()).map(|(_, v)| **v)
         });
 
