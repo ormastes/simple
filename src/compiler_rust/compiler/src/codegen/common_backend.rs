@@ -705,12 +705,38 @@ impl<M: Module> CodegenBackend<M> {
             match self.compile_function(func) {
                 Ok(()) => {}
                 Err(_e) => {
-                    eprintln!("[CODEGEN STUB] Function '{}' failed to compile: {:?}", func.name, _e);
+                    // Loud, distinctive marker so missing-body bugs cannot hide
+                    // in normal log noise. Includes the func name so methods
+                    // like "DesktopShell.init" surface immediately. The
+                    // previous Agent V workaround inlined launcher_init() into
+                    // DesktopShell.new() because `me init()` silently became a
+                    // stub via this exact path.
+                    eprintln!(
+                        "[CODEGEN-STUB-FALLBACK] body compilation failed for '{}': {:?} \
+                         — this function will be replaced by an empty stub. \
+                         Set SIMPLE_NO_STUB_FALLBACK=1 to make this a hard error.",
+                        func.name, _e
+                    );
                     failed_functions.push(func);
                     // IMPORTANT: Clear context to prevent state from leaking to next function
                     self.module.clear_context(&mut self.ctx);
                 }
             }
+        }
+
+        // Hard-fail mode: opt-in via SIMPLE_NO_STUB_FALLBACK=1.
+        // When set, any function whose body failed to compile aborts the
+        // whole module compilation with a clear error instead of silently
+        // emitting an empty stub. This is the recommended setting when
+        // diagnosing missing-body bugs (e.g., the baremetal me-method
+        // dispatch issue from 2026-04-13).
+        if !failed_functions.is_empty() && std::env::var("SIMPLE_NO_STUB_FALLBACK").is_ok() {
+            let names: Vec<&str> = failed_functions.iter().map(|f| f.name.as_str()).collect();
+            return Err(BackendError::ModuleError(format!(
+                "SIMPLE_NO_STUB_FALLBACK: {} function body/bodies failed to compile and would have been replaced by empty stubs: [{}]",
+                names.len(),
+                names.join(", ")
+            )));
         }
 
         // Create stubs for failed functions
