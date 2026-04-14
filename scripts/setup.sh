@@ -965,4 +965,14 @@ else
 fi
 
 echo ""
+script_layout_checker="${repo_root}/scripts/check_script_layout.shs"
+if [ -x "${script_layout_checker}" ]; then
+  echo "Running script layout checker..."
+  echo ""
+  "${script_layout_checker}"
+else
+  echo "(check_script_layout.shs not found, skipping)"
+fi
+
+echo ""
 echo "Setup complete."

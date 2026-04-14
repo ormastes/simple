@@ -43,6 +43,7 @@ User-facing guides for the Simple programming language. For specifications see `
 | [tooling/dashboard.md](tooling/dashboard.md) | Dashboard CLI, CI/CD |
 | [tooling/duplicate_check.md](tooling/duplicate_check.md) | Code duplication detection |
 | [tooling/wm_ui_snapshot.md](tooling/wm_ui_snapshot.md) | WM/UI HTML snapshot export, PNG generation, Stitch handoff |
+| [tooling/script_layout_policy.md](tooling/script_layout_policy.md) | `scripts/` vs `bin/` policy, `.shs` rule, ignore list |
 
 ## FFI
 
@@ -79,6 +80,7 @@ User-facing guides for the Simple programming language. For specifications see `
 |-------|-------------|
 | [platform/platforms.md](platform/platforms.md) | Platform support, FreeBSD, cross-compilation |
 | [platform/packaging.md](platform/packaging.md) | Packages, deployment, GitHub |
+| [platform/simpleos_dev_guide.md](platform/simpleos_dev_guide.md) | SimpleOS tooling, bootstrap, native build and run workflow |
 
 ## Architecture
 

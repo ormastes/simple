@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
+SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
+REPO_ROOT="$(CDPATH= cd -- "${SCRIPT_DIR}/.." && pwd)"
+
 export DEBIAN_FRONTEND=noninteractive
 
 OS="$(uname -s)"
@@ -138,3 +141,9 @@ echo "Notes:"
 echo "  - grep was NOT replaced with rg"
 echo "  - find was NOT replaced with fd"
 echo "  - safe shims: fd->fdfind, bat->batcat (Linux), g{grep,sed,awk} (FreeBSD)"
+
+if [ -x "${REPO_ROOT}/scripts/check_script_layout.shs" ]; then
+    echo ""
+    echo "Running script layout checker..."
+    "${REPO_ROOT}/scripts/check_script_layout.shs"
+fi

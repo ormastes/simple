@@ -376,6 +376,89 @@ val valid = simpleos_validate_sysroot("build/os/sysroot")
 
 Functions: `simpleos_sysroot_path()`, `simpleos_linker_flags()`, `simpleos_include_paths()`, `simpleos_target_arch()`, `simpleos_clang_target()`, `simpleos_c_flags()`, `simpleos_crt_objects()`, `simpleos_library_paths()`, `simpleos_libraries()`, `simpleos_linker_script()`, `simpleos_validate_sysroot()`.
 
+### 4.8 Building and Running a Native SimpleOS Program
+
+There are two distinct workflows:
+
+1. build and boot a baremetal entrypoint as the whole guest image
+2. launch a desktop app from inside the running guest
+
+The first workflow works today. The second is still architecture-dependent.
+
+#### Build a native x86_64 SimpleOS entry
+
+Use an existing entry file under `examples/simple_os/arch/x86_64/` as a template.
+For example, build the minimal entry directly:
+
+```bash
+src/compiler_rust/target/release/simple native-build \
+  --source src/os \
+  --source src/lib \
+  --source examples/simple_os \
+  --backend cranelift \
+  --entry-closure \
+  --entry examples/simple_os/arch/x86_64/minimal_entry.spl \
+  --target x86_64-unknown-none \
+  -o build/os/minimal_x86_64.elf \
+  --linker-script examples/simple_os/arch/x86_64/linker.ld
+```
+
+For normal day-to-day work, prefer the higher-level QEMU runner:
+
+```bash
+bin/simple os build --arch=x86_64
+bin/simple os run --arch=x86_64
+bin/simple os test --arch=x86_64
+```
+
+#### Run a named desktop scenario
+
+Named scenarios are the stable way to run richer SimpleOS lanes:
+
+```bash
+bin/simple os build --scenario=x64-desktop-test
+bin/simple os run --scenario=x64-desktop-test
+
+bin/simple os build --scenario=x64-desktop-disk
+bin/simple os test --scenario=x64-desktop-disk
+```
+
+`x64-desktop-disk` automatically ensures `build/os/fat32.img` exists by calling:
+
+```bash
+sh scripts/make_os_disk.shs
+```
+
+That script now has a host-independent Python fallback seeder, so it can
+populate a formatted FAT32 image even when `mtools` and loop-mount are missing.
+
+#### Current x86_64 desktop limitation
+
+On the x86_64 baremetal desktop lane, booting the guest image works and the
+disk-backed FAT32 path works, but desktop app spawning is not fully native yet.
+
+Current status:
+
+- `Browser Demo`, `Hello World`, `File Manager`, and `Shell` have disk-backed
+  resident manifest metadata in the FAT32 image
+- the desktop guest mounts FAT32 successfully on the `x64-desktop-disk` lane
+- `posix_spawn()` for those apps still returns `-38` on this lane because the
+  x86_64 baremetal syscall shim does not yet implement syscall `13`
+  (`SpawnBinary`)
+
+That means:
+
+- building and booting native SimpleOS entrypoints is supported
+- disk-backed app metadata is supported
+- true launched user processes on the x86_64 baremetal desktop path are not yet
+  fully wired end-to-end
+
+If you need a working proof lane today, use:
+
+- `bin/simple os test --scenario=x64-desktop-disk` for disk + desktop boot proof
+- `bin/simple os test --scenario=x64-desktop-test` for the lighter desktop lane
+- direct `native-build` for custom baremetal entrypoint experiments
+
 ---
 
 ## 5. Simple Compiler Bootstrap

@@ -15,7 +15,14 @@ bin/simple build lint
 
 # Run all quality checks (includes lint)
 bin/simple build check
+
+# Check repo script/bin layout policy
+sh scripts/check_script_layout.shs
 ```
+
+Related guide:
+
+- [script_layout_policy.md](script_layout_policy.md) — naming and placement rules for `scripts/` and `bin/`
 
 ---
 
