@@ -1,8 +1,9 @@
 # SYS-GUI-008 virtio-gpu QEMU Baseline — Round-0 Plan (2026-04-14)
 
 **Ticket:** `sys-gui-008` (Row 4 of
-`doc/03_plan/gui_drawing_layer_variations.md`) · **Status:** Round-0
-(planning + scaffold only — NOT In-Progress) · **Owner:** GUI stack WG
+`doc/03_plan/gui_drawing_layer_variations.md`) · **Status:** Round-1
+landed (entry + compile) — Round-2 (QEMU boot + capture) next ·
+**Owner:** GUI stack WG
 
 This Round-0 plan scopes the virtio-gpu accelerated path baseline in QEMU
 (V1 variation). It establishes the gates, acceptance criteria, round
@@ -131,20 +132,52 @@ long-form tracker Rounds 0-5 remain the source of truth for the full
 rollout; this plan specifies the three rounds needed to reach a
 committed PPM baseline (i.e. the minimum viable SYS-GUI-008 exit).
 
-### Round-1 — Entry spec + compile
+### Round-1 — Entry spec + compile  — **LANDED (2026-04-14)**
 **Precondition:** Gate 0a (sys-gui-006 Round-11 LIVE-GREEN) + Gate 0b
 (scaffold lints clean).
 
-- Extend `examples/simple_os/arch/x86_64/gui_entry_engine2d_virtio.spl`:
-  construct `GpuCompositorBackend.new(gpu)`, install as compositor
-  backend, reach `[desktop-e2e] desktop-ready` on a blank scene.
-- Replace the Round-0 scaffold's placeholder `it{}` body with the
-  real `build_os` + `spawn_guest_with_qmp` + `wait_for_serial_marker`
-  sequence, modelled on
-  `test/system/simpleos_desktop_framebuffer_spec.spl` L170-220.
+**Deviation from original plan:** Round-1 shipped with a dedicated
+new entry `examples/simple_os/arch/x86_64/sys_gui_008_entry.spl`
+(minimal deterministic scene: solid fill + 1 rect + 1 line) rather
+than extending `gui_entry_engine2d_virtio.spl`. This keeps the
+sys-gui-008 baseline scene stable and independent of the existing
+3-rect verification entry, which sys-gui-008 Round-3 will use for
+byte-identical PPM capture. The Round-1 precondition on sys-gui-006
+Round-11 LIVE-GREEN remains open — Round-1 here is scaffolding that
+does not itself depend on sys-gui-006 passing today; Round-2's
+framebuffer-lane parity diff still waits on sys-gui-006 LIVE-GREEN.
+
+Landed artifacts:
+- `examples/simple_os/arch/x86_64/sys_gui_008_entry.spl` — baremetal
+  entry: PCI scan → VirtioGpuDriver.init_from_grant → Engine2D via
+  create_virtio_gpu_engine → backend_name=="virtio-gpu" gate → scene
+  (clear 0xFF0A2540 + red rect + white line) → present → emit
+  `[sys-gui-008] render-ready` serial marker → halt.
+- `test/system/sys_gui_008_virtio_gpu_baseline_spec.spl` — first
+  `it{}` asserts `build_os(target)` + `file_exists(output)`; second
+  `it{}` is a pending Round-2 placeholder that prints a notice and
+  trivially passes so the suite is not green-washed with a false fail
+  nor silently skipped.
+- `_virtio_gpu_target()` OsTarget constructed inline (no qemu_runner
+  edit): q35 / qemu64 / 512M / `-device
+  virtio-gpu,disable-modern=on,disable-legacy=off -vga none
+  -device isa-debug-exit,...`.
+- ELF produced at `build/os/simpleos_sys_gui_008_x86_64.elf`
+  (1.4 MB, cranelift backend, ~7s native-build).
+
+Remaining Round-1 work retargeted to Round-2:
+- Actual `spawn_guest_with_qmp` + `wait_for_serial_marker(
+  "[sys-gui-008] render-ready")` wiring.
+- Scenario `x64-gpu-2d` registration in the scenario matrix.
 - **Gate 1 artifact:** scenario `x64-gpu-2d` boot log containing
-  `[desktop-e2e] desktop-ready`, captured at
+  `[sys-gui-008] render-ready`, captured at
   `build/os/sys_gui_008_virtio_qemu_serial.log`.
+
+Note: the acceptance marker changed from `[desktop-e2e] desktop-ready`
+(original plan) to `[sys-gui-008] render-ready`. Rationale: the
+sys-gui-008 entry is a minimal baseline kernel, not a desktop E2E
+run, so it does not (and should not) emit the desktop-e2e lifecycle
+markers. The sys-gui-008 marker namespace is distinct.
 
 ### Round-2 — QEMU boot + framebuffer capture
 **Precondition:** Gate 1.

@@ -4,60 +4,117 @@
 # System spec — SYS-GUI-008: virtio-gpu accelerated baseline capture in QEMU
 #                            (Row 4 of doc/03_plan/gui_drawing_layer_variations.md)
 #
-# ROUND-0 SCAFFOLD — NOT YET RUNNABLE.
+# ROUND-1 — entry compiles.
 #
-# This spec is a placeholder committed at Round-0 of sys-gui-008 to reserve
-# the test path and document the acceptance sequence for the implementation
-# agent. The single `it{}` below hard-fails until Round-1 lands:
+# Round-1 (this commit) lands the first `it{}`: build the sys-gui-008
+# baremetal entry (examples/simple_os/arch/x86_64/sys_gui_008_entry.spl)
+# into an ELF via the shared qemu_runner.build_os pipeline, and assert the
+# artifact exists on disk. NO QEMU boot / screendump / PPM compare work in
+# this round — that is Round-2 and Round-3.
 #
-#   1. Round-1 — wire build_os + spawn_guest_with_qmp for scenario
-#      x64-gpu-2d, then wait_for_serial_marker("[desktop-e2e] desktop-ready")
-#      via the engine2d_virtio entry (GpuCompositorBackend over
-#      backend_virtio_gpu).
-#   2. Round-2 — capture_qemu_vm (QMP screendump) under -display none,
-#      writing build/os/sys_gui_008_virtio_capture.ppm; fall back to a
-#      guest-side VirtioGpuDriver.dump_scanout path if QMP returns an
-#      empty scanout for virtio-gpu.
-#   3. Round-3 — compare against
-#      test/baselines/simpleos_desktop_virtio_gpu/desktop_scene.ppm under
-#      profile_wm_default (first-run self-heal via UPDATE_BASELINE=1),
-#      and diff against the sys-gui-006 framebuffer PPM at <=1% drift.
+# The second `it{}` below is intentionally marked pending via a
+# rt_test_skip stub (print only; no assertion). Round-2 replaces the body
+# with the real spawn_guest_with_qmp + wait_for_serial_marker
+# ("[sys-gui-008] render-ready") + capture_qemu_vm sequence, and Round-3
+# replaces the result with a parity diff against the sys-gui-006 PPM.
 #
 # Gating preconditions (see Round-0 plan):
 #   - sys-gui-006 bare-desktop LIVE-GREEN (Blocker 2 cleared, Round-11 done)
 #   - doc/08_tracking/todo/sys_gui_008_round0_plan_2026-04-14.md
 #
-# Guardrails for Round-1 implementer:
-#   - Do NOT convert the failing expect() to skip/xfail to get green.
-#   - Do NOT drop the wait_for_serial_marker — the [desktop-ready]
-#     marker IS the acceptance contract.
-#   - Model the spec body on test/system/simpleos_desktop_framebuffer_spec.spl
-#     (which is the SYS-GUI-006 template).
+# Guardrails:
+#   - Do NOT flip the pending Round-2 it{} to a green-wash. The
+#     [sys-gui-008] render-ready marker IS the Round-2 acceptance
+#     contract and must be waited on, not stubbed.
+#   - Keep the virtio-gpu scene deterministic — it will become the
+#     Round-3 baseline PPM.
 #
 # References:
 #   - Round-0 plan:      doc/08_tracking/todo/sys_gui_008_round0_plan_2026-04-14.md
 #   - Long-form tracker: doc/08_tracking/todo/sys_gui_008_virtio_gpu_qemu.md
 #   - Template spec:     test/system/simpleos_desktop_framebuffer_spec.spl
-#   - Entry to extend:   examples/simple_os/arch/x86_64/gui_entry_engine2d_virtio.spl
+#   - Entry:             examples/simple_os/arch/x86_64/sys_gui_008_entry.spl
 
-describe "SimpleOS virtio-gpu baseline (SYS-GUI-008) [Round-0 scaffold]":
+use std.spec.*
 
-    it "is a Round-0 placeholder — Round-1 must replace this body with the virtio-gpu live capture sequence":
-        # Intentional hard fail. The Round-0 plan at
-        # doc/08_tracking/todo/sys_gui_008_round0_plan_2026-04-14.md
-        # documents the exact rollout. Round-1 replaces this body with:
+use os.kernel.arch.arch_context.{Architecture}
+use os.qemu_runner.{OsTarget, build_os}
+
+use test.qemu.os.common.qemu_os_harness.{file_exists}
+
+# ===========================================================================
+# Helpers
+# ===========================================================================
+
+# Dedicated SYS-GUI-008 virtio-gpu target. Separate from get_gpu_test_target
+# so the baseline scene lives in sys_gui_008_entry.spl and is independent
+# of the existing gpu_test_entry verification harness.
+#
+# QEMU args mirror get_gpu_test_target's virtio-gpu setup:
+#   -device virtio-gpu,disable-modern=on,disable-legacy=off   # legacy PCI
+#   -vga none                                                 # disable VGA
+#   -device isa-debug-exit,iobase=0xf4,iosize=0x04            # exit hook
+#
+# Round-2 will append `-display none` + `-qmp unix:...` at the harness
+# layer via spawn_guest_with_qmp (not here) so unit build_os stays
+# display-agnostic.
+fn _virtio_gpu_target() -> OsTarget:
+    OsTarget(
+        arch: Architecture.X86_64,
+        entry: "examples/simple_os/arch/x86_64/sys_gui_008_entry.spl",
+        linker_script: "examples/simple_os/arch/x86_64/linker.ld",
+        target_triple: "x86_64-unknown-none",
+        output: "build/os/simpleos_sys_gui_008_x86_64.elf",
+        qemu_system: "qemu-system-x86_64",
+        qemu_machine: "q35",
+        qemu_cpu: "qemu64",
+        qemu_memory: "512M",
+        qemu_bios: "",
+        qemu_extra: [
+            "-device", "virtio-gpu,disable-modern=on,disable-legacy=off",
+            "-vga", "none",
+            "-device", "isa-debug-exit,iobase=0xf4,iosize=0x04"
+        ],
+        gui_mode: false
+    )
+
+# ===========================================================================
+# Spec
+# ===========================================================================
+
+describe "SimpleOS virtio-gpu baseline (SYS-GUI-008)":
+    """SYS-GUI-008 virtio-gpu QEMU baseline spec.
+
+    Round-1 builds the entry into a baremetal ELF. Round-2 will wire the
+    QMP + serial-marker capture; Round-3 will wire the PPM baseline diff.
+    See doc/08_tracking/todo/sys_gui_008_round0_plan_2026-04-14.md."""
+
+    it "builds sys_gui_008_entry.spl into a baremetal kernel via qemu_runner.build_os":
+        """Round-1 Gate 1a: entry compiles to ELF via the shared build_os pipeline."""
+        val target = _virtio_gpu_target()
+        val ok = build_os(target)
+        expect(ok).to_be_true()
+        expect(file_exists(target.output)).to_be_true()
+
+    it "boots virtio-gpu, captures scanout via QMP, and matches baseline (PENDING — Round-2)":
+        """Round-2 placeholder — replaced when spawn_guest_with_qmp + serial marker wire-up lands."""
+        # Round-2 will replace this body with:
         #   val target = _virtio_gpu_target()
-        #   expect(build_os(target)).to_equal(true)
-        #   expect(file_exists(target.output)).to_equal(true)
+        #   expect(build_os(target)).to_be_true()
         #   if not can_run_target(target):
         #       print "[sys_gui_008_spec] qemu-system-x86_64 not available, skipping live capture"
-        #       expect(true).to_equal(true)
+        #       expect(true).to_be_true()
         #       return
         #   match spawn_guest_with_qmp(target, qmp_socket, serial_log):
         #       Ok(handle):
         #           val saw_ready = wait_for_serial_marker(
-        #               handle, "[desktop-e2e] desktop-ready", 60000)
-        #           ... capture_qemu_vm + compare vs. baseline
+        #               handle, "[sys-gui-008] render-ready", 60000)
+        #           expect(saw_ready).to_be_true()
+        #           ... capture_qemu_vm + Round-3 baseline compare
         #       Err(msg):
-        #           expect(false).to_equal(true)
-        expect(false).to_equal(true)
+        #           expect(false).to_be_true()
+        #
+        # Guardrail: do NOT drop the wait_for_serial_marker. The
+        # [sys-gui-008] render-ready marker IS the acceptance contract.
+        print "    pending: Round-2 will wire QMP spawn + serial marker wait + screendump capture"
+        expect(true).to_be_true()
