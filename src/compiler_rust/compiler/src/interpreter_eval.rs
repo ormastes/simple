@@ -1075,13 +1075,8 @@ pub(super) fn evaluate_module_impl(items: &[Node]) -> Result<i32, CompileError> 
                         });
                     }
                     Err(e) => {
-                        // Module loading failed - log and use empty dict as fallback
                         tracing::debug!("Module loading failed for '{}': {:?}", binding_name, e);
-                        let empty = Value::Dict(Arc::new(HashMap::new()));
-                        env.insert(binding_name.clone(), empty.clone());
-                        MODULE_GLOBALS.with(|cell| {
-                            cell.borrow_mut().insert(binding_name.clone(), empty);
-                        });
+                        return Err(e);
                     }
                 }
             }

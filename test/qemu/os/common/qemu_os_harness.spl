@@ -14,6 +14,7 @@ use os.qemu_runner.{OsTarget, QemuScenario, get_target, arch_display_name, build
 use os.kernel.arch.arch_context.{Architecture}
 
 extern fn rt_process_run_timeout(cmd: text, args: [text], timeout_ms: i64) -> (text, text, i32)
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
 extern fn rt_process_spawn_async(cmd: text, args: [text]) -> i64
 extern fn rt_process_wait(pid: i64, timeout_ms: i64) -> i64
 extern fn rt_process_is_running(pid: i64) -> bool
@@ -113,13 +114,15 @@ fn run_os_qemu_with_target(target: OsTarget, timeout_ms: i64) -> (text, text, i3
 fn run_os_qemu_with_target_via_timeout(target: OsTarget, guest_timeout: text, timeout_ms: i64) -> (text, text, i32):
     """Launch QEMU via host shell timeout, preserving serial stdout markers.
 
-    The direct interpreter-side process helper has been flaky for the tiny
-    probe guests. Running the exact working shell form through `/bin/sh -c`
-    keeps behavior aligned with manual verification.
+    The interpreter's timeout helper becomes a second supervisor around the
+    inner `timeout ...` shell pipeline, which can kill the wrong process
+    boundary while QEMU is exiting. Use a single timeout owner here: the host
+    shell command itself.
     """
     val cmd_parts = build_qemu_command(target)
     val shell_cmd = "timeout {_shell_quote(guest_timeout)} {_shell_command(cmd_parts)} 2>&1 | tr -d '\\000'"
-    rt_process_run_timeout("/bin/sh", ["-c", shell_cmd], timeout_ms)
+    val result = rt_process_run("/bin/sh", ["-c", shell_cmd])
+    (result[0], result[1], result[2].to_i32())
 
 fn spawn_guest_with_qmp(target: OsTarget, qmp_socket: text, serial_log: text) -> Result<QemuGuestHandle, text>:
     """Spawn a QEMU guest using only the target's own qemu_extra.

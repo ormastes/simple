@@ -101,6 +101,10 @@ pub struct HirImpl {
     pub type_id: TypeId,
     /// Optional trait being implemented
     pub trait_id: Option<TypeId>,
+    /// Optional trait name (string) — set when `impl TraitName for StructName`
+    pub trait_name: Option<String>,
+    /// Struct/type name (string)
+    pub type_name: String,
     /// Methods: name -> function name
     pub methods: HashMap<String, String>,
 }
