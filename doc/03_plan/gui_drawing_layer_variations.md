@@ -1,6 +1,6 @@
 # GUI Drawing Layer Variations — Plan
 
-**Status:** draft · **Date:** 2026-04-14 · **Owner:** GUI stack WG
+**Status:** Rows 1, 2, 3, 5, 6, 7, 8 ✅ Done (2026-04-14); Row 4 blocked on sys-gui-006 LIVE-GREEN · **Date:** 2026-04-14 · **Owner:** GUI stack WG
 
 Goal: make the Simple GUI stack work under four host/runtime combinations
 with the *same* application code. The compositor + widget tree + 2D engine
@@ -125,16 +125,24 @@ Gaps:
 
 Ordered by unlock value. Each item ends with the artifact that proves it.
 
-| # | Task | Variation | Artifact | Plan |
-|---|------|-----------|----------|------|
-| 1 | Lock `Compositor` + `Engine2D` trait surfaces; mark unstable methods | all | `doc/04_architecture/gui_layer_contract.md` | [gui_layer_contract.md](../04_architecture/gui_layer_contract.md) (locked); fix plan: [sys_gui/gui_layer_contract_fix_plan.md](./sys_gui/gui_layer_contract_fix_plan.md) |
-| 2 | Expand `wm_compare` to run the same scene through V1/V2 and diff | V1, V2 | `test/sys/wm_compare/v1_v2_parity_spec.spl` | [sys_test/wm_compare_v1_v2_parity.md](./sys_test/wm_compare_v1_v2_parity.md) |
-| 3 | Land Cocoa + Win32 hosted surfaces behind `hosted_backend` | V2 | `src/os/compositor/hosted_backend_cocoa.spl`, `_win32.spl` | [v2_hosted_engine2d_rewiring.md](./v2_hosted_engine2d_rewiring.md) (Phase C) |
-| 4 | virtio-gpu accelerated path in QEMU for V1 | V1 | `sys-gui-008` baseline in `doc/08_tracking/todo/` | not yet planned (sys-gui-008 tracker) |
-| 5 | CEF or simple_browser shell driving `browser_compositor_backend` | V3 | `src/app/ui.chromium/main.spl` + parity screenshots | [v3_simple_browser_milestones.md](./v3_simple_browser_milestones.md) — Option B chosen per [v3_shell_choice_2026-04-14.md](../01_research/domain/v3_shell_choice_2026-04-14.md) |
-| 6 | Electron main/renderer split using `electron_capture` + `ui.ipc` | V4 | `src/app/ui.electron/main.spl` green in `wm_compare` | not yet planned |
-| 7 | Shared input-event conformance suite across all four | all | `test/unit/common/ui/input_event_conformance_spec.spl` | [sys_test/input_event_conformance.md](./sys_test/input_event_conformance.md) |
-| 8 | Golden-image gate: same app, 4 backends, ≤1% perceptual diff | all | `doc/06_spec/app/compiler/feature/windows_spec.md` update | not yet planned (depends on row 2) |
+| # | Task | Variation | Artifact | Plan | Status |
+|---|------|-----------|----------|------|--------|
+| 1 | Lock `Compositor` + `Engine2D` trait surfaces; mark unstable methods | all | `doc/04_architecture/gui_layer_contract.md` | [gui_layer_contract.md](../04_architecture/gui_layer_contract.md) (locked); fix plan: [sys_gui/gui_layer_contract_fix_plan.md](./sys_gui/gui_layer_contract_fix_plan.md) | ✅ Done 2026-04-14 |
+| 2 | Expand `wm_compare` to run the same scene through V1/V2 and diff | V1, V2 | `test/sys/wm_compare/v1_v2_parity_spec.spl` | [sys_test/wm_compare_v1_v2_parity.md](./sys_test/wm_compare_v1_v2_parity.md) | ✅ Done 2026-04-14 |
+| 3 | Land Cocoa + Win32 hosted surfaces behind `hosted_backend` | V2 | `src/os/compositor/hosted_backend_cocoa.spl`, `_win32.spl` | [v2_hosted_engine2d_rewiring.md](./v2_hosted_engine2d_rewiring.md) (Phase C) | ✅ Done 2026-04-14 |
+| 4 | virtio-gpu accelerated path in QEMU for V1 | V1 | `sys-gui-008` baseline in `doc/08_tracking/todo/` | not yet planned (sys-gui-008 tracker) | ⛔ Blocked on sys-gui-006 LIVE-GREEN |
+| 5 | CEF or simple_browser shell driving `browser_compositor_backend` | V3 | `src/app/ui.chromium/main.spl` + parity screenshots | [v3_simple_browser_milestones.md](./v3_simple_browser_milestones.md) — Option B chosen per [v3_shell_choice_2026-04-14.md](../01_research/domain/v3_shell_choice_2026-04-14.md) | ✅ Done 2026-04-14 (M1–M12 all landed) |
+| 6 | Electron main/renderer split using `electron_capture` + `ui.ipc` | V4 | `src/app/ui.electron/main.spl` green in `wm_compare` | not yet planned | ✅ Done 2026-04-14 |
+| 7 | Shared input-event conformance suite across all four | all | `test/unit/common/ui/input_event_conformance_spec.spl` | [sys_test/input_event_conformance.md](./sys_test/input_event_conformance.md) | ✅ Done 2026-04-14 |
+| 8 | Golden-image gate: same app, 4 backends, ≤1% perceptual diff | all | `doc/06_spec/app/compiler/feature/windows_spec.md` update | landed with Row 2 harness | ✅ Done 2026-04-14 |
+
+> **Row 5 milestone trace (2026-04-14).** M1 skeleton `8b`, M2 input `cdd`,
+> M3 CSS subset `56c`, M4 engine merge `07`, M5 wm_compare parity `5c`,
+> M6 tab manager `26`, M7 interactivity `37` + real WebGPU `96`,
+> M8 CSS extensions `ca`, M9 JS audit `cc`, M10 DevTools `05`,
+> M11 snapshot/record-replay `0f`, M12 Acid2 reftest `9ef`. Plus Gpu native
+> glass (D2 Phase 2) in `37`. Only remaining row is Row 4 (sys-gui-008
+> virtio-gpu QEMU), still blocked on sys-gui-006 reaching LIVE-GREEN.
 
 ## 5. Decisions still open
 

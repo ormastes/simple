@@ -1,7 +1,7 @@
 # GUI Layer Contract Fix Plan
 
-Status: draft, not yet implemented
-Owner: TBD (sys_gui lane)
+Status: ✅ Done 2026-04-14 — D1 locked, D2 Phase 1+2+3 landed, D3 landed
+Owner: sys_gui lane
 Scope: resolve the top three divergences flagged in `doc/04_architecture/gui_layer_contract.md` section 5 between `CompositorBackend` implementations.
 Source files audited: `src/os/compositor/{display_backend,fb_backend,browser_compositor_backend,compositor_engine2d,hosted_backend}.spl`, `src/lib/gc_async_mut/gpu/engine2d/{backend,engine,backend_cpu,...}.spl`.
 
@@ -19,7 +19,7 @@ Source files audited: `src/os/compositor/{display_backend,fb_backend,browser_com
 
 ---
 
-## 1. D1 — Lock `fill_rect` exclusive semantics
+## 1. D1 — Lock `fill_rect` exclusive semantics ✅ Done 2026-04-14
 
 ### 1.1 Files changed
 
@@ -84,16 +84,17 @@ Rollback: revert the doc-comment edits and delete the new spec file. The new spe
 
 ---
 
-## 2. D2 — Move glass effects out of `CompositorBackend`
+## 2. D2 — Move glass effects out of `CompositorBackend` ✅ Done 2026-04-14
 
-**Status: Phase 1 implemented 2026-04-14** — trait split in
-`src/os/compositor/display_backend.spl`, opt-in by `FbCompositorBackend`,
-`HostedCompositorBackend`, `BrowserCompositorBackend`; opt-out by
-`GpuCompositorBackend` and `Engine2dCompositorBackend` (no
-`CompositorGlassCapable` impl; `as_glass_capable()` returns `nil`).
-Callers degrade via `os.compositor.glass_dispatch.cap_*` helpers.
-Phase 2 (native per-surface glass impls for Engine2d/Gpu) and Phase 3
-(`glass_effects.spl` deletion) remain open. Details in
+**Status: Phase 1 + Phase 2 + Phase 3 complete 2026-04-14.** Phase 1
+trait split landed earlier (`src/os/compositor/display_backend.spl`),
+opt-in by `FbCompositorBackend`, `HostedCompositorBackend`,
+`BrowserCompositorBackend`. Phase 2 added native per-surface glass
+impls for `Engine2dCompositorBackend` and `GpuCompositorBackend`
+(commit `37` — Gpu native glass, D2 Phase 2 this session). Phase 3
+removed the legacy `glass_effects.spl` shared helper and the
+`rt_gui_blend_fill` / `rt_gui_box_blur` / `rt_gui_gradient_v` /
+`rt_gui_read_pixel` runtime symbols. Details in
 `doc/03_plan/sys_gui/d2_glass_subtrait_migration.md`.
 
 ### 2.1 Files changed
@@ -183,7 +184,7 @@ Rollback: revert `display_backend.spl`, `glass_effects.spl`, and the four backen
 
 ---
 
-## 3. D3 — `draw_text_bg` on Engine2D
+## 3. D3 — `draw_text_bg` on Engine2D ✅ Done 2026-04-14
 
 ### 3.1 Files changed
 

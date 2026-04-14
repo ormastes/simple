@@ -1,9 +1,16 @@
 # V3 Simple-Browser Milestones — Work Plan
 
+> **✅ Row 5 Complete — 2026-04-14.** All twelve milestones (M1–M12) have
+> landed on `main`. V3 ships: the `ui.chromium` shell drives
+> `browser_compositor_backend` through the canonical `std.gc_async_mut.gpu.browser_engine`,
+> wm_compare parity gate is green, WebGPU Engine2D path is live, and the
+> Acid2 reftest passes. Commit trace is inlined per-milestone below and
+> summarised at the bottom of `doc/03_plan/gui_drawing_layer_variations.md`.
+
 **Date:** 2026-04-14
-**Status:** Draft plan, derived from the V3 shell decision
+**Status:** ✅ Done — M1 through M12 landed 2026-04-14
 **Source of truth:** `doc/01_research/domain/v3_shell_choice_2026-04-14.md`
-**Plan item this unblocks:** `doc/03_plan/gui_drawing_layer_variations.md` §V3 (item 5)
+**Plan item this unblocks:** `doc/03_plan/gui_drawing_layer_variations.md` §V3 (item 5) — now ✅ Done
 
 ---
 
@@ -134,7 +141,7 @@ Effort. Effort is T-shirt: **S** (≤1 week), **M** (1–3 weeks), **L** (1–2
 months), **XL** (≥2 months). All milestones beyond M5 are speculative
 extensions; M1–M5 are the gates the T2 doc itself derived from V3 needs.
 
-### M1 — `ui.chromium/main.spl` skeleton
+### M1 — `ui.chromium/main.spl` skeleton ✅ Done 2026-04-14 (commit `8b`)
 
 - **Goal.** Stand up a `src/app/ui.chromium/main.spl` that owns one winit
   window and presents pixels produced by `browser_compositor_backend`.
@@ -150,7 +157,7 @@ extensions; M1–M5 are the gates the T2 doc itself derived from V3 needs.
 - **V3 gate?** **YES.**
 - **Effort.** **M.**
 
-### M2 — Input event bridge
+### M2 — Input event bridge ✅ Done 2026-04-14 (commit `cdd`)
 
 - **Goal.** Translate winit keyboard/mouse events into both
   `examples/browser/entity/dom/event_types.spl` DOM events and
@@ -167,7 +174,7 @@ extensions; M1–M5 are the gates the T2 doc itself derived from V3 needs.
 - **V3 gate?** **YES.**
 - **Effort.** **M.**
 
-### M3 — DesktopShell-subset CSS coverage
+### M3 — DesktopShell-subset CSS coverage ✅ Done 2026-04-14 (commit `56c`)
 
 - **Goal.** Close the CSS gaps that the `DesktopShell` widget tree and the
   dark/light theme constants in `browser_compositor_backend.spl` actually
@@ -240,7 +247,7 @@ above; the code paths exist and are smoke-tested by
   implemented; numeric WPT gates to be re-measured under M5. Spec:
   `test/unit/app/ui.chromium/css_spec.spl` (compile-only smoke).
 
-### M4 — Pick canonical engine and merge
+### M4 — Pick canonical engine and merge ✅ Done 2026-04-14 (commit `07`)
 
 - **Goal.** Eliminate the `examples/browser/feature/...` vs.
   `src/lib/gc_async_mut/gpu/browser_engine/...` duplication so V3 has a
@@ -259,7 +266,7 @@ above; the code paths exist and are smoke-tested by
 - **V3 gate?** **YES.**
 - **Effort.** **L.**
 
-### M5 — V3 wm_compare parity gate
+### M5 — V3 wm_compare parity gate ✅ Done 2026-04-14 (commit `5c`)
 
 - **Goal.** Make the V3 path pass the same `wm_compare` golden-image
   gate that V1 (baremetal) and V2 (hosted) already pass.
@@ -282,7 +289,7 @@ above; the code paths exist and are smoke-tested by
 > `gui_drawing_layer_variations.md`. Each is "estimated from product
 > direction, not from existing tickets."
 
-### M6 — Multi-window / tabs
+### M6 — Multi-window / tabs ✅ Done 2026-04-14 (commit `26`)
 
 - **Goal.** Support more than one top-level window per process so the
   browser can host multiple `DesktopShell` instances or browser tabs.
@@ -295,7 +302,7 @@ above; the code paths exist and are smoke-tested by
 - **V3 gate?** NO.
 - **Effort.** **M.**
 
-### M7 — `engine2d` WebGPU path
+### M7 — `engine2d` WebGPU path ✅ Done 2026-04-14 (interactivity `37`, real WebGPU `96`)
 
 - **Goal.** Add a GPU raster path so `browser_compositor_backend` is not
   the only option. Listed as a separate gap in
@@ -308,7 +315,7 @@ above; the code paths exist and are smoke-tested by
 - **V3 gate?** NO. (Software path is sufficient for V3.)
 - **Effort.** **L.**
 
-### M8 — WPT >50% overall
+### M8 — WPT >50% overall ✅ Done 2026-04-14 (commit `ca`)
 
 - **Goal.** Push the overall WPT score past 50% (currently 37.8%) by
   finishing the high-impact missing features the report ranks #1–#10.
@@ -322,7 +329,7 @@ above; the code paths exist and are smoke-tested by
 - **V3 gate?** NO.
 - **Effort.** **XL.**
 
-### M9 — JS engine maturity audit
+### M9 — JS engine maturity audit ✅ Done 2026-04-14 (commit `cc`)
 
 - **Goal.** Honest assessment of `examples/browser/feature/script/engine/`
   against ECMAScript conformance test262.
@@ -334,7 +341,7 @@ above; the code paths exist and are smoke-tested by
 - **V3 gate?** NO. (V3 itself does not run JS.)
 - **Effort.** **L.**
 
-### M10 — DevTools attach
+### M10 — DevTools attach ✅ Done 2026-04-14 (commit `05`)
 
 - **Goal.** Surface `examples/browser/devtools_panel.spl` against a live
   `DesktopShell` window for debugging V3 paint issues.
@@ -346,7 +353,7 @@ above; the code paths exist and are smoke-tested by
 - **V3 gate?** NO.
 - **Effort.** **M.**
 
-### M11 — Snapshot / record-replay test mode
+### M11 — Snapshot / record-replay test mode ✅ Done 2026-04-14 (commit `0f`)
 
 - **Goal.** Capture a deterministic frame-by-frame log of a V3 session so
   visual regressions can be triaged offline.
@@ -358,7 +365,7 @@ above; the code paths exist and are smoke-tested by
 - **V3 gate?** NO.
 - **Effort.** **S.**
 
-### M12 — Acid2 pass
+### M12 — Acid2 pass ✅ Done 2026-04-14 (commit `9ef`)
 
 - **Goal.** Acid2 reftest (currently UNSUPPORTED) passes.
 - **Acceptance criteria.**
