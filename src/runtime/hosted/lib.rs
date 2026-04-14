@@ -32,6 +32,7 @@
 #![allow(clippy::missing_safety_doc)]
 
 pub mod cocoa;
+pub mod js_test262;
 pub mod select;
 pub mod webgpu;
 pub mod win32;

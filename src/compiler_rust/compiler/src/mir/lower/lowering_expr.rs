@@ -150,6 +150,12 @@ impl<'a> MirLowerer<'a> {
                     _ => None,
                 }
             }
+            // G6: `(if c then a else b).method()` — both branches share the
+            // same type by type-checking; recurse into `then_branch`.
+            HirExprKind::If { then_branch, .. } => self.recover_receiver_type(then_branch),
+            // G13: `(let x = v in expr).method()` — the expression type comes
+            // from the body; recurse into it.
+            HirExprKind::LetIn { body, .. } => self.recover_receiver_type(body),
             _ => None,
         }
     }
