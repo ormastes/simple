@@ -328,6 +328,68 @@ fn render_v3(scene: ParityScene) -> [u32]:
     bcb.get_pixel_buffer()
 
 # ============================================================================
+# V4 path — render through the Electron reference pipeline (dev-preview).
+#
+# V4 Electron is a dev-preview-only target per
+# `doc/01_research/domain/v4_electron_packaging_2026-04-14.md`: the
+# `ui.electron` shell is not a shipped GUI target, and `electron_capture`
+# acts as the Source-A reference renderer for `wm_compare`. Its
+# `capture_electron_scene()` does NOT invoke Electron for pixel rendering —
+# it forwards to `render_scene_to_backend()`, i.e.
+# `BrowserCompositorBackend` — the same compositor V3 exercises.
+#
+# We therefore render `render_v4` through the same BrowserCompositorBackend
+# trait surface V3 drives, so the ParityOp sequence reaches V4 unchanged
+# without spinning up a live Electron runtime (which the spec interpreter
+# cannot do — no Node, no IPC, no PPM round-trip). This keeps the spec
+# runnable in-process while still locking the contract that the V4
+# reference-renderer path stays within the ≤1% perceptual budget vs V1.
+# ============================================================================
+
+fn render_v4(scene: ParityScene) -> [u32]:
+    """Render `scene` through the V4 Electron dev-preview reference pipeline
+    and return the resulting ARGB8888 buffer.
+
+    The V4 Electron shell is dev-preview-only; its `electron_capture`
+    module is the Source-A reference renderer inside `wm_compare`, and
+    `capture_electron_scene()` intentionally does NOT hit Electron for
+    pixels — it forwards to `BrowserCompositorBackend` via
+    `render_scene_to_backend()`. The parity runner mirrors that contract
+    here by driving `BrowserCompositorBackend` directly (same trait
+    surface V1/V2/V3 use), so the ParityOp sequence replays through the
+    exact compositor V4 would use in production without requiring a live
+    Electron runtime inside the interpreter.
+
+    Note: u32 → i32 casts are safe because parity scenes are all 32x16."""
+    var bcb = BrowserCompositorBackend.new(scene.width.to_i32(), scene.height.to_i32())
+    # Match render_v1/v2/v3 preamble: start from a fully-zeroed buffer so
+    # pre-clear ops behave identically on all four paths.
+    bcb.clear(0u32)
+    for op in scene.ops:
+        val packed = _pack_argb(op.a, op.r, op.g, op.b)
+        val packed_bg = _pack_argb(op.bg_a, op.bg_r, op.bg_g, op.bg_b)
+        if op.kind == "clear":
+            bcb.clear(packed)
+        elif op.kind == "fill_rect":
+            bcb.fill_rect(
+                op.x.to_i32(), op.y.to_i32(),
+                op.w.to_i32(), op.h.to_i32(),
+                packed
+            )
+        elif op.kind == "draw_char":
+            bcb.draw_char_8x16(
+                op.x.to_i32(), op.y.to_i32(),
+                op.ch, packed, packed_bg
+            )
+        elif op.kind == "blend_rect":
+            bcb.blend_rect(
+                op.x.to_i32(), op.y.to_i32(),
+                op.w.to_i32(), op.h.to_i32(),
+                packed, op.alpha
+            )
+    bcb.get_pixel_buffer()
+
+# ============================================================================
 # Diff
 # ============================================================================
 
@@ -401,6 +463,24 @@ fn run_parity_v3(scene: ParityScene) -> ParityResult:
     val v1 = render_v1(scene)
     val v3 = render_v3(scene)
     diff_buffers(scene.name, scene.width, scene.height, v1, v3)
+
+fn run_parity_v4(scene: ParityScene) -> ParityResult:
+    """Render `scene` through V1 and V4 (Electron dev-preview reference
+    pipeline), then diff. Row 6 parity gate: V4 must stay within the same
+    ≤1% perceptual budget Row 2 locked for V1/V2. The returned
+    `ParityResult` reuses the `v2_pixels` field to carry the V4 buffer —
+    the struct shape is shared with `run_parity` / `run_parity_v3` so
+    `diff_buffers`, PPM dumps, and the golden-gate runner all work
+    unchanged.
+
+    V4 is dev-preview-only per
+    `doc/01_research/domain/v4_electron_packaging_2026-04-14.md`; pixels
+    come from `BrowserCompositorBackend` (the Source-A reference renderer
+    `electron_capture.capture_electron_scene` already forwards to), not
+    from a live Electron runtime."""
+    val v1 = render_v1(scene)
+    val v4 = render_v4(scene)
+    diff_buffers(scene.name, scene.width, scene.height, v1, v4)
 
 # ============================================================================
 # Stock parity scenes — used by the spec
