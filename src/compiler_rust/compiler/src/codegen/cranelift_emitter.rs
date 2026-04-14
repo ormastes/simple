@@ -314,6 +314,7 @@ impl<M: Module> CodegenEmitter for CraneliftEmitter<'_, '_, M> {
             field_offsets,
             field_types,
             field_values,
+            None, // vtable_data_id: cranelift_emitter path doesn't support trait vtables
         );
         Ok(())
     }
