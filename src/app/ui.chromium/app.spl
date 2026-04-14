@@ -16,6 +16,8 @@
 #   - No new FFI; reuses existing `rt_winit_*` surface.
 
 use app.ui.chromium.backend.{ChromiumBackend}
+use app.ui.chromium.event_bridge.{ChromiumEventBridge}
+use common.ui.widget.{UIEvent}
 use os.compositor.compositor.{Compositor}
 use os.compositor.hosted_input_backend.{HostedInputBackend}
 
@@ -48,6 +50,7 @@ class ChromiumApp:
     window: i64
     backend: ChromiumBackend
     compositor: Compositor
+    input_bridge: ChromiumEventBridge
     running: bool
 
 impl ChromiumApp:
@@ -95,6 +98,7 @@ impl ChromiumApp:
             window: window,
             backend: backend,
             compositor: compositor,
+            input_bridge: ChromiumEventBridge.new(),
             running: true
         ))
 
@@ -117,6 +121,19 @@ impl ChromiumApp:
             var ev = rt_winit_event_loop_poll_events(self.event_loop, 100)
             while ev != 0:
                 val event_type = rt_winit_event_get_type(ev)
+                # M2: feed the raw winit event type through the chromium
+                # event bridge so modifier-tracked UIEvents are produced
+                # even for events the compositor's HostedInputBackend
+                # does not poll (window close, mouse wheel).
+                val translated = self.input_bridge.on_event(
+                    event_type,
+                    0,       # keycode: populated by HostedInputBackend
+                    false,   # pressed
+                    0, 0,    # x, y
+                    0        # delta_y
+                )
+                if val ui_event = translated:
+                    self.handle_ui_event(ui_event)
                 if event_type == EVT_CLOSE:
                     self.running = false
                 rt_winit_event_free(ev)
@@ -130,6 +147,22 @@ impl ChromiumApp:
                 rt_thread_sleep(16)
 
         self.shutdown()
+
+    me handle_ui_event(event: UIEvent):
+        """Route a translated UIEvent into the compositor / shell.
+
+        M2 only needs to observe `UIEvent.Quit` (close window) — the
+        compositor's own `HostedInputBackend` keeps handling keyboard /
+        mouse via the shared winit event loop. Later milestones will
+        fan out Focus / KeyPress / TouchPress here to the WM session.
+        """
+        match event:
+            UIEvent.Quit =>
+                self.running = false
+            _ =>
+                # Other variants are already delivered through the
+                # compositor's hosted input backend for M2.
+                val _ignored = 0
 
     me shutdown():
         """Clean window teardown — no orphan threads (M1 acceptance)."""
