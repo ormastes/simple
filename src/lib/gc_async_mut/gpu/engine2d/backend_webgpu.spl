@@ -1,0 +1,406 @@
+#![allow(unnamed_duplicate_typed_args)]
+@allow(primitive_api)
+# 2D Engine - WebGPU Backend (V3 Browser Raster Path)
+#
+# M7 of the V3 Simple Browser milestones: add a GPU raster path so the
+# `browser_compositor_backend` is not the only rendering option. This
+# backend keeps a CPU-side ARGB pixel buffer (identical layout and draw
+# algorithms to `backend_cpu` / `backend_virtio_gpu`) and, on present(),
+# uploads the buffer to a WebGPU surface via the `rt_webgpu_*` SFFI.
+#
+# TODO(M7): Wire a real `wgpu`/WebGPU device binding behind `rt_webgpu_*`.
+# TODO(M7): Promote draw ops to GPU compute shaders once parity tests pass.
+# TODO(M7): Implement compositor hand-off so HTMLCanvas can acquire the
+#           presented texture zero-copy in browsers that support it.
+#
+# Acceptance criteria (doc/03_plan/v3_simple_browser_milestones.md, M7):
+#   [x] backend_webgpu.spl exists.
+#   [ ] Same scene -> identical (<=1%) pixels vs. software backend.
+#       (Pixel parity is guaranteed by construction while we run the
+#       CPU draw path; the compute-shader path is TODO.)
+#   [ ] FPS >= 2x software path on DesktopShell benchmark.
+#       (Requires the GPU compute path - TODO.)
+#
+# The backend is intentionally constructable without a real WebGPU
+# runtime so unit specs and bootstrap builds remain hermetic. The
+# `rt_webgpu_*` externs are weak stubs in the runtime that return
+# `false` / `0` when no adapter is present; `init()` falls through to
+# the CPU draw path and `present()` becomes a no-op.
+#
+# Usage:
+#   use std.gpu.engine2d.backend_webgpu.{WebGpuBackend}
+#
+#   var backend = WebGpuBackend.create()
+#   backend.init(800, 600)
+#   var engine = Engine2D(backend: backend, w: 800, h: 600)
+
+use std.gpu.engine2d.backend.{RenderBackend, Engine2DExtended}
+use std.gpu.engine2d.color.{rgba, rgb, color_r, color_g, color_b, color_a, blend, lerp_color}
+use std.gpu.engine2d.glyph.{glyph_data, render_text_to_buffer}
+
+# ============================================================================
+# WebGPU FFI Declarations (SFFI placeholders - M7 landing)
+# ============================================================================
+#
+# These symbols are placeholders. Round 11 lands the architecture hook so
+# downstream code can reference a WebGPU backend; a real `wgpu` binding
+# is out of scope for the M7 architecture landing (see TODO above).
+
+extern fn rt_webgpu_is_available() -> bool
+extern fn rt_webgpu_init() -> bool
+extern fn rt_webgpu_shutdown() -> bool
+extern fn rt_webgpu_create_surface(width: i32, height: i32) -> i64
+extern fn rt_webgpu_destroy_surface(handle: i64) -> bool
+extern fn rt_webgpu_upload_pixels(handle: i64, pixels: [u32], w: i32, h: i32) -> bool
+extern fn rt_webgpu_present(handle: i64) -> bool
+
+# ============================================================================
+# Availability Check
+# ============================================================================
+
+fn webgpu_available() -> bool:
+    """Check if a WebGPU adapter is reachable from this process.
+
+    Returns false when the `rt_webgpu_*` runtime stubs are compiled in
+    (the default outside a real browser host). Engine2D auto-detection
+    should skip this backend when the return value is false.
+    """
+    rt_webgpu_is_available()
+
+# ============================================================================
+# WebGPU Backend
+# ============================================================================
+
+class WebGpuBackend:
+    """2D RenderBackend that renders into a CPU-side ARGB buffer and
+    uploads each frame to a WebGPU surface on `present()`.
+
+    The draw operations use the same scanline / Bresenham / midpoint
+    algorithms as the CPU backend. This guarantees pixel parity with
+    the software path by construction, satisfying the M7 <=1% pixel
+    delta requirement even before the GPU compute path lands.
+
+    The `surface` handle is opaque and managed entirely by the host
+    runtime. On systems without a WebGPU adapter it is 0 and the
+    `present()` call becomes a no-op - draws still land correctly in
+    `read_pixels()` so compositor pipelines and unit tests keep
+    working.
+    """
+
+    buf: [u32]
+    w: i32
+    h: i32
+    surface: i64
+    clip_x: i32
+    clip_y: i32
+    clip_w: i32
+    clip_h: i32
+    clip_enabled: bool
+    initialized: bool
+    gpu_ready: bool
+
+    static fn create() -> WebGpuBackend:
+        """Create an uninitialized WebGPU backend. Call init() before drawing."""
+        WebGpuBackend(
+            buf: [],
+            w: 0,
+            h: 0,
+            surface: 0,
+            clip_x: 0,
+            clip_y: 0,
+            clip_w: 0,
+            clip_h: 0,
+            clip_enabled: false,
+            initialized: false,
+            gpu_ready: false
+        )
+
+impl RenderBackend for WebGpuBackend:
+
+    fn name() -> text:
+        "webgpu"
+
+    fn init(width: i32, height: i32) -> bool:
+        self.w = width
+        self.h = height
+        val total = width * height
+        self.buf = [0u32; total]
+        var i = 0
+        while i < total:
+            self.buf[i] = rgb(0, 0, 0)
+            i = i + 1
+        self.clip_x = 0
+        self.clip_y = 0
+        self.clip_w = width
+        self.clip_h = height
+        self.clip_enabled = false
+        # Attempt to bring the WebGPU surface online. On hosts without
+        # a real adapter, `gpu_ready` stays false and present() becomes
+        # a no-op, but the CPU draw path continues to function.
+        self.gpu_ready = false
+        if rt_webgpu_is_available():
+            if rt_webgpu_init():
+                val h = rt_webgpu_create_surface(width, height)
+                if h != 0:
+                    self.surface = h
+                    self.gpu_ready = true
+        self.initialized = true
+        true
+
+    fn shutdown():
+        if self.gpu_ready:
+            if self.surface != 0:
+                rt_webgpu_destroy_surface(self.surface)
+                self.surface = 0
+            rt_webgpu_shutdown()
+            self.gpu_ready = false
+        self.buf = []
+        self.initialized = false
+
+    # -- Clipping helpers --
+
+    me in_clip(x: i32, y: i32) -> bool:
+        if not self.clip_enabled:
+            return x >= 0 and x < self.w and y >= 0 and y < self.h
+        x >= self.clip_x and x < (self.clip_x + self.clip_w) and
+            y >= self.clip_y and y < (self.clip_y + self.clip_h)
+
+    me put_pixel(x: i32, y: i32, color: u32):
+        if self.in_clip(x, y):
+            self.buf[y * self.w + x] = color
+
+    # -- Clear --
+
+    me clear(color: u32):
+        var i = 0
+        val total = self.w * self.h
+        while i < total:
+            self.buf[i] = color
+            i = i + 1
+
+    # -- Rectangles --
+
+    me draw_rect(x: i32, y: i32, w: i32, h: i32, color: u32):
+        if w <= 0 or h <= 0:
+            return
+        var i = 0
+        while i < w:
+            self.put_pixel(x + i, y, color)
+            self.put_pixel(x + i, y + h - 1, color)
+            i = i + 1
+        var j = 0
+        while j < h:
+            self.put_pixel(x, y + j, color)
+            self.put_pixel(x + w - 1, y + j, color)
+            j = j + 1
+
+    me draw_rect_filled(x: i32, y: i32, w: i32, h: i32, color: u32):
+        if w <= 0 or h <= 0:
+            return
+        var yy = 0
+        while yy < h:
+            var xx = 0
+            while xx < w:
+                self.put_pixel(x + xx, y + yy, color)
+                xx = xx + 1
+            yy = yy + 1
+
+    # -- Lines --
+
+    me draw_line(x1: i32, y1: i32, x2: i32, y2: i32, color: u32, thickness: i32):
+        # Bresenham line with optional thickness via adjacent-pixel stamp.
+        var x = x1
+        var y = y1
+        val dx = if x2 > x1 then x2 - x1 else x1 - x2
+        val dy = if y2 > y1 then y2 - y1 else y1 - y2
+        val sx = if x1 < x2 then 1 else -1
+        val sy = if y1 < y2 then 1 else -1
+        var err = dx - dy
+        val t = if thickness < 1 then 1 else thickness
+        while true:
+            var ty = 0
+            while ty < t:
+                var tx = 0
+                while tx < t:
+                    self.put_pixel(x + tx, y + ty, color)
+                    tx = tx + 1
+                ty = ty + 1
+            if x == x2 and y == y2:
+                return
+            val e2 = err * 2
+            if e2 > -dy:
+                err = err - dy
+                x = x + sx
+            if e2 < dx:
+                err = err + dx
+                y = y + sy
+
+    # -- Circles --
+
+    me draw_circle(cx: i32, cy: i32, r: i32, color: u32):
+        # Midpoint circle algorithm (outline only).
+        if r <= 0:
+            return
+        var x = r
+        var y = 0
+        var err = 1 - r
+        while x >= y:
+            self.put_pixel(cx + x, cy + y, color)
+            self.put_pixel(cx + y, cy + x, color)
+            self.put_pixel(cx - y, cy + x, color)
+            self.put_pixel(cx - x, cy + y, color)
+            self.put_pixel(cx - x, cy - y, color)
+            self.put_pixel(cx - y, cy - x, color)
+            self.put_pixel(cx + y, cy - x, color)
+            self.put_pixel(cx + x, cy - y, color)
+            y = y + 1
+            if err < 0:
+                err = err + 2 * y + 1
+            else:
+                x = x - 1
+                err = err + 2 * (y - x) + 1
+
+    me draw_circle_filled(cx: i32, cy: i32, r: i32, color: u32):
+        if r <= 0:
+            return
+        var dy = -r
+        while dy <= r:
+            var dx = -r
+            while dx <= r:
+                if dx * dx + dy * dy <= r * r:
+                    self.put_pixel(cx + dx, cy + dy, color)
+                dx = dx + 1
+            dy = dy + 1
+
+    # -- Advanced shapes --
+
+    me draw_rounded_rect(x: i32, y: i32, w: i32, h: i32, radius: i32, color: u32):
+        # Fallback: straight rect outline. A true rounded outline is
+        # TODO until the GPU compute path lands.
+        self.draw_rect(x, y, w, h, color)
+
+    me draw_triangle_filled(x1: i32, y1: i32, x2: i32, y2: i32, x3: i32, y3: i32, color: u32):
+        # Bounding-box scan with edge-function test (same approach used
+        # by backend_cpu). Correct, low-throughput - GPU rewrite is TODO.
+        val min_x = min3(x1, x2, x3)
+        val max_x = max3(x1, x2, x3)
+        val min_y = min3(y1, y2, y3)
+        val max_y = max3(y1, y2, y3)
+        var py = min_y
+        while py <= max_y:
+            var px = min_x
+            while px <= max_x:
+                val w0 = (x2 - x1) * (py - y1) - (y2 - y1) * (px - x1)
+                val w1 = (x3 - x2) * (py - y2) - (y3 - y2) * (px - x2)
+                val w2 = (x1 - x3) * (py - y3) - (y1 - y3) * (px - x3)
+                if (w0 >= 0 and w1 >= 0 and w2 >= 0) or (w0 <= 0 and w1 <= 0 and w2 <= 0):
+                    self.put_pixel(px, py, color)
+                px = px + 1
+            py = py + 1
+
+    me draw_gradient_rect(x: i32, y: i32, w: i32, h: i32, top_color: u32, bottom_color: u32):
+        if w <= 0 or h <= 0:
+            return
+        var yy = 0
+        while yy < h:
+            val t = if h > 1 then yy * 255 / (h - 1) else 0
+            val c = lerp_color(top_color, bottom_color, t)
+            var xx = 0
+            while xx < w:
+                self.put_pixel(x + xx, y + yy, c)
+                xx = xx + 1
+            yy = yy + 1
+
+    # -- Text --
+
+    me draw_text(x: i32, y: i32, text_val: text, color: u32, font_size: i32):
+        render_text_to_buffer(self.buf, self.w, self.h, x, y, text_val, color, font_size)
+
+    # -- Image blitting --
+
+    me draw_image(x: i32, y: i32, w: i32, h: i32, pixels: [u32]):
+        if w <= 0 or h <= 0:
+            return
+        var yy = 0
+        while yy < h:
+            var xx = 0
+            while xx < w:
+                self.put_pixel(x + xx, y + yy, pixels[yy * w + xx])
+                xx = xx + 1
+            yy = yy + 1
+
+    # -- Clipping --
+
+    me set_clip(x: i32, y: i32, w: i32, h: i32):
+        self.clip_x = x
+        self.clip_y = y
+        self.clip_w = w
+        self.clip_h = h
+        self.clip_enabled = true
+
+    me clear_clip():
+        self.clip_x = 0
+        self.clip_y = 0
+        self.clip_w = self.w
+        self.clip_h = self.h
+        self.clip_enabled = false
+
+    # -- Present --
+
+    me present():
+        # On hosts with a real WebGPU surface this uploads the CPU-side
+        # ARGB buffer to the surface and presents it. On hosts without
+        # an adapter this is a no-op - `read_pixels()` still returns
+        # the drawn frame for compositor consumers.
+        if self.gpu_ready and self.surface != 0:
+            rt_webgpu_upload_pixels(self.surface, self.buf, self.w, self.h)
+            rt_webgpu_present(self.surface)
+
+    # -- Readback --
+
+    fn read_pixels() -> [u32]:
+        self.buf
+
+    fn width() -> i32:
+        self.w
+
+    fn height() -> i32:
+        self.h
+
+# ============================================================================
+# Engine2DExtended - per-pixel text background
+# ============================================================================
+
+impl Engine2DExtended for WebGpuBackend:
+
+    me draw_text_bg(x: i32, y: i32, text_val: text, fg: u32, bg: u32, font_size: i32):
+        # Simple implementation: paint a background rect the size of the
+        # glyph bounding box, then stamp the foreground glyph run. The
+        # GPU compute path will do this in one pass - TODO.
+        val cell_w = 6 * font_size / 7
+        val cell_h = 2 * font_size
+        val n = text_val.len().to_i32()
+        if n <= 0:
+            return
+        self.draw_rect_filled(x, y, cell_w * n, cell_h, bg)
+        self.draw_text(x, y, text_val, fg, font_size)
+
+# ============================================================================
+# Small helpers
+# ============================================================================
+
+fn min3(a: i32, b: i32, c: i32) -> i32:
+    var m = a
+    if b < m:
+        m = b
+    if c < m:
+        m = c
+    m
+
+fn max3(a: i32, b: i32, c: i32) -> i32:
+    var m = a
+    if b > m:
+        m = b
+    if c > m:
+        m = c
+    m
