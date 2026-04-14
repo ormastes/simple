@@ -10,51 +10,88 @@ regression lane for the SimpleOS "Small Complete GUI" milestone.
   on a clean `x64-desktop-test` guest run. On a fresh checkout this
   may be a zero-byte placeholder (see below).
 
-## Current status (Agent T / Round 5, 2026-04-13)
+## Current status (Agent Z3 / Round 7, 2026-04-13)
 
 The committed `desktop_scene.ppm` is still a **zero-byte placeholder**.
 
-**SYS-GUI-006 is NOT yet LIVE-PROVEN.** Two independent blockers
-currently prevent recording a real baseline from `bin/simple test`:
+**SYS-GUI-006 is NOT yet LIVE-PROVEN.** Round-7 progress vs Round-5:
 
-1. **Test-runner cannot execute `it` block bodies.** All three
-   execution modes of the test runner (`interpreter`, `smf`,
-   `native`) fall through to a safe/static-analysis path that
-   only verifies file loading — the QEMU spawn / marker-wait /
-   capture code in this spec's `it` block is never invoked.
-   See `src/compiler_rust/driver/src/cli/test_runner/runner.rs`
-   around the `Smf`/`Native` match arms ("X mode for tests not
-   supported, using safe mode") and the `Interpreter` branch
-   comment "Interpreter mode doesn't execute `it` block bodies
-   — it only verifies file loading." Until the pure-Simple
-   test runner in `src/app/test_runner_new/` grows a real
-   execution path for system specs, `UPDATE_BASELINE=1
-   bin/simple test test/system/simpleos_desktop_framebuffer_spec.spl`
-   reports PASS in <20 ms without spawning QEMU at all.
+- Agent V's compositor fix landed: `bin/simple os test
+  --scenario=x64-desktop-test` now reaches `[desktop-e2e]
+  desktop-ready` live. The serial lane after `desktop-ready`
+  still fails downstream at `[desktop-e2e] shortcut:fail`
+  (Agent Z1's domain), but that is not on the bare-desktop
+  baseline path — the spec only waits on `desktop-ready`.
 
-2. **Desktop entry path fails earlier than `desktop-ready`.**
-   Running `bin/simple os test --scenario=x64-desktop-test`
-   directly on main prints:
-   `[desktop-e2e] boot` → `[desktop-e2e] shell-ready` →
-   `[desktop-e2e] launcher:fail registered=0` → `TEST FAILED`.
-   The guest never reaches `desktop-ready`, so even if the test
-   runner DID execute the spec body, the marker wait would time
-   out. Agent M's Round-5 report that the guest reaches
-   `desktop-ready` live does not match current main — either
-   the fix is not yet landed, or it is gated behind something
-   that `x64-desktop-test` does not exercise.
+- Agent X's `bin/simple` swap: the test runner's `interpreter`
+  mode now actually executes `it` block bodies (the spec body
+  reaches `build_os(target)` and yields a real semantic error,
+  whereas Round-5 saw a sub-20-ms no-op PASS). `--mode native`
+  and `--mode smf` still print "Native mode for tests not
+  supported, using safe mode" and fall back to static analysis,
+  so interpreter is the only mode that can run the body.
 
-The spec has been updated in this round to wait on the
-earlier-and-more-stable `[desktop-e2e] desktop-ready` marker
-(bare desktop, no apps yet) so that the moment blocker #2 is
-resolved, a single `UPDATE_BASELINE=1` run on a host with a
-functioning test-runner execution path will record the real
-baseline without further edits here. The "with apps" variant
-(waiting on `remote-grouping:ok`) lives in sibling spec
-`test/system/simpleos_desktop_with_apps_framebuffer_spec.spl`
-and is tagged `@tag:pending_until_shortcut_fix`; it skips
-cleanly on marker miss so it does not fail CI while the
-downstream `shortcut:fail` is still being investigated.
+The remaining blocker preventing baseline capture is now a
+single upstream bug in interpreter parsing:
+
+**Interpreter parser cannot handle `pub enum` after an `@allow(...)`
+attribute.** The `std.spec` import chain transitively loads
+`src/compiler_rust/lib/std/src/core/json.spl`, which begins:
+
+```
+@allow(primitive_api, bare_bool)
+
+pub enum JsonValue:
+    ...
+```
+
+Interpreter module loader fails this file with:
+
+```
+ERROR ... module_loader: 504: Failed to parse module
+  path=".../core/json.spl"
+  error=Unexpected token: expected fn, struct, class, mixin,
+  or mod after pub with attributes, found Enum
+```
+
+The cascading effect is that `std.spec`, `screenshot`, and the
+shared OS type graph load with missing exports (`ExampleState`,
+`Runtime`, `parse_toml_test_config`, `discover_project_config`,
+…). When the spec body then calls `build_os(target)` against a
+target whose `arch` field is `Architecture.X86_64`, the type
+system has been corrupted enough that it prints:
+
+```
+✗ builds desktop_e2e_entry.spl into a baremetal kernel
+    semantic: method `X86_64` not found on type `Architecture`
+✗ boots desktop, captures framebuffer via QMP, and matches baseline
+    semantic: method `X86_64` not found on type `Architecture`
+```
+
+even though `Architecture` (defined in
+`src/os/kernel/arch/arch_context.spl`) clearly has the
+`X86_64` variant and the same call works fine through
+`bin/simple os test --scenario=x64-desktop-test` (which uses
+the native compiler path, not the interpreter loader). The
+sibling spec `test/system/engine2d_in_qemu_spec.spl`
+reproduces the exact same error verbatim under `bin/simple
+test --force-rebuild`, confirming this is global to the
+interpreter / `std.spec` load path and not spec-local.
+
+Fix lives in `src/compiler_rust/**` (Agent Z2's territory) —
+either teach the interpreter parser to accept `pub enum` after
+attribute prefixes, or have the test runner's `--mode native`
+path actually execute `it` bodies via the cranelift backend
+(which already parses `json.spl` correctly — `bin/simple os
+test --scenario=x64-desktop-test` proves this). Once either
+half lands, `UPDATE_BASELINE=1 bin/simple test
+test/system/simpleos_desktop_framebuffer_spec.spl` records the
+real baseline without any further edit here.
+
+The "with apps" variant
+(`test/system/simpleos_desktop_with_apps_framebuffer_spec.spl`)
+is still tagged `@tag:pending_until_shortcut_fix` and skips
+cleanly while Agent Z1 stabilises the shortcut/launcher chain.
 
 ## Recording procedure
 
@@ -71,10 +108,16 @@ downstream `shortcut:fail` is still being investigated.
    only required for the "with apps" variant in
    `test/system/simpleos_desktop_with_apps_framebuffer_spec.spl`.)
 
-2. Ensure the test runner's system-spec execution path actually
-   invokes `it` block bodies. On current main this is the blocker
-   described under "Current status" above — until it is fixed,
-   step 3 silently reports PASS without spawning QEMU.
+2. Ensure the test runner can load `std.spec` cleanly under
+   `--mode interpreter` (or, equivalently, that `--mode native`
+   stops falling back to safe-mode for `it` block execution).
+   On current main, interpreter mode runs `it` bodies but the
+   `std.spec` → `screenshot` → `std.core.json` import chain
+   trips an interpreter-parser bug on `pub enum` after `@allow`,
+   which propagates as `semantic: method X86_64 not found on
+   type Architecture` from `build_os(target)`. Until this is
+   fixed (see "Current status" above), step 3 fails in ~300 ms
+   without ever spawning QEMU.
 
 3. Run the framebuffer spec once with `UPDATE_BASELINE=1`:
 
