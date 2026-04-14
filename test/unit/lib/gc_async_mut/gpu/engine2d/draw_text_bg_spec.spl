@@ -12,6 +12,7 @@
 
 use std.spec.{describe, context, it, expect}
 use std.gc_async_mut.gpu.engine2d.engine.{Engine2D}
+use std.gc_async_mut.gpu.engine2d.color.{color_r}
 
 # ============================================================================
 # Tests
@@ -50,6 +51,32 @@ describe "Engine2DExtended.draw_text_bg (CPU backend)":
             val inside_idx = 15 * 32 + 0
             val inside = pixels[inside_idx]
             expect(inside == BLACK or inside == WHITE).to_be_true()
+
+            engine.shutdown()
+
+        it "blends glyph edge coverage between bg and fg (per-pixel AA)":
+            # Per-pixel AA-preserving contract: output pixels that straddle
+            # an on/off boundary of the 5x7 binary font must take on a
+            # value strictly between pure bg and pure fg, not snap to one
+            # or the other. This proves draw_text_bg is blending glyph
+            # coverage instead of doing a bg-rect + opaque-glyph overlay.
+            val BLACK: u32 = 0xFF000000
+            val WHITE: u32 = 0xFFFFFFFF
+
+            var engine = Engine2D.create_with_backend(32, 16, "cpu")
+            engine.clear(BLACK)
+            # font_size=16 -> scale = 16/7 = 2, glyph cell = 10x14.
+            # For 'A' row 0 = 0b01110, the top-edge sub-pixel at output
+            # coord (3, 0) bilinearly samples neighbors spanning the
+            # off-above / on-below boundary, so coverage is ~0.75 and
+            # the red channel lands near 191 — clearly not 0 or 255.
+            engine.draw_text_bg(0, 0, "A", WHITE, BLACK, 16)
+            engine.present()
+
+            val pixels = engine.read_pixels()
+            val edge_idx = 0 * 32 + 3
+            val r = color_r(pixels[edge_idx])
+            expect(r > 0 and r < 255).to_be_true()
 
             engine.shutdown()
 
