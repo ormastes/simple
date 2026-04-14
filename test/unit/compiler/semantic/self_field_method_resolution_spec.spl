@@ -1,50 +1,38 @@
-// @bug self-field-method-resolution
-// Regression spec for: seed compiler self.field.method() resolution bug
-// Phase-4 report STOP marker (2026-04-14)
-//
-// Expected: self.inner.foo() dispatches to Inner.foo(), returns 42
-// Actual:   method call on field-access receiver either
-//           (a) lowers receiver type to ANY → lookup_method_return_type fails silently, or
-//           (b) MIR mangler resolves to the enclosing method name → infinite recursion
-//
-// DO NOT run until self_field_method_resume_2026-04-14.md fix is applied and
-// src/compiler_rust/compiler/src/hir/lower/expr/calls.rs / access.rs are patched.
+# Regression spec for: seed compiler self.field.method() resolution bug
+#
+# Expected: self.inner.foo() dispatches to Inner.foo(), returns 42
+# Actual (pre-fix): method call on field-access receiver either
+#   (a) lowers receiver type to ANY → lookup_method_return_type fails silently, or
+#   (b) MIR mangler resolves to the enclosing method name → infinite recursion
+#
+# Fix landed in src/compiler_rust/compiler/src/hir/lower/expr/access.rs
 
-use std.testing
+struct Inner:
+    value: i32
 
-dataclass Inner:
-  var value: i32
+    fn foo() -> i32: self.value
 
-  fn foo() -> i32:
-    return self.value
+struct Outer:
+    inner: Inner
 
-dataclass Outer:
-  var inner: Inner
+    fn trigger() -> i32: self.inner.foo()
 
-  fn trigger() -> i32:
-    // This is the pattern that breaks: receiver is a FieldAccess node,
-    // not a bare identifier. The seed compiler's lower_method_call sees
-    // receiver_hir.ty == ANY (CannotInferFieldType fallback in access.rs:140)
-    // and lookup_method_return_type returns ANY. MIR then misresolves the
-    // mangled name to the enclosing function, causing infinite recursion.
-    return self.inner.foo()
+fn make_outer(v: i32) -> Outer:
+    val inner_val = Inner(value: v)
+    Outer(inner: inner_val)
 
-spec "self.field.method() resolution":
-  it "dispatches through struct field to correct method":
-    var inner_val: Inner = Inner(value: 42)
-    var outer_val: Outer = Outer(inner: inner_val)
-    var result: i32 = outer_val.trigger()
-    assert result == 42
+describe "self.field.method() resolution":
+    it "dispatches through struct field to correct method":
+        val outer_val = make_outer(42)
+        val result = outer_val.trigger()
+        expect(result).to_equal(42)
 
-  it "two-level chained field method call":
-    // Ensure x.a.b.method() also works (not just one hop)
-    var inner_val: Inner = Inner(value: 7)
-    var outer_val: Outer = Outer(inner: inner_val)
-    // trigger() calls self.inner.foo() internally
-    assert outer_val.trigger() == 7
+    it "two-level chained field method call returns correct value":
+        val outer_val = make_outer(7)
+        val result = outer_val.trigger()
+        expect(result).to_equal(7)
 
-  it "field method result used in arithmetic":
-    var inner_val: Inner = Inner(value: 10)
-    var outer_val: Outer = Outer(inner: inner_val)
-    var doubled: i32 = outer_val.trigger() * 2
-    assert doubled == 20
+    it "field method result used in arithmetic":
+        val outer_val = make_outer(10)
+        val doubled = outer_val.trigger() * 2
+        expect(doubled).to_equal(20)

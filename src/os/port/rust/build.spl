@@ -420,6 +420,55 @@ fn run_validate() -> bool:
     print "=== Validation: {passed} passed, {failed} failed ==="
     failed == 0
 
+## ---- Vendor-Prep Subcommand ------------------------------------------------
+##
+## Populate the `vendor/` directories for every offline-enabled Rust
+## project with `cargo vendor`. Output is captured to
+## build/os/rust/vendor.log. Requires network on the host.
+
+val VENDOR_LOG_DIR = "build/os/rust"
+val VENDOR_LOG_PATH = "build/os/rust/vendor.log"
+
+val VENDOR_PROJECTS = [
+    "src/compiler_rust",
+    "src/os/port/rust/examples/hello-simpleos",
+]
+
+fn run_vendor_prep() -> bool:
+    """Run `cargo vendor` for every offline project. Returns true on success."""
+    print "[vendor-prep] Running cargo vendor for offline-enabled projects"
+
+    if not fs.exists(VENDOR_LOG_DIR):
+        fs.create_dir(VENDOR_LOG_DIR)
+
+    var log = "cargo vendor log\n"
+    var ok = true
+
+    for project in VENDOR_PROJECTS:
+        print "[vendor-prep] vendoring {project}"
+        log = log + "=== {project} ===\n"
+
+        if not fs.exists(project):
+            print "[vendor-prep] FAIL: project not found: {project}"
+            log = log + "ERROR: project missing\n"
+            ok = false
+        else:
+            val result = process.run("sh", [
+                "-c",
+                "cd {project} && cargo vendor --respect-source-config",
+            ])
+            log = log + result.stdout
+            log = log + result.stderr
+            if result.exit_code != 0:
+                print "[vendor-prep] FAIL: cargo vendor exited {result.exit_code} in {project}"
+                ok = false
+            else:
+                print "[vendor-prep] OK: {project}"
+
+    fs.write(VENDOR_LOG_PATH, log)
+    print "[vendor-prep] log written to {VENDOR_LOG_PATH}"
+    ok
+
 ## ---- Main Entry Point -------------------------------------------------------
 
 fn main():
@@ -430,6 +479,24 @@ fn main():
         val ok = run_validate()
         if not ok:
             process.exit(1)
+        return
+
+    # If first arg is "vendor-prep", populate vendor/ directories.
+    if args.len() > 0 and args[0] == "vendor-prep":
+        val ok = run_vendor_prep()
+        if not ok:
+            process.exit(1)
+        return
+
+    # Print usage if help requested.
+    if args.len() > 0 and (args[0] == "help" or args[0] == "--help" or args[0] == "-h"):
+        print "Usage: build.spl [subcommand] [options]"
+        print "Subcommands:"
+        print "  validate        Static validation of rust cross-compile prereqs"
+        print "  examples ...    Build rust examples (status|all|hello|ipc-sample)"
+        print "  vendor-prep     Run cargo vendor for offline-enabled projects"
+        print "  help            Show this message"
+        print "(no subcommand)   Run the full rust toolchain build"
         return
 
     # If first arg is "examples", run example builder instead of toolchain build

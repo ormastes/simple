@@ -1031,9 +1031,9 @@ fn ensure_desktop_disk_image() -> bool:
     x64-desktop-disk scenario so the NVMe -drive file=... arg resolves.
     """
     val img_path = "build/os/fat32.img"
-    if rt_file_exists(img_path):
+    if rt_file_exists(img_path) and _desktop_disk_image_has_browser_manifest(img_path):
         return true
-    print "[ensure_desktop_disk_image] {img_path} missing, invoking scripts/make_os_disk.shs"
+    print "[ensure_desktop_disk_image] {img_path} missing or incomplete, invoking scripts/make_os_disk.shs"
     val (stdout, stderr, exit_code) = rt_process_run_timeout(
         "/bin/sh", ["scripts/make_os_disk.shs"], 60000)
     if stdout != "":
@@ -1043,7 +1043,24 @@ fn ensure_desktop_disk_image() -> bool:
     if exit_code != 0:
         print "[ensure_desktop_disk_image] make_os_disk.shs exited {exit_code}"
         return false
-    rt_file_exists(img_path)
+    if not rt_file_exists(img_path):
+        return false
+    if not _desktop_disk_image_has_browser_manifest(img_path):
+        print "[ensure_desktop_disk_image] image exists but browser manifest marker is missing"
+        return false
+    true
+
+fn _desktop_disk_image_has_browser_manifest(img_path: text) -> bool:
+    """Best-effort host-side validation that the disk image is populated.
+
+    The browser launch path currently packages a plain-text manifest whose
+    body contains `browser_demo_remote_main`. Grepping for that marker keeps
+    the validation lightweight and host-portable while avoiding false-positive
+    success on an empty FAT32 image.
+    """
+    val shell_cmd = "grep -a -q 'browser_demo_remote_main' \"{img_path}\""
+    val (_stdout, _stderr, exit_code) = rt_process_run_timeout("/bin/sh", ["-c", shell_cmd], 5000)
+    exit_code == 0
 
 fn build_scenario_command(scenario: QemuScenario, kernel_path: text) -> [text]:
     """Build QEMU command line from a scenario."""
