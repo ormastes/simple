@@ -9,7 +9,7 @@ use crate::value::Value;
 
 use super::super::{
     evaluate_call, evaluate_method_call, exec_method_function, find_and_exec_method_with_self, ClassDef, Enums, Env,
-    FunctionDef, ImplMethods, BLOCK_SCOPED_ENUMS, MODULE_GLOBALS,
+    FunctionDef, ImplMethods, BLOCK_SCOPED_ENUMS, GLOBAL_ENUMS, MODULE_GLOBALS,
 };
 
 pub(super) fn eval_call_expr(
@@ -324,10 +324,21 @@ pub(super) fn eval_call_expr(
                         // enum variant path before erroring. Class lookup wins first
                         // for normal static-method resolution; this fallback only
                         // kicks in when the class has no matching method.
+                        //
+                        // We probe three scopes in order so cross-module enums are
+                        // reachable even when only the struct was imported into the
+                        // caller's local namespace:
+                        //   1. module-local `enums` (direct import)
+                        //   2. `BLOCK_SCOPED_ENUMS` (block-local definitions)
+                        //   3. `GLOBAL_ENUMS` (cross-module enum registry)
                         {
-                            let enum_def = enums.get(class_name).cloned().or_else(|| {
-                                BLOCK_SCOPED_ENUMS.with(|cell| cell.borrow().get(class_name).cloned())
-                            });
+                            let enum_def = enums
+                                .get(class_name)
+                                .cloned()
+                                .or_else(|| {
+                                    BLOCK_SCOPED_ENUMS.with(|cell| cell.borrow().get(class_name).cloned())
+                                })
+                                .or_else(|| GLOBAL_ENUMS.with(|cell| cell.borrow().get(class_name).cloned()));
                             if let Some(enum_def) = enum_def {
                                 if let Some(variant) = enum_def.variants.iter().find(|v| v.name == *field) {
                                     let has_fields = variant.fields.as_ref().is_some_and(|f| !f.is_empty());
@@ -404,11 +415,17 @@ pub(super) fn eval_call_expr(
                 // Enum type field access - construct enum variants
                 // EnumName.VariantName syntax
                 Value::EnumType { ref enum_name } => {
-                    // Check both module-level enums and block-scoped enums
+                    // Check module-level enums, block-scoped enums, and the cross-module
+                    // GLOBAL_ENUMS registry. Without the GLOBAL_ENUMS fallback an
+                    // enum whose name is never imported into the local scope (e.g.
+                    // `Architecture` from `os.kernel.arch.arch_context` when a spec
+                    // only imports the `std.spec.arch.Architecture` struct) fails
+                    // to resolve its variants.
                     let enum_def = enums
                         .get(enum_name)
                         .cloned()
-                        .or_else(|| BLOCK_SCOPED_ENUMS.with(|cell| cell.borrow().get(enum_name).cloned()));
+                        .or_else(|| BLOCK_SCOPED_ENUMS.with(|cell| cell.borrow().get(enum_name).cloned()))
+                        .or_else(|| GLOBAL_ENUMS.with(|cell| cell.borrow().get(enum_name).cloned()));
                     if let Some(enum_def) = enum_def {
                         // Check if the field is a valid variant name
                         let variant_opt = enum_def.variants.iter().find(|v| v.name == *field);
