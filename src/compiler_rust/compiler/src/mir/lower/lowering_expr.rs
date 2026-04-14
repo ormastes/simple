@@ -1366,9 +1366,62 @@ impl<'a> MirLowerer<'a> {
                 // on the x86_64 baremetal desktop lane (see Agent V's
                 // 2026-04-13 workaround). Set SIMPLE_DEBUG_METHOD_DISPATCH=1
                 // to dump these bare-name dispatches at compile time.
+                //
+                // Round-16 fix (sys-gui-006 Blocker 2): when the expression's
+                // own `receiver.ty` cannot be named, fall back to the type
+                // recorded on the corresponding `MirFunction.locals[idx]`
+                // when the receiver is `HirExprKind::Local(idx)`. This is
+                // exactly the user-supplied `var shell: DesktopShell = ...`
+                // annotation — copied into the MIR local table by the
+                // statement lowerer — and survives even when constructor
+                // return-type inference falls through to `Any`. Without
+                // this fallback the typed-receiver workaround at
+                // `desktop_e2e_entry.spl:97` was being silently undone for
+                // the very call site (`shell.init()`) it was meant to fix.
+                let receiver_local_ty: Option<TypeId> =
+                    if let HirExprKind::Local(idx) = &receiver.kind {
+                        let lookup_idx = *idx;
+                        self.with_func(|func, _| {
+                            let nparams = func.params.len();
+                            // Local indices include params first, then locals.
+                            if lookup_idx < nparams {
+                                Some(func.params[lookup_idx].ty)
+                            } else {
+                                let li = lookup_idx - nparams;
+                                func.locals.get(li).map(|l| l.ty)
+                            }
+                        })
+                        .ok()
+                        .flatten()
+                    } else {
+                        None
+                    };
+
                 let func_name = if let Some(registry) = self.type_registry {
                     if let Some(type_name) = registry.get_type_name(receiver.ty) {
                         format!("{}.{}", type_name, method)
+                    } else if let Some(local_ty) = receiver_local_ty {
+                        if let Some(type_name) = registry.get_type_name(local_ty) {
+                            if std::env::var("SIMPLE_DEBUG_METHOD_DISPATCH").is_ok() {
+                                eprintln!(
+                                    "[MIR-METHOD-DISPATCH] '{}' qualified via local-table type '{}' (receiver.ty was unnamed)",
+                                    method, type_name
+                                );
+                            }
+                            format!("{}.{}", type_name, method)
+                        } else {
+                            if std::env::var("SIMPLE_DEBUG_METHOD_DISPATCH").is_ok() {
+                                let ty_desc = registry
+                                    .get(receiver.ty)
+                                    .map(|t| format!("{:?}", t))
+                                    .unwrap_or_else(|| format!("<missing tid={:?}>", receiver.ty));
+                                eprintln!(
+                                    "[MIR-METHOD-DISPATCH] bare '{}' call: receiver ty = {} (local-table fallback also unnamed)",
+                                    method, ty_desc
+                                );
+                            }
+                            method.clone()
+                        }
                     } else {
                         if std::env::var("SIMPLE_DEBUG_METHOD_DISPATCH").is_ok() {
                             let ty_desc = registry
