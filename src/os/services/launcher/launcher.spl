@@ -23,8 +23,6 @@
 use os.userlib.syscall_raw.{syscall}
 use os.posix.process_compat.{posix_spawn, posix_kill}
 use os.userlib.process.{spawn, get_task_info}
-use os.apps.hello_world.hello_world.{hello_world_remote_main}
-use os.apps.browser_demo.browser_demo.{browser_demo_remote_main}
 
 extern fn serial_println(msg: text)
 
@@ -96,15 +94,6 @@ val MOD_SHIFT: u32 = 8
 
 # Task priority for launched apps (Normal)
 val APP_PRIORITY: u8 = 2
-
-fn _builtin_remote_app_entry(path: text) -> u64?:
-    match path:
-        case "/sys/apps/hello_world":
-            Some(hello_world_remote_main as u64)
-        case "/sys/apps/browser_demo":
-            Some(browser_demo_remote_main as u64)
-        case _:
-            nil
 
 fn _app_name(idx: u64) -> text:
     if idx >= app_count:
@@ -446,8 +435,15 @@ fn launcher_launch(name: text) -> i64:
         app_exit_code[slot] = pid_result.to_i32()
         serial_println("[launcher] Failed to launch {name}: {pid_result}")
         return pid_result
+    _finalize_launch(slot, name, pid_result.to_u64())
 
-    val pid = pid_result.to_u64()
+fn launcher_launch_by_index(idx: u64) -> i64:
+    """Launch an app by registry index. Returns PID or -1."""
+    if idx >= app_count:
+        return -1
+    return launcher_launch(_app_name(idx))
+
+fn _finalize_launch(slot: u64, name: text, pid: u64) -> i64:
     app_launch_count[slot] = app_launch_count[slot] + 1
     app_last_pid[slot] = pid
     _sync_app_slot(slot, pid, "running", 0, 0, true)
@@ -456,12 +452,6 @@ fn launcher_launch(name: text) -> i64:
     serial_println("[launcher] Started {name} (PID {pid})")
     serial_println("[launcher] spawned app_id={app_id} pid={pid} name={name}")
     pid.to_i64()
-
-fn launcher_launch_by_index(idx: u64) -> i64:
-    """Launch an app by registry index. Returns PID or -1."""
-    if idx >= app_count:
-        return -1
-    return launcher_launch(_app_name(idx))
 
 fn _launch_seeded_app(slot: u64, name: text, path: text, icon: text, key: u32, modifiers: u32) -> i64:
     """Launch one of the four seeded desktop apps using canonical metadata.
@@ -481,6 +471,8 @@ fn _launch_seeded_app(slot: u64, name: text, path: text, icon: text, key: u32, m
     app_shortcut_key[slot] = key
     app_shortcut_mod[slot] = modifiers
     app_active[slot] = true
+    if slot >= app_count:
+        app_count = slot + 1
 
     val pid_result = posix_spawn(path, APP_PRIORITY)
     if pid_result < 0:
@@ -488,16 +480,7 @@ fn _launch_seeded_app(slot: u64, name: text, path: text, icon: text, key: u32, m
         app_exit_code[slot] = pid_result.to_i32()
         serial_println("[launcher] Failed to launch {name}: {pid_result}")
         return pid_result
-
-    val pid = pid_result.to_u64()
-    app_launch_count[slot] = app_launch_count[slot] + 1
-    app_last_pid[slot] = pid
-    _sync_app_slot(slot, pid, "running", 0, 0, true)
-    launcher_record_process(pid, slot.to_i64(), "running", 0, 0, true)
-    val app_id = _default_app_identity(slot)
-    serial_println("[launcher] Started {name} (PID {pid})")
-    serial_println("[launcher] spawned app_id={app_id} pid={pid} name={name}")
-    pid.to_i64()
+    _finalize_launch(slot, name, pid_result.to_u64())
 
 fn _dispatch_seeded_shortcut(key: u32, modifiers: u32) -> bool:
     """Fallback for the four canonical desktop shortcuts on baremetal."""

@@ -16,6 +16,7 @@ use os.kernel.ipc.notification.{NotificationTable, notification_create, notifica
 use os.kernel.ipc.notif_global.{g_notification_table}
 use os.kernel.log.klog.{KernelLog}
 use os.kernel.loader.executable_source.{resolve_executable_bytes}
+use os.kernel.loader.disk_launch_manifest.{resolve_disk_launch_entry}
 use os.kernel.loader.process_image.{build_user_process_image}
 use os.kernel.loader.builtin_binary_registry.{resolve_builtin_binary}
 use os.kernel.arch.arch_context.{Architecture}
@@ -550,6 +551,19 @@ fn _handle_spawn_binary(args: SyscallArgs, scheduler: Scheduler, klog: KernelLog
     val arch = _current_exec_arch()
     val bytes_result = resolve_executable_bytes(path, arch)
     if bytes_result.is_err():
+        val disk_entry = resolve_disk_launch_entry(path)
+        if disk_entry != nil:
+            val priority = _u64_to_priority(args.arg2)
+            val caps = CapabilitySet.full()
+            var sched = scheduler
+            val task_id = sched.create_task(disk_entry.unwrap(), priority, caps)
+            if task_id.id == 0:
+                return SyscallResult(value: -12)
+
+            var dlog = klog
+            dlog.write(6, 1, task_id.id, "spawn_binary launched disk-backed resident {path}")
+            return SyscallResult(value: task_id.id.to_i64())
+
         val builtin_entry = resolve_builtin_binary(path)
         if builtin_entry != nil:
             val priority = _u64_to_priority(args.arg2)
