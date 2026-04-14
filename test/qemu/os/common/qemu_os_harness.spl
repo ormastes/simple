@@ -21,7 +21,7 @@ extern fn rt_process_kill(pid: i64) -> bool
 extern fn rt_file_read_text(path: text) -> text
 extern fn rt_file_delete(path: text) -> bool
 extern fn rt_file_exists(path: text) -> bool
-extern fn rt_sleep_ms(ms: i64)
+extern fn rt_thread_sleep(ms: i64)
 
 class QemuGuestHandle:
     pid: i64
@@ -107,11 +107,19 @@ fn run_os_qemu_output(arch: Architecture, timeout_ms: i64) -> text:
 fn run_os_qemu_with_target(target: OsTarget, timeout_ms: i64) -> (text, text, i32):
     """Launch QEMU with explicit target config."""
     val cmd_parts = build_qemu_command(target)
-    val qemu_bin = cmd_parts[0]
-    var args: [text] = []
-    for i in 1..cmd_parts.len():
-        args.push(cmd_parts[i])
-    rt_process_run_timeout(qemu_bin, args, timeout_ms)
+    val shell_cmd = _shell_command(cmd_parts)
+    rt_process_run_timeout("/bin/sh", ["-c", shell_cmd], timeout_ms)
+
+fn run_os_qemu_with_target_via_timeout(target: OsTarget, guest_timeout: text, timeout_ms: i64) -> (text, text, i32):
+    """Launch QEMU via host shell timeout, preserving serial stdout markers.
+
+    The direct interpreter-side process helper has been flaky for the tiny
+    probe guests. Running the exact working shell form through `/bin/sh -c`
+    keeps behavior aligned with manual verification.
+    """
+    val cmd_parts = build_qemu_command(target)
+    val shell_cmd = "timeout {_shell_quote(guest_timeout)} {_shell_command(cmd_parts)} 2>&1 | tr -d '\\000'"
+    rt_process_run_timeout("/bin/sh", ["-c", shell_cmd], timeout_ms)
 
 fn spawn_guest_with_qmp(target: OsTarget, qmp_socket: text, serial_log: text) -> Result<QemuGuestHandle, text>:
     """Spawn a QEMU guest using only the target's own qemu_extra.
@@ -208,7 +216,7 @@ fn wait_for_serial_marker(handle: QemuGuestHandle, marker: text, timeout_ms: i64
             return true
         if not rt_process_is_running(handle.pid):
             return serial_output.contains(marker)
-        rt_sleep_ms(100)
+        rt_thread_sleep(100)
         waited = waited + 100
     read_serial_log(handle).contains(marker)
 
@@ -300,7 +308,7 @@ fn wait_for_qmp_socket(socket_path: text, timeout_ms: i64) -> bool:
     while waited <= timeout_ms:
         if rt_file_exists(socket_path):
             return true
-        rt_sleep_ms(100)
+        rt_thread_sleep(100)
         waited = waited + 100
     false
 

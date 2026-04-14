@@ -5,7 +5,7 @@ Impl in Simple unless it has big performance differences.
 
 ## Essential Commands
 ```bash
-bin/simple build                  # Build (add --release for release)
+bin/simple build                  # Debug build (lint/fmt/check/bootstrap subcommands also available)
 bin/simple test                   # Run all tests (or: test path/to/spec.spl)
 scripts/bootstrap/bootstrap-from-scratch.sh --deploy  # Full bootstrap
 ```

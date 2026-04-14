@@ -382,6 +382,22 @@ impl<'a> MirLowerer<'a> {
             .map(|sig| (sig.param_types.clone(), sig.return_type))
     }
 
+    /// Search all trait_infos for the first trait that owns `method_name`.
+    /// Returns `(vtable_slot, param_types, return_type)` if found, else None.
+    /// Used by DispatchMode::Dynamic to emit MethodCallVirtual.
+    pub(super) fn find_trait_for_method(
+        &self,
+        method_name: &str,
+    ) -> Option<(u32, Vec<crate::hir::TypeId>, crate::hir::TypeId)> {
+        let infos = self.trait_infos?;
+        for info in infos.values() {
+            if let Some(sig) = info.get_method(method_name) {
+                return Some((sig.vtable_slot, sig.param_types.clone(), sig.return_type));
+            }
+        }
+        None
+    }
+
     /// Get the current contract mode
     pub fn contract_mode(&self) -> ContractMode {
         self.contract_mode

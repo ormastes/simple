@@ -1386,9 +1386,52 @@ impl<'a> MirLowerer<'a> {
                     method.clone()
                 };
 
-                let receiver_ty = receiver.ty;
+                let _receiver_ty = receiver.ty;
                 match dispatch {
-                    DispatchMode::Static | DispatchMode::Dynamic => {
+                    DispatchMode::Dynamic => {
+                        // Try to find the method in a registered trait (vtable dispatch)
+                        if let Some((vtable_slot, param_types, return_type)) =
+                            self.find_trait_for_method(&method)
+                        {
+                            let dest = self.with_func(|func, current_block| {
+                                let dest = func.new_vreg();
+                                let block = func.block_mut(current_block).unwrap();
+                                block.instructions.push(MirInst::MethodCallVirtual {
+                                    dest: Some(dest),
+                                    receiver: receiver_reg,
+                                    vtable_slot,
+                                    param_types,
+                                    return_type,
+                                    args: arg_regs,
+                                });
+                                dest
+                            })?;
+                            Ok(dest)
+                        } else {
+                            // Fallback: not a registered trait method — use static dispatch
+                            let dest = self.with_func(|func, current_block| {
+                                let dest = func.new_vreg();
+                                let block = func.block_mut(current_block).unwrap();
+                                block.instructions.push(MirInst::MethodCallStatic {
+                                    dest: Some(dest),
+                                    receiver: receiver_reg,
+                                    func_name,
+                                    args: arg_regs,
+                                });
+                                dest
+                            })?;
+
+                            // NOTE: Do NOT store the push result back to the receiver
+                            // variable. rt_array_push returns bool (success/failure),
+                            // NOT a new array pointer. Storing the bool back would
+                            // overwrite the array pointer with 1 (true), causing
+                            // crashes on subsequent array access.
+                            // The array is mutated in-place; the pointer stays valid.
+
+                            Ok(dest)
+                        }
+                    }
+                    DispatchMode::Static => {
                         let dest = self.with_func(|func, current_block| {
                             let dest = func.new_vreg();
                             let block = func.block_mut(current_block).unwrap();
