@@ -9,10 +9,10 @@
 #                    run_browser_gui). Phase B will attach a real window.
 #   --backend=NAME   Forwarded to BrowserBackend via parse_backend_flag.
 
-use app.ui.browser.app.{BrowserApp, run_browser_gui, parse_backend_flag}
-use std.cli.cli_util.{get_cli_args}
+use app.ui.browser.app.{BrowserApp}
 
 extern fn rt_mkdir_p(path: text) -> bool
+extern fn rt_cli_get_args() -> [text]
 
 fn parse_snapshot_flag(args: [text]) -> text:
     var i = 0
@@ -52,16 +52,35 @@ fn ensure_parent_dir(path: text):
         val dir = path[0:slash]
         rt_mkdir_p(dir)
 
+fn parse_backend_flag(args: [text]) -> text:
+    var i = 0
+    while i < args.len():
+        val arg = args[i]
+        if arg == "--backend" and i + 1 < args.len():
+            return args[i + 1]
+        elif arg.starts_with("--backend="):
+            return arg[10:]
+        i = i + 1
+    return "auto"
+
 fn main() -> i64:
-    val args = get_cli_args()
+    val args = rt_cli_get_args()
     val file_path = first_positional(args)
     if file_path == "":
         print "Usage: simple browser <file.ui.sdn> [--snapshot=<out.ppm>] [--open]"
         return 1
 
     val open_flag = parse_open_flag(args)
+    val gpu_backend = parse_backend_flag(args)
     if open_flag:
-        return run_browser_gui(file_path, 0)
+        val gui_result = BrowserApp.new(file_path, 0, gpu_backend)
+        match gui_result:
+            Err(e):
+                print "Error: {e}"
+                return 1
+            Ok(app):
+                app.run()
+                return 0
 
     var snapshot_path = parse_snapshot_flag(args)
     if snapshot_path == "":
@@ -70,7 +89,6 @@ fn main() -> i64:
     else:
         ensure_parent_dir(snapshot_path)
 
-    val gpu_backend = parse_backend_flag()
     val app_result = BrowserApp.new(file_path, 0, gpu_backend)
     match app_result:
         Err(e):

@@ -16,6 +16,24 @@ use app.ui.web.html.{generate_css}
 extern fn rt_file_read_text(path: text) -> text
 extern fn rt_file_exists(path: text) -> bool
 extern fn rt_cli_get_args() -> [text]
+extern fn rt_winit_event_loop_new() -> i64
+extern fn rt_winit_window_new(el: i64, w: i64, h: i64, title: text) -> i64
+extern fn rt_winit_event_loop_poll_events(el: i64, max: i64) -> i64
+extern fn rt_winit_event_get_type(ev: i64) -> i64
+extern fn rt_winit_event_keyboard_input(ev: i64) -> (i64, i64, bool)
+extern fn rt_winit_event_mouse_moved(ev: i64) -> (f64, f64)
+extern fn rt_winit_event_mouse_button(ev: i64) -> (i64, bool)
+extern fn rt_winit_event_free(ev: i64)
+extern fn rt_winit_window_present_rgba(win: i64, w: i64, h: i64, pixels: [i64])
+extern fn rt_winit_window_free(win: i64)
+extern fn rt_winit_event_loop_free(el: i64)
+extern fn rt_thread_sleep(ms: i64)
+
+val EVT_CLOSE: i64 = 3
+val EVT_KEYBOARD: i64 = 10
+val EVT_MOUSE_BUTTON: i64 = 20
+val EVT_MOUSE_MOVED: i64 = 21
+val HOST_WINDOW_TITLE: text = "Simple Browser"
 
 # =========================================================================
 # BrowserApp
@@ -27,6 +45,8 @@ class BrowserApp:
     backend: BrowserBackend
     running: bool
     last_file_content: text
+    last_mouse_x: i32
+    last_mouse_y: i32
 
     static fn new(file_path: text, port: i32, gpu_backend: text) -> Result<BrowserApp, text>:
         val tree_result = parse_ui_to_tree(file_path)
@@ -52,7 +72,9 @@ class BrowserApp:
                             state: state,
                             backend: backend,
                             running: true,
-                            last_file_content: content
+                            last_file_content: content,
+                            last_mouse_x: 0,
+                            last_mouse_y: 0
                         ))
 
     me run_once(snapshot_path: text) -> i64:
@@ -68,36 +90,51 @@ class BrowserApp:
         return 1
 
     me run():
-        """Main browser engine loop: render -> poll -> update -> repeat."""
-        # Initial render
+        """Main browser engine loop with a real hosted window."""
+        val width = self.backend.viewport_width().to_i64()
+        val height = self.backend.viewport_height().to_i64()
+        val event_loop = rt_winit_event_loop_new()
+        if event_loop == 0:
+            print "Error: failed to create host event loop"
+            self.backend.shutdown()
+            return
+
+        val window = rt_winit_window_new(event_loop, width, height, HOST_WINDOW_TITLE)
+        if window == 0:
+            print "Error: failed to create host browser window"
+            rt_winit_event_loop_free(event_loop)
+            self.backend.shutdown()
+            return
+
         self.backend.render_frame(self.state.tree, self.state)
+        self.present_host_window(window)
 
         while self.running:
-            val events = self.backend.poll_events()
             var had_event = false
-
-            for event in events:
+            var ev = rt_winit_event_loop_poll_events(event_loop, 100)
+            while ev != 0:
                 had_event = true
-                match event:
-                    UIEvent.Quit:
-                        self.running = false
-                    _:
-                        self.state = update_state(self.state, event)
+                self.handle_host_event(ev)
+                rt_winit_event_free(ev)
+                ev = rt_winit_event_loop_poll_events(event_loop, 100)
 
-            # Check for file changes periodically
-            self.check_file_changes()
+            if self.check_file_changes():
+                had_event = true
 
-            # Re-render after events or file changes
             if had_event:
                 self.backend.render_frame(self.state.tree, self.state)
+                self.present_host_window(window)
 
-        # Cleanup
+            rt_thread_sleep(16)
+
+        rt_winit_window_free(window)
+        rt_winit_event_loop_free(event_loop)
         self.backend.shutdown()
 
-    me check_file_changes():
+    me check_file_changes() -> bool:
         """Check if the .ui.sdn file has changed and reload if so."""
         if not rt_file_exists(self.file_path):
-            return
+            return false
 
         val current_content = rt_file_read_text(self.file_path)
         if current_content != self.last_file_content:
@@ -106,10 +143,70 @@ class BrowserApp:
             match tree_result:
                 Ok(new_tree):
                     self.state = update_tree(self.state, new_tree)
-                    self.backend.render_frame(self.state.tree, self.state)
+                    return true
                 Err(e):
                     # Keep old state on parse error
-                    pass_dn
+                    return false
+        return false
+
+    me handle_ui_event(event: UIEvent):
+        match event:
+            UIEvent.Quit:
+                self.running = false
+            _:
+                self.state = update_state(self.state, event)
+
+    me handle_host_event(ev: i64):
+        val event_type = rt_winit_event_get_type(ev)
+        if event_type == EVT_CLOSE:
+            self.running = false
+            return
+
+        if event_type == EVT_KEYBOARD:
+            val (_scancode, keycode, pressed) = rt_winit_event_keyboard_input(ev)
+            if pressed:
+                val translated = translate_key_event(keycode.to_i32(), 0)
+                if translated != nil:
+                    self.handle_ui_event(translated)
+            return
+
+        if event_type == EVT_MOUSE_MOVED:
+            val (mouse_x, mouse_y) = rt_winit_event_mouse_moved(ev)
+            self.last_mouse_x = mouse_x.to_i32()
+            self.last_mouse_y = mouse_y.to_i32()
+            val translated = translate_mouse_event(
+                self.last_mouse_x,
+                self.last_mouse_y,
+                0,
+                "move"
+            )
+            if translated != nil:
+                self.handle_ui_event(translated)
+            return
+
+        if event_type == EVT_MOUSE_BUTTON:
+            val (button_code, pressed) = rt_winit_event_mouse_button(ev)
+            val action = if pressed:
+                "press"
+            else:
+                "release"
+            val translated = translate_mouse_event(
+                self.last_mouse_x,
+                self.last_mouse_y,
+                button_code.to_i32(),
+                action
+            )
+            if translated != nil:
+                self.handle_ui_event(translated)
+
+    me present_host_window(window: i64):
+        val pixels = self.backend.pixels_rgba_i64()
+        rt_winit_window_present_rgba(
+            window,
+            self.backend.viewport_width().to_i64(),
+            self.backend.viewport_height().to_i64(),
+            pixels
+        )
 
 # =========================================================================
 # Entry Point
