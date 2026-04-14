@@ -77,6 +77,7 @@ use test.qemu.os.common.qemu_os_harness.{
     stop_guest, wait_for_serial_marker}
 
 extern fn rt_env_get(name: text) -> text
+extern fn rt_thread_sleep(ms: i64)
 
 # ===========================================================================
 # Helpers
@@ -221,6 +222,17 @@ describe "SimpleOS desktop framebuffer baseline (SYS-GUI-006)":
         # before returning, and kills the process on any error path.
         match spawn_guest_with_qmp(target, qmp_socket, serial_log):
             Ok(handle):
+                # SYS-GUI-006 Round-13 harness-race mitigation:
+                # `rt_process_is_running` currently returns false for live
+                # children spawned via rt_process_spawn_async (measured in
+                # Round-13 — dedicated runtime bug, out of scope for this
+                # round). wait_for_serial_marker reads the log BEFORE it
+                # checks is_running, so if the serial log contains the
+                # desktop-ready marker on the FIRST iteration of its 100ms
+                # poll, the function still returns true even with the
+                # broken is_running probe.
+                print "[simpleos_desktop_fb_spec] R13 pre-wait sleep for serial-log flush"
+                rt_thread_sleep(2000)
                 # Wait for the bare-desktop paint marker — compositor has
                 # painted wallpaper + dock + shell chrome at least once.
                 # This captures the deterministic "bare desktop" scene
@@ -259,6 +271,19 @@ describe "SimpleOS desktop framebuffer baseline (SYS-GUI-006)":
                     return
 
                 # Capture framebuffer via QMP screendump.
+                # Round-13 note: `capture_qemu_vm` transitively calls
+                # `shell(cmd)` from src/lib/nogc_sync_mut/qemu/qmp_client.spl
+                # (qmp_send → shell(cmd) via `use std.io.{shell}`). `std.io`
+                # does NOT export a `shell` function — the name resolves to
+                # the class `shell` in src/compiler_rust/lib/std/src/shell.spl
+                # which only has static methods. The interpreter therefore
+                # raises "too many arguments for class `shell` constructor"
+                # and the spec body aborts silently with a failing expect.
+                # This is a pre-existing qmp_client.spl bug, blocks LIVE-
+                # GREEN, and requires a std.io/qmp_client fix in a dedicated
+                # round (Round-14+). Paint-settle + pre-wait in this round
+                # do clear the harness-race portion of the blocker (saw_ready
+                # now returns true on the first iteration).
                 val result = capture_qemu_vm(qmp_socket, capture_ppm)
                 if not result.success:
                     print "[simpleos_desktop_fb_spec] QMP screendump failed: {result.error}"

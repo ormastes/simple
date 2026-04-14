@@ -60,6 +60,28 @@ fn _latest_launcher_pid() -> u64:
         return 0
     launcher_get_process_pid((process_count - 1).to_u64())
 
+# SYS-GUI-006 Round-13 paint-settle: busy-wait between desktop-ready and
+# launcher_shortcut_dispatch so that the LIVE-GREEN QMP screendump lane
+# (test/system/simpleos_desktop_framebuffer_spec.spl) has enough
+# wall-clock to poll the serial marker, open the QMP socket, issue
+# `screendump`, and write the PPM BEFORE the no-NVMe shortcut path
+# FAULTs / triggers `[PANIC] heap exhausted` and QEMU exits via
+# isa-debug-exit. On the serial-only lane this adds ~2s to a 10s+ budget
+# and is otherwise invisible — shortcut:ok / wm:ok emission is unchanged.
+#
+# Implementation: port-outb to the legacy POST diagnostic port 0x80.
+# QEMU implements this as an ignored write so it still counts as a real
+# I/O cycle (the Cranelift backend cannot elide an extern call). The
+# outer count was calibrated empirically — in Round-13 10M iterations
+# completed in <200 ms on the dev box (confirming it is sub-second).
+# 200M iterations target ~4 s at ~50 ns per outb in QEMU, well inside
+# the serial lane's 10 s post-desktop-ready budget.
+fn _paint_settle():
+    var i: u64 = 0
+    while i < 200000000:
+        rt_port_outb(0x80, i & 0x01)
+        i = i + 1
+
 fn desktop_e2e_main() -> bool:
     # ---- SYS-GUI-001: boot / shell-ready / launcher-ready / desktop-ready ----
     serial_println("[desktop-e2e] boot")
@@ -113,6 +135,13 @@ fn desktop_e2e_main() -> bool:
     serial_println("[desktop-e2e] launcher:ready apps={registered}")
 
     serial_println("[desktop-e2e] desktop-ready")
+
+    # SYS-GUI-006 Round-13: paint-settle before touching the shortcut
+    # chain. See _paint_settle() doc above for rationale. Harness-visible
+    # window for QMP screendump; no observable effect on marker ordering
+    # beyond a ~2s delay between desktop-ready and shortcut:ok.
+    _paint_settle()
+    serial_println("[desktop-e2e] paint-settle:done")
 
     # ---- SYS-GUI-002: launcher shortcut + wm join ----
     # Dispatch Meta+B through the real launcher shortcut path. This is the

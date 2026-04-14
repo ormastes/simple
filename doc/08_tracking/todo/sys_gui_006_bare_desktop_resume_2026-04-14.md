@@ -32,6 +32,20 @@ that used to reach `desktop-ready` regressed.
 > QEMU even spawns. Not an OS/compiler regression — a spec/harness
 > issue. See `sys_gui_006_round11_status_2026-04-14.md` for full
 > evidence and Round-12 remediation plan.
+>
+> **Round-13 update (2026-04-14):** Harness race **CLEARED** by pairing a
+> 2,000 ms pre-sleep in the spec with an OS-side `_paint_settle()` in
+> `examples/simple_os/arch/x86_64/desktop_e2e_entry.spl`. Instrumented
+> run confirms `wait_for_serial_marker returned saw_ready=true` on the
+> first iteration. **New blocker surfaced**: `capture_qemu_vm` aborts
+> on `qmp_send → shell(cmd)` — `std.io` does not export a `shell`
+> function so the name resolves to the `shell` class (static-only),
+> and the interpreter raises
+> `semantic: too many arguments for class \`shell\` constructor`.
+> See `sys_gui_006_round13_status_2026-04-14.md` for full evidence
+> and Round-14 remediation plan (fix `qmp_send` in
+> `src/lib/nogc_sync_mut/qemu/qmp_client.spl` to use `shell.run(...)`
+> or a direct `rt_process_run` extern).
 
 ## One-command retry
 

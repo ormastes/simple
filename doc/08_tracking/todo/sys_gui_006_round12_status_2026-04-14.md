@@ -173,3 +173,10 @@ Do both and LIVE-GREEN lands in a single round.
   landed 2026-04-14 · Round-1 gated on sys-gui-006 Round-11 LIVE-GREEN"
   — the reference to Round-11 should be superseded by Round-13 once
   Track A or Track B lands.
+
+> **Round-13 update (2026-04-14):** Track A (paint-settle) landed and
+> the harness race is cleared (see
+> `sys_gui_006_round13_status_2026-04-14.md`). LIVE-GREEN remains
+> blocked, now on a different root cause: `qmp_send` calls
+> `shell(cmd)` with the wrong import resolution — Round-14 will fix
+> the `qmp_client.spl` path and unblock the capture.
