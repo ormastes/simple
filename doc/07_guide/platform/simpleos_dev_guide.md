@@ -436,28 +436,29 @@ populate a formatted FAT32 image even when `mtools` and loop-mount are missing.
 
 SimpleOS now has two intentionally separate launch proofs:
 
-- `x64-desktop-disk` proves disk-backed packaged app launch through FAT32
-  manifests and the launcher path
+- `x64-desktop-disk` proves the disk-backed resident-manifest compatibility
+  lane and the FAT32 artifact path
 - `browser_engine_in_qemu_spec.spl` proves arbitrary baremetal ELF execution via
   directly built `native-build` outputs
 
 Current status:
 
 - `Browser Demo`, `Hello World`, `File Manager`, and `Shell` are represented in
-  the FAT32 manifest table for the disk-backed resident-manifest lane
-- `spawn_binary()` resolves disk-backed packaged apps first, then resolves direct
-  ELF bytes, and still contains a transitional resident-entry fallback
+  the FAT32 manifest table for the disk-backed resident-manifest bridge
+- `spawn_binary()` currently resolves direct ELF bytes first, then consults the
+  disk-backed resident-manifest bridge, then falls back to the legacy builtin
+  resident registry
 - `browser_engine_in_qemu_spec.spl` is the right place for direct ELF boot
   coverage, not for packaged disk launch coverage
-- `simpleos_desktop_disk_boot_spec.spl` is the right place for packaged app
-  launch coverage, not for arbitrary ELF execution
+- `simpleos_desktop_disk_boot_spec.spl` is the right place for disk-backed
+  resident-manifest bridge coverage, not for arbitrary ELF execution
 
 That means:
 
 - the launcher/manifest path and the direct ELF path are now documented as
   different execution modes
-- Browser Demo is still transitional because it appears in the packaged manifest
-  path and in legacy resident fallback code
+- Browser Demo is still transitional because it appears in the resident-manifest
+  bridge and in legacy builtin fallback code
 - the next cleanup step is to remove Browser Demo from the fallback path once the
   packaged-app route is the only supported launch form for that app
 

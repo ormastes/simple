@@ -606,6 +606,66 @@ fn _handle_spawn_binary(args: SyscallArgs, scheduler: Scheduler, klog: KernelLog
     log.write(6, 1, task_id.id, "spawn_binary launched {path}")
     SyscallResult(value: task_id.id.to_i64())
 
+fn dispatch_spawn_binary_direct(path_ptr: u64, path_len: u64, priority_raw: u64, scheduler: Scheduler, klog: KernelLog) -> i64:
+    """Dedicated SpawnBinary bridge that avoids the generic syscall wrapper."""
+    val path_result = _copy_user_text(path_ptr, path_len)
+    if path_result.is_err():
+        return -14
+
+    val path = path_result.unwrap()
+    val arch = _current_exec_arch()
+
+    val bytes_result = resolve_executable_bytes(path, arch)
+    if bytes_result.is_err():
+        val disk_entry = resolve_disk_launch_entry(path)
+        if disk_entry != nil:
+            val priority = _u64_to_priority(priority_raw)
+            val caps = CapabilitySet.full()
+            var sched = scheduler
+            val task_id = sched.create_task(disk_entry.unwrap(), priority, caps)
+            if task_id.id == 0:
+                return -12
+
+            var dlog = klog
+            dlog.write(6, 1, task_id.id, "spawn_binary launched disk-backed resident {path}")
+            return task_id.id.to_i64()
+
+        val builtin_entry = resolve_builtin_binary(path)
+        if builtin_entry != nil:
+            val priority = _u64_to_priority(priority_raw)
+            val caps = CapabilitySet.full()
+            var sched = scheduler
+            val task_id = sched.create_task(builtin_entry.unwrap(), priority, caps)
+            if task_id.id == 0:
+                return -12
+
+            var blog = klog
+            blog.write(6, 1, task_id.id, "spawn_binary launched builtin {path}")
+            return task_id.id.to_i64()
+
+        var log = klog
+        log.write(3, 1, 0, "spawn_binary rejected unknown binary: {path}")
+        return -2
+
+    val _sp_argv: [text] = []
+    val _sp_envp: [text] = []
+    val image_result = build_user_process_image(path, bytes_result.unwrap(), arch, _sp_argv, _sp_envp)
+    if image_result.is_err():
+        var log = klog
+        log.write(3, 1, 0, "spawn_binary rejected invalid executable: {path}")
+        return -8
+
+    val priority = _u64_to_priority(priority_raw)
+    val caps = CapabilitySet.full()
+    var sched = scheduler
+    val task_id = sched.create_user_task(image_result.unwrap(), priority, caps)
+    if task_id.id == 0:
+        return -12
+
+    var log = klog
+    log.write(6, 1, task_id.id, "spawn_binary launched {path}")
+    task_id.id.to_i64()
+
 # ============================================================================
 # IPC Syscall Handlers
 # ============================================================================

@@ -3425,6 +3425,10 @@ static int64_t _ipc_recv_handler(uint64_t port, uint64_t buf_addr, uint64_t max_
  * =================================================================== */
 
 int64_t _pci_enumerate(uint64_t mode, uint64_t index, uint64_t buf_addr);
+extern int64_t kernel__arch__x86_64__interrupt__x86_dispatch_installed_syscall_abi(
+    uint64_t id, uint64_t arg0, uint64_t arg1, uint64_t arg2,
+    uint64_t arg3, uint64_t arg4, uint64_t arg5
+) __attribute__((weak));
 
 int64_t userlib__syscall_raw__syscall(uint64_t id, uint64_t a0, uint64_t a1,
                                        uint64_t a2, uint64_t a3, uint64_t a4)
@@ -3436,6 +3440,13 @@ int64_t userlib__syscall_raw__syscall(uint64_t id, uint64_t a0, uint64_t a1,
             return 0;
         case 4:  /* GetPid */
             return 1; /* bare-metal: PID 1 */
+        case 13: /* SpawnBinary */
+            if (kernel__arch__x86_64__interrupt__x86_dispatch_installed_syscall_abi) {
+                return kernel__arch__x86_64__interrupt__x86_dispatch_installed_syscall_abi(
+                    id, a0, a1, a2, a3, a4, 0
+                );
+            }
+            return -38; /* ENOSYS */
         case 60: /* DebugWrite */
             serial_putchar((char)(a0 & 0xFF));
             return 0;

@@ -1,7 +1,7 @@
 # TODO List
 
 **Generated:** 2026-04-14
-**Total:** 16 items | **Open:** 16 | **Blocked:** 0 | **Stale:** 0
+**Total:** 17 items | **Open:** 17 | **Blocked:** 1 | **Stale:** 0
 **Database:** `doc/todo/todo_db.sdn`
 
 ## Statistics
@@ -14,7 +14,7 @@
 | driver | 6 | 0 | 0 | 6 | 0 | 0 |
 | gpu | 2 | 0 | 0 | 0 | 2 | 0 |
 | parser | 3 | 0 | 0 | 2 | 1 | 0 |
-| runtime | 3 | 0 | 0 | 3 | 0 | 0 |
+| runtime | 4 | 0 | 0 | 4 | 0 | 1 |
 | test | 1 | 0 | 0 | 1 | 0 | 0 |
 
 ### By Priority
@@ -23,7 +23,7 @@
 |----------|-------|------|---------|-------|
 | P0 (critical) | 0 | 0 | 0 | 0 |
 | P1 (high) | 0 | 0 | 0 | 0 |
-| P2 (medium) | 13 | 13 | 0 | 0 |
+| P2 (medium) | 14 | 14 | 1 | 0 |
 | P3 (low) | 3 | 3 | 0 | 0 |
 
 ## P2 Medium Priority TODOs (13)
@@ -71,6 +71,11 @@
   - Status: open
 
 ### runtime
+
+- **#25** [runtime][P2] Finish x86_64 baremetal `SpawnBinary` bridge end-to-end.
+  - File: `./examples/simple_os/arch/x86_64/boot/baremetal_stubs.c:3438`
+  - Status: blocked
+  - Blocker: The installed-runtime syscall bridge is linked, but `x64-desktop-disk` still faults on the live `SpawnBinary` path before launch completes. The remaining issue is the x86 baremetal runtime behavior inside the dedicated spawn bridge, not launcher linkage.
 
 - **#10** [runtime][P2] Use real datetime FFI
   - File: `./src/app/package.registry/trust.spl:389`

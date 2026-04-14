@@ -19,7 +19,7 @@ use os.kernel.types.syscall_types.{SyscallArgs, SyscallResult, KLogEntry}
 use os.kernel.scheduler.scheduler.{Scheduler}
 use os.kernel.ipc.ipc.{IpcManager}
 use os.kernel.log.klog.{KernelLog}
-use os.kernel.ipc.syscall.{syscall_handler}
+use os.kernel.ipc.syscall.{syscall_handler, dispatch_spawn_binary_direct}
 use std.baremetal.x86.io.{outb, inb}
 
 # ============================================================================
@@ -220,3 +220,24 @@ fn x86_dispatch_installed_syscall(args: SyscallArgs) -> Result<SyscallResult, te
 
     val runtime = g_trap_runtime.unwrap()
     Ok(syscall_handler(args, runtime.scheduler, runtime.ipc, runtime.klog))
+
+fn x86_dispatch_installed_syscall_abi(id: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u64, arg4: u64, arg5: u64) -> i64:
+    """C-callable primitive ABI for the installed x86_64 syscall bridge."""
+    if id == 13:
+        if not x86_runtime_installed():
+            return -38
+        val runtime = g_trap_runtime.unwrap()
+        return dispatch_spawn_binary_direct(arg0, arg1, arg2, runtime.scheduler, runtime.klog)
+
+    val result = x86_dispatch_installed_syscall(SyscallArgs(
+        id: id,
+        arg0: arg0,
+        arg1: arg1,
+        arg2: arg2,
+        arg3: arg3,
+        arg4: arg4,
+        arg5: arg5
+    ))
+    if result.is_err():
+        return -38
+    result.unwrap().value
