@@ -247,6 +247,8 @@ So the only direct edit is `compositor_engine2d.spl`. The fix is invisible to ~1
 Risk: **medium**. Eleven concrete `RenderBackend` impls touched. The CPU/baremetal/software backends are exercised in CI; the GPU-class backends (cuda/vulkan/metal/rocm/opengl/intel/virtio_gpu) are not necessarily, and a stub that compiles but does not print text correctly will only show up under headed run.
 Rollback: revert `compositor_engine2d.spl` (restores pre-fill behavior), then revert the 11 backend additions and `engine.spl` and `backend.spl`. The `cpu_draw_text_bg_spec` would fail and pin the regression.
 
+Status: implemented 2026-04-14 (Phase 1 fallback bodies; proper per-pixel impl in follow-up). Trait `Engine2DExtended` added to `backend.spl`; all 10 `backend_*.spl` files (`cpu`, `baremetal`, `software`, `vulkan`, `metal`, `cuda`, `rocm`, `opengl`, `intel`, `virtio_gpu`) got an `impl Engine2DExtended` block; Engine2D facade forwards `draw_text_bg`; `Engine2dCompositorBackend.draw_text` now calls `engine.draw_text_bg` (the pre-paint-rect workaround is gone). Baremetal is semi-native (the underlying `FramebufferDriver.draw_text` already takes fg/bg); the other nine ship the documented fallback (`draw_rect_filled(bg) + draw_text(fg)`) with a `TODO(sys-gui-007 draw_text_bg native)` marker. Test: `test/unit/lib/gc_async_mut/gpu/engine2d/draw_text_bg_spec.spl`.
+
 ---
 
 ## 4. Order of operations
