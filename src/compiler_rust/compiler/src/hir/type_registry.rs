@@ -298,10 +298,30 @@ impl TypeRegistry {
     ///
     /// Returns the type name if the type is a named type (struct, class, enum),
     /// otherwise returns None.
+    ///
+    /// Classes in Simple are represented as `HirType::Struct` and receivers
+    /// are commonly wrapped in `HirType::Pointer { inner, .. }` at the MIR
+    /// boundary (e.g. `var shell = DesktopShell.new()`). Without following
+    /// the pointer through to its struct inner, MIR method-call lowering
+    /// falls back to a bare method name like `"init"`. The native-build
+    /// codegen then picks the shortest-named `.init` symbol across the whole
+    /// module — silently dispatching `shell.init()` to `Ps2Keyboard.init()`,
+    /// which caused Agent V's `DesktopShell.init()` disappearance on the
+    /// x86_64 baremetal desktop lane. Follow one layer of pointer wrapping
+    /// so named receivers always surface their class name.
     pub fn get_type_name(&self, type_id: TypeId) -> Option<&str> {
         match self.get(type_id) {
             Some(HirType::Struct { name, .. }) => Some(name.as_str()),
             Some(HirType::Enum { name, .. }) => Some(name.as_str()),
+            Some(HirType::ExternClass { name }) => Some(name.as_str()),
+            Some(HirType::Pointer { inner, .. }) => {
+                // Guard against self-referential pointers.
+                if *inner == type_id {
+                    None
+                } else {
+                    self.get_type_name(*inner)
+                }
+            }
             _ => None,
         }
     }

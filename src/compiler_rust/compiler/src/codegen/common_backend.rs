@@ -75,6 +75,14 @@ pub struct CodegenBackend<M: Module> {
     /// Built from the current file's `use` statements. Used to resolve
     /// ambiguous cross-module imports that the global import map can't handle.
     pub use_map: std::collections::HashMap<String, String>,
+    /// Set of mangled names that correspond to module-level data (val/var/
+    /// const/static) rather than functions. When a cross-module imported
+    /// global name resolves (via use_map/import_map) to a member of this set,
+    /// `declare_globals` skips the function-import fast path and declares it
+    /// as a data import instead. Without this, imported `val K: u32 = 1`
+    /// style constants get registered as function imports and `GlobalLoad`
+    /// returns the symbol's address instead of its value.
+    pub data_exports: std::sync::Arc<std::collections::HashSet<String>>,
 }
 
 /// Settings for creating a codegen backend
@@ -239,6 +247,7 @@ impl<M: Module> CodegenBackend<M> {
             import_map: std::sync::Arc::new(std::collections::HashMap::new()),
             ambiguous_names: std::sync::Arc::new(std::collections::HashSet::new()),
             use_map: std::collections::HashMap::new(),
+            data_exports: std::sync::Arc::new(std::collections::HashSet::new()),
         })
     }
 
@@ -274,6 +283,16 @@ impl<M: Module> CodegenBackend<M> {
     /// Set the per-module use map for resolving imports from `use` statements.
     pub fn set_use_map(&mut self, map: std::collections::HashMap<String, String>) {
         self.use_map = map;
+    }
+
+    /// Set the set of mangled names that correspond to cross-module DATA
+    /// globals (val/var/const/static), so `declare_globals` does not misroute
+    /// them through the function-import fast path.
+    pub fn set_data_exports(
+        &mut self,
+        exports: std::sync::Arc<std::collections::HashSet<String>>,
+    ) {
+        self.data_exports = exports;
     }
 
     /// Mangle a function name with the module prefix (if set).
@@ -508,6 +527,17 @@ impl<M: Module> CodegenBackend<M> {
             // function call at codegen time. Without this, the codegen creates a
             // DATA import that the linker can't match to the FUNCTION symbol in
             // the defining module — leaving the data slot as NULL (0x1) on macOS.
+            //
+            // IMPORTANT: this fast path must NOT apply to cross-module data
+            // globals (`val K: u32 = 1`, `var counter: i32 = 0`, etc.). If a
+            // `val`-backed data symbol is declared as a function import here,
+            // the GlobalLoad emitter (see codegen/instr/mod.rs) sees the name
+            // in `func_ids`, picks the "function reference used as a value"
+            // branch, and emits `func_addr` — returning the symbol's ADDRESS
+            // instead of loading its VALUE. That's the cross-module `val u32`
+            // constant corruption Agent Z1 observed (mod=5940624 instead of 1).
+            // Skip this branch when the resolved mangled name is known to be
+            // data (tracked in `data_exports`, built at import-map time).
             if !local_globals.contains(name) {
                 if let Some(resolved) = self
                     .use_map
@@ -515,16 +545,24 @@ impl<M: Module> CodegenBackend<M> {
                     .or_else(|| self.import_map.get(name.as_str()))
                 {
                     let sanitized = self.sanitize_symbol(resolved);
-                    let call_conv = super::shared::platform_call_conv();
-                    let mut sig = cranelift_codegen::ir::Signature::new(call_conv);
-                    sig.params.push(cranelift_codegen::ir::AbiParam::new(types::I64));
-                    sig.returns.push(cranelift_codegen::ir::AbiParam::new(types::I64));
-                    if let Ok(fid) = self
-                        .module
-                        .declare_function(&sanitized, cranelift_module::Linkage::Import, &sig)
-                    {
-                        self.func_ids.entry(name.clone()).or_insert(fid);
-                        continue;
+                    // If `resolved` (or its sanitized form) refers to a module-level
+                    // data export, fall through to the data-import path below so
+                    // `GlobalLoad` reads the value from memory instead of treating
+                    // the symbol as a function pointer.
+                    let is_data_export = self.data_exports.contains(resolved)
+                        || self.data_exports.contains(&sanitized);
+                    if !is_data_export {
+                        let call_conv = super::shared::platform_call_conv();
+                        let mut sig = cranelift_codegen::ir::Signature::new(call_conv);
+                        sig.params.push(cranelift_codegen::ir::AbiParam::new(types::I64));
+                        sig.returns.push(cranelift_codegen::ir::AbiParam::new(types::I64));
+                        if let Ok(fid) = self
+                            .module
+                            .declare_function(&sanitized, cranelift_module::Linkage::Import, &sig)
+                        {
+                            self.func_ids.entry(name.clone()).or_insert(fid);
+                            continue;
+                        }
                     }
                 }
             }

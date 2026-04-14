@@ -73,6 +73,16 @@ impl Codegen {
         self.backend.set_use_map(map);
     }
 
+    /// Set the set of mangled names corresponding to cross-module DATA globals
+    /// (val/var/const/static) so `declare_globals` does not misroute them
+    /// through the function-import fast path.
+    pub fn set_data_exports(
+        &mut self,
+        exports: std::sync::Arc<std::collections::HashSet<String>>,
+    ) {
+        self.backend.set_data_exports(exports);
+    }
+
     /// Get a reference to the inner backend for accessing mangling and resolution state.
     pub fn backend(&self) -> &CodegenBackend<ObjectModule> {
         &self.backend

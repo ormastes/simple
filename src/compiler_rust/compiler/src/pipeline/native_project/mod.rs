@@ -99,6 +99,13 @@ pub(crate) struct ModuleImports {
     /// Global struct definitions: struct_name -> [(field_name, field_type_name)].
     /// Shared across all compilation units for consistent cross-module field offsets.
     pub struct_defs: std::sync::Arc<std::collections::HashMap<String, Vec<(String, String)>>>,
+    /// Set of mangled names that correspond to module-level data (`val`/`var`/
+    /// `const`/`static`) rather than functions. Consulted by the cranelift
+    /// backend so cross-module imported data constants are declared as
+    /// `Linkage::Import` DATA (load value from memory) instead of being
+    /// misrouted through the function-import fast path (which would return
+    /// the symbol's address as the "value").
+    pub data_exports: std::sync::Arc<std::collections::HashSet<String>>,
     /// When true, pass `struct_defs` to the HIR lowerer so cross-module field
     /// accesses (e.g. `fb_info.addr.addr`) can resolve to real FieldGet instructions
     /// instead of falling through to dynamic MethodCall (which becomes
@@ -460,6 +467,7 @@ impl NativeProjectBuilder {
                 all_mangled: std::sync::Arc::new(result.all_mangled),
                 re_exports: std::sync::Arc::new(result.re_exports),
                 struct_defs: std::sync::Arc::new(result.struct_defs),
+                data_exports: std::sync::Arc::new(result.data_exports),
                 populate_global_struct_defs: self.config.entry_closure,
             }
         } else {
@@ -469,6 +477,7 @@ impl NativeProjectBuilder {
                 all_mangled: std::sync::Arc::new(std::collections::HashMap::new()),
                 re_exports: std::sync::Arc::new(std::collections::HashMap::new()),
                 struct_defs: std::sync::Arc::new(std::collections::HashMap::new()),
+                data_exports: std::sync::Arc::new(std::collections::HashSet::new()),
                 populate_global_struct_defs: false,
             }
         };

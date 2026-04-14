@@ -17,6 +17,14 @@ pub(crate) struct ImportMapResult {
     pub re_exports: std::collections::HashMap<String, std::collections::HashMap<String, String>>,
     /// Global struct definitions: struct_name -> field names (in order).
     pub struct_defs: std::collections::HashMap<String, Vec<(String, String)>>,
+    /// Set of mangled names that correspond to module-level `val`/`var`/`const`
+    /// (i.e. DATA, not functions). Used by the cranelift backend to decide
+    /// whether a cross-module imported global should be declared as a data
+    /// import (read value from memory) or a function import (load function
+    /// address). Without this set, data constants imported across modules
+    /// get incorrectly routed through the function-import fast path and
+    /// `GlobalLoad` returns the symbol's address instead of its value.
+    pub data_exports: std::collections::HashSet<String>,
 }
 
 /// Sanitize a mangled symbol name for the host platform.
@@ -182,6 +190,7 @@ pub(crate) fn build_import_map(
 
     let mut raw_to_mangled: HashMap<String, Vec<String>> = HashMap::new();
     let mut struct_defs: HashMap<String, Vec<(String, String)>> = HashMap::new();
+    let mut data_exports: HashSet<String> = HashSet::new();
 
     let mut seen_canonical = HashSet::new();
     for (path, source) in file_sources {
@@ -240,16 +249,22 @@ pub(crate) fn build_import_map(
                     simple_parser::ast::Node::Let(l) => {
                         if let Some(name) = extract_let_name(&l.pattern) {
                             let mangled = format!("{}__{}", prefix, name);
-                            raw_to_mangled.entry(name).or_default().push(mangled);
+                            raw_to_mangled.entry(name).or_default().push(mangled.clone());
+                            // Module-level `var`/`val` (via `let`) is data, not a function.
+                            data_exports.insert(mangled);
                         }
                     }
                     simple_parser::ast::Node::Const(c) => {
                         let mangled = format!("{}__{}", prefix, c.name);
-                        raw_to_mangled.entry(c.name.clone()).or_default().push(mangled);
+                        raw_to_mangled.entry(c.name.clone()).or_default().push(mangled.clone());
+                        // Module-level `const`/`val` is data, not a function.
+                        data_exports.insert(mangled);
                     }
                     simple_parser::ast::Node::Static(s) => {
                         let mangled = format!("{}__{}", prefix, s.name);
-                        raw_to_mangled.entry(s.name.clone()).or_default().push(mangled);
+                        raw_to_mangled.entry(s.name.clone()).or_default().push(mangled.clone());
+                        // Module-level `static` is data, not a function.
+                        data_exports.insert(mangled);
                     }
                     simple_parser::ast::Node::Struct(s) => {
                         if !s.fields.is_empty() {
@@ -442,6 +457,7 @@ pub(crate) fn build_import_map(
         all_mangled: raw_to_mangled,
         re_exports,
         struct_defs,
+        data_exports,
     }
 }
 
