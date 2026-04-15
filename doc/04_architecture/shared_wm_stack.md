@@ -1,12 +1,14 @@
 # Shared WM Stack — Host and SimpleOS Window Management
 
-Status: current (2026-04-14)
+Status: current (2026-04-15)
 Owners: `src/os/compositor/`, `src/os/services/wm/`, `src/lib/common/window_protocol/`
 Related: [`cross_platform_wm.md`](cross_platform_wm.md), [`gui_layer_contract.md`](gui_layer_contract.md)
 
 ## 1. Overview
 
-The shared WM stack lets host-side UI shells (Electron, Tauri, Cocoa, Win32, Browser, TUI) and the SimpleOS kernel desktop run the same `Compositor` + `WmService` code with no duplication. Before this migration, hosted windows duplicated rendering logic outside `CompositorBackend` and used bare primitive types on public API boundaries, triggering `primitive_api` lint warnings throughout the WM surface. The fix has two parts: (1) a unified entry point (`host_compositor_entry.spl`) that selects the correct backend at runtime while keeping the compositor core unchanged, and (2) wrapper types in `geometry.spl` that replace bare `i32`/`u32`/`u64` on every public WM/UI API. Zero `@allow(primitive_api)` annotations are permitted in WM or UI scope.
+The shared WM stack lets host-side UI shells (Electron, Tauri, Cocoa, Win32, Browser, TUI, WebCanvas) and the SimpleOS kernel desktop run the same `Compositor` + `WmService` code with no duplication. Before this migration, hosted windows duplicated rendering logic outside `CompositorBackend` and used bare primitive types on public API boundaries, triggering `primitive_api` lint warnings throughout the WM surface. The fix has two parts: (1) a unified entry point (`host_compositor_entry.spl`) that selects the correct backend at runtime while keeping the compositor core unchanged, and (2) wrapper types in `geometry.spl` that replace bare `i32`/`u32`/`u64` on every public WM/UI API. Zero `@allow(primitive_api)` annotations are permitted in WM or UI scope.
+
+All six host backend entry-point files now call `init_host_wm` and accept both a `--shared-wm` CLI flag and a per-backend env var (see §4c).
 
 ## 2. Layer Diagram
 
@@ -58,13 +60,30 @@ The baremetal desktop shell at `src/os/desktop/shell.spl` constructs `Compositor
 ### 4b. Host path
 
 `init_host_wm(config: HostWmConfig) -> HostWmHandle?` in
-`src/os/compositor/host_compositor_entry.spl` is the single entry point for host applications. It reads `config.backend` (a `HostBackendKind` variant: `Cocoa`, `Win32`, `Browser`, `Electron`, `WebCanvas`, or `Tui`), calls `Compositor.new_hosted(config.initial_size, config.title)` which selects the appropriate `CompositorBackend` + `InputBackend` pair internally, and returns a `HostWmHandle { compositor, wm }`. The caller drives the event loop with `handle.run_once()` (single tick) or `handle.tick_forever()` (blocking loop). The `Compositor` and `WmService` instances are identical to those used on SimpleOS — no forked logic.
+`src/os/compositor/host_compositor_entry.spl` is the single entry point for host applications. It reads `config.backend` (a `HostBackendKind` variant: `Cocoa`, `Win32`, `Browser`, `Electron`, `WebCanvas`, or `Tui`), calls `rt_hosted_set_surface_override(selector)` to set the platform surface before backend selection (Cocoa→1, Win32→2, all others→0/winit fallback), then calls `select_hosted_backend` and `Compositor.new_hosted(config.initial_size, config.title)` which selects the appropriate `CompositorBackend` + `InputBackend` pair internally, and returns a `HostWmHandle { compositor, wm }`. The caller drives the event loop with `handle.run_once()` (single tick) or `handle.tick_forever()` (blocking loop). The `Compositor` and `WmService` instances are identical to those used on SimpleOS — no forked logic.
 
-### 4c. Input translation
+The runtime hook `rt_hosted_set_surface_override` is exposed from `src/runtime/hosted/select.rs` and backed by an `AtomicI64 SURFACE_OVERRIDE`, making the selector write lock-free.
+
+All six host-app entry points wire `init_host_wm`:
+
+| File | `HostBackendKind` | Env var |
+|------|-------------------|---------|
+| `src/app/ui.electron/async_app.spl` | `Electron` | `SIMPLE_UI_ELECTRON_SHARED_WM` |
+| `src/app/ui.tauri/async_app.spl` | `Browser` | `SIMPLE_UI_TAURI_SHARED_WM` |
+| `src/app/ui.tui/async_app.spl` | `Tui` | `SIMPLE_UI_TUI_SHARED_WM` |
+| `src/app/ui.browser/main.spl` | `Browser` | `SIMPLE_UI_BROWSER_SHARED_WM` |
+| `src/app/ui.web/server.spl` | `WebCanvas` | `SIMPLE_UI_WEB_SHARED_WM` |
+| `src/app/ui.tui_web/app.spl` | `Tui` | `SIMPLE_UI_TUI_WEB_SHARED_WM` |
+
+### 4c. `--shared-wm` flag and env var convention
+
+Every host backend entry point accepts `--shared-wm` on the CLI and a corresponding env var (see the table in §4b). When either is set, the app delegates window management to the shared `Compositor`+`WmService` stack instead of its native windowing path. The env vars are checked first; the CLI flag overrides. Neither is required for standalone operation — omitting both keeps the previous single-window native mode.
+
+### 4d. Input translation
 
 Native key and mouse events from any backend are translated into the shared `WmInputEvent` struct (declared in `window_protocol.spl`) by the `InputBackend` implementations. `Ps2InputBackend` translates PS/2 scan codes; `HostedInputBackend` translates winit events; `BrowserCompositorBackend` translates DOM events. Once in `WmInputEvent` form, the `WmService` routes events to the target window regardless of which backend produced them. The `WmInputEvent` fields (`key_code: u32`, `modifiers: u32`, `mouse_x/y: i32`) are raw here for wire-protocol compatibility; wrapper types are applied at the `WmService` dispatch boundary before the event reaches widget code.
 
-> **Note.** `input_translator.spl` and `wm_core.spl` are listed in the task context as planned modules but **do not yet exist on disk**. When they land, add them to section 5 below.
+Shared key-press event construction is now extracted into `input_translator.spl` (`key_char_to_wm_key_event`). Pure hit-test, resize, and z-order helpers live in `wm_core.spl` (`detect_resize_edge`, `raise_to_top`, `apply_resize`). `compositor.spl` imports and calls these instead of the former inline duplicates (cursor-shape loop, left-click resize, resize delta math, focus_window z-order).
 
 ## 5. Module Reference
 
@@ -72,8 +91,9 @@ Native key and mouse events from any backend are translated into the shared `WmI
 |--------|---------|
 | [`src/lib/common/window_protocol/geometry.spl`](../../src/lib/common/window_protocol/geometry.spl) | Wrapper types: `Px`, `Point`, `Size`, `Rect`, `Argb32`, `Alpha`, `BlurRadius`, `KeyCode`, `Modifiers`, `WindowId`, `ProcessId`, `AppId`, `WmEventType`, `WmStatus` |
 | [`src/lib/common/window_protocol/window_protocol.spl`](../../src/lib/common/window_protocol/window_protocol.spl) | IPC message structs: `WmCreateRequest/Response`, `WmInputEvent`, `WmCloseRequest`, `WmResizeRequest`, `WmMoveRequest`, `WmFocusEvent`; typed constants `WM_EVENT_*`, `WM_STATUS_*` |
-| `src/lib/common/window_protocol/input_translator.spl` | (planned) Shared `key_event_to_wm`, `mouse_event_to_wm`, `key_to_ui_event`, `wm_to_ui_event` helpers |
-| `src/os/compositor/wm_core.spl` | (planned) Pure WM helpers: `detect_resize_edge`, `hit_test`, `raise_to_top`, `apply_drag`, `apply_resize` |
+| [`src/lib/common/window_protocol/input_translator.spl`](../../src/lib/common/window_protocol/input_translator.spl) | Shared `key_char_to_wm_key_event` — key-press event construction shared across all backends |
+| [`src/os/compositor/wm_core.spl`](../../src/os/compositor/wm_core.spl) | Pure WM helpers: `detect_resize_edge`, `raise_to_top`, `apply_resize` — all wrapper-typed, no platform code |
+| [`src/runtime/hosted/select.rs`](../../src/runtime/hosted/select.rs) | `rt_hosted_set_surface_override` / `SURFACE_OVERRIDE AtomicI64` — lock-free platform surface selector |
 | [`src/os/compositor/host_compositor_entry.spl`](../../src/os/compositor/host_compositor_entry.spl) | `HostBackendKind`, `HostWmConfig`, `HostWmHandle`, `init_host_wm` — single entry for host apps |
 | [`src/os/compositor/compositor.spl`](../../src/os/compositor/compositor.spl) | `Compositor` — Z-order surfaces, input routing, drag, focus, decorations, cursor |
 | [`src/os/services/wm/wm_service.spl`](../../src/os/services/wm/wm_service.spl) | `WmService` — IPC port `"compositor"`, window lifecycle, `WmAction` dispatch |
@@ -90,7 +110,7 @@ For the full backend implementation matrix, see [`gui_layer_contract.md`](gui_la
 
 3. **Add a variant to `HostBackendKind`** — in `src/os/compositor/host_compositor_entry.spl`, add `<Name>` to the `enum HostBackendKind` body.
 
-4. **Branch in `init_host_wm`** — in the same file, add a match arm (or `if` branch) for `HostBackendKind.<Name>` that constructs your `CompositorBackend` + `InputBackend` and passes them to `Compositor.new_with_backends(...)`.
+4. **Branch in `init_host_wm`** — in the same file, add a match arm (or `if` branch) for `HostBackendKind.<Name>` that constructs your `CompositorBackend` + `InputBackend` and passes them to `Compositor.new_with_backends(...)`. If the new platform needs a distinct surface selector, assign a new integer constant and call `rt_hosted_set_surface_override(constant)` before `select_hosted_backend`; otherwise the existing winit fallback (selector 0) applies.
 
 5. **Wire up `Compositor.new_hosted`** (or add `Compositor.new_with_backends`) — if the compositor does not already accept injected backends, extend `compositor.spl` to accept a backend pair so step 4 can supply it.
 
