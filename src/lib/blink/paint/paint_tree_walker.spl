@@ -1,0 +1,139 @@
+# Paint tree walker — walks LayoutContext + ComputedStyles → SkCanvas ops.
+#
+# Mirrors Blink's BlockPainter + BoxPainter for the simplest case:
+#   1. Fill background-color (if non-transparent alpha)
+#   2. Draw 4 border edges (if any border_*_width > 0)
+#   3. Recurse into children
+#
+# Output is a SkPicture (via SkCanvas.begin_recording) containing DrawRect
+# ops. Caller feeds it to CpuBackend.render_picture for raster.
+#
+# Scope: box model only. Inline flow, text, images, and effects (opacity,
+# transform, clip) are out of scope — they're layered on top in later passes.
+
+use std.lib.blink.layout.block_flow.{LayoutContext, LayoutBox, BoxGeometry, layout_context_new, layout_box_new, box_geometry_zero}
+use std.lib.blink.entity.computed_style.{ComputedStyle, computed_style_default}
+use std.lib.skia.entity.canvas.{SkCanvas, sk_canvas_make}
+use std.lib.skia.entity.paint.{SkPaint, sk_paint_new, sk_paint_fill}
+use std.lib.skia.entity.picture.{SkPicture, SkPictureRecorder, sk_picture_recorder_new, sk_picture_empty}
+use std.lib.skia.entity.geometry.{SkRect}
+use std.lib.skia.entity.color.{SkColor4f, sk_color4f, sk_color_argb}
+
+# ============================================================================
+# StyledBox — pairs a layout_id with its resolved ComputedStyle
+# ============================================================================
+
+class StyledBox:
+    layout_id: i64
+    style: ComputedStyle
+
+# ============================================================================
+# PaintContext — mutable painting state threaded through the walk
+# ============================================================================
+
+class PaintContext:
+    layout_context: LayoutContext
+    styles: [StyledBox]
+    canvas: SkCanvas
+
+# ============================================================================
+# Methods on PaintContext
+# ============================================================================
+
+impl PaintContext:
+    # find_style — linear scan of styles by layout_id.
+    # Returns None when no StyledBox matches (box will still recurse, just
+    # without any paint ops of its own).
+    fn find_style(layout_id: i64) -> Option<ComputedStyle>:
+        val i = 0
+        val len = self.styles.len()
+        val result: Option<ComputedStyle> = None
+        while i < len:
+            if self.styles[i].layout_id == layout_id:
+                result = Some(self.styles[i].style)
+            i = i + 1
+        result
+
+    # paint_box — paint one LayoutBox and recurse into its children.
+    #
+    # parent_x / parent_y: absolute canvas coordinates of the parent's
+    # border-box origin.  computed_rect is stored in parent-relative coords,
+    # so we add them here to get absolute coords.
+    me fn paint_box(box_id: i64, parent_x: f64, parent_y: f64):
+        # --- resolve style (optional) ---
+        val maybe_style = self.find_style(box_id)
+
+        # --- resolve layout box ---
+        val maybe_box = self.layout_context.get_box(box_id)
+        if maybe_box is None:
+            pass_do_nothing
+        else:
+            val lb = maybe_box.unwrap()
+
+            # Absolute rect: computed_rect is parent-relative; add parent origin.
+            val abs_left   = lb.computed_rect.left  + parent_x
+            val abs_top    = lb.computed_rect.top   + parent_y
+            val abs_right  = lb.computed_rect.right + parent_x
+            val abs_bottom = lb.computed_rect.bottom + parent_y
+            val abs_rect = SkRect(
+                left:   abs_left,
+                top:    abs_top,
+                right:  abs_right,
+                bottom: abs_bottom
+            )
+
+            # --- 1. Background fill ---
+            if val style = maybe_style:
+                val bg = style.background_color
+                if bg.a > 0.001:
+                    val packed_color = bg.to_sk_color()
+                    val bg_paint = sk_paint_fill(packed_color)
+                    self.canvas.draw_rect(abs_rect, bg_paint)
+
+            # WHY: Border painting skipped this round — border_color,
+            # border_style, and border_*_width fields do not yet exist on
+            # ComputedStyle (stub only carries BoxGeometry.border_* thickness
+            # values, not the paint attributes needed for stroke ops).
+            # Will be added in the next pass once ComputedStyle is extended.
+
+            # --- 3. Recurse into children ---
+            val c = 0
+            val child_count = lb.children_ids.len()
+            while c < child_count:
+                val child_id = lb.children_ids[c]
+                self.paint_box(child_id, abs_left, abs_top)
+                c = c + 1
+
+# ============================================================================
+# Free functions
+# ============================================================================
+
+# paint_tree_new — allocate a PaintContext backed by a recording SkCanvas.
+# The canvas dimensions come from the LayoutContext viewport.
+fn paint_tree_new(ctx: LayoutContext, styles: [StyledBox]) -> PaintContext:
+    val w = ctx.viewport_width.to_i64()
+    val h = ctx.viewport_height.to_i64()
+    val base_canvas = sk_canvas_make(w, h)
+    val bounds = SkRect(
+        left:   0.0,
+        top:    0.0,
+        right:  ctx.viewport_width,
+        bottom: ctx.viewport_height
+    )
+    val recording_canvas = base_canvas.begin_recording(bounds)
+    PaintContext(
+        layout_context: ctx,
+        styles:         styles,
+        canvas:         recording_canvas
+    )
+
+# finalize_paint — close the recording and return the resulting SkPicture.
+fn finalize_paint(pc: PaintContext) -> SkPicture:
+    pc.canvas.end_recording()
+
+# paint_tree — top-level convenience: create context, walk from root, finalize.
+fn paint_tree(ctx: LayoutContext, styles: [StyledBox]) -> SkPicture:
+    val pc = paint_tree_new(ctx, styles)
+    if ctx.root_id != -1:
+        pc.paint_box(ctx.root_id, 0.0, 0.0)
+    finalize_paint(pc)

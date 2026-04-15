@@ -1,0 +1,247 @@
+# Connection Matrix
+# All valid (target x debugger) combinations for remote debugging.
+# Factory for creating correctly configured adapters.
+
+use std.nogc_sync_mut.debug.remote.target.stm32h7.Stm32H7Target
+use std.nogc_sync_mut.debug.remote.target.stm32wb.Stm32WbTarget
+
+# Debug target enum
+enum DebugTarget:
+    Stm32H7
+    Stm32Wb
+    T32PowerDebug
+    QemuArmCortexM
+    QemuRiscV32
+
+    fn to_string() -> text:
+        match self:
+            Stm32H7: "STM32H7"
+            Stm32Wb: "STM32WB"
+            T32PowerDebug: "T32 Power Debug"
+            QemuArmCortexM: "QEMU ARM Cortex-M"
+            QemuRiscV32: "QEMU RISC-V32"
+
+    fn eq(other: DebugTarget) -> bool:
+        self.to_string() == other.to_string()
+
+# Debugger kind enum
+enum DebuggerKind:
+    StLinkTools
+    T32Native
+    T32AsGdbServer
+    OpenocdGdb
+    GdbDirectRemote
+
+    fn to_string() -> text:
+        match self:
+            StLinkTools: "ST-Link Tools"
+            T32Native: "T32 Native"
+            T32AsGdbServer: "T32 GDB Bridge"
+            OpenocdGdb: "OpenOCD+GDB"
+            GdbDirectRemote: "GDB Direct"
+
+    fn eq(other: DebuggerKind) -> bool:
+        self.to_string() == other.to_string()
+
+# A single connection specification
+class ConnectionSpec:
+    index: i32
+    target: DebugTarget
+    debugger: DebuggerKind
+    transport: text
+    gdb_port: i32
+    t32_port: i32
+    cfg_path: text
+    stlink_serial: text
+
+impl ConnectionSpec:
+    fn to_string() -> text:
+        "#{self.index}: {self.target.to_string()} via {self.debugger.to_string()} (port {self.gdb_port})"
+
+    fn is_hardware() -> bool:
+        match self.target:
+            Stm32H7: true
+            Stm32Wb: true
+            T32PowerDebug: true
+            QemuArmCortexM: false
+            QemuRiscV32: false
+
+    fn is_t32() -> bool:
+        match self.debugger:
+            T32Native: true
+            T32AsGdbServer: true
+            StLinkTools: false
+            OpenocdGdb: false
+            GdbDirectRemote: false
+
+    fn is_stlink() -> bool:
+        match self.debugger:
+            StLinkTools: true
+            T32Native: false
+            T32AsGdbServer: false
+            OpenocdGdb: false
+            GdbDirectRemote: false
+
+    fn is_openocd() -> bool:
+        match self.debugger:
+            OpenocdGdb: true
+            StLinkTools: false
+            T32Native: false
+            T32AsGdbServer: false
+            GdbDirectRemote: false
+
+# The connection matrix: all 8 valid combos
+class ConnectionMatrix:
+    specs: [ConnectionSpec]
+
+impl ConnectionMatrix:
+    static fn default() -> ConnectionMatrix:
+        val h7 = Stm32H7Target.default()
+        val wb = Stm32WbTarget.default()
+
+        ConnectionMatrix(specs: [
+            # 1: STM32H7 via ST-Link tools (built-in STLINK-V3)
+            ConnectionSpec(
+                index: 1,
+                target: DebugTarget.Stm32H7,
+                debugger: DebuggerKind.StLinkTools,
+                transport: "st-flash/st-info via STLINK-V3",
+                gdb_port: 0,
+                t32_port: 0,
+                cfg_path: "",
+                stlink_serial: h7.stlink_serial
+            ),
+            # 2: STM32H7 via OpenOCD+GDB
+            ConnectionSpec(
+                index: 2,
+                target: DebugTarget.Stm32H7,
+                debugger: DebuggerKind.OpenocdGdb,
+                transport: "OpenOCD -> STLINK-V3, GDB:3333",
+                gdb_port: h7.gdb_port,
+                t32_port: 0,
+                cfg_path: h7.openocd_cfg,
+                stlink_serial: h7.stlink_serial
+            ),
+            # 3: STM32WB via ST-Link tools (built-in ST-LINK/V2.1)
+            ConnectionSpec(
+                index: 3,
+                target: DebugTarget.Stm32Wb,
+                debugger: DebuggerKind.StLinkTools,
+                transport: "st-flash/st-info via ST-LINK/V2.1",
+                gdb_port: 0,
+                t32_port: 0,
+                cfg_path: "",
+                stlink_serial: wb.stlink_serial
+            ),
+            # 4: STM32WB via OpenOCD+GDB
+            ConnectionSpec(
+                index: 4,
+                target: DebugTarget.Stm32Wb,
+                debugger: DebuggerKind.OpenocdGdb,
+                transport: "OpenOCD -> ST-LINK/V2.1, GDB:3334",
+                gdb_port: wb.gdb_port,
+                t32_port: 0,
+                cfg_path: wb.openocd_cfg,
+                stlink_serial: wb.stlink_serial
+            ),
+            # 5: T32 Power Debug via T32 Native (t32rem PRACTICE)
+            ConnectionSpec(
+                index: 5,
+                target: DebugTarget.T32PowerDebug,
+                debugger: DebuggerKind.T32Native,
+                transport: "t32rem -> Power Debug II JTAG",
+                gdb_port: 0,
+                t32_port: 20000,
+                cfg_path: "t32_startup.cmm",
+                stlink_serial: ""
+            ),
+            # 6: T32 Power Debug via T32 GDB Bridge
+            ConnectionSpec(
+                index: 6,
+                target: DebugTarget.T32PowerDebug,
+                debugger: DebuggerKind.T32AsGdbServer,
+                transport: "GDB -> T32 GDB server + PRACTICE",
+                gdb_port: 2331,
+                t32_port: 20000,
+                cfg_path: "t32_startup.cmm",
+                stlink_serial: ""
+            ),
+            # 7: QEMU ARM via GDB Direct
+            ConnectionSpec(
+                index: 7,
+                target: DebugTarget.QemuArmCortexM,
+                debugger: DebuggerKind.GdbDirectRemote,
+                transport: "qemu-system-arm -s -S",
+                gdb_port: 3335,
+                t32_port: 0,
+                cfg_path: "",
+                stlink_serial: ""
+            ),
+            # 8: QEMU RISC-V32 via GDB Direct
+            ConnectionSpec(
+                index: 8,
+                target: DebugTarget.QemuRiscV32,
+                debugger: DebuggerKind.GdbDirectRemote,
+                transport: "qemu-system-riscv32 -s -S",
+                gdb_port: 1234,
+                t32_port: 0,
+                cfg_path: "",
+                stlink_serial: ""
+            )
+        ])
+
+    fn count() -> i32:
+        self.specs.len()
+
+    fn get(index: i32) -> Option<ConnectionSpec>:
+        if index >= 1 and index <= self.specs.len():
+            Some(self.specs[index - 1])
+        else:
+            nil
+
+    # Find specs for a given target
+    fn find_by_target(target: DebugTarget) -> [ConnectionSpec]:
+        var result: [ConnectionSpec] = []
+        for spec in self.specs:
+            if spec.target.eq(target):
+                result = result + [spec]
+        result
+
+    # Find specs for a given debugger
+    fn find_by_debugger(debugger: DebuggerKind) -> [ConnectionSpec]:
+        var result: [ConnectionSpec] = []
+        for spec in self.specs:
+            if spec.debugger.eq(debugger):
+                result = result + [spec]
+        result
+
+    # Find specific combination
+    fn find(target: DebugTarget, debugger: DebuggerKind) -> Option<ConnectionSpec>:
+        for spec in self.specs:
+            if spec.target.eq(target) and spec.debugger.eq(debugger):
+                return Some(spec)
+        nil
+
+    # List all hardware targets
+    fn hardware_specs() -> [ConnectionSpec]:
+        var result: [ConnectionSpec] = []
+        for spec in self.specs:
+            if spec.is_hardware():
+                result = result + [spec]
+        result
+
+    # List all QEMU targets
+    fn qemu_specs() -> [ConnectionSpec]:
+        var result: [ConnectionSpec] = []
+        for spec in self.specs:
+            if not spec.is_hardware():
+                result = result + [spec]
+        result
+
+    # Check if hardware is available (by checking lsusb for ST-LINK USB IDs)
+    fn is_available(spec: ConnectionSpec) -> bool:
+        if not spec.is_hardware():
+            return true
+        # Hardware availability would require lsusb check
+        # For now, return true (deferred to runtime)
+        true

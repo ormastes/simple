@@ -1,0 +1,151 @@
+# DOM Node — base class for Blink's DOM tree.
+#
+# Mirrors W3C DOM Node interface + Blink's Node implementation. Holds
+# parent/sibling/child links for tree traversal, a node_type discriminant,
+# and an optional text/tag/attribute payload.
+#
+# Types modeled: Element (has tag_name + attributes), Text (has text_content),
+# Comment (has text_content), DocumentNode (root), DocumentType (first
+# child of DocumentNode if present).
+
+# ============================================================================
+# NodeType — discriminant mirroring W3C DOM nodeType constants
+# ============================================================================
+
+enum NodeType:
+    Element
+    Text
+    Comment
+    DocumentNode
+    DocumentType
+    DocumentFragment
+
+# ============================================================================
+# Attribute — name/value pair attached to an Element
+# ============================================================================
+
+class Attribute:
+    name: String
+    value: String
+
+fn attribute_new(name: String, value: String) -> Attribute:
+    Attribute(name: name, value: value)
+
+# ============================================================================
+# DomNode — a single node in the flat node pool
+# ============================================================================
+#
+# parent / first_child / next_sibling / prev_sibling are all stored as i64
+# where -1 means None. The public get_node() accessor returns an Option<DomNode>
+# for the whole node lookup; pointer-style fields use -1 as the None sentinel
+# to stay compatible with the flat [DomNode] pool indexing scheme.
+
+class DomNode:
+    node_type: NodeType
+    tag_name: String
+    text_content: String
+    attributes: [Attribute]
+    parent: i64
+    first_child: i64
+    next_sibling: i64
+    prev_sibling: i64
+    id: i64
+
+fn dom_node_new(id: i64, node_type: NodeType) -> DomNode:
+    DomNode(
+        node_type: node_type,
+        tag_name: "",
+        text_content: "",
+        attributes: [Attribute](),
+        parent: -1,
+        first_child: -1,
+        next_sibling: -1,
+        prev_sibling: -1,
+        id: id
+    )
+
+# ============================================================================
+# DomTree — flat node pool + root pointer + monotonic id counter
+# ============================================================================
+
+class DomTree:
+    nodes: [DomNode]
+    root_id: i64
+    next_id: i64
+
+fn dom_tree_new() -> DomTree:
+    val root = dom_node_new(0, NodeType.DocumentNode)
+    val tree = DomTree(
+        nodes: [DomNode](),
+        root_id: 0,
+        next_id: 1
+    )
+    tree.nodes.push(root)
+    tree
+
+# ============================================================================
+# DomTree methods
+# ============================================================================
+
+impl DomTree:
+    me create_element(tag: String) -> i64:
+        val new_id = self.next_id
+        val node = dom_node_new(new_id, NodeType.Element)
+        node.tag_name = tag
+        self.nodes.push(node)
+        self.next_id = new_id + 1
+        new_id
+
+    me create_text(text: String) -> i64:
+        val new_id = self.next_id
+        val node = dom_node_new(new_id, NodeType.Text)
+        node.text_content = text
+        self.nodes.push(node)
+        self.next_id = new_id + 1
+        new_id
+
+    me append_child(parent_id: i64, child_id: i64):
+        # Set the child's parent pointer.
+        self.nodes[child_id].parent = parent_id
+        self.nodes[child_id].next_sibling = -1
+
+        val existing_first = self.nodes[parent_id].first_child
+        if existing_first == -1:
+            # First child — becomes both head and tail of the sibling list.
+            self.nodes[parent_id].first_child = child_id
+            self.nodes[child_id].prev_sibling = -1
+        else:
+            # Walk to the tail and append. Simple list-tail walk; fine for a
+            # stub. Blink keeps an explicit last_child pointer for O(1).
+            var cursor = existing_first
+            while self.nodes[cursor].next_sibling != -1:
+                cursor = self.nodes[cursor].next_sibling
+            self.nodes[cursor].next_sibling = child_id
+            self.nodes[child_id].prev_sibling = cursor
+
+    me get_node(id: i64) -> Option<DomNode>:
+        if id < 0:
+            return None
+        if id >= self.nodes.len().to_i64():
+            return None
+        Some(self.nodes[id])
+
+    me set_attribute(elem_id: i64, name: String, value: String):
+        # Replace if a matching-name attribute exists; otherwise append.
+        var i = 0
+        val count = self.nodes[elem_id].attributes.len()
+        while i < count:
+            if self.nodes[elem_id].attributes[i].name == name:
+                self.nodes[elem_id].attributes[i].value = value
+                return
+            i = i + 1
+        self.nodes[elem_id].attributes.push(attribute_new(name, value))
+
+    me get_attribute(elem_id: i64, name: String) -> Option<String>:
+        var i = 0
+        val count = self.nodes[elem_id].attributes.len()
+        while i < count:
+            if self.nodes[elem_id].attributes[i].name == name:
+                return Some(self.nodes[elem_id].attributes[i].value)
+            i = i + 1
+        None

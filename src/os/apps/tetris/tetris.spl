@@ -1,0 +1,472 @@
+# Tetris — Classic Falling Block Puzzle
+#
+# 10-wide x 20-tall board with 7 tetromino types (I, O, T, S, Z, L, J).
+# Arrow keys move and rotate, space hard-drops. Lines cleared score points,
+# levels increase every 10 lines. Game over when a new piece cannot spawn.
+#
+# MDSOC: feature dimension, apps layer
+
+use common.ui.builder.{
+    column, row, panel, button, text_widget, label,
+    statusbar, menubar, build_tree_with_title,
+    with_flex, with_width
+}
+use common.ui.widget.{WidgetNode, UITree, UIEvent}
+use common.ui.session.{UISession}
+
+# =========================================================================
+# Constants
+# =========================================================================
+
+val BOARD_W: i32 = 10
+val BOARD_H: i32 = 20
+val PIECE_SIZE: i32 = 4
+
+# =========================================================================
+# Tetris App
+# =========================================================================
+
+class TetrisApp:
+    """Classic Tetris falling-block puzzle game.
+
+    Board is a flat array of i32 (0 = empty, 1..7 = piece type).
+    Pieces are encoded as 4x4 grids per type and rotation.
+    """
+    board: [i32]
+    current_piece: i32
+    piece_x: i32
+    piece_y: i32
+    piece_rotation: i32
+    next_piece: i32
+    score: i32
+    level: i32
+    lines: i32
+    game_over: bool
+    piece_counter: i32
+
+impl TetrisApp:
+
+    static fn new() -> TetrisApp:
+        """Create a new Tetris game in its initial state."""
+        var initial_board = []
+        var i = 0
+        while i < 200:
+            initial_board = initial_board.push(0)
+            i = i + 1
+        var app = TetrisApp(
+            board: initial_board,
+            current_piece: 0,
+            piece_x: 3,
+            piece_y: 0,
+            piece_rotation: 0,
+            next_piece: 1,
+            score: 0,
+            level: 1,
+            lines: 0,
+            game_over: false,
+            piece_counter: 0
+        )
+        app.spawn_piece()
+        app
+
+    # -- Piece Shape Data ----------------------------------------------------
+
+    me _get_cell(piece_type: i32, rotation: i32, r: i32, c: i32) -> bool:
+        """Return whether cell (r, c) is filled for the given piece type and rotation.
+
+        Piece types: 0=I, 1=O, 2=T, 3=S, 4=Z, 5=L, 6=J
+        Rotation: 0..3 (0=spawn, 1=CW, 2=180, 3=CCW)
+        """
+        val rot = rotation % 4
+
+        # I-piece
+        if piece_type == 0:
+            if rot == 0 or rot == 2:
+                return r == 1 and c >= 0 and c <= 3
+            return c == 2 and r >= 0 and r <= 3
+
+        # O-piece (rotation invariant)
+        if piece_type == 1:
+            return (r == 0 or r == 1) and (c == 1 or c == 2)
+
+        # T-piece
+        if piece_type == 2:
+            if rot == 0:
+                return (r == 0 and c == 1) or (r == 1 and c >= 0 and c <= 2)
+            if rot == 1:
+                return (c == 1 and r >= 0 and r <= 2) or (r == 1 and c == 2)
+            if rot == 2:
+                return (r == 1 and c >= 0 and c <= 2) or (r == 2 and c == 1)
+            return (c == 1 and r >= 0 and r <= 2) or (r == 1 and c == 0)
+
+        # S-piece
+        if piece_type == 3:
+            if rot == 0 or rot == 2:
+                return (r == 0 and (c == 1 or c == 2)) or (r == 1 and (c == 0 or c == 1))
+            return (c == 0 and (r == 0 or r == 1)) or (c == 1 and (r == 1 or r == 2))
+
+        # Z-piece
+        if piece_type == 4:
+            if rot == 0 or rot == 2:
+                return (r == 0 and (c == 0 or c == 1)) or (r == 1 and (c == 1 or c == 2))
+            return (c == 1 and (r == 0 or r == 1)) or (c == 0 and (r == 1 or r == 2))
+
+        # L-piece
+        if piece_type == 5:
+            if rot == 0:
+                return (r == 0 and c == 2) or (r == 1 and c >= 0 and c <= 2)
+            if rot == 1:
+                return (c == 1 and r >= 0 and r <= 2) or (r == 2 and c == 2)
+            if rot == 2:
+                return (r == 1 and c >= 0 and c <= 2) or (r == 2 and c == 0)
+            return (c == 1 and r >= 0 and r <= 2) or (r == 0 and c == 0)
+
+        # J-piece
+        if piece_type == 6:
+            if rot == 0:
+                return (r == 0 and c == 0) or (r == 1 and c >= 0 and c <= 2)
+            if rot == 1:
+                return (c == 1 and r >= 0 and r <= 2) or (r == 0 and c == 2)
+            if rot == 2:
+                return (r == 1 and c >= 0 and c <= 2) or (r == 2 and c == 2)
+            return (c == 1 and r >= 0 and r <= 2) or (r == 2 and c == 0)
+
+        false
+
+    # -- Collision Detection -------------------------------------------------
+
+    me _collides(px: i32, py: i32, ptype: i32, prot: i32) -> bool:
+        """Check if piece at (px, py) with given rotation collides with walls or locked cells."""
+        var r = 0
+        while r < PIECE_SIZE:
+            var c = 0
+            while c < PIECE_SIZE:
+                if self._get_cell(ptype, prot, r, c):
+                    val bx = px + c
+                    val by = py + r
+                    # Wall or floor collision
+                    if bx < 0 or bx >= BOARD_W or by >= BOARD_H:
+                        return true
+                    # Skip cells above the top
+                    if by >= 0:
+                        val idx = by * BOARD_W + bx
+                        if self.board[idx] != 0:
+                            return true
+                c = c + 1
+            r = r + 1
+        false
+
+    # -- Piece Spawn ---------------------------------------------------------
+
+    me spawn_piece():
+        """Place the next piece at the top of the board.
+
+        Sets game_over if the new piece immediately collides.
+        """
+        self.current_piece = self.next_piece
+        self.piece_x = 3
+        self.piece_y = 0
+        self.piece_rotation = 0
+        # Simple pseudo-random: cycle through types based on counter
+        self.piece_counter = self.piece_counter + 1
+        self.next_piece = (self.piece_counter * 7 + 3) % 7
+        if self._collides(self.piece_x, self.piece_y, self.current_piece, self.piece_rotation):
+            self.game_over = true
+
+    # -- Lock Piece ----------------------------------------------------------
+
+    me lock_piece():
+        """Lock the current piece onto the board, then clear lines and spawn next."""
+        var r = 0
+        while r < PIECE_SIZE:
+            var c = 0
+            while c < PIECE_SIZE:
+                if self._get_cell(self.current_piece, self.piece_rotation, r, c):
+                    val bx = self.piece_x + c
+                    val by = self.piece_y + r
+                    if bx >= 0 and bx < BOARD_W and by >= 0 and by < BOARD_H:
+                        val idx = by * BOARD_W + bx
+                        self.board[idx] = self.current_piece + 1
+                c = c + 1
+            r = r + 1
+        self._clear_lines()
+        self.spawn_piece()
+
+    # -- Line Clearing -------------------------------------------------------
+
+    me _clear_lines():
+        """Remove all full rows and shift everything above down."""
+        var cleared = 0
+        var row_idx = BOARD_H - 1
+        while row_idx >= 0:
+            var full = true
+            var col = 0
+            while col < BOARD_W:
+                if self.board[row_idx * BOARD_W + col] == 0:
+                    full = false
+                col = col + 1
+            if full:
+                # Shift all rows above down by one
+                var shift_row = row_idx
+                while shift_row > 0:
+                    var sc = 0
+                    while sc < BOARD_W:
+                        self.board[shift_row * BOARD_W + sc] = self.board[(shift_row - 1) * BOARD_W + sc]
+                        sc = sc + 1
+                    shift_row = shift_row - 1
+                # Clear top row
+                var tc = 0
+                while tc < BOARD_W:
+                    self.board[tc] = 0
+                    tc = tc + 1
+                cleared = cleared + 1
+                # Re-check same row since rows shifted down
+            else:
+                row_idx = row_idx - 1
+        if cleared > 0:
+            self.lines = self.lines + cleared
+            self.score = self.score + cleared * 100
+            self.level = 1 + self.lines / 10
+
+    # -- Movement ------------------------------------------------------------
+
+    me move_left():
+        """Move the piece one cell left if possible."""
+        if self.game_over:
+            return
+        if not self._collides(self.piece_x - 1, self.piece_y, self.current_piece, self.piece_rotation):
+            self.piece_x = self.piece_x - 1
+
+    me move_right():
+        """Move the piece one cell right if possible."""
+        if self.game_over:
+            return
+        if not self._collides(self.piece_x + 1, self.piece_y, self.current_piece, self.piece_rotation):
+            self.piece_x = self.piece_x + 1
+
+    me rotate():
+        """Rotate the piece clockwise if possible."""
+        if self.game_over:
+            return
+        val new_rot = (self.piece_rotation + 1) % 4
+        if not self._collides(self.piece_x, self.piece_y, self.current_piece, new_rot):
+            self.piece_rotation = new_rot
+
+    me hard_drop():
+        """Drop the piece as far as possible and lock immediately."""
+        if self.game_over:
+            return
+        while not self._collides(self.piece_x, self.piece_y + 1, self.current_piece, self.piece_rotation):
+            self.piece_y = self.piece_y + 1
+        self.lock_piece()
+
+    me tick():
+        """Advance the piece down one row (gravity tick).
+
+        If the piece cannot move down it is locked in place.
+        """
+        if self.game_over:
+            return
+        if not self._collides(self.piece_x, self.piece_y + 1, self.current_piece, self.piece_rotation):
+            self.piece_y = self.piece_y + 1
+        else:
+            self.lock_piece()
+
+    # -- New Game ------------------------------------------------------------
+
+    me new_game():
+        """Reset the board and start a fresh game."""
+        var i = 0
+        while i < 200:
+            self.board[i] = 0
+            i = i + 1
+        self.score = 0
+        self.level = 1
+        self.lines = 0
+        self.game_over = false
+        self.piece_counter = 0
+        self.next_piece = 1
+        self.spawn_piece()
+
+    # -- Input Handling ------------------------------------------------------
+
+    me handle_key(key: text):
+        """Map keyboard input to game actions."""
+        match key:
+            "Left" => self.move_left()
+            "Right" => self.move_right()
+            "Up" => self.rotate()
+            "Down" => self.tick()
+            " " => self.hard_drop()
+            "n" => self.new_game()
+            _ => pass_dn
+
+    me handle_action(action: text):
+        """Dispatch button action strings."""
+        match action:
+            "move_left" => self.move_left()
+            "move_right" => self.move_right()
+            "rotate" => self.rotate()
+            "soft_drop" => self.tick()
+            "hard_drop" => self.hard_drop()
+            "new_game" => self.new_game()
+            "tick" => self.tick()
+            _ => pass_dn
+
+    # -- Rendering -----------------------------------------------------------
+
+    me _piece_name(ptype: i32) -> text:
+        """Return the single-letter name of a piece type."""
+        match ptype:
+            0 => "I"
+            1 => "O"
+            2 => "T"
+            3 => "S"
+            4 => "Z"
+            5 => "L"
+            6 => "J"
+            _ => "?"
+
+    me _render_board() -> text:
+        """Render the board as multiline text.
+
+        Filled cells show as [], empty as .. (two chars per cell).
+        The active piece is overlaid on the board.
+        """
+        var output = ""
+        var r = 0
+        while r < BOARD_H:
+            var line = ""
+            var c = 0
+            while c < BOARD_W:
+                val idx = r * BOARD_W + c
+                # Check if active piece occupies this cell
+                val pr = r - self.piece_y
+                val pc = c - self.piece_x
+                var is_piece = false
+                if (pr >= 0 and pr < PIECE_SIZE and
+                    pc >= 0 and pc < PIECE_SIZE):
+                    if self._get_cell(self.current_piece, self.piece_rotation, pr, pc):
+                        is_piece = true
+                if is_piece:
+                    line = "{line}[]"
+                else:
+                    if self.board[idx] != 0:
+                        line = "{line}[]"
+                    else:
+                        line = "{line}.."
+                c = c + 1
+            if r < BOARD_H - 1:
+                output = "{output}{line}\n"
+            else:
+                output = "{output}{line}"
+            r = r + 1
+        output
+
+    me _render_next_piece() -> text:
+        """Render the next piece preview as a 4x4 text grid."""
+        var output = ""
+        var r = 0
+        while r < PIECE_SIZE:
+            var line = ""
+            var c = 0
+            while c < PIECE_SIZE:
+                if self._get_cell(self.next_piece, 0, r, c):
+                    line = "{line}[]"
+                else:
+                    line = "{line}  "
+                c = c + 1
+            if r < PIECE_SIZE - 1:
+                output = "{output}{line}\n"
+            else:
+                output = "{output}{line}"
+            r = r + 1
+        output
+
+    me _ghost_y() -> i32:
+        """Compute the Y position where the piece would land (ghost piece)."""
+        var gy = self.piece_y
+        while not self._collides(self.piece_x, gy + 1, self.current_piece, self.piece_rotation):
+            gy = gy + 1
+        gy
+
+    # -- UI Construction -----------------------------------------------------
+
+    me build_ui() -> UISession:
+        """Build the Tetris UI.
+
+        Layout:
+          Menu bar
+          Main area: board (left) | info panel (right)
+            Info panel: Next piece, Score, Level, Lines, Controls
+          Status bar
+        """
+        val board_text = self._render_board()
+        val next_text = self._render_next_piece()
+        val piece_name = self._piece_name(self.current_piece)
+        val next_name = self._piece_name(self.next_piece)
+        val ghost = self._ghost_y()
+
+        val status_text = if self.game_over:
+            "GAME OVER - Press N for new game"
+        else:
+            "Piece: {piece_name} | Drop: {ghost}"
+
+        val root = column("tetris_root", [
+            # Menu bar
+            menubar("tetris_menu", [
+                "Game", "Help"
+            ]),
+
+            # Main game area: board + info side-by-side
+            with_flex(row("tetris_main", [
+                # Board panel
+                with_flex(panel("tetris_board_panel", "Board", [
+                    text_widget("tetris_board", board_text)
+                ]), 2),
+
+                # Info panel
+                with_width(column("tetris_info", [
+                    # Next piece preview
+                    panel("tetris_next_panel", "Next: {next_name}", [
+                        text_widget("tetris_next", next_text)
+                    ]),
+
+                    # Score display
+                    panel("tetris_score_panel", "Score", [
+                        label("tetris_score_val", "{self.score}"),
+                        label("tetris_level_label", "Level: {self.level}"),
+                        label("tetris_lines_label", "Lines: {self.lines}")
+                    ]),
+
+                    # Controls
+                    panel("tetris_ctrl_panel", "Controls", [
+                        label("ctrl_arrows", "Arrow keys: Move/Rotate"),
+                        label("ctrl_space", "Space: Hard Drop"),
+                        label("ctrl_down", "Down: Soft Drop"),
+                        label("ctrl_n", "N: New Game")
+                    ]),
+
+                    # Action buttons
+                    row("tetris_btn_row1", [
+                        with_flex(button("btn_left", "<", "move_left"), 1),
+                        with_flex(button("btn_rotate", "^", "rotate"), 1),
+                        with_flex(button("btn_right", ">", "move_right"), 1)
+                    ]),
+                    row("tetris_btn_row2", [
+                        with_flex(button("btn_drop", "Drop", "hard_drop"), 1),
+                        with_flex(button("btn_down", "Down", "soft_drop"), 1)
+                    ]),
+                    button("btn_new_game", "New Game", "new_game")
+                ]), 20)
+            ]), 1),
+
+            # Status bar
+            statusbar("tetris_status",
+                status_text,
+                "Tetris | Level {self.level}"
+            )
+        ])
+
+        val tree = build_tree_with_title(root, "Tetris", "dark")
+        UISession.new(tree)

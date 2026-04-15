@@ -1,0 +1,522 @@
+# @cover src/lib/nogc_async_mut/game3d/math.spl 80%
+# @cover src/lib/nogc_async_mut/game3d/event.spl 80%
+# @cover src/lib/nogc_async_mut/game3d/component.spl 80%
+# @cover src/lib/nogc_async_mut/game3d/game_loop.spl 80%
+# @cover src/lib/nogc_async_mut/game3d/key_codes.spl 80%
+"""
+# Game3D System Integration Tests
+
+**Feature IDs:** #GAME3D-001
+**Category:** Stdlib
+**Difficulty:** 2/5
+**Status:** In Progress
+**Requirements:** N/A
+**Plan:** N/A
+**Design:** N/A
+**Research:** N/A
+
+## Overview
+
+End-to-end system tests verifying the game3d library components work together:
+math types, event queue, component registry, game loop callbacks, and key codes.
+These tests verify the full integration path, not isolated units.
+"""
+
+# tag: system
+
+import std.spec
+
+use std.nogc_async_mut.game3d.math.*
+use std.nogc_async_mut.game3d.event.*
+use std.nogc_async_mut.game3d.component.*
+use std.nogc_async_mut.game3d.game_loop.*
+use std.nogc_async_mut.game3d.key_codes.*
+
+# ============================================================================
+# Module-level flags for game loop callback verification
+# ============================================================================
+
+var _init_ran: bool = false
+var _update_ran: bool = false
+var _shutdown_ran: bool = false
+var _last_dt: f32 = 0.0
+
+fn test_on_init() -> i32:
+    _init_ran = true
+    0
+
+fn test_on_update(dt: f32):
+    _update_ran = true
+    _last_dt = dt
+
+fn test_on_shutdown():
+    _shutdown_ran = true
+
+# ============================================================================
+# 1. Entity + Component Lifecycle
+# ============================================================================
+
+describe "Component Registry - Entity Lifecycle":
+    it "adds Transform, Render, and Physics components to entity 1":
+        var registry = ComponentRegistry.create()
+        registry.add(1, ComponentTag.Transform, 100)
+        registry.add(1, ComponentTag.Render, 101)
+        registry.add(1, ComponentTag.Physics, 102)
+
+        expect(registry.has(1, ComponentTag.Transform)).to_equal(true)
+        expect(registry.has(1, ComponentTag.Render)).to_equal(true)
+        expect(registry.has(1, ComponentTag.Physics)).to_equal(true)
+
+    it "returns correct data_ids for added components":
+        var registry = ComponentRegistry.create()
+        registry.add(1, ComponentTag.Transform, 100)
+        registry.add(1, ComponentTag.Render, 101)
+        registry.add(1, ComponentTag.Physics, 102)
+
+        expect(registry.get_data_id(1, ComponentTag.Transform)).to_equal(100)
+        expect(registry.get_data_id(1, ComponentTag.Render)).to_equal(101)
+        expect(registry.get_data_id(1, ComponentTag.Physics)).to_equal(102)
+
+    it "removes Physics component while keeping Transform and Render":
+        var registry = ComponentRegistry.create()
+        registry.add(1, ComponentTag.Transform, 100)
+        registry.add(1, ComponentTag.Render, 101)
+        registry.add(1, ComponentTag.Physics, 102)
+
+        registry.remove(1, ComponentTag.Physics)
+
+        expect(registry.has(1, ComponentTag.Physics)).to_equal(false)
+        expect(registry.has(1, ComponentTag.Transform)).to_equal(true)
+        expect(registry.has(1, ComponentTag.Render)).to_equal(true)
+
+    it "remove_all clears all components for entity 1":
+        var registry = ComponentRegistry.create()
+        registry.add(1, ComponentTag.Transform, 100)
+        registry.add(1, ComponentTag.Render, 101)
+        registry.add(1, ComponentTag.Physics, 102)
+        registry.add(2, ComponentTag.Transform, 200)
+
+        registry.remove_all(1)
+
+        expect(registry.has(1, ComponentTag.Transform)).to_equal(false)
+        expect(registry.has(1, ComponentTag.Render)).to_equal(false)
+        expect(registry.has(1, ComponentTag.Physics)).to_equal(false)
+        # Entity 2 still intact
+        expect(registry.has(2, ComponentTag.Transform)).to_equal(true)
+        expect(registry.count()).to_equal(1)
+
+    it "returns -1 for data_id of missing component":
+        var registry = ComponentRegistry.create()
+        expect(registry.get_data_id(99, ComponentTag.Physics)).to_equal(-1)
+
+# ============================================================================
+# 2. Event Flow: Collision → Event Queue → Game Logic
+# ============================================================================
+
+describe "Event Queue - Collision and Trigger Flow":
+    it "accepts collision event and trigger enter event":
+        var queue = EventQueue.create(64)
+        val col = GameEvent.collision(10, 20, 0.0, 1.0, 0.0)
+        val trig = GameEvent.trigger(5, 6, true)
+        queue.push(col)
+        queue.push(trig)
+
+        expect(queue.count()).to_equal(2)
+
+    it "reads back correct entity IDs from collision event":
+        var queue = EventQueue.create(64)
+        val col = GameEvent.collision(10, 20, 0.0, 1.0, 0.0)
+        queue.push(col)
+
+        val ev = queue.get(0)
+        expect(ev.entity_a).to_equal(10)
+        expect(ev.entity_b).to_equal(20)
+
+    it "reads back correct normal from collision event":
+        var queue = EventQueue.create(64)
+        val col = GameEvent.collision(10, 20, 0.0, 1.0, 0.0)
+        queue.push(col)
+
+        val ev = queue.get(0)
+        expect(ev.param_x).to_equal(0.0)
+        expect(ev.param_y).to_equal(1.0)
+        expect(ev.param_z).to_equal(0.0)
+
+    it "reads back TriggerEnter event type":
+        var queue = EventQueue.create(64)
+        val trig = GameEvent.trigger(5, 6, true)
+        queue.push(trig)
+
+        val ev = queue.get(0)
+        expect(ev.event_type.to_i32()).to_equal(GameEventType.TriggerEnter.to_i32())
+
+    it "has_events returns true when queue has events":
+        var queue = EventQueue.create(64)
+        queue.push(GameEvent.simple(GameEventType.EntityCreated))
+        expect(queue.has_events()).to_equal(true)
+
+    it "clear empties the queue":
+        var queue = EventQueue.create(64)
+        queue.push(GameEvent.collision(1, 2, 1.0, 0.0, 0.0))
+        queue.push(GameEvent.collision(3, 4, 0.0, 0.0, 1.0))
+        queue.clear()
+
+        expect(queue.count()).to_equal(0)
+        expect(queue.has_events()).to_equal(false)
+
+    it "does not exceed max_size":
+        var queue = EventQueue.create(2)
+        queue.push(GameEvent.simple(GameEventType.Custom))
+        queue.push(GameEvent.simple(GameEventType.Custom))
+        queue.push(GameEvent.simple(GameEventType.Custom))
+
+        expect(queue.count()).to_equal(2)
+
+# ============================================================================
+# 3. Math Integration
+# ============================================================================
+
+describe "Math - Vec3 operations":
+    it "adds two Vec3 values correctly":
+        val a = Vec3(1.0, 2.0, 3.0)
+        val b = Vec3(4.0, 5.0, 6.0)
+        val c = a.add(b)
+        expect(c.x).to_equal(5.0)
+        expect(c.y).to_equal(7.0)
+        expect(c.z).to_equal(9.0)
+
+    it "dot product of orthogonal vectors is zero":
+        val up = Vec3.up()
+        val right = Vec3.right()
+        val d = up.dot(right)
+        expect(d).to_equal(0.0)
+
+    it "cross product of forward and right gives down":
+        val fwd = Vec3.forward()
+        val right = Vec3.right()
+        val cross = fwd.cross(right)
+        # forward(0,0,1) x right(1,0,0) = (0*0-1*0, 1*1-0*0, 0*0-0*1) = (0,1,0) negate = down
+        # Actually: (fy*rz - fz*ry, fz*rx - fx*rz, fx*ry - fy*rx)
+        # = (0*0 - 1*0, 1*1 - 0*0, 0*0 - 0*1) = (0, 1, 0) = up
+        expect(cross.y).to_equal(1.0)
+
+    it "normalizes a Vec3 to unit length":
+        val v = Vec3(3.0, 0.0, 4.0)
+        val n = v.normalize()
+        val len = n.length()
+        # length_squared should be ~1.0; check magnitude is 1.0
+        val len_sq = n.x * n.x + n.y * n.y + n.z * n.z
+        expect(len_sq).to_be_greater_than(0.99)
+        expect(len_sq).to_be_less_than(1.01)
+
+    it "lerp at t=0 returns first vector":
+        val a = Vec3(0.0, 0.0, 0.0)
+        val b = Vec3(10.0, 10.0, 10.0)
+        val result = a.lerp(b, 0.0)
+        expect(result.x).to_equal(0.0)
+        expect(result.y).to_equal(0.0)
+        expect(result.z).to_equal(0.0)
+
+    it "lerp at t=1 returns second vector":
+        val a = Vec3(0.0, 0.0, 0.0)
+        val b = Vec3(10.0, 10.0, 10.0)
+        val result = a.lerp(b, 1.0)
+        expect(result.x).to_equal(10.0)
+        expect(result.y).to_equal(10.0)
+        expect(result.z).to_equal(10.0)
+
+describe "Math - Transform point transformation":
+    it "identity transform leaves point unchanged":
+        val t = Transform.identity()
+        val p = Vec3(5.0, 3.0, 2.0)
+        val result = t.transform_point(p)
+        expect(result.x).to_equal(5.0)
+        expect(result.y).to_equal(3.0)
+        expect(result.z).to_equal(2.0)
+
+    it "translation-only transform shifts point by position":
+        val t = Transform(
+            position: Vec3(1.0, 2.0, 3.0),
+            rotation: Quat.identity(),
+            scale_: Vec3.one()
+        )
+        val p = Vec3(0.0, 0.0, 0.0)
+        val result = t.transform_point(p)
+        expect(result.x).to_equal(1.0)
+        expect(result.y).to_equal(2.0)
+        expect(result.z).to_equal(3.0)
+
+    it "90-degree Y-axis rotation transforms X-axis toward -Z":
+        val half_pi: f32 = 1.5707963
+        val rot = Quat.from_axis_angle(Vec3.up(), half_pi)
+        val t = Transform(
+            position: Vec3.zero(),
+            rotation: rot,
+            scale_: Vec3.one()
+        )
+        val p = Vec3(1.0, 0.0, 0.0)
+        val result = t.transform_point(p)
+        # 90-degree Y rotation: X -> -Z
+        expect(result.x).to_be_greater_than(-0.01)
+        expect(result.x).to_be_less_than(0.01)
+        expect(result.y).to_be_greater_than(-0.01)
+        expect(result.y).to_be_less_than(0.01)
+        expect(result.z).to_be_less_than(-0.99)
+
+    it "translation then rotation places point correctly":
+        val t = Transform(
+            position: Vec3(10.0, 0.0, 0.0),
+            rotation: Quat.identity(),
+            scale_: Vec3.one()
+        )
+        val p = Vec3(1.0, 0.0, 0.0)
+        val result = t.transform_point(p)
+        expect(result.x).to_equal(11.0)
+        expect(result.y).to_equal(0.0)
+        expect(result.z).to_equal(0.0)
+
+describe "Math - AABB intersection":
+    it "overlapping AABBs intersect":
+        val a = AABB(min: Vec3(0.0, 0.0, 0.0), max: Vec3(2.0, 2.0, 2.0))
+        val b = AABB(min: Vec3(1.0, 1.0, 1.0), max: Vec3(3.0, 3.0, 3.0))
+        expect(a.intersects(b)).to_equal(true)
+
+    it "non-overlapping AABBs do not intersect":
+        val a = AABB(min: Vec3(0.0, 0.0, 0.0), max: Vec3(1.0, 1.0, 1.0))
+        val b = AABB(min: Vec3(2.0, 2.0, 2.0), max: Vec3(3.0, 3.0, 3.0))
+        expect(a.intersects(b)).to_equal(false)
+
+    it "contains_point returns true for interior point":
+        val box = AABB(min: Vec3(0.0, 0.0, 0.0), max: Vec3(4.0, 4.0, 4.0))
+        expect(box.contains_point(Vec3(2.0, 2.0, 2.0))).to_equal(true)
+
+    it "contains_point returns false for exterior point":
+        val box = AABB(min: Vec3(0.0, 0.0, 0.0), max: Vec3(4.0, 4.0, 4.0))
+        expect(box.contains_point(Vec3(5.0, 5.0, 5.0))).to_equal(false)
+
+    it "from_center_extents creates correct bounds":
+        val box = AABB.from_center_extents(Vec3(0.0, 0.0, 0.0), Vec3(1.0, 1.0, 1.0))
+        expect(box.min.x).to_equal(-1.0)
+        expect(box.max.x).to_equal(1.0)
+
+describe "Math - Ray point_at":
+    it "point_at t=0 is origin":
+        val r = Ray.create(origin: Vec3(1.0, 2.0, 3.0), direction: Vec3(0.0, 0.0, 1.0))
+        val p = r.point_at(0.0)
+        expect(p.x).to_equal(1.0)
+        expect(p.y).to_equal(2.0)
+        expect(p.z).to_equal(3.0)
+
+    it "point_at t=5 advances along direction":
+        val r = Ray.create(origin: Vec3(0.0, 0.0, 0.0), direction: Vec3(1.0, 0.0, 0.0))
+        val p = r.point_at(5.0)
+        expect(p.x).to_equal(5.0)
+        expect(p.y).to_equal(0.0)
+        expect(p.z).to_equal(0.0)
+
+    it "ray normalizes its direction":
+        val r = Ray.create(origin: Vec3.zero(), direction: Vec3(3.0, 0.0, 4.0))
+        val len_sq = r.direction.x * r.direction.x + r.direction.y * r.direction.y + r.direction.z * r.direction.z
+        expect(len_sq).to_be_greater_than(0.99)
+        expect(len_sq).to_be_less_than(1.01)
+
+# ============================================================================
+# 4. Game Loop Callback Flow
+# ============================================================================
+
+describe "Game Loop - Callback Registration and Invocation":
+    it "game_init calls registered init callback":
+        _init_ran = false
+        set_init_callback(test_on_init)
+        game_init()
+        expect(_init_ran).to_equal(true)
+
+    it "on_collision pushes events to the shared queue":
+        val q = get_event_queue()
+        q.clear()
+        on_collision(10, 20, 0.0, 1.0, 0.0)
+        on_collision(30, 40, 1.0, 0.0, 0.0)
+        expect(q.count()).to_equal(2)
+
+    it "game_update clears the event queue then calls update callback":
+        _update_ran = false
+        _last_dt = 0.0
+        set_update_callback(test_on_update)
+
+        val q = get_event_queue()
+        q.clear()
+        on_collision(1, 2, 0.0, 1.0, 0.0)
+        expect(q.count()).to_equal(1)
+
+        game_update(0.016)
+
+        expect(_update_ran).to_equal(true)
+        expect(q.count()).to_equal(0)
+
+    it "game_update passes correct delta time to callback":
+        _last_dt = 0.0
+        set_update_callback(test_on_update)
+        game_update(0.033)
+        expect(_last_dt).to_be_greater_than(0.032)
+        expect(_last_dt).to_be_less_than(0.034)
+
+    it "game_shutdown calls registered shutdown callback":
+        _shutdown_ran = false
+        set_shutdown_callback(test_on_shutdown)
+        game_shutdown()
+        expect(_shutdown_ran).to_equal(true)
+
+    it "on_trigger pushes TriggerEnter event to shared queue":
+        val q = get_event_queue()
+        q.clear()
+        on_trigger(5, 6, 1)
+        expect(q.count()).to_equal(1)
+        val ev = q.get(0)
+        expect(ev.event_type.to_i32()).to_equal(GameEventType.TriggerEnter.to_i32())
+        expect(ev.entity_a).to_equal(5)
+        expect(ev.entity_b).to_equal(6)
+
+    it "on_trigger with entered=0 pushes TriggerExit event":
+        val q = get_event_queue()
+        q.clear()
+        on_trigger(7, 8, 0)
+        expect(q.count()).to_equal(1)
+        val ev = q.get(0)
+        expect(ev.event_type.to_i32()).to_equal(GameEventType.TriggerExit.to_i32())
+
+# ============================================================================
+# 5. Component + Event Combined Flow
+# ============================================================================
+
+describe "Component and Event Integration":
+    it "both colliding entities have Physics components":
+        var registry = ComponentRegistry.create()
+        registry.add(1, ComponentTag.Physics, 10)
+        registry.add(2, ComponentTag.Physics, 20)
+        registry.add(3, ComponentTag.Physics, 30)
+
+        var queue = EventQueue.create(64)
+        val col = GameEvent.collision(1, 2, 0.0, 1.0, 0.0)
+        queue.push(col)
+
+        val ev = queue.get(0)
+        val ea = ev.entity_a
+        val eb = ev.entity_b
+
+        expect(registry.has(ea, ComponentTag.Physics)).to_equal(true)
+        expect(registry.has(eb, ComponentTag.Physics)).to_equal(true)
+
+    it "removing all components from entity 2 leaves entity 1 intact":
+        var registry = ComponentRegistry.create()
+        registry.add(1, ComponentTag.Transform, 10)
+        registry.add(1, ComponentTag.Physics, 11)
+        registry.add(2, ComponentTag.Transform, 20)
+        registry.add(2, ComponentTag.Physics, 21)
+        registry.add(2, ComponentTag.Render, 22)
+
+        registry.remove_all(2)
+
+        expect(registry.has(2, ComponentTag.Transform)).to_equal(false)
+        expect(registry.has(2, ComponentTag.Physics)).to_equal(false)
+        expect(registry.has(2, ComponentTag.Render)).to_equal(false)
+        expect(registry.has(1, ComponentTag.Transform)).to_equal(true)
+        expect(registry.has(1, ComponentTag.Physics)).to_equal(true)
+
+    it "count_by_tag counts only components of matching type":
+        var registry = ComponentRegistry.create()
+        registry.add(1, ComponentTag.Physics, 10)
+        registry.add(2, ComponentTag.Physics, 20)
+        registry.add(3, ComponentTag.Transform, 30)
+
+        expect(registry.count_by_tag(ComponentTag.Physics)).to_equal(2)
+        expect(registry.count_by_tag(ComponentTag.Transform)).to_equal(1)
+        expect(registry.count_by_tag(ComponentTag.Render)).to_equal(0)
+
+    it "multi-entity collision event triggers lookup for all entities":
+        var registry = ComponentRegistry.create()
+        registry.add(1, ComponentTag.Physics, 100)
+        registry.add(2, ComponentTag.Physics, 200)
+        registry.add(3, ComponentTag.Render, 300)
+
+        var queue = EventQueue.create(64)
+        queue.push(GameEvent.collision(1, 2, 0.0, 1.0, 0.0))
+        queue.push(GameEvent.collision(2, 3, 1.0, 0.0, 0.0))
+
+        val ev1 = queue.get(0)
+        val ev2 = queue.get(1)
+
+        # Both entities in first collision have Physics
+        expect(registry.has(ev1.entity_a, ComponentTag.Physics)).to_equal(true)
+        expect(registry.has(ev1.entity_b, ComponentTag.Physics)).to_equal(true)
+
+        # Entity 3 in second collision has Render, not Physics
+        expect(registry.has(ev2.entity_b, ComponentTag.Render)).to_equal(true)
+        expect(registry.has(ev2.entity_b, ComponentTag.Physics)).to_equal(false)
+
+# ============================================================================
+# 6. KeyCode Helper Integration
+# ============================================================================
+
+describe "KeyCode - WASD letters and arrow classification":
+    it "W is a letter key":
+        expect(KeyCode.W.is_letter()).to_equal(true)
+
+    it "A is a letter key":
+        expect(KeyCode.A.is_letter()).to_equal(true)
+
+    it "S is a letter key":
+        expect(KeyCode.S.is_letter()).to_equal(true)
+
+    it "D is a letter key":
+        expect(KeyCode.D.is_letter()).to_equal(true)
+
+    it "Up arrow is an arrow key":
+        expect(KeyCode.Up.is_arrow()).to_equal(true)
+
+    it "Down arrow is an arrow key":
+        expect(KeyCode.Down.is_arrow()).to_equal(true)
+
+    it "Left arrow is an arrow key":
+        expect(KeyCode.Left.is_arrow()).to_equal(true)
+
+    it "Right arrow is an arrow key":
+        expect(KeyCode.Right.is_arrow()).to_equal(true)
+
+    it "arrow keys are not letter keys":
+        expect(KeyCode.Up.is_letter()).to_equal(false)
+        expect(KeyCode.Down.is_letter()).to_equal(false)
+        expect(KeyCode.Left.is_letter()).to_equal(false)
+        expect(KeyCode.Right.is_letter()).to_equal(false)
+
+    it "letter keys are not arrow keys":
+        expect(KeyCode.W.is_arrow()).to_equal(false)
+        expect(KeyCode.A.is_arrow()).to_equal(false)
+
+    it "letter keys are not function keys":
+        expect(KeyCode.W.is_function_key()).to_equal(false)
+        expect(KeyCode.S.is_function_key()).to_equal(false)
+
+    it "F1 through F4 are function keys":
+        expect(KeyCode.F1.is_function_key()).to_equal(true)
+        expect(KeyCode.F2.is_function_key()).to_equal(true)
+        expect(KeyCode.F3.is_function_key()).to_equal(true)
+        expect(KeyCode.F4.is_function_key()).to_equal(true)
+
+    it "digit keys are digits but not letters":
+        expect(KeyCode.Num0.is_digit()).to_equal(true)
+        expect(KeyCode.Num9.is_digit()).to_equal(true)
+        expect(KeyCode.Num0.is_letter()).to_equal(false)
+
+    it "modifier keys are recognized":
+        expect(KeyCode.LeftShift.is_modifier()).to_equal(true)
+        expect(KeyCode.LeftCtrl.is_modifier()).to_equal(true)
+        expect(KeyCode.RightAlt.is_modifier()).to_equal(true)
+
+    it "letter keys are not modifier keys":
+        expect(KeyCode.W.is_modifier()).to_equal(false)
+
+    it "to_i32 returns correct raw value for W":
+        expect(KeyCode.W.to_i32()).to_equal(87)
+
+    it "to_i32 returns correct raw value for Space":
+        expect(KeyCode.Space.to_i32()).to_equal(32)

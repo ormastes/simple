@@ -1,0 +1,632 @@
+// Window Manager for Simple Language Web UI — v2 (server-authoritative)
+//
+// The server is the sole authority over window state (position, z-order,
+// focus, visibility). This client:
+//   1. Authenticates via POST /ui/login → bearer token.
+//   2. Opens WebSocket at /ui/ws?token=<token>.
+//   3. Sends hello → open_session (or resume_session on reconnect).
+//   4. Forwards raw input events to the server.
+//   5. Applies server-sent snapshot / patch_batch via RetainedRenderer.
+//
+// Optimistic drag/resize: a separate .wm-ghost overlay is shown during drag.
+// It is removed when the next patch_batch arrives (or after 60 ms TTL).
+// The server's patch_batch is the ground truth; the ghost is cosmetic only.
+
+// RetainedRenderer is loaded via dynamic import so this file can remain a
+// classic script (html.spl does not set type="module"). If html.spl gains
+// type="module", replace the dynamic import with a top-level import.
+
+const PROTOCOL_VERSION = 1;
+const RECONNECT_BASE_MS = 1000;
+const RECONNECT_MAX_MS  = 16000;
+const ACK_INTERVAL_MS   = 500;
+const GHOST_TTL_MS      = 60;  // optimistic ghost lifetime
+
+class SimpleWindowManager {
+  constructor() {
+    // DOM roots (populated from server state, not local decisions).
+    this.desktop  = document.getElementById('wm-desktop');
+    this.taskbar  = document.getElementById('wm-taskbar');
+
+    // Renderer — set after dynamic import resolves.
+    this.renderer = null;
+
+    // WebSocket + session state.
+    this.ws            = null;
+    this.sessionId     = null;
+    this.token         = null;
+    this.reconnectDelay = RECONNECT_BASE_MS;
+    this.reconnecting  = false;
+
+    // Drag/resize ghost state.
+    this.dragState     = null;  // { windowEl, startX, startY, origLeft, origTop, ghostEl, timer }
+    this.resizeState   = null;  // { windowEl, startX, startY, origRect, ghostEl, timer, direction }
+
+    // Periodic ack timer.
+    this._ackTimer = null;
+
+    // Load renderer then begin auth.
+    this._init();
+  }
+
+  // -------------------------------------------------------------------------
+  // Initialisation
+  // -------------------------------------------------------------------------
+
+  async _init() {
+    const mod = await import('./retained_renderer.js');
+    this.renderer = new mod.RetainedRenderer(this.desktop);
+    this._bindGlobalEvents();
+    await this._authenticate();
+  }
+
+  async _authenticate() {
+    try {
+      const resp = await fetch('/ui/login', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ capability_grant: 'dev' })
+      });
+      if (!resp.ok) throw new Error('login failed: ' + resp.status);
+      const data = await resp.json();
+      this.token = data.token;
+      this._connect();
+    } catch (err) {
+      console.error('[WM] auth error:', err);
+      setTimeout(() => this._authenticate(), this.reconnectDelay);
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  // WebSocket connection
+  // -------------------------------------------------------------------------
+
+  _connect() {
+    const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+    const url   = `${proto}://${location.host}/ui/ws?token=${encodeURIComponent(this.token)}`;
+    this.ws = new WebSocket(url);
+
+    this.ws.onopen = () => {
+      this.reconnectDelay = RECONNECT_BASE_MS;
+      this.reconnecting   = false;
+      this._send({ t: 'hello', v: PROTOCOL_VERSION, s: null,
+                   payload: { protocol_version: PROTOCOL_VERSION, client_caps: 0 } });
+    };
+
+    this.ws.onmessage = (e) => {
+      let frame;
+      try { frame = JSON.parse(e.data); } catch { return; }
+      this._dispatch(frame);
+    };
+
+    this.ws.onclose = (e) => {
+      this._stopAckTimer();
+      if (e.code === 1002) {
+        // Protocol mismatch — do not retry without software upgrade.
+        console.error('[WM] protocol version mismatch — cannot reconnect');
+        return;
+      }
+      this._scheduleReconnect();
+    };
+
+    this.ws.onerror = () => {
+      this.ws.close();
+    };
+  }
+
+  _scheduleReconnect() {
+    if (this.reconnecting) return;
+    this.reconnecting = true;
+    setTimeout(() => {
+      this.reconnecting = false;
+      this._reconnect();
+    }, this.reconnectDelay);
+    this.reconnectDelay = Math.min(this.reconnectDelay * 2, RECONNECT_MAX_MS);
+  }
+
+  _reconnect() {
+    // Send resume_session after reconnect so server can diff-patch instead of
+    // sending a full snapshot whenever possible (§8 of the protocol doc).
+    const rev = this.renderer ? this.renderer.snapshotRevision : 0;
+    const seq = this.renderer ? this.renderer.lastSequence : -1;
+
+    const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+    const url   = `${proto}://${location.host}/ui/ws?token=${encodeURIComponent(this.token)}`;
+    this.ws = new WebSocket(url);
+
+    this.ws.onopen = () => {
+      this.reconnectDelay = RECONNECT_BASE_MS;
+      this.reconnecting   = false;
+      // hello first, then resume.
+      this._send({ t: 'hello', v: PROTOCOL_VERSION, s: null,
+                   payload: { protocol_version: PROTOCOL_VERSION, client_caps: 0 } });
+      // After capabilities response we send resume_session — handled in _dispatch.
+      // Store resume params so _dispatch can use them.
+      this._pendingResume = { session_id: this.sessionId, snapshot_revision: rev, last_sequence: seq };
+    };
+
+    this.ws.onmessage = (e) => {
+      let frame;
+      try { frame = JSON.parse(e.data); } catch { return; }
+      this._dispatch(frame);
+    };
+
+    this.ws.onclose = (e) => {
+      this._stopAckTimer();
+      if (e.code === 1002) {
+        console.error('[WM] protocol version mismatch — cannot reconnect');
+        return;
+      }
+      this._scheduleReconnect();
+    };
+
+    this.ws.onerror = () => { this.ws.close(); };
+  }
+
+  // -------------------------------------------------------------------------
+  // Frame dispatch (S→C)
+  // -------------------------------------------------------------------------
+
+  _dispatch(frame) {
+    // Update session id from any server frame that carries one.
+    if (frame.s && !this.sessionId) {
+      this.sessionId = frame.s;
+    }
+
+    switch (frame.t) {
+      case 'capabilities':
+        // Server has greeted us. Send open_session or resume_session.
+        if (this._pendingResume) {
+          this._send({
+            t: 'resume_session', v: PROTOCOL_VERSION, s: this.sessionId, seq: null,
+            payload: this._pendingResume
+          });
+          this._pendingResume = null;
+        } else {
+          const vp = { x: 0, y: 0, w: window.innerWidth, h: window.innerHeight };
+          this._send({
+            t: 'open_session', v: PROTOCOL_VERSION, s: null, seq: null,
+            payload: { viewport: vp }
+          });
+        }
+        this._startAckTimer();
+        break;
+
+      case 'snapshot':
+        if (!this.renderer) break;
+        this.sessionId = frame.s ?? this.sessionId;
+        this.renderer.applySnapshot(frame.payload);
+        this._cancelGhost();
+        this._updateTaskbar(frame.payload);
+        break;
+
+      case 'patch_batch':
+        if (!this.renderer) break;
+        this.renderer.applyPatchBatch(frame.payload);
+        this._cancelGhost();
+        this._updateTaskbarFromRenderer();
+        break;
+
+      case 'focus_changed':
+        if (!this.renderer) break;
+        this.renderer.setFocus(
+          frame.payload.surface_id,
+          frame.payload.widget_id
+        );
+        this._updateTaskbarFromRenderer();
+        break;
+
+      case 'ping':
+        this._send({ t: 'pong', v: PROTOCOL_VERSION, s: this.sessionId, seq: null,
+                     payload: { nonce: frame.payload.nonce } });
+        break;
+
+      case 'error':
+        console.error('[WM] server error:', frame.payload.code, frame.payload.message);
+        this._showToast(frame.payload.message);
+        if (frame.payload.retry_after_ms > 0) {
+          this.reconnectDelay = frame.payload.retry_after_ms;
+        }
+        break;
+
+      default:
+        // Unknown message type — ignore silently.
+        break;
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  // Sending (C→S)
+  // -------------------------------------------------------------------------
+
+  _send(frame) {
+    if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+      this.ws.send(JSON.stringify(frame));
+    }
+  }
+
+  _sendInputEvent(surfaceId, widgetId, event) {
+    this._send({
+      t: 'input_event', v: PROTOCOL_VERSION, s: this.sessionId, seq: null,
+      payload: { surface_id: surfaceId, widget_id: widgetId, event }
+    });
+  }
+
+  _sendWindowCmd(kind, extra) {
+    this._send({
+      t: 'window_cmd', v: PROTOCOL_VERSION, s: this.sessionId, seq: null,
+      payload: { kind, ...extra }
+    });
+  }
+
+  // -------------------------------------------------------------------------
+  // Ack timer
+  // -------------------------------------------------------------------------
+
+  _startAckTimer() {
+    if (this._ackTimer) return;
+    this._ackTimer = setInterval(() => {
+      if (!this.renderer) return;
+      const seq = this.renderer.lastSequence;
+      if (seq >= 0) {
+        this._send({
+          t: 'ack', v: PROTOCOL_VERSION, s: this.sessionId, seq: null,
+          payload: { last_applied_sequence: seq }
+        });
+      }
+    }, ACK_INTERVAL_MS);
+  }
+
+  _stopAckTimer() {
+    if (this._ackTimer) { clearInterval(this._ackTimer); this._ackTimer = null; }
+  }
+
+  // -------------------------------------------------------------------------
+  // Taskbar (populated from server-authoritative renderer state)
+  // -------------------------------------------------------------------------
+
+  _updateTaskbar(snapshotPayload) {
+    if (!this.taskbar) return;
+    this.taskbar.innerHTML = '';
+    const roots = Array.isArray(snapshotPayload.roots)
+      ? snapshotPayload.roots : (snapshotPayload.root ? [snapshotPayload.root] : []);
+    for (const node of roots) {
+      const title = (node.props && node.props.title) ? node.props.title : node.surface_id;
+      const active = this.renderer && this.renderer.activeSurface === node.surface_id;
+      const item = document.createElement('div');
+      item.className = 'wm-taskbar-item' + (active ? ' active' : '');
+      item.textContent = title;
+      item.dataset.surfaceId = node.surface_id;
+      item.addEventListener('click', () => {
+        this._sendWindowCmd('focus', { window_id_hint: node.surface_id });
+      });
+      this.taskbar.appendChild(item);
+    }
+  }
+
+  _updateTaskbarFromRenderer() {
+    if (!this.taskbar || !this.renderer) return;
+    this.taskbar.innerHTML = '';
+    for (const [surfaceId, el] of this.renderer.surfaces) {
+      const title = el.dataset.title || el.title || surfaceId;
+      const active = this.renderer.activeSurface === surfaceId;
+      const minimized = el.classList.contains('minimized');
+      const item = document.createElement('div');
+      item.className = 'wm-taskbar-item'
+        + (active    ? ' active'    : '')
+        + (minimized ? ' minimized' : '');
+      item.textContent = title;
+      item.dataset.surfaceId = surfaceId;
+      item.addEventListener('click', () => {
+        this._sendWindowCmd('focus', { window_id_hint: surfaceId });
+      });
+      this.taskbar.appendChild(item);
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  // Ghost overlay (optimistic drag/resize — 60 ms TTL)
+  // -------------------------------------------------------------------------
+
+  _createGhost(winEl) {
+    const ghost = document.createElement('div');
+    ghost.className = 'wm-ghost';
+    const r = winEl.getBoundingClientRect();
+    const dr = this.desktop.getBoundingClientRect();
+    ghost.style.cssText = `
+      position:absolute;
+      left:${r.left - dr.left}px;top:${r.top - dr.top}px;
+      width:${r.width}px;height:${r.height}px;
+      border:2px dashed rgba(120,140,255,.7);
+      pointer-events:none;box-sizing:border-box;z-index:99999;
+    `;
+    this.desktop.appendChild(ghost);
+    return ghost;
+  }
+
+  _cancelGhost() {
+    if (this.dragState && this.dragState.ghostEl) {
+      this.dragState.ghostEl.remove();
+      clearTimeout(this.dragState.timer);
+      this.dragState = null;
+    }
+    if (this.resizeState && this.resizeState.ghostEl) {
+      this.resizeState.ghostEl.remove();
+      clearTimeout(this.resizeState.timer);
+      this.resizeState = null;
+    }
+  }
+
+  _scheduleGhostExpiry(state) {
+    clearTimeout(state.timer);
+    state.timer = setTimeout(() => {
+      if (state.ghostEl) state.ghostEl.remove();
+      if (this.dragState === state)   this.dragState = null;
+      if (this.resizeState === state) this.resizeState = null;
+    }, GHOST_TTL_MS);
+  }
+
+  // -------------------------------------------------------------------------
+  // Input / drag
+  // -------------------------------------------------------------------------
+
+  _onTitlebarMousedown(e, winEl) {
+    if (e.target.closest('.wm-traffic-lights')) return;
+    const surfaceId = winEl.dataset.surfaceId ?? '';
+    // Bring to front request (server decides z-order).
+    this._sendWindowCmd('focus', { window_id_hint: surfaceId });
+
+    const ghost = this._createGhost(winEl);
+    this.dragState = {
+      surfaceId, ghostEl: ghost, timer: null,
+      startX: e.clientX, startY: e.clientY,
+      origLeft: parseFloat(winEl.style.left || 0),
+      origTop:  parseFloat(winEl.style.top  || 0),
+      winEl
+    };
+    e.preventDefault();
+  }
+
+  _onResizeMousedown(e, winEl, direction) {
+    const surfaceId = winEl.dataset.surfaceId ?? '';
+    this._sendWindowCmd('focus', { window_id_hint: surfaceId });
+
+    const ghost = this._createGhost(winEl);
+    const r = winEl.getBoundingClientRect();
+    this.resizeState = {
+      surfaceId, ghostEl: ghost, timer: null, direction,
+      startX: e.clientX, startY: e.clientY,
+      origW: r.width, origH: r.height,
+      winEl
+    };
+    e.preventDefault();
+  }
+
+  _onMousemove(e) {
+    if (this.dragState) {
+      const ds = this.dragState;
+      const dx = e.clientX - ds.startX;
+      const dy = e.clientY - ds.startY;
+      // Move the ghost only — do NOT mutate the actual window element.
+      // Optimistic: ghost is a 60 ms cosmetic preview.
+      const dr = this.desktop.getBoundingClientRect();
+      ds.ghostEl.style.left = (ds.origLeft + dx) + 'px';
+      ds.ghostEl.style.top  = (ds.origTop  + dy) + 'px';
+      this._scheduleGhostExpiry(ds);
+    }
+    if (this.resizeState) {
+      const rs = this.resizeState;
+      const dx = e.clientX - rs.startX;
+      const dy = e.clientY - rs.startY;
+      const dir = rs.direction;
+      const minW = 200, minH = 120;
+      let w = rs.origW, h = rs.origH;
+      if (dir.includes('e')) w = Math.max(minW, rs.origW + dx);
+      if (dir.includes('s')) h = Math.max(minH, rs.origH + dy);
+      if (dir.includes('w')) w = Math.max(minW, rs.origW - dx);
+      if (dir === 'n' || dir.includes('n')) h = Math.max(minH, rs.origH - dy);
+      rs.ghostEl.style.width  = w + 'px';
+      rs.ghostEl.style.height = h + 'px';
+      this._scheduleGhostExpiry(rs);
+    }
+  }
+
+  _onMouseup(e) {
+    if (this.dragState) {
+      const ds = this.dragState;
+      const dx = e.clientX - ds.startX;
+      const dy = e.clientY - ds.startY;
+      const newX = ds.origLeft + dx;
+      const newY = ds.origTop  + dy;
+      // Send authoritative move request; server will reconcile and patch back.
+      // window_id_hint is a HINT only; server resolves via UiWindowSurfaceRegistry.
+      this._sendWindowCmd('move', {
+        window_id_hint: ds.surfaceId,
+        x: Math.round(newX),
+        y: Math.round(newY)
+      });
+      if (ds.ghostEl) ds.ghostEl.remove();
+      clearTimeout(ds.timer);
+      this.dragState = null;
+    }
+    if (this.resizeState) {
+      const rs = this.resizeState;
+      const dx = e.clientX - rs.startX;
+      const dy = e.clientY - rs.startY;
+      const dir = rs.direction;
+      const minW = 200, minH = 120;
+      let w = rs.origW, h = rs.origH;
+      if (dir.includes('e')) w = Math.max(minW, rs.origW + dx);
+      if (dir.includes('s')) h = Math.max(minH, rs.origH + dy);
+      if (dir.includes('w')) w = Math.max(minW, rs.origW - dx);
+      if (dir === 'n' || dir.includes('n')) h = Math.max(minH, rs.origH - dy);
+      this._sendWindowCmd('resize', {
+        window_id_hint: rs.surfaceId,
+        w: Math.round(w),
+        h: Math.round(h)
+      });
+      if (rs.ghostEl) rs.ghostEl.remove();
+      clearTimeout(rs.timer);
+      this.resizeState = null;
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  // Global event binding
+  // -------------------------------------------------------------------------
+
+  _bindGlobalEvents() {
+    document.addEventListener('mousemove', (e) => this._onMousemove(e));
+    document.addEventListener('mouseup',   (e) => this._onMouseup(e));
+
+    document.addEventListener('mousedown', (e) => {
+      const titlebar = e.target.closest('.wm-titlebar');
+      if (titlebar) {
+        const winEl = titlebar.closest('.wm-window');
+        if (winEl) { this._onTitlebarMousedown(e, winEl); return; }
+      }
+      const handle = e.target.closest('.wm-resize-handle');
+      if (handle) {
+        const winEl = handle.closest('.wm-window');
+        if (winEl) { this._onResizeMousedown(e, winEl, handle.dataset.direction); return; }
+      }
+      // Click anywhere on a window — request focus.
+      const win = e.target.closest('.wm-window');
+      if (win) {
+        const surfaceId = win.dataset.surfaceId ?? win.dataset.canonicalId ?? '';
+        if (surfaceId) this._sendWindowCmd('focus', { window_id_hint: surfaceId });
+      }
+    });
+
+    // Traffic-light buttons.
+    document.addEventListener('click', (e) => {
+      const btn = e.target.closest('.wm-traffic-lights button');
+      if (!btn) return;
+      const win = btn.closest('.wm-window');
+      if (!win) return;
+      const surfaceId = win.dataset.surfaceId ?? '';
+      const action = btn.dataset.action;
+      if      (action === 'close')    this._sendWindowCmd('close',    { window_id_hint: surfaceId });
+      else if (action === 'minimize') this._sendWindowCmd('minimize', { window_id_hint: surfaceId });
+      else if (action === 'maximize') this._sendWindowCmd('maximize', { window_id_hint: surfaceId });
+    });
+
+    // Forward pointer events inside windows as input_event frames.
+    document.addEventListener('pointerdown', (e) => {
+      const widget = e.target.closest('[data-canonical-id]');
+      if (!widget) return;
+      const cid = widget.dataset.canonicalId ?? '';
+      const hash = cid.indexOf('#');
+      const surfId = hash >= 0 ? cid.slice(0, hash) : cid;
+      const widId  = hash >= 0 ? cid.slice(hash + 1) : '';
+      const r = this.desktop ? this.desktop.getBoundingClientRect() : { left: 0, top: 0 };
+      this._sendInputEvent(surfId, widId, {
+        kind: 'pointer_down',
+        x: Math.round(e.clientX - r.left),
+        y: Math.round(e.clientY - r.top),
+        button: e.button
+      });
+    });
+
+    document.addEventListener('pointerup', (e) => {
+      const widget = e.target.closest('[data-canonical-id]');
+      if (!widget) return;
+      const cid = widget.dataset.canonicalId ?? '';
+      const hash = cid.indexOf('#');
+      const surfId = hash >= 0 ? cid.slice(0, hash) : cid;
+      const widId  = hash >= 0 ? cid.slice(hash + 1) : '';
+      const r = this.desktop ? this.desktop.getBoundingClientRect() : { left: 0, top: 0 };
+      this._sendInputEvent(surfId, widId, {
+        kind: 'pointer_up',
+        x: Math.round(e.clientX - r.left),
+        y: Math.round(e.clientY - r.top),
+        button: e.button
+      });
+    });
+
+    document.addEventListener('pointermove', (e) => {
+      // Only forward when inside a known surface.
+      const widget = e.target.closest('[data-surface-id]');
+      if (!widget) return;
+      const surfId = widget.dataset.surfaceId ?? '';
+      if (!surfId) return;
+      const r = this.desktop ? this.desktop.getBoundingClientRect() : { left: 0, top: 0 };
+      this._sendInputEvent(surfId, '', {
+        kind: 'pointer_move',
+        x: Math.round(e.clientX - r.left),
+        y: Math.round(e.clientY - r.top)
+      });
+    });
+
+    document.addEventListener('wheel', (e) => {
+      const widget = e.target.closest('[data-canonical-id]');
+      if (!widget) return;
+      const cid = widget.dataset.canonicalId ?? '';
+      const hash = cid.indexOf('#');
+      const surfId = hash >= 0 ? cid.slice(0, hash) : cid;
+      const widId  = hash >= 0 ? cid.slice(hash + 1) : '';
+      this._sendInputEvent(surfId, widId, {
+        kind: 'wheel',
+        delta_x: Math.round(e.deltaX),
+        delta_y: Math.round(e.deltaY)
+      });
+    });
+
+    document.addEventListener('keydown', (e) => {
+      if (!this.renderer || !this.renderer.activeSurface) return;
+      const surfId = this.renderer.activeSurface;
+      this._sendInputEvent(surfId, '', {
+        kind: 'key_down',
+        key_code: e.keyCode,
+        modifiers: _modifiers(e),
+        repeat: e.repeat
+      });
+    });
+
+    document.addEventListener('keyup', (e) => {
+      if (!this.renderer || !this.renderer.activeSurface) return;
+      const surfId = this.renderer.activeSurface;
+      this._sendInputEvent(surfId, '', {
+        kind: 'key_up',
+        key_code: e.keyCode,
+        modifiers: _modifiers(e)
+      });
+    });
+
+    document.addEventListener('input', (e) => {
+      const widget = e.target.closest('[data-canonical-id]');
+      if (!widget) return;
+      const cid = widget.dataset.canonicalId ?? '';
+      const hash = cid.indexOf('#');
+      const surfId = hash >= 0 ? cid.slice(0, hash) : cid;
+      const widId  = hash >= 0 ? cid.slice(hash + 1) : '';
+      this._sendInputEvent(surfId, widId, {
+        kind: 'text_input',
+        text: e.target.value ?? e.data ?? ''
+      });
+    });
+  }
+
+  // -------------------------------------------------------------------------
+  // Toast (error display)
+  // -------------------------------------------------------------------------
+
+  _showToast(msg) {
+    const t = document.createElement('div');
+    t.className = 'wm-toast';
+    t.textContent = msg;
+    document.body.appendChild(t);
+    setTimeout(() => t.remove(), 4000);
+  }
+}
+
+// -------------------------------------------------------------------------
+// Helpers
+// -------------------------------------------------------------------------
+
+function _modifiers(e) {
+  return (e.shiftKey ? 1 : 0) | (e.ctrlKey ? 2 : 0) | (e.altKey ? 4 : 0) | (e.metaKey ? 8 : 0);
+}
+
+// Global instance — initialized by inline boot script.
+var simpleWM = null;

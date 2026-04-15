@@ -1,0 +1,211 @@
+@allow(primitive_api)
+# OpenGL Runtime SFFI Bindings
+#
+# SFFI pattern for OpenGL 2D rendering.
+# Note: These require OpenGL 3.3+ runtime to be available.
+# The runtime (Rust side) handles GL context creation, shader compilation,
+# VAO/VBO management, and orthographic projection internally.
+
+# ============================================================================
+# Tier 1: Extern Declarations (Raw FFI)
+# ============================================================================
+
+# -- Lifecycle --
+extern fn rt_opengl_init(width: i64, height: i64) -> i64
+extern fn rt_opengl_destroy(ctx: i64) -> bool
+extern fn rt_opengl_is_available() -> i64
+
+# -- Framebuffer Object (Offscreen Rendering) --
+extern fn rt_opengl_create_fbo(ctx: i64, width: i64, height: i64) -> i64
+extern fn rt_opengl_destroy_fbo(ctx: i64, fbo: i64) -> bool
+extern fn rt_opengl_bind_fbo(ctx: i64, fbo: i64) -> bool
+extern fn rt_opengl_read_pixels(ctx: i64, pixels: [u32], width: i64, height: i64) -> bool
+
+# -- Drawing Primitives --
+extern fn rt_opengl_clear(ctx: i64, color: u32) -> bool
+extern fn rt_opengl_draw_rect(ctx: i64, x: i64, y: i64, w: i64, h: i64, color: u32, filled: i64) -> bool
+extern fn rt_opengl_draw_line(ctx: i64, x1: i64, y1: i64, x2: i64, y2: i64, color: u32, thickness: i64) -> bool
+extern fn rt_opengl_draw_circle(ctx: i64, cx: i64, cy: i64, radius: i64, color: u32, filled: i64) -> bool
+extern fn rt_opengl_draw_triangle(ctx: i64, x1: i64, y1: i64, x2: i64, y2: i64, x3: i64, y3: i64, color: u32) -> bool
+extern fn rt_opengl_draw_rounded_rect(ctx: i64, x: i64, y: i64, w: i64, h: i64, radius: i64, color: u32) -> bool
+extern fn rt_opengl_draw_gradient_rect(ctx: i64, x: i64, y: i64, w: i64, h: i64, top_color: u32, bottom_color: u32) -> bool
+extern fn rt_opengl_draw_image(ctx: i64, x: i64, y: i64, w: i64, h: i64, pixels: [u32], img_w: i64, img_h: i64) -> bool
+
+# -- Clipping (Scissor Test) --
+extern fn rt_opengl_set_scissor(ctx: i64, x: i64, y: i64, w: i64, h: i64) -> bool
+extern fn rt_opengl_clear_scissor(ctx: i64) -> bool
+
+# -- Present / Flush --
+extern fn rt_opengl_flush(ctx: i64) -> bool
+
+# -- Error Reporting --
+extern fn rt_opengl_get_last_error() -> text
+
+# ============================================================================
+# Tier 2: Simple-Friendly Wrapper Functions
+# ============================================================================
+
+fn opengl_available() -> bool:
+    """Check if OpenGL runtime is available on this system."""
+    rt_opengl_is_available() != 0
+
+fn opengl_last_error() -> text:
+    """Get the last OpenGL error message."""
+    rt_opengl_get_last_error()
+
+# -- Context Management --
+
+struct OpenGLContext:
+    handle: i64
+    width: i64
+    height: i64
+    is_valid: bool
+
+fn opengl_init(width: i64, height: i64) -> OpenGLContext:
+    """Initialize an OpenGL context for offscreen 2D rendering.
+
+    The runtime creates a headless GL context (EGL/CGL/WGL depending on
+    platform), compiles the 2D shader programs, sets up VAO/VBO, and
+    configures an orthographic projection matrix.
+    """
+    val handle = rt_opengl_init(width, height)
+    OpenGLContext(handle: handle, width: width, height: height, is_valid: handle != 0)
+
+fn opengl_destroy(ctx: OpenGLContext) -> bool:
+    """Destroy an OpenGL context and release all GPU resources."""
+    if not ctx.is_valid:
+        true
+    else:
+        rt_opengl_destroy(ctx.handle)
+
+# -- Framebuffer Objects --
+
+struct OpenGLFBO:
+    handle: i64
+    ctx_handle: i64
+    width: i64
+    height: i64
+    is_valid: bool
+
+fn opengl_create_fbo(ctx: OpenGLContext, width: i64, height: i64) -> OpenGLFBO:
+    """Create a framebuffer object for offscreen rendering."""
+    if not ctx.is_valid:
+        OpenGLFBO(handle: 0, ctx_handle: ctx.handle, width: width, height: height, is_valid: false)
+    else:
+        val handle = rt_opengl_create_fbo(ctx.handle, width, height)
+        OpenGLFBO(handle: handle, ctx_handle: ctx.handle, width: width, height: height, is_valid: handle != 0)
+
+fn opengl_destroy_fbo(ctx: OpenGLContext, fbo: OpenGLFBO) -> bool:
+    """Destroy a framebuffer object."""
+    if not ctx.is_valid or not fbo.is_valid:
+        true
+    else:
+        rt_opengl_destroy_fbo(ctx.handle, fbo.handle)
+
+fn opengl_bind_fbo(ctx: OpenGLContext, fbo: OpenGLFBO) -> bool:
+    """Bind a framebuffer object as the current render target."""
+    if not ctx.is_valid or not fbo.is_valid:
+        false
+    else:
+        rt_opengl_bind_fbo(ctx.handle, fbo.handle)
+
+fn opengl_read_pixels(ctx: OpenGLContext, pixels: [u32], width: i64, height: i64) -> bool:
+    """Read pixel data from the current framebuffer into the provided buffer."""
+    if not ctx.is_valid:
+        false
+    else:
+        rt_opengl_read_pixels(ctx.handle, pixels, width, height)
+
+# -- Drawing Primitives --
+
+fn opengl_clear(ctx: OpenGLContext, color: u32) -> bool:
+    """Clear the current framebuffer with the specified color."""
+    if not ctx.is_valid:
+        false
+    else:
+        rt_opengl_clear(ctx.handle, color)
+
+fn opengl_draw_rect(ctx: OpenGLContext, x: i64, y: i64, w: i64, h: i64, color: u32, filled: bool) -> bool:
+    """Draw a rectangle (outline or filled)."""
+    if not ctx.is_valid:
+        false
+    else:
+        var filled_flag: i64 = 0
+        if filled:
+            filled_flag = 1
+        rt_opengl_draw_rect(ctx.handle, x, y, w, h, color, filled_flag)
+
+fn opengl_draw_line(ctx: OpenGLContext, x1: i64, y1: i64, x2: i64, y2: i64, color: u32, thickness: i64) -> bool:
+    """Draw a line with specified thickness."""
+    if not ctx.is_valid:
+        false
+    else:
+        rt_opengl_draw_line(ctx.handle, x1, y1, x2, y2, color, thickness)
+
+fn opengl_draw_circle(ctx: OpenGLContext, cx: i64, cy: i64, radius: i64, color: u32, filled: bool) -> bool:
+    """Draw a circle (outline or filled)."""
+    if not ctx.is_valid:
+        false
+    else:
+        var filled_flag: i64 = 0
+        if filled:
+            filled_flag = 1
+        rt_opengl_draw_circle(ctx.handle, cx, cy, radius, color, filled_flag)
+
+fn opengl_draw_triangle(ctx: OpenGLContext, x1: i64, y1: i64, x2: i64, y2: i64, x3: i64, y3: i64, color: u32) -> bool:
+    """Draw a filled triangle."""
+    if not ctx.is_valid:
+        false
+    else:
+        rt_opengl_draw_triangle(ctx.handle, x1, y1, x2, y2, x3, y3, color)
+
+fn opengl_draw_rounded_rect(ctx: OpenGLContext, x: i64, y: i64, w: i64, h: i64, radius: i64, color: u32) -> bool:
+    """Draw a filled rounded rectangle."""
+    if not ctx.is_valid:
+        false
+    else:
+        rt_opengl_draw_rounded_rect(ctx.handle, x, y, w, h, radius, color)
+
+fn opengl_draw_gradient_rect(ctx: OpenGLContext, x: i64, y: i64, w: i64, h: i64, top_color: u32, bottom_color: u32) -> bool:
+    """Draw a rectangle with a vertical gradient (top to bottom)."""
+    if not ctx.is_valid:
+        false
+    else:
+        rt_opengl_draw_gradient_rect(ctx.handle, x, y, w, h, top_color, bottom_color)
+
+fn opengl_draw_image(ctx: OpenGLContext, x: i64, y: i64, w: i64, h: i64, pixels: [u32], img_w: i64, img_h: i64) -> bool:
+    """Draw pixel data as a textured quad at (x, y) with size (w, h)."""
+    if not ctx.is_valid:
+        false
+    else:
+        rt_opengl_draw_image(ctx.handle, x, y, w, h, pixels, img_w, img_h)
+
+# -- Clipping (Scissor Test) --
+
+fn opengl_set_scissor(ctx: OpenGLContext, x: i64, y: i64, w: i64, h: i64) -> bool:
+    """Enable scissor test and set the scissor rectangle."""
+    if not ctx.is_valid:
+        false
+    else:
+        rt_opengl_set_scissor(ctx.handle, x, y, w, h)
+
+fn opengl_clear_scissor(ctx: OpenGLContext) -> bool:
+    """Disable scissor test (drawing covers full framebuffer)."""
+    if not ctx.is_valid:
+        false
+    else:
+        rt_opengl_clear_scissor(ctx.handle)
+
+# -- Present / Flush --
+
+fn opengl_flush(ctx: OpenGLContext) -> bool:
+    """Flush all pending GL commands to the GPU."""
+    if not ctx.is_valid:
+        false
+    else:
+        rt_opengl_flush(ctx.handle)
+
+# ============================================================================
+# Exports
+# ============================================================================
+

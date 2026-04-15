@@ -1,0 +1,346 @@
+"""
+# HTTP Server Configuration
+
+Parses SDN configuration files into ServerConfig.
+
+## SDN Config Format
+
+```sdn
+server:
+  listen: "0.0.0.0:8080"
+  worker_count: 0
+  max_connections: 10000
+  server_name: "my-app"
+  timeouts:
+    keepalive: 65000
+    read: 60000
+    write: 60000
+  client_max_body_size: 1048576
+  access_log: "logs/access.log"
+  error_log: "logs/error.log"
+  locations:
+    - pattern: "/static/"
+      match: prefix
+      handler: static
+      root: "/var/www/static"
+    - pattern: "/api/"
+      match: prefix
+      handler: app
+  upstreams:
+    - name: "backend"
+      strategy: round_robin
+      servers:
+        - addr: "127.0.0.1:3000"
+          weight: 5
+```
+"""
+
+use std.sdn.{parse, parse_file, SdnValue}
+use std.http_server.types.{
+    ServerConfig, LocationConfig, UpstreamConfig, UpstreamServer,
+    LoadBalanceStrategy, default_server_config, default_location_config
+}
+use std.http_server.error.{HttpServerError}
+
+# ============================================================================
+# Public API
+# ============================================================================
+
+fn load_config(path: text) -> Result<ServerConfig, HttpServerError>:
+    """Load server configuration from an SDN file.
+
+    Args:
+        path: Path to the .sdn config file
+
+    Returns:
+        Parsed ServerConfig or ConfigError
+    """
+    val content = parse_file(path)
+    if content.?:
+        parse_server_config(content)
+    else:
+        Err(HttpServerError.ConfigError("Failed to read config file: {path}"))
+
+fn parse_config_text(source: text) -> Result<ServerConfig, HttpServerError>:
+    """Parse server configuration from an SDN text string.
+
+    Args:
+        source: SDN-formatted text
+
+    Returns:
+        Parsed ServerConfig or ConfigError
+    """
+    val value = parse(source)
+    if value.?:
+        parse_server_config(value)
+    else:
+        Err(HttpServerError.ConfigError("Failed to parse SDN config"))
+
+# ============================================================================
+# Parsing
+# ============================================================================
+
+fn parse_server_config(root: SdnValue) -> Result<ServerConfig, HttpServerError>:
+    """Parse top-level server block."""
+    val server = root.get("server")
+    if not server.?:
+        return Err(HttpServerError.ConfigError("Missing 'server' block"))
+
+    var config = default_server_config()
+
+    val listen = server.get_text("listen")
+    if listen.?:
+        config = ServerConfig(
+            listen_addr: listen,
+            worker_count: config.worker_count,
+            max_connections: config.max_connections,
+            keepalive_timeout_ms: config.keepalive_timeout_ms,
+            read_timeout_ms: config.read_timeout_ms,
+            write_timeout_ms: config.write_timeout_ms,
+            client_max_body_size: config.client_max_body_size,
+            server_name: config.server_name,
+            locations: config.locations,
+            upstreams: config.upstreams,
+            access_log: config.access_log,
+            error_log: config.error_log
+        )
+
+    val server_name = server.get_text("server_name")
+    if server_name.?:
+        config = ServerConfig(
+            listen_addr: config.listen_addr,
+            worker_count: config.worker_count,
+            max_connections: config.max_connections,
+            keepalive_timeout_ms: config.keepalive_timeout_ms,
+            read_timeout_ms: config.read_timeout_ms,
+            write_timeout_ms: config.write_timeout_ms,
+            client_max_body_size: config.client_max_body_size,
+            server_name: server_name,
+            locations: config.locations,
+            upstreams: config.upstreams,
+            access_log: config.access_log,
+            error_log: config.error_log
+        )
+
+    val wc = server.get_int("worker_count")
+    if wc.?:
+        config = ServerConfig(
+            listen_addr: config.listen_addr,
+            worker_count: wc,
+            max_connections: config.max_connections,
+            keepalive_timeout_ms: config.keepalive_timeout_ms,
+            read_timeout_ms: config.read_timeout_ms,
+            write_timeout_ms: config.write_timeout_ms,
+            client_max_body_size: config.client_max_body_size,
+            server_name: config.server_name,
+            locations: config.locations,
+            upstreams: config.upstreams,
+            access_log: config.access_log,
+            error_log: config.error_log
+        )
+
+    val mc = server.get_int("max_connections")
+    if mc.?:
+        config = ServerConfig(
+            listen_addr: config.listen_addr,
+            worker_count: config.worker_count,
+            max_connections: mc,
+            keepalive_timeout_ms: config.keepalive_timeout_ms,
+            read_timeout_ms: config.read_timeout_ms,
+            write_timeout_ms: config.write_timeout_ms,
+            client_max_body_size: config.client_max_body_size,
+            server_name: config.server_name,
+            locations: config.locations,
+            upstreams: config.upstreams,
+            access_log: config.access_log,
+            error_log: config.error_log
+        )
+
+    val body_size = server.get_int("client_max_body_size")
+    if body_size.?:
+        config = ServerConfig(
+            listen_addr: config.listen_addr,
+            worker_count: config.worker_count,
+            max_connections: config.max_connections,
+            keepalive_timeout_ms: config.keepalive_timeout_ms,
+            read_timeout_ms: config.read_timeout_ms,
+            write_timeout_ms: config.write_timeout_ms,
+            client_max_body_size: body_size,
+            server_name: config.server_name,
+            locations: config.locations,
+            upstreams: config.upstreams,
+            access_log: config.access_log,
+            error_log: config.error_log
+        )
+
+    # Parse timeouts block
+    val timeouts = server.get("timeouts")
+    if timeouts.?:
+        config = parse_timeouts(config, timeouts)
+
+    val al = server.get_text("access_log")
+    if al.?:
+        config = ServerConfig(
+            listen_addr: config.listen_addr,
+            worker_count: config.worker_count,
+            max_connections: config.max_connections,
+            keepalive_timeout_ms: config.keepalive_timeout_ms,
+            read_timeout_ms: config.read_timeout_ms,
+            write_timeout_ms: config.write_timeout_ms,
+            client_max_body_size: config.client_max_body_size,
+            server_name: config.server_name,
+            locations: config.locations,
+            upstreams: config.upstreams,
+            access_log: al,
+            error_log: config.error_log
+        )
+
+    val el = server.get_text("error_log")
+    if el.?:
+        config = ServerConfig(
+            listen_addr: config.listen_addr,
+            worker_count: config.worker_count,
+            max_connections: config.max_connections,
+            keepalive_timeout_ms: config.keepalive_timeout_ms,
+            read_timeout_ms: config.read_timeout_ms,
+            write_timeout_ms: config.write_timeout_ms,
+            client_max_body_size: config.client_max_body_size,
+            server_name: config.server_name,
+            locations: config.locations,
+            upstreams: config.upstreams,
+            access_log: config.access_log,
+            error_log: el
+        )
+
+    # Parse locations
+    val locs = server.get_list("locations")
+    if locs.?:
+        var locations: [LocationConfig] = []
+        for loc in locs:
+            locations = locations + [parse_location(loc)]
+        config = ServerConfig(
+            listen_addr: config.listen_addr,
+            worker_count: config.worker_count,
+            max_connections: config.max_connections,
+            keepalive_timeout_ms: config.keepalive_timeout_ms,
+            read_timeout_ms: config.read_timeout_ms,
+            write_timeout_ms: config.write_timeout_ms,
+            client_max_body_size: config.client_max_body_size,
+            server_name: config.server_name,
+            locations: locations,
+            upstreams: config.upstreams,
+            access_log: config.access_log,
+            error_log: config.error_log
+        )
+
+    # Parse upstreams
+    val ups = server.get_list("upstreams")
+    if ups.?:
+        var upstreams: [UpstreamConfig] = []
+        for u in ups:
+            upstreams = upstreams + [parse_upstream(u)]
+        config = ServerConfig(
+            listen_addr: config.listen_addr,
+            worker_count: config.worker_count,
+            max_connections: config.max_connections,
+            keepalive_timeout_ms: config.keepalive_timeout_ms,
+            read_timeout_ms: config.read_timeout_ms,
+            write_timeout_ms: config.write_timeout_ms,
+            client_max_body_size: config.client_max_body_size,
+            server_name: config.server_name,
+            locations: config.locations,
+            upstreams: upstreams,
+            access_log: config.access_log,
+            error_log: config.error_log
+        )
+
+    Ok(config)
+
+fn parse_timeouts(config: ServerConfig, timeouts: SdnValue) -> ServerConfig:
+    """Parse timeouts sub-block."""
+    var ka = config.keepalive_timeout_ms
+    var rd = config.read_timeout_ms
+    var wr = config.write_timeout_ms
+
+    val ka_val = timeouts.get_int("keepalive")
+    if ka_val.?:
+        ka = ka_val
+
+    val rd_val = timeouts.get_int("read")
+    if rd_val.?:
+        rd = rd_val
+
+    val wr_val = timeouts.get_int("write")
+    if wr_val.?:
+        wr = wr_val
+
+    ServerConfig(
+        listen_addr: config.listen_addr,
+        worker_count: config.worker_count,
+        max_connections: config.max_connections,
+        keepalive_timeout_ms: ka,
+        read_timeout_ms: rd,
+        write_timeout_ms: wr,
+        client_max_body_size: config.client_max_body_size,
+        server_name: config.server_name,
+        locations: config.locations,
+        upstreams: config.upstreams,
+        access_log: config.access_log,
+        error_log: config.error_log
+    )
+
+fn parse_location(loc: SdnValue) -> LocationConfig:
+    """Parse a single location block."""
+    val pattern = loc.get_text("pattern") ?? "/"
+    val match_type = loc.get_text("match") ?? "prefix"
+    val handler_type = loc.get_text("handler") ?? "static"
+    val root = loc.get_text("root") ?? "."
+    val proxy_pass = loc.get_text("proxy_pass") ?? ""
+
+    var middlewares: [text] = []
+    val mw_list = loc.get_list("middlewares")
+    if mw_list.?:
+        for mw in mw_list:
+            val name = mw.as_text()
+            if name.?:
+                middlewares = middlewares + [name]
+
+    LocationConfig(
+        pattern: pattern,
+        match_type: match_type,
+        handler_type: handler_type,
+        root: root,
+        proxy_pass: proxy_pass,
+        middlewares: middlewares
+    )
+
+fn parse_upstream(u: SdnValue) -> UpstreamConfig:
+    """Parse a single upstream block."""
+    val name = u.get_text("name") ?? "default"
+    val strategy_str = u.get_text("strategy") ?? "round_robin"
+    val strategy = match strategy_str:
+        "least_connections": LoadBalanceStrategy.LeastConnections
+        "ip_hash": LoadBalanceStrategy.IpHash
+        _: LoadBalanceStrategy.RoundRobin
+
+    var servers: [UpstreamServer] = []
+    val srv_list = u.get_list("servers")
+    if srv_list.?:
+        for s in srv_list:
+            servers = servers + [parse_upstream_server(s)]
+
+    UpstreamConfig(name: name, servers: servers, strategy: strategy)
+
+fn parse_upstream_server(s: SdnValue) -> UpstreamServer:
+    """Parse a single upstream server entry."""
+    val addr = s.get_text("addr") ?? "127.0.0.1:8080"
+    val weight = s.get_int("weight") ?? 1
+    val max_fails = s.get_int("max_fails") ?? 3
+    val fail_timeout = s.get_int("fail_timeout") ?? 10000
+
+    UpstreamServer(
+        addr: addr,
+        weight: weight,
+        max_fails: max_fails,
+        fail_timeout_ms: fail_timeout
+    )

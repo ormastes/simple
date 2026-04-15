@@ -1,0 +1,66 @@
+@allow(primitive_api)
+# std.play.xvfb — Linux Xvfb wrapper
+#
+# Mirrors scripts/t32_host_bootstrap.shs:65-82 (t32_run_xvfb) for use from
+# Simple code. On macOS and Windows this module is a no-op; on Linux it
+# auto-wraps commands in `xvfb-run -a` when DISPLAY is not set.
+
+extern fn rt_env_get(key: text) -> text
+extern fn rt_dir_exists(path: text) -> bool
+extern fn rt_file_exists(path: text) -> bool
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+
+fn is_linux() -> bool:
+    val uname = rt_process_run("uname", ["-s"])
+    uname.0.trim() == "Linux"
+
+fn is_macos() -> bool:
+    val uname = rt_process_run("uname", ["-s"])
+    uname.0.trim() == "Darwin"
+
+fn is_windows() -> bool:
+    val os = rt_env_get("OS")
+    if os == "" or os == nil: false else: os.lower().contains("windows")
+
+fn display_is_set() -> bool:
+    val d = rt_env_get("DISPLAY")
+    if d == "" or d == nil: false else: true
+
+fn needs_xvfb() -> bool:
+    """True iff we're on Linux without an existing DISPLAY."""
+    if not is_linux(): return false
+    if display_is_set(): return false
+    true
+
+fn xvfb_run_available() -> bool:
+    val check = rt_process_run("which", ["xvfb-run"])
+    check.2 == 0 and check.0.trim() != ""
+
+fn wrap_cmd(cmd: text, args: [text]) -> (text, [text]):
+    """If we need Xvfb, return (xvfb-run, ["-a", cmd, ...args]).
+    Otherwise return (cmd, args) unchanged."""
+    if not needs_xvfb():
+        return (cmd, args)
+    if not xvfb_run_available():
+        return (cmd, args)
+    var wrapped: [text] = ["-a"]
+    # Check for font path (matches t32_setup_xvfb_args)
+    val font_dir = rt_env_get("T32_FONT_DIR")
+    if font_dir != "" and font_dir != nil:
+        if rt_dir_exists(font_dir) and rt_file_exists(font_dir + "/fonts.dir"):
+            wrapped.push("-s")
+            wrapped.push("-fp " + font_dir)
+    wrapped.push(cmd)
+    for a in args:
+        wrapped.push(a)
+    ("xvfb-run", wrapped)
+
+fn maybe_wrap_cmd(cmd: text, args: [text], force_xvfb: bool) -> (text, [text]):
+    """Like wrap_cmd but force_xvfb=true forces wrapping on Linux regardless
+    of DISPLAY (useful for CI where a real display exists but we want Xvfb)."""
+    if force_xvfb and is_linux() and xvfb_run_available():
+        var wrapped: [text] = ["-a", cmd]
+        for a in args:
+            wrapped.push(a)
+        return ("xvfb-run", wrapped)
+    wrap_cmd(cmd, args)

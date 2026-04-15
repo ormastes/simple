@@ -1,1 +1,0 @@
-/Users/ormastes/simple/src/app/ui.web/wm.js

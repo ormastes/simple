@@ -1,0 +1,119 @@
+# Shared JIT Utilities
+#
+# Canonical hex formatting and integer parsing functions.
+# Used by jit_hal, remote exec adapters, compiler bridge, and uploader.
+
+fn hex_i64(v: i64) -> text:
+    """Convert i64 to hex string (no 0x prefix)."""
+    if v == 0:
+        return "0"
+    var result = ""
+    var remaining = v
+    while remaining > 0:
+        val nibble = remaining & 0xF
+        result = hex_char(nibble) + result
+        remaining = remaining >> 4
+    result
+
+fn hex_0x_i64(v: i64) -> text:
+    """Convert i64 to hex string with 0x prefix."""
+    "0x{hex_i64(v)}"
+
+fn hex_i32(v: i32) -> text:
+    """Convert i32 to hex string with 0x prefix."""
+    hex_0x_i64(v as i64)
+
+fn hex_byte(v: i32) -> text:
+    """Convert byte to 2-char hex string."""
+    val hi = (v >> 4) & 0xF
+    val lo = v & 0xF
+    "{hex_char(hi as i64)}{hex_char(lo as i64)}"
+
+fn hex_char(v: i64) -> text:
+    match v:
+        0: "0"
+        1: "1"
+        2: "2"
+        3: "3"
+        4: "4"
+        5: "5"
+        6: "6"
+        7: "7"
+        8: "8"
+        9: "9"
+        10: "a"
+        11: "b"
+        12: "c"
+        13: "d"
+        14: "e"
+        15: "f"
+        _: "?"
+
+fn parse_i64(s: text) -> i64:
+    s.trim().parse_int() ?? -1
+
+fn parse_hex(s: text) -> i64:
+    var hex = s.trim().lower()
+    if hex.starts_with("0x"):
+        hex = hex[2:hex.len()]
+    var result: i64 = 0
+    var i = 0
+    while i < hex.len():
+        val c = hex[i:i + 1]
+        var digit: i64 = 0
+        if c >= "0" and c <= "9":
+            digit = (c.parse_int() ?? 0) as i64
+        elif c == "a":
+            digit = 10
+        elif c == "b":
+            digit = 11
+        elif c == "c":
+            digit = 12
+        elif c == "d":
+            digit = 13
+        elif c == "e":
+            digit = 14
+        elif c == "f":
+            digit = 15
+        else:
+            i = i + 1
+            continue
+        result = result * 16 + digit
+        i = i + 1
+    result
+
+fn extract_reg_value(output: text) -> i64:
+    if not output.contains("0x"):
+        return -1
+    val parts = output.split("0x")
+    if parts.len() < 2:
+        return -1
+    val hex_tail = parts[1]
+    var end = 0
+    while end < hex_tail.len():
+        val c = hex_tail[end:end + 1]
+        val is_hex = (c >= "0" and c <= "9") or (c >= "a" and c <= "f") or (c >= "A" and c <= "F")
+        if not is_hex:
+            break
+        end = end + 1
+    if end <= 0:
+        return -1
+    parse_hex("0x" + hex_tail[0:end])
+
+fn parse_mdw_bytes(output: text, size: i64) -> [i32]:
+    var bytes: [i32] = []
+    val lines = output.split("\n")
+    for line in lines:
+        val parts = line.split(": ")
+        if parts.len() < 2:
+            continue
+        val word_text = parts[1].trim()
+        val word = parse_hex(word_text)
+        bytes.push((word & 0xFF) as i32)
+        bytes.push(((word >> 8) & 0xFF) as i32)
+        bytes.push(((word >> 16) & 0xFF) as i32)
+        bytes.push(((word >> 24) & 0xFF) as i32)
+    if bytes.len() > size:
+        bytes[0:size]
+    else:
+        bytes

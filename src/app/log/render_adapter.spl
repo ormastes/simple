@@ -1,0 +1,217 @@
+#![allow(unnamed_duplicate_typed_args)]
+# Log Viewer Render Adapter
+#
+# Bridges the log app to the shared ui.render contract.
+# Produces text (colored log lines with timestamps) and HTML
+# (filterable log table with level badges) via RenderResult.
+
+use app.ui.render.types.{RenderConfig, RenderResult}
+use app.ui.render.html.{html_page, html_card, html_table, html_badge, html_escape, css_dark_theme, css_light_theme, css_reset}
+use app.ui.render.ansi.{colorize, RESET, BOLD, DIM, GREEN, RED, YELLOW, CYAN, WHITE, BRIGHT_BLACK}
+use app.ui.render.fmt.{fmt_timestamp}
+use app.ui.render.css.{card_css, badge_css, table_css}
+
+# =========================================================================
+# Render Adapter Entry Point
+# =========================================================================
+
+fn render_log(config: RenderConfig) -> RenderResult:
+    """Render log viewer output via the shared render contract.
+
+    Dispatches to text or HTML rendering based on config.format.
+    Shows log entries with timestamps, levels, and messages.
+    """
+    match config.format:
+        "html":
+            return render_log_html(config)
+        "both":
+            return RenderResult.both(
+                render_log_text(config).text_output,
+                render_log_html(config).html_output
+            )
+        _:
+            return render_log_text(config)
+
+# =========================================================================
+# Text Rendering
+# =========================================================================
+
+fn render_log_text(config: RenderConfig) -> RenderResult:
+    """Render log entries as ANSI-colored text with timestamps.
+
+    Shows header, status line, and colored log entries by level.
+    """
+    var lines: [text] = []
+
+    # Header
+    lines.push(colorize("Debug Log Viewer", BOLD))
+    lines.push(colorize("Storage: .build/debug_log/", DIM))
+    lines.push("")
+
+    # Status
+    lines.push(colorize("Status:", BOLD) + " " + colorize("enabled", GREEN) + "  " + colorize("Pattern:", BOLD) + " *")
+    lines.push(colorize("Entries:", BOLD) + " 6")
+    lines.push("")
+
+    # Log entries with colored levels and timestamps
+    lines.push(colorize("Recent entries:", BOLD))
+    lines.push("")
+    lines.push(format_log_line("2026-04-03 10:15:32", "INFO", "Module loaded: std.fs", GREEN))
+    lines.push(format_log_line("2026-04-03 10:15:33", "DEBUG", "Resolving import: std.cli.cli_util", CYAN))
+    lines.push(format_log_line("2026-04-03 10:15:33", "INFO", "Parser: 142 tokens processed", GREEN))
+    lines.push(format_log_line("2026-04-03 10:15:34", "WARN", "Unused variable: temp_val", YELLOW))
+    lines.push(format_log_line("2026-04-03 10:15:35", "ERROR", "Type mismatch: expected i64, got text", RED))
+    lines.push(format_log_line("2026-04-03 10:15:35", "DEBUG", "Codegen: emitting function main", CYAN))
+
+    # Subcommands
+    lines.push("")
+    lines.push(colorize("Subcommands:", BOLD))
+    lines.push("  " + colorize("enable", CYAN) + "   Enable logging")
+    lines.push("  " + colorize("disable", CYAN) + "  Disable logging")
+    lines.push("  " + colorize("clear", CYAN) + "    Clear log entries")
+    lines.push("  " + colorize("query", CYAN) + "    Query with filters")
+    lines.push("  " + colorize("tree", CYAN) + "     Render as call tree")
+    lines.push("  " + colorize("status", CYAN) + "   Show log status")
+
+    var result = RenderResult.text(join_lines(lines))
+    result.metadata = log_metadata()
+    return result
+
+fn format_log_line(timestamp: text, level: text, message: text, color: text) -> text:
+    """Format a single log line with colored level and timestamp."""
+    val ts = colorize(timestamp, BRIGHT_BLACK)
+    val padded_level = pad_level(level)
+    val lvl = colorize(padded_level, color)
+    return "{ts}  {lvl}  {message}"
+
+fn pad_level(level: text) -> text:
+    """Pad log level string to 5 chars for alignment."""
+    if level.len() >= 5:
+        return level
+    var padded = level
+    while padded.len() < 5:
+        padded = "{padded} "
+    return padded
+
+# =========================================================================
+# HTML Rendering
+# =========================================================================
+
+fn render_log_html(config: RenderConfig) -> RenderResult:
+    """Render log entries as a full HTML page with filterable table."""
+    val theme_css = if config.theme == "light": css_light_theme() else: css_dark_theme()
+    val css = css_reset() + theme_css + card_css() + badge_css() + table_css() + log_css()
+    val body = log_html_body()
+    val page = html_page("Debug Log Viewer", css, body)
+
+    var result = RenderResult.html(page)
+    result.metadata = log_metadata()
+    return result
+
+fn log_css() -> text:
+    """Log-viewer-specific CSS styles."""
+    var s = ""
+    s = "{s}.log-container {\n"
+    s = "{s}  max-width: 1000px;\n"
+    s = "{s}  margin: 0 auto;\n"
+    s = "{s}}\n"
+    s = "{s}.log-header {\n"
+    s = "{s}  margin-bottom: 20px;\n"
+    s = "{s}}\n"
+    s = "{s}.log-header h1 {\n"
+    s = "{s}  font-size: 20px;\n"
+    s = "{s}  color: var(--blue, #58a6ff);\n"
+    s = "{s}}\n"
+    s = "{s}.log-header .subtitle {\n"
+    s = "{s}  font-size: 13px;\n"
+    s = "{s}  color: var(--text-dim, #8b949e);\n"
+    s = "{s}}\n"
+    s = "{s}.log-status {\n"
+    s = "{s}  display: flex;\n"
+    s = "{s}  gap: 20px;\n"
+    s = "{s}  font-size: 13px;\n"
+    s = "{s}  color: var(--text-dim, #8b949e);\n"
+    s = "{s}  margin-bottom: 16px;\n"
+    s = "{s}  padding: 8px 12px;\n"
+    s = "{s}  background: var(--bg-card, #161b22);\n"
+    s = "{s}  border: 1px solid var(--border, #30363d);\n"
+    s = "{s}  border-radius: 6px;\n"
+    s = "{s}}\n"
+    s = "{s}.log-status .enabled {\n"
+    s = "{s}  color: var(--green, #3fb950);\n"
+    s = "{s}}\n"
+    s = "{s}.log-msg {\n"
+    s = "{s}  font-family: 'SF Mono', 'Fira Code', monospace;\n"
+    s = "{s}  font-size: 13px;\n"
+    s = "{s}}\n"
+    return s
+
+fn level_badge(level: text) -> text:
+    """Return an HTML badge colored by log level."""
+    match level:
+        "ERROR":
+            return html_badge("ERROR", "#f85149")
+        "WARN":
+            return html_badge("WARN", "#d29922")
+        "INFO":
+            return html_badge("INFO", "#3fb950")
+        "DEBUG":
+            return html_badge("DEBUG", "#58a6ff")
+        _:
+            return html_badge(level, "#8b949e")
+
+fn log_html_body() -> text:
+    """Generate log viewer HTML body content."""
+    var h = ""
+    h = "{h}<div class=\"log-container\">\n"
+
+    # Header
+    h = "{h}  <div class=\"log-header\">\n"
+    h = "{h}    <h1>Debug Log Viewer</h1>\n"
+    h = "{h}    <div class=\"subtitle\">Storage: .build/debug_log/</div>\n"
+    h = "{h}  </div>\n"
+
+    # Status bar
+    h = "{h}  <div class=\"log-status\">\n"
+    h = "{h}    <span>Status: <span class=\"enabled\">enabled</span></span>\n"
+    h = "{h}    <span>Pattern: *</span>\n"
+    h = "{h}    <span>Entries: 6</span>\n"
+    h = "{h}  </div>\n"
+
+    # Log table
+    val headers = ["Timestamp", "Level", "Message"]
+    val rows = [
+        ["2026-04-03 10:15:32", level_badge("INFO"), "<span class=\"log-msg\">" + html_escape("Module loaded: std.fs") + "</span>"],
+        ["2026-04-03 10:15:33", level_badge("DEBUG"), "<span class=\"log-msg\">" + html_escape("Resolving import: std.cli.cli_util") + "</span>"],
+        ["2026-04-03 10:15:33", level_badge("INFO"), "<span class=\"log-msg\">" + html_escape("Parser: 142 tokens processed") + "</span>"],
+        ["2026-04-03 10:15:34", level_badge("WARN"), "<span class=\"log-msg\">" + html_escape("Unused variable: temp_val") + "</span>"],
+        ["2026-04-03 10:15:35", level_badge("ERROR"), "<span class=\"log-msg\">" + html_escape("Type mismatch: expected i64, got text") + "</span>"],
+        ["2026-04-03 10:15:35", level_badge("DEBUG"), "<span class=\"log-msg\">" + html_escape("Codegen: emitting function main") + "</span>"]
+    ]
+    h = "{h}  {html_card("Log Entries", html_table(headers, rows))}\n"
+
+    h = "{h}</div>\n"
+    return h
+
+# =========================================================================
+# Helpers
+# =========================================================================
+
+fn join_lines(lines: [text]) -> text:
+    """Join lines with newline separator."""
+    var result = ""
+    var first = true
+    for line in lines:
+        if not first:
+            result = "{result}\n"
+        result = "{result}{line}"
+        first = false
+    return result
+
+fn log_metadata() -> Dict<text, text>:
+    """Build metadata for log render results."""
+    var meta: Dict<text, text> = {}
+    meta["adapter"] = "log"
+    meta["storage"] = ".build/debug_log/"
+    meta["entry_count"] = "6"
+    return meta

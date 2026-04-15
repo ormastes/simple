@@ -1,0 +1,671 @@
+# Hex Editor — Binary File Viewer/Editor
+#
+# Displays binary data in hex + ASCII side-by-side view with cursor
+# navigation, hex digit editing, and go-to-offset support.
+# 16 bytes per row: OFFSET: HH HH ... HH  HH HH ... HH  |ASCII...|
+#
+# MDSOC: feature dimension, apps layer
+
+use common.ui.builder.{
+    column, row, panel, button, text_widget, label,
+    statusbar, menubar, build_tree_with_title,
+    with_flex, with_width
+}
+use common.ui.widget.{WidgetNode, UITree, UIEvent}
+use common.ui.session.{UISession}
+
+# =========================================================================
+# Hex Chars Lookup
+# =========================================================================
+
+fn _hex_chars() -> [text]:
+    """Return the 16 hex digit characters."""
+    return ["0", "1", "2", "3", "4", "5", "6", "7",
+            "8", "9", "A", "B", "C", "D", "E", "F"]
+
+# =========================================================================
+# Hex Editor App
+# =========================================================================
+
+class HexEditorApp:
+    """Binary file viewer/editor.
+
+    Displays data as hex + ASCII side-by-side, 16 bytes per row.
+    Supports cursor navigation, hex digit editing, go-to-offset,
+    and toggle between hex and ASCII panes.
+    """
+    data: [i32]
+    cursor_offset: i32
+    view_offset: i32
+    rows_visible: i32
+    editing_hex: bool
+    nibble_pos: i32
+    file_path: text
+    modified: bool
+    show_ascii: bool
+    goto_buffer: text
+    goto_active: bool
+    status_message: text
+
+impl HexEditorApp:
+
+    static fn new() -> HexEditorApp:
+        """Create a hex editor with 256 sample bytes."""
+        var sample = []
+        # Header bytes (simulating an ELF-like header)
+        sample = sample.push(0x7F)  # 0
+        sample = sample.push(0x45)  # E
+        sample = sample.push(0x4C)  # L
+        sample = sample.push(0x46)  # F
+        sample = sample.push(0x02)
+        sample = sample.push(0x01)
+        sample = sample.push(0x01)
+        sample = sample.push(0x00)
+        sample = sample.push(0x00)
+        sample = sample.push(0x00)
+        sample = sample.push(0x00)
+        sample = sample.push(0x00)
+        sample = sample.push(0x00)
+        sample = sample.push(0x00)
+        sample = sample.push(0x00)
+        sample = sample.push(0x00)
+        # Text section bytes
+        sample = sample.push(0x48)  # H
+        sample = sample.push(0x65)  # e
+        sample = sample.push(0x6C)  # l
+        sample = sample.push(0x6C)  # l
+        sample = sample.push(0x6F)  # o
+        sample = sample.push(0x2C)  # ,
+        sample = sample.push(0x20)  # (space)
+        sample = sample.push(0x57)  # W
+        sample = sample.push(0x6F)  # o
+        sample = sample.push(0x72)  # r
+        sample = sample.push(0x6C)  # l
+        sample = sample.push(0x64)  # d
+        sample = sample.push(0x21)  # !
+        sample = sample.push(0x0A)  # newline
+        sample = sample.push(0x00)
+        sample = sample.push(0x00)
+        # Various byte patterns
+        sample = sample.push(0xFF)
+        sample = sample.push(0xFE)
+        sample = sample.push(0xFD)
+        sample = sample.push(0xFC)
+        sample = sample.push(0xDE)
+        sample = sample.push(0xAD)
+        sample = sample.push(0xBE)
+        sample = sample.push(0xEF)
+        sample = sample.push(0xCA)
+        sample = sample.push(0xFE)
+        sample = sample.push(0xBA)
+        sample = sample.push(0xBE)
+        sample = sample.push(0x01)
+        sample = sample.push(0x02)
+        sample = sample.push(0x03)
+        sample = sample.push(0x04)
+        # Fill remaining with ascending pattern
+        var i = sample.len()
+        while i < 256:
+            sample = sample.push(i % 256)
+            i = i + 1
+        return HexEditorApp(
+            data: sample,
+            cursor_offset: 0,
+            view_offset: 0,
+            rows_visible: 16,
+            editing_hex: true,
+            nibble_pos: 0,
+            file_path: "(sample data)",
+            modified: false,
+            show_ascii: true,
+            goto_buffer: "",
+            goto_active: false,
+            status_message: "Ready - 256 bytes loaded"
+        )
+
+    # -- Byte/Hex Formatting -------------------------------------------------
+
+    fn _hex_byte(b: i32) -> text:
+        """Convert a byte value (0-255) to 2-char uppercase hex."""
+        val chars = _hex_chars()
+        val hi = (b / 16) % 16
+        val lo = b % 16
+        return "{chars[hi]}{chars[lo]}"
+
+    fn _printable_char(b: i32) -> text:
+        """Return the ASCII char if printable (32-126), else '.'."""
+        if b >= 32 and b <= 126:
+            # Map common printable range
+            if b == 32:
+                return " "
+            if b == 33:
+                return "!"
+            if b == 34:
+                return "\""
+            if b == 35:
+                return "#"
+            if b == 36:
+                return "$"
+            if b == 37:
+                return "%"
+            if b == 38:
+                return "&"
+            if b == 39:
+                return "'"
+            if b == 40:
+                return "("
+            if b == 41:
+                return ")"
+            if b == 42:
+                return "*"
+            if b == 43:
+                return "+"
+            if b == 44:
+                return ","
+            if b == 45:
+                return "-"
+            if b == 46:
+                return "."
+            if b == 47:
+                return "/"
+            if b >= 48 and b <= 57:
+                # 0-9
+                val digit = b - 48
+                val digits = ["0", "1", "2", "3", "4", "5", "6", "7", "8", "9"]
+                return digits[digit]
+            if b == 58:
+                return ":"
+            if b == 59:
+                return ";"
+            if b == 60:
+                return "<"
+            if b == 61:
+                return "="
+            if b == 62:
+                return ">"
+            if b == 63:
+                return "?"
+            if b == 64:
+                return "@"
+            if b >= 65 and b <= 90:
+                # A-Z
+                val upper = ["A", "B", "C", "D", "E", "F", "G", "H", "I", "J",
+                             "K", "L", "M", "N", "O", "P", "Q", "R", "S", "T",
+                             "U", "V", "W", "X", "Y", "Z"]
+                return upper[b - 65]
+            if b == 91:
+                return "["
+            if b == 92:
+                return "\\"
+            if b == 93:
+                return "]"
+            if b == 94:
+                return "^"
+            if b == 95:
+                return "_"
+            if b == 96:
+                return "`"
+            if b >= 97 and b <= 122:
+                # a-z
+                val lower = ["a", "b", "c", "d", "e", "f", "g", "h", "i", "j",
+                             "k", "l", "m", "n", "o", "p", "q", "r", "s", "t",
+                             "u", "v", "w", "x", "y", "z"]
+                return lower[b - 97]
+            if b == 123:
+                return "{"
+            if b == 124:
+                return "|"
+            if b == 125:
+                return "}"
+            if b == 126:
+                return "~"
+        return "."
+
+    fn _format_offset(off: i32) -> text:
+        """Format offset as 8-char hex string (zero-padded)."""
+        val chars = _hex_chars()
+        val d7 = (off / 268435456) % 16
+        val d6 = (off / 16777216) % 16
+        val d5 = (off / 1048576) % 16
+        val d4 = (off / 65536) % 16
+        val d3 = (off / 4096) % 16
+        val d2 = (off / 256) % 16
+        val d1 = (off / 16) % 16
+        val d0 = off % 16
+        return "{chars[d7]}{chars[d6]}{chars[d5]}{chars[d4]}{chars[d3]}{chars[d2]}{chars[d1]}{chars[d0]}"
+
+    # -- Cursor Movement -----------------------------------------------------
+
+    me move_cursor(delta: i32):
+        """Move cursor by delta bytes, clamping to data bounds."""
+        val new_offset = self.cursor_offset + delta
+        if new_offset < 0:
+            self.cursor_offset = 0
+        elif new_offset >= self.data.len():
+            self.cursor_offset = self.data.len() - 1
+        else:
+            self.cursor_offset = new_offset
+        self.nibble_pos = 0
+        self._ensure_visible()
+
+    me page_up():
+        """Scroll up by visible row count."""
+        val delta = self.rows_visible * 16
+        self.move_cursor(0 - delta)
+
+    me page_down():
+        """Scroll down by visible row count."""
+        val delta = self.rows_visible * 16
+        self.move_cursor(delta)
+
+    me move_to_start():
+        """Jump to start of data."""
+        self.cursor_offset = 0
+        self.nibble_pos = 0
+        self._ensure_visible()
+
+    me move_to_end():
+        """Jump to end of data."""
+        if self.data.len() > 0:
+            self.cursor_offset = self.data.len() - 1
+        self.nibble_pos = 0
+        self._ensure_visible()
+
+    me _ensure_visible():
+        """Ensure cursor row is within the visible viewport."""
+        val cursor_row = self.cursor_offset / 16
+        val view_row = self.view_offset / 16
+        if cursor_row < view_row:
+            self.view_offset = cursor_row * 16
+        if cursor_row >= view_row + self.rows_visible:
+            self.view_offset = (cursor_row - self.rows_visible + 1) * 16
+
+    # -- Editing -------------------------------------------------------------
+
+    me input_hex_digit(digit: i32):
+        """Edit the current byte by inputting a hex nibble (0-15).
+
+        First nibble sets the high 4 bits, second sets the low 4 bits
+        and advances the cursor to the next byte.
+        """
+        if self.cursor_offset >= self.data.len():
+            return
+        val current = self.data[self.cursor_offset]
+        if self.nibble_pos == 0:
+            # Set high nibble, keep low nibble
+            val new_val = (digit * 16) + (current % 16)
+            self.data[self.cursor_offset] = new_val
+            self.nibble_pos = 1
+        else:
+            # Set low nibble, keep high nibble
+            val hi = (current / 16) * 16
+            self.data[self.cursor_offset] = hi + digit
+            self.nibble_pos = 0
+            # Advance to next byte
+            if self.cursor_offset < self.data.len() - 1:
+                self.cursor_offset = self.cursor_offset + 1
+                self._ensure_visible()
+        self.modified = true
+
+    # -- Go-to-offset --------------------------------------------------------
+
+    me start_goto():
+        """Enter go-to-offset mode."""
+        self.goto_active = true
+        self.goto_buffer = ""
+        self.status_message = "Go to offset (hex): "
+
+    me cancel_goto():
+        """Cancel go-to-offset mode."""
+        self.goto_active = false
+        self.goto_buffer = ""
+        self.status_message = ""
+
+    me confirm_goto():
+        """Parse the goto buffer as hex offset and jump there."""
+        val offset = _parse_hex(self.goto_buffer)
+        if offset >= 0 and offset < self.data.len():
+            self.cursor_offset = offset
+            self.nibble_pos = 0
+            self._ensure_visible()
+            self.status_message = "Jumped to offset {self._format_offset(offset)}"
+        else:
+            self.status_message = "Invalid offset: {self.goto_buffer}"
+        self.goto_active = false
+        self.goto_buffer = ""
+
+    me goto_input_char(ch: text):
+        """Append a hex character to the goto buffer."""
+        self.goto_buffer = "{self.goto_buffer}{ch}"
+        self.status_message = "Go to offset (hex): {self.goto_buffer}"
+
+    # -- Key Handling --------------------------------------------------------
+
+    me handle_key(key: text):
+        """Handle keyboard input for navigation and editing."""
+        # Go-to-offset mode intercepts keys
+        if self.goto_active:
+            match key:
+                "enter":
+                    self.confirm_goto()
+                "escape":
+                    self.cancel_goto()
+                "backspace":
+                    if self.goto_buffer.len() > 0:
+                        self.goto_buffer = self.goto_buffer.slice(0, self.goto_buffer.len() - 1)
+                        self.status_message = "Go to offset (hex): {self.goto_buffer}"
+                    else:
+                        self.cancel_goto()
+                "0" => self.goto_input_char("0")
+                "1" => self.goto_input_char("1")
+                "2" => self.goto_input_char("2")
+                "3" => self.goto_input_char("3")
+                "4" => self.goto_input_char("4")
+                "5" => self.goto_input_char("5")
+                "6" => self.goto_input_char("6")
+                "7" => self.goto_input_char("7")
+                "8" => self.goto_input_char("8")
+                "9" => self.goto_input_char("9")
+                "a" => self.goto_input_char("A")
+                "b" => self.goto_input_char("B")
+                "c" => self.goto_input_char("C")
+                "d" => self.goto_input_char("D")
+                "e" => self.goto_input_char("E")
+                "f" => self.goto_input_char("F")
+                "A" => self.goto_input_char("A")
+                "B" => self.goto_input_char("B")
+                "C" => self.goto_input_char("C")
+                "D" => self.goto_input_char("D")
+                "E" => self.goto_input_char("E")
+                "F" => self.goto_input_char("F")
+                _ => pass_dn
+            return
+
+        # Normal mode
+        match key:
+            "up":
+                self.move_cursor(-16)
+            "down":
+                self.move_cursor(16)
+            "left":
+                self.move_cursor(-1)
+            "right":
+                self.move_cursor(1)
+            "page_up":
+                self.page_up()
+            "page_down":
+                self.page_down()
+            "home":
+                self.move_to_start()
+            "end":
+                self.move_to_end()
+            "tab":
+                self.editing_hex = not self.editing_hex
+                self.nibble_pos = 0
+                val pane = if self.editing_hex: "Hex" else: "ASCII"
+                self.status_message = "Editing: {pane} pane"
+            "ctrl_g":
+                self.start_goto()
+            # Hex digit input (editing hex pane)
+            "0" => self._try_hex_input(0)
+            "1" => self._try_hex_input(1)
+            "2" => self._try_hex_input(2)
+            "3" => self._try_hex_input(3)
+            "4" => self._try_hex_input(4)
+            "5" => self._try_hex_input(5)
+            "6" => self._try_hex_input(6)
+            "7" => self._try_hex_input(7)
+            "8" => self._try_hex_input(8)
+            "9" => self._try_hex_input(9)
+            "a" => self._try_hex_input(10)
+            "b" => self._try_hex_input(11)
+            "c" => self._try_hex_input(12)
+            "d" => self._try_hex_input(13)
+            "e" => self._try_hex_input(14)
+            "f" => self._try_hex_input(15)
+            "A" => self._try_hex_input(10)
+            "B" => self._try_hex_input(11)
+            "C" => self._try_hex_input(12)
+            "D" => self._try_hex_input(13)
+            "E" => self._try_hex_input(14)
+            "F" => self._try_hex_input(15)
+            _ => pass_dn
+
+    me _try_hex_input(digit: i32):
+        """Input a hex digit if in hex editing mode."""
+        if self.editing_hex:
+            self.input_hex_digit(digit)
+        else:
+            self.status_message = "Switch to hex pane (Tab) to edit"
+
+    me handle_action(action: text):
+        """Handle menu/button actions."""
+        match action:
+            "new":
+                self._new_data()
+            "open":
+                self.status_message = "Open: provide file path"
+            "goto":
+                self.start_goto()
+            "toggle_ascii":
+                self.show_ascii = not self.show_ascii
+                val state = if self.show_ascii: "shown" else: "hidden"
+                self.status_message = "ASCII pane: {state}"
+            _ => pass_dn
+
+    me _new_data():
+        """Reset to empty 256-byte buffer."""
+        var new_data = []
+        var i = 0
+        while i < 256:
+            new_data = new_data.push(0)
+            i = i + 1
+        self.data = new_data
+        self.cursor_offset = 0
+        self.view_offset = 0
+        self.nibble_pos = 0
+        self.modified = false
+        self.file_path = "(new)"
+        self.status_message = "New buffer: 256 bytes (zeroed)"
+
+    # -- Row Formatting ------------------------------------------------------
+
+    fn _format_hex_row(row_offset: i32) -> text:
+        """Format one row of 16 bytes as hex with 8-byte group spacing.
+
+        Format: HH HH HH HH HH HH HH HH  HH HH HH HH HH HH HH HH
+        """
+        var hex_part = ""
+        var col = 0
+        while col < 16:
+            val byte_offset = row_offset + col
+            if byte_offset < self.data.len():
+                val b = self.data[byte_offset]
+                val hex_str = self._hex_byte(b)
+                if byte_offset == self.cursor_offset and self.editing_hex:
+                    # Highlight cursor byte with reverse video
+                    val esc = "\u{001b}"
+                    hex_part = "{hex_part}{esc}[7m{hex_str}{esc}[0m"
+                else:
+                    hex_part = "{hex_part}{hex_str}"
+            else:
+                hex_part = "{hex_part}  "
+            # Spacing: extra space between groups of 8
+            if col == 7:
+                hex_part = "{hex_part}  "
+            elif col < 15:
+                hex_part = "{hex_part} "
+            col = col + 1
+        return hex_part
+
+    fn _format_ascii_row(row_offset: i32) -> text:
+        """Format one row of 16 bytes as printable ASCII.
+
+        Format: |ASCII...........|
+        """
+        var ascii_part = "|"
+        var col = 0
+        while col < 16:
+            val byte_offset = row_offset + col
+            if byte_offset < self.data.len():
+                val b = self.data[byte_offset]
+                val ch = self._printable_char(b)
+                if byte_offset == self.cursor_offset and not self.editing_hex:
+                    val esc = "\u{001b}"
+                    ascii_part = "{ascii_part}{esc}[7m{ch}{esc}[0m"
+                else:
+                    ascii_part = "{ascii_part}{ch}"
+            else:
+                ascii_part = "{ascii_part} "
+            col = col + 1
+        ascii_part = "{ascii_part}|"
+        return ascii_part
+
+    fn _format_row(row_offset: i32) -> text:
+        """Format a complete hex dump row: offset + hex + ASCII."""
+        val offset_str = self._format_offset(row_offset)
+        val hex_part = self._format_hex_row(row_offset)
+        if self.show_ascii:
+            val ascii_part = self._format_ascii_row(row_offset)
+            return "{offset_str}: {hex_part}  {ascii_part}"
+        return "{offset_str}: {hex_part}"
+
+    # -- Statusbar Info ------------------------------------------------------
+
+    fn _cursor_info() -> text:
+        """Format statusbar info about the current cursor position."""
+        if self.data.len() == 0:
+            return "Empty"
+        val off_str = self._format_offset(self.cursor_offset)
+        val b = self.data[self.cursor_offset]
+        val hex_str = self._hex_byte(b)
+        val dec_str = "{b}"
+        val ascii_ch = self._printable_char(b)
+        val pane = if self.editing_hex: "HEX" else: "ASCII"
+        val nibble_str = if self.editing_hex:
+            if self.nibble_pos == 0: " [hi]" else: " [lo]"
+        else:
+            ""
+        return "Off:{off_str} | Byte:0x{hex_str} ({dec_str}) '{ascii_ch}' | {pane}{nibble_str}"
+
+    fn _file_info() -> text:
+        """Format statusbar file information."""
+        val mod_indicator = if self.modified: " [modified]" else: ""
+        return "{self.file_path} | {self.data.len()} bytes{mod_indicator}"
+
+    # -- UI Construction -----------------------------------------------------
+
+    fn build_ui() -> UISession:
+        """Build the hex editor UI.
+
+        Layout:
+          Menubar: File | Edit | View
+          Hex dump rows (offset: hex bytes  |ASCII|)
+          Statusbar: cursor info | file info
+          Message line
+        """
+        # Build hex dump rows
+        var line_widgets = []
+        # Header row
+        val header = "          00 01 02 03 04 05 06 07  08 09 0A 0B 0C 0D 0E 0F"
+        val header_full = if self.show_ascii:
+            "{header}  |0123456789ABCDEF|"
+        else:
+            header
+        line_widgets = line_widgets.push(text_widget("hex_header", header_full))
+
+        var row_idx = 0
+        val view_row = self.view_offset / 16
+        var current_row = view_row
+        while row_idx < self.rows_visible:
+            val row_offset = current_row * 16
+            if row_offset < self.data.len():
+                val row_text = self._format_row(row_offset)
+                line_widgets = line_widgets.push(
+                    text_widget("hex_row_{current_row}", row_text)
+                )
+            else:
+                # Empty row beyond data
+                line_widgets = line_widgets.push(
+                    text_widget("hex_row_{current_row}", "")
+                )
+            current_row = current_row + 1
+            row_idx = row_idx + 1
+
+        val root = column("hex_root", [
+            menubar("hex_menu", [
+                "File: New | Open",
+                "Edit: Go To",
+                "View: Toggle ASCII"
+            ]),
+            with_flex(panel("hex_panel", "", line_widgets), 1),
+            statusbar("hex_status",
+                self._cursor_info(),
+                self._file_info()
+            ),
+            text_widget("hex_msgline", self.status_message)
+        ])
+
+        val tree = build_tree_with_title(root, "Hex Editor - {self.file_path}", "dark")
+        return UISession.new(tree)
+
+# =========================================================================
+# Helpers
+# =========================================================================
+
+fn _parse_hex(s: text) -> i32:
+    """Parse a hexadecimal string to an integer. Returns -1 on error."""
+    if s == "":
+        return -1
+    var result = 0
+    var i = 0
+    while i < s.len():
+        val ch = _char_at(s, i)
+        val digit = _hex_digit_value(ch)
+        if digit < 0:
+            return -1
+        result = result * 16 + digit
+        i = i + 1
+    return result
+
+fn _hex_digit_value(ch: text) -> i32:
+    """Return the numeric value of a hex character, or -1 if invalid."""
+    if ch == "0":
+        return 0
+    if ch == "1":
+        return 1
+    if ch == "2":
+        return 2
+    if ch == "3":
+        return 3
+    if ch == "4":
+        return 4
+    if ch == "5":
+        return 5
+    if ch == "6":
+        return 6
+    if ch == "7":
+        return 7
+    if ch == "8":
+        return 8
+    if ch == "9":
+        return 9
+    if ch == "A" or ch == "a":
+        return 10
+    if ch == "B" or ch == "b":
+        return 11
+    if ch == "C" or ch == "c":
+        return 12
+    if ch == "D" or ch == "d":
+        return 13
+    if ch == "E" or ch == "e":
+        return 14
+    if ch == "F" or ch == "f":
+        return 15
+    return -1
+
+fn _char_at(s: text, index: i32) -> text:
+    """Get character at index (returns empty string if out of bounds)."""
+    if index < 0 or index >= s.len():
+        return ""
+    return s.slice(index, index + 1)

@@ -1,0 +1,81 @@
+# Tests for cc::PropertyTrees — unified compositor property tree model.
+
+use std.sspec.*
+use std.lib.cc.entity.property_tree.{
+    PropertyTrees, property_trees_new,
+    TransformNode, ClipNode, EffectNode, ScrollNode
+}
+use std.skia.entity.matrix.{Matrix3x3}
+use std.skia.entity.geometry.{SkRect, sk_rect}
+
+fn _approx(a: f64, b: f64) -> bool:
+    val d = a - b
+    val ad = if d < 0.0: -d else: d
+    ad < 0.0001
+
+describe "PropertyTrees":
+    it "property_trees_new: has 1 root node of each kind (transform, clip, effect, scroll)":
+        val pt = property_trees_new()
+        expect(pt.transform_nodes.len().to_i64()).to_equal(1)
+        expect(pt.clip_nodes.len().to_i64()).to_equal(1)
+        expect(pt.effect_nodes.len().to_i64()).to_equal(1)
+        expect(pt.scroll_nodes.len().to_i64()).to_equal(1)
+
+    it "add_transform: returns index 1 after root (which is 0)":
+        val pt = property_trees_new()
+        val idx = pt.add_transform(Matrix3x3.identity(), 0)
+        expect(idx).to_equal(1)
+
+    it "compute_transform_to_root: root node returns identity":
+        val pt = property_trees_new()
+        val m = pt.compute_transform_to_root(0)
+        expect(_approx(m.m00, 1.0)).to_equal(true)
+        expect(_approx(m.m11, 1.0)).to_equal(true)
+        expect(_approx(m.m22, 1.0)).to_equal(true)
+        expect(_approx(m.m01, 0.0)).to_equal(true)
+        expect(_approx(m.m02, 0.0)).to_equal(true)
+        expect(_approx(m.m12, 0.0)).to_equal(true)
+
+    it "compute_transform_to_root: translate child returns translate * identity = translate":
+        val pt = property_trees_new()
+        val child = pt.add_transform(Matrix3x3.translate(10.0, 20.0), 0)
+        val m = pt.compute_transform_to_root(child)
+        expect(_approx(m.m02, 10.0)).to_equal(true)
+        expect(_approx(m.m12, 20.0)).to_equal(true)
+        expect(_approx(m.m00, 1.0)).to_equal(true)
+        expect(_approx(m.m11, 1.0)).to_equal(true)
+
+    it "compute_clip_to_root: inherits parent clip tighter than child":
+        val pt = property_trees_new()
+        val parent = pt.add_clip(sk_rect(0.0, 0.0, 100.0, 100.0), 0)
+        val child = pt.add_clip(sk_rect(-50.0, -50.0, 200.0, 200.0), parent)
+        val r = pt.compute_clip_to_root(child)
+        # parent (0,0,100,100) tightens child (-50,-50,200,200) → (0,0,100,100)
+        expect(_approx(r.left, 0.0)).to_equal(true)
+        expect(_approx(r.top, 0.0)).to_equal(true)
+        expect(_approx(r.right, 100.0)).to_equal(true)
+        expect(_approx(r.bottom, 100.0)).to_equal(true)
+
+    it "compute_opacity_to_root: child with opacity 0.5 and parent 0.5 returns 0.25":
+        val pt = property_trees_new()
+        val parent = pt.add_effect(0.5, 0, false)
+        val child = pt.add_effect(0.5, parent, false)
+        val op = pt.compute_opacity_to_root(child)
+        expect(_approx(op, 0.25)).to_equal(true)
+
+    it "compute_scroll_to_root: sums scroll offsets up chain":
+        val pt = property_trees_new()
+        val parent = pt.add_scroll(10.0, 20.0, 0)
+        val child = pt.add_scroll(3.0, 4.0, parent)
+        val (sx, sy) = pt.compute_scroll_to_root(child)
+        expect(_approx(sx, 13.0)).to_equal(true)
+        expect(_approx(sy, 24.0)).to_equal(true)
+
+    it "add_effect: has_filter true is preserved":
+        val pt = property_trees_new()
+        val idx = pt.add_effect(1.0, 0, true)
+        val opt = pt.effect_nodes.get(idx)
+        if val node = opt:
+            expect(node.has_filter).to_equal(true)
+        else:
+            expect(false).to_equal(true)
