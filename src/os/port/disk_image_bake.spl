@@ -2,15 +2,17 @@
 #
 # Given cross-built toolchain paths (clang, rustc, simple), emits the
 # two artifacts QEMU needs at boot:
-#   build/os/initramfs.cpio.zst  — RAM-disk root
-#   build/os/disk.img             — FAT32 persistent drive
+#   build/os/simpleos_initramfs.cpio.zst  — RAM-disk root
+#   build/os/simpleos_disk.img             — FAT32 persistent drive
 #
-# Wave-3 scaffold: logs the bake plan and invokes the scaffolds for
-# initramfs_pack (real) + disk_image.build (scaffold returns blank
-# 64 MiB). Wave-4 fills in payload copy into the FAT32 image.
+# Wave-5: main() actually runs — cross-compiles hello.c, loads hello_rs,
+# builds FAT32 image via disk_image.build(), and packs initramfs via
+# initramfs_pack.cmd_build().
 
 use std.fs
 use std.text
+use std.process
+use std.cli
 use os.port.disk_image as disk_image
 use os.port.initramfs_pack as initramfs_pack
 
@@ -22,55 +24,112 @@ struct BakeConfig:
     rustc_path: Text        # host path to cross-built rustc
     simple_path: Text       # host path to simple stage3
     output_dir: Text        # e.g. "build/os"
-    disk_size_mb: u64       # 64 MiB default
+    disk_size_mb: u64       # 32 MiB default
+
+# -- Internal helpers --------------------------------------------------------
+
+fn disk_size_mb_to_text(mb: u64) -> Text:
+    """Convert u64 MiB count to a display string."""
+    text.from_u64(mb)
+
+fn ensure_dir(path: Text):
+    if not fs.dir_exists(path):
+        fs.create_dir_all(path)
 
 # -- Bake entry points -------------------------------------------------------
 
 fn bake(config: BakeConfig) -> Result<Text, Text>:
     """Combine initramfs + FAT32 disk image into a QEMU-bootable bundle.
 
-    Wave-3 scaffold:
-      Step 1 — Invoke initramfs_pack to build the RAM-disk root. The
-               packer is wave-2 complete and stages real payloads.
-      Step 2 — Invoke disk_image.build_blank to produce a 64 MiB
-               zero-filled FAT32 image. Wave-4 will copy payloads in.
-
-    Both artifacts land in `config.output_dir`.
+    Wave-5:
+      Step 0 — Build hello_rs (Rust ELF) via bootstrap script if missing.
+      Step 1 — Cross-compile hello.c to hello_c.o via cross-clang.
+      Step 2 — Load both ELFs as PayloadEntry bytes.
+      Step 3 — Call disk_image.build() → build/os/simpleos_disk.img (32 MiB FAT32).
+      Step 4 — Call initramfs_pack.cmd_build() → build/os/simpleos_initramfs.cpio.zst.
     """
-    # Derive artifact paths.
-    val initramfs_path = config.output_dir + "/initramfs.cpio.zst"
-    val disk_path      = config.output_dir + "/disk.img"
+    val disk_path       = config.output_dir + "/simpleos_disk.img"
+    val initramfs_path  = config.output_dir + "/simpleos_initramfs.cpio.zst"
+    val hello_rs_path   = "/tmp/hello_rs_simpleos/target/target/release/hello_rs"
+    val hello_c_src     = "examples/simpleos_hello_c/hello.c"
+    val hello_c_obj     = config.output_dir + "/hello_c.o"
+    val sysroot_path    = "build/os/sysroot"
 
-    # Log the bake plan (wave-3: no real payload merge yet).
-    print "=== SimpleOS disk-image bake ==="
+    print "=== SimpleOS I5 disk-image bake ==="
     print "  clang  : " + config.clang_path
-    print "  rustc  : " + config.rustc_path
-    print "  simple : " + config.simple_path
     print "  out    : " + config.output_dir
     print "  disk   : " + disk_size_mb_to_text(config.disk_size_mb) + " MiB"
-    print "--- Step 1: initramfs pack ---"
 
-    # Step 1: Build initramfs via the wave-2 complete packer.
-    # PackConfig uses text fields; map BakeConfig paths in.
-    val pack_cfg = PackConfig(
+    ensure_dir(config.output_dir)
+
+    # --- Step 0: build hello_rs if missing ---
+    if not fs.exists(hello_rs_path):
+        print "--- Step 0: building hello_rs ELF ---"
+        val r0 = process.run("bash", ["scripts/build_rust_hello_simpleos.sh"])
+        if r0.exit_code != 0:
+            return Err("bake: build_rust_hello_simpleos.sh failed: " + r0.stderr)
+        print "  hello_rs built: " + hello_rs_path
+    else:
+        print "--- Step 0: hello_rs already present ---"
+
+    # --- Step 1: cross-compile hello.c ---
+    print "--- Step 1: cross-compiling hello.c ---"
+    val r1 = process.run(config.clang_path, [
+        "--target=x86_64-unknown-simpleos",
+        "--sysroot=" + sysroot_path,
+        "-c", hello_c_src,
+        "-o", hello_c_obj,
+    ])
+    if r1.exit_code != 0:
+        return Err("bake: cross-clang failed: " + r1.stderr)
+    print "  hello_c.o: " + hello_c_obj
+
+    # --- Step 2: load payload bytes ---
+    print "--- Step 2: loading payload bytes ---"
+    val rs_bytes = fs.read_bytes(hello_rs_path)
+    val co_bytes = fs.read_bytes(hello_c_obj)
+
+    val payloads: [disk_image.PayloadEntry] = [
+        disk_image.PayloadEntry(path: "HELLORS ", data: rs_bytes),
+        disk_image.PayloadEntry(path: "HELLOCO ", data: co_bytes),
+    ]
+
+    # --- Step 3: build FAT32 disk image ---
+    print "--- Step 3: building FAT32 disk image ---"
+    val disk_cfg = disk_image.DiskImageConfig(
+        size_mb: config.disk_size_mb,
+        payloads: payloads,
+    )
+    match disk_image.build(disk_cfg, disk_path):
+        case Ok(()):
+            print "  simpleos_disk.img written: " + disk_path
+        case Err(e):
+            return Err("bake: disk_image.build failed: " + e)
+
+    # --- Step 4: build initramfs ---
+    print "--- Step 4: building initramfs ---"
+    val extra_payloads: List<initramfs_pack.PayloadEntry> = [
+        initramfs_pack.PayloadEntry(
+            host_path: hello_rs_path,
+            guest_path: "/usr/bin/hello_rs",
+            is_dir: false,
+        ),
+        initramfs_pack.PayloadEntry(
+            host_path: hello_c_obj,
+            guest_path: "/usr/share/test/hello_c.o",
+            is_dir: false,
+        ),
+    ]
+    val pack_cfg = initramfs_pack.PackConfig(
         simple_binary: config.simple_path,
         llvm_prefix:   fs.parent(config.clang_path),
-        sysroot:       "build/os/sysroot",
+        sysroot:       sysroot_path,
         source_tree:   "src",
         output:        initramfs_path,
         staging:       config.output_dir + "/initramfs-staging",
-        payloads:      []
+        payloads:      extra_payloads,
     )
-    cmd_build(pack_cfg)
-
-    print "--- Step 2: disk image build (wave-3 blank) ---"
-
-    # Step 2: Build blank FAT32 image. Wave-4 will inject payloads.
-    match disk_image.build_blank(disk_path):
-        case Ok(p):
-            print "  disk.img written: " + p
-        case Err(e):
-            return Err("bake: disk_image.build_blank failed: " + e)
+    initramfs_pack.cmd_build(pack_cfg)
 
     print "=== bake complete: " + config.output_dir + " ==="
     Ok(config.output_dir)
@@ -78,16 +137,19 @@ fn bake(config: BakeConfig) -> Result<Text, Text>:
 fn bake_default() -> Result<Text, Text>:
     """Convenience: assumes I3+I4 outputs are in standard locations."""
     val cfg = BakeConfig(
-        clang_path:   "build/os/llvm/cross/bin/clang",
+        clang_path:   "build/os/llvm/cross-x86_64/bin/clang",
         rustc_path:   "build/os/rust/cross/bin/rustc",
         simple_path:  "build/bootstrap/stage3/simple_simpleos",
         output_dir:   "build/os",
-        disk_size_mb: 64u64
+        disk_size_mb: 32u64,
     )
     bake(cfg)
 
-# -- Internal helpers --------------------------------------------------------
-
-fn disk_size_mb_to_text(mb: u64) -> Text:
-    """Convert u64 MiB count to a display string."""
-    text.from_u64(mb)
+fn main():
+    """Entry point: run via `bin/simple run src/os/port/disk_image_bake.spl`."""
+    match bake_default():
+        case Ok(out):
+            print "bake done: " + out
+        case Err(e):
+            print "bake FAILED: " + e
+            process.exit(1)

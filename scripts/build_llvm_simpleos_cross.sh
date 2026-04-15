@@ -98,6 +98,18 @@ fi
 
 echo "==> Stage cross: cmake configure -> $LLVM_BUILD"
 run mkdir -p "$LLVM_BUILD"
+# Freestanding header shims: cpu_model/x86.c and crtend.c include hosted
+# headers (assert.h, stdint.h) that drag in glibc internals when targeting
+# x86_64-unknown-simpleos.  Provide minimal stubs via -isystem so the
+# builtins archive compiles cleanly without a host sysroot.
+SHIM_DIR="$LLVM_BUILD/simpleos_shim_include"
+run mkdir -p "$SHIM_DIR/bits"
+printf '#pragma once\n#define __WORDSIZE 64\n#define __WORDSIZE_TIME64_COMPAT32 1\n' \
+    > "$SHIM_DIR/bits/wordsize.h"
+printf '#pragma once\n#ifdef NDEBUG\n#define assert(x) ((void)0)\n#else\n#define assert(x) ((void)(x))\n#endif\n#define static_assert _Static_assert\n' \
+    > "$SHIM_DIR/assert.h"
+printf '#pragma once\ntypedef signed char int8_t;\ntypedef short int16_t;\ntypedef int int32_t;\ntypedef long long int64_t;\ntypedef unsigned char uint8_t;\ntypedef unsigned short uint16_t;\ntypedef unsigned int uint32_t;\ntypedef unsigned long long uint64_t;\ntypedef long intptr_t;\ntypedef unsigned long uintptr_t;\ntypedef long long intmax_t;\ntypedef unsigned long long uintmax_t;\n#define INT8_MAX 127\n#define INT16_MAX 32767\n#define INT32_MAX 2147483647\n#define UINT8_MAX 255U\n#define UINT16_MAX 65535U\n#define UINT32_MAX 4294967295U\n#define INT64_MAX 9223372036854775807LL\n#define UINT64_MAX 18446744073709551615ULL\n#define INT8_C(x) (x)\n#define INT16_C(x) (x)\n#define INT32_C(x) (x)\n#define INT64_C(x) (x##LL)\n#define UINT8_C(x) (x##U)\n#define UINT16_C(x) (x##U)\n#define UINT32_C(x) (x##U)\n#define UINT64_C(x) (x##ULL)\n' \
+    > "$SHIM_DIR/stdint.h"
 run cmake -S "$LLVM_SRC/llvm" -B "$LLVM_BUILD" \
     -G Ninja \
     -DCMAKE_BUILD_TYPE=Release \
@@ -107,13 +119,21 @@ run cmake -S "$LLVM_SRC/llvm" -B "$LLVM_BUILD" \
     -DLLVM_DEFAULT_TARGET_TRIPLE=x86_64-unknown-simpleos \
     -DCLANG_DEFAULT_LINKER=lld \
     -DCLANG_SIMPLEOS_EMBED_LLD=ON \
-    -DLLVM_ENABLE_PROJECTS="clang;lld"
+    -DLLVM_ENABLE_PROJECTS="clang;lld" \
+    -DLLVM_ENABLE_RUNTIMES="compiler-rt" \
+    -DCOMPILER_RT_BUILD_BUILTINS=ON \
+    -DCOMPILER_RT_BUILD_SANITIZERS=OFF \
+    -DCOMPILER_RT_BUILD_XRAY=OFF \
+    -DCOMPILER_RT_BUILD_LIBFUZZER=OFF \
+    -DCOMPILER_RT_BUILD_PROFILE=OFF \
+    -DCOMPILER_RT_DEFAULT_TARGET_TRIPLE=x86_64-unknown-simpleos \
+    "-DBUILTINS_CMAKE_ARGS=-DCMAKE_SYSTEM_NAME=SimpleOS\;-DCOMPILER_RT_BAREMETAL_BUILD=ON\;-DCOMPILER_RT_BUILD_BUILTINS=ON\;-DCOMPILER_RT_BUILD_SANITIZERS=OFF\;-DCOMPILER_RT_BUILD_PROFILE=OFF\;-DCOMPILER_RT_DEFAULT_TARGET_TRIPLE=x86_64-unknown-simpleos\;-DCMAKE_C_FLAGS=-isystem $LLVM_BUILD/simpleos_shim_include"
 
 # --- 5c. Stage cross: ninja build --------------------------------------------
 
 echo "==> Stage cross: ninja build (this takes 30-60 min)"
 run ninja -C "$LLVM_BUILD" -j"$JOBS" \
-    clang lld llvm-ar llvm-nm llvm-ranlib llvm-objdump llvm-objcopy llvm-strip
+    clang lld llvm-ar llvm-nm llvm-ranlib llvm-objdump llvm-objcopy llvm-strip builtins
 
 # --- 6. Summary --------------------------------------------------------------
 
