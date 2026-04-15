@@ -10,6 +10,7 @@ use common.ui.widget_store.{WidgetStore}
 use common.ui.viewport.{Viewport, default_viewport}
 use common.ui.changelog.{ChangeLog, default_changelog}
 use common.ui.lifecycle.{LifecycleRegistry, LifecycleEvent, new_lifecycle_registry, emit_lifecycle_events, describe_lifecycle_event}
+use common.ui.access.{UiAccessSnapshot, UiAccessEvent, ui_access_record_action, ui_access_lifecycle_events, ui_access_recent_events, ui_access_recent_surface_events, ui_access_snapshot_from_session, ui_access_snapshot_from_state}
 use common.ui.diff.{diff_trees_with}
 use common.ui.state.{update_state}
 use common.ui.surface.{SurfaceHandle, SurfaceManager, new_surface_manager}
@@ -31,6 +32,8 @@ class UISession:
     profile_resolver: ProfileResolver
     profile_sets: [ProfileSetEntry]
     capability_policy: CapabilityPolicy?
+    access_events: [UiAccessEvent]
+    access_sequence: i64
 
     static fn new(tree: UITree) -> UISession:
         """Create a session with a main tree and default settings."""
@@ -46,7 +49,9 @@ class UISession:
             surfaces: sm,
             profile_resolver: ProfileResolver.new(),
             profile_sets: [],
-            capability_policy: nil
+            capability_policy: nil,
+            access_events: [],
+            access_sequence: 0
         )
 
     static fn new_with_store(tree: UITree, store: WidgetStore) -> UISession:
@@ -62,7 +67,9 @@ class UISession:
             surfaces: sm,
             profile_resolver: ProfileResolver.new(),
             profile_sets: [],
-            capability_policy: nil
+            capability_policy: nil,
+            access_events: [],
+            access_sequence: 0
         )
 
     static fn new_with_policy(tree: UITree, policy: CapabilityPolicy) -> UISession:
@@ -79,7 +86,9 @@ class UISession:
             surfaces: sm,
             profile_resolver: ProfileResolver.new(),
             profile_sets: [],
-            capability_policy: policy
+            capability_policy: policy,
+            access_events: [],
+            access_sequence: 0
         )
 
 # =========================================================================
@@ -130,11 +139,78 @@ impl UISession:
         """Get the name of the active backend."""
         return self.viewport.active_backend
 
+    fn access_snapshot() -> UiAccessSnapshot:
+        """Build a canonical access snapshot for all open surfaces."""
+        return ui_access_snapshot_from_session(self.state, self.surfaces, self.surfaces.active(), self.access_events)
+
+    fn access_recent_events(count: i32) -> [UiAccessEvent]:
+        """Get the most recent UI access events."""
+        return ui_access_recent_events(self.access_events, count)
+
+    fn access_recent_surface_events(surface_id: text, count: i32) -> [UiAccessEvent]:
+        """Get recent access events for one surface."""
+        return ui_access_recent_surface_events(self.access_events, surface_id, count)
+
     # -- State mutation ------------------------------------------------------
 
     me dispatch(event: UIEvent):
         """Process a UI event through the state update pipeline."""
+        val surface_id = if self.surfaces.active() != "": self.surfaces.active() else: "main"
+        var target_widget_id = self.state.focused_id
+        var event_kind = "event"
+        var payload = ""
+        match event:
+            UIEvent.KeyPress(key: key):
+                event_kind = "key_press"
+                payload = key
+            UIEvent.Resize(width, height):
+                event_kind = "resize"
+                payload = "{width}x{height}"
+            UIEvent.Quit:
+                event_kind = "quit"
+                payload = "quit"
+            UIEvent.Action(name: name):
+                event_kind = "action"
+                payload = name
+            UIEvent.FocusNext:
+                event_kind = "focus_next"
+                payload = "focus_next"
+            UIEvent.FocusPrev:
+                event_kind = "focus_prev"
+                payload = "focus_prev"
+            UIEvent.CommandMode:
+                event_kind = "mode"
+                payload = "command"
+            UIEvent.NormalMode:
+                event_kind = "mode"
+                payload = "normal"
+            UIEvent.InsertMode:
+                event_kind = "mode"
+                payload = "insert"
+            UIEvent.TouchPress(x, y):
+                event_kind = "touch_press"
+                payload = "{x},{y}"
+            UIEvent.TouchMove(x, y):
+                event_kind = "touch_move"
+                payload = "{x},{y}"
+            UIEvent.TouchRelease(x, y):
+                event_kind = "touch_release"
+                payload = "{x},{y}"
+            UIEvent.FileChanged:
+                event_kind = "file_changed"
+                payload = "file_changed"
         self.state = update_state(self.state, event)
+        if target_widget_id == "":
+            target_widget_id = self.state.focused_id
+        self.access_sequence = self.access_sequence + 1
+        self.access_events = ui_access_record_action(
+            self.access_events,
+            self.access_sequence,
+            surface_id,
+            target_widget_id,
+            event_kind,
+            payload
+        )
         # Check for resize events and trigger profile switching
         match event:
             UIEvent.Resize(width, height):
@@ -147,6 +223,7 @@ impl UISession:
 
     me update_tree(new_tree: UITree):
         """Replace the main tree, computing diff and emitting lifecycle events."""
+        val surface_id = "main"
         val old_root = self.state.tree.root_node()
         val new_root = new_tree.root_node()
         val patches = diff_trees_with(old_root, new_root, self.store)
@@ -154,6 +231,13 @@ impl UISession:
         # Push lifecycle events to changelog
         for event in self.lifecycle.event_log:
             self.changelog.push(event)
+            self.access_sequence = self.access_sequence + 1
+            self.access_events = ui_access_lifecycle_events(
+                self.access_events,
+                self.access_sequence - 1,
+                surface_id,
+                [event]
+            )
         self.lifecycle.clear_log()
         # Update state with new tree
         self.state = UIState(
@@ -190,11 +274,32 @@ impl UISession:
 
     me open_surface(id: text, tree: UITree) -> SurfaceHandle:
         """Open a named surface with the given tree."""
-        return self.surfaces.open(id, tree)
+        val handle = self.surfaces.open(id, tree)
+        self.access_sequence = self.access_sequence + 1
+        self.access_events = ui_access_record_action(
+            self.access_events,
+            self.access_sequence,
+            id,
+            tree.root_node().id,
+            "surface_open",
+            id
+        )
+        return handle
 
     me close_surface(handle: SurfaceHandle) -> bool:
         """Close a surface by its handle. Returns false if stale."""
-        return self.surfaces.close(handle)
+        val closed = self.surfaces.close(handle)
+        if closed:
+            self.access_sequence = self.access_sequence + 1
+            self.access_events = ui_access_record_action(
+                self.access_events,
+                self.access_sequence,
+                handle.id,
+                "",
+                "surface_close",
+                handle.id
+            )
+        return closed
 
     fn get_surface(id: text) -> UITree?:
         """Get the tree for a named surface."""
@@ -211,6 +316,15 @@ impl UISession:
     me set_active_surface(id: text):
         """Set which surface is active."""
         self.surfaces.set_active(id)
+        self.access_sequence = self.access_sequence + 1
+        self.access_events = ui_access_record_action(
+            self.access_events,
+            self.access_sequence,
+            id,
+            "",
+            "surface_focus",
+            id
+        )
 
     fn active_surface() -> text:
         """Get the active surface ID."""
@@ -219,6 +333,10 @@ impl UISession:
     fn validate_surface_handle(handle: SurfaceHandle) -> bool:
         """Check whether a surface handle is still valid."""
         return self.surfaces.validate_handle(handle)
+
+    fn surface_handle(id: text) -> SurfaceHandle?:
+        """Get a current handle for an existing surface."""
+        return self.surfaces.handle_for(id)
 
     me update_surface_tree(handle: SurfaceHandle, new_tree: UITree):
         """Update a surface's tree. Does nothing if handle is stale."""
@@ -234,6 +352,13 @@ impl UISession:
         emit_lifecycle_events(self.lifecycle, patches)
         for event in self.lifecycle.event_log:
             self.changelog.push(event)
+            self.access_sequence = self.access_sequence + 1
+            self.access_events = ui_access_lifecycle_events(
+                self.access_events,
+                self.access_sequence - 1,
+                handle.id,
+                [event]
+            )
         self.lifecycle.clear_log()
         # Commit new tree
         self.surfaces.update_tree(handle.id, new_tree)

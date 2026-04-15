@@ -1,0 +1,538 @@
+# UI Access Protocol — shared surface/node snapshot for LLM and test tooling
+#
+# Provides a canonical, additive access model over UISession and SurfaceManager.
+# This is an internal semantic protocol for Simple UI surfaces, not an OS
+# accessibility provider. MCP tools, test APIs, and skills should all derive
+# their view from this layer.
+
+use common.ui.widget.{UIState, UITree, WidgetNode, widget_props, get_widget_record}
+use common.ui.surface.{SurfaceManager}
+use common.ui.lifecycle.{LifecycleEvent}
+
+val UI_ACCESS_PROTOCOL_VERSION = 1
+val UI_ACCESS_MAX_EVENTS = 200
+
+struct UiAccessProp:
+    key: text
+    value: text
+
+struct UiAccessNode:
+    canonical_id: text
+    surface_id: text
+    widget_id: text
+    kind: text
+    visible: bool
+    focused: bool
+    enabled: bool
+    selected: bool
+    text: text
+    props: [UiAccessProp]
+    child_ids: [text]
+    action_names: [text]
+
+struct UiAccessSurface:
+    surface_id: text
+    title: text
+    active: bool
+    window_id: text
+    app_id: text
+    root_canonical_id: text
+
+struct UiAccessEvent:
+    surface_id: text
+    widget_id: text
+    canonical_id: text
+    event_kind: text
+    payload: text
+    sequence: i64
+
+struct UiAccessSnapshot:
+    protocol_version: i32
+    mode: text
+    active_surface: text
+    surfaces: [UiAccessSurface]
+    nodes: [UiAccessNode]
+    recent_events: [UiAccessEvent]
+
+fn ui_access_canonical_id(surface_id: text, widget_id: text) -> text:
+    return "{surface_id}#{widget_id}"
+
+fn ui_access_empty_snapshot(mode: text, active_surface: text, recent_events: [UiAccessEvent]) -> UiAccessSnapshot:
+    return UiAccessSnapshot(
+        protocol_version: UI_ACCESS_PROTOCOL_VERSION,
+        mode: mode,
+        active_surface: active_surface,
+        surfaces: [],
+        nodes: [],
+        recent_events: recent_events
+    )
+
+fn ui_access_snapshot_from_state(state: UIState, recent_events: [UiAccessEvent]) -> UiAccessSnapshot:
+    val surface_id = "main"
+    val tree = state.tree
+    val surface = UiAccessSurface(
+        surface_id: surface_id,
+        title: tree.title_text(),
+        active: true,
+        window_id: "",
+        app_id: "",
+        root_canonical_id: ui_access_canonical_id(surface_id, tree.root_node().id)
+    )
+    val nodes = _collect_access_nodes(surface_id, tree)
+    return UiAccessSnapshot(
+        protocol_version: UI_ACCESS_PROTOCOL_VERSION,
+        mode: state.mode_name(),
+        active_surface: surface_id,
+        surfaces: [surface],
+        nodes: nodes,
+        recent_events: recent_events
+    )
+
+fn ui_access_snapshot_from_session(state: UIState, surfaces: SurfaceManager, active_surface: text, recent_events: [UiAccessEvent]) -> UiAccessSnapshot:
+    var snapshot = ui_access_empty_snapshot(state.mode_name(), active_surface, recent_events)
+    val ids = surfaces.surface_ids()
+    if ids.len() == 0:
+        return ui_access_snapshot_from_state(state, recent_events)
+
+    var snapshot_surfaces: [UiAccessSurface] = []
+    var snapshot_nodes: [UiAccessNode] = []
+    for surface_id in ids:
+        val tree_opt = surfaces.get(surface_id)
+        if tree_opt == nil:
+            pass_dn
+        else:
+            val tree = tree_opt
+            val root = tree.root_node()
+            val root_canonical_id = ui_access_canonical_id(surface_id, root.id)
+            snapshot_surfaces = snapshot_surfaces.push(UiAccessSurface(
+                surface_id: surface_id,
+                title: tree.title_text(),
+                active: surface_id == active_surface,
+                window_id: "",
+                app_id: "",
+                root_canonical_id: root_canonical_id
+            ))
+            val nodes = _collect_access_nodes(surface_id, tree)
+            for node in nodes:
+                snapshot_nodes = snapshot_nodes.push(node)
+    snapshot.surfaces = snapshot_surfaces
+    snapshot.nodes = snapshot_nodes
+    return snapshot
+
+fn ui_access_recent_events(events: [UiAccessEvent], count: i32) -> [UiAccessEvent]:
+    if count <= 0:
+        return []
+    val total = events.len()
+    if count >= total:
+        return events
+    var result: [UiAccessEvent] = []
+    val start = total - count
+    var idx = 0
+    for event in events:
+        if idx >= start:
+            result = result.push(event)
+        idx = idx + 1
+    return result
+
+fn ui_access_recent_surface_events(events: [UiAccessEvent], surface_id: text, count: i32) -> [UiAccessEvent]:
+    if count <= 0:
+        return []
+    var filtered: [UiAccessEvent] = []
+    for event in events:
+        if event.surface_id == surface_id:
+            filtered = filtered.push(event)
+    return ui_access_recent_events(filtered, count)
+
+fn ui_access_record_event(events: [UiAccessEvent], event: UiAccessEvent) -> [UiAccessEvent]:
+    var updated = events.push(event)
+    if updated.len() <= UI_ACCESS_MAX_EVENTS:
+        return updated
+    var trimmed: [UiAccessEvent] = []
+    val start = updated.len() - UI_ACCESS_MAX_EVENTS
+    var idx = 0
+    for current in updated:
+        if idx >= start:
+            trimmed = trimmed.push(current)
+        idx = idx + 1
+    return trimmed
+
+fn ui_access_record_action(events: [UiAccessEvent], sequence: i64, surface_id: text, widget_id: text, event_kind: text, payload: text) -> [UiAccessEvent]:
+    val canonical_id = if widget_id == "": "" else: ui_access_canonical_id(surface_id, widget_id)
+    val event = UiAccessEvent(
+        surface_id: surface_id,
+        widget_id: widget_id,
+        canonical_id: canonical_id,
+        event_kind: event_kind,
+        payload: payload,
+        sequence: sequence
+    )
+    return ui_access_record_event(events, event)
+
+fn ui_access_lifecycle_events(events: [UiAccessEvent], start_sequence: i64, surface_id: text, lifecycle_events: [LifecycleEvent]) -> [UiAccessEvent]:
+    var updated = events
+    var seq = start_sequence
+    for lifecycle_event in lifecycle_events:
+        seq = seq + 1
+        val event = _lifecycle_to_access_event(seq, surface_id, lifecycle_event)
+        updated = ui_access_record_event(updated, event)
+    return updated
+
+fn ui_access_find_nodes(snapshot: UiAccessSnapshot, surface_id: text, kind: text, text_query: text, focused_only: bool) -> [UiAccessNode]:
+    var matches: [UiAccessNode] = []
+    val kind_filter = kind.to_lower()
+    val text_filter = text_query.to_lower()
+    for node in snapshot.nodes:
+        if surface_id != "" and node.surface_id != surface_id:
+            pass_dn
+        elif kind_filter != "" and node.kind.to_lower() != kind_filter:
+            pass_dn
+        elif focused_only and not node.focused:
+            pass_dn
+        elif text_filter != "" and not _node_matches_text(node, text_filter):
+            pass_dn
+        else:
+            matches = matches.push(node)
+    return matches
+
+fn ui_access_snapshot_to_text(snapshot: UiAccessSnapshot) -> text:
+    var out = "UI Access Snapshot (v{snapshot.protocol_version})\n"
+    out = "{out}Mode: {snapshot.mode}\n"
+    out = "{out}Active surface: {snapshot.active_surface}\n"
+    out = "{out}Surfaces: {snapshot.surfaces.len()}\n"
+    for surface in snapshot.surfaces:
+        val active_marker = if surface.active: " [active]" else: ""
+        out = "{out}\n[surface:{surface.surface_id}] {surface.title}{active_marker}\n"
+        val nodes = ui_access_find_nodes(snapshot, surface.surface_id, "", "", false)
+        for node in nodes:
+            if node.surface_id == surface.surface_id:
+                val child_text = _join_text(node.child_ids, ",")
+                val action_text = _join_text(node.action_names, ",")
+                out = "{out}  [{node.canonical_id}] {node.kind} text=\"{node.text}\" children=[{child_text}] actions=[{action_text}]\n"
+    if snapshot.recent_events.len() > 0:
+        out = "{out}\nRecent events:\n"
+        for event in snapshot.recent_events:
+            out = "{out}  #{event.sequence} {event.surface_id} {event.event_kind} {event.payload}\n"
+    return out
+
+fn ui_access_snapshot_to_json(snapshot: UiAccessSnapshot) -> text:
+    val surfaces_json = _surfaces_to_json(snapshot.surfaces)
+    val nodes_json = _nodes_to_json(snapshot.nodes)
+    val events_json = _events_to_json(snapshot.recent_events)
+    return "{" +
+        _json_pair("protocol_version", "{snapshot.protocol_version}") + "," +
+        _json_pair("mode", _json_str(snapshot.mode)) + "," +
+        _json_pair("active_surface", _json_str(snapshot.active_surface)) + "," +
+        _json_pair("surfaces", surfaces_json) + "," +
+        _json_pair("nodes", nodes_json) + "," +
+        _json_pair("recent_events", events_json) +
+        "}"
+
+fn ui_access_surface_to_json(snapshot: UiAccessSnapshot, surface_id: text) -> text:
+    for surface in snapshot.surfaces:
+        if surface.surface_id == surface_id:
+            var nodes: [UiAccessNode] = []
+            for node in snapshot.nodes:
+                if node.surface_id == surface_id:
+                    nodes = nodes.push(node)
+            return "{" +
+                _json_pair("surface", _surface_to_json(surface)) + "," +
+                _json_pair("nodes", _nodes_to_json(nodes)) +
+                "}"
+    return "{}"
+
+fn ui_access_events_to_json(events: [UiAccessEvent]) -> text:
+    return _events_to_json(events)
+
+fn _collect_access_nodes(surface_id: text, tree: UITree) -> [UiAccessNode]:
+    val root = tree.root_node()
+    return _collect_access_nodes_from(root, surface_id)
+
+fn _collect_access_nodes_from(node: WidgetNode, surface_id: text) -> [UiAccessNode]:
+    var nodes: [UiAccessNode] = []
+    nodes = nodes.push(_widget_to_access_node(node, surface_id))
+    for child in node.children():
+        val child_nodes = _collect_access_nodes_from(child, surface_id)
+        for child_node in child_nodes:
+            nodes = nodes.push(child_node)
+    return nodes
+
+fn _widget_to_access_node(node: WidgetNode, surface_id: text) -> UiAccessNode:
+    val record = get_widget_record(node.id)
+    val props = _public_props_for_node(node.id)
+    val child_ids = _child_canonical_ids(surface_id, node.children())
+    val actions = _node_actions(node)
+    if record == nil:
+        return UiAccessNode(
+            canonical_id: ui_access_canonical_id(surface_id, node.id),
+            surface_id: surface_id,
+            widget_id: node.id,
+            kind: "panel",
+            visible: true,
+            focused: false,
+            enabled: true,
+            selected: false,
+            text: node.get_prop("text"),
+            props: props,
+            child_ids: child_ids,
+            action_names: actions
+        )
+    return UiAccessNode(
+        canonical_id: ui_access_canonical_id(surface_id, node.id),
+        surface_id: surface_id,
+        widget_id: node.id,
+        kind: record.kind,
+        visible: record.visible,
+        focused: record.focused,
+        enabled: _node_enabled(node),
+        selected: _node_selected(node),
+        text: node.get_prop("text"),
+        props: props,
+        child_ids: child_ids,
+        action_names: actions
+    )
+
+fn _node_enabled(node: WidgetNode) -> bool:
+    val enabled_prop = node.get_prop("enabled").to_lower()
+    val disabled_prop = node.get_prop("disabled").to_lower()
+    if enabled_prop == "false":
+        return false
+    if disabled_prop == "true":
+        return false
+    return true
+
+fn _node_selected(node: WidgetNode) -> bool:
+    val selected_prop = node.get_prop("selected").to_lower()
+    return selected_prop == "true" or selected_prop == "yes" or selected_prop == "1"
+
+fn _public_props_for_node(node_id: text) -> [UiAccessProp]:
+    var props: [UiAccessProp] = []
+    for prop in widget_props():
+        if prop.node_id == node_id and not prop.key.starts_with("ui_"):
+            props = props.push(UiAccessProp(key: prop.key, value: prop.value))
+    return props
+
+fn _child_canonical_ids(surface_id: text, children: [WidgetNode]) -> [text]:
+    var ids: [text] = []
+    for child in children:
+        ids = ids.push(ui_access_canonical_id(surface_id, child.id))
+    return ids
+
+fn _node_actions(node: WidgetNode) -> [text]:
+    var actions: [text] = []
+    val kind = node.kind().to_lower()
+    val prop_action = node.get_prop("action")
+    if prop_action != "":
+        actions = actions.push(prop_action)
+    if kind == "button" or kind == "checkbox" or kind == "dropdown" or kind == "tabs" or kind == "list" or kind == "tree" or kind == "dialog":
+        actions = _push_unique(actions, "click")
+    if kind == "input" or kind == "textfield" or kind == "textarea":
+        actions = _push_unique(actions, "focus")
+        actions = _push_unique(actions, "set_text")
+    if kind == "dialog":
+        actions = _push_unique(actions, "submit")
+    return actions
+
+fn _push_unique(items: [text], value: text) -> [text]:
+    for item in items:
+        if item == value:
+            return items
+    return items.push(value)
+
+fn _node_matches_text(node: UiAccessNode, text_filter: text) -> bool:
+    if node.widget_id.to_lower().contains(text_filter):
+        return true
+    if node.text.to_lower().contains(text_filter):
+        return true
+    for prop in node.props:
+        if prop.key.to_lower().contains(text_filter) or prop.value.to_lower().contains(text_filter):
+            return true
+    return false
+
+fn _lifecycle_to_access_event(sequence: i64, surface_id: text, lifecycle_event: LifecycleEvent) -> UiAccessEvent:
+    match lifecycle_event:
+        LifecycleEvent.Mount(widget_id: widget_id):
+            return UiAccessEvent(
+                surface_id: surface_id,
+                widget_id: widget_id,
+                canonical_id: ui_access_canonical_id(surface_id, widget_id),
+                event_kind: "mount",
+                payload: widget_id,
+                sequence: sequence
+            )
+        LifecycleEvent.Unmount(widget_id: widget_id):
+            return UiAccessEvent(
+                surface_id: surface_id,
+                widget_id: widget_id,
+                canonical_id: ui_access_canonical_id(surface_id, widget_id),
+                event_kind: "unmount",
+                payload: widget_id,
+                sequence: sequence
+            )
+        LifecycleEvent.Update(widget_id: widget_id, prop_key: prop_key, prop_value: prop_value):
+            return UiAccessEvent(
+                surface_id: surface_id,
+                widget_id: widget_id,
+                canonical_id: ui_access_canonical_id(surface_id, widget_id),
+                event_kind: "update",
+                payload: "{prop_key}={prop_value}",
+                sequence: sequence
+            )
+        LifecycleEvent.Action(widget_id: widget_id, action_name: action_name):
+            return UiAccessEvent(
+                surface_id: surface_id,
+                widget_id: widget_id,
+                canonical_id: ui_access_canonical_id(surface_id, widget_id),
+                event_kind: "action",
+                payload: action_name,
+                sequence: sequence
+            )
+        LifecycleEvent.Focus(widget_id: widget_id):
+            return UiAccessEvent(
+                surface_id: surface_id,
+                widget_id: widget_id,
+                canonical_id: ui_access_canonical_id(surface_id, widget_id),
+                event_kind: "focus",
+                payload: widget_id,
+                sequence: sequence
+            )
+        LifecycleEvent.Blur(widget_id: widget_id):
+            return UiAccessEvent(
+                surface_id: surface_id,
+                widget_id: widget_id,
+                canonical_id: ui_access_canonical_id(surface_id, widget_id),
+                event_kind: "blur",
+                payload: widget_id,
+                sequence: sequence
+            )
+
+fn _surfaces_to_json(surfaces: [UiAccessSurface]) -> text:
+    var result = "["
+    var first = true
+    for surface in surfaces:
+        if not first:
+            result = "{result},"
+        result = "{result}{_surface_to_json(surface)}"
+        first = false
+    result = "{result}]"
+    return result
+
+fn _surface_to_json(surface: UiAccessSurface) -> text:
+    val active = if surface.active: "true" else: "false"
+    return "{" +
+        _json_pair("surface_id", _json_str(surface.surface_id)) + "," +
+        _json_pair("title", _json_str(surface.title)) + "," +
+        _json_pair("active", active) + "," +
+        _json_pair("window_id", _json_str(surface.window_id)) + "," +
+        _json_pair("app_id", _json_str(surface.app_id)) + "," +
+        _json_pair("root_canonical_id", _json_str(surface.root_canonical_id)) +
+        "}"
+
+fn _nodes_to_json(nodes: [UiAccessNode]) -> text:
+    var result = "["
+    var first = true
+    for node in nodes:
+        if not first:
+            result = "{result},"
+        result = "{result}{_node_to_json(node)}"
+        first = false
+    result = "{result}]"
+    return result
+
+fn _node_to_json(node: UiAccessNode) -> text:
+    val visible = if node.visible: "true" else: "false"
+    val focused = if node.focused: "true" else: "false"
+    val enabled = if node.enabled: "true" else: "false"
+    val selected = if node.selected: "true" else: "false"
+    return "{" +
+        _json_pair("canonical_id", _json_str(node.canonical_id)) + "," +
+        _json_pair("surface_id", _json_str(node.surface_id)) + "," +
+        _json_pair("widget_id", _json_str(node.widget_id)) + "," +
+        _json_pair("kind", _json_str(node.kind)) + "," +
+        _json_pair("visible", visible) + "," +
+        _json_pair("focused", focused) + "," +
+        _json_pair("enabled", enabled) + "," +
+        _json_pair("selected", selected) + "," +
+        _json_pair("text", _json_str(node.text)) + "," +
+        _json_pair("props", _props_to_json(node.props)) + "," +
+        _json_pair("child_ids", _text_array_to_json(node.child_ids)) + "," +
+        _json_pair("action_names", _text_array_to_json(node.action_names)) +
+        "}"
+
+fn _props_to_json(props: [UiAccessProp]) -> text:
+    var result = "{"
+    var first = true
+    for prop in props:
+        if not first:
+            result = "{result},"
+        result = "{result}{_json_str(prop.key)}:{_json_str(prop.value)}"
+        first = false
+    result = "{result}}"
+    return result
+
+fn _events_to_json(events: [UiAccessEvent]) -> text:
+    var result = "["
+    var first = true
+    for event in events:
+        if not first:
+            result = "{result},"
+        result = "{result}{_event_to_json(event)}"
+        first = false
+    result = "{result}]"
+    return result
+
+fn _event_to_json(event: UiAccessEvent) -> text:
+    return "{" +
+        _json_pair("surface_id", _json_str(event.surface_id)) + "," +
+        _json_pair("widget_id", _json_str(event.widget_id)) + "," +
+        _json_pair("canonical_id", _json_str(event.canonical_id)) + "," +
+        _json_pair("event_kind", _json_str(event.event_kind)) + "," +
+        _json_pair("payload", _json_str(event.payload)) + "," +
+        _json_pair("sequence", "{event.sequence}") +
+        "}"
+
+fn _text_array_to_json(items: [text]) -> text:
+    var result = "["
+    var first = true
+    for item in items:
+        if not first:
+            result = "{result},"
+        result = "{result}{_json_str(item)}"
+        first = false
+    result = "{result}]"
+    return result
+
+fn _join_text(items: [text], sep: text) -> text:
+    var out = ""
+    var first = true
+    for item in items:
+        if not first:
+            out = "{out}{sep}"
+        out = "{out}{item}"
+        first = false
+    return out
+
+fn _json_pair(key: text, value: text) -> text:
+    return "{_json_str(key)}:{value}"
+
+fn _json_str(value: text) -> text:
+    return "\"{_escape_json(value)}\""
+
+fn _escape_json(value: text) -> text:
+    var result = ""
+    var idx = 0
+    while idx < value.len():
+        val ch = value[idx]
+        if ch == "\"":
+            result = "{result}\\\""
+        elif ch == "\\":
+            result = "{result}\\\\"
+        elif ch == "\n":
+            result = "{result}\\n"
+        elif ch == "\r":
+            result = "{result}\\r"
+        elif ch == "\t":
+            result = "{result}\\t"
+        else:
+            result = "{result}{ch}"
+        idx = idx + 1
+    return result

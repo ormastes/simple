@@ -6,6 +6,8 @@
 # for automated UI testing (click, type, drag, screenshot, etc.).
 
 use common.ui.widget.{UIState, UIEvent, WidgetNode, get_widget_record}
+use common.ui.session.{UISession}
+use common.ui.access.{UiAccessSnapshot, ui_access_snapshot_from_state, ui_access_snapshot_to_json, ui_access_surface_to_json, ui_access_events_to_json}
 use app.ui.test_api.json.{element_to_json, elements_to_json, extract_json_field, escape_json, state_to_json}
 
 val PROTOCOL_VERSION = 1
@@ -14,7 +16,7 @@ val PROTOCOL_VERSION = 1
 # Main Handler
 # =========================================================================
 
-fn handle_test_request(path: text, method: text, body: text, state: UIState, inject_event: fn(UIEvent)) -> (i32, text, text):
+fn handle_test_request(path: text, method: text, body: text, state: UIState, inject_event: fn(UIEvent), session: UISession?) -> (i32, text, text):
     """Handle an incoming test API request.
 
     Returns (status_code, content_type, response_body).
@@ -23,7 +25,9 @@ fn handle_test_request(path: text, method: text, body: text, state: UIState, inj
     val route = _strip_query(path)
 
     if method == "POST":
-        if route == "/api/test/click":
+        if route == "/api/test/ui/act":
+            return _handle_ui_act(body, inject_event)
+        elif route == "/api/test/click":
             return _handle_click(body, inject_event)
         elif route == "/api/test/type":
             return _handle_type(body, inject_event)
@@ -37,7 +41,16 @@ fn handle_test_request(path: text, method: text, body: text, state: UIState, inj
             return (404, "application/json", "{\"error\":\"not_found\",\"message\":\"Route not found\"}")
 
     elif method == "GET":
-        if route == "/api/test/screenshot":
+        if route == "/api/test/ui/snapshot":
+            return _handle_ui_snapshot(state, session)
+        elif route == "/api/test/ui/surface":
+            val id = _extract_query_param(path, "id")
+            return _handle_ui_surface(id, state, session)
+        elif route == "/api/test/ui/history":
+            val surface_id = _extract_query_param(path, "surface_id")
+            val count_str = _extract_query_param(path, "count")
+            return _handle_ui_history(surface_id, count_str, session)
+        elif route == "/api/test/screenshot":
             return _handle_screenshot(state)
         elif route == "/api/test/element":
             val id = _extract_query_param(path, "id")
@@ -142,6 +155,22 @@ fn _handle_event(body: text, inject_event: fn(UIEvent)) -> (i32, text, text):
         _:
             return (400, "application/json", "{\"error\":\"unknown_event_type\",\"message\":\"Unknown event type\"}")
 
+fn _handle_ui_act(body: text, inject_event: fn(UIEvent)) -> (i32, text, text):
+    """Handle POST /api/test/ui/act — additive UI access action route."""
+    val surface_id = extract_json_field(body, "surface_id")
+    val canonical_id = extract_json_field(body, "canonical_id")
+    val action = extract_json_field(body, "action")
+    val widget_id = _widget_id_from_canonical(canonical_id)
+    if action == "":
+        return (400, "application/json", "{\"error\":\"missing_field\",\"message\":\"Missing required field: action\"}")
+    if widget_id == "" and canonical_id != "":
+        return (400, "application/json", "{\"error\":\"invalid_field\",\"message\":\"Invalid canonical_id\"}")
+    if widget_id != "":
+        inject_event(UIEvent.Action(name: "{action}_{widget_id}"))
+    else:
+        inject_event(UIEvent.Action(name: action))
+    return (200, "application/json", "{\"ok\":true,\"surface_id\":\"{escape_json(surface_id)}\",\"canonical_id\":\"{escape_json(canonical_id)}\"}")
+
 # =========================================================================
 # GET Handlers
 # =========================================================================
@@ -176,6 +205,36 @@ fn _handle_elements(state: UIState) -> (i32, text, text):
     val json = elements_to_json(state)
     return (200, "application/json", json)
 
+fn _handle_ui_snapshot(state: UIState, session: UISession?) -> (i32, text, text):
+    """Handle GET /api/test/ui/snapshot — return canonical access snapshot."""
+    val snapshot = _build_access_snapshot(state, session)
+    val json = ui_access_snapshot_to_json(snapshot)
+    return (200, "application/json", json)
+
+fn _handle_ui_surface(surface_id: text, state: UIState, session: UISession?) -> (i32, text, text):
+    """Handle GET /api/test/ui/surface?id=X — return one surface and its nodes."""
+    if surface_id == "":
+        return (400, "application/json", "{\"error\":\"missing_field\",\"message\":\"Missing required field: id\"}")
+    val snapshot = _build_access_snapshot(state, session)
+    val json = ui_access_surface_to_json(snapshot, surface_id)
+    if json == "{}":
+        return (404, "application/json", "{\"error\":\"element_not_found\",\"message\":\"Surface not found: {surface_id}\"}")
+    return (200, "application/json", json)
+
+fn _handle_ui_history(surface_id: text, count_str: text, session: UISession?) -> (i32, text, text):
+    """Handle GET /api/test/ui/history — return recent access events."""
+    if session == nil:
+        return (200, "application/json", "[]")
+    var count = 20
+    if count_str != "":
+        count = count_str.to_i32()
+    val events = if surface_id == "":
+        session.access_recent_events(count)
+    else:
+        session.access_recent_surface_events(surface_id, count)
+    val json = ui_access_events_to_json(events)
+    return (200, "application/json", json)
+
 # =========================================================================
 # Query String Helpers
 # =========================================================================
@@ -206,6 +265,19 @@ fn _extract_query_param(path: text, param: text) -> text:
         end_pos = end_pos + 1
 
     return query.slice(start, end_pos)
+
+fn _build_access_snapshot(state: UIState, session: UISession?) -> UiAccessSnapshot:
+    if session != nil:
+        return session.access_snapshot()
+    return ui_access_snapshot_from_state(state, [])
+
+fn _widget_id_from_canonical(canonical_id: text) -> text:
+    if canonical_id == "":
+        return ""
+    val idx = canonical_id.find("#")
+    if idx < 0:
+        return ""
+    return canonical_id.slice(idx + 1, canonical_id.len())
 
 # =========================================================================
 # HTML Snapshot Rendering

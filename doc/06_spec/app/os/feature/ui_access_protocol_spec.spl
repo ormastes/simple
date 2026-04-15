@@ -1,0 +1,42 @@
+# System-spec checks for the internal UI access protocol.
+#
+# Requirements: doc/02_requirements/feature/ui_access_protocol.md
+
+use std.spec.{describe, it, expect}
+use common.ui.builder.{column, text_widget, button, build_tree}
+use common.ui.session.{UISession}
+use common.ui.widget.{UIEvent}
+use common.ui.access.{ui_access_canonical_id}
+
+fn _session_with_popup() -> UISession:
+    val root = column("root").child(
+        text_widget("title", "Hello Access")
+    ).child(
+        button("submit_btn", "Submit", "submit")
+    )
+    val tree = build_tree(root)
+    var session = UISession.new(tree)
+    val popup_tree = build_tree(
+        column("popup_root").child(button("ok_btn", "OK", "ok"))
+    )
+    session.open_surface("popup", popup_tree)
+    session.set_active_surface("popup")
+    return session
+
+describe "ui_access_protocol feature spec":
+    it "REQ-UAP-001 and REQ-UAP-004 expose a canonical multi-surface snapshot":
+        val session = _session_with_popup()
+        val snapshot = session.access_snapshot()
+        expect(snapshot.protocol_version).to_equal(1)
+        expect(snapshot.surfaces.len()).to_equal(2)
+        expect(snapshot.active_surface).to_equal("popup")
+
+    it "REQ-UAP-002 uses readable canonical node ids":
+        expect(ui_access_canonical_id("popup", "ok_btn")).to_equal("popup#ok_btn")
+
+    it "REQ-UAP-007 and REQ-UAP-008 record recent surface-scoped history":
+        val session = _session_with_popup()
+        session.dispatch(UIEvent.Action(name: "ok"))
+        val popup_events = session.access_recent_surface_events("popup", 10)
+        expect(popup_events.len()).to_be_greater_than(0)
+        expect(popup_events[0].surface_id).to_equal("popup")
