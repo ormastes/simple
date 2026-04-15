@@ -27,7 +27,8 @@ C_SRCS  = simpleos_libc.c simpleos_math.c simpleos_math_ext.c simpleos_fs.c \
           simpleos_pthread_rwlock.c simpleos_pthread_cond.c \
           simpleos_epoll.c simpleos_eventfd.c simpleos_timerfd.c \
           simpleos_signalfd.c simpleos_inotify.c simpleos_fs_walk.c \
-          simpleos_glob_stub.c simpleos_pwd_stub.c simpleos_strfmon.c
+          simpleos_glob_stub.c simpleos_pwd_stub.c simpleos_strfmon.c \
+          simpleos_fork.c simpleos_ipc.c
 ASM_SRCS = simpleos_crt0.S simpleos_syscall.S simpleos_setjmp.S
 
 C_OBJS  = $(C_SRCS:.c=.o)
