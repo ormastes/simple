@@ -387,9 +387,13 @@ FAT32_BAD  : u32   # 0x0FFFFFF7
 
 **Landed (wave-4, 2026-04-15):** `disk_image_bake.spl` produces a 32 MiB
 FAT32-signature stub (BPB jump + OEM + `0x55AA` + zero pad) — commit
-`a4ba52b6c5`. Real FAT32 payload embed is **deferred to wave-4d** pending
-`rt_file_truncate` extern (preferred) or interpreter-perf remediation — see
-IF-13 for the blocker description.
+`a4ba52b6c5`. **Wave-4d (same day)** resolves the real payload embed via the
+`rt_file_truncate` extern (commit `a47cd179a3`): structural bytes (~150 KiB)
+written via `rt_file_write_bytes`, kernel zero-extends to 32 MiB via
+`ftruncate()`. Verified: `build/os/simpleos_disk.img` is exactly 33554432 bytes,
+`file` reports FAT32 BPB with SIMPLEOS OEM, and a `HELLORS` 8.3 directory entry
+lands at sector 288 pointing to `first_cluster=3`. Multi-payload embed is a
+wave-4a-builder limit (HELLOCO not yet written); follow-up.
 
 ---
 
@@ -603,7 +607,7 @@ fn main()
 
 ## IF-13 Interpreter-perf blocker for disk-image bake
 
-**Status:** new-this-cycle (known blocker, not a frozen contract)
+**Status:** resolved-wave-4d (via candidate A; see `rt_file_truncate` below)
 
 **Location:** `src/os/port/disk_image_bake.spl`, `src/os/port/disk_image.spl`
 
@@ -617,14 +621,19 @@ emits a 32 MiB FAT32-signature stub — BPB jump + OEM tag + `0x55AA` sector
 signature + zeroed pad — without embedding real payloads. Kernel boot can
 still probe the image but no files are readable.
 
-**Wave-4d candidates:**
-- A: add `extern fn rt_file_truncate(path: text, size: u64) -> bool` so
-  only structural bytes (~150 KiB) are built in Simple; libc `ftruncate()`
-  pads the tail.
-- B: compile `disk_image_bake.spl` to native via `bin/simple native-build`
-  and run the compiled binary (skips interpreter perf cost entirely).
+**Wave-4d landed (candidate A, commit `a47cd179a3`):** `rt_file_truncate(path, size) -> bool`
+extern added to `src/runtime/runtime_native.c` + interpreter bridge at
+`src/compiler_rust/compiler/src/interpreter_extern/{file_io.rs,mod.rs}`.
+`disk_image.spl:build()` now writes structural bytes (~150 KiB) via
+`rt_file_write_bytes` then calls `rt_file_truncate` to have libc `ftruncate()`
+zero-extend the tail. Verified end-to-end: the full bake completes and
+produces a 32 MiB image with HELLORS payload embedded at cluster 3.
+Interpreter `img.push(0u8)` in FAT-table builders is still the residual
+~5-minute bottleneck for the ~150 KiB structural prefix; further wins
+would come from a `[u8].extend_zeros(n)` stdlib helper or a native-compiled
+bake (candidate B, deferred).
 
-**Consumers:** Phase-2 Track I5, Phase-3 QEMU smoke (stub-tolerant path).
+**Consumers:** Phase-2 Track I5 (unblocked), Phase-3 QEMU smoke.
 
 ---
 
@@ -735,3 +744,50 @@ Cross-toolchain milestones (not IF-id changes, recorded here for traceability):
   (cfg_select gaps, extern-block `unsafe` in edition 2024, unresolved
   `libc::__errno_location` / `strerror_r` / `c_char`, `os::unix` missing,
   `unsafe_op_in_unsafe_fn` in `thread.rs`); separate agent E in flight.
+
+### 2026-04-15 (evening) — wave-4d landings
+
+Completes the Phase-3 prerequisite chain. All Rust/clang/disk-image pieces
+needed for the QEMU smoke are in place; remaining blocker is the kernel ELF
+build workstream (separate wave).
+
+- **IF-13 resolved — `rt_file_truncate` extern (IF-07 follow-up)** — commit
+  `a47cd179a3`. Added `src/runtime/runtime_native.c` POSIX `ftruncate` wrapper
+  plus interpreter bridge in `src/compiler_rust/compiler/src/interpreter_extern/{file_io.rs,mod.rs}`.
+  `src/os/port/disk_image.spl:build()` now writes structural bytes via
+  `rt_file_write_bytes` and delegates zero-pad to the kernel via `rt_file_truncate`.
+  After Rust bootstrap seed rebuild (cargo 2m40s) + redeploy (simple `cp` to
+  `bin/release/.../simple`), the full bake completes in 5m31s and produces a
+  32 MiB FAT32 image with the `HELLORS` payload embedded at cluster 3
+  (verified: exact size, FAT32 BPB + SIMPLEOS OEM, HELLORS 8.3 entry at root
+  sector 288).
+- **Rust stage1 libstd GREEN (Agent E, IF-04 adjacent)** — fork commits
+  (multiple) on `ormastes/rust:simpleos`. Fixed 58 libstd PAL errors: cfg_select
+  branches added to `library/std/src/sys/{random,alloc,io,thread_local}/mod.rs`;
+  `extern "C"` blocks wrapped with `unsafe` per Rust 2024 edition;
+  `unsafe_op_in_unsafe_fn` wraps in `pal/simpleos/thread.rs`; local extern
+  bindings for `__errno_location` / `strerror_r` / `c_char` in PAL files;
+  new `library/std/src/os/simpleos.rs` module. Build produces
+  `libstd-*.rlib` (1.2 MB), `libcore-*.rlib` (1.2 MB), `liballoc-*.rlib`
+  (320 KB), `libcompiler_builtins-*.rlib` (3.6 MB) under
+  `/home/ormastes/rust/build/*/stage1/lib/rustlib/x86_64-unknown-simpleos/lib/`.
+- **Stage1 sysroot verification script (Agent H)** — commit `8974a794a8`.
+  New `scripts/build_rust_hello_with_stage1.sh` (173 lines) cross-compiles
+  against the fork's stage1 sysroot via `--sysroot` + bare triple
+  (fork registers simpleos as a built-in target). libstd smoke build
+  produces a 35544-byte ELF with 39 demangled `std::/alloc::/core::` symbols
+  linked, proving the rlibs are usable, not just on-disk. Quirks documented:
+  stage1 rustc requires bare triple (not JSON), `${SDKROOT}` requires a literal
+  symlink (rust-lld doesn't env-expand), and `hello_rs/src/main.rs`'s hand-written
+  `_start` collides with `crt0.o` — use `fn main()` instead for stage1 builds.
+- **LLVM `__simpleos__` predefines (Agent I, IF-05 adjacent)** — commit `3b33ba807`
+  on `ormastes/llvm-project:simpleos` (NOT in this repo; cited for traceability).
+  Adds `SimpleOSTargetInfo<Target>` class in `clang/lib/Basic/Targets/OSTargets.h`
+  with `getOSDefines()` emitting `__simpleos__`, `__SIMPLEOS__`, `__unix__`,
+  `__ELF__`, `_REENTRANT`; wires `case llvm::Triple::SimpleOS:` into
+  `Targets.cpp` x86_64 OS switch. Verified via
+  `clang -dM -E --target=x86_64-unknown-simpleos`. Negative test against
+  `x86_64-linux-gnu` confirms gating is correct.
+- **Initramfs real bake (community, IF-06 follow-up)** — commit `14cff9cec6`.
+  Initramfs is now a real cpio payload (not a 7-byte stub) built as part
+  of the disk bake flow.
