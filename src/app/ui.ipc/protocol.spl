@@ -25,8 +25,10 @@ enum IpcMessageKind:
 # IPC Message Parsing (from Electron → Simple)
 # =========================================================================
 
-## Maximum allowed IPC message length (64KB).
-val IPC_MAX_MESSAGE_LEN = 65536
+## Maximum allowed IPC message length (1MB) — large enough to carry
+## fetch_result bodies up to the host-side 256KB body cap with JSON
+## escape overhead.
+val IPC_MAX_MESSAGE_LEN = 1048576
 
 ## Maximum allowed field value length (8KB).
 val IPC_MAX_FIELD_LEN = 8192
@@ -61,14 +63,18 @@ fn parse_ipc_message(json_str: text) -> UIEvent?:
         val key = extract_json_field(json_str, "key")
         val kp_win = extract_json_field(json_str, "windowId")
         if key != "":
-            if kp_win != "":
+            # "main" is the default sentinel meaning the host window —
+            # treat it as no windowId so single-window apps see KeyPress
+            # directly. Multi-window WMs use specific windowIds and get
+            # the Action(win:…) wrapping.
+            if kp_win != "" and kp_win != "main":
                 return UIEvent.Action(name: "win:" + kp_win + ":keypress:" + key)
             return UIEvent.KeyPress(key: key)
     if msg_type == "action":
         val name = extract_json_field(json_str, "name")
         val act_win = extract_json_field(json_str, "windowId")
         if name != "":
-            if act_win != "":
+            if act_win != "" and act_win != "main":
                 return UIEvent.Action(name: "win:" + act_win + ":action:" + name)
             return UIEvent.Action(name: name)
     if msg_type == "resize":
@@ -153,6 +159,17 @@ fn parse_ipc_message(json_str: text) -> UIEvent?:
         val val_str = extract_json_field(json_str, "value")
         if tid != "":
             return UIEvent.InputChange(target_id: tid, value: val_str)
+    if msg_type == "fetch_result":
+        val req_id = extract_json_field(json_str, "requestId")
+        val url = extract_json_field(json_str, "url")
+        val status_str = extract_json_field(json_str, "status")
+        val body = extract_json_field(json_str, "body")
+        val error = extract_json_field(json_str, "error")
+        val status: i32 = if status_str != "":
+            status_str.to_int().to_i32()
+        else:
+            0
+        return UIEvent.FetchResult(request_id: req_id, url: url, status: status, body: body, error: error)
     return nil
 
 # =========================================================================
@@ -171,6 +188,12 @@ fn build_ipc_paint_canvas(ops_json: text, viewport_w: i32, viewport_h: i32) -> t
     escaped, because Canvas2D ops are passed straight through to
     JSON.parse on the renderer side."""
     return "{\"type\":\"paint_canvas\",\"ops\":" + ops_json + ",\"width\":" + str(viewport_w) + ",\"height\":" + str(viewport_h) + "}"
+
+fn build_ipc_request_fetch(url: text, request_id: text) -> text:
+    """Ask the host to perform an HTTP GET. The reply arrives as a
+    `fetch_result` message decoded into UIEvent.FetchResult. `request_id`
+    is an opaque string the caller can use to correlate."""
+    return "{\"type\":\"request_fetch\",\"url\":\"" + escape_ipc_json(url) + "\",\"requestId\":\"" + escape_ipc_json(request_id) + "\"}"
 
 fn build_ipc_dialog(dialog_type: text, title: text, message: text) -> text:
     """Build an IPC dialog request."""
@@ -242,32 +265,131 @@ fn _s_find(s: text, n: text) -> i64:
         Some(i): return i
         nil: return -1
 
+fn _scan_string_value(rest: text) -> text:
+    """Scan a JSON string body until the first unescaped closing quote,
+    decoding the standard escapes (\\, \", \n, \r, \t, \/). Caller passes
+    the substring AFTER the opening quote; the closing quote terminates."""
+    var out = ""
+    var i = 0
+    val length = rest.len()
+    while i < length:
+        val ch = rest.substring(i, i + 1)
+        if ch == "\\":
+            if i + 1 >= length:
+                return out
+            val next = rest.substring(i + 1, i + 2)
+            if next == "\"":
+                out = out + "\""
+            elif next == "\\":
+                out = out + "\\"
+            elif next == "/":
+                out = out + "/"
+            elif next == "n":
+                out = out + "\n"
+            elif next == "r":
+                out = out + "\r"
+            elif next == "t":
+                out = out + "\t"
+            elif next == "b":
+                out = out + "\u{0008}"
+            elif next == "f":
+                out = out + "\u{000c}"
+            elif next == "u":
+                # Decode \uXXXX as a single BMP code point. If the four
+                # hex digits aren't valid, emit a literal placeholder.
+                if i + 5 < length:
+                    val hex = rest.substring(i + 2, i + 6)
+                    val code = _hex4_to_int(hex)
+                    if code >= 0:
+                        out = out + _codepoint_to_text(code)
+                    else:
+                        out = out + "?"
+                    i = i + 4
+                else:
+                    out = out + "?"
+            else:
+                out = out + next
+            i = i + 2
+        elif ch == "\"":
+            return out
+        else:
+            out = out + ch
+            i = i + 1
+    out
+
+fn _hex_digit(ch: text) -> i64:
+    if ch == "0": return 0
+    if ch == "1": return 1
+    if ch == "2": return 2
+    if ch == "3": return 3
+    if ch == "4": return 4
+    if ch == "5": return 5
+    if ch == "6": return 6
+    if ch == "7": return 7
+    if ch == "8": return 8
+    if ch == "9": return 9
+    if ch == "a" or ch == "A": return 10
+    if ch == "b" or ch == "B": return 11
+    if ch == "c" or ch == "C": return 12
+    if ch == "d" or ch == "D": return 13
+    if ch == "e" or ch == "E": return 14
+    if ch == "f" or ch == "F": return 15
+    -1
+
+fn _hex4_to_int(hex: text) -> i64:
+    if hex.len() < 4:
+        return -1
+    var i = 0
+    var n: i64 = 0
+    while i < 4:
+        val d = _hex_digit(hex.substring(i, i + 1))
+        if d < 0:
+            return -1
+        n = n * 16 + d
+        i = i + 1
+    n
+
+fn _codepoint_to_text(cp: i64) -> text:
+    # ASCII fast path
+    if cp >= 32 and cp < 127:
+        return "{cp.to_text_char()}"
+    # Non-ASCII: best-effort placeholder. The fetched content's text
+    # rendering only needs ASCII for now; full UTF-8 escape decoding can
+    # land later.
+    "?"
+
 fn extract_json_field(json_str: text, field: text) -> text:
-    """Extract a string field value from simple JSON."""
+    """Extract a field value (string OR number) from simple JSON.
+    Strings are scanned escape-aware so embedded `\"` doesn't truncate;
+    numbers are returned as text up to the next comma/brace/whitespace."""
     val quote = "\""
-    # Include opening quote in search to avoid reuse-after-method-call bug
-    val search = quote + field + quote + ":" + quote
-    val idx = _s_find(json_str, search)
-    if idx < 0:
-        # Try with space after colon: "field": "value"
-        val search2 = quote + field + quote + ": " + quote
-        val idx2 = _s_find(json_str, search2)
-        if idx2 < 0:
-            return ""
-        val slen2 = search2.len()
-        val start2 = idx2 + slen2
-        val rest2 = json_str.substring(start2)
-        val end2 = _s_find(rest2, quote)
-        if end2 < 0:
-            return ""
-        return rest2.substring(0, end2)
-    val slen = search.len()
-    val start = idx + slen
-    val rest = json_str.substring(start)
-    val end = _s_find(rest, quote)
-    if end < 0:
+    val key = quote + field + quote + ":"
+    val key_idx = _s_find(json_str, key)
+    if key_idx < 0:
         return ""
-    return rest.substring(0, end)
+    var pos = key_idx + key.len()
+    val total = json_str.len()
+    # Skip whitespace after the colon.
+    while pos < total:
+        val ch = json_str.substring(pos, pos + 1)
+        if ch == " " or ch == "\t" or ch == "\n" or ch == "\r":
+            pos = pos + 1
+        else:
+            break
+    if pos >= total:
+        return ""
+    val first = json_str.substring(pos, pos + 1)
+    if first == "\"":
+        # Quoted string — scan with escape handling.
+        return _scan_string_value(json_str.substring(pos + 1))
+    # Bare value (number, true, false, null) — read until terminator.
+    var end = pos
+    while end < total:
+        val ch = json_str.substring(end, end + 1)
+        if ch == "," or ch == "}" or ch == "]" or ch == " " or ch == "\t" or ch == "\n" or ch == "\r":
+            break
+        end = end + 1
+    json_str.substring(pos, end)
 
 fn escape_ipc_json(s: text) -> text:
     """Escape a string for JSON in IPC messages.

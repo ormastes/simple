@@ -50,7 +50,7 @@
 # * Bidi, tables, flex, complex CSS, JS, video, web fonts: NOT supported.
 # ---------------------------------------------------------------------------
 
-use app.ui.ipc.protocol.{parse_ipc_message, build_ipc_paint_canvas}
+use app.ui.ipc.protocol.{parse_ipc_message, build_ipc_paint_canvas, build_ipc_request_fetch}
 use common.ui.widget.{UIEvent}
 use common.render_scene.scene_to_canvas2d_json.{display_list_to_canvas2d_ops}
 use examples.browser.entity.dom.paint_types.{PaintOp, DisplayList}
@@ -193,34 +193,168 @@ fn _build_chrome_ops(url: text, pal: Palette, vw: f64, focused_input: bool) -> [
 # scroll_y`.
 # ---------------------------------------------------------------------------
 
-fn _build_content_ops(url: text, loaded: bool, pal: Palette, vw: f64, vh: f64, scroll_y: f64) -> [PaintOp]:
+fn _index_of_or(s: text, needle: text, default_value: i64) -> i64:
+    """Wrapper for text.index_of that returns -1 (or `default_value`) when
+    the substring isn't found, since text.index_of returns Option<i64>."""
+    val idx = s.index_of(needle)
+    match idx:
+        Some(i): return i
+        nil: return default_value
+
+fn _drop_block(body: text, open_tag: text, close_tag: text) -> text:
+    """Remove all <open_tag>…</close_tag> sections (case-insensitive on the
+    tag bound) — used for <style>, <script>, and <!-- comments -->."""
+    var src = body
+    var out = ""
+    var safety = 0
+    while safety < 1000:
+        safety = safety + 1
+        val lower = src.to_lower()
+        val start = _index_of_or(lower, open_tag, -1)
+        if start < 0:
+            return out + src
+        out = out + src.substring(0, start)
+        val rest = src.substring(start)
+        val rest_lower = rest.to_lower()
+        val end_rel = _index_of_or(rest_lower, close_tag, -1)
+        if end_rel < 0:
+            # Unterminated block — drop the rest.
+            return out
+        src = rest.substring(end_rel + close_tag.len())
+    out + src
+
+fn _strip_html(body: text) -> text:
+    """Strip HTML tags and collapse whitespace into a single text run.
+    Crude but adequate until the Blink HTML parser is wired in. Handles
+    <style>/<script>/comments first, then tag stripping + entity decoding."""
+    var stripped = _drop_block(body, "<style", "</style>")
+    stripped = _drop_block(stripped, "<script", "</script>")
+    stripped = _drop_block(stripped, "<!--", "-->")
+    var result = ""
+    var in_tag = false
+    var i = 0
+    val length = stripped.len()
+    while i < length:
+        val ch = stripped.substring(i, i + 1)
+        if in_tag:
+            if ch == ">":
+                in_tag = false
+        else:
+            if ch == "<":
+                in_tag = true
+            else:
+                result = result + ch
+        i = i + 1
+    var cleaned = result.replace("&amp;", "&")
+    cleaned = cleaned.replace("&lt;", "<")
+    cleaned = cleaned.replace("&gt;", ">")
+    cleaned = cleaned.replace("&quot;", "\"")
+    cleaned = cleaned.replace("&#39;", "'")
+    cleaned = cleaned.replace("&nbsp;", " ")
+    cleaned = cleaned.replace("\r", " ")
+    cleaned = cleaned.replace("\n", " ")
+    cleaned = cleaned.replace("\t", " ")
+    var prev_len = -1
+    while prev_len != cleaned.len():
+        prev_len = cleaned.len()
+        cleaned = cleaned.replace("  ", " ")
+    cleaned.trim()
+
+fn _wrap_lines(content: text, max_chars: i64) -> [text]:
+    """Greedy word-wrap to lines of at most max_chars."""
+    var lines: [text] = []
+    var current = ""
+    val words = content.split(" ")
+    for word in words:
+        if word == "":
+            continue
+        if current == "":
+            current = word
+        elif current.len() + 1 + word.len() <= max_chars:
+            current = current + " " + word
+        else:
+            lines = lines.push(current)
+            current = word
+    if current != "":
+        lines = lines.push(current)
+    lines
+
+fn _build_content_ops(url: text, loaded: bool, fetched_status: i32, fetched_body: text, fetched_error: text, pal: Palette, vw: f64, vh: f64, scroll_y: f64) -> [PaintOp]:
     var ops: [PaintOp] = []
     val content_y = CHROME_HEIGHT
     val content_h = vh - CHROME_HEIGHT
     ops = ops.push(PaintOp.FillRect(x: 0.0, y: content_y, w: vw, h: content_h, color: pal.content_bg))
     ops = ops.push(PaintOp.PushClip(x: 0.0, y: content_y, w: vw, h: content_h))
     val base_y = content_y + 40.0 - scroll_y
-    val title = if loaded: "Loaded: " + url else: "Simple Browser"
+
+    if not loaded:
+        ops = ops.push(PaintOp.DrawText(
+            x: 24.0, y: base_y,
+            text_content: "Simple Browser", font_size: 24.0, color: pal.fg
+        ))
+        ops = ops.push(PaintOp.DrawText(
+            x: 24.0, y: base_y + 36.0,
+            text_content: "Type a URL and press Enter (or click Go).", font_size: 14.0, color: pal.subtle
+        ))
+        ops = ops.push(PaintOp.DrawText(
+            x: 24.0, y: base_y + 60.0,
+            text_content: "HTTP fetch runs in the Electron main process; HTML body is", font_size: 13.0, color: pal.subtle
+        ))
+        ops = ops.push(PaintOp.DrawText(
+            x: 24.0, y: base_y + 82.0,
+            text_content: "stripped to text and laid out below as wrapped lines.", font_size: 13.0, color: pal.subtle
+        ))
+        ops = ops.push(PaintOp.PopClip)
+        return ops
+
+    # Loaded but not yet responded
+    if fetched_status == 0 and fetched_error == "":
+        ops = ops.push(PaintOp.DrawText(
+            x: 24.0, y: base_y,
+            text_content: "Loading: " + url, font_size: 18.0, color: pal.fg
+        ))
+        ops = ops.push(PaintOp.PopClip)
+        return ops
+
+    # Error
+    if fetched_error != "":
+        ops = ops.push(PaintOp.DrawText(
+            x: 24.0, y: base_y,
+            text_content: "Failed: " + url, font_size: 18.0, color: pal.fg
+        ))
+        ops = ops.push(PaintOp.DrawText(
+            x: 24.0, y: base_y + 28.0,
+            text_content: fetched_error, font_size: 13.0, color: pal.subtle
+        ))
+        ops = ops.push(PaintOp.PopClip)
+        return ops
+
+    # Success — render status + stripped body, wrapped
+    val header = "{fetched_status} " + url
     ops = ops.push(PaintOp.DrawText(
         x: 24.0, y: base_y,
-        text_content: title, font_size: 24.0, color: pal.fg
+        text_content: header, font_size: 14.0, color: pal.subtle
     ))
-    ops = ops.push(PaintOp.DrawText(
-        x: 24.0, y: base_y + 36.0,
-        text_content: "Pure-Simple paint pipeline", font_size: 14.0, color: pal.subtle
-    ))
-    ops = ops.push(PaintOp.DrawText(
-        x: 24.0, y: base_y + 60.0,
-        text_content: "Chrome drawn via DisplayList -> Canvas2D ops.", font_size: 13.0, color: pal.subtle
-    ))
-    ops = ops.push(PaintOp.DrawText(
-        x: 24.0, y: base_y + 82.0,
-        text_content: "Navigation + full HTML render land once Blink modules", font_size: 13.0, color: pal.subtle
-    ))
-    ops = ops.push(PaintOp.DrawText(
-        x: 24.0, y: base_y + 102.0,
-        text_content: "expose an examples/-reachable facade.", font_size: 13.0, color: pal.subtle
-    ))
+    val cleaned = _strip_html(fetched_body)
+    val max_chars: i64 = ((vw - 48.0) / 7.5).to_i64()
+    val safe_max = if max_chars < 20: 20 else: max_chars
+    val lines = _wrap_lines(cleaned, safe_max)
+    var line_y = base_y + 32.0
+    val max_lines: i64 = 200
+    var i: i64 = 0
+    val total = lines.len()
+    while i < total and i < max_lines:
+        ops = ops.push(PaintOp.DrawText(
+            x: 24.0, y: line_y,
+            text_content: lines[i], font_size: 14.0, color: pal.fg
+        ))
+        line_y = line_y + 22.0
+        i = i + 1
+    if total > max_lines:
+        ops = ops.push(PaintOp.DrawText(
+            x: 24.0, y: line_y,
+            text_content: "(truncated at " + "{max_lines}" + " lines of " + "{total}" + ")", font_size: 12.0, color: pal.subtle
+        ))
     ops = ops.push(PaintOp.PopClip)
     return ops
 
@@ -258,6 +392,13 @@ fn _hit_button(x: f64, y: f64, vw: f64) -> bool:
 # Main
 # ---------------------------------------------------------------------------
 
+fn _trigger_fetch(url: text, request_seq: i32) -> i32:
+    """Emit a request_fetch IPC and bump the sequence number used to
+    correlate the eventual fetch_result back to the in-flight request."""
+    val req_id = "req-{request_seq}"
+    print build_ipc_request_fetch(url, req_id)
+    request_seq + 1
+
 fn main() -> i64:
     val theme = _resolve_theme()
     val pal = _palette(theme)
@@ -267,11 +408,16 @@ fn main() -> i64:
     var scroll_y: f64 = 0.0
     var viewport_w: i32 = 1024
     var viewport_h: i32 = 768
+    var fetched_status: i32 = 0
+    var fetched_body: text = ""
+    var fetched_error: text = ""
+    var pending_request_id: text = ""
+    var request_seq: i32 = 1
 
     val vw_f = viewport_w.to_f64()
     val vh_f = viewport_h.to_f64()
     val chrome0 = _build_chrome_ops(url, pal, vw_f, focused_input)
-    val content0 = _build_content_ops(url, loaded, pal, vw_f, vh_f, scroll_y)
+    val content0 = _build_content_ops(url, loaded, fetched_status, fetched_body, fetched_error, pal, vw_f, vh_f, scroll_y)
     _emit_paint(_merge(chrome0, content0), viewport_w, viewport_h)
 
     var running = true
@@ -281,6 +427,7 @@ fn main() -> i64:
             val event = parse_ipc_message(line)
             if event != nil:
                 var dirty = false
+                var trigger_fetch = false
                 match event:
                     UIEvent.Quit:
                         running = false
@@ -296,8 +443,7 @@ fn main() -> i64:
                                     focused_input = true
                                     dirty = true
                             elif _hit_button(x, y, vw2):
-                                loaded = true
-                                scroll_y = 0.0
+                                trigger_fetch = true
                                 focused_input = false
                                 dirty = true
                             else:
@@ -307,8 +453,7 @@ fn main() -> i64:
                     UIEvent.KeyPress(key):
                         if focused_input:
                             if key == "Enter":
-                                loaded = true
-                                scroll_y = 0.0
+                                trigger_fetch = true
                                 focused_input = false
                                 dirty = true
                             elif key == "Backspace":
@@ -335,12 +480,30 @@ fn main() -> i64:
                         val new_scroll = scroll_y + dy
                         scroll_y = if new_scroll < 0.0: 0.0 else: new_scroll
                         dirty = true
+                    UIEvent.FetchResult(req_id, fr_url, status, body, err):
+                        eprint "[fetch_result] req={req_id} status={status} body_len={body.len()} err={err}"
+                        # Accept any in-flight result (our model is single-flight).
+                        if pending_request_id == "" or pending_request_id == req_id:
+                            pending_request_id = ""
+                            fetched_status = status
+                            fetched_body = body
+                            fetched_error = err
+                            scroll_y = 0.0
+                            dirty = true
                     _:
                         pass_dn
+                if trigger_fetch:
+                    loaded = true
+                    scroll_y = 0.0
+                    fetched_status = 0
+                    fetched_body = ""
+                    fetched_error = ""
+                    pending_request_id = "req-{request_seq}"
+                    request_seq = _trigger_fetch(url, request_seq)
                 if dirty:
                     val vw_i = viewport_w.to_f64()
                     val vh_i = viewport_h.to_f64()
                     val chrome_ops = _build_chrome_ops(url, pal, vw_i, focused_input)
-                    val content_ops = _build_content_ops(url, loaded, pal, vw_i, vh_i, scroll_y)
+                    val content_ops = _build_content_ops(url, loaded, fetched_status, fetched_body, fetched_error, pal, vw_i, vh_i, scroll_y)
                     _emit_paint(_merge(chrome_ops, content_ops), viewport_w, viewport_h)
     return 0

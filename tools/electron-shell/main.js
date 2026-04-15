@@ -7,7 +7,7 @@
 //   electron . <entry.spl>
 //   SIMPLE_BIN=/path/to/simple electron . <entry.spl>
 
-const { app, BrowserWindow, ipcMain, dialog, Notification } = require('electron');
+const { app, BrowserWindow, ipcMain, dialog, Notification, net } = require('electron');
 const { spawn } = require('child_process');
 const path = require('path');
 const fs = require('fs');
@@ -103,6 +103,60 @@ function sendToSimple(msg) {
     }
 }
 
+// Fetch a URL via Electron's net module and ship the body back to Simple as
+// a `fetch_result` message. Handles redirects automatically. Body is capped
+// at 256 KB to keep the IPC payload under the 64 KB-per-message limit
+// enforced by parse_ipc_message (we'll truncate; for v1 that's fine).
+const FETCH_BODY_CAP = 256 * 1024;
+function handleFetchRequest(url, requestId) {
+    debugLog(`request_fetch url=${url} requestId=${requestId}`);
+    if (!url) {
+        sendToSimple({ type: 'fetch_result', requestId, url: '', status: 0, body: '', error: 'empty url' });
+        return;
+    }
+    let request;
+    try {
+        request = net.request({ method: 'GET', url, redirect: 'follow' });
+    } catch (err) {
+        sendToSimple({ type: 'fetch_result', requestId, url, status: 0, body: '', error: String(err.message || err) });
+        return;
+    }
+    let chunks = [];
+    let total = 0;
+    let truncated = false;
+    request.on('response', (response) => {
+        const status = response.statusCode || 0;
+        response.on('data', (chunk) => {
+            if (truncated) return;
+            const remaining = FETCH_BODY_CAP - total;
+            if (chunk.length > remaining) {
+                chunks.push(chunk.slice(0, remaining));
+                total += remaining;
+                truncated = true;
+            } else {
+                chunks.push(chunk);
+                total += chunk.length;
+            }
+        });
+        response.on('end', () => {
+            const body = Buffer.concat(chunks).toString('utf8');
+            sendToSimple({
+                type: 'fetch_result',
+                requestId,
+                url,
+                status: String(status),
+                body,
+                error: truncated ? `truncated at ${FETCH_BODY_CAP} bytes` : ''
+            });
+        });
+    });
+    request.on('error', (err) => {
+        debugLog(`request_fetch error url=${url} err=${err.message}`);
+        sendToSimple({ type: 'fetch_result', requestId, url, status: 0, body: '', error: String(err.message || err) });
+    });
+    request.end();
+}
+
 // Handle a single JSON line from the Simple subprocess stdout
 function handleSimpleMessage(line) {
     if (!line.trim()) return;
@@ -129,6 +183,14 @@ function handleSimpleMessage(line) {
                         height: msg.height || 0
                     });
                 }
+                break;
+
+            // HTTP fetch on behalf of the Simple subprocess. Done in the main
+            // process via Electron's net module — no CSP, no SFFI dependency.
+            // Result is shipped back to Simple's stdin as a `fetch_result`
+            // message that parse_ipc_message decodes into UIEvent.FetchResult.
+            case 'request_fetch':
+                handleFetchRequest(msg.url || '', msg.requestId || '');
                 break;
 
             case 'notification':
@@ -365,6 +427,7 @@ app.whenReady().then(() => {
 // IPC from renderer: keypress (tagged with windowId)
 ipcMain.on('keypress', (event, key) => {
     const windowId = webContentsToWindowId.get(event.sender.id) || 'main';
+    debugLog(`keypress key=${JSON.stringify(key)} windowId=${windowId}`);
     sendToSimple({ type: 'keypress', key, windowId });
 });
 
@@ -387,12 +450,14 @@ ipcMain.on('quit', () => {
 // IPC from renderer: mouse / scroll / focus / input — for Canvas2D-rendered apps
 // where the Simple program owns hit-testing, focus, and form state.
 ipcMain.on('mouse', (event, payload) => {
+    const kind = (payload && payload.kind) || 'move';
+    if (kind !== 'move') debugLog(`mouse kind=${kind} button=${(payload && payload.button) || ''} x=${(payload && payload.x) || 0} y=${(payload && payload.y) || 0}`);
     sendToSimple({
         type: 'mouse',
         x: String((payload && payload.x) || 0),
         y: String((payload && payload.y) || 0),
         button: (payload && payload.button) || '',
-        kind: (payload && payload.kind) || 'move'
+        kind: kind
     });
 });
 
