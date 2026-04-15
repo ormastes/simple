@@ -58,7 +58,8 @@ fn handle_test_request(path: text, method: text, body: text, state: UIState, inj
         elif route == "/api/test/ui/state":
             val surface_id = _extract_query_param(path, "surface_id")
             val canonical_id = _extract_query_param(path, "canonical_id")
-            return _handle_ui_state_get(surface_id, canonical_id, state, session)
+            val state_key = _extract_query_param(path, "state_key")
+            return _handle_ui_state_get(surface_id, canonical_id, state_key, state, session)
         elif route == "/api/test/ui/history":
             val surface_id = _extract_query_param(path, "surface_id")
             val count_str = _extract_query_param(path, "count")
@@ -318,12 +319,29 @@ fn _handle_ui_observe(surface_id: text, canonical_id: text, kind: text, text_que
         return _handle_ui_surface(surface_id, state, session)
     return (400, "application/json", "{\"error\":\"missing_field\",\"message\":\"Missing selector: surface_id, canonical_id, kind, text, or focused_only\"}")
 
-fn _handle_ui_state_get(surface_id: text, canonical_id: text, state: UIState, session: UISession?) -> (i32, text, text):
+fn _handle_ui_state_get(surface_id: text, canonical_id: text, state_key: text, state: UIState, session: UISession?) -> (i32, text, text):
     """Handle GET /api/test/ui/state — declarative state read route."""
+    val snapshot = _build_access_snapshot(state, session)
     if canonical_id != "":
-        return _handle_ui_observe(surface_id, canonical_id, "", "", "", state, session)
+        val node = ui_access_find_node(snapshot, canonical_id)
+        if node == nil:
+            return (404, "application/json", "{\"error\":\"element_not_found\",\"message\":\"Canonical node not found: {escape_json(canonical_id)}\"}")
+        if state_key == "":
+            return _handle_ui_observe(surface_id, canonical_id, "", "", "", state, session)
+        val node_value = _node_state_value(node, state_key)
+        if node_value == nil:
+            return (400, "application/json", "{\"error\":\"invalid_field\",\"message\":\"Unsupported state key: {escape_json(state_key)}\"}")
+        return (200, "application/json", "{\"canonical_id\":\"{escape_json(canonical_id)}\",\"state_key\":\"{escape_json(state_key)}\",\"state_value\":\"{escape_json(node_value)}\"}")
     if surface_id != "":
-        return _handle_ui_surface(surface_id, state, session)
+        val surface = _find_surface(snapshot, surface_id)
+        if surface == nil:
+            return (404, "application/json", "{\"error\":\"element_not_found\",\"message\":\"Surface not found: {escape_json(surface_id)}\"}")
+        if state_key == "":
+            return _handle_ui_surface(surface_id, state, session)
+        val surface_value = _surface_state_value(surface, state_key)
+        if surface_value == nil:
+            return (400, "application/json", "{\"error\":\"invalid_field\",\"message\":\"Unsupported state key: {escape_json(state_key)}\"}")
+        return (200, "application/json", "{\"surface_id\":\"{escape_json(surface_id)}\",\"state_key\":\"{escape_json(state_key)}\",\"state_value\":\"{escape_json(surface_value)}\"}")
     return (400, "application/json", "{\"error\":\"missing_field\",\"message\":\"Missing required field: surface_id or canonical_id\"}")
 
 fn _handle_ui_surface(surface_id: text, state: UIState, session: UISession?) -> (i32, text, text):
@@ -405,10 +423,20 @@ fn _resolve_ui_state_action(snapshot: UiAccessSnapshot, node: UiAccessNode, stat
         if not _is_truthy(state_value):
             return ""
         return ui_access_resolve_action_name(snapshot, node.canonical_id, "submit")
-    if lower_key == "select" or lower_key == "selected":
+    if lower_key == "select":
         if not _is_truthy(state_value):
             return ""
+        if node.selected:
+            return "__noop__"
         return ui_access_resolve_action_name(snapshot, node.canonical_id, "select")
+    if lower_key == "selected":
+        if _state_matches_toggle_target(node.selected, state_value):
+            return "__noop__"
+        if _is_truthy(state_value):
+            return ui_access_resolve_action_name(snapshot, node.canonical_id, "select")
+        if _is_falsy(state_value):
+            return ui_access_resolve_action_name(snapshot, node.canonical_id, "toggle")
+        return ""
     if lower_key == "toggle" or lower_key == "toggled" or lower_key == "checked" or lower_key == "expanded":
         if _state_matches_toggle_target(node.selected, state_value):
             return "__noop__"
@@ -433,6 +461,63 @@ fn _state_matches_toggle_target(selected: bool, desired: text) -> bool:
     if _is_falsy(desired):
         return not selected
     return false
+
+fn _find_surface(snapshot: UiAccessSnapshot, surface_id: text) -> UiAccessSurface?:
+    for surface in snapshot.surfaces:
+        if surface.surface_id == surface_id:
+            return surface
+    return nil
+
+fn _node_state_value(node: UiAccessNode, state_key: text) -> text?:
+    val lower_key = state_key.to_lower()
+    if lower_key == "canonical_id":
+        return node.canonical_id
+    if lower_key == "surface_id":
+        return node.surface_id
+    if lower_key == "widget_id":
+        return node.widget_id
+    if lower_key == "kind":
+        return node.kind
+    if lower_key == "visible":
+        return if node.visible: "true" else: "false"
+    if lower_key == "focused":
+        return if node.focused: "true" else: "false"
+    if lower_key == "enabled":
+        return if node.enabled: "true" else: "false"
+    if lower_key == "selected" or lower_key == "checked" or lower_key == "expanded":
+        return if node.selected: "true" else: "false"
+    if lower_key == "text":
+        return node.text
+    if lower_key == "actions" or lower_key == "action_names":
+        return _join_text(node.action_names, ",")
+    return nil
+
+fn _surface_state_value(surface: UiAccessSurface, state_key: text) -> text?:
+    val lower_key = state_key.to_lower()
+    if lower_key == "surface_id":
+        return surface.surface_id
+    if lower_key == "title":
+        return surface.title
+    if lower_key == "active":
+        return if surface.active: "true" else: "false"
+    if lower_key == "window_id":
+        return surface.window_id
+    if lower_key == "app_id":
+        return surface.app_id
+    if lower_key == "root_canonical_id":
+        return surface.root_canonical_id
+    return nil
+
+fn _join_text(values: [text], separator: text) -> text:
+    var out = ""
+    var first = true
+    for value in values:
+        if first:
+            out = value
+            first = false
+        else:
+            out = "{out}{separator}{value}"
+    return out
 
 # =========================================================================
 # HTML Snapshot Rendering

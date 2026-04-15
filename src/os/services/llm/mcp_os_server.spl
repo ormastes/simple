@@ -602,11 +602,28 @@ impl OsMcpServer:
 
     me tool_ui_access_state(surface_id: text, canonical_id: text, state_key: text, state_value: text) -> text:
         """Declarative state read/write layer over canonical UI access tools."""
-        if state_key == "" and state_value == "":
+        val snapshot = self.bridge.session.access_snapshot()
+        if state_value == "":
             if canonical_id != "":
-                return self.tool_ui_access_observe(surface_id, canonical_id, "", "", "")
+                val node = ui_access_find_node(snapshot, canonical_id)
+                if node == nil:
+                    return "error: canonical node {canonical_id} not found"
+                if state_key == "":
+                    return self.tool_ui_access_observe(surface_id, canonical_id, "", "", "")
+                val node_value = _node_state_value(node, state_key)
+                if node_value == nil:
+                    return "error: unsupported state key {state_key}"
+                return "{\"canonical_id\":\"{canonical_id}\",\"state_key\":\"{state_key}\",\"state_value\":\"{node_value}\"}"
             if surface_id != "":
-                return self.tool_ui_access_surface(surface_id)
+                val surface = _find_surface(snapshot, surface_id)
+                if surface == nil:
+                    return "error: surface {surface_id} not found"
+                if state_key == "":
+                    return self.tool_ui_access_surface(surface_id)
+                val surface_value = _surface_state_value(surface, state_key)
+                if surface_value == nil:
+                    return "error: unsupported state key {state_key}"
+                return "{\"surface_id\":\"{surface_id}\",\"state_key\":\"{state_key}\",\"state_value\":\"{surface_value}\"}"
             return "error: missing target"
 
         var resolved_surface_id = surface_id
@@ -630,7 +647,6 @@ impl OsMcpServer:
             return "error: missing canonical_id"
         if not self.bridge.session.has_surface(resolved_surface_id):
             return "error: surface {resolved_surface_id} not found"
-        val snapshot = self.bridge.session.access_snapshot()
         val node = ui_access_find_node(snapshot, canonical_id)
         if node == nil:
             return "error: canonical node {canonical_id} not found"
@@ -649,10 +665,21 @@ impl OsMcpServer:
             if not _is_truthy(state_value):
                 return "error: unsupported state transition {state_key}={state_value}"
             action = "submit"
-        elif lower_key == "select" or lower_key == "selected":
+        elif lower_key == "select":
             if not _is_truthy(state_value):
                 return "error: unsupported state transition {state_key}={state_value}"
+            if node.selected:
+                return "ok: state {state_key}={state_value} on {canonical_id}"
             action = "select"
+        elif lower_key == "selected":
+            if _state_matches_toggle_target(node, state_value):
+                return "ok: state {state_key}={state_value} on {canonical_id}"
+            if _is_truthy(state_value):
+                action = "select"
+            elif _is_falsy(state_value):
+                action = "toggle"
+            else:
+                return "error: unsupported state transition {state_key}={state_value}"
         elif lower_key == "toggle" or lower_key == "toggled" or lower_key == "checked" or lower_key == "expanded":
             if _state_matches_toggle_target(node, state_value):
                 return "ok: state {state_key}={state_value} on {canonical_id}"
@@ -794,6 +821,63 @@ fn _state_matches_toggle_target(node: UiAccessNode, desired: text) -> bool:
     if _is_falsy(desired):
         return not node.selected
     return false
+
+fn _find_surface(snapshot: UiAccessSnapshot, surface_id: text) -> UiAccessSurface?:
+    for surface in snapshot.surfaces:
+        if surface.surface_id == surface_id:
+            return surface
+    return nil
+
+fn _node_state_value(node: UiAccessNode, state_key: text) -> text?:
+    val lower_key = state_key.to_lower()
+    if lower_key == "canonical_id":
+        return node.canonical_id
+    if lower_key == "surface_id":
+        return node.surface_id
+    if lower_key == "widget_id":
+        return node.widget_id
+    if lower_key == "kind":
+        return node.kind
+    if lower_key == "visible":
+        return if node.visible: "true" else: "false"
+    if lower_key == "focused":
+        return if node.focused: "true" else: "false"
+    if lower_key == "enabled":
+        return if node.enabled: "true" else: "false"
+    if lower_key == "selected" or lower_key == "checked" or lower_key == "expanded":
+        return if node.selected: "true" else: "false"
+    if lower_key == "text":
+        return node.text
+    if lower_key == "actions" or lower_key == "action_names":
+        return _join_text(node.action_names, ",")
+    return nil
+
+fn _surface_state_value(surface: UiAccessSurface, state_key: text) -> text?:
+    val lower_key = state_key.to_lower()
+    if lower_key == "surface_id":
+        return surface.surface_id
+    if lower_key == "title":
+        return surface.title
+    if lower_key == "active":
+        return if surface.active: "true" else: "false"
+    if lower_key == "window_id":
+        return surface.window_id
+    if lower_key == "app_id":
+        return surface.app_id
+    if lower_key == "root_canonical_id":
+        return surface.root_canonical_id
+    return nil
+
+fn _join_text(values: [text], separator: text) -> text:
+    var out = ""
+    var first = true
+    for value in values:
+        if first:
+            out = value
+            first = false
+        else:
+            out = "{out}{separator}{value}"
+    return out
 
 fn _find_window(windows: [WindowInfo], id_str: text) -> WindowInfo?:
     """Find a window by ID string."""
