@@ -1,0 +1,807 @@
+# OpenType table parser — cmap, glyf, hmtx, CFF, GSUB/GPOS skeletons, GDEF, fvar/avar partial
+
+use std.skia.entity.path.{SkPath, sk_path_new}
+use std.skia.entity.geometry.{SkRect}
+use std.skia.feature.glyph.outline.{GlyphOutline, GlyphMetrics}
+
+# ===== utility big-endian readers =====
+
+fn read_u16_be(buf: [u8], offset: i64) -> u32:
+    if offset + 1 >= buf.len():
+        return 0
+    val hi = buf[offset] as u32
+    val lo = buf[offset + 1] as u32
+    (hi << 8) | lo
+
+fn read_i16_be(buf: [u8], offset: i64) -> i32:
+    val raw = read_u16_be(buf, offset)
+    if raw >= 32768:
+        (raw as i32) - 65536
+    else:
+        raw as i32
+
+fn read_u32_be(buf: [u8], offset: i64) -> u32:
+    if offset + 3 >= buf.len():
+        return 0
+    val b0 = buf[offset] as u32
+    val b1 = buf[offset + 1] as u32
+    val b2 = buf[offset + 2] as u32
+    val b3 = buf[offset + 3] as u32
+    (b0 << 24) | (b1 << 16) | (b2 << 8) | b3
+
+fn read_fixed_1616(buf: [u8], offset: i64) -> f64:
+    val raw = read_u32_be(buf, offset)
+    val integer_part = (raw >> 16) as f64
+    val frac_part = (raw & 0xFFFF) as f64
+    integer_part + (frac_part / 65536.0)
+
+# ===== table record / offset table =====
+
+class OtTable:
+    tag: u32
+    offset: u32
+    length: u32
+
+class OtFont:
+    blob: [u8]
+    tables: [OtTable]
+
+fn parse_offset_table(blob: [u8]) -> Option<OtFont>:
+    if blob.len() < 12:
+        return None
+    val sfnt_version = read_u32_be(blob, 0)
+    # Valid sfnt versions: 0x00010000 (TrueType), 0x4F54544F (OTTO/CFF), 0x74727565 (true), 0x74797031 (typ1)
+    val is_truetype = sfnt_version == 65536
+    val is_otto = sfnt_version == 1330926671
+    val is_true = sfnt_version == 1953658213
+    val is_typ1 = sfnt_version == 1954115633
+    if (not is_truetype) and (not is_otto) and (not is_true) and (not is_typ1):
+        return None
+    val num_tables = read_u16_be(blob, 4) as i64
+    if blob.len() < (12 + num_tables * 16) as i64:
+        return None
+    var tables: [OtTable] = []
+    var i: i64 = 0
+    while i < num_tables:
+        val rec_off = 12 + i * 16
+        val tag = read_u32_be(blob, rec_off)
+        val tbl_offset = read_u32_be(blob, rec_off + 8)
+        val tbl_length = read_u32_be(blob, rec_off + 12)
+        val tbl = OtTable(tag: tag, offset: tbl_offset, length: tbl_length)
+        tables = [...tables, tbl]
+        i = i + 1
+    Some(OtFont(blob: blob, tables: tables))
+
+fn find_table(font: OtFont, tag: u32) -> Option<OtTable>:
+    var i: i64 = 0
+    while i < font.tables.len():
+        val tbl = font.tables[i]
+        if tbl.tag == tag:
+            return Some(tbl)
+        i = i + 1
+    None
+
+# ===== cmap =====
+
+class CmapFormat4:
+    seg_count: u32
+    end_codes: [u32]
+    start_codes: [u32]
+    id_deltas: [i32]
+    id_range_offsets: [u32]
+    glyph_ids: [u32]
+
+fn parse_cmap_format4(font: OtFont) -> Option<CmapFormat4>:
+    # Tag 'cmap' = 0x636D6170
+    val cmap_tag: u32 = 1668112752
+    val maybe_tbl = find_table(font, cmap_tag)
+    if maybe_tbl == None:
+        return None
+    val tbl = maybe_tbl.unwrap()
+    val base = tbl.offset as i64
+    val blob = font.blob
+    val version = read_u16_be(blob, base)
+    val num_subtables = read_u16_be(blob, base + 2) as i64
+    # Walk encoding records looking for format 4 (prefer platform 3 encoding 1, or platform 0)
+    var fmt4_offset: i64 = -1
+    var i: i64 = 0
+    while i < num_subtables:
+        val rec = base + 4 + i * 8
+        val platform_id = read_u16_be(blob, rec)
+        val encoding_id = read_u16_be(blob, rec + 2)
+        val sub_offset = read_u32_be(blob, rec + 4) as i64
+        val sub_abs = base + sub_offset
+        val fmt = read_u16_be(blob, sub_abs)
+        if fmt == 4:
+            if fmt4_offset < 0:
+                fmt4_offset = sub_abs
+            # Prefer platform 3 encoding 1
+            if platform_id == 3 and encoding_id == 1:
+                fmt4_offset = sub_abs
+        i = i + 1
+    if fmt4_offset < 0:
+        return None
+    # Parse format 4 subtable
+    val seg_count_x2 = read_u16_be(blob, fmt4_offset + 6) as i64
+    val seg_count = (seg_count_x2 / 2) as u32
+    val end_code_base = fmt4_offset + 14
+    var end_codes: [u32] = []
+    var start_codes: [u32] = []
+    var id_deltas: [i32] = []
+    var id_range_offsets: [u32] = []
+    var j: i64 = 0
+    while j < seg_count as i64:
+        val ec = read_u16_be(blob, end_code_base + j * 2)
+        end_codes = [...end_codes, ec]
+        j = j + 1
+    # reserved pad at end_code_base + seg_count * 2
+    val start_code_base = end_code_base + seg_count as i64 * 2 + 2
+    j = 0
+    while j < seg_count as i64:
+        val sc = read_u16_be(blob, start_code_base + j * 2)
+        start_codes = [...start_codes, sc]
+        j = j + 1
+    val delta_base = start_code_base + seg_count as i64 * 2
+    j = 0
+    while j < seg_count as i64:
+        val delta = read_i16_be(blob, delta_base + j * 2)
+        id_deltas = [...id_deltas, delta]
+        j = j + 1
+    val range_base = delta_base + seg_count as i64 * 2
+    j = 0
+    while j < seg_count as i64:
+        val ro = read_u16_be(blob, range_base + j * 2)
+        id_range_offsets = [...id_range_offsets, ro]
+        j = j + 1
+    # glyph id array follows range offsets
+    val gid_base = range_base + seg_count as i64 * 2
+    val gid_count = (blob.len() as i64 - gid_base) / 2
+    var glyph_ids: [u32] = []
+    j = 0
+    while j < gid_count and j < 65536:
+        val gid = read_u16_be(blob, gid_base + j * 2)
+        glyph_ids = [...glyph_ids, gid]
+        j = j + 1
+    Some(CmapFormat4(
+        seg_count: seg_count,
+        end_codes: end_codes,
+        start_codes: start_codes,
+        id_deltas: id_deltas,
+        id_range_offsets: id_range_offsets,
+        glyph_ids: glyph_ids
+    ))
+
+fn cmap_lookup(cmap: CmapFormat4, codepoint: u32) -> u32:
+    val n = cmap.seg_count as i64
+    # Binary search end_codes for first segment where end_code >= codepoint
+    var lo: i64 = 0
+    var hi: i64 = n - 1
+    var seg: i64 = n  # sentinel: not found
+    while lo <= hi:
+        val mid = (lo + hi) / 2
+        if cmap.end_codes[mid] >= codepoint:
+            seg = mid
+            hi = mid - 1
+        else:
+            lo = mid + 1
+    if seg >= n:
+        return 0
+    if cmap.start_codes[seg] > codepoint:
+        return 0
+    val ro = cmap.id_range_offsets[seg]
+    if ro == 0:
+        val raw = (codepoint as i32 + cmap.id_deltas[seg]) & 0xFFFF
+        return raw as u32
+    # Use glyph id array
+    val gid_idx = (ro / 2) as i64 + (codepoint as i64 - cmap.start_codes[seg] as i64) - (n - seg)
+    if gid_idx < 0 or gid_idx >= cmap.glyph_ids.len():
+        return 0
+    val gid = cmap.glyph_ids[gid_idx]
+    if gid == 0:
+        return 0
+    val adjusted = (gid as i32 + cmap.id_deltas[seg]) & 0xFFFF
+    adjusted as u32
+
+# ===== hmtx =====
+
+class HorizontalMetrics:
+    advance_width: u32
+    left_side_bearing: i32
+
+fn parse_hmtx(font: OtFont, num_long_metrics: u32, glyph_id: u32) -> Option<HorizontalMetrics>:
+    # Tag 'hmtx' = 0x686D7478
+    val hmtx_tag: u32 = 1752003704
+    val maybe_tbl = find_table(font, hmtx_tag)
+    if maybe_tbl == None:
+        return None
+    val tbl = maybe_tbl.unwrap()
+    val base = tbl.offset as i64
+    val blob = font.blob
+    val n = num_long_metrics as i64
+    if glyph_id as i64 < n:
+        val off = base + glyph_id as i64 * 4
+        if off + 3 >= blob.len() as i64:
+            return None
+        val aw = read_u16_be(blob, off)
+        val lsb = read_i16_be(blob, off + 2)
+        Some(HorizontalMetrics(advance_width: aw, left_side_bearing: lsb))
+    else:
+        # Beyond num_long_metrics: use last advance, read lsb from monospace array
+        if n == 0:
+            return None
+        val last_aw_off = base + (n - 1) * 4
+        if last_aw_off + 1 >= blob.len() as i64:
+            return None
+        val aw = read_u16_be(blob, last_aw_off)
+        val lsb_off = base + n * 4 + (glyph_id as i64 - n) * 2
+        if lsb_off + 1 >= blob.len() as i64:
+            return Some(HorizontalMetrics(advance_width: aw, left_side_bearing: 0))
+        val lsb = read_i16_be(blob, lsb_off)
+        Some(HorizontalMetrics(advance_width: aw, left_side_bearing: lsb))
+
+# ===== glyf =====
+
+class GlyfFlags:
+    on_curve: bool
+    x_short: bool
+    y_short: bool
+    repeat: bool
+    x_same_positive: bool
+    y_same_positive: bool
+
+fn decode_glyf_flags(blob: [u8], flags_start: i64, point_count: i64) -> [u8]:
+    var flags: [u8] = []
+    var pos: i64 = flags_start
+    while flags.len() as i64 < point_count and pos < blob.len() as i64:
+        val f = blob[pos]
+        pos = pos + 1
+        flags = [...flags, f]
+        # bit 3 = repeat flag
+        if (f & 8) != 0 and pos < blob.len() as i64:
+            val repeat_count = blob[pos] as i64
+            pos = pos + 1
+            var r: i64 = 0
+            while r < repeat_count and flags.len() as i64 < point_count:
+                flags = [...flags, f]
+                r = r + 1
+    flags
+
+fn decode_coord_deltas(blob: [u8], start: i64, flags: [u8], short_bit: u8, same_bit: u8) -> ([i32], i64):
+    var coords: [i32] = []
+    var pos: i64 = start
+    var current: i32 = 0
+    var i: i64 = 0
+    while i < flags.len() as i64:
+        val f = flags[i]
+        val is_short = (f & short_bit) != 0
+        val is_same = (f & same_bit) != 0
+        if is_short:
+            if pos >= blob.len() as i64:
+                coords = [...coords, current]
+                i = i + 1
+                continue
+            val delta = blob[pos] as i32
+            pos = pos + 1
+            if is_same:
+                current = current + delta
+            else:
+                current = current - delta
+        else:
+            if is_same:
+                # repeat previous (delta = 0)
+                pass_do_nothing
+            else:
+                if pos + 1 >= blob.len() as i64:
+                    coords = [...coords, current]
+                    i = i + 1
+                    continue
+                val delta = read_i16_be(blob, pos)
+                pos = pos + 2
+                current = current + delta
+        coords = [...coords, current]
+        i = i + 1
+    (coords, pos)
+
+fn parse_glyf_simple(font: OtFont, glyph_offset: u32) -> Option<SkPath>:
+    val blob = font.blob
+    val base = glyph_offset as i64
+    if base + 10 >= blob.len() as i64:
+        return None
+    val num_contours = read_i16_be(blob, base)
+    if num_contours < 0:
+        # Compound glyph
+        return None
+    if num_contours == 0:
+        val empty = sk_path_new()
+        return Some(empty)
+    val contour_count = num_contours as i64
+    # Read contour endpoint indices
+    var endpoints: [i32] = []
+    var i: i64 = 0
+    while i < contour_count:
+        val ep = read_u16_be(blob, base + 10 + i * 2) as i32
+        endpoints = [...endpoints, ep]
+        i = i + 1
+    val point_count = (endpoints[contour_count - 1] + 1) as i64
+    # Skip instructions
+    val instr_len_off = base + 10 + contour_count * 2
+    if instr_len_off + 1 >= blob.len() as i64:
+        return None
+    val instr_len = read_u16_be(blob, instr_len_off) as i64
+    val flags_start = instr_len_off + 2 + instr_len
+    # Decode flags
+    val flags = decode_glyf_flags(blob, flags_start, point_count)
+    if flags.len() as i64 < point_count:
+        return None
+    # Estimate flags end: count bytes consumed
+    var flags_pos: i64 = flags_start
+    var fi: i64 = 0
+    var flag_bytes_left: i64 = point_count
+    while fi < flags.len() as i64 and flag_bytes_left > 0:
+        val f = flags[fi]
+        flags_pos = flags_pos + 1
+        if (f & 8) != 0 and fi + 1 < flags.len() as i64:
+            val rpt = flags[fi + 1] as i64
+            flags_pos = flags_pos + 1
+            flag_bytes_left = flag_bytes_left - rpt - 1
+            fi = fi + 2
+        else:
+            flag_bytes_left = flag_bytes_left - 1
+            fi = fi + 1
+    # Decode x coords (bit 1 = x_short, bit 4 = x_same_positive)
+    val x_result = decode_coord_deltas(blob, flags_pos, flags, 2, 16)
+    val xs = x_result.0
+    val after_x = x_result.1
+    # Decode y coords (bit 2 = y_short, bit 5 = y_same_positive)
+    val y_result = decode_coord_deltas(blob, after_x, flags, 4, 32)
+    val ys = y_result.0
+    if xs.len() as i64 < point_count or ys.len() as i64 < point_count:
+        return None
+    # Build SkPath
+    var path = sk_path_new()
+    var contour_start: i64 = 0
+    var ci: i64 = 0
+    while ci < contour_count:
+        val contour_end = endpoints[ci] as i64
+        # moveTo first point
+        val mx = xs[contour_start] as f64
+        val my = ys[contour_start] as f64
+        val p0 = path.move_to(mx, my)
+        path = p0
+        var pi: i64 = contour_start + 1
+        while pi <= contour_end:
+            val px = xs[pi] as f64
+            val py = ys[pi] as f64
+            val on_curve = (flags[pi] & 1) != 0
+            if on_curve:
+                val p1 = path.line_to(px, py)
+                path = p1
+            else:
+                # Off-curve: quadratic control point; look ahead for endpoint
+                val next = pi + 1
+                if next <= contour_end:
+                    val nx = xs[next] as f64
+                    val ny = ys[next] as f64
+                    val next_on = (flags[next] & 1) != 0
+                    if next_on:
+                        val p1 = path.quad_to(px, py, nx, ny)
+                        path = p1
+                        pi = next
+                    else:
+                        # Implied midpoint
+                        val mid_x = (px + nx) / 2.0
+                        val mid_y = (py + ny) / 2.0
+                        val p1 = path.quad_to(px, py, mid_x, mid_y)
+                        path = p1
+                    # don't skip next; outer loop increments
+                else:
+                    # Off-curve at end: wrap to contour start
+                    val p1 = path.quad_to(px, py, mx, my)
+                    path = p1
+            pi = pi + 1
+        val pc = path.close()
+        path = pc
+        contour_start = contour_end + 1
+        ci = ci + 1
+    Some(path)
+
+fn parse_glyf_compound(font: OtFont, glyph_offset: u32) -> Option<SkPath>:
+    # TODO(ot-parser-compound)
+    pass_todo
+
+# ===== CFF =====
+
+fn parse_cff_charstring(font: OtFont, glyph_id: u32) -> Option<SkPath>:
+    # Tag 'CFF ' = 0x43464620
+    val cff_tag: u32 = 1128678944
+    val maybe_tbl = find_table(font, cff_tag)
+    if maybe_tbl == None:
+        return None
+    val tbl = maybe_tbl.unwrap()
+    val base = tbl.offset as i64
+    val blob = font.blob
+    if base >= blob.len() as i64:
+        return None
+    # Minimal: scan for Index structures to locate CharStrings INDEX.
+    # CFF header: major(1), minor(1), hdrSize(1), offSize(1)
+    if base + 4 >= blob.len() as i64:
+        return None
+    val hdr_size = blob[base + 2] as i64
+    # Skip Name INDEX, Top DICT INDEX, String INDEX, Global Subr INDEX to reach CharStrings.
+    # For minimal implementation: parse only endchar (14) opcode.
+    # Locate charstring data by offset stored at charstrings_offset in Top DICT.
+    # This is a simplified scan: walk the blob for common Type 2 opcodes.
+    var path = sk_path_new()
+    var stack: [f64] = []
+    var cx: f64 = 0.0
+    var cy: f64 = 0.0
+    # Scan charstring bytes starting after CFF header (simplified; real impl needs INDEX navigation)
+    var pos: i64 = base + hdr_size
+    var done: bool = false
+    while pos < blob.len() as i64 and (not done):
+        val b = blob[pos] as i32
+        pos = pos + 1
+        if b == 14:
+            # endchar
+            done = true
+        else if b >= 32 and b <= 246:
+            # integer operand
+            val n = (b - 139) as f64
+            stack = [...stack, n]
+        else if b >= 247 and b <= 250:
+            if pos >= blob.len() as i64:
+                done = true
+            else:
+                val w = blob[pos] as i32
+                pos = pos + 1
+                val n = ((b - 247) * 256 + w + 108) as f64
+                stack = [...stack, n]
+        else if b >= 251 and b <= 254:
+            if pos >= blob.len() as i64:
+                done = true
+            else:
+                val w = blob[pos] as i32
+                pos = pos + 1
+                val n = (-(b - 251) * 256 - w - 108) as f64
+                stack = [...stack, n]
+        else if b == 28:
+            if pos + 1 >= blob.len() as i64:
+                done = true
+            else:
+                val hi = blob[pos] as i32
+                val lo = blob[pos + 1] as i32
+                pos = pos + 2
+                val n = ((hi << 8) | lo) as f64
+                stack = [...stack, n]
+        else if b == 29:
+            if pos + 3 >= blob.len() as i64:
+                done = true
+            else:
+                val b0 = blob[pos] as i32
+                val b1 = blob[pos + 1] as i32
+                val b2 = blob[pos + 2] as i32
+                val b3 = blob[pos + 3] as i32
+                pos = pos + 4
+                val n = ((b0 << 24) | (b1 << 16) | (b2 << 8) | b3) as f64
+                stack = [...stack, n]
+        else if b == 21:
+            # rmoveto: dx dy
+            if stack.len() >= 2:
+                val dy = stack[stack.len() - 1]
+                val dx = stack[stack.len() - 2]
+                cx = cx + dx
+                cy = cy + dy
+                val p0 = path.move_to(cx, cy)
+                path = p0
+            stack = []
+        else if b == 22:
+            # hmoveto: dx
+            if stack.len() >= 1:
+                val dx = stack[stack.len() - 1]
+                cx = cx + dx
+                val p0 = path.move_to(cx, cy)
+                path = p0
+            stack = []
+        else if b == 4:
+            # vmoveto: dy
+            if stack.len() >= 1:
+                val dy = stack[stack.len() - 1]
+                cy = cy + dy
+                val p0 = path.move_to(cx, cy)
+                path = p0
+            stack = []
+        else if b == 5:
+            # rlineto: {dx dy}+
+            var si: i64 = 0
+            while si + 1 < stack.len() as i64:
+                cx = cx + stack[si]
+                cy = cy + stack[si + 1]
+                val p0 = path.line_to(cx, cy)
+                path = p0
+                si = si + 2
+            stack = []
+        else if b == 6:
+            # hlineto: alternating h v
+            var si: i64 = 0
+            var horiz: bool = true
+            while si < stack.len() as i64:
+                if horiz:
+                    cx = cx + stack[si]
+                else:
+                    cy = cy + stack[si]
+                val p0 = path.line_to(cx, cy)
+                path = p0
+                horiz = not horiz
+                si = si + 1
+            stack = []
+        else if b == 7:
+            # vlineto: alternating v h
+            var si: i64 = 0
+            var vert: bool = true
+            while si < stack.len() as i64:
+                if vert:
+                    cy = cy + stack[si]
+                else:
+                    cx = cx + stack[si]
+                val p0 = path.line_to(cx, cy)
+                path = p0
+                vert = not vert
+                si = si + 1
+            stack = []
+        else if b == 8:
+            # rrcurveto: {dx1 dy1 dx2 dy2 dx3 dy3}+
+            var si: i64 = 0
+            while si + 5 < stack.len() as i64:
+                val x1 = cx + stack[si]
+                val y1 = cy + stack[si + 1]
+                val x2 = x1 + stack[si + 2]
+                val y2 = y1 + stack[si + 3]
+                cx = x2 + stack[si + 4]
+                cy = y2 + stack[si + 5]
+                val p0 = path.cubic_to(x1, y1, x2, y2, cx, cy)
+                path = p0
+                si = si + 6
+            stack = []
+        else if b == 27:
+            # hhcurveto
+            var si: i64 = 0
+            var dy1: f64 = 0.0
+            if stack.len() as i64 % 4 == 1:
+                dy1 = stack[0]
+                si = 1
+            while si + 3 < stack.len() as i64:
+                val x1 = cx + stack[si]
+                val y1 = cy + dy1
+                dy1 = 0.0
+                val x2 = x1 + stack[si + 1]
+                val y2 = y1 + stack[si + 2]
+                cx = x2 + stack[si + 3]
+                cy = y2
+                val p0 = path.cubic_to(x1, y1, x2, y2, cx, cy)
+                path = p0
+                si = si + 4
+            stack = []
+        else if b == 26:
+            # vvcurveto
+            var si: i64 = 0
+            var dx1: f64 = 0.0
+            if stack.len() as i64 % 4 == 1:
+                dx1 = stack[0]
+                si = 1
+            while si + 3 < stack.len() as i64:
+                val x1 = cx + dx1
+                dx1 = 0.0
+                val y1 = cy + stack[si]
+                val x2 = x1 + stack[si + 1]
+                val y2 = y1 + stack[si + 2]
+                cx = x2
+                cy = y2 + stack[si + 3]
+                val p0 = path.cubic_to(x1, y1, x2, y2, cx, cy)
+                path = p0
+                si = si + 4
+            stack = []
+        else:
+            # TODO(cff-full-opcodes) — unrecognised opcode, stop parsing
+            done = true
+    Some(path)
+
+# ===== GSUB / GPOS =====
+
+class GsubLookup:
+    lookup_type: u32
+    flag: u32
+    subtable_offsets: [u32]
+
+class GposLookup:
+    lookup_type: u32
+    flag: u32
+    subtable_offsets: [u32]
+
+fn read_lookup_list(blob: [u8], lookup_list_abs: i64) -> [u32]:
+    if lookup_list_abs + 1 >= blob.len() as i64:
+        return []
+    val count = read_u16_be(blob, lookup_list_abs) as i64
+    var offsets: [u32] = []
+    var i: i64 = 0
+    while i < count:
+        val off = read_u16_be(blob, lookup_list_abs + 2 + i * 2)
+        offsets = [...offsets, off]
+        i = i + 1
+    offsets
+
+fn parse_gsub_skeleton(font: OtFont) -> [GsubLookup]:
+    # Tag 'GSUB' = 0x47535542
+    val gsub_tag: u32 = 1196643650
+    val maybe_tbl = find_table(font, gsub_tag)
+    if maybe_tbl == None:
+        return []
+    val tbl = maybe_tbl.unwrap()
+    val base = tbl.offset as i64
+    val blob = font.blob
+    if base + 10 >= blob.len() as i64:
+        return []
+    val lookup_list_off = read_u16_be(blob, base + 8) as i64
+    val lookup_list_abs = base + lookup_list_off
+    if lookup_list_abs + 1 >= blob.len() as i64:
+        return []
+    val count = read_u16_be(blob, lookup_list_abs) as i64
+    var results: [GsubLookup] = []
+    var i: i64 = 0
+    while i < count:
+        val off = read_u16_be(blob, lookup_list_abs + 2 + i * 2) as i64
+        val lkp_abs = lookup_list_abs + off
+        if lkp_abs + 5 >= blob.len() as i64:
+            i = i + 1
+            continue
+        val ltype = read_u16_be(blob, lkp_abs)
+        val flag = read_u16_be(blob, lkp_abs + 2)
+        val sub_count = read_u16_be(blob, lkp_abs + 4) as i64
+        var subs: [u32] = []
+        var j: i64 = 0
+        while j < sub_count:
+            val soff = read_u16_be(blob, lkp_abs + 6 + j * 2)
+            subs = [...subs, soff]
+            j = j + 1
+        val lkp = GsubLookup(lookup_type: ltype, flag: flag, subtable_offsets: subs)
+        results = [...results, lkp]
+        i = i + 1
+    results
+
+fn parse_gpos_skeleton(font: OtFont) -> [GposLookup]:
+    # Tag 'GPOS' = 0x47504F53
+    val gpos_tag: u32 = 1196643155
+    val maybe_tbl = find_table(font, gpos_tag)
+    if maybe_tbl == None:
+        return []
+    val tbl = maybe_tbl.unwrap()
+    val base = tbl.offset as i64
+    val blob = font.blob
+    if base + 10 >= blob.len() as i64:
+        return []
+    val lookup_list_off = read_u16_be(blob, base + 8) as i64
+    val lookup_list_abs = base + lookup_list_off
+    if lookup_list_abs + 1 >= blob.len() as i64:
+        return []
+    val count = read_u16_be(blob, lookup_list_abs) as i64
+    var results: [GposLookup] = []
+    var i: i64 = 0
+    while i < count:
+        val off = read_u16_be(blob, lookup_list_abs + 2 + i * 2) as i64
+        val lkp_abs = lookup_list_abs + off
+        if lkp_abs + 5 >= blob.len() as i64:
+            i = i + 1
+            continue
+        val ltype = read_u16_be(blob, lkp_abs)
+        val flag = read_u16_be(blob, lkp_abs + 2)
+        val sub_count = read_u16_be(blob, lkp_abs + 4) as i64
+        var subs: [u32] = []
+        var j: i64 = 0
+        while j < sub_count:
+            val soff = read_u16_be(blob, lkp_abs + 6 + j * 2)
+            subs = [...subs, soff]
+            j = j + 1
+        val lkp = GposLookup(lookup_type: ltype, flag: flag, subtable_offsets: subs)
+        results = [...results, lkp]
+        i = i + 1
+    results
+
+# ===== GDEF =====
+
+enum GlyphClass:
+    Base
+    Ligature
+    Mark
+    Component
+    Unknown
+
+fn parse_gdef_glyph_class(font: OtFont, glyph_id: u32) -> GlyphClass:
+    # Tag 'GDEF' = 0x47444546
+    val gdef_tag: u32 = 1195656006
+    val maybe_tbl = find_table(font, gdef_tag)
+    if maybe_tbl == None:
+        return GlyphClass.Unknown
+    val tbl = maybe_tbl.unwrap()
+    val base = tbl.offset as i64
+    val blob = font.blob
+    if base + 13 >= blob.len() as i64:
+        return GlyphClass.Unknown
+    # GlyphClassDef offset at bytes 4-5
+    val glyph_class_def_off = read_u16_be(blob, base + 4) as i64
+    if glyph_class_def_off == 0:
+        return GlyphClass.Unknown
+    val class_def_abs = base + glyph_class_def_off
+    if class_def_abs + 1 >= blob.len() as i64:
+        return GlyphClass.Unknown
+    val format = read_u16_be(blob, class_def_abs)
+    var class_val: u32 = 0
+    if format == 1:
+        val start_glyph = read_u16_be(blob, class_def_abs + 2) as i64
+        val glyph_count = read_u16_be(blob, class_def_abs + 4) as i64
+        val idx = glyph_id as i64 - start_glyph
+        if idx >= 0 and idx < glyph_count:
+            class_val = read_u16_be(blob, class_def_abs + 6 + idx * 2)
+    else if format == 2:
+        val range_count = read_u16_be(blob, class_def_abs + 2) as i64
+        var ri: i64 = 0
+        while ri < range_count:
+            val rbase = class_def_abs + 4 + ri * 6
+            val start_g = read_u16_be(blob, rbase) as i64
+            val end_g = read_u16_be(blob, rbase + 2) as i64
+            val cls = read_u16_be(blob, rbase + 4)
+            if glyph_id as i64 >= start_g and glyph_id as i64 <= end_g:
+                class_val = cls
+            ri = ri + 1
+    if class_val == 1:
+        GlyphClass.Base
+    else if class_val == 2:
+        GlyphClass.Ligature
+    else if class_val == 3:
+        GlyphClass.Mark
+    else if class_val == 4:
+        GlyphClass.Component
+    else:
+        GlyphClass.Unknown
+
+# ===== fvar/avar (variable fonts, partial) =====
+
+class FvarAxis:
+    tag: u32
+    min_value: f64
+    default_value: f64
+    max_value: f64
+
+fn parse_fvar_axes(font: OtFont) -> [FvarAxis]:
+    # Tag 'fvar' = 0x66766172
+    val fvar_tag: u32 = 1719034226
+    val maybe_tbl = find_table(font, fvar_tag)
+    if maybe_tbl == None:
+        return []
+    val tbl = maybe_tbl.unwrap()
+    val base = tbl.offset as i64
+    val blob = font.blob
+    if base + 15 >= blob.len() as i64:
+        return []
+    # fvar header: majorVersion(2), minorVersion(2), offsetToAxesArray(2), reserved(2), axisCount(2), axisSize(2), ...
+    val axes_offset = read_u16_be(blob, base + 4) as i64
+    val axis_count = read_u16_be(blob, base + 8) as i64
+    val axis_size = read_u16_be(blob, base + 10) as i64
+    val axes_abs = base + axes_offset
+    var axes: [FvarAxis] = []
+    var i: i64 = 0
+    while i < axis_count:
+        val abase = axes_abs + i * axis_size
+        if abase + 13 >= blob.len() as i64:
+            i = i + 1
+            continue
+        val tag = read_u32_be(blob, abase)
+        val min_val = read_fixed_1616(blob, abase + 4)
+        val default_val = read_fixed_1616(blob, abase + 8)
+        val max_val = read_fixed_1616(blob, abase + 12)
+        val axis = FvarAxis(tag: tag, min_value: min_val, default_value: default_val, max_value: max_val)
+        axes = [...axes, axis]
+        i = i + 1
+    axes
+
+fn parse_avar_mapping(font: OtFont, axis_index: u32, normalized: f64) -> f64:
+    # TODO(ot-parser-avar-full)
+    normalized
