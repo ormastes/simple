@@ -529,6 +529,42 @@ fn create_user_address_space() -> AddressSpace:
     g_next_as_id = g_next_as_id + 1
     AddressSpace(phys_root: phys, id: id)
 
+fn vmm_cow_clone_pages(pml4_phys: u64) -> u64:
+    """Shallow COW clone of a user address space (wave-4b scaffold).
+
+    Allocates a new PML4, copies kernel-half entries (256..511) unchanged,
+    and copies user-half entries (0..255) with PTE_WRITABLE cleared so the
+    next write from either parent or child traps into the COW fault handler.
+    Only the top PML4 level is walked here; deep PDPT/PD/PT writable
+    clearing is deferred to wave-4c.
+
+    Returns the new PML4 physical address, or 0 on allocation failure.
+    """
+    val new_pml4_phys = _alloc_table_page()
+    if new_pml4_phys == 0:
+        return 0
+
+    val new_pml4_virt = _phys_to_virt(new_pml4_phys)
+    val src_pml4_virt = _phys_to_virt(pml4_phys)
+
+    # User-half (0..255): copy present entries with writable bit cleared (COW)
+    # TODO(wave-4c): deep-walk PDPT/PD/PT levels to clear writable on leaf PTEs
+    var i: u64 = 0
+    while i < 256:
+        val entry = _read_pte(src_pml4_virt, i)
+        if _pte_is_present(entry):
+            _write_pte(new_pml4_virt, i, entry & ~PTE_WRITABLE)
+        i = i + 1
+
+    # Kernel-half (256..511): shared unchanged
+    i = 256
+    while i < ENTRIES_PER_TABLE:
+        val entry = _read_pte(src_pml4_virt, i)
+        _write_pte(new_pml4_virt, i, entry)
+        i = i + 1
+
+    new_pml4_phys
+
 fn destroy_user_address_space(space: AddressSpace):
     """Release page-table pages owned by a user address space.
 
