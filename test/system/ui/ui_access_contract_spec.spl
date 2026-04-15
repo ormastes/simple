@@ -1,0 +1,173 @@
+# @cover src/app/ui.test_api/handler.spl 80%
+# @cover src/lib/nogc_sync_mut/ui_test/client.spl 80%
+# @cover src/app/ui.web/server.spl 60%
+# @cover src/app/ui.tui/screen.spl 60%
+"""
+UI Access Contract Specification
+
+End-to-end contract coverage for the additive /api/test/ui/* routes.
+Verifies the canonical access snapshot, surface lookup, action dispatch,
+and history behavior across both backends.
+
+tag: slow, system, contract
+"""
+
+use std.ui_test.client.{UITestClient}
+use std.ui_test.http.{test_get, test_post}
+use std.ui_test.parse.{extract_field, extract_bool_field}
+use test.system.ui.helpers.ui_test_helpers.{start_ui_server, stop_ui_server, free_port}
+
+val sdn_path = "test/fixtures/ui/test_app.ui.sdn"
+
+# ============================================================================
+# Helpers
+# ============================================================================
+
+fn backend_ports() -> (i32, i32):
+    """Allocate a stable port pair for the web and tui_web servers."""
+    val base = free_port()
+    (base + 60, base + 61)
+
+fn snapshot_path() -> text:
+    return "/api/test/ui/snapshot"
+
+fn surface_path(id: text) -> text:
+    return "/api/test/ui/surface?id={id}"
+
+fn history_path(surface_id: text, count: text) -> text:
+    return "/api/test/ui/history?surface_id={surface_id}&count={count}"
+
+fn act_body(surface_id: text, canonical_id: text, action: text) -> text:
+    return "{\"surface_id\":\"{surface_id}\",\"canonical_id\":\"{canonical_id}\",\"action\":\"{action}\"}"
+
+fn start_backend(mode: text, port: i32) -> i64:
+    return start_ui_server(mode, sdn_path, port)
+
+fn wait_ready(port: i32):
+    var client = UITestClient(host: "127.0.0.1", port: port)
+    client.wait_ready(5000)
+
+fn assert_snapshot_body(body: text):
+    val version = extract_field(body, "protocol_version")
+    expect version to_equal "1"
+    val mode = extract_field(body, "mode")
+    expect mode to_equal "NORMAL"
+    val active_surface = extract_field(body, "active_surface")
+    expect active_surface to_equal "main"
+    val has_surfaces = body.index_of("\"surfaces\":[") != nil
+    val has_nodes = body.index_of("\"nodes\":[") != nil
+    val has_main_surface = body.index_of("\"surface_id\":\"main\"") != nil
+    expect has_surfaces to_equal true
+    expect has_nodes to_equal true
+    expect has_main_surface to_equal true
+
+fn assert_surface_body(body: text):
+    val surface_id = extract_field(body, "surface_id")
+    expect surface_id to_equal "main"
+    val has_surface = body.index_of("\"surface\":{") != nil
+    val has_nodes = body.index_of("\"nodes\":[") != nil
+    expect has_surface to_equal true
+    expect has_nodes to_equal true
+
+fn assert_ok_act_body(body: text):
+    val ok = extract_bool_field(body, "ok")
+    expect ok to_equal true
+    val surface_id = extract_field(body, "surface_id")
+    expect surface_id to_equal "main"
+    val canonical_id = extract_field(body, "canonical_id")
+    expect canonical_id to_equal "main#action_btn"
+
+# ============================================================================
+# Contract coverage
+# ============================================================================
+
+describe "UI Access Contract":
+
+    slow_it "snapshot and surface routes work on both backends":
+        val (web_port, tui_port) = backend_ports()
+        val web_pid = start_backend("web", web_port)
+        val tui_pid = start_backend("tui_web", tui_port)
+        wait_ready(web_port)
+        wait_ready(tui_port)
+
+        val web_snapshot = test_get("127.0.0.1", web_port, snapshot_path())
+        val tui_snapshot = test_get("127.0.0.1", tui_port, snapshot_path())
+        match web_snapshot:
+            Ok(body):
+                assert_snapshot_body(body)
+            Err(e):
+                expect e to_equal ""
+        match tui_snapshot:
+            Ok(body):
+                assert_snapshot_body(body)
+            Err(e):
+                expect e to_equal ""
+
+        val web_surface = test_get("127.0.0.1", web_port, surface_path("main"))
+        val tui_surface = test_get("127.0.0.1", tui_port, surface_path("main"))
+        match web_surface:
+            Ok(body):
+                assert_surface_body(body)
+            Err(e):
+                expect e to_equal ""
+        match tui_surface:
+            Ok(body):
+                assert_surface_body(body)
+            Err(e):
+                expect e to_equal ""
+
+        stop_ui_server(web_pid)
+        stop_ui_server(tui_pid)
+
+    slow_it "history is recorded with a live session on web":
+        val (web_port, tui_port) = backend_ports()
+        val web_pid = start_backend("web", web_port)
+        val tui_pid = start_backend("tui_web", tui_port)
+        wait_ready(web_port)
+        wait_ready(tui_port)
+
+        val body = act_body("main", "main#action_btn", "click")
+        val web_act = test_post("127.0.0.1", web_port, "/api/test/ui/act", body)
+        match web_act:
+            Ok(resp):
+                assert_ok_act_body(resp)
+            Err(e):
+                expect e to_equal ""
+
+        val web_history = test_get("127.0.0.1", web_port, history_path("main", "10"))
+        match web_history:
+            Ok(resp):
+                val has_focus = resp.index_of("\"event_kind\":\"surface_focus\"") != nil
+                val has_action = resp.index_of("\"event_kind\":\"action\"") != nil
+                expect has_focus to_equal true
+                expect has_action to_equal true
+            Err(e):
+                expect e to_equal ""
+
+        stop_ui_server(web_pid)
+        stop_ui_server(tui_pid)
+
+    slow_it "history stays empty without a session on tui_web":
+        val (web_port, tui_port) = backend_ports()
+        val web_pid = start_backend("web", web_port)
+        val tui_pid = start_backend("tui_web", tui_port)
+        wait_ready(web_port)
+        wait_ready(tui_port)
+
+        val body = act_body("main", "main#action_btn", "click")
+        val tui_act = test_post("127.0.0.1", tui_port, "/api/test/ui/act", body)
+        match tui_act:
+            Ok(resp):
+                assert_ok_act_body(resp)
+            Err(e):
+                expect e to_equal ""
+
+        val tui_history = test_get("127.0.0.1", tui_port, history_path("main", "10"))
+        match tui_history:
+            Ok(resp):
+                expect resp to_equal "[]"
+            Err(e):
+                expect e to_equal ""
+
+        stop_ui_server(web_pid)
+        stop_ui_server(tui_pid)

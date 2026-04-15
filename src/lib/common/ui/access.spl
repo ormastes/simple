@@ -57,6 +57,22 @@ struct UiAccessSnapshot:
 fn ui_access_canonical_id(surface_id: text, widget_id: text) -> text:
     return "{surface_id}#{widget_id}"
 
+fn ui_access_surface_id_from_canonical(canonical_id: text) -> text:
+    if canonical_id == "":
+        return ""
+    val idx = canonical_id.find("#")
+    if idx < 0:
+        return ""
+    return canonical_id.slice(0, idx)
+
+fn ui_access_widget_id_from_canonical(canonical_id: text) -> text:
+    if canonical_id == "":
+        return ""
+    val idx = canonical_id.find("#")
+    if idx < 0:
+        return ""
+    return canonical_id.slice(idx + 1, canonical_id.len())
+
 fn ui_access_empty_snapshot(mode: text, active_surface: text, recent_events: [UiAccessEvent]) -> UiAccessSnapshot:
     return UiAccessSnapshot(
         protocol_version: UI_ACCESS_PROTOCOL_VERSION,
@@ -193,6 +209,27 @@ fn ui_access_find_nodes(snapshot: UiAccessSnapshot, surface_id: text, kind: text
         else:
             matches = matches.push(node)
     return matches
+
+fn ui_access_find_node(snapshot: UiAccessSnapshot, canonical_id: text) -> UiAccessNode?:
+    if canonical_id == "":
+        return nil
+    for node in snapshot.nodes:
+        if node.canonical_id == canonical_id:
+            return node
+    return nil
+
+fn ui_access_resolve_action_name(snapshot: UiAccessSnapshot, canonical_id: text, action: text) -> text:
+    if action == "":
+        return ""
+    val node = ui_access_find_node(snapshot, canonical_id)
+    if node == nil:
+        val widget_id = ui_access_widget_id_from_canonical(canonical_id)
+        if widget_id == "":
+            return action
+        if _is_legacy_targeted_action(action):
+            return action
+        return "{action}_{widget_id}"
+    return _resolve_action_for_node(node, action)
 
 fn ui_access_snapshot_to_text(snapshot: UiAccessSnapshot) -> text:
     var out = "UI Access Snapshot (v{snapshot.protocol_version})\n"
@@ -338,6 +375,40 @@ fn _push_unique(items: [text], value: text) -> [text]:
             return items
     return items.push(value)
 
+fn _resolve_action_for_node(node: UiAccessNode, action: text) -> text:
+    if action == "":
+        return ""
+    if _is_legacy_targeted_action(action):
+        return action
+    if _node_has_action(node, action):
+        return action
+    val lower = action.to_lower()
+    if lower == "click" or lower == "invoke" or lower == "press" or lower == "activate":
+        return "click_{node.widget_id}"
+    if lower == "focus":
+        return "focus_{node.widget_id}"
+    if lower == "toggle" or lower == "expand" or lower == "collapse":
+        return "toggle_{node.widget_id}"
+    if lower == "submit":
+        return "submit_{node.widget_id}"
+    if lower == "select":
+        return "select_{node.widget_id}"
+    return "{action}_{node.widget_id}"
+
+fn _node_has_action(node: UiAccessNode, action: text) -> bool:
+    for current in node.action_names:
+        if current == action:
+            return true
+    return false
+
+fn _is_legacy_targeted_action(action: text) -> bool:
+    return action.starts_with("click_") or
+        action.starts_with("focus_") or
+        action.starts_with("toggle_") or
+        action.starts_with("submit_") or
+        action.starts_with("select_") or
+        action.starts_with("drag_")
+
 fn _node_matches_text(node: UiAccessNode, text_filter: text) -> bool:
     if node.widget_id.to_lower().contains(text_filter):
         return true
@@ -350,7 +421,7 @@ fn _node_matches_text(node: UiAccessNode, text_filter: text) -> bool:
 
 fn _lifecycle_to_access_event(sequence: i64, surface_id: text, lifecycle_event: LifecycleEvent) -> UiAccessEvent:
     match lifecycle_event:
-        LifecycleEvent.Mount(widget_id: widget_id):
+        LifecycleEvent.Mount(widget_id):
             return UiAccessEvent(
                 surface_id: surface_id,
                 widget_id: widget_id,
@@ -359,7 +430,7 @@ fn _lifecycle_to_access_event(sequence: i64, surface_id: text, lifecycle_event: 
                 payload: widget_id,
                 sequence: sequence
             )
-        LifecycleEvent.Unmount(widget_id: widget_id):
+        LifecycleEvent.Unmount(widget_id):
             return UiAccessEvent(
                 surface_id: surface_id,
                 widget_id: widget_id,
@@ -368,7 +439,7 @@ fn _lifecycle_to_access_event(sequence: i64, surface_id: text, lifecycle_event: 
                 payload: widget_id,
                 sequence: sequence
             )
-        LifecycleEvent.Update(widget_id: widget_id, prop_key: prop_key, prop_value: prop_value):
+        LifecycleEvent.Update(widget_id, prop_key, prop_value):
             return UiAccessEvent(
                 surface_id: surface_id,
                 widget_id: widget_id,
@@ -377,7 +448,7 @@ fn _lifecycle_to_access_event(sequence: i64, surface_id: text, lifecycle_event: 
                 payload: "{prop_key}={prop_value}",
                 sequence: sequence
             )
-        LifecycleEvent.Action(widget_id: widget_id, action_name: action_name):
+        LifecycleEvent.Action(widget_id, action_name):
             return UiAccessEvent(
                 surface_id: surface_id,
                 widget_id: widget_id,
@@ -386,7 +457,7 @@ fn _lifecycle_to_access_event(sequence: i64, surface_id: text, lifecycle_event: 
                 payload: action_name,
                 sequence: sequence
             )
-        LifecycleEvent.Focus(widget_id: widget_id):
+        LifecycleEvent.Focus(widget_id):
             return UiAccessEvent(
                 surface_id: surface_id,
                 widget_id: widget_id,
@@ -395,7 +466,7 @@ fn _lifecycle_to_access_event(sequence: i64, surface_id: text, lifecycle_event: 
                 payload: widget_id,
                 sequence: sequence
             )
-        LifecycleEvent.Blur(widget_id: widget_id):
+        LifecycleEvent.Blur(widget_id):
             return UiAccessEvent(
                 surface_id: surface_id,
                 widget_id: widget_id,

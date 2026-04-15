@@ -7,7 +7,7 @@
 
 use common.ui.widget.{UIState, UIEvent, WidgetNode, get_widget_record}
 use common.ui.session.{UISession}
-use common.ui.access.{UiAccessSnapshot, ui_access_snapshot_from_state, ui_access_snapshot_to_json, ui_access_surface_to_json, ui_access_events_to_json}
+use common.ui.access.{UiAccessSnapshot, ui_access_snapshot_from_state, ui_access_snapshot_to_json, ui_access_surface_to_json, ui_access_events_to_json, ui_access_surface_id_from_canonical, ui_access_widget_id_from_canonical, ui_access_resolve_action_name}
 use app.ui.test_api.json.{element_to_json, elements_to_json, extract_json_field, escape_json, state_to_json}
 
 val PROTOCOL_VERSION = 1
@@ -26,7 +26,7 @@ fn handle_test_request(path: text, method: text, body: text, state: UIState, inj
 
     if method == "POST":
         if route == "/api/test/ui/act":
-            return _handle_ui_act(body, inject_event)
+            return _handle_ui_act(body, inject_event, session)
         elif route == "/api/test/click":
             return _handle_click(body, inject_event)
         elif route == "/api/test/type":
@@ -155,21 +155,34 @@ fn _handle_event(body: text, inject_event: fn(UIEvent)) -> (i32, text, text):
         _:
             return (400, "application/json", "{\"error\":\"unknown_event_type\",\"message\":\"Unknown event type\"}")
 
-fn _handle_ui_act(body: text, inject_event: fn(UIEvent)) -> (i32, text, text):
+fn _handle_ui_act(body: text, inject_event: fn(UIEvent), session: UISession?) -> (i32, text, text):
     """Handle POST /api/test/ui/act — additive UI access action route."""
     val surface_id = extract_json_field(body, "surface_id")
     val canonical_id = extract_json_field(body, "canonical_id")
     val action = extract_json_field(body, "action")
-    val widget_id = _widget_id_from_canonical(canonical_id)
+    val widget_id = ui_access_widget_id_from_canonical(canonical_id)
+    var resolved_surface_id = surface_id
     if action == "":
         return (400, "application/json", "{\"error\":\"missing_field\",\"message\":\"Missing required field: action\"}")
     if widget_id == "" and canonical_id != "":
         return (400, "application/json", "{\"error\":\"invalid_field\",\"message\":\"Invalid canonical_id\"}")
-    if widget_id != "":
-        inject_event(UIEvent.Action(name: "{action}_{widget_id}"))
+    if canonical_id != "":
+        resolved_surface_id = ui_access_surface_id_from_canonical(canonical_id)
+    if resolved_surface_id == "":
+        return (400, "application/json", "{\"error\":\"missing_field\",\"message\":\"Missing required field: surface_id\"}")
+    if session != nil and not session.has_surface(resolved_surface_id):
+        return (404, "application/json", "{\"error\":\"element_not_found\",\"message\":\"Surface not found: {resolved_surface_id}\"}")
+    if session != nil:
+        session.set_active_surface(resolved_surface_id)
+    val action_name = if session != nil and canonical_id != "":
+        ui_access_resolve_action_name(session.access_snapshot(), canonical_id, action)
+    elif widget_id != "":
+        "{action}_{widget_id}"
     else:
-        inject_event(UIEvent.Action(name: action))
-    return (200, "application/json", "{\"ok\":true,\"surface_id\":\"{escape_json(surface_id)}\",\"canonical_id\":\"{escape_json(canonical_id)}\"}")
+        action
+    inject_event(UIEvent.Action(name: action_name))
+    val response_surface_id = if surface_id != "": surface_id else: resolved_surface_id
+    return (200, "application/json", "{\"ok\":true,\"surface_id\":\"{escape_json(response_surface_id)}\",\"canonical_id\":\"{escape_json(canonical_id)}\"}")
 
 # =========================================================================
 # GET Handlers
@@ -270,14 +283,6 @@ fn _build_access_snapshot(state: UIState, session: UISession?) -> UiAccessSnapsh
     if session != nil:
         return session.access_snapshot()
     return ui_access_snapshot_from_state(state, [])
-
-fn _widget_id_from_canonical(canonical_id: text) -> text:
-    if canonical_id == "":
-        return ""
-    val idx = canonical_id.find("#")
-    if idx < 0:
-        return ""
-    return canonical_id.slice(idx + 1, canonical_id.len())
 
 # =========================================================================
 # HTML Snapshot Rendering

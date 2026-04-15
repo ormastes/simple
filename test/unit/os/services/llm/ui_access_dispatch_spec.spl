@@ -1,0 +1,67 @@
+# UI access protocol MCP dispatch specification
+#
+# Verifies the dispatcher path for the canonical UI access tools.
+
+use std.spec.{describe, it, expect}
+use common.ui.builder.{column, text_widget, button, build_tree}
+use common.ui.session.{UISession}
+use os.services.vfs.vfs.{VfsManager}
+use os.services.llm.cli_gui_bridge.{CliGuiBridge}
+use os.services.llm.mcp_os_server.{OsMcpServer}
+
+fn _session_with_popup() -> UISession:
+    val root = column("root").child(
+        text_widget("title", "Hello Access")
+    ).child(
+        button("submit_btn", "Submit", "submit")
+    )
+    val tree = build_tree(root)
+    var session = UISession.new(tree)
+    val popup_tree = build_tree(
+        column("popup_root").child(button("ok_btn", "OK", "ok"))
+    )
+    session.open_surface("popup", popup_tree)
+    session.set_active_surface("popup")
+    return session
+
+describe "ui_access_protocol MCP dispatch":
+    it "routes snapshot and surface reads through the canonical dispatcher":
+        val session = _session_with_popup()
+        val bridge = CliGuiBridge.new(session)
+        val server = OsMcpServer.new(VfsManager.new(), bridge)
+        val snapshot = server.dispatch("ui_access_snapshot", "")
+        expect(snapshot).to_contain("\"protocol_version\":1")
+        expect(snapshot).to_contain("\"popup\"")
+        val find = server.dispatch(
+            "ui_access_find",
+            "{\"surface_id\":\"popup\",\"kind\":\"button\",\"text\":\"OK\",\"focused_only\":\"false\"}"
+        )
+        expect(find).to_contain("popup#ok_btn")
+        val surface = server.dispatch("ui_access_surface", "{\"surface_id\":\"popup\"}")
+        expect(surface).to_contain("\"surface_id\":\"popup\"")
+        expect(surface).to_contain("popup#ok_btn")
+
+    it "dispatches canonical actions and rejects invalid targets":
+        val session = _session_with_popup()
+        val bridge = CliGuiBridge.new(session)
+        val server = OsMcpServer.new(VfsManager.new(), bridge)
+        val action = server.dispatch(
+            "ui_access_act",
+            "{\"surface_id\":\"popup\",\"canonical_id\":\"popup#ok_btn\",\"action\":\"click\"}"
+        )
+        expect(action).to_contain("ok: dispatched click_ok_btn")
+        val alias = server.dispatch(
+            "ui_access_act",
+            "{\"surface_id\":\"main\",\"canonical_id\":\"main#submit_btn\",\"action\":\"submit\"}"
+        )
+        expect(alias).to_contain("ok: dispatched submit")
+        expect(bridge.session.active_surface()).to_equal("popup")
+        val history = server.dispatch("ui_access_history", "{\"surface_id\":\"popup\",\"count\":\"5\"}")
+        expect(history).to_contain("\"event_kind\":\"action\"")
+        val missing_surface = server.dispatch(
+            "ui_access_act",
+            "{\"surface_id\":\"missing\",\"action\":\"click\"}"
+        )
+        expect(missing_surface).to_contain("error: surface missing not found")
+        val missing_target = server.dispatch("ui_access_act", "{\"action\":\"click\"}")
+        expect(missing_target).to_contain("error: missing surface_id")
