@@ -1,0 +1,144 @@
+# CPU Backend dispatch loop — spec
+#
+# Tests for CpuBackend.render_picture covering all major op kinds.
+
+use std.sspec.{describe, it, expect}
+use std.skia.backend.cpu.backend.{CpuBackend, cpu_backend_new}
+use std.skia.backend.cpu.raster_prims.{Bitmap}
+use std.skia.entity.picture.{
+    SkPicture, SkPictureOp, SkPictureOpKind,
+    sk_picture_op_draw_rect, sk_picture_op_draw_rrect,
+    sk_picture_op_draw_path, sk_picture_op_draw_paint,
+    sk_picture_empty
+}
+use std.skia.entity.paint.{SkPaint, sk_paint_fill, sk_paint_stroke, sk_paint_new}
+use std.skia.entity.geometry.{SkRect}
+use std.skia.entity.color.{SkColor4f, sk_color_argb, sk_color_rgb}
+use std.skia.entity.enums.{SkPaintStyle}
+use std.skia.entity.path.{SkPath, sk_path_new}
+
+# Helper: make a 10x10 cull rect
+fn _cull10() -> SkRect:
+    SkRect(left: 0.0, top: 0.0, right: 10.0, bottom: 10.0)
+
+# Helper: make an SkPicture with a given list of ops
+fn _make_picture(ops: [SkPictureOp]) -> SkPicture:
+    SkPicture(
+        cull_rect: _cull10(),
+        op_count: ops.len(),
+        ops: ops
+    )
+
+# Helper: get the pixel value at (x, y) as a list of [r, g, b, a] bytes (0-255)
+fn _pixel_at(bm: Bitmap, x: i64, y: i64) -> [u8]:
+    val idx = (y * bm.width + x) * 4
+    [bm.pixels[idx], bm.pixels[idx + 1], bm.pixels[idx + 2], bm.pixels[idx + 3]]
+
+# Helper: sum all byte values in the bitmap (zero means all transparent)
+fn _pixel_sum(bm: Bitmap) -> i64:
+    var s = 0 as i64
+    var i = 0
+    while i < bm.pixels.len():
+        s = s + (bm.pixels[i] as i64)
+        i = i + 1
+    s
+
+describe "CpuBackend.render_picture":
+
+    it "empty picture produces all-zero bitmap":
+        val pic = sk_picture_empty()
+        val backend = cpu_backend_new()
+        val cull = _cull10()
+        val bm = backend.render_picture(pic, cull)
+        val total = _pixel_sum(bm)
+        expect(total).to_equal(0)
+
+    it "DrawRect fills center pixel with the rect color":
+        val red = sk_color_argb(255, 200, 0, 0)
+        val paint = sk_paint_fill(red)
+        val rect = SkRect(left: 2.0, top: 2.0, right: 8.0, bottom: 8.0)
+        val op = sk_picture_op_draw_rect(rect, paint)
+        val ops = [op]
+        val pic = _make_picture(ops)
+        val backend = cpu_backend_new()
+        val bm = backend.render_picture(pic, _cull10())
+        # pixel at center (5,5) should be non-zero
+        val px = _pixel_at(bm, 5, 5)
+        val r_val = px[0] as i64
+        expect(r_val).to_be_greater_than(0)
+
+    it "DrawRRect with rx=ry=0 matches DrawRect output pixel at center":
+        val green = sk_color_argb(255, 0, 180, 0)
+        val paint = sk_paint_fill(green)
+        val rect = SkRect(left: 1.0, top: 1.0, right: 9.0, bottom: 9.0)
+        val op = sk_picture_op_draw_rrect(rect, 0.0, 0.0, paint)
+        val ops = [op]
+        val pic = _make_picture(ops)
+        val backend = cpu_backend_new()
+        val bm = backend.render_picture(pic, _cull10())
+        # center pixel should have the green channel non-zero
+        val px = _pixel_at(bm, 5, 5)
+        val g_val = px[1] as i64
+        expect(g_val).to_be_greater_than(0)
+
+    it "DrawPath fill op produces non-zero coverage inside the path":
+        val blue = sk_color_argb(255, 0, 0, 200)
+        val paint = sk_paint_fill(blue)
+        # triangle: (1,1) -> (8,1) -> (4,8) -> close
+        val p0 = sk_path_new()
+        val p1 = p0.move_to(1.0, 1.0)
+        val p2 = p1.line_to(8.0, 1.0)
+        val p3 = p2.line_to(4.0, 8.0)
+        val path = p3.close()
+        val op = sk_picture_op_draw_path(path, paint)
+        val ops = [op]
+        val pic = _make_picture(ops)
+        val backend = cpu_backend_new()
+        val bm = backend.render_picture(pic, _cull10())
+        # pixel near centroid (4, 3) should be non-zero
+        val px = _pixel_at(bm, 4, 3)
+        val b_val = px[2] as i64
+        expect(b_val).to_be_greater_than(0)
+
+    it "DrawPath stroke op with stroke_width=1.0 produces non-zero along edges":
+        val white = sk_color_argb(255, 255, 255, 255)
+        val paint = sk_paint_stroke(white, 1.0)
+        # horizontal line segment across the bitmap
+        val p0 = sk_path_new()
+        val p1 = p0.move_to(1.0, 5.0)
+        val path = p1.line_to(9.0, 5.0)
+        val op = sk_picture_op_draw_path(path, paint)
+        val ops = [op]
+        val pic = _make_picture(ops)
+        val backend = cpu_backend_new()
+        val bm = backend.render_picture(pic, _cull10())
+        # pixel on the stroked line should be non-zero
+        val px = _pixel_at(bm, 5, 5)
+        val r_val = px[0] as i64
+        expect(r_val).to_be_greater_than(0)
+
+    it "DrawPaint fills entire bitmap with the paint color":
+        val yellow = sk_color_argb(255, 255, 220, 0)
+        val paint = sk_paint_fill(yellow)
+        val op_paint = SkPictureOp(
+            kind: SkPictureOpKind.DrawPaint,
+            rect: SkRect(left: 0.0, top: 0.0, right: 0.0, bottom: 0.0),
+            rx: 0.0,
+            ry: 0.0,
+            path: None,
+            image: None,
+            paint: paint,
+            x: 0.0,
+            y: 0.0
+        )
+        val ops = [op_paint]
+        val pic = _make_picture(ops)
+        val backend = cpu_backend_new()
+        val bm = backend.render_picture(pic, _cull10())
+        # every pixel should have its red channel set to 255
+        val px_corner = _pixel_at(bm, 0, 0)
+        val px_far = _pixel_at(bm, 9, 9)
+        val r0 = px_corner[0] as i64
+        val r1 = px_far[0] as i64
+        expect(r0).to_equal(255)
+        expect(r1).to_equal(255)

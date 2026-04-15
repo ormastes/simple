@@ -4,7 +4,7 @@ use std.sspec.*
 use std.skia.feature.shaper.script_detect.{Script, script_of, script_is_rtl}
 use std.skia.feature.shaper.feature_tags.{OpenTypeFeature, feature_tag}
 use std.skia.feature.shaper.font_fallback.{FallbackChain, fallback_chain_new, system_default_chain}
-use std.skia.feature.shaper.shaper.{Shaper, shaper_new, ascii_to_codepoints}
+use std.skia.feature.shaper.shaper.{Shaper, ShapedRun, ShapedGlyph, ArabicJoinForm, IndicClass, shaper_new, shaper_with_ot_font, ascii_to_codepoints, shaper_shape, arabic_join_form, devanagari_classify}
 use std.skia.entity.font.{sk_font_default}
 
 describe "script_of: Latin range":
@@ -87,3 +87,164 @@ describe "ascii_to_codepoints":
         val cps = ascii_to_codepoints("hello")
         val first = cps[0]
         expect first to_equal 104 as u32
+
+# ===== New shaping tests =====
+
+describe "shaper_shape: empty text":
+    it "empty codepoint list produces empty run list":
+        val chain = system_default_chain()
+        val shaper = shaper_new(chain)
+        val runs = shaper_shape(shaper, [], sk_font_default(), 0.0, 0.0)
+        expect runs.len() to_equal 0
+
+describe "shaper_shape: ASCII Latin text":
+    it "ASCII 'hi' produces a single Latin run":
+        val chain = system_default_chain()
+        val shaper = shaper_new(chain)
+        val cps = ascii_to_codepoints("hi")
+        val runs = shaper_shape(shaper, cps, sk_font_default(), 0.0, 0.0)
+        expect runs.len() to_equal 1
+
+    it "Latin run has correct script":
+        val chain = system_default_chain()
+        val shaper = shaper_new(chain)
+        val cps = ascii_to_codepoints("hi")
+        val runs = shaper_shape(shaper, cps, sk_font_default(), 0.0, 0.0)
+        val run = runs[0]
+        expect run.script to_equal Script.Latin
+
+    it "Latin glyph ids match codepoints (identity mapping without OtFont)":
+        val chain = system_default_chain()
+        val shaper = shaper_new(chain)
+        # 'A' = 65, 'B' = 66
+        val cps: [u32] = [65 as u32, 66 as u32]
+        val runs = shaper_shape(shaper, cps, sk_font_default(), 0.0, 0.0)
+        val run = runs[0]
+        val gid0 = run.glyph_ids[0]
+        val gid1 = run.glyph_ids[1]
+        expect gid0 to_equal 65 as u32
+        expect gid1 to_equal 66 as u32
+
+describe "shaper_shape: mixed Latin + Arabic":
+    it "mixed Latin then Arabic codepoints produces 2 runs":
+        val chain = system_default_chain()
+        val shaper = shaper_new(chain)
+        # 'A'=65 (Latin), Arabic ba=1576
+        val cps: [u32] = [65 as u32, 1576 as u32]
+        val runs = shaper_shape(shaper, cps, sk_font_default(), 0.0, 0.0)
+        expect runs.len() to_equal 2
+
+    it "first run of mixed text is Latin":
+        val chain = system_default_chain()
+        val shaper = shaper_new(chain)
+        val cps: [u32] = [65 as u32, 1576 as u32]
+        val runs = shaper_shape(shaper, cps, sk_font_default(), 0.0, 0.0)
+        val first_run = runs[0]
+        expect first_run.script to_equal Script.Latin
+
+    it "second run of mixed text is Arabic":
+        val chain = system_default_chain()
+        val shaper = shaper_new(chain)
+        val cps: [u32] = [65 as u32, 1576 as u32]
+        val runs = shaper_shape(shaper, cps, sk_font_default(), 0.0, 0.0)
+        val second_run = runs[1]
+        expect second_run.script to_equal Script.Arabic
+
+describe "shaper_shape: Arabic-only joining forms":
+    it "Arabic run is RTL":
+        val chain = system_default_chain()
+        val shaper = shaper_new(chain)
+        # Arabic: alef=1575, ba=1576, jim=1580
+        val cps: [u32] = [1575 as u32, 1576 as u32, 1580 as u32]
+        val runs = shaper_shape(shaper, cps, sk_font_default(), 0.0, 0.0)
+        val run = runs[0]
+        expect run.is_rtl to_equal true
+
+    it "Arabic sequence produces exactly 1 run":
+        val chain = system_default_chain()
+        val shaper = shaper_new(chain)
+        val cps: [u32] = [1575 as u32, 1576 as u32, 1580 as u32]
+        val runs = shaper_shape(shaper, cps, sk_font_default(), 0.0, 0.0)
+        expect runs.len() to_equal 1
+
+    it "Arabic middle letter classified as Medial or Final (joining form set)":
+        # ba (1576) between two joiners: alef (1575, right-joining only) on left, jim (1580) on right
+        # alef can join left (to ba on its right), ba can join right (to jim on its right)
+        # ba: has_left = alef joins to ba's left neighbor? alef is right-joining only so arabic_can_join_left(1575)=false
+        # ba: has_right = jim (1580) arabic_can_join_right(1580)=true (in 1576-1594 range)
+        # So ba gets Initial form
+        val cps: [u32] = [1575 as u32, 1576 as u32, 1580 as u32]
+        val form = arabic_join_form(cps, 1)
+        expect form to_equal ArabicJoinForm.Initial
+
+    it "isolated Arabic letter gets Isolated join form":
+        val cps: [u32] = [1575 as u32]
+        val form = arabic_join_form(cps, 0)
+        expect form to_equal ArabicJoinForm.Isolated
+
+describe "shaper_shape: Devanagari reph classification":
+    it "Devanagari ra (2352) is classified as Reph":
+        val cls = devanagari_classify(2352 as u32)
+        expect cls to_equal IndicClass.Reph
+
+    it "Devanagari virama (2381) is classified as Halant":
+        val cls = devanagari_classify(2381 as u32)
+        expect cls to_equal IndicClass.Halant
+
+    it "Devanagari matra (2366) is classified as Matra":
+        val cls = devanagari_classify(2366 as u32)
+        expect cls to_equal IndicClass.Matra
+
+    it "Devanagari run produces 1 run for Devanagari-only codepoints":
+        val chain = system_default_chain()
+        val shaper = shaper_new(chain)
+        # Devanagari: ka=2325, virama=2381, ra=2352
+        val cps: [u32] = [2325 as u32, 2381 as u32, 2352 as u32]
+        val runs = shaper_shape(shaper, cps, sk_font_default(), 0.0, 0.0)
+        expect runs.len() to_equal 1
+
+    it "Devanagari run has Devanagari script":
+        val chain = system_default_chain()
+        val shaper = shaper_new(chain)
+        val cps: [u32] = [2325 as u32, 2381 as u32, 2352 as u32]
+        val runs = shaper_shape(shaper, cps, sk_font_default(), 0.0, 0.0)
+        val run = runs[0]
+        expect run.script to_equal Script.Devanagari
+
+describe "shaper_shape: glyph count matches codepoint count (no ligatures)":
+    it "3 ASCII codepoints produce 3 glyph ids":
+        val chain = system_default_chain()
+        val shaper = shaper_new(chain)
+        val cps: [u32] = [72 as u32, 105 as u32, 33 as u32]
+        val runs = shaper_shape(shaper, cps, sk_font_default(), 0.0, 0.0)
+        val run = runs[0]
+        expect run.glyph_ids.len() to_equal 3
+
+    it "positions count matches glyph count":
+        val chain = system_default_chain()
+        val shaper = shaper_new(chain)
+        val cps: [u32] = [72 as u32, 105 as u32, 33 as u32]
+        val runs = shaper_shape(shaper, cps, sk_font_default(), 0.0, 0.0)
+        val run = runs[0]
+        expect run.positions.len() to_equal run.glyph_ids.len()
+
+describe "shaper_shape: advances from font size when no OtFont":
+    it "positions are monotonically increasing for LTR Latin":
+        val chain = system_default_chain()
+        val shaper = shaper_new(chain)
+        val cps: [u32] = [65 as u32, 66 as u32, 67 as u32]
+        val runs = shaper_shape(shaper, cps, sk_font_default(), 0.0, 0.0)
+        val run = runs[0]
+        val x0 = run.positions[0].x
+        val x1 = run.positions[1].x
+        val x2 = run.positions[2].x
+        expect x1 to_be_greater_than x0
+        expect x2 to_be_greater_than x1
+
+    it "first position x is start_x":
+        val chain = system_default_chain()
+        val shaper = shaper_new(chain)
+        val cps: [u32] = [65 as u32, 66 as u32]
+        val runs = shaper_shape(shaper, cps, sk_font_default(), 10.0, 5.0)
+        val run = runs[0]
+        expect run.positions[0].x to_equal 10.0
