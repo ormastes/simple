@@ -11,29 +11,58 @@ use common.ui.window.{WindowManager, WindowInfo, new_window_manager}
 
 extern fn rt_stdin_read_line() -> text?
 extern fn rt_thread_sleep(ms: i64)
+extern fn rt_env_get(key: text) -> text
+
+fn _resolve_theme() -> text:
+    # Stitch-aligned themes. SIMPLE_THEME env var selects between dark and
+    # light; defaults to the Obsidian dark palette pulled from Stitch
+    # project 12496218458601315145.
+    val env_val = rt_env_get("SIMPLE_THEME") ?? ""
+    if env_val == "light" or env_val == "glass_obsidian_light":
+        return "glass_obsidian_light"
+    return "glass_obsidian_dark"
 
 fn _build_desktop_html(css: text) -> text:
     """Build the desktop chrome (system bar + dock only). Floating windows
     live in the host Electron shell's persistent #wm-desktop container and
     are drawn by SimpleWindowManager — do NOT include #wm-desktop here,
-    otherwise the render path would wipe the window state on every render.
-
-    The sys bar sits at the top (z below floating windows) and the dock
-    floats at the bottom. Both need pointer-events so clicks reach them."""
+    otherwise the render path would wipe the window state on every render."""
     val bar_html = "<div class=\"widget-menubar\" id=\"sysbar\" style=\"position:absolute;top:0;left:0;right:0;z-index:5;pointer-events:auto;\"><span class=\"menu-item\">File</span><span class=\"menu-item\">Edit</span><span class=\"menu-item\">View</span><span class=\"menu-item\">Go</span><span class=\"menu-item\">Window</span><span class=\"menu-item\">Help</span></div>"
     val dock_html = "<div class=\"widget-tab-bar\" id=\"dock\" style=\"position:absolute;bottom:64px;left:50%;transform:translateX(-50%);z-index:5;pointer-events:auto;\"><div class=\"tab-bar-item tab-bar-item-active\" data-action=\"app_terminal\"><span class=\"tab-bar-icon\">&gt;</span><span class=\"tab-bar-label\">Terminal</span></div><div class=\"tab-bar-item\" data-action=\"app_editor\"><span class=\"tab-bar-icon\">E</span><span class=\"tab-bar-label\">Editor</span></div><div class=\"tab-bar-item\" data-action=\"app_browser\"><span class=\"tab-bar-icon\">W</span><span class=\"tab-bar-label\">Browser</span></div><div class=\"tab-bar-item\" data-action=\"app_files\"><span class=\"tab-bar-icon\">D</span><span class=\"tab-bar-label\">Files</span></div><div class=\"tab-bar-item\" data-action=\"app_calc\"><span class=\"tab-bar-icon\">#</span><span class=\"tab-bar-label\">Calc</span></div><div class=\"tab-bar-item\" data-action=\"app_settings\"><span class=\"tab-bar-icon\">*</span><span class=\"tab-bar-label\">Settings</span></div></div>"
     return "<html><head><style>" + css + "</style></head><body>" + bar_html + dock_html + "</body></html>"
 
-fn _build_app_html(title: text, content: text) -> text:
-    """Build HTML for an application window with inline styles."""
-    val body = "<div style=\"display:flex;flex-direction:column;height:100vh;padding:0;margin:0;background:#0A0A0F;color:#F5F5F7;font-family:Inter,-apple-system,sans-serif;\"><div style=\"padding:12px 16px;font-size:11px;text-transform:uppercase;letter-spacing:1.2px;color:#0A84FF;font-weight:650;border-bottom:1px solid rgba(255,255,255,0.08);background:linear-gradient(180deg,rgba(255,255,255,0.10),rgba(255,255,255,0.03));\">" + title + "</div><div style=\"flex:1;padding:16px;overflow:auto;white-space:pre-wrap;font-family:'Fira Code',monospace;font-size:13px;line-height:1.6;\">" + content + "</div></div>"
-    return "<html><head></head><body style=\"margin:0;\">" + body + "</body></html>"
+fn _build_app_html(title: text, content: text, theme: text) -> text:
+    """Build HTML for an application window. Frosted-glass surface per the
+    Stitch Obsidian spec so the desktop gradient bleeds through windows.
+    Pass `content` as a raw HTML string (so callers may inject iframes or
+    widgets); text content should be pre-wrapped in a <pre> by the caller
+    if monospace/wrapping is desired."""
+    val is_light = theme == "glass_obsidian_light"
+    # Glass surface tokens from GlassColorTokens.obsidian_{dark,light}()
+    val body_bg = if is_light: "rgba(255,255,255,0.78)" else: "rgba(18,18,31,0.72)"
+    val body_fg = if is_light: "#1D1D1F" else: "#E3E0F3"
+    val title_fg = if is_light: "#7C69A3" else: "#C6C6C8"
+    val title_border = if is_light: "rgba(74,69,77,0.15)" else: "rgba(149,142,152,0.15)"
+    val title_grad = if is_light:
+        "linear-gradient(180deg,rgba(124,105,163,0.10),rgba(124,105,163,0.02))"
+    else:
+        "linear-gradient(180deg,rgba(255,255,255,0.10),rgba(255,255,255,0.03))"
+    val glass_style = "background:" + body_bg + ";backdrop-filter:blur(28px) saturate(170%);-webkit-backdrop-filter:blur(28px) saturate(170%);"
+    val body = "<div style=\"display:flex;flex-direction:column;height:100vh;padding:0;margin:0;" + glass_style + "color:" + body_fg + ";font-family:'Space Grotesk','Manrope','Inter',-apple-system,sans-serif;\"><div style=\"padding:12px 16px;font-size:11px;text-transform:uppercase;letter-spacing:1.2px;color:" + title_fg + ";font-weight:650;border-bottom:1px solid " + title_border + ";background:" + title_grad + ";\">" + title + "</div><div style=\"flex:1;overflow:hidden;display:flex;flex-direction:column;\">" + content + "</div></div>"
+    return "<html><head></head><body style=\"margin:0;background:transparent;\">" + body + "</body></html>"
+
+fn _pre_block(text_content: text, theme: text) -> text:
+    """Wrap plain-text content in a padded <pre> so _build_app_html's body
+    stays HTML-mode (letting callers swap in iframes)."""
+    return "<pre style=\"margin:0;padding:16px;overflow:auto;white-space:pre-wrap;font-family:'Fira Code','Cascadia Code','SF Mono',monospace;font-size:13px;line-height:1.6;\">" + text_content + "</pre>"
 
 fn main() -> i64:
-    # Use the Stitch-aligned Obsidian theme (pulled from Stitch project
-    # 12496218458601315145 via mcp__stitch__list_projects on 2026-04-12).
+    # Stitch-aligned themes (pulled from Stitch project 12496218458601315145
+    # for dark / 14134637940805933672 "Celestial Ether" for light, via
+    # mcp__stitch__list_projects 2026-04-12 / 2026-04-15).
     # Snapshot: doc/05_design/stitch_snapshots/12496218458601315145/design_systems/obsidian_active.sdn
-    val css = generate_css("glass_obsidian_dark")
+    val theme = _resolve_theme()
+    val css = generate_css(theme)
 
     # Render desktop (system bar + dock)
     val desktop_html = _build_desktop_html(css)
@@ -42,22 +71,26 @@ fn main() -> i64:
     rt_thread_sleep(300)
 
     # Open application windows at specific positions
-    val term_html = _build_app_html("TERMINAL", "$ simple --version\nSimple Language v0.9.5\n\n$ _")
+    val term_html = _build_app_html("TERMINAL", _pre_block("$ simple --version\nSimple Language v0.9.5\n\n$ _", theme), theme)
     print build_ipc_open_window("terminal", "Terminal", term_html, 50, 60, 600, 400)
 
     rt_thread_sleep(100)
 
-    val editor_html = _build_app_html("EDITOR", "# hello.spl\n\nfn main() -> i64:\n    print \"Hello, World!\"\n    return 0")
+    val editor_html = _build_app_html("EDITOR", _pre_block("# hello.spl\n\nfn main() -> i64:\n    print \"Hello, World!\"\n    return 0", theme), theme)
     print build_ipc_open_window("editor", "Editor", editor_html, 40, 500, 700, 400)
 
     rt_thread_sleep(100)
 
-    val browser_html = _build_app_html("BROWSER", "Simple Language Documentation\n\nA modern systems programming language.")
+    # Real browser app — iframe into the running Web WM on localhost:3333.
+    # This is a genuine, navigable web view (not a static HTML blob).
+    val browser_url = rt_env_get("SIMPLE_BROWSER_URL") ?? "http://localhost:3333"
+    val browser_body = "<iframe src=\"" + browser_url + "\" style=\"flex:1;width:100%;height:100%;border:none;background:transparent;\" sandbox=\"allow-scripts allow-same-origin allow-forms allow-popups\"></iframe>"
+    val browser_html = _build_app_html("BROWSER — " + browser_url, browser_body, theme)
     print build_ipc_open_window("browser", "Browser", browser_html, 670, 60, 650, 450)
 
     rt_thread_sleep(100)
 
-    val files_html = _build_app_html("FILE MANAGER", "src/\n  compiler/\n  lib/\n  app/\nexamples/\n  ui/\n  simple_os/")
+    val files_html = _build_app_html("FILE MANAGER", _pre_block("src/\n  compiler/\n  lib/\n  app/\nexamples/\n  ui/\n  simple_os/", theme), theme)
     print build_ipc_open_window("files", "File Manager", files_html, 700, 520, 550, 350)
 
     # Main IPC loop

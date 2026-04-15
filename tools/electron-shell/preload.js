@@ -42,5 +42,42 @@ contextBridge.exposeInMainWorld('simpleUI', {
     // Send quit signal to the Simple process
     sendQuit() {
         ipcRenderer.send('quit');
+    },
+
+    // ============================================================================
+    // Canvas2D paint pipeline — used when the Simple program renders via the
+    // Blink-style engine at src/lib/blink/ instead of emitting HTML.
+    // ============================================================================
+
+    // Receive a Canvas2D ops payload from the Simple process.
+    // payload = { ops: [{op:..., ...}, ...], width, height }
+    onPaintCanvas(callback) {
+        ipcRenderer.on('paint-canvas', (event, payload) => {
+            callback(payload);
+        });
+    },
+
+    // Forward a mouse event to the Simple process.
+    // payload = { x, y, button: 'left'|'right'|'middle'|'', kind: 'down'|'up'|'move' }
+    sendMouse(payload) {
+        ipcRenderer.send('mouse', payload || {});
+    },
+
+    // Forward a scroll/wheel event to the Simple process.
+    // payload = { x, y, dx, dy }
+    sendScroll(payload) {
+        ipcRenderer.send('scroll', payload || {});
+    },
+
+    // Forward a focus/blur event to the Simple process.
+    // payload = { targetId, kind: 'focus'|'blur' }
+    sendFocus(payload) {
+        ipcRenderer.send('focusEvent', payload || {});
+    },
+
+    // Forward an input value change to the Simple process.
+    // payload = { targetId, value }
+    sendInput(payload) {
+        ipcRenderer.send('inputChange', payload || {});
     }
 });

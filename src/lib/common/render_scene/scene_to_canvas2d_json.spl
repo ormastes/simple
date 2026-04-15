@@ -1,0 +1,123 @@
+# scene_to_canvas2d_json — convert PaintArtifact into a Canvas2D-friendly JSON ops array.
+#
+# The Blink-style renderer at src/lib/blink/ emits a PaintArtifact whose
+# DisplayList is a sequence of PaintOp enum values. The Electron host
+# (tools/electron-shell/) renders into an HTML <canvas>; this module
+# serializes the ops into a JSON array that the renderer can iterate
+# and dispatch to Canvas2D APIs (ctx.fillRect, ctx.fillText, etc.).
+#
+# Output shape (one element per PaintOp):
+#   {"op":"fillRect","x":..,"y":..,"w":..,"h":..,"color":"rgb(..)"}
+#   {"op":"fillText","x":..,"y":..,"text":"..","font":"<px>px sans-serif","color":"rgb(..)"}
+#   {"op":"strokeRect","x":..,"y":..,"w":..,"h":..,"width":..,"color":"rgb(..)"}
+#   {"op":"drawImage","x":..,"y":..,"w":..,"h":..,"imageId":N}
+#   {"op":"pushClip","x":..,"y":..,"w":..,"h":..}
+#   {"op":"popClip"}
+#   {"op":"pushOpacity","alpha":..}
+#   {"op":"popOpacity"}
+
+use std.common.color.convert.{to_css}
+use examples.browser.entity.dom.paint_types.{PaintOp, DisplayList}
+
+# JSON braces — written via raw strings so Simple's `{var}` interpolation
+# doesn't try to evaluate them.
+val _LB = r"{"
+val _RB = r"}"
+
+fn _esc(s: text) -> text:
+    """Escape a string for embedding inside a JSON string literal."""
+    var r = s.replace("\\", "\\\\")
+    r = r.replace("\"", "\\\"")
+    r = r.replace("\n", "\\n")
+    r = r.replace("\r", "\\r")
+    r = r.replace("\t", "\\t")
+    return r
+
+fn _border_side(x: f64, y: f64, w: f64, h: f64, side_widths: [f64], side_colors: [Color], idx: i32) -> text:
+    """Emit one of four border edges as a fillRect (top=0, right=1, bottom=2, left=3).
+    Returns "" if the corresponding width is 0."""
+    if idx >= side_widths.len().to_i32():
+        return ""
+    val width = side_widths[idx]
+    if width <= 0.0:
+        return ""
+    var color_css = "rgb(0,0,0)"
+    if idx < side_colors.len().to_i32():
+        color_css = to_css(side_colors[idx])
+    var sx = x
+    var sy = y
+    var sw = w
+    var sh = h
+    # CSS border order: top(0), right(1), bottom(2), left(3)
+    if idx == 0:
+        sh = width
+    elif idx == 1:
+        sx = x + w - width
+        sw = width
+    elif idx == 2:
+        sy = y + h - width
+        sh = width
+    elif idx == 3:
+        sw = width
+    return _LB + "\"op\":\"fillRect\",\"x\":{sx},\"y\":{sy},\"w\":{sw},\"h\":{sh},\"color\":\"" + color_css + "\"" + _RB
+
+fn _op_to_json(op: PaintOp) -> text:
+    """Serialize a single PaintOp to a JSON object string (or several, comma-joined, for borders)."""
+    match op:
+        PaintOp.FillRect(x, y, w, h, color):
+            return _LB + "\"op\":\"fillRect\",\"x\":{x},\"y\":{y},\"w\":{w},\"h\":{h},\"color\":\"" + to_css(color) + "\"" + _RB
+        PaintOp.DrawText(x, y, text_content, font_size, color):
+            val font = "{font_size}px -apple-system, BlinkMacSystemFont, 'Inter', 'Space Grotesk', 'Manrope', sans-serif"
+            return _LB + "\"op\":\"fillText\",\"x\":{x},\"y\":{y},\"text\":\"" + _esc(text_content) + "\",\"font\":\"" + font + "\",\"color\":\"" + to_css(color) + "\"" + _RB
+        PaintOp.DrawBorder(x, y, w, h, widths, colors):
+            var parts: [text] = []
+            var i: i32 = 0
+            while i < 4:
+                val side = _border_side(x, y, w, h, widths, colors, i)
+                if side != "":
+                    parts = parts.push(side)
+                i = i + 1
+            return parts.join(",")
+        PaintOp.DrawImage(x, y, w, h, image_id):
+            return _LB + "\"op\":\"drawImage\",\"x\":{x},\"y\":{y},\"w\":{w},\"h\":{h},\"imageId\":{image_id}" + _RB
+        PaintOp.DrawGradient(x, y, w, h, gradient):
+            # Phase A: emit a flat fillRect with the first stop's color as a fallback.
+            # Real gradient rendering will be added when the Canvas2D executor
+            # gains gradient support.
+            var fallback_color = "rgb(0,0,0)"
+            if gradient.stops.len() > 0:
+                fallback_color = to_css(gradient.stops[0].color)
+            return _LB + "\"op\":\"fillRect\",\"x\":{x},\"y\":{y},\"w\":{w},\"h\":{h},\"color\":\"" + fallback_color + "\"" + _RB
+        PaintOp.PushClip(x, y, w, h):
+            return _LB + "\"op\":\"pushClip\",\"x\":{x},\"y\":{y},\"w\":{w},\"h\":{h}" + _RB
+        PaintOp.PopClip:
+            return _LB + "\"op\":\"popClip\"" + _RB
+        PaintOp.PushOpacity(alpha):
+            return _LB + "\"op\":\"pushOpacity\",\"alpha\":{alpha}" + _RB
+        PaintOp.PopOpacity:
+            return _LB + "\"op\":\"popOpacity\"" + _RB
+        PaintOp.PushTransform(matrix):
+            # Canvas2D wants a 6-element 2D affine matrix [a,b,c,d,e,f].
+            var entries: [text] = []
+            var i: i32 = 0
+            while i < matrix.len().to_i32():
+                entries = entries.push("{matrix[i]}")
+                i = i + 1
+            return _LB + "\"op\":\"pushTransform\",\"matrix\":[" + entries.join(",") + "]" + _RB
+        PaintOp.PopTransform:
+            return _LB + "\"op\":\"popTransform\"" + _RB
+        PaintOp.PushFilter(filter_type, amount):
+            return _LB + "\"op\":\"pushFilter\",\"kind\":\"" + _esc(filter_type) + "\",\"amount\":{amount}" + _RB
+        PaintOp.PopFilter:
+            return _LB + "\"op\":\"popFilter\"" + _RB
+
+fn display_list_to_canvas2d_ops(list: DisplayList) -> text:
+    """Walk a DisplayList and return a JSON array of Canvas2D ops as text."""
+    var entries: [text] = []
+    for op in list.ops:
+        val piece = _op_to_json(op)
+        if piece != "":
+            entries = entries.push(piece)
+    return "[" + entries.join(",") + "]"
+
+export display_list_to_canvas2d_ops

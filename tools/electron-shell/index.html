@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline';">
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'; frame-src http://localhost:* http://127.0.0.1:* https: data:; img-src 'self' data: https:; connect-src 'self' http://localhost:* ws://localhost:*;">
     <title>Simple UI</title>
     <style>
         * {
@@ -68,12 +68,29 @@
             z-index: 10000;
             pointer-events: auto;
         }
+        /* Canvas2D surface for Simple-rendered apps (Blink-style pipeline).
+           Hidden by default; the first paint_canvas IPC message reveals it
+           and stretches it under any HTML chrome. */
+        #sb-canvas {
+            position: absolute;
+            inset: 0;
+            width: 100%;
+            height: 100%;
+            display: none;
+            z-index: 3;
+            background: transparent;
+            outline: none;
+        }
+        #sb-canvas.active {
+            display: block;
+        }
     </style>
 </head>
 <body>
     <div id="app" class="loading">
         <div id="wm-chrome"></div>
         <div id="wm-desktop"></div>
+        <canvas id="sb-canvas" tabindex="0"></canvas>
         <div id="wm-taskbar"></div>
         <div id="wm-loading-text">Loading...</div>
     </div>
@@ -269,6 +286,193 @@
                 window.simpleUI.sendQuit();
             }
         });
+
+        // ====================================================================
+        // Canvas2D executor — consumes paint_canvas IPC from the Simple-side
+        // Blink-style renderer (src/lib/blink/) and forwards mouse/scroll/
+        // keyboard/input events back to Simple via simpleUI.send*.
+        // ====================================================================
+
+        var canvasEl = document.getElementById('sb-canvas');
+        var canvasCtx = canvasEl ? canvasEl.getContext('2d') : null;
+        var canvasImageCache = new Map();   // imageId|url → HTMLImageElement
+        var lastPaintPayload = null;        // re-rendered on resize / image-load
+
+        function resizeCanvasBacking() {
+            if (!canvasEl) return;
+            var ratio = window.devicePixelRatio || 1;
+            var rect = canvasEl.getBoundingClientRect();
+            canvasEl.width = Math.max(1, Math.floor(rect.width * ratio));
+            canvasEl.height = Math.max(1, Math.floor(rect.height * ratio));
+            if (canvasCtx) canvasCtx.setTransform(ratio, 0, 0, ratio, 0, 0);
+        }
+
+        function getCanvasImage(key, src) {
+            var existing = canvasImageCache.get(key);
+            if (existing) return existing;
+            var img = new Image();
+            img.crossOrigin = 'anonymous';
+            img.onload = function() {
+                if (lastPaintPayload) executePaintOps(lastPaintPayload.ops);
+            };
+            img.src = src;
+            canvasImageCache.set(key, img);
+            return img;
+        }
+
+        function executePaintOps(ops) {
+            if (!canvasCtx || !Array.isArray(ops)) return;
+            var ctx = canvasCtx;
+            var ratio = window.devicePixelRatio || 1;
+            ctx.setTransform(ratio, 0, 0, ratio, 0, 0);
+            ctx.clearRect(0, 0, canvasEl.width / ratio, canvasEl.height / ratio);
+            for (var i = 0; i < ops.length; i++) {
+                var op = ops[i];
+                if (!op || !op.op) continue;
+                switch (op.op) {
+                    case 'fillRect':
+                        ctx.fillStyle = op.color || '#000';
+                        ctx.fillRect(op.x || 0, op.y || 0, op.w || 0, op.h || 0);
+                        break;
+                    case 'strokeRect':
+                        ctx.strokeStyle = op.color || '#000';
+                        ctx.lineWidth = op.width || 1;
+                        ctx.strokeRect(op.x || 0, op.y || 0, op.w || 0, op.h || 0);
+                        break;
+                    case 'fillText':
+                        if (op.font) ctx.font = op.font;
+                        ctx.fillStyle = op.color || '#000';
+                        ctx.textBaseline = 'alphabetic';
+                        ctx.fillText(op.text || '', op.x || 0, op.y || 0);
+                        break;
+                    case 'drawImage': {
+                        var key = op.url || ('id:' + (op.imageId || 0));
+                        var src = op.url || op.dataUrl || '';
+                        if (src) {
+                            var img = getCanvasImage(key, src);
+                            if (img.complete && img.naturalWidth > 0) {
+                                ctx.drawImage(img, op.x || 0, op.y || 0, op.w || img.naturalWidth, op.h || img.naturalHeight);
+                            }
+                        }
+                        break;
+                    }
+                    case 'pushClip':
+                        ctx.save();
+                        ctx.beginPath();
+                        ctx.rect(op.x || 0, op.y || 0, op.w || 0, op.h || 0);
+                        ctx.clip();
+                        break;
+                    case 'popClip':
+                        ctx.restore();
+                        break;
+                    case 'pushOpacity':
+                        ctx.save();
+                        ctx.globalAlpha *= (op.alpha == null ? 1 : op.alpha);
+                        break;
+                    case 'popOpacity':
+                        ctx.restore();
+                        break;
+                    case 'pushTransform':
+                        if (Array.isArray(op.matrix) && op.matrix.length >= 6) {
+                            ctx.save();
+                            ctx.transform(op.matrix[0], op.matrix[1], op.matrix[2], op.matrix[3], op.matrix[4], op.matrix[5]);
+                        }
+                        break;
+                    case 'popTransform':
+                        ctx.restore();
+                        break;
+                    case 'pushFilter':
+                        ctx.save();
+                        if (op.kind && op.amount != null) {
+                            ctx.filter = op.kind + '(' + op.amount + ')';
+                        }
+                        break;
+                    case 'popFilter':
+                        ctx.restore();
+                        break;
+                    default:
+                        // Unknown op; skip silently
+                        break;
+                }
+            }
+        }
+
+        if (window.simpleUI && typeof window.simpleUI.onPaintCanvas === 'function') {
+            window.simpleUI.onPaintCanvas(function(payload) {
+                lastPaintPayload = payload;
+                if (canvasEl && !canvasEl.classList.contains('active')) {
+                    canvasEl.classList.add('active');
+                    appEl.classList.remove('loading');
+                    if (loadingEl && loadingEl.parentNode) loadingEl.parentNode.removeChild(loadingEl);
+                }
+                resizeCanvasBacking();
+                executePaintOps(payload.ops || []);
+            });
+        }
+
+        // Re-rasterize on window resize (devicePixelRatio + size change).
+        window.addEventListener('resize', function() {
+            if (lastPaintPayload && canvasEl && canvasEl.classList.contains('active')) {
+                resizeCanvasBacking();
+                executePaintOps(lastPaintPayload.ops || []);
+            }
+        });
+
+        // Mouse / scroll / keyboard listeners on the canvas — forwarded to
+        // Simple where the Blink hit-tester decides what was clicked.
+        function canvasCoords(ev) {
+            var rect = canvasEl.getBoundingClientRect();
+            return {
+                x: ev.clientX - rect.left,
+                y: ev.clientY - rect.top
+            };
+        }
+
+        function buttonName(ev) {
+            if (ev.button === 0) return 'left';
+            if (ev.button === 1) return 'middle';
+            if (ev.button === 2) return 'right';
+            return '';
+        }
+
+        if (canvasEl) {
+            canvasEl.addEventListener('mousemove', function(e) {
+                var c = canvasCoords(e);
+                if (window.simpleUI && typeof window.simpleUI.sendMouse === 'function') {
+                    window.simpleUI.sendMouse({ x: c.x, y: c.y, button: '', kind: 'move' });
+                }
+            });
+            canvasEl.addEventListener('mousedown', function(e) {
+                var c = canvasCoords(e);
+                canvasEl.focus();
+                if (window.simpleUI && typeof window.simpleUI.sendMouse === 'function') {
+                    window.simpleUI.sendMouse({ x: c.x, y: c.y, button: buttonName(e), kind: 'down' });
+                }
+            });
+            canvasEl.addEventListener('mouseup', function(e) {
+                var c = canvasCoords(e);
+                if (window.simpleUI && typeof window.simpleUI.sendMouse === 'function') {
+                    window.simpleUI.sendMouse({ x: c.x, y: c.y, button: buttonName(e), kind: 'up' });
+                }
+            });
+            canvasEl.addEventListener('wheel', function(e) {
+                e.preventDefault();
+                var c = canvasCoords(e);
+                if (window.simpleUI && typeof window.simpleUI.sendScroll === 'function') {
+                    window.simpleUI.sendScroll({ x: c.x, y: c.y, dx: e.deltaX, dy: e.deltaY });
+                }
+            }, { passive: false });
+            canvasEl.addEventListener('keydown', function(e) {
+                var key = e.key;
+                if (key === ' ') key = 'Space';
+                if (window.simpleUI && typeof window.simpleUI.sendKeypress === 'function') {
+                    window.simpleUI.sendKeypress(key);
+                }
+                // Don't preventDefault — let browser handle native shortcuts
+                // (Cmd-Q etc.). The Simple side decides what to do with the key.
+            });
+            canvasEl.addEventListener('contextmenu', function(e) { e.preventDefault(); });
+        }
     </script>
 </body>
 </html>

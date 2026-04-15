@@ -44,7 +44,12 @@ function dumpRenderedHtml(html) {
     }
 }
 
-// Resolve Simple binary path: CLI arg --bin, env SIMPLE_BIN, or default
+// Resolve Simple binary path: CLI arg --bin, env SIMPLE_BIN, or default.
+// The deployed self-hosted bin/simple currently has a dispatch fallthrough
+// bug (#3 in doc/08_tracking/bug/wm_cocoa_session_findings_2026-04-15.md)
+// where `bin/simple <file.spl>` always returns "Error running" exit 1.
+// Until that lands, prefer the Rust seed bootstrap binary when present —
+// it runs `.spl` files reliably.
 function resolveSimpleBin() {
     const args = process.argv.slice(2);
     for (let i = 0; i < args.length; i++) {
@@ -55,7 +60,12 @@ function resolveSimpleBin() {
     if (process.env.SIMPLE_BIN) {
         return process.env.SIMPLE_BIN;
     }
-    return path.join(__dirname, '..', '..', 'bin', 'simple');
+    const projectRoot = path.join(__dirname, '..', '..');
+    const seedBin = path.join(projectRoot, 'src', 'compiler_rust', 'target', 'bootstrap', 'simple');
+    if (fs.existsSync(seedBin)) {
+        return seedBin;
+    }
+    return path.join(projectRoot, 'bin', 'simple');
 }
 
 // Collect non-flag arguments as the entry file and its args.
@@ -104,6 +114,20 @@ function handleSimpleMessage(line) {
                 if (mainWindow) {
                     dumpRenderedHtml(msg.html || '');
                     mainWindow.webContents.send('render', msg.html);
+                }
+                break;
+
+            // Canvas2D paint commands from a Simple-side renderer (e.g. the
+            // Blink-style pipeline at src/lib/blink/). The renderer-side
+            // executor in index.html iterates ops and calls the matching
+            // Canvas2D APIs.
+            case 'paint_canvas':
+                if (mainWindow && !mainWindow.isDestroyed()) {
+                    mainWindow.webContents.send('paint-canvas', {
+                        ops: Array.isArray(msg.ops) ? msg.ops : [],
+                        width: msg.width || 0,
+                        height: msg.height || 0
+                    });
                 }
                 break;
 
@@ -358,6 +382,44 @@ ipcMain.on('quit', () => {
         simpleProcess = null;
     }
     app.quit();
+});
+
+// IPC from renderer: mouse / scroll / focus / input — for Canvas2D-rendered apps
+// where the Simple program owns hit-testing, focus, and form state.
+ipcMain.on('mouse', (event, payload) => {
+    sendToSimple({
+        type: 'mouse',
+        x: String((payload && payload.x) || 0),
+        y: String((payload && payload.y) || 0),
+        button: (payload && payload.button) || '',
+        kind: (payload && payload.kind) || 'move'
+    });
+});
+
+ipcMain.on('scroll', (event, payload) => {
+    sendToSimple({
+        type: 'scroll',
+        x: String((payload && payload.x) || 0),
+        y: String((payload && payload.y) || 0),
+        dx: String((payload && payload.dx) || 0),
+        dy: String((payload && payload.dy) || 0)
+    });
+});
+
+ipcMain.on('focusEvent', (event, payload) => {
+    sendToSimple({
+        type: 'focus',
+        targetId: (payload && payload.targetId) || '',
+        kind: (payload && payload.kind) || 'focus'
+    });
+});
+
+ipcMain.on('inputChange', (event, payload) => {
+    sendToSimple({
+        type: 'input',
+        targetId: (payload && payload.targetId) || '',
+        value: (payload && payload.value) || ''
+    });
 });
 
 app.on('window-all-closed', () => {
