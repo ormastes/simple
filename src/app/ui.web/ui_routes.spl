@@ -8,12 +8,12 @@
 #
 # /ui/login is handled by server.spl and must NOT be intercepted here.
 
-use std.nogc_sync_mut.io.tcp.{TcpStream}
+use app.ui.web.tls_serve_loop.{ConnStream}
 use common.ui.session.{UISession}
 use app.ui.web.origin_guard.{OriginGuard, AuthError}
 use app.ui.web.session_token.{verify, load_secret}
 use app.ui.web.ws_handler.{handle_ws_upgrade, extract_ws_key, compute_ws_accept, send_ws_text}
-use app.ui.web.async_ws.{read_ws_frame, extract_field}
+use app.ui.web.async_ws.{extract_field}
 use app.ui.web.web_runtime_adapter.{WebRuntimeAdapter}
 use app.ui.web.wm_bridge.{WmBridge}
 use app.ui.web.bounded_channel.{BoundedChannel}
@@ -25,7 +25,7 @@ extern fn rt_time_ms() -> u64
 # Route dispatcher
 # =========================================================================
 
-fn dispatch_ui_route(path: text, method: text, headers: text, body: text, stream: TcpStream, session: UISession, guard: OriginGuard, secret: text) -> bool:
+fn dispatch_ui_route(path: text, method: text, headers: text, body: text, stream: ConnStream, session: UISession, guard: OriginGuard, secret: text) -> bool:
     """Returns true if request was handled; false if path is not /ui/*.
     /ui/login is intentionally excluded — handled by server.spl."""
     if not path.starts_with("/ui/"):
@@ -41,40 +41,40 @@ fn dispatch_ui_route(path: text, method: text, headers: text, body: text, stream
 
     # Unknown /ui/ path
     val resp = "HTTP/1.1 404 Not Found\r\nContent-Length: 9\r\nConnection: close\r\n\r\nNot Found"
-    stream.write_text(resp)
+    stream.write_all(resp)
     return true
 
 # =========================================================================
 # /ui/ws — WebSocket upgrade + adapter loop
 # =========================================================================
 
-fn _handle_ws_route(stream: TcpStream, headers: text, session: UISession, guard: OriginGuard, secret: text):
+fn _handle_ws_route(stream: ConnStream, headers: text, session: UISession, guard: OriginGuard, secret: text):
     """Gate origin + bearer, complete WS handshake, then run adapter read loop."""
     # Security gate: origin check
     val origin_result = guard.check(headers)
     val origin = match origin_result:
         Err(_):
-            stream.write_text("HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\n\r\n")
+            stream.write_all("HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\n\r\n")
             return
         Ok(o): o
 
     # Security gate: bearer token
     val bearer = _extract_bearer(headers)
     if bearer == "":
-        stream.write_text("HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\n\r\n")
+        stream.write_all("HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\n\r\n")
         return
     val now = rt_time_ms()
     val tok_result = verify(bearer, origin, secret, now)
     val grant_id = match tok_result:
         Err(_):
-            stream.write_text("HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\n\r\n")
+            stream.write_all("HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\n\r\n")
             return
         Ok(tok): tok.grant_id
 
     # Complete WebSocket handshake
     val key = extract_ws_key(headers)
     if key == "":
-        stream.write_text("HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\n\r\n")
+        stream.write_all("HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\n\r\n")
         return
     val accept = compute_ws_accept(key)
     var ws_response = "HTTP/1.1 101 Switching Protocols\r\n"
@@ -82,11 +82,11 @@ fn _handle_ws_route(stream: TcpStream, headers: text, session: UISession, guard:
     ws_response = "{ws_response}Connection: Upgrade\r\n"
     ws_response = "{ws_response}Sec-WebSocket-Accept: {accept}\r\n"
     ws_response = "{ws_response}\r\n"
-    stream.write_text(ws_response)
+    stream.write_all(ws_response)
 
     # Build adapter
     val session_id = rt_random_hex(16)
-    val out_channel = BoundedChannel<text>.new(256)
+    var out_channel: BoundedChannel<text> = BoundedChannel.new(256)
     var adapter = WebRuntimeAdapter.new(session_id, session, grant_id, out_channel)
 
     # Send initial snapshot
@@ -95,7 +95,7 @@ fn _handle_ws_route(stream: TcpStream, headers: text, session: UISession, guard:
 
     # Read loop
     loop:
-        val frame = read_ws_frame(stream)
+        val frame = _read_ws_frame_conn(stream)
         if frame == nil:
             break
         val msg_type = extract_field(frame, "t")
@@ -132,7 +132,7 @@ fn _handle_ws_route(stream: TcpStream, headers: text, session: UISession, guard:
         adapter.emit_patches()
         _flush_out(stream, out_channel)
 
-fn _flush_out(stream: TcpStream, ch: BoundedChannel<text>):
+fn _flush_out(stream: ConnStream, ch: BoundedChannel<text>):
     """Drain the adapter's output channel and send all frames."""
     loop:
         val item = ch.try_recv()
@@ -179,7 +179,7 @@ fn _handle_window_cmd(frame: text, session: UISession, session_id: text, out: Bo
 # /ui/resume — HTTP POST resume
 # =========================================================================
 
-fn _handle_resume_route(stream: TcpStream, body: text, session: UISession):
+fn _handle_resume_route(stream: ConnStream, body: text, session: UISession):
     val session_id = _json_field(body, "session_id")
     val rev_str = _json_field(body, "snapshot_revision")
     val seq_str = _json_field(body, "last_sequence")
@@ -192,11 +192,93 @@ fn _handle_resume_route(stream: TcpStream, body: text, session: UISession):
     resp = "{resp}Connection: close\r\n"
     resp = "{resp}\r\n"
     resp = "{resp}{resp_json}"
-    stream.write_text(resp)
+    stream.write_all(resp)
 
 # =========================================================================
 # Private helpers
 # =========================================================================
+
+fn _read_ws_frame_conn(stream: ConnStream) -> text?:
+    """Read a single WebSocket text frame from a ConnStream.
+
+    Mirrors async_ws.read_ws_frame but uses ConnStream.read_bytes instead of
+    TcpStream.read so it works over both TCP and TLS transports.
+    Returns the decoded payload text, or nil on error/close.
+    """
+    match stream.read_bytes(2):
+        Err(_):
+            return nil
+        Ok(header):
+            var byte0: u8 = 0
+            var byte1: u8 = 0
+            var hdr_idx = 0
+            for b in header:
+                if hdr_idx == 0:
+                    byte0 = b
+                elif hdr_idx == 1:
+                    byte1 = b
+                hdr_idx = hdr_idx + 1
+            if hdr_idx < 2:
+                return nil
+
+            val opcode = byte0 & 0x0F
+            # 0x8 = connection close, 0x9 = ping, 0xA = pong
+            if opcode == 0x8:
+                return nil
+
+            val masked = (byte1 & 0x80) != 0
+            var payload_len: i64 = (byte1 & 0x7F) as i64
+
+            if payload_len == 126:
+                match stream.read_bytes(2):
+                    Err(_):
+                        return nil
+                    Ok(ext):
+                        var b0: u8 = 0
+                        var b1: u8 = 0
+                        var idx = 0
+                        for b in ext:
+                            if idx == 0: b0 = b
+                            elif idx == 1: b1 = b
+                            idx = idx + 1
+                        payload_len = (b0 as i64) * 256 + (b1 as i64)
+            elif payload_len == 127:
+                match stream.read_bytes(8):
+                    Err(_):
+                        return nil
+                    Ok(ext):
+                        var acc: i64 = 0
+                        for b in ext:
+                            acc = acc * 256 + (b as i64)
+                        payload_len = acc
+
+            var mask_key: [u8] = []
+            if masked:
+                match stream.read_bytes(4):
+                    Err(_):
+                        return nil
+                    Ok(mk):
+                        mask_key = mk
+
+            match stream.read_bytes(payload_len):
+                Err(_):
+                    return nil
+                Ok(payload_bytes):
+                    if not masked:
+                        return payload_bytes.to_text()
+                    var decoded: [u8] = []
+                    var pi = 0
+                    for pb in payload_bytes:
+                        val mk_idx = pi % 4
+                        var mk_byte: u8 = 0
+                        var mi = 0
+                        for mk in mask_key:
+                            if mi == mk_idx:
+                                mk_byte = mk
+                            mi = mi + 1
+                        decoded = decoded + [(pb ^ mk_byte)]
+                        pi = pi + 1
+                    return decoded.to_text()
 
 fn _make_frame(msg_type: text, session_id: text, seq: text, payload: text) -> text:
     return "{\"t\": \"{msg_type}\", \"v\": 1, \"s\": \"{session_id}\", \"seq\": {seq}, \"payload\": {payload}}"

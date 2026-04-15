@@ -1,0 +1,631 @@
+# UI Test API Handler — Regression Tests
+#
+# Exercises all 18 routes in src/app/ui.test_api/handler.spl at the
+# function-call level (no real sockets).  Calls handle_test_request()
+# directly and inspects the (status, content_type, body) tuple.
+#
+# NOTE: /api/test/ui/ensure is present in handler.spl (line 51) but is
+# NOT in the 18-route specification.  It is exercised nowhere here; see
+# the FINDING at the bottom of this file.
+
+use std.sspec.*
+use app.ui.test_api.handler.{handle_test_request, PROTOCOL_VERSION}
+use common.ui.widget.{UIState, UIEvent, UITree, WidgetNode}
+use common.ui.session.{UISession}
+
+# ============================================================================
+# Module-level inject_event stub
+#
+# Closure-modify limitation: nested closures cannot mutate an outer var.
+# Use a module-level var + a named function instead.
+# ============================================================================
+
+var _captured_events: [UIEvent] = []
+
+fn _stub_inject(e: UIEvent):
+    _captured_events = _captured_events.push(e)
+
+fn _noop_inject(e: UIEvent):
+    pass_do_nothing
+
+# ============================================================================
+# Fixture helpers
+# ============================================================================
+
+fn _make_state() -> UIState:
+    val root = WidgetNode(id: "root")
+    val tree = UITree.new(root)
+    return UIState.new(tree)
+
+fn _make_session() -> UISession:
+    val root = WidgetNode(id: "root")
+    val tree = UITree.new(root)
+    return UISession.new(tree)
+
+# ============================================================================
+# Group 1: /api/test/ready  (GET)
+# ============================================================================
+
+describe "GET /api/test/ready":
+    """
+    ## Protocol version sentinel
+
+    The ready route must return 200 with ready:true and the integer
+    protocol_version matching the PROTOCOL_VERSION constant (expected: 1).
+    """
+
+    it "returns 200 with ready:true":
+        val state = _make_state()
+        val (status, ctype, body) = handle_test_request("/api/test/ready", "GET", "", state, _noop_inject, nil)
+        expect(status).to_equal(200)
+        expect(body).to_contain("\"ready\":true")
+
+    it "PROTOCOL_VERSION constant equals 1":
+        expect(PROTOCOL_VERSION).to_equal(1)
+
+    it "body contains protocol_version 1":
+        val state = _make_state()
+        val (status, ctype, body) = handle_test_request("/api/test/ready", "GET", "", state, _noop_inject, nil)
+        expect(body).to_contain("\"protocol_version\":1")
+
+    it "returns application/json content type":
+        val state = _make_state()
+        val (status, ctype, body) = handle_test_request("/api/test/ready", "GET", "", state, _noop_inject, nil)
+        expect(ctype).to_equal("application/json")
+
+# ============================================================================
+# Group 2: /api/test/state  (GET)
+# ============================================================================
+
+describe "GET /api/test/state":
+    """
+    ## Application state serialisation
+
+    Returns the full UIState as a JSON object.
+    """
+
+    it "returns 200":
+        val state = _make_state()
+        val (status, ctype, body) = handle_test_request("/api/test/state", "GET", "", state, _noop_inject, nil)
+        expect(status).to_equal(200)
+
+    it "returns application/json":
+        val state = _make_state()
+        val (status, ctype, body) = handle_test_request("/api/test/state", "GET", "", state, _noop_inject, nil)
+        expect(ctype).to_equal("application/json")
+
+# ============================================================================
+# Group 3: /api/test/elements  (GET)
+# ============================================================================
+
+describe "GET /api/test/elements":
+    """
+    ## All widgets as JSON array
+
+    Returns all widget records from the current UIState.
+    """
+
+    it "returns 200":
+        val state = _make_state()
+        val (status, ctype, body) = handle_test_request("/api/test/elements", "GET", "", state, _noop_inject, nil)
+        expect(status).to_equal(200)
+
+    it "returns application/json":
+        val state = _make_state()
+        val (status, ctype, body) = handle_test_request("/api/test/elements", "GET", "", state, _noop_inject, nil)
+        expect(ctype).to_equal("application/json")
+
+# ============================================================================
+# Group 4: /api/test/element  (GET)
+# ============================================================================
+
+describe "GET /api/test/element":
+    """
+    ## Single element lookup by id query param
+
+    Happy path: ?id=root → 200 (root widget exists in fixture tree).
+    Error path: missing ?id= → 400.
+    Error path: unknown id → 404.
+
+    FINDING: If happy-path returns 404 for id=root, this indicates that
+    UITree.new registers the WidgetNode handle lazily and find_widget()
+    cannot locate it until a widget record is upserted.  Document as v1.2
+    finding if the test below fails.
+    """
+
+    it "returns 200 for the root widget id":
+        val state = _make_state()
+        val (status, ctype, body) = handle_test_request("/api/test/element?id=root", "GET", "", state, _noop_inject, nil)
+        # If this returns 404, see FINDING above — flag for v1.2, do not fix here
+        expect(status).to_equal(200)
+
+    it "returns 400 when id param is missing":
+        val state = _make_state()
+        val (status, ctype, body) = handle_test_request("/api/test/element", "GET", "", state, _noop_inject, nil)
+        expect(status).to_equal(400)
+        expect(body).to_contain("missing_field")
+
+    it "returns 404 for unknown widget id":
+        val state = _make_state()
+        val (status, ctype, body) = handle_test_request("/api/test/element?id=no_such_widget", "GET", "", state, _noop_inject, nil)
+        expect(status).to_equal(404)
+        expect(body).to_contain("element_not_found")
+
+# ============================================================================
+# Group 5: /api/test/screenshot  (GET)
+# ============================================================================
+
+describe "GET /api/test/screenshot":
+    """
+    ## Full widget tree as HTML snapshot
+
+    Returns 200 with text/html content type.
+    """
+
+    it "returns 200":
+        val state = _make_state()
+        val (status, ctype, body) = handle_test_request("/api/test/screenshot", "GET", "", state, _noop_inject, nil)
+        expect(status).to_equal(200)
+
+    it "returns text/html":
+        val state = _make_state()
+        val (status, ctype, body) = handle_test_request("/api/test/screenshot", "GET", "", state, _noop_inject, nil)
+        expect(ctype).to_equal("text/html")
+
+    it "body contains html tag":
+        val state = _make_state()
+        val (status, ctype, body) = handle_test_request("/api/test/screenshot", "GET", "", state, _noop_inject, nil)
+        expect(body).to_contain("<html>")
+
+# ============================================================================
+# Group 6: /api/test/ui/snapshot  (GET)
+# ============================================================================
+
+describe "GET /api/test/ui/snapshot":
+    """
+    ## Canonical access snapshot
+
+    Returns 200 with JSON snapshot built from UIState (session nil).
+    """
+
+    it "returns 200":
+        val state = _make_state()
+        val (status, ctype, body) = handle_test_request("/api/test/ui/snapshot", "GET", "", state, _noop_inject, nil)
+        expect(status).to_equal(200)
+
+    it "returns application/json":
+        val state = _make_state()
+        val (status, ctype, body) = handle_test_request("/api/test/ui/snapshot", "GET", "", state, _noop_inject, nil)
+        expect(ctype).to_equal("application/json")
+
+# ============================================================================
+# Group 7: /api/test/ui/query  (GET)
+# ============================================================================
+
+describe "GET /api/test/ui/query":
+    """
+    ## Structured canonical query
+
+    No selector params → returns 200 with an empty result set.
+    """
+
+    it "returns 200 with no query params":
+        val state = _make_state()
+        val (status, ctype, body) = handle_test_request("/api/test/ui/query", "GET", "", state, _noop_inject, nil)
+        expect(status).to_equal(200)
+
+    it "returns 200 with surface_id param":
+        val state = _make_state()
+        val (status, ctype, body) = handle_test_request("/api/test/ui/query?surface_id=main", "GET", "", state, _noop_inject, nil)
+        expect(status).to_equal(200)
+
+# ============================================================================
+# Group 8: /api/test/ui/observe  (GET)
+# ============================================================================
+
+describe "GET /api/test/ui/observe":
+    """
+    ## Declarative read
+
+    Without any selector → 400 missing selector.
+    With surface_id → delegates to surface handler (400 or 404 since no session surface).
+    """
+
+    it "returns 400 when no selector provided":
+        val state = _make_state()
+        val (status, ctype, body) = handle_test_request("/api/test/ui/observe", "GET", "", state, _noop_inject, nil)
+        expect(status).to_equal(400)
+        expect(body).to_contain("missing_field")
+
+    it "returns 200 with kind param filter":
+        val state = _make_state()
+        val (status, ctype, body) = handle_test_request("/api/test/ui/observe?kind=button", "GET", "", state, _noop_inject, nil)
+        expect(status).to_equal(200)
+
+# ============================================================================
+# Group 9: /api/test/ui/surface  (GET)
+# ============================================================================
+
+describe "GET /api/test/ui/surface":
+    """
+    ## Surface lookup by id query param
+
+    Happy path: ?id=main with a live session → 200 (UISession.new opens "main").
+    Error path: missing id → 400.
+    Error path: unknown id → 404.
+    """
+
+    it "returns 200 for the main surface via session":
+        val state = _make_state()
+        val session = _make_session()
+        val (status, ctype, body) = handle_test_request("/api/test/ui/surface?id=main", "GET", "", state, _noop_inject, session)
+        expect(status).to_equal(200)
+
+    it "returns 400 when id param is missing":
+        val state = _make_state()
+        val (status, ctype, body) = handle_test_request("/api/test/ui/surface", "GET", "", state, _noop_inject, nil)
+        expect(status).to_equal(400)
+        expect(body).to_contain("missing_field")
+
+    it "returns 404 for unknown surface id":
+        val state = _make_state()
+        val (status, ctype, body) = handle_test_request("/api/test/ui/surface?id=no_such_surface", "GET", "", state, _noop_inject, nil)
+        expect(status).to_equal(404)
+        expect(body).to_contain("element_not_found")
+
+# ============================================================================
+# Group 10: /api/test/ui/state  (GET)
+# ============================================================================
+
+describe "GET /api/test/ui/state":
+    """
+    ## Declarative state read
+
+    Happy path: ?surface_id=main with session, no state_key → delegates to
+    surface handler which returns 200 for the known "main" surface.
+    Error path: missing both selectors → 400.
+    Error path: unknown surface_id → 404.
+    """
+
+    it "returns 200 for known surface_id with session":
+        val state = _make_state()
+        val session = _make_session()
+        val (status, ctype, body) = handle_test_request("/api/test/ui/state?surface_id=main", "GET", "", state, _noop_inject, session)
+        expect(status).to_equal(200)
+
+    it "returns 400 when neither surface_id nor canonical_id provided":
+        val state = _make_state()
+        val (status, ctype, body) = handle_test_request("/api/test/ui/state", "GET", "", state, _noop_inject, nil)
+        expect(status).to_equal(400)
+        expect(body).to_contain("missing_field")
+
+    it "returns 404 for unknown surface_id":
+        val state = _make_state()
+        val (status, ctype, body) = handle_test_request("/api/test/ui/state?surface_id=ghost", "GET", "", state, _noop_inject, nil)
+        expect(status).to_equal(404)
+        expect(body).to_contain("element_not_found")
+
+# ============================================================================
+# Group 11: /api/test/ui/history  (GET)
+# ============================================================================
+
+describe "GET /api/test/ui/history":
+    """
+    ## Recent access events
+
+    With session nil → returns 200 with empty array [].
+    With a live session → returns 200 JSON array.
+    """
+
+    it "returns 200 empty array when session is nil":
+        val state = _make_state()
+        val (status, ctype, body) = handle_test_request("/api/test/ui/history", "GET", "", state, _noop_inject, nil)
+        expect(status).to_equal(200)
+        expect(body).to_equal("[]")
+
+    it "returns 200 with a live session":
+        val state = _make_state()
+        val session = _make_session()
+        val (status, ctype, body) = handle_test_request("/api/test/ui/history", "GET", "", state, _noop_inject, session)
+        expect(status).to_equal(200)
+
+# ============================================================================
+# Group 12: POST /api/test/click
+# ============================================================================
+
+describe "POST /api/test/click":
+    """
+    ## Inject a click action for a widget
+
+    Happy path: id present → 200 ok:true, event captured.
+    Error path: missing id → 400.
+    """
+
+    it "returns 200 with ok:true when id is provided":
+        _captured_events = []
+        val state = _make_state()
+        val (status, ctype, body) = handle_test_request("/api/test/click", "POST", "{\"id\":\"btn1\"}", state, _stub_inject, nil)
+        expect(status).to_equal(200)
+        expect(body).to_contain("\"ok\":true")
+
+    it "injects a click action event":
+        _captured_events = []
+        val state = _make_state()
+        handle_test_request("/api/test/click", "POST", "{\"id\":\"btn1\"}", state, _stub_inject, nil)
+        expect(_captured_events.len()).to_equal(1)
+
+    it "returns 400 when id is missing":
+        val state = _make_state()
+        val (status, ctype, body) = handle_test_request("/api/test/click", "POST", "{}", state, _noop_inject, nil)
+        expect(status).to_equal(400)
+        expect(body).to_contain("missing_field")
+
+# ============================================================================
+# Group 13: POST /api/test/type
+# ============================================================================
+
+describe "POST /api/test/type":
+    """
+    ## Focus widget and inject key presses
+
+    Happy path: id + text present → 200 ok:true, events captured.
+    Error path: missing id → 400.
+    """
+
+    it "returns 200 with ok:true":
+        _captured_events = []
+        val state = _make_state()
+        val (status, ctype, body) = handle_test_request("/api/test/type", "POST", "{\"id\":\"input1\",\"text\":\"hi\"}", state, _stub_inject, nil)
+        expect(status).to_equal(200)
+        expect(body).to_contain("\"ok\":true")
+
+    it "injects focus plus one KeyPress per character":
+        _captured_events = []
+        val state = _make_state()
+        handle_test_request("/api/test/type", "POST", "{\"id\":\"input1\",\"text\":\"ab\"}", state, _stub_inject, nil)
+        # 1 focus action + 2 key presses = 3 events
+        expect(_captured_events.len()).to_equal(3)
+
+    it "returns 400 when id is missing":
+        val state = _make_state()
+        val (status, ctype, body) = handle_test_request("/api/test/type", "POST", "{\"text\":\"hi\"}", state, _noop_inject, nil)
+        expect(status).to_equal(400)
+        expect(body).to_contain("missing_field")
+
+# ============================================================================
+# Group 14: POST /api/test/drag
+# ============================================================================
+
+describe "POST /api/test/drag":
+    """
+    ## Focus source then action to target
+
+    Happy path: from_id + to_id present → 200 ok:true, 2 events.
+    Error path: missing from_id or to_id → 400.
+    """
+
+    it "returns 200 with ok:true":
+        _captured_events = []
+        val state = _make_state()
+        val (status, ctype, body) = handle_test_request("/api/test/drag", "POST", "{\"from_id\":\"src\",\"to_id\":\"dst\"}", state, _stub_inject, nil)
+        expect(status).to_equal(200)
+        expect(body).to_contain("\"ok\":true")
+
+    it "injects 2 events (focus + drag action)":
+        _captured_events = []
+        val state = _make_state()
+        handle_test_request("/api/test/drag", "POST", "{\"from_id\":\"src\",\"to_id\":\"dst\"}", state, _stub_inject, nil)
+        expect(_captured_events.len()).to_equal(2)
+
+    it "returns 400 when from_id is missing":
+        val state = _make_state()
+        val (status, ctype, body) = handle_test_request("/api/test/drag", "POST", "{\"to_id\":\"dst\"}", state, _noop_inject, nil)
+        expect(status).to_equal(400)
+        expect(body).to_contain("missing_field")
+
+# ============================================================================
+# Group 15: POST /api/test/submit
+# ============================================================================
+
+describe "POST /api/test/submit":
+    """
+    ## Submit a form or dialog
+
+    Happy path: id present → 200 ok:true.
+    Error path: missing id → 400.
+    """
+
+    it "returns 200 with ok:true":
+        _captured_events = []
+        val state = _make_state()
+        val (status, ctype, body) = handle_test_request("/api/test/submit", "POST", "{\"id\":\"form1\"}", state, _stub_inject, nil)
+        expect(status).to_equal(200)
+        expect(body).to_contain("\"ok\":true")
+
+    it "injects 1 submit action event":
+        _captured_events = []
+        val state = _make_state()
+        handle_test_request("/api/test/submit", "POST", "{\"id\":\"form1\"}", state, _stub_inject, nil)
+        expect(_captured_events.len()).to_equal(1)
+
+    it "returns 400 when id is missing":
+        val state = _make_state()
+        val (status, ctype, body) = handle_test_request("/api/test/submit", "POST", "{}", state, _noop_inject, nil)
+        expect(status).to_equal(400)
+
+# ============================================================================
+# Group 16: POST /api/test/event
+# ============================================================================
+
+describe "POST /api/test/event":
+    """
+    ## Inject a raw UIEvent
+
+    Covers event_type: key, action, quit, focus_next, focus_prev, resize.
+    Error path: unknown event_type → 400.
+    """
+
+    it "event_type=key returns 200":
+        _captured_events = []
+        val state = _make_state()
+        val (status, ctype, body) = handle_test_request("/api/test/event", "POST", "{\"event_type\":\"key\",\"key\":\"Enter\"}", state, _stub_inject, nil)
+        expect(status).to_equal(200)
+        expect(body).to_contain("\"ok\":true")
+
+    it "event_type=action returns 200":
+        _captured_events = []
+        val state = _make_state()
+        val (status, ctype, body) = handle_test_request("/api/test/event", "POST", "{\"event_type\":\"action\",\"name\":\"save\"}", state, _stub_inject, nil)
+        expect(status).to_equal(200)
+
+    it "event_type=quit returns 200":
+        _captured_events = []
+        val state = _make_state()
+        val (status, ctype, body) = handle_test_request("/api/test/event", "POST", "{\"event_type\":\"quit\"}", state, _stub_inject, nil)
+        expect(status).to_equal(200)
+
+    it "event_type=focus_next returns 200":
+        _captured_events = []
+        val state = _make_state()
+        val (status, ctype, body) = handle_test_request("/api/test/event", "POST", "{\"event_type\":\"focus_next\"}", state, _stub_inject, nil)
+        expect(status).to_equal(200)
+
+    it "event_type=focus_prev returns 200":
+        _captured_events = []
+        val state = _make_state()
+        val (status, ctype, body) = handle_test_request("/api/test/event", "POST", "{\"event_type\":\"focus_prev\"}", state, _stub_inject, nil)
+        expect(status).to_equal(200)
+
+    it "event_type=resize returns 200":
+        _captured_events = []
+        val state = _make_state()
+        val (status, ctype, body) = handle_test_request("/api/test/event", "POST", "{\"event_type\":\"resize\",\"width\":\"800\",\"height\":\"600\"}", state, _stub_inject, nil)
+        expect(status).to_equal(200)
+
+    it "unknown event_type returns 400":
+        val state = _make_state()
+        val (status, ctype, body) = handle_test_request("/api/test/event", "POST", "{\"event_type\":\"bogus\"}", state, _noop_inject, nil)
+        expect(status).to_equal(400)
+        expect(body).to_contain("unknown_event_type")
+
+    it "event_type=key with missing key field returns 400":
+        val state = _make_state()
+        val (status, ctype, body) = handle_test_request("/api/test/event", "POST", "{\"event_type\":\"key\"}", state, _noop_inject, nil)
+        expect(status).to_equal(400)
+        expect(body).to_contain("missing_field")
+
+# ============================================================================
+# Group 17: POST /api/test/ui/act
+# ============================================================================
+
+describe "POST /api/test/ui/act":
+    """
+    ## Additive UI access action route
+
+    Happy path with session: surface_id + action present → 200 ok:true.
+    Error path: missing action → 400.
+    Error path: surface not found → 404.
+    """
+
+    it "returns 400 when action field is missing":
+        val state = _make_state()
+        val session = _make_session()
+        val (status, ctype, body) = handle_test_request("/api/test/ui/act", "POST", "{\"surface_id\":\"main\"}", state, _noop_inject, session)
+        expect(status).to_equal(400)
+        expect(body).to_contain("missing_field")
+
+    it "returns 404 for unknown surface_id when session provided":
+        val state = _make_state()
+        val session = _make_session()
+        val (status, ctype, body) = handle_test_request("/api/test/ui/act", "POST", "{\"surface_id\":\"ghost\",\"action\":\"click\"}", state, _noop_inject, session)
+        expect(status).to_equal(404)
+        expect(body).to_contain("element_not_found")
+
+    it "returns 200 with known surface_id and action":
+        _captured_events = []
+        val state = _make_state()
+        val session = _make_session()
+        # UISession.new opens a "main" surface automatically
+        val (status, ctype, body) = handle_test_request("/api/test/ui/act", "POST", "{\"surface_id\":\"main\",\"action\":\"click\"}", state, _stub_inject, session)
+        expect(status).to_equal(200)
+        expect(body).to_contain("\"ok\":true")
+
+    it "returns 400 when surface_id missing and no canonical_id":
+        val state = _make_state()
+        val (status, ctype, body) = handle_test_request("/api/test/ui/act", "POST", "{\"action\":\"click\"}", state, _noop_inject, nil)
+        expect(status).to_equal(400)
+
+# ============================================================================
+# Group 18: POST /api/test/ui/state
+# ============================================================================
+
+describe "POST /api/test/ui/state":
+    """
+    ## Declarative UI state route
+
+    Error path: missing state_key → 400.
+    Error path: session nil → 400.
+    Happy path: state_key=active + known surface → 200.
+    """
+
+    it "returns 400 when state_key is missing":
+        val state = _make_state()
+        val session = _make_session()
+        val (status, ctype, body) = handle_test_request("/api/test/ui/state", "POST", "{\"surface_id\":\"main\"}", state, _noop_inject, session)
+        expect(status).to_equal(400)
+        expect(body).to_contain("missing_field")
+
+    it "returns 400 when session is nil":
+        val state = _make_state()
+        val (status, ctype, body) = handle_test_request("/api/test/ui/state", "POST", "{\"surface_id\":\"main\",\"state_key\":\"active\",\"state_value\":\"true\"}", state, _noop_inject, nil)
+        expect(status).to_equal(400)
+        expect(body).to_contain("missing_field")
+
+    it "returns 200 when activating a known surface":
+        val state = _make_state()
+        val session = _make_session()
+        val (status, ctype, body) = handle_test_request("/api/test/ui/state", "POST", "{\"surface_id\":\"main\",\"state_key\":\"active\",\"state_value\":\"true\"}", state, _noop_inject, session)
+        expect(status).to_equal(200)
+        expect(body).to_contain("\"ok\":true")
+
+# ============================================================================
+# Group 19: Method dispatch error paths
+# ============================================================================
+
+describe "Method dispatch":
+    """
+    ## Routing and method validation
+
+    POST to a GET-only route → 404 (no POST handler matches).
+    Unknown method → 405.
+    """
+
+    it "POST to GET-only /api/test/ready returns 404":
+        val state = _make_state()
+        val (status, ctype, body) = handle_test_request("/api/test/ready", "POST", "", state, _noop_inject, nil)
+        expect(status).to_equal(404)
+        expect(body).to_contain("not_found")
+
+    it "DELETE method returns 405":
+        val state = _make_state()
+        val (status, ctype, body) = handle_test_request("/api/test/ready", "DELETE", "", state, _noop_inject, nil)
+        expect(status).to_equal(405)
+        expect(body).to_contain("method_not_allowed")
+
+    it "unknown GET route returns 404":
+        val state = _make_state()
+        val (status, ctype, body) = handle_test_request("/api/test/no_such_route", "GET", "", state, _noop_inject, nil)
+        expect(status).to_equal(404)
+
+# ============================================================================
+# FINDING: Undocumented route /api/test/ui/ensure
+#
+# handler.spl lines 51-62 implement GET /api/test/ui/ensure — a polling
+# "ensure/goal-state" route that accepts expectation, expected_value,
+# timeout_ms, and poll_ms query params.  This route is absent from the
+# 18-route specification handed to Agent J, but is fully implemented in
+# the handler.  It calls rt_sleep_ms() in a polling loop, which may cause
+# test timeouts if exercised without a zero timeout_ms.  Recommend adding
+# it to the specification as route #19 and testing it with timeout_ms=0
+# to avoid the sleep in v1.2.
+# ============================================================================

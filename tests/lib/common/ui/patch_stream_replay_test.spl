@@ -1,0 +1,281 @@
+# PatchStream Replay Tests
+#
+# Tests for:
+#   1. UiAccessStore.query_events round-trip
+#   2. patches_since cold-start (from_sequence=0)
+#   3. patches_since warm path returns real patches from structural events
+#   4. patches_since gap-in-retention returns snapshot
+#   5. Unknown event kind is skipped without crash
+
+use std.sspec.*
+use common.ui.access_store.{UiAccessStore}
+use common.ui.access.{
+    UiAccessEvent,
+    UiAccessSnapshot,
+    UI_ACCESS_PROTOCOL_VERSION,
+    ui_access_empty_snapshot
+}
+use common.ui.patch_stream.{PatchStream, PatchSinceResult, patches_since}
+use common.ui.patch.{PatchKind}
+
+# ============================================================================
+# Helpers
+# ============================================================================
+
+fn _make_event(seq: i64, kind: text) -> UiAccessEvent:
+    return UiAccessEvent(
+        surface_id: "surf1",
+        widget_id: "w1",
+        canonical_id: "surf1#w1",
+        event_kind: kind,
+        payload: "k=v",
+        sequence: seq
+    )
+
+fn _make_mount_event(seq: i64, widget_id: text) -> UiAccessEvent:
+    val canonical_id = "surf1#{widget_id}"
+    return UiAccessEvent(
+        surface_id: "surf1",
+        widget_id: widget_id,
+        canonical_id: canonical_id,
+        event_kind: "mount",
+        payload: widget_id,
+        sequence: seq
+    )
+
+fn _make_empty_snapshot() -> UiAccessSnapshot:
+    return ui_access_empty_snapshot("cli", "surf1", [])
+
+fn _insert_test_events(store: UiAccessStore, start_seq: i64, count: i64, kind: text):
+    var i = 0i64
+    while i < count:
+        val ev = _make_event(start_seq + i, kind)
+        store.insert_event(ev)
+        i = i + 1
+
+# ============================================================================
+# Test Group 1: query_events round-trip
+# ============================================================================
+
+describe "query_events round-trip":
+    """
+    ## query_events — sequence-filtered DB retrieval
+
+    Record 5 events at sequences 10-14. Calling query_events(from_sequence: 11, limit: 10)
+    must return exactly 3 events with sequences 12, 13, 14 in ascending order.
+    """
+
+    it "returns events with sequence > from_sequence in ASC order":
+        val store_result = UiAccessStore.memory()
+        if val Err(_) = store_result:
+            expect(false).to_equal(true)
+        val store = store_result.unwrap()
+        _insert_test_events(store, 10i64, 5i64, "focus")
+        val result = store.query_events(11i64, 10i64)
+        if val Err(_) = result:
+            expect(false).to_equal(true)
+        val events = result.unwrap()
+        expect(events.len()).to_equal(3)
+        expect(events[0].sequence).to_equal(12i64)
+        expect(events[1].sequence).to_equal(13i64)
+        expect(events[2].sequence).to_equal(14i64)
+
+    it "returns empty list when no events after from_sequence":
+        val store_result = UiAccessStore.memory()
+        if val Err(_) = store_result:
+            expect(false).to_equal(true)
+        val store = store_result.unwrap()
+        _insert_test_events(store, 10i64, 3i64, "blur")
+        val result = store.query_events(15i64, 10i64)
+        if val Err(_) = result:
+            expect(false).to_equal(true)
+        val events = result.unwrap()
+        expect(events.len()).to_equal(0)
+
+    it "respects the limit parameter":
+        val store_result = UiAccessStore.memory()
+        if val Err(_) = store_result:
+            expect(false).to_equal(true)
+        val store = store_result.unwrap()
+        _insert_test_events(store, 20i64, 10i64, "action")
+        val result = store.query_events(20i64, 3i64)
+        if val Err(_) = result:
+            expect(false).to_equal(true)
+        val events = result.unwrap()
+        expect(events.len()).to_equal(3)
+
+# ============================================================================
+# Test Group 2: patches_since cold-start
+# ============================================================================
+
+describe "patches_since cold-start":
+    """
+    ## Cold start path
+
+    When from_sequence is 0, patches_since must return (Some(snapshot), []).
+    """
+
+    it "returns snapshot on cold-start (from_sequence=0, no events)":
+        val snap = _make_empty_snapshot()
+        val result = patches_since(snap, [], 0i64)
+        expect(result.snapshot).to_equal(snap)
+        expect(result.patches.len()).to_equal(0)
+
+    it "returns snapshot on cold-start (from_sequence=0, events present)":
+        val snap = _make_empty_snapshot()
+        val events = [_make_event(1i64, "focus"), _make_event(2i64, "blur")]
+        val result = patches_since(snap, events, 0i64)
+        expect(result.snapshot).to_equal(snap)
+        expect(result.patches.len()).to_equal(0)
+
+# ============================================================================
+# Test Group 3: patches_since warm path
+# ============================================================================
+
+describe "patches_since warm path produces patches":
+    """
+    ## Warm resume path
+
+    After recording 5 structural (mount) events at sequences 20-24,
+    calling patches_since with from_sequence=22 must return (nil, >=2 patches).
+    """
+
+    it "returns at least 2 patches from structural events at 20-24 with from_sequence=22":
+        val snap = _make_empty_snapshot()
+        val events = [
+            _make_mount_event(20i64, "w20"),
+            _make_mount_event(21i64, "w21"),
+            _make_mount_event(22i64, "w22"),
+            _make_mount_event(23i64, "w23"),
+            _make_mount_event(24i64, "w24")
+        ]
+        val result = patches_since(snap, events, 22i64)
+        expect(result.snapshot).to_be_nil()
+        expect(result.patches.len()).to_be_greater_than(1)
+
+    it "mount events produce InsertChild patches":
+        val snap = _make_empty_snapshot()
+        val events = [
+            _make_mount_event(10i64, "wA"),
+            _make_mount_event(11i64, "wB")
+        ]
+        val result = patches_since(snap, events, 9i64)
+        expect(result.snapshot).to_be_nil()
+        expect(result.patches.len()).to_equal(2)
+        expect(result.patches[0].kind).to_equal(PatchKind.InsertChild)
+
+    it "unmount events produce RemoveChild patches":
+        val snap = _make_empty_snapshot()
+        val events = [
+            UiAccessEvent(
+                surface_id: "surf1",
+                widget_id: "wx",
+                canonical_id: "surf1#wx",
+                event_kind: "unmount",
+                payload: "wx",
+                sequence: 30i64
+            )
+        ]
+        val result = patches_since(snap, events, 29i64)
+        expect(result.snapshot).to_be_nil()
+        expect(result.patches.len()).to_equal(1)
+        expect(result.patches[0].kind).to_equal(PatchKind.RemoveChild)
+
+    it "focus events produce UpdateProp focused=true patch":
+        val snap = _make_empty_snapshot()
+        val events = [_make_event(40i64, "focus")]
+        val result = patches_since(snap, events, 39i64)
+        expect(result.snapshot).to_be_nil()
+        expect(result.patches.len()).to_equal(1)
+        expect(result.patches[0].prop_key).to_equal("focused")
+        expect(result.patches[0].prop_value).to_equal("true")
+
+    it "blur events produce UpdateProp focused=false patch":
+        val snap = _make_empty_snapshot()
+        val events = [_make_event(50i64, "blur")]
+        val result = patches_since(snap, events, 49i64)
+        expect(result.snapshot).to_be_nil()
+        expect(result.patches.len()).to_equal(1)
+        expect(result.patches[0].prop_key).to_equal("focused")
+        expect(result.patches[0].prop_value).to_equal("false")
+
+# ============================================================================
+# Test Group 4: patches_since gap-in-retention
+# ============================================================================
+
+describe "patches_since gap-in-retention":
+    """
+    ## Gap-in-retention path
+
+    When the oldest retained event has sequence > from_sequence + 1
+    (client is behind the retention window), patches_since returns
+    (Some(snapshot), []) — client must do a cold-start.
+    """
+
+    it "returns snapshot when oldest retained event has sequence > from_sequence+1":
+        val snap = _make_empty_snapshot()
+        # Oldest retained event at sequence 100; client is at sequence 6
+        # 100 > 6 + 1 => gap => return snapshot
+        val events = [
+            _make_event(100i64, "mount"),
+            _make_event(101i64, "mount")
+        ]
+        val result = patches_since(snap, events, 6i64)
+        expect(result.snapshot).to_equal(snap)
+        expect(result.patches.len()).to_equal(0)
+
+    it "does NOT gap when oldest retained is exactly from_sequence+1":
+        val snap = _make_empty_snapshot()
+        # Oldest at 7, client at 6: 7 == 6+1 => NOT a gap => warm path
+        val events = [
+            _make_event(7i64, "focus"),
+            _make_event(8i64, "focus")
+        ]
+        val result = patches_since(snap, events, 6i64)
+        expect(result.snapshot).to_be_nil()
+
+# ============================================================================
+# Test Group 5: Unknown event kind is skipped without crash
+# ============================================================================
+
+describe "patches_since unknown event kind":
+    """
+    ## Unknown event kind graceful skip
+
+    An event with an unrecognized event_kind must be silently skipped.
+    No crash, no patch emitted for it.
+    """
+
+    it "unknown event kind is skipped and produces no patch":
+        val snap = _make_empty_snapshot()
+        val events = [
+            UiAccessEvent(
+                surface_id: "surf1",
+                widget_id: "wunk",
+                canonical_id: "surf1#wunk",
+                event_kind: "xyzzy_unknown_kind_v99",
+                payload: "whatever",
+                sequence: 60i64
+            )
+        ]
+        val result = patches_since(snap, events, 59i64)
+        expect(result.snapshot).to_be_nil()
+        expect(result.patches.len()).to_equal(0)
+
+    it "unknown event kind mixed with known: known patches still emitted":
+        val snap = _make_empty_snapshot()
+        val events = [
+            UiAccessEvent(
+                surface_id: "surf1",
+                widget_id: "wunk",
+                canonical_id: "surf1#wunk",
+                event_kind: "xyzzy_unknown_kind_v99",
+                payload: "whatever",
+                sequence: 70i64
+            ),
+            _make_mount_event(71i64, "wgood")
+        ]
+        val result = patches_since(snap, events, 69i64)
+        expect(result.snapshot).to_be_nil()
+        expect(result.patches.len()).to_equal(1)
+        expect(result.patches[0].kind).to_equal(PatchKind.InsertChild)

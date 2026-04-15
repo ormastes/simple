@@ -10,7 +10,7 @@
 # already in the retention window.  Agent D wires the actual patch queue on top.
 
 use common.ui.access.{UiAccessSnapshot, UiAccessEvent}
-use common.ui.patch.{UIPatch}
+use common.ui.patch.{UIPatch, PatchKind}
 
 # =========================================================================
 # Resume result (no tuples in Simple — explicit struct)
@@ -41,17 +41,116 @@ impl PatchStream:
     fn patches_since(snapshot: UiAccessSnapshot, events: [UiAccessEvent], from_sequence: i64) -> PatchSinceResult:
         """Return incremental patches for a client resuming at from_sequence.
 
-        Current behavior (v1): UiAccessEvent entries are not structurally
-        equivalent to UIPatch values, so this method does not reconstruct
-        patches from events.  Instead it returns the full current snapshot
-        when from_sequence is 0 or the ring is empty, letting the caller
-        perform a cold-start.  For clients already within the retention
-        window (from_sequence > 0 and events exist) it returns (nil, []),
-        signalling that the caller's separate patch-emission path should
-        supply any queued patches."""
+        Cold start (from_sequence <= 0 or no events): returns (Some(snapshot), []).
+        Gap-in-retention (oldest retained event has sequence > from_sequence + 1):
+          returns (Some(snapshot), []). Caller is responsible for bumping revision on
+          structural resets; this function is immutable and cannot mutate PatchStream.
+        Warm path (from_sequence + 1 >= earliest retained sequence): translates events
+          with sequence > from_sequence into UIPatch ops and returns (nil, patches).
+
+        Event kind mapping:
+          "mount"   -> InsertChild   (target_id = canonical_id, parent_id from surface_id)
+          "unmount" -> RemoveChild   (target_id = canonical_id)
+          "update"  -> UpdateProp    (payload parsed as key=value)
+          "focus"   -> UpdateProp    focused=true
+          "blur"    -> UpdateProp    focused=false
+          "action"  -> UpdateProp    action=payload
+          other     -> skipped silently (not a crash-worthy unknown)
+        """
         if from_sequence <= 0 or events.len() == 0:
             return PatchSinceResult(snapshot: snapshot, patches: [])
         val earliest = events[0].sequence
-        if from_sequence < earliest:
+        if earliest > from_sequence + 1:
+            # gap-in-retention: client is too far behind the retained ring
             return PatchSinceResult(snapshot: snapshot, patches: [])
-        return PatchSinceResult(snapshot: nil, patches: [])
+        var patches: [UIPatch] = []
+        for event in events:
+            if event.sequence > from_sequence:
+                val patch = _event_to_patch(event)
+                if patch != nil:
+                    patches = patches.push(patch)
+        return PatchSinceResult(snapshot: nil, patches: patches)
+
+# =========================================================================
+# Private helpers
+# =========================================================================
+
+fn _event_to_patch(event: UiAccessEvent) -> UIPatch?:
+    """Translate a single UiAccessEvent to a UIPatch, or nil if unmappable.
+
+    Structural events (mount/unmount) emit tree-structure patches.
+    State events (focus/blur/action/update) emit UpdateProp patches.
+    Unknown event_kind values are skipped silently — this is intentional;
+    future event kinds must not crash existing clients.
+    """
+    val kind = event.event_kind
+    if kind == "mount":
+        return UIPatch(
+            kind: PatchKind.InsertChild,
+            target_id: event.canonical_id,
+            parent_id: event.surface_id,
+            prop_key: "",
+            prop_value: "",
+            node: nil
+        )
+    if kind == "unmount":
+        return UIPatch(
+            kind: PatchKind.RemoveChild,
+            target_id: event.canonical_id,
+            parent_id: "",
+            prop_key: "",
+            prop_value: "",
+            node: nil
+        )
+    if kind == "update":
+        val eq_idx = event.payload.find("=")
+        if eq_idx < 0:
+            return UIPatch(
+                kind: PatchKind.UpdateProp,
+                target_id: event.canonical_id,
+                parent_id: "",
+                prop_key: event.payload,
+                prop_value: "",
+                node: nil
+            )
+        val prop_key = event.payload.slice(0, eq_idx)
+        val prop_value = event.payload.slice(eq_idx + 1, event.payload.len())
+        return UIPatch(
+            kind: PatchKind.UpdateProp,
+            target_id: event.canonical_id,
+            parent_id: "",
+            prop_key: prop_key,
+            prop_value: prop_value,
+            node: nil
+        )
+    if kind == "focus":
+        return UIPatch(
+            kind: PatchKind.UpdateProp,
+            target_id: event.canonical_id,
+            parent_id: "",
+            prop_key: "focused",
+            prop_value: "true",
+            node: nil
+        )
+    if kind == "blur":
+        return UIPatch(
+            kind: PatchKind.UpdateProp,
+            target_id: event.canonical_id,
+            parent_id: "",
+            prop_key: "focused",
+            prop_value: "false",
+            node: nil
+        )
+    if kind == "action":
+        return UIPatch(
+            kind: PatchKind.UpdateProp,
+            target_id: event.canonical_id,
+            parent_id: "",
+            prop_key: "action",
+            prop_value: event.payload,
+            node: nil
+        )
+    # Unknown event kind — skip silently. Do not crash; new event kinds are
+    # expected as the protocol evolves. Callers should not depend on exhaustive
+    # coverage of event_kind values.
+    return nil

@@ -19,6 +19,7 @@ use app.ui.web.ws_handler.{extract_ws_key, compute_ws_accept, send_ws_text}
 use app.ui.test_api.handler.{handle_test_request}
 use app.ui.web.web_runtime_adapter.{WebRuntimeAdapter}
 use app.ui.web.ui_routes.{dispatch_ui_route}
+use app.ui.web.tls_serve_loop.{ConnStream}
 use app.ui.web.origin_guard.{OriginGuard}
 use app.ui.web.session_token.{load_secret}
 
@@ -66,12 +67,14 @@ class AsyncWebServer:
                     rt_file_read_text(file_path)
                 else:
                     ""
+                var event_ch: BoundedChannel<UIEvent> = BoundedChannel.new(256)
+                var render_ch: BoundedChannel<text> = BoundedChannel.new(256)
                 return Ok(AsyncWebServer(
                     file_path: file_path,
                     port: port,
                     session: session,
-                    event_channel: BoundedChannel<UIEvent>.new(256),
-                    render_channel: BoundedChannel<text>.new(256),
+                    event_channel: event_ch,
+                    render_channel: render_ch,
                     ws_clients: [],
                     ws_adapters: [],
                     last_file_content: content,
@@ -171,7 +174,8 @@ class AsyncWebServer:
                     var body = ""
                     if method == "POST":
                         body = _read_request_body(stream, headers)
-                    val handled = dispatch_ui_route(path, method, headers, body, stream, self.session, self.origin_guard, self.token_secret)
+                    var conn_stream = ConnStream.from_tcp(stream)
+                    val handled = dispatch_ui_route(path, method, headers, body, conn_stream, self.session, self.origin_guard, self.token_secret)
                     if handled:
                         return
 
@@ -221,15 +225,16 @@ class AsyncWebServer:
         stream.write_all(response)
 
         # Build adapter and send initial snapshot (no HTML broadcast)
-        val out_ch = BoundedChannel<text>.new(256)
+        var out_ch: BoundedChannel<text> = BoundedChannel.new(256)
         var adapter = WebRuntimeAdapter.new("async-{self.ws_clients.len()}", self.session, "", out_ch)
         adapter.send_snapshot()
         # Flush initial frames to client
+        var conn_for_flush = ConnStream.from_tcp(stream)
         loop:
             val item = out_ch.try_recv()
             if item == nil:
                 break
-            send_ws_text(stream, item as text)
+            send_ws_text(conn_for_flush, item as text)
 
         # Register as a WebSocket client
         self.ws_clients = self.ws_clients + [stream]
