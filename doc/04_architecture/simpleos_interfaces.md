@@ -633,3 +633,28 @@ port-dev-chain maintainer before merge.
 | IF-10 | `src/compiler_rust/.cargo/config.toml` |
 | IF-11 | `src/compiler/70.backend/linker/lld_ffi.spl` |
 | IF-12 | `src/os/port/stubs_manifest.spl` |
+
+---
+
+## Changelog
+
+### 2026-04-15 — wave-4 landings
+
+New wave-4 code citations for interfaces with real implementations this cycle:
+
+- **IF-02** (Fork/exec kernel contract) — `Scheduler::clone_task` real COW scaffold:
+  `src/os/kernel/scheduler/scheduler.spl:492` (commit `d339203a4f`).
+  `exec_into` at line 540, `wait_for` at line 552 remain scaffold (return ENOSYS).
+- **IF-07** (FAT32 disk image) — `Fat32Filesystem.mount()` real BPB parser + cluster-to-lba:
+  `src/os/services/fat32/fat32.spl:394` (commit `def2569894`). 22/22 fat32 tests pass.
+  Mount call site wired at `2a6bbb32c3` (scaffold log pending BlockDevice implementor).
+- **IF-09** (Bootstrap verifier contract) — `verify_native_convergence` now compares ELF
+  symbol-table counts for prefixes `spl_handle_`, `simpleos_`, `rt_`:
+  `src/os/port/bootstrap_native_verify.spl:199` (commit `05b552c4e8`). 3/3 tests pass.
+
+Cross-toolchain milestones (not IF-id changes, recorded here for traceability):
+
+- I3 LLVM cross-clang green: `ec87deb5ef` + `f874b685c1`. Artifact: `build/os/llvm/cross-x86_64/bin/clang`.
+- I4 Rust cross-build green (out-of-tree): `e25b0de45c`. Script: `scripts/build_rust_hello_simpleos.sh`.
+- W4-A1 compiler-rt SimpleOS variant: `5fe74ee9ec` (main) / `6f4502542` (llvm-project fork).
+  Archive: `build/os/llvm/cross-x86_64/lib/clang/20/lib/x86_64-unknown-simpleos/libclang_rt.builtins.a`.
