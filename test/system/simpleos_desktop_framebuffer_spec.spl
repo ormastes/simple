@@ -169,6 +169,37 @@ fn _update_baseline_requested() -> bool:
     val v = rt_env_get("UPDATE_BASELINE") ?? ""
     v == "1" or v == "true"
 
+# Extract the compare-mode branch into a standalone function so the
+# semantic pass on the it{} block never sees base_w / base_h / cmp etc.
+# (the interpreter performs a full semantic pass over all statements in
+# an it{} block before execution, even those after an early return).
+fn _run_compare(handle: QemuGuestHandle, result: CaptureResult, baseline_path: text, nb: i64) -> bool:
+    val (ok, base_pixels, base_w, base_h, err) = _read_baseline_ppm(baseline_path)
+    if not ok:
+        print "[simpleos_desktop_fb_spec] baseline read failed: {err}"
+        stop_guest(handle)
+        expect(false).to_equal(true)
+        return false
+
+    if base_w != result.width or base_h != result.height:
+        print "[simpleos_desktop_fb_spec] baseline dims {base_w}x{base_h} != capture dims {result.width}x{result.height}"
+        stop_guest(handle)
+        expect(false).to_equal(true)
+        return false
+
+    val profile = profile_wm_default()
+    val cmp: ComparisonResult = compare_with_profile(
+        result.pixels, base_pixels, result.width, result.height, profile)
+    val pct_whole = cmp.match_percentage / 100
+    val pct_frac = cmp.match_percentage % 100
+    print "[simpleos_desktop_fb_spec] match: {pct_whole}.{pct_frac}% ({cmp.matching_pixels}/{cmp.total_pixels}) profile={profile.name}"
+
+    stop_guest(handle)
+
+    expect(nb > 0).to_equal(true)
+    expect(cmp.match_percentage >= 9500).to_equal(true)
+    true
+
 
 # Round-12 harness-race fix: build the kernel at most once per spec run.
 # The first it{} block builds unconditionally; subsequent it{} blocks reuse
@@ -334,36 +365,9 @@ describe "SimpleOS desktop framebuffer baseline (SYS-GUI-006)":
                     expect(nb > 0).to_equal(true)
                     return
 
-                # Compare mode: read baseline, run tolerance profile compare.
-                val (ok, base_pixels, base_w, base_h, err) = _read_baseline_ppm(baseline_path)
-                if not ok:
-                    print "[simpleos_desktop_fb_spec] baseline read failed: {err}"
-                    stop_guest(handle)
-                    expect(false).to_equal(true)
-                    return
-
-                if base_w != result.width or base_h != result.height:
-                    print "[simpleos_desktop_fb_spec] baseline dims {base_w}x{base_h} != capture dims {result.width}x{result.height}"
-                    stop_guest(handle)
-                    expect(false).to_equal(true)
-                    return
-
-                val profile = profile_wm_default()
-                val cmp: ComparisonResult = compare_with_profile(
-                    result.pixels, base_pixels, result.width, result.height, profile)
-                val pct_whole = cmp.match_percentage / 100
-                val pct_frac = cmp.match_percentage % 100
-                print "[simpleos_desktop_fb_spec] match: {pct_whole}.{pct_frac}% ({cmp.matching_pixels}/{cmp.total_pixels}) profile={profile.name}"
-
-                # Always tear the guest down before asserting so a failed
-                # expect does not leave a zombie QEMU process behind.
-                stop_guest(handle)
-
-                # Primary regression gates.
-                expect(nb > 0).to_equal(true)
-                # 9500 on the 0-10000 integer scale == 95.00%. Matches
-                # the Baseline policy in the milestone status doc.
-                expect(cmp.match_percentage >= 9500).to_equal(true)
+                # Compare mode: delegated to _run_compare to keep base_w /
+                # base_h / cmp etc. out of the it{} block's semantic pass.
+                _run_compare(handle, result, baseline_path, nb)
             Err(err):
                 print "[simpleos_desktop_fb_spec] failed to spawn guest: {err}"
                 expect(false).to_equal(true)
