@@ -242,17 +242,28 @@ class TlsWebServer:
         watcher.free()
 
     fn accept_loop(tls_server_handle: i64):
-        """Poll for TLS connections and process pending events between accepts."""
+        """Poll for TLS connections and process pending events between accepts.
+
+        Each accepted connection is handed to a dedicated thread so a blocking
+        WebSocket read loop on one client does not stall new accepts or the
+        event/file-watcher pump — mirrors the server.spl TCP pattern."""
         while self.running:
             val conn_handle = rt_tls_server_accept(tls_server_handle)
             if is_valid_handle(conn_handle):
                 var conn = ConnStream.from_tls(conn_handle)
-                self.handle_connection(conn)
+                val handler = thread_spawn2(conn, self, \c, server:
+                    val tls_server: TlsWebServer = server
+                    TlsWebServer.handle_connection_thread(tls_server, c)
+                )
+                handler.free()
             else:
                 # No connection ready; yield briefly so the event loop can run
                 thread_sleep(10)
 
             self.process_events()
+
+    static fn handle_connection_thread(server: TlsWebServer, conn: ConnStream):
+        server.handle_connection(conn)
 
     me handle_connection(conn: ConnStream):
         """Handle a single incoming TLS HTTP connection."""
