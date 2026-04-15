@@ -14,10 +14,35 @@
 use app.ui.web.origin_guard.{AuthError}
 use common.crypto.hmac.{hmac_sha256}
 use common.crypto.types.{bytes_to_hex}
+use std.nogc_sync_mut.core.random.{seed, randint}
 
 extern fn rt_env_get(key: text) -> text
-extern fn rt_random_hex(len: i64) -> text   # runtime: produce N hex-encoded random bytes
 extern fn rt_time_ms() -> u64               # runtime: current epoch milliseconds
+
+# Module-level dev-mode RNG seeding flag.  The Rust runtime xorshift RNG is
+# global state; seeding once per process from wall-clock time matches what an
+# unimplemented rt_random_hex would have done — see also the dev-insecure
+# secret fallback below.
+var _seeded: bool = false
+
+fn random_hex(len: i64) -> text:
+    """Produce N bytes' worth of pseudo-random hex (2*N hex chars).
+
+    Security profile equals the Rust runtime's xorshift RNG (non-cryptographic).
+    Sufficient for dev-mode session token ids; production tokens should rely on
+    SIMPLE_UI_WEB_TOKEN_SECRET via HMAC, not on this output alone."""
+    if not _seeded:
+        seed(rt_time_ms() as i64)
+        _seeded = true
+    val chars = "0123456789abcdef"
+    var result = ""
+    var i: i64 = 0
+    val total = len * 2
+    while i < total:
+        val idx = randint(0, 15)
+        result = result + chars[idx:idx+1]
+        i = i + 1
+    return result
 
 # =========================================================================
 # SessionToken
@@ -34,7 +59,7 @@ class SessionToken:
 
     static fn issue(grant_id: text, origin: text, ttl_ms: u64, secret: text) -> SessionToken:
         """Mint a new signed SessionToken."""
-        val token_id = rt_random_hex(32)
+        val token_id = random_hex(32)
         val exp = rt_time_ms() + ttl_ms
         val payload = _token_payload(token_id, grant_id, origin, exp)
         val sig = bytes_to_hex(hmac_sha256(secret, payload))
@@ -110,7 +135,7 @@ fn load_secret(tls_mode: bool) -> text:
         # We cannot panic; return empty — caller must check
         return ""
     print "WARNING: SIMPLE_UI_WEB_TOKEN_SECRET unset; using insecure dev secret. Do not use in production."
-    return "dev-insecure-secret-" + rt_random_hex(8)
+    return "dev-insecure-secret-" + random_hex(8)
 
 # =========================================================================
 # Private helpers
