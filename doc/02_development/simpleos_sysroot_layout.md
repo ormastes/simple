@@ -37,15 +37,11 @@ Two distinct linker scripts exist in the tree and must not be confused:
 ## Invocation
 
 ```sh
-sh src/os/port/llvm/sysroot.shs
+bin/simple run src/os/port/llvm/sysroot.shs
 ```
 
-Note: the script is a plain shell script, not a Simple program — invoke with
-`sh`, not `bin/simple run`.
-
 Expected runtime: ~30 s on first run (compiles libc from source); ~2 s on
-subsequent runs (staging only, sources unchanged). To force a full rebuild
-after adding new libc sources, run `make -C src/os/libc clean` first.
+subsequent runs (staging only, sources unchanged).
 
 ## Expected Sizes
 
