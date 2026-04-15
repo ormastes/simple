@@ -1,0 +1,635 @@
+# SimpleOS Port-Dev-Chain Interfaces — Frozen Contracts
+
+**Status:** Locked 2026-04-15. PRs that change a frozen signature must update
+this file in the same commit.
+
+**Owner:** port-dev-chain maintainers. Changes require review from that group.
+
+---
+
+## Table of Contents
+
+- [IF-01 Kernel syscall ABI](#if-01-kernel-syscall-abi)
+- [IF-02 Fork/exec kernel contract](#if-02-forkexec-kernel-contract)
+- [IF-03 libc C ABI (POSIX subset)](#if-03-libc-c-abi-posix-subset)
+- [IF-04 Rust libstd PAL contract](#if-04-rust-libstd-pal-contract)
+- [IF-05 LLVM sysroot layout](#if-05-llvm-sysroot-layout)
+- [IF-06 Initramfs format + manifest](#if-06-initramfs-format--manifest)
+- [IF-07 FAT32 disk image](#if-07-fat32-disk-image)
+- [IF-08 QEMU boot serial protocol](#if-08-qemu-boot-serial-protocol)
+- [IF-09 Bootstrap verifier contract](#if-09-bootstrap-verifier-contract)
+- [IF-10 Cargo vendored protocol](#if-10-cargo-vendored-protocol)
+- [IF-11 In-process LLD FFI](#if-11-in-process-lld-ffi)
+- [IF-12 Stubs manifest format](#if-12-stubs-manifest-format)
+
+---
+
+## IF-01 Kernel syscall ABI
+
+**Status:** frozen (existing 53 shims) + new-this-cycle (5 new syscalls below)
+
+**Location:** `src/os/kernel/abi/syscall_shim.spl`
+**Weak stubs:** `examples/simple_os/arch/x86_64/boot/baremetal_stubs.c`
+
+### Calling convention
+
+All syscall handlers share the same C-ABI signature: six `u64` arguments
+(`a0`–`a5`) and an `i64` return value. The SYSCALL dispatch stub in
+`examples/simple_os/arch/x86_64/boot/` copies `rdi, rsi, rdx, r10, r8, r9`
+into those slots and places the return value in `rax`.
+
+### Existing frozen shims (Wave 10F, 53 total — representative set)
+
+```
+# src/os/kernel/abi/syscall_shim.spl
+
+@export("C", name: "spl_handle_debug_write")
+fn spl_handle_debug_write(a0: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64) -> i64
+  # syscall 60: a0 = byte to emit on COM1. Returns 0.
+
+@export("C", name: "spl_handle_exit")
+fn spl_handle_exit(a0: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64) -> i64
+  # syscall 0: a0 = exit code. Does not return.
+
+@export("C", name: "spl_handle_yield")
+fn spl_handle_yield(a0: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64) -> i64
+  # syscall 1: voluntarily yield CPU. Returns 0.
+
+@export("C", name: "spl_handle_spawn")
+fn spl_handle_spawn(a0: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64) -> i64
+  # syscall 2: a0 = path ptr (user VA), a1 = path len.
+  # Returns new TaskId on success, negative errno on failure.
+
+@export("C", name: "spl_handle_wait")
+fn spl_handle_wait(a0: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64) -> i64
+  # Blocks until child exits. Returns exit status or negative errno.
+
+@export("C", name: "spl_handle_getpid")
+fn spl_handle_getpid(a0: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64) -> i64
+
+@export("C", name: "spl_handle_mmap")
+fn spl_handle_mmap(a0: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64) -> i64
+  # a0=addr_hint, a1=len, a2=prot, a3=flags, a4=fd, a5=offset
+
+@export("C", name: "spl_handle_munmap")
+fn spl_handle_munmap(a0: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64) -> i64
+
+@export("C", name: "spl_handle_mprotect")
+fn spl_handle_mprotect(a0: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64) -> i64
+
+@export("C", name: "spl_handle_file_open")
+fn spl_handle_file_open(a0: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64) -> i64
+
+@export("C", name: "spl_handle_file_read")
+fn spl_handle_file_read(a0: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64) -> i64
+
+@export("C", name: "spl_handle_file_write")
+fn spl_handle_file_write(a0: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64) -> i64
+
+@export("C", name: "spl_handle_file_close")
+fn spl_handle_file_close(a0: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64) -> i64
+
+@export("C", name: "spl_handle_ipc_send")
+fn spl_handle_ipc_send(a0: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64) -> i64
+
+@export("C", name: "spl_handle_ipc_recv")
+fn spl_handle_ipc_recv(a0: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64) -> i64
+
+@export("C", name: "spl_handle_net_socket")
+fn spl_handle_net_socket(a0: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64) -> i64
+
+@export("C", name: "spl_handle_clock_gettime")
+fn spl_handle_clock_gettime(a0: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64) -> i64
+
+@export("C", name: "shim_init")
+fn shim_init(sched: Scheduler, ipc: IpcManager, klog: KernelLog)
+  # Boot-time initializer. Call once before any SYSCALL can arrive.
+```
+
+Full list of 53 shims: see `_shim_keepalive()` in `syscall_shim.spl` lines 108–172.
+
+### NEW syscalls — new-this-cycle
+
+These five symbols are added in this cycle. Weak stubs must be added to
+`baremetal_stubs.c`; strong overrides live in `syscall_shim.spl`.
+
+```
+@export("C", name: "spl_handle_fork")
+fn spl_handle_fork() -> i64
+  # Returns child pid in parent, 0 in child, -ECHILD on failure.
+
+@export("C", name: "spl_handle_exec")
+fn spl_handle_exec(path_ptr: u64, argv_ptr: u64, envp_ptr: u64) -> i64
+  # Returns -1 on failure; does not return on success.
+
+@export("C", name: "spl_handle_wait")
+fn spl_handle_wait(pid: i64, wstatus_ptr: u64, options: i32) -> i64
+  # Typed overload for the POSIX-style wait4; replaces the raw 6-arg form
+  # for new libc callers. The raw 6-arg shim remains for compat.
+
+@export("C", name: "spl_handle_pipe")
+fn spl_handle_pipe(fds_ptr: u64) -> i64
+  # Writes two i32 fds to *fds_ptr (read end, write end). Returns 0 or -errno.
+
+@export("C", name: "spl_handle_dup2")
+fn spl_handle_dup2(oldfd: i32, newfd: i32) -> i64
+  # Duplicates oldfd onto newfd. Returns newfd or -errno.
+```
+
+**Consumers:** `src/os/libc/simpleos_process.c`, `src/os/libc/simpleos_process_wait.c`,
+`src/os/port/init/`
+
+---
+
+## IF-02 Fork/exec kernel contract
+
+**Status:** new-this-cycle
+
+**Location:** `src/os/kernel/` (Scheduler implementation)
+
+SimpleOS uses an exokernel model — there is no Unix-style fork that copies a
+process context in the kernel. Instead the Scheduler exposes three primitive
+operations that together implement POSIX fork+exec semantics.
+
+### Scheduler contract
+
+```
+# src/os/kernel/scheduler/scheduler.spl
+
+fn Scheduler::clone_task(self, parent: TaskId) -> Result<TaskId, KernelError>
+  # Creates a new task with a COW page-table clone of parent.
+  # Parent returns child_id (> 0); child starts at same rip+rsp but
+  # syscall return value is 0 (matches POSIX fork() semantics).
+
+fn Scheduler::exec_into(self, task: TaskId, elf_bytes: [u8],
+                        argv: List<text>, envp: List<text>) -> Result<(), KernelError>
+  # Overwrites the task's address space with a freshly-parsed ELF.
+  # Drops all COW pages. argv/envp are materialized on the new stack.
+  # TaskId is preserved across the exec; the old mapping tree is freed.
+
+fn Scheduler::wait_for(self, parent: TaskId, child: Option<TaskId>,
+                       options: i32) -> Result<(TaskId, i32), KernelError>
+  # Blocks parent until a child exits.
+  # child == None means "any child" (POSIX waitpid(-1, ...)).
+  # options: WNOHANG (0x1) for non-blocking poll.
+  # Returns (exited_pid, exit_status). Zombie entry removed after return.
+```
+
+### Memory model
+
+- COW: parent page tables are marked read-only at `clone_task` time. A page
+  fault in either task triggers a physical copy before resuming.
+- Exec: `exec_into` allocates a new page table tree, maps the ELF segments,
+  and swaps it atomically. The old tree and all COW pages are freed.
+- Zombies: exited children remain in `Scheduler::exited_tasks` until
+  `wait_for` collects them. Uncollected zombies are reaped when the parent
+  exits.
+
+**Consumers:** `src/os/libc/simpleos_process.c`, `src/os/port/init/`,
+`spl_handle_fork`, `spl_handle_exec` (IF-01)
+
+---
+
+## IF-03 libc C ABI (POSIX subset)
+
+**Status:** frozen
+
+**Location:** `src/os/libc/include/` (headers), `src/os/libc/` (C sources)
+**Built artifact:** `build/os/sysroot/lib/libsimpleos_c.a`
+
+### Key header signatures (verbatim from `src/os/libc/include/`)
+
+```c
+/* unistd.h */
+int open(const char *path, int flags, ...);
+int fcntl(int fd, int cmd, ...);
+
+/* dirent.h */
+DIR           *opendir(const char *name);
+int            closedir(DIR *dirp);
+void           rewinddir(DIR *dirp);
+
+/* dlfcn.h */
+void *dlopen(const char *path, int mode);
+void *dlsym(void *handle, const char *name);
+int   dlclose(void *handle);
+char *dlerror(void);
+
+/* assert.h */
+void __assert_fail(const char *expr, const char *file,
+                   unsigned int line, const char *func);
+
+/* locale.h */
+char *setlocale(int category, const char *locale);
+
+/* math.h */
+double frexp(double x, int *exp);
+double ldexp(double x, int exp);
+double scalbn(double x, int n);
+float  frexpf(float x, int *exp);
+float  ldexpf(float x, int exp);
+float  scalbnf(float x, int n);
+```
+
+Full header tree: `src/os/libc/include/{stdio,stdlib,string,stdint,stddef,
+stdbool,stdarg,signal,setjmp,pthread,math,limits,locale,fcntl,errno,
+dirent,dlfcn,assert,wchar,time,unistd}.h` plus `sys/` subdirectory.
+
+**Consumers:** `src/compiler_rust/`, LLVM cross-toolchain, any userspace ELF
+compiled for `x86_64-unknown-simpleos`.
+
+---
+
+## IF-04 Rust libstd PAL contract
+
+**Status:** frozen (stage-1 scaffold)
+
+**Location:** `$HOME/rust/library/std/src/sys/pal/simpleos/mod.rs`
+(fork of upstream `unsupported` PAL, tracked separately from this repo)
+
+```rust
+//! SimpleOS PAL — stage 1 scaffold (derived from unsupported)
+#![deny(unsafe_op_in_unsafe_fn)]
+
+mod common;
+pub use common::*;
+```
+
+The PAL delegates all unimplemented syscalls to `common.rs` stubs that panic
+with `"not supported"`. As IF-01 syscalls land, each stub is replaced with a
+real `syscall` instruction wrapper targeting the SimpleOS SYSCALL ABI.
+
+**Required env var for cross-compile:**
+```sh
+export SDKROOT=$SIMPLEOS_SYSROOT   # = build/os/sysroot/
+```
+
+**Consumers:** `src/compiler_rust/`, `scripts/build_rust_simpleos_cross.sh`
+
+---
+
+## IF-05 LLVM sysroot layout
+
+**Status:** frozen
+
+**Location:** `build/os/sysroot/` (generated by `src/os/port/llvm/sysroot.shs`)
+**Source of truth:** `doc/02_development/simpleos_sysroot_layout.md`
+
+| Deliverable | Build path | Source |
+|---|---|---|
+| Headers | `build/os/sysroot/include/` | `src/os/libc/include/` |
+| Static libc | `build/os/sysroot/lib/libsimpleos_c.a` | `src/os/libc/` Makefile |
+| C runtime | `build/os/sysroot/lib/crt0.o` | `src/os/libc/simpleos_crt0.S` |
+| Userspace LD script | `build/os/sysroot/share/simpleos/simpleos.ld` | embedded in `sysroot.shs` |
+
+Linker script constants (userspace):
+
+- Entry point: `_start`
+- Load base: `0x10000000`
+- No multiboot header (kernel script at `examples/simple_os/arch/x86_64/linker.ld`
+  uses `_entry32` + `0x100000` — do not mix these)
+
+Rebuild:
+```sh
+sh src/os/port/llvm/sysroot.shs
+```
+
+**Consumers:** `scripts/build_llvm_simpleos_cross.sh`,
+`scripts/build_rust_simpleos_cross.sh`, any `cargo build --target x86_64-unknown-simpleos.json`
+
+---
+
+## IF-06 Initramfs format + manifest
+
+**Status:** frozen
+
+**Location:** `src/os/port/initramfs_pack.spl`
+**Output:** `build/os/initramfs.img.zst` (newc cpio + zstd)
+
+### Configuration class
+
+```
+# src/os/port/initramfs_pack.spl
+
+class PayloadEntry:
+    host_path: text
+    guest_path: text
+    is_dir: bool
+
+class PackConfig:
+    simple_binary: text      # default: build/bootstrap/stage3/simple_simpleos
+    llvm_prefix: text        # default: build/os/llvm/cross/bin
+    sysroot: text            # default: build/os/sysroot
+    source_tree: text        # default: src
+    output: text             # default: build/os/initramfs.img.zst
+    staging: text            # default: build/os/initramfs-staging
+    payloads: List<PayloadEntry>
+```
+
+### populate_staging contract
+
+`populate_staging` copies in order:
+1. Simple compiler binary → `/bin/simple`
+2. LLVM tools (`clang lld llvm-ar llvm-nm llvm-ranlib llvm-objdump llvm-objcopy llvm-strip`) → `/usr/bin/`
+3. Sysroot tree → `/usr/`
+4. Source tree → `/src/`
+5. Extra `PayloadEntry` items (user-supplied `--payload HOST:GUEST`)
+6. Placeholder `/sbin/init`
+
+Image is then packed with `cpio --format=newc` and compressed with `zstd`.
+
+QEMU loads it via `-initrd build/os/initramfs.img.zst`.
+
+**Consumers:** `src/os/port/port_all.spl`, QEMU runner (`src/os/qemu_runner.spl`)
+
+---
+
+## IF-07 FAT32 disk image
+
+**Status:** frozen
+
+**Location:** `src/os/services/fat32/fat32.spl`
+**Spec:** `test/unit/os/services/fat32/fat32_spec.spl`
+
+### Core traits and types
+
+```
+# src/os/services/fat32/fat32.spl
+
+trait BlockDevice:
+    fn read_sector(lba: u64, buffer: [u8]) -> Result<bool, text>
+    fn write_sector(lba: u64, data: [u8]) -> Result<bool, text>
+    fn sector_size() -> u32   # must return 512
+
+class Fat32Bpb: ...           # BPB field layout per FAT32 spec
+class Fat32DirEntry: ...      # 32-byte directory entry
+
+class Fat32Driver: ...        # stateful driver; constructed over a BlockDevice
+
+# Attribute constants
+FAT32_ATTR_READ_ONLY  : u8
+FAT32_ATTR_HIDDEN     : u8
+FAT32_ATTR_SYSTEM     : u8
+FAT32_ATTR_VOLUME_ID  : u8
+FAT32_ATTR_DIRECTORY  : u8
+FAT32_ATTR_ARCHIVE    : u8
+FAT32_ATTR_LFN        : u8
+
+# Cluster chain sentinels
+FAT32_FREE : u32   # 0x00000000
+FAT32_EOC  : u32   # >= 0x0FFFFFF8
+FAT32_BAD  : u32   # 0x0FFFFFF7
+```
+
+**Consumers:** `src/os/kernel/` VFS layer, disk-image builder in
+`src/os/port/`, installer
+
+---
+
+## IF-08 QEMU boot serial protocol
+
+**Status:** frozen
+
+**Location:** `examples/simple_os/` (kernel boot path)
+**Transport:** COM1 serial at 115200 baud (default QEMU `-serial stdio`)
+
+### Marker tokens (from kernel source scan)
+
+All markers follow the pattern `[tag] message` on a single line terminated by
+`\n`. Consumers (test harness, CI) grep for these exact bracket-prefixed tags.
+
+| Tag | Meaning |
+|---|---|
+| `[boot]` | Early boot progress (e.g. `[boot] init`, `[boot] calling`) |
+| `[fault]` | CPU exception/fault (includes `rip`, `rflags`, `errcode`, `cr*`, `cs`) |
+| `[dev-test]` | Device enumeration test output |
+| `[gpu-test]` | GPU smoke test output |
+| `[grant]` | Capability grant events |
+| `[hello]` | Userspace hello-world confirmation |
+| `[desktop]` | Desktop/compositor lifecycle |
+| `[download]` | In-guest download progress |
+| `[native-verify]` | Bootstrap convergence verifier (see IF-09) |
+
+The test harness (`src/os/qemu_runner.spl`) waits for `[boot] init` within 30 s
+as the liveness signal. A `[fault]` marker causes immediate test failure.
+
+**Consumers:** `src/os/qemu_runner.spl`, CI boot-test scripts
+
+---
+
+## IF-09 Bootstrap verifier contract
+
+**Status:** frozen
+
+**Location:** `src/os/port/bootstrap_native_verify.spl`
+
+### Entry point
+
+```
+# src/os/port/bootstrap_native_verify.spl
+
+fn main() -> i32
+  # Exit codes:
+  #   0  — convergence confirmed (byte-identical OR same auto_stub count)
+  #   2  — source tree missing under /src/
+  #   3  — Stage 2 build failed
+  #   4  — Stage 3 build failed
+  #   5  — binaries diverge (byte offset + stub counts differ)
+  #   6  — could not read one or both binaries
+```
+
+### Stage paths (fixed)
+
+```
+STAGE2_BIN = "/build/stage2/simple"
+STAGE3_BIN = "/build/stage3/simple"
+ENTRY      = "/src/app/cli/main.spl"
+SOURCES    = ["/src/compiler", "/src/lib", "/src/app"]
+```
+
+### Convergence algorithm
+
+1. `_check_source_tree_present()` — all SOURCES dirs + ENTRY must exist.
+2. `_build_stage(STAGE2_BIN)` — compile from `/src/` using `/bin/simple`.
+3. `_build_stage_with(STAGE2_BIN, STAGE3_BIN)` — compile from `/src/` using Stage 2.
+4. `_byte_compare(STAGE2_BIN, STAGE3_BIN)` — byte-identical check.
+5. Fallback: `_auto_stub_count_equal` — counts `auto_stub` ELF symbols via
+   `compiler.backend.introspection.elf_symbols.count_symbols_matching`.
+
+**Note:** Steps 2–3 currently return `Err` (in-process build not yet wired).
+They unblock once `spl_handle_fork`/`spl_handle_exec` (IF-01) land.
+
+**Consumers:** CI in-guest boot test, `src/os/port/verify_all.spl`
+
+---
+
+## IF-10 Cargo vendored protocol
+
+**Status:** frozen
+
+**Location:** `src/compiler_rust/.cargo/config.toml`
+
+SimpleOS does not provide fork/exec at build time (until IF-01/02 land), so
+`cargo` cannot spawn `git` or `curl`. All crates must be pre-vendored on the
+host and committed to `vendor/`.
+
+### Frozen config block
+
+```toml
+[source.crates-io]
+replace-with = "vendored-sources"
+
+[source.vendored-sources]
+directory = "vendor"
+```
+
+### Protocol
+
+1. On host: `cargo vendor --respect-source-config` inside `src/compiler_rust/`.
+2. Commit `vendor/` contents to repo.
+3. Cross-build: `cargo build --target x86_64-unknown-simpleos.json` reads from
+   `vendor/` with no network access.
+
+**Consumers:** `src/compiler_rust/`, `scripts/build_rust_simpleos_cross.sh`,
+in-guest self-build once fork/exec lands
+
+---
+
+## IF-11 In-process LLD FFI
+
+**Status:** new-this-cycle
+
+**Location (Simple wrapper):** `src/compiler/70.backend/linker/lld_ffi.spl`
+**Location (C++ shim):** `src/compiler/70.backend/linker/lld_shim.cpp`
+
+### C++ shim declaration
+
+```cpp
+// src/compiler/70.backend/linker/lld_shim.cpp
+extern "C" int rt_lld_link_elf(uint64_t argc, const char** argv);
+```
+
+Implementation calls:
+```cpp
+lld::elf::link(
+    llvm::ArrayRef<const char*>(argv, argc),
+    llvm::outs(),
+    llvm::errs(),
+    /*exitEarly=*/false,
+    /*disableOutput=*/false
+)
+```
+
+### Simple FFI binding
+
+```
+# src/compiler/70.backend/linker/lld_ffi.spl
+
+extern fn rt_lld_link_elf(argc: u64, argv_ptr: u64) -> i32
+  # Calls lld::elf::link via C++ shim.
+  # Returns 0 on success, non-zero on LLD exit-code failure.
+
+fn lld_link_elf(args: List<text>) -> Result<(), text>:
+    """High-level wrapper. Marshals args into a null-terminated argv array,
+    calls rt_lld_link_elf, and converts non-zero returns to Err(stderr)."""
+```
+
+### Link requirements
+
+`lld_shim.cpp` must be compiled with the same LLVM headers used to build the
+Simple compiler's Cranelift/LLVM backend. Link with `-llldELF -llldCommon
+-lLLVM` (or the monolithic `-lLLVM-19`).
+
+**Consumers:** `src/compiler/70.backend/`, `src/os/port/build_tools/`,
+bootstrap stage that links SimpleOS userspace ELFs
+
+---
+
+## IF-12 Stubs manifest format
+
+**Status:** frozen
+
+**Location:** `src/os/port/stubs_manifest.spl`
+**Output:** `build/os/stubs_manifest.sdn`
+
+### SDN manifest schema
+
+```
+[stubs_manifest
+  [binary "<path-to-binary>"]
+  [total_count <integer>]
+  [groups
+    [group
+      [name "<prefix>"]
+      [count <integer>]
+      [symbols
+        "<symbol_name>"
+        ...
+      ]
+    ]
+    ...
+  ]
+]
+```
+
+### Classifier prefixes (in priority order)
+
+`gpu`, `cuda`, `vulkan`, `opencl`, `gfx`, `net`, `http`, `tls`, `ssl`,
+`sqlite3`, `sqlite`, `db`, `torch`, `ml`, `audio`, `video`, `crypto`.
+
+Symbols not matching any prefix are grouped under `"other"`.
+
+### Entry point
+
+```
+fn main()
+  # Invoked as: bin/simple run src/os/port/stubs_manifest.spl [-- options]
+  # Options: --binary <path>, --output <path>
+  # Scans binary with `nm`, extracts auto_stub_* and _stub_panic_* symbols,
+  # groups by prefix (descending count), writes SDN manifest, prints summary.
+```
+
+**Consumers:** CI stub-audit step, `src/os/port/audit_stubs.spl`,
+`src/os/port/verify_all.spl`
+
+---
+
+## Verification
+
+### Drift detection
+
+A CI lint step should grep this doc for file paths appearing after
+`**Location**:` and verify that each path exists in the repository. Signature
+drift (e.g. a renamed `@export` symbol) must be caught by the port-dev-chain
+integration test suite, which compiles a probe that imports each frozen symbol.
+
+Suggested CI command:
+```sh
+grep -oP '(?<=\*\*Location\*\*: )`[^`]+`' doc/04_architecture/simpleos_interfaces.md \
+  | tr -d '`' | while read p; do
+      test -e "$p" || echo "MISSING: $p"
+  done
+```
+
+### Change policy
+
+PRs that rename, remove, or change the type signature of any frozen interface
+listed here **must** update this file in the same commit. The PR description
+must include the label `interface-change` and receive approval from a
+port-dev-chain maintainer before merge.
+
+### Ownership
+
+| Interface | Primary owner file |
+|---|---|
+| IF-01, IF-02 | `src/os/kernel/abi/syscall_shim.spl` |
+| IF-03 | `src/os/libc/` |
+| IF-04 | `rust/library/std/src/sys/pal/simpleos/` |
+| IF-05 | `src/os/port/llvm/sysroot.shs` |
+| IF-06 | `src/os/port/initramfs_pack.spl` |
+| IF-07 | `src/os/services/fat32/fat32.spl` |
+| IF-08 | `examples/simple_os/arch/x86_64/` |
+| IF-09 | `src/os/port/bootstrap_native_verify.spl` |
+| IF-10 | `src/compiler_rust/.cargo/config.toml` |
+| IF-11 | `src/compiler/70.backend/linker/lld_ffi.spl` |
+| IF-12 | `src/os/port/stubs_manifest.spl` |

@@ -45,3 +45,16 @@ Additional targets: `aarch64-unknown-simpleos.json`, `riscv64gc-unknown-simpleos
 | `libsimpleos_c.a not found` | Build the SimpleOS sysroot; set `SIMPLEOS_SYSROOT` |
 | Linker errors / missing clang | Run `scripts/build_llvm_simpleos_cross.sh` first |
 | Wrong target JSON | Verify `src/os/toolchain/rust/${TARGET}.json` exists |
+
+## Convenience wrapper
+
+For everyday cross-compile use:
+
+    scripts/cargo_simpleos.sh build --release -p hello_rs
+
+This wrapper sets `SDKROOT`, `CARGO_TARGET_X86_64_UNKNOWN_SIMPLEOS_LINKER`,
+`CC_x86_64_unknown_simpleos`, `AR_x86_64_unknown_simpleos`, and `RUSTFLAGS`
+automatically, and appends `-Z build-std=core,alloc,compiler_builtins`. Honors
+`LLVM_BUILD`, `SIMPLEOS_SYSROOT`, `RUST_SRC` env overrides. Set
+`CARGO_SIMPLEOS_NO_BUILD_STD=1` to skip build-std (e.g., when pointing at a
+forked rustc that already has SimpleOS libstd built-in).
