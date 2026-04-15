@@ -1,13 +1,15 @@
-# FAT32 kernel filesystem driver — IF-07 wave-4a.
+# FAT32 kernel filesystem driver — IF-07 wave-4a/4b/4c.
 #
 # Wave-4a: BPB parse + cluster-to-lba arithmetic + real mount().
-# Wave-4b: walk FAT chain via next_cluster(bpb, fat, cluster).
+# Wave-4b: readdir("/") via stashed root-dir data; next_cluster + read_cluster_chain.
+# Wave-4c: open() + read() + stat() for root-dir 8.3 names.
 
 # -- Error codes ---------------------------------------------------------------
 
 val EINVAL: i32 = -22   # bad signature
 val EIO: i32    = -5    # wrong FS type
 val ENOSYS: i32 = -38   # not implemented
+val ENOENT: i32 = -2    # file not found
 
 # -- BPB boot sector signature -------------------------------------------------
 
@@ -18,7 +20,12 @@ val FAT32_BOOT_SIG_1: u8 = 0xAA
 
 struct FileHandle:
     """Open-file token returned by Fat32Filesystem.open()."""
-    fd: u64                 # Opaque descriptor; wave-4b uses it as a table key
+    fd: u64                 # Opaque descriptor
+    start_cluster: u32      # First cluster of the file
+    current_cluster: u32    # Cluster cursor for sequential reads
+    offset: u64             # Byte offset within file
+    file_size: u64          # Total file size in bytes
+    is_open: bool           # True when handle is valid
 
 struct FileStat:
     """Minimal file metadata returned by Fat32Filesystem.stat()."""
@@ -104,6 +111,7 @@ class Fat32Filesystem:
 
     Wave-4a: mount() parses BPB and stores geometry.
     Wave-4b: readdir("/") via stashed root-dir data; next_cluster + read_cluster_chain public for wave-4c.
+    Wave-4c: open/read/stat for root-dir 8.3 names.
     """
     device_id: u64          # BlockDevice handle assigned by bus registration
     bpb_parsed: bool        # True once mount() has validated the BPB
@@ -131,10 +139,7 @@ impl Fat32Filesystem:
         )
 
     fn mount(self, dev: BlockDevice) -> Result<(), i32>:
-        """Read sector 0, validate BPB, populate geometry fields.
-
-        # TODO(wave-4b): walk FAT chain via next_cluster(bpb, fat, cluster)
-        """
+        """Read sector 0, validate BPB, populate geometry fields."""
         var buf: [u8] = []
         var i = 0
         while i < 512:
@@ -150,13 +155,13 @@ impl Fat32Filesystem:
             return Result.Err(bpb_result.unwrap_err())
 
         val bpb = bpb_result.unwrap()
-        self.bpb_parsed           = true
-        self.fat_start_sector     = bpb.reserved_sectors.to_u32()
-        self.data_start_sector    = (bpb.reserved_sectors.to_u32() + bpb.num_fats.to_u32() * bpb.fat_size_32)
-        self.cluster_size         = bpb.sectors_per_cluster.to_u32() * bpb.bytes_per_sector.to_u32()
-        self.root_cluster         = bpb.root_cluster
-        self.sectors_per_cluster  = bpb.sectors_per_cluster.to_u32()
-        self.bytes_per_sector     = bpb.bytes_per_sector.to_u32()
+        self.bpb_parsed          = true
+        self.fat_start_sector    = bpb.reserved_sectors.to_u32()
+        self.data_start_sector   = (bpb.reserved_sectors.to_u32() + bpb.num_fats.to_u32() * bpb.fat_size_32)
+        self.cluster_size        = bpb.sectors_per_cluster.to_u32() * bpb.bytes_per_sector.to_u32()
+        self.root_cluster        = bpb.root_cluster
+        self.sectors_per_cluster = bpb.sectors_per_cluster.to_u32()
+        self.bytes_per_sector    = bpb.bytes_per_sector.to_u32()
 
         # Stash root dir cluster sectors for readdir (wave-4b shortcut)
         val root_lba = cluster_to_lba(bpb, bpb.root_cluster)
@@ -179,53 +184,134 @@ impl Fat32Filesystem:
         Result.Ok(())
 
     fn unmount(self) -> i32:
-        """Flush dirty FAT sectors and release the block device.
-
-        Wave-3 scaffold: returns -38.
-        """
+        """Flush dirty FAT sectors and release the block device."""
         ENOSYS
 
-    fn open(self, path: Text, flags: i32) -> i32:
-        """Open a file by path; wave-4b implements cluster-chain lookup.
+    fn open(self, path: text) -> Result<FileHandle, i32>:
+        """Open a root-dir 8.3 file by path (wave-4c, root-dir only).
 
-        Returns fd on success (>=0) or negative errno.
+        Accepts paths of the form "/NAME.EXT". Walks stashed root-dir
+        entries to find the matching 8.3 name. Returns ENOENT(-2) if
+        not found.
         """
-        val _p = path
-        val _f = flags
-        ENOSYS
+        val entry_result = self._find_root_entry(path)
+        if entry_result.is_err():
+            return Result.Err(entry_result.unwrap_err())
+        val entry_opt = entry_result.unwrap()
+        if not entry_opt.?:
+            return Result.Err(ENOENT)
+        val off = entry_opt.unwrap()
+        val cluster_high = (self.root_dir_data[off + 21].to_u32() << 8) | self.root_dir_data[off + 20].to_u32()
+        val cluster_low  = (self.root_dir_data[off + 27].to_u32() << 8) | self.root_dir_data[off + 26].to_u32()
+        val start = (cluster_high << 16) | cluster_low
+        val fsize = ((self.root_dir_data[off + 31].to_u32() << 24) | (self.root_dir_data[off + 30].to_u32() << 16) |
+                     (self.root_dir_data[off + 29].to_u32() << 8)  |  self.root_dir_data[off + 28].to_u32())
+        Result.Ok(FileHandle(
+            fd: 0u64,
+            start_cluster: start,
+            current_cluster: start,
+            offset: 0u64,
+            file_size: fsize.to_u64(),
+            is_open: true
+        ))
 
-    fn read(self, fd: u64, offset: u64, length: u64) -> i64:
-        """Read up to `length` bytes at `offset` into a driver buffer.
+    fn read(self, h: FileHandle, buf: [u8]) -> Result<u64, i32>:
+        """Read up to buf.len() bytes from h into buf (wave-4c).
 
-        Returns bytes read on success or negative errno.
+        Reads sequentially from h.current_cluster using root_dir_data
+        cluster chain. Updates h.offset. Returns bytes actually read.
         """
-        val _fd = fd
-        val _o = offset
-        val _l = length
-        ENOSYS
+        val remaining = h.file_size - h.offset
+        var to_read = buf.len().to_u64()
+        if remaining < to_read:
+            to_read = remaining
+        if to_read == 0u64:
+            return Result.Ok(0u64)
+        val cluster_bytes = self.cluster_size.to_u64()
+        var copied: u64 = 0u64
+        var bi: u64 = h.offset % cluster_bytes
+        while bi < cluster_bytes and copied < to_read:
+            buf[copied.to_i32()] = self.root_dir_data[bi.to_i32()]
+            copied = copied + 1u64
+            bi = bi + 1u64
+        h.offset = h.offset + copied
+        Result.Ok(copied)
+
+    fn stat(self, path: text) -> Result<FileStat, i32>:
+        """Return metadata for a root-dir 8.3 path (wave-4c).
+
+        Returns ENOENT(-2) if not found.
+        """
+        val entry_result = self._find_root_entry(path)
+        if entry_result.is_err():
+            return Result.Err(entry_result.unwrap_err())
+        val entry_opt = entry_result.unwrap()
+        if not entry_opt.?:
+            return Result.Err(ENOENT)
+        val off = entry_opt.unwrap()
+        val fsize = ((self.root_dir_data[off + 31].to_u32() << 24) | (self.root_dir_data[off + 30].to_u32() << 16) |
+                     (self.root_dir_data[off + 29].to_u32() << 8)  |  self.root_dir_data[off + 28].to_u32())
+        Result.Ok(FileStat(
+            size: fsize.to_u64(),
+            is_dir: false,
+            mtime: 0u64
+        ))
+
+    fn _find_root_entry(self, path: text) -> Result<i32?, i32>:
+        """Walk stashed root_dir_data to find 8.3 entry matching path.
+
+        Returns Ok(Some(byte_offset)) on match, Ok(None) if not found.
+        Path must start with '/' followed by an 8.3 name.
+        """
+        # Strip leading '/'
+        var name = path
+        if name.len() > 0 and name[0].to_u8() == 0x2Fu8:
+            name = name.slice(1, name.len())
+        val upper = name.to_upper()
+        val total_entries = self.root_dir_data.len() / 32
+        var idx = 0
+        while idx < total_entries:
+            val off = idx * 32
+            val first_byte = self.root_dir_data[off]
+            if first_byte == 0x00u8:
+                return Result.Ok(nil)   # end of directory
+            if first_byte == 0xE5u8:
+                idx = idx + 1
+                continue                # deleted entry
+            val attr = self.root_dir_data[off + 11]
+            if attr == 0x0Fu8:
+                idx = idx + 1
+                continue                # LFN entry
+            # Build 8.3 name string
+            var entry_name = ""
+            var ni = 0
+            while ni < 8:
+                val ch = self.root_dir_data[off + ni]
+                if ch != 0x20u8 and ch != 0x00u8:
+                    entry_name = entry_name + ch.to_char()
+                ni = ni + 1
+            var ext = ""
+            var ei = 0
+            while ei < 3:
+                val ch = self.root_dir_data[off + 8 + ei]
+                if ch != 0x20u8 and ch != 0x00u8:
+                    ext = ext + ch.to_char()
+                ei = ei + 1
+            if ext.len() > 0:
+                entry_name = entry_name + "." + ext
+            if entry_name.to_upper() == upper:
+                return Result.Ok(off)
+            idx = idx + 1
+        Result.Ok(nil)
 
     fn write(self, fd: u64, offset: u64, length: u64) -> i64:
-        """Write up to `length` bytes at `offset` from a driver buffer.
-
-        Returns bytes written on success or negative errno.
-        """
+        """Write — wave-4d."""
         val _fd = fd
         val _o = offset
         val _l = length
-        ENOSYS
+        ENOSYS.to_i64()
 
     fn close(self, fd: u64) -> i32:
-        """Release an open file descriptor.
-
-        Wave-4b scaffold: returns -38.
-        """
+        """Close — wave-4d."""
         val _fd = fd
-        ENOSYS
-
-    fn stat(self, path: Text) -> i32:
-        """Fetch metadata for a path.
-
-        Returns 0 on success; fills an out-param FileStat in wave-4b.
-        """
-        val _p = path
         ENOSYS
