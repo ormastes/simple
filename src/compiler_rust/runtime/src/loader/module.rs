@@ -10,6 +10,7 @@ pub struct LoadedModule {
     pub header: SmfHeader,
     pub code_mem: ExecutableMemory,
     pub data_mem: Option<ExecutableMemory>,
+    pub got_mem: Option<ExecutableMemory>,
     pub symbols: SymbolTable,
     pub version: u32,
 }

@@ -174,7 +174,7 @@ impl ParsedObject {
                 };
 
                 // Map object relocation to SMF relocation type
-                let reloc_type = map_relocation_type(reloc.kind(), reloc.encoding())?;
+                let reloc_type = map_relocation_type(reloc.kind(), reloc.encoding(), reloc.flags())?;
 
                 let smf_reloc = SmfRelocation {
                     offset,
@@ -215,19 +215,32 @@ impl Default for ParsedObject {
 fn map_relocation_type(
     kind: object::RelocationKind,
     encoding: object::RelocationEncoding,
+    flags: object::RelocationFlags,
 ) -> ParseResult<RelocationType> {
     use object::RelocationEncoding::*;
+    use object::RelocationFlags::*;
     use object::RelocationKind::*;
 
     // Map based on relocation kind and encoding
     match (kind, encoding) {
         (Absolute, Generic) => Ok(RelocationType::Abs64),
         (Relative, Generic) => Ok(RelocationType::Pc32),
+        (Relative, AArch64Call) => Ok(RelocationType::Arm64Branch26),
         (PltRelative, _) => Ok(RelocationType::Plt32),
         (Got, _) | (GotRelative, _) => Ok(RelocationType::GotPcRel),
-        _ => {
-            // Default to none for unknown types
-            Ok(RelocationType::None)
+        _ => match flags {
+            MachO { r_type, .. } => match r_type {
+                object::macho::ARM64_RELOC_BRANCH26 => Ok(RelocationType::Arm64Branch26),
+                object::macho::ARM64_RELOC_PAGE21 => Ok(RelocationType::Arm64Page21),
+                object::macho::ARM64_RELOC_PAGEOFF12 => Ok(RelocationType::Arm64PageOff12),
+                object::macho::ARM64_RELOC_GOT_LOAD_PAGE21 => Ok(RelocationType::Arm64GotLoadPage21),
+                object::macho::ARM64_RELOC_GOT_LOAD_PAGEOFF12 => Ok(RelocationType::Arm64GotLoadPageOff12),
+                _ => Ok(RelocationType::None),
+            },
+            _ => {
+                // Default to none for unknown types
+                Ok(RelocationType::None)
+            }
         }
     }
 }
@@ -247,9 +260,29 @@ mod tests {
     #[test]
     fn test_map_relocation_type() {
         use object::RelocationEncoding::Generic;
+        use object::RelocationFlags;
         use object::RelocationKind::*;
 
-        assert_eq!(map_relocation_type(Absolute, Generic).unwrap(), RelocationType::Abs64);
-        assert_eq!(map_relocation_type(Relative, Generic).unwrap(), RelocationType::Pc32);
+        assert_eq!(
+            map_relocation_type(Absolute, Generic, RelocationFlags::Generic { kind: Absolute, encoding: Generic, size: 64 }).unwrap(),
+            RelocationType::Abs64
+        );
+        assert_eq!(
+            map_relocation_type(Relative, Generic, RelocationFlags::Generic { kind: Relative, encoding: Generic, size: 32 }).unwrap(),
+            RelocationType::Pc32
+        );
+        assert_eq!(
+            map_relocation_type(
+                object::RelocationKind::Unknown,
+                object::RelocationEncoding::Generic,
+                RelocationFlags::MachO {
+                    r_type: object::macho::ARM64_RELOC_BRANCH26,
+                    r_pcrel: true,
+                    r_length: 2,
+                }
+            )
+            .unwrap(),
+            RelocationType::Arm64Branch26
+        );
     }
 }

@@ -1,6 +1,7 @@
 use std::fs::File;
 use std::io::{Cursor, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
+use std::collections::HashMap;
 
 use thiserror::Error;
 use tracing::{debug, error, instrument, trace, warn};
@@ -327,11 +328,67 @@ impl ModuleLoader {
         })?;
         trace!(relocations = relocs.len(), "Relocations read successfully");
 
+        let got_slot_count = relocs
+            .iter()
+            .filter(|r| {
+                matches!(
+                    r.reloc_type,
+                    RelocationType::GotPcRel
+                        | RelocationType::Arm64GotLoadPage21
+                        | RelocationType::Arm64GotLoadPageOff12
+                )
+            })
+            .map(|r| r.symbol_index)
+            .collect::<std::collections::BTreeSet<_>>()
+            .len();
+
+        let got_mem = if got_slot_count > 0 {
+            let got_size = (got_slot_count * 8).max(4096);
+            debug!(got_slot_count, got_size, "Allocating GOT memory");
+            Some(self.allocator.allocate(got_size, 4096).map_err(|e| {
+                error!(got_slot_count, got_size, error = %e, "Failed to allocate GOT memory");
+                e
+            })?)
+        } else {
+            None
+        };
+
         // Apply relocations
         debug!(count = relocs.len(), "Applying relocations");
         let code_slice = unsafe { std::slice::from_raw_parts_mut(code_mem.as_mut_ptr(), code_size) };
+        let mut got_offsets: HashMap<u32, usize> = HashMap::new();
+        let mut next_got_offset = 0usize;
+        let mut got_slot_resolver = |symbol_index: u32, sym_addr: usize| -> Result<usize, String> {
+            let mem = got_mem
+                .as_ref()
+                .ok_or_else(|| "GOT slot requested without allocated GOT memory".to_string())?;
+            if let Some(&addr) = got_offsets.get(&symbol_index) {
+                return Ok(addr);
+            }
+            let slot_offset = next_got_offset;
+            let end = slot_offset
+                .checked_add(8)
+                .ok_or_else(|| "GOT slot offset overflow".to_string())?;
+            if end > mem.size() {
+                return Err(format!("GOT memory exhausted: need {}, have {}", end, mem.size()));
+            }
+            unsafe {
+                std::ptr::write_unaligned(mem.as_mut_ptr().add(slot_offset) as *mut u64, sym_addr as u64);
+            }
+            let addr = mem.as_ptr() as usize + slot_offset;
+            got_offsets.insert(symbol_index, addr);
+            next_got_offset = end;
+            Ok(addr)
+        };
 
-        apply_relocations(code_slice, &relocs, &symbols, code_mem.as_ptr() as usize, &resolver).map_err(|e| {
+        apply_relocations(
+            code_slice,
+            &relocs,
+            &symbols,
+            code_mem.as_ptr() as usize,
+            &resolver,
+            &mut got_slot_resolver,
+        ).map_err(|e| {
             error!(error = %e, "Failed to apply relocations");
             LoadError::RelocationFailed(e)
         })?;
@@ -362,6 +419,7 @@ impl ModuleLoader {
             header,
             code_mem,
             data_mem,
+            got_mem,
             symbols,
             version: 1,
         })

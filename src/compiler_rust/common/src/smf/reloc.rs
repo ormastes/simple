@@ -19,6 +19,11 @@ pub enum RelocationType {
     Pc32 = 2,
     Plt32 = 3,
     GotPcRel = 4,
+    Arm64Branch26 = 5,
+    Arm64Page21 = 6,
+    Arm64PageOff12 = 7,
+    Arm64GotLoadPage21 = 8,
+    Arm64GotLoadPageOff12 = 9,
 }
 
 pub fn apply_relocations(
@@ -27,6 +32,7 @@ pub fn apply_relocations(
     symbols: &SymbolTable,
     base_address: usize,
     imports: &dyn Fn(&str) -> Option<usize>,
+    got_slot_resolver: &mut dyn FnMut(u32, usize) -> Result<usize, String>,
 ) -> Result<(), String> {
     let code_len = code.len();
     debug!(
@@ -75,6 +81,15 @@ pub fn apply_relocations(
                     return Err(msg);
                 }
             }
+        };
+
+        let got_slot = if matches!(
+            reloc.reloc_type,
+            RelocationType::GotPcRel | RelocationType::Arm64GotLoadPage21 | RelocationType::Arm64GotLoadPageOff12
+        ) {
+            got_slot_resolver(reloc.symbol_index, sym_addr)?
+        } else {
+            0
         };
 
         let offset = reloc.offset as usize;
@@ -135,7 +150,6 @@ pub fn apply_relocations(
                 }
 
                 let got_value = sym_addr as u64;
-                let got_slot = Box::leak(Box::new(got_value)) as *mut u64 as usize;
                 let patch_addr = base_address.wrapping_add(offset);
                 let patch_ptr = code.as_mut_ptr().wrapping_add(offset);
                 let value = (got_slot as i64)
@@ -150,6 +164,105 @@ pub fn apply_relocations(
                 );
                 unsafe {
                     std::ptr::write_unaligned(patch_ptr as *mut i32, value);
+                }
+            }
+            RelocationType::Arm64Branch26 => {
+                if offset.checked_add(4).is_none_or(|end| end > code_len) {
+                    let msg = format!(
+                        "Relocation {} (Arm64Branch26) at offset {} exceeds code buffer size {} (needs 4 bytes)",
+                        reloc_idx, offset, code_len
+                    );
+                    error!("{}", msg);
+                    return Err(msg);
+                }
+
+                let patch_addr = base_address.wrapping_add(offset);
+                let target = (sym_addr as i64).wrapping_add(reloc.addend);
+                let diff = target.wrapping_sub(patch_addr as i64);
+                let shifted = diff >> 2;
+                if !((shifted >> 26 == -1) || (shifted >> 26 == 0)) {
+                    let msg = format!(
+                        "Arm64Branch26 relocation {} target out of range: patch={:#x} target={:#x} diff={:#x}",
+                        reloc_idx, patch_addr, target, diff
+                    );
+                    error!("{}", msg);
+                    return Err(msg);
+                }
+                let patch_ptr = code.as_mut_ptr().wrapping_add(offset);
+                unsafe {
+                    let inst = std::ptr::read_unaligned(patch_ptr as *const u32);
+                    let imm26 = (shifted as u32) & 0x03ff_ffff;
+                    std::ptr::write_unaligned(patch_ptr as *mut u32, (inst & 0xfc00_0000) | imm26);
+                }
+            }
+            RelocationType::Arm64Page21 | RelocationType::Arm64GotLoadPage21 => {
+                if offset.checked_add(4).is_none_or(|end| end > code_len) {
+                    let msg = format!(
+                        "Relocation {} ({:?}) at offset {} exceeds code buffer size {} (needs 4 bytes)",
+                        reloc_idx, reloc.reloc_type, offset, code_len
+                    );
+                    error!("{}", msg);
+                    return Err(msg);
+                }
+
+                let target_base = if reloc.reloc_type == RelocationType::Arm64GotLoadPage21 {
+                    got_slot
+                } else {
+                    sym_addr
+                };
+                let target = (target_base as i64).wrapping_add(reloc.addend) as usize;
+                let patch_addr = base_address.wrapping_add(offset);
+                let target_page = target & !0xfffusize;
+                let patch_page = patch_addr & !0xfffusize;
+                let page_delta = ((target_page as i64).wrapping_sub(patch_page as i64)) >> 12;
+                if !((page_delta >> 20 == -1) || (page_delta >> 20 == 0)) {
+                    let msg = format!(
+                        "Arm64Page21 relocation {} target out of range: patch={:#x} target={:#x} delta_pages={:#x}",
+                        reloc_idx, patch_addr, target, page_delta
+                    );
+                    error!("{}", msg);
+                    return Err(msg);
+                }
+                let patch_ptr = code.as_mut_ptr().wrapping_add(offset);
+                unsafe {
+                    let inst = std::ptr::read_unaligned(patch_ptr as *const u32);
+                    let immlo = ((page_delta as u32) & 0x3) << 29;
+                    let immhi = (((page_delta as u32) >> 2) & 0x7ffff) << 5;
+                    let mask = !((0x7ffff << 5) | (0x3 << 29));
+                    std::ptr::write_unaligned(patch_ptr as *mut u32, (inst & mask) | immlo | immhi);
+                }
+            }
+            RelocationType::Arm64PageOff12 | RelocationType::Arm64GotLoadPageOff12 => {
+                if offset.checked_add(4).is_none_or(|end| end > code_len) {
+                    let msg = format!(
+                        "Relocation {} ({:?}) at offset {} exceeds code buffer size {} (needs 4 bytes)",
+                        reloc_idx, reloc.reloc_type, offset, code_len
+                    );
+                    error!("{}", msg);
+                    return Err(msg);
+                }
+
+                let target_base = if reloc.reloc_type == RelocationType::Arm64GotLoadPageOff12 {
+                    got_slot
+                } else {
+                    sym_addr
+                };
+                let target = (target_base as i64).wrapping_add(reloc.addend) as usize;
+                let pageoff = target & 0xfffusize;
+                let patch_ptr = code.as_mut_ptr().wrapping_add(offset);
+                unsafe {
+                    let inst = std::ptr::read_unaligned(patch_ptr as *const u32);
+                    // ADD/SUB (immediate) encode an unscaled 12-bit immediate at bits 21:10.
+                    let is_add_sub_imm = (inst & 0x1f00_0000) == 0x1100_0000;
+                    let imm12 = if is_add_sub_imm {
+                        pageoff as u32
+                    } else {
+                        // LDR/STR unsigned immediates encode pageoff scaled by access size.
+                        let scale = ((inst >> 30) & 0x3) as usize;
+                        (pageoff >> scale) as u32
+                    } & 0x0fff;
+                    let mask = !(0x0fff << 10);
+                    std::ptr::write_unaligned(patch_ptr as *mut u32, (inst & mask) | (imm12 << 10));
                 }
             }
         }
@@ -198,7 +311,7 @@ mod tests {
         apply_relocations(&mut code, &relocs, &symbols, base_address, &|_| {
             import_lookups.set(import_lookups.get() + 1);
             None
-        })
+        }, &mut |_sym, _addr| Err("unexpected GOT relocation".to_string()))
         .expect("defined globals should relocate from the module body");
 
         assert_eq!(import_lookups.get(), 0);
@@ -237,7 +350,7 @@ mod tests {
         apply_relocations(&mut code, &relocs, &symbols, base_address, &|_| {
             import_lookups.set(import_lookups.get() + 1);
             None
-        })
+        }, &mut |_sym, _addr| Err("unexpected GOT relocation".to_string()))
         .expect("defined globals at offset zero should relocate from the module body");
 
         assert_eq!(import_lookups.get(), 0);
