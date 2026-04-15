@@ -8443,6 +8443,53 @@ RuntimeValue rt_alloc_page_aligned(RuntimeValue size)
     return (RuntimeValue)(uint64_t)aligned;
 }
 
+RuntimeValue rt_virtq_desc_write(RuntimeValue base, RuntimeValue index, RuntimeValue addr_lo,
+                                 RuntimeValue addr_hi, RuntimeValue len,
+                                 RuntimeValue flags, RuntimeValue next)
+{
+    uint8_t *desc = (uint8_t *)(uintptr_t)((uint64_t)base + ((uint64_t)index * 16ULL));
+    *(volatile uint32_t *)(void *)(desc + 0)  = (uint32_t)(uint64_t)addr_lo;
+    *(volatile uint32_t *)(void *)(desc + 4)  = (uint32_t)(uint64_t)addr_hi;
+    *(volatile uint32_t *)(void *)(desc + 8)  = (uint32_t)(uint64_t)len;
+    *(volatile uint16_t *)(void *)(desc + 12) = (uint16_t)(uint64_t)flags;
+    *(volatile uint16_t *)(void *)(desc + 14) = (uint16_t)(uint64_t)next;
+    return 0;
+}
+
+RuntimeValue rt_virtq_write_req_resp_chain(RuntimeValue base,
+                                           RuntimeValue req_addr,
+                                           RuntimeValue req_len,
+                                           RuntimeValue resp_addr,
+                                           RuntimeValue resp_len)
+{
+    uint8_t *desc0 = (uint8_t *)(uintptr_t)(uint64_t)base;
+    uint8_t *desc1 = desc0 + 16;
+    uint64_t req64 = (uint64_t)req_addr;
+    uint64_t resp64 = (uint64_t)resp_addr;
+
+    *(volatile uint64_t *)(void *)(desc0 + 0)  = req64;
+    *(volatile uint32_t *)(void *)(desc0 + 8)  = (uint32_t)(uint64_t)req_len;
+    *(volatile uint16_t *)(void *)(desc0 + 12) = 1; /* NEXT */
+    *(volatile uint16_t *)(void *)(desc0 + 14) = 1; /* desc1 */
+
+    *(volatile uint64_t *)(void *)(desc1 + 0)  = resp64;
+    *(volatile uint32_t *)(void *)(desc1 + 8)  = (uint32_t)(uint64_t)resp_len;
+    *(volatile uint16_t *)(void *)(desc1 + 12) = 2; /* WRITE */
+    *(volatile uint16_t *)(void *)(desc1 + 14) = 0;
+    return 0;
+}
+
+RuntimeValue rt_virtio_gpu_write_ctrl_hdr(RuntimeValue addr, RuntimeValue cmd_type)
+{
+    uint8_t *p = (uint8_t *)(uintptr_t)(uint64_t)addr;
+    *(volatile uint32_t *)(void *)(p + 0)  = (uint32_t)(uint64_t)cmd_type;
+    *(volatile uint32_t *)(void *)(p + 4)  = 0;
+    *(volatile uint64_t *)(void *)(p + 8)  = 0;
+    *(volatile uint32_t *)(void *)(p + 16) = 0;
+    *(volatile uint32_t *)(void *)(p + 20) = 0;
+    return 0;
+}
+
 /* --- CPU: real x86_64 implementations --- */
 
 RuntimeValue rt_hlt_real(void)

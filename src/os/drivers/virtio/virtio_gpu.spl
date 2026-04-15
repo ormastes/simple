@@ -45,6 +45,10 @@ extern fn rt_virtq_avail_slot_addr(base: u64, idx: u64, qsize: u64) -> u64
 extern fn rt_virtio_notify_addr(base: u64, off: u64, mult: u64) -> u64
 extern fn rt_virtio_notify_write16(base: u64, off: u64, mult: u64, value: u64) -> u64
 extern fn rt_alloc_page_aligned(size: u64) -> u64
+extern fn rt_virtq_desc_write(base: u64, index: u64, addr_lo: u64, addr_hi: u64, len: u64, flags: u64, next: u64) -> u64
+extern fn rt_virtq_write_req_resp_chain(base: u64, req_addr: u64, req_len: u64, resp_addr: u64, resp_len: u64) -> u64
+extern fn rt_virtio_gpu_write_ctrl_hdr(addr: u64, cmd_type: u64) -> u64
+extern fn rt_mmio_read_u32_real(addr: u64) -> u64
 
 # ============================================================================
 # VirtIO Legacy PCI BAR0 Register Offsets
@@ -716,11 +720,7 @@ impl VirtioGpuDriver:
 
         Layout: type(4) + flags(4) + fence_id(8) + ctx_id(4) + padding(4)
         """
-        ram_write32(self.cmd_buf_virt, cmd_type)        # type
-        ram_write32(self.cmd_buf_virt + 4, 0)           # flags
-        ram_write64(self.cmd_buf_virt + 8, 0)           # fence_id
-        ram_write32(self.cmd_buf_virt + 16, 0)          # ctx_id
-        ram_write32(self.cmd_buf_virt + 20, 0)          # padding
+        rt_virtio_gpu_write_ctrl_hdr(self.cmd_buf_virt, cmd_type.to_u64())
 
     me _send_command(cmd_size: u64, resp_size: u64) -> u32:
         """Submit a command via controlq and wait for response.
@@ -736,24 +736,14 @@ impl VirtioGpuDriver:
         val d1: u16 = 1
 
         # desc[d0]: request (device reads from cmd_buf)
-        val d0_off = self.ctrl_desc_virt + (d0 * 16).to_u64()
-        val cmd_phys_low = (self.cmd_buf_phys & 0xFFFFFFFF).to_u32()
-        val cmd_phys_high = (self.cmd_buf_phys >> 32).to_u32()
-        ram_write32_raw(d0_off, cmd_phys_low.to_u64())               # addr low
-        ram_write32_raw(d0_off + 4, cmd_phys_high.to_u64())          # addr high
-        ram_write32_raw(d0_off + 8, cmd_size)                        # len
-        ram_write16_raw(d0_off + 12, VIRTQ_DESC_F_NEXT.to_u64())     # flags
-        ram_write16_raw(d0_off + 14, d1.to_u64())                    # next
+        rt_virtq_write_req_resp_chain(
+            self.ctrl_desc_virt,
+            self.cmd_buf_phys, cmd_size,
+            self.resp_buf_phys, resp_size
+        )
 
-        # desc[d1]: response (device writes to resp_buf)
+        val d0_off = self.ctrl_desc_virt + (d0 * 16).to_u64()
         val d1_off = self.ctrl_desc_virt + (d1 * 16).to_u64()
-        val resp_phys_low = (self.resp_buf_phys & 0xFFFFFFFF).to_u32()
-        val resp_phys_high = (self.resp_buf_phys >> 32).to_u32()
-        ram_write32_raw(d1_off, resp_phys_low.to_u64())              # addr low
-        ram_write32_raw(d1_off + 4, resp_phys_high.to_u64())         # addr high
-        ram_write32_raw(d1_off + 8, resp_size)                       # len
-        ram_write16_raw(d1_off + 12, VIRTQ_DESC_F_WRITE.to_u64())    # flags
-        ram_write16_raw(d1_off + 14, 0)                              # next
 
         # Barrier: ensure descriptor writes are visible to device before avail ring update
         rt_memory_barrier()
@@ -806,7 +796,7 @@ impl VirtioGpuDriver:
         val isr = self.read_isr()
 
         # Return response type from first 4 bytes of response buffer
-        ram_read32(self.resp_buf_virt)
+        rt_mmio_read_u32_real(self.resp_buf_virt).to_u32()
 
     # ========================================================================
     # GPU Commands

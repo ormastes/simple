@@ -37,6 +37,8 @@ val ASSISTANT_STORE_NOTIFICATIONS = ASSISTANT_STORE_ROOT + "/notifications"
 class AssistantStore:
     root: text
 
+impl AssistantStore:
+
     static fn new(root: text) -> AssistantStore:
         val resolved = if root.trim() == "": ASSISTANT_STORE_ROOT else: root
         AssistantStore(root: resolved)
@@ -370,6 +372,10 @@ fn _assistant_session_finalize(session: AssistantSessionRecord) -> AssistantSess
         session.updated_at_ms = assistant_now_ms()
     if session.created_at_ms <= 0:
         session.created_at_ms = session.updated_at_ms
+    if session.children.len() == 0 and session.child_tasks.len() > 0:
+        for task in session.child_tasks:
+            if task.child_session_id.trim() != "":
+                session.children = _assistant_text_list_append_unique(session.children, task.child_session_id)
     session
 
 fn _assistant_infer_session_state(kind: text, current: text) -> text:
@@ -700,3 +706,189 @@ fn _assistant_insert_session_sorted(sorted: [AssistantSessionRecord], session: A
     if not inserted:
         out.push(session)
     out
+
+# =========================================================================
+# Public Root-Based API
+# =========================================================================
+
+fn assistant_store_resolve_root(root: text) -> text:
+    if root.trim() == "":
+        ASSISTANT_STORE_ROOT
+    else:
+        root
+
+fn assistant_store_sessions_dir(root: text) -> text:
+    "{assistant_store_resolve_root(root)}/sessions"
+
+fn assistant_store_timelines_dir(root: text) -> text:
+    "{assistant_store_resolve_root(root)}/timelines"
+
+fn assistant_store_notifications_dir(root: text) -> text:
+    "{assistant_store_resolve_root(root)}/notifications"
+
+fn assistant_store_session_path(root: text, session_id: text) -> text:
+    "{assistant_store_sessions_dir(root)}/{session_id}.json"
+
+fn assistant_store_timeline_path(root: text, session_id: text) -> text:
+    "{assistant_store_timelines_dir(root)}/{session_id}.jsonl"
+
+fn assistant_store_notifications_path(root: text, session_id: text) -> text:
+    "{assistant_store_notifications_dir(root)}/{session_id}.jsonl"
+
+fn assistant_store_ensure_dirs(root: text) -> bool:
+    rt_mkdir_p(assistant_store_sessions_dir(root)) and rt_mkdir_p(assistant_store_timelines_dir(root)) and rt_mkdir_p(assistant_store_notifications_dir(root))
+
+fn assistant_store_create_session(root: text, session: AssistantSessionRecord) -> AssistantSessionRecord?:
+    var normalized = session
+    if normalized.session_id.trim() == "":
+        normalized.session_id = assistant_generate_session_id(assistant_now_ms())
+    if normalized.name.trim() == "":
+        normalized.name = normalized.session_id
+    if normalized.summary.trim() == "":
+        normalized.summary = assistant_session_summary(normalized.name, normalized.prompt, normalized.objective)
+    if normalized.objective.trim() == "":
+        normalized.objective = assistant_first_non_empty([normalized.summary, normalized.prompt, normalized.name])
+    if normalized.mode.trim() == "":
+        normalized.mode = "proactive"
+    if normalized.state.trim() == "":
+        normalized.state = "running"
+    if normalized.policy.trim() == "":
+        normalized.policy = "bounded"
+    if normalized.created_at_ms <= 0:
+        normalized.created_at_ms = assistant_now_ms()
+    if normalized.updated_at_ms <= 0:
+        normalized.updated_at_ms = normalized.created_at_ms
+    if normalized.last_event_detail.trim() == "":
+        normalized.last_event_detail = assistant_first_non_empty([normalized.summary, normalized.objective, normalized.state])
+    if normalized.last_event_kind.trim() == "":
+        normalized.last_event_kind = assistant_first_non_empty([normalized.state, "session"])
+    assistant_store_ensure_dirs(root)
+    if not _assistant_write_json(assistant_store_session_path(root, normalized.session_id), _assistant_session_record_to_json_value(normalized)):
+        return nil
+    assistant_store_load_session(root, normalized.session_id)
+
+fn assistant_store_load_session(root: text, session_id: text) -> AssistantSessionRecord?:
+    if session_id.trim() == "":
+        return nil
+    val path = assistant_store_session_path(root, session_id)
+    if not rt_file_exists(path):
+        return nil
+    val content = rt_file_read_text(path)
+    if content.trim() == "":
+        return nil
+    val record = json_parse(content)
+    if record == nil:
+        return nil
+    var session = _assistant_session_record_from_json_value(record)
+    session = _assistant_session_merge_timeline(root, session)
+    session = _assistant_session_merge_notifications(root, session)
+    session = _assistant_session_finalize(session)
+    session
+
+fn assistant_store_list_sessions(root: text) -> [AssistantSessionRecord]:
+    assistant_store_ensure_dirs(root)
+    val entries = rt_dir_list(assistant_store_sessions_dir(root))
+    var sessions: [AssistantSessionRecord] = []
+    for entry in entries:
+        if entry.ends_with(".json"):
+            val session_id = entry.slice(0, entry.len() - 5)
+            if val loaded = assistant_store_load_session(root, session_id):
+                sessions.push(loaded)
+    _assistant_sort_sessions_by_updated_at(sessions)
+
+fn assistant_store_append_event(root: text, event: AssistantTimelineRecord) -> AssistantSessionRecord?:
+    var normalized = event
+    if normalized.kind.trim() == "":
+        normalized.kind = "note"
+    if normalized.timestamp_ms <= 0:
+        normalized.timestamp_ms = assistant_now_ms()
+    if normalized.event_id.trim() == "":
+        normalized.event_id = assistant_generate_event_id(normalized.session_id, normalized.timestamp_ms, normalized.kind)
+    if normalized.severity.trim() == "":
+        normalized.severity = assistant_timeline_severity(normalized.kind)
+    if normalized.title.trim() == "":
+        normalized.title = assistant_timeline_title(normalized.kind, normalized.message, normalized.signal)
+    if normalized.detail.trim() == "":
+        normalized.detail = assistant_timeline_detail(normalized.kind, normalized.message, normalized.signal)
+    if normalized.source.trim() == "":
+        normalized.source = "assistant"
+    if normalized.session_id.trim() == "":
+        return nil
+    assistant_store_ensure_dirs(root)
+    if not _assistant_append_jsonl(assistant_store_timeline_path(root, normalized.session_id), _assistant_timeline_record_to_json_text(normalized)):
+        return nil
+    _assistant_append_jsonl(assistant_store_notifications_path(root, normalized.session_id), _assistant_timeline_record_to_json_text(normalized))
+    if val session = assistant_store_load_session(root, normalized.session_id):
+        session.last_signal = if normalized.signal.trim() != "": normalized.signal else: session.last_signal
+        session.last_event_kind = normalized.kind
+        session.last_event_detail = assistant_first_non_empty([normalized.detail, normalized.message, normalized.signal, normalized.kind])
+        session.last_event_time_ms = normalized.timestamp_ms
+        session.updated_at_ms = if normalized.timestamp_ms > 0: normalized.timestamp_ms else: assistant_now_ms()
+        _assistant_write_json(assistant_store_session_path(root, session.session_id), _assistant_session_record_to_json_value(session))
+        return assistant_store_load_session(root, normalized.session_id)
+    nil
+
+fn assistant_store_update_state(root: text, session_id: text, new_state: text, wake_reason: text) -> AssistantSessionRecord?:
+    if session_id.trim() == "":
+        return nil
+    if val session = assistant_store_load_session(root, session_id):
+        session.state = if new_state.trim() == "": session.state else: new_state
+        if wake_reason.trim() != "":
+            session.last_signal = wake_reason
+        session.updated_at_ms = assistant_now_ms()
+        session.last_event_kind = "state"
+        session.last_event_detail = session.state
+        session.last_event_time_ms = session.updated_at_ms
+        val state_event = AssistantTimelineRecord.new(session.session_id, "state", session.state, wake_reason)
+        state_event.parent_session_id = session.parent_session_id
+        state_event.title = "state"
+        state_event.detail = "state -> {session.state}"
+        state_event.message = "state -> {session.state}"
+        state_event.signal = wake_reason
+        state_event.source = "assistant"
+        if not _assistant_append_jsonl(assistant_store_timeline_path(root, session.session_id), _assistant_timeline_record_to_json_text(state_event)):
+            return nil
+        _assistant_append_jsonl(assistant_store_notifications_path(root, session.session_id), _assistant_timeline_record_to_json_text(state_event))
+        _assistant_write_json(assistant_store_session_path(root, session.session_id), _assistant_session_record_to_json_value(session))
+        return assistant_store_load_session(root, session_id)
+    nil
+
+fn assistant_store_create_child_task(root: text, task: AssistantChildTaskRecord) -> AssistantSessionRecord?:
+    if task.session_id.trim() == "":
+        return nil
+    if val session = assistant_store_load_session(root, task.session_id):
+        var normalized = task
+        if normalized.task_id.trim() == "":
+            normalized.task_id = assistant_generate_task_id(session.session_id, assistant_now_ms())
+        normalized.parent_session_id = session.session_id
+        normalized.updated_at_ms = assistant_now_ms()
+        normalized.created_at_ms = if normalized.created_at_ms > 0: normalized.created_at_ms else: normalized.updated_at_ms
+        if normalized.status.trim() == "":
+            normalized.status = "queued"
+        if normalized.owner_kind.trim() == "":
+            normalized.owner_kind = "assistant"
+        if normalized.resource_policy.trim() == "":
+            normalized.resource_policy = "bounded"
+        if normalized.objective.trim() == "":
+            normalized.objective = normalized.result_summary
+        session.child_tasks = _assistant_child_tasks_append(session.child_tasks, normalized)
+        if normalized.child_session_id.trim() != "":
+            session.children = _assistant_text_list_append_unique(session.children, normalized.child_session_id)
+        session.updated_at_ms = normalized.updated_at_ms
+        session.last_event_kind = "child_task"
+        session.last_event_detail = assistant_first_non_empty([normalized.objective, normalized.child_session_id, normalized.task_id])
+        session.last_signal = assistant_first_non_empty([normalized.status, session.last_signal])
+        session.event_count = session.event_count + 1
+        val child_event = AssistantTimelineRecord.new(session.session_id, "child_task", normalized.objective, normalized.status)
+        child_event.child_task_id = normalized.task_id
+        child_event.parent_session_id = session.parent_session_id
+        child_event.title = "child_task"
+        child_event.detail = assistant_first_non_empty([normalized.objective, normalized.child_session_id, normalized.task_id])
+        child_event.message = child_event.detail
+        child_event.signal = normalized.status
+        if not _assistant_append_jsonl(assistant_store_timeline_path(root, session.session_id), _assistant_timeline_record_to_json_text(child_event)):
+            return nil
+        _assistant_append_jsonl(assistant_store_notifications_path(root, session.session_id), _assistant_timeline_record_to_json_text(child_event))
+        _assistant_write_json(assistant_store_session_path(root, session.session_id), _assistant_session_record_to_json_value(session))
+        return assistant_store_load_session(root, session.session_id)
+    nil
