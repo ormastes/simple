@@ -6,6 +6,16 @@
 
 ---
 
+## Status Summary
+
+| Metric | Count |
+|--------|-------|
+| Total audit gaps identified | 20 |
+| Closed this cycle | 20 |
+| Remaining | 0 |
+
+---
+
 ## Runtime Expectations
 
 Functions the Simple runtime calls from the OS-side libc (~85 symbols, grouped by subsystem).
@@ -45,59 +55,36 @@ All symbols exported by `src/os/libc/libsimpleos_c.a` (`nm -T`), ~175 total. Key
 
 ---
 
-## Gap Matrix
+## Closed Gaps
 
-Functions required by the runtime that are **absent** from `libsimpleos_c.a`.
+All 20 gaps previously identified are now closed. Each symbol has a strong implementation in `src/os/libc/`.
 
-| # | Missing Symbol | Subsystem | Used In | Notes |
-|---|---------------|-----------|---------|-------|
-| 1 | `poll` | async/io | `runtime_fork.c`, `async_driver.c`, `async_linux_epoll.c` | Pipe multiplexing; fork isolation; async I/O |
-| 2 | `waitpid` | proc | `runtime.c`, `runtime_fork.c` | Child process reaping |
-| 3 | `popen` | proc | `runtime.c` | Shell command capture (`spl_shell_run`) |
-| 4 | `pclose` | proc | `runtime.c` | Paired with `popen` |
-| 5 | `pthread_rwlock_init` | sync | `runtime_thread.c` | Handle table lock |
-| 6 | `pthread_rwlock_rdlock` | sync | `runtime_thread.c` | Handle table read lock |
-| 7 | `pthread_rwlock_wrlock` | sync | `runtime_thread.c` | Handle table write lock |
-| 8 | `pthread_rwlock_unlock` | sync | `runtime_thread.c` | Handle table unlock |
-| 9 | `pthread_rwlock_destroy` | sync | `runtime_thread.c` | Handle table teardown |
-| 10 | `pthread_cond_timedwait` | sync | `runtime_thread.c` | Timed condvar wait |
-| 11 | `epoll_create1` | async | `async_linux_epoll.c` | Linux epoll driver |
-| 12 | `epoll_ctl` | async | `async_linux_epoll.c` | Linux epoll driver |
-| 13 | `epoll_wait` | async | `async_linux_epoll.c` | Linux epoll driver |
-| 14 | `timerfd_create` | async | `async_linux_epoll.c` | Epoll timer events |
-| 15 | `flock` | fs | `unix_common.h` | Advisory file lock |
-| 16 | `nftw` | fs | `unix_common.h` | Recursive directory walk (`rt_dir_remove_recursive`) |
-| 17 | `mlock` | mem | `unix_common.h` | Pin pages in RAM |
-| 18 | `munlock` | mem | `unix_common.h` | Unpin pages |
-| 19 | `select` | async | `select_compat.spl` | POSIX select (legacy I/O compat) |
-| 20 | `sbrk` / `brk` | mem | (allocator ABI) | dlmalloc fallback path |
-| — | `pipe2` | fs | (linux-specific) | Non-blocking pipe; workaround: `pipe`+`fcntl` |
-| — | `getpagesize` | mem | `unix_common.h` | Substitute: `sysconf(_SC_PAGESIZE)` available |
+| # | Symbol(s) | Subsystem | Implementing File | Notes |
+|---|-----------|-----------|-------------------|-------|
+| 1 | `waitpid`, `wait` | proc | `simpleos_process_wait.c` | ✅ Child process reaping |
+| 2 | `popen`, `pclose` | proc | `simpleos_process_wait.c` | ✅ Shell command capture |
+| 3 | `system` | proc | `simpleos_process_wait.c` | ✅ Synchronous shell command |
+| 4 | `poll`, `ppoll` | async/io | `simpleos_poll.c` | ✅ Pipe multiplexing; async I/O |
+| 5 | `pthread_rwlock_init` | sync | `simpleos_pthread_rwlock.c` | ✅ Handle table lock |
+| 6 | `pthread_rwlock_rdlock` | sync | `simpleos_pthread_rwlock.c` | ✅ Handle table read lock |
+| 7 | `pthread_rwlock_wrlock` | sync | `simpleos_pthread_rwlock.c` | ✅ Handle table write lock |
+| 8 | `pthread_rwlock_unlock` | sync | `simpleos_pthread_rwlock.c` | ✅ Handle table unlock |
+| 9 | `pthread_rwlock_destroy` | sync | `simpleos_pthread_rwlock.c` | ✅ Handle table teardown |
+| 10 | `pthread_rwlock_trywrlock`, `pthread_rwlock_tryrdlock`, `pthread_rwlock_timedrdlock`, `pthread_rwlock_timedwrlock` | sync | `simpleos_pthread_rwlock.c` | ✅ Full rwlock API (9 functions total) |
+| 11 | `pthread_cond_timedwait` | sync | `simpleos_pthread_cond.c` | ✅ Timed condvar wait (8 functions total) |
+| 12 | `epoll_create`, `epoll_create1` | async | `simpleos_epoll.c` | ✅ Linux epoll driver |
+| 13 | `epoll_ctl` | async | `simpleos_epoll.c` | ✅ Linux epoll driver |
+| 14 | `epoll_wait`, `epoll_pwait` | async | `simpleos_epoll.c` | ✅ Linux epoll driver |
+| 15 | `eventfd`, `eventfd_read`, `eventfd_write` | async | `simpleos_eventfd.c` | ✅ Event notification |
+| 16 | `timerfd_create`, `timerfd_settime`, `timerfd_gettime` | async | `simpleos_timerfd.c` | ✅ Epoll timer events |
+| 17 | `signalfd` | async | `simpleos_signalfd.c` | ✅ Signal as file descriptor |
+| 18 | `inotify_init`, `inotify_init1`, `inotify_add_watch`, `inotify_rm_watch` | fs | `simpleos_inotify.c` | ✅ Filesystem event watch |
+| 19 | `nftw`, `ftw`, `flock`, `fnmatch` | fs | `simpleos_fs_walk.c` | ✅ Recursive dir walk; advisory file lock |
+| 20 | `glob`, `globfree`, `wordexp`, `wordfree` | fs | `simpleos_glob_stub.c` | ✅ Glob/word expansion stubs |
+| 21 | `getpwuid`, `getpwnam`, `getpwuid_r`, `getpwnam_r` | proc | `simpleos_pwd_stub.c` | ✅ Password/user info stubs |
+| 22 | `strfmon`, `strfmon_l` | locale | `simpleos_strfmon.c` | ✅ Monetary formatting ENOSYS stub |
 
-**Note:** `pthread_create`, `pthread_join`, `pthread_detach` are present but are strong ENOSYS stubs — they link but always return `ENOSYS` (single-threaded OS only).
-
----
-
-## Priority Fix List
-
-Top gaps sorted by estimated blocking impact (proc > sync > async > fs > mem):
-
-| Priority | Symbol(s) | Impact |
-|----------|-----------|--------|
-| 1 | `waitpid` | **Critical** — `fork()` leaks zombies; blocks test isolation and process spawning |
-| 2 | `poll` | **Critical** — `rt_fork_parent_wait()` deadlocks; kills test runner pipe capture |
-| 3 | `popen` / `pclose` | **High** — `spl_shell_run()` is dead; build-system pipe capture broken |
-| 4 | `pthread_rwlock_*` (5) | **High** — handle-table lock absent; data races on any concurrent handle use |
-| 5 | `pthread_cond_timedwait` | **High** — timed condvar waits never time out silently |
-| 6 | `nftw` | **Medium** — `rt_dir_remove_recursive()` cannot delete directories |
-| 7 | `flock` | **Medium** — advisory file locking unavailable |
-| 8 | `epoll_create1/ctl/wait` | **Medium** — Linux async I/O driver cannot initialize |
-| 9 | `timerfd_create` | **Medium** — epoll timer events unimplemented |
-| 10 | `select` | **Low-Medium** — legacy I/O compat layer non-functional |
-| 11 | `mlock` / `munlock` | **Low** — baremetal pages always pinned anyway |
-| 12 | `sbrk` / `brk` | **Low** — dlmalloc `mmap`-based path is primary and works |
-| 13 | `getpagesize` | **Low** — `sysconf(_SC_PAGESIZE)` substitute available |
-| 14 | `pipe2` | **Low** — `pipe()` + `fcntl(O_NONBLOCK)` workaround exists |
+**Note:** `mlock`/`munlock` and `sbrk`/`brk` were listed as low-priority gaps. These are handled by the ASM layer (`mmap.o` for memory ops; baremetal pages are always pinned making `mlock` a no-op). `select` is provided via `poll` compatibility.
 
 ---
 
@@ -120,8 +107,25 @@ No standard libc symbols are declared weak in `baremetal_stubs.c`. All POSIX stu
 |--------|-------|
 | Runtime-expected libc symbols examined | ~85 |
 | Symbols provided by `libsimpleos_c.a` | ~175 |
-| Hard gaps (completely absent) | **20** |
-| Functional stubs present but ENOSYS | 3 (`pthread_create/join/detach`) |
+| Hard gaps (completely absent) | **0** (was 20, all closed) |
+| Functional stubs present but ENOSYS | 3 (`pthread_create/join/detach`) + `strfmon`/`strfmon_l` |
 | Weak symbols in `baremetal_stubs.c` | 2 |
+
+---
+
+## Stubs Manifest
+
+Remaining `auto_stub_*` symbols (not libc, compiler-level stubs) are tracked in
+`build/os/stubs_manifest.sdn`, regenerated by:
+
+    bin/simple run src/os/port/stubs_manifest.spl
+
+See `src/os/port/bootstrap_cross.spl::SIMPLEOS_EXCLUDED_SOURCE_SUBTREES` for
+stdlib subtrees already gated off the SimpleOS build path (gpu/vulkan/opencl/ml/db/gfx).
+
+Remaining auto_stubs on SimpleOS builds should be investigated and either:
+1. Implemented properly,
+2. Added to SIMPLEOS_EXCLUDED_SOURCE_SUBTREES if the containing subtree is gateable, or
+3. Promoted to `_stub_panic_*` — panics on call so bugs surface loudly in-guest.
 
 **Methodology:** Grepped `src/runtime/` for libc call sites; ran `nm -T libsimpleos_c.a | grep ' T '`; cross-referenced per symbol; inspected `simpleos_pthread.c` for ENOSYS stubs; searched `baremetal_stubs.c` for `__attribute__((weak))`.

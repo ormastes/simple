@@ -1,0 +1,235 @@
+## stubs_manifest.spl — auto_stub / panic-on-call symbol manifest generator.
+##
+## Audits the default stage1_full binary for remaining auto_stub_* and
+## _stub_panic_* symbols, groups them by semantic prefix, writes a structured
+## SDN manifest to build/os/stubs_manifest.sdn, and prints a summary.
+##
+## Usage:
+##   bin/simple run src/os/port/stubs_manifest.spl
+##   bin/simple run src/os/port/stubs_manifest.spl -- --binary <path>
+##   bin/simple run src/os/port/stubs_manifest.spl -- --output <path>
+##   bin/simple run src/os/port/stubs_manifest.spl -- --help
+
+use std.fs
+use std.process
+use std.text
+use std.cli
+
+val DEFAULT_BINARY = "build/bootstrap/stage1_full/simple"
+val DEFAULT_OUTPUT = "build/os/stubs_manifest.sdn"
+
+val KNOWN_PREFIXES: [text] = [
+    "gpu", "cuda", "vulkan", "opencl", "gfx",
+    "net", "http", "tls", "ssl",
+    "sqlite3", "sqlite", "db",
+    "torch", "ml",
+    "audio", "video",
+    "crypto",
+]
+
+val OTHER_PREFIX = "other"
+
+## ─── argument parsing ────────────────────────────────────────────────────────
+
+fn print_usage():
+    print "stubs_manifest -- audit auto_stub / _stub_panic_ symbols and write SDN manifest"
+    print ""
+    print "Usage: bin/simple run src/os/port/stubs_manifest.spl [-- options]"
+    print ""
+    print "Options:"
+    print "  --binary <path>   Binary to inspect (default: {DEFAULT_BINARY})"
+    print "  --output <path>   Manifest output path (default: {DEFAULT_OUTPUT})"
+    print "  --help, -h        Show this help"
+
+fn parse_args(args: [text]) -> (text, text):
+    var binary = DEFAULT_BINARY
+    var output = DEFAULT_OUTPUT
+    var i = 0
+    while i < args.len():
+        val arg = args[i]
+        if arg == "--help" or arg == "-h":
+            print_usage()
+            process.exit(0)
+        else if arg == "--binary":
+            i = i + 1
+            if i < args.len():
+                binary = args[i]
+        else if arg.starts_with("--binary="):
+            binary = arg.slice(9, arg.len())
+        else if arg == "--output":
+            i = i + 1
+            if i < args.len():
+                output = args[i]
+        else if arg.starts_with("--output="):
+            output = arg.slice(9, arg.len())
+        i = i + 1
+    (binary, output)
+
+## ─── nm invocation ───────────────────────────────────────────────────────────
+
+fn run_nm(binary: text) -> [text]:
+    """Run nm on binary and return non-empty output lines."""
+    if not fs.exists(binary):
+        print "error: binary not found: {binary}"
+        process.exit(1)
+    val result = process.run("nm", [binary])
+    if result.exit_code != 0:
+        print "error: nm failed (exit {result.exit_code}):"
+        print result.stderr
+        process.exit(1)
+    var lines: [text] = []
+    for line in result.stdout.split("\n"):
+        val t = line.trim()
+        if t != "":
+            lines = lines + [t]
+    lines
+
+## ─── symbol extraction ───────────────────────────────────────────────────────
+
+fn extract_name(line: text) -> text:
+    """Return symbol name from an nm line (last token); empty if not a text symbol."""
+    val parts = line.split(" ")
+    var tokens: [text] = []
+    for p in parts:
+        if p != "":
+            tokens = tokens + [p]
+    if tokens.len() < 2:
+        return ""
+    val type_letter = tokens[tokens.len() - 2]
+    if type_letter == "T" or type_letter == "t" or type_letter == "W" or type_letter == "w":
+        return tokens[tokens.len() - 1]
+    ""
+
+fn is_stub_symbol(name: text) -> bool:
+    name.contains("auto_stub") or name.contains("_stub_panic_")
+
+fn collect_stubs(lines: [text]) -> [text]:
+    var out: [text] = []
+    for line in lines:
+        val name = extract_name(line)
+        if name != "" and is_stub_symbol(name):
+            out = out + [name]
+    out
+
+## ─── classification ──────────────────────────────────────────────────────────
+
+fn classify(symbol: text) -> text:
+    """Map a stub symbol to the first matching known prefix, or OTHER_PREFIX."""
+    val lower = symbol.to_lower()
+    for prefix in KNOWN_PREFIXES:
+        if lower.contains(prefix):
+            return prefix
+    OTHER_PREFIX
+
+## ─── grouping ────────────────────────────────────────────────────────────────
+
+struct Group:
+    name: text
+    symbols: [text]
+
+fn build_groups(symbols: [text]) -> [Group]:
+    var names: [text] = []
+    var counts: [i64] = []
+    var lists: [[text]] = []
+
+    for sym in symbols:
+        val bucket = classify(sym)
+        var found = false
+        var idx = 0
+        while idx < names.len():
+            if names[idx] == bucket:
+                found = true
+                lists = lists.with(idx, lists[idx] + [sym])
+                counts = counts.with(idx, counts[idx] + 1)
+            idx = idx + 1
+        if not found:
+            names = names + [bucket]
+            counts = counts + [1]
+            lists = lists + [[sym]]
+
+    ## build Group list in insertion order
+    var groups: [Group] = []
+    var gi = 0
+    while gi < names.len():
+        groups = groups + [Group(name: names[gi], symbols: lists[gi])]
+        gi = gi + 1
+    groups
+
+fn sort_groups_desc(groups: [Group]) -> [Group]:
+    """Selection-sort groups by descending symbol count."""
+    var gs = groups
+    var n = gs.len()
+    var i = 0
+    while i < n:
+        var best = i
+        var j = i + 1
+        while j < n:
+            if gs[j].symbols.len() > gs[best].symbols.len():
+                best = j
+            j = j + 1
+        if best != i:
+            val tmp = gs[i]
+            gs = gs.with(i, gs[best])
+            gs = gs.with(best, tmp)
+        i = i + 1
+    gs
+
+## ─── SDN manifest writer ─────────────────────────────────────────────────────
+
+fn symbols_sdn(syms: [text]) -> text:
+    var inner = ""
+    for s in syms:
+        inner = inner + "        \"{s}\"\n"
+    inner
+
+fn group_sdn(g: Group) -> text:
+    val syms = symbols_sdn(g.symbols)
+    "    [group\n      [name \"{g.name}\"]\n      [count {g.symbols.len()}]\n      [symbols\n{syms}      ]\n    ]\n"
+
+fn write_manifest(binary: text, total: i64, sorted: [Group], output: text):
+    val parent = fs.parent(output)
+    if parent != "" and not fs.dir_exists(parent):
+        fs.create_dir_all(parent)
+
+    var body = "[stubs_manifest\n"
+    body = body + "  [binary \"{binary}\"]\n"
+    body = body + "  [total_count {total}]\n"
+    body = body + "  [groups\n"
+    for g in sorted:
+        body = body + group_sdn(g)
+    body = body + "  ]\n"
+    body = body + "]\n"
+
+    fs.write_text(output, body)
+    print "manifest written: {output}"
+
+## ─── stdout summary ──────────────────────────────────────────────────────────
+
+fn print_summary(binary: text, total: i64, sorted: [Group]):
+    print "=== stubs_manifest: {binary} ==="
+    print "total stub symbols: {total}"
+    print ""
+    print "top groups:"
+    val show = if sorted.len() < 5: sorted.len() else: 5
+    var si = 0
+    while si < show:
+        val g = sorted[si]
+        print "  {g.name}: {g.symbols.len()}"
+        si = si + 1
+    if sorted.len() > 5:
+        print "  ... ({sorted.len() - 5} more groups)"
+
+## ─── entry point ─────────────────────────────────────────────────────────────
+
+fn main():
+    val args = cli.args()
+    val (binary, output) = parse_args(args)
+
+    print "[stubs_manifest] scanning {binary} with nm..."
+    val lines = run_nm(binary)
+    val stubs = collect_stubs(lines)
+    val total: i64 = stubs.len()
+    val groups = build_groups(stubs)
+    val sorted = sort_groups_desc(groups)
+    print_summary(binary: binary, total: total, sorted: sorted)
+    write_manifest(binary: binary, total: total, sorted: sorted, output: output)
