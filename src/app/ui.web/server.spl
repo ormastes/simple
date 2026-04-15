@@ -5,9 +5,9 @@
 
 use std.nogc_sync_mut.io.tcp.{TcpListener, TcpStream}
 use std.nogc_async_mut.concurrent.thread.{thread_spawn2}
-use common.ui.widget.{UIState, UITree, UIEvent}
+use common.ui.widget.{UIState, UITree, UIEvent, UIMode}
 use common.ui.parse.sdn_tree.{parse_ui_to_tree}
-use common.ui.state.{init_state, update_state, update_tree}
+use common.ui.state.{update_state}
 use common.ui.event.{process_event}
 use app.ui.web.html.{generate_html_page, generate_wm_html_page}
 use app.ui.web.ws_handler.{handle_ws_upgrade, is_ws_upgrade_request}
@@ -54,13 +54,26 @@ class WebServer:
     origin_guard: OriginGuard
     token_secret: text
 
+    static fn build_state(tree: UITree) -> UIState:
+        val ids = tree.all_widget_ids()
+        var initial_focus = ""
+        for id in ids:
+            if initial_focus == "":
+                initial_focus = id
+        return UIState(
+            tree: tree,
+            mode: UIMode.Normal,
+            focused_id: initial_focus,
+            command_buffer: ""
+        )
+
     static fn new(file_path: text, port: i32, wm_mode: bool) -> Result<WebServer, text>:
         val tree_result = parse_ui_to_tree(file_path)
         match tree_result:
             Err(e):
                 return Err(e)
             Ok(tree):
-                val state = init_state(tree)
+                val state = WebServer.build_state(tree)
                 val content = if rt_file_exists(file_path):
                     rt_file_read_text(file_path)
                 else:
@@ -96,13 +109,16 @@ class WebServer:
                 Ok(stream):
                     val handler = thread_spawn2(stream, self, \conn_stream, server:
                         val ws_server: WebServer = server
-                        ws_server.handle_connection(conn_stream)
+                        WebServer.handle_connection_thread(ws_server, conn_stream)
                     )
                     handler.free()
                 Err(e):
                     print "Accept error: {e}"
 
-    fn handle_connection(stream: TcpStream):
+    static fn handle_connection_thread(server: WebServer, stream: TcpStream):
+        server.handle_connection(stream)
+
+    me handle_connection(stream: TcpStream):
         """Handle a single HTTP connection."""
         match stream.read_line():
             Err(e):
@@ -265,7 +281,7 @@ class WebServer:
             val tree_result = parse_ui_to_tree(self.file_path)
             match tree_result:
                 Ok(new_tree):
-                    self.state = update_tree(self.state, new_tree)
+                    self.state = WebServer.build_state(new_tree)
                 Err(e):
                     # Keep old state on parse error
                     print "Warning: UI parse error: {e}"

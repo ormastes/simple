@@ -7,7 +7,7 @@ use std::sync::Arc;
 
 use simple_common::gc::GcAllocator;
 use simple_common::target::Target;
-use simple_parser::ast::Node;
+use simple_parser::ast::{Module, Node};
 use simple_type::check as type_check;
 use tracing::instrument;
 
@@ -43,6 +43,28 @@ fn generate_linked_smf_from_object(
         .write(&mut buf)
         .map_err(|e| CompileError::Codegen(format!("Failed to write linked SMF: {}", e)))?;
     Ok(buf)
+}
+
+fn strip_flattened_import_nodes(module: Module) -> Module {
+    let items = module
+        .items
+        .into_iter()
+        .filter(|item| {
+            !matches!(
+                item,
+                Node::UseStmt(_)
+                    | Node::MultiUse(_)
+                    | Node::CommonUseStmt(_)
+                    | Node::ExportUseStmt(_)
+                    | Node::StructuredExportStmt(_)
+                    | Node::AutoImportStmt(_)
+            )
+        })
+        .collect();
+    Module {
+        name: module.name,
+        items,
+    }
 }
 
 /// Link a WASM object file into a complete WASM module using wasm-ld.
@@ -327,11 +349,19 @@ impl CompilerPipeline {
         // 6. Validate sync constraints (async-by-default #44)
         self.validate_sync_constraints(&ast_module.items)?;
 
-        // If script-style statements exist, interpret directly and wrap result.
-        if has_script_statements(&ast_module.items) {
+        // Source-file compilation uses a flattened module graph for import resolution.
+        // Imported top-level statements must not force compile-time interpretation
+        // of the entry module.
+        if has_script_statements(&ast_module.items) && source_file.is_none() {
             let main_value = self.evaluate_module_with_project(&ast_module.items)?;
             return Ok(generate_smf_bytes(main_value, self.gc.as_ref()));
         }
+
+        let ast_module = if source_file.is_some() {
+            strip_flattened_import_nodes(ast_module)
+        } else {
+            ast_module
+        };
 
         // 4. Compilability analysis for hybrid execution
         let compilability = analyze_module(&ast_module.items);
@@ -354,6 +384,11 @@ impl CompilerPipeline {
         let has_main_function = mir_module.functions.iter().any(|f| f.name == FUNC_MAIN);
 
         if !has_main_function {
+            if source_file.is_some() {
+                return Err(CompileError::Semantic(
+                    "no native-compilable `fn main()` was found after lowering".to_string(),
+                ));
+            }
             // Fallback: evaluate via interpreter and wrap result
             let main_value = self.evaluate_module_with_project(&ast_module.items)?;
             return Ok(generate_smf_bytes(main_value, self.gc.as_ref()));
@@ -379,13 +414,16 @@ impl CompilerPipeline {
             generate_linked_smf_from_object(&object_code, &mir_module)
         } else {
             // Include templates in SMF
-            Ok(crate::smf_writer::generate_smf_with_templates(
+            crate::smf_writer::generate_linked_smf_with_templates(
                 &object_code,
+                &mir_module,
                 Some(&templates),
                 Some(&metadata),
+                None,
                 self.gc.as_ref(),
                 Target::host(),
-            ))
+            )
+            .map_err(CompileError::Codegen)
         }
     }
 
@@ -445,8 +483,9 @@ impl CompilerPipeline {
         // 6. Validate sync constraints (async-by-default #44)
         self.validate_sync_constraints(&ast_module.items)?;
 
-        // If script-style statements exist, interpret directly and wrap result.
-        if has_script_statements(&ast_module.items) {
+        // File-based target compilation should not interpret imported top-level
+        // statements from the flattened module graph.
+        if has_script_statements(&ast_module.items) && source_path.is_none() {
             if target.is_wasm() {
                 return Err(wasm_target_fallback_error(
                     "script-style top-level statements were detected in the entry module or its flattened imports",
@@ -455,6 +494,12 @@ impl CompilerPipeline {
             let main_value = self.evaluate_module_with_project(&ast_module.items)?;
             return Ok(generate_smf_bytes_for_target(main_value, self.gc.as_ref(), target));
         }
+
+        let ast_module = if source_path.is_some() {
+            strip_flattened_import_nodes(ast_module)
+        } else {
+            ast_module
+        };
 
         // 4. Compilability analysis for hybrid execution
         let compilability = analyze_module(&ast_module.items);
@@ -478,6 +523,11 @@ impl CompilerPipeline {
             if target.is_wasm() {
                 return Err(wasm_target_fallback_error(
                     "no native-compilable `fn main()` was found after lowering",
+                ));
+            }
+            if source_path.is_some() {
+                return Err(CompileError::Semantic(
+                    "no native-compilable `fn main()` was found after lowering".to_string(),
                 ));
             }
             // Fallback: evaluate via interpreter and wrap result
@@ -511,13 +561,16 @@ impl CompilerPipeline {
             if templates.is_empty() {
                 generate_linked_smf_from_object(&object_code, &mir_module)
             } else {
-                Ok(crate::smf_writer::generate_smf_with_templates(
+                crate::smf_writer::generate_linked_smf_with_templates(
                     &object_code,
+                    &mir_module,
                     Some(&templates),
                     Some(&metadata),
+                    None,
                     self.gc.as_ref(),
                     target,
-                ))
+                )
+                .map_err(CompileError::Codegen)
             }
         }
     }
@@ -695,6 +748,12 @@ impl CompilerPipeline {
 
         // Monomorphization
         let ast_module = monomorphize_module(&ast_module);
+
+        let ast_module = if source_path.is_some() {
+            strip_flattened_import_nodes(ast_module)
+        } else {
+            ast_module
+        };
 
         // Bootstrap leniency: when building the first native compiler with a newer
         // Rust toolchain, allow compiling without the full type system so older

@@ -32,7 +32,15 @@ impl LoadedModule {
             return None;
         }
 
-        Some(unsafe { self.code_mem.get_fn(self.header.entry_point as usize) })
+        let entry_offset = if self.header.entry_point != 0 {
+            Some(self.header.entry_point as usize)
+        } else {
+            ["_spl_main", "spl_main", "_main", "main"]
+                .iter()
+                .find_map(|name| self.symbols.lookup(name).map(|sym| sym.value as usize))
+        }?;
+
+        Some(unsafe { self.code_mem.get_fn(entry_offset) })
     }
 
     /// Check if module supports hot reload

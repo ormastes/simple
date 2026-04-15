@@ -84,6 +84,18 @@ pub extern "C" fn rt_sha1_free(handle: i64) {
     SHA1_MAP.lock().unwrap().remove(&handle);
 }
 
+/// Finalize SHA1 and get base64 string.
+#[no_mangle]
+pub extern "C" fn rt_sha1_finish_base64(handle: i64) -> RuntimeValue {
+    let mut map = SHA1_MAP.lock().unwrap();
+    if let Some(hasher) = map.remove(&handle) {
+        let result = hasher.finalize();
+        unsafe { crate::value::ffi::utils::rt_base64_encode(result.as_ptr(), result.len() as u64) }
+    } else {
+        RuntimeValue::NIL
+    }
+}
+
 /// Clear all SHA1 hasher handles (for test cleanup)
 pub fn clear_sha1_registry() {
     SHA1_MAP.lock().unwrap().clear();

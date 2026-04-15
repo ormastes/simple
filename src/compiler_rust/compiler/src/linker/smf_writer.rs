@@ -178,6 +178,27 @@ impl SmfWriter {
         self.add_data_section(name, data, DataSectionKind::Mutable)
     }
 
+    /// Add an arbitrary SMF section while preserving its bytes and alignment.
+    pub fn add_custom_section(
+        &mut self,
+        name: &str,
+        section_type: SectionType,
+        flags: u32,
+        data: Vec<u8>,
+        alignment: u32,
+    ) -> usize {
+        let section = SmfSection {
+            name: name.to_string(),
+            section_type,
+            flags,
+            data,
+            alignment,
+        };
+        let index = self.sections.len();
+        self.sections.push(section);
+        index
+    }
+
     /// Add a symbol
     pub fn add_symbol(&mut self, symbol: SmfSymbol) -> u32 {
         let index = self.symbols.len() as u32;
@@ -271,8 +292,8 @@ impl SmfWriter {
         let entry_point = self
             .symbols
             .iter()
-            .find(|symbol| symbol.name == "spl_main")
-            .or_else(|| self.symbols.iter().find(|symbol| symbol.name == "main"))
+            .find(|symbol| matches!(symbol.name.as_str(), "spl_main" | "_spl_main"))
+            .or_else(|| self.symbols.iter().find(|symbol| matches!(symbol.name.as_str(), "main" | "_main")))
             .map(|symbol| symbol.value)
             .unwrap_or(0);
         let exported_count = self
@@ -356,7 +377,7 @@ impl SmfWriter {
                 name_hash: hash_name(&symbol.name),
                 sym_type: symbol.sym_type,
                 binding: symbol.binding,
-                visibility: 0,
+                visibility: if symbol.section_index != 0 { 1 } else { 0 },
                 flags,
                 value: symbol.value,
                 size: symbol.size,
@@ -418,8 +439,11 @@ impl SmfWriter {
         // Add all symbols with layout information from MIR
         for mut symbol in parsed.symbols.into_iter() {
             // Update section index to SMF numbering
-            if let Some(&smf_idx) = section_mapping.get(&(symbol.section_index as usize)) {
-                symbol.section_index = smf_idx as u16;
+            let parsed_section_idx = symbol.section_index.saturating_sub(1) as usize;
+            if symbol.section_index != 0 {
+                if let Some(&smf_idx) = section_mapping.get(&parsed_section_idx) {
+                    symbol.section_index = (smf_idx as u16) + 1;
+                }
             }
 
             // Merge layout info from MIR if available

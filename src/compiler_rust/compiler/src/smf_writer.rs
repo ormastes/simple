@@ -16,7 +16,9 @@ use simple_common::smf::{
 use simple_common::target::Target;
 
 use crate::elf_utils::extract_code_from_object;
+use crate::linker;
 use crate::monomorphize::{GenericTemplates, MonomorphizationMetadata, NoteSdnMetadata};
+use crate::mir::MirModule;
 
 /// Generate SMF from object code with optional template sections.
 ///
@@ -30,6 +32,47 @@ pub fn generate_smf_with_templates(
     target: Target,
 ) -> Vec<u8> {
     generate_smf_with_all_sections(object_code, templates, metadata, None, gc, target)
+}
+
+/// Generate SMF from object code while preserving object-level symbols and relocations,
+/// then append template-bearing sections for deferred monomorphization.
+pub fn generate_linked_smf_with_templates(
+    object_code: &[u8],
+    mir: &MirModule,
+    templates: Option<&GenericTemplates>,
+    metadata: Option<&MonomorphizationMetadata>,
+    note_sdn: Option<&NoteSdnMetadata>,
+    gc: Option<&Arc<dyn GcAllocator>>,
+    _target: Target,
+) -> Result<Vec<u8>, String> {
+    let template_bytes = templates.map(serialize_templates).unwrap_or_default();
+    let metadata_bytes = metadata.map(serialize_metadata).unwrap_or_default();
+    let note_sdn_bytes = note_sdn.map(serialize_note_sdn).unwrap_or_default();
+
+    let mut writer = linker::SmfWriter::from_object_code(object_code, mir)
+        .map_err(|e| format!("Failed to parse object into relocation-aware SMF: {}", e))?;
+
+    if let Some(gc) = gc {
+        let _ = gc.alloc_bytes(&template_bytes);
+        let _ = gc.alloc_bytes(&metadata_bytes);
+        let _ = gc.alloc_bytes(&note_sdn_bytes);
+    }
+
+    if !template_bytes.is_empty() {
+        writer.add_custom_section("template_code", SectionType::TemplateCode, SECTION_FLAG_READ, template_bytes, 8);
+    }
+    if !metadata_bytes.is_empty() {
+        writer.add_custom_section("template_meta", SectionType::TemplateMeta, SECTION_FLAG_READ, metadata_bytes, 8);
+    }
+    if !note_sdn_bytes.is_empty() {
+        writer.add_custom_section("note.sdn", SectionType::TemplateMeta, SECTION_FLAG_READ, note_sdn_bytes, 1);
+    }
+
+    let mut buf = Vec::new();
+    writer
+        .write(&mut buf)
+        .map_err(|e| format!("Failed to write relocation-aware template SMF: {}", e))?;
+    Ok(buf)
 }
 
 /// Generate SMF from object code with all optional sections.

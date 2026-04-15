@@ -1291,6 +1291,46 @@ pub extern "C" fn rt_array_first(array: RuntimeValue) -> RuntimeValue {
     rt_array_get(array, 0)
 }
 
+/// Create a half-open integer range [start, end) as an array of ints.
+#[no_mangle]
+pub extern "C" fn rt_range(start: i64, end: i64) -> RuntimeValue {
+    if end <= start {
+        return rt_array_new(0);
+    }
+
+    let len = (end - start) as u64;
+    let result = rt_array_new(len);
+    if result.is_nil() {
+        return result;
+    }
+
+    for value in start..end {
+        rt_array_push(result, RuntimeValue::from_int(value));
+    }
+
+    result
+}
+
+/// Create an inclusive integer range [start, end] as an array of ints.
+#[no_mangle]
+pub extern "C" fn rt_range_inclusive(start: i64, end: i64) -> RuntimeValue {
+    if end < start {
+        return rt_array_new(0);
+    }
+
+    let len = (end - start + 1) as u64;
+    let result = rt_array_new(len);
+    if result.is_nil() {
+        return result;
+    }
+
+    for value in start..=end {
+        rt_array_push(result, RuntimeValue::from_int(value));
+    }
+
+    result
+}
+
 /// Get the last element of an array
 /// Returns NIL if array is empty
 #[no_mangle]

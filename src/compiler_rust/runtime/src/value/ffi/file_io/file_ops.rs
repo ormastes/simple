@@ -298,6 +298,46 @@ pub unsafe extern "C" fn rt_bytes_from_raw(ptr: i64, len: i64) -> RuntimeValue {
     array_handle
 }
 
+/// Convert a UTF-8 text buffer to a byte array ([u8]).
+#[no_mangle]
+pub unsafe extern "C" fn rt_text_to_bytes(text_ptr: *const u8, text_len: u64) -> RuntimeValue {
+    if text_ptr.is_null() || text_len == 0 {
+        return rt_array_new(0);
+    }
+
+    let bytes = std::slice::from_raw_parts(text_ptr, text_len as usize);
+    let array_handle = rt_array_new(text_len);
+    for &byte in bytes {
+        let byte_value = RuntimeValue::from_int(byte as i64);
+        rt_array_push(array_handle, byte_value);
+    }
+    array_handle
+}
+
+/// Convert a byte array ([u8]) to a UTF-8 text value.
+#[no_mangle]
+pub extern "C" fn rt_bytes_to_text(bytes: RuntimeValue) -> RuntimeValue {
+    let len = crate::value::collections::rt_array_len(bytes);
+    if len < 0 {
+        return RuntimeValue::NIL;
+    }
+
+    let mut out = Vec::with_capacity(len as usize);
+    for i in 0..len {
+        let value = crate::value::collections::rt_array_get(bytes, i);
+        if !value.is_int() {
+            return RuntimeValue::NIL;
+        }
+        let byte = value.as_int();
+        if !(0..=255).contains(&byte) {
+            return RuntimeValue::NIL;
+        }
+        out.push(byte as u8);
+    }
+
+    unsafe { rt_string_new(out.as_ptr(), out.len() as u64) }
+}
+
 /// Write raw bytes to file
 /// Takes an array of integers (0-255)
 #[no_mangle]

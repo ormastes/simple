@@ -107,6 +107,10 @@ fn requested_import_names(target: &ImportTarget, out: &mut Vec<String>) {
     }
 }
 
+fn should_flatten_transitively(target: &ImportTarget) -> bool {
+    matches!(target, ImportTarget::Group(_) | ImportTarget::Glob)
+}
+
 fn file_might_define_requested_symbol(path: &Path, requested_names: &[String]) -> bool {
     if requested_names.is_empty() {
         return true;
@@ -598,8 +602,12 @@ fn load_module_with_imports_internal(
         if let Node::UseStmt(use_stmt) = &item {
             if let Some(resolved) = resolve_use_to_path(use_stmt, path.parent().unwrap_or(Path::new("."))) {
                 if flatten_imports {
-                    let mut imported =
-                        load_module_with_imports_internal(&resolved, visited, Some(effective_caps), false)?;
+                    let mut imported = load_module_with_imports_internal(
+                        &resolved,
+                        visited,
+                        Some(effective_caps),
+                        should_flatten_transitively(&use_stmt.target),
+                    )?;
                     if resolved.file_name().is_some_and(|name| name == "__init__.spl") {
                         imported.items.extend(load_matching_package_siblings(
                             &resolved,
@@ -649,8 +657,12 @@ fn load_module_with_imports_internal(
             };
             if let Some(resolved) = resolve_use_to_path(&temp_use, path.parent().unwrap_or(Path::new("."))) {
                 if flatten_imports {
-                    let mut imported =
-                        load_module_with_imports_internal(&resolved, visited, Some(effective_caps), false)?;
+                    let mut imported = load_module_with_imports_internal(
+                        &resolved,
+                        visited,
+                        Some(effective_caps),
+                        should_flatten_transitively(&temp_use.target),
+                    )?;
                     if resolved.file_name().is_some_and(|name| name == "__init__.spl") {
                         imported.items.extend(load_matching_package_siblings(
                             &resolved,
@@ -691,8 +703,12 @@ fn load_module_with_imports_internal(
             };
             if let Some(resolved) = resolve_use_to_path(&temp_use, path.parent().unwrap_or(Path::new("."))) {
                 if flatten_imports {
-                    let mut imported =
-                        load_module_with_imports_internal(&resolved, visited, Some(effective_caps), false)?;
+                    let mut imported = load_module_with_imports_internal(
+                        &resolved,
+                        visited,
+                        Some(effective_caps),
+                        should_flatten_transitively(&temp_use.target),
+                    )?;
                     if resolved.file_name().is_some_and(|name| name == "__init__.spl") {
                         imported.items.extend(load_matching_package_siblings(
                             &resolved,
@@ -735,8 +751,12 @@ fn load_module_with_imports_internal(
                 };
                 if let Some(resolved) = resolve_use_to_path(&temp_use, path.parent().unwrap_or(Path::new("."))) {
                     if flatten_imports {
-                        let mut imported =
-                            load_module_with_imports_internal(&resolved, visited, Some(effective_caps), false)?;
+                        let mut imported = load_module_with_imports_internal(
+                            &resolved,
+                            visited,
+                            Some(effective_caps),
+                            should_flatten_transitively(&temp_use.target),
+                        )?;
                         if resolved.file_name().is_some_and(|name| name == "__init__.spl") {
                             imported.items.extend(load_matching_package_siblings(
                                 &resolved,
@@ -1167,6 +1187,68 @@ mod tests {
 
         assert!(has_run);
         assert!(!has_helper);
+    }
+
+    #[test]
+    fn nested_group_imports_flatten_transitively() {
+        let temp = tempfile::tempdir().unwrap();
+        let entry = temp.path().join("main.spl");
+        let wrapper = temp.path().join("wrapper.spl");
+        let helper = temp.path().join("helper.spl");
+
+        fs::write(
+            &entry,
+            "use wrapper.{run}\nfn main() -> int:\n    run()\n",
+        )
+        .unwrap();
+        fs::write(&wrapper, "use helper.{helper_fn}\n\nfn run() -> int:\n    helper_fn()\n").unwrap();
+        fs::write(&helper, "fn helper_fn() -> int:\n    1\n").unwrap();
+
+        let loaded = load_module_with_imports(&entry, &mut HashSet::new()).unwrap();
+        let has_run = loaded
+            .items
+            .iter()
+            .any(|item| matches!(item, Node::Function(func) if func.name == "run"));
+        let has_helper = loaded
+            .items
+            .iter()
+            .any(|item| matches!(item, Node::Function(func) if func.name == "helper_fn"));
+
+        assert!(has_run);
+        assert!(has_helper);
+    }
+
+    #[test]
+    fn web_wm_example_flattens_nested_web_helpers() {
+        let entry = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("..")
+            .join("examples")
+            .join("ui")
+            .join("web_wm.spl");
+
+        let loaded = load_module_with_imports(&entry, &mut HashSet::new()).unwrap();
+        let has_run_web_wm = loaded
+            .items
+            .iter()
+            .any(|item| matches!(item, Node::Function(func) if func.name == "run_web_wm"));
+        let has_parse_ui_to_tree = loaded
+            .items
+            .iter()
+            .any(|item| matches!(item, Node::Function(func) if func.name == "parse_ui_to_tree"));
+        let has_generate_wm_html_page = loaded
+            .items
+            .iter()
+            .any(|item| matches!(item, Node::Function(func) if func.name == "generate_wm_html_page"));
+        let has_handle_ws_wm_upgrade = loaded
+            .items
+            .iter()
+            .any(|item| matches!(item, Node::Function(func) if func.name == "handle_ws_wm_upgrade"));
+
+        assert!(has_run_web_wm);
+        assert!(has_parse_ui_to_tree);
+        assert!(has_generate_wm_html_page);
+        assert!(has_handle_ws_wm_upgrade);
     }
 
     #[test]

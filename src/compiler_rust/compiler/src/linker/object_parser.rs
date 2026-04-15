@@ -72,7 +72,11 @@ impl ParsedObject {
                     SECTION_FLAG_READ | SECTION_FLAG_WRITE,
                     Some(DataSectionKind::Mutable),
                 ),
-                SectionKind::ReadOnlyData => (SectionType::RoData, SECTION_FLAG_READ, Some(DataSectionKind::ReadOnly)),
+                SectionKind::ReadOnlyData
+                | SectionKind::ReadOnlyDataWithRel
+                | SectionKind::ReadOnlyString => {
+                    (SectionType::RoData, SECTION_FLAG_READ, Some(DataSectionKind::ReadOnly))
+                }
                 SectionKind::UninitializedData => {
                     // BSS - skip for now
                     continue;
@@ -123,7 +127,11 @@ impl ParsedObject {
                 // Find SMF section index from object section index
                 let obj_section = obj_file.section_by_index(section_idx)?;
                 let section_name = obj_section.name().unwrap_or("");
-                parsed.section_name_to_index.get(section_name).copied().unwrap_or(0) as u16
+                parsed
+                    .section_name_to_index
+                    .get(section_name)
+                    .map(|idx| (*idx as u16) + 1)
+                    .unwrap_or(0)
             } else {
                 0 // Undefined symbol
             };

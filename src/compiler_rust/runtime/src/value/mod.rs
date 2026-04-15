@@ -105,9 +105,9 @@ pub use channels::RuntimeChannel;
 
 // Re-export collection FFI functions
 pub use collections::{
-    rt_array_clear, rt_array_get, rt_array_len, rt_array_new, rt_array_pop, rt_array_push, rt_array_set, rt_contains,
+    rt_array_clear, rt_array_first, rt_array_get, rt_array_len, rt_array_new, rt_array_pop, rt_array_push, rt_array_set, rt_contains,
     rt_cstring_to_text, rt_index_get, rt_index_set, rt_len, rt_slice, rt_string_char_at, rt_string_concat,
-    rt_string_data, rt_string_ends_with, rt_string_eq, rt_string_find, rt_string_index_of, rt_string_join,
+    rt_range, rt_range_inclusive, rt_string_data, rt_string_ends_with, rt_string_eq, rt_string_find, rt_string_index_of, rt_string_join,
     rt_string_len, rt_string_new, rt_string_replace, rt_string_rfind, rt_string_split, rt_string_starts_with,
     rt_string_to_float, rt_string_to_int, rt_string_to_lower, rt_string_to_upper, rt_string_trim, rt_to_string,
     rt_tuple_get, rt_tuple_len, rt_tuple_new, rt_tuple_set,
@@ -334,6 +334,8 @@ pub use ffi::{
     rt_file_append_text,
     rt_file_read_bytes,
     rt_bytes_from_raw,
+    rt_bytes_to_text,
+    rt_text_to_bytes,
     rt_file_write_bytes,
     rt_file_move,
     // Directory ops
@@ -360,6 +362,29 @@ pub use ffi::{
     rt_path_stem,
     rt_path_relative,
     rt_path_join,
+};
+
+// Re-export hash FFI functions
+pub use ffi::{
+    rt_sha1_finish,
+    rt_sha1_finish_base64,
+    rt_sha1_finish_bytes,
+    rt_sha1_free,
+    rt_sha1_new,
+    rt_sha1_reset,
+    rt_sha1_write,
+    rt_sha256_finish,
+    rt_sha256_finish_bytes,
+    rt_sha256_free,
+    rt_sha256_new,
+    rt_sha256_reset,
+    rt_sha256_write,
+    rt_xxhash_finish,
+    rt_xxhash_free,
+    rt_xxhash_new,
+    rt_xxhash_new_with_seed,
+    rt_xxhash_reset,
+    rt_xxhash_write,
 };
 
 // Re-export atomic operations FFI functions
@@ -720,6 +745,23 @@ pub use net::{
     native_tcp_set_write_timeout,
     native_tcp_shutdown,
     native_tcp_write,
+    rt_io_tcp_accept,
+    rt_io_tcp_accept_timeout,
+    rt_io_tcp_bind,
+    rt_io_tcp_close,
+    rt_io_tcp_connect,
+    rt_io_tcp_connect_timeout,
+    rt_io_tcp_flush,
+    rt_io_tcp_local_addr,
+    rt_io_tcp_peer_addr,
+    rt_io_tcp_read,
+    rt_io_tcp_read_line,
+    rt_io_tcp_set_nodelay,
+    rt_io_tcp_set_read_timeout,
+    rt_io_tcp_set_write_timeout,
+    rt_io_tcp_shutdown,
+    rt_io_tcp_write,
+    rt_io_tcp_write_text,
     // UDP functions
     native_udp_bind,
     native_udp_close,

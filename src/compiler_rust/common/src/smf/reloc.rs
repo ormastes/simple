@@ -57,7 +57,7 @@ pub fn apply_relocations(
             "Processing relocation"
         );
 
-        let sym_addr = if sym.binding == SymbolBinding::Local || sym.value != 0 {
+        let sym_addr = if sym.visibility != 0 || sym.binding == SymbolBinding::Local || sym.value != 0 || sym.size != 0 {
             base_address.wrapping_add(sym.value as usize)
         } else {
             match imports(sym_name) {
@@ -203,5 +203,44 @@ mod tests {
 
         assert_eq!(import_lookups.get(), 0);
         assert_eq!(u64::from_le_bytes(code), (base_address + 0x40) as u64);
+    }
+
+    #[test]
+    fn applies_defined_global_symbol_at_offset_zero_without_import_lookup() {
+        let name = b"parse_ui_to_tree\0".to_vec();
+        let symbol = SmfSymbol {
+            name_offset: 0,
+            name_hash: hash_name("parse_ui_to_tree"),
+            sym_type: SymbolType::Function,
+            binding: SymbolBinding::Global,
+            visibility: 0,
+            flags: 0,
+            value: 0,
+            size: 32,
+            type_id: 0,
+            version: 0,
+            template_param_count: 0,
+            reserved: [0; 3],
+            template_offset: 0,
+        };
+        let symbols = SymbolTable::new(vec![symbol], name);
+        let relocs = [SmfRelocation {
+            offset: 0,
+            symbol_index: 0,
+            reloc_type: RelocationType::Abs64,
+            addend: 0,
+        }];
+        let mut code = [0u8; 8];
+        let base_address = 0x2000usize;
+        let import_lookups = Cell::new(0);
+
+        apply_relocations(&mut code, &relocs, &symbols, base_address, &|_| {
+            import_lookups.set(import_lookups.get() + 1);
+            None
+        })
+        .expect("defined globals at offset zero should relocate from the module body");
+
+        assert_eq!(import_lookups.get(), 0);
+        assert_eq!(u64::from_le_bytes(code), base_address as u64);
     }
 }
