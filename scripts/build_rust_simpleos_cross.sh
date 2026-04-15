@@ -77,7 +77,7 @@ export CARGO_TARGET_X86_64_UNKNOWN_SIMPLEOS_RUSTFLAGS="-C link-arg=--target=x86_
 # ---------------------------------------------------------------------------
 # 5. Compose cargo command
 # ---------------------------------------------------------------------------
-TARGET_JSON_REL="../../os/toolchain/rust/${TARGET}.json"
+TARGET_JSON_REL="$TARGET_JSON"
 
 if [ "$USE_FORKED" -eq 1 ]; then
     CARGO_CMD="RUSTC=$FORKED_RUSTC cargo build --release \
