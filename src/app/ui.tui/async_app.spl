@@ -24,11 +24,35 @@ use app.ui.tui.input.{parse_input_line, format_input_prompt}
 use app.ui.tui.async_input.{start_input_reader, start_raw_input_reader}
 use app.ui.render.widgets.{render_tui_tree}
 use common.ui.layout.{compute_layout}
+use app.io.env_ops.{env_get}
+use common.window_protocol.geometry.{Size}
+use os.compositor.host_compositor_entry.{HostBackendKind, HostWmConfig, HostWmHandle, init_host_wm}
 
 extern fn rt_file_read_text(path: text) -> text
 extern fn rt_file_exists(path: text) -> bool
 extern fn rt_platform_name() -> text
 extern fn rt_term_enable_ansi() -> bool
+extern fn rt_cli_get_args() -> [text]
+
+fn _shared_wm_requested(args: [text]) -> bool:
+    for a in args:
+        if a == "--shared-wm":
+            return true
+    val env_val = env_get("SIMPLE_UI_TUI_SHARED_WM")
+    env_val == "1"
+
+fn run_shared_wm_tui(title: text) -> i64:
+    val config = HostWmConfig(
+        backend: HostBackendKind.Tui,
+        initial_size: Size.wh(80, 24),
+        title: title
+    )
+    val handle = init_host_wm(config)
+    if handle == nil:
+        print "Error: failed to initialise shared WM (TUI backend)"
+        return 1
+    handle.tick_forever()
+    return 0
 
 fn ensure_ansi_support():
     """Enable ANSI virtual terminal processing on Windows."""
@@ -221,6 +245,9 @@ class AsyncTuiApp:
 
 fn run_async_tui(file_path: text) -> i64:
     """Start async TUI mode for a .ui.sdn file."""
+    val args = rt_cli_get_args()
+    if _shared_wm_requested(args):
+        return run_shared_wm_tui("simple tui")
     if not rt_file_exists(file_path):
         print "Error: File not found: {file_path}"
         return 1
