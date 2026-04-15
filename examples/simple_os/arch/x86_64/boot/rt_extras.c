@@ -386,6 +386,12 @@ RuntimeValue rt_ptr_read_i64(RuntimeValue addr, RuntimeValue offset) {
     return (RuntimeValue)*p;
 }
 
+RuntimeValue rt_ptr_write_i32(RuntimeValue addr, RuntimeValue offset, RuntimeValue value) {
+    int32_t *p = (int32_t *)((uintptr_t)addr + (uintptr_t)offset);
+    *p = (int32_t)value;
+    return NIL_VALUE;
+}
+
 RuntimeValue rt_ptr_write_i64(RuntimeValue addr, RuntimeValue offset, RuntimeValue value) {
     int64_t *p = (int64_t *)((uintptr_t)addr + (uintptr_t)offset);
     *p = (int64_t)value;
