@@ -645,21 +645,13 @@ impl VirtioGpuDriver:
     # ========================================================================
 
     fn alloc_dma(size: u64) -> GpuDmaAllocResult:
-        """Allocate DMA memory, preferring syscall 84 over the raw heap.
+        """Allocate page-aligned DMA memory from the baremetal wrapper heap.
 
-        In the SYS-GUI-008 baremetal lane the syscall-shim alloc_dma path is
-        available and can return a device-visible address pair. Fall back to
-        the raw identity-mapped heap only if the shim path is unavailable.
+        In the SYS-GUI-008 wrapper lane, syscall 84 resolves to the direct
+        baremetal stub path and does not provide the kernel alloc_dma contract.
+        Use the raw aligned allocator instead so device-visible addresses are
+        stable and page-aligned under the identity-map assumption.
         """
-        var result_pair: [u64; 2] = [0, 0]
-        val dma_result = syscall(84, size, &result_pair as u64, 0, 0, 0)
-        if dma_result > 0 and result_pair[0] != 0:
-            return GpuDmaAllocResult(
-                virt: dma_result.to_u64(),
-                phys: result_pair[0],
-                ok: true
-            )
-
         val aligned = rt_alloc_page_aligned(size)
         if aligned == 0:
             return GpuDmaAllocResult(virt: 0, phys: 0, ok: false)
@@ -747,11 +739,11 @@ impl VirtioGpuDriver:
         val d0_off = self.ctrl_desc_virt + (d0 * 16).to_u64()
         val cmd_phys_low = (self.cmd_buf_phys & 0xFFFFFFFF).to_u32()
         val cmd_phys_high = (self.cmd_buf_phys >> 32).to_u32()
-        val d0_tail: u64 = 0x00010001
         ram_write32_raw(d0_off, cmd_phys_low.to_u64())               # addr low
         ram_write32_raw(d0_off + 4, cmd_phys_high.to_u64())          # addr high
         ram_write32_raw(d0_off + 8, cmd_size)                        # len
-        ram_write32_raw(d0_off + 12, d0_tail)
+        ram_write16_raw(d0_off + 12, VIRTQ_DESC_F_NEXT.to_u64())     # flags
+        ram_write16_raw(d0_off + 14, d1.to_u64())                    # next
 
         # desc[d1]: response (device writes to resp_buf)
         val d1_off = self.ctrl_desc_virt + (d1 * 16).to_u64()
@@ -760,7 +752,8 @@ impl VirtioGpuDriver:
         ram_write32_raw(d1_off, resp_phys_low.to_u64())              # addr low
         ram_write32_raw(d1_off + 4, resp_phys_high.to_u64())         # addr high
         ram_write32_raw(d1_off + 8, resp_size)                       # len
-        ram_write32_raw(d1_off + 12, 0x00000002)
+        ram_write16_raw(d1_off + 12, VIRTQ_DESC_F_WRITE.to_u64())    # flags
+        ram_write16_raw(d1_off + 14, 0)                              # next
 
         # Barrier: ensure descriptor writes are visible to device before avail ring update
         rt_memory_barrier()
