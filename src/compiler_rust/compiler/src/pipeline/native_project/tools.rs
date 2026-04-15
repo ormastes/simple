@@ -217,11 +217,14 @@ pub(crate) fn strip_llvm_constructors(lib: &Path, temp_dir: &Path) -> Result<Pat
         .arg("--remove-section=.ctors")
         .arg("--remove-section=.fini_array")
         .arg("--remove-section=.dtors");
-    #[cfg(target_os = "macos")]
-    {
-        cmd.arg("--remove-section=__DATA,__mod_init_func")
-            .arg("--remove-section=__DATA,__mod_term_func");
-    }
+    // NOTE(2026-04-15): we deliberately do NOT strip __DATA,__mod_init_func /
+    // __mod_term_func on macOS even though LIM-010 (LLVM static constructor
+    // segfault) used to require it. ObjC class registration also lives in
+    // __mod_init_func, and stripping it leaves NSApplication / NSWindow
+    // un-registered, so the first AppKit method dispatch goes through the
+    // forwarding path and crashes inside dyld with a NULL selector name (see
+    // crash analysis in src/runtime/hosted/cocoa.rs comments). LIM-010 only
+    // affects the LLVM backend, which is opt-in via `--backend=llvm-lib`.
     cmd.arg(&archive_path).arg(&filtered);
 
     let status = cmd.status().map_err(|e| format!("llvm-objcopy on archive: {e}"))?;
