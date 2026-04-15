@@ -7,7 +7,11 @@
 #
 # Wave-4a: single payload file, 8.3 name, no LFN, no subdirectories.
 
-use std.fs
+# IF-13 wave-4d: write structural bytes via rt_file_write_bytes, then ask the
+# kernel to zero-extend to full image size via rt_file_truncate. Building a
+# 32 MiB byte buffer in the interpreter is intractable (>30s for 1 MiB).
+extern fn rt_file_write_bytes(path: text, data: [u8]) -> bool
+extern fn rt_file_truncate(path: text, size: u64) -> bool
 
 # -- Public types -----------------------------------------------------------
 
@@ -212,12 +216,12 @@ fn build(cfg: DiskImageConfig, out_path: text) -> Result<(), text>:
     if padded > written:
         _push_zeros(img, padded - written)
 
-    # Pad remainder of image to total size
+    # IF-13 wave-4d: write only the structural prefix (~150 KiB), then let
+    # the kernel zero-extend to full image size via ftruncate. This avoids
+    # building a 32 MiB byte array in the interpreter (intractable: >30s/MiB).
     val img_bytes: u64 = cfg.size_mb * 1024u64 * 1024u64
-    if img_bytes > img.length as u64:
-        _push_zeros(img, img_bytes - img.length as u64)
-
-    if fs.write_bytes(out_path, img):
-        Ok(())
-    else:
-        Err("disk_image.build: write failed: " + out_path)
+    if not rt_file_write_bytes(out_path, img):
+        return Err("disk_image.build: write failed: " + out_path)
+    if not rt_file_truncate(out_path, img_bytes):
+        return Err("disk_image.build: truncate failed: " + out_path)
+    Ok(())

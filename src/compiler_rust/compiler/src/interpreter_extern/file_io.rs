@@ -326,6 +326,27 @@ pub fn rt_file_write_bytes(args: &[Value]) -> Result<Value, CompileError> {
     }
 }
 
+/// Truncate (or zero-extend) file at `path` to exactly `size` bytes.
+///
+/// IF-13 wave-4d: the interpreter cannot build a multi-MiB byte buffer in
+/// reasonable time. Disk-image bakes use this to write the structural prefix
+/// (BPB+FATs+root dir+payload) and let the kernel zero-fill the remainder.
+pub fn rt_file_truncate(args: &[Value]) -> Result<Value, CompileError> {
+    let path = extract_path(args, 0)?;
+    let size: u64 = match args.get(1) {
+        Some(Value::Int(n)) => *n as u64,
+        _ => return Ok(Value::Bool(false)),
+    };
+    let file = match OpenOptions::new().write(true).create(true).open(&path) {
+        Ok(f) => f,
+        Err(_) => return Ok(Value::Bool(false)),
+    };
+    match file.set_len(size) {
+        Ok(_) => Ok(Value::Bool(true)),
+        Err(_) => Ok(Value::Bool(false)),
+    }
+}
+
 /// Move file (works across filesystems)
 pub fn rt_file_move(args: &[Value]) -> Result<Value, CompileError> {
     let src = extract_path(args, 0)?;

@@ -771,6 +771,7 @@ pub(crate) fn call_extern_function(
         "rt_file_read_bytes" => file_io::rt_file_read_bytes(&evaluated),
         "rt_bytes_from_raw" => file_io::rt_bytes_from_raw(&evaluated),
         "rt_file_write_bytes" => file_io::rt_file_write_bytes(&evaluated),
+        "rt_file_truncate" => file_io::rt_file_truncate(&evaluated),
         "rt_file_move" => file_io::rt_file_move(&evaluated),
         "rt_file_delete" => native_ffi::rt_file_delete(&evaluated),
         // Directory operations

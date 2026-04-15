@@ -5,71 +5,57 @@
 #   /tmp/hello_c.o  (cross-compiled C object)
 #
 # Run:
-#   bin/simple src/os/port/disk_image_bake.spl
+#   bin/simple run src/os/port/disk_image_bake.spl
 #
-# NOTE(wave-4): src/os/port/disk_image.spl calls fs.write_bytes which does not
-# exist in std.fs (only fs.write_text). Until disk_image.spl is fixed in a
-# follow-up batch, this bake bypasses disk_image.build() and emits a minimal
-# 32 MiB FAT32 stub directly via rt_file_write_bytes. Payloads are read but
-# not yet embedded; embedding is wave-4b once disk_image.build() works.
+# IF-13 wave-4d (this revision): the previous wave-4 bake emitted a 32 MiB
+# FAT32 stub via an in-interpreter array-doubling pad because the per-element
+# zero-pad in disk_image.build() was intractable (>30s/MiB). With
+# rt_file_truncate now available, disk_image.build() writes only the ~150 KiB
+# structural prefix and asks the kernel to zero-extend, so we can call the
+# real builder with embedded payloads here.
 
 use std.io_runtime as io
+use os.port.disk_image.{DiskImageConfig, PayloadEntry, build}
 
 extern fn rt_file_write_bytes(path: text, data: [u8]) -> bool
+extern fn rt_file_read_bytes(path: text) -> [u8]
 
-fn _build_stub_image(size_mb: u64) -> [u8]:
-    """Produce a minimal recognizable FAT32 stub: BPB jump + zeros to size.
-
-    Uses array-doubling for bulk zero fill; per-element push is too slow in
-    interpreter mode for 32 MiB.
-    """
-    # Build first 512-byte sector (BPB stub) by hand
-    var sector: [u8] = []
-    sector.push(0xEBu8)
-    sector.push(0x58u8)
-    sector.push(0x90u8)
-    val oem = "SIMPLEOS"
-    var i: i64 = 0
-    while i < 8:
-        sector.push(oem[i] as u8)
-        i = i + 1
-    while sector.length < 510:
-        sector.push(0u8)
-    sector.push(0x55u8)
-    sector.push(0xAAu8)
-    # Build (size_mb * 1 MiB - 512) bytes of zeros via doubling
-    var pad: [u8] = [0u8]
-    val total: i64 = (size_mb * 1048576u64) as i64
-    val need: i64 = total - 512
-    while pad.length < need:
-        pad = pad + pad
-    # Truncate excess via slice
-    val tail = pad[0:need]
-    sector + tail
+fn _load_payload(path: text, name83: text) -> Result<PayloadEntry, text>:
+    """Read a file and wrap as a FAT32 8.3 directory entry."""
+    if not io.file_exists(path):
+        return Err("bake: payload missing: " + path)
+    val data: [u8] = rt_file_read_bytes(path) ?? []
+    if data.length == 0:
+        return Err("bake: payload empty or unreadable: " + path)
+    Ok(PayloadEntry(path: name83, data: data))
 
 fn bake(out_disk: text, out_initramfs: text) -> Result<(), text>:
     """Produce FAT32 disk image + initramfs stub from pre-built ELF artifacts."""
     val hello_rs_path = "/tmp/hello_rs_simpleos/target/target/release/hello_rs"
     val hello_c_path  = "/tmp/hello_c.o"
 
-    # --- Step 1: load hello_rs (informational) ---
-    if io.file_exists(hello_rs_path):
-        print "bake: loaded hello_rs (" + io.file_size(hello_rs_path).to_text() + " bytes)"
-    else:
-        print "bake: warning — hello_rs not found"
+    # --- Step 1: load hello_rs ---
+    val rs_entry = match _load_payload(hello_rs_path, "HELLORS    "):
+        case Ok(e):
+            print "bake: loaded hello_rs (" + io.file_size(hello_rs_path).to_text() + " bytes)"
+            e
+        case Err(msg):
+            return Err(msg)
 
-    # --- Step 2: load hello_c.o (informational) ---
+    # --- Step 2: load hello_c.o (informational only — wave-4a embeds first payload) ---
     if io.file_exists(hello_c_path):
         print "bake: loaded hello_c.o (" + io.file_size(hello_c_path).to_text() + " bytes)"
     else:
-        print "bake: warning — hello_c.o not found"
+        print "bake: warning — hello_c.o not found (skipped, wave-4a single-payload limit)"
 
-    # --- Step 3: ensure output dir + write 32 MiB FAT32 stub ---
+    # --- Step 3: ensure output dir + build real FAT32 image ---
     io.dir_create_all("build/os")
-    val img = _build_stub_image(32u64)
-    if not rt_file_write_bytes(out_disk, img):
-        return Err("bake: failed to write disk image: " + out_disk)
-    print "bake: disk image written: " + out_disk
+    val cfg = DiskImageConfig(size_mb: 32u64, payloads: [rs_entry])
+    match build(cfg, out_disk):
+        case Ok(()):
+            print "bake: disk image written: " + out_disk
+        case Err(e):
+            return Err("bake: disk_image.build failed: " + e)
 
     # --- Step 4: initramfs stub (TODO wave-6: call initramfs_pack.cmd_build) ---
     val stub: [u8] = [0x28u8, 0x42u8, 0x35u8, 0x44u8, 0x36u8, 0x29u8, 0x0Au8]

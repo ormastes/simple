@@ -22,6 +22,9 @@
 #include <string.h>
 #include <math.h>
 #include <time.h>
+#include <fcntl.h>
+#include <unistd.h>
+#include <sys/types.h>
 
 /* ================================================================
  * I/O Operations
@@ -230,6 +233,18 @@ int rt_file_write_bytes(const char* path, const void* data, int64_t len) {
     size_t written = fwrite(data, 1, (size_t)len, f);
     fclose(f);
     return written == (size_t)len ? 1 : 0;
+}
+
+/* IF-13 wave-4d: truncate (or zero-extend) `path` to exactly `size` bytes.
+ * Used by SimpleOS disk-image bake to push the multi-MiB zero-fill into the
+ * kernel rather than building a giant byte-array in the interpreter. */
+int rt_file_truncate(const char* path, uint64_t size) {
+    if (!path) return 0;
+    int fd = open(path, O_WRONLY | O_CREAT, 0644);
+    if (fd < 0) return 0;
+    int rc = ftruncate(fd, (off_t)size);
+    close(fd);
+    return rc == 0 ? 1 : 0;
 }
 
 SplArray* rt_bytes_from_raw(int64_t ptr, int64_t len) {
