@@ -16,7 +16,6 @@ use os.drivers.virtio.virtio_net.{VirtioNetDriver}
 use os.kernel.types.device_mem_types.{DeviceGrant}
 use os.kernel.boot.mmio.{mmio_read8, mmio_read32, mmio_write8, mmio_write32, mmio_write64}
 use os.userlib.syscall_raw.{syscall}
-use os.async.os_waker.{OsWaker}
 
 extern fn serial_println(msg: text)
 
@@ -236,23 +235,18 @@ fn handle_recv_async(dst_virt: u64, dst_len: u64) -> i64:
 fn handle_send_async(frame_virt: u64, frame_phys: u64, frame_len: u64) -> i64:
     """Handle NET_METHOD_SEND_ASYNC: non-blocking send.
 
-    Submits the frame to the TX virtqueue and returns immediately.
-    The caller does not wait for TX completion.
+    The service does not yet retain per-request future state across IPC calls.
+    Until it owns that lifecycle, use the normal driver send path so this
+    method does not falsely report success after dropping the future.
 
-    Returns 0 on successful submission, negative on error.
+    Returns 0 on successful completion, negative on error.
     """
     if not service_ready:
         return -1
 
-    val future_result = driver.send_frame_async(frame_virt, frame_phys, frame_len)
-    match future_result:
-        Ok(future):
-            # Frame submission happens on first poll of the future.
-            # For the IPC service, we do a single poll to trigger submission
-            # and return immediately without waiting for device consumption.
-            val waker = OsWaker.new(driver.notif_id, 1)
-            val poll_result = future.poll(waker)
-            # Whether Ready or Pending, the frame has been submitted
+    val result = driver.send_frame(frame_virt, frame_phys, frame_len)
+    match result:
+        Ok(done):
             0
         Err(msg):
             serial_println("[virtio-net-svc] Async send failed: {msg}")

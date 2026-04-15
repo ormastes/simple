@@ -87,6 +87,19 @@ sys-gui-007's disk lane.
 - Headless CI run supported (QEMU `-display none` + scanout capture
   via `flush_rect` buffer readback, not host display).
 
+## Round-3 status (2026-04-15)
+
+- **DECODE_INT ram_write bug fixed** — commit `3ab3ffeee9dd` (2026-04-15).
+  virtio-gpu ring corruption caused by a DECODE_INT mis-write into guest RAM;
+  patched and confirmed not to regress other lanes.
+- **3-B PPM diff harness wired** — `test/system/sys_gui_008_ppm_diff_harness_spec.spl`
+  spec implemented 2026-04-15; Phase 2+3+4 bodies wired; runs on next QEMU boot.
+- **sys-gui-006 LIVE-GREEN** — framebuffer baseline exists; diff reference ready.
+- **Remaining (need actual QEMU boot):**
+  - 3-A: boot verification + baseline capture (`render-ready` marker required)
+  - 3-C: commit `test/baselines/sys_gui_008/virtio_gpu_scene.ppm` after clean render
+  - 3-D: final tracking doc update + lane_matrix green
+
 ## Round milestones
 
 - **Round 0 — Compositor hand-off in the virtio entry.**

@@ -94,3 +94,13 @@ After completion of all phases:
 - **Host-aware supported:** CH32V307, STM32H7/OpenOCD, STM32H7/TRACE32
 - **Host-aware simulation:** GHDL RV32 semihost (semihosting-backed), GHDL RV32 mailbox (MMIO-backed, debugger-independent)
 - **Excluded:** ZedBoard/FPGA (quarantined until real execution proof)
+
+## SYS-GUI-008 virtio-gpu Lane (2026-04-15)
+
+**Status: Round-3 in progress — waiting on boot verification (not yet green)**
+
+- DECODE_INT ram_write bug fixed (commit `3ab3ffeee9dd`, 2026-04-15)
+- PPM diff harness spec implemented (3-B done)
+- sys-gui-006 framebuffer baseline LIVE-GREEN (diff reference available)
+- Remaining before green: boot verification, baseline PPM capture (3-A/3-C), final doc update (3-D)
+- Tracked by: `doc/08_tracking/todo/sys_gui_008_virtio_gpu_qemu.md`

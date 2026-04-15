@@ -83,7 +83,7 @@ if [ "$USE_FORKED" -eq 1 ]; then
     CARGO_CMD="RUSTC=$FORKED_RUSTC cargo build --release \
         --target $TARGET_JSON_REL"
 else
-    CARGO_CMD="cargo +nightly build --release \
+    CARGO_CMD="cargo +${NIGHTLY_PIN} build --release \
         --target $TARGET_JSON_REL \
         -Z build-std=core,alloc,compiler_builtins \
         -Z build-std-features=compiler-builtins-mem"
@@ -108,7 +108,7 @@ if [ "$USE_FORKED" -eq 1 ]; then
     RUSTC="$FORKED_RUSTC" cargo build --release \
         --target "$TARGET_JSON_REL"
 else
-    cargo +nightly build --release \
+    cargo +"${NIGHTLY_PIN}" build --release \
         --target "$TARGET_JSON_REL" \
         -Z build-std=core,alloc,compiler_builtins \
         -Z build-std-features=compiler-builtins-mem

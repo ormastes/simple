@@ -23,6 +23,8 @@ non-empty PPM.
 
 ### 3-A  Capture baseline PPM via QMP screendump
 
+**Status: pending — needs QEMU boot verification**
+
 - Spec: `test/system/sys_gui_008_virtio_gpu_baseline_spec.spl`
   (skeleton already merged, pending `render-ready` signal)
 - Flow: build ELF → `spawn_guest_with_qmp` → wait for
@@ -30,6 +32,8 @@ non-empty PPM.
   compare against `test/baselines/sys_gui_008/virtio_gpu_scene.ppm`
 
 ### 3-B  Write the PPM diff harness spec
+
+**Status: DONE — spec implemented 2026-04-15; Phase 4 body wired; Phase 2+3 body wired, runs on next QEMU boot**
 
 - Spec: `test/system/sys_gui_008_ppm_diff_harness_spec.spl`
   (skeleton merged as part of wave-3; needs `it{}` bodies filled in)
@@ -39,12 +43,16 @@ non-empty PPM.
 
 ### 3-C  Commit the virtio-gpu baseline PPM
 
+**Status: pending — needs QEMU boot + clean render first**
+
 - Path: `test/baselines/sys_gui_008/virtio_gpu_scene.ppm`
 - Resolution: 1024 × 768 (matching the framebuffer boot config in
   `examples/simple_os/arch/x86_64/sys_gui_008_entry.spl`)
 - Run with `UPDATE_BASELINE=1 bin/simple test ...` once guest renders cleanly
 
 ### 3-D  Update tracking docs
+
+**Status: pending — final doc update deferred until 3-A/3-C complete**
 
 - Row 4 of `doc/03_plan/gui_drawing_layer_variations.md` → ✅ Done
 - `doc/08_tracking/todo/sys_gui_008_round2_status_2026-04-15.md` → add
