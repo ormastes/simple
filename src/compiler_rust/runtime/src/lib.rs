@@ -114,6 +114,11 @@ pub extern "C" fn simple_runtime_abi_version() -> u32 {
     simple_common::AbiVersion::CURRENT.to_u32()
 }
 
+#[no_mangle]
+pub extern "C" fn rt_sleep_ms(milliseconds: i64) {
+    rt_thread_sleep(milliseconds);
+}
+
 // Re-export runtime value types for codegen
 pub use value::{
     HeapHeader, HeapObjectType, RuntimeArray, RuntimeChannel, RuntimeClosure, RuntimeEnum, RuntimeObject,
