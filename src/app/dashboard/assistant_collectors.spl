@@ -8,10 +8,7 @@
 
 use std.nogc_sync_mut.io.file_ops.{file_exists, file_read, file_modified_time}
 use std.nogc_sync_mut.io.process_ops.{shell_output_trimmed}
-use std.common.json.parser.{json_parse}
-use std.common.json.types.{json_get_type, json_to_string, json_to_number, json_to_boolean}
-use std.common.json.object_ops.{json_object_get}
-use std.common.json.array_ops.{json_array_get, json_array_length}
+use std.common.json.{json_parse, json_get_type, json_object_get, json_array_get, json_array_length, json_to_string, json_to_number, json_to_boolean}
 use std.common.json.path_ops.{json_path_get}
 
 extern fn rt_env_get(key: text) -> text
@@ -25,6 +22,10 @@ val ASSISTANT_CACHE_TTL_SECS: i64 = 3
 val ASSISTANT_LIVE_WINDOW_SECS: i64 = 180
 val ASSISTANT_MAX_SESSIONS: i64 = 24
 val ASSISTANT_MAX_TIMELINE_EVENTS: i64 = 24
+val ASSISTANT_STORE_ROOT = ".build/llm_dashboard/assistant"
+val ASSISTANT_STORE_SESSIONS = ASSISTANT_STORE_ROOT + "/sessions"
+val ASSISTANT_STORE_TIMELINES = ASSISTANT_STORE_ROOT + "/timelines"
+val ASSISTANT_STORE_NOTIFICATIONS = ASSISTANT_STORE_ROOT + "/notifications"
 
 # =========================================================================
 # Snapshot Types
@@ -170,7 +171,7 @@ fn collect_assistant_snapshot() -> AssistantDashboardSnapshot:
 
     if files.len() == 0:
         snapshot.surface_state = "degraded"
-        snapshot.warnings.push("No assistant transcripts found under ~/.claude/projects")
+        snapshot.warnings.push("No assistant transcripts or MCP assistant store sessions found")
         snapshot.selected_session_id = ""
         ASSISTANT_CACHE = snapshot
         ASSISTANT_CACHE_SIGNATURE = signature
@@ -253,7 +254,20 @@ fn discover_assistant_transcripts() -> [text]:
         val history = assistant_history_path()
         if history != "" and file_exists(history):
             files.push(history)
+    for path in discover_assistant_store_sessions():
+        files.push(path)
 
+    files
+
+fn discover_assistant_store_sessions() -> [text]:
+    var files: [text] = []
+    if ASSISTANT_STORE_SESSIONS != "" and file_exists(ASSISTANT_STORE_SESSIONS):
+        val out = shell_output_trimmed("find '{ASSISTANT_STORE_SESSIONS}' -type f -name '*.json' 2>/dev/null | sort", "")
+        if out.trim() != "":
+            for line in out.split("\n"):
+                val path = line.trim()
+                if path != "":
+                    files.push(path)
     files
 
 fn assistant_cache_signature(files: [text]) -> text:
@@ -271,16 +285,34 @@ fn assistant_cache_signature(files: [text]) -> text:
 fn assistant_source_label(files: [text]) -> text:
     if files.len() == 0:
         return "degraded"
+    var has_store = false
+    var has_transcripts = false
     val root = assistant_source_root()
-    if root != "" and files[0].starts_with(root):
+    val history = assistant_history_path()
+    for path in files:
+        if assistant_is_store_session_path(path):
+            has_store = true
+        elif root != "" and path.starts_with(root):
+            has_transcripts = true
+        elif history != "" and path == history:
+            has_transcripts = true
+    if has_store and has_transcripts:
+        return "assistant store + Claude transcripts"
+    if has_store:
+        return "assistant store"
+    if root != "" and has_transcripts:
         return "live/replay transcripts"
-    return "replay history"
+    if has_transcripts:
+        return "replay history"
+    "replay history"
 
 # =========================================================================
 # Session Parsing
 # =========================================================================
 
 fn parse_assistant_session(path: text, now_secs: i64) -> AssistantSession:
+    if assistant_is_store_session_path(path):
+        return parse_assistant_store_session(path, now_secs)
     val session_id = assistant_session_id(path)
     var session = AssistantSession.new(session_id, path)
     session.last_modified_time = file_modified_time(path)
@@ -445,6 +477,150 @@ fn parse_assistant_session(path: text, now_secs: i64) -> AssistantSession:
 
     session
 
+fn parse_assistant_store_session(path: text, now_secs: i64) -> AssistantSession:
+    val session_id = assistant_store_session_id(path)
+    var session = AssistantSession.new(session_id, assistant_store_timeline_path(session_id))
+    session.project_name = "assistant"
+    session.last_modified_time = file_modified_time(path)
+    if session.last_modified_time > 0 and now_secs - session.last_modified_time <= ASSISTANT_LIVE_WINDOW_SECS:
+        session.source_state = "live"
+        session.session_state = "active"
+
+    if not file_exists(path):
+        session.source_state = "degraded"
+        session.session_state = "degraded"
+        session.warnings.push("missing assistant store session")
+        return session
+
+    val content = file_read(path)
+    if content.trim() == "":
+        session.source_state = "degraded"
+        session.session_state = "degraded"
+        session.warnings.push("empty assistant store session")
+        return session
+
+    val record = json_parse(content)
+    if record == nil:
+        session.source_state = "degraded"
+        session.session_state = "degraded"
+        session.warnings.push("unparsed assistant store session")
+        return session
+
+    session.session_id = first_non_empty([
+        json_text_at(record, "id"),
+        session.session_id
+    ])
+    session.title = first_non_empty([
+        json_text_at(record, "name"),
+        json_text_at(record, "summary"),
+        session.title
+    ])
+    session.objective = first_non_empty([
+        json_text_at(record, "prompt"),
+        json_text_at(record, "summary"),
+        session.title
+    ])
+    session.wake_reason = first_non_empty([
+        json_text_at(record, "last_signal"),
+        json_text_at(record, "state"),
+        "assistant store"
+    ])
+    session.parent_session_id = json_text_at(record, "parent_session_id")
+    session.last_event_time = assistant_clock_label_from_millis(json_number_at(record, "updated_at"))
+
+    val raw_state = json_text_at(record, "state")
+    val timeline_path = assistant_store_timeline_path(session.session_id)
+    if file_exists(timeline_path):
+        val timeline_content = file_read(timeline_path)
+        var saw_timeline_event = false
+        var saw_error = false
+        var saw_end = false
+        for raw in timeline_content.split("\n"):
+            val line = raw.trim()
+            if line == "":
+                continue
+            val event = json_parse(line)
+            if event == nil:
+                session.warnings.push("unparsed assistant store timeline line")
+                continue
+            saw_timeline_event = true
+            session.turn_count = session.turn_count + 1
+            val kind = assistant_timeline_kind(event)
+            val detail = assistant_store_event_summary(event, kind)
+            val event_time = assistant_clock_label_from_millis(json_number_at(event, "timestamp"))
+            if event_time != "":
+                session.last_event_time = event_time
+            if kind != "":
+                session.last_event_kind = kind
+            if detail != "":
+                session.last_event_detail = detail
+                if session.title == "":
+                    session.title = detail
+                if session.objective == "":
+                    session.objective = detail
+            if kind == "error":
+                saw_error = true
+                session.error_count = session.error_count + 1
+            elif kind == "stop" or kind == "sessionend" or kind == "taskcompleted" or kind == "completed":
+                saw_end = true
+        if not saw_timeline_event and session.wake_reason == "":
+            session.wake_reason = "assistant store"
+        if saw_error and not saw_end:
+            session.session_state = "failed"
+        elif saw_end:
+            session.session_state = "completed"
+        elif raw_state == "paused":
+            session.session_state = "paused"
+        elif raw_state == "running" or raw_state == "active":
+            if session.source_state == "live":
+                session.session_state = "active"
+            else:
+                session.session_state = "stale"
+        elif raw_state != "":
+            session.session_state = raw_state
+        elif session.source_state == "live":
+            session.session_state = "active"
+        else:
+            session.session_state = "stale"
+    else:
+        if raw_state == "paused":
+            session.session_state = "paused"
+        elif raw_state == "completed":
+            session.session_state = "completed"
+        elif raw_state == "failed":
+            session.session_state = "failed"
+        elif raw_state == "running" or raw_state == "active":
+            if session.source_state == "live":
+                session.session_state = "active"
+            else:
+                session.session_state = "stale"
+        elif raw_state != "":
+            session.session_state = raw_state
+        elif session.source_state == "live":
+            session.session_state = "active"
+        else:
+            session.session_state = "degraded"
+
+    if session.model != "" and session.provider == "":
+        session.provider = assistant_provider_from_model(session.model)
+    if session.title == "":
+        session.title = first_non_empty([
+            json_text_at(record, "name"),
+            json_text_at(record, "summary"),
+            "assistant session"
+        ])
+    if session.objective == "":
+        session.objective = session.title
+    if session.last_event_kind == "":
+        session.last_event_kind = raw_state
+    if session.last_event_detail == "":
+        session.last_event_detail = first_non_empty([
+            json_text_at(record, "summary"),
+            raw_state,
+            session.title
+        ])
+    session
+
 fn link_assistant_sessions(sessions: [AssistantSession]):
     var i = 0
     while i < sessions.len():
@@ -453,14 +629,16 @@ fn link_assistant_sessions(sessions: [AssistantSession]):
 
     var child_idx = 0
     while child_idx < sessions.len():
-        val child_parent = sessions[child_idx].parent_tool_use_id
-        if child_parent != "":
-            val parent_id = assistant_find_parent_session_id(sessions, child_parent)
-            if parent_id != "":
-                sessions[child_idx].parent_session_id = parent_id
-                val parent_idx = assistant_session_index(sessions, parent_id)
-                if parent_idx >= 0 and not text_list_contains(sessions[parent_idx].children, sessions[child_idx].session_id):
-                    sessions[parent_idx].children.push(sessions[child_idx].session_id)
+        var parent_id = sessions[child_idx].parent_session_id
+        if parent_id == "":
+            val child_parent = sessions[child_idx].parent_tool_use_id
+            if child_parent != "":
+                parent_id = assistant_find_parent_session_id(sessions, child_parent)
+        if parent_id != "":
+            sessions[child_idx].parent_session_id = parent_id
+            val parent_idx = assistant_session_index(sessions, parent_id)
+            if parent_idx >= 0 and not text_list_contains(sessions[parent_idx].children, sessions[child_idx].session_id):
+                sessions[parent_idx].children.push(sessions[child_idx].session_id)
         child_idx = child_idx + 1
 
 fn sort_sessions_by_activity(sessions: [AssistantSession]) -> [AssistantSession]:
@@ -565,7 +743,10 @@ fn build_session_timeline(snapshot: AssistantDashboardSnapshot, session_id: text
         val record = json_parse(line)
         if record == nil:
             continue
-        val timestamp = assistant_clock_from_iso(json_text_at(record, "timestamp"))
+        val timestamp = if assistant_is_store_timeline_path(path):
+            assistant_clock_label_from_millis(json_number_at(record, "timestamp"))
+        else:
+            assistant_clock_from_iso(json_text_at(record, "timestamp"))
         val kind = assistant_timeline_kind(record)
         val severity = assistant_timeline_severity(kind)
         val title = assistant_timeline_title(record, kind)
@@ -578,6 +759,11 @@ fn build_session_timeline(snapshot: AssistantDashboardSnapshot, session_id: text
 
 fn assistant_timeline_kind(record: any) -> text:
     val type_name = json_text_at(record, "type")
+    if type_name == "":
+        val store_kind = json_text_at(record, "kind")
+        if store_kind != "":
+            return store_kind.to_lower()
+        return ""
     if type_name == "assistant":
         val message = json_object_get(record, "message")
         val content = json_object_get(message, "content")
@@ -607,6 +793,8 @@ fn assistant_timeline_kind(record: any) -> text:
 
 fn assistant_timeline_severity(kind: text) -> text:
     match kind:
+        "start" | "resume" | "signal" => "info"
+        "pause" => "muted"
         "error" | "posttoolusefailure" | "permissiondenied" => "danger"
         "sessionend" | "stop" | "taskcompleted" => "success"
         "subagentstart" | "tool_use" => "info"
@@ -623,10 +811,13 @@ fn assistant_timeline_title(record: any, kind: text) -> text:
             assistant_system_summary(record)
         "tool_use" =>
             assistant_tool_use_summary(record)
+        "start" | "pause" | "resume" | "signal" =>
+            assistant_store_event_summary(record, kind)
         "snapshot" =>
             "snapshot"
         _ =>
             first_non_empty([
+                assistant_store_event_summary(record, kind),
                 json_text_at(record, "data.hookEvent"),
                 json_text_at(record, "data.hook_event_name"),
                 json_text_at(record, "data.hookName"),
@@ -641,12 +832,15 @@ fn assistant_timeline_detail(record: any, kind: text) -> text:
             assistant_user_summary(record)
         "tool_use" =>
             assistant_tool_use_summary(record)
+        "start" | "pause" | "resume" | "signal" =>
+            assistant_store_event_summary(record, kind)
         "progress" =>
             assistant_progress_summary(record)
         "snapshot" =>
             "replay checkpoint"
         _ =>
             first_non_empty([
+                assistant_store_event_summary(record, kind),
                 assistant_progress_summary(record),
                 assistant_error_summary(record)
             ])
@@ -766,6 +960,13 @@ fn assistant_tool_use_summary(record: any) -> text:
         i = i + 1
     ""
 
+fn assistant_store_event_summary(record: any, kind: text) -> text:
+    first_non_empty([
+        json_text_at(record, "message"),
+        json_text_at(record, "signal"),
+        kind
+    ])
+
 fn first_message_text(message_payload: any) -> text:
     val content = json_object_get(message_payload, "content")
     var i = 0
@@ -845,6 +1046,38 @@ fn assistant_clock_label(now_secs: i64) -> text:
         ss = "0{seconds}"
     "{hh}:{mm}:{ss}"
 
+fn assistant_clock_label_from_millis(now_millis: i64) -> text:
+    if now_millis <= 0:
+        return ""
+    assistant_clock_label(now_millis / 1000)
+
+fn assistant_store_root() -> text:
+    ASSISTANT_STORE_ROOT
+
+fn assistant_store_session_path(session_id: text) -> text:
+    ASSISTANT_STORE_SESSIONS + "/" + session_id + ".json"
+
+fn assistant_store_timeline_path(session_id: text) -> text:
+    ASSISTANT_STORE_TIMELINES + "/" + session_id + ".jsonl"
+
+fn assistant_store_notifications_path(session_id: text) -> text:
+    ASSISTANT_STORE_NOTIFICATIONS + "/" + session_id + ".jsonl"
+
+fn assistant_is_store_session_path(path: text) -> bool:
+    path.starts_with(ASSISTANT_STORE_SESSIONS) and path.ends_with(".json")
+
+fn assistant_is_store_timeline_path(path: text) -> bool:
+    path.starts_with(ASSISTANT_STORE_TIMELINES) and path.ends_with(".jsonl")
+
+fn assistant_store_session_id(path: text) -> text:
+    val parts = path.split("/")
+    if parts.len() == 0:
+        return "assistant-session"
+    val leaf = parts[parts.len() - 1]
+    if leaf.ends_with(".json"):
+        return leaf.slice(0, leaf.len() - 5)
+    leaf
+
 fn assistant_extract_between(text: text, start: text, finish: text) -> text:
     val start_idx = text.index_of(start)
     if start_idx < 0:
@@ -900,7 +1133,7 @@ fn json_text_at(value: any, path: text) -> text:
         val n = json_to_number(target)
         if n == nil:
             return ""
-        return "{n}".to_i64() ?? "{n}"
+        return "{n as i64}"
     if target_type == "boolean":
         val b = json_to_boolean(target)
         if b == nil:
@@ -921,4 +1154,4 @@ fn json_number_at(value: any, path: text) -> i64:
     val n = json_to_number(target)
     if n == nil:
         return 0
-    "{n}".to_i64() ?? 0
+    n as i64
