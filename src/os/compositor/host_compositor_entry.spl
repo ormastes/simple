@@ -10,7 +10,7 @@
 
 use common.window_protocol.geometry.{Size}
 use os.compositor.display_backend.{CompositorBackend}
-use os.compositor.hosted_backend.{HostedCompositorBackend, select_hosted_backend}
+use os.compositor.hosted_backend.{HostedCompositorBackend, select_hosted_backend, rt_hosted_set_surface_override}
 
 # =========================================================================
 # Public types
@@ -74,11 +74,31 @@ class HostWmHandle:
 # Factory
 # =========================================================================
 
+fn _host_backend_selector(kind: HostBackendKind) -> i64:
+    """Translate HostBackendKind to the rt_hosted_select_surface selector integer.
+
+    Defined selector values (must stay in sync with select.rs):
+      0 = winit (default / Linux / BSD / unknown)
+      1 = cocoa (macOS)
+      2 = win32 (Windows)
+
+    Browser, Electron, WebCanvas, and Tui are not yet mapped to distinct
+    runtime selectors — the winit path handles those host surfaces today.
+    """
+    if kind == HostBackendKind.Cocoa:
+        return 1
+    if kind == HostBackendKind.Win32:
+        return 2
+    # Browser / Electron / WebCanvas / Tui: runtime selector doesn't yet
+    # distinguish these from the winit path.
+    0
+
 fn init_host_wm(config: HostWmConfig) -> HostWmHandle?:
     """Initialise a shared HostCompositor + WmService for the given host backend.
 
     Returns nil if the backend cannot be created (e.g. missing driver).
     """
+    rt_hosted_set_surface_override(_host_backend_selector(config.backend))
     val backend = select_hosted_backend(0, config.initial_size.w, config.initial_size.h, 0)
     val comp = HostCompositor.new(backend, config.initial_size)
     val wm = WmService.new()

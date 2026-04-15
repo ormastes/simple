@@ -7,8 +7,9 @@
 //!   - `2` win32   (Windows)
 //!
 //! Resolution order:
-//!   1. `SIMPLE_HOSTED_SURFACE` env var — explicit override (wins over all).
-//!   2. Host OS triple fallback:
+//!   1. Programmatic override via `rt_hosted_set_surface_override` (highest priority).
+//!   2. `SIMPLE_HOSTED_SURFACE` env var — explicit override.
+//!   3. Host OS triple fallback:
 //!        - `macos`   -> 1
 //!        - `windows` -> 2
 //!        - other     -> 0
@@ -19,10 +20,16 @@
 
 use std::env;
 use std::ffi::OsString;
+use std::sync::atomic::{AtomicI64, Ordering};
 
 const SEL_WINIT: i64 = 0;
 const SEL_COCOA: i64 = 1;
 const SEL_WIN32: i64 = 2;
+const SEL_NONE: i64 = -1;
+
+/// Process-level override set by `rt_hosted_set_surface_override`.
+/// `-1` means "not set" (use env-var / host-default logic).
+static SURFACE_OVERRIDE: AtomicI64 = AtomicI64::new(SEL_NONE);
 
 fn classify_override(raw: &OsString) -> Option<i64> {
     let s = raw.to_string_lossy();
@@ -46,9 +53,22 @@ fn host_default() -> i64 {
     }
 }
 
+/// SFFI entry point — called by Simple before constructing the backend to
+/// pin the selector to a specific value.  A `sel` of `-1` clears the override
+/// and lets the env-var / host-default logic run again.
+#[no_mangle]
+pub extern "C" fn rt_hosted_set_surface_override(sel: i64) {
+    SURFACE_OVERRIDE.store(sel, Ordering::Relaxed);
+}
+
 /// SFFI entry point. Called once per compositor construction.
 #[no_mangle]
 pub extern "C" fn rt_hosted_select_surface() -> i64 {
+    // Programmatic override (set by `rt_hosted_set_surface_override`) wins first.
+    let prog = SURFACE_OVERRIDE.load(Ordering::Relaxed);
+    if prog != SEL_NONE {
+        return prog;
+    }
     if let Some(raw) = env::var_os("SIMPLE_HOSTED_SURFACE") {
         if let Some(sel) = classify_override(&raw) {
             return sel;
