@@ -51,6 +51,35 @@ fi
 }
 [ -f "$SRC" ] || { echo "error: hello_rs source missing at $SRC"; exit 5; }
 
+# examples/simpleos_hello_rs/src/main.rs defines its own _start for the
+# wave-4a path where crt0.o is not linked. The stage1 built-in target spec
+# DOES pull in ${SDKROOT}/lib/crt0.o, which already provides _start — that
+# would produce a duplicate-symbol link error. Stage a _start-less variant
+# that still exercises libcore (PanicInfo) so the stage1 rlibs get linked.
+SHIM_SRC_DIR="${SHIM_SRC_DIR:-/tmp/simpleos-stage1-src}"
+mkdir -p "$SHIM_SRC_DIR"
+cat >"$SHIM_SRC_DIR/hello_rs_stage1.rs" <<'RS'
+// Stage1-sysroot smoke test: exercises libcore via PanicInfo & core::hint,
+// links libsimpleos_c via the built-in target spec, lets crt0.o provide
+// _start. Mirrors the shape of examples/simpleos_hello_rs/src/main.rs but
+// without the duplicate _start.
+#![no_std]
+#![no_main]
+
+use core::panic::PanicInfo;
+
+#[panic_handler]
+fn panic(_info: &PanicInfo) -> ! {
+    loop { core::hint::spin_loop(); }
+}
+
+#[no_mangle]
+pub extern "C" fn main() -> i32 {
+    0
+}
+RS
+STAGE1_SRC="$SHIM_SRC_DIR/hello_rs_stage1.rs"
+
 # The built-in target spec's pre-link-args hard-code the LITERAL string
 # "${SDKROOT}/share/simpleos/simpleos.ld" and "${SDKROOT}/lib/crt0.o"
 # (rust-lld does NOT env-expand those paths). Work around this by building
@@ -67,31 +96,78 @@ mkdir -p "$(dirname "$OUT")"
 echo "[stage1] rustc: $RUSTC"
 echo "[stage1] sysroot: $SYSROOT"
 echo "[stage1] target: $TARGET_TRIPLE (built-in)"
-echo "[stage1] SDKROOT: $SDKROOT"
-echo "[stage1] out: $OUT"
+echo "[stage1] shim:   $SHIM_DIR"
+echo "[stage1] out:    $OUT"
 
-# Bare triple — hits the compiled-in TargetOptions whose metadata hash matches
-# the stage1 rlibs. Extra -L passes libsimpleos_c's directory without editing
-# any spec file.
-"$RUSTC" \
-    --edition 2021 \
-    --target "$TARGET_TRIPLE" \
-    --sysroot "$SYSROOT" \
-    -C opt-level=3 \
-    -C panic=abort \
-    -C link-arg=-L"$SYSROOT_LIB" \
-    -o "$OUT" \
-    "$SRC"
+# Bare triple — hits the compiled-in TargetOptions whose metadata hash
+# matches the stage1 rlibs. cd into the shim so literal "${SDKROOT}/..."
+# paths resolve through the symlink.
+(
+    cd "$SHIM_DIR"
+    "$RUSTC" \
+        --edition 2021 \
+        --target "$TARGET_TRIPLE" \
+        --sysroot "$SYSROOT" \
+        -C opt-level=3 \
+        -C panic=abort \
+        -C link-arg=-L"$SYSROOT_LIB" \
+        -o "$OUT" \
+        "$STAGE1_SRC"
+)
 
 [ -f "$OUT" ] || { echo "error: artifact missing after rustc"; exit 6; }
 
 echo ""
-echo "==> OK: $OUT"
+echo "==> OK no_std artifact: $OUT"
 if [ -x "$LLVM_NM" ]; then
     "$LLVM_NM" "$OUT" | grep ' _start' || { echo "error: _start symbol missing"; exit 7; }
-    STD_SYMS="$("$LLVM_NM" "$OUT" | grep -cE '(core|alloc|std)::' || true)"
-    echo "[stage1] stdlib-symbol count (core/alloc/std::): $STD_SYMS"
-else
-    echo "warn: $LLVM_NM not found, skipping symbol check"
+    # v0 mangling encodes crate name as `NtCs..._4core`/`_5alloc`/`_3std`.
+    STD_SYMS="$("$LLVM_NM" "$OUT" | grep -cE '_(4core|5alloc|3std)' || true)"
+    echo "[stage1] libcore/alloc/std symbol count (no_std build): $STD_SYMS"
 fi
 ls -la "$OUT"
+
+# ---- Second smoke: libstd linkage ----
+# The no_std build above only exercises libcore + libcompiler_builtins. To
+# prove the stage1 libstd rlib is *usable* (not just present on disk), build
+# a tiny program that allocates a String — which forces libstd, liballoc,
+# libcompiler_builtins, panic_abort, and the global allocator to all link.
+STD_SRC="$SHIM_SRC_DIR/std_smoke.rs"
+OUT_STD="${OUT_STD:-/tmp/hello_std_stage1}"
+cat >"$STD_SRC" <<'RS'
+// Stage1 libstd linkage smoke. Uses -O1 + side-effect sink so the allocation
+// is not dead-code-eliminated. crt0 provides _start; we define `main`.
+#![no_main]
+static mut SINK: usize = 0;
+#[no_mangle]
+pub extern "C" fn main(argc: i32, _argv: *const *const u8) -> i32 {
+    let s: std::string::String = std::string::String::from("hello simpleos");
+    unsafe { SINK = s.len().wrapping_add(argc as usize); }
+    core::mem::forget(s);
+    0
+}
+RS
+(
+    cd "$SHIM_DIR"
+    "$RUSTC" \
+        --edition 2021 \
+        --target "$TARGET_TRIPLE" \
+        --sysroot "$SYSROOT" \
+        -C opt-level=1 \
+        -C panic=abort \
+        -C link-arg=-L"$SYSROOT_LIB" \
+        -o "$OUT_STD" \
+        "$STD_SRC"
+)
+[ -f "$OUT_STD" ] || { echo "error: std artifact missing"; exit 8; }
+echo ""
+echo "==> OK std artifact:  $OUT_STD"
+if [ -x "$LLVM_NM" ]; then
+    STD_SYMS_STD="$("$LLVM_NM" "$OUT_STD" | grep -cE '_(4core|5alloc|3std)' || true)"
+    echo "[stage1] libcore/alloc/std symbol count (libstd build): $STD_SYMS_STD"
+    if [ "$STD_SYMS_STD" -lt 10 ]; then
+        echo "error: libstd was not actually linked (<10 stdlib symbols)"
+        exit 9
+    fi
+fi
+ls -la "$OUT_STD"
