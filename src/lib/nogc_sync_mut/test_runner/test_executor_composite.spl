@@ -17,7 +17,7 @@ use std.nogc_sync_mut.jit.jit_util.{hex_i64}
 use std.nogc_sync_mut.debug.remote.exec.types.{MemoryMap, Architecture}
 use std.nogc_sync_mut.debug.remote.exec.compiler_bridge.{compile_remote_binary}
 use std.nogc_sync_mut.jit.jit_layout.{append_halt_trampoline_arm32, plan_binary_layout_arm32, jit_entry_pc_arm32, jit_return_pc_arm32}
-use std.nogc_sync_mut.jit.jit_hal_stm32h7.{stm32h7_connect, stm32h7_disconnect, stm32h7_write_code, stm32h7_write_register, stm32h7_read_register, stm32h7_resume}
+use std.nogc_sync_mut.jit.jit_hal_stm32h7.{stm32h7_connect, stm32h7_disconnect, stm32h7_write_code, stm32h7_read_code, stm32h7_write_register, stm32h7_read_register, stm32h7_resume}
 use test_executor_composite_jit_generic.{run_test_file_jit_qemu_rv32, run_test_file_jit_qemu_arm, run_test_file_jit_stm32wb, run_test_file_jit_stm32h7_adapter, run_test_file_jit_ch32v307, run_test_file_jit_ghdl_rv32, run_test_file_jit_trace32_stm32h7, run_test_file_jit_trace32_stm32wb}
 
 # =========================================================================
@@ -369,7 +369,24 @@ fn run_test_file_jit_stm32h7(file_path: text, source: text, options: TestOptions
             duration_ms: 0, setup_ms: (end - setup_start) / 1000,
             error: "JIT upload failed: {write_result.err().unwrap()}", timed_out: false, cached: false)
 
-    # TODO: [test][P2] restore SRAM readback verify when stm32h7_read_code() has a timeout-guarded shim that returns Err(...) in interpreter mode instead of blocking on the shell() call to OpenOCD telnet.
+    val readback_result = stm32h7_read_code(layout.code_base, bytes.len())
+    match readback_result:
+        Err(msg):
+            # Skipped in interpreter mode or hardware unavailable — log and continue
+            shell("echo 'SRAM readback skipped: {msg}' >&2")
+        Ok(readback):
+            var mismatch = false
+            var idx = 0
+            while idx < bytes.len():
+                if bytes[idx] != readback[idx]:
+                    mismatch = true
+                idx = idx + 1
+            if mismatch:
+                stm32h7_disconnect(openocd_pid)
+                val end = time_now_unix_micros()
+                return TestFileResult(path: file_path, passed: 0, failed: 1, skipped: 0, pending: 0,
+                    duration_ms: 0, setup_ms: (end - setup_start) / 1000,
+                    error: "SRAM readback mismatch", timed_out: false, cached: false)
 
     val sp_result = stm32h7_write_register(13, layout.stack_top)
     if sp_result.is_err():
