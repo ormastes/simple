@@ -489,16 +489,53 @@ impl Scheduler:
     # -- IF-02 Fork/Exec Contract (wave-3 scaffolds) -------------------------
     # Real COW page-table clone + ELF load arrive in wave 4.
 
-    fn clone_task(parent_id: TaskId) -> TaskId:
+    me clone_task(parent_id: TaskId) -> TaskId:
         """Clone parent task into new child task (IF-02).
 
-        Wave-3 scaffold returns sentinel TaskId(id: 0) meaning failure.
-        Wave-4 will allocate a new task slot, COW-map the parent's page
-        tables, duplicate the register file, and return child TaskId.
+        Wave-4 scaffold: looks up parent TCB, allocates a fresh TaskId,
+        copies registers/priority/parent linkage, marks child Ready,
+        and enqueues it. Page-table COW arrives in wave-4b.
         """
-        # Silence unused-parameter warning while body is a scaffold.
-        val _p = parent_id
-        TaskId(id: 0)
+        val parent_slot = self._find_slot(parent_id)
+        if parent_slot < 0:
+            return TaskId(id: 0)
+        val parent_tcb = self.tasks[parent_slot]
+        if parent_tcb == nil:
+            return TaskId(id: 0)
+        val parent = parent_tcb
+
+        val child_id = TaskId(id: self.next_task_id)
+        self.next_task_id = self.next_task_id + 1
+
+        val child_slot = self._find_empty_slot()
+        if child_slot < 0:
+            return TaskId(id: 0)
+
+        # TODO(wave-4b): shallow-clone page tables with COW bit set via MmuCtx.cow_clone()
+
+        val child = TaskControlBlock(
+            id: child_id,
+            state: TaskState.Ready,
+            priority: parent.priority,
+            is_user: parent.is_user,
+            entry_point: parent.entry_point,
+            context: parent.context,
+            user_context: parent.user_context,
+            address_space: parent.address_space,
+            kernel_stack: parent.kernel_stack,
+            user_stack: parent.user_stack,
+            capabilities: parent.capabilities,
+            parent: Some(parent_id),
+            exit_code: 0,
+            ticks_remaining: TIME_SLICE_TICKS
+        )
+
+        self.tasks[child_slot] = child
+
+        val queue_idx = _priority_to_index(child.priority)
+        self.ready_queues[queue_idx].enqueue(child_id)
+
+        child_id
 
     fn exec_into(task_id: TaskId, argv: [Text], envp: [Text]) -> i32:
         """Replace task image with ELF at argv[0] (IF-02).

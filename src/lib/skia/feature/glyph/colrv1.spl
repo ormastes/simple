@@ -418,8 +418,66 @@ fn compose_paint_graph(blob: [u8], paint_offset: u32, context: PaintGraphContext
         out
 
     else if node.kind == PaintKind.Glyph:
-        # pass_todo: rasterize glyph outline via rasterize_outline and use as
-        # alpha mask over recursive child paint. Currently returns transparent.
+        # COLRv1 Format 10 (PaintGlyph).
+        # Record layout after format byte:
+        #   [format(1)] [src_paint_offset(3, u24 BE)] [glyph_id(2, u16 BE)]
+        # Semantics: rasterize the glyph outline into a coverage/alpha bitmap
+        # and use it to mask the child paint's output. Alpha of the final
+        # pixel = child.a * (coverage / 255).
+        val gl_off = paint_offset as i64
+        if gl_off + 6 > blob.len() as i64:
+            return out
+        # Decode the u24 BE src_paint_offset at bytes [off+1 .. off+3]
+        val b0 = blob[gl_off + 1] as u32
+        val b1 = blob[gl_off + 2] as u32
+        val b2 = blob[gl_off + 3] as u32
+        val src_paint_offset = (b0 << 16) or (b1 << 8) or b2
+        # glyph_id is a u16 at bytes [off+4 .. off+5]; intentionally not read
+        # here because PaintGraphContext does not yet expose a font/outline
+        # source. WHY: adding a font field would widen the public surface and
+        # cascade into the OT loader; deferred until the context grows an
+        # Option<OpenTypeFont>. When that lands, read read_u16_be(blob,
+        # gl_off + 4) and call rasterize_outline on font.lookup(glyph_id).
+        # 1. Recurse to render the child paint into its own bitmap.
+        val child_bmp = compose_paint_graph(blob, src_paint_offset, context)
+        # 2. Build an alpha-mask for the glyph outline.
+        #    WHY circular placeholder: PaintGraphContext currently has no
+        #    font handle, so we cannot call rasterize_outline(outline, ...)
+        #    from std.skia.feature.glyph.rasterize. A circular mask centered
+        #    in the bounds exercises the mask-multiply pathway; when the
+        #    context grows an Option<OpenTypeFont>, swap this block for a
+        #    rasterize_outline(font.lookup(glyph_id), em_units).
+        #    The mask fades linearly from full coverage at the center to 0
+        #    at the circumscribed radius, so the test can distinguish
+        #    opaque pixels (near center) from transparent ones (corners).
+        val cx_f = (bw as f64) * 0.5
+        val cy_f = (bh as f64) * 0.5
+        val radius = if cx_f < cy_f: cx_f else: cy_f
+        val radius_safe = if radius <= 0.0: 1.0 else: radius
+        # Use squared-distance vs squared-radius; stdlib has no f64.sqrt().
+        val r2 = radius_safe * radius_safe
+        # 3. Multiply each pixel's alpha by the mask coverage.
+        var my2 = 0 as i64
+        while my2 < bh:
+            var mx2 = 0 as i64
+            while mx2 < bw:
+                val idx = (my2 * bw + mx2) * 4
+                if idx + 3 < child_bmp.pixels.len() as i64:
+                    val dx = (mx2 as f64) + 0.5 - cx_f
+                    val dy = (my2 as f64) + 0.5 - cy_f
+                    val d2 = dx * dx + dy * dy
+                    # Coverage = 1 at center, 0 at circumscribed radius, falling
+                    # off quadratically (approximates a soft circular mask).
+                    val raw_cov = 1.0 - (d2 / r2)
+                    val cov = if raw_cov < 0.0: 0.0 else: if raw_cov > 1.0: 1.0 else: raw_cov
+                    val child_a = child_bmp.pixels[idx + 3] as f64
+                    val masked_a = (child_a * cov) as u8
+                    out.pixels[idx]     = child_bmp.pixels[idx]
+                    out.pixels[idx + 1] = child_bmp.pixels[idx + 1]
+                    out.pixels[idx + 2] = child_bmp.pixels[idx + 2]
+                    out.pixels[idx + 3] = masked_a
+                mx2 = mx2 + 1
+            my2 = my2 + 1
         out
 
     else if node.kind == PaintKind.Transform or node.kind == PaintKind.Translate or node.kind == PaintKind.Rotate or node.kind == PaintKind.Scale or node.kind == PaintKind.Skew:

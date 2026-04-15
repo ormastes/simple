@@ -142,3 +142,125 @@ describe "CpuBackend.render_picture":
         val r1 = px_far[0] as i64
         expect(r0).to_equal(255)
         expect(r1).to_equal(255)
+
+    it "Save then Restore with DrawRect in between produces visible pixel":
+        val red = sk_color_argb(255, 220, 0, 0)
+        val paint = sk_paint_fill(red)
+        val rect = SkRect(left: 2.0, top: 2.0, right: 8.0, bottom: 8.0)
+        val op_save = SkPictureOp(
+            kind: SkPictureOpKind.Save,
+            rect: SkRect(left: 0.0, top: 0.0, right: 0.0, bottom: 0.0),
+            rx: 0.0, ry: 0.0,
+            path: None, image: None,
+            paint: sk_paint_new(),
+            x: 0.0, y: 0.0
+        )
+        val op_draw = sk_picture_op_draw_rect(rect, paint)
+        val op_restore = SkPictureOp(
+            kind: SkPictureOpKind.Restore,
+            rect: SkRect(left: 0.0, top: 0.0, right: 0.0, bottom: 0.0),
+            rx: 0.0, ry: 0.0,
+            path: None, image: None,
+            paint: sk_paint_new(),
+            x: 0.0, y: 0.0
+        )
+        val ops = [op_save, op_draw, op_restore]
+        val pic = _make_picture(ops)
+        val backend = cpu_backend_new()
+        val bm = backend.render_picture(pic, _cull10())
+        val px = _pixel_at(bm, 5, 5)
+        val r_val = px[0] as i64
+        expect(r_val).to_be_greater_than(0)
+
+    it "SaveLayer with half-alpha produces lower alpha than un-layered DrawRect":
+        val red = sk_color_argb(255, 255, 0, 0)
+        val fill = sk_paint_fill(red)
+        val rect = SkRect(left: 2.0, top: 2.0, right: 8.0, bottom: 8.0)
+
+        # Reference: plain DrawRect (no layer)
+        val op_plain = sk_picture_op_draw_rect(rect, fill)
+        val pic_plain = _make_picture([op_plain])
+        val backend_a = cpu_backend_new()
+        val bm_plain = backend_a.render_picture(pic_plain, _cull10())
+        val px_plain = _pixel_at(bm_plain, 5, 5)
+        val a_plain = px_plain[3] as i64
+
+        # Layer paint with alpha=128 (half)
+        val half = sk_color_argb(128, 255, 255, 255)
+        val layer_paint = sk_paint_fill(half)
+        val op_savelayer = SkPictureOp(
+            kind: SkPictureOpKind.SaveLayer,
+            rect: SkRect(left: 0.0, top: 0.0, right: 10.0, bottom: 10.0),
+            rx: 0.0, ry: 0.0,
+            path: None, image: None,
+            paint: layer_paint,
+            x: 0.0, y: 0.0
+        )
+        val op_restore = SkPictureOp(
+            kind: SkPictureOpKind.Restore,
+            rect: SkRect(left: 0.0, top: 0.0, right: 0.0, bottom: 0.0),
+            rx: 0.0, ry: 0.0,
+            path: None, image: None,
+            paint: sk_paint_new(),
+            x: 0.0, y: 0.0
+        )
+        val ops_layer = [op_savelayer, op_plain, op_restore]
+        val pic_layer = _make_picture(ops_layer)
+        val backend_b = cpu_backend_new()
+        val bm_layer = backend_b.render_picture(pic_layer, _cull10())
+        val px_layer = _pixel_at(bm_layer, 5, 5)
+        val a_layer = px_layer[3] as i64
+
+        expect(a_layer).to_be_less_than(a_plain)
+
+    it "ClipRect: DrawRect inside visible, DrawRect fully outside absent":
+        val white = sk_color_argb(255, 255, 255, 255)
+        val fill = sk_paint_fill(white)
+
+        val op_clip = SkPictureOp(
+            kind: SkPictureOpKind.ClipRect,
+            rect: SkRect(left: 0.0, top: 0.0, right: 5.0, bottom: 5.0),
+            rx: 0.0, ry: 0.0,
+            path: None, image: None,
+            paint: sk_paint_new(),
+            x: 0.0, y: 0.0
+        )
+        # Inside the clip
+        val op_inside = sk_picture_op_draw_rect(
+            SkRect(left: 1.0, top: 1.0, right: 4.0, bottom: 4.0),
+            fill
+        )
+        # Fully outside the clip
+        val op_outside = sk_picture_op_draw_rect(
+            SkRect(left: 6.0, top: 6.0, right: 9.0, bottom: 9.0),
+            fill
+        )
+        val ops = [op_clip, op_inside, op_outside]
+        val pic = _make_picture(ops)
+        val backend = cpu_backend_new()
+        val bm = backend.render_picture(pic, _cull10())
+
+        val px_in = _pixel_at(bm, 2, 2)
+        val r_in = px_in[0] as i64
+        expect(r_in).to_be_greater_than(0)
+
+        val px_out = _pixel_at(bm, 7, 7)
+        val r_out = px_out[0] as i64
+        expect(r_out).to_equal(0)
+
+    it "Restore beyond Save count (underflow) does not crash":
+        val op_restore = SkPictureOp(
+            kind: SkPictureOpKind.Restore,
+            rect: SkRect(left: 0.0, top: 0.0, right: 0.0, bottom: 0.0),
+            rx: 0.0, ry: 0.0,
+            path: None, image: None,
+            paint: sk_paint_new(),
+            x: 0.0, y: 0.0
+        )
+        # Several restores with no preceding saves
+        val ops = [op_restore, op_restore, op_restore]
+        val pic = _make_picture(ops)
+        val backend = cpu_backend_new()
+        val bm = backend.render_picture(pic, _cull10())
+        val total = _pixel_sum(bm)
+        expect(total).to_equal(0)

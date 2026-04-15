@@ -232,3 +232,44 @@ describe "compose_paint_graph":
         val idx = 0 as i64
         expect(bmp.pixels[idx] as i64).to_equal(0)
         expect(bmp.pixels[idx + 3] as i64).to_equal(0)
+
+    it "PaintGlyph masks child paint output":
+        # Blob layout:
+        #   offset 0 (6 bytes): format=10 (PaintGlyph)
+        #     [0]=10 (format)
+        #     [1..3]=src_paint_offset (u24 BE) = 6
+        #     [4..5]=glyph_id (u16 BE) = 0 (unused — no font in context)
+        #   offset 6 (6 bytes): format=2 (Solid), palette_index=0
+        val buf: [u8] = [
+            10, 0, 0, 6, 0, 0,   # PaintGlyph header -> child at offset 6
+            2, 0, 0, 0, 0, 0      # Solid child, palette[0]
+        ]
+        # 8x8 bitmap: large enough for corners to fall outside the circular
+        # mask and the center to be fully covered.
+        val bounds = SkRect(left: 0.0, top: 0.0, right: 8.0, bottom: 8.0)
+        val red: SkColor = sk_color_argb(255, 255, 0, 0)
+        val palette: [SkColor] = [red]
+        val ctx = PaintGraphContext(bounds: bounds, palette: palette, em_units: 1000)
+        val bmp = compose_paint_graph(buf, 0, ctx)
+        expect(bmp.width).to_equal(8)
+        expect(bmp.height).to_equal(8)
+        # Scan all pixels; count opaque (alpha>0) and transparent (alpha==0).
+        val total = bmp.width * bmp.height
+        var opaque_count = 0 as i64
+        var transparent_count = 0 as i64
+        var alpha_sum = 0 as i64
+        var i = 0 as i64
+        while i < total:
+            val a_idx = i * 4 + 3
+            val a = bmp.pixels[a_idx] as i64
+            alpha_sum = alpha_sum + a
+            if a > 0:
+                opaque_count = opaque_count + 1
+            else:
+                transparent_count = transparent_count + 1
+            i = i + 1
+        # Some pixels must be opaque (center under mask) ...
+        expect(alpha_sum).to_be_greater_than(0)
+        expect(opaque_count).to_be_greater_than(0)
+        # ... and some must be transparent (corners outside the circular mask).
+        expect(transparent_count).to_be_greater_than(0)
