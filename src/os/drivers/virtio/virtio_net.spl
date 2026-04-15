@@ -382,13 +382,61 @@ impl VirtioNetDriver:
         mmio_read8(self.bar0_virt + VIRTIO_PCI_ISR)
 
     me set_completion_mode(mode: u64):
-        self.completion_mode = mode
+        if mode <= VIRTIO_NET_COMPLETION_AUTO:
+            self.completion_mode = mode
 
     me effective_completion_mode() -> u64:
         if self.completion_mode == VIRTIO_NET_COMPLETION_AUTO:
             VIRTIO_NET_COMPLETION_INTERRUPT
         else:
             self.completion_mode
+
+    fn wait_for_tx_completion() -> Result<bool, text>:
+        var used_idx = mmio_read16(self.tx_used_virt + 2)
+        if self.effective_completion_mode() == VIRTIO_NET_COMPLETION_POLL:
+            var polls: u32 = 0
+            while used_idx == self.tx_last_used and polls < VIRTIO_NET_COMPLETION_POLL_LIMIT:
+                used_idx = mmio_read16(self.tx_used_virt + 2)
+                polls = polls + 1
+            if used_idx == self.tx_last_used:
+                return Err("TX completion poll timeout")
+        else:
+            val wait_result = syscall(26, self.notif_id, 0, 0, 0, 0)
+            if wait_result < 0:
+                return Err("TX notification wait failed: {wait_result}")
+            self.read_isr()
+            used_idx = mmio_read16(self.tx_used_virt + 2)
+            if used_idx == self.tx_last_used:
+                var polls: u32 = 0
+                while used_idx == self.tx_last_used and polls < VIRTIO_NET_COMPLETION_POLL_LIMIT:
+                    used_idx = mmio_read16(self.tx_used_virt + 2)
+                    polls = polls + 1
+                if used_idx == self.tx_last_used:
+                    return Err("TX completion timeout after notification")
+        self.tx_last_used = used_idx
+        Ok(true)
+
+    fn wait_for_rx_ready() -> bool:
+        var used_idx = mmio_read16(self.rx_used_virt + 2)
+        if self.effective_completion_mode() == VIRTIO_NET_COMPLETION_POLL:
+            var polls: u32 = 0
+            while used_idx == self.rx_last_used and polls < VIRTIO_NET_COMPLETION_POLL_LIMIT:
+                used_idx = mmio_read16(self.rx_used_virt + 2)
+                polls = polls + 1
+            used_idx != self.rx_last_used
+        else:
+            if used_idx == self.rx_last_used:
+                val wait_result = syscall(26, self.notif_id, 0, 0, 0, 0)
+                if wait_result < 0:
+                    return false
+                self.read_isr()
+                used_idx = mmio_read16(self.rx_used_virt + 2)
+                if used_idx == self.rx_last_used:
+                    var polls: u32 = 0
+                    while used_idx == self.rx_last_used and polls < VIRTIO_NET_COMPLETION_POLL_LIMIT:
+                        used_idx = mmio_read16(self.rx_used_virt + 2)
+                        polls = polls + 1
+            used_idx != self.rx_last_used
 
     # ========================================================================
     # MAC Address
@@ -472,21 +520,9 @@ impl VirtioNetDriver:
         # Notify device (TX queue = 1)
         mmio_write16(self.bar0_virt + VIRTIO_PCI_QUEUE_NOTIFY, VIRTIO_NET_TX_QUEUE)
 
-        # AUTO preserves current behavior: resolve to interrupt-backed waits.
-        var used_idx = mmio_read16(self.tx_used_virt + 2)
-        if self.effective_completion_mode() == VIRTIO_NET_COMPLETION_POLL:
-            while used_idx == self.tx_last_used:
-                used_idx = mmio_read16(self.tx_used_virt + 2)
-        else:
-            val wait_result = syscall(26, self.notif_id, 0, 0, 0, 0)
-            if wait_result < 0:
-                return Err("TX notification wait failed: {wait_result}")
-            self.read_isr()
-            used_idx = mmio_read16(self.tx_used_virt + 2)
-
-        # Advance used tracking
-        self.tx_last_used = used_idx
-
+        val wait_result = self.wait_for_tx_completion()
+        if wait_result.is_err():
+            return Err(wait_result.unwrap_err())
         Ok(true)
 
     # ========================================================================
@@ -511,20 +547,11 @@ impl VirtioNetDriver:
             return 0
 
         # Check if there are already completed RX descriptors.
-        # AUTO preserves current behavior: resolve to interrupt-backed waits.
         var used_idx = mmio_read16(self.rx_used_virt + 2)
-        if self.effective_completion_mode() == VIRTIO_NET_COMPLETION_POLL:
-            while used_idx == self.rx_last_used:
-                used_idx = mmio_read16(self.rx_used_virt + 2)
-        else:
-            if used_idx == self.rx_last_used:
-                # No frame ready — wait for IRQ notification
-                val wait_result = syscall(26, self.notif_id, 0, 0, 0, 0)
-                if wait_result < 0:
-                    return 0
-                # Acknowledge interrupt
-                self.read_isr()
-                used_idx = mmio_read16(self.rx_used_virt + 2)
+        if used_idx == self.rx_last_used:
+            if not self.wait_for_rx_ready():
+                return 0
+            used_idx = mmio_read16(self.rx_used_virt + 2)
 
         if used_idx == self.rx_last_used:
             return 0  # Still nothing (spurious IRQ)

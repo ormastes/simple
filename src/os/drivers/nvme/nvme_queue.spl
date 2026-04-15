@@ -13,6 +13,8 @@ use os.kernel.boot.mmio.{mmio_read32, mmio_write32, mmio_write64}
 use os.drivers.nvme.nvme_types.{SQE_SIZE, CQE_SIZE}
 use os.userlib.syscall_raw.{syscall}
 
+extern fn serial_println(msg: text)
+
 # ============================================================================
 # NVMe Queue Pair
 # ============================================================================
@@ -66,9 +68,23 @@ impl NvmeQueuePair:
           DW8-9: PRP2 (data pointer 2 / PRP list)
           DW10-15: command-specific dwords
         """
+        if self.sq_virt == 0 or self.cq_virt == 0:
+            serial_println("[nvme] submit blocked: queue {self.qid} not initialized")
+            return 0xFFFF
+        if self.sq_doorbell == 0 or self.cq_doorbell == 0:
+            serial_println("[nvme] submit blocked: queue {self.qid} doorbells unset")
+            return 0xFFFF
+        if self.depth == 0 or self.sq_tail >= self.depth:
+            serial_println("[nvme] submit blocked: queue {self.qid} tail={self.sq_tail} depth={self.depth}")
+            return 0xFFFF
+
         val cmd_id = self.next_cmd_id
         val tail_u64 = self.sq_tail.to_u64()
         val entry_addr = self.sq_virt + tail_u64 * SQE_SIZE
+        val sq_limit = self.sq_virt + self.depth.to_u64() * SQE_SIZE
+        if entry_addr + SQE_SIZE > sq_limit:
+            serial_println("[nvme] submit blocked: SQ entry out of range qid={self.qid} entry=0x{entry_addr}")
+            return 0xFFFF
 
         # DW0: opcode (byte 0), flags=0 (byte 1), command_id (bytes 2-3)
         val dw0 = opcode.to_u32() | (cmd_id.to_u32() << 16)
@@ -96,6 +112,7 @@ impl NvmeQueuePair:
         self.sq_tail = (self.sq_tail + 1) % self.depth
         # Ring SQ tail doorbell
         mmio_write32(self.sq_doorbell, self.sq_tail.to_u32())
+        serial_println("[nvme] submit qid={self.qid} cmd={cmd_id} tail={self.sq_tail} sqe=0x{entry_addr} prp1=0x{prp1}")
 
         self.next_cmd_id = self.next_cmd_id + 1
         cmd_id
@@ -107,6 +124,11 @@ impl NvmeQueuePair:
         The controller sets the phase bit to match the expected phase.
         On each full wrap of the CQ, the expected phase toggles.
         """
+        if self.cq_virt == 0 or self.cq_doorbell == 0 or self.depth == 0:
+            return false
+        if self.cq_head >= self.depth:
+            serial_println("[nvme] bad cq_head qid={self.qid} head={self.cq_head} depth={self.depth}")
+            return false
         val head_u64 = self.cq_head.to_u64()
         val entry_addr = self.cq_virt + head_u64 * CQE_SIZE
         # DW3 of CQE: bits[31:17] = status, bit[16] = phase, bits[15:0] = command_id
@@ -127,6 +149,7 @@ impl NvmeQueuePair:
 
         # Ring CQ head doorbell to tell controller we consumed this entry
         mmio_write32(self.cq_doorbell, self.cq_head.to_u32())
+        serial_println("[nvme] completion qid={self.qid} head={self.cq_head} dw3=0x{dw3} phase={phase_bit}")
         true
 
     me get_completion_status() -> u32:
