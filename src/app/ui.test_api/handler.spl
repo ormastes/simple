@@ -7,10 +7,13 @@
 
 use common.ui.widget.{UIState, UIEvent, WidgetNode, get_widget_record}
 use common.ui.session.{UISession}
-use common.ui.access.{UiAccessSnapshot, UiAccessNode, UiAccessSurface, ui_access_snapshot_from_state, ui_access_snapshot_to_json, ui_access_surface_to_json, ui_access_events_to_json, ui_access_surface_id_from_canonical, ui_access_widget_id_from_canonical, ui_access_find_node, ui_access_find_nodes, ui_access_resolve_action_name, ui_access_snapshot_to_text, ui_access_query_to_json}
+use common.ui.access.{UiAccessSnapshot, UiAccessNode, UiAccessSurface, ui_access_snapshot_from_state, ui_access_snapshot_to_json, ui_access_surface_to_json, ui_access_events_to_json, ui_access_surface_id_from_canonical, ui_access_widget_id_from_canonical, ui_access_find_node, ui_access_find_nodes, ui_access_resolve_action_name, ui_access_snapshot_to_text, ui_access_query_to_json, ui_access_ensure_result, ui_access_ensure_to_json}
 use app.ui.test_api.json.{element_to_json, elements_to_json, extract_json_field, escape_json, state_to_json}
 
 val PROTOCOL_VERSION = 1
+
+extern fn rt_time_now_ms() -> i64
+extern fn rt_sleep_ms(ms: i64)
 
 # =========================================================================
 # Main Handler
@@ -45,6 +48,18 @@ fn handle_test_request(path: text, method: text, body: text, state: UIState, inj
     elif method == "GET":
         if route == "/api/test/ui/snapshot":
             return _handle_ui_snapshot(state, session)
+        elif route == "/api/test/ui/ensure":
+            val surface_id = _extract_query_param(path, "surface_id")
+            val canonical_id = _extract_query_param(path, "canonical_id")
+            val kind = _extract_query_param(path, "kind")
+            val text_query = _extract_query_param(path, "text")
+            val focused_only = _extract_query_param(path, "focused_only")
+            val expectation = _extract_query_param(path, "expectation")
+            val expected_value = _extract_query_param(path, "expected_value")
+            val limit_str = _extract_query_param(path, "limit")
+            val timeout_str = _extract_query_param(path, "timeout_ms")
+            val poll_str = _extract_query_param(path, "poll_ms")
+            return _handle_ui_ensure(surface_id, canonical_id, kind, text_query, focused_only, expectation, expected_value, limit_str, timeout_str, poll_str, state, session)
         elif route == "/api/test/ui/query":
             val surface_id = _extract_query_param(path, "surface_id")
             val canonical_id = _extract_query_param(path, "canonical_id")
@@ -302,6 +317,30 @@ fn _handle_ui_query(surface_id: text, canonical_id: text, kind: text, text_query
     if limit_str != "":
         limit = limit_str.to_i32()
     val json = ui_access_query_to_json(snapshot, surface_id, canonical_id, kind, text_query, _is_truthy(focused_only), limit)
+    return (200, "application/json", json)
+
+fn _handle_ui_ensure(surface_id: text, canonical_id: text, kind: text, text_query: text, focused_only: text, expectation: text, expected_value: text, limit_str: text, timeout_str: text, poll_str: text, state: UIState, session: UISession?) -> (i32, text, text):
+    """Handle GET /api/test/ui/ensure — semantic goal-state route."""
+    var limit = 50
+    if limit_str != "":
+        limit = limit_str.to_i32()
+    var timeout_ms = 0
+    if timeout_str != "":
+        timeout_ms = timeout_str.to_i64()
+    var poll_ms = 25
+    if poll_str != "":
+        poll_ms = poll_str.to_i64()
+    val focused = _is_truthy(focused_only)
+    val started = rt_time_now_ms()
+    var snapshot = _build_access_snapshot(state, session)
+    var result = ui_access_ensure_result(snapshot, surface_id, canonical_id, kind, text_query, focused, limit, expectation, expected_value)
+    while session != nil and timeout_ms > 0 and not result.satisfied and (rt_time_now_ms() - started) < timeout_ms:
+        if poll_ms > 0:
+            rt_sleep_ms(poll_ms)
+        snapshot = _build_access_snapshot(state, session)
+        result = ui_access_ensure_result(snapshot, surface_id, canonical_id, kind, text_query, focused, limit, expectation, expected_value)
+    val elapsed_ms = rt_time_now_ms() - started
+    val json = ui_access_ensure_to_json(snapshot, surface_id, canonical_id, kind, text_query, focused, limit, expectation, expected_value, elapsed_ms)
     return (200, "application/json", json)
 
 fn _handle_ui_observe(surface_id: text, canonical_id: text, kind: text, text_query: text, focused_only: text, state: UIState, session: UISession?) -> (i32, text, text):

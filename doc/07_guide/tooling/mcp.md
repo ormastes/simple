@@ -1,6 +1,6 @@
 # MCP Server Setup and Usage
 
-The Simple MCP (Model Context Protocol) server currently provides 107 tools, 3
+The Simple MCP (Model Context Protocol) server currently provides 108 tools, 3
 resources, and 2 prompts for code intelligence, debugging, build, VCS,
 analysis, and UI access -- accessible from Claude Code and Claude Desktop.
 
@@ -78,7 +78,7 @@ bin/simple_mcp_server
 - **Protocol**: JSON-RPC 2.0 over stdio
 - **MCP Version**: 2025-06-18
 - **Startup**: < 1s (optimized single-process)
-- **Tool count**: 107 tools
+- **Tool count**: 108 tools
 
 ---
 
@@ -186,6 +186,7 @@ surfaces.
 | `ui_access_observe` | Read the narrowest canonical view for a surface, node, or filtered query |
 | `ui_access_state` | Read or set constrained declarative surface/node state over the canonical protocol |
 | `ui_access_query` | Query canonical UI nodes with structured JSON results |
+| `ui_access_ensure` | Ensure a bounded declarative expectation over canonical UI query results |
 
 For the operator workflow and HTTP route equivalents, see
 [tooling/ui_access.md](ui_access.md).

@@ -73,6 +73,7 @@ Owns additive HTTP contract routes:
 - `GET /api/test/ui/observe?...`
 - `GET /api/test/ui/state?...`
 - `POST /api/test/ui/state`
+- `GET /api/test/ui/query?...`
 
 The existing `/api/test/*` contract remains valid.
 
@@ -86,7 +87,9 @@ Own:
 - LLM-facing tool registration
 - routing reads through persisted access data when available
 - canonical action dispatch
-- declarative observe/state shims over the canonical snapshot/action paths
+- declarative observe/state/query/ensure shims over the canonical
+  snapshot/action
+  paths
 - snapshot-derived text rendering
 
 ## Canonical Data Model
@@ -138,6 +141,23 @@ and can be queried across runtime restarts.
 3. filter nodes by surface/kind/text/focus
 4. render filtered text or JSON response
 
+### Query
+
+1. build or fetch the current live snapshot
+2. validate strict canonical-id targets when provided
+3. filter nodes by surface/kind/text/focus
+4. return structured JSON with query metadata, matched surfaces, and matched
+   nodes
+
+### Ensure
+
+1. build or fetch the current live snapshot
+2. evaluate a bounded expectation over the same canonical selector space as
+   `query`
+3. optionally poll until timeout against live session state
+4. return structured JSON with satisfaction, elapsed time, query metadata, and
+   matched surfaces/nodes
+
 ### History
 
 1. query persisted access events when a store is attached
@@ -177,10 +197,11 @@ persisting them and instead rebuilds registry bindings per runtime.
 
 ### Constrained declarative semantics
 
-The shipped `observe` and `state` helpers are intentionally thin wrappers over
-the canonical snapshot/find/action paths. They support only the current limited
-set of surface activation and node action/state transitions rather than a fully
-general semantic state engine.
+The shipped `observe`, `state`, `query`, and `ensure` helpers are intentionally
+thin
+wrappers over the canonical snapshot/find/action paths. They support only the
+current limited set of surface activation, selector, and node
+action/state transitions rather than a fully general semantic state engine.
 
 ## Follow-on Architecture
 
@@ -188,5 +209,5 @@ Future phases can extend the same snapshot contract with:
 
 - screenshot/mark fallback
 - external accessibility adapters
-- broader declarative semantics beyond the current constrained `observe/state`
-  wrapper layer
+- broader declarative semantics beyond the current constrained
+  `observe/state/query/ensure` wrapper layer

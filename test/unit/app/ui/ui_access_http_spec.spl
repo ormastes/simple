@@ -165,6 +165,85 @@ describe "ui_access_protocol HTTP routes":
         expect(missing.0).to_equal(404)
         expect(missing.2).to_contain("Canonical node not found")
 
+    it "ensures bounded declarative expectations over canonical queries":
+        val session = _session_with_popup()
+        val missing = handle_test_request(
+            "/api/test/ui/ensure?surface_id=popup&kind=button&text=Missing&expectation=absent",
+            "GET",
+            "",
+            session.current_state(),
+            \event: pass_dn,
+            session
+        )
+        expect(missing.0).to_equal(200)
+        expect(missing.2).to_contain("\"satisfied\":true")
+        val focus = handle_test_request(
+            "/api/test/ui/state",
+            "POST",
+            "{\"surface_id\":\"popup\",\"canonical_id\":\"popup#ok_btn\",\"state_key\":\"focused\",\"state_value\":\"true\"}",
+            session.current_state(),
+            \event: pass_dn,
+            session
+        )
+        expect(focus.0).to_equal(200)
+        val ensured = handle_test_request(
+            "/api/test/ui/ensure?surface_id=popup&kind=button&focused_only=true&expectation=match_count&expected_value=1&limit=1",
+            "GET",
+            "",
+            session.current_state(),
+            \event: pass_dn,
+            session
+        )
+        expect(ensured.0).to_equal(200)
+        expect(ensured.2).to_contain("\"satisfied\":true")
+        expect(ensured.2).to_contain("\"match_count\":1")
+        expect(ensured.2).to_contain("\"canonical_id\":\"popup#ok_btn\"")
+
+    it "preserves focused semantics across state, observe, and query":
+        val session = _session_with_popup()
+        val empty = handle_test_request(
+            "/api/test/ui/query?surface_id=popup&kind=button&focused_only=true&limit=1",
+            "GET",
+            "",
+            session.current_state(),
+            \event: pass_dn,
+            session
+        )
+        expect(empty.0).to_equal(200)
+        expect(empty.2).to_contain("\"match_count\":0")
+        val focus = handle_test_request(
+            "/api/test/ui/state",
+            "POST",
+            "{\"surface_id\":\"popup\",\"canonical_id\":\"popup#ok_btn\",\"state_key\":\"focused\",\"state_value\":\"true\"}",
+            session.current_state(),
+            \event: pass_dn,
+            session
+        )
+        expect(focus.0).to_equal(200)
+        expect(focus.2).to_contain("\"ok\":true")
+        val observed = handle_test_request(
+            "/api/test/ui/observe?canonical_id=popup#ok_btn",
+            "GET",
+            "",
+            session.current_state(),
+            \event: pass_dn,
+            session
+        )
+        expect(observed.0).to_equal(200)
+        expect(observed.2).to_contain("\"canonical_id\":\"popup#ok_btn\"")
+        expect(observed.2).to_contain("\"focused\":true")
+        val query = handle_test_request(
+            "/api/test/ui/query?surface_id=popup&kind=button&focused_only=true&limit=1",
+            "GET",
+            "",
+            session.current_state(),
+            \event: pass_dn,
+            session
+        )
+        expect(query.0).to_equal(200)
+        expect(query.2).to_contain("\"match_count\":1")
+        expect(query.2).to_contain("\"canonical_id\":\"popup#ok_btn\"")
+
     it "reads and sets declarative UI state":
         val session = _session_with_popup()
         val read = handle_test_request(

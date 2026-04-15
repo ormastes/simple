@@ -39,7 +39,7 @@ Responsibilities:
 
 - accept optional `UISession`
 - serve additive `/api/test/ui/*` routes, including declarative observe/state
-  reads and writes
+  reads and writes plus structured query and ensure reads
 - fall back to state-derived snapshot when session is absent
 
 ### `src/os/services/llm/mcp_os_server.spl`
@@ -47,8 +47,9 @@ Responsibilities:
 Responsibilities:
 
 - dispatch the new UI access tools
-- provide declarative `ui_access_observe` and `ui_access_state` shims over the
-  canonical snapshot/find/action paths
+- provide declarative `ui_access_observe`, `ui_access_state`, and
+  `ui_access_query`/`ui_access_ensure` shims over the canonical
+  snapshot/find/action paths
 - prefer persisted history and node search when a store is attached
 - reuse canonical snapshot text rendering for screen/debug output
 - route actions through the existing event-dispatch path
@@ -77,6 +78,8 @@ tooling. Persisted snapshots are derived from it by stripping runtime
 - invalid `canonical_id` -> explicit route/tool errors
 - invalid `state_key` or unsupported declarative transition -> explicit route
   or tool error
+- invalid declarative query target -> explicit route/tool error
+- unsupported declarative ensure expectation -> explicit route/tool error
 - absent session in HTTP test API -> empty/history-less fallback response
 - missing surface on update/action -> error string or `404`-style response
 - attached store unavailable or query failure -> fall back to live in-memory
@@ -86,8 +89,8 @@ tooling. Persisted snapshots are derived from it by stripping runtime
 
 - keep legacy widget tools/routes intact
 - add new routes and tools rather than mutating old names
-- keep declarative observe/state helpers as compatibility wrappers rather than a
-  second execution model
+- keep declarative observe/state/query/ensure helpers as compatibility wrappers
+  rather than a second execution model
 - reuse `UIEvent.Action` so action execution semantics remain compatible with
   current render/update flow
 
@@ -97,7 +100,8 @@ tooling. Persisted snapshots are derived from it by stripping runtime
 - REQ-UAP-010 -> `test/unit/app/ui/ui_access_http_spec.spl`,
   `test/system/ui/ui_access_contract_spec.spl`
 - REQ-UAP-013 / 014 -> `test/unit/os/services/llm/tool_registry_spec.spl`,
-  `test/unit/os/services/llm/ui_access_dispatch_spec.spl`
+  `test/unit/os/services/llm/ui_access_dispatch_spec.spl`,
+  `test/unit/app/mcp_unit/mcp_inventory_alignment_spec.spl`
 - REQ-UAP-018 / NFR-UAP-013 -> `test/unit/app/ui/ui_access_runtime_spec.spl`,
   `test/unit/app/ui/ui_access_store_spec.spl`
 - REQ-UAP-019 -> `test/unit/app/ui/window_surface_registry_spec.spl`,

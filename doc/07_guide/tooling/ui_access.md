@@ -59,6 +59,7 @@ Declarative shortcuts now sit on top of that base flow:
 6. `ui_access_observe`
 7. `ui_access_state`
 8. `ui_access_query`
+9. `ui_access_ensure`
 
 This matches the repo-local agent skill at [.codex/skills/simple-ui/SKILL.md](../../../.codex/skills/simple-ui/SKILL.md).
 
@@ -66,7 +67,7 @@ This matches the repo-local agent skill at [.codex/skills/simple-ui/SKILL.md](..
 
 ## MCP Tools
 
-The MCP OS server exposes eight tools:
+The MCP OS server exposes nine tools:
 
 | Tool | Purpose | Result shape |
 |------|---------|--------------|
@@ -78,6 +79,7 @@ The MCP OS server exposes eight tools:
 | `ui_access_observe` | Declaratively observe a node, surface, or filtered query | JSON or text |
 | `ui_access_state` | Read or set declarative state for a surface or node | JSON or text |
 | `ui_access_query` | Query canonical nodes with structured JSON results | JSON |
+| `ui_access_ensure` | Ensure a bounded declarative expectation over canonical query results | JSON |
 
 Important behavior:
 
@@ -94,6 +96,9 @@ Important behavior:
   `submit`, `select`, `toggle`, and `action`.
 - `ui_access_query` keeps filtered reads in JSON form with `query`,
   `match_count`, `truncated`, `surfaces`, and `nodes`.
+- `ui_access_ensure` reuses the same selector space as `query`, then evaluates
+  one bounded expectation such as `exists`, `absent`, `focused`, `enabled`, or
+  `match_count`.
 
 ---
 
@@ -111,6 +116,7 @@ The shared test API exposes additive routes under `/api/test/ui/*`:
 | `/api/test/ui/state?...` | `GET` | Read declarative state for a surface or node |
 | `/api/test/ui/state` | `POST` | Set constrained declarative state for a surface or node |
 | `/api/test/ui/query?...` | `GET` | Query canonical nodes with structured JSON results |
+| `/api/test/ui/ensure?...` | `GET` | Ensure a bounded declarative expectation over canonical query results |
 
 Example action body:
 
@@ -132,6 +138,9 @@ Compatibility rules:
   `surface_id`, `canonical_id`, `kind`, `text`, or `focused_only`.
 - `GET /api/test/ui/query` accepts the same selectors as `observe`, plus
   optional `limit`.
+- `GET /api/test/ui/ensure` accepts the same selectors as `query`, plus
+  `expectation`, optional `expected_value`, and optional bounded wait controls
+  `timeout_ms` and `poll_ms`.
 - `POST /api/test/ui/state` requires `state_key` and either `surface_id` or
   `canonical_id`.
 
@@ -241,7 +250,13 @@ ui_access_state(canonical_id="main#submit_btn", state_key="invoke", state_value=
 ui_access_query(surface_id="popup", kind="button", text="OK", focused_only="false", limit="10")
 ```
 
-### Confirm the result
+### Ensure a goal state
+
+```text
+ui_access_ensure(surface_id="popup", kind="button", focused_only="true", expectation="match_count", expected_value="1", limit="1")
+```
+
+### Confirm the result through history
 
 ```text
 ui_access_history(surface_id="popup", count="10")

@@ -55,6 +55,19 @@ struct UiAccessSnapshot:
     nodes: [UiAccessNode]
     recent_events: [UiAccessEvent]
 
+struct UiAccessQueryResult:
+    applied_limit: i32
+    match_count: i32
+    truncated: bool
+    surfaces: [UiAccessSurface]
+    nodes: [UiAccessNode]
+
+struct UiAccessEnsureResult:
+    expectation: text
+    expected_value: text
+    satisfied: bool
+    query: UiAccessQueryResult
+
 fn ui_access_canonical_id(surface_id: text, widget_id: text) -> text:
     return "{surface_id}#{widget_id}"
 
@@ -308,6 +321,16 @@ fn ui_access_surface_to_json(snapshot: UiAccessSnapshot, surface_id: text) -> te
     return "{}"
 
 fn ui_access_query_to_json(snapshot: UiAccessSnapshot, surface_id: text, canonical_id: text, kind: text, text_query: text, focused_only: bool, limit: i32) -> text:
+    val result = ui_access_query_result(snapshot, surface_id, canonical_id, kind, text_query, focused_only, limit)
+    return "{" +
+        _json_pair("query", _query_meta_to_json(surface_id, canonical_id, kind, text_query, focused_only, result.applied_limit)) + "," +
+        _json_pair("match_count", "{result.match_count}") + "," +
+        _json_pair("truncated", if result.truncated: "true" else: "false") + "," +
+        _json_pair("surfaces", _surfaces_to_json(result.surfaces)) + "," +
+        _json_pair("nodes", _nodes_to_json(result.nodes)) +
+        "}"
+
+fn ui_access_query_result(snapshot: UiAccessSnapshot, surface_id: text, canonical_id: text, kind: text, text_query: text, focused_only: bool, limit: i32) -> UiAccessQueryResult:
     var matches: [UiAccessNode] = []
     if canonical_id != "":
         val node = ui_access_find_node(snapshot, canonical_id)
@@ -329,13 +352,35 @@ fn ui_access_query_to_json(snapshot: UiAccessSnapshot, surface_id: text, canonic
             nodes = nodes.push(node)
         idx = idx + 1
     val surfaces = _query_surfaces(snapshot, surface_id, canonical_id, nodes)
-    val truncated = total > nodes.len()
+    return UiAccessQueryResult(
+        applied_limit: applied_limit,
+        match_count: total,
+        truncated: total > nodes.len(),
+        surfaces: surfaces,
+        nodes: nodes
+    )
+
+fn ui_access_ensure_result(snapshot: UiAccessSnapshot, surface_id: text, canonical_id: text, kind: text, text_query: text, focused_only: bool, limit: i32, expectation: text, expected_value: text) -> UiAccessEnsureResult:
+    val normalized_expectation = if expectation.trim() == "": "exists" else: expectation.trim().to_lower()
+    val query = ui_access_query_result(snapshot, surface_id, canonical_id, kind, text_query, focused_only, limit)
+    return UiAccessEnsureResult(
+        expectation: normalized_expectation,
+        expected_value: expected_value,
+        satisfied: _ensure_expectation_satisfied(query, normalized_expectation, expected_value),
+        query: query
+    )
+
+fn ui_access_ensure_to_json(snapshot: UiAccessSnapshot, surface_id: text, canonical_id: text, kind: text, text_query: text, focused_only: bool, limit: i32, expectation: text, expected_value: text, elapsed_ms: i64) -> text:
+    val result = ui_access_ensure_result(snapshot, surface_id, canonical_id, kind, text_query, focused_only, limit, expectation, expected_value)
     return "{" +
-        _json_pair("query", _query_meta_to_json(surface_id, canonical_id, kind, text_query, focused_only, applied_limit)) + "," +
-        _json_pair("match_count", "{total}") + "," +
-        _json_pair("truncated", if truncated: "true" else: "false") + "," +
-        _json_pair("surfaces", _surfaces_to_json(surfaces)) + "," +
-        _json_pair("nodes", _nodes_to_json(nodes)) +
+        _json_pair("satisfied", if result.satisfied: "true" else: "false") + "," +
+        _json_pair("elapsed_ms", "{elapsed_ms}") + "," +
+        _json_pair("query", _query_meta_to_json(surface_id, canonical_id, kind, text_query, focused_only, result.query.applied_limit)) + "," +
+        _json_pair("expectation", _json_str(result.expectation)) + "," +
+        _json_pair("expected_value", _json_str(result.expected_value)) + "," +
+        _json_pair("match_count", "{result.query.match_count}") + "," +
+        _json_pair("surfaces", _surfaces_to_json(result.query.surfaces)) + "," +
+        _json_pair("nodes", _nodes_to_json(result.query.nodes)) +
         "}"
 
 fn ui_access_events_to_json(events: [UiAccessEvent]) -> text:
@@ -652,6 +697,45 @@ fn _query_meta_to_json(surface_id: text, canonical_id: text, kind: text, text_qu
         _json_pair("focused_only", if focused_only: "true" else: "false") + "," +
         _json_pair("limit", "{limit}") +
         "}"
+
+fn _ensure_expectation_satisfied(query: UiAccessQueryResult, expectation: text, expected_value: text) -> bool:
+    if expectation == "exists":
+        return query.match_count > 0
+    if expectation == "absent":
+        return query.match_count == 0
+    if expectation == "match_count":
+        if expected_value.trim() == "":
+            return false
+        return query.match_count == expected_value.trim().to_i32()
+    if expectation == "active":
+        return _all_surfaces_match(query.surfaces, \surface: surface.active)
+    if expectation == "focused":
+        return _all_nodes_match(query.nodes, \node: node.focused)
+    if expectation == "enabled":
+        return _all_nodes_match(query.nodes, \node: node.enabled)
+    if expectation == "disabled":
+        return _all_nodes_match(query.nodes, \node: not node.enabled)
+    if expectation == "selected":
+        return _all_nodes_match(query.nodes, \node: node.selected)
+    if expectation == "unselected":
+        return _all_nodes_match(query.nodes, \node: not node.selected)
+    return false
+
+fn _all_nodes_match(nodes: [UiAccessNode], predicate: fn(UiAccessNode) -> bool) -> bool:
+    if nodes.len() == 0:
+        return false
+    for node in nodes:
+        if not predicate(node):
+            return false
+    return true
+
+fn _all_surfaces_match(surfaces: [UiAccessSurface], predicate: fn(UiAccessSurface) -> bool) -> bool:
+    if surfaces.len() == 0:
+        return false
+    for surface in surfaces:
+        if not predicate(surface):
+            return false
+    return true
 
 fn _event_to_json(event: UiAccessEvent) -> text:
     return "{" +

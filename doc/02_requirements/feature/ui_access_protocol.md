@@ -45,7 +45,8 @@ surfaces. It is not an external OS accessibility integration in v1.
 ### F4: HTTP/test API
 
 - REQ-UAP-010: The shared test API shall add additive routes under
-  `/api/test/ui/*` for snapshot, surface, history, action, observe, and state.
+  `/api/test/ui/*` for snapshot, surface, history, action, observe, state,
+  query, and ensure.
 - REQ-UAP-011: The new routes shall preserve the existing shared error-model
   style used by `/api/test/*`.
 - REQ-UAP-012: Existing `/api/test/element`, `/api/test/elements`,
@@ -55,7 +56,8 @@ surfaces. It is not an external OS accessibility integration in v1.
 
 - REQ-UAP-013: The MCP OS tool surface shall register `ui_access_snapshot`,
   `ui_access_surface`, `ui_access_find`, `ui_access_act`,
-  `ui_access_history`, `ui_access_observe`, and `ui_access_state`.
+  `ui_access_history`, `ui_access_observe`, `ui_access_state`,
+  `ui_access_query`, and `ui_access_ensure`.
 - REQ-UAP-014: The new tool schemas and dispatcher shall stay aligned and have
   automated coverage.
 - REQ-UAP-015: Human-readable UI tree text used by screen/debug helpers shall be
@@ -70,8 +72,8 @@ surfaces. It is not an external OS accessibility integration in v1.
 - REQ-UAP-016: The repository shall include a plugin bundle that documents the
   new UI-access workflow for agent/plugin-marketplace use.
 - REQ-UAP-017: The repository shall include a Codex `simple-ui` skill that
-  teaches snapshot, find, observe, state, act, history, and debugging flow on
-  top of the shared protocol.
+  teaches snapshot, find, query, observe, state, act, history, and debugging
+  flow on top of the shared protocol.
 
 ## Acceptance Criteria
 
@@ -80,11 +82,12 @@ surfaces. It is not an external OS accessibility integration in v1.
 - AC-UAP-02: Recent access events can be queried for all surfaces and for one
   selected surface.
 - AC-UAP-03: `/api/test/ui/snapshot`, `/api/test/ui/surface`,
-  `/api/test/ui/history`, `/api/test/ui/act`, `/api/test/ui/observe`, and
-  `/api/test/ui/state` respond with stable additive behavior.
-- AC-UAP-04: The MCP tool registry lists the seven UI access tools with
-  matching schemas, and the declarative observe/state tools preserve canonical
-  node IDs while routing through the shared protocol.
+  `/api/test/ui/history`, `/api/test/ui/act`, `/api/test/ui/observe`,
+  `/api/test/ui/state`, `/api/test/ui/query`, and `/api/test/ui/ensure`
+  respond with stable additive behavior.
+- AC-UAP-04: The MCP tool registry lists the nine UI access tools with
+  matching schemas, and the declarative observe/state/query/ensure tools
+  preserve canonical node IDs while routing through the shared protocol.
 - AC-UAP-05: Existing widget routes and tests still pass after the feature lands.
 - AC-UAP-06: With a UI access store attached, persisted history and persisted
   node search survive restart-level reuse of the same database.
