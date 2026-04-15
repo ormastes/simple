@@ -1,0 +1,174 @@
+#!/bin/sh
+set -eu
+
+REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+cd "$REPO_ROOT"
+
+TMP_DIR="${TMPDIR:-/tmp}/simple_mcp_native_diag.$$"
+trap 'rm -rf "$TMP_DIR"' EXIT
+mkdir -p "$TMP_DIR"
+
+MCP_BIN="$TMP_DIR/simple_mcp_native"
+LSP_BIN="$TMP_DIR/simple_lsp_mcp_native"
+
+INIT_BODY='{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"diag","version":"1.0"}}}'
+TOOLS_BODY='{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}'
+
+section() {
+  printf '\n== %s ==\n' "$1"
+}
+
+build_msg() {
+  local body="$1"
+  local len
+  len="$(printf '%s' "$body" | wc -c | tr -d ' ')"
+  printf 'Content-Length: %s\r\n\r\n%s' "$len" "$body"
+}
+
+preview() {
+  tr '\n' ' ' | cut -c1-240
+}
+
+run_request() {
+  local bin="$1"
+  local name="$2"
+  local body="$3"
+  local out_file="$TMP_DIR/${name}.out"
+  local err_file="$TMP_DIR/${name}.err"
+  build_msg "$body" | "$bin" >"$out_file" 2>"$err_file" || true
+  local bytes
+  bytes="$(wc -c <"$out_file" | tr -d ' ')"
+  printf '%s bytes=%s preview=%s\n' "$name" "$bytes" "$(preview <"$out_file")"
+  if [ -s "$err_file" ]; then
+    printf '%s stderr=%s\n' "$name" "$(preview <"$err_file")"
+  fi
+}
+
+build_native_servers() {
+  section "Build Native Servers"
+  bin/simple native-build --source src/compiler --source src/app --source src/lib --entry-closure --entry src/app/mcp/main.spl -o "$MCP_BIN"
+  bin/simple native-build --source src/compiler --source src/app --source src/lib --entry-closure --entry src/app/simple_lsp_mcp/main.spl -o "$LSP_BIN"
+}
+
+write_probe_sources() {
+  mkdir -p "$TMP_DIR/probes"
+
+  cat >"$TMP_DIR/probes/common.spl" <<'EOF'
+use app.mcp.main_lazy_json
+
+fn emit(s: text) -> i64:
+    print_raw(s)
+    0
+EOF
+
+  cat >"$TMP_DIR/probes/native_idprobe.spl" <<'EOF'
+use app.mcp.main_lazy_json
+use app.mcp.main_lazy_protocol
+
+fn main() -> i64:
+    val line = read_stdin_message()
+    print_raw("LINE=")
+    print_raw(line)
+    print_raw("\nID=")
+    print_raw(extract_id(line))
+    print_raw("\nMETHOD=")
+    print_raw(extract_field(line, "method"))
+    0
+EOF
+
+  cat >"$TMP_DIR/probes/native_resp_probe.spl" <<'EOF'
+use app.mcp.main_lazy_json
+use app.mcp.main_lazy_protocol
+
+fn main() -> i64:
+    val line = read_stdin_message()
+    val id = extract_id(line)
+    val result = jo2(jp("protocolVersion", js("2025-06-18")), jp("capabilities", "{}"))
+    val response = make_json_result(id, result)
+    print_raw(response)
+    0
+EOF
+
+  cat >"$TMP_DIR/probes/mcp_protocol_probe.spl" <<'EOF'
+use app.mcp.main_lazy_protocol
+
+fn main() -> i64:
+    print_raw(make_init_response("1"))
+    0
+EOF
+
+  cat >"$TMP_DIR/probes/lsp_protocol_probe.spl" <<'EOF'
+use app.simple_lsp_mcp.protocol
+
+fn main() -> i64:
+    print_raw(make_tools_list("2"))
+    0
+EOF
+}
+
+build_and_run_probe() {
+  local name="$1"
+  local entry="$2"
+  local body="${3:-}"
+  local bin="$TMP_DIR/${name}.bin"
+  bin/simple native-build --source "$TMP_DIR/probes" --source src/app --entry-closure --entry "$entry" -o "$bin" >/dev/null
+  if [ -n "$body" ]; then
+    build_msg "$body" | "$bin" >"$TMP_DIR/${name}.out" 2>"$TMP_DIR/${name}.err" || true
+  else
+    "$bin" >"$TMP_DIR/${name}.out" 2>"$TMP_DIR/${name}.err" || true
+  fi
+  printf '%s bytes=%s preview=%s\n' "$name" "$(wc -c <"$TMP_DIR/${name}.out" | tr -d ' ')" "$(preview <"$TMP_DIR/${name}.out")"
+}
+
+run_probes() {
+  section "Native Probes"
+  write_probe_sources
+  build_and_run_probe "idprobe" "$TMP_DIR/probes/native_idprobe.spl" "$INIT_BODY"
+  build_and_run_probe "resp_probe" "$TMP_DIR/probes/native_resp_probe.spl" "$INIT_BODY"
+  build_and_run_probe "mcp_protocol_probe" "$TMP_DIR/probes/mcp_protocol_probe.spl"
+  build_and_run_probe "lsp_protocol_probe" "$TMP_DIR/probes/lsp_protocol_probe.spl"
+}
+
+classify() {
+  section "Diagnosis"
+
+  local mcp_init_bytes lsp_init_bytes resp_probe_bytes mcp_protocol_bytes
+  mcp_init_bytes="$(wc -c <"$TMP_DIR/mcp_init.out" | tr -d ' ')"
+  lsp_init_bytes="$(wc -c <"$TMP_DIR/lsp_init.out" | tr -d ' ')"
+  resp_probe_bytes="$(wc -c <"$TMP_DIR/resp_probe.out" | tr -d ' ')"
+  mcp_protocol_bytes="$(wc -c <"$TMP_DIR/mcp_protocol_probe.out" | tr -d ' ')"
+
+  if [ "$mcp_init_bytes" -eq 0 ] && [ "$lsp_init_bytes" -eq 0 ] && [ "$resp_probe_bytes" -gt 0 ] && [ "$mcp_protocol_bytes" -eq 0 ]; then
+    cat <<'EOF'
+classification=framework-native-miscompile
+reason=Integrated MCP native servers fail, but small native JSON-RPC response probes work. The collapse happens inside the real MCP/LSP protocol helper path, not in stdin/stdout or basic JSON handling.
+likely_hotspots=
+  - src/app/mcp/main_lazy_protocol.spl
+  - src/app/simple_lsp_mcp/protocol.spl
+  - native codegen for large text-building / response-returning functions in real server modules
+recommended_next_step=reduce one real protocol helper to the smallest compiler regression case and add a compiler/runtime regression test before touching wrappers again.
+EOF
+    return
+  fi
+
+  cat <<'EOF'
+classification=unclassified
+reason=The observed outputs do not match the currently known MCP-native failure signature.
+recommended_next_step=inspect the per-step outputs above and extend the probes.
+EOF
+}
+
+main() {
+  build_native_servers
+
+  section "Integrated Server Requests"
+  run_request "$MCP_BIN" "mcp_init" "$INIT_BODY"
+  run_request "$MCP_BIN" "mcp_tools" "$TOOLS_BODY"
+  run_request "$LSP_BIN" "lsp_init" "$INIT_BODY"
+  run_request "$LSP_BIN" "lsp_tools" "$TOOLS_BODY"
+
+  run_probes
+  classify
+}
+
+main "$@"
