@@ -1,17 +1,24 @@
-# FAT32 kernel filesystem driver — IF-07 wave-3 scaffold.
+# FAT32 kernel filesystem driver — IF-07 wave-4a.
 #
-# Implements Filesystem over a BlockDevice. This is a scaffold: mount /
-# open / read / write return not-implemented errors. Wave-4 fills in:
-#   - BPB parsing from sector 0 (validate 0xAA55 signature)
-#   - FAT cluster-chain walking for sequential read/write
-#   - Short-name 8.3 + LFN directory entry decoding
-#   - Write-back of dirty FAT sectors via BlockDevice.write_sector
+# Wave-4a: BPB parse + cluster-to-lba arithmetic + real mount().
+# Wave-4b: walk FAT chain via next_cluster(bpb, fat, cluster).
 
-# -- Public types -----------------------------------------------------------
+# -- Error codes ---------------------------------------------------------------
+
+val EINVAL: i32 = -22   # bad signature
+val EIO: i32    = -5    # wrong FS type
+val ENOSYS: i32 = -38   # not implemented
+
+# -- BPB boot sector signature -------------------------------------------------
+
+val FAT32_BOOT_SIG_0: u8 = 0x55
+val FAT32_BOOT_SIG_1: u8 = 0xAA
+
+# -- Public types --------------------------------------------------------------
 
 struct FileHandle:
     """Open-file token returned by Fat32Filesystem.open()."""
-    fd: u64                 # Opaque descriptor; wave-4 uses it as a table key
+    fd: u64                 # Opaque descriptor; wave-4b uses it as a table key
 
 struct FileStat:
     """Minimal file metadata returned by Fat32Filesystem.stat()."""
@@ -19,14 +26,84 @@ struct FileStat:
     is_dir: bool
     mtime: u64              # POSIX seconds since epoch
 
-# -- Driver state -----------------------------------------------------------
+struct Fat32Bpb:
+    """BIOS Parameter Block — parsed from the first 512-byte sector."""
+    bytes_per_sector: u16
+    sectors_per_cluster: u8
+    reserved_sectors: u16
+    num_fats: u8
+    total_sectors_32: u32
+    fat_size_32: u32
+    root_cluster: u32
+    fs_info_sector: u16
+    bs_fat_type_label: [u8]     # 8 bytes: "FAT32   "
+    bs_boot_signature: u8
+    bs_volume_id: u32
+    bs_volume_label: [u8]       # 11 bytes
+    bs_fat32_signature: [u8]    # 2 bytes: 0x55 0xAA
+
+# -- Pure BPB parser -----------------------------------------------------------
+
+fn parse_bpb(sector0: [u8]) -> Result<Fat32Bpb, i32>:
+    """Parse the 512-byte boot sector into a Fat32Bpb.
+
+    Returns Err(EINVAL=-22) for a missing 0x55AA signature.
+    Returns Err(EIO=-5) if the FS-type label is not 'FAT32   '.
+    """
+    # Validate boot sector signature at bytes 510-511
+    val sig0 = sector0[510]
+    val sig1 = sector0[511]
+    if sig0 != FAT32_BOOT_SIG_0 or sig1 != FAT32_BOOT_SIG_1:
+        return Result.Err(EINVAL)
+
+    # Validate FAT32 type label at offset 82 (8 bytes: "FAT32   ")
+    val l0 = sector0[82]
+    val l1 = sector0[83]
+    val l2 = sector0[84]
+    val l3 = sector0[85]
+    val l4 = sector0[86]
+    if (l0 != 0x46 or l1 != 0x41 or l2 != 0x54 or
+        l3 != 0x33 or l4 != 0x32):
+        return Result.Err(EIO)
+
+    val bpb = Fat32Bpb(
+        bytes_per_sector:   (sector0[12].to_u16() << 8) | sector0[11].to_u16(),
+        sectors_per_cluster: sector0[13],
+        reserved_sectors:   (sector0[15].to_u16() << 8) | sector0[14].to_u16(),
+        num_fats:           sector0[16],
+        total_sectors_32:   ((sector0[35].to_u32() << 24) | (sector0[34].to_u32() << 16) | (sector0[33].to_u32() << 8) | sector0[32].to_u32()),
+        fat_size_32:        ((sector0[39].to_u32() << 24) | (sector0[38].to_u32() << 16) | (sector0[37].to_u32() << 8) | sector0[36].to_u32()),
+        root_cluster:       ((sector0[47].to_u32() << 24) | (sector0[46].to_u32() << 16) | (sector0[45].to_u32() << 8) | sector0[44].to_u32()),
+        fs_info_sector:     (sector0[49].to_u16() << 8) | sector0[48].to_u16(),
+        bs_fat_type_label:  [sector0[82], sector0[83], sector0[84], sector0[85],
+                             sector0[86], sector0[87], sector0[88], sector0[89]],
+        bs_boot_signature:  sector0[66],
+        bs_volume_id:       ((sector0[70].to_u32() << 24) | (sector0[69].to_u32() << 16) | (sector0[68].to_u32() << 8) | sector0[67].to_u32()),
+        bs_volume_label:    [sector0[71], sector0[72], sector0[73], sector0[74],
+                             sector0[75], sector0[76], sector0[77], sector0[78],
+                             sector0[79], sector0[80], sector0[81]],
+        bs_fat32_signature: [sector0[510], sector0[511]]
+    )
+    Result.Ok(bpb)
+
+# -- Cluster arithmetic --------------------------------------------------------
+
+fn cluster_to_lba(bpb: Fat32Bpb, cluster: u32) -> u64:
+    """Convert a cluster number to an absolute LBA sector.
+
+    Formula: reserved_sectors + num_fats*fat_size_32 + (cluster-2)*sectors_per_cluster
+    """
+    val fat_region  = bpb.reserved_sectors.to_u64() + bpb.num_fats.to_u64() * bpb.fat_size_32.to_u64()
+    val data_offset = (cluster - 2u32).to_u64() * bpb.sectors_per_cluster.to_u64()
+    fat_region + data_offset
+
+# -- Driver state --------------------------------------------------------------
 
 class Fat32Filesystem:
     """FAT32 filesystem over a block device (IF-07).
 
-    Wave-3 scaffold: all ops return 'not implemented' errors. The type
-    names and method shapes match the IF-07 contract so userspace and
-    higher kernel layers can be linked now against stable signatures.
+    Wave-4a: mount() parses BPB and stores geometry.
+    Wave-4b will add open/read/write/readdir via cluster-chain walking.
     """
     device_id: u64          # BlockDevice handle assigned by bus registration
     bpb_parsed: bool        # True once mount() has validated the BPB
@@ -45,66 +122,81 @@ impl Fat32Filesystem:
             data_start_sector: 0u32
         )
 
-    fn mount(self) -> i32:
+    fn mount(self, dev: BlockDevice) -> Result<(), i32>:
         """Read sector 0, validate BPB, populate geometry fields.
 
-        Returns 0 on success or a negative errno on failure.
-        Wave-3 scaffold: returns -38 (ENOSYS).
+        # TODO(wave-4b): walk FAT chain via next_cluster(bpb, fat, cluster)
         """
-        -38
+        var buf: [u8] = []
+        var i = 0
+        while i < 512:
+            buf.push(0u8)
+            i = i + 1
+
+        val read_result = dev.read_sector(0u64, buf)
+        if read_result.is_err():
+            return Result.Err(EIO)
+
+        val bpb_result = parse_bpb(buf)
+        if bpb_result.is_err():
+            return Result.Err(bpb_result.unwrap_err())
+
+        val bpb = bpb_result.unwrap()
+        self.bpb_parsed      = true
+        self.fat_start_sector = bpb.reserved_sectors.to_u32()
+        self.data_start_sector = (bpb.reserved_sectors.to_u32() + bpb.num_fats.to_u32() * bpb.fat_size_32)
+        self.cluster_size    = bpb.sectors_per_cluster.to_u32() * bpb.bytes_per_sector.to_u32()
+
+        Result.Ok(())
 
     fn unmount(self) -> i32:
         """Flush dirty FAT sectors and release the block device.
 
         Wave-3 scaffold: returns -38.
         """
-        -38
+        ENOSYS
 
     fn open(self, path: Text, flags: i32) -> i32:
-        """Open a file by path; populates FileHandle into an out-param.
+        """Open a file by path; wave-4b implements cluster-chain lookup.
 
         Returns fd on success (>=0) or negative errno.
-        Wave-3 scaffold: returns -38.
         """
         val _p = path
         val _f = flags
-        -38
+        ENOSYS
 
     fn read(self, fd: u64, offset: u64, length: u64) -> i64:
         """Read up to `length` bytes at `offset` into a driver buffer.
 
         Returns bytes read on success or negative errno.
-        Wave-3 scaffold: returns -38.
         """
         val _fd = fd
         val _o = offset
         val _l = length
-        -38
+        ENOSYS
 
     fn write(self, fd: u64, offset: u64, length: u64) -> i64:
         """Write up to `length` bytes at `offset` from a driver buffer.
 
         Returns bytes written on success or negative errno.
-        Wave-3 scaffold: returns -38.
         """
         val _fd = fd
         val _o = offset
         val _l = length
-        -38
+        ENOSYS
 
     fn close(self, fd: u64) -> i32:
         """Release an open file descriptor.
 
-        Wave-3 scaffold: returns -38.
+        Wave-4b scaffold: returns -38.
         """
         val _fd = fd
-        -38
+        ENOSYS
 
     fn stat(self, path: Text) -> i32:
         """Fetch metadata for a path.
 
-        Returns 0 on success; fills an out-param FileStat in wave-4.
-        Wave-3 scaffold: returns -38.
+        Returns 0 on success; fills an out-param FileStat in wave-4b.
         """
         val _p = path
-        -38
+        ENOSYS

@@ -147,6 +147,24 @@ class BugDatabase:
         row.set("valid", valid_str)
         row
 
+    fn bug_to_row_for_table(bug: Bug, table: SdnTable) -> SdnRow:
+        val row = SdnRow.empty()
+        for column in table.columns:
+            match column:
+                "id" => row.set("id", bug.id)
+                "severity" => row.set("severity", severity_to_string(bug.severity))
+                "status" => row.set("status", status_to_string(bug.status))
+                "title" => row.set("title", bug.title)
+                "file" => row.set("file", bug.file)
+                "line" => row.set("line", "{bug.line}")
+                "description" => row.set("description", if bug.description.len() > 0: bug.description[0] else: "")
+                "reproducible_by" => row.set("reproducible_by", bug.reproducible_by)
+                "created_at" => row.set("created_at", bug.created_at)
+                "updated_at" => row.set("updated_at", bug.updated_at)
+                "valid" => row.set("valid", if bug.valid: "true" else: "false")
+                _ => pass
+        row
+
     # Add new bug
     me add_bug(bug: Bug) -> bool:
         if not self.db.add_row_to_table("bugs", bug_to_row(bug)):
@@ -178,45 +196,74 @@ class BugDatabase:
 
     # Get bug by ID
     fn get_bug(id: text) -> Bug?:
-        val bugs_table = self.db.get_table("bugs")?
-        val row = bugs_table.get_row(id)?
+        val bugs_table_opt = self.db.get_table("bugs")
+        if not bugs_table_opt.?:
+            return None
+        val bugs_table = bugs_table_opt.unwrap()
+
+        val row_opt = bugs_table.get_row(id)
+        if not row_opt.?:
+            return None
+        val row = row_opt.unwrap()
 
         # Parse main fields
-        val severity = parse_severity(row.get("severity")?)
-        val status = parse_status(row.get("status")?)
+        val severity = parse_severity(row.get("severity") ?? "P3")
+        val status = parse_status(row.get("status") ?? "Open")
 
         # Get multiline fields
-        val description = self.get_multiline_field("bug_descriptions", id)
+        val description = self.get_bug_description(row, id)
         val fix_strategy = self.get_multiline_field("bug_fix_strategies", id)
         val investigation_log = self.get_multiline_field("bug_investigation_logs", id)
+
+        val created_at = row.get("created_at") ?? ""
+        val updated_at = row.get("updated_at") ?? ""
+        val valid_raw = (row.get("valid") ?? "true").to_lower()
+        val valid = valid_raw != "false"
+
+        val title = row.get("title") ?? ""
+        val file = row.get("file") ?? ""
+        val line = (row.get("line") ?? "0").to_i64() ?? 0
+        val reproducible_by = row.get("reproducible_by") ?? ""
 
         Some(Bug(
             id: id,
             severity: severity,
             status: status,
-            title: row.get("title")?,
+            title: title,
             description: description,
-            file: row.get("file")?,
-            line: row.get_i64("line")?,
-            reproducible_by: row.get("reproducible_by")?,
+            file: file,
+            line: line,
+            reproducible_by: reproducible_by,
             fix_strategy: fix_strategy,
             investigation_log: investigation_log,
-            created_at: row.get("created_at")?,
-            updated_at: row.get("updated_at")?,
-            valid: row.get_bool("valid")?
+            created_at: created_at,
+            updated_at: updated_at,
+            valid: valid
         ))
 
     # Helper to get multiline field
     fn get_multiline_field(table_name: text, bug_id: text) -> [text]:
-        val table = self.db.get_table(table_name)?
+        val table_opt = self.db.get_table(table_name)
+        if not table_opt.?:
+            return []
+        val table = table_opt.unwrap()
         var lines = []
 
         for row in table.rows:
-            if row.get("bug_id")? == bug_id:
-                val content = row.get("content")?
+            if (row.get("bug_id") ?? "") == bug_id:
+                val content = row.get("content") ?? ""
                 lines.push(content)
 
         lines
+
+    fn get_bug_description(row: SdnRow, bug_id: text) -> [text]:
+        val multiline = self.get_multiline_field("bug_descriptions", bug_id)
+        if multiline.len() > 0:
+            return multiline
+        val inline = row.get("description") ?? ""
+        if inline == "":
+            return []
+        [inline]
 
     # Get all bugs
     fn all_bugs() -> [Bug]:
@@ -254,11 +301,16 @@ class BugDatabase:
 
     # Update bug
     me update_bug(id: text, bug: Bug) -> bool:
-        # Mark old bug as invalid (get_table returns copy, must write back)
         var bugs_table_opt = self.db.get_table_mut("bugs")
         if not bugs_table_opt.?:
             return false
         var bugs_table = bugs_table_opt.unwrap()
+        if not bugs_table.columns.contains("valid"):
+            val updated = bugs_table.update_row(id, self.bug_to_row_for_table(bug, bugs_table))
+            self.db.set_table("bugs", bugs_table)
+            return updated
+
+        # Mark old bug as invalid (get_table returns copy, must write back)
         bugs_table.mark_deleted(id)
         self.db.set_table("bugs", bugs_table)
 
@@ -286,11 +338,16 @@ class BugDatabase:
             updated_at: timestamp,
             valid: old_bug.valid
         )
-        # Mark old entry as invalid, then insert resolved copy
         var bugs_table_opt = self.db.get_table_mut("bugs")
         if not bugs_table_opt.?:
             return false
         var bugs_table = bugs_table_opt.unwrap()
+        if not bugs_table.columns.contains("valid"):
+            val updated = bugs_table.update_row(id, self.bug_to_row_for_table(resolved, bugs_table))
+            self.db.set_table("bugs", bugs_table)
+            return updated
+
+        # Mark old entry as invalid, then insert resolved copy
         bugs_table.mark_deleted(id)
         self.db.set_table("bugs", bugs_table)
         self.add_bug(resolved)

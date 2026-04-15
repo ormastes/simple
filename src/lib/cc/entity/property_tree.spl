@@ -1,65 +1,46 @@
-# cc::PropertyTrees — four compositor property trees mirroring Chromium's cc layer.
+# PropertyTree — hierarchical compositor property inheritance.
+#
+# Mirrors cc's TransformTree/ClipTree/EffectTree/ScrollTree. Each layer references
+# nodes in these trees by index, and per-layer values are computed by walking
+# the chain from the layer's node to the root and combining.
+#
+# Two coexisting APIs:
+#   1. PropertyTrees — unified bundle (layer_tree_host, property_tree_spec).
+#   2. Separate TransformTree/ClipTree/EffectTree/ScrollTree classes
+#      (aggregator_compose, aggregator_compose_spec).
+#
+# The node types (TransformNode, ClipNode, EffectNode, ScrollNode) carry a
+# superset of fields from both APIs so both shapes can construct them.
+
+use std.skia.entity.matrix.{Matrix3x3}
+use std.skia.entity.geometry.{SkRect, sk_rect}
 
 # ---------------------------------------------------------------------------
-# TransformTree
+# PropertyKind — tag for which tree a node lives in.
+# ---------------------------------------------------------------------------
+
+enum PropertyKind:
+    Transform
+    Clip
+    Effect
+    Scroll
+
+# ---------------------------------------------------------------------------
+# Node types — one per compositor property tree.
+# Fields are a union of both API shapes; unused fields default cheaply.
 # ---------------------------------------------------------------------------
 
 class TransformNode:
+    # Legacy (aggregator_compose) fields:
     id: i32
     parent_id: i32
     local: [f32]
-    origin_x: f32
-    origin_y: f32
-    scrolls: bool
-    flattens_inherited_transform: bool
-
-class TransformTree:
-    nodes: [TransformNode]
-
-    static fn new() -> TransformTree:
-        val root = TransformNode(
-            id: 0,
-            parent_id: -1,
-            local: [f32](),
-            origin_x: 0.0,
-            origin_y: 0.0,
-            scrolls: false,
-            flattens_inherited_transform: false
-        )
-        val ns = [TransformNode]()
-        ns.push(root)
-        TransformTree(nodes: ns)
-
-    me add_node(n: TransformNode) -> i32:
-        val new_id = self.nodes.len().to_i32()
-        val node = TransformNode(
-            id: new_id,
-            parent_id: n.parent_id,
-            local: n.local,
-            origin_x: n.origin_x,
-            origin_y: n.origin_y,
-            scrolls: n.scrolls,
-            flattens_inherited_transform: n.flattens_inherited_transform
-        )
-        self.nodes.push(node)
-        new_id
-
-    me get(id: i32) -> TransformNode:
-        val idx = id.to_i64()
-        val opt = self.nodes.get(idx)
-        if val node = opt:
-            node
-        else:
-            self.nodes.get(0).unwrap()
-
-    me root_id() -> i32:
-        0
-
-# ---------------------------------------------------------------------------
-# ClipTree
-# ---------------------------------------------------------------------------
+    # New (PropertyTrees) fields:
+    local_matrix: Matrix3x3
+    parent_index: i64
 
 class ClipNode:
+    # Legacy (aggregator_compose) fields:
     id: i32
     parent_id: i32
     clip_x: f32
@@ -68,181 +49,405 @@ class ClipNode:
     clip_h: f32
     transform_id: i32
     applies_local_clip: bool
+    # New (PropertyTrees) fields:
+    clip: SkRect
+    parent_index: i64
 
-class ClipTree:
-    nodes: [ClipNode]
+class EffectNode:
+    # Legacy (aggregator_compose) fields:
+    id: i32
+    parent_id: i32
+    blend_mode: i32
+    has_render_surface: bool
+    clip_id: i32
+    transform_id: i32
+    # Shared/new fields:
+    opacity: f64
+    parent_index: i64
+    has_filter: bool
 
-    static fn new() -> ClipTree:
-        val root = ClipNode(
-            id: 0,
-            parent_id: -1,
+class ScrollNode:
+    # Legacy fields:
+    id: i32
+    parent_id: i32
+    # New fields:
+    scroll_offset_x: f64
+    scroll_offset_y: f64
+    parent_index: i64
+
+# ---------------------------------------------------------------------------
+# PropertyTrees — unified bundle of all four compositor trees.
+# ---------------------------------------------------------------------------
+
+class PropertyTrees:
+    transform_nodes: [TransformNode]
+    clip_nodes: [ClipNode]
+    effect_nodes: [EffectNode]
+    scroll_nodes: [ScrollNode]
+
+    static fn new() -> PropertyTrees:
+        property_trees_new()
+
+    # Append a TransformNode and return its index.
+    me add_transform(local: Matrix3x3, parent: i64) -> i64:
+        val idx = self.transform_nodes.len().to_i64()
+        self.transform_nodes.push(TransformNode(
+            id: idx.to_i32(),
+            parent_id: parent.to_i32(),
+            local: [f32](),
+            local_matrix: local,
+            parent_index: parent
+        ))
+        idx
+
+    # Append a ClipNode and return its index.
+    me add_clip(clip: SkRect, parent: i64) -> i64:
+        val idx = self.clip_nodes.len().to_i64()
+        self.clip_nodes.push(ClipNode(
+            id: idx.to_i32(),
+            parent_id: parent.to_i32(),
             clip_x: 0.0,
             clip_y: 0.0,
             clip_w: 0.0,
             clip_h: 0.0,
             transform_id: 0,
-            applies_local_clip: false
-        )
-        val ns = [ClipNode]()
-        ns.push(root)
-        ClipTree(nodes: ns)
+            applies_local_clip: false,
+            clip: clip,
+            parent_index: parent
+        ))
+        idx
 
-    me add_node(n: ClipNode) -> i32:
-        val new_id = self.nodes.len().to_i32()
-        val node = ClipNode(
-            id: new_id,
-            parent_id: n.parent_id,
-            clip_x: n.clip_x,
-            clip_y: n.clip_y,
-            clip_w: n.clip_w,
-            clip_h: n.clip_h,
-            transform_id: n.transform_id,
-            applies_local_clip: n.applies_local_clip
-        )
+    # Append an EffectNode and return its index.
+    me add_effect(opacity: f64, parent: i64, has_filter: bool) -> i64:
+        val idx = self.effect_nodes.len().to_i64()
+        self.effect_nodes.push(EffectNode(
+            id: idx.to_i32(),
+            parent_id: parent.to_i32(),
+            blend_mode: 0,
+            has_render_surface: false,
+            clip_id: 0,
+            transform_id: 0,
+            opacity: opacity,
+            parent_index: parent,
+            has_filter: has_filter
+        ))
+        idx
+
+    # Append a ScrollNode and return its index.
+    me add_scroll(sx: f64, sy: f64, parent: i64) -> i64:
+        val idx = self.scroll_nodes.len().to_i64()
+        self.scroll_nodes.push(ScrollNode(
+            id: idx.to_i32(),
+            parent_id: parent.to_i32(),
+            scroll_offset_x: sx,
+            scroll_offset_y: sy,
+            parent_index: parent
+        ))
+        idx
+
+    # Walk up the transform chain, combining local transforms into the world
+    # transform. Order: parent * ... * grandchild * child * local.
+    me compute_transform_to_root(node_index: i64) -> Matrix3x3:
+        var acc = Matrix3x3.identity()
+        var cur = node_index
+        while cur >= 0:
+            val opt = self.transform_nodes.get(cur)
+            if val node = opt:
+                acc = node.local_matrix.mul(acc)
+                cur = node.parent_index
+            else:
+                cur = -1
+        acc
+
+    # Walk up the clip chain, intersecting each clip rect. The result is the
+    # tightest clip that applies at this node.
+    me compute_clip_to_root(node_index: i64) -> SkRect:
+        var acc = sk_rect(-1.0e18, -1.0e18, 1.0e18, 1.0e18)
+        var cur = node_index
+        while cur >= 0:
+            val opt = self.clip_nodes.get(cur)
+            if val node = opt:
+                val l = if node.clip.left > acc.left: node.clip.left else: acc.left
+                val t = if node.clip.top > acc.top: node.clip.top else: acc.top
+                val r = if node.clip.right < acc.right: node.clip.right else: acc.right
+                val b = if node.clip.bottom < acc.bottom: node.clip.bottom else: acc.bottom
+                acc = sk_rect(l, t, r, b)
+                cur = node.parent_index
+            else:
+                cur = -1
+        acc
+
+    # Walk up the effect chain, multiplying opacities.
+    me compute_opacity_to_root(node_index: i64) -> f64:
+        var acc = 1.0
+        var cur = node_index
+        while cur >= 0:
+            val opt = self.effect_nodes.get(cur)
+            if val node = opt:
+                acc = acc * node.opacity
+                cur = node.parent_index
+            else:
+                cur = -1
+        acc
+
+    # Walk up the scroll chain, summing scroll offsets.
+    me compute_scroll_to_root(node_index: i64) -> (f64, f64):
+        var sx = 0.0
+        var sy = 0.0
+        var cur = node_index
+        while cur >= 0:
+            val opt = self.scroll_nodes.get(cur)
+            if val node = opt:
+                sx = sx + node.scroll_offset_x
+                sy = sy + node.scroll_offset_y
+                cur = node.parent_index
+            else:
+                cur = -1
+        (sx, sy)
+
+# ---------------------------------------------------------------------------
+# Factory — PropertyTrees with a single root node per tree.
+# ---------------------------------------------------------------------------
+
+# Using 1e9 as a stand-in for "infinity" when building the root clip. Any
+# finite clip child will tighten this to a real value during intersection.
+fn property_trees_new() -> PropertyTrees:
+    val big = 1.0e9
+    val t_nodes = [TransformNode]()
+    t_nodes.push(TransformNode(
+        id: 0,
+        parent_id: -1,
+        local: [f32](),
+        local_matrix: Matrix3x3.identity(),
+        parent_index: -1
+    ))
+    val c_nodes = [ClipNode]()
+    c_nodes.push(ClipNode(
+        id: 0,
+        parent_id: -1,
+        clip_x: 0.0,
+        clip_y: 0.0,
+        clip_w: 0.0,
+        clip_h: 0.0,
+        transform_id: 0,
+        applies_local_clip: false,
+        clip: sk_rect(0.0, 0.0, big, big),
+        parent_index: -1
+    ))
+    val e_nodes = [EffectNode]()
+    e_nodes.push(EffectNode(
+        id: 0,
+        parent_id: -1,
+        blend_mode: 0,
+        has_render_surface: false,
+        clip_id: 0,
+        transform_id: 0,
+        opacity: 1.0,
+        parent_index: -1,
+        has_filter: false
+    ))
+    val s_nodes = [ScrollNode]()
+    s_nodes.push(ScrollNode(
+        id: 0,
+        parent_id: -1,
+        scroll_offset_x: 0.0,
+        scroll_offset_y: 0.0,
+        parent_index: -1
+    ))
+    PropertyTrees(
+        transform_nodes: t_nodes,
+        clip_nodes: c_nodes,
+        effect_nodes: e_nodes,
+        scroll_nodes: s_nodes
+    )
+
+# ---------------------------------------------------------------------------
+# Legacy per-tree classes — backward compat for aggregator_compose.
+#
+# Each tree wraps a plain [Node] list plus a root node inserted at index 0.
+# get(id) is a linear scan by `id` field (old API uses i32 ids).
+# add_node(node) appends.
+# ---------------------------------------------------------------------------
+
+class TransformTree:
+    nodes: [TransformNode]
+
+    static fn new() -> TransformTree:
+        transform_tree_new()
+
+    me add_node(node: TransformNode):
         self.nodes.push(node)
-        new_id
+
+    me get(id: i32) -> TransformNode:
+        var i = 0
+        while i < self.nodes.len().to_i32():
+            val n = self.nodes[i.to_i64()]
+            if n.id == id:
+                return n
+            i = i + 1
+        # fallback: return root (index 0) if present, else a fresh identity node
+        if self.nodes.len() > 0:
+            self.nodes[0]
+        else:
+            TransformNode(
+                id: -1,
+                parent_id: -1,
+                local: [f32](),
+                local_matrix: Matrix3x3.identity(),
+                parent_index: -1
+            )
+
+    me size() -> i64:
+        self.nodes.len().to_i64()
+
+fn transform_tree_new() -> TransformTree:
+    val ns = [TransformNode]()
+    ns.push(TransformNode(
+        id: 0,
+        parent_id: -1,
+        local: [f32](),
+        local_matrix: Matrix3x3.identity(),
+        parent_index: -1
+    ))
+    TransformTree(nodes: ns)
+
+class ClipTree:
+    nodes: [ClipNode]
+
+    static fn new() -> ClipTree:
+        clip_tree_new()
+
+    me add_node(node: ClipNode):
+        self.nodes.push(node)
 
     me get(id: i32) -> ClipNode:
-        val idx = id.to_i64()
-        val opt = self.nodes.get(idx)
-        if val node = opt:
-            node
+        var i = 0
+        while i < self.nodes.len().to_i32():
+            val n = self.nodes[i.to_i64()]
+            if n.id == id:
+                return n
+            i = i + 1
+        if self.nodes.len() > 0:
+            self.nodes[0]
         else:
-            self.nodes.get(0).unwrap()
+            ClipNode(
+                id: -1,
+                parent_id: -1,
+                clip_x: 0.0,
+                clip_y: 0.0,
+                clip_w: 0.0,
+                clip_h: 0.0,
+                transform_id: 0,
+                applies_local_clip: false,
+                clip: sk_rect(0.0, 0.0, 0.0, 0.0),
+                parent_index: -1
+            )
 
-    me root_id() -> i32:
-        0
+    me size() -> i64:
+        self.nodes.len().to_i64()
 
-# ---------------------------------------------------------------------------
-# EffectTree
-# ---------------------------------------------------------------------------
-
-class EffectNode:
-    id: i32
-    parent_id: i32
-    opacity: f32
-    blend_mode: i32
-    has_render_surface: bool
-    clip_id: i32
-    transform_id: i32
+fn clip_tree_new() -> ClipTree:
+    val ns = [ClipNode]()
+    ns.push(ClipNode(
+        id: 0,
+        parent_id: -1,
+        clip_x: 0.0,
+        clip_y: 0.0,
+        clip_w: 0.0,
+        clip_h: 0.0,
+        transform_id: 0,
+        applies_local_clip: false,
+        clip: sk_rect(0.0, 0.0, 0.0, 0.0),
+        parent_index: -1
+    ))
+    ClipTree(nodes: ns)
 
 class EffectTree:
     nodes: [EffectNode]
 
     static fn new() -> EffectTree:
-        val root = EffectNode(
-            id: 0,
-            parent_id: -1,
-            opacity: 1.0,
-            blend_mode: 0,
-            has_render_surface: false,
-            clip_id: 0,
-            transform_id: 0
-        )
-        val ns = [EffectNode]()
-        ns.push(root)
-        EffectTree(nodes: ns)
+        effect_tree_new()
 
-    me add_node(n: EffectNode) -> i32:
-        val new_id = self.nodes.len().to_i32()
-        val node = EffectNode(
-            id: new_id,
-            parent_id: n.parent_id,
-            opacity: n.opacity,
-            blend_mode: n.blend_mode,
-            has_render_surface: n.has_render_surface,
-            clip_id: n.clip_id,
-            transform_id: n.transform_id
-        )
+    me add_node(node: EffectNode):
         self.nodes.push(node)
-        new_id
 
     me get(id: i32) -> EffectNode:
-        val idx = id.to_i64()
-        val opt = self.nodes.get(idx)
-        if val node = opt:
-            node
+        var i = 0
+        while i < self.nodes.len().to_i32():
+            val n = self.nodes[i.to_i64()]
+            if n.id == id:
+                return n
+            i = i + 1
+        if self.nodes.len() > 0:
+            self.nodes[0]
         else:
-            self.nodes.get(0).unwrap()
+            EffectNode(
+                id: -1,
+                parent_id: -1,
+                blend_mode: 0,
+                has_render_surface: false,
+                clip_id: 0,
+                transform_id: 0,
+                opacity: 1.0,
+                parent_index: -1,
+                has_filter: false
+            )
 
-    me root_id() -> i32:
-        0
+    me size() -> i64:
+        self.nodes.len().to_i64()
 
-# ---------------------------------------------------------------------------
-# ScrollTree
-# ---------------------------------------------------------------------------
-
-class ScrollNode:
-    id: i32
-    parent_id: i32
-    scrollable: bool
-    scroll_offset_x: f32
-    scroll_offset_y: f32
-    container_width: f32
-    container_height: f32
-    content_width: f32
-    content_height: f32
+fn effect_tree_new() -> EffectTree:
+    val ns = [EffectNode]()
+    ns.push(EffectNode(
+        id: 0,
+        parent_id: -1,
+        blend_mode: 0,
+        has_render_surface: false,
+        clip_id: 0,
+        transform_id: 0,
+        opacity: 1.0,
+        parent_index: -1,
+        has_filter: false
+    ))
+    EffectTree(nodes: ns)
 
 class ScrollTree:
     nodes: [ScrollNode]
 
     static fn new() -> ScrollTree:
-        val root = ScrollNode(
-            id: 0,
-            parent_id: -1,
-            scrollable: false,
-            scroll_offset_x: 0.0,
-            scroll_offset_y: 0.0,
-            container_width: 0.0,
-            container_height: 0.0,
-            content_width: 0.0,
-            content_height: 0.0
-        )
-        val ns = [ScrollNode]()
-        ns.push(root)
-        ScrollTree(nodes: ns)
+        scroll_tree_new()
 
-    me add_node(n: ScrollNode) -> i32:
-        val new_id = self.nodes.len().to_i32()
-        val node = ScrollNode(
-            id: new_id,
-            parent_id: n.parent_id,
-            scrollable: n.scrollable,
-            scroll_offset_x: n.scroll_offset_x,
-            scroll_offset_y: n.scroll_offset_y,
-            container_width: n.container_width,
-            container_height: n.container_height,
-            content_width: n.content_width,
-            content_height: n.content_height
-        )
+    me add_node(node: ScrollNode):
         self.nodes.push(node)
-        new_id
 
     me get(id: i32) -> ScrollNode:
-        val idx = id.to_i64()
-        val opt = self.nodes.get(idx)
-        if val node = opt:
-            node
+        var i = 0
+        while i < self.nodes.len().to_i32():
+            val n = self.nodes[i.to_i64()]
+            if n.id == id:
+                return n
+            i = i + 1
+        if self.nodes.len() > 0:
+            self.nodes[0]
         else:
-            self.nodes.get(0).unwrap()
+            ScrollNode(
+                id: -1,
+                parent_id: -1,
+                scroll_offset_x: 0.0,
+                scroll_offset_y: 0.0,
+                parent_index: -1
+            )
 
-    me root_id() -> i32:
-        0
+    me size() -> i64:
+        self.nodes.len().to_i64()
 
-# ---------------------------------------------------------------------------
-# PropertyTrees — bundle of the four trees
-# ---------------------------------------------------------------------------
-
-class PropertyTrees:
-    transform_tree: TransformTree
-    clip_tree: ClipTree
-    effect_tree: EffectTree
-    scroll_tree: ScrollTree
-
-    static fn new() -> PropertyTrees:
-        PropertyTrees(
-            transform_tree: TransformTree.new(),
-            clip_tree: ClipTree.new(),
-            effect_tree: EffectTree.new(),
-            scroll_tree: ScrollTree.new()
-        )
+fn scroll_tree_new() -> ScrollTree:
+    val ns = [ScrollNode]()
+    ns.push(ScrollNode(
+        id: 0,
+        parent_id: -1,
+        scroll_offset_x: 0.0,
+        scroll_offset_y: 0.0,
+        parent_index: -1
+    ))
+    ScrollTree(nodes: ns)

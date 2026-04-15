@@ -267,12 +267,31 @@ static size_t _heap_off = 0;
 void *malloc(size_t sz)
 {
     sz = (sz + 15) & ~(size_t)15;
+    if (sz >= 0x100000 || _heap_off >= 0x0FF00000ULL) {
+        serial_puts("[heap] alloc sz=");
+        serial_put_hex((uint64_t)sz);
+        serial_puts(" off_before=");
+        serial_put_hex((uint64_t)_heap_off);
+        serial_puts("\r\n");
+    }
     if (_heap_off + sz > sizeof(_heap)) {
         serial_puts("[PANIC] heap exhausted\r\n");
+        serial_puts("[PANIC] heap_off=");
+        serial_put_hex((uint64_t)_heap_off);
+        serial_puts(" req=");
+        serial_put_hex((uint64_t)sz);
+        serial_puts(" limit=");
+        serial_put_hex((uint64_t)sizeof(_heap));
+        serial_puts("\r\n");
         for(;;) outb(0xF4, 0);
     }
     void *p = &_heap[_heap_off];
     _heap_off += sz;
+    if (sz >= 0x100000 || _heap_off >= 0x0FF00000ULL) {
+        serial_puts("[heap] alloc off_after=");
+        serial_put_hex((uint64_t)_heap_off);
+        serial_puts("\r\n");
+    }
     return p;
 }
 
@@ -8363,6 +8382,21 @@ RuntimeValue rt_mmio_write_u64_real(RuntimeValue addr, RuntimeValue val)
     return 0;
 }
 
+RuntimeValue rt_wait_u16_change_real(RuntimeValue addr, RuntimeValue old_value, RuntimeValue spins)
+{
+    volatile uint16_t *ptr = (volatile uint16_t *)(uintptr_t)(uint64_t)addr;
+    uint16_t old16 = (uint16_t)(uint64_t)old_value;
+    uint64_t remaining = (uint64_t)spins;
+    while (remaining-- > 0) {
+        uint16_t current = *ptr;
+        if (current != old16) {
+            return (RuntimeValue)(uint64_t)current;
+        }
+        __asm__ volatile("pause" ::: "memory");
+    }
+    return (RuntimeValue)(uint64_t)old16;
+}
+
 RuntimeValue rt_mmio_read_u8(RuntimeValue a) { return rt_mmio_read_u8_real(a); }
 RuntimeValue rt_mmio_read_u16(RuntimeValue a) { return rt_mmio_read_u16_real(a); }
 RuntimeValue rt_mmio_read_u32(RuntimeValue a) { return rt_mmio_read_u32_real(a); }
@@ -8371,6 +8405,43 @@ RuntimeValue rt_mmio_write_u8(RuntimeValue a, RuntimeValue v) { return rt_mmio_w
 RuntimeValue rt_mmio_write_u16(RuntimeValue a, RuntimeValue v) { return rt_mmio_write_u16_real(a, v); }
 RuntimeValue rt_mmio_write_u32(RuntimeValue a, RuntimeValue v) { return rt_mmio_write_u32_real(a, v); }
 RuntimeValue rt_mmio_write_u64(RuntimeValue a, RuntimeValue v) { return rt_mmio_write_u64_real(a, v); }
+RuntimeValue rt_wait_u16_change(RuntimeValue a, RuntimeValue old_value, RuntimeValue spins) { return rt_wait_u16_change_real(a, old_value, spins); }
+
+RuntimeValue rt_virtq_avail_slot_addr(RuntimeValue base, RuntimeValue idx, RuntimeValue qsize)
+{
+    uint64_t base64 = (uint64_t)base;
+    uint64_t idx64 = (uint64_t)idx;
+    uint64_t qsize64 = (uint64_t)qsize;
+    if (qsize64 == 0) return (RuntimeValue)base64;
+    return (RuntimeValue)(base64 + 4 + ((idx64 % qsize64) * 2));
+}
+
+RuntimeValue rt_virtio_notify_addr(RuntimeValue base, RuntimeValue off, RuntimeValue mult)
+{
+    uint64_t base64 = (uint64_t)base;
+    uint64_t off64 = (uint64_t)off;
+    uint64_t mult64 = (uint64_t)mult;
+    return (RuntimeValue)(base64 + (off64 * mult64));
+}
+
+RuntimeValue rt_virtio_notify_write16(RuntimeValue base, RuntimeValue off, RuntimeValue mult, RuntimeValue val)
+{
+    uint64_t addr = (uint64_t)rt_virtio_notify_addr(base, off, mult);
+    *(volatile uint16_t *)(uintptr_t)addr = (uint16_t)(uint64_t)val;
+    return (RuntimeValue)addr;
+}
+
+RuntimeValue rt_alloc_page_aligned(RuntimeValue size)
+{
+    uint64_t size64 = (uint64_t)size;
+    if (size64 == 0) return 0;
+    uint64_t rounded = (size64 + 4095ULL) & ~4095ULL;
+    void *raw = malloc((size_t)(rounded + 4095ULL));
+    if (!raw) return 0;
+    uintptr_t aligned = ((uintptr_t)raw + 4095ULL) & ~(uintptr_t)4095ULL;
+    __builtin_memset((void *)aligned, 0, (size_t)rounded);
+    return (RuntimeValue)(uint64_t)aligned;
+}
 
 /* --- CPU: real x86_64 implementations --- */
 

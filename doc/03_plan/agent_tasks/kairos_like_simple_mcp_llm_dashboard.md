@@ -184,5 +184,5 @@ The feature family is ready for implementation review when:
 Current validation note:
 
 - `simple dashboard status` works after the dashboard loader/runtime fixes landed.
-- `simple dashboard assistant` still has an open replay-data coercion bug tracked in [bug_report_dashboard_assistant_cast_runtime_2026-04-15.md](/home/ormastes/dev/pub/simple/doc/08_tracking/bug/bug_report_dashboard_assistant_cast_runtime_2026-04-15.md).
+- `simple dashboard assistant` replay-data coercion bug was fixed on 2026-04-15; see [bug_report_dashboard_assistant_cast_runtime_2026-04-15.md](/home/ormastes/dev/pub/simple/doc/08_tracking/bug/bug_report_dashboard_assistant_cast_runtime_2026-04-15.md) for the resolution and the remaining `bug-resolve` tracking utility blocker.
 - Generic `n as i64` and `"{n as i64}"` semantics are covered by [cast_numeric_parity_spec.spl](/home/ormastes/dev/pub/simple/test/unit/compiler/interpreter/cast_numeric_parity_spec.spl), so the remaining defect should be treated as a collector/replay-path bug, not a language-level cast bug.

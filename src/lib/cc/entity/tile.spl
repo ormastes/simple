@@ -1,53 +1,234 @@
-# cc::Tile and TileKey — raster tile descriptors
+# cc::Tile — single raster tile in the tile cache.
+#
+# Mirrors cc::Tile. Tiles partition a layer's content into fixed-size
+# rectangles, each raster-cached independently. The tile manager decides
+# which tiles to raster and which to evict based on visibility, memory,
+# and priority.
+#
+# This module exposes BOTH the modern shape (TileId / SkRect / method-based
+# draw-state transitions) AND the legacy shape (TileKey / SkIRect / direct
+# `is_ready` field + `set_ready`/`invalidate` helpers) used by the existing
+# cc::PictureLayerImpl, cc::TileManager, cc::RasterBufferProvider and their
+# tests. Both APIs coexist so that callers can migrate incrementally.
 
-use std.skia.entity.geometry.{SkIRect}
+use std.skia.entity.geometry.{SkRect, SkIRect}
+use std.skia.backend.cpu.raster_prims.{Bitmap}
+
+# ---------------------------------------------------------------------------
+# TilePriority — tile importance bucket.
+#
+# Mirrors cc::TilePriority::PriorityBin: NOW, SOON, EVENTUALLY, plus a
+# sentinel "None" for tiles with no scheduling preference.
+#
+# The *Bin-suffixed variants (NowBin / SoonBin / EventuallyBin) are the
+# legacy spelling still used by PictureLayerImpl / TileManager; they are
+# kept as additional variants so both spellings resolve.
+# ---------------------------------------------------------------------------
 
 enum TilePriority:
+    Now
+    Soon
+    Eventually
+    None
     NowBin
     SoonBin
     EventuallyBin
 
-class TileKey:
-    layer_id: i32
-    tiling_i: i32
-    tiling_j: i32
+# ---------------------------------------------------------------------------
+# TileDrawState — raster lifecycle state.
+#
+#   Unrasterized → InProgress → Ready
+#                            ↘ Failed
+# ---------------------------------------------------------------------------
+
+enum TileDrawState:
+    Unrasterized
+    InProgress
+    Ready
+    Failed
+
+# ---------------------------------------------------------------------------
+# TileId — stable identity across repaints (modern shape).
+#
+# Two tiles with matching (layer_id, tile_col, tile_row, contents_scale)
+# cover the same content at the same resolution.
+# ---------------------------------------------------------------------------
+
+class TileId:
+    layer_id: i64
+    tile_col: i64
+    tile_row: i64
     contents_scale: f64
 
-    static fn new(layer_id: i32, tiling_i: i32, tiling_j: i32, contents_scale: f64) -> TileKey:
-        TileKey(
-            layer_id: layer_id,
-            tiling_i: tiling_i,
-            tiling_j: tiling_j,
-            contents_scale: contents_scale
-        )
+fn tile_id_new(layer_id: i64, col: i64, row: i64, scale: f64) -> TileId:
+    TileId(
+        layer_id: layer_id,
+        tile_col: col,
+        tile_row: row,
+        contents_scale: scale
+    )
 
-    fn matches(other: TileKey) -> bool:
-        (me.layer_id == other.layer_id and
-            me.tiling_i == other.tiling_i and
-            me.tiling_j == other.tiling_j)
+# ---------------------------------------------------------------------------
+# TileKey — legacy identity used by PictureLayerImpl / TileManager.
+#
+# Equivalent to TileId but accepts i32 coordinates and exposes a static
+# `new` constructor plus a `matches` method for key comparison inside
+# the tile manager's invalidate loop.
+# ---------------------------------------------------------------------------
+
+class TileKey:
+    layer_id: i32
+    col: i32
+    row: i32
+    scale: f64
+
+    static fn new(layer_id: i32, col: i32, row: i32, scale: f64) -> TileKey:
+        TileKey(layer_id: layer_id, col: col, row: row, scale: scale)
+
+    me matches(other: TileKey) -> bool:
+        me.layer_id == other.layer_id
+            and me.col == other.col
+            and me.row == other.row
+            and me.scale == other.scale
+
+# ---------------------------------------------------------------------------
+# Tile — a single raster tile.
+#
+# Unifies the modern and legacy shapes:
+#   * `id: TileId`              — modern identity
+#   * `key: TileKey`            — legacy identity (mirrors `id`)
+#   * `content_rect: SkIRect`   — layer-space integer rect (legacy + callers)
+#   * `content_frect: SkRect`   — float rect for modern pipelines
+#   * `priority: TilePriority`
+#   * `draw_state: TileDrawState`
+#   * `has_raster_task: bool`
+#   * `bitmap: Bitmap`
+#   * `required_for_activation: bool`
+#   * `is_ready: bool`          — DIRECT FIELD (mirrors draw_state == Ready)
+#   * `raster_handle: i64`      — handle returned by the raster buffer
+#
+# `is_ready` is a *field* so legacy callers (`t.is_ready`) keep working.
+# The field is updated in lockstep with `draw_state` by the raster
+# lifecycle methods below.
+# ---------------------------------------------------------------------------
 
 class Tile:
+    id: TileId
     key: TileKey
     content_rect: SkIRect
+    content_frect: SkRect
     priority: TilePriority
+    draw_state: TileDrawState
+    has_raster_task: bool
+    bitmap: Bitmap
+    required_for_activation: bool
     is_ready: bool
     raster_handle: i64
-    draw_info_handle: i64
 
-    static fn new(key: TileKey, content_rect: SkIRect, priority: TilePriority) -> Tile:
+    # Legacy constructor — (TileKey, SkIRect, TilePriority).
+    # Used by PictureLayerImpl.create_tilings and tile_manager_spec.
+    static fn new(key: TileKey, rect: SkIRect, priority: TilePriority) -> Tile:
+        val id = TileId(
+            layer_id: key.layer_id as i64,
+            tile_col: key.col as i64,
+            tile_row: key.row as i64,
+            contents_scale: key.scale
+        )
+        val frect = SkRect(
+            left: rect.left as f64,
+            top: rect.top as f64,
+            right: rect.right as f64,
+            bottom: rect.bottom as f64
+        )
         Tile(
+            id: id,
             key: key,
-            content_rect: content_rect,
+            content_rect: rect,
+            content_frect: frect,
             priority: priority,
+            draw_state: TileDrawState.Unrasterized,
+            has_raster_task: false,
+            bitmap: Bitmap.zeros(0, 0),
+            required_for_activation: false,
             is_ready: false,
-            raster_handle: 0,
-            draw_info_handle: 0
+            raster_handle: 0
         )
 
+    # Update the scheduling priority. Called by the tile manager as
+    # viewport and visibility change.
+    me set_priority(p: TilePriority):
+        me.priority = p
+
+    # Transition Unrasterized → InProgress and mark a raster task as
+    # in flight. Called when the tile manager schedules this tile.
+    me begin_raster():
+        me.draw_state = TileDrawState.InProgress
+        me.has_raster_task = true
+
+    # Transition InProgress → Ready with the raster result. Clears the
+    # in-flight task flag and mirrors state onto the `is_ready` field.
+    me complete_raster(bmp: Bitmap):
+        me.draw_state = TileDrawState.Ready
+        me.bitmap = bmp
+        me.has_raster_task = false
+        me.is_ready = true
+
+    # Transition InProgress → Failed (raster errored). Clears the
+    # in-flight task flag; bitmap is left unchanged (still empty).
+    me fail_raster():
+        me.draw_state = TileDrawState.Failed
+        me.has_raster_task = false
+        me.is_ready = false
+
+    # Legacy API — used by TileManager.schedule_tasks after it pulls a
+    # raster buffer from the provider. Marks the tile Ready and stores
+    # the provider-returned handle for later release.
     me set_ready(handle: i64):
+        me.draw_state = TileDrawState.Ready
+        me.has_raster_task = false
         me.is_ready = true
         me.raster_handle = handle
 
+    # Legacy API — used by TileManager.invalidate_tile and
+    # PictureLayerImpl.invalidate_rect. Resets the tile back to
+    # Unrasterized so the next schedule pass re-rasters it.
     me invalidate():
+        me.draw_state = TileDrawState.Unrasterized
+        me.has_raster_task = false
         me.is_ready = false
         me.raster_handle = 0
+
+    # Flag tiles that the pending tree must have before it can activate.
+    me mark_required_for_activation(required: bool):
+        me.required_for_activation = required
+
+# ---------------------------------------------------------------------------
+# Factory — a fresh tile starts Unrasterized at Eventually priority.
+# ---------------------------------------------------------------------------
+
+fn tile_new(id: TileId, rect: SkRect) -> Tile:
+    val key = TileKey(
+        layer_id: id.layer_id as i32,
+        col: id.tile_col as i32,
+        row: id.tile_row as i32,
+        scale: id.contents_scale
+    )
+    val irect = SkIRect(
+        left: rect.left as i32,
+        top: rect.top as i32,
+        right: rect.right as i32,
+        bottom: rect.bottom as i32
+    )
+    Tile(
+        id: id,
+        key: key,
+        content_rect: irect,
+        content_frect: rect,
+        priority: TilePriority.Eventually,
+        draw_state: TileDrawState.Unrasterized,
+        has_raster_task: false,
+        bitmap: Bitmap.zeros(0, 0),
+        required_for_activation: false,
+        is_ready: false,
+        raster_handle: 0
+    )

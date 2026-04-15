@@ -1,0 +1,207 @@
+# Text line breaker — simple word-wrap for Latin + generic scripts.
+#
+# Mirrors Skia's SkShaper line break, simplified:
+#   - Hard breaks: '\n'
+#   - Soft breaks: space, tab, '-' (hyphen), '/' (slash)
+#   - Given a total width budget per line, greedily pack words; if a word
+#     exceeds the budget on its own, break it mid-word at the budget boundary.
+#
+# Width is caller-provided via a `measure_fn(text: String) -> f64` callback
+# in the Skia model. In this Simple port we stub the measurement with a
+# fixed per-character width (6.0 px) because passing `fn` callbacks across
+# module boundaries is not yet stable in the bootstrap compiler.
+#
+# WHY (stub): callers that need a real proportional font measurement should
+# pre-scale `max_width` to units of `char_width` (default 6.0) before calling
+# `wrap_text`, or call the `_measure_slice` helper directly with their own
+# per-character width.
+
+# ===== BreakKind =====
+
+enum BreakKind:
+    Hard
+    Soft
+    None
+
+# ===== BreakPoint =====
+#
+# position = codeunit offset in source text.
+# kind     = classification of the break opportunity.
+# break_before = true if the break occurs BEFORE this codeunit (space, tab,
+#                newline); false if the break occurs AFTER (hyphen, slash).
+
+class BreakPoint:
+    position: i64
+    kind: BreakKind
+    break_before: bool
+
+# ===== WrappedLine =====
+#
+# Represents one output line. start/end are codeunit offsets into the source
+# text; end is exclusive. width is the measured pixel width of the slice.
+
+class WrappedLine:
+    start: i64
+    end: i64
+    width: f64
+
+# ===== Helpers =====
+
+# Fixed per-character width used by the stub measurement. Callers who need
+# a different width should scale their max_width accordingly.
+fn _char_width_default() -> f64:
+    6.0
+
+# Measure a slice of text assuming fixed per-character width.
+fn _measure_slice(text: String, start: i64, end: i64, char_width: f64) -> f64:
+    val n = end - start
+    if n <= 0:
+        0.0
+    else:
+        (n as f64) * char_width
+
+# Return true if codepoint `c` is a "break-after" character (hyphen, slash).
+# Space/tab/newline are NOT break-after — they are break-before (the break
+# happens at the whitespace and the whitespace itself is consumed).
+fn _is_breakable_after(c: i64) -> bool:
+    if c == 45:
+        true
+    else if c == 47:
+        true
+    else:
+        false
+
+# Return true if codepoint `c` is a "break-before" whitespace codepoint.
+fn _is_breakable_before(c: i64) -> bool:
+    if c == 32:
+        true
+    else if c == 9:
+        true
+    else if c == 10:
+        true
+    else:
+        false
+
+# ===== find_break_opportunities =====
+#
+# Iterates source text byte-by-byte (ASCII-only in our tests) and emits a
+# BreakPoint for every whitespace/hyphen/slash.
+
+fn find_break_opportunities(text: String) -> [BreakPoint]:
+    var result: [BreakPoint] = []
+    val n = text.len()
+    var i: i64 = 0
+    while i < n:
+        val c = text.byte_at(i) as i64
+        if c == 10:
+            val bp = BreakPoint(position: i, kind: BreakKind.Hard, break_before: true)
+            result.push(bp)
+        else if c == 32:
+            val bp = BreakPoint(position: i, kind: BreakKind.Soft, break_before: true)
+            result.push(bp)
+        else if c == 9:
+            val bp = BreakPoint(position: i, kind: BreakKind.Soft, break_before: true)
+            result.push(bp)
+        else if c == 45:
+            val bp = BreakPoint(position: i, kind: BreakKind.Soft, break_before: false)
+            result.push(bp)
+        else if c == 47:
+            val bp = BreakPoint(position: i, kind: BreakKind.Soft, break_before: false)
+            result.push(bp)
+        i = i + 1
+    result
+
+# ===== wrap_text =====
+#
+# Greedy line packing:
+#   - iterate codeunits; whenever we encounter a whitespace/hyphen/slash,
+#     consider finalizing the current line
+#   - at '\n': always finalize and start a new line
+#   - if the current word alone exceeds max_width, break it mid-word
+#
+# Uses fixed per-character width (6.0). See WHY comment at the top of file.
+
+fn wrap_text(text: String, max_width: f64, char_width: f64) -> [WrappedLine]:
+    var lines: [WrappedLine] = []
+    val n = text.len()
+    if n == 0:
+        return lines
+
+    val cw = char_width
+    var line_start: i64 = 0
+    # `last_break_end` is the exclusive end of the last finalized break
+    # opportunity within the current line (0 if no break yet).
+    var last_break_end: i64 = 0
+    # `last_break_skip` is the number of chars to skip past a break-before
+    # whitespace when starting the next line.
+    var last_break_skip: i64 = 0
+    var i: i64 = 0
+    while i < n:
+        val c = text.byte_at(i) as i64
+
+        # Hard break: finalize current line up to i, skip the newline,
+        # restart with line_start = i + 1.
+        if c == 10:
+            val w = _measure_slice(text, line_start, i, cw)
+            val ln = WrappedLine(start: line_start, end: i, width: w)
+            lines.push(ln)
+            line_start = i + 1
+            last_break_end = 0
+            last_break_skip = 0
+            i = i + 1
+        else:
+            # Tentative width if we include this char.
+            val candidate_end = i + 1
+            val candidate_width = _measure_slice(text, line_start, candidate_end, cw)
+
+            if candidate_width > max_width:
+                # Need to break before this char.
+                if last_break_end > line_start:
+                    # Break at last whitespace/hyphen/slash.
+                    val w = _measure_slice(text, line_start, last_break_end, cw)
+                    val ln = WrappedLine(start: line_start, end: last_break_end, width: w)
+                    lines.push(ln)
+                    line_start = last_break_end + last_break_skip
+                    last_break_end = 0
+                    last_break_skip = 0
+                    # Do NOT advance i — re-evaluate this char on the new line.
+                else:
+                    # No break opportunity: split mid-word at i (if i > line_start),
+                    # otherwise force-advance by one char to avoid infinite loop
+                    # when max_width < char_width.
+                    if i > line_start:
+                        val w = _measure_slice(text, line_start, i, cw)
+                        val ln = WrappedLine(start: line_start, end: i, width: w)
+                        lines.push(ln)
+                        line_start = i
+                        last_break_end = 0
+                        last_break_skip = 0
+                    else:
+                        val w = _measure_slice(text, line_start, i + 1, cw)
+                        val ln = WrappedLine(start: line_start, end: i + 1, width: w)
+                        lines.push(ln)
+                        line_start = i + 1
+                        last_break_end = 0
+                        last_break_skip = 0
+                        i = i + 1
+            else:
+                # Fits — record break opportunity if applicable.
+                if _is_breakable_before(c):
+                    # Break is BEFORE c: line ends at i (exclusive), next
+                    # line starts at i + 1 (skip the whitespace).
+                    last_break_end = i
+                    last_break_skip = 1
+                else if _is_breakable_after(c):
+                    # Break is AFTER c: line ends at i + 1 (exclusive), next
+                    # line starts at i + 1 (no skip).
+                    last_break_end = i + 1
+                    last_break_skip = 0
+                i = i + 1
+
+    # Flush final pending line.
+    if line_start < n:
+        val w = _measure_slice(text, line_start, n, cw)
+        val ln = WrappedLine(start: line_start, end: n, width: w)
+        lines.push(ln)
+
+    lines

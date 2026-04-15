@@ -2,7 +2,9 @@
 
 ## Summary
 
-`bin/simple dashboard assistant` currently fails at runtime with:
+Initial report:
+
+`bin/simple dashboard assistant` failed at runtime with:
 
 ```text
 error: semantic: type mismatch: cannot convert string to int
@@ -85,7 +87,18 @@ Working operational path:
 
 ## Decision
 
-Treat this as an **open dashboard assistant bug**, not as a language-level cast bug.
+Resolution status on 2026-04-15:
+
+- `bin/simple dashboard assistant` now runs successfully against both the default workspace assistant store and an empty `HOME` fallback scenario.
+- The root fixes were in the dashboard assistant collector/render path, not in language-level cast semantics.
+- The generic `n as i64` and `"{n as i64}"` behavior remains valid and separately covered by interpreter regression tests.
+
+Tracking note:
+
+- The bug DB row was added through the managed writer path.
+- Closing that row is currently blocked by a separate `bug-resolve` legacy-schema/runtime issue, so the DB status may still show `Open` until that utility is fixed.
+
+Treat this as a **resolved dashboard assistant bug**, not as a language-level cast bug.
 
 ## Follow-up Plan
 
