@@ -102,10 +102,17 @@ int main(int argc, char** argv) {
             if output.status.success() {
                 let stdout = String::from_utf8_lossy(&output.stdout);
                 for line in stdout.lines() {
-                    if let Some(name) = line.split_whitespace().last() {
-                        let name = name.strip_prefix('_').unwrap_or(name);
-                        if name.starts_with("__module_init_") {
-                            let sanitized = name.replace('.', "_dot_");
+                    if let Some(raw_name) = line.split_whitespace().last() {
+                        // Mach-O prefixes external C symbols with one extra leading
+                        // underscore. ELF/COFF do not, so stripping unconditionally
+                        // breaks discovery of real `__module_init_*` symbols on Linux.
+                        let normalized = if cfg!(target_os = "macos") {
+                            raw_name.strip_prefix('_').unwrap_or(raw_name)
+                        } else {
+                            raw_name
+                        };
+                        if normalized.starts_with("__module_init_") {
+                            let sanitized = normalized.replace('.', "_dot_");
                             init_names.push(sanitized);
                         }
                     }
