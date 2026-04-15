@@ -1,0 +1,67 @@
+# SimpleOS offline FAT32 disk-image builder — IF-06 + D-1 wave-3 scaffold.
+#
+# Produces a raw FAT32 image file suitable for QEMU
+# `-drive file=disk.img,format=raw,if=ide`. Wave-4 fills in real FAT32
+# write logic (BPB authoring, FAT chain threading, root-directory entry
+# emission). Wave-3 allocates a zero-filled image and refuses payloads,
+# so the rest of the build pipeline can reference build/os/disk.img today.
+
+use std.fs
+use std.text
+
+# -- Public types -----------------------------------------------------------
+
+struct PayloadEntry:
+    """One host→guest file mapping for inclusion in the image."""
+    host_path: Text         # Absolute path on the build host
+    guest_path: Text        # Path as seen from SimpleOS (e.g. /usr/bin/clang)
+    mode: u32               # POSIX mode bits (0o755, 0o644, …)
+
+struct DiskImageConfig:
+    """Builder configuration for one disk image."""
+    output_path: Text       # Absolute path of the image file to produce
+    size_mb: u64            # Total image size in MiB (must be > 0)
+    payloads: [PayloadEntry]   # Files to copy into the image (wave-4)
+    label: Text             # Volume label (max 11 bytes, uppercase)
+
+# -- Builder API ------------------------------------------------------------
+
+fn build(config: DiskImageConfig) -> Result<Text, Text>:
+    """Build a raw FAT32 image per `config`.
+
+    Wave-3 scaffold: allocates a zero-filled image of `size_mb` MiB.
+    Payloads and label are accepted but not yet written; the function
+    errors if any payloads are supplied so callers know the image is
+    blank. Wave-4 will emit a real BPB, FAT, and root directory.
+    """
+    if config.size_mb == 0u64:
+        return Err("disk_image.build: size_mb must be > 0")
+
+    if config.payloads.length > 0:
+        return Err("disk_image.build: payload write not yet implemented (wave-3 scaffold). Use initramfs for payloads until wave-4 lands.")
+
+    val total_bytes = config.size_mb * 1024u64 * 1024u64
+
+    # Allocate a zero-filled buffer. For multi-hundred-MiB images this
+    # should eventually stream to disk; wave-3 keeps it simple and in-memory.
+    var zeros: [u8] = []
+    var i: u64 = 0u64
+    while i < total_bytes:
+        zeros.push(0u8)
+        i = i + 1u64
+
+    match fs.write_bytes(config.output_path, zeros):
+        case Ok(_):
+            Ok(config.output_path)
+        case Err(e):
+            Err("disk_image.build: write failed: " + e)
+
+fn build_blank(path: Text) -> Result<Text, Text>:
+    """Convenience: 64 MiB blank image at `path`, label SIMPLEOS."""
+    val cfg = DiskImageConfig(
+        output_path: path,
+        size_mb: 64u64,
+        payloads: [],
+        label: "SIMPLEOS"
+    )
+    build(cfg)
