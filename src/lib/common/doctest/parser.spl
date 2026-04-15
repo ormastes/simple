@@ -1,9 +1,186 @@
 # Doctest Parser
 #
 # Parses docstring code examples for testing.
-# TODO: [doc][P2] Full implementation of doctest parsing.
+# Scans /// doc-comment lines for >>> code blocks and produces typed DoctestItem list.
 
 enum Expected:
     Output(value: text)
     Empty
     Exception(exc_type: text, msg: text?)
+
+    fn is_output() -> bool:
+        match self:
+            Output(_): true
+            _: false
+
+    fn is_empty() -> bool:
+        match self:
+            Empty: true
+            _: false
+
+    fn is_exception() -> bool:
+        match self:
+            Exception(_, _): true
+            _: false
+
+    fn get_exception_type() -> text?:
+        match self:
+            Exception(exc_type, _): exc_type
+            _: nil
+
+    fn summary() -> text:
+        match self:
+            Output(value): "Output({value})"
+            Empty: "Empty"
+            Exception(exc_type, msg):
+                if msg == nil:
+                    "Exception({exc_type})"
+                else:
+                    "Exception({exc_type}: {msg})"
+
+class DoctestItem:
+    source_path: text
+    start_line: i64
+    commands: [text]
+    expected: Expected
+    section_name: text?
+
+fn parse_docstring(source: text) -> [DoctestItem]:
+    """Parse doctest examples from a docstring (no file path context).
+
+    Scans for bare `>>> ` prefixed lines and following output lines.
+    Returns a list of DoctestItem with typed Expected values.
+    """
+    parse_lines(source.split("\n"), "", false)
+
+fn parse_doctests(source: text, file_path: text) -> [DoctestItem]:
+    """Parse doctest examples from source text.
+
+    Scans for `/// ` doc-comment lines containing `>>> ` code prefixes.
+    Returns a list of DoctestItem with line numbers and typed Expected values.
+    """
+    parse_lines(source.split("\n"), file_path, true)
+
+fn parse_lines(lines: [text], file_path: text, require_doc_prefix: bool) -> [DoctestItem]:
+    """Core line-by-line parser shared by parse_docstring and parse_doctests."""
+    var items: [DoctestItem] = []
+    var i = 0
+    var current_commands: [text] = []
+    var current_expected_lines: [text] = []
+    var current_start: i64 = 0
+    var in_example = false
+    var in_expected = false
+
+    while i < lines.len():
+        val trimmed = lines[i].trim()
+
+        # Resolve the "content" of this line: strip /// prefix if present
+        var content = ""
+        var is_active = false
+        if trimmed.starts_with("/// "):
+            content = trimmed.slice(4, trimmed.len())
+            is_active = true
+        elif trimmed.starts_with("///"):
+            content = trimmed.slice(3, trimmed.len())
+            is_active = true
+        elif not require_doc_prefix:
+            # Docstring mode: bare lines are active
+            content = trimmed
+            is_active = trimmed.len() > 0
+
+        val content_trimmed = content.trim()
+
+        if is_active and content_trimmed.starts_with(">>> "):
+            # Code line — start or continue a block
+            if in_expected:
+                # Previous item complete; save it before starting new block
+                val exp = build_expected(current_expected_lines)
+                val item = DoctestItem(
+                    source_path: file_path,
+                    start_line: current_start,
+                    commands: current_commands,
+                    expected: exp,
+                    section_name: nil)
+                items = items.push(item)
+                current_commands = []
+                current_expected_lines = []
+                in_expected = false
+            if not in_example:
+                current_start = i + 1
+                in_example = true
+            val code_part = content_trimmed.slice(4, content_trimmed.len())
+            current_commands = current_commands.push(code_part)
+        elif in_example and is_active and content_trimmed.len() > 0:
+            # Non-code active line following code — expected output
+            in_expected = true
+            val exp_line = build_expected_line(content_trimmed)
+            current_expected_lines = current_expected_lines.push(exp_line)
+        elif in_example and (not is_active or content_trimmed.len() == 0):
+            # Blank or non-active line ends the current example
+            if current_commands.len() > 0:
+                val exp = build_expected(current_expected_lines)
+                val item = DoctestItem(
+                    source_path: file_path,
+                    start_line: current_start,
+                    commands: current_commands,
+                    expected: exp,
+                    section_name: nil)
+                items = items.push(item)
+            current_commands = []
+            current_expected_lines = []
+            in_example = false
+            in_expected = false
+
+        i = i + 1
+
+    # Flush the final item if source ended inside an example
+    if in_example and current_commands.len() > 0:
+        val exp = build_expected(current_expected_lines)
+        val item = DoctestItem(
+            source_path: file_path,
+            start_line: current_start,
+            commands: current_commands,
+            expected: exp,
+            section_name: nil)
+        items = items.push(item)
+
+    items
+
+fn build_expected_line(line: text) -> text:
+    """Return the line as-is (used for accumulation)."""
+    line
+
+fn build_expected(lines: [text]) -> Expected:
+    """Build an Expected value from collected output lines.
+
+    If the single output line starts with `Error: `, parse it as an exception.
+    """
+    if lines.len() == 0:
+        return Expected.Empty
+    # Check for exception pattern: "Error: Type: message" or "Error: Type"
+    if lines.len() == 1 and lines[0].starts_with("Error: "):
+        val after_error = lines[0].slice(7, lines[0].len()).trim()
+        # Try to split on first ': ' to get type vs message
+        var colon_pos = -1
+        var k = 0
+        while k < after_error.len() - 1:
+            if after_error.slice(k, k + 2) == ": ":
+                colon_pos = k
+                k = after_error.len()
+            else:
+                k = k + 1
+        if colon_pos >= 0:
+            val exc_type = after_error.slice(0, colon_pos).trim()
+            val exc_msg = after_error.slice(colon_pos + 2, after_error.len()).trim()
+            return Expected.Exception(exc_type: exc_type, msg: exc_msg)
+        else:
+            return Expected.Exception(exc_type: after_error, msg: nil)
+    var joined = ""
+    var j = 0
+    while j < lines.len():
+        if j == 0:
+            joined = lines[j]
+        else:
+            joined = joined + "\n" + lines[j]
+        j = j + 1
+    Expected.Output(value: joined)
