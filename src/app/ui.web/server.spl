@@ -10,9 +10,13 @@ use common.ui.state.{init_state, update_state, update_tree}
 use common.ui.event.{process_event}
 use app.ui.web.html.{generate_html_page, generate_wm_html_page}
 use app.ui.web.ws_handler.{handle_ws_upgrade, handle_ws_wm_upgrade, is_ws_upgrade_request}
+use app.io.env_ops.{env_get}
+use common.window_protocol.geometry.{Size}
+use os.compositor.host_compositor_entry.{HostBackendKind, HostWmConfig, HostWmHandle, init_host_wm}
 
 extern fn rt_file_read_text(path: text) -> text
 extern fn rt_file_exists(path: text) -> bool
+extern fn rt_cli_get_args() -> [text]
 
 fn parse_request_line(request_line: text) -> (text, text):
     var method = ""
@@ -249,11 +253,38 @@ fn widgets_to_json(state: UIState) -> text:
     return "[{items}]"
 
 # =========================================================================
+# Shared WM helpers
+# =========================================================================
+
+fn _shared_wm_requested(args: [text]) -> bool:
+    for a in args:
+        if a == "--shared-wm":
+            return true
+    val env_val = env_get("SIMPLE_UI_WEB_SHARED_WM")
+    env_val == "1"
+
+fn run_shared_wm_web(title: text) -> i64:
+    val config = HostWmConfig(
+        backend: HostBackendKind.WebCanvas,
+        initial_size: Size.wh(1280, 800),
+        title: title
+    )
+    val handle = init_host_wm(config)
+    if handle == nil:
+        print "Error: failed to initialise shared WM (WebCanvas backend)"
+        return 1
+    handle.tick_forever()
+    return 0
+
+# =========================================================================
 # Entry Point
 # =========================================================================
 
 fn run_web(file_path: text, port: i32) -> i64:
     """Start web server mode for a .ui.sdn file."""
+    val args = rt_cli_get_args()
+    if _shared_wm_requested(args):
+        return run_shared_wm_web("simple ui web")
     if not rt_file_exists(file_path):
         print "Error: File not found: {file_path}"
         return 1
