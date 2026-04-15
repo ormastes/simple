@@ -124,6 +124,57 @@ describe "ui_access_protocol MCP dispatch":
         val missing_target = server.dispatch("ui_access_act", "{\"action\":\"click\"}")
         expect(missing_target).to_contain("error: missing surface_id")
 
+    it "observes declarative state through snapshot, surface, node, and filtered reads":
+        val session = _session_with_popup()
+        val bridge = CliGuiBridge.new(session)
+        val server = OsMcpServer.new(VfsManager.new(), bridge)
+        val whole = server.dispatch("ui_access_observe", "{}")
+        expect(whole).to_contain("\"protocol_version\":1")
+        val surface = server.dispatch("ui_access_observe", "{\"surface_id\":\"popup\"}")
+        expect(surface).to_contain("\"surface_id\":\"popup\"")
+        val node = server.dispatch("ui_access_observe", "{\"canonical_id\":\"popup#ok_btn\"}")
+        expect(node).to_contain("\"canonical_id\":\"popup#ok_btn\"")
+        val filtered = server.dispatch(
+            "ui_access_observe",
+            "{\"surface_id\":\"popup\",\"kind\":\"button\",\"text\":\"OK\",\"focused_only\":\"false\"}"
+        )
+        expect(filtered).to_contain("popup#ok_btn")
+
+    it "reads and sets declarative state through canonical targets":
+        val session = _session_with_popup()
+        val bridge = CliGuiBridge.new(session)
+        val server = OsMcpServer.new(VfsManager.new(), bridge)
+        val read = server.dispatch("ui_access_state", "{\"canonical_id\":\"popup#ok_btn\"}")
+        expect(read).to_contain("\"canonical_id\":\"popup#ok_btn\"")
+        val focus = server.dispatch(
+            "ui_access_state",
+            "{\"canonical_id\":\"popup#ok_btn\",\"state_key\":\"focused\",\"state_value\":\"true\"}"
+        )
+        expect(focus).to_contain("ok: state focused=true -> focus_ok_btn")
+        val active = server.dispatch(
+            "ui_access_state",
+            "{\"surface_id\":\"main\",\"state_key\":\"active\",\"state_value\":\"true\"}"
+        )
+        expect(active).to_contain("ok: state active=true on main")
+        expect(bridge.session.active_surface()).to_equal("main")
+        val invoke = server.dispatch(
+            "ui_access_state",
+            "{\"canonical_id\":\"main#submit_btn\",\"state_key\":\"invoke\",\"state_value\":\"true\"}"
+        )
+        expect(invoke).to_contain("ok: state invoke=true -> click_submit_btn")
+
+    it "rejects invalid declarative state transitions":
+        val session = _session_with_popup()
+        val bridge = CliGuiBridge.new(session)
+        val server = OsMcpServer.new(VfsManager.new(), bridge)
+        val unsupported = server.dispatch(
+            "ui_access_state",
+            "{\"canonical_id\":\"popup#ok_btn\",\"state_key\":\"focused\",\"state_value\":\"false\"}"
+        )
+        expect(unsupported).to_contain("error: unsupported state transition focused=false")
+        val missing = server.dispatch("ui_access_state", "{\"state_key\":\"active\",\"state_value\":\"true\"}")
+        expect(missing).to_contain("error: missing surface_id")
+
     it "reads persisted find and history results when a store is attached":
         var session = _session_with_popup()
         var store = UiAccessStore.memory()?

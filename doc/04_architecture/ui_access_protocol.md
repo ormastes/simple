@@ -55,6 +55,8 @@ Owns:
 
 - recording recent UI access events
 - exposing snapshot/history helpers
+- attaching and querying the optional `UiAccessStore`
+- exposing shared window-surface registry bindings
 - bridging lifecycle changes into canonical access events
 - preserving active-surface semantics
 
@@ -68,6 +70,9 @@ Owns additive HTTP contract routes:
 - `GET /api/test/ui/surface?id=...`
 - `GET /api/test/ui/history?...`
 - `POST /api/test/ui/act`
+- `GET /api/test/ui/observe?...`
+- `GET /api/test/ui/state?...`
+- `POST /api/test/ui/state`
 
 The existing `/api/test/*` contract remains valid.
 
@@ -79,8 +84,9 @@ The existing `/api/test/*` contract remains valid.
 Own:
 
 - LLM-facing tool registration
-- window metadata overlay on access surfaces
+- routing reads through persisted access data when available
 - canonical action dispatch
+- declarative observe/state shims over the canonical snapshot/action paths
 - snapshot-derived text rendering
 
 ## Canonical Data Model
@@ -107,12 +113,14 @@ Each surface carries:
 - `root_canonical_id`
 
 Window metadata is enrichment, not the primary identity source.
+Runtime `window_id` values are resolved through the shared window-surface
+registry and are intentionally stripped from persisted snapshots.
 
 ### Event model
 
 Recent access events are bounded, append-only in memory, and surface-scoped.
-They are intended for debugging and short-horizon history, not as a persistent
-audit log.
+When a `UiAccessStore` is attached, the same canonical events are also persisted
+and can be queried across runtime restarts.
 
 ## Hot Paths
 
@@ -120,14 +128,22 @@ audit log.
 
 1. read current session state and surface inventory
 2. collect node metadata from in-memory trees/widget registry
-3. optionally overlay WM window metadata
+3. enrich surfaces from the shared runtime window-surface registry
 4. serialize to JSON or text
 
 ### Find
 
-1. build or fetch current snapshot
-2. filter nodes in memory by surface/kind/text/focus
-3. render filtered text or JSON response
+1. query the attached access-store index when available
+2. otherwise build or fetch the current snapshot
+3. filter nodes by surface/kind/text/focus
+4. render filtered text or JSON response
+
+### History
+
+1. query persisted access events when a store is attached
+2. otherwise read bounded in-memory recent events from the session
+3. scope by `surface_id` when requested
+4. serialize as canonical JSON events
 
 ### Action
 
@@ -138,12 +154,13 @@ audit log.
 
 ## Cache and Invalidation Strategy
 
-- v1 uses existing in-memory session/surface state as its cache
-- access snapshots are rebuilt on demand from that state
-- event history is invalidated naturally by bounded append-only replacement
-- no extra persistent index is introduced in the hot path
-
-This keeps the first release simple and avoids stale parallel caches.
+- current snapshots are still rebuilt from live in-memory session/surface state
+- the optional `UiAccessStore` maintains a persisted current-node view plus
+  append-only events for read paths that need restart durability
+- runtime window bindings live only in the shared in-memory registry and are
+  rebuilt on startup
+- writes flow from session updates into the store; read paths prefer the store
+  when attached and otherwise fall back to live in-memory state
 
 ## Risks
 
@@ -153,16 +170,17 @@ The current system still dispatches through action-name strings such as
 `click_widgetId`. The protocol wraps that behavior but does not replace it in
 v1.
 
-### Surface/tree mismatch
+### Runtime-only window handles
 
-Window metadata and surface trees are maintained in different subsystems. The
-MCP layer therefore overlays window metadata onto surfaces instead of forcing a
-deep refactor in v1.
+Window IDs and native handles are not durable identity. The architecture avoids
+persisting them and instead rebuilds registry bindings per runtime.
 
-### Event granularity
+### Constrained declarative semantics
 
-Recent events are bounded and in-memory only. This is enough for local debug and
-LLM workflows, but not for long-lived audit requirements.
+The shipped `observe` and `state` helpers are intentionally thin wrappers over
+the canonical snapshot/find/action paths. They support only the current limited
+set of surface activation and node action/state transitions rather than a fully
+general semantic state engine.
 
 ## Follow-on Architecture
 
@@ -170,5 +188,5 @@ Future phases can extend the same snapshot contract with:
 
 - screenshot/mark fallback
 - external accessibility adapters
-- persisted history or indexing
-- declarative aliases over raw actions
+- broader declarative semantics beyond the current constrained `observe/state`
+  wrapper layer

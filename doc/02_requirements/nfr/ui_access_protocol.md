@@ -10,7 +10,8 @@
   surface state; the hot path shall not shell out, scan the filesystem, or make
   external process calls.
 - NFR-UAP-002: Recent-event history shall remain bounded in memory.
-- NFR-UAP-003: `ui_access_find` shall filter the in-memory snapshot rather than
+- NFR-UAP-003: `ui_access_find` shall prefer the attached access-store index
+  when present and otherwise filter the current in-memory snapshot rather than
   rebuilding state through repeated scans.
 
 ## Compatibility
@@ -26,6 +27,9 @@
   an empty or state-derived access response rather than crashing.
 - NFR-UAP-007: Missing surfaces or invalid canonical IDs shall return explicit
   error responses.
+- NFR-UAP-012: Persisted UI-access snapshots shall not store runtime
+  `window_id` handles; window bindings shall be reconstructed per runtime from
+  the live window-surface registry.
 
 ## Observability
 
@@ -40,3 +44,6 @@
   IDs, snapshot building, finding, and event history.
 - NFR-UAP-011: The tool registry shall have automated coverage for the new UI
   access schema surface.
+- NFR-UAP-013: Runtime DB-path resolution shall have automated coverage for
+  config override, environment override, default path selection, and disable
+  behavior.

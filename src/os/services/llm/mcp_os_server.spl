@@ -9,7 +9,7 @@
 #   Process: process_list, process_spawn, process_kill
 #   Window:  window_create, window_close, window_list, window_focus
 #   Widget:  widget_set, widget_read, widget_action
-#   UIAccess: ui_access_snapshot, ui_access_surface, ui_access_find, ui_access_act, ui_access_history
+#   UIAccess: ui_access_snapshot, ui_access_surface, ui_access_find, ui_access_act, ui_access_history, ui_access_observe, ui_access_state
 #   Screen:  screenshot, screen_read_text
 #   System:  system_info, system_exec
 
@@ -23,7 +23,7 @@ use os.services.llm.tool_registry.{register_os_tools}
 use common.ui.session.{UISession}
 use common.ui.widget.{UITree, WidgetNode, UIEvent}
 use common.ui.builder.{build_tree}
-use common.ui.access.{UiAccessNode, UiAccessSnapshot, UiAccessSurface, ui_access_find_nodes, ui_access_resolve_action_name, ui_access_snapshot_to_json, ui_access_surface_to_json, ui_access_events_to_json, ui_access_snapshot_to_text}
+use common.ui.access.{UiAccessNode, UiAccessSnapshot, UiAccessSurface, ui_access_find_nodes, ui_access_find_node, ui_access_resolve_action_name, ui_access_snapshot_to_json, ui_access_surface_to_json, ui_access_events_to_json, ui_access_snapshot_to_text}
 
 # =========================================================================
 # Window Tracking
@@ -160,6 +160,19 @@ impl OsMcpServer:
             val surface_id = _extract_arg(args, "surface_id")
             val count_str = _extract_arg(args, "count")
             return self.tool_ui_access_history(surface_id, count_str)
+        elif tool_name == "ui_access_observe":
+            val surface_id = _extract_arg(args, "surface_id")
+            val canonical_id = _extract_arg(args, "canonical_id")
+            val kind = _extract_arg(args, "kind")
+            val text_query = _extract_arg(args, "text")
+            val focused_only = _extract_arg(args, "focused_only")
+            return self.tool_ui_access_observe(surface_id, canonical_id, kind, text_query, focused_only)
+        elif tool_name == "ui_access_state":
+            val surface_id = _extract_arg(args, "surface_id")
+            val canonical_id = _extract_arg(args, "canonical_id")
+            val state_key = _extract_arg(args, "state_key")
+            val state_value = _extract_arg(args, "state_value")
+            return self.tool_ui_access_state(surface_id, canonical_id, state_key, state_value)
         elif tool_name == "screenshot":
             return self.tool_screenshot()
         elif tool_name == "screen_read_text":
@@ -561,6 +574,102 @@ impl OsMcpServer:
                     self.bridge.session.access_recent_surface_events(surface_id, count)
         return ui_access_events_to_json(events)
 
+    fn tool_ui_access_observe(surface_id: text, canonical_id: text, kind: text, text_query: text, focused_only: text) -> text:
+        """Declarative read layer over canonical UI access tools."""
+        val snapshot = self.bridge.session.access_snapshot()
+        if canonical_id != "":
+            val node = ui_access_find_node(snapshot, canonical_id)
+            if node == nil:
+                return "error: canonical node {canonical_id} not found"
+            var surfaces: [UiAccessSurface] = []
+            for surface in snapshot.surfaces:
+                if surface.surface_id == node.surface_id:
+                    surfaces = surfaces.push(surface)
+            val filtered = UiAccessSnapshot(
+                protocol_version: snapshot.protocol_version,
+                mode: snapshot.mode,
+                active_surface: snapshot.active_surface,
+                surfaces: surfaces,
+                nodes: [node],
+                recent_events: []
+            )
+            return ui_access_snapshot_to_json(filtered)
+        if kind != "" or text_query != "" or focused_only != "":
+            return self.tool_ui_access_find(surface_id, kind, text_query, focused_only)
+        if surface_id != "":
+            return self.tool_ui_access_surface(surface_id)
+        return self.tool_ui_access_snapshot()
+
+    me tool_ui_access_state(surface_id: text, canonical_id: text, state_key: text, state_value: text) -> text:
+        """Declarative state read/write layer over canonical UI access tools."""
+        if state_key == "" and state_value == "":
+            if canonical_id != "":
+                return self.tool_ui_access_observe(surface_id, canonical_id, "", "", "")
+            if surface_id != "":
+                return self.tool_ui_access_surface(surface_id)
+            return "error: missing target"
+
+        var resolved_surface_id = surface_id
+        if canonical_id != "":
+            val idx = canonical_id.find("#")
+            if idx < 0:
+                return "error: invalid canonical_id"
+            resolved_surface_id = canonical_id.slice(0, idx)
+        if state_key == "active":
+            if resolved_surface_id == "":
+                return "error: missing surface_id"
+            if not _is_truthy(state_value):
+                return "error: unsupported state transition active={state_value}"
+            if not self.bridge.session.has_surface(resolved_surface_id):
+                return "error: surface {resolved_surface_id} not found"
+            self.bridge.session.set_active_surface(resolved_surface_id)
+            self.bridge.render()
+            return "ok: state active=true on {resolved_surface_id}"
+
+        if canonical_id == "":
+            return "error: missing canonical_id"
+        if not self.bridge.session.has_surface(resolved_surface_id):
+            return "error: surface {resolved_surface_id} not found"
+        val snapshot = self.bridge.session.access_snapshot()
+        val node = ui_access_find_node(snapshot, canonical_id)
+        if node == nil:
+            return "error: canonical node {canonical_id} not found"
+
+        val lower_key = state_key.to_lower()
+        var action = ""
+        if lower_key == "focus" or lower_key == "focused":
+            if not _is_truthy(state_value):
+                return "error: unsupported state transition {state_key}={state_value}"
+            action = "focus"
+        elif lower_key == "invoke" or lower_key == "invoked" or lower_key == "press" or lower_key == "pressed":
+            if not _is_truthy(state_value):
+                return "error: unsupported state transition {state_key}={state_value}"
+            action = "invoke"
+        elif lower_key == "submit" or lower_key == "submitted":
+            if not _is_truthy(state_value):
+                return "error: unsupported state transition {state_key}={state_value}"
+            action = "submit"
+        elif lower_key == "select" or lower_key == "selected":
+            if not _is_truthy(state_value):
+                return "error: unsupported state transition {state_key}={state_value}"
+            action = "select"
+        elif lower_key == "toggle" or lower_key == "toggled" or lower_key == "checked" or lower_key == "expanded":
+            if _state_matches_toggle_target(node, state_value):
+                return "ok: state {state_key}={state_value} on {canonical_id}"
+            action = "toggle"
+        elif lower_key == "action":
+            if state_value == "":
+                return "error: missing state_value"
+            action = state_value
+        else:
+            return "error: unsupported state key {state_key}"
+
+        self.bridge.session.set_active_surface(resolved_surface_id)
+        val action_name = ui_access_resolve_action_name(snapshot, canonical_id, action)
+        self.bridge.session.dispatch(UIEvent.Action(name: action_name))
+        self.bridge.render()
+        return "ok: state {state_key}={state_value} -> {action_name}"
+
     # =================================================================
     # Screen Tools
     # =================================================================
@@ -670,6 +779,21 @@ fn _extract_arg(args_json: text, key: text) -> text:
                     return ""
         _:
             return ""
+
+fn _is_truthy(value: text) -> bool:
+    val lower = value.to_lower()
+    return lower == "true" or lower == "1" or lower == "yes" or lower == "on"
+
+fn _is_falsy(value: text) -> bool:
+    val lower = value.to_lower()
+    return lower == "false" or lower == "0" or lower == "no" or lower == "off"
+
+fn _state_matches_toggle_target(node: UiAccessNode, desired: text) -> bool:
+    if _is_truthy(desired):
+        return node.selected
+    if _is_falsy(desired):
+        return not node.selected
+    return false
 
 fn _find_window(windows: [WindowInfo], id_str: text) -> WindowInfo?:
     """Find a window by ID string."""

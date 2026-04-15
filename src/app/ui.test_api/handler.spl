@@ -7,7 +7,7 @@
 
 use common.ui.widget.{UIState, UIEvent, WidgetNode, get_widget_record}
 use common.ui.session.{UISession}
-use common.ui.access.{UiAccessSnapshot, ui_access_snapshot_from_state, ui_access_snapshot_to_json, ui_access_surface_to_json, ui_access_events_to_json, ui_access_surface_id_from_canonical, ui_access_widget_id_from_canonical, ui_access_resolve_action_name}
+use common.ui.access.{UiAccessSnapshot, UiAccessNode, UiAccessSurface, ui_access_snapshot_from_state, ui_access_snapshot_to_json, ui_access_surface_to_json, ui_access_events_to_json, ui_access_surface_id_from_canonical, ui_access_widget_id_from_canonical, ui_access_find_node, ui_access_find_nodes, ui_access_resolve_action_name, ui_access_snapshot_to_text}
 use app.ui.test_api.json.{element_to_json, elements_to_json, extract_json_field, escape_json, state_to_json}
 
 val PROTOCOL_VERSION = 1
@@ -27,6 +27,8 @@ fn handle_test_request(path: text, method: text, body: text, state: UIState, inj
     if method == "POST":
         if route == "/api/test/ui/act":
             return _handle_ui_act(body, inject_event, session)
+        elif route == "/api/test/ui/state":
+            return _handle_ui_state_post(body, inject_event, session)
         elif route == "/api/test/click":
             return _handle_click(body, inject_event)
         elif route == "/api/test/type":
@@ -43,9 +45,20 @@ fn handle_test_request(path: text, method: text, body: text, state: UIState, inj
     elif method == "GET":
         if route == "/api/test/ui/snapshot":
             return _handle_ui_snapshot(state, session)
+        elif route == "/api/test/ui/observe":
+            val surface_id = _extract_query_param(path, "surface_id")
+            val canonical_id = _extract_query_param(path, "canonical_id")
+            val kind = _extract_query_param(path, "kind")
+            val text_query = _extract_query_param(path, "text")
+            val focused_only = _extract_query_param(path, "focused_only")
+            return _handle_ui_observe(surface_id, canonical_id, kind, text_query, focused_only, state, session)
         elif route == "/api/test/ui/surface":
             val id = _extract_query_param(path, "id")
             return _handle_ui_surface(id, state, session)
+        elif route == "/api/test/ui/state":
+            val surface_id = _extract_query_param(path, "surface_id")
+            val canonical_id = _extract_query_param(path, "canonical_id")
+            return _handle_ui_state_get(surface_id, canonical_id, state, session)
         elif route == "/api/test/ui/history":
             val surface_id = _extract_query_param(path, "surface_id")
             val count_str = _extract_query_param(path, "count")
@@ -184,6 +197,51 @@ fn _handle_ui_act(body: text, inject_event: fn(UIEvent), session: UISession?) ->
     val response_surface_id = if surface_id != "": surface_id else: resolved_surface_id
     return (200, "application/json", "{\"ok\":true,\"surface_id\":\"{escape_json(response_surface_id)}\",\"canonical_id\":\"{escape_json(canonical_id)}\"}")
 
+fn _handle_ui_state_post(body: text, inject_event: fn(UIEvent), session: UISession?) -> (i32, text, text):
+    """Handle POST /api/test/ui/state — declarative UI state route."""
+    val surface_id = extract_json_field(body, "surface_id")
+    val canonical_id = extract_json_field(body, "canonical_id")
+    val state_key = extract_json_field(body, "state_key")
+    val state_value = extract_json_field(body, "state_value")
+    if state_key == "":
+        return (400, "application/json", "{\"error\":\"missing_field\",\"message\":\"Missing required field: state_key\"}")
+    if session == nil:
+        return (400, "application/json", "{\"error\":\"missing_field\",\"message\":\"A live session is required for /api/test/ui/state\"}")
+
+    var resolved_surface_id = surface_id
+    if canonical_id != "":
+        val widget_id = ui_access_widget_id_from_canonical(canonical_id)
+        if widget_id == "":
+            return (400, "application/json", "{\"error\":\"invalid_field\",\"message\":\"Invalid canonical_id\"}")
+        resolved_surface_id = ui_access_surface_id_from_canonical(canonical_id)
+    if state_key == "active":
+        if resolved_surface_id == "":
+            return (400, "application/json", "{\"error\":\"missing_field\",\"message\":\"Missing required field: surface_id\"}")
+        if not _is_truthy(state_value):
+            return (400, "application/json", "{\"error\":\"invalid_field\",\"message\":\"Unsupported state transition: active={escape_json(state_value)}\"}")
+        if not session.has_surface(resolved_surface_id):
+            return (404, "application/json", "{\"error\":\"element_not_found\",\"message\":\"Surface not found: {resolved_surface_id}\"}")
+        session.set_active_surface(resolved_surface_id)
+        return (200, "application/json", "{\"ok\":true,\"surface_id\":\"{escape_json(resolved_surface_id)}\",\"state_key\":\"active\",\"state_value\":\"true\"}")
+
+    if canonical_id == "":
+        return (400, "application/json", "{\"error\":\"missing_field\",\"message\":\"Missing required field: canonical_id\"}")
+    if not session.has_surface(resolved_surface_id):
+        return (404, "application/json", "{\"error\":\"element_not_found\",\"message\":\"Surface not found: {resolved_surface_id}\"}")
+    val snapshot = session.access_snapshot()
+    val node = ui_access_find_node(snapshot, canonical_id)
+    if node == nil:
+        return (404, "application/json", "{\"error\":\"element_not_found\",\"message\":\"Canonical node not found: {escape_json(canonical_id)}\"}")
+
+    val action_name = _resolve_ui_state_action(snapshot, node, state_key, state_value)
+    if action_name == "":
+        return (400, "application/json", "{\"error\":\"invalid_field\",\"message\":\"Unsupported state transition: {escape_json(state_key)}={escape_json(state_value)}\"}")
+    if action_name == "__noop__":
+        return (200, "application/json", "{\"ok\":true,\"surface_id\":\"{escape_json(resolved_surface_id)}\",\"canonical_id\":\"{escape_json(canonical_id)}\",\"state_key\":\"{escape_json(state_key)}\",\"state_value\":\"{escape_json(state_value)}\"}")
+    session.set_active_surface(resolved_surface_id)
+    inject_event(UIEvent.Action(name: action_name))
+    return (200, "application/json", "{\"ok\":true,\"surface_id\":\"{escape_json(resolved_surface_id)}\",\"canonical_id\":\"{escape_json(canonical_id)}\",\"state_key\":\"{escape_json(state_key)}\",\"state_value\":\"{escape_json(state_value)}\",\"action\":\"{escape_json(action_name)}\"}")
+
 # =========================================================================
 # GET Handlers
 # =========================================================================
@@ -224,6 +282,50 @@ fn _handle_ui_snapshot(state: UIState, session: UISession?) -> (i32, text, text)
     val json = ui_access_snapshot_to_json(snapshot)
     return (200, "application/json", json)
 
+fn _handle_ui_observe(surface_id: text, canonical_id: text, kind: text, text_query: text, focused_only: text, state: UIState, session: UISession?) -> (i32, text, text):
+    """Handle GET /api/test/ui/observe — declarative read route."""
+    val snapshot = _build_access_snapshot(state, session)
+    if canonical_id != "":
+        val node = ui_access_find_node(snapshot, canonical_id)
+        if node == nil:
+            return (404, "application/json", "{\"error\":\"element_not_found\",\"message\":\"Canonical node not found: {escape_json(canonical_id)}\"}")
+        var surfaces: [UiAccessSurface] = []
+        for surface in snapshot.surfaces:
+            if surface.surface_id == node.surface_id:
+                surfaces = surfaces.push(surface)
+        val filtered = UiAccessSnapshot(
+            protocol_version: snapshot.protocol_version,
+            mode: snapshot.mode,
+            active_surface: snapshot.active_surface,
+            surfaces: surfaces,
+            nodes: [node],
+            recent_events: []
+        )
+        return (200, "application/json", ui_access_snapshot_to_json(filtered))
+    if kind != "" or text_query != "" or focused_only != "":
+        val focused = _is_truthy(focused_only)
+        val matches = ui_access_find_nodes(snapshot, surface_id, kind, text_query, focused)
+        val filtered = UiAccessSnapshot(
+            protocol_version: snapshot.protocol_version,
+            mode: snapshot.mode,
+            active_surface: snapshot.active_surface,
+            surfaces: snapshot.surfaces,
+            nodes: matches,
+            recent_events: []
+        )
+        return (200, "text/plain", ui_access_snapshot_to_text(filtered))
+    if surface_id != "":
+        return _handle_ui_surface(surface_id, state, session)
+    return (400, "application/json", "{\"error\":\"missing_field\",\"message\":\"Missing selector: surface_id, canonical_id, kind, text, or focused_only\"}")
+
+fn _handle_ui_state_get(surface_id: text, canonical_id: text, state: UIState, session: UISession?) -> (i32, text, text):
+    """Handle GET /api/test/ui/state — declarative state read route."""
+    if canonical_id != "":
+        return _handle_ui_observe(surface_id, canonical_id, "", "", "", state, session)
+    if surface_id != "":
+        return _handle_ui_surface(surface_id, state, session)
+    return (400, "application/json", "{\"error\":\"missing_field\",\"message\":\"Missing required field: surface_id or canonical_id\"}")
+
 fn _handle_ui_surface(surface_id: text, state: UIState, session: UISession?) -> (i32, text, text):
     """Handle GET /api/test/ui/surface?id=X — return one surface and its nodes."""
     if surface_id == "":
@@ -241,10 +343,15 @@ fn _handle_ui_history(surface_id: text, count_str: text, session: UISession?) ->
     var count = 20
     if count_str != "":
         count = count_str.to_i32()
-    val events = if surface_id == "":
-        session.access_recent_events(count)
-    else:
-        session.access_recent_surface_events(surface_id, count)
+    val persisted = session.access_persisted_events(surface_id, count.to_i64())
+    val events = match persisted:
+        Ok(found):
+            found
+        Err(_):
+            if surface_id == "":
+                session.access_recent_events(count)
+            else:
+                session.access_recent_surface_events(surface_id, count)
     val json = ui_access_events_to_json(events)
     return (200, "application/json", json)
 
@@ -283,6 +390,49 @@ fn _build_access_snapshot(state: UIState, session: UISession?) -> UiAccessSnapsh
     if session != nil:
         return session.access_snapshot()
     return ui_access_snapshot_from_state(state, [])
+
+fn _resolve_ui_state_action(snapshot: UiAccessSnapshot, node: UiAccessNode, state_key: text, state_value: text) -> text:
+    val lower_key = state_key.to_lower()
+    if lower_key == "focus" or lower_key == "focused":
+        if not _is_truthy(state_value):
+            return ""
+        return ui_access_resolve_action_name(snapshot, node.canonical_id, "focus")
+    if lower_key == "invoke" or lower_key == "invoked" or lower_key == "press" or lower_key == "pressed":
+        if not _is_truthy(state_value):
+            return ""
+        return ui_access_resolve_action_name(snapshot, node.canonical_id, "invoke")
+    if lower_key == "submit" or lower_key == "submitted":
+        if not _is_truthy(state_value):
+            return ""
+        return ui_access_resolve_action_name(snapshot, node.canonical_id, "submit")
+    if lower_key == "select" or lower_key == "selected":
+        if not _is_truthy(state_value):
+            return ""
+        return ui_access_resolve_action_name(snapshot, node.canonical_id, "select")
+    if lower_key == "toggle" or lower_key == "toggled" or lower_key == "checked" or lower_key == "expanded":
+        if _state_matches_toggle_target(node.selected, state_value):
+            return "__noop__"
+        return ui_access_resolve_action_name(snapshot, node.canonical_id, "toggle")
+    if lower_key == "action":
+        if state_value == "":
+            return ""
+        return ui_access_resolve_action_name(snapshot, node.canonical_id, state_value)
+    return ""
+
+fn _is_truthy(value: text) -> bool:
+    val lower = value.to_lower()
+    return lower == "true" or lower == "1" or lower == "yes" or lower == "on"
+
+fn _is_falsy(value: text) -> bool:
+    val lower = value.to_lower()
+    return lower == "false" or lower == "0" or lower == "no" or lower == "off"
+
+fn _state_matches_toggle_target(selected: bool, desired: text) -> bool:
+    if _is_truthy(desired):
+        return selected
+    if _is_falsy(desired):
+        return not selected
+    return false
 
 # =========================================================================
 # HTML Snapshot Rendering

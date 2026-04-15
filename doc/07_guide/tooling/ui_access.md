@@ -54,13 +54,18 @@ Use the protocol in this order:
 4. `ui_access_act`
 5. `ui_access_history`
 
+Declarative shortcuts now sit on top of that base flow:
+
+6. `ui_access_observe`
+7. `ui_access_state`
+
 This matches the repo-local agent skill at [.codex/skills/simple-ui/SKILL.md](../../../.codex/skills/simple-ui/SKILL.md).
 
 ---
 
 ## MCP Tools
 
-The MCP OS server exposes five tools:
+The MCP OS server exposes seven tools:
 
 | Tool | Purpose | Result shape |
 |------|---------|--------------|
@@ -69,6 +74,8 @@ The MCP OS server exposes five tools:
 | `ui_access_find` | Find nodes by surface, kind, text, or focus | Text |
 | `ui_access_act` | Dispatch an action to a surface or canonical node | Text |
 | `ui_access_history` | Read recent access events globally or per surface | JSON |
+| `ui_access_observe` | Declaratively observe a node, surface, or filtered query | JSON or text |
+| `ui_access_state` | Read or set declarative state for a surface or node | JSON or text |
 
 Important behavior:
 
@@ -77,6 +84,12 @@ Important behavior:
   `ok: dispatched click_ok_btn`.
 - `ui_access_act` switches the active surface before dispatch when the target
   surface is known.
+- `ui_access_observe` chooses the narrowest read automatically:
+  canonical node -> filtered snapshot JSON, surface -> surface JSON, query ->
+  `ui_access_find` text, no selector -> full snapshot JSON.
+- `ui_access_state` reads current state when no `state_key` is supplied, and
+  supports constrained declarative writes for `active`, `focused`, `invoke`,
+  `submit`, `select`, `toggle`, and `action`.
 
 ---
 
@@ -90,6 +103,9 @@ The shared test API exposes additive routes under `/api/test/ui/*`:
 | `/api/test/ui/surface?id=<surface_id>` | `GET` | One surface and its nodes |
 | `/api/test/ui/history?surface_id=<id>&count=<n>` | `GET` | Recent events |
 | `/api/test/ui/act` | `POST` | Action dispatch |
+| `/api/test/ui/observe?...` | `GET` | Declaratively observe a node, surface, or filtered query |
+| `/api/test/ui/state?...` | `GET` | Read declarative state for a surface or node |
+| `/api/test/ui/state` | `POST` | Set constrained declarative state for a surface or node |
 
 Example action body:
 
@@ -107,6 +123,10 @@ Compatibility rules:
   `/api/test/screenshot` routes remain available.
 - If no live `UISession` exists, snapshot falls back to the current `UIState`
   tree and history returns `[]`.
+- `GET /api/test/ui/observe` requires at least one selector:
+  `surface_id`, `canonical_id`, `kind`, `text`, or `focused_only`.
+- `POST /api/test/ui/state` requires `state_key` and either `surface_id` or
+  `canonical_id`.
 
 ---
 
@@ -194,6 +214,18 @@ ui_access_find(surface_id="popup", kind="button", text="OK", focused_only="false
 
 ```text
 ui_access_act(surface_id="popup", canonical_id="popup#ok_btn", action="click")
+```
+
+### Observe declaratively
+
+```text
+ui_access_observe(canonical_id="popup#ok_btn")
+```
+
+### Set declarative state
+
+```text
+ui_access_state(canonical_id="main#submit_btn", state_key="invoke", state_value="true")
 ```
 
 ### Confirm the result

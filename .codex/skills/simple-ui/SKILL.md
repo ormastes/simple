@@ -15,6 +15,8 @@ inside this repository.
 3. `ui_access_find`
 4. `ui_access_act`
 5. `ui_access_history`
+6. `ui_access_observe`
+7. `ui_access_state`
 
 ## Procedure
 
@@ -38,11 +40,20 @@ inside this repository.
 - read `ui_access_history`
 - if needed, re-read the surface snapshot
 
+### Phase 5: Declarative Shortcuts
+
+- use `ui_access_observe` when the task is phrased as “what is this?” or
+  “show me the current state”
+- use `ui_access_state` when the task is phrased as “make this active/focused”
+  or “invoke/submit/select/toggle this”
+
 ## Rules
 
 - treat `surface_id#widget_id` as the canonical node identity
 - prefer the canonical UI access tools over legacy widget tools when both can do
   the job
+- prefer `ui_access_observe` / `ui_access_state` when the user is expressing
+  intent declaratively rather than asking for a raw action name
 - use legacy widget tools only for compatibility work or when a task
   specifically names them
 - this skill is internal-only in v1; do not assume OS accessibility or visual

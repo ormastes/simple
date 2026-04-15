@@ -38,8 +38,14 @@ fn surface_path(id: text) -> text:
 fn history_path(surface_id: text, count: text) -> text:
     return "/api/test/ui/history?surface_id={surface_id}&count={count}"
 
+fn observe_path(canonical_id: text) -> text:
+    return "/api/test/ui/observe?canonical_id={canonical_id}"
+
 fn act_body(surface_id: text, canonical_id: text, action: text) -> text:
     return "{\"surface_id\":\"{surface_id}\",\"canonical_id\":\"{canonical_id}\",\"action\":\"{action}\"}"
+
+fn state_body(surface_id: text, canonical_id: text, state_key: text, state_value: text) -> text:
+    return "{\"surface_id\":\"{surface_id}\",\"canonical_id\":\"{canonical_id}\",\"state_key\":\"{state_key}\",\"state_value\":\"{state_value}\"}"
 
 fn start_backend(mode: text, port: i32) -> i64:
     return start_ui_server(mode, sdn_path, port)
@@ -220,3 +226,63 @@ describe "UI Access Contract":
         stop_ui_server(second_pid)
         if file_exists(db_path):
             file_delete(db_path)
+
+    slow_it "observe and state routes work on both backends":
+        val (web_port, tui_port) = backend_ports()
+        val web_pid = start_backend("web", web_port)
+        val tui_pid = start_backend("tui_web", tui_port)
+        wait_ready(web_port)
+        wait_ready(tui_port)
+
+        val web_observe = test_get("127.0.0.1", web_port, observe_path("main#action_btn"))
+        val tui_observe = test_get("127.0.0.1", tui_port, observe_path("main#action_btn"))
+        match web_observe:
+            Ok(body):
+                val has_canonical = body.index_of("\"canonical_id\":\"main#action_btn\"") != nil
+                expect has_canonical to_equal true
+            Err(e):
+                expect e to_equal ""
+        match tui_observe:
+            Ok(body):
+                val has_canonical = body.index_of("\"canonical_id\":\"main#action_btn\"") != nil
+                expect has_canonical to_equal true
+            Err(e):
+                expect e to_equal ""
+
+        val body = state_body("main", "main#action_btn", "invoke", "true")
+        val web_state = test_post("127.0.0.1", web_port, "/api/test/ui/state", body)
+        val tui_state = test_post("127.0.0.1", tui_port, "/api/test/ui/state", body)
+        match web_state:
+            Ok(resp):
+                val ok = extract_bool_field(resp, "ok")
+                val action = extract_field(resp, "action")
+                expect ok to_equal true
+                expect action to_equal "click_action_btn"
+            Err(e):
+                expect e to_equal ""
+        match tui_state:
+            Ok(resp):
+                val ok = extract_bool_field(resp, "ok")
+                val action = extract_field(resp, "action")
+                expect ok to_equal true
+                expect action to_equal "click_action_btn"
+            Err(e):
+                expect e to_equal ""
+
+        val web_history = test_get("127.0.0.1", web_port, history_path("main", "10"))
+        val tui_history = test_get("127.0.0.1", tui_port, history_path("main", "10"))
+        match web_history:
+            Ok(resp):
+                val has_click = resp.index_of("\"payload\":\"click_action_btn\"") != nil
+                expect has_click to_equal true
+            Err(e):
+                expect e to_equal ""
+        match tui_history:
+            Ok(resp):
+                val has_click = resp.index_of("\"payload\":\"click_action_btn\"") != nil
+                expect has_click to_equal true
+            Err(e):
+                expect e to_equal ""
+
+        stop_ui_server(web_pid)
+        stop_ui_server(tui_pid)

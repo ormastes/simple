@@ -6,6 +6,7 @@ use std.spec.{describe, it, expect}
 use common.ui.builder.{column, text_widget, button, build_tree}
 use common.ui.session.{UISession}
 use common.ui.widget.{UIEvent}
+use common.ui.access_store.{UiAccessStore}
 use app.ui.test_api.handler.{handle_test_request}
 
 fn _session_with_popup() -> UISession:
@@ -96,6 +97,82 @@ describe "ui_access_protocol HTTP routes":
         )
         expect(fallback.0).to_equal(200)
         expect(fallback.2).to_equal("[]")
+
+    it "serves persisted history when a store is attached":
+        var session = _session_with_popup()
+        var store = UiAccessStore.memory()?
+        session.attach_access_store(store)
+        session.dispatch(UIEvent.Action(name: "submit"))
+        session.access_events = []
+        val live = handle_test_request(
+            "/api/test/ui/history?surface_id=popup&count=5",
+            "GET",
+            "",
+            session.current_state(),
+            \event: pass_dn,
+            session
+        )
+        expect(live.0).to_equal(200)
+        expect(live.2).to_contain("\"surface_id\":\"popup\"")
+        expect(live.2).to_contain("\"event_kind\":\"action\"")
+
+    it "observes canonical nodes and rejects missing selectors":
+        val session = _session_with_popup()
+        val found = handle_test_request(
+            "/api/test/ui/observe?canonical_id=popup#ok_btn",
+            "GET",
+            "",
+            session.current_state(),
+            \event: pass_dn,
+            session
+        )
+        expect(found.0).to_equal(200)
+        expect(found.2).to_contain("\"canonical_id\":\"popup#ok_btn\"")
+        expect(found.2).to_contain("\"kind\":\"button\"")
+        val missing = handle_test_request(
+            "/api/test/ui/observe",
+            "GET",
+            "",
+            session.current_state(),
+            \event: pass_dn,
+            session
+        )
+        expect(missing.0).to_equal(400)
+        expect(missing.2).to_contain("Missing selector")
+
+    it "reads and sets declarative UI state":
+        val session = _session_with_popup()
+        val read = handle_test_request(
+            "/api/test/ui/state?canonical_id=popup#ok_btn",
+            "GET",
+            "",
+            session.current_state(),
+            \event: pass_dn,
+            session
+        )
+        expect(read.0).to_equal(200)
+        expect(read.2).to_contain("\"canonical_id\":\"popup#ok_btn\"")
+        val write = handle_test_request(
+            "/api/test/ui/state",
+            "POST",
+            "{\"surface_id\":\"main\",\"canonical_id\":\"main#submit_btn\",\"state_key\":\"invoke\",\"state_value\":\"true\"}",
+            session.current_state(),
+            \event: pass_dn,
+            session
+        )
+        expect(write.0).to_equal(200)
+        expect(write.2).to_contain("\"ok\":true")
+        expect(write.2).to_contain("click_submit_btn")
+        val missing = handle_test_request(
+            "/api/test/ui/state",
+            "POST",
+            "{\"state_value\":\"true\"}",
+            session.current_state(),
+            \event: pass_dn,
+            session
+        )
+        expect(missing.0).to_equal(400)
+        expect(missing.2).to_contain("Missing required field: state_key")
 
     it "accepts canonical actions, switches surface, and rejects empty or missing targets":
         val session = _session_with_popup()

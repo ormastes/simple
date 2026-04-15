@@ -29,6 +29,8 @@ Responsibilities:
 - store bounded `access_events`
 - increment event sequence numbers
 - expose access snapshot/history methods
+- attach and route through `UiAccessStore`
+- own the shared runtime window-surface registry
 - convert lifecycle diffs and dispatched actions into `UiAccessEvent`
 
 ### `src/app/ui.test_api/handler.spl`
@@ -36,7 +38,8 @@ Responsibilities:
 Responsibilities:
 
 - accept optional `UISession`
-- serve additive `/api/test/ui/*` routes
+- serve additive `/api/test/ui/*` routes, including declarative observe/state
+  reads and writes
 - fall back to state-derived snapshot when session is absent
 
 ### `src/os/services/llm/mcp_os_server.spl`
@@ -44,7 +47,9 @@ Responsibilities:
 Responsibilities:
 
 - dispatch the new UI access tools
-- overlay window metadata onto surfaces
+- provide declarative `ui_access_observe` and `ui_access_state` shims over the
+  canonical snapshot/find/action paths
+- prefer persisted history and node search when a store is attached
 - reuse canonical snapshot text rendering for screen/debug output
 - route actions through the existing event-dispatch path
 
@@ -63,24 +68,38 @@ Responsibilities:
 ### `UiAccessSnapshot`
 
 Carries only the current state and bounded history needed for interactive
-tooling. It is not a persistence format.
+tooling. Persisted snapshots are derived from it by stripping runtime
+`window_id` bindings before storage.
 
 ## Error Handling
 
 - invalid or missing `surface_id` -> explicit route/tool errors
 - invalid `canonical_id` -> explicit route/tool errors
+- invalid `state_key` or unsupported declarative transition -> explicit route
+  or tool error
 - absent session in HTTP test API -> empty/history-less fallback response
 - missing surface on update/action -> error string or `404`-style response
+- attached store unavailable or query failure -> fall back to live in-memory
+  snapshot/history behavior
 
 ## Compatibility Design
 
 - keep legacy widget tools/routes intact
 - add new routes and tools rather than mutating old names
+- keep declarative observe/state helpers as compatibility wrappers rather than a
+  second execution model
 - reuse `UIEvent.Action` so action execution semantics remain compatible with
   current render/update flow
 
 ## Verification Mapping
 
 - REQ-UAP-001 / 002 / 007 / 008 -> `test/unit/app/ui/access_spec.spl`
-- REQ-UAP-013 / 014 -> `test/unit/os/services/llm/tool_registry_spec.spl`
-- build/runtime compatibility -> existing build and UI unit suites
+- REQ-UAP-010 -> `test/unit/app/ui/ui_access_http_spec.spl`,
+  `test/system/ui/ui_access_contract_spec.spl`
+- REQ-UAP-013 / 014 -> `test/unit/os/services/llm/tool_registry_spec.spl`,
+  `test/unit/os/services/llm/ui_access_dispatch_spec.spl`
+- REQ-UAP-018 / NFR-UAP-013 -> `test/unit/app/ui/ui_access_runtime_spec.spl`,
+  `test/unit/app/ui/ui_access_store_spec.spl`
+- REQ-UAP-019 -> `test/unit/app/ui/window_surface_registry_spec.spl`,
+  `test/unit/os/services/llm/ui_access_dispatch_spec.spl`
+- build/runtime compatibility -> existing build and UI/system suites
