@@ -1,12 +1,8 @@
 # UI Test API Handler — Regression Tests
 #
-# Exercises all 18 routes in src/app/ui.test_api/handler.spl at the
+# Exercises the routes in src/app/ui.test_api/handler.spl at the
 # function-call level (no real sockets).  Calls handle_test_request()
 # directly and inspects the (status, content_type, body) tuple.
-#
-# NOTE: /api/test/ui/ensure is present in handler.spl (line 51) but is
-# NOT in the 18-route specification.  It is exercised nowhere here; see
-# the FINDING at the bottom of this file.
 
 use std.sspec.*
 use app.ui.test_api.handler.{handle_test_request, PROTOCOL_VERSION}
@@ -618,14 +614,138 @@ describe "Method dispatch":
         expect(status).to_equal(404)
 
 # ============================================================================
-# FINDING: Undocumented route /api/test/ui/ensure
-#
-# handler.spl lines 51-62 implement GET /api/test/ui/ensure — a polling
-# "ensure/goal-state" route that accepts expectation, expected_value,
-# timeout_ms, and poll_ms query params.  This route is absent from the
-# 18-route specification handed to Agent J, but is fully implemented in
-# the handler.  It calls rt_sleep_ms() in a polling loop, which may cause
-# test timeouts if exercised without a zero timeout_ms.  Recommend adding
-# it to the specification as route #19 and testing it with timeout_ms=0
-# to avoid the sleep in v1.2.
+# Group 20: GET /api/test/ui/ensure
 # ============================================================================
+
+describe "GET /api/test/ui/ensure":
+    """
+    ## Goal-state polling route
+
+    timeout_ms=0 forces a single snapshot read with no rt_sleep_ms call.
+    Always returns 200 with an ensure-shaped JSON body.
+    """
+
+    it "returns 200 with no session and timeout_ms=0":
+        val state = _make_state()
+        val (status, ctype, body) = handle_test_request("/api/test/ui/ensure?timeout_ms=0", "GET", "", state, _noop_inject, nil)
+        expect(status).to_equal(200)
+        expect(ctype).to_equal("application/json")
+
+    it "returns 200 with a session and timeout_ms=0":
+        val state = _make_state()
+        val session = _make_session()
+        val (status, ctype, body) = handle_test_request("/api/test/ui/ensure?surface_id=main&timeout_ms=0", "GET", "", state, _noop_inject, session)
+        expect(status).to_equal(200)
+
+    it "honors expectation+expected_value query params":
+        val state = _make_state()
+        val session = _make_session()
+        val (status, ctype, body) = handle_test_request("/api/test/ui/ensure?surface_id=main&expectation=value&expected_value=x&timeout_ms=0", "GET", "", state, _noop_inject, session)
+        expect(status).to_equal(200)
+
+# ============================================================================
+# Group 21: POST /api/test/ui/value
+# ============================================================================
+
+describe "POST /api/test/ui/value":
+    """
+    ## Typed value write route
+
+    Validates required fields and surface presence before delegating
+    the write to the session.
+    """
+
+    it "returns 400 when canonical_id is missing":
+        val state = _make_state()
+        val session = _make_session()
+        val (status, ctype, body) = handle_test_request("/api/test/ui/value", "POST", "{\"value\":\"hi\"}", state, _noop_inject, session)
+        expect(status).to_equal(400)
+        expect(body).to_contain("missing_field")
+
+    it "returns 400 when value is missing":
+        val state = _make_state()
+        val session = _make_session()
+        val (status, ctype, body) = handle_test_request("/api/test/ui/value", "POST", "{\"canonical_id\":\"main#root\"}", state, _noop_inject, session)
+        expect(status).to_equal(400)
+        expect(body).to_contain("missing_field")
+
+    it "returns 400 when session is nil":
+        val state = _make_state()
+        val (status, ctype, body) = handle_test_request("/api/test/ui/value", "POST", "{\"canonical_id\":\"main#root\",\"value\":\"hi\"}", state, _noop_inject, nil)
+        expect(status).to_equal(400)
+        expect(body).to_contain("missing_field")
+
+    it "returns 404 when surface is not present":
+        val state = _make_state()
+        val session = _make_session()
+        val (status, ctype, body) = handle_test_request("/api/test/ui/value", "POST", "{\"surface_id\":\"ghost\",\"canonical_id\":\"ghost#root\",\"value\":\"hi\"}", state, _noop_inject, session)
+        expect(status).to_equal(404)
+        expect(body).to_contain("element_not_found")
+
+# ============================================================================
+# Group 22: GET /api/test/ui/value
+# ============================================================================
+
+describe "GET /api/test/ui/value":
+    """
+    ## Typed value read route
+
+    Requires canonical_id; returns 404 when the canonical node cannot
+    be resolved against the snapshot.
+    """
+
+    it "returns 400 when canonical_id is missing":
+        val state = _make_state()
+        val session = _make_session()
+        val (status, ctype, body) = handle_test_request("/api/test/ui/value", "GET", "", state, _noop_inject, session)
+        expect(status).to_equal(400)
+        expect(body).to_contain("missing_field")
+
+    it "returns 404 for an unknown canonical_id":
+        val state = _make_state()
+        val session = _make_session()
+        val (status, ctype, body) = handle_test_request("/api/test/ui/value?canonical_id=ghost#nope", "GET", "", state, _noop_inject, session)
+        expect(status).to_equal(404)
+        expect(body).to_contain("element_not_found")
+
+# ============================================================================
+# Group 23: GET /api/test/ui/adapter_snapshot
+# ============================================================================
+
+describe "GET /api/test/ui/adapter_snapshot":
+    """
+    ## Additive adapter envelope route
+
+    Requires a live session; resolves through the default adapter registry.
+    """
+
+    it "returns 400 when session is nil":
+        val state = _make_state()
+        val (status, ctype, body) = handle_test_request("/api/test/ui/adapter_snapshot?surface_id=main", "GET", "", state, _noop_inject, nil)
+        expect(status).to_equal(400)
+        expect(body).to_contain("missing_field")
+
+# ============================================================================
+# Group 24: GET /api/test/ui/visual_probe
+# ============================================================================
+
+describe "GET /api/test/ui/visual_probe":
+    """
+    ## Vision sidecar capture route
+
+    Requires a live session; vision capture is delegated to the
+    ui_access_resolve_visual_probe sidecar.
+    """
+
+    it "returns 400 when session is nil":
+        val state = _make_state()
+        val (status, ctype, body) = handle_test_request("/api/test/ui/visual_probe?surface_id=main", "GET", "", state, _noop_inject, nil)
+        expect(status).to_equal(400)
+        expect(body).to_contain("missing_field")
+
+    it "returns 200 with a session":
+        val state = _make_state()
+        val session = _make_session()
+        val (status, ctype, body) = handle_test_request("/api/test/ui/visual_probe?surface_id=main", "GET", "", state, _noop_inject, session)
+        expect(status).to_equal(200)
+        expect(ctype).to_equal("application/json")
