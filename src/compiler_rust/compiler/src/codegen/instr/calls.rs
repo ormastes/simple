@@ -200,6 +200,9 @@ pub fn text_arg_indices(func_name: &str) -> Option<&'static [usize]> {
         // File stat (path is text, rest are output pointers)
         "rt_file_stat" => Some(&[0]),
 
+        // Hosted compositor (Cocoa / Win32 windows take title text at index 2)
+        "rt_cocoa_window_new" | "rt_win32_window_new" => Some(&[2]),
+
         _ => None,
     }
 }

@@ -21,7 +21,6 @@
 //! that maps `i64` handles to owned Rust-side state (window handle + pixel
 //! buffer). We never hand raw NSWindow pointers back to Simple.
 
-use std::os::raw::c_char;
 use std::sync::atomic::{AtomicI64, Ordering};
 
 /// Sentinel returned by every `*_new` / `*_create` on failure (and on every
@@ -32,15 +31,33 @@ pub const COCOA_INVALID_HANDLE: i64 = -1;
 // Shared helpers (compiled on every host)
 // ---------------------------------------------------------------------------
 
-/// Safely reinterpret a Simple `text` argument as a borrowed `&str`. Returns
-/// `"untitled"` if the pointer is null or the bytes are not UTF-8.
+// Simple-runtime helpers that decode a tagged-text RuntimeValue (i64) into a
+// raw byte pointer + length. Linked dynamically against `libsimple_native_all`
+// at the final native-build step.
+extern "C" {
+    fn rt_string_data(rv: i64) -> *const u8;
+    fn rt_string_len(rv: i64) -> i64;
+}
+
+/// Decode a Simple `text` RuntimeValue into a borrowed `&str`. The Simple-side
+/// ABI passes `text` as a single tagged i64 to externs that aren't listed in
+/// `codegen::instr::calls::text_arg_indices`. We use the runtime accessors
+/// so this works whether the compiler decided to expand the arg or not.
 #[allow(dead_code)]
-unsafe fn text_to_str<'a>(ptr: *const c_char) -> &'a str {
-    if ptr.is_null() {
-        return "untitled";
+unsafe fn text_rv_to_string(rv: i64) -> String {
+    if rv == 0 {
+        return "untitled".to_string();
     }
-    let c = unsafe { std::ffi::CStr::from_ptr(ptr) };
-    c.to_str().unwrap_or("untitled")
+    let len = unsafe { rt_string_len(rv) };
+    if len <= 0 {
+        return "untitled".to_string();
+    }
+    let ptr = unsafe { rt_string_data(rv) };
+    if ptr.is_null() {
+        return "untitled".to_string();
+    }
+    let bytes = unsafe { std::slice::from_raw_parts(ptr, len as usize) };
+    std::str::from_utf8(bytes).unwrap_or("untitled").to_string()
 }
 
 /// Global counter for handles (real mode only). Starts at 1 so `0` stays
@@ -61,10 +78,9 @@ fn next_handle() -> i64 {
 #[cfg(not(all(target_os = "macos", feature = "cocoa-real")))]
 mod imp {
     use super::COCOA_INVALID_HANDLE;
-    use std::os::raw::c_char;
 
     #[inline]
-    pub fn window_new(_w: i64, _h: i64, _title: *const c_char) -> i64 {
+    pub fn window_new(_w: i64, _h: i64, _title_rv: i64) -> i64 {
         COCOA_INVALID_HANDLE
     }
     #[inline]
@@ -151,9 +167,8 @@ mod imp {
 
 #[cfg(all(target_os = "macos", feature = "cocoa-real"))]
 mod imp {
-    use super::{next_handle, text_to_str, COCOA_INVALID_HANDLE};
+    use super::{next_handle, COCOA_INVALID_HANDLE};
     use std::collections::{HashMap, VecDeque};
-    use std::os::raw::c_char;
     use std::sync::Mutex;
 
     use objc2::rc::Retained;
@@ -221,7 +236,7 @@ mod imp {
         app
     }
 
-    pub fn window_new(w: i64, h: i64, title: *const c_char) -> i64 {
+    pub fn window_new(w: i64, h: i64, title_rv: i64) -> i64 {
         if w <= 0 || h <= 0 {
             return COCOA_INVALID_HANDLE;
         }
@@ -230,7 +245,7 @@ mod imp {
         let Some(mtm) = MainThreadMarker::new() else {
             return COCOA_INVALID_HANDLE;
         };
-        let title_str = unsafe { text_to_str(title) }.to_owned();
+        let title_str = unsafe { super::text_rv_to_string(title_rv) };
         let _app = ensure_app(mtm);
 
         let frame = NSRect::new(
@@ -560,12 +575,8 @@ mod imp {
 // ---------------------------------------------------------------------------
 
 #[no_mangle]
-pub unsafe extern "C" fn rt_cocoa_window_new(
-    w: i64,
-    h: i64,
-    title: *const c_char,
-) -> i64 {
-    imp::window_new(w, h, title)
+pub unsafe extern "C" fn rt_cocoa_window_new(w: i64, h: i64, title_rv: i64) -> i64 {
+    imp::window_new(w, h, title_rv)
 }
 
 #[no_mangle]
