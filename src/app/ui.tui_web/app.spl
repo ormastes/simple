@@ -4,8 +4,36 @@
 # and starts serving TUI output over HTTP+WebSocket.
 
 use app.ui.tui_web.server.{TuiWebServer}
+use app.io.env_ops.{env_get}
+use common.window_protocol.geometry.{Size}
+use os.compositor.host_compositor_entry.{HostBackendKind, HostWmConfig, HostWmHandle, init_host_wm}
 
 extern fn rt_file_exists(path: text) -> bool
+extern fn rt_cli_get_args() -> [text]
+
+# =========================================================================
+# Shared WM helpers
+# =========================================================================
+
+fn _shared_wm_requested(args: [text]) -> bool:
+    for a in args:
+        if a == "--shared-wm":
+            return true
+    val env_val = env_get("SIMPLE_UI_TUI_WEB_SHARED_WM")
+    env_val == "1"
+
+fn run_shared_wm_tui_web(title: text) -> i64:
+    val config = HostWmConfig(
+        backend: HostBackendKind.Tui,
+        initial_size: Size.wh(80, 24),
+        title: title
+    )
+    val handle = init_host_wm(config)
+    if handle == nil:
+        print "Error: failed to initialise shared WM (Tui backend)"
+        return 1
+    handle.tick_forever()
+    return 0
 
 # =========================================================================
 # Entry Point
@@ -17,6 +45,10 @@ fn run_tui_web(file_path: text, port: i32) -> i64:
     Creates a TuiWebServer that renders the UI as a TUI-style
     terminal view and serves it over HTTP with WebSocket live updates.
     """
+    val args = rt_cli_get_args()
+    if _shared_wm_requested(args):
+        return run_shared_wm_tui_web("simple tui_web")
+
     if not rt_file_exists(file_path):
         print "Error: File not found: {file_path}"
         return 1
