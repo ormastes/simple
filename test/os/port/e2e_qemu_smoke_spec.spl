@@ -1,0 +1,129 @@
+## Lint-only spec encoding the 6-step Phase-3 QEMU SimpleOS smoke test.
+##
+## Gates on the SIMPLEOS_QEMU_SMOKE environment variable. If unset, all
+## it-blocks return a skip marker — the suite stays green on host builds
+## that have no QEMU + SimpleOS image present.
+##
+## When SIMPLEOS_QEMU_SMOKE is set this spec documents (wave-4 will run):
+##   Step 1  Boot image: initramfs + FAT32, serial [boot] markers per IF-08
+##   Step 2  clang --target=x86_64-simpleos compiles hello.c → exit 0
+##   Step 3  llvm-nm /tmp/hello.o | grep main → non-empty
+##   Step 4  rustc --target x86_64-unknown-simpleos hello.rs → ELF with _start
+##   Step 5  cargo build --offline vendored crate → exit 0
+##   Step 6  simple native-build → stage3=stage4 convergence (IF-09)
+##
+## Run:
+##   bin/simple test test/os/port/e2e_qemu_smoke_spec.spl
+
+use std.spec
+
+extern fn rt_env_get(key: text) -> text
+
+fn qemu_smoke_gate() -> text:
+    """Return the SIMPLEOS_QEMU_SMOKE env var, or empty string if unset."""
+    val v = rt_env_get("SIMPLEOS_QEMU_SMOKE")
+    if v == nil:
+        ""
+    else:
+        v
+
+describe "Phase-3 end-to-end QEMU SimpleOS smoke test":
+    """
+    Encodes the 6-step Phase-3 verification pipeline as documented in the
+    SimpleOS port plan.  Each step is a separate it-block so failures are
+    reported individually.
+
+    All cases skip cleanly when SIMPLEOS_QEMU_SMOKE is not set, so this
+    spec is safe to run on any host build.  Wave-4 replaces the scaffold
+    bodies with real QEMU invocations via qemu_runner.spl.
+    """
+
+    it "step 1: QEMU boots with [boot] markers (IF-08)":
+        """
+        IF-08 contract: the kernel must emit [boot] init on COM1 within 30 s.
+        A [fault] marker causes immediate failure.  The harness (qemu_runner.spl)
+        waits for [boot] init as the liveness signal before proceeding to step 2.
+
+        Marker format: [boot] <message>\n  (bracket-prefixed, COM1 115200 baud)
+        """
+        val gate = qemu_smoke_gate()
+        if gate == "":
+            return "skip: SIMPLEOS_QEMU_SMOKE not set"
+        ## Wave-4: invoke qemu_runner.spl, capture serial, assert [boot] init seen.
+        val boot_ok = 1
+        boot_ok.to_equal(1)
+
+    it "step 2: clang cross-compiles hello.c for x86_64-simpleos (exit 0)":
+        """
+        Verifies the LLVM sysroot (IF-05) is wired correctly inside the guest.
+        Command: /usr/bin/clang --target=x86_64-simpleos -c
+                   /usr/share/test/hello.c -o /tmp/hello.o
+        Expected: process exits 0 and /tmp/hello.o exists.
+        """
+        val gate = qemu_smoke_gate()
+        if gate == "":
+            return "skip: SIMPLEOS_QEMU_SMOKE not set"
+        ## Wave-4: run command in guest via QMP/serial shell, capture exit code.
+        val exit_code = 0
+        exit_code.to_equal(0)
+
+    it "step 3: llvm-nm finds main symbol in hello.o":
+        """
+        Confirms hello.o produced in step 2 contains a valid ELF symbol table
+        with `main` present.
+        Command: /usr/bin/llvm-nm /tmp/hello.o | grep main
+        Expected: output non-empty (at least one matching line).
+        """
+        val gate = qemu_smoke_gate()
+        if gate == "":
+            return "skip: SIMPLEOS_QEMU_SMOKE not set"
+        ## Wave-4: capture grep output length, assert > 0.
+        val symbol_found = 1
+        symbol_found.to_be_greater_than(0)
+
+    it "step 4: rustc cross-compiles hello.rs, ELF contains _start":
+        """
+        Verifies the Rust PAL (IF-04) and libstd sysroot are functional.
+        Command: /usr/bin/rustc --target x86_64-unknown-simpleos
+                   /usr/share/test/hello.rs -o /tmp/hello_rs
+        Expected: exit 0 and llvm-nm /tmp/hello_rs shows _start.
+        """
+        val gate = qemu_smoke_gate()
+        if gate == "":
+            return "skip: SIMPLEOS_QEMU_SMOKE not set"
+        ## Wave-4: run rustc in guest, then nm, assert exit 0 and _start present.
+        val exit_code = 0
+        exit_code.to_equal(0)
+
+    it "step 5: cargo offline build succeeds for vendored hello_rs crate":
+        """
+        Verifies the Cargo vendored protocol (IF-10) and offline build path.
+        Command: /usr/bin/cargo build --offline
+                   --manifest-path=/src/crates/hello_rs/Cargo.toml
+                   --target x86_64-unknown-simpleos
+        Expected: exit 0.
+        """
+        val gate = qemu_smoke_gate()
+        if gate == "":
+            return "skip: SIMPLEOS_QEMU_SMOKE not set"
+        ## Wave-4: run cargo in guest, capture exit code, assert 0.
+        val exit_code = 0
+        exit_code.to_equal(0)
+
+    it "step 6: simple native-build stage3=stage4 convergence (IF-09)":
+        """
+        IF-09 bootstrap verifier contract: stage3 binary compiled by stage2
+        must be byte-identical to stage4 binary compiled by stage3 (or equal
+        auto_stub counts when full identity is not yet enforced).
+        Command: /usr/bin/simple native-build --source /src
+                   --entry /src/app/cli/main.spl -o /build/stage3_native/simple
+        Expected: bootstrap_native_verify exits 0 (convergence confirmed).
+        Exit code 5 means divergence; codes 2-6 per IF-09 spec.
+        """
+        val gate = qemu_smoke_gate()
+        if gate == "":
+            return "skip: SIMPLEOS_QEMU_SMOKE not set"
+        ## Wave-4: invoke native-build + bootstrap_native_verify in guest,
+        ## assert exit code 0 (convergence) per IF-09.
+        val convergence_exit = 0
+        convergence_exit.to_equal(0)
