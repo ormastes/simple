@@ -1,0 +1,75 @@
+# @cover src/lib/nogc_sync_mut/test_runner/test_executor_composite.spl 80%
+# System tests for the baremetal RISC-V QEMU test runner pipeline.
+#
+# Verifies: .spl → baremetal ELF → QEMU compile-and-run flow.
+# Requires: clang, llc, ld.lld, qemu-system-riscv32
+
+use app.test_runner_new.test_executor_composite.{
+    compile_spl_to_baremetal_elf,
+    run_test_file_baremetal_compile_and_run,
+    qemu_binary_for_arch, qemu_machine_for_arch
+}
+use app.test_runner_new.test_runner_types.{TestOptions, TestFileResult, TestExecutionMode, TestLevel}
+use app.io.file_ops.{file_exists}
+
+# Helper functions to avoid tuple destructuring in it blocks
+fn _compile_baremetal(path: text, arch: text) -> [text]:
+    val (elf_path, error) = compile_spl_to_baremetal_elf(path, arch)
+    [elf_path, error]
+
+describe "baremetal test runner":
+    describe "compile_spl_to_baremetal_elf":
+        it "compiles trivial .spl to riscv32 ELF":
+            val result = _compile_baremetal(
+                "test/fixtures/baremetal/trivial_baremetal_spec.spl", "riscv32"
+            )
+            val elf_path = result[0]
+            val error = result[1]
+            expect(error).to_equal("")
+            expect(elf_path).to_end_with("kernel.elf")
+            expect(file_exists(elf_path)).to_equal(true)
+
+        it "handles compilation failure gracefully":
+            val result = _compile_baremetal(
+                "test/fixtures/baremetal/nonexistent_file.spl", "riscv32"
+            )
+            val elf_path = result[0]
+            val error = result[1]
+            expect(elf_path).to_equal("")
+            expect(error.len() > 0).to_equal(true)
+
+    describe "QEMU helpers":
+        it "returns correct binary for riscv32":
+            expect(qemu_binary_for_arch("riscv32")).to_equal("qemu-system-riscv32")
+
+        it "returns correct binary for riscv64":
+            expect(qemu_binary_for_arch("riscv64")).to_equal("qemu-system-riscv64")
+
+        it "returns correct machine for riscv32":
+            expect(qemu_machine_for_arch("riscv32")).to_equal("virt")
+
+    describe "compile-and-run":
+        it "runs compiled riscv32 ELF on QEMU and gets results":
+            val options = TestOptions(
+                path: "test/fixtures/baremetal/trivial_baremetal_spec.spl",
+                level: TestLevel.All,
+                tag: "",
+                fail_fast: false,
+                mode: TestExecutionMode.Composite(spec: "native(baremetal(riscv32))"),
+                timeout: 30,
+                list: false,
+                list_ignored: false,
+                only_slow: false,
+                only_skipped: false,
+                show_tags: false,
+                gc_log: false,
+                gc_off: false,
+                seed: 0,
+                has_seed: false
+            )
+            val result = run_test_file_baremetal_compile_and_run(
+                "test/fixtures/baremetal/trivial_baremetal_spec.spl",
+                options, "riscv32"
+            )
+            expect(result.timed_out).to_equal(false)
+            expect(result.error).to_equal("")

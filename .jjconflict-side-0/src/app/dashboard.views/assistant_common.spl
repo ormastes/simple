@@ -1,0 +1,235 @@
+#![allow(unnamed_duplicate_typed_args)]
+# Assistant Dashboard Shared Helpers
+#
+# Shared helper layer for the assistant dashboard subviews. This keeps the
+# section modules focused on presentation while preserving the existing output
+# and traversal behavior.
+
+use app.dashboard.assistant_collectors.{
+    AssistantDashboardSnapshot, AssistantSession, assistant_session_by_id
+}
+use app.ui.render.ansi.{
+    BOLD, DIM, CYAN, GREEN, YELLOW, RED, RESET, colorize
+}
+use app.ui.render.html.{html_escape}
+
+fn assistant_session_summary(session: AssistantSession) -> text:
+    var out = ""
+    out = "{out}{assistant_state_label(session.session_state)} {assistant_source_label(session.source_state)}"
+    if session.provider != "":
+        out = "{out} | {session.provider}"
+    if session.model != "":
+        out = "{out} | {assistant_short_text(session.model, 28)}"
+    if session.last_event_kind != "":
+        out = "{out} | {session.last_event_kind}"
+    if session.last_event_time != "":
+        out = "{out} | {session.last_event_time}"
+    out
+
+fn assistant_session_summary_html(session: AssistantSession) -> text:
+    var out = ""
+    out = "{out}{assistant_plain_state(session.session_state)} {assistant_plain_source(session.source_state)}"
+    if session.provider != "":
+        out = "{out} | {session.provider}"
+    if session.model != "":
+        out = "{out} | {assistant_short_text(session.model, 28)}"
+    if session.last_event_kind != "":
+        out = "{out} | {session.last_event_kind}"
+    if session.last_event_time != "":
+        out = "{out} | {session.last_event_time}"
+    out
+
+fn assistant_surface_label(surface_state: text) -> text:
+    match surface_state:
+        "live" => colorize("LIVE", GREEN)
+        "replay" => colorize("REPLAY", CYAN)
+        "degraded" => colorize("DEGRADED", RED)
+        _ => colorize(surface_state, YELLOW)
+
+fn assistant_surface_plain(surface_state: text) -> text:
+    match surface_state:
+        "live" => "LIVE"
+        "replay" => "REPLAY"
+        "degraded" => "DEGRADED"
+        _ => surface_state
+
+fn assistant_state_label(state: text) -> text:
+    match state:
+        "live" => colorize("LIVE", GREEN)
+        "active" => colorize("ACTIVE", YELLOW)
+        "completed" => colorize("DONE", GREEN)
+        "failed" => colorize("FAILED", RED)
+        "stale" => colorize("STALE", DIM)
+        "degraded" => colorize("DEGRADED", RED)
+        _ => colorize(state, CYAN)
+
+fn assistant_source_label(state: text) -> text:
+    match state:
+        "live" => colorize("LIVE", GREEN)
+        "replay" => colorize("REPLAY", CYAN)
+        "degraded" => colorize("DEGRADED", RED)
+        _ => colorize(state, YELLOW)
+
+fn assistant_session_badge(state: text) -> text:
+    assistant_html_badge(assistant_plain_state(state), assistant_state_css(state))
+
+fn assistant_source_badge(state: text) -> text:
+    assistant_html_badge(assistant_plain_source(state), assistant_source_css(state))
+
+fn assistant_state_css(state: text) -> text:
+    match state:
+        "live" => "badge-green"
+        "active" => "badge-yellow"
+        "completed" => "badge-green"
+        "failed" => "badge-red"
+        "stale" => "badge-dim"
+        "degraded" => "badge-red"
+        _ => "badge-blue"
+
+fn assistant_source_css(state: text) -> text:
+    match state:
+        "live" => "badge-green"
+        "replay" => "badge-blue"
+        "degraded" => "badge-red"
+        _ => "badge-yellow"
+
+fn assistant_plain_state(state: text) -> text:
+    match state:
+        "live" => "LIVE"
+        "active" => "ACTIVE"
+        "completed" => "DONE"
+        "failed" => "FAILED"
+        "stale" => "STALE"
+        "degraded" => "DEGRADED"
+        _ => state
+
+fn assistant_plain_source(state: text) -> text:
+    match state:
+        "live" => "LIVE"
+        "replay" => "REPLAY"
+        "degraded" => "DEGRADED"
+        _ => state
+
+fn assistant_short_id(value: text) -> text:
+    assistant_short_text(value, 12)
+
+fn assistant_short_text(value: text, max_len: i64) -> text:
+    var trimmed = value.trim()
+    trimmed = trimmed.replace("\n", " ")
+    if trimmed.len() <= max_len:
+        return trimmed
+    if max_len <= 3:
+        return trimmed.slice(0, max_len)
+    trimmed.slice(0, max_len - 3) + "..."
+
+fn assistant_html_text(value: text, max_len: i64) -> text:
+    html_escape(assistant_short_text(value, max_len))
+
+fn assistant_render_limit(config: RenderConfig, max_available: i64) -> i64:
+    val target = if config.height > 0: config.height - 10 else: 16
+    if max_available < 6:
+        return max_available
+    if target < 6:
+        return 6
+    if target > max_available:
+        return max_available
+    target
+
+fn assistant_tree_depth_limit(config: RenderConfig) -> i64:
+    if config.height > 0:
+        val limit = config.height / 4
+        if limit < 3:
+            return 3
+        if limit > 8:
+            return 8
+        return limit
+    5
+
+fn assistant_contains_text(values: [text], value: text) -> bool:
+    for item in values:
+        if item == value:
+            return true
+    false
+
+fn assistant_root_sessions(snapshot: AssistantDashboardSnapshot) -> [AssistantSession]:
+    var roots: [AssistantSession] = []
+    for session in snapshot.sessions:
+        if session.parent_session_id == "":
+            roots.push(session)
+    if roots.len() == 0 and snapshot.sessions.len() > 0:
+        roots.push(snapshot.sessions[0])
+    roots
+
+fn assistant_child_sessions(snapshot: AssistantDashboardSnapshot, session: AssistantSession) -> [AssistantSession]:
+    var children: [AssistantSession] = []
+    for child_id in session.children:
+        val child = assistant_session_by_id(snapshot.sessions, child_id)
+        if child != nil:
+            children.push(child)
+    children
+
+fn assistant_append_tree_lines(snapshot: AssistantDashboardSnapshot, session: AssistantSession, depth: i64, depth_limit: i64, lines: [text], visited: [text]):
+    if depth > depth_limit:
+        return
+    if assistant_contains_text(visited, session.session_id):
+        return
+
+    var next_visited = visited
+    next_visited.push(session.session_id)
+
+    var indent = ""
+    var i = 0
+    while i < depth:
+        indent = "{indent}  "
+        i = i + 1
+
+    val prefix = if depth == 0: ">" else: "|-"
+    var line = "{indent}{prefix} {assistant_state_label(session.session_state)} {assistant_short_text(session.title, 44)}"
+    if session.children.len() > 0:
+        line = "{line} {DIM}[{session.children.len()} children]{RESET}"
+    lines.push(line)
+
+    val children = assistant_child_sessions(snapshot, session)
+    for child in children:
+        assistant_append_tree_lines(snapshot, child, depth + 1, depth_limit, lines, next_visited)
+
+fn assistant_html_head(title: text) -> text:
+    var h = "<!DOCTYPE html>\n<html>\n<head>\n<meta charset=\"utf-8\">\n"
+    h = "{h}<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n"
+    h = "{h}<title>{title}</title>\n"
+    h = "{h}<style>\n"
+    h = "{h}body{{font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; margin:0; background: #0d1117; color:#c9d1d9;}}\n"
+    h = "{h}.container{{max-width:1200px; margin:0 auto; padding:24px;}}\n"
+    h = "{h}.card{{background:#161b22; border:1px solid #30363d; border-radius:12px; padding:16px; box-shadow:0 8px 24px rgba(1,4,9,.18);}}\n"
+    h = "{h}.card-grid{{display:grid; gap:12px; grid-template-columns:repeat(auto-fit,minmax(180px,1fr));}}\n"
+    h = "{h}.value{{font-size:28px; font-weight:700; margin-top:6px;}}\n"
+    h = "{h}.sub,.muted,.tree-meta,.subtitle{{color:#8b949e; font-size:12px; line-height:1.5;}}\n"
+    h = "{h}.section-title{{display:flex; justify-content:space-between; align-items:center; margin-bottom:10px; font-weight:700;}}\n"
+    h = "{h}.count{{color:#8b949e; font-size:12px;}}\n"
+    h = "{h}.tree-node{{padding:8px 10px; border-left:2px solid #30363d; margin-top:4px;}}\n"
+    h = "{h}.tree-line{{font-size:13px;}}\n"
+    h = "{h}.alert{{padding:10px 12px; border-radius:8px; margin-top:8px;}}\n"
+    h = "{h}.alert-warning{{background:rgba(210,153,34,.12); color:#d29922;}}\n"
+    h = "{h}.alert-critical{{background:rgba(248,81,73,.12); color:#f85149;}}\n"
+    h = "{h}.empty-state{{padding:18px; color:#8b949e; text-align:center; border:1px dashed #30363d; border-radius:8px;}}\n"
+    h = "{h}.badge{{display:inline-block; padding:2px 7px; border-radius:999px; font-size:11px; font-weight:700; text-transform:uppercase; letter-spacing:.02em;}}\n"
+    h = "{h}.badge-green{{background:rgba(63,185,80,.15); color:#3fb950;}}\n"
+    h = "{h}.badge-yellow{{background:rgba(210,153,34,.15); color:#d29922;}}\n"
+    h = "{h}.badge-red{{background:rgba(248,81,73,.15); color:#f85149;}}\n"
+    h = "{h}.badge-blue{{background:rgba(88,166,255,.15); color:#58a6ff;}}\n"
+    h = "{h}.badge-dim{{background:rgba(139,148,158,.15); color:#8b949e;}}\n"
+    h = "{h}.data-table{{width:100%; border-collapse:collapse; font-size:12px;}}\n"
+    h = "{h}.data-table th,.data-table td{{border-bottom:1px solid #30363d; padding:8px 6px; text-align:left; vertical-align:top;}}\n"
+    h = "{h}.data-table th{{color:#8b949e; font-weight:700;}}\n"
+    h = "{h}</style>\n</head>\n"
+    h
+
+fn assistant_html_badge(label: text, css_class: text) -> text:
+    "<span class=\"badge {css_class}\">{html_escape(label)}</span>"
+
+fn assistant_threshold_css_color(percent: f64) -> text:
+    if percent >= 80.0:
+        return "var(--green, #3fb950)"
+    if percent >= 60.0:
+        return "var(--yellow, #d29922)"
+    "var(--red, #f85149)"

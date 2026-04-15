@@ -1,0 +1,114 @@
+# Containing Block Resolution
+#
+# Determines the containing block for positioned elements.
+# CSS 2.1 section 10.1:
+#   - static/relative: containing block is the content edge of nearest block ancestor
+#   - absolute: containing block is the padding edge of nearest positioned ancestor
+#   - fixed: containing block is the viewport
+#
+# Maintains a stack of containing blocks during tree traversal.
+
+use examples.browser.entity.dom.box_types.{LayoutBox}
+use examples.browser.entity.dom.css_types.CSSValue
+use examples.browser.feature.layout.block.LayoutContext
+use examples.browser.shared.logging.{Logger, LogLevel}
+
+# =========================================================================
+# Containing block entry — one level of the containing block stack.
+# =========================================================================
+
+class ContainingBlockEntry:
+    node_id: i64
+    x: f64
+    y: f64
+    width: f64
+    height: f64
+    is_positioned: bool  # true if position != static
+
+    static fn from_layout(box_node: LayoutBox, positioned: bool) -> ContainingBlockEntry:
+        ContainingBlockEntry(
+            node_id: box_node.node_id,
+            x: box_node.x,
+            y: box_node.y,
+            width: box_node.width,
+            height: box_node.height,
+            is_positioned: positioned
+        )
+
+    static fn from_viewport(vw: f64, vh: f64) -> ContainingBlockEntry:
+        ContainingBlockEntry(
+            node_id: -1,
+            x: 0.0,
+            y: 0.0,
+            width: vw,
+            height: vh,
+            is_positioned: true
+        )
+
+# =========================================================================
+# ContainingBlockResolver — resolves containing blocks for positioned elements.
+# =========================================================================
+
+class ContainingBlockResolver:
+    stack: [ContainingBlockEntry]
+    viewport_width: f64
+    viewport_height: f64
+    logger: Logger
+
+    static fn new(vw: f64, vh: f64, logger: Logger) -> ContainingBlockResolver:
+        val viewport = ContainingBlockEntry.from_viewport(vw, vh)
+        ContainingBlockResolver(
+            stack: [viewport],
+            viewport_width: vw,
+            viewport_height: vh,
+            logger: logger
+        )
+
+    me push(entry: ContainingBlockEntry):
+        self.stack = self.stack + [entry]
+
+    me pop():
+        if self.stack.len() > 1:
+            self.stack = self.stack.slice(0, self.stack.len() - 1)
+
+    fn current() -> ContainingBlockEntry:
+        """Get the current containing block (top of stack)."""
+        if self.stack.len() > 0:
+            return self.stack[self.stack.len() - 1]
+        ContainingBlockEntry.from_viewport(self.viewport_width, self.viewport_height)
+
+    fn find_for_absolute() -> ContainingBlockEntry:
+        """Find the nearest positioned ancestor for absolute positioning.
+        Walks down the stack from top to find the first entry with is_positioned == true.
+        """
+        var i = self.stack.len() - 1
+        while i >= 0:
+            val entry = self.stack[i]
+            if entry.is_positioned:
+                return entry
+            i = i - 1
+        # Fallback: viewport
+        ContainingBlockEntry.from_viewport(self.viewport_width, self.viewport_height)
+
+    fn find_for_fixed() -> ContainingBlockEntry:
+        """For fixed positioning, the containing block is always the viewport."""
+        ContainingBlockEntry.from_viewport(self.viewport_width, self.viewport_height)
+
+    fn to_layout_context() -> LayoutContext:
+        """Convert the current containing block to a LayoutContext."""
+        val cb = self.current()
+        LayoutContext.from_containing(
+            cb.width, cb.height,
+            cb.x, cb.y,
+            self.viewport_width, self.viewport_height,
+            self.logger
+        )
+
+    fn to_layout_context_for(entry: ContainingBlockEntry) -> LayoutContext:
+        """Convert a specific containing block entry to a LayoutContext."""
+        LayoutContext.from_containing(
+            entry.width, entry.height,
+            entry.x, entry.y,
+            self.viewport_width, self.viewport_height,
+            self.logger
+        )

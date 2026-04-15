@@ -1,0 +1,311 @@
+# Duplicate Typed Args Lint
+#
+# Detects when a function has multiple parameters with the same type
+# and a call site passes them positionally (easy to accidentally swap).
+#
+# DTYP001: Positional arg for parameter sharing type with another parameter
+#
+# Algorithm: O(n) via type-string grouping.
+#
+# 1. Walk AST for function definitions → collect {fn_name: [{name, type}]} registry
+# 2. Walk AST for call expressions → for each call, group params by type,
+#    flag positional args matching a duplicate-typed param
+# 3. Emit warning with suggestion to use named args
+
+use compiler.core.ast_expr.{
+    EXPR_CALL, EXPR_METHOD_CALL, EXPR_IDENT, EXPR_FIELD_ACCESS,
+    EXPR_BINARY, EXPR_UNARY, EXPR_LAMBDA, EXPR_ARRAY_LIT, EXPR_INDEX,
+    expr_tag, expr_s_val, expr_left, expr_right, expr_args, expr_stmts
+}
+use compiler.core.ast_stmt.{
+    STMT_EXPR, STMT_VAL_DECL, STMT_VAR_DECL, STMT_IF, STMT_FOR,
+    STMT_WHILE, STMT_BLOCK,
+    stmt_tag, stmt_expr, stmt_body
+}
+use compiler.core.ast.{
+    DECL_FN, DECL_CLASS, DECL_STRUCT, DECL_IMPL,
+    decl_tag, decl_name, decl_body_stmts, decl_params, decl_param_types
+}
+
+# ============================================================================
+# Warning Struct
+# ============================================================================
+
+struct DuplicateTypedArgWarning:
+    code: text
+    severity: text
+    message: text
+    hint: text
+    fn_name: text
+
+    fn fmt() -> text:
+        "[{self.code}] {self.severity}: {self.message} in '{self.fn_name}' — {self.hint}"
+
+# ============================================================================
+# Function Registry
+# ============================================================================
+
+# Module-level registries populated during the collection pass
+var _fn_param_names: {text: [text]} = {}
+var _fn_param_types: {text: [text]} = {}
+
+fn collect_functions(decl_indices: [i64]):
+    """Pass 1: Collect function definitions and their parameter info."""
+    _fn_param_names = {}
+    _fn_param_types = {}
+
+    for idx in decl_indices:
+        val tag = decl_tag[idx]
+        if tag == DECL_FN:
+            val name = decl_name[idx]
+            val params = decl_params[idx]
+            val types = decl_param_types[idx]
+            _fn_param_names[name] = params
+            _fn_param_types[name] = types
+
+# ============================================================================
+# Duplicate Type Detection (O(n) via grouping)
+# ============================================================================
+
+fn find_duplicate_typed_indices(param_types: [text]) -> {i64: bool}:
+    """Find parameter indices that share a type with at least one other param.
+
+    Groups by type string, then marks all indices in groups with >1 member.
+    Returns a set (dict with true values) of duplicate indices.
+    """
+    # Group indices by type string
+    var by_type: {text: [i64]} = {}
+    var i = 0
+    for ty in param_types:
+        if ty != "" and ty != "?":
+            if by_type.contains_key(ty):
+                by_type[ty].push(i)
+            else:
+                by_type[ty] = [i]
+        i = i + 1
+
+    # Collect indices from groups with >1 member
+    var duplicates: {i64: bool} = {}
+    for ty in by_type:
+        val indices = by_type[ty]
+        if indices.len() > 1:
+            for idx in indices:
+                duplicates[idx] = true
+    duplicates
+
+# ============================================================================
+# Call Site Checking
+# ============================================================================
+
+fn check_call_site(callee_name: text, arg_count: i64, named_arg_indices: {i64: bool}) -> [DuplicateTypedArgWarning]:
+    """Check a call site for positional args to duplicate-typed params."""
+    var warnings: [DuplicateTypedArgWarning] = []
+
+    if not _fn_param_names.contains_key(callee_name):
+        return warnings
+
+    val param_names = _fn_param_names[callee_name]
+    val param_types = _fn_param_types[callee_name]
+
+    val dup_indices = find_duplicate_typed_indices(param_types)
+    if dup_indices.len() == 0:
+        return warnings
+
+    # Build peer names map: for each duplicate index, names of other params sharing type
+    var peer_map: {i64: text} = {}
+    # Group by type
+    var by_type2: {text: [i64]} = {}
+    var j = 0
+    for ty in param_types:
+        if dup_indices.contains_key(j):
+            if by_type2.contains_key(ty):
+                by_type2[ty].push(j)
+            else:
+                by_type2[ty] = [j]
+        j = j + 1
+
+    for ty in by_type2:
+        val indices = by_type2[ty]
+        for idx in indices:
+            var peers: [text] = []
+            for other_idx in indices:
+                if other_idx != idx:
+                    if other_idx < param_names.len():
+                        peers.push(param_names[other_idx])
+            peer_map[idx] = peers.join("`, `")
+
+    # Check each positional argument
+    var arg_idx = 0
+    while arg_idx < arg_count:
+        if not named_arg_indices.contains_key(arg_idx):
+            # Positional argument
+            if dup_indices.contains_key(arg_idx):
+                if arg_idx < param_names.len() and arg_idx < param_types.len():
+                    val param_name = param_names[arg_idx]
+                    val param_type = param_types[arg_idx]
+                    val peers = peer_map[arg_idx] ?? ""
+                    warnings.push(DuplicateTypedArgWarning(
+                        code: "DTYP001",
+                        severity: "WARNING",
+                        message: "positional arg for `{param_name}` shares type `{param_type}` with `{peers}`",
+                        hint: "use named argument: `{param_name}: <value>`",
+                        fn_name: callee_name
+                    ))
+        arg_idx = arg_idx + 1
+    warnings
+
+# ============================================================================
+# AST Walker
+# ============================================================================
+
+fn check_expr_calls(e: i64) -> [DuplicateTypedArgWarning]:
+    """Recursively check an expression tree for call sites."""
+    var warnings: [DuplicateTypedArgWarning] = []
+    if e < 0:
+        return warnings
+
+    val tag = expr_tag[e]
+
+    if tag == EXPR_CALL:
+        val callee = expr_left[e]
+        var callee_name = ""
+        if callee >= 0:
+            if expr_tag[callee] == EXPR_IDENT:
+                callee_name = expr_s_val[callee]
+            elif expr_tag[callee] == EXPR_FIELD_ACCESS:
+                callee_name = expr_s_val[callee]
+
+        if callee_name != "":
+            val call_args = expr_args[e]
+            # For now treat all args as positional (named arg detection
+            # would require checking EXPR_NAMED_ARG tags)
+            var named: {i64: bool} = {}
+            val ws = check_call_site(callee_name, call_args.len(), named)
+            for w in ws:
+                warnings.push(w)
+
+        # Recurse into callee and args
+        if callee >= 0:
+            val callee_ws = check_expr_calls(callee)
+            for w in callee_ws:
+                warnings.push(w)
+        val args = expr_args[e]
+        for arg in args:
+            val arg_ws = check_expr_calls(arg)
+            for w in arg_ws:
+                warnings.push(w)
+
+    elif tag == EXPR_METHOD_CALL:
+        val method_name = expr_s_val[e]
+        if method_name != "":
+            val call_args = expr_args[e]
+            var named: {i64: bool} = {}
+            val ws = check_call_site(method_name, call_args.len(), named)
+            for w in ws:
+                warnings.push(w)
+
+        # Recurse into receiver and args
+        val receiver = expr_left[e]
+        if receiver >= 0:
+            val recv_ws = check_expr_calls(receiver)
+            for w in recv_ws:
+                warnings.push(w)
+        val args = expr_args[e]
+        for arg in args:
+            val arg_ws = check_expr_calls(arg)
+            for w in arg_ws:
+                warnings.push(w)
+
+    elif tag == EXPR_BINARY:
+        val left_ws = check_expr_calls(expr_left[e])
+        for w in left_ws:
+            warnings.push(w)
+        val right_ws = check_expr_calls(expr_right[e])
+        for w in right_ws:
+            warnings.push(w)
+
+    elif tag == EXPR_UNARY:
+        val operand_ws = check_expr_calls(expr_right[e])
+        for w in operand_ws:
+            warnings.push(w)
+
+    elif tag == EXPR_LAMBDA:
+        val body_stmts = expr_stmts[e]
+        val stmts_ws = check_stmts_calls(body_stmts)
+        for w in stmts_ws:
+            warnings.push(w)
+
+    elif tag == EXPR_ARRAY_LIT:
+        val elems = expr_args[e]
+        for elem in elems:
+            val elem_ws = check_expr_calls(elem)
+            for w in elem_ws:
+                warnings.push(w)
+
+    elif tag == EXPR_INDEX:
+        val recv_ws = check_expr_calls(expr_left[e])
+        for w in recv_ws:
+            warnings.push(w)
+        val idx_ws = check_expr_calls(expr_right[e])
+        for w in idx_ws:
+            warnings.push(w)
+
+    warnings
+
+fn check_stmts_calls(stmts: [i64]) -> [DuplicateTypedArgWarning]:
+    """Check a list of statements for call sites."""
+    var warnings: [DuplicateTypedArgWarning] = []
+    for s in stmts:
+        if s < 0:
+            continue
+        val tag = stmt_tag[s]
+
+        if tag == STMT_EXPR:
+            val e = stmt_expr[s]
+            if e >= 0:
+                val ws = check_expr_calls(e)
+                for w in ws:
+                    warnings.push(w)
+
+        elif tag == STMT_VAL_DECL or tag == STMT_VAR_DECL:
+            val e = stmt_expr[s]
+            if e >= 0:
+                val ws = check_expr_calls(e)
+                for w in ws:
+                    warnings.push(w)
+
+        # Recurse into blocks
+        if tag == STMT_IF or tag == STMT_BLOCK or tag == STMT_FOR or tag == STMT_WHILE:
+            val nested = check_stmts_calls(stmt_body[s])
+            for w in nested:
+                warnings.push(w)
+    warnings
+
+# ============================================================================
+# Main Entry Point
+# ============================================================================
+
+fn check_duplicate_typed_args(decl_indices: [i64]) -> [DuplicateTypedArgWarning]:
+    """Run duplicate-typed-args lint on module declarations.
+
+    Two-pass algorithm:
+    1. Collect function definitions → param registry
+    2. Walk call sites → check for positional args to duplicate-typed params
+    """
+    # Pass 1: collect functions
+    collect_functions(decl_indices)
+
+    # Pass 2: walk call sites
+    var warnings: [DuplicateTypedArgWarning] = []
+    for idx in decl_indices:
+        if decl_tag[idx] == DECL_FN:
+            val body = decl_body_stmts[idx]
+            val ws = check_stmts_calls(body)
+            for w in ws:
+                warnings.push(w)
+    warnings
+
+# ============================================================================
+# Exports
+# ============================================================================
+

@@ -1,0 +1,104 @@
+"""
+# TRACE32 STM32WB Remote JIT End-to-End
+
+**Category:** Integration
+**Difficulty:** 4/5
+**Status:** Implemented
+
+## Overview
+
+Runs the real composite JIT lane for STM32WB through the TRACE32 adapter path:
+
+- `run_test_file_composite`
+- `Trace32Adapter`
+- `T32GdbBridgeClient`
+- `RemoteExecutionManager`
+
+Requires a live TRACE32 PowerView session with the repo GDB bridge on `2331`.
+"""
+
+use app.io.{shell, file_exists}
+use app.test_runner_new.test_executor_composite.{run_test_file_composite}
+use app.test_runner_new.test_runner_args.parse_test_args
+
+val TRACE32_STM32WB_SPEC = "jit(remote(baremetal(trace32(stm32wb))))"
+val TRACE32_GDB_PORT = 2331
+val RETURN_ZERO_FIXTURE = "test/fixtures/remote_jit/stm32h7_return_zero.spl"
+
+fn find_t32rem() -> text:
+    val repo_wrapper = "scripts/t32_remote_cmd.shs"
+    val wrapper_check = shell("test -x '{repo_wrapper}'")
+    if wrapper_check.exit_code == 0:
+        return repo_wrapper
+    val from_env = shell("test -n \"$T32_PATH\" && echo \"$T32_PATH/bin/pc_linux64/t32rem\"")
+    if from_env.exit_code == 0 and from_env.stdout.trim() != "":
+        val check = shell("test -x '{from_env.stdout.trim()}'")
+        if check.exit_code == 0:
+            return from_env.stdout.trim()
+    val from_path = shell("which t32rem 2>/dev/null")
+    if from_path.exit_code == 0 and from_path.stdout.trim() != "":
+        return from_path.stdout.trim()
+    val bundled = "/opt/t32/bin/pc_linux64/t32rem"
+    val bundled_check = shell("test -x '{bundled}'")
+    if bundled_check.exit_code == 0:
+        return bundled
+    ""
+
+fn t32_reachable() -> bool:
+    val t32rem = find_t32rem()
+    if t32rem == "":
+        return false
+    val result = shell("timeout 5 '{t32rem}' localhost port=20000 'PRINT VERSION.BUILD()' >/dev/null 2>&1")
+    result.exit_code == 0
+
+fn t32_gdb_bridge_ready() -> bool:
+    val nc = shell("command -v nc >/dev/null 2>&1")
+    if nc.exit_code == 0:
+        val result = shell("nc -z -w 2 localhost {TRACE32_GDB_PORT} >/dev/null 2>&1")
+        return result.exit_code == 0
+    val fallback = shell("bash -lc 'echo >/dev/tcp/localhost/{TRACE32_GDB_PORT}' >/dev/null 2>&1")
+    fallback.exit_code == 0
+
+fn toolchain_available() -> bool:
+    val clang = shell("command -v clang >/dev/null 2>&1")
+    val lld = shell("command -v ld.lld >/dev/null 2>&1")
+    val objcopy = shell("command -v llvm-objcopy >/dev/null 2>&1")
+    clang.exit_code == 0 and lld.exit_code == 0 and objcopy.exit_code == 0
+
+fn trace32_wb_options(path: text):
+    parse_test_args([path, "--quick", "--timeout", "20"])
+
+fn live_trace32_ready() -> bool:
+    file_exists(RETURN_ZERO_FIXTURE) and t32_reachable() and t32_gdb_bridge_ready() and toolchain_available()
+
+describe "TRACE32 STM32WB JIT E2E":
+    slow_it "discovers the repo return-zero fixture":
+        expect(file_exists(RETURN_ZERO_FIXTURE)).to_equal(true)
+
+    slow_it "checks for a live TRACE32 Remote API session":
+        if not t32_reachable():
+            print "[skip] TRACE32 PowerView not reachable on port 20000"
+            return
+        expect(t32_reachable()).to_equal(true)
+        print "[ok] TRACE32 PowerView responds to PING"
+
+    slow_it "checks for a live TRACE32 GDB bridge on the repo default port":
+        if not t32_reachable():
+            print "[skip] TRACE32 PowerView not reachable on port 20000"
+            return
+        if not t32_gdb_bridge_ready():
+            print "[skip] TRACE32 GDB bridge not reachable on port 2331"
+            return
+        expect(t32_gdb_bridge_ready()).to_equal(true)
+        print "[ok] TRACE32 GDB bridge responds on port 2331"
+
+    slow_it "runs the real composite TRACE32 STM32WB JIT lane":
+        if not live_trace32_ready():
+            print "[skip] TRACE32 session, GDB bridge, toolchain, or fixture not available"
+            return
+        val options = trace32_wb_options(RETURN_ZERO_FIXTURE)
+        val result = run_test_file_composite(RETURN_ZERO_FIXTURE, options, TRACE32_STM32WB_SPEC)
+        expect(result.failed).to_equal(0)
+        expect(result.error).to_equal("")
+        expect(result.passed).to_equal(1)
+        print "[ok] TRACE32 STM32WB composite JIT returned 0"

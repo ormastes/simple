@@ -1,0 +1,198 @@
+# Bookmark management with folders for the Simple Browser Platform.
+# Supports nested folders, search, import/export stubs.
+
+use sbp.shared.logging.{Logger, LogLevel}
+
+class Bookmark:
+    id: i64
+    url: text
+    title: text
+    folder_id: i64
+    created_at: i64
+    favicon_url: text
+
+    static fn create(id: i64, url: text, title: text, folder_id: i64, created_at: i64) -> Bookmark:
+        Bookmark(
+            id: id, url: url, title: title,
+            folder_id: folder_id, created_at: created_at,
+            favicon_url: ""
+        )
+
+class BookmarkFolder:
+    id: i64
+    name: text
+    parent_id: i64
+    children: [i64]
+
+    static fn create(id: i64, name: text, parent_id: i64) -> BookmarkFolder:
+        BookmarkFolder(id: id, name: name, parent_id: parent_id, children: [i64]())
+
+class BookmarkManager:
+    bookmarks: [Bookmark]
+    folders: [BookmarkFolder]
+    next_id: i64
+    root_folder_id: i64
+    logger: Logger
+
+    static fn new(logger: Logger) -> BookmarkManager:
+        val root = BookmarkFolder.create(id: 1, name: "Bookmarks", parent_id: 0)
+        var folders = [BookmarkFolder]()
+        folders.push(root)
+        BookmarkManager(
+            bookmarks: [Bookmark](),
+            folders: folders,
+            next_id: 2,
+            root_folder_id: 1,
+            logger: logger
+        )
+
+    me allocate_id() -> i64:
+        val id = self.next_id
+        self.next_id = self.next_id + 1
+        id
+
+    me add_bookmark(url: text, title: text, folder_id: i64) -> i64:
+        val id = self.allocate_id()
+        val bm = Bookmark.create(id: id, url: url, title: title, folder_id: folder_id, created_at: 0)
+        self.bookmarks.push(bm)
+        # Add to parent folder children list
+        for i in 0..self.folders.len():
+            if self.folders[i].id == folder_id:
+                self.folders[i].children.push(id)
+        self.logger.info("Bookmark added id={id}: {title} ({url})")
+        id
+
+    me remove_bookmark(id: i64):
+        var idx = -1
+        var fid = 0
+        for i in 0..self.bookmarks.len():
+            if self.bookmarks[i].id == id:
+                idx = i
+                fid = self.bookmarks[i].folder_id
+        if idx >= 0:
+            self.bookmarks.remove(idx)
+            # Remove from parent folder children
+            for i in 0..self.folders.len():
+                if self.folders[i].id == fid:
+                    var cidx = -1
+                    for j in 0..self.folders[i].children.len():
+                        if self.folders[i].children[j] == id:
+                            cidx = j
+                    if cidx >= 0:
+                        self.folders[i].children.remove(cidx)
+            self.logger.info("Bookmark removed id={id}")
+
+    me move_bookmark(id: i64, folder_id: i64):
+        for i in 0..self.bookmarks.len():
+            if self.bookmarks[i].id == id:
+                val old_folder = self.bookmarks[i].folder_id
+                self.bookmarks[i].folder_id = folder_id
+                # Remove from old folder
+                for f in 0..self.folders.len():
+                    if self.folders[f].id == old_folder:
+                        var cidx = -1
+                        for j in 0..self.folders[f].children.len():
+                            if self.folders[f].children[j] == id:
+                                cidx = j
+                        if cidx >= 0:
+                            self.folders[f].children.remove(cidx)
+                # Add to new folder
+                for f in 0..self.folders.len():
+                    if self.folders[f].id == folder_id:
+                        self.folders[f].children.push(id)
+                self.logger.debug("Bookmark id={id} moved to folder id={folder_id}")
+                return
+
+    me create_folder(name: text, parent_id: i64) -> i64:
+        val id = self.allocate_id()
+        val folder = BookmarkFolder.create(id: id, name: name, parent_id: parent_id)
+        self.folders.push(folder)
+        # Add folder id to parent's children
+        for i in 0..self.folders.len():
+            if self.folders[i].id == parent_id:
+                self.folders[i].children.push(id)
+        self.logger.info("Folder created id={id}: {name}")
+        id
+
+    me remove_folder(id: i64):
+        if id == self.root_folder_id:
+            self.logger.warn("Cannot remove root bookmark folder")
+            return
+        # Move all bookmarks in this folder to root
+        for i in 0..self.bookmarks.len():
+            if self.bookmarks[i].folder_id == id:
+                self.bookmarks[i].folder_id = self.root_folder_id
+        # Remove folder
+        var idx = -1
+        for i in 0..self.folders.len():
+            if self.folders[i].id == id:
+                idx = i
+        if idx >= 0:
+            self.folders.remove(idx)
+            self.logger.info("Folder removed id={id}")
+
+    fn search(query: text) -> [Bookmark]:
+        var results = [Bookmark]()
+        val q = query.to_lower()
+        for bm in self.bookmarks:
+            if bm.title.to_lower().contains(q) or bm.url.to_lower().contains(q):
+                results.push(bm)
+        results
+
+    fn is_bookmarked(url: text) -> bool:
+        for bm in self.bookmarks:
+            if bm.url == url:
+                return true
+        false
+
+    fn get_folder_contents(folder_id: i64) -> [Bookmark]:
+        var results = [Bookmark]()
+        for bm in self.bookmarks:
+            if bm.folder_id == folder_id:
+                results.push(bm)
+        results
+
+    fn get_bookmark(id: i64) -> Bookmark?:
+        for bm in self.bookmarks:
+            if bm.id == id:
+                return Some(bm)
+        nil
+
+    fn get_folder(id: i64) -> BookmarkFolder?:
+        for f in self.folders:
+            if f.id == id:
+                return Some(f)
+        nil
+
+    me import_bookmarks(data: text):
+        # Simple line-based import format: each line is "url|title|folder_id"
+        # Lines starting with '#' are comments, blank lines are skipped.
+        val lines = data.split("\n")
+        var count = 0
+        for line in lines:
+            val trimmed = line.trim()
+            if trimmed.len() == 0:
+                pass_dn
+            else if trimmed.starts_with("#"):
+                pass_dn
+            else:
+                val parts = trimmed.split("|")
+                if parts.len() >= 2:
+                    val url = parts[0].trim()
+                    val title = parts[1].trim()
+                    var folder_id = self.root_folder_id
+                    if parts.len() >= 3:
+                        val fid_str = parts[2].trim()
+                        # Try to parse folder id; fall back to root
+                        if fid_str.len() > 0:
+                            folder_id = fid_str.to_i64() ?? self.root_folder_id
+                    self.add_bookmark(url: url, title: title, folder_id: folder_id)
+                    count = count + 1
+        self.logger.info("Imported {count} bookmarks")
+
+    fn export_bookmarks() -> text:
+        # Export all bookmarks in the same line-based format: "url|title|folder_id"
+        var output = "# Simple Browser Bookmarks Export\n"
+        for bm in self.bookmarks:
+            output = output + "{bm.url}|{bm.title}|{bm.folder_id}\n"
+        output

@@ -1,0 +1,345 @@
+# Actor Scheduler - Round-Robin Message Dispatch
+#
+# @tag:api
+# @tag:stdlib
+#
+# Single-threaded round-robin scheduler that processes actor mailboxes.
+# The scheduler maintains a registry of actors and processes them
+# one message at a time in round-robin order.
+#
+# Design:
+#   - Single-threaded (no thread pool) -- safe, deterministic
+#   - Round-robin across all actors with pending messages
+#   - Reply store for ask-style request/response patterns
+#   - Actors can be dynamically added and removed
+#
+# Usage:
+#   use std.actor.scheduler.{ActorScheduler}
+#   use std.actor.actor.{Actor, HandlerTable}
+#   use std.actor.spawn.{ActorRef}
+#
+#   var sched = ActorScheduler.new()
+#   var h = HandlerTable.new()
+#   h.register("ping", \\args: "pong")
+#   val ref = sched.register_actor(Actor.new(h))
+#   ref.send("ping", [])
+#   sched.run_until_idle()
+
+use std.actor.actor.{Actor, HandlerTable, ActorState}
+use std.actor.mailbox.{ActorMailbox, ActorMessage}
+
+# ================================================================
+# Reply Store
+# ================================================================
+
+struct ReplyEntry:
+    """Stores a reply value keyed by reply ID."""
+    reply_id: i64
+    value: text
+
+struct ReplyStore:
+    """Collects results from ask-style messages."""
+    entries: [ReplyEntry]
+    next_reply_id: i64
+
+impl ReplyStore:
+    static fn new() -> ReplyStore:
+        ReplyStore(entries: [], next_reply_id: 1)
+
+    me allocate_id() -> i64:
+        """Allocate a unique reply ID."""
+        val id = self.next_reply_id
+        self.next_reply_id = self.next_reply_id + 1
+        id
+
+    me put(reply_id: i64, value: text):
+        """Store a reply value."""
+        self.entries.push(ReplyEntry(reply_id: reply_id, value: value))
+
+    fn get(reply_id: i64) -> text?:
+        """Retrieve a reply value, or nil if not yet available."""
+        for entry in self.entries:
+            if entry.reply_id == reply_id:
+                return Some(entry.value)
+        nil
+
+    fn has(reply_id: i64) -> bool:
+        """Check if a reply is available."""
+        for entry in self.entries:
+            if entry.reply_id == reply_id:
+                return true
+        false
+
+    me remove(reply_id: i64):
+        """Remove a reply entry after it has been consumed."""
+        var new_entries: [ReplyEntry] = []
+        for entry in self.entries:
+            if entry.reply_id != reply_id:
+                new_entries.push(entry)
+        self.entries = new_entries
+
+# ================================================================
+# Actor Scheduler
+# ================================================================
+
+struct ActorScheduler:
+    """Single-threaded round-robin scheduler for actors.
+
+    Manages a set of actors, processing one message from each actor
+    in round-robin order. Supports fire-and-forget (send) and
+    request-reply (ask) messaging patterns.
+
+    Fields:
+        actors: Registry of all managed actors
+        ready_queue: IDs of actors with pending messages
+        replies: Reply store for ask-style messages
+        total_dispatched: Total messages dispatched
+        total_errors: Total dispatch errors
+    """
+    actors: [Actor]
+    ready_queue: [i64]
+    replies: ReplyStore
+    total_dispatched: i64
+    total_errors: i64
+
+impl ActorScheduler:
+    static fn new() -> ActorScheduler:
+        """Create a new empty scheduler."""
+        ActorScheduler(
+            actors: [],
+            ready_queue: [],
+            replies: ReplyStore.new(),
+            total_dispatched: 0,
+            total_errors: 0
+        )
+
+    me register_actor(act: Actor) -> i64:
+        """Register an actor with the scheduler.
+
+        The actor is started and added to the ready queue.
+        Returns the actor's ID for later reference.
+
+        Args:
+            act: Actor instance (will be started)
+
+        Returns:
+            Actor ID
+        """
+        act.start()
+        val aid = act.id
+        self.actors.push(act)
+        if act.has_messages():
+            self._enqueue_ready(aid)
+        aid
+
+    me unregister_actor(actor_id: i64):
+        """Remove an actor from the scheduler.
+
+        Stops the actor and removes it from all internal structures.
+        """
+        var new_actors: [Actor] = []
+        for act in self.actors:
+            if act.id == actor_id:
+                act.stop()
+            else:
+                new_actors.push(act)
+        self.actors = new_actors
+        self._remove_ready(actor_id)
+
+    fn get_actor(actor_id: i64) -> Actor?:
+        """Look up an actor by ID."""
+        for act in self.actors:
+            if act.id == actor_id:
+                return Some(act)
+        nil
+
+    me send_message(actor_id: i64, method: text, args: [text]) -> bool:
+        """Send a fire-and-forget message to an actor.
+
+        Returns true if the message was enqueued successfully.
+        """
+        for act in self.actors:
+            if act.id == actor_id:
+                val msg = ActorMessage.fire_and_forget(method, args)
+                val ok = act.mailbox.enqueue(msg)
+                if ok:
+                    self._enqueue_ready(actor_id)
+                return ok
+        false
+
+    me ask_message(actor_id: i64, method: text, args: [text]) -> i64:
+        """Send a message and allocate a reply ID.
+
+        The caller can later retrieve the reply via get_reply(reply_id).
+        Returns the reply ID, or -1 if the actor was not found.
+        """
+        val reply_id = self.replies.allocate_id()
+        for act in self.actors:
+            if act.id == actor_id:
+                val msg = ActorMessage.with_reply(method, args, reply_id)
+                val ok = act.mailbox.enqueue(msg)
+                if ok:
+                    self._enqueue_ready(actor_id)
+                    return reply_id
+                return -1
+        -1
+
+    fn get_reply(reply_id: i64) -> text?:
+        """Check for a reply to an ask-style message.
+
+        Returns Some(value) if the reply has arrived, nil otherwise.
+        """
+        self.replies.get(reply_id)
+
+    me consume_reply(reply_id: i64) -> text?:
+        """Get and remove a reply. Returns nil if not yet available."""
+        val result = self.replies.get(reply_id)
+        if result.?:
+            self.replies.remove(reply_id)
+        result
+
+    # ================================================================
+    # Scheduling Loop
+    # ================================================================
+
+    me run_once() -> bool:
+        """Process one message from the next ready actor.
+
+        Returns true if there are more messages to process.
+        """
+        if self.ready_queue.is_empty():
+            self._refresh_ready_queue()
+            if self.ready_queue.is_empty():
+                return false
+
+        val actor_id = self.ready_queue.pop_front()
+
+        for act in self.actors:
+            if act.id == actor_id:
+                # Peek at the message to get reply_id before processing
+                val msg_peek = act.mailbox.dequeue()
+                if not msg_peek.?:
+                    return not self.ready_queue.is_empty()
+
+                val the_msg = msg_peek.unwrap()
+                val result = act.handlers.dispatch(the_msg.method, the_msg.args)
+
+                if result.is_ok():
+                    act.processed_count = act.processed_count + 1
+                    self.total_dispatched = self.total_dispatched + 1
+
+                    # Store reply if requested
+                    if the_msg.reply_id.?:
+                        val rid = the_msg.reply_id.unwrap()
+                        self.replies.put(rid, result.value)
+                else:
+                    act.error_count = act.error_count + 1
+                    act.last_error = result.error_msg
+                    self.total_errors = self.total_errors + 1
+
+                # Re-enqueue if more messages remain
+                if act.has_messages():
+                    self._enqueue_ready(actor_id)
+
+                return not self.ready_queue.is_empty() or self._has_any_messages()
+
+        not self.ready_queue.is_empty()
+
+    me run_until_idle():
+        """Process all pending messages across all actors.
+
+        Runs the round-robin loop until no actor has any pending messages.
+        """
+        var has_work = true
+        while has_work:
+            has_work = self.run_once()
+
+    me run():
+        """Alias for run_until_idle(). Processes all pending messages."""
+        self.run_until_idle()
+
+    me run_n(n: i64):
+        """Process at most N messages, then return.
+
+        Useful for cooperative scheduling or testing.
+
+        Args:
+            n: Maximum number of messages to process
+        """
+        var count = 0
+        while count < n:
+            val more = self.run_once()
+            count = count + 1
+            if not more:
+                return
+
+    # ================================================================
+    # Internal Helpers
+    # ================================================================
+
+    me _enqueue_ready(actor_id: i64):
+        """Add actor to ready queue if not already present."""
+        for id in self.ready_queue:
+            if id == actor_id:
+                return
+        self.ready_queue.push(actor_id)
+
+    me _remove_ready(actor_id: i64):
+        """Remove actor from ready queue."""
+        var new_queue: [i64] = []
+        for id in self.ready_queue:
+            if id != actor_id:
+                new_queue.push(id)
+        self.ready_queue = new_queue
+
+    me _refresh_ready_queue():
+        """Scan all actors and add those with pending messages."""
+        for act in self.actors:
+            if act.is_alive() and act.has_messages():
+                self._enqueue_ready(act.id)
+
+    fn _has_any_messages() -> bool:
+        """Check if any actor has pending messages."""
+        for act in self.actors:
+            if act.is_alive() and act.has_messages():
+                return true
+        false
+
+    # ================================================================
+    # Queries
+    # ================================================================
+
+    fn actor_count() -> i64:
+        """Return the number of registered actors."""
+        self.actors.len()
+
+    fn pending_message_count() -> i64:
+        """Return total pending messages across all actors."""
+        var total = 0
+        for act in self.actors:
+            total = total + act.mailbox.len()
+        total
+
+    fn stats_string() -> text:
+        """Return scheduler statistics."""
+        "Scheduler(actors={self.actors.len()}, dispatched={self.total_dispatched}, errors={self.total_errors}, pending={self.pending_message_count()})"
+
+# ================================================================
+# Global Scheduler
+# ================================================================
+
+var _global_scheduler: ActorScheduler? = nil
+
+fn get_scheduler() -> ActorScheduler:
+    """Get or create the global actor scheduler.
+
+    The global scheduler is a convenience for simple programs.
+    For more control, create and manage your own ActorScheduler.
+    """
+    if not _global_scheduler.?:
+        _global_scheduler = Some(ActorScheduler.new())
+    _global_scheduler.unwrap()
+
+fn run_all():
+    """Run the global scheduler until all mailboxes are empty."""
+    get_scheduler().run_until_idle()

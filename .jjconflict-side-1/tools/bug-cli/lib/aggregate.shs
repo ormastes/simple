@@ -1,0 +1,86 @@
+#!/bin/bash
+# bug-cli aggregation layer — merges bugs from GitHub + Jira
+# Depends on: config.shs, github.shs, jira.shs (sourced by main entry point)
+
+bug_aggregate_list() {
+  local gh_bugs="[]" jira_bugs="[]"
+  local github_enabled jira_enabled
+
+  github_enabled=$(bug_config_get "github_enabled")
+  jira_enabled=$(bug_config_get "jira_enabled")
+
+  # Collect from enabled sources
+  if [ "$github_enabled" = "true" ] && bug_github_available; then
+    gh_bugs=$(bug_github_list "$@" 2>/dev/null) || gh_bugs="[]"
+  fi
+
+  if [ "$jira_enabled" = "true" ] && bug_jira_available; then
+    jira_bugs=$(bug_jira_list "$@" 2>/dev/null) || jira_bugs="[]"
+  fi
+
+  # Merge and sort by created date (newest first)
+  printf '%s\n%s' "$gh_bugs" "$jira_bugs" | jq -s 'flatten | sort_by(.created) | reverse'
+}
+
+bug_aggregate_view() {
+  local id="$1"
+
+  case "$id" in
+    gh#*)
+      if bug_github_available; then
+        bug_github_view "$id"
+      else
+        echo "error: GitHub not available" >&2; return 1
+      fi
+      ;;
+    jira:*)
+      if bug_jira_available; then
+        bug_jira_view "$id"
+      else
+        echo "error: Jira not available" >&2; return 1
+      fi
+      ;;
+    *)
+      # Try to detect: if numeric, assume GitHub; if has dash, assume Jira
+      case "$id" in
+        [0-9]*)
+          if bug_github_available; then
+            bug_github_view "gh#${id}"
+          else
+            echo "error: cannot determine source for '${id}'" >&2; return 1
+          fi
+          ;;
+        *-*)
+          if bug_jira_available; then
+            bug_jira_view "jira:${id}"
+          else
+            echo "error: cannot determine source for '${id}'" >&2; return 1
+          fi
+          ;;
+        *)
+          echo "error: cannot determine source for '${id}'. Use gh#N or jira:KEY format." >&2
+          return 1
+          ;;
+      esac
+      ;;
+  esac
+}
+
+bug_aggregate_search() {
+  local query="$1"
+  local gh_results="[]" jira_results="[]"
+  local github_enabled jira_enabled
+
+  github_enabled=$(bug_config_get "github_enabled")
+  jira_enabled=$(bug_config_get "jira_enabled")
+
+  if [ "$github_enabled" = "true" ] && bug_github_available; then
+    gh_results=$(bug_github_search "$query" 2>/dev/null) || gh_results="[]"
+  fi
+
+  if [ "$jira_enabled" = "true" ] && bug_jira_available; then
+    jira_results=$(bug_jira_search "$query" 2>/dev/null) || jira_results="[]"
+  fi
+
+  printf '%s\n%s' "$gh_results" "$jira_results" | jq -s 'flatten | sort_by(.created) | reverse'
+}

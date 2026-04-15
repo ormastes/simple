@@ -1,0 +1,197 @@
+@allow(unnamed_duplicate_typed_args)
+@allow(primitive_api)
+# Intel oneAPI SFFI Bindings
+#
+# SFFI pattern for Intel GPU compute via SYCL / Level Zero.
+# Note: These require oneAPI toolkit to be installed.
+
+# ============================================================================
+# Tier 1: Extern Declarations (Raw FFI)
+# ============================================================================
+
+extern fn rt_oneapi_init() -> bool
+extern fn rt_oneapi_is_available() -> bool
+extern fn rt_oneapi_device_count() -> i64
+extern fn rt_oneapi_device_name(device: i64) -> text
+extern fn rt_oneapi_device_type(device: i64) -> text
+extern fn rt_oneapi_device_memory(device: i64) -> i64
+extern fn rt_oneapi_set_device(device: i64) -> bool
+extern fn rt_oneapi_get_device() -> i64
+extern fn rt_oneapi_malloc_device(size: i64) -> i64
+extern fn rt_oneapi_malloc_shared(size: i64) -> i64
+extern fn rt_oneapi_free(ptr: i64) -> bool
+extern fn rt_oneapi_memcpy(dst: i64, src: i64, size: i64) -> bool
+extern fn rt_oneapi_memcpy_h2d(dst: i64, src_data: [u8], size: i64) -> bool
+extern fn rt_oneapi_memcpy_d2h(dst_data: [u8], src: i64, size: i64) -> bool
+extern fn rt_oneapi_memset(ptr: i64, value: i64, size: i64) -> bool
+extern fn rt_oneapi_compile_spirv(spirv_bytes: [u8], size: i64) -> i64
+extern fn rt_oneapi_compile_opencl(source: text) -> i64
+extern fn rt_oneapi_get_function(module: i64, name: text) -> i64
+extern fn rt_oneapi_submit_kernel(queue: i64, kernel: i64, global_range: i64, local_range: i64) -> bool
+extern fn rt_oneapi_unload_module(module: i64) -> bool
+extern fn rt_oneapi_create_queue() -> i64
+extern fn rt_oneapi_destroy_queue(queue: i64) -> bool
+extern fn rt_oneapi_queue_wait(queue: i64) -> bool
+extern fn rt_oneapi_synchronize() -> bool
+extern fn rt_oneapi_get_last_error() -> text
+
+# ============================================================================
+# Tier 2: Simple-Friendly Wrapper Functions
+# ============================================================================
+
+fn oneapi_available() -> bool:
+    rt_oneapi_is_available()
+
+fn oneapi_init() -> bool:
+    rt_oneapi_init()
+
+fn oneapi_device_count() -> i64:
+    rt_oneapi_device_count()
+
+fn oneapi_set_device(id: i64) -> bool:
+    rt_oneapi_set_device(id)
+
+fn oneapi_get_device() -> i64:
+    rt_oneapi_get_device()
+
+enum OneApiDeviceType:
+    Gpu
+    Cpu
+    Accelerator
+    Unknown
+
+fn parse_oneapi_device_type(type_str: text) -> OneApiDeviceType:
+    if type_str == "gpu":
+        OneApiDeviceType.Gpu
+    elif type_str == "cpu":
+        OneApiDeviceType.Cpu
+    elif type_str == "accelerator":
+        OneApiDeviceType.Accelerator
+    else:
+        OneApiDeviceType.Unknown
+
+struct OneApiDeviceInfo:
+    id: i64
+    name: text
+    device_type: OneApiDeviceType
+    total_memory: i64
+
+fn oneapi_device_info(id: i64) -> OneApiDeviceInfo:
+    OneApiDeviceInfo(id: id, name: rt_oneapi_device_name(id), device_type: parse_oneapi_device_type(rt_oneapi_device_type(id)), total_memory: rt_oneapi_device_memory(id))
+
+struct OneApiPtr:
+    ptr: i64
+    size: i64
+    is_shared: bool
+    is_valid: bool
+
+fn oneapi_alloc_device(size: i64) -> OneApiPtr:
+    val ptr = rt_oneapi_malloc_device(size)
+    OneApiPtr(ptr: ptr, size: size, is_shared: false, is_valid: ptr != 0)
+
+fn oneapi_alloc_shared(size: i64) -> OneApiPtr:
+    val ptr = rt_oneapi_malloc_shared(size)
+    OneApiPtr(ptr: ptr, size: size, is_shared: true, is_valid: ptr != 0)
+
+fn oneapi_free(mem: OneApiPtr) -> bool:
+    if mem.is_valid:
+        rt_oneapi_free(mem.ptr)
+    else:
+        true
+
+fn oneapi_copy_to_device(dst: OneApiPtr, src: [u8]) -> bool:
+    if not dst.is_valid:
+        false
+    else:
+        rt_oneapi_memcpy_h2d(dst.ptr, src, src.len())
+
+fn oneapi_copy_from_device(dst: [u8], src: OneApiPtr) -> bool:
+    if not src.is_valid:
+        false
+    else:
+        rt_oneapi_memcpy_d2h(dst, src.ptr, dst.len())
+
+fn oneapi_memset(mem: OneApiPtr, value: i64) -> bool:
+    if not mem.is_valid:
+        false
+    else:
+        rt_oneapi_memset(mem.ptr, value, mem.size)
+
+struct OneApiModule:
+    handle: i64
+    is_valid: bool
+
+fn oneapi_compile_spirv(spirv_bytes: [u8]) -> OneApiModule:
+    val handle = rt_oneapi_compile_spirv(spirv_bytes, spirv_bytes.len())
+    OneApiModule(handle: handle, is_valid: handle != 0)
+
+fn oneapi_compile_opencl(source: text) -> OneApiModule:
+    """Compile OpenCL-C source code into a oneAPI module at runtime.
+
+    This uses the runtime OpenCL-C compiler available in oneAPI/Level Zero
+    to compile kernel source directly, avoiding the need for offline
+    SPIR-V compilation.
+    """
+    val handle = rt_oneapi_compile_opencl(source)
+    OneApiModule(handle: handle, is_valid: handle != 0)
+
+fn oneapi_unload(module: OneApiModule) -> bool:
+    if module.is_valid:
+        rt_oneapi_unload_module(module.handle)
+    else:
+        true
+
+struct OneApiFunc:
+    handle: i64
+    module: OneApiModule
+    name: text
+    is_valid: bool
+
+fn oneapi_get_kernel(module: OneApiModule, name: text) -> OneApiFunc:
+    if not module.is_valid:
+        OneApiFunc(handle: 0, module: module, name: name, is_valid: false)
+    else:
+        val handle = rt_oneapi_get_function(module.handle, name)
+        OneApiFunc(handle: handle, module: module, name: name, is_valid: handle != 0)
+
+struct OneApiQueue:
+    handle: i64
+    is_valid: bool
+
+fn oneapi_create_queue() -> OneApiQueue:
+    val handle = rt_oneapi_create_queue()
+    OneApiQueue(handle: handle, is_valid: handle != 0)
+
+fn oneapi_destroy_queue(queue: OneApiQueue) -> bool:
+    if queue.is_valid:
+        rt_oneapi_destroy_queue(queue.handle)
+    else:
+        true
+
+fn oneapi_queue_wait(queue: OneApiQueue) -> bool:
+    if queue.is_valid:
+        rt_oneapi_queue_wait(queue.handle)
+    else:
+        true
+
+fn oneapi_submit(queue: OneApiQueue, kernel: OneApiFunc, global_range: i64, local_range: i64) -> bool:
+    if not queue.is_valid or not kernel.is_valid:
+        false
+    else:
+        rt_oneapi_submit_kernel(queue.handle, kernel.handle, global_range, local_range)
+
+fn oneapi_sync() -> bool:
+    rt_oneapi_synchronize()
+
+fn oneapi_last_error() -> text:
+    rt_oneapi_get_last_error()
+
+fn oneapi_alloc_from_host(data: [u8]) -> OneApiPtr:
+    val mem = oneapi_alloc_device(data.len())
+    if mem.is_valid:
+        oneapi_copy_to_device(mem, data)
+    mem
+
+# ============================================================================
+# Exports
+# ============================================================================

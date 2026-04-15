@@ -1,0 +1,219 @@
+# Web Workers binding — Worker constructor, postMessage, terminate.
+# Models worker instances with message queues and lifecycle states.
+# Actual thread isolation requires runtime support; this provides the API surface.
+
+use browser.shared.logging.Logger
+use browser.shared.error.BrowserResult
+use browser.shared.error.script_error
+use std.js.types.js_types.JsValue
+use std.js.types.js_types.JsObject
+use std.js.types.js_types.JsProperty
+use std.js.engine.runtime.JsRuntime
+use std.js.engine.interpreter_types.to_string
+
+# ── Native function IDs ──────────────────────────────────────────────────
+
+val NATIVE_NEW_WORKER = -600
+val NATIVE_WORKER_POST_MESSAGE = -601
+val NATIVE_WORKER_TERMINATE = -602
+val NATIVE_WORKER_ON_MESSAGE = -603
+val NATIVE_WORKER_ON_ERROR = -604
+
+# ── Worker state ─────────────────────────────────────────────────────────
+
+enum WorkerState:
+    Pending
+    Running
+    Terminated
+    Failed
+
+# ── WorkerInstance ───────────────────────────────────────────────────────
+
+class WorkerInstance:
+    id: i64
+    script_url: text
+    state: WorkerState
+    message_queue: [JsValue]
+    onmessage_callback: i64
+    onerror_callback: i64
+
+    # Worker script loading creates a Pending worker.
+    # A real implementation would fetch and evaluate script_url in an
+    # isolated execution context before transitioning to Running.
+    # Thread isolation is not yet supported, so workers remain in Pending state.
+    static fn create(id: i64, script_url: text) -> WorkerInstance:
+        WorkerInstance(
+            id: id,
+            script_url: script_url,
+            state: WorkerState.Pending,
+            message_queue: [JsValue](),
+            onmessage_callback: -1,
+            onerror_callback: -1,
+        )
+
+# ── WorkerBinding ────────────────────────────────────────────────────────
+
+class WorkerBinding:
+    workers: [WorkerInstance]
+    next_id: i64
+    logger: Logger
+
+    static fn new(logger: Logger) -> WorkerBinding:
+        WorkerBinding(workers: [WorkerInstance](), next_id: 1, logger: logger)
+
+    # Install Worker constructor and related methods on the JS runtime.
+    me install(runtime: JsRuntime):
+        self.logger.debug("Installing Worker bindings")
+        runtime._define_global_fn("Worker", NATIVE_NEW_WORKER)
+        self.logger.debug("Worker bindings installed")
+
+    # ── Worker creation ─────────────────────────────────────────────
+
+    me js_new_Worker(args: [JsValue], runtime: JsRuntime) -> JsValue:
+        if args.len() < 1:
+            return JsValue.Undefined
+
+        val script_url = to_string(args.get(0))
+        val worker_id = self.next_id
+        self.next_id = self.next_id + 1
+
+        val worker = WorkerInstance.create(worker_id, script_url)
+        self.workers.push(worker)
+
+        self.logger.warn("Worker created but thread isolation not supported: id={worker_id}, url={script_url}")
+
+        # Create a JS object representing the Worker
+        val obj_id = runtime.interpreter.object_store.create_object()
+
+        # Set worker metadata
+        runtime.interpreter.object_store.set_property(
+            obj_id, "__worker_id__", JsValue.Number(v: worker_id.to_f64()))
+
+        # Install postMessage and terminate methods
+        runtime._define_method_on(obj_id, "postMessage", NATIVE_WORKER_POST_MESSAGE)
+        runtime._define_method_on(obj_id, "terminate", NATIVE_WORKER_TERMINATE)
+
+        JsValue.Object(id: obj_id)
+
+    # ── postMessage ─────────────────────────────────────────────────
+
+    me js_worker_postMessage(args: [JsValue]) -> JsValue:
+        # args: [worker_object, message]
+        if args.len() < 2:
+            return JsValue.Undefined
+
+        val worker_id = _extract_worker_id(args.get(0))
+        val message = args.get(1)
+
+        self.post_to_worker(worker_id, message)
+        JsValue.Undefined
+
+    # ── terminate ───────────────────────────────────────────────────
+
+    me js_worker_terminate(args: [JsValue]) -> JsValue:
+        if args.len() < 1:
+            return JsValue.Undefined
+
+        val worker_id = _extract_worker_id(args.get(0))
+        var i = 0
+        val len = self.workers.len()
+        while i < len:
+            var worker = self.workers.get(i)
+            if worker.id == worker_id:
+                worker.state = WorkerState.Terminated
+                self.logger.debug("Worker terminated: id={worker_id}")
+                return JsValue.Undefined
+            i = i + 1
+
+        self.logger.warn("Worker not found for terminate: id={worker_id}")
+        JsValue.Undefined
+
+    # ── onmessage / onerror handlers ────────────────────────────────
+
+    me js_worker_onmessage(args: [JsValue]) -> JsValue:
+        # args: [worker_object, callback]
+        if args.len() < 2:
+            return JsValue.Undefined
+
+        val worker_id = _extract_worker_id(args.get(0))
+        var callback_id: i64 = -1
+        match args.get(1):
+            JsValue.Function(id):
+                callback_id = id
+            _:
+                pass_dn
+
+        var i = 0
+        val len = self.workers.len()
+        while i < len:
+            var worker = self.workers.get(i)
+            if worker.id == worker_id:
+                worker.onmessage_callback = callback_id
+                return JsValue.Undefined
+            i = i + 1
+
+        JsValue.Undefined
+
+    me js_worker_onerror(args: [JsValue]) -> JsValue:
+        # args: [worker_object, callback]
+        if args.len() < 2:
+            return JsValue.Undefined
+
+        val worker_id = _extract_worker_id(args.get(0))
+        var callback_id: i64 = -1
+        match args.get(1):
+            JsValue.Function(id):
+                callback_id = id
+            _:
+                pass_dn
+
+        var i = 0
+        val len = self.workers.len()
+        while i < len:
+            var worker = self.workers.get(i)
+            if worker.id == worker_id:
+                worker.onerror_callback = callback_id
+                return JsValue.Undefined
+            i = i + 1
+
+        JsValue.Undefined
+
+    # ── Message passing ─────────────────────────────────────────────
+
+    me post_to_worker(worker_id: i64, message: JsValue):
+        var i = 0
+        val len = self.workers.len()
+        while i < len:
+            var worker = self.workers.get(i)
+            if worker.id == worker_id:
+                match worker.state:
+                    WorkerState.Terminated:
+                        self.logger.warn("Cannot post to terminated worker: id={worker_id}")
+                    _:
+                        worker.message_queue.push(message)
+                        self.logger.debug("Message posted to worker: id={worker_id}")
+                return
+            i = i + 1
+        self.logger.warn("Worker not found for postMessage: id={worker_id}")
+
+    me receive_from_worker(worker_id: i64) -> JsValue?:
+        var i = 0
+        val len = self.workers.len()
+        while i < len:
+            var worker = self.workers.get(i)
+            if worker.id == worker_id:
+                if worker.message_queue.len() > 0:
+                    val msg = worker.message_queue.get(0)
+                    worker.message_queue.remove(0)
+                    return Some(msg)
+                return nil
+            i = i + 1
+        nil
+
+# ── Internal helpers ─────────────────────────────────────────────────────
+
+fn _extract_worker_id(value: JsValue) -> i64:
+    match value:
+        JsValue.Object(id): id
+        JsValue.Number(v): v.to_i64()
+        _: -1

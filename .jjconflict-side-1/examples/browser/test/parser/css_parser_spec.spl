@@ -1,0 +1,269 @@
+"""
+# Css Parser
+
+Tests for css parser functionality.
+"""
+# CSS Parser Tests
+#
+# Category: Browser Platform Parser
+# Status: Active
+#
+# Validates the CSS tokenizer and parser: tokenization of CSS values,
+# selector parsing, declaration blocks, specificity calculations, and
+# value types (colors, lengths, percentages, !important).
+#
+# Run with: bin/simple test examples/browser/test/parser/css_parser_spec.spl
+
+use std.spec
+use sbp.feature.parser.css_tokenizer.{css_tokenize, CSSToken, CSSTokenKind}
+use sbp.feature.parser.css_parser.{parse_selector, parse_declarations, calculate_specificity}
+use sbp.entity.dom.css_types.{CSSValue, CSSDeclaration, SelectorPart, Selector, Specificity}
+
+# ============================================================================
+# Helpers
+# ============================================================================
+
+fn tok_kind(tok: CSSToken) -> text:
+    match tok.kind:
+        CSSTokenKind.Ident: "ident"
+        CSSTokenKind.Number: "number"
+        CSSTokenKind.Dimension: "dimension"
+        CSSTokenKind.Percentage: "percentage"
+        CSSTokenKind.Hash: "hash"
+        CSSTokenKind.String: "string"
+        CSSTokenKind.Whitespace: "whitespace"
+        CSSTokenKind.Colon: "colon"
+        CSSTokenKind.Semicolon: "semicolon"
+        CSSTokenKind.LeftBrace: "left_brace"
+        CSSTokenKind.RightBrace: "right_brace"
+        CSSTokenKind.Dot: "dot"
+        CSSTokenKind.Comma: "comma"
+        CSSTokenKind.Delim: "delim"
+
+fn tok_value(tok: CSSToken) -> text:
+    tok.value
+
+fn selector_part_kind(part: SelectorPart) -> text:
+    match part:
+        SelectorPart.Type(_): "type"
+        SelectorPart.Class(_): "class"
+        SelectorPart.Id(_): "id"
+        SelectorPart.Universal: "universal"
+        SelectorPart.Attribute(_, _, _): "attribute"
+        SelectorPart.PseudoClass(_): "pseudo_class"
+        SelectorPart.PseudoElement(_): "pseudo_element"
+        SelectorPart.Combinator(_): "combinator"
+
+fn selector_part_name(part: SelectorPart) -> text:
+    match part:
+        SelectorPart.Type(name): name
+        SelectorPart.Class(name): name
+        SelectorPart.Id(name): name
+        SelectorPart.Universal: "*"
+        SelectorPart.Attribute(name, _, _): name
+        SelectorPart.PseudoClass(name): name
+        SelectorPart.PseudoElement(name): name
+        SelectorPart.Combinator(kind): kind
+
+# ============================================================================
+# CSS Tokenizer
+# ============================================================================
+
+describe "CSSTokenizer":
+    """
+    ## Csstokenizer Tests
+
+    Validates CSSTokenizer functionality.
+    """
+
+    context "basic tokens":
+        it "tokenizes ident":
+            val tokens = css_tokenize("color")
+            # Filter out whitespace tokens for simpler assertions
+            var idents = [CSSToken]()
+            var i = 0
+            while i < tokens.len():
+                if tok_kind(tokens.get(i)) == "ident":
+                    idents.push(tokens.get(i))
+                i = i + 1
+            expect(idents.len()).to_be_greater_than(0)
+            expect(tok_value(idents.get(0))).to_equal("color")
+
+        it "tokenizes number":
+            val tokens = css_tokenize("42")
+            var nums = [CSSToken]()
+            var i = 0
+            while i < tokens.len():
+                if tok_kind(tokens.get(i)) == "number":
+                    nums.push(tokens.get(i))
+                i = i + 1
+            expect(nums.len()).to_be_greater_than(0)
+            expect(tok_value(nums.get(0))).to_equal("42")
+
+        it "tokenizes dimension (px, em, rem)":
+            val tokens = css_tokenize("16px")
+            var dims = [CSSToken]()
+            var i = 0
+            while i < tokens.len():
+                if tok_kind(tokens.get(i)) == "dimension":
+                    dims.push(tokens.get(i))
+                i = i + 1
+            expect(dims.len()).to_be_greater_than(0)
+            expect(tok_value(dims.get(0))).to_start_with("16")
+
+        it "tokenizes percentage":
+            val tokens = css_tokenize("50%")
+            var pcts = [CSSToken]()
+            var i = 0
+            while i < tokens.len():
+                if tok_kind(tokens.get(i)) == "percentage":
+                    pcts.push(tokens.get(i))
+                i = i + 1
+            expect(pcts.len()).to_be_greater_than(0)
+            expect(tok_value(pcts.get(0))).to_start_with("50")
+
+        it "tokenizes hash":
+            val tokens = css_tokenize("#ff0000")
+            var hashes = [CSSToken]()
+            var i = 0
+            while i < tokens.len():
+                if tok_kind(tokens.get(i)) == "hash":
+                    hashes.push(tokens.get(i))
+                i = i + 1
+            expect(hashes.len()).to_be_greater_than(0)
+            expect(tok_value(hashes.get(0))).to_equal("ff0000")
+
+        it "tokenizes string":
+            val tokens = css_tokenize("\"hello world\"")
+            var strs = [CSSToken]()
+            var i = 0
+            while i < tokens.len():
+                if tok_kind(tokens.get(i)) == "string":
+                    strs.push(tokens.get(i))
+                i = i + 1
+            expect(strs.len()).to_be_greater_than(0)
+            expect(tok_value(strs.get(0))).to_equal("hello world")
+
+        it "tokenizes whitespace":
+            val tokens = css_tokenize("a  b")
+            var found_ws = false
+            var i = 0
+            while i < tokens.len():
+                if tok_kind(tokens.get(i)) == "whitespace":
+                    found_ws = true
+                i = i + 1
+            expect(found_ws).to_equal(true)
+
+# ============================================================================
+# CSS Selector Parsing
+# ============================================================================
+
+describe "CSS Selector Parser":
+    context "simple selectors":
+        it "parses simple type selector":
+            val sel = parse_selector("div")
+            expect(sel.parts.len()).to_equal(1)
+            expect(selector_part_kind(sel.parts.get(0))).to_equal("type")
+            expect(selector_part_name(sel.parts.get(0))).to_equal("div")
+
+        it "parses class selector":
+            val sel = parse_selector(".main")
+            expect(sel.parts.len()).to_equal(1)
+            expect(selector_part_kind(sel.parts.get(0))).to_equal("class")
+            expect(selector_part_name(sel.parts.get(0))).to_equal("main")
+
+        it "parses ID selector":
+            val sel = parse_selector("#header")
+            expect(sel.parts.len()).to_equal(1)
+            expect(selector_part_kind(sel.parts.get(0))).to_equal("id")
+            expect(selector_part_name(sel.parts.get(0))).to_equal("header")
+
+    context "compound selectors":
+        it "parses compound selector":
+            val sel = parse_selector("div.main#content")
+            expect(sel.parts.len()).to_equal(3)
+            expect(selector_part_kind(sel.parts.get(0))).to_equal("type")
+            expect(selector_part_name(sel.parts.get(0))).to_equal("div")
+            expect(selector_part_kind(sel.parts.get(1))).to_equal("class")
+            expect(selector_part_name(sel.parts.get(1))).to_equal("main")
+            expect(selector_part_kind(sel.parts.get(2))).to_equal("id")
+            expect(selector_part_name(sel.parts.get(2))).to_equal("content")
+
+    context "combinators":
+        it "parses descendant combinator":
+            val sel = parse_selector("div p")
+            # Should produce: Type("div"), Combinator(" "), Type("p")
+            expect(sel.parts.len()).to_equal(3)
+            expect(selector_part_kind(sel.parts.get(0))).to_equal("type")
+            expect(selector_part_name(sel.parts.get(0))).to_equal("div")
+            expect(selector_part_kind(sel.parts.get(1))).to_equal("combinator")
+            expect(selector_part_kind(sel.parts.get(2))).to_equal("type")
+            expect(selector_part_name(sel.parts.get(2))).to_equal("p")
+
+# ============================================================================
+# CSS Declaration Parsing
+# ============================================================================
+
+describe "CSS Declaration Parser":
+    it "parses declaration block":
+        val decls = parse_declarations("color: red; font-size: 16px;")
+        expect(decls.len()).to_equal(2)
+        expect(decls.get(0).property).to_equal("color")
+        expect(decls.get(1).property).to_equal("font-size")
+
+    it "parses color value (#hex)":
+        val decls = parse_declarations("color: #ff0000;")
+        expect(decls.len()).to_equal(1)
+        expect(decls.get(0).property).to_equal("color")
+        val is_color = match decls.get(0).value:
+            CSSValue.Color(color): color.r == 255 and color.g == 0 and color.b == 0
+            _: false
+        expect(is_color).to_equal(true)
+
+    it "parses length value":
+        val decls = parse_declarations("width: 100px;")
+        expect(decls.len()).to_equal(1)
+        expect(decls.get(0).property).to_equal("width")
+        val is_length = match decls.get(0).value:
+            CSSValue.Length(v, unit): unit == "px"
+            _: false
+        expect(is_length).to_equal(true)
+
+    it "parses !important flag":
+        val decls = parse_declarations("color: red !important;")
+        expect(decls.len()).to_equal(1)
+        expect(decls.get(0).important).to_equal(true)
+
+# ============================================================================
+# Specificity Calculation
+# ============================================================================
+
+describe "CSS Specificity":
+    it "calculates specificity for type selector":
+        val sel = parse_selector("div")
+        val spec = calculate_specificity(sel)
+        expect(spec.ids).to_equal(0)
+        expect(spec.classes).to_equal(0)
+        expect(spec.elements).to_equal(1)
+
+    it "calculates specificity for class selector":
+        val sel = parse_selector(".main")
+        val spec = calculate_specificity(sel)
+        expect(spec.ids).to_equal(0)
+        expect(spec.classes).to_equal(1)
+        expect(spec.elements).to_equal(0)
+
+    it "calculates specificity for ID selector":
+        val sel = parse_selector("#header")
+        val spec = calculate_specificity(sel)
+        expect(spec.ids).to_equal(1)
+        expect(spec.classes).to_equal(0)
+        expect(spec.elements).to_equal(0)
+
+    it "calculates specificity for compound selector":
+        # div.main#content => (1 id, 1 class, 1 element)
+        val sel = parse_selector("div.main#content")
+        val spec = calculate_specificity(sel)
+        expect(spec.ids).to_equal(1)
+        expect(spec.classes).to_equal(1)
+        expect(spec.elements).to_equal(1)

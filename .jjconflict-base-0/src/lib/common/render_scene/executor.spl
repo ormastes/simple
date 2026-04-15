@@ -1,0 +1,801 @@
+#![allow(unnamed_duplicate_typed_args)]
+# Render Scene Executor — software rasterizer for RenderScene display lists.
+#
+# Consumes a RenderScene and draws every SceneCommand into a flat [u32]
+# ARGB pixel buffer.  Supports fill_rect, stroke_rect, text (VGA 8x16
+# bitmap font), line (Bresenham), circle / circle_filled (midpoint),
+# rounded_rect, gradient_rect, image blit, and clip push/pop.
+
+use common.render_scene.scene.{SceneCommand, RenderScene, argb_alpha, argb_red, argb_green, argb_blue, argb}
+use common.render_scene.engine_trait.{EffectEngine}
+use common.render_scene.engine_int.{IntEffectEngine, int_effect_engine}
+use common.render_scene.engine_float.{FloatEffectEngine, float_effect_engine}
+use common.display_protocol.display_protocol.{DamageRect, damage_rect}
+use common.text_layout.font_renderer.{FontRenderer, blit_glyph}
+
+# ============================================================================
+# Effect engine selection
+# ============================================================================
+
+var _active_engine: EffectEngine? = nil
+
+fn set_effect_engine(engine: EffectEngine):
+    """Set the active effect engine for rendering operations."""
+    _active_engine = engine
+
+fn get_effect_engine() -> EffectEngine:
+    """Return the active effect engine, creating a default IntEffectEngine if none set."""
+    if val Some(e) = _active_engine:
+        return e
+    val default_engine = int_effect_engine()
+    _active_engine = default_engine
+    default_engine
+
+fn select_effect_engine(platform: text):
+    """Select the effect engine based on the platform capability.
+
+    Hosted or float-capable platforms use the f64-based FloatEffectEngine
+    for higher-quality rendering (Gaussian shadows, exact trig, BT.709
+    grayscale).  Baremetal or integer-only platforms use the pure-integer
+    IntEffectEngine which needs no FPU.
+
+    Args:
+        platform: One of "hosted", "float", "baremetal", "int", etc.
+    """
+    if platform == "hosted" or platform == "float":
+        set_effect_engine(float_effect_engine())
+    else:
+        set_effect_engine(int_effect_engine())
+
+# ============================================================================
+# Clip rectangle
+# ============================================================================
+
+struct ClipRect:
+    """Axis-aligned clip bounds."""
+    x: i32
+    y: i32
+    w: i32
+    h: i32
+
+# ============================================================================
+# Internal: pixel write with clip check
+# ============================================================================
+
+fn put_pixel(buffer: [u32], buf_w: i32, buf_h: i32, px: i32, py: i32, color: u32, clip_stack: [ClipRect]):
+    """Write a pixel to the buffer if it passes clip and bounds checks."""
+    if px < 0 or py < 0 or px >= buf_w or py >= buf_h:
+        return
+
+    # Check against active clip (top of stack)
+    if clip_stack.len() > 0:
+        val clip = clip_stack[clip_stack.len() - 1]
+        if px < clip.x or py < clip.y:
+            return
+        if px >= clip.x + clip.w or py >= clip.y + clip.h:
+            return
+
+    val idx = py * buf_w + px
+    buffer[idx] = color
+
+fn put_pixel_blend(buffer: [u32], buf_w: i32, buf_h: i32, px: i32, py: i32, color: u32, clip_stack: [ClipRect]):
+    """Write a pixel with simple alpha blending (source-over).
+    Delegates to the active EffectEngine when one is set.
+    """
+    if px < 0 or py < 0 or px >= buf_w or py >= buf_h:
+        return
+
+    if clip_stack.len() > 0:
+        val clip = clip_stack[clip_stack.len() - 1]
+        if px < clip.x or py < clip.y:
+            return
+        if px >= clip.x + clip.w or py >= clip.y + clip.h:
+            return
+
+    val sa = argb_alpha(color)
+    if sa == 0:
+        return
+    if sa == 255:
+        val idx = py * buf_w + px
+        buffer[idx] = color
+        return
+
+    val idx = py * buf_w + px
+    val dst = buffer[idx]
+
+    # Delegate to effect engine when available
+    if val Some(engine) = _active_engine:
+        buffer[idx] = engine.blend_pixel(color, dst)
+        return
+
+    # Fallback: original inline blending for backwards compatibility
+    val da = argb_alpha(dst)
+    val dr = argb_red(dst)
+    val dg = argb_green(dst)
+    val db = argb_blue(dst)
+    val sr = argb_red(color)
+    val sg = argb_green(color)
+    val sb = argb_blue(color)
+    val inv_sa = 255 - sa
+    val out_r = (sr * sa + dr * inv_sa) / 255
+    val out_g = (sg * sa + dg * inv_sa) / 255
+    val out_b = (sb * sa + db * inv_sa) / 255
+    val out_a = sa + (da * inv_sa) / 255
+    buffer[idx] = argb(out_a, out_r, out_g, out_b)
+
+# ============================================================================
+# Internal: primitive drawing
+# ============================================================================
+
+fn draw_fill_rect(buffer: [u32], buf_w: i32, buf_h: i32, x: i32, y: i32, w: i32, h: i32, color: u32, clip_stack: [ClipRect]):
+    """Fill a solid rectangle with alpha blending."""
+    val sa = argb_alpha(color)
+    var row: i32 = 0
+    while row < h:
+        var col: i32 = 0
+        while col < w:
+            if sa == 255:
+                put_pixel(buffer, buf_w, buf_h, x + col, y + row, color, clip_stack)
+            else:
+                put_pixel_blend(buffer, buf_w, buf_h, x + col, y + row, color, clip_stack)
+            col = col + 1
+        row = row + 1
+
+fn with_alpha(color: u32, a: u32) -> u32:
+    """Return color with its alpha channel replaced by `a` (0-255)."""
+    (color & 0x00FFFFFF) | ((a & 0xFF) << 24)
+
+fn draw_aa_hspan(buffer: [u32], buf_w: i32, buf_h: i32, x0: i32, x1: i32, y: i32, color: u32, clip_stack: [ClipRect]):
+    """Blend a horizontal span [x0, x1) at row y using put_pixel_blend."""
+    var x: i32 = x0
+    while x < x1:
+        put_pixel_blend(buffer, buf_w, buf_h, x, y, color, clip_stack)
+        x = x + 1
+
+fn draw_aa_vspan(buffer: [u32], buf_w: i32, buf_h: i32, x: i32, y0: i32, y1: i32, color: u32, clip_stack: [ClipRect]):
+    """Blend a vertical span [y0, y1) at column x using put_pixel_blend."""
+    var y: i32 = y0
+    while y < y1:
+        put_pixel_blend(buffer, buf_w, buf_h, x, y, color, clip_stack)
+        y = y + 1
+
+fn draw_stroke_rect(buffer: [u32], buf_w: i32, buf_h: i32, x: i32, y: i32, w: i32, h: i32, color: u32, sw: i32, clip_stack: [ClipRect]):
+    """Draw an outlined rectangle with the given stroke width.
+
+    For sw == 1 we emulate Chrome's 1px border edge anti-aliasing by drawing
+    the main edge at ~90% opacity and bleeding a ~7% fringe into the adjacent
+    outside/inside rows.  This matches Chrome's sub-pixel-positioned 1px
+    borders (see doc/08_tracking/wm_compare/phase2_report.md)."""
+    if sw == 1 and w >= 2 and h >= 2:
+        val aa_main = with_alpha(color, 230)    # ~0.90 coverage
+        val aa_fringe = with_alpha(color, 18)   # ~0.07 coverage
+
+        val x0 = x
+        val x1 = x + w            # exclusive
+        val yt = y                # top main row
+        val yb = y + h - 1        # bottom main row
+
+        # Horizontal edges: fringe above/below the main row over full width
+        draw_aa_hspan(buffer, buf_w, buf_h, x0, x1, yt - 1, aa_fringe, clip_stack)  # top outside
+        draw_aa_hspan(buffer, buf_w, buf_h, x0, x1, yt,     aa_main,   clip_stack)  # top main
+        draw_aa_hspan(buffer, buf_w, buf_h, x0, x1, yt + 1, aa_fringe, clip_stack)  # top inside
+        draw_aa_hspan(buffer, buf_w, buf_h, x0, x1, yb - 1, aa_fringe, clip_stack)  # bottom inside
+        draw_aa_hspan(buffer, buf_w, buf_h, x0, x1, yb,     aa_main,   clip_stack)  # bottom main
+        draw_aa_hspan(buffer, buf_w, buf_h, x0, x1, yb + 1, aa_fringe, clip_stack)  # bottom outside
+
+        # Vertical edges: fringes span full height (outside cols never collide
+        # with horizontal main rows because they're at x-1/x+w); main and
+        # inside fringes are drawn only on rows strictly between top/bottom
+        # mains to avoid double-blending the 4 corner main pixels.
+        val xl = x                # left main col
+        val xr = x + w - 1        # right main col
+        val ytop_in = y + 1
+        val ybot_in = y + h - 1   # exclusive end for vertical spans
+
+        # Left outside fringe: full height (column is x-1, outside the box)
+        draw_aa_vspan(buffer, buf_w, buf_h, xl - 1, y, y + h, aa_fringe, clip_stack)
+        # Right outside fringe: full height
+        draw_aa_vspan(buffer, buf_w, buf_h, xr + 1, y, y + h, aa_fringe, clip_stack)
+        # Left main (skip top/bottom main rows)
+        draw_aa_vspan(buffer, buf_w, buf_h, xl, ytop_in, ybot_in, aa_main, clip_stack)
+        # Right main (skip top/bottom main rows)
+        draw_aa_vspan(buffer, buf_w, buf_h, xr, ytop_in, ybot_in, aa_main, clip_stack)
+        # Left inside fringe (skip top/bottom main rows)
+        draw_aa_vspan(buffer, buf_w, buf_h, xl + 1, ytop_in, ybot_in, aa_fringe, clip_stack)
+        # Right inside fringe (skip top/bottom main rows)
+        draw_aa_vspan(buffer, buf_w, buf_h, xr - 1, ytop_in, ybot_in, aa_fringe, clip_stack)
+        return
+
+    # Top edge
+    draw_fill_rect(buffer, buf_w, buf_h, x, y, w, sw, color, clip_stack)
+    # Bottom edge
+    draw_fill_rect(buffer, buf_w, buf_h, x, y + h - sw, w, sw, color, clip_stack)
+    # Left edge
+    draw_fill_rect(buffer, buf_w, buf_h, x, y + sw, sw, h - sw - sw, color, clip_stack)
+    # Right edge
+    draw_fill_rect(buffer, buf_w, buf_h, x + w - sw, y + sw, sw, h - sw - sw, color, clip_stack)
+
+fn abs_i32(v: i32) -> i32:
+    if v < 0: return 0 - v
+    return v
+
+fn draw_line(buffer: [u32], buf_w: i32, buf_h: i32, x0: i32, y0: i32, x1: i32, y1: i32, color: u32, clip_stack: [ClipRect]):
+    """Bresenham's line algorithm."""
+    var dx = abs_i32(x1 - x0)
+    var dy = abs_i32(y1 - y0)
+    var sx: i32 = if x0 < x1: 1 else: -1
+    var sy: i32 = if y0 < y1: 1 else: -1
+    var err = dx - dy
+    var cx = x0
+    var cy = y0
+
+    while true:
+        put_pixel(buffer, buf_w, buf_h, cx, cy, color, clip_stack)
+        if cx == x1 and cy == y1:
+            return
+        val e2 = 2 * err
+        if e2 > 0 - dy:
+            err = err - dy
+            cx = cx + sx
+        if e2 < dx:
+            err = err + dx
+            cy = cy + sy
+
+fn draw_circle_outline(buffer: [u32], buf_w: i32, buf_h: i32, cx: i32, cy: i32, r: i32, color: u32, clip_stack: [ClipRect]):
+    """Midpoint circle algorithm — outline only."""
+    var x: i32 = 0
+    var y: i32 = r
+    var d: i32 = 1 - r
+
+    while x <= y:
+        put_pixel(buffer, buf_w, buf_h, cx + x, cy + y, color, clip_stack)
+        put_pixel(buffer, buf_w, buf_h, cx - x, cy + y, color, clip_stack)
+        put_pixel(buffer, buf_w, buf_h, cx + x, cy - y, color, clip_stack)
+        put_pixel(buffer, buf_w, buf_h, cx - x, cy - y, color, clip_stack)
+        put_pixel(buffer, buf_w, buf_h, cx + y, cy + x, color, clip_stack)
+        put_pixel(buffer, buf_w, buf_h, cx - y, cy + x, color, clip_stack)
+        put_pixel(buffer, buf_w, buf_h, cx + y, cy - x, color, clip_stack)
+        put_pixel(buffer, buf_w, buf_h, cx - y, cy - x, color, clip_stack)
+        if d < 0:
+            d = d + 2 * x + 3
+        else:
+            d = d + 2 * (x - y) + 5
+            y = y - 1
+        x = x + 1
+
+fn draw_circle_filled(buffer: [u32], buf_w: i32, buf_h: i32, cx: i32, cy: i32, r: i32, color: u32, clip_stack: [ClipRect]):
+    """Midpoint circle algorithm — filled (draw horizontal scan-lines)."""
+    var x: i32 = 0
+    var y: i32 = r
+    var d: i32 = 1 - r
+
+    while x <= y:
+        # Horizontal spans for each octant pair
+        draw_hline(buffer, buf_w, buf_h, cx - x, cx + x, cy + y, color, clip_stack)
+        draw_hline(buffer, buf_w, buf_h, cx - x, cx + x, cy - y, color, clip_stack)
+        draw_hline(buffer, buf_w, buf_h, cx - y, cx + y, cy + x, color, clip_stack)
+        draw_hline(buffer, buf_w, buf_h, cx - y, cx + y, cy - x, color, clip_stack)
+        if d < 0:
+            d = d + 2 * x + 3
+        else:
+            d = d + 2 * (x - y) + 5
+            y = y - 1
+        x = x + 1
+
+fn draw_hline(buffer: [u32], buf_w: i32, buf_h: i32, x0: i32, x1: i32, y: i32, color: u32, clip_stack: [ClipRect]):
+    """Draw a horizontal line from x0 to x1 (inclusive) at row y."""
+    val sa = argb_alpha(color)
+    var x = x0
+    while x <= x1:
+        if sa == 255:
+            put_pixel(buffer, buf_w, buf_h, x, y, color, clip_stack)
+        else:
+            put_pixel_blend(buffer, buf_w, buf_h, x, y, color, clip_stack)
+        x = x + 1
+
+fn draw_rounded_rect(buffer: [u32], buf_w: i32, buf_h: i32, x: i32, y: i32, w: i32, h: i32, color: u32, radius: i32, clip_stack: [ClipRect]):
+    """Fill a rounded rectangle: inner cross + 4 filled quarter-circles."""
+    val r = if radius > w / 2: w / 2 else: (if radius > h / 2: h / 2 else: radius)
+
+    # Fill center cross (three rectangles)
+    # Horizontal bar (full width, between corner rows)
+    draw_fill_rect(buffer, buf_w, buf_h, x, y + r, w, h - r - r, color, clip_stack)
+    # Top bar (between corners)
+    draw_fill_rect(buffer, buf_w, buf_h, x + r, y, w - r - r, r, color, clip_stack)
+    # Bottom bar (between corners)
+    draw_fill_rect(buffer, buf_w, buf_h, x + r, y + h - r, w - r - r, r, color, clip_stack)
+
+    # Fill four quarter circles at corners
+    draw_quarter_circle_filled(buffer, buf_w, buf_h, x + r, y + r, r, color, clip_stack)
+    draw_quarter_circle_filled(buffer, buf_w, buf_h, x + w - r - 1, y + r, r, color, clip_stack)
+    draw_quarter_circle_filled(buffer, buf_w, buf_h, x + r, y + h - r - 1, r, color, clip_stack)
+    draw_quarter_circle_filled(buffer, buf_w, buf_h, x + w - r - 1, y + h - r - 1, r, color, clip_stack)
+
+fn draw_quarter_circle_filled(buffer: [u32], buf_w: i32, buf_h: i32, cx: i32, cy: i32, r: i32, color: u32, clip_stack: [ClipRect]):
+    """Fill a quarter circle (all four quadrants overlap to form a full circle at cx,cy)."""
+    val sa = argb_alpha(color)
+    var yy: i32 = 0 - r
+    while yy <= r:
+        var xx: i32 = 0 - r
+        while xx <= r:
+            if xx * xx + yy * yy <= r * r:
+                if sa == 255:
+                    put_pixel(buffer, buf_w, buf_h, cx + xx, cy + yy, color, clip_stack)
+                else:
+                    put_pixel_blend(buffer, buf_w, buf_h, cx + xx, cy + yy, color, clip_stack)
+            xx = xx + 1
+        yy = yy + 1
+
+fn lerp_channel(a: u32, b: u32, t_num: i32, t_den: i32) -> u32:
+    """Linearly interpolate a single 8-bit color channel.
+    Delegates to the active EffectEngine when one is set.
+    """
+    # Delegate to effect engine when available
+    if val Some(engine) = _active_engine:
+        return engine.lerp_channel(a, b, t_num, t_den)
+
+    # Fallback: original inline interpolation for backwards compatibility
+    val av = a & 0xFF
+    val bv = b & 0xFF
+    if t_den == 0:
+        return av
+    val result = av + ((bv - av) * t_num.to_u32()) / t_den.to_u32()
+    result & 0xFF
+
+fn draw_gradient_rect_engine(buffer: [u32], buf_w: i32, buf_h: i32, x: i32, y: i32, w: i32, h: i32, c1: u32, c2: u32, clip_stack: [ClipRect], engine: EffectEngine):
+    """Fill a gradient rectangle using the given EffectEngine for color computation."""
+    var row: i32 = 0
+    while row < h:
+        var col: i32 = 0
+        while col < w:
+            val color = engine.gradient_color(c1, c2, col, w)
+            put_pixel(buffer, buf_w, buf_h, x + col, y + row, color, clip_stack)
+            col = col + 1
+        row = row + 1
+
+fn draw_gradient_rect_fallback(buffer: [u32], buf_w: i32, buf_h: i32, x: i32, y: i32, w: i32, h: i32, c1: u32, c2: u32, clip_stack: [ClipRect]):
+    """Fill a gradient rectangle using original per-channel lerp (no engine)."""
+    var row: i32 = 0
+    while row < h:
+        var col: i32 = 0
+        while col < w:
+            val a = lerp_channel(argb_alpha(c1), argb_alpha(c2), col, w - 1)
+            val r = lerp_channel(argb_red(c1), argb_red(c2), col, w - 1)
+            val g = lerp_channel(argb_green(c1), argb_green(c2), col, w - 1)
+            val b = lerp_channel(argb_blue(c1), argb_blue(c2), col, w - 1)
+            val color = argb(a, r, g, b)
+            put_pixel(buffer, buf_w, buf_h, x + col, y + row, color, clip_stack)
+            col = col + 1
+        row = row + 1
+
+fn draw_gradient_rect(buffer: [u32], buf_w: i32, buf_h: i32, x: i32, y: i32, w: i32, h: i32, c1: u32, c2: u32, clip_stack: [ClipRect]):
+    """Fill a rectangle with horizontal linear gradient from c1 to c2.
+    Delegates gradient color computation to the active EffectEngine when set.
+    """
+    if val Some(engine) = _active_engine:
+        draw_gradient_rect_engine(buffer, buf_w, buf_h, x, y, w, h, c1, c2, clip_stack, engine)
+        return
+    draw_gradient_rect_fallback(buffer, buf_w, buf_h, x, y, w, h, c1, c2, clip_stack)
+
+fn draw_image(buffer: [u32], buf_w: i32, buf_h: i32, x: i32, y: i32, w: i32, h: i32, pixels: [u32], pw: i32, ph: i32, clip_stack: [ClipRect]):
+    """Blit a pixel array into the buffer with bounds checking."""
+    var row: i32 = 0
+    while row < h and row < ph:
+        var col: i32 = 0
+        while col < w and col < pw:
+            val src_idx = row * pw + col
+            if src_idx < pixels.len():
+                put_pixel_blend(buffer, buf_w, buf_h, x + col, y + row, pixels[src_idx], clip_stack)
+            col = col + 1
+        row = row + 1
+
+# ============================================================================
+# VGA 8x16 bitmap font (printable ASCII 0x20 - 0x7E)
+# ============================================================================
+
+fn glyph_8x16(ch: i32) -> [u32]:
+    """Return 16-element glyph bitmap for an ASCII character.
+
+    Each element is an 8-bit row (MSB = leftmost pixel).
+    Returns a blank glyph for characters outside 0x20..0x7E.
+    """
+    if ch == 0x20: return [0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]
+    if ch == 0x21: return [0x00, 0x00, 0x18, 0x3C, 0x3C, 0x3C, 0x18, 0x18, 0x18, 0x00, 0x18, 0x18, 0x00, 0x00, 0x00, 0x00]
+    if ch == 0x22: return [0x00, 0x66, 0x66, 0x66, 0x24, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]
+    if ch == 0x23: return [0x00, 0x00, 0x00, 0x6C, 0x6C, 0xFE, 0x6C, 0x6C, 0x6C, 0xFE, 0x6C, 0x6C, 0x00, 0x00, 0x00, 0x00]
+    if ch == 0x24: return [0x18, 0x18, 0x7C, 0xC6, 0xC2, 0xC0, 0x7C, 0x06, 0x06, 0x86, 0xC6, 0x7C, 0x18, 0x18, 0x00, 0x00]
+    if ch == 0x25: return [0x00, 0x00, 0x00, 0x00, 0xC2, 0xC6, 0x0C, 0x18, 0x30, 0x60, 0xC6, 0x86, 0x00, 0x00, 0x00, 0x00]
+    if ch == 0x26: return [0x00, 0x00, 0x38, 0x6C, 0x6C, 0x38, 0x76, 0xDC, 0xCC, 0xCC, 0xCC, 0x76, 0x00, 0x00, 0x00, 0x00]
+    if ch == 0x27: return [0x00, 0x30, 0x30, 0x30, 0x60, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]
+    if ch == 0x28: return [0x00, 0x00, 0x0C, 0x18, 0x30, 0x30, 0x30, 0x30, 0x30, 0x30, 0x18, 0x0C, 0x00, 0x00, 0x00, 0x00]
+    if ch == 0x29: return [0x00, 0x00, 0x30, 0x18, 0x0C, 0x0C, 0x0C, 0x0C, 0x0C, 0x0C, 0x18, 0x30, 0x00, 0x00, 0x00, 0x00]
+    if ch == 0x2A: return [0x00, 0x00, 0x00, 0x00, 0x00, 0x66, 0x3C, 0xFF, 0x3C, 0x66, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]
+    if ch == 0x2B: return [0x00, 0x00, 0x00, 0x00, 0x00, 0x18, 0x18, 0x7E, 0x18, 0x18, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]
+    if ch == 0x2C: return [0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x18, 0x18, 0x18, 0x30, 0x00, 0x00, 0x00]
+    if ch == 0x2D: return [0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xFE, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]
+    if ch == 0x2E: return [0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x18, 0x18, 0x00, 0x00, 0x00, 0x00]
+    if ch == 0x2F: return [0x00, 0x00, 0x00, 0x00, 0x02, 0x06, 0x0C, 0x18, 0x30, 0x60, 0xC0, 0x80, 0x00, 0x00, 0x00, 0x00]
+    # 0-9
+    if ch == 0x30: return [0x00, 0x00, 0x7C, 0xC6, 0xC6, 0xCE, 0xDE, 0xF6, 0xE6, 0xC6, 0xC6, 0x7C, 0x00, 0x00, 0x00, 0x00]
+    if ch == 0x31: return [0x00, 0x00, 0x18, 0x38, 0x78, 0x18, 0x18, 0x18, 0x18, 0x18, 0x18, 0x7E, 0x00, 0x00, 0x00, 0x00]
+    if ch == 0x32: return [0x00, 0x00, 0x7C, 0xC6, 0x06, 0x0C, 0x18, 0x30, 0x60, 0xC0, 0xC6, 0xFE, 0x00, 0x00, 0x00, 0x00]
+    if ch == 0x33: return [0x00, 0x00, 0x7C, 0xC6, 0x06, 0x06, 0x3C, 0x06, 0x06, 0x06, 0xC6, 0x7C, 0x00, 0x00, 0x00, 0x00]
+    if ch == 0x34: return [0x00, 0x00, 0x0C, 0x1C, 0x3C, 0x6C, 0xCC, 0xFE, 0x0C, 0x0C, 0x0C, 0x1E, 0x00, 0x00, 0x00, 0x00]
+    if ch == 0x35: return [0x00, 0x00, 0xFE, 0xC0, 0xC0, 0xC0, 0xFC, 0x06, 0x06, 0x06, 0xC6, 0x7C, 0x00, 0x00, 0x00, 0x00]
+    if ch == 0x36: return [0x00, 0x00, 0x38, 0x60, 0xC0, 0xC0, 0xFC, 0xC6, 0xC6, 0xC6, 0xC6, 0x7C, 0x00, 0x00, 0x00, 0x00]
+    if ch == 0x37: return [0x00, 0x00, 0xFE, 0xC6, 0x06, 0x06, 0x0C, 0x18, 0x30, 0x30, 0x30, 0x30, 0x00, 0x00, 0x00, 0x00]
+    if ch == 0x38: return [0x00, 0x00, 0x7C, 0xC6, 0xC6, 0xC6, 0x7C, 0xC6, 0xC6, 0xC6, 0xC6, 0x7C, 0x00, 0x00, 0x00, 0x00]
+    if ch == 0x39: return [0x00, 0x00, 0x7C, 0xC6, 0xC6, 0xC6, 0x7E, 0x06, 0x06, 0x06, 0x0C, 0x78, 0x00, 0x00, 0x00, 0x00]
+    # Punctuation : ; < = > ? @
+    if ch == 0x3A: return [0x00, 0x00, 0x00, 0x00, 0x18, 0x18, 0x00, 0x00, 0x00, 0x18, 0x18, 0x00, 0x00, 0x00, 0x00, 0x00]
+    if ch == 0x3B: return [0x00, 0x00, 0x00, 0x00, 0x18, 0x18, 0x00, 0x00, 0x00, 0x18, 0x18, 0x30, 0x00, 0x00, 0x00, 0x00]
+    if ch == 0x3C: return [0x00, 0x00, 0x00, 0x06, 0x0C, 0x18, 0x30, 0x60, 0x30, 0x18, 0x0C, 0x06, 0x00, 0x00, 0x00, 0x00]
+    if ch == 0x3D: return [0x00, 0x00, 0x00, 0x00, 0x00, 0x7E, 0x00, 0x00, 0x7E, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]
+    if ch == 0x3E: return [0x00, 0x00, 0x00, 0x60, 0x30, 0x18, 0x0C, 0x06, 0x0C, 0x18, 0x30, 0x60, 0x00, 0x00, 0x00, 0x00]
+    if ch == 0x3F: return [0x00, 0x00, 0x7C, 0xC6, 0xC6, 0x0C, 0x18, 0x18, 0x18, 0x00, 0x18, 0x18, 0x00, 0x00, 0x00, 0x00]
+    if ch == 0x40: return [0x00, 0x00, 0x00, 0x7C, 0xC6, 0xC6, 0xDE, 0xDE, 0xDE, 0xDC, 0xC0, 0x7C, 0x00, 0x00, 0x00, 0x00]
+    # A-Z
+    if ch == 0x41: return [0x00, 0x00, 0x10, 0x38, 0x6C, 0xC6, 0xC6, 0xFE, 0xC6, 0xC6, 0xC6, 0xC6, 0x00, 0x00, 0x00, 0x00]
+    if ch == 0x42: return [0x00, 0x00, 0xFC, 0x66, 0x66, 0x66, 0x7C, 0x66, 0x66, 0x66, 0x66, 0xFC, 0x00, 0x00, 0x00, 0x00]
+    if ch == 0x43: return [0x00, 0x00, 0x3C, 0x66, 0xC2, 0xC0, 0xC0, 0xC0, 0xC0, 0xC2, 0x66, 0x3C, 0x00, 0x00, 0x00, 0x00]
+    if ch == 0x44: return [0x00, 0x00, 0xF8, 0x6C, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x6C, 0xF8, 0x00, 0x00, 0x00, 0x00]
+    if ch == 0x45: return [0x00, 0x00, 0xFE, 0x66, 0x62, 0x68, 0x78, 0x68, 0x60, 0x62, 0x66, 0xFE, 0x00, 0x00, 0x00, 0x00]
+    if ch == 0x46: return [0x00, 0x00, 0xFE, 0x66, 0x62, 0x68, 0x78, 0x68, 0x60, 0x60, 0x60, 0xF0, 0x00, 0x00, 0x00, 0x00]
+    if ch == 0x47: return [0x00, 0x00, 0x3C, 0x66, 0xC2, 0xC0, 0xC0, 0xDE, 0xC6, 0xC6, 0x66, 0x3A, 0x00, 0x00, 0x00, 0x00]
+    if ch == 0x48: return [0x00, 0x00, 0xC6, 0xC6, 0xC6, 0xC6, 0xFE, 0xC6, 0xC6, 0xC6, 0xC6, 0xC6, 0x00, 0x00, 0x00, 0x00]
+    if ch == 0x49: return [0x00, 0x00, 0x3C, 0x18, 0x18, 0x18, 0x18, 0x18, 0x18, 0x18, 0x18, 0x3C, 0x00, 0x00, 0x00, 0x00]
+    if ch == 0x4A: return [0x00, 0x00, 0x1E, 0x0C, 0x0C, 0x0C, 0x0C, 0x0C, 0xCC, 0xCC, 0xCC, 0x78, 0x00, 0x00, 0x00, 0x00]
+    if ch == 0x4B: return [0x00, 0x00, 0xE6, 0x66, 0x66, 0x6C, 0x78, 0x78, 0x6C, 0x66, 0x66, 0xE6, 0x00, 0x00, 0x00, 0x00]
+    if ch == 0x4C: return [0x00, 0x00, 0xF0, 0x60, 0x60, 0x60, 0x60, 0x60, 0x60, 0x62, 0x66, 0xFE, 0x00, 0x00, 0x00, 0x00]
+    if ch == 0x4D: return [0x00, 0x00, 0xC6, 0xEE, 0xFE, 0xFE, 0xD6, 0xC6, 0xC6, 0xC6, 0xC6, 0xC6, 0x00, 0x00, 0x00, 0x00]
+    if ch == 0x4E: return [0x00, 0x00, 0xC6, 0xE6, 0xF6, 0xFE, 0xDE, 0xCE, 0xC6, 0xC6, 0xC6, 0xC6, 0x00, 0x00, 0x00, 0x00]
+    if ch == 0x4F: return [0x00, 0x00, 0x7C, 0xC6, 0xC6, 0xC6, 0xC6, 0xC6, 0xC6, 0xC6, 0xC6, 0x7C, 0x00, 0x00, 0x00, 0x00]
+    if ch == 0x50: return [0x00, 0x00, 0xFC, 0x66, 0x66, 0x66, 0x7C, 0x60, 0x60, 0x60, 0x60, 0xF0, 0x00, 0x00, 0x00, 0x00]
+    if ch == 0x51: return [0x00, 0x00, 0x7C, 0xC6, 0xC6, 0xC6, 0xC6, 0xC6, 0xC6, 0xD6, 0xDE, 0x7C, 0x0C, 0x0E, 0x00, 0x00]
+    if ch == 0x52: return [0x00, 0x00, 0xFC, 0x66, 0x66, 0x66, 0x7C, 0x6C, 0x66, 0x66, 0x66, 0xE6, 0x00, 0x00, 0x00, 0x00]
+    if ch == 0x53: return [0x00, 0x00, 0x7C, 0xC6, 0xC6, 0x60, 0x38, 0x0C, 0x06, 0xC6, 0xC6, 0x7C, 0x00, 0x00, 0x00, 0x00]
+    if ch == 0x54: return [0x00, 0x00, 0xFF, 0xDB, 0x99, 0x18, 0x18, 0x18, 0x18, 0x18, 0x18, 0x3C, 0x00, 0x00, 0x00, 0x00]
+    if ch == 0x55: return [0x00, 0x00, 0xC6, 0xC6, 0xC6, 0xC6, 0xC6, 0xC6, 0xC6, 0xC6, 0xC6, 0x7C, 0x00, 0x00, 0x00, 0x00]
+    if ch == 0x56: return [0x00, 0x00, 0xC6, 0xC6, 0xC6, 0xC6, 0xC6, 0xC6, 0xC6, 0x6C, 0x38, 0x10, 0x00, 0x00, 0x00, 0x00]
+    if ch == 0x57: return [0x00, 0x00, 0xC6, 0xC6, 0xC6, 0xC6, 0xD6, 0xD6, 0xD6, 0xFE, 0xEE, 0x6C, 0x00, 0x00, 0x00, 0x00]
+    if ch == 0x58: return [0x00, 0x00, 0xC6, 0xC6, 0x6C, 0x7C, 0x38, 0x38, 0x7C, 0x6C, 0xC6, 0xC6, 0x00, 0x00, 0x00, 0x00]
+    if ch == 0x59: return [0x00, 0x00, 0xC6, 0xC6, 0xC6, 0x6C, 0x38, 0x18, 0x18, 0x18, 0x18, 0x3C, 0x00, 0x00, 0x00, 0x00]
+    if ch == 0x5A: return [0x00, 0x00, 0xFE, 0xC6, 0x86, 0x0C, 0x18, 0x30, 0x60, 0xC2, 0xC6, 0xFE, 0x00, 0x00, 0x00, 0x00]
+    # [ \ ] ^ _ `
+    if ch == 0x5B: return [0x00, 0x00, 0x3C, 0x30, 0x30, 0x30, 0x30, 0x30, 0x30, 0x30, 0x30, 0x3C, 0x00, 0x00, 0x00, 0x00]
+    if ch == 0x5C: return [0x00, 0x00, 0x00, 0x80, 0xC0, 0xE0, 0x70, 0x38, 0x1C, 0x0E, 0x06, 0x02, 0x00, 0x00, 0x00, 0x00]
+    if ch == 0x5D: return [0x00, 0x00, 0x3C, 0x0C, 0x0C, 0x0C, 0x0C, 0x0C, 0x0C, 0x0C, 0x0C, 0x3C, 0x00, 0x00, 0x00, 0x00]
+    if ch == 0x5E: return [0x10, 0x38, 0x6C, 0xC6, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]
+    if ch == 0x5F: return [0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xFF, 0x00, 0x00, 0x00]
+    if ch == 0x60: return [0x30, 0x30, 0x18, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]
+    # a-z
+    if ch == 0x61: return [0x00, 0x00, 0x00, 0x00, 0x00, 0x78, 0x0C, 0x7C, 0xCC, 0xCC, 0xCC, 0x76, 0x00, 0x00, 0x00, 0x00]
+    if ch == 0x62: return [0x00, 0x00, 0xE0, 0x60, 0x60, 0x78, 0x6C, 0x66, 0x66, 0x66, 0x66, 0x7C, 0x00, 0x00, 0x00, 0x00]
+    if ch == 0x63: return [0x00, 0x00, 0x00, 0x00, 0x00, 0x7C, 0xC6, 0xC0, 0xC0, 0xC0, 0xC6, 0x7C, 0x00, 0x00, 0x00, 0x00]
+    if ch == 0x64: return [0x00, 0x00, 0x1C, 0x0C, 0x0C, 0x3C, 0x6C, 0xCC, 0xCC, 0xCC, 0xCC, 0x76, 0x00, 0x00, 0x00, 0x00]
+    if ch == 0x65: return [0x00, 0x00, 0x00, 0x00, 0x00, 0x7C, 0xC6, 0xFE, 0xC0, 0xC0, 0xC6, 0x7C, 0x00, 0x00, 0x00, 0x00]
+    if ch == 0x66: return [0x00, 0x00, 0x38, 0x6C, 0x64, 0x60, 0xF0, 0x60, 0x60, 0x60, 0x60, 0xF0, 0x00, 0x00, 0x00, 0x00]
+    if ch == 0x67: return [0x00, 0x00, 0x00, 0x00, 0x00, 0x76, 0xCC, 0xCC, 0xCC, 0xCC, 0xCC, 0x7C, 0x0C, 0xCC, 0x78, 0x00]
+    if ch == 0x68: return [0x00, 0x00, 0xE0, 0x60, 0x60, 0x6C, 0x76, 0x66, 0x66, 0x66, 0x66, 0xE6, 0x00, 0x00, 0x00, 0x00]
+    if ch == 0x69: return [0x00, 0x00, 0x18, 0x18, 0x00, 0x38, 0x18, 0x18, 0x18, 0x18, 0x18, 0x3C, 0x00, 0x00, 0x00, 0x00]
+    if ch == 0x6A: return [0x00, 0x00, 0x06, 0x06, 0x00, 0x0E, 0x06, 0x06, 0x06, 0x06, 0x06, 0x06, 0x66, 0x66, 0x3C, 0x00]
+    if ch == 0x6B: return [0x00, 0x00, 0xE0, 0x60, 0x60, 0x66, 0x6C, 0x78, 0x78, 0x6C, 0x66, 0xE6, 0x00, 0x00, 0x00, 0x00]
+    if ch == 0x6C: return [0x00, 0x00, 0x38, 0x18, 0x18, 0x18, 0x18, 0x18, 0x18, 0x18, 0x18, 0x3C, 0x00, 0x00, 0x00, 0x00]
+    if ch == 0x6D: return [0x00, 0x00, 0x00, 0x00, 0x00, 0xEC, 0xFE, 0xD6, 0xD6, 0xD6, 0xD6, 0xC6, 0x00, 0x00, 0x00, 0x00]
+    if ch == 0x6E: return [0x00, 0x00, 0x00, 0x00, 0x00, 0xDC, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x00, 0x00, 0x00, 0x00]
+    if ch == 0x6F: return [0x00, 0x00, 0x00, 0x00, 0x00, 0x7C, 0xC6, 0xC6, 0xC6, 0xC6, 0xC6, 0x7C, 0x00, 0x00, 0x00, 0x00]
+    if ch == 0x70: return [0x00, 0x00, 0x00, 0x00, 0x00, 0xDC, 0x66, 0x66, 0x66, 0x66, 0x66, 0x7C, 0x60, 0x60, 0xF0, 0x00]
+    if ch == 0x71: return [0x00, 0x00, 0x00, 0x00, 0x00, 0x76, 0xCC, 0xCC, 0xCC, 0xCC, 0xCC, 0x7C, 0x0C, 0x0C, 0x1E, 0x00]
+    if ch == 0x72: return [0x00, 0x00, 0x00, 0x00, 0x00, 0xDC, 0x76, 0x66, 0x60, 0x60, 0x60, 0xF0, 0x00, 0x00, 0x00, 0x00]
+    if ch == 0x73: return [0x00, 0x00, 0x00, 0x00, 0x00, 0x7C, 0xC6, 0x60, 0x38, 0x0C, 0xC6, 0x7C, 0x00, 0x00, 0x00, 0x00]
+    if ch == 0x74: return [0x00, 0x00, 0x10, 0x30, 0x30, 0xFC, 0x30, 0x30, 0x30, 0x30, 0x36, 0x1C, 0x00, 0x00, 0x00, 0x00]
+    if ch == 0x75: return [0x00, 0x00, 0x00, 0x00, 0x00, 0xCC, 0xCC, 0xCC, 0xCC, 0xCC, 0xCC, 0x76, 0x00, 0x00, 0x00, 0x00]
+    if ch == 0x76: return [0x00, 0x00, 0x00, 0x00, 0x00, 0xC6, 0xC6, 0xC6, 0xC6, 0xC6, 0x6C, 0x38, 0x00, 0x00, 0x00, 0x00]
+    if ch == 0x77: return [0x00, 0x00, 0x00, 0x00, 0x00, 0xC6, 0xC6, 0xD6, 0xD6, 0xD6, 0xFE, 0x6C, 0x00, 0x00, 0x00, 0x00]
+    if ch == 0x78: return [0x00, 0x00, 0x00, 0x00, 0x00, 0xC6, 0x6C, 0x38, 0x38, 0x38, 0x6C, 0xC6, 0x00, 0x00, 0x00, 0x00]
+    if ch == 0x79: return [0x00, 0x00, 0x00, 0x00, 0x00, 0xC6, 0xC6, 0xC6, 0xC6, 0xC6, 0xC6, 0x7E, 0x06, 0x0C, 0xF8, 0x00]
+    if ch == 0x7A: return [0x00, 0x00, 0x00, 0x00, 0x00, 0xFE, 0xCC, 0x18, 0x30, 0x60, 0xC6, 0xFE, 0x00, 0x00, 0x00, 0x00]
+    # { | } ~
+    if ch == 0x7B: return [0x00, 0x00, 0x0E, 0x18, 0x18, 0x18, 0x70, 0x18, 0x18, 0x18, 0x18, 0x0E, 0x00, 0x00, 0x00, 0x00]
+    if ch == 0x7C: return [0x00, 0x00, 0x18, 0x18, 0x18, 0x18, 0x00, 0x18, 0x18, 0x18, 0x18, 0x18, 0x00, 0x00, 0x00, 0x00]
+    if ch == 0x7D: return [0x00, 0x00, 0x70, 0x18, 0x18, 0x18, 0x0E, 0x18, 0x18, 0x18, 0x18, 0x70, 0x00, 0x00, 0x00, 0x00]
+    if ch == 0x7E: return [0x00, 0x00, 0x76, 0xDC, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]
+    # Default: blank glyph for any other character
+    return [0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]
+
+fn draw_char_to_buffer(buffer: [u32], buf_w: i32, buf_h: i32, x: i32, y: i32, ch: i32, color: u32, clip_stack: [ClipRect]):
+    """Draw a single 8x16 VGA glyph into the pixel buffer."""
+    val glyph = glyph_8x16(ch)
+    var row: i32 = 0
+    while row < 16:
+        val bits = glyph[row]
+        var col: i32 = 0
+        while col < 8:
+            val mask = 0x80 >> col
+            if (bits & mask) != 0:
+                put_pixel(buffer, buf_w, buf_h, x + col, y + row, color, clip_stack)
+            col = col + 1
+        row = row + 1
+
+fn draw_text_to_buffer(buffer: [u32], buf_w: i32, buf_h: i32, x: i32, y: i32, text_str: text, color: u32, clip_stack: [ClipRect]):
+    """Draw a text string using the 8x16 VGA font (legacy fallback)."""
+    var cx = x
+    val n = text_str.len()
+    var i: i32 = 0
+    while i < n:
+        val ch_code = text_str.char_code_at(i).to_i32()
+        draw_char_to_buffer(buffer, buf_w, buf_h, cx, y, ch_code, color, clip_stack)
+        cx = cx + 8
+        i = i + 1
+
+# Shared font renderer instance (lazy-initialized)
+var _font_renderer: FontRenderer? = nil
+
+fn get_font_renderer() -> FontRenderer:
+    if val Some(r) = _font_renderer:
+        return r
+    val r = FontRenderer.new()
+    _font_renderer = r
+    r
+
+fn draw_text_scaled(buffer: [u32], buf_w: i32, buf_h: i32, x: i32, y: i32,
+                    text_str: text, color: u32, font_size: i32, clip_stack: [ClipRect]):
+    """Draw text using the shared font renderer with vector/bitmap auto-selection.
+    Supports anti-aliased vector glyphs when available, falls back to scaled bitmap.
+    """
+    var renderer = get_font_renderer()
+    renderer.render_text(buffer, buf_w, buf_h, x, y, text_str, color, font_size)
+
+# ============================================================================
+# Main executor
+# ============================================================================
+
+fn execute_scene_to_buffer(scene: RenderScene, buffer: [u32], buf_w: i32, buf_h: i32) -> [u32]:
+    """Execute all SceneCommands in a RenderScene, drawing into a flat u32 pixel buffer.
+
+    The buffer must be pre-allocated with at least buf_w * buf_h elements.
+    Pixel format is ARGB (same as SceneCommand.color).
+
+    Returns the (mutated) buffer for callers that still capture the result.
+    """
+    var clip_stack: [ClipRect] = []
+
+    var i: i32 = 0
+    while i < scene.commands.len():
+        val cmd = scene.commands[i]
+
+        if cmd.kind == "fill_rect":
+            draw_fill_rect(buffer, buf_w, buf_h, cmd.x, cmd.y, cmd.width, cmd.height, cmd.color, clip_stack)
+
+        if cmd.kind == "stroke_rect":
+            val sw = if cmd.stroke_width > 0: cmd.stroke_width else: 1
+            draw_stroke_rect(buffer, buf_w, buf_h, cmd.x, cmd.y, cmd.width, cmd.height, cmd.color, sw, clip_stack)
+
+        if cmd.kind == "text":
+            draw_text_to_buffer(buffer, buf_w, buf_h, cmd.x, cmd.y, cmd.text_val, cmd.color, clip_stack)
+
+        if cmd.kind == "line":
+            # x/y = start, width/height = end point
+            draw_line(buffer, buf_w, buf_h, cmd.x, cmd.y, cmd.width, cmd.height, cmd.color, clip_stack)
+
+        if cmd.kind == "circle":
+            draw_circle_outline(buffer, buf_w, buf_h, cmd.x, cmd.y, cmd.width, cmd.color, clip_stack)
+
+        if cmd.kind == "circle_filled":
+            draw_circle_filled(buffer, buf_w, buf_h, cmd.x, cmd.y, cmd.width, cmd.color, clip_stack)
+
+        if cmd.kind == "rounded_rect":
+            draw_rounded_rect(buffer, buf_w, buf_h, cmd.x, cmd.y, cmd.width, cmd.height, cmd.color, cmd.border_radius, clip_stack)
+
+        if cmd.kind == "gradient_rect":
+            draw_gradient_rect(buffer, buf_w, buf_h, cmd.x, cmd.y, cmd.width, cmd.height, cmd.color, cmd.color2, clip_stack)
+
+        if cmd.kind == "blur_rect":
+            # Backdrop blur: read pixels from buffer, apply box blur, write back
+            val blur_radius = cmd.font_size  # blur radius stored in font_size
+            if blur_radius > 0:
+                apply_box_blur(buffer, buf_w, buf_h, cmd.x, cmd.y, cmd.width, cmd.height, blur_radius)
+
+        if cmd.kind == "image":
+            draw_image(buffer, buf_w, buf_h, cmd.x, cmd.y, cmd.width, cmd.height, cmd.pixels, cmd.pixel_width, cmd.pixel_height, clip_stack)
+
+        if cmd.kind == "clip_push":
+            clip_stack.push(ClipRect(x: cmd.x, y: cmd.y, w: cmd.width, h: cmd.height))
+
+        if cmd.kind == "clip_pop":
+            if clip_stack.len() > 0:
+                clip_stack.pop()
+
+        i = i + 1
+
+    return buffer
+
+# ============================================================================
+# Query helpers
+# ============================================================================
+
+fn scene_command_count(scene: RenderScene) -> i32:
+    """Return the number of commands in the scene."""
+    scene.commands.len()
+
+fn scene_bounds(scene: RenderScene) -> DamageRect:
+    """Compute the bounding box enclosing all commands in the scene.
+
+    Returns a DamageRect with the smallest axis-aligned rectangle that
+    covers every command's extent.  Commands with zero area are skipped.
+    """
+    var min_x: i32 = 2147483647  # i32 max
+    var min_y: i32 = 2147483647
+    var max_x: i32 = 0
+    var max_y: i32 = 0
+    var has_any: bool = false
+
+    var i: i32 = 0
+    while i < scene.commands.len():
+        val cmd = scene.commands[i]
+        var cx0 = cmd.x
+        var cy0 = cmd.y
+        var cx1 = cmd.x
+        var cy1 = cmd.y
+
+        if cmd.kind == "fill_rect" or cmd.kind == "stroke_rect" or cmd.kind == "rounded_rect" or cmd.kind == "gradient_rect" or cmd.kind == "image" or cmd.kind == "clip_push":
+            cx1 = cmd.x + cmd.width
+            cy1 = cmd.y + cmd.height
+
+        if cmd.kind == "text":
+            val tw = cmd.text_val.len() * 8
+            cx1 = cmd.x + tw
+            cy1 = cmd.y + 16
+
+        if cmd.kind == "line":
+            # width/height are actually x2/y2
+            val lx0 = if cmd.x < cmd.width: cmd.x else: cmd.width
+            val ly0 = if cmd.y < cmd.height: cmd.y else: cmd.height
+            val lx1 = if cmd.x > cmd.width: cmd.x else: cmd.width
+            val ly1 = if cmd.y > cmd.height: cmd.y else: cmd.height
+            cx0 = lx0
+            cy0 = ly0
+            cx1 = lx1 + 1
+            cy1 = ly1 + 1
+
+        if cmd.kind == "circle" or cmd.kind == "circle_filled":
+            val r = cmd.width
+            cx0 = cmd.x - r
+            cy0 = cmd.y - r
+            cx1 = cmd.x + r + 1
+            cy1 = cmd.y + r + 1
+
+        # Skip clip_pop and no-area commands
+        if cmd.kind != "clip_pop":
+            if cx0 < min_x: min_x = cx0
+            if cy0 < min_y: min_y = cy0
+            if cx1 > max_x: max_x = cx1
+            if cy1 > max_y: max_y = cy1
+            has_any = true
+
+        i = i + 1
+
+    if not has_any:
+        return damage_rect(0, 0, 0, 0)
+
+    val bx = if min_x < 0: 0 else: min_x.to_u32()
+    val by = if min_y < 0: 0 else: min_y.to_u32()
+    val bw = (max_x - min_x).to_u32()
+    val bh = (max_y - min_y).to_u32()
+    damage_rect(bx, by, bw, bh)
+
+# ============================================================================
+# Box Blur (for backdrop-filter)
+# ============================================================================
+
+fn apply_box_blur(buffer: [u32], buf_w: i32, buf_h: i32, rx: i32, ry: i32, rw: i32, rh: i32, radius: i32):
+    """Apply a box blur to a rectangular region of the pixel buffer.
+
+    Uses a separable two-pass approach (horizontal then vertical) with
+    a running sum accumulator for O(n) per-pixel cost regardless of radius.
+
+    Algorithm adapted from glass_effects_pure.spl and glass_render.c.
+    """
+    # Clamp region to buffer bounds
+    val x0 = if rx < 0: 0 else: rx
+    val y0 = if ry < 0: 0 else: ry
+    val x1 = if rx + rw > buf_w: buf_w else: rx + rw
+    val y1 = if ry + rh > buf_h: buf_h else: ry + rh
+
+    val region_w = x1 - x0
+    val region_h = y1 - y0
+    if region_w <= 0 or region_h <= 0:
+        return
+
+    val r = if radius > 50: 50 else: radius  # cap for performance
+    val kernel = r * 2 + 1
+
+    # Horizontal pass: blur each row
+    var y: i32 = y0
+    while y < y1:
+        # Read row into temp buffer
+        var row_r: [i32] = []
+        var row_g: [i32] = []
+        var row_b: [i32] = []
+        var xi: i32 = x0
+        while xi < x1:
+            val idx = y * buf_w + xi
+            val px = buffer[idx]
+            row_r.push(((px >> 16) & 0xFF).to_i32())
+            row_g.push(((px >> 8) & 0xFF).to_i32())
+            row_b.push((px & 0xFF).to_i32())
+            xi = xi + 1
+
+        # Accumulate and write back
+        xi = 0
+        while xi < region_w:
+            var sum_r: i32 = 0
+            var sum_g: i32 = 0
+            var sum_b: i32 = 0
+            var count: i32 = 0
+
+            var ki: i32 = -r
+            while ki <= r:
+                val sx = xi + ki
+                if sx >= 0 and sx < region_w:
+                    sum_r = sum_r + row_r[sx]
+                    sum_g = sum_g + row_g[sx]
+                    sum_b = sum_b + row_b[sx]
+                    count = count + 1
+                ki = ki + 1
+
+            if count > 0:
+                val avg_r = (sum_r / count).to_u32()
+                val avg_g = (sum_g / count).to_u32()
+                val avg_b = (sum_b / count).to_u32()
+                val idx = y * buf_w + (x0 + xi)
+                val alpha = (buffer[idx] >> 24) & 0xFF
+                buffer[idx] = (alpha << 24) | (avg_r << 16) | (avg_g << 8) | avg_b
+
+            xi = xi + 1
+        y = y + 1
+
+    # Vertical pass: blur each column
+    var x: i32 = x0
+    while x < x1:
+        # Read column into temp buffer
+        var col_r: [i32] = []
+        var col_g: [i32] = []
+        var col_b: [i32] = []
+        var yi: i32 = y0
+        while yi < y1:
+            val idx = yi * buf_w + x
+            val px = buffer[idx]
+            col_r.push(((px >> 16) & 0xFF).to_i32())
+            col_g.push(((px >> 8) & 0xFF).to_i32())
+            col_b.push((px & 0xFF).to_i32())
+            yi = yi + 1
+
+        # Accumulate and write back
+        yi = 0
+        while yi < region_h:
+            var sum_r: i32 = 0
+            var sum_g: i32 = 0
+            var sum_b: i32 = 0
+            var count: i32 = 0
+
+            var ki: i32 = -r
+            while ki <= r:
+                val sy = yi + ki
+                if sy >= 0 and sy < region_h:
+                    sum_r = sum_r + col_r[sy]
+                    sum_g = sum_g + col_g[sy]
+                    sum_b = sum_b + col_b[sy]
+                    count = count + 1
+                ki = ki + 1
+
+            if count > 0:
+                val avg_r = (sum_r / count).to_u32()
+                val avg_g = (sum_g / count).to_u32()
+                val avg_b = (sum_b / count).to_u32()
+                val idx = (y0 + yi) * buf_w + x
+                val alpha = (buffer[idx] >> 24) & 0xFF
+                buffer[idx] = (alpha << 24) | (avg_r << 16) | (avg_g << 8) | avg_b
+
+            yi = yi + 1
+        x = x + 1

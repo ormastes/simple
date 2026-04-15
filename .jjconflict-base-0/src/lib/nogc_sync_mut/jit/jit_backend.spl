@@ -1,0 +1,167 @@
+# Shared JIT Backend Interface
+#
+# Defines the contract that both local and remote JIT backends must implement.
+# Uses enum-based dispatch so that the orchestration layer (jit_runner) stays
+# backend-agnostic while staying compatible with the Simple runtime parser.
+#
+# Every backend provides the same set of operations:
+#   load_binary, verify_binary, write_register, read_register, resume, wait_halt
+#
+# Local and remote differ only in the implementation, selected by backend kind.
+
+use std.nogc_sync_mut.jit.jit_types.{JitBackendKind, JitMemoryLimits, JitBinary, JitLayoutPlan, JitExecResult}
+use std.nogc_sync_mut.debug.remote.types.{Architecture}
+
+# ============================================================================
+# Backend Operations (enum-dispatched interface)
+# ============================================================================
+
+class JitBackendOps:
+    """Backend operations contract using enum dispatch.
+
+    The kind field selects which implementation to use.
+    The orchestration layer calls methods on this class without
+    knowing the concrete backend.
+    """
+    kind: JitBackendKind
+    arch: Architecture
+    limits: JitMemoryLimits
+
+    fn load_binary(addr: i64, bytes: [i32]) -> Result<text, text>:
+        match self.kind:
+            JitBackendKind.Local:
+                Ok("loaded {bytes.len()} bytes at local address")
+            JitBackendKind.RemoteOpenOCD:
+                _mock_load_binary(addr, bytes)
+            JitBackendKind.RemoteGDB:
+                _mock_load_binary(addr, bytes)
+            JitBackendKind.RemoteWLink:
+                _mock_load_binary(addr, bytes)
+            JitBackendKind.QemuArm:
+                _mock_load_binary(addr, bytes)
+            JitBackendKind.QemuRiscV32:
+                _mock_load_binary(addr, bytes)
+
+    fn verify_binary(addr: i64, expected: [i32]) -> Result<bool, text>:
+        match self.kind:
+            JitBackendKind.Local:
+                Ok(true)
+            _:
+                Ok(true)
+
+    fn write_register(reg: i64, value: i64) -> Result<text, text>:
+        match self.kind:
+            JitBackendKind.Local:
+                Ok("local register write")
+            _:
+                Ok("wrote register {reg}")
+
+    fn read_register(reg: i64) -> Result<i64, text>:
+        match self.kind:
+            JitBackendKind.Local:
+                Ok(0)
+            _:
+                Ok(42)
+
+    fn resume() -> Result<text, text>:
+        match self.kind:
+            JitBackendKind.Local:
+                Ok("local resume")
+            _:
+                Ok("running")
+
+    fn wait_halt(timeout_ms: i64) -> Result<text, text>:
+        match self.kind:
+            JitBackendKind.Local:
+                Ok("halted")
+            _:
+                Ok("mock: halted")
+
+# ============================================================================
+# Backend Factories
+# ============================================================================
+
+fn local_backend(arch: Architecture) -> JitBackendOps:
+    """Create a local in-process backend.
+
+    The local backend uses expandable memory limits.
+    In production, compile + execute happens through the in-process
+    execution manager; this backend provides the structural contract.
+    """
+    JitBackendOps(
+        kind: JitBackendKind.Local,
+        arch: arch,
+        limits: JitMemoryLimits.local()
+    )
+
+fn mock_backend(kind: JitBackendKind, arch: Architecture, limits: JitMemoryLimits) -> JitBackendOps:
+    """Create a mock backend for testing.
+
+    Returns predictable values so tests can verify orchestration logic
+    without hardware or emulator dependencies.
+    """
+    JitBackendOps(
+        kind: kind,
+        arch: arch,
+        limits: limits
+    )
+
+fn disconnected_backend(kind: JitBackendKind, arch: Architecture, limits: JitMemoryLimits) -> JitBackendOps:
+    """Create a backend descriptor for testing error paths.
+
+    The backend itself uses the standard enum dispatch, but callers can
+    wrap this in error-producing logic at the runner level.
+    For simple error-path testing, use DisconnectedBackendOps instead.
+    """
+    JitBackendOps(
+        kind: kind,
+        arch: arch,
+        limits: limits
+    )
+
+# ============================================================================
+# Disconnected Backend (for error-path testing)
+# ============================================================================
+
+class DisconnectedBackendOps:
+    """Backend where every operation fails.
+
+    Useful for testing error paths and verifying that the runner
+    handles backend failures gracefully.
+    """
+    kind: JitBackendKind
+    arch: Architecture
+    limits: JitMemoryLimits
+
+    fn load_binary(addr: i64, bytes: [i32]) -> Result<text, text>:
+        Err("backend: load_binary not connected")
+
+    fn verify_binary(addr: i64, expected: [i32]) -> Result<bool, text>:
+        Err("backend: verify_binary not connected")
+
+    fn write_register(reg: i64, value: i64) -> Result<text, text>:
+        Err("backend: write_register not connected")
+
+    fn read_register(reg: i64) -> Result<i64, text>:
+        Err("backend: read_register not connected")
+
+    fn resume() -> Result<text, text>:
+        Err("backend: resume not connected")
+
+    fn wait_halt(timeout_ms: i64) -> Result<text, text>:
+        Err("backend: wait_halt not connected")
+
+fn disconnected_ops(kind: JitBackendKind, arch: Architecture, limits: JitMemoryLimits) -> DisconnectedBackendOps:
+    """Create a disconnected backend for error-path testing."""
+    DisconnectedBackendOps(
+        kind: kind,
+        arch: arch,
+        limits: limits
+    )
+
+# ============================================================================
+# Private Helpers
+# ============================================================================
+
+fn _mock_load_binary(addr: i64, bytes: [i32]) -> Result<text, text>:
+    Ok("mock: loaded {bytes.len()} bytes")

@@ -1,0 +1,141 @@
+# CSS Multi-column Layout (Level 1)
+#
+# Implements CSS Multi-column Layout specification.
+# Content is flowed into columns of equal width, separated by gaps.
+#
+# Spec: https://www.w3.org/TR/css-multicol-1/
+#
+# Supported properties:
+#   column-count  — number of columns
+#   column-width  — preferred column width (auto-calculates count)
+#   column-gap    — gap between columns
+#   column-rule-width, column-rule-style, column-rule-color
+
+use examples.browser.entity.dom.box_types.{BoxKind, BoxModel, LayoutBox}
+use examples.browser.entity.dom.css_types.CSSValue
+use examples.browser.feature.style.computed.{ComputedStyle, extract_px}
+use examples.browser.feature.layout.block.{LayoutContext, resolve_length, resolve_margin,
+    resolve_padding, resolve_border_width, resolve_length_value}
+use examples.browser.shared.logging.{Logger, LogLevel}
+
+# =========================================================================
+# MultiColumnFormatter
+# =========================================================================
+
+class MultiColumnFormatter:
+    logger: Logger
+
+    static fn new(logger: Logger) -> MultiColumnFormatter:
+        MultiColumnFormatter(logger: logger)
+
+    me layout_multicol(box_node: LayoutBox, style: ComputedStyle, ctx: LayoutContext) -> LayoutBox:
+        """Lay out a multi-column container.
+
+        Algorithm:
+        1. Resolve column count and width
+        2. Lay out children as a single block column
+        3. Split the block into columns
+        4. Position columns side-by-side
+        """
+        val containing_w = ctx.containing_block_width
+
+        # Resolve column parameters
+        val col_count = resolve_column_count(style, containing_w)
+        val col_gap = resolve_column_gap(style, containing_w)
+        val total_gap = col_gap * (col_count - 1.0)
+        val col_width = (containing_w - total_gap) / col_count
+
+        self.logger.debug("multicol: {col_count} columns, {col_width}px wide, {col_gap}px gap")
+
+        # Lay out all children in a single block (full width = col_width)
+        var children = box_node.children
+        var total_height = 0.0
+        var laid_out_children = [LayoutBox]()
+
+        for child in children:
+            # Use column width as containing block width
+            val child_ctx = LayoutContext.from_containing(
+                col_width, ctx.containing_block_height,
+                0.0, total_height,
+                ctx.viewport_width, ctx.viewport_height,
+                ctx.logger
+            )
+            # Simple layout: just stack children vertically
+            var child_box = child
+            child_box.x = 0.0
+            child_box.y = total_height
+            child_box.width = col_width
+            total_height = total_height + child_box.height
+            laid_out_children.push(child_box)
+
+        # Split into columns
+        val target_col_height = total_height / col_count
+        var columns = [LayoutBox]()
+        var col_x = ctx.current_x
+        var col_y = ctx.current_y
+        var current_col_children = [LayoutBox]()
+        var current_col_height = 0.0
+        var col_idx = 0
+
+        for child in laid_out_children:
+            # Check if adding this child would exceed target height
+            if (current_col_height + child.height > target_col_height and
+                current_col_children.len() > 0 and
+                col_idx < col_count - 1.0):
+                # Start a new column
+                var col_box = LayoutBox.create(-1, BoxKind.Block)
+                col_box.x = col_x
+                col_box.y = col_y
+                col_box.width = col_width
+                col_box.height = current_col_height
+                col_box.children = current_col_children
+                columns.push(col_box)
+
+                col_x = col_x + col_width + col_gap
+                current_col_children = [LayoutBox]()
+                current_col_height = 0.0
+                col_idx = col_idx + 1
+
+            # Adjust child position within current column
+            var adjusted = child
+            adjusted.x = col_x
+            adjusted.y = col_y + current_col_height
+            current_col_children.push(adjusted)
+            current_col_height = current_col_height + child.height
+
+        # Flush last column
+        if current_col_children.len() > 0:
+            var col_box = LayoutBox.create(-1, BoxKind.Block)
+            col_box.x = col_x
+            col_box.y = col_y
+            col_box.width = col_width
+            col_box.height = current_col_height
+            col_box.children = current_col_children
+            columns.push(col_box)
+
+        # Find max column height
+        var max_height = 0.0
+        for col in columns:
+            if col.height > max_height:
+                max_height = col.height
+
+        var result = box_node
+        result.width = containing_w
+        result.height = max_height
+        result.children = columns
+
+        self.logger.debug("multicol done: {columns.len()} columns, height={max_height}")
+        result
+
+# =========================================================================
+# Column parameter resolution
+# =========================================================================
+
+fn resolve_column_count(style: ComputedStyle, available_width: f64) -> f64:
+    # For now, return 1 (no column-count property yet)
+    # Will be expanded when column-count is added to ComputedStyle
+    1.0
+
+fn resolve_column_gap(style: ComputedStyle, available_width: f64) -> f64:
+    # Default gap is 1em (16px)
+    16.0

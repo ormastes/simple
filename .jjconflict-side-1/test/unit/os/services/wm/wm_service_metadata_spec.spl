@@ -1,0 +1,83 @@
+# WmService Ownership Metadata Tests
+#
+# Verifies that ownership records preserve process/app identity metadata
+# and expose shell-friendly query helpers.
+
+use std.spec
+use os.services.wm.wm_service.{WmService}
+use os.services.launcher.launcher.{launcher_init, launcher_register, launcher_record_process}
+
+extern fn unsafe_addr_of(ref: any) -> u64
+
+fn push_u32(buf: [u8], value: u32):
+    buf.push((value and 0xFF).to_u8())
+    buf.push(((value >> 8) and 0xFF).to_u8())
+    buf.push(((value >> 16) and 0xFF).to_u8())
+    buf.push(((value >> 24) and 0xFF).to_u8())
+
+fn push_i32(buf: [u8], value: i32):
+    push_u32(buf, value.to_u32())
+
+fn push_u64(buf: [u8], value: u64):
+    buf.push((value and 0xFF).to_u8())
+    buf.push(((value >> 8) and 0xFF).to_u8())
+    buf.push(((value >> 16) and 0xFF).to_u8())
+    buf.push(((value >> 24) and 0xFF).to_u8())
+    buf.push(((value >> 32) and 0xFF).to_u8())
+    buf.push(((value >> 40) and 0xFF).to_u8())
+    buf.push(((value >> 48) and 0xFF).to_u8())
+    buf.push(((value >> 56) and 0xFF).to_u8())
+
+describe "WmService ownership metadata":
+    it "stores explicit process and app identity":
+        val wm = WmService.new()
+        wm.register_window_owner_with_identity(7, 44, 1234, "app.browser")
+        expect(wm.window_owner_process_id(7)).to_equal(1234)
+        expect(wm.window_owner_app_id(7)).to_equal("app.browser")
+        expect(wm.window_count_for_process(1234)).to_equal(1)
+        expect(wm.window_ids_for_process(1234).len()).to_equal(1)
+
+    it "defaults process identity to the owning port":
+        val wm = WmService.new()
+        wm.register_window_owner(9, 55)
+        expect(wm.window_owner_process_id(9)).to_equal(55)
+        expect(wm.window_ids_for_owner_port(55).len()).to_equal(1)
+
+    it "parses create-window identity extension when provided":
+        val wm = WmService.new()
+        var payload: [u8] = []
+        push_u32(payload, 7)
+        for ch in "Browser":
+            payload.push(ch.to_u8())
+        push_i32(payload, 10)
+        push_i32(payload, 20)
+        push_i32(payload, 640)
+        push_i32(payload, 480)
+        push_u64(payload, 1234)
+        push_u32(payload, 12)
+        for ch in "/sys/browser":
+            payload.push(ch.to_u8())
+        val action = wm.parse_create_window(77, unsafe_addr_of(payload), payload.len().to_u32())
+        expect(action.process_id).to_equal(1234)
+        expect(action.app_id).to_equal("/sys/browser")
+
+    it "falls back to launcher-owned app identity when app_id is omitted":
+        launcher_init()
+        launcher_register("Browser Demo", "/sys/apps/browser_demo", "B", 0x42, 0)
+        val recorded = launcher_record_process(4321, 0, "running", 0, 0, true)
+        expect(recorded).to_be(true)
+
+        val wm = WmService.new()
+        var payload: [u8] = []
+        push_u32(payload, 7)
+        for ch in "Browser":
+            payload.push(ch.to_u8())
+        push_i32(payload, 10)
+        push_i32(payload, 20)
+        push_i32(payload, 640)
+        push_i32(payload, 480)
+        push_u64(payload, 4321)
+
+        val action = wm.parse_create_window(77, unsafe_addr_of(payload), payload.len().to_u32())
+        expect(action.process_id).to_equal(4321)
+        expect(action.app_id).to_equal("/sys/apps/browser_demo")

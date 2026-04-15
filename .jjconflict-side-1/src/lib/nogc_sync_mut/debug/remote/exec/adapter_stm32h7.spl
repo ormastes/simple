@@ -1,0 +1,189 @@
+# STM32H7 Adapter
+#
+# ExecTarget implementation for STM32H7 real hardware via OpenOCD telnet.
+# This follows the same control model already proven in the STM32H7 E2E spec:
+# reset halt -> write SRAM -> set registers -> resume -> read back result.
+#
+# Feature ID: #RJE-011
+
+use std.io_runtime.{shell}
+use std.nogc_sync_mut.debug.remote.exec.types.{
+    MemoryMap, Architecture, arm_reg_name
+}
+use std.nogc_sync_mut.debug.remote.exec.manager.{RemoteExecutionManager}
+use std.nogc_sync_mut.jit.jit_util.{hex_0x_i64, hex_i32, parse_i64, parse_hex, extract_reg_value, parse_mdw_bytes}
+use std.nogc_sync_mut.debug.remote.exec.capability_report.{CapabilityReport, probe_openocd}
+
+fn default_stm32h7_gdb_port() -> i32:
+    23333
+
+fn default_stm32h7_telnet_port() -> i32:
+    24444
+
+fn default_stm32h7_tcl_port() -> i32:
+    26666
+
+fn stm32h7_board_cfg() -> text:
+    "board/stm32h7x3i_eval.cfg"
+
+fn stm32h7_stlink_serial() -> text:
+    "002600213137510833333639"
+
+class Stm32H7Adapter:
+    """STM32H7 adapter using OpenOCD telnet for SRAM execution."""
+    openocd_pid: i64
+    gdb_port: i32
+    telnet_port: i32
+    tcl_port: i32
+    memory_map: MemoryMap
+    connected: bool
+
+    static fn new() -> Stm32H7Adapter:
+        Stm32H7Adapter(
+            openocd_pid: 0,
+            gdb_port: default_stm32h7_gdb_port(),
+            telnet_port: default_stm32h7_telnet_port(),
+            tcl_port: default_stm32h7_tcl_port(),
+            memory_map: MemoryMap.stm32h7(),
+            connected: false
+        )
+
+    static fn with_ports(gdb_port: i32, telnet_port: i32) -> Stm32H7Adapter:
+        Stm32H7Adapter(
+            openocd_pid: 0,
+            gdb_port: gdb_port,
+            telnet_port: telnet_port,
+            tcl_port: default_stm32h7_tcl_port(),
+            memory_map: MemoryMap.stm32h7(),
+            connected: false
+        )
+
+    fn is_available() -> bool:
+        val result = shell("command -v openocd >/dev/null 2>&1")
+        result.exit_code == 0
+
+    fn capability_report() -> CapabilityReport:
+        probe_openocd()
+
+    me connect() -> Result<text, text>:
+        if not self.is_available():
+            return Err("openocd not available")
+
+        val cmd = "openocd -f {stm32h7_board_cfg()} -c 'adapter serial {stm32h7_stlink_serial()}' -c 'gdb_port {self.gdb_port}' -c 'telnet_port {self.telnet_port}' -c 'tcl_port {self.tcl_port}' >/dev/null 2>&1 & echo $!"
+        val start = shell(cmd)
+        val pid_text = start.stdout.trim()
+        self.openocd_pid = if pid_text.len() > 0: parse_i64(pid_text) else: -1
+
+        if self.openocd_pid <= 0:
+            return Err("failed to launch OpenOCD")
+
+        var tries = 0
+        while tries < 25:
+            shell("sleep 0.2")
+            val halt = self.telnet_cmd("reset halt")
+            if halt.contains("halted"):
+                self.connected = true
+                return Ok("connected to STM32H7 via OpenOCD telnet on port {self.telnet_port}")
+            tries = tries + 1
+
+        self.stop_openocd()
+        Err("OpenOCD telnet port did not become ready")
+
+    me disconnect():
+        self.stop_openocd()
+        self.connected = false
+
+    me stop_openocd():
+        if self.openocd_pid > 0:
+            self.telnet_cmd("shutdown")
+            shell("kill {self.openocd_pid} >/dev/null 2>&1 || true")
+            shell("sleep 0.1")
+            shell("kill -9 {self.openocd_pid} >/dev/null 2>&1 || true")
+            self.openocd_pid = 0
+
+    fn telnet_cmd(cmd: text) -> text:
+        val result = shell("echo '{cmd}' | nc -q 1 localhost {self.telnet_port} 2>/dev/null")
+        result.stdout
+
+    fn write_code(addr: i64, bytes: [i32]) -> Result<text, text>:
+        if not self.connected:
+            return Err("not connected")
+
+        var offset = 0
+        while offset < bytes.len():
+            var b0 = bytes[offset]
+            var b1 = if offset + 1 < bytes.len(): bytes[offset + 1] else: 0
+            var b2 = if offset + 2 < bytes.len(): bytes[offset + 2] else: 0
+            var b3 = if offset + 3 < bytes.len(): bytes[offset + 3] else: 0
+            val word = (b3 << 24) + (b2 << 16) + (b1 << 8) + b0
+            val out = self.telnet_cmd("mww {hex_0x_i64(addr + offset)} {hex_i32(word)}")
+            if out.lower().contains("error"):
+                return Err(out.trim())
+            offset = offset + 4
+        Ok("wrote {bytes.len()} bytes")
+
+    fn read_code(addr: i64, size: i64) -> Result<[i32], text>:
+        if not self.connected:
+            return Err("not connected")
+
+        var words = size / 4
+        if (size % 4) != 0:
+            words = words + 1
+        val out = self.telnet_cmd("mdw {hex_0x_i64(addr)} {words}")
+        if out.trim() == "":
+            return Err("empty mdw response")
+        val bytes = parse_mdw_bytes(out, size)
+        if bytes.len() < size:
+            return Err("short mdw response")
+        Ok(bytes)
+
+    fn write_register(reg: i64, value: i64) -> Result<text, text>:
+        if not self.connected:
+            return Err("not connected")
+        val name = arm_reg_name(reg)
+        val out = self.telnet_cmd("reg {name} {hex_0x_i64(value)}")
+        if out.lower().contains("error"):
+            return Err(out.trim())
+        Ok(out)
+
+    fn read_register(reg: i64) -> Result<i64, text>:
+        if not self.connected:
+            return Err("not connected")
+        val name = arm_reg_name(reg)
+        val out = self.telnet_cmd("reg {name}")
+        val value = extract_reg_value(out)
+        if value < 0:
+            return Err("failed to parse register {name}: {out.trim()}")
+        Ok(value)
+
+    fn resume() -> Result<text, text>:
+        if not self.connected:
+            return Err("not connected")
+        self.telnet_cmd("resume")
+        Ok("running")
+
+    fn wait_halt(timeout_ms: i64) -> Result<text, text>:
+        if not self.connected:
+            return Err("not connected")
+        val secs = if timeout_ms <= 0: 1 else:
+            val whole = timeout_ms / 1000
+            if whole < 1: 1 else: whole
+        shell("sleep {secs}")
+        Ok("halted")
+
+    fn create_manager() -> Result<RemoteExecutionManager, text>:
+        if not self.connected:
+            return Err("not connected — call connect() first")
+
+        Ok(RemoteExecutionManager.new(
+            arch: Architecture.Arm32,
+            memory_map: self.memory_map,
+            write_code_fn: \addr, bytes: self.write_code(addr, bytes),
+            read_code_fn: \addr, size: self.read_code(addr, size),
+            write_register_fn: \reg, val_: self.write_register(reg, val_),
+            read_register_fn: \reg: self.read_register(reg),
+            resume_fn: \: self.resume(),
+            wait_halt_fn: \timeout: self.wait_halt(timeout)
+        ))
+
+

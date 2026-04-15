@@ -1,0 +1,239 @@
+#![allow(unnamed_duplicate_typed_args)]
+# Async I/O Layer — async-by-default file operations
+#
+# All I/O operations are internally async using IPC to the VFS service.
+# Sync POSIX wrappers (in fd_io.spl) call these and block until completion.
+#
+# Design: Each async operation sends a non-blocking IPC message to the
+# VFS service and returns a request handle. The caller can poll for
+# completion or wait (blocking the thread via notification).
+
+use os.posix.errno.{EBADF, EINVAL, EIO, EAGAIN}
+use os.posix.fd_table.{fd_is_valid, fd_types, fd_flags, fd_ports, fd_offsets, FD_TYPE_FREE, FD_TYPE_SERIAL, MAX_FDS}
+use os.userlib.syscall_raw.{syscall}
+
+# Well-known VFS service IPC port
+val _VFS_PORT: u64 = 1
+
+# Syscall numbers
+val _SYS_IPC_SEND: u64 = 20
+val _SYS_IPC_RECV: u64 = 21
+val _SYS_NOTIF_CREATE: u64 = 24
+
+# Async request states
+val ASYNC_FREE: u8 = 0
+val ASYNC_PENDING: u8 = 1
+val ASYNC_COMPLETE: u8 = 2
+val ASYNC_ERROR: u8 = 3
+
+val MAX_ASYNC_REQUESTS: u64 = 128
+
+# VFS IPC method IDs (must match VFS service protocol)
+val VFS_OPEN: u32 = 1
+val VFS_READ: u32 = 2
+val VFS_WRITE: u32 = 3
+val VFS_CLOSE: u32 = 4
+val VFS_STAT: u32 = 5
+val VFS_SEEK: u32 = 6
+val VFS_READDIR: u32 = 7
+val VFS_MKDIR: u32 = 8
+
+# Async request tracking
+var req_states: [u8; 128]
+var req_fds: [i32; 128]
+var req_methods: [u32; 128]
+var req_results: [i64; 128]       # result value (bytes read, error code, etc.)
+var req_notifications: [u64; 128] # notification ID to signal on completion
+
+fn async_io_init():
+    """Initialize async I/O request pool."""
+    var i: u64 = 0
+    while i < MAX_ASYNC_REQUESTS:
+        req_states[i] = ASYNC_FREE
+        req_fds[i] = -1
+        req_methods[i] = 0
+        req_results[i] = 0
+        req_notifications[i] = 0
+        i = i + 1
+
+fn async_alloc_request() -> u64:
+    """Allocate an async request slot. Returns index, or MAX_ASYNC_REQUESTS on failure."""
+    var i: u64 = 0
+    while i < MAX_ASYNC_REQUESTS:
+        if req_states[i] == ASYNC_FREE:
+            req_states[i] = ASYNC_PENDING
+            return i
+        i = i + 1
+    MAX_ASYNC_REQUESTS
+
+fn async_free_request(req_id: u64):
+    """Free an async request slot."""
+    if req_id < MAX_ASYNC_REQUESTS:
+        req_states[req_id] = ASYNC_FREE
+
+fn async_is_complete(req_id: u64) -> bool:
+    """Check if an async request has completed."""
+    if req_id >= MAX_ASYNC_REQUESTS:
+        return true
+    req_states[req_id] == ASYNC_COMPLETE or req_states[req_id] == ASYNC_ERROR
+
+fn async_get_result(req_id: u64) -> i64:
+    """Get the result of a completed async request."""
+    if req_id >= MAX_ASYNC_REQUESTS:
+        return 0 - EIO as i64
+    req_results[req_id]
+
+# ===========================================================================
+# Async file operations
+# ===========================================================================
+
+fn async_read(fd: i32, buf_addr: u64, count: u64) -> u64:
+    """Start an async read. Returns request ID.
+
+    The VFS service will read `count` bytes from the file at the current
+    offset and write them to buf_addr. When complete, the request's
+    notification is signaled.
+    """
+    if not fd_is_valid(fd):
+        return MAX_ASYNC_REQUESTS
+    val idx: u64 = fd as u64
+
+    # Serial: direct read (synchronous for now)
+    if fd_types[idx] == FD_TYPE_SERIAL:
+        val req = async_alloc_request()
+        if req < MAX_ASYNC_REQUESTS:
+            req_fds[req] = fd
+            req_methods[req] = VFS_READ
+            # Serial read is immediate — mark complete
+            req_states[req] = ASYNC_COMPLETE
+            req_results[req] = 0  # TODO: actual serial read
+        return req
+
+    # File: send VFS_READ IPC to VFS service (port 1)
+    val req = async_alloc_request()
+    if req < MAX_ASYNC_REQUESTS:
+        req_fds[req] = fd
+        req_methods[req] = VFS_READ
+
+        # Build IPC payload: vfs_handle(u64) | offset(u64) | count(u64)
+        val vfs_handle = fd_ports[idx]
+        val offset = fd_offsets[idx]
+        var payload: [u8] = []
+        _async_push_u32(payload, VFS_READ)
+        _async_push_u64(payload, vfs_handle)
+        _async_push_u64(payload, offset)
+        _async_push_u64(payload, count)
+
+        extern fn unsafe_addr_of(ref: any) -> u64
+        val payload_ptr = unsafe_addr_of(payload)
+        val send_result = syscall(_SYS_IPC_SEND, _VFS_PORT, VFS_READ as u64, 0, payload_ptr, payload.len())
+        if send_result < 0:
+            req_states[req] = ASYNC_ERROR
+            req_results[req] = 0 - EIO as i64
+        else:
+            # Create a notification for async completion
+            val notif = syscall(_SYS_NOTIF_CREATE, 0, 0, 0, 0, 0)
+            if notif >= 0:
+                req_notifications[req] = notif as u64
+            # Mark pending — completion will be signaled via notification
+            req_states[req] = ASYNC_PENDING
+            req_results[req] = 0
+    req
+
+fn async_write(fd: i32, buf_addr: u64, count: u64) -> u64:
+    """Start an async write. Returns request ID."""
+    if not fd_is_valid(fd):
+        return MAX_ASYNC_REQUESTS
+    val idx: u64 = fd as u64
+
+    # Serial: direct write (synchronous for now)
+    if fd_types[idx] == FD_TYPE_SERIAL:
+        val req = async_alloc_request()
+        if req < MAX_ASYNC_REQUESTS:
+            req_fds[req] = fd
+            req_methods[req] = VFS_WRITE
+            req_states[req] = ASYNC_COMPLETE
+            req_results[req] = count as i64
+            # Serial write: actual byte output needs rt_port_outb wiring
+        return req
+
+    # File: send VFS_WRITE IPC to VFS service (port 1)
+    val req = async_alloc_request()
+    if req < MAX_ASYNC_REQUESTS:
+        req_fds[req] = fd
+        req_methods[req] = VFS_WRITE
+
+        # Build IPC payload: vfs_handle(u64) | offset(u64) | count(u64) | data(bytes)
+        val vfs_handle = fd_ports[idx]
+        val offset = fd_offsets[idx]
+        var payload: [u8] = []
+        _async_push_u32(payload, VFS_WRITE)
+        _async_push_u64(payload, vfs_handle)
+        _async_push_u64(payload, offset)
+        _async_push_u64(payload, count)
+        # Copy data from user buffer into payload
+        extern fn mmio_read8(addr: u64) -> u8
+        var ci: u64 = 0
+        while ci < count:
+            payload.push(mmio_read8(buf_addr + ci))
+            ci = ci + 1
+
+        extern fn unsafe_addr_of(ref: any) -> u64
+        val payload_ptr = unsafe_addr_of(payload)
+        val send_result = syscall(_SYS_IPC_SEND, _VFS_PORT, VFS_WRITE as u64, 0, payload_ptr, payload.len())
+        if send_result < 0:
+            req_states[req] = ASYNC_ERROR
+            req_results[req] = 0 - EIO as i64
+        else:
+            val notif = syscall(_SYS_NOTIF_CREATE, 0, 0, 0, 0, 0)
+            if notif >= 0:
+                req_notifications[req] = notif as u64
+            req_states[req] = ASYNC_PENDING
+            req_results[req] = 0
+    req
+
+# ===========================================================================
+# Blocking wrappers (sync POSIX API)
+# ===========================================================================
+
+fn sync_read(fd: i32, buf_addr: u64, count: u64) -> i64:
+    """Synchronous read — blocks until complete. Returns bytes read or -errno."""
+    val req = async_read(fd, buf_addr, count)
+    if req >= MAX_ASYNC_REQUESTS:
+        return 0 - EBADF as i64
+    # Spin until complete (TODO: use notification wait instead)
+    while not async_is_complete(req):
+        pass_dn
+    val result = async_get_result(req)
+    async_free_request(req)
+    result
+
+fn sync_write(fd: i32, buf_addr: u64, count: u64) -> i64:
+    """Synchronous write — blocks until complete. Returns bytes written or -errno."""
+    val req = async_write(fd, buf_addr, count)
+    if req >= MAX_ASYNC_REQUESTS:
+        return 0 - EBADF as i64
+    while not async_is_complete(req):
+        # Use notification wait if available, otherwise spin
+        if req_notifications[req] != 0:
+            syscall(26, req_notifications[req], 0, 0, 0, 0)  # NotificationWait
+        pass_dn
+    val result = async_get_result(req)
+    async_free_request(req)
+    result
+
+# ============================================================================
+# Serialization Helpers
+# ============================================================================
+
+fn _async_push_u32(buf: [u8], val_: u32):
+    """Push a u32 in little-endian byte order."""
+    buf.push((val_ & 0xFF) as u8)
+    buf.push(((val_ >> 8) & 0xFF) as u8)
+    buf.push(((val_ >> 16) & 0xFF) as u8)
+    buf.push(((val_ >> 24) & 0xFF) as u8)
+
+fn _async_push_u64(buf: [u8], val_: u64):
+    """Push a u64 in little-endian byte order."""
+    _async_push_u32(buf, (val_ & 0xFFFFFFFF) as u32)
+    _async_push_u32(buf, ((val_ >> 32) & 0xFFFFFFFF) as u32)

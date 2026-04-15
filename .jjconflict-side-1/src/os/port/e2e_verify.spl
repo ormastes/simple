@@ -1,0 +1,295 @@
+## SimpleOS End-to-End Verification Orchestrator
+##
+## Implements the "End-to-End Verification" section of the master plan at
+## `.claude/plans/mutable-giggling-raccoon.md`. Runs five checks against a
+## booted SimpleOS QEMU instance and reports pass/fail for each.
+##
+## Usage:
+##   bin/simple run src/os/port/e2e_verify.spl -- [options]
+##
+## Options:
+##   --skip-build             Do not rebuild the initramfs image.
+##   --timeout <seconds>      QEMU boot-and-exit timeout (default: 90).
+##   --kernel <path>          Path to the SimpleOS kernel ELF.
+##   --initrd <path>          Path to the initramfs image.
+##   --dry-run                Print the plan + QEMU command; do not execute.
+##   -h, --help               Print this usage and exit.
+
+use std.fs
+use std.process
+use std.cli
+use std.text
+
+val DEFAULT_KERNEL = "build/os/kernel/simpleos"
+val DEFAULT_INITRD = "build/os/initramfs.img.zst"
+val DEFAULT_TIMEOUT = 90
+
+val TAG_VERSION = "SIMPLE_VERSION:"
+val TAG_CLANG_OK = "SMOKE_CLANG_OK"
+val TAG_RUST_OK = "hello from rust"
+val TAG_SELFHOST_OK = "STAGE2_EQ_STAGE3_OK"
+val TAG_CORPUS_OK = "BOOTSTRAP_CORPUS_OK"
+
+class E2eConfig:
+    skip_build: bool
+    timeout_s: i64
+    kernel: text
+    initrd: text
+    dry_run: bool
+
+class CheckResult:
+    name: text
+    passed: bool
+    detail: text
+
+fn default_config() -> E2eConfig:
+    E2eConfig(
+        skip_build: false,
+        timeout_s: DEFAULT_TIMEOUT,
+        kernel: DEFAULT_KERNEL,
+        initrd: DEFAULT_INITRD,
+        dry_run: false,
+    )
+
+fn usage():
+    print "SimpleOS end-to-end verification orchestrator"
+    print ""
+    print "Usage: bin/simple run src/os/port/e2e_verify.spl -- [options]"
+    print ""
+    print "Options:"
+    print "  --skip-build          Skip rebuilding the initramfs image"
+    print "  --timeout <seconds>   QEMU timeout (default: {DEFAULT_TIMEOUT})"
+    print "  --kernel <path>       Kernel ELF (default: {DEFAULT_KERNEL})"
+    print "  --initrd <path>       Initramfs image (default: {DEFAULT_INITRD})"
+    print "  --dry-run             Print planned actions without executing"
+    print "  -h, --help            Show this help"
+
+fn parse_args(args: [text]) -> E2eConfig:
+    var cfg = default_config()
+    var i = 0
+    while i < args.len():
+        val a = args[i]
+        if a == "--help" or a == "-h":
+            usage()
+            process.exit(0)
+        else if a == "--skip-build":
+            cfg = E2eConfig(
+                skip_build: true,
+                timeout_s: cfg.timeout_s,
+                kernel: cfg.kernel,
+                initrd: cfg.initrd,
+                dry_run: cfg.dry_run,
+            )
+        else if a == "--dry-run":
+            cfg = E2eConfig(
+                skip_build: cfg.skip_build,
+                timeout_s: cfg.timeout_s,
+                kernel: cfg.kernel,
+                initrd: cfg.initrd,
+                dry_run: true,
+            )
+        else if a == "--timeout":
+            i = i + 1
+            if i < args.len():
+                cfg = E2eConfig(
+                    skip_build: cfg.skip_build,
+                    timeout_s: text_to_int(args[i], DEFAULT_TIMEOUT),
+                    kernel: cfg.kernel,
+                    initrd: cfg.initrd,
+                    dry_run: cfg.dry_run,
+                )
+        else if a == "--kernel":
+            i = i + 1
+            if i < args.len():
+                cfg = E2eConfig(
+                    skip_build: cfg.skip_build,
+                    timeout_s: cfg.timeout_s,
+                    kernel: args[i],
+                    initrd: cfg.initrd,
+                    dry_run: cfg.dry_run,
+                )
+        else if a == "--initrd":
+            i = i + 1
+            if i < args.len():
+                cfg = E2eConfig(
+                    skip_build: cfg.skip_build,
+                    timeout_s: cfg.timeout_s,
+                    kernel: cfg.kernel,
+                    initrd: args[i],
+                    dry_run: cfg.dry_run,
+                )
+        else:
+            print "warn: unknown argument ignored: {a}"
+        i = i + 1
+    cfg
+
+fn text_to_int(s: text, default: i64) -> i64:
+    if s.len() == 0:
+        return default
+    var acc: i64 = 0
+    var i = 0
+    while i < s.len():
+        val c = s.char_code_at(i)
+        if c < 48 or c > 57:
+            return default
+        acc = acc * 10 + (c - 48)
+        i = i + 1
+    acc
+
+fn qemu_command(cfg: E2eConfig) -> (text, [text]):
+    val args: [text] = [
+        "-m", "1G",
+        "-kernel", cfg.kernel,
+        "-initrd", cfg.initrd,
+        "-append", "init=/sbin/init console=ttyS0",
+        "-nographic",
+        "-serial", "stdio",
+    ]
+    ("qemu-system-x86_64", args)
+
+fn format_qemu_line(cmd: text, args: [text]) -> text:
+    var line = cmd
+    for a in args:
+        line = line + " " + a
+    line
+
+fn print_plan(cfg: E2eConfig):
+    val (cmd, args) = qemu_command(cfg)
+    print "=== SimpleOS end-to-end verification plan ==="
+    print "  kernel:  {cfg.kernel}"
+    print "  initrd:  {cfg.initrd}"
+    print "  timeout: {cfg.timeout_s}s"
+    print "  skip-build: {cfg.skip_build}"
+    print ""
+    print "Steps:"
+    print "  1. simple smoke     — look for tag {TAG_VERSION}"
+    print "  2. bootstrap corpus — look for tag {TAG_CORPUS_OK}"
+    print "  3. simple selfhost  — look for tag {TAG_SELFHOST_OK}"
+    print "  4. clang smoke      — look for tag {TAG_CLANG_OK}"
+    print "  5. rust smoke       — look for tag '{TAG_RUST_OK}'"
+    print ""
+    print "QEMU command:"
+    print "  {format_qemu_line(cmd, args)}"
+
+fn cmd_build_image(cfg: E2eConfig) -> bool:
+    if cfg.skip_build:
+        print "[build] skipped (--skip-build)"
+        return true
+    print "[build] running initramfs_pack.spl build"
+    val args: [text] = [
+        "run",
+        "src/os/port/initramfs_pack.spl",
+        "--",
+        "build",
+        "--output",
+        cfg.initrd,
+    ]
+    val result = process.run("bin/simple", args)
+    if result.exit_code != 0:
+        print "[build] FAIL — initramfs_pack exited {result.exit_code}"
+        print result.stderr
+        return false
+    print "[build] OK"
+    true
+
+fn cmd_boot_qemu(cfg: E2eConfig) -> Result<text, text>:
+    if not fs.exists(cfg.kernel):
+        return Err("kernel missing at {cfg.kernel}; run `bin/simple build` or the kernel build recipe")
+    if not fs.exists(cfg.initrd):
+        return Err("initrd missing at {cfg.initrd}; run initramfs_pack first or omit --skip-build")
+    val (qcmd, qargs) = qemu_command(cfg)
+    val wrapped = "timeout {cfg.timeout_s} {format_qemu_line(qcmd, qargs)} </dev/null 2>&1"
+    print "[qemu] launching (timeout {cfg.timeout_s}s)"
+    val result = process.run("sh", ["-c", wrapped])
+    # timeout(1) exits 124 when it fires; we still accept that output.
+    if result.exit_code != 0 and result.exit_code != 124:
+        return Err("qemu exited {result.exit_code}; stderr:\n{result.stderr}")
+    Ok(result.stdout)
+
+fn check_simple_smoke(stdout: text) -> bool:
+    stdout.contains(TAG_VERSION)
+
+fn check_clang_smoke(stdout: text) -> bool:
+    stdout.contains(TAG_CLANG_OK)
+
+fn check_rust_smoke(stdout: text) -> bool:
+    stdout.contains(TAG_RUST_OK)
+
+fn check_simple_selfhost(stdout: text) -> bool:
+    stdout.contains(TAG_SELFHOST_OK)
+
+fn check_bootstrap_corpus(stdout: text) -> bool:
+    stdout.contains(TAG_CORPUS_OK)
+
+fn run_all_checks(stdout: text) -> [CheckResult]:
+    [
+        CheckResult(
+            name: "simple-smoke",
+            passed: check_simple_smoke(stdout),
+            detail: "tag {TAG_VERSION}",
+        ),
+        CheckResult(
+            name: "bootstrap-corpus",
+            passed: check_bootstrap_corpus(stdout),
+            detail: "tag {TAG_CORPUS_OK}",
+        ),
+        CheckResult(
+            name: "simple-selfhost",
+            passed: check_simple_selfhost(stdout),
+            detail: "tag {TAG_SELFHOST_OK}",
+        ),
+        CheckResult(
+            name: "clang-smoke",
+            passed: check_clang_smoke(stdout),
+            detail: "tag {TAG_CLANG_OK}",
+        ),
+        CheckResult(
+            name: "rust-smoke",
+            passed: check_rust_smoke(stdout),
+            detail: "tag '{TAG_RUST_OK}'",
+        ),
+    ]
+
+fn print_results(results: [CheckResult]) -> bool:
+    print ""
+    print "=== Result table ==="
+    print "  step               status   tag"
+    var all_ok = true
+    for r in results:
+        val status = if r.passed: "PASS" else: "FAIL"
+        val pad = "                ".slice(0, 18 - r.name.len())
+        print "  {r.name}{pad} {status}    {r.detail}"
+        if not r.passed:
+            all_ok = false
+    print ""
+    if all_ok:
+        print "=== overall: PASS (5/5) ==="
+    else:
+        var failed = 0
+        for r in results:
+            if not r.passed:
+                failed = failed + 1
+        print "=== overall: FAIL ({failed}/5 failed) ==="
+    all_ok
+
+fn main(args: [text]):
+    val cfg = parse_args(args)
+
+    if cfg.dry_run:
+        print_plan(cfg)
+        return
+
+    if not cmd_build_image(cfg):
+        print "e2e_verify: aborting — image build failed"
+        process.exit(1)
+
+    val boot = cmd_boot_qemu(cfg)
+    match boot:
+        case Ok(out):
+            val results = run_all_checks(out)
+            val ok = print_results(results)
+            if not ok:
+                process.exit(1)
+        case Err(msg):
+            print "e2e_verify: FAIL — {msg}"
+            process.exit(1)

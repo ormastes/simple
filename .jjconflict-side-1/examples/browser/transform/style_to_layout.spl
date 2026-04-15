@@ -1,0 +1,137 @@
+# Style-to-Layout bridge for the Simple Browser Platform.
+# Converts a DOM tree with resolved computed styles into a layout box tree
+# that the layout engine can process to compute geometry.
+#
+# Responsibilities:
+#   - Map each visible element to a LayoutBox with the correct BoxKind
+#   - Skip elements with `display: none`
+#   - Insert anonymous wrapper boxes where the CSS spec requires them
+#   - Detect replaced elements (img, input, video, canvas, ...)
+
+use sbp.shared.logging.{Logger, LogLevel}
+use sbp.entity.dom.node_types.{DomNode, Element, NodeKind}
+use sbp.entity.dom.box_types.{LayoutBox, BoxKind, BoxModel}
+use sbp.entity.dom.css_types.{CSSValue}
+use sbp.feature.style.computed.{ComputedStyle}
+
+# ---------------------------------------------------------------------------
+# StyleToLayoutBridge
+# ---------------------------------------------------------------------------
+class StyleToLayoutBridge:
+    logger: Logger
+
+    static fn new(logger: Logger) -> StyleToLayoutBridge:
+        StyleToLayoutBridge(logger: logger)
+
+    # Build the top-level layout tree from the DOM root, its styles, and node
+    # / element lists.  Each visible node gets a LayoutBox.
+    fn build_layout_tree(root_node_id: i64, styles: [ComputedStyle], nodes: [DomNode], elements: [Element]) -> LayoutBox:
+        self.logger.info("StyleToLayout: building layout tree from root={root_node_id}")
+        val root_box = self.create_layout_box_for_node(root_node_id, styles, nodes, elements)
+        root_box
+
+    # --- Box creation --------------------------------------------------------
+
+    # Create a LayoutBox for a single node, recursing into children.
+    fn create_layout_box_for_node(node_id: i64, styles: [ComputedStyle], nodes: [DomNode], elements: [Element]) -> LayoutBox:
+        # Find the node and its style (index by node_id)
+        val style = self.style_for_node(node_id, styles)
+        val kind = determine_box_kind(style)
+
+        var box_node = LayoutBox.create(node_id, kind)
+
+        # Recurse into children
+        val node = self.find_node(node_id, nodes)
+        if val n = node:
+            for child_id in n.children:
+                val child_style = self.style_for_node(child_id, styles)
+                if should_create_box(child_style):
+                    val child_kind = determine_box_kind(child_style)
+                    # Check if we need an anonymous wrapper
+                    if needs_anonymous_wrapper(kind, child_kind):
+                        var wrapper = LayoutBox.create(-1, BoxKind.Block)
+                        val child_box = self.create_layout_box_for_node(child_id, styles, nodes, elements)
+                        wrapper.children.push(child_box)
+                        box_node.children.push(wrapper)
+                    else:
+                        val child_box = self.create_layout_box_for_node(child_id, styles, nodes, elements)
+                        box_node.children.push(child_box)
+        box_node
+
+    # Look up the style for a given node_id.  Falls back to default_style if
+    # the id is out of range.
+    fn style_for_node(node_id: i64, styles: [ComputedStyle]) -> ComputedStyle:
+        if node_id >= 0 and node_id < styles.len():
+            styles.get(node_id)
+        else:
+            ComputedStyle.default_style()
+
+    # Find a DomNode by id in the flat list.
+    fn find_node(node_id: i64, nodes: [DomNode]) -> DomNode?:
+        for n in nodes:
+            if n.id == node_id:
+                return Some(n)
+        nil
+
+    # Find an Element record by node_id.
+    fn find_element(node_id: i64, elements: [Element]) -> Element?:
+        for e in elements:
+            if e.node_id == node_id:
+                return Some(e)
+        nil
+
+# ---------------------------------------------------------------------------
+# Pure helpers — no instance state needed
+# ---------------------------------------------------------------------------
+
+# Map the CSS `display` value to a BoxKind enum variant.
+fn determine_box_kind(style: ComputedStyle) -> BoxKind:
+    match style.display:
+        "block": BoxKind.Block
+        "inline": BoxKind.Inline
+        "inline-block": BoxKind.InlineBlock
+        "flex": BoxKind.Flex
+        "grid": BoxKind.Grid
+        "table": BoxKind.Table
+        "table-row": BoxKind.TableRow
+        "table-cell": BoxKind.TableCell
+        "none": BoxKind.None
+        _: BoxKind.Block
+
+# display != none  ->  create a box
+fn should_create_box(style: ComputedStyle) -> bool:
+    style.display != "none"
+
+# Create a fresh LayoutBox for a node + style.
+fn create_layout_box(node_id: i64, style: ComputedStyle) -> LayoutBox:
+    val kind = determine_box_kind(style)
+    LayoutBox.create(node_id, kind)
+
+# Inline children inside a block parent need an anonymous block wrapper
+# (CSS 2.1 Section 9.2.1.1).
+fn needs_anonymous_wrapper(parent_kind: BoxKind, child_kind: BoxKind) -> bool:
+    match parent_kind:
+        BoxKind.Block:
+            match child_kind:
+                BoxKind.Inline: true
+                _: false
+        BoxKind.Table:
+            match child_kind:
+                BoxKind.TableRow: false
+                _: true
+        _: false
+
+# Replaced elements have intrinsic dimensions and are laid out differently.
+fn is_replaced_element(tag: text) -> bool:
+    match tag:
+        "img": true
+        "input": true
+        "textarea": true
+        "select": true
+        "video": true
+        "audio": true
+        "canvas": true
+        "iframe": true
+        "embed": true
+        "object": true
+        _: false

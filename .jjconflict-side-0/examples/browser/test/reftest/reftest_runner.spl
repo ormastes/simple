@@ -1,0 +1,182 @@
+# CSS Ref Test Runner
+#
+# Implements WPT-style reference tests for browser rendering.
+# A ref test has two pages: test and reference. Both are rendered
+# to pixel buffers at the same viewport size. The test passes if
+# the pixel buffers match (== comparison) or differ (!= comparison).
+#
+# Usage:
+#   val runner = RefTestRunner.new(renderer, 800, 600, logger)
+#   val result = runner.run_test("test.html", "ref.html", "==")
+
+use examples.browser.test.reftest.pixel_compare.{CompareResult, compare_exact, compare_fuzzy}
+use examples.browser.shared.logging.{Logger, LogLevel}
+
+# =========================================================================
+# Test Case
+# =========================================================================
+
+class RefTestCase:
+    name: text
+    test_html: text
+    ref_html: text
+    comparison: text  # "==" or "!="
+    tolerance: i32    # per-channel tolerance (0 = exact)
+    category: text    # e.g. "css-box", "css-flexbox"
+
+    static fn create(name: text, test_html: text, ref_html: text) -> RefTestCase:
+        RefTestCase(
+            name: name,
+            test_html: test_html,
+            ref_html: ref_html,
+            comparison: "==",
+            tolerance: 0,
+            category: "general"
+        )
+
+    static fn with_tolerance(name: text, test_html: text, ref_html: text, tol: i32) -> RefTestCase:
+        RefTestCase(
+            name: name,
+            test_html: test_html,
+            ref_html: ref_html,
+            comparison: "==",
+            tolerance: tol,
+            category: "general"
+        )
+
+# =========================================================================
+# Test Result
+# =========================================================================
+
+class RefTestResult:
+    test_name: text
+    passed: bool
+    comparison: CompareResult
+    category: text
+
+    fn summary() -> text:
+        val status = if self.passed: "PASS" else: "FAIL"
+        "{status}: {self.test_name} — {self.comparison.summary()}"
+
+# =========================================================================
+# Test Suite Result
+# =========================================================================
+
+class RefTestSuiteResult:
+    total: i64
+    passed: i64
+    failed: i64
+    results: [RefTestResult]
+
+    static fn empty() -> RefTestSuiteResult:
+        RefTestSuiteResult(total: 0, passed: 0, failed: 0, results: [])
+
+    me add_result(result: RefTestResult):
+        self.results = self.results + [result]
+        self.total = self.total + 1
+        if result.passed:
+            self.passed = self.passed + 1
+        else:
+            self.failed = self.failed + 1
+
+    fn pass_rate() -> f64:
+        if self.total == 0:
+            return 0.0
+        (self.passed.to_f64() / self.total.to_f64()) * 100.0
+
+    fn summary() -> text:
+        var lines = "Ref Test Results: {self.passed}/{self.total} passed ({self.pass_rate()}%)\n"
+        for r in self.results:
+            lines = "{lines}  {r.summary()}\n"
+        lines
+
+    fn summary_by_category() -> text:
+        # Group results by category and show per-category stats
+        var categories: [text] = []
+        var cat_pass: [i64] = []
+        var cat_total: [i64] = []
+
+        for r in self.results:
+            var found_idx = -1
+            var i = 0
+            for cat in categories:
+                if cat == r.category:
+                    found_idx = i
+                i = i + 1
+
+            if found_idx >= 0:
+                cat_total[found_idx] = cat_total[found_idx] + 1
+                if r.passed:
+                    cat_pass[found_idx] = cat_pass[found_idx] + 1
+            else:
+                categories = categories + [r.category]
+                cat_total = cat_total + [1]
+                val p = if r.passed: 1 else: 0
+                cat_pass = cat_pass + [p]
+
+        var report = "Category Results:\n"
+        var i = 0
+        while i < categories.len():
+            val pct = if cat_total[i] > 0: (cat_pass[i].to_f64() / cat_total[i].to_f64()) * 100.0 else: 0.0
+            report = "{report}  {categories[i]}: {cat_pass[i]}/{cat_total[i]} ({pct}%)\n"
+            i = i + 1
+        report
+
+# =========================================================================
+# RefTestRunner
+# =========================================================================
+
+class RefTestRunner:
+    viewport_width: i32
+    viewport_height: i32
+    logger: Logger
+
+    static fn new(vw: i32, vh: i32, logger: Logger) -> RefTestRunner:
+        RefTestRunner(
+            viewport_width: vw,
+            viewport_height: vh,
+            logger: logger
+        )
+
+    me run_test_buffers(test_name: text, test_buffer: [u32], ref_buffer: [u32],
+                        comparison: text, tolerance: i32, category: text) -> RefTestResult:
+        """Compare two pre-rendered pixel buffers."""
+        self.logger.debug("running reftest: {test_name}")
+
+        var cmp: CompareResult
+        if tolerance > 0:
+            cmp = compare_fuzzy(test_buffer, ref_buffer,
+                               self.viewport_width, self.viewport_height, tolerance)
+        else:
+            cmp = compare_exact(test_buffer, ref_buffer,
+                               self.viewport_width, self.viewport_height)
+
+        var passed = cmp.passed
+        if comparison == "!=":
+            passed = not passed
+
+        val result = RefTestResult(
+            test_name: test_name,
+            passed: passed,
+            comparison: cmp,
+            category: category
+        )
+        self.logger.info(result.summary())
+        result
+
+    me run_suite(tests: [RefTestCase], render_fn: fn(text) -> [u32]) -> RefTestSuiteResult:
+        """Run a suite of ref tests using the provided render function."""
+        var suite = RefTestSuiteResult.empty()
+
+        for test in tests:
+            self.logger.info("reftest: {test.name}")
+            val test_buffer = render_fn(test.test_html)
+            val ref_buffer = render_fn(test.ref_html)
+            val result = self.run_test_buffers(
+                test.name, test_buffer, ref_buffer,
+                test.comparison, test.tolerance, test.category
+            )
+            suite.add_result(result)
+
+        self.logger.info(suite.summary())
+        suite

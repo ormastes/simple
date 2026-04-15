@@ -1,0 +1,532 @@
+"""
+# RV64D Double-Precision Floating-Point Extension
+
+All functions operate on i64 bit patterns representing IEEE 754 double-precision values.
+"""
+
+use hardware.rv64gc.pkg.rv64_fp_types_pkg.*
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+fn _dp_sign(x: i64) -> i64:
+    (x >> 63) and 1
+
+fn _dp_exp(x: i64) -> i64:
+    (x >> 52) and 0x7FF
+
+fn _dp_frac(x: i64) -> i64:
+    x and DP_FRAC_MASK
+
+fn _dp_is_nan(x: i64) -> bool:
+    (_dp_exp(x) == 0x7FF) and (_dp_frac(x) != 0)
+
+fn _dp_is_snan(x: i64) -> bool:
+    _dp_is_nan(x) and ((_dp_frac(x) and 0x0008000000000000) == 0)
+
+fn _dp_is_inf(x: i64) -> bool:
+    (_dp_exp(x) == 0x7FF) and (_dp_frac(x) == 0)
+
+fn _dp_is_zero(x: i64) -> bool:
+    (x and 0x7FFFFFFFFFFFFFFF) == 0
+
+fn _fp_result_d(value: i64, flags: i64) -> FpResult:
+    FpResult(value: value, flags: flags)
+
+fn _check_nan_inputs_d(a: i64, b: i64) -> i64:
+    if _dp_is_snan(a) or _dp_is_snan(b): FP_FLAG_NV
+    else: 0
+
+val _DP_BIAS: i64 = 1023
+val _DP_MANT_BITS: i64 = 52
+val _DP_IMPLICIT_BIT: i64 = 0x10000000000000
+
+fn _dp_pack(sign: i64, exp: i64, frac: i64) -> i64:
+    ((sign and 1) << 63) or ((exp and 0x7FF) << 52) or (frac and DP_FRAC_MASK)
+
+fn _dp_unpack_mant(x: i64) -> i64:
+    val exp = _dp_exp(x)
+    val frac = _dp_frac(x)
+    if exp == 0: frac
+    else: frac or _DP_IMPLICIT_BIT
+
+fn _dp_make_result(sign: i64, exp: i64, mant: i64, flags: i64) -> FpResult:
+    var e = exp
+    var m = mant
+    var f = flags
+    if m != 0:
+        while m >= (1 << 53):
+            m = m >> 1
+            e = e + 1
+        while m < _DP_IMPLICIT_BIT and e > 0:
+            m = m << 1
+            e = e - 1
+    if e >= 0x7FF:
+        return _fp_result_d(_dp_pack(sign, 0x7FF, 0), f or FP_FLAG_OF or FP_FLAG_NX)
+    if e <= 0 and m < _DP_IMPLICIT_BIT:
+        if m != 0: f = f or FP_FLAG_UF or FP_FLAG_NX
+        return _fp_result_d(_dp_pack(sign, 0, 0), f)
+    _fp_result_d(_dp_pack(sign, e, m and DP_FRAC_MASK), f)
+
+# ---------------------------------------------------------------------------
+# Arithmetic operations
+# ---------------------------------------------------------------------------
+
+fn fp_add_d(a: i64, b: i64, rm: RoundMode) -> FpResult:
+    """Double-precision addition."""
+    if _dp_is_nan(a) or _dp_is_nan(b):
+        return _fp_result_d(DP_QNAN, _check_nan_inputs_d(a, b))
+    if _dp_is_inf(a):
+        if _dp_is_inf(b) and _dp_sign(a) != _dp_sign(b):
+            return _fp_result_d(DP_QNAN, FP_FLAG_NV)
+        return _fp_result_d(a, 0)
+    if _dp_is_inf(b): return _fp_result_d(b, 0)
+    if _dp_is_zero(a) and _dp_is_zero(b):
+        val sign = if _dp_sign(a) == 1 and _dp_sign(b) == 1: 1 else: 0
+        return _fp_result_d(_dp_pack(sign, 0, 0), 0)
+    if _dp_is_zero(a): return _fp_result_d(b, 0)
+    if _dp_is_zero(b): return _fp_result_d(a, 0)
+    val sa = _dp_sign(a)
+    val sb = _dp_sign(b)
+    var ea = _dp_exp(a)
+    var eb = _dp_exp(b)
+    var ma = _dp_unpack_mant(a)
+    var mb = _dp_unpack_mant(b)
+    if ea == 0: ea = 1
+    if eb == 0: eb = 1
+    if ea > eb:
+        val diff = ea - eb
+        if diff < 53: mb = mb >> diff
+        else: mb = 0
+        eb = ea
+    elif eb > ea:
+        val diff = eb - ea
+        if diff < 53: ma = ma >> diff
+        else: ma = 0
+        ea = eb
+    var rs: i64 = 0
+    var rm_: i64 = 0
+    if sa == sb:
+        rs = sa
+        rm_ = ma + mb
+    else:
+        if ma >= mb:
+            rs = sa
+            rm_ = ma - mb
+        else:
+            rs = sb
+            rm_ = mb - ma
+    if rm_ == 0: return _fp_result_d(_dp_pack(0, 0, 0), 0)
+    _dp_make_result(rs, ea, rm_, 0)
+
+fn fp_sub_d(a: i64, b: i64, rm: RoundMode) -> FpResult:
+    """Double-precision subtraction: a - b = a + (-b)."""
+    val neg_b = b xor DP_SIGN_MASK
+    fp_add_d(a, neg_b, rm)
+
+fn fp_mul_d(a: i64, b: i64, rm: RoundMode) -> FpResult:
+    """Double-precision multiplication using split mantissa."""
+    val result_sign = _dp_sign(a) xor _dp_sign(b)
+    if _dp_is_nan(a) or _dp_is_nan(b):
+        return _fp_result_d(DP_QNAN, _check_nan_inputs_d(a, b))
+    if (_dp_is_zero(a) and _dp_is_inf(b)) or (_dp_is_inf(a) and _dp_is_zero(b)):
+        return _fp_result_d(DP_QNAN, FP_FLAG_NV)
+    if _dp_is_inf(a) or _dp_is_inf(b):
+        return _fp_result_d(_dp_pack(result_sign, 0x7FF, 0), 0)
+    if _dp_is_zero(a) or _dp_is_zero(b):
+        return _fp_result_d(_dp_pack(result_sign, 0, 0), 0)
+    var ea = _dp_exp(a)
+    var eb = _dp_exp(b)
+    val ma = _dp_unpack_mant(a)
+    val mb = _dp_unpack_mant(b)
+    if ea == 0: ea = 1
+    if eb == 0: eb = 1
+    # Split mantissas: hi (27 bits) + lo (26 bits)
+    val a_hi = ma >> 26
+    val a_lo = ma and 0x3FFFFFF
+    val b_hi = mb >> 26
+    val b_lo = mb and 0x3FFFFFF
+    val hh = a_hi * b_hi
+    val hl = a_hi * b_lo
+    val lh = a_lo * b_hi
+    val ll = a_lo * b_lo
+    val cross = hl + lh
+    # Combine: product_hi captures top ~54 bits of 106-bit result
+    val product_hi = hh + (cross >> 26) + ((((cross and 0x3FFFFFF) << 26) + ll) >> 52)
+    val has_low = (ll and 0xFFFFFFFFFFFFF) != 0 or (cross and 0x3FFFFFF) != 0
+    var re = ea + eb - _DP_BIAS
+    var flags: i64 = 0
+    if has_low: flags = FP_FLAG_NX
+    _dp_make_result(result_sign, re, product_hi, flags)
+
+fn fp_div_d(a: i64, b: i64, rm: RoundMode) -> FpResult:
+    """Double-precision division using bit-by-bit algorithm."""
+    val result_sign = _dp_sign(a) xor _dp_sign(b)
+    if _dp_is_nan(a) or _dp_is_nan(b):
+        return _fp_result_d(DP_QNAN, _check_nan_inputs_d(a, b))
+    if _dp_is_zero(a) and _dp_is_zero(b):
+        return _fp_result_d(DP_QNAN, FP_FLAG_NV)
+    if _dp_is_inf(a) and _dp_is_inf(b):
+        return _fp_result_d(DP_QNAN, FP_FLAG_NV)
+    if _dp_is_zero(b):
+        return _fp_result_d(_dp_pack(result_sign, 0x7FF, 0), FP_FLAG_DZ)
+    if _dp_is_zero(a):
+        return _fp_result_d(_dp_pack(result_sign, 0, 0), 0)
+    if _dp_is_inf(a):
+        return _fp_result_d(_dp_pack(result_sign, 0x7FF, 0), 0)
+    if _dp_is_inf(b):
+        return _fp_result_d(_dp_pack(result_sign, 0, 0), 0)
+    var ea = _dp_exp(a)
+    var eb = _dp_exp(b)
+    val ma = _dp_unpack_mant(a)
+    val mb = _dp_unpack_mant(b)
+    if ea == 0: ea = 1
+    if eb == 0: eb = 1
+    # Bit-by-bit division for 53 bits of quotient
+    var q: i64 = 0
+    var rem = ma
+    var i = 0
+    while i < 53:
+        rem = rem << 1
+        if rem >= mb:
+            q = q or (1 << (52 - i))
+            rem = rem - mb
+        i = i + 1
+    var re = ea - eb + _DP_BIAS
+    var flags: i64 = 0
+    if rem != 0: flags = FP_FLAG_NX
+    _dp_make_result(result_sign, re, q, flags)
+
+fn fp_sqrt_d(a: i64, rm: RoundMode) -> FpResult:
+    """Double-precision square root."""
+    if _dp_is_nan(a):
+        return _fp_result_d(DP_QNAN, if _dp_is_snan(a): FP_FLAG_NV else: 0)
+    if _dp_sign(a) == 1 and (a and 0x7FFFFFFFFFFFFFFF) != 0:
+        return _fp_result_d(DP_QNAN, FP_FLAG_NV)
+    if _dp_is_zero(a): return _fp_result_d(a, 0)
+    if _dp_is_inf(a): return _fp_result_d(a, 0)
+    var ea = _dp_exp(a)
+    val ma = _dp_unpack_mant(a)
+    if ea == 0: ea = 1
+    var adj_exp = ea - _DP_BIAS
+    var adj_mant = ma
+    if (adj_exp and 1) != 0:
+        adj_mant = adj_mant << 1
+        adj_exp = adj_exp - 1
+    val re = (adj_exp >> 1) + _DP_BIAS
+    # Bit-by-bit sqrt
+    var x = adj_mant << _DP_MANT_BITS
+    var result: i64 = 0
+    var bit: i64 = 1 << 53
+    while bit > 0:
+        val trial = result + bit
+        if trial <= x / trial:
+            result = trial
+        bit = bit >> 1
+    var flags: i64 = 0
+    if result * result != x: flags = FP_FLAG_NX
+    _dp_make_result(0, re, result, flags)
+
+# ---------------------------------------------------------------------------
+# Fused multiply-add
+# ---------------------------------------------------------------------------
+
+fn fp_fmadd_d(a: i64, b: i64, c: i64, rm: RoundMode) -> FpResult:
+    """Fused multiply-add: a*b + c."""
+    if _dp_is_nan(a) or _dp_is_nan(b) or _dp_is_nan(c):
+        return _fp_result_d(DP_QNAN, _check_nan_inputs_d(a, b) or (if _dp_is_snan(c): FP_FLAG_NV else: 0))
+    if (_dp_is_zero(a) and _dp_is_inf(b)) or (_dp_is_inf(a) and _dp_is_zero(b)):
+        return _fp_result_d(DP_QNAN, FP_FLAG_NV)
+    val mul_result = fp_mul_d(a, b, rm)
+    if mul_result.value == DP_QNAN: return mul_result
+    fp_add_d(mul_result.value, c, rm)
+
+fn fp_fmsub_d(a: i64, b: i64, c: i64, rm: RoundMode) -> FpResult:
+    """Fused multiply-subtract: a*b - c."""
+    val neg_c = c xor DP_SIGN_MASK
+    fp_fmadd_d(a, b, neg_c, rm)
+
+fn fp_fnmadd_d(a: i64, b: i64, c: i64, rm: RoundMode) -> FpResult:
+    """FNMADD: -(a*b) - c."""
+    val neg_a = a xor DP_SIGN_MASK
+    val neg_c = c xor DP_SIGN_MASK
+    fp_fmadd_d(neg_a, b, neg_c, rm)
+
+fn fp_fnmsub_d(a: i64, b: i64, c: i64, rm: RoundMode) -> FpResult:
+    """FNMSUB: -(a*b) + c."""
+    val neg_a = a xor DP_SIGN_MASK
+    fp_fmadd_d(neg_a, b, c, rm)
+
+# ---------------------------------------------------------------------------
+# Comparison operations
+# ---------------------------------------------------------------------------
+
+fn fp_eq_d(a: i64, b: i64) -> i64:
+    """FEQ.D: returns 1 if a == b."""
+    if _dp_is_nan(a) or _dp_is_nan(b): 0
+    elif _dp_is_zero(a) and _dp_is_zero(b): 1
+    elif a == b: 1
+    else: 0
+
+fn fp_lt_d(a: i64, b: i64) -> i64:
+    """FLT.D: returns 1 if a < b."""
+    if _dp_is_nan(a) or _dp_is_nan(b): 0
+    else:
+        val sa = _dp_sign(a)
+        val sb = _dp_sign(b)
+        if sa != sb:
+            if _dp_is_zero(a) and _dp_is_zero(b): 0
+            else: sa
+        elif sa == 0:
+            if (a and 0x7FFFFFFFFFFFFFFF) < (b and 0x7FFFFFFFFFFFFFFF): 1 else: 0
+        else:
+            if (a and 0x7FFFFFFFFFFFFFFF) > (b and 0x7FFFFFFFFFFFFFFF): 1 else: 0
+
+fn fp_le_d(a: i64, b: i64) -> i64:
+    """FLE.D: returns 1 if a <= b."""
+    if _dp_is_nan(a) or _dp_is_nan(b): 0
+    elif fp_eq_d(a, b) == 1: 1
+    else: fp_lt_d(a, b)
+
+# ---------------------------------------------------------------------------
+# Min / Max
+# ---------------------------------------------------------------------------
+
+fn fp_min_d(a: i64, b: i64) -> i64:
+    """FMIN.D: returns the minimum of a and b."""
+    if _dp_is_nan(a) and _dp_is_nan(b): DP_QNAN
+    elif _dp_is_nan(a): b
+    elif _dp_is_nan(b): a
+    elif _dp_is_zero(a) and _dp_is_zero(b):
+        if _dp_sign(a) == 1: a else: b
+    elif fp_lt_d(a, b) == 1: a
+    else: b
+
+fn fp_max_d(a: i64, b: i64) -> i64:
+    """FMAX.D: returns the maximum of a and b."""
+    if _dp_is_nan(a) and _dp_is_nan(b): DP_QNAN
+    elif _dp_is_nan(a): b
+    elif _dp_is_nan(b): a
+    elif _dp_is_zero(a) and _dp_is_zero(b):
+        if _dp_sign(a) == 0: a else: b
+    elif fp_lt_d(b, a) == 1: a
+    else: b
+
+# ---------------------------------------------------------------------------
+# Sign injection
+# ---------------------------------------------------------------------------
+
+fn fp_sgnj_d(a: i64, b: i64) -> i64:
+    """FSGNJ.D: result = |a| with sign of b."""
+    val mag = a and 0x7FFFFFFFFFFFFFFF
+    val sign = b and DP_SIGN_MASK
+    mag or sign
+
+fn fp_sgnjn_d(a: i64, b: i64) -> i64:
+    """FSGNJN.D: result = |a| with negated sign of b."""
+    val mag = a and 0x7FFFFFFFFFFFFFFF
+    val sign = (b xor DP_SIGN_MASK) and DP_SIGN_MASK
+    mag or sign
+
+fn fp_sgnjx_d(a: i64, b: i64) -> i64:
+    """FSGNJX.D: result = a with sign = sign(a) XOR sign(b)."""
+    val sign = (a xor b) and DP_SIGN_MASK
+    val mag = a and 0x7FFFFFFFFFFFFFFF
+    mag or sign
+
+# ---------------------------------------------------------------------------
+# Classify
+# ---------------------------------------------------------------------------
+
+fn fp_class_d(a: i64) -> i64:
+    """FCLASS.D: returns 10-bit classification mask."""
+    val sign = _dp_sign(a)
+    val exp = _dp_exp(a)
+    val frac = _dp_frac(a)
+
+    if exp == 0x7FF:
+        if frac == 0:
+            if sign == 1: 1 else: 0x80
+        elif (frac and 0x0008000000000000) != 0:
+            0x200  # Quiet NaN
+        else:
+            0x100  # Signaling NaN
+    elif exp == 0:
+        if frac == 0:
+            if sign == 1: 0x8 else: 0x10
+        else:
+            if sign == 1: 0x4 else: 0x20
+    else:
+        if sign == 1: 0x2 else: 0x40
+
+# ---------------------------------------------------------------------------
+# Conversions
+# ---------------------------------------------------------------------------
+
+fn _dp_to_i64(a: i64) -> i64:
+    """Convert DP float to i64 (truncate toward zero)."""
+    if _dp_is_nan(a): return 0x7FFFFFFFFFFFFFFF
+    if _dp_is_inf(a):
+        if _dp_sign(a) == 1: return 0x8000000000000000
+        else: return 0x7FFFFFFFFFFFFFFF
+    val sign = _dp_sign(a)
+    val exp = _dp_exp(a)
+    val mant = _dp_unpack_mant(a)
+    if exp == 0 and mant == 0: return 0
+    val unbiased = exp - _DP_BIAS
+    if unbiased < 0: return 0
+    if unbiased >= 63:
+        if sign == 1: return 0x8000000000000000
+        else: return 0x7FFFFFFFFFFFFFFF
+    var result: i64 = 0
+    if unbiased >= _DP_MANT_BITS:
+        result = mant << (unbiased - _DP_MANT_BITS)
+    else:
+        result = mant >> (_DP_MANT_BITS - unbiased)
+    if sign == 1: 0 - result else: result
+
+fn _i64_to_dp(v: i64) -> FpResult:
+    """Convert signed i64 to DP float."""
+    if v == 0: return _fp_result_d(DP_POS_ZERO, 0)
+    var sign: i64 = 0
+    var abs_v = v
+    if v < 0:
+        sign = 1
+        abs_v = 0 - v
+    var exp = _DP_BIAS + _DP_MANT_BITS
+    var m = abs_v
+    while m >= (1 << 53):
+        m = m >> 1
+        exp = exp + 1
+    while m < _DP_IMPLICIT_BIT:
+        m = m << 1
+        exp = exp - 1
+    var flags: i64 = 0
+    # Check precision loss (i64 has 63 bits, double has 53 bits mantissa)
+    if abs_v >= (1 << 53):
+        val shift = exp - _DP_BIAS - _DP_MANT_BITS
+        if shift > 0:
+            val reconstructed = m << shift
+            if reconstructed != abs_v:
+                flags = FP_FLAG_NX
+    _fp_result_d(_dp_pack(sign, exp, m and DP_FRAC_MASK), flags)
+
+fn fcvt_w_d(a: i64, rm: RoundMode) -> FpResult:
+    """Convert double to signed 32-bit integer."""
+    if _dp_is_nan(a) or (_dp_is_inf(a) and _dp_sign(a) == 0):
+        return FpResult(value: 0x7FFFFFFF, flags: FP_FLAG_NV)
+    if _dp_is_inf(a) and _dp_sign(a) == 1:
+        return FpResult(value: -1 * 0x80000000, flags: FP_FLAG_NV)
+    val result = _dp_to_i64(a)
+    if result > 0x7FFFFFFF: FpResult(value: 0x7FFFFFFF, flags: FP_FLAG_NV)
+    elif result < -2147483648: FpResult(value: -2147483648, flags: FP_FLAG_NV)
+    else: FpResult(value: result, flags: 0)
+
+fn fcvt_wu_d(a: i64, rm: RoundMode) -> FpResult:
+    """Convert double to unsigned 32-bit integer."""
+    if _dp_is_nan(a): return FpResult(value: 0xFFFFFFFF, flags: FP_FLAG_NV)
+    if _dp_sign(a) == 1 and not _dp_is_zero(a):
+        return FpResult(value: 0, flags: FP_FLAG_NV)
+    val result = _dp_to_i64(a)
+    if result > 0xFFFFFFFF: FpResult(value: 0xFFFFFFFF, flags: FP_FLAG_NV)
+    else: FpResult(value: result, flags: 0)
+
+fn fcvt_d_w(a: i64, rm: RoundMode) -> FpResult:
+    """Convert signed 32-bit integer to double (always exact)."""
+    var v = a and 0xFFFFFFFF
+    if (v and 0x80000000) != 0:
+        v = v or 0xFFFFFFFF00000000
+    _i64_to_dp(v)
+
+fn fcvt_d_wu(a: i64, rm: RoundMode) -> FpResult:
+    """Convert unsigned 32-bit integer to double (always exact)."""
+    _i64_to_dp(a and 0xFFFFFFFF)
+
+fn fcvt_l_d(a: i64, rm: RoundMode) -> FpResult:
+    """Convert double to signed 64-bit integer."""
+    if _dp_is_nan(a) or (_dp_is_inf(a) and _dp_sign(a) == 0):
+        return FpResult(value: 0x7FFFFFFFFFFFFFFF, flags: FP_FLAG_NV)
+    if _dp_is_inf(a) and _dp_sign(a) == 1:
+        return FpResult(value: 0x8000000000000000, flags: FP_FLAG_NV)
+    FpResult(value: _dp_to_i64(a), flags: 0)
+
+fn fcvt_lu_d(a: i64, rm: RoundMode) -> FpResult:
+    """Convert double to unsigned 64-bit integer."""
+    if _dp_is_nan(a): return FpResult(value: 0xFFFFFFFFFFFFFFFF, flags: FP_FLAG_NV)
+    if _dp_sign(a) == 1 and not _dp_is_zero(a):
+        return FpResult(value: 0, flags: FP_FLAG_NV)
+    FpResult(value: _dp_to_i64(a), flags: 0)
+
+fn fcvt_d_l(a: i64, rm: RoundMode) -> FpResult:
+    """Convert signed 64-bit integer to double."""
+    _i64_to_dp(a)
+
+fn fcvt_d_lu(a: i64, rm: RoundMode) -> FpResult:
+    """Convert unsigned 64-bit integer to double."""
+    if a < 0:
+        val high = (a >> 1) and 0x7FFFFFFFFFFFFFFF
+        val result = _i64_to_dp(high)
+        val exp = _dp_exp(result.value) + 1
+        val frac = _dp_frac(result.value)
+        if (a and 1) != 0:
+            return _fp_result_d(_dp_pack(0, exp, frac), FP_FLAG_NX)
+        _fp_result_d(_dp_pack(0, exp, frac), result.flags)
+    else:
+        _i64_to_dp(a)
+
+# Single <-> Double conversions
+fn fcvt_s_d(a: i64, rm: RoundMode) -> FpResult:
+    """Convert double to single-precision (narrowing)."""
+    if _dp_is_nan(a): return _fp_result_d(SP_QNAN, if _dp_is_snan(a): FP_FLAG_NV else: 0)
+    if _dp_is_inf(a):
+        val sp_inf = if _dp_sign(a) == 1: SP_NEG_INF else: SP_POS_INF
+        return _fp_result_d(sp_inf, 0)
+    if _dp_is_zero(a):
+        return _fp_result_d(if _dp_sign(a) == 1: SP_NEG_ZERO else: SP_POS_ZERO, 0)
+    val sign = _dp_sign(a)
+    val dp_exp = _dp_exp(a)
+    val dp_frac = _dp_frac(a)
+    # Re-bias exponent: DP bias=1023 → SP bias=127
+    val sp_exp = dp_exp - _DP_BIAS + 127
+    # Truncate fraction: 52 bits → 23 bits
+    val sp_frac = dp_frac >> 29
+    val lost = dp_frac and 0x1FFFFFFF
+    var flags: i64 = 0
+    if lost != 0: flags = FP_FLAG_NX
+    if sp_exp >= 0xFF:
+        return _fp_result_d((sign << 31) or SP_POS_INF, flags or FP_FLAG_OF)
+    if sp_exp <= 0:
+        return _fp_result_d((sign << 31), flags or FP_FLAG_UF)
+    _fp_result_d((sign << 31) or (sp_exp << 23) or sp_frac, flags)
+
+fn fcvt_d_s(a: i64, rm: RoundMode) -> FpResult:
+    """Convert single to double-precision (widening, always exact for normals)."""
+    val bits = a and 0xFFFFFFFF
+    if (bits and 0x7F800000) == 0x7F800000:
+        # NaN or Inf
+        if (bits and 0x7FFFFF) != 0:
+            return _fp_result_d(DP_QNAN, if (bits and 0x400000) == 0: FP_FLAG_NV else: 0)
+        val sign = (bits >> 31) and 1
+        return _fp_result_d(if sign == 1: DP_NEG_INF else: DP_POS_INF, 0)
+    if (bits and 0x7FFFFFFF) == 0:
+        val sign = (bits >> 31) and 1
+        return _fp_result_d(if sign == 1: DP_NEG_ZERO else: DP_POS_ZERO, 0)
+    val sign = (bits >> 31) and 1
+    val sp_exp = (bits >> 23) and 0xFF
+    val sp_frac = bits and 0x7FFFFF
+    val dp_exp = sp_exp - 127 + _DP_BIAS
+    val dp_frac = sp_frac << 29  # 23 bits → 52 bits
+    _fp_result_d(_dp_pack(sign, dp_exp, dp_frac), 0)
+
+# ---------------------------------------------------------------------------
+# Move (bit-level reinterpret)
+# ---------------------------------------------------------------------------
+
+fn fmv_x_d(a: i64) -> i64:
+    """FMV.X.D: move double bits to integer register."""
+    a
+
+fn fmv_d_x(a: i64) -> i64:
+    """FMV.D.X: move integer bits to double register."""
+    a

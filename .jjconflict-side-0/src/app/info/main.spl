@@ -1,0 +1,92 @@
+# Simple CLI - info command
+# Shows project info OR registry package info
+#
+# Usage:
+#   simple info              - Show project/system info (delegates to Rust)
+#   simple info <package>    - Show registry package metadata
+
+use std.cli.cli_util (get_cli_args)
+use app.package.registry.config (default_config)
+use app.package.registry.index (fetch_index_entry, latest_version, deps_for_version)
+use app.package.registry.types (RegistryConfig, IndexEntry)
+
+use app.io.mod (cli_info)
+use std.log.{error}
+
+fn print_help():
+    print "Usage: simple info [options]"
+    print "       simple info <package> [--versions]"
+    print ""
+    print "Without arguments: show project and system information"
+    print "With package name: show registry package metadata"
+    print ""
+    print "Registry Options:"
+    print "  --versions    Show all available versions"
+    print ""
+    print "Run 'simple info --help' for Rust-level help."
+
+fn show_package_info(config: RegistryConfig, name: text, show_versions: bool) -> i64:
+    val entry = fetch_index_entry(config, name)
+
+    if entry.package.name == "":
+        error("info", "package '{name}' not found in registry")
+        return 1
+
+    val pkg = entry.package
+    val latest = latest_version(entry)
+
+    print "{pkg.name}"
+    print "  Latest version: {latest}"
+    if pkg.description != "":
+        print "  Description:    {pkg.description}"
+    if pkg.license != "":
+        print "  License:        {pkg.license}"
+    if pkg.homepage != "":
+        print "  Homepage:       {pkg.homepage}"
+    if pkg.repository != "":
+        print "  Repository:     {pkg.repository}"
+
+    val deps = deps_for_version(entry, latest)
+    if deps.len() > 0:
+        print ""
+        print "  Dependencies:"
+        for dep in deps:
+            print "    {dep.name} {dep.constraint}"
+
+    if show_versions:
+        print ""
+        print "  Versions:"
+        for ver in entry.versions:
+            val yanked_marker = if ver.yanked: " (yanked)" else: ""
+            print "    {ver.version}{yanked_marker}  [{ver.published_at}]"
+
+    return 0
+
+fn main() -> i64:
+    val args = get_cli_args()
+
+    # Check if a package name is given (non-flag argument after "info")
+    var pkg_name = ""
+    var show_versions = false
+    var has_pkg_arg = false
+
+    var i = 0
+    while i < args.len():
+        val arg = args[i]
+        if arg == "info":
+            pass
+        elif arg == "--versions":
+            show_versions = true
+            has_pkg_arg = true
+        elif not arg.starts_with("-") and pkg_name == "":
+            pkg_name = arg
+            has_pkg_arg = true
+        i = i + 1
+
+    # If a package name is given, show registry info
+    if pkg_name != "":
+        val config = default_config()
+        return show_package_info(config, pkg_name, show_versions)
+
+    # Otherwise delegate to Rust runtime for project/system info
+    cli_info(args)

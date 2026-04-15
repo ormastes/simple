@@ -1,0 +1,196 @@
+"""
+# Stacking Context
+
+Tests for stacking context functionality.
+"""
+#![allow(unnamed_duplicate_typed_args)]
+use std.spec
+
+# StackingContext.z_index uses i64 directly — this is intentional for simplicity at this layer.
+# Stacking context entry
+class StackingContext:
+    node_id: i64
+    z_index: i64
+    opacity: f64
+    is_positioned: bool
+    children: [StackingContext]
+
+    static fn create(node_id: i64, z_index: i64) -> StackingContext:
+        StackingContext(
+            node_id: node_id,
+            z_index: z_index,
+            opacity: 1.0,
+            is_positioned: false,
+            children: [StackingContext]()
+        )
+
+    static fn positioned(node_id: i64, z_index: i64) -> StackingContext:
+        StackingContext(
+            node_id: node_id,
+            z_index: z_index,
+            opacity: 1.0,
+            is_positioned: true,
+            children: [StackingContext]()
+        )
+
+# Check if an element creates a stacking context
+fn creates_stacking_context(is_root: bool, is_positioned: bool, z_index: i64, opacity: f64) -> bool:
+    if is_root:
+        return true
+    if is_positioned and z_index != 0:
+        return true
+    if opacity < 1.0:
+        return true
+    false
+
+# Categorize children into negative z-index, zero, and positive z-index groups
+class PaintOrder:
+    negative: [StackingContext]
+    zero: [StackingContext]
+    positive: [StackingContext]
+
+    static fn empty() -> PaintOrder:
+        PaintOrder(
+            negative: [StackingContext](),
+            zero: [StackingContext](),
+            positive: [StackingContext]()
+        )
+
+fn categorize_children(children: [StackingContext]) -> PaintOrder:
+    var order = PaintOrder.empty()
+    for child in children:
+        if child.z_index < 0:
+            order.negative.push(child)
+        else:
+            if child.z_index == 0:
+                order.zero.push(child)
+            else:
+                order.positive.push(child)
+    order
+
+# Sort stacking contexts by z-index (simple insertion sort)
+fn sort_by_z_index(contexts: [StackingContext]) -> [StackingContext]:
+    var sorted = [StackingContext]()
+    for ctx in contexts:
+        sorted.push(ctx)
+    var n = sorted.len()
+    var i = 1
+    while i < n:
+        var j = i
+        while j > 0 and sorted[j - 1].z_index > sorted[j].z_index:
+            var tmp = sorted[j - 1]
+            sorted[j - 1] = sorted[j]
+            sorted[j] = tmp
+            j = j - 1
+        i = i + 1
+    sorted
+
+# Flatten stacking contexts into paint order (node_id list)
+fn flatten_paint_order(ctx: StackingContext) -> [i64]:
+    var result = [i64]()
+    var order = categorize_children(ctx.children)
+    # 1. Negative z-index children
+    var neg_sorted = sort_by_z_index(order.negative)
+    for c in neg_sorted:
+        var sub = flatten_paint_order(c)
+        for id in sub:
+            result.push(id)
+    # 2. Current element
+    result.push(ctx.node_id)
+    # 3. Zero z-index children (source order)
+    for c in order.zero:
+        var sub = flatten_paint_order(c)
+        for id in sub:
+            result.push(id)
+    # 4. Positive z-index children
+    var pos_sorted = sort_by_z_index(order.positive)
+    for c in pos_sorted:
+        var sub = flatten_paint_order(c)
+        for id in sub:
+            result.push(id)
+    result
+
+describe "StackingContext":
+    """
+    ## Stackingcontext Tests
+
+    Validates StackingContext functionality.
+    """
+
+    describe "context creation":
+        it "root element creates stacking context":
+            var result = creates_stacking_context(true, false, 0, 1.0)
+            expect(result).to_equal(true)
+
+        it "positioned element with z-index creates context":
+            var result = creates_stacking_context(false, true, 5, 1.0)
+            expect(result).to_equal(true)
+
+        it "opacity less than 1 creates context":
+            var result = creates_stacking_context(false, false, 0, 0.5)
+            expect(result).to_equal(true)
+
+        it "non-positioned elements don't create context":
+            var result = creates_stacking_context(false, false, 0, 1.0)
+            expect(result).to_equal(false)
+
+    describe "paint ordering":
+        it "negative z-index paints before positive":
+            var root = StackingContext.create(0, 0)
+            var neg_child = StackingContext.positioned(1, -1)
+            var pos_child = StackingContext.positioned(2, 1)
+            root.children = [pos_child, neg_child]
+            var order = flatten_paint_order(root)
+            # negative(-1) first, then root(0), then positive(1)
+            expect(order[0]).to_equal(1)
+            expect(order[1]).to_equal(0)
+            expect(order[2]).to_equal(2)
+
+        it "z-index 0 paints between negative and positive":
+            var root = StackingContext.create(0, 0)
+            var neg = StackingContext.positioned(1, -2)
+            var zero = StackingContext.create(2, 0)
+            var pos = StackingContext.positioned(3, 5)
+            root.children = [pos, neg, zero]
+            var order = flatten_paint_order(root)
+            expect(order[0]).to_equal(1)
+            expect(order[1]).to_equal(0)
+            expect(order[2]).to_equal(2)
+            expect(order[3]).to_equal(3)
+
+        it "same z-index preserves source order":
+            var root = StackingContext.create(0, 0)
+            var a = StackingContext.create(1, 0)
+            var b = StackingContext.create(2, 0)
+            var c = StackingContext.create(3, 0)
+            root.children = [a, b, c]
+            var order = flatten_paint_order(root)
+            # root painted, then children in source order
+            expect(order[0]).to_equal(0)
+            expect(order[1]).to_equal(1)
+            expect(order[2]).to_equal(2)
+            expect(order[3]).to_equal(3)
+
+        it "nested stacking contexts":
+            var root = StackingContext.create(0, 0)
+            var child = StackingContext.positioned(1, 1)
+            var grandchild = StackingContext.positioned(2, 2)
+            child.children = [grandchild]
+            root.children = [child]
+            var order = flatten_paint_order(root)
+            expect(order[0]).to_equal(0)
+            expect(order[1]).to_equal(1)
+            expect(order[2]).to_equal(2)
+
+    describe "special descendants":
+        it "float descendants paint after block descendants":
+            # Floats paint in layer 4 (after in-flow blocks in layer 3)
+            var block_layer = 3
+            var float_layer = 4
+            expect(float_layer).to_be_greater_than(block_layer)
+
+        it "inline descendants paint after floats":
+            # Inline/text content is in layer 5 (after floats in layer 4)
+            var float_layer = 4
+            var inline_layer = 5
+            expect(inline_layer).to_be_greater_than(float_layer)

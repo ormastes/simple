@@ -1,0 +1,123 @@
+#![allow(unnamed_duplicate_typed_args)]
+@allow(unnamed_duplicate_typed_args)
+# Tests for BugDatabase write API: add_bug, update_bug, resolve_bug, save/reload
+
+use std.spec (describe, it, expect)
+use app.io.mod (file_exists, file_write, file_read)
+use nogc_sync_mut.database.bug.{Bug, BugSeverity, BugStatus,
+    load_bug_database, create_bug_database}
+
+val TEST_DB_PATH = "test/fixtures/bug_write_api_test.sdn"
+
+fn make_test_bug(id: text) -> Bug:
+    Bug(
+        id: id,
+        severity: BugSeverity.P2,
+        status: BugStatus.Open,
+        title: "Test bug {id}",
+        description: ["A test bug"],
+        file: "src/test/fake.spl",
+        line: 42,
+        reproducible_by: "bin/simple test test/unit/",
+        fix_strategy: [""],
+        investigation_log: [""],
+        created_at: "2026-04-14",
+        updated_at: "2026-04-14",
+        valid: true
+    )
+
+describe "BugDatabase write API":
+    it "add_bug stores a new bug":
+        var db = create_bug_database(TEST_DB_PATH)
+        val bug = make_test_bug("write_test_001")
+        val added = db.add_bug(bug)
+        expect(added).to_be(true)
+        val found = db.get_bug("write_test_001")
+        expect(found.?).to_be(true)
+        expect(found.unwrap().title).to_be("Test bug write_test_001")
+
+    it "get_bug returns None for unknown id":
+        var db = create_bug_database(TEST_DB_PATH)
+        val found = db.get_bug("nonexistent_999")
+        expect(found.?).to_be(false)
+
+    it "update_bug replaces existing bug":
+        var db = create_bug_database(TEST_DB_PATH)
+        val bug = make_test_bug("write_test_002")
+        db.add_bug(bug)
+        val updated = Bug(
+            id: "write_test_002",
+            severity: BugSeverity.P1,
+            status: BugStatus.Confirmed,
+            title: "Updated title",
+            description: ["Updated description"],
+            file: "src/test/fake.spl",
+            line: 42,
+            reproducible_by: "bin/simple test test/unit/",
+            fix_strategy: ["Fix it"],
+            investigation_log: ["Investigated"],
+            created_at: "2026-04-14",
+            updated_at: "2026-04-14",
+            valid: true
+        )
+        db.update_bug("write_test_002", updated)
+        val found = db.get_bug("write_test_002")
+        expect(found.?).to_be(true)
+        expect(found.unwrap().title).to_be("Updated title")
+        expect(found.unwrap().status).to_be(BugStatus.Confirmed)
+
+    it "resolve_bug marks status Closed":
+        var db = create_bug_database(TEST_DB_PATH)
+        val bug = make_test_bug("write_test_003")
+        db.add_bug(bug)
+        val resolved = db.resolve_bug("write_test_003", "2026-04-14")
+        expect(resolved).to_be(true)
+        val found = db.get_bug("write_test_003")
+        expect(found.?).to_be(true)
+        expect(found.unwrap().status).to_be(BugStatus.Closed)
+        expect(found.unwrap().updated_at).to_be("2026-04-14")
+
+    it "resolve_bug returns false for unknown id":
+        var db = create_bug_database(TEST_DB_PATH)
+        val result = db.resolve_bug("nonexistent_999", "2026-04-14")
+        expect(result).to_be(false)
+
+    it "save and reload persists bugs":
+        var db = create_bug_database(TEST_DB_PATH)
+        val bug = make_test_bug("write_test_004")
+        db.add_bug(bug)
+        db.resolve_bug("write_test_004", "2026-04-14")
+        val saved = db.save()
+        expect(saved).to_be(true)
+
+        val db2_opt = load_bug_database(TEST_DB_PATH)
+        expect(db2_opt.?).to_be(true)
+        val db2 = db2_opt.unwrap()
+        val found = db2.get_bug("write_test_004")
+        expect(found.?).to_be(true)
+        expect(found.unwrap().status).to_be(BugStatus.Closed)
+
+    it "all_bugs returns valid bugs only":
+        var db = create_bug_database(TEST_DB_PATH)
+        db.add_bug(make_test_bug("write_test_005"))
+        db.add_bug(make_test_bug("write_test_006"))
+        val all = db.all_bugs()
+        expect(all.len() >= 2).to_be(true)
+
+    it "load_bug_database can round-trip the tracked bug DB with a temp copy":
+        val test_path = "/tmp/bug_write_api_real_bug_db_copy.sdn"
+        val content = file_read("doc/08_tracking/bug/bug_db.sdn")
+        val wrote = file_write(test_path, content)
+        expect(wrote).to_be(true)
+
+        val db_opt = load_bug_database(test_path)
+        expect(db_opt.?).to_be(true)
+
+        var db = db_opt.unwrap()
+        val added = db.add_bug(make_test_bug("comment_prefix_002"))
+        expect(added).to_be(true)
+        val saved = db.save()
+        expect(saved).to_be(true)
+
+        val roundtrip = file_read(test_path)
+        expect(roundtrip.contains("comment_prefix_002")).to_be(true)

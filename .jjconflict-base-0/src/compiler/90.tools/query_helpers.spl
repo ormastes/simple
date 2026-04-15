@@ -1,0 +1,193 @@
+#![allow(unnamed_duplicate_typed_args)]
+@allow(unnamed_duplicate_typed_args)
+# Query API Helper Functions
+#
+# Free helper functions used by the Compiler Query API.
+# Includes conversion functions, FFI wrappers, and workspace search utilities.
+
+import compiler.treesitter_types.{ParseError, ErrorSeverity}
+import compiler.common.dependency.symbol.{SymbolTable}
+import compiler.types.type_system.checker.{TypeError}
+import compiler.hir.hir_types.{Scope}
+import app.io  # For file I/O functions
+
+use query_types.*
+
+
+# --- Conversion Helpers ---
+
+# Convert position to single-point range
+fn position_to_range(pos: Position) -> Range:
+    Range(start: pos, end: pos)
+
+# Convert parse error to diagnostic
+fn parse_error_to_diagnostic(error: ParseError) -> Diagnostic:
+    val severity = match error.severity:
+        case ErrorSeverity.Error: DiagnosticSeverity.Error
+        case ErrorSeverity.Warning: DiagnosticSeverity.Warning
+        case ErrorSeverity.Info: DiagnosticSeverity.Info
+
+    Diagnostic(
+        range: Range(
+            start: Position(line: error.span.line, column: error.span.col),
+            end: Position(line: error.span.line, column: error.span.col + 1),
+        ),
+        severity: severity,
+        message: error.message,
+        code: Some("E001"),
+        source: "simple-parser",
+    )
+
+# Convert type error to diagnostic
+fn type_error_to_diagnostic(error: TypeError) -> Diagnostic:
+    # TypeError is an enum, extract message
+    val message = error.message()
+
+    Diagnostic(
+        range: Range(
+            start: Position(line: 0, column: 0),
+            end: Position(line: 0, column: 1),
+        ),
+        severity: DiagnosticSeverity.Error,
+        message: message,
+        code: Some("T001"),
+        source: "simple-type-checker",
+    )
+
+# Convert symbol to completion item
+fn symbol_to_completion(symbol: Symbol) -> Completion:
+    val kind = match symbol.kind:
+        SymbolKind.Variable: CompletionKind.Variable
+        SymbolKind.Function: CompletionKind.Function
+        SymbolKind.Method: CompletionKind.Method
+        SymbolKind.Class, SymbolKind.Struct, SymbolKind.Enum, SymbolKind.Trait:
+            CompletionKind.Type
+        SymbolKind.Field: CompletionKind.Field
+        SymbolKind.EnumVariant: CompletionKind.EnumVariant
+        _: CompletionKind.Variable
+
+    Completion(
+        label: symbol.name,
+        kind: kind,
+        detail: symbol.type_info,
+        documentation: symbol.doc_comment,
+        insert_text: symbol.name,
+        sort_priority: 5,
+    )
+
+# --- FFI Functions (imported from app.io) ---
+
+# These functions are implemented in rust/compiler/src/query_ffi.rs
+# and exposed through app.io module
+
+fn get_file_mtime(path: text) -> i64:
+    io.rt_get_file_mtime(path)
+
+fn parse_source(source: text, file_path: text) -> Result<AST, ParseError>:
+    io.rt_parse_source(source, file_path)
+
+fn build_symbol_table(ast: AST) -> SymbolTable:
+    io.rt_build_symbol_table(ast)
+
+fn find_symbol_at_position(table: SymbolTable, pos: Position) -> Option<Symbol>:
+    io.rt_find_symbol_at_position(table, pos)
+
+fn find_symbol_references(table: SymbolTable, name: text) -> [Location]:
+    io.rt_find_symbol_references(table, name)
+
+fn get_scope_at_position(table: SymbolTable, pos: Position) -> Scope:
+    io.rt_get_scope_at_position(table, pos)
+
+fn get_context_keywords(pos: Position, scope: Scope) -> [text]:
+    io.rt_get_context_keywords(pos, scope)
+
+fn type_check_ast(ast: AST) -> [TypeError]:
+    io.rt_type_check_ast(ast)
+
+fn extract_all_symbols(table: SymbolTable) -> [Symbol]:
+    io.rt_extract_all_symbols(table)
+
+# --- Workspace Symbol Search Helpers ---
+
+# Find all source files in a directory
+fn find_source_files(root: text) -> [text]:
+    var files = []
+    val entries = io.dir_walk(root)
+
+    for entry in entries:
+        # Only include .spl and .sspec files
+        if entry.ends_with(".spl") or entry.ends_with(".sspec"):
+            # Skip build directories and hidden files
+            if not entry.contains("/target/") and not entry.contains("/."):
+                files.push(entry)
+
+    files
+
+# Check if symbol name matches query (case-insensitive substring)
+fn symbol_matches_query(name: text, query: text) -> bool:
+    val name_lower = name.to_lower()
+    val query_lower = query.to_lower()
+    name_lower.contains(query_lower)
+
+# Rank symbol match quality (lower score = better match)
+fn rank_symbol_match(symbol: Symbol, query: text) -> i64:
+    var score = 0
+
+    # Exact match: highest priority
+    if symbol.name == query:
+        score = -100
+    # Prefix match: high priority
+    elif symbol.name.starts_with(query):
+        score = -50
+    # Contains: lower priority
+    else:
+        score = -20
+
+    # Public symbols get bonus
+    if symbol.is_public:
+        score = score - 10
+
+    score
+
+# Find files that might import the given file
+# Simple heuristic: search all files and check for import statements
+fn find_files_that_might_import(file_path: text, project_root: text) -> [text]:
+    # Extract module name from file path
+    val module_name = extract_module_name(file_path, project_root)
+
+    # Get all source files
+    val all_files = find_source_files(project_root)
+
+    # Search for files that import this module
+    var importing_files = [file_path]  # Always include the file itself
+
+    for file in all_files:
+        if file == file_path:
+            continue
+
+        # Read file and check for import statement
+        if io.file_exists(file):
+            val content = io.file_read(file)
+            if content.contains("import {module_name}") or content.contains("use {module_name}"):
+                importing_files.push(file)
+
+    importing_files
+
+# Extract module name from file path
+fn extract_module_name(file_path: text, project_root: text) -> text:
+    # Remove project root and convert path to module name
+    var module_path = file_path
+
+    if module_path.starts_with(project_root):
+        module_path = module_path[project_root.len():]
+
+    # Remove leading slash
+    if module_path.starts_with("/"):
+        module_path = module_path[1:]
+
+    # Remove .spl extension
+    if module_path.ends_with(".spl"):
+        module_path = module_path[:module_path.len() - 4]
+
+    # Convert path separators to dots
+    module_path.replace("/", ".")

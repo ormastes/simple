@@ -1,0 +1,252 @@
+@allow(primitive_api)
+# Unicode-Aware Text Operations
+#
+# Drop-in replacements for string_core.spl functions that respect CharMode.
+# In Utf8 mode: behaves identically to string_core (byte-oriented).
+# In FullUnicode mode: operates on codepoints.
+#
+# These functions extend (not replace) string_core — use them when Unicode
+# correctness is needed. The originals in string_core.spl remain for
+# performance-critical ASCII-only code paths.
+#
+# Usage:
+#     use std.common.encoding.unicode_text.{
+#         utext_len, utext_char_at, utext_slice,
+#         utext_to_upper, utext_to_lower,
+#         utext_is_alpha, utext_is_digit,
+#         utext_display_width
+#     }
+
+use std.common.encoding.char_mode.{CharMode, char_mode, is_utf8_mode}
+use std.common.encoding.utf8.{
+    text_byte_len, text_codepoint_len, text_codepoints,
+    utf8_seq_len, utf8_decode_one, utf8_encode_one, char_from_codepoint
+}
+use std.common.encoding.text_ops.{
+    text_len_mode, text_char_at_mode, text_slice_mode,
+    text_chars_mode, text_display_width, codepoint_display_width
+}
+use std.common.unicode.codepoint.{
+    is_unicode_letter, is_unicode_digit, is_unicode_whitespace,
+    is_unicode_upper, is_unicode_lower,
+    unicode_to_upper, unicode_to_lower, is_combining_mark
+}
+
+# ============================================================================
+# Length functions
+# ============================================================================
+
+fn utext_len(s: text) -> i64:
+    """Mode-aware string length.
+    Utf8: byte count. FullUnicode: codepoint count."""
+    text_len_mode(s)
+
+fn utext_byte_len(s: text) -> i64:
+    """Always returns byte length (regardless of mode)."""
+    text_byte_len(s)
+
+fn utext_char_count(s: text) -> i64:
+    """Always returns codepoint count (regardless of mode)."""
+    text_codepoint_len(s)
+
+fn utext_width(s: text) -> i64:
+    """Display width accounting for wide/zero-width chars."""
+    text_display_width(s)
+
+# ============================================================================
+# Character access
+# ============================================================================
+
+fn utext_char_at(s: text, idx: i64) -> text:
+    """Mode-aware character access."""
+    text_char_at_mode(s, idx)
+
+fn utext_slice(s: text, start: i64, end_idx: i64) -> text:
+    """Mode-aware string slicing."""
+    text_slice_mode(s, start, end_idx)
+
+fn utext_chars(s: text) -> [text]:
+    """Mode-aware character splitting."""
+    text_chars_mode(s)
+
+# ============================================================================
+# Unicode-aware case conversion (always codepoint-level)
+# ============================================================================
+
+fn utext_to_upper(s: text) -> text:
+    """Convert text to uppercase (Unicode-aware: Latin + Cyrillic)."""
+    val cps = text_codepoints(s)
+    var result_cps: [i64] = []
+    var i: i64 = 0
+    while i < cps.len():
+        result_cps.push(unicode_to_upper(cps[i]))
+        i = i + 1
+    codepoints_to_text_internal(result_cps)
+
+fn utext_to_lower(s: text) -> text:
+    """Convert text to lowercase (Unicode-aware: Latin + Cyrillic)."""
+    val cps = text_codepoints(s)
+    var result_cps: [i64] = []
+    var i: i64 = 0
+    while i < cps.len():
+        result_cps.push(unicode_to_lower(cps[i]))
+        i = i + 1
+    codepoints_to_text_internal(result_cps)
+
+fn utext_capitalize(s: text) -> text:
+    """Capitalize first letter, lowercase rest (Unicode-aware)."""
+    val cps = text_codepoints(s)
+    if cps.len() == 0:
+        return ""
+    var result_cps: [i64] = []
+    result_cps.push(unicode_to_upper(cps[0]))
+    var i: i64 = 1
+    while i < cps.len():
+        result_cps.push(unicode_to_lower(cps[i]))
+        i = i + 1
+    codepoints_to_text_internal(result_cps)
+
+# ============================================================================
+# Unicode-aware classification (always codepoint-level)
+# ============================================================================
+
+fn utext_is_alpha(s: text) -> bool:
+    """Check if all characters are letters (Unicode-aware)."""
+    val cps = text_codepoints(s)
+    if cps.len() == 0:
+        return false
+    var i: i64 = 0
+    while i < cps.len():
+        if not is_unicode_letter(cps[i]):
+            return false
+        i = i + 1
+    true
+
+fn utext_is_digit(s: text) -> bool:
+    """Check if all characters are digits (Unicode-aware)."""
+    val cps = text_codepoints(s)
+    if cps.len() == 0:
+        return false
+    var i: i64 = 0
+    while i < cps.len():
+        if not is_unicode_digit(cps[i]):
+            return false
+        i = i + 1
+    true
+
+fn utext_is_whitespace(s: text) -> bool:
+    """Check if all characters are whitespace (Unicode-aware)."""
+    val cps = text_codepoints(s)
+    if cps.len() == 0:
+        return false
+    var i: i64 = 0
+    while i < cps.len():
+        if not is_unicode_whitespace(cps[i]):
+            return false
+        i = i + 1
+    true
+
+fn utext_is_upper(s: text) -> bool:
+    """Check if all cased characters are uppercase."""
+    val cps = text_codepoints(s)
+    var has_cased = false
+    var i: i64 = 0
+    while i < cps.len():
+        if is_unicode_lower(cps[i]):
+            return false
+        if is_unicode_upper(cps[i]):
+            has_cased = true
+        i = i + 1
+    has_cased
+
+fn utext_is_lower(s: text) -> bool:
+    """Check if all cased characters are lowercase."""
+    val cps = text_codepoints(s)
+    var has_cased = false
+    var i: i64 = 0
+    while i < cps.len():
+        if is_unicode_upper(cps[i]):
+            return false
+        if is_unicode_lower(cps[i]):
+            has_cased = true
+        i = i + 1
+    has_cased
+
+# ============================================================================
+# Unicode-aware trimming
+# ============================================================================
+
+fn utext_trim(s: text) -> text:
+    """Trim Unicode whitespace from both ends."""
+    val cps = text_codepoints(s)
+    var start: i64 = 0
+    var end_idx: i64 = cps.len()
+
+    while start < end_idx and is_unicode_whitespace(cps[start]):
+        start = start + 1
+    while end_idx > start and is_unicode_whitespace(cps[end_idx - 1]):
+        end_idx = end_idx - 1
+
+    if start >= end_idx:
+        return ""
+
+    # Convert back to text
+    var trimmed_cps: [i64] = []
+    var i = start
+    while i < end_idx:
+        trimmed_cps.push(cps[i])
+        i = i + 1
+    codepoints_to_text_internal(trimmed_cps)
+
+# ============================================================================
+# Unicode-aware reverse (handles combining marks)
+# ============================================================================
+
+fn utext_reverse(s: text) -> text:
+    """Reverse text string, keeping combining marks attached to their base chars."""
+    val cps = text_codepoints(s)
+    if cps.len() <= 1:
+        return s
+
+    # Group codepoints into grapheme-like clusters (base + combining marks)
+    var clusters: [[i64]] = []
+    var current_cluster: [i64] = []
+    var i: i64 = 0
+
+    while i < cps.len():
+        if is_combining_mark(cps[i]) and current_cluster.len() > 0:
+            # Attach combining mark to current cluster
+            current_cluster.push(cps[i])
+        else:
+            if current_cluster.len() > 0:
+                clusters.push(current_cluster)
+            current_cluster = [cps[i]]
+        i = i + 1
+
+    if current_cluster.len() > 0:
+        clusters.push(current_cluster)
+
+    # Reverse the cluster order
+    var reversed_cps: [i64] = []
+    i = clusters.len() - 1
+    while i >= 0:
+        var j: i64 = 0
+        while j < clusters[i].len():
+            reversed_cps.push(clusters[i][j])
+            j = j + 1
+        i = i - 1
+
+    codepoints_to_text_internal(reversed_cps)
+
+# ============================================================================
+# Internal helper
+# ============================================================================
+
+fn codepoints_to_text_internal(cps: [i64]) -> text:
+    """Convert codepoint array back to text."""
+    var parts: [text] = []
+    var i: i64 = 0
+    while i < cps.len():
+        parts.push(char_from_codepoint(cps[i]))
+        i = i + 1
+    parts.join("")

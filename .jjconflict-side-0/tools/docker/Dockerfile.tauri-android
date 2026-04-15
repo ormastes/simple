@@ -1,0 +1,66 @@
+FROM ubuntu:24.04
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+# System dependencies for Android build (no desktop webkit/GTK needed)
+RUN apt-get update && apt-get install -y \
+    # Build tools
+    curl build-essential pkg-config unzip wget \
+    # Tauri android needs these for host-side linking
+    libssl-dev libglib2.0-dev \
+    # Java (needed by Android SDK / Gradle)
+    openjdk-17-jdk-headless \
+    # Misc
+    ca-certificates git \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install Rust + Android targets
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+ENV PATH="/root/.cargo/bin:${PATH}"
+RUN rustup target add aarch64-linux-android armv7-linux-androideabi x86_64-linux-android i686-linux-android
+
+# Install Node.js
+RUN curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
+    && apt-get install -y nodejs \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install Android SDK command-line tools
+ENV ANDROID_HOME=/opt/android-sdk
+ENV PATH="${ANDROID_HOME}/cmdline-tools/latest/bin:${ANDROID_HOME}/platform-tools:${PATH}"
+
+RUN mkdir -p ${ANDROID_HOME}/cmdline-tools && \
+    cd /tmp && \
+    wget -q https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip -O cmdline-tools.zip && \
+    unzip -q cmdline-tools.zip && \
+    mv cmdline-tools ${ANDROID_HOME}/cmdline-tools/latest && \
+    rm cmdline-tools.zip
+
+# Accept licenses and install SDK components
+RUN yes | sdkmanager --licenses 2>/dev/null && \
+    sdkmanager "platform-tools" "platforms;android-34" "build-tools;34.0.0" \
+    "ndk;27.0.12077973" "system-images;android-34;google_apis;x86_64" 2>&1 | tail -5
+
+ENV NDK_HOME="${ANDROID_HOME}/ndk/27.0.12077973"
+
+# Install Tauri CLI
+RUN cargo install tauri-cli --version "^2"
+
+WORKDIR /app
+
+# Copy project
+COPY tools/tauri-shell/ /app/tools/tauri-shell/
+COPY bin/release/linux-x86_64/simple /app/bin/simple
+COPY examples/ui/ /app/examples/ui/
+
+# Install npm deps
+WORKDIR /app/tools/tauri-shell
+RUN npm install
+
+# Initialize Android target
+RUN cargo tauri android init 2>&1 | tail -10
+
+# Build for Android
+RUN cargo tauri android build --debug 2>&1 | tail -20
+
+WORKDIR /app
+CMD ["echo", "Android build complete. APK at tools/tauri-shell/src-tauri/gen/android/app/build/outputs/apk/"]

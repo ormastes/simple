@@ -1,0 +1,300 @@
+use std.sspec.*
+
+# Inline monitor/link registry for interpreter-mode testing
+
+struct TestDownEvent:
+    monitor_ref: i64
+    pid: i64
+    reason: text
+
+struct TestLinkExitEvent:
+    pid: i64
+    reason: text
+
+var _next_ref: i64 = 1
+var _mon_refs: [i64] = []
+var _mon_watchers: [i64] = []
+var _mon_targets: [i64] = []
+var _link_a: [i64] = []
+var _link_b: [i64] = []
+var _down_evt_refs: [i64] = []
+var _down_evt_pids: [i64] = []
+var _down_evt_reasons: [text] = []
+var _down_evt_dest: [i64] = []
+var _link_evt_pids: [i64] = []
+var _link_evt_reasons: [text] = []
+var _link_evt_dest: [i64] = []
+
+fn reset():
+    _next_ref = 1
+    _mon_refs = []
+    _mon_watchers = []
+    _mon_targets = []
+    _link_a = []
+    _link_b = []
+    _down_evt_refs = []
+    _down_evt_pids = []
+    _down_evt_reasons = []
+    _down_evt_dest = []
+    _link_evt_pids = []
+    _link_evt_reasons = []
+    _link_evt_dest = []
+
+fn monitor_from(watcher: i64, target: i64) -> i64:
+    val ref = _next_ref
+    _next_ref = _next_ref + 1
+    _mon_refs = _mon_refs + [ref]
+    _mon_watchers = _mon_watchers + [watcher]
+    _mon_targets = _mon_targets + [target]
+    ref
+
+fn demonitor(ref: i64):
+    var nr: [i64] = []
+    var nw: [i64] = []
+    var nt: [i64] = []
+    var i = 0
+    for r in _mon_refs:
+        if r != ref:
+            nr = nr + [r]
+            nw = nw + [_mon_watchers[i]]
+            nt = nt + [_mon_targets[i]]
+        i = i + 1
+    _mon_refs = nr
+    _mon_watchers = nw
+    _mon_targets = nt
+
+fn link_pids(a: i64, b: i64):
+    var i = 0
+    for x in _link_a:
+        if (x == a and _link_b[i] == b) or (x == b and _link_b[i] == a):
+            return
+        i = i + 1
+    _link_a = _link_a + [a]
+    _link_b = _link_b + [b]
+
+fn unlink_pids(a: i64, b: i64):
+    var na: [i64] = []
+    var nb: [i64] = []
+    var i = 0
+    for x in _link_a:
+        val y = _link_b[i]
+        if not ((x == a and y == b) or (x == b and y == a)):
+            na = na + [x]
+            nb = nb + [y]
+        i = i + 1
+    _link_a = na
+    _link_b = nb
+
+fn notify_exit(pid: i64, reason: text):
+    var nr: [i64] = []
+    var nw: [i64] = []
+    var nt: [i64] = []
+    var i = 0
+    for ref in _mon_refs:
+        if _mon_targets[i] == pid:
+            _down_evt_refs = _down_evt_refs + [ref]
+            _down_evt_pids = _down_evt_pids + [pid]
+            _down_evt_reasons = _down_evt_reasons + [reason]
+            _down_evt_dest = _down_evt_dest + [_mon_watchers[i]]
+        else:
+            nr = nr + [ref]
+            nw = nw + [_mon_watchers[i]]
+            nt = nt + [_mon_targets[i]]
+        i = i + 1
+    _mon_refs = nr
+    _mon_watchers = nw
+    _mon_targets = nt
+    var na: [i64] = []
+    var nb: [i64] = []
+    var j = 0
+    for a in _link_a:
+        val b = _link_b[j]
+        if a == pid:
+            _link_evt_pids = _link_evt_pids + [pid]
+            _link_evt_reasons = _link_evt_reasons + [reason]
+            _link_evt_dest = _link_evt_dest + [b]
+        elif b == pid:
+            _link_evt_pids = _link_evt_pids + [pid]
+            _link_evt_reasons = _link_evt_reasons + [reason]
+            _link_evt_dest = _link_evt_dest + [a]
+        else:
+            na = na + [a]
+            nb = nb + [b]
+        j = j + 1
+    _link_a = na
+    _link_b = nb
+
+fn poll_down(watcher: i64) -> i64:
+    var count = 0
+    var nr: [i64] = []
+    var np: [i64] = []
+    var nre: [text] = []
+    var nd: [i64] = []
+    var i = 0
+    for ref in _down_evt_refs:
+        if _down_evt_dest[i] == watcher:
+            count = count + 1
+        else:
+            nr = nr + [ref]
+            np = np + [_down_evt_pids[i]]
+            nre = nre + [_down_evt_reasons[i]]
+            nd = nd + [_down_evt_dest[i]]
+        i = i + 1
+    _down_evt_refs = nr
+    _down_evt_pids = np
+    _down_evt_reasons = nre
+    _down_evt_dest = nd
+    count
+
+fn poll_link(pid: i64) -> i64:
+    var count = 0
+    var np: [i64] = []
+    var nre: [text] = []
+    var nd: [i64] = []
+    var i = 0
+    for p in _link_evt_pids:
+        if _link_evt_dest[i] == pid:
+            count = count + 1
+        else:
+            np = np + [p]
+            nre = nre + [_link_evt_reasons[i]]
+            nd = nd + [_link_evt_dest[i]]
+        i = i + 1
+    _link_evt_pids = np
+    _link_evt_reasons = nre
+    _link_evt_dest = nd
+    count
+
+describe "Monitor Registry":
+    context "monitor creation":
+        it "returns unique ref":
+            reset()
+            val r1 = monitor_from(10, 20)
+            val r2 = monitor_from(10, 30)
+            expect(r1 != r2).to_equal(true)
+
+        it "increases count":
+            reset()
+            monitor_from(10, 20)
+            expect(_mon_refs.len()).to_equal(1)
+
+        it "stores watcher identity":
+            reset()
+            monitor_from(42, 99)
+            expect(_mon_watchers[0]).to_equal(42)
+
+    context "demonitor":
+        it "removes monitor":
+            reset()
+            val ref = monitor_from(10, 20)
+            demonitor(ref)
+            expect(_mon_refs.len()).to_equal(0)
+
+        it "invalid ref is no-op":
+            reset()
+            monitor_from(10, 20)
+            demonitor(999)
+            expect(_mon_refs.len()).to_equal(1)
+
+    context "notify_exit delivers DownEvent":
+        it "delivers to correct watcher":
+            reset()
+            monitor_from(10, 20)
+            notify_exit(20, "crashed")
+            expect(poll_down(10)).to_equal(1)
+
+        it "no event for wrong watcher":
+            reset()
+            monitor_from(10, 20)
+            notify_exit(20, "crashed")
+            expect(poll_down(99)).to_equal(0)
+
+        it "removes monitor after delivery":
+            reset()
+            monitor_from(10, 20)
+            notify_exit(20, "crashed")
+            expect(_mon_refs.len()).to_equal(0)
+
+        it "no event for unmonitored pid":
+            reset()
+            monitor_from(10, 20)
+            notify_exit(30, "crashed")
+            expect(poll_down(10)).to_equal(0)
+
+        it "multi-watcher routing":
+            reset()
+            monitor_from(10, 50)
+            monitor_from(20, 50)
+            notify_exit(50, "killed")
+            expect(poll_down(10)).to_equal(1)
+            expect(poll_down(20)).to_equal(1)
+
+    context "poll clears events":
+        it "second poll returns zero":
+            reset()
+            monitor_from(10, 20)
+            notify_exit(20, "crashed")
+            poll_down(10)
+            expect(poll_down(10)).to_equal(0)
+
+describe "Link Registry":
+    context "link creation":
+        it "creates link":
+            reset()
+            link_pids(10, 20)
+            expect(_link_a.len()).to_equal(1)
+
+        it "duplicate is no-op":
+            reset()
+            link_pids(10, 20)
+            link_pids(10, 20)
+            expect(_link_a.len()).to_equal(1)
+
+        it "reverse duplicate is no-op":
+            reset()
+            link_pids(10, 20)
+            link_pids(20, 10)
+            expect(_link_a.len()).to_equal(1)
+
+    context "unlink":
+        it "removes link":
+            reset()
+            link_pids(10, 20)
+            unlink_pids(10, 20)
+            expect(_link_a.len()).to_equal(0)
+
+    context "notify_exit delivers LinkExitEvent":
+        it "notifies partner":
+            reset()
+            link_pids(10, 20)
+            notify_exit(20, "crashed")
+            expect(poll_link(10)).to_equal(1)
+
+        it "notifies both directions":
+            reset()
+            link_pids(10, 20)
+            notify_exit(10, "timeout")
+            expect(poll_link(20)).to_equal(1)
+
+        it "removes link after delivery":
+            reset()
+            link_pids(10, 20)
+            notify_exit(20, "crashed")
+            expect(_link_a.len()).to_equal(0)
+
+    context "poll clears link events":
+        it "second poll returns zero":
+            reset()
+            link_pids(10, 20)
+            notify_exit(20, "crashed")
+            poll_link(10)
+            expect(poll_link(10)).to_equal(0)
+
+describe "Reset":
+    it "clears everything":
+        reset()
+        monitor_from(1, 2)
+        link_pids(3, 4)
+        reset()
+        expect(_mon_refs.len()).to_equal(0)
+        expect(_link_a.len()).to_equal(0)

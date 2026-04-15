@@ -1,0 +1,264 @@
+@allow(primitive_api)
+# OpenOCD Protocol Client
+# Manages OpenOCD process lifecycle + GDB MI connection for debug ops.
+# Uses telnet for flash/reset/monitor commands, GDB for standard debug ops.
+
+use std.nogc_sync_mut.debug.remote.types.{DebugConfig, Architecture}
+use std.nogc_sync_mut.debug.remote.protocol.gdb_mi.GdbMiClient
+use std.nogc_sync_mut.debug.coordinator.{VarInfo, FrameInfo}
+
+# Manages an OpenOCD process and its telnet interface
+class OpenocdProcess:
+    cfg_path: text
+    serial: text
+    gdb_port: i32
+    telnet_port: i32
+    pid: i64
+    running: bool
+
+impl OpenocdProcess:
+    static fn create(cfg_path: text, serial: text, gdb_port: i32, telnet_port: i32) -> OpenocdProcess:
+        OpenocdProcess(
+            cfg_path: cfg_path,
+            serial: serial,
+            gdb_port: gdb_port,
+            telnet_port: telnet_port,
+            pid: 0,
+            running: false
+        )
+
+    # Start OpenOCD process in background
+    me start() -> Result<text, text>:
+        val serial_cmd = if self.serial.len() > 0: " -c \"adapter serial {self.serial}\"" else: ""
+        val cmd = "openocd -f {self.cfg_path}{serial_cmd} -c \"gdb_port {self.gdb_port}\" -c \"telnet_port {self.telnet_port}\" &"
+        val result = rt_system(cmd)
+        if result < 0:
+            return Err("failed to start openocd: exit code {result}")
+        self.running = true
+        # Wait for OpenOCD to initialize
+        rt_sleep_ms(500)
+        Ok("openocd started on gdb:{self.gdb_port} telnet:{self.telnet_port}")
+
+    # Send a command via telnet to OpenOCD
+    fn send_telnet_command(cmd: text) -> Result<text, text>:
+        if not self.running:
+            return Err("openocd not running")
+        val telnet_cmd = "echo '{cmd}' | nc -q 1 localhost {self.telnet_port}"
+        val output = rt_command_output(telnet_cmd)
+        Ok(output)
+
+    # Flash an ELF file to target
+    fn flash_elf(elf_path: text) -> Result<text, text>:
+        self.send_telnet_command("program {elf_path} verify reset")
+
+    # Reset and halt target
+    fn reset_halt() -> Result<text, text>:
+        self.send_telnet_command("reset halt")
+
+    # Reset and run target
+    fn reset_run() -> Result<text, text>:
+        self.send_telnet_command("reset run")
+
+    # Read memory words
+    fn mdw(addr: i64, count: i32) -> Result<text, text>:
+        self.send_telnet_command("mdw 0x{rt_hex(addr)} {count}")
+
+    # Write memory word
+    fn mww(addr: i64, value: i64) -> Result<text, text>:
+        self.send_telnet_command("mww 0x{rt_hex(addr)} 0x{rt_hex(value)}")
+
+    # Stop OpenOCD process
+    me stop():
+        if self.running:
+            self.send_telnet_command("shutdown")
+            self.running = false
+
+    fn is_running() -> bool:
+        self.running
+
+# Composite client: OpenOCD process + GDB MI for debug operations
+class OpenocdClient:
+    process: OpenocdProcess
+    gdb: Option<GdbMiClient>
+    program: text
+    attached: bool
+
+impl OpenocdClient:
+    # Connect to target via OpenOCD
+    static fn connect(cfg_path: text, gdb_port: i32, telnet_port: i32, program: text, serial: text) -> Result<OpenocdClient, text>:
+        var process = OpenocdProcess.create(cfg_path, serial, gdb_port, telnet_port)
+        process.start()?
+
+        # Connect GDB to OpenOCD's GDB port
+        val gdb_config = DebugConfig(
+            host: "localhost",
+            port: gdb_port,
+            target: Architecture.Arm32,
+            program: program,
+            options: {}
+        )
+        val gdb = GdbMiClient.connect(gdb_config)?
+
+        Ok(OpenocdClient(
+            process: process,
+            gdb: Some(gdb),
+            program: program,
+            attached: true
+        ))
+
+    # Create client wrapping existing process and GDB connection
+    static fn from_parts(process: OpenocdProcess, gdb: GdbMiClient, program: text) -> OpenocdClient:
+        OpenocdClient(
+            process: process,
+            gdb: Some(gdb),
+            program: program,
+            attached: true
+        )
+
+    fn is_attached() -> bool:
+        self.attached
+
+    # --- Standard debug ops (delegated to GDB) ---
+
+    fn halt() -> Result<text, text>:
+        match self.gdb:
+            Some(gdb): gdb.halt()
+            nil: Err("GDB not connected")
+
+    fn resume() -> Result<text, text>:
+        match self.gdb:
+            Some(gdb): gdb.resume()
+            nil: Err("GDB not connected")
+
+    fn single_step() -> Result<text, text>:
+        match self.gdb:
+            Some(gdb): gdb.single_step()
+            nil: Err("GDB not connected")
+
+    fn step_over() -> Result<text, text>:
+        match self.gdb:
+            Some(gdb): gdb.step_over()
+            nil: Err("GDB not connected")
+
+    fn step_out() -> Result<text, text>:
+        match self.gdb:
+            Some(gdb): gdb.step_out()
+            nil: Err("GDB not connected")
+
+    fn read_memory(addr: i64, size: i32) -> Result<[i32], text>:
+        match self.gdb:
+            Some(gdb): gdb.read_memory(addr, size)
+            nil: Err("GDB not connected")
+
+    fn write_memory(addr: i64, data: [i32]) -> Result<text, text>:
+        match self.gdb:
+            Some(gdb): gdb.write_memory(addr, data)
+            nil: Err("GDB not connected")
+
+    fn read_register(name: text) -> Result<i64, text>:
+        match self.gdb:
+            Some(gdb): gdb.read_register(name)
+            nil: Err("GDB not connected")
+
+    fn read_all_registers() -> Result<Dict<text, i64>, text>:
+        match self.gdb:
+            Some(gdb): gdb.read_all_registers()
+            nil: Err("GDB not connected")
+
+    fn write_register(name: text, value: i64) -> Result<text, text>:
+        match self.gdb:
+            Some(gdb): gdb.write_register(name, value)
+            nil: Err("GDB not connected")
+
+    fn set_breakpoint(location: text) -> Result<i32, text>:
+        match self.gdb:
+            Some(gdb): gdb.set_breakpoint(location)
+            nil: Err("GDB not connected")
+
+    fn set_breakpoint_at_addr(addr: i64) -> Result<i32, text>:
+        match self.gdb:
+            Some(gdb): gdb.set_breakpoint_at_addr(addr)
+            nil: Err("GDB not connected")
+
+    fn delete_breakpoint(id: i32) -> Result<text, text>:
+        match self.gdb:
+            Some(gdb): gdb.delete_breakpoint(id)
+            nil: Err("GDB not connected")
+
+    fn set_watchpoint(expr: text, access: text) -> Result<i32, text>:
+        match self.gdb:
+            Some(gdb): gdb.set_watchpoint(expr, access)
+            nil: Err("GDB not connected")
+
+    fn read_locals() -> Result<[VarInfo], text>:
+        match self.gdb:
+            Some(gdb): gdb.read_locals()
+            nil: Err("GDB not connected")
+
+    fn read_arguments() -> Result<[VarInfo], text>:
+        match self.gdb:
+            Some(gdb): gdb.read_arguments()
+            nil: Err("GDB not connected")
+
+    fn read_globals() -> Result<[VarInfo], text>:
+        match self.gdb:
+            Some(gdb): gdb.read_globals()
+            nil: Err("GDB not connected")
+
+    fn evaluate(expr: text) -> Result<text, text>:
+        match self.gdb:
+            Some(gdb): gdb.evaluate(expr)
+            nil: Err("GDB not connected")
+
+    fn stack_trace() -> Result<[FrameInfo], text>:
+        match self.gdb:
+            Some(gdb): gdb.stack_trace()
+            nil: Err("GDB not connected")
+
+    fn stack_depth() -> Result<i32, text>:
+        match self.gdb:
+            Some(gdb): gdb.stack_depth()
+            nil: Err("GDB not connected")
+
+    fn select_frame(level: i32) -> Result<text, text>:
+        match self.gdb:
+            Some(gdb): gdb.select_frame(level)
+            nil: Err("GDB not connected")
+
+    # --- OpenOCD-native ops (delegated to telnet) ---
+
+    fn flash_program(elf_path: text) -> Result<text, text>:
+        self.process.flash_elf(elf_path)
+
+    fn system_reset() -> Result<text, text>:
+        self.process.reset_halt()
+
+    fn monitor(cmd: text) -> Result<text, text>:
+        self.process.send_telnet_command(cmd)
+
+    # --- Lifecycle ---
+
+    me disconnect():
+        match self.gdb:
+            Some(gdb): gdb.disconnect()
+            nil: pass
+        self.process.stop()
+        self.attached = false
+
+# Helper: format integer as hex string
+fn rt_hex(value: i64) -> text:
+    if value == 0:
+        return "0"
+    var result = ""
+    var v = value
+    val hex_chars = "0123456789abcdef"
+    while v > 0:
+        val digit = v % 16
+        result = hex_chars[digit] + result
+        v = v / 16
+    result
+
+# FFI declarations for process management
+extern fn rt_system(cmd: text) -> i64
+extern fn rt_command_output(cmd: text) -> text
+extern fn rt_sleep_ms(ms: i64)

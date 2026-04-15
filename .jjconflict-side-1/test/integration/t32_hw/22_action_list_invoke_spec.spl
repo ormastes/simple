@@ -1,0 +1,78 @@
+# T32 Hardware -- Action List / Invoke
+#
+# Tests core execution-control actions: Go, Break, Step, Step.Over.
+# Verifies that target state changes correctly after each action.
+#
+# @session-kind: trace32_board
+# @target: arm
+# @tag: t32_hw, new_tools
+# @reuse: exclusive_reused
+
+use std.sspec.{describe, context, it, expect, before_all, after_all}
+use test.integration.t32_hw.t32_hw_helpers.{
+    t32_hw_probe_available, t32_hw_connect, t32_hw_run_cmd, t32_hw_eval,
+    t32_hw_host, t32_hw_port, t32_hw_version_gate_new,
+    t32_hw_relay_power_on, t32_hw_relay_power_off, t32_hw_relay_power_state
+}
+
+describe "T32 action list invoke":
+    var client = nil
+
+    before_all:
+        val result = t32_hw_connect()
+        match result:
+            Ok(c): client = c
+            Err(e): expect("connect failed: {e}").to_equal("")
+        # Ensure system is up before running actions
+        t32_hw_run_cmd(client, "SYStem.Up")
+
+    after_all:
+        if client != nil:
+            # Leave target in stopped state
+            t32_hw_run_cmd(client, "Break")
+            client.disconnect()
+
+    context "execution control":
+        it "Go starts target":
+            val go_result = t32_hw_run_cmd(client, "Go")
+            match go_result:
+                Ok(_): expect("go ok").to_contain("ok")
+                Err(e): expect("Go failed: {e}").to_equal("")
+            val state = t32_hw_eval(client, "STATE.RUN()")
+            match state:
+                Ok(v): expect(v).to_contain("TRUE")
+                Err(e): expect("STATE.RUN() failed: {e}").to_equal("")
+
+        it "Break stops target":
+            t32_hw_run_cmd(client, "Go")
+            val brk_result = t32_hw_run_cmd(client, "Break")
+            match brk_result:
+                Ok(_): expect("break ok").to_contain("ok")
+                Err(e): expect("Break failed: {e}").to_equal("")
+            val state = t32_hw_eval(client, "STATE.RUN()")
+            match state:
+                Ok(v): expect(v).to_contain("FALSE")
+                Err(e): expect("STATE.RUN() failed: {e}").to_equal("")
+
+        it "Step executes one instruction":
+            # Ensure target is stopped first
+            t32_hw_run_cmd(client, "Break")
+            val result = t32_hw_run_cmd(client, "Step")
+            match result:
+                Ok(_):
+                    val state = t32_hw_eval(client, "STATE.RUN()")
+                    match state:
+                        Ok(v): expect(v).to_contain("FALSE")
+                        Err(e): expect("STATE.RUN() after Step failed: {e}").to_equal("")
+                Err(e): expect("Step failed: {e}").to_equal("")
+
+        it "Step.Over executes":
+            t32_hw_run_cmd(client, "Break")
+            val result = t32_hw_run_cmd(client, "Step.Over")
+            match result:
+                Ok(_):
+                    val state = t32_hw_eval(client, "STATE.RUN()")
+                    match state:
+                        Ok(v): expect(v).to_contain("FALSE")
+                        Err(e): expect("STATE.RUN() after Step.Over failed: {e}").to_equal("")
+                Err(e): expect("Step.Over failed: {e}").to_equal("")

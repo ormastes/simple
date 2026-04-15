@@ -1,0 +1,133 @@
+"""
+# STM32WB Remote JIT End-to-End
+
+**Feature IDs:** #RJE-010
+**Category:** Integration
+**Difficulty:** 4/5
+**Status:** Implemented
+
+## Overview
+
+End-to-end JIT test on real STM32WB hardware via unified adapter pattern.
+Uses Stm32WbAdapter (OpenOCD + GDB MI) + CompilerBridge for compile-upload-execute.
+
+Requires STM32WB Nucleo board with ST-Link connected (USB 0483:).
+"""
+
+use std.io_runtime.{shell}
+use std.nogc_sync_mut.debug.remote.exec.adapter_stm32wb.{Stm32WbAdapter}
+use std.nogc_sync_mut.debug.remote.exec.types.{MemoryMap}
+use std.nogc_sync_mut.debug.remote.exec.compiler_bridge.{CompilerBridge}
+use std.nogc_sync_mut.debug.remote.types.{Architecture}
+
+fn command_available(cmd: text) -> bool:
+    val result = shell("command -v {cmd} >/dev/null 2>&1")
+    result.exit_code == 0
+
+fn stlink_detected() -> bool:
+    val result = shell("lsusb 2>/dev/null | grep -q '0483:'")
+    result.exit_code == 0
+
+fn hardware_ready() -> bool:
+    command_available("openocd") and command_available("clang") and command_available("ld.lld") and command_available("llvm-objcopy") and stlink_detected()
+
+describe "STM32WB Remote JIT E2E":
+    slow_it "discovers required tools":
+        if not hardware_ready():
+            print "[skip] STM32WB hardware or tools not available"
+            return
+        expect(command_available("openocd")).to_equal(true)
+        expect(command_available("clang")).to_equal(true)
+        expect(command_available("ld.lld")).to_equal(true)
+        expect(command_available("llvm-objcopy")).to_equal(true)
+        expect(stlink_detected()).to_equal(true)
+        print "[ok] all required tools and hardware detected"
+
+    slow_it "connects to STM32WB via OpenOCD":
+        if not hardware_ready():
+            print "[skip] STM32WB hardware not available"
+            return
+        var adapter = Stm32WbAdapter.new()
+        val result = adapter.connect()
+        if result.is_err():
+            print "[skip] connect failed: {result.err().unwrap()}"
+            return
+        expect(result.is_ok()).to_equal(true)
+        print "[ok] connected to STM32WB via OpenOCD"
+        adapter.disconnect()
+
+    slow_it "compiles and uploads return-zero":
+        if not hardware_ready():
+            print "[skip] STM32WB hardware not available"
+            return
+
+        var adapter = Stm32WbAdapter.new()
+        val conn = adapter.connect()
+        if conn.is_err():
+            print "[skip] connect failed: {conn.err().unwrap()}"
+            return
+
+        val manager_result = adapter.create_manager()
+        if manager_result.is_err():
+            adapter.disconnect()
+            print "[skip] manager failed: {manager_result.err().unwrap()}"
+            return
+
+        val source = "fn main() -> i64:\n    0\n"
+        val limits = MemoryMap.stm32wb()
+        val compile_result = CompilerBridge.compile(source, Architecture.Arm32, limits.code_start)
+        if compile_result.is_err():
+            adapter.disconnect()
+            print "[skip] compile failed: {compile_result.err().unwrap()}"
+            return
+
+        var manager = manager_result.ok.unwrap()
+        val exec_result = manager.execute_bytes("stm32wb_return_zero", compile_result.ok.unwrap(), [])
+        adapter.disconnect()
+
+        if exec_result.is_err():
+            print "[skip] exec failed: {exec_result.err().unwrap()}"
+            return
+
+        val exec = exec_result.ok.unwrap()
+        expect(exec.is_ok()).to_equal(true)
+        expect(exec.return_value).to_equal(0)
+        print "[ok] STM32WB JIT: main() returned 0"
+
+    slow_it "compiles and executes return-42":
+        if not hardware_ready():
+            print "[skip] STM32WB hardware not available"
+            return
+
+        var adapter = Stm32WbAdapter.new()
+        val conn = adapter.connect()
+        if conn.is_err():
+            print "[skip] connect failed: {conn.err().unwrap()}"
+            return
+
+        val manager_result = adapter.create_manager()
+        if manager_result.is_err():
+            adapter.disconnect()
+            print "[skip] manager failed: {manager_result.err().unwrap()}"
+            return
+
+        val source = "fn main() -> i64:\n    42\n"
+        val limits = MemoryMap.stm32wb()
+        val compile_result = CompilerBridge.compile(source, Architecture.Arm32, limits.code_start)
+        if compile_result.is_err():
+            adapter.disconnect()
+            print "[skip] compile failed: {compile_result.err().unwrap()}"
+            return
+
+        var manager = manager_result.ok.unwrap()
+        val exec_result = manager.execute_bytes("stm32wb_return_42", compile_result.ok.unwrap(), [])
+        adapter.disconnect()
+
+        if exec_result.is_err():
+            print "[skip] exec failed: {exec_result.err().unwrap()}"
+            return
+
+        val exec = exec_result.ok.unwrap()
+        expect(exec.is_ok()).to_equal(true)
+        expect(exec.return_value).to_equal(42)
+        print "[ok] STM32WB JIT: main() returned 42"

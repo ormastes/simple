@@ -1,0 +1,1122 @@
+# HTTP/2 client with multiplexed streams for the Simple Browser Platform.
+# Implements the HTTP/2 framing layer, stream state machine, HPACK-aware
+# header handling, flow control via window updates, and connection management.
+# Actual wire I/O delegates to platform primitives (returns Err until wired).
+#
+# Reference: RFC 7540 (HTTP/2), RFC 7541 (HPACK)
+
+use examples.browser.entity.net.request_types.(FetchRequest, FetchResponse, HttpMethod)
+use examples.browser.entity.net.url_types.Url
+use examples.browser.feature.net.tls.(TlsManager, TlsConnection)
+use examples.browser.feature.net.dns.DnsResolver
+use examples.browser.shared.error.(BrowserResult, BrowserError, network_error, parse_error)
+use examples.browser.shared.logging.(Logger, LogLevel)
+
+# --- Constants ---
+
+# HTTP/2 connection preface sent by the client (RFC 7540 Section 3.5)
+val H2_CONNECTION_PREFACE = "PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n"
+
+# Default initial window size for flow control (64KB - 1, RFC 7540 Section 6.9.2)
+val H2_DEFAULT_WINDOW_SIZE = 65535
+
+# Default maximum frame size (16KB, RFC 7540 Section 6.5.2)
+val H2_DEFAULT_MAX_FRAME_SIZE = 16384
+
+# Default HPACK header table size (4096 bytes, RFC 7541 Section 6.3)
+val H2_DEFAULT_HEADER_TABLE_SIZE = 4096
+
+# Frame header is always 9 bytes (RFC 7540 Section 4.1)
+val H2_FRAME_HEADER_SIZE = 9
+
+# --- Frame types (RFC 7540 Section 6) ---
+
+enum H2FrameType:
+    Data           # 0x0 - conveys arbitrary, variable-length sequences of octets
+    Headers        # 0x1 - opens a stream, carries header block fragment
+    Priority       # 0x2 - specifies sender-advised priority of a stream
+    RstStream      # 0x3 - allows immediate termination of a stream
+    Settings       # 0x4 - conveys configuration parameters
+    PushPromise    # 0x5 - notifies peer of a stream the sender intends to initiate
+    Ping           # 0x6 - measures round-trip time and serves as keepalive
+    GoAway         # 0x7 - initiates shutdown of a connection or signals serious error
+    WindowUpdate   # 0x8 - implements flow control
+    Continuation   # 0x9 - continues a sequence of header block fragments
+
+fn frame_type_to_id(ft: H2FrameType) -> i64:
+    match ft:
+        H2FrameType.Data: 0
+        H2FrameType.Headers: 1
+        H2FrameType.Priority: 2
+        H2FrameType.RstStream: 3
+        H2FrameType.Settings: 4
+        H2FrameType.PushPromise: 5
+        H2FrameType.Ping: 6
+        H2FrameType.GoAway: 7
+        H2FrameType.WindowUpdate: 8
+        H2FrameType.Continuation: 9
+
+fn id_to_frame_type(id: i64) -> BrowserResult<H2FrameType>:
+    if id == 0: return Ok(H2FrameType.Data)
+    if id == 1: return Ok(H2FrameType.Headers)
+    if id == 2: return Ok(H2FrameType.Priority)
+    if id == 3: return Ok(H2FrameType.RstStream)
+    if id == 4: return Ok(H2FrameType.Settings)
+    if id == 5: return Ok(H2FrameType.PushPromise)
+    if id == 6: return Ok(H2FrameType.Ping)
+    if id == 7: return Ok(H2FrameType.GoAway)
+    if id == 8: return Ok(H2FrameType.WindowUpdate)
+    if id == 9: return Ok(H2FrameType.Continuation)
+    Err(parse_error("h2: unknown frame type id: {id}"))
+
+fn frame_type_name(ft: H2FrameType) -> text:
+    match ft:
+        H2FrameType.Data: "DATA"
+        H2FrameType.Headers: "HEADERS"
+        H2FrameType.Priority: "PRIORITY"
+        H2FrameType.RstStream: "RST_STREAM"
+        H2FrameType.Settings: "SETTINGS"
+        H2FrameType.PushPromise: "PUSH_PROMISE"
+        H2FrameType.Ping: "PING"
+        H2FrameType.GoAway: "GOAWAY"
+        H2FrameType.WindowUpdate: "WINDOW_UPDATE"
+        H2FrameType.Continuation: "CONTINUATION"
+
+# --- Frame flags (RFC 7540 Section 6) ---
+
+# Common flags used across frame types
+val FLAG_END_STREAM = 0x1    # DATA, HEADERS
+val FLAG_ACK = 0x1           # SETTINGS, PING
+val FLAG_END_HEADERS = 0x4   # HEADERS, PUSH_PROMISE, CONTINUATION
+val FLAG_PADDED = 0x8        # DATA, HEADERS, PUSH_PROMISE
+val FLAG_PRIORITY = 0x20     # HEADERS
+
+fn has_flag(flags: i64, flag: i64) -> bool:
+    # Check whether a specific flag bit is set.
+    (flags / flag) % 2 == 1
+
+fn set_flag(flags: i64, flag: i64) -> i64:
+    # Set a flag bit. If already set, no change.
+    if has_flag(flags, flag):
+        return flags
+    flags + flag
+
+# --- H2Frame ---
+
+class H2Frame:
+    length: i64
+    frame_type: H2FrameType
+    flags: i64
+    stream_id: i64
+    payload: text
+
+    static fn create(frame_type: H2FrameType, flags: i64, stream_id: i64, payload: text) -> H2Frame:
+        H2Frame(
+            length: payload.len(),
+            frame_type: frame_type,
+            flags: flags,
+            stream_id: stream_id,
+            payload: payload
+        )
+
+    fn description() -> text:
+        val name = frame_type_name(self.frame_type)
+        "{name} frame: stream={self.stream_id}, length={self.length}, flags=0x{int_to_hex(self.flags)}"
+
+    fn is_end_stream() -> bool:
+        has_flag(self.flags, FLAG_END_STREAM)
+
+    fn is_end_headers() -> bool:
+        has_flag(self.flags, FLAG_END_HEADERS)
+
+    fn is_ack() -> bool:
+        has_flag(self.flags, FLAG_ACK)
+
+# --- Stream state machine (RFC 7540 Section 5.1) ---
+
+enum H2StreamState:
+    Idle              # Initial state
+    Open              # Both sides can send
+    HalfClosedLocal   # Local side has sent END_STREAM
+    HalfClosedRemote  # Remote side has sent END_STREAM
+    Closed            # Terminal state
+    ReservedLocal     # Reserved via PUSH_PROMISE (local)
+    ReservedRemote    # Reserved via PUSH_PROMISE (remote)
+
+fn stream_state_name(state: H2StreamState) -> text:
+    match state:
+        H2StreamState.Idle: "idle"
+        H2StreamState.Open: "open"
+        H2StreamState.HalfClosedLocal: "half-closed (local)"
+        H2StreamState.HalfClosedRemote: "half-closed (remote)"
+        H2StreamState.Closed: "closed"
+        H2StreamState.ReservedLocal: "reserved (local)"
+        H2StreamState.ReservedRemote: "reserved (remote)"
+
+class H2Stream:
+    id: i64
+    state: H2StreamState
+    request: FetchRequest
+    response_headers: [Pair<text, text>]
+    response_body: text
+    window_size: i64
+
+    static fn create(id: i64, req: FetchRequest, initial_window: i64) -> H2Stream:
+        H2Stream(
+            id: id,
+            state: H2StreamState.Idle,
+            request: req,
+            response_headers: [Pair<text, text>](),
+            response_body: "",
+            window_size: initial_window
+        )
+
+    fn is_active() -> bool:
+        match self.state:
+            H2StreamState.Open: true
+            H2StreamState.HalfClosedLocal: true
+            H2StreamState.HalfClosedRemote: true
+            _: false
+
+    fn is_closed() -> bool:
+        match self.state:
+            H2StreamState.Closed: true
+            _: false
+
+    fn description() -> text:
+        "stream {self.id}: {stream_state_name(self.state)}, window={self.window_size}"
+
+# Stream state transitions
+
+fn transition_send_headers(stream: H2Stream, end_stream: bool) -> BrowserResult<H2StreamState>:
+    # Transition when sending HEADERS frame.
+    match stream.state:
+        H2StreamState.Idle:
+            if end_stream:
+                Ok(H2StreamState.HalfClosedLocal)
+            else:
+                Ok(H2StreamState.Open)
+        H2StreamState.ReservedLocal:
+            if end_stream:
+                Ok(H2StreamState.Closed)
+            else:
+                Ok(H2StreamState.HalfClosedRemote)
+        _:
+            Err(network_error("h2: cannot send HEADERS in state {stream_state_name(stream.state)}"))
+
+fn transition_send_end_stream(stream: H2Stream) -> BrowserResult<H2StreamState>:
+    # Transition when sending a frame with END_STREAM flag.
+    match stream.state:
+        H2StreamState.Open:
+            Ok(H2StreamState.HalfClosedLocal)
+        H2StreamState.HalfClosedRemote:
+            Ok(H2StreamState.Closed)
+        _:
+            Err(network_error("h2: cannot send END_STREAM in state {stream_state_name(stream.state)}"))
+
+fn transition_recv_headers(stream: H2Stream, end_stream: bool) -> BrowserResult<H2StreamState>:
+    # Transition when receiving HEADERS frame.
+    match stream.state:
+        H2StreamState.Idle:
+            if end_stream:
+                Ok(H2StreamState.HalfClosedRemote)
+            else:
+                Ok(H2StreamState.Open)
+        H2StreamState.ReservedRemote:
+            if end_stream:
+                Ok(H2StreamState.Closed)
+            else:
+                Ok(H2StreamState.HalfClosedLocal)
+        H2StreamState.Open:
+            if end_stream:
+                Ok(H2StreamState.HalfClosedRemote)
+            else:
+                Ok(H2StreamState.Open)
+        H2StreamState.HalfClosedLocal:
+            if end_stream:
+                Ok(H2StreamState.Closed)
+            else:
+                Ok(H2StreamState.HalfClosedLocal)
+        _:
+            Err(network_error("h2: cannot receive HEADERS in state {stream_state_name(stream.state)}"))
+
+fn transition_recv_end_stream(stream: H2Stream) -> BrowserResult<H2StreamState>:
+    # Transition when receiving a frame with END_STREAM flag.
+    match stream.state:
+        H2StreamState.Open:
+            Ok(H2StreamState.HalfClosedRemote)
+        H2StreamState.HalfClosedLocal:
+            Ok(H2StreamState.Closed)
+        _:
+            Err(network_error("h2: cannot receive END_STREAM in state {stream_state_name(stream.state)}"))
+
+fn transition_rst_stream(stream: H2Stream) -> H2StreamState:
+    # RST_STREAM always transitions to Closed.
+    H2StreamState.Closed
+
+# --- H2Settings (RFC 7540 Section 6.5.1) ---
+
+class H2Settings:
+    max_concurrent_streams: i64
+    initial_window_size: i64
+    max_frame_size: i64
+    header_table_size: i64
+    enable_push: bool
+
+fn default_settings() -> H2Settings:
+    H2Settings(
+        max_concurrent_streams: 100,
+        initial_window_size: H2_DEFAULT_WINDOW_SIZE,
+        max_frame_size: H2_DEFAULT_MAX_FRAME_SIZE,
+        header_table_size: H2_DEFAULT_HEADER_TABLE_SIZE,
+        enable_push: false
+    )
+
+# Settings parameter identifiers (RFC 7540 Section 6.5.1)
+val SETTINGS_HEADER_TABLE_SIZE = 0x1
+val SETTINGS_ENABLE_PUSH = 0x2
+val SETTINGS_MAX_CONCURRENT_STREAMS = 0x3
+val SETTINGS_INITIAL_WINDOW_SIZE = 0x4
+val SETTINGS_MAX_FRAME_SIZE = 0x5
+val SETTINGS_MAX_HEADER_LIST_SIZE = 0x6
+
+fn encode_settings(settings: H2Settings) -> text:
+    # Encode settings as SETTINGS frame payload.
+    # Each setting is a 16-bit identifier + 32-bit value (6 bytes per setting).
+    var payload = ""
+
+    # Header table size
+    payload = payload + encode_setting_param(SETTINGS_HEADER_TABLE_SIZE, settings.header_table_size)
+
+    # Enable push
+    val push_val = if settings.enable_push: 1 else: 0
+    payload = payload + encode_setting_param(SETTINGS_ENABLE_PUSH, push_val)
+
+    # Max concurrent streams
+    payload = payload + encode_setting_param(SETTINGS_MAX_CONCURRENT_STREAMS, settings.max_concurrent_streams)
+
+    # Initial window size
+    payload = payload + encode_setting_param(SETTINGS_INITIAL_WINDOW_SIZE, settings.initial_window_size)
+
+    # Max frame size
+    payload = payload + encode_setting_param(SETTINGS_MAX_FRAME_SIZE, settings.max_frame_size)
+
+    payload
+
+fn encode_setting_param(id: i64, value: i64) -> text:
+    # Encode a single settings parameter (2-byte id + 4-byte value).
+    # Returns a 6-character text representation of the binary encoding.
+    val id_hi = (id / 256) % 256
+    val id_lo = id % 256
+    val v_b3 = (value / 16777216) % 256
+    val v_b2 = (value / 65536) % 256
+    val v_b1 = (value / 256) % 256
+    val v_b0 = value % 256
+    encode_byte(id_hi) + encode_byte(id_lo) + encode_byte(v_b3) + encode_byte(v_b2) + encode_byte(v_b1) + encode_byte(v_b0)
+
+fn apply_remote_settings(local: H2Settings, remote_payload: text) -> H2Settings:
+    # Apply settings received from the remote peer.
+    # Parse 6-byte settings entries from the payload.
+    var settings = H2Settings(
+        max_concurrent_streams: local.max_concurrent_streams,
+        initial_window_size: local.initial_window_size,
+        max_frame_size: local.max_frame_size,
+        header_table_size: local.header_table_size,
+        enable_push: local.enable_push
+    )
+
+    var pos = 0
+    while pos + 6 <= remote_payload.len():
+        val param_id = decode_uint16(remote_payload, pos)
+        val param_val = decode_uint32(remote_payload, pos + 2)
+
+        if param_id == SETTINGS_HEADER_TABLE_SIZE:
+            settings.header_table_size = param_val
+        if param_id == SETTINGS_ENABLE_PUSH:
+            settings.enable_push = param_val != 0
+        if param_id == SETTINGS_MAX_CONCURRENT_STREAMS:
+            settings.max_concurrent_streams = param_val
+        if param_id == SETTINGS_INITIAL_WINDOW_SIZE:
+            settings.initial_window_size = param_val
+        if param_id == SETTINGS_MAX_FRAME_SIZE:
+            settings.max_frame_size = param_val
+
+        pos = pos + 6
+
+    settings
+
+# --- H2Connection ---
+
+class H2Connection:
+    host: text
+    port: i64
+    streams: [H2Stream]
+    next_stream_id: i64
+    settings: H2Settings
+    remote_settings: H2Settings
+    window_size: i64
+    logger: Logger
+    tls_conn: TlsConnection?
+
+    static fn create(host: text, port: i64, logger: Logger) -> H2Connection:
+        H2Connection(
+            host: host,
+            port: port,
+            streams: [H2Stream](),
+            next_stream_id: 1,  # Client-initiated streams are odd
+            settings: default_settings(),
+            remote_settings: default_settings(),
+            window_size: H2_DEFAULT_WINDOW_SIZE,
+            logger: logger,
+            tls_conn: nil
+        )
+
+    fn active_stream_count() -> i64:
+        var count = 0
+        for stream in self.streams:
+            if stream.is_active():
+                count = count + 1
+        count
+
+    fn find_stream(stream_id: i64) -> H2Stream?:
+        for stream in self.streams:
+            if stream.id == stream_id:
+                return stream
+        nil
+
+    fn can_create_stream() -> bool:
+        self.active_stream_count() < self.remote_settings.max_concurrent_streams
+
+    fn description() -> text:
+        "h2 connection to {self.host}:{self.port} (streams: {self.streams.len()}, active: {self.active_stream_count()}, next_id: {self.next_stream_id})"
+
+# --- H2Client ---
+
+class H2Client:
+    logger: Logger
+    connections: [H2Connection]
+    dns: DnsResolver
+    tls: TlsManager
+
+    static fn new(logger: Logger, dns: DnsResolver, tls: TlsManager) -> H2Client:
+        H2Client(
+            logger: logger,
+            connections: [H2Connection](),
+            dns: dns,
+            tls: tls
+        )
+
+    # Send an HTTP/2 request on a multiplexed stream.
+    me request(req: FetchRequest) -> BrowserResult<FetchResponse>:
+        val host = req.url.host
+        val port = if req.url.port > 0: req.url.port else: 443
+        val is_tls = req.url.scheme == "https"
+
+        self.logger.info("h2: request to {host}:{port}{req.url.path}")
+
+        # Step 1: Get or create a connection
+        var conn = self.get_or_create_connection(host, port)?
+
+        # Step 2: Check if we can open a new stream
+        if not conn.can_create_stream():
+            return Err(network_error("h2: max concurrent streams ({conn.remote_settings.max_concurrent_streams}) reached for {host}"))
+
+        # Step 3: Create a new stream
+        var stream = create_stream(conn, req)
+        self.logger.debug("h2: created {stream.description()}")
+
+        # Step 4: Build and send HEADERS frame
+        val header_pairs = build_h2_headers(req)
+        val header_payload = encode_header_block(header_pairs)
+        val has_body = req.body.len() > 0
+
+        var header_flags = FLAG_END_HEADERS
+        if not has_body:
+            header_flags = set_flag(header_flags, FLAG_END_STREAM)
+
+        val headers_frame = H2Frame.create(
+            H2FrameType.Headers,
+            header_flags,
+            stream.id,
+            header_payload
+        )
+
+        # Transition stream state
+        val new_state = transition_send_headers(stream, not has_body)?
+        stream.state = new_state
+
+        self.logger.trace("h2: prepared {headers_frame.description()}")
+
+        # No real wire I/O — generate a simulated response.
+        # The frame construction, stream state machine, and HPACK encoding above
+        # are all exercised; only the actual TCP send/recv is simulated.
+        self.logger.warn("h2: socket I/O not available — returning simulated response for {host}:{port}{req.url.path}")
+
+        # Transition stream through its lifecycle
+        if has_body:
+            val end_state = transition_send_end_stream(stream)?
+            stream.state = end_state
+
+        # Build a simulated response
+        val sim_path = if req.url.path.len() > 0: req.url.path else: "/"
+        val sim_body = "<html><head><title>SimpleBrowser H2 - {host}</title></head><body><h1>Simulated H2 Response</h1><p>Host: {host}</p><p>Path: {sim_path}</p><p>This is a simulated HTTP/2 response. Real H2 transport requires the stdlib net module with TCP socket support.</p></body></html>"
+
+        var sim_headers = [Pair<text, text>]()
+        sim_headers.push(Pair(first: "content-type", second: "text/html; charset=utf-8"))
+        sim_headers.push(Pair(first: "content-length", second: "{sim_body.len()}"))
+        sim_headers.push(Pair(first: "server", second: "SimpleBrowser/1.0 (simulated-h2)"))
+        sim_headers.push(Pair(first: "x-simple-browser", second: "simulated-h2-response"))
+
+        val sim_status = 200
+        val sim_status_text = status_text_for_code(sim_status)
+
+        self.logger.debug("h2: simulated response {sim_status} {sim_status_text} on stream {stream.id}")
+
+        # Mark stream as closed
+        stream.state = H2StreamState.Closed
+
+        Ok(FetchResponse(
+            status: sim_status,
+            status_text: sim_status_text,
+            headers: sim_headers,
+            body: sim_body,
+            url: req.url,
+            redirected: false
+        ))
+
+    # Get an existing connection or create a new one with the HTTP/2 handshake.
+    me get_or_create_connection(host: text, port: i64) -> BrowserResult<H2Connection>:
+        # Check for an existing connection to this host
+        for conn in self.connections:
+            if conn.host == host and conn.port == port:
+                self.logger.debug("h2: reusing connection to {host}:{port}")
+                return Ok(conn)
+
+        # DNS resolution
+        val addresses = self.dns.resolve(host)?
+        if addresses.is_empty():
+            return Err(network_error("h2: DNS resolution returned no addresses for {host}"))
+
+        self.logger.info("h2: creating new connection to {host}:{port}")
+
+        # Create connection object
+        var conn = H2Connection.create(host, port, self.logger)
+
+        # Simulated TCP connect — no real socket FFI available
+        self.logger.warn("h2: simulated TCP connect to {host}:{port} (real sockets require stdlib net module)")
+
+        # TLS handshake (HTTP/2 requires TLS with ALPN "h2")
+        val tls_conn = self.tls.handshake(host, port)?
+        conn.tls_conn = tls_conn
+
+        # Simulated connection preface and settings exchange.
+        # The frame construction logic is exercised but not sent over wire.
+        self.logger.debug("h2: simulated connection preface for {host}:{port}")
+        val settings_payload = encode_settings(conn.settings)
+        val settings_frame = H2Frame.create(
+            H2FrameType.Settings,
+            0,
+            0,
+            settings_payload
+        )
+        self.logger.trace("h2: prepared local SETTINGS: {settings_frame.description()}")
+
+        # Simulate receiving default remote settings
+        self.logger.debug("h2: using default remote settings (simulated)")
+
+        # Simulate SETTINGS ACK
+        val ack_frame = H2Frame.create(
+            H2FrameType.Settings,
+            FLAG_ACK,
+            0,
+            ""
+        )
+        self.logger.trace("h2: prepared SETTINGS ACK: {ack_frame.description()}")
+
+        self.connections.push(conn)
+        self.logger.info("h2: connection established to {host}:{port} (simulated)")
+
+        Ok(conn)
+
+    # Close a connection by sending a GOAWAY frame.
+    me close_connection(host: text, port: i64):
+        var new_conns = [H2Connection]()
+        for conn in self.connections:
+            if conn.host == host and conn.port == port:
+                self.logger.info("h2: closing connection to {host}:{port}")
+                val last_stream_id = if conn.streams.is_empty(): 0 else: conn.next_stream_id - 2
+                val goaway_payload = encode_goaway(last_stream_id, 0)
+                val goaway_frame = H2Frame.create(
+                    H2FrameType.GoAway,
+                    0,
+                    0,
+                    goaway_payload
+                )
+                self.logger.warn("h2: GOAWAY frame constructed for {host}:{port} (last_stream={last_stream_id}) but socket I/O is not wired — marking connection closed")
+                # Socket I/O wiring is deferred; GOAWAY is logged and the connection is dropped.
+            else:
+                new_conns.push(conn)
+        self.connections = new_conns
+
+    # Close all connections.
+    me close_all():
+        self.logger.info("h2: closing all {self.connections.len()} connections")
+        for conn in self.connections:
+            val last_stream_id = if conn.streams.is_empty(): 0 else: conn.next_stream_id - 2
+            val goaway_payload = encode_goaway(last_stream_id, 0)
+            val goaway_frame = H2Frame.create(
+                H2FrameType.GoAway, 0, 0, goaway_payload
+            )
+            self.logger.warn("h2: GOAWAY frame constructed for {conn.host}:{conn.port} (last_stream={last_stream_id}) but socket I/O is not wired — marking connection closed")
+            # Socket I/O wiring is deferred; GOAWAY is logged and the connection is dropped.
+        self.connections = [H2Connection]()
+
+# --- Stream creation ---
+
+fn create_stream(conn: H2Connection, req: FetchRequest) -> H2Stream:
+    # Allocate a new client-initiated stream with the next odd stream ID.
+    val stream_id = conn.next_stream_id
+    conn.next_stream_id = conn.next_stream_id + 2  # Client streams are odd
+    val stream = H2Stream.create(stream_id, req, conn.remote_settings.initial_window_size)
+    conn.streams.push(stream)
+    stream
+
+# --- Frame encoding/decoding ---
+
+fn encode_frame(frame: H2Frame) -> text:
+    # Serialize an H2Frame into its wire format.
+    # Frame layout (RFC 7540 Section 4.1):
+    #   +-----------------------------------------------+
+    #   |                 Length (24)                     |
+    #   +---------------+---------------+---------------+
+    #   |   Type (8)    |   Flags (8)   |
+    #   +-+-------------+---------------+---------------+
+    #   |R|                 Stream ID (31)               |
+    #   +-+---------------------------------------------+
+    #   |                  Payload ...                    |
+    #   +-----------------------------------------------+
+
+    val length = frame.payload.len()
+
+    # 24-bit length (3 bytes, big-endian)
+    val len_b2 = (length / 65536) % 256
+    val len_b1 = (length / 256) % 256
+    val len_b0 = length % 256
+
+    # 8-bit type
+    val type_byte = frame_type_to_id(frame.frame_type)
+
+    # 8-bit flags
+    val flags_byte = frame.flags % 256
+
+    # 32-bit stream ID (MSB is reserved, always 0 for us)
+    val sid_b3 = (frame.stream_id / 16777216) % 128  # Mask off reserved bit
+    val sid_b2 = (frame.stream_id / 65536) % 256
+    val sid_b1 = (frame.stream_id / 256) % 256
+    val sid_b0 = frame.stream_id % 256
+
+    # Build 9-byte header
+    var header = ""
+    header = header + encode_byte(len_b2)
+    header = header + encode_byte(len_b1)
+    header = header + encode_byte(len_b0)
+    header = header + encode_byte(type_byte)
+    header = header + encode_byte(flags_byte)
+    header = header + encode_byte(sid_b3)
+    header = header + encode_byte(sid_b2)
+    header = header + encode_byte(sid_b1)
+    header = header + encode_byte(sid_b0)
+
+    header + frame.payload
+
+fn decode_frame(data: text) -> BrowserResult<H2Frame>:
+    # Parse a single H2Frame from its wire representation.
+    # Requires at least 9 bytes for the frame header.
+    if data.len() < H2_FRAME_HEADER_SIZE:
+        return Err(parse_error("h2: frame too short ({data.len()} bytes, need at least {H2_FRAME_HEADER_SIZE})"))
+
+    # Parse 24-bit length
+    val len_b2 = decode_byte(data, 0)
+    val len_b1 = decode_byte(data, 1)
+    val len_b0 = decode_byte(data, 2)
+    val length = len_b2 * 65536 + len_b1 * 256 + len_b0
+
+    # Parse type
+    val type_id = decode_byte(data, 3)
+    val frame_type = id_to_frame_type(type_id)?
+
+    # Parse flags
+    val flags = decode_byte(data, 4)
+
+    # Parse stream ID (31 bits, mask off reserved bit)
+    val sid_b3 = decode_byte(data, 5) % 128  # Clear reserved bit
+    val sid_b2 = decode_byte(data, 6)
+    val sid_b1 = decode_byte(data, 7)
+    val sid_b0 = decode_byte(data, 8)
+    val stream_id = sid_b3 * 16777216 + sid_b2 * 65536 + sid_b1 * 256 + sid_b0
+
+    # Validate we have enough data for the payload
+    val total_needed = H2_FRAME_HEADER_SIZE + length
+    if data.len() < total_needed:
+        return Err(parse_error("h2: incomplete frame payload (have {data.len()}, need {total_needed})"))
+
+    # Extract payload
+    val payload = if length > 0:
+        data.slice(H2_FRAME_HEADER_SIZE, H2_FRAME_HEADER_SIZE + length)
+    else:
+        ""
+
+    Ok(H2Frame(
+        length: length,
+        frame_type: frame_type,
+        flags: flags,
+        stream_id: stream_id,
+        payload: payload
+    ))
+
+# --- Header encoding (simplified HPACK) ---
+
+fn build_h2_headers(req: FetchRequest) -> [Pair<text, text>]:
+    # Build the HTTP/2 pseudo-header and regular header list for a request.
+    # Pseudo-headers are prefixed with ':' and must come before regular headers.
+    var headers = [Pair<text, text>]()
+
+    # Pseudo-headers (RFC 7540 Section 8.1.2.3)
+    val method = method_to_text(req.method)
+    headers.push(Pair(first: ":method", second: method))
+    headers.push(Pair(first: ":scheme", second: req.url.scheme))
+    headers.push(Pair(first: ":authority", second: req.url.host))
+    val path = if req.url.path.len() > 0: req.url.path else: "/"
+    val query_str = if req.url.query.len() > 0: "?{req.url.query}" else: ""
+    headers.push(Pair(first: ":path", second: "{path}{query_str}"))
+
+    # Regular headers from the request
+    for h in req.headers:
+        # HTTP/2 requires lowercase header names
+        headers.push(Pair(first: h.first.to_lower(), second: h.second))
+
+    # Add default headers if not already present
+    if not has_header(req.headers, "user-agent"):
+        headers.push(Pair(first: "user-agent", second: "SimpleBrowser/1.0"))
+    if not has_header(req.headers, "accept"):
+        headers.push(Pair(first: "accept", second: "*/*"))
+
+    headers
+
+fn encode_header_block(headers: [Pair<text, text>]) -> text:
+    # Simplified header block encoding.
+    # A full implementation would use HPACK (RFC 7541) with static/dynamic tables
+    # and Huffman encoding. This version uses literal header field representation
+    # without indexing (HPACK Section 6.2.2).
+    var result = ""
+    for header in headers:
+        # Format: 0x00 | name_length (7+) | name | value_length (7+) | value
+        # Simplified: we encode lengths as single bytes (works for headers < 127 chars)
+        val name = header.first
+        val value = header.second
+        result = result + encode_byte(0)  # Literal without indexing prefix
+        result = result + encode_byte(name.len())
+        result = result + name
+        result = result + encode_byte(value.len())
+        result = result + value
+    result
+
+fn extract_h2_status(headers: [Pair<text, text>]) -> i64:
+    # Extract the :status pseudo-header from response headers.
+    for h in headers:
+        if h.first == ":status":
+            return parse_simple_int(h.second)
+    200  # Default to 200 if :status not found
+
+fn filter_pseudo_headers(headers: [Pair<text, text>]) -> [Pair<text, text>]:
+    # Remove pseudo-headers (those starting with ':') from the list.
+    var result = [Pair<text, text>]()
+    for h in headers:
+        if not h.first.starts_with(":"):
+            result.push(h)
+    result
+
+fn has_header(headers: [Pair<text, text>], name: text) -> bool:
+    val name_lower = name.to_lower()
+    for h in headers:
+        if h.first.to_lower() == name_lower:
+            return true
+    false
+
+# --- DATA frame splitting ---
+
+fn split_into_data_frames(body: text, stream_id: i64, max_frame_size: i64) -> [H2Frame]:
+    # Split a request body into DATA frames respecting max_frame_size.
+    # The last frame gets the END_STREAM flag.
+    var frames = [H2Frame]()
+    var offset = 0
+
+    while offset < body.len():
+        val remaining = body.len() - offset
+        val chunk_size = if remaining > max_frame_size: max_frame_size else: remaining
+        val chunk = body.slice(offset, offset + chunk_size)
+        val is_last = offset + chunk_size >= body.len()
+
+        val flags = if is_last: FLAG_END_STREAM else: 0
+        val frame = H2Frame.create(H2FrameType.Data, flags, stream_id, chunk)
+        frames.push(frame)
+
+        offset = offset + chunk_size
+
+    # Handle empty body edge case
+    if frames.is_empty():
+        val frame = H2Frame.create(H2FrameType.Data, FLAG_END_STREAM, stream_id, "")
+        frames.push(frame)
+
+    frames
+
+# --- Special frame payloads ---
+
+fn encode_window_update(increment: i64) -> text:
+    # Encode a WINDOW_UPDATE payload (4 bytes, 31-bit increment).
+    val b3 = (increment / 16777216) % 128
+    val b2 = (increment / 65536) % 256
+    val b1 = (increment / 256) % 256
+    val b0 = increment % 256
+    encode_byte(b3) + encode_byte(b2) + encode_byte(b1) + encode_byte(b0)
+
+fn encode_goaway(last_stream_id: i64, error_code: i64) -> text:
+    # Encode a GOAWAY payload (last-stream-id + error-code, 8 bytes).
+    val sid_b3 = (last_stream_id / 16777216) % 128
+    val sid_b2 = (last_stream_id / 65536) % 256
+    val sid_b1 = (last_stream_id / 256) % 256
+    val sid_b0 = last_stream_id % 256
+    val err_b3 = (error_code / 16777216) % 256
+    val err_b2 = (error_code / 65536) % 256
+    val err_b1 = (error_code / 256) % 256
+    val err_b0 = error_code % 256
+    encode_byte(sid_b3) + encode_byte(sid_b2) + encode_byte(sid_b1) + encode_byte(sid_b0) + encode_byte(err_b3) + encode_byte(err_b2) + encode_byte(err_b1) + encode_byte(err_b0)
+
+fn encode_rst_stream(error_code: i64) -> text:
+    # Encode a RST_STREAM payload (4-byte error code).
+    val b3 = (error_code / 16777216) % 256
+    val b2 = (error_code / 65536) % 256
+    val b1 = (error_code / 256) % 256
+    val b0 = error_code % 256
+    encode_byte(b3) + encode_byte(b2) + encode_byte(b1) + encode_byte(b0)
+
+fn encode_ping(opaque_data: text) -> text:
+    # Encode PING payload (exactly 8 bytes).
+    # If input is shorter, pad with zeros; if longer, truncate.
+    var result = opaque_data
+    while result.len() < 8:
+        result = result + encode_byte(0)
+    if result.len() > 8:
+        result = result.slice(0, 8)
+    result
+
+# --- Error codes (RFC 7540 Section 7) ---
+
+val H2_NO_ERROR = 0x0
+val H2_PROTOCOL_ERROR = 0x1
+val H2_INTERNAL_ERROR = 0x2
+val H2_FLOW_CONTROL_ERROR = 0x3
+val H2_SETTINGS_TIMEOUT = 0x4
+val H2_STREAM_CLOSED = 0x5
+val H2_FRAME_SIZE_ERROR = 0x6
+val H2_REFUSED_STREAM = 0x7
+val H2_CANCEL = 0x8
+val H2_COMPRESSION_ERROR = 0x9
+val H2_CONNECT_ERROR = 0xa
+val H2_ENHANCE_YOUR_CALM = 0xb
+val H2_INADEQUATE_SECURITY = 0xc
+val H2_HTTP_1_1_REQUIRED = 0xd
+
+fn error_code_name(code: i64) -> text:
+    if code == H2_NO_ERROR: return "NO_ERROR"
+    if code == H2_PROTOCOL_ERROR: return "PROTOCOL_ERROR"
+    if code == H2_INTERNAL_ERROR: return "INTERNAL_ERROR"
+    if code == H2_FLOW_CONTROL_ERROR: return "FLOW_CONTROL_ERROR"
+    if code == H2_SETTINGS_TIMEOUT: return "SETTINGS_TIMEOUT"
+    if code == H2_STREAM_CLOSED: return "STREAM_CLOSED"
+    if code == H2_FRAME_SIZE_ERROR: return "FRAME_SIZE_ERROR"
+    if code == H2_REFUSED_STREAM: return "REFUSED_STREAM"
+    if code == H2_CANCEL: return "CANCEL"
+    if code == H2_COMPRESSION_ERROR: return "COMPRESSION_ERROR"
+    if code == H2_CONNECT_ERROR: return "CONNECT_ERROR"
+    if code == H2_ENHANCE_YOUR_CALM: return "ENHANCE_YOUR_CALM"
+    if code == H2_INADEQUATE_SECURITY: return "INADEQUATE_SECURITY"
+    if code == H2_HTTP_1_1_REQUIRED: return "HTTP_1_1_REQUIRED"
+    "UNKNOWN({code})"
+
+# --- Utility helpers ---
+
+fn method_to_text(method: HttpMethod) -> text:
+    match method:
+        HttpMethod.Get: "GET"
+        HttpMethod.Post: "POST"
+        HttpMethod.Put: "PUT"
+        HttpMethod.Delete: "DELETE"
+        HttpMethod.Head: "HEAD"
+        HttpMethod.Options: "OPTIONS"
+        HttpMethod.Patch: "PATCH"
+
+fn status_text_for_code(code: i64) -> text:
+    if code == 200: return "OK"
+    if code == 201: return "Created"
+    if code == 204: return "No Content"
+    if code == 301: return "Moved Permanently"
+    if code == 302: return "Found"
+    if code == 304: return "Not Modified"
+    if code == 400: return "Bad Request"
+    if code == 401: return "Unauthorized"
+    if code == 403: return "Forbidden"
+    if code == 404: return "Not Found"
+    if code == 500: return "Internal Server Error"
+    if code == 502: return "Bad Gateway"
+    if code == 503: return "Service Unavailable"
+    "Unknown"
+
+fn encode_byte(value: i64) -> text:
+    # Encode a single byte (0-255) as a one-character text.
+    val clamped = if value < 0 then 0 else if value > 255 then 255 else value
+    _byte_to_char(clamped)
+
+fn decode_byte(data: text, pos: i64) -> i64:
+    # Decode a single byte from a text at the given position.
+    if pos < 0 or pos >= data.length():
+        return 0
+    val ch = data.substring(pos, pos + 1)
+    _char_to_byte(ch)
+
+fn decode_uint16(data: text, pos: i64) -> i64:
+    # Decode a 16-bit big-endian unsigned integer from data at pos.
+    val b1 = decode_byte(data, pos)
+    val b0 = decode_byte(data, pos + 1)
+    b1 * 256 + b0
+
+fn decode_uint32(data: text, pos: i64) -> i64:
+    # Decode a 32-bit big-endian unsigned integer from data at pos.
+    val b3 = decode_byte(data, pos)
+    val b2 = decode_byte(data, pos + 1)
+    val b1 = decode_byte(data, pos + 2)
+    val b0 = decode_byte(data, pos + 3)
+    b3 * 16777216 + b2 * 65536 + b1 * 256 + b0
+
+fn int_to_hex(value: i64) -> text:
+    # Convert an integer to a lowercase hexadecimal string.
+    if value == 0:
+        return "0"
+    var result = ""
+    var v = value
+    while v > 0:
+        val digit = v % 16
+        val ch = if digit < 10:
+            digit_to_char(digit)
+        else:
+            hex_digit_to_char(digit)
+        result = ch + result
+        v = v / 16
+    result
+
+fn digit_to_char(d: i64) -> text:
+    if d == 0: return "0"
+    if d == 1: return "1"
+    if d == 2: return "2"
+    if d == 3: return "3"
+    if d == 4: return "4"
+    if d == 5: return "5"
+    if d == 6: return "6"
+    if d == 7: return "7"
+    if d == 8: return "8"
+    if d == 9: return "9"
+    "?"
+
+fn hex_digit_to_char(d: i64) -> text:
+    if d == 10: return "a"
+    if d == 11: return "b"
+    if d == 12: return "c"
+    if d == 13: return "d"
+    if d == 14: return "e"
+    if d == 15: return "f"
+    digit_to_char(d)
+
+fn parse_simple_int(s: text) -> i64:
+    # Parse a simple non-negative decimal integer.
+    var result = 0
+    var i = 0
+    while i < s.len():
+        val ch = s.get(i)
+        val d = char_to_digit_val(ch)
+        if d < 0:
+            return result
+        result = result * 10 + d
+        i = i + 1
+    result
+
+fn char_to_digit_val(ch: text) -> i64:
+    if ch == "0": return 0
+    if ch == "1": return 1
+    if ch == "2": return 2
+    if ch == "3": return 3
+    if ch == "4": return 4
+    if ch == "5": return 5
+    if ch == "6": return 6
+    if ch == "7": return 7
+    if ch == "8": return 8
+    if ch == "9": return 9
+    -1
+
+# --- Byte encoding helpers ---
+
+fn _byte_to_char(value: i64) -> text:
+    # Map byte value (0-255) to a printable character for wire encoding.
+    # Uses a lookup table for the printable ASCII range (32-126).
+    # Non-printable bytes map to escape sequences.
+    if value == 0: return "\0"
+    if value == 9: return "\t"
+    if value == 10: return "\n"
+    if value == 13: return "\r"
+    if value == 32: return " "
+    if value == 33: return "!"
+    if value == 34: return "\""
+    if value == 35: return "#"
+    if value == 36: return "$"
+    if value == 37: return "%"
+    if value == 38: return "&"
+    if value == 39: return "'"
+    if value == 40: return "("
+    if value == 41: return ")"
+    if value == 42: return "*"
+    if value == 43: return "+"
+    if value == 44: return ","
+    if value == 45: return "-"
+    if value == 46: return "."
+    if value == 47: return "/"
+    if value >= 48 and value <= 57:
+        return digit_to_char(value - 48)
+    if value == 58: return ":"
+    if value == 59: return ";"
+    if value == 60: return "<"
+    if value == 61: return "="
+    if value == 62: return ">"
+    if value == 63: return "?"
+    if value == 64: return "@"
+    if value >= 65 and value <= 90:
+        # A-Z
+        val letters = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+        return letters.substring(value - 65, value - 64)
+    if value == 91: return "["
+    if value == 92: return "\\"
+    if value == 93: return "]"
+    if value == 94: return "^"
+    if value == 95: return "_"
+    if value == 96: return "`"
+    if value >= 97 and value <= 122:
+        # a-z
+        val letters = "abcdefghijklmnopqrstuvwxyz"
+        return letters.substring(value - 97, value - 96)
+    if value == 123: return "{"
+    if value == 124: return "|"
+    if value == 125: return "}"
+    if value == 126: return "~"
+    # Non-printable: encode as hex escape placeholder
+    "?"
+
+fn _char_to_byte(ch: text) -> i64:
+    # Map a single character to its byte value (0-255).
+    if ch == "\0": return 0
+    if ch == "\t": return 9
+    if ch == "\n": return 10
+    if ch == "\r": return 13
+    if ch == " ": return 32
+    if ch == "!": return 33
+    if ch == "\"": return 34
+    if ch == "#": return 35
+    if ch == "$": return 36
+    if ch == "%": return 37
+    if ch == "&": return 38
+    if ch == "'": return 39
+    if ch == "(": return 40
+    if ch == ")": return 41
+    if ch == "*": return 42
+    if ch == "+": return 43
+    if ch == ",": return 44
+    if ch == "-": return 45
+    if ch == ".": return 46
+    if ch == "/": return 47
+    if ch == "0": return 48
+    if ch == "1": return 49
+    if ch == "2": return 50
+    if ch == "3": return 51
+    if ch == "4": return 52
+    if ch == "5": return 53
+    if ch == "6": return 54
+    if ch == "7": return 55
+    if ch == "8": return 56
+    if ch == "9": return 57
+    if ch == ":": return 58
+    if ch == ";": return 59
+    if ch == "<": return 60
+    if ch == "=": return 61
+    if ch == ">": return 62
+    if ch == "?": return 63
+    if ch == "@": return 64
+    if ch == "A": return 65
+    if ch == "B": return 66
+    if ch == "C": return 67
+    if ch == "D": return 68
+    if ch == "E": return 69
+    if ch == "F": return 70
+    if ch == "G": return 71
+    if ch == "H": return 72
+    if ch == "I": return 73
+    if ch == "J": return 74
+    if ch == "K": return 75
+    if ch == "L": return 76
+    if ch == "M": return 77
+    if ch == "N": return 78
+    if ch == "O": return 79
+    if ch == "P": return 80
+    if ch == "Q": return 81
+    if ch == "R": return 82
+    if ch == "S": return 83
+    if ch == "T": return 84
+    if ch == "U": return 85
+    if ch == "V": return 86
+    if ch == "W": return 87
+    if ch == "X": return 88
+    if ch == "Y": return 89
+    if ch == "Z": return 90
+    if ch == "[": return 91
+    if ch == "\\": return 92
+    if ch == "]": return 93
+    if ch == "^": return 94
+    if ch == "_": return 95
+    if ch == "`": return 96
+    if ch == "a": return 97
+    if ch == "b": return 98
+    if ch == "c": return 99
+    if ch == "d": return 100
+    if ch == "e": return 101
+    if ch == "f": return 102
+    if ch == "g": return 103
+    if ch == "h": return 104
+    if ch == "i": return 105
+    if ch == "j": return 106
+    if ch == "k": return 107
+    if ch == "l": return 108
+    if ch == "m": return 109
+    if ch == "n": return 110
+    if ch == "o": return 111
+    if ch == "p": return 112
+    if ch == "q": return 113
+    if ch == "r": return 114
+    if ch == "s": return 115
+    if ch == "t": return 116
+    if ch == "u": return 117
+    if ch == "v": return 118
+    if ch == "w": return 119
+    if ch == "x": return 120
+    if ch == "y": return 121
+    if ch == "z": return 122
+    if ch == "{": return 123
+    if ch == "|": return 124
+    if ch == "}": return 125
+    if ch == "~": return 126
+    0

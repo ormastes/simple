@@ -1,0 +1,353 @@
+#![allow(export_outside_init)]
+#![allow(unnamed_duplicate_typed_args)]
+# UI Test JSON Response Parsing
+#
+# Lightweight JSON parsing for UI test client responses.
+# Parses element info, element lists, and state info from JSON strings.
+#
+# Components:
+#   - extract_field: Extract string value from JSON by field name
+#   - extract_bool_field: Extract boolean value from JSON by field name
+#   - parse_props: Parse JSON object into key-value pairs
+#   - parse_element_info: Parse single element JSON into ElementInfo
+#   - parse_elements_list: Parse JSON array of elements into [ElementInfo]
+#   - parse_state_info: Parse state JSON into UIStateInfo
+#
+# Usage:
+#   use std.ui_test.parse.{parse_element_info, parse_state_info}
+#
+#   val elem = parse_element_info("{\"id\":\"btn1\",\"kind\":\"button\"}")?
+#   val state = parse_state_info("{\"mode\":\"NORMAL\",\"title\":\"App\"}")?
+
+use std.ui_test.types.{ElementInfo, UIStateInfo}
+
+# ============================================================================
+# Field Extraction Helpers
+# ============================================================================
+
+fn extract_field(json: text, field: text) -> text:
+    """Extract a string value from JSON by field name.
+
+    Searches for "field":"value" pattern and extracts the value.
+    Returns empty string if field not found.
+
+    Args:
+        json: JSON string to search
+        field: Field name to extract
+
+    Returns:
+        Field value as text, or empty string if not found
+    """
+    var search = "\"{field}\":"
+    var idx = json.index_of(search)
+    if idx == nil:
+        return ""
+    var after_key = idx + search.length()
+    var rest = json.substring(after_key)
+    var trimmed = rest.trim_start()
+    if trimmed.length() == 0:
+        return ""
+    var first_char = trimmed.substring(0, 1)
+    if first_char == "\"":
+        # String value - find closing quote
+        var value_start = 1
+        var value_rest = trimmed.substring(value_start)
+        var end_quote = value_rest.index_of("\"")
+        if end_quote == nil:
+            return ""
+        var value = value_rest.substring(0, end_quote)
+        return value
+    # Non-string value (number, bool, null) - read until comma, }, or ]
+    var val_parts: [text] = []
+    var i = 0
+    while i < trimmed.length():
+        var ch = trimmed.substring(i, i + 1)
+        if ch == "," or ch == "}" or ch == "]":
+            return val_parts.join("").trim()
+        val_parts.push(ch)
+        i = i + 1
+    val_parts.join("").trim()
+
+fn extract_bool_field(json: text, field: text) -> bool:
+    """Extract a boolean value from JSON by field name.
+
+    Searches for "field":true or "field":false pattern.
+
+    Args:
+        json: JSON string to search
+        field: Field name to extract
+
+    Returns:
+        Boolean value, defaults to false if not found
+    """
+    var value = extract_field(json, field)
+    value == "true"
+
+fn skip_whitespace(json: text, pos: i64) -> i64:
+    """Skip whitespace characters starting from pos.
+
+    Args:
+        json: JSON string
+        pos: Starting position
+
+    Returns:
+        Position of first non-whitespace character
+    """
+    var i = pos
+    while i < json.length():
+        var ch = json.substring(i, i + 1)
+        if ch != " " and ch != "\t" and ch != "\n" and ch != "\r":
+            return i
+        i = i + 1
+    i
+
+fn find_object_end(json: text, start: i64) -> i64:
+    """Find the closing brace of a JSON object.
+
+    Handles nested objects by counting brace depth.
+
+    Args:
+        json: JSON string
+        start: Position of the opening brace
+
+    Returns:
+        Position after the closing brace, or -1 if not found
+    """
+    var depth = 0
+    var in_string = false
+    var i = start
+    while i < json.length():
+        var ch = json.substring(i, i + 1)
+        if in_string:
+            if ch == "\\":
+                i = i + 2
+                continue
+            if ch == "\"":
+                in_string = false
+        else:
+            if ch == "\"":
+                in_string = true
+            elif ch == "{":
+                depth = depth + 1
+            elif ch == "}":
+                depth = depth - 1
+                if depth == 0:
+                    return i + 1
+        i = i + 1
+    -1
+
+# ============================================================================
+# Props Parsing
+# ============================================================================
+
+fn parse_props(json: text) -> [(text, text)]:
+    """Parse a JSON object into key-value pairs.
+
+    Expects a JSON object like {"label":"OK","color":"blue"}.
+    Only handles string values.
+
+    Args:
+        json: JSON object string
+
+    Returns:
+        List of (key, value) text pairs
+    """
+    var props: [(text, text)] = []
+    var trimmed = json.trim()
+    if trimmed.length() < 2:
+        return props
+    var first = trimmed.substring(0, 1)
+    if first != "{":
+        return props
+    # Remove outer braces
+    var inner = trimmed.substring(1, trimmed.length() - 1)
+    var inner_trimmed = inner.trim()
+    if inner_trimmed.length() == 0:
+        return props
+    # Split by comma and parse each key:value pair
+    var remaining = inner_trimmed
+    while remaining.length() > 0:
+        # Find key
+        var key_start = remaining.index_of("\"")
+        if key_start == nil:
+            return props
+        var after_key_start = remaining.substring(key_start + 1)
+        var key_end = after_key_start.index_of("\"")
+        if key_end == nil:
+            return props
+        var key = after_key_start.substring(0, key_end)
+        # Find value after colon
+        var after_key = after_key_start.substring(key_end + 1)
+        var colon_idx = after_key.index_of(":")
+        if colon_idx == nil:
+            return props
+        var after_colon = after_key.substring(colon_idx + 1)
+        var trimmed_val = after_colon.trim_start()
+        var val_first = trimmed_val.substring(0, 1)
+        if val_first == "\"":
+            var val_content = trimmed_val.substring(1)
+            var val_end = val_content.index_of("\"")
+            if val_end == nil:
+                return props
+            var value = val_content.substring(0, val_end)
+            props.append((key, value))
+            var after_val = val_content.substring(val_end + 1)
+            var comma_idx = after_val.index_of(",")
+            if comma_idx == nil:
+                return props
+            remaining = after_val.substring(comma_idx + 1)
+        else:
+            # Non-string value - read until comma or end
+            var val_parts: [text] = []
+            var i = 0
+            while i < trimmed_val.length():
+                var ch = trimmed_val.substring(i, i + 1)
+                if ch == "," or ch == "}":
+                    props.append((key, val_parts.join("").trim()))
+                    if ch == ",":
+                        remaining = trimmed_val.substring(i + 1)
+                    else:
+                        return props
+                    break
+                val_parts.push(ch)
+                i = i + 1
+            if i >= trimmed_val.length():
+                val val_str = val_parts.join("")
+                if val_str.length() > 0:
+                    props.append((key, val_str.trim()))
+                return props
+    props
+
+# ============================================================================
+# Element Parsing
+# ============================================================================
+
+fn parse_element_info(json: text) -> Result<ElementInfo, text>:
+    """Parse a JSON object into an ElementInfo.
+
+    Expected format:
+        {"id":"X","kind":"button","visible":true,"focused":false,"props":{"label":"OK"}}
+
+    Args:
+        json: JSON string representing an element
+
+    Returns:
+        Result with ElementInfo or error message
+    """
+    var trimmed = json.trim()
+    if trimmed.length() < 2:
+        return Err("Empty JSON for ElementInfo")
+    var first = trimmed.substring(0, 1)
+    if first != "{":
+        return Err("Expected JSON object for ElementInfo")
+    var id = extract_field(trimmed, "id")
+    var kind = extract_field(trimmed, "kind")
+    var visible = extract_bool_field(trimmed, "visible")
+    var focused = extract_bool_field(trimmed, "focused")
+    # New contract fields (backward-compatible defaults)
+    var enabled_str = extract_field(trimmed, "enabled")
+    var enabled = if enabled_str == "": true else: extract_bool_field(trimmed, "enabled")
+    var selected = extract_bool_field(trimmed, "selected")
+    var text_content = extract_field(trimmed, "text")
+    # Parse props sub-object
+    var props_search = "\"props\":"
+    var props_idx = trimmed.index_of(props_search)
+    var props: [(text, text)] = []
+    if props_idx != nil:
+        var after_props = trimmed.substring(props_idx + props_search.length())
+        var props_trimmed = after_props.trim_start()
+        var props_first = props_trimmed.substring(0, 1)
+        if props_first == "{":
+            var props_end = find_object_end(props_trimmed, 0)
+            if props_end > 0:
+                var props_json = props_trimmed.substring(0, props_end)
+                props = parse_props(props_json)
+    var elem = ElementInfo(id: id, kind: kind, visible: visible, focused: focused, enabled: enabled, selected: selected, text_content: text_content, props: props)
+    Ok(elem)
+
+fn parse_elements_list(json: text) -> Result<[ElementInfo], text>:
+    """Parse a JSON array of elements into a list of ElementInfo.
+
+    Expected format:
+        [{"id":"X","kind":"button",...},{"id":"Y","kind":"label",...}]
+
+    Args:
+        json: JSON array string
+
+    Returns:
+        Result with list of ElementInfo or error message
+    """
+    var trimmed = json.trim()
+    if trimmed.length() < 2:
+        return Err("Empty JSON for elements list")
+    var first = trimmed.substring(0, 1)
+    if first != "[":
+        return Err("Expected JSON array for elements list")
+    var elements: [ElementInfo] = []
+    # Find each object in the array
+    var pos = 1
+    while pos < trimmed.length():
+        pos = skip_whitespace(trimmed, pos)
+        if pos >= trimmed.length():
+            break
+        var ch = trimmed.substring(pos, pos + 1)
+        if ch == "]":
+            break
+        if ch == ",":
+            pos = pos + 1
+            continue
+        if ch == "{":
+            var obj_end = find_object_end(trimmed, pos)
+            if obj_end < 0:
+                return Err("Malformed JSON object in array")
+            var obj_json = trimmed.substring(pos, obj_end)
+            var elem_result = parse_element_info(obj_json)
+            match elem_result:
+                Ok(elem):
+                    elements.append(elem)
+                Err(e):
+                    return Err("Failed to parse element: {e}")
+            pos = obj_end
+        else:
+            pos = pos + 1
+    Ok(elements)
+
+# ============================================================================
+# State Parsing
+# ============================================================================
+
+fn parse_state_info(json: text) -> Result<UIStateInfo, text>:
+    """Parse a JSON object into a UIStateInfo.
+
+    Expected format:
+        {"mode":"NORMAL","focused_id":"X","title":"App","theme":"dark"}
+
+    Args:
+        json: JSON string representing UI state
+
+    Returns:
+        Result with UIStateInfo or error message
+    """
+    var trimmed = json.trim()
+    if trimmed.length() < 2:
+        return Err("Empty JSON for UIStateInfo")
+    var first = trimmed.substring(0, 1)
+    if first != "{":
+        return Err("Expected JSON object for UIStateInfo")
+    var mode = extract_field(trimmed, "mode")
+    var focused_id = extract_field(trimmed, "focused_id")
+    var title = extract_field(trimmed, "title")
+    var theme = extract_field(trimmed, "theme")
+    var count_str = extract_field(trimmed, "element_count")
+    var element_count = if count_str != "": count_str.to_i32() else: 0
+    var ver_str = extract_field(trimmed, "protocol_version")
+    var protocol_version = if ver_str != "": ver_str.to_i32() else: 0
+    var state = UIStateInfo(mode: mode, focused_id: focused_id, title: title, theme: theme, element_count: element_count, protocol_version: protocol_version)
+    Ok(state)
+
+# ============================================================================
+# Exports
+# ============================================================================
+
+export extract_field, extract_bool_field, parse_props
+export parse_element_info, parse_elements_list, parse_state_info

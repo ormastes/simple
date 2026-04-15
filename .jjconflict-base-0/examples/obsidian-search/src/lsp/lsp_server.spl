@@ -1,0 +1,84 @@
+#![allow(export_outside_init)]
+# Obsidian LSP — JSON-RPC Transport over Stdio
+# Main LSP entry point implementing Content-Length framing.
+#
+# The LSP protocol uses JSON-RPC 2.0 over stdio with Content-Length headers.
+# Messages are read from stdin, dispatched via lsp_handlers, and responses
+# are written to stdout.
+#
+# Architecture:
+#   lsp_json.spl        — JSON builder/parser helpers (re-exports + LSP-specific)
+#   lsp_server.spl      — transport (this file): read/write JSON-RPC messages
+#   lsp_handlers.spl    — protocol dispatch for all LSP methods
+#   lsp_document.spl    — document store + vault state
+#   lsp_completion.spl  — wikilink/tag completions
+#   lsp_hover.spl       — frontmatter preview on hover
+#   lsp_definition.spl  — go-to-definition for wikilinks
+#   lsp_semantic.spl    — semantic token highlighting
+#   lsp_diagnostics.spl — broken wikilink / orphan diagnostics
+
+export start_lsp_server
+
+use src.lsp.lsp_handlers.{dispatch_method, DispatchResult}
+use src.lsp.lsp_document.{doc_store_init}
+
+extern fn rt_stdin_read_line() -> text
+extern fn rt_stdin_read_bytes(n: i64) -> text
+extern fn rt_stdout_write(s: text)
+extern fn rt_stdout_flush()
+extern fn rt_stderr_write(s: text)
+extern fn rt_text_byte_len(s: text) -> i64
+
+# ---------------------------------------------------------------------------
+# Content-Length header framing
+# ---------------------------------------------------------------------------
+
+fn read_message() -> text:
+    var header_line = rt_stdin_read_line()
+    var content_length = 0
+
+    # Read headers until blank line
+    while header_line.trim() != "":
+        if header_line.starts_with("Content-Length:"):
+            val len_str = header_line.substring(15, header_line.len()).trim()
+            content_length = int(len_str) ?? 0
+        header_line = rt_stdin_read_line()
+
+    if content_length <= 0:
+        return ""
+
+    rt_stdin_read_bytes(content_length)
+
+fn write_message(body: text):
+    val byte_len = rt_text_byte_len(body)
+    rt_stdout_write("Content-Length: {byte_len}\r\n\r\n{body}")
+    rt_stdout_flush()
+
+# ---------------------------------------------------------------------------
+# Main server loop
+# ---------------------------------------------------------------------------
+
+fn start_lsp_server():
+    doc_store_init()
+    rt_stderr_write("obsidian-lsp: server starting\n")
+
+    var running = true
+    while running:
+        val msg = read_message()
+        if msg == "":
+            # EOF or empty message — check if stdin is closed
+            rt_stderr_write("obsidian-lsp: empty message or EOF, shutting down\n")
+            running = false
+            continue
+
+        val result = dispatch_method(msg)
+
+        # Send response if non-empty
+        if result.response != "":
+            write_message(result.response)
+
+        # Check if we should exit
+        if result.should_exit:
+            running = false
+
+    rt_stderr_write("obsidian-lsp: server stopped\n")

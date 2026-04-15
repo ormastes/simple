@@ -1,0 +1,73 @@
+## Spec for Phase-2 I5 disk-image bake harness.
+##
+## Gated on SIMPLEOS_DISK_BAKE=1. When unset, all it blocks skip.
+##
+## Run:
+##   SIMPLEOS_DISK_BAKE=1 bin/simple test test/os/port/disk_image_bake_spec.spl
+
+use std.fs
+use std.spec
+use os.port.disk_image_bake as bake_mod
+use os.port.initramfs_pack.{validate_image}
+
+extern fn rt_env_get(key: text) -> text
+
+fn disk_bake_enabled() -> bool:
+    """Return true when SIMPLEOS_DISK_BAKE=1 is set."""
+    val v = rt_env_get("SIMPLEOS_DISK_BAKE")
+    if v == nil:
+        return false
+    v == "1"
+
+val OUT_DISK       = "/tmp/simpleos_bake_test/simpleos_disk.img"
+val OUT_INITRAMFS  = "/tmp/simpleos_bake_test/simpleos_initramfs.cpio.zst"
+val MIN_DISK_BYTES = 33554432   # 32 MiB
+val MIN_INIT_BYTES = 1
+
+describe "SimpleOS I5 disk-image bake harness":
+    """Env-gated integration tests for bake(). Set SIMPLEOS_DISK_BAKE=1 to run."""
+
+    it "skips when SIMPLEOS_DISK_BAKE not set":
+        """Always green on CI that has not set the gate variable."""
+        if not disk_bake_enabled():
+            return "skip: SIMPLEOS_DISK_BAKE not set"
+        return "ok: gate enabled"
+
+    it "bake() returns Ok and produces both artifact files":
+        """Call bake() and assert both output paths exist with minimum sizes."""
+        if not disk_bake_enabled():
+            return "skip: SIMPLEOS_DISK_BAKE not set"
+        match bake_mod.bake(OUT_DISK, OUT_INITRAMFS):
+            case Ok(()):
+                pass_dn
+            case Err(e):
+                expect false.to_equal(true)
+                return "FAIL: bake returned Err: " + e
+        expect fs.exists(OUT_DISK).to_equal(true)
+        expect fs.exists(OUT_INITRAMFS).to_equal(true)
+
+    it "disk image is at least 32 MiB":
+        """Verify the FAT32 image has the expected minimum size."""
+        if not disk_bake_enabled():
+            return "skip: SIMPLEOS_DISK_BAKE not set"
+        if not fs.exists(OUT_DISK):
+            return "skip: disk image not present (run bake first)"
+        val sz = fs.file_size(OUT_DISK)
+        expect sz.to_be_greater_than(MIN_DISK_BYTES - 1)
+
+    it "initramfs artifact exists with non-zero size":
+        """Verify the initramfs output file was written."""
+        if not disk_bake_enabled():
+            return "skip: SIMPLEOS_DISK_BAKE not set"
+        if not fs.exists(OUT_INITRAMFS):
+            return "skip: initramfs not present (run bake first)"
+        val sz = fs.file_size(OUT_INITRAMFS)
+        expect sz.to_be_greater_than(MIN_INIT_BYTES - 1)
+
+    it "initramfs artifact validates as a real archive":
+        """Verify the packed output can be decompressed and listed."""
+        if not disk_bake_enabled():
+            return "skip: SIMPLEOS_DISK_BAKE not set"
+        if not fs.exists(OUT_INITRAMFS):
+            return "skip: initramfs not present (run bake first)"
+        expect validate_image(OUT_INITRAMFS).to_equal(true)

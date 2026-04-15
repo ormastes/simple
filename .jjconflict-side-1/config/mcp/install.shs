@@ -1,0 +1,64 @@
+#!/bin/sh
+# Install platform-specific MCP configs for Claude Code and Codex CLI.
+# Usage: sh config/mcp/install.shs
+
+set -e
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+PROJECT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+
+OS="$(uname -s)"
+
+case "$OS" in
+    MINGW*|MSYS*|CYGWIN*|Windows_NT)
+        SRC="$SCRIPT_DIR/win/.mcp.json"
+        EXT=".cmd"
+        ;;
+    *)
+        SRC="$SCRIPT_DIR/common/.mcp.json"
+        EXT=""
+        ;;
+esac
+
+# --- Claude Code (.mcp.json) ---
+cp "$SRC" "$PROJECT_ROOT/.mcp.json"
+echo "Installed .mcp.json for $OS"
+
+# --- Codex CLI (global ~/.codex/config.toml) ---
+if command -v codex >/dev/null 2>&1; then
+    SERVERS="simple-mcp simple-lsp-mcp"
+    for NAME in $SERVERS; do
+        CMD="$PROJECT_ROOT/bin/${NAME}${EXT}"
+        # Convert server name to wrapper name (simple-mcp -> simple_mcp_server)
+        WRAPPER=$(echo "$NAME" | sed 's/-/_/g')_server
+        CMD="$PROJECT_ROOT/bin/${WRAPPER}${EXT}"
+        if [ -e "$CMD" ] || [ -L "$CMD" ]; then
+            codex mcp remove "$NAME" 2>/dev/null || true
+            codex mcp add "$NAME" --env SIMPLE_LOG=error --env RUST_LOG=error -- "$CMD"
+        else
+            echo "Warning: $CMD not found, skipping $NAME"
+        fi
+    done
+    if command -v node >/dev/null 2>&1; then
+        CHROME_CMD="$PROJECT_ROOT/bin/codex_chrome_devtools_mcp.js"
+        if [ -f "$CHROME_CMD" ]; then
+            codex mcp remove "chrome-devtools" 2>/dev/null || true
+            codex mcp add "chrome-devtools" -- node "$CHROME_CMD"
+        else
+            echo "Warning: $CHROME_CMD not found, skipping chrome-devtools"
+        fi
+
+        STITCH_CMD="$PROJECT_ROOT/bin/codex_stitch_mcp.js"
+        if [ -f "$STITCH_CMD" ]; then
+            codex mcp remove "stitch-mcp" 2>/dev/null || true
+            codex mcp add "stitch-mcp" -- node "$STITCH_CMD"
+        else
+            echo "Warning: $STITCH_CMD not found, skipping stitch-mcp"
+        fi
+    else
+        echo "Warning: node not found, skipping chrome-devtools and stitch-mcp"
+    fi
+    echo "Installed Codex MCP servers for $OS"
+else
+    echo "Codex CLI not found, skipping Codex MCP setup"
+fi

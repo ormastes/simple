@@ -1,0 +1,567 @@
+#![allow(unnamed_duplicate_typed_args)]
+use compiler.common.driver_core_types.{CompileResult}
+
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+extern fn rt_file_write_text(path: text, content: text) -> bool
+extern fn rt_file_exists(path: text) -> bool
+extern fn rt_env_get(name: text) -> text
+extern fn rt_file_delete(path: text) -> bool
+extern fn rt_file_read_text(path: text) -> text
+extern fn rt_dir_create(path: text, recursive: bool) -> bool
+extern fn rt_path_join(a: text, b: text) -> text
+
+# Lightweight bridge for public `compiler.driver.{...}` imports.
+# `interpret_file` shells out to keep external script calls lightweight.
+# The header helper uses a lightweight source parser because direct external
+# execution of the full driver helper path is still unstable in interpreter mode.
+
+fn interpret_file(path: text) -> CompileResult:
+    val simple_bin = _find_simple_binary()
+    val (stdout, stderr, exit_code) = rt_process_run(simple_bin, [path])
+    val combined = _clean_child_output(stdout, stderr)
+    if _looks_like_driver_failure(combined):
+        return CompileResult.RuntimeError(combined)
+    if exit_code == 0 or combined == "":
+        return CompileResult.Success(combined)
+    CompileResult.Success(combined)
+
+fn generate_headers(path: text, output_dir: text, lib_name: text, emit_c: bool, emit_cpp: bool) -> CompileResult:
+    val source = rt_file_read_text(path) ?? ""
+    if source.trim() == "":
+        return CompileResult.RuntimeError("failed to read source file: {path}")
+
+    val parsed = _parse_public_exports(source)
+    if parsed.error != "":
+        return CompileResult.RuntimeError(parsed.error)
+
+    if parsed.exported_classes.len() == 0 and parsed.exported_functions.len() == 0:
+        return CompileResult.RuntimeError("no @export(\"C\") items found in {path}")
+
+    if not _ensure_output_dir(output_dir):
+        return CompileResult.RuntimeError("failed to create output directory: {output_dir}")
+
+    if emit_c:
+        val c_header = _emit_public_c_header(lib_name, parsed.exported_functions, parsed.exported_classes)
+        val c_path = rt_path_join(output_dir, lib_name + ".h")
+        if not rt_file_write_text(c_path, c_header):
+            return CompileResult.RuntimeError("failed to write generated header: {c_path}")
+        if not rt_file_exists(c_path):
+            return CompileResult.RuntimeError("generated header missing after write: {c_path}")
+
+    if emit_cpp:
+        val cpp_header = _emit_public_cpp_header(lib_name, parsed.exported_classes, parsed.exported_functions)
+        val cpp_path = rt_path_join(output_dir, lib_name + ".hpp")
+        if not rt_file_write_text(cpp_path, cpp_header):
+            return CompileResult.RuntimeError("failed to write generated C++ header: {cpp_path}")
+        if not rt_file_exists(cpp_path):
+            return CompileResult.RuntimeError("generated C++ header missing after write: {cpp_path}")
+
+    CompileResult.Success(nil)
+
+fn _find_simple_binary() -> text:
+    val env_bin = rt_env_get("SIMPLE_BINARY") ?? ""
+    if env_bin != "":
+        return env_bin
+    if rt_file_exists("src/compiler_rust/target/release/simple"):
+        return "src/compiler_rust/target/release/simple"
+    if rt_file_exists("src/compiler_rust/target/bootstrap/simple"):
+        return "src/compiler_rust/target/bootstrap/simple"
+    val os_env = rt_env_get("OS") ?? ""
+    if os_env.contains("Windows"):
+        if rt_file_exists("src/compiler_rust/target/release/simple.exe"):
+            return "src/compiler_rust/target/release/simple.exe"
+        if rt_file_exists("src/compiler_rust/target/bootstrap/simple.exe"):
+            return "src/compiler_rust/target/bootstrap/simple.exe"
+        if rt_file_exists("bin/simple.exe"):
+            return "bin/simple.exe"
+        if rt_file_exists("bin/release/x86_64-pc-windows-msvc/simple.exe"):
+            return "bin/release/x86_64-pc-windows-msvc/simple.exe"
+        if rt_file_exists("bin/release/x86_64-pc-windows-gnu/simple.exe"):
+            return "bin/release/x86_64-pc-windows-gnu/simple.exe"
+    if rt_file_exists("bin/simple"):
+        return "bin/simple"
+    if rt_file_exists("bin/release/aarch64-apple-darwin-macho/simple"):
+        return "bin/release/aarch64-apple-darwin-macho/simple"
+    if rt_file_exists("bin/release/macos-arm64/simple"):
+        return "bin/release/macos-arm64/simple"
+    if rt_file_exists("bin/release/darwin-aarch64/simple"):
+        return "bin/release/darwin-aarch64/simple"
+    if rt_file_exists("bin/release/macos-x86_64/simple"):
+        return "bin/release/macos-x86_64/simple"
+    if rt_file_exists("bin/release/linux-x86_64/simple"):
+        return "bin/release/linux-x86_64/simple"
+    "bin/simple"
+
+fn _ensure_output_dir(path: text) -> bool:
+    if rt_dir_create(path, true):
+        return true
+    val (_, _, exit_code) = rt_process_run("mkdir", ["-p", path])
+    exit_code == 0
+
+fn _clean_child_output(stdout: text, stderr: text) -> text:
+    val combined = if stderr.trim() != "":
+        stdout + "\n" + stderr
+    else:
+        stdout
+
+    val lines = combined.split("\n")
+    var kept: [text] = []
+    var i = 0
+    while i < lines.len():
+        val line = lines[i].trim()
+        if line != "" and line != "__SIMPLE_DRIVER_OK__":
+            kept.push(line)
+        i = i + 1
+    kept.join("\n")
+
+fn _looks_like_driver_failure(output: text) -> bool:
+    val trimmed = output.trim()
+    if trimmed == "":
+        return false
+    trimmed.contains("error:") or
+    trimmed.contains("panic") or
+        trimmed.contains("ParseError") or
+        trimmed.contains("TypeError") or
+        trimmed.contains("RuntimeError")
+
+fn _escape_simple_text(value: text) -> text:
+    val escaped_slashes = value.replace("\\", "\\\\")
+    escaped_slashes.replace("\"", "\\\"")
+
+fn _combine_process_error(prefix: text, stdout: text, stderr: text) -> text:
+    var detail = stderr.trim()
+    if detail == "":
+        detail = stdout.trim()
+    if detail == "":
+        return prefix
+    prefix + ": " + detail
+
+struct PublicExportField:
+    name: text
+    type_name: text
+    raw_decl: text
+    has_bits: bool
+    bits_width: text
+
+struct PublicExportClass:
+    name: text
+    fields: [PublicExportField]
+
+struct PublicExportFunction:
+    name: text
+    params: [text]
+    return_type: text
+
+struct PublicExportParse:
+    exported_classes: [PublicExportClass]
+    exported_functions: [PublicExportFunction]
+    error: text
+
+fn _parse_public_exports(source: text) -> PublicExportParse:
+    val lines = source.split("\n")
+    var classes: [PublicExportClass] = []
+    var functions: [PublicExportFunction] = []
+    var pending_export = false
+    var i = 0
+    while i < lines.len():
+        val line = lines[i].trim()
+        if line == "":
+            i = i + 1
+            continue
+        if line == "@export(\"C\")":
+            pending_export = true
+            i = i + 1
+            continue
+        if line.starts_with("@"):
+            i = i + 1
+            continue
+        if pending_export and line.starts_with("class "):
+            val class_name = _parse_class_name(line)
+            if class_name == "":
+                return PublicExportParse(exported_classes: classes, exported_functions: functions, error: "failed to parse exported class declaration")
+            val fields_result = _parse_class_fields(lines, i + 1)
+            if fields_result.error != "":
+                return PublicExportParse(exported_classes: classes, exported_functions: functions, error: fields_result.error)
+            classes = classes.push(PublicExportClass(name: class_name, fields: fields_result.fields))
+            pending_export = false
+            i = fields_result.next_index
+            continue
+        if pending_export and line.starts_with("fn "):
+            val function_result = _parse_export_function(line)
+            if function_result.error != "":
+                return PublicExportParse(exported_classes: classes, exported_functions: functions, error: function_result.error)
+            functions = functions.push(function_result.exported_fn)
+            pending_export = false
+            i = i + 1
+            continue
+        pending_export = false
+        i = i + 1
+
+    PublicExportParse(exported_classes: classes, exported_functions: functions, error: "")
+
+struct PublicFieldParse:
+    fields: [PublicExportField]
+    next_index: i64
+    error: text
+
+struct PublicFunctionParse:
+    exported_fn: PublicExportFunction
+    error: text
+
+fn _parse_class_name(line: text) -> text:
+    if not line.starts_with("class "):
+        return ""
+    val rest = line.substring(6).trim()
+    val parts = rest.split(":")
+    if parts.len() == 0:
+        return rest
+    parts[0].trim()
+
+fn _parse_class_fields(lines: [text], start_index: i64) -> PublicFieldParse:
+    var fields: [PublicExportField] = []
+    var i = start_index
+    while i < lines.len():
+        val raw = lines[i]
+        val trimmed = raw.trim()
+        if trimmed == "":
+            i = i + 1
+            continue
+        if trimmed.starts_with("@") or trimmed.starts_with("fn ") or trimmed.starts_with("class "):
+            return PublicFieldParse(fields: fields, next_index: i, error: "")
+        val field_parts = trimmed.split(":")
+        if field_parts.len() < 2:
+            return PublicFieldParse(fields: fields, next_index: i, error: "failed to parse exported field: {trimmed}")
+        val field_name = field_parts[0].trim()
+        var type_part = field_parts[1].trim()
+        var has_bits = false
+        var bits_width = ""
+        if type_part.contains("@bits("):
+            has_bits = true
+            val bits_parts = type_part.split("@bits(")
+            if bits_parts.len() < 2:
+                return PublicFieldParse(fields: fields, next_index: i, error: "failed to parse @bits width for field: {field_name}")
+            val bits_text_parts = bits_parts[1].split(")")
+            if bits_text_parts.len() == 0:
+                return PublicFieldParse(fields: fields, next_index: i, error: "failed to parse @bits width for field: {field_name}")
+            bits_width = bits_text_parts[0].trim()
+            type_part = bits_parts[0].trim()
+        fields = fields.push(PublicExportField(name: field_name, type_name: type_part, raw_decl: trimmed, has_bits: has_bits, bits_width: bits_width))
+        i = i + 1
+    PublicFieldParse(fields: fields, next_index: i, error: "")
+
+fn _parse_export_function(line: text) -> PublicFunctionParse:
+    val after_fn = line.substring(3).trim()
+    val fn_parts = after_fn.split("(")
+    if fn_parts.len() < 2:
+        return PublicFunctionParse(exported_fn: PublicExportFunction(name: "", params: [], return_type: ""), error: "failed to parse exported function declaration")
+    val fn_name = fn_parts[0].trim()
+    val tail = fn_parts[1]
+    val tail_parts = tail.split(")")
+    if tail_parts.len() < 2:
+        return PublicFunctionParse(exported_fn: PublicExportFunction(name: "", params: [], return_type: ""), error: "failed to parse exported function declaration")
+    val params_text = tail_parts[0].trim()
+    var params: [text] = []
+    if params_text != "":
+        val parts = params_text.split(",")
+        var i = 0
+        while i < parts.len():
+            val param = parts[i].trim()
+            val param_parts = param.split(":")
+            if param_parts.len() < 2:
+                return PublicFunctionParse(exported_fn: PublicExportFunction(name: "", params: [], return_type: ""), error: "failed to parse parameter in exported function: {fn_name}")
+            params = params.push(param_parts[1].trim())
+            i = i + 1
+    val return_type = if tail_parts[1].contains("->"):
+        val ret_parts = tail_parts[1].split("->")
+        if ret_parts.len() < 2:
+            "unit"
+        else:
+            val suffix = ret_parts[1].trim()
+            val suffix_parts = suffix.split(":")
+            suffix_parts[0].trim()
+    else:
+        "unit"
+    PublicFunctionParse(
+        exported_fn: PublicExportFunction(name: fn_name, params: params, return_type: return_type),
+        error: ""
+    )
+
+fn _emit_public_c_header(lib_name: text, functions: [PublicExportFunction], classes: [PublicExportClass]) -> text:
+    val guard_name = _public_guard_name(lib_name)
+    var lines: [text] = []
+    lines.push("#ifndef {guard_name}_H")
+    lines.push("#define {guard_name}_H")
+    lines.push("")
+    lines.push("#include <stdint.h>")
+    lines.push("#include <stddef.h>")
+    lines.push("#include <stdbool.h>")
+    lines.push("")
+    lines.push("#ifdef __cplusplus")
+    lines.push("extern \"C\" {")
+    lines.push("#endif")
+    lines.push("")
+    lines.push("void spl_library_init(void);")
+    lines.push("void spl_library_shutdown(void);")
+    lines.push("")
+
+    var ci = 0
+    while ci < classes.len():
+        val class_ = classes[ci]
+        val prefix = "spl_" + class_.name
+        lines.push("typedef struct {prefix}* {prefix}_t;")
+        lines.push("")
+        lines.push("{prefix}_t {prefix}_create({_public_ctor_params(class_.fields)});")
+        lines.push("void {prefix}_destroy({prefix}_t self);")
+        lines.push("")
+        lines.push("typedef struct {prefix}_layout {")
+        var fi = 0
+        while fi < class_.fields.len():
+            val field = class_.fields[fi]
+            lines.push("    " + _public_c_field_decl(field))
+            fi = fi + 1
+        lines.push("} {prefix}_layout;")
+        lines.push("_Static_assert(sizeof({prefix}_layout) >= 1, \"{class_.name} layout\");")
+        lines.push("")
+        ci = ci + 1
+
+    var fi = 0
+    while fi < functions.len():
+        val func = functions[fi]
+        lines.push(_public_c_fn_decl(func))
+        fi = fi + 1
+
+    if functions.len() > 0:
+        lines.push("")
+    lines.push("#ifdef __cplusplus")
+    lines.push("}")
+    lines.push("#endif")
+    lines.push("")
+    lines.push("#endif /* {guard_name}_H */")
+    lines.join("\n")
+
+fn _emit_public_cpp_header(lib_name: text, classes: [PublicExportClass], functions: [PublicExportFunction]) -> text:
+    var lines: [text] = []
+    lines.push("#pragma once")
+    lines.push("")
+    lines.push("#include \"{lib_name}.h\"")
+    lines.push("")
+    lines.push("#include <memory>")
+    lines.push("#include <string>")
+    lines.push("#include <utility>")
+    lines.push("#include <cstddef>")
+    lines.push("")
+    lines.push("namespace spl {")
+    lines.push("")
+    lines.push("class Library {")
+    lines.push("public:")
+    lines.push("    Library() { spl_library_init(); }")
+    lines.push("    ~Library() { spl_library_shutdown(); }")
+    lines.push("    Library(const Library&) = delete;")
+    lines.push("    Library& operator=(const Library&) = delete;")
+    lines.push("};")
+    lines.push("")
+
+    var ci = 0
+    while ci < classes.len():
+        val class_ = classes[ci]
+        val prefix = "spl_" + class_.name
+        lines.push("class {class_.name} {")
+        lines.push("    {prefix}_t handle_;")
+        lines.push("")
+        lines.push("public:")
+        lines.push("    {class_.name}({_public_cpp_ctor_params(class_.fields)}) : handle_({prefix}_create({_public_cpp_ctor_args(class_.fields)})) {}")
+        lines.push("    ~{class_.name}() {")
+        lines.push("        if (handle_) {prefix}_destroy(handle_);")
+        lines.push("    }")
+        lines.push("")
+        lines.push("    {class_.name}(const {class_.name}&) = delete;")
+        lines.push("    {class_.name}& operator=(const {class_.name}&) = delete;")
+        lines.push("")
+        lines.push("    {class_.name}({class_.name}&& other) noexcept : handle_(other.handle_) {")
+        lines.push("        other.handle_ = nullptr;")
+        lines.push("    }")
+        lines.push("")
+        lines.push("    {class_.name}& operator=({class_.name}&& other) noexcept {")
+        lines.push("        if (this != &other) {")
+        lines.push("            if (handle_) {prefix}_destroy(handle_);")
+        lines.push("            handle_ = other.handle_;")
+        lines.push("            other.handle_ = nullptr;")
+        lines.push("        }")
+        lines.push("        return *this;")
+        lines.push("    }")
+        lines.push("};")
+        lines.push("")
+        ci = ci + 1
+
+    if functions.len() > 0:
+        lines.push("// --- Free functions ---")
+        lines.push("")
+        var fi = 0
+        while fi < functions.len():
+            val func = functions[fi]
+            val cpp_ret = _public_cpp_type(func.return_type)
+            val cpp_params = _public_cpp_fn_params(func.params)
+            val c_args = _public_cpp_fn_args(func.params)
+            lines.push("inline {cpp_ret} {func.name}({cpp_params}) {")
+            val call_expr = "spl_" + func.name + "(" + c_args + ")"
+            if cpp_ret == "void":
+                lines.push("    {call_expr};")
+            else:
+                lines.push("    return {call_expr};")
+            lines.push("}")
+            lines.push("")
+            fi = fi + 1
+
+    lines.push("} // namespace spl")
+    lines.push("")
+    lines.join("\n")
+
+fn _public_guard_name(lib_name: text) -> text:
+    var guard = lib_name.to_upper()
+    guard = guard.replace("-", "_")
+    guard = guard.replace(".", "_")
+    guard = guard.replace(" ", "_")
+    guard
+
+fn _public_ctor_params(fields: [PublicExportField]) -> text:
+    if fields.len() == 0:
+        return "void"
+    var params: [text] = []
+    var i = 0
+    while i < fields.len():
+        val field = fields[i]
+        params = params.push(_public_field_param_c_type(field) + " " + field.name)
+        i = i + 1
+    params.join(", ")
+
+fn _public_cpp_ctor_params(fields: [PublicExportField]) -> text:
+    if fields.len() == 0:
+        return ""
+    var params: [text] = []
+    var i = 0
+    while i < fields.len():
+        val field = fields[i]
+        params = params.push(_public_field_param_cpp_type(field) + " " + field.name)
+        i = i + 1
+    params.join(", ")
+
+fn _public_cpp_ctor_args(fields: [PublicExportField]) -> text:
+    var args: [text] = []
+    var i = 0
+    while i < fields.len():
+        args = args.push(fields[i].name)
+        i = i + 1
+    args.join(", ")
+
+fn _public_c_field_decl(field: PublicExportField) -> text:
+    val c_type = _public_field_storage_c_type(field)
+    if field.has_bits:
+        return "{c_type} {field.name} : {field.bits_width};"
+    "{c_type} {field.name};"
+
+fn _public_c_fn_decl(func: PublicExportFunction) -> text:
+    val ret = _public_c_type(func.return_type)
+    val export_name = "spl_" + func.name
+    if func.params.len() == 0:
+        return "{ret} {export_name}(void);"
+    var params: [text] = []
+    var i = 0
+    while i < func.params.len():
+        params = params.push(_public_c_type(func.params[i]) + " arg" + "{i}")
+        i = i + 1
+    "{ret} {export_name}(" + params.join(", ") + ");"
+
+fn _public_cpp_fn_params(params: [text]) -> text:
+    if params.len() == 0:
+        return ""
+    var rendered: [text] = []
+    var i = 0
+    while i < params.len():
+        rendered = rendered.push(_public_cpp_type(params[i]) + " arg" + "{i}")
+        i = i + 1
+    rendered.join(", ")
+
+fn _public_cpp_fn_args(params: [text]) -> text:
+    var args: [text] = []
+    var i = 0
+    while i < params.len():
+        args = args.push("arg" + "{i}")
+        i = i + 1
+    args.join(", ")
+
+fn _public_c_type(type_name: text) -> text:
+    val normalized = type_name.trim()
+    if normalized.starts_with("i8"):
+        return "int8_t"
+    if normalized.starts_with("i16"):
+        return "int16_t"
+    if normalized.starts_with("i32"):
+        return "int32_t"
+    if normalized.starts_with("i64"):
+        return "int64_t"
+    if normalized.starts_with("u8"):
+        return "uint8_t"
+    if normalized.starts_with("u16"):
+        return "uint16_t"
+    if normalized.starts_with("u32"):
+        return "uint32_t"
+    if normalized.starts_with("u64"):
+        return "uint64_t"
+    if normalized.starts_with("f32"):
+        return "float"
+    if normalized.starts_with("f64"):
+        return "double"
+    if normalized.starts_with("bool"):
+        return "bool"
+    if normalized.starts_with("text") or normalized.starts_with("str"):
+        return "const char*"
+    if normalized == "unit" or normalized == "()":
+        return "void"
+    "void*"
+
+fn _public_cpp_type(type_name: text) -> text:
+    match type_name:
+        case "text" | "str": "const std::string&"
+        case _: _public_c_type(type_name)
+
+fn _public_field_storage_c_type(field: PublicExportField) -> text:
+    val raw = field.raw_decl.trim()
+    if raw.contains(": u8") or raw.contains(":u8"):
+        return "uint8_t"
+    if raw.contains(": u16") or raw.contains(":u16"):
+        return "uint16_t"
+    if raw.contains(": u32") or raw.contains(":u32"):
+        return "uint32_t"
+    if raw.contains(": u64") or raw.contains(":u64"):
+        return "uint64_t"
+    if raw.contains(": i8") or raw.contains(":i8"):
+        return "int8_t"
+    if raw.contains(": i16") or raw.contains(":i16"):
+        return "int16_t"
+    if raw.contains(": i32") or raw.contains(":i32"):
+        return "int32_t"
+    if raw.contains(": i64") or raw.contains(":i64"):
+        return "int64_t"
+    if raw.contains(": f32") or raw.contains(":f32"):
+        return "float"
+    if raw.contains(": f64") or raw.contains(":f64"):
+        return "double"
+    if raw.contains(": bool") or raw.contains(":bool"):
+        if field.has_bits:
+            return "uint8_t"
+        return "bool"
+    if raw.contains(": text") or raw.contains(":text") or raw.contains(": str") or raw.contains(":str"):
+        return "const char*"
+    _public_c_type(field.type_name)
+
+fn _public_field_param_c_type(field: PublicExportField) -> text:
+    val raw = field.raw_decl.trim()
+    if raw.contains(": bool") or raw.contains(":bool"):
+        return "bool"
+    _public_field_storage_c_type(field)
+
+fn _public_field_param_cpp_type(field: PublicExportField) -> text:
+    val raw = field.raw_decl.trim()
+    if raw.contains(": text") or raw.contains(":text") or raw.contains(": str") or raw.contains(":str"):
+        return "const std::string&"
+    _public_field_param_c_type(field)

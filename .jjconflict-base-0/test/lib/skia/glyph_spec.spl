@@ -1,0 +1,115 @@
+# Glyph outline, rasterize, and subpixel specification tests
+
+use std.sspec.*
+use std.skia.feature.glyph.outline.{GlyphOutline, stub_box_outline}
+use std.skia.feature.glyph.rasterize.{GlyphBitmap, rasterize_outline}
+use std.skia.feature.glyph.subpixel.{SubpixelOffset, subpixel_offset, apply_subpixel, LcdOrder, lcd_filter_5tap, apply_lcd_filter, apply_gamma_correction}
+
+describe "stub_box_outline":
+    it "glyph_id is stored correctly":
+        val outline = stub_box_outline(65 as u32, 10.0, 12.0)
+        expect outline.glyph_id to_equal 65 as u32
+
+    it "advance_x matches width":
+        val outline = stub_box_outline(65 as u32, 10.0, 12.0)
+        expect outline.metrics.advance_x to_equal 10.0
+
+    it "path has segments (not empty)":
+        val outline = stub_box_outline(65 as u32, 10.0, 12.0)
+        val count = outline.path.segments.len()
+        expect count to_be_greater_than 0
+
+describe "rasterize_outline":
+    it "produces bitmap with width > 0":
+        val outline = stub_box_outline(65 as u32, 10.0, 12.0)
+        val bmp = rasterize_outline(outline, 12.0)
+        expect bmp.width to_be_greater_than 0
+
+    it "produces bitmap with height > 0":
+        val outline = stub_box_outline(65 as u32, 10.0, 12.0)
+        val bmp = rasterize_outline(outline, 12.0)
+        expect bmp.height to_be_greater_than 0
+
+    it "pixel count equals width times height":
+        val outline = stub_box_outline(65 as u32, 10.0, 12.0)
+        val bmp = rasterize_outline(outline, 12.0)
+        val expected = bmp.width * bmp.height
+        val actual = bmp.pixels.len()
+        expect actual to_equal expected
+
+describe "subpixel_offset":
+    it "0.1 maps to Zero":
+        val off = subpixel_offset(0.1)
+        expect off to_equal SubpixelOffset.Zero
+
+    it "0.4 maps to OneThird":
+        val off = subpixel_offset(0.4)
+        expect off to_equal SubpixelOffset.OneThird
+
+    it "0.7 maps to TwoThird":
+        val off = subpixel_offset(0.7)
+        expect off to_equal SubpixelOffset.TwoThird
+
+describe "apply_subpixel":
+    it "returns bitmap with same width (passthrough stub)":
+        val outline = stub_box_outline(65 as u32, 8.0, 10.0)
+        val bmp = rasterize_outline(outline, 12.0)
+        val result = apply_subpixel(bmp, SubpixelOffset.Zero)
+        expect result.width to_equal bmp.width
+
+describe "lcd_filter_5tap":
+    it "uniform row preserves brightness within tolerance":
+        # A row of all-128 should produce output where each channel sums close to input sum
+        val row: [u8] = [128 as u8, 128 as u8, 128 as u8, 128 as u8, 128 as u8]
+        val out = lcd_filter_5tap(row, LcdOrder.Rgb)
+        # Output is 15 bytes (5 pixels * 3 channels). Green channel (index 1,4,7,10,13)
+        # for a uniform input should stay near 128. Check middle pixel green channel.
+        val mid_g = out[7] as i64
+        val diff: i64 = if mid_g > 128: mid_g - 128 else: 128 - mid_g
+        expect diff to_be_less_than 10
+
+    it "impulse input spreads into adjacent subpixels":
+        # Single non-zero pixel in center of 5-wide row
+        val row: [u8] = [0 as u8, 0 as u8, 255 as u8, 0 as u8, 0 as u8]
+        val out = lcd_filter_5tap(row, LcdOrder.Rgb)
+        # Center pixel (index 2) green channel at out[7] should be largest contributor
+        val center_g = out[7] as i64
+        # Adjacent pixels (index 1 and 3) should also receive some energy
+        val left_g = out[4] as i64
+        val right_g = out[10] as i64
+        # Center green should be non-zero (impulse spreads to green)
+        expect center_g to_be_greater_than 0
+        # At least one neighbor should also be non-zero (filter spreads energy)
+        val neighbor_sum: i64 = left_g + right_g
+        expect neighbor_sum to_be_greater_than 0
+
+describe "apply_lcd_filter":
+    it "Rgb vs Bgr order produces mirrored channels":
+        # Use a non-uniform row so R != B
+        val pixels: [u8] = [200 as u8, 100 as u8, 50 as u8, 100 as u8, 200 as u8]
+        val bmp = GlyphBitmap(width: 5, height: 1, left: 0, top: 0, pixels: pixels)
+        val rgb_bmp = apply_lcd_filter(bmp, LcdOrder.Rgb)
+        val bgr_bmp = apply_lcd_filter(bmp, LcdOrder.Bgr)
+        # For pixel i: Rgb stores (R,G,B) and Bgr stores (B,G,R).
+        # So rgb_bmp.pixels[0] should equal bgr_bmp.pixels[2] (R of Rgb == B slot of Bgr swapped)
+        val rgb_r = rgb_bmp.pixels[0] as i64
+        val bgr_b_slot = bgr_bmp.pixels[0] as i64
+        # They should differ since input is non-uniform (R filter != B filter for asymmetric input)
+        # The green channel (index 1) should match between Rgb and Bgr
+        val rgb_g = rgb_bmp.pixels[1] as i64
+        val bgr_g = bgr_bmp.pixels[1] as i64
+        expect rgb_g to_equal bgr_g
+
+describe "apply_gamma_correction":
+    it "gamma 2.2 darkens mid-gray (128 -> less than 128)":
+        val result = apply_gamma_correction(128 as u8, 2.2)
+        val result_i = result as i64
+        expect result_i to_be_less_than 128
+
+    it "gamma 1.0 is identity":
+        val r0 = apply_gamma_correction(0 as u8, 1.0)
+        val r128 = apply_gamma_correction(128 as u8, 1.0)
+        val r255 = apply_gamma_correction(255 as u8, 1.0)
+        expect r0 as i64 to_equal 0
+        expect r128 as i64 to_equal 128
+        expect r255 as i64 to_equal 255

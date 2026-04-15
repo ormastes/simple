@@ -1,0 +1,767 @@
+# NVMe Driver -- Block device driver using DeviceGrant pattern
+#
+# MDSOC: feature dimension, drivers layer
+# Receives a DeviceGrant from the PCI manager and provides sector-level
+# read/write via paired submission/completion queues over BAR0 MMIO.
+#
+# Init sequence:
+#   1. Map BAR0 registers via syscall
+#   2. Read CAP (doorbell stride, max queue entries)
+#   3. Disable controller, wait for not-ready
+#   4. Allocate DMA memory for admin SQ/CQ
+#   5. Configure admin queue attributes (AQA, ASQ, ACQ)
+#   6. Enable controller, wait for ready
+#   7. Identify Controller + Namespace 1
+#   8. Create I/O completion and submission queues
+#
+# Syscalls used:
+#   83 = MapBar(phys, size, 0) -> virt addr
+#   84 = AllocDma(size, &phys_out, 0) -> virt addr
+#   26 = NotificationWait(notif_id)
+
+use os.kernel.types.device_mem_types.{DeviceGrant}
+use os.kernel.boot.mmio.{mmio_read32, mmio_write32, mmio_read64, mmio_write64}
+use os.userlib.syscall_raw.{syscall}
+use os.drivers.nvme.nvme_types.{NVME_REG_CAP, NVME_REG_VS, NVME_REG_CC, NVME_REG_CSTS, NVME_REG_AQA, NVME_REG_ASQ, NVME_REG_ACQ, CC_EN, CC_CSS_NVM, CC_MPS_4K, CC_IOSQES_64, CC_IOCQES_16, CSTS_RDY, CSTS_CFS, ADMIN_QUEUE_DEPTH, IO_QUEUE_DEPTH, SQE_SIZE, CQE_SIZE, NVME_ADMIN_IDENTIFY, NVME_ADMIN_CREATE_IOCQ, NVME_ADMIN_CREATE_IOSQ, NVME_ADMIN_SET_FEATURES, NVME_IO_READ, NVME_IO_WRITE, NVME_IO_FLUSH, IDENTIFY_CNS_NAMESPACE, IDENTIFY_CNS_CONTROLLER, IDNS_NSZE_OFFSET, IDNS_FLBAS_OFFSET, IDNS_LBAF0_OFFSET}
+use os.drivers.nvme.nvme_queue.{NvmeQueuePair}
+
+extern fn serial_println(msg: text)
+
+# Timeout for controller ready transitions (spin iterations)
+val READY_TIMEOUT: u32 = 1000000
+# Timeout for individual command completions
+val CMD_TIMEOUT: u32 = 500000
+# DMA allocation page size
+val DMA_PAGE_SIZE: u64 = 4096
+
+# Syscall numbers
+val SYS_MAP_BAR: u64 = 83
+val SYS_ALLOC_DMA: u64 = 84
+val SYS_NOTIFICATION_WAIT: u64 = 26
+
+# ============================================================================
+# NVMe Driver
+# ============================================================================
+
+class NvmeDriver:
+    """NVMe block device driver.
+
+    Provides sector-level read/write on an NVMe namespace.
+    Initialized from a DeviceGrant obtained from the PCI manager.
+    """
+    bar0_virt: u64              # Virtual address of mapped BAR0 registers
+    admin_queue: NvmeQueuePair  # Admin queue pair (QID 0)
+    io_queue: NvmeQueuePair     # I/O queue pair (QID 1)
+    notif_id: u64               # IRQ notification ID from grant
+    sector_count: u64           # Namespace 1 total sectors (LBAs)
+    sector_size: u32            # Bytes per sector (usually 512)
+    db_stride: u32              # Doorbell stride from CAP register
+    initialized: bool
+
+impl NvmeDriver:
+    static fn new() -> NvmeDriver:
+        """Create an uninitialized NVMe driver."""
+        NvmeDriver(
+            bar0_virt: 0,
+            admin_queue: NvmeQueuePair.new(0, ADMIN_QUEUE_DEPTH),
+            io_queue: NvmeQueuePair.new(1, IO_QUEUE_DEPTH),
+            notif_id: 0,
+            sector_count: 0,
+            sector_size: 512,
+            db_stride: 0,
+            initialized: false
+        )
+
+    # ========================================================================
+    # Initialization
+    # ========================================================================
+
+    me init_from_grant(grant: DeviceGrant) -> Result<bool, text>:
+        """Initialize NVMe controller from a DeviceGrant.
+
+        Performs the full NVMe init sequence: map BAR0, reset controller,
+        configure admin queues, identify controller/namespace, create I/O queues.
+        """
+        self.notif_id = grant.irq_notification_id
+
+        # Step 1: Map BAR0 via syscall
+        val bar0_result = syscall(SYS_MAP_BAR, grant.bar0_phys, grant.bar0_size, 0, 0, 0)
+        if bar0_result < 0:
+            return Result.Err("NVMe: failed to map BAR0")
+        self.bar0_virt = bar0_result.to_u64()
+        serial_println("NVMe: BAR0 mapped")
+
+        # Step 2: Read CAP register -- extract doorbell stride and max queue entries
+        val cap = mmio_read64(self.bar0_virt + NVME_REG_CAP)
+        # CAP bits 32-35: DSTRD (Doorbell Stride, in units of 4 bytes)
+        val dstrd = ((cap >> 32) & 0x0F).to_u32()
+        self.db_stride = dstrd
+        # CAP bits 0-15: MQES (Maximum Queue Entries Supported, 0-based)
+        val mqes = (cap & 0xFFFF).to_u16()
+        serial_println("NVMe: CAP read, DSTRD={dstrd}, MQES={mqes}")
+
+        # Step 3: Disable controller
+        val disable_result = self.disable_controller()
+        if disable_result.is_err():
+            return disable_result
+
+        # Step 4: Allocate admin queue DMA memory
+        val admin_sq_size = ADMIN_QUEUE_DEPTH.to_u64() * SQE_SIZE
+        val admin_cq_size = ADMIN_QUEUE_DEPTH.to_u64() * CQE_SIZE
+        val admin_sq_result = self.alloc_dma(admin_sq_size)
+        if admin_sq_result.is_err():
+            return Result.Err("NVMe: failed to allocate admin SQ")
+        val admin_sq_addrs = admin_sq_result.unwrap()
+        self.admin_queue.sq_virt = admin_sq_addrs.virt
+        self.admin_queue.sq_phys = admin_sq_addrs.phys
+
+        val admin_cq_result = self.alloc_dma(admin_cq_size)
+        if admin_cq_result.is_err():
+            return Result.Err("NVMe: failed to allocate admin CQ")
+        val admin_cq_addrs = admin_cq_result.unwrap()
+        self.admin_queue.cq_virt = admin_cq_addrs.virt
+        self.admin_queue.cq_phys = admin_cq_addrs.phys
+
+        # Zero out queue memory
+        self.zero_memory(self.admin_queue.sq_virt, admin_sq_size)
+        self.zero_memory(self.admin_queue.cq_virt, admin_cq_size)
+
+        # Set admin queue doorbells
+        # SQ y Tail Doorbell = 0x1000 + 2*y * (4 << DSTRD)
+        # CQ y Head Doorbell = 0x1000 + (2*y+1) * (4 << DSTRD)
+        val db_size = 4 << self.db_stride
+        val db_size_u64 = db_size.to_u64()
+        self.admin_queue.sq_doorbell = self.bar0_virt + 0x1000
+        self.admin_queue.cq_doorbell = self.bar0_virt + 0x1000 + db_size_u64
+
+        # Step 5: Write AQA (admin queue attributes)
+        # Bits 0-11: ASQS (admin SQ size, 0-based), Bits 16-27: ACQS (admin CQ size, 0-based)
+        val asqs = (ADMIN_QUEUE_DEPTH - 1).to_u32()
+        val acqs = (ADMIN_QUEUE_DEPTH - 1).to_u32()
+        val aqa = asqs | (acqs << 16)
+        mmio_write32(self.bar0_virt + NVME_REG_AQA, aqa)
+
+        # Step 6: Write ASQ (admin submission queue base address)
+        mmio_write64(self.bar0_virt + NVME_REG_ASQ, self.admin_queue.sq_phys)
+
+        # Step 7: Write ACQ (admin completion queue base address)
+        mmio_write64(self.bar0_virt + NVME_REG_ACQ, self.admin_queue.cq_phys)
+
+        # Step 8: Enable controller
+        val enable_result = self.enable_controller()
+        if enable_result.is_err():
+            return enable_result
+        serial_println("NVMe: controller enabled")
+
+        # Step 9: Identify Controller (admin command, CNS=1)
+        val identify_ctrl_result = self.identify_controller()
+        if identify_ctrl_result.is_err():
+            return identify_ctrl_result
+        serial_println("NVMe: controller identified")
+
+        # Step 10: Identify Namespace 1 (admin command, CNS=0, NSID=1)
+        val identify_ns_result = self.identify_namespace()
+        if identify_ns_result.is_err():
+            return identify_ns_result
+        serial_println("NVMe: namespace identified, sectors={self.sector_count}, sector_size={self.sector_size}")
+
+        # Step 11: Set Number of Queues feature (feature ID 0x07)
+        val set_queues_result = self.set_num_queues(1, 1)
+        if set_queues_result.is_err():
+            return set_queues_result
+
+        # Step 12: Create I/O Completion Queue (QID 1)
+        val create_iocq_result = self.create_io_completion_queue()
+        if create_iocq_result.is_err():
+            return create_iocq_result
+        serial_println("NVMe: I/O CQ created")
+
+        # Step 13: Create I/O Submission Queue (QID 1)
+        val create_iosq_result = self.create_io_submission_queue()
+        if create_iosq_result.is_err():
+            return create_iosq_result
+        serial_println("NVMe: I/O SQ created")
+
+        self.initialized = true
+        serial_println("NVMe: initialization complete")
+        Result.Ok(true)
+
+    me init_baremetal(bar0_virt_addr: i64, dma_buf_addr: i64) -> Result<bool, text>:
+        """Initialize NVMe controller on baremetal (no DeviceGrant needed).
+
+        Uses raw BAR0 virtual address and DMA buffer from C heap.
+        No IRQ notifications — uses polling only.
+        """
+        self.bar0_virt = bar0_virt_addr
+        self.notif_id = 0  # No IRQ on baremetal, polling only
+        serial_println("[nvme] BAR0 at 0x{bar0_virt_addr}")
+
+        # Read CAP register
+        val cap = mmio_read64(self.bar0_virt + NVME_REG_CAP)
+        val dstrd = ((cap / 4294967296) & 0x0F).to_u32()
+        self.db_stride = dstrd
+        val mqes = (cap & 0xFFFF).to_u16()
+        serial_println("[nvme] CAP: DSTRD={dstrd}, MQES={mqes}")
+
+        # Disable controller
+        val disable_result = self.disable_controller()
+        if disable_result.is_err():
+            return disable_result
+
+        # Allocate admin queue DMA via syscall 84
+        val admin_sq_size = 32 * 64  # ADMIN_QUEUE_DEPTH * SQE_SIZE = 2048
+        val admin_cq_size = 32 * 16  # ADMIN_QUEUE_DEPTH * CQE_SIZE = 512
+        val sq_dma = syscall(84, admin_sq_size, 0, 0, 0, 0)
+        if sq_dma < 0:
+            return Result.Err("[nvme] failed to allocate admin SQ DMA")
+        val cq_dma = syscall(84, admin_cq_size, 0, 0, 0, 0)
+        if cq_dma < 0:
+            return Result.Err("[nvme] failed to allocate admin CQ DMA")
+
+        # Set admin queue addresses (on baremetal: virt == phys)
+        self.admin_queue.sq_virt = sq_dma
+        self.admin_queue.sq_phys = sq_dma
+        self.admin_queue.cq_virt = cq_dma
+        self.admin_queue.cq_phys = cq_dma
+
+        # Zero the queue memory
+        self.zero_memory(sq_dma, admin_sq_size)
+        self.zero_memory(cq_dma, admin_cq_size)
+
+        # Set doorbell addresses (BAR0 + 0x1000 + qid*stride)
+        val db_offset = 0x1000
+        self.admin_queue.sq_doorbell = self.bar0_virt + db_offset
+        self.admin_queue.cq_doorbell = self.bar0_virt + db_offset + 4
+
+        # Configure AQA, ASQ, ACQ registers
+        val aqa = (31 << 16) | 31  # 32-1 entries each
+        mmio_write32(self.bar0_virt + NVME_REG_AQA, aqa)
+        mmio_write32(self.bar0_virt + NVME_REG_ASQ, sq_dma & 0xFFFFFFFF)
+        mmio_write32(self.bar0_virt + NVME_REG_ASQ + 4, (sq_dma / 4294967296) & 0xFFFFFFFF)
+        mmio_write32(self.bar0_virt + NVME_REG_ACQ, cq_dma & 0xFFFFFFFF)
+        mmio_write32(self.bar0_virt + NVME_REG_ACQ + 4, (cq_dma / 4294967296) & 0xFFFFFFFF)
+        serial_println("[nvme] Admin queues configured")
+
+        # Enable controller
+        val enable_result = self.enable_controller()
+        if enable_result.is_err():
+            return enable_result
+
+        serial_println("[nvme] Controller enabled, running Identify...")
+
+        # Identify Controller
+        val ident_result = self.identify_controller()
+        if ident_result.is_err():
+            serial_println("[nvme] Identify failed — continuing anyway")
+
+        # Identify Namespace 1
+        val ns_result = self.identify_namespace()
+        if ns_result.is_err():
+            serial_println("[nvme] Namespace identify failed — using defaults")
+
+        # Create I/O queues
+        val io_sq_size = 64 * 64  # IO_QUEUE_DEPTH * SQE_SIZE
+        val io_cq_size = 64 * 16  # IO_QUEUE_DEPTH * CQE_SIZE
+        val io_sq_dma = syscall(84, io_sq_size, 0, 0, 0, 0)
+        val io_cq_dma = syscall(84, io_cq_size, 0, 0, 0, 0)
+        if io_sq_dma > 0 and io_cq_dma > 0:
+            self.io_queue.sq_virt = io_sq_dma
+            self.io_queue.sq_phys = io_sq_dma
+            self.io_queue.cq_virt = io_cq_dma
+            self.io_queue.cq_phys = io_cq_dma
+            self.zero_memory(io_sq_dma, io_sq_size)
+            self.zero_memory(io_cq_dma, io_cq_size)
+            val io_db_offset = 0x1000 + 2 * 4  # qid=1, stride=4
+            self.io_queue.sq_doorbell = self.bar0_virt + io_db_offset
+            self.io_queue.cq_doorbell = self.bar0_virt + io_db_offset + 4
+
+            val cq_result = self.create_io_completion_queue()
+            val sq_result = self.create_io_submission_queue()
+            if cq_result.is_ok() and sq_result.is_ok():
+                serial_println("[nvme] I/O queues created")
+            else:
+                serial_println("[nvme] I/O queue creation failed — read/write unavailable")
+
+        self.initialized = true
+        serial_println("[nvme] Baremetal initialization complete")
+        Result.Ok(true)
+
+    # ========================================================================
+    # Controller Enable / Disable
+    # ========================================================================
+
+    me disable_controller() -> Result<bool, text>:
+        """Disable controller by clearing CC.EN and wait for CSTS.RDY == 0."""
+        val cc = mmio_read32(self.bar0_virt + NVME_REG_CC)
+        val cc_disabled = cc & (0xFFFFFFFF ^ CC_EN)
+        mmio_write32(self.bar0_virt + NVME_REG_CC, cc_disabled)
+
+        # Wait for CSTS.RDY to clear
+        var i: u32 = 0
+        while i < READY_TIMEOUT:
+            val csts = mmio_read32(self.bar0_virt + NVME_REG_CSTS)
+            if (csts & CSTS_RDY) == 0:
+                serial_println("NVMe: controller disabled")
+                return Result.Ok(true)
+            if (csts & CSTS_CFS) != 0:
+                return Result.Err("NVMe: controller fatal status during disable")
+            i = i + 1
+        Result.Err("NVMe: timeout waiting for controller disable")
+
+    me enable_controller() -> Result<bool, text>:
+        """Enable controller with NVM command set, 4KB pages, 64B SQ / 16B CQ entries."""
+        val cc = CC_EN | CC_CSS_NVM | CC_MPS_4K | CC_IOSQES_64 | CC_IOCQES_16
+        mmio_write32(self.bar0_virt + NVME_REG_CC, cc)
+
+        # Wait for CSTS.RDY to set
+        var i: u32 = 0
+        while i < READY_TIMEOUT:
+            val csts = mmio_read32(self.bar0_virt + NVME_REG_CSTS)
+            if (csts & CSTS_RDY) != 0:
+                return Result.Ok(true)
+            if (csts & CSTS_CFS) != 0:
+                return Result.Err("NVMe: controller fatal status during enable")
+            i = i + 1
+        Result.Err("NVMe: timeout waiting for controller ready")
+
+    # ========================================================================
+    # Admin Commands
+    # ========================================================================
+
+    me identify_controller() -> Result<bool, text>:
+        """Issue Identify Controller command (CNS=1).
+
+        Allocates a 4KB DMA buffer for the identify data structure.
+        We do not parse the full structure -- just verify the command succeeds.
+        """
+        val buf_result = self.alloc_dma(DMA_PAGE_SIZE)
+        if buf_result.is_err():
+            return Result.Err("NVMe: failed to allocate identify buffer")
+        val buf = buf_result.unwrap()
+        self.zero_memory(buf.virt, DMA_PAGE_SIZE)
+
+        # Identify: opcode=0x06, NSID=0, PRP1=buffer, CDW10=CNS (1=controller)
+        self.admin_queue.submit_command(
+            NVME_ADMIN_IDENTIFY, 0, buf.phys, 0,
+            IDENTIFY_CNS_CONTROLLER, 0, 0
+        )
+
+        if not self.admin_queue.wait_completion(CMD_TIMEOUT):
+            return Result.Err("NVMe: identify controller timeout")
+        Result.Ok(true)
+
+    me identify_namespace() -> Result<bool, text>:
+        """Issue Identify Namespace command (CNS=0, NSID=1).
+
+        Reads namespace size (NSZE) and LBA format to determine sector count
+        and sector size for the first namespace.
+        """
+        val buf_result = self.alloc_dma(DMA_PAGE_SIZE)
+        if buf_result.is_err():
+            return Result.Err("NVMe: failed to allocate identify ns buffer")
+        val buf = buf_result.unwrap()
+        self.zero_memory(buf.virt, DMA_PAGE_SIZE)
+
+        # Identify Namespace: opcode=0x06, NSID=1, PRP1=buffer, CDW10=CNS (0=namespace)
+        self.admin_queue.submit_command(
+            NVME_ADMIN_IDENTIFY, 1, buf.phys, 0,
+            IDENTIFY_CNS_NAMESPACE, 0, 0
+        )
+
+        if not self.admin_queue.wait_completion(CMD_TIMEOUT):
+            return Result.Err("NVMe: identify namespace timeout")
+
+        # Parse NSZE (Namespace Size in LBAs) at offset 0
+        self.sector_count = mmio_read64(buf.virt + IDNS_NSZE_OFFSET)
+
+        # Parse FLBAS (Formatted LBA Size) at offset 26 to find active LBA format index
+        val flbas_raw = mmio_read32(buf.virt + IDNS_FLBAS_OFFSET)
+        val flbas = flbas_raw & 0x0F  # Lower 4 bits = LBA format index
+
+        # Read LBA Format descriptor: LBAF0 is at offset 128, each LBAF is 4 bytes
+        val lbaf_offset = IDNS_LBAF0_OFFSET + flbas.to_u64() * 4
+        val lbaf = mmio_read32(buf.virt + lbaf_offset)
+        # LBAF bits 16-23: LBADS (LBA Data Size as power of 2)
+        val lbads = (lbaf >> 16) & 0xFF
+        if lbads >= 9 and lbads <= 16:
+            self.sector_size = 1 << lbads
+        else:
+            self.sector_size = 512  # Default fallback
+
+        Result.Ok(true)
+
+    me set_num_queues(nsq: u16, ncq: u16) -> Result<bool, text>:
+        """Set Number of Queues feature (feature ID 0x07).
+
+        Requests nsq submission queues and ncq completion queues.
+        CDW11: bits[31:16] = NCQR (0-based), bits[15:0] = NSQR (0-based).
+        """
+        val nsqr = (nsq - 1).to_u32()
+        val ncqr = (ncq - 1).to_u32()
+        val cdw11 = nsqr | (ncqr << 16)
+        val feature_id: u32 = 0x07  # Number of Queues
+
+        self.admin_queue.submit_command(
+            NVME_ADMIN_SET_FEATURES, 0, 0, 0,
+            feature_id, cdw11, 0
+        )
+
+        if not self.admin_queue.wait_completion(CMD_TIMEOUT):
+            return Result.Err("NVMe: set num queues timeout")
+        Result.Ok(true)
+
+    me create_io_completion_queue() -> Result<bool, text>:
+        """Create I/O Completion Queue (QID 1) via admin command.
+
+        Allocates DMA memory for the CQ and issues Create I/O CQ command.
+        CDW10: bits[31:16] = QSIZE (0-based), bits[15:0] = QID
+        CDW11: bit[0] = PC (physically contiguous), bits[31:16] = IV (interrupt vector)
+        """
+        val cq_size = IO_QUEUE_DEPTH.to_u64() * CQE_SIZE
+        val cq_result = self.alloc_dma(cq_size)
+        if cq_result.is_err():
+            return Result.Err("NVMe: failed to allocate I/O CQ")
+        val cq = cq_result.unwrap()
+        self.io_queue.cq_virt = cq.virt
+        self.io_queue.cq_phys = cq.phys
+        self.zero_memory(cq.virt, cq_size)
+
+        # Set I/O CQ doorbell: CQ y Head Doorbell = 0x1000 + (2*y+1) * (4 << DSTRD)
+        val db_size = 4 << self.db_stride
+        val db_size_u64 = db_size.to_u64()
+        val io_qid: u64 = 1
+        self.io_queue.cq_doorbell = self.bar0_virt + 0x1000 + (2 * io_qid + 1) * db_size_u64
+
+        # CDW10: QID=1 | QSIZE=(depth-1) << 16
+        val cdw10 = 1 | ((IO_QUEUE_DEPTH - 1).to_u32() << 16)
+        # CDW11: PC=1 (physically contiguous), IV=0, IEN=1
+        val cdw11: u32 = 0x01  # PC bit
+
+        self.admin_queue.submit_command(
+            NVME_ADMIN_CREATE_IOCQ, 0, cq.phys, 0,
+            cdw10, cdw11, 0
+        )
+
+        if not self.admin_queue.wait_completion(CMD_TIMEOUT):
+            return Result.Err("NVMe: create I/O CQ timeout")
+        Result.Ok(true)
+
+    me create_io_submission_queue() -> Result<bool, text>:
+        """Create I/O Submission Queue (QID 1) via admin command.
+
+        Allocates DMA memory for the SQ and issues Create I/O SQ command.
+        CDW10: bits[31:16] = QSIZE (0-based), bits[15:0] = QID
+        CDW11: bit[0] = PC, bits[31:16] = CQID (associated CQ)
+        """
+        val sq_size = IO_QUEUE_DEPTH.to_u64() * SQE_SIZE
+        val sq_result = self.alloc_dma(sq_size)
+        if sq_result.is_err():
+            return Result.Err("NVMe: failed to allocate I/O SQ")
+        val sq = sq_result.unwrap()
+        self.io_queue.sq_virt = sq.virt
+        self.io_queue.sq_phys = sq.phys
+        self.zero_memory(sq.virt, sq_size)
+
+        # Set I/O SQ doorbell: SQ y Tail Doorbell = 0x1000 + 2*y * (4 << DSTRD)
+        val db_size = 4 << self.db_stride
+        val db_size_u64 = db_size.to_u64()
+        val io_qid: u64 = 1
+        self.io_queue.sq_doorbell = self.bar0_virt + 0x1000 + 2 * io_qid * db_size_u64
+
+        # CDW10: QID=1 | QSIZE=(depth-1) << 16
+        val cdw10 = 1 | ((IO_QUEUE_DEPTH - 1).to_u32() << 16)
+        # CDW11: PC=1 (physically contiguous), CQID=1 << 16
+        val cdw11: u32 = 0x01 | (1 << 16)
+
+        self.admin_queue.submit_command(
+            NVME_ADMIN_CREATE_IOSQ, 0, sq.phys, 0,
+            cdw10, cdw11, 0
+        )
+
+        if not self.admin_queue.wait_completion(CMD_TIMEOUT):
+            return Result.Err("NVMe: create I/O SQ timeout")
+        Result.Ok(true)
+
+    # ========================================================================
+    # Block I/O
+    # ========================================================================
+
+    me read_sectors(lba: u64, count: u32, buf_phys: u64) -> Result<bool, text>:
+        """Read sectors from namespace 1.
+
+        lba:      Starting logical block address
+        count:    Number of sectors to read (1-based)
+        buf_phys: Physical address of DMA buffer (must be pre-allocated via AllocDma)
+
+        NVMe Read command (opcode 0x02):
+          NSID = 1
+          PRP1 = buf_phys
+          CDW10 = LBA lower 32 bits
+          CDW11 = LBA upper 32 bits
+          CDW12 = Number of Logical Blocks (0-based, so count-1)
+        """
+        if not self.initialized:
+            return Result.Err("NVMe: driver not initialized")
+        val count_u64 = count.to_u64()
+        if lba + count_u64 > self.sector_count:
+            return Result.Err("NVMe: read beyond namespace capacity")
+
+        val lba_low = (lba & 0xFFFFFFFF).to_u32()
+        val lba_high = (lba >> 32).to_u32()
+        val nlb = count - 1  # 0-based count
+
+        self.io_queue.submit_command(
+            NVME_IO_READ, 1, buf_phys, 0,
+            lba_low, lba_high, nlb
+        )
+
+        if not self.io_queue.wait_completion(CMD_TIMEOUT):
+            return Result.Err("NVMe: read timeout at LBA {lba}")
+
+        # Check completion status
+        val status_dw3 = self.io_queue.get_completion_status()
+        val status_code = (status_dw3 >> 17) & 0x7FF  # Status Code Type + Status Code
+        if status_code != 0:
+            return Result.Err("NVMe: read error, status={status_code}")
+
+        Result.Ok(true)
+
+    me write_sectors(lba: u64, count: u32, buf_phys: u64) -> Result<bool, text>:
+        """Write sectors to namespace 1.
+
+        lba:      Starting logical block address
+        count:    Number of sectors to write (1-based)
+        buf_phys: Physical address of DMA buffer containing data to write
+
+        NVMe Write command (opcode 0x01):
+          NSID = 1
+          PRP1 = buf_phys
+          CDW10 = LBA lower 32 bits
+          CDW11 = LBA upper 32 bits
+          CDW12 = Number of Logical Blocks (0-based, so count-1)
+        """
+        if not self.initialized:
+            return Result.Err("NVMe: driver not initialized")
+        val count_u64 = count.to_u64()
+        if lba + count_u64 > self.sector_count:
+            return Result.Err("NVMe: write beyond namespace capacity")
+
+        val lba_low = (lba & 0xFFFFFFFF).to_u32()
+        val lba_high = (lba >> 32).to_u32()
+        val nlb = count - 1  # 0-based count
+
+        self.io_queue.submit_command(
+            NVME_IO_WRITE, 1, buf_phys, 0,
+            lba_low, lba_high, nlb
+        )
+
+        if not self.io_queue.wait_completion(CMD_TIMEOUT):
+            return Result.Err("NVMe: write timeout at LBA {lba}")
+
+        # Check completion status
+        val status_dw3 = self.io_queue.get_completion_status()
+        val status_code = (status_dw3 >> 17) & 0x7FF
+        if status_code != 0:
+            return Result.Err("NVMe: write error, status={status_code}")
+
+        Result.Ok(true)
+
+    me flush() -> Result<bool, text>:
+        """Flush controller write cache to persistent storage.
+
+        NVMe Flush command (opcode 0x00) on the I/O queue.
+        """
+        if not self.initialized:
+            return Result.Err("NVMe: driver not initialized")
+
+        self.io_queue.submit_command(
+            NVME_IO_FLUSH, 1, 0, 0,
+            0, 0, 0
+        )
+
+        if not self.io_queue.wait_completion(CMD_TIMEOUT):
+            return Result.Err("NVMe: flush timeout")
+
+        val status_dw3 = self.io_queue.get_completion_status()
+        val status_code = (status_dw3 >> 17) & 0x7FF
+        if status_code != 0:
+            return Result.Err("NVMe: flush error, status={status_code}")
+
+        Result.Ok(true)
+
+    # ========================================================================
+    # Notification-Based Block I/O (non-spinning)
+    # ========================================================================
+
+    me read_sectors_notify(lba: u64, count: u32, buf_phys: u64) -> Result<bool, text>:
+        """Read sectors using notification-based completion (non-spinning).
+
+        Same as read_sectors() but uses wait_completion_notify() which blocks
+        on the IRQ notification instead of spin-polling. This yields the CPU
+        to other tasks while waiting for the NVMe controller to complete.
+
+        lba:      Starting logical block address
+        count:    Number of sectors to read (1-based)
+        buf_phys: Physical address of DMA buffer (must be pre-allocated)
+        """
+        if not self.initialized:
+            return Result.Err("NVMe: driver not initialized")
+        val count_u64 = count.to_u64()
+        if lba + count_u64 > self.sector_count:
+            return Result.Err("NVMe: read beyond namespace capacity")
+
+        val lba_low = (lba & 0xFFFFFFFF).to_u32()
+        val lba_high = (lba >> 32).to_u32()
+        val nlb = count - 1  # 0-based count
+
+        self.io_queue.submit_command(
+            NVME_IO_READ, 1, buf_phys, 0,
+            lba_low, lba_high, nlb
+        )
+
+        # Wait using notification instead of spin-poll
+        if not self.io_queue.wait_completion_notify(self.notif_id, CMD_TIMEOUT):
+            return Result.Err("NVMe: read timeout at LBA {lba}")
+
+        # Check completion status
+        val status_dw3 = self.io_queue.get_completion_status()
+        val status_code = (status_dw3 >> 17) & 0x7FF
+        if status_code != 0:
+            return Result.Err("NVMe: read error, status={status_code}")
+
+        Result.Ok(true)
+
+    me write_sectors_notify(lba: u64, count: u32, buf_phys: u64) -> Result<bool, text>:
+        """Write sectors using notification-based completion (non-spinning).
+
+        Same as write_sectors() but uses wait_completion_notify() which blocks
+        on the IRQ notification instead of spin-polling.
+
+        lba:      Starting logical block address
+        count:    Number of sectors to write (1-based)
+        buf_phys: Physical address of DMA buffer containing data
+        """
+        if not self.initialized:
+            return Result.Err("NVMe: driver not initialized")
+        val count_u64 = count.to_u64()
+        if lba + count_u64 > self.sector_count:
+            return Result.Err("NVMe: write beyond namespace capacity")
+
+        val lba_low = (lba & 0xFFFFFFFF).to_u32()
+        val lba_high = (lba >> 32).to_u32()
+        val nlb = count - 1  # 0-based count
+
+        self.io_queue.submit_command(
+            NVME_IO_WRITE, 1, buf_phys, 0,
+            lba_low, lba_high, nlb
+        )
+
+        # Wait using notification instead of spin-poll
+        if not self.io_queue.wait_completion_notify(self.notif_id, CMD_TIMEOUT):
+            return Result.Err("NVMe: write timeout at LBA {lba}")
+
+        # Check completion status
+        val status_dw3 = self.io_queue.get_completion_status()
+        val status_code = (status_dw3 >> 17) & 0x7FF
+        if status_code != 0:
+            return Result.Err("NVMe: write error, status={status_code}")
+
+        Result.Ok(true)
+
+    me flush_notify() -> Result<bool, text>:
+        """Flush write cache using notification-based completion (non-spinning).
+
+        Same as flush() but uses wait_completion_notify() instead of spin-polling.
+        """
+        if not self.initialized:
+            return Result.Err("NVMe: driver not initialized")
+
+        self.io_queue.submit_command(
+            NVME_IO_FLUSH, 1, 0, 0,
+            0, 0, 0
+        )
+
+        # Wait using notification instead of spin-poll
+        if not self.io_queue.wait_completion_notify(self.notif_id, CMD_TIMEOUT):
+            return Result.Err("NVMe: flush timeout")
+
+        val status_dw3 = self.io_queue.get_completion_status()
+        val status_code = (status_dw3 >> 17) & 0x7FF
+        if status_code != 0:
+            return Result.Err("NVMe: flush error, status={status_code}")
+
+        Result.Ok(true)
+
+    # ========================================================================
+    # Query
+    # ========================================================================
+
+    fn get_sector_count() -> u64:
+        """Total number of sectors on namespace 1."""
+        self.sector_count
+
+    fn get_sector_size() -> u32:
+        """Sector size in bytes."""
+        self.sector_size
+
+    fn capacity_bytes() -> u64:
+        """Total capacity in bytes."""
+        val ss = self.sector_size.to_u64()
+        self.sector_count * ss
+
+    fn is_initialized() -> bool:
+        self.initialized
+
+    # ========================================================================
+    # DMA Helpers
+    # ========================================================================
+
+    fn alloc_dma(size: u64) -> Result<DmaAddrs, text>:
+        """Allocate DMA-capable memory via syscall 84.
+
+        Returns both virtual and physical addresses.
+        The kernel writes (phys_addr: u64, virt_addr: u64) at the result_ptr,
+        and also returns virt_addr as the syscall return value.
+        """
+        # Kernel protocol: arg0=size, arg1=pointer to 16-byte result buffer
+        # Result buffer layout: offset 0 = phys_addr (u64), offset 8 = virt_addr (u64)
+        var result_buf = DmaAddrs(virt: 0, phys: 0)
+        val result_ptr = unsafe_addr_of(result_buf)
+        val virt_result = syscall(SYS_ALLOC_DMA, size, result_ptr, 0, 0, 0)
+        if virt_result < 0:
+            return Result.Err("DMA allocation failed")
+        # Kernel wrote phys at result_buf.phys (offset 0) and virt at result_buf.virt (offset 8)
+        # But struct field order is virt then phys, so read via MMIO to be safe
+        val phys_addr = mmio_read64(result_ptr)
+        val virt_addr = mmio_read64(result_ptr + 8)
+        if phys_addr == 0 or virt_addr == 0:
+            return Result.Err("DMA allocation returned zero address")
+        if size >= DMA_PAGE_SIZE:
+            if (phys_addr & (DMA_PAGE_SIZE - 1)) != 0:
+                return Result.Err("DMA physical address not page-aligned")
+            if (virt_addr & (DMA_PAGE_SIZE - 1)) != 0:
+                return Result.Err("DMA virtual address not page-aligned")
+        val addrs = DmaAddrs(virt: virt_addr, phys: phys_addr)
+        Result.Ok(addrs)
+
+    fn zero_memory(addr: u64, size: u64):
+        """Zero out a region of memory using 32-bit MMIO writes."""
+        var offset: u64 = 0
+        while offset < size:
+            mmio_write32(addr + offset, 0)
+            offset = offset + 4
+
+# ============================================================================
+# DMA Address Pair
+# ============================================================================
+
+struct DmaAddrs:
+    """Virtual and physical address pair from a DMA allocation."""
+    virt: u64
+    phys: u64
+
+# ============================================================================
+# Convenience: unsafe_addr_of
+# ============================================================================
+
+extern fn unsafe_addr_of(ref: any) -> u64

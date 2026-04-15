@@ -1,0 +1,446 @@
+# Font Viewer — Character Map and Font Display
+#
+# Displays character maps organized by category (ASCII, Latin-1,
+# Box Drawing, Symbols) in a tabbed interface. Each tab shows a
+# 16-column grid of characters with code points. Selecting a
+# character reveals its detail: code, hex, decimal, and category.
+#
+# MDSOC: feature dimension, apps layer
+
+use common.ui.builder.{
+    column, row, panel, button, text_widget, label,
+    statusbar, menubar, build_tree_with_title,
+    with_flex, with_width, tabs
+}
+use common.ui.widget.{WidgetNode, UITree, UIEvent}
+use common.ui.session.{UISession}
+
+# =========================================================================
+# Character Info
+# =========================================================================
+
+struct CharInfo:
+    """A single character entry with metadata."""
+    code_point: i32
+    character: text
+    name: text
+    category: text
+
+# =========================================================================
+# Font Viewer App
+# =========================================================================
+
+class FontViewerApp:
+    """Character map application.
+
+    Displays characters organized by encoding range in a tabbed
+    grid layout. Selecting a character shows its code point, hex
+    representation, name, and category.
+    """
+    current_tab: text
+    selected_code: i32
+    chars_per_row: i32
+    status_message: text
+    copied_char: text
+
+impl FontViewerApp:
+
+    static fn new() -> FontViewerApp:
+        """Create a font viewer with default state."""
+        FontViewerApp(
+            current_tab: "ASCII",
+            selected_code: 65,
+            chars_per_row: 16,
+            status_message: "Select a character",
+            copied_char: ""
+        )
+
+    # -- Character Data ------------------------------------------------------
+
+    fn _chars_for_tab(tab: text) -> [CharInfo]:
+        """Get the character list for the given tab."""
+        var result = []
+        match tab:
+            "ASCII":
+                val printable = " !\"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`abcdefghijklmnopqrstuvwxyz{|}~"
+                var code = 32
+                while code <= 126:
+                    val ch = printable.slice(code - 32, code - 31)
+                    result = result.push(CharInfo(
+                        code_point: code, character: ch,
+                        name: _char_name(code), category: "Basic Latin"
+                    ))
+                    code = code + 1
+                result = result.push(CharInfo(
+                    code_point: 127, character: "DEL",
+                    name: "Delete", category: "Control"
+                ))
+            "Latin-1":
+                var code = 128
+                while code <= 255:
+                    result = result.push(CharInfo(
+                        code_point: code, character: "({code})",
+                        name: _latin1_name(code), category: "Latin-1 Supplement"
+                    ))
+                    code = code + 1
+            "Box Drawing":
+                result = _box_drawing_chars()
+            "Symbols":
+                result = _symbol_chars()
+            _: pass_dn
+        result
+
+    fn _format_grid(chars: [CharInfo]) -> text:
+        """Format characters as a 16-column grid with code points."""
+        var char_map = ""
+        var col = 0
+        for info in chars:
+            val hex = _format_hex(info.code_point)
+            char_map = "{char_map} {info.character} {hex}"
+            col = col + 1
+            if col >= 16:
+                char_map = "{char_map}\n"
+                col = 0
+        char_map
+
+    # -- Input Handling ------------------------------------------------------
+
+    me handle_key(key: text):
+        """Handle keyboard input for navigation and tab switching."""
+        match key:
+            "1" => self.current_tab = "ASCII"
+            "2" => self.current_tab = "Latin-1"
+            "3" => self.current_tab = "Box Drawing"
+            "4" => self.current_tab = "Symbols"
+            "Right":
+                self.selected_code = self.selected_code + 1
+                self._clamp_selection()
+            "Left":
+                self.selected_code = self.selected_code - 1
+                self._clamp_selection()
+            "Down":
+                self.selected_code = self.selected_code + self.chars_per_row
+                self._clamp_selection()
+            "Up":
+                self.selected_code = self.selected_code - self.chars_per_row
+                self._clamp_selection()
+            "Enter" => self._copy_selected()
+            "Tab" => self._next_tab()
+            _ => pass_dn
+
+    me handle_action(action: text):
+        """Dispatch button/menu action strings."""
+        match action:
+            "tab_ascii" => self.current_tab = "ASCII"
+            "tab_latin1" => self.current_tab = "Latin-1"
+            "tab_box" => self.current_tab = "Box Drawing"
+            "tab_symbols" => self.current_tab = "Symbols"
+            "copy" => self._copy_selected()
+            _ =>
+                if action.starts_with("select_"):
+                    val code_str = action.slice(7, action.len())
+                    self.selected_code = _parse_int_simple(code_str)
+                    self.status_message = "Selected U+{_format_hex(self.selected_code)}"
+
+    # -- Internal Helpers ----------------------------------------------------
+
+    me _next_tab():
+        """Cycle to the next tab."""
+        match self.current_tab:
+            "ASCII" => self.current_tab = "Latin-1"
+            "Latin-1" => self.current_tab = "Box Drawing"
+            "Box Drawing" => self.current_tab = "Symbols"
+            _ => self.current_tab = "ASCII"
+        self.status_message = "Tab: {self.current_tab}"
+
+    me _clamp_selection():
+        """Clamp selected_code to the range of the current tab."""
+        val chars = self._chars_for_tab(self.current_tab)
+        if chars.len() == 0:
+            return
+        val first = chars[0].code_point
+        val last = chars[chars.len() - 1].code_point
+        if self.selected_code < first:
+            self.selected_code = first
+        if self.selected_code > last:
+            self.selected_code = last
+        self.status_message = "U+{_format_hex(self.selected_code)}"
+
+    me _copy_selected():
+        """Simulate copying the selected character."""
+        val chars = self._chars_for_tab(self.current_tab)
+        for info in chars:
+            if info.code_point == self.selected_code:
+                self.copied_char = info.character
+                self.status_message = "Copied: {info.character} (U+{_format_hex(info.code_point)})"
+                return
+        self.status_message = "No character selected"
+
+    fn _find_selected_info() -> CharInfo?:
+        """Find the CharInfo for the currently selected code point."""
+        val chars = self._chars_for_tab(self.current_tab)
+        for info in chars:
+            if info.code_point == self.selected_code:
+                return info
+        nil
+
+    # -- UI Construction -----------------------------------------------------
+
+    fn build_ui() -> UISession:
+        """Build the font viewer UI.
+
+        Layout:
+          Menubar
+          Tab bar: ASCII | Latin-1 | Box Drawing | Symbols
+          Row: Character grid panel | Detail panel
+          Statusbar
+        """
+        val tab_names = ["ASCII", "Latin-1", "Box Drawing", "Symbols"]
+        val tab_index = match self.current_tab:
+            "ASCII" => 0
+            "Latin-1" => 1
+            "Box Drawing" => 2
+            "Symbols" => 3
+            _ => 0
+
+        val chars = self._chars_for_tab(self.current_tab)
+
+        # -- Character grid rows (16 columns) --
+        var grid_widgets = []
+        var row_cells = []
+        var col = 0
+        for info in chars:
+            val cell_label = if info.code_point == self.selected_code:
+                "[{info.character}]"
+            else:
+                " {info.character} "
+            row_cells = row_cells.push(
+                button("char_{info.code_point}", cell_label, "select_{info.code_point}")
+            )
+            col = col + 1
+            if col >= self.chars_per_row:
+                grid_widgets = grid_widgets.push(row("grid_row_{info.code_point}", row_cells))
+                row_cells = []
+                col = 0
+        if row_cells.len() > 0:
+            grid_widgets = grid_widgets.push(row("grid_row_last", row_cells))
+
+        # -- Detail panel --
+        var detail_widgets = []
+        val selected = self._find_selected_info()
+        if selected != nil:
+            val info = selected
+            val hex = _format_hex(info.code_point)
+            detail_widgets = [
+                label("detail_preview", "    {info.character}"),
+                label("detail_sep", "-------------------"),
+                label("detail_char", "Char:  {info.character}"),
+                label("detail_uni", "Code:  U+{hex}"),
+                label("detail_dec", "Dec:   {info.code_point}"),
+                label("detail_hex", "Hex:   0x{hex}"),
+                label("detail_name", "Name:  {info.name}"),
+                label("detail_cat", "Cat:   {info.category}"),
+                label("detail_sep2", "-------------------"),
+                button("btn_copy", "Copy Character", "copy")
+            ]
+        else:
+            detail_widgets = [label("detail_none", "No character selected")]
+
+        val copy_ind = if self.copied_char != "": " | Copied: {self.copied_char}" else: ""
+
+        val root = column("fv_root", [
+            menubar("fv_menu", ["File", "Edit", "View", "Help"]),
+            tabs("fv_tabs", tab_names, tab_index),
+            with_flex(row("fv_body", [
+                with_flex(panel("fv_grid_panel", "{self.current_tab} Characters", grid_widgets), 3),
+                with_width(panel("fv_detail_panel", "Detail", detail_widgets), 24)
+            ]), 1),
+            statusbar("fv_status", self.status_message, "{self.current_tab} | {chars.len()} chars{copy_ind}")
+        ])
+
+        val tree = build_tree_with_title(root, "Font Viewer", "dark")
+        UISession.new(tree)
+
+# =========================================================================
+# Character Name Helpers
+# =========================================================================
+
+fn _char_name(code: i32) -> text:
+    """Descriptive name for printable ASCII characters."""
+    if code == 32: return "Space"
+    if code >= 33 and code <= 47:
+        val names = ["Exclamation Mark", "Quotation Mark", "Number Sign", "Dollar Sign", "Percent Sign", "Ampersand", "Apostrophe", "Left Parenthesis", "Right Parenthesis", "Asterisk", "Plus Sign", "Comma", "Hyphen-Minus", "Full Stop", "Solidus"]
+        return names[code - 33]
+    if code >= 48 and code <= 57: return "Digit {code - 48}"
+    if code >= 58 and code <= 64:
+        val names = ["Colon", "Semicolon", "Less-Than Sign", "Equals Sign", "Greater-Than Sign", "Question Mark", "Commercial At"]
+        return names[code - 58]
+    if code >= 65 and code <= 90:
+        val letters = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+        val ch = letters.slice(code - 65, code - 64)
+        return "Latin Capital {ch}"
+    if code >= 91 and code <= 96:
+        val names = ["Left Square Bracket", "Reverse Solidus", "Right Square Bracket", "Circumflex Accent", "Low Line", "Grave Accent"]
+        return names[code - 91]
+    if code >= 97 and code <= 122:
+        val letters = "abcdefghijklmnopqrstuvwxyz"
+        val ch = letters.slice(code - 97, code - 96)
+        return "Latin Small {ch}"
+    if code >= 123 and code <= 126:
+        val names = ["Left Curly Bracket", "Vertical Line", "Right Curly Bracket", "Tilde"]
+        return names[code - 123]
+    if code == 127: return "Delete"
+    "Character {code}"
+
+fn _latin1_name(code: i32) -> text:
+    """Descriptive name for Latin-1 Supplement characters (128-255)."""
+    match code:
+        160 => "No-Break Space"
+        161 => "Inverted Exclamation"
+        162 => "Cent Sign"
+        163 => "Pound Sign"
+        164 => "Currency Sign"
+        165 => "Yen Sign"
+        166 => "Broken Bar"
+        167 => "Section Sign"
+        168 => "Diaeresis"
+        169 => "Copyright Sign"
+        170 => "Feminine Ordinal"
+        171 => "Left Guillemet"
+        172 => "Not Sign"
+        173 => "Soft Hyphen"
+        174 => "Registered Sign"
+        175 => "Macron"
+        176 => "Degree Sign"
+        177 => "Plus-Minus Sign"
+        178 => "Superscript Two"
+        179 => "Superscript Three"
+        180 => "Acute Accent"
+        181 => "Micro Sign"
+        182 => "Pilcrow Sign"
+        183 => "Middle Dot"
+        184 => "Cedilla"
+        185 => "Superscript One"
+        186 => "Masculine Ordinal"
+        187 => "Right Guillemet"
+        188 => "One Quarter"
+        189 => "One Half"
+        190 => "Three Quarters"
+        191 => "Inverted Question Mark"
+        215 => "Multiplication Sign"
+        247 => "Division Sign"
+        _ => "Latin-1 Char {code}"
+
+# =========================================================================
+# Box Drawing and Symbol Data
+# =========================================================================
+
+fn _box_drawing_chars() -> [CharInfo]:
+    """Box drawing character entries with Unicode codes and names."""
+    [
+        CharInfo(code_point: 9472, character: "-", name: "Light Horizontal", category: "Box Drawing"),
+        CharInfo(code_point: 9474, character: "|", name: "Light Vertical", category: "Box Drawing"),
+        CharInfo(code_point: 9484, character: "+", name: "Light Down Right", category: "Box Drawing"),
+        CharInfo(code_point: 9488, character: "+", name: "Light Down Left", category: "Box Drawing"),
+        CharInfo(code_point: 9492, character: "+", name: "Light Up Right", category: "Box Drawing"),
+        CharInfo(code_point: 9496, character: "+", name: "Light Up Left", category: "Box Drawing"),
+        CharInfo(code_point: 9500, character: "+", name: "Light Vertical Right", category: "Box Drawing"),
+        CharInfo(code_point: 9508, character: "+", name: "Light Vertical Left", category: "Box Drawing"),
+        CharInfo(code_point: 9516, character: "+", name: "Light Down Horizontal", category: "Box Drawing"),
+        CharInfo(code_point: 9524, character: "+", name: "Light Up Horizontal", category: "Box Drawing"),
+        CharInfo(code_point: 9532, character: "+", name: "Light Cross", category: "Box Drawing"),
+        CharInfo(code_point: 9552, character: "=", name: "Double Horizontal", category: "Box Drawing"),
+        CharInfo(code_point: 9553, character: "H", name: "Double Vertical", category: "Box Drawing"),
+        CharInfo(code_point: 9554, character: "+", name: "Double Down Right", category: "Box Drawing"),
+        CharInfo(code_point: 9557, character: "+", name: "Double Down Left", category: "Box Drawing"),
+        CharInfo(code_point: 9560, character: "+", name: "Double Up Right", category: "Box Drawing"),
+        CharInfo(code_point: 9563, character: "+", name: "Double Up Left", category: "Box Drawing"),
+        CharInfo(code_point: 9580, character: "+", name: "Double Cross", category: "Box Drawing"),
+        CharInfo(code_point: 9600, character: "#", name: "Upper Half Block", category: "Block"),
+        CharInfo(code_point: 9604, character: "#", name: "Lower Half Block", category: "Block"),
+        CharInfo(code_point: 9608, character: "#", name: "Full Block", category: "Block"),
+        CharInfo(code_point: 9617, character: ".", name: "Light Shade", category: "Block"),
+        CharInfo(code_point: 9618, character: ":", name: "Medium Shade", category: "Block"),
+        CharInfo(code_point: 9619, character: "#", name: "Dark Shade", category: "Block")
+    ]
+
+fn _symbol_chars() -> [CharInfo]:
+    """Common symbol character entries."""
+    [
+        CharInfo(code_point: 169, character: "(c)", name: "Copyright Sign", category: "Symbol"),
+        CharInfo(code_point: 174, character: "(R)", name: "Registered Sign", category: "Symbol"),
+        CharInfo(code_point: 8482, character: "TM", name: "Trade Mark Sign", category: "Symbol"),
+        CharInfo(code_point: 176, character: "deg", name: "Degree Sign", category: "Symbol"),
+        CharInfo(code_point: 177, character: "+-", name: "Plus-Minus Sign", category: "Math"),
+        CharInfo(code_point: 215, character: "x", name: "Multiplication Sign", category: "Math"),
+        CharInfo(code_point: 247, character: "/", name: "Division Sign", category: "Math"),
+        CharInfo(code_point: 8804, character: "<=", name: "Less-Than or Equal", category: "Math"),
+        CharInfo(code_point: 8805, character: ">=", name: "Greater-Than or Equal", category: "Math"),
+        CharInfo(code_point: 8800, character: "!=", name: "Not Equal To", category: "Math"),
+        CharInfo(code_point: 8734, character: "inf", name: "Infinity", category: "Math"),
+        CharInfo(code_point: 8721, character: "Sum", name: "N-Ary Summation", category: "Math"),
+        CharInfo(code_point: 8730, character: "sqrt", name: "Square Root", category: "Math"),
+        CharInfo(code_point: 8747, character: "int", name: "Integral", category: "Math"),
+        CharInfo(code_point: 960, character: "pi", name: "Greek Small Pi", category: "Greek"),
+        CharInfo(code_point: 945, character: "alpha", name: "Greek Small Alpha", category: "Greek"),
+        CharInfo(code_point: 946, character: "beta", name: "Greek Small Beta", category: "Greek"),
+        CharInfo(code_point: 947, character: "gamma", name: "Greek Small Gamma", category: "Greek"),
+        CharInfo(code_point: 948, character: "delta", name: "Greek Small Delta", category: "Greek"),
+        CharInfo(code_point: 955, character: "lambda", name: "Greek Small Lambda", category: "Greek"),
+        CharInfo(code_point: 963, character: "sigma", name: "Greek Small Sigma", category: "Greek"),
+        CharInfo(code_point: 8592, character: "<-", name: "Leftwards Arrow", category: "Arrow"),
+        CharInfo(code_point: 8593, character: "^", name: "Upwards Arrow", category: "Arrow"),
+        CharInfo(code_point: 8594, character: "->", name: "Rightwards Arrow", category: "Arrow"),
+        CharInfo(code_point: 8595, character: "v", name: "Downwards Arrow", category: "Arrow"),
+        CharInfo(code_point: 8596, character: "<->", name: "Left Right Arrow", category: "Arrow"),
+        CharInfo(code_point: 8226, character: "*", name: "Bullet", category: "Punctuation"),
+        CharInfo(code_point: 8230, character: "...", name: "Horizontal Ellipsis", category: "Punctuation"),
+        CharInfo(code_point: 8212, character: "--", name: "Em Dash", category: "Punctuation")
+    ]
+
+# =========================================================================
+# Formatting Helpers
+# =========================================================================
+
+fn _format_hex(n: i32) -> text:
+    """Format an integer as a 4-digit uppercase hex string."""
+    val hex_chars = "0123456789ABCDEF"
+    val d3 = (n / 4096) % 16
+    val d2 = (n / 256) % 16
+    val d1 = (n / 16) % 16
+    val d0 = n % 16
+    val c3 = hex_chars.slice(d3, d3 + 1)
+    val c2 = hex_chars.slice(d2, d2 + 1)
+    val c1 = hex_chars.slice(d1, d1 + 1)
+    val c0 = hex_chars.slice(d0, d0 + 1)
+    "{c3}{c2}{c1}{c0}"
+
+fn _parse_int_simple(s: text) -> i32:
+    """Parse a decimal integer string. Returns 0 on failure."""
+    var result = 0
+    var negative = false
+    var started = false
+    for ch in s:
+        if ch == "-" and not started:
+            negative = true
+            started = true
+        elif ch >= "0" and ch <= "9":
+            val digit = match ch:
+                "0" => 0
+                "1" => 1
+                "2" => 2
+                "3" => 3
+                "4" => 4
+                "5" => 5
+                "6" => 6
+                "7" => 7
+                "8" => 8
+                "9" => 9
+                _ => 0
+            result = result * 10 + digit
+            started = true
+        else:
+            pass_dn
+    if negative:
+        return 0 - result
+    result

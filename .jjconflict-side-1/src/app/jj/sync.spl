@@ -1,0 +1,223 @@
+# JJ Sync - Full sync workflow with file count safety
+#
+# Implements: jj git fetch && jj rebase -d main@origin && jj bookmark set main -r @- && jj git push --bookmark main
+# With file count safety guard: checks file count before/after rebase to detect unexpected file reduction.
+#
+# Usage: use app.jj.sync.{jj_sync, SyncResult}
+
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+
+# Result of a sync step
+struct StepResult:
+    step_name: text
+    success: bool
+    output: text
+    exit_code: i64
+
+# Overall sync result
+struct SyncResult:
+    success: bool
+    steps: [StepResult]
+    file_count_before: i64
+    file_count_after: i64
+    file_count_warning: bool   # True if unexpected file reduction detected
+    warning_message: text
+
+    fn display() -> text:
+        var lines: [text] = []
+        for step in self.steps:
+            val status = if step.success: "OK" else: "FAIL"
+            lines.push("[{status}] {step.step_name}")
+            if not step.success and step.output != "":
+                lines.push("  {step.output}")
+        if self.file_count_warning:
+            lines.push("")
+            lines.push("WARNING: {self.warning_message}")
+        if self.success:
+            lines.push("")
+            lines.push("Sync complete. Files: {self.file_count_before} -> {self.file_count_after}")
+        lines.join("\n")
+
+fn count_tracked_files() -> i64:
+    """Count the number of files tracked by jj"""
+    val (stdout, _stderr, code) = rt_process_run("jj", ["--no-pager", "--color", "never", "file", "list"])
+    if code != 0:
+        return -1
+    var count = 0
+    val lines = stdout.split("\n")
+    for line in lines:
+        if line.trim() != "":
+            count = count + 1
+    count
+
+fn run_step(step_name: text, jj_args: [text]) -> StepResult:
+    """Run a single sync step and return result"""
+    val (stdout, stderr, code) = rt_process_run("jj", jj_args)
+    val output = if stdout != "": stdout else: stderr
+    StepResult(
+        step_name: step_name,
+        success: code == 0,
+        output: output.trim(),
+        exit_code: code
+    )
+
+fn jj_sync(push: bool) -> SyncResult:
+    """Execute full jj sync workflow with file count safety
+
+    Steps:
+    1. Count files before sync
+    2. jj git fetch
+    3. jj rebase -d main@origin
+    4. Count files after rebase (safety check)
+    5. jj bookmark set main -r @-
+    6. jj git push --bookmark main (if push=true)
+    """
+    var steps: [StepResult] = []
+    var file_count_warning = false
+    var warning_message = ""
+
+    # Step 1: Count files before
+    val count_before = count_tracked_files()
+    if count_before < 0:
+        steps.push(StepResult(
+            step_name: "Count files (pre-sync)",
+            success: false,
+            output: "Failed to count tracked files. Is this a jj repository?",
+            exit_code: 1
+        ))
+        return SyncResult(
+            success: false, steps: steps,
+            file_count_before: 0, file_count_after: 0,
+            file_count_warning: false, warning_message: ""
+        )
+    steps.push(StepResult(
+        step_name: "Count files (pre-sync): {count_before}",
+        success: true, output: "", exit_code: 0
+    ))
+
+    # Step 2: jj git fetch
+    val fetch_result = run_step("jj git fetch", ["--no-pager", "--color", "never", "git", "fetch"])
+    steps.push(fetch_result)
+    if not fetch_result.success:
+        return SyncResult(
+            success: false, steps: steps,
+            file_count_before: count_before, file_count_after: count_before,
+            file_count_warning: false, warning_message: ""
+        )
+
+    # Step 3: jj rebase -d main@origin
+    val rebase_result = run_step("jj rebase -d main@origin", ["--no-pager", "--color", "never", "rebase", "-d", "main@origin"])
+    steps.push(rebase_result)
+    if not rebase_result.success:
+        # Rebase can fail if already up-to-date or conflicts; warn but continue
+        if rebase_result.output.contains("Nothing changed"):
+            # Already up to date, that's fine
+            steps[steps.len() - 1] = StepResult(
+                step_name: "jj rebase -d main@origin (already up-to-date)",
+                success: true,
+                output: rebase_result.output,
+                exit_code: 0
+            )
+        else:
+            return SyncResult(
+                success: false, steps: steps,
+                file_count_before: count_before, file_count_after: count_before,
+                file_count_warning: false, warning_message: ""
+            )
+
+    # Step 4: Count files after rebase (safety check)
+    val count_after = count_tracked_files()
+    steps.push(StepResult(
+        step_name: "Count files (post-rebase): {count_after}",
+        success: true, output: "", exit_code: 0
+    ))
+
+    # File count safety: warn if >20% reduction
+    if count_before > 0 and count_after >= 0:
+        val reduction = count_before - count_after
+        if reduction > 0:
+            # Calculate percentage reduction
+            val pct = (reduction * 100) / count_before
+            if pct > 20:
+                file_count_warning = true
+                warning_message = "File count dropped by {pct}% ({count_before} -> {count_after}, lost {reduction} files). This may indicate a destructive rebase. Review with 'jj diff --stat' before pushing."
+            elif reduction > 50:
+                file_count_warning = true
+                warning_message = "Lost {reduction} files after rebase ({count_before} -> {count_after}). Review with 'jj diff --stat' before pushing."
+
+    if file_count_warning:
+        steps.push(StepResult(
+            step_name: "File count safety check",
+            success: false,
+            output: warning_message,
+            exit_code: 1
+        ))
+        return SyncResult(
+            success: false, steps: steps,
+            file_count_before: count_before, file_count_after: count_after,
+            file_count_warning: true, warning_message: warning_message
+        )
+
+    # Step 5: jj bookmark set main -r @-
+    val bookmark_result = run_step("jj bookmark set main -r @-", ["--no-pager", "--color", "never", "bookmark", "set", "main", "-r", "@-"])
+    steps.push(bookmark_result)
+    if not bookmark_result.success:
+        # Non-fatal: bookmark might not exist or might already be set
+        if not bookmark_result.output.contains("error"):
+            steps[steps.len() - 1] = StepResult(
+                step_name: "jj bookmark set main -r @- (warning)",
+                success: true,
+                output: bookmark_result.output,
+                exit_code: 0
+            )
+
+    # Step 6: jj git push (if requested)
+    if push:
+        val push_result = run_step("jj git push --bookmark main", ["--no-pager", "--color", "never", "git", "push", "--bookmark", "main"])
+        steps.push(push_result)
+        if not push_result.success:
+            return SyncResult(
+                success: false, steps: steps,
+                file_count_before: count_before, file_count_after: count_after,
+                file_count_warning: false, warning_message: ""
+            )
+
+    SyncResult(
+        success: true, steps: steps,
+        file_count_before: count_before, file_count_after: count_after,
+        file_count_warning: false, warning_message: ""
+    )
+
+fn run_sync(args: [text]) -> i64:
+    """CLI entry point for jj sync
+
+    Usage:
+      simple jj sync            - Fetch, rebase, set bookmark, push
+      simple jj sync --no-push  - Fetch and rebase only (no push)
+      simple jj sync --force    - Push even with file count warning
+    """
+    var push = true
+    var force = false
+
+    for arg in args:
+        if arg == "--no-push":
+            push = false
+        elif arg == "--force":
+            force = true
+
+    print "Starting jj sync..."
+    print ""
+
+    val result = jj_sync(push)
+
+    print result.display()
+
+    if result.file_count_warning and not force:
+        print ""
+        print "Re-run with --force to push despite file count warning."
+        return 1
+
+    if result.success:
+        return 0
+    else:
+        return 1

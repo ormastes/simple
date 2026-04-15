@@ -1,0 +1,234 @@
+# Hosted Compositor Backend — Cocoa / macOS surface shim
+#
+# Row 3 of the GUI drawing-layer work matrix (2026-04-14).
+# Phase C of `doc/03_plan/v2_hosted_engine2d_rewiring.md`.
+#
+# This file plumbs `CompositorBackend` through to a *macOS-native*
+# surface (NSWindow + CAMetalLayer or CGContext) instead of the
+# cross-platform winit path used by `hosted_backend.spl`. It is the
+# architecture skeleton only — the SFFI bodies are placeholder
+# declarations against `rt_cocoa_*` runtime symbols that the next
+# agent will fill in (see `doc/03_plan/v2_hosted_engine2d_rewiring.md`
+# §"Phase C — wire Metal on macOS").
+#
+# Selection: routed by `hosted_backend.spl::select_hosted_backend()`
+# at construct time based on the `SIMPLE_HOSTED_SURFACE` env var (or
+# host triple detection in the runtime). When `cocoa` is selected,
+# `HostedCocoaBackend` is instantiated in place of the winit-backed
+# `HostedCompositorBackend`. See that file for the dispatch site.
+#
+# The four `HostedBackend`-style trait methods called out in the work
+# matrix are:
+#   - create  : allocate window + draw surface (rt_cocoa_window_new)
+#   - resize  : react to NSWindow live-resize (rt_cocoa_window_resize)
+#   - present : flush back-buffer to CAMetalLayer (rt_cocoa_layer_present)
+#   - pump    : drive the NSApplication run-loop one tick
+#               (rt_cocoa_event_pump) — called from `hosted_input_backend`
+#
+# TODO(next-agent): bind these symbols in
+# `src/runtime/hosted/cocoa.rs` (objc2 / core-graphics-rs crates) and
+# wire selection via the `SIMPLE_HOSTED_SURFACE=cocoa` path. Until
+# then the externs link to runtime stubs that return -1 / false.
+
+use os.compositor.display_backend.{CompositorBackend, CompositorGlassCapable}
+use os.drivers.framebuffer.fb_driver.{get_glyph_8x16}
+
+# ============================================================================
+# Cocoa Surface SFFI Declarations (placeholders — see TODO above)
+# ============================================================================
+#
+# Naming convention: `rt_cocoa_*` mirrors the existing `rt_winit_*` family
+# in `hosted_backend.spl`. All numeric arguments are `i64` to keep the
+# SFFI layer wide and avoid per-platform intrinsic mismatches.
+
+extern fn rt_cocoa_window_new(w: i64, h: i64, title: text) -> i64
+extern fn rt_cocoa_window_resize(win: i64, w: i64, h: i64) -> bool
+extern fn rt_cocoa_window_close(win: i64) -> bool
+extern fn rt_cocoa_layer_create(win: i64, w: i64, h: i64, fill_color: i64) -> i64
+extern fn rt_cocoa_layer_fill_rect(layer: i64, x: i64, y: i64, w: i64, h: i64, color: i64) -> bool
+extern fn rt_cocoa_layer_present(win: i64, layer: i64) -> bool
+extern fn rt_cocoa_layer_free(layer: i64) -> bool
+extern fn rt_cocoa_layer_read_pixel(layer: i64, x: i64, y: i64) -> i64
+extern fn rt_cocoa_layer_blend_rect(layer: i64, x: i64, y: i64, w: i64, h: i64, color: i64, alpha: i64) -> bool
+extern fn rt_cocoa_layer_blur(layer: i64, x: i64, y: i64, w: i64, h: i64, radius: i64) -> bool
+extern fn rt_cocoa_layer_gradient_v(layer: i64, x: i64, y: i64, w: i64, h: i64, c1: i64, c2: i64) -> bool
+extern fn rt_cocoa_event_pump(win: i64) -> i64
+
+# Module-level state — same idiom as `hosted_backend.spl` (interpreter
+# trait dispatch loses struct fields, so we mirror them here).
+var _cocoa_window_id: i64 = 0
+var _cocoa_layer_id: i64 = 0
+var _cocoa_w: i32 = 0
+var _cocoa_h: i32 = 0
+
+# ============================================================================
+# HostedCocoaBackend
+# ============================================================================
+
+class HostedCocoaBackend:
+    """CompositorBackend that targets a macOS NSWindow + CAMetalLayer.
+
+    Drawing is delegated to `rt_cocoa_*` SFFI symbols. The layer handle
+    is opaque — the runtime owns whether it is a CAMetalLayer drawable
+    or a CGContext-backed bitmap. From Simple's view it is just an i64.
+
+    Colors are u32 ARGB (0xAARRGGBB), matching `CompositorBackend`. The
+    runtime is responsible for the BGRA8Unorm swizzle Metal expects.
+    """
+    window_id: i64
+    layer_id: i64
+    w: i32
+    h: i32
+
+# ============================================================================
+# CompositorBackend Trait Implementation
+# ============================================================================
+
+impl CompositorBackend for HostedCocoaBackend:
+
+    fn width() -> i32:
+        _cocoa_w
+
+    fn height() -> i32:
+        _cocoa_h
+
+    me clear(color: u32):
+        val w_i: i64 = _cocoa_w
+        val h_i: i64 = _cocoa_h
+        val c: i64 = color
+        rt_cocoa_layer_fill_rect(_cocoa_layer_id, 0, 0, w_i, h_i, c)
+
+    me fill_rect(x: i32, y: i32, w: i32, h: i32, color: u32):
+        val xi: i64 = x
+        val yi: i64 = y
+        val wi: i64 = w
+        val hi: i64 = h
+        val c: i64 = color
+        rt_cocoa_layer_fill_rect(_cocoa_layer_id, xi, yi, wi, hi, c)
+
+    me draw_text(x: i32, y: i32, text_str: text, fg: u32, bg: u32):
+        var cx = x
+        for ch in text_str:
+            val code = ch.ord()
+            val ch_byte: u8 = code
+            self.draw_char_8x16(cx, y, ch_byte, fg, bg)
+            cx = cx + 8
+
+    me draw_char_8x16(x: i32, y: i32, ch: u8, fg: u32, bg: u32):
+        val glyph = get_glyph_8x16(ch)
+        val fg_i: i64 = fg
+        val bg_i: i64 = bg
+        var row: i64 = 0
+        while row < 16:
+            val bits: i64 = glyph[row]
+            var col: i64 = 0
+            while col < 8:
+                val mask: i64 = 0x80 >> col
+                val color = if (bits & mask) != 0: fg_i else: bg_i
+                val px: i64 = x + col
+                val py: i64 = y + row
+                rt_cocoa_layer_fill_rect(_cocoa_layer_id, px, py, 1, 1, color)
+                col = col + 1
+            row = row + 1
+
+    me put_pixel(x: i32, y: i32, color: u32):
+        val xi: i64 = x
+        val yi: i64 = y
+        val c: i64 = color
+        rt_cocoa_layer_fill_rect(_cocoa_layer_id, xi, yi, 1, 1, c)
+
+    me present():
+        rt_cocoa_layer_present(_cocoa_window_id, _cocoa_layer_id)
+
+    me present_rect(x: i32, y: i32, w: i32, h: i32):
+        # CAMetalLayer always presents the full drawable; degrade to full present.
+        rt_cocoa_layer_present(_cocoa_window_id, _cocoa_layer_id)
+
+    fn as_glass_capable() -> CompositorGlassCapable?:
+        # The Cocoa layer is a per-surface bitmap we own end-to-end, so
+        # the glass methods can land safely. Opt IN.
+        self
+
+# ============================================================================
+# CompositorGlassCapable Trait Implementation
+# ============================================================================
+
+impl CompositorGlassCapable for HostedCocoaBackend:
+
+    me blend_rect(x: i32, y: i32, w: i32, h: i32, color: u32, alpha: u8):
+        val xi: i64 = x
+        val yi: i64 = y
+        val wi: i64 = w
+        val hi: i64 = h
+        val c: i64 = color
+        val a: i64 = alpha
+        rt_cocoa_layer_blend_rect(_cocoa_layer_id, xi, yi, wi, hi, c, a)
+
+    me blur_region(x: i32, y: i32, w: i32, h: i32, radius: u32):
+        val xi: i64 = x
+        val yi: i64 = y
+        val wi: i64 = w
+        val hi: i64 = h
+        val ri: i64 = radius
+        rt_cocoa_layer_blur(_cocoa_layer_id, xi, yi, wi, hi, ri)
+
+    me gradient_v(x: i32, y: i32, w: i32, h: i32, color1: u32, color2: u32):
+        val xi: i64 = x
+        val yi: i64 = y
+        val wi: i64 = w
+        val hi: i64 = h
+        val c1: i64 = color1
+        val c2: i64 = color2
+        rt_cocoa_layer_gradient_v(_cocoa_layer_id, xi, yi, wi, hi, c1, c2)
+
+    fn read_pixel(x: i32, y: i32) -> u32:
+        val xi: i64 = x
+        val yi: i64 = y
+        val result = rt_cocoa_layer_read_pixel(_cocoa_layer_id, xi, yi)
+        result.to_u32()
+
+# ============================================================================
+# Lifecycle — create / resize / pump / free
+# ============================================================================
+
+impl HostedCocoaBackend:
+
+    static fn new(window_id: i64, layer_id: i64, w: i32, h: i32) -> HostedCocoaBackend:
+        """Wrap pre-existing Cocoa handles (test seam)."""
+        HostedCocoaBackend(window_id: window_id, layer_id: layer_id, w: w, h: h)
+
+    static fn create(w: i32, h: i32, title: text, fill_color: u32) -> HostedCocoaBackend:
+        """Allocate an NSWindow + CAMetalLayer pair sized w×h."""
+        val w64: i64 = w
+        val h64: i64 = h
+        val fc64: i64 = fill_color
+        val win = rt_cocoa_window_new(w64, h64, title)
+        val layer = rt_cocoa_layer_create(win, w64, h64, fc64)
+        _cocoa_window_id = win
+        _cocoa_layer_id = layer
+        _cocoa_w = w
+        _cocoa_h = h
+        HostedCocoaBackend(window_id: win, layer_id: layer, w: w, h: h)
+
+    me resize(new_w: i32, new_h: i32) -> bool:
+        """React to an NSWindow live-resize. Reallocates the CAMetalLayer
+        drawable so the next `present()` matches the new window size."""
+        val w64: i64 = new_w
+        val h64: i64 = new_h
+        val ok = rt_cocoa_window_resize(_cocoa_window_id, w64, h64)
+        if ok:
+            _cocoa_w = new_w
+            _cocoa_h = new_h
+        ok
+
+    me pump() -> i64:
+        """Drive one NSApplication run-loop tick. Returns the number of
+        events drained — used by `hosted_input_backend` to decide whether
+        to re-poll. The runtime is responsible for keeping the call
+        non-blocking (NSEventTrackingRunLoopMode + 0 timeout)."""
+        rt_cocoa_event_pump(_cocoa_window_id)
+
+    me free():
+        """Release the Cocoa layer + window. Idempotent."""
+        rt_cocoa_layer_free(self.layer_id)
+        rt_cocoa_window_close(self.window_id)

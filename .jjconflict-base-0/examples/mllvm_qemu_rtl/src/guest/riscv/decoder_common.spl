@@ -1,0 +1,368 @@
+#![allow(unnamed_duplicate_typed_args)]
+# RISC-V Shared Decoder Helpers
+#
+# Emit helpers for translating RISC-V instructions to IR_TC operations.
+# Parameterized by word_type (I32 or I64) so both RV32 and RV64 decoders
+# can share the same emit logic.
+#
+# Usage: RV32 decoder calls these with word_type=IrTcTypeKind.I32,
+#        RV64 decoder calls with word_type=IrTcTypeKind.I64.
+
+use core.types.{IrTcTypeKind, IrTcValue, IrTcCond, GuestArch}
+use core.mem_op.{MemOp, Endian, GuestRegId, ADDR_SPACE_DEFAULT}
+use core.ops.{IrTcOp}
+use core.builder.{IrTcBuilder}
+use core.block.{BlockId}
+use guest.riscv.common.{
+    RV_REG_PC, RV_CSR_MSTATUS, RV_CSR_MTVEC, RV_CSR_MEPC,
+    RV_CSR_MCAUSE, RV_CSR_MTVAL, RV_CSR_MIE, RV_CSR_MIP,
+    RV_CSR_MSCRATCH, RV_CSR_MHARTID,
+    rv_gpr_name, rv_csr_to_reg
+}
+
+# ============================================================================
+# ALU Operation Enum
+# ============================================================================
+
+enum RvAluOp:
+    """ALU operations shared by register and immediate ALU instructions."""
+    Add
+    Sub
+    And
+    Or
+    Xor
+    Sll
+    Srl
+    Sra
+    Slt
+    Sltu
+
+# ============================================================================
+# GuestRegId Helpers
+# ============================================================================
+
+fn rv_reg_id(arch: GuestArch, index: i64) -> GuestRegId:
+    """Build a GuestRegId for a RISC-V register by index."""
+    if index < 32:
+        GuestRegId.new(arch, index, rv_gpr_name(index))
+    else:
+        match index:
+            32: GuestRegId.new(arch, 32, "pc")
+            33: GuestRegId.new(arch, 33, "mstatus")
+            34: GuestRegId.new(arch, 34, "mtvec")
+            35: GuestRegId.new(arch, 35, "mepc")
+            36: GuestRegId.new(arch, 36, "mcause")
+            37: GuestRegId.new(arch, 37, "mtval")
+            38: GuestRegId.new(arch, 38, "mie")
+            39: GuestRegId.new(arch, 39, "mip")
+            40: GuestRegId.new(arch, 40, "mscratch")
+            41: GuestRegId.new(arch, 41, "mhartid")
+            _: GuestRegId.new(arch, index, "r{index}")
+
+# ============================================================================
+# Register Read/Write Helpers
+# ============================================================================
+
+fn rv_read_gpr(builder: IrTcBuilder, arch: GuestArch, index: i64, word_type: IrTcTypeKind) -> IrTcValue:
+    """Read a GPR. Returns zero constant for x0."""
+    if index == 0:
+        # x0 is hardwired to zero
+        rv_const(builder, word_type, 0)
+    else:
+        builder.read_guest_reg(rv_reg_id(arch, index), word_type)
+
+fn rv_write_gpr(builder: IrTcBuilder, arch: GuestArch, index: i64, value: IrTcValue):
+    """Write a GPR. Silently discards writes to x0."""
+    if index != 0:
+        builder.write_guest_reg(rv_reg_id(arch, index), value)
+
+# ============================================================================
+# Constant Creation
+# ============================================================================
+
+fn rv_const(builder: IrTcBuilder, word_type: IrTcTypeKind, value: i64) -> IrTcValue:
+    """Create a word-sized constant value.
+
+    Uses the same pattern as AVR/8086 decoders: allocate a new_value
+    that the emulation engine treats as a constant materialization point.
+    """
+    builder.const_imm(word_type, value)
+
+# ============================================================================
+# ALU Emit Helpers
+# ============================================================================
+
+fn _apply_alu_op(builder: IrTcBuilder, alu_op: RvAluOp, a: IrTcValue, b: IrTcValue, word_type: IrTcTypeKind) -> IrTcValue:
+    """Apply an ALU operation to two operands."""
+    match alu_op:
+        RvAluOp.Add: builder.add(a, b)
+        RvAluOp.Sub: builder.sub(a, b)
+        RvAluOp.And: builder.and_(a, b)
+        RvAluOp.Or: builder.or_(a, b)
+        RvAluOp.Xor: builder.xor_(a, b)
+        RvAluOp.Sll: builder.shl(a, b)
+        RvAluOp.Srl: builder.shr(a, b)
+        RvAluOp.Sra: builder.sar(a, b)
+        RvAluOp.Slt:
+            # Set less than (signed): result is 1 if a < b, else 0
+            val flag = builder.cmp(IrTcCond.Lt, a, b)
+            builder.ext(flag, word_type, false)
+        RvAluOp.Sltu:
+            # Set less than (unsigned): result is 1 if a < b, else 0
+            val flag = builder.cmp(IrTcCond.Ltu, a, b)
+            builder.ext(flag, word_type, false)
+
+fn emit_rv_alu(builder: IrTcBuilder, arch: GuestArch, rd: i64, rs1: i64, rs2: i64, alu_op: RvAluOp, word_type: IrTcTypeKind):
+    """Emit a register-register ALU instruction: rd <- rs1 op rs2."""
+    val a = rv_read_gpr(builder, arch, rs1, word_type)
+    val b = rv_read_gpr(builder, arch, rs2, word_type)
+    val result = _apply_alu_op(builder, alu_op, a, b, word_type)
+    rv_write_gpr(builder, arch, rd, result)
+
+fn emit_rv_alu_imm(builder: IrTcBuilder, arch: GuestArch, rd: i64, rs1: i64, imm: i64, alu_op: RvAluOp, word_type: IrTcTypeKind):
+    """Emit a register-immediate ALU instruction: rd <- rs1 op imm."""
+    val a = rv_read_gpr(builder, arch, rs1, word_type)
+    val b = rv_const(builder, word_type, imm)
+    val result = _apply_alu_op(builder, alu_op, a, b, word_type)
+    rv_write_gpr(builder, arch, rd, result)
+
+# ============================================================================
+# RV64I Word-Width ALU (W-suffix instructions)
+# ============================================================================
+
+fn emit_rv_alu_word(builder: IrTcBuilder, arch: GuestArch, rd: i64, rs1: i64, rs2: i64, alu_op: RvAluOp, word_type: IrTcTypeKind):
+    """Emit a W-suffix ALU instruction (RV64 only): operate on lower 32 bits, sign-extend result.
+
+    rd <- sign_ext((rs1[31:0] op rs2[31:0])[31:0])
+    """
+    val a = rv_read_gpr(builder, arch, rs1, word_type)
+    val b = rv_read_gpr(builder, arch, rs2, word_type)
+    # Truncate to 32 bits
+    val a32 = builder.trunc(a, IrTcTypeKind.I32)
+    val b32 = builder.trunc(b, IrTcTypeKind.I32)
+    # Compute in 32-bit
+    val result32 = _apply_alu_op(builder, alu_op, a32, b32, IrTcTypeKind.I32)
+    # Sign-extend back to 64-bit
+    val result = builder.ext(result32, word_type, true)
+    rv_write_gpr(builder, arch, rd, result)
+
+fn emit_rv_alu_imm_word(builder: IrTcBuilder, arch: GuestArch, rd: i64, rs1: i64, imm: i64, alu_op: RvAluOp, word_type: IrTcTypeKind):
+    """Emit a W-suffix immediate ALU instruction (RV64 only).
+
+    rd <- sign_ext((rs1[31:0] op imm)[31:0])
+    """
+    val a = rv_read_gpr(builder, arch, rs1, word_type)
+    val a32 = builder.trunc(a, IrTcTypeKind.I32)
+    val b32 = rv_const(builder, IrTcTypeKind.I32, imm)
+    val result32 = _apply_alu_op(builder, alu_op, a32, b32, IrTcTypeKind.I32)
+    val result = builder.ext(result32, word_type, true)
+    rv_write_gpr(builder, arch, rd, result)
+
+# ============================================================================
+# Load / Store Emit Helpers
+# ============================================================================
+
+fn _width_to_type(width: i64) -> IrTcTypeKind:
+    """Convert byte width to IrTcTypeKind."""
+    match width:
+        1: IrTcTypeKind.I8
+        2: IrTcTypeKind.I16
+        4: IrTcTypeKind.I32
+        8: IrTcTypeKind.I64
+        _: IrTcTypeKind.I32
+
+fn _width_to_memop(width: i64) -> MemOp:
+    """Create a MemOp for the given byte width (little-endian, unsigned)."""
+    match width:
+        1: MemOp.byte(Endian.Little)
+        2: MemOp.word16(Endian.Little)
+        4: MemOp.word32(Endian.Little)
+        8: MemOp.word64(Endian.Little)
+        _: MemOp.word32(Endian.Little)
+
+fn emit_rv_load(builder: IrTcBuilder, arch: GuestArch, rd: i64, rs1: i64, offset: i64, load_width: i64, signed: bool, word_type: IrTcTypeKind):
+    """Emit a load instruction: rd <- ext(mem[rs1 + offset]).
+
+    Args:
+        load_width: Access width in bytes (1, 2, 4, 8)
+        signed: true for sign-extension, false for zero-extension
+    """
+    val base = rv_read_gpr(builder, arch, rs1, word_type)
+    val off = rv_const(builder, word_type, offset)
+    val addr = builder.add(base, off)
+    val load_type = _width_to_type(load_width)
+    val mem = _width_to_memop(load_width)
+    val loaded = builder.guest_load(addr, load_type, mem, 0)
+    # Extend to word width if narrower
+    val result = if load_width < 4 or (load_width == 4 and word_type == IrTcTypeKind.I64):
+        if signed:
+            builder.ext(loaded, word_type, true)
+        else:
+            builder.ext(loaded, word_type, false)
+    else:
+        loaded
+    rv_write_gpr(builder, arch, rd, result)
+
+fn emit_rv_store(builder: IrTcBuilder, arch: GuestArch, rs1: i64, rs2: i64, offset: i64, store_width: i64, word_type: IrTcTypeKind):
+    """Emit a store instruction: mem[rs1 + offset] <- rs2[width-1:0].
+
+    Args:
+        store_width: Access width in bytes (1, 2, 4, 8)
+    """
+    val base = rv_read_gpr(builder, arch, rs1, word_type)
+    val off = rv_const(builder, word_type, offset)
+    val addr = builder.add(base, off)
+    val src = rv_read_gpr(builder, arch, rs2, word_type)
+    val store_type = _width_to_type(store_width)
+    val mem = _width_to_memop(store_width)
+    # Truncate source to store width if wider
+    val truncated = if store_width < 4 or (store_width == 4 and word_type == IrTcTypeKind.I64):
+        builder.trunc(src, store_type)
+    else:
+        src
+    builder.guest_store(truncated, addr, mem, 0)
+
+# ============================================================================
+# Branch Emit Helper
+# ============================================================================
+
+fn emit_rv_branch(builder: IrTcBuilder, arch: GuestArch, rs1: i64, rs2: i64, cond: IrTcCond, offset: i64, pc: i64, word_type: IrTcTypeKind):
+    """Emit a conditional branch: if (rs1 cond rs2) PC <- pc + offset, else PC <- pc + 4.
+
+    Creates taken and fallthrough basic blocks.
+    """
+    val a = rv_read_gpr(builder, arch, rs1, word_type)
+    val b = rv_read_gpr(builder, arch, rs2, word_type)
+    val flag = builder.cmp(cond, a, b)
+
+    val taken = builder.new_block("taken")
+    val fall = builder.new_block("fallthrough")
+    builder.br_cond(flag, taken, fall)
+
+    # Taken path: PC <- pc + offset
+    builder.set_block(taken)
+    val target = rv_const(builder, word_type, pc + offset)
+    builder.write_guest_reg(rv_reg_id(arch, RV_REG_PC), target)
+    builder.sync_guest_pc(target)
+    builder.lookup_goto_tb(target)
+
+    # Fallthrough path: PC <- pc + 4
+    builder.set_block(fall)
+    val next = rv_const(builder, word_type, pc + 4)
+    builder.write_guest_reg(rv_reg_id(arch, RV_REG_PC), next)
+    builder.sync_guest_pc(next)
+    builder.lookup_goto_tb(next)
+
+# ============================================================================
+# Upper Immediate Emit Helpers
+# ============================================================================
+
+fn emit_rv_lui(builder: IrTcBuilder, arch: GuestArch, rd: i64, imm: i64, word_type: IrTcTypeKind):
+    """Emit LUI: rd <- imm (already shifted by rv_imm_u)."""
+    val value = rv_const(builder, word_type, imm)
+    rv_write_gpr(builder, arch, rd, value)
+
+fn emit_rv_auipc(builder: IrTcBuilder, arch: GuestArch, rd: i64, imm: i64, pc: i64, word_type: IrTcTypeKind):
+    """Emit AUIPC: rd <- PC + imm."""
+    val value = rv_const(builder, word_type, pc + imm)
+    rv_write_gpr(builder, arch, rd, value)
+
+# ============================================================================
+# Jump Emit Helpers
+# ============================================================================
+
+fn emit_rv_jal(builder: IrTcBuilder, arch: GuestArch, rd: i64, offset: i64, pc: i64, word_type: IrTcTypeKind):
+    """Emit JAL: rd <- PC + 4, PC <- PC + offset."""
+    val link = rv_const(builder, word_type, pc + 4)
+    rv_write_gpr(builder, arch, rd, link)
+    val target = rv_const(builder, word_type, pc + offset)
+    builder.write_guest_reg(rv_reg_id(arch, RV_REG_PC), target)
+    builder.sync_guest_pc(target)
+    builder.exit_tb(0)
+
+fn emit_rv_jalr(builder: IrTcBuilder, arch: GuestArch, rd: i64, rs1: i64, offset: i64, pc: i64, word_type: IrTcTypeKind):
+    """Emit JALR: rd <- PC + 4, PC <- (rs1 + offset) & ~1."""
+    val link = rv_const(builder, word_type, pc + 4)
+    rv_write_gpr(builder, arch, rd, link)
+    val base = rv_read_gpr(builder, arch, rs1, word_type)
+    val off = rv_const(builder, word_type, offset)
+    val target = builder.add(base, off)
+    # Clear bit 0 per RISC-V spec
+    val mask = rv_const(builder, word_type, -2)
+    val aligned = builder.and_(target, mask)
+    builder.write_guest_reg(rv_reg_id(arch, RV_REG_PC), aligned)
+    builder.sync_guest_pc(aligned)
+    builder.lookup_goto_tb(aligned)
+
+# ============================================================================
+# CSR Emit Helper
+# ============================================================================
+
+fn emit_rv_csr(builder: IrTcBuilder, arch: GuestArch, rd: i64, csr_addr: i64, rs1_or_uimm: i64, is_imm: bool, op: text, word_type: IrTcTypeKind):
+    """Emit a CSR read-modify-write instruction.
+
+    Args:
+        rd: Destination register for old CSR value
+        csr_addr: 12-bit CSR address
+        rs1_or_uimm: Register index (for CSRRW/S/C) or immediate (for CSRRWI/SI/CI)
+        is_imm: true if rs1_or_uimm is an immediate value
+        op: "w" (write), "s" (set bits), "c" (clear bits)
+    """
+    if val reg_idx = rv_csr_to_reg(csr_addr):
+        val csr_reg = rv_reg_id(arch, reg_idx)
+        val old = builder.read_guest_reg(csr_reg, word_type)
+        rv_write_gpr(builder, arch, rd, old)
+
+        # Get the source value
+        val src = if is_imm:
+            rv_const(builder, word_type, rs1_or_uimm)
+        else:
+            rv_read_gpr(builder, arch, rs1_or_uimm, word_type)
+
+        # Compute new CSR value based on operation
+        val new_val = match op:
+            "w": src
+            "s": builder.or_(old, src)
+            "c":
+                val inv = builder.not_(src)
+                builder.and_(old, inv)
+            _: old
+
+        builder.write_guest_reg(csr_reg, new_val)
+    else:
+        # Unsupported CSR — write zero to rd
+        val zero = rv_const(builder, word_type, 0)
+        rv_write_gpr(builder, arch, rd, zero)
+
+# ============================================================================
+# System Instruction Helpers
+# ============================================================================
+
+fn emit_rv_ecall(builder: IrTcBuilder, arch: GuestArch, pc: i64, word_type: IrTcTypeKind):
+    """Emit ECALL: trigger environment call exception.
+
+    Sets mcause and mepc, then exits the translation block.
+    """
+    val pc_val = rv_const(builder, word_type, pc)
+    builder.write_guest_reg(rv_reg_id(arch, RV_REG_PC), pc_val)
+    builder.sync_guest_pc(pc_val)
+    # Exit with code 1 to signal the runtime to handle the ecall
+    builder.exit_tb(1)
+
+fn emit_rv_ebreak(builder: IrTcBuilder, arch: GuestArch, pc: i64, word_type: IrTcTypeKind):
+    """Emit EBREAK: trigger breakpoint exception.
+
+    Sets PC and exits the translation block.
+    """
+    val pc_val = rv_const(builder, word_type, pc)
+    builder.write_guest_reg(rv_reg_id(arch, RV_REG_PC), pc_val)
+    builder.sync_guest_pc(pc_val)
+    # Exit with code 2 to signal the runtime to handle the ebreak
+    builder.exit_tb(2)
+
+fn emit_rv_fence(builder: IrTcBuilder):
+    """Emit FENCE: memory ordering barrier.
+
+    For single-hart emulation this is a no-op at the IR level.
+    """
+    builder.nop()

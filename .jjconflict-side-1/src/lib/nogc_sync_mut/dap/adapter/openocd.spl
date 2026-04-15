@@ -1,0 +1,265 @@
+# OpenOCD Debug Adapter
+# Wraps OpenocdClient to implement the DebugAdapter trait
+# Provides unified interface for OpenOCD-based debugging (STM32 via ST-LINK)
+
+use std.nogc_sync_mut.debug.coordinator.{VarInfo, FrameInfo, LocationInfo}
+use std.nogc_sync_mut.dap.adapter.mod.{DebugAdapter, AdapterCapabilities, AdapterConfig}
+use std.nogc_sync_mut.debug.remote.protocol.openocd.OpenocdClient
+use std.nogc_sync_mut.debug.remote.target.stm32h7.Stm32H7Target
+use std.nogc_sync_mut.debug.remote.target.stm32wb.Stm32WbTarget
+
+class OpenocdAdapter:
+    client: Option<OpenocdClient>
+    config: AdapterConfig
+    attached: bool
+    capabilities: AdapterCapabilities
+
+impl OpenocdAdapter:
+    # Create adapter from config (starts OpenOCD, connects GDB)
+    static fn connect(config: AdapterConfig) -> Result<OpenocdAdapter, text>:
+        val cfg_path = config.architecture
+        val serial = if config.args.len() > 0: config.args[0] else: ""
+        val client = OpenocdClient.connect(cfg_path, config.port, config.port + 1000, config.program, serial)?
+
+        Ok(OpenocdAdapter(
+            client: Some(client),
+            config: config,
+            attached: true,
+            capabilities: AdapterCapabilities.basic()
+                .with_reset()
+                .with_memory()
+                .with_registers()
+        ))
+
+    # Factory for STM32H7 target
+    static fn for_stm32h7(program: text) -> AdapterConfig:
+        val target = Stm32H7Target.default()
+        AdapterConfig(
+            adapter_type: "openocd",
+            host: "localhost",
+            port: target.gdb_port,
+            program: program,
+            args: [target.stlink_serial],
+            timeout_ms: 30000,
+            architecture: target.openocd_cfg
+        )
+
+    # Factory for STM32WB target
+    static fn for_stm32wb(program: text) -> AdapterConfig:
+        val target = Stm32WbTarget.default()
+        AdapterConfig(
+            adapter_type: "openocd",
+            host: "localhost",
+            port: target.gdb_port,
+            program: program,
+            args: [target.stlink_serial],
+            timeout_ms: 30000,
+            architecture: target.openocd_cfg
+        )
+
+    # Wrap existing client
+    static fn from_client(client: OpenocdClient, config: AdapterConfig) -> OpenocdAdapter:
+        OpenocdAdapter(
+            client: Some(client),
+            config: config,
+            attached: true,
+            capabilities: AdapterCapabilities.basic()
+                .with_reset()
+                .with_memory()
+                .with_registers()
+        )
+
+    fn get_capabilities() -> AdapterCapabilities:
+        self.capabilities
+
+    # --- DebugAdapter trait implementation ---
+
+    fn name() -> text:
+        "openocd"
+
+    fn is_attached() -> bool:
+        self.attached
+
+    fn attach(program: text, args: [text]) -> Result<text, text>:
+        match self.client:
+            Some(client):
+                if program.len() > 0:
+                    client.flash_program(program)?
+                self.attached = true
+                Ok("attached via OpenOCD")
+            nil:
+                Err("OpenOCD client not connected")
+
+    fn detach() -> Result<text, text>:
+        match self.client:
+            Some(client):
+                client.disconnect()
+                self.attached = false
+                Ok("detached from OpenOCD")
+            nil:
+                Err("OpenOCD client not connected")
+
+    fn halt() -> Result<text, text>:
+        match self.client:
+            Some(client): client.halt()
+            nil: Err("OpenOCD client not connected")
+
+    fn resume() -> Result<text, text>:
+        match self.client:
+            Some(client): client.resume()
+            nil: Err("OpenOCD client not connected")
+
+    fn single_step() -> Result<text, text>:
+        match self.client:
+            Some(client): client.single_step()
+            nil: Err("OpenOCD client not connected")
+
+    fn step_over() -> Result<text, text>:
+        match self.client:
+            Some(client): client.step_over()
+            nil: Err("OpenOCD client not connected")
+
+    fn step_out() -> Result<text, text>:
+        match self.client:
+            Some(client): client.step_out()
+            nil: Err("OpenOCD client not connected")
+
+    fn reset() -> Result<text, text>:
+        match self.client:
+            Some(client): client.system_reset()
+            nil: Err("OpenOCD client not connected")
+
+    fn set_breakpoint(file: text, line: i32) -> Result<i32, text>:
+        match self.client:
+            Some(client):
+                val location = "{file}:{line}"
+                client.set_breakpoint(location)
+            nil:
+                Err("OpenOCD client not connected")
+
+    fn set_breakpoint_at_addr(addr: i64) -> Result<i32, text>:
+        match self.client:
+            Some(client): client.set_breakpoint_at_addr(addr)
+            nil: Err("OpenOCD client not connected")
+
+    fn delete_breakpoint(id: i32) -> Result<text, text>:
+        match self.client:
+            Some(client): client.delete_breakpoint(id)
+            nil: Err("OpenOCD client not connected")
+
+    fn set_watchpoint(expr: text, access: text) -> Result<i32, text>:
+        match self.client:
+            Some(client): client.set_watchpoint(expr, access)
+            nil: Err("OpenOCD client not connected")
+
+    fn read_locals() -> Result<[VarInfo], text>:
+        match self.client:
+            Some(client): client.read_locals()
+            nil: Err("OpenOCD client not connected")
+
+    fn read_arguments() -> Result<[VarInfo], text>:
+        match self.client:
+            Some(client): client.read_arguments()
+            nil: Err("OpenOCD client not connected")
+
+    fn read_globals() -> Result<[VarInfo], text>:
+        match self.client:
+            Some(client): client.read_globals()
+            nil: Err("OpenOCD client not connected")
+
+    fn evaluate(expr: text) -> Result<text, text>:
+        match self.client:
+            Some(client): client.evaluate(expr)
+            nil: Err("OpenOCD client not connected")
+
+    fn stack_trace() -> Result<[FrameInfo], text>:
+        match self.client:
+            Some(client): client.stack_trace()
+            nil: Err("OpenOCD client not connected")
+
+    fn stack_depth() -> Result<i32, text>:
+        match self.client:
+            Some(client): client.stack_depth()
+            nil: Err("OpenOCD client not connected")
+
+    fn select_frame(level: i32) -> Result<text, text>:
+        match self.client:
+            Some(client): client.select_frame(level)
+            nil: Err("OpenOCD client not connected")
+
+    fn current_location() -> Result<LocationInfo, text>:
+        match self.client:
+            Some(client):
+                val frames = client.stack_trace()?
+                if frames.len() > 0:
+                    val f = frames[0]
+                    Ok(LocationInfo.at(f.file, f.line, f.function_name))
+                else:
+                    Err("no frames available")
+            nil:
+                Err("OpenOCD client not connected")
+
+    fn read_memory(addr: i64, size: i32) -> Result<[i32], text>:
+        match self.client:
+            Some(client): client.read_memory(addr, size)
+            nil: Err("OpenOCD client not connected")
+
+    fn write_memory(addr: i64, data: [i32]) -> Result<text, text>:
+        match self.client:
+            Some(client): client.write_memory(addr, data)
+            nil: Err("OpenOCD client not connected")
+
+    fn read_register(name: text) -> Result<i64, text>:
+        match self.client:
+            Some(client): client.read_register(name)
+            nil: Err("OpenOCD client not connected")
+
+    fn read_all_registers() -> Result<Dict<text, i64>, text>:
+        match self.client:
+            Some(client): client.read_all_registers()
+            nil: Err("OpenOCD client not connected")
+
+    fn write_register(name: text, value: i64) -> Result<text, text>:
+        match self.client:
+            Some(client): client.write_register(name, value)
+            nil: Err("OpenOCD client not connected")
+
+    fn clear_context() -> Result<text, text>:
+        Ok("context clearing not supported (hardware target)")
+
+    fn reload_program(program: text) -> Result<text, text>:
+        match self.client:
+            Some(client):
+                client.flash_program(program)?
+                client.system_reset()?
+                Ok("program reloaded via OpenOCD")
+            nil:
+                Err("OpenOCD client not connected")
+
+    # Rich breakpoint — delegates to basic set_breakpoint (condition support can be added later)
+    fn set_breakpoint_rich(file: text, line: i32, condition: Option<text>,
+                           hit_condition: Option<text>, log_message: Option<text>) -> Result<i32, text>:
+        self.set_breakpoint(file, line)
+
+    fn list_children(var_ref: text) -> Result<[VarInfo], text>:
+        Err("nested variable expansion not supported")
+
+    fn capabilities() -> AdapterCapabilities:
+        self.capabilities
+
+    # --- OpenOCD-specific operations ---
+
+    fn flash_program(elf_path: text) -> Result<text, text>:
+        match self.client:
+            Some(client): client.flash_program(elf_path)
+            nil: Err("OpenOCD client not connected")
+
+    fn monitor(cmd: text) -> Result<text, text>:
+        match self.client:
+            Some(client): client.monitor(cmd)
+            nil: Err("OpenOCD client not connected")
+
+    fn reset_halt() -> Result<text, text>:
+        match self.client:
+            Some(client): client.system_reset()
+            nil: Err("OpenOCD client not connected")

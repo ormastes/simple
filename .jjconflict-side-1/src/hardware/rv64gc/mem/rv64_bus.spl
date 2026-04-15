@@ -1,0 +1,153 @@
+"""
+# RV64 System Bus — Address Decode and MMIO Routing
+
+Routes memory accesses to RAM or MMIO peripherals based on address ranges.
+Compatible with QEMU virt machine memory map.
+"""
+
+use hardware.rv64gc.core.rv64_memory.{MemResult, mem_ok, mem_fault}
+use hardware.rv64gc.mem.rv64_ram.Rv64Ram
+use hardware.rv64gc.periph.rv64_uart.Rv64Uart
+use hardware.rv64gc.periph.rv64_clint.Rv64Clint
+use hardware.rv64gc.periph.rv64_plic.Rv64Plic
+use hardware.rv64gc.pkg.rv64_types_pkg.{TRAP_LOAD_ACCESS_FAULT, TRAP_STORE_ACCESS_FAULT}
+
+# QEMU virt memory map
+val UART0_BASE: i64 = 0x10000000
+val UART0_SIZE: i64 = 0x100
+
+val CLINT_BASE: i64 = 0x02000000
+val CLINT_SIZE: i64 = 0x10000
+
+val PLIC_BASE: i64 = 0x0C000000
+val PLIC_SIZE: i64 = 0x4000000
+
+val DRAM_BASE: i64 = 0x80000000
+
+class Rv64Bus:
+    ram: Rv64Ram
+    uart: Rv64Uart
+    clint: Rv64Clint
+    plic: Rv64Plic
+
+    static fn create(ram_size: i64, num_harts: i64) -> Rv64Bus:
+        Rv64Bus(
+            ram: Rv64Ram.create(ram_size),
+            uart: Rv64Uart.create(),
+            clint: Rv64Clint.create(num_harts),
+            plic: Rv64Plic.create(64, num_harts * 2)
+        )
+
+    fn _is_uart(addr: i64) -> bool:
+        addr >= UART0_BASE and addr < (UART0_BASE + UART0_SIZE)
+
+    fn _is_clint(addr: i64) -> bool:
+        addr >= CLINT_BASE and addr < (CLINT_BASE + CLINT_SIZE)
+
+    fn _is_plic(addr: i64) -> bool:
+        addr >= PLIC_BASE and addr < (PLIC_BASE + PLIC_SIZE)
+
+    fn _is_dram(addr: i64) -> bool:
+        addr >= DRAM_BASE
+
+    fn _dram_offset(addr: i64) -> i64:
+        addr - DRAM_BASE
+
+    # ---------------------------------------------------------------------------
+    # Read interface
+    # ---------------------------------------------------------------------------
+
+    fn read8(addr: i64) -> MemResult:
+        if self._is_uart(addr):
+            val offset = addr - UART0_BASE
+            mem_ok(self.uart.read_reg(offset))
+        elif self._is_dram(addr):
+            self.ram.read8(self._dram_offset(addr))
+        else:
+            mem_fault(TRAP_LOAD_ACCESS_FAULT)
+
+    fn read16(addr: i64) -> MemResult:
+        if self._is_dram(addr):
+            self.ram.read16(self._dram_offset(addr))
+        else:
+            mem_fault(TRAP_LOAD_ACCESS_FAULT)
+
+    fn read32(addr: i64) -> MemResult:
+        if self._is_clint(addr):
+            val offset = addr - CLINT_BASE
+            mem_ok(self.clint.read(offset))
+        elif self._is_plic(addr):
+            val offset = addr - PLIC_BASE
+            mem_ok(self.plic.read(offset))
+        elif self._is_dram(addr):
+            self.ram.read32(self._dram_offset(addr))
+        else:
+            mem_fault(TRAP_LOAD_ACCESS_FAULT)
+
+    fn read64(addr: i64) -> MemResult:
+        if self._is_clint(addr):
+            val offset = addr - CLINT_BASE
+            mem_ok(self.clint.read(offset))
+        elif self._is_plic(addr):
+            val offset = addr - PLIC_BASE
+            mem_ok(self.plic.read(offset))
+        elif self._is_dram(addr):
+            self.ram.read64(self._dram_offset(addr))
+        else:
+            mem_fault(TRAP_LOAD_ACCESS_FAULT)
+
+    # ---------------------------------------------------------------------------
+    # Write interface
+    # ---------------------------------------------------------------------------
+
+    me write8(addr: i64, value: i64) -> MemResult:
+        if self._is_uart(addr):
+            val offset = addr - UART0_BASE
+            self.uart.write_reg(offset, value)
+            mem_ok(0)
+        elif self._is_dram(addr):
+            self.ram.write8(self._dram_offset(addr), value)
+        else:
+            mem_fault(TRAP_STORE_ACCESS_FAULT)
+
+    me write16(addr: i64, value: i64) -> MemResult:
+        if self._is_dram(addr):
+            self.ram.write16(self._dram_offset(addr), value)
+        else:
+            mem_fault(TRAP_STORE_ACCESS_FAULT)
+
+    me write32(addr: i64, value: i64) -> MemResult:
+        if self._is_clint(addr):
+            val offset = addr - CLINT_BASE
+            self.clint.write(offset, value)
+            mem_ok(0)
+        elif self._is_plic(addr):
+            val offset = addr - PLIC_BASE
+            self.plic.write_reg(offset, value)
+            mem_ok(0)
+        elif self._is_dram(addr):
+            self.ram.write32(self._dram_offset(addr), value)
+        else:
+            mem_fault(TRAP_STORE_ACCESS_FAULT)
+
+    me write64(addr: i64, value: i64) -> MemResult:
+        if self._is_clint(addr):
+            val offset = addr - CLINT_BASE
+            self.clint.write(offset, value)
+            mem_ok(0)
+        elif self._is_plic(addr):
+            val offset = addr - PLIC_BASE
+            self.plic.write_reg(offset, value)
+            mem_ok(0)
+        elif self._is_dram(addr):
+            self.ram.write64(self._dram_offset(addr), value)
+        else:
+            mem_fault(TRAP_STORE_ACCESS_FAULT)
+
+    me tick():
+        """Advance CLINT timer."""
+        self.clint.tick()
+
+    me load_binary(base_addr: i64, bytes: [i64]):
+        """Load binary data into DRAM."""
+        self.ram.load_bytes(base_addr - DRAM_BASE, bytes)

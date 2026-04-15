@@ -1,0 +1,159 @@
+# Network Stack Boot Initialization
+#
+# MDSOC: feature dimension, network layer
+# Mirrors vfs_init.spl pattern:
+# PCI scan -> find VirtIO-net -> grant device -> init driver -> create netstack
+#
+# Called during kernel init. Sets up the complete network stack:
+# 1. PCI manager finds VirtIO-net device
+# 2. VirtIO-net driver initializes with DeviceGrant
+# 3. NetstackService wraps the driver with TCP/IP protocol layers
+# 4. Default IP configured for QEMU user-mode networking
+# 5. NetstackService starts listening on IPC port 2
+
+use os.drivers.virtio.virtio_net.{VirtioNetDriver}
+use os.services.netstack.netstack_service.{NetstackService}
+use os.services.netstack.ipv4.{Ipv4Address}
+use os.services.pcimgr.pcimgr.{pcimgr_init, pcimgr_find_by_class, pcimgr_find_by_vendor, pcimgr_grant_device, pcimgr_get_device_vendor}
+use os.services.pcimgr.driver_match.{PCI_CLASS_NETWORK, PCI_SUBCLASS_ETHERNET, VIRTIO_VENDOR, VIRTIO_DEV_NET}
+use os.kernel.types.device_mem_types.{DeviceGrant}
+
+extern fn serial_println(msg: text)
+
+# ============================================================================
+# QEMU User-Mode Networking Defaults
+# ============================================================================
+# QEMU's -netdev user,id=net0 provides:
+#   Guest IP:  10.0.2.15
+#   Gateway:   10.0.2.2
+#   DNS:       10.0.2.3
+#   Subnet:    255.255.255.0
+
+val QEMU_IP_A: u8 = 10
+val QEMU_IP_B: u8 = 0
+val QEMU_IP_C: u8 = 2
+val QEMU_IP_D: u8 = 15
+
+val QEMU_GW_A: u8 = 10
+val QEMU_GW_B: u8 = 0
+val QEMU_GW_C: u8 = 2
+val QEMU_GW_D: u8 = 2
+
+val QEMU_MASK_A: u8 = 255
+val QEMU_MASK_B: u8 = 255
+val QEMU_MASK_C: u8 = 255
+val QEMU_MASK_D: u8 = 0
+
+# ============================================================================
+# Module-Level State
+# ============================================================================
+
+var g_netstack: NetstackService? = nil
+var g_net_driver: VirtioNetDriver = VirtioNetDriver.new()
+var g_net_initialized: bool = false
+
+# ============================================================================
+# Boot Init
+# ============================================================================
+
+fn net_boot_init() -> bool:
+    """Initialize the network stack from PCI discovery.
+
+    Steps:
+    1. Find VirtIO-net device via PCI manager
+       - Class 0x02 (network controller), subclass 0x00 (Ethernet)
+       - Fallback: vendor 0x1AF4 (Red Hat), device 0x1000 (legacy virtio-net)
+    2. Grant device resources (BAR0, IRQ, DMA)
+    3. Initialize VirtIO-net driver
+    4. Create NetstackService with the driver
+    5. Configure IP for QEMU user-mode networking:
+       - IP: 10.0.2.15, gateway: 10.0.2.2, subnet: 255.255.255.0
+
+    Returns true if network stack is ready.
+    """
+    serial_println("[net-init] Starting network stack initialization...")
+
+    # Step 1: Find VirtIO-net device
+    # Search by VirtIO vendor first (precise), then by class (broad).
+    # Class-based search finds any NIC (e.g., Intel 82574L), but we need VirtIO.
+    serial_println("[net-init] Looking for VirtIO-net device (vendor=0x1AF4)...")
+    var dev_idx = pcimgr_find_by_vendor(VIRTIO_VENDOR, VIRTIO_DEV_NET)
+
+    if dev_idx < 0:
+        # Fallback: find network controller by class, then verify vendor
+        dev_idx = pcimgr_find_by_class(PCI_CLASS_NETWORK, PCI_SUBCLASS_ETHERNET)
+        if dev_idx >= 0:
+            val vendor = pcimgr_get_device_vendor(dev_idx.to_u64())
+            if vendor != VIRTIO_VENDOR:
+                serial_println("[net-init] Found NIC at index {dev_idx} but not VirtIO (vendor=0x{vendor})")
+                dev_idx = -1
+
+    if dev_idx < 0:
+        serial_println("[net-init] No VirtIO-net device found -- network unavailable")
+        return false
+    serial_println("[net-init] Found VirtIO-net device at index {dev_idx}")
+
+    # On baremetal, the C VirtIO-net driver (syscall 90) handles everything.
+    # The C driver was already initialized during C boot phase.
+    # Just check if it's alive via syscall 93 (NetStats).
+    serial_println("[net-init] Using C VirtIO-net driver (initialized during C boot)")
+    val stats = syscall(93, 0, 0, 0, 0, 0)
+    serial_println("[net-init] C network driver active")
+
+    g_net_initialized = true
+    serial_println("[net-init] Network stack ready (C-backed)")
+    true
+
+# ============================================================================
+# Network Service Start
+# ============================================================================
+
+fn net_service_start():
+    """Start the network stack IPC + frame polling loop (blocking).
+
+    Call after net_boot_init() returns true. This enters the
+    NetstackService.start() loop which blocks on IPC/frame processing.
+    In a real system this would run in its own scheduler task.
+    For cooperative scheduling, use net_service_init_port() + net_service_poll().
+    """
+    if not g_net_initialized:
+        serial_println("[net-init] Cannot start service -- not initialized")
+        return
+    if g_netstack == nil:
+        serial_println("[net-init] Cannot start service -- no netstack instance")
+        return
+    g_netstack.start()
+
+fn net_service_init_port():
+    """Initialize the netstack IPC port without entering the blocking loop.
+
+    Use with net_service_poll() for cooperative scheduling.
+    """
+    if not g_net_initialized or g_netstack == nil:
+        serial_println("[net-init] Cannot init port -- not initialized")
+        return
+    g_netstack.init_port()
+
+fn net_service_poll():
+    """Run one tick of the network stack (non-blocking).
+
+    Call from a cooperative main loop alongside VFS and shell.
+    """
+    if g_net_initialized and g_netstack != nil:
+        g_netstack.poll_once()
+
+# ============================================================================
+# Query Helpers
+# ============================================================================
+
+fn net_is_ready() -> bool:
+    """Check if network stack has been initialized and is ready."""
+    g_net_initialized
+
+fn net_get_service() -> NetstackService?:
+    """Return the global NetstackService instance (nil if not initialized)."""
+    g_netstack
+
+fn net_get_driver() -> VirtioNetDriver:
+    """Return the global VirtIO-net driver instance."""
+    g_net_driver

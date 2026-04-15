@@ -1,0 +1,602 @@
+#![allow(unnamed_duplicate_typed_args)]
+## SimpleOS Full Verification Script
+##
+## Master script that verifies every layer of the SimpleOS development
+## environment: shell tools, VCS (git/jj), build tools, toolchains,
+## and Simple compiler bootstrap.
+##
+## Usage:
+##   bin/simple run src/os/port/verify_all.spl
+##   bin/simple run src/os/port/verify_all.spl -- --phase shell
+##   bin/simple run src/os/port/verify_all.spl -- --phase vcs
+##   bin/simple run src/os/port/verify_all.spl -- --phase toolchain
+##   bin/simple run src/os/port/verify_all.spl -- --phase build-tools
+##   bin/simple run src/os/port/verify_all.spl -- --phase bootstrap
+##   bin/simple run src/os/port/verify_all.spl -- --dry-run
+##   bin/simple run src/os/port/verify_all.spl -- --target x86_64-simpleos
+##   bin/simple run src/os/port/verify_all.spl -- --verbose
+
+use std.fs
+use std.process
+use std.text
+use std.cli
+
+# ============================================================================
+# Configuration
+# ============================================================================
+
+val VERSION = "1.0.0"
+
+struct VerifyConfig:
+    phase: text               # "" = all, or specific phase
+    target: text              # SimpleOS target triple
+    dry_run: bool             # Only check prerequisites
+    verbose: bool             # Extra output
+    skip_slow: bool           # Skip slow phases (toolchain build, bootstrap)
+
+struct PhaseResult:
+    name: text
+    passed: i64
+    failed: i64
+    skipped: i64
+    errors: [text]
+
+impl PhaseResult:
+    static fn new(name: text) -> PhaseResult:
+        PhaseResult(name: name, passed: 0, failed: 0, skipped: 0, errors: [])
+
+    fn total() -> i64:
+        self.passed + self.failed + self.skipped
+
+    fn ok() -> bool:
+        self.failed == 0
+
+# ============================================================================
+# Argument Parsing
+# ============================================================================
+
+fn parse_args(args: [text]) -> VerifyConfig:
+    var phase = ""
+    var target = "x86_64-simpleos"
+    var dry_run = false
+    var verbose = false
+    var skip_slow = false
+
+    var i = 0
+    while i < args.len():
+        val arg = args[i]
+        if arg == "--phase":
+            i = i + 1
+            if i < args.len():
+                phase = args[i]
+        else if arg == "--target":
+            i = i + 1
+            if i < args.len():
+                target = args[i]
+        else if arg == "--dry-run":
+            dry_run = true
+        else if arg == "--verbose" or arg == "-v":
+            verbose = true
+        else if arg == "--skip-slow":
+            skip_slow = true
+        else if arg == "--help" or arg == "-h":
+            print_usage()
+            return VerifyConfig(phase: "", target: "", dry_run: true,
+                                verbose: false, skip_slow: false)
+        i = i + 1
+
+    VerifyConfig(
+        phase: phase,
+        target: target,
+        dry_run: dry_run,
+        verbose: verbose,
+        skip_slow: skip_slow
+    )
+
+fn print_usage():
+    print "SimpleOS Full Verification Script v{VERSION}"
+    print ""
+    print "Usage: bin/simple run src/os/port/verify_all.spl [-- OPTIONS]"
+    print ""
+    print "Phases:"
+    print "  shell        Verify shell built-in tools (26 core + 14 extended)"
+    print "  vcs          Verify git and jj VCS wrappers"
+    print "  build-tools  Verify cmake/ninja/make ports and simple_make"
+    print "  toolchain    Verify LLVM/Clang and Rust cross-build (slow)"
+    print "  bootstrap    Verify Simple compiler bootstrap (slow)"
+    print ""
+    print "Options:"
+    print "  --phase NAME    Run only the specified phase"
+    print "  --target TRIPLE Target triple (default: x86_64-simpleos)"
+    print "  --dry-run       Only check prerequisites, do not build"
+    print "  --skip-slow     Skip toolchain and bootstrap phases"
+    print "  --verbose, -v   Extra output"
+    print "  --help, -h      Show this help"
+    print ""
+    print "Examples:"
+    print "  bin/simple run src/os/port/verify_all.spl"
+    print "  bin/simple run src/os/port/verify_all.spl -- --phase shell"
+    print "  bin/simple run src/os/port/verify_all.spl -- --skip-slow --verbose"
+
+# ============================================================================
+# Helpers
+# ============================================================================
+
+fn check_file_exists(path: text, desc: text, result: PhaseResult, verbose: bool) -> PhaseResult:
+    """Check that a file exists and update the result."""
+    var r = result
+    if fs.exists(path):
+        r.passed = r.passed + 1
+        if verbose:
+            print "  [PASS] {desc}: {path}"
+    else:
+        r.failed = r.failed + 1
+        r.errors.push("Missing: {desc} ({path})")
+        print "  [FAIL] {desc}: {path} not found"
+    r
+
+fn check_command_exists(cmd: text, result: PhaseResult, verbose: bool) -> PhaseResult:
+    """Check that an external command is available on PATH."""
+    var r = result
+    val (_, _, code) = process.run("which", [cmd])
+    if code == 0:
+        r.passed = r.passed + 1
+        if verbose:
+            print "  [PASS] command: {cmd}"
+    else:
+        r.failed = r.failed + 1
+        r.errors.push("Command not found: {cmd}")
+        print "  [FAIL] command not found: {cmd}"
+    r
+
+fn check_file_contains(path: text, needle: text, desc: text, result: PhaseResult,
+                        verbose: bool) -> PhaseResult:
+    """Check that a file exists and contains a string."""
+    var r = result
+    if not fs.exists(path):
+        r.failed = r.failed + 1
+        r.errors.push("Missing: {desc} ({path})")
+        print "  [FAIL] {desc}: {path} not found"
+        return r
+    val content = fs.read_text(path)
+    if content.contains(needle):
+        r.passed = r.passed + 1
+        if verbose:
+            print "  [PASS] {desc}: contains '{needle}'"
+    else:
+        r.failed = r.failed + 1
+        r.errors.push("{desc}: missing '{needle}' in {path}")
+        print "  [FAIL] {desc}: '{needle}' not found in {path}"
+    r
+
+fn banner(title: text):
+    print ""
+    print "================================================================"
+    print "  {title}"
+    print "================================================================"
+
+fn section(title: text):
+    print ""
+    print "--- {title} ---"
+
+# ============================================================================
+# Phase 1: Shell Tools Verification
+# ============================================================================
+
+fn verify_shell(config: VerifyConfig) -> PhaseResult:
+    banner("Phase 1: Shell Tools")
+    var r = PhaseResult.new("shell")
+
+    section("Core Shell Files")
+    r = check_file_exists("src/os/apps/shell/shell_app.spl", "Shell app", r, config.verbose)
+    r = check_file_exists("src/os/apps/shell/shell_pipe.spl", "Pipeline support", r, config.verbose)
+    r = check_file_exists("src/os/apps/shell/shell_redirect.spl", "Redirection", r, config.verbose)
+    r = check_file_exists("src/os/apps/shell/shell_job.spl", "Job control", r, config.verbose)
+    r = check_file_exists("src/os/apps/shell/shell_async.spl", "Async support", r, config.verbose)
+    r = check_file_exists("src/os/apps/shell/shell_tools.spl", "Extended tools", r, config.verbose)
+    r = check_file_exists("src/os/apps/shell/mod.spl", "Module export", r, config.verbose)
+
+    section("Core Built-in Commands (26)")
+    val core_builtins = [
+        "cd", "ls", "pwd", "echo", "cat", "mkdir", "rm", "cp", "mv",
+        "grep", "find", "ps", "kill", "mount", "clear", "help", "exit",
+        "env", "export", "history", "hostname", "uptime", "dmesg",
+        "jobs", "fg", "bg"
+    ]
+    r = check_file_contains("src/os/apps/shell/shell_app.spl",
+        "_dispatch_builtin", "Command dispatch", r, config.verbose)
+    for cmd in core_builtins:
+        r = check_file_contains("src/os/apps/shell/shell_app.spl",
+            "\"{cmd}\"", "Builtin: {cmd}", r, config.verbose)
+
+    section("Extended Tools (14)")
+    val ext_tools = [
+        "tool_touch", "tool_head", "tool_tail", "tool_wc",
+        "tool_sort", "tool_uniq", "tool_which", "tool_date",
+        "tool_true", "tool_false", "tool_tee", "tool_ln",
+        "tool_chmod", "tool_stat"
+    ]
+    for tool in ext_tools:
+        r = check_file_contains("src/os/apps/shell/shell_tools.spl",
+            tool, "Extended: {tool}", r, config.verbose)
+
+    section("Shell Features")
+    r = check_file_contains("src/os/apps/shell/shell_app.spl",
+        "has_pipeline", "Pipeline execution", r, config.verbose)
+    r = check_file_contains("src/os/apps/shell/shell_app.spl",
+        "parse_redirects", "File redirection", r, config.verbose)
+    r = check_file_contains("src/os/apps/shell/shell_app.spl",
+        "spawn_command_bg", "Background execution", r, config.verbose)
+    r = check_file_contains("src/os/apps/shell/shell_app.spl",
+        "_expand_vars", "Env var expansion", r, config.verbose)
+
+    print_phase_summary(r)
+    r
+
+# ============================================================================
+# Phase 2: VCS (Git + JJ) Verification
+# ============================================================================
+
+fn verify_vcs(config: VerifyConfig) -> PhaseResult:
+    banner("Phase 2: VCS (Git + JJ)")
+    var r = PhaseResult.new("vcs")
+
+    section("Native VCS App")
+    r = check_file_exists("src/os/apps/vcs/vcs_app.spl", "Native VCS app", r, config.verbose)
+    r = check_file_exists("src/os/apps/vcs/mod.spl", "VCS module", r, config.verbose)
+    val vcs_cmds = ["init", "add", "commit", "log", "status", "diff", "checkout", "show"]
+    for cmd in vcs_cmds:
+        r = check_file_contains("src/os/apps/vcs/vcs_app.spl",
+            "\"{cmd}\"", "VCS cmd: {cmd}", r, config.verbose)
+
+    section("Git Wrapper")
+    r = check_file_exists("src/os/apps/git/git_app.spl", "Git wrapper app", r, config.verbose)
+    r = check_file_exists("src/os/apps/git/mod.spl", "Git module", r, config.verbose)
+    val git_cmds = ["init", "clone", "add", "commit", "status", "log", "diff",
+                    "branch", "checkout", "merge", "push", "pull", "remote", "stash"]
+    for cmd in git_cmds:
+        r = check_file_contains("src/os/apps/git/git_app.spl",
+            "\"{cmd}\"", "Git cmd: {cmd}", r, config.verbose)
+    # Check shell integration
+    r = check_file_contains("src/os/apps/shell/shell_app.spl",
+        "\"git\"", "Shell git dispatch", r, config.verbose)
+
+    section("JJ (Jujutsu) Wrapper")
+    r = check_file_exists("src/os/apps/jj/jj_app.spl", "JJ wrapper app", r, config.verbose)
+    r = check_file_exists("src/os/apps/jj/mod.spl", "JJ module", r, config.verbose)
+    val jj_cmds = ["init", "log", "status", "diff", "new", "describe",
+                   "commit", "bookmark", "rebase", "squash", "abandon"]
+    for cmd in jj_cmds:
+        r = check_file_contains("src/os/apps/jj/jj_app.spl",
+            "\"{cmd}\"", "JJ cmd: {cmd}", r, config.verbose)
+    # Check shell integration
+    r = check_file_contains("src/os/apps/shell/shell_app.spl",
+        "\"jj\"", "Shell jj dispatch", r, config.verbose)
+
+    section("Host Tool Availability")
+    r = check_command_exists("git", r, config.verbose)
+    r = check_command_exists("jj", r, config.verbose)
+
+    print_phase_summary(r)
+    r
+
+# ============================================================================
+# Phase 3: Build Tools Verification
+# ============================================================================
+
+fn verify_build_tools(config: VerifyConfig) -> PhaseResult:
+    banner("Phase 3: Build Tools")
+    var r = PhaseResult.new("build-tools")
+
+    section("simple_make (in-tree)")
+    r = check_file_exists("src/os/port/build_tools/simple_make.spl",
+        "simple_make", r, config.verbose)
+    r = check_file_contains("src/os/port/build_tools/simple_make.spl",
+        "parse_makefile", "Makefile parser", r, config.verbose)
+    r = check_file_contains("src/os/port/build_tools/simple_make.spl",
+        "needs_rebuild", "Dependency tracking", r, config.verbose)
+    r = check_file_contains("src/os/port/build_tools/simple_make.spl",
+        "pattern", "Pattern rules", r, config.verbose)
+
+    section("CMake Port (examples/cmake/)")
+    r = check_file_exists("examples/cmake/simple_cmake.spl",
+        "CMake port main", r, config.verbose)
+    r = check_file_exists("examples/cmake/cmake_parser.spl",
+        "CMake parser", r, config.verbose)
+    r = check_file_exists("examples/cmake/cmake_generator.spl",
+        "CMake generator", r, config.verbose)
+    r = check_file_exists("examples/cmake/README.md",
+        "CMake docs", r, config.verbose)
+
+    section("Ninja Port (examples/ninja/)")
+    r = check_file_exists("examples/ninja/simple_ninja.spl",
+        "Ninja port main", r, config.verbose)
+    r = check_file_exists("examples/ninja/ninja_parser.spl",
+        "Ninja parser", r, config.verbose)
+    r = check_file_exists("examples/ninja/ninja_builder.spl",
+        "Ninja builder", r, config.verbose)
+    r = check_file_exists("examples/ninja/README.md",
+        "Ninja docs", r, config.verbose)
+
+    section("Make Enhanced Port (examples/make/)")
+    r = check_file_exists("examples/make/simple_make_enhanced.spl",
+        "Enhanced make main", r, config.verbose)
+    r = check_file_exists("examples/make/make_parser.spl",
+        "Make parser", r, config.verbose)
+    r = check_file_exists("examples/make/make_executor.spl",
+        "Make executor", r, config.verbose)
+    r = check_file_exists("examples/make/README.md",
+        "Make docs", r, config.verbose)
+
+    section("Host Build Tools")
+    r = check_command_exists("cmake", r, config.verbose)
+    r = check_command_exists("ninja", r, config.verbose)
+    r = check_command_exists("make", r, config.verbose)
+
+    print_phase_summary(r)
+    r
+
+# ============================================================================
+# Phase 4: Toolchain Verification
+# ============================================================================
+
+fn verify_toolchain(config: VerifyConfig) -> PhaseResult:
+    banner("Phase 4: Toolchains (LLVM + Rust)")
+    var r = PhaseResult.new("toolchain")
+
+    section("LLVM Cross-Build Infrastructure")
+    r = check_file_exists("src/os/port/llvm/build.spl",
+        "LLVM build script", r, config.verbose)
+    r = check_file_exists("src/os/port/llvm/build.shs",
+        "LLVM shell builder", r, config.verbose)
+    r = check_file_exists("src/os/port/llvm/sysroot.shs",
+        "Sysroot builder", r, config.verbose)
+    r = check_file_exists("src/os/port/llvm/test_smoke.spl",
+        "LLVM smoke tests", r, config.verbose)
+    r = check_file_exists("src/os/toolchain/llvm/simpleos_cross_toolchain.cmake",
+        "CMake toolchain file", r, config.verbose)
+
+    section("LLVM Build Script Completeness")
+    r = check_file_contains("src/os/port/llvm/build.spl",
+        "--cross", "Cross-build mode", r, config.verbose)
+    r = check_file_contains("src/os/port/llvm/build.spl",
+        "--all", "All-targets mode", r, config.verbose)
+    r = check_file_contains("src/os/port/llvm/build.spl",
+        "compiler-rt", "Compiler-RT build", r, config.verbose)
+
+    section("Rust Cross-Build Infrastructure")
+    r = check_file_exists("src/os/port/rust/build.spl",
+        "Rust build script", r, config.verbose)
+    r = check_file_exists("src/os/port/rust/build.shs",
+        "Rust shell builder", r, config.verbose)
+
+    section("Rust Target Specs (4 architectures)")
+    r = check_file_exists("src/os/toolchain/rust/x86_64-unknown-simpleos.json",
+        "x86_64 target spec", r, config.verbose)
+    r = check_file_exists("src/os/toolchain/rust/aarch64-unknown-simpleos.json",
+        "aarch64 target spec", r, config.verbose)
+    r = check_file_exists("src/os/toolchain/rust/riscv64gc-unknown-simpleos.json",
+        "riscv64gc target spec", r, config.verbose)
+    r = check_file_exists("src/os/toolchain/rust/riscv32imac-unknown-simpleos.json",
+        "riscv32imac target spec", r, config.verbose)
+    r = check_file_exists("src/os/toolchain/rust/cargo_config.toml",
+        "Cargo config", r, config.verbose)
+
+    section("SimpleOS Libc")
+    r = check_file_exists("src/os/libc/simpleos_libc.c",
+        "Core libc", r, config.verbose)
+    r = check_file_exists("src/os/libc/simpleos_math.c",
+        "Math library", r, config.verbose)
+    r = check_file_exists("src/os/libc/simpleos_string_ext.c",
+        "String extensions", r, config.verbose)
+    r = check_file_exists("src/os/libc/simpleos_math_ext.c",
+        "Math extensions", r, config.verbose)
+    r = check_file_exists("src/os/libc/Makefile",
+        "Libc Makefile", r, config.verbose)
+    r = check_file_exists("src/os/libc/include/string.h",
+        "string.h header", r, config.verbose)
+    r = check_file_exists("src/os/libc/include/math.h",
+        "math.h header", r, config.verbose)
+
+    section("Deployment Script")
+    r = check_file_exists("src/os/port/deploy_toolchains.spl",
+        "Deploy script", r, config.verbose)
+    r = check_file_exists("src/os/port/simpleos_native_build_config.spl",
+        "Native build config", r, config.verbose)
+
+    section("Host Toolchain")
+    r = check_command_exists("clang", r, config.verbose)
+    r = check_command_exists("cmake", r, config.verbose)
+    r = check_command_exists("ninja", r, config.verbose)
+
+    # Run LLVM smoke test if not dry-run
+    if not config.dry_run and not config.skip_slow:
+        section("Running LLVM Smoke Tests")
+        val (out, err, code) = process.run("bin/simple",
+            ["run", "src/os/port/llvm/test_smoke.spl"])
+        if code == 0:
+            r.passed = r.passed + 1
+            print "  [PASS] LLVM smoke tests passed"
+        else:
+            r.failed = r.failed + 1
+            r.errors.push("LLVM smoke tests failed (exit {code})")
+            print "  [FAIL] LLVM smoke tests failed"
+            if config.verbose:
+                print "  stdout: {out}"
+                print "  stderr: {err}"
+    else:
+        r.skipped = r.skipped + 1
+        print "  [SKIP] LLVM smoke tests (dry-run or skip-slow)"
+
+    print_phase_summary(r)
+    r
+
+# ============================================================================
+# Phase 5: Bootstrap Verification
+# ============================================================================
+
+fn verify_bootstrap(config: VerifyConfig) -> PhaseResult:
+    banner("Phase 5: Simple Compiler Bootstrap")
+    var r = PhaseResult.new("bootstrap")
+
+    section("Bootstrap Infrastructure")
+    r = check_file_exists("src/os/port/bootstrap_verify.spl",
+        "Bootstrap verify script", r, config.verbose)
+    r = check_file_exists("src/os/port/bootstrap_cross.spl",
+        "Cross bootstrap script", r, config.verbose)
+    r = check_file_exists("doc/03_plan/simpleos_bootstrap_plan.md",
+        "Bootstrap plan", r, config.verbose)
+
+    section("Rust Seed")
+    r = check_file_exists("src/compiler_rust/Cargo.toml",
+        "Cargo workspace", r, config.verbose)
+    r = check_file_exists("src/compiler_rust/driver/Cargo.toml",
+        "Driver crate", r, config.verbose)
+    r = check_file_exists("src/compiler_rust/native_all/Cargo.toml",
+        "Native-all crate", r, config.verbose)
+
+    section("Bootstrap Entry Points")
+    r = check_file_exists("src/app/cli/main.spl",
+        "Full CLI entry", r, config.verbose)
+    r = check_file_exists("src/app/cli/bootstrap_main.spl",
+        "Bootstrap entry", r, config.verbose)
+    r = check_file_contains("src/app/cli/main.spl",
+        "cli_native_build", "native-build dispatch", r, config.verbose)
+
+    section("Source Directories")
+    r = check_file_exists("src/compiler/00.common", "Compiler common", r, config.verbose)
+    r = check_file_exists("src/compiler/10.frontend", "Frontend", r, config.verbose)
+    r = check_file_exists("src/compiler/70.backend", "Backends", r, config.verbose)
+    r = check_file_exists("src/compiler/80.driver", "Driver", r, config.verbose)
+    r = check_file_exists("src/lib/common", "Stdlib common", r, config.verbose)
+    r = check_file_exists("src/app/cli", "CLI app", r, config.verbose)
+
+    section("Native Build Config")
+    r = check_file_contains("src/os/port/simpleos_native_build_config.spl",
+        "simpleos_linker_flags", "Linker flags fn", r, config.verbose)
+    r = check_file_contains("src/os/port/simpleos_native_build_config.spl",
+        "simpleos_include_paths", "Include paths fn", r, config.verbose)
+    r = check_file_contains("src/os/port/simpleos_native_build_config.spl",
+        "simpleos_validate_sysroot", "Sysroot validation", r, config.verbose)
+    r = check_file_contains("src/os/port/simpleos_native_build_config.spl",
+        "SimpleOSBuildConfig", "Build config struct", r, config.verbose)
+
+    # Run bootstrap prerequisite check (dry-run) if not skipping slow
+    if not config.dry_run and not config.skip_slow:
+        section("Running Bootstrap Prerequisite Check")
+        val (out, err, code) = process.run("bin/simple",
+            ["run", "src/os/port/bootstrap_verify.spl", "--", "--dry-run"])
+        if code == 0:
+            r.passed = r.passed + 1
+            print "  [PASS] Bootstrap prerequisites satisfied"
+        else:
+            r.failed = r.failed + 1
+            r.errors.push("Bootstrap prerequisite check failed")
+            print "  [FAIL] Bootstrap prerequisites missing"
+            if config.verbose:
+                print "  {out}"
+    else:
+        r.skipped = r.skipped + 1
+        print "  [SKIP] Bootstrap prerequisite check (dry-run or skip-slow)"
+
+    print_phase_summary(r)
+    r
+
+# ============================================================================
+# Summary
+# ============================================================================
+
+fn print_phase_summary(r: PhaseResult):
+    print ""
+    val status = if r.ok(): "PASS" else: "FAIL"
+    print "  {r.name}: {status}  ({r.passed} passed, {r.failed} failed, {r.skipped} skipped)"
+    if r.errors.len() > 0:
+        print "  Errors:"
+        for err in r.errors:
+            print "    - {err}"
+
+fn print_final_summary(results: [PhaseResult]):
+    banner("Final Summary")
+
+    var total_pass = 0
+    var total_fail = 0
+    var total_skip = 0
+
+    for r in results:
+        val status = if r.ok(): "PASS" else: "FAIL"
+        val pad = "                    ".slice(0, 15 - r.name.len())
+        print "  [{status}] {r.name}{pad} {r.passed} passed, {r.failed} failed, {r.skipped} skipped"
+        total_pass = total_pass + r.passed
+        total_fail = total_fail + r.failed
+        total_skip = total_skip + r.skipped
+
+    print ""
+    val total = total_pass + total_fail + total_skip
+    val overall = if total_fail == 0: "ALL PHASES PASSED" else: "{total_fail} CHECKS FAILED"
+    print "  Total: {total} checks — {total_pass} passed, {total_fail} failed, {total_skip} skipped"
+    print "  Result: {overall}"
+    print ""
+
+    if total_fail > 0:
+        print "  Failed checks:"
+        for r in results:
+            for err in r.errors:
+                print "    [{r.name}] {err}"
+        print ""
+
+# ============================================================================
+# Main
+# ============================================================================
+
+fn main(args: [text]):
+    val config = parse_args(args)
+
+    print "SimpleOS Full Verification v{VERSION}"
+    print "Target: {config.target}"
+    if config.dry_run:
+        print "Mode: dry-run (no builds or test execution)"
+    if config.skip_slow:
+        print "Mode: skip-slow (no toolchain builds or bootstrap)"
+
+    var results: [PhaseResult] = []
+
+    val run_all = config.phase == ""
+
+    if run_all or config.phase == "shell":
+        results.push(verify_shell(config))
+
+    if run_all or config.phase == "vcs":
+        results.push(verify_vcs(config))
+
+    if run_all or config.phase == "build-tools":
+        results.push(verify_build_tools(config))
+
+    if run_all or config.phase == "toolchain":
+        if config.skip_slow:
+            var r = PhaseResult.new("toolchain")
+            r.skipped = 1
+            print ""
+            print "  [SKIP] Toolchain phase (--skip-slow)"
+            results.push(r)
+        else:
+            results.push(verify_toolchain(config))
+
+    if run_all or config.phase == "bootstrap":
+        if config.skip_slow:
+            var r = PhaseResult.new("bootstrap")
+            r.skipped = 1
+            print ""
+            print "  [SKIP] Bootstrap phase (--skip-slow)"
+            results.push(r)
+        else:
+            results.push(verify_bootstrap(config))
+
+    print_final_summary(results)
+
+    # Exit with failure code if any phase failed
+    var any_fail = false
+    for r in results:
+        if not r.ok():
+            any_fail = true
+    if any_fail:
+        process.exit(1)

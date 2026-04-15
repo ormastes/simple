@@ -1,0 +1,153 @@
+# @tag:system
+# @tag:sys-gui-008
+#
+# System spec — SYS-GUI-008: virtio-gpu accelerated baseline capture in QEMU
+#                            (Row 4 of doc/03_plan/gui_drawing_layer_variations.md)
+#
+# ROUND-2 — entry compiles, boots under QEMU, emits render-ready marker,
+#            captures framebuffer via QMP screendump.
+#
+# Round-1 landed the ELF build gate.
+# Round-2 (this file) wires the second `it{}`:
+#   - spawn_guest_with_qmp with the virtio-gpu target
+#   - wait_for_serial_marker("[sys-gui-008] render-ready", 60s)
+#   - capture_qemu_vm -> build/os/simpleos_sys_gui_008_capture.ppm
+#   - assert file exists and the decoded pixel buffer is non-empty
+#
+# Round-3 will wire the parity diff against the sys-gui-006 PPM.
+#
+# Gating preconditions (see Round-0 plan):
+#   - sys-gui-006 bare-desktop LIVE-GREEN (Blocker 2 cleared, Round-11 done)
+#   - doc/08_tracking/todo/sys_gui_008_round0_plan_2026-04-14.md
+#
+# Guardrails:
+#   - Do NOT flip the pending Round-2 it{} to a green-wash. The
+#     [sys-gui-008] render-ready marker IS the Round-2 acceptance
+#     contract and must be waited on, not stubbed.
+#   - Keep the virtio-gpu scene deterministic — it will become the
+#     Round-3 baseline PPM.
+#
+# References:
+#   - Round-0 plan:      doc/08_tracking/todo/sys_gui_008_round0_plan_2026-04-14.md
+#   - Long-form tracker: doc/08_tracking/todo/sys_gui_008_virtio_gpu_qemu.md
+#   - Template spec:     test/system/simpleos_desktop_framebuffer_spec.spl
+#   - Entry:             examples/simple_os/arch/x86_64/sys_gui_008_entry.spl
+
+use std.spec.*
+
+use os.kernel.arch.arch_context.{Architecture}
+use os.qemu_runner.{OsTarget, build_os}
+use os.compositor.qemu_capture.{capture_qemu_vm}
+use std.nogc_sync_mut.ffi.io.{dir_create_all}
+
+use test.qemu.os.common.qemu_os_harness.{
+    can_run_target, file_exists, spawn_guest_with_qmp, stop_guest,
+    wait_for_serial_marker}
+
+extern fn rt_get_cwd() -> text
+
+# ===========================================================================
+# Helpers
+# ===========================================================================
+
+# Dedicated SYS-GUI-008 virtio-gpu target. Separate from get_gpu_test_target
+# so the baseline scene lives in sys_gui_008_entry.spl and is independent
+# of the existing gpu_test_entry verification harness.
+#
+# QEMU args mirror get_gpu_test_target's virtio-gpu setup:
+#   -device virtio-gpu,disable-modern=on,disable-legacy=off   # legacy PCI
+#   -vga none                                                 # disable VGA
+#   -device isa-debug-exit,iobase=0xf4,iosize=0x04            # exit hook
+#
+# Round-2 will append `-display none` + `-qmp unix:...` at the harness
+# layer via spawn_guest_with_qmp (not here) so unit build_os stays
+# display-agnostic.
+fn _virtio_gpu_target() -> OsTarget:
+    OsTarget(
+        arch: Architecture.X86_64,
+        entry: "examples/simple_os/arch/x86_64/sys_gui_008_entry.spl",
+        linker_script: "examples/simple_os/arch/x86_64/linker.ld",
+        target_triple: "x86_64-unknown-none",
+        output: "build/os/simpleos_sys_gui_008_x86_64.elf",
+        qemu_system: "qemu-system-x86_64",
+        qemu_machine: "q35",
+        qemu_cpu: "qemu64",
+        qemu_memory: "512M",
+        qemu_bios: "",
+        qemu_extra: [
+            "-device", "virtio-gpu,disable-modern=on,disable-legacy=off",
+            "-vga", "none",
+            "-device", "isa-debug-exit,iobase=0xf4,iosize=0x04"
+        ],
+        gui_mode: false
+    )
+
+fn _build_once(target: OsTarget) -> bool:
+    if file_exists(target.output):
+        true
+    else:
+        build_os(target)
+
+# ===========================================================================
+# Spec
+# ===========================================================================
+
+describe "SimpleOS virtio-gpu baseline (SYS-GUI-008)":
+    """SYS-GUI-008 virtio-gpu QEMU baseline spec.
+
+    Round-1 builds the entry into a baremetal ELF. Round-2 boots it under
+    QEMU, gates on the render-ready marker, and captures the scanout via
+    QMP. Round-3 will wire the PPM baseline diff.
+    See doc/08_tracking/todo/sys_gui_008_round0_plan_2026-04-14.md."""
+
+    it "builds sys_gui_008_entry.spl into a baremetal kernel via qemu_runner.build_os":
+        """Round-1 Gate 1a: entry compiles to ELF via the shared build_os pipeline."""
+        val target = _virtio_gpu_target()
+        val ok = build_os(target)
+        expect(ok).to_equal(true)
+        expect(file_exists(target.output)).to_equal(true)
+
+    it "boots virtio-gpu, waits for render-ready marker, and captures scanout via QMP (Round-2)":
+        """Round-2: spawn QEMU, gate on the render-ready serial marker, and capture a PPM via QMP."""
+        val target = _virtio_gpu_target()
+        expect(_build_once(target)).to_equal(true)
+        expect(file_exists(target.output)).to_equal(true)
+
+        if not can_run_target(target):
+            print "[sys_gui_008_spec] qemu-system-x86_64 not available, skipping live capture"
+            expect(true).to_equal(true)
+            return
+
+        val qmp_socket = "/tmp/sys_gui_008_qmp.sock"
+        val serial_log = "build/os/sys_gui_008_qemu_serial.log"
+        val _cwd = rt_get_cwd()
+        val capture_ppm = "{_cwd}/build/os/simpleos_sys_gui_008_capture.ppm"
+
+        dir_create_all("build/os")
+
+        match spawn_guest_with_qmp(target, qmp_socket, serial_log):
+            Ok(handle):
+                val saw_ready = wait_for_serial_marker(
+                    handle, "[sys-gui-008] render-ready", 60000)
+                if not saw_ready:
+                    print "[sys_gui_008_spec] render-ready marker not seen within 60s"
+                    stop_guest(handle)
+                    expect(saw_ready).to_equal(true)
+                    return
+
+                val result = capture_qemu_vm(qmp_socket, capture_ppm)
+                if not result.success:
+                    print "[sys_gui_008_spec] QMP screendump failed: {result.error}"
+                    stop_guest(handle)
+                    expect(result.success).to_equal(true)
+                    return
+
+                stop_guest(handle)
+
+                # Round-2 acceptance: live capture exists and decoded into pixels.
+                # Round-3 adds baseline commit + compare.
+                expect(file_exists(capture_ppm)).to_equal(true)
+                expect(result.pixels.len() > 0).to_equal(true)
+            Err(err):
+                print "[sys_gui_008_spec] failed to spawn guest: {err}"
+                expect(false).to_equal(true)

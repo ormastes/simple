@@ -1,0 +1,129 @@
+# URL reputation checking for the Simple Browser Platform.
+# Maintains a local threat list and checks URLs for known threats.
+
+use sbp.shared.logging.{Logger, LogLevel}
+
+enum ThreatType:
+    Malware
+    Phishing
+    Unwanted
+    Harmful
+    Safe
+
+class ThreatEntry:
+    url_pattern: text
+    threat_type: ThreatType
+    expires: i64
+
+    static fn create(url_pattern: text, threat_type: ThreatType, expires: i64) -> ThreatEntry:
+        ThreatEntry(url_pattern: url_pattern, threat_type: threat_type, expires: expires)
+
+class SafeBrowsing:
+    threat_list: [ThreatEntry]
+    exceptions: [text]
+    is_enabled: bool
+    logger: Logger
+
+    static fn new(logger: Logger) -> SafeBrowsing:
+        SafeBrowsing(
+            threat_list: [ThreatEntry](),
+            exceptions: [text](),
+            is_enabled: true,
+            logger: logger
+        )
+
+    fn check_url(url: text) -> ThreatType:
+        if not self.is_enabled:
+            return ThreatType.Safe
+        # Check user exceptions first
+        for exc in self.exceptions:
+            if url == exc:
+                return ThreatType.Safe
+        # Check against threat list
+        for entry in self.threat_list:
+            if url_matches_pattern(url, entry.url_pattern):
+                self.logger.warn("Threat detected: {self.threat_to_text(entry.threat_type)} for {url}")
+                return entry.threat_type
+        ThreatType.Safe
+
+    fn is_safe(url: text) -> bool:
+        match self.check_url(url):
+            ThreatType.Safe: true
+            _: false
+
+    me update_threat_list(entries: [ThreatEntry]):
+        self.threat_list = entries
+        self.logger.info("Threat list updated: {entries.len()} entries")
+
+    me add_threat(url_pattern: text, threat_type: ThreatType, expires: i64):
+        val entry = ThreatEntry.create(
+            url_pattern: url_pattern,
+            threat_type: threat_type,
+            expires: expires
+        )
+        self.threat_list.push(entry)
+        self.logger.debug("Threat added: {url_pattern}")
+
+    me add_exception(url: text):
+        # Check if already excepted
+        for exc in self.exceptions:
+            if exc == url:
+                return
+        self.exceptions.push(url)
+        self.logger.info("Safe browsing exception added: {url}")
+
+    me remove_exception(url: text):
+        var idx = -1
+        for i in 0..self.exceptions.len():
+            if self.exceptions[i] == url:
+                idx = i
+        if idx >= 0:
+            self.exceptions.remove(idx)
+            self.logger.debug("Safe browsing exception removed: {url}")
+
+    me enable():
+        self.is_enabled = true
+        self.logger.info("Safe browsing enabled")
+
+    me disable():
+        self.is_enabled = false
+        self.logger.warn("Safe browsing disabled")
+
+    fn get_threat_count() -> i64:
+        self.threat_list.len()
+
+    fn threat_to_text(t: ThreatType) -> text:
+        match t:
+            ThreatType.Malware: "malware"
+            ThreatType.Phishing: "phishing"
+            ThreatType.Unwanted: "unwanted"
+            ThreatType.Harmful: "harmful"
+            ThreatType.Safe: "safe"
+
+# --- Module-level URL pattern matching ---
+
+fn url_matches_pattern(url: text, pattern: text) -> bool:
+    # Simple wildcard matching: '*' matches any sequence of characters.
+    # Pattern without wildcard is an exact match.
+    if not pattern.contains("*"):
+        return url == pattern
+    # Split pattern on '*' and check that all parts appear in order
+    val parts = pattern.split("*")
+    var remaining = url
+    for i in 0..parts.len():
+        val part = parts[i]
+        if part == "":
+            continue
+        if not remaining.contains(part):
+            return false
+        val idx = remaining.index_of(part)
+        # First segment must match from the start if pattern does not start with '*'
+        if i == 0 and not pattern.starts_with("*") and idx != 0:
+            return false
+        remaining = remaining.slice(idx + part.len())
+    # Last segment must match at end if pattern does not end with '*'
+    if not pattern.ends_with("*") and parts.len() > 0:
+        val last_part = parts[parts.len() - 1]
+        if last_part != "" and not url.ends_with(last_part):
+            return false
+    true

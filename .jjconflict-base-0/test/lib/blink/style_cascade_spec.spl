@@ -1,0 +1,135 @@
+# @cover src/lib/blink/style/cascade.spl 80%
+"""
+# Style Cascade Specification
+
+**Category:** Browser / Blink
+**Status:** Active
+
+## Overview
+
+Tests for the CSS style cascade engine — parse_length_value, parse_color_value,
+parse_f64_value, apply_declaration, and resolve_style. Mirrors Blink's
+StyleResolver behaviour for a core set of CSS properties.
+"""
+
+use std.sspec.*
+use std.lib.blink.dom.node.{DomTree, dom_tree_new, NodeType}
+use std.lib.blink.entity.computed_style.{
+    ComputedStyle, Display, Position, Overflow, Visibility, TextAlign, Length,
+    computed_style_default
+}
+use std.lib.blink.css_parser.parser.{
+    CssStyleSheet, CssStyleRule, CssDeclaration
+}
+use std.lib.blink.style.cascade.{
+    parse_length_value, parse_color_value, parse_f64_value,
+    apply_declaration, resolve_style
+}
+use std.lib.skia.entity.color.{SkColor4f, sk_color4f}
+
+describe "parse_length_value":
+    it "100px returns Length with value 100 and unit px":
+        val result = parse_length_value("100px")
+        val value_ok = result.value > 99.9 && result.value < 100.1
+        val unit_ok  = result.unit == "px"
+        expect(value_ok).to_equal(true)
+        expect(unit_ok).to_equal(true)
+
+    it "empty string returns Length(0, px)":
+        val result = parse_length_value("")
+        val value_ok = result.value > -0.001 && result.value < 0.001
+        val unit_ok  = result.unit == "px"
+        expect(value_ok).to_equal(true)
+        expect(unit_ok).to_equal(true)
+
+describe "parse_color_value":
+    it "red returns opaque red":
+        val c = parse_color_value("red")
+        val r_ok = c.r > 0.99
+        val g_ok = c.g < 0.01
+        val b_ok = c.b < 0.01
+        val a_ok = c.a > 0.99
+        expect(r_ok).to_equal(true)
+        expect(g_ok).to_equal(true)
+        expect(b_ok).to_equal(true)
+        expect(a_ok).to_equal(true)
+
+    it "#ff0000 returns opaque red":
+        val c = parse_color_value("#ff0000")
+        val r_ok = c.r > 0.99
+        val g_ok = c.g < 0.01
+        val b_ok = c.b < 0.01
+        val a_ok = c.a > 0.99
+        expect(r_ok).to_equal(true)
+        expect(g_ok).to_equal(true)
+        expect(b_ok).to_equal(true)
+        expect(a_ok).to_equal(true)
+
+describe "parse_f64_value":
+    it "0.5 returns 0.5":
+        val result = parse_f64_value("0.5")
+        val ok = result > 0.49 && result < 0.51
+        expect(ok).to_equal(true)
+
+    it "invalid string returns 0.0":
+        val result = parse_f64_value("abc")
+        val ok = result > -0.001 && result < 0.001
+        expect(ok).to_equal(true)
+
+describe "apply_declaration":
+    it "color: blue sets style.color to blue":
+        val style = computed_style_default()
+        val decl = CssDeclaration(property: "color", value: "blue", important: false)
+        val updated = apply_declaration(style, decl)
+        val b_ok = updated.color.b > 0.99
+        val r_ok = updated.color.r < 0.01
+        expect(b_ok).to_equal(true)
+        expect(r_ok).to_equal(true)
+
+    it "unknown property is ignored and style is returned unchanged":
+        val style = computed_style_default()
+        val decl = CssDeclaration(property: "unknown-property", value: "whatever", important: false)
+        val updated = apply_declaration(style, decl)
+        # display should remain the default (Inline)
+        val display_ok = updated.display == Display.Inline
+        expect(display_ok).to_equal(true)
+
+describe "resolve_style":
+    it "rule matching div sets its color":
+        val tree = dom_tree_new()
+        val div_id = tree.create_element("div")
+        tree.append_child(tree.root_id, div_id)
+
+        val decl = CssDeclaration(property: "color", value: "red", important: false)
+        val decls = [CssDeclaration]()
+        decls.push(decl)
+        val rule = CssStyleRule(selector: "div", declarations: decls)
+        val rules = [CssStyleRule]()
+        rules.push(rule)
+        val sheet = CssStyleSheet(rules: rules, errors: [String]())
+
+        val parent_style = computed_style_default()
+        val result = resolve_style(tree, div_id, parent_style, sheet)
+        val r_ok = result.color.r > 0.99
+        val g_ok = result.color.g < 0.01
+        expect(r_ok).to_equal(true)
+        expect(g_ok).to_equal(true)
+
+    it "non-matching rule does not affect style":
+        val tree = dom_tree_new()
+        val span_id = tree.create_element("span")
+        tree.append_child(tree.root_id, span_id)
+
+        val decl = CssDeclaration(property: "color", value: "red", important: false)
+        val decls = [CssDeclaration]()
+        decls.push(decl)
+        val rule = CssStyleRule(selector: "div", declarations: decls)
+        val rules = [CssStyleRule]()
+        rules.push(rule)
+        val sheet = CssStyleSheet(rules: rules, errors: [String]())
+
+        val parent_style = computed_style_default()
+        val result = resolve_style(tree, span_id, parent_style, sheet)
+        # color should remain inherited from parent (default black: r=0)
+        val r_ok = result.color.r < 0.01
+        expect(r_ok).to_equal(true)

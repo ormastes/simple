@@ -1,0 +1,169 @@
+"""
+# App Dispatcher
+
+Registers as the "app" handler in the HttpServer's HandlerRegistry.
+Receives all requests routed to `handler_type: "app"` locations,
+matches them against the WebRouter, builds a ControllerContext,
+and dispatches to the appropriate controller action function.
+
+## Usage
+
+```simple
+var registry = HandlerRegistry.new()
+val dispatcher = AppDispatcher(router: router, action_map: actions)
+register_app_handler(registry, dispatcher)
+```
+"""
+
+use std.http_server.types.{HttpRequestData, HttpResponseData, LocationConfig}
+use std.http_server.response.{build_error, build_html}
+use std.http_server.handler.{HandlerRegistry}
+use std.web_framework.route_types.{RouteMatch}
+use std.web_framework.controller.{ControllerContext, make_context}
+use std.web_framework.flash.{FlashMessage, flash_get, flash_clear}
+
+# ============================================================================
+# Forward declaration: WebRouter is in router.spl
+# ============================================================================
+
+use std.web_framework.router.{WebRouter, parse_query_params}
+use std.web_framework.form_parser.{parse_request_body}
+
+# ============================================================================
+# Action Function Type
+# ============================================================================
+
+# Controller actions are registered as `fn(ControllerContext) -> HttpResponseData`
+# The action_map maps "controller_name#action_name" to the function.
+
+class AppDispatcher:
+    """Dispatches HTTP requests to controller actions via the WebRouter.
+
+    The action_map maps "controller#action" keys to handler functions.
+    """
+    router: WebRouter
+    action_map: Dict<text, fn(ControllerContext) -> HttpResponseData>
+    session_data: Dict<text, text>
+
+impl AppDispatcher:
+    static fn new(router: WebRouter) -> AppDispatcher:
+        """Create a dispatcher with an empty action map."""
+        AppDispatcher(
+            router: router,
+            action_map: {},
+            session_data: {}
+        )
+
+    me register_action(controller: text, action: text,
+                        handler: fn(ControllerContext) -> HttpResponseData) -> AppDispatcher:
+        """Register a controller action handler.
+
+        Args:
+            controller: Controller name (e.g., "posts")
+            action: Action name (e.g., "index")
+            handler: Function to handle the action
+
+        Returns:
+            Self for chaining
+        """
+        val key = "{controller}#{action}"
+        self.action_map[key] = handler
+        self
+
+    fn dispatch(request: HttpRequestData, location: LocationConfig) -> HttpResponseData:
+        """Dispatch an incoming request to the matching controller action.
+
+        Steps:
+        1. Match the request method+path against the router
+        2. Parse query params and body params
+        3. Merge all params (route + query + body)
+        4. Build ControllerContext
+        5. Look up and call the action function
+        6. Return the response
+
+        Args:
+            request: HTTP request data
+            location: Matched location config
+
+        Returns:
+            Response from the controller action, or error response
+        """
+        # Match route
+        val matched = self.router.match_route(request.method, request.path)
+        if matched == nil:
+            return build_error(404, "No route matches {request.method} {request.path}")
+
+        val route_match = matched ?? RouteMatch(
+            route: self.router.routes[0],
+            params: {}
+        )
+
+        # Parse query params
+        var params = route_match.params
+        val query_params = parse_query_params(request.query)
+        for key in query_params.keys():
+            params[key] = query_params.get(key) ?? ""
+
+        # Parse body params (URL-encoded or multipart)
+        if request.body.len() > 0:
+            val content_type = get_request_header(request, "content-type")
+            val body_params = parse_request_body(request.body, content_type)
+            for key in body_params.keys():
+                params[key] = body_params.get(key) ?? ""
+
+        # Also merge any params from the request object itself
+        for key in request.params.keys():
+            params[key] = request.params.get(key) ?? ""
+
+        # Get flash messages from session
+        val flash_messages = flash_get(self.session_data)
+
+        # Build context
+        val ctx = make_context(
+            request,
+            self.session_data,
+            flash_messages,
+            params,
+            nil
+        )
+
+        # Look up action
+        val action_key = "{route_match.route.controller_name}#{route_match.route.action_name}"
+        val action = self.action_map.get(action_key)
+        if action == nil:
+            return build_error(501, "No action registered for {action_key}")
+
+        val action_fn = action ?? default_action
+        action_fn(ctx)
+
+# ============================================================================
+# Registration
+# ============================================================================
+
+fn register_app_handler(registry: HandlerRegistry, dispatcher: AppDispatcher):
+    """Register the AppDispatcher as the "app" handler in HandlerRegistry.
+
+    Args:
+        registry: Handler registry to register with
+        dispatcher: App dispatcher to handle requests
+    """
+    val dispatch_fn = fn(request: HttpRequestData, location: LocationConfig) -> HttpResponseData:
+        dispatcher.dispatch(request, location)
+
+    registry.register("app", dispatch_fn)
+
+# ============================================================================
+# Helpers
+# ============================================================================
+
+fn default_action(ctx: ControllerContext) -> HttpResponseData:
+    """Default action that returns 501 Not Implemented."""
+    build_error(501, "Action not implemented")
+
+fn get_request_header(request: HttpRequestData, name: text) -> text:
+    """Get a header value from the request (case-insensitive)."""
+    val lower_name = name.to_lower()
+    for header in request.headers:
+        if header.0.to_lower() == lower_name:
+            return header.1
+    ""

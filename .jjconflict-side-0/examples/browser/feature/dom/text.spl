@@ -1,0 +1,174 @@
+# Text node operations — manipulation of text, comment, and character data.
+# All functions operate on a Document by node ID and delegate to NodeStore.
+# Follows the W3C CharacterData interface conventions.
+
+use examples.browser.entity.dom.node_types
+use examples.browser.feature.dom.document
+
+# --- TextOps — stateless helper for text and comment node operations ----------
+
+class TextOps:
+    pass_dn
+
+    # Get the text content of a text or comment node.
+    static fn get_data(doc: Document, node_id: i64) -> text:
+        val text_opt = doc.node_store.get_text(node_id)
+        if val Some(tn) = text_opt:
+            return tn.content
+        val comment_opt = doc.node_store.get_comment(node_id)
+        if val Some(cm) = comment_opt:
+            return cm.content
+        # Fallback to DomNode.data
+        val node_opt = doc.node_store.get_node(node_id)
+        if val Some(node) = node_opt:
+            return node.data
+        ""
+
+    # Set the text content of a text or comment node.
+    static fn set_data(doc: Document, node_id: i64, data: text):
+        val text_opt = doc.node_store.get_text(node_id)
+        if val Some(tn) = text_opt:
+            doc.node_store.update_text(node_id, TextNode(node_id: tn.node_id, content: data))
+            # Also sync DomNode.data
+            val node_opt = doc.node_store.get_node(node_id)
+            if val Some(n) = node_opt:
+                doc.node_store.update_node(node_id, DomNode(id: n.id, kind: n.kind, parent_id: n.parent_id, children: n.children, data: data))
+            return
+
+        val comment_opt = doc.node_store.get_comment(node_id)
+        if val Some(cm) = comment_opt:
+            doc.node_store.update_comment(node_id, Comment(node_id: cm.node_id, content: data))
+            val node_opt = doc.node_store.get_node(node_id)
+            if val Some(n) = node_opt:
+                doc.node_store.update_node(node_id, DomNode(id: n.id, kind: n.kind, parent_id: n.parent_id, children: n.children, data: data))
+
+    # Return the length of the text content.
+    static fn get_length(doc: Document, node_id: i64) -> i64:
+        val data = TextOps.get_data(doc, node_id)
+        data.len()
+
+    # Extract a substring from the text content.
+    static fn substringData(doc: Document, node_id: i64, offset: i64, count: i64) -> text:
+        val data = TextOps.get_data(doc, node_id)
+        val end = offset + count
+        val clamped_end = if end > data.len(): data.len() else: end
+        data.substring(offset, clamped_end)
+
+    # Append additional text to the end.
+    static fn appendData(doc: Document, node_id: i64, data: text):
+        val current = TextOps.get_data(doc, node_id)
+        TextOps.set_data(doc, node_id, current + data)
+
+    # Insert text at the given offset.
+    static fn insertData(doc: Document, node_id: i64, offset: i64, data: text):
+        val current = TextOps.get_data(doc, node_id)
+        val before = current.substring(0, offset)
+        val after = current.substring(offset, current.len())
+        TextOps.set_data(doc, node_id, before + data + after)
+
+    # Delete a range of characters starting at offset.
+    static fn deleteData(doc: Document, node_id: i64, offset: i64, count: i64):
+        val current = TextOps.get_data(doc, node_id)
+        val end = offset + count
+        val clamped_end = if end > current.len(): current.len() else: end
+        val before = current.substring(0, offset)
+        val after = current.substring(clamped_end, current.len())
+        TextOps.set_data(doc, node_id, before + after)
+
+    # Replace a range of characters with new data.
+    static fn replaceData(doc: Document, node_id: i64, offset: i64, count: i64, data: text):
+        val current = TextOps.get_data(doc, node_id)
+        val end = offset + count
+        val clamped_end = if end > current.len(): current.len() else: end
+        val before = current.substring(0, offset)
+        val after = current.substring(clamped_end, current.len())
+        TextOps.set_data(doc, node_id, before + data + after)
+
+    # Split a text node at the given offset.
+    # The original node keeps text[0..offset], a new node gets text[offset..].
+    # The new node is inserted as the next sibling. Returns the new node id.
+    static fn splitText(doc: Document, node_id: i64, offset: i64) -> i64:
+        val current = TextOps.get_data(doc, node_id)
+        val before = current.substring(0, offset)
+        val after = current.substring(offset, current.len())
+
+        # Update original node
+        TextOps.set_data(doc, node_id, before)
+
+        # Create new text node with the remainder
+        val new_id = doc.createTextNode(after)
+
+        # Insert the new node after the original in its parent's children list
+        val node_opt = doc.node_store.get_node(node_id)
+        if val Some(node) = node_opt:
+            val parent_id = node.parent_id
+            if parent_id >= 0:
+                val parent_opt = doc.node_store.get_node(parent_id)
+                if val Some(parent) = parent_opt:
+                    var new_children = [i64]()
+                    var i = 0
+                    while i < parent.children.len():
+                        val cid = parent.children.get(i)
+                        new_children.push(cid)
+                        if cid == node_id:
+                            new_children.push(new_id)
+                        i = i + 1
+                    doc.node_store.update_node(parent_id, DomNode(
+                        id: parent.id,
+                        kind: parent.kind,
+                        parent_id: parent.parent_id,
+                        children: new_children,
+                        data: parent.data
+                    ))
+                # Set parent of new node
+                val new_node = doc.node_store.get_node(new_id)
+                if val Some(nn) = new_node:
+                    doc.node_store.update_node(new_id, DomNode(
+                        id: nn.id,
+                        kind: nn.kind,
+                        parent_id: parent_id,
+                        children: nn.children,
+                        data: nn.data
+                    ))
+
+        new_id
+
+    # Normalize: merge adjacent text nodes under a parent.
+    # Empty text nodes are removed; consecutive text nodes are merged into one.
+    static fn normalize(doc: Document, parent_id: i64):
+        val parent_opt = doc.node_store.get_node(parent_id)
+        if val Some(parent) = parent_opt:
+            var new_children = [i64]()
+            var last_text_id: i64 = -1
+            var i = 0
+            while i < parent.children.len():
+                val cid = parent.children.get(i)
+                val child_opt = doc.node_store.get_node(cid)
+                if val Some(child) = child_opt:
+                    match child.kind:
+                        NodeKind.Text:
+                            val data = TextOps.get_data(doc, cid)
+                            if data.len() == 0:
+                                # Remove empty text node — skip it
+                                pass_dn
+                            else if last_text_id >= 0:
+                                # Merge with previous text node
+                                val prev_data = TextOps.get_data(doc, last_text_id)
+                                TextOps.set_data(doc, last_text_id, prev_data + data)
+                                # Do not add cid to new_children (effectively removes it)
+                            else:
+                                last_text_id = cid
+                                new_children.push(cid)
+                        _:
+                            last_text_id = -1
+                            new_children.push(cid)
+                i = i + 1
+
+            # Update parent's children list
+            doc.node_store.update_node(parent_id, DomNode(
+                id: parent.id,
+                kind: parent.kind,
+                parent_id: parent.parent_id,
+                children: new_children,
+                data: parent.data
+            ))

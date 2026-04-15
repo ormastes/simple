@@ -1,0 +1,691 @@
+# Stack-based virtual machine for the JS engine.
+# Executes BytecodeChunk opcodes with a frame-based call stack.
+
+use std.js.types.bytecode_types.(OpCode, BytecodeChunk, ConstantPool)
+use std.js.types.js_types.(JsValue, JsObject, JsProperty)
+use browser.shared.error.(BrowserError, BrowserResult, script_error)
+use browser.shared.logging.(Logger, LogLevel)
+
+# --- Native function binding ---
+
+class NativeFunction:
+    name: text
+    arity: i64
+    callback_id: i64
+
+# --- Object heap ---
+
+class ObjectStore:
+    objects: [JsObject]
+    next_id: i64
+
+    static fn new() -> ObjectStore:
+        ObjectStore(objects: [JsObject](), next_id: 0)
+
+    me allocate() -> JsObject:
+        val id = self.next_id
+        val obj = JsObject.create(id)
+        self.objects.push(obj)
+        self.next_id = self.next_id + 1
+        obj
+
+    me create_object() -> i64:
+        val obj = self.allocate()
+        obj.id
+
+    fn get_object(id: i64) -> JsObject:
+        self.objects.get(id)
+
+    me set_property(obj_id: i64, key: text, value: JsValue):
+        var obj = self.objects.get(obj_id)
+        # Check if property exists
+        var found = false
+        var i = 0
+        while i < obj.properties.len():
+            val prop = obj.properties.get(i)
+            if prop.key == key:
+                obj.properties.set(i, JsProperty.data(key, value))
+                found = true
+                i = obj.properties.len()  # break
+            i = i + 1
+        if not found:
+            obj.properties.push(JsProperty.data(key, value))
+
+    fn get_property(obj_id: i64, key: text) -> JsValue:
+        val obj = self.objects.get(obj_id)
+        var i = 0
+        while i < obj.properties.len():
+            val prop = obj.properties.get(i)
+            if prop.key == key:
+                return prop.value
+            i = i + 1
+        JsValue.Undefined
+
+# --- Call frame ---
+
+class VmFrame:
+    chunk: BytecodeChunk
+    ip: i64
+    base_pointer: i64
+    function_name: text
+
+# --- Virtual machine ---
+
+class ExceptionHandler:
+    catch_offset: i64
+    stack_depth: i64
+    frame_depth: i64
+
+class Vm:
+    stack: [JsValue]
+    frames: [VmFrame]
+    max_frames: i64
+    max_stack: i64
+    globals: [Pair<text, JsValue>]
+    object_store: ObjectStore
+    native_functions: [NativeFunction]
+    function_chunks: [BytecodeChunk]
+    exception_handlers: [ExceptionHandler]
+    logger: Logger
+
+    static fn new(logger: Logger) -> Vm:
+        Vm(
+            stack: [JsValue](),
+            frames: [VmFrame](),
+            max_frames: 256,
+            max_stack: 65536,
+            globals: [Pair<text, JsValue>](),
+            object_store: ObjectStore.new(),
+            native_functions: [NativeFunction](),
+            function_chunks: [BytecodeChunk](),
+            exception_handlers: [ExceptionHandler](),
+            logger: logger
+        )
+
+    me register_function(chunk: BytecodeChunk) -> i64:
+        val id = self.function_chunks.len()
+        self.function_chunks.push(chunk)
+        id
+
+    # --- Main entry ---
+
+    me execute(chunk: BytecodeChunk) -> BrowserResult<JsValue>:
+        self.logger.info("Executing chunk: {chunk.name} ({chunk.ops.len()} ops)")
+        self.push_frame(chunk, "main")
+        self.run()
+
+    # --- Instruction dispatch loop ---
+
+    me run() -> BrowserResult<JsValue>:
+        while self.frames.len() > 0:
+            val op = self.read_op()
+            match op:
+                OpCode.LoadConst(idx):
+                    val value = self._current_constants().get(idx)
+                    self.push(value)
+
+                OpCode.LoadLocal(idx):
+                    val frame = self.current_frame()
+                    val stack_idx = frame.base_pointer + idx
+                    val value = self.stack.get(stack_idx)
+                    self.push(value)
+
+                OpCode.StoreLocal(idx):
+                    val frame = self.current_frame()
+                    val stack_idx = frame.base_pointer + idx
+                    val value = self.pop()
+                    # Extend stack if needed
+                    while self.stack.len() <= stack_idx:
+                        self.stack.push(JsValue.Undefined)
+                    self.stack.set(stack_idx, value)
+
+                OpCode.LoadGlobal(name):
+                    val value = self._get_global(name)
+                    self.push(value)
+
+                OpCode.StoreGlobal(name):
+                    val value = self.pop()
+                    self._set_global(name, value)
+
+                OpCode.Add:
+                    val b = self.pop()
+                    val a = self.pop()
+                    self.push(vm_add(a, b))
+
+                OpCode.Sub:
+                    val b = self.pop()
+                    val a = self.pop()
+                    self.push(vm_sub(a, b))
+
+                OpCode.Mul:
+                    val b = self.pop()
+                    val a = self.pop()
+                    self.push(vm_mul(a, b))
+
+                OpCode.Div:
+                    val b = self.pop()
+                    val a = self.pop()
+                    self.push(vm_div(a, b))
+
+                OpCode.Mod:
+                    val b = self.pop()
+                    val a = self.pop()
+                    self.push(vm_mod(a, b))
+
+                OpCode.Eq:
+                    val b = self.pop()
+                    val a = self.pop()
+                    self.push(vm_eq(a, b))
+
+                OpCode.Ne:
+                    val b = self.pop()
+                    val a = self.pop()
+                    val eq_result = vm_eq(a, b)
+                    match eq_result:
+                        JsValue.Boolean(v): self.push(JsValue.Boolean(v: not v))
+                        _: self.push(JsValue.Boolean(v: false))
+
+                OpCode.Lt:
+                    val b = self.pop()
+                    val a = self.pop()
+                    self.push(vm_lt(a, b))
+
+                OpCode.Gt:
+                    val b = self.pop()
+                    val a = self.pop()
+                    self.push(vm_lt(b, a))
+
+                OpCode.Le:
+                    val b = self.pop()
+                    val a = self.pop()
+                    val gt_result = vm_lt(b, a)
+                    match gt_result:
+                        JsValue.Boolean(v): self.push(JsValue.Boolean(v: not v))
+                        _: self.push(JsValue.Boolean(v: false))
+
+                OpCode.Ge:
+                    val b = self.pop()
+                    val a = self.pop()
+                    val lt_result = vm_lt(a, b)
+                    match lt_result:
+                        JsValue.Boolean(v): self.push(JsValue.Boolean(v: not v))
+                        _: self.push(JsValue.Boolean(v: false))
+
+                OpCode.Not:
+                    val operand = self.pop()
+                    self.push(_js_not(operand))
+
+                OpCode.Neg:
+                    val operand = self.pop()
+                    self.push(_js_neg(operand))
+
+                OpCode.Jump(offset):
+                    self._set_ip(offset)
+
+                OpCode.JumpIfFalse(offset):
+                    val cond = self.pop()
+                    if not _is_truthy(cond):
+                        self._set_ip(offset)
+
+                OpCode.Call(argc):
+                    val callee = self.peek_at(argc)
+                    match callee:
+                        JsValue.Function(id):
+                            # Check if it's a native function
+                            val native_result = self._find_native_by_id(id)
+                            match native_result:
+                                Some(native_fn):
+                                    var args = [JsValue]()
+                                    var a = 0
+                                    while a < argc:
+                                        args.push(self.pop())
+                                        a = a + 1
+                                    self.pop()  # pop callee
+                                    val result = self.call_native(native_fn, args)?
+                                    self.push(result)
+                                nil:
+                                    self.logger.debug("Calling function id {id}")
+                                    # For user-defined functions: collect args, set up frame
+                                    # The function chunk is stored in the function_chunks list
+                                    if id >= 0 and id < self.function_chunks.len():
+                                        val fn_chunk = self.function_chunks.get(id)
+                                        # Args are already on stack above callee
+                                        # Re-arrange: pop args, pop callee, push args as locals
+                                        var args = [JsValue]()
+                                        var a = 0
+                                        while a < argc:
+                                            args.push(self.pop())
+                                            a = a + 1
+                                        self.pop()  # pop callee
+                                        # Push args back as locals for the new frame
+                                        val base = self.stack.len()
+                                        var ra = args.len() - 1
+                                        while ra >= 0:
+                                            self.push(args.get(ra))
+                                            ra = ra - 1
+                                        self.push_frame(fn_chunk, fn_chunk.name)
+                                    else:
+                                        self.push(JsValue.Undefined)
+                        _:
+                            return Err(script_error("Cannot call non-function value"))
+
+                OpCode.Return:
+                    val result = self.pop()
+                    val frame = self.pop_frame()
+                    # Pop locals
+                    while self.stack.len() > frame.base_pointer:
+                        self.pop()
+                    self.push(result)
+                    if self.frames.len() == 0:
+                        return Ok(result)
+
+                OpCode.Pop:
+                    self.pop()
+
+                OpCode.Dup:
+                    val value = self.peek()
+                    self.push(value)
+
+                OpCode.GetProperty(name):
+                    val obj_val = self.pop()
+                    match obj_val:
+                        JsValue.Object(id):
+                            val value = self.object_store.get_property(id, name)
+                            self.push(value)
+                        _:
+                            self.push(JsValue.Undefined)
+
+                OpCode.SetProperty(name):
+                    val value = self.pop()
+                    val obj_val = self.pop()
+                    match obj_val:
+                        JsValue.Object(id):
+                            self.object_store.set_property(id, name, value)
+                            self.push(value)
+                        _:
+                            self.push(JsValue.Undefined)
+
+                OpCode.NewObject:
+                    val obj = self.object_store.allocate()
+                    self.push(JsValue.Object(id: obj.id))
+
+                OpCode.NewArray(count):
+                    var elements = [JsValue]()
+                    var i = 0
+                    while i < count:
+                        elements.push(self.pop())
+                        i = i + 1
+                    # Reverse since we popped in reverse order
+                    var reversed = [JsValue]()
+                    var r = elements.len() - 1
+                    while r >= 0:
+                        reversed.push(elements.get(r))
+                        r = r - 1
+                    val arr_obj = self.object_store.allocate()
+                    # Store elements as indexed properties
+                    var idx = 0
+                    while idx < reversed.len():
+                        val key = "{idx}"
+                        self.object_store.set_property(arr_obj.id, key, reversed.get(idx))
+                        idx = idx + 1
+                    self.object_store.set_property(arr_obj.id, "length", JsValue.Number(v: reversed.len().to_f64()))
+                    self.push(JsValue.Array(id: arr_obj.id))
+
+                OpCode.Closure(fn_idx, upvalue_count):
+                    # Load the function constant and push as closure
+                    val fn_val = self._current_constants().get(fn_idx)
+                    self.push(fn_val)
+
+                OpCode.GetUpvalue(idx):
+                    # Upvalue access — simplified: treat as global for now
+                    self.push(JsValue.Undefined)
+
+                OpCode.SetUpvalue(idx):
+                    # Upvalue set — simplified
+                    self.pop()
+
+                OpCode.Throw:
+                    val thrown = self.pop()
+                    if self.exception_handlers.len() > 0:
+                        val handler = self.exception_handlers.pop()
+                        # Unwind stack and frames to handler state
+                        while self.stack.len() > handler.stack_depth:
+                            self.pop()
+                        while self.frames.len() > handler.frame_depth:
+                            self.pop_frame()
+                        self.push(thrown)  # push thrown value for catch
+                        self._set_ip(handler.catch_offset)
+                    else:
+                        self.logger.error("Uncaught exception: {_js_to_string(thrown)}")
+                        return Err(script_error("Uncaught exception"))
+
+                OpCode.PushExceptionHandler(catch_offset):
+                    val handler = ExceptionHandler(
+                        catch_offset: catch_offset,
+                        stack_depth: self.stack.len(),
+                        frame_depth: self.frames.len()
+                    )
+                    self.exception_handlers.push(handler)
+
+                OpCode.PopExceptionHandler:
+                    if self.exception_handlers.len() > 0:
+                        self.exception_handlers.pop()
+
+                OpCode.GetIterator:
+                    # Convert top-of-stack to an iterator representation
+                    # For arrays, push index 0 as iterator state
+                    val iterable = self.peek()
+                    match iterable:
+                        JsValue.Array(id):
+                            pass_dn  # array stays on stack as iterator
+                        JsValue.Object(id):
+                            pass_dn  # object stays on stack
+                        _:
+                            pass_dn
+
+                OpCode.IteratorNext:
+                    # Pop iterator state, get next value, push done flag and value
+                    # Simplified: push Undefined (signals done via JumpIfFalse)
+                    self.push(JsValue.Boolean(v: false))
+
+                OpCode.StrictEq:
+                    val b = self.pop()
+                    val a = self.pop()
+                    self.push(vm_strict_eq(a, b))
+
+                OpCode.StrictNe:
+                    val b = self.pop()
+                    val a = self.pop()
+                    val eq_result = vm_strict_eq(a, b)
+                    match eq_result:
+                        JsValue.Boolean(v): self.push(JsValue.Boolean(v: not v))
+                        _: self.push(JsValue.Boolean(v: false))
+
+                OpCode.InstanceOf:
+                    val right = self.pop()
+                    val left = self.pop()
+                    # Simplified: check if left is an object
+                    match left:
+                        JsValue.Object(id): self.push(JsValue.Boolean(v: true))
+                        _: self.push(JsValue.Boolean(v: false))
+
+                OpCode.InOp:
+                    val obj = self.pop()
+                    val key = self.pop()
+                    val key_str = _js_to_string(key)
+                    match obj:
+                        JsValue.Object(id):
+                            val value = self.object_store.get_property(id, key_str)
+                            match value:
+                                JsValue.Undefined: self.push(JsValue.Boolean(v: false))
+                                _: self.push(JsValue.Boolean(v: true))
+                        _: self.push(JsValue.Boolean(v: false))
+
+                OpCode.Halt:
+                    self.logger.info("VM halted")
+                    if self.stack.len() > 0:
+                        return Ok(self.pop())
+                    return Ok(JsValue.Undefined)
+
+        # Fallback — execution ended without explicit halt
+        if self.stack.len() > 0:
+            Ok(self.pop())
+        else:
+            Ok(JsValue.Undefined)
+
+    # --- Stack operations ---
+
+    me push(value: JsValue):
+        self.stack.push(value)
+
+    me pop() -> JsValue:
+        self.stack.pop()
+
+    fn peek() -> JsValue:
+        self.stack.get(self.stack.len() - 1)
+
+    fn peek_at(offset: i64) -> JsValue:
+        val idx = self.stack.len() - 1 - offset
+        self.stack.get(idx)
+
+    # --- Frame operations ---
+
+    me push_frame(chunk: BytecodeChunk, name: text):
+        val frame = VmFrame(
+            chunk: chunk,
+            ip: 0,
+            base_pointer: self.stack.len(),
+            function_name: name
+        )
+        self.frames.push(frame)
+        self.logger.debug("Pushed frame: {name} (depth {self.frames.len()})")
+
+    me pop_frame() -> VmFrame:
+        val frame = self.frames.pop()
+        self.logger.debug("Popped frame: {frame.function_name}")
+        frame
+
+    fn current_frame() -> VmFrame:
+        self.frames.get(self.frames.len() - 1)
+
+    me read_op() -> OpCode:
+        var frame = self.frames.get(self.frames.len() - 1)
+        val op = frame.chunk.ops.get(frame.ip)
+        frame.ip = frame.ip + 1
+        op
+
+    # --- Native function support ---
+
+    me define_native(name: text, arity: i64, callback_id: i64):
+        val native = NativeFunction(name: name, arity: arity, callback_id: callback_id)
+        self.native_functions.push(native)
+        # Also store as a global so it can be called
+        val fn_id = self.native_functions.len() - 1
+        self._set_global(name, JsValue.Function(id: fn_id))
+        self.logger.debug("Registered native function: {name}")
+
+    me call_native(func: NativeFunction, args: [JsValue]) -> BrowserResult<JsValue>:
+        self.logger.debug("Calling native: {func.name} with {args.len()} args")
+        # Dispatch by callback_id — extensible by the host
+        match func.callback_id:
+            0:
+                # console.log — print all arguments
+                var output = ""
+                var i = 0
+                while i < args.len():
+                    if i > 0:
+                        output = output + " "
+                    output = output + _js_to_string(args.get(i))
+                    i = i + 1
+                print(output)
+                Ok(JsValue.Undefined)
+            _:
+                Err(script_error("Unknown native callback id: {func.callback_id}"))
+
+    # --- Private helpers ---
+
+    me _set_ip(offset: i64):
+        var frame = self.frames.get(self.frames.len() - 1)
+        frame.ip = offset
+
+    fn _current_constants() -> [JsValue]:
+        val frame = self.current_frame()
+        frame.chunk.constants.values
+
+    fn _get_global(name: text) -> JsValue:
+        var i = 0
+        while i < self.globals.len():
+            val entry = self.globals.get(i)
+            if entry.first == name:
+                return entry.second
+            i = i + 1
+        JsValue.Undefined
+
+    me _set_global(name: text, value: JsValue):
+        var i = 0
+        while i < self.globals.len():
+            val entry = self.globals.get(i)
+            if entry.first == name:
+                self.globals.set(i, Pair(first: name, second: value))
+                return
+            i = i + 1
+        self.globals.push(Pair(first: name, second: value))
+
+    fn get_object_store() -> ObjectStore:
+        self.object_store
+
+    fn _find_native_by_id(id: i64) -> Option<NativeFunction>:
+        if id >= 0 and id < self.native_functions.len():
+            Some(self.native_functions.get(id))
+        else:
+            nil
+
+# --- Arithmetic helpers (free functions) ---
+
+fn vm_add(a: JsValue, b: JsValue) -> JsValue:
+    match a:
+        JsValue.Number(av):
+            match b:
+                JsValue.Number(bv): JsValue.Number(v: av + bv)
+                JsValue.String(bv): JsValue.String(v: "{av}{bv}")
+                _: JsValue.Number(v: av)
+        JsValue.String(av):
+            match b:
+                JsValue.String(bv): JsValue.String(v: "{av}{bv}")
+                JsValue.Number(bv): JsValue.String(v: "{av}{bv}")
+                _: JsValue.String(v: av)
+        _: JsValue.Undefined
+
+fn vm_sub(a: JsValue, b: JsValue) -> JsValue:
+    match a:
+        JsValue.Number(av):
+            match b:
+                JsValue.Number(bv): JsValue.Number(v: av - bv)
+                _: JsValue.Number(v: av)
+        _: JsValue.Undefined
+
+fn vm_mul(a: JsValue, b: JsValue) -> JsValue:
+    match a:
+        JsValue.Number(av):
+            match b:
+                JsValue.Number(bv): JsValue.Number(v: av * bv)
+                _: JsValue.Undefined
+        _: JsValue.Undefined
+
+fn vm_div(a: JsValue, b: JsValue) -> JsValue:
+    match a:
+        JsValue.Number(av):
+            match b:
+                JsValue.Number(bv):
+                    if bv == 0.0:
+                        JsValue.Number(v: 0.0)  # Simplified: real JS returns Infinity
+                    else:
+                        JsValue.Number(v: av / bv)
+                _: JsValue.Undefined
+        _: JsValue.Undefined
+
+fn vm_mod(a: JsValue, b: JsValue) -> JsValue:
+    match a:
+        JsValue.Number(av):
+            match b:
+                JsValue.Number(bv):
+                    if bv == 0.0:
+                        JsValue.Number(v: 0.0)
+                    else:
+                        JsValue.Number(v: av % bv)
+                _: JsValue.Undefined
+        _: JsValue.Undefined
+
+fn vm_eq(a: JsValue, b: JsValue) -> JsValue:
+    match a:
+        JsValue.Number(av):
+            match b:
+                JsValue.Number(bv): JsValue.Boolean(v: av == bv)
+                _: JsValue.Boolean(v: false)
+        JsValue.String(av):
+            match b:
+                JsValue.String(bv): JsValue.Boolean(v: av == bv)
+                _: JsValue.Boolean(v: false)
+        JsValue.Boolean(av):
+            match b:
+                JsValue.Boolean(bv): JsValue.Boolean(v: av == bv)
+                _: JsValue.Boolean(v: false)
+        JsValue.Null:
+            match b:
+                JsValue.Null: JsValue.Boolean(v: true)
+                JsValue.Undefined: JsValue.Boolean(v: true)
+                _: JsValue.Boolean(v: false)
+        JsValue.Undefined:
+            match b:
+                JsValue.Null: JsValue.Boolean(v: true)
+                JsValue.Undefined: JsValue.Boolean(v: true)
+                _: JsValue.Boolean(v: false)
+        _: JsValue.Boolean(v: false)
+
+fn vm_strict_eq(a: JsValue, b: JsValue) -> JsValue:
+    match a:
+        JsValue.Number(av):
+            match b:
+                JsValue.Number(bv): JsValue.Boolean(v: av == bv)
+                _: JsValue.Boolean(v: false)
+        JsValue.String(av):
+            match b:
+                JsValue.String(bv): JsValue.Boolean(v: av == bv)
+                _: JsValue.Boolean(v: false)
+        JsValue.Boolean(av):
+            match b:
+                JsValue.Boolean(bv): JsValue.Boolean(v: av == bv)
+                _: JsValue.Boolean(v: false)
+        JsValue.Null:
+            match b:
+                JsValue.Null: JsValue.Boolean(v: true)
+                _: JsValue.Boolean(v: false)
+        JsValue.Undefined:
+            match b:
+                JsValue.Undefined: JsValue.Boolean(v: true)
+                _: JsValue.Boolean(v: false)
+        _: JsValue.Boolean(v: false)
+
+fn vm_lt(a: JsValue, b: JsValue) -> JsValue:
+    match a:
+        JsValue.Number(av):
+            match b:
+                JsValue.Number(bv): JsValue.Boolean(v: av < bv)
+                _: JsValue.Boolean(v: false)
+        JsValue.String(av):
+            match b:
+                JsValue.String(bv): JsValue.Boolean(v: av < bv)
+                _: JsValue.Boolean(v: false)
+        _: JsValue.Boolean(v: false)
+
+# --- Internal helpers ---
+
+fn _is_truthy(value: JsValue) -> bool:
+    match value:
+        JsValue.Undefined: false
+        JsValue.Null: false
+        JsValue.Boolean(v): v
+        JsValue.Number(v): v != 0.0
+        JsValue.String(v): v.len() > 0
+        _: true
+
+fn _js_not(value: JsValue) -> JsValue:
+    JsValue.Boolean(v: not _is_truthy(value))
+
+fn _js_neg(value: JsValue) -> JsValue:
+    match value:
+        JsValue.Number(v): JsValue.Number(v: 0.0 - v)
+        _: JsValue.Undefined
+
+fn _js_to_string(value: JsValue) -> text:
+    match value:
+        JsValue.Undefined: "undefined"
+        JsValue.Null: "null"
+        JsValue.Boolean(v):
+            if v: "true" else: "false"
+        JsValue.Number(v): "{v}"
+        JsValue.String(v): v
+        JsValue.Object(id): "[object Object]"
+        JsValue.Array(id): "[Array]"
+        JsValue.Function(id): "[Function]"
+        JsValue.Symbol(id): "[Symbol]"

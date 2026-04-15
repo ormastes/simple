@@ -1,0 +1,188 @@
+#![allow(unnamed_duplicate_typed_args)]
+# WM Scene — Standard window manager scene definition
+#
+# Builds a reference WM scene (window decorations, glassmorphism panel,
+# text label, desktop chrome gradient) for pixel-level consistency testing
+# across the shared compositor capture paths.
+#
+# The scene is defined programmatically (not loaded from SDN) so that
+# both Electron HTML and compositor pixel-buffer paths render the exact
+# same logical scene.
+
+use os.compositor.browser_compositor_backend.{BrowserCompositorBackend}
+use os.compositor.glass_dispatch.{cap_blend_rect, cap_blur_region, cap_gradient_v, cap_read_pixel}
+
+# ============================================================================
+# Data Structures
+# ============================================================================
+
+struct SceneElement:
+    """A single visual element in the WM scene."""
+    kind: text          # "desktop_chrome", "decoration", "glass_panel", "text_label"
+    x: i32
+    y: i32
+    w: i32
+    h: i32
+    properties: [text]  # Key-value pairs as alternating strings
+
+struct WmSceneSpec:
+    """Specification for a standard WM scene."""
+    name: text
+    width: i32
+    height: i32
+    elements: [SceneElement]
+
+# ============================================================================
+# Scene Construction
+# ============================================================================
+
+fn standard_wm_scene(width: i32, height: i32) -> WmSceneSpec:
+    """Build the reference WM scene with standard elements.
+
+    Contains:
+    - Desktop chrome gradient (full background)
+    - Window decoration (title bar, border)
+    - Glass panel (glassmorphism frosted effect)
+    - Text label (window title text)
+    """
+    var elements: [SceneElement] = []
+
+    # 1. Desktop chrome — full-screen gradient background
+    elements = elements + [SceneElement(
+        kind: "desktop_chrome",
+        x: 0, y: 0, w: width, h: height,
+        properties: ["color_top", "0xFF1A1A2E", "color_bottom", "0xFF16213E"]
+    )]
+
+    # 2. Window decoration — centered window with title bar
+    val win_w = width * 3 / 4
+    val win_h = height * 3 / 4
+    val win_x = (width - win_w) / 2
+    val win_y = (height - win_h) / 2
+    elements = elements + [SceneElement(
+        kind: "decoration",
+        x: win_x, y: win_y, w: win_w, h: 28,
+        properties: ["color", "0xFF2D2D44", "title", "Simple WM Test Window"]
+    )]
+
+    # 3. Glass panel — frosted glass area inside the window
+    val glass_x = win_x + 10
+    val glass_y = win_y + 38
+    val glass_w = win_w - 20
+    val glass_h = win_h - 48
+    elements = elements + [SceneElement(
+        kind: "glass_panel",
+        x: glass_x, y: glass_y, w: glass_w, h: glass_h,
+        properties: ["surface_color", "0xFF303050", "alpha", "180", "blur_radius", "8"]
+    )]
+
+    # 4. Text label — centered in the glass panel
+    val text_x = glass_x + 20
+    val text_y = glass_y + 20
+    val text_w = glass_w - 40
+    val text_h = 20
+    elements = elements + [SceneElement(
+        kind: "text_label",
+        x: text_x, y: text_y, w: text_w, h: text_h,
+        properties: ["text", "Pixel Consistency Test", "fg", "0xFFFFFFFF", "bg", "0x00000000"]
+    )]
+
+    WmSceneSpec(
+        name: "standard_wm_scene",
+        width: width,
+        height: height,
+        elements: elements
+    )
+
+# ============================================================================
+# Scene Rendering to Backend
+# ============================================================================
+
+fn render_scene_to_backend(scene: WmSceneSpec, backend_opt: BrowserCompositorBackend?) -> [u32]:
+    """Render a WM scene to a BrowserCompositorBackend and return pixel buffer.
+
+    If backend_opt is nil, creates a new backend with scene dimensions.
+    Otherwise, the provided backend is reused.
+    """
+    var backend = BrowserCompositorBackend.new(scene.width, scene.height)
+    if backend_opt != nil:
+        backend = backend_opt
+
+    # Render each element
+    for elem in scene.elements:
+        if elem.kind == "desktop_chrome":
+            render_desktop_chrome(backend, elem)
+        elif elem.kind == "decoration":
+            render_decoration(backend, elem)
+        elif elem.kind == "glass_panel":
+            render_glass_panel(backend, elem)
+        elif elem.kind == "text_label":
+            render_text_label(backend, elem)
+
+    backend.get_pixel_buffer()
+
+# ============================================================================
+# Element Renderers
+# ============================================================================
+
+fn render_desktop_chrome(backend: BrowserCompositorBackend, elem: SceneElement):
+    """Render desktop chrome as vertical gradient."""
+    val color_top: u32 = 0xFF1A1A2E
+    val color_bot: u32 = 0xFF16213E
+    cap_gradient_v(backend, elem.x, elem.y, elem.w, elem.h, color_top, color_bot)
+
+fn render_decoration(backend: BrowserCompositorBackend, elem: SceneElement):
+    """Render window decoration (title bar)."""
+    val color: u32 = 0xFF2D2D44
+    backend.fill_rect(elem.x, elem.y, elem.w, elem.h, color)
+
+fn render_glass_panel(backend: BrowserCompositorBackend, elem: SceneElement):
+    """Render glassmorphism panel: blur + semi-transparent overlay."""
+    # First blur the background region
+    cap_blur_region(backend, elem.x, elem.y, elem.w, elem.h, 8)
+    # Then overlay semi-transparent surface
+    val surface_color: u32 = 0xFF303050
+    val alpha: u8 = 180
+    cap_blend_rect(backend, elem.x, elem.y, elem.w, elem.h, surface_color, alpha)
+
+fn render_text_label(backend: BrowserCompositorBackend, elem: SceneElement):
+    """Render text label using 8x16 bitmap font."""
+    val fg: u32 = 0xFFFFFFFF
+    val bg: u32 = 0x00000000
+    val text_str = get_property(elem.properties, "text", "Text")
+    backend.draw_text(elem.x, elem.y, text_str, fg, bg)
+
+fn get_property(props: [text], key: text, default_val: text) -> text:
+    """Get a property value by key from alternating key-value list."""
+    var i: i32 = 0
+    while i + 1 < props.len().to_i32():
+        if props[i] == key:
+            return props[i + 1]
+        i = i + 2
+    default_val
+
+# ============================================================================
+# HTML Conversion
+# ============================================================================
+
+fn scene_to_html(scene: WmSceneSpec) -> text:
+    """Convert a WM scene to HTML for preview/display only.
+
+    PREVIEW ONLY — not used in the pixel comparison pipeline.
+    Both comparison paths use render_scene_to_backend() for bit-identical output.
+    This function generates approximate HTML for visual inspection in a browser.
+    """
+    var body_content = ""
+
+    for elem in scene.elements:
+        if elem.kind == "desktop_chrome":
+            body_content = body_content + "  <div class=\"desktop-chrome\" style=\"position:absolute;left:{elem.x}px;top:{elem.y}px;width:{elem.w}px;height:{elem.h}px;background:linear-gradient(to bottom, #1A1A2E, #16213E);\"></div>\n"
+        elif elem.kind == "decoration":
+            body_content = body_content + "  <div class=\"decoration\" style=\"position:absolute;left:{elem.x}px;top:{elem.y}px;width:{elem.w}px;height:{elem.h}px;background:#2D2D44;font-family:monospace;color:white;padding:4px 8px;font-size:12px;\">Simple WM Test Window</div>\n"
+        elif elem.kind == "glass_panel":
+            body_content = body_content + "  <div class=\"glass-panel\" style=\"position:absolute;left:{elem.x}px;top:{elem.y}px;width:{elem.w}px;height:{elem.h}px;background:rgba(48,48,80,0.7);backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px);\"></div>\n"
+        elif elem.kind == "text_label":
+            val label_text = get_property(elem.properties, "text", "Text")
+            body_content = body_content + "  <div class=\"text-label\" style=\"position:absolute;left:{elem.x}px;top:{elem.y}px;width:{elem.w}px;height:{elem.h}px;color:white;font-family:monospace;font-size:16px;\">{label_text}</div>\n"
+
+    "<!DOCTYPE html>\n<html>\n<head>\n<meta charset=\"utf-8\">\n<style>\nbody { margin: 0; padding: 0; overflow: hidden; width: {scene.width}px; height: {scene.height}px; position: relative; }\n</style>\n</head>\n<body>\n{body_content}</body>\n</html>"

@@ -1,0 +1,267 @@
+#![allow(unnamed_duplicate_typed_args)]
+@allow(unnamed_duplicate_typed_args)
+# Core Interpreter — JIT Engine (runtime-compatible, file-backed state)
+
+extern fn rt_file_write_text(path: text, content: text) -> bool
+extern fn rt_file_read_text(path: text) -> text
+extern fn rt_file_delete(path: text) -> bool
+extern fn rt_getpid() -> i64
+
+var _jit_enabled_cached: i64 = -1
+
+class JitState:
+    threshold: i64
+    enabled: i64
+    epoch: i64
+    call_keys: [text]
+    call_vals: [i64]
+    compiled: [text]
+    used_keys: [text]
+    used_vals: [i64]
+
+fn _state_path() -> text:
+    val pid = rt_getpid()
+    "/tmp/simple_jit_{pid}.sdn"
+
+fn _find_idx(keys: [text], key: text) -> i64:
+    for i in range(0, keys.len()):
+        if keys[i] == key:
+            return i
+    -1
+
+fn _split_nonempty(s: text, sep: text) -> [text]:
+    if s == "":
+        return []
+    val parts = s.split(sep)
+    var out: [text] = []
+    for p in parts:
+        if p != "":
+            out.push(p)
+    out
+
+fn _parse_pairs(line: text) -> ([text], [i64]):
+    var keys: [text] = []
+    var vals: [i64] = []
+    val items = _split_nonempty(line, ";")
+    for item in items:
+        val eq = item.index_of("=") ?? -1
+        if eq > 0:
+            val k = item.substring(0, eq)
+            val v_str = item.substring(eq + 1)
+            val v = v_str.to_int()
+            keys.push(k)
+            vals.push(v)
+    (keys, vals)
+
+fn _encode_pairs(keys: [text], vals: [i64]) -> text:
+    var parts: [text] = []
+    for i in range(0, keys.len()):
+        parts.push(keys[i] + "=" + vals[i].to_string())
+    parts.join(";")
+
+fn _load_state() -> JitState:
+    val raw = rt_file_read_text(_state_path()) ?? ""
+    if raw == "":
+        return JitState(
+            threshold: 10,
+            enabled: 0,
+            epoch: 0,
+            call_keys: [],
+            call_vals: [],
+            compiled: [],
+            used_keys: [],
+            used_vals: []
+        )
+
+    val lines = raw.split("\n")
+    var threshold: i64 = 10
+    var enabled: i64 = 0
+    var epoch: i64 = 0
+    var calls_line = ""
+    var compiled_line = ""
+    var used_line = ""
+
+    if lines.len() > 0 and lines[0] != "":
+        threshold = lines[0].to_int()
+    if lines.len() > 1 and lines[1] != "":
+        enabled = lines[1].to_int()
+    if lines.len() > 2 and lines[2] != "":
+        epoch = lines[2].to_int()
+    if lines.len() > 3:
+        calls_line = lines[3]
+    if lines.len() > 4:
+        compiled_line = lines[4]
+    if lines.len() > 5:
+        used_line = lines[5]
+
+    val call_parsed = _parse_pairs(calls_line)
+    val used_parsed = _parse_pairs(used_line)
+
+    JitState(
+        threshold: threshold,
+        enabled: enabled,
+        epoch: epoch,
+        call_keys: call_parsed[0],
+        call_vals: call_parsed[1],
+        compiled: _split_nonempty(compiled_line, ","),
+        used_keys: used_parsed[0],
+        used_vals: used_parsed[1]
+    )
+
+fn _save_state(s: JitState):
+    val content = s.threshold.to_string() + "\n" +
+        s.enabled.to_string() + "\n" +
+        s.epoch.to_string() + "\n" +
+        _encode_pairs(s.call_keys, s.call_vals) + "\n" +
+        s.compiled.join(",") + "\n" +
+        _encode_pairs(s.used_keys, s.used_vals)
+    val ok = rt_file_write_text(_state_path(), content)
+    ok
+
+fn jit_init(threshold: i64, verbose: i64):
+    var enabled: i64 = 0
+    if threshold < 999999:
+        enabled = 1
+    val ok = _save_state(JitState(
+        threshold: threshold,
+        enabled: enabled,
+        epoch: 0,
+        call_keys: [],
+        call_vals: [],
+        compiled: [],
+        used_keys: [],
+        used_vals: []
+    ))
+    _jit_enabled_cached = enabled
+    if verbose == 1:
+        print "jit_init save={ok}"
+
+fn jit_init_with_backend(threshold: i64, verbose: i64, backend: text):
+    jit_init(threshold, verbose)
+
+fn jit_cleanup():
+    rt_file_delete(_state_path())
+
+fn jit_record_call(fn_name: text):
+    if _jit_enabled_cached == 0:
+        return
+    if _jit_enabled_cached == -1:
+        val s = _load_state()
+        _jit_enabled_cached = s.enabled
+        if _jit_enabled_cached == 0:
+            return
+    var s = _load_state()
+    if s.enabled == 0:
+        _jit_enabled_cached = 0
+        return
+    jit_mark_symbol_used(fn_name)
+    s = _load_state()
+    val idx = _find_idx(s.call_keys, fn_name)
+    if idx >= 0:
+        s.call_vals[idx] = s.call_vals[idx] + 1
+    else:
+        s.call_keys.push(fn_name)
+        s.call_vals.push(1)
+    _save_state(s)
+
+fn jit_get_call_count(fn_name: text) -> i64:
+    val s = _load_state()
+    val idx = _find_idx(s.call_keys, fn_name)
+    if idx >= 0:
+        return s.call_vals[idx]
+    0
+
+fn jit_should_compile(fn_name: text) -> bool:
+    val s = _load_state()
+    if s.enabled == 0:
+        return false
+    jit_get_call_count(fn_name) >= s.threshold
+
+fn jit_is_compiled(fn_name: text) -> bool:
+    if _jit_enabled_cached == 0:
+        return false
+    val s = _load_state()
+    s.compiled.contains(fn_name)
+
+fn jit_mark_compiled(fn_name: text):
+    var s = _load_state()
+    if not s.compiled.contains(fn_name):
+        s.compiled.push(fn_name)
+    _save_state(s)
+
+fn jit_try_compile(fn_name: text, mir_data: text) -> bool:
+    val s = _load_state()
+    if s.enabled == 0:
+        return false
+    if jit_should_compile(fn_name):
+        jit_mark_compiled(fn_name)
+        return true
+    false
+
+fn jit_try_execute(fn_name: text, args: [i64]) -> i64:
+    if jit_is_compiled(fn_name):
+        return 0
+    -1
+
+fn jit_is_enabled() -> bool:
+    if _jit_enabled_cached == 0:
+        return false
+    val s = _load_state()
+    s.enabled == 1
+
+fn jit_compiled_count() -> i64:
+    val s = _load_state()
+    s.compiled.len()
+
+fn jit_total_tracked() -> i64:
+    val s = _load_state()
+    s.call_keys.len()
+
+fn jit_mark_symbol_used(fn_name: text):
+    var s = _load_state()
+    val idx = _find_idx(s.used_keys, fn_name)
+    if idx >= 0:
+        s.used_vals[idx] = s.epoch
+    else:
+        s.used_keys.push(fn_name)
+        s.used_vals.push(s.epoch)
+    _save_state(s)
+
+fn jit_advance_epoch() -> i64:
+    var s = _load_state()
+    s.epoch = s.epoch + 1
+    _save_state(s)
+    s.epoch
+
+fn jit_get_epoch() -> i64:
+    val s = _load_state()
+    s.epoch
+
+fn jit_sweep_stale(max_age: i64) -> i64:
+    var s = _load_state()
+    val threshold = s.epoch - max_age
+    var removed: i64 = 0
+    var kept: [text] = []
+    for name in s.compiled:
+        val idx = _find_idx(s.used_keys, name)
+        if idx >= 0 and s.used_vals[idx] < threshold:
+            removed = removed + 1
+        else:
+            kept.push(name)
+    s.compiled = kept
+    _save_state(s)
+    removed
+
+fn jit_cleanup_symbol(fn_name: text):
+    var s = _load_state()
+    var kept: [text] = []
+    for name in s.compiled:
+        if name != fn_name:
+            kept.push(name)
+    s.compiled = kept
+    _save_state(s)
+
+fn jit_sweep_tracked_count() -> i64:
+    val s = _load_state()
+    s.used_keys.len()
+

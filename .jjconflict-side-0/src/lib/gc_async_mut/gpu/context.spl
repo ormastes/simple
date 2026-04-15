@@ -1,0 +1,412 @@
+# GPU Context API
+#
+# Unified interface for GPU operations across backends
+
+use std.gpu.device.{GpuBackend, Gpu, detect_backends, preferred_backend, gpu_cuda, gpu_vulkan, gpu_rocm, gpu_oneapi, gpu_metal, gpu_none}
+use std.gpu.memory.{GpuArray, gpu_alloc, gpu_alloc_upload, gpu_alloc_zeros}
+use std.torch.{TorchStream}
+use std.gpu.{GpuModule, GpuLaunchConfig, GpuError, gpu_launch}
+use std.gpu.graphics.{GpuTextureDesc, GpuTexture, GpuRenderPassDesc, GpuRenderPass, GpuPipelineDesc, GpuGraphicsPipeline, GpuSwapchainDesc, GpuSwapchain, GpuFramebuffer, GpuFormat, GpuLoadOp, GpuStoreOp, GpuBlendMode, GpuTopology}
+use std.io.vulkan_ffi.{rt_vulkan_create_render_pass, rt_vulkan_create_graphics_pipeline, rt_vulkan_create_image, rt_vulkan_destroy_image, rt_vulkan_create_swapchain, rt_vulkan_create_framebuffer, rt_vulkan_begin_render_pass_gfx, rt_vulkan_end_render_pass_gfx, rt_vulkan_bind_graphics_pipeline, rt_vulkan_draw_indexed, rt_vulkan_present}
+use std.io.metal_ffi.{rt_metal_create_texture, rt_metal_free_texture, rt_metal_begin_render_pass, rt_metal_end_render_pass, rt_metal_draw_indexed, rt_metal_present, rt_metal_create_swapchain}
+
+# ============================================================================
+# Context Type
+# ============================================================================
+
+class Context:
+    """Unified GPU context managing device, memory, and streams.
+
+    Automatically selects best available backend and provides
+    backend-agnostic API for all operations.
+
+    Example:
+        # Auto-detect best GPU
+        val ctx = Context.default()
+
+        # Allocate and upload
+        val a = ctx.alloc_upload([1.0, 2.0, 3.0, 4.0])
+        val b = ctx.alloc_upload([5.0, 6.0, 7.0, 8.0])
+
+        # Operations (future)
+        # ctx.launch(kernel, args: [a, b])
+
+        # Download results
+        val result = a.download()
+
+        # Memory auto-freed when ctx goes out of scope
+    """
+
+    backend: GpuBackend
+    device: Gpu
+    default_stream: TorchStream?
+
+    # ========================================================================
+    # Constructors
+    # ========================================================================
+
+    static fn default() -> Context:
+        """Auto-detect best backend and device.
+
+        Checks in order:
+        1. CUDA (via PyTorch) - device 0
+        2. Vulkan compute - device 0 (future)
+        3. CPU fallback
+
+        Returns:
+            Context with best available backend
+        """
+        val backend = preferred_backend()
+        match backend:
+            case GpuBackend.Cuda:
+                Context.new(backend: GpuBackend.Cuda, device: 0)
+            case GpuBackend.Rocm:
+                Context.new(backend: GpuBackend.Rocm, device: 0)
+            case GpuBackend.Metal:
+                Context.new(backend: GpuBackend.Metal, device: 0)
+            case GpuBackend.OneApi:
+                Context.new(backend: GpuBackend.OneApi, device: 0)
+            case GpuBackend.Vulkan:
+                Context.new(backend: GpuBackend.Vulkan, device: 0)
+            case GpuBackend.None:
+                Context.new(backend: GpuBackend.None, device: -1)
+
+    static fn new(backend: GpuBackend, device: i32) -> Context:
+        """Create context for specific backend and device.
+
+        Args:
+            backend: GPU backend type
+            device: Device ID (0=1st GPU, 1=2nd GPU, etc.)
+
+        Returns:
+            Context for specified backend
+
+        Example:
+            # Explicit CUDA on 2nd GPU
+            val ctx = Context.new(backend: GpuBackend.Cuda, device: 1)
+        """
+        val gpu = match backend:
+            case GpuBackend.Cuda: gpu_cuda(device)
+            case GpuBackend.Vulkan: gpu_vulkan(device)
+            case GpuBackend.Rocm: gpu_rocm(device)
+            case GpuBackend.OneApi: gpu_oneapi(device)
+            case GpuBackend.Metal: gpu_metal(device)
+            case GpuBackend.None: gpu_none()
+
+        val stream = match backend:
+            case GpuBackend.Cuda:
+                Some(TorchStream.create(device))
+            case _:
+                nil
+
+        Context(backend: backend, device: gpu, default_stream: stream)
+
+    # ========================================================================
+    # Memory Allocation
+    # ========================================================================
+
+    fn alloc[T](count: i64) -> GpuArray[T]:
+        """Allocate uninitialized array on device.
+
+        Args:
+            count: Number of elements
+
+        Returns:
+            GPU array (uninitialized)
+
+        Example:
+            val arr = ctx.alloc[f32](1024)
+        """
+        gpu_alloc[T](self.device, count)
+
+    fn alloc_upload[T](data: [T]) -> GpuArray[T]:
+        """Allocate and upload data to device (async).
+
+        Args:
+            data: Host array to upload
+
+        Returns:
+            GPU array with uploaded data
+
+        Example:
+            val arr = ctx.alloc_upload([1.0, 2.0, 3.0, 4.0])
+        """
+        gpu_alloc_upload[T](self.device, data)
+
+    fn alloc_zeros[T](count: i64) -> GpuArray[T]:
+        """Allocate zero-initialized array.
+
+        Args:
+            count: Number of elements
+
+        Returns:
+            GPU array filled with zeros
+
+        Example:
+            val arr = ctx.alloc_zeros[f32](1024)
+        """
+        gpu_alloc_zeros[T](self.device, count)
+
+    fn launch(module: GpuModule, kernel_name: text, config: GpuLaunchConfig, args_ptr: i64) -> Result<(), GpuError>:
+        """Launch a GPU kernel."""
+        gpu_launch(module, kernel_name, config, args_ptr)
+
+    # ========================================================================
+    # Synchronization
+    # ========================================================================
+
+    fn sync():
+        """Wait for all operations to complete (blocking).
+
+        Example:
+            ctx.launch(kernel, ...)
+            ctx.sync()  # Wait for kernel to finish
+        """
+        match self.default_stream:
+            case Some(s):
+                s.sync()
+            case nil:
+                self.device.sync()
+
+    # ========================================================================
+    # Stream Management
+    # ========================================================================
+
+    fn create_stream() -> TorchStream:
+        """Create new stream for async operations.
+
+        Returns:
+            New CUDA stream
+
+        Example:
+            val stream1 = ctx.create_stream()
+            val stream2 = ctx.create_stream()
+            # Use streams for parallel execution
+        """
+        match self.backend:
+            case GpuBackend.Cuda:
+                TorchStream.create(self.device.device_id)
+            case _:
+                eprint("Warning: create_stream() called on non-CUDA backend, returning dummy stream")
+                TorchStream.create(0)
+
+    # ========================================================================
+    # Device Info
+    # ========================================================================
+
+    fn backend_name() -> text:
+        """Get backend name.
+
+        Returns:
+            Backend name ("CUDA", "Vulkan", "ROCm", "oneAPI", "Metal", "CPU")
+        """
+        match self.backend:
+            case GpuBackend.Cuda: "CUDA"
+            case GpuBackend.Vulkan: "Vulkan"
+            case GpuBackend.Rocm: "ROCm"
+            case GpuBackend.OneApi: "oneAPI"
+            case GpuBackend.Metal: "Metal"
+            case GpuBackend.None: "CPU"
+
+    fn device_id() -> i32:
+        """Get device ID.
+
+        Returns:
+            Device ID, or -1 for CPU
+        """
+        self.device.device_id
+
+    # ========================================================================
+    # Cleanup
+    # ========================================================================
+
+    fn drop():
+        """Automatically free all resources when context goes out of scope."""
+        match self.default_stream:
+            case Some(s):
+                s.drop()
+            case nil:
+                ()
+
+    # ========================================================================
+    # Graphics Operations
+    # ========================================================================
+
+    me create_texture(desc: GpuTextureDesc) -> GpuTexture:
+        # Create a GPU texture. Only Vulkan and Metal support graphics.
+        match self.backend:
+            case GpuBackend.Vulkan:
+                val format_i = _gpu_format_to_i64(desc.format)
+                val usage_i = 0
+                val h = rt_vulkan_create_image(self.device.device_id, desc.width, desc.height, format_i, usage_i)
+                GpuTexture(handle: h, width: desc.width, height: desc.height, format: desc.format)
+            case GpuBackend.Metal:
+                val format_i = _gpu_format_to_i64(desc.format)
+                val h = rt_metal_create_texture(self.device.device_id, desc.width, desc.height, format_i)
+                GpuTexture(handle: h, width: desc.width, height: desc.height, format: desc.format)
+            case _:
+                GpuTexture(handle: 0, width: 0, height: 0, format: desc.format)
+
+    me destroy_texture(texture: GpuTexture):
+        match self.backend:
+            case GpuBackend.Vulkan:
+                rt_vulkan_destroy_image(texture.handle)
+            case GpuBackend.Metal:
+                rt_metal_free_texture(texture.handle)
+            case _:
+                pass_do_nothing
+
+    me create_render_pass(desc: GpuRenderPassDesc) -> GpuRenderPass:
+        match self.backend:
+            case GpuBackend.Vulkan:
+                val cf = _gpu_format_to_i64(desc.color_format)
+                val df = if desc.has_depth: _gpu_format_to_i64(desc.depth_format) else: 0
+                val lo = _load_op_to_i64(desc.load_op)
+                val so = _store_op_to_i64(desc.store_op)
+                val h = rt_vulkan_create_render_pass(self.device.device_id, cf, df, lo, so)
+                GpuRenderPass(handle: h)
+            case _:
+                GpuRenderPass(handle: 0)
+
+    me create_graphics_pipeline(desc: GpuPipelineDesc) -> GpuGraphicsPipeline:
+        match self.backend:
+            case GpuBackend.Vulkan:
+                val h = rt_vulkan_create_graphics_pipeline(self.device.device_id, desc.vertex_shader.handle, desc.fragment_shader.handle, desc.render_pass.handle, _blend_mode_to_i64(desc.blend_mode), _topology_to_i64(desc.topology))
+                GpuGraphicsPipeline(handle: h)
+            case _:
+                GpuGraphicsPipeline(handle: 0)
+
+    me create_swapchain(desc: GpuSwapchainDesc) -> GpuSwapchain:
+        match self.backend:
+            case GpuBackend.Vulkan:
+                val f = _gpu_format_to_i64(desc.format)
+                val vs = if desc.vsync: 1 else: 0
+                val h = rt_vulkan_create_swapchain(self.device.device_id, desc.window_handle, desc.width, desc.height, f, vs)
+                GpuSwapchain(handle: h, width: desc.width, height: desc.height, format: desc.format)
+            case GpuBackend.Metal:
+                val h = rt_metal_create_swapchain(self.device.device_id, desc.window_handle, desc.width, desc.height)
+                GpuSwapchain(handle: h, width: desc.width, height: desc.height, format: desc.format)
+            case _:
+                GpuSwapchain(handle: 0, width: 0, height: 0, format: desc.format)
+
+    me create_framebuffer(render_pass: GpuRenderPass, texture: GpuTexture) -> GpuFramebuffer:
+        match self.backend:
+            case GpuBackend.Vulkan:
+                val h = rt_vulkan_create_framebuffer(self.device.device_id, render_pass.handle, texture.handle, texture.width, texture.height)
+                GpuFramebuffer(handle: h, width: texture.width, height: texture.height)
+            case _:
+                GpuFramebuffer(handle: 0, width: 0, height: 0)
+
+    me begin_render_pass(render_pass: GpuRenderPass, fb: GpuFramebuffer, clear_r: f64, clear_g: f64, clear_b: f64, clear_a: f64):
+        match self.backend:
+            case GpuBackend.Vulkan:
+                rt_vulkan_begin_render_pass_gfx(0, render_pass.handle, fb.handle, clear_r, clear_g, clear_b, clear_a)
+            case GpuBackend.Metal:
+                rt_metal_begin_render_pass(0, fb.handle, clear_r, clear_g, clear_b, clear_a)
+            case _:
+                pass_do_nothing
+
+    me end_render_pass():
+        match self.backend:
+            case GpuBackend.Vulkan:
+                rt_vulkan_end_render_pass_gfx(0)
+            case GpuBackend.Metal:
+                rt_metal_end_render_pass(0)
+            case _:
+                pass_do_nothing
+
+    me bind_pipeline(pipeline: GpuGraphicsPipeline):
+        match self.backend:
+            case GpuBackend.Vulkan:
+                rt_vulkan_bind_graphics_pipeline(0, pipeline.handle)
+            case _:
+                pass_do_nothing
+
+    me draw_indexed(index_count: i64):
+        match self.backend:
+            case GpuBackend.Vulkan:
+                rt_vulkan_draw_indexed(0, index_count)
+            case GpuBackend.Metal:
+                rt_metal_draw_indexed(0, index_count, 0)
+            case _:
+                pass_do_nothing
+
+    me present(swapchain: GpuSwapchain):
+        match self.backend:
+            case GpuBackend.Vulkan:
+                rt_vulkan_present(swapchain.handle, 0)
+            case GpuBackend.Metal:
+                rt_metal_present(swapchain.handle)
+            case _:
+                pass_do_nothing
+
+# ============================================================================
+# Config Integration
+# ============================================================================
+
+fn create_context_from_config() -> Context:
+    """Create GPU context from global DL config.
+
+    Reads device from `dl.default_device` and creates appropriate context.
+
+    Returns:
+        Context matching config settings
+
+    Example:
+        use std.src.dl.config.{load_local_config}
+        use std.gpu.{create_context_from_config}
+
+        load_local_config()  # Loads dl.config.sdn
+        val ctx = create_context_from_config()  # Uses config device
+    """
+    use std.src.dl.config.{dl, Device}
+
+    match dl.default_device:
+        case Device.CPU:
+            Context.new(backend: GpuBackend.None, device: -1)
+        case Device.CUDA(id):
+            Context.new(backend: GpuBackend.Cuda, device: id)
+
+# ============================================================================
+# Graphics Format Conversion Helpers
+# ============================================================================
+
+fn _gpu_format_to_i64(format: GpuFormat) -> i64:
+    match format:
+        case RGBA8: 0
+        case BGRA8: 1
+        case RGB8: 2
+        case R8: 3
+        case Depth32F: 4
+        case Depth24Stencil8: 5
+
+fn _load_op_to_i64(op: GpuLoadOp) -> i64:
+    match op:
+        case Clear: 0
+        case Load: 1
+        case DontCare: 2
+
+fn _store_op_to_i64(op: GpuStoreOp) -> i64:
+    match op:
+        case Store: 0
+        case DontCare: 1
+
+fn _blend_mode_to_i64(mode: GpuBlendMode) -> i64:
+    match mode:
+        case Opaque: 0
+        case AlphaBlend: 1
+        case Additive: 2
+        case Multiply: 3
+
+fn _topology_to_i64(topo: GpuTopology) -> i64:
+    match topo:
+        case TriangleList: 0
+        case TriangleStrip: 1
+        case LineList: 2
+        case LineStrip: 3
+        case PointList: 4
+
+# ============================================================================
+# Exports
+# ============================================================================
+

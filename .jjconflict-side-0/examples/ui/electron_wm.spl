@@ -1,0 +1,76 @@
+# Electron Window Manager
+#
+# Launches a desktop WM in Electron with system bar, dock, and
+# multiple application windows. Uses multi-window IPC to create
+# separate Electron BrowserWindow instances for each app.
+
+use app.ui.ipc.protocol.{parse_ipc_message, build_ipc_render, build_ipc_open_window, build_ipc_close_window, build_ipc_render_window, escape_ipc_json}
+use common.ui.widget.{UIEvent}
+use app.ui.web.html.{generate_css}
+use common.ui.window.{WindowManager, WindowInfo, new_window_manager}
+
+extern fn rt_stdin_read_line() -> text?
+extern fn rt_thread_sleep(ms: i64)
+
+fn _build_desktop_html(css: text) -> text:
+    """Build the desktop chrome (system bar + dock only). Floating windows
+    live in the host Electron shell's persistent #wm-desktop container and
+    are drawn by SimpleWindowManager — do NOT include #wm-desktop here,
+    otherwise the render path would wipe the window state on every render.
+
+    The sys bar sits at the top (z below floating windows) and the dock
+    floats at the bottom. Both need pointer-events so clicks reach them."""
+    val bar_html = "<div class=\"widget-menubar\" id=\"sysbar\" style=\"position:absolute;top:0;left:0;right:0;z-index:5;pointer-events:auto;\"><span class=\"menu-item\">File</span><span class=\"menu-item\">Edit</span><span class=\"menu-item\">View</span><span class=\"menu-item\">Go</span><span class=\"menu-item\">Window</span><span class=\"menu-item\">Help</span></div>"
+    val dock_html = "<div class=\"widget-tab-bar\" id=\"dock\" style=\"position:absolute;bottom:64px;left:50%;transform:translateX(-50%);z-index:5;pointer-events:auto;\"><div class=\"tab-bar-item tab-bar-item-active\" data-action=\"app_terminal\"><span class=\"tab-bar-icon\">&gt;</span><span class=\"tab-bar-label\">Terminal</span></div><div class=\"tab-bar-item\" data-action=\"app_editor\"><span class=\"tab-bar-icon\">E</span><span class=\"tab-bar-label\">Editor</span></div><div class=\"tab-bar-item\" data-action=\"app_browser\"><span class=\"tab-bar-icon\">W</span><span class=\"tab-bar-label\">Browser</span></div><div class=\"tab-bar-item\" data-action=\"app_files\"><span class=\"tab-bar-icon\">D</span><span class=\"tab-bar-label\">Files</span></div><div class=\"tab-bar-item\" data-action=\"app_calc\"><span class=\"tab-bar-icon\">#</span><span class=\"tab-bar-label\">Calc</span></div><div class=\"tab-bar-item\" data-action=\"app_settings\"><span class=\"tab-bar-icon\">*</span><span class=\"tab-bar-label\">Settings</span></div></div>"
+    return "<html><head><style>" + css + "</style></head><body>" + bar_html + dock_html + "</body></html>"
+
+fn _build_app_html(title: text, content: text) -> text:
+    """Build HTML for an application window with inline styles."""
+    val body = "<div style=\"display:flex;flex-direction:column;height:100vh;padding:0;margin:0;background:#0A0A0F;color:#F5F5F7;font-family:Inter,-apple-system,sans-serif;\"><div style=\"padding:12px 16px;font-size:11px;text-transform:uppercase;letter-spacing:1.2px;color:#0A84FF;font-weight:650;border-bottom:1px solid rgba(255,255,255,0.08);background:linear-gradient(180deg,rgba(255,255,255,0.10),rgba(255,255,255,0.03));\">" + title + "</div><div style=\"flex:1;padding:16px;overflow:auto;white-space:pre-wrap;font-family:'Fira Code',monospace;font-size:13px;line-height:1.6;\">" + content + "</div></div>"
+    return "<html><head></head><body style=\"margin:0;\">" + body + "</body></html>"
+
+fn main() -> i64:
+    # Use the Stitch-aligned Obsidian theme (pulled from Stitch project
+    # 12496218458601315145 via mcp__stitch__list_projects on 2026-04-12).
+    # Snapshot: doc/05_design/stitch_snapshots/12496218458601315145/design_systems/obsidian_active.sdn
+    val css = generate_css("glass_obsidian_dark")
+
+    # Render desktop (system bar + dock)
+    val desktop_html = _build_desktop_html(css)
+    print build_ipc_render(desktop_html)
+
+    rt_thread_sleep(300)
+
+    # Open application windows at specific positions
+    val term_html = _build_app_html("TERMINAL", "$ simple --version\nSimple Language v0.9.5\n\n$ _")
+    print build_ipc_open_window("terminal", "Terminal", term_html, 50, 60, 600, 400)
+
+    rt_thread_sleep(100)
+
+    val editor_html = _build_app_html("EDITOR", "# hello.spl\n\nfn main() -> i64:\n    print \"Hello, World!\"\n    return 0")
+    print build_ipc_open_window("editor", "Editor", editor_html, 40, 500, 700, 400)
+
+    rt_thread_sleep(100)
+
+    val browser_html = _build_app_html("BROWSER", "Simple Language Documentation\n\nA modern systems programming language.")
+    print build_ipc_open_window("browser", "Browser", browser_html, 670, 60, 650, 450)
+
+    rt_thread_sleep(100)
+
+    val files_html = _build_app_html("FILE MANAGER", "src/\n  compiler/\n  lib/\n  app/\nexamples/\n  ui/\n  simple_os/")
+    print build_ipc_open_window("files", "File Manager", files_html, 700, 520, 550, 350)
+
+    # Main IPC loop
+    var running = true
+    while running:
+        val line = rt_stdin_read_line()
+        if line != nil and line != "":
+            val event = parse_ipc_message(line)
+            if event != nil:
+                match event:
+                    UIEvent.Quit:
+                        running = false
+                    _:
+                        pass_dn
+
+    return 0

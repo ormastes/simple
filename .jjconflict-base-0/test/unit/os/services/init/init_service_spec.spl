@@ -1,0 +1,311 @@
+"""
+# Init Service Specification
+
+**Feature IDs:** #OS-INIT
+**Category:** Infrastructure
+**Difficulty:** 3/5
+**Status:** In Progress
+
+## Overview
+
+Tests the init service manager: registration, dependency resolution
+via topological sort, dependency checking, and default service definitions.
+"""
+
+use std.spec
+use os.services.init.init_service.{
+    InitService, ServiceDef, ServiceInstance, ServiceState,
+    RestartPolicy, default_services
+}
+
+fn _launcher_ok(binary: text, priority: u8) -> Result<u64, text>:
+    if binary == "/sys/services/vfs":
+        return Ok(41)
+    if binary == "/sys/services/compositor":
+        return Ok(52)
+    Err("unknown binary")
+
+fn _launcher_err(binary: text, priority: u8) -> Result<u64, text>:
+    Err("launch failed")
+
+# ============================================================================
+# Test Group 1: InitService Initialization
+# ============================================================================
+
+describe "InitService":
+    describe "new":
+        it "starts with empty services":
+            val init = InitService.new()
+            expect(init.services.len()).to_equal(0)
+
+        it "starts with boot_complete false":
+            val init = InitService.new()
+            expect(init.boot_complete).to_equal(false)
+
+        it "accepts an injected launcher":
+            val init = InitService.with_launcher(_launcher_ok)
+            expect(init.boot_complete).to_equal(false)
+
+    # ========================================================================
+    # Test Group 2: Service Registration
+    # ========================================================================
+
+    describe "register":
+        it "adds a service":
+            var init = InitService.new()
+            val def_ = ServiceDef(
+                name: "vfs",
+                binary: "/sys/services/vfs",
+                dependencies: [],
+                capabilities: ["FileRead(/)"],
+                restart: RestartPolicy.Always,
+                priority: "high"
+            )
+            init.register(def_)
+            expect(init.services.len()).to_equal(1)
+
+        it "sets initial state to Stopped":
+            var init = InitService.new()
+            val def_ = ServiceDef(
+                name: "vfs",
+                binary: "/sys/services/vfs",
+                dependencies: [],
+                capabilities: [],
+                restart: RestartPolicy.Always,
+                priority: "high"
+            )
+            init.register(def_)
+            expect(init.services[0].state).to_equal(ServiceState.Stopped)
+
+        it "sets restart_count to zero":
+            var init = InitService.new()
+            val def_ = ServiceDef(
+                name: "vfs",
+                binary: "/sys/services/vfs",
+                dependencies: [],
+                capabilities: [],
+                restart: RestartPolicy.Always,
+                priority: "high"
+            )
+            init.register(def_)
+            expect(init.services[0].restart_count).to_equal(0)
+
+        it "registers multiple services":
+            var init = InitService.new()
+            val vfs_def = ServiceDef(
+                name: "vfs",
+                binary: "/sys/services/vfs",
+                dependencies: [],
+                capabilities: [],
+                restart: RestartPolicy.Always,
+                priority: "high"
+            )
+            val net_def = ServiceDef(
+                name: "net",
+                binary: "/sys/services/net",
+                dependencies: [],
+                capabilities: [],
+                restart: RestartPolicy.Always,
+                priority: "high"
+            )
+            init.register(vfs_def)
+            init.register(net_def)
+            expect(init.services.len()).to_equal(2)
+
+    # ========================================================================
+    # Test Group 3: Dependency Resolution (Topological Sort)
+    # ========================================================================
+
+    describe "resolve_start_order":
+        it "returns single service":
+            var init = InitService.new()
+            init.register(ServiceDef(
+                name: "vfs",
+                binary: "/sys/services/vfs",
+                dependencies: [],
+                capabilities: [],
+                restart: RestartPolicy.Always,
+                priority: "high"
+            ))
+            val order = init.resolve_start_order()
+            expect(order.len()).to_equal(1)
+            expect(order[0]).to_equal("vfs")
+
+        it "puts dependency before dependent":
+            var init = InitService.new()
+            init.register(ServiceDef(
+                name: "compositor",
+                binary: "/sys/services/compositor",
+                dependencies: ["vfs"],
+                capabilities: [],
+                restart: RestartPolicy.Always,
+                priority: "high"
+            ))
+            init.register(ServiceDef(
+                name: "vfs",
+                binary: "/sys/services/vfs",
+                dependencies: [],
+                capabilities: [],
+                restart: RestartPolicy.Always,
+                priority: "high"
+            ))
+            val order = init.resolve_start_order()
+            # vfs must come before compositor
+            var vfs_idx = -1
+            var comp_idx = -1
+            var i = 0
+            while i < order.len():
+                if order[i] == "vfs":
+                    vfs_idx = i
+                if order[i] == "compositor":
+                    comp_idx = i
+                i = i + 1
+            expect(vfs_idx).to_be_less_than(comp_idx)
+
+        it "handles multi-level dependencies":
+            var init = InitService.new()
+            init.register(ServiceDef(
+                name: "desktop",
+                binary: "/sys/apps/desktop",
+                dependencies: ["compositor", "vfs"],
+                capabilities: [],
+                restart: RestartPolicy.OnFailure,
+                priority: "normal"
+            ))
+            init.register(ServiceDef(
+                name: "compositor",
+                binary: "/sys/services/compositor",
+                dependencies: ["vfs"],
+                capabilities: [],
+                restart: RestartPolicy.Always,
+                priority: "high"
+            ))
+            init.register(ServiceDef(
+                name: "vfs",
+                binary: "/sys/services/vfs",
+                dependencies: [],
+                capabilities: [],
+                restart: RestartPolicy.Always,
+                priority: "high"
+            ))
+            val order = init.resolve_start_order()
+            expect(order.len()).to_equal(3)
+            # vfs first
+            expect(order[0]).to_equal("vfs")
+
+    # ========================================================================
+    # Test Group 4: Dependency Checking
+    # ========================================================================
+
+    describe "check_deps":
+        it "returns true for empty dependencies":
+            val init = InitService.new()
+            val result = init.check_deps([])
+            expect(result).to_equal(true)
+
+        it "returns false when dep is not running":
+            var init = InitService.new()
+            init.register(ServiceDef(
+                name: "vfs",
+                binary: "/sys/services/vfs",
+                dependencies: [],
+                capabilities: [],
+                restart: RestartPolicy.Always,
+                priority: "high"
+            ))
+            # vfs is Stopped, not Running
+            val result = init.check_deps(["vfs"])
+            expect(result).to_equal(false)
+
+        it "returns false when dep is not registered":
+            val init = InitService.new()
+            val result = init.check_deps(["nonexistent"])
+            expect(result).to_equal(false)
+
+
+# ============================================================================
+# Test Group 5: Default Services
+# ============================================================================
+
+describe "default_services":
+    it "returns 5 services":
+        val defs = default_services()
+        expect(defs.len()).to_equal(5)
+
+    it "starts with vfs":
+        val defs = default_services()
+        expect(defs[0].name).to_equal("vfs")
+
+    it "includes net":
+        val defs = default_services()
+        expect(defs[1].name).to_equal("net")
+
+    it "includes compositor depending on vfs":
+        val defs = default_services()
+        expect(defs[2].name).to_equal("compositor")
+        expect(defs[2].dependencies).to_contain("vfs")
+
+    it "includes desktop depending on compositor and vfs":
+        val defs = default_services()
+        expect(defs[3].name).to_equal("desktop")
+        expect(defs[3].dependencies).to_contain("compositor")
+        expect(defs[3].dependencies).to_contain("vfs")
+
+    it "includes llm_mcp depending on compositor, vfs, and net":
+        val defs = default_services()
+        expect(defs[4].name).to_equal("llm_mcp")
+        expect(defs[4].dependencies).to_contain("compositor")
+        expect(defs[4].dependencies).to_contain("vfs")
+        expect(defs[4].dependencies).to_contain("net")
+
+    it "vfs has no dependencies":
+        val defs = default_services()
+        expect(defs[0].dependencies.len()).to_equal(0)
+
+    it "vfs has Always restart policy":
+        val defs = default_services()
+        expect(defs[0].restart).to_equal(RestartPolicy.Always)
+
+    it "desktop has OnFailure restart policy":
+        val defs = default_services()
+        expect(defs[3].restart).to_equal(RestartPolicy.OnFailure)
+
+describe "InitService launch path":
+    it "starts a service through the binary launcher":
+        var init = InitService.with_launcher(_launcher_ok)
+        init.register(ServiceDef(
+            name: "vfs",
+            binary: "/sys/services/vfs",
+            dependencies: [],
+            capabilities: [],
+            restart: RestartPolicy.Always,
+            priority: "high"
+        ))
+        init.start_service("vfs")
+        expect(init.services[0].state).to_equal(ServiceState.Running(pid: 41))
+
+    it "fails a service when the launcher returns an error":
+        var init = InitService.with_launcher(_launcher_err)
+        init.register(ServiceDef(
+            name: "vfs",
+            binary: "/sys/services/vfs",
+            dependencies: [],
+            capabilities: [],
+            restart: RestartPolicy.Always,
+            priority: "high"
+        ))
+        init.start_service("vfs")
+        expect(init.services[0].state).to_equal(ServiceState.Failed(reason: "spawn failed"))
+
+    it "does not launch a service until dependencies are running":
+        var init = InitService.with_launcher(_launcher_ok)
+        init.register(ServiceDef(
+            name: "compositor",
+            binary: "/sys/services/compositor",
+            dependencies: ["vfs"],
+            capabilities: [],
+            restart: RestartPolicy.Always,
+            priority: "high"
+        ))
+        init.start_service("compositor")
+        expect(init.services[0].state).to_equal(ServiceState.Stopped)

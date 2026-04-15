@@ -1,0 +1,74 @@
+# Compatibility JIT compilation context surface for interpreter/test runner.
+
+use compiler.loader.compiler_ffi.{CompilerContext, TypeInfo, make_named_type, type_to_string}
+
+class TemplateBytes:
+    bytes: [u8]
+    name: text
+    param_count: i64
+
+class JitInstantiationRecord:
+    template_name: text
+    type_args: [TypeInfo]
+    mangled_name: text
+    success: bool
+    error: text?
+
+class JitCompilationContext:
+    compiler_ctx: CompilerContext
+    smf_templates: Dict<text, TemplateBytes>
+    recorded: [JitInstantiationRecord]
+
+    static fn from_smf(tmpls: Dict<text, TemplateBytes>) -> JitCompilationContext:
+        JitCompilationContext(
+            compiler_ctx: CompilerContext.create(),
+            smf_templates: tmpls,
+            recorded: []
+        )
+
+    fn load_template(name: text) -> Result<TemplateBytes, text>:
+        if self.smf_templates.contains_key(name):
+            return Ok(self.smf_templates[name])
+        Err("Template not in SMF: " + name)
+
+    fn has_template(name: text) -> bool:
+        self.smf_templates.contains_key(name)
+
+    fn contract_mode() -> text:
+        "boundary"
+
+    fn coverage_enabled() -> bool:
+        false
+
+    fn instantiation_mode() -> text:
+        "jit_time"
+
+    fn type_registry() -> Dict<text, text>:
+        {}
+
+    fn di_container():
+        nil
+
+    fn aop_weaver():
+        nil
+
+    fn compile_template(tmpl: TemplateBytes, type_args: [TypeInfo]) -> Result<TemplateBytes, text>:
+        val mangled = _mangle(tmpl.name, type_args)
+        var bytes: [u8] = []
+        for byte in (mangled + ":" + tmpl.param_count.to_string()).bytes():
+            bytes.push(byte)
+        Ok(TemplateBytes(bytes: bytes, name: mangled, param_count: tmpl.param_count))
+
+    me record_instantiation(template_name: text, type_args: [TypeInfo], mangled_name: text, success: bool, error: text?):
+        self.recorded = self.recorded.push(JitInstantiationRecord(
+            template_name: template_name,
+            type_args: type_args,
+            mangled_name: mangled_name,
+            success: success,
+            error: error
+        ))
+
+fn _mangle(name: text, type_args: [TypeInfo]) -> text:
+    if type_args.len() == 0:
+        return name
+    name + "$" + type_args.map(\arg: type_to_string(arg)).join("_")

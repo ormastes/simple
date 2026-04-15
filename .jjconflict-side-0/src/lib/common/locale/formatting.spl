@@ -1,0 +1,243 @@
+# Locale Formatting Utilities
+# Provides message translation and text formatting with placeholders.
+
+import locale::types
+
+# ============================================================================
+# MESSAGE TRANSLATION
+# ============================================================================
+
+fn create_message_key(locale_code: text, key: text) -> text:
+    # Internal: Creates a unique key for message storage.
+    locale_code + ":" + key
+
+fn load_messages(locale: (text, text, text, text), messages: text):
+    # Loads message translations for a locale.
+    # Messages format: "key1=value1\nkey2=value2\n..."
+    #
+    # Args:
+    #   locale: Target locale
+    #   messages: Newline-separated key=value pairs
+    #
+    # Example:
+    #   val msgs = "greeting=Hello\nfarewell=Goodbye"
+    #   load_messages(locale_en_us(), msgs)
+
+    var locale_code = locale_to_code(locale)
+    var lines = messages.split("\n")
+    var i = 0
+
+    # In a real implementation, this would populate a data structure
+    # For now, we append to global_messages
+    while i < lines.length():
+        var line = lines.get(i)
+        if line != "":
+            global_messages = global_messages + locale_code + ":" + line + "\n"
+        i = i + 1
+
+fn add_message(locale: (text, text, text, text), key: text, value: text):
+    # Adds a single message translation for a locale.
+    #
+    # Example:
+    #   add_message(locale_en_us(), "welcome", "Welcome!")
+
+    var locale_code = locale_to_code(locale)
+    var entry = locale_code + ":" + key + "=" + value + "\n"
+    global_messages = global_messages + entry
+
+fn translate(key: text, locale: (text, text, text, text)) -> text:
+    # Translates a message key to the target locale.
+    # Returns: Translated message or key if not found
+    #
+    # Example:
+    #   val msg = translate("greeting", locale_en_us())
+
+    var locale_code = locale_to_code(locale)
+    var search_key = locale_code + ":" + key + "="
+    var lines = global_messages.split("\n")
+    var i = 0
+
+    while i < lines.length():
+        var line = lines.get(i)
+        if line.starts_with(search_key):
+            var parts = line.split("=")
+            if parts.length() >= 2:
+                return parts.get(1)
+        i = i + 1
+
+    # Not found, return key
+    key
+
+fn translate_with_args(key: text, args: (text, text, text, text, text), locale: (text, text, text, text)) -> text:
+    # Translates a message with placeholder substitution.
+    # Placeholders: {0}, {1}, {2}, {3}, {4}
+    # Returns: Translated and formatted message
+    #
+    # Example:
+    #   add_message(locale, "welcome_user", "Welcome, {0}!")
+    #   val msg = translate_with_args("welcome_user", ("Alice", "", "", "", ""), locale)
+    #   # "Welcome, Alice!"
+
+    var template = translate(key, locale)
+
+    # Replace {0}
+    var result = template.replace("{0}", args.0)
+
+    # Replace {1}
+    if args.1 != "":
+        result = result.replace("{1}", args.1)
+
+    # Replace {2}
+    if args.2 != "":
+        result = result.replace("{2}", args.2)
+
+    # Replace {3}
+    if args.3 != "":
+        result = result.replace("{3}", args.3)
+
+    # Replace {4}
+    if args.4 != "":
+        result = result.replace("{4}", args.4)
+
+    result
+
+fn translate_with_count(key: text, count: i64, locale: (text, text, text, text)) -> text:
+    # Translates a message with count placeholder {n}.
+    # Returns: Translated message with {n} replaced by count
+    #
+    # Example:
+    #   add_message(locale, "items", "{n} items")
+    #   val msg = translate_with_count("items", 5, locale)  # "5 items"
+
+    var template = translate(key, locale)
+    var count_str = count.to_text()
+    template.replace("{n}", count_str)
+
+# ============================================================================
+# PLURALIZATION
+# ============================================================================
+
+fn plural_rule(count: i64, locale: (text, text, text, text)) -> text:
+    # Determines the plural category for a count in a locale.
+    # Returns: "zero", "one", "two", "few", "many", or "other"
+    #
+    # CLDR Plural Rules implementation for common languages
+
+    var lang = locale.0
+
+    # English, German: one (n == 1), other
+    if lang == "en" or lang == "de":
+        if count == 1: return "one"
+        return "other"
+
+    # French: one (n == 0 or n == 1), other
+    if lang == "fr":
+        if count == 0 or count == 1: return "one"
+        return "other"
+
+    # Spanish, Italian: one (n == 1), other
+    if lang == "es" or lang == "it" or lang == "pt":
+        if count == 1: return "one"
+        return "other"
+
+    # Russian: complex rules
+    if lang == "ru":
+        var mod_10 = count % 10
+        var mod_100 = count % 100
+        if mod_10 == 1 and mod_100 != 11: return "one"
+        var check1 = mod_10 >= 2 and mod_10 <= 4
+        var check2 = mod_100 < 10 or mod_100 >= 20
+        if check1 and check2: return "few"
+        return "many"
+
+    # Arabic: very complex rules (simplified)
+    if lang == "ar":
+        if count == 0: return "zero"
+        if count == 1: return "one"
+        if count == 2: return "two"
+        var mod_100 = count % 100
+        if mod_100 >= 3 and mod_100 <= 10: return "few"
+        if mod_100 >= 11: return "many"
+        return "other"
+
+    # Polish: complex rules
+    if lang == "pl":
+        if count == 1: return "one"
+        var mod_10 = count % 10
+        var mod_100 = count % 100
+        var check1 = mod_10 >= 2 and mod_10 <= 4
+        var check2 = mod_100 < 10 or mod_100 >= 20
+        if check1 and check2: return "few"
+        return "many"
+
+    # Japanese, Korean, Chinese: other (no plurals)
+    if lang == "ja" or lang == "ko" or lang == "zh":
+        return "other"
+
+    # Default: one (n == 1), other
+    if count == 1: return "one"
+    "other"
+
+fn pluralize(count: i64, forms: (text, text, text, text, text, text), locale: (text, text, text, text)) -> text:
+    # Selects the appropriate plural form for a count.
+    # Forms: (zero, one, two, few, many, other)
+    # Returns: Selected form with {n} replaced by count
+    #
+    # Example:
+    #   val forms = ("no items", "one item", "", "", "", "{n} items")
+    #   pluralize(0, forms, locale_en_us())  # "no items"
+    #   pluralize(1, forms, locale_en_us())  # "one item"
+    #   pluralize(5, forms, locale_en_us())  # "5 items"
+
+    var category = plural_rule(count, locale)
+
+    var selected = ""
+    if category == "zero": selected = forms.0
+    if category == "one": selected = forms.1
+    if category == "two": selected = forms.2
+    if category == "few": selected = forms.3
+    if category == "many": selected = forms.4
+    if category == "other": selected = forms.5
+
+    # Fallback to "other" if selected is empty
+    if selected == "":
+        selected = forms.5
+
+    # Replace {n} with count
+    var count_str = count.to_text()
+    selected.replace("{n}", count_str)
+
+# ============================================================================
+# TEXT DIRECTION
+# ============================================================================
+
+fn text_direction(locale: (text, text, text, text)) -> text:
+    # Gets the text direction for a locale.
+    # Returns: "ltr" (left-to-right) or "rtl" (right-to-left)
+    #
+    # Example:
+    #   text_direction(locale_en_us())  # "ltr"
+    #   text_direction(locale_ar_sa())  # "rtl"
+
+    var lang = locale.0
+
+    # RTL languages
+    if lang == "ar" or lang == "he" or lang == "fa" or lang == "ur":
+        return "rtl"
+
+    # Most languages are LTR
+    "ltr"
+
+fn is_rtl(locale: (text, text, text, text)) -> bool:
+    # Checks if a locale uses right-to-left text direction.
+    # Returns: true if RTL, false otherwise
+
+    var dir = text_direction(locale)
+    dir == "rtl"
+
+fn is_ltr(locale: (text, text, text, text)) -> bool:
+    # Checks if a locale uses left-to-right text direction.
+    # Returns: true if LTR, false otherwise
+
+    var dir = text_direction(locale)
+    dir == "ltr"

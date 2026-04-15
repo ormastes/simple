@@ -1,0 +1,107 @@
+# DrawQuad and SharedQuadState unit tests
+
+use std.sspec.*
+use std.skia.entity.geometry.{SkRect}
+use std.skia.entity.matrix.{Matrix3x3}
+use std.skia.entity.color.{SkColor4f}
+use std.skia.entity.enums.{SkBlendMode}
+use std.viz.entity.shared_image.{SharedImageMailbox}
+use std.viz.entity.draw_quad.{DrawQuad, DrawQuadKind, SharedQuadState}
+
+fn _rect(l: f64, t: f64, r: f64, b: f64) -> SkRect:
+    SkRect(left: l, top: t, right: r, bottom: b)
+
+fn _identity_sqs() -> SharedQuadState:
+    SharedQuadState(
+        quad_to_target_transform: Matrix3x3.identity(),
+        visible_layer_rect: _rect(0.0, 0.0, 100.0, 100.0),
+        clip_rect: _rect(0.0, 0.0, 100.0, 100.0),
+        is_clipped: false,
+        opacity: 1.0,
+        blend_mode: SkBlendMode.SrcOver,
+        sorting_context_id: 0
+    )
+
+describe "SharedQuadState":
+    it "opacity is 1.0 when built with explicit value":
+        val sqs = _identity_sqs()
+        expect sqs.opacity to_equal 1.0
+
+    it "is_clipped defaults to false":
+        val sqs = _identity_sqs()
+        expect sqs.is_clipped to_equal false
+
+describe "DrawQuad::solid_color":
+    it "sets kind to SolidColor":
+        val rect = _rect(0.0, 0.0, 50.0, 50.0)
+        val color = SkColor4f(r: 1.0, g: 0.0, b: 0.0, a: 1.0)
+        val q = DrawQuad.solid_color(0, rect, color)
+        val is_solid = match q.kind:
+            DrawQuadKind.SolidColor: true
+            _: false
+        expect is_solid to_equal true
+
+    it "carries the supplied color":
+        val rect = _rect(0.0, 0.0, 50.0, 50.0)
+        val color = SkColor4f(r: 0.5, g: 0.2, b: 0.8, a: 1.0)
+        val q = DrawQuad.solid_color(0, rect, color)
+        expect q.solid_color.r to_equal 0.5
+        expect q.solid_color.g to_equal 0.2
+
+    it "rect and visible_rect are both set to constructor rect":
+        val rect = _rect(10.0, 20.0, 60.0, 80.0)
+        val color = SkColor4f(r: 0.0, g: 0.0, b: 0.0, a: 1.0)
+        val q = DrawQuad.solid_color(2, rect, color)
+        expect q.rect.left to_equal 10.0
+        expect q.visible_rect.top to_equal 20.0
+
+describe "DrawQuad::texture":
+    it "sets kind to Texture":
+        val rect = _rect(0.0, 0.0, 100.0, 100.0)
+        val mailbox = SharedImageMailbox(bytes: [])
+        val q = DrawQuad.texture(0, rect, mailbox)
+        val is_tex = match q.kind:
+            DrawQuadKind.Texture: true
+            _: false
+        expect is_tex to_equal true
+
+    it "carries the mailbox":
+        val rect = _rect(0.0, 0.0, 100.0, 100.0)
+        val mailbox = SharedImageMailbox(bytes: [1, 2, 3])
+        val q = DrawQuad.texture(0, rect, mailbox)
+        expect q.texture_mailbox.bytes.len() to_equal 3
+
+describe "DrawQuad::render_pass":
+    it "sets kind to RenderPass":
+        val rect = _rect(0.0, 0.0, 800.0, 600.0)
+        val q = DrawQuad.render_pass(0, rect, 42)
+        val is_rp = match q.kind:
+            DrawQuadKind.RenderPass: true
+            _: false
+        expect is_rp to_equal true
+
+    it "carries the pass_id":
+        val rect = _rect(0.0, 0.0, 800.0, 600.0)
+        val q = DrawQuad.render_pass(1, rect, 99)
+        expect q.render_pass_id to_equal 99
+
+describe "DrawQuadKind":
+    it "has 6 variants distinguishable by pattern match":
+        val kinds: [DrawQuadKind] = [
+            DrawQuadKind.SolidColor,
+            DrawQuadKind.Texture,
+            DrawQuadKind.Tile,
+            DrawQuadKind.RenderPass,
+            DrawQuadKind.Video,
+            DrawQuadKind.Debug
+        ]
+        expect kinds.len() to_equal 6
+
+    it "two quads with same sqs_index have distinct rects":
+        val r1 = _rect(0.0, 0.0, 10.0, 10.0)
+        val r2 = _rect(20.0, 20.0, 30.0, 30.0)
+        val color = SkColor4f(r: 0.0, g: 0.0, b: 0.0, a: 1.0)
+        val q1 = DrawQuad.solid_color(0, r1, color)
+        val q2 = DrawQuad.solid_color(0, r2, color)
+        expect q1.rect.left to_equal 0.0
+        expect q2.rect.left to_equal 20.0

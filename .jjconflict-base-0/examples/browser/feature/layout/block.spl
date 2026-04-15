@@ -1,0 +1,530 @@
+# Block formatting context — the workhorse of CSS layout.
+# Implements the CSS 2.1 block layout algorithm: width resolution, margin
+# collapsing, vertical stacking of block children, anonymous block wrapping
+# for mixed inline/block content, and min/max size constraints.
+
+use examples.browser.entity.dom.box_types.(BoxKind, BoxModel, LayoutBox)
+use examples.browser.entity.dom.css_types.(CSSValue)
+use examples.browser.feature.style.computed.(ComputedStyle, extract_px)
+use examples.browser.feature.style.css_functions.{FunctionContext, resolve_css_function}
+use examples.browser.feature.layout.float_pos.(apply_position, FloatContext, clear_floats)
+use examples.browser.shared.logging.(Logger, LogLevel)
+
+# ---------------------------------------------------------------------------
+# LayoutContext — carries the current layout constraints through the tree.
+# ---------------------------------------------------------------------------
+
+class LayoutContext:
+    viewport_width: f64
+    viewport_height: f64
+    containing_block_width: f64
+    containing_block_height: f64
+    current_x: f64
+    current_y: f64
+    logger: Logger
+
+    static fn create(vw: f64, vh: f64, logger: Logger) -> LayoutContext:
+        LayoutContext(
+            viewport_width: vw,
+            viewport_height: vh,
+            containing_block_width: vw,
+            containing_block_height: vh,
+            current_x: 0.0,
+            current_y: 0.0,
+            logger: logger
+        )
+
+    static fn from_containing(cw: f64, ch: f64, x: f64, y: f64, vw: f64, vh: f64, logger: Logger) -> LayoutContext:
+        LayoutContext(
+            viewport_width: vw,
+            viewport_height: vh,
+            containing_block_width: cw,
+            containing_block_height: ch,
+            current_x: x,
+            current_y: y,
+            logger: logger
+        )
+
+# ---------------------------------------------------------------------------
+# BlockFormatter — performs block-level layout.
+# ---------------------------------------------------------------------------
+
+class BlockFormatter:
+    logger: Logger
+
+    static fn new(logger: Logger) -> BlockFormatter:
+        BlockFormatter(logger: logger)
+
+    # -----------------------------------------------------------------------
+    # Main entry: layout a block-level box.
+    # -----------------------------------------------------------------------
+    me layout_block(box_node: LayoutBox, style: ComputedStyle, ctx: LayoutContext) -> LayoutBox:
+        self.logger.debug("layout_block node={box_node.node_id} containing_w={ctx.containing_block_width}")
+
+        val containing_w = ctx.containing_block_width
+        val containing_h = ctx.containing_block_height
+
+        # Step 1: Apply box model — resolve margin, border, padding from style
+        var result = apply_box_model(box_node, style, containing_w)
+
+        # Step 2: Resolve width
+        val resolved_w = resolve_width(style, containing_w)
+        val bm = result.box_model
+
+        # Step 3: Resolve horizontal margins (auto margins for centering)
+        val total_horizontal = bm.padding_left + bm.border_left + resolved_w + bm.border_right + bm.padding_right
+        var ml = bm.margin_left
+        var mr = bm.margin_right
+        val margin_left_is_auto = is_auto_value(style.margin_left)
+        val margin_right_is_auto = is_auto_value(style.margin_right)
+
+        if margin_left_is_auto and margin_right_is_auto:
+            # Center the box: split remaining space equally
+            val remaining = containing_w - total_horizontal
+            val half = if remaining > 0.0: remaining / 2.0 else: 0.0
+            ml = half
+            mr = half
+        else if margin_left_is_auto:
+            val remaining = containing_w - total_horizontal - mr
+            ml = if remaining > 0.0: remaining else: 0.0
+        else if margin_right_is_auto:
+            val remaining = containing_w - total_horizontal - ml
+            mr = if remaining > 0.0: remaining else: 0.0
+
+        # Update box model with resolved margins
+        var updated_bm = BoxModel(
+            margin_top: bm.margin_top, margin_right: mr,
+            margin_bottom: bm.margin_bottom, margin_left: ml,
+            border_top: bm.border_top, border_right: bm.border_right,
+            border_bottom: bm.border_bottom, border_left: bm.border_left,
+            padding_top: bm.padding_top, padding_right: bm.padding_right,
+            padding_bottom: bm.padding_bottom, padding_left: bm.padding_left
+        )
+
+        # Step 4: Position box
+        val pos_x = ctx.current_x + ml + updated_bm.border_left + updated_bm.padding_left
+        val pos_y = ctx.current_y + updated_bm.margin_top + updated_bm.border_top + updated_bm.padding_top
+
+        result.x = ctx.current_x + ml
+        result.y = ctx.current_y + updated_bm.margin_top
+        result.width = resolved_w
+        result.box_model = updated_bm
+
+        # Step 5: Layout children
+        val children = result.children
+        val has_block = has_any_block_child(children)
+        val has_inline = has_any_inline_child(children)
+
+        # Content area starts at the top-left of padding box
+        val content_x = pos_x
+        var content_y = pos_y
+
+        var laid_out_children = [LayoutBox]()
+        var prev_margin_bottom = 0.0
+        var total_content_height = 0.0
+
+        if has_block and has_inline:
+            # Mixed content: wrap inline children in anonymous block boxes
+            val wrapped = wrap_inline_in_anonymous(children)
+            for child in wrapped:
+                # Collapse margins between adjacent blocks
+                val child_style = ComputedStyle.default_style()
+                val child_margin_top = resolve_margin(child_style.margin_top, containing_w)
+                val collapsed = collapse_margins(prev_margin_bottom, child_margin_top)
+                # Adjust y position: subtract the smaller margin (already accounted for)
+                val adjusted_y = content_y + collapsed - child_margin_top
+
+                val child_ctx = LayoutContext.from_containing(
+                    resolved_w, containing_h,
+                    content_x, adjusted_y,
+                    ctx.viewport_width, ctx.viewport_height,
+                    ctx.logger
+                )
+                val laid_out = self.layout_block(child, child_style, child_ctx)
+                val child_total_h = laid_out.box_model.margin_top + laid_out.box_model.border_top + laid_out.box_model.padding_top + laid_out.height + laid_out.box_model.padding_bottom + laid_out.box_model.border_bottom + laid_out.box_model.margin_bottom
+                content_y = laid_out.y + laid_out.box_model.border_top + laid_out.box_model.padding_top + laid_out.height + laid_out.box_model.padding_bottom + laid_out.box_model.border_bottom
+                prev_margin_bottom = laid_out.box_model.margin_bottom
+                total_content_height = content_y - pos_y
+                laid_out_children.push(laid_out)
+        else if has_block:
+            # All block children: stack vertically with margin collapsing
+            for child in children:
+                val child_bm = child.box_model
+                val child_margin_top = child_bm.margin_top
+                val collapsed = collapse_margins(prev_margin_bottom, child_margin_top)
+                val adjusted_y = content_y + collapsed - child_margin_top
+
+                val child_style = ComputedStyle.default_style()
+                val child_ctx = LayoutContext.from_containing(
+                    resolved_w, containing_h,
+                    content_x, adjusted_y,
+                    ctx.viewport_width, ctx.viewport_height,
+                    ctx.logger
+                )
+                val laid_out = self.layout_block(child, child_style, child_ctx)
+                content_y = laid_out.y + laid_out.box_model.border_top + laid_out.box_model.padding_top + laid_out.height + laid_out.box_model.padding_bottom + laid_out.box_model.border_bottom
+                prev_margin_bottom = laid_out.box_model.margin_bottom
+                total_content_height = content_y - pos_y
+                laid_out_children.push(laid_out)
+        else:
+            # All inline children or no children — inline formatting context
+            # For now, set height based on children if any
+            for child in children:
+                laid_out_children.push(child)
+            total_content_height = estimate_inline_height(children, style)
+
+        result.children = laid_out_children
+
+        # Step 6: Resolve height
+        val raw_height = resolve_height(style, containing_h, total_content_height)
+
+        # Step 7: Apply min-height, max-height constraints
+        val constrained_h = constrain_size(raw_height, style.min_height, style.max_height, containing_h)
+        result.height = constrained_h
+
+        # Step 8: Apply CSS positioning (relative/absolute/fixed/sticky)
+        if style.position != "static":
+            result = apply_position(result, style, ctx)
+
+        self.logger.debug("layout_block done node={box_node.node_id} x={result.x} y={result.y} w={result.width} h={result.height}")
+        result
+
+# ---------------------------------------------------------------------------
+# Width resolution — CSS 10.3.3 block-level, non-replaced elements.
+# ---------------------------------------------------------------------------
+
+fn resolve_width(style: ComputedStyle, containing_width: f64) -> f64:
+    val width_val = style.width
+    match width_val:
+        CSSValue.Keyword(v):
+            if v == "auto":
+                val ml = resolve_margin(style.margin_left, containing_width)
+                val mr = resolve_margin(style.margin_right, containing_width)
+                val pl = resolve_padding(style.padding_left, containing_width)
+                val pr = resolve_padding(style.padding_right, containing_width)
+                val bl = resolve_border_width(style.border_left_width)
+                val br = resolve_border_width(style.border_right_width)
+                val auto_w = containing_width - ml - mr - pl - pr - bl - br
+                if auto_w > 0.0: auto_w else: 0.0
+            else:
+                0.0
+        CSSValue.Length(v, unit):
+            resolve_length_value(v, unit, containing_width)
+        CSSValue.Percentage(v):
+            (v / 100.0) * containing_width
+        CSSValue.Number(v):
+            v
+        CSSValue.Function(name, args):
+            val ctx = FunctionContext(
+                container_size: containing_width,
+                parent_font_size: 16.0,
+                root_font_size: 16.0
+            )
+            resolve_css_function(name, args, ctx)
+        _:
+            containing_width
+
+# ---------------------------------------------------------------------------
+# Height resolution — CSS 10.6.3 block-level, non-replaced elements.
+# ---------------------------------------------------------------------------
+
+fn resolve_height(style: ComputedStyle, containing_height: f64, content_height: f64) -> f64:
+    val height_val = style.height
+    match height_val:
+        CSSValue.Keyword(v):
+            if v == "auto":
+                # Check aspect-ratio: if set and width is known, compute height
+                if style.aspect_ratio != "auto" and style.aspect_ratio != "":
+                    val ratio = parse_aspect_ratio(style.aspect_ratio)
+                    if ratio > 0.0:
+                        # width / ratio = height
+                        match style.width:
+                            CSSValue.Length(wv, _):
+                                return wv / ratio
+                            _: pass_dn
+                content_height
+            else:
+                content_height
+        CSSValue.Length(v, unit):
+            resolve_length_value(v, unit, containing_height)
+        CSSValue.Percentage(v):
+            (v / 100.0) * containing_height
+        CSSValue.Number(v):
+            v
+        CSSValue.Function(name, args):
+            val ctx = FunctionContext(
+                container_size: containing_height,
+                parent_font_size: 16.0,
+                root_font_size: 16.0
+            )
+            resolve_css_function(name, args, ctx)
+        _:
+            content_height
+
+# ---------------------------------------------------------------------------
+# Margin resolution — auto resolves to 0 for vertical, auto for horizontal
+# is handled separately in layout_block.
+# ---------------------------------------------------------------------------
+
+fn resolve_margin(value: CSSValue, containing_width: f64) -> f64:
+    match value:
+        CSSValue.Length(v, unit):
+            resolve_length_value(v, unit, containing_width)
+        CSSValue.Percentage(v):
+            (v / 100.0) * containing_width
+        CSSValue.Number(v):
+            v
+        CSSValue.Keyword(v):
+            # "auto" margin resolves to 0 in this context
+            0.0
+        _:
+            0.0
+
+# ---------------------------------------------------------------------------
+# Padding resolution — percentages resolve against containing block width.
+# ---------------------------------------------------------------------------
+
+fn resolve_padding(value: CSSValue, containing_width: f64) -> f64:
+    match value:
+        CSSValue.Length(v, unit):
+            resolve_length_value(v, unit, containing_width)
+        CSSValue.Percentage(v):
+            (v / 100.0) * containing_width
+        CSSValue.Number(v):
+            v
+        _:
+            0.0
+
+# ---------------------------------------------------------------------------
+# Border width resolution — borders cannot be percentages.
+# ---------------------------------------------------------------------------
+
+fn resolve_border_width(value: CSSValue) -> f64:
+    match value:
+        CSSValue.Length(v, unit):
+            v
+        CSSValue.Number(v):
+            v
+        CSSValue.Keyword(v):
+            match v:
+                "thin": 1.0
+                "medium": 3.0
+                "thick": 5.0
+                _: 0.0
+        _:
+            0.0
+
+# ---------------------------------------------------------------------------
+# Generic length resolution — px, em, %, auto.
+# ---------------------------------------------------------------------------
+
+fn resolve_length(value: CSSValue, reference: f64) -> f64:
+    match value:
+        CSSValue.Length(v, unit):
+            resolve_length_value(v, unit, reference)
+        CSSValue.Percentage(v):
+            (v / 100.0) * reference
+        CSSValue.Number(v):
+            v
+        CSSValue.Keyword(v):
+            0.0
+        _:
+            0.0
+
+# Internal: resolve a numeric value + unit to px.
+fn resolve_length_value(v: f64, unit: text, reference: f64) -> f64:
+    match unit:
+        "px": v
+        "em": v * 16.0
+        "rem": v * 16.0
+        "%": (v / 100.0) * reference
+        "vw": (v / 100.0) * reference
+        "vh": (v / 100.0) * reference
+        "pt": v * (96.0 / 72.0)
+        "cm": v * (96.0 / 2.54)
+        "mm": v * (96.0 / 25.4)
+        "in": v * 96.0
+        _: v
+
+# ---------------------------------------------------------------------------
+# Margin collapsing — CSS 2.1 section 8.3.1.
+# When two vertical margins meet, they collapse: the result is the larger
+# of the two (not the sum). Negative margins: take the most negative.
+# Mixed: largest positive + most negative.
+# ---------------------------------------------------------------------------
+
+fn collapse_margins(margin_a: f64, margin_b: f64) -> f64:
+    if margin_a >= 0.0 and margin_b >= 0.0:
+        # Both positive: take the larger
+        if margin_a > margin_b: margin_a else: margin_b
+    else if margin_a < 0.0 and margin_b < 0.0:
+        # Both negative: take the more negative (smaller absolute value wins... no, larger abs)
+        if margin_a < margin_b: margin_a else: margin_b
+    else:
+        # Mixed: sum of largest positive and most negative
+        margin_a + margin_b
+
+# ---------------------------------------------------------------------------
+# Anonymous block creation — wrap inline children in an anonymous block box.
+# CSS 2.1 section 9.2.1.1: when a block container has both block-level and
+# inline-level children, the inline children are wrapped in anonymous blocks.
+# ---------------------------------------------------------------------------
+
+fn create_anonymous_block(children: [LayoutBox]) -> LayoutBox:
+    var anon = LayoutBox.create(-1, BoxKind.Block)
+    anon.children = children
+    anon
+
+# Wrap inline children among block children into anonymous blocks.
+fn wrap_inline_in_anonymous(children: [LayoutBox]) -> [LayoutBox]:
+    var result = [LayoutBox]()
+    var inline_run = [LayoutBox]()
+
+    for child in children:
+        if is_block_child(child.kind):
+            # Flush any accumulated inline children as an anonymous block
+            if inline_run.len() > 0:
+                result.push(create_anonymous_block(inline_run))
+                inline_run = [LayoutBox]()
+            result.push(child)
+        else:
+            inline_run.push(child)
+
+    # Flush remaining inline children
+    if inline_run.len() > 0:
+        result.push(create_anonymous_block(inline_run))
+
+    result
+
+# ---------------------------------------------------------------------------
+# Box kind helpers.
+# ---------------------------------------------------------------------------
+
+fn is_block_child(box_kind: BoxKind) -> bool:
+    match box_kind:
+        BoxKind.Block: true
+        BoxKind.Flex: true
+        BoxKind.Grid: true
+        BoxKind.Table: true
+        _: false
+
+fn has_any_block_child(children: [LayoutBox]) -> bool:
+    for child in children:
+        if is_block_child(child.kind):
+            return true
+    return false
+
+fn has_any_inline_child(children: [LayoutBox]) -> bool:
+    for child in children:
+        if not is_block_child(child.kind):
+            return true
+    return false
+
+# ---------------------------------------------------------------------------
+# Box model application — set margin/border/padding from ComputedStyle.
+# ---------------------------------------------------------------------------
+
+fn apply_box_model(box_node: LayoutBox, style: ComputedStyle, containing_width: f64) -> LayoutBox:
+    var result = box_node
+    val mt = resolve_margin(style.margin_top, containing_width)
+    val mr = resolve_margin(style.margin_right, containing_width)
+    val mb = resolve_margin(style.margin_bottom, containing_width)
+    val ml = resolve_margin(style.margin_left, containing_width)
+
+    val pt = resolve_padding(style.padding_top, containing_width)
+    val pr = resolve_padding(style.padding_right, containing_width)
+    val pb = resolve_padding(style.padding_bottom, containing_width)
+    val pl = resolve_padding(style.padding_left, containing_width)
+
+    val bt = resolve_border_width(style.border_top_width)
+    val br = resolve_border_width(style.border_right_width)
+    val bb = resolve_border_width(style.border_bottom_width)
+    val blw = resolve_border_width(style.border_left_width)
+
+    result.box_model = BoxModel(
+        margin_top: mt, margin_right: mr, margin_bottom: mb, margin_left: ml,
+        border_top: bt, border_right: br, border_bottom: bb, border_left: blw,
+        padding_top: pt, padding_right: pr, padding_bottom: pb, padding_left: pl
+    )
+    result
+
+# ---------------------------------------------------------------------------
+# Size constraint application — min/max width/height.
+# ---------------------------------------------------------------------------
+
+fn constrain_size(size: f64, min_val: CSSValue, max_val: CSSValue, reference: f64) -> f64:
+    var result = size
+
+    # Apply min constraint
+    val min_resolved = resolve_min_max(min_val, reference)
+    if min_resolved > 0.0 and result < min_resolved:
+        result = min_resolved
+
+    # Apply max constraint
+    val max_resolved = resolve_min_max(max_val, reference)
+    if max_resolved > 0.0 and result > max_resolved:
+        result = max_resolved
+
+    result
+
+fn resolve_min_max(value: CSSValue, reference: f64) -> f64:
+    match value:
+        CSSValue.Length(v, unit):
+            resolve_length_value(v, unit, reference)
+        CSSValue.Percentage(v):
+            (v / 100.0) * reference
+        CSSValue.Number(v):
+            v
+        CSSValue.Keyword(v):
+            # "auto" and "none" mean no constraint
+            -1.0
+        _:
+            -1.0
+
+# ---------------------------------------------------------------------------
+# Helpers.
+# ---------------------------------------------------------------------------
+
+fn is_auto_value(value: CSSValue) -> bool:
+    match value:
+        CSSValue.Keyword(v):
+            v == "auto"
+        _:
+            false
+
+fn parse_aspect_ratio(value: text) -> f64:
+    """Parse aspect-ratio like '16/9' or '1.5' to a numeric ratio."""
+    val trimmed = value.trim()
+    val slash_pos = trimmed.index_of("/")
+    if slash_pos > 0:
+        val num_str = trimmed.slice(0, slash_pos).trim()
+        val den_str = trimmed.slice(slash_pos + 1, trimmed.len()).trim()
+        val num = num_str.parse_f64()
+        val den = den_str.parse_f64()
+        if num != nil and den != nil and den > 0.0:
+            return num / den
+        return 0.0
+    # Try as plain number
+    val n = trimmed.parse_f64()
+    if n != nil:
+        return n
+    0.0
+
+fn estimate_inline_height(children: [LayoutBox], style: ComputedStyle) -> f64:
+    # Simple estimate: if no children, height is 0.
+    # If children exist, use line-height as a rough estimate per child line.
+    if children.len() == 0:
+        return 0.0
+
+    val font_size = extract_px(style.font_size)
+    val lh = extract_px(style.line_height)
+    val line_height = if lh > 0.0: lh * font_size else: font_size * 1.2
+
+    # Estimate: each inline child occupies one line (very rough)
+    var total = 0.0
+    for child in children:
+        if child.height > 0.0:
+            total = total + child.height
+        else:
+            total = total + line_height
+    total

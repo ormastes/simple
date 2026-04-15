@@ -1,0 +1,81 @@
+# Star Import Lint
+#
+# Detects wildcard imports (`use module.*`) that import all symbols.
+# Wildcard imports make it hard to track where symbols come from
+# and can cause unexpected name collisions.
+#
+# W0406: Wildcard import used — prefer explicit named imports        WARNING
+#
+# Does NOT flag:
+# - Named imports (use module.{a, b, c})
+# - Re-export modules (__init__.spl, mod.spl) when using file-aware check
+#
+# Works with the arena-based core AST (integer-tagged nodes).
+
+use compiler.core.ast.{
+    DECL_USE,
+    decl_tag, decl_name, decl_imports
+}
+
+# ============================================================================
+# Warning Struct
+# ============================================================================
+
+struct StarImportWarning:
+    code: text
+    severity: text
+    message: text
+    module_path: text
+
+    fn fmt() -> text:
+        "[{self.code}] {self.severity}: {self.message} — 'use {self.module_path}.*'"
+
+# ============================================================================
+# Main Entry Points
+# ============================================================================
+
+fn check_star_import(decl_indices: [i64]) -> [StarImportWarning]:
+    """Run star-import lint on module declarations.
+
+    For each use declaration, checks whether it is a wildcard import
+    (empty import list = `use module.*`). Emits W0406 for each one.
+    """
+    var warnings: [StarImportWarning] = []
+
+    for idx in decl_indices:
+        val tag = decl_tag[idx]
+
+        # Only check use declarations
+        if tag != DECL_USE:
+            continue
+
+        val imported = decl_imports[idx]
+
+        # Wildcard imports have an empty import list
+        if imported.len() == 0:
+            val mod_path = decl_name[idx]
+            warnings.push(StarImportWarning(
+                code: "W0406",
+                severity: "WARNING",
+                message: "wildcard import — prefer explicit named imports",
+                module_path: mod_path
+            ))
+
+    warnings
+
+fn check_star_import_file(decl_indices: [i64], file_path: text) -> [StarImportWarning]:
+    """Run star-import lint with file-based filtering.
+
+    Skips the check entirely for __init__.spl and mod.spl files,
+    which are re-export facade modules where wildcard imports are expected.
+    """
+    if file_path.ends_with("__init__.spl"):
+        return []
+    if file_path.ends_with("mod.spl"):
+        return []
+    check_star_import(decl_indices)
+
+# ============================================================================
+# Exports
+# ============================================================================
+

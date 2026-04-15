@@ -1,0 +1,232 @@
+# Chromium Shell DevTools — Attach Session (V3 simple_browser shell — M10)
+#
+# Top-level façade that binds a live DOM mirror and a CSS inspector together
+# into a single object the chromium shell can "attach" to a `DesktopShell`
+# window. The session owns a small FSM — detached → attached → rendering —
+# so the devtools panel (`examples/browser/devtools_panel.spl`) can tell
+# whether it currently has a live data source behind it.
+#
+# The session API is intentionally narrow:
+#
+#   - `attach(window_id)`         — bind to a specific shell window
+#   - `detach()`                  — drop the binding
+#   - `begin_snapshot()`          — chromium shell calls this to start a
+#                                    fresh DOM / CSS snapshot
+#   - `push_element / push_text`  — forwarded to the DOM mirror
+#   - `set_style_property`        — forwarded to the CSS inspector
+#   - `select_node(id)`           — devtools panel click target
+#   - `end_snapshot()`            — flips the status to RENDERING so the
+#                                    panel knows it can read the mirror
+#
+# M10 only requires that the panel can render the live DOM tree and a
+# computed-style column; Chrome DevTools Protocol parity is explicitly
+# out of scope, so the session speaks directly to the in-process chromium
+# shell instead of exchanging wire messages.
+
+use app.ui.chromium.devtools.dom_mirror.{DevToolsDomMirror, DevToolsDomNode}
+use app.ui.chromium.devtools.css_inspector.{DevToolsCssInspector, DevToolsComputedStyle}
+
+# =========================================================================
+# Attach status constants
+# =========================================================================
+
+val DEVTOOLS_STATUS_DETACHED:  i32 = 0
+val DEVTOOLS_STATUS_ATTACHED:  i32 = 1
+val DEVTOOLS_STATUS_RENDERING: i32 = 2
+
+# =========================================================================
+# DevToolsAttachStatus
+# =========================================================================
+
+class DevToolsAttachStatus:
+    """Small wrapper over the integer status constants so callers can
+    query the session state without importing the raw integers."""
+    value: i32
+
+impl DevToolsAttachStatus:
+
+    static fn detached() -> DevToolsAttachStatus:
+        DevToolsAttachStatus(value: DEVTOOLS_STATUS_DETACHED)
+
+    static fn attached() -> DevToolsAttachStatus:
+        DevToolsAttachStatus(value: DEVTOOLS_STATUS_ATTACHED)
+
+    static fn rendering() -> DevToolsAttachStatus:
+        DevToolsAttachStatus(value: DEVTOOLS_STATUS_RENDERING)
+
+    fn is_detached() -> bool:
+        self.value == DEVTOOLS_STATUS_DETACHED
+
+    fn is_attached() -> bool:
+        self.value == DEVTOOLS_STATUS_ATTACHED
+
+    fn is_rendering() -> bool:
+        self.value == DEVTOOLS_STATUS_RENDERING
+
+    fn code() -> i32:
+        self.value
+
+    fn label() -> text:
+        if self.value == DEVTOOLS_STATUS_DETACHED:
+            "detached"
+        else:
+            if self.value == DEVTOOLS_STATUS_ATTACHED:
+                "attached"
+            else:
+                "rendering"
+
+# =========================================================================
+# DevToolsAttachSession
+# =========================================================================
+
+class DevToolsAttachSession:
+    """Live binding between the chromium shell and the devtools panel.
+
+    The session is created detached; calling `attach(window_id)` with a
+    non-negative id flips it to ATTACHED. The shell then calls
+    `begin_snapshot`, streams DOM and CSS updates, and finishes with
+    `end_snapshot`, at which point the session is in RENDERING and the
+    panel can safely read `dom()` / `css()`.
+    """
+    dom_mirror: DevToolsDomMirror
+    css_view: DevToolsCssInspector
+    status_code: i32
+    window_id: i64
+    snapshot_epoch: i64
+
+impl DevToolsAttachSession:
+
+    static fn new() -> DevToolsAttachSession:
+        DevToolsAttachSession(
+            dom_mirror: DevToolsDomMirror.new(),
+            css_view: DevToolsCssInspector.new(),
+            status_code: DEVTOOLS_STATUS_DETACHED,
+            window_id: -1,
+            snapshot_epoch: 0
+        )
+
+    # ---- status queries ------------------------------------------------
+
+    fn status() -> DevToolsAttachStatus:
+        DevToolsAttachStatus(value: self.status_code)
+
+    fn is_detached() -> bool:
+        self.status_code == DEVTOOLS_STATUS_DETACHED
+
+    fn is_attached() -> bool:
+        self.status_code != DEVTOOLS_STATUS_DETACHED
+
+    fn is_rendering() -> bool:
+        self.status_code == DEVTOOLS_STATUS_RENDERING
+
+    fn window_id_of() -> i64:
+        self.window_id
+
+    fn snapshot_epoch_of() -> i64:
+        """Return the monotonic snapshot counter. Increments once per
+        `end_snapshot` so test and wm_compare harnesses can confirm a
+        repaint was observed by the devtools panel."""
+        self.snapshot_epoch
+
+    # ---- attach / detach ----------------------------------------------
+
+    me attach(window_id: i64) -> bool:
+        """Bind the session to a shell window. Returns false if the id
+        is negative (treated as 'no window')."""
+        if window_id < 0:
+            return false
+        self.window_id = window_id
+        self.status_code = DEVTOOLS_STATUS_ATTACHED
+        true
+
+    me detach():
+        """Release the shell binding and clear the live mirrors so the
+        panel stops showing stale nodes."""
+        self.window_id = -1
+        self.status_code = DEVTOOLS_STATUS_DETACHED
+        self.dom_mirror.clear()
+        self.css_view.clear()
+
+    # ---- snapshot lifecycle -------------------------------------------
+
+    me begin_snapshot() -> bool:
+        """Start a fresh DOM / CSS snapshot pass. Returns false when the
+        session is not attached — the shell drops the snapshot on the
+        floor in that case."""
+        if not self.is_attached():
+            return false
+        self.dom_mirror.clear()
+        self.css_view.clear()
+        self.status_code = DEVTOOLS_STATUS_ATTACHED
+        true
+
+    me end_snapshot() -> bool:
+        """Finish a snapshot pass. Bumps the snapshot epoch and flips
+        the status to RENDERING so the panel can read the mirror."""
+        if not self.is_attached():
+            return false
+        self.status_code = DEVTOOLS_STATUS_RENDERING
+        self.snapshot_epoch = self.snapshot_epoch + 1
+        true
+
+    # ---- DOM forwarding -----------------------------------------------
+
+    me push_element(tag: text, depth: i32) -> i64:
+        """Forward an element push into the DOM mirror. Returns -1 if
+        the session is detached."""
+        if self.is_detached():
+            return -1
+        self.dom_mirror.push_element(tag, depth)
+
+    me push_text(value: text, depth: i32) -> i64:
+        if self.is_detached():
+            return -1
+        self.dom_mirror.push_text(value, depth)
+
+    me attach_child(parent_id: i64, child_id: i64) -> bool:
+        if self.is_detached():
+            return false
+        self.dom_mirror.attach_child(parent_id, child_id)
+
+    # ---- CSS forwarding -----------------------------------------------
+
+    me set_style_property(node_id: i64, name: text, value: text) -> bool:
+        """Record a computed-style property for a DOM node. Returns false
+        if the session is detached."""
+        if self.is_detached():
+            return false
+        self.css_view.set_property(node_id, name, value)
+        true
+
+    me select_node(node_id: i64) -> bool:
+        """Update the CSS inspector's selected node. Returns false if the
+        session is detached or the node has no computed-style block yet."""
+        if self.is_detached():
+            return false
+        self.css_view.select(node_id)
+
+    # ---- panel read-side ----------------------------------------------
+
+    fn dom() -> DevToolsDomMirror:
+        """Return the live DOM mirror for the panel to iterate."""
+        self.dom_mirror
+
+    fn css() -> DevToolsCssInspector:
+        """Return the CSS inspector view for the panel to render."""
+        self.css_view
+
+    fn dom_node_count() -> i32:
+        self.dom_mirror.count()
+
+    fn dom_root_id() -> i64:
+        self.dom_mirror.root_id_of()
+
+    fn dom_labels() -> [text]:
+        """Return the flattened DOM labels so the panel can render the
+        tree column without touching the mirror directly."""
+        self.dom_mirror.flattened_labels()
+
+    fn selected_style_lines() -> [text]:
+        """Return the formatted property lines for the CSS inspector's
+        current selection, or an empty list if nothing is selected."""
+        self.css_view.selected_lines()

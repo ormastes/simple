@@ -1,0 +1,245 @@
+@allow(primitive_api)
+# Remote JIT Execution Types
+#
+# Core types for the remote JIT execution pipeline:
+# compile on host -> upload to target -> execute -> collect results.
+#
+# Feature IDs: #RJE-001 through #RJE-006
+# Design: doc/05_design/remote_jit_impl.md
+
+use std.nogc_sync_mut.debug.remote.types.{Architecture, HaltReason}
+
+# ============================================================================
+# Memory Layout
+# ============================================================================
+
+class MemoryMap:
+    """Target memory layout for code upload and execution."""
+    code_start: i64
+    code_end: i64
+    data_start: i64
+    data_end: i64
+    stack_top: i64
+    allow_expand: bool
+
+    fn code_capacity() -> i64:
+        self.code_end - self.code_start
+
+    fn data_capacity() -> i64:
+        self.data_end - self.data_start
+
+    static fn qemu_rv32() -> MemoryMap:
+        MemoryMap(
+            code_start: 0x80010000,
+            code_end: 0x80100000,
+            data_start: 0x80100000,
+            data_end: 0x80200000,
+            stack_top: 0x80200000,
+            allow_expand: false
+        )
+
+    static fn qemu_arm() -> MemoryMap:
+        MemoryMap(
+            code_start: 0x40010000,
+            code_end: 0x40100000,
+            data_start: 0x40100000,
+            data_end: 0x40200000,
+            stack_top: 0x40200000,
+            allow_expand: false
+        )
+
+    static fn stm32h7() -> MemoryMap:
+        MemoryMap(
+            code_start: 0x24010000,
+            code_end: 0x24080000,
+            data_start: 0x24080000,
+            data_end: 0x240C0000,
+            stack_top: 0x240C0000,
+            allow_expand: false
+        )
+
+    static fn stm32wb() -> MemoryMap:
+        MemoryMap(
+            code_start: 0x20008000,
+            code_end: 0x20030000,
+            data_start: 0x20030000,
+            data_end: 0x20040000,
+            stack_top: 0x20040000,
+            allow_expand: false
+        )
+
+    static fn ch32v307() -> MemoryMap:
+        MemoryMap(
+            code_start: 0x20002000,
+            code_end: 0x20008000,
+            data_start: 0x20008000,
+            data_end: 0x2000C000,
+            stack_top: 0x2000C000,
+            allow_expand: false
+        )
+
+    static fn ghdl_rv32() -> MemoryMap:
+        MemoryMap(
+            code_start: 0x80010000,
+            code_end: 0x80100000,
+            data_start: 0x80100000,
+            data_end: 0x80200000,
+            stack_top: 0x80200000,
+            allow_expand: false
+        )
+
+# ============================================================================
+# Code Info
+# ============================================================================
+
+class CodeInfo:
+    """Metadata about uploaded code on the target."""
+    name: text
+    addr: i64
+    size: i64
+    entry_point: i64
+
+# ============================================================================
+# Execution Result
+# ============================================================================
+
+class ExecResult:
+    """Result of executing uploaded code on the target."""
+    return_value: i64
+    duration_ms: i64
+    halt_reason: text
+    error: text
+
+    fn is_ok() -> bool:
+        self.error == ""
+
+    static fn success(value: i64, duration: i64, reason: text) -> ExecResult:
+        ExecResult(return_value: value, duration_ms: duration, halt_reason: reason, error: "")
+
+    static fn failure(msg: text) -> ExecResult:
+        ExecResult(return_value: 0, duration_ms: 0, halt_reason: "error", error: msg)
+
+# ============================================================================
+# Halt Instructions
+# ============================================================================
+
+val EBREAK_RV32: i64 = 0x00100073
+val BKPT_ARM: i64 = 0xBE00
+
+fn halt_instruction_for(arch: Architecture) -> i64:
+    match arch:
+        Architecture.RiscV32: EBREAK_RV32
+        Architecture.Arm32: BKPT_ARM
+        _: EBREAK_RV32
+
+fn halt_instruction_size(arch: Architecture) -> i64:
+    match arch:
+        Architecture.Arm32: 2
+        _: 4
+
+# ============================================================================
+# Register Indices
+# ============================================================================
+
+fn pc_register_index(arch: Architecture) -> i64:
+    match arch:
+        Architecture.RiscV32: 32
+        Architecture.Arm32: 15
+        _: 32
+
+fn sp_register_index(arch: Architecture) -> i64:
+    match arch:
+        Architecture.RiscV32: 2
+        Architecture.Arm32: 13
+        _: 2
+
+fn return_register_index(arch: Architecture) -> i64:
+    match arch:
+        Architecture.RiscV32: 10
+        Architecture.Arm32: 0
+        _: 10
+
+fn link_register_index(arch: Architecture) -> i64:
+    match arch:
+        Architecture.RiscV32: 1
+        Architecture.Arm32: 14
+        _: 1
+
+fn arg_register_indices(arch: Architecture) -> [i64]:
+    match arch:
+        Architecture.RiscV32: [10, 11, 12, 13, 14, 15, 16, 17]
+        Architecture.Arm32: [0, 1, 2, 3]
+        _: [10, 11, 12, 13, 14, 15, 16, 17]
+
+fn max_args(arch: Architecture) -> i64:
+    match arch:
+        Architecture.RiscV32: 8
+        Architecture.Arm32: 4
+        _: 8
+
+# ============================================================================
+# Register Names
+# ============================================================================
+
+fn arm_reg_name(reg: i64) -> text:
+    match reg:
+        0: "r0"
+        1: "r1"
+        2: "r2"
+        3: "r3"
+        4: "r4"
+        5: "r5"
+        6: "r6"
+        7: "r7"
+        8: "r8"
+        9: "r9"
+        10: "r10"
+        11: "r11"
+        12: "r12"
+        13: "sp"
+        14: "lr"
+        15: "pc"
+        _: "r0"
+
+fn rv32_reg_name(reg: i64) -> text:
+    match reg:
+        0: "zero"
+        1: "ra"
+        2: "sp"
+        3: "gp"
+        4: "tp"
+        5: "t0"
+        6: "t1"
+        7: "t2"
+        8: "s0"
+        9: "s1"
+        10: "a0"
+        11: "a1"
+        12: "a2"
+        13: "a3"
+        14: "a4"
+        15: "a5"
+        16: "a6"
+        17: "a7"
+        18: "s2"
+        19: "s3"
+        20: "s4"
+        21: "s5"
+        22: "s6"
+        23: "s7"
+        24: "s8"
+        25: "s9"
+        26: "s10"
+        27: "s11"
+        28: "t3"
+        29: "t4"
+        30: "t5"
+        31: "t6"
+        32: "pc"
+        _: "zero"
+
+fn reg_name_for_arch(reg: i64, arch: Architecture) -> text:
+    match arch:
+        Architecture.Arm32: arm_reg_name(reg)
+        Architecture.RiscV32: rv32_reg_name(reg)
+        _: rv32_reg_name(reg)

@@ -1,0 +1,186 @@
+# Daemon SDK Client Specification
+#
+# Tests the client submit-and-poll API: submission, polling,
+# timeout handling, and daemon lifecycle.
+#
+# **Feature IDs:** #DSDK-041 to #DSDK-050
+# **Category:** Infrastructure
+
+# ============================================================================
+# Module-level mock state
+# ============================================================================
+
+var cl_daemon_running: bool = false
+var cl_submitted_ids: [text] = []
+var cl_submitted_kinds: [i64] = []
+var cl_response_ids: [text] = []
+var cl_response_statuses: [i64] = []
+var cl_poll_attempts: i64 = 0
+var cl_start_called: bool = false
+
+fn cl_reset():
+    cl_daemon_running = false
+    cl_submitted_ids = []
+    cl_submitted_kinds = []
+    cl_response_ids = []
+    cl_response_statuses = []
+    cl_poll_attempts = 0
+    cl_start_called = false
+
+fn cl_start_daemon():
+    cl_daemon_running = true
+    cl_start_called = true
+
+fn cl_stop_daemon():
+    cl_daemon_running = false
+
+fn cl_add_response(req_id: text, status: i64):
+    cl_response_ids = cl_response_ids + [req_id]
+    cl_response_statuses = cl_response_statuses + [status]
+
+fn cl_find_response(req_id: text) -> i64:
+    val ids = cl_response_ids
+    var i = 0
+    while i < ids.len():
+        if ids[i] == req_id:
+            return i
+        i = i + 1
+    -1
+
+# Mock ensure_running
+fn mock_ensure_running() -> bool:
+    if cl_daemon_running:
+        return true
+    cl_start_daemon()
+    cl_daemon_running
+
+# Mock submit
+fn mock_submit(req_id: text, kind: i64) -> text:
+    if not cl_daemon_running:
+        return ""
+    cl_submitted_ids = cl_submitted_ids + [req_id]
+    cl_submitted_kinds = cl_submitted_kinds + [kind]
+    req_id
+
+# Mock poll
+fn mock_poll(req_id: text, max_attempts: i64) -> (text, i64):
+    var attempts = 0
+    while attempts < max_attempts:
+        val idx = cl_find_response(req_id)
+        if idx >= 0:
+            cl_poll_attempts = cl_poll_attempts + attempts + 1
+            val ids = cl_response_ids
+            val statuses = cl_response_statuses
+            return (ids[idx], statuses[idx])
+        attempts = attempts + 1
+    cl_poll_attempts = cl_poll_attempts + attempts
+    ("", -1)
+
+# Mock submit_and_wait
+fn mock_submit_and_wait(req_id: text, kind: i64, max_attempts: i64) -> (text, i64):
+    val submitted = mock_submit(req_id, kind)
+    if submitted == "":
+        return ("", -1)
+    mock_poll(req_id, max_attempts)
+
+# Getters
+fn cl_get_daemon_running() -> bool:
+    cl_daemon_running
+fn cl_get_submit_count() -> i64:
+    cl_submitted_ids.len()
+fn cl_get_poll_attempts() -> i64:
+    cl_poll_attempts
+fn cl_get_start_called() -> bool:
+    cl_start_called
+fn cl_get_submitted_id(idx: i64) -> text:
+    cl_submitted_ids[idx]
+
+# ============================================================================
+# Tests
+# ============================================================================
+
+describe "DaemonClient":
+    describe "ensure_running":
+        it "returns true when daemon already running":
+            cl_reset()
+            cl_start_daemon()
+            val ok = mock_ensure_running()
+            expect(ok).to_equal(true)
+
+        it "starts daemon when not running":
+            cl_reset()
+            val ok = mock_ensure_running()
+            expect(ok).to_equal(true)
+            expect(cl_get_start_called()).to_equal(true)
+
+    describe "submit":
+        it "submits request when daemon running":
+            cl_reset()
+            cl_start_daemon()
+            val id = mock_submit("req_1", 1)
+            expect(id).to_equal("req_1")
+            expect(cl_get_submit_count()).to_equal(1)
+
+        it "fails when daemon not running":
+            cl_reset()
+            val id = mock_submit("req_1", 1)
+            expect(id).to_equal("")
+            expect(cl_get_submit_count()).to_equal(0)
+
+        it "submits multiple requests":
+            cl_reset()
+            cl_start_daemon()
+            mock_submit("r1", 1)
+            mock_submit("r2", 2)
+            mock_submit("r3", 3)
+            expect(cl_get_submit_count()).to_equal(3)
+
+    describe "poll":
+        it "finds existing response immediately":
+            cl_reset()
+            cl_add_response("req_1", 2)
+            val resp = mock_poll("req_1", 10)
+            expect(resp[0]).to_equal("req_1")
+            expect(resp[1]).to_equal(2)
+
+        it "returns empty on timeout":
+            cl_reset()
+            val resp = mock_poll("req_1", 3)
+            expect(resp[0]).to_equal("")
+            expect(resp[1]).to_equal(-1)
+            expect(cl_get_poll_attempts()).to_equal(3)
+
+    describe "submit_and_wait":
+        it "submits and gets response":
+            cl_reset()
+            cl_start_daemon()
+            cl_add_response("r1", 2)
+            val resp = mock_submit_and_wait("r1", 1, 10)
+            expect(resp[0]).to_equal("r1")
+            expect(resp[1]).to_equal(2)
+
+        it "fails when daemon not running":
+            cl_reset()
+            val resp = mock_submit_and_wait("r1", 1, 10)
+            expect(resp[0]).to_equal("")
+            expect(resp[1]).to_equal(-1)
+
+        it "times out when no response":
+            cl_reset()
+            cl_start_daemon()
+            val resp = mock_submit_and_wait("r1", 1, 5)
+            expect(resp[0]).to_equal("")
+            expect(resp[1]).to_equal(-1)
+
+    describe "stop":
+        it "stops running daemon":
+            cl_reset()
+            cl_start_daemon()
+            expect(cl_get_daemon_running()).to_equal(true)
+            cl_stop_daemon()
+            expect(cl_get_daemon_running()).to_equal(false)
+
+        it "is idempotent when already stopped":
+            cl_reset()
+            cl_stop_daemon()
+            expect(cl_get_daemon_running()).to_equal(false)

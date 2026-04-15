@@ -1,0 +1,59 @@
+# Shared Async IPC Handler
+#
+# Extracts shared async IPC reader/writer logic used by both Tauri and
+# Electron backends.  Messages are read from stdin and dispatched to a
+# Channel; render commands travel the opposite direction via a writer
+# channel and are printed to stdout.
+
+use std.nogc_async_mut.concurrent.channel.{Channel}
+use std.nogc_async_mut.concurrent.thread.{thread_sleep}
+use common.ui.widget.{UIEvent}
+use app.ui.ipc.protocol.{parse_ipc_message, build_ipc_render}
+
+extern fn rt_stdin_read_line() -> text?
+
+# =========================================================================
+# IPC Reader — stdin → event_channel
+# =========================================================================
+
+fn start_ipc_reader(event_channel: Channel):
+    """Read stdin lines in a loop, parse each as an IPC message, and
+    send the resulting UIEvent to event_channel.
+    Stops on a quit message, channel close, or EOF."""
+    while not event_channel.is_closed():
+        val line = rt_stdin_read_line()
+        if line == nil:
+            # EOF — signal quit and stop
+            event_channel.send(UIEvent.Quit)
+            return
+        if line == "":
+            # Empty line — yield and retry
+            thread_sleep(1)
+            continue
+
+        val event = parse_ipc_message(line)
+        if event != nil:
+            event_channel.send(event)
+            # If we just forwarded a Quit, we are done
+            match event:
+                UIEvent.Quit:
+                    return
+                _:
+                    pass_dn
+        # Unrecognised messages are silently dropped (graceful handling)
+
+# =========================================================================
+# IPC Writer — render_channel → stdout
+# =========================================================================
+
+fn start_ipc_writer(render_channel: Channel):
+    """Read rendered HTML strings from render_channel and print the
+    corresponding IPC render message to stdout.
+    Stops when the channel is closed and drained."""
+    while true:
+        val html = render_channel.recv()
+        if html == nil:
+            # Channel closed and empty — stop
+            return
+        val ipc_msg = build_ipc_render(html)
+        print ipc_msg

@@ -1,0 +1,231 @@
+#![allow(unnamed_duplicate_typed_args)]
+# bin/simple task-daemon — Background task management CLI
+#
+# Subcommands:
+#   submit <command>         — Spawn command in background, return task ID
+#   status <task_id>         — Get task status and partial output
+#   cancel <task_id>         — Kill a running task
+#   list                     — List all tracked tasks
+#
+# Storage: .build/task_daemon/
+#   tasks/                   — One file per task: <task_id>.task
+#   outputs/                 — Stdout capture: <task_id>.out
+#
+# Task file format (key=value):
+#   id=t1
+#   command=bin/simple build
+#   pid=12345
+#   status=working|completed|failed|cancelled
+#   exit_code=-1
+#   start_time=1234567890
+
+use std.fs.{file_read_text, file_write_text, file_exists, mkdir_p, list_dir}
+use std.cli.cli_util.{get_cli_args}
+
+extern fn rt_process_spawn_async(cmd: text, args: [text]) -> i64
+extern fn rt_process_is_running(pid: i64) -> bool
+extern fn rt_process_wait(pid: i64, timeout_ms: i64) -> i64
+extern fn rt_process_kill(pid: i64) -> bool
+extern fn rt_time_now_unix_micros() -> i64
+
+val TASK_DIR = ".build/task_daemon/tasks"
+val OUTPUT_DIR = ".build/task_daemon/outputs"
+val COUNTER_FILE = ".build/task_daemon/next_id"
+
+fn ensure_dirs():
+    mkdir_p(TASK_DIR)
+    mkdir_p(OUTPUT_DIR)
+
+fn next_task_id() -> text:
+    ensure_dirs()
+    var next_id: i64 = 1
+    if file_exists(COUNTER_FILE):
+        val content = file_read_text(COUNTER_FILE) ?? ""
+        if content.trim() != "":
+            next_id = int(content.trim())
+    file_write_text(COUNTER_FILE, str(next_id + 1))
+    "t" + str(next_id)
+
+fn write_task(id: text, command: text, pid: i64, status: text, exit_code: i64):
+    val now = rt_time_now_unix_micros()
+    var content = "id=" + id + "\n"
+    content = content + "command=" + command + "\n"
+    content = content + "pid=" + str(pid) + "\n"
+    content = content + "status=" + status + "\n"
+    content = content + "exit_code=" + str(exit_code) + "\n"
+    content = content + "start_time=" + str(now) + "\n"
+    file_write_text(TASK_DIR + "/" + id + ".task", content)
+
+fn read_task_field(id: text, field: text) -> text:
+    val path = TASK_DIR + "/" + id + ".task"
+    if not file_exists(path):
+        return ""
+    val content = file_read_text(path) ?? ""
+    val lines = content.split("\n")
+    val prefix = field + "="
+    for line in lines:
+        if line.starts_with(prefix):
+            return line.substring(prefix.len())
+    ""
+
+fn update_task_field(id: text, field: text, value: text):
+    val path = TASK_DIR + "/" + id + ".task"
+    if not file_exists(path):
+        return
+    val content = file_read_text(path) ?? ""
+    val lines = content.split("\n")
+    val prefix = field + "="
+    var new_lines: [text] = []
+    var found = false
+    for line in lines:
+        if line.starts_with(prefix):
+            new_lines.push(prefix + value)
+            found = true
+        else:
+            new_lines.push(line)
+    if not found:
+        new_lines.push(prefix + value)
+    file_write_text(path, new_lines.join("\n"))
+
+fn refresh_task(id: text):
+    """Check if a working task has completed"""
+    val status = read_task_field(id, "status")
+    if status != "working":
+        return
+    val pid_str = read_task_field(id, "pid")
+    val pid = int(pid_str)
+    if pid <= 0:
+        return
+    if not rt_process_is_running(pid):
+        val exit_code = rt_process_wait(pid, 0)
+        if exit_code < 0:
+            update_task_field(id, "status", "failed")
+        else:
+            update_task_field(id, "status", "completed")
+        update_task_field(id, "exit_code", str(exit_code))
+
+fn cmd_submit(args: [text]):
+    if args.len() == 0:
+        print "Usage: simple task-daemon submit <command>"
+        return
+
+    val command = args.join(" ")
+    val tid = next_task_id()
+    val out_file = OUTPUT_DIR + "/" + tid + ".out"
+
+    # Spawn as background process
+    val full_cmd = command + " > " + out_file + " 2>&1"
+    val pid = rt_process_spawn_async("/bin/sh", ["-c", full_cmd])
+
+    if pid < 0:
+        write_task(tid, command, -1, "failed", -1)
+        print "{\"taskId\":\"" + tid + "\",\"status\":\"failed\",\"error\":\"spawn failed\"}"
+        return
+
+    write_task(tid, command, pid, "working", -1)
+    print "{\"taskId\":\"" + tid + "\",\"status\":\"working\",\"pid\":" + str(pid) + "}"
+
+fn cmd_status(args: [text]):
+    if args.len() == 0:
+        print "Usage: simple task-daemon status <task_id>"
+        return
+
+    val tid = args[0]
+    val task_path = TASK_DIR + "/" + tid + ".task"
+    if not file_exists(task_path):
+        print "{\"error\":\"Task not found: " + tid + "\"}"
+        return
+
+    refresh_task(tid)
+    val status = read_task_field(tid, "status")
+    val exit_code = read_task_field(tid, "exit_code")
+    val command = read_task_field(tid, "command")
+
+    var output = ""
+    val out_file = OUTPUT_DIR + "/" + tid + ".out"
+    if file_exists(out_file):
+        output = file_read_text(out_file) ?? ""
+        # Limit output to last 2000 chars
+        if output.len() > 2000:
+            output = output.substring(output.len() - 2000)
+
+    if status == "completed" or status == "failed":
+        print "-- " + command + " (exit: " + exit_code + ") --"
+        print output
+    else:
+        print "{\"taskId\":\"" + tid + "\",\"status\":\"" + status + "\",\"command\":\"" + command + "\"}"
+        if output != "":
+            print "Partial output:"
+            print output
+
+fn cmd_cancel(args: [text]):
+    if args.len() == 0:
+        print "Usage: simple task-daemon cancel <task_id>"
+        return
+
+    val tid = args[0]
+    val task_path = TASK_DIR + "/" + tid + ".task"
+    if not file_exists(task_path):
+        print "{\"error\":\"Task not found: " + tid + "\"}"
+        return
+
+    val status = read_task_field(tid, "status")
+    if status != "working":
+        print "{\"error\":\"Task not running: " + tid + " (status: " + status + ")\"}"
+        return
+
+    val pid_str = read_task_field(tid, "pid")
+    val pid = int(pid_str)
+    if pid > 0:
+        rt_process_kill(pid)
+    update_task_field(tid, "status", "cancelled")
+    update_task_field(tid, "exit_code", "-1")
+    print "{\"taskId\":\"" + tid + "\",\"status\":\"cancelled\"}"
+
+fn cmd_list():
+    ensure_dirs()
+    val files = list_dir(TASK_DIR) ?? []
+    if files.len() == 0:
+        print "No background tasks"
+        return
+
+    var tasks: [text] = []
+    for f in files:
+        if not f.ends_with(".task"):
+            continue
+        val tid = f.replace(".task", "")
+        refresh_task(tid)
+        val status = read_task_field(tid, "status")
+        val command = read_task_field(tid, "command")
+        val exit_code = read_task_field(tid, "exit_code")
+        var entry = "{\"id\":\"" + tid + "\",\"status\":\"" + status + "\",\"command\":\"" + command + "\""
+        if status == "completed" or status == "failed":
+            entry = entry + ",\"exit_code\":" + exit_code
+        entry = entry + "}"
+        tasks.push(entry)
+
+    print "[" + tasks.join(",") + "]"
+
+fn main() -> i64:
+    val args = get_cli_args()
+    if args.len() == 0:
+        cmd_list()
+        return 0
+
+    val subcmd = args[0]
+    val rest = if args.len() > 1: args[1:] else: []
+
+    match subcmd:
+        case "submit":
+            cmd_submit(rest)
+        case "status":
+            cmd_status(rest)
+        case "cancel":
+            cmd_cancel(rest)
+        case "list":
+            cmd_list()
+        case _:
+            print "Unknown task-daemon subcommand: {subcmd}"
+            print "Usage: simple task-daemon [submit|status|cancel|list]"
+            return 1
+    0

@@ -1,0 +1,164 @@
+@allow(primitive_api)
+# 3D Math — Quaternion
+#
+# Unit quaternion for 3D rotations. Convention: (w, x, y, z) where w is scalar.
+# All operations return new values (immutable style).
+#
+# Usage:
+#   val q = Quaternion.identity()
+#   val q2 = Quaternion.from_axis_angle(Vec3.up(), 1.5708)
+#   val rotated = q2.rotate_vector(Vec3.forward())
+#   val m = q2.to_mat4()
+#   val q3 = q.slerp(q2, 0.5)
+
+use std.common.math.{math_lerp}
+use std.common.math3d.vec.{Vec3}
+use std.common.math3d.mat.{Mat4}
+use std.common.math3d.math_util.{sqrt3d, sin3d, cos3d, acos3d}
+
+val _EPSILON = 0.0000000001
+
+# ============================================================================
+# Quaternion
+# ============================================================================
+
+class Quaternion:
+    x: f64
+    y: f64
+    z: f64
+    w: f64
+
+impl Quaternion:
+    # --- Static constructors ---
+
+    static fn identity() -> Quaternion:
+        Quaternion(x: 0.0, y: 0.0, z: 0.0, w: 1.0)
+
+    static fn from_axis_angle(axis: Vec3, angle_rad: f64) -> Quaternion:
+        """Create quaternion from axis (should be normalized) and angle in radians."""
+        val half = angle_rad / 2.0
+        val s = sin3d(half)
+        val c = cos3d(half)
+        val a = axis.normalize()
+        Quaternion(x: a.x * s, y: a.y * s, z: a.z * s, w: c)
+
+    static fn from_euler(pitch_rad: f64, yaw_rad: f64, roll_rad: f64) -> Quaternion:
+        """Create quaternion from Euler angles in radians (pitch=X, yaw=Y, roll=Z)."""
+        val hp = pitch_rad / 2.0
+        val hy = yaw_rad / 2.0
+        val hr = roll_rad / 2.0
+
+        val sp = sin3d(hp)
+        val cp = cos3d(hp)
+        val sy = sin3d(hy)
+        val cy = cos3d(hy)
+        val sr = sin3d(hr)
+        val cr = cos3d(hr)
+
+        val qx = sp * cy * cr - cp * sy * sr
+        val qy = cp * sy * cr + sp * cy * sr
+        val qz = cp * cy * sr - sp * sy * cr
+        val qw = cp * cy * cr + sp * sy * sr
+
+        Quaternion(x: qx, y: qy, z: qz, w: qw)
+
+    # --- Properties ---
+
+    fn length_squared() -> f64:
+        self.x * self.x + self.y * self.y + self.z * self.z + self.w * self.w
+
+    fn length() -> f64:
+        sqrt3d(self.length_squared())
+
+    fn normalize() -> Quaternion:
+        val len = self.length()
+        if len < _EPSILON:
+            return Quaternion.identity()
+        Quaternion(x: self.x / len, y: self.y / len, z: self.z / len, w: self.w / len)
+
+    fn conjugate() -> Quaternion:
+        Quaternion(x: -self.x, y: -self.y, z: -self.z, w: self.w)
+
+    fn inverse() -> Quaternion:
+        val len_sq = self.length_squared()
+        if len_sq < _EPSILON:
+            return Quaternion.identity()
+        val conj = self.conjugate()
+        Quaternion(x: conj.x / len_sq, y: conj.y / len_sq, z: conj.z / len_sq, w: conj.w / len_sq)
+
+    # --- Operations ---
+
+    fn multiply(other: Quaternion) -> Quaternion:
+        """Hamilton product: self * other."""
+        val qx = self.w * other.x + self.x * other.w + self.y * other.z - self.z * other.y
+        val qy = self.w * other.y - self.x * other.z + self.y * other.w + self.z * other.x
+        val qz = self.w * other.z + self.x * other.y - self.y * other.x + self.z * other.w
+        val qw = self.w * other.w - self.x * other.x - self.y * other.y - self.z * other.z
+        Quaternion(x: qx, y: qy, z: qz, w: qw)
+
+    fn dot(other: Quaternion) -> f64:
+        self.x * other.x + self.y * other.y + self.z * other.z + self.w * other.w
+
+    fn slerp(other: Quaternion, t: f64) -> Quaternion:
+        """Spherical linear interpolation between self and other."""
+        var dot_val = self.x * other.x + self.y * other.y + self.z * other.z + self.w * other.w
+
+        # If dot is negative, negate one quaternion to take shorter path
+        var ox = other.x
+        var oy = other.y
+        var oz = other.z
+        var ow = other.w
+        if dot_val < 0.0:
+            dot_val = -dot_val
+            ox = -ox
+            oy = -oy
+            oz = -oz
+            ow = -ow
+
+        # If very close, use linear interpolation
+        if dot_val > 0.9995:
+            val rx = math_lerp(self.x, ox, t)
+            val ry = math_lerp(self.y, oy, t)
+            val rz = math_lerp(self.z, oz, t)
+            val rw = math_lerp(self.w, ow, t)
+            val result = Quaternion(x: rx, y: ry, z: rz, w: rw)
+            return result.normalize()
+
+        val theta = acos3d(dot_val)
+        val sin_theta = sin3d(theta)
+        val s0 = sin3d((1.0 - t) * theta) / sin_theta
+        val s1 = sin3d(t * theta) / sin_theta
+
+        val rx = self.x * s0 + ox * s1
+        val ry = self.y * s0 + oy * s1
+        val rz = self.z * s0 + oz * s1
+        val rw = self.w * s0 + ow * s1
+        Quaternion(x: rx, y: ry, z: rz, w: rw)
+
+    fn to_mat4() -> Mat4:
+        """Convert quaternion to 4x4 rotation matrix."""
+        val xx = self.x * self.x
+        val yy = self.y * self.y
+        val zz = self.z * self.z
+        val xy = self.x * self.y
+        val xz = self.x * self.z
+        val yz = self.y * self.z
+        val wx = self.w * self.x
+        val wy = self.w * self.y
+        val wz = self.w * self.z
+
+        Mat4(data: [
+            1.0 - 2.0 * (yy + zz), 2.0 * (xy + wz),       2.0 * (xz - wy),       0.0,
+            2.0 * (xy - wz),        1.0 - 2.0 * (xx + zz), 2.0 * (yz + wx),       0.0,
+            2.0 * (xz + wy),        2.0 * (yz - wx),        1.0 - 2.0 * (xx + yy), 0.0,
+            0.0,                     0.0,                     0.0,                     1.0
+        ])
+
+    fn rotate_vector(v: Vec3) -> Vec3:
+        """Rotate a vector by this quaternion: q * v * q^-1."""
+        val qv = Vec3(x: self.x, y: self.y, z: self.z)
+        val uv = qv.cross(v)
+        val uuv = qv.cross(uv)
+        val scaled_uv = uv.mul(2.0 * self.w)
+        val scaled_uuv = uuv.mul(2.0)
+        v.add(scaled_uv).add(scaled_uuv)

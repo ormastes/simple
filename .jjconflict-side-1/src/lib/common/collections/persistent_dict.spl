@@ -1,0 +1,195 @@
+# Persistent Dictionary - Hash-bucketed with structural sharing
+#
+# Immutable dictionary using a 32-bucket hash table.
+# Every mutation returns a NEW dictionary — original is never modified.
+# Only the affected bucket is copied; 31 other buckets are shared.
+#
+# Performance vs naive parallel arrays:
+#   get:      O(n/32) avg vs O(n)     — ~32x faster
+#   set:      O(n/32) avg vs O(n)     — ~32x faster, 97% less allocation
+#   remove:   O(n/32) avg vs O(n)     — ~32x faster
+#   contains: O(n/32) avg vs O(n)     — ~32x faster
+
+val PD_NUM_BUCKETS: i64 = 32
+
+fn pd_hash_key(key) -> i64:
+    """Hash any key using FNV-1a on its text representation."""
+    val s = "{key}"
+    var h: i64 = -3750763034362895579
+    for byte in s.bytes():
+        h = h xor (byte as i64)
+        h = h * 1099511628211
+    if h < 0:
+        0 - h
+    else:
+        h
+
+fn pd_bucket_index(key) -> i64:
+    pd_hash_key(key) % PD_NUM_BUCKETS
+
+fn pd_make_empty_buckets():
+    var buckets = []
+    var i = 0
+    while i < PD_NUM_BUCKETS:
+        buckets.push([])
+        i = i + 1
+    buckets
+
+fn pd_replace_bucket(buckets, idx: i64, new_bucket):
+    """Return new bucket array with one bucket replaced. O(32) = O(1)."""
+    var new_buckets = []
+    var i = 0
+    for b in buckets:
+        if i == idx:
+            new_buckets.push(new_bucket)
+        else:
+            new_buckets.push(b)
+        i = i + 1
+    new_buckets
+
+class PersistentDict:
+    buckets: []     # 32 buckets; each is [[key, value], ...]
+    pd_size: i64
+
+    fn len() -> i64:
+        self.pd_size
+
+    fn is_empty() -> bool:
+        self.pd_size == 0
+
+    fn get(key):
+        val idx = pd_bucket_index(key)
+        val bucket = self.buckets[idx]
+        for entry in bucket:
+            if entry[0] == key:
+                return entry[1]
+        nil
+
+    fn set(key, value) -> PersistentDict:
+        val idx = pd_bucket_index(key)
+        val bucket = self.buckets[idx]
+        var new_bucket = []
+        var found = false
+        for entry in bucket:
+            if entry[0] == key:
+                new_bucket.push([key, value])
+                found = true
+            else:
+                new_bucket.push(entry)
+        if not found:
+            new_bucket.push([key, value])
+        val new_buckets = pd_replace_bucket(self.buckets, idx, new_bucket)
+        var new_size = self.pd_size
+        if not found:
+            new_size = new_size + 1
+        PersistentDict(buckets: new_buckets, pd_size: new_size)
+
+    fn remove(key) -> PersistentDict:
+        val idx = pd_bucket_index(key)
+        val bucket = self.buckets[idx]
+        var new_bucket = []
+        var removed = false
+        for entry in bucket:
+            if entry[0] == key:
+                removed = true
+            else:
+                new_bucket.push(entry)
+        if not removed:
+            return PersistentDict(buckets: self.buckets, pd_size: self.pd_size)
+        val new_buckets = pd_replace_bucket(self.buckets, idx, new_bucket)
+        PersistentDict(buckets: new_buckets, pd_size: self.pd_size - 1)
+
+    fn contains(key) -> bool:
+        val idx = pd_bucket_index(key)
+        val bucket = self.buckets[idx]
+        for entry in bucket:
+            if entry[0] == key:
+                return true
+        false
+
+    fn get_or(key, default_val):
+        val idx = pd_bucket_index(key)
+        val bucket = self.buckets[idx]
+        for entry in bucket:
+            if entry[0] == key:
+                return entry[1]
+        default_val
+
+    fn merge(other: PersistentDict) -> PersistentDict:
+        var result = PersistentDict(buckets: self.buckets, pd_size: self.pd_size)
+        for bucket in other.buckets:
+            for entry in bucket:
+                result = result.set(entry[0], entry[1])
+        result
+
+    fn filter(pred: fn()) -> PersistentDict:
+        var new_buckets = []
+        var new_size: i64 = 0
+        for bucket in self.buckets:
+            var new_bucket = []
+            for entry in bucket:
+                if pred(entry[0], entry[1]):
+                    new_bucket.push(entry)
+                    new_size = new_size + 1
+            new_buckets.push(new_bucket)
+        PersistentDict(buckets: new_buckets, pd_size: new_size)
+
+    fn map_values(f: fn()) -> PersistentDict:
+        var new_buckets = []
+        for bucket in self.buckets:
+            var new_bucket = []
+            for entry in bucket:
+                new_bucket.push([entry[0], f(entry[1])])
+            new_buckets.push(new_bucket)
+        PersistentDict(buckets: new_buckets, pd_size: self.pd_size)
+
+    fn update(key, f: fn()) -> PersistentDict:
+        val current = self.get(key)
+        val new_val = f(current)
+        self.set(key, new_val)
+
+    fn entries():
+        var result = []
+        for bucket in self.buckets:
+            for entry in bucket:
+                result.push([entry[0], entry[1]])
+        result
+
+    fn keys():
+        var result = []
+        for bucket in self.buckets:
+            for entry in bucket:
+                result.push(entry[0])
+        result
+
+    fn values():
+        var result = []
+        for bucket in self.buckets:
+            for entry in bucket:
+                result.push(entry[1])
+        result
+
+    fn to_dict():
+        var result = {}
+        for bucket in self.buckets:
+            for entry in bucket:
+                result[entry[0]] = entry[1]
+        result
+
+    fn copy() -> PersistentDict:
+        PersistentDict(buckets: self.buckets, pd_size: self.pd_size)
+
+    static fn from_dict(d) -> PersistentDict:
+        var result = PersistentDict.empty()
+        for k in d:
+            result = result.set(k, d[k])
+        result
+
+    static fn from_entries(entries) -> PersistentDict:
+        var result = PersistentDict.empty()
+        for entry in entries:
+            result = result.set(entry[0], entry[1])
+        result
+
+    static fn empty() -> PersistentDict:
+        PersistentDict(buckets: pd_make_empty_buckets(), pd_size: 0)

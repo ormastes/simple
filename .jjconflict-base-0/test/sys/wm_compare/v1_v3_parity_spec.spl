@@ -1,0 +1,69 @@
+#![allow(unnamed_duplicate_typed_args)]
+# @tag: sys, wm_compare, parity, v1, v3, chromium
+# @cover src/app/wm_compare/v1_v2_parity.spl 0%
+# @cover src/os/compositor/browser_compositor_backend.spl 0%
+#
+# wm_compare V1/V3 Parity — Row 5 M5 of the V3 simple_browser milestones
+#
+# Locks the contract that the same drawing scene rendered through V1
+# (`FramebufferDriver.from_buffer`, the fb_backend code path) and V3
+# (`BrowserCompositorBackend`, the in-tree browser compositor software
+# backend that the `ui.chromium` shell blits via `rt_winit_window_present_rgba`)
+# stays within the ≤1% perceptual budget that Row 2 already locked for
+# V1/V2.
+#
+# Scenes are the exact `ParityScene` set Row 2 uses — scene_solid_fill,
+# scene_fill_rect_row_edge, scene_text_with_bg, scene_glass_blend — so a
+# failing spec is guaranteed to be a real V1↔V3 divergence, not a new
+# scene pulling V3 off its baseline.
+#
+# M5 scope: rendering parity only. The winit presenter
+# (`ChromiumBackend.present_to_window`) is not exercised here — blitting is
+# a pure pixel copy and gets its own coverage when the shell boots. M5 is
+# done the moment all four scenes diff ≤1% vs V1.
+#
+# Plan: doc/03_plan/v3_simple_browser_milestones.md §M5
+
+use std.spec.{describe, context, it, expect}
+use app.wm_compare.v1_v2_parity.{
+    run_parity_v3, render_v1, render_v3, diff_buffers,
+    scene_solid_fill, scene_fill_rect_row_edge, scene_text_with_bg, scene_glass_blend,
+}
+
+describe "wm_compare V1/V3 parity (Row 5 M5 — simple_browser shell)":
+
+    context "solid fill — BrowserCompositorBackend.clear() matches fb_driver":
+
+        it "stays within the ≤1% perceptual budget":
+            val r = run_parity_v3(scene_solid_fill())
+            expect(r.pass_perceptual).to_be_true()
+
+    context "fill_rect row edge — exercises [x,x+w) half-open contract on V3":
+
+        it "stays within the ≤1% perceptual budget":
+            val r = run_parity_v3(scene_fill_rect_row_edge())
+            expect(r.pass_perceptual).to_be_true()
+
+    context "text + bg — BrowserCompositorBackend.draw_char_8x16 bg cells":
+
+        it "stays within the ≤1% perceptual budget":
+            val r = run_parity_v3(scene_text_with_bg())
+            expect(r.pass_perceptual).to_be_true()
+
+    context "glass blend — CompositorGlassCapable.blend_rect on V3":
+
+        it "stays within the ≤1% perceptual budget":
+            val r = run_parity_v3(scene_glass_blend())
+            expect(r.pass_perceptual).to_be_true()
+
+    context "V3 render harness self-check":
+
+        it "returns a buffer of the expected length":
+            val v3 = render_v3(scene_solid_fill())
+            expect(v3.len() == 32 * 16).to_be_true()
+
+        it "diffs identical V3 buffers as exact":
+            val a = render_v3(scene_solid_fill())
+            val b = render_v3(scene_solid_fill())
+            val r = diff_buffers("v3_self_check", 32u32, 16u32, a, b)
+            expect(r.pass_exact).to_be_true()

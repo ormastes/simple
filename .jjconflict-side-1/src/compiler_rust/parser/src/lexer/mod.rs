@@ -1,0 +1,602 @@
+mod comments;
+mod escapes;
+mod i18n;
+mod identifiers;
+mod indentation;
+mod numbers;
+mod strings;
+
+pub use crate::token::{NamePattern, NumericSuffix};
+use crate::token::{Span, Token, TokenKind};
+
+#[derive(Clone)]
+pub struct Lexer<'a> {
+    source: &'a str,
+    chars: std::iter::Peekable<std::str::CharIndices<'a>>,
+    current_pos: usize,
+    line: usize,
+    column: usize,
+    indent_stack: Vec<usize>,
+    pending_tokens: Vec<Token>,
+    at_line_start: bool,
+    /// Track bracket depth to suppress INDENT/DEDENT inside delimiters
+    pub bracket_depth: usize,
+    /// Force indentation tracking even inside brackets (for lambda bodies, match expressions).
+    /// Uses a counter to support nested contexts that both require forced indentation.
+    force_indentation_depth: usize,
+    /// Stack of bracket depths at which forced indentation was enabled.
+    /// Forced indentation only applies at or below the bracket depth when it was enabled.
+    /// This ensures that inner parenthesized expressions still suppress indentation normally.
+    force_indent_bracket_depths: Vec<usize>,
+}
+
+impl<'a> Lexer<'a> {
+    pub fn new(source: &'a str) -> Self {
+        Self {
+            source,
+            chars: source.char_indices().peekable(),
+            current_pos: 0,
+            line: 1,
+            column: 1,
+            indent_stack: vec![0],
+            pending_tokens: Vec::new(),
+            at_line_start: true,
+            bracket_depth: 0,
+            force_indentation_depth: 0,
+            force_indent_bracket_depths: Vec::new(),
+        }
+    }
+
+    /// Create a lexer for parsing inline expressions (e.g., f-string interpolations).
+    /// Unlike `new()`, this lexer does NOT treat leading whitespace as indentation.
+    pub fn new_expression(source: &'a str) -> Self {
+        Self {
+            source,
+            chars: source.char_indices().peekable(),
+            current_pos: 0,
+            line: 1,
+            column: 1,
+            indent_stack: vec![0],
+            pending_tokens: Vec::new(),
+            at_line_start: false, // Don't treat leading whitespace as indentation
+            bracket_depth: 0,
+            force_indentation_depth: 0,
+            force_indent_bracket_depths: Vec::new(),
+        }
+    }
+
+    /// Enable indentation tracking even inside brackets (for lambda bodies, match expressions).
+    /// Records the current bracket depth so that forced indentation only applies at or below
+    /// this depth. Inner parenthesized expressions still suppress indentation normally.
+    pub fn enable_forced_indentation(&mut self) {
+        self.force_indentation_depth += 1;
+        self.force_indent_bracket_depths.push(self.bracket_depth);
+    }
+
+    /// Disable forced indentation tracking.
+    /// Only fully disables when all nested contexts have been closed.
+    pub fn disable_forced_indentation(&mut self) {
+        self.force_indentation_depth = self.force_indentation_depth.saturating_sub(1);
+        self.force_indent_bracket_depths.pop();
+    }
+
+    /// Check if forced indentation is currently active at the current bracket depth.
+    /// Returns true if forced indentation is enabled AND the current bracket depth
+    /// is at or below the bracket depth when forced indentation was enabled.
+    fn is_forced_indentation_active(&self) -> bool {
+        if self.force_indentation_depth == 0 {
+            return false;
+        }
+        // Check if any forced indentation context applies at the current bracket depth
+        self.force_indent_bracket_depths
+            .iter()
+            .any(|&depth| self.bracket_depth <= depth)
+    }
+
+    /// Pop the topmost indent level from the indent stack.
+    /// Used to keep the indent stack in sync when a lambda body ends at
+    /// a closing bracket without a matching Dedent token.
+    pub fn pop_indent(&mut self) {
+        if self.indent_stack.len() > 1 {
+            self.indent_stack.pop();
+        }
+    }
+
+    pub fn tokenize(&mut self) -> Vec<Token> {
+        let mut tokens = Vec::new();
+
+        loop {
+            let token = self.next_token();
+            let is_eof = token.kind == TokenKind::Eof;
+            tokens.push(token);
+            if is_eof {
+                break;
+            }
+        }
+
+        tokens
+    }
+
+    pub fn next_token(&mut self) -> Token {
+        // Return pending tokens first (for INDENT/DEDENT)
+        if let Some(token) = self.pending_tokens.pop() {
+            return token;
+        }
+
+        // Handle indentation at line start (but not inside brackets, unless forced)
+        if self.at_line_start {
+            self.at_line_start = false;
+            // Skip indentation handling when inside brackets/parens/braces, unless force_indentation is active
+            if self.bracket_depth == 0 || self.is_forced_indentation_active() {
+                if let Some(indent_token) = self.handle_indentation() {
+                    return indent_token;
+                }
+            } else {
+                // Still need to skip whitespace at line start when inside brackets
+                while let Some(ch) = self.peek() {
+                    match ch {
+                        ' ' | '\t' | '\r' => {
+                            self.advance();
+                        }
+                        '\n' => {
+                            // Empty line inside brackets
+                            self.advance();
+                            self.line += 1;
+                            self.column = 1;
+                        }
+                        _ => break,
+                    }
+                }
+            }
+        }
+
+        self.skip_whitespace();
+
+        let start_pos = self.current_pos;
+        let start_line = self.line;
+        let start_column = self.column;
+
+        let Some((_pos, ch)) = self.advance() else {
+            // Generate remaining DEDENTs at EOF
+            while self.indent_stack.len() > 1 {
+                self.indent_stack.pop();
+                self.pending_tokens.push(Token::new(
+                    TokenKind::Dedent,
+                    Span::new(start_pos, start_pos, start_line, start_column),
+                    String::new(),
+                ));
+            }
+            if let Some(token) = self.pending_tokens.pop() {
+                return token;
+            }
+            return Token::new(
+                TokenKind::Eof,
+                Span::new(start_pos, start_pos, start_line, start_column),
+                String::new(),
+            );
+        };
+
+        let kind = match ch {
+            // Newline
+            '\n' => {
+                self.line += 1;
+                self.column = 1;
+                self.at_line_start = true;
+                // Skip newlines inside brackets (parentheses, braces, brackets)
+                // unless force_indentation is active at the current bracket depth
+                if self.bracket_depth > 0 && !self.is_forced_indentation_active() {
+                    // Continue to next token instead of emitting Newline
+                    return self.next_token();
+                }
+                TokenKind::Newline
+            }
+
+            // Single-character tokens - track bracket depth for indentation suppression
+            '(' => {
+                self.bracket_depth += 1;
+                TokenKind::LParen
+            }
+            ')' => {
+                self.bracket_depth = self.bracket_depth.saturating_sub(1);
+                TokenKind::RParen
+            }
+            '[' => {
+                self.bracket_depth += 1;
+                TokenKind::LBracket
+            }
+            ']' => {
+                self.bracket_depth = self.bracket_depth.saturating_sub(1);
+                TokenKind::RBracket
+            }
+            '{' => {
+                self.bracket_depth += 1;
+                TokenKind::LBrace
+            }
+            '}' => {
+                self.bracket_depth = self.bracket_depth.saturating_sub(1);
+                TokenKind::RBrace
+            }
+            ',' => TokenKind::Comma,
+            ';' => TokenKind::Semicolon,
+            '@' => TokenKind::At,
+            '#' => {
+                // Check if this is an attribute: #[
+                if self.peek() == Some('[') {
+                    TokenKind::Hash
+                } else if self.peek() == Some('#') {
+                    // Doc comment: ## ...
+                    self.advance(); // consume second '#'
+                    return self.read_doc_line_comment(start_pos, start_line, start_column);
+                } else {
+                    // Otherwise it's a regular comment
+                    self.skip_comment()
+                }
+            }
+            '$' => TokenKind::Dollar,
+            '\\' => {
+                // Line continuation: backslash followed by newline
+                if self.peek() == Some('\n') {
+                    self.advance(); // consume the newline
+                    self.line += 1;
+                    self.column = 1;
+                    // Return next meaningful token instead of backslash
+                    return self.next_token();
+                }
+                // Double backslash \\x is treated same as \x (lambda)
+                // Some source files use \\ as lambda prefix
+                if self.peek() == Some('\\') {
+                    self.advance(); // consume second backslash
+                }
+                TokenKind::Backslash
+            }
+            '^' => TokenKind::Xor,
+            '~' => {
+                // Check for ~> (layer connect operator)
+                if self.check('>') {
+                    self.advance();
+                    TokenKind::TildeArrow
+                // Check for compound suspension operators: ~+=, ~-=, ~*=, ~/=
+                } else if self.check('+') {
+                    self.advance();
+                    if self.check('=') {
+                        self.advance();
+                        TokenKind::TildePlusAssign
+                    } else {
+                        // Put back the '+' - this is just ~+ which isn't valid
+                        // For now, treat as error or just return Tilde
+                        TokenKind::Tilde
+                    }
+                } else if self.check('-') {
+                    self.advance();
+                    if self.check('=') {
+                        self.advance();
+                        TokenKind::TildeMinusAssign
+                    } else {
+                        TokenKind::Tilde
+                    }
+                } else if self.check('*') {
+                    self.advance();
+                    if self.check('=') {
+                        self.advance();
+                        TokenKind::TildeStarAssign
+                    } else {
+                        TokenKind::Tilde
+                    }
+                } else if self.check('/') {
+                    self.advance();
+                    if self.check('=') {
+                        self.advance();
+                        TokenKind::TildeSlashAssign
+                    } else {
+                        TokenKind::Tilde
+                    }
+                } else if self.check('=') {
+                    self.advance();
+                    TokenKind::TildeAssign
+                } else {
+                    TokenKind::Tilde
+                }
+            }
+            '?' => {
+                // Check for ?? (null coalescing) or ?. (optional chaining)
+                if self.check('?') {
+                    self.advance();
+                    TokenKind::DoubleQuestion
+                } else if self.check('.') {
+                    self.advance();
+                    TokenKind::QuestionDot
+                } else {
+                    TokenKind::Question
+                }
+            }
+
+            // Multi-character operators
+            '+' => self.match_char('=', TokenKind::PlusAssign, TokenKind::Plus),
+            '-' => {
+                if self.check('>') {
+                    self.advance();
+                    TokenKind::Arrow
+                } else if self.check('=') {
+                    self.advance();
+                    TokenKind::MinusAssign
+                } else {
+                    TokenKind::Minus
+                }
+            }
+            '*' => {
+                if self.check('*') {
+                    self.advance();
+                    TokenKind::DoubleStar
+                } else if self.check('=') {
+                    self.advance();
+                    TokenKind::StarAssign
+                } else {
+                    TokenKind::Star
+                }
+            }
+            '/' => {
+                if self.check('*') {
+                    self.advance(); // consume '*'
+                    if self.peek() == Some('*') && self.peek_ahead(1) != Some('/') {
+                        // Doc comment /** ... */
+                        self.advance(); // consume second '*'
+                        return self.read_doc_block_comment(start_pos, start_line, start_column);
+                    } else {
+                        // Regular block comment /* ... */
+                        self.skip_block_comment()
+                    }
+                } else if self.check('/') {
+                    self.advance(); // consume second '/'
+                    if self.check('/') {
+                        // Doc comment /// ...
+                        self.advance(); // consume third '/'
+                        return self.read_doc_line_comment(start_pos, start_line, start_column);
+                    } else {
+                        // Parallel operator //
+                        TokenKind::Parallel
+                    }
+                } else if self.check('=') {
+                    self.advance();
+                    TokenKind::SlashAssign
+                } else {
+                    TokenKind::Slash
+                }
+            }
+            '%' => self.match_char('=', TokenKind::PercentAssign, TokenKind::Percent),
+            '&' => {
+                if self.check('&') {
+                    self.advance();
+                    TokenKind::DoubleAmp
+                } else if self.check(':') {
+                    self.advance();
+                    TokenKind::AmpColon
+                } else {
+                    TokenKind::Ampersand
+                }
+            }
+            '|' => {
+                if self.check('|') {
+                    self.advance();
+                    TokenKind::DoublePipe
+                } else if self.check('>') {
+                    self.advance();
+                    TokenKind::PipeForward
+                } else {
+                    TokenKind::Pipe
+                }
+            }
+
+            '=' => {
+                if self.check('=') {
+                    self.advance();
+                    TokenKind::Eq
+                } else if self.check('>') {
+                    self.advance();
+                    TokenKind::FatArrow
+                } else {
+                    TokenKind::Assign
+                }
+            }
+            '!' => {
+                if self.check('=') {
+                    self.advance();
+                    TokenKind::NotEq
+                } else {
+                    // Standalone ! for macro invocations
+                    TokenKind::Bang
+                }
+            }
+            '<' => {
+                if self.check('-') {
+                    self.advance();
+                    TokenKind::ChannelArrow
+                } else if self.check('=') {
+                    self.advance();
+                    TokenKind::LtEq
+                } else if self.check('<') {
+                    self.advance();
+                    if self.check('<') {
+                        self.advance();
+                        TokenKind::TripleLt
+                    } else {
+                        TokenKind::ShiftLeft
+                    }
+                } else {
+                    TokenKind::Lt
+                }
+            }
+            '>' => {
+                if self.check('=') {
+                    self.advance();
+                    TokenKind::GtEq
+                } else if self.check('>') {
+                    self.advance();
+                    if self.check('>') {
+                        self.advance();
+                        TokenKind::TripleGt
+                    } else {
+                        TokenKind::ShiftRight
+                    }
+                } else {
+                    TokenKind::Gt
+                }
+            }
+            ':' => {
+                if self.check(':') {
+                    self.advance();
+                    TokenKind::DoubleColon
+                } else if self.check_alpha() {
+                    // Symbol literal :name
+                    self.scan_symbol()
+                } else {
+                    TokenKind::Colon
+                }
+            }
+            '.' => {
+                if self.check('.') {
+                    self.advance();
+                    if self.check('.') {
+                        self.advance();
+                        TokenKind::Ellipsis
+                    } else if self.check('=') {
+                        self.advance();
+                        TokenKind::DoubleDotEq
+                    } else {
+                        TokenKind::DoubleDot
+                    }
+                } else if self.check('?') {
+                    self.advance();
+                    TokenKind::DotQuestion
+                } else {
+                    TokenKind::Dot
+                }
+            }
+
+            // String literals
+            '"' => {
+                // Check for triple-quoted string (docstring)
+                if self.check('"') && self.check_ahead(1, '"') {
+                    self.scan_triple_quoted_string()
+                } else {
+                    self.scan_fstring() // Double quotes are interpolated by default
+                }
+            }
+            '\'' => {
+                // Disambiguate: label 'ident vs raw string / char literal 'text'
+                //
+                // Labels ('loop, 'outer) never have a closing tick.
+                // Raw strings and char literals ('a', 'type', 'hello world')
+                // always have a closing tick on the same line.
+                //
+                // Strategy: when the next char is alpha/underscore, peek ahead
+                // (non-destructively) to check for a closing tick before newline.
+                // If found → raw string.  If not → label.
+                if let Some(next_ch) = self.peek() {
+                    if next_ch.is_alphabetic() || next_ch == '_' {
+                        // Look ahead for a closing tick on this line
+                        let mut has_close_tick = false;
+                        for i in 0..500 {
+                            match self.peek_ahead(i) {
+                                Some('\'') => {
+                                    has_close_tick = true;
+                                    break;
+                                }
+                                Some('\n') | None => break,
+                                _ => {}
+                            }
+                        }
+                        if has_close_tick {
+                            // 'text' — delegate to raw string scanner
+                            self.scan_raw_string()
+                        } else {
+                            // 'ident — label (no closing tick)
+                            let mut label = String::new();
+                            while let Some(c) = self.peek() {
+                                if c.is_alphanumeric() || c == '_' {
+                                    label.push(c);
+                                    self.advance();
+                                } else {
+                                    break;
+                                }
+                            }
+                            TokenKind::Label(label)
+                        }
+                    } else {
+                        self.scan_raw_string()
+                    }
+                } else {
+                    self.scan_raw_string()
+                }
+            }
+
+            // Numbers
+            '0'..='9' => self.scan_number(ch),
+
+            // Backtick atom literal: `symbol`
+            '`' => self.scan_atom(),
+
+            // Identifiers and keywords
+            'a'..='z' | 'A'..='Z' | '_' => self.scan_identifier(ch),
+
+            _ => TokenKind::Error(format!("Unexpected character: '{}'", ch)),
+        };
+
+        let end_pos = self.current_pos;
+        let lexeme = self.source[start_pos..end_pos].to_string();
+
+        Token::new(kind, Span::new(start_pos, end_pos, start_line, start_column), lexeme)
+    }
+
+    fn advance(&mut self) -> Option<(usize, char)> {
+        if let Some((pos, ch)) = self.chars.next() {
+            self.current_pos = pos + ch.len_utf8();
+            self.column += 1;
+            Some((pos, ch))
+        } else {
+            None
+        }
+    }
+
+    fn peek(&mut self) -> Option<char> {
+        self.chars.peek().map(|(_, ch)| *ch)
+    }
+
+    fn peek_ahead(&self, n: usize) -> Option<char> {
+        self.source[self.current_pos..].chars().nth(n)
+    }
+
+    fn check(&mut self, expected: char) -> bool {
+        self.peek() == Some(expected)
+    }
+
+    fn check_ahead(&mut self, n: usize, expected: char) -> bool {
+        self.peek_ahead(n) == Some(expected)
+    }
+
+    fn check_alpha(&mut self) -> bool {
+        self.peek().map(|c| c.is_alphabetic() || c == '_').unwrap_or(false)
+    }
+
+    fn match_char(&mut self, expected: char, if_match: TokenKind, otherwise: TokenKind) -> TokenKind {
+        if self.check(expected) {
+            self.advance();
+            if_match
+        } else {
+            otherwise
+        }
+    }
+
+    fn skip_whitespace(&mut self) {
+        while let Some(ch) = self.peek() {
+            if ch == ' ' || ch == '\t' || ch == '\r' {
+                self.advance();
+            } else {
+                break;
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+#[path = "../lexer_tests.rs"]
+mod tests;

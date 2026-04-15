@@ -1,0 +1,143 @@
+# @parent test/system/t32_mcp_lifecycle_spec.spl
+# @req REQ-lifecycle
+# tag: unit
+#
+# Unit tests for T32 MCP lifecycle helper functions.
+# Implementation: examples/10_tooling/trace32_tools/t32_mcp/lifecycle_tools.spl
+#
+# Note: Functions are inlined here to avoid import issues (same pattern as
+# test/unit/app/mcp_t32/mcp_t32_run_guard_spec.spl).
+
+extern fn rt_env_get(name: text) -> text
+extern fn rt_file_exists(path: text) -> bool
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+
+# ============================================================================
+# Inlined logic from lifecycle_tools.spl — pure/testable functions only
+# ============================================================================
+
+fn arch_to_binary(arch: text) -> text:
+    val a = arch.to_lower()
+    if a == "arm" or a == "arm32" or a == "cortex-m" or a == "cortex-a" or a == "":
+        return "t32marm"
+    elif a == "arm64" or a == "aarch64":
+        return "t32marm64"
+    elif a == "tricore" or a == "tc3xx" or a == "tc":
+        return "t32mtc"
+    elif a == "ppc" or a == "powerpc":
+        return "t32mppc"
+    elif a == "riscv" or a == "risc-v":
+        return "t32mriscv"
+    elif a == "x86" or a == "x86_64":
+        return "t32mx86"
+    "t32marm"
+
+fn find_install_dir() -> text:
+    val t32mem = rt_env_get("T32MEM") ?? ""
+    if t32mem != "":
+        return t32mem
+    if rt_file_exists("/opt/t32"):
+        return "/opt/t32"
+    ""
+
+fn check_xvfb() -> bool:
+    var stdout = ""
+    var stderr = ""
+    var rc: i64 = 0
+    (stdout, stderr, rc) = rt_process_run("/bin/sh", ["-c", "which xvfb-run 2>/dev/null"])
+    rc == 0
+
+fn ping_port(backend: text, port: i64) -> bool:
+    var stdout = ""
+    var stderr = ""
+    var rc: i64 = 0
+    (stdout, stderr, rc) = rt_process_run("/bin/sh", ["-c", backend + " localhost port=" + str(port) + " PING < /dev/null 2>/dev/null"])
+    rc == 0
+
+# ============================================================================
+# Tests
+# ============================================================================
+
+describe "t32_arch_to_binary":
+    it "maps arm to t32marm":
+        expect(arch_to_binary("arm")).to_equal("t32marm")
+
+    it "maps ARM (uppercase) to t32marm":
+        expect(arch_to_binary("ARM")).to_equal("t32marm")
+
+    it "maps arm32 to t32marm":
+        expect(arch_to_binary("arm32")).to_equal("t32marm")
+
+    it "maps cortex-m to t32marm":
+        expect(arch_to_binary("cortex-m")).to_equal("t32marm")
+
+    it "maps cortex-a to t32marm":
+        expect(arch_to_binary("cortex-a")).to_equal("t32marm")
+
+    it "maps empty string to default t32marm":
+        expect(arch_to_binary("")).to_equal("t32marm")
+
+    it "maps arm64 to t32marm64":
+        expect(arch_to_binary("arm64")).to_equal("t32marm64")
+
+    it "maps aarch64 to t32marm64":
+        expect(arch_to_binary("aarch64")).to_equal("t32marm64")
+
+    it "maps ARM64 (uppercase) to t32marm64":
+        expect(arch_to_binary("ARM64")).to_equal("t32marm64")
+
+    it "maps tricore to t32mtc":
+        expect(arch_to_binary("tricore")).to_equal("t32mtc")
+
+    it "maps tc3xx to t32mtc":
+        expect(arch_to_binary("tc3xx")).to_equal("t32mtc")
+
+    it "maps tc to t32mtc":
+        expect(arch_to_binary("tc")).to_equal("t32mtc")
+
+    it "maps ppc to t32mppc":
+        expect(arch_to_binary("ppc")).to_equal("t32mppc")
+
+    it "maps powerpc to t32mppc":
+        expect(arch_to_binary("powerpc")).to_equal("t32mppc")
+
+    it "maps riscv to t32mriscv":
+        expect(arch_to_binary("riscv")).to_equal("t32mriscv")
+
+    it "maps risc-v to t32mriscv":
+        expect(arch_to_binary("risc-v")).to_equal("t32mriscv")
+
+    it "maps x86 to t32mx86":
+        expect(arch_to_binary("x86")).to_equal("t32mx86")
+
+    it "maps x86_64 to t32mx86":
+        expect(arch_to_binary("x86_64")).to_equal("t32mx86")
+
+    it "maps unknown arch to default t32marm":
+        expect(arch_to_binary("mips")).to_equal("t32marm")
+
+describe "t32_find_install_dir":
+    it "returns /opt/t32 when it exists (standard install)":
+        # This machine has /opt/t32 installed
+        val dir = find_install_dir()
+        expect(dir).to_equal("/opt/t32")
+
+    it "returns non-empty string when T32 is installed":
+        val dir = find_install_dir()
+        expect(dir != "").to_equal(true)
+
+describe "t32_check_xvfb":
+    it "returns true when xvfb-run is installed":
+        # This machine has xvfb installed
+        val result = check_xvfb()
+        expect(result).to_equal(true)
+
+describe "t32_ping_port":
+    it "returns false when no service is listening on an unused port":
+        # Port 19999 should not have a T32 instance running
+        val result = ping_port("t32rem64", 19999)
+        expect(result).to_equal(false)
+
+    it "returns false for an invalid backend on a closed port":
+        val result = ping_port("t32rem64", 65000)
+        expect(result).to_equal(false)

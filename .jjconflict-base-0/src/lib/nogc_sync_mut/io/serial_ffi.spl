@@ -1,0 +1,98 @@
+@allow(primitive_api)
+# Serial Port SFFI Wrapper
+#
+# POSIX tty serial port driver (Linux/macOS).
+# Wraps libc open + nix termios for raw-mode serial I/O.
+# Devices: /dev/ttyUSB*, /dev/ttyS*, /dev/cu.* etc.
+
+use std.nogc_sync_mut.io.sffi_common.{is_valid_handle, is_invalid_handle}
+
+# ============================================================================
+# Tier 1: Extern Declarations (Raw FFI)
+# ============================================================================
+
+# Open serial device at baud rate in raw mode. Returns fd (> 0) or 0 on error.
+extern fn rt_serial_open(device: text, baud: i64) -> i64
+
+# Close serial fd. Returns true on success.
+extern fn rt_serial_close(handle: i64) -> bool
+
+# Read up to max_bytes from serial. Blocks until data or 5s timeout.
+extern fn rt_serial_read(handle: i64, max_bytes: i64) -> text
+
+# Write data to serial. Returns bytes written (0 on error).
+extern fn rt_serial_write(handle: i64, data: text) -> i64
+
+# Set read timeout. timeout_ms < 0 = block forever, 0 = non-blocking, > 0 = timed.
+extern fn rt_serial_set_timeout(handle: i64, timeout_ms: i64) -> bool
+
+# Flush (drain) output buffer. Returns true on success.
+extern fn rt_serial_flush(handle: i64) -> bool
+
+# Bidirectional relay: stdin (fd 0) ↔ serial fd, until either end closes.
+# Used by serial_proxy as SSH ProxyCommand. Returns true on clean exit.
+extern fn rt_serial_relay(serial_fd: i64) -> bool
+
+# ============================================================================
+# Tier 2: Simple-Friendly Wrapper
+# ============================================================================
+
+struct SerialPort:
+    handle: i64
+    device: text
+    baud: i64
+    is_valid: bool
+
+fn serial_open(device: text, baud: i64) -> SerialPort:
+    """Open a serial port at the given baud rate in raw mode.
+
+    Args:
+        device: Device path, e.g. "/dev/ttyUSB0" or "/dev/cu.usbserial"
+        baud:   Baud rate (9600 / 19200 / 38400 / 57600 / 115200 / 230400)
+
+    Returns: SerialPort (check is_valid before use)
+
+    Example:
+        val port = serial_open("/dev/ttyUSB0", 115200)
+        if port.is_valid:
+            serial_write(port, "hello\n")
+    """
+    val handle = rt_serial_open(device, baud)
+    SerialPort(handle: handle, device: device, baud: baud, is_valid: is_valid_handle(handle))
+
+fn serial_close(port: SerialPort) -> bool:
+    """Close the serial port."""
+    if is_invalid_handle(port.handle):
+        return false
+    rt_serial_close(port.handle)
+
+fn serial_read(port: SerialPort, max_bytes: i64) -> text:
+    """Read up to max_bytes from the serial port. Blocks until data arrives."""
+    if is_invalid_handle(port.handle):
+        return ""
+    rt_serial_read(port.handle, max_bytes)
+
+fn serial_write(port: SerialPort, data: text) -> i64:
+    """Write data to the serial port. Returns bytes written."""
+    if is_invalid_handle(port.handle):
+        return 0
+    rt_serial_write(port.handle, data)
+
+fn serial_flush(port: SerialPort) -> bool:
+    """Flush pending output to the serial port."""
+    if is_invalid_handle(port.handle):
+        return false
+    rt_serial_flush(port.handle)
+
+fn serial_set_timeout(port: SerialPort, timeout_ms: i64) -> bool:
+    """Set read timeout in milliseconds. -1 = block, 0 = non-blocking."""
+    if is_invalid_handle(port.handle):
+        return false
+    rt_serial_set_timeout(port.handle, timeout_ms)
+
+fn serial_relay(port: SerialPort) -> bool:
+    """Bidirectional relay: stdin ↔ serial until either end closes.
+    Suitable for use as SSH ProxyCommand relay. Returns true on clean exit."""
+    if is_invalid_handle(port.handle):
+        return false
+    rt_serial_relay(port.handle)

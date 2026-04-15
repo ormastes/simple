@@ -1,0 +1,262 @@
+# Minimal render pipeline orchestration for the runnable browser example.
+# This keeps the example executable under the current bootstrap compiler while
+# still producing real DOM, layout, and paint data structures.
+
+use examples.browser.entity.dom.node_types.{DomNode, Element, NodeKind}
+use examples.browser.entity.dom.attribute_types.{Attr}
+use examples.browser.entity.dom.box_types.{LayoutBox, BoxKind}
+use examples.browser.entity.dom.paint_types.{PaintOp, Color, from_rgb, black, transparent}
+use examples.browser.shared.logging.{Logger}
+use examples.browser.shared.error.{BrowserError, parse_error}
+
+class RenderStyle:
+    display: text
+    font_size: f64
+    background: Color
+    foreground: Color
+
+    static fn default_block() -> RenderStyle:
+        RenderStyle(
+            display: "block",
+            font_size: 16.0,
+            background: transparent(),
+            foreground: black()
+        )
+
+class DomTree:
+    root_id: i64
+    nodes: [DomNode]
+    elements: [Element]
+
+class StyledTree:
+    root_id: i64
+    nodes: [DomNode]
+    elements: [Element]
+    styles: [RenderStyle]
+
+class LayoutTree:
+    root_id: i64
+    nodes: [DomNode]
+    elements: [Element]
+    styles: [RenderStyle]
+    root_box: LayoutBox
+
+class DisplayList:
+    ops: [PaintOp]
+    commands: [text]
+
+class RenderPipeline:
+    logger: Logger
+
+    static fn create_pipeline(logger: Logger) -> RenderPipeline:
+        RenderPipeline(logger: logger)
+
+    me run_full_pipeline(html: text) -> Result<DisplayList, BrowserError>:
+        val dom = self.parse(html)?
+        val styled = self.resolve_styles(dom)?
+        val layout = self.compute_layout(styled)?
+        self.paint(layout)
+
+    me parse(html: text) -> Result<DomTree, BrowserError>:
+        if html.trim().len() == 0:
+            return Err(parse_error("Empty HTML document"))
+
+        var nodes = [DomNode]()
+        var elements = [Element]()
+
+        val doc = DomNode(id: 0, kind: NodeKind.Document, parent_id: -1, children: [i64](), data: "#document")
+        nodes.push(doc)
+
+        val html_id = self.push_element(nodes, elements, 0, 1, "html")
+        val body_id = self.push_element(nodes, elements, html_id, 2, "body")
+
+        var next_id = 3
+        next_id = self.append_if_present(html, "<h1>", "</h1>", "h1", nodes, elements, body_id, next_id)
+        next_id = self.append_if_present(html, "<p>", "</p>", "p", nodes, elements, body_id, next_id)
+        next_id = self.append_if_present(html, "<div>", "</div>", "div", nodes, elements, body_id, next_id)
+
+        if nodes.get(body_id).children.len() == 0:
+            self.push_text(nodes, body_id, next_id, self.extract_text(html))
+
+        Ok(DomTree(root_id: 0, nodes: nodes, elements: elements))
+
+    me resolve_styles(dom: DomTree) -> Result<StyledTree, BrowserError>:
+        var styles = [RenderStyle]()
+        var i = 0
+        while i < dom.nodes.len():
+            val node = dom.nodes.get(i)
+            var style = RenderStyle.default_block()
+            if node.kind == NodeKind.Text:
+                style.display = "inline"
+            val element = self.find_element(node.id, dom.elements)
+            if element.?:
+                val tag = element.unwrap().tag_name
+                if tag == "h1":
+                    style.font_size = 32.0
+                else if tag == "p":
+                    style.font_size = 18.0
+                else if tag == "div":
+                    style.background = from_rgb(240, 240, 240)
+            styles.push(style)
+            i = i + 1
+
+        Ok(StyledTree(root_id: dom.root_id, nodes: dom.nodes, elements: dom.elements, styles: styles))
+
+    me compute_layout(styled: StyledTree) -> Result<LayoutTree, BrowserError>:
+        val root_box = self.layout_node(styled.root_id, styled.nodes, styled.styles, 0.0, 0.0, 800.0)
+        Ok(LayoutTree(
+            root_id: styled.root_id,
+            nodes: styled.nodes,
+            elements: styled.elements,
+            styles: styled.styles,
+            root_box: root_box
+        ))
+
+    me paint(layout: LayoutTree) -> Result<DisplayList, BrowserError>:
+        var ops = [PaintOp]()
+        self.paint_box_tree(layout.root_box, layout.nodes, layout.styles, ops)
+
+        var commands = [text]()
+        for op in ops:
+            match op:
+                PaintOp.FillRect(x, y, w, h, color):
+                    commands.push("fill_rect")
+                PaintOp.DrawText(x, y, text_content, font_size, color):
+                    commands.push("draw_text")
+                PaintOp.DrawBorder(x, y, w, h, widths, colors):
+                    commands.push("draw_border")
+                PaintOp.DrawImage(x, y, w, h, image_id):
+                    commands.push("draw_image")
+                PaintOp.DrawGradient(x, y, w, h, gradient):
+                    commands.push("draw_gradient")
+                PaintOp.PushClip(x, y, w, h):
+                    commands.push("push_clip")
+                PaintOp.PopClip:
+                    commands.push("pop_clip")
+                PaintOp.PushOpacity(alpha):
+                    commands.push("push_opacity")
+                PaintOp.PopOpacity:
+                    commands.push("pop_opacity")
+                PaintOp.PushTransform(matrix):
+                    commands.push("push_transform")
+                PaintOp.PopTransform:
+                    commands.push("pop_transform")
+                PaintOp.PushFilter(filter_type, amount):
+                    commands.push("push_filter")
+                PaintOp.PopFilter:
+                    commands.push("pop_filter")
+        Ok(DisplayList(ops: ops, commands: commands))
+
+    me paint_box_tree(box_node: LayoutBox, nodes: [DomNode], styles: [RenderStyle], ops: [PaintOp]):
+        val style = styles.get(box_node.node_id)
+        if style.background.a > 0:
+            ops.push(PaintOp.FillRect(
+                x: box_node.x,
+                y: box_node.y,
+                w: box_node.width,
+                h: box_node.height,
+                color: style.background
+            ))
+
+        val node = nodes.get(box_node.node_id)
+        if node.kind == NodeKind.Text:
+            ops.push(PaintOp.DrawText(
+                x: box_node.x,
+                y: box_node.y + style.font_size,
+                text_content: node.data,
+                font_size: style.font_size,
+                color: style.foreground
+            ))
+
+        for child in box_node.children:
+            self.paint_box_tree(child, nodes, styles, ops)
+
+    fn layout_node(node_id: i64, nodes: [DomNode], styles: [RenderStyle], x: f64, y: f64, available_width: f64) -> LayoutBox:
+        val node = nodes.get(node_id)
+        val style = styles.get(node_id)
+        var box_node = LayoutBox.create(node_id, self.kind_for(style.display))
+        box_node.x = x
+        box_node.y = y
+
+        if node.kind == NodeKind.Text:
+            box_node.width = self.measure_text(node.data, style.font_size)
+            box_node.height = style.font_size + 6.0
+            return box_node
+
+        var cursor_y = y + 12.0
+        var max_width = 0.0
+        for child_id in node.children:
+            val child_box = self.layout_node(child_id, nodes, styles, x + 12.0, cursor_y, available_width - 24.0)
+            box_node.children.push(child_box)
+            cursor_y = cursor_y + child_box.height + 12.0
+            if child_box.width > max_width:
+                max_width = child_box.width
+
+        if box_node.children.len() == 0:
+            box_node.width = available_width
+            box_node.height = 32.0
+        else:
+            box_node.width = if max_width > 0.0: max_width + 24.0 else: available_width
+            box_node.height = cursor_y - y
+        box_node
+
+    fn kind_for(display: text) -> BoxKind:
+        if display == "inline":
+            return BoxKind.Inline
+        BoxKind.Block
+
+    fn measure_text(value: text, font_size: f64) -> f64:
+        if value.trim().len() == 0:
+            return 0.0
+        value.trim().len().to_f64() * (font_size * 0.55)
+
+    me append_if_present(html: text, open_tag: text, close_tag: text, tag_name: text, nodes: [DomNode], elements: [Element], parent_id: i64, next_id: i64) -> i64:
+        val content = self.extract_between(html, open_tag, close_tag)
+        if content.len() == 0:
+            return next_id
+
+        val element_id = next_id
+        val text_id = next_id + 1
+        self.push_element(nodes, elements, parent_id, element_id, tag_name)
+        self.push_text(nodes, element_id, text_id, content)
+        text_id + 1
+
+    me push_element(nodes: [DomNode], elements: [Element], parent_id: i64, node_id: i64, tag_name: text) -> i64:
+        nodes.push(DomNode(id: node_id, kind: NodeKind.Element, parent_id: parent_id, children: [i64](), data: tag_name))
+        elements.push(Element(node_id: node_id, tag_name: tag_name, attributes: [Attr](), ns: "html"))
+        self.attach_child(nodes, parent_id, node_id)
+        node_id
+
+    me push_text(nodes: [DomNode], parent_id: i64, node_id: i64, content: text):
+        nodes.push(DomNode(id: node_id, kind: NodeKind.Text, parent_id: parent_id, children: [i64](), data: content.trim()))
+        self.attach_child(nodes, parent_id, node_id)
+
+    me attach_child(nodes: [DomNode], parent_id: i64, child_id: i64):
+        var parent = nodes.get(parent_id)
+        parent.children.push(child_id)
+        nodes.set(parent_id, parent)
+
+    fn extract_between(html: text, open_tag: text, close_tag: text) -> text:
+        val start = html.index_of(open_tag)
+        if start < 0:
+            return ""
+        val content_start = start + open_tag.len()
+        val rest = html.substring(content_start)
+        val end = rest.index_of(close_tag)
+        if end < 0:
+            return ""
+        rest.substring(0, end).trim()
+
+    fn extract_text(html: text) -> text:
+        var text_value = html.trim()
+        if text_value.starts_with("<") and text_value.contains(">"):
+            val close = text_value.index_of(">")
+            if close >= 0 and close + 1 < text_value.len():
+                text_value = text_value.substring(close + 1).trim()
+        text_value
+
+    fn find_element(node_id: i64, elements: [Element]) -> Element?:
+        for element in elements:
+            if element.node_id == node_id:
+                return Some(element)
+        nil

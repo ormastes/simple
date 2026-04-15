@@ -1,0 +1,89 @@
+# Command-line argument parsing and filtering utilities
+#
+# This module provides utilities for parsing global flags and filtering
+# internal command-line arguments.
+
+use tooling.config_env.{set_env}
+
+# FFI declarations for runtime configuration
+extern fn rt_set_macro_trace(enabled: bool)
+extern fn rt_set_debug_mode(enabled: bool)
+
+# Parse global flags from command-line arguments
+struct GlobalFlags:
+    gc_log: bool
+    gc_off: bool
+    use_notui: bool
+    macro_trace: bool
+    debug_mode: bool
+
+impl GlobalFlags:
+    # Parse global flags from command-line arguments
+    static fn parse(args: List<text>) -> GlobalFlags:
+        GlobalFlags(
+            gc_log: args.any(\a: a == "--gc-log"),
+            gc_off: args.any(\a: a == "--gc=off" or a == "--gc=OFF"),
+            use_notui: args.any(\a: a == "--notui"),
+            macro_trace: args.any(\a: a == "--macro-trace"),
+            debug_mode: args.any(\a: a == "--debug")
+        )
+
+    # Apply global flags to the runtime environment
+    fn apply(self):
+        if self.macro_trace:
+            rt_set_macro_trace(true)
+
+        if self.debug_mode:
+            rt_set_debug_mode(true)
+
+# Parse and set language flag for i18n localization
+#
+# Looks for --lang flag and sets SIMPLE_LANG environment variable.
+# Example: --lang ko sets SIMPLE_LANG=ko
+fn parse_lang_flag(args: List<text>):
+    # Find --lang flag position manually
+    var lang_pos = -1
+    var i = 0
+    while i < args.len():
+        if args[i] == "--lang":
+            lang_pos = i
+            break
+        i = i + 1
+
+    # Set environment variable if flag found with value
+    if lang_pos >= 0 and lang_pos + 1 < args.len():
+        val lang = args[lang_pos + 1]
+        set_env("SIMPLE_LANG", lang)
+
+# Filter out internal flags (GC, sandbox, etc.) from arguments
+#
+# Returns a new list with only user-provided arguments, removing:
+# - Single flags: --gc*, --notui, --startup-metrics, --macro-trace, --debug, --sandbox, --no-network
+# - Value flags: --time-limit, --memory-limit, --fd-limit, --thread-limit, --network-*, --read-*, --lang
+pub fn filter_internal_flags(args: List<text>) -> List<text>:
+    var filtered_args: List<text> = []
+    var i = 0
+
+    while i < args.len():
+        val arg = args[i]
+        var skip_next = false
+
+        # Single flags without values
+        val is_single_flag = arg.starts_with("--gc") or arg == "--notui" or arg == "--startup-metrics" or arg == "--macro-trace" or arg == "--debug" or arg == "--sandbox" or arg == "--no-network"
+
+        if is_single_flag:
+            i = i + 1
+            continue
+
+        # Flags that take a value - skip the next argument too
+        val is_value_flag = arg == "--time-limit" or arg == "--memory-limit" or arg == "--fd-limit" or arg == "--thread-limit" or arg == "--network-allow" or arg == "--network-block" or arg == "--read-only" or arg == "--read-write" or arg == "--lang"
+
+        if is_value_flag:
+            i = i + 2  # Skip flag and value
+            continue
+
+        # Keep this argument
+        filtered_args.append(arg)
+        i = i + 1
+
+    filtered_args

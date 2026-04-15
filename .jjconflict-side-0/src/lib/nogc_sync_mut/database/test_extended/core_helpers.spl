@@ -1,0 +1,114 @@
+# Test Database Extended - Core Helper Methods
+#
+# Methods for getting or creating file, suite, and test records
+
+use std.database.core.{SdnRow}
+use std.database.test_extended.database.{TestDatabaseExtended}
+
+# Extension methods for TestDatabaseExtended
+impl TestDatabaseExtended:
+    # Get or create file record
+    me get_or_create_file(path: text) -> i64:
+        val path_id = self.interner.intern(path)
+
+        # Check if file exists
+        val files_table_opt = self.db.get_table("files")
+        if files_table_opt.?:
+            val files_table = files_table_opt.unwrap()
+            for row in files_table.rows:
+                # BUG-044: Use ?? instead of ? to avoid "try: early return"
+                val row_path_str = row.get_i32("path_str") ?? -1
+                if row_path_str != -1:
+                    if row_path_str == path_id:
+                        val file_id = row.get_i64("file_id") ?? -1
+                        if file_id != -1:
+                            return file_id
+
+        # Create new file
+        val file_id = self.next_file_id
+        self.next_file_id = self.next_file_id + 1
+
+        var files_table_mut_opt = self.db.get_table_mut("files")
+        if files_table_mut_opt.?:
+            var files_table_mut = files_table_mut_opt.unwrap()
+            val row = SdnRow.empty()
+            row.set("file_id", "{file_id}")
+            row.set("path_str", "{path_id}")
+            files_table_mut.add_row(row)
+            self.db.set_table("files", files_table_mut)
+
+        file_id
+
+    # Get or create suite record
+    me get_or_create_suite(file_path: text, suite_name: text) -> i64:
+        val file_id = self.get_or_create_file(file_path)
+        val name_id = self.interner.intern(suite_name)
+
+        # Check if suite exists
+        val suites_table_opt = self.db.get_table("suites")
+        if suites_table_opt.?:
+            val suites_table = suites_table_opt.unwrap()
+            for row in suites_table.rows:
+                # BUG-044: Use ?? instead of ? to avoid "try: early return"
+                val row_file_id = row.get_i64("file_id") ?? -1
+                val row_name_str = row.get_i32("name_str") ?? -1
+                if row_file_id != -1 and row_name_str != -1:
+                    if row_file_id == file_id and row_name_str == name_id:
+                        val suite_id = row.get_i64("suite_id") ?? -1
+                        if suite_id != -1:
+                            return suite_id
+
+        # Create new suite
+        val suite_id = self.next_suite_id
+        self.next_suite_id = self.next_suite_id + 1
+
+        var suites_table_mut_opt = self.db.get_table_mut("suites")
+        if suites_table_mut_opt.?:
+            var suites_table_mut = suites_table_mut_opt.unwrap()
+            val row = SdnRow.empty()
+            row.set("suite_id", "{suite_id}")
+            row.set("file_id", "{file_id}")
+            row.set("name_str", "{name_id}")
+            suites_table_mut.add_row(row)
+            self.db.set_table("suites", suites_table_mut)
+
+        suite_id
+
+    # Get or create test record
+    me get_or_create_test(suite_id: i64, test_name: text) -> i64:
+        val name_id = self.interner.intern(test_name)
+
+        # Check if test exists
+        val tests_table_opt = self.db.get_table("tests")
+        if tests_table_opt.?:
+            val tests_table = tests_table_opt.unwrap()
+            for row in tests_table.rows:
+                # BUG-044: Use ?? instead of ? to avoid "try: early return"
+                val row_suite_id = row.get_i64("suite_id") ?? -1
+                val row_name_str = row.get_i32("name_str") ?? -1
+                if row_suite_id != -1 and row_name_str != -1:
+                    if row_suite_id == suite_id and row_name_str == name_id:
+                        val test_id = row.get_i64("test_id") ?? -1
+                        if test_id != -1:
+                            return test_id
+
+        # Create new test
+        val test_id = self.next_test_id
+        self.next_test_id = self.next_test_id + 1
+
+        var tests_table_mut_opt = self.db.get_table_mut("tests")
+        if tests_table_mut_opt.?:
+            var tests_table_mut = tests_table_mut_opt.unwrap()
+            val row = SdnRow.empty()
+            row.set("test_id", "{test_id}")
+            row.set("suite_id", "{suite_id}")
+            row.set("name_str", "{name_id}")
+            row.set("category_str", "0")  # Default category
+            row.set("status_str", "{self.interner.intern("unknown")}")
+            row.set("tags_str", "0")
+            row.set("description_str", "0")
+            row.set("valid", "true")
+            tests_table_mut.add_row(row)
+            self.db.set_table("tests", tests_table_mut)
+
+        test_id

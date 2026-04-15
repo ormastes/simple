@@ -1,0 +1,605 @@
+# CSS Table Layout — CSS 2.1 Table Formatting Context.
+# Implements both fixed and automatic table layout algorithms,
+# column width calculation, row height computation, colspan/rowspan handling,
+# border-collapse vs border-separate, and cell positioning.
+#
+# Reference: https://www.w3.org/TR/CSS21/tables.html
+
+use examples.browser.entity.dom.box_types.(LayoutBox, BoxModel, BoxKind)
+use examples.browser.entity.dom.css_types.(CSSValue)
+use examples.browser.feature.style.computed.(ComputedStyle, extract_px)
+use examples.browser.feature.layout.flex.(LayoutContext)
+use examples.browser.shared.logging.(Logger, LogLevel)
+
+# ---------------------------------------------------------------------------
+# Table layout algorithm selector.
+# ---------------------------------------------------------------------------
+
+enum TableLayoutAlgorithm:
+    Auto
+    Fixed
+
+# ---------------------------------------------------------------------------
+# Table section kind — thead, tbody, tfoot.
+# ---------------------------------------------------------------------------
+
+enum TableSectionKind:
+    Head
+    Body
+    Foot
+
+# ---------------------------------------------------------------------------
+# TableCell — one cell within a table row.
+# ---------------------------------------------------------------------------
+
+class TableCell:
+    row: i64
+    col: i64
+    row_span: i64
+    col_span: i64
+    content: LayoutBox
+    width: f64
+    height: f64
+
+    static fn create(row: i64, col: i64, content: LayoutBox) -> TableCell:
+        TableCell(
+            row: row, col: col,
+            row_span: 1, col_span: 1,
+            content: content,
+            width: 0.0, height: 0.0
+        )
+
+    static fn spanning(row: i64, col: i64, rs: i64, cs: i64, content: LayoutBox) -> TableCell:
+        TableCell(
+            row: row, col: col,
+            row_span: rs, col_span: cs,
+            content: content,
+            width: 0.0, height: 0.0
+        )
+
+    # Minimum content width — the smallest width the cell can shrink to.
+    fn min_content_width() -> f64:
+        val bm = self.content.box_model
+        val padding_h = bm.padding_left + bm.padding_right
+        val border_h = bm.border_left + bm.border_right
+        val content_w = self.content.width
+        # Minimum is at least padding + border, or content if set
+        val min_w = padding_h + border_h
+        if content_w > min_w:
+            content_w
+        else:
+            min_w
+
+    # Maximum content width — preferred width without line breaks.
+    fn max_content_width() -> f64:
+        val bm = self.content.box_model
+        val padding_h = bm.padding_left + bm.padding_right
+        val border_h = bm.border_left + bm.border_right
+        self.content.width + padding_h + border_h
+
+    # Content height including padding and border.
+    fn total_height() -> f64:
+        val bm = self.content.box_model
+        val padding_v = bm.padding_top + bm.padding_bottom
+        val border_v = bm.border_top + bm.border_bottom
+        self.content.height + padding_v + border_v
+
+# ---------------------------------------------------------------------------
+# TableRow — one row containing cells.
+# ---------------------------------------------------------------------------
+
+class TableRow:
+    index: i64
+    cells: [TableCell]
+    height: f64
+
+    static fn create(index: i64) -> TableRow:
+        TableRow(index: index, cells: [TableCell](), height: 0.0)
+
+# ---------------------------------------------------------------------------
+# TableColumn — metadata and sizing for one column.
+# ---------------------------------------------------------------------------
+
+class TableColumn:
+    index: i64
+    min_width: f64
+    max_width: f64
+    width: f64
+    percentage_width: f64
+
+    static fn create(index: i64) -> TableColumn:
+        TableColumn(
+            index: index, min_width: 0.0, max_width: 0.0,
+            width: 0.0, percentage_width: 0.0
+        )
+
+# ---------------------------------------------------------------------------
+# TableSection — thead, tbody, or tfoot group.
+# ---------------------------------------------------------------------------
+
+class TableSection:
+    rows: [TableRow]
+    kind: TableSectionKind
+
+    static fn create(kind: TableSectionKind) -> TableSection:
+        TableSection(rows: [TableRow](), kind: kind)
+
+# ---------------------------------------------------------------------------
+# TableFormatter — main entry point for CSS table layout.
+# ---------------------------------------------------------------------------
+
+class TableFormatter:
+    logger: Logger
+
+    static fn new(logger: Logger) -> TableFormatter:
+        TableFormatter(logger: logger)
+
+    # Full table layout algorithm.
+    #
+    # 1. Collect table structure (sections -> rows -> cells).
+    # 2. Determine number of columns.
+    # 3. Handle colspan / rowspan.
+    # 4. Column width algorithm (fixed or auto).
+    # 5. Distribute available width to columns.
+    # 6. Compute row heights.
+    # 7. Position cells in the grid.
+    # 8. Handle border-collapse vs border-separate.
+    # 9. Apply table caption if present.
+    me layout_table(container: LayoutBox, style: ComputedStyle, ctx: LayoutContext) -> LayoutBox:
+        self.logger.debug("table layout: width={container.width}")
+
+        # Step 1 — collect structure
+        var sections = collect_table_structure(container.children)
+
+        # Step 2 — determine column count
+        val num_cols = determine_column_count(sections)
+        self.logger.trace("table: {num_cols} columns detected")
+
+        # Step 3 — determine layout algorithm
+        val algorithm = TableLayoutAlgorithm.Auto  # Could be parsed from style
+
+        # Step 4 — compute column widths
+        var columns = compute_column_widths(sections, container.width, algorithm)
+
+        # Step 5 — distribute remaining width
+        val used_width = _sum_column_widths(columns)
+        val remaining = container.width - used_width
+        if remaining > 0.0:
+            columns = distribute_remaining_width(columns, remaining)
+
+        # Extract column widths as a flat list
+        var col_widths = [f64]()
+        for col in columns:
+            col_widths.push(col.width)
+
+        # Step 6 — compute row heights
+        sections = compute_row_heights(sections, col_widths)
+
+        # Step 7 — position cells
+        val gap_x = 0.0  # border-separate spacing (default)
+        val gap_y = 0.0
+        sections = position_cells(sections, col_widths, gap_x, gap_y)
+
+        # Step 8 — handle border collapse
+        # For border-collapse, merge adjacent cell borders (simplified)
+        val border_collapse = (style.border_top_style != "separate")
+        if border_collapse:
+            sections = _collapse_borders_in_sections(sections)
+
+        # Step 9 — build result children from positioned cells
+        var result_children = [LayoutBox]()
+        var y_cursor = container.y
+
+        # Render in order: head, body, foot
+        for section in sections:
+            match section.kind:
+                TableSectionKind.Head:
+                    y_cursor = _render_section(section, container.x, y_cursor, result_children, gap_y)
+                _: pass_dn
+
+        for section in sections:
+            match section.kind:
+                TableSectionKind.Body:
+                    y_cursor = _render_section(section, container.x, y_cursor, result_children, gap_y)
+                _: pass_dn
+
+        for section in sections:
+            match section.kind:
+                TableSectionKind.Foot:
+                    y_cursor = _render_section(section, container.x, y_cursor, result_children, gap_y)
+                _: pass_dn
+
+        var result = container
+        result.children = result_children
+        result.height = y_cursor - container.y
+        self.logger.debug("table layout complete: {result_children.len()} cells, height={result.height}")
+        result
+
+# ---------------------------------------------------------------------------
+# Structure collection — map LayoutBox children to table sections/rows/cells.
+# ---------------------------------------------------------------------------
+
+fn collect_table_structure(children: [LayoutBox]) -> [TableSection]:
+    var sections = [TableSection]()
+
+    # Check child box kinds to determine section types
+    var body_section = TableSection.create(TableSectionKind.Body)
+    var row_index = 0
+
+    for child in children:
+        match child.kind:
+            BoxKind.TableRow:
+                # This child is a table row
+                var row = TableRow.create(row_index)
+                var col_index = 0
+                for cell_box in child.children:
+                    val cell = TableCell.create(row_index, col_index, cell_box)
+                    row.cells.push(cell)
+                    col_index = col_index + 1
+                body_section.rows.push(row)
+                row_index = row_index + 1
+            BoxKind.TableCell:
+                # Direct cells — create implicit row
+                if body_section.rows.len() == 0 or _last_row_is_full(body_section):
+                    var new_row = TableRow.create(row_index)
+                    body_section.rows.push(new_row)
+                    row_index = row_index + 1
+                val row_idx = body_section.rows.len() - 1
+                var last_row = body_section.rows[row_idx]
+                val col_idx = last_row.cells.len()
+                val cell = TableCell.create(row_idx, col_idx, child)
+                last_row.cells.push(cell)
+                body_section.rows[row_idx] = last_row
+            _:
+                # Treat any other child as a row containing a single cell
+                var row = TableRow.create(row_index)
+                val cell = TableCell.create(row_index, 0, child)
+                row.cells.push(cell)
+                body_section.rows.push(row)
+                row_index = row_index + 1
+
+    sections.push(body_section)
+    sections
+
+# ---------------------------------------------------------------------------
+# Column count — maximum cells across all rows, accounting for colspan.
+# ---------------------------------------------------------------------------
+
+fn determine_column_count(sections: [TableSection]) -> i64:
+    var max_cols = 0
+    for section in sections:
+        for row in section.rows:
+            var row_cols = 0
+            for cell in row.cells:
+                row_cols = row_cols + cell.col_span
+            if row_cols > max_cols:
+                max_cols = row_cols
+    if max_cols == 0:
+        max_cols = 1
+    max_cols
+
+# ---------------------------------------------------------------------------
+# Column width computation — dispatches to fixed or auto algorithm.
+# ---------------------------------------------------------------------------
+
+fn compute_column_widths(sections: [TableSection], available_width: f64, algorithm: TableLayoutAlgorithm) -> [TableColumn]:
+    val num_cols = determine_column_count(sections)
+
+    # Initialize columns
+    var columns = [TableColumn]()
+    var i = 0
+    while i < num_cols:
+        columns.push(TableColumn.create(i))
+        i = i + 1
+
+    # Gather min/max content widths from cells
+    for section in sections:
+        for row in section.rows:
+            for cell in row.cells:
+                if cell.col_span == 1 and cell.col < columns.len():
+                    val min_w = cell.min_content_width()
+                    val max_w = cell.max_content_width()
+                    var col = columns[cell.col]
+                    if min_w > col.min_width:
+                        col.min_width = min_w
+                    if max_w > col.max_width:
+                        col.max_width = max_w
+                    columns[cell.col] = col
+
+    # Handle colspan cells — distribute width across spanned columns
+    for section in sections:
+        for row in section.rows:
+            for cell in row.cells:
+                if cell.col_span > 1:
+                    val span_start = cell.col
+                    val span_end = cell.col + cell.col_span
+                    val cell_min = cell.min_content_width()
+                    # Calculate current total min across spanned columns
+                    var current_total = 0.0
+                    var si = span_start
+                    while si < span_end and si < columns.len():
+                        current_total = current_total + columns[si].min_width
+                        si = si + 1
+                    # If cell needs more, distribute extra evenly
+                    if cell_min > current_total:
+                        val extra = (cell_min - current_total) / cell.col_span.to_f64()
+                        var di = span_start
+                        while di < span_end and di < columns.len():
+                            var col = columns[di]
+                            col.min_width = col.min_width + extra
+                            columns[di] = col
+                            di = di + 1
+
+    match algorithm:
+        TableLayoutAlgorithm.Fixed:
+            columns = fixed_table_layout(columns, available_width)
+        TableLayoutAlgorithm.Auto:
+            columns = auto_table_layout(columns, available_width)
+
+    columns
+
+# ---------------------------------------------------------------------------
+# Auto table layout — use min/max content widths to distribute space.
+# ---------------------------------------------------------------------------
+
+fn auto_table_layout(columns: [TableColumn], available: f64) -> [TableColumn]:
+    # Sum minimum widths
+    var total_min = 0.0
+    var total_max = 0.0
+    for col in columns:
+        total_min = total_min + col.min_width
+        total_max = total_max + col.max_width
+
+    var result = [TableColumn]()
+
+    if total_max <= available:
+        # All columns fit at their maximum — use max widths
+        for col in columns:
+            var rc = col
+            rc.width = rc.max_width
+            result.push(rc)
+    else if total_min >= available:
+        # Even minimums don't fit — use min widths
+        for col in columns:
+            var rc = col
+            rc.width = rc.min_width
+            result.push(rc)
+    else:
+        # Distribute available space proportionally between min and max
+        val extra = available - total_min
+        val range = total_max - total_min
+        for col in columns:
+            var rc = col
+            val col_range = rc.max_width - rc.min_width
+            if range > 0.0:
+                val share = (col_range / range) * extra
+                rc.width = rc.min_width + share
+            else:
+                rc.width = rc.min_width
+            result.push(rc)
+
+    result
+
+# ---------------------------------------------------------------------------
+# Fixed table layout — first row / specified widths determine column widths.
+# ---------------------------------------------------------------------------
+
+fn fixed_table_layout(columns: [TableColumn], available: f64) -> [TableColumn]:
+    val num_cols = columns.len()
+    if num_cols == 0:
+        return columns
+
+    # Count columns with and without specified widths
+    var specified_total = 0.0
+    var unspecified_count = 0
+    for col in columns:
+        if col.min_width > 0.0:
+            specified_total = specified_total + col.min_width
+        else:
+            unspecified_count = unspecified_count + 1
+
+    # Distribute remaining space to unspecified columns
+    val remaining = available - specified_total
+    val per_unspecified = if unspecified_count > 0: remaining / unspecified_count.to_f64() else: 0.0
+
+    var result = [TableColumn]()
+    for col in columns:
+        var rc = col
+        if rc.min_width > 0.0:
+            rc.width = rc.min_width
+        else:
+            rc.width = if per_unspecified > 0.0: per_unspecified else: available / num_cols.to_f64()
+        result.push(rc)
+
+    result
+
+# ---------------------------------------------------------------------------
+# Distribute remaining width evenly among all columns.
+# ---------------------------------------------------------------------------
+
+fn distribute_remaining_width(columns: [TableColumn], remaining: f64) -> [TableColumn]:
+    val num_cols = columns.len()
+    if num_cols == 0:
+        return columns
+
+    val extra_per_col = remaining / num_cols.to_f64()
+    var result = [TableColumn]()
+    for col in columns:
+        var rc = col
+        rc.width = rc.width + extra_per_col
+        result.push(rc)
+    result
+
+# ---------------------------------------------------------------------------
+# Row height computation — find the tallest cell in each row.
+# ---------------------------------------------------------------------------
+
+fn compute_row_heights(sections: [TableSection], col_widths: [f64]) -> [TableSection]:
+    var result = [TableSection]()
+
+    for section in sections:
+        var new_section = TableSection.create(section.kind)
+        for row in section.rows:
+            var new_row = TableRow.create(row.index)
+            var max_height = 0.0
+
+            for cell in row.cells:
+                var new_cell = cell
+                # Assign width from column(s)
+                var cell_width = 0.0
+                var ci = cell.col
+                while ci < cell.col + cell.col_span and ci < col_widths.len():
+                    cell_width = cell_width + col_widths[ci]
+                    ci = ci + 1
+                new_cell.width = cell_width
+
+                # Cell height from content
+                val cell_h = new_cell.total_height()
+                new_cell.height = cell_h
+
+                if cell.row_span == 1 and cell_h > max_height:
+                    max_height = cell_h
+
+                new_row.cells.push(new_cell)
+
+            new_row.height = max_height
+            new_section.rows.push(new_row)
+        result.push(new_section)
+
+    # Handle rowspan — distribute height across spanned rows
+    for section in result:
+        for row in section.rows:
+            for cell in row.cells:
+                if cell.row_span > 1:
+                    # Sum heights of spanned rows
+                    var spanned_height = 0.0
+                    var ri = row.index
+                    while ri < row.index + cell.row_span and ri < section.rows.len():
+                        spanned_height = spanned_height + section.rows[ri].height
+                        ri = ri + 1
+                    # If cell needs more height, grow the last spanned row
+                    if cell.height > spanned_height:
+                        val extra = cell.height - spanned_height
+                        val last_ri = row.index + cell.row_span - 1
+                        if last_ri < section.rows.len():
+                            var last_row = section.rows[last_ri]
+                            last_row.height = last_row.height + extra
+                            section.rows[last_ri] = last_row
+
+    result
+
+# ---------------------------------------------------------------------------
+# Cell positioning — assign x/y coordinates based on column widths and row heights.
+# ---------------------------------------------------------------------------
+
+fn position_cells(sections: [TableSection], col_widths: [f64], gap_x: f64, gap_y: f64) -> [TableSection]:
+    var result = [TableSection]()
+
+    for section in sections:
+        var new_section = TableSection.create(section.kind)
+        for row in section.rows:
+            var new_row = TableRow.create(row.index)
+            new_row.height = row.height
+
+            for cell in row.cells:
+                var new_cell = cell
+
+                # Calculate x position from column widths + gaps
+                var x_pos = 0.0
+                var ci = 0
+                while ci < cell.col and ci < col_widths.len():
+                    x_pos = x_pos + col_widths[ci] + gap_x
+                    ci = ci + 1
+
+                # Calculate cell width across colspan
+                var cell_w = 0.0
+                var csi = cell.col
+                while csi < cell.col + cell.col_span and csi < col_widths.len():
+                    cell_w = cell_w + col_widths[csi]
+                    if csi < cell.col + cell.col_span - 1:
+                        cell_w = cell_w + gap_x
+                    csi = csi + 1
+
+                new_cell.width = cell_w
+                # y position computed during rendering phase (cumulative)
+                var positioned = new_cell.content
+                positioned.x = x_pos
+                positioned.width = cell_w
+                positioned.height = row.height  # Stretch cell to row height
+                new_cell.content = positioned
+                new_row.cells.push(new_cell)
+
+            new_section.rows.push(new_row)
+        result.push(new_section)
+
+    result
+
+# ---------------------------------------------------------------------------
+# Border collapse — merge adjacent borders (simplified: use thicker border).
+# ---------------------------------------------------------------------------
+
+fn handle_border_collapse(cells: [TableCell]) -> [TableCell]:
+    # Build adjacency and merge borders
+    var result = [TableCell]()
+    for cell in cells:
+        var rc = cell
+        var bm = rc.content.box_model
+
+        # For collapsed borders, halve each shared edge
+        bm.border_right = bm.border_right / 2.0
+        bm.border_bottom = bm.border_bottom / 2.0
+
+        # Left border of non-first columns is halved
+        if rc.col > 0:
+            bm.border_left = bm.border_left / 2.0
+
+        # Top border of non-first rows is halved
+        if rc.row > 0:
+            bm.border_top = bm.border_top / 2.0
+
+        rc.content.box_model = bm
+        result.push(rc)
+
+    result
+
+# ---------------------------------------------------------------------------
+# Internal helpers.
+# ---------------------------------------------------------------------------
+
+fn _sum_column_widths(columns: [TableColumn]) -> f64:
+    var total = 0.0
+    for col in columns:
+        total = total + col.width
+    total
+
+fn _last_row_is_full(section: TableSection) -> bool:
+    # Heuristic: consider a row "full" if it has cells (for implicit row creation)
+    if section.rows.len() == 0:
+        return true
+    val last_row = section.rows[section.rows.len() - 1]
+    last_row.cells.len() > 0
+
+fn _render_section(section: TableSection, start_x: f64, start_y: f64, result_children: [LayoutBox], gap_y: f64) -> f64:
+    var y_cursor = start_y
+    for row in section.rows:
+        for cell in row.cells:
+            var child = cell.content
+            child.x = start_x + child.x
+            child.y = y_cursor
+            child.height = row.height
+            result_children.push(child)
+        y_cursor = y_cursor + row.height + gap_y
+    y_cursor
+
+fn _collapse_borders_in_sections(sections: [TableSection]) -> [TableSection]:
+    var result = [TableSection]()
+    for section in sections:
+        var new_section = TableSection.create(section.kind)
+        for row in section.rows:
+            var new_row = TableRow.create(row.index)
+            new_row.height = row.height
+            val collapsed = handle_border_collapse(row.cells)
+            new_row.cells = collapsed
+            new_section.rows.push(new_row)
+        result.push(new_section)
+    result

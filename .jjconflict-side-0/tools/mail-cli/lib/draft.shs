@@ -1,0 +1,160 @@
+#!/bin/bash
+# mail-cli draft management
+# Depends on: config.shs, imap.shs, smtp.shs, format.shs (sourced by main entry point)
+
+# Determine drafts folder based on provider
+_draft_folder() {
+  local acc
+  acc=$(mail_config_get_account "$MAIL_ACCT_NAME")
+  local provider
+  provider=$(echo "$acc" | jq -r '.provider // "other"')
+
+  case "$provider" in
+    gmail) echo "[Gmail]/Drafts" ;;
+    *)     echo "Drafts" ;;
+  esac
+}
+
+cmd_draft() {
+  local subcmd="${1:-}"
+  shift 2>/dev/null || true
+
+  case "$subcmd" in
+    list)   cmd_draft_list "$@" ;;
+    create) cmd_draft_create "$@" ;;
+    send)   cmd_draft_send "$@" ;;
+    *)
+      echo "Manage email drafts"
+      echo ""
+      echo "USAGE"
+      echo "  mail draft <command>"
+      echo ""
+      echo "COMMANDS"
+      echo "  list      List drafts"
+      echo "  create    Create a new draft"
+      echo "  send      Send a draft"
+      ;;
+  esac
+}
+
+cmd_draft_list() {
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --account) MAIL_ACCOUNT="$2"; shift 2 ;;
+      *) shift ;;
+    esac
+  done
+
+  mail_resolve_account || return 1
+  local draft_folder
+  draft_folder=$(_draft_folder)
+
+  # Reuse inbox listing with draft folder
+  cmd_inbox --folder "$draft_folder" --account "$MAIL_ACCT_NAME"
+}
+
+cmd_draft_create() {
+  local to="" subject="" body=""
+
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --account) MAIL_ACCOUNT="$2"; shift 2 ;;
+      --to)      to="$2"; shift 2 ;;
+      --subject) subject="$2"; shift 2 ;;
+      --body)    body="$2"; shift 2 ;;
+      *) shift ;;
+    esac
+  done
+
+  mail_resolve_account || return 1
+
+  if [ -z "$to" ]; then
+    echo "? To:"; printf "  > "; read -r to
+  fi
+  if [ -z "$subject" ]; then
+    echo "? Subject:"; printf "  > "; read -r subject
+  fi
+  if [ -z "$body" ]; then
+    echo "? Body:"; printf "  > "; read -r body
+  fi
+
+  local from="${MAIL_ACCT_DISPLAY} <${MAIL_ACCT_EMAIL}>"
+  local draft_folder
+  draft_folder=$(_draft_folder)
+
+  # Compose message
+  local msg_file
+  msg_file=$(mktemp /tmp/mail-cli-draft.XXXXXX)
+  mail_format_compose "$from" "$to" "$subject" "$body" > "$msg_file"
+
+  # Append to Drafts folder via IMAP
+  mail_imap_append "$draft_folder" "$msg_file"
+  local append_exit=$?
+
+  rm -f "$msg_file"
+
+  if [ $append_exit -eq 0 ]; then
+    echo "✓ Draft saved to ${draft_folder}"
+  else
+    echo "error: could not save draft" >&2
+    return 1
+  fi
+}
+
+cmd_draft_send() {
+  local uid="${1:-}"
+  shift 2>/dev/null || true
+
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --account) MAIL_ACCOUNT="$2"; shift 2 ;;
+      *) shift ;;
+    esac
+  done
+
+  if [ -z "$uid" ]; then
+    echo "error: draft UID required" >&2; return 1
+  fi
+
+  mail_resolve_account || return 1
+  local draft_folder
+  draft_folder=$(_draft_folder)
+
+  # Fetch the draft
+  local raw_draft
+  raw_draft=$(mail_imap_fetch_body "$draft_folder" "$uid")
+  if [ -z "$raw_draft" ]; then
+    echo "error: could not fetch draft ${uid}" >&2; return 1
+  fi
+
+  # Extract recipient from To header
+  local headers
+  headers=$(mail_format_parse_headers "$raw_draft")
+  local to
+  to=$(echo "$headers" | jq -r '.to')
+
+  if [ -z "$to" ]; then
+    echo "error: draft has no recipient" >&2; return 1
+  fi
+
+  # Write to temp file and send
+  local msg_file
+  msg_file=$(mktemp /tmp/mail-cli-draft-send.XXXXXX)
+  echo "$raw_draft" > "$msg_file"
+
+  printf "- Sending draft..."
+  mail_smtp_send "$MAIL_ACCT_EMAIL" "$to" "$msg_file"
+  local send_exit=$?
+
+  rm -f "$msg_file"
+
+  if [ $send_exit -eq 0 ]; then
+    echo " done"
+    # Delete draft after sending
+    mail_imap_delete "$draft_folder" "$uid"
+    echo "✓ Draft sent and removed"
+  else
+    echo " FAILED"
+    return 1
+  fi
+}

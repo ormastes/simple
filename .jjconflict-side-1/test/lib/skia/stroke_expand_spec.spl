@@ -1,0 +1,89 @@
+# @cover src/lib/skia/feature/stroke/expand.spl 80%
+"""
+# Skia Stroke Expansion Specification
+
+**Feature IDs:** #SKI-STROKE-EXPAND
+**Category:** Stdlib
+**Difficulty:** 4/5
+**Status:** Implemented
+
+## Overview
+
+Tests for expand_stroke — the stroke-to-fill expansion helper mirroring
+Skia's SkStroke::strokePath. Given a stroked path plus width + cap + join,
+produces a closed fillable outline that, when filled, approximates the
+original stroked pixels.
+
+These tests avoid asserting exact vertex coordinates (which depend on the
+join/cap polyline tessellation choices) and instead validate geometry via
+SkPath.contains() point queries plus bounding-box comparisons.
+"""
+
+use std.sspec.*
+use std.skia.entity.path.{SkPath, SkPathVerb, sk_path_new}
+use std.skia.feature.stroke.expand.{StrokeJoin, StrokeCap, StrokeParams, stroke_params_new, expand_stroke}
+
+describe "stroke_expand":
+    it "expand_stroke: width 0 produces empty-ish path":
+        val input = sk_path_new().move_to(0.0, 0.0).line_to(10.0, 0.0)
+        val params = stroke_params_new(0.0, StrokeCap.Butt, StrokeJoin.Miter, 4.0)
+        val out = expand_stroke(input, params)
+        # Width <= 0 short-circuits to an empty path.
+        expect(out.is_empty()).to_equal(true)
+
+    it "expand_stroke: single horizontal line with Butt caps produces a rectangle":
+        # Line from (0, 10) to (20, 10), width 4 -> expected filled rect (0,8,20,12).
+        val input = sk_path_new().move_to(0.0, 10.0).line_to(20.0, 10.0)
+        val params = stroke_params_new(4.0, StrokeCap.Butt, StrokeJoin.Miter, 4.0)
+        val out = expand_stroke(input, params)
+        # A point on the centerline must be inside.
+        expect(out.contains(10.0, 10.0)).to_equal(true)
+        # A point just outside the stroke band (y > 12) must be outside.
+        expect(out.contains(10.0, 20.0)).to_equal(false)
+        # A point well before the start cap (x < 0) must be outside.
+        expect(out.contains(-5.0, 10.0)).to_equal(false)
+
+    it "expand_stroke: right-angle L-shape with Miter join extends to the corner":
+        # L-shape: (0, 0) -> (10, 0) -> (10, 10), width 4.
+        # With a Miter join at (10, 0), the outside corner of the stroke
+        # should extend beyond the centerline corner into (12, -2) region.
+        val input = sk_path_new().move_to(0.0, 0.0).line_to(10.0, 0.0).line_to(10.0, 10.0)
+        val params = stroke_params_new(4.0, StrokeCap.Butt, StrokeJoin.Miter, 4.0)
+        val out = expand_stroke(input, params)
+        # The miter tip sits at roughly (12, -2).
+        val bounds = out.bounds()
+        # right edge should reach ~12 (stroke right side of vertical segment).
+        expect(bounds.right).to_be_greater_than(11.5)
+
+    it "expand_stroke: right-angle L-shape with Bevel join is shorter than Miter":
+        val input = sk_path_new().move_to(0.0, 0.0).line_to(10.0, 0.0).line_to(10.0, 10.0)
+        val miter_params = stroke_params_new(4.0, StrokeCap.Butt, StrokeJoin.Miter, 4.0)
+        val bevel_params = stroke_params_new(4.0, StrokeCap.Butt, StrokeJoin.Bevel, 4.0)
+        val miter_out = expand_stroke(input, miter_params)
+        val bevel_out = expand_stroke(input, bevel_params)
+        # The bevel outline's outer boundary is chamfered, so its outer corner
+        # does not reach as far as the miter tip. Verb count differs (bevel
+        # inserts one line_to for the chamfer; miter inserts two — miter tip + b).
+        val miter_verbs = miter_out.count_verbs()
+        val bevel_verbs = bevel_out.count_verbs()
+        expect(bevel_verbs).to_be_less_than(miter_verbs)
+
+    it "expand_stroke: closed square input produces a frame (outer + inner outlines)":
+        # Square (0,0)-(10,10), closed. Width 2.
+        # Expect an outer outline reaching ~(-1,-1)-(11,11) and an inner
+        # outline around (1,1)-(9,9). A point at the center (5,5) is NOT
+        # inside the stroke band (it's the interior hole); a point on an
+        # edge midline (5, 0) IS inside.
+        val input = sk_path_new()
+            .move_to(0.0, 0.0)
+            .line_to(10.0, 0.0)
+            .line_to(10.0, 10.0)
+            .line_to(0.0, 10.0)
+            .close()
+        val params = stroke_params_new(2.0, StrokeCap.Butt, StrokeJoin.Miter, 4.0)
+        val out = expand_stroke(input, params)
+        # A point on the top edge centerline must be inside.
+        expect(out.contains(5.0, 0.0)).to_equal(true)
+        # The frame's outer bounds extend at least a half-width past the corner.
+        val bounds = out.bounds()
+        expect(bounds.right).to_be_greater_than(10.5)

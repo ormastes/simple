@@ -1,0 +1,547 @@
+@allow(primitive_api)
+# GDB Machine Interface Client
+# Communicates with GDB via MI protocol over process pipes.
+# GDB handles the TCP connection to QEMU's GDB stub.
+
+use std.io.{shell, process_run, ProcessResult}
+use app.debug.coordinator.{VarInfo, FrameInfo, LocationInfo}
+use app.debug.remote.protocol.gdb_mi_parser.{GdbMiParser, GdbMiRecord, GdbVariable, parse_hex_value, parse_hex_byte, hex_char_value}
+use app.debug.remote.types.{DebugConfig, DebugError}
+
+# GDB MI client controlling a GDB process
+class GdbMiClient:
+    fifo_in: text           # named pipe for GDB stdin
+    fifo_out: text          # named pipe for GDB stdout
+    pid: text               # GDB process PID
+    token_counter: i32      # auto-incrementing command token
+    connected: bool
+    program: text           # ELF binary for symbol loading
+
+    static fn connect(config: DebugConfig) -> Result<GdbMiClient, text>:
+        # Generate unique FIFO names
+        val ts = shell("date +%s%N").stdout.trim()
+        val fifo_in = "/tmp/simple_gdb_{ts}_in"
+        val fifo_out = "/tmp/simple_gdb_{ts}_out"
+
+        # Create FIFOs
+        val mk1 = shell("mkfifo {fifo_in}")
+        if mk1.exit_code != 0:
+            return Err("failed to create input FIFO: {mk1.stderr}")
+        val mk2 = shell("mkfifo {fifo_out}")
+        if mk2.exit_code != 0:
+            shell("rm -f {fifo_in}")
+            return Err("failed to create output FIFO: {mk2.stderr}")
+
+        # Determine GDB binary. RISC-V targets require a target-aware GDB.
+        val gdb_bin_result = GdbMiClient.find_gdb_binary(config)
+        if gdb_bin_result.is_err():
+            shell("rm -f {fifo_in} {fifo_out}")
+            return Err(gdb_bin_result.err().unwrap())
+        val gdb_bin = gdb_bin_result.ok.unwrap()
+
+        # Start GDB with MI interface, reading from/writing to FIFOs.
+        # Capture the PID in the same shell that launches the background job.
+        val start_result = shell("sh -c 'exec 3<>\"{fifo_in}\"; exec 4<>\"{fifo_out}\"; {gdb_bin} --interpreter=mi3 -nx <&3 >&4 2>&1 & echo $!'")
+        if start_result.exit_code != 0:
+            shell("rm -f {fifo_in} {fifo_out}")
+            return Err("failed to start GDB: {start_result.stderr}")
+
+        val pid = start_result.stdout.trim()
+        if pid.len() == 0:
+            shell("rm -f {fifo_in} {fifo_out}")
+            return Err("failed to capture GDB pid")
+
+        # Small delay for GDB to start
+        shell("sleep 0.3")
+
+        var client = GdbMiClient(
+            fifo_in: fifo_in,
+            fifo_out: fifo_out,
+            pid: pid,
+            token_counter: 1,
+            connected: false,
+            program: config.program
+        )
+
+        # Read initial GDB banner/prompt
+        client.read_until_prompt()
+
+        # Load symbols before connecting so GDB can infer the target layout.
+        if config.program.len() > 0:
+            client.send_command("file-exec-and-symbols {config.program}")?
+
+        # Connect to remote target
+        val connect_result = client.send_command("target-select remote {config.host}:{config.port}")
+        match connect_result:
+            case Ok(_):
+                client.connected = true
+            case Err(msg):
+                if msg.contains("Truncated register") or msg.contains("remote 'g' packet"):
+                    client.connected = true
+                else:
+                    return Err(msg)
+
+        Ok(client)
+
+    # Find the best GDB binary available
+    static fn find_gdb_binary(config: DebugConfig) -> Result<text, text>:
+        # Try riscv-specific first
+        val rv32 = shell("which riscv32-unknown-elf-gdb 2>/dev/null")
+        if rv32.exit_code == 0:
+            return Ok(rv32.stdout.trim())
+
+        val rvelf = shell("which riscv64-unknown-elf-gdb 2>/dev/null")
+        if rvelf.exit_code == 0:
+            return Ok(rvelf.stdout.trim())
+
+        # Fall back to gdb-multiarch
+        val multi = shell("which gdb-multiarch 2>/dev/null")
+        if multi.exit_code == 0:
+            return Ok(multi.stdout.trim())
+
+        # Also check user-local installs that may not be on PATH
+        val home = shell("echo $HOME").stdout.trim()
+        if home.len() > 0:
+            val local_multi = "{home}/.local/bin/gdb-multiarch"
+            val local_probe = shell("test -x '{local_multi}'")
+            if local_probe.exit_code == 0:
+                return Ok(local_multi)
+
+        match config.target:
+            Architecture.RiscV32: return Err("target-aware GDB unavailable for riscv32 (need riscv32-unknown-elf-gdb, riscv64-unknown-elf-gdb, or gdb-multiarch)")
+            Architecture.RiscV64: return Err("target-aware GDB unavailable for riscv64 (need riscv64-unknown-elf-gdb or gdb-multiarch)")
+            _: pass
+
+        # Last resort
+        Ok("gdb")
+
+    # Send a GDB MI command and wait for result
+    me send_command(cmd: text) -> Result<Dict<text, text>, text>:
+        val token = self.token_counter
+        self.token_counter = self.token_counter + 1
+
+        # Write command to FIFO
+        val full_cmd = "{token}-{cmd}"
+        val write_result = shell("echo '{full_cmd}' > {self.fifo_in}")
+        if write_result.exit_code != 0:
+            return Err("failed to send command: {write_result.stderr}")
+
+        # Read response lines until we get our result token
+        val response = self.read_result(token)?
+        Ok(response)
+
+    # Read GDB output until we get a result for our token
+    fn read_result(token: i32) -> Result<Dict<text, text>, text>:
+        # Read only until the matching result record arrives. Using `cat` here
+        # forces every MI command to wait for the timeout because GDB keeps the
+        # FIFO open for the life of the session.
+        val output = shell("timeout 10 grep -m1 '^{token}\\^' {self.fifo_out}")
+        val lines = output.stdout.split("\n")
+
+        for line in lines:
+            val trimmed = line.trim()
+            if not trimmed.contains("^"):
+                continue
+
+            val caret_parts = trimmed.split("^")
+            if caret_parts.len() < 2:
+                continue
+
+            val token_text = caret_parts[0]
+            val parsed_token = token_text.parse_int() ?? -1
+            if parsed_token != token:
+                continue
+
+            var rest_parts: [text] = []
+            var i = 1
+            while i < caret_parts.len():
+                rest_parts.push(caret_parts[i])
+                i = i + 1
+
+            val rest = rest_parts.join("^")
+            val (cls_val, data) = GdbMiParser.parse_class_and_data(rest)
+            if cls_val == "error":
+                val msg = data.get("msg") ?? "unknown GDB error"
+                return Err("GDB error: {msg}")
+            return Ok(data)
+
+        Err("no result received from GDB (timeout?)")
+
+    # Read lines until (gdb) prompt
+    fn read_until_prompt():
+        shell("timeout 5 grep -m1 '^\\\\(gdb\\\\)' {self.fifo_out} > /dev/null 2>&1")
+
+    # --- Execution Control ---
+
+    fn halt() -> Result<text, text>:
+        self.send_command("exec-interrupt")?
+        Ok("halted")
+
+    fn resume() -> Result<text, text>:
+        self.send_command("exec-continue")?
+        Ok("running")
+
+    fn single_step() -> Result<text, text>:
+        self.send_command("exec-step")?
+        Ok("stepped")
+
+    fn step_over() -> Result<text, text>:
+        self.send_command("exec-next")?
+        Ok("stepped over")
+
+    fn step_out() -> Result<text, text>:
+        self.send_command("exec-finish")?
+        Ok("stepped out")
+
+    fn console_exec(command: text) -> Result<text, text>:
+        self.send_command("interpreter-exec console \"{command}\"")?
+        Ok(command)
+
+    fn set_qemu_physical_memory_mode(enabled: bool) -> Result<text, text>:
+        val flag = if enabled: "1" else: "0"
+        self.console_exec("maintenance packet Qqemu.PhyMemMode:{flag}")?
+        Ok("qemu physical memory mode {flag}")
+
+    # --- Variable Inspection ---
+
+    fn read_locals() -> Result<[VarInfo], text>:
+        val data = self.send_command("stack-list-locals --all-values")?
+        val locals_raw = data.get("locals") ?? "[]"
+        val tuples = GdbMiParser.parse_tuple_records(locals_raw)
+        var result: [VarInfo] = []
+        for t in tuples:
+            val name = t.get("name") ?? "?"
+            val value = t.get("value") ?? "?"
+            val type_name = t.get("type") ?? ""
+            result.push(VarInfo.of(name, value, type_name))
+        Ok(result)
+
+    fn read_arguments() -> Result<[VarInfo], text>:
+        val data = self.send_command("stack-list-arguments --all-values 0 0")?
+        val args_raw = data.get("stack-args") ?? "[]"
+        val frames = GdbMiParser.parse_tuple_records(args_raw)
+        var result: [VarInfo] = []
+        # GDB returns [{level="0",args=[{name="x",value="42"}]}]
+        for frame in frames:
+            val args_list = frame.get("args") ?? "[]"
+            val args = GdbMiParser.parse_tuple_records(args_list)
+            for a in args:
+                val name = a.get("name") ?? "?"
+                val value = a.get("value") ?? "?"
+                val type_name = a.get("type") ?? ""
+                result.push(VarInfo.of(name, value, type_name))
+        Ok(result)
+
+    fn read_globals() -> Result<[VarInfo], text>:
+        # GDB MI doesn't have a direct "list globals" command
+        # Use -symbol-list-variables and -data-evaluate-expression
+        val data = self.send_command("symbol-list-variables")?
+        var result: [VarInfo] = []
+        # Parse symbols and evaluate each
+        val symbols_raw = data.get("symbols") ?? "[]"
+        val symbols = GdbMiParser.parse_tuple_records(symbols_raw)
+        for s in symbols:
+            val name = s.get("name") ?? "?"
+            # Try to evaluate the symbol
+            val eval_result = self.evaluate(name)
+            match eval_result:
+                Ok(value):
+                    result.push(VarInfo.of(name, value, ""))
+                Err(_):
+                    pass  # skip symbols we can't evaluate
+        Ok(result)
+
+    fn evaluate(expr: text) -> Result<text, text>:
+        val data = self.send_command("data-evaluate-expression \"{expr}\"")?
+        val value = data.get("value") ?? ""
+        Ok(value)
+
+    # Create a GDB variable object for structured inspection
+    fn create_variable(expr: text) -> Result<GdbVariable, text>:
+        val data = self.send_command("var-create - * \"{expr}\"")?
+        Ok(GdbVariable(
+            name: data.get("name") ?? "",
+            value: data.get("value") ?? "",
+            type_name: data.get("type") ?? "",
+            num_children: (data.get("numchild") ?? "0").parse_int() ?? 0,
+            has_more: (data.get("has_more") ?? "0") == "1"
+        ))
+
+    # List children of a variable object
+    fn list_children(var_name: text) -> Result<[GdbVariable], text>:
+        val data = self.send_command("var-list-children --all-values \"{var_name}\"")?
+        val children_raw = data.get("children") ?? "[]"
+        val tuples = GdbMiParser.parse_tuple_records(children_raw)
+        var result: [GdbVariable] = []
+        for t in tuples:
+            # Each child is wrapped in child={...}
+            val child_data = t.get("child") ?? ""
+            val child = GdbMiParser.parse_kv_pairs(child_data)
+            result.push(GdbVariable(
+                name: child.get("name") ?? "",
+                value: child.get("value") ?? "",
+                type_name: child.get("type") ?? "",
+                num_children: (child.get("numchild") ?? "0").parse_int() ?? 0,
+                has_more: (child.get("has_more") ?? "0") == "1"
+            ))
+        Ok(result)
+
+    # Delete a variable object
+    fn delete_variable(var_name: text) -> Result<text, text>:
+        self.send_command("var-delete \"{var_name}\"")?
+        Ok("deleted")
+
+    # --- Stack ---
+
+    fn stack_trace() -> Result<[FrameInfo], text>:
+        val data = self.send_command("stack-list-frames")?
+        val frames_raw = data.get("stack") ?? "[]"
+        val tuples = GdbMiParser.parse_tuple_records(frames_raw)
+        var result: [FrameInfo] = []
+        for t in tuples:
+            val level = (t.get("level") ?? "0").parse_int() ?? 0
+            val func = t.get("func") ?? "??"
+            val file = t.get("fullname") ?? t.get("file") ?? ""
+            val line = (t.get("line") ?? "0").parse_int() ?? 0
+            result.push(FrameInfo.of(level, func, file, line))
+        Ok(result)
+
+    fn stack_depth() -> Result<i32, text>:
+        val data = self.send_command("stack-info-depth")?
+        val depth = (data.get("depth") ?? "0").parse_int() ?? 0
+        Ok(depth)
+
+    fn select_frame(level: i32) -> Result<text, text>:
+        self.send_command("stack-select-frame {level}")?
+        Ok("frame {level}")
+
+    # --- Memory ---
+
+    fn read_memory(addr: i64, size: i32) -> Result<[i32], text>:
+        val hex_addr = GdbMiClient.to_hex_i64(addr)
+        val data = self.send_command("data-read-memory-bytes {hex_addr} {size}")?
+        val memory_raw = data.get("memory") ?? "[]"
+        val tuples = GdbMiParser.parse_tuple_records(memory_raw)
+        var result: [i32] = []
+        for t in tuples:
+            val contents = t.get("contents") ?? ""
+            # Parse hex string into bytes
+            var i = 0
+            while i + 1 < contents.len():
+                val hex_byte = contents[i:i + 2]
+                val byte_val = parse_hex_byte(hex_byte)
+                result.push(byte_val)
+                i = i + 2
+        Ok(result)
+
+    fn write_memory(addr: i64, data: [i32]) -> Result<text, text>:
+        val hex_addr = GdbMiClient.to_hex_i64(addr)
+        # Convert bytes to hex string
+        var hex_parts: [text] = []
+        for byte in data:
+            val hi = GdbMiClient.hex_digit(byte / 16)
+            val lo = GdbMiClient.hex_digit(byte % 16)
+            hex_parts.push(hi)
+            hex_parts.push(lo)
+        val hex_data = hex_parts.join("")
+        self.send_command("data-write-memory-bytes {hex_addr} {hex_data}")?
+        Ok("written {data.len()} bytes")
+
+    # --- Registers ---
+
+    fn read_register(name: text) -> Result<i64, text>:
+        # First get register number from name
+        # Use -data-list-register-names to find index
+        val all_regs = self.read_all_registers()?
+        val value = all_regs.get(name)
+        if value != nil:
+            Ok(value)
+        else:
+            Err("unknown register: {name}")
+
+    fn read_all_registers() -> Result<Dict<text, i64>, text>:
+        # Get register names
+        val names_data = self.send_command("data-list-register-names")?
+        val names_raw = names_data.get("register-names") ?? "[]"
+
+        # Get register values
+        val values_data = self.send_command("data-list-register-values x")?
+        val values_raw = values_data.get("register-values") ?? "[]"
+        val value_tuples = GdbMiParser.parse_tuple_records(values_raw)
+
+        # Parse names (simple list of strings)
+        var names: [text] = []
+        val names_inner = names_raw.trim()
+        val ni = if names_inner.starts_with("["): names_inner[1:] else: names_inner
+        val ni_len = ni.len()
+        val nj = if ni.ends_with("]"): ni[0:ni_len - 1] else: ni
+        for part in nj.split(","):
+            val name = part.trim()
+            val unquoted = if name.starts_with("\""): name[1:name.len() - 1] else: name
+            names.push(unquoted)
+
+        # Build name→value dict
+        var result: Dict<text, i64> = {}
+        for vt in value_tuples:
+            val number = (vt.get("number") ?? "-1").parse_int() ?? -1
+            val value_str = vt.get("value") ?? "0"
+            val value = parse_hex_value(value_str)
+            if number >= 0 and number < names.len():
+                val reg_name = names[number]
+                if reg_name.len() > 0:
+                    result[reg_name] = value
+
+        Ok(result)
+
+    fn write_register(name: text, value: i64) -> Result<text, text>:
+        # Need register number
+        val names_data = self.send_command("data-list-register-names")?
+        val names_raw = names_data.get("register-names") ?? "[]"
+        # Find index of register name
+        var reg_num = -1
+        var idx = 0
+        val ni = names_raw.trim()
+        val inner = if ni.starts_with("["): ni[1:] else: ni
+        val inner_len = inner.len()
+        val inner2 = if inner.ends_with("]"): inner[0:inner_len - 1] else: inner
+        for part in inner2.split(","):
+            val trimmed = part.trim()
+            val n = trimmed.replace("\"", "")
+            if n == name:
+                reg_num = idx
+                break
+            idx = idx + 1
+
+        if reg_num < 0:
+            return Err("unknown register: {name}")
+
+        self.send_command("data-set-register-values x {reg_num} {GdbMiClient.to_hex_i64(value)}")?
+        Ok("register {name} set")
+
+    # --- Breakpoints ---
+
+    fn set_breakpoint(location: text) -> Result<i32, text>:
+        val data = self.send_command("break-insert {location}")?
+        val bkpt_raw = data.get("bkpt") ?? "{}"
+        val bkpt = GdbMiParser.parse_kv_pairs(bkpt_raw)
+        val id = (bkpt.get("number") ?? "0").parse_int() ?? 0
+        Ok(id)
+
+    fn set_breakpoint_at_addr(addr: i64) -> Result<i32, text>:
+        self.set_breakpoint("*{GdbMiClient.to_hex_i64(addr)}")
+
+    fn delete_breakpoint(id: i32) -> Result<text, text>:
+        self.send_command("break-delete {id}")?
+        Ok("breakpoint {id} deleted")
+
+    fn set_watchpoint(expr: text, access: text) -> Result<i32, text>:
+        # access: "read", "write", "access"
+        val flag = match access:
+            "read": "-r"
+            "access": "-a"
+            _: ""  # write is default
+        val data = self.send_command("break-watch {flag} {expr}")?
+        val wpt_raw = data.get("wpt") ?? data.get("hw-rwpt") ?? data.get("hw-awpt") ?? "{}"
+        val wpt = GdbMiParser.parse_kv_pairs(wpt_raw)
+        val id = (wpt.get("number") ?? "0").parse_int() ?? 0
+        Ok(id)
+
+    # --- Disconnect ---
+
+    me disconnect():
+        if self.connected:
+            # Detach from target
+            shell("echo '-target-detach' > {self.fifo_in}")
+            shell("sleep 0.1")
+            # Exit GDB
+            shell("echo '-gdb-exit' > {self.fifo_in}")
+            shell("sleep 0.2")
+            self.connected = false
+
+        self.cleanup()
+
+    fn cleanup():
+        # Kill GDB process if still running
+        if self.pid.len() > 0:
+            shell("kill {self.pid} 2>/dev/null")
+        # Remove FIFOs
+        shell("rm -f {self.fifo_in} {self.fifo_out}")
+
+    # --- Hex Helpers ---
+
+    static fn parse_hex_byte(hex: text) -> i32:
+        var result = 0
+        for ch in hex:
+            result = result * 16
+            result = result + hex_char_value(ch)
+        result
+
+    static fn parse_hex_value(raw: text) -> i64:
+        var s = raw.trim()
+        if s.starts_with("0x") or s.starts_with("0X"):
+            s = s[2:]
+        var result: i64 = 0
+        for ch in s:
+            result = result * 16
+            result = result + hex_char_value(ch)
+        result
+
+    static fn hex_char_value(ch: text) -> i64:
+        match ch:
+            "0": 0
+            "1": 1
+            "2": 2
+            "3": 3
+            "4": 4
+            "5": 5
+            "6": 6
+            "7": 7
+            "8": 8
+            "9": 9
+            "a": 10
+            "A": 10
+            "b": 11
+            "B": 11
+            "c": 12
+            "C": 12
+            "d": 13
+            "D": 13
+            "e": 14
+            "E": 14
+            "f": 15
+            "F": 15
+            _: 0
+
+    static fn hex_digit(value: i32) -> text:
+        match value:
+            0: "0"
+            1: "1"
+            2: "2"
+            3: "3"
+            4: "4"
+            5: "5"
+            6: "6"
+            7: "7"
+            8: "8"
+            9: "9"
+            10: "a"
+            11: "b"
+            12: "c"
+            13: "d"
+            14: "e"
+            15: "f"
+            _: "0"
+
+    static fn to_hex_i64(value: i64) -> text:
+        if value == 0:
+            return "0x0"
+
+        var n = value
+        var parts: [text] = []
+        while n > 0:
+            val digit = (n % 16) as i32
+            parts.push(GdbMiClient.hex_digit(digit))
+            n = n / 16
+
+        parts.reverse()
+        "0x{parts.join(\"\")}"

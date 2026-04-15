@@ -1,0 +1,155 @@
+# GPU Acceleration — VirtIO-GPU 2D surface management
+#
+# Provides GPU-accelerated frame presentation via VirtIO-GPU.
+# Effects (blur, blend, gradient) remain CPU-side — VirtIO-GPU 2D
+# has no compute shaders. GPU acceleration is for present() only:
+# DMA transfer + flush instead of per-pixel MMIO copy.
+
+use os.drivers.virtio.virtio_gpu.{VirtioGpuDriver}
+
+# glass_render.c externs — mirror the Simple-side feature flag into the
+# C-side compositor state so rt_gui_present() can suppress the MMIO
+# memcpy fallback and hand the dirty rect off via rt_gui_take_pending_flush.
+extern fn rt_gui_set_gpu_accel_enabled(enabled: u64, unused1: u64, unused2: u64, unused3: u64)
+extern fn rt_gui_set_gpu_mode(enabled: u64, resource_id: u64, unused1: u64, unused2: u64)
+extern fn rt_gui_take_pending_flush(unused1: u64, unused2: u64, unused3: u64, unused4: u64) -> u64
+
+# Packed pending-flush rect: (x1<<48) | (y1<<32) | (x2<<16) | y2, u16 each.
+# drain_pending_flush() returns this packed value if glass_render.c has
+# recorded a rect since the last drain, or 0 if nothing is pending.
+# Callers should issue TRANSFER_TO_HOST_2D + RESOURCE_FLUSH on the rect
+# via their existing virtio-gpu controlq (see VirtioGpuDriver.flush_rect).
+struct PendingFlushRect:
+    x1: u32
+    y1: u32
+    x2: u32
+    y2: u32
+    valid: bool
+
+struct GpuSurface:
+    """A GPU-side 2D resource with DMA-backed memory."""
+    resource_id: u32
+    width: u32
+    height: u32
+    backing_phys: u64
+    backing_virt: u64
+    backing_size: u64
+
+class GpuAccelerator:
+    """Manages GPU resources for accelerated frame presentation."""
+    gpu: VirtioGpuDriver
+    primary_surface: GpuSurface
+    next_id: u32
+    available: bool
+
+impl GpuAccelerator:
+    static fn new(gpu: VirtioGpuDriver) -> GpuAccelerator:
+        GpuAccelerator(
+            gpu: gpu,
+            primary_surface: GpuSurface(
+                resource_id: gpu.resource_id,
+                width: gpu.width,
+                height: gpu.height,
+                backing_phys: gpu.fb_phys,
+                backing_virt: gpu.fb_virt,
+                backing_size: (gpu.width * gpu.height * 4).to_u64()
+            ),
+            next_id: gpu.next_resource_id,
+            available: true
+        )
+
+    me present_full():
+        """Transfer full framebuffer to GPU and flush display."""
+        self.gpu.flush()
+
+    me present_dirty(x: u32, y: u32, w: u32, h: u32):
+        """Transfer only dirty region to GPU (partial update)."""
+        self.gpu.flush_rect(x, y, w, h)
+
+    fn is_available() -> bool:
+        self.available
+
+    fn primary_fb_virt() -> u64:
+        """Get virtual address of primary framebuffer for CPU rendering."""
+        self.primary_surface.backing_virt
+
+    fn primary_fb_phys() -> u64:
+        """Get physical address for DMA."""
+        self.primary_surface.backing_phys
+
+    fn screen_width() -> u32:
+        self.primary_surface.width
+
+    fn screen_height() -> u32:
+        self.primary_surface.height
+
+# GPU acceleration status for glass_render.c integration
+#
+# Module-level mutable: set by boot-time VirtIO-GPU probe (see
+# src/os/drivers/virtio/virtio_gpu.spl). Mirrored into glass_render.c
+# via rt_gui_set_gpu_accel_enabled() so the C side can suppress the
+# MMIO memcpy path in rt_gui_present().
+let mut g_gpu_accel_supported: bool = false
+let mut g_gpu_accel_resource_id: u32 = 0
+
+fn gpu_accel_supported() -> bool:
+    """Check if VirtIO-GPU is available for accelerated present.
+
+    When true, glass_render.c uses the pending-flush handoff path
+    instead of the per-pixel MMIO copy in rt_gui_present().
+    Set by boot-time VirtIO-GPU probe via set_gpu_accel_supported().
+    """
+    g_gpu_accel_supported
+
+fn gpu_accel_resource_id() -> u32:
+    """Primary scanout resource id, or 0 if no GPU probe completed."""
+    g_gpu_accel_resource_id
+
+fn set_gpu_accel_supported_from_driver(gpu: VirtioGpuDriver) -> void:
+    """Boot-time probe hook — call from boot paths that successfully
+    complete VirtIO-GPU init (display_service.init_gpu,
+    virtio_gpu_entry.gpu_test_main). Captures the resource id and
+    mirrors the feature flag into glass_render.c via the runtime
+    externs so rt_gui_present() can take the GPU fast path."""
+    if not gpu.is_initialized():
+        return
+    g_gpu_accel_supported = true
+    g_gpu_accel_resource_id = gpu.resource_id
+    # Seed the C-side compositor state: GPU mode on + resource id, then
+    # flip the accel feature flag. Order matters: the C helper
+    # virtio_gpu_queue_transfer_flush() requires a non-zero resource id
+    # before g_gpu_accel_enabled=1 will actually record pending rects.
+    rt_gui_set_gpu_mode(1, gpu.resource_id.to_u64(), 0, 0)
+    rt_gui_set_gpu_accel_enabled(1, 0, 0, 0)
+
+fn drain_pending_flush() -> PendingFlushRect:
+    """Poll glass_render.c for a pending transfer/flush rect.
+
+    Returns a PendingFlushRect with valid=true if glass_render.c
+    recorded a dirty region since the last drain, otherwise valid=false.
+    Clears the pending state on the C side on read — a second call
+    without an intervening rt_gui_present() returns valid=false.
+
+    Callers (compositor present loop / virtio-gpu backend tick) should
+    issue the actual TRANSFER_TO_HOST_2D + RESOURCE_FLUSH via the
+    existing virtio_gpu driver controlq on the returned rect.
+    """
+    val packed = rt_gui_take_pending_flush(0, 0, 0, 0)
+    if packed == 0:
+        return PendingFlushRect(x1: 0, y1: 0, x2: 0, y2: 0, valid: false)
+    val x1 = ((packed >> 48) & 0xFFFF).to_u32()
+    val y1 = ((packed >> 32) & 0xFFFF).to_u32()
+    val x2 = ((packed >> 16) & 0xFFFF).to_u32()
+    val y2 = (packed & 0xFFFF).to_u32()
+    PendingFlushRect(x1: x1, y1: y1, x2: x2, y2: y2, valid: true)
+
+fn set_gpu_accel_supported(enabled: bool) -> void:
+    """Lower-level override — toggles the flag without capturing a
+    driver handle. Use set_gpu_accel_supported_from_driver() for the
+    normal boot path. This form is kept for test and teardown paths
+    that want to force the flag off."""
+    g_gpu_accel_supported = enabled
+    if not enabled:
+        g_gpu_accel_resource_id = 0
+        rt_gui_set_gpu_accel_enabled(0, 0, 0, 0)
+        rt_gui_set_gpu_mode(0, 0, 0, 0)

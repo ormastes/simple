@@ -1,0 +1,91 @@
+# Phase 4 — Filesystem-backed executable loading.
+#
+# Exercises `resolve_executable_bytes` / `resolve_executable_size` in their
+# post-Phase-4 shape: initramfs-first lookup with a LEGACY_BOOT_STUBS fallback
+# and a synthetic-entry injection point for specs.
+
+use std.spec
+use os.kernel.loader.executable_source.{
+    resolve_executable_bytes,
+    resolve_executable_size,
+    _set_synthetic_initramfs_for_test,
+    _clear_synthetic_initramfs_for_test,
+    LEGACY_BOOT_STUBS,
+}
+use os.kernel.arch.arch_context.{Architecture}
+
+describe "executable source — VFS-backed loading":
+    """Phase 4 coverage: initramfs-first resolution and legacy stub fallback."""
+
+    it "returns ENOENT for unknown paths":
+        """Unknown absolute paths must surface the ENOENT errno-string."""
+        _clear_synthetic_initramfs_for_test()
+        val result = resolve_executable_bytes("/nonexistent", Architecture.Riscv64)
+        expect(result.is_err()).to_equal(true)
+        expect(result.err().unwrap().starts_with("ENOENT")).to_equal(true)
+
+    it "returns EINVAL for an empty path":
+        """Empty paths are rejected before any lookup is attempted."""
+        _clear_synthetic_initramfs_for_test()
+        val result = resolve_executable_bytes("", Architecture.Riscv64)
+        expect(result.is_err()).to_equal(true)
+        expect(result.err().unwrap().starts_with("EINVAL")).to_equal(true)
+
+    it "still resolves the legacy boot stub fallback (/sbin/init_min)":
+        """Boot smoke tests depend on the inlined RV64 stub remaining reachable."""
+        _clear_synthetic_initramfs_for_test()
+        val result = resolve_executable_bytes("/sbin/init_min", Architecture.Riscv64)
+        expect(result.is_ok()).to_equal(true)
+        val bytes = result.unwrap()
+        # ELF magic must still be present in the inlined stub.
+        expect(bytes[0]).to_equal(0x7F.to_u8())
+        expect(bytes[1]).to_equal(0x45.to_u8())
+
+    it "resolves a synthetic initramfs entry by exact path":
+        """A synthetic /usr/bin/foo payload round-trips through the reader."""
+        _clear_synthetic_initramfs_for_test()
+        var payload: [u8] = []
+        payload.push(0xDE.to_u8())
+        payload.push(0xAD.to_u8())
+        payload.push(0xBE.to_u8())
+        payload.push(0xEF.to_u8())
+        _set_synthetic_initramfs_for_test("/usr/bin/foo", payload)
+
+        val result = resolve_executable_bytes("/usr/bin/foo", Architecture.Riscv64)
+        expect(result.is_ok()).to_equal(true)
+        val bytes = result.unwrap()
+        expect(bytes.len()).to_equal(4)
+        expect(bytes[0]).to_equal(0xDE.to_u8())
+        expect(bytes[3]).to_equal(0xEF.to_u8())
+        _clear_synthetic_initramfs_for_test()
+
+    it "resolve_executable_size matches the synthetic payload length":
+        """The size helper returns the byte length used by Phase 2/3 for pre-alloc."""
+        _clear_synthetic_initramfs_for_test()
+        var payload: [u8] = []
+        var i = 0
+        while i < 17:
+            payload.push((i & 0xFF).to_u8())
+            i = i + 1
+        _set_synthetic_initramfs_for_test("/usr/bin/bar", payload)
+
+        val sz = resolve_executable_size("/usr/bin/bar", Architecture.Riscv64)
+        expect(sz.is_ok()).to_equal(true)
+        expect(sz.unwrap()).to_equal(17.to_u64())
+        _clear_synthetic_initramfs_for_test()
+
+    it "LEGACY_BOOT_STUBS retains /sbin/init_min for boot-test fallback":
+        """The boot-test allowlist must still include the minimal init stub."""
+        var has_init = false
+        for p in LEGACY_BOOT_STUBS:
+            if p == "/sbin/init_min":
+                has_init = true
+        expect(has_init).to_equal(true)
+
+    it "real initramfs paths without a synthetic entry fall through to ENOENT":
+        """/usr/bin/clang is NOT in LEGACY_BOOT_STUBS — zstd/cpio decode is not
+        wired yet, so the kernel must surface ENOENT rather than a stub."""
+        _clear_synthetic_initramfs_for_test()
+        val result = resolve_executable_bytes("/usr/bin/clang", Architecture.Riscv64)
+        expect(result.is_err()).to_equal(true)
+        expect(result.err().unwrap().starts_with("ENOENT")).to_equal(true)

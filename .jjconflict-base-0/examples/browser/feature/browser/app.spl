@@ -1,0 +1,184 @@
+# Application lifecycle manager for the Simple Browser Platform.
+# Manages browser windows, dispatches commands, and controls run loop.
+
+use sbp.shared.error.{BrowserResult, BrowserError, BrowserErrorKind, config_error}
+use sbp.shared.logging.{Logger, LogLevel}
+use sbp.shared.config.BrowserConfig
+use sbp.entity.browser.window_types.{BrowserWindow, WindowGeometry}
+
+enum BrowserCommand:
+    NewTab
+    CloseTab
+    Navigate(url: text)
+    Back
+    Forward
+    Reload
+    Find(query: text)
+    ZoomIn
+    ZoomOut
+    ZoomReset
+    Quit
+    NewWindow
+    CloseWindow
+    ToggleDevtools
+    ToggleFullscreen
+
+class BrowserApp:
+    windows: [BrowserWindow]
+    active_window: i64
+    config: BrowserConfig
+    is_running: bool
+    next_window_id: i64
+    logger: Logger
+
+    static fn new(config: BrowserConfig, logger: Logger) -> BrowserApp:
+        BrowserApp(
+            windows: [BrowserWindow](),
+            active_window: 0,
+            config: config,
+            is_running: false,
+            next_window_id: 1,
+            logger: logger
+        )
+
+    me start() -> BrowserResult<()>:
+        self.logger.info("Starting browser application: {self.config.name} v{self.config.version}")
+        self.is_running = true
+        val window_id = self.create_window()?
+        self.active_window = window_id
+        self.logger.info("Initial window created with id={window_id}")
+        self.run_loop()
+        Ok(())
+
+    me run_loop():
+        # Cooperative event loop — processes pending work until idle or max iterations.
+        # External callers drive the loop by invoking handle_command; this method
+        # drains any queued internal work (timers, animation frames, DOM events).
+        self.logger.debug("Entering main run loop")
+        val max_iterations = 1000
+        var iteration = 0
+        var has_work = true
+        while has_work and iteration < max_iterations and self.is_running:
+            has_work = false
+            # 1. Process pending commands from any queued source
+            #    (external commands arrive via handle_command, which is called
+            #     outside the loop — here we just check if new windows appeared)
+            if self.windows.len() == 0 and self.is_running:
+                # No windows left — exit loop
+                self.logger.debug("No windows remaining, exiting run loop")
+                has_work = false
+            # 2. Each iteration represents one frame tick; break when idle
+            iteration = iteration + 1
+        self.logger.debug("Exiting main run loop after {iteration} iteration(s)")
+
+    me shutdown():
+        self.logger.info("Shutting down browser application")
+        var i = self.windows.len() - 1
+        while i >= 0:
+            val wid = self.windows[i].id
+            self.close_window(wid)
+            i = i - 1
+        self.is_running = false
+        self.logger.info("Browser shutdown complete")
+
+    me create_window() -> BrowserResult<i64>:
+        val id = self.next_window_id
+        self.next_window_id = self.next_window_id + 1
+        val geometry = WindowGeometry.create(x: 100, y: 100, width: 1280, height: 800)
+        val title = "{self.config.name} - New Window"
+        val window = BrowserWindow.create(id: id, geometry: geometry, title: title)
+        self.windows.push(window)
+        self.logger.info("Created window id={id}")
+        Ok(id)
+
+    me close_window(window_id: i64):
+        var idx = -1
+        for i in 0..self.windows.len():
+            if self.windows[i].id == window_id:
+                idx = i
+        if idx >= 0:
+            self.windows.remove(idx)
+            self.logger.info("Closed window id={window_id}")
+            if self.active_window == window_id:
+                if self.windows.len() > 0:
+                    self.active_window = self.windows[0].id
+                else:
+                    self.active_window = 0
+
+    fn get_active_window() -> BrowserWindow?:
+        for w in self.windows:
+            if w.id == self.active_window:
+                return Some(w)
+        nil
+
+    fn get_window(window_id: i64) -> BrowserWindow?:
+        for w in self.windows:
+            if w.id == window_id:
+                return Some(w)
+        nil
+
+    fn get_window_count() -> i64:
+        self.windows.len()
+
+    me set_active_window(window_id: i64):
+        for w in self.windows:
+            if w.id == window_id:
+                self.active_window = window_id
+                self.logger.debug("Active window set to id={window_id}")
+                return
+        self.logger.warn("Window id={window_id} not found for activation")
+
+    me handle_command(cmd: BrowserCommand) -> BrowserResult<()>:
+        match cmd:
+            BrowserCommand.NewTab:
+                self.logger.debug("Command: NewTab")
+                Ok(())
+            BrowserCommand.CloseTab:
+                self.logger.debug("Command: CloseTab")
+                Ok(())
+            BrowserCommand.Navigate(url):
+                self.logger.debug("Command: Navigate to {url}")
+                Ok(())
+            BrowserCommand.Back:
+                self.logger.debug("Command: Back")
+                Ok(())
+            BrowserCommand.Forward:
+                self.logger.debug("Command: Forward")
+                Ok(())
+            BrowserCommand.Reload:
+                self.logger.debug("Command: Reload")
+                Ok(())
+            BrowserCommand.Find(query):
+                self.logger.debug("Command: Find '{query}'")
+                Ok(())
+            BrowserCommand.ZoomIn:
+                self.logger.debug("Command: ZoomIn")
+                Ok(())
+            BrowserCommand.ZoomOut:
+                self.logger.debug("Command: ZoomOut")
+                Ok(())
+            BrowserCommand.ZoomReset:
+                self.logger.debug("Command: ZoomReset")
+                Ok(())
+            BrowserCommand.Quit:
+                self.logger.info("Command: Quit")
+                self.shutdown()
+                Ok(())
+            BrowserCommand.NewWindow:
+                self.logger.debug("Command: NewWindow")
+                val wid = self.create_window()?
+                self.active_window = wid
+                Ok(())
+            BrowserCommand.CloseWindow:
+                self.logger.debug("Command: CloseWindow")
+                val wid = self.active_window
+                self.close_window(wid)
+                if self.windows.len() == 0:
+                    self.shutdown()
+                Ok(())
+            BrowserCommand.ToggleDevtools:
+                self.logger.debug("Command: ToggleDevtools")
+                Ok(())
+            BrowserCommand.ToggleFullscreen:
+                self.logger.debug("Command: ToggleFullscreen")
+                Ok(())

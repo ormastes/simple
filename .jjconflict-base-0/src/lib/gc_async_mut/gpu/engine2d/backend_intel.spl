@@ -1,0 +1,937 @@
+@allow(primitive_api)
+# 2D Engine — Intel oneAPI GPU Backend
+#
+# Hardware-accelerated 2D rendering using Intel oneAPI Level Zero with
+# SPIR-V compute kernels. Each draw operation dispatches a compute kernel
+# operating on a device-side framebuffer. present() copies the GPU
+# framebuffer back to host memory for display.
+#
+# Requires Intel GPU with oneAPI toolkit / Level Zero runtime.
+#
+# Architecture:
+#   - Framebuffer lives in device memory (d_framebuffer)
+#   - SPIR-V modules are compiled at init() time
+#   - Each draw call submits a kernel to the command queue
+#   - present() copies device framebuffer to host buffer
+#   - Text rendering falls back to CPU-side bitmap font + upload
+#
+# Usage:
+#   use std.gpu.engine2d.backend_intel.{IntelBackend}
+
+use std.gpu.engine2d.backend.{RenderBackend, Engine2DExtended}
+use std.gpu.engine2d.color.{rgba, rgb, color_r, color_g, color_b, color_a}
+use std.gpu.engine2d.glyph.{render_text_to_buffer}
+use std.gc_async_mut.io.oneapi_ffi.{
+    oneapi_available, oneapi_init, oneapi_device_count,
+    oneapi_alloc_device, oneapi_free,
+    oneapi_copy_to_device, oneapi_copy_from_device,
+    oneapi_memset, oneapi_sync,
+    oneapi_compile_spirv, oneapi_compile_opencl, oneapi_unload,
+    oneapi_get_kernel, oneapi_submit,
+    oneapi_create_queue, oneapi_destroy_queue, oneapi_queue_wait,
+    OneApiPtr, OneApiModule, OneApiFunc, OneApiQueue
+}
+
+# ============================================================================
+# Intel oneAPI Backend
+# ============================================================================
+
+class IntelBackend:
+    """GPU-accelerated 2D renderer using Intel oneAPI Level Zero.
+
+    Architecture:
+    - Framebuffer lives in Intel GPU device memory (d_framebuffer)
+    - SPIR-V compute kernels handle each 2D primitive
+    - Each draw call submits a kernel to the Level Zero command queue
+    - present() copies GPU framebuffer to host buffer
+    - Host buffer is returned by read_pixels()
+
+    Kernel dispatch: Each primitive (rect, circle, line) has a dedicated
+    compute kernel. Work-group sizes are chosen to cover the bounding box
+    of the primitive being drawn. oneAPI uses a 1D global/local range model
+    so we linearize 2D dispatch as (width * height) work-items.
+    """
+
+    host_buf: [u32]
+    w: i32
+    h: i32
+    d_framebuffer: OneApiPtr    # Device pointer to GPU framebuffer
+    spirv_module: OneApiModule   # Handle to loaded SPIR-V module
+    queue: OneApiQueue           # Command queue for kernel dispatch
+    clip_x: i32
+    clip_y: i32
+    clip_w: i32
+    clip_h: i32
+    clip_enabled: bool
+    initialized: bool
+    dirty: bool                  # True when GPU has changes not yet copied to host
+
+    # Cached kernel handles
+    k_clear: OneApiFunc
+    k_rect_filled: OneApiFunc
+    k_rect_outline: OneApiFunc
+    k_line: OneApiFunc
+    k_circle: OneApiFunc
+    k_circle_filled: OneApiFunc
+    k_rounded_rect: OneApiFunc
+    k_triangle_filled: OneApiFunc
+    k_gradient_rect: OneApiFunc
+    k_blit_image: OneApiFunc
+
+    static fn create() -> IntelBackend:
+        """Create an uninitialized Intel backend. Call init() before drawing."""
+        val null_ptr = OneApiPtr(ptr: 0, size: 0, is_shared: false, is_valid: false)
+        val null_mod = OneApiModule(handle: 0, is_valid: false)
+        val null_queue = OneApiQueue(handle: 0, is_valid: false)
+        val null_func = OneApiFunc(handle: 0, module: null_mod, name: "", is_valid: false)
+        IntelBackend(
+            host_buf: [],
+            w: 0,
+            h: 0,
+            d_framebuffer: null_ptr,
+            spirv_module: null_mod,
+            queue: null_queue,
+            clip_x: 0,
+            clip_y: 0,
+            clip_w: 0,
+            clip_h: 0,
+            clip_enabled: false,
+            initialized: false,
+            dirty: false,
+            k_clear: null_func,
+            k_rect_filled: null_func,
+            k_rect_outline: null_func,
+            k_line: null_func,
+            k_circle: null_func,
+            k_circle_filled: null_func,
+            k_rounded_rect: null_func,
+            k_triangle_filled: null_func,
+            k_gradient_rect: null_func,
+            k_blit_image: null_func
+        )
+
+impl RenderBackend for IntelBackend:
+
+    fn name() -> text:
+        "intel"
+
+    fn init(width: i32, height: i32) -> bool:
+        # Check oneAPI availability
+        if not oneapi_available():
+            return false
+
+        val init_ok = oneapi_init()
+        if not init_ok:
+            return false
+
+        if oneapi_device_count() < 1:
+            return false
+
+        self.w = width
+        self.h = height
+
+        # Create command queue
+        self.queue = oneapi_create_queue()
+        if not self.queue.is_valid:
+            return false
+
+        # Allocate device framebuffer (4 bytes per pixel = u32 ARGB)
+        val fb_size = _i64(width) * _i64(height) * 4
+        self.d_framebuffer = oneapi_alloc_device(fb_size)
+        if not self.d_framebuffer.is_valid:
+            oneapi_destroy_queue(self.queue)
+            return false
+
+        # Clear device framebuffer to black
+        oneapi_memset(self.d_framebuffer, 0)
+
+        # Allocate host buffer
+        val total = width * height
+        self.host_buf = [0u32; total]
+
+        # Compile compute kernels: try OpenCL-C source first, fall back to SPIR-V
+        val opencl_src = _engine2d_opencl_source()
+        self.spirv_module = oneapi_compile_opencl(opencl_src)
+        if not self.spirv_module.is_valid:
+            # OpenCL-C compilation failed; fall back to pre-compiled SPIR-V
+            val spirv_bytes = _engine2d_spirv()
+            self.spirv_module = oneapi_compile_spirv(spirv_bytes)
+            if not self.spirv_module.is_valid:
+                oneapi_free(self.d_framebuffer)
+                oneapi_destroy_queue(self.queue)
+                return false
+
+        # Cache kernel handles
+        self.k_clear = oneapi_get_kernel(self.spirv_module, "kernel_clear")
+        self.k_rect_filled = oneapi_get_kernel(self.spirv_module, "kernel_draw_rect_filled")
+        self.k_rect_outline = oneapi_get_kernel(self.spirv_module, "kernel_draw_rect_outline")
+        self.k_line = oneapi_get_kernel(self.spirv_module, "kernel_draw_line")
+        self.k_circle = oneapi_get_kernel(self.spirv_module, "kernel_draw_circle")
+        self.k_circle_filled = oneapi_get_kernel(self.spirv_module, "kernel_draw_circle_filled")
+        self.k_rounded_rect = oneapi_get_kernel(self.spirv_module, "kernel_draw_rounded_rect")
+        self.k_triangle_filled = oneapi_get_kernel(self.spirv_module, "kernel_draw_triangle_filled")
+        self.k_gradient_rect = oneapi_get_kernel(self.spirv_module, "kernel_draw_gradient_rect")
+        self.k_blit_image = oneapi_get_kernel(self.spirv_module, "kernel_blit_image")
+
+        self.clip_x = 0
+        self.clip_y = 0
+        self.clip_w = width
+        self.clip_h = height
+        self.clip_enabled = false
+        self.initialized = true
+        self.dirty = false
+        true
+
+    fn shutdown():
+        if self.spirv_module.is_valid:
+            oneapi_unload(self.spirv_module)
+            self.spirv_module = OneApiModule(handle: 0, is_valid: false)
+        if self.d_framebuffer.is_valid:
+            oneapi_free(self.d_framebuffer)
+            self.d_framebuffer = OneApiPtr(ptr: 0, size: 0, is_shared: false, is_valid: false)
+        if self.queue.is_valid:
+            oneapi_destroy_queue(self.queue)
+            self.queue = OneApiQueue(handle: 0, is_valid: false)
+        self.host_buf = []
+        self.w = 0
+        self.h = 0
+        self.initialized = false
+
+    me clear(color: u32):
+        # Launch clear kernel: one work-item per pixel
+        val total = _i64(self.w) * _i64(self.h)
+        val local_size: i64 = 256
+        val global_size = _align_up(total, local_size)
+        _set_kernel_args_clear(self.d_framebuffer.ptr, color, self.w, self.h)
+        oneapi_submit(self.queue, self.k_clear, global_size, local_size)
+        self.dirty = true
+
+    me draw_rect(x: i32, y: i32, w: i32, h: i32, color: u32):
+        val total = _i64(w) * _i64(h)
+        val local_size: i64 = 256
+        val global_size = _align_up(total, local_size)
+        _set_kernel_args_rect(self.d_framebuffer.ptr, x, y, w, h, color, self.w, self.h, 0)
+        oneapi_submit(self.queue, self.k_rect_outline, global_size, local_size)
+        self.dirty = true
+
+    me draw_rect_filled(x: i32, y: i32, w: i32, h: i32, color: u32):
+        val total = _i64(w) * _i64(h)
+        val local_size: i64 = 256
+        val global_size = _align_up(total, local_size)
+        _set_kernel_args_rect(self.d_framebuffer.ptr, x, y, w, h, color, self.w, self.h, 1)
+        oneapi_submit(self.queue, self.k_rect_filled, global_size, local_size)
+        self.dirty = true
+
+    me draw_line(x1: i32, y1: i32, x2: i32, y2: i32, color: u32, thickness: i32):
+        # Line kernel: one work-item per pixel along the line length
+        var dx = x2 - x1
+        var dy = y2 - y1
+        if dx < 0:
+            dx = -dx
+        if dy < 0:
+            dy = -dy
+        var line_len = dx
+        if dy > dx:
+            line_len = dy
+        if line_len == 0:
+            line_len = 1
+        val local_size: i64 = 256
+        val global_size = _align_up(_i64(line_len), local_size)
+        _set_kernel_args_line(self.d_framebuffer.ptr, x1, y1, x2, y2, color, thickness, self.w, self.h)
+        oneapi_submit(self.queue, self.k_line, global_size, local_size)
+        self.dirty = true
+
+    me draw_circle(cx: i32, cy: i32, r: i32, color: u32):
+        # Circle outline: launch kernel covering bounding box
+        val bw = 2 * r + 1
+        val bh = 2 * r + 1
+        val total = _i64(bw) * _i64(bh)
+        val local_size: i64 = 256
+        val global_size = _align_up(total, local_size)
+        _set_kernel_args_circle(self.d_framebuffer.ptr, cx, cy, r, color, self.w, self.h, 0)
+        oneapi_submit(self.queue, self.k_circle, global_size, local_size)
+        self.dirty = true
+
+    me draw_circle_filled(cx: i32, cy: i32, r: i32, color: u32):
+        val bw = 2 * r + 1
+        val bh = 2 * r + 1
+        val total = _i64(bw) * _i64(bh)
+        val local_size: i64 = 256
+        val global_size = _align_up(total, local_size)
+        _set_kernel_args_circle(self.d_framebuffer.ptr, cx, cy, r, color, self.w, self.h, 1)
+        oneapi_submit(self.queue, self.k_circle_filled, global_size, local_size)
+        self.dirty = true
+
+    me draw_rounded_rect(x: i32, y: i32, w: i32, h: i32, radius: i32, color: u32):
+        val total = _i64(w) * _i64(h)
+        val local_size: i64 = 256
+        val global_size = _align_up(total, local_size)
+        _set_kernel_args_rounded_rect(self.d_framebuffer.ptr, x, y, w, h, radius, color, self.w, self.h)
+        oneapi_submit(self.queue, self.k_rounded_rect, global_size, local_size)
+        self.dirty = true
+
+    me draw_triangle_filled(x1: i32, y1: i32, x2: i32, y2: i32, x3: i32, y3: i32, color: u32):
+        # Compute bounding box of triangle
+        var min_x = x1
+        if x2 < min_x: min_x = x2
+        if x3 < min_x: min_x = x3
+        var min_y = y1
+        if y2 < min_y: min_y = y2
+        if y3 < min_y: min_y = y3
+        var max_x = x1
+        if x2 > max_x: max_x = x2
+        if x3 > max_x: max_x = x3
+        var max_y = y1
+        if y2 > max_y: max_y = y2
+        if y3 > max_y: max_y = y3
+
+        val bw = max_x - min_x + 1
+        val bh = max_y - min_y + 1
+        val total = _i64(bw) * _i64(bh)
+        val local_size: i64 = 256
+        val global_size = _align_up(total, local_size)
+        _set_kernel_args_triangle(self.d_framebuffer.ptr, x1, y1, x2, y2, x3, y3, color, self.w, self.h, min_x, min_y)
+        oneapi_submit(self.queue, self.k_triangle_filled, global_size, local_size)
+        self.dirty = true
+
+    me draw_gradient_rect(x: i32, y: i32, w: i32, h: i32, top_color: u32, bottom_color: u32):
+        val total = _i64(w) * _i64(h)
+        val local_size: i64 = 256
+        val global_size = _align_up(total, local_size)
+        _set_kernel_args_gradient(self.d_framebuffer.ptr, x, y, w, h, top_color, bottom_color, self.w, self.h)
+        oneapi_submit(self.queue, self.k_gradient_rect, global_size, local_size)
+        self.dirty = true
+
+    me draw_text(x: i32, y: i32, text_val: text, color: u32, font_size: i32):
+        # Text rendering on GPU is complex; fall back to CPU-side rendering
+        # then upload the affected region. For production, a glyph atlas
+        # texture would be uploaded and sampled by a kernel.
+        _intel_draw_text_fallback(self, x, y, text_val, color, font_size)
+        self.dirty = true
+
+    me draw_image(x: i32, y: i32, w: i32, h: i32, pixels: [u32]):
+        # Upload pixel data to a temporary device buffer, then launch
+        # a blit kernel to copy it into the framebuffer
+        val pixel_count = _i64(w) * _i64(h)
+        val byte_size = pixel_count * 4
+        val d_src = oneapi_alloc_device(byte_size)
+        if d_src.is_valid:
+            # Upload source pixels as byte array to device
+            _upload_pixels_to_device_intel(d_src, pixels, pixel_count)
+            # Launch blit kernel
+            val local_size: i64 = 256
+            val global_size = _align_up(pixel_count, local_size)
+            _set_kernel_args_blit(self.d_framebuffer.ptr, d_src.ptr, x, y, w, h, self.w, self.h)
+            oneapi_submit(self.queue, self.k_blit_image, global_size, local_size)
+            oneapi_free(d_src)
+        self.dirty = true
+
+    me set_clip(x: i32, y: i32, w: i32, h: i32):
+        self.clip_x = x
+        self.clip_y = y
+        self.clip_w = w
+        self.clip_h = h
+        self.clip_enabled = true
+
+    me clear_clip():
+        self.clip_enabled = false
+        self.clip_x = 0
+        self.clip_y = 0
+        self.clip_w = self.w
+        self.clip_h = self.h
+
+    me present():
+        # Copy GPU framebuffer to host memory
+        if self.dirty:
+            val fb_size = _i64(self.w) * _i64(self.h) * 4
+            _download_framebuffer_intel(self.d_framebuffer, self.host_buf, fb_size)
+            oneapi_queue_wait(self.queue)
+            self.dirty = false
+
+    fn read_pixels() -> [u32]:
+        # Ensure host buffer is up to date
+        if self.dirty:
+            val fb_size = _i64(self.w) * _i64(self.h) * 4
+            _download_framebuffer_intel(self.d_framebuffer, self.host_buf, fb_size)
+            oneapi_queue_wait(self.queue)
+        var copy: [u32] = [0u32; self.w * self.h]
+        var i = 0
+        while i < self.w * self.h:
+            copy[i] = self.host_buf[i]
+            i = i + 1
+        copy
+
+    fn width() -> i32:
+        self.w
+
+    fn height() -> i32:
+        self.h
+
+impl Engine2DExtended for IntelBackend:
+    # Phase 1 fallback: fill bg cell via the Level Zero rect kernel, then
+    # use the CPU-side text fallback to overlay glyphs.
+    # TODO(sys-gui-007 draw_text_bg native) — add a SPIR-V kernel that
+    # samples a glyph atlas.
+    me draw_text_bg(x: i32, y: i32, text_val: text, fg: u32, bg: u32, font_size: i32):
+        val cell_w: i32 = 6 * font_size / 7
+        val cell_h: i32 = font_size
+        val tw: i32 = text_val.len().to_i32() * cell_w
+        self.draw_rect_filled(x, y, tw, cell_h, bg)
+        _intel_draw_text_fallback(self, x, y, text_val, fg, font_size)
+        self.dirty = true
+
+# ============================================================================
+# Dispatch Helpers
+# ============================================================================
+
+fn _align_up(value: i64, alignment: i64) -> i64:
+    """Round up value to the next multiple of alignment."""
+    ((value + alignment - 1) / alignment) * alignment
+
+# ============================================================================
+# Kernel Argument Setters
+#
+# Each kernel expects its arguments set via the runtime's kernel argument
+# serialization. These extern functions match the SPIR-V kernel signatures
+# and pack arguments into the Level Zero kernel argument slots.
+# ============================================================================
+
+extern fn rt_intel_engine2d_set_args_clear(fb_ptr: i64, color: i64, width: i64, height: i64) -> bool
+extern fn rt_intel_engine2d_set_args_rect(fb_ptr: i64, x: i64, y: i64, w: i64, h: i64, color: i64, fb_w: i64, fb_h: i64, filled: i64) -> bool
+extern fn rt_intel_engine2d_set_args_line(fb_ptr: i64, x1: i64, y1: i64, x2: i64, y2: i64, color: i64, thickness: i64, fb_w: i64, fb_h: i64) -> bool
+extern fn rt_intel_engine2d_set_args_circle(fb_ptr: i64, cx: i64, cy: i64, r: i64, color: i64, fb_w: i64, fb_h: i64, filled: i64) -> bool
+extern fn rt_intel_engine2d_set_args_rounded_rect(fb_ptr: i64, x: i64, y: i64, w: i64, h: i64, radius: i64, color: i64, fb_w: i64, fb_h: i64) -> bool
+extern fn rt_intel_engine2d_set_args_triangle(fb_ptr: i64, x1: i64, y1: i64, x2: i64, y2: i64, x3: i64, y3: i64, color: i64, fb_w: i64, fb_h: i64, min_x: i64, min_y: i64) -> bool
+extern fn rt_intel_engine2d_set_args_gradient(fb_ptr: i64, x: i64, y: i64, w: i64, h: i64, top_color: i64, bottom_color: i64, fb_w: i64, fb_h: i64) -> bool
+extern fn rt_intel_engine2d_set_args_blit(fb_ptr: i64, src_ptr: i64, x: i64, y: i64, w: i64, h: i64, fb_w: i64, fb_h: i64) -> bool
+
+fn _set_kernel_args_clear(fb_ptr: i64, color: u32, w: i32, h: i32):
+    """Set arguments for clear kernel."""
+    rt_intel_engine2d_set_args_clear(fb_ptr, _i64_from_u32(color), _i64(w), _i64(h))
+
+fn _set_kernel_args_rect(fb_ptr: i64, x: i32, y: i32, w: i32, h: i32, color: u32, fb_w: i32, fb_h: i32, filled: i32):
+    """Set arguments for rect kernel (outline or filled)."""
+    rt_intel_engine2d_set_args_rect(fb_ptr, _i64(x), _i64(y), _i64(w), _i64(h), _i64_from_u32(color), _i64(fb_w), _i64(fb_h), _i64(filled))
+
+fn _set_kernel_args_line(fb_ptr: i64, x1: i32, y1: i32, x2: i32, y2: i32, color: u32, thickness: i32, fb_w: i32, fb_h: i32):
+    """Set arguments for line kernel."""
+    rt_intel_engine2d_set_args_line(fb_ptr, _i64(x1), _i64(y1), _i64(x2), _i64(y2), _i64_from_u32(color), _i64(thickness), _i64(fb_w), _i64(fb_h))
+
+fn _set_kernel_args_circle(fb_ptr: i64, cx: i32, cy: i32, r: i32, color: u32, fb_w: i32, fb_h: i32, filled: i32):
+    """Set arguments for circle kernel (outline or filled)."""
+    rt_intel_engine2d_set_args_circle(fb_ptr, _i64(cx), _i64(cy), _i64(r), _i64_from_u32(color), _i64(fb_w), _i64(fb_h), _i64(filled))
+
+fn _set_kernel_args_rounded_rect(fb_ptr: i64, x: i32, y: i32, w: i32, h: i32, radius: i32, color: u32, fb_w: i32, fb_h: i32):
+    """Set arguments for rounded rect kernel."""
+    rt_intel_engine2d_set_args_rounded_rect(fb_ptr, _i64(x), _i64(y), _i64(w), _i64(h), _i64(radius), _i64_from_u32(color), _i64(fb_w), _i64(fb_h))
+
+fn _set_kernel_args_triangle(fb_ptr: i64, x1: i32, y1: i32, x2: i32, y2: i32, x3: i32, y3: i32, color: u32, fb_w: i32, fb_h: i32, min_x: i32, min_y: i32):
+    """Set arguments for triangle kernel."""
+    rt_intel_engine2d_set_args_triangle(fb_ptr, _i64(x1), _i64(y1), _i64(x2), _i64(y2), _i64(x3), _i64(y3), _i64_from_u32(color), _i64(fb_w), _i64(fb_h), _i64(min_x), _i64(min_y))
+
+fn _set_kernel_args_gradient(fb_ptr: i64, x: i32, y: i32, w: i32, h: i32, top_color: u32, bottom_color: u32, fb_w: i32, fb_h: i32):
+    """Set arguments for gradient rect kernel."""
+    rt_intel_engine2d_set_args_gradient(fb_ptr, _i64(x), _i64(y), _i64(w), _i64(h), _i64_from_u32(top_color), _i64_from_u32(bottom_color), _i64(fb_w), _i64(fb_h))
+
+fn _set_kernel_args_blit(fb_ptr: i64, src_ptr: i64, x: i32, y: i32, w: i32, h: i32, fb_w: i32, fb_h: i32):
+    """Set arguments for image blit kernel."""
+    rt_intel_engine2d_set_args_blit(fb_ptr, src_ptr, _i64(x), _i64(y), _i64(w), _i64(h), _i64(fb_w), _i64(fb_h))
+
+# ============================================================================
+# Device Memory Transfer
+# ============================================================================
+
+extern fn rt_intel_engine2d_upload_pixels(d_dst: i64, pixels: [u32], count: i64) -> i64
+extern fn rt_intel_engine2d_download_pixels(d_src: i64, pixels: [u32], byte_size: i64) -> i64
+extern fn rt_intel_engine2d_upload_host_buf(d_dst: i64, host_buf: [u32], byte_size: i64) -> i64
+
+fn _upload_pixels_to_device_intel(d_dst: OneApiPtr, pixels: [u32], count: i64):
+    """Upload host pixel array to Intel device memory."""
+    rt_intel_engine2d_upload_pixels(d_dst.ptr, pixels, count)
+
+fn _download_framebuffer_intel(d_src: OneApiPtr, host_buf: [u32], byte_size: i64):
+    """Download device framebuffer to host buffer."""
+    rt_intel_engine2d_download_pixels(d_src.ptr, host_buf, byte_size)
+
+fn _upload_host_to_device_intel(d_dst: OneApiPtr, host_buf: [u32], byte_size: i64):
+    """Upload entire host buffer to device memory."""
+    rt_intel_engine2d_upload_host_buf(d_dst.ptr, host_buf, byte_size)
+
+# ============================================================================
+# Text Rendering Fallback
+# ============================================================================
+
+fn _intel_draw_text_fallback(backend: IntelBackend, x: i32, y: i32, text_val: text, color: u32, font_size: i32):
+    """Render text on CPU and upload affected region to GPU.
+
+    For production use, a glyph atlas would be pre-uploaded to GPU memory
+    and sampled by a text-rendering kernel. This fallback is acceptable
+    for low-frequency text draws (UI labels, debug overlays).
+    """
+    # Ensure host buffer is current
+    if backend.dirty:
+        val fb_size = _i64(backend.w) * _i64(backend.h) * 4
+        _download_framebuffer_intel(backend.d_framebuffer, backend.host_buf, fb_size)
+        oneapi_queue_wait(backend.queue)
+
+    # Render glyphs into host buffer using shared glyph module
+    render_text_to_buffer(backend.host_buf, backend.w, backend.h, x, y, text_val, color, font_size)
+
+    # Re-upload entire framebuffer (simpler; for production, upload only the dirty rect)
+    val fb_size = _i64(backend.w) * _i64(backend.h) * 4
+    _upload_host_to_device_intel(backend.d_framebuffer, backend.host_buf, fb_size)
+
+# ============================================================================
+# OpenCL-C Kernel Source
+# ============================================================================
+
+fn _engine2d_opencl_source() -> text:
+    """OpenCL-C source for all 2D rendering compute kernels.
+
+    Compiled at runtime via oneapi_compile_opencl(). Each kernel operates
+    on a u32 ARGB framebuffer in device memory. Work-items are dispatched
+    in 1D and decomposed into 2D pixel coordinates within each primitive's
+    bounding region.
+    """
+    r"""
+__kernel void kernel_clear(
+    __global uint* fb, uint color, int width, int height)
+{
+    int gid = get_global_id(0);
+    if (gid < width * height) fb[gid] = color;
+}
+
+__kernel void kernel_draw_rect_filled(
+    __global uint* fb, int rx, int ry, int rw, int rh,
+    uint color, int fb_w, int fb_h)
+{
+    int gid = get_global_id(0);
+    int lx = gid % rw;
+    int ly = gid / rw;
+    if (lx >= rw || ly >= rh) return;
+    int px = rx + lx;
+    int py = ry + ly;
+    if (px >= 0 && px < fb_w && py >= 0 && py < fb_h)
+        fb[py * fb_w + px] = color;
+}
+
+__kernel void kernel_draw_rect_outline(
+    __global uint* fb, int rx, int ry, int rw, int rh,
+    uint color, int fb_w, int fb_h)
+{
+    int gid = get_global_id(0);
+    int lx = gid % rw;
+    int ly = gid / rw;
+    if (lx >= rw || ly >= rh) return;
+    if (lx != 0 && lx != rw-1 && ly != 0 && ly != rh-1) return;
+    int px = rx + lx;
+    int py = ry + ly;
+    if (px >= 0 && px < fb_w && py >= 0 && py < fb_h)
+        fb[py * fb_w + px] = color;
+}
+
+__kernel void kernel_draw_circle_filled(
+    __global uint* fb, int cx, int cy, int r,
+    uint color, int fb_w, int fb_h)
+{
+    int gid = get_global_id(0);
+    int bw = 2 * r + 1;
+    int lx = gid % bw;
+    int ly = gid / bw;
+    if (ly >= bw) return;
+    int px = cx - r + lx;
+    int py = cy - r + ly;
+    int dx = px - cx;
+    int dy = py - cy;
+    if (dx*dx + dy*dy <= r*r)
+        if (px >= 0 && px < fb_w && py >= 0 && py < fb_h)
+            fb[py * fb_w + px] = color;
+}
+
+__kernel void kernel_draw_circle(
+    __global uint* fb, int cx, int cy, int r,
+    uint color, int fb_w, int fb_h)
+{
+    int gid = get_global_id(0);
+    int bw = 2 * r + 1;
+    int lx = gid % bw;
+    int ly = gid / bw;
+    if (ly >= bw) return;
+    int px = cx - r + lx;
+    int py = cy - r + ly;
+    int dx = px - cx;
+    int dy = py - cy;
+    int dist_sq = dx*dx + dy*dy;
+    int r_inner = (r-1) * (r-1);
+    int r_outer = r * r;
+    if (dist_sq >= r_inner && dist_sq <= r_outer)
+        if (px >= 0 && px < fb_w && py >= 0 && py < fb_h)
+            fb[py * fb_w + px] = color;
+}
+
+__kernel void kernel_draw_line(
+    __global uint* fb, int x1, int y1, int x2, int y2,
+    uint color, int thickness, int fb_w, int fb_h)
+{
+    int gid = get_global_id(0);
+    int dx = abs(x2 - x1);
+    int dy = abs(y2 - y1);
+    int steps = (dx > dy) ? dx : dy;
+    if (steps == 0) steps = 1;
+    if (gid > steps) return;
+    int px = x1 + (x2 - x1) * gid / steps;
+    int py = y1 + (y2 - y1) * gid / steps;
+    int half = thickness / 2;
+    for (int ty = -half; ty <= half; ty++)
+        for (int tx = -half; tx <= half; tx++) {
+            int fx = px + tx;
+            int fy = py + ty;
+            if (fx >= 0 && fx < fb_w && fy >= 0 && fy < fb_h)
+                fb[fy * fb_w + fx] = color;
+        }
+}
+
+__kernel void kernel_draw_rounded_rect(
+    __global uint* fb, int rx, int ry, int rw, int rh,
+    int radius, uint color, int fb_w, int fb_h)
+{
+    int gid = get_global_id(0);
+    int lx = gid % rw;
+    int ly = gid / rw;
+    if (lx >= rw || ly >= rh) return;
+    int px = rx + lx;
+    int py = ry + ly;
+    int r = radius;
+    bool inside = true;
+    if (lx < r && ly < r) {
+        int cdx = r - lx; int cdy = r - ly;
+        if (cdx*cdx + cdy*cdy > r*r) inside = false;
+    } else if (lx >= rw-r && ly < r) {
+        int cdx = lx - (rw-1-r); int cdy = r - ly;
+        if (cdx*cdx + cdy*cdy > r*r) inside = false;
+    } else if (lx < r && ly >= rh-r) {
+        int cdx = r - lx; int cdy = ly - (rh-1-r);
+        if (cdx*cdx + cdy*cdy > r*r) inside = false;
+    } else if (lx >= rw-r && ly >= rh-r) {
+        int cdx = lx - (rw-1-r); int cdy = ly - (rh-1-r);
+        if (cdx*cdx + cdy*cdy > r*r) inside = false;
+    }
+    if (inside && px >= 0 && px < fb_w && py >= 0 && py < fb_h)
+        fb[py * fb_w + px] = color;
+}
+
+__kernel void kernel_draw_triangle_filled(
+    __global uint* fb, int x1, int y1, int x2, int y2,
+    int x3, int y3, uint color, int fb_w, int fb_h,
+    int min_x, int min_y)
+{
+    int gid = get_global_id(0);
+    int bw = fb_w;
+    int lx = gid % bw;
+    int ly = gid / bw;
+    int px = min_x + lx;
+    int py = min_y + ly;
+    int d = (y2-y3)*(x1-x3) + (x3-x2)*(y1-y3);
+    if (d == 0) return;
+    float a = (float)((y2-y3)*(px-x3) + (x3-x2)*(py-y3)) / d;
+    float b = (float)((y3-y1)*(px-x3) + (x1-x3)*(py-y3)) / d;
+    float c = 1.0f - a - b;
+    if (a >= 0 && b >= 0 && c >= 0)
+        if (px >= 0 && px < fb_w && py >= 0 && py < fb_h)
+            fb[py * fb_w + px] = color;
+}
+
+__kernel void kernel_draw_gradient_rect(
+    __global uint* fb, int rx, int ry, int rw, int rh,
+    uint top_color, uint bottom_color, int fb_w, int fb_h)
+{
+    int gid = get_global_id(0);
+    int lx = gid % rw;
+    int ly = gid / rw;
+    if (lx >= rw || ly >= rh) return;
+    int px = rx + lx;
+    int py = ry + ly;
+    if (px < 0 || px >= fb_w || py < 0 || py >= fb_h) return;
+    float t = (rh > 1) ? (float)ly / (float)(rh - 1) : 0.0f;
+    uint tr = (top_color >> 16) & 0xFF;
+    uint tg = (top_color >> 8)  & 0xFF;
+    uint tb = top_color & 0xFF;
+    uint ta = (top_color >> 24) & 0xFF;
+    uint br = (bottom_color >> 16) & 0xFF;
+    uint bg = (bottom_color >> 8)  & 0xFF;
+    uint bb = bottom_color & 0xFF;
+    uint ba = (bottom_color >> 24) & 0xFF;
+    uint cr = (uint)(tr + t * (br - tr));
+    uint cg = (uint)(tg + t * (bg - tg));
+    uint cb = (uint)(tb + t * (bb - tb));
+    uint ca = (uint)(ta + t * (ba - ta));
+    fb[py * fb_w + px] = (ca << 24) | (cr << 16) | (cg << 8) | cb;
+}
+
+__kernel void kernel_blit_image(
+    __global uint* fb, __global uint* src,
+    int dx, int dy, int sw, int sh, int fb_w, int fb_h)
+{
+    int gid = get_global_id(0);
+    int lx = gid % sw;
+    int ly = gid / sw;
+    if (lx >= sw || ly >= sh) return;
+    int px = dx + lx;
+    int py = dy + ly;
+    if (px >= 0 && px < fb_w && py >= 0 && py < fb_h)
+        fb[py * fb_w + px] = src[ly * sw + lx];
+}
+"""
+
+# ============================================================================
+# SPIR-V Kernel Binary (Fallback)
+# ============================================================================
+
+fn _engine2d_spirv() -> [u8]:
+    """Embedded SPIR-V binary for 2D rendering compute kernels.
+
+    These kernels operate on a u32 framebuffer in device memory.
+    Each pixel is ARGB packed as a 32-bit unsigned integer.
+
+    The SPIR-V is compiled from OpenCL C kernel source. The kernels use a
+    1D global work-item ID that is decomposed into (px, py) coordinates
+    within the primitive's bounding region.
+
+    Kernel list:
+    - kernel_clear:               Fill entire framebuffer with a color
+    - kernel_draw_rect_filled:    Fill a rectangle region
+    - kernel_draw_rect_outline:   Draw rectangle border (1px)
+    - kernel_draw_circle_filled:  Fill a circle (distance check)
+    - kernel_draw_circle:         Draw circle outline (distance band)
+    - kernel_draw_line:           Bresenham line (1 work-item per step)
+    - kernel_draw_rounded_rect:   Rect with rounded corners
+    - kernel_draw_triangle_filled: Barycentric triangle fill
+    - kernel_draw_gradient_rect:  Vertical gradient fill
+    - kernel_blit_image:          Copy source pixels to framebuffer region
+
+    Note: In production, this would be a precompiled .spv file loaded from
+    disk. The SPIR-V binary is generated from the following OpenCL C source
+    using: clang -cl-std=CL2.0 -target spir64 -O2 -emit-llvm | llvm-spirv
+
+    OpenCL C source (reference — not compiled at runtime):
+
+    __kernel void kernel_clear(
+        __global uint* fb, uint color, int width, int height)
+    {
+        int gid = get_global_id(0);
+        if (gid < width * height) fb[gid] = color;
+    }
+
+    __kernel void kernel_draw_rect_filled(
+        __global uint* fb, int rx, int ry, int rw, int rh,
+        uint color, int fb_w, int fb_h)
+    {
+        int gid = get_global_id(0);
+        int lx = gid % rw;
+        int ly = gid / rw;
+        if (lx >= rw || ly >= rh) return;
+        int px = rx + lx;
+        int py = ry + ly;
+        if (px >= 0 && px < fb_w && py >= 0 && py < fb_h)
+            fb[py * fb_w + px] = color;
+    }
+
+    __kernel void kernel_draw_rect_outline(
+        __global uint* fb, int rx, int ry, int rw, int rh,
+        uint color, int fb_w, int fb_h)
+    {
+        int gid = get_global_id(0);
+        int lx = gid % rw;
+        int ly = gid / rw;
+        if (lx >= rw || ly >= rh) return;
+        if (lx != 0 && lx != rw-1 && ly != 0 && ly != rh-1) return;
+        int px = rx + lx;
+        int py = ry + ly;
+        if (px >= 0 && px < fb_w && py >= 0 && py < fb_h)
+            fb[py * fb_w + px] = color;
+    }
+
+    __kernel void kernel_draw_circle_filled(
+        __global uint* fb, int cx, int cy, int r,
+        uint color, int fb_w, int fb_h)
+    {
+        int gid = get_global_id(0);
+        int bw = 2 * r + 1;
+        int lx = gid % bw;
+        int ly = gid / bw;
+        if (ly >= bw) return;
+        int px = cx - r + lx;
+        int py = cy - r + ly;
+        int dx = px - cx;
+        int dy = py - cy;
+        if (dx*dx + dy*dy <= r*r)
+            if (px >= 0 && px < fb_w && py >= 0 && py < fb_h)
+                fb[py * fb_w + px] = color;
+    }
+
+    __kernel void kernel_draw_circle(
+        __global uint* fb, int cx, int cy, int r,
+        uint color, int fb_w, int fb_h)
+    {
+        int gid = get_global_id(0);
+        int bw = 2 * r + 1;
+        int lx = gid % bw;
+        int ly = gid / bw;
+        if (ly >= bw) return;
+        int px = cx - r + lx;
+        int py = cy - r + ly;
+        int dx = px - cx;
+        int dy = py - cy;
+        int dist_sq = dx*dx + dy*dy;
+        int r_inner = (r-1) * (r-1);
+        int r_outer = r * r;
+        if (dist_sq >= r_inner && dist_sq <= r_outer)
+            if (px >= 0 && px < fb_w && py >= 0 && py < fb_h)
+                fb[py * fb_w + px] = color;
+    }
+
+    __kernel void kernel_draw_line(
+        __global uint* fb, int x1, int y1, int x2, int y2,
+        uint color, int thickness, int fb_w, int fb_h)
+    {
+        int gid = get_global_id(0);
+        int dx = abs(x2 - x1);
+        int dy = abs(y2 - y1);
+        int steps = (dx > dy) ? dx : dy;
+        if (steps == 0) steps = 1;
+        if (gid > steps) return;
+        int px = x1 + (x2 - x1) * gid / steps;
+        int py = y1 + (y2 - y1) * gid / steps;
+        int half = thickness / 2;
+        for (int ty = -half; ty <= half; ty++)
+            for (int tx = -half; tx <= half; tx++) {
+                int fx = px + tx;
+                int fy = py + ty;
+                if (fx >= 0 && fx < fb_w && fy >= 0 && fy < fb_h)
+                    fb[fy * fb_w + fx] = color;
+            }
+    }
+
+    __kernel void kernel_draw_rounded_rect(
+        __global uint* fb, int rx, int ry, int rw, int rh,
+        int radius, uint color, int fb_w, int fb_h)
+    {
+        int gid = get_global_id(0);
+        int lx = gid % rw;
+        int ly = gid / rw;
+        if (lx >= rw || ly >= rh) return;
+        int px = rx + lx;
+        int py = ry + ly;
+        // Check corners
+        int r = radius;
+        bool inside = true;
+        if (lx < r && ly < r) {
+            int dx = r - lx; int dy = r - ly;
+            if (dx*dx + dy*dy > r*r) inside = false;
+        } else if (lx >= rw-r && ly < r) {
+            int dx = lx - (rw-1-r); int dy = r - ly;
+            if (dx*dx + dy*dy > r*r) inside = false;
+        } else if (lx < r && ly >= rh-r) {
+            int dx = r - lx; int dy = ly - (rh-1-r);
+            if (dx*dx + dy*dy > r*r) inside = false;
+        } else if (lx >= rw-r && ly >= rh-r) {
+            int dx = lx - (rw-1-r); int dy = ly - (rh-1-r);
+            if (dx*dx + dy*dy > r*r) inside = false;
+        }
+        if (inside && px >= 0 && px < fb_w && py >= 0 && py < fb_h)
+            fb[py * fb_w + px] = color;
+    }
+
+    __kernel void kernel_draw_triangle_filled(
+        __global uint* fb, int x1, int y1, int x2, int y2,
+        int x3, int y3, uint color, int fb_w, int fb_h,
+        int min_x, int min_y)
+    {
+        int gid = get_global_id(0);
+        int bw = fb_w;  // computed from caller as max_x - min_x + 1
+        int lx = gid % bw;
+        int ly = gid / bw;
+        int px = min_x + lx;
+        int py = min_y + ly;
+        // Barycentric test
+        int d = (y2-y3)*(x1-x3) + (x3-x2)*(y1-y3);
+        if (d == 0) return;
+        float a = (float)((y2-y3)*(px-x3) + (x3-x2)*(py-y3)) / d;
+        float b = (float)((y3-y1)*(px-x3) + (x1-x3)*(py-y3)) / d;
+        float c = 1.0f - a - b;
+        if (a >= 0 && b >= 0 && c >= 0)
+            if (px >= 0 && px < fb_w && py >= 0 && py < fb_h)
+                fb[py * fb_w + px] = color;
+    }
+
+    __kernel void kernel_draw_gradient_rect(
+        __global uint* fb, int rx, int ry, int rw, int rh,
+        uint top_color, uint bottom_color, int fb_w, int fb_h)
+    {
+        int gid = get_global_id(0);
+        int lx = gid % rw;
+        int ly = gid / rw;
+        if (lx >= rw || ly >= rh) return;
+        int px = rx + lx;
+        int py = ry + ly;
+        if (px < 0 || px >= fb_w || py < 0 || py >= fb_h) return;
+        float t = (rh > 1) ? (float)ly / (float)(rh - 1) : 0.0f;
+        uint tr = (top_color >> 16) & 0xFF;
+        uint tg = (top_color >> 8)  & 0xFF;
+        uint tb = top_color & 0xFF;
+        uint ta = (top_color >> 24) & 0xFF;
+        uint br = (bottom_color >> 16) & 0xFF;
+        uint bg = (bottom_color >> 8)  & 0xFF;
+        uint bb = bottom_color & 0xFF;
+        uint ba = (bottom_color >> 24) & 0xFF;
+        uint cr = (uint)(tr + t * (br - tr));
+        uint cg = (uint)(tg + t * (bg - tg));
+        uint cb = (uint)(tb + t * (bb - tb));
+        uint ca = (uint)(ta + t * (ba - ta));
+        fb[py * fb_w + px] = (ca << 24) | (cr << 16) | (cg << 8) | cb;
+    }
+
+    __kernel void kernel_blit_image(
+        __global uint* fb, __global uint* src,
+        int dx, int dy, int sw, int sh, int fb_w, int fb_h)
+    {
+        int gid = get_global_id(0);
+        int lx = gid % sw;
+        int ly = gid / sw;
+        if (lx >= sw || ly >= sh) return;
+        int px = dx + lx;
+        int py = dy + ly;
+        if (px >= 0 && px < fb_w && py >= 0 && py < fb_h)
+            fb[py * fb_w + px] = src[ly * sw + lx];
+    }
+
+    The actual SPIR-V bytes would be generated offline from the above source.
+    For now we return a placeholder that will be replaced with real SPIR-V
+    once the offline compilation pipeline is set up.
+    """
+    # Placeholder SPIR-V magic number header + minimal valid module
+    # Real SPIR-V would be generated from the OpenCL C kernels above
+    # using: clang -cl-std=CL2.0 -target spir64 -O2 -emit-llvm | llvm-spirv
+    #
+    # SPIR-V magic: 0x07230203
+    # The runtime's rt_oneapi_compile_spirv will validate the binary.
+    # When the SPIR-V is invalid/placeholder, oneapi_compile_spirv returns
+    # an invalid module and init() returns false gracefully.
+    [
+        0x03, 0x02, 0x23, 0x07,  # SPIR-V magic number (little-endian)
+        0x00, 0x05, 0x01, 0x00,  # Version 1.5
+        0x00, 0x00, 0x00, 0x00,  # Generator magic
+        0x00, 0x00, 0x00, 0x00   # Bound / schema (placeholder)
+    ]
+
+# ============================================================================
+# Conversion Helpers
+# ============================================================================
+
+fn _i64(v: i32) -> i64:
+    """Widen i32 to i64."""
+    v as i64
+
+fn _i64_from_u32(v: u32) -> i64:
+    """Widen u32 to i64."""
+    v as i64

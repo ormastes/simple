@@ -1,0 +1,349 @@
+#![allow(unnamed_duplicate_typed_args)]
+# CSPRNG — Cryptographically Secure Pseudo-Random Number Generator
+#
+# Hardware entropy from RDRAND (x86_64) / platform-specific sources,
+# with ChaCha20-based CSPRNG for stretching.
+# No SFFI/Rust FFI beyond the single hardware RNG intrinsic.
+#
+# Reference: RFC 7539 (ChaCha20 and Poly1305)
+
+# ============================================================================
+# Hardware Entropy Sources
+# ============================================================================
+
+@cfg(x86_64)
+extern fn rt_rdrand() -> u64
+
+@cfg(x86)
+extern fn rt_rdrand() -> u64
+
+@cfg(arm64)
+extern fn rt_rndr() -> u64
+
+@cfg(riscv64)
+extern fn rt_riscv_seed() -> u64
+
+extern fn rt_array_new_with_cap(cap: i64) -> [u8]
+extern fn rt_random_bytes_c(count: u64) -> [u8]
+
+# ============================================================================
+# ChaCha20 Quarter Round
+# ============================================================================
+
+fn _u32_mask(x: u32) -> u32:
+    """Mask to 32 bits."""
+    x & 0xFFFFFFFF
+
+fn _rotl32(x: u32, n: u32) -> u32:
+    """32-bit left rotation."""
+    _u32_mask((x << n) | (x >> (32 - n)))
+
+fn _quarter_round(state: [u32], a: u64, b: u64, c: u64, d: u64):
+    """ChaCha20 quarter round (mutates state in place).
+
+    a += b; d ^= a; d <<<= 16
+    c += d; b ^= c; b <<<= 12
+    a += b; d ^= a; d <<<= 8
+    c += d; b ^= c; b <<<= 7
+    """
+    state[a] = _u32_mask(state[a] + state[b])
+    state[d] = _rotl32(state[d] ^ state[a], 16)
+
+    state[c] = _u32_mask(state[c] + state[d])
+    state[b] = _rotl32(state[b] ^ state[c], 12)
+
+    state[a] = _u32_mask(state[a] + state[b])
+    state[d] = _rotl32(state[d] ^ state[a], 8)
+
+    state[c] = _u32_mask(state[c] + state[d])
+    state[b] = _rotl32(state[b] ^ state[c], 7)
+
+# ============================================================================
+# ChaCha20 Block Function
+# ============================================================================
+
+fn _chacha20_block(key: [u32], counter: u32, nonce: [u32]) -> [u32]:
+    """Generate one 64-byte ChaCha20 keystream block.
+
+    State layout (16 x u32):
+      [0..3]   = "expand 32-byte k" (constants)
+      [4..11]  = 256-bit key (8 words)
+      [12]     = 32-bit counter
+      [13..15] = 96-bit nonce (3 words)
+    """
+    # Initialize state
+    var state: [u32] = rt_array_new_with_cap(16)
+
+    # Constants: "expand 32-byte k" in little-endian
+    state.push(0x61707865)    # "expa"
+    state.push(0x3320646e)    # "nd 3"
+    state.push(0x79622d32)    # "2-by"
+    state.push(0x6b206574)    # "te k"
+
+    # Key (8 words)
+    var i: u64 = 0
+    while i < 8:
+        state.push(key[i])
+        i = i + 1
+
+    # Counter
+    state.push(counter)
+
+    # Nonce (3 words)
+    i = 0
+    while i < 3:
+        state.push(nonce[i])
+        i = i + 1
+
+    # Working copy
+    var working: [u32] = rt_array_new_with_cap(16)
+    i = 0
+    while i < 16:
+        working.push(state[i])
+        i = i + 1
+
+    # 20 rounds (10 double-rounds)
+    var round: u64 = 0
+    while round < 10:
+        # Column rounds
+        _quarter_round(working, 0, 4, 8, 12)
+        _quarter_round(working, 1, 5, 9, 13)
+        _quarter_round(working, 2, 6, 10, 14)
+        _quarter_round(working, 3, 7, 11, 15)
+
+        # Diagonal rounds
+        _quarter_round(working, 0, 5, 10, 15)
+        _quarter_round(working, 1, 6, 11, 12)
+        _quarter_round(working, 2, 7, 8, 13)
+        _quarter_round(working, 3, 4, 9, 14)
+
+        round = round + 1
+
+    # Add initial state to working state
+    var result: [u32] = rt_array_new_with_cap(16)
+    i = 0
+    while i < 16:
+        result.push(_u32_mask(working[i] + state[i]))
+        i = i + 1
+
+    result
+
+# ============================================================================
+# CSPRNG State
+# ============================================================================
+
+struct CsprngState:
+    """ChaCha20-based CSPRNG, seeded from hardware entropy.
+
+    Uses ChaCha20 in counter mode to generate pseudorandom bytes.
+    Re-seeds periodically from hardware entropy.
+    """
+    key: [u32]          # 8 x u32 (256-bit key)
+    nonce: [u32]        # 3 x u32 (96-bit nonce)
+    counter: u32        # Block counter
+    initialized: bool
+    bytes_generated: u64   # Track for periodic reseed
+    buffer: [u8]        # Buffered keystream bytes
+    buf_pos: u64        # Current position in buffer
+
+val RESEED_INTERVAL: u64 = 65536    # Reseed after this many bytes
+
+# Global CSPRNG instance
+var g_csprng: CsprngState = CsprngState(
+    key: [],
+    nonce: [],
+    counter: 0,
+    initialized: false,
+    bytes_generated: 0,
+    buffer: [],
+    buf_pos: 0
+)
+
+# ============================================================================
+# Hardware Entropy Collection
+# ============================================================================
+
+fn _hw_random_u64() -> u64:
+    """Get a 64-bit hardware random value."""
+    rt_rdrand()
+
+fn csprng_seed() -> [u8]:
+    """Collect 32 bytes of hardware entropy for seeding.
+
+    Uses RDRAND (x86_64) or platform equivalent.
+    """
+    var seed: [u8] = rt_array_new_with_cap(32)
+    var i: u64 = 0
+    while i < 4:
+        val r = _hw_random_u64()
+        var j: u64 = 0
+        while j < 8:
+            seed.push(((r >> (j * 8)) & 0xFF).to_u8())
+            j = j + 1
+        i = i + 1
+    seed
+
+# ============================================================================
+# CSPRNG Initialization and Operations
+# ============================================================================
+
+fn _csprng_init():
+    """Initialize the global CSPRNG from hardware entropy."""
+    val seed = csprng_seed()
+
+    # Use first 32 bytes as key (8 x u32, little-endian)
+    var key: [u32] = rt_array_new_with_cap(8)
+    var i: u64 = 0
+    while i < 8:
+        val base = i * 4
+        val word = seed[base].to_u32() |
+                   (seed[base + 1].to_u32() << 8) |
+                   (seed[base + 2].to_u32() << 16) |
+                   (seed[base + 3].to_u32() << 24)
+        key.push(word)
+        i = i + 1
+
+    # Get 12 more bytes for nonce
+    val nonce_seed = csprng_seed()
+    var nonce: [u32] = rt_array_new_with_cap(3)
+    i = 0
+    while i < 3:
+        val base = i * 4
+        val word = nonce_seed[base].to_u32() |
+                   (nonce_seed[base + 1].to_u32() << 8) |
+                   (nonce_seed[base + 2].to_u32() << 16) |
+                   (nonce_seed[base + 3].to_u32() << 24)
+        nonce.push(word)
+        i = i + 1
+
+    g_csprng.key = key
+    g_csprng.nonce = nonce
+    g_csprng.counter = 0
+    g_csprng.initialized = true
+    g_csprng.bytes_generated = 0
+    g_csprng.buffer = []
+    g_csprng.buf_pos = 0
+
+fn _csprng_reseed():
+    """Reseed the CSPRNG from hardware entropy."""
+    val new_seed = csprng_seed()
+
+    # XOR new entropy into existing key
+    var i: u64 = 0
+    while i < 8:
+        val base = i * 4
+        val word = new_seed[base].to_u32() |
+                   (new_seed[base + 1].to_u32() << 8) |
+                   (new_seed[base + 2].to_u32() << 16) |
+                   (new_seed[base + 3].to_u32() << 24)
+        g_csprng.key[i] = g_csprng.key[i] ^ word
+        i = i + 1
+
+    g_csprng.counter = 0
+    g_csprng.bytes_generated = 0
+    g_csprng.buffer = []
+    g_csprng.buf_pos = 0
+
+fn _csprng_fill_buffer():
+    """Generate a new 64-byte block of keystream."""
+    val block = _chacha20_block(g_csprng.key, g_csprng.counter, g_csprng.nonce)
+    g_csprng.counter = _u32_mask(g_csprng.counter + 1)
+
+    # Convert u32 words to bytes (little-endian)
+    var buf: [u8] = rt_array_new_with_cap(64)
+    var i: u64 = 0
+    while i < 16:
+        val word = block[i]
+        buf.push((word & 0xFF).to_u8())
+        buf.push(((word >> 8) & 0xFF).to_u8())
+        buf.push(((word >> 16) & 0xFF).to_u8())
+        buf.push(((word >> 24) & 0xFF).to_u8())
+        i = i + 1
+
+    g_csprng.buffer = buf
+    g_csprng.buf_pos = 0
+
+# ============================================================================
+# Public API
+# ============================================================================
+
+fn random_bytes(count: u64) -> [u8]:
+    """Generate random bytes.
+
+    Uses ChaCha20-based CSPRNG seeded from hardware entropy.
+    Automatically initializes on first use and reseeds periodically.
+
+    Args:
+        count: Number of random bytes to generate.
+
+    Returns: Array of random bytes.
+    """
+    if not g_csprng.initialized:
+        _csprng_init()
+
+    # Check if reseed is needed
+    if g_csprng.bytes_generated > RESEED_INTERVAL:
+        _csprng_reseed()
+
+    var result: [u8] = rt_array_new_with_cap(count.to_i64())
+    var remaining = count
+
+    while remaining > 0:
+        # Refill buffer if exhausted
+        if g_csprng.buf_pos >= g_csprng.buffer.len():
+            _csprng_fill_buffer()
+
+        # Copy available bytes
+        var available: u64 = g_csprng.buffer.len() - g_csprng.buf_pos
+        var to_copy: u64 = if remaining < available: remaining else: available
+
+        var i: u64 = 0
+        while i < to_copy:
+            result.push(g_csprng.buffer[g_csprng.buf_pos])
+            g_csprng.buf_pos = g_csprng.buf_pos + 1
+            i = i + 1
+
+        remaining = remaining - to_copy
+        g_csprng.bytes_generated = g_csprng.bytes_generated + to_copy
+
+    result
+
+fn random_u32() -> u32:
+    """Generate a random 32-bit unsigned integer."""
+    val bytes = random_bytes(4)
+    bytes[0].to_u32() |
+    (bytes[1].to_u32() << 8) |
+    (bytes[2].to_u32() << 16) |
+    (bytes[3].to_u32() << 24)
+
+fn random_u64() -> u64:
+    """Generate a random 64-bit unsigned integer."""
+    val bytes = random_bytes(8)
+    bytes[0].to_u64() |
+    (bytes[1].to_u64() << 8) |
+    (bytes[2].to_u64() << 16) |
+    (bytes[3].to_u64() << 24) |
+    (bytes[4].to_u64() << 32) |
+    (bytes[5].to_u64() << 40) |
+    (bytes[6].to_u64() << 48) |
+    (bytes[7].to_u64() << 56)
+
+fn random_range(min_val: u64, max_val: u64) -> u64:
+    """Generate a random u64 in [min_val, max_val).
+
+    Uses rejection sampling to avoid modulo bias.
+    """
+    val range = max_val - min_val
+    if range == 0:
+        return min_val
+    if range == 1:
+        return min_val
+
+    # Find the largest multiple of range that fits in u64
+    val threshold = (0 - range) % range   # = (2^64 - range) % range
+
+    var r = random_u64()
+    while r < threshold:
+        r = random_u64()
+
+    min_val + (r % range)

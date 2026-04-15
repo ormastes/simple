@@ -1,0 +1,132 @@
+#!/bin/bash
+# mail-cli multi-account config
+# Config stored at: ~/.config/mail-cli/config.json
+
+MAIL_CONFIG_DIR="${HOME}/.config/mail-cli"
+MAIL_CONFIG_FILE="${MAIL_CONFIG_DIR}/config.json"
+
+# Provider presets — function-based for bash 3.x compatibility
+mail_preset() {
+  local provider="$1" field="$2"
+  case "${provider}_${field}" in
+    gmail_imap)         echo "imap.gmail.com" ;;
+    gmail_imap_port)    echo "993" ;;
+    gmail_smtp)         echo "smtp.gmail.com" ;;
+    gmail_smtp_port)    echo "465" ;;
+    gmail_tls)          echo "implicit" ;;
+    outlook_imap)       echo "outlook.office365.com" ;;
+    outlook_imap_port)  echo "993" ;;
+    outlook_smtp)       echo "smtp.office365.com" ;;
+    outlook_smtp_port)  echo "587" ;;
+    outlook_tls)        echo "starttls" ;;
+    yahoo_imap)         echo "imap.mail.yahoo.com" ;;
+    yahoo_imap_port)    echo "993" ;;
+    yahoo_smtp)         echo "smtp.mail.yahoo.com" ;;
+    yahoo_smtp_port)    echo "465" ;;
+    yahoo_tls)          echo "implicit" ;;
+    protonmail_imap)       echo "127.0.0.1" ;;
+    protonmail_imap_port)  echo "1143" ;;
+    protonmail_smtp)       echo "127.0.0.1" ;;
+    protonmail_smtp_port)  echo "1025" ;;
+    protonmail_tls)        echo "starttls" ;;
+    fastmail_imap)      echo "imap.fastmail.com" ;;
+    fastmail_imap_port) echo "993" ;;
+    fastmail_smtp)      echo "smtp.fastmail.com" ;;
+    fastmail_smtp_port) echo "465" ;;
+    fastmail_tls)       echo "implicit" ;;
+    *) echo "" ;;
+  esac
+}
+
+mail_config_dir() {
+  mkdir -p "$MAIL_CONFIG_DIR"
+}
+
+mail_config_exists() {
+  [ -f "$MAIL_CONFIG_FILE" ]
+}
+
+mail_config_init() {
+  mail_config_dir
+  if ! mail_config_exists; then
+    cat > "$MAIL_CONFIG_FILE" <<'EOF'
+{
+  "default_account": "",
+  "accounts": {}
+}
+EOF
+    chmod 600 "$MAIL_CONFIG_FILE"
+  fi
+}
+
+mail_config_list_accounts() {
+  if mail_config_exists; then
+    jq -r '.accounts | keys[]' "$MAIL_CONFIG_FILE" 2>/dev/null
+  fi
+}
+
+mail_config_get_default() {
+  if mail_config_exists; then
+    jq -r '.default_account // empty' "$MAIL_CONFIG_FILE" 2>/dev/null
+  fi
+}
+
+mail_config_set_default() {
+  local name="$1"
+  local tmp="${MAIL_CONFIG_FILE}.tmp"
+  jq --arg n "$name" '.default_account = $n' "$MAIL_CONFIG_FILE" > "$tmp" && mv "$tmp" "$MAIL_CONFIG_FILE"
+  chmod 600 "$MAIL_CONFIG_FILE"
+}
+
+mail_config_get_account() {
+  local name="$1"
+  if mail_config_exists; then
+    jq --arg n "$name" '.accounts[$n] // empty' "$MAIL_CONFIG_FILE" 2>/dev/null
+  fi
+}
+
+mail_config_set_account() {
+  local name="$1" account_json="$2"
+  mail_config_init
+  local tmp="${MAIL_CONFIG_FILE}.tmp"
+  jq --arg n "$name" --argjson acc "$account_json" '.accounts[$n] = $acc' "$MAIL_CONFIG_FILE" > "$tmp" && mv "$tmp" "$MAIL_CONFIG_FILE"
+  chmod 600 "$MAIL_CONFIG_FILE"
+}
+
+mail_config_delete_account() {
+  local name="$1"
+  if mail_config_exists; then
+    local tmp="${MAIL_CONFIG_FILE}.tmp"
+    jq --arg n "$name" 'del(.accounts[$n])' "$MAIL_CONFIG_FILE" > "$tmp" && mv "$tmp" "$MAIL_CONFIG_FILE"
+  fi
+}
+
+# Resolve account — uses --account flag or default
+mail_resolve_account() {
+  local name="${MAIL_ACCOUNT:-}"
+  if [ -z "$name" ]; then
+    name=$(mail_config_get_default)
+  fi
+  if [ -z "$name" ]; then
+    echo "error: no account specified and no default set. Use --account NAME or run 'mail auth login'." >&2
+    return 1
+  fi
+
+  local acc
+  acc=$(mail_config_get_account "$name")
+  if [ -z "$acc" ]; then
+    echo "error: account '${name}' not found" >&2
+    return 1
+  fi
+
+  # Export account fields for use by other modules
+  MAIL_ACCT_NAME="$name"
+  MAIL_ACCT_EMAIL=$(echo "$acc" | jq -r '.email')
+  MAIL_ACCT_DISPLAY=$(echo "$acc" | jq -r '.display_name // .email')
+  MAIL_ACCT_IMAP_SERVER=$(echo "$acc" | jq -r '.imap_server')
+  MAIL_ACCT_IMAP_PORT=$(echo "$acc" | jq -r '.imap_port')
+  MAIL_ACCT_SMTP_SERVER=$(echo "$acc" | jq -r '.smtp_server')
+  MAIL_ACCT_SMTP_PORT=$(echo "$acc" | jq -r '.smtp_port')
+  MAIL_ACCT_PASSWORD=$(echo "$acc" | jq -r '.password')
+  MAIL_ACCT_TLS=$(echo "$acc" | jq -r '.tls // "implicit"')
+}

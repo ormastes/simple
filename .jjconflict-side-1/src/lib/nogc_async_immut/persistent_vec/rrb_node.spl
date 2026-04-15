@@ -1,0 +1,442 @@
+#![allow(unnamed_duplicate_typed_args)]
+@allow(unnamed_duplicate_typed_args)
+@allow(primitive_api)
+# RRB-Tree Node Operations
+#
+# Relaxed Radix Balanced tree (RRB-tree) — a persistent, immutable vector
+# structure using 32-way branching. Based on Bagwell & Rompf (2011) and
+# Stucki, Rompf, Ureche, Bagwell (2015).
+#
+# Node representation (tag-based arrays for zero-overhead dispatch):
+#   LEAF   = [1, items_array]
+#   BRANCH = [2, children_array, size_table_or_nil]
+#
+# The tree consumes 5 bits of the index per level (2^5 = 32-way branching).
+# A size_table is nil for "strict" nodes (all children are full except the
+# rightmost) and [cumulative_sizes...] for "relaxed" nodes (after concat).
+#
+# All operations return NEW nodes (structural sharing). The original tree
+# is never modified.
+
+# ============================================================================
+# Constants
+# ============================================================================
+
+val RRB_BRANCH_FACTOR = 32
+val RRB_BITS = 5
+val RRB_MASK = 31
+val RRB_NODE_LEAF = 1
+val RRB_NODE_BRANCH = 2
+
+# ============================================================================
+# Node Constructors
+# ============================================================================
+
+# Create a leaf node holding up to 32 elements.
+fn rrb_leaf(items):
+    [RRB_NODE_LEAF, items]
+
+# Create a branch node with children and an optional size table.
+# size_table is nil for strict nodes, [cumulative_sizes...] for relaxed.
+fn rrb_branch(children, size_table):
+    [RRB_NODE_BRANCH, children, size_table]
+
+# ============================================================================
+# Node Type Inspection
+# ============================================================================
+
+# Check if a node is a leaf.
+fn rrb_is_leaf(node) -> bool:
+    if node == nil:
+        return false
+    node[0] == RRB_NODE_LEAF
+
+# Check if a node is a branch.
+fn rrb_is_branch(node) -> bool:
+    if node == nil:
+        return false
+    node[0] == RRB_NODE_BRANCH
+
+# Get the tag of a node. Returns 0 for nil.
+fn rrb_node_tag(node) -> i64:
+    if node == nil:
+        return 0
+    node[0]
+
+# ============================================================================
+# Leaf Accessors
+# ============================================================================
+
+# Get the items array from a leaf node.
+fn rrb_leaf_items(node):
+    node[1]
+
+# Get a single element from a leaf at the given index.
+fn rrb_leaf_get(node, index: i64):
+    val items = node[1]
+    items[index]
+
+# Return a new leaf with the element at index replaced by value.
+fn rrb_leaf_set(node, index: i64, value):
+    val items = node[1]
+    var new_items = []
+    val n = items.len()
+    var i = 0
+    while i < n:
+        if i == index:
+            new_items.push(value)
+        else:
+            new_items.push(items[i])
+        i = i + 1
+    rrb_leaf(new_items)
+
+# Return a new leaf with value appended (caller must ensure room).
+fn rrb_leaf_push(node, value):
+    val items = node[1]
+    var new_items = []
+    val n = items.len()
+    var i = 0
+    while i < n:
+        new_items.push(items[i])
+        i = i + 1
+    new_items.push(value)
+    rrb_leaf(new_items)
+
+# Count the number of elements in a leaf.
+fn rrb_leaf_count(node) -> i64:
+    val items = node[1]
+    items.len()
+
+# ============================================================================
+# Branch Accessors
+# ============================================================================
+
+# Get the children array from a branch node.
+fn rrb_branch_children(node):
+    node[1]
+
+# Get the size table from a branch node (nil if strict).
+fn rrb_branch_size_table(node):
+    node[2]
+
+# ============================================================================
+# Array Helpers (immutable copy-on-write)
+# ============================================================================
+
+# Return a new array with the element at index replaced.
+fn rrb_array_replace(arr, idx: i64, value):
+    var result = []
+    val n = arr.len()
+    var i = 0
+    while i < n:
+        if i == idx:
+            result.push(value)
+        else:
+            result.push(arr[i])
+        i = i + 1
+    result
+
+# Return a new array with the last element removed.
+fn rrb_array_pop(arr):
+    var result = []
+    val n = arr.len() - 1
+    var i = 0
+    while i < n:
+        result.push(arr[i])
+        i = i + 1
+    result
+
+# Return a copy of the array.
+fn rrb_array_copy(arr):
+    var result = []
+    val n = arr.len()
+    var i = 0
+    while i < n:
+        result.push(arr[i])
+        i = i + 1
+    result
+
+# Return a new array with a value appended.
+fn rrb_array_push(arr, value):
+    var result = []
+    val n = arr.len()
+    var i = 0
+    while i < n:
+        result.push(arr[i])
+        i = i + 1
+    result.push(value)
+    result
+
+# ============================================================================
+# Tree Navigation — Get
+# ============================================================================
+
+# Retrieve the value at index from the tree.
+# shift = current bit offset (0 at deepest single-level, 5 at two levels, etc.)
+# The caller is responsible for bounds checking and tail-vs-tree routing.
+fn rrb_get(node, index: i64, shift: i64):
+    if node == nil:
+        return nil
+
+    val tag = node[0]
+
+    if tag == RRB_NODE_LEAF:
+        # At a leaf: index directly into items
+        val items = node[1]
+        return items[index]
+
+    # Branch node
+    val children = node[1]
+    val size_table = node[2]
+
+    if size_table == nil:
+        # Strict node: radix indexing
+        val child_idx = (index >> shift) & RRB_MASK
+        val child = children[child_idx]
+        val sub_index = index & ((1 << shift) - 1)
+        return rrb_get(child, sub_index, shift - RRB_BITS)
+
+    # Relaxed node: scan size table for the correct child
+    val n_children = children.len()
+    var child_idx = 0
+    while child_idx < n_children:
+        if index < size_table[child_idx]:
+            val prev_size = 0
+            if child_idx > 0:
+                val ps = size_table[child_idx - 1]
+                val child = children[child_idx]
+                val sub_index = index - ps
+                return rrb_get(child, sub_index, shift - RRB_BITS)
+            val child = children[child_idx]
+            return rrb_get(child, index, shift - RRB_BITS)
+        child_idx = child_idx + 1
+
+    nil
+
+# ============================================================================
+# Tree Navigation — Set (path-copy)
+# ============================================================================
+
+# Return a new tree with the value at index replaced.
+# Only copies the path from root to the modified leaf — everything else is shared.
+fn rrb_set(node, index: i64, value, shift: i64):
+    if node == nil:
+        return nil
+
+    val tag = node[0]
+
+    if tag == RRB_NODE_LEAF:
+        return rrb_leaf_set(node, index, value)
+
+    # Branch node
+    val children = node[1]
+    val size_table = node[2]
+
+    if size_table == nil:
+        # Strict node: radix indexing
+        val child_idx = (index >> shift) & RRB_MASK
+        val child = children[child_idx]
+        val sub_index = index & ((1 << shift) - 1)
+        val new_child = rrb_set(child, sub_index, value, shift - RRB_BITS)
+        val new_children = rrb_array_replace(children, child_idx, new_child)
+        return rrb_branch(new_children, nil)
+
+    # Relaxed node: scan size table
+    val n_children = children.len()
+    var child_idx = 0
+    while child_idx < n_children:
+        if index < size_table[child_idx]:
+            var sub_index = index
+            if child_idx > 0:
+                sub_index = index - size_table[child_idx - 1]
+            val child = children[child_idx]
+            val new_child = rrb_set(child, sub_index, value, shift - RRB_BITS)
+            val new_children = rrb_array_replace(children, child_idx, new_child)
+            return rrb_branch(new_children, size_table)
+        child_idx = child_idx + 1
+
+    node
+
+# ============================================================================
+# Tree Mutation — Push Tail
+# ============================================================================
+
+# Create a chain of single-child branch nodes from the given shift level
+# down to a leaf. Used when pushing a tail requires growing the tree
+# into a new subtree.
+fn rrb_new_path(shift: i64, leaf):
+    if shift == 0:
+        return leaf
+    val child = rrb_new_path(shift - RRB_BITS, leaf)
+    rrb_branch([child], nil)
+
+# Push a leaf node (the old tail wrapped as a leaf) into the tree.
+# Returns a new tree root. If the tree overflows, returns nil to signal
+# that a new root level is needed (handled by PersistentVec.push).
+#
+# shift: the current depth's bit offset (root shift)
+fn rrb_push_tail(node, tail_node, shift: i64):
+    if node == nil:
+        # Empty tree: the tail leaf becomes the entire tree
+        return rrb_new_path(shift, tail_node)
+
+    val tag = node[0]
+
+    if tag == RRB_NODE_LEAF:
+        # Should not happen — leaves don't contain other leaves.
+        # The caller should handle this via new_path.
+        return nil
+
+    # Branch node
+    val children = node[1]
+    val n_children = children.len()
+
+    if shift == RRB_BITS:
+        # One level above leaves: insert tail_node directly as new child
+        if n_children >= RRB_BRANCH_FACTOR:
+            # No room — signal overflow
+            return nil
+        val new_children = rrb_array_push(children, tail_node)
+        return rrb_branch(new_children, nil)
+
+    # Deeper levels: try to push into the rightmost child
+    val rightmost = children[n_children - 1]
+    val new_rightmost = rrb_push_tail(rightmost, tail_node, shift - RRB_BITS)
+
+    if new_rightmost != nil:
+        # Successfully pushed into existing subtree
+        val new_children = rrb_array_replace(children, n_children - 1, new_rightmost)
+        return rrb_branch(new_children, nil)
+
+    # Rightmost subtree is full — create a new path and add as sibling
+    if n_children >= RRB_BRANCH_FACTOR:
+        # This level is also full — signal overflow
+        return nil
+    val new_path = rrb_new_path(shift - RRB_BITS, tail_node)
+    val new_children = rrb_array_push(children, new_path)
+    rrb_branch(new_children, nil)
+
+# ============================================================================
+# Tree Mutation — Pop Tail
+# ============================================================================
+
+# Remove the rightmost leaf from the tree.
+# Returns a new tree root, or nil if the tree becomes empty.
+#
+# shift: the current depth's bit offset (root shift)
+fn rrb_pop_tail(node, shift: i64):
+    if node == nil:
+        return nil
+
+    val tag = node[0]
+
+    if tag == RRB_NODE_LEAF:
+        # Should not be called directly on a leaf by PersistentVec;
+        # the tail is managed separately. But handle gracefully.
+        return nil
+
+    # Branch node
+    val children = node[1]
+    val n_children = children.len()
+
+    if shift == RRB_BITS:
+        # One level above leaves: remove the last child
+        if n_children <= 1:
+            return nil
+        val new_children = rrb_array_pop(children)
+        return rrb_branch(new_children, nil)
+
+    # Deeper levels: recurse into rightmost child
+    val rightmost = children[n_children - 1]
+    val new_rightmost = rrb_pop_tail(rightmost, shift - RRB_BITS)
+
+    if new_rightmost == nil:
+        # Rightmost subtree is now empty — remove it
+        if n_children <= 1:
+            return nil
+        val new_children = rrb_array_pop(children)
+        return rrb_branch(new_children, nil)
+
+    # Rightmost subtree shrank but still has children
+    val new_children = rrb_array_replace(children, n_children - 1, new_rightmost)
+    rrb_branch(new_children, nil)
+
+# ============================================================================
+# Tree Traversal — Get Rightmost Leaf
+# ============================================================================
+
+# Retrieve the rightmost leaf node from the tree.
+# Used by PersistentVec.pop to extract the new tail.
+fn rrb_rightmost_leaf(node):
+    if node == nil:
+        return nil
+
+    val tag = node[0]
+
+    if tag == RRB_NODE_LEAF:
+        return node
+
+    # Branch: follow rightmost child
+    val children = node[1]
+    val n_children = children.len()
+    val rightmost = children[n_children - 1]
+    rrb_rightmost_leaf(rightmost)
+
+# ============================================================================
+# Tree Traversal — Collect All Elements
+# ============================================================================
+
+# Collect all elements from the tree into a flat output array.
+# Appends to the provided `out` array (mutable).
+fn rrb_collect_elements(node, out):
+    if node == nil:
+        return 0
+
+    val tag = node[0]
+
+    if tag == RRB_NODE_LEAF:
+        val items = node[1]
+        var i = 0
+        val n = items.len()
+        while i < n:
+            out.push(items[i])
+            i = i + 1
+        return 0
+
+    if tag == RRB_NODE_BRANCH:
+        val children = node[1]
+        var i = 0
+        val n = children.len()
+        while i < n:
+            rrb_collect_elements(children[i], out)
+            i = i + 1
+        return 0
+
+    0
+
+# Count total elements in a tree node (recursive).
+fn rrb_count(node) -> i64:
+    if node == nil:
+        return 0
+
+    val tag = node[0]
+
+    if tag == RRB_NODE_LEAF:
+        return node[1].len()
+
+    if tag == RRB_NODE_BRANCH:
+        val children = node[1]
+        var total = 0
+        var i = 0
+        val n = children.len()
+        while i < n:
+            total = total + rrb_count(children[i])
+            i = i + 1
+        return total
+
+    0
+
+# ============================================================================
+# Exports
+# ============================================================================
+

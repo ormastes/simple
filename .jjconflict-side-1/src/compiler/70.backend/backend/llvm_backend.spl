@@ -1,0 +1,448 @@
+# LLVM Backend
+#
+# LLVM-based code generation for the Simple compiler.
+# Provides:
+# - 32-bit architecture support (i686, armv7, riscv32)
+# - Full optimization pipeline
+# - Native code generation
+# - Cross-compilation support
+#
+# Refactored: Split into submodules for modularity:
+# - llvm_target.spl: Target triple and CPU configuration
+# - llvm_ir_builder.spl: Optimization passes, IR builder, MIR→LLVM translation
+# - llvm_backend_tools.spl: CLI tool finders, IR-to-object, WASM support
+#
+# Usage:
+#   val backend = LlvmBackend.create(target, opt_level)
+#   val result = backend.compile_module(mir_module)
+
+use compiler.mir.mir_data.*
+use compiler.backend.backend_api.*
+use compiler.backend.backend.backend_types.{CompiledModule, CompiledSymbol, CompiledSymbolKind, CodegenTarget, OptimizationLevel}
+use compiler.backend.llvm_target.{LlvmTargetTriple, LlvmTargetConfig}
+use compiler.backend.llvm_passes.{LlvmPass, passes_for_level}
+use compiler.backend.llvm_ir_builder.{LlvmIRBuilder}
+use compiler.backend.mir_to_llvm.{MirToLlvm}
+use compiler.mir_opt.mod.{optimize_module, OptLevel}
+use app.io.mod (shell, file_write, file_delete, file_exists, getpid, time_now_unix_micros)
+use compiler.backend.backend.runtime_compiler.{_get_temp_dir}
+
+# Import tools from split module
+use compiler.backend.llvm_backend_tools.{LlvmObjectCode, find_llc, find_opt, opt_available, llc_available}
+use compiler.backend.llvm_backend_tools.{find_wasm_ld, find_wasm_opt, find_wasi_sysroot}
+use compiler.backend.llvm_backend_tools.{extract_symbols_nm, compile_ir_to_object, compile_ir_to_wasm}
+use compiler.backend.llvm_backend_tools.{generate_wasm_runtime_declarations, to_mir_opt_level}
+
+# FFI for reading files (object code + optimized IR)
+extern fn rt_file_read_bytes(path: text) -> [u8]
+extern fn rt_file_read_text(path: text) -> text
+
+# ============================================================================
+# LLVM Backend
+# ============================================================================
+
+class LlvmBackend:
+    """
+    LLVM-based compilation backend with modern CPU defaults.
+
+    Defaults to x86-64-v3 (Haswell, 2015+) for x86_64 targets, which enables:
+    - AVX2 (256-bit SIMD) for 2-3x vectorization speedup
+    - FMA (fused multiply-add) for better numerical code
+    - BMI1/BMI2 (bit manipulation) for faster bit operations
+
+    Use with_cpu_override() or compatibility_build() for older CPUs.
+    Use create_baremetal() for bare-metal/embedded targets (no OS, no stdlib).
+    """
+    target: CodegenTarget
+    opt_level: OptimizationLevel
+    cpu_override: text?        # Override CPU (e.g., "x86-64" for compat)
+    emit_llvm_ir: bool
+    emit_assembly: bool
+    debug_info: bool
+    bare_metal: bool           # Bare-metal mode (no OS, no stdlib)
+
+    static fn create(target: CodegenTarget, opt_level: OptimizationLevel) -> LlvmBackend:
+        """Create backend with default CPU selection (x86-64-v3 for x86_64)."""
+        LlvmBackend(
+            target: target,
+            opt_level: opt_level,
+            cpu_override: nil,  # Auto-select based on target
+            emit_llvm_ir: false,
+            emit_assembly: false,
+            debug_info: false,
+            bare_metal: false
+        )
+
+    static fn create_baremetal(target: CodegenTarget, opt_level: OptimizationLevel) -> LlvmBackend:
+        """
+        Create backend for bare-metal/embedded targets.
+
+        Bare-metal mode:
+        - No OS (uses -none target triple)
+        - No stdlib (no libc, no runtime)
+        - Custom startup code (_start entry point)
+        - Volatile operations for MMIO
+        - Interrupt handlers supported
+
+        Use for: embedded systems, kernels, bootloaders, firmware
+        """
+        LlvmBackend(
+            target: target,
+            opt_level: opt_level,
+            cpu_override: nil,
+            emit_llvm_ir: false,
+            emit_assembly: false,
+            debug_info: true,    # Enable debug info for bare-metal (helps with GDB)
+            bare_metal: true
+        )
+
+    static fn compatibility_build(target: CodegenTarget, opt_level: OptimizationLevel) -> LlvmBackend:
+        """
+        Create backend for maximum compatibility (old CPUs).
+
+        For x86_64, uses x86-64 baseline (2003+) instead of x86-64-v3 (2015+).
+        Slower but works on older hardware.
+        """
+        val cpu_compat = match target:
+            case CodegenTarget.X86_64: "x86-64"          # Baseline, no AVX
+            case CodegenTarget.X86: "i686"               # 32-bit baseline
+            case CodegenTarget.AArch64: "generic"        # Generic ARM64
+            case CodegenTarget.Arm: "generic"            # Generic ARM32
+            case CodegenTarget.Riscv64: "generic-rv64"   # Generic RISC-V 64
+            case CodegenTarget.Riscv32: "generic-rv32"   # Generic RISC-V 32
+            case _: nil                                  # Use default
+
+        LlvmBackend(
+            target: target,
+            opt_level: opt_level,
+            cpu_override: cpu_compat,
+            emit_llvm_ir: false,
+            emit_assembly: false,
+            debug_info: false,
+            bare_metal: false
+        )
+
+    static fn create_wasm(opt_level: OptimizationLevel) -> LlvmBackend:
+        """Create backend for WASM compilation via LLVM.
+
+        Uses wasm32-wasi target triple. Compiles MIR -> LLVM IR -> .wasm
+        via llc + wasm-ld pipeline.
+        """
+        LlvmBackend(
+            target: CodegenTarget.Wasm32,
+            opt_level: opt_level,
+            cpu_override: Some("generic"),
+            emit_llvm_ir: false,
+            emit_assembly: false,
+            debug_info: false,
+            bare_metal: false
+        )
+
+    static fn default_backend() -> LlvmBackend:
+        """Default backend (Host target, Speed optimization, x86-64-v3 on x86_64)."""
+        LlvmBackend.create(CodegenTarget.Host, OptimizationLevel.Speed)
+
+    fn with_cpu_override(cpu: text) -> LlvmBackend:
+        """Override target CPU (e.g., 'x86-64', 'haswell', 'skylake')."""
+        LlvmBackend(
+            target: self.target,
+            opt_level: self.opt_level,
+            cpu_override: Some(cpu),
+            emit_llvm_ir: self.emit_llvm_ir,
+            emit_assembly: self.emit_assembly,
+            debug_info: self.debug_info
+        )
+
+    fn with_llvm_ir() -> LlvmBackend:
+        """Enable LLVM IR output."""
+        LlvmBackend(
+            target: self.target,
+            opt_level: self.opt_level,
+            cpu_override: self.cpu_override,
+            emit_llvm_ir: true,
+            emit_assembly: self.emit_assembly,
+            debug_info: self.debug_info
+        )
+
+    fn with_assembly() -> LlvmBackend:
+        """Enable assembly output."""
+        LlvmBackend(
+            target: self.target,
+            opt_level: self.opt_level,
+            cpu_override: self.cpu_override,
+            emit_llvm_ir: self.emit_llvm_ir,
+            emit_assembly: true,
+            debug_info: self.debug_info
+        )
+
+    fn with_debug_info() -> LlvmBackend:
+        """Enable debug information (DWARF)."""
+        LlvmBackend(
+            target: self.target,
+            opt_level: self.opt_level,
+            cpu_override: self.cpu_override,
+            emit_llvm_ir: self.emit_llvm_ir,
+            emit_assembly: self.emit_assembly,
+            debug_info: true
+        )
+
+    fn get_target_config() -> LlvmTargetConfig:
+        """Get effective target configuration."""
+        LlvmTargetConfig.for_target(self.target, self.cpu_override)
+
+    fn optimize_ir(ir_path: text, output_path: text) -> Result<text, text>:
+        """Run LLVM optimizer on IR file."""
+        val opt_tool = find_opt()
+        if opt_tool == "":
+            return Err("LLVM opt not found")
+        val opt_flag = match self.opt_level:
+            case Debug: "-O0"
+            case Size: "-Os"
+            case Speed: "-O2"
+            case Aggressive: "-O3"
+            case _: "-O0"
+        val (opt_out, opt_err, opt_code) = shell("{opt_tool} {opt_flag} -S {ir_path} -o {output_path}")
+        if opt_code != 0:
+            Err("opt failed: {opt_err}")
+        else:
+            Ok(output_path)
+
+    fn compile_to_wasm(module: MirModule, output_path: text):
+        """Compile a MIR module to WASM via LLVM pipeline.
+
+        Returns Ok(output_path) on success, Err(message) on failure.
+        """
+        val config = LlvmTargetConfig.for_target(CodegenTarget.Wasm32, self.cpu_override)
+
+        # Run MIR optimization passes
+        val mir_opt_level = to_mir_opt_level(self.opt_level)
+        var optimized_module = optimize_module(module, mir_opt_level)
+
+        # Translate MIR to LLVM IR
+        var translator = MirToLlvm.create(optimized_module.name, CodegenTarget.Wasm32, self.cpu_override)
+
+        # Add WASM runtime declarations
+        val runtime_decls = generate_wasm_runtime_declarations(CodegenTarget.Wasm32)
+        var llvm_ir = runtime_decls + "\n" + "\n"
+        llvm_ir = llvm_ir + translator.translate_module(optimized_module)
+
+        # Compile IR to WASM
+        compile_ir_to_wasm(llvm_ir, config, self.opt_level, output_path)
+
+    fn compile_module(module: MirModule):
+        """Compile a MIR module using LLVM."""
+        val start_time = time_now_unix_micros()
+
+        # Get target configuration (includes CPU selection)
+        val config = if self.bare_metal:
+            LlvmTargetConfig.for_target_baremetal(self.target, self.cpu_override)
+        else:
+            LlvmTargetConfig.for_target(self.target, self.cpu_override)
+
+        # Run MIR optimization passes before LLVM IR emission
+        val mir_opt_level = to_mir_opt_level(self.opt_level)
+        var optimized_module = optimize_module(module, mir_opt_level)
+
+        # Translate MIR to LLVM IR
+        var translator = if self.bare_metal:
+            MirToLlvm.create_baremetal(optimized_module.name, self.target, self.cpu_override)
+        else:
+            MirToLlvm.create(optimized_module.name, self.target, self.cpu_override)
+
+        # Add runtime FFI declarations
+        val runtime_decls = generate_runtime_declarations_for_target(self.target)
+        var llvm_ir = runtime_decls + "\n" + "\n"
+        llvm_ir = llvm_ir + translator.translate_module(optimized_module)
+
+        # Run LLVM opt if available (optimize IR before llc)
+        val opt_tool = find_opt()
+        if opt_tool.?:
+            val pid = getpid()
+            val tmp_dir = _get_temp_dir()
+            val opt_ir_path = "{tmp_dir}/simple_opt_{pid}.ll"
+            val opt_out_path = "{tmp_dir}/simple_opt_{pid}_out.ll"
+            if file_write(opt_ir_path, llvm_ir):
+                val opt_result = self.optimize_ir(opt_ir_path, opt_out_path)
+                if opt_result.is_ok():
+                    val optimized_ir = rt_file_read_text(opt_out_path) ?? ""
+                    if optimized_ir != "":
+                        llvm_ir = optimized_ir
+                file_delete(opt_ir_path)
+                file_delete(opt_out_path)
+
+        # Compile IR to object code
+        var object_code: [u8]? = nil
+        var symbols: [CompiledSymbol] = []
+        if not self.emit_llvm_ir:  # Skip object generation if only IR requested
+            val obj_result = compile_ir_to_object(llvm_ir, config, self.opt_level)
+            if obj_result.is_err():
+                return Err(obj_result.unwrap_err())
+            val obj = obj_result.unwrap()
+            object_code = Some(obj.bytes)
+            symbols = obj.symbols
+
+        val end_time = time_now_unix_micros()
+        val compile_time = (end_time - start_time) / 1000  # Convert to ms
+
+        Ok(LlvmCompileResult(
+            module_name: module.name,
+            llvm_ir: if self.emit_llvm_ir: Some(llvm_ir) else: nil,
+            assembly: if self.emit_assembly: Some("; LLVM generated assembly") else: nil,
+            object_code: object_code,
+            symbols: symbols,
+            compile_time_ms: compile_time
+        ))
+
+struct LlvmCompileResult:
+    """Result of LLVM compilation."""
+    module_name: text
+    llvm_ir: text?
+    assembly: text?
+    object_code: [u8]?
+    symbols: [CompiledSymbol]
+    compile_time_ms: i64
+
+impl LlvmCompileResult:
+    fn has_object_code() -> bool:
+        self.object_code.?
+
+    fn to_compiled_module() -> CompiledModule:
+        """Convert LLVM compile result to standard CompiledModule format."""
+        CompiledModule(
+            name: self.module_name,
+            object_code: self.object_code,
+            assembly: self.assembly,
+            llvm_ir: self.llvm_ir,
+            mir_dump: nil,
+            symbols: self.symbols,
+            compile_time_ms: self.compile_time_ms
+        )
+
+# ============================================================================
+# Runtime FFI Declarations
+# ============================================================================
+
+fn generate_runtime_declarations() -> text:
+    """Generate runtime declarations for the host target (default 64-bit)."""
+    generate_runtime_declarations_for_target(CodegenTarget.Host)
+
+fn generate_runtime_declarations_for_target(target: CodegenTarget) -> text:
+    """
+    Generate LLVM IR declarations for runtime functions.
+
+    These declarations allow compiled code to call runtime functions
+    for I/O, memory management, strings, collections, etc.
+    Parameterized by target for correct intrinsic types on 32-bit targets.
+    Dispatches to WASM-specific declarations for Wasm32/Wasm64 targets.
+    """
+    match target:
+        case Wasm32 | Wasm64:
+            return generate_wasm_runtime_declarations(target)
+        case _:
+            ()
+
+    val size_ty = if target.is_32bit(): "i32" else: "i64"
+    val int_ty = if target.is_32bit(): "i32" else: "i64"
+    var decls = "; Runtime function declarations\n"
+
+    # File I/O
+    decls = decls + "declare ptr @rt_file_open(ptr, ptr)\n"
+    decls = decls + "declare void @rt_file_close(ptr)\n"
+    decls = decls + "declare ptr @rt_file_read_text(ptr)\n"
+    decls = decls + "declare i1 @rt_file_write(ptr, ptr)\n"
+    decls = decls + "declare ptr @rt_file_read_bytes(ptr)\n"
+    decls = decls + "declare i1 @rt_file_write_bytes(ptr, ptr, i64)\n"
+    decls = decls + "declare i1 @rt_file_exists(ptr)\n"
+    decls = decls + "declare i1 @rt_file_delete(ptr)\n"
+    decls = decls + "declare i1 @rt_file_copy(ptr, ptr)\n"
+    decls = decls + "declare i1 @rt_file_move(ptr, ptr)\n"
+    decls = decls + "declare i64 @rt_file_size(ptr)\n"
+    decls = decls + "declare i1 @rt_file_lock(ptr)\n"
+    decls = decls + "declare i1 @rt_file_unlock(ptr)\n"
+
+    # Directory operations
+    decls = decls + "declare i1 @rt_dir_create(ptr)\n"
+    decls = decls + "declare i1 @rt_dir_delete(ptr)\n"
+    decls = decls + "declare i1 @rt_dir_exists(ptr)\n"
+    decls = decls + "declare ptr @rt_dir_list(ptr)\n"
+
+    # Process operations
+    decls = decls + "declare ptr @rt_process_spawn(ptr, ptr, i64)\n"
+    decls = decls + "declare i64 @rt_process_wait(ptr)\n"
+    decls = decls + "declare ptr @rt_getenv(ptr)\n"
+    decls = decls + "declare i1 @rt_setenv(ptr, ptr)\n"
+    decls = decls + "declare i64 @rt_getpid()\n"
+    decls = decls + "declare void @rt_exit(i64)\n"
+
+    # Memory operations
+    decls = decls + "declare ptr @rt_alloc(i64)\n"
+    decls = decls + "declare ptr @rt_realloc(ptr, i64)\n"
+    decls = decls + "declare void @rt_free(ptr)\n"
+    decls = decls + "declare ptr @rt_memcpy(ptr, ptr, i64)\n"
+    decls = decls + "declare ptr @rt_memset(ptr, i8, i64)\n"
+    decls = decls + "declare i64 @rt_memcmp(ptr, ptr, i64)\n"
+
+    # String operations
+    decls = decls + "declare i64 @rt_strlen(ptr)\n"
+    decls = decls + "declare ptr @rt_strcat(ptr, ptr)\n"
+    decls = decls + "declare ptr @rt_substr(ptr, i64, i64)\n"
+    decls = decls + "declare i64 @rt_strfind(ptr, ptr)\n"
+    decls = decls + "declare ptr @rt_strreplace(ptr, ptr, ptr)\n"
+    decls = decls + "declare ptr @rt_strsplit(ptr, ptr)\n"
+    decls = decls + "declare i64 @rt_strcmp(ptr, ptr)\n"
+
+    # Array/Collection operations
+    decls = decls + "declare ptr @rt_array_new(i64)\n"
+    decls = decls + "declare i64 @rt_array_len(ptr)\n"
+    decls = decls + "declare ptr @rt_array_get(ptr, i64)\n"
+    decls = decls + "declare void @rt_array_set(ptr, i64, ptr)\n"
+    decls = decls + "declare ptr @rt_array_push(ptr, ptr)\n"
+    decls = decls + "declare ptr @rt_array_pop(ptr)\n"
+
+    # Dict/Map operations
+    decls = decls + "declare ptr @rt_dict_new()\n"
+    decls = decls + "declare ptr @rt_dict_get(ptr, ptr)\n"
+    decls = decls + "declare void @rt_dict_set(ptr, ptr, ptr)\n"
+    decls = decls + "declare i1 @rt_dict_contains(ptr, ptr)\n"
+    decls = decls + "declare i64 @rt_dict_len(ptr)\n"
+
+    # I/O operations
+    decls = decls + "declare void @rt_print(ptr)\n"
+    decls = decls + "declare void @rt_println(ptr)\n"
+    decls = decls + "declare ptr @rt_readline()\n"
+
+    # Time operations
+    decls = decls + "declare i64 @rt_time_now_unix()\n"
+    decls = decls + "declare i64 @rt_time_now_unix_micros()\n"
+    decls = decls + "declare void @rt_sleep_ms(i64)\n"
+
+    # Error handling
+    decls = decls + "declare void @rt_panic(ptr)\n"
+    decls = decls + "declare void @abort()\n"
+
+    # Math operations
+    decls = decls + "declare double @rt_sin(double)\n"
+    decls = decls + "declare double @rt_cos(double)\n"
+    decls = decls + "declare double @rt_sqrt(double)\n"
+    decls = decls + "declare double @rt_pow(double, double)\n"
+
+    # Integer power
+    decls = decls + "declare {int_ty} @__simple_pow({int_ty}, {int_ty})\n"
+
+    # LLVM intrinsics (size type depends on target architecture)
+    decls = decls + "declare void @llvm.memcpy.p0.p0.{size_ty}(ptr, ptr, {size_ty}, i1)\n"
+    decls = decls + "declare void @llvm.memset.p0.{size_ty}(ptr, i8, {size_ty}, i1)\n"
+    decls = decls + "declare double @llvm.pow.f64(double, double)\n"
+    decls = decls + "declare float @llvm.pow.f32(float, float)\n"
+
+    decls
+
+# ============================================================================
+# Exports - includes re-exports from submodules for backward compatibility
+# ============================================================================
+
+# Re-export from llvm_target.spl
+
+# Re-export from llvm_passes.spl, llvm_ir_builder.spl, mir_to_llvm.spl
+
+# This module's exports

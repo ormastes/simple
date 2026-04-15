@@ -1,0 +1,60 @@
+#![allow(unnamed_duplicate_typed_args)]
+# Assistant Dashboard Task Tree Subview
+
+use app.dashboard.assistant_collectors.{AssistantDashboardSnapshot, AssistantSession}
+use app.dashboard.views.assistant_common.{
+    assistant_append_tree_lines, assistant_child_sessions, assistant_contains_text,
+    assistant_html_badge, assistant_html_text, assistant_root_sessions,
+    assistant_short_id, assistant_short_text, assistant_state_label,
+    assistant_session_badge, assistant_session_summary_html, assistant_tree_depth_limit,
+    assistant_tree_depth_limit, assistant_session_summary
+}
+use app.ui.render.html.{html_escape}
+use app.ui.render.ansi.{DIM, RESET}
+use app.ui.render.types.{RenderConfig}
+
+fn assistant_tasks_text(snapshot: AssistantDashboardSnapshot, config: RenderConfig) -> text:
+    var out = "{BOLD}Child Task Tree{RESET}\n"
+    val roots = assistant_root_sessions(snapshot)
+    if roots.len() == 0:
+        out = "{out}  No task tree available.\n"
+        return out
+
+    var lines: [text] = []
+    val depth_limit = assistant_tree_depth_limit(config)
+    for root in roots:
+        assistant_append_tree_lines(snapshot, root, 0, depth_limit, lines, [])
+    for line in lines:
+        out = "{out}{line}\n"
+    out
+
+fn assistant_tasks_html(snapshot: AssistantDashboardSnapshot, config: RenderConfig) -> text:
+    val roots = assistant_root_sessions(snapshot)
+    if roots.len() == 0:
+        return "<div class=\"card\" style=\"margin-top:12px\"><div class=\"section-title\">Child Task Tree</div><div class=\"empty-state\">No task tree available.</div></div>"
+
+    var h = "<div class=\"card\" style=\"margin-top:12px\">"
+    h = "{h}<div class=\"section-title\">Child Task Tree <span class=\"count\">{roots.len()} roots</span></div>"
+    val depth_limit = assistant_tree_depth_limit(config)
+    for root in roots:
+        h = "{h}{assistant_tree_node_html(snapshot, root, 0, depth_limit, [])}"
+    h = "{h}</div>"
+    h
+
+fn assistant_tree_node_html(snapshot: AssistantDashboardSnapshot, session: AssistantSession, depth: i64, depth_limit: i64, visited: [text]) -> text:
+    if depth > depth_limit:
+        return ""
+    if assistant_contains_text(visited, session.session_id):
+        return ""
+
+    var next_visited = visited
+    next_visited.push(session.session_id)
+
+    var h = "<div class=\"tree-node\" style=\"margin-left:{depth * 18}px\">"
+    h = "{h}<div class=\"tree-line\">{assistant_session_badge(session.session_state)} <strong>{assistant_short_text(session.title, 48)}</strong> <span class=\"muted\">{assistant_short_id(session.session_id)}</span></div>"
+    h = "{h}<div class=\"tree-meta\">{assistant_session_summary_html(session)}</div>"
+    val children = assistant_child_sessions(snapshot, session)
+    for child in children:
+        h = "{h}{assistant_tree_node_html(snapshot, child, depth + 1, depth_limit, next_visited)}"
+    h = "{h}</div>"
+    h

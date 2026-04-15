@@ -1,0 +1,573 @@
+@allow(star_import)
+# Terminal & Power Control - Core Type Definitions
+#
+# Defines terminal connection kinds (SSH, Telnet, T32 SWD, Relay),
+# configuration structs, connection state, execution results,
+# and power control types.
+#
+# Used by: terminal implementations, power controllers, MCP tools
+
+# ============================================================================
+# Terminal Kind Constants
+# ============================================================================
+
+val TERM_KIND_SSH: i64 = 0
+val TERM_KIND_TELNET: i64 = 1
+val TERM_KIND_T32_SWD: i64 = 2
+val TERM_KIND_RELAY: i64 = 3
+
+# ============================================================================
+# Power State Constants
+# ============================================================================
+
+val POWER_STATE_UNKNOWN: i64 = 0
+val POWER_STATE_ON: i64 = 1
+val POWER_STATE_OFF: i64 = 2
+
+# ============================================================================
+# Terminal Configuration
+# ============================================================================
+
+struct TerminalConfig:
+    """Configuration for a terminal connection.
+
+    Fields common to all kinds:
+        kind: Terminal kind (TERM_KIND_SSH, TERM_KIND_TELNET, etc.)
+        name: Human-readable name for this terminal
+        host: Remote host address
+        port: Remote port number
+
+    SSH-specific:
+        username: SSH username
+        auth_method: "password" | "pubkey" | "agent" | "none"
+        credential: Password or "encrypted:<base64>" for encrypted storage
+        key_path: Path to SSH private key (for pubkey auth)
+
+    T32 SWD-specific:
+        t32_host: TRACE32 API host (default: localhost)
+        t32_port: TRACE32 API port (default: 20000)
+        channel: T32 TERM channel name (default: "TERM.A")
+
+    Relay-specific:
+        script_path: Path to .shs relay script
+    """
+    kind: i64
+    name: text
+    host: text
+    port: i64
+    username: text
+    auth_method: text
+    credential: text
+    key_path: text
+    t32_host: text
+    t32_port: i64
+    channel: text
+    script_path: text
+
+# ============================================================================
+# Terminal Connection State
+# ============================================================================
+
+struct TerminalConnection:
+    """Active terminal connection state.
+
+    Tracks the connection lifecycle including handle management.
+
+    Fields:
+        id: Unique connection ID (assigned by connection manager)
+        kind: Terminal kind matching the config
+        config: Original configuration used to establish connection
+        connected: Whether the connection is currently active
+        session_handle: SSH session handle or telnet socket descriptor
+        channel_handle: SSH channel handle (0 if not applicable)
+    """
+    id: i64
+    kind: i64
+    config: TerminalConfig
+    connected: bool
+    session_handle: i64
+    channel_handle: i64
+
+# ============================================================================
+# Terminal Execution Result
+# ============================================================================
+
+struct TerminalExecResult:
+    """Result from executing a command on a terminal.
+
+    Fields:
+        exit_code: Process exit code (0 = success)
+        stdout: Standard output captured as text
+        stderr: Standard error captured as text
+        duration_ms: Execution wall-clock time in milliseconds
+    """
+    exit_code: i64
+    stdout: text
+    stderr: text
+    duration_ms: i64
+
+# ============================================================================
+# Power Configuration
+# ============================================================================
+
+struct PowerConfig:
+    """Configuration for power control of a target device.
+
+    Supports three power control kinds:
+    - "t32": TRACE32 probe (SYStem.Up/Down/RESetTarget)
+    - "relay": External relay via .shs scripts
+    - "host": Remote PC via SSH + Wake-on-LAN
+
+    Fields common to all kinds:
+        kind: "t32" | "relay" | "host"
+        name: Human-readable name for this power target
+
+    Host/SSH-specific:
+        host: Remote host address
+        port: SSH port (for host kind)
+        username: SSH username
+        auth_method: "password" | "pubkey" | "agent" | "none"
+        credential: Password or encrypted credential
+        key_path: Path to SSH private key
+        mac_address: MAC address for Wake-on-LAN (format: AA:BB:CC:DD:EE:FF)
+
+    T32-specific:
+        t32_host: TRACE32 API host
+        t32_port: TRACE32 API port
+
+    Relay-specific (each maps to a .shs script):
+        on_script: Script to power on
+        off_script: Script to power off
+        toggle_script: Script to toggle power
+        reset_script: Script to reset
+        state_script: Script to query power state (prints "on" or "off")
+        relay_device: Serial device path (e.g., "/dev/ttyACM0"), empty for auto-detect
+        relay_baud: Serial baud rate (e.g., "9600"), empty for default
+        relay_usb_vid: USB vendor ID for auto-detect (e.g., "1a86"), empty for default
+        relay_usb_pid: USB product ID for auto-detect (e.g., "7523"), empty for default
+        relay_cmd_on: Custom serial ON command, empty for default
+        relay_cmd_off: Custom serial OFF command, empty for default
+        relay_cmd_state: Custom serial STATE command, empty for default
+        relay_cmd_toggle: Custom serial TOGGLE command, empty for default
+        relay_reset_delay: Seconds between off/on during reset, empty for default (2)
+    """
+    kind: text
+    name: text
+    host: text
+    port: i64
+    username: text
+    auth_method: text
+    credential: text
+    key_path: text
+    mac_address: text
+    t32_host: text
+    t32_port: i64
+    on_script: text
+    off_script: text
+    toggle_script: text
+    reset_script: text
+    state_script: text
+    relay_device: text
+    relay_baud: text
+    relay_usb_vid: text
+    relay_usb_pid: text
+    relay_cmd_on: text
+    relay_cmd_off: text
+    relay_cmd_state: text
+    relay_cmd_toggle: text
+    relay_reset_delay: text
+
+# ============================================================================
+# Power State
+# ============================================================================
+
+struct PowerState:
+    """Current power state of a target device.
+
+    Fields:
+        state: Power state constant (POWER_STATE_UNKNOWN/ON/OFF)
+        label: Human-readable state label
+        timestamp: Unix timestamp when state was queried
+    """
+    state: i64
+    label: text
+    timestamp: i64
+
+# ============================================================================
+# Helper Functions
+# ============================================================================
+
+fn term_kind_name(kind: i64) -> text:
+    """Convert terminal kind constant to human-readable name.
+
+    Args:
+        kind: Terminal kind constant (TERM_KIND_SSH, etc.)
+
+    Returns:
+        Name string ("ssh", "telnet", "t32_swd", "relay", or "unknown")
+    """
+    if kind == TERM_KIND_SSH:
+        return "ssh"
+    if kind == TERM_KIND_TELNET:
+        return "telnet"
+    if kind == TERM_KIND_T32_SWD:
+        return "t32_swd"
+    if kind == TERM_KIND_RELAY:
+        return "relay"
+    "unknown"
+
+fn power_state_name(state: i64) -> text:
+    """Convert power state constant to human-readable name.
+
+    Args:
+        state: Power state constant (POWER_STATE_UNKNOWN, etc.)
+
+    Returns:
+        Name string ("unknown", "on", "off")
+    """
+    if state == POWER_STATE_ON:
+        return "on"
+    if state == POWER_STATE_OFF:
+        return "off"
+    "unknown"
+
+# ============================================================================
+# Factory Functions - Terminal Configs
+# ============================================================================
+
+fn make_ssh_config(name: text, host: text, port: i64, username: text, auth_method: text, credential: text) -> TerminalConfig:
+    """Create an SSH terminal configuration.
+
+    Args:
+        name: Human-readable terminal name
+        host: SSH server host
+        port: SSH server port (usually 22)
+        username: SSH username
+        auth_method: "password" | "pubkey" | "agent"
+        credential: Password or encrypted credential (for password auth)
+
+    Returns:
+        TerminalConfig with SSH kind
+
+    Example:
+        val cfg = make_ssh_config("my_host", "192.168.1.100", 22, "admin", "password", "secret")
+    """
+    TerminalConfig(
+        kind: TERM_KIND_SSH,
+        name: name,
+        host: host,
+        port: port,
+        username: username,
+        auth_method: auth_method,
+        credential: credential,
+        key_path: "",
+        t32_host: "",
+        t32_port: 0,
+        channel: "",
+        script_path: ""
+    )
+
+fn make_ssh_pubkey_config(name: text, host: text, port: i64, username: text, key_path: text) -> TerminalConfig:
+    """Create an SSH terminal configuration with public key auth.
+
+    Args:
+        name: Human-readable terminal name
+        host: SSH server host
+        port: SSH server port (usually 22)
+        username: SSH username
+        key_path: Path to SSH private key file
+
+    Returns:
+        TerminalConfig with SSH kind and pubkey auth
+    """
+    TerminalConfig(
+        kind: TERM_KIND_SSH,
+        name: name,
+        host: host,
+        port: port,
+        username: username,
+        auth_method: "pubkey",
+        credential: "",
+        key_path: key_path,
+        t32_host: "",
+        t32_port: 0,
+        channel: "",
+        script_path: ""
+    )
+
+fn make_telnet_config(name: text, host: text, port: i64) -> TerminalConfig:
+    """Create a Telnet terminal configuration.
+
+    Args:
+        name: Human-readable terminal name
+        host: Telnet server host
+        port: Telnet server port (usually 23)
+
+    Returns:
+        TerminalConfig with Telnet kind
+    """
+    TerminalConfig(
+        kind: TERM_KIND_TELNET,
+        name: name,
+        host: host,
+        port: port,
+        username: "",
+        auth_method: "none",
+        credential: "",
+        key_path: "",
+        t32_host: "",
+        t32_port: 0,
+        channel: "",
+        script_path: ""
+    )
+
+fn make_t32_swd_config(name: text, t32_host: text, t32_port: i64, channel: text) -> TerminalConfig:
+    """Create a T32 SWD serial terminal configuration.
+
+    Args:
+        name: Human-readable terminal name
+        t32_host: TRACE32 API host (e.g., "localhost")
+        t32_port: TRACE32 API port (e.g., 20000)
+        channel: TERM channel name (e.g., "TERM.A")
+
+    Returns:
+        TerminalConfig with T32 SWD kind
+    """
+    TerminalConfig(
+        kind: TERM_KIND_T32_SWD,
+        name: name,
+        host: "",
+        port: 0,
+        username: "",
+        auth_method: "none",
+        credential: "",
+        key_path: "",
+        t32_host: t32_host,
+        t32_port: t32_port,
+        channel: channel,
+        script_path: ""
+    )
+
+fn make_relay_config(name: text, script_path: text) -> TerminalConfig:
+    """Create a Relay terminal configuration.
+
+    Args:
+        name: Human-readable terminal name
+        script_path: Path to .shs relay script
+
+    Returns:
+        TerminalConfig with Relay kind
+    """
+    TerminalConfig(
+        kind: TERM_KIND_RELAY,
+        name: name,
+        host: "",
+        port: 0,
+        username: "",
+        auth_method: "none",
+        credential: "",
+        key_path: "",
+        t32_host: "",
+        t32_port: 0,
+        channel: "",
+        script_path: script_path
+    )
+
+# ============================================================================
+# Factory Functions - Power Configs
+# ============================================================================
+
+fn make_power_config_t32(name: text, t32_host: text, t32_port: i64) -> PowerConfig:
+    """Create a T32 power control configuration.
+
+    Args:
+        name: Human-readable power target name
+        t32_host: TRACE32 API host
+        t32_port: TRACE32 API port
+
+    Returns:
+        PowerConfig with T32 kind
+    """
+    PowerConfig(
+        kind: "t32",
+        name: name,
+        host: "",
+        port: 0,
+        username: "",
+        auth_method: "",
+        credential: "",
+        key_path: "",
+        mac_address: "",
+        t32_host: t32_host,
+        t32_port: t32_port,
+        on_script: "",
+        off_script: "",
+        toggle_script: "",
+        reset_script: "",
+        state_script: "",
+        relay_device: "",
+        relay_baud: "",
+        relay_usb_vid: "",
+        relay_usb_pid: "",
+        relay_cmd_on: "",
+        relay_cmd_off: "",
+        relay_cmd_state: "",
+        relay_cmd_toggle: "",
+        relay_reset_delay: ""
+    )
+
+fn make_power_config_relay(name: text, on_script: text, off_script: text, toggle_script: text, reset_script: text, state_script: text, relay_device: text, relay_baud: text, relay_usb_vid: text, relay_usb_pid: text, relay_cmd_on: text, relay_cmd_off: text, relay_cmd_state: text, relay_cmd_toggle: text, relay_reset_delay: text) -> PowerConfig:
+    """Create a relay power control configuration.
+
+    Args:
+        name: Human-readable power target name
+        on_script: Path to power-on .shs script
+        off_script: Path to power-off .shs script
+        toggle_script: Path to power-toggle .shs script
+        reset_script: Path to reset .shs script
+        state_script: Path to state query .shs script
+        relay_device: Serial device path (empty for auto-detect)
+        relay_baud: Serial baud rate (empty for default 9600)
+        relay_usb_vid: USB vendor ID for auto-detect (empty for default)
+        relay_usb_pid: USB product ID for auto-detect (empty for default)
+        relay_cmd_on: Custom ON command (empty for default)
+        relay_cmd_off: Custom OFF command (empty for default)
+        relay_cmd_state: Custom STATE command (empty for default)
+        relay_cmd_toggle: Custom TOGGLE command (empty for default)
+        relay_reset_delay: Seconds between off/on during reset (empty for default 2)
+
+    Returns:
+        PowerConfig with relay kind
+    """
+    PowerConfig(
+        kind: "relay",
+        name: name,
+        host: "",
+        port: 0,
+        username: "",
+        auth_method: "",
+        credential: "",
+        key_path: "",
+        mac_address: "",
+        t32_host: "",
+        t32_port: 0,
+        on_script: on_script,
+        off_script: off_script,
+        toggle_script: toggle_script,
+        reset_script: reset_script,
+        state_script: state_script,
+        relay_device: relay_device,
+        relay_baud: relay_baud,
+        relay_usb_vid: relay_usb_vid,
+        relay_usb_pid: relay_usb_pid,
+        relay_cmd_on: relay_cmd_on,
+        relay_cmd_off: relay_cmd_off,
+        relay_cmd_state: relay_cmd_state,
+        relay_cmd_toggle: relay_cmd_toggle,
+        relay_reset_delay: relay_reset_delay
+    )
+
+fn make_power_config_host(name: text, host: text, port: i64, username: text, auth_method: text, credential: text, key_path: text, mac_address: text) -> PowerConfig:
+    """Create a host power control configuration.
+
+    Uses SSH for shutdown/reboot, Wake-on-LAN for power on, and
+    TCP probe for state detection.
+
+    Args:
+        name: Human-readable power target name
+        host: Remote host address
+        port: SSH port
+        username: SSH username
+        auth_method: "password" | "pubkey" | "agent"
+        credential: Password or encrypted credential
+        key_path: Path to SSH private key
+        mac_address: MAC address for Wake-on-LAN (AA:BB:CC:DD:EE:FF)
+
+    Returns:
+        PowerConfig with host kind
+    """
+    PowerConfig(
+        kind: "host",
+        name: name,
+        host: host,
+        port: port,
+        username: username,
+        auth_method: auth_method,
+        credential: credential,
+        key_path: key_path,
+        mac_address: mac_address,
+        t32_host: "",
+        t32_port: 0,
+        on_script: "",
+        off_script: "",
+        toggle_script: "",
+        reset_script: "",
+        state_script: "",
+        relay_device: "",
+        relay_baud: "",
+        relay_usb_vid: "",
+        relay_usb_pid: "",
+        relay_cmd_on: "",
+        relay_cmd_off: "",
+        relay_cmd_state: "",
+        relay_cmd_toggle: "",
+        relay_reset_delay: ""
+    )
+
+# ============================================================================
+# Factory Functions - State
+# ============================================================================
+
+fn make_power_state(state: i64, timestamp: i64) -> PowerState:
+    """Create a PowerState with auto-generated label.
+
+    Args:
+        state: Power state constant (POWER_STATE_UNKNOWN/ON/OFF)
+        timestamp: Unix timestamp when state was queried
+
+    Returns:
+        PowerState with label derived from state constant
+    """
+    PowerState(
+        state: state,
+        label: power_state_name(state),
+        timestamp: timestamp
+    )
+
+fn make_terminal_connection(id: i64, config: TerminalConfig) -> TerminalConnection:
+    """Create a new disconnected TerminalConnection.
+
+    Args:
+        id: Unique connection ID
+        config: Terminal configuration
+
+    Returns:
+        TerminalConnection in disconnected state
+    """
+    TerminalConnection(
+        id: id,
+        kind: config.kind,
+        config: config,
+        connected: false,
+        session_handle: 0,
+        channel_handle: 0
+    )
+
+fn make_exec_result(exit_code: i64, stdout: text, stderr: text, duration_ms: i64) -> TerminalExecResult:
+    """Create a terminal execution result.
+
+    Args:
+        exit_code: Process exit code
+        stdout: Standard output text
+        stderr: Standard error text
+        duration_ms: Execution duration in milliseconds
+
+    Returns:
+        TerminalExecResult
+    """
+    TerminalExecResult(
+        exit_code: exit_code,
+        stdout: stdout,
+        stderr: stderr,
+        duration_ms: duration_ms
+    )

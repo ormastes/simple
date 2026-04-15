@@ -1,0 +1,604 @@
+# Generator State Machine Transform
+#
+# Transforms generator function bodies containing Yield instructions into
+# stackless state machines (Rust async-style), enabling lazy evaluation.
+#
+# Before (eager generator):
+#   fn gen_body():
+#       yield 1
+#       yield 2
+#       yield 3
+#
+# After (state machine):
+#   fn gen_state_machine(state_ptr: i64) -> i64:
+#       val state = load(state_ptr)
+#       match state:
+#           case 0:  # Initial
+#               store(state_ptr + YIELD_OFFSET, 1)
+#               store(state_ptr, 1)   # next state
+#               return 0              # has_value = true
+#           case 1:
+#               store(state_ptr + YIELD_OFFSET, 2)
+#               store(state_ptr, 2)
+#               return 0
+#           case 2:
+#               store(state_ptr + YIELD_OFFSET, 3)
+#               store(state_ptr, 3)  # terminal state
+#               return 0
+#           case 3:
+#               return 1  # exhausted
+#
+# Algorithm:
+# 1. Find all Yield instructions in the function
+# 2. Compute live locals at each yield point
+# 3. Build state struct layout: { state: u32, yielded: RuntimeValue, locals... }
+# 4. Split function body at yield points into state segments
+# 5. Create dispatcher that switches on state
+# 6. Each segment restores locals from state, runs code, saves locals at yield
+
+use compiler.mir.mir_data.*
+use compiler.mir.mir.*
+use compiler.mir_opt.mod.{MirPass}
+
+# ============================================================================
+# Yield Point Analysis
+# ============================================================================
+
+struct YieldPoint:
+    """A yield point in a generator function.
+
+    Fields:
+        id: Sequential yield point ID (0, 1, 2, ...)
+        block_id: Block containing the Yield instruction
+        inst_index: Index of the Yield instruction within the block
+        yielded_operand: The value being yielded (nil for bare yield)
+        live_locals: Locals that are live across this yield point
+    """
+    id: i64
+    block_id: BlockId
+    inst_index: i64
+    yielded_operand: MirOperand?
+    live_locals: [LocalId]
+
+struct YieldAnalysis:
+    """Complete yield point analysis for a generator function.
+
+    Fields:
+        yield_points: Ordered list of yield points
+        total_states: Number of states (yields + 1 for initial + 1 for terminal)
+        all_live_locals: Union of all locals live across any yield point
+    """
+    yield_points: [YieldPoint]
+    total_states: i64
+    all_live_locals: [LocalId]
+
+# ============================================================================
+# Yield Analysis
+# ============================================================================
+
+fn analyze_yields(func: MirFunction) -> YieldAnalysis:
+    """Analyze a function to find all yield points and compute liveness.
+
+    Scans all blocks for Yield instructions and computes which locals
+    need to be preserved in the state struct.
+
+    Args:
+        func: Generator function to analyze
+
+    Returns:
+        YieldAnalysis with all yield points identified
+    """
+    var yield_points: [YieldPoint] = []
+    var next_id = 0
+
+    # Pass 1: Find all yield instructions
+    for block in func.blocks:
+        for i in 0..(block.instructions.len()):
+            val inst = block.instructions[i]
+            match inst.kind:
+                case Yield(value):
+                    val yp = YieldPoint(
+                        id: next_id,
+                        block_id: block.id,
+                        inst_index: i,
+                        yielded_operand: value,
+                        live_locals: []  # Will be computed below
+                    )
+                    yield_points = yield_points.push(yp)
+                    next_id = next_id + 1
+                case _:
+                    pass_do_nothing
+
+    if yield_points.len() == 0:
+        return YieldAnalysis(
+            yield_points: [],
+            total_states: 0,
+            all_live_locals: []
+        )
+
+    # Pass 2: Compute live locals at each yield point
+    # Conservative: all non-temp, non-return locals that are defined before
+    # the yield point are considered live across it
+    var updated_points: [YieldPoint] = []
+    var all_live_set = {}
+
+    for yp in yield_points:
+        val live = compute_live_at_yield(func, yp)
+        val updated = YieldPoint(..yp, live_locals: live)
+        updated_points = updated_points.push(updated)
+
+        for local in live:
+            all_live_set[local.id] = true
+
+    # Collect all live locals
+    var all_live: [LocalId] = []
+    for local in func.locals:
+        if all_live_set.contains_key(local.id.id):
+            all_live = all_live.push(local.id)
+
+    YieldAnalysis(
+        yield_points: updated_points,
+        total_states: yield_points.len() + 2,  # +1 initial, +1 terminal
+        all_live_locals: all_live
+    )
+
+fn compute_live_at_yield(func: MirFunction, yp: YieldPoint) -> [LocalId]:
+    """Compute locals that are live across a yield point.
+
+    A local is live across a yield point if:
+    1. It is defined (written) before the yield point
+    2. It is used (read) after the yield point
+
+    For simplicity, we use a conservative approximation:
+    all non-temp locals defined before the yield are considered live.
+    """
+    var live: [LocalId] = []
+    var defined_before = {}
+
+    # Find all definitions before this yield point
+    var found_yield = false
+    for block in func.blocks:
+        for i in 0..(block.instructions.len()):
+            val inst = block.instructions[i]
+
+            # Check if we've reached our yield point
+            if block.id.id == yp.block_id.id and i == yp.inst_index:
+                found_yield = true
+                break
+
+            # Track definitions
+            val dest = get_inst_dest_sm(inst)
+            if dest.?:
+                defined_before[dest.unwrap().id] = true
+
+        if found_yield:
+            break
+
+    # Include function arguments as implicitly defined before any yield
+    for local in func.locals:
+        match local.kind:
+            case Arg(_):
+                defined_before[local.id.id] = true
+            case _:
+                pass_do_nothing
+
+    # Conservatively: all defined-before locals that are also function locals
+    # (not temps with no name) are live
+    for local in func.locals:
+        if defined_before.contains_key(local.id.id):
+            match local.kind:
+                case Arg(_):
+                    live = live.push(local.id)
+                case Var:
+                    live = live.push(local.id)
+                case _:
+                    # Skip Return and anonymous Temp locals
+                    if local.name.?:
+                        live = live.push(local.id)
+    live
+
+# ============================================================================
+# State Machine Transform
+# ============================================================================
+
+class GeneratorStateMachine:
+    """Transforms generator bodies into stackless state machines.
+
+    The transform replaces the original function body with a dispatcher
+    that switches on a state discriminant. Each yield point becomes a
+    state transition.
+
+    Statistics:
+    - generators_transformed: Number of generator functions transformed
+    - yield_points_total: Total yield points across all generators
+    - locals_saved: Total locals saved in state structs
+    """
+    generators_transformed: i64
+    yield_points_total: i64
+    locals_saved: i64
+
+impl GeneratorStateMachine:
+    static fn new() -> GeneratorStateMachine:
+        GeneratorStateMachine(
+            generators_transformed: 0,
+            yield_points_total: 0,
+            locals_saved: 0
+        )
+
+    fn name() -> text:
+        "generator_state_machine"
+
+    fn description() -> text:
+        "Transforms generator yield points into a stackless state machine"
+
+    fn is_analysis_pass() -> bool:
+        false
+
+    fn dependencies() -> [text]:
+        []
+
+    me run_on_function(func: MirFunction) -> MirFunction:
+        """Transform a generator function into a state machine.
+
+        Only transforms functions that contain Yield instructions.
+        Non-generator functions are returned unchanged.
+        """
+        # Check if function contains any yields
+        if not has_yields(func):
+            return func
+
+        # Analyze yield points
+        val analysis = analyze_yields(func)
+        if analysis.yield_points.len() == 0:
+            return func
+
+        self.generators_transformed = self.generators_transformed + 1
+        self.yield_points_total = self.yield_points_total + analysis.yield_points.len()
+        self.locals_saved = self.locals_saved + analysis.all_live_locals.len()
+
+        # Build the state machine function
+        self.build_state_machine(func, analysis)
+
+    me build_state_machine(func: MirFunction, analysis: YieldAnalysis) -> MirFunction:
+        """Build the state machine version of a generator function.
+
+        The state machine has:
+        - A state_ptr parameter (pointer to state struct)
+        - A dispatcher block that switches on state
+        - One block per state (initial + one per yield + terminal)
+        - State transitions at each yield point
+
+        State struct layout (conceptual):
+            offset 0: state discriminant (i64)
+            offset 1: yielded value (i64 / RuntimeValue)
+            offset 2+: saved locals
+        """
+        # Add state_ptr parameter to the function signature
+        var new_params = func.signature.params
+        new_params = new_params.push(MirType.i64())  # state_ptr: i64
+
+        val new_sig = MirSignature(
+            params: new_params,
+            return_type: MirType.i64(),  # returns 0=has_value, 1=exhausted
+            is_variadic: false
+        )
+
+        # Create state_ptr local
+        val state_ptr_id = LocalId(id: func.locals.len())
+        var new_locals = func.locals
+        new_locals = new_locals.push(MirLocal(
+            id: state_ptr_id,
+            name: Some("state_ptr"),
+            type_: MirType.i64(),
+            kind: LocalKind.Arg(index: func.signature.params.len())
+        ))
+
+        # Create temp locals for state loading
+        val state_val_id = LocalId(id: func.locals.len() + 1)
+        new_locals = new_locals.push(MirLocal(
+            id: state_val_id,
+            name: Some("state_val"),
+            type_: MirType.i64(),
+            kind: LocalKind.Temp
+        ))
+
+        val return_val_id = LocalId(id: func.locals.len() + 2)
+        new_locals = new_locals.push(MirLocal(
+            id: return_val_id,
+            name: Some("sm_return"),
+            type_: MirType.i64(),
+            kind: LocalKind.Temp
+        ))
+
+        # Build blocks for the state machine
+        var sm_blocks: [MirBlock] = []
+
+        # Block 0: Dispatcher - load state, switch on value
+        val dispatcher_id = BlockId(id: 0)
+
+        # Create load instruction for state discriminant
+        val load_state = MirInst(
+            kind: MirInstKind.Load(
+                dest: state_val_id,
+                ptr: mir_operand_copy(state_ptr_id)
+            ),
+            span: nil
+        )
+
+        # Build switch cases: one per yield point + initial + terminal
+        var switch_cases: [SwitchCase] = []
+        var state_block_ids: [BlockId] = []
+
+        # State 0 = initial (before first yield)
+        val initial_block_id = BlockId(id: 1)
+        switch_cases = switch_cases.push(SwitchCase(value: 0, target: initial_block_id))
+        state_block_ids = state_block_ids.push(initial_block_id)
+
+        # States 1..N = after each yield
+        for i in 0..(analysis.yield_points.len()):
+            val block_id = BlockId(id: i + 2)
+            switch_cases = switch_cases.push(SwitchCase(value: i + 1, target: block_id))
+            state_block_ids = state_block_ids.push(block_id)
+
+        # Terminal state block
+        val terminal_block_id = BlockId(id: analysis.yield_points.len() + 2)
+
+        val dispatcher_block = MirBlock(
+            id: dispatcher_id,
+            label: Some("sm_dispatch"),
+            instructions: [load_state],
+            terminator: MirTerminator.Switch(
+                value: mir_operand_copy(state_val_id),
+                targets: switch_cases,
+                default: terminal_block_id
+            )
+        )
+        sm_blocks = sm_blocks.push(dispatcher_block)
+
+        # Build state blocks from the original function's code
+        # Split the original blocks at yield points
+        val segments = split_at_yields(func, analysis)
+
+        # State 0 block (initial): code before first yield
+        if segments.len() > 0:
+            val initial_segment = segments[0]
+            var initial_insts = initial_segment
+
+            # If there's a yield point at state 0, add yield store + state transition
+            if analysis.yield_points.len() > 0:
+                val first_yp = analysis.yield_points[0]
+
+                # Store yielded value
+                if first_yp.yielded_operand.?:
+                    val store_yield = MirInst(
+                        kind: MirInstKind.Store(
+                            ptr: mir_operand_const_int(1),  # offset 1 = yielded value
+                            value: first_yp.yielded_operand.unwrap()
+                        ),
+                        span: nil
+                    )
+                    initial_insts = initial_insts.push(store_yield)
+
+                # Store next state
+                val store_state = MirInst(
+                    kind: MirInstKind.Store(
+                        ptr: mir_operand_copy(state_ptr_id),
+                        value: mir_operand_const_int(1)
+                    ),
+                    span: nil
+                )
+                initial_insts = initial_insts.push(store_state)
+
+                # Save live locals
+                for j in 0..(first_yp.live_locals.len()):
+                    val local = first_yp.live_locals[j]
+                    val save_inst = MirInst(
+                        kind: MirInstKind.Store(
+                            ptr: mir_operand_const_int(j + 2),  # offset 2+ for locals
+                            value: mir_operand_copy(local)
+                        ),
+                        span: nil
+                    )
+                    initial_insts = initial_insts.push(save_inst)
+
+            # Return 0 = has_value
+            val ret_val = MirInst(
+                kind: MirInstKind.Const(return_val_id, MirConstValue.Int(0), MirType.i64()),
+                span: nil
+            )
+            initial_insts = initial_insts.push(ret_val)
+
+            val initial_block = MirBlock(
+                id: initial_block_id,
+                label: Some("sm_state_0"),
+                instructions: initial_insts,
+                terminator: MirTerminator.Return(Some(mir_operand_copy(return_val_id)))
+            )
+            sm_blocks = sm_blocks.push(initial_block)
+
+        # State 1..N blocks (after each yield)
+        for i in 0..(analysis.yield_points.len()):
+            val yp = analysis.yield_points[i]
+            val state_id = BlockId(id: i + 2)
+            var state_insts: [MirInst] = []
+
+            # Restore live locals from state struct
+            for j in 0..(yp.live_locals.len()):
+                val local = yp.live_locals[j]
+                val restore_inst = MirInst(
+                    kind: MirInstKind.Load(
+                        dest: local,
+                        ptr: mir_operand_const_int(j + 2)  # offset 2+ for locals
+                    ),
+                    span: nil
+                )
+                state_insts = state_insts.push(restore_inst)
+
+            # Add segment instructions (code between this yield and next)
+            if i + 1 < segments.len():
+                val segment = segments[i + 1]
+                for inst in segment:
+                    state_insts = state_insts.push(inst)
+
+            # Check if there's a next yield point
+            val is_last = i == analysis.yield_points.len() - 1
+            val next_state = if is_last: analysis.yield_points.len() + 1 else: i + 2
+
+            # If not last, store next yield's value
+            if not is_last:
+                val next_yp = analysis.yield_points[i + 1]
+                if next_yp.yielded_operand.?:
+                    val store_yield = MirInst(
+                        kind: MirInstKind.Store(
+                            ptr: mir_operand_const_int(1),
+                            value: next_yp.yielded_operand.unwrap()
+                        ),
+                        span: nil
+                    )
+                    state_insts = state_insts.push(store_yield)
+
+                # Save live locals for next yield
+                for j in 0..(next_yp.live_locals.len()):
+                    val local = next_yp.live_locals[j]
+                    val save_inst = MirInst(
+                        kind: MirInstKind.Store(
+                            ptr: mir_operand_const_int(j + 2),
+                            value: mir_operand_copy(local)
+                        ),
+                        span: nil
+                    )
+                    state_insts = state_insts.push(save_inst)
+
+            # Store next state
+            val store_next = MirInst(
+                kind: MirInstKind.Store(
+                    ptr: mir_operand_copy(state_ptr_id),
+                    value: mir_operand_const_int(next_state)
+                ),
+                span: nil
+            )
+            state_insts = state_insts.push(store_next)
+
+            # Return 0 = has_value (or 1 = exhausted if last + no more yields)
+            val ret_code = if is_last: 0 else: 0  # still has_value for current yield
+            val ret_inst = MirInst(
+                kind: MirInstKind.Const(return_val_id, MirConstValue.Int(ret_code), MirType.i64()),
+                span: nil
+            )
+            state_insts = state_insts.push(ret_inst)
+
+            val state_block = MirBlock(
+                id: state_id,
+                label: Some("sm_state_{i + 1}"),
+                instructions: state_insts,
+                terminator: MirTerminator.Return(Some(mir_operand_copy(return_val_id)))
+            )
+            sm_blocks = sm_blocks.push(state_block)
+
+        # Terminal state block (exhausted)
+        val exhausted_inst = MirInst(
+            kind: MirInstKind.Const(return_val_id, MirConstValue.Int(1), MirType.i64()),
+            span: nil
+        )
+        val terminal_block = MirBlock(
+            id: terminal_block_id,
+            label: Some("sm_terminal"),
+            instructions: [exhausted_inst],
+            terminator: MirTerminator.Return(Some(mir_operand_copy(return_val_id)))
+        )
+        sm_blocks = sm_blocks.push(terminal_block)
+
+        # Build the transformed function
+        MirFunction(
+            ..func,
+            signature: new_sig,
+            locals: new_locals,
+            blocks: sm_blocks,
+            entry_block: dispatcher_id
+        )
+
+    fn stats_summary() -> text:
+        """Generate summary of transformation work."""
+        "GeneratorSM: {self.generators_transformed} generators transformed, {self.yield_points_total} yield points, {self.locals_saved} locals saved"
+
+# ============================================================================
+# Helper Functions
+# ============================================================================
+
+fn has_yields(func: MirFunction) -> bool:
+    """Quick check if a function contains any Yield instructions."""
+    for block in func.blocks:
+        for inst in block.instructions:
+            match inst.kind:
+                case Yield(_): return true
+                case _: pass_do_nothing
+    false
+
+fn get_inst_dest_sm(inst: MirInst) -> LocalId?:
+    """Extract destination local from an instruction (for state machine analysis)."""
+    match inst.kind:
+        case Const(dest, _, _): Some(dest)
+        case Copy(dest, _): Some(dest)
+        case Move(dest, _): Some(dest)
+        case BinOp(dest, _, _, _): Some(dest)
+        case UnaryOp(dest, _, _): Some(dest)
+        case Alloc(dest, _): Some(dest)
+        case Load(dest, _): Some(dest)
+        case GetField(dest, _, _): Some(dest)
+        case Aggregate(dest, _, _): Some(dest)
+        case Cast(dest, _, _): Some(dest)
+        case Call(dest, _, _): dest
+        case _: nil
+
+fn split_at_yields(func: MirFunction, analysis: YieldAnalysis) -> [[MirInst]]:
+    """Split function instructions at yield points into segments.
+
+    Returns a list of instruction segments:
+    - segments[0]: instructions before first yield
+    - segments[1]: instructions between yield 0 and yield 1
+    - segments[N]: instructions after yield N-1
+
+    Yield instructions themselves are NOT included in segments.
+    """
+    if analysis.yield_points.len() == 0:
+        return []
+
+    var segments: [[MirInst]] = []
+    var current_segment: [MirInst] = []
+    var yield_idx = 0
+
+    # Flatten all blocks into a single instruction stream
+    for block in func.blocks:
+        for i in 0..(block.instructions.len()):
+            val inst = block.instructions[i]
+
+            # Check if this is a yield point
+            match inst.kind:
+                case Yield(_):
+                    # End current segment and start a new one
+                    segments = segments.push(current_segment)
+                    current_segment = []
+                    yield_idx = yield_idx + 1
+                case _:
+                    current_segment = current_segment.push(inst)
+
+    # Add the final segment (after last yield)
+    segments = segments.push(current_segment)
+
+    segments
+
+# ============================================================================
+# Factory Function
+# ============================================================================
+
+fn create_generator_sm_pass() -> GeneratorStateMachine:
+    """Create a new generator state machine pass instance."""
+    GeneratorStateMachine.new()
+
+# ============================================================================
+# Exports
+# ============================================================================
+
+fn generator_sm_run_on_function(pass: GeneratorStateMachine, func: MirFunction) -> MirFunction:
+    """Free-function wrapper for generator state machine pass dispatch."""
+    pass.run_on_function(func)

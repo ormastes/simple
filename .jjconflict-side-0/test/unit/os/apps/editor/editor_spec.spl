@@ -1,0 +1,318 @@
+# Text Editor Unit Tests
+#
+# Tests for TextEditor: construction, insert_char, delete_char, newline,
+# mode transitions (Normal/Insert/Command), and cursor bounds.
+
+# ============================================================================
+# EditorMode Enum
+# ============================================================================
+
+describe "EditorMode":
+    it "has Normal variant":
+        val mode = EditorMode.Normal
+        expect(mode).to_equal(EditorMode.Normal)
+
+    it "has Insert variant":
+        val mode = EditorMode.Insert
+        expect(mode).to_equal(EditorMode.Insert)
+
+    it "has Command variant":
+        val mode = EditorMode.Command
+        expect(mode).to_equal(EditorMode.Command)
+
+    it "mode_name returns NORMAL":
+        val name = mode_name(EditorMode.Normal)
+        expect(name).to_equal("NORMAL")
+
+    it "mode_name returns INSERT":
+        val name = mode_name(EditorMode.Insert)
+        expect(name).to_equal("INSERT")
+
+    it "mode_name returns COMMAND":
+        val name = mode_name(EditorMode.Command)
+        expect(name).to_equal("COMMAND")
+
+# ============================================================================
+# TextEditor Construction
+# ============================================================================
+
+describe "TextEditor":
+    context "when newly created":
+        it "starts with one empty line":
+            val ed = TextEditor.new()
+            expect(ed.lines.len()).to_equal(1)
+            expect(ed.lines[0]).to_equal("")
+
+        it "starts with cursor at row 0":
+            val ed = TextEditor.new()
+            expect(ed.cursor_row).to_equal(0)
+
+        it "starts with cursor at col 0":
+            val ed = TextEditor.new()
+            expect(ed.cursor_col).to_equal(0)
+
+        it "starts with scroll_row at 0":
+            val ed = TextEditor.new()
+            expect(ed.scroll_row).to_equal(0)
+
+        it "starts with no file_path":
+            val ed = TextEditor.new()
+            expect(ed.file_path).to_be_nil
+
+        it "starts not modified":
+            val ed = TextEditor.new()
+            expect(ed.modified).to_equal(false)
+
+        it "starts in Normal mode":
+            val ed = TextEditor.new()
+            expect(ed.mode).to_equal(EditorMode.Normal)
+
+        it "starts with empty command_buffer":
+            val ed = TextEditor.new()
+            expect(ed.command_buffer).to_equal("")
+
+        it "starts with empty yank_buffer":
+            val ed = TextEditor.new()
+            expect(ed.yank_buffer.len()).to_equal(0)
+
+        it "starts with Ready status message":
+            val ed = TextEditor.new()
+            expect(ed.status_message).to_equal("Ready")
+
+        it "has default visible_rows of 20":
+            val ed = TextEditor.new()
+            expect(ed.visible_rows).to_equal(20)
+
+        it "has default visible_cols of 80":
+            val ed = TextEditor.new()
+            expect(ed.visible_cols).to_equal(80)
+
+        it "has nil vfs by default":
+            val ed = TextEditor.new()
+            expect(ed.vfs).to_be_nil
+
+# ============================================================================
+# Insert Character
+# ============================================================================
+
+describe "TextEditor insert_char":
+    it "adds character at cursor position":
+        var ed = TextEditor.new()
+        ed.mode = EditorMode.Insert
+        ed.insert_char("A")
+        expect(ed.lines[0]).to_contain("A")
+
+    it "advances cursor after insert":
+        var ed = TextEditor.new()
+        ed.mode = EditorMode.Insert
+        ed.insert_char("A")
+        expect(ed.cursor_col).to_equal(1)
+
+    it "inserts multiple characters sequentially":
+        var ed = TextEditor.new()
+        ed.mode = EditorMode.Insert
+        ed.insert_char("H")
+        ed.insert_char("i")
+        expect(ed.cursor_col).to_equal(2)
+        expect(ed.lines[0]).to_start_with("Hi")
+
+    it "marks document as modified":
+        var ed = TextEditor.new()
+        ed.mode = EditorMode.Insert
+        ed.insert_char("X")
+        expect(ed.modified).to_equal(true)
+
+    it "inserts at middle of existing text":
+        var ed = TextEditor.new()
+        ed.mode = EditorMode.Insert
+        ed.insert_char("A")
+        ed.insert_char("C")
+        ed.cursor_col = 1
+        ed.insert_char("B")
+        expect(ed.lines[0]).to_equal("ABC")
+
+# ============================================================================
+# Delete Character
+# ============================================================================
+
+describe "TextEditor delete_char":
+    it "removes character at cursor":
+        var ed = TextEditor.new()
+        ed.mode = EditorMode.Insert
+        ed.insert_char("A")
+        ed.insert_char("B")
+        ed.cursor_col = 0
+        ed.delete_char()
+        expect(ed.lines[0]).to_start_with("B")
+
+    it "marks document as modified":
+        var ed = TextEditor.new()
+        ed.mode = EditorMode.Insert
+        ed.insert_char("X")
+        ed.cursor_col = 0
+        ed.delete_char()
+        expect(ed.modified).to_equal(true)
+
+describe "TextEditor delete_char_before":
+    it "deletes character before cursor (backspace)":
+        var ed = TextEditor.new()
+        ed.mode = EditorMode.Insert
+        ed.insert_char("A")
+        ed.insert_char("B")
+        ed.delete_char_before()
+        expect(ed.cursor_col).to_equal(1)
+
+    it "does nothing when cursor at column 0 row 0":
+        var ed = TextEditor.new()
+        ed.delete_char_before()
+        expect(ed.cursor_col).to_equal(0)
+        expect(ed.cursor_row).to_equal(0)
+
+    it "joins with previous line when at column 0":
+        var ed = TextEditor.new()
+        ed.mode = EditorMode.Insert
+        ed.insert_char("A")
+        ed.newline()
+        ed.insert_char("B")
+        ed.cursor_col = 0
+        ed.delete_char_before()
+        expect(ed.cursor_row).to_equal(0)
+        expect(ed.lines.len()).to_equal(1)
+
+# ============================================================================
+# Newline
+# ============================================================================
+
+describe "TextEditor newline":
+    it "splits line at cursor":
+        var ed = TextEditor.new()
+        ed.mode = EditorMode.Insert
+        ed.insert_char("A")
+        ed.insert_char("B")
+        ed.cursor_col = 1
+        ed.newline()
+        expect(ed.lines.len()).to_equal(2)
+        expect(ed.lines[0]).to_equal("A")
+        expect(ed.lines[1]).to_start_with("B")
+
+    it "moves cursor to next row":
+        var ed = TextEditor.new()
+        ed.mode = EditorMode.Insert
+        ed.insert_char("X")
+        ed.newline()
+        expect(ed.cursor_row).to_equal(1)
+
+    it "resets cursor col to 0":
+        var ed = TextEditor.new()
+        ed.mode = EditorMode.Insert
+        ed.insert_char("X")
+        ed.insert_char("Y")
+        ed.newline()
+        expect(ed.cursor_col).to_equal(0)
+
+    it "marks document as modified":
+        var ed = TextEditor.new()
+        ed.mode = EditorMode.Insert
+        ed.newline()
+        expect(ed.modified).to_equal(true)
+
+    it "creates empty line when at end of text":
+        var ed = TextEditor.new()
+        ed.mode = EditorMode.Insert
+        ed.insert_char("Z")
+        ed.newline()
+        expect(ed.lines.len()).to_equal(2)
+        expect(ed.lines[1]).to_equal("")
+
+# ============================================================================
+# Mode Transitions
+# ============================================================================
+
+describe "TextEditor mode transitions":
+    context "Normal to Insert":
+        it "switches to Insert on 'i' key":
+            var ed = TextEditor.new()
+            ed.handle_normal_key("i")
+            expect(ed.mode).to_equal(EditorMode.Insert)
+
+        it "sets INSERT status message":
+            var ed = TextEditor.new()
+            ed.handle_normal_key("i")
+            expect(ed.status_message).to_equal("-- INSERT --")
+
+        it "switches to Insert on 'a' key (append)":
+            var ed = TextEditor.new()
+            ed.handle_normal_key("a")
+            expect(ed.mode).to_equal(EditorMode.Insert)
+
+        it "switches to Insert on 'o' key (open below)":
+            var ed = TextEditor.new()
+            ed.handle_normal_key("o")
+            expect(ed.mode).to_equal(EditorMode.Insert)
+
+    context "Insert to Normal":
+        it "switches to Normal on escape":
+            var ed = TextEditor.new()
+            ed.mode = EditorMode.Insert
+            ed.handle_insert_key("escape")
+            expect(ed.mode).to_equal(EditorMode.Normal)
+
+        it "clears status message on escape":
+            var ed = TextEditor.new()
+            ed.mode = EditorMode.Insert
+            ed.status_message = "-- INSERT --"
+            ed.handle_insert_key("escape")
+            expect(ed.status_message).to_equal("")
+
+    context "Insert mode key handling":
+        it "inserts character on regular key":
+            var ed = TextEditor.new()
+            ed.mode = EditorMode.Insert
+            ed.handle_insert_key("A")
+            expect(ed.lines[0]).to_contain("A")
+
+        it "handles enter key":
+            var ed = TextEditor.new()
+            ed.mode = EditorMode.Insert
+            ed.handle_insert_key("enter")
+            expect(ed.lines.len()).to_equal(2)
+
+        it "handles backspace key":
+            var ed = TextEditor.new()
+            ed.mode = EditorMode.Insert
+            ed.insert_char("X")
+            ed.handle_insert_key("backspace")
+            expect(ed.cursor_col).to_equal(0)
+
+# ============================================================================
+# Cursor Bounds Checking
+# ============================================================================
+
+describe "TextEditor cursor bounds":
+    it "h does not go below col 0":
+        var ed = TextEditor.new()
+        ed.cursor_col = 0
+        ed.handle_normal_key("h")
+        expect(ed.cursor_col).to_equal(0)
+
+    it "k does not go below row 0":
+        var ed = TextEditor.new()
+        ed.cursor_row = 0
+        ed.handle_normal_key("k")
+        expect(ed.cursor_row).to_equal(0)
+
+    it "j does not go past last line":
+        var ed = TextEditor.new()
+        # Only 1 line, so j should not advance
+        ed.handle_normal_key("j")
+        expect(ed.cursor_row).to_equal(0)
+
+    it "0 moves to start of line":
+        var ed = TextEditor.new()
+        ed.mode = EditorMode.Insert
+        ed.insert_char("A")
+        ed.insert_char("B")
+        ed.insert_char("C")
+        ed.mode = EditorMode.Normal
+        ed.handle_normal_key("0")
+        expect(ed.cursor_col).to_equal(0)

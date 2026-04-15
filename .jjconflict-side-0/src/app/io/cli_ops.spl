@@ -1,0 +1,133 @@
+# CLI Functions - Pure Simple I/O
+# Extracted from mod.spl for modularity
+
+# Extern fn declarations (runtime resolves at file level)
+
+extern fn rt_cli_get_args() -> [text]
+extern fn rt_exit(code: i64)
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+extern fn rt_cli_run_tests(args: [text], gc_log: bool, gc_off: bool) -> i64
+extern fn rt_cli_handle_compile(args: [text]) -> i64
+extern fn rt_env_get(key: text) -> text
+extern fn rt_compile_to_llvm_ir(source_file: text, target_triple: text, bare_metal: bool) -> (text, text, i64)
+
+# --- Shell/file helpers (local copies to avoid circular imports) ---
+
+fn _cli_is_windows_platform() -> bool:
+    val os_env = rt_env_get("OS")
+    if os_env == nil:
+        false
+    else:
+        os_env.lower().contains("windows")
+
+struct _CliProcessResult:
+    stdout: text
+    stderr: text
+    exit_code: i64
+
+fn _cli_shell(command: text) -> _CliProcessResult:
+    val (shell_path, shell_args) = if _cli_is_windows_platform():
+        ("cmd.exe", ["/c", command])
+    else:
+        ("/bin/sh", ["-c", command])
+    val (stdout, stderr, code) = rt_process_run(shell_path, shell_args)
+    _CliProcessResult(stdout: stdout, stderr: stderr, exit_code: code)
+
+fn _cli_shell_bool(command: text) -> bool:
+    val result = _cli_shell(command)
+    result.exit_code == 0
+
+fn _cli_file_exists_impl(path: text) -> bool:
+    _cli_shell_bool("test -f '{path}'")
+
+fn _cli_file_read_impl(path: text) -> text:
+    val result = _cli_shell("cat '{path}' 2>/dev/null")
+    if result.exit_code == 0:
+        result.stdout
+    else:
+        ""
+
+fn _cli_file_write_impl(path: text, content: text) -> bool:
+    val result = _cli_shell("cat > '{path}' << 'SIMPLE_WRITE_EOF'\n{content}\nSIMPLE_WRITE_EOF")
+    result.exit_code == 0
+
+fn _cli_file_copy_impl(src: text, dst: text) -> bool:
+    val result = _cli_shell("cp '{src}' '{dst}'")
+    result.exit_code == 0
+
+fn _cli_dir_create_impl(path: text, recursive: bool) -> bool:
+    if recursive:
+        val result = _cli_shell("mkdir -p '{path}'")
+        result.exit_code == 0
+    else:
+        val result = _cli_shell("mkdir '{path}'")
+        result.exit_code == 0
+
+fn _cli_eprint(msg: text):
+    print "[STDERR] {msg}"
+
+fn _cli_process_run(cmd: text, args: [text]) -> (text, text, i64):
+    var resolved_cmd = cmd
+    if _cli_is_windows_platform():
+        if not cmd.ends_with(".exe") and not cmd.ends_with(".cmd") and not cmd.ends_with(".bat"):
+            val check = rt_process_run("where", [cmd + ".exe"])
+            if check.2 == 0:
+                resolved_cmd = cmd + ".exe"
+    else:
+        if not cmd.contains("/"):
+            val check = rt_process_run("which", [cmd])
+            if check.2 == 0 and check.0.trim() != "":
+                resolved_cmd = check.0.trim()
+    rt_process_run(resolved_cmd, args)
+
+# ============================================================================
+# CLI Core Functions
+# ============================================================================
+
+fn get_args() -> [String]:
+    rt_cli_get_args()
+
+fn exit(code: i64):
+    rt_exit(code)
+
+fn cli_get_args() -> [text]:
+    rt_cli_get_args()
+
+fn cli_exit(code: i64):
+    rt_exit(code)
+
+fn cli_file_exists(path: text) -> bool:
+    _cli_file_exists_impl(path)
+
+fn cli_read_file(path: text) -> text:
+    _cli_file_read_impl(path)
+
+# ============================================================================
+# Stubs & Utilities
+# ============================================================================
+
+fn context_generate(path: text, target: text, format: text) -> text:
+    ""
+
+fn context_stats(path: text, target: text) -> text:
+    ""
+
+fn settlement_main() -> i64:
+    0
+
+fn fault_set_stack_overflow_detection(enabled: bool):
+    ()
+
+fn fault_set_max_recursion_depth(depth: i64):
+    ()
+
+fn fault_set_timeout(secs: i64):
+    ()
+
+fn fault_set_execution_limit(limit: i64):
+    ()
+
+# ============================================================================
+# Exports
+# ============================================================================
+

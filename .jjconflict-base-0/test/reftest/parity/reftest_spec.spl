@@ -1,0 +1,156 @@
+# reftest_spec — Chromium parity reftest suite, Phase 8 drawing-stack
+
+use std.sspec.*
+use std.skia.entity.picture.{SkPicture, SkPictureRecorder}
+use std.skia.entity.geometry.{SkRect}
+use test.reftest.parity.harness.{ReftestHarness, SceneManifest, scene_signature, reftest_harness_new}
+use test.reftest.parity.pixel_diff.{compare_pictures, PixelDiffResult}
+use test.reftest.parity.scenes.path_winding.{make_scene as winding_scene}
+use test.reftest.parity.scenes.path_evenodd.{make_scene as evenodd_scene}
+use test.reftest.parity.scenes.dashed_strokes.{make_scene as dashed_scene}
+use test.reftest.parity.scenes.gradient_linear.{make_scene as gradient_scene}
+use test.reftest.parity.scenes.text_arabic.{make_scene as arabic_scene}
+use test.reftest.parity.scenes.porter_duff.{make_scene as porterduff_scene}
+use test.reftest.parity.scenes.mix_blend_mode.{make_scene as mixblend_scene}
+use test.reftest.parity.scenes.backdrop_filter.{make_scene as backdrop_scene}
+use test.reftest.parity.scenes.scroll_damage.{make_scene as scroll_scene}
+use test.reftest.parity.scenes.transform_tree.{make_scene as transform_scene}
+use test.reftest.parity.scenes.opacity_layer.{make_scene as opacity_scene}
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+fn _manifest(name: text, desc: text) -> SceneManifest:
+    SceneManifest(name: name, description: desc, chromium_ref_file: "")
+
+fn _mk_rect(r: f64, b: f64) -> SkRect:
+    SkRect(left: 0.0, top: 0.0, right: r, bottom: b)
+
+fn _mk_pic(r: f64, b: f64) -> SkPicture:
+    val bounds = _mk_rect(r, b)
+    val rec = SkPictureRecorder(recording: false, cull_rect: bounds, ops: 0)
+    val started = rec.begin_recording(bounds)
+    started.finish_recording()
+
+# ---------------------------------------------------------------------------
+# Harness lifecycle
+# ---------------------------------------------------------------------------
+
+describe "Drawing parity reftest suite":
+    it "harness starts empty":
+        val h = reftest_harness_new()
+        expect(h.result_count()).to_equal(0)
+
+    it "runs one scene and records result":
+        var h = reftest_harness_new()
+        val pic = winding_scene()
+        val m = _manifest("path_winding", "winding fill rule")
+        val r = h.run(m, pic)
+        expect(r.op_count >= 0).to_equal(true)
+
+    it "result_count increases after each scene":
+        var h = reftest_harness_new()
+        val m1 = _manifest("path_winding", "winding fill")
+        val m2 = _manifest("path_evenodd", "even-odd fill")
+        h.run(m1, winding_scene())
+        h.run(m2, evenodd_scene())
+        expect(h.result_count()).to_equal(2)
+
+    it "find returns Some for registered scene":
+        var h = reftest_harness_new()
+        val m = _manifest("dashed_strokes", "dashed path effect")
+        h.run(m, dashed_scene())
+        val found = h.find("dashed_strokes")
+        expect(found.is_some()).to_equal(true)
+
+    it "find returns None for unknown scene":
+        val h = reftest_harness_new()
+        val found = h.find("nonexistent")
+        expect(found.is_none()).to_equal(true)
+
+# ---------------------------------------------------------------------------
+# Signature distinctness
+# ---------------------------------------------------------------------------
+
+describe "10 scenes produce distinct signatures":
+    it "all 10 scene signatures are unique":
+        val s0 = scene_signature(winding_scene())
+        val s1 = scene_signature(evenodd_scene())
+        val s2 = scene_signature(dashed_scene())
+        val s3 = scene_signature(gradient_scene())
+        val s4 = scene_signature(arabic_scene())
+        val s5 = scene_signature(porterduff_scene())
+        val s6 = scene_signature(mixblend_scene())
+        val s7 = scene_signature(backdrop_scene())
+        val s8 = scene_signature(scroll_scene())
+        val s9 = scene_signature(transform_scene())
+        val s10 = scene_signature(opacity_scene())
+        # Each cull_rect differs, so coord_sum differs, so signature differs.
+        expect(s0 == s1).to_equal(false)
+        expect(s1 == s2).to_equal(false)
+        expect(s2 == s3).to_equal(false)
+        expect(s3 == s4).to_equal(false)
+        expect(s4 == s5).to_equal(false)
+        expect(s5 == s6).to_equal(false)
+        expect(s6 == s7).to_equal(false)
+        expect(s7 == s8).to_equal(false)
+        expect(s8 == s9).to_equal(false)
+        expect(s9 == s10).to_equal(false)
+
+    it "same scene produces same signature when called twice":
+        val a = scene_signature(winding_scene())
+        val b = scene_signature(winding_scene())
+        expect(a).to_equal(b)
+
+# ---------------------------------------------------------------------------
+# PixelDiffResult contract
+# ---------------------------------------------------------------------------
+
+describe "compare_pictures stub":
+    it "identical signatures return ratio 0":
+        val pic = winding_scene()
+        val sig = scene_signature(pic)
+        val diff = compare_pictures(sig, sig)
+        expect(diff.ratio).to_equal(0.0)
+
+    it "identical signatures return max_channel_delta 0":
+        val pic = evenodd_scene()
+        val sig = scene_signature(pic)
+        val diff = compare_pictures(sig, sig)
+        expect(diff.max_channel_delta).to_equal(0)
+
+    it "different signatures return ratio 1":
+        val sig_a = scene_signature(winding_scene())
+        val sig_b = scene_signature(evenodd_scene())
+        val diff = compare_pictures(sig_a, sig_b)
+        expect(diff.ratio).to_equal(1.0)
+
+    it "different signatures return max_channel_delta 255":
+        val sig_a = scene_signature(porterduff_scene())
+        val sig_b = scene_signature(mixblend_scene())
+        val diff = compare_pictures(sig_a, sig_b)
+        expect(diff.max_channel_delta).to_equal(255)
+
+# ---------------------------------------------------------------------------
+# Chromium name spot-checks
+# ---------------------------------------------------------------------------
+
+describe "Scene cull rects match Chromium spec":
+    it "path_winding cull is 200x200":
+        val pic = winding_scene()
+        val r = pic.cull_rect
+        expect(r.right).to_equal(200.0)
+        expect(r.bottom).to_equal(200.0)
+
+    it "porter_duff cull is 300x300":
+        val pic = porterduff_scene()
+        val r = pic.cull_rect
+        expect(r.right).to_equal(300.0)
+        expect(r.bottom).to_equal(300.0)
+
+    it "scroll_damage cull is 400x400":
+        val pic = scroll_scene()
+        val r = pic.cull_rect
+        expect(r.right).to_equal(400.0)
+        expect(r.bottom).to_equal(400.0)

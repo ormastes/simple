@@ -1,0 +1,104 @@
+use app.mcp.assistant.{
+    AssistantSessionRecord, AssistantTimelineRecord,
+    assistant_store_create_session, assistant_store_append_event,
+    assistant_store_session_detail, assistant_store_session_brief,
+    assistant_store_collect_timeline, assistant_store_collect_notifications
+}
+
+extern fn rt_getpid() -> i64
+extern fn rt_time_now_unix_micros() -> i64
+
+fn test_root(tag: text) -> text:
+    "/tmp/simple-assistant-session-views-{tag}-{rt_getpid()}-{rt_time_now_unix_micros()}"
+
+describe "assistant session views":
+    it "renders detail and compact brief from the file-backed store":
+        val root = test_root("detail")
+        val session_id = "assistant-views-detail"
+        val created = assistant_store_create_session(
+            root,
+            AssistantSessionRecord.new(
+                session_id,
+                "Assistant Views",
+                "build reusable session views",
+                "proactive",
+                "",
+                "",
+                "build reusable session views"
+            )
+        )
+        match created:
+            case Some(session):
+                expect(session.session_id).to_equal(session_id)
+            case nil:
+                expect(false).to_equal(true)
+
+        var first = AssistantTimelineRecord.new(session_id, "note", "first event", "")
+        first.timestamp_ms = 1000
+        first.event_id = "event-1"
+        assistant_store_append_event(root, first)
+
+        var second = AssistantTimelineRecord.new(session_id, "note", "second event", "")
+        second.timestamp_ms = 2000
+        second.event_id = "event-2"
+        assistant_store_append_event(root, second)
+
+        val detail = assistant_store_session_detail(root, session_id)
+        match detail:
+            case Some(session):
+                expect(session.session_id).to_equal(session_id)
+                expect(session.event_count).to_equal(2)
+                expect(session.last_event_kind).to_equal("note")
+                expect(session.last_event_detail).to_equal("second event")
+            case nil:
+                expect(false).to_equal(true)
+
+        val brief = assistant_store_session_brief(root, session_id)
+        expect(brief.contains("session: " + session_id)).to_equal(true)
+        expect(brief.contains("timeline events: 2")).to_equal(true)
+        expect(brief.contains("notifications: 2")).to_equal(true)
+        expect(brief.contains("last event: note - second event")).to_equal(true)
+
+    it "collects timeline and notifications from the same persisted files":
+        val root = test_root("collect")
+        val session_id = "assistant-views-collect"
+        assistant_store_create_session(
+            root,
+            AssistantSessionRecord.new(
+                session_id,
+                "Assistant Views Collect",
+                "collect view data",
+                "proactive",
+                "",
+                "",
+                "collect view data"
+            )
+        )
+
+        var first = AssistantTimelineRecord.new(session_id, "note", "first event", "")
+        first.timestamp_ms = 1000
+        first.event_id = "event-1"
+        assistant_store_append_event(root, first)
+
+        var second = AssistantTimelineRecord.new(session_id, "signal", "second event", "wake")
+        second.timestamp_ms = 2000
+        second.event_id = "event-2"
+        assistant_store_append_event(root, second)
+
+        val timeline = assistant_store_collect_timeline(root, session_id, 10, 0)
+        expect(timeline.len()).to_equal(2)
+        expect(timeline[0].message).to_equal("first event")
+        expect(timeline[1].message).to_equal("second event")
+
+        val timeline_tail = assistant_store_collect_timeline(root, session_id, 1, 1500)
+        expect(timeline_tail.len()).to_equal(1)
+        expect(timeline_tail[0].message).to_equal("second event")
+
+        val notifications = assistant_store_collect_notifications(root, session_id, 10, 0)
+        expect(notifications.len()).to_equal(2)
+        expect(notifications[0].message).to_equal("first event")
+        expect(notifications[1].message).to_equal("second event")
+
+        val notifications_tail = assistant_store_collect_notifications(root, session_id, 1, 1500)
+        expect(notifications_tail.len()).to_equal(1)
+        expect(notifications_tail[0].message).to_equal("second event")

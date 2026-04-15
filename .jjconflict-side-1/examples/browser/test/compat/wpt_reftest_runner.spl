@@ -1,0 +1,167 @@
+# WPT Reftest Runner — renders test+ref HTML pairs through Simple browser engine
+#
+# For each WPT reftest pair:
+#   1. Read test.html and ref.html
+#   2. Render both through BrowserRenderer at 800x600
+#   3. Compare pixel buffers
+#   4. Report pass/fail (>= 95% pixel match = PASS)
+#
+# Usage:
+#   bin/simple run examples/browser/test/compat/wpt_reftest_runner.spl [category]
+
+extern fn rt_cli_get_args() -> [text]
+extern fn rt_file_read_text(path: text) -> text
+extern fn rt_file_write_text(path: text, content: text) -> bool
+extern fn rt_list_dir(path: text) -> [text]
+
+use std.gc_async_mut.gpu.browser_engine.browser_renderer.{BrowserRenderer}
+use examples.browser.test.compat.image_export.{compare_pixel_buffers, export_ppm_text}
+
+# =========================================================================
+# Test Result
+# =========================================================================
+
+class WptResult:
+    name: text
+    category: text
+    match_pct: f64
+    rmse: f64
+    passed: bool
+    error: text
+
+# =========================================================================
+# Main
+# =========================================================================
+
+fn main() -> i64:
+    val argv = rt_cli_get_args()
+    val filter_category = if argv.len() > 2: argv[2] else: ""
+
+    val base = "examples/browser/test/compat/external/wpt"
+    val categories = rt_list_dir(base)
+
+    var results: [WptResult] = []
+    var total = 0
+    var passed = 0
+    var failed = 0
+    var errors = 0
+
+    print "=========================================="
+    print "  WPT Reftest Runner — Simple Browser"
+    print "=========================================="
+    print ""
+
+    for category in categories:
+        if filter_category != "" and category != filter_category:
+            continue
+
+        val cat_path = "{base}/{category}"
+        val files = rt_list_dir(cat_path)
+
+        # Find test files (not *-ref.html)
+        var test_files: [text] = []
+        for f in files:
+            if f.ends_with(".html") and not f.ends_with("-ref.html"):
+                test_files = test_files + [f]
+
+        if test_files.len() == 0:
+            continue
+
+        print "--- {category} ({test_files.len()} tests) ---"
+
+        for test_file in test_files:
+            val test_name = test_file.slice(0, test_file.len() - 5)  # strip .html
+            val test_path = "{cat_path}/{test_file}"
+            val ref_path = "{cat_path}/{test_name}-ref.html"
+
+            val test_html = rt_file_read_text(test_path) ?? ""
+            val ref_html = rt_file_read_text(ref_path) ?? ""
+
+            if test_html.len() == 0:
+                print "  SKIP {test_name}: cannot read test file"
+                errors = errors + 1
+                continue
+            if ref_html.len() == 0:
+                print "  SKIP {test_name}: cannot read ref file"
+                errors = errors + 1
+                continue
+
+            # Render both
+            val renderer = BrowserRenderer.create(800, 600)
+            val test_result = renderer.render_html_to_pixels(test_html)
+            val ref_result = renderer.render_html_to_pixels(ref_html)
+
+            if test_result.pixel_data.len() == 0 or ref_result.pixel_data.len() == 0:
+                print "  ERR  {test_name}: render produced no pixels"
+                results = results + [WptResult(name: test_name, category: category,
+                    match_pct: 0.0, rmse: 0.0, passed: false, error: "no pixels")]
+                errors = errors + 1
+                total = total + 1
+                continue
+
+            # Compare
+            val metrics = compare_pixel_buffers(
+                test_result.pixel_data, ref_result.pixel_data, 800, 600)
+
+            val is_pass = metrics.match_percentage >= 95.0
+            val status = if is_pass: "PASS" else: "FAIL"
+
+            if is_pass:
+                passed = passed + 1
+            else:
+                failed = failed + 1
+            total = total + 1
+
+            print "  {status} {test_name}: {metrics.match_percentage}% match (RMSE={metrics.rmse})"
+
+            results = results + [WptResult(name: test_name, category: category,
+                match_pct: metrics.match_percentage, rmse: metrics.rmse,
+                passed: is_pass, error: "")]
+
+        print ""
+
+    # Summary
+    print "=========================================="
+    print "  SUMMARY"
+    print "=========================================="
+    val pass_rate = if total > 0: (passed.to_f64() / total.to_f64()) * 100.0 else: 0.0
+    print "Total: {total}, Passed: {passed}, Failed: {failed}, Errors: {errors}"
+    print "Pass rate: {pass_rate}%"
+    print ""
+
+    # Category breakdown
+    var seen_cats: [text] = []
+    for r in results:
+        var found = false
+        for sc in seen_cats:
+            if sc == r.category:
+                found = true
+        if not found:
+            seen_cats = seen_cats + [r.category]
+
+    for cat in seen_cats:
+        var cat_total = 0
+        var cat_pass = 0
+        for r in results:
+            if r.category == cat:
+                cat_total = cat_total + 1
+                if r.passed:
+                    cat_pass = cat_pass + 1
+        val cat_rate = if cat_total > 0: (cat_pass.to_f64() / cat_total.to_f64()) * 100.0 else: 0.0
+        print "  {cat}: {cat_pass}/{cat_total} ({cat_rate}%)"
+
+    # Write report
+    var report = "# WPT Reftest Results\n\n"
+    report = "{report}Total: {total}, Passed: {passed}, Failed: {failed}, Errors: {errors}\n"
+    report = "{report}Pass rate: {pass_rate}%\n\n"
+    report = "{report}## Results\n\n"
+    report = "{report}| Category | Test | Match % | RMSE | Status |\n"
+    report = "{report}|----------|------|---------|------|--------|\n"
+    for r in results:
+        val status = if r.passed: "PASS" else: "FAIL"
+        report = "{report}| {r.category} | {r.name} | {r.match_pct}% | {r.rmse} | {status} |\n"
+
+    rt_file_write_text("examples/browser/test/compat/external/wpt_results.md", report)
+    print "\nReport written to examples/browser/test/compat/external/wpt_results.md"
+
+    0

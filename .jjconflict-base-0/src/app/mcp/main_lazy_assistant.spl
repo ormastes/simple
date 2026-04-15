@@ -1,0 +1,708 @@
+#![allow(unnamed_duplicate_typed_args)]
+@allow(unnamed_duplicate_typed_args)
+# MCP Assistant Surface — KAIROS-like session bridge
+#
+# Self-contained, file-backed assistant sessions with timeline and
+# notification logs. The dashboard can read the same store later, but this
+# surface does not depend on any assistant-core implementation being present.
+
+use app.mcp.main_lazy_json
+use app.llm_dashboard.collectors.{collect_daemons, collect_remote_sessions, collect_schedules}
+use app.llm_dashboard.data.types.{ManagedTask, task_kind_name, task_state_name}
+use std.common.json.parser.{json_parse}
+use app.mcp.assistant.types.{AssistantSessionRecord, AssistantTimelineRecord}
+use app.mcp.assistant.session_store.{
+    assistant_store_create_session, assistant_store_load_session, assistant_store_list_sessions,
+    assistant_store_append_event, assistant_store_update_state, assistant_store_create_child_task
+}
+use app.mcp.assistant.session_views.{
+    assistant_store_session_brief, assistant_store_collect_timeline, assistant_store_collect_notifications
+}
+
+extern fn rt_dir_create_all(path: text) -> bool
+extern fn rt_dir_list(path: text) -> [text]
+extern fn rt_file_exists(path: text) -> bool
+extern fn rt_time_now_unix_micros() -> i64
+
+val ASSIST_ROOT = ".build/llm_dashboard/assistant"
+val ASSIST_SESSIONS = ASSIST_ROOT + "/sessions"
+val ASSIST_TIMELINES = ASSIST_ROOT + "/timelines"
+val ASSIST_NOTIFICATIONS = ASSIST_ROOT + "/notifications"
+
+fn _assistant_now_ms() -> i64:
+    rt_time_now_unix_micros() / 1000
+
+fn _assistant_ensure_dirs():
+    rt_dir_create_all(ASSIST_SESSIONS)
+    rt_dir_create_all(ASSIST_TIMELINES)
+    rt_dir_create_all(ASSIST_NOTIFICATIONS)
+
+fn _assistant_session_path(session_id: text) -> text:
+    ASSIST_SESSIONS + "/" + session_id + ".json"
+
+fn _assistant_timeline_path(session_id: text) -> text:
+    ASSIST_TIMELINES + "/" + session_id + ".jsonl"
+
+fn _assistant_notifications_path(session_id: text) -> text:
+    ASSIST_NOTIFICATIONS + "/" + session_id + ".jsonl"
+
+fn _assistant_session_exists(session_id: text) -> bool:
+    assistant_store_load_session(ASSIST_ROOT, session_id) != nil
+
+fn _assistant_make_session_id(now_ms: i64) -> text:
+    "assistant-" + str(now_ms)
+
+fn _assistant_default_name(session_id: text, prompt: text) -> text:
+    if prompt != "":
+        val preview = prompt
+        if preview.len() > 48:
+            return "Assistant " + preview.slice(0, 48)
+        return "Assistant " + preview
+    "Assistant " + session_id
+
+fn _assistant_default_summary(name: text, prompt: text) -> text:
+    if prompt != "":
+        if prompt.len() > 160:
+            return prompt.slice(0, 160)
+        return prompt
+    name
+
+fn _assistant_write_session(
+    session_id: text,
+    name: text,
+    prompt: text,
+    mode: text,
+    parent_session_id: text,
+    state: text,
+    summary: text,
+    created_at: i64,
+    updated_at: i64,
+    last_signal: text
+):
+    var obj = LB()
+    obj = obj + jp("id", js(session_id))
+    obj = obj + "," + jp("name", js(name))
+    obj = obj + "," + jp("prompt", js(prompt))
+    obj = obj + "," + jp("mode", js(mode))
+    obj = obj + "," + jp("parent_session_id", js(parent_session_id))
+    obj = obj + "," + jp("state", js(state))
+    obj = obj + "," + jp("summary", js(summary))
+    obj = obj + "," + jp("created_at", str(created_at))
+    obj = obj + "," + jp("updated_at", str(updated_at))
+    obj = obj + "," + jp("last_signal", js(last_signal))
+    obj = obj + RB()
+    file_write(_assistant_session_path(session_id), obj)
+
+fn _assistant_load_session(session_id: text) -> text:
+    if not _assistant_session_exists(session_id):
+        return ""
+    file_read(_assistant_session_path(session_id))
+
+fn _assistant_update_session_state(session_id: text, new_state: text, last_signal: text) -> text:
+    val current = _assistant_load_session(session_id)
+    if current == "":
+        return ""
+
+    val name = extract_field(current, "name")
+    val prompt = extract_field(current, "prompt")
+    val mode = extract_field(current, "mode")
+    val parent_session_id = extract_field(current, "parent_session_id")
+    val summary = extract_field(current, "summary")
+    val created_at = extract_field(current, "created_at")
+    val updated_at = _assistant_now_ms()
+    _assistant_write_session(
+        session_id,
+        name,
+        prompt,
+        mode,
+        parent_session_id,
+        new_state,
+        summary,
+        created_at.to_i64() ?? updated_at,
+        updated_at,
+        last_signal
+    )
+    _assistant_load_session(session_id)
+
+fn _assistant_append_jsonl(path: text, line: text):
+    var content = file_read(path)
+    if content != "" and not content.ends_with("\n"):
+        content = content + "\n"
+    content = content + line + "\n"
+    file_write(path, content)
+
+fn _assistant_count_lines(content: text) -> i64:
+    if content == "":
+        return 0
+    var count: i64 = 0
+    for line in content.split("\n"):
+        if line.trim() != "":
+            count = count + 1
+    count
+
+fn _assistant_last_jsonl_line(content: text) -> text:
+    if content == "":
+        return ""
+    var last = ""
+    for line in content.split("\n"):
+        val trimmed = line.trim()
+        if trimmed != "":
+            last = trimmed
+    last
+
+fn _assistant_event_object(session_id: text, timestamp: i64, kind: text, message: text, signal: text) -> text:
+    var obj = LB()
+    obj = obj + jp("timestamp", str(timestamp))
+    obj = obj + "," + jp("session_id", js(session_id))
+    obj = obj + "," + jp("kind", js(kind))
+    obj = obj + "," + jp("message", js(message))
+    obj = obj + "," + jp("signal", js(signal))
+    obj = obj + RB()
+    obj
+
+fn _assistant_record_event(session_id: text, kind: text, message: text, signal: text):
+    val ts = _assistant_now_ms()
+    val line = _assistant_event_object(session_id, ts, kind, message, signal)
+    _assistant_append_jsonl(_assistant_timeline_path(session_id), line)
+    _assistant_append_jsonl(_assistant_notifications_path(session_id), line)
+
+fn _assistant_session_detail_object(session_json: text) -> text:
+    val session_id = extract_field(session_json, "id")
+    val name = extract_field(session_json, "name")
+    val prompt = extract_field(session_json, "prompt")
+    val mode = extract_field(session_json, "mode")
+    val state = extract_field(session_json, "state")
+    val summary = extract_field(session_json, "summary")
+    val parent_session_id = extract_field(session_json, "parent_session_id")
+    val created_at = extract_field(session_json, "created_at")
+    val updated_at = extract_field(session_json, "updated_at")
+    val last_signal = extract_field(session_json, "last_signal")
+
+    val timeline_content = file_read(_assistant_timeline_path(session_id))
+    val notifications_content = file_read(_assistant_notifications_path(session_id))
+    val timeline_count = _assistant_count_lines(timeline_content)
+    val notification_count = _assistant_count_lines(notifications_content)
+    val last_event_line = _assistant_last_jsonl_line(timeline_content)
+
+    var obj = LB()
+    obj = obj + jp("session_id", js(session_id))
+    obj = obj + "," + jp("name", js(name))
+    obj = obj + "," + jp("prompt", js(prompt))
+    obj = obj + "," + jp("mode", js(mode))
+    obj = obj + "," + jp("state", js(state))
+    obj = obj + "," + jp("summary", js(summary))
+    obj = obj + "," + jp("parent_session_id", js(parent_session_id))
+    obj = obj + "," + jp("created_at", created_at)
+    obj = obj + "," + jp("updated_at", updated_at)
+    obj = obj + "," + jp("last_signal", js(last_signal))
+    obj = obj + "," + jp("timeline_count", str(timeline_count))
+    obj = obj + "," + jp("notification_count", str(notification_count))
+    if last_event_line != "":
+        obj = obj + "," + jp("last_event_kind", js(extract_field(last_event_line, "kind")))
+        obj = obj + "," + jp("last_event_message", js(extract_field(last_event_line, "message")))
+        obj = obj + "," + jp("last_event_signal", js(extract_field(last_event_line, "signal")))
+        obj = obj + "," + jp("last_event_at", extract_field(last_event_line, "timestamp"))
+    obj = obj + RB()
+    obj
+
+fn _assistant_session_brief(session_json: text) -> text:
+    val detail = _assistant_session_detail_object(session_json)
+    val session_id = extract_field(detail, "session_id")
+    val name = extract_field(detail, "name")
+    val state = extract_field(detail, "state")
+    val mode = extract_field(detail, "mode")
+    val summary = extract_field(detail, "summary")
+    val timeline_count = extract_field(detail, "timeline_count")
+    val notification_count = extract_field(detail, "notification_count")
+    val last_event_kind = extract_field(detail, "last_event_kind")
+    val last_event_message = extract_field(detail, "last_event_message")
+
+    var lines: [text] = []
+    lines.push("session: " + session_id)
+    lines.push("name: " + name)
+    lines.push("state: " + state)
+    lines.push("mode: " + mode)
+    if summary != "":
+        lines.push("summary: " + summary)
+    lines.push("timeline events: " + timeline_count)
+    lines.push("notifications: " + notification_count)
+    if last_event_kind != "":
+        var tail = "last event: " + last_event_kind
+        if last_event_message != "":
+            tail = tail + " - " + last_event_message
+        lines.push(tail)
+    lines.join("\n")
+
+fn _assistant_list_session_ids() -> [text]:
+    _assistant_ensure_dirs()
+    var ids: [text] = []
+    if not rt_file_exists(ASSIST_SESSIONS):
+        return ids
+    val files = rt_dir_list(ASSIST_SESSIONS)
+    for fname in files:
+        if fname.ends_with(".json"):
+            ids.push(fname.slice(0, fname.len() - 5))
+    ids
+
+fn _assistant_session_task_json(session_json: text) -> text:
+    val detail = _assistant_session_detail_object(session_json)
+    var obj = LB()
+    obj = obj + jp("id", js(extract_field(detail, "session_id")))
+    obj = obj + "," + jp("source", js("assistant"))
+    obj = obj + "," + jp("kind", js("assistant"))
+    obj = obj + "," + jp("state", js(extract_field(detail, "state")))
+    obj = obj + "," + jp("name", js(extract_field(detail, "name")))
+    obj = obj + "," + jp("command", js(extract_field(detail, "prompt")))
+    obj = obj + "," + jp("created_at", extract_field(detail, "created_at"))
+    obj = obj + "," + jp("updated_at", extract_field(detail, "updated_at"))
+    obj = obj + "," + jp("last_signal", js(extract_field(detail, "last_signal")))
+    obj = obj + RB()
+    obj
+
+fn _assistant_managed_task_json(task: ManagedTask, source: text) -> text:
+    var obj = LB()
+    obj = obj + jp("id", js(task.id))
+    obj = obj + "," + jp("source", js(source))
+    obj = obj + "," + jp("kind", js(task_kind_name(task.kind)))
+    obj = obj + "," + jp("state", js(task_state_name(task.state)))
+    obj = obj + "," + jp("name", js(task.name))
+    obj = obj + "," + jp("command", js(task.command))
+    obj = obj + "," + jp("created_at", str(task.created_at))
+    obj = obj + "," + jp("updated_at", str(task.last_run_time))
+    obj = obj + "," + jp("last_result", js(task.last_result))
+    obj = obj + "," + jp("agent_id", js(task.agent_id))
+    obj = obj + RB()
+    obj
+
+fn _assistant_collect_dashboard_tasks() -> [text]:
+    var tasks: [text] = []
+    for task in collect_schedules():
+        tasks.push(_assistant_managed_task_json(task, "dashboard"))
+    for task in collect_daemons():
+        tasks.push(_assistant_managed_task_json(task, "dashboard"))
+    for task in collect_remote_sessions():
+        tasks.push(_assistant_managed_task_json(task, "dashboard"))
+    tasks
+
+fn _assistant_collect_all_tasks() -> [text]:
+    var tasks: [text] = []
+    for session_id in _assistant_list_session_ids():
+        val session_json = _assistant_load_session(session_id)
+        if session_json != "":
+            tasks.push(_assistant_session_task_json(session_json))
+    for task_json in _assistant_collect_dashboard_tasks():
+        tasks.push(task_json)
+    tasks
+
+fn _assistant_collect_filtered_notifications(session_id: text, limit: i64, since_ts: i64) -> [text]:
+    var notifications: [text] = []
+    if session_id != "":
+        val content = file_read(_assistant_notifications_path(session_id))
+        for line in content.split("\n"):
+            val trimmed = line.trim()
+            if trimmed == "":
+                continue
+            val event_ts = extract_field(trimmed, "timestamp").to_i64() ?? 0
+            if since_ts > 0 and event_ts <= since_ts:
+                continue
+            notifications.push(_assistant_event_object(
+                extract_field(trimmed, "session_id"),
+                event_ts,
+                extract_field(trimmed, "kind"),
+                extract_field(trimmed, "message"),
+                extract_field(trimmed, "signal")
+            ))
+    else:
+        for sid in _assistant_list_session_ids():
+            val content = file_read(_assistant_notifications_path(sid))
+            for line in content.split("\n"):
+                val trimmed = line.trim()
+                if trimmed == "":
+                    continue
+                val event_ts = extract_field(trimmed, "timestamp").to_i64() ?? 0
+                if since_ts > 0 and event_ts <= since_ts:
+                    continue
+                notifications.push(_assistant_event_object(
+                    extract_field(trimmed, "session_id"),
+                    event_ts,
+                    extract_field(trimmed, "kind"),
+                    extract_field(trimmed, "message"),
+                    extract_field(trimmed, "signal")
+                ))
+    if limit <= 0 or notifications.len() <= limit:
+        return notifications
+    var trimmed_notifications: [text] = []
+    var start = notifications.len() - limit
+    var i = start
+    while i < notifications.len():
+        trimmed_notifications.push(notifications[i])
+        i = i + 1
+    trimmed_notifications
+
+fn _assistant_collect_timeline_events(session_id: text, limit: i64, since_ts: i64) -> [text]:
+    var events: [text] = []
+    val content = file_read(_assistant_timeline_path(session_id))
+    for line in content.split("\n"):
+        val trimmed = line.trim()
+        if trimmed == "":
+            continue
+        val event_ts = extract_field(trimmed, "timestamp").to_i64() ?? 0
+        if since_ts > 0 and event_ts <= since_ts:
+            continue
+        events.push(_assistant_event_object(
+            extract_field(trimmed, "session_id"),
+            event_ts,
+            extract_field(trimmed, "kind"),
+            extract_field(trimmed, "message"),
+            extract_field(trimmed, "signal")
+        ))
+    if limit <= 0 or events.len() <= limit:
+        return events
+    var trimmed_events: [text] = []
+    var start = events.len() - limit
+    var i = start
+    while i < events.len():
+        trimmed_events.push(events[i])
+        i = i + 1
+    trimmed_events
+
+fn _assistant_session_detail_json(session: AssistantSessionRecord) -> text:
+    var obj = LB()
+    obj = obj + jp("session_id", js(session.session_id))
+    obj = obj + "," + jp("name", js(session.name))
+    obj = obj + "," + jp("prompt", js(session.prompt))
+    obj = obj + "," + jp("mode", js(session.mode))
+    obj = obj + "," + jp("state", js(session.state))
+    obj = obj + "," + jp("summary", js(session.summary))
+    obj = obj + "," + jp("parent_session_id", js(session.parent_session_id))
+    obj = obj + "," + jp("created_at", str(session.created_at_ms))
+    obj = obj + "," + jp("updated_at", str(session.updated_at_ms))
+    obj = obj + "," + jp("last_signal", js(session.last_signal))
+    obj = obj + "," + jp("timeline_count", str(session.event_count))
+    obj = obj + "," + jp("notification_count", str(session.event_count))
+    if session.last_event_kind.trim() != "":
+        obj = obj + "," + jp("last_event_kind", js(session.last_event_kind))
+        obj = obj + "," + jp("last_event_message", js(session.last_event_detail))
+        obj = obj + "," + jp("last_event_signal", js(session.last_signal))
+        obj = obj + "," + jp("last_event_at", str(session.last_event_time_ms))
+    obj = obj + RB()
+    obj
+
+fn _assistant_timeline_event_json(event: AssistantTimelineRecord) -> text:
+    var obj = LB()
+    obj = obj + jp("timestamp", str(event.timestamp_ms))
+    obj = obj + "," + jp("session_id", js(event.session_id))
+    obj = obj + "," + jp("kind", js(event.kind))
+    obj = obj + "," + jp("message", js(event.message))
+    obj = obj + "," + jp("signal", js(event.signal))
+    obj = obj + RB()
+    obj
+
+fn _assistant_session_task_json_from_record(session: AssistantSessionRecord) -> text:
+    var obj = LB()
+    obj = obj + jp("id", js(session.session_id))
+    obj = obj + "," + jp("source", js("assistant"))
+    obj = obj + "," + jp("kind", js("assistant"))
+    obj = obj + "," + jp("state", js(session.state))
+    obj = obj + "," + jp("name", js(session.name))
+    obj = obj + "," + jp("command", js(session.prompt))
+    obj = obj + "," + jp("created_at", str(session.created_at_ms))
+    obj = obj + "," + jp("updated_at", str(session.updated_at_ms))
+    obj = obj + "," + jp("last_signal", js(session.last_signal))
+    obj = obj + RB()
+    obj
+
+fn _assistant_child_task_json(session: AssistantSessionRecord, task_id: text, objective: text, status: text, parent_task_id: text, child_session_id: text, resource_policy: text, owner_kind: text, result_summary: text, created_at_ms: i64, updated_at_ms: i64) -> text:
+    var obj = LB()
+    obj = obj + jp("id", js(task_id))
+    obj = obj + "," + jp("source", js("assistant"))
+    obj = obj + "," + jp("kind", js("child_task"))
+    obj = obj + "," + jp("state", js(status))
+    obj = obj + "," + jp("name", js(objective))
+    obj = obj + "," + jp("command", js(session.prompt))
+    obj = obj + "," + jp("session_id", js(session.session_id))
+    obj = obj + "," + jp("parent_session_id", js(session.session_id))
+    obj = obj + "," + jp("parent_task_id", js(parent_task_id))
+    obj = obj + "," + jp("child_session_id", js(child_session_id))
+    obj = obj + "," + jp("resource_policy", js(resource_policy))
+    obj = obj + "," + jp("owner_kind", js(owner_kind))
+    obj = obj + "," + jp("result_summary", js(result_summary))
+    obj = obj + "," + jp("created_at", str(created_at_ms))
+    obj = obj + "," + jp("updated_at", str(updated_at_ms))
+    obj = obj + RB()
+    obj
+
+fn _assistant_parse_json_object(text: text) -> any:
+    json_parse(text)
+
+# ---------------------------------------------------------------------------
+# Tool handlers
+# ---------------------------------------------------------------------------
+
+fn handle_assistant_start(id: text, body: text) -> text:
+    val now = _assistant_now_ms()
+    val session_id = _assistant_make_session_id(now)
+    var name = extract_field(body, "name")
+    val prompt = extract_field(body, "prompt")
+    var mode = extract_field(body, "mode")
+    val parent_session_id = extract_field(body, "parent_session_id")
+    if name == "":
+        name = _assistant_default_name(session_id, prompt)
+    if mode == "":
+        mode = "proactive"
+    val summary = _assistant_default_summary(name, prompt)
+    var session_json = LB()
+    session_json = session_json + jp("id", js(session_id))
+    session_json = session_json + "," + jp("name", js(name))
+    session_json = session_json + "," + jp("prompt", js(prompt))
+    session_json = session_json + "," + jp("mode", js(mode))
+    session_json = session_json + "," + jp("parent_session_id", js(parent_session_id))
+    session_json = session_json + "," + jp("state", js("running"))
+    session_json = session_json + "," + jp("summary", js(summary))
+    session_json = session_json + "," + jp("created_at", str(now))
+    session_json = session_json + "," + jp("updated_at", str(now))
+    session_json = session_json + RB()
+    val session_obj = _assistant_parse_json_object(session_json)
+    if session_obj == nil:
+        return make_tool_error(id, -32603, "Failed to build assistant session payload")
+    val created = assistant_store_create_session(ASSIST_ROOT, session_obj)
+    if created == nil:
+        return make_tool_error(id, -32603, "Failed to create assistant session")
+    val event_obj = _assistant_parse_json_object(
+        jo4(
+            jp("session_id", js(session_id)),
+            jp("kind", js("start")),
+            jp("message", js(summary)),
+            jp("signal", js("start"))
+        )
+    )
+    if event_obj == nil:
+        return make_tool_error(id, -32603, "Failed to build assistant start event")
+    assistant_store_append_event(ASSIST_ROOT, event_obj)
+    if val session = assistant_store_load_session(ASSIST_ROOT, session_id):
+        return make_tool_result(id, _assistant_session_detail_json(session))
+    return make_tool_error(id, -32603, "Failed to record assistant start event")
+
+fn handle_assistant_spawn_task(id: text, body: text) -> text:
+    val now = _assistant_now_ms()
+    val session_id = _assistant_make_session_id(now)
+    val parent_session_id = extract_field(body, "parent_session_id")
+    val prompt = extract_field(body, "prompt")
+    var name = extract_field(body, "name")
+    var mode = extract_field(body, "mode")
+
+    if prompt == "":
+        return make_tool_error(id, -32602, "Missing required parameter: prompt")
+
+    if name == "":
+        name = _assistant_default_name(session_id, prompt)
+    if mode == "":
+        mode = "child-task"
+
+    val summary = _assistant_default_summary(name, prompt)
+    var session_json = LB()
+    session_json = session_json + jp("id", js(session_id))
+    session_json = session_json + "," + jp("name", js(name))
+    session_json = session_json + "," + jp("prompt", js(prompt))
+    session_json = session_json + "," + jp("mode", js(mode))
+    session_json = session_json + "," + jp("parent_session_id", js(parent_session_id))
+    session_json = session_json + "," + jp("state", js("running"))
+    session_json = session_json + "," + jp("summary", js(summary))
+    session_json = session_json + "," + jp("created_at", str(now))
+    session_json = session_json + "," + jp("updated_at", str(now))
+    session_json = session_json + RB()
+    val session_obj = _assistant_parse_json_object(session_json)
+    if session_obj == nil:
+        return make_tool_error(id, -32603, "Failed to build assistant child-task payload")
+    val created = assistant_store_create_session(ASSIST_ROOT, session_obj)
+    if created == nil:
+        return make_tool_error(id, -32603, "Failed to create assistant child session")
+    val event_obj = _assistant_parse_json_object(
+        jo4(
+            jp("session_id", js(session_id)),
+            jp("kind", js("spawn")),
+            jp("message", js(summary)),
+            jp("signal", js("spawn"))
+        )
+    )
+    if event_obj == nil:
+        return make_tool_error(id, -32603, "Failed to build assistant spawn event")
+    assistant_store_append_event(ASSIST_ROOT, event_obj)
+    if parent_session_id != "":
+        var child_task_json = LB()
+        child_task_json = child_task_json + jp("session_id", js(parent_session_id))
+        child_task_json = child_task_json + "," + jp("objective", js(summary))
+        child_task_json = child_task_json + "," + jp("owner_kind", js("assistant"))
+        child_task_json = child_task_json + "," + jp("resource_policy", js("bounded"))
+        child_task_json = child_task_json + "," + jp("child_session_id", js(session_id))
+        child_task_json = child_task_json + "," + jp("status", js("running"))
+        child_task_json = child_task_json + "," + jp("result_summary", js(summary))
+        child_task_json = child_task_json + RB()
+        val child_task_obj = _assistant_parse_json_object(child_task_json)
+        if child_task_obj == nil:
+            return make_tool_error(id, -32603, "Failed to build assistant child task payload")
+        if assistant_store_create_child_task(ASSIST_ROOT, child_task_obj) == nil:
+            return make_tool_error(id, -32603, "Failed to record parent child-task state")
+    if val session = assistant_store_load_session(ASSIST_ROOT, session_id):
+        return make_tool_result(id, _assistant_session_detail_json(session))
+    return make_tool_error(id, -32603, "Failed to record assistant spawn event")
+
+fn handle_assistant_pause(id: text, body: text) -> text:
+    val session_id = extract_field(body, "session_id")
+    if session_id == "":
+        return make_tool_error(id, -32602, "Missing required parameter: session_id")
+    if not _assistant_session_exists(session_id):
+        return make_tool_error(id, -32602, "Session not found: " + session_id)
+    val updated = assistant_store_update_state(ASSIST_ROOT, session_id, "paused", "pause")
+    if updated == nil:
+        return make_tool_error(id, -32603, "Failed to pause session: " + session_id)
+    val event_obj = _assistant_parse_json_object(
+        jo4(
+            jp("session_id", js(session_id)),
+            jp("kind", js("pause")),
+            jp("message", js("session paused")),
+            jp("signal", js("pause"))
+        )
+    )
+    if event_obj == nil:
+        return make_tool_error(id, -32603, "Failed to build assistant pause event")
+    assistant_store_append_event(ASSIST_ROOT, event_obj)
+    if val session = assistant_store_load_session(ASSIST_ROOT, session_id):
+        return make_tool_result(id, _assistant_session_detail_json(session))
+    return make_tool_error(id, -32603, "Failed to record assistant pause event")
+
+fn handle_assistant_resume(id: text, body: text) -> text:
+    val session_id = extract_field(body, "session_id")
+    if session_id == "":
+        return make_tool_error(id, -32602, "Missing required parameter: session_id")
+    if not _assistant_session_exists(session_id):
+        return make_tool_error(id, -32602, "Session not found: " + session_id)
+    val updated = assistant_store_update_state(ASSIST_ROOT, session_id, "running", "resume")
+    if updated == nil:
+        return make_tool_error(id, -32603, "Failed to resume session: " + session_id)
+    val event_obj = _assistant_parse_json_object(
+        jo4(
+            jp("session_id", js(session_id)),
+            jp("kind", js("resume")),
+            jp("message", js("session resumed")),
+            jp("signal", js("resume"))
+        )
+    )
+    if event_obj == nil:
+        return make_tool_error(id, -32603, "Failed to build assistant resume event")
+    assistant_store_append_event(ASSIST_ROOT, event_obj)
+    if val session = assistant_store_load_session(ASSIST_ROOT, session_id):
+        return make_tool_result(id, _assistant_session_detail_json(session))
+    return make_tool_error(id, -32603, "Failed to record assistant resume event")
+
+fn handle_assistant_brief(id: text, body: text) -> text:
+    val session_id = extract_field(body, "session_id")
+    if session_id == "":
+        return make_tool_error(id, -32602, "Missing required parameter: session_id")
+    val brief = assistant_store_session_brief(ASSIST_ROOT, session_id)
+    if brief == "":
+        return make_tool_error(id, -32602, "Session not found: " + session_id)
+    make_tool_result(id, brief)
+
+fn handle_assistant_list_sessions(id: text, body: text) -> text:
+    val state_filter = extract_field(body, "state")
+    var items: [text] = []
+    for session in assistant_store_list_sessions(ASSIST_ROOT):
+        if state_filter != "" and session.state != state_filter:
+            continue
+        items.push(_assistant_session_detail_json(session))
+    make_tool_result(id, jo1(jp("sessions", "[" + items.join(",") + "]")))
+
+fn handle_assistant_get_session(id: text, body: text) -> text:
+    val session_id = extract_field(body, "session_id")
+    if session_id == "":
+        return make_tool_error(id, -32602, "Missing required parameter: session_id")
+    if val session = assistant_store_load_session(ASSIST_ROOT, session_id):
+        return make_tool_result(id, _assistant_session_detail_json(session))
+    return make_tool_error(id, -32602, "Session not found: " + session_id)
+
+fn handle_assistant_get_timeline(id: text, body: text) -> text:
+    val session_id = extract_field(body, "session_id")
+    if session_id == "":
+        return make_tool_error(id, -32602, "Missing required parameter: session_id")
+    if not _assistant_session_exists(session_id):
+        return make_tool_error(id, -32602, "Session not found: " + session_id)
+    val limit_str = extract_field(body, "limit")
+    val since_ts_str = extract_field(body, "since_ts")
+    val limit: i64 = if limit_str != "": limit_str.to_i64() ?? 20 else: 20
+    val since_ts: i64 = if since_ts_str != "": since_ts_str.to_i64() ?? 0 else: 0
+    var events: [text] = []
+    for event in assistant_store_collect_timeline(ASSIST_ROOT, session_id, limit, since_ts):
+        events.push(_assistant_timeline_event_json(event))
+    make_tool_result(id, jo2(jp("session_id", js(session_id)), jp("events", "[" + events.join(",") + "]")))
+
+fn handle_assistant_push_signal(id: text, body: text) -> text:
+    val session_id = extract_field(body, "session_id")
+    val signal = extract_field(body, "signal")
+    val payload = extract_field(body, "payload")
+    if session_id == "" or signal == "":
+        return make_tool_error(id, -32602, "Missing required parameter: session_id/signal")
+    if not _assistant_session_exists(session_id):
+        return make_tool_error(id, -32602, "Session not found: " + session_id)
+    val message = if payload != "": payload else: signal
+    val event_obj = _assistant_parse_json_object(
+        jo4(
+            jp("session_id", js(session_id)),
+            jp("kind", js("signal")),
+            jp("message", js(message)),
+            jp("signal", js(signal))
+        )
+    )
+    if event_obj == nil:
+        return make_tool_error(id, -32603, "Failed to build assistant signal event")
+    assistant_store_append_event(ASSIST_ROOT, event_obj)
+    val current_state = match assistant_store_load_session(ASSIST_ROOT, session_id):
+        case Some(session): session.state
+        case nil: ""
+    val updated = assistant_store_update_state(ASSIST_ROOT, session_id, current_state, signal)
+    if updated == nil:
+        return make_tool_error(id, -32603, "Failed to record signal: " + signal)
+    make_tool_result(id, jo4(jp("session_id", js(session_id)), jp("signal", js(signal)), jp("message", js(message)), jp("status", js("ok"))))
+
+fn handle_assistant_list_tasks(id: text, body: text) -> text:
+    val source_filter = extract_field(body, "source")
+    var items: [text] = []
+    for session in assistant_store_list_sessions(ASSIST_ROOT):
+        if source_filter == "" or source_filter == "assistant":
+            items.push(_assistant_session_task_json_from_record(session))
+            for task in session.child_tasks:
+                items.push(_assistant_child_task_json(
+                    session,
+                    task.task_id,
+                    task.objective,
+                    task.status,
+                    task.parent_task_id,
+                    task.child_session_id,
+                    task.resource_policy,
+                    task.owner_kind,
+                    task.result_summary,
+                    task.created_at_ms,
+                    task.updated_at_ms
+                ))
+    if source_filter == "" or source_filter == "dashboard":
+        for task_json in _assistant_collect_dashboard_tasks():
+            items.push(task_json)
+    make_tool_result(id, jo2(jp("tasks", "[" + items.join(",") + "]"), jp("count", str(items.len()))))
+
+fn handle_assistant_get_notifications(id: text, body: text) -> text:
+    val session_id = extract_field(body, "session_id")
+    val limit_str = extract_field(body, "limit")
+    val since_ts_str = extract_field(body, "since_ts")
+    val limit: i64 = if limit_str != "": limit_str.to_i64() ?? 20 else: 20
+    val since_ts: i64 = if since_ts_str != "": since_ts_str.to_i64() ?? 0 else: 0
+    if session_id != "" and not _assistant_session_exists(session_id):
+        return make_tool_error(id, -32602, "Session not found: " + session_id)
+    var notifications: [text] = []
+    if session_id != "":
+        for event in assistant_store_collect_notifications(ASSIST_ROOT, session_id, limit, since_ts):
+            notifications.push(_assistant_timeline_event_json(event))
+    else:
+        for session in assistant_store_list_sessions(ASSIST_ROOT):
+            for event in assistant_store_collect_notifications(ASSIST_ROOT, session.session_id, limit, since_ts):
+                notifications.push(_assistant_timeline_event_json(event))
+    make_tool_result(id, jo2(jp("session_id", js(session_id)), jp("notifications", "[" + notifications.join(",") + "]")))

@@ -1,0 +1,235 @@
+"""
+# RV64 Baremetal OS Boot Integration Test
+
+**Feature IDs:** #RV64-BOOT-001
+**Category:** OS
+**Difficulty:** 4/5
+**Status:** Draft
+
+## Overview
+
+Tests that the RV64GC hardware emulation can boot a minimal baremetal program.
+Verifies: reset vector, RAM access, UART output, instruction execution pipeline.
+Uses the rv64gc machine profile (QEMU virt layout) with inline test programs.
+"""
+
+# tag: only-compiled, slow
+
+import std.spec
+
+use hardware.rv64gc.mem.rv64_ram.Rv64Ram
+use hardware.rv64gc.core.rv64_regfile.Rv64RegFile
+use hardware.rv64gc.core.rv64_execute.{alu_execute, alu_execute_word}
+use hardware.rv64gc.core.rv64_decode.*
+use hardware.rv64gc.pkg.rv64_types_pkg.*
+use hardware.rv64gc.pkg.rv64_isa_pkg.*
+
+# QEMU virt memory map constants
+val DRAM_BASE: i64 = 0x80000000
+val UART_BASE: i64 = 0x10000000
+
+describe "RV64 Boot — Reset Vector":
+    """
+    ## Reset Vector at 0x80000000
+
+    After reset, PC must be at DRAM_BASE and all GPRs zeroed.
+    """
+
+    it "PC starts at DRAM_BASE (0x80000000)":
+        val reset_pc: i64 = DRAM_BASE
+        expect(reset_pc).to_equal(0x80000000)
+
+    it "all registers zero at reset":
+        val rf = Rv64RegFile.create()
+        var i = 0
+        var all_zero = true
+        while i < 32:
+            if rf.read(i) != 0:
+                all_zero = false
+            i = i + 1
+        expect(all_zero).to_equal(true)
+
+    it "x0 stays zero after attempted write":
+        var rf = Rv64RegFile.create()
+        rf.write(0, 0xDEAD)
+        expect(rf.read(0)).to_equal(0)
+
+describe "RV64 Boot — RAM Load and Execute":
+    """
+    ## Load Program to RAM and Execute
+
+    Simulate loading machine code into RAM at DRAM_BASE,
+    then fetch-decode-execute individual instructions.
+    """
+
+    it "load instruction bytes to RAM":
+        var ram = Rv64Ram.create(64)
+        # ADDI x10, x0, 42 = 0x02A00513
+        ram.write32(0, 0x02A00513)
+        expect(ram.read32(0).value).to_equal(0x02A00513)
+
+    it "fetch and decode ADDI from RAM":
+        var ram = Rv64Ram.create(64)
+        ram.write32(0, 0x02A00513)  # ADDI x10, x0, 42
+        val instr = ram.read32(0).value
+        val opcode = decode_opcode(instr)
+        val rd = decode_rd(instr)
+        val rs1 = decode_rs1(instr)
+        val imm = decode_imm_i(instr)
+        expect(opcode).to_equal(OP_OP_IMM)
+        expect(rd).to_equal(10)
+        expect(rs1).to_equal(0)
+        expect(imm).to_equal(42)
+
+    it "execute ADDI and writeback to register":
+        var rf = Rv64RegFile.create()
+        var ram = Rv64Ram.create(64)
+        ram.write32(0, 0x02A00513)  # ADDI x10, x0, 42
+        val instr = ram.read32(0).value
+        val rd = decode_rd(instr)
+        val rs1_val = rf.read(decode_rs1(instr))
+        val imm = decode_imm_i(instr)
+        val result = alu_execute(AluOp.Add, rs1_val, imm)
+        rf.write(rd, result)
+        expect(rf.read(10)).to_equal(42)
+
+    it "multi-instruction program: compute 3+4":
+        var rf = Rv64RegFile.create()
+        var ram = Rv64Ram.create(64)
+        # ADDI x10, x0, 3 = 0x00300513
+        # ADDI x11, x0, 4 = 0x00400593
+        # ADD  x12, x10, x11 = 0x00B50633
+        ram.write32(0, 0x00300513)
+        ram.write32(4, 0x00400593)
+        ram.write32(8, 0x00B50633)
+
+        # Execute instruction 1: ADDI x10, x0, 3
+        var instr = ram.read32(0).value
+        rf.write(decode_rd(instr), alu_execute(AluOp.Add, rf.read(decode_rs1(instr)), decode_imm_i(instr)))
+        expect(rf.read(10)).to_equal(3)
+
+        # Execute instruction 2: ADDI x11, x0, 4
+        instr = ram.read32(4).value
+        rf.write(decode_rd(instr), alu_execute(AluOp.Add, rf.read(decode_rs1(instr)), decode_imm_i(instr)))
+        expect(rf.read(11)).to_equal(4)
+
+        # Execute instruction 3: ADD x12, x10, x11
+        instr = ram.read32(8).value
+        val rs1 = rf.read(decode_rs1(instr))
+        val rs2 = rf.read(decode_rs2(instr))
+        rf.write(decode_rd(instr), alu_execute(AluOp.Add, rs1, rs2))
+        expect(rf.read(12)).to_equal(7)
+
+describe "RV64 Boot — Store and Load Cycle":
+    """
+    ## Store value to memory, load it back
+
+    Simulates SW/LW instruction pair.
+    """
+
+    it "store word then load word":
+        var ram = Rv64Ram.create(256)
+        # Store 0xDEADBEEF at address 128
+        ram.write32(128, 0xDEADBEEF)
+        # Load from address 128
+        val loaded = ram.read32(128).value
+        expect(loaded).to_equal(0xDEADBEEF)
+
+    it "store double then load double":
+        var ram = Rv64Ram.create(256)
+        ram.write64(128, 0xCAFEBABEDEADBEEF)
+        expect(ram.read64(128).value).to_equal(0xCAFEBABEDEADBEEF)
+
+    it "store byte then load byte with sign extension":
+        var ram = Rv64Ram.create(256)
+        ram.write8(128, 0x80)
+        val raw = ram.read8(128).value
+        # Simulate LB sign extension
+        val sign_ext = if (raw and 0x80) != 0: raw or 0xFFFFFFFFFFFFFF00 else: raw
+        expect(sign_ext).to_equal(0xFFFFFFFFFFFFFF80)
+
+describe "RV64 Boot — UART Output Simulation":
+    """
+    ## UART Output Path
+
+    Verify that writing bytes to UART THR address produces output.
+    Uses the RAM model as a simplified UART simulation.
+    """
+
+    it "write 'H' to UART address":
+        var uart_buffer: [i64] = []
+        val ch: i64 = 0x48  # 'H'
+        uart_buffer = uart_buffer + [ch]
+        expect(uart_buffer[0]).to_equal(0x48)
+
+    it "write 'Hello' byte-by-byte":
+        var uart_buffer: [i64] = []
+        val hello = [0x48, 0x65, 0x6C, 0x6C, 0x6F]
+        var i = 0
+        while i < hello.len():
+            uart_buffer = uart_buffer + [hello[i]]
+            i = i + 1
+        expect(uart_buffer.len()).to_equal(5)
+        expect(uart_buffer[0]).to_equal(0x48)
+        expect(uart_buffer[4]).to_equal(0x6F)
+
+    it "UART THR at offset 0 from UART_BASE":
+        val thr_addr = UART_BASE + 0
+        expect(thr_addr).to_equal(0x10000000)
+
+    it "UART LSR at offset 5 — TX ready check":
+        val lsr_addr = UART_BASE + 5
+        val lsr_val: i64 = 0x60  # THR empty + transmitter idle
+        val tx_ready = (lsr_val and 0x20) != 0
+        expect(tx_ready).to_equal(true)
+
+describe "RV64 Boot — Stack Setup":
+    """
+    ## Stack Initialization
+
+    Boot code must set SP (x2) to top of RAM.
+    """
+
+    it "set SP to top of 128MB RAM":
+        var rf = Rv64RegFile.create()
+        val stack_top = DRAM_BASE + 0x8000000  # 128MB
+        rf.write(2, stack_top)
+        expect(rf.read(2)).to_equal(0x88000000)
+
+    it "stack push/pop simulation":
+        var rf = Rv64RegFile.create()
+        var ram = Rv64Ram.create(256)
+        rf.write(2, 256)  # SP = 256
+
+        # Push: SP -= 8, store value
+        val sp = rf.read(2) - 8
+        rf.write(2, sp)
+        ram.write64(sp, 0xCAFEBABE)
+
+        # Pop: load value, SP += 8
+        val loaded = ram.read64(rf.read(2)).value
+        rf.write(2, rf.read(2) + 8)
+
+        expect(loaded).to_equal(0xCAFEBABE)
+        expect(rf.read(2)).to_equal(256)
+
+describe "RV64 Boot — W-Variant in Boot Code":
+    """
+    ## W-suffix instructions used in boot code
+
+    Boot code often uses ADDIW for 32-bit pointer arithmetic.
+    """
+
+    it "ADDIW for 32-bit counter":
+        var rf = Rv64RegFile.create()
+        rf.write(10, 0)
+        # Loop counter increment with ADDIW
+        val result = alu_execute_word(AluOp.Addw, rf.read(10), 1)
+        rf.write(10, result)
+        expect(rf.read(10)).to_equal(1)
+
+    it "ADDW for 32-bit address calculation":
+        val base: i64 = 0x10000000
+        val offset: i64 = 0x100
+        val result = alu_execute_word(AluOp.Addw, base, offset)
+        expect(result).to_equal(0x10000100)

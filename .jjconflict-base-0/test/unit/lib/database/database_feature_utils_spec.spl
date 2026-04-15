@@ -1,0 +1,72 @@
+# Feature Database Utilities Tests
+#
+# Parser-safe local coverage for metadata helpers.
+
+use nogc_sync_mut.database.feature_utils.{parse_sspec_metadata, parse_attr_list,
+    extract_quoted_string, extract_category_from_path, compare_feature_id}
+
+extern fn rt_file_write_text(path: text, content: text) -> bool
+
+fn check(condition: bool):
+    expect(condition).to_equal(true)
+
+fn file_write(path: text, content: text) -> bool:
+    rt_file_write_text(path, content)
+
+fn temp_path(name: text) -> text:
+    "/tmp/{name}_database_feature_utils_spec.spl"
+
+fn write_spec(name: text, content: text) -> text:
+    val path = temp_path(name)
+    check(file_write(path, content))
+    path
+
+describe "Database Feature Utils":
+    it "parses attribute lists":
+        val modes = parse_attr_list("modes(\"pure\", \"hybrid\")", "modes")
+        check(modes.len() == 2)
+        check(modes[0] == "pure")
+        check(modes[1] == "hybrid")
+
+    it "extracts quoted names":
+        check(extract_quoted_string("describe \"My Feature\":") == "My Feature")
+
+    it "extracts categories from feature paths":
+        check(extract_category_from_path("test/system/features/control_flow/loops_spec.spl") == "control_flow")
+        check(extract_category_from_path("spec.spl") == "uncategorized")
+
+    it "compares feature ids semantically":
+        check(compare_feature_id("1.2", "1.10") < 0)
+        check(compare_feature_id("1.10.1", "1.2.20") > 0)
+        check(compare_feature_id("alpha", "beta") < 0)
+
+    it "parses sspec metadata from a temp file":
+        val path = write_spec("metadata", """
+#[id("feature_001")]
+#[modes("pure", "hybrid")]
+#[skip_modes("jit")]
+#[platforms("linux", "macos")]
+#[ignore]
+describe "My Feature":
+    pass
+
+describe "Auto ID Feature":
+    pass
+""")
+        val items = parse_sspec_metadata(path)
+        check(items.len() == 2)
+        check(items[0].id == "feature_001")
+        check(items[0].name == "My Feature")
+        check(items[0].modes.len() == 2)
+        check(items[0].modes[0] == "pure")
+        check(items[0].skip_modes.len() == 1)
+        check(items[0].skip_modes[0] == "jit")
+        check(items[0].platforms.len() == 2)
+        check(items[0].platforms[1] == "macos")
+        check(items[0].is_ignored)
+        check(items[0].file_path == path)
+        check(items[1].id == "Auto ID Feature")
+        check(items[1].name == "Auto ID Feature")
+
+    it "returns empty metadata for missing file":
+        check(parse_sspec_metadata("/nonexistent/database_feature_utils_spec.spl").len() == 0)

@@ -1,0 +1,298 @@
+# CORS (Cross-Origin Resource Sharing) preflight and enforcement.
+# Implements the CORS protocol checks per the Fetch specification.
+# Validates preflight responses, determines when preflight is needed,
+# and enforces Access-Control-Allow-* header semantics.
+
+use examples.browser.entity.net.request_types {FetchRequest, FetchResponse, HttpMethod, RequestMode}
+use examples.browser.entity.net.cors_types {PreflightResult}
+use examples.browser.entity.net.url_types {Url, Origin}
+use examples.browser.shared.error {BrowserError, BrowserResult, network_error}
+use examples.browser.shared.logging {Logger, LogLevel}
+
+# The set of CORS-safelisted request headers (lowercase).
+# These headers never trigger a preflight request.
+val SIMPLE_HEADERS = ["accept", "accept-language", "content-language", "content-type"]
+
+# Content-Type values that are considered simple (no preflight needed).
+val SIMPLE_CONTENT_TYPES = [
+    "application/x-www-form-urlencoded",
+    "multipart/form-data",
+    "text/plain"
+]
+
+# CORS checker that validates cross-origin requests against server-provided
+# Access-Control-Allow-* headers. Determines preflight necessity and
+# constructs/validates OPTIONS preflight requests.
+class CorsChecker:
+    logger: Logger
+
+    static fn new(logger: Logger) -> CorsChecker:
+        CorsChecker(logger: logger)
+
+    # Verify that the response headers allow the cross-origin request.
+    # Checks Access-Control-Allow-Origin against the request origin and
+    # ensures credentials mode is respected.
+    fn check(request: FetchRequest, response_headers: [Pair<text, text>]) -> BrowserResult<()>:
+        val request_origin = Origin.from_url(request.url)
+        val origin_str = request_origin.to_text()
+        self.logger.debug("cors: checking response headers for origin {origin_str}")
+
+        # Extract the Access-Control-Allow-Origin header value
+        val allow_origin = self.get_header(response_headers, "access-control-allow-origin")
+
+        if val allowed = allow_origin:
+            # Wildcard allows any origin (but not with credentials)
+            if allowed == "*":
+                # When credentials mode is "include", wildcard is not permitted
+                match request.credentials:
+                    RequestCredentials.Include:
+                        self.logger.warn("cors: wildcard origin not allowed with credentials: include")
+                        return Err(network_error("CORS error: wildcard origin not allowed with credentials"))
+                    _:
+                        self.logger.debug("cors: wildcard origin allowed")
+                        return Ok(())
+
+            # Check if the specific origin matches
+            val allowed_origins = parse_allow_origin(allowed)
+            var origin_matched = false
+            for ao in allowed_origins:
+                if ao == origin_str:
+                    origin_matched = true
+
+            if not origin_matched:
+                self.logger.warn("cors: origin {origin_str} not in allowed list: {allowed}")
+                return Err(network_error("CORS error: origin '{origin_str}' not allowed by Access-Control-Allow-Origin"))
+
+            self.logger.debug("cors: origin {origin_str} is allowed")
+            Ok(())
+        else:
+            self.logger.warn("cors: no Access-Control-Allow-Origin header in response")
+            Err(network_error("CORS error: no Access-Control-Allow-Origin header present"))
+
+    # Determine whether a preflight OPTIONS request is required.
+    # Preflight is needed when the request uses a non-simple method or
+    # includes non-simple headers (per Fetch spec section 4.1).
+    fn needs_preflight(request: FetchRequest) -> bool:
+        # Non-simple methods always need preflight
+        if not is_simple_method(request.method):
+            self.logger.debug("cors: preflight needed (non-simple method)")
+            return true
+
+        # Check each request header against the safelist
+        for header in request.headers:
+            val name = header.first.to_lowercase()
+            if not is_simple_header(name):
+                self.logger.debug("cors: preflight needed (non-simple header: {name})")
+                return true
+
+            # Content-Type must also have a simple value
+            if name == "content-type":
+                val value = header.second.to_lowercase().trim()
+                # Strip any parameters (e.g., charset)
+                val base_type = if value.contains(";"):
+                    val parts = value.split(";")
+                    parts.get(0).unwrap_or("").trim()
+                else:
+                    value
+                var is_simple_ct = false
+                for ct in SIMPLE_CONTENT_TYPES:
+                    if base_type == ct:
+                        is_simple_ct = true
+                if not is_simple_ct:
+                    self.logger.debug("cors: preflight needed (non-simple content-type: {base_type})")
+                    return true
+
+        # Check if the request body is non-empty for non-GET/HEAD
+        # (POST with simple content-type is fine, already checked above)
+        self.logger.debug("cors: no preflight needed")
+        false
+
+    # Construct an OPTIONS preflight request matching the original request.
+    # Sets Access-Control-Request-Method and Access-Control-Request-Headers.
+    fn create_preflight(request: FetchRequest) -> FetchRequest:
+        val method_name = method_to_text(request.method)
+        self.logger.debug("cors: creating preflight for {method_name} {request.url.to_text()}")
+
+        var preflight_headers = [Pair<text, text>]()
+
+        # Origin header
+        val origin = Origin.from_url(request.url)
+        preflight_headers.push(Pair("Origin", origin.to_text()))
+
+        # Access-Control-Request-Method
+        preflight_headers.push(Pair("Access-Control-Request-Method", method_name))
+
+        # Access-Control-Request-Headers (only non-simple headers)
+        val non_simple = self.collect_non_simple_headers(request.headers)
+        if not non_simple.is_empty():
+            val header_list = non_simple.join(", ")
+            preflight_headers.push(Pair("Access-Control-Request-Headers", header_list))
+
+        FetchRequest(
+            url: request.url,
+            method: HttpMethod.Options,
+            headers: preflight_headers,
+            body: "",
+            mode: request.mode,
+            credentials: request.credentials
+        )
+
+    # Validate a preflight response against the original request.
+    # Checks that the response status is successful (200-299) and that
+    # Access-Control-Allow-Methods and Access-Control-Allow-Headers
+    # permit the original request.
+    fn validate_preflight(response: FetchResponse, original: FetchRequest) -> PreflightResult:
+        self.logger.debug("cors: validating preflight response (status: {response.status})")
+
+        # Preflight response must be successful
+        if response.status < 200 or response.status >= 300:
+            return PreflightResult.Denied(reason: "Preflight response status {response.status} is not successful")
+
+        # Check Access-Control-Allow-Methods
+        val allow_methods_header = self.get_header(response.headers, "access-control-allow-methods")
+        val original_method = method_to_text(original.method)
+
+        if val methods_str = allow_methods_header:
+            val allowed_methods = parse_allow_methods(methods_str)
+            if not self.list_contains_ci(allowed_methods, original_method):
+                # Simple methods are always implicitly allowed
+                if not is_simple_method(original.method):
+                    return PreflightResult.Denied(
+                        reason: "Method '{original_method}' not in Access-Control-Allow-Methods: {methods_str}"
+                    )
+        else:
+            # No Allow-Methods header; only simple methods are implicitly allowed
+            if not is_simple_method(original.method):
+                return PreflightResult.Denied(
+                    reason: "No Access-Control-Allow-Methods header and method '{original_method}' is not simple"
+                )
+
+        # Check Access-Control-Allow-Headers
+        val non_simple_headers = self.collect_non_simple_headers(original.headers)
+        if not non_simple_headers.is_empty():
+            val allow_headers_header = self.get_header(response.headers, "access-control-allow-headers")
+            if val headers_str = allow_headers_header:
+                val allowed_headers = parse_allow_headers(headers_str)
+                # Wildcard allows all headers
+                var wildcard = false
+                for ah in allowed_headers:
+                    if ah == "*":
+                        wildcard = true
+                if not wildcard:
+                    for needed in non_simple_headers:
+                        if not self.list_contains_ci(allowed_headers, needed):
+                            return PreflightResult.Denied(
+                                reason: "Header '{needed}' not in Access-Control-Allow-Headers: {headers_str}"
+                            )
+            else:
+                return PreflightResult.Denied(
+                    reason: "Non-simple headers present but no Access-Control-Allow-Headers in preflight response"
+                )
+
+        # Check Access-Control-Allow-Origin (reuse the main check logic)
+        val allow_origin = self.get_header(response.headers, "access-control-allow-origin")
+        if val ao = allow_origin:
+            val request_origin = Origin.from_url(original.url).to_text()
+            if ao != "*" and ao != request_origin:
+                return PreflightResult.Denied(
+                    reason: "Origin '{request_origin}' not allowed by preflight Access-Control-Allow-Origin: {ao}"
+                )
+        else:
+            return PreflightResult.Denied(reason: "No Access-Control-Allow-Origin header in preflight response")
+
+        self.logger.debug("cors: preflight validation passed")
+        PreflightResult.Allowed
+
+    # Collect header names from the request that are not in the CORS safelist.
+    fn collect_non_simple_headers(headers: [Pair<text, text>]) -> [text]:
+        var result = [text]()
+        for header in headers:
+            val name = header.first.to_lowercase()
+            if not is_simple_header(name):
+                result.push(name)
+        result
+
+    # Case-insensitive search for a value in a list.
+    fn list_contains_ci(haystack: [text], needle: text) -> bool:
+        val lower_needle = needle.to_lowercase()
+        for item in haystack:
+            if item.to_lowercase() == lower_needle:
+                return true
+        false
+
+    # Extract a header value by name (case-insensitive) from a header list.
+    fn get_header(headers: [Pair<text, text>], name: text) -> text?:
+        val lower_name = name.to_lowercase()
+        for header in headers:
+            if header.first.to_lowercase() == lower_name:
+                return header.second
+        nil
+
+# -- Module-level functions --
+
+# Check whether an HTTP method is a CORS-safelisted (simple) method.
+fn is_simple_method(method: HttpMethod) -> bool:
+    match method:
+        HttpMethod.Get: true
+        HttpMethod.Head: true
+        HttpMethod.Post: true
+        _: false
+
+# Check whether a header name (lowercase) is in the CORS safelist.
+fn is_simple_header(name: text) -> bool:
+    val lower = name.to_lowercase()
+    for h in SIMPLE_HEADERS:
+        if lower == h:
+            return true
+    false
+
+# Parse the Access-Control-Allow-Origin header value.
+# May be "*" (wildcard) or a single origin, or space-separated origins.
+fn parse_allow_origin(header: text) -> [text]:
+    val trimmed = header.trim()
+    if trimmed == "*":
+        return ["*"]
+    # The spec says Allow-Origin is a single origin or "*", but some servers
+    # return space-separated values. Handle both cases.
+    var result = [text]()
+    val parts = trimmed.split(" ")
+    for part in parts:
+        val p = part.trim()
+        if not p.is_empty():
+            result.push(p)
+    if result.is_empty():
+        result.push(trimmed)
+    result
+
+# Parse the Access-Control-Allow-Methods header value.
+# Comma-separated list of HTTP method names.
+fn parse_allow_methods(header: text) -> [text]:
+    var result = [text]()
+    val parts = header.split(",")
+    for part in parts:
+        val trimmed = part.trim()
+        if not trimmed.is_empty():
+            result.push(trimmed)
+    result
+
+# Parse the Access-Control-Allow-Headers header value.
+# Comma-separated list of header names.
+fn parse_allow_headers(header: text) -> [text]:
+    var result = [text]()
+    val parts = header.split(",")
+    for part in parts:
+        val trimmed = part.trim()
+        if not trimmed.is_empty():
+            result.push(trimmed)
+    result
+
+# Convert an HttpMethod enum value to its textual representation.
+fn method_to_text(method: HttpMethod) -> text:
+    match method:
+        HttpMethod.Get: "GET"
+        HttpMethod.Post: "POST"
+        HttpMethod.Put: "PUT"
+        HttpMethod.Delete: "DELETE"
+        HttpMethod.Head: "HEAD"
+        HttpMethod.Options: "OPTIONS"
+        HttpMethod.Patch: "PATCH"

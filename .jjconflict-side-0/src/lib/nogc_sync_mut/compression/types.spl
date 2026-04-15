@@ -1,0 +1,194 @@
+# compression/types.spl - Type definitions and data structures for compression
+#
+# Defines core data structures used across compression algorithms:
+# - RLE Entry: (character, count)
+# - Huffman Node: (value, frequency, left, right)
+# - Huffman Code: (character, bit_string)
+# - LZ77 Token: (offset, length, next_char)
+# - Bit Stream: (bits, length)
+# - Compression Result: (compressed_data, original_size, compressed_size, metadata)
+
+# =============================================================================
+# HUFFMAN TREE OPERATIONS
+# =============================================================================
+
+# Create a leaf node for Huffman tree
+fn huffman_leaf(char, freq):
+    return [char, freq, nil, nil]
+
+# Create an internal node for Huffman tree
+fn huffman_node(freq, left, right):
+    return [nil, freq, left, right]
+
+# Get frequency from a node
+fn huffman_freq(node):
+    if node == nil:
+        return 0
+    return node[1]
+
+# Check if node is a leaf
+fn huffman_is_leaf(node):
+    if node == nil:
+        return false
+    val left = node[2]
+    val right = node[3]
+    return left == nil
+
+# Build Huffman tree from frequency list
+fn build_huffman_tree(freqs):
+    if freqs == nil:
+        return nil
+
+    val len = freqs.length()
+    if len == 0:
+        return nil
+
+    # Create leaf nodes
+    var nodes = []
+    var i = 0
+
+    loop:
+        if i >= len:
+            break
+
+        val entry = freqs[i]
+        val ch = entry[0]
+        val count = entry[1]
+        val leaf = huffman_leaf(ch, count)
+        nodes = nodes + [leaf]
+
+        i = i + 1
+
+    # Build tree by combining two lowest-frequency nodes
+    loop:
+        if nodes.length() <= 1:
+            break
+
+        # Find two minimum frequency nodes
+        var min1_idx = 0
+        var min1_freq = huffman_freq(nodes[0])
+        var j = 1
+
+        loop:
+            if j >= nodes.length():
+                break
+
+            val freq = huffman_freq(nodes[j])
+            if freq < min1_freq:
+                min1_idx = j
+                min1_freq = freq
+
+            j = j + 1
+
+        val min1 = nodes[min1_idx]
+
+        # Remove min1 from nodes
+        var new_nodes = []
+        var k = 0
+        loop:
+            if k >= nodes.length():
+                break
+
+            if k != min1_idx:
+                new_nodes = new_nodes + [nodes[k]]
+
+            k = k + 1
+
+        nodes = new_nodes
+
+        # Find second minimum
+        var min2_idx = 0
+        var min2_freq = huffman_freq(nodes[0])
+        var m = 1
+
+        loop:
+            if m >= nodes.length():
+                break
+
+            val freq = huffman_freq(nodes[m])
+            if freq < min2_freq:
+                min2_idx = m
+                min2_freq = freq
+
+            m = m + 1
+
+        val min2 = nodes[min2_idx]
+
+        # Remove min2 from nodes
+        var new_nodes2 = []
+        var n = 0
+        loop:
+            if n >= nodes.length():
+                break
+
+            if n != min2_idx:
+                new_nodes2 = new_nodes2 + [nodes[n]]
+
+            n = n + 1
+
+        nodes = new_nodes2
+
+        # Create parent node
+        val combined_freq = min1_freq + min2_freq
+        val parent = huffman_node(combined_freq, min1, min2)
+        nodes = nodes + [parent]
+
+    if nodes.length() > 0:
+        return nodes[0]
+
+    return nil
+
+# Generate Huffman codes from tree
+fn generate_huffman_codes(root):
+    if root == nil:
+        return []
+
+    var codes = []
+
+    # Helper: traverse tree and build codes
+    codes = huffman_traverse(root, "", codes)
+
+    return codes
+
+# Recursively traverse tree to build code table
+fn huffman_traverse(node, code, codes):
+    if node == nil:
+        return codes
+
+    val is_leaf = huffman_is_leaf(node)
+
+    if is_leaf:
+        val ch = node[0]
+        var new_codes = codes + [[ch, code]]
+        return new_codes
+
+    val left = node[2]
+    val right = node[3]
+
+    var result = codes
+    result = huffman_traverse(left, code + "0", result)
+    result = huffman_traverse(right, code + "1", result)
+
+    return result
+
+# Look up code for a character
+fn huffman_lookup_code(codes, char):
+    if codes == nil:
+        return nil
+
+    var i = 0
+
+    loop:
+        if i >= codes.length():
+            break
+
+        val entry = codes[i]
+        val ch = entry[0]
+        val code = entry[1]
+
+        if ch == char:
+            return code
+
+        i = i + 1
+
+    return nil

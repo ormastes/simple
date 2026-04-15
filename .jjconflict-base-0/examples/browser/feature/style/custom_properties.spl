@@ -1,0 +1,185 @@
+# CSS custom properties (CSS variables) — var(--name, fallback) resolution.
+# Custom properties are inherited by default and resolved at computed-value time.
+# Supports nested var() references and fallback values.
+
+use examples.browser.entity.dom.css_types.(CSSValue, CSSDeclaration)
+use examples.browser.shared.logging.(Logger, LogLevel)
+
+# ---------------------------------------------------------------------------
+# CustomProperty — a single custom property definition.
+# ---------------------------------------------------------------------------
+
+class CustomProperty:
+    name: text
+    value: text
+    node_id: i64
+    inherited: bool
+
+    static fn create(name: text, value: text, node_id: i64) -> CustomProperty:
+        CustomProperty(name: name, value: value, node_id: node_id, inherited: true)
+
+# ---------------------------------------------------------------------------
+# Pair — simple two-element tuple for var() parsing.
+# ---------------------------------------------------------------------------
+
+class Pair:
+    first: text
+    second: text
+
+    static fn create(first: text, second: text) -> Pair:
+        Pair(first: first, second: second)
+
+# ---------------------------------------------------------------------------
+# CustomPropertyStore — stores and resolves custom properties per node.
+# ---------------------------------------------------------------------------
+
+class CustomPropertyStore:
+    properties: [CustomProperty]
+    logger: Logger
+
+    static fn new(logger: Logger) -> CustomPropertyStore:
+        CustomPropertyStore(properties: [CustomProperty](), logger: logger)
+
+    # Set a custom property on a node: --name: value
+    me set_property(node_id: i64, name: text, value: text):
+        if not is_custom_property(name):
+            self.logger.warn("attempted to set non-custom property '{name}' as custom property")
+            return
+
+        # Replace existing property if it exists for this node
+        var idx = 0
+        for prop in self.properties:
+            if prop.node_id == node_id and prop.name == name:
+                self.properties.set(idx, CustomProperty.create(name, value, node_id))
+                self.logger.trace("custom property updated: {name} = {value} on node {node_id}")
+                return
+            idx = idx + 1
+
+        # Add new property
+        self.properties.push(CustomProperty.create(name, value, node_id))
+        self.logger.trace("custom property set: {name} = {value} on node {node_id}")
+
+    # Get the value of a custom property for a node.
+    # Searches the node first, then ancestors via inherited properties.
+    fn get_property(node_id: i64, name: text) -> text?:
+        for prop in self.properties:
+            if prop.node_id == node_id and prop.name == name:
+                return prop.value
+        return nil
+
+    # Resolve a var(--name, fallback) reference to a concrete CSSValue.
+    # The input value is the raw text containing var().
+    fn resolve_var(value: text, node_id: i64) -> CSSValue:
+        if not has_var_reference(value):
+            return CSSValue.Keyword(v: value)
+
+        val parsed = parse_var_function(value)
+        val var_name = parsed.first
+        val fallback = parsed.second
+
+        # Look up the custom property
+        val resolved = self.get_property(node_id, var_name)
+        if val v = resolved:
+            # Recursively resolve if the value itself contains var()
+            if has_var_reference(v):
+                return self.resolve_var(v, node_id)
+            return CSSValue.Keyword(v: v)
+
+        # Use fallback if provided
+        if fallback.len() > 0:
+            if has_var_reference(fallback):
+                return self.resolve_var(fallback, node_id)
+            return CSSValue.Keyword(v: fallback)
+
+        # No value and no fallback — return initial
+        self.logger.warn("unresolved custom property: {var_name} on node {node_id}")
+        CSSValue.Initial
+
+    # Resolve all var() references in a list of declarations.
+    fn resolve_all_vars(declarations: [CSSDeclaration], node_id: i64) -> [CSSDeclaration]:
+        var result = [CSSDeclaration]()
+        for decl in declarations:
+            match decl.value:
+                CSSValue.Keyword(v):
+                    if has_var_reference(v):
+                        val resolved = self.resolve_var(v, node_id)
+                        result.push(CSSDeclaration(property: decl.property, value: resolved, important: decl.important))
+                    else:
+                        result.push(decl)
+                _:
+                    result.push(decl)
+        result
+
+    # Propagate inherited custom properties from parent to child.
+    # Copies all inherited custom properties from parent_id to child_id
+    # unless the child already defines the same property.
+    me inherit_properties(parent_id: i64, child_id: i64):
+        var to_add = [CustomProperty]()
+
+        for prop in self.properties:
+            if prop.node_id == parent_id and prop.inherited:
+                # Check if child already defines this property
+                var child_has = false
+                for existing in self.properties:
+                    if existing.node_id == child_id and existing.name == prop.name:
+                        child_has = true
+                if not child_has:
+                    to_add.push(CustomProperty(
+                        name: prop.name,
+                        value: prop.value,
+                        node_id: child_id,
+                        inherited: true
+                    ))
+
+        for p in to_add:
+            self.properties.push(p)
+
+        if to_add.len() > 0:
+            self.logger.trace("inherited {to_add.len()} custom properties from node {parent_id} to {child_id}")
+
+# ---------------------------------------------------------------------------
+# Parsing helpers.
+# ---------------------------------------------------------------------------
+
+# Check if a property name is a custom property (starts with "--").
+fn is_custom_property(name: text) -> bool:
+    if name.len() < 3:
+        return false
+    return name.starts_with("--")
+
+# Check if a value string contains a var() reference.
+fn has_var_reference(value: text) -> bool:
+    value.contains("var(")
+
+# Parse a var(--name, fallback) function call.
+# Returns a Pair with first = variable name, second = fallback value.
+fn parse_var_function(value: text) -> Pair:
+    # Find "var(" prefix
+    val var_start = value.index_of("var(")
+    if var_start < 0:
+        return Pair.create("", "")
+
+    # Extract content between var( and matching )
+    val content_start = var_start + 4
+    var paren_depth = 1
+    var content_end = content_start
+    while content_end < value.len() and paren_depth > 0:
+        val ch = value.char_at(content_end)
+        if ch == "(":
+            paren_depth = paren_depth + 1
+        else if ch == ")":
+            paren_depth = paren_depth - 1
+        if paren_depth > 0:
+            content_end = content_end + 1
+
+    val content = value.substring(content_start, content_end).trim()
+
+    # Split on first comma to separate name from fallback
+    val comma_pos = content.index_of(",")
+    if comma_pos < 0:
+        # No fallback
+        return Pair.create(content.trim(), "")
+
+    val var_name = content.substring(0, comma_pos).trim()
+    val fallback = content.substring(comma_pos + 1, content.len()).trim()
+    Pair.create(var_name, fallback)

@@ -1,0 +1,637 @@
+# @cover src/lib/common/math_repr.spl 90%
+"""
+# Math Block Rendering Specification
+
+**Feature IDs:** #1090-1102 (math block rendering)
+**Category:** Syntax / Math DSL / Rendering
+**Difficulty:** 3/5
+**Status:** Implemented
+
+## Overview
+
+Intensive tests for the math expression rendering pipeline:
+- `to_text()`:         Normalized plain text
+- `to_debug()`:        AST structure
+- `to_pretty()`:       Unicode pretty print
+- `to_md()`:           Markdown LaTeX
+- `render_latex_raw()`: Raw LaTeX output
+
+Covers edge cases: nested fracs, sum/integral binders, transpose,
+subscript, complex DL equations, Greek letters, operator precedence,
+implicit multiplication, and LaTeX-style commands.
+"""
+
+use std.math_repr.{to_text, to_debug, to_pretty, to_md, render_latex_raw}
+
+# ============================================================================
+# to_text — Normalized Plain Text
+# ============================================================================
+
+describe "to_text rendering":
+
+    context "arithmetic":
+        it "renders addition":
+            expect(to_text("2 + 3")).to_equal("2 + 3")
+
+        it "renders subtraction":
+            expect(to_text("10 - 3")).to_equal("10 - 3")
+
+        it "renders multiplication":
+            expect(to_text("4 * 5")).to_equal("4 * 5")
+
+        it "renders division":
+            expect(to_text("15 / 3")).to_equal("15 / 3")
+
+        it "renders negation":
+            expect(to_text("-5")).to_equal("-5")
+
+        it "renders parenthesized group":
+            expect(to_text("(2 + 3) * 4")).to_equal("(2 + 3) * 4")
+
+        it "renders power":
+            expect(to_text("x^2")).to_equal("x^2")
+
+        it "renders complex expression":
+            expect(to_text("2 + 3 * 4")).to_equal("2 + 3 * 4")
+
+    context "functions":
+        it "renders sqrt":
+            expect(to_text("sqrt(16)")).to_equal("sqrt(16)")
+
+        it "renders abs":
+            expect(to_text("abs(-5)")).to_equal("abs(-5)")
+
+        it "renders frac as division":
+            expect(to_text("frac(1, 2)")).to_equal("1 / 2")
+
+        it "renders nested frac":
+            expect(to_text("frac(1, frac(1, 2))")).to_equal("1 / 1 / 2")
+
+        it "renders multi-arg function":
+            expect(to_text("dot(a, b)")).to_equal("dot(a, b)")
+
+    context "subscript and transpose":
+        it "renders subscript":
+            expect(to_text("x[0]")).to_equal("x[0]")
+
+        it "renders nested subscript":
+            expect(to_text("A[0][1]")).to_equal("A[0][1]")
+
+        it "renders transpose":
+            expect(to_text("A'")).to_equal("A'")
+
+    context "binders":
+        it "renders sum":
+            expect(to_text("sum(i, 0..10) i")).to_contain("sum")
+            expect(to_text("sum(i, 0..10) i")).to_contain("0")
+            expect(to_text("sum(i, 0..10) i")).to_contain("10")
+
+        it "renders integral":
+            expect(to_text("int(x, 0..1) x")).to_contain("int")
+            expect(to_text("int(x, 0..1) x")).to_contain("0")
+            expect(to_text("int(x, 0..1) x")).to_contain("1")
+
+
+# ============================================================================
+# to_debug — AST Structure
+# ============================================================================
+
+describe "to_debug rendering":
+
+    context "literals and identifiers":
+        it "renders number":
+            expect(to_debug("42")).to_equal("Num(42)")
+
+        it "renders float":
+            expect(to_debug("3.14")).to_equal("Num(3.14)")
+
+        it "renders identifier":
+            expect(to_debug("x")).to_equal("Id(x)")
+
+    context "binary operators":
+        it "renders addition":
+            expect(to_debug("2 + 3")).to_equal("Add(Num(2), Num(3))")
+
+        it "renders subtraction":
+            expect(to_debug("10 - 3")).to_equal("Sub(Num(10), Num(3))")
+
+        it "renders multiplication":
+            expect(to_debug("4 * 5")).to_equal("Mul(Num(4), Num(5))")
+
+        it "renders division":
+            expect(to_debug("15 / 3")).to_equal("Div(Num(15), Num(3))")
+
+        it "renders power":
+            expect(to_debug("x^2")).to_equal("Pow(Id(x), Num(2))")
+
+    context "unary and grouping":
+        it "renders negation":
+            expect(to_debug("-5")).to_equal("Neg(Num(5))")
+
+        it "renders group":
+            expect(to_debug("(x)")).to_equal("Group(Id(x))")
+
+    context "functions":
+        it "renders frac":
+            expect(to_debug("frac(1, 2)")).to_equal("Frac(Num(1), Num(2))")
+
+        it "renders nested frac":
+            expect(to_debug("frac(1, frac(2, 3))")).to_equal("Frac(Num(1), Frac(Num(2), Num(3)))")
+
+        it "renders sqrt call":
+            expect(to_debug("sqrt(x)")).to_equal("Call(sqrt, Id(x))")
+
+        it "renders multi-arg call":
+            expect(to_debug("dot(a, b)")).to_equal("Call(dot, Id(a), Id(b))")
+
+    context "postfix":
+        it "renders subscript":
+            expect(to_debug("x[0]")).to_contain("Sub(")
+
+        it "renders transpose":
+            expect(to_debug("A'")).to_equal("Transpose(Id(A))")
+
+    context "precedence":
+        it "renders add-mul precedence":
+            expect(to_debug("2 + 3 * 4")).to_equal("Add(Num(2), Mul(Num(3), Num(4)))")
+
+        it "renders power right-assoc with unary":
+            # x^-2 means x^(-2)
+            expect(to_debug("x^-2")).to_equal("Pow(Id(x), Neg(Num(2)))")
+
+    context "complex expressions":
+        it "renders sigmoid":
+            val ast = to_debug("frac(1, 1 + exp(-x))")
+            expect(ast).to_contain("Frac")
+            expect(ast).to_contain("Add")
+            expect(ast).to_contain("Call(exp")
+            expect(ast).to_contain("Neg(Id(x))")
+
+        it "renders layer norm":
+            val ast = to_debug("frac(x - mu, sqrt(sigma^2 + epsilon))")
+            expect(ast).to_contain("Frac")
+            expect(ast).to_contain("Sub(Id(x), Id(mu))")
+            expect(ast).to_contain("Call(sqrt")
+            expect(ast).to_contain("Pow(Id(sigma), Num(2))")
+
+
+# ============================================================================
+# render_latex_raw — LaTeX Output
+# ============================================================================
+
+describe "render_latex_raw rendering":
+
+    context "arithmetic":
+        it "renders addition":
+            expect(render_latex_raw("2 + 3")).to_equal("2 + 3")
+
+        it "renders subtraction":
+            expect(render_latex_raw("10 - 3")).to_equal("10 - 3")
+
+        it "renders explicit multiplication as cdot":
+            expect(render_latex_raw("4 * 5")).to_contain("\\cdot")
+
+        it "renders division":
+            expect(render_latex_raw("15 / 3")).to_equal("15 / 3")
+
+        it "renders power":
+            val latex = render_latex_raw("x^2")
+            expect(latex).to_contain("x")
+            expect(latex).to_contain("2")
+
+        it "renders negation":
+            expect(render_latex_raw("-x")).to_equal("-x")
+
+    context "fractions":
+        it "renders frac":
+            val latex = render_latex_raw("frac(1, 2)")
+            expect(latex).to_contain("\\frac")
+            expect(latex).to_contain("{1}")
+            expect(latex).to_contain("{2}")
+
+        it "renders nested frac":
+            val latex = render_latex_raw("frac(1, frac(2, 3))")
+            expect(latex).to_contain("\\frac")
+            expect(latex).to_contain("{1}")
+            expect(latex).to_contain("{\\frac")
+
+        it "renders frac with complex numerator":
+            val latex = render_latex_raw("frac(x + 1, 2)")
+            expect(latex).to_contain("\\frac")
+            expect(latex).to_contain("x + 1")
+
+        it "renders frac with complex denominator":
+            val latex = render_latex_raw("frac(1, x^2 + 1)")
+            expect(latex).to_contain("\\frac")
+
+    context "functions":
+        it "renders sqrt":
+            val latex = render_latex_raw("sqrt(x)")
+            expect(latex).to_contain("\\sqrt")
+
+        it "renders known function sin":
+            val latex = render_latex_raw("sin(x)")
+            expect(latex).to_contain("\\sin")
+
+        it "renders known function cos":
+            val latex = render_latex_raw("cos(x)")
+            expect(latex).to_contain("\\cos")
+
+        it "renders known function exp":
+            val latex = render_latex_raw("exp(x)")
+            expect(latex).to_contain("\\exp")
+
+        it "renders known function log":
+            val latex = render_latex_raw("log(x)")
+            expect(latex).to_contain("\\log")
+
+        it "renders known function ln":
+            val latex = render_latex_raw("ln(x)")
+            expect(latex).to_contain("\\ln")
+
+        it "renders known function tanh":
+            val latex = render_latex_raw("tanh(x)")
+            expect(latex).to_contain("\\tanh")
+
+        it "renders unknown function as operatorname":
+            val latex = render_latex_raw("relu(x)")
+            expect(latex).to_contain("\\operatorname{relu}")
+
+        it "renders nested sqrt in frac":
+            val latex = render_latex_raw("frac(1, sqrt(x))")
+            expect(latex).to_contain("\\frac")
+            expect(latex).to_contain("\\sqrt")
+
+    context "greek letters":
+        it "renders alpha":
+            expect(render_latex_raw("alpha")).to_equal("\\alpha")
+
+        it "renders pi":
+            expect(render_latex_raw("pi")).to_equal("\\pi")
+
+        it "renders theta":
+            expect(render_latex_raw("theta")).to_equal("\\theta")
+
+        it "renders sigma":
+            expect(render_latex_raw("sigma")).to_equal("\\sigma")
+
+        it "renders omega":
+            expect(render_latex_raw("omega")).to_equal("\\omega")
+
+        it "renders upper Gamma":
+            expect(render_latex_raw("Gamma")).to_equal("\\Gamma")
+
+        it "renders upper Sigma":
+            expect(render_latex_raw("Sigma")).to_equal("\\Sigma")
+
+        it "renders upper Omega":
+            expect(render_latex_raw("Omega")).to_equal("\\Omega")
+
+    context "subscript and transpose":
+        it "renders subscript":
+            val latex = render_latex_raw("x[i]")
+            expect(latex).to_contain("x")
+            expect(latex).to_contain("i")
+
+        it "renders transpose":
+            val latex = render_latex_raw("A'")
+            expect(latex).to_contain("A")
+            expect(latex).to_contain("T")
+
+    context "binders":
+        it "renders sum":
+            val latex = render_latex_raw("sum(i, 0..10) i")
+            expect(latex).to_contain("\\sum")
+            expect(latex).to_contain("i")
+
+        it "renders integral":
+            val latex = render_latex_raw("int(x, 0..1) x")
+            expect(latex).to_contain("\\int")
+            expect(latex).to_contain("x")
+
+    context "DL equations":
+        it "renders sigmoid":
+            val latex = render_latex_raw("frac(1, 1 + exp(-x))")
+            expect(latex).to_contain("\\frac")
+            expect(latex).to_contain("\\exp")
+
+        it "renders MSE loss":
+            val latex = render_latex_raw("frac(1, n) * sum(i, 1..n) (y[i] - pred[i])^2")
+            expect(latex).to_contain("\\frac")
+            expect(latex).to_contain("\\sum")
+
+        it "renders softmax numerator":
+            val latex = render_latex_raw("frac(exp(x[i]), sum(j, 1..n) exp(x[j]))")
+            expect(latex).to_contain("\\frac")
+            expect(latex).to_contain("\\exp")
+            expect(latex).to_contain("\\sum")
+
+        it "renders layer norm":
+            val latex = render_latex_raw("frac(x - mu, sqrt(sigma^2 + epsilon))")
+            expect(latex).to_contain("\\frac")
+            expect(latex).to_contain("\\sqrt")
+            expect(latex).to_contain("\\epsilon")
+
+        it "renders SGD update":
+            val latex = render_latex_raw("theta - alpha * nabla * J(theta)")
+            expect(latex).to_contain("\\theta")
+            expect(latex).to_contain("\\alpha")
+            expect(latex).to_contain("\\nabla")
+
+        it "renders cross entropy":
+            val latex = render_latex_raw("-sum(i, 1..n) y[i] * log(pred[i])")
+            expect(latex).to_contain("\\sum")
+            expect(latex).to_contain("\\log")
+
+        it "renders xavier init":
+            val latex = render_latex_raw("sqrt(frac(6, fan_in + fan_out))")
+            expect(latex).to_contain("\\sqrt")
+            expect(latex).to_contain("\\frac")
+
+        it "renders attention scores":
+            val latex = render_latex_raw("frac(Q * K', sqrt(d_k))")
+            expect(latex).to_contain("\\frac")
+            expect(latex).to_contain("\\sqrt")
+            expect(latex).to_contain("T")
+
+
+# ============================================================================
+# to_pretty — Unicode Pretty Print
+# ============================================================================
+
+describe "to_pretty rendering":
+
+    context "identifiers and constants":
+        it "renders plain identifier":
+            expect(to_pretty("x")).to_equal("x")
+
+        it "renders greek alpha":
+            expect(to_pretty("alpha")).to_equal("α")
+
+        it "renders greek pi":
+            expect(to_pretty("pi")).to_equal("π")
+
+        it "renders greek theta":
+            expect(to_pretty("theta")).to_equal("θ")
+
+        it "renders greek sigma":
+            expect(to_pretty("sigma")).to_equal("σ")
+
+        it "renders greek omega":
+            expect(to_pretty("omega")).to_equal("ω")
+
+        it "renders greek lambda":
+            expect(to_pretty("lambda")).to_equal("λ")
+
+        it "renders upper Gamma":
+            expect(to_pretty("Gamma")).to_equal("Γ")
+
+        it "renders upper Delta":
+            expect(to_pretty("Delta")).to_equal("Δ")
+
+        it "renders upper Sigma":
+            expect(to_pretty("Sigma")).to_equal("Σ")
+
+        it "renders upper Omega":
+            expect(to_pretty("Omega")).to_equal("Ω")
+
+    context "arithmetic":
+        it "renders addition":
+            expect(to_pretty("2 + 3")).to_equal("2 + 3")
+
+        it "renders subtraction":
+            expect(to_pretty("10 - 3")).to_equal("10 - 3")
+
+        it "renders negation":
+            expect(to_pretty("-x")).to_equal("-x")
+
+    context "power — superscript":
+        it "renders x^2":
+            val p = to_pretty("x^2")
+            expect(p).to_contain("x")
+            # Should use superscript ²
+            expect(p).to_contain("²")
+
+        it "renders x^3":
+            val p = to_pretty("x^3")
+            expect(p).to_contain("³")
+
+        it "renders x^n":
+            val p = to_pretty("x^n")
+            expect(p).to_contain("x")
+
+    context "fractions":
+        it "renders simple frac":
+            val p = to_pretty("frac(1, 2)")
+            expect(p).to_equal("(1)/(2)")
+
+        it "renders nested frac":
+            val p = to_pretty("frac(1, frac(2, 3))")
+            expect(p).to_contain("1")
+            expect(p).to_contain("2")
+            expect(p).to_contain("3")
+
+    context "sqrt":
+        it "renders sqrt":
+            val p = to_pretty("sqrt(x)")
+            expect(p).to_contain("√")
+            expect(p).to_contain("x")
+
+        it "renders sqrt of expression":
+            val p = to_pretty("sqrt(x^2 + 1)")
+            expect(p).to_contain("√")
+
+    context "binders":
+        it "renders sum with Unicode sigma":
+            val p = to_pretty("sum(i, 0..10) i^2")
+            expect(p).to_equal("∑(i=0..10) i²")
+
+        it "renders integral with Unicode symbol":
+            val p = to_pretty("int(x, 0..1) x^2")
+            expect(p).to_equal("∫(x=0..1) x²")
+
+    context "DL equations":
+        it "renders sigmoid":
+            val p = to_pretty("frac(1, 1 + exp(-x))")
+            expect(p).to_contain("1")
+            expect(p).to_contain("exp")
+
+        it "renders layer norm":
+            val p = to_pretty("frac(x - mu, sqrt(sigma^2 + epsilon))")
+            expect(p).to_contain("√")
+            expect(p).to_contain("μ")
+            expect(p).to_contain("σ")
+            expect(p).to_contain("ε")
+
+        it "renders SGD update with greek":
+            val p = to_pretty("theta - alpha * grad")
+            expect(p).to_contain("θ")
+            expect(p).to_contain("α")
+
+        it "renders xavier init":
+            val p = to_pretty("sqrt(frac(6, fan_in + fan_out))")
+            expect(p).to_contain("√")
+
+
+# ============================================================================
+# to_md — Markdown LaTeX
+# ============================================================================
+
+describe "to_md rendering":
+
+    it "wraps in dollar signs":
+        val md = to_md("x + 1")
+        expect(md).to_start_with("$")
+        expect(md).to_end_with("$")
+
+    it "renders frac in markdown":
+        val md = to_md("frac(1, 2)")
+        expect(md).to_contain("\\frac")
+        expect(md).to_start_with("$")
+        expect(md).to_end_with("$")
+
+    it "renders greek in markdown":
+        val md = to_md("alpha + beta")
+        expect(md).to_contain("\\alpha")
+        expect(md).to_contain("\\beta")
+        expect(md).to_start_with("$")
+
+    it "renders complex DL equation":
+        val md = to_md("frac(1, 1 + exp(-x))")
+        expect(md).to_contain("\\frac")
+        expect(md).to_contain("\\exp")
+        expect(md).to_start_with("$")
+        expect(md).to_end_with("$")
+
+    it "renders sum binder":
+        val md = to_md("sum(i, 1..n) x[i]^2")
+        expect(md).to_contain("\\sum")
+        expect(md).to_start_with("$")
+
+
+# ============================================================================
+# Edge Cases — Stress Tests
+# ============================================================================
+
+describe "rendering edge cases":
+
+    context "deeply nested":
+        it "renders triple-nested frac":
+            val latex = render_latex_raw("frac(frac(1, 2), frac(3, 4))")
+            expect(latex).to_contain("\\frac")
+            expect(latex).to_contain("{1}")
+            expect(latex).to_contain("{2}")
+            expect(latex).to_contain("{3}")
+            expect(latex).to_contain("{4}")
+
+        it "renders frac inside sqrt inside frac":
+            val latex = render_latex_raw("frac(1, sqrt(frac(2, 3)))")
+            expect(latex).to_contain("\\frac")
+            expect(latex).to_contain("\\sqrt")
+
+        it "renders power of frac":
+            val latex = render_latex_raw("frac(1, 2)^3")
+            expect(latex).to_contain("\\frac")
+
+    context "implicit multiplication":
+        it "renders 2x":
+            val t = to_text("2x")
+            expect(t).to_contain("2")
+            expect(t).to_contain("x")
+
+        it "renders 3(x + 1)":
+            val t = to_text("3(x + 1)")
+            expect(t).to_contain("3")
+            expect(t).to_contain("x + 1")
+
+    context "complex DL architectures":
+        it "renders attention formula":
+            # Attention(Q, K, V) = softmax(QK^T / sqrt(d_k)) V
+            val latex = render_latex_raw("frac(Q * K', sqrt(d_k))")
+            expect(latex).to_contain("\\frac")
+            expect(latex).to_contain("\\sqrt")
+
+        it "renders batch norm":
+            val latex = render_latex_raw("gamma * frac(x - mu, sqrt(sigma^2 + epsilon)) + beta")
+            expect(latex).to_contain("\\gamma")
+            expect(latex).to_contain("\\frac")
+            expect(latex).to_contain("\\sqrt")
+            expect(latex).to_contain("\\beta")
+            expect(latex).to_contain("\\epsilon")
+
+        it "renders KL divergence":
+            val latex = render_latex_raw("sum(i, 1..n) p[i] * log(frac(p[i], q[i]))")
+            expect(latex).to_contain("\\sum")
+            expect(latex).to_contain("\\log")
+            expect(latex).to_contain("\\frac")
+
+        it "renders GELU approximation":
+            # 0.5 * x * (1 + tanh(sqrt(2/pi) * (x + 0.044715 * x^3)))
+            val latex = render_latex_raw("0.5 * x * (1 + tanh(sqrt(frac(2, pi)) * (x + 0.044715 * x^3)))")
+            expect(latex).to_contain("\\tanh")
+            expect(latex).to_contain("\\sqrt")
+            expect(latex).to_contain("\\frac")
+            expect(latex).to_contain("\\pi")
+
+        it "renders Adam optimizer update":
+            val latex = render_latex_raw("theta - alpha * frac(m_hat, sqrt(v_hat) + epsilon)")
+            expect(latex).to_contain("\\theta")
+            expect(latex).to_contain("\\alpha")
+            expect(latex).to_contain("\\frac")
+            expect(latex).to_contain("\\sqrt")
+            expect(latex).to_contain("\\epsilon")
+
+    context "m{} loss{} nograd{} evaluation parity in rendering":
+        it "m{} and loss{} render same to_pretty":
+            val m_text = to_pretty("frac(1, 1 + exp(-x))")
+            # loss{} and nograd{} use the same rendering pipeline
+            # (they all pass the inner expression to math_repr)
+            val l_text = to_pretty("frac(1, 1 + exp(-x))")
+            expect(m_text).to_equal(l_text)
+
+        it "m{} and loss{} render same LaTeX":
+            val m_latex = render_latex_raw("theta - alpha * grad")
+            val l_latex = render_latex_raw("theta - alpha * grad")
+            expect(m_latex).to_equal(l_latex)
+
+    context "Greek mixed with operators":
+        it "renders alpha * beta + gamma":
+            val latex = render_latex_raw("alpha * beta + gamma")
+            expect(latex).to_contain("\\alpha")
+            expect(latex).to_contain("\\beta")
+            expect(latex).to_contain("\\gamma")
+
+        it "renders partial derivative notation":
+            val latex = render_latex_raw("partial * f / partial * x")
+            expect(latex).to_contain("\\partial")
+
+        it "renders nabla operator":
+            val latex = render_latex_raw("nabla * f(x)")
+            expect(latex).to_contain("\\nabla")
+
+    context "subscript chains":
+        it "renders A[i][j]":
+            val latex = render_latex_raw("A[i][j]")
+            expect(latex).to_contain("A")
+            expect(latex).to_contain("i")
+            expect(latex).to_contain("j")
+
+        it "renders x[i]^2":
+            val latex = render_latex_raw("x[i]^2")
+            expect(latex).to_contain("x")
+            expect(latex).to_contain("i")
+
+    context "empty and minimal":
+        it "renders single number":
+            expect(render_latex_raw("42")).to_equal("42")
+            expect(to_pretty("42")).to_equal("42")
+            expect(to_text("42")).to_equal("42")
+
+        it "renders single identifier":
+            expect(render_latex_raw("x")).to_equal("x")
+            expect(to_pretty("x")).to_equal("x")
+            expect(to_text("x")).to_equal("x")
+
+        it "renders single greek letter":
+            expect(render_latex_raw("pi")).to_equal("\\pi")
+            expect(to_pretty("pi")).to_equal("π")

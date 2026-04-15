@@ -1,0 +1,110 @@
+#![allow(unnamed_duplicate_typed_args)]
+@allow(unnamed_duplicate_typed_args)
+# Simple LSP MCP Protocol — initialize, tools list, schemas
+#
+# Uses shared mcp_sdk for JSON building and JSON-RPC framing.
+
+use app.simple_lsp_mcp.json_helpers.{LB, RB, Q, SB_L, SB_R, jp, js, jo1, jo2, jo3, escape_json, jsonrpc_result}
+
+# NOTE: These caches used to live in main.spl but cross-module var
+# references don't resolve correctly in native builds — the reference
+# to main.spl's INIT_CACHE from protocol.spl was reading nil. Moving
+# the caches into this module fixes it.
+var _PROTOCOL_INIT_CACHE = ""
+var _PROTOCOL_TOOLS_CACHE = ""
+val _PROTOCOL_SERVER_NAME = "simple-lsp-mcp"
+val _PROTOCOL_SERVER_VERSION = "0.2.0"
+
+fn make_init_response(id: text) -> text:
+    if _PROTOCOL_INIT_CACHE != "":
+        return jsonrpc_result(id, _PROTOCOL_INIT_CACHE)
+
+    val tools_cap = jo1(jp("listChanged", "false"))
+    val resources_cap = jo1(jp("listChanged", "false"))
+    val prompts_cap = jo1(jp("listChanged", "false"))
+    val roots_cap = jo1(jp("listChanged", "false"))
+
+    var caps = LB()
+    caps = caps + jp("tools", tools_cap)
+    caps = caps + "," + jp("resources", resources_cap)
+    caps = caps + "," + jp("prompts", prompts_cap)
+    caps = caps + "," + jp("logging", LB() + RB())
+    caps = caps + "," + jp("roots", roots_cap)
+    caps = caps + RB()
+
+    val server_info = jo2(
+        jp("name", js(_PROTOCOL_SERVER_NAME)),
+        jp("version", js(_PROTOCOL_SERVER_VERSION))
+    )
+
+    var result = LB()
+    result = result + jp("protocolVersion", js("2025-06-18"))
+    result = result + "," + jp("capabilities", caps)
+    result = result + "," + jp("instructions", js("Simple LSP MCP — backed by lsp_query.spl and simple lint. Provides 11 LSP tools."))
+    result = result + "," + jp("serverInfo", server_info)
+    result = result + RB()
+
+    _PROTOCOL_INIT_CACHE = result
+    return jsonrpc_result(id, result)
+
+fn make_tools_list(id: text) -> text:
+    if _PROTOCOL_TOOLS_CACHE != "":
+        return jsonrpc_result(id, _PROTOCOL_TOOLS_CACHE)
+
+    var tool_parts: [text] = []
+    # Original 5 tools
+    tool_parts.push(make_tool_schema("lsp_definition", "Find where a symbol is defined in a Simple source file."))
+    tool_parts.push(make_tool_schema("lsp_references", "Find symbol references in Simple source."))
+    tool_parts.push(make_tool_schema("lsp_hover", "Get hover information for a symbol in Simple source."))
+    tool_parts.push(make_tool_schema("lsp_symbols", "List symbols in a Simple source file."))
+    tool_parts.push(make_tool_schema("lsp_diagnostics", "Run lightweight diagnostics via simple lint."))
+    # New 6 tools
+    tool_parts.push(make_tool_schema("lsp_completion", "Get code completions at a position in a Simple source file."))
+    tool_parts.push(make_tool_schema("lsp_type_at", "Get the inferred type of a symbol at a position."))
+    tool_parts.push(make_tool_schema("lsp_signature_help", "Get function signature information at a call site."))
+    tool_parts.push(make_tool_schema("lsp_implementation", "Go to implementation of a trait or interface."))
+    tool_parts.push(make_tool_schema("lsp_document_highlight", "Highlight all occurrences of a symbol in the same file."))
+    tool_parts.push(make_tool_schema("lsp_type_definition", "Navigate to the type definition of a symbol."))
+
+    val tools = SB_L() + tool_parts.join(",") + SB_R()
+    val result = jo1(jp("tools", tools))
+    _PROTOCOL_TOOLS_CACHE = result
+    return jsonrpc_result(id, result)
+
+fn make_tool_schema(name: text, description: text) -> text:
+    var props = LB() + RB()
+    var req = "[]"
+
+    if name == "lsp_symbols" or name == "lsp_diagnostics":
+        props = jo1(jp("file", jo2(jp("type", js("string")), jp("description", js("Path to the source file")))))
+        req = SB_L() + js("file") + SB_R()
+    else:
+        # All position-based tools: definition, references, hover, completion, type_at, signature_help, implementation, document_highlight, type_definition
+        var p = LB()
+        p = p + jp("file", jo2(jp("type", js("string")), jp("description", js("Path to the source file"))))
+        p = p + "," + jp("line", jo2(jp("type", js("integer")), jp("description", js("0-indexed line number"))))
+        p = p + "," + jp("character", jo2(jp("type", js("integer")), jp("description", js("0-indexed character offset"))))
+        p = p + RB()
+        props = p
+        req = SB_L() + js("file") + "," + js("line") + "," + js("character") + SB_R()
+
+    var schema = LB()
+    schema = schema + jp("type", js("object"))
+    schema = schema + "," + jp("properties", props)
+    schema = schema + "," + jp("required", req)
+    schema = schema + RB()
+
+    var annotations = LB()
+    annotations = annotations + jp("readOnlyHint", "true")
+    annotations = annotations + "," + jp("destructiveHint", "false")
+    annotations = annotations + "," + jp("idempotentHint", "true")
+    annotations = annotations + "," + jp("openWorldHint", "false")
+    annotations = annotations + RB()
+
+    var tool_obj = jo3(
+        jp("name", js(name)),
+        jp("description", js(description)),
+        jp("inputSchema", schema)
+    )
+    tool_obj = tool_obj.substring(0, tool_obj.len() - 1) + "," + jp("annotations", annotations) + RB()
+    tool_obj

@@ -1,0 +1,117 @@
+# RSA PKCS#1 Padding Schemes
+#
+# PKCS#1 v1.5 padding for encryption and signing
+
+import src.std.array as array
+import src.std.rsa.random as random
+
+# PKCS#1 v1.5 padding for encryption (Type 2)
+fn pkcs1_pad_type2(message: list, length: i64) -> list:
+    val msg_len = array.length(message)
+
+    # Padding format: 0x00 || 0x02 || PS || 0x00 || M
+    # PS is random non-zero bytes, at least 8 bytes
+    val ps_len = length - msg_len - 3
+
+    if ps_len < 8:
+        return []
+
+    var padded = [0, 2]
+
+    var i = 0
+    while i < ps_len:
+        var rand_byte = random.random_i64() % 255 + 1
+        padded = array.push(padded, rand_byte)
+        i = i + 1
+
+    padded = array.push(padded, 0)
+
+    i = 0
+    while i < msg_len:
+        val byte = array.get(message, i)
+        padded = array.push(padded, byte)
+        i = i + 1
+
+    return padded
+
+# PKCS#1 v1.5 unpad
+fn pkcs1_unpad(padded: list) -> list:
+    val len = array.length(padded)
+
+    if len < 11:
+        return []
+
+    val first = array.get(padded, 0)
+    val second = array.get(padded, 1)
+
+    if first != 0:
+        return []
+    if second != 2:
+        return []
+
+    var sep_idx = 2
+    var found = false
+
+    while sep_idx < len:
+        val byte = array.get(padded, sep_idx)
+        if byte == 0:
+            found = true
+            break
+        sep_idx = sep_idx + 1
+
+    if !found:
+        return []
+
+    var message = []
+    var i = sep_idx + 1
+
+    while i < len:
+        val byte = array.get(padded, i)
+        message = array.push(message, byte)
+        i = i + 1
+
+    return message
+
+# PKCS#1 v1.5 padding for signing (Type 1)
+fn pkcs1_pad_type1(hash: list, length: i64) -> list:
+    val hash_len = array.length(hash)
+
+    # Padding format: 0x00 || 0x01 || PS || 0x00 || T || H
+    # PS is 0xFF bytes
+    val ps_len = length - hash_len - 3
+
+    if ps_len < 8:
+        return []
+
+    var padded = [0, 1]
+
+    var i = 0
+    while i < ps_len:
+        padded = array.push(padded, 255)
+        i = i + 1
+
+    padded = array.push(padded, 0)
+
+    i = 0
+    while i < hash_len:
+        val byte = array.get(hash, i)
+        padded = array.push(padded, byte)
+        i = i + 1
+
+    return padded
+
+# Simple hash function (SHA-256-like, simplified)
+fn simple_hash(data: list) -> list:
+    val len = array.length(data)
+    var hash = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+
+    var i = 0
+    while i < len:
+        val byte = array.get(data, i)
+        val idx = i % 32
+        val current = array.get(hash, idx)
+        val mixed = (current + byte * 31 + i * 17) % 256
+        hash = array.set(hash, idx, mixed)
+        i = i + 1
+
+    return hash

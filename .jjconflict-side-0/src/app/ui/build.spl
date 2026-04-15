@@ -1,0 +1,293 @@
+#![allow(unnamed_duplicate_typed_args)]
+# GUI Binary Builder
+#
+# Builds standalone native GUI binaries from .ui.sdn files.
+# Generates a platform-specific entry point, then compiles via native-build.
+#
+# Usage:
+#   build_gui_binary("examples/ui/minimal.ui.sdn", "build/gui/minimal", "web", 3000)
+#
+# Supported backends: web, tui, tauri, electron, headless
+# Supported platforms: macOS (Darwin), Linux, Windows
+
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+extern fn rt_file_exists(path: text) -> bool
+extern fn rt_file_read_text(path: text) -> text
+extern fn rt_file_write_text(path: text, content: text) -> bool
+extern fn rt_dir_create_all(path: text) -> bool
+extern fn rt_platform_name() -> text
+extern fn rt_env_get(name: text) -> text
+
+# =========================================================================
+# Platform Detection
+# =========================================================================
+
+fn detect_platform() -> text:
+    """Detect the current OS platform."""
+    return rt_platform_name()
+
+fn supported_platforms() -> [text]:
+    """List all platforms the GUI system supports."""
+    return ["macos", "linux", "windows"]
+
+fn platform_display_name(platform: text) -> text:
+    if platform == "macos":
+        return "macOS"
+    if platform == "linux":
+        return "Linux"
+    if platform == "windows":
+        return "Windows"
+    return platform
+
+# =========================================================================
+# Entry Point Generation
+# =========================================================================
+
+fn generate_gui_entry(ui_file: text, backend: text, port: i32) -> text:
+    """Generate a Simple entry point .spl that launches the GUI app."""
+    var src = "# Auto-generated GUI entry point\n"
+    src = "{src}# UI file: {ui_file}\n"
+    src = "{src}# Backend: {backend}\n\n"
+
+    if backend == "web":
+        src = "{src}use app.ui.web.server.{{run_web}}\n\n"
+        src = "{src}fn main() -> i64:\n"
+        src = "{src}    return run_web(\"{ui_file}\", {port})\n"
+    elif backend == "tui":
+        src = "{src}use app.ui.tui.app.{{run_tui}}\n\n"
+        src = "{src}fn main() -> i64:\n"
+        src = "{src}    return run_tui(\"{ui_file}\")\n"
+    elif backend == "tauri":
+        src = "{src}use app.ui.tauri.app.{{run_tauri}}\n\n"
+        src = "{src}fn main() -> i64:\n"
+        src = "{src}    return run_tauri(\"{ui_file}\", {port})\n"
+    elif backend == "electron":
+        src = "{src}use app.ui.electron.app.{{run_electron}}\n\n"
+        src = "{src}fn main() -> i64:\n"
+        src = "{src}    return run_electron(\"{ui_file}\", {port})\n"
+    elif backend == "headless":
+        src = "{src}use app.ui.none.app.{{run_headless}}\n\n"
+        src = "{src}fn main() -> i64:\n"
+        src = "{src}    return run_headless(\"{ui_file}\")\n"
+    else:
+        # Default: auto-detect at runtime
+        src = "{src}use app.ui.detect.{{detect_gui_backend}}\n"
+        src = "{src}use app.ui.main.{{run_detected_backend}}\n\n"
+        src = "{src}fn main() -> i64:\n"
+        src = "{src}    val backend = detect_gui_backend()\n"
+        src = "{src}    return run_detected_backend(backend, \"{ui_file}\", {port})\n"
+
+    return src
+
+# =========================================================================
+# Build
+# =========================================================================
+
+class GuiBuildResult:
+    success: bool
+    binary_path: text
+    platform: text
+    backend: text
+    error: text
+
+fn build_gui_binary(ui_file: text, output: text, backend: text, port: i32) -> GuiBuildResult:
+    """Build a standalone GUI binary from a .ui.sdn file.
+
+    Args:
+        ui_file: Path to the .ui.sdn file
+        output: Output binary path (e.g. "build/gui/minimal")
+        backend: GUI backend ("web", "tui", "tauri", "electron", "headless", "auto")
+        port: Port for web/tauri/electron backends (ignored for tui/headless)
+
+    Returns:
+        GuiBuildResult with success status and binary path
+    """
+    val platform = detect_platform()
+
+    # Validate input
+    if not rt_file_exists(ui_file):
+        return GuiBuildResult(
+            success: false,
+            binary_path: "",
+            platform: platform,
+            backend: backend,
+            error: "UI file not found: {ui_file}"
+        )
+
+    # Create output directory
+    val parts = output.split("/")
+    if parts.len() > 1:
+        var dir = ""
+        var i = 0
+        while i < parts.len() - 1:
+            if i > 0:
+                dir = "{dir}/"
+            dir = "{dir}{parts[i]}"
+            i = i + 1
+        rt_dir_create_all(dir)
+
+    # Generate entry point
+    val entry_src = generate_gui_entry(ui_file, backend, port)
+    val entry_path = "{output}_gui_entry.spl"
+
+    # Write entry point file
+    rt_file_write_text(entry_path, entry_src)
+
+    # Build native binary — use only self-hosted/runtime binaries here.
+    val simple_bin = _find_simple_binary()
+    val is_win = rt_platform_name() == "windows"
+    val result = if is_win:
+        val build_cmd = "set SIMPLE_LIB=%cd%\\src&& {simple_bin} native-build --source src/compiler --source src/lib --source src/app --entry-closure --entry {entry_path} -o {output} --strip 2>&1"
+        rt_process_run("cmd", ["/c", build_cmd])
+    else:
+        val build_cmd = "SIMPLE_LIB=$(pwd)/src {simple_bin} native-build --source src/compiler --source src/lib --source src/app --entry-closure --entry {entry_path} -o {output} --strip 2>&1"
+        rt_process_run("/bin/sh", ["-c", build_cmd])
+
+    if result.2 != 0:
+        return GuiBuildResult(
+            success: false,
+            binary_path: output,
+            platform: platform,
+            backend: backend,
+            error: "native-build failed (exit {result.2}): {result.0}{result.1}"
+        )
+
+    if not rt_file_exists(output):
+        return GuiBuildResult(
+            success: false,
+            binary_path: output,
+            platform: platform,
+            backend: backend,
+            error: "Binary not produced at {output}"
+        )
+
+    return GuiBuildResult(
+        success: true,
+        binary_path: output,
+        platform: platform,
+        backend: backend,
+        error: ""
+    )
+
+fn build_gui_for_platform(ui_file: text, output_dir: text, backend: text, port: i32, platform: text) -> GuiBuildResult:
+    """Build a GUI binary targeting a specific platform.
+
+    For cross-compilation, sets the appropriate target. Currently only
+    native compilation is supported (cross-compile is future work).
+    """
+    val current = detect_platform()
+    if platform != current:
+        return GuiBuildResult(
+            success: false,
+            binary_path: "",
+            platform: platform,
+            backend: backend,
+            error: "Cross-compilation not yet supported. Current: {current}, target: {platform}"
+        )
+
+    # Extract name from ui_file
+    val filename_parts = ui_file.split("/")
+    var name = filename_parts[filename_parts.len() - 1]
+    name = name.replace(".ui.sdn", "")
+    val output = "{output_dir}/{name}_{platform}"
+    return build_gui_binary(ui_file, output, backend, port)
+
+fn build_gui_all_platforms(ui_file: text, output_dir: text, backend: text, port: i32) -> [GuiBuildResult]:
+    """Build GUI binary for all supported platforms.
+
+    Currently builds for the current platform only (native).
+    Cross-compilation support is planned.
+    """
+    var results: [GuiBuildResult] = []
+    val current = detect_platform()
+
+    for platform in supported_platforms():
+        if platform == current:
+            val result = build_gui_for_platform(ui_file, output_dir, backend, port, platform)
+            results.push(result)
+        else:
+            results.push(GuiBuildResult(
+                success: false,
+                binary_path: "",
+                platform: platform,
+                backend: backend,
+                error: "Cross-compilation not yet supported (current: {current})"
+            ))
+
+    return results
+
+# =========================================================================
+# Internal Helpers
+# =========================================================================
+
+fn _find_simple_binary() -> text:
+    """Find a working self-hosted simple binary for normal runtime use."""
+    val env_bin = rt_env_get("SIMPLE_BINARY") ?? ""
+    if env_bin != "":
+        return env_bin
+
+    val is_win = rt_platform_name() == "windows"
+    val ext = if is_win: ".exe" else: ""
+
+    if rt_file_exists("src/compiler_rust/target/release/simple{ext}"):
+        val check = _run_version_check("src/compiler_rust/target/release/simple{ext}", is_win)
+        if check:
+            return "src/compiler_rust/target/release/simple{ext}"
+
+    if rt_file_exists("src/compiler_rust/target/bootstrap/simple{ext}"):
+        val check = _run_version_check("src/compiler_rust/target/bootstrap/simple{ext}", is_win)
+        if check:
+            return "src/compiler_rust/target/bootstrap/simple{ext}"
+
+    if rt_file_exists("bin/simple{ext}"):
+        val check = _run_version_check("bin/simple{ext}", is_win)
+        if check:
+            return "bin/simple{ext}"
+
+    if not is_win:
+        if rt_file_exists("bin/release/aarch64-apple-darwin-macho/simple"):
+            val check = _run_version_check("bin/release/aarch64-apple-darwin-macho/simple", false)
+            if check:
+                return "bin/release/aarch64-apple-darwin-macho/simple"
+
+        if rt_file_exists("bin/release/macos-arm64/simple"):
+            val check = _run_version_check("bin/release/macos-arm64/simple", false)
+            if check:
+                return "bin/release/macos-arm64/simple"
+
+        if rt_file_exists("bin/release/darwin-aarch64/simple"):
+            val check = _run_version_check("bin/release/darwin-aarch64/simple", false)
+            if check:
+                return "bin/release/darwin-aarch64/simple"
+
+        if rt_file_exists("bin/release/macos-x86_64/simple"):
+            val check = _run_version_check("bin/release/macos-x86_64/simple", false)
+            if check:
+                return "bin/release/macos-x86_64/simple"
+
+        if rt_file_exists("bin/release/linux-x86_64/simple"):
+            val check = _run_version_check("bin/release/linux-x86_64/simple", false)
+            if check:
+                return "bin/release/linux-x86_64/simple"
+    else:
+        if rt_file_exists("bin/release/x86_64-pc-windows-msvc/simple.exe"):
+            val check = _run_version_check("bin/release/x86_64-pc-windows-msvc/simple.exe", true)
+            if check:
+                return "bin/release/x86_64-pc-windows-msvc/simple.exe"
+
+        if rt_file_exists("bin/release/x86_64-pc-windows-gnu/simple.exe"):
+            val check = _run_version_check("bin/release/x86_64-pc-windows-gnu/simple.exe", true)
+            if check:
+                return "bin/release/x86_64-pc-windows-gnu/simple.exe"
+
+    # Last resort
+    return "bin/simple{ext}"
+
+fn _run_version_check(binary: text, is_win: bool) -> bool:
+    """Run a --version check on a binary, returns true if it succeeds."""
+    if is_win:
+        val result = rt_process_run("cmd", ["/c", "{binary} --version 2>nul"])
+        return result.2 == 0
+    else:
+        val result = rt_process_run("/bin/sh", ["-c", "{binary} --version 2>/dev/null"])
+        return result.2 == 0

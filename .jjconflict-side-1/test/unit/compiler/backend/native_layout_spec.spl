@@ -1,0 +1,105 @@
+use compiler.backend.native.{solve_layout, HotnessProfile, LayoutPhase}
+use compiler.mir.mir_data.*
+use compiler.mir.mir_instructions.{MirBlock, MirTerminator, BlockId}
+from hir_types import {SymbolId}
+from lexer import {Span}
+
+fn empty_span() -> Span:
+    Span(start: 0, end_pos: 0, line: 1, col: 1)
+
+fn make_function(name: text, phase: LayoutPhase?, symbol_id: i64) -> MirFunction:
+    MirFunction(
+        symbol: SymbolId(id: symbol_id),
+        name: name,
+        signature: MirSignature(
+            params: [],
+            return_type: MirType.unit(),
+            is_variadic: false
+        ),
+        locals: [],
+        blocks: [
+            MirBlock(
+                id: BlockId.entry(),
+                label: Some("entry"),
+                instructions: [],
+                terminator: MirTerminator.Unreachable
+            )
+        ],
+        entry_block: BlockId.entry(),
+        span: empty_span(),
+        generic_params: [],
+        is_generic_template: false,
+        specialization_of: nil,
+        type_bindings: {},
+        layout_phase: phase,
+        is_kernel: false,
+        is_export_c: false,
+        export_name: ""
+    )
+
+fn make_module(functions: [MirFunction]) -> MirModule:
+    var function_map: Dict<SymbolId, MirFunction> = {}
+    for func in functions:
+        function_map[func.symbol] = func
+
+    MirModule(
+        name: "native_layout_test",
+        functions: function_map,
+        statics: {},
+        constants: {},
+        types: {}
+    )
+
+fn names_in_phase(plan, phase: LayoutPhase) -> [text]:
+    var names: [text] = []
+    for group in plan.groups:
+        if group.phase == phase:
+            for func in group.functions:
+                names.push(func.name)
+    names
+
+describe "Native Layout":
+    it "infers startup and cold phases from function names":
+        val module = make_module([
+            make_function("init_runtime", nil, 1),
+            make_function("error_handler", nil, 2)
+        ])
+
+        val plan = solve_layout(module, nil)
+
+        expect(names_in_phase(plan, LayoutPhase.Startup)).to_equal(["init_runtime"])
+        expect(names_in_phase(plan, LayoutPhase.Cold)).to_equal(["error_handler"])
+
+    it "respects explicit layout phase overrides":
+        val module = make_module([
+            make_function("regular_worker", LayoutPhase.FirstFrame, 3)
+        ])
+
+        val plan = solve_layout(module, nil)
+
+        expect(names_in_phase(plan, LayoutPhase.FirstFrame)).to_equal(["regular_worker"])
+
+    it "keeps default steady functions in the steady phase":
+        val module = make_module([
+            make_function("compute", nil, 4)
+        ])
+
+        val plan = solve_layout(module, nil)
+
+        expect(names_in_phase(plan, LayoutPhase.Steady)).to_equal(["compute"])
+
+    it "orders hottest functions first within a phase":
+        var profile = HotnessProfile.empty()
+        profile.execution_counts["func_a"] = 1000
+        profile.execution_counts["func_b"] = 5000
+        profile.execution_counts["func_c"] = 3000
+
+        val module = make_module([
+            make_function("func_a", LayoutPhase.Steady, 10),
+            make_function("func_b", LayoutPhase.Steady, 11),
+            make_function("func_c", LayoutPhase.Steady, 12)
+        ])
+
+        val plan = solve_layout(module, profile)
+
+        expect(names_in_phase(plan, LayoutPhase.Steady)).to_equal(["func_b", "func_c", "func_a"])

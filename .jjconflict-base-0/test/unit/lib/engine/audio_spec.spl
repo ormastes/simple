@@ -1,0 +1,106 @@
+"""
+Engine Audio — AudioManager silent backend tests
+
+Tests AudioManager creation, clip loading/caching, sound handle generation,
+bus volume control, master volume, and mute/unmute.
+"""
+
+use std.spec.{describe, it, expect}
+use std.common.engine.units.{Volume, Distance}
+use std.nogc_sync_mut.engine.audio.types.{AudioClip, AudioConfig, default_audio_config}
+use std.nogc_sync_mut.engine.audio.audio_manager.{AudioManager}
+
+describe "AudioManager":
+    it "create initializes with 3 default buses":
+        val config = default_audio_config()
+        val mgr = AudioManager.create(config)
+        # Should have sfx, music, ui buses
+        val sfx_vol = mgr.get_bus_volume("sfx")
+        val music_vol = mgr.get_bus_volume("music")
+        val ui_vol = mgr.get_bus_volume("ui")
+        val sfx_i = sfx_vol.value * 1000.0
+        val music_i = music_vol.value * 1000.0
+        val ui_i = ui_vol.value * 1000.0
+        expect(sfx_i).to_be_greater_than(999.0)
+        expect(sfx_i).to_be_less_than(1001.0)
+        expect(music_i).to_be_greater_than(999.0)
+        expect(music_i).to_be_less_than(1001.0)
+        expect(ui_i).to_be_greater_than(999.0)
+        expect(ui_i).to_be_less_than(1001.0)
+
+    it "load_clip returns valid clip":
+        val config = default_audio_config()
+        var mgr = AudioManager.create(config)
+        val clip = mgr.load_clip("sfx/hit.wav")
+        expect(clip.path).to_equal("sfx/hit.wav")
+        expect(clip.is_loaded).to_equal(true)
+
+    it "load_clip_cached returns same on second call":
+        val config = default_audio_config()
+        var mgr = AudioManager.create(config)
+        val clip1 = mgr.load_clip_cached("sfx/hit.wav")
+        val clip2 = mgr.load_clip_cached("sfx/hit.wav")
+        expect(clip1.path).to_equal(clip2.path)
+        expect(clip1.is_loaded).to_equal(clip2.is_loaded)
+
+    it "play returns valid SoundHandle":
+        val config = default_audio_config()
+        var mgr = AudioManager.create(config)
+        val clip = mgr.load_clip("sfx/hit.wav")
+        val handle = mgr.play(clip, "sfx")
+        expect(handle.is_valid()).to_equal(true)
+        expect(handle.playback_handle).to_be_greater_than(0)
+
+    it "each play gives unique handle":
+        val config = default_audio_config()
+        var mgr = AudioManager.create(config)
+        val clip = mgr.load_clip("sfx/hit.wav")
+        val h1 = mgr.play(clip, "sfx")
+        val h2 = mgr.play(clip, "sfx")
+        val h3 = mgr.play(clip, "sfx")
+        # Each handle should be different
+        val different_1_2 = h1.playback_handle != h2.playback_handle
+        val different_2_3 = h2.playback_handle != h3.playback_handle
+        expect(different_1_2).to_equal(true)
+        expect(different_2_3).to_equal(true)
+
+    it "set_bus_volume and get_bus_volume round-trip":
+        val config = default_audio_config()
+        var mgr = AudioManager.create(config)
+        val ok = mgr.set_bus_volume("sfx", Volume(value: 0.5))
+        expect(ok).to_equal(true)
+        val vol = mgr.get_bus_volume("sfx")
+        val vol_i = vol.value * 1000.0
+        expect(vol_i).to_be_greater_than(499.0)
+        expect(vol_i).to_be_less_than(501.0)
+
+    it "set_master_volume and get_master_volume round-trip":
+        val config = default_audio_config()
+        var mgr = AudioManager.create(config)
+        mgr.set_master_volume(Volume(value: 0.75))
+        val vol = mgr.get_master_volume()
+        val vol_i = vol.value * 1000.0
+        expect(vol_i).to_be_greater_than(749.0)
+        expect(vol_i).to_be_less_than(751.0)
+
+    it "mute_bus and unmute_bus":
+        val config = default_audio_config()
+        var mgr = AudioManager.create(config)
+        val muted = mgr.mute_bus("music")
+        expect(muted).to_equal(true)
+        val unmuted = mgr.unmute_bus("music")
+        expect(unmuted).to_equal(true)
+
+    it "set_bus_volume returns false for unknown bus":
+        val config = default_audio_config()
+        var mgr = AudioManager.create(config)
+        val ok = mgr.set_bus_volume("nonexistent", Volume(value: 0.5))
+        expect(ok).to_equal(false)
+
+    it "get_bus_volume returns 0 for unknown bus":
+        val config = default_audio_config()
+        val mgr = AudioManager.create(config)
+        val vol = mgr.get_bus_volume("nonexistent")
+        val vol_i = vol.value * 1000.0
+        expect(vol_i).to_be_greater_than(-1.0)
+        expect(vol_i).to_be_less_than(1.0)

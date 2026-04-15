@@ -1,0 +1,197 @@
+# @cover src/lib/blink/html_parser/tree_builder.spl 80%
+"""
+# HTML Tree Builder Specification
+
+**Feature IDs:** #BLK-HTML-TREE-001
+**Category:** Browser / Blink port
+**Difficulty:** 3/5
+**Status:** Implemented
+
+## Overview
+
+Tests for `build_html_tree` — the second stage of the Blink HTML parser port.
+Covers happy-path HTML5 tree construction: element nesting, text nodes,
+self-closing void elements, comment nodes, and attribute preservation.
+Token values are constructed directly to avoid tokenizer coupling.
+"""
+
+use std.sspec.*
+use std.blink.html_parser.{
+    HtmlToken,
+    HtmlTokenKind,
+    HtmlAttribute
+}
+use std.blink.html_parser.tree_builder.{build_html_tree}
+use std.blink.dom.node.{NodeType}
+
+describe "html_tree_builder":
+    it "build_html_tree: empty tokens produces empty tree (just root DocumentNode)":
+        val tokens: [HtmlToken] = [
+            HtmlToken(
+                kind: HtmlTokenKind.Eof,
+                name: "",
+                data: "",
+                attributes: [],
+                self_closing: false
+            )
+        ]
+        val tree = build_html_tree(tokens)
+        # Root node id is always 0, node count is exactly 1.
+        expect(tree.nodes.len()).to_equal(1)
+        val root_opt = tree.get_node(0)
+        match root_opt:
+            Some(root):
+                expect(root.node_type == NodeType.DocumentNode).to_equal(true)
+            None:
+                expect(false).to_equal(true)
+
+    it "build_html_tree: single \"<html></html>\" produces tree with html element as child of root":
+        val tokens: [HtmlToken] = [
+            HtmlToken(
+                kind: HtmlTokenKind.StartTag,
+                name: "html",
+                data: "",
+                attributes: [],
+                self_closing: false
+            ),
+            HtmlToken(
+                kind: HtmlTokenKind.EndTag,
+                name: "html",
+                data: "",
+                attributes: [],
+                self_closing: false
+            ),
+            HtmlToken(
+                kind: HtmlTokenKind.Eof,
+                name: "",
+                data: "",
+                attributes: [],
+                self_closing: false
+            )
+        ]
+        val tree = build_html_tree(tokens)
+        # There should be root + html element = 2 nodes total.
+        expect(tree.nodes.len()).to_equal(2)
+        val html_opt = tree.get_node(1)
+        match html_opt:
+            Some(html_node):
+                expect(html_node.tag_name).to_equal("html")
+                expect(html_node.node_type == NodeType.Element).to_equal(true)
+                expect(html_node.parent).to_equal(0)
+            None:
+                expect(false).to_equal(true)
+
+    it "build_html_tree: \"<html><body><p>hi</p></body></html>\" produces nested structure":
+        val tokens: [HtmlToken] = [
+            HtmlToken(kind: HtmlTokenKind.StartTag, name: "html",  data: "", attributes: [], self_closing: false),
+            HtmlToken(kind: HtmlTokenKind.StartTag, name: "body",  data: "", attributes: [], self_closing: false),
+            HtmlToken(kind: HtmlTokenKind.StartTag, name: "p",     data: "", attributes: [], self_closing: false),
+            HtmlToken(kind: HtmlTokenKind.Character, name: "",     data: "hi", attributes: [], self_closing: false),
+            HtmlToken(kind: HtmlTokenKind.EndTag,   name: "p",     data: "", attributes: [], self_closing: false),
+            HtmlToken(kind: HtmlTokenKind.EndTag,   name: "body",  data: "", attributes: [], self_closing: false),
+            HtmlToken(kind: HtmlTokenKind.EndTag,   name: "html",  data: "", attributes: [], self_closing: false),
+            HtmlToken(kind: HtmlTokenKind.Eof,      name: "",      data: "", attributes: [], self_closing: false)
+        ]
+        val tree = build_html_tree(tokens)
+        # root(0) + html(1) + body(2) + p(3) + text("hi")(4) = 5 nodes
+        expect(tree.nodes.len()).to_equal(5)
+        # html is child of root
+        val html_opt = tree.get_node(1)
+        match html_opt:
+            Some(html_node):
+                expect(html_node.parent).to_equal(0)
+            None:
+                expect(false).to_equal(true)
+        # body is child of html
+        val body_opt = tree.get_node(2)
+        match body_opt:
+            Some(body_node):
+                expect(body_node.parent).to_equal(1)
+                expect(body_node.tag_name).to_equal("body")
+            None:
+                expect(false).to_equal(true)
+        # p is child of body
+        val p_opt = tree.get_node(3)
+        match p_opt:
+            Some(p_node):
+                expect(p_node.parent).to_equal(2)
+                expect(p_node.tag_name).to_equal("p")
+            None:
+                expect(false).to_equal(true)
+
+    it "build_html_tree: \"<div>text</div>\" creates div with Text child":
+        val tokens: [HtmlToken] = [
+            HtmlToken(kind: HtmlTokenKind.StartTag,  name: "div",  data: "",     attributes: [], self_closing: false),
+            HtmlToken(kind: HtmlTokenKind.Character, name: "",     data: "text", attributes: [], self_closing: false),
+            HtmlToken(kind: HtmlTokenKind.EndTag,    name: "div",  data: "",     attributes: [], self_closing: false),
+            HtmlToken(kind: HtmlTokenKind.Eof,       name: "",     data: "",     attributes: [], self_closing: false)
+        ]
+        val tree = build_html_tree(tokens)
+        # root(0) + div(1) + text(2) = 3 nodes
+        expect(tree.nodes.len()).to_equal(3)
+        val text_opt = tree.get_node(2)
+        match text_opt:
+            Some(text_node):
+                expect(text_node.node_type == NodeType.Text).to_equal(true)
+                expect(text_node.text_content).to_equal("text")
+                expect(text_node.parent).to_equal(1)
+            None:
+                expect(false).to_equal(true)
+
+    it "build_html_tree: \"<br/>\" creates self-closing br with no children":
+        val tokens: [HtmlToken] = [
+            HtmlToken(kind: HtmlTokenKind.StartTag, name: "br", data: "", attributes: [], self_closing: true),
+            HtmlToken(kind: HtmlTokenKind.Eof,      name: "",   data: "", attributes: [], self_closing: false)
+        ]
+        val tree = build_html_tree(tokens)
+        # root(0) + br(1) = 2 nodes; br has no children
+        expect(tree.nodes.len()).to_equal(2)
+        val br_opt = tree.get_node(1)
+        match br_opt:
+            Some(br_node):
+                expect(br_node.tag_name).to_equal("br")
+                expect(br_node.first_child).to_equal(-1)
+            None:
+                expect(false).to_equal(true)
+
+    it "build_html_tree: \"<!-- hi -->\" creates Comment node":
+        val tokens: [HtmlToken] = [
+            HtmlToken(kind: HtmlTokenKind.Comment, name: "", data: " hi ", attributes: [], self_closing: false),
+            HtmlToken(kind: HtmlTokenKind.Eof,     name: "", data: "",     attributes: [], self_closing: false)
+        ]
+        val tree = build_html_tree(tokens)
+        # root(0) + comment(1) = 2 nodes
+        expect(tree.nodes.len()).to_equal(2)
+        val comment_opt = tree.get_node(1)
+        match comment_opt:
+            Some(comment_node):
+                expect(comment_node.node_type == NodeType.Comment).to_equal(true)
+                expect(comment_node.text_content.len()).to_be_greater_than(0)
+            None:
+                expect(false).to_equal(true)
+
+    it "build_html_tree: '<a href=\"x\">click</a>' preserves attribute on element":
+        val attrs: [HtmlAttribute] = [
+            HtmlAttribute(name: "href", value: "x")
+        ]
+        val tokens: [HtmlToken] = [
+            HtmlToken(kind: HtmlTokenKind.StartTag,  name: "a",     data: "",      attributes: attrs, self_closing: false),
+            HtmlToken(kind: HtmlTokenKind.Character, name: "",      data: "click", attributes: [],    self_closing: false),
+            HtmlToken(kind: HtmlTokenKind.EndTag,    name: "a",     data: "",      attributes: [],    self_closing: false),
+            HtmlToken(kind: HtmlTokenKind.Eof,       name: "",      data: "",      attributes: [],    self_closing: false)
+        ]
+        val tree = build_html_tree(tokens)
+        # root(0) + a(1) + text(2) = 3 nodes
+        expect(tree.nodes.len()).to_equal(3)
+        val a_opt = tree.get_node(1)
+        match a_opt:
+            Some(a_node):
+                expect(a_node.tag_name).to_equal("a")
+                val href_opt = tree.get_attribute(1, "href")
+                match href_opt:
+                    Some(v):
+                        expect(v).to_equal("x")
+                    None:
+                        expect(false).to_equal(true)
+            None:
+                expect(false).to_equal(true)

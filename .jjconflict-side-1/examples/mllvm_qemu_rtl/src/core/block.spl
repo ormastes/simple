@@ -1,0 +1,232 @@
+# IR_TC Block, Function, Module
+#
+# SSA-form basic blocks organized into functions and modules.
+# Supports both compilation (full CFG) and emulation (translation blocks).
+
+use core.types.{IrTcTypeKind, IrTcValue, GuestArch}
+use core.ops.{IrTcInst, IrTcOp}
+
+# ============================================================================
+# Basic Block
+# ============================================================================
+
+struct BlockId:
+    """Basic block identifier."""
+    id: i64
+
+impl BlockId:
+    static fn new(id: i64) -> BlockId:
+        BlockId(id: id)
+
+    static fn entry() -> BlockId:
+        BlockId(id: 0)
+
+    fn to_text() -> text:
+        "bb{self.id}"
+
+struct IrTcBlock:
+    """A basic block — sequence of instructions ending with a terminator."""
+    id: BlockId
+    label: text?
+    instructions: [IrTcInst]
+
+impl IrTcBlock:
+    static fn new(id: BlockId) -> IrTcBlock:
+        IrTcBlock(id: id, label: nil, instructions: [])
+
+    static fn with_label(id: BlockId, label: text) -> IrTcBlock:
+        IrTcBlock(id: id, label: Some(label), instructions: [])
+
+    me append(inst: IrTcInst):
+        self.instructions.push(inst)
+
+    fn terminator() -> IrTcInst?:
+        if self.instructions.len() > 0:
+            val last = self.instructions[self.instructions.len() - 1]
+            if last.kind.is_terminator():
+                return Some(last)
+        nil
+
+    fn is_terminated() -> bool:
+        self.terminator().? != nil
+
+    fn display_label() -> text:
+        if val l = self.label:
+            l
+        else:
+            self.id.to_text()
+
+# ============================================================================
+# Function
+# ============================================================================
+
+struct IrTcParam:
+    """Function parameter."""
+    name: text
+    type_: IrTcTypeKind
+
+impl IrTcParam:
+    static fn new(name: text, type_: IrTcTypeKind) -> IrTcParam:
+        IrTcParam(name: name, type_: type_)
+
+struct IrTcFunction:
+    """A function — ordered list of basic blocks in SSA form."""
+    name: text
+    params: [IrTcParam]
+    return_type: IrTcTypeKind
+    blocks: [IrTcBlock]
+    is_declaration: bool        # true = external declaration (no body)
+    next_value_id: i64          # Counter for generating unique value IDs
+    next_block_id: i64          # Counter for generating unique block IDs
+
+impl IrTcFunction:
+    static fn new(name: text, params: [IrTcParam], return_type: IrTcTypeKind) -> IrTcFunction:
+        IrTcFunction(
+            name: name,
+            params: params,
+            return_type: return_type,
+            blocks: [],
+            is_declaration: false,
+            next_value_id: 0,
+            next_block_id: 0
+        )
+
+    static fn declaration(name: text, params: [IrTcParam], return_type: IrTcTypeKind) -> IrTcFunction:
+        IrTcFunction(
+            name: name,
+            params: params,
+            return_type: return_type,
+            blocks: [],
+            is_declaration: true,
+            next_value_id: 0,
+            next_block_id: 0
+        )
+
+    me new_value(type_: IrTcTypeKind) -> IrTcValue:
+        val id = self.next_value_id
+        self.next_value_id = self.next_value_id + 1
+        IrTcValue.new(id, type_)
+
+    me new_block() -> BlockId:
+        val id = self.next_block_id
+        self.next_block_id = self.next_block_id + 1
+        val block_id = BlockId.new(id)
+        self.blocks.push(IrTcBlock.new(block_id))
+        block_id
+
+    me new_block_with_label(label: text) -> BlockId:
+        val id = self.next_block_id
+        self.next_block_id = self.next_block_id + 1
+        val block_id = BlockId.new(id)
+        self.blocks.push(IrTcBlock.with_label(block_id, label))
+        block_id
+
+    fn entry_block() -> IrTcBlock?:
+        if self.blocks.len() > 0:
+            Some(self.blocks[0])
+        else:
+            nil
+
+    fn get_block(id: BlockId) -> IrTcBlock?:
+        for block in self.blocks:
+            if block.id.id == id.id:
+                return Some(block)
+        nil
+
+# ============================================================================
+# Module
+# ============================================================================
+
+enum IrTcModuleMode:
+    """Operating mode determines which IR_TC ops are valid."""
+    Compilation     # Standard ahead-of-time compilation (no guest state ops)
+    Emulation       # Dynamic binary translation (guest state ops allowed)
+    Mixed           # Both paths (for testing / hybrid use)
+
+impl IrTcModuleMode:
+    fn allows_emulation_ops() -> bool:
+        match self:
+            Compilation: false
+            Emulation: true
+            Mixed: true
+
+    fn to_text() -> text:
+        match self:
+            Compilation: "compilation"
+            Emulation: "emulation"
+            Mixed: "mixed"
+
+struct IrTcModule:
+    """Top-level IR_TC module — contains functions, globals, and metadata."""
+    name: text
+    mode: IrTcModuleMode
+    target_arch: GuestArch?         # Guest arch for emulation, target arch for compilation
+    functions: [IrTcFunction]
+    globals: [IrTcGlobal]
+    string_table: [text]            # Indexed strings (function names, debug info)
+
+impl IrTcModule:
+    static fn new(name: text, mode: IrTcModuleMode) -> IrTcModule:
+        IrTcModule(
+            name: name,
+            mode: mode,
+            target_arch: nil,
+            functions: [],
+            globals: [],
+            string_table: []
+        )
+
+    me add_function(func: IrTcFunction):
+        self.functions.push(func)
+
+    me add_global(global: IrTcGlobal):
+        self.globals.push(global)
+
+    me intern_string(s: text) -> i64:
+        """Intern a string and return its index."""
+        for i in 0..self.string_table.len():
+            if self.string_table[i] == s:
+                return i
+        val idx = self.string_table.len()
+        self.string_table.push(s)
+        idx
+
+    fn find_function(name: text) -> IrTcFunction?:
+        for func in self.functions:
+            if func.name == name:
+                return Some(func)
+        nil
+
+# ============================================================================
+# Global Variables
+# ============================================================================
+
+struct IrTcGlobal:
+    """A global variable or constant."""
+    name: text
+    type_: IrTcTypeKind
+    is_const: bool
+    initializer: [i64]?     # Byte-level initializer (nil = zero-initialized)
+    addr_space: i64          # Address space (for Harvard architectures)
+
+impl IrTcGlobal:
+    static fn new(name: text, type_: IrTcTypeKind) -> IrTcGlobal:
+        IrTcGlobal(
+            name: name,
+            type_: type_,
+            is_const: false,
+            initializer: nil,
+            addr_space: 0
+        )
+
+    static fn constant(name: text, type_: IrTcTypeKind, init: [i64]) -> IrTcGlobal:
+        IrTcGlobal(
+            name: name,
+            type_: type_,
+            is_const: true,
+            initializer: Some(init),
+            addr_space: 0
+        )
+
+    fn with_addr_space(addr_space: i64) -> IrTcGlobal:
+        IrTcGlobal(..self, addr_space: addr_space)

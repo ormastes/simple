@@ -1,0 +1,544 @@
+# UI Session — Unified Session Model
+#
+# Central shared-state container that owns UIState, WidgetStore,
+# Viewport, ChangeLog, LifecycleRegistry, and SurfaceManager.
+# All state transitions flow through the session, enabling
+# shared state across CLI, TUI, and GUI backends.
+
+use common.ui.widget.{WidgetNode, UITree, UIState, UIEvent, UIMode}
+use common.ui.widget_store.{WidgetStore}
+use common.ui.viewport.{Viewport, default_viewport}
+use common.ui.changelog.{ChangeLog, default_changelog}
+use common.ui.lifecycle.{LifecycleRegistry, LifecycleEvent, new_lifecycle_registry, emit_lifecycle_events, describe_lifecycle_event}
+use common.ui.access.{UiAccessSnapshot, UiAccessNode, UiAccessEvent, ui_access_record_action, ui_access_lifecycle_events, ui_access_recent_events, ui_access_recent_surface_events, ui_access_snapshot_from_session, ui_access_snapshot_from_state, ui_access_snapshot_persistable}
+use common.ui.access_store.{UiAccessStore}
+use common.ui.diff.{diff_trees_with}
+use common.ui.state.{update_state}
+use common.ui.surface.{SurfaceHandle, SurfaceManager, new_surface_manager}
+use common.ui.window_surface_registry.{UiWindowSurfaceRegistry}
+use common.ui.profile.{ProfileResolver, ProfileSet, ProfileSetEntry, Orientation, LayoutProfile, compute_profile}
+use common.ui.capability.{Capability}
+use common.ui.capability_policy.{CapabilityPolicy, check_capability, require_capability}
+use common.ui.patch_stream.{PatchStream}
+
+# =========================================================================
+# UISession
+# =========================================================================
+
+class UISession:
+    state: UIState
+    store: WidgetStore
+    viewport: Viewport
+    changelog: ChangeLog
+    lifecycle: LifecycleRegistry
+    surfaces: SurfaceManager
+    profile_resolver: ProfileResolver
+    profile_sets: [ProfileSetEntry]
+    capability_policy: CapabilityPolicy?
+    access_events: [UiAccessEvent]
+    access_sequence: i64
+    access_store: UiAccessStore?
+    window_surfaces: UiWindowSurfaceRegistry
+    patch_stream: PatchStream
+
+    static fn new(tree: UITree) -> UISession:
+        """Create a session with a main tree and default settings."""
+        val store = WidgetStore.new()
+        var sm = new_surface_manager()
+        sm.open("main", tree)
+        return UISession(
+            state: UIState.new(tree),
+            store: store,
+            viewport: default_viewport(),
+            changelog: default_changelog(),
+            lifecycle: new_lifecycle_registry(),
+            surfaces: sm,
+            profile_resolver: ProfileResolver.new(),
+            profile_sets: [],
+            capability_policy: nil,
+            access_events: [],
+            access_sequence: 0,
+            access_store: nil,
+            window_surfaces: UiWindowSurfaceRegistry.new(),
+            patch_stream: PatchStream.new()
+        )
+
+    static fn new_with_store(tree: UITree, store: WidgetStore) -> UISession:
+        """Create a session with a pre-populated widget store."""
+        var sm = new_surface_manager()
+        sm.open("main", tree)
+        return UISession(
+            state: UIState.new(tree),
+            store: store,
+            viewport: default_viewport(),
+            changelog: default_changelog(),
+            lifecycle: new_lifecycle_registry(),
+            surfaces: sm,
+            profile_resolver: ProfileResolver.new(),
+            profile_sets: [],
+            capability_policy: nil,
+            access_events: [],
+            access_sequence: 0,
+            access_store: nil,
+            window_surfaces: UiWindowSurfaceRegistry.new(),
+            patch_stream: PatchStream.new()
+        )
+
+    static fn new_with_policy(tree: UITree, policy: CapabilityPolicy) -> UISession:
+        """Create a session with a specific capability policy."""
+        val store = WidgetStore.new()
+        var sm = new_surface_manager()
+        sm.open("main", tree)
+        return UISession(
+            state: UIState.new(tree),
+            store: store,
+            viewport: default_viewport(),
+            changelog: default_changelog(),
+            lifecycle: new_lifecycle_registry(),
+            surfaces: sm,
+            profile_resolver: ProfileResolver.new(),
+            profile_sets: [],
+            capability_policy: policy,
+            access_events: [],
+            access_sequence: 0,
+            access_store: nil,
+            window_surfaces: UiWindowSurfaceRegistry.new(),
+            patch_stream: PatchStream.new()
+        )
+
+# =========================================================================
+# Constructor Shorthand
+# =========================================================================
+
+fn new_session(tree: UITree) -> UISession:
+    """Create a new UI session with the given tree."""
+    return UISession.new(tree)
+
+# =========================================================================
+# UISession Methods
+# =========================================================================
+
+impl UISession:
+
+    # -- State access --------------------------------------------------------
+
+    fn current_state() -> UIState:
+        """Get the current UI state."""
+        return self.state
+
+    fn current_tree() -> UITree:
+        """Get the current widget tree."""
+        return self.state.tree
+
+    fn current_mode() -> text:
+        """Get the current mode name (NORMAL, COMMAND, etc.)."""
+        return self.state.mode_name()
+
+    fn focused_widget() -> text:
+        """Get the ID of the currently focused widget."""
+        return self.state.focused_id
+
+    fn recent_changes(count: i32) -> [text]:
+        """Get human-readable descriptions of recent lifecycle events."""
+        return self.changelog.recent_descriptions(count)
+
+    fn viewport_width() -> i32:
+        """Get viewport width."""
+        return self.viewport.width
+
+    fn viewport_height() -> i32:
+        """Get viewport height."""
+        return self.viewport.height
+
+    fn active_backend() -> text:
+        """Get the name of the active backend."""
+        return self.viewport.active_backend
+
+    fn access_snapshot() -> UiAccessSnapshot:
+        """Build a canonical access snapshot for all open surfaces."""
+        return ui_access_snapshot_from_session(self.state, self.surfaces, self.surfaces.active(), self.access_events, self.window_surfaces)
+
+    fn access_recent_events(count: i32) -> [UiAccessEvent]:
+        """Get the most recent UI access events."""
+        return ui_access_recent_events(self.access_events, count)
+
+    fn access_recent_surface_events(surface_id: text, count: i32) -> [UiAccessEvent]:
+        """Get recent access events for one surface."""
+        return ui_access_recent_surface_events(self.access_events, surface_id, count)
+
+    fn access_persisted_events(surface_id: text, count: i64) -> Result<[UiAccessEvent], text>:
+        """Read persisted access events when a store is attached."""
+        if self.access_store == nil:
+            return Err("no access store attached")
+        match self.access_store.list_events(surface_id, count):
+            Ok(events):
+                return Ok(events)
+            Err(e):
+                return Err(e.message())
+
+    fn access_search_nodes(surface_id: text, kind: text, text_query: text, limit: i64) -> Result<[UiAccessNode], text>:
+        """Query persisted latest-node rows when a store is attached."""
+        if self.access_store == nil:
+            return Err("no access store attached")
+        match self.access_store.query_nodes(surface_id, kind, text_query, limit):
+            Ok(nodes):
+                return Ok(nodes)
+            Err(e):
+                return Err(e.message())
+
+    me attach_access_store(store: UiAccessStore):
+        """Attach a persisted UI access store and immediately seed it."""
+        self.access_store = store
+        self._sync_access_store_snapshot()
+
+    # -- State mutation ------------------------------------------------------
+
+    me dispatch(event: UIEvent):
+        """Process a UI event through the state update pipeline."""
+        val surface_id = if self.surfaces.active() != "": self.surfaces.active() else: "main"
+        var target_widget_id = self.state.focused_id
+        var event_kind = "event"
+        var payload = ""
+        match event:
+            UIEvent.KeyPress(key):
+                event_kind = "key_press"
+                payload = key
+            UIEvent.Resize(width, height):
+                event_kind = "resize"
+                payload = "{width}x{height}"
+            UIEvent.Quit:
+                event_kind = "quit"
+                payload = "quit"
+            UIEvent.Action(name):
+                event_kind = "action"
+                payload = name
+            UIEvent.FocusNext:
+                event_kind = "focus_next"
+                payload = "focus_next"
+            UIEvent.FocusPrev:
+                event_kind = "focus_prev"
+                payload = "focus_prev"
+            UIEvent.CommandMode:
+                event_kind = "mode"
+                payload = "command"
+            UIEvent.NormalMode:
+                event_kind = "mode"
+                payload = "normal"
+            UIEvent.InsertMode:
+                event_kind = "mode"
+                payload = "insert"
+            UIEvent.TouchPress(x, y):
+                event_kind = "touch_press"
+                payload = "{x},{y}"
+            UIEvent.TouchMove(x, y):
+                event_kind = "touch_move"
+                payload = "{x},{y}"
+            UIEvent.TouchRelease(x, y):
+                event_kind = "touch_release"
+                payload = "{x},{y}"
+            UIEvent.FileChanged:
+                event_kind = "file_changed"
+                payload = "file_changed"
+        self.state = update_state(self.state, event)
+        if target_widget_id == "":
+            target_widget_id = self.state.focused_id
+        self.access_sequence = self.access_sequence + 1
+        self.access_events = ui_access_record_action(
+            self.access_events,
+            self.access_sequence,
+            surface_id,
+            target_widget_id,
+            event_kind,
+            payload
+        )
+        self._persist_latest_access_event()
+        self._sync_access_store_snapshot()
+        # Check for resize events and trigger profile switching
+        match event:
+            UIEvent.Resize(width, height):
+                val old_orientation = self.profile_resolver.orientation()
+                self.profile_resolver.update(self.viewport)
+                if self.profile_resolver.orientation_changed(old_orientation):
+                    self._apply_profiles(self.profile_resolver.orientation())
+            _:
+                pass_dn
+
+    me update_tree(new_tree: UITree):
+        """Replace the main tree, computing diff and emitting lifecycle events."""
+        val surface_id = "main"
+        val old_root = self.state.tree.root_node()
+        val new_root = new_tree.root_node()
+        val patches = diff_trees_with(old_root, new_root, self.store)
+        emit_lifecycle_events(self.lifecycle, patches)
+        # Push lifecycle events to changelog
+        for event in self.lifecycle.event_log:
+            self.changelog.push(event)
+            self.access_sequence = self.access_sequence + 1
+            self.access_events = ui_access_lifecycle_events(
+                self.access_events,
+                self.access_sequence - 1,
+                surface_id,
+                [event]
+            )
+        self.lifecycle.clear_log()
+        # Update state with new tree
+        self.state = UIState(
+            tree: new_tree,
+            mode: self.state.mode,
+            focused_id: self.state.focused_id,
+            command_buffer: self.state.command_buffer
+        )
+        # Update main surface
+        if self.surfaces.has("main"):
+            self.surfaces.update_tree("main", new_tree)
+        self._sync_access_store_snapshot()
+
+    # -- Viewport management -------------------------------------------------
+
+    me set_viewport(width: i32, height: i32, backend: text):
+        """Set viewport dimensions. Only the active backend can update."""
+        val current_backend = self.viewport.active_backend
+        if current_backend == backend or current_backend == "none":
+            self.viewport = Viewport(
+                width: width,
+                height: height,
+                active_backend: backend
+            )
+
+    me set_active_backend(name: text):
+        """Set which backend is the active renderer."""
+        self.viewport = Viewport(
+            width: self.viewport.width,
+            height: self.viewport.height,
+            active_backend: name
+        )
+
+    # -- Surface lifecycle ---------------------------------------------------
+
+    me open_surface(id: text, tree: UITree) -> SurfaceHandle:
+        """Open a named surface with the given tree."""
+        val handle = self.surfaces.open(id, tree)
+        self.access_sequence = self.access_sequence + 1
+        self.access_events = ui_access_record_action(
+            self.access_events,
+            self.access_sequence,
+            id,
+            tree.root_node().id,
+            "surface_open",
+            id
+        )
+        self._persist_latest_access_event()
+        self._sync_access_store_snapshot()
+        return handle
+
+    me close_surface(handle: SurfaceHandle) -> bool:
+        """Close a surface by its handle. Returns false if stale."""
+        val closed = self.surfaces.close(handle)
+        if closed:
+            self.window_surfaces.clear_surface(handle.id)
+            self.access_sequence = self.access_sequence + 1
+            self.access_events = ui_access_record_action(
+                self.access_events,
+                self.access_sequence,
+                handle.id,
+                "",
+                "surface_close",
+                handle.id
+            )
+            self._persist_latest_access_event()
+            self._sync_access_store_snapshot()
+        return closed
+
+    fn get_surface(id: text) -> UITree?:
+        """Get the tree for a named surface."""
+        return self.surfaces.get(id)
+
+    fn has_surface(id: text) -> bool:
+        """Check whether a named surface exists."""
+        return self.surfaces.has(id)
+
+    fn surface_count() -> i32:
+        """How many surfaces are open."""
+        return self.surfaces.surface_count()
+
+    me set_surface_widget_value(surface_id: text, widget_id: text, value: text) -> bool:
+        """Set the live value prop for a widget on a surface."""
+        val tree = self.surfaces.get(surface_id)
+        if tree == nil:
+            return false
+        val node = tree.find_widget(widget_id)
+        if node == nil:
+            return false
+        node.set_prop("value", value)
+        self.access_sequence = self.access_sequence + 1
+        self.access_events = ui_access_record_action(
+            self.access_events,
+            self.access_sequence,
+            surface_id,
+            widget_id,
+            "value_set",
+            value
+        )
+        self._persist_latest_access_event()
+        self._sync_access_store_snapshot()
+        return true
+
+    me set_active_surface(id: text):
+        """Set which surface is active."""
+        self.surfaces.set_active(id)
+        self.access_sequence = self.access_sequence + 1
+        self.access_events = ui_access_record_action(
+            self.access_events,
+            self.access_sequence,
+            id,
+            "",
+            "surface_focus",
+            id
+        )
+        self._persist_latest_access_event()
+        self._sync_access_store_snapshot()
+
+    fn active_surface() -> text:
+        """Get the active surface ID."""
+        return self.surfaces.active()
+
+    fn validate_surface_handle(handle: SurfaceHandle) -> bool:
+        """Check whether a surface handle is still valid."""
+        return self.surfaces.validate_handle(handle)
+
+    fn surface_handle(id: text) -> SurfaceHandle?:
+        """Get a current handle for an existing surface."""
+        return self.surfaces.handle_for(id)
+
+    me bind_window_surface(window_id: text, surface_id: text, process_id: u64, app_id: text, title: text):
+        """Bind runtime window metadata to a surface."""
+        self.window_surfaces.bind(window_id, surface_id, process_id, app_id, title)
+        self._sync_access_store_snapshot()
+
+    me clear_window_surface_binding(surface_id: text):
+        """Remove any runtime window binding for a surface."""
+        self.window_surfaces.clear_surface(surface_id)
+        self._sync_access_store_snapshot()
+
+    me clear_window_binding(window_id: text):
+        """Remove any runtime window binding for a window id."""
+        self.window_surfaces.clear_window(window_id)
+        self._sync_access_store_snapshot()
+
+    me update_surface_tree(handle: SurfaceHandle, new_tree: UITree):
+        """Update a surface's tree. Does nothing if handle is stale."""
+        if not self.surfaces.validate_handle(handle):
+            return
+        val old_tree = self.surfaces.get(handle.id)
+        if old_tree == nil:
+            return
+        val old_root = old_tree.root_node()
+        val new_root = new_tree.root_node()
+        # Diff and emit
+        val patches = diff_trees_with(old_root, new_root, self.store)
+        emit_lifecycle_events(self.lifecycle, patches)
+        for event in self.lifecycle.event_log:
+            self.changelog.push(event)
+            self.access_sequence = self.access_sequence + 1
+            self.access_events = ui_access_lifecycle_events(
+                self.access_events,
+                self.access_sequence - 1,
+                handle.id,
+                [event]
+            )
+        self.lifecycle.clear_log()
+        # Commit new tree
+        self.surfaces.update_tree(handle.id, new_tree)
+        self._sync_access_store_snapshot()
+
+    # -- Profile management --------------------------------------------------
+
+    me register_profile_set(surface_id: text, profiles: ProfileSet):
+        """Register landscape/portrait profiles for a surface."""
+        # Replace existing entry for this surface, or append
+        var new_sets: [ProfileSetEntry] = []
+        var found = false
+        for entry in self.profile_sets:
+            if entry.surface_id == surface_id:
+                new_sets = new_sets.push(ProfileSetEntry(surface_id: surface_id, profiles: profiles))
+                found = true
+            else:
+                new_sets = new_sets.push(entry)
+        if not found:
+            new_sets = new_sets.push(ProfileSetEntry(surface_id: surface_id, profiles: profiles))
+        self.profile_sets = new_sets
+
+    me _apply_profiles(orientation: Orientation):
+        """Switch all registered surfaces to the matching profile."""
+        for entry in self.profile_sets:
+            val new_root = entry.profiles.resolve(orientation)
+            val new_tree = UITree.new(new_root)
+            if entry.surface_id == "main":
+                self.update_tree(new_tree)
+            else:
+                if self.surfaces.has(entry.surface_id):
+                    self.surfaces.update_tree(entry.surface_id, new_tree)
+        # Reset focus if the focused widget no longer exists
+        val ids = self.state.tree.all_widget_ids()
+        var focus_valid = false
+        for id in ids:
+            if id == self.state.focused_id:
+                focus_valid = true
+        if not focus_valid and ids.len() > 0:
+            self.state = UIState(
+                tree: self.state.tree,
+                mode: self.state.mode,
+                focused_id: ids[0],
+                command_buffer: self.state.command_buffer
+            )
+
+    fn current_profile() -> LayoutProfile:
+        """Get the current computed layout profile."""
+        return self.profile_resolver.current_profile()
+
+    fn current_orientation() -> Orientation:
+        """Get the current detected orientation."""
+        return self.profile_resolver.orientation()
+
+    me _persist_latest_access_event():
+        if self.access_store == nil:
+            return
+        if self.access_events.len() == 0:
+            return
+        val latest = self.access_events[self.access_events.len() - 1]
+        match self.access_store.insert_event(latest):
+            Ok(_):
+                pass_dn
+            Err(_):
+                pass_dn
+
+    me _sync_access_store_snapshot():
+        if self.access_store == nil:
+            return
+        val snapshot = ui_access_snapshot_persistable(self.access_snapshot())
+        match self.access_store.persist_snapshot(snapshot):
+            Ok(_):
+                pass_dn
+            Err(_):
+                pass_dn
+
+    # -- Capability enforcement -----------------------------------------------
+
+    fn check_cap(cap: Capability) -> Result<bool, text>:
+        """Check if a capability is allowed by this session's policy."""
+        if self.capability_policy == nil:
+            return Ok(true)
+        return check_capability(self.capability_policy, cap)
+
+    me set_capability_policy(policy: CapabilityPolicy):
+        """Replace the session's capability policy."""
+        self.capability_policy = policy
+
+    me open_surface_gated(id: text, tree: UITree, required_cap: Capability) -> Result<SurfaceHandle, text>:
+        """Open a surface only if the required capability is granted."""
+        if self.capability_policy == nil:
+            return Ok(self.surfaces.open(id, tree))
+        val cap_check = check_capability(self.capability_policy, required_cap)
+        match cap_check:
+            Ok(_): Ok(self.surfaces.open(id, tree))
+            Err(msg): Err(msg)

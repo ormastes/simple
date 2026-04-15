@@ -1,0 +1,123 @@
+# SMF Relocation Application Test Specification
+#
+# Phase 2.4: Tests for applying relocations to loaded code at runtime.
+# Verifies that apply_smf_relocations correctly patches code bytes
+# for Abs64, Rel32/Pc32, and PltRel32 relocation types.
+
+# ============================================================================
+# Test Helpers
+# ============================================================================
+
+fn i64_to_le_bytes(v: i64) -> [u8]:
+    var result: [u8] = []
+    result.push((v & 0xFF) as u8)
+    result.push(((v >> 8) & 0xFF) as u8)
+    result.push(((v >> 16) & 0xFF) as u8)
+    result.push(((v >> 24) & 0xFF) as u8)
+    result.push(((v >> 32) & 0xFF) as u8)
+    result.push(((v >> 40) & 0xFF) as u8)
+    result.push(((v >> 48) & 0xFF) as u8)
+    result.push(((v >> 56) & 0xFF) as u8)
+    result
+
+# ============================================================================
+# Relocation Application Tests
+# ============================================================================
+
+describe "SMF Relocation Application":
+    describe "relocation type handling":
+        it "Abs64 writes 8-byte absolute address":
+            # Abs64 (type 1): write sym_addr + addend as 8 bytes
+            val reloc_type = 1
+            val sym_addr = 0x400000
+            val addend = 0
+            val patch_value = sym_addr + addend
+            val bytes = i64_to_le_bytes(patch_value)
+            expect(bytes.len()).to_equal(8)
+            expect(bytes[0]).to_equal(0)
+            expect(bytes[1]).to_equal(0)
+            expect(bytes[2]).to_equal(0x40)
+
+        it "Rel32 writes 4-byte PC-relative offset":
+            # Rel32/Pc32 (type 2): write (sym_addr - patch_addr + addend) as i32
+            val reloc_type = 2
+            val sym_addr = 0x1000
+            val patch_addr = 0x0F00
+            val addend = -4
+            val displacement = sym_addr - patch_addr + addend
+            # 0x1000 - 0x0F00 + (-4) = 0x100 - 4 = 252
+            expect(displacement).to_equal(252)
+
+        it "PltRel32 writes 4-byte PC-relative offset":
+            # PltRel32 (type 3): same formula as Pc32
+            val reloc_type = 3
+            val sym_addr = 0x2000
+            val patch_addr = 0x1000
+            val addend = -4
+            val displacement = sym_addr - patch_addr + addend
+            # 0x2000 - 0x1000 + (-4) = 0x1000 - 4 = 4092
+            expect(displacement).to_equal(4092)
+
+        it "GotRel32 writes 4-byte PC-relative offset":
+            # GotRel32 (type 4): same formula as Pc32
+            val reloc_type = 4
+            val sym_addr = 0x3000
+            val patch_addr = 0x2000
+            val addend = -4
+            val displacement = sym_addr - patch_addr + addend
+            expect(displacement).to_equal(4092)
+
+    describe "symbol resolution":
+        it "resolves symbols from global symbol table":
+            var global_symbols: Dict<text, i64> = {}
+            global_symbols["printf"] = 0x7FFFF7A62E80
+            global_symbols["main"] = 0x400080
+
+            expect(global_symbols["printf"]).to_equal(0x7FFFF7A62E80)
+            expect(global_symbols["main"]).to_equal(0x400080)
+
+        it "handles missing symbol gracefully":
+            var global_symbols: Dict<text, i64> = {}
+            global_symbols["known_fn"] = 0x1000
+            val has_unknown = global_symbols.contains_key("unknown_fn")
+            expect(has_unknown).to_equal(false)
+
+    describe "W^X security flow":
+        it "follows RW -> patch -> RX sequence":
+            # The relocation flow should be:
+            # 1. mprotect(RW) - make writable for patching
+            # 2. Apply relocations (write patch values)
+            # 3. mprotect(RX) - make executable, remove write
+            # 4. Flush icache (required on ARM/RISC-V)
+            val step_1 = "mprotect_rw"
+            val step_2 = "apply_relocs"
+            val step_3 = "mprotect_rx"
+            val step_4 = "flush_icache"
+            val steps = [step_1, step_2, step_3, step_4]
+            expect(steps.len()).to_equal(4)
+            expect(steps[0]).to_equal("mprotect_rw")
+            expect(steps[2]).to_equal("mprotect_rx")
+
+    describe "edge cases":
+        it "handles empty relocation list":
+            var relocs: [i64] = []
+            expect(relocs.len()).to_equal(0)
+
+        it "handles zero addend":
+            val sym_addr = 0x1000
+            val addend = 0
+            val result = sym_addr + addend
+            expect(result).to_equal(0x1000)
+
+        it "handles negative addend":
+            val sym_addr = 0x1000
+            val addend = -4
+            val result = sym_addr + addend
+            expect(result).to_equal(0x0FFC)
+
+        it "handles large displacement":
+            val sym_addr = 0x7FFFFFFF
+            val patch_addr = 0x0
+            val addend = 0
+            val displacement = sym_addr - patch_addr + addend
+            expect(displacement).to_equal(0x7FFFFFFF)

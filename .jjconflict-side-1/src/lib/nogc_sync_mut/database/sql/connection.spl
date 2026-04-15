@@ -1,0 +1,202 @@
+# Typed SQL Database Library - Database Connection Facade
+#
+# Primary user-facing class. Owns SqliteConnection + StatementCache.
+# Provides parameterized queries, transactions, and convenience helpers.
+
+use std.io.sqlite_ffi.{SqliteConnection, sqlite_open, sqlite_open_memory, sqlite_close, sqlite_execute, sqlite_execute_batch, sqlite_query_all, sqlite_error_message, sqlite_last_insert_rowid, sqlite_changes, sqlite_table_exists, sqlite_begin, SqliteRow}
+use std.database.sql.types.{DbValue, DbRow, DbError}
+use std.database.sql.statement.{PreparedStatement}
+use std.database.sql.stmt_cache.{StatementCache}
+use std.database.sql.transaction.{Transaction, TxState}
+
+# ============================================================================
+# Database — main facade for typed SQL access
+# ============================================================================
+
+class Database:
+    conn: SqliteConnection
+    cache: StatementCache
+    is_open: bool
+
+    # ------------------------------------------------------------------
+    # Open a file-backed database.
+    # Sets WAL journal mode, foreign keys on, synchronous=normal.
+    # ------------------------------------------------------------------
+    static fn open(path: text) -> Result<Database, DbError>:
+        val conn = sqlite_open(path)
+        if not conn.is_valid:
+            val msg = sqlite_error_message(conn)
+            return Err(DbError.ConnectionFailed(path: path, message: msg))
+
+        val db = Database(conn: conn, cache: StatementCache.new(64), is_open: true)
+        db._apply_pragmas()
+        Ok(db)
+
+    # ------------------------------------------------------------------
+    # Open an in-memory database.
+    # ------------------------------------------------------------------
+    static fn memory() -> Result<Database, DbError>:
+        val conn = sqlite_open_memory()
+        if not conn.is_valid:
+            val msg = sqlite_error_message(conn)
+            return Err(DbError.ConnectionFailed(path: ":memory:", message: msg))
+
+        val db = Database(conn: conn, cache: StatementCache.new(64), is_open: true)
+        db._apply_pragmas()
+        Ok(db)
+
+    # ------------------------------------------------------------------
+    # Close the database. Clears cached statements first.
+    # ------------------------------------------------------------------
+    me close() -> Result<(), DbError>:
+        if not self.is_open:
+            return Err(DbError.Closed)
+
+        self.cache.clear()
+
+        val ok = sqlite_close(self.conn)
+        if not ok:
+            val msg = sqlite_error_message(self.conn)
+            return Err(DbError.ConnectionFailed(path: self.conn.path, message: "close failed: {msg}"))
+
+        self.is_open = false
+        Ok(())
+
+    # ------------------------------------------------------------------
+    # Execute SQL with typed parameters.
+    # Returns number of affected rows.
+    # ------------------------------------------------------------------
+    me exec(sql: text, params: [DbValue]) -> Result<i64, DbError>:
+        if not self.is_open:
+            return Err(DbError.Closed)
+
+        if params.len() == 0:
+            val ok = sqlite_execute(self.conn, sql)
+            if not ok:
+                val msg = sqlite_error_message(self.conn)
+                return Err(DbError.QueryFailed(sql: sql, message: msg))
+            return Ok(sqlite_changes(self.conn))
+
+        var stmt = self.cache.get_or_prepare(self.conn, sql)?
+        stmt.bind_all(params)?
+        stmt.execute()?
+        val changed = sqlite_changes(self.conn)
+        stmt.reset_stmt()
+        Ok(changed)
+
+    # ------------------------------------------------------------------
+    # Query rows with typed parameters.
+    # ------------------------------------------------------------------
+    fn query(sql: text, params: [DbValue]) -> Result<[DbRow], DbError>:
+        if not self.is_open:
+            return Err(DbError.Closed)
+
+        if params.len() == 0:
+            val raw_rows = sqlite_query_all(self.conn, sql)
+            return Ok(_convert_rows(raw_rows))
+
+        var stmt = self.cache.get_or_prepare(self.conn, sql)?
+        stmt.bind_all(params)?
+        val rows = stmt.query_rows()?
+        stmt.reset_stmt()
+        Ok(rows)
+
+    # ------------------------------------------------------------------
+    # Query a single row (or nil if none).
+    # ------------------------------------------------------------------
+    fn query_one(sql: text, params: [DbValue]) -> Result<DbRow?, DbError>:
+        if not self.is_open:
+            return Err(DbError.Closed)
+
+        if params.len() == 0:
+            val raw_rows = sqlite_query_all(self.conn, sql)
+            val rows = _convert_rows(raw_rows)
+            if rows.len() > 0:
+                return Ok(Some(rows[0]))
+            return Ok(nil)
+
+        var stmt = self.cache.get_or_prepare(self.conn, sql)?
+        stmt.bind_all(params)?
+        val result = stmt.query_one()?
+        stmt.reset_stmt()
+        Ok(result)
+
+    # ------------------------------------------------------------------
+    # Query a single scalar value (first column of first row).
+    # ------------------------------------------------------------------
+    fn query_value(sql: text, params: [DbValue]) -> Result<DbValue?, DbError>:
+        if not self.is_open:
+            return Err(DbError.Closed)
+
+        val row_opt = self.query_one(sql, params)?
+        if val Some(row) = row_opt:
+            if row.values.len() > 0:
+                return Ok(Some(row.values[0]))
+        Ok(nil)
+
+    # ------------------------------------------------------------------
+    # Execute SQL without parameters (convenience).
+    # ------------------------------------------------------------------
+    me exec_sql(sql: text) -> Result<i64, DbError>:
+        self.exec(sql, [])
+
+    # ------------------------------------------------------------------
+    # Begin a new transaction.
+    # ------------------------------------------------------------------
+    me begin() -> Result<Transaction, DbError>:
+        if not self.is_open:
+            return Err(DbError.Closed)
+
+        val ok = sqlite_begin(self.conn)
+        if not ok:
+            val msg = sqlite_error_message(self.conn)
+            return Err(DbError.TransactionFailed(reason: "begin failed: {msg}"))
+
+        Ok(Transaction(conn: self.conn, state: TxState.Active))
+
+    # ------------------------------------------------------------------
+    # Check whether a table exists.
+    # ------------------------------------------------------------------
+    fn table_exists(name: text) -> bool:
+        if not self.is_open:
+            return false
+        sqlite_table_exists(self.conn, name)
+
+    # ------------------------------------------------------------------
+    # Last inserted row ID.
+    # ------------------------------------------------------------------
+    fn last_insert_rowid() -> i64:
+        if not self.is_open:
+            return 0
+        sqlite_last_insert_rowid(self.conn)
+
+    # ------------------------------------------------------------------
+    # Number of rows affected by the last statement.
+    # ------------------------------------------------------------------
+    fn changes() -> i64:
+        if not self.is_open:
+            return 0
+        sqlite_changes(self.conn)
+
+    # ------------------------------------------------------------------
+    # Apply default pragmas for performance and safety.
+    # ------------------------------------------------------------------
+    me _apply_pragmas():
+        sqlite_execute(self.conn, "PRAGMA journal_mode=wal")
+        sqlite_execute(self.conn, "PRAGMA foreign_keys=on")
+        sqlite_execute(self.conn, "PRAGMA synchronous=normal")
+
+# ============================================================================
+# Internal helpers
+# ============================================================================
+
+# Convert raw SqliteRow list to typed DbRow list.
+# sqlite_query_all returns all values as text; wrap them in DbValue.Text.
+fn _convert_rows(raw_rows: [SqliteRow]) -> [DbRow]:
+    var result: [DbRow] = []
+    for row in raw_rows:
+        var values: [DbValue] = []
+        for v in row.values:
+            values.push(DbValue.Text(value: v))
+        result.push(DbRow(columns: row.column_names, values: values))
+    result

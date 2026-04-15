@@ -1,0 +1,306 @@
+# IR_TC Builder
+#
+# Convenience API for constructing IR_TC modules, functions, and blocks.
+# Tracks current insertion point and generates unique value/block IDs.
+
+use core.types.{IrTcTypeKind, IrTcValue, IrTcCond, CallConv, GuestArch}
+use core.mem_op.{MemOp, BarrierKind, GuestRegId}
+use core.ops.{IrTcOp, IrTcInst, SwitchCase, PhiEntry}
+use core.block.{BlockId, IrTcBlock, IrTcFunction, IrTcParam, IrTcModule, IrTcModuleMode, IrTcGlobal}
+
+# ============================================================================
+# Builder
+# ============================================================================
+
+class IrTcBuilder:
+    """Fluent API for building IR_TC modules.
+
+    Usage:
+        var builder = IrTcBuilder.new("my_module", IrTcModuleMode.Compilation)
+        builder.begin_function("add", [IrTcParam.new("a", IrTcTypeKind.I32), ...], IrTcTypeKind.I32)
+        val entry = builder.new_block("entry")
+        builder.set_block(entry)
+        val a = builder.param_value(0)
+        val b = builder.param_value(1)
+        val result = builder.add(a, b)
+        builder.ret(Some(result))
+        builder.end_function()
+        val module = builder.finish()
+    """
+    module: IrTcModule
+    current_func: IrTcFunction?
+    current_block_id: BlockId?
+
+impl IrTcBuilder:
+    static fn new(name: text, mode: IrTcModuleMode) -> IrTcBuilder:
+        IrTcBuilder(
+            module: IrTcModule.new(name, mode),
+            current_func: nil,
+            current_block_id: nil
+        )
+
+    # ── Module-level ──
+
+    me set_target(arch: GuestArch):
+        self.module.target_arch = Some(arch)
+
+    me add_global(global: IrTcGlobal):
+        self.module.add_global(global)
+
+    # ── Function management ──
+
+    me begin_function(name: text, params: [IrTcParam], return_type: IrTcTypeKind):
+        self.current_func = Some(IrTcFunction.new(name, params, return_type))
+        self.current_block_id = nil
+
+    me begin_declaration(name: text, params: [IrTcParam], return_type: IrTcTypeKind):
+        var func = IrTcFunction.declaration(name, params, return_type)
+        self.module.add_function(func)
+
+    me end_function():
+        if var func = self.current_func:
+            self.module.add_function(func)
+        self.current_func = nil
+        self.current_block_id = nil
+
+    me finish() -> IrTcModule:
+        if self.current_func.? != nil:
+            self.end_function()
+        self.module
+
+    # ── Block management ──
+
+    me new_block(label: text) -> BlockId:
+        if var func = self.current_func:
+            val bid = func.new_block_with_label(label)
+            self.current_func = Some(func)
+            bid
+        else:
+            BlockId.new(-1)
+
+    me set_block(block_id: BlockId):
+        self.current_block_id = Some(block_id)
+
+    # ── Value creation ──
+
+    me new_value(type_: IrTcTypeKind) -> IrTcValue:
+        if var func = self.current_func:
+            val v = func.new_value(type_)
+            self.current_func = Some(func)
+            v
+        else:
+            IrTcValue.new(-1, type_)
+
+    fn param_value(index: i64) -> IrTcValue:
+        """Get a value representing a function parameter."""
+        if val func = self.current_func:
+            if index < func.params.len():
+                return IrTcValue.new(index, func.params[index].type_)
+        IrTcValue.new(-1, IrTcTypeKind.Void)
+
+    fn const_imm(type_: IrTcTypeKind, value: i64) -> IrTcValue:
+        IrTcValue.const_imm(value, type_)
+
+    # ── Internal: emit instruction ──
+
+    me emit(op: IrTcOp):
+        if var func = self.current_func:
+            if val bid = self.current_block_id:
+                for i in 0..func.blocks.len():
+                    if func.blocks[i].id.id == bid.id:
+                        func.blocks[i].append(IrTcInst.new(op))
+            self.current_func = Some(func)
+
+    # ── Arithmetic ──
+
+    me add(a: IrTcValue, b: IrTcValue) -> IrTcValue:
+        val dest = self.new_value(a.type_)
+        self.emit(IrTcOp.Add(dest: dest, a: a, b: b))
+        dest
+
+    me sub(a: IrTcValue, b: IrTcValue) -> IrTcValue:
+        val dest = self.new_value(a.type_)
+        self.emit(IrTcOp.Sub(dest: dest, a: a, b: b))
+        dest
+
+    me mul(a: IrTcValue, b: IrTcValue) -> IrTcValue:
+        val dest = self.new_value(a.type_)
+        self.emit(IrTcOp.Mul(dest: dest, a: a, b: b))
+        dest
+
+    me div(a: IrTcValue, b: IrTcValue, signed: bool) -> IrTcValue:
+        val dest = self.new_value(a.type_)
+        self.emit(IrTcOp.Div(dest: dest, a: a, b: b, signed: signed))
+        dest
+
+    me rem(a: IrTcValue, b: IrTcValue, signed: bool) -> IrTcValue:
+        val dest = self.new_value(a.type_)
+        self.emit(IrTcOp.Rem(dest: dest, a: a, b: b, signed: signed))
+        dest
+
+    me neg(a: IrTcValue) -> IrTcValue:
+        val dest = self.new_value(a.type_)
+        self.emit(IrTcOp.Neg(dest: dest, a: a))
+        dest
+
+    # ── Bitwise ──
+
+    me and_(a: IrTcValue, b: IrTcValue) -> IrTcValue:
+        val dest = self.new_value(a.type_)
+        self.emit(IrTcOp.And(dest: dest, a: a, b: b))
+        dest
+
+    me or_(a: IrTcValue, b: IrTcValue) -> IrTcValue:
+        val dest = self.new_value(a.type_)
+        self.emit(IrTcOp.Or(dest: dest, a: a, b: b))
+        dest
+
+    me xor_(a: IrTcValue, b: IrTcValue) -> IrTcValue:
+        val dest = self.new_value(a.type_)
+        self.emit(IrTcOp.Xor(dest: dest, a: a, b: b))
+        dest
+
+    me not_(a: IrTcValue) -> IrTcValue:
+        val dest = self.new_value(a.type_)
+        self.emit(IrTcOp.Not(dest: dest, a: a))
+        dest
+
+    me shl(a: IrTcValue, b: IrTcValue) -> IrTcValue:
+        val dest = self.new_value(a.type_)
+        self.emit(IrTcOp.Shl(dest: dest, a: a, b: b))
+        dest
+
+    me shr(a: IrTcValue, b: IrTcValue) -> IrTcValue:
+        val dest = self.new_value(a.type_)
+        self.emit(IrTcOp.Shr(dest: dest, a: a, b: b))
+        dest
+
+    me sar(a: IrTcValue, b: IrTcValue) -> IrTcValue:
+        val dest = self.new_value(a.type_)
+        self.emit(IrTcOp.Sar(dest: dest, a: a, b: b))
+        dest
+
+    # ── Comparison ──
+
+    me cmp(cond: IrTcCond, a: IrTcValue, b: IrTcValue) -> IrTcValue:
+        val dest = self.new_value(IrTcTypeKind.I1)
+        self.emit(IrTcOp.Cmp(dest: dest, cond: cond, a: a, b: b))
+        dest
+
+    # ── Width conversion ──
+
+    me ext(src: IrTcValue, target_type: IrTcTypeKind, signed: bool) -> IrTcValue:
+        val dest = self.new_value(target_type)
+        self.emit(IrTcOp.Ext(dest: dest, src: src, signed: signed))
+        dest
+
+    me trunc(src: IrTcValue, target_type: IrTcTypeKind) -> IrTcValue:
+        val dest = self.new_value(target_type)
+        self.emit(IrTcOp.Trunc(dest: dest, src: src))
+        dest
+
+    me bitcast(src: IrTcValue, target_type: IrTcTypeKind) -> IrTcValue:
+        val dest = self.new_value(target_type)
+        self.emit(IrTcOp.Bitcast(dest: dest, src: src))
+        dest
+
+    # ── Memory (compilation) ──
+
+    me load(addr: IrTcValue, result_type: IrTcTypeKind, mem: MemOp) -> IrTcValue:
+        val dest = self.new_value(result_type)
+        self.emit(IrTcOp.Load(dest: dest, addr: addr, mem: mem))
+        dest
+
+    me store(value: IrTcValue, addr: IrTcValue, mem: MemOp):
+        self.emit(IrTcOp.Store(value: value, addr: addr, mem: mem))
+
+    me alloca(type_: IrTcTypeKind) -> IrTcValue:
+        val dest = self.new_value(IrTcTypeKind.Ptr(addr_space: 0))
+        self.emit(IrTcOp.Alloca(dest: dest, type_: type_, count: nil))
+        dest
+
+    # ── Memory (emulation) ──
+
+    me guest_load(addr: IrTcValue, result_type: IrTcTypeKind, mem: MemOp, mmu_idx: i64) -> IrTcValue:
+        val dest = self.new_value(result_type)
+        self.emit(IrTcOp.GuestLoad(dest: dest, addr: addr, mem: mem, mmu_idx: mmu_idx))
+        dest
+
+    me guest_store(value: IrTcValue, addr: IrTcValue, mem: MemOp, mmu_idx: i64):
+        self.emit(IrTcOp.GuestStore(value: value, addr: addr, mem: mem, mmu_idx: mmu_idx))
+
+    # ── Control flow ──
+
+    me br(target: BlockId):
+        self.emit(IrTcOp.Br(target: target))
+
+    me br_cond(cond: IrTcValue, true_: BlockId, false_: BlockId):
+        self.emit(IrTcOp.BrCond(cond: cond, true_: true_, false_: false_))
+
+    me switch_(value: IrTcValue, cases: [SwitchCase], default: BlockId):
+        self.emit(IrTcOp.Switch(value: value, cases: cases, default: default))
+
+    me ret(value: IrTcValue?):
+        self.emit(IrTcOp.Ret(value: value))
+
+    # ── Calls ──
+
+    me call(func: IrTcValue, args: [IrTcValue], return_type: IrTcTypeKind, cc: CallConv) -> IrTcValue?:
+        if return_type == IrTcTypeKind.Void:
+            self.emit(IrTcOp.Call(dest: nil, func: func, args: args, cc: cc))
+            nil
+        else:
+            val dest = self.new_value(return_type)
+            self.emit(IrTcOp.Call(dest: Some(dest), func: func, args: args, cc: cc))
+            Some(dest)
+
+    me call_helper(helper_id: i64, args: [IrTcValue], return_type: IrTcTypeKind) -> IrTcValue?:
+        if return_type == IrTcTypeKind.Void:
+            self.emit(IrTcOp.CallHelper(dest: nil, helper_id: helper_id, args: args))
+            nil
+        else:
+            val dest = self.new_value(return_type)
+            self.emit(IrTcOp.CallHelper(dest: Some(dest), helper_id: helper_id, args: args))
+            Some(dest)
+
+    # ── Guest state (emulation) ──
+
+    me read_guest_reg(guest_reg: GuestRegId, type_: IrTcTypeKind) -> IrTcValue:
+        val dest = self.new_value(type_)
+        self.emit(IrTcOp.ReadGuestReg(dest: dest, guest_reg: guest_reg))
+        dest
+
+    me write_guest_reg(guest_reg: GuestRegId, value: IrTcValue):
+        self.emit(IrTcOp.WriteGuestReg(guest_reg: guest_reg, value: value))
+
+    # ── Translation block (emulation) ──
+
+    me exit_tb(exit_code: i64):
+        self.emit(IrTcOp.ExitTB(exit_code: exit_code))
+
+    me goto_tb(tb_index: i64):
+        self.emit(IrTcOp.GotoTB(tb_index: tb_index))
+
+    me lookup_goto_tb(target_pc: IrTcValue):
+        self.emit(IrTcOp.LookupGotoTB(target_pc: target_pc))
+
+    me sync_guest_pc(value: IrTcValue):
+        self.emit(IrTcOp.SyncGuestPC(value: value))
+
+    # ── Special ──
+
+    me barrier(kind: BarrierKind):
+        self.emit(IrTcOp.Barrier(kind: kind))
+
+    me nop():
+        self.emit(IrTcOp.Nop)
+
+    me unreachable():
+        self.emit(IrTcOp.Unreachable)
+
+    # ── Phi ──
+
+    me phi(type_: IrTcTypeKind, incoming: [PhiEntry]) -> IrTcValue:
+        val dest = self.new_value(type_)
+        self.emit(IrTcOp.Phi(dest: dest, incoming: incoming))
+        dest

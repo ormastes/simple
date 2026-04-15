@@ -1,0 +1,90 @@
+"""
+# RV64GC Machine — QEMU Virt Machine Profile
+
+Top-level machine configuration matching the QEMU virt board layout.
+Provides a single entry point for creating and running an RV64GC system.
+"""
+
+use hardware.rv64gc.top.rv64_soc.Rv64Soc
+use hardware.rv64gc.mem.rv64_bus.DRAM_BASE
+use hardware.rv64gc.core.rv64_memory.MemResult
+
+# QEMU virt machine defaults
+val DEFAULT_RAM_SIZE: i64 = 0x8000000      # 128 MiB
+val DEFAULT_RESET_VECTOR: i64 = 0x80000000  # Start of DRAM
+val DEFAULT_NUM_HARTS: i64 = 1
+
+# QEMU virt memory map constants
+val VIRT_MROM_BASE: i64 = 0x00001000
+val VIRT_CLINT_BASE: i64 = 0x02000000
+val VIRT_PLIC_BASE: i64 = 0x0C000000
+val VIRT_UART0_BASE: i64 = 0x10000000
+val VIRT_VIRTIO_BASE: i64 = 0x10001000
+val VIRT_DRAM_BASE: i64 = 0x80000000
+
+class Rv64Machine:
+    soc: Rv64Soc
+    name: text
+
+    static fn create(name: text, num_harts: i64, ram_size: i64) -> Rv64Machine:
+        """Create a QEMU virt-compatible machine."""
+        Rv64Machine(
+            soc: Rv64Soc.create(num_harts, ram_size, VIRT_DRAM_BASE),
+            name: name
+        )
+
+    static fn default() -> Rv64Machine:
+        """Create a default single-hart machine with 128 MiB RAM."""
+        Rv64Machine.create("rv64-virt", DEFAULT_NUM_HARTS, DEFAULT_RAM_SIZE)
+
+    me load_binary(addr: i64, bytes: [i64]):
+        """Load binary data at the specified address."""
+        self.soc.load_binary(addr, bytes)
+
+    me load_kernel(bytes: [i64]):
+        """Load a kernel image at the default DRAM base."""
+        self.soc.load_binary(VIRT_DRAM_BASE, bytes)
+
+    me step() -> bool:
+        """Execute one cycle. Returns false if all harts are halted."""
+        self.soc.tick()
+        self.soc.harts.active_hart_count() > 0
+
+    me run(max_cycles: i64) -> i64:
+        """Run the machine for up to max_cycles. Returns cycles executed."""
+        var cycles: i64 = 0
+        var running = true
+        while running and cycles < max_cycles:
+            running = self.step()
+            cycles = cycles + 1
+        cycles
+
+    fn get_hart_pc(hartid: i64) -> i64:
+        """Get current PC of a hart."""
+        self.soc.harts.get_hart(hartid).get_pc()
+
+    fn get_hart_reg(hartid: i64, reg: i64) -> i64:
+        """Get integer register value of a hart."""
+        self.soc.harts.get_hart(hartid).read_reg(reg)
+
+    fn read_mem(addr: i64, width: i64) -> MemResult:
+        """Read physical memory."""
+        self.soc.read_mem(addr, width)
+
+    me write_mem(addr: i64, value: i64, width: i64) -> MemResult:
+        """Write physical memory."""
+        self.soc.write_mem(addr, value, width)
+
+    fn get_cycle_count() -> i64:
+        self.soc.get_cycle_count()
+
+    fn get_name() -> text:
+        self.name
+
+    me uart_input(byte: i64):
+        """Send a byte to UART0."""
+        self.soc.bus.uart.push_rx(byte)
+
+    me uart_output() -> i64:
+        """Read a byte from UART0 TX FIFO."""
+        self.soc.bus.uart.consume_tx()

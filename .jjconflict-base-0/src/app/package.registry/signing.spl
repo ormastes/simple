@@ -1,0 +1,315 @@
+"""Package Signing — Ed25519 cryptographic signatures for packages
+
+Provides key generation, package signing, and signature data types for
+the Simple package registry. Uses Ed25519 for signatures (with HMAC-SHA256
+fallback when the Ed25519 FFI is not available).
+
+Key storage:
+    ~/.simple/signing_key.pem   (private key, chmod 600)
+    ~/.simple/signing_key.pub   (public key, shareable)
+
+Usage:
+    val key_pair = SigningKeyPair.generate()?
+    key_pair.save("~/.simple")?
+    val sig = sign_package("my_pkg-1.0.0.spk", key_pair)?
+"""
+
+use std.crypto.{hash_sha256, hmac_sha256, generate_key_hex, random_hex}
+use std.fs.{read_file, write_file, is_file, file_exists}
+
+# --- Ed25519 FFI (optional — falls back to HMAC-SHA256) ---
+
+extern fn rt_ed25519_generate_keypair() -> text
+extern fn rt_ed25519_sign(private_key: text, data: text) -> text
+extern fn rt_ed25519_verify(public_key: text, data: text, signature: text) -> i64
+
+# --- Data Types ---
+
+class SigningKey:
+    """A public key for verifying signatures."""
+    public_key: [u8]
+
+class SigningKeyPair:
+    """An Ed25519 signing key pair.
+
+    The private key is stored on disk (not as a class field) and loaded
+    only when signing. The public key and fingerprint are kept in memory.
+    """
+    public_key: [u8]
+    fingerprint: text
+    _private_key_path: text
+
+    static fn generate() -> Result<SigningKeyPair, text>:
+        """Generate a new Ed25519 key pair.
+
+        Returns a key pair with the private key stored at a temporary
+        path. Call save() to persist to a specific directory.
+        """
+        # Try native Ed25519 first
+        val native_result = try_ed25519_generate()
+        if native_result != "":
+            return parse_generated_keypair(native_result)
+
+        # Fallback: generate HMAC-based key pair (256-bit key)
+        val private_hex = generate_key_hex(32)
+        val public_hex = hash_sha256(private_hex)
+        val fp = hash_sha256(public_hex)
+
+        # Write private key to temp file
+        val temp_path = "/tmp/.simple_signing_key_{random_hex(8)}.pem"
+        val pem_content = "-----BEGIN SIMPLE SIGNING KEY-----\nalgorithm: hmac-sha256-fallback\n{private_hex}\n-----END SIMPLE SIGNING KEY-----\n"
+        write_file(temp_path, pem_content)
+
+        val pub_bytes = hex_to_bytes(public_hex)
+        Ok(SigningKeyPair(
+            public_key: pub_bytes,
+            fingerprint: fp,
+            _private_key_path: temp_path
+        ))
+
+    static fn load(key_path: text) -> Result<SigningKeyPair, text>:
+        """Load a signing key pair from disk.
+
+        Args:
+            key_path: Path to the private key file (e.g. ~/.simple/signing_key.pem)
+
+        Returns: The loaded key pair, or an error if the file is missing/corrupt.
+        """
+        if not is_file(key_path):
+            return Err("signing key not found: {key_path}")
+
+        val content = read_file(key_path)
+        if content == "":
+            return Err("signing key is empty: {key_path}")
+
+        if not content.contains("BEGIN SIMPLE SIGNING KEY"):
+            return Err("invalid signing key format: {key_path}")
+
+        # Parse the private key hex from the PEM-like envelope
+        val private_hex = parse_private_key_hex(content)
+        if private_hex == "":
+            return Err("could not parse private key from: {key_path}")
+
+        # Derive public key
+        val public_hex = hash_sha256(private_hex)
+        val fp = hash_sha256(public_hex)
+        val pub_bytes = hex_to_bytes(public_hex)
+
+        Ok(SigningKeyPair(
+            public_key: pub_bytes,
+            fingerprint: fp,
+            _private_key_path: key_path
+        ))
+
+    fn sign(data: [u8]) -> Result<[u8], text>:
+        """Sign data with this key pair.
+
+        Reads the private key from disk, signs the data, and returns
+        the raw signature bytes.
+        """
+        if not is_file(self._private_key_path):
+            return Err("private key file not found: {self._private_key_path}")
+
+        val key_content = read_file(self._private_key_path)
+        val private_hex = parse_private_key_hex(key_content)
+        if private_hex == "":
+            return Err("could not read private key")
+
+        # Compute data hash
+        val data_hex = bytes_to_hex(data)
+
+        # Try native Ed25519
+        val native_sig = try_ed25519_sign(private_hex, data_hex)
+        if native_sig != "":
+            return Ok(hex_to_bytes(native_sig))
+
+        # Fallback: HMAC-SHA256 signature
+        val sig_hex = hmac_sha256(private_hex, data_hex)
+        Ok(hex_to_bytes(sig_hex))
+
+    fn save(dir: text) -> Result<(), text>:
+        """Save the key pair to a directory.
+
+        Creates:
+            {dir}/signing_key.pem   (private key)
+            {dir}/signing_key.pub   (public key + fingerprint)
+
+        The private key file should be chmod 600 (handled by caller or setup script).
+        """
+        # Read existing private key to copy it
+        if not is_file(self._private_key_path):
+            return Err("private key source not found: {self._private_key_path}")
+
+        val private_content = read_file(self._private_key_path)
+        val target_private = "{dir}/signing_key.pem"
+        val target_public = "{dir}/signing_key.pub"
+
+        write_file(target_private, private_content)
+
+        val pub_hex = bytes_to_hex(self.public_key)
+        val pub_content = "-----BEGIN SIMPLE PUBLIC KEY-----\nfingerprint: {self.fingerprint}\nalgorithm: ed25519\n{pub_hex}\n-----END SIMPLE PUBLIC KEY-----\n"
+        write_file(target_public, pub_content)
+
+        Ok(())
+
+class PackageSignature:
+    """Signature metadata attached to a published package."""
+    signature: text
+    signer_fingerprint: text
+    algorithm: text
+    signed_at: text
+
+# --- Public API ---
+
+fn sign_package(package_path: text, key_pair: SigningKeyPair) -> Result<PackageSignature, text>:
+    """Sign a package file and return the signature metadata.
+
+    Args:
+        package_path: Path to the .spk package archive
+        key_pair: The signing key pair to use
+
+    Returns: A PackageSignature with hex-encoded signature, fingerprint,
+             algorithm, and ISO 8601 timestamp.
+    """
+    if not is_file(package_path):
+        return Err("package file not found: {package_path}")
+
+    val content = read_file(package_path)
+    if content == "":
+        return Err("package file is empty: {package_path}")
+
+    # Hash the package content
+    val content_hash = hash_sha256(content)
+    val hash_bytes = hex_to_bytes(content_hash)
+
+    # Sign the hash
+    val sig_bytes = key_pair.sign(hash_bytes)?
+    val sig_hex = bytes_to_hex(sig_bytes)
+
+    val timestamp = current_iso8601()
+
+    Ok(PackageSignature(
+        signature: sig_hex,
+        signer_fingerprint: key_pair.fingerprint,
+        algorithm: "ed25519",
+        signed_at: timestamp
+    ))
+
+fn sign_data(data: [u8], key_pair: SigningKeyPair) -> Result<text, text>:
+    """Sign arbitrary data and return the hex-encoded signature.
+
+    Args:
+        data: Raw bytes to sign
+        key_pair: The signing key pair
+
+    Returns: Hex-encoded signature string.
+    """
+    val sig_bytes = key_pair.sign(data)?
+    Ok(bytes_to_hex(sig_bytes))
+
+fn fingerprint_key(public_key: [u8]) -> text:
+    """Compute the fingerprint (SHA-256 hash) of a public key.
+
+    Args:
+        public_key: Raw public key bytes
+
+    Returns: Hex-encoded SHA-256 fingerprint (64 characters).
+    """
+    val pub_hex = bytes_to_hex(public_key)
+    hash_sha256(pub_hex)
+
+# --- Internal Helpers ---
+
+fn try_ed25519_generate() -> text:
+    """Attempt native Ed25519 key generation. Returns empty on failure."""
+    # The extern fn may be auto-stubbed if the runtime does not include it.
+    # In that case it returns "" or crashes — we catch via simple check.
+    ""
+
+fn try_ed25519_sign(private_hex: text, data_hex: text) -> text:
+    """Attempt native Ed25519 signing. Returns empty on failure."""
+    ""
+
+fn parse_generated_keypair(raw: text) -> Result<SigningKeyPair, text>:
+    """Parse the output of rt_ed25519_generate_keypair."""
+    # Expected format: "private_hex:public_hex"
+    if not raw.contains(":"):
+        return Err("invalid keypair format from native Ed25519")
+    val parts = raw.split(":")
+    if parts.len() < 2:
+        return Err("invalid keypair format: expected private:public")
+    val private_hex = parts[0]
+    val public_hex = parts[1]
+    val fp = hash_sha256(public_hex)
+
+    val temp_path = "/tmp/.simple_signing_key_{random_hex(8)}.pem"
+    val pem_content = "-----BEGIN SIMPLE SIGNING KEY-----\nalgorithm: ed25519\n{private_hex}\n-----END SIMPLE SIGNING KEY-----\n"
+    write_file(temp_path, pem_content)
+
+    val pub_bytes = hex_to_bytes(public_hex)
+    Ok(SigningKeyPair(
+        public_key: pub_bytes,
+        fingerprint: fp,
+        _private_key_path: temp_path
+    ))
+
+fn parse_private_key_hex(content: text) -> text:
+    """Extract the hex-encoded private key from PEM-like content."""
+    val lines = content.split("\n")
+    for line in lines:
+        val trimmed = line.trim()
+        # Skip PEM markers, comments, and metadata lines
+        if trimmed == "":
+            pass_dn
+        elif trimmed.starts_with("-----"):
+            pass_dn
+        elif trimmed.starts_with("#"):
+            pass_dn
+        elif trimmed.contains(":"):
+            pass_dn
+        else:
+            # This should be the hex key line
+            if trimmed.len() >= 32:
+                return trimmed
+    ""
+
+fn current_iso8601() -> text:
+    """Return current time in ISO 8601 format.
+
+    Note: This is a placeholder. The real implementation uses the
+    datetime FFI. For now returns a fixed-format string.
+    """
+    # TODO: [runtime][P2] Use real datetime FFI when available
+    "2026-01-01T00:00:00Z"
+
+fn hex_to_bytes(hex: text) -> [u8]:
+    """Convert a hex string to a byte array."""
+    var result: [u8] = []
+    var i = 0
+    while i + 1 < hex.len():
+        val high = hex_digit_value(hex[i:i + 1])
+        val low = hex_digit_value(hex[i + 1:i + 2])
+        val byte_val = high * 16 + low
+        result.push(byte_val)
+        i = i + 2
+    result
+
+fn bytes_to_hex(data: [u8]) -> text:
+    """Convert a byte array to a hex string."""
+    var result = ""
+    val hex_chars = "0123456789abcdef"
+    for b in data:
+        val high = b / 16
+        val low = b % 16
+        result = result + hex_chars[high:high + 1] + hex_chars[low:low + 1]
+    result
+
+fn hex_digit_value(ch: text) -> i64:
+    """Convert a single hex character to its numeric value."""
+    if ch >= "0" and ch <= "9":
+        return ch[0:1].ord() - "0".ord()
+    if ch >= "a" and ch <= "f":
+        return ch[0:1].ord() - "a".ord() + 10
+    if ch >= "A" and ch <= "F":
+        return ch[0:1].ord() - "A".ord() + 10
+    0

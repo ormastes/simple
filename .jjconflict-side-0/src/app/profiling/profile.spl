@@ -1,0 +1,244 @@
+#![allow(unnamed_duplicate_typed_args)]
+@allow(unnamed_duplicate_typed_args)
+#!/usr/bin/env simple
+# Profile Simple interpreter with perf and generate flamegraph
+# Migrated from scripts/profiling/profile-interpreter.sh
+#
+# Usage:
+#   profile <simple-script.spl>
+#   profile --benchmark
+#
+# Requirements:
+#   - perf (linux-perf-tools)
+#   - flamegraph (cargo install flamegraph)
+#
+# Output:
+#   - perf.data - raw perf data
+#   - flamegraph.svg - interactive flamegraph visualization
+
+use app.io
+use app.utils.colors.{success, error, warning, info}
+
+
+struct ProfileConfig:
+    script_file: text
+    mode: text  # "script" or "benchmark"
+    freq: i64
+    time: i64
+    output_file: text
+    keep_perf_data: bool
+
+fn main():
+    val args = get_args()
+
+    if args.len() == 0:
+        print_usage()
+        exit(1)
+
+    val config = parse_args(args)
+    val result = profile_interpreter(config)
+
+    if not result:
+        exit(1)
+
+fn print_usage():
+    print "Usage: profile <simple-script.spl> [options]"
+    print ""
+    print "Options:"
+    print "  --benchmark          Profile benchmark workload instead of script"
+    print "  --freq=N             Sampling frequency (default: 99 Hz)"
+    print "  --time=N             Recording time (default: 10 seconds)"
+    print "  --output=FILE        Output flamegraph file (default: flamegraph.svg)"
+    print "  --keep-perf-data     Keep perf.data after generating flamegraph"
+    print ""
+    print "Examples:"
+    print "  profile examples/fibonacci.spl"
+    print "  profile --benchmark --time=30"
+    print "  profile test.spl --freq=999 --output=test-profile.svg"
+
+fn parse_args(args: [text]) -> ProfileConfig:
+    """Parse command line arguments"""
+    var script_file = ""
+    var mode = "script"
+    var freq = 99
+    var time = 10
+    var output_file = "flamegraph.svg"
+    var keep_perf_data = false
+
+    for arg in args:
+        if arg == "--benchmark":
+            mode = "benchmark"
+        elif arg == "--keep-perf-data":
+            keep_perf_data = true
+        elif arg == "--help" or arg == "-h":
+            print_usage()
+            exit(0)
+        elif arg.starts_with("--freq="):
+            val value = arg.substring(7, arg.len())
+            freq = value.parse_int().unwrap_or(99)
+        elif arg.starts_with("--time="):
+            val value = arg.substring(7, arg.len())
+            time = value.parse_int().unwrap_or(10)
+        elif arg.starts_with("--output="):
+            output_file = arg.substring(9, arg.len())
+        elif script_file.len() == 0:
+            script_file = arg
+        else:
+            print error("Unknown argument: {arg}")
+            print_usage()
+            exit(1)
+
+    ProfileConfig(
+        script_file: script_file,
+        mode: mode,
+        freq: freq,
+        time: time,
+        output_file: output_file,
+        keep_perf_data: keep_perf_data
+    )
+
+fn profile_interpreter(config: ProfileConfig) -> bool:
+    """Run profiling with perf and generate flamegraph"""
+
+    # Check requirements
+    if not check_command("perf", "sudo apt-get install linux-tools-generic"):
+        return false
+
+    if not check_command("flamegraph", "cargo install flamegraph"):
+        return false
+
+    # Validate input
+    if config.mode == "script" and config.script_file.len() == 0:
+        print error("Script file required")
+        print_usage()
+        return false
+
+    if config.mode == "script" and not file_exists(config.script_file):
+        print error("Script file not found: {config.script_file}")
+        return false
+
+    # Build optimized runtime
+    print success("Building optimized runtime...")
+    val build_result = process_run("cargo", ["build", "--release", "--quiet", "--manifest-path", "rust/Cargo.toml"])
+    val stderr = build_result[1]
+    val code = build_result[2]
+
+    if code != 0:
+        print error("Build failed: {stderr}")
+        return false
+
+    val runtime = "rust/target/release/simple"
+
+    # Prepare script file
+    var script_file = config.script_file
+    if config.mode == "benchmark":
+        script_file = create_benchmark_script()
+        print warning("Using benchmark workload")
+
+    # Run profiling
+    print success("Profiling: {script_file}")
+    print warning("Frequency: {config.freq} Hz, Duration: {config.time}s")
+
+    # Check if perf needs sudo
+    val needs_sudo = check_perf_needs_sudo(config.freq)
+    var sudo = ""
+    if needs_sudo:
+        print warning("Note: perf requires elevated privileges")
+        sudo = "sudo "
+
+    # Record with perf
+    var perf_args = ["record", "-F", "{config.freq}", "-g", "--call-graph", "dwarf", "-o", "perf.data", "--", runtime, script_file]
+    var perf_prog = "perf"
+    if sudo.len() > 0:
+        perf_prog = "sudo"
+        perf_args = ["perf"] + perf_args
+    val perf_run_result = process_run(perf_prog, perf_args)
+    val perf_code = perf_run_result[2]
+
+    if perf_code != 0:
+        print error("Profiling failed")
+        return false
+
+    # Generate flamegraph
+    print success("Generating flamegraph: {config.output_file}")
+    var fg_args = ["perf", "script"]
+    var fg_prog = "perf"
+    if sudo.len() > 0:
+        fg_prog = "sudo"
+        fg_args = ["perf", "script"]
+    val fg_run_result = process_run(fg_prog, fg_args)
+    val fg_code = fg_run_result[2]
+
+    if fg_code != 0:
+        print error("Flamegraph generation failed")
+        return false
+
+    # Cleanup
+    if not config.keep_perf_data:
+        val rm_result = process_run("rm", ["-f", "perf.data", "perf.data.old"])
+        print warning("Cleaned up perf.data")
+
+    if config.mode == "benchmark":
+        val del_result = process_run("rm", ["-f", script_file])
+
+    # Show results
+    print ""
+    print success("✓ Profiling complete!")
+    print "  Flamegraph: {config.output_file}"
+    print ""
+    print "Open with: firefox {config.output_file}"
+    print "  or:      chromium {config.output_file}"
+
+    true
+
+fn check_command(command: text, install_cmd: text) -> bool:
+    """Check if a command is available"""
+    val cmd_result = process_run("command", ["-v", command])
+    val code = cmd_result[2]
+    if code != 0:
+        print error("{command} is not installed")
+        print "Install with: {install_cmd}"
+        return false
+    true
+
+fn check_perf_needs_sudo(freq: i64) -> bool:
+    """Check if perf requires sudo by attempting a test run"""
+    val perf_result = process_run("perf", ["record", "-o", "/dev/null", "-F", "{freq}", "--", "sleep", "0.1"])
+    val code = perf_result[2]
+    code != 0
+
+fn create_benchmark_script() -> text:
+    """Create a benchmark workload script"""
+    val script_path = "/tmp/bench_profile.spl"
+    var benchmark_lines = []
+    benchmark_lines.push("fn fibonacci(n):")
+    benchmark_lines.push("    if n <= 1:")
+    benchmark_lines.push("        n")
+    benchmark_lines.push("    else:")
+    benchmark_lines.push("        fibonacci(n - 1) + fibonacci(n - 2)")
+    benchmark_lines.push("")
+    benchmark_lines.push("fn factorial(n):")
+    benchmark_lines.push("    if n <= 1:")
+    benchmark_lines.push("        1")
+    benchmark_lines.push("    else:")
+    benchmark_lines.push("        n * factorial(n - 1)")
+    benchmark_lines.push("")
+    benchmark_lines.push("fn sum_array(arr):")
+    benchmark_lines.push("    var sum = 0")
+    benchmark_lines.push("    for x in arr:")
+    benchmark_lines.push("        sum = sum + x")
+    benchmark_lines.push("    sum")
+    benchmark_lines.push("")
+    benchmark_lines.push("fn main():")
+    benchmark_lines.push("    for i in 0..100:")
+    benchmark_lines.push("        val fib_result = fibonacci(15)")
+    benchmark_lines.push("        val fact_result = factorial(10)")
+    benchmark_lines.push("        val arr = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]")
+    benchmark_lines.push("        val sum = sum_array(arr)")
+    benchmark_lines.push("    0")
+    benchmark_lines.push("")
+    benchmark_lines.push("main()")
+    val benchmark_code = benchmark_lines.join("\n")
+
+    file_write(script_path, benchmark_code)
+    script_path

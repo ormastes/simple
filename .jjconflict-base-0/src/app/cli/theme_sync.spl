@@ -1,0 +1,495 @@
+# Theme Sync CLI — subcommand implementation
+#
+# Entry point for `bin/simple theme-sync <subcommand> [options]`.
+# Mirrors the dispatch pattern of src/app/cli/debug_ui.spl.
+#
+# Subcommands:
+#   dump-local [--theme=<name>] [--out=<path>]
+#   diff --local=<sdn> --remote=<sdn> [--no-color]
+#   list [--root=<dir>]
+#   render-wm    (Phase 4 stub)
+#   render-app   (Phase 4 stub)
+
+use common.ui.glass_tokens.{StitchDesignSystem, load_stitch_design_md}
+use common.ui.theme_sync_sdn.{dump_stitch_design_system_sdn, parse_stitch_design_system_sdn, emit_push_payload_sdn}
+use common.ui.theme_sync_diff.{diff_stitch_design_systems, format_drift_report}
+use std.play.wm.mod.{wm_screenshot}
+
+extern fn rt_file_read_text(path: text) -> text
+extern fn rt_file_write_text(path: text, content: text) -> bool
+extern fn rt_file_exists(path: text) -> bool
+extern fn rt_dir_list(path: text) -> [text]
+extern fn rt_dir_exists(path: text) -> bool
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+extern fn rt_env_set(key: text, value: text) -> bool
+
+# =========================================================================
+# Date helper — static for Phase 2 (no date extern needed)
+# =========================================================================
+
+fn _today() -> text:
+    "2026-04-12"
+
+# =========================================================================
+# Argument parsing helpers
+# =========================================================================
+
+fn _flag_value(args: [text], prefix: text) -> text:
+    """Extract --flag=value from args. Returns "" if not found."""
+    var i = 0
+    while i < args.len():
+        val arg = args[i]
+        if arg.starts_with(prefix):
+            return arg[prefix.len():]
+        i = i + 1
+    ""
+
+fn _has_flag(args: [text], flag: text) -> bool:
+    var i = 0
+    while i < args.len():
+        if args[i] == flag:
+            return true
+        i = i + 1
+    false
+
+# =========================================================================
+# Usage
+# =========================================================================
+
+fn print_theme_sync_usage():
+    print "Usage: simple theme-sync <subcommand> [options]"
+    print ""
+    print "Subcommands:"
+    print "  dump-local [--theme=<name>] [--out=<path>]"
+    print "      Serialize local design system to SDN. Themes: obsidian (default), glass, celestial_ether."
+    print "      --out: write to file instead of stdout."
+    print ""
+    print "  diff --local=<sdn> --remote=<sdn> [--no-color]"
+    print "      Compare two SDN snapshots. Exit 0 = no drift, 2 = drift detected."
+    print ""
+    print "  list [--root=<dir>]"
+    print "      List known Stitch snapshots. Default root: doc/05_design/stitch_snapshots."
+    print ""
+    print "  render-wm   (Phase 4 — not yet implemented)"
+    print "  render-app  (Phase 4 — not yet implemented)"
+    print ""
+    print "  build-push-payload --project=<pid> --design-system=<asset_id> --local=<sdn_path> [--out=<path>]"
+    print "      Serialize a local SDN into a Stitch update_design_system payload."
+    print "      Default out: doc/05_design/stitch_snapshots/<pid>/_pending_update_<asset_id>.sdn"
+    print ""
+    print "  build-verify-report --wm=<png> --app-html=<html> [--app-png=<png>] [--stitch-dir=<dir>] --out-dir=<dir>"
+    print "      Emit a side-by-side HTML comparison (WM / App / Stitch) at <out-dir>/index.html."
+
+# =========================================================================
+# dump-local subcommand
+# =========================================================================
+
+fn cmd_dump_local(theme: text, out_path: text) -> i32:
+    """Serialize StitchDesignSystem.<theme>() to SDN.
+    theme ∈ {obsidian, glass, celestial_ether}. out_path="" = stdout."""
+    var ds_theme = theme
+    if ds_theme == "":
+        ds_theme = "obsidian"
+
+    var ds = StitchDesignSystem.obsidian()
+    var pulled_from = "local/glass_tokens.spl StitchDesignSystem.obsidian()"
+
+    if ds_theme == "glass":
+        ds = StitchDesignSystem.glass()
+        pulled_from = "local/glass_tokens.spl StitchDesignSystem.glass()"
+    elif ds_theme == "celestial_ether":
+        print "Error: celestial_ether does not have a full MD3 color set yet (no factory). Use obsidian or glass."
+        return 1
+    elif ds_theme != "obsidian":
+        print "Error: unknown theme '{ds_theme}'. Available: obsidian (default), glass, celestial_ether."
+        return 1
+
+    val sdn = dump_stitch_design_system_sdn(ds, pulled_from, _today())
+
+    if out_path == "":
+        print sdn
+        return 0
+
+    val ok = rt_file_write_text(out_path, sdn)
+    if not ok:
+        print "Error: failed to write to '{out_path}'"
+        return 1
+
+    return 0
+
+# =========================================================================
+# diff subcommand
+# =========================================================================
+
+fn cmd_diff(local_path: text, remote_path: text, color: bool) -> i32:
+    """Parse two SDN files and report token drift.
+    Exit 0 = no drift, 2 = drift detected."""
+    if local_path == "":
+        print "Error: --local=<path> is required"
+        return 1
+    if remote_path == "":
+        print "Error: --remote=<path> is required"
+        return 1
+
+    if not rt_file_exists(local_path):
+        print "Error: local file not found: {local_path}"
+        return 1
+    if not rt_file_exists(remote_path):
+        print "Error: remote file not found: {remote_path}"
+        return 1
+
+    # rt_file_read_text returns Option in bootstrap runtime — unwrap with ??
+    val local_text = rt_file_read_text(local_path) ?? ""
+    val remote_text = rt_file_read_text(remote_path) ?? ""
+
+    val local_ds = parse_stitch_design_system_sdn(local_text)
+    val remote_ds = parse_stitch_design_system_sdn(remote_text)
+
+    val report = diff_stitch_design_systems(local_ds, remote_ds)
+    val output = format_drift_report(report, color)
+    print output
+
+    if report.any_drift():
+        return 2
+    return 0
+
+# =========================================================================
+# list subcommand
+# =========================================================================
+
+fn _read_sdn_value(content: text, key: text) -> text:
+    """Extract a top-level simple `key: value` from SDN content."""
+    val lines = content.split("\n")
+    var i = 0
+    while i < lines.len():
+        val line = lines[i].trim()
+        val prefix = "{key}: "
+        if line.starts_with(prefix):
+            val raw = line[prefix.len():]
+            if raw.starts_with("\"") and raw.ends_with("\"") and raw.len() >= 2:
+                return raw[1:raw.len() - 1]
+            return raw
+        i = i + 1
+    ""
+
+fn cmd_list(snapshots_root: text) -> i32:
+    """List known Stitch snapshots from projects.sdn."""
+    var root = snapshots_root
+    if root == "":
+        root = "doc/05_design/stitch_snapshots"
+
+    val projects_path = "{root}/projects.sdn"
+    if not rt_file_exists(projects_path):
+        print "Error: projects.sdn not found at {projects_path}"
+        return 1
+
+    val projects_content = rt_file_read_text(projects_path) ?? ""
+
+    # Read sync_mode
+    val sync_mode_path = "{root}/sync_mode.sdn"
+    var sync_mode = "unknown"
+    if rt_file_exists(sync_mode_path):
+        val sm_content = rt_file_read_text(sync_mode_path) ?? ""
+        val sm = _read_sdn_value(sm_content, "mode")
+        if sm != "":
+            sync_mode = sm
+
+    print "Stitch Snapshots — root: {root}"
+    print "Sync mode: {sync_mode}"
+    print ""
+
+    # Walk project IDs from the directory listing
+    val entries = rt_dir_list(root)
+    var i = 0
+    while i < entries.len():
+        val entry = entries[i]
+        # Project directories are numeric IDs — skip root-level SDN state files
+        # (projects.sdn, sync_mode.sdn, last_pull.sdn).
+        if entry.ends_with(".sdn"):
+            i = i + 1
+            continue
+        val project_dir = "{root}/{entry}"
+        if rt_dir_exists(project_dir):
+            val ds_dir = "{project_dir}/design_systems"
+            print "Project: {entry}"
+            if rt_dir_exists(ds_dir):
+                val ds_entries = rt_dir_list(ds_dir)
+                var j = 0
+                while j < ds_entries.len():
+                    val ds_file = ds_entries[j]
+                    if ds_file.ends_with(".sdn"):
+                        val ds_path = "{ds_dir}/{ds_file}"
+                        val ds_content = rt_file_read_text(ds_path) ?? ""
+                        val ds_name = _read_sdn_value(ds_content, "display_name")
+                        val ds_pulled_at = _read_sdn_value(ds_content, "pulled_at")
+                        print "  design_system: {ds_file}  name={ds_name}  pulled_at={ds_pulled_at}"
+                    j = j + 1
+            # Check for last_pull.sdn in the project dir
+            val last_pull_path = "{project_dir}/last_pull.sdn"
+            if rt_file_exists(last_pull_path):
+                val lp_content = rt_file_read_text(last_pull_path) ?? ""
+                val lp_time = _read_sdn_value(lp_content, "pulled_at")
+                print "  last_pull: {lp_time}"
+            print ""
+        i = i + 1
+
+    return 0
+
+# =========================================================================
+# render-wm / render-app helpers
+# =========================================================================
+
+fn _valid_theme(theme: text) -> bool:
+    theme == "obsidian" or theme == "glass" or theme == "celestial_ether"
+
+fn cmd_render_wm(theme: text, out_path: text) -> i32:
+    """Capture the full desktop to <out_path> via std.play.wm.wm_screenshot.
+    Theme is validated but not yet wired into live window theming."""
+    if out_path == "":
+        print "Error: --out=<path> is required"
+        return 1
+    var t = theme
+    if t == "":
+        t = "obsidian"
+    if not _valid_theme(t):
+        print "Error: unknown theme '{t}'. Available: obsidian, glass, celestial_ether."
+        return 1
+    if t != "obsidian":
+        print "Warning: theme '{t}' is accepted but live theme switching is not wired yet; capturing current desktop."
+    val result = wm_screenshot(out_path)
+    match result:
+        case Ok(p):
+            print "Screenshot written: {p}"
+            return 0
+        case Err(e):
+            print "Error: wm_screenshot failed: {e.message}"
+            return 2
+
+fn cmd_render_app(theme: text, entry: text, out_html: text, out_png: text) -> i32:
+    """Shell out to scripts/export_ui_snapshot.shs to dump rendered HTML,
+    then optionally invoke tools/electron-shell/screenshot.js for a PNG."""
+    if out_html == "":
+        print "Error: --out-html=<path> is required"
+        return 1
+    var t = theme
+    if t == "":
+        t = "obsidian"
+    if not _valid_theme(t):
+        print "Error: unknown theme '{t}'. Available: obsidian, glass, celestial_ether."
+        return 1
+    var entry_path = entry
+    if entry_path == "":
+        entry_path = "examples/ui/demo.ui.sdn"
+
+    # Propagate dump path via env var as well (script reads $2 positionally,
+    # but setting the env var matches the spec and is inherited by children).
+    rt_env_set("SIMPLE_UI_DUMP_HTML_PATH", out_html)
+
+    val html_result = rt_process_run("sh", ["scripts/export_ui_snapshot.shs", entry_path, out_html])
+    if html_result.2 != 0:
+        print "Error: export_ui_snapshot.shs failed (exit {html_result.2})"
+        if html_result.1 != "":
+            print html_result.1
+        return 2
+    print "HTML snapshot written: {out_html}"
+
+    if out_png != "":
+        val png_result = rt_process_run("node", ["tools/electron-shell/screenshot.js", out_html, out_png, "1360", "840"])
+        if png_result.2 != 0:
+            print "Error: screenshot.js failed (exit {png_result.2})"
+            if png_result.1 != "":
+                print png_result.1
+            return 2
+        print "PNG preview written: {out_png}"
+
+    return 0
+
+# =========================================================================
+# build-push-payload subcommand (Phase 5)
+# =========================================================================
+
+fn cmd_build_push_payload(project_id: text, design_system_id: text, local_path: text, out_path: text) -> i32:
+    """Serialize a local SDN into a Stitch update_design_system payload file.
+
+    Reads the local SDN at `local_path`, loads the designMd sidecar, and
+    writes a flat push-payload SDN to `out_path` (or a default pending path).
+    Pure: no network calls — the Claude skill session reads the file and
+    dispatches the actual MCP call.
+    """
+    if project_id == "":
+        print "Error: --project=<id> is required"
+        return 1
+    if design_system_id == "":
+        print "Error: --design-system=<asset_id> is required"
+        return 1
+    if local_path == "":
+        print "Error: --local=<sdn_path> is required"
+        return 1
+
+    # Mode guard — warn if sync_mode.sdn is not set to push_only but still allow.
+    val sync_mode_path = "doc/05_design/stitch_snapshots/sync_mode.sdn"
+    if rt_file_exists(sync_mode_path):
+        val sm_content = rt_file_read_text(sync_mode_path) ?? ""
+        val sm = _read_sdn_value(sm_content, "mode")
+        if sm != "push_only":
+            print "Warning: mode: reconcile — push gated; use /theme_sync push only after flipping sync_mode.sdn to push_only"
+    else:
+        print "Warning: sync_mode.sdn not found — push gated; use /theme_sync push only after flipping sync_mode.sdn to push_only"
+
+    if not rt_file_exists(local_path):
+        print "Error: local SDN not found: {local_path}"
+        return 2
+
+    val local_text = rt_file_read_text(local_path) ?? ""
+    if local_text == "":
+        print "Error: local SDN is empty or unreadable: {local_path}"
+        return 2
+
+    val parsed = parse_stitch_design_system_sdn(local_text)
+    val design_md = load_stitch_design_md()
+
+    var target = out_path
+    if target == "":
+        target = "doc/05_design/stitch_snapshots/{project_id}/_pending_update_{design_system_id}.sdn"
+
+    val payload = emit_push_payload_sdn(parsed, project_id, design_system_id, _today(), design_md)
+    val ok = rt_file_write_text(target, payload)
+    if not ok:
+        print "Error: failed to write push payload to '{target}'"
+        return 2
+
+    print "Push payload written: {target}"
+    return 0
+
+# =========================================================================
+# build-verify-report subcommand (Phase 4)
+# =========================================================================
+
+fn cmd_build_verify_report(wm_png: text, app_html: text, app_png: text, stitch_dir: text, out_dir: text) -> i32:
+    """Emit a side-by-side HTML comparison (WM / App / Stitch) as <out_dir>/index.html.
+
+    - wm_png      : path to the local WM screenshot (required)
+    - app_html    : path to the local Electron app HTML snapshot (required)
+    - app_png     : optional path to a rendered PNG of the app (empty = skip)
+    - stitch_dir  : optional directory of stitch HTML snapshots (empty = placeholder)
+    - out_dir     : existing output directory (required)
+    """
+    if wm_png == "":
+        print "Error: --wm=<png> is required"
+        return 1
+    if app_html == "":
+        print "Error: --app-html=<html> is required"
+        return 1
+    if out_dir == "":
+        print "Error: --out-dir=<dir> is required"
+        return 1
+
+    if not rt_file_exists(wm_png):
+        print "Error: --wm file not found: {wm_png}"
+        return 1
+    if not rt_file_exists(app_html):
+        print "Error: --app-html file not found: {app_html}"
+        return 1
+    if app_png != "" and not rt_file_exists(app_png):
+        print "Error: --app-png file not found: {app_png}"
+        return 1
+    if stitch_dir != "" and not rt_dir_exists(stitch_dir):
+        print "Error: --stitch-dir does not exist: {stitch_dir}"
+        return 1
+    if not rt_dir_exists(out_dir):
+        print "Error: --out-dir does not exist: {out_dir}"
+        return 1
+
+    # Build the App column body (iframe + optional img).
+    var app_body = "<iframe sandbox src=\"{app_html}\"></iframe>\n    <div class=\"caption\">{app_html}</div>"
+    if app_png != "":
+        app_body = "{app_body}\n    <img src=\"{app_png}\">\n    <div class=\"caption\">{app_png}</div>"
+
+    # Build the Stitch column body — iterate *.html in stitch_dir if provided.
+    var stitch_body = "<div class=\"caption\">(no stitch-dir given)</div>"
+    if stitch_dir != "":
+        var pieces = ""
+        val entries = rt_dir_list(stitch_dir)
+        var i = 0
+        while i < entries.len():
+            val entry = entries[i]
+            if entry.ends_with(".html"):
+                val src = "{stitch_dir}/{entry}"
+                val block = "<iframe sandbox src=\"{src}\"></iframe>\n    <div class=\"caption\">{entry}</div>\n    "
+                pieces = "{pieces}{block}"
+            i = i + 1
+        if pieces == "":
+            stitch_body = "<div class=\"caption\">(no *.html files in {stitch_dir})</div>"
+        else:
+            stitch_body = pieces
+
+    val today = _today()
+    val html = "<!DOCTYPE html>\n<html>\n<head>\n<meta charset=\"utf-8\">\n<title>Theme Verify Report</title>\n<style>\n  body {{ font-family: -apple-system, system-ui, sans-serif; background: #060612; color: #E3E0F3; margin: 0; padding: 20px; }}\n  h1 {{ font-size: 18px; margin: 0 0 16px 0; color: #0A84FF; }}\n  .grid {{ display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 16px; }}\n  .col {{ border: 1px solid rgba(255,255,255,0.08); border-radius: 8px; padding: 12px; background: rgba(255,255,255,0.03); }}\n  .col h2 {{ font-size: 11px; text-transform: uppercase; letter-spacing: 1.2px; color: #0A84FF; margin: 0 0 12px 0; }}\n  .col iframe, .col img {{ width: 100%; border: 0; background: #0e0820; border-radius: 4px; }}\n  .col iframe {{ height: 520px; }}\n  .caption {{ font-size: 10px; color: rgba(227,224,243,0.6); margin-top: 6px; font-family: monospace; }}\n</style>\n</head>\n<body>\n<h1>Theme Verify Report — {today}</h1>\n<div class=\"grid\">\n  <div class=\"col\">\n    <h2>Local WM</h2>\n    <img src=\"{wm_png}\">\n    <div class=\"caption\">{wm_png}</div>\n  </div>\n  <div class=\"col\">\n    <h2>Local App</h2>\n    {app_body}\n  </div>\n  <div class=\"col\">\n    <h2>Stitch</h2>\n    {stitch_body}\n  </div>\n</div>\n</body>\n</html>\n"
+
+    val out_path = "{out_dir}/index.html"
+    val ok = rt_file_write_text(out_path, html)
+    if not ok:
+        print "Error: failed to write verify report to '{out_path}'"
+        return 2
+
+    print "Verify report written: {out_path}"
+    return 0
+
+# =========================================================================
+# CLI entry point
+# =========================================================================
+
+fn cli_theme_sync(args: [text]) -> i32:
+    """Handle `bin/simple theme-sync <subcommand> [options]`."""
+    if args.len() < 1:
+        print_theme_sync_usage()
+        return 1
+
+    val subcmd = args[0]
+
+    if subcmd == "dump-local":
+        val theme = _flag_value(args, "--theme=")
+        val out_path = _flag_value(args, "--out=")
+        return cmd_dump_local(theme, out_path)
+
+    if subcmd == "diff":
+        val local_path = _flag_value(args, "--local=")
+        val remote_path = _flag_value(args, "--remote=")
+        val no_color = _has_flag(args, "--no-color")
+        return cmd_diff(local_path, remote_path, not no_color)
+
+    if subcmd == "list":
+        val root = _flag_value(args, "--root=")
+        return cmd_list(root)
+
+    if subcmd == "render-wm":
+        val theme = _flag_value(args, "--theme=")
+        val out_path = _flag_value(args, "--out=")
+        return cmd_render_wm(theme, out_path)
+
+    if subcmd == "render-app":
+        val theme = _flag_value(args, "--theme=")
+        val entry = _flag_value(args, "--entry=")
+        val out_html = _flag_value(args, "--out-html=")
+        val out_png = _flag_value(args, "--out-png=")
+        return cmd_render_app(theme, entry, out_html, out_png)
+
+    if subcmd == "build-push-payload":
+        val project_id = _flag_value(args, "--project=")
+        val design_system_id = _flag_value(args, "--design-system=")
+        val local_path = _flag_value(args, "--local=")
+        val out_path = _flag_value(args, "--out=")
+        return cmd_build_push_payload(project_id, design_system_id, local_path, out_path)
+
+    if subcmd == "build-verify-report":
+        val wm_png = _flag_value(args, "--wm=")
+        val app_html = _flag_value(args, "--app-html=")
+        val app_png = _flag_value(args, "--app-png=")
+        val stitch_dir = _flag_value(args, "--stitch-dir=")
+        val out_dir = _flag_value(args, "--out-dir=")
+        return cmd_build_verify_report(wm_png, app_html, app_png, stitch_dir, out_dir)
+
+    print "Error: unknown subcommand '{subcmd}'"
+    print ""
+    print_theme_sync_usage()
+    return 1

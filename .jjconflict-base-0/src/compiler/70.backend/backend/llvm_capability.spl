@@ -1,0 +1,556 @@
+# LLVM Capability Detection
+#
+# Centralized, deterministic detection of LLVM toolchain capabilities.
+# Produces a normalized LlvmCapabilityReport that backends and the driver
+# use for selection and diagnostics.
+#
+# Replaces scattered `command -v` checks with one portable detection pass.
+# Supports Linux, macOS, FreeBSD, and Windows.
+
+use app.io.mod (shell)
+use std.platform.get_host_os
+use std.io_runtime.host_arch
+use compiler.backend.llvm_version.{
+    LlvmVersionInfo, LlvmVersionStatus,
+    detect_llc_version, detect_opt_version, detect_clang_version, detect_libllvm_version,
+    check_version_compatibility, version_diagnostic, check_version_mismatch,
+    LLVM_VERSION_MIN, LLVM_VERSION_MAX
+}
+use compiler.backend.backend.backend_types.{BackendKind, CodegenTarget}
+
+# ============================================================================
+# Tool Status
+# ============================================================================
+
+struct LlvmToolStatus:
+    """Status of a single LLVM tool."""
+    name: text
+    path: text          # Empty if not found
+    version: LlvmVersionInfo
+    available: bool
+
+impl LlvmToolStatus:
+    static fn not_found(name: text) -> LlvmToolStatus:
+        LlvmToolStatus(
+            name: name,
+            path: "",
+            version: LlvmVersionInfo.unknown(),
+            available: false
+        )
+
+    static fn found(name: text, path: text, version: LlvmVersionInfo) -> LlvmToolStatus:
+        LlvmToolStatus(
+            name: name,
+            path: path,
+            version: version,
+            available: true
+        )
+
+# ============================================================================
+# Capability Report
+# ============================================================================
+
+struct LlvmCapabilityReport:
+    """Normalized report of LLVM toolchain capabilities on this host.
+
+    Generated once, cached, and used by all backend selection and
+    diagnostic code paths.
+    """
+    # Tool availability
+    llc: LlvmToolStatus
+    opt: LlvmToolStatus
+    clang: LlvmToolStatus
+    wasm_ld: LlvmToolStatus
+    nm: LlvmToolStatus
+    libllvm: LlvmToolStatus
+
+    # Derived capabilities
+    llvm_backend_available: bool      # llc path works
+    llvm_lib_backend_available: bool  # libLLVM loadable
+    wasm_link_available: bool         # wasm-ld works
+    can_optimize: bool                # opt works
+
+    # Host info
+    host_os: text
+    host_arch: text
+
+    # Supported targets for current toolchain
+    supported_targets: [text]
+
+    # Warnings and errors
+    warnings: [text]
+    errors: [text]
+
+impl LlvmCapabilityReport:
+    fn preferred_backend() -> BackendKind:
+        """Return the preferred LLVM backend for this host."""
+        if self.llvm_lib_backend_available:
+            BackendKind.LlvmLib
+        elif self.llvm_backend_available:
+            BackendKind.Llvm
+        else:
+            BackendKind.Cranelift
+
+    fn has_any_llvm() -> bool:
+        """Return true if any LLVM backend is available."""
+        self.llvm_backend_available or self.llvm_lib_backend_available
+
+    fn format_report() -> text:
+        """Format the capability report as human-readable text."""
+        var report = "LLVM Capability Report\n"
+        report = report + "=====================\n\n"
+
+        report = report + "Host: {self.host_arch}-{self.host_os}\n\n"
+
+        report = report + "Tools:\n"
+        report = report + "  llc:     {format_tool_status(self.llc)}\n"
+        report = report + "  opt:     {format_tool_status(self.opt)}\n"
+        report = report + "  clang:   {format_tool_status(self.clang)}\n"
+        report = report + "  wasm-ld: {format_tool_status(self.wasm_ld)}\n"
+        report = report + "  nm:      {format_tool_status(self.nm)}\n"
+        report = report + "  libLLVM: {format_tool_status(self.libllvm)}\n\n"
+
+        report = report + "Backends:\n"
+        report = report + "  llvm-lib: {if self.llvm_lib_backend_available: \"available\" else: \"unavailable\"}\n"
+        report = report + "  llvm:     {if self.llvm_backend_available: \"available\" else: \"unavailable\"}\n"
+        report = report + "  preferred: {self.preferred_backend().to_text()}\n\n"
+
+        if self.supported_targets.len() > 0:
+            report = report + "Supported targets: {self.supported_targets.join(\", \")}\n\n"
+
+        if self.warnings.len() > 0:
+            report = report + "Warnings:\n"
+            for w in self.warnings:
+                report = report + "  - {w}\n"
+            report = report + "\n"
+
+        if self.errors.len() > 0:
+            report = report + "Errors:\n"
+            for e in self.errors:
+                report = report + "  - {e}\n"
+            report = report + "\n"
+
+        report
+
+    fn format_diagnostic() -> text:
+        """Format a short diagnostic for missing prerequisites."""
+        if self.has_any_llvm():
+            return ""
+
+        var diag = "No LLVM backend available.\n\n"
+        diag = diag + "Install LLVM to enable optimized compilation:\n"
+
+        val os = self.host_os
+        if os == "linux":
+            diag = diag + "  Ubuntu/Debian: sudo apt install llvm-18 libllvm-18-dev lld-18\n"
+            diag = diag + "  Arch Linux:    sudo pacman -S llvm lld\n"
+            diag = diag + "  Fedora:        sudo dnf install llvm-devel lld\n"
+        elif os == "macos":
+            diag = diag + "  Homebrew:      brew install llvm\n"
+            diag = diag + "  Then add:      export PATH=\"$(brew --prefix llvm)/bin:$PATH\"\n"
+        elif os == "freebsd":
+            diag = diag + "  pkg:           sudo pkg install llvm18\n"
+        elif os == "windows":
+            diag = diag + "  Chocolatey:    choco install llvm\n"
+            diag = diag + "  Scoop:         scoop install llvm\n"
+            diag = diag + "  Or download:   https://releases.llvm.org/\n"
+        else:
+            diag = diag + "  Download from: https://releases.llvm.org/\n"
+
+        diag = diag + "\nFalling back to Cranelift backend (64-bit targets only, reduced optimization).\n"
+        diag
+
+fn format_tool_status(tool: LlvmToolStatus) -> text:
+    if tool.available:
+        var status = "{tool.path}"
+        if tool.version.is_known():
+            status = status + " (v{tool.version.to_text()})"
+        status
+    else:
+        "not found"
+
+# ============================================================================
+# Tool Discovery (Portable)
+# ============================================================================
+
+fn find_tool_portable(candidates: [text]) -> text:
+    """Find a tool using platform-appropriate detection.
+
+    On Unix: uses `command -v`
+    On Windows: uses `where`
+
+    Returns the resolved path or empty string.
+    """
+    val os = get_host_os()
+    val is_windows = os == "windows"
+
+    for candidate in candidates:
+        if is_windows:
+            val (out, err, code) = shell("where {candidate} 2>NUL")
+            if code == 0:
+                val path = out.trim()
+                if path != "":
+                    return path
+        else:
+            val (out, err, code) = shell("command -v {candidate} 2>/dev/null")
+            if code == 0:
+                val path = out.trim()
+                if path != "":
+                    return path
+    ""
+
+fn find_llc_portable() -> text:
+    find_tool_portable(["llc-19", "llc-18", "llc-17", "llc-16", "llc"])
+
+fn find_opt_portable() -> text:
+    find_tool_portable(["opt-19", "opt-18", "opt-17", "opt-16", "opt"])
+
+fn find_clang_portable() -> text:
+    find_tool_portable(["clang-19", "clang-18", "clang-17", "clang-16", "clang"])
+
+fn find_wasm_ld_portable() -> text:
+    find_tool_portable(["wasm-ld-19", "wasm-ld-18", "wasm-ld-17", "wasm-ld-16", "wasm-ld"])
+
+fn find_nm_portable() -> text:
+    val os = get_host_os()
+    if os == "macos":
+        # macOS nm is BSD nm, prefer llvm-nm
+        find_tool_portable(["llvm-nm-18", "llvm-nm-17", "llvm-nm-16", "llvm-nm", "nm"])
+    else:
+        find_tool_portable(["nm"])
+
+# ============================================================================
+# Detect libLLVM availability
+# ============================================================================
+
+fn detect_libllvm_available() -> bool:
+    """Check if libLLVM is available for dynamic loading.
+
+    Uses llvm-config to check, or probes common library paths.
+    """
+    val os = get_host_os()
+
+    # Method 1: llvm-config --libdir
+    val config_candidates = ["llvm-config-18", "llvm-config-17", "llvm-config-16", "llvm-config-19", "llvm-config"]
+    for candidate in config_candidates:
+        val (out, err, code) = shell("{candidate} --libdir 2>/dev/null")
+        if code == 0:
+            val libdir = out.trim()
+            if libdir != "":
+                # Check if libLLVM exists in that directory
+                if os == "windows":
+                    val (chk_out, chk_err, chk_code) = shell("dir /b \"{libdir}\\LLVM-C.dll\" 2>NUL")
+                    if chk_code == 0:
+                        return true
+                elif os == "macos":
+                    val (chk_out, chk_err, chk_code) = shell("test -f '{libdir}/libLLVM.dylib' && echo ok")
+                    if chk_code == 0:
+                        return true
+                else:
+                    val (chk_out, chk_err, chk_code) = shell("test -f '{libdir}/libLLVM.so' -o -f '{libdir}/libLLVM-18.so' -o -f '{libdir}/libLLVM-17.so' && echo ok")
+                    if chk_code == 0:
+                        return true
+
+    # Method 2: Probe common paths
+    if os == "linux":
+        val probes = [
+            "/usr/lib/llvm-18/lib/libLLVM.so",
+            "/usr/lib/llvm-17/lib/libLLVM.so",
+            "/usr/lib/llvm-16/lib/libLLVM.so",
+            "/usr/lib/x86_64-linux-gnu/libLLVM.so",
+            "/usr/lib64/libLLVM.so"
+        ]
+        for probe in probes:
+            val (out, err, code) = shell("test -f '{probe}' && echo ok")
+            if code == 0:
+                return true
+    elif os == "macos":
+        val (out, err, code) = shell("test -f '$(brew --prefix llvm 2>/dev/null)/lib/libLLVM.dylib' 2>/dev/null && echo ok")
+        if code == 0:
+            return true
+
+    false
+
+# ============================================================================
+# Main Detection Entry Point
+# ============================================================================
+
+fn detect_llvm_capabilities() -> LlvmCapabilityReport:
+    """Detect all LLVM capabilities on the current host.
+
+    Performs one detection pass covering all tools, versions, and
+    derived capabilities. Result should be cached by the caller.
+
+    sdoctest:
+        val report = detect_llvm_capabilities()
+        expect(report.host_os != "").to_equal(true)
+    """
+    var warnings: [text] = []
+    var errors: [text] = []
+
+    val os = get_host_os()
+    val arch = host_arch()
+
+    # Detect individual tools
+    val llc_path = find_llc_portable()
+    val llc_ver = if llc_path != "": detect_llc_version() else: LlvmVersionInfo.unknown()
+    val llc_status = if llc_path != "":
+        LlvmToolStatus.found("llc", llc_path, llc_ver)
+    else:
+        LlvmToolStatus.not_found("llc")
+
+    val opt_path = find_opt_portable()
+    val opt_ver = if opt_path != "": detect_opt_version() else: LlvmVersionInfo.unknown()
+    val opt_status = if opt_path != "":
+        LlvmToolStatus.found("opt", opt_path, opt_ver)
+    else:
+        LlvmToolStatus.not_found("opt")
+
+    val clang_path = find_clang_portable()
+    val clang_ver = if clang_path != "": detect_clang_version() else: LlvmVersionInfo.unknown()
+    val clang_status = if clang_path != "":
+        LlvmToolStatus.found("clang", clang_path, clang_ver)
+    else:
+        LlvmToolStatus.not_found("clang")
+
+    val wasm_ld_path = find_wasm_ld_portable()
+    val wasm_ld_status = if wasm_ld_path != "":
+        LlvmToolStatus.found("wasm-ld", wasm_ld_path, LlvmVersionInfo.unknown())
+    else:
+        LlvmToolStatus.not_found("wasm-ld")
+
+    val nm_path = find_nm_portable()
+    val nm_status = if nm_path != "":
+        LlvmToolStatus.found("nm", nm_path, LlvmVersionInfo.unknown())
+    else:
+        LlvmToolStatus.not_found("nm")
+
+    # Detect libLLVM
+    val lib_ver = detect_libllvm_version()
+    val lib_available = detect_libllvm_available()
+    val libllvm_status = if lib_available:
+        LlvmToolStatus.found("libLLVM", "system", lib_ver)
+    else:
+        LlvmToolStatus.not_found("libLLVM")
+
+    # Version compatibility checks
+    if llc_ver.is_known():
+        val llc_compat = check_version_compatibility(llc_ver)
+        if llc_compat == LlvmVersionStatus.TooOld:
+            errors.push(version_diagnostic(llc_ver, "llc"))
+        elif llc_compat == LlvmVersionStatus.TooNew:
+            warnings.push(version_diagnostic(llc_ver, "llc"))
+
+    # Check for version mismatch between CLI and lib
+    val mismatch = check_version_mismatch(llc_ver, lib_ver)
+    if mismatch.?:
+        warnings.push(mismatch.unwrap())
+
+    # Determine derived capabilities
+    val llvm_backend = llc_path != ""
+    val llvm_lib_backend = lib_available
+    val wasm_link = wasm_ld_path != ""
+    val can_opt = opt_path != ""
+
+    # Determine supported targets
+    var targets: [text] = []
+    if llvm_backend or llvm_lib_backend:
+        # Native targets always supported
+        if arch == "x86_64":
+            targets.push("x86_64-native")
+        elif arch == "aarch64":
+            targets.push("aarch64-native")
+        elif arch == "riscv64":
+            targets.push("riscv64-native")
+
+        # Cross targets (LLVM supports them if the backend has target support)
+        targets.push("x86_64-cross")
+        targets.push("i686-cross")
+        targets.push("aarch64-cross")
+        targets.push("armv7-cross")
+        targets.push("riscv64-cross")
+        targets.push("riscv32-cross")
+
+        # Bare-metal variants
+        targets.push("riscv32-baremetal")
+        targets.push("riscv64-baremetal")
+        targets.push("armv7-baremetal")
+        targets.push("aarch64-baremetal")
+
+    if wasm_link:
+        targets.push("wasm32")
+        targets.push("wasm64")
+    elif llvm_backend or llvm_lib_backend:
+        # Can compile to WASM objects but can't link
+        targets.push("wasm32-compile-only")
+        warnings.push("wasm-ld not found: WASM compilation works but linking requires wasm-ld (install lld)")
+
+    LlvmCapabilityReport(
+        llc: llc_status,
+        opt: opt_status,
+        clang: clang_status,
+        wasm_ld: wasm_ld_status,
+        nm: nm_status,
+        libllvm: libllvm_status,
+        llvm_backend_available: llvm_backend,
+        llvm_lib_backend_available: llvm_lib_backend,
+        wasm_link_available: wasm_link,
+        can_optimize: can_opt,
+        host_os: os,
+        host_arch: arch,
+        supported_targets: targets,
+        warnings: warnings,
+        errors: errors
+    )
+
+# ============================================================================
+# Cached Global Detection
+# ============================================================================
+
+# Module-level cache for the capability report.
+# Detect once on first access, reuse thereafter.
+var _cached_report: LlvmCapabilityReport? = nil
+
+fn get_llvm_capabilities() -> LlvmCapabilityReport:
+    """Get the cached LLVM capability report, detecting on first call.
+
+    sdoctest:
+        val report = get_llvm_capabilities()
+        expect(report.host_arch != "").to_equal(true)
+    """
+    if _cached_report.?:
+        return _cached_report.unwrap()
+    val report = detect_llvm_capabilities()
+    _cached_report = Some(report)
+    report
+
+fn reset_capability_cache():
+    """Reset the cached capability report (for testing)."""
+    _cached_report = nil
+
+# ============================================================================
+# Cross-Target Capability Detection
+# ============================================================================
+
+fn detect_multilib() -> bool:
+    """Check if 32-bit multilib development libraries are available.
+
+    Probes for gcc-multilib or 32-bit libc on the host.
+    """
+    val os = get_host_os()
+    if os == "linux":
+        # Check for i386 CRT objects (the real requirement for 32-bit linking)
+        val (out, err, code) = shell("test -f /usr/lib/i386-linux-gnu/crt1.o -o -f /usr/lib32/crt1.o && echo ok")
+        if code == 0:
+            return true
+        # Check for gcc-multilib package
+        val (out2, err2, code2) = shell("dpkg -l gcc-multilib 2>/dev/null | grep -q '^ii' && echo ok")
+        if code2 == 0:
+            return true
+    elif os == "freebsd":
+        val (out, err, code) = shell("test -f /usr/lib32/crt1.o && echo ok")
+        return code == 0
+    false
+
+fn detect_cross_sysroot(target_prefix: text) -> text:
+    """Probe standard paths for a cross-compilation sysroot.
+
+    Returns the sysroot path if found, empty string otherwise.
+
+    target_prefix: e.g. "aarch64-linux-gnu", "arm-linux-gnueabihf", "riscv64-linux-gnu"
+    """
+    val os = get_host_os()
+    if os != "linux":
+        return ""
+
+    # Standard Debian/Ubuntu cross-sysroot locations
+    val candidates = [
+        "/usr/{target_prefix}",
+        "/usr/lib/{target_prefix}"
+    ]
+
+    for candidate in candidates:
+        val (out, err, code) = shell("test -d '{candidate}' && test -f '{candidate}/lib/libc.so.6' -o -f '{candidate}/lib/libc.a' && echo ok")
+        if code == 0:
+            return candidate
+
+    # Fallback: check if the cross-compiler itself is installed (implies sysroot)
+    val (out, err, code) = shell("command -v {target_prefix}-gcc 2>/dev/null")
+    if code == 0:
+        # Get sysroot from the cross-compiler
+        val (sysroot_out, e2, c2) = shell("{target_prefix}-gcc -print-sysroot 2>/dev/null")
+        if c2 == 0 and sysroot_out.trim() != "":
+            return sysroot_out.trim()
+
+    ""
+
+fn detect_cross_linker(target_prefix: text) -> text:
+    """Find a cross-linker by target prefix convention.
+
+    Returns the linker path if found, empty string otherwise.
+
+    target_prefix: e.g. "aarch64-linux-gnu", "arm-linux-gnueabihf", "riscv64-linux-gnu"
+    """
+    # Try prefixed linkers in order of preference
+    val candidates = [
+        "{target_prefix}-ld",
+        "{target_prefix}-ld.bfd",
+        "{target_prefix}-ld.gold"
+    ]
+
+    for candidate in candidates:
+        val path = find_tool_portable([candidate])
+        if path != "":
+            return path
+
+    # Fallback: try LLD with target flag (lld can cross-link)
+    val lld_path = find_tool_portable(["ld.lld-19", "ld.lld-18", "ld.lld-17", "ld.lld-16", "ld.lld"])
+    if lld_path != "":
+        return lld_path
+
+    ""
+
+fn generate_capability_report() -> text:
+    """Generate a comprehensive cross-target capability report.
+
+    Probes the host for all cross-compilation toolchains and summarizes
+    what's available for each target architecture.
+    """
+    val base = get_llvm_capabilities()
+    var report = base.format_report()
+
+    report = report + "\nCross-Target Capabilities\n"
+    report = report + "========================\n\n"
+
+    # Multilib (i686)
+    val has_multilib = detect_multilib()
+    report = report + "i686 multilib:      {if has_multilib: \"available\" else: \"NOT FOUND\"}\n"
+
+    # AArch64
+    val aarch64_sysroot = detect_cross_sysroot("aarch64-linux-gnu")
+    val aarch64_linker = detect_cross_linker("aarch64-linux-gnu")
+    report = report + "aarch64 sysroot:    {if aarch64_sysroot != \"\": aarch64_sysroot else: \"NOT FOUND\"}\n"
+    report = report + "aarch64 linker:     {if aarch64_linker != \"\": aarch64_linker else: \"NOT FOUND\"}\n"
+
+    # ARMv7
+    val arm_sysroot = detect_cross_sysroot("arm-linux-gnueabihf")
+    val arm_linker = detect_cross_linker("arm-linux-gnueabihf")
+    report = report + "armv7 sysroot:      {if arm_sysroot != \"\": arm_sysroot else: \"NOT FOUND\"}\n"
+    report = report + "armv7 linker:       {if arm_linker != \"\": arm_linker else: \"NOT FOUND\"}\n"
+
+    # RISC-V 64
+    val riscv64_sysroot = detect_cross_sysroot("riscv64-linux-gnu")
+    val riscv64_linker = detect_cross_linker("riscv64-linux-gnu")
+    report = report + "riscv64 sysroot:    {if riscv64_sysroot != \"\": riscv64_sysroot else: \"NOT FOUND\"}\n"
+    report = report + "riscv64 linker:     {if riscv64_linker != \"\": riscv64_linker else: \"NOT FOUND\"}\n"
+
+    # RISC-V 32 (baremetal)
+    val riscv32_linker = detect_cross_linker("riscv64-linux-gnu")
+    report = report + "riscv32 linker:     {if riscv32_linker != \"\": riscv32_linker else: \"NOT FOUND\"} (via riscv64 toolchain)\n"
+
+    report = report + "\n"
+    report
+
+# ============================================================================
+# Exports
+# ============================================================================

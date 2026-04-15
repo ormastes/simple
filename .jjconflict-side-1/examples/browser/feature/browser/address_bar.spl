@@ -1,0 +1,158 @@
+# Omnibox / URL bar with autocomplete for the Simple Browser Platform.
+# Combines URL input, history suggestions, bookmark suggestions, and web search.
+
+use sbp.shared.logging.{Logger, LogLevel}
+
+enum SuggestionKind:
+    History
+    Bookmark
+    Search
+    Url
+
+class Suggestion:
+    text_val: text
+    url: text
+    kind: SuggestionKind
+    score: f64
+
+    static fn create(text_val: text, url: text, kind: SuggestionKind, score: f64) -> Suggestion:
+        Suggestion(text_val: text_val, url: url, kind: kind, score: score)
+
+class AddressBar:
+    current_text: text
+    suggestions: [Suggestion]
+    is_focused: bool
+    cursor_pos: i64
+    logger: Logger
+
+    static fn new(logger: Logger) -> AddressBar:
+        AddressBar(
+            current_text: "",
+            suggestions: [Suggestion](),
+            is_focused: false,
+            cursor_pos: 0,
+            logger: logger
+        )
+
+    me set_text(text_val: text):
+        self.current_text = text_val
+        self.cursor_pos = text_val.len()
+        self.logger.debug("Address bar text: '{text_val}'")
+
+    me submit() -> text:
+        val url = normalize_submit(self.current_text)
+        self.logger.info("Address bar submit: {url}")
+        self.is_focused = false
+        url
+
+    me focus():
+        self.is_focused = true
+        # Select all text on focus for easy replacement
+        self.cursor_pos = self.current_text.len()
+        self.logger.debug("Address bar focused")
+
+    me blur():
+        self.is_focused = false
+        self.suggestions = [Suggestion]()
+        self.logger.debug("Address bar blurred")
+
+    me update_suggestions(query: text, history_entries: [text], history_titles: [text], bookmark_urls: [text], bookmark_titles: [text]):
+        # Build suggestion list from history and bookmarks.
+        # In a real implementation, this also queries a search provider.
+        self.suggestions = [Suggestion]()
+        if query == "":
+            return
+        val q = query.to_lower()
+        # History suggestions
+        for i in 0..history_entries.len():
+            val url = history_entries[i]
+            val title = if i < history_titles.len(): history_titles[i] else: url
+            val s = score_suggestion(q, url, title)
+            if s > 0.0:
+                val suggestion = Suggestion.create(
+                    text_val: title, url: url,
+                    kind: SuggestionKind.History, score: s
+                )
+                self.suggestions.push(suggestion)
+        # Bookmark suggestions
+        for i in 0..bookmark_urls.len():
+            val url = bookmark_urls[i]
+            val title = if i < bookmark_titles.len(): bookmark_titles[i] else: url
+            val s = score_suggestion(q, url, title)
+            if s > 0.0:
+                val suggestion = Suggestion.create(
+                    text_val: title, url: url,
+                    kind: SuggestionKind.Bookmark, score: s + 0.1
+                )
+                self.suggestions.push(suggestion)
+        # URL-like input gets a direct URL suggestion
+        if is_url_like(query):
+            val direct = Suggestion.create(
+                text_val: query, url: normalize_submit(query),
+                kind: SuggestionKind.Url, score: 1.0
+            )
+            self.suggestions.push(direct)
+        # Always offer a search suggestion
+        val search = Suggestion.create(
+            text_val: "Search for \"{query}\"",
+            url: search_url(query),
+            kind: SuggestionKind.Search,
+            score: 0.1
+        )
+        self.suggestions.push(search)
+        # Sort by score descending (simple insertion sort)
+        for i in 1..self.suggestions.len():
+            var j = i
+            while j > 0 and self.suggestions[j].score > self.suggestions[j - 1].score:
+                val tmp = self.suggestions[j]
+                self.suggestions[j] = self.suggestions[j - 1]
+                self.suggestions[j - 1] = tmp
+                j = j - 1
+
+    fn get_suggestions() -> [Suggestion]:
+        self.suggestions
+
+# --- Module-level utility functions ---
+
+fn score_suggestion(query: text, url: text, title: text) -> f64:
+    val q = query.to_lower()
+    val u = url.to_lower()
+    val t = title.to_lower()
+    var score = 0.0
+    # Exact prefix match on URL is highest
+    if u.starts_with(q) or u.starts_with("https://{q}") or u.starts_with("http://{q}"):
+        score = score + 0.8
+    # Title starts with query
+    if t.starts_with(q):
+        score = score + 0.6
+    # URL contains query
+    if u.contains(q) and score == 0.0:
+        score = score + 0.4
+    # Title contains query
+    if t.contains(q) and score < 0.4:
+        score = score + 0.3
+    score
+
+fn is_url_like(input: text) -> bool:
+    # Heuristic: has a dot, no spaces, or starts with a protocol
+    if input.starts_with("https://") or input.starts_with("http://"):
+        return true
+    if input.starts_with("file://") or input.starts_with("about:"):
+        return true
+    if input.contains(".") and not input.contains(" "):
+        return true
+    false
+
+fn search_url(query: text) -> text:
+    "https://search.example.com/?q={query}"
+
+fn normalize_submit(input: text) -> text:
+    if input == "":
+        return "about:blank"
+    if input.starts_with("https://") or input.starts_with("http://"):
+        return input
+    if input.starts_with("file://") or input.starts_with("about:"):
+        return input
+    if is_url_like(input):
+        return "https://{input}"
+    search_url(input)

@@ -1,0 +1,445 @@
+# PersistentSet Specification
+#
+# Comprehensive tests for the immutable PersistentSet backed by PersistentMap (HAMT).
+# Covers construction, element operations, persistence guarantees,
+# set algebra (union, intersection, difference), higher-order ops,
+# subset/superset checks, conversion, and stress tests.
+
+use std.persistent_set.{PersistentSet, PersistentSet__empty, PersistentSet__from_array, PersistentSet__of}
+
+describe "PersistentSet":
+
+    describe "empty set":
+        it "has zero length":
+            val s = PersistentSet.empty()
+            expect(s.len()).to_equal(0)
+
+        it "is empty":
+            val s = PersistentSet.empty()
+            expect(s.is_empty()).to_equal(true)
+
+        it "contains returns false for any element":
+            val s = PersistentSet.empty()
+            expect(s.contains("x")).to_equal(false)
+            expect(s.contains(42)).to_equal(false)
+
+        it "to_array returns empty array":
+            val s = PersistentSet.empty()
+            val arr = s.to_array()
+            expect(arr.len()).to_equal(0)
+
+    describe "add and contains":
+        it "adds and finds a single element":
+            val s = PersistentSet.empty().add("alice")
+            expect(s.contains("alice")).to_equal(true)
+            expect(s.len()).to_equal(1)
+
+        it "returns new set on add - original unchanged":
+            val s1 = PersistentSet.empty()
+            val s2 = s1.add("alice")
+            expect(s1.len()).to_equal(0)
+            expect(s1.contains("alice")).to_equal(false)
+            expect(s2.len()).to_equal(1)
+            expect(s2.contains("alice")).to_equal(true)
+
+        it "adding duplicate does not increase length":
+            val s = PersistentSet.empty().add("a").add("a")
+            expect(s.len()).to_equal(1)
+            expect(s.contains("a")).to_equal(true)
+
+        it "handles two elements":
+            val s = PersistentSet.empty().add("a").add("b")
+            expect(s.contains("a")).to_equal(true)
+            expect(s.contains("b")).to_equal(true)
+            expect(s.len()).to_equal(2)
+
+        it "handles three elements":
+            val s = PersistentSet.empty().add("a").add("b").add("c")
+            expect(s.contains("a")).to_equal(true)
+            expect(s.contains("b")).to_equal(true)
+            expect(s.contains("c")).to_equal(true)
+            expect(s.len()).to_equal(3)
+
+        it "stores integer elements":
+            val s = PersistentSet.empty().add(1).add(2).add(3)
+            expect(s.contains(1)).to_equal(true)
+            expect(s.contains(2)).to_equal(true)
+            expect(s.contains(3)).to_equal(true)
+            expect(s.len()).to_equal(3)
+
+        it "returns false for missing element":
+            val s = PersistentSet.empty().add("a")
+            expect(s.contains("b")).to_equal(false)
+
+        it "is no longer empty after add":
+            val s = PersistentSet.empty().add("x")
+            expect(s.is_empty()).to_equal(false)
+
+    describe "persistence across multiple adds":
+        it "preserves snapshots":
+            val s0 = PersistentSet.empty()
+            val s1 = s0.add("a")
+            val s2 = s1.add("b")
+            val s3 = s2.add("c")
+            expect(s0.len()).to_equal(0)
+            expect(s1.len()).to_equal(1)
+            expect(s2.len()).to_equal(2)
+            expect(s3.len()).to_equal(3)
+            expect(s1.contains("b")).to_equal(false)
+            expect(s2.contains("c")).to_equal(false)
+
+    describe "remove":
+        it "removes an existing element":
+            val s = PersistentSet.empty().add("a").add("b")
+            val s2 = s.remove("a")
+            expect(s2.contains("a")).to_equal(false)
+            expect(s2.contains("b")).to_equal(true)
+            expect(s2.len()).to_equal(1)
+
+        it "does not modify original on remove":
+            val s1 = PersistentSet.empty().add("a")
+            val s2 = s1.remove("a")
+            expect(s1.contains("a")).to_equal(true)
+            expect(s1.len()).to_equal(1)
+            expect(s2.contains("a")).to_equal(false)
+            expect(s2.len()).to_equal(0)
+
+        it "handles removing non-existent element":
+            val s = PersistentSet.empty().add("a")
+            val s2 = s.remove("b")
+            expect(s2.len()).to_equal(1)
+            expect(s2.contains("a")).to_equal(true)
+
+        it "removes last element to get empty set":
+            val s = PersistentSet.empty().add("only")
+            val s2 = s.remove("only")
+            expect(s2.len()).to_equal(0)
+            expect(s2.is_empty()).to_equal(true)
+
+        it "removes from multi-element set":
+            val s = PersistentSet.empty().add("a").add("b").add("c")
+            val s2 = s.remove("b")
+            expect(s2.len()).to_equal(2)
+            expect(s2.contains("a")).to_equal(true)
+            expect(s2.contains("b")).to_equal(false)
+            expect(s2.contains("c")).to_equal(true)
+
+        it "remove from empty set":
+            val s = PersistentSet.empty()
+            val s2 = s.remove("nothing")
+            expect(s2.len()).to_equal(0)
+
+    describe "from_array":
+        it "builds from array of elements":
+            val s = PersistentSet.from_array(["a", "b", "c"])
+            expect(s.len()).to_equal(3)
+            expect(s.contains("a")).to_equal(true)
+            expect(s.contains("b")).to_equal(true)
+            expect(s.contains("c")).to_equal(true)
+
+        it "handles empty array":
+            val s = PersistentSet.from_array([])
+            expect(s.len()).to_equal(0)
+            expect(s.is_empty()).to_equal(true)
+
+        it "handles single element array":
+            val s = PersistentSet.from_array(["only"])
+            expect(s.contains("only")).to_equal(true)
+            expect(s.len()).to_equal(1)
+
+        it "deduplicates on construction":
+            val s = PersistentSet.from_array(["a", "b", "a", "c", "b"])
+            expect(s.len()).to_equal(3)
+
+    describe "of (alias for from_array)":
+        it "builds set via of":
+            val s = PersistentSet.of(["x", "y"])
+            expect(s.len()).to_equal(2)
+            expect(s.contains("x")).to_equal(true)
+            expect(s.contains("y")).to_equal(true)
+
+    describe "union":
+        it "merges two disjoint sets":
+            val s1 = PersistentSet.from_array(["a", "b"])
+            val s2 = PersistentSet.from_array(["c", "d"])
+            val u = s1.union(s2)
+            expect(u.len()).to_equal(4)
+            expect(u.contains("a")).to_equal(true)
+            expect(u.contains("b")).to_equal(true)
+            expect(u.contains("c")).to_equal(true)
+            expect(u.contains("d")).to_equal(true)
+
+        it "deduplicates overlapping elements":
+            val s1 = PersistentSet.from_array(["a", "b", "c"])
+            val s2 = PersistentSet.from_array(["b", "c", "d"])
+            val u = s1.union(s2)
+            expect(u.len()).to_equal(4)
+
+        it "union with empty returns equivalent set":
+            val s1 = PersistentSet.from_array(["a", "b"])
+            val s2 = PersistentSet.empty()
+            val u = s1.union(s2)
+            expect(u.len()).to_equal(2)
+            expect(u.contains("a")).to_equal(true)
+
+        it "empty union with other returns other":
+            val s1 = PersistentSet.empty()
+            val s2 = PersistentSet.from_array(["x"])
+            val u = s1.union(s2)
+            expect(u.len()).to_equal(1)
+            expect(u.contains("x")).to_equal(true)
+
+        it "does not modify originals":
+            val s1 = PersistentSet.from_array(["a"])
+            val s2 = PersistentSet.from_array(["b"])
+            val u = s1.union(s2)
+            expect(s1.len()).to_equal(1)
+            expect(s2.len()).to_equal(1)
+            expect(u.len()).to_equal(2)
+
+    describe "intersection":
+        it "returns only common elements":
+            val s1 = PersistentSet.from_array(["a", "b", "c"])
+            val s2 = PersistentSet.from_array(["b", "c", "d"])
+            val inter = s1.intersection(s2)
+            expect(inter.len()).to_equal(2)
+            expect(inter.contains("b")).to_equal(true)
+            expect(inter.contains("c")).to_equal(true)
+            expect(inter.contains("a")).to_equal(false)
+            expect(inter.contains("d")).to_equal(false)
+
+        it "returns empty for disjoint sets":
+            val s1 = PersistentSet.from_array(["a", "b"])
+            val s2 = PersistentSet.from_array(["c", "d"])
+            val inter = s1.intersection(s2)
+            expect(inter.len()).to_equal(0)
+            expect(inter.is_empty()).to_equal(true)
+
+        it "intersection with empty returns empty":
+            val s1 = PersistentSet.from_array(["a", "b"])
+            val s2 = PersistentSet.empty()
+            val inter = s1.intersection(s2)
+            expect(inter.len()).to_equal(0)
+
+        it "intersection with itself returns equivalent set":
+            val s = PersistentSet.from_array(["a", "b", "c"])
+            val inter = s.intersection(s)
+            expect(inter.len()).to_equal(3)
+
+    describe "difference":
+        it "returns elements in self but not other":
+            val s1 = PersistentSet.from_array(["a", "b", "c"])
+            val s2 = PersistentSet.from_array(["b", "d"])
+            val diff = s1.difference(s2)
+            expect(diff.len()).to_equal(2)
+            expect(diff.contains("a")).to_equal(true)
+            expect(diff.contains("c")).to_equal(true)
+            expect(diff.contains("b")).to_equal(false)
+
+        it "returns empty when self is subset of other":
+            val s1 = PersistentSet.from_array(["a", "b"])
+            val s2 = PersistentSet.from_array(["a", "b", "c"])
+            val diff = s1.difference(s2)
+            expect(diff.len()).to_equal(0)
+
+        it "difference with empty returns self":
+            val s1 = PersistentSet.from_array(["a", "b"])
+            val s2 = PersistentSet.empty()
+            val diff = s1.difference(s2)
+            expect(diff.len()).to_equal(2)
+
+        it "difference with itself returns empty":
+            val s = PersistentSet.from_array(["a", "b"])
+            val diff = s.difference(s)
+            expect(diff.len()).to_equal(0)
+            expect(diff.is_empty()).to_equal(true)
+
+    describe "symmetric_difference":
+        it "returns elements in either but not both":
+            val s1 = PersistentSet.from_array(["a", "b", "c"])
+            val s2 = PersistentSet.from_array(["b", "c", "d"])
+            val sd = s1.symmetric_difference(s2)
+            expect(sd.len()).to_equal(2)
+            expect(sd.contains("a")).to_equal(true)
+            expect(sd.contains("d")).to_equal(true)
+            expect(sd.contains("b")).to_equal(false)
+            expect(sd.contains("c")).to_equal(false)
+
+        it "symmetric difference of identical sets is empty":
+            val s = PersistentSet.from_array(["a", "b"])
+            val sd = s.symmetric_difference(s)
+            expect(sd.len()).to_equal(0)
+
+        it "symmetric difference of disjoint sets is union":
+            val s1 = PersistentSet.from_array(["a"])
+            val s2 = PersistentSet.from_array(["b"])
+            val sd = s1.symmetric_difference(s2)
+            expect(sd.len()).to_equal(2)
+            expect(sd.contains("a")).to_equal(true)
+            expect(sd.contains("b")).to_equal(true)
+
+    describe "is_subset":
+        it "returns true when self is subset":
+            val s1 = PersistentSet.from_array(["a", "b"])
+            val s2 = PersistentSet.from_array(["a", "b", "c"])
+            expect(s1.is_subset(s2)).to_equal(true)
+
+        it "returns false when not subset":
+            val s1 = PersistentSet.from_array(["a", "b", "x"])
+            val s2 = PersistentSet.from_array(["a", "b", "c"])
+            expect(s1.is_subset(s2)).to_equal(false)
+
+        it "empty set is subset of any set":
+            val s1 = PersistentSet.empty()
+            val s2 = PersistentSet.from_array(["a"])
+            expect(s1.is_subset(s2)).to_equal(true)
+
+        it "set is subset of itself":
+            val s = PersistentSet.from_array(["a", "b"])
+            expect(s.is_subset(s)).to_equal(true)
+
+    describe "is_superset":
+        it "returns true when self is superset":
+            val s1 = PersistentSet.from_array(["a", "b", "c"])
+            val s2 = PersistentSet.from_array(["a", "b"])
+            expect(s1.is_superset(s2)).to_equal(true)
+
+        it "returns false when not superset":
+            val s1 = PersistentSet.from_array(["a", "b"])
+            val s2 = PersistentSet.from_array(["a", "b", "c"])
+            expect(s1.is_superset(s2)).to_equal(false)
+
+        it "any set is superset of empty":
+            val s1 = PersistentSet.from_array(["a"])
+            val s2 = PersistentSet.empty()
+            expect(s1.is_superset(s2)).to_equal(true)
+
+    describe "filter":
+        it "keeps elements matching predicate":
+            val s = PersistentSet.from_array([1, 2, 3, 4, 5])
+            val evens = s.filter(fn(x): x % 2 == 0)
+            expect(evens.len()).to_equal(2)
+            expect(evens.contains(2)).to_equal(true)
+            expect(evens.contains(4)).to_equal(true)
+            expect(evens.contains(1)).to_equal(false)
+
+        it "returns empty when nothing matches":
+            val s = PersistentSet.from_array([1, 2, 3])
+            val filtered = s.filter(fn(x): x > 100)
+            expect(filtered.len()).to_equal(0)
+            expect(filtered.is_empty()).to_equal(true)
+
+        it "returns all when everything matches":
+            val s = PersistentSet.from_array([1, 2, 3])
+            val filtered = s.filter(fn(x): x > 0)
+            expect(filtered.len()).to_equal(3)
+
+    describe "map":
+        it "transforms all elements":
+            val s = PersistentSet.from_array([1, 2, 3])
+            val doubled = s.map(fn(x): x * 2)
+            expect(doubled.len()).to_equal(3)
+            expect(doubled.contains(2)).to_equal(true)
+            expect(doubled.contains(4)).to_equal(true)
+            expect(doubled.contains(6)).to_equal(true)
+
+        it "deduplicates mapped results":
+            val s = PersistentSet.from_array([1, 2, 3, 4])
+            val modded = s.map(fn(x): x % 2)
+            expect(modded.len()).to_equal(2)
+            expect(modded.contains(0)).to_equal(true)
+            expect(modded.contains(1)).to_equal(true)
+
+        it "does not modify original":
+            val s = PersistentSet.from_array([1, 2])
+            val mapped = s.map(fn(x): x + 10)
+            expect(s.len()).to_equal(2)
+            expect(s.contains(1)).to_equal(true)
+            expect(mapped.contains(1)).to_equal(false)
+
+    describe "fold":
+        it "sums all elements":
+            val s = PersistentSet.from_array([1, 2, 3])
+            val total = s.fold(0, fn(acc, x): acc + x)
+            expect(total).to_equal(6)
+
+        it "fold over empty returns init":
+            val s = PersistentSet.empty()
+            val result = s.fold(42, fn(acc, x): acc + x)
+            expect(result).to_equal(42)
+
+    describe "to_array":
+        it "returns correct number of elements":
+            val s = PersistentSet.from_array(["x", "y", "z"])
+            val arr = s.to_array()
+            expect(arr.len()).to_equal(3)
+
+        it "single element set":
+            val s = PersistentSet.from_array(["only"])
+            val arr = s.to_array()
+            expect(arr.len()).to_equal(1)
+
+    describe "copy":
+        it "returns identical set":
+            val s = PersistentSet.from_array(["a", "b"])
+            val c = s.copy()
+            expect(c.contains("a")).to_equal(true)
+            expect(c.contains("b")).to_equal(true)
+            expect(c.len()).to_equal(2)
+
+    describe "stress test":
+        it "handles many elements via helper fn":
+            fn run_stress() -> i64:
+                var s = PersistentSet.empty()
+                var i = 0
+                while i < 100:
+                    s = s.add("item_{i}")
+                    i = i + 1
+                s.len()
+            expect(run_stress()).to_equal(100)
+
+        it "add and check many elements":
+            fn run_check_stress() -> i64:
+                var s = PersistentSet.empty()
+                var i = 0
+                while i < 50:
+                    s = s.add("k_{i}")
+                    i = i + 1
+                var ok_count = 0
+                i = 0
+                while i < 50:
+                    if s.contains("k_{i}"):
+                        ok_count = ok_count + 1
+                    i = i + 1
+                ok_count
+            expect(run_check_stress()).to_equal(50)
+
+        it "remove many elements":
+            fn run_remove_stress() -> i64:
+                var s = PersistentSet.empty()
+                var i = 0
+                while i < 30:
+                    s = s.add("r_{i}")
+                    i = i + 1
+                i = 0
+                while i < 15:
+                    s = s.remove("r_{i}")
+                    i = i + 1
+                s.len()
+            expect(run_remove_stress()).to_equal(15)
+
+    describe "edge cases":
+        it "add same element repeatedly":
+            val s = PersistentSet.empty().add("a").add("a").add("a")
+            expect(s.len()).to_equal(1)
+
+        it "empty string as element":
+            val s = PersistentSet.empty().add("")
+            expect(s.contains("")).to_equal(true)
+            expect(s.len()).to_equal(1)
+
+        it "add and remove same element":
+            val s = PersistentSet.empty().add("temp").remove("temp")
+            expect(s.len()).to_equal(0)
+            expect(s.is_empty()).to_equal(true)
+            expect(s.contains("temp")).to_equal(false)

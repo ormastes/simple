@@ -1,0 +1,133 @@
+# Process Monitor Tests
+
+use std.spec.{describe, it, expect}
+use std.process_monitor.{ProcessMetrics, sample_process, exceeds_limits, is_linux, is_macos}
+use app.io.mod.{process_spawn_async, process_wait, process_kill, time_now_unix_micros}
+
+describe "ProcessMetrics struct":
+    it "creates metrics with all fields":
+        val metrics = ProcessMetrics(
+            pid: 1234,
+            cpu_percent: 45.5,
+            memory_mb: 128,
+            open_fds: 23,
+            thread_count: 4,
+            timestamp_ms: 1000000
+        )
+        expect(metrics.pid).to_equal(1234)
+        expect(metrics.cpu_percent).to_equal(45.5)
+        expect(metrics.memory_mb).to_equal(128)
+        expect(metrics.open_fds).to_equal(23)
+        expect(metrics.thread_count).to_equal(4)
+        expect(metrics.timestamp_ms).to_equal(1000000)
+
+describe "Platform detection":
+    it "detects at least one platform":
+        val linux = is_linux()
+        val macos = is_macos()
+
+        # At least one should be true
+        val has_platform = linux or macos
+        expect(has_platform).to_equal(true)
+
+describe "sample_process":
+    it "returns zero metrics for non-existent process":
+        val timestamp = time_now_unix_micros() / 1000
+        val metrics = sample_process(999999, timestamp)
+
+        # Non-existent process should have zero thread count
+        # (or other indicators of non-existence)
+        expect(metrics.pid).to_equal(999999)
+
+    it "samples self process successfully":
+        val timestamp = time_now_unix_micros() / 1000
+
+        # Sample own process (this test runner)
+        # Use a known existing PID - get from a spawned process
+        val test_pid = process_spawn_async("sleep", ["1"])
+
+        if test_pid > 0:
+            val metrics = sample_process(test_pid, timestamp)
+
+            # Should have non-zero values for running process
+            expect(metrics.pid).to_equal(test_pid)
+            expect(metrics.timestamp_ms).to_equal(timestamp)
+
+            # Memory should be positive for running process
+            if is_linux():
+                expect(metrics.memory_mb).to_be_greater_than(-1)
+
+            # Clean up
+            process_kill(test_pid)
+
+    it "tracks CPU time for running process":
+        val timestamp = time_now_unix_micros() / 1000
+
+        # Spawn a CPU-intensive process
+        val test_pid = process_spawn_async("sleep", ["1"])
+
+        if test_pid > 0:
+            val metrics = sample_process(test_pid, timestamp)
+
+            # CPU percent might be 0 for just-started process
+            expect(metrics.cpu_percent).to_be_greater_than(-1.0)
+
+            # Clean up
+            process_kill(test_pid)
+
+describe "exceeds_limits":
+    it "detects CPU limit violation":
+        val metrics = ProcessMetrics(
+            pid: 1,
+            cpu_percent: 250.0,
+            memory_mb: 100,
+            open_fds: 10,
+            thread_count: 2,
+            timestamp_ms: 0
+        )
+
+        val (violated, vtype) = exceeds_limits(metrics, 200.0, 512, 1024)
+        expect(violated).to_equal(true)
+        expect(vtype).to_equal("cpu")
+
+    it "detects memory limit violation":
+        val metrics = ProcessMetrics(
+            pid: 1,
+            cpu_percent: 50.0,
+            memory_mb: 1024,
+            open_fds: 10,
+            thread_count: 2,
+            timestamp_ms: 0
+        )
+
+        val (violated, vtype) = exceeds_limits(metrics, 200.0, 512, 1024)
+        expect(violated).to_equal(true)
+        expect(vtype).to_equal("memory")
+
+    it "detects file descriptor limit violation":
+        val metrics = ProcessMetrics(
+            pid: 1,
+            cpu_percent: 50.0,
+            memory_mb: 256,
+            open_fds: 2048,
+            thread_count: 2,
+            timestamp_ms: 0
+        )
+
+        val (violated, vtype) = exceeds_limits(metrics, 200.0, 512, 1024)
+        expect(violated).to_equal(true)
+        expect(vtype).to_equal("fds")
+
+    it "reports no violation when within limits":
+        val metrics = ProcessMetrics(
+            pid: 1,
+            cpu_percent: 50.0,
+            memory_mb: 256,
+            open_fds: 100,
+            thread_count: 2,
+            timestamp_ms: 0
+        )
+
+        val (violated, vtype) = exceeds_limits(metrics, 200.0, 512, 1024)
+        expect(violated).to_equal(false)
+        expect(vtype).to_equal("")

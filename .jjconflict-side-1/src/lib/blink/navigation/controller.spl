@@ -1,0 +1,119 @@
+# Navigation controller — URL history stack with back/forward.
+#
+# Mirrors Chromium's NavigationController. Maintains a list of NavigationEntry
+# objects (URL + title + timestamp) and an index pointing to the current entry.
+# Navigating to a new URL appends an entry after the current index, truncating
+# the forward history. back()/forward() move the index without modifying the
+# list.
+#
+# Scope: single frame, no subframe history, no session restore, no page state
+# serialization, no HTTP-level redirect handling.
+
+use std.lib.blink.url.url_parser.{ParsedUrl, parse_url}
+
+# ============================================================================
+# NavigationEntry — one slot in the history list
+# ============================================================================
+
+class NavigationEntry:
+    url: ParsedUrl
+    title: String
+    timestamp_ms: f64
+    scroll_x: f64
+    scroll_y: f64
+
+fn navigation_entry_new(url: ParsedUrl, title: String, timestamp: f64) -> NavigationEntry:
+    NavigationEntry(
+        url: url,
+        title: title,
+        timestamp_ms: timestamp,
+        scroll_x: 0.0,
+        scroll_y: 0.0
+    )
+
+# ============================================================================
+# NavigationController — the history stack
+# ============================================================================
+
+class NavigationController:
+    entries: [NavigationEntry]
+    current_index: i64
+
+fn navigation_controller_new() -> NavigationController:
+    NavigationController(
+        entries: [NavigationEntry](),
+        current_index: -1
+    )
+
+# ============================================================================
+# NavigationController methods
+# ============================================================================
+
+impl NavigationController:
+
+    # navigate — parse url_string, discard forward history, append new entry.
+    # Returns the new entry, or None if the URL is invalid.
+    me navigate(url_string: String, timestamp: f64) -> Option<NavigationEntry>:
+        val parsed = parse_url(url_string)
+        if not parsed.is_valid:
+            return None
+        # Truncate entries to [0 .. current_index+1] — drop forward history.
+        val keep = self.current_index + 1
+        var trimmed: [NavigationEntry] = [NavigationEntry]()
+        var i: i64 = 0
+        while i < keep:
+            trimmed.push(self.entries[i])
+            i = i + 1
+        val entry = navigation_entry_new(parsed, "", timestamp)
+        trimmed.push(entry)
+        self.entries = trimmed
+        self.current_index = self.entries.len().to_i64() - 1
+        Some(entry)
+
+    # can_go_back — true when there is at least one earlier entry.
+    me can_go_back() -> bool:
+        self.current_index > 0
+
+    # can_go_forward — true when there is at least one later entry.
+    me can_go_forward() -> bool:
+        self.current_index + 1 < self.entries.len().to_i64()
+
+    # go_back — move one step back; returns the new current entry or None.
+    me go_back() -> Option<NavigationEntry>:
+        if not self.can_go_back():
+            return None
+        self.current_index = self.current_index - 1
+        Some(self.entries[self.current_index])
+
+    # go_forward — move one step forward; returns the new current entry or None.
+    me go_forward() -> Option<NavigationEntry>:
+        if not self.can_go_forward():
+            return None
+        self.current_index = self.current_index + 1
+        Some(self.entries[self.current_index])
+
+    # current_entry — the entry at current_index, or None if the list is empty.
+    me current_entry() -> Option<NavigationEntry>:
+        if self.current_index < 0:
+            return None
+        Some(self.entries[self.current_index])
+
+    # set_current_title — overwrite the title of the current entry.
+    me set_current_title(title: String):
+        if self.current_index >= 0:
+            self.entries[self.current_index].title = title
+
+    # set_current_scroll — save scroll position before navigating away.
+    me set_current_scroll(x: f64, y: f64):
+        if self.current_index >= 0:
+            self.entries[self.current_index].scroll_x = x
+            self.entries[self.current_index].scroll_y = y
+
+    # history_count — total number of entries in the list.
+    me history_count() -> i64:
+        self.entries.len().to_i64()
+
+    # clear — reset to the initial empty state.
+    me clear():
+        self.entries = [NavigationEntry]()
+        self.current_index = -1

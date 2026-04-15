@@ -1,0 +1,155 @@
+@allow(primitive_api)
+# std.play.sdl2_backend — Simple OS env automation client
+#
+# Drives Simple-native SDL2 apps (or any app that links ui.test_api/handler.spl)
+# via the HTTP test endpoints the handler already exposes:
+#
+#   POST /api/test/click   {"id":"<widget-id>"}
+#   POST /api/test/type    {"id":"<widget-id>", "text":"..."}
+#   POST /api/test/drag    {"from":"<id>", "to":"<id>"}
+#   POST /api/test/event   {"event": <ui_event_json>}
+#   POST /api/test/submit  {"id":"<form-id>"}
+#   GET  /api/test/element?id=<id>
+#   GET  /api/test/elements
+#   GET  /api/test/state
+#   GET  /api/test/screenshot
+#   GET  /api/test/ready
+#
+# The Simple app must be built with ui.test_api wired in; once the app is
+# running (and listening on e.g. 127.0.0.1:17645), this client sends JSON
+# POST requests via curl (keeping dependencies minimal).
+
+use std.play.types.*
+use std.json.builder.{JsonBuilder, escape_json}
+
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+extern fn rt_time_now_unix_micros() -> i64
+extern fn rt_file_write_text(path: text, content: text) -> bool
+
+class Sdl2Client:
+    base_url: text
+    session: PlaySession
+
+    static fn connect(base_url: text) -> Result<Sdl2Client, PlayError>:
+        val probe = rt_process_run("curl", ["-s", "--max-time", "3", base_url + "/api/test/ready"])
+        if probe.2 != 0:
+            return Err(play_error_with_detail(ERR_BACKEND_UNAVAILABLE, "sdl2 test api not reachable", base_url))
+        if not probe.0.contains("\"ready\":true"):
+            return Err(play_error_with_detail(ERR_BACKEND_UNAVAILABLE, "sdl2 test api did not report ready", probe.0))
+        val now = rt_time_now_unix_micros()
+        val sess = PlaySession(
+            id: "sdl2-{now}",
+            backend: BACKEND_SDL2,
+            state: STATE_READY,
+            pid: -1,
+            cwd: "",
+            executable_path: "",
+            args: [],
+            ws_url: "",
+            http_url: base_url,
+            artifacts_dir: "doc/08_tracking/test/play/sdl2-{now}",
+            first_window_id: "",
+            windows: [],
+            created_at_us: now,
+            last_activity_us: now,
+            stdout_path: "",
+            stderr_path: "",
+            console_log_path: "",
+            cdp_trace_path: ""
+        )
+        Ok(Sdl2Client(base_url: base_url, session: sess))
+
+    me _post(path: text, json_body: text) -> Result<text, PlayError>:
+        val r = rt_process_run("curl", [
+            "-s", "--max-time", "5",
+            "-X", "POST",
+            "-H", "Content-Type: application/json",
+            "-d", json_body,
+            self.base_url + path
+        ])
+        if r.2 != 0:
+            return Err(play_error_with_detail(ERR_BACKEND_UNAVAILABLE, "http post failed", path))
+        if r.0.contains("\"error\""):
+            return Err(play_error_with_detail(ERR_CDP_PROTOCOL, "test api returned error", r.0))
+        Ok(r.0)
+
+    me _get(path: text) -> Result<text, PlayError>:
+        val r = rt_process_run("curl", ["-s", "--max-time", "5", self.base_url + path])
+        if r.2 != 0:
+            return Err(play_error_with_detail(ERR_BACKEND_UNAVAILABLE, "http get failed", path))
+        Ok(r.0)
+
+    # ------------------------------------------------------------------
+    # Playwright-ish surface
+    # ------------------------------------------------------------------
+
+    me click(widget_id: text) -> Result<(), PlayError>:
+        val body = JsonBuilder.object().field("id", widget_id).build()
+        self._post("/api/test/click", body)?
+        Ok(())
+
+    me fill(widget_id: text, value: text) -> Result<(), PlayError>:
+        val body = JsonBuilder.object()
+            .field("id", widget_id)
+            .field("text", value)
+            .build()
+        self._post("/api/test/type", body)?
+        Ok(())
+
+    me type_text(widget_id: text, value: text) -> Result<(), PlayError>:
+        self.fill(widget_id, value)
+
+    me press(widget_id: text, key: text) -> Result<(), PlayError>:
+        val body = JsonBuilder.object()
+            .field("id", widget_id)
+            .field("key", key)
+            .build()
+        self._post("/api/test/event", body)?
+        Ok(())
+
+    me drag(from_id: text, to_id: text) -> Result<(), PlayError>:
+        val body = JsonBuilder.object()
+            .field("from", from_id)
+            .field("to", to_id)
+            .build()
+        self._post("/api/test/drag", body)?
+        Ok(())
+
+    me submit(form_id: text) -> Result<(), PlayError>:
+        val body = JsonBuilder.object().field("id", form_id).build()
+        self._post("/api/test/submit", body)?
+        Ok(())
+
+    # ------------------------------------------------------------------
+    # Queries
+    # ------------------------------------------------------------------
+
+    me elements() -> Result<text, PlayError>:
+        self._get("/api/test/elements")
+
+    me element(widget_id: text) -> Result<text, PlayError>:
+        self._get("/api/test/element?id=" + widget_id)
+
+    me state() -> Result<text, PlayError>:
+        self._get("/api/test/state")
+
+    me screenshot(path: text) -> Result<text, PlayError>:
+        val body = self._get("/api/test/screenshot")?
+        val final_path = if path == "": self.session.artifacts_dir + "/screenshot.txt" else: path
+        rt_file_write_text(final_path, body)
+        Ok(final_path)
+
+    # ------------------------------------------------------------------
+    # Auto-retry waiting
+    # ------------------------------------------------------------------
+
+    me wait_for_element(widget_id: text, timeout_ms: i64) -> Result<(), PlayError>:
+        val deadline = rt_time_now_unix_micros() + (timeout_ms * 1000)
+        while rt_time_now_unix_micros() < deadline:
+            val r = self.element(widget_id)
+            match r:
+                case Ok(body):
+                    if not body.contains("\"error\""):
+                        return Ok(())
+                case Err(_): pass_do_nothing
+        Err(play_error(ERR_TIMEOUT, "wait_for_element: " + widget_id))

@@ -1,0 +1,323 @@
+#![allow(unnamed_duplicate_typed_args)]
+# Window Decorations
+#
+# Draws window chrome: title bar, close button, minimize/maximize,
+# and borders around each window surface.
+#
+# Title bar: 24px tall, dark gray (focused) or medium gray (unfocused)
+# Close button: red square with white X in top-right of title bar
+# Border: 1px gray line around the window frame
+
+use os.compositor.display_backend.{CompositorBackend}
+use os.compositor.glass_effects_pure.{GlassConfig, glass_fill_pure, glass_blur_pure, glass_shadow_pure, glass_solid_fill_pure, draw_glass_rect_pure, draw_glass_border_pure}
+use os.compositor.glass_port.{GlassPortConfig}
+use os.compositor.window_effects.{draw_glass_window_enhanced}
+use common.ui.glass_numeric_tokens.{GLASS_DARK_ELEVATED, GLASS_DARK_SURFACE, GLASS_DARK_TEXT, GLASS_DARK_TEXT_SEC, GLASS_DARK_ACCENT, GLASS_DARK_BORDER, GLASS_BTN_CLOSE, GLASS_BTN_MIN, GLASS_BTN_MAX}
+
+# ============================================================================
+# Decoration Constants
+# ============================================================================
+
+val TITLE_BAR_HEIGHT: i32 = 24
+val BORDER_WIDTH: i32 = 1
+val CLOSE_BUTTON_SIZE: i32 = 18
+val CLOSE_BUTTON_MARGIN: i32 = 3
+val TITLE_TEXT_X_OFFSET: i32 = 8
+val TITLE_TEXT_Y_OFFSET: i32 = 4
+
+val ALPHA_OPAQUE: u32 = 0xFF000000
+
+# ============================================================================
+# Color Palette (u32 ARGB: 0xAARRGGBB)
+#
+# All palette colors are sourced from `common.ui.glass_numeric_tokens`, the
+# single source of truth shared with the GUI library and Stitch design system.
+# Tokens are u64 RGB (low 24 bits); `| ALPHA_OPAQUE` promotes to u32 ARGB.
+# See `doc/07_guide/theme/stitch_simple_os_theme.md`.
+# ============================================================================
+
+fn title_bar_color_focused() -> u32:
+    val c: u32 = GLASS_DARK_ELEVATED
+    c | ALPHA_OPAQUE
+
+fn title_bar_color_unfocused() -> u32:
+    val c: u32 = GLASS_DARK_SURFACE
+    c | ALPHA_OPAQUE
+
+fn title_text_color_focused() -> u32:
+    val c: u32 = GLASS_DARK_TEXT
+    c | ALPHA_OPAQUE
+
+fn title_text_color_unfocused() -> u32:
+    val c: u32 = GLASS_DARK_TEXT_SEC
+    c | ALPHA_OPAQUE
+
+fn close_button_bg() -> u32:
+    val c: u32 = GLASS_BTN_CLOSE
+    c | ALPHA_OPAQUE
+
+fn close_button_hover_bg() -> u32:
+    # No hover state in glass_numeric_tokens yet; keep the lighter-red literal
+    # until a token lands. Do not copy close_button_bg() — that would collapse
+    # two visual states into one.
+    0xFFE64646
+
+fn close_button_x_color() -> u32:
+    val c: u32 = GLASS_DARK_TEXT
+    c | ALPHA_OPAQUE
+
+fn border_color_focused() -> u32:
+    val c: u32 = GLASS_DARK_ACCENT
+    c | ALPHA_OPAQUE
+
+fn border_color_unfocused() -> u32:
+    val c: u32 = GLASS_DARK_BORDER
+    c | ALPHA_OPAQUE
+
+# ============================================================================
+# Decoration Dimensions
+# ============================================================================
+
+fn total_decoration_top() -> i32:
+    """Total height consumed by title bar + top border."""
+    TITLE_BAR_HEIGHT + BORDER_WIDTH
+
+fn total_decoration_left() -> i32:
+    """Width consumed by left border."""
+    BORDER_WIDTH
+
+fn total_decoration_right() -> i32:
+    """Width consumed by right border."""
+    BORDER_WIDTH
+
+fn total_decoration_bottom() -> i32:
+    """Height consumed by bottom border."""
+    BORDER_WIDTH
+
+fn client_area_x(window_x: i32) -> i32:
+    """X coordinate of client area within window."""
+    window_x + total_decoration_left()
+
+fn client_area_y(window_y: i32) -> i32:
+    """Y coordinate of client area within window."""
+    window_y + total_decoration_top()
+
+fn client_area_width(window_w: i32) -> i32:
+    """Width of client area within window."""
+    if window_w <= total_decoration_left() + total_decoration_right():
+        return 0
+    window_w - total_decoration_left() - total_decoration_right()
+
+fn client_area_height(window_h: i32) -> i32:
+    """Height of client area within window."""
+    val overhead = total_decoration_top() + total_decoration_bottom()
+    if window_h <= overhead:
+        return 0
+    window_h - overhead
+
+# ============================================================================
+# Drawing Functions
+# ============================================================================
+
+fn draw_window_frame(backend: CompositorBackend, x: i32, y: i32, width: i32, height: i32, title: text, focused: bool):
+    """Draw complete window frame: border + title bar + close button."""
+    draw_border(backend, x, y, width, height, focused)
+    draw_title_bar(backend, x, y, width, title, focused)
+    draw_close_button(backend, x, y, width)
+
+fn draw_title_bar(backend: CompositorBackend, x: i32, y: i32, width: i32, title: text, focused: bool):
+    """Draw the title bar at the top of the window."""
+    val bar_x = x + BORDER_WIDTH
+    val bar_y = y + BORDER_WIDTH
+    val bar_w = if width > 2 * BORDER_WIDTH: width - 2 * BORDER_WIDTH else: 0
+    val bar_h = TITLE_BAR_HEIGHT
+
+    if bar_w == 0:
+        return
+
+    # Background
+    val bg = if focused: title_bar_color_focused() else: title_bar_color_unfocused()
+    backend.fill_rect(bar_x, bar_y, bar_w, bar_h, bg)
+
+    # Title text
+    val fg = if focused: title_text_color_focused() else: title_text_color_unfocused()
+    val text_x = bar_x + TITLE_TEXT_X_OFFSET
+    val text_y = bar_y + TITLE_TEXT_Y_OFFSET
+    backend.draw_text(text_x, text_y, title, fg, bg)
+
+fn draw_close_button(backend: CompositorBackend, x: i32, y: i32, width: i32):
+    """Draw the close button (red square with X) at the top-right of the title bar."""
+    val bar_x = x + BORDER_WIDTH
+    val bar_y = y + BORDER_WIDTH
+    val bar_w = if width > 2 * BORDER_WIDTH: width - 2 * BORDER_WIDTH else: 0
+
+    if bar_w < CLOSE_BUTTON_SIZE + CLOSE_BUTTON_MARGIN * 2:
+        return
+
+    val btn_x = bar_x + bar_w - CLOSE_BUTTON_SIZE - CLOSE_BUTTON_MARGIN
+    val btn_y = bar_y + CLOSE_BUTTON_MARGIN
+
+    # Red background
+    backend.fill_rect(btn_x, btn_y, CLOSE_BUTTON_SIZE, CLOSE_BUTTON_SIZE, close_button_bg())
+
+    # White X: two diagonal lines approximated with small filled rects
+    val inner = CLOSE_BUTTON_SIZE - 6
+    var i: i32 = 0
+    while i < inner:
+        # Top-left to bottom-right diagonal
+        backend.fill_rect(btn_x + 3 + i, btn_y + 3 + i, 2, 2, close_button_x_color())
+        # Top-right to bottom-left diagonal
+        backend.fill_rect(btn_x + 3 + inner - 1 - i, btn_y + 3 + i, 2, 2, close_button_x_color())
+        i = i + 1
+
+fn draw_border(backend: CompositorBackend, x: i32, y: i32, w: i32, h: i32, focused: bool):
+    """Draw a 1px border around the window."""
+    val color = if focused: border_color_focused() else: border_color_unfocused()
+
+    # Top
+    backend.fill_rect(x, y, w, BORDER_WIDTH, color)
+    # Bottom
+    if h > BORDER_WIDTH:
+        backend.fill_rect(x, y + h - BORDER_WIDTH, w, BORDER_WIDTH, color)
+    # Left
+    backend.fill_rect(x, y, BORDER_WIDTH, h, color)
+    # Right
+    if w > BORDER_WIDTH:
+        backend.fill_rect(x + w - BORDER_WIDTH, y, BORDER_WIDTH, h, color)
+
+# ============================================================================
+# Glass Window Frame
+# ============================================================================
+
+val GLASS_TITLE_BAR_HEIGHT: i32 = 28
+val TRAFFIC_LIGHT_RADIUS: i32 = 6
+val TRAFFIC_LIGHT_Y_OFFSET: i32 = 8
+val TRAFFIC_LIGHT_X_START: i32 = 10
+val TRAFFIC_LIGHT_SPACING: i32 = 20
+val FOCUS_RING_WIDTH: i32 = 2
+
+fn draw_glass_window_frame(backend: CompositorBackend, x: i32, y: i32, width: i32, height: i32, title: text, focused: bool, config: GlassConfig):
+    """Draw a glassmorphism window frame with shadow, blur, border, title bar, and traffic lights.
+
+    Routes through `glass_effects_pure` so calls go via `glass_dispatch`,
+    which degrades gracefully on backends that opted out of
+    `CompositorGlassCapable` (D2 Phase 1: Engine2d, Gpu).
+    """
+    # 1. Drop shadow below the window
+    glass_shadow_pure(backend, x, y, width, height, config)
+
+    # 2. Blur the window region for glass effect
+    glass_blur_pure(backend, x, y, width, height, config.blur_radius)
+
+    # 3. Blend semi-transparent glass surface over the blurred area
+    glass_fill_pure(backend, x, y, width, height, config.surface_color, config.surface_alpha)
+
+    # 4. Draw glass border
+    draw_glass_border_pure(backend, x, y, width, height, config)
+
+    # 5. Elevated title bar (higher opacity for readability)
+    val raw_title_alpha: i32 = config.surface_alpha.to_i32() + 40
+    val capped_alpha: u8 = if raw_title_alpha > 255: 255.to_u8() else: raw_title_alpha.to_u8()
+    val title_h = GLASS_TITLE_BAR_HEIGHT
+    glass_fill_pure(backend, x, y, width, title_h, config.surface_color, capped_alpha)
+
+    # Separator line below title bar
+    val sep_y = y + title_h
+    glass_fill_pure(backend, x, sep_y, width, 1, config.border_color, config.border_alpha)
+
+    # 6. Title text (centered in title bar)
+    val text_fg: u32 = if focused: 0xFFFFFFFF else: 0xFFB0B0B0
+    val text_bg: u32 = 0x00000000
+    val text_x = x + TRAFFIC_LIGHT_X_START + TRAFFIC_LIGHT_SPACING * 3 + 8
+    val text_y = y + (GLASS_TITLE_BAR_HEIGHT - 16) / 2
+    backend.draw_text(text_x, text_y, title, text_fg, text_bg)
+
+    # 7. Traffic light buttons (close=red, minimize=yellow, maximize=green)
+    val btn_y = y + TRAFFIC_LIGHT_Y_OFFSET
+    val btn_r = TRAFFIC_LIGHT_RADIUS
+
+    # Traffic light colors (sourced from glass_numeric_tokens — canonical
+    # macOS traffic-light palette; these were previously drifted literals).
+    val tl_close: u32 = GLASS_BTN_CLOSE
+    val tl_min: u32 = GLASS_BTN_MIN
+    val tl_max: u32 = GLASS_BTN_MAX
+
+    # Close button (red)
+    val close_x = x + TRAFFIC_LIGHT_X_START
+    _draw_traffic_light_button(backend, close_x, btn_y, btn_r, tl_close | ALPHA_OPAQUE)
+
+    # Minimize button (yellow)
+    val min_x = x + TRAFFIC_LIGHT_X_START + TRAFFIC_LIGHT_SPACING
+    _draw_traffic_light_button(backend, min_x, btn_y, btn_r, tl_min | ALPHA_OPAQUE)
+
+    # Maximize button (green)
+    val max_x = x + TRAFFIC_LIGHT_X_START + TRAFFIC_LIGHT_SPACING * 2
+    _draw_traffic_light_button(backend, max_x, btn_y, btn_r, tl_max | ALPHA_OPAQUE)
+
+    # 8. Focus ring (accent-colored border when focused)
+    if focused:
+        val ring_alpha: u8 = 120.to_u8()
+        glass_fill_pure(backend, x, y, width, FOCUS_RING_WIDTH, config.accent_color, ring_alpha)
+        if height > FOCUS_RING_WIDTH:
+            glass_fill_pure(backend, x, y + height - FOCUS_RING_WIDTH, width, FOCUS_RING_WIDTH, config.accent_color, ring_alpha)
+        glass_fill_pure(backend, x, y, FOCUS_RING_WIDTH, height, config.accent_color, ring_alpha)
+        if width > FOCUS_RING_WIDTH:
+            glass_fill_pure(backend, x + width - FOCUS_RING_WIDTH, y, FOCUS_RING_WIDTH, height, config.accent_color, ring_alpha)
+
+fn draw_glass_window_frame_enhanced(backend: CompositorBackend, x: i32, y: i32, width: i32, height: i32,
+                                    title: text, focused: bool, config: GlassPortConfig):
+    """Draw an enhanced glassmorphism window frame using shared window_effects.
+
+    Includes multi-layer shadows, frosted glass, focus ring, noise texture,
+    rainbow edge refraction, traffic lights with icons, and inactive dimming.
+    Shared between hosted and QEMU window managers.
+    """
+    draw_glass_window_enhanced(backend, x, y, width, height, title, focused, config, GLASS_TITLE_BAR_HEIGHT, false)
+
+fn _draw_traffic_light_button(backend: CompositorBackend, cx: i32, cy: i32, r: i32, color: u32):
+    """Draw a filled circle approximation for a traffic light button.
+
+    Uses concentric horizontal fill lines to approximate a circle.
+    cx, cy is the top-left corner; r is the radius (diameter = 2*r).
+    """
+    var dy: i32 = 0
+    while dy < r * 2:
+        # Distance from center (r) along y axis
+        val dist_y = dy - r
+        val abs_dy = if dist_y < 0: 0 - dist_y else: dist_y
+        # Horizontal half-width at this row (circular approximation)
+        val hw = r - abs_dy
+        if hw > 0:
+            val lx = cx + r - hw
+            val w = hw * 2
+            backend.fill_rect(lx, cy + dy, w, 1, color)
+        dy = dy + 1
+
+# ============================================================================
+# Hit Testing
+# ============================================================================
+
+fn is_in_title_bar(window_x: i32, window_y: i32, window_w: i32, click_x: i32, click_y: i32) -> bool:
+    """Test if a click lands in the title bar area."""
+    val bar_x = window_x + BORDER_WIDTH
+    val bar_y = window_y + BORDER_WIDTH
+    val bar_w = window_w - 2 * BORDER_WIDTH
+    val bar_h = TITLE_BAR_HEIGHT
+
+    val in_x = click_x >= bar_x and click_x < bar_x + bar_w
+    val in_y = click_y >= bar_y and click_y < bar_y + bar_h
+    return in_x and in_y
+
+fn is_in_close_button(window_x: i32, window_y: i32, window_w: i32, click_x: i32, click_y: i32) -> bool:
+    """Test if a click lands on the close button."""
+    val bar_x = window_x + BORDER_WIDTH
+    val bar_y = window_y + BORDER_WIDTH
+    val bar_w = window_w - 2 * BORDER_WIDTH
+
+    val btn_x = bar_x + bar_w - CLOSE_BUTTON_SIZE - CLOSE_BUTTON_MARGIN
+    val btn_y = bar_y + CLOSE_BUTTON_MARGIN
+    val btn_s = CLOSE_BUTTON_SIZE
+
+    val in_x = click_x >= btn_x and click_x < btn_x + btn_s
+    val in_y = click_y >= btn_y and click_y < btn_y + btn_s
+    return in_x and in_y

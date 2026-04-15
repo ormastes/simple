@@ -1,0 +1,122 @@
+"""
+# T32 MCP Guard Integration
+
+**Category:** Application
+**Status:** In Progress
+
+## Overview
+
+Tests the TRACE32 MCP dispatch with run-state guard logic. Verifies that tool
+dispatch correctly checks target run state before executing commands, and that
+guard violations produce appropriate error responses without a live T32 connection.
+"""
+# T32 MCP Guard Integration spec — tests dispatch with run-state guard
+# Inlined dispatch logic to test guard behavior without live T32 connection
+
+# --- Inlined guard logic ---
+
+fn intg_is_always_allowed(tool_name: text) -> bool:
+    if tool_name == "t32_sessions_list":
+        return true
+    if tool_name == "t32_session_open":
+        return true
+    if tool_name == "t32_session_resume":
+        return true
+    if tool_name == "t32_session_close":
+        return true
+    if tool_name == "t32_window_list":
+        return true
+    if tool_name == "t32_window_describe":
+        return true
+    if tool_name == "t32_history_tail":
+        return true
+    if tool_name == "t32_resources_list":
+        return true
+    if tool_name == "t32_resource_read":
+        return true
+    if tool_name == "t32_cmm_commands":
+        return true
+    false
+
+fn intg_is_safe_cmd(command: text) -> bool:
+    val cmd_lower = command.to_lower()
+    if cmd_lower.starts_with("break"):
+        return true
+    false
+
+fn intg_check_guard(tool_name: text, is_running: bool, command: text) -> text:
+    # Returns "" if allowed, error message if blocked
+    if intg_is_always_allowed(tool_name):
+        return ""
+    if not is_running:
+        return ""
+    if tool_name == "t32_cmd_run" and intg_is_safe_cmd(command):
+        return ""
+    if tool_name == "t32_field_get":
+        return ""
+    "T4100: Target is running — '{tool_name}' requires a halted CPU."
+
+fn intg_make_timeout_response(tool_name: text, elapsed_ms: i64) -> text:
+    # Simulate timeout response JSON
+    var r = "{"
+    r = r + "\"status\":\"timeout\""
+    r = r + ",\"tool\":\"" + tool_name + "\""
+    r = r + ",\"elapsed_ms\":" + str(elapsed_ms)
+    r = r + "}"
+    r
+
+# --- Tests ---
+
+describe "T32 MCP Guard Integration":
+
+    context "dispatch with running target":
+        it "blocks window_capture when running":
+            val result = intg_check_guard("t32_window_capture", true, "")
+            expect(result).to_start_with("T4100")
+            expect(result).to_contain("t32_window_capture")
+
+        it "allows cmd_run Break when running":
+            val result = intg_check_guard("t32_cmd_run", true, "Break")
+            expect(result).to_equal("")
+
+        it "allows cmd_run Break.Set when running":
+            val result = intg_check_guard("t32_cmd_run", true, "Break.Set main")
+            expect(result).to_equal("")
+
+        it "blocks cmd_run Data.dump when running":
+            val result = intg_check_guard("t32_cmd_run", true, "Data.dump")
+            expect(result).to_start_with("T4100")
+
+        it "allows sessions_list always":
+            val result = intg_check_guard("t32_sessions_list", true, "")
+            expect(result).to_equal("")
+
+        it "allows field_get with stale data":
+            val result = intg_check_guard("t32_field_get", true, "")
+            expect(result).to_equal("")
+
+    context "dispatch with halted target":
+        it "allows window_capture when halted":
+            val result = intg_check_guard("t32_window_capture", false, "")
+            expect(result).to_equal("")
+
+        it "allows field_set when halted":
+            val result = intg_check_guard("t32_field_set", false, "")
+            expect(result).to_equal("")
+
+        it "allows screenshot when halted":
+            val result = intg_check_guard("t32_screenshot", false, "")
+            expect(result).to_equal("")
+
+    context "timeout response format":
+        it "includes status timeout":
+            val resp = intg_make_timeout_response("t32_eval", 3500)
+            expect(resp).to_contain("\"status\":\"timeout\"")
+
+        it "includes tool name":
+            val resp = intg_make_timeout_response("t32_eval", 3500)
+            expect(resp).to_contain("\"tool\":\"t32_eval\"")
+
+        it "includes elapsed time":
+            val resp = intg_make_timeout_response("t32_eval", 3500)
+            expect(resp).to_contain("\"elapsed_ms\":3500")

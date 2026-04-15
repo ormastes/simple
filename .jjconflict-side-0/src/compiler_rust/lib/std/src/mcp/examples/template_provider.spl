@@ -1,0 +1,215 @@
+# MCP Provider Template
+# Copy this file and customize it for your own language/tool
+
+use core.*
+use mcp.core.*
+
+# Example: Custom language provider
+pub class MyLanguageProvider:
+    pub base: BaseProvider
+    
+    pub fn new(root_path: text) -> MyLanguageProvider:
+        return MyLanguageProvider(base: BaseProvider.new(root_path))
+    
+    # Add your custom methods here
+    pub fn parse_my_language_file(self, source: text):
+        # Parse custom language using line-based pattern matching
+        # This is a template - implement language-specific parsing here
+        var symbols: List<Symbol> = []
+        var current_line = 0
+
+        for line in source.lines():
+            current_line += 1
+            val trimmed = line.trim()
+
+            # Example patterns - customize for your language:
+            # Function: func name(...) or def name(...)
+            if trimmed.starts_with("func ") or trimmed.starts_with("def "):
+                val keyword_len = if trimmed.starts_with("func "): 5 else: 4
+                val after_keyword = trimmed.substring(keyword_len, trimmed.len())
+                val name = after_keyword.split("(")[0].trim()
+                symbols.append(Symbol.new(name, SymbolKind.Function, current_line))
+
+            # Class: class Name
+            elif trimmed.starts_with("class "):
+                val name = trimmed.substring(6, trimmed.len()).split(" ")[0].split(":")[0].trim()
+                symbols.append(Symbol.new(name, SymbolKind.Class, current_line))
+
+        return symbols
+
+impl ResourceProvider for MyLanguageProvider:
+    fn list_resources() -> List<Resource>:
+        # Return list of resources for your language
+        # Scan root path for source files with custom extension
+        import host.async_nogc_mut.io.fs
+        import host.common.io.types.{FileType, DirPath}
+
+        var resources: List<Resource> = []
+
+        # Define your file extensions here
+        val extensions = [".mylang", ".ml", ".custom"]
+
+        fn scan_directory(dir: text):
+            match fs.read_dir(dir as DirPath):
+                Ok(entries):
+                    for entry in entries:
+                        val name = entry.name() as text
+                        val path = entry.path() as text
+
+                        match entry.file_type():
+                            FileType.File:
+                                for ext in extensions:
+                                    if name.ends_with(ext):
+                                        resources.append(Resource {
+                                            uri: "file://{path}",
+                                            name: name,
+                                            description: "Custom language source file",
+                                            mime_type: "text/x-custom"
+                                        })
+                            FileType.Directory:
+                                if not name.starts_with("."):
+                                    scan_directory(path)
+                            _:
+                                pass
+                Err(_):
+                    pass
+
+        scan_directory(self.base.root_path)
+        return resources
+
+    fn read_resource(uri: text) -> ResourceContents:
+        # Read and format resource for your language
+        import host.async_nogc_mut.io.fs
+
+        # Extract file path from URI
+        val path = if uri.starts_with("file://"):
+            uri[7..]
+        else:
+            uri
+
+        # Read file contents
+        match fs.read_to_string(path):
+            Ok(content):
+                # Parse the file to extract symbols
+                val symbols = self.parse_my_language_file(content)
+
+                # Format with symbol information
+                var formatted = "# File: {path}\n"
+                formatted += "# Symbols: {symbols.len()}\n\n"
+
+                for symbol in symbols:
+                    formatted += "# - {symbol.kind}: {symbol.name} (line {symbol.line})\n"
+
+                formatted += "\n" + content
+
+                return ResourceContents.new(uri, "text/x-custom", formatted)
+
+            Err(e):
+                return ResourceContents.new(uri, "text/plain", "# Error reading file: {e}")
+
+    fn search_resources(query: text) -> List<Resource>:
+        # Search in your language files
+        var results: List<Resource> = []
+        val all_resources = self.list_resources()
+
+        for resource in all_resources:
+            # Check if resource name contains query
+            if resource.name.contains(query):
+                results.append(resource)
+                continue
+
+            # Also check file contents for the query
+            val path = if resource.uri.starts_with("file://"):
+                resource.uri[7..]
+            else:
+                resource.uri
+
+            match fs.read_to_string(path):
+                Ok(content):
+                    if content.contains(query):
+                        results.append(resource)
+                Err(_):
+                    pass
+
+        return results
+
+# Example: Create MCP server for your language
+pub fn create_my_language_server() -> McpServer:
+    # Create provider
+    provider = MyLanguageProvider.new(".")
+    
+    # Create server
+    server = McpServer.new("My Language MCP", "1.0.0", provider)
+    
+    # Register custom tools
+    analyze_tool = Tool.new("analyze_code", "Analyze code in my language")
+    analyze_handler = fn(args: Dict<text, Any>) -> text:
+        code = args.get("code")
+
+        # Analyze the code: count lines, functions, classes
+        var line_count = 0
+        var function_count = 0
+        var class_count = 0
+        var comment_count = 0
+
+        for line in code.lines():
+            line_count += 1
+            val trimmed = line.trim()
+
+            # Count functions (examples for various languages)
+            # For Simple: also check for static fn, async fn, me, etc.
+            if (trimmed.starts_with("func ") or trimmed.starts_with("def ") or trimmed.starts_with("fn ") or trimmed.starts_with("static fn ") or trimmed.starts_with("async fn ") or trimmed.starts_with("me ") or trimmed.starts_with("pub fn ") or trimmed.starts_with("pub static fn ")):
+                function_count += 1
+
+            # Count classes
+            if trimmed.starts_with("class "):
+                class_count += 1
+
+            # Count comments
+            if trimmed.starts_with("#") or trimmed.starts_with("//"):
+                comment_count += 1
+
+        # Build analysis report
+        var report = "Code Analysis Report\n"
+        report += "====================\n\n"
+        report += "Lines of code: {line_count}\n"
+        report += "Functions: {function_count}\n"
+        report += "Classes: {class_count}\n"
+        report += "Comments: {comment_count}\n"
+
+        # Calculate comment ratio
+        if line_count > 0:
+            val ratio = (comment_count * 100) / line_count
+            report += "Comment ratio: {ratio}%\n"
+
+        return report
+    
+    server.register_tool(analyze_tool, create_text_tool(
+        "analyze_code",
+        "Analyze code",
+        analyze_handler
+    ))
+    
+    return server
+
+# Example: Main entry point for your MCP server
+pub fn main_example():
+    # Create server
+    server = create_my_language_server()
+    
+    # Create transport (stdio for MCP)
+    transport = StdioTransport.new()
+    
+    # Server loop
+    while transport.is_alive():
+        # Read request
+        request_opt = transport.read_message()
+        
+        if request_opt.is_some():
+            request = request_opt.unwrap()
+            
+            # Handle request
+            response = server.handle_request(request)
+            
+            # Send response
+            transport.write_response(response)

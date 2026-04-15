@@ -1,0 +1,61 @@
+#!/bin/sh
+# Obsidian MCP wrapper for local clients.
+# Modes:
+#   bridge (default) -> examples/obsidian-search/src/main_bridge.spl
+#   mcp              -> examples/obsidian-search/src/main.spl
+
+set -eu
+
+SELF="$0"
+while [ -L "$SELF" ]; do
+  DIR="$(cd "$(dirname "$SELF")" && pwd)"
+  SELF="$(readlink "$SELF")"
+  case "$SELF" in /*) ;; *) SELF="${DIR}/${SELF}" ;; esac
+done
+SCRIPT_DIR="$(cd "$(dirname "$SELF")" && pwd)"
+REPO_ROOT=""
+SEARCH_DIR="$SCRIPT_DIR"
+while [ "$SEARCH_DIR" != "/" ]; do
+  if [ -d "${SEARCH_DIR}/src" ] && [ -d "${SEARCH_DIR}/bin" ]; then
+    REPO_ROOT="$SEARCH_DIR"
+    break
+  fi
+  SEARCH_DIR="$(dirname "$SEARCH_DIR")"
+done
+if [ -z "$REPO_ROOT" ]; then
+  echo "error: failed to locate repo root for obsidian_lsp_mcp_server" >&2
+  exit 1
+fi
+RUNTIME="${REPO_ROOT}/src/compiler_rust/target/release/simple"
+if [ ! -x "$RUNTIME" ]; then RUNTIME="${REPO_ROOT}/src/compiler_rust/target/bootstrap/simple"; fi
+if [ ! -x "$RUNTIME" ]; then RUNTIME="${SCRIPT_DIR}/simple"; fi
+if [ ! -x "$RUNTIME" ]; then RUNTIME="${REPO_ROOT}/bin/simple"; fi
+if [ ! -x "$RUNTIME" ]; then echo "error: no runtime found for obsidian_lsp_mcp_server" >&2; exit 1; fi
+
+export SIMPLE_LIB="${REPO_ROOT}/examples/obsidian-search/src:${REPO_ROOT}/src"
+export SIMPLE_BINARY="$RUNTIME"
+export SIMPLE_LOG="${SIMPLE_LOG:-error}"
+unset DEBUG SIMPLE_TEST_DEBUG REPL_DEBUG
+
+MODE="${1:-bridge}"
+if [ "$#" -gt 0 ]; then
+  case "$MODE" in
+    bridge|mcp)
+      shift
+      ;;
+    *)
+      MODE="bridge"
+      ;;
+  esac
+fi
+
+if [ "$MODE" = "mcp" ]; then
+  ENTRY_SOURCE="${REPO_ROOT}/examples/obsidian-search/src/main.spl"
+  CACHE_NAME="obsidian-mcp.smf"
+else
+  ENTRY_SOURCE="${REPO_ROOT}/examples/obsidian-search/src/main_bridge.spl"
+  CACHE_NAME="obsidian-bridge.smf"
+fi
+
+cd "$REPO_ROOT"
+RUST_LOG=error exec "$RUNTIME" "$ENTRY_SOURCE" "$@" 2>/dev/null

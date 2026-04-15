@@ -1,0 +1,456 @@
+#![allow(unnamed_duplicate_typed_args)]
+# LLM Diagnostics — Environment Scanner
+#
+# Introspects Claude Code environment artifacts:
+# - CLAUDE.md files (project, user, parent directories)
+# - Skills (.claude/skills/)
+# - Agents (.claude/agents/)
+# - MCP servers (.mcp.json)
+# - Hook configurations (settings.json)
+# - Memory files (.claude/memory/)
+# - Templates (.claude/templates/)
+
+extern fn rt_rt_file_read_text(path: text) -> text
+extern fn rt_file_exists(path: text) -> bool
+extern fn rt_dir_list(path: text) -> [text]
+extern fn rt_env_get(name: text) -> text
+
+# --- Artifact Types ---
+
+struct ClaudeMdFile:
+    path: text
+    size: i64
+    scope: text             # "project", "user", "parent"
+    estimated_tokens: i64
+
+struct SkillDef:
+    name: text
+    path: text
+    size: i64
+    estimated_tokens: i64
+    description: text       # first line or summary
+
+struct AgentDef:
+    name: text
+    path: text
+    size: i64
+    estimated_tokens: i64
+    description: text
+
+struct McpServerDef:
+    name: text
+    command: text
+    args: [text]
+    tool_count: i64         # estimated from config
+    env_vars: [text]
+
+struct HookDef:
+    event_type: text
+    matcher: text
+    hook_type: text         # "command" or "http"
+    command: text
+
+struct MemoryFile:
+    name: text
+    path: text
+    size: i64
+    memory_type: text       # from frontmatter: user, feedback, project, reference
+
+struct TemplateDef:
+    name: text
+    path: text
+    size: i64
+
+# --- Environment Summary ---
+
+struct EnvSummary:
+    claude_md_files: [ClaudeMdFile]
+    skills: [SkillDef]
+    agents: [AgentDef]
+    mcp_servers: [McpServerDef]
+    hooks: [HookDef]
+    memory_files: [MemoryFile]
+    templates: [TemplateDef]
+    total_estimated_startup_tokens: i64
+
+fn new_env_summary() -> EnvSummary:
+    EnvSummary(
+        claude_md_files: [],
+        skills: [],
+        agents: [],
+        mcp_servers: [],
+        hooks: [],
+        memory_files: [],
+        templates: [],
+        total_estimated_startup_tokens: 0
+    )
+
+# --- Token Estimation ---
+
+fn estimate_file_tokens(content: text) -> i64:
+    if content.len() == 0:
+        return 0
+    val chars = content.len() as f64
+    (chars / 4.0 + 0.5) as i64
+
+# --- Scanners ---
+
+fn scan_claude_md_files(project_dir: text) -> [ClaudeMdFile]:
+    """Find all CLAUDE.md files that Claude Code would load."""
+    var files: [ClaudeMdFile] = []
+
+    # Project CLAUDE.md
+    val project_md = project_dir + "/CLAUDE.md"
+    if rt_file_exists(project_md):
+        val content = rt_file_read_text(project_md)
+        files.push(ClaudeMdFile(
+            path: project_md,
+            size: content.len(),
+            scope: "project",
+            estimated_tokens: estimate_file_tokens(content)
+        ))
+
+    # .claude/CLAUDE.md (project-level nested)
+    val nested_md = project_dir + "/.claude/CLAUDE.md"
+    if rt_file_exists(nested_md):
+        val content = rt_file_read_text(nested_md)
+        files.push(ClaudeMdFile(
+            path: nested_md,
+            size: content.len(),
+            scope: "project",
+            estimated_tokens: estimate_file_tokens(content)
+        ))
+
+    # User-level CLAUDE.md
+    val home = rt_env_get("HOME")
+    if home.len() > 0:
+        val user_md = home + "/.claude/CLAUDE.md"
+        if rt_file_exists(user_md):
+            val content = rt_file_read_text(user_md)
+            files.push(ClaudeMdFile(
+                path: user_md,
+                size: content.len(),
+                scope: "user",
+                estimated_tokens: estimate_file_tokens(content)
+            ))
+
+    # AGENTS.md (alternate name)
+    val agents_md = project_dir + "/AGENTS.md"
+    if rt_file_exists(agents_md):
+        val content = rt_file_read_text(agents_md)
+        files.push(ClaudeMdFile(
+            path: agents_md,
+            size: content.len(),
+            scope: "project",
+            estimated_tokens: estimate_file_tokens(content)
+        ))
+
+    files
+
+fn scan_skills(project_dir: text) -> [SkillDef]:
+    """Scan .claude/skills/ for skill definitions."""
+    val skills_dir = project_dir + "/.claude/skills"
+    if not rt_file_exists(skills_dir):
+        return []
+    var skills: [SkillDef] = []
+    val entries = rt_dir_list(skills_dir)
+    for entry in entries:
+        if entry.ends_with(".md"):
+            val path = skills_dir + "/" + entry
+            val content = rt_file_read_text(path)
+            val name = entry.replace(".md", "")
+            val desc = extract_first_line(content)
+            skills.push(SkillDef(
+                name: name,
+                path: path,
+                size: content.len(),
+                estimated_tokens: estimate_file_tokens(content),
+                description: desc
+            ))
+    skills
+
+fn scan_agents(project_dir: text) -> [AgentDef]:
+    """Scan .claude/agents/ for agent definitions."""
+    val agents_dir = project_dir + "/.claude/agents"
+    if not rt_file_exists(agents_dir):
+        return []
+    var agents: [AgentDef] = []
+    val entries = rt_dir_list(agents_dir)
+    for entry in entries:
+        if entry.ends_with(".md"):
+            val path = agents_dir + "/" + entry
+            val content = rt_file_read_text(path)
+            val name = entry.replace(".md", "")
+            val desc = extract_first_line(content)
+            agents.push(AgentDef(
+                name: name,
+                path: path,
+                size: content.len(),
+                estimated_tokens: estimate_file_tokens(content),
+                description: desc
+            ))
+    agents
+
+fn scan_mcp_servers(project_dir: text) -> [McpServerDef]:
+    """Parse .mcp.json for MCP server definitions."""
+    val mcp_path = project_dir + "/.mcp.json"
+    if not rt_file_exists(mcp_path):
+        return []
+    val content = rt_file_read_text(mcp_path)
+    parse_mcp_json(content)
+
+fn scan_memory_files(project_dir: text) -> [MemoryFile]:
+    """Scan .claude/memory/ or project memory directory."""
+    val home = rt_env_get("HOME")
+    # Check project-specific memory path
+    var memory_dir = ""
+    if home.len() > 0:
+        # Claude stores project memories in ~/.claude/projects/<hash>/memory/
+        # We scan .claude/memory/ in project dir as a fallback
+        memory_dir = project_dir + "/.claude/memory"
+    if not rt_file_exists(memory_dir):
+        return []
+    var files: [MemoryFile] = []
+    val entries = rt_dir_list(memory_dir)
+    for entry in entries:
+        if entry.ends_with(".md") and entry != "MEMORY.md":
+            val path = memory_dir + "/" + entry
+            val content = rt_file_read_text(path)
+            val mem_type = extract_frontmatter_field(content, "type")
+            files.push(MemoryFile(
+                name: entry.replace(".md", ""),
+                path: path,
+                size: content.len(),
+                memory_type: mem_type
+            ))
+    files
+
+fn scan_templates(project_dir: text) -> [TemplateDef]:
+    """Scan .claude/templates/ for template files."""
+    val templates_dir = project_dir + "/.claude/templates"
+    if not rt_file_exists(templates_dir):
+        return []
+    var templates: [TemplateDef] = []
+    val entries = rt_dir_list(templates_dir)
+    for entry in entries:
+        val path = templates_dir + "/" + entry
+        val content = rt_file_read_text(path)
+        templates.push(TemplateDef(
+            name: entry,
+            path: path,
+            size: content.len()
+        ))
+    templates
+
+fn scan_hooks(project_dir: text) -> [HookDef]:
+    """Parse hook definitions from settings.json."""
+    val settings_path = project_dir + "/.claude/settings.json"
+    if not rt_file_exists(settings_path):
+        return []
+    val content = rt_file_read_text(settings_path)
+    # Simple extraction — look for hook event names
+    parse_hooks_from_settings(content)
+
+# --- Full Environment Scan ---
+
+fn scan_environment(project_dir: text) -> EnvSummary:
+    """Scan all Claude Code artifacts in the project."""
+    var summary = new_env_summary()
+    summary.claude_md_files = scan_claude_md_files(project_dir)
+    summary.skills = scan_skills(project_dir)
+    summary.agents = scan_agents(project_dir)
+    summary.mcp_servers = scan_mcp_servers(project_dir)
+    summary.hooks = scan_hooks(project_dir)
+    summary.memory_files = scan_memory_files(project_dir)
+    summary.templates = scan_templates(project_dir)
+
+    # Estimate total startup tokens
+    var total = 0
+    for md in summary.claude_md_files:
+        total = total + md.estimated_tokens
+    for skill in summary.skills:
+        total = total + skill.estimated_tokens
+    for agent in summary.agents:
+        total = total + agent.estimated_tokens
+    summary.total_estimated_startup_tokens = total
+    summary
+
+# --- Helpers ---
+
+fn extract_first_line(content: text) -> text:
+    """Get first non-empty line (for description)."""
+    val lines = content.split("\n")
+    for line in lines:
+        val trimmed = line.trim()
+        if trimmed.len() > 0 and not trimmed.starts_with("#") and not trimmed.starts_with("---"):
+            if trimmed.len() > 80:
+                return trimmed.slice(0, 80)
+            return trimmed
+    ""
+
+fn extract_frontmatter_field(content: text, field: text) -> text:
+    """Extract a field from YAML frontmatter (between --- delimiters)."""
+    if not content.starts_with("---"):
+        return ""
+    val search = field + ":"
+    val lines = content.split("\n")
+    var in_frontmatter = false
+    for line in lines:
+        val trimmed = line.trim()
+        if trimmed == "---":
+            if in_frontmatter:
+                return ""
+            in_frontmatter = true
+            continue
+        if in_frontmatter and trimmed.starts_with(search):
+            val value = trimmed.slice(search.len(), trimmed.len()).trim()
+            return value
+    ""
+
+fn parse_mcp_json(json: text) -> [McpServerDef]:
+    """Simple parser for .mcp.json mcpServers object."""
+    # Look for "mcpServers" key and extract server names
+    var servers: [McpServerDef] = []
+    val lines = json.split("\n")
+    var current_name = ""
+    var current_command = ""
+    var in_server = false
+    var depth = 0
+
+    for line in lines:
+        val trimmed = line.trim()
+
+        # Detect server name (key in mcpServers object)
+        if trimmed.contains("\"command\""):
+            val cmd_start = trimmed.index_of("\"command\"")
+            match cmd_start:
+                Some(i):
+                    # Extract command value after ":"
+                    val after = trimmed.slice(i + 11, trimmed.len())
+                    val q1 = after.index_of("\"")
+                    match q1:
+                        Some(s):
+                            val rest = after.slice(s + 1, after.len())
+                            val q2 = rest.index_of("\"")
+                            match q2:
+                                Some(e):
+                                    current_command = rest.slice(0, e)
+                                nil:
+                                    pass_do_nothing
+                        nil:
+                            pass_do_nothing
+                nil:
+                    pass_do_nothing
+
+        # Detect server name patterns like "simple-mcp": {
+        if trimmed.contains("\": {") or trimmed.contains("\":{"):
+            val q1 = trimmed.index_of("\"")
+            match q1:
+                Some(s):
+                    val rest = trimmed.slice(s + 1, trimmed.len())
+                    val q2 = rest.index_of("\"")
+                    match q2:
+                        Some(e):
+                            val name = rest.slice(0, e)
+                            if name != "mcpServers" and name != "env" and name != "args":
+                                if current_name.len() > 0 and current_command.len() > 0:
+                                    servers.push(McpServerDef(
+                                        name: current_name,
+                                        command: current_command,
+                                        args: [],
+                                        tool_count: 0,
+                                        env_vars: []
+                                    ))
+                                current_name = name
+                                current_command = ""
+                        nil:
+                            pass_do_nothing
+                nil:
+                    pass_do_nothing
+
+    # Push last server
+    if current_name.len() > 0 and current_command.len() > 0:
+        servers.push(McpServerDef(
+            name: current_name,
+            command: current_command,
+            args: [],
+            tool_count: 0,
+            env_vars: []
+        ))
+
+    servers
+
+fn parse_hooks_from_settings(json: text) -> [HookDef]:
+    """Simple extraction of hook definitions from settings JSON."""
+    # Look for known hook event names
+    var hooks: [HookDef] = []
+    val event_names = ["PreToolUse", "PostToolUse", "PostToolUseFailure",
+                       "SessionStart", "SessionEnd",
+                       "SubagentStart", "SubagentStop"]
+    for event_name in event_names:
+        if json.contains(event_name):
+            hooks.push(HookDef(
+                event_type: event_name,
+                matcher: "",
+                hook_type: "command",
+                command: ""
+            ))
+    hooks
+
+# --- Formatting ---
+
+fn format_env_summary_text(summary: EnvSummary) -> text:
+    """Format environment summary as terminal text."""
+    var lines: [text] = []
+    lines.push("=== Claude Code Environment ===")
+    lines.push("")
+
+    # CLAUDE.md files
+    lines.push("--- CLAUDE.md Files ---")
+    if summary.claude_md_files.len() == 0:
+        lines.push("  (none found)")
+    for md in summary.claude_md_files:
+        lines.push("  [" + md.scope + "] " + md.path + " (" + md.size.to_text() + " chars, ~" + md.estimated_tokens.to_text() + " tokens)")
+
+    # Skills
+    lines.push("")
+    lines.push("--- Skills (" + summary.skills.len().to_text() + ") ---")
+    for skill in summary.skills:
+        lines.push("  " + skill.name + " — ~" + skill.estimated_tokens.to_text() + " tokens")
+
+    # Agents
+    lines.push("")
+    lines.push("--- Agents (" + summary.agents.len().to_text() + ") ---")
+    for agent in summary.agents:
+        lines.push("  " + agent.name + " — ~" + agent.estimated_tokens.to_text() + " tokens")
+
+    # MCP Servers
+    lines.push("")
+    lines.push("--- MCP Servers (" + summary.mcp_servers.len().to_text() + ") ---")
+    for server in summary.mcp_servers:
+        lines.push("  " + server.name + " → " + server.command)
+
+    # Hooks
+    lines.push("")
+    lines.push("--- Hooks (" + summary.hooks.len().to_text() + ") ---")
+    for hook in summary.hooks:
+        lines.push("  " + hook.event_type)
+
+    # Memory
+    lines.push("")
+    lines.push("--- Memory Files (" + summary.memory_files.len().to_text() + ") ---")
+    for mem in summary.memory_files:
+        lines.push("  [" + mem.memory_type + "] " + mem.name)
+
+    # Templates
+    lines.push("")
+    lines.push("--- Templates (" + summary.templates.len().to_text() + ") ---")
+    for tmpl in summary.templates:
+        lines.push("  " + tmpl.name + " (" + tmpl.size.to_text() + " chars)")
+
+    # Total
+    lines.push("")
+    lines.push("--- Estimated Startup Token Cost ---")
+    lines.push("  ~" + summary.total_estimated_startup_tokens.to_text() + " tokens (CLAUDE.md + skills + agents)")
+
+    lines.join("\n")

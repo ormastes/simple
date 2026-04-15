@@ -1,0 +1,188 @@
+#![allow(unnamed_duplicate_typed_args)]
+@allow(unnamed_duplicate_typed_args)
+# LSP Server - JSON helpers
+# Inlined for zero-import startup (mirrors MCP pattern).
+#
+# JSON-RPC building functions (Q, LB, RB, jp, js, jo*, escape_json) are
+# equivalent to std.mcp_sdk.core.json and std.mcp_sdk.core.jsonrpc.
+# They are kept inline here for fast startup; if startup time is not
+# critical, these can be replaced with:
+#   use std.mcp_sdk.core.json.{Q, LB, RB, jp, js, jo1, jo2, jo3, jo4, jo5, escape_json}
+#   use std.mcp_sdk.core.jsonrpc.{jsonrpc_result, jsonrpc_error}
+# where jsonrpc_result == make_json_result, jsonrpc_error == make_error.
+
+fn Q() -> text:
+    "\""
+
+fn LB() -> text:
+    "{"
+
+fn RB() -> text:
+    "}"
+
+fn SB_L() -> text:
+    "["
+
+fn SB_R() -> text:
+    "]"
+
+fn escape_json(s: text) -> text:
+    var result = s
+    result = result.replace(r"\", r"\\")
+    result = result.replace(Q(), r"\" + Q())
+    result = result.replace("\n", r"\n")
+    result = result.replace("\r", r"\r")
+    result = result.replace("\t", r"\t")
+    result
+
+fn js(s: text) -> text:
+    Q() + escape_json(s) + Q()
+
+fn jp(key: text, value: text) -> text:
+    Q() + key + Q() + ":" + value
+
+fn jo1(p1: text) -> text:
+    LB() + p1 + RB()
+
+fn jo2(p1: text, p2: text) -> text:
+    LB() + p1 + "," + p2 + RB()
+
+fn jo3(p1: text, p2: text, p3: text) -> text:
+    LB() + p1 + "," + p2 + "," + p3 + RB()
+
+fn jo4(p1: text, p2: text, p3: text, p4: text) -> text:
+    LB() + p1 + "," + p2 + "," + p3 + "," + p4 + RB()
+
+fn jo5(p1: text, p2: text, p3: text, p4: text, p5: text) -> text:
+    LB() + p1 + "," + p2 + "," + p3 + "," + p4 + "," + p5 + RB()
+
+fn extract_field(json: text, key: text) -> text:
+    val search = Q() + key + Q() + ":"
+    val idx_result = json.index_of(search)
+    var idx = -1
+    match idx_result:
+        Some(i): idx = i
+        nil: return ""
+    if idx < 0:
+        return ""
+    val start = idx + search.len()
+    val after = json.substring(start)
+    val trimmed = after.trim()
+    if trimmed.starts_with(Q()):
+        val after_quote = trimmed.substring(1)
+        val end_idx_result = after_quote.index_of(Q())
+        var end_idx = -1
+        match end_idx_result:
+            Some(i): end_idx = i
+            nil: return ""
+        if end_idx < 0:
+            return ""
+        return trimmed.substring(1, end_idx + 1)
+    else:
+        var parts: [text] = []
+        for ch in trimmed:
+            if ch == "," or ch == RB() or ch == SB_R() or ch == " " or ch == "\n":
+                break
+            parts.push(ch)
+        return parts.join("")
+
+fn extract_field_raw(json: text, key: text) -> text:
+    val search = Q() + key + Q() + ":"
+    val idx_result = json.index_of(search)
+    var idx = -1
+    match idx_result:
+        Some(i): idx = i
+        nil: return "null"
+    if idx < 0:
+        return "null"
+    var start = idx + search.len()
+    if start >= json.len():
+        return "null"
+    var rest = json.substring(start)
+    rest = rest.trim()
+    if rest == "":
+        return "null"
+    if rest.starts_with(Q()):
+        var out: [text] = [Q()]
+        var escaped = false
+        var pos = 1
+        for _i in range(0, 100000):
+            if pos >= rest.len():
+                break
+            val ch = rest.substring(pos, pos + 1)
+            out.push(ch)
+            if escaped:
+                escaped = false
+            elif ch == "\\":
+                escaped = true
+            elif ch == Q():
+                break
+            pos = pos + 1
+        return out.join("")
+    var parts: [text] = []
+    for ch in rest:
+        if ch == "," or ch == RB() or ch == SB_R() or ch == " " or ch == "\n":
+            break
+        parts.push(ch)
+    val raw = parts.join("")
+    if raw == "":
+        return "null"
+    raw
+
+fn extract_id(json: text) -> text:
+    extract_field_raw(json, "id")
+
+fn extract_nested(json: text, key: text) -> text:
+    val params_search = Q() + "params" + Q() + ":"
+    val params_idx_result = json.index_of(params_search)
+    var params_idx = -1
+    match params_idx_result:
+        Some(i): params_idx = i
+        nil: return ""
+    if params_idx < 0:
+        return ""
+    val params_start = params_idx + params_search.len()
+    val params = json.substring(params_start)
+    extract_field(params, key)
+
+fn extract_nested_raw(json: text, key: text) -> text:
+    val params_search = Q() + "params" + Q() + ":"
+    val params_idx_result = json.index_of(params_search)
+    var params_idx = -1
+    match params_idx_result:
+        Some(i): params_idx = i
+        nil: return "null"
+    if params_idx < 0:
+        return "null"
+    val params_start = params_idx + params_search.len()
+    val params = json.substring(params_start)
+    extract_field_raw(params, key)
+
+fn make_json_result(id: text, result: text) -> text:
+    jo3(jp("jsonrpc", js("2.0")), jp("id", id), jp("result", result))
+
+fn make_error(id: text, code: i64, message: text) -> text:
+    val err = jo2(jp("code", str(code)), jp("message", js(message)))
+    jo3(jp("jsonrpc", js("2.0")), jp("id", id), jp("error", err))
+
+fn text_byte_len(s: text) -> i64:
+    s.len()
+
+# --- Standard JSON-RPC error codes (consistent with MCP SDK jsonrpc.spl) ---
+fn ERROR_PARSE_ERROR() -> i64:
+    -32700
+
+fn ERROR_INVALID_REQUEST() -> i64:
+    -32600
+
+fn ERROR_METHOD_NOT_FOUND() -> i64:
+    -32601
+
+fn ERROR_INVALID_PARAMS() -> i64:
+    -32602
+
+fn ERROR_INTERNAL_ERROR() -> i64:
+    -32603
+
+fn ERROR_SERVER_NOT_INITIALIZED() -> i64:
+    -32002

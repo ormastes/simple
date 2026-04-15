@@ -1,0 +1,213 @@
+# SSH Daemon — SimpleOS SSH Server
+#
+# Listens on a TCP port (default 22) and spawns per-client SSH sessions.
+# Each connection goes through version exchange, key exchange,
+# authentication, and then provides an interactive shell.
+#
+# Usage:
+#   var daemon = SshDaemon.new(22)
+#   daemon.start()
+
+use os.posix.socket_compat.{posix_socket, posix_bind, posix_listen, posix_accept, posix_close_socket, sockaddr_any, SOCK_STREAM, AF_INET}
+use os.crypto.ed25519.{ed25519_keypair_from_seed, ed25519_self_test}
+use os.crypto.random.{random_bytes}
+use os.apps.sshd.ssh_session.{SshSession, SessionState}
+use os.apps.sshd.ssh_auth.{SshUserDb, sshd_create_default_users}
+
+# ============================================================================
+# Constants
+# ============================================================================
+
+val SSHD_PORT: u16 = 22
+val SSHD_BACKLOG: i32 = 5
+val SSHD_MAX_SESSIONS: u32 = 16
+
+# ============================================================================
+# SSH Daemon
+# ============================================================================
+
+class SshDaemon:
+    """SimpleOS SSH server.
+
+    Listens on a TCP port and handles incoming SSH connections.
+    Maintains a user database and generates a host key on startup.
+    """
+    listen_fd: i32
+    user_db: SshUserDb
+    sessions: [SshSession]
+    running: bool
+    port: u16
+    host_private_key: [u8]    # 32-byte Ed25519 seed (private key)
+    host_public_key: [u8]     # 32-byte Ed25519 public key
+
+impl SshDaemon:
+
+    static fn new(port: u16) -> SshDaemon:
+        """Create a new SSH daemon on the given port.
+
+        Does NOT generate a host keypair yet — that happens in start()
+        after the Ed25519 self-test passes. This ensures no unvalidated
+        crypto code runs during construction.
+
+        Creates default users:
+          root / simpleos
+          user / password
+        """
+        # Set up user database with default accounts
+        # NOTE: Call module-level function to avoid method resolution
+        # ambiguity between SshDaemon.add_user and SshUserDb.add_user
+        var db = sshd_create_default_users()
+
+        SshDaemon(
+            listen_fd: -1,
+            user_db: db,
+            sessions: [],
+            running: false,
+            port: port,
+            host_private_key: [],   # Generated in start() after self-test
+            host_public_key: []     # Generated in start() after self-test
+        )
+
+    me add_user(username: text, password: text):
+        """Add a user to the authentication database."""
+        self.user_db.add_user(username, password)
+
+    me add_user_key(username: text, key_blob: [u8]):
+        """Add an authorized public key for a user."""
+        self.user_db.add_user_key(username, key_blob)
+
+    me start() -> Result<bool, text>:
+        """Start listening for SSH connections.
+
+        Runs Ed25519 self-test first (RFC 8032 test vectors). Refuses to
+        start if the crypto implementation fails validation — this prevents
+        serving SSH with broken signatures that clients would reject or
+        that could leak key material.
+
+        Creates a TCP socket, binds to the configured port, and enters
+        the accept loop. This method does not return until stop() is called.
+        """
+        # Ed25519 is now validated in the dedicated SSH self-test lane.
+        # Run the same gate in the live daemon so startup failures stay
+        # aligned with the validated crypto baseline.
+        serial_println("[sshd] Running Ed25519 self-test in live lane")
+        val r_self_test = ed25519_self_test()
+        if r_self_test.is_err():
+            return Err("Ed25519 self-test failed in live lane")
+        serial_println("[sshd] Ed25519 self-test: PASS")
+
+        # Generate host keypair (Ed25519)
+        # Uses C-side Ed25519 implementation via extern fn wrappers,
+        # which avoids the baremetal Cranelift codegen bugs with pure Simple
+        # extended-coordinate point arithmetic.
+        var seed = random_bytes(32)
+        serial_println("[sshd] Seed: {seed.len()} bytes")
+        val keypair = ed25519_keypair_from_seed(seed)
+        self.host_private_key = keypair.0   # 32-byte seed
+        self.host_public_key = keypair.1    # 32-byte Ed25519 public key
+        serial_println("[sshd] Host keys: priv={self.host_private_key.len()} pub={self.host_public_key.len()}")
+
+        # Create TCP socket
+        var fd = posix_socket(AF_INET, SOCK_STREAM, 0)
+        if fd < 0:
+            serial_println("[sshd] posix_socket failed: {fd}")
+            return Err("failed to create socket: {fd}")
+        self.listen_fd = fd.to_i32()
+
+        # Bind to 0.0.0.0:port
+        var addr = sockaddr_any(self.port)
+        var bind_result = posix_bind(self.listen_fd, addr)
+        if bind_result < 0:
+            posix_close_socket(self.listen_fd)
+            self.listen_fd = -1
+            return Err("failed to bind to port {self.port}: {bind_result}")
+
+        # Start listening
+        var listen_result = posix_listen(self.listen_fd, SSHD_BACKLOG)
+        if listen_result < 0:
+            posix_close_socket(self.listen_fd)
+            self.listen_fd = -1
+            return Err("failed to listen: {listen_result}")
+
+        serial_println("[sshd] SSH daemon listening on port {self.port}")
+        self.running = true
+        self.accept_loop()
+        Ok(true)
+
+    me accept_loop():
+        """Accept connections and handle them sequentially.
+
+        Each connection is handled synchronously in the accept loop.
+        A future improvement could spawn async tasks per connection.
+        """
+        while self.running:
+            var client_fd = posix_accept(self.listen_fd)
+            if client_fd >= 0:
+                self.handle_connection(client_fd.to_i32())
+            else:
+                # Accept error — if we're shutting down, that's expected
+                if not self.running:
+                    return
+
+    me handle_connection(client_fd: i32):
+        """Handle a new SSH connection from a client."""
+        # Enforce session limit
+        self._cleanup_closed_sessions()
+        if self.sessions.len().to_u32() >= SSHD_MAX_SESSIONS:
+            posix_close_socket(client_fd)
+            return
+
+        # Guard: host keys must have been generated in start()
+        var priv_len: u64 = self.host_private_key.len()
+        var pub_len: u64 = self.host_public_key.len()
+        if priv_len < 1 or pub_len < 1:
+            serial_println("[sshd] FATAL: host keys not initialized (priv={priv_len} pub={pub_len})")
+            posix_close_socket(client_fd)
+            return
+
+        # Create and run the session
+        var session = SshSession.new(
+            client_fd, self.user_db,
+            self.host_private_key, self.host_public_key
+        )
+        self.sessions.push(session)
+        session.run()
+
+        # Clean up after session ends
+        session.close()
+
+    me _cleanup_closed_sessions():
+        """Remove finished sessions from the sessions list."""
+        var active: [SshSession] = []
+        var i: u64 = 0
+        while i < self.sessions.len():
+            var s = self.sessions[i]
+            match s.state:
+                SessionState.Closed:
+                    pass_dn   # Drop closed sessions
+                _:
+                    active.push(s)
+            i = i + 1
+        self.sessions = active
+
+    me stop():
+        """Stop the SSH daemon and close the listening socket."""
+        self.running = false
+        if self.listen_fd >= 0:
+            posix_close_socket(self.listen_fd)
+            self.listen_fd = -1
+
+        # Close all active sessions
+        var i: u64 = 0
+        while i < self.sessions.len():
+            self.sessions[i].close()
+            i = i + 1
+        self.sessions = []
+
+    fn is_running() -> bool:
+        """Check if the daemon is currently running."""
+        self.running
+
+    fn session_count() -> u32:
+        """Return the number of active sessions."""
+        self.sessions.len().to_u32()

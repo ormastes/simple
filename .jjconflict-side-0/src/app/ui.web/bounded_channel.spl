@@ -1,0 +1,93 @@
+# BoundedChannel — drop-oldest ring buffer replacing the unbounded Channel
+# for WebSocket event/render broadcast paths.
+#
+# Drop policy: when full, the oldest item (at head) is discarded and `dropped`
+# is incremented. The caller (async_server) inspects `dropped` to decide
+# whether to close a lagging WebSocket client with WS close code 1013.
+#
+# Thread safety: single-producer intended. The buffer is a List used as a
+# circular ring; no mutex — the async_server runs everything on one thread
+# with cooperative yield points between accepts.
+
+class OverflowError:
+    dropped_count: u64
+
+class BoundedChannel<T>:
+    capacity: i64     # maximum items in flight; default 256
+    buffer: List<Any> # ring storage; T items stored as Any
+    head: i64         # index of oldest item (next recv)
+    tail: i64         # index of next write slot
+    size: i64         # current number of items
+    dropped: u64      # cumulative drop count
+
+    static fn new(capacity: i64) -> BoundedChannel<T>:
+        """Create a new BoundedChannel with the given capacity."""
+        return BoundedChannel(
+            capacity: capacity,
+            buffer: _make_buffer(capacity),
+            head: 0,
+            tail: 0,
+            size: 0,
+            dropped: 0u64
+        )
+
+    fn try_send(self, item: T) -> Result<Unit, OverflowError>:
+        """Send an item. If full, drops the oldest item (head) and records it.
+        Always succeeds from caller's perspective — returns Err only to signal
+        that a drop occurred so caller can react (e.g. close lagging client)."""
+        if self.size >= self.capacity:
+            # Drop oldest: advance head, decrement size
+            self.head = (self.head + 1) % self.capacity
+            self.size = self.size - 1
+            self.dropped = self.dropped + 1u64
+            self.buffer = self.buffer.set(self.tail, item)
+            self.tail = (self.tail + 1) % self.capacity
+            self.size = self.size + 1
+            return Err(OverflowError(dropped_count: self.dropped))
+        self.buffer = self.buffer.set(self.tail, item)
+        self.tail = (self.tail + 1) % self.capacity
+        self.size = self.size + 1
+        return Ok(())
+
+    fn recv(self) -> Option<T>:
+        """Receive the oldest item, or None if empty."""
+        if self.size == 0:
+            return None
+        val item = self.buffer.get(self.head)
+        self.head = (self.head + 1) % self.capacity
+        self.size = self.size - 1
+        return Some(item as T)
+
+    fn try_recv(self) -> Option<Any>:
+        """Receive as Any (matches the Channel.try_recv() call pattern)."""
+        if self.size == 0:
+            return None
+        val item = self.buffer.get(self.head)
+        self.head = (self.head + 1) % self.capacity
+        self.size = self.size - 1
+        return Some(item)
+
+    fn send(self, item: Any):
+        """Fire-and-forget send (matches Channel.send() call pattern).
+        Drops oldest on overflow; dropped counter is incremented silently."""
+        val _ = self.try_send(item as T)
+
+    fn close(self):
+        """No-op: BoundedChannel has no OS resources to release."""
+        pass_do_nothing
+
+    fn is_empty(self) -> bool:
+        return self.size == 0
+
+# =========================================================================
+# Private helpers
+# =========================================================================
+
+fn _make_buffer(capacity: i64) -> List<Any>:
+    """Pre-allocate a list of `capacity` nil slots."""
+    var buf: List<Any> = []
+    var i = 0
+    while i < capacity:
+        buf = buf.push(nil)
+        i = i + 1
+    return buf

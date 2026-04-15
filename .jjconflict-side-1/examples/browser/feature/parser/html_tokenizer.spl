@@ -1,0 +1,972 @@
+# HTML5 Tokenizer — state machine for lexing HTML into tokens.
+#
+# Compliance level: Covers the core states from WHATWG HTML5 specification
+# section 13.2.5 (Tokenization). Implements the major tokenizer states needed
+# for practical HTML parsing: data, tags, attributes, comments, doctypes,
+# raw text (script/style), self-closing tags, and basic character references.
+#
+# Not yet implemented: RCDATA states, ambiguous ampersand, numeric character
+# references (&#x..;), bogus doctype states, CDATA section bracket tracking.
+# These are marked with pass_todo for future expansion.
+#
+# Depends on:
+#   examples/browser/entity/dom/attribute_types.spl  (Attr)
+#   examples/browser/shared/logging.spl              (Logger)
+
+use examples.browser.entity.dom.attribute_types
+use examples.browser.shared.logging
+
+# ---------------------------------------------------------------------------
+# TokenizerState — the major states of the HTML5 tokenizer state machine
+# ---------------------------------------------------------------------------
+
+enum TokenizerState:
+    Data
+    TagOpen
+    EndTagOpen
+    TagName
+    BeforeAttributeName
+    AttributeName
+    AfterAttributeName
+    BeforeAttributeValue
+    AttributeValueDoubleQuoted
+    AttributeValueSingleQuoted
+    AttributeValueUnquoted
+    AfterAttributeValueQuoted
+    SelfClosingStartTag
+    BogusComment
+    MarkupDeclarationOpen
+    CommentStart
+    CommentStartDash
+    Comment
+    CommentEndDash
+    CommentEnd
+    Doctype
+    BeforeDoctypeName
+    DoctypeName
+    AfterDoctypeName
+    CharacterReference
+    RawText
+    RawTextLessThan
+    RawTextEndTagOpen
+    RawTextEndTagName
+    ScriptData
+    ScriptDataLessThan
+    ScriptDataEndTagOpen
+    ScriptDataEndTagName
+    PlainText
+    CDataSection
+
+# ---------------------------------------------------------------------------
+# HtmlToken — the output tokens produced by the tokenizer
+# ---------------------------------------------------------------------------
+
+enum HtmlToken:
+    Doctype(name: text, public_id: text, system_id: text, force_quirks: bool)
+    StartTag(name: text, attributes: [Attr], self_closing: bool)
+    EndTag(name: text)
+    Character(data: text)
+    CommentToken(data: text)
+    Eof
+
+# ---------------------------------------------------------------------------
+# HtmlTokenizer — the tokenizer class with full state machine
+# ---------------------------------------------------------------------------
+
+class HtmlTokenizer:
+    input: text
+    pos: i64
+    state: TokenizerState
+    return_state: TokenizerState
+    current_tag_name: text
+    current_tag_is_end: bool
+    current_tag_self_closing: bool
+    current_attrs: [Attr]
+    current_attr_name: text
+    current_attr_value: text
+    current_comment: text
+    current_doctype_name: text
+    temp_buffer: text
+    last_start_tag: text
+    logger: Logger
+
+    static fn new(input: text, logger: Logger) -> HtmlTokenizer:
+        HtmlTokenizer(
+            input: input,
+            pos: 0,
+            state: TokenizerState.Data,
+            return_state: TokenizerState.Data,
+            current_tag_name: "",
+            current_tag_is_end: false,
+            current_tag_self_closing: false,
+            current_attrs: [Attr](),
+            current_attr_name: "",
+            current_attr_value: "",
+            current_comment: "",
+            current_doctype_name: "",
+            temp_buffer: "",
+            last_start_tag: "",
+            logger: logger
+        )
+
+    # --- Character consumption helpers ---
+
+    fn is_eof() -> bool:
+        self.pos >= self.input.len()
+
+    me consume() -> text:
+        if self.is_eof():
+            return ""
+        val c = self.input.char_at(self.pos)
+        self.pos = self.pos + 1
+        c
+
+    fn peek() -> text:
+        if self.is_eof():
+            return ""
+        self.input.char_at(self.pos)
+
+    me reconsume():
+        if self.pos > 0:
+            self.pos = self.pos - 1
+
+    # --- Token emission helpers ---
+
+    me emit_tag() -> HtmlToken:
+        self.finish_attribute()
+        val name = self.current_tag_name
+        if self.current_tag_is_end:
+            self.logger.debug("Emit end tag: </{name}>")
+            return HtmlToken.EndTag(name: name)
+        self.last_start_tag = name
+        self.logger.debug("Emit start tag: <{name}> self_closing={self.current_tag_self_closing}")
+        HtmlToken.StartTag(
+            name: name,
+            attributes: self.current_attrs,
+            self_closing: self.current_tag_self_closing
+        )
+
+    me emit_character(c: text) -> HtmlToken:
+        HtmlToken.Character(data: c)
+
+    me emit_comment() -> HtmlToken:
+        self.logger.debug("Emit comment: {self.current_comment}")
+        HtmlToken.CommentToken(data: self.current_comment)
+
+    me emit_doctype() -> HtmlToken:
+        self.logger.debug("Emit doctype: {self.current_doctype_name}")
+        HtmlToken.Doctype(
+            name: self.current_doctype_name,
+            public_id: "",
+            system_id: "",
+            force_quirks: false
+        )
+
+    # --- Attribute helpers ---
+
+    me create_attribute():
+        self.finish_attribute()
+        self.current_attr_name = ""
+        self.current_attr_value = ""
+
+    me finish_attribute():
+        if self.current_attr_name.len() > 0:
+            val attr = Attr.create(self.current_attr_name, self.current_attr_value)
+            self.current_attrs.push(attr)
+            self.current_attr_name = ""
+            self.current_attr_value = ""
+
+    # --- Tag state reset ---
+
+    me reset_tag(is_end: bool):
+        self.current_tag_name = ""
+        self.current_tag_is_end = is_end
+        self.current_tag_self_closing = false
+        self.current_attrs = [Attr]()
+        self.current_attr_name = ""
+        self.current_attr_value = ""
+
+    # --- Character reference resolver (basic named references) ---
+
+    fn resolve_char_ref(name: text) -> text:
+        match name:
+            "amp": "&"
+            "lt": "<"
+            "gt": ">"
+            "quot": "\""
+            "apos": "'"
+            "nbsp": " "
+            _: "&{name};"
+
+    # --- Main tokenizer loop ---
+
+    me next_token() -> HtmlToken:
+        var loop_guard = 0
+        val max_iterations = self.input.len() + 100
+        while loop_guard < max_iterations:
+            loop_guard = loop_guard + 1
+
+            match self.state:
+                # -------------------------------------------------------
+                # Data state — the default state
+                # -------------------------------------------------------
+                TokenizerState.Data:
+                    if self.is_eof():
+                        return HtmlToken.Eof
+                    val c = self.consume()
+                    match c:
+                        "<":
+                            self.state = TokenizerState.TagOpen
+                        "&":
+                            self.return_state = TokenizerState.Data
+                            self.state = TokenizerState.CharacterReference
+                            self.temp_buffer = ""
+                        _:
+                            return self.emit_character(c)
+
+                # -------------------------------------------------------
+                # TagOpen — just saw '<'
+                # -------------------------------------------------------
+                TokenizerState.TagOpen:
+                    if self.is_eof():
+                        self.state = TokenizerState.Data
+                        return self.emit_character("<")
+                    val c = self.consume()
+                    match c:
+                        "!":
+                            self.state = TokenizerState.MarkupDeclarationOpen
+                        "/":
+                            self.state = TokenizerState.EndTagOpen
+                        "?":
+                            self.current_comment = ""
+                            self.state = TokenizerState.BogusComment
+                            self.reconsume()
+                        _:
+                            if self.is_ascii_alpha(c):
+                                self.reset_tag(false)
+                                self.reconsume()
+                                self.state = TokenizerState.TagName
+                            else:
+                                self.state = TokenizerState.Data
+                                self.reconsume()
+                                return self.emit_character("<")
+
+                # -------------------------------------------------------
+                # EndTagOpen — saw '</'
+                # -------------------------------------------------------
+                TokenizerState.EndTagOpen:
+                    if self.is_eof():
+                        self.state = TokenizerState.Data
+                        return self.emit_character("<")
+                    val c = self.consume()
+                    if self.is_ascii_alpha(c):
+                        self.reset_tag(true)
+                        self.reconsume()
+                        self.state = TokenizerState.TagName
+                    else if c == ">":
+                        self.logger.warn("Missing end tag name")
+                        self.state = TokenizerState.Data
+                    else:
+                        self.current_comment = ""
+                        self.state = TokenizerState.BogusComment
+                        self.reconsume()
+
+                # -------------------------------------------------------
+                # TagName — reading the tag name
+                # -------------------------------------------------------
+                TokenizerState.TagName:
+                    if self.is_eof():
+                        self.state = TokenizerState.Data
+                        return HtmlToken.Eof
+                    val c = self.consume()
+                    match c:
+                        " ":
+                            self.state = TokenizerState.BeforeAttributeName
+                        "\t":
+                            self.state = TokenizerState.BeforeAttributeName
+                        "\n":
+                            self.state = TokenizerState.BeforeAttributeName
+                        "/":
+                            self.state = TokenizerState.SelfClosingStartTag
+                        ">":
+                            self.state = TokenizerState.Data
+                            val tag = self.emit_tag()
+                            # Switch to raw text for script/style
+                            val tn = self.current_tag_name
+                            if (tn == "script" and not self.current_tag_is_end):
+                                self.state = TokenizerState.ScriptData
+                            else if (tn == "style" and not self.current_tag_is_end):
+                                self.state = TokenizerState.RawText
+                            return tag
+                        _:
+                            self.current_tag_name = self.current_tag_name + self.to_lower(c)
+
+                # -------------------------------------------------------
+                # BeforeAttributeName — whitespace before attribute name
+                # -------------------------------------------------------
+                TokenizerState.BeforeAttributeName:
+                    if self.is_eof():
+                        self.state = TokenizerState.Data
+                        return HtmlToken.Eof
+                    val c = self.consume()
+                    match c:
+                        " ":
+                            pass_do_nothing
+                        "\t":
+                            pass_do_nothing
+                        "\n":
+                            pass_do_nothing
+                        "/":
+                            self.state = TokenizerState.SelfClosingStartTag
+                        ">":
+                            self.state = TokenizerState.Data
+                            return self.emit_tag()
+                        _:
+                            self.create_attribute()
+                            self.reconsume()
+                            self.state = TokenizerState.AttributeName
+
+                # -------------------------------------------------------
+                # AttributeName — reading attribute name characters
+                # -------------------------------------------------------
+                TokenizerState.AttributeName:
+                    if self.is_eof():
+                        self.state = TokenizerState.Data
+                        return HtmlToken.Eof
+                    val c = self.consume()
+                    match c:
+                        " ":
+                            self.state = TokenizerState.AfterAttributeName
+                        "\t":
+                            self.state = TokenizerState.AfterAttributeName
+                        "\n":
+                            self.state = TokenizerState.AfterAttributeName
+                        "/":
+                            self.state = TokenizerState.SelfClosingStartTag
+                        ">":
+                            self.state = TokenizerState.Data
+                            return self.emit_tag()
+                        "=":
+                            self.state = TokenizerState.BeforeAttributeValue
+                        _:
+                            self.current_attr_name = self.current_attr_name + self.to_lower(c)
+
+                # -------------------------------------------------------
+                # AfterAttributeName — after attribute name, before = or next attr
+                # -------------------------------------------------------
+                TokenizerState.AfterAttributeName:
+                    if self.is_eof():
+                        self.state = TokenizerState.Data
+                        return HtmlToken.Eof
+                    val c = self.consume()
+                    match c:
+                        " ":
+                            pass_do_nothing
+                        "\t":
+                            pass_do_nothing
+                        "\n":
+                            pass_do_nothing
+                        "/":
+                            self.state = TokenizerState.SelfClosingStartTag
+                        ">":
+                            self.state = TokenizerState.Data
+                            return self.emit_tag()
+                        "=":
+                            self.state = TokenizerState.BeforeAttributeValue
+                        _:
+                            self.create_attribute()
+                            self.reconsume()
+                            self.state = TokenizerState.AttributeName
+
+                # -------------------------------------------------------
+                # BeforeAttributeValue — just saw '=', expecting value
+                # -------------------------------------------------------
+                TokenizerState.BeforeAttributeValue:
+                    if self.is_eof():
+                        self.state = TokenizerState.Data
+                        return HtmlToken.Eof
+                    val c = self.consume()
+                    match c:
+                        " ":
+                            pass_do_nothing
+                        "\t":
+                            pass_do_nothing
+                        "\n":
+                            pass_do_nothing
+                        "\"":
+                            self.state = TokenizerState.AttributeValueDoubleQuoted
+                        "'":
+                            self.state = TokenizerState.AttributeValueSingleQuoted
+                        ">":
+                            self.logger.warn("Missing attribute value")
+                            self.state = TokenizerState.Data
+                            return self.emit_tag()
+                        _:
+                            self.reconsume()
+                            self.state = TokenizerState.AttributeValueUnquoted
+
+                # -------------------------------------------------------
+                # AttributeValueDoubleQuoted — inside "..."
+                # -------------------------------------------------------
+                TokenizerState.AttributeValueDoubleQuoted:
+                    if self.is_eof():
+                        self.state = TokenizerState.Data
+                        return HtmlToken.Eof
+                    val c = self.consume()
+                    match c:
+                        "\"":
+                            self.state = TokenizerState.AfterAttributeValueQuoted
+                        "&":
+                            self.return_state = TokenizerState.AttributeValueDoubleQuoted
+                            self.state = TokenizerState.CharacterReference
+                            self.temp_buffer = ""
+                        _:
+                            self.current_attr_value = self.current_attr_value + c
+
+                # -------------------------------------------------------
+                # AttributeValueSingleQuoted — inside '...'
+                # -------------------------------------------------------
+                TokenizerState.AttributeValueSingleQuoted:
+                    if self.is_eof():
+                        self.state = TokenizerState.Data
+                        return HtmlToken.Eof
+                    val c = self.consume()
+                    match c:
+                        "'":
+                            self.state = TokenizerState.AfterAttributeValueQuoted
+                        "&":
+                            self.return_state = TokenizerState.AttributeValueSingleQuoted
+                            self.state = TokenizerState.CharacterReference
+                            self.temp_buffer = ""
+                        _:
+                            self.current_attr_value = self.current_attr_value + c
+
+                # -------------------------------------------------------
+                # AttributeValueUnquoted — bare attribute value
+                # -------------------------------------------------------
+                TokenizerState.AttributeValueUnquoted:
+                    if self.is_eof():
+                        self.state = TokenizerState.Data
+                        return HtmlToken.Eof
+                    val c = self.consume()
+                    match c:
+                        " ":
+                            self.state = TokenizerState.BeforeAttributeName
+                        "\t":
+                            self.state = TokenizerState.BeforeAttributeName
+                        "\n":
+                            self.state = TokenizerState.BeforeAttributeName
+                        "&":
+                            self.return_state = TokenizerState.AttributeValueUnquoted
+                            self.state = TokenizerState.CharacterReference
+                            self.temp_buffer = ""
+                        ">":
+                            self.state = TokenizerState.Data
+                            return self.emit_tag()
+                        _:
+                            self.current_attr_value = self.current_attr_value + c
+
+                # -------------------------------------------------------
+                # AfterAttributeValueQuoted — just closed a quoted value
+                # -------------------------------------------------------
+                TokenizerState.AfterAttributeValueQuoted:
+                    if self.is_eof():
+                        self.state = TokenizerState.Data
+                        return HtmlToken.Eof
+                    val c = self.consume()
+                    match c:
+                        " ":
+                            self.state = TokenizerState.BeforeAttributeName
+                        "\t":
+                            self.state = TokenizerState.BeforeAttributeName
+                        "\n":
+                            self.state = TokenizerState.BeforeAttributeName
+                        "/":
+                            self.state = TokenizerState.SelfClosingStartTag
+                        ">":
+                            self.state = TokenizerState.Data
+                            return self.emit_tag()
+                        _:
+                            self.logger.warn("Missing space between attributes")
+                            self.reconsume()
+                            self.state = TokenizerState.BeforeAttributeName
+
+                # -------------------------------------------------------
+                # SelfClosingStartTag — saw '/' inside a tag
+                # -------------------------------------------------------
+                TokenizerState.SelfClosingStartTag:
+                    if self.is_eof():
+                        self.state = TokenizerState.Data
+                        return HtmlToken.Eof
+                    val c = self.consume()
+                    match c:
+                        ">":
+                            self.current_tag_self_closing = true
+                            self.state = TokenizerState.Data
+                            return self.emit_tag()
+                        _:
+                            self.logger.warn("Unexpected character in self-closing tag")
+                            self.reconsume()
+                            self.state = TokenizerState.BeforeAttributeName
+
+                # -------------------------------------------------------
+                # MarkupDeclarationOpen — saw '<!'
+                # -------------------------------------------------------
+                TokenizerState.MarkupDeclarationOpen:
+                    # Check for "--" (comment), "DOCTYPE", or "[CDATA["
+                    if self.match_ahead("--"):
+                        self.pos = self.pos + 2
+                        self.current_comment = ""
+                        self.state = TokenizerState.CommentStart
+                    else if self.match_ahead_ci("doctype"):
+                        self.pos = self.pos + 7
+                        self.state = TokenizerState.Doctype
+                    else if self.match_ahead("[CDATA["):
+                        self.pos = self.pos + 7
+                        self.state = TokenizerState.CDataSection
+                    else:
+                        self.current_comment = ""
+                        self.state = TokenizerState.BogusComment
+
+                # -------------------------------------------------------
+                # CommentStart — just entered a comment
+                # -------------------------------------------------------
+                TokenizerState.CommentStart:
+                    if self.is_eof():
+                        self.state = TokenizerState.Data
+                        return self.emit_comment()
+                    val c = self.consume()
+                    match c:
+                        "-":
+                            self.state = TokenizerState.CommentStartDash
+                        ">":
+                            self.logger.warn("Abrupt closing of empty comment")
+                            self.state = TokenizerState.Data
+                            return self.emit_comment()
+                        _:
+                            self.reconsume()
+                            self.state = TokenizerState.Comment
+
+                # -------------------------------------------------------
+                # CommentStartDash — saw '-' at start of comment
+                # -------------------------------------------------------
+                TokenizerState.CommentStartDash:
+                    if self.is_eof():
+                        self.state = TokenizerState.Data
+                        return self.emit_comment()
+                    val c = self.consume()
+                    match c:
+                        "-":
+                            self.state = TokenizerState.CommentEnd
+                        ">":
+                            self.logger.warn("Abrupt closing of empty comment")
+                            self.state = TokenizerState.Data
+                            return self.emit_comment()
+                        _:
+                            self.current_comment = self.current_comment + "-"
+                            self.reconsume()
+                            self.state = TokenizerState.Comment
+
+                # -------------------------------------------------------
+                # Comment — inside comment body
+                # -------------------------------------------------------
+                TokenizerState.Comment:
+                    if self.is_eof():
+                        self.state = TokenizerState.Data
+                        return self.emit_comment()
+                    val c = self.consume()
+                    match c:
+                        "-":
+                            self.state = TokenizerState.CommentEndDash
+                        _:
+                            self.current_comment = self.current_comment + c
+
+                # -------------------------------------------------------
+                # CommentEndDash — saw '-' inside comment
+                # -------------------------------------------------------
+                TokenizerState.CommentEndDash:
+                    if self.is_eof():
+                        self.state = TokenizerState.Data
+                        return self.emit_comment()
+                    val c = self.consume()
+                    match c:
+                        "-":
+                            self.state = TokenizerState.CommentEnd
+                        _:
+                            self.current_comment = self.current_comment + "-" + c
+                            self.state = TokenizerState.Comment
+
+                # -------------------------------------------------------
+                # CommentEnd — saw '--' inside comment
+                # -------------------------------------------------------
+                TokenizerState.CommentEnd:
+                    if self.is_eof():
+                        self.state = TokenizerState.Data
+                        return self.emit_comment()
+                    val c = self.consume()
+                    match c:
+                        ">":
+                            self.state = TokenizerState.Data
+                            return self.emit_comment()
+                        "-":
+                            self.current_comment = self.current_comment + "-"
+                        _:
+                            self.current_comment = self.current_comment + "--" + c
+                            self.state = TokenizerState.Comment
+
+                # -------------------------------------------------------
+                # Doctype — saw '<!DOCTYPE'
+                # -------------------------------------------------------
+                TokenizerState.Doctype:
+                    if self.is_eof():
+                        self.current_doctype_name = ""
+                        self.state = TokenizerState.Data
+                        return self.emit_doctype()
+                    val c = self.consume()
+                    match c:
+                        " ":
+                            self.state = TokenizerState.BeforeDoctypeName
+                        "\t":
+                            self.state = TokenizerState.BeforeDoctypeName
+                        "\n":
+                            self.state = TokenizerState.BeforeDoctypeName
+                        ">":
+                            self.current_doctype_name = ""
+                            self.state = TokenizerState.Data
+                            return self.emit_doctype()
+                        _:
+                            self.logger.warn("Missing whitespace before doctype name")
+                            self.reconsume()
+                            self.state = TokenizerState.BeforeDoctypeName
+
+                # -------------------------------------------------------
+                # BeforeDoctypeName — whitespace before doctype name
+                # -------------------------------------------------------
+                TokenizerState.BeforeDoctypeName:
+                    if self.is_eof():
+                        self.current_doctype_name = ""
+                        self.state = TokenizerState.Data
+                        return self.emit_doctype()
+                    val c = self.consume()
+                    match c:
+                        " ":
+                            pass_do_nothing
+                        "\t":
+                            pass_do_nothing
+                        "\n":
+                            pass_do_nothing
+                        ">":
+                            self.current_doctype_name = ""
+                            self.state = TokenizerState.Data
+                            return self.emit_doctype()
+                        _:
+                            self.current_doctype_name = self.to_lower(c)
+                            self.state = TokenizerState.DoctypeName
+
+                # -------------------------------------------------------
+                # DoctypeName — reading doctype name
+                # -------------------------------------------------------
+                TokenizerState.DoctypeName:
+                    if self.is_eof():
+                        self.state = TokenizerState.Data
+                        return self.emit_doctype()
+                    val c = self.consume()
+                    match c:
+                        " ":
+                            self.state = TokenizerState.AfterDoctypeName
+                        "\t":
+                            self.state = TokenizerState.AfterDoctypeName
+                        "\n":
+                            self.state = TokenizerState.AfterDoctypeName
+                        ">":
+                            self.state = TokenizerState.Data
+                            return self.emit_doctype()
+                        _:
+                            self.current_doctype_name = self.current_doctype_name + self.to_lower(c)
+
+                # -------------------------------------------------------
+                # AfterDoctypeName — after doctype name, skip to '>'
+                # -------------------------------------------------------
+                TokenizerState.AfterDoctypeName:
+                    if self.is_eof():
+                        self.state = TokenizerState.Data
+                        return self.emit_doctype()
+                    val c = self.consume()
+                    match c:
+                        " ":
+                            pass_do_nothing
+                        "\t":
+                            pass_do_nothing
+                        "\n":
+                            pass_do_nothing
+                        ">":
+                            self.state = TokenizerState.Data
+                            return self.emit_doctype()
+                        _:
+                            # PUBLIC/SYSTEM identifiers — simplified: skip to '>'
+                            pass_do_nothing
+
+                # -------------------------------------------------------
+                # CharacterReference — basic named entity resolution
+                # -------------------------------------------------------
+                TokenizerState.CharacterReference:
+                    if self.is_eof():
+                        self.state = self.return_state
+                        val resolved = "&" + self.temp_buffer
+                        return self.emit_character(resolved)
+                    val c = self.consume()
+                    match c:
+                        ";":
+                            val resolved = self.resolve_char_ref(self.temp_buffer)
+                            self.state = self.return_state
+                            # If we were in an attribute value state, append to attr
+                            if self.is_attr_return_state():
+                                self.current_attr_value = self.current_attr_value + resolved
+                            else:
+                                return self.emit_character(resolved)
+                        _:
+                            if self.is_ascii_alphanumeric(c):
+                                self.temp_buffer = self.temp_buffer + c
+                            else:
+                                # Not a valid reference — emit ampersand and buffer
+                                val fallback = "&" + self.temp_buffer
+                                self.reconsume()
+                                self.state = self.return_state
+                                if self.is_attr_return_state():
+                                    self.current_attr_value = self.current_attr_value + fallback
+                                else:
+                                    return self.emit_character(fallback)
+
+                # -------------------------------------------------------
+                # RawText — for <style> content (emit characters until </style>)
+                # -------------------------------------------------------
+                TokenizerState.RawText:
+                    if self.is_eof():
+                        return HtmlToken.Eof
+                    val c = self.consume()
+                    match c:
+                        "<":
+                            self.temp_buffer = ""
+                            self.state = TokenizerState.RawTextLessThan
+                        _:
+                            return self.emit_character(c)
+
+                TokenizerState.RawTextLessThan:
+                    if self.is_eof():
+                        self.state = TokenizerState.RawText
+                        return self.emit_character("<")
+                    val c = self.consume()
+                    match c:
+                        "/":
+                            self.temp_buffer = ""
+                            self.state = TokenizerState.RawTextEndTagOpen
+                        _:
+                            self.reconsume()
+                            self.state = TokenizerState.RawText
+                            return self.emit_character("<")
+
+                TokenizerState.RawTextEndTagOpen:
+                    if self.is_eof():
+                        self.state = TokenizerState.RawText
+                        return self.emit_character("<")
+                    val c = self.consume()
+                    if self.is_ascii_alpha(c):
+                        self.reset_tag(true)
+                        self.reconsume()
+                        self.state = TokenizerState.RawTextEndTagName
+                    else:
+                        self.reconsume()
+                        self.state = TokenizerState.RawText
+                        return self.emit_character("</")
+
+                TokenizerState.RawTextEndTagName:
+                    if self.is_eof():
+                        self.state = TokenizerState.RawText
+                        return self.emit_character("</" + self.current_tag_name)
+                    val c = self.consume()
+                    match c:
+                        ">":
+                            if self.current_tag_name == self.last_start_tag:
+                                self.state = TokenizerState.Data
+                                return self.emit_tag()
+                            else:
+                                val fallback = "</" + self.current_tag_name + ">"
+                                self.state = TokenizerState.RawText
+                                return self.emit_character(fallback)
+                        " ":
+                            if self.current_tag_name == self.last_start_tag:
+                                self.state = TokenizerState.BeforeAttributeName
+                            else:
+                                val fallback = "</" + self.current_tag_name
+                                self.state = TokenizerState.RawText
+                                return self.emit_character(fallback)
+                        _:
+                            if self.is_ascii_alpha(c):
+                                self.current_tag_name = self.current_tag_name + self.to_lower(c)
+                            else:
+                                val fallback = "</" + self.current_tag_name + c
+                                self.state = TokenizerState.RawText
+                                return self.emit_character(fallback)
+
+                # -------------------------------------------------------
+                # ScriptData — for <script> content (emit characters until </script>)
+                # -------------------------------------------------------
+                TokenizerState.ScriptData:
+                    if self.is_eof():
+                        return HtmlToken.Eof
+                    val c = self.consume()
+                    match c:
+                        "<":
+                            self.temp_buffer = ""
+                            self.state = TokenizerState.ScriptDataLessThan
+                        _:
+                            return self.emit_character(c)
+
+                TokenizerState.ScriptDataLessThan:
+                    if self.is_eof():
+                        self.state = TokenizerState.ScriptData
+                        return self.emit_character("<")
+                    val c = self.consume()
+                    match c:
+                        "/":
+                            self.temp_buffer = ""
+                            self.state = TokenizerState.ScriptDataEndTagOpen
+                        _:
+                            self.reconsume()
+                            self.state = TokenizerState.ScriptData
+                            return self.emit_character("<")
+
+                TokenizerState.ScriptDataEndTagOpen:
+                    if self.is_eof():
+                        self.state = TokenizerState.ScriptData
+                        return self.emit_character("<")
+                    val c = self.consume()
+                    if self.is_ascii_alpha(c):
+                        self.reset_tag(true)
+                        self.reconsume()
+                        self.state = TokenizerState.ScriptDataEndTagName
+                    else:
+                        self.reconsume()
+                        self.state = TokenizerState.ScriptData
+                        return self.emit_character("</")
+
+                TokenizerState.ScriptDataEndTagName:
+                    if self.is_eof():
+                        self.state = TokenizerState.ScriptData
+                        return self.emit_character("</" + self.current_tag_name)
+                    val c = self.consume()
+                    match c:
+                        ">":
+                            if self.current_tag_name == self.last_start_tag:
+                                self.state = TokenizerState.Data
+                                return self.emit_tag()
+                            else:
+                                val fallback = "</" + self.current_tag_name + ">"
+                                self.state = TokenizerState.ScriptData
+                                return self.emit_character(fallback)
+                        " ":
+                            if self.current_tag_name == self.last_start_tag:
+                                self.state = TokenizerState.BeforeAttributeName
+                            else:
+                                val fallback = "</" + self.current_tag_name
+                                self.state = TokenizerState.ScriptData
+                                return self.emit_character(fallback)
+                        _:
+                            if self.is_ascii_alpha(c):
+                                self.current_tag_name = self.current_tag_name + self.to_lower(c)
+                            else:
+                                val fallback = "</" + self.current_tag_name + c
+                                self.state = TokenizerState.ScriptData
+                                return self.emit_character(fallback)
+
+                # -------------------------------------------------------
+                # BogusComment — collect until '>'
+                # -------------------------------------------------------
+                TokenizerState.BogusComment:
+                    if self.is_eof():
+                        self.state = TokenizerState.Data
+                        return self.emit_comment()
+                    val c = self.consume()
+                    match c:
+                        ">":
+                            self.state = TokenizerState.Data
+                            return self.emit_comment()
+                        _:
+                            self.current_comment = self.current_comment + c
+
+                # -------------------------------------------------------
+                # PlainText — emit everything as characters
+                # -------------------------------------------------------
+                TokenizerState.PlainText:
+                    if self.is_eof():
+                        return HtmlToken.Eof
+                    val c = self.consume()
+                    return self.emit_character(c)
+
+                # -------------------------------------------------------
+                # CDataSection — emit content until ']]>'
+                # -------------------------------------------------------
+                TokenizerState.CDataSection:
+                    if self.is_eof():
+                        self.state = TokenizerState.Data
+                        return HtmlToken.Eof
+                    val c = self.consume()
+                    if c == "]" and self.match_ahead("]>"):
+                        self.pos = self.pos + 2
+                        self.state = TokenizerState.Data
+                    else:
+                        return self.emit_character(c)
+
+                # Catch-all for any unhandled state
+                _:
+                    self.logger.error("Unhandled tokenizer state")
+                    return HtmlToken.Eof
+
+        # Safety: if we exhaust the loop guard, return EOF
+        self.logger.error("Tokenizer loop guard exceeded")
+        HtmlToken.Eof
+
+    # --- Utility helpers ---
+
+    fn is_ascii_alpha(c: text) -> bool:
+        if c.len() == 0:
+            return false
+        val code = c.char_code_at(0)
+        (code >= 65 and code <= 90) or (code >= 97 and code <= 122)
+
+    fn is_ascii_alphanumeric(c: text) -> bool:
+        if c.len() == 0:
+            return false
+        val code = c.char_code_at(0)
+        (code >= 65 and code <= 90) or (code >= 97 and code <= 122) or (code >= 48 and code <= 57)
+
+    fn to_lower(c: text) -> text:
+        if c.len() == 0:
+            return c
+        val code = c.char_code_at(0)
+        if code >= 65 and code <= 90:
+            return c.to_lowercase()
+        c
+
+    fn match_ahead(expected: text) -> bool:
+        # Check if the next characters match expected (case-sensitive)
+        val remaining = self.input.len() - self.pos
+        if remaining < expected.len():
+            return false
+        val slice = self.input.substring(self.pos, self.pos + expected.len())
+        slice == expected
+
+    fn match_ahead_ci(expected: text) -> bool:
+        # Check if the next characters match expected (case-insensitive)
+        val remaining = self.input.len() - self.pos
+        if remaining < expected.len():
+            return false
+        val slice = self.input.substring(self.pos, self.pos + expected.len())
+        slice.to_lowercase() == expected.to_lowercase()
+
+    fn is_attr_return_state() -> bool:
+        match self.return_state:
+            TokenizerState.AttributeValueDoubleQuoted: true
+            TokenizerState.AttributeValueSingleQuoted: true
+            TokenizerState.AttributeValueUnquoted: true
+            _: false

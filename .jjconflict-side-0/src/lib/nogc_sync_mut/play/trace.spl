@@ -1,0 +1,90 @@
+@allow(primitive_api)
+# std.play.trace — Artifact + trace writer
+#
+# Writes structured artifacts to doc/08_tracking/test/play/<session_id>/:
+#   - stdout.log, stderr.log — child process output (written by launcher)
+#   - cdp.log                — CDP protocol transcript (append-only)
+#   - console.log            — JS console output from the target
+#   - summary.sdn            — final session summary (SDN format per CLAUDE.md)
+#   - screenshot-<ts>.png    — screenshots from Page.screenshot()
+#
+# Also appends a row to doc/08_tracking/test/play_index.sdn for discoverability.
+
+use std.play.types.{PlaySession}
+
+extern fn rt_mkdir_p(path: text) -> bool
+extern fn rt_file_write_text(path: text, content: text) -> bool
+extern fn rt_file_read_text(path: text) -> text
+extern fn rt_file_append_text(path: text, content: text) -> bool
+extern fn rt_file_exists(path: text) -> bool
+extern fn rt_time_now_unix_micros() -> i64
+
+val TRACE_ROOT = "doc/08_tracking/test/play"
+val TRACE_INDEX = "doc/08_tracking/test/play_index.sdn"
+
+fn trace_init(session_id: text) -> text:
+    val dir = "{TRACE_ROOT}/{session_id}"
+    rt_mkdir_p(dir)
+    rt_file_write_text("{dir}/cdp.log", "")
+    rt_file_write_text("{dir}/console.log", "")
+    dir
+
+fn trace_append_cdp(session_id: text, direction: text, message: text) -> bool:
+    val path = "{TRACE_ROOT}/{session_id}/cdp.log"
+    val ts = rt_time_now_unix_micros()
+    rt_file_append_text(path, "{ts} {direction} {message}\n")
+
+fn trace_append_console(session_id: text, level: text, message: text) -> bool:
+    val path = "{TRACE_ROOT}/{session_id}/console.log"
+    val ts = rt_time_now_unix_micros()
+    rt_file_append_text(path, "{ts} {level}: {message}\n")
+
+fn trace_write_summary(session: PlaySession, passed: i64, failed: i64, duration_ms: i64) -> bool:
+    val path = "{session.artifacts_dir}/summary.sdn"
+    val now = rt_time_now_unix_micros()
+    val body =
+        "# Play session summary (SDN format)\n" +
+        "session_id: \"{session.id}\"\n" +
+        "backend: \"{session.backend}\"\n" +
+        "state: \"{session.state}\"\n" +
+        "pid: {session.pid}\n" +
+        "executable: \"{session.executable_path}\"\n" +
+        "ws_url: \"{session.ws_url}\"\n" +
+        "artifacts_dir: \"{session.artifacts_dir}\"\n" +
+        "stdout_path: \"{session.stdout_path}\"\n" +
+        "stderr_path: \"{session.stderr_path}\"\n" +
+        "cdp_trace_path: \"{session.cdp_trace_path}\"\n" +
+        "console_log_path: \"{session.console_log_path}\"\n" +
+        "first_window_id: \"{session.first_window_id}\"\n" +
+        "window_count: {session.windows.length()}\n" +
+        "passed: {passed}\n" +
+        "failed: {failed}\n" +
+        "duration_ms: {duration_ms}\n" +
+        "created_at_us: {session.created_at_us}\n" +
+        "finished_at_us: {now}\n"
+    rt_file_write_text(path, body)
+
+fn trace_append_index(session: PlaySession, passed: i64, failed: i64) -> bool:
+    if not rt_file_exists(TRACE_INDEX):
+        rt_file_write_text(TRACE_INDEX,
+            "# play sessions index (append-only)\n" +
+            "# fields: session_id backend state passed failed pid artifacts_dir\n")
+    val row = "{session.id} {session.backend} {session.state} {passed} {failed} {session.pid} {session.artifacts_dir}\n"
+    rt_file_append_text(TRACE_INDEX, row)
+
+fn trace_read_cdp(session_id: text) -> text:
+    val path = "{TRACE_ROOT}/{session_id}/cdp.log"
+    if not rt_file_exists(path): return ""
+    rt_file_read_text(path)
+
+fn trace_read_stdout(session: PlaySession) -> text:
+    if not rt_file_exists(session.stdout_path): return ""
+    rt_file_read_text(session.stdout_path)
+
+fn trace_read_stderr(session: PlaySession) -> text:
+    if not rt_file_exists(session.stderr_path): return ""
+    rt_file_read_text(session.stderr_path)
+
+fn trace_read_console(session: PlaySession) -> text:
+    if not rt_file_exists(session.console_log_path): return ""
+    rt_file_read_text(session.console_log_path)

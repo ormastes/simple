@@ -1,0 +1,267 @@
+#![allow(unnamed_duplicate_typed_args)]
+# Terminal Render Adapter
+#
+# Bridges the terminal app to the shared ui.render contract.
+# Produces text (terminal screen buffer snapshot) and HTML
+# (terminal screen with ANSI-to-CSS conversion) via RenderResult.
+
+use app.ui.render.types.{RenderConfig, RenderResult}
+use app.ui.render.html.{html_page, html_escape, css_dark_theme, css_light_theme, css_reset}
+use app.ui.render.ansi.{colorize, strip_ansi, fg_256, RESET, BOLD, DIM, GREEN, CYAN, YELLOW, WHITE}
+use app.ui.render.css.{card_css}
+
+# =========================================================================
+# Render Adapter Entry Point
+# =========================================================================
+
+fn render_terminal(config: RenderConfig) -> RenderResult:
+    """Render the terminal view via the shared render contract.
+
+    Dispatches to text or HTML rendering based on config.format.
+    Shows terminal configuration and connection status.
+    """
+    match config.format:
+        "html":
+            return render_terminal_html(config)
+        "both":
+            return RenderResult.both(
+                render_terminal_text(config).text_output,
+                render_terminal_html(config).html_output
+            )
+        _:
+            return render_terminal_text(config)
+
+# =========================================================================
+# Text Rendering
+# =========================================================================
+
+fn render_terminal_text(config: RenderConfig) -> RenderResult:
+    """Render terminal as ANSI-colored text snapshot.
+
+    Shows terminal header, screen buffer area, and status line.
+    """
+    var lines: [text] = []
+    val width = if config.width > 0: config.width else: 80
+    val height = if config.height > 0: config.height else: 24
+
+    # Header
+    lines.push(colorize("Simple Terminal", BOLD))
+    lines.push(colorize("Screen buffer: {width}x{height}", DIM))
+    lines.push("")
+
+    # Top border
+    val border_line = build_border(width)
+    lines.push(colorize(border_line, DIM))
+
+    # Empty screen buffer lines
+    val content_height = if height > 4: height - 4 else: 4
+    var row = 0
+    while row < content_height:
+        val empty_line = build_empty_line(width)
+        lines.push(colorize("|", DIM) + empty_line + colorize("|", DIM))
+        row = row + 1
+
+    # Bottom border
+    lines.push(colorize(border_line, DIM))
+
+    # Status line
+    lines.push("")
+    lines.push(colorize("Status:", BOLD) + " " + colorize("idle", GREEN))
+    lines.push(colorize("Config:", BOLD) + " config/t32/t32_terminal.sdn")
+
+    # Subcommands reference
+    lines.push("")
+    lines.push(colorize("Subcommands:", BOLD))
+    lines.push("  " + colorize("connect <name>", CYAN) + "    Connect to terminal")
+    lines.push("  " + colorize("exec <name> <cmd>", CYAN) + " Execute command")
+    lines.push("  " + colorize("list", CYAN) + "              List terminals")
+    lines.push("  " + colorize("disconnect <name>", CYAN) + " Disconnect terminal")
+
+    var result = RenderResult.text(join_lines(lines))
+    result.metadata = terminal_metadata(width, height)
+    return result
+
+# =========================================================================
+# HTML Rendering
+# =========================================================================
+
+fn render_terminal_html(config: RenderConfig) -> RenderResult:
+    """Render terminal as a full HTML page with terminal-style display."""
+    val theme_css = if config.theme == "light": css_light_theme() else: css_dark_theme()
+    val css = css_reset() + theme_css + card_css() + terminal_css()
+    val width = if config.width > 0: config.width else: 80
+    val height = if config.height > 0: config.height else: 24
+    val body = terminal_html_body(width, height)
+    val page = html_page("Simple Terminal", css, body)
+
+    var result = RenderResult.html(page)
+    result.metadata = terminal_metadata(width, height)
+    return result
+
+fn terminal_css() -> text:
+    """Terminal-specific CSS styles."""
+    var s = ""
+    s = "{s}.term-container {\n"
+    s = "{s}  max-width: 900px;\n"
+    s = "{s}  margin: 0 auto;\n"
+    s = "{s}}\n"
+    s = "{s}.term-header {\n"
+    s = "{s}  margin-bottom: 16px;\n"
+    s = "{s}}\n"
+    s = "{s}.term-header h1 {\n"
+    s = "{s}  font-size: 20px;\n"
+    s = "{s}  color: var(--green, #3fb950);\n"
+    s = "{s}}\n"
+    s = "{s}.term-header .subtitle {\n"
+    s = "{s}  font-size: 13px;\n"
+    s = "{s}  color: var(--text-dim, #8b949e);\n"
+    s = "{s}}\n"
+    s = "{s}.term-screen {\n"
+    s = "{s}  background: #000000;\n"
+    s = "{s}  border: 2px solid var(--border, #30363d);\n"
+    s = "{s}  border-radius: 8px;\n"
+    s = "{s}  padding: 12px;\n"
+    s = "{s}  font-family: 'SF Mono', 'Fira Code', 'Cascadia Code', monospace;\n"
+    s = "{s}  font-size: 14px;\n"
+    s = "{s}  line-height: 1.4;\n"
+    s = "{s}  color: #c0c0c0;\n"
+    s = "{s}  overflow: auto;\n"
+    s = "{s}  margin-bottom: 16px;\n"
+    s = "{s}}\n"
+    s = "{s}.term-screen .cursor {\n"
+    s = "{s}  background: #c0c0c0;\n"
+    s = "{s}  color: #000000;\n"
+    s = "{s}  animation: blink 1s step-end infinite;\n"
+    s = "{s}}\n"
+    s = "{s}@keyframes blink {\n"
+    s = "{s}  50% { opacity: 0; }\n"
+    s = "{s}}\n"
+    s = "{s}.term-line {\n"
+    s = "{s}  white-space: pre;\n"
+    s = "{s}  min-height: 1.4em;\n"
+    s = "{s}}\n"
+    s = "{s}.term-status {\n"
+    s = "{s}  display: flex;\n"
+    s = "{s}  justify-content: space-between;\n"
+    s = "{s}  font-size: 12px;\n"
+    s = "{s}  color: var(--text-dim, #8b949e);\n"
+    s = "{s}  padding: 4px 0;\n"
+    s = "{s}}\n"
+    s = "{s}.term-status .connected {\n"
+    s = "{s}  color: var(--green, #3fb950);\n"
+    s = "{s}}\n"
+    s = "{s}.term-status .disconnected {\n"
+    s = "{s}  color: var(--gray, #8b949e);\n"
+    s = "{s}}\n"
+    s = "{s}.cmd-grid {\n"
+    s = "{s}  display: grid;\n"
+    s = "{s}  grid-template-columns: 1fr 1fr;\n"
+    s = "{s}  gap: 8px;\n"
+    s = "{s}  font-size: 13px;\n"
+    s = "{s}}\n"
+    s = "{s}.cmd-entry {\n"
+    s = "{s}  padding: 8px 12px;\n"
+    s = "{s}  background: var(--bg-card, #161b22);\n"
+    s = "{s}  border: 1px solid var(--border, #30363d);\n"
+    s = "{s}  border-radius: 6px;\n"
+    s = "{s}}\n"
+    s = "{s}.cmd-entry .cmd-name {\n"
+    s = "{s}  color: var(--blue, #58a6ff);\n"
+    s = "{s}  font-family: monospace;\n"
+    s = "{s}  font-weight: 600;\n"
+    s = "{s}}\n"
+    s = "{s}.cmd-entry .cmd-desc {\n"
+    s = "{s}  color: var(--text-dim, #8b949e);\n"
+    s = "{s}  margin-top: 2px;\n"
+    s = "{s}}\n"
+    return s
+
+fn terminal_html_body(width: i64, height: i64) -> text:
+    """Generate terminal HTML body content."""
+    var h = ""
+    h = "{h}<div class=\"term-container\">\n"
+
+    # Header
+    h = "{h}  <div class=\"term-header\">\n"
+    h = "{h}    <h1>Simple Terminal</h1>\n"
+    h = "{h}    <div class=\"subtitle\">Terminal emulator &mdash; {width}&times;{height}</div>\n"
+    h = "{h}  </div>\n"
+
+    # Screen buffer
+    val content_height = if height > 4: height - 2 else: 4
+    h = "{h}  <div class=\"term-screen\">\n"
+    var row = 0
+    while row < content_height:
+        if row == 0:
+            h = "{h}    <div class=\"term-line\"><span class=\"cursor\"> </span></div>\n"
+        else:
+            h = "{h}    <div class=\"term-line\"></div>\n"
+        row = row + 1
+    h = "{h}  </div>\n"
+
+    # Status bar
+    h = "{h}  <div class=\"term-status\">\n"
+    h = "{h}    <span class=\"disconnected\">idle</span>\n"
+    h = "{h}    <span>config/t32/t32_terminal.sdn</span>\n"
+    h = "{h}  </div>\n"
+
+    # Subcommands
+    h = "{h}  <div class=\"card\" style=\"margin-top:16px\">\n"
+    h = "{h}    <h3>Subcommands</h3>\n"
+    h = "{h}    <div class=\"cmd-grid\">\n"
+    h = "{h}      <div class=\"cmd-entry\"><div class=\"cmd-name\">connect &lt;name&gt;</div>"
+    h = "{h}<div class=\"cmd-desc\">Connect to a configured terminal</div></div>\n"
+    h = "{h}      <div class=\"cmd-entry\"><div class=\"cmd-name\">exec &lt;name&gt; &lt;cmd&gt;</div>"
+    h = "{h}<div class=\"cmd-desc\">Execute command on terminal</div></div>\n"
+    h = "{h}      <div class=\"cmd-entry\"><div class=\"cmd-name\">list</div>"
+    h = "{h}<div class=\"cmd-desc\">List configured terminals</div></div>\n"
+    h = "{h}      <div class=\"cmd-entry\"><div class=\"cmd-name\">disconnect &lt;name&gt;</div>"
+    h = "{h}<div class=\"cmd-desc\">Disconnect active terminal</div></div>\n"
+    h = "{h}    </div>\n"
+    h = "{h}  </div>\n"
+
+    h = "{h}</div>\n"
+    return h
+
+# =========================================================================
+# Helpers
+# =========================================================================
+
+fn build_border(width: i64) -> text:
+    """Build a horizontal border line of the given width."""
+    var s = "+"
+    var i = 0
+    while i < width:
+        s = "{s}-"
+        i = i + 1
+    s = "{s}+"
+    return s
+
+fn build_empty_line(width: i64) -> text:
+    """Build an empty content line of the given width."""
+    var s = ""
+    var i = 0
+    while i < width:
+        s = "{s} "
+        i = i + 1
+    return s
+
+fn join_lines(lines: [text]) -> text:
+    """Join lines with newline separator."""
+    var result = ""
+    var first = true
+    for line in lines:
+        if not first:
+            result = "{result}\n"
+        result = "{result}{line}"
+        first = false
+    return result
+
+fn terminal_metadata(width: i64, height: i64) -> Dict<text, text>:
+    """Build metadata for terminal render results."""
+    var meta: Dict<text, text> = {}
+    meta["adapter"] = "terminal"
+    meta["width"] = "{width}"
+    meta["height"] = "{height}"
+    meta["config_path"] = "config/t32/t32_terminal.sdn"
+    return meta

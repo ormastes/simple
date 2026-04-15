@@ -1,0 +1,281 @@
+@allow(star_import)
+# Host Power Control - Remote PC power via SSH and Wake-on-LAN
+#
+# Controls remote host power using:
+#   - Wake-on-LAN (WoL) magic packet for power on
+#   - SSH "shutdown -h now" for power off
+#   - SSH "reboot" for reset
+#   - TCP probe to SSH port for state detection
+#
+# SSH operations create a TerminalConfig from PowerConfig fields and
+# use ssh_terminal_connect/ssh_terminal_execute.
+#
+# Used by: power/controller.spl dispatch layer
+
+use std.terminal.types.{PowerConfig, PowerState, TerminalConfig, TERM_KIND_SSH, POWER_STATE_ON, POWER_STATE_OFF, POWER_STATE_UNKNOWN, make_power_state}
+
+extern fn rt_shell_exec(cmd: text) -> (text, text, i64)
+extern fn rt_udp_send(host: text, port: i64, data: [u8]) -> bool
+extern fn rt_tcp_connect_timeout(host: text, port: i64, timeout_ms: i64) -> i64
+extern fn rt_time_now_unix_micros() -> i64
+
+# ============================================================================
+# Internal Helpers
+# ============================================================================
+
+fn make_ssh_config_from_power(config: PowerConfig) -> TerminalConfig:
+    """Create a TerminalConfig for SSH from PowerConfig fields.
+
+    Maps host power config fields (host, port, username, auth_method,
+    credential, key_path) into a TerminalConfig suitable for SSH operations.
+
+    Args:
+        config: PowerConfig with host SSH fields populated
+
+    Returns:
+        TerminalConfig with SSH kind
+    """
+    TerminalConfig(
+        kind: TERM_KIND_SSH,
+        name: "{config.name}_ssh",
+        host: config.host,
+        port: config.port,
+        username: config.username,
+        auth_method: config.auth_method,
+        credential: config.credential,
+        key_path: config.key_path,
+        t32_host: "",
+        t32_port: 0,
+        channel: "",
+        script_path: ""
+    )
+
+fn ssh_execute_command(config: PowerConfig, command: text) -> (text, i64):
+    """Execute a command on remote host via SSH using rt_shell_exec.
+
+    Builds an ssh command line from config fields and executes it.
+    Supports both password and pubkey authentication.
+
+    Args:
+        config: PowerConfig with SSH fields set
+        command: Remote command to execute
+
+    Returns:
+        Tuple of (stdout, exit_code)
+    """
+    var ssh_cmd = "ssh -o StrictHostKeyChecking=no -o ConnectTimeout=5"
+    if config.auth_method == "pubkey" and config.key_path != "":
+        ssh_cmd = "{ssh_cmd} -i {config.key_path}"
+    ssh_cmd = "{ssh_cmd} -p {config.port} {config.username}@{config.host} '{command}'"
+    val (stdout, stderr, exit_code) = rt_shell_exec(ssh_cmd)
+    (stdout, exit_code)
+
+fn parse_mac_address(mac_address: text) -> [u8]:
+    """Parse a MAC address string (AA:BB:CC:DD:EE:FF) into 6 bytes.
+
+    Args:
+        mac_address: MAC address in colon-separated hex format
+
+    Returns:
+        List of 6 bytes, or empty list if parsing fails
+    """
+    val parts = mac_address.split(":")
+    if parts.len() != 6:
+        return []
+    var bytes: [u8] = []
+    for part in parts:
+        if part.len() != 2:
+            return []
+        val hi = hex_char_value(part[0])
+        val lo = hex_char_value(part[1])
+        if hi < 0 or lo < 0:
+            return []
+        val byte_val: u8 = ((hi * 16) + lo)
+        bytes.push(byte_val)
+    bytes
+
+fn hex_char_value(ch: text) -> i64:
+    """Convert a single hex character to its integer value.
+
+    Args:
+        ch: Single hex character (0-9, a-f, A-F)
+
+    Returns:
+        Integer value 0-15, or -1 for invalid characters
+    """
+    match ch:
+        "0": 0
+        "1": 1
+        "2": 2
+        "3": 3
+        "4": 4
+        "5": 5
+        "6": 6
+        "7": 7
+        "8": 8
+        "9": 9
+        "a": 10
+        "b": 11
+        "c": 12
+        "d": 13
+        "e": 14
+        "f": 15
+        "A": 10
+        "B": 11
+        "C": 12
+        "D": 13
+        "E": 14
+        "F": 15
+        _: -1
+
+# ============================================================================
+# Wake-on-LAN
+# ============================================================================
+
+fn send_wol_packet(mac_address: text) -> bool:
+    """Send a Wake-on-LAN magic packet via UDP broadcast.
+
+    Constructs the standard WoL magic packet: 6 bytes of 0xFF followed by
+    16 repetitions of the target MAC address (102 bytes total).
+    Sends to broadcast address 255.255.255.255 on UDP port 9.
+
+    Args:
+        mac_address: Target MAC address in format AA:BB:CC:DD:EE:FF
+
+    Returns:
+        true if packet was sent successfully, false otherwise
+    """
+    val mac_bytes = parse_mac_address(mac_address)
+    if mac_bytes.len() != 6:
+        return false
+
+    # Build magic packet: 6x 0xFF + 16x MAC address
+    var packet: [u8] = []
+
+    # 6 bytes of 0xFF
+    var i = 0
+    while i < 6:
+        val ff: u8 = 255
+        packet.push(ff)
+        i = i + 1
+
+    # 16 repetitions of the MAC address
+    var rep = 0
+    while rep < 16:
+        for byte in mac_bytes:
+            packet.push(byte)
+        rep = rep + 1
+
+    rt_udp_send("255.255.255.255", 9, packet)
+
+# ============================================================================
+# Host Power Operations
+# ============================================================================
+
+fn host_power_on(config: PowerConfig) -> PowerState:
+    """Power on remote host via Wake-on-LAN magic packet.
+
+    Sends a WoL magic packet to the MAC address specified in config.
+    The remote host must have WoL enabled in BIOS/firmware and be
+    connected via wired Ethernet.
+
+    Args:
+        config: PowerConfig with kind="host", mac_address set
+
+    Returns:
+        PowerState with POWER_STATE_ON if packet sent, POWER_STATE_UNKNOWN on failure
+    """
+    val timestamp = rt_time_now_unix_micros()
+    if config.mac_address == "":
+        return make_power_state(POWER_STATE_UNKNOWN, timestamp)
+    val sent = send_wol_packet(config.mac_address)
+    if sent:
+        make_power_state(POWER_STATE_ON, timestamp)
+    else:
+        make_power_state(POWER_STATE_UNKNOWN, timestamp)
+
+fn host_power_off(config: PowerConfig) -> PowerState:
+    """Power off remote host via SSH shutdown command.
+
+    Connects to the remote host via SSH and executes "shutdown -h now"
+    to initiate a clean system shutdown.
+
+    Args:
+        config: PowerConfig with kind="host", SSH fields set
+
+    Returns:
+        PowerState with POWER_STATE_OFF on success, POWER_STATE_UNKNOWN on failure
+    """
+    val timestamp = rt_time_now_unix_micros()
+    val (stdout, exit_code) = ssh_execute_command(config, "shutdown -h now")
+    # shutdown may close the connection before returning exit code 0
+    # so we accept both 0 and 255 (broken pipe) as success
+    if exit_code == 0 or exit_code == 255:
+        make_power_state(POWER_STATE_OFF, timestamp)
+    else:
+        make_power_state(POWER_STATE_UNKNOWN, timestamp)
+
+fn host_power_reset(config: PowerConfig) -> PowerState:
+    """Reset remote host via SSH reboot command.
+
+    Connects to the remote host via SSH and executes "reboot" to
+    initiate a system restart. Target will be ON after reboot completes.
+
+    Args:
+        config: PowerConfig with kind="host", SSH fields set
+
+    Returns:
+        PowerState with POWER_STATE_ON on success, POWER_STATE_UNKNOWN on failure
+    """
+    val timestamp = rt_time_now_unix_micros()
+    val (stdout, exit_code) = ssh_execute_command(config, "reboot")
+    # reboot may close the connection before returning exit code 0
+    if exit_code == 0 or exit_code == 255:
+        make_power_state(POWER_STATE_ON, timestamp)
+    else:
+        make_power_state(POWER_STATE_UNKNOWN, timestamp)
+
+fn host_power_toggle(config: PowerConfig) -> PowerState:
+    """Toggle remote host power based on current state.
+
+    Checks current power state via TCP probe, then:
+    - If on: executes SSH shutdown (power off)
+    - If off: sends Wake-on-LAN packet (power on)
+    - If unknown: attempts Wake-on-LAN (assumes off)
+
+    Args:
+        config: PowerConfig with kind="host", SSH and WoL fields set
+
+    Returns:
+        PowerState reflecting the new state after toggle
+    """
+    val current = host_power_state(config)
+    if current.state == POWER_STATE_ON:
+        return host_power_off(config)
+    # If off or unknown, try to power on
+    host_power_on(config)
+
+fn host_power_state(config: PowerConfig) -> PowerState:
+    """Query remote host power state via TCP probe to SSH port.
+
+    Attempts a TCP connection to the host's SSH port with a 3-second
+    timeout. A successful connection indicates the host is powered on
+    and the SSH service is running.
+
+    Args:
+        config: PowerConfig with kind="host", host and port set
+
+    Returns:
+        PowerState with POWER_STATE_ON if reachable, POWER_STATE_OFF otherwise
+    """
+    val timestamp = rt_time_now_unix_micros()
+    if config.host == "":
+        return make_power_state(POWER_STATE_UNKNOWN, timestamp)
+    val port = if config.port > 0: config.port else: 22
+    val handle = rt_tcp_connect_timeout(config.host, port, 3000)
+    if handle >= 0:
+        # Connection succeeded - host is on
+        make_power_state(POWER_STATE_ON, timestamp)
+    else:
+        # Connection failed - host is off or unreachable
+        make_power_state(POWER_STATE_OFF, timestamp)

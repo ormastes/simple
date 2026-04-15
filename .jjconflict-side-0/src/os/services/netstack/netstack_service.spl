@@ -1,0 +1,867 @@
+# Network Stack Service -- User-Space TCP/IP on IPC Port 2
+#
+# MDSOC: feature dimension, network layer
+# Owns the VirtIO-net driver in-process (exokernel/libOS pattern).
+# Receives raw Ethernet frames, processes through protocol layers
+# (ARP, IPv4, ICMP, TCP, UDP), and delivers to application sockets.
+# Receives IPC requests from applications for socket operations.
+#
+# Wire protocol (IPC):
+#   Request:  method(u32) | payload(bytes)
+#   Response: status(i32) | payload(bytes)
+
+use os.drivers.virtio.virtio_net.{VirtioNetDriver}
+use os.services.netstack.ethernet.{
+    EthAddress, EthFrame, eth_parse, eth_build,
+    ETHERTYPE_IPV4, ETHERTYPE_ARP, ETH_MAX_FRAME
+}
+use os.services.netstack.arp.{
+    ArpTable, ArpPacket, arp_parse, arp_build_request, arp_build_reply,
+    ARP_REQUEST, ARP_REPLY
+}
+use os.services.netstack.ipv4.{
+    Ipv4Address, Ipv4Packet, Ipv4Header, ipv4_parse, ipv4_build, RoutingTable,
+    IP_PROTO_ICMP, IP_PROTO_TCP, IP_PROTO_UDP
+}
+use os.services.netstack.icmp.{
+    IcmpPacket, icmp_parse, icmp_build_echo_reply,
+    ICMP_ECHO_REQUEST
+}
+use os.services.netstack.udp.{
+    UdpDatagram, UdpTable, udp_parse, udp_build
+}
+use os.services.netstack.tcp.{
+    TcpState, TcpSegment, TcpHeader, tcp_parse, tcp_build_with_checksum, tcp_checksum,
+    TCP_FLAG_SYN, TCP_FLAG_ACK, tcp_has_flag
+}
+use os.services.netstack.tcp_connection.{TcpConnection}
+use os.services.netstack.socket.{
+    OsSocket, SocketTable, SockAddr, SocketProtocol, SocketState
+}
+use os.userlib.syscall_raw.{syscall}
+
+extern fn serial_println(msg: text)
+
+# IPC method constants for network syscalls
+val NET_SOCKET: u32 = 1
+val NET_BIND: u32 = 2
+val NET_LISTEN: u32 = 3
+val NET_CONNECT: u32 = 4
+val NET_ACCEPT: u32 = 5
+val NET_SEND: u32 = 6
+val NET_RECV: u32 = 7
+val NET_CLOSE: u32 = 8
+val NET_IFCONFIG: u32 = 9
+
+# Syscall numbers
+val SYS_IPC_SEND: u64 = 20
+val SYS_IPC_RECV: u64 = 21
+val SYS_IPC_CREATE_PORT: u64 = 22
+
+# IPC response status
+val STATUS_OK: i32 = 0
+val STATUS_ERR: i32 = -1
+
+# Stack defaults
+val DEFAULT_IP_A: u8 = 10
+val DEFAULT_IP_B: u8 = 0
+val DEFAULT_IP_C: u8 = 2
+val DEFAULT_IP_D: u8 = 15
+val DEFAULT_MASK_A: u8 = 255
+val DEFAULT_MASK_B: u8 = 255
+val DEFAULT_MASK_C: u8 = 255
+val DEFAULT_MASK_D: u8 = 0
+val DEFAULT_GW_A: u8 = 10
+val DEFAULT_GW_B: u8 = 0
+val DEFAULT_GW_C: u8 = 2
+val DEFAULT_GW_D: u8 = 2
+
+val ARP_TABLE_CAPACITY: u32 = 64
+val RECV_BUF_SIZE: u64 = 2048
+val NEXT_CONN_ID_START: u64 = 1
+
+# Ephemeral port range
+val EPHEMERAL_PORT_START: u16 = 49152
+val EPHEMERAL_PORT_END: u16 = 65535
+
+# ============================================================================
+# Network Stack Service
+# ============================================================================
+
+struct NetstackService:
+    """User-space TCP/IP network stack service.
+
+    Runs on IPC port 2. Owns the VirtIO-net driver and processes all
+    network traffic through Ethernet -> ARP/IPv4 -> ICMP/TCP/UDP layers.
+    Applications communicate via IPC to create sockets, send/receive data.
+    """
+    driver: VirtioNetDriver
+    arp_table: ArpTable
+    routing: RoutingTable
+    tcp_connections: [TcpConnection]
+    udp_table: UdpTable
+    sockets: SocketTable
+    local_ip: Ipv4Address
+    local_mac: EthAddress
+    subnet_mask: Ipv4Address
+    port_id: u64           # IPC port (2)
+    running: bool
+    next_conn_id: u64
+    next_ephemeral: u16
+    tick_count: u64         # Monotonic tick counter for timers
+
+impl NetstackService:
+    static fn new(driver: VirtioNetDriver) -> NetstackService:
+        NetstackService(
+            driver: driver,
+            arp_table: ArpTable.new(ARP_TABLE_CAPACITY),
+            routing: RoutingTable.new(),
+            tcp_connections: [],
+            udp_table: UdpTable.new(),
+            sockets: SocketTable.new(),
+            local_ip: Ipv4Address.from_bytes(DEFAULT_IP_A, DEFAULT_IP_B, DEFAULT_IP_C, DEFAULT_IP_D),
+            local_mac: EthAddress.zero(),
+            subnet_mask: Ipv4Address.from_bytes(DEFAULT_MASK_A, DEFAULT_MASK_B, DEFAULT_MASK_C, DEFAULT_MASK_D),
+            port_id: 2,
+            running: false,
+            next_conn_id: NEXT_CONN_ID_START,
+            next_ephemeral: EPHEMERAL_PORT_START,
+            tick_count: 0
+        )
+
+    # ========================================================================
+    # Initialization
+    # ========================================================================
+
+    me start():
+        """Initialize the network stack and start the service loop.
+
+        Reads MAC from VirtIO driver, sets default IP configuration,
+        creates IPC port 2, and enters the main event loop.
+        """
+        # Read MAC from driver
+        val mac_bytes = self.driver.mac_address()
+        self.local_mac = EthAddress.from_driver_mac(mac_bytes)
+        serial_println("[netstack] MAC={self.local_mac.to_text()}")
+        serial_println("[netstack] IP={self.local_ip.to_text()}")
+
+        # Set up default route
+        val gw = Ipv4Address.from_bytes(DEFAULT_GW_A, DEFAULT_GW_B, DEFAULT_GW_C, DEFAULT_GW_D)
+        self.routing.set_default(gw)
+        self.routing.add_route(
+            Ipv4Address.from_bytes(DEFAULT_IP_A, DEFAULT_IP_B, DEFAULT_IP_C, 0),
+            self.subnet_mask, gw, self.local_ip
+        )
+        serial_println("[netstack] Default gateway={gw.to_text()}")
+
+        # Create IPC port
+        val port = syscall(SYS_IPC_CREATE_PORT, 0, 0, 0, 0, 0)
+        if port < 0:
+            serial_println("[netstack] Failed to create IPC port: {port}")
+            return
+        self.port_id = port.to_u64()
+        self.running = true
+        serial_println("[netstack] Service started on IPC port {self.port_id}")
+
+        self.run_loop()
+
+    # ========================================================================
+    # Main Event Loop
+    # ========================================================================
+
+    me run_loop():
+        """Main event loop: process incoming frames and IPC requests.
+
+        Busy-polls frames and IPC in a tight loop. For dedicated task mode.
+        For cooperative scheduling, use init_port() + poll_once() instead.
+
+        Note: This is a polling loop, not a blocking-wait loop, because
+        the netstack must continuously poll for incoming Ethernet frames
+        (there's no IRQ-driven notification in the cooperative path).
+        """
+        while self.running:
+            self.poll_once()
+
+    me init_port():
+        """Initialize IPC port without entering the blocking loop.
+
+        Call this instead of start() when using cooperative scheduling
+        (os_main calls poll_once() in a shared main loop).
+        """
+        val mac_bytes = self.driver.mac_address()
+        self.local_mac = EthAddress.from_driver_mac(mac_bytes)
+        serial_println("[netstack] MAC={self.local_mac.to_text()}")
+        serial_println("[netstack] IP={self.local_ip.to_text()}")
+
+        val gw = Ipv4Address.from_bytes(DEFAULT_GW_A, DEFAULT_GW_B, DEFAULT_GW_C, DEFAULT_GW_D)
+        self.routing.set_default(gw)
+        self.routing.add_route(
+            Ipv4Address.from_bytes(DEFAULT_IP_A, DEFAULT_IP_B, DEFAULT_IP_C, 0),
+            self.subnet_mask, gw, self.local_ip
+        )
+        serial_println("[netstack] Default gateway={gw.to_text()}")
+
+        val port = syscall(SYS_IPC_CREATE_PORT, 0, 0, 0, 0, 0)
+        if port < 0:
+            serial_println("[netstack] Failed to create IPC port: {port}")
+            return
+        self.port_id = port.to_u64()
+        self.running = true
+        serial_println("[netstack] Service ready on IPC port {self.port_id}")
+
+    me poll_once():
+        """Run one iteration of the event loop (non-blocking).
+
+        Call this from a cooperative main loop. Processes:
+          1. Incoming Ethernet frames (non-blocking poll)
+          2. IPC requests from applications (non-blocking)
+          3. TCP send buffer flush
+          4. TCP retransmission timers
+          5. TIME_WAIT expiry cleanup
+          6. ARP table aging (every 100 ticks)
+        """
+        if not self.running:
+            return
+        self.tick_count = self.tick_count + 1
+
+        # 1. Process incoming Ethernet frames
+        self.process_incoming_frames()
+
+        # 2. Process IPC requests from applications
+        self.process_ipc_requests()
+
+        # 3. Flush pending TCP data
+        self.flush_tcp_connections()
+
+        # 4. Check TCP retransmission timers
+        self.check_tcp_timers()
+
+        # 5. Check TIME_WAIT expiry and clean up closed connections
+        self.cleanup_connections()
+
+        # 6. Age ARP entries periodically (every 100 ticks)
+        if self.tick_count % 100 == 0:
+            self.arp_table.age_entries(1)
+
+    # ========================================================================
+    # Frame Processing
+    # ========================================================================
+
+    me process_incoming_frames():
+        """Poll for and process incoming Ethernet frames.
+
+        Uses the non-blocking recv_frame_poll() from the VirtIO driver.
+        Dispatches by EtherType: ARP (0x0806) or IPv4 (0x0800).
+        """
+        # Use a stack buffer for the raw frame
+        var buf: [u8] = []
+        var bi: u64 = 0
+        while bi < RECV_BUF_SIZE:
+            buf.push(0)
+            bi = bi + 1
+
+        # Non-blocking poll
+        extern fn unsafe_addr_of(ref: any) -> u64
+        val buf_addr = unsafe_addr_of(buf)
+        val result = self.driver.recv_frame_poll(buf_addr, RECV_BUF_SIZE)
+
+        match result:
+            Ok(frame_len):
+                # Extract frame bytes
+                var frame_data: [u8] = []
+                var fi: u64 = 0
+                while fi < frame_len:
+                    frame_data.push(buf[fi])
+                    fi = fi + 1
+                self._dispatch_frame(frame_data)
+            Err(_):
+                pass_dn  # No frame available, that's normal
+
+    me _dispatch_frame(data: [u8]):
+        """Parse Ethernet frame and dispatch by EtherType."""
+        val frame_result = eth_parse(data)
+        match frame_result:
+            Err(msg):
+                serial_println("[netstack] frame parse error: {msg}")
+            Ok(frame):
+                match frame.ethertype:
+                    ETHERTYPE_ARP:
+                        self.handle_arp(frame)
+                    ETHERTYPE_IPV4:
+                        self.handle_ipv4(frame)
+                    _:
+                        pass_dn  # Ignore unknown EtherTypes
+
+    # ========================================================================
+    # ARP Handling
+    # ========================================================================
+
+    me handle_arp(frame: EthFrame):
+        """Process an ARP request or reply.
+
+        - ARP Request for our IP: send ARP Reply with our MAC
+        - ARP Reply: update our ARP cache
+        """
+        val arp_result = arp_parse(frame.payload)
+        match arp_result:
+            Err(msg):
+                serial_println("[netstack] ARP parse error: {msg}")
+            Ok(arp):
+                # Always learn the sender's mapping
+                self.arp_table.insert(arp.sender_ip, arp.sender_mac)
+
+                if arp.operation == ARP_REQUEST:
+                    # Is this request for our IP?
+                    if arp.target_ip == self.local_ip.value:
+                        serial_println("[netstack] ARP request for our IP from {arp.sender_mac.to_text()}")
+                        val reply_payload = arp_build_reply(
+                            self.local_mac, self.local_ip.value,
+                            arp.sender_mac, arp.sender_ip
+                        )
+                        val eth_frame = eth_build(
+                            arp.sender_mac, self.local_mac,
+                            ETHERTYPE_ARP, reply_payload
+                        )
+                        self._send_raw_frame(eth_frame)
+
+                else if arp.operation == ARP_REPLY:
+                    serial_println("[netstack] ARP reply: {Ipv4Address.from_u32(arp.sender_ip).to_text()} -> {arp.sender_mac.to_text()}")
+
+    # ========================================================================
+    # IPv4 Handling
+    # ========================================================================
+
+    me handle_ipv4(frame: EthFrame):
+        """Process an IPv4 packet.
+
+        Validates the header and dispatches by protocol:
+          ICMP (1), TCP (6), UDP (17)
+        """
+        val ip_result = ipv4_parse(frame.payload)
+        match ip_result:
+            Err(msg):
+                serial_println("[netstack] IPv4 parse error: {msg}")
+            Ok(packet):
+                # Check if this packet is for us (or broadcast)
+                if (packet.header.dst.equals(self.local_ip) or
+                    packet.header.dst.is_broadcast()):
+                    match packet.header.protocol:
+                        IP_PROTO_ICMP: self.handle_icmp(packet)
+                        IP_PROTO_TCP: self.handle_tcp(packet)
+                        IP_PROTO_UDP: self.handle_udp(packet)
+                        _: pass_dn  # Unsupported protocol
+
+    # ========================================================================
+    # ICMP Handling
+    # ========================================================================
+
+    me handle_icmp(packet: Ipv4Packet):
+        """Process an ICMP packet.
+
+        Echo Request (type 8): send Echo Reply (type 0).
+        """
+        val icmp_result = icmp_parse(packet.payload)
+        match icmp_result:
+            Err(msg):
+                serial_println("[netstack] ICMP parse error: {msg}")
+            Ok(icmp):
+                if icmp.type_ == ICMP_ECHO_REQUEST:
+                    serial_println("[netstack] ICMP echo request from {packet.header.src.to_text()}")
+                    val reply = icmp_build_echo_reply(icmp)
+                    self.send_ipv4(packet.header.src, IP_PROTO_ICMP, reply)
+
+    # ========================================================================
+    # TCP Handling
+    # ========================================================================
+
+    me handle_tcp(packet: Ipv4Packet):
+        """Process an incoming TCP segment.
+
+        Looks up the connection by (src_ip, src_port, dst_port).
+        If no connection exists and it's a SYN to a listening socket,
+        creates a new connection via the listener.
+        """
+        val tcp_result = tcp_parse(packet.payload)
+        match tcp_result:
+            Err(msg):
+                serial_println("[netstack] TCP parse error: {msg}")
+            Ok(segment):
+                val src_ip = packet.header.src
+                val src_port = segment.header.src_port
+                val dst_port = segment.header.dst_port
+
+                # Find existing connection
+                var conn_idx: i64 = -1
+                var ci: u64 = 0
+                while ci < self.tcp_connections.len():
+                    if self.tcp_connections[ci].matches_tuple(src_ip, src_port, dst_port):
+                        conn_idx = ci.to_i64()
+                        break
+                    ci = ci + 1
+
+                if conn_idx >= 0:
+                    # Existing connection: process segment
+                    val reply_segments = self.tcp_connections[conn_idx.to_u64()].process_segment(segment, src_ip)
+                    self._send_tcp_segments(conn_idx.to_u64(), reply_segments)
+                else:
+                    # No existing connection: check for SYN to a listener
+                    if tcp_has_flag(segment.header.flags, TCP_FLAG_SYN) and
+                       not tcp_has_flag(segment.header.flags, TCP_FLAG_ACK):
+                        self._handle_incoming_syn(segment, src_ip, dst_port)
+                    # else: send RST for unsolicited segments
+                    # (omitted for simplicity -- a real stack would RST)
+
+    me _handle_incoming_syn(segment: TcpSegment, src_ip: Ipv4Address, dst_port: u16):
+        """Handle a SYN to a listening socket: create new connection."""
+        val listener = self.sockets.find_listener(dst_port)
+        if listener.?:
+            val listener_sock = listener.unwrap()
+            # Create a new TcpConnection in LISTEN state, then process the SYN
+            var conn = TcpConnection.new_listener(self.local_ip, dst_port)
+            conn.conn_id = self.next_conn_id
+            self.next_conn_id = self.next_conn_id + 1
+
+            val reply_segments = conn.process_segment(segment, src_ip)
+
+            self.tcp_connections.push(conn)
+            val conn_idx = self.tcp_connections.len() - 1
+
+            # Queue the connection for accept
+            self.sockets.queue_accepted(listener_sock.fd, conn.conn_id)
+
+            self._send_tcp_segments(conn_idx, reply_segments)
+            serial_println("[netstack] New TCP connection from {src_ip.to_text()}:{segment.header.src_port} -> :{dst_port}")
+        # else: no listener, ignore (real stack sends RST)
+
+    me _send_tcp_segments(conn_idx: u64, segments: [TcpSegment]):
+        """Send TCP segments for a connection, computing checksums."""
+        val conn = self.tcp_connections[conn_idx]
+        var i: u64 = 0
+        while i < segments.len():
+            val seg = segments[i]
+            val tcp_bytes = tcp_build_with_checksum(
+                seg.header.src_port, seg.header.dst_port,
+                seg.header.seq_num, seg.header.ack_num,
+                seg.header.flags, seg.header.window,
+                seg.data,
+                self.local_ip, conn.remote_addr
+            )
+            self.send_ipv4(conn.remote_addr, IP_PROTO_TCP, tcp_bytes)
+            i = i + 1
+
+    # ========================================================================
+    # UDP Handling
+    # ========================================================================
+
+    me handle_udp(packet: Ipv4Packet):
+        """Process an incoming UDP datagram.
+
+        Parses the UDP header and delivers the payload to the bound port.
+        """
+        val udp_result = udp_parse(packet.payload)
+        match udp_result:
+            Err(msg):
+                serial_println("[netstack] UDP parse error: {msg}")
+            Ok(datagram):
+                val delivered = self.udp_table.deliver(
+                    datagram.header.dst_port,
+                    datagram.data,
+                    packet.header.src,
+                    datagram.header.src_port
+                )
+                if not delivered:
+                    serial_println("[netstack] UDP: no binding for port {datagram.header.dst_port}")
+
+    # ========================================================================
+    # TCP Connection Management
+    # ========================================================================
+
+    me flush_tcp_connections():
+        """Flush send buffers for all established TCP connections."""
+        var i: u64 = 0
+        while i < self.tcp_connections.len():
+            if self.tcp_connections[i].has_send_data():
+                val segments = self.tcp_connections[i].flush_send_buf()
+                self._send_tcp_segments(i, segments)
+            i = i + 1
+
+    me check_tcp_timers():
+        """Check retransmission timers for all TCP connections."""
+        var i: u64 = 0
+        while i < self.tcp_connections.len():
+            val segments = self.tcp_connections[i].check_retransmit(self.tick_count)
+            if segments.len() > 0:
+                self._send_tcp_segments(i, segments)
+            i = i + 1
+
+    me cleanup_connections():
+        """Check TIME_WAIT expiry and remove fully closed connections."""
+        var i: u64 = 0
+        while i < self.tcp_connections.len():
+            self.tcp_connections[i].check_time_wait(self.tick_count)
+            i = i + 1
+
+        # Remove closed connections (compact the list)
+        var active: [TcpConnection] = []
+        i = 0
+        while i < self.tcp_connections.len():
+            if not self.tcp_connections[i].is_closed():
+                active.push(self.tcp_connections[i])
+            i = i + 1
+        self.tcp_connections = active
+
+    # ========================================================================
+    # IPv4 Sending
+    # ========================================================================
+
+    me send_ipv4(dst_ip: Ipv4Address, protocol: u8, payload: [u8]):
+        """Send an IPv4 packet to a destination IP.
+
+        1. Build the IPv4 packet (header + payload)
+        2. Resolve destination MAC via ARP lookup
+        3. Wrap in Ethernet frame
+        4. Transmit via VirtIO driver
+        """
+        val ip_pkt = ipv4_build(self.local_ip, dst_ip, protocol, payload)
+
+        # Determine next-hop IP (gateway or direct)
+        var next_hop = dst_ip
+        if not dst_ip.in_subnet(self.local_ip, self.subnet_mask):
+            val gw = self.routing.lookup(dst_ip)
+            if gw.?:
+                next_hop = gw.unwrap()
+
+        # Resolve MAC for next hop
+        var dst_mac = self.arp_table.lookup(next_hop.value)
+        if dst_mac.?:
+            val mac = dst_mac.unwrap()
+            val eth_frame = eth_build(mac, self.local_mac, ETHERTYPE_IPV4, ip_pkt)
+            self._send_raw_frame(eth_frame)
+        else:
+            # Need ARP resolution: send ARP request
+            # Queue the packet for later (simplified: just send ARP and drop this packet)
+            serial_println("[netstack] ARP miss for {next_hop.to_text()}, sending request")
+            val arp_req = arp_build_request(self.local_mac, self.local_ip.value, next_hop.value)
+            val arp_frame = eth_build(EthAddress.broadcast(), self.local_mac, ETHERTYPE_ARP, arp_req)
+            self._send_raw_frame(arp_frame)
+            # Drop current packet (TCP retransmit will resend; UDP is best-effort)
+
+    me _send_raw_frame(frame: [u8]):
+        """Send a raw Ethernet frame via the VirtIO driver."""
+        extern fn unsafe_addr_of(ref: any) -> u64
+        val data_addr = unsafe_addr_of(frame)
+        val result = self.driver.send_frame(data_addr, 0, frame.len())
+        match result:
+            Err(msg): serial_println("[netstack] send_frame error: {msg}")
+            Ok(_): pass_dn
+
+    # ========================================================================
+    # IPC Request Processing
+    # ========================================================================
+
+    me process_ipc_requests():
+        """Poll for and process IPC requests from applications.
+
+        Non-blocking: arg1=0 means timeout=0, kernel returns -EAGAIN
+        immediately if no message pending (syscall.spl lines 627-629).
+        """
+        val msg_raw = syscall(SYS_IPC_RECV, self.port_id, 0, 0, 0, 0)
+        if msg_raw < 0:
+            return  # EAGAIN (-11) or error — no message pending
+
+        self._dispatch_ipc(msg_raw.to_u64())
+
+    me _dispatch_ipc(msg_addr: u64):
+        """Parse and dispatch an IPC request."""
+        extern fn mmio_read8(addr: u64) -> u8
+        extern fn mmio_read32(addr: u64) -> u32
+        extern fn mmio_read64(addr: u64) -> u64
+
+        val src_port = mmio_read64(msg_addr)
+        val method = mmio_read32(msg_addr + 16)
+        val payload_len = mmio_read32(msg_addr + 24)
+        val payload_addr = msg_addr + 32
+
+        match method:
+            NET_SOCKET: self._ipc_socket(src_port, payload_addr, payload_len)
+            NET_BIND: self._ipc_bind(src_port, payload_addr, payload_len)
+            NET_LISTEN: self._ipc_listen(src_port, payload_addr, payload_len)
+            NET_CONNECT: self._ipc_connect(src_port, payload_addr, payload_len)
+            NET_ACCEPT: self._ipc_accept(src_port, payload_addr, payload_len)
+            NET_SEND: self._ipc_send(src_port, payload_addr, payload_len)
+            NET_RECV: self._ipc_recv(src_port, payload_addr, payload_len)
+            NET_CLOSE: self._ipc_close(src_port, payload_addr, payload_len)
+            NET_IFCONFIG: self._ipc_ifconfig(src_port)
+            _: self._send_ipc_error(src_port, "unknown method")
+
+    # ========================================================================
+    # IPC Handlers
+    # ========================================================================
+
+    me _ipc_socket(src_port: u64, payload_addr: u64, payload_len: u32):
+        """Create a new socket. Payload: protocol(u8) — 1=TCP, 2=UDP."""
+        extern fn mmio_read8(addr: u64) -> u8
+        val proto_raw = mmio_read8(payload_addr)
+        val proto = if proto_raw == 1: SocketProtocol.Tcp else: SocketProtocol.Udp
+        val fd = self.sockets.create(proto)
+        self._send_ipc_i32(src_port, fd)
+
+    me _ipc_bind(src_port: u64, payload_addr: u64, payload_len: u32):
+        """Bind socket. Payload: fd(i32) | ip(u32) | port(u16)."""
+        extern fn mmio_read16(addr: u64) -> u16
+        extern fn mmio_read32(addr: u64) -> u32
+
+        val fd = mmio_read32(payload_addr).to_i32()
+        val ip_val = mmio_read32(payload_addr + 4)
+        val port = mmio_read16(payload_addr + 8)
+        val addr = SockAddr(ip: Ipv4Address.from_u32(ip_val), port: port)
+
+        match self.sockets.bind(fd, addr):
+            Ok(_): self._send_ipc_i32(src_port, 0)
+            Err(msg): self._send_ipc_error(src_port, msg)
+
+    me _ipc_listen(src_port: u64, payload_addr: u64, payload_len: u32):
+        """Listen on socket. Payload: fd(i32) | backlog(u32)."""
+        extern fn mmio_read32(addr: u64) -> u32
+        val fd = mmio_read32(payload_addr).to_i32()
+        val backlog = mmio_read32(payload_addr + 4)
+
+        match self.sockets.listen(fd, backlog):
+            Ok(_): self._send_ipc_i32(src_port, 0)
+            Err(msg): self._send_ipc_error(src_port, msg)
+
+    me _ipc_connect(src_port: u64, payload_addr: u64, payload_len: u32):
+        """Connect socket. Payload: fd(i32) | ip(u32) | port(u16)."""
+        extern fn mmio_read16(addr: u64) -> u16
+        extern fn mmio_read32(addr: u64) -> u32
+
+        val fd = mmio_read32(payload_addr).to_i32()
+        val ip_val = mmio_read32(payload_addr + 4)
+        val port = mmio_read16(payload_addr + 8)
+        val remote = SockAddr(ip: Ipv4Address.from_u32(ip_val), port: port)
+
+        match self.sockets.connect(fd, remote):
+            Ok(_):
+                # For TCP: create a new TcpConnection and initiate handshake
+                val sock = self.sockets.get_socket(fd)
+                if sock.?:
+                    val s = sock.unwrap()
+                    if _is_proto_tcp(s.protocol):
+                        val local_port = self._alloc_ephemeral_port()
+                        var conn = TcpConnection.new_client(self.local_ip, local_port, remote.ip, port)
+                        conn.conn_id = self.next_conn_id
+                        self.next_conn_id = self.next_conn_id + 1
+
+                        val syn_segments = conn.connect()
+                        self.tcp_connections.push(conn)
+                        val conn_idx = self.tcp_connections.len() - 1
+                        self.sockets.set_connected(fd, conn.conn_id)
+
+                        self._send_tcp_segments(conn_idx, syn_segments)
+
+                self._send_ipc_i32(src_port, 0)
+            Err(msg):
+                self._send_ipc_error(src_port, msg)
+
+    me _ipc_accept(src_port: u64, payload_addr: u64, payload_len: u32):
+        """Accept connection. Payload: fd(i32)."""
+        extern fn mmio_read32(addr: u64) -> u32
+        val fd = mmio_read32(payload_addr).to_i32()
+
+        match self.sockets.accept(fd):
+            Ok(new_fd): self._send_ipc_i32(src_port, new_fd)
+            Err(msg): self._send_ipc_error(src_port, msg)
+
+    me _ipc_send(src_port: u64, payload_addr: u64, payload_len: u32):
+        """Send data. Payload: fd(i32) | data(bytes)."""
+        extern fn mmio_read8(addr: u64) -> u8
+        extern fn mmio_read32(addr: u64) -> u32
+
+        val fd = mmio_read32(payload_addr).to_i32()
+        val data_len = payload_len - 4
+
+        var data: [u8] = []
+        var i: u32 = 0
+        while i < data_len:
+            data.push(mmio_read8(payload_addr + 4 + i.to_u64()))
+            i = i + 1
+
+        val conn_id = self.sockets.get_conn_id(fd)
+        val sock = self.sockets.get_socket(fd)
+        if sock.?:
+            val s = sock.unwrap()
+            if _is_proto_tcp(s.protocol):
+                # Find the TCP connection and queue data
+                var ci: u64 = 0
+                while ci < self.tcp_connections.len():
+                    if self.tcp_connections[ci].conn_id == conn_id:
+                        match self.tcp_connections[ci].send_data(data):
+                            Ok(n): self._send_ipc_i32(src_port, n.to_i32())
+                            Err(msg): self._send_ipc_error(src_port, msg)
+                        return
+                    ci = ci + 1
+                self._send_ipc_error(src_port, "connection not found")
+            else:
+                # UDP: send immediately
+                val remote = s.remote_addr
+                if remote.?:
+                    val r = remote.unwrap()
+                    val local_port = if s.local_addr.?: s.local_addr.unwrap().port else: self._alloc_ephemeral_port()
+                    val udp_pkt = udp_build(local_port, r.port, data)
+                    self.send_ipv4(r.ip, IP_PROTO_UDP, udp_pkt)
+                    self._send_ipc_i32(src_port, data.len().to_i32())
+                else:
+                    self._send_ipc_error(src_port, "UDP socket not connected")
+        else:
+            self._send_ipc_error(src_port, "invalid fd")
+
+    me _ipc_recv(src_port: u64, payload_addr: u64, payload_len: u32):
+        """Receive data. Payload: fd(i32) | max_len(u32)."""
+        extern fn mmio_read32(addr: u64) -> u32
+
+        val fd = mmio_read32(payload_addr).to_i32()
+        val max_len = mmio_read32(payload_addr + 4).to_u64()
+
+        val conn_id = self.sockets.get_conn_id(fd)
+        val sock = self.sockets.get_socket(fd)
+        if sock.?:
+            val s = sock.unwrap()
+            if _is_proto_tcp(s.protocol):
+                var ci: u64 = 0
+                while ci < self.tcp_connections.len():
+                    if self.tcp_connections[ci].conn_id == conn_id:
+                        val data = self.tcp_connections[ci].recv_data(max_len)
+                        self._send_ipc_bytes(src_port, data)
+                        return
+                    ci = ci + 1
+                self._send_ipc_bytes(src_port, [])
+            else:
+                # UDP: dequeue from binding
+                val local_addr = s.local_addr
+                if local_addr.?:
+                    val la = local_addr.unwrap()
+                    val entry = self.udp_table.dequeue(la.port)
+                    if entry.?:
+                        self._send_ipc_bytes(src_port, entry.unwrap().data)
+                    else:
+                        self._send_ipc_bytes(src_port, [])
+                else:
+                    self._send_ipc_bytes(src_port, [])
+        else:
+            self._send_ipc_error(src_port, "invalid fd")
+
+    me _ipc_close(src_port: u64, payload_addr: u64, payload_len: u32):
+        """Close socket. Payload: fd(i32)."""
+        extern fn mmio_read32(addr: u64) -> u32
+        val fd = mmio_read32(payload_addr).to_i32()
+
+        # If TCP, initiate close on the connection
+        val conn_id = self.sockets.get_conn_id(fd)
+        var ci: u64 = 0
+        while ci < self.tcp_connections.len():
+            if self.tcp_connections[ci].conn_id == conn_id:
+                val fin_segments = self.tcp_connections[ci].close()
+                self._send_tcp_segments(ci, fin_segments)
+                break
+            ci = ci + 1
+
+        match self.sockets.close(fd):
+            Ok(_): self._send_ipc_i32(src_port, 0)
+            Err(msg): self._send_ipc_error(src_port, msg)
+
+    me _ipc_ifconfig(src_port: u64):
+        """Return network interface configuration."""
+        val info = "eth0: ip={self.local_ip.to_text()} mac={self.local_mac.to_text()} mask={self.subnet_mask.to_text()}"
+        self._send_ipc_text(src_port, info)
+
+    # ========================================================================
+    # Configuration
+    # ========================================================================
+
+    me set_ip(ip: Ipv4Address):
+        """Set the stack's IP address (e.g., after DHCP)."""
+        self.local_ip = ip
+        serial_println("[netstack] IP changed to {ip.to_text()}")
+
+    me set_subnet_mask(mask: Ipv4Address):
+        self.subnet_mask = mask
+
+    me set_gateway(gw: Ipv4Address):
+        self.routing.set_default(gw)
+
+    me stop():
+        """Stop the service loop."""
+        self.running = false
+        serial_println("[netstack] Service stopped")
+
+    # ========================================================================
+    # Ephemeral Port Allocation
+    # ========================================================================
+
+    me _alloc_ephemeral_port() -> u16:
+        """Allocate the next ephemeral port (49152-65535)."""
+        val port = self.next_ephemeral
+        self.next_ephemeral = self.next_ephemeral + 1
+        if self.next_ephemeral > EPHEMERAL_PORT_END:
+            self.next_ephemeral = EPHEMERAL_PORT_START
+        port
+
+    # ========================================================================
+    # IPC Reply Helpers
+    # ========================================================================
+
+    fn _send_ipc_i32(dst_port: u64, value: i32):
+        """Send an IPC reply with status OK + i32 value."""
+        var buf: [u8] = []
+        _push_i32(buf, STATUS_OK)
+        _push_i32(buf, value)
+        _ipc_send_raw(dst_port, self.port_id, buf)
+
+    fn _send_ipc_bytes(dst_port: u64, data: [u8]):
+        """Send an IPC reply with status OK + byte payload."""
+        var buf: [u8] = []
+        _push_i32(buf, STATUS_OK)
+        var i: u64 = 0
+        while i < data.len():
+            buf.push(data[i])
+            i = i + 1
+        _ipc_send_raw(dst_port, self.port_id, buf)
+
+    fn _send_ipc_text(dst_port: u64, msg: text):
+        """Send an IPC reply with status OK + text payload."""
+        var buf: [u8] = []
+        _push_i32(buf, STATUS_OK)
+        for ch in msg:
+            buf.push(ch.to_u8())
+        _ipc_send_raw(dst_port, self.port_id, buf)
+
+    fn _send_ipc_error(dst_port: u64, msg: text):
+        """Send an IPC error reply."""
+        var buf: [u8] = []
+        _push_i32(buf, STATUS_ERR)
+        for ch in msg:
+            buf.push(ch.to_u8())
+        _ipc_send_raw(dst_port, self.port_id, buf)
+
+# ============================================================================
+# Serialization Helpers
+# ============================================================================
+
+fn _push_i32(buf: [u8], val: i32):
+    val u = val.to_u32()
+    buf.push((u & 0xFF).to_u8())
+    buf.push(((u >> 8) & 0xFF).to_u8())
+    buf.push(((u >> 16) & 0xFF).to_u8())
+    buf.push(((u >> 24) & 0xFF).to_u8())
+
+fn _ipc_send_raw(dst_port: u64, src_port: u64, data: [u8]):
+    """Send raw bytes via IPC syscall."""
+    extern fn unsafe_addr_of(ref: any) -> u64
+    val data_ptr = unsafe_addr_of(data)
+    val data_len = data.len().to_u64()
+    syscall(SYS_IPC_SEND, dst_port, src_port, data_ptr, data_len, 0)
+
+fn _is_proto_tcp(protocol: SocketProtocol) -> bool:
+    match protocol:
+        SocketProtocol.Tcp: true
+        SocketProtocol.Udp: false

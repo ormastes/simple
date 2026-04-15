@@ -1,0 +1,332 @@
+#![allow(unnamed_duplicate_typed_args)]
+@allow(unnamed_duplicate_typed_args)
+# T32 LSP MCP Server — JSON, protocol, and transport helpers
+#
+# Inlined implementations that work in interpreter mode.
+# The std.mcp_sdk.* imports hang in interpreter mode because the
+# std/common/lib module loader blocks during resolution.
+# This file provides equivalent functions using only inline code
+# and extern fn declarations.
+
+extern fn stdin_read_char() -> text
+extern fn stdout_write(data: text) -> i64
+extern fn rt_stdout_flush() -> i64
+extern fn rt_file_append_text(path: text, content: text) -> bool
+
+# --- JSON building helpers ---
+
+fn Q() -> text:
+    return "\""
+
+fn LB() -> text:
+    return "{"
+
+fn RB() -> text:
+    return "}"
+
+fn SB_L() -> text:
+    return "["
+
+fn SB_R() -> text:
+    return "]"
+
+fn escape_json(s: text) -> text:
+    var out = s
+    out = out.replace("\\", "\\\\")
+    out = out.replace("\"", "\\\"")
+    out = out.replace("\n", "\\n")
+    out = out.replace("\r", "\\r")
+    out = out.replace("\t", "\\t")
+    return out
+
+fn js(value: text) -> text:
+    return Q() + escape_json(value) + Q()
+
+fn jp(key: text, value: text) -> text:
+    return Q() + key + Q() + ":" + value
+
+fn jo1(p1: text) -> text:
+    return LB() + p1 + RB()
+
+fn jo2(p1: text, p2: text) -> text:
+    return LB() + p1 + "," + p2 + RB()
+
+fn jo3(p1: text, p2: text, p3: text) -> text:
+    return LB() + p1 + "," + p2 + "," + p3 + RB()
+
+fn jo4(p1: text, p2: text, p3: text, p4: text) -> text:
+    return LB() + p1 + "," + p2 + "," + p3 + "," + p4 + RB()
+
+# --- JSON parsing helpers ---
+
+fn _char_at(s: text, i: i64) -> text:
+    return s.substring(i, i + 1)
+
+fn _is_ws(ch: text) -> bool:
+    return ch == " " or ch == "\n" or ch == "\r" or ch == "\t"
+
+fn _find_json_value_start(json: text, key: text) -> i64:
+    val search = Q() + key + Q()
+    var offset = 0
+    while offset + search.len() <= json.len():
+        if json.substring(offset, offset + search.len()) != search:
+            offset = offset + 1
+            continue
+        var j = offset + search.len()
+        while j < json.len() and _is_ws(_char_at(json, j)):
+            j = j + 1
+        if j < json.len() and _char_at(json, j) == ":":
+            j = j + 1
+            while j < json.len() and _is_ws(_char_at(json, j)):
+                j = j + 1
+            return j
+        offset = offset + search.len()
+    return -1
+
+fn extract_field(json: text, key: text) -> text:
+    val start = _find_json_value_start(json, key)
+    if start < 0 or start >= json.len():
+        return ""
+    val first = _char_at(json, start)
+    if first == Q():
+        var i = start + 1
+        var escaped = false
+        while i < json.len():
+            val ch = _char_at(json, i)
+            if escaped:
+                escaped = false
+            elif ch == "\\":
+                escaped = true
+            elif ch == Q():
+                return json.substring(start + 1, i)
+            i = i + 1
+        return ""
+    var end = start
+    while end < json.len():
+        val ch = _char_at(json, end)
+        if ch == "," or ch == RB() or ch == "]" or _is_ws(ch):
+            break
+        end = end + 1
+    return json.substring(start, end)
+
+fn extract_field_raw(json: text, key: text) -> text:
+    val start = _find_json_value_start(json, key)
+    if start < 0 or start >= json.len():
+        return "null"
+    val first = _char_at(json, start)
+    if first == Q():
+        # String value: find closing quote (skip escaped)
+        var i2 = start + 1
+        var escaped = false
+        while i2 < json.len():
+            val ch = _char_at(json, i2)
+            if escaped:
+                escaped = false
+            elif ch == "\\":
+                escaped = true
+            elif ch == Q():
+                return json.substring(start, i2 + 1)
+            i2 = i2 + 1
+        return "null"
+    if first == LB() or first == "[":
+        # Nested object or array: find matching close
+        var depth = 0
+        var i3 = start
+        var in_str = false
+        var esc = false
+        while i3 < json.len():
+            val ch = _char_at(json, i3)
+            if in_str:
+                if esc:
+                    esc = false
+                elif ch == "\\":
+                    esc = true
+                elif ch == Q():
+                    in_str = false
+            else:
+                if ch == Q():
+                    in_str = true
+                elif ch == LB() or ch == "[":
+                    depth = depth + 1
+                elif ch == RB() or ch == "]":
+                    depth = depth - 1
+                    if depth == 0:
+                        return json.substring(start, i3 + 1)
+            i3 = i3 + 1
+        return "null"
+    # Bare value (number, bool, null)
+    var end = start
+    while end < json.len():
+        val ch = _char_at(json, end)
+        if ch == "," or ch == RB() or ch == "]" or _is_ws(ch):
+            break
+        end = end + 1
+    val raw = json.substring(start, end)
+    if raw == "":
+        return "null"
+    return raw
+
+fn extract_id(json: text) -> text:
+    return extract_field_raw(json, "id")
+
+fn unescape_json_string(s: text) -> text:
+    var parts: [text] = []
+    var i = 0
+    while i < s.len():
+        val ch = s.substring(i, i + 1)
+        if ch != "\\":
+            parts.push(ch)
+            i = i + 1
+            continue
+        if i + 1 >= s.len():
+            parts.push(ch)
+            i = i + 1
+            continue
+        val next = s.substring(i + 1, i + 2)
+        if next == "n":
+            parts.push("\n")
+        elif next == "r":
+            parts.push("\r")
+        elif next == "t":
+            parts.push("\t")
+        elif next == "\"":
+            parts.push("\"")
+        elif next == "\\":
+            parts.push("\\")
+        else:
+            parts.push(next)
+        i = i + 2
+    return parts.join("")
+
+fn extract_nested(json: text, key: text) -> text:
+    val params = extract_field_raw(json, "params")
+    if params == "null":
+        return ""
+    return extract_field(params, key)
+
+fn extract_nested_raw(json: text, key: text) -> text:
+    val params = extract_field_raw(json, "params")
+    if params == "null":
+        return "null"
+    return extract_field_raw(params, key)
+
+# --- JSON-RPC builders ---
+
+fn jsonrpc_result(id: text, result: text) -> text:
+    return jo3(jp("jsonrpc", js("2.0")), jp("id", id), jp("result", result))
+
+fn jsonrpc_error(id: text, code: i64, message: text) -> text:
+    val err = jo2(jp("code", code.to_string()), jp("message", js(escape_json(message))))
+    return jo3(jp("jsonrpc", js("2.0")), jp("id", id), jp("error", err))
+
+# --- Tool result helpers ---
+
+fn make_tool_result(id: text, content: text) -> text:
+    val text_obj = jo2(jp("type", js("text")), jp("text", js(escape_json(content))))
+    val result = jo1(jp("content", "[" + text_obj + "]"))
+    return jo3(jp("jsonrpc", js("2.0")), jp("id", id), jp("result", result))
+
+fn make_tool_error(id: text, message: text) -> text:
+    val text_obj = jo2(jp("type", js("text")), jp("text", js(escape_json(message))))
+    var result = LB()
+    result = result + jp("content", "[" + text_obj + "]")
+    result = result + "," + jp("isError", "true")
+    result = result + RB()
+    return jo3(jp("jsonrpc", js("2.0")), jp("id", id), jp("result", result))
+
+# --- Method detection ---
+
+fn has_method(msg: text, name: text) -> bool:
+    return msg.contains("\"method\":\"" + name + "\"") or msg.contains("\"method\": \"" + name + "\"")
+
+# --- Stdio transport ---
+
+# Protocol auto-detection
+var _USE_JSON_LINES = false
+
+fn _read_line() -> text:
+    var line = ""
+    while true:
+        val ch = stdin_read_char()
+        if ch.len() == 0:
+            return line
+        line = line + ch
+        if ch == "\n":
+            return line
+
+fn _read_chars(count: i64) -> text:
+    var result = ""
+    var i = 0
+    while i < count:
+        val ch = stdin_read_char()
+        if ch.len() == 0:
+            break
+        result = result + ch
+        i = i + 1
+    return result
+
+fn _strip_line_end(line: text) -> text:
+    if line.ends_with("\r\n"):
+        return line.substring(0, line.len() - 2)
+    if line.ends_with("\n"):
+        return line.substring(0, line.len() - 1)
+    if line.ends_with("\r"):
+        return line.substring(0, line.len() - 1)
+    return line
+
+fn read_stdin_message() -> text:
+    var content_length = 0
+    while true:
+        var line = _read_line()
+        if line.len() == 0:
+            if content_length > 0:
+                break
+            return ""
+        if line == "\r\n" or line == "\r" or line == "\n":
+            if content_length > 0:
+                break
+            continue
+        line = _strip_line_end(line)
+        if line.starts_with(LB()):
+            _USE_JSON_LINES = true
+            return line
+        if line.starts_with("Content-Length:"):
+            var len_str = line.replace("Content-Length:", "")
+            len_str = len_str.trim()
+            content_length = int(len_str)
+    if content_length <= 0:
+        return ""
+    _read_chars(content_length)
+
+fn write_stdout_message(body: text):
+    val nl = "\n"
+    if _USE_JSON_LINES:
+        print_raw(body + nl)
+    else:
+        var header = "Content-Length: " + str(body.len()) + "\r" + nl + "\r" + nl
+        print_raw(header + body)
+
+# Legacy aliases used by the direct tool runners and tests.
+fn lsp_Q() -> text: Q()
+fn lsp_LB() -> text: LB()
+fn lsp_RB() -> text: RB()
+fn lsp_SB_L() -> text: SB_L()
+fn lsp_SB_R() -> text: SB_R()
+fn lsp_escape_json(s: text) -> text: escape_json(s)
+fn lsp_js(value: text) -> text: js(value)
+fn lsp_jp(key: text, value: text) -> text: jp(key, value)
+fn lsp_jo1(p1: text) -> text: jo1(p1)
+fn lsp_jo2(p1: text, p2: text) -> text: jo2(p1, p2)
+fn lsp_jo3(p1: text, p2: text, p3: text) -> text: jo3(p1, p2, p3)
+fn lsp_jo4(p1: text, p2: text, p3: text, p4: text) -> text: jo4(p1, p2, p3, p4)
+fn lsp_extract_field(json: text, key: text) -> text: extract_field(json, key)
+fn lsp_extract_field_raw(json: text, key: text) -> text: extract_field_raw(json, key)
+fn lsp_extract_id(json: text) -> text: extract_id(json)
+fn lsp_extract_nested(json: text, key: text) -> text: extract_nested(json, key)
+fn lsp_extract_nested_raw(json: text, key: text) -> text: extract_nested_raw(json, key)
+fn lsp_unescape_json_string(s: text) -> text: unescape_json_string(s)
+fn lsp_jsonrpc_result(id: text, result: text) -> text: jsonrpc_result(id, result)
+fn lsp_jsonrpc_error(id: text, code: i64, message: text) -> text: jsonrpc_error(id, code, message)
+fn lsp_make_tool_result(id: text, content: text) -> text: make_tool_result(id, content)
+fn lsp_make_tool_error(id: text, code: i64, message: text) -> text:
+    make_tool_error(id, "ERROR " + str(code) + ": " + message)

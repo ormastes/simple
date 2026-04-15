@@ -1,0 +1,70 @@
+# @cover src/lib/cc/feature/tile_manager.spl 80%
+
+use std.sspec.*
+use std.cc.entity.tile.{Tile, TileKey, TilePriority}
+use std.cc.feature.raster_buffer_provider.{RasterBufferProvider}
+use std.cc.feature.tile_manager.{TileManager}
+use std.skia.entity.geometry.{SkIRect}
+use std.skia.capability.{SkCapability}
+
+fn make_manager() -> TileManager:
+    val rp = RasterBufferProvider.new(SkCapability.Software)
+    TileManager.new(rp)
+
+fn make_tile(layer_id: i32, i: i32, j: i32, priority: TilePriority) -> Tile:
+    val key = TileKey.new(layer_id, i, j, 1.0)
+    val rect = SkIRect.make_xywh(i * 256, j * 256, 256, 256)
+    Tile.new(key, rect, priority)
+
+describe "TileManager":
+    context "new":
+        it "new manager has 0 tiles and 0 ready":
+            val mgr = make_manager()
+            expect(mgr.tiles.len()).to_equal(0)
+            expect(mgr.ready_count()).to_equal(0)
+
+    context "add_tile":
+        it "add_tile increments pending_count":
+            var mgr = make_manager()
+            val t = make_tile(1, 0, 0, TilePriority.NowBin)
+            mgr.add_tile(t)
+            expect(mgr.pending_count()).to_equal(1)
+
+    context "schedule_tasks":
+        it "schedule_tasks marks NowBin tiles ready":
+            var mgr = make_manager()
+            val t = make_tile(1, 0, 0, TilePriority.NowBin)
+            mgr.add_tile(t)
+            mgr.schedule_tasks()
+            expect(mgr.ready_count()).to_equal(1)
+
+        it "SoonBin tiles remain not-ready after schedule":
+            var mgr = make_manager()
+            val t = make_tile(1, 0, 0, TilePriority.SoonBin)
+            mgr.add_tile(t)
+            mgr.schedule_tasks()
+            expect(mgr.ready_count()).to_equal(0)
+
+    context "invalidate_tile":
+        it "invalidate_tile flips is_ready back to false":
+            var mgr = make_manager()
+            val key = TileKey.new(1, 0, 0, 1.0)
+            val t = make_tile(1, 0, 0, TilePriority.NowBin)
+            mgr.add_tile(t)
+            mgr.schedule_tasks()
+            expect(mgr.ready_count()).to_equal(1)
+            mgr.invalidate_tile(key)
+            expect(mgr.ready_count()).to_equal(0)
+
+    context "counts":
+        it "ready_count + pending_count equals tile count":
+            var mgr = make_manager()
+            val t1 = make_tile(1, 0, 0, TilePriority.NowBin)
+            val t2 = make_tile(1, 1, 0, TilePriority.SoonBin)
+            val t3 = make_tile(1, 0, 1, TilePriority.NowBin)
+            mgr.add_tile(t1)
+            mgr.add_tile(t2)
+            mgr.add_tile(t3)
+            mgr.schedule_tasks()
+            val total = mgr.ready_count() + mgr.pending_count()
+            expect(total).to_equal(mgr.tiles.len())

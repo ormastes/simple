@@ -1,0 +1,78 @@
+# @cover src/lib/skia/feature/color_management/tone_map.spl 80%
+"""
+# Skia Tone Map Specification
+
+**Feature IDs:** #SKI-012
+**Category:** Stdlib
+**Difficulty:** 2/5
+**Status:** Implemented
+
+## Overview
+
+Tests for transfer-function encode/decode pairs (sRGB, gamma 2.2, PQ, HLG),
+the TransferDirection enum + apply_transfer_fn dispatch, and the rgb_to_rgb
+linear-space conversion in std.skia.feature.color_management.tone_map.
+"""
+
+use std.sspec.*
+use std.skia.entity.color_space.{
+    SkColorSpace, SkColorSpaceKind, SkTransferFn,
+    srgb
+}
+use std.skia.entity.color.{SkColor4f}
+use std.skia.feature.color_management.tone_map.{
+    srgb_decode, srgb_encode,
+    pq_decode, pq_encode,
+    hlg_decode,
+    apply_transfer_fn, TransferDirection,
+    rgb_to_rgb
+}
+use std.common.math.{math_abs}
+
+
+describe "tone_map transfer functions":
+    it "srgb_decode maps 0.0 to 0.0":
+        val out = srgb_decode(0.0)
+        expect(out).to_equal(0.0)
+
+    it "srgb_decode maps 1.0 to 1.0":
+        val out = srgb_decode(1.0)
+        val close = math_abs(out - 1.0) < 1e-6
+        expect(close).to_equal(true)
+
+    it "srgb_encode is the inverse of srgb_decode at 0.5":
+        val linear = srgb_decode(0.5)
+        val round = srgb_encode(linear)
+        val close = math_abs(round - 0.5) < 1e-4
+        expect(close).to_equal(true)
+
+    it "pq_decode is the inverse of pq_encode at 0.3":
+        val encoded = pq_encode(0.3)
+        val round = pq_decode(encoded)
+        val close = math_abs(round - 0.3) < 1e-3
+        expect(close).to_equal(true)
+
+    it "hlg_decode(0.25) is in the open interval (0, 0.25)":
+        val out = hlg_decode(0.25)
+        expect(out).to_be_greater_than(0.0)
+        expect(out).to_be_less_than(0.25)
+
+
+describe "apply_transfer_fn dispatch":
+    it "decode then encode with SkTransferFn.Srgb is identity on 0.42":
+        val x = 0.42
+        val lin = apply_transfer_fn(SkTransferFn.Srgb, x, TransferDirection.Decode)
+        val back = apply_transfer_fn(SkTransferFn.Srgb, lin, TransferDirection.Encode)
+        val close = math_abs(back - x) < 1e-4
+        expect(close).to_equal(true)
+
+
+describe "rgb_to_rgb identity for matching spaces":
+    it "rgb_to_rgb with src == dst == sRGB returns the input color unchanged":
+        val cs = srgb()
+        val input = SkColor4f(r: 0.2, g: 0.4, b: 0.6, a: 0.9)
+        val out = rgb_to_rgb(input, cs, cs)
+        expect(out.r).to_equal(0.2)
+        expect(out.g).to_equal(0.4)
+        expect(out.b).to_equal(0.6)
+        expect(out.a).to_equal(0.9)

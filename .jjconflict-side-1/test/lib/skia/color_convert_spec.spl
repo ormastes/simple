@@ -1,0 +1,82 @@
+# @cover src/lib/skia/feature/color_management/color_convert.spl 80%
+"""
+# Skia Color Convert Specification
+
+**Feature IDs:** #SKI-011
+**Category:** Stdlib
+**Difficulty:** 2/5
+**Status:** Implemented
+
+## Overview
+
+Tests for convert_rgba_pixel, convert_bitmap, and convert_pixel_to_srgb — the
+color-space bitmap-conversion helpers mirroring Chromium's
+SkColorSpaceXformSteps.
+"""
+
+use std.sspec.*
+use std.skia.entity.color_space.{
+    SkColorSpace, SkColorSpaceKind,
+    srgb, display_p3, rec2020
+}
+use std.skia.backend.cpu.raster_prims.{Bitmap}
+use std.skia.feature.color_management.color_convert.{
+    convert_rgba_pixel, convert_pixel_to_srgb, convert_bitmap
+}
+use std.common.math.{math_abs}
+
+describe "color_convert":
+    it "convert_rgba_pixel: same space is identity":
+        val cs = srgb()
+        val out = convert_rgba_pixel(0.25, 0.5, 0.75, 0.8, cs, cs)
+        val r = out.0
+        val g = out.1
+        val b = out.2
+        val a = out.3
+        val r_ok = math_abs(r - 0.25) < 1e-6
+        val g_ok = math_abs(g - 0.5) < 1e-6
+        val b_ok = math_abs(b - 0.75) < 1e-6
+        val a_ok = math_abs(a - 0.8) < 1e-6
+        expect(r_ok).to_equal(true)
+        expect(g_ok).to_equal(true)
+        expect(b_ok).to_equal(true)
+        expect(a_ok).to_equal(true)
+
+    it "convert_rgba_pixel: sRGB to Display P3 preserves alpha exactly":
+        val src = srgb()
+        val dst = display_p3()
+        val alpha_in = 0.37
+        val out = convert_rgba_pixel(0.6, 0.2, 0.1, alpha_in, src, dst)
+        val a_out = out.3
+        expect(a_out).to_equal(alpha_in)
+
+    it "convert_bitmap: returns new bitmap with same dimensions":
+        val src_bmp = Bitmap.zeros(4, 3)
+        val src_space = srgb()
+        val dst_space = display_p3()
+        val out_bmp = convert_bitmap(src_bmp, src_space, dst_space)
+        expect(out_bmp.width).to_equal(4)
+        expect(out_bmp.height).to_equal(3)
+        val expected_len = 4 * 3 * 4
+        expect(out_bmp.pixels.length()).to_equal(expected_len)
+
+    it "convert_pixel_to_srgb: from Rec2020 pure red is approximately clamped sRGB red":
+        val src = rec2020()
+        val out = convert_pixel_to_srgb(1.0, 0.0, 0.0, 1.0, src)
+        val r = out.0
+        val g = out.1
+        val b = out.2
+        val a = out.3
+        # Rec2020 (0,1] primaries are wider than sRGB: pure Rec2020 red, after
+        # conversion, will have a non-negative red channel and clamped
+        # (possibly small negative pre-clamp) green/blue in [0,1].
+        expect(r).to_be_greater_than(0.0)
+        expect(g).to_be_less_than(1.0)
+        expect(b).to_be_less_than(1.0)
+        val r_in_range = r <= 1.0
+        val g_in_range = g >= 0.0
+        val b_in_range = b >= 0.0
+        expect(r_in_range).to_equal(true)
+        expect(g_in_range).to_equal(true)
+        expect(b_in_range).to_equal(true)
+        expect(a).to_equal(1.0)

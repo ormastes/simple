@@ -1,0 +1,88 @@
+# Lint Cache — Incremental Hash-Based Cache for Lint Results
+#
+# Caches lint results per scope (file::fn_name). Reuses cached warnings
+# when the AST subtree hash of the enclosing scope has not changed.
+# Supports symbol-reference invalidation: when a depended-on symbol
+# changes, all cache entries referencing it are invalidated.
+
+use std.common.hash_utils.{hash_string_fnv, hash_combine}
+use compiler.semantics.lint.required_comment.{RequiredCommentWarning}
+
+# ============================================================================
+# Data Structures
+# ============================================================================
+
+class LintCacheEntry:
+    scope_hash: i64
+    warnings: [RequiredCommentWarning]
+    symbol_deps: [text]
+
+class LintCache:
+    entries: Dict<text, LintCacheEntry>
+    symbol_index: Dict<text, [text]>
+
+# ============================================================================
+# Hash Computation
+# ============================================================================
+
+fn hash_ast_scope(expr_indices: [i64]) -> i64:
+    """Hash a list of expression indices using FNV. This is a simplified
+    version that hashes the index values themselves for cache keying."""
+    var h: i64 = 0
+    for idx in expr_indices:
+        val idx_hash = hash_string_fnv("{idx}")
+        h = hash_combine(h, idx_hash)
+    h
+
+# ============================================================================
+# Cache Operations
+# ============================================================================
+
+fn lint_cache_lookup(cache: LintCache, key: text, current_hash: i64) -> Option<[RequiredCommentWarning]>:
+    """Return cached warnings if the scope hash matches, else nil."""
+    if not cache.entries.contains_key(key):
+        return nil
+    val entry = cache.entries[key]
+    if entry.scope_hash != current_hash:
+        return nil
+    Some(entry.warnings)
+
+fn lint_cache_store(cache: LintCache, key: text, hash: i64, warnings: [RequiredCommentWarning], deps: [text]):
+    """Store lint result and update the symbol index."""
+    val entry = LintCacheEntry(
+        scope_hash: hash,
+        warnings: warnings,
+        symbol_deps: deps
+    )
+    cache.entries[key] = entry
+
+    # Update symbol_index: map each dep to this cache key
+    for dep in deps:
+        var existing: [text] = []
+        if cache.symbol_index.contains_key(dep):
+            existing = cache.symbol_index[dep]
+        existing.push(key)
+        cache.symbol_index[dep] = existing
+
+fn lint_cache_invalidate_symbol(cache: LintCache, symbol: text):
+    """Remove all cache entries that depend on the given symbol."""
+    if not cache.symbol_index.contains_key(symbol):
+        return
+    val keys_to_remove = cache.symbol_index[symbol]
+    for k in keys_to_remove:
+        cache.entries.remove(k)
+    cache.symbol_index.remove(symbol)
+
+fn lint_cache_invalidate_file(cache: LintCache, file_prefix: text):
+    """Remove all cache entries whose key starts with the given file prefix."""
+    var to_remove: [text] = []
+    for key in cache.entries.keys():
+        if key.starts_with(file_prefix):
+            to_remove.push(key)
+    for k in to_remove:
+        # Also cascade symbol invalidation for deps of removed entries
+        if cache.entries.contains_key(k):
+            val entry = cache.entries[k]
+            for dep in entry.symbol_deps:
+                lint_cache_invalidate_symbol(cache, dep)
+        cache.entries.remove(k)

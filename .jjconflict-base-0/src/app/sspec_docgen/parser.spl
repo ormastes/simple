@@ -1,0 +1,468 @@
+#![allow(unnamed_duplicate_typed_args)]
+# SSpec Documentation Generator — Parser, Metadata, Validation & Test Structure
+#
+# Extracted from main.spl. Contains:
+# - Parser: parse_id_attr, parse_sspec_file (incl. comment-doc extraction)
+# - Metadata: extract_field_value, split_metadata_list, extract_metadata
+# - Validation: validate_spec
+# - Test Structure: extract_quoted_name, extract_inline_docstring, extract_test_structure
+
+use app.sspec_docgen.common.{DocBlock, FeatureMetadata, SspecDoc, ValidationResult, sspec_dbg, native_fs_read_string, native_fs_exists}
+
+# ============================================================================
+# PARSER MODULE
+# ============================================================================
+
+fn parse_id_attr(line: text) -> text:
+    # Parse @id("...") attribute to extract ID
+    val trimmed = line.trim()
+    if not trimmed.starts_with("#[id("):
+        return ""
+
+    # Extract content between quotes
+    val after_prefix = trimmed[5:]  # Remove "#[id("
+    val without_suffix = after_prefix.trim_end_matches(")]")
+    val inner = without_suffix.trim()
+
+    if inner.starts_with("\"") and inner.ends_with("\"") and inner.len() >= 2:
+        inner[1:-1]  # Remove quotes
+    else:
+        ""
+
+fn parse_sspec_file(path: text) -> Result<SspecDoc, text>:
+    sspec_dbg("reading file: {path}")
+    val content = native_fs_read_string(path)
+    sspec_dbg("file read, splitting lines")
+    val lines = content.split("\n")
+    val lines_len = lines.len()
+    sspec_dbg("got {lines_len} lines")
+    var doc_blocks = []
+    var feature_title = ""
+    var feature_ids = []
+
+    # Pre-scan: Extract comment-based documentation (# ## Section pattern)
+    # Many feature specs use comment-based docs instead of """ blocks.
+    # Lines starting with "# " contain doc content; lines that are just "#" are blank lines.
+    var comment_doc_lines: [text] = []
+    var comment_scan_i = 0
+    # Skip leading blank lines
+    while comment_scan_i < lines.len() and lines[comment_scan_i].trim() == "":
+        comment_scan_i = comment_scan_i + 1
+    # Collect consecutive comment lines
+    while comment_scan_i < lines.len():
+        val cline = lines[comment_scan_i]
+        val ctrimmed = cline.trim()
+        if ctrimmed.starts_with("# ") and not ctrimmed.starts_with("#["):
+            comment_doc_lines.push(ctrimmed[2:])
+        elif ctrimmed == "#":
+            comment_doc_lines.push("")
+        else:
+            break
+        comment_scan_i = comment_scan_i + 1
+
+    # If comment docs contain markdown structure, synthesize a DocBlock
+    if comment_doc_lines.len() > 0:
+        val comment_content = comment_doc_lines.join("\n").trim()
+        if comment_content.contains("## ") or comment_content.contains("**Category:**"):
+            # Extract feature title from "# Title" pattern
+            for cl in comment_doc_lines:
+                val cl_trimmed = cl.trim()
+                if cl_trimmed.starts_with("# "):
+                    feature_title = cl_trimmed[2:].trim()
+                    break
+
+            doc_blocks.push(DocBlock(
+                content: comment_content,
+                line_start: 0,
+                line_end: comment_scan_i
+            ))
+            sspec_dbg("extracted comment-based doc block: {comment_doc_lines.len()} lines")
+
+    var i = 0
+    while i < lines.len():
+        val line = lines[i]
+        val trimmed = line.trim()
+
+        # Extract feature IDs from @id(...) attributes
+        if trimmed.starts_with("#[id("):
+            val id = parse_id_attr(trimmed)
+            if id != "":
+                feature_ids.push(id)
+
+        # Check for doc block start (standalone """ on its own line)
+        if trimmed == "\"\"\"":
+            val start_line = i
+            i = i + 1
+
+            var block_lines: [text] = []
+            var found_end = false
+
+            # Collect lines until closing """
+            while i < lines.len():
+                val block_line = lines[i]
+
+                if block_line.trim() == "\"\"\"":
+                    found_end = true
+                    break
+
+                block_lines.push(block_line)
+                i = i + 1
+
+            val block_content = block_lines.join("\n") + "\n"
+
+            if found_end:
+                # Extract feature title from first doc block if present
+                if feature_title == "" and block_content.contains("# "):
+                    val block_lines = block_content.split("\n")
+                    for bl in block_lines:
+                        val bl_trimmed = bl.trim()
+                        if bl_trimmed.starts_with("# "):
+                            feature_title = bl_trimmed[2:].trim()
+                            break
+
+                doc_blocks.push(DocBlock(
+                    content: block_content.trim(),
+                    line_start: start_line,
+                    line_end: i
+                ))
+
+        i = i + 1
+
+    val doc = SspecDoc(
+        file_path: path,
+        raw_content: content,
+        doc_blocks: doc_blocks,
+        feature_title: feature_title,
+        feature_ids: feature_ids,
+        metadata: FeatureMetadata.empty()
+    )
+    sspec_dbg("parse_sspec_file done: {doc_blocks.len()} doc blocks, title={feature_title}")
+    return Ok(doc)
+
+# ============================================================================
+# METADATA MODULE
+# ============================================================================
+
+fn extract_field_value(line: text, prefix: text) -> text:
+    # Extract value from a metadata field line
+    if not line.starts_with(prefix):
+        return ""
+
+    val value_part = line[prefix.len():]
+    value_part.trim()
+
+fn split_metadata_list(value: text) -> [text]:
+    var items: [text] = []
+    for semi_part in value.split(";"):
+        for comma_part in semi_part.split(","):
+            val trimmed = comma_part.trim()
+            if trimmed != "":
+                items.push(trimmed)
+    items
+
+fn extract_metadata(doc: SspecDoc) -> FeatureMetadata:
+    var metadata = FeatureMetadata.empty()
+
+    # Concatenate all doc blocks for metadata extraction
+    var content_parts: [text] = []
+    for block in doc.doc_blocks:
+        content_parts.push(block.content)
+    val full_content = content_parts.join("\n") + "\n"
+
+    # Extract metadata fields from markdown
+    val lines = full_content.split("\n")
+    for line in lines:
+        val trimmed = line.trim()
+
+        # Match patterns like "**Feature ID:** #20" or "**Feature IDs:** #20"
+        if trimmed.starts_with("**Feature ID:**"):
+            val value = extract_field_value(trimmed, "**Feature ID:**")
+            if value != "":
+                metadata = FeatureMetadata(
+                    id: value, category: metadata.category, difficulty: metadata.difficulty,
+                    status: metadata.status, requirement: metadata.requirement, plan: metadata.plan,
+                    design: metadata.design, research: metadata.research, artifacts: metadata.artifacts,
+                    screenshots: metadata.screenshots, tui_captures: metadata.tui_captures, logs: metadata.logs)
+        elif trimmed.starts_with("**Feature IDs:**"):
+            val value = extract_field_value(trimmed, "**Feature IDs:**")
+            if value != "":
+                metadata = FeatureMetadata(
+                    id: value, category: metadata.category, difficulty: metadata.difficulty,
+                    status: metadata.status, requirement: metadata.requirement, plan: metadata.plan,
+                    design: metadata.design, research: metadata.research, artifacts: metadata.artifacts,
+                    screenshots: metadata.screenshots, tui_captures: metadata.tui_captures, logs: metadata.logs)
+        elif trimmed.starts_with("**Category:**"):
+            val value = extract_field_value(trimmed, "**Category:**")
+            if value != "":
+                metadata = FeatureMetadata(
+                    id: metadata.id, category: value, difficulty: metadata.difficulty,
+                    status: metadata.status, requirement: metadata.requirement, plan: metadata.plan,
+                    design: metadata.design, research: metadata.research, artifacts: metadata.artifacts,
+                    screenshots: metadata.screenshots, tui_captures: metadata.tui_captures, logs: metadata.logs)
+        elif trimmed.starts_with("**Difficulty:**"):
+            val value = extract_field_value(trimmed, "**Difficulty:**")
+            if value != "":
+                metadata = FeatureMetadata(
+                    id: metadata.id, category: metadata.category, difficulty: value,
+                    status: metadata.status, requirement: metadata.requirement, plan: metadata.plan,
+                    design: metadata.design, research: metadata.research, artifacts: metadata.artifacts,
+                    screenshots: metadata.screenshots, tui_captures: metadata.tui_captures, logs: metadata.logs)
+        elif trimmed.starts_with("**Status:**"):
+            val value = extract_field_value(trimmed, "**Status:**")
+            if value != "":
+                metadata = FeatureMetadata(
+                    id: metadata.id, category: metadata.category, difficulty: metadata.difficulty,
+                    status: value, requirement: metadata.requirement, plan: metadata.plan,
+                    design: metadata.design, research: metadata.research, artifacts: metadata.artifacts,
+                    screenshots: metadata.screenshots, tui_captures: metadata.tui_captures, logs: metadata.logs)
+        elif trimmed.starts_with("**Requirements:**"):
+            val value = extract_field_value(trimmed, "**Requirements:**")
+            if value != "":
+                metadata = FeatureMetadata(
+                    id: metadata.id, category: metadata.category, difficulty: metadata.difficulty,
+                    status: metadata.status, requirement: value, plan: metadata.plan,
+                    design: metadata.design, research: metadata.research, artifacts: metadata.artifacts,
+                    screenshots: metadata.screenshots, tui_captures: metadata.tui_captures, logs: metadata.logs)
+        elif trimmed.starts_with("**Plan:**"):
+            val value = extract_field_value(trimmed, "**Plan:**")
+            if value != "":
+                metadata = FeatureMetadata(
+                    id: metadata.id, category: metadata.category, difficulty: metadata.difficulty,
+                    status: metadata.status, requirement: metadata.requirement, plan: value,
+                    design: metadata.design, research: metadata.research, artifacts: metadata.artifacts,
+                    screenshots: metadata.screenshots, tui_captures: metadata.tui_captures, logs: metadata.logs)
+        elif trimmed.starts_with("**Design:**"):
+            val value = extract_field_value(trimmed, "**Design:**")
+            if value != "":
+                metadata = FeatureMetadata(
+                    id: metadata.id, category: metadata.category, difficulty: metadata.difficulty,
+                    status: metadata.status, requirement: metadata.requirement, plan: metadata.plan,
+                    design: value, research: metadata.research, artifacts: metadata.artifacts,
+                    screenshots: metadata.screenshots, tui_captures: metadata.tui_captures, logs: metadata.logs)
+        elif trimmed.starts_with("**Research:**"):
+            val value = extract_field_value(trimmed, "**Research:**")
+            if value != "":
+                metadata = FeatureMetadata(
+                    id: metadata.id, category: metadata.category, difficulty: metadata.difficulty,
+                    status: metadata.status, requirement: metadata.requirement, plan: metadata.plan,
+                    design: metadata.design, research: value, artifacts: metadata.artifacts,
+                    screenshots: metadata.screenshots, tui_captures: metadata.tui_captures, logs: metadata.logs)
+        elif trimmed.starts_with("**Artifacts:**"):
+            val value = extract_field_value(trimmed, "**Artifacts:**")
+            metadata = FeatureMetadata(
+                id: metadata.id, category: metadata.category, difficulty: metadata.difficulty,
+                status: metadata.status, requirement: metadata.requirement, plan: metadata.plan,
+                design: metadata.design, research: metadata.research, artifacts: split_metadata_list(value),
+                screenshots: metadata.screenshots, tui_captures: metadata.tui_captures, logs: metadata.logs)
+        elif trimmed.starts_with("**Screenshots:**"):
+            val value = extract_field_value(trimmed, "**Screenshots:**")
+            metadata = FeatureMetadata(
+                id: metadata.id, category: metadata.category, difficulty: metadata.difficulty,
+                status: metadata.status, requirement: metadata.requirement, plan: metadata.plan,
+                design: metadata.design, research: metadata.research, artifacts: metadata.artifacts,
+                screenshots: split_metadata_list(value), tui_captures: metadata.tui_captures, logs: metadata.logs)
+        elif trimmed.starts_with("**TUI Captures:**"):
+            val value = extract_field_value(trimmed, "**TUI Captures:**")
+            metadata = FeatureMetadata(
+                id: metadata.id, category: metadata.category, difficulty: metadata.difficulty,
+                status: metadata.status, requirement: metadata.requirement, plan: metadata.plan,
+                design: metadata.design, research: metadata.research, artifacts: metadata.artifacts,
+                screenshots: metadata.screenshots, tui_captures: split_metadata_list(value), logs: metadata.logs)
+        elif trimmed.starts_with("**Logs:**"):
+            val value = extract_field_value(trimmed, "**Logs:**")
+            metadata = FeatureMetadata(
+                id: metadata.id, category: metadata.category, difficulty: metadata.difficulty,
+                status: metadata.status, requirement: metadata.requirement, plan: metadata.plan,
+                design: metadata.design, research: metadata.research, artifacts: metadata.artifacts,
+                screenshots: metadata.screenshots, tui_captures: metadata.tui_captures, logs: split_metadata_list(value))
+
+    # Extract feature ID from feature_ids if metadata.id is not set
+    if metadata.id == "" and doc.feature_ids.len() > 0:
+        metadata = FeatureMetadata(
+            id: doc.feature_ids[0], category: metadata.category, difficulty: metadata.difficulty,
+            status: metadata.status, requirement: metadata.requirement, plan: metadata.plan,
+            design: metadata.design, research: metadata.research, artifacts: metadata.artifacts,
+            screenshots: metadata.screenshots, tui_captures: metadata.tui_captures, logs: metadata.logs)
+
+    metadata
+
+# ============================================================================
+# VALIDATION MODULE
+# ============================================================================
+
+fn validate_spec(doc: SspecDoc) -> ValidationResult:
+    var warnings = []
+    val docs_present = doc.doc_blocks.len() > 0
+
+    var doc_lines = 0
+    for block in doc.doc_blocks:
+        doc_lines = doc_lines + block.content.split("\n").len()
+
+    # Check if doc blocks exist
+    if not docs_present:
+        warnings.push("No documentation blocks found (stub generated)")
+    else:
+        # Check total documentation length
+        if doc_lines < 100:
+            warnings.push("Only {doc_lines} lines of documentation (recommended: 100+)")
+
+        # Concatenate all docs to check for sections
+        var validate_parts: [text] = []
+        for block in doc.doc_blocks:
+            validate_parts.push(block.content)
+        val full_content = validate_parts.join("\n") + "\n"
+
+        var has_overview = false
+        var has_syntax = false
+
+        val lines = full_content.split("\n")
+        for line in lines:
+            val trimmed = line.trim()
+            if trimmed.starts_with("## Overview") or trimmed.starts_with("## Description"):
+                has_overview = true
+            if trimmed.starts_with("## Syntax") or trimmed.starts_with("## Examples"):
+                has_syntax = true
+
+        # Warn about missing important sections
+        if not has_overview:
+            warnings.push("Missing '## Overview' or '## Description' section")
+        if not has_syntax:
+            warnings.push("Missing '## Syntax' or '## Examples' section")
+
+        # Doc-link validation: check presence and file existence
+        # Use "N/A" as the value to suppress a warning for links genuinely not applicable
+        val req_link = doc.metadata.requirement
+        if req_link == "":
+            warnings.push("Missing '**Requirements:**' link (use doc/requirement/xxx.md or N/A)")
+        elif req_link != "N/A" and not native_fs_exists(req_link):
+            warnings.push("Requirements link not found: '{req_link}'")
+
+        val plan_link = doc.metadata.plan
+        if plan_link == "":
+            warnings.push("Missing '**Plan:**' link (use doc/03_plan/xxx.md or N/A)")
+        elif plan_link != "N/A" and not native_fs_exists(plan_link):
+            warnings.push("Plan link not found: '{plan_link}'")
+
+        val design_link = doc.metadata.design
+        if design_link == "":
+            warnings.push("Missing '**Design:**' link (use doc/05_design/xxx.md or N/A)")
+        elif design_link != "N/A" and not native_fs_exists(design_link):
+            warnings.push("Design link not found: '{design_link}'")
+
+        val research_link = doc.metadata.research
+        if research_link == "":
+            warnings.push("Missing '**Research:**' link (use doc/01_research/xxx.md or N/A)")
+        elif research_link != "N/A" and not native_fs_exists(research_link):
+            warnings.push("Research link not found: '{research_link}'")
+
+    ValidationResult(
+        file_path: doc.file_path,
+        docs_present: docs_present,
+        doc_lines: doc_lines,
+        warnings: warnings
+    )
+
+# ============================================================================
+# TEST STRUCTURE EXTRACTION
+# ============================================================================
+
+fn extract_quoted_name(line: text) -> text:
+    # Extract text between first and last double-quote in a line
+    # e.g. describe "Null Coalescing (??)"": -> "Null Coalescing (??)"
+    if not line.contains("\""):
+        return line
+    val parts = line.split("\"")
+    if parts.len() >= 2:
+        parts[1]
+    else:
+        line
+
+fn extract_inline_docstring(trimmed: text) -> text:
+    # Extract content from """single line content""" (both open and close on same line)
+    if trimmed.starts_with("\"\"\"") and trimmed.ends_with("\"\"\"") and trimmed.len() > 6:
+        trimmed[3:-3].trim()
+    else:
+        ""
+
+fn extract_test_structure(content: text) -> text:
+    val lines = content.split("\n")
+    var result_parts: [text] = []
+    var i = 0
+    var in_docstring = false
+
+    while i < lines.len():
+        val line = lines[i]
+        val trimmed = line.trim()
+
+        # Handle multi-line docstring content — skip until closing """
+        if in_docstring:
+            if trimmed == "\"\"\"" or trimmed.ends_with("\"\"\""):
+                in_docstring = false
+            i = i + 1
+            continue
+
+        # Detect standalone """ opening (multi-line block)
+        if trimmed == "\"\"\"":
+            in_docstring = true
+            i = i + 1
+            continue
+
+        # Detect inline multi-line start: """text (no closing """ on same line)
+        if trimmed.starts_with("\"\"\"") and not (trimmed.ends_with("\"\"\"") and trimmed.len() > 6):
+            in_docstring = true
+            i = i + 1
+            continue
+
+        # describe block -> H3
+        if trimmed.starts_with("describe ") and trimmed.contains("\""):
+            val name = extract_quoted_name(trimmed)
+            result_parts.push("### {name}\n")
+
+            # Check next line for single-line docstring
+            if i + 1 < lines.len():
+                val next_trimmed = lines[i + 1].trim()
+                val doc = extract_inline_docstring(next_trimmed)
+                if doc != "":
+                    result_parts.push("_{doc}_\n")
+                    i = i + 1
+
+            result_parts.push("\n")
+
+        # skip context block -> H4 with skipped marker
+        elif trimmed.starts_with("skip context ") and trimmed.contains("\""):
+            val name = extract_quoted_name(trimmed)
+            result_parts.push("#### {name} _(skipped)_\n")
+
+        # regular context block -> H4
+        elif trimmed.starts_with("context ") and trimmed.contains("\""):
+            val name = extract_quoted_name(trimmed)
+            result_parts.push("#### {name}\n")
+
+            # Check next line for single-line docstring
+            if i + 1 < lines.len():
+                val next_trimmed = lines[i + 1].trim()
+                val doc = extract_inline_docstring(next_trimmed)
+                if doc != "":
+                    result_parts.push("_{doc}_\n")
+                    i = i + 1
+
+            result_parts.push("\n")
+
+        # skip it -> skipped bullet
+        elif trimmed.starts_with("skip it ") and trimmed.contains("\""):
+            val name = extract_quoted_name(trimmed)
+            result_parts.push("- skip {name} (skipped)\n")
+
+        # pending -> pending bullet
+        elif trimmed.starts_with("pending ") and trimmed.contains("\""):
+            val name = extract_quoted_name(trimmed)
+            result_parts.push("- pending {name} (pending)\n")
+
+        # regular it -> check bullet
+        elif trimmed.starts_with("it ") and trimmed.contains("\""):
+            val name = extract_quoted_name(trimmed)
+            result_parts.push("- ok {name}\n")
+
+        i = i + 1
+
+    result_parts.join("").trim()

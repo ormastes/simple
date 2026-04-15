@@ -1,0 +1,255 @@
+@allow(primitive_api)
+# Fault Detection
+#
+# Shared fault detection for stack overflow and timeout detection
+# across interpreter and compiled modes.
+#
+# Port of rust/common/src/fault_detection.rs
+# Note: Rust uses atomics; Simple uses module-level mutable state.
+# Thread safety is provided by the runtime's GIL or per-actor isolation.
+
+# ============================================================================
+# Stack Overflow Detection
+# ============================================================================
+
+var recursion_depth: i64 = 0
+var max_recursion_depth: i64 = 1000
+var stack_overflow_detection_enabled: bool = true
+
+fn set_stack_overflow_detection_enabled(enabled: bool):
+    """Enable or disable stack overflow detection."""
+    stack_overflow_detection_enabled = enabled
+
+fn is_stack_overflow_detection_enabled() -> bool:
+    stack_overflow_detection_enabled
+
+fn set_max_recursion_depth(depth: i64):
+    """Set the maximum recursion depth limit."""
+    max_recursion_depth = depth
+
+fn get_max_recursion_depth() -> i64:
+    max_recursion_depth
+
+fn reset_recursion_depth():
+    """Reset the recursion counter to zero."""
+    recursion_depth = 0
+
+fn increment_recursion_depth() -> bool:
+    """Increment depth counter. Returns false if limit exceeded."""
+    if not stack_overflow_detection_enabled:
+        return true
+    recursion_depth = recursion_depth + 1
+    recursion_depth <= max_recursion_depth
+
+fn decrement_recursion_depth():
+    """Decrement depth counter (floor at 0)."""
+    if recursion_depth > 0:
+        recursion_depth = recursion_depth - 1
+
+fn current_recursion_depth() -> i64:
+    recursion_depth
+
+# ============================================================================
+# Timeout Detection
+# ============================================================================
+
+var timeout_exceeded: bool = false
+
+fn is_timeout_exceeded() -> bool:
+    """Check if timeout has been exceeded (set by watchdog thread)."""
+    timeout_exceeded
+
+fn set_timeout_exceeded():
+    """Mark timeout as exceeded."""
+    timeout_exceeded = true
+
+fn reset_timeout():
+    """Reset timeout flag."""
+    timeout_exceeded = false
+
+# ============================================================================
+# Combined Check
+# ============================================================================
+
+enum FaultKind:
+    """Type of fault detected."""
+    StackOverflow(depth: i64, limit: i64)
+    Timeout
+    SignalFault(signal_number: i64, signal_name: text)
+    MemoryExceeded(used_mb: i64, limit_mb: i64)
+    InterruptRequested
+
+# ============================================================================
+# Signal Fault Detection
+# ============================================================================
+
+var signal_fault_number: i64 = 0
+var signal_fault_name: text = ""
+var signal_fault_detected: bool = false
+
+fn set_signal_fault(signal_number: i64, signal_name: text):
+    """Record a signal fault (called from Rust signal handler)."""
+    signal_fault_number = signal_number
+    signal_fault_name = signal_name
+    signal_fault_detected = true
+
+fn is_signal_fault() -> bool:
+    signal_fault_detected
+
+fn clear_signal_fault():
+    signal_fault_detected = false
+    signal_fault_number = 0
+    signal_fault_name = ""
+
+# ============================================================================
+# Memory Limit Detection
+# ============================================================================
+
+var memory_exceeded: bool = false
+var memory_used_mb: i64 = 0
+var memory_limit_mb: i64 = 0
+
+fn set_memory_exceeded(used_mb: i64, limit_mb: i64):
+    """Record memory limit exceeded (called from watchdog)."""
+    memory_exceeded = true
+    memory_used_mb = used_mb
+    memory_limit_mb = limit_mb
+
+fn is_memory_exceeded() -> bool:
+    memory_exceeded
+
+fn clear_memory_exceeded():
+    memory_exceeded = false
+    memory_used_mb = 0
+    memory_limit_mb = 0
+
+# ============================================================================
+# Interrupt Detection
+# ============================================================================
+
+var interrupt_requested: bool = false
+
+fn set_interrupt_requested():
+    """Record interrupt request (SIGINT/Ctrl-C)."""
+    interrupt_requested = true
+
+fn is_interrupt_requested() -> bool:
+    interrupt_requested
+
+fn clear_interrupt():
+    interrupt_requested = false
+
+# ============================================================================
+# Combined Check (priority: signal > memory > timeout > stack overflow > interrupt)
+# ============================================================================
+
+fn check_faults() -> FaultKind?:
+    """Check for any active fault condition, highest priority first."""
+    if signal_fault_detected:
+        return Some(FaultKind.SignalFault(
+            signal_number: signal_fault_number,
+            signal_name: signal_fault_name
+        ))
+    if memory_exceeded:
+        return Some(FaultKind.MemoryExceeded(
+            used_mb: memory_used_mb,
+            limit_mb: memory_limit_mb
+        ))
+    if timeout_exceeded:
+        return Some(FaultKind.Timeout)
+    if stack_overflow_detection_enabled and recursion_depth > max_recursion_depth:
+        return Some(FaultKind.StackOverflow(
+            depth: recursion_depth,
+            limit: max_recursion_depth
+        ))
+    if interrupt_requested:
+        return Some(FaultKind.InterruptRequested)
+    nil
+
+fn reset_faults():
+    """Reset ALL fault state (for testing)."""
+    reset_recursion_depth()
+    reset_timeout()
+    clear_signal_fault()
+    clear_memory_exceeded()
+    clear_interrupt()
+
+# ============================================================================
+# High-Level API (used by tests and user code)
+# ============================================================================
+
+var timeout_secs: i64 = 0
+var execution_limit: i64 = 10000000
+
+fn enable_stack_overflow_detection():
+    set_stack_overflow_detection_enabled(true)
+
+fn disable_stack_overflow_detection():
+    set_stack_overflow_detection_enabled(false)
+
+fn set_recursion_limit(depth: i64):
+    set_max_recursion_depth(depth)
+
+fn set_timeout(secs: i64):
+    timeout_secs = secs
+
+fn get_timeout() -> i64:
+    timeout_secs
+
+fn set_execution_limit(limit: i64):
+    execution_limit = limit
+
+fn get_execution_limit() -> i64:
+    execution_limit
+
+fn reset_defaults():
+    set_stack_overflow_detection_enabled(true)
+    set_max_recursion_depth(1000)
+    reset_recursion_depth()
+    timeout_secs = 0
+    reset_timeout()
+    clear_signal_fault()
+    clear_memory_exceeded()
+    clear_interrupt()
+    execution_limit = 10000000
+
+# ============================================================================
+# FaultConfig Struct
+# ============================================================================
+
+val DEFAULT_MAX_RECURSION_DEPTH = 1000
+val DEFAULT_EXECUTION_LIMIT = 10000000
+val DEFAULT_TIMEOUT = 0
+
+class FaultConfig:
+    stack_overflow_enabled: bool
+    max_recursion_depth: i64
+    timeout_secs: i64
+    execution_limit: i64
+
+    fn with_timeout(secs: i64) -> FaultConfig:
+        FaultConfig(stack_overflow_enabled: self.stack_overflow_enabled, max_recursion_depth: self.max_recursion_depth, timeout_secs: secs, execution_limit: self.execution_limit)
+
+    fn with_max_depth(depth: i64) -> FaultConfig:
+        FaultConfig(stack_overflow_enabled: self.stack_overflow_enabled, max_recursion_depth: depth, timeout_secs: self.timeout_secs, execution_limit: self.execution_limit)
+
+    fn with_execution_limit(limit: i64) -> FaultConfig:
+        FaultConfig(stack_overflow_enabled: self.stack_overflow_enabled, max_recursion_depth: self.max_recursion_depth, timeout_secs: self.timeout_secs, execution_limit: limit)
+
+    fn apply():
+        set_stack_overflow_detection_enabled(self.stack_overflow_enabled)
+        set_max_recursion_depth(self.max_recursion_depth)
+        timeout_secs = self.timeout_secs
+        execution_limit = self.execution_limit
+
+    static fn disabled() -> FaultConfig:
+        FaultConfig(stack_overflow_enabled: false, max_recursion_depth: 0, timeout_secs: 0, execution_limit: 0)
+
+    static fn permissive() -> FaultConfig:
+        FaultConfig(stack_overflow_enabled: true, max_recursion_depth: 10000, timeout_secs: 0, execution_limit: 100000000)
+
+    static fn strict() -> FaultConfig:
+        FaultConfig(stack_overflow_enabled: true, max_recursion_depth: 500, timeout_secs: 30, execution_limit: 5000000)
+
+    static fn defaults() -> FaultConfig:
+        FaultConfig(stack_overflow_enabled: true, max_recursion_depth: 1000, timeout_secs: 0, execution_limit: 10000000)

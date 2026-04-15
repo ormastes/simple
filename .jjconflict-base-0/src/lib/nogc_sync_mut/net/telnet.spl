@@ -1,0 +1,610 @@
+#![allow(unnamed_duplicate_typed_args)]
+@allow(star_import)
+# Telnet Client - RFC 854 Implementation
+#
+# Telnet protocol client built on TCP sockets. Implements IAC (Interpret As
+# Command) byte handling, option negotiation (WILL/WONT/DO/DONT), login
+# prompt detection, and command execution with prompt-based response capture.
+#
+# Depends on: net/ffi.spl (TCP socket extern functions)
+#
+# Reference: RFC 854 (Telnet Protocol), RFC 855 (Telnet Option Specs)
+
+use std.error.{SimpleError, error}
+use std.net.ffi.*
+use std.net.tcp.{TcpStream}
+
+# ============================================================================
+# Telnet Protocol Constants
+# ============================================================================
+
+# IAC (Interpret As Command) byte
+val TELNET_IAC: i64 = 255
+
+# Telnet command codes (sent after IAC)
+val TELNET_WILL: i64 = 251
+val TELNET_WONT: i64 = 252
+val TELNET_DO: i64 = 253
+val TELNET_DONT: i64 = 254
+val TELNET_SB: i64 = 250    # Sub-negotiation Begin
+val TELNET_SE: i64 = 240    # Sub-negotiation End
+val TELNET_NOP: i64 = 241   # No Operation
+val TELNET_AYT: i64 = 246   # Are You There
+val TELNET_EC: i64 = 247    # Erase Character
+val TELNET_EL: i64 = 248    # Erase Line
+val TELNET_GA: i64 = 249    # Go Ahead
+
+# Telnet option codes
+val TELOPT_ECHO: i64 = 1          # Echo
+val TELOPT_SGA: i64 = 3           # Suppress Go Ahead
+val TELOPT_STATUS: i64 = 5        # Status
+val TELOPT_TTYPE: i64 = 24        # Terminal Type
+val TELOPT_NAWS: i64 = 31         # Negotiate About Window Size
+val TELOPT_TSPEED: i64 = 32       # Terminal Speed
+val TELOPT_LFLOW: i64 = 33        # Remote Flow Control
+val TELOPT_LINEMODE: i64 = 34     # Linemode
+val TELOPT_XDISPLOC: i64 = 35     # X Display Location
+val TELOPT_ENVIRON: i64 = 36      # Environment Option
+val TELOPT_NEW_ENVIRON: i64 = 39  # New Environment Option
+
+# Control characters
+val TELNET_CR: i64 = 13    # Carriage Return
+val TELNET_LF: i64 = 10    # Line Feed
+val TELNET_NUL: i64 = 0    # Null
+
+# ============================================================================
+# Telnet Connection State
+# ============================================================================
+
+struct TelnetConnection:
+    """Active telnet connection wrapping a TCP stream.
+
+    Fields:
+        stream: Underlying TCP stream
+        connected: Whether connection is active
+        echo_enabled: Whether server echoes input
+        sga_enabled: Whether Suppress Go Ahead is active
+    """
+    stream: TcpStream
+    connected: bool
+    echo_enabled: bool
+    sga_enabled: bool
+
+# ============================================================================
+# IAC Byte Helpers
+# ============================================================================
+
+fn iac_byte(value: i64) -> u8:
+    """Convert integer to byte for IAC sequences."""
+    value.to_u8()
+
+fn is_iac_byte(byte: i64) -> bool:
+    """Check if a byte value is the IAC escape (255)."""
+    byte == TELNET_IAC
+
+fn telopt_name(option: i64) -> text:
+    """Get human-readable name for a telnet option code.
+
+    Args:
+        option: Telnet option number
+
+    Returns:
+        Option name string
+    """
+    if option == TELOPT_ECHO:
+        return "ECHO"
+    if option == TELOPT_SGA:
+        return "SGA"
+    if option == TELOPT_TTYPE:
+        return "TTYPE"
+    if option == TELOPT_NAWS:
+        return "NAWS"
+    if option == TELOPT_TSPEED:
+        return "TSPEED"
+    if option == TELOPT_LINEMODE:
+        return "LINEMODE"
+    if option == TELOPT_NEW_ENVIRON:
+        return "NEW_ENVIRON"
+    "UNKNOWN({option})"
+
+# ============================================================================
+# Connection Management
+# ============================================================================
+
+fn telnet_connect(host: text, port: i64, timeout_ms: i64) -> Result<TelnetConnection, SimpleError>:
+    """Connect to a telnet server.
+
+    Establishes a TCP connection and performs initial IAC negotiation.
+    Responds WILL SGA and WONT ECHO by default.
+
+    Args:
+        host: Telnet server hostname or IP address
+        port: Telnet server port (usually 23)
+        timeout_ms: Connection timeout in milliseconds
+
+    Returns:
+        Result with TelnetConnection or error
+
+    Example:
+        val conn = telnet_connect("192.168.1.200", 23, 5000)?
+    """
+    val addr = "{host}:{port}"
+    val stream_result = tcp_stream_connect_timeout(addr, timeout_ms)
+    match stream_result:
+        Err(e):
+            return Err(e)
+        Ok(stream):
+            # Set read timeout for negotiation
+            stream.set_read_timeout(timeout_ms)
+
+            var conn = TelnetConnection(
+                stream: stream,
+                connected: true,
+                echo_enabled: false,
+                sga_enabled: false
+            )
+
+            # Read and process any initial IAC negotiation from server
+            val initial_data = telnet_receive_raw(conn, timeout_ms)
+            if initial_data.length() > 0:
+                val clean = telnet_process_iac(conn, initial_data)
+                # Discard initial banner text (or could be returned)
+                pass_do_nothing
+
+            return Ok(conn)
+
+fn telnet_close(conn: TelnetConnection) -> bool:
+    """Close a telnet connection.
+
+    Args:
+        conn: Active telnet connection
+
+    Returns:
+        true if connection was closed successfully
+    """
+    if not conn.connected:
+        return false
+
+    conn.stream.close()
+    true
+
+# ============================================================================
+# IAC Negotiation
+# ============================================================================
+
+fn telnet_build_response(command: i64, option: i64) -> [u8]:
+    """Build a 3-byte IAC response sequence.
+
+    Args:
+        command: Response command (WILL/WONT/DO/DONT)
+        option: Option code
+
+    Returns:
+        3-byte array [IAC, command, option]
+    """
+    var response: [u8] = []
+    response.push(iac_byte(TELNET_IAC))
+    response.push(iac_byte(command))
+    response.push(iac_byte(option))
+    response
+
+fn telnet_negotiate_option(conn: TelnetConnection, command: i64, option: i64):
+    """Handle a single IAC option negotiation request.
+
+    Negotiation strategy:
+    - WILL SGA: respond DO SGA (suppress go-ahead improves interactivity)
+    - WILL ECHO: respond DO ECHO (let server handle echo)
+    - WILL anything else: respond DONT (refuse unknown options)
+    - DO SGA: respond WILL SGA
+    - DO anything else: respond WONT (refuse to enable unknown options)
+
+    Args:
+        conn: Active telnet connection
+        command: Received command (WILL/WONT/DO/DONT)
+        option: Option code
+    """
+    if command == TELNET_WILL:
+        if option == TELOPT_SGA:
+            # Accept Suppress Go Ahead
+            val resp = telnet_build_response(TELNET_DO, TELOPT_SGA)
+            conn.stream.write(resp)
+            conn.sga_enabled = true
+        else:
+            if option == TELOPT_ECHO:
+                # Accept server echo
+                val resp = telnet_build_response(TELNET_DO, TELOPT_ECHO)
+                conn.stream.write(resp)
+                conn.echo_enabled = true
+            else:
+                # Refuse all other WILL offers
+                val resp = telnet_build_response(TELNET_DONT, option)
+                conn.stream.write(resp)
+
+    if command == TELNET_DO:
+        if option == TELOPT_SGA:
+            # Agree to suppress go-ahead
+            val resp = telnet_build_response(TELNET_WILL, TELOPT_SGA)
+            conn.stream.write(resp)
+            conn.sga_enabled = true
+        else:
+            # Refuse all other DO requests
+            val resp = telnet_build_response(TELNET_WONT, option)
+            conn.stream.write(resp)
+
+    if command == TELNET_WONT:
+        if option == TELOPT_ECHO:
+            conn.echo_enabled = false
+        pass_do_nothing
+
+    if command == TELNET_DONT:
+        pass_do_nothing
+
+fn telnet_process_iac(conn: TelnetConnection, data: [u8]) -> [u8]:
+    """Process raw data and strip IAC sequences, responding to negotiations.
+
+    Scans through raw received bytes, identifies IAC escape sequences,
+    dispatches option negotiations, and returns clean data with IAC
+    sequences removed.
+
+    Args:
+        conn: Active telnet connection
+        data: Raw bytes received from server
+
+    Returns:
+        Clean data with all IAC sequences stripped
+    """
+    var clean: [u8] = []
+    val len = data.length()
+    var i = 0
+
+    while i < len:
+        val byte = data[i].to_i64()
+
+        if byte == TELNET_IAC:
+            # IAC escape sequence
+            if i + 1 < len:
+                val cmd = data[i + 1].to_i64()
+
+                if cmd == TELNET_IAC:
+                    # Escaped IAC (literal 255 byte)
+                    clean.push(iac_byte(TELNET_IAC))
+                    i = i + 2
+                else:
+                    if cmd == TELNET_SB:
+                        # Sub-negotiation: skip until IAC SE
+                        i = i + 2
+                        while i < len:
+                            val sb_byte = data[i].to_i64()
+                            if sb_byte == TELNET_IAC:
+                                if i + 1 < len:
+                                    val next = data[i + 1].to_i64()
+                                    if next == TELNET_SE:
+                                        i = i + 2
+                                        break
+                                i = i + 1
+                            else:
+                                i = i + 1
+                    else:
+                        if (cmd == TELNET_WILL or cmd == TELNET_WONT or
+                            cmd == TELNET_DO or cmd == TELNET_DONT):
+                            # Option negotiation: 3 bytes total
+                            if i + 2 < len:
+                                val option = data[i + 2].to_i64()
+                                telnet_negotiate_option(conn, cmd, option)
+                                i = i + 3
+                            else:
+                                i = i + 2
+                        else:
+                            # Other IAC command (NOP, AYT, etc.) - skip
+                            i = i + 2
+            else:
+                # Lone IAC at end - skip
+                i = i + 1
+        else:
+            # Regular data byte
+            clean.push(data[i])
+            i = i + 1
+
+    clean
+
+# ============================================================================
+# Data Transfer
+# ============================================================================
+
+fn telnet_receive_raw(conn: TelnetConnection, timeout_ms: i64) -> [u8]:
+    """Receive raw bytes from telnet connection (no IAC processing).
+
+    Args:
+        conn: Active telnet connection
+        timeout_ms: Read timeout in milliseconds
+
+    Returns:
+        Raw bytes received (may contain IAC sequences), empty on timeout/error
+    """
+    if not conn.connected:
+        return []
+
+    conn.stream.set_read_timeout(timeout_ms)
+    val result = conn.stream.read(4096)
+    match result:
+        Ok(data):
+            return data
+        Err(e):
+            return []
+
+fn telnet_receive(conn: TelnetConnection, timeout_ms: i64) -> text:
+    """Receive data from telnet connection with IAC stripping.
+
+    Reads available data, processes IAC sequences (responding to
+    negotiations), and returns clean text output.
+
+    Args:
+        conn: Active telnet connection
+        timeout_ms: Read timeout in milliseconds
+
+    Returns:
+        Clean text with IAC sequences stripped, empty on timeout/error
+
+    Example:
+        val output = telnet_receive(conn, 3000)
+        print "Server says: {output}"
+    """
+    val raw = telnet_receive_raw(conn, timeout_ms)
+    if raw.length() == 0:
+        return ""
+
+    val clean = telnet_process_iac(conn, raw)
+    bytes_to_string(clean)
+
+fn telnet_send(conn: TelnetConnection, data: text) -> bool:
+    """Send text data over telnet connection.
+
+    Appends CR+LF line ending as required by telnet protocol.
+
+    Args:
+        conn: Active telnet connection
+        data: Text to send
+
+    Returns:
+        true if send was successful
+
+    Example:
+        telnet_send(conn, "ls -la")
+    """
+    if not conn.connected:
+        return false
+
+    val line = data + "\r\n"
+    val bytes = line.as_bytes()
+    val result = conn.stream.write_all(bytes)
+    match result:
+        Ok(_):
+            return true
+        Err(e):
+            return false
+
+fn telnet_send_raw(conn: TelnetConnection, data: [u8]) -> bool:
+    """Send raw bytes over telnet connection (no CR+LF appended).
+
+    Args:
+        conn: Active telnet connection
+        data: Raw bytes to send
+
+    Returns:
+        true if send was successful
+    """
+    if not conn.connected:
+        return false
+
+    val result = conn.stream.write_all(data)
+    match result:
+        Ok(_):
+            return true
+        Err(e):
+            return false
+
+# ============================================================================
+# Login / Authentication
+# ============================================================================
+
+fn telnet_login(conn: TelnetConnection, username: text, password: text, timeout_ms: i64) -> bool:
+    """Authenticate to a telnet server by detecting login/password prompts.
+
+    Reads server output looking for common login prompt patterns
+    (e.g., "login:", "Username:"), sends username, then waits for
+    password prompt and sends password.
+
+    Args:
+        conn: Active telnet connection (just after connect)
+        username: Login username
+        password: Login password
+        timeout_ms: Timeout for each read operation in milliseconds
+
+    Returns:
+        true if login appears successful (prompt received after password)
+
+    Example:
+        val conn = telnet_connect("192.168.1.200", 23, 5000)?
+        if telnet_login(conn, "admin", "password123", 5000):
+            print "Logged in successfully"
+    """
+    if not conn.connected:
+        return false
+
+    # Wait for login prompt
+    var attempts = 0
+    var got_login_prompt = false
+    while attempts < 10:
+        val output = telnet_receive(conn, timeout_ms)
+        val lower = output.to_lower()
+        if (lower.contains("login:") or lower.contains("username:") or
+            lower.contains("login :") or lower.contains("user:")):
+            got_login_prompt = true
+            break
+        attempts = attempts + 1
+
+    if not got_login_prompt:
+        return false
+
+    # Send username
+    telnet_send(conn, username)
+
+    # Wait for password prompt
+    attempts = 0
+    var got_password_prompt = false
+    while attempts < 10:
+        val output = telnet_receive(conn, timeout_ms)
+        val lower = output.to_lower()
+        if (lower.contains("password:") or lower.contains("password :") or
+            lower.contains("passwd:")):
+            got_password_prompt = true
+            break
+        attempts = attempts + 1
+
+    if not got_password_prompt:
+        return false
+
+    # Send password
+    telnet_send(conn, password)
+
+    # Wait for shell prompt ($ or # or > indicates success)
+    attempts = 0
+    while attempts < 10:
+        val output = telnet_receive(conn, timeout_ms)
+        if (output.contains("$") or output.contains("#") or
+            output.contains(">") or output.contains("~")):
+            return true
+        val lower = output.to_lower()
+        # Check for login failure messages
+        if (lower.contains("incorrect") or lower.contains("denied") or
+            lower.contains("failed") or lower.contains("invalid")):
+            return false
+        attempts = attempts + 1
+
+    false
+
+# ============================================================================
+# Command Execution
+# ============================================================================
+
+fn telnet_command(conn: TelnetConnection, cmd: text, timeout_ms: i64) -> text:
+    """Send a command and wait for the response until a prompt is detected.
+
+    Sends the command, then reads output until a shell prompt character
+    ($ # or >) is found, indicating the command has completed.
+
+    Args:
+        conn: Active telnet connection (must be logged in)
+        cmd: Shell command to execute
+        timeout_ms: Timeout for each read operation in milliseconds
+
+    Returns:
+        Combined output text from the command (may include echoed command)
+
+    Example:
+        val output = telnet_command(conn, "uname -a", 5000)
+        print "System: {output}"
+    """
+    if not conn.connected:
+        return ""
+
+    # Send the command
+    telnet_send(conn, cmd)
+
+    # Collect output until we see a prompt
+    var output_parts: [text] = []
+    var attempts = 0
+    while attempts < 20:
+        val chunk = telnet_receive(conn, timeout_ms)
+        if chunk.length() == 0:
+            # Timeout - return what we have
+            break
+        output_parts.push(chunk)
+
+        # Check for shell prompt indicating command completed
+        val trimmed = chunk.trim()
+        if trimmed.length() > 0:
+            val last_char = trimmed[trimmed.length() - 1]
+            if (last_char == "$" or last_char == "#" or last_char == ">"):
+                break
+        attempts = attempts + 1
+
+    output_parts.join("")
+
+fn telnet_command_wait(conn: TelnetConnection, cmd: text, wait_for: text, timeout_ms: i64) -> text:
+    """Send a command and wait for a specific string in the response.
+
+    Useful for commands that produce known output markers.
+
+    Args:
+        conn: Active telnet connection
+        cmd: Shell command to execute
+        wait_for: String to wait for in output
+        timeout_ms: Timeout for each read operation in milliseconds
+
+    Returns:
+        Combined output text until wait_for string is found or timeout
+    """
+    if not conn.connected:
+        return ""
+
+    telnet_send(conn, cmd)
+
+    var output_parts: [text] = []
+    var attempts = 0
+    while attempts < 30:
+        val chunk = telnet_receive(conn, timeout_ms)
+        if chunk.length() == 0:
+            break
+        output_parts.push(chunk)
+        val output_so_far = output_parts.join("")
+        if output_so_far.contains(wait_for):
+            return output_so_far
+        attempts = attempts + 1
+
+    output_parts.join("")
+
+# ============================================================================
+# Utility Functions
+# ============================================================================
+
+fn telnet_is_connected(conn: TelnetConnection) -> bool:
+    """Check if telnet connection is still active.
+
+    Args:
+        conn: Telnet connection to check
+
+    Returns:
+        true if connection is marked as active
+    """
+    conn.connected
+
+fn telnet_send_break(conn: TelnetConnection) -> bool:
+    """Send a telnet BREAK signal.
+
+    Sends IAC + BREAK (243) sequence.
+
+    Args:
+        conn: Active telnet connection
+
+    Returns:
+        true if send was successful
+    """
+    var brk: [u8] = []
+    brk.push(iac_byte(TELNET_IAC))
+    brk.push(iac_byte(243))
+    telnet_send_raw(conn, brk)
+
+fn telnet_send_ayt(conn: TelnetConnection) -> bool:
+    """Send a telnet Are-You-There signal.
+
+    Args:
+        conn: Active telnet connection
+
+    Returns:
+        true if send was successful
+    """
+    var ayt: [u8] = []
+    ayt.push(iac_byte(TELNET_IAC))
+    ayt.push(iac_byte(TELNET_AYT))
+    telnet_send_raw(conn, ayt)

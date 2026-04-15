@@ -1,0 +1,153 @@
+# File Descriptor Table — per-process FD management
+#
+# Maps integer file descriptors to IPC port handles for VFS service.
+# FD 0 = stdin, FD 1 = stdout, FD 2 = stderr (serial on baremetal).
+#
+# Async by default: FD operations internally use non-blocking IPC.
+# Sync POSIX wrappers block the calling thread until completion.
+
+use os.posix.errno.{EBADF, EMFILE, EINVAL}
+
+val MAX_FDS: u64 = 256
+
+# FD entry types
+val FD_TYPE_FREE: u8 = 0
+val FD_TYPE_FILE: u8 = 1
+val FD_TYPE_PIPE_READ: u8 = 2
+val FD_TYPE_PIPE_WRITE: u8 = 3
+val FD_TYPE_SOCKET: u8 = 4
+val FD_TYPE_DEVICE: u8 = 5
+val FD_TYPE_SERIAL: u8 = 6
+
+# Open flags (POSIX O_* values)
+val O_RDONLY: u32 = 0
+val O_WRONLY: u32 = 1
+val O_RDWR: u32 = 2
+val O_CREAT: u32 = 64
+val O_TRUNC: u32 = 512
+val O_APPEND: u32 = 1024
+val O_NONBLOCK: u32 = 2048
+
+# Seek whence
+val SEEK_SET: u32 = 0
+val SEEK_CUR: u32 = 1
+val SEEK_END: u32 = 2
+
+# FD entry
+struct FdEntry:
+    fd_type: u8
+    flags: u32
+    ipc_port: u64      # IPC endpoint for VFS service
+    file_offset: u64   # current read/write position
+    path_hash: u64     # hash of the opened path (for debugging)
+    ref_count: u32     # for dup/dup2
+
+# Per-process FD table
+var fd_types: [u8; 256]
+var fd_flags: [u32; 256]
+var fd_ports: [u64; 256]
+var fd_offsets: [u64; 256]
+var fd_refcounts: [u32; 256]
+
+fn fd_table_init():
+    """Initialize FD table with stdin/stdout/stderr on serial."""
+    var i: u64 = 0
+    while i < MAX_FDS:
+        fd_types[i] = FD_TYPE_FREE
+        fd_flags[i] = 0
+        fd_ports[i] = 0
+        fd_offsets[i] = 0
+        fd_refcounts[i] = 0
+        i = i + 1
+    # FD 0: stdin (serial input)
+    fd_types[0] = FD_TYPE_SERIAL
+    fd_flags[0] = O_RDONLY
+    fd_refcounts[0] = 1
+    # FD 1: stdout (serial output)
+    fd_types[1] = FD_TYPE_SERIAL
+    fd_flags[1] = O_WRONLY
+    fd_refcounts[1] = 1
+    # FD 2: stderr (serial output)
+    fd_types[2] = FD_TYPE_SERIAL
+    fd_flags[2] = O_WRONLY
+    fd_refcounts[2] = 1
+
+fn fd_alloc() -> i32:
+    """Find the lowest free FD. Returns -EMFILE if table full."""
+    var i: u64 = 3  # skip stdin/stdout/stderr
+    while i < MAX_FDS:
+        if fd_types[i] == FD_TYPE_FREE:
+            return i as i32
+        i = i + 1
+    0 - EMFILE
+
+fn fd_is_valid(fd: i32) -> bool:
+    """Check if an FD is valid and allocated."""
+    if fd < 0:
+        return false
+    val idx: u64 = fd as u64
+    if idx >= MAX_FDS:
+        return false
+    fd_types[idx] != FD_TYPE_FREE
+
+fn fd_set(fd: i32, fd_type: u8, flags: u32, ipc_port: u64):
+    """Configure an FD entry."""
+    val idx: u64 = fd as u64
+    if idx < MAX_FDS:
+        fd_types[idx] = fd_type
+        fd_flags[idx] = flags
+        fd_ports[idx] = ipc_port
+        fd_offsets[idx] = 0
+        fd_refcounts[idx] = 1
+
+fn fd_close(fd: i32) -> i32:
+    """Close an FD. Returns 0 on success, -EBADF on error."""
+    if not fd_is_valid(fd):
+        return 0 - EBADF
+    val idx: u64 = fd as u64
+    fd_refcounts[idx] = fd_refcounts[idx] - 1
+    if fd_refcounts[idx] == 0:
+        fd_types[idx] = FD_TYPE_FREE
+        fd_flags[idx] = 0
+        fd_ports[idx] = 0
+        fd_offsets[idx] = 0
+    0
+
+fn fd_dup(old_fd: i32) -> i32:
+    """Duplicate an FD. Returns new FD or -EBADF/-EMFILE."""
+    if not fd_is_valid(old_fd):
+        return 0 - EBADF
+    val new_fd = fd_alloc()
+    if new_fd < 0:
+        return new_fd
+    val old_idx: u64 = old_fd as u64
+    val new_idx: u64 = new_fd as u64
+    fd_types[new_idx] = fd_types[old_idx]
+    fd_flags[new_idx] = fd_flags[old_idx]
+    fd_ports[new_idx] = fd_ports[old_idx]
+    fd_offsets[new_idx] = fd_offsets[old_idx]
+    fd_refcounts[new_idx] = 1
+    # Bump ref count on underlying resource
+    fd_refcounts[old_idx] = fd_refcounts[old_idx] + 1
+    new_fd
+
+fn fd_dup2(old_fd: i32, new_fd: i32) -> i32:
+    """Duplicate old_fd to new_fd, closing new_fd first if open."""
+    if not fd_is_valid(old_fd):
+        return 0 - EBADF
+    if new_fd < 0 or (new_fd as u64) >= MAX_FDS:
+        return 0 - EINVAL
+    if old_fd == new_fd:
+        return new_fd
+    # Close new_fd if it's open
+    if fd_is_valid(new_fd):
+        fd_close(new_fd)
+    val old_idx: u64 = old_fd as u64
+    val new_idx: u64 = new_fd as u64
+    fd_types[new_idx] = fd_types[old_idx]
+    fd_flags[new_idx] = fd_flags[old_idx]
+    fd_ports[new_idx] = fd_ports[old_idx]
+    fd_offsets[new_idx] = fd_offsets[old_idx]
+    fd_refcounts[new_idx] = 1
+    fd_refcounts[old_idx] = fd_refcounts[old_idx] + 1
+    new_fd

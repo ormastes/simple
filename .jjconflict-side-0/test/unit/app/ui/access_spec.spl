@@ -1,0 +1,136 @@
+# UI access protocol specification
+#
+# Tests the shared canonical snapshot, find helpers, and surface-scoped history.
+
+use std.spec.{describe, it, expect}
+use common.ui.builder.{column, text_widget, button, build_tree}
+use common.ui.session.{UISession}
+use common.ui.widget.{UIEvent}
+use common.ui.access.{UiAccessEvent, ui_access_canonical_id, ui_access_snapshot_from_state, ui_access_find_nodes, ui_access_record_action, ui_access_resolve_action_name, ui_access_ensure_result}
+use common.ui.access_store.{UiAccessStore}
+
+fn _demo_session() -> UISession:
+    val root = column("root").child(
+        text_widget("title", "Hello Access")
+    ).child(
+        button("submit_btn", "Submit", "submit")
+    )
+    val tree = build_tree(root)
+    return UISession.new(tree)
+
+describe "ui_access_canonical_id":
+    it "joins surface and widget ids":
+        expect(ui_access_canonical_id("main", "submit_btn")).to_equal("main#submit_btn")
+
+describe "ui_access_snapshot_from_state":
+    it "builds a snapshot for the main surface":
+        val session = _demo_session()
+        val snapshot = ui_access_snapshot_from_state(session.current_state(), [])
+        expect(snapshot.protocol_version).to_equal(1)
+        expect(snapshot.surfaces.len()).to_equal(1)
+        expect(snapshot.surfaces[0].surface_id).to_equal("main")
+        expect(snapshot.nodes.len()).to_be_greater_than(0)
+
+describe "ui_access_find_nodes":
+    it "finds nodes by kind and text":
+        val session = _demo_session()
+        val snapshot = session.access_snapshot()
+        val by_kind = ui_access_find_nodes(snapshot, "main", "button", "", false)
+        expect(by_kind.len()).to_equal(1)
+        expect(by_kind[0].widget_id).to_equal("submit_btn")
+        val by_text = ui_access_find_nodes(snapshot, "", "", "hello", false)
+        expect(by_text.len()).to_be_greater_than(0)
+
+    it "finds only focused nodes when requested":
+        val session = _demo_session()
+        val snapshot = session.access_snapshot()
+        val focused = ui_access_find_nodes(snapshot, "main", "", "", true)
+        expect(focused.len()).to_equal(1)
+        expect(focused[0].focused).to_equal(true)
+
+describe "ui_access_ensure_result":
+    it "evaluates existence, absence, and match_count expectations":
+        val session = _demo_session()
+        val snapshot = session.access_snapshot()
+        val exists = ui_access_ensure_result(snapshot, "main", "", "button", "Submit", false, 10, "exists", "")
+        expect(exists.satisfied).to_equal(true)
+        val absent = ui_access_ensure_result(snapshot, "main", "", "button", "Missing", false, 10, "absent", "")
+        expect(absent.satisfied).to_equal(true)
+        val count = ui_access_ensure_result(snapshot, "main", "", "button", "Submit", false, 10, "match_count", "1")
+        expect(count.satisfied).to_equal(true)
+
+    it "evaluates focused and enabled expectations against matched nodes":
+        val session = _demo_session()
+        val snapshot = session.access_snapshot()
+        val focused = ui_access_ensure_result(snapshot, "main", "", "", "Submit", true, 10, "focused", "")
+        expect(focused.satisfied).to_equal(true)
+        val enabled = ui_access_ensure_result(snapshot, "main", "main#submit_btn", "", "", false, 10, "enabled", "")
+        expect(enabled.satisfied).to_equal(true)
+
+describe "ui_access_resolve_action_name":
+    it "keeps explicit node actions and maps semantic aliases to targeted actions":
+        val session = _demo_session()
+        val snapshot = session.access_snapshot()
+        expect(ui_access_resolve_action_name(snapshot, "main#submit_btn", "submit")).to_equal("submit")
+        expect(ui_access_resolve_action_name(snapshot, "main#submit_btn", "invoke")).to_equal("click_submit_btn")
+        expect(ui_access_resolve_action_name(snapshot, "main#submit_btn", "focus")).to_equal("focus_submit_btn")
+
+describe "UISession access history":
+    it "records dispatched action events":
+        val session = _demo_session()
+        session.dispatch(UIEvent.Action(name: "submit"))
+        val events = session.access_recent_events(5)
+        expect(events.len()).to_equal(1)
+        expect(events[0].event_kind).to_equal("action")
+        expect(events[0].payload).to_equal("submit")
+
+    it "records surface scoped tree updates":
+        var session = _demo_session()
+        val popup_root = text_widget("popup_text", "Popup")
+        val popup_tree = build_tree(popup_root)
+        val popup_handle = session.open_surface("popup", popup_tree)
+        session.set_active_surface("popup")
+        val popup_updated = build_tree(
+            column("popup_root").child(text_widget("popup_text", "Popup Updated"))
+        )
+        session.update_surface_tree(popup_handle, popup_updated)
+        val events = session.access_recent_surface_events("popup", 10)
+        expect(events.len()).to_be_greater_than(0)
+        expect(events[0].surface_id).to_equal("popup")
+
+describe "UISession persisted access":
+    it "reads persisted snapshot nodes and events after attaching a store":
+        var session = _demo_session()
+        var store = UiAccessStore.memory()?
+        session.attach_access_store(store)
+        session.dispatch(UIEvent.Action(name: "submit"))
+        val persisted_events = session.access_persisted_events("main", 10)?
+        expect(persisted_events.len()).to_be_greater_than(0)
+        expect(persisted_events[0].surface_id).to_equal("main")
+        val persisted_nodes = session.access_search_nodes("main", "button", "submit", 10)?
+        expect(persisted_nodes.len()).to_equal(1)
+        expect(persisted_nodes[0].canonical_id).to_equal("main#submit_btn")
+
+    it "enriches live snapshots from the window-surface registry without persisting runtime window ids":
+        var session = _demo_session()
+        session.bind_window_surface("77", "main", 4242, "app.demo", "Demo Window")
+        val live_snapshot = session.access_snapshot()
+        expect(live_snapshot.surfaces.len()).to_equal(1)
+        expect(live_snapshot.surfaces[0].window_id).to_equal("77")
+        expect(live_snapshot.surfaces[0].app_id).to_equal("app.demo")
+        var store = UiAccessStore.memory()?
+        session.attach_access_store(store)
+        val persisted_surfaces = store.list_surfaces()?
+        expect(persisted_surfaces.len()).to_equal(1)
+        expect(persisted_surfaces[0].window_id).to_equal("")
+        expect(persisted_surfaces[0].app_id).to_equal("app.demo")
+
+describe "ui_access history bounds":
+    it "keeps recent event history bounded":
+        var events: [UiAccessEvent] = []
+        var seq = 0
+        while seq < 205:
+            seq = seq + 1
+            events = ui_access_record_action(events, seq, "main", "submit_btn", "action", "submit")
+        expect(events.len()).to_equal(200)
+        expect(events[0].sequence).to_equal(6)

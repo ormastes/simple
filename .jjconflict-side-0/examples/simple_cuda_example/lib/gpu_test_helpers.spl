@@ -1,0 +1,216 @@
+#![allow(export_outside_init)]
+#![allow(unnamed_duplicate_typed_args)]
+# GPU Test Helpers
+#
+# Shared utilities for CUDA example tests.
+# Provides GPU availability checks, convenience alloc/download wrappers,
+# and floating-point comparison.
+
+use std.nogc_sync_mut.gpu.{GpuArray, GpuBackend, detect_backends}
+use std.nogc_sync_mut.torch.ffi.{spl_i64_is_zero, spl_f64_to_bits}
+
+extern fn rt_torch_to_cuda(handle: i64, device_id: i32) -> i64
+extern fn rt_torch_free(handle: i64)
+extern fn rt_dyn_torch_tensor_from_bits_1d(data_bits_ptr: i64, data_len: i64) -> i64
+extern fn rt_alloc(size: i64) -> i64
+extern fn rt_free(ptr: i64, size: i64)
+extern fn rt_ptr_write_i64(addr: i64, offset: i64, value: i64)
+
+fn has_cuda_gpu() -> bool:
+    val backends = detect_backends()
+    for backend in backends:
+        match backend:
+            case GpuBackend.Cuda:
+                return true
+            case _:
+                pass_dn
+    false
+
+# ============================================================================
+# GPU Availability
+# ============================================================================
+
+# Check whether a GPU is available. Prints a warning and returns false if not.
+# Call this at the top of any example that requires a real device.
+fn assert_gpu_available() -> bool:
+    val backends = detect_backends()
+    var has_gpu = false
+    for backend in backends:
+        match backend:
+            case GpuBackend.Cuda:
+                has_gpu = true
+            case GpuBackend.Vulkan:
+                has_gpu = true
+            case _:
+                pass_dn
+
+    if not has_gpu:
+        eprint("WARNING: No GPU detected. Running in CPU-fallback mode.")
+        eprint("         Results may differ from real GPU execution.")
+    has_gpu
+
+# ============================================================================
+# Convenience Alloc / Download Wrappers
+# ============================================================================
+
+# Allocate a GPU array and upload host data in one step.
+# Returns a Result: Ok with the GpuArray, or Err with a GpuError message.
+fn alloc_and_upload(data: [f32]) -> Result<GpuArray<f32>, text>:
+    if not has_cuda_gpu():
+        return Err("GPU context not available")
+
+    var host_f64: [f64] = []
+    var i = 0
+    while i < data.len():
+        host_f64.push(data[i] as f64)
+        i = i + 1
+
+    val bytes = data.len() * 8
+    val raw_bits = rt_alloc(bytes)
+    if raw_bits == 0:
+        return Err("rt_alloc failed")
+
+    i = 0
+    while i < host_f64.len():
+        rt_ptr_write_i64(raw_bits, i * 8, spl_f64_to_bits(host_f64[i]))
+        i = i + 1
+
+    val cpu_handle = rt_dyn_torch_tensor_from_bits_1d(raw_bits, data.len())
+    rt_free(raw_bits, bytes)
+    if spl_i64_is_zero(cpu_handle):
+        return Err("rt_torch_tensor_from_data failed")
+
+    val gpu_handle = rt_torch_to_cuda(cpu_handle, 0)
+    rt_torch_free(cpu_handle)
+    if spl_i64_is_zero(gpu_handle):
+        return Err("rt_torch_to_cuda failed")
+
+    Ok(GpuArray(
+        backend: GpuBackend.Cuda,
+        device_id: 0,
+        count: data.len(),
+        torch_handle: gpu_handle
+    ))
+
+# Download data from a GpuArray and free the device memory.
+# `size` is the expected number of f32 elements.
+# Returns a Result: Ok with the host array, or Err with a message.
+fn download_and_free(arr: GpuArray<f32>, size: i64) -> Result<[f32], text>:
+    if arr.count != size:
+        return Err("Size mismatch: expected {size}, got {arr.count}")
+
+    if spl_i64_is_zero(arr.torch_handle):
+        return Err("GpuArray has no backing tensor")
+
+    val host_data = arr.download()
+    if host_data.len() != size:
+        return Err("Download length mismatch: expected {size}, got {host_data.len()}")
+    Ok(host_data)
+
+# Upload and immediately download data to validate host/device round-tripping.
+# Returns Ok(true) when values survive the round-trip within epsilon.
+fn roundtrip_f32(data: [f32], epsilon: f32) -> Result<bool, text>:
+    if not has_cuda_gpu():
+        return Err("GPU context not available")
+
+    val uploaded = alloc_and_upload(data)
+    val arr = match uploaded:
+        case Ok(gpu_arr):
+            gpu_arr
+        case Err(msg):
+            return Err(msg)
+
+    val downloaded = arr.download()
+    val host_data = downloaded
+    if host_data.len() != data.len():
+        return Err("Round-trip length mismatch: expected {data.len()}, got {host_data.len()}")
+
+    var i = 0
+    while i < data.len():
+        if not close_enough(host_data[i], data[i], epsilon):
+            return Err("Round-trip mismatch at index {i}: expected {data[i]}, got {host_data[i]}")
+        i = i + 1
+
+    Ok(true)
+
+fn copy_roundtrip_f32(data: [f32], epsilon: f32) -> Result<bool, text>:
+    if not has_cuda_gpu():
+        return Err("GPU context not available")
+
+    val uploaded = alloc_and_upload(data)
+    val source = match uploaded:
+        case Ok(arr):
+            arr
+        case Err(msg):
+            return Err(msg)
+
+    val cloned = source.copy()
+    if spl_i64_is_zero(cloned.torch_handle):
+        return Err("GpuArray.copy failed")
+
+    val host_data = cloned.download()
+    if host_data.len() != data.len():
+        return Err("Copy round-trip length mismatch: expected {data.len()}, got {host_data.len()}")
+
+    var i = 0
+    while i < data.len():
+        if not close_enough(host_data[i], data[i], epsilon):
+            return Err("Copy round-trip mismatch at index {i}: expected {data[i]}, got {host_data[i]}")
+        i = i + 1
+
+    Ok(true)
+
+fn copy_to_roundtrip_f32(data: [f32], epsilon: f32) -> Result<bool, text>:
+    if not has_cuda_gpu():
+        return Err("GPU context not available")
+
+    val uploaded = alloc_and_upload(data)
+    val source = match uploaded:
+        case Ok(arr):
+            arr
+        case Err(msg):
+            return Err(msg)
+
+    val dest = GpuArray(
+        backend: GpuBackend.Cuda,
+        device_id: 0,
+        count: data.len(),
+        torch_handle: 0
+    )
+
+    if not source.copy_to(dest):
+        return Err("GpuArray.copy_to failed")
+
+    val host_data = dest.download()
+    if host_data.len() != data.len():
+        return Err("Copy-to round-trip length mismatch: expected {data.len()}, got {host_data.len()}")
+
+    var i = 0
+    while i < data.len():
+        if not close_enough(host_data[i], data[i], epsilon):
+            return Err("Copy-to round-trip mismatch at index {i}: expected {data[i]}, got {host_data[i]}")
+        i = i + 1
+
+    Ok(true)
+
+# ============================================================================
+# Floating-Point Comparison
+# ============================================================================
+
+# Return true if |a - b| <= epsilon.
+# Use this instead of exact equality for GPU results that may have rounding.
+fn close_enough(a: f32, b: f32, epsilon: f32) -> bool:
+    val diff = a - b
+    var abs_diff = diff
+    if abs_diff < 0.0:
+        abs_diff = 0.0 - abs_diff
+    abs_diff <= epsilon
+
+# ============================================================================
+# Exports
+# ============================================================================
+
+export assert_gpu_available
+export alloc_and_upload, download_and_free
+export roundtrip_f32, copy_roundtrip_f32, copy_to_roundtrip_f32
+export close_enough

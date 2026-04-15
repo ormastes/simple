@@ -1,0 +1,127 @@
+//! Module evaluation and export collection for the Simple interpreter.
+//!
+//! This module handles evaluating module statements to collect definitions,
+//! process imports, and build the module's environment and exports.
+
+use std::collections::HashMap;
+use std::path::Path;
+use std::sync::Arc;
+
+use simple_parser::ast::{ClassDef, EnumDef, FunctionDef, Node};
+
+use crate::error::CompileError;
+use crate::value::{Env, Value};
+
+use super::module_cache::cache_partial_module_exports;
+
+mod evaluation_helpers;
+use evaluation_helpers::{
+    add_builtin_types, create_filtered_env, export_functions, process_bare_exports, process_imports_and_assignments,
+    register_definitions,
+};
+
+type Enums = HashMap<String, Arc<EnumDef>>;
+type ImplMethods = HashMap<String, Vec<Arc<simple_parser::ast::FunctionDef>>>;
+
+/// Collected module exports: (env, exports, functions, classes, enums).
+/// Functions are `Arc<FunctionDef>` for cheap sharing between cache and `Value::Function`.
+type ModuleExports = (
+    Env,
+    HashMap<String, Value>,
+    HashMap<String, Arc<simple_parser::ast::FunctionDef>>,
+    HashMap<String, Arc<ClassDef>>,
+    Enums,
+);
+
+/// Evaluate a module's statements and collect its environment and exports
+pub fn evaluate_module_exports(
+    items: &[Node],
+    module_path: Option<&Path>,
+    global_functions: &mut HashMap<String, Arc<simple_parser::ast::FunctionDef>>,
+    global_classes: &mut HashMap<String, Arc<ClassDef>>,
+    global_enums: &mut Enums,
+) -> Result<ModuleExports, CompileError> {
+    evaluate_module_exports_with_preloaded(items, module_path, global_functions, global_classes, global_enums, None)
+}
+
+/// Evaluate a module's statements with an optional preloaded environment.
+///
+/// When `preloaded_env` is provided (e.g., from loading `mod.spl` for an `__init__.spl`),
+/// those values are merged into the module's environment before processing bare export
+/// statements, so that `export X, Y, Z` can find symbols defined in the preloaded module.
+pub fn evaluate_module_exports_with_preloaded(
+    items: &[Node],
+    module_path: Option<&Path>,
+    global_functions: &mut HashMap<String, Arc<FunctionDef>>,
+    global_classes: &mut HashMap<String, Arc<ClassDef>>,
+    global_enums: &mut Enums,
+    preloaded_env: Option<&HashMap<String, Value>>,
+) -> Result<ModuleExports, CompileError> {
+    let mut env: Env = Env::new();
+    let mut exports: HashMap<String, Value> = HashMap::new();
+    let mut local_functions: HashMap<String, Arc<FunctionDef>> = HashMap::new();
+    let mut local_classes: HashMap<String, Arc<ClassDef>> = HashMap::new();
+    let mut local_enums: Enums = HashMap::new();
+    let impl_methods: ImplMethods = HashMap::new();
+
+    // Collect bare export statements (export X, Y) to process after all definitions are available
+    let mut bare_exports: Vec<Vec<String>> = Vec::new();
+
+    // Add builtin types to module environment
+    add_builtin_types(&mut env);
+
+    // If we have a preloaded environment (e.g., from mod.spl), merge it into env.
+    // This makes symbols from mod.spl available for bare exports in __init__.spl.
+    if let Some(preloaded) = preloaded_env {
+        for (name, value) in preloaded {
+            env.insert(name.clone(), value.clone());
+        }
+    }
+
+    // First pass: register functions and types
+    register_definitions(
+        items,
+        &mut local_functions,
+        global_functions,
+        &mut local_classes,
+        global_classes,
+        &mut local_enums,
+        global_enums,
+        &mut exports,
+        &mut env,
+    );
+
+    // Cache partial exports (type definitions) for circular import resolution
+    // This allows other modules that import this one to access types even during circular imports
+    if let Some(path) = module_path {
+        cache_partial_module_exports(path, Value::Dict(Arc::new(exports.clone())));
+    }
+
+    // Second pass: process imports and assignments to build the environment
+    process_imports_and_assignments(
+        items,
+        module_path,
+        &mut env,
+        &mut local_functions,
+        &mut local_classes,
+        &local_enums,
+        &impl_methods,
+        global_functions,
+        global_classes,
+        global_enums,
+        &mut exports,
+        &mut bare_exports,
+    )?;
+
+    // Create filtered environment and export functions.
+    // export_functions returns the Arc<FunctionDef> map it builds internally,
+    // so the same Arc instances flow into both Value::Function (in exports) and the cache.
+    let filtered_env = create_filtered_env(&env);
+    let local_functions_arc = export_functions(&local_functions, &filtered_env, &mut exports, &mut env);
+
+    // Process bare export statements
+    process_bare_exports(&bare_exports, &env, &mut exports);
+
+    // Return env, exports, and the local definitions for caching
+    Ok((env, exports, local_functions_arc, local_classes, local_enums))
+}

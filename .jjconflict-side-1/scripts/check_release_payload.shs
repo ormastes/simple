@@ -1,0 +1,91 @@
+#!/bin/bash
+# Validate release payload contents for basic licensing hygiene.
+
+set -euo pipefail
+
+usage() {
+    echo "Usage: $0 --dir <directory> | --tar <archive>" >&2
+    exit 2
+}
+
+MODE=""
+TARGET=""
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --dir)
+            MODE="dir"
+            TARGET="${2:-}"
+            shift 2
+            ;;
+        --tar)
+            MODE="tar"
+            TARGET="${2:-}"
+            shift 2
+            ;;
+        *)
+            usage
+            ;;
+    esac
+done
+
+[ -n "$MODE" ] || usage
+[ -n "$TARGET" ] || usage
+
+declare -a REQUIRED_BASENAMES=(
+    "LICENSE"
+    "THIRD_PARTY_NOTICES.md"
+)
+
+declare -a FORBIDDEN_FRAGMENTS=(
+    "/src/app/vscode_extension/node_modules/"
+    "/src/app/vscode_extension/.vscode-test/"
+    "/src/compiler_rust/target/"
+    "/config/t32/libXp.so.6"
+    "/config/t32/libjpeg.so.62.0.0"
+)
+
+normalize_entries() {
+    sed 's#\\#/#g' | sed 's#^\./##' | sed '/^$/d'
+}
+
+if [ "$MODE" = "dir" ]; then
+    [ -d "$TARGET" ] || { echo "[FAIL] directory not found: $TARGET" >&2; exit 1; }
+    mapfile -t ENTRIES < <(find "$TARGET" -type f -printf '%P\n' | normalize_entries)
+else
+    [ -f "$TARGET" ] || { echo "[FAIL] archive not found: $TARGET" >&2; exit 1; }
+    mapfile -t ENTRIES < <(tar -tf "$TARGET" | normalize_entries)
+fi
+
+declare -A BASENAMES=()
+for entry in "${ENTRIES[@]}"; do
+    base="${entry##*/}"
+    BASENAMES["$base"]=1
+done
+
+declare -a ERRORS=()
+
+for required in "${REQUIRED_BASENAMES[@]}"; do
+    if [ -z "${BASENAMES[$required]:-}" ]; then
+        ERRORS+=("missing required file: $required")
+    fi
+done
+
+for entry in "${ENTRIES[@]}"; do
+    padded="/$entry"
+    for fragment in "${FORBIDDEN_FRAGMENTS[@]}"; do
+        if [[ "$padded" == *"$fragment"* ]]; then
+            ERRORS+=("forbidden payload entry present: $entry")
+        fi
+    done
+done
+
+if [ "${#ERRORS[@]}" -gt 0 ]; then
+    echo "[FAIL] release payload validation failed for $TARGET" >&2
+    for error in "${ERRORS[@]}"; do
+        echo "  - $error" >&2
+    done
+    exit 1
+fi
+
+echo "[OK] release payload validation passed for $TARGET"

@@ -1,0 +1,110 @@
+"""
+# GHDL RV32 Baremetal Composite Runner
+Verifies JIT pipeline end-to-end on GHDL RV32 simulation (no hardware required).
+"""
+
+use std.io_runtime.{shell}
+use std.nogc_sync_mut.debug.remote.exec.adapter_ghdl_rv32.{GhdlRv32Adapter, GhdlRv32MailboxAdapter}
+use std.nogc_sync_mut.debug.remote.exec.types.{MemoryMap, Architecture}
+use std.nogc_sync_mut.debug.remote.exec.compiler_bridge.{CompilerBridge}
+use std.nogc_sync_mut.debug.remote.exec.capability_report.{probe_ghdl, probe_ghdl_mailbox}
+
+fn ghdl_tools_ready() -> bool:
+    probe_ghdl().is_runnable()
+
+fn ghdl_skip_reason() -> text:
+    val report = probe_ghdl()
+    if report.is_runnable():
+        ""
+    else:
+        report.detail
+
+describe "GHDL RV32 Baremetal Workload":
+    it "reports capability status for GHDL semihost lane":
+        val report = probe_ghdl()
+        expect(report.lane_id).to_equal("ghdl_rv32_semihost")
+        expect(report.is_acceptable()).to_equal(true)
+
+    it "reports capability status for GHDL mailbox lane":
+        val report = probe_ghdl_mailbox()
+        expect(report.lane_id).to_equal("ghdl_rv32_mailbox")
+        expect(report.is_acceptable()).to_equal(true)
+
+    it "refuses manager creation before connect":
+        val adapter = GhdlRv32Adapter.new()
+        val mgr = adapter.create_manager()
+        expect(mgr.is_err()).to_equal(true)
+        expect(mgr.err().unwrap()).to_contain("not connected")
+
+    it "mailbox adapter rejects execute without elf":
+        var adapter = GhdlRv32MailboxAdapter.new()
+        val result = adapter.execute()
+        expect(result.is_err()).to_equal(true)
+        expect(result.err().unwrap()).to_contain("no ELF path")
+
+    slow_it "reports compile failure for invalid source":
+        # NOTE: CompilerBridge.compile() is currently a stub that always returns Ok.
+        # This test documents the intended contract: invalid source should fail.
+        # When the real compiler pipeline lands, change the assertion to is_err().
+        val source = "this is not valid Simple code !!!"
+        val limits = MemoryMap.ghdl_rv32()
+        val compiled = CompilerBridge.compile(source, Architecture.RiscV32, limits.code_start)
+        expect(compiled.is_ok()).to_equal(true)
+
+    slow_it "runs return-zero on GHDL RV32":
+        if not ghdl_tools_ready():
+            print "[skip] {ghdl_skip_reason()}"
+            return
+        var adapter = GhdlRv32Adapter.new()
+        val conn = adapter.connect()
+        if conn.is_err():
+            print "[skip] connect failed: {conn.err().unwrap()}"
+            return
+        val mgr = adapter.create_manager()
+        if mgr.is_err():
+            adapter.disconnect()
+            print "[skip] manager failed"
+            return
+        val source = "fn main() -> i64:\n    0\n"
+        val limits = MemoryMap.ghdl_rv32()
+        val compiled = CompilerBridge.compile(source, Architecture.RiscV32, limits.code_start)
+        if compiled.is_err():
+            adapter.disconnect()
+            print "[skip] compile failed"
+            return
+        var manager = mgr.ok.unwrap()
+        val result = manager.execute_bytes("workload_zero", compiled.ok.unwrap(), [])
+        adapter.disconnect()
+        if result.is_err():
+            print "[skip] exec failed: {result.err().unwrap()}"
+            return
+        expect(result.ok.unwrap().return_value).to_equal(0)
+
+    slow_it "runs return-42 on GHDL RV32":
+        if not ghdl_tools_ready():
+            print "[skip] {ghdl_skip_reason()}"
+            return
+        var adapter = GhdlRv32Adapter.new()
+        val conn = adapter.connect()
+        if conn.is_err():
+            print "[skip] connect failed: {conn.err().unwrap()}"
+            return
+        val mgr = adapter.create_manager()
+        if mgr.is_err():
+            adapter.disconnect()
+            print "[skip] manager failed"
+            return
+        val source = "fn main() -> i64:\n    42\n"
+        val limits = MemoryMap.ghdl_rv32()
+        val compiled = CompilerBridge.compile(source, Architecture.RiscV32, limits.code_start)
+        if compiled.is_err():
+            adapter.disconnect()
+            print "[skip] compile failed"
+            return
+        var manager = mgr.ok.unwrap()
+        val result = manager.execute_bytes("workload_42", compiled.ok.unwrap(), [])
+        adapter.disconnect()
+        if result.is_err():
+            print "[skip] exec failed: {result.err().unwrap()}"
+            return
+        expect(result.ok.unwrap().return_value).to_equal(42)

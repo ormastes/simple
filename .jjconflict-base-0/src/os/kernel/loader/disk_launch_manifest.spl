@@ -1,0 +1,63 @@
+#![allow(unnamed_duplicate_typed_args)]
+# Disk Launch Manifest — Transitional disk-backed app launch metadata
+#
+# Resolves a small set of packaged app manifests from the QEMU FAT32 image.
+# This is a bridge away from path->builtin kernel embedding on x86_64 baremetal
+# while the full filesystem-backed user ELF exec path is still under
+# construction.
+
+use os.apps.browser_demo.browser_demo.{browser_demo_remote_main}
+use os.apps.file_manager.file_manager.{file_manager_remote_main}
+use os.apps.hello_world.hello_world.{hello_world_remote_main}
+use os.apps.shell.shell_app.{shell_remote_main}
+
+extern fn rt_fat32_read_file_text(name: text) -> text
+
+fn disk_manifest_filename_for_path(path: text) -> text:
+    """Map canonical app paths to the packaged FAT32 manifest filename."""
+    if path == "/usr/local/bin/browser-demo" or path == "/sys/apps/browser_demo":
+        return "BROWSER.APP"
+    if path == "/usr/bin/hello-world" or path == "/sys/apps/hello_world":
+        return "HELLO.APP"
+    if path == "/usr/bin/file-manager" or path == "/sys/apps/file_manager":
+        return "FILEMAN.APP"
+    if path == "/bin/shell" or path == "/sys/apps/shell":
+        return "SHELL.APP"
+    ""
+
+fn parse_disk_launch_entry_name(content: text) -> text:
+    """Extract `entry=<symbol>` from a simple line-oriented manifest."""
+    val lines = content.split("\n")
+    var i: u64 = 0
+    while i < lines.len().to_u64():
+        val line = lines[i as i64].trim()
+        if line.starts_with("#") or line == "":
+            i = i + 1
+            continue
+        if line.starts_with("entry="):
+            return line.slice(6, line.len()).trim()
+        i = i + 1
+    ""
+
+fn resolve_disk_launch_entry(path: text) -> u64?:
+    """Resolve a disk-backed resident app entry from the FAT32 image."""
+    val manifest_name = disk_manifest_filename_for_path(path)
+    if manifest_name == "":
+        return nil
+
+    val content = rt_fat32_read_file_text(manifest_name)
+    if content.trim() == "":
+        return nil
+
+    val entry_name = parse_disk_launch_entry_name(content)
+    match entry_name:
+        case "browser_demo_remote_main":
+            Some(browser_demo_remote_main as u64)
+        case "hello_world_remote_main":
+            Some(hello_world_remote_main as u64)
+        case "file_manager_remote_main":
+            Some(file_manager_remote_main as u64)
+        case "shell_remote_main":
+            Some(shell_remote_main as u64)
+        case _:
+            nil

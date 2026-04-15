@@ -1,0 +1,106 @@
+#![allow(unnamed_duplicate_typed_args)]
+# cut — Remove sections from lines
+# MDSOC: feature dimension, shell layer
+
+use os.apps.terminal.terminal.{Terminal}
+use os.services.vfs.vfs.{VfsManager}
+use os.tools.shell.shell_helpers.{resolve_path, write_line, write_error}
+
+fn tool_cut(vfs: VfsManager?, cwd: text, args: [text], terminal: Terminal) -> i32:
+    """Cut fields or character ranges from lines.
+
+    Flags: -d DELIM (delimiter, default tab), -f FIELDS (1-based, comma-separated)
+           -c CHARS (character positions)
+    Usage: cut -d: -f1,3 FILE
+    """
+    var delimiter = "\t"
+    var fields: [i32] = []
+    var chars: [i32] = []
+    var file_path = ""
+    var i = 0
+
+    while i < args.len():
+        val arg = args[i]
+        if arg == "-d" and i + 1 < args.len():
+            i = i + 1
+            delimiter = args[i]
+        elif arg.starts_with("-d"):
+            delimiter = arg.slice(2, arg.len())
+        elif arg == "-f" and i + 1 < args.len():
+            i = i + 1
+            fields = _parse_field_list(args[i])
+        elif arg.starts_with("-f"):
+            fields = _parse_field_list(arg.slice(2, arg.len()))
+        elif arg == "-c" and i + 1 < args.len():
+            i = i + 1
+            chars = _parse_field_list(args[i])
+        elif arg.starts_with("-c"):
+            chars = _parse_field_list(arg.slice(2, arg.len()))
+        elif not arg.starts_with("-"):
+            file_path = arg
+        i = i + 1
+
+    if file_path == "":
+        write_error(terminal, "cut: missing file operand")
+        return 1
+    if fields.len() == 0 and chars.len() == 0:
+        write_error(terminal, "cut: must specify -f or -c")
+        return 1
+    if vfs == nil:
+        write_error(terminal, "cut: no filesystem mounted")
+        return 1
+
+    val path = resolve_path(cwd, file_path)
+    val result = vfs.read_text(path)
+    if result.is_err():
+        write_error(terminal, "cut: {path}: {result.unwrap_err()}")
+        return 1
+
+    val content = result.unwrap()
+    for line in content.split("\n"):
+        if chars.len() > 0:
+            write_line(terminal, _cut_chars(line, chars))
+        else:
+            write_line(terminal, _cut_fields(line, delimiter, fields))
+    return 0
+
+fn _cut_fields(line: text, delim: text, fields: [i32]) -> text:
+    """Extract specified fields from a delimited line."""
+    val parts = line.split(delim)
+    var output = ""
+    var first = true
+    for f in fields:
+        val idx = f - 1
+        if idx >= 0 and idx < parts.len() as i32:
+            if not first:
+                output = "{output}{delim}"
+            output = "{output}{parts[idx]}"
+            first = false
+    return output
+
+fn _cut_chars(line: text, positions: [i32]) -> text:
+    """Extract characters at specified positions."""
+    var result = ""
+    for pos in positions:
+        val idx = pos - 1
+        if idx >= 0 and idx < line.len() as i32:
+            result = "{result}{line.char_at(idx)}"
+    return result
+
+fn _parse_field_list(spec: text) -> [i32]:
+    """Parse comma-separated field numbers (1-based)."""
+    var fields: [i32] = []
+    var current: i32 = 0
+    var has_digit = false
+    for ch in spec:
+        if ch >= "0" and ch <= "9":
+            current = current * 10 + (ch.to_i32() - "0".to_i32())
+            has_digit = true
+        elif ch == ",":
+            if has_digit:
+                fields = fields.push(current)
+            current = 0
+            has_digit = false
+    if has_digit:
+        fields = fields.push(current)
+    return fields

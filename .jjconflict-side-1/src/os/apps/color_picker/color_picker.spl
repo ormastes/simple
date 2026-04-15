@@ -1,0 +1,515 @@
+#![allow(unnamed_duplicate_typed_args)]
+# Color Picker — Color Selection Utility
+#
+# RGB slider controls, hex/HSL display, color preview, preset palette,
+# and color history. Keyboard and button-driven interaction.
+#
+# MDSOC: feature dimension, apps layer
+
+use common.ui.builder.{
+    column, row, panel, button, text_widget, label,
+    statusbar, menubar, build_tree_with_title,
+    with_flex, with_width
+}
+use common.ui.widget.{WidgetNode, UITree, UIEvent}
+use common.ui.session.{UISession}
+
+# =========================================================================
+# Color Value
+# =========================================================================
+
+struct ColorValue:
+    """An RGB color with components in 0-255."""
+    r: i32
+    g: i32
+    b: i32
+
+# =========================================================================
+# Hex Helpers
+# =========================================================================
+
+fn _hex_digit(n: i32) -> text:
+    """Convert a value 0-15 to a single hex character."""
+    match n:
+        0  => "0"
+        1  => "1"
+        2  => "2"
+        3  => "3"
+        4  => "4"
+        5  => "5"
+        6  => "6"
+        7  => "7"
+        8  => "8"
+        9  => "9"
+        10 => "A"
+        11 => "B"
+        12 => "C"
+        13 => "D"
+        14 => "E"
+        15 => "F"
+        _  => "0"
+
+fn _to_hex(color: ColorValue) -> text:
+    """Format an RGB color as #RRGGBB."""
+    val rh = _hex_digit(color.r / 16)
+    val rl = _hex_digit(color.r % 16)
+    val gh = _hex_digit(color.g / 16)
+    val gl = _hex_digit(color.g % 16)
+    val bh = _hex_digit(color.b / 16)
+    val bl = _hex_digit(color.b % 16)
+    "#{rh}{rl}{gh}{gl}{bh}{bl}"
+
+# =========================================================================
+# HSL Conversion
+# =========================================================================
+
+fn _min3(a: i32, b: i32, c: i32) -> i32:
+    var m = a
+    if b < m:
+        m = b
+    if c < m:
+        m = c
+    m
+
+fn _max3(a: i32, b: i32, c: i32) -> i32:
+    var m = a
+    if b > m:
+        m = b
+    if c > m:
+        m = c
+    m
+
+fn _abs(n: i32) -> i32:
+    if n < 0: 0 - n else: n
+
+fn _to_hsl(color: ColorValue) -> [i32]:
+    """Convert RGB (0-255) to HSL. Returns [h, s, l] where h=0-360, s=0-100, l=0-100."""
+    val r = color.r
+    val g = color.g
+    val b = color.b
+    val cmax = _max3(r, g, b)
+    val cmin = _min3(r, g, b)
+    val delta = cmax - cmin
+
+    # Lightness (0-100), using integer math: L = (cmax + cmin) * 100 / 510
+    val l = (cmax + cmin) * 100 / 510
+
+    # Saturation
+    var s = 0
+    if delta != 0:
+        if l <= 50:
+            s = delta * 100 / (cmax + cmin)
+        else:
+            s = delta * 100 / (510 - cmax - cmin)
+
+    # Hue
+    var h = 0
+    if delta != 0:
+        if cmax == r:
+            h = 60 * ((g - b) * 100 / delta) / 100
+            if g < b:
+                h = h + 360
+        elif cmax == g:
+            h = 60 * ((b - r) * 100 / delta) / 100 + 120
+        else:
+            h = 60 * ((r - g) * 100 / delta) / 100 + 240
+        if h < 0:
+            h = h + 360
+        if h >= 360:
+            h = h - 360
+
+    [h, s, l]
+
+# =========================================================================
+# Clamp Helper
+# =========================================================================
+
+fn _clamp(v: i32, lo: i32, hi: i32) -> i32:
+    if v < lo: lo
+    elif v > hi: hi
+    else: v
+
+# =========================================================================
+# Default Presets
+# =========================================================================
+
+fn _default_presets() -> [ColorValue]:
+    """16 basic color presets."""
+    [
+        ColorValue(r: 0,   g: 0,   b: 0),     # Black
+        ColorValue(r: 255, g: 255, b: 255),    # White
+        ColorValue(r: 255, g: 0,   b: 0),      # Red
+        ColorValue(r: 0,   g: 255, b: 0),      # Green
+        ColorValue(r: 0,   g: 0,   b: 255),    # Blue
+        ColorValue(r: 255, g: 255, b: 0),      # Yellow
+        ColorValue(r: 0,   g: 255, b: 255),    # Cyan
+        ColorValue(r: 255, g: 0,   b: 255),    # Magenta
+        ColorValue(r: 128, g: 128, b: 128),    # Gray
+        ColorValue(r: 128, g: 0,   b: 0),      # Maroon
+        ColorValue(r: 0,   g: 128, b: 0),      # Dark Green
+        ColorValue(r: 0,   g: 0,   b: 128),    # Navy
+        ColorValue(r: 128, g: 128, b: 0),      # Olive
+        ColorValue(r: 128, g: 0,   b: 128),    # Purple
+        ColorValue(r: 0,   g: 128, b: 128),    # Teal
+        ColorValue(r: 255, g: 165, b: 0)       # Orange
+    ]
+
+fn _preset_name(idx: i32) -> text:
+    """Human-readable name for a preset index."""
+    match idx:
+        0  => "Black"
+        1  => "White"
+        2  => "Red"
+        3  => "Green"
+        4  => "Blue"
+        5  => "Yellow"
+        6  => "Cyan"
+        7  => "Magenta"
+        8  => "Gray"
+        9  => "Maroon"
+        10 => "DkGreen"
+        11 => "Navy"
+        12 => "Olive"
+        13 => "Purple"
+        14 => "Teal"
+        15 => "Orange"
+        _  => "?"
+
+# =========================================================================
+# Color Picker App
+# =========================================================================
+
+class ColorPickerApp:
+    """Color selection utility with RGB sliders, hex/HSL display,
+    preset palette, and color history."""
+    color: ColorValue
+    history: [ColorValue]
+    presets: [ColorValue]
+    active_channel: text
+    status_message: text
+    clipboard: text
+
+impl ColorPickerApp:
+
+    static fn new() -> ColorPickerApp:
+        """Create a color picker with default state."""
+        ColorPickerApp(
+            color: ColorValue(r: 128, g: 64, b: 200),
+            history: [],
+            presets: _default_presets(),
+            active_channel: "r",
+            status_message: "Ready",
+            clipboard: ""
+        )
+
+    # -- Channel adjustment --------------------------------------------------
+
+    me set_red(val: i32):
+        """Set the red channel, clamped to 0-255."""
+        self.color = ColorValue(r: _clamp(val, 0, 255), g: self.color.g, b: self.color.b)
+
+    me set_green(val: i32):
+        """Set the green channel, clamped to 0-255."""
+        self.color = ColorValue(r: self.color.r, g: _clamp(val, 0, 255), b: self.color.b)
+
+    me set_blue(val: i32):
+        """Set the blue channel, clamped to 0-255."""
+        self.color = ColorValue(r: self.color.r, g: self.color.g, b: _clamp(val, 0, 255))
+
+    me adjust_channel(channel: text, delta: i32):
+        """Adjust a channel by delta (+/- step)."""
+        match channel:
+            "r": self.set_red(self.color.r + delta)
+            "g": self.set_green(self.color.g + delta)
+            "b": self.set_blue(self.color.b + delta)
+            _ => pass_dn
+
+    # -- Preset selection ----------------------------------------------------
+
+    me select_preset(idx: i32):
+        """Pick a color from the preset palette."""
+        if idx >= 0 and idx < self.presets.len():
+            self.add_to_history()
+            val preset = self.presets[idx]
+            self.color = ColorValue(r: preset.r, g: preset.g, b: preset.b)
+            self.status_message = "Preset: {_preset_name(idx)}"
+
+    # -- History -------------------------------------------------------------
+
+    me add_to_history():
+        """Save the current color to history (max 8 entries)."""
+        self.history = self.history.push(
+            ColorValue(r: self.color.r, g: self.color.g, b: self.color.b)
+        )
+        if self.history.len() > 8:
+            var trimmed = []
+            var i = self.history.len() - 8
+            while i < self.history.len():
+                trimmed = trimmed.push(self.history[i])
+                i = i + 1
+            self.history = trimmed
+
+    me select_history(idx: i32):
+        """Restore a color from history."""
+        if idx >= 0 and idx < self.history.len():
+            val h = self.history[idx]
+            self.color = ColorValue(r: h.r, g: h.g, b: h.b)
+            self.status_message = "Restored {_to_hex(self.color)}"
+
+    # -- Clipboard -----------------------------------------------------------
+
+    me copy_hex():
+        """Copy the current hex value to the simulated clipboard."""
+        self.add_to_history()
+        self.clipboard = _to_hex(self.color)
+        self.status_message = "Copied {self.clipboard}"
+
+    # -- Key handling --------------------------------------------------------
+
+    me handle_key(key: text):
+        """Map keyboard input to color picker actions.
+
+        r/g/b select the active channel. Up/Down adjust it by 5.
+        Shift+Up/Down adjust by 1. 1-9 and 0 select presets.
+        c copies hex. h shows history item 0, etc.
+        """
+        match key:
+            "r":
+                self.active_channel = "r"
+                self.status_message = "Channel: Red"
+            "g":
+                self.active_channel = "g"
+                self.status_message = "Channel: Green"
+            "b":
+                self.active_channel = "b"
+                self.status_message = "Channel: Blue"
+            "Up":
+                self.adjust_channel(self.active_channel, 5)
+            "Down":
+                self.adjust_channel(self.active_channel, -5)
+            "Right":
+                self.adjust_channel(self.active_channel, 1)
+            "Left":
+                self.adjust_channel(self.active_channel, -1)
+            "1": self.select_preset(0)
+            "2": self.select_preset(1)
+            "3": self.select_preset(2)
+            "4": self.select_preset(3)
+            "5": self.select_preset(4)
+            "6": self.select_preset(5)
+            "7": self.select_preset(6)
+            "8": self.select_preset(7)
+            "9": self.select_preset(8)
+            "0": self.select_preset(9)
+            "c": self.copy_hex()
+            "Escape":
+                self.color = ColorValue(r: 0, g: 0, b: 0)
+                self.status_message = "Reset to black"
+            _ => pass_dn
+
+    # -- Action dispatch -----------------------------------------------------
+
+    me handle_action(action: text):
+        """Dispatch button action strings."""
+        match action:
+            "r_up":   self.adjust_channel("r", 5)
+            "r_down": self.adjust_channel("r", -5)
+            "g_up":   self.adjust_channel("g", 5)
+            "g_down": self.adjust_channel("g", -5)
+            "b_up":   self.adjust_channel("b", 5)
+            "b_down": self.adjust_channel("b", -5)
+            "r_up1":   self.adjust_channel("r", 1)
+            "r_down1": self.adjust_channel("r", -1)
+            "g_up1":   self.adjust_channel("g", 1)
+            "g_down1": self.adjust_channel("g", -1)
+            "b_up1":   self.adjust_channel("b", 1)
+            "b_down1": self.adjust_channel("b", -1)
+            "copy_hex": self.copy_hex()
+            "preset_0":  self.select_preset(0)
+            "preset_1":  self.select_preset(1)
+            "preset_2":  self.select_preset(2)
+            "preset_3":  self.select_preset(3)
+            "preset_4":  self.select_preset(4)
+            "preset_5":  self.select_preset(5)
+            "preset_6":  self.select_preset(6)
+            "preset_7":  self.select_preset(7)
+            "preset_8":  self.select_preset(8)
+            "preset_9":  self.select_preset(9)
+            "preset_10": self.select_preset(10)
+            "preset_11": self.select_preset(11)
+            "preset_12": self.select_preset(12)
+            "preset_13": self.select_preset(13)
+            "preset_14": self.select_preset(14)
+            "preset_15": self.select_preset(15)
+            "hist_0": self.select_history(0)
+            "hist_1": self.select_history(1)
+            "hist_2": self.select_history(2)
+            "hist_3": self.select_history(3)
+            "hist_4": self.select_history(4)
+            "hist_5": self.select_history(5)
+            "hist_6": self.select_history(6)
+            "hist_7": self.select_history(7)
+            _ => self.status_message = "Unknown action: {action}"
+
+    # -- UI Construction -----------------------------------------------------
+
+    me build_ui() -> UISession:
+        """Build the color picker UI.
+
+        Layout:
+          Menubar
+          RGB slider controls (value + up/down buttons per channel)
+          Hex display + copy button
+          HSL display
+          Color preview panel
+          Preset palette (two rows of 8)
+          History row
+          Statusbar
+        """
+        val hex = _to_hex(self.color)
+        val hsl = _to_hsl(self.color)
+        val h_val = hsl[0]
+        val s_val = hsl[1]
+        val l_val = hsl[2]
+
+        # -- RGB slider rows --
+        val r_bar = _bar_text(self.color.r)
+        val g_bar = _bar_text(self.color.g)
+        val b_bar = _bar_text(self.color.b)
+
+        val red_row = row("cp_red_row", [
+            with_width(label("cp_r_label", "R:"), 3),
+            with_width(text_widget("cp_r_val", "{self.color.r}"), 4),
+            button("btn_r_down", "-", "r_down"),
+            with_flex(text_widget("cp_r_bar", r_bar), 1),
+            button("btn_r_up", "+", "r_up")
+        ])
+
+        val green_row = row("cp_green_row", [
+            with_width(label("cp_g_label", "G:"), 3),
+            with_width(text_widget("cp_g_val", "{self.color.g}"), 4),
+            button("btn_g_down", "-", "g_down"),
+            with_flex(text_widget("cp_g_bar", g_bar), 1),
+            button("btn_g_up", "+", "g_up")
+        ])
+
+        val blue_row = row("cp_blue_row", [
+            with_width(label("cp_b_label", "B:"), 3),
+            with_width(text_widget("cp_b_val", "{self.color.b}"), 4),
+            button("btn_b_down", "-", "b_down"),
+            with_flex(text_widget("cp_b_bar", b_bar), 1),
+            button("btn_b_up", "+", "b_up")
+        ])
+
+        # -- Hex + HSL info --
+        val hex_row = row("cp_hex_row", [
+            label("cp_hex_label", "Hex:"),
+            with_flex(text_widget("cp_hex_val", hex), 1),
+            button("btn_copy", "Copy", "copy_hex")
+        ])
+
+        val hsl_row = row("cp_hsl_row", [
+            label("cp_hsl_label", "HSL:"),
+            with_flex(text_widget("cp_hsl_val", "H:{h_val} S:{s_val}% L:{l_val}%"), 1)
+        ])
+
+        # -- Preview --
+        val preview_text = "          {hex}          "
+        val preview_panel = panel("cp_preview", "Preview", [
+            text_widget("cp_preview_color", preview_text),
+            text_widget("cp_preview_rgb", "RGB({self.color.r}, {self.color.g}, {self.color.b})")
+        ])
+
+        # -- Preset palette: two rows of 8 --
+        var preset_row1_widgets = []
+        var idx = 0
+        while idx < 8:
+            val pname = _preset_name(idx)
+            val pid = "preset_{idx}"
+            preset_row1_widgets = preset_row1_widgets.push(
+                with_flex(button("btn_p{idx}", pname, pid), 1)
+            )
+            idx = idx + 1
+
+        var preset_row2_widgets = []
+        idx = 8
+        while idx < 16:
+            val pname = _preset_name(idx)
+            val pid = "preset_{idx}"
+            preset_row2_widgets = preset_row2_widgets.push(
+                with_flex(button("btn_p{idx}", pname, pid), 1)
+            )
+            idx = idx + 1
+
+        val presets_panel = panel("cp_presets", "Presets", [
+            row("cp_preset_row1", preset_row1_widgets),
+            row("cp_preset_row2", preset_row2_widgets)
+        ])
+
+        # -- History row --
+        var hist_widgets = []
+        var hi = 0
+        while hi < self.history.len():
+            val hc = self.history[hi]
+            val hx = _to_hex(hc)
+            hist_widgets = hist_widgets.push(
+                with_flex(button("btn_h{hi}", hx, "hist_{hi}"), 1)
+            )
+            hi = hi + 1
+        # Fill remaining slots with placeholders
+        while hi < 8:
+            hist_widgets = hist_widgets.push(
+                with_flex(label("cp_h_empty_{hi}", "---"), 1)
+            )
+            hi = hi + 1
+
+        val history_panel = panel("cp_history", "History", [
+            row("cp_hist_row", hist_widgets)
+        ])
+
+        # -- Assemble root --
+        val clipboard_info = if self.clipboard != "": " | Clipboard: {self.clipboard}" else: ""
+
+        val root = column("cp_root", [
+            menubar("cp_menu", [
+                "File", "Edit", "Help"
+            ]),
+            panel("cp_sliders", "RGB Channels", [
+                red_row,
+                green_row,
+                blue_row
+            ]),
+            row("cp_info_row", [
+                with_flex(column("cp_info_col", [
+                    hex_row,
+                    hsl_row
+                ]), 1),
+                with_flex(preview_panel, 1)
+            ]),
+            presets_panel,
+            history_panel,
+            statusbar("cp_status",
+                "{hex} | R:{self.color.r} G:{self.color.g} B:{self.color.b}{clipboard_info}",
+                "Color Picker"
+            )
+        ])
+
+        val tree = build_tree_with_title(root, "Color Picker", "dark")
+        UISession.new(tree)
+
+# =========================================================================
+# Bar Rendering Helper
+# =========================================================================
+
+fn _bar_text(value: i32) -> text:
+    """Render a simple text bar representing 0-255 as filled/empty blocks."""
+    val filled = value * 20 / 255
+    var bar = ""
+    var i = 0
+    while i < 20:
+        if i < filled:
+            bar = "{bar}#"
+        else:
+            bar = "{bar}-"
+        i = i + 1
+    bar

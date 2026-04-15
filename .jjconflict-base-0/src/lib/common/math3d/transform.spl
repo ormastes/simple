@@ -1,0 +1,119 @@
+@allow(primitive_api)
+# 3D Math — Transform
+#
+# Position + Rotation (Quaternion) + Scale combined transform.
+# Composes to a Mat4 via TRS (Translation * Rotation * Scale).
+#
+# Usage:
+#   val t = Transform.identity()
+#   val m = t.to_matrix()
+#   val fwd = t.forward()
+#   val child_t = t.compose(other_t)
+
+use std.common.math3d.vec.{Vec3}
+use std.common.math3d.mat.{Mat4}
+use std.common.math3d.quat.{Quaternion}
+
+# ============================================================================
+# Transform
+# ============================================================================
+
+class Transform:
+    position: Vec3
+    rotation: Quaternion
+    scale: Vec3
+
+impl Transform:
+    static fn identity() -> Transform:
+        Transform(
+            position: Vec3.zero(),
+            rotation: Quaternion.identity(),
+            scale: Vec3.one()
+        )
+
+    static fn from_position(pos: Vec3) -> Transform:
+        Transform(
+            position: pos,
+            rotation: Quaternion.identity(),
+            scale: Vec3.one()
+        )
+
+    static fn from_rotation(rot: Quaternion) -> Transform:
+        Transform(
+            position: Vec3.zero(),
+            rotation: rot,
+            scale: Vec3.one()
+        )
+
+    fn to_matrix() -> Mat4:
+        """Compose TRS matrix: Translation * Rotation * Scale."""
+        val s = Mat4.scale(self.scale.x, self.scale.y, self.scale.z)
+        val r = self.rotation.to_mat4()
+        val t = Mat4.translate(self.position.x, self.position.y, self.position.z)
+        t.multiply(r.multiply(s))
+
+    fn transform_point(p: Vec3) -> Vec3:
+        """Apply scale, rotation, then translation to a point."""
+        # 1. Scale
+        val scaled = Vec3(x: p.x * self.scale.x, y: p.y * self.scale.y, z: p.z * self.scale.z)
+        # 2. Rotate
+        val rotated = self.rotation.rotate_vector(scaled)
+        # 3. Translate
+        rotated.add(self.position)
+
+    fn transform_direction(d: Vec3) -> Vec3:
+        """Apply rotation only to a direction vector (no scale, no translate)."""
+        self.rotation.rotate_vector(d)
+
+    fn compose(child: Transform) -> Transform:
+        """Compose parent (self) with child: parent * child.
+        Result transforms a point as: parent(child(point))."""
+        # Combined scale (component-wise)
+        val new_scale = Vec3(
+            x: self.scale.x * child.scale.x,
+            y: self.scale.y * child.scale.y,
+            z: self.scale.z * child.scale.z
+        )
+        # Combined rotation
+        val new_rotation = self.rotation.multiply(child.rotation)
+        # Combined position: transform child's position through parent
+        val child_pos = self.transform_point(child.position)
+        Transform(
+            position: child_pos,
+            rotation: new_rotation,
+            scale: new_scale
+        )
+
+    fn inverse() -> Transform:
+        """Compute the inverse transform."""
+        val inv_scale = Vec3(
+            x: 1.0 / self.scale.x,
+            y: 1.0 / self.scale.y,
+            z: 1.0 / self.scale.z
+        )
+        val inv_rotation = self.rotation.inverse()
+        # Inverse position: un-rotate and un-scale the negated position
+        val neg_pos = self.position.negate()
+        val unrotated = inv_rotation.rotate_vector(neg_pos)
+        val inv_pos = Vec3(
+            x: unrotated.x * inv_scale.x,
+            y: unrotated.y * inv_scale.y,
+            z: unrotated.z * inv_scale.z
+        )
+        Transform(
+            position: inv_pos,
+            rotation: inv_rotation,
+            scale: inv_scale
+        )
+
+    fn forward() -> Vec3:
+        """Forward direction (local +Z rotated by quaternion)."""
+        self.rotation.rotate_vector(Vec3.forward())
+
+    fn right() -> Vec3:
+        """Right direction (local +X rotated by quaternion)."""
+        self.rotation.rotate_vector(Vec3.right())
+
+    fn up() -> Vec3:
+        """Up direction (local +Y rotated by quaternion)."""
+        self.rotation.rotate_vector(Vec3.up())

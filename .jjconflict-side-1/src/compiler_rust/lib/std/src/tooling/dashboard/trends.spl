@@ -1,0 +1,376 @@
+# Dashboard Trend Analysis
+#
+# Analyzes historical snapshots to identify trends, regressions, and improvements
+# in project metrics over time.
+
+use tooling.dashboard.types.{Trend, TrendStatus}
+use tooling.dashboard.snapshots.{SnapshotData, load_recent_snapshots}
+
+# =========================================================================
+# Trend Analyzer
+# =========================================================================
+
+class TrendAnalyzer:
+    days: i32
+
+    static fn new(days: i32) -> TrendAnalyzer:
+        return TrendAnalyzer { days: days }
+
+    # Analyze all metrics
+    fn analyze_all() -> Result<TrendReport, text>:
+        val snapshots_result = load_recent_snapshots(self.days)
+        match snapshots_result:
+            | Err(e) ->
+                return Err("Failed to load snapshots: {e}")
+            | Ok(snapshots) ->
+                if snapshots.len() < 2:
+                    return Err("Need at least 2 snapshots for trend analysis")
+                else:
+                    val report = TrendReport {
+                        days: self.days,
+                        snapshot_count: snapshots.len(),
+                        coverage: self.analyze_coverage(snapshots),
+                        todos: self.analyze_todos(snapshots),
+                        features: self.analyze_features(snapshots),
+                        tests: self.analyze_tests(snapshots)
+                    }
+                    return Ok(report)
+
+    # Analyze coverage trend
+    fn analyze_coverage(snapshots: List<SnapshotData>) -> Trend:
+        var values: List<f64> = []
+
+        for snapshot in snapshots:
+            values.append(snapshot.coverage_percent)
+
+        return calculate_trend("Coverage", values)
+
+    # Analyze TODO trend
+    fn analyze_todos(snapshots: List<SnapshotData>) -> Trend:
+        var values: List<f64> = []
+
+        for snapshot in snapshots:
+            values.append(snapshot.todos_total as f64)
+
+        return calculate_trend("TODOs", values)
+
+    # Analyze feature completion trend
+    fn analyze_features(snapshots: List<SnapshotData>) -> Trend:
+        var values: List<f64> = []
+
+        for snapshot in snapshots:
+            values.append(snapshot.feature_completion_percent())
+
+        return calculate_trend("Features", values)
+
+    # Analyze test count trend
+    fn analyze_tests(snapshots: List<SnapshotData>) -> Trend:
+        var values: List<f64> = []
+
+        for snapshot in snapshots:
+            values.append(snapshot.sspec_tests as f64)
+
+        return calculate_trend("Tests", values)
+
+# =========================================================================
+# Trend Report
+# =========================================================================
+
+class TrendReport:
+    days: i32
+    snapshot_count: i32
+    coverage: Trend
+    todos: Trend
+    features: Trend
+    tests: Trend
+
+    fn has_regressions() -> bool:
+        return self.coverage.status == TrendStatus.Degrading or
+               self.todos.status == TrendStatus.Degrading or
+               self.features.status == TrendStatus.Degrading
+
+    fn has_improvements() -> bool:
+        return self.coverage.status == TrendStatus.Improving or
+               self.features.status == TrendStatus.Improving or
+               self.tests.status == TrendStatus.Improving
+
+    fn summary() -> text:
+        var output = "Trend Analysis ({self.days} days, {self.snapshot_count} snapshots)\n\n"
+
+        output = "{output}Coverage: {format_trend(self.coverage)}\n"
+        output = "{output}Features: {format_trend(self.features)}\n"
+        output = "{output}TODOs: {format_trend(self.todos)}\n"
+        output = "{output}Tests: {format_trend(self.tests)}\n"
+
+        return output
+
+# =========================================================================
+# Trend Calculation
+# =========================================================================
+
+# Calculate trend from historical values
+fn calculate_trend(metric: text, values: List<f64>) -> Trend:
+    if values.len() < 2:
+        return Trend.new(
+            metric,
+            0.0,
+            0.0,
+            0.0,
+            TrendStatus.Unknown,
+            []
+        )
+
+    val current = values[values.len() - 1]
+    val previous = values[values.len() - 2]
+    val change_percent = if previous == 0.0:
+        0.0
+    else:
+        ((current - previous) / previous) * 100.0
+
+    # Determine trend status
+    val status = determine_trend_status(metric, change_percent)
+
+    return Trend.new(
+        metric,
+        current,
+        previous,
+        change_percent,
+        status,
+        values
+    )
+
+# Determine trend status based on metric type and change
+fn determine_trend_status(metric: text, change_percent: f64) -> TrendStatus:
+    # Threshold for significant change
+    val threshold = 1.0  # 1%
+
+    if abs(change_percent) < threshold:
+        return TrendStatus.Stable
+
+    # For most metrics, higher is better
+    match metric:
+        | "Coverage" ->
+            if change_percent > 0.0:
+                return TrendStatus.Improving
+            else:
+                return TrendStatus.Degrading
+        | "Features" ->
+            if change_percent > 0.0:
+                return TrendStatus.Improving
+            else:
+                return TrendStatus.Degrading
+        | "Tests" ->
+            if change_percent > 0.0:
+                return TrendStatus.Improving
+            else:
+                return TrendStatus.Degrading
+        | "TODOs" ->
+            # For TODOs, lower is better
+            if change_percent < 0.0:
+                return TrendStatus.Improving
+            else:
+                return TrendStatus.Degrading
+        | _ ->
+            return TrendStatus.Unknown
+
+# =========================================================================
+# Statistical Functions
+# =========================================================================
+
+# Calculate linear regression slope
+fn calculate_slope(values: List<f64>) -> f64:
+    val n = values.len()
+    if n < 2:
+        return 0.0
+
+    var sum_x = 0.0
+    var sum_y = 0.0
+    var sum_xy = 0.0
+    var sum_xx = 0.0
+
+    for i in 0..n:
+        val x = i as f64
+        val y = values[i]
+        sum_x = sum_x + x
+        sum_y = sum_y + y
+        sum_xy = sum_xy + (x * y)
+        sum_xx = sum_xx + (x * x)
+
+    val n_f = n as f64
+    val denominator = (n_f * sum_xx) - (sum_x * sum_x)
+
+    if denominator == 0.0:
+        return 0.0
+
+    return ((n_f * sum_xy) - (sum_x * sum_y)) / denominator
+
+# Calculate average
+fn average(values: List<f64>) -> f64:
+    if values.len() == 0:
+        return 0.0
+
+    var sum = 0.0
+    for value in values:
+        sum = sum + value
+
+    return sum / (values.len() as f64)
+
+# Calculate standard deviation
+fn std_dev(values: List<f64>) -> f64:
+    if values.len() < 2:
+        return 0.0
+
+    val avg = average(values)
+    var sum_squared_diff = 0.0
+
+    for value in values:
+        val diff = value - avg
+        sum_squared_diff = sum_squared_diff + (diff * diff)
+
+    val variance = sum_squared_diff / (values.len() as f64)
+    return sqrt(variance)
+
+# Absolute value
+fn abs(x: f64) -> f64:
+    if x < 0.0:
+        return -x
+    return x
+
+# Square root using Newton's method
+fn sqrt(x: f64) -> f64:
+    """Calculate square root using Newton's method approximation."""
+    if x < 0.0:
+        return 0.0  # Undefined for negative numbers
+    if x == 0.0 or x == 1.0:
+        return x
+
+    # Newton's method: x_n+1 = (x_n + x/x_n) / 2
+    var guess = x / 2.0
+    var prev_guess = 0.0
+    var iterations = 0
+    val max_iterations = 50
+
+    while iterations < max_iterations and abs_diff(guess, prev_guess) > 0.0001:
+        prev_guess = guess
+        guess = (guess + x / guess) / 2.0
+        iterations = iterations + 1
+
+    return guess
+
+fn abs_diff(a: f64, b: f64) -> f64:
+    """Calculate absolute difference between two floats."""
+    val diff = a - b
+    return if diff < 0.0: -diff else: diff
+
+# =========================================================================
+# Formatting Functions
+# =========================================================================
+
+# Format trend for display
+fn format_trend(trend: Trend) -> text:
+    val status_str = match trend.status:
+        | TrendStatus ->:Improving: "↑ Improving"
+        | TrendStatus ->:Degrading: "↓ Degrading"
+        | TrendStatus ->:Stable: "→ Stable"
+        | TrendStatus ->:Unknown: "? Unknown"
+
+    val change_sign = if trend.change_percent >= 0.0:
+        "+"
+    else:
+        ""
+
+    return "{trend.current} ({change_sign}{trend.change_percent}%) {status_str}"
+
+# Format trend with ASCII chart
+fn format_trend_chart(trend: Trend, width: i32) -> text:
+    var output = "{trend.metric}: "
+    output = "{output}{format_trend(trend)}\n"
+
+    # Mini ASCII chart
+    if trend.history.len() > 0:
+        output = "{output}{render_ascii_chart(trend.history, width)}\n"
+
+    return output
+
+# Render simple ASCII chart
+fn render_ascii_chart(values: List<f64>, width: i32) -> text:
+    if values.len() == 0:
+        return ""
+
+    # Find min/max
+    var min_val = values[0]
+    var max_val = values[0]
+
+    for value in values:
+        if value < min_val:
+            min_val = value
+        if value > max_val:
+            max_val = value
+
+    # Scale to fit width
+    val range = max_val - min_val
+    if range == 0.0:
+        return "  [flat line]"
+
+    var chart = "  "
+    for value in values:
+        val normalized = ((value - min_val) / range) * 10.0
+        val bar_height = normalized as i32
+
+        match bar_height:
+            | 0 -> chart = "{chart}_"
+            | 1 -> chart = "{chart}▁"
+            | 2 -> chart = "{chart}▂"
+            | 3 -> chart = "{chart}▃"
+            | 4 -> chart = "{chart}▄"
+            | 5 -> chart = "{chart}▅"
+            | 6 -> chart = "{chart}▆"
+            | 7 -> chart = "{chart}▇"
+            | _ -> chart = "{chart}█"
+
+    return chart
+
+# =========================================================================
+# Convenience Functions
+# =========================================================================
+
+# Analyze trends for last 7 days
+fn analyze_weekly_trends() -> Result<TrendReport, text>:
+    val analyzer = TrendAnalyzer.new(7)
+    return analyzer.analyze_all()
+
+# Analyze trends for last 30 days
+fn analyze_monthly_trends() -> Result<TrendReport, text>:
+    val analyzer = TrendAnalyzer.new(30)
+    return analyzer.analyze_all()
+
+# Analyze specific metric
+fn analyze_metric(metric: text, days: i32) -> Result<Trend, text>:
+    match load_recent_snapshots(days):
+        | Err(e) -> Err("Failed to load snapshots: {e}")
+        | Ok(snapshots) ->
+            if snapshots.len() < 2:
+                Err("Need at least 2 snapshots")
+
+            match metric:
+                | "coverage" ->
+                    var values: List<f64> = []
+                    for s in snapshots:
+                        values.append(s.coverage_percent)
+                    Ok(calculate_trend("Coverage", values))
+                | "todos" ->
+                    var values: List<f64> = []
+                    for s in snapshots:
+                        values.append(s.todos_total as f64)
+                    Ok(calculate_trend("TODOs", values))
+                | "features" ->
+                    var values: List<f64> = []
+                    for s in snapshots:
+                        values.append(s.feature_completion_percent())
+                    Ok(calculate_trend("Features", values))
+                | _ -> Err("Unknown metric: {metric}")
+
+# =========================================================================
+# Exports
+# =========================================================================
+

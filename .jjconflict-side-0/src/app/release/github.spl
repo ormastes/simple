@@ -1,0 +1,154 @@
+#![allow(unnamed_duplicate_typed_args)]
+@allow(unnamed_duplicate_typed_args)
+# GitHub release publishing helpers.
+
+use std.nogc_sync_mut.io.dir_ops.{dir_list, is_dir}
+use std.nogc_sync_mut.io.env_ops.{env_get}
+use std.nogc_sync_mut.io.file_ops.{file_exists, file_read, file_read_bytes}
+use std.nogc_sync_mut.io.http_ffi.{HttpMethod, http_request, url_encode}
+use std.json.{JsonValue}
+use std.json.builder.{JsonBuilder}
+use std.common.base_encoding.{bytes_to_text}
+
+
+fn basename(path: text) -> text:
+    var last_slash = -1
+    var i = 0
+    while i < path.len():
+        if path.char_at(i) == "/":
+            last_slash = i
+        i = i + 1
+
+    if last_slash < 0:
+        return path
+    path.slice(last_slash + 1, path.len())
+
+fn strip_upload_url_template(upload_url: text) -> text:
+    val brace = upload_url.find("{")
+    if brace >= 0:
+        return upload_url.slice(0, brace)
+    upload_url
+
+fn guess_content_type(path: text) -> text:
+    val lower = path.lower()
+    if lower.ends_with(".txt") or lower.ends_with(".md") or lower.ends_with(".sha256"):
+        return "text/plain; charset=utf-8"
+    if lower.ends_with(".json"):
+        return "application/json"
+    if lower.ends_with(".gz") or lower.ends_with(".tgz") or lower.ends_with(".spk"):
+        return "application/gzip"
+    if lower.ends_with(".deb"):
+        return "application/vnd.debian.binary-package"
+    if lower.ends_with(".rpm"):
+        return "application/x-rpm"
+    if lower.ends_with(".pkg"):
+        return "application/octet-stream"
+    if lower.ends_with(".txz"):
+        return "application/x-xz"
+    if lower.ends_with(".exe"):
+        return "application/vnd.microsoft.portable-executable"
+    "application/octet-stream"
+
+fn build_release_payload(tag: text, name: text, body: text, target: text,
+        draft: bool, prerelease: bool) -> text:
+    val builder = JsonBuilder.object()
+        .field("tag_name", tag)
+        .field("name", name)
+        .field("body", body)
+        .field_bool("draft", draft)
+        .field_bool("prerelease", prerelease)
+    if target != "":
+        return builder.field("target_commitish", target).build()
+    builder.build()
+
+fn release_headers(token: text, content_type: text) -> [text]:
+    [
+        "Accept: application/vnd.github+json",
+        "Authorization: Bearer {token}",
+        "X-GitHub-Api-Version: 2022-11-28",
+        "User-Agent: simple-release",
+        "Content-Type: {content_type}"
+    ]
+
+fn parse_upload_url(json_text: text) -> text:
+    match JsonValue.parse(json_text):
+        Ok(value):
+            match value.get("upload_url"):
+                Some(upload_value):
+                    match upload_value.as_string():
+                        Some(raw):
+                            strip_upload_url_template(raw)
+                        nil:
+                            ""
+                nil:
+                    ""
+        Err(_):
+            ""
+
+fn parse_release_html_url(json_text: text) -> text:
+    match JsonValue.parse(json_text):
+        Ok(value):
+            match value.get("html_url"):
+                Some(url_value):
+                    match url_value.as_string():
+                        Some(raw):
+                            raw
+                        nil:
+                            ""
+                nil:
+                    ""
+        Err(_):
+            ""
+
+fn upload_asset(upload_url: text, token: text, file_path: text) -> Result<text, text>:
+    if not file_exists(file_path):
+        return Err("Asset not found: {file_path}")
+
+    val file_name = basename(file_path)
+    val encoded_name = url_encode(file_name)
+    val request_url = "{upload_url}?name={encoded_name}"
+    val body = bytes_to_text(file_read_bytes(file_path))
+    val headers = release_headers(token, guess_content_type(file_path))
+    val response = http_request(HttpMethod.POST, request_url, headers, body)
+    if response.is_ok:
+        return Ok(file_name)
+    Err("Upload failed for {file_name}: HTTP {response.status_code} {response.error}\n{response.body}")
+
+fn create_github_release(repo: text, token: text, tag: text, name: text, body: text,
+        target: text, draft: bool, prerelease: bool, files_dir: text) -> Result<text, text>:
+    val url = "https://api.github.com/repos/{repo}/releases"
+    val payload = build_release_payload(tag, name, body, target, draft, prerelease)
+    val headers = release_headers(token, "application/json")
+    val response = http_request(HttpMethod.POST, url, headers, payload)
+    if not response.is_ok:
+        return Err("Release creation failed: HTTP {response.status_code} {response.error}\n{response.body}")
+
+    val upload_url = parse_upload_url(response.body)
+    if files_dir != "" and is_dir(files_dir):
+        val files = dir_list(files_dir)
+        for file_name in files:
+            val file_path = "{files_dir}/{file_name}"
+            if file_exists(file_path):
+                match upload_asset(upload_url, token, file_path):
+                    Ok(_):
+                        print "Uploaded asset: {file_name}"
+                    Err(err):
+                        return Err(err)
+
+    val html_url = parse_release_html_url(response.body)
+    if html_url != "":
+        return Ok(html_url)
+    Ok("https://github.com/{repo}/releases/tag/{tag}")
+
+fn default_repo() -> text:
+    env_get("GITHUB_REPOSITORY")
+
+fn default_token() -> text:
+    env_get("GITHUB_TOKEN")
+
+fn read_body_file(path: text) -> Result<text, text>:
+    if path == "":
+        return Ok("")
+    if not file_exists(path):
+        return Err("Body file not found: {path}")
+    Ok(file_read(path))

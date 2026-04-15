@@ -1,0 +1,530 @@
+## Rust cross-compilation build script for SimpleOS targets.
+##
+## Builds core and alloc from the ormastes/rust fork for SimpleOS.
+##
+## Usage:
+##   bin/simple run src/os/port/rust/build.spl -- --target x86_64-simpleos
+##   bin/simple run src/os/port/rust/build.spl -- --all
+##   bin/simple run src/os/port/rust/build.spl -- --target-spec-only
+
+use std.fs
+use std.process
+use std.text
+use std.cli
+
+val SUPPORTED_TARGETS = [
+    "x86_64-simpleos",
+    "aarch64-simpleos",
+    "riscv64gc-simpleos",
+    "riscv32imac-simpleos",
+]
+
+val RUST_REPO = "https://github.com/ormastes/rust.git"
+val RUST_BRANCH = "simpleos"
+val TARGET_SPEC_DIR = "src/os/toolchain/rust"
+val DEFAULT_INSTALL_PREFIX = "/opt/simpleos-rust"
+
+class BuildConfig:
+    target: text
+    source_dir: text
+    install_prefix: text
+    jobs: i64
+    target_spec_only: bool
+
+fn parse_args(args: List<text>) -> BuildConfig:
+    var target = "x86_64-simpleos"
+    var source_dir = "rust-simpleos"
+    var install_prefix = DEFAULT_INSTALL_PREFIX
+    var jobs = 0
+    var build_all = false
+    var target_spec_only = false
+
+    var i = 0
+    while i < args.len():
+        val arg = args[i]
+        if arg == "--target":
+            i = i + 1
+            target = args[i]
+        else if arg == "--source-dir":
+            i = i + 1
+            source_dir = args[i]
+        else if arg == "--prefix":
+            i = i + 1
+            install_prefix = args[i]
+        else if arg == "--jobs":
+            i = i + 1
+            jobs = args[i].parse_int()
+        else if arg == "--all":
+            build_all = true
+        else if arg == "--target-spec-only":
+            target_spec_only = true
+        i = i + 1
+
+    if target_spec_only:
+        print_target_spec_info()
+        process.exit(0)
+
+    if build_all:
+        for t in SUPPORTED_TARGETS:
+            val config = BuildConfig(
+                target: t,
+                source_dir: source_dir,
+                install_prefix: install_prefix,
+                jobs: jobs,
+                target_spec_only: false,
+            )
+            build_rust(config)
+        process.exit(0)
+
+    BuildConfig(
+        target: target,
+        source_dir: source_dir,
+        install_prefix: install_prefix,
+        jobs: jobs,
+        target_spec_only: false,
+    )
+
+fn target_spec_path(target: text) -> text:
+    """Return the path to a target's JSON spec file."""
+    # Map short target names to full spec file names
+    if target == "x86_64-simpleos":
+        "{TARGET_SPEC_DIR}/x86_64-unknown-simpleos.json"
+    else if target == "aarch64-simpleos":
+        "{TARGET_SPEC_DIR}/aarch64-unknown-simpleos.json"
+    else if target == "riscv64gc-simpleos":
+        "{TARGET_SPEC_DIR}/riscv64gc-unknown-simpleos.json"
+    else if target == "riscv32imac-simpleos":
+        "{TARGET_SPEC_DIR}/riscv32imac-unknown-simpleos.json"
+    else:
+        "{TARGET_SPEC_DIR}/{target}.json"
+
+fn print_target_spec_info():
+    print "Available target specs in {TARGET_SPEC_DIR}/:"
+    for target in SUPPORTED_TARGETS:
+        val spec_path = target_spec_path(target)
+        if fs.exists(spec_path):
+            print "  {target} -> {spec_path}"
+        else:
+            print "  {target} -> MISSING ({spec_path})"
+    print ""
+    print "Usage with cargo:"
+    print "  cargo build -Z build-std=core,alloc --target {TARGET_SPEC_DIR}/x86_64-unknown-simpleos.json"
+
+fn check_prerequisites():
+    val required_tools = ["python3", "git", "cmake", "ninja"]
+    for tool in required_tools:
+        val result = process.run("which", [tool])
+        if result.exit_code != 0:
+            panic("Required tool not found: {tool}")
+
+    # Check for rustup and rust-src
+    val rustup = process.run("rustup", ["component", "list", "--installed"])
+    if rustup.exit_code != 0:
+        panic("rustup not found. Install Rust via https://rustup.rs/")
+
+    if not rustup.stdout.contains("rust-src"):
+        print "Installing rust-src component..."
+        process.run_checked("rustup", ["component", "add", "rust-src"])
+
+    print "All prerequisites found."
+
+fn clone_or_update_source(config: BuildConfig):
+    if fs.exists(config.source_dir):
+        print "Source directory exists, updating..."
+        process.run_checked("git", ["-C", config.source_dir, "fetch", "origin"])
+        process.run_checked("git", ["-C", config.source_dir, "checkout", RUST_BRANCH])
+        process.run_checked("git", ["-C", config.source_dir, "pull", "--rebase"])
+    else:
+        print "Cloning Rust source from {RUST_REPO}..."
+        process.run_checked("git", ["clone", "--branch", RUST_BRANCH, RUST_REPO, config.source_dir])
+
+fn write_config_toml(config: BuildConfig):
+    val arch = if config.target.starts_with("x86_64"):
+        "X86"
+    else if config.target.starts_with("aarch64"):
+        "AArch64"
+    else:
+        "RISCV"
+
+    val config_content = """[llvm]
+link-shared = false
+targets = "{arch}"
+
+[build]
+target = ["{config.target}"]
+docs = false
+extended = false
+
+[install]
+prefix = "{config.install_prefix}"
+
+[rust]
+lld = true
+"""
+    fs.write("{config.source_dir}/config.toml", config_content)
+    print "Wrote config.toml for {config.target}"
+
+fn build_rust(config: BuildConfig):
+    print "=== Building Rust for {config.target} ==="
+    print "  Source:  {config.source_dir}"
+    print "  Prefix:  {config.install_prefix}"
+
+    write_config_toml(config)
+
+    # Build core and alloc
+    print "Building core and alloc..."
+    var build_args = [
+        "x.py", "build",
+        "library/core", "library/alloc",
+        "--target", config.target,
+    ]
+
+    process.run_checked("python3", build_args)
+
+    # Install
+    print "Installing..."
+    process.run_checked("python3", [
+        "x.py", "install",
+        "--target", config.target,
+    ])
+
+    print "Rust build complete for {config.target}."
+
+## ---- Example Cross-Compilation Orchestrator --------------------------------
+##
+## Drives Rust cross-compilation of individual examples (hello, ipc_sample)
+## using the build.shs shell script. Provides status tracking from Simple.
+
+class RustExampleBuildConfig:
+    target_spec: text
+    libc_dir: text
+    build_dir: text
+    examples_dir: text
+
+impl RustExampleBuildConfig:
+    static fn default() -> RustExampleBuildConfig:
+        RustExampleBuildConfig(
+            target_spec: "src/os/toolchain/rust/x86_64-unknown-simpleos.json",
+            libc_dir: "src/os/libc",
+            build_dir: "build/os/rust",
+            examples_dir: "src/os/port/rust/examples"
+        )
+
+fn rust_build_status() -> text:
+    """Check Rust-on-SimpleOS example build status."""
+    var status = "Rust-on-SimpleOS Build Status:\n"
+
+    # Check all target specs
+    val specs = [
+        "src/os/toolchain/rust/x86_64-unknown-simpleos.json",
+        "src/os/toolchain/rust/aarch64-unknown-simpleos.json",
+        "src/os/toolchain/rust/riscv64gc-unknown-simpleos.json",
+        "src/os/toolchain/rust/riscv32imac-unknown-simpleos.json",
+    ]
+    var specs_found = 0
+    for spec in specs:
+        if fs.exists(spec):
+            specs_found = specs_found + 1
+    status = status + "  target specs: {specs_found}/{specs.len()} present\n"
+
+    if fs.exists("src/os/libc/libsimpleos_c.a"):
+        status = status + "  libc: BUILT\n"
+    else:
+        status = status + "  libc: NOT BUILT\n"
+    if fs.exists("build/os/rust/hello"):
+        status = status + "  hello: BUILT\n"
+    else:
+        status = status + "  hello: NOT BUILT\n"
+    if fs.exists("build/os/rust/ipc_sample"):
+        status = status + "  ipc_sample: BUILT\n"
+    else:
+        status = status + "  ipc_sample: NOT BUILT\n"
+    status
+
+fn rust_build_all_examples() -> bool:
+    """Build all Rust examples for SimpleOS."""
+    print "[rust-build] Building Rust examples for SimpleOS..."
+    val result = process.run("sh", ["src/os/port/rust/build.shs", "all"])
+    if result.exit_code != 0:
+        print "[rust-build] Build failed"
+        print result.stderr
+        return false
+    print "[rust-build] All Rust examples built successfully"
+    true
+
+fn rust_build_hello() -> bool:
+    """Build just the hello world example."""
+    val result = process.run("sh", ["src/os/port/rust/build.shs", "hello"])
+    result.exit_code == 0
+
+fn rust_build_ipc_sample() -> bool:
+    """Build just the IPC sample service."""
+    val result = process.run("sh", ["src/os/port/rust/build.shs", "ipc-sample"])
+    result.exit_code == 0
+
+## ---- Validate Subcommand ---------------------------------------------------
+##
+## Static validation that checks Rust cross-compilation prerequisites
+## WITHOUT requiring Rust nightly to be installed. Useful for CI and
+## smoke testing.
+
+val TOOLCHAIN_TARGET_SPEC = "src/os/toolchain/rust/x86_64-unknown-simpleos.json"
+val LIBC_ARCHIVE = "build/os/sysroot/lib/libsimpleos_c.a"
+val EXAMPLE_HELLO = "src/os/port/rust/examples/hello.rs"
+val EXAMPLE_IPC = "src/os/port/rust/examples/ipc_sample.rs"
+
+# Required fields that must appear in target spec JSON
+val TARGET_SPEC_REQUIRED_FIELDS = [
+    "arch",
+    "data-layout",
+    "llvm-target",
+]
+
+fn has_tool(name: text) -> bool:
+    """Check whether a command-line tool is available on PATH."""
+    val result = process.run("which", [name])
+    result.exit_code == 0
+
+fn validate_target_spec() -> bool:
+    """Check all target spec JSONs exist and contain required fields."""
+    val all_specs = [
+        "src/os/toolchain/rust/x86_64-unknown-simpleos.json",
+        "src/os/toolchain/rust/aarch64-unknown-simpleos.json",
+        "src/os/toolchain/rust/riscv64gc-unknown-simpleos.json",
+        "src/os/toolchain/rust/riscv32imac-unknown-simpleos.json",
+    ]
+
+    var ok = true
+    for spec_path in all_specs:
+        print "[validate] Checking target spec: {spec_path}"
+
+        if not fs.exists(spec_path):
+            print "[validate] FAIL: target spec not found: {spec_path}"
+            ok = false
+        else:
+            val content = fs.read_text(spec_path)
+            if content.len() == 0:
+                print "[validate] FAIL: target spec is empty: {spec_path}"
+                ok = false
+            else:
+                for field in TARGET_SPEC_REQUIRED_FIELDS:
+                    val key_pattern = "\"{field}\""
+                    if not content.contains(key_pattern):
+                        print "[validate] FAIL: {spec_path} missing field '{field}'"
+                        ok = false
+                    else:
+                        print "[validate]   {field}: present"
+
+    if ok:
+        print "[validate] PASS: all target specs valid"
+    ok
+
+fn validate_libc_linkage() -> bool:
+    """Check that libsimpleos_c.a exists for linking."""
+    print "[validate] Checking libc archive: {LIBC_ARCHIVE}"
+
+    if not fs.exists(LIBC_ARCHIVE):
+        # Also check the source libc directory as fallback
+        if fs.exists("src/os/libc/libsimpleos_c.a"):
+            print "[validate] PASS: libc archive found at src/os/libc/libsimpleos_c.a"
+            return true
+        print "[validate] FAIL: libsimpleos_c.a not found (sysroot not built)"
+        return false
+
+    print "[validate] PASS: libc archive exists"
+    true
+
+fn validate_example_sources() -> bool:
+    """Verify example Rust source files exist."""
+    print "[validate] Checking example sources..."
+    var ok = true
+
+    if not fs.exists(EXAMPLE_HELLO):
+        print "[validate] FAIL: missing {EXAMPLE_HELLO}"
+        ok = false
+    else:
+        val content = fs.read_text(EXAMPLE_HELLO)
+        print "[validate]   hello.rs: {content.len()} bytes"
+
+    if not fs.exists(EXAMPLE_IPC):
+        print "[validate] FAIL: missing {EXAMPLE_IPC}"
+        ok = false
+    else:
+        val content = fs.read_text(EXAMPLE_IPC)
+        print "[validate]   ipc_sample.rs: {content.len()} bytes"
+
+    if ok:
+        print "[validate] PASS: example sources present"
+    ok
+
+fn validate_rust_nightly() -> bool:
+    """Check if Rust nightly toolchain is available (optional)."""
+    print "[validate] Checking Rust nightly availability..."
+
+    if not has_tool("rustc"):
+        print "[validate] INFO: rustc not found -- Rust not installed"
+        print "[validate] INFO: Rust nightly not installed -- static validation only"
+        return true  # not a failure, just informational
+
+    val result = process.run("rustc", ["+nightly", "--version"])
+    if result.exit_code != 0:
+        print "[validate] INFO: Rust nightly not installed -- static validation only"
+        print "[validate] INFO: Install with: rustup toolchain install nightly"
+        return true  # not a failure, just informational
+
+    print "[validate]   rustc nightly: {result.stdout.trim()}"
+
+    # Check for rust-src component (needed for -Zbuild-std)
+    val comp_result = process.run("rustup", ["+nightly", "component", "list", "--installed"])
+    if comp_result.exit_code == 0:
+        if comp_result.stdout.contains("rust-src"):
+            print "[validate]   rust-src: installed"
+        else:
+            print "[validate] WARN: rust-src not installed (needed for -Zbuild-std)"
+            print "[validate] WARN: Install with: rustup +nightly component add rust-src"
+
+    print "[validate] PASS: Rust nightly available"
+    true
+
+fn run_validate() -> bool:
+    """Run all validation checks. Returns true if all pass."""
+    print "=== SimpleOS Rust Cross-Compilation Validation ==="
+    var passed = 0
+    var failed = 0
+
+    # 1. Target spec validation
+    if validate_target_spec():
+        passed = passed + 1
+    else:
+        failed = failed + 1
+
+    # 2. Libc linkage
+    if validate_libc_linkage():
+        passed = passed + 1
+    else:
+        failed = failed + 1
+
+    # 3. Example sources
+    if validate_example_sources():
+        passed = passed + 1
+    else:
+        failed = failed + 1
+
+    # 4. Rust nightly (informational, does not cause failure)
+    if validate_rust_nightly():
+        passed = passed + 1
+    else:
+        failed = failed + 1
+
+    print ""
+    print "=== Validation: {passed} passed, {failed} failed ==="
+    failed == 0
+
+## ---- Vendor-Prep Subcommand ------------------------------------------------
+##
+## Populate the `vendor/` directories for every offline-enabled Rust
+## project with `cargo vendor`. Output is captured to
+## build/os/rust/vendor.log. Requires network on the host.
+
+val VENDOR_LOG_DIR = "build/os/rust"
+val VENDOR_LOG_PATH = "build/os/rust/vendor.log"
+
+val VENDOR_PROJECTS = [
+    "src/compiler_rust",
+    "src/os/port/rust/examples/hello-simpleos",
+]
+
+fn run_vendor_prep() -> bool:
+    """Run `cargo vendor` for every offline project. Returns true on success."""
+    print "[vendor-prep] Running cargo vendor for offline-enabled projects"
+
+    if not fs.exists(VENDOR_LOG_DIR):
+        fs.create_dir(VENDOR_LOG_DIR)
+
+    var log = "cargo vendor log\n"
+    var ok = true
+
+    for project in VENDOR_PROJECTS:
+        print "[vendor-prep] vendoring {project}"
+        log = log + "=== {project} ===\n"
+
+        if not fs.exists(project):
+            print "[vendor-prep] FAIL: project not found: {project}"
+            log = log + "ERROR: project missing\n"
+            ok = false
+        else:
+            val result = process.run("sh", [
+                "-c",
+                "cd {project} && cargo vendor --respect-source-config",
+            ])
+            log = log + result.stdout
+            log = log + result.stderr
+            if result.exit_code != 0:
+                print "[vendor-prep] FAIL: cargo vendor exited {result.exit_code} in {project}"
+                ok = false
+            else:
+                print "[vendor-prep] OK: {project}"
+
+    fs.write(VENDOR_LOG_PATH, log)
+    print "[vendor-prep] log written to {VENDOR_LOG_PATH}"
+    ok
+
+## ---- Main Entry Point -------------------------------------------------------
+
+fn main():
+    val args = cli.args()
+
+    # If first arg is "validate", run validation instead of build
+    if args.len() > 0 and args[0] == "validate":
+        val ok = run_validate()
+        if not ok:
+            process.exit(1)
+        return
+
+    # If first arg is "vendor-prep", populate vendor/ directories.
+    if args.len() > 0 and args[0] == "vendor-prep":
+        val ok = run_vendor_prep()
+        if not ok:
+            process.exit(1)
+        return
+
+    # Print usage if help requested.
+    if args.len() > 0 and (args[0] == "help" or args[0] == "--help" or args[0] == "-h"):
+        print "Usage: build.spl [subcommand] [options]"
+        print "Subcommands:"
+        print "  validate        Static validation of rust cross-compile prereqs"
+        print "  examples ...    Build rust examples (status|all|hello|ipc-sample)"
+        print "  vendor-prep     Run cargo vendor for offline-enabled projects"
+        print "  help            Show this message"
+        print "(no subcommand)   Run the full rust toolchain build"
+        return
+
+    # If first arg is "examples", run example builder instead of toolchain build
+    if args.len() > 0 and args[0] == "examples":
+        var sub = "status"
+        if args.len() > 1:
+            sub = args[1]
+        if sub == "status":
+            print rust_build_status()
+        else if sub == "all":
+            if not rust_build_all_examples():
+                process.exit(1)
+        else if sub == "hello":
+            if not rust_build_hello():
+                process.exit(1)
+        else if sub == "ipc-sample":
+            if not rust_build_ipc_sample():
+                process.exit(1)
+        else:
+            print "Usage: build.spl examples {status|all|hello|ipc-sample}"
+            process.exit(1)
+        return
+
+    # Default: full toolchain build
+    print "=== SimpleOS Rust Toolchain Build ==="
+    check_prerequisites()
+
+    val config = parse_args(args)
+    clone_or_update_source(config)
+    build_rust(config)
+    print "=== Build finished successfully ==="

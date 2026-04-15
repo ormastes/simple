@@ -1,0 +1,978 @@
+#![allow(unknown_attribute)]
+# HAL — Generic Hardware Abstraction Layer
+#
+# Architecture-generic HAL functions that delegate to arch-specific
+# implementations via @cfg conditional compilation.
+#
+# x86_64: fully implemented, delegates to x86_64/ submodules.
+# arm64, arm32, riscv64, riscv32: pass_todo — awaiting arch implementations.
+#
+# Compile-time arch selection: @cfg(x86_64), @cfg(arm64), etc.
+# Only the active arch's function body is compiled into the final binary.
+
+use os.kernel.boot.ports.{BootOutputPort}
+use os.kernel.types.memory_types.{PhysAddr, VirtAddr, VmFlags}
+use os.kernel.arch.arch_context.{ArchContext}
+use os.kernel.memory.pmm.{PhysMemManager}
+
+# x86_64 arch imports
+use os.kernel.arch.x86_64.console.{serial_init, serial_write_byte, serial_write, serial_writeln}
+use os.kernel.arch.x86_64.boot.{X86Boot}
+use os.kernel.arch.x86_64.cpu.{cli, sti, hlt, halt_loop, invlpg, read_cr3, write_cr3}
+use os.kernel.arch.x86_64.paging.{vmm_init, vmm_map_page, vmm_unmap_page, vmm_translate, vmm_create_address_space, vmm_switch_address_space}
+use os.kernel.arch.x86_64.interrupt.{X86Interrupt}
+use os.kernel.arch.x86_64.timer.{X86Timer}
+use os.kernel.arch.x86_64.context.{X86ContextSwitch}
+
+# ============================================================================
+# Traits (interface definitions)
+# ============================================================================
+
+trait HalConsole:
+    """Early serial console output — first thing initialized at boot."""
+    fn console_init()
+    fn console_write_byte(b: u8)
+    fn console_write(msg: text)
+    fn console_writeln(msg: text)
+
+trait HalBoot:
+    """Boot protocol parsing — extracts memory map, framebuffer, etc."""
+    fn parse_boot_info() -> BootOutputPort
+
+trait HalCpu:
+    """CPU control primitives — interrupt toggling, halt, TLB flush."""
+    fn cpu_disable_interrupts()
+    fn cpu_enable_interrupts()
+    fn cpu_halt()
+    fn cpu_halt_loop()
+    fn cpu_flush_tlb(vaddr: u64)
+    fn cpu_flush_tlb_all()
+    fn cpu_id() -> u64
+    fn cpu_address_width() -> u32
+
+trait HalPaging:
+    """Page table management — map, unmap, translate virtual addresses."""
+    fn paging_init(boot_info: BootOutputPort)
+    fn paging_map(virt: VirtAddr, phys: PhysAddr, flags: VmFlags) -> bool
+    fn paging_unmap(virt: VirtAddr) -> bool
+    fn paging_translate(virt: VirtAddr) -> PhysAddr?
+    fn paging_create_address_space() -> u64
+    fn paging_switch_address_space(root_phys: u64)
+    fn paging_levels() -> u32
+
+trait HalInterrupt:
+    """Interrupt controller — IRQ enable/disable, acknowledge, handler registration."""
+    fn interrupt_init()
+    fn interrupt_enable_irq(irq: u32)
+    fn interrupt_disable_irq(irq: u32)
+    fn interrupt_acknowledge(irq: u32)
+    fn interrupt_set_handler(irq: u32, handler: u64)
+    fn interrupt_set_priority(irq: u32, priority: u32)
+
+trait HalTimer:
+    """Preemption timer — periodic tick or one-shot deadline for scheduling."""
+    fn timer_init(frequency_hz: u64)
+    fn timer_set_deadline(ticks: u64)
+    fn timer_current_ticks() -> u64
+    fn timer_ticks_per_second() -> u64
+
+trait HalContext:
+    """Context switching — save/restore/initialize CPU register state."""
+    fn context_save() -> ArchContext
+    fn context_restore(ctx: ArchContext)
+    fn context_init(entry: u64, stack: u64, arg: u64) -> ArchContext
+
+# ============================================================================
+# Console (4 functions)
+# ============================================================================
+
+@cfg(x86_64)
+fn hal_console_init():
+    """Initialize serial console — COM1 at 0x3F8, 115200 baud, 8N1."""
+    serial_init()
+
+@cfg(arm64)
+fn hal_console_init():
+    """Initialize console — arch: arm64 PL011 UART via MMIO."""
+    pass_todo("arch: arm64 PL011 UART console init not yet implemented")
+
+@cfg(arm32)
+fn hal_console_init():
+    """Initialize console — arch: arm32 PL011 UART via MMIO."""
+    pass_todo("arch: arm32 PL011 UART console init not yet implemented")
+
+@cfg(riscv64)
+fn hal_console_init():
+    """Initialize console — arch: riscv64 16550 UART or SBI console."""
+    pass_todo("arch: riscv64 UART/SBI console init not yet implemented")
+
+@cfg(riscv32)
+fn hal_console_init():
+    """Initialize console — arch: riscv32 16550 UART or SBI console."""
+    pass_todo("arch: riscv32 UART/SBI console init not yet implemented")
+
+@cfg(x86_64)
+fn hal_console_write_byte(b: u8):
+    """Write a single byte to COM1 serial port."""
+    serial_write_byte(b)
+
+@cfg(arm64)
+fn hal_console_write_byte(b: u8):
+    """Write byte — arch: arm64 MMIO UART."""
+    pass_todo("arch: arm64 console write_byte not yet implemented")
+
+@cfg(arm32)
+fn hal_console_write_byte(b: u8):
+    """Write byte — arch: arm32 MMIO UART."""
+    pass_todo("arch: arm32 console write_byte not yet implemented")
+
+@cfg(riscv64)
+fn hal_console_write_byte(b: u8):
+    """Write byte — arch: riscv64 SBI ecall or UART MMIO."""
+    pass_todo("arch: riscv64 console write_byte not yet implemented")
+
+@cfg(riscv32)
+fn hal_console_write_byte(b: u8):
+    """Write byte — arch: riscv32 SBI ecall or UART MMIO."""
+    pass_todo("arch: riscv32 console write_byte not yet implemented")
+
+@cfg(x86_64)
+fn hal_console_write(s: text):
+    """Write string to COM1 serial console."""
+    serial_write(s)
+
+@cfg(arm64)
+fn hal_console_write(s: text):
+    """Write string — arch: arm64 MMIO UART."""
+    pass_todo("arch: arm64 console write not yet implemented")
+
+@cfg(arm32)
+fn hal_console_write(s: text):
+    """Write string — arch: arm32 MMIO UART."""
+    pass_todo("arch: arm32 console write not yet implemented")
+
+@cfg(riscv64)
+fn hal_console_write(s: text):
+    """Write string — arch: riscv64 SBI/UART."""
+    pass_todo("arch: riscv64 console write not yet implemented")
+
+@cfg(riscv32)
+fn hal_console_write(s: text):
+    """Write string — arch: riscv32 SBI/UART."""
+    pass_todo("arch: riscv32 console write not yet implemented")
+
+@cfg(x86_64)
+fn hal_console_writeln(s: text):
+    """Write string + newline to COM1 serial console."""
+    serial_writeln(s)
+
+@cfg(arm64)
+fn hal_console_writeln(s: text):
+    """Write string + newline — arch: arm64 MMIO UART."""
+    pass_todo("arch: arm64 console writeln not yet implemented")
+
+@cfg(arm32)
+fn hal_console_writeln(s: text):
+    """Write string + newline — arch: arm32 MMIO UART."""
+    pass_todo("arch: arm32 console writeln not yet implemented")
+
+@cfg(riscv64)
+fn hal_console_writeln(s: text):
+    """Write string + newline — arch: riscv64 SBI/UART."""
+    pass_todo("arch: riscv64 console writeln not yet implemented")
+
+@cfg(riscv32)
+fn hal_console_writeln(s: text):
+    """Write string + newline — arch: riscv32 SBI/UART."""
+    pass_todo("arch: riscv32 console writeln not yet implemented")
+
+# ============================================================================
+# Boot (1 function)
+# ============================================================================
+
+@cfg(x86_64)
+fn hal_parse_boot_info() -> BootOutputPort:
+    """Parse Limine boot protocol responses on x86_64."""
+    val boot = X86Boot()
+    boot.parse_hhdm()
+    boot.build_boot_output()
+
+@cfg(arm64)
+fn hal_parse_boot_info() -> BootOutputPort:
+    """Parse boot info — arch: arm64 DTB (Device Tree Blob)."""
+    pass_todo("arch: arm64 DTB boot info parsing not yet implemented")
+
+@cfg(arm32)
+fn hal_parse_boot_info() -> BootOutputPort:
+    """Parse boot info — arch: arm32 DTB (Device Tree Blob)."""
+    pass_todo("arch: arm32 DTB boot info parsing not yet implemented")
+
+@cfg(riscv64)
+fn hal_parse_boot_info() -> BootOutputPort:
+    """Parse boot info — arch: riscv64 OpenSBI + DTB."""
+    pass_todo("arch: riscv64 OpenSBI boot info parsing not yet implemented")
+
+@cfg(riscv32)
+fn hal_parse_boot_info() -> BootOutputPort:
+    """Parse boot info — arch: riscv32 OpenSBI + DTB."""
+    pass_todo("arch: riscv32 OpenSBI boot info parsing not yet implemented")
+
+# ============================================================================
+# CPU (8 functions)
+# ============================================================================
+
+@cfg(x86_64)
+fn hal_disable_interrupts():
+    """Disable maskable interrupts — x86_64 CLI instruction."""
+    cli()
+
+@cfg(arm64)
+fn hal_disable_interrupts():
+    """Disable interrupts — arch: arm64 MSR DAIF set."""
+    pass_todo("arch: arm64 disable interrupts not yet implemented")
+
+@cfg(arm32)
+fn hal_disable_interrupts():
+    """Disable interrupts — arch: arm32 CPSID if."""
+    pass_todo("arch: arm32 disable interrupts not yet implemented")
+
+@cfg(riscv64)
+fn hal_disable_interrupts():
+    """Disable interrupts — arch: riscv64 csrci sstatus.SIE."""
+    pass_todo("arch: riscv64 disable interrupts not yet implemented")
+
+@cfg(riscv32)
+fn hal_disable_interrupts():
+    """Disable interrupts — arch: riscv32 csrci sstatus.SIE."""
+    pass_todo("arch: riscv32 disable interrupts not yet implemented")
+
+@cfg(x86_64)
+fn hal_enable_interrupts():
+    """Enable maskable interrupts — x86_64 STI instruction."""
+    sti()
+
+@cfg(arm64)
+fn hal_enable_interrupts():
+    """Enable interrupts — arch: arm64 MSR DAIF clear."""
+    pass_todo("arch: arm64 enable interrupts not yet implemented")
+
+@cfg(arm32)
+fn hal_enable_interrupts():
+    """Enable interrupts — arch: arm32 CPSIE if."""
+    pass_todo("arch: arm32 enable interrupts not yet implemented")
+
+@cfg(riscv64)
+fn hal_enable_interrupts():
+    """Enable interrupts — arch: riscv64 csrsi sstatus.SIE."""
+    pass_todo("arch: riscv64 enable interrupts not yet implemented")
+
+@cfg(riscv32)
+fn hal_enable_interrupts():
+    """Enable interrupts — arch: riscv32 csrsi sstatus.SIE."""
+    pass_todo("arch: riscv32 enable interrupts not yet implemented")
+
+@cfg(x86_64)
+fn hal_halt():
+    """Halt CPU until next interrupt — x86_64 HLT instruction."""
+    hlt()
+
+@cfg(arm64)
+fn hal_halt():
+    """Halt CPU — arch: arm64 WFI (Wait For Interrupt)."""
+    pass_todo("arch: arm64 halt (WFI) not yet implemented")
+
+@cfg(arm32)
+fn hal_halt():
+    """Halt CPU — arch: arm32 WFI (Wait For Interrupt)."""
+    pass_todo("arch: arm32 halt (WFI) not yet implemented")
+
+@cfg(riscv64)
+fn hal_halt():
+    """Halt CPU — arch: riscv64 WFI instruction."""
+    pass_todo("arch: riscv64 halt (WFI) not yet implemented")
+
+@cfg(riscv32)
+fn hal_halt():
+    """Halt CPU — arch: riscv32 WFI instruction."""
+    pass_todo("arch: riscv32 halt (WFI) not yet implemented")
+
+@cfg(x86_64)
+fn hal_halt_loop():
+    """Halt CPU in infinite loop — x86_64 CLI; HLT loop."""
+    halt_loop()
+
+@cfg(arm64)
+fn hal_halt_loop():
+    """Halt loop — arch: arm64 disable interrupts + WFI loop."""
+    pass_todo("arch: arm64 halt_loop not yet implemented")
+
+@cfg(arm32)
+fn hal_halt_loop():
+    """Halt loop — arch: arm32 disable interrupts + WFI loop."""
+    pass_todo("arch: arm32 halt_loop not yet implemented")
+
+@cfg(riscv64)
+fn hal_halt_loop():
+    """Halt loop — arch: riscv64 disable interrupts + WFI loop."""
+    pass_todo("arch: riscv64 halt_loop not yet implemented")
+
+@cfg(riscv32)
+fn hal_halt_loop():
+    """Halt loop — arch: riscv32 disable interrupts + WFI loop."""
+    pass_todo("arch: riscv32 halt_loop not yet implemented")
+
+@cfg(x86_64)
+fn hal_flush_tlb(addr: u64):
+    """Flush TLB entry for virtual address — x86_64 INVLPG instruction."""
+    invlpg(addr)
+
+@cfg(arm64)
+fn hal_flush_tlb(addr: u64):
+    """Flush TLB — arch: arm64 TLBI VAE1IS."""
+    pass_todo("arch: arm64 TLB flush not yet implemented")
+
+@cfg(arm32)
+fn hal_flush_tlb(addr: u64):
+    """Flush TLB — arch: arm32 MCR TLBIMVA."""
+    pass_todo("arch: arm32 TLB flush not yet implemented")
+
+@cfg(riscv64)
+fn hal_flush_tlb(addr: u64):
+    """Flush TLB — arch: riscv64 SFENCE.VMA."""
+    pass_todo("arch: riscv64 TLB flush not yet implemented")
+
+@cfg(riscv32)
+fn hal_flush_tlb(addr: u64):
+    """Flush TLB — arch: riscv32 SFENCE.VMA."""
+    pass_todo("arch: riscv32 TLB flush not yet implemented")
+
+@cfg(x86_64)
+fn hal_flush_tlb_all():
+    """Flush entire TLB — x86_64 reload CR3."""
+    val cr3 = read_cr3()
+    write_cr3(cr3)
+
+@cfg(arm64)
+fn hal_flush_tlb_all():
+    """Flush entire TLB — arch: arm64 TLBI ALLE1IS."""
+    pass_todo("arch: arm64 TLB flush all not yet implemented")
+
+@cfg(arm32)
+fn hal_flush_tlb_all():
+    """Flush entire TLB — arch: arm32 MCR TLBIALL."""
+    pass_todo("arch: arm32 TLB flush all not yet implemented")
+
+@cfg(riscv64)
+fn hal_flush_tlb_all():
+    """Flush entire TLB — arch: riscv64 SFENCE.VMA zero,zero."""
+    pass_todo("arch: riscv64 TLB flush all not yet implemented")
+
+@cfg(riscv32)
+fn hal_flush_tlb_all():
+    """Flush entire TLB — arch: riscv32 SFENCE.VMA zero,zero."""
+    pass_todo("arch: riscv32 TLB flush all not yet implemented")
+
+@cfg(x86_64)
+fn hal_cpu_id() -> u64:
+    """Return current CPU ID — x86_64 APIC ID (0 for single-CPU)."""
+    0
+
+@cfg(arm64)
+fn hal_cpu_id() -> u64:
+    """Return CPU ID — arch: arm64 MPIDR_EL1 affinity."""
+    pass_todo("arch: arm64 cpu_id not yet implemented")
+
+@cfg(arm32)
+fn hal_cpu_id() -> u64:
+    """Return CPU ID — arch: arm32 MPIDR affinity."""
+    pass_todo("arch: arm32 cpu_id not yet implemented")
+
+@cfg(riscv64)
+fn hal_cpu_id() -> u64:
+    """Return hart ID — arch: riscv64 mhartid CSR."""
+    pass_todo("arch: riscv64 cpu_id not yet implemented")
+
+@cfg(riscv32)
+fn hal_cpu_id() -> u64:
+    """Return hart ID — arch: riscv32 mhartid CSR."""
+    pass_todo("arch: riscv32 cpu_id not yet implemented")
+
+@cfg(x86_64)
+fn hal_address_width() -> u32:
+    """Return virtual address width — 48 bits (canonical x86_64)."""
+    48
+
+@cfg(arm64)
+fn hal_address_width() -> u32:
+    """Return address width — arch: arm64 (48 or 52 with LVA)."""
+    pass_todo("arch: arm64 address_width not yet implemented")
+
+@cfg(arm32)
+fn hal_address_width() -> u32:
+    """Return address width — arch: arm32 (32 bits, LPAE extends to 40)."""
+    pass_todo("arch: arm32 address_width not yet implemented")
+
+@cfg(riscv64)
+fn hal_address_width() -> u32:
+    """Return address width — arch: riscv64 Sv39=39, Sv48=48, Sv57=57."""
+    pass_todo("arch: riscv64 address_width not yet implemented")
+
+@cfg(riscv32)
+fn hal_address_width() -> u32:
+    """Return address width — arch: riscv32 Sv32=32."""
+    pass_todo("arch: riscv32 address_width not yet implemented")
+
+# ============================================================================
+# Paging (7 functions)
+# ============================================================================
+
+@cfg(x86_64)
+fn hal_paging_init(boot_info: BootOutputPort):
+    """Initialize 4-level page tables — x86_64 PML4, identity-map 4GB."""
+    # Extract PMM and HHDM offset from boot_info for vmm_init
+    # The PMM should already be initialized before paging_init is called.
+    # We pass a default PhysMemManager; the real PMM is wired via extern.
+    vmm_init(PhysMemManager(), boot_info.hhdm_offset)
+
+@cfg(arm64)
+fn hal_paging_init(boot_info: BootOutputPort):
+    """Initialize paging — arch: arm64 TTBR0/TTBR1 page tables."""
+    pass_todo("arch: arm64 paging init not yet implemented")
+
+@cfg(arm32)
+fn hal_paging_init(boot_info: BootOutputPort):
+    """Initialize paging — arch: arm32 TTBR page tables."""
+    pass_todo("arch: arm32 paging init not yet implemented")
+
+@cfg(riscv64)
+fn hal_paging_init(boot_info: BootOutputPort):
+    """Initialize paging — arch: riscv64 Sv39/Sv48 page tables."""
+    pass_todo("arch: riscv64 paging init not yet implemented")
+
+@cfg(riscv32)
+fn hal_paging_init(boot_info: BootOutputPort):
+    """Initialize paging — arch: riscv32 Sv32 page tables."""
+    pass_todo("arch: riscv32 paging init not yet implemented")
+
+@cfg(x86_64)
+fn hal_paging_map(virt: VirtAddr, phys: PhysAddr, flags: VmFlags) -> bool:
+    """Map 4KB virtual page — x86_64 4-level walk."""
+    vmm_map_page(virt, phys, flags)
+
+@cfg(arm64)
+fn hal_paging_map(virt: VirtAddr, phys: PhysAddr, flags: VmFlags) -> bool:
+    """Map page — arch: arm64 translation table walk."""
+    pass_todo("arch: arm64 paging map not yet implemented")
+
+@cfg(arm32)
+fn hal_paging_map(virt: VirtAddr, phys: PhysAddr, flags: VmFlags) -> bool:
+    """Map page — arch: arm32 translation table walk."""
+    pass_todo("arch: arm32 paging map not yet implemented")
+
+@cfg(riscv64)
+fn hal_paging_map(virt: VirtAddr, phys: PhysAddr, flags: VmFlags) -> bool:
+    """Map page — arch: riscv64 Sv39/Sv48 walk."""
+    pass_todo("arch: riscv64 paging map not yet implemented")
+
+@cfg(riscv32)
+fn hal_paging_map(virt: VirtAddr, phys: PhysAddr, flags: VmFlags) -> bool:
+    """Map page — arch: riscv32 Sv32 walk."""
+    pass_todo("arch: riscv32 paging map not yet implemented")
+
+@cfg(x86_64)
+fn hal_paging_unmap(virt: VirtAddr) -> bool:
+    """Unmap 4KB virtual page — x86_64 clear PTE + INVLPG."""
+    vmm_unmap_page(virt)
+
+@cfg(arm64)
+fn hal_paging_unmap(virt: VirtAddr) -> bool:
+    """Unmap page — arch: arm64."""
+    pass_todo("arch: arm64 paging unmap not yet implemented")
+
+@cfg(arm32)
+fn hal_paging_unmap(virt: VirtAddr) -> bool:
+    """Unmap page — arch: arm32."""
+    pass_todo("arch: arm32 paging unmap not yet implemented")
+
+@cfg(riscv64)
+fn hal_paging_unmap(virt: VirtAddr) -> bool:
+    """Unmap page — arch: riscv64."""
+    pass_todo("arch: riscv64 paging unmap not yet implemented")
+
+@cfg(riscv32)
+fn hal_paging_unmap(virt: VirtAddr) -> bool:
+    """Unmap page — arch: riscv32."""
+    pass_todo("arch: riscv32 paging unmap not yet implemented")
+
+@cfg(x86_64)
+fn hal_paging_translate(virt: VirtAddr) -> PhysAddr?:
+    """Translate virtual to physical — x86_64 page table walk."""
+    vmm_translate(virt)
+
+@cfg(arm64)
+fn hal_paging_translate(virt: VirtAddr) -> PhysAddr?:
+    """Translate address — arch: arm64."""
+    pass_todo("arch: arm64 paging translate not yet implemented")
+
+@cfg(arm32)
+fn hal_paging_translate(virt: VirtAddr) -> PhysAddr?:
+    """Translate address — arch: arm32."""
+    pass_todo("arch: arm32 paging translate not yet implemented")
+
+@cfg(riscv64)
+fn hal_paging_translate(virt: VirtAddr) -> PhysAddr?:
+    """Translate address — arch: riscv64."""
+    pass_todo("arch: riscv64 paging translate not yet implemented")
+
+@cfg(riscv32)
+fn hal_paging_translate(virt: VirtAddr) -> PhysAddr?:
+    """Translate address — arch: riscv32."""
+    pass_todo("arch: riscv32 paging translate not yet implemented")
+
+@cfg(x86_64)
+fn hal_paging_create_address_space() -> u64:
+    """Create new PML4 — x86_64 allocate + copy kernel mappings."""
+    vmm_create_address_space()
+
+@cfg(arm64)
+fn hal_paging_create_address_space() -> u64:
+    """Create address space — arch: arm64 new TTBR0 table."""
+    pass_todo("arch: arm64 paging create_address_space not yet implemented")
+
+@cfg(arm32)
+fn hal_paging_create_address_space() -> u64:
+    """Create address space — arch: arm32 new TTBR table."""
+    pass_todo("arch: arm32 paging create_address_space not yet implemented")
+
+@cfg(riscv64)
+fn hal_paging_create_address_space() -> u64:
+    """Create address space — arch: riscv64 new satp root."""
+    pass_todo("arch: riscv64 paging create_address_space not yet implemented")
+
+@cfg(riscv32)
+fn hal_paging_create_address_space() -> u64:
+    """Create address space — arch: riscv32 new satp root."""
+    pass_todo("arch: riscv32 paging create_address_space not yet implemented")
+
+@cfg(x86_64)
+fn hal_paging_switch_address_space(root_phys: u64):
+    """Switch address space — x86_64 write CR3."""
+    vmm_switch_address_space(root_phys)
+
+@cfg(arm64)
+fn hal_paging_switch_address_space(root_phys: u64):
+    """Switch address space — arch: arm64 write TTBR0_EL1."""
+    pass_todo("arch: arm64 paging switch_address_space not yet implemented")
+
+@cfg(arm32)
+fn hal_paging_switch_address_space(root_phys: u64):
+    """Switch address space — arch: arm32 write TTBR0."""
+    pass_todo("arch: arm32 paging switch_address_space not yet implemented")
+
+@cfg(riscv64)
+fn hal_paging_switch_address_space(root_phys: u64):
+    """Switch address space — arch: riscv64 write satp CSR."""
+    pass_todo("arch: riscv64 paging switch_address_space not yet implemented")
+
+@cfg(riscv32)
+fn hal_paging_switch_address_space(root_phys: u64):
+    """Switch address space — arch: riscv32 write satp CSR."""
+    pass_todo("arch: riscv32 paging switch_address_space not yet implemented")
+
+@cfg(x86_64)
+fn hal_paging_levels() -> u32:
+    """Return page table levels — 4 for x86_64 (PML4/PDPT/PD/PT)."""
+    4
+
+@cfg(arm64)
+fn hal_paging_levels() -> u32:
+    """Return page table levels — arch: arm64 (3 or 4 depending on granule)."""
+    pass_todo("arch: arm64 paging levels not yet implemented")
+
+@cfg(arm32)
+fn hal_paging_levels() -> u32:
+    """Return page table levels — arch: arm32 (2 for short-descriptor)."""
+    pass_todo("arch: arm32 paging levels not yet implemented")
+
+@cfg(riscv64)
+fn hal_paging_levels() -> u32:
+    """Return page table levels — arch: riscv64 Sv39=3, Sv48=4, Sv57=5."""
+    pass_todo("arch: riscv64 paging levels not yet implemented")
+
+@cfg(riscv32)
+fn hal_paging_levels() -> u32:
+    """Return page table levels — arch: riscv32 Sv32=2."""
+    pass_todo("arch: riscv32 paging levels not yet implemented")
+
+# ============================================================================
+# Interrupt (6 functions)
+# ============================================================================
+
+@cfg(x86_64)
+fn hal_interrupt_init():
+    """Initialize IDT + APIC/PIC — x86_64 interrupt controller."""
+    var intr = X86Interrupt()
+    intr.init()
+
+@cfg(arm64)
+fn hal_interrupt_init():
+    """Initialize interrupts — arch: arm64 GICv2/GICv3."""
+    pass_todo("arch: arm64 GIC interrupt init not yet implemented")
+
+@cfg(arm32)
+fn hal_interrupt_init():
+    """Initialize interrupts — arch: arm32 GICv2 or VIC."""
+    pass_todo("arch: arm32 interrupt init not yet implemented")
+
+@cfg(riscv64)
+fn hal_interrupt_init():
+    """Initialize interrupts — arch: riscv64 PLIC + sstatus.SIE."""
+    pass_todo("arch: riscv64 PLIC interrupt init not yet implemented")
+
+@cfg(riscv32)
+fn hal_interrupt_init():
+    """Initialize interrupts — arch: riscv32 PLIC + sstatus.SIE."""
+    pass_todo("arch: riscv32 PLIC interrupt init not yet implemented")
+
+@cfg(x86_64)
+fn hal_interrupt_enable_irq(irq: u32):
+    """Enable IRQ line — x86_64 IOAPIC/PIC unmask."""
+    var intr = X86Interrupt()
+    intr.set_irq_mask(irq as u64, false)
+
+@cfg(arm64)
+fn hal_interrupt_enable_irq(irq: u32):
+    """Enable IRQ — arch: arm64 GIC ISENABLER."""
+    pass_todo("arch: arm64 interrupt enable_irq not yet implemented")
+
+@cfg(arm32)
+fn hal_interrupt_enable_irq(irq: u32):
+    """Enable IRQ — arch: arm32 GIC/VIC enable."""
+    pass_todo("arch: arm32 interrupt enable_irq not yet implemented")
+
+@cfg(riscv64)
+fn hal_interrupt_enable_irq(irq: u32):
+    """Enable IRQ — arch: riscv64 PLIC enable."""
+    pass_todo("arch: riscv64 interrupt enable_irq not yet implemented")
+
+@cfg(riscv32)
+fn hal_interrupt_enable_irq(irq: u32):
+    """Enable IRQ — arch: riscv32 PLIC enable."""
+    pass_todo("arch: riscv32 interrupt enable_irq not yet implemented")
+
+@cfg(x86_64)
+fn hal_interrupt_disable_irq(irq: u32):
+    """Disable IRQ line — x86_64 IOAPIC/PIC mask."""
+    var intr = X86Interrupt()
+    intr.set_irq_mask(irq as u64, true)
+
+@cfg(arm64)
+fn hal_interrupt_disable_irq(irq: u32):
+    """Disable IRQ — arch: arm64 GIC ICENABLER."""
+    pass_todo("arch: arm64 interrupt disable_irq not yet implemented")
+
+@cfg(arm32)
+fn hal_interrupt_disable_irq(irq: u32):
+    """Disable IRQ — arch: arm32 GIC/VIC disable."""
+    pass_todo("arch: arm32 interrupt disable_irq not yet implemented")
+
+@cfg(riscv64)
+fn hal_interrupt_disable_irq(irq: u32):
+    """Disable IRQ — arch: riscv64 PLIC disable."""
+    pass_todo("arch: riscv64 interrupt disable_irq not yet implemented")
+
+@cfg(riscv32)
+fn hal_interrupt_disable_irq(irq: u32):
+    """Disable IRQ — arch: riscv32 PLIC disable."""
+    pass_todo("arch: riscv32 interrupt disable_irq not yet implemented")
+
+@cfg(x86_64)
+fn hal_interrupt_acknowledge(irq: u32):
+    """Acknowledge IRQ — x86_64 LAPIC EOI."""
+    var intr = X86Interrupt()
+    intr.send_eoi(irq as u64)
+
+@cfg(arm64)
+fn hal_interrupt_acknowledge(irq: u32):
+    """Acknowledge IRQ — arch: arm64 GIC EOIR."""
+    pass_todo("arch: arm64 interrupt acknowledge not yet implemented")
+
+@cfg(arm32)
+fn hal_interrupt_acknowledge(irq: u32):
+    """Acknowledge IRQ — arch: arm32 GIC/VIC EOI."""
+    pass_todo("arch: arm32 interrupt acknowledge not yet implemented")
+
+@cfg(riscv64)
+fn hal_interrupt_acknowledge(irq: u32):
+    """Acknowledge IRQ — arch: riscv64 PLIC claim/complete."""
+    pass_todo("arch: riscv64 interrupt acknowledge not yet implemented")
+
+@cfg(riscv32)
+fn hal_interrupt_acknowledge(irq: u32):
+    """Acknowledge IRQ — arch: riscv32 PLIC claim/complete."""
+    pass_todo("arch: riscv32 interrupt acknowledge not yet implemented")
+
+@cfg(x86_64)
+fn hal_interrupt_set_handler(irq: u32, handler: u64):
+    """Set IRQ handler — x86_64 write IDT entry for vector."""
+    var intr = X86Interrupt()
+    intr.register_handler(irq as u64, handler)
+
+@cfg(arm64)
+fn hal_interrupt_set_handler(irq: u32, handler: u64):
+    """Set IRQ handler — arch: arm64 GIC handler table."""
+    pass_todo("arch: arm64 interrupt set_handler not yet implemented")
+
+@cfg(arm32)
+fn hal_interrupt_set_handler(irq: u32, handler: u64):
+    """Set IRQ handler — arch: arm32 vector table."""
+    pass_todo("arch: arm32 interrupt set_handler not yet implemented")
+
+@cfg(riscv64)
+fn hal_interrupt_set_handler(irq: u32, handler: u64):
+    """Set IRQ handler — arch: riscv64 stvec/handler table."""
+    pass_todo("arch: riscv64 interrupt set_handler not yet implemented")
+
+@cfg(riscv32)
+fn hal_interrupt_set_handler(irq: u32, handler: u64):
+    """Set IRQ handler — arch: riscv32 stvec/handler table."""
+    pass_todo("arch: riscv32 interrupt set_handler not yet implemented")
+
+@cfg(x86_64)
+fn hal_interrupt_set_priority(irq: u32, priority: u32):
+    """Set IRQ priority — x86_64 IOAPIC redirection / LAPIC TPR."""
+    # x86_64 LAPIC uses fixed priority scheme via vector numbers.
+    # Priority is implicitly vector / 16. No dynamic priority on legacy PIC.
+    pass_todo("x86_64 IOAPIC priority routing not yet wired")
+
+@cfg(arm64)
+fn hal_interrupt_set_priority(irq: u32, priority: u32):
+    """Set IRQ priority — arch: arm64 GIC IPRIORITYR."""
+    pass_todo("arch: arm64 interrupt set_priority not yet implemented")
+
+@cfg(arm32)
+fn hal_interrupt_set_priority(irq: u32, priority: u32):
+    """Set IRQ priority — arch: arm32 GIC/VIC priority."""
+    pass_todo("arch: arm32 interrupt set_priority not yet implemented")
+
+@cfg(riscv64)
+fn hal_interrupt_set_priority(irq: u32, priority: u32):
+    """Set IRQ priority — arch: riscv64 PLIC priority register."""
+    pass_todo("arch: riscv64 interrupt set_priority not yet implemented")
+
+@cfg(riscv32)
+fn hal_interrupt_set_priority(irq: u32, priority: u32):
+    """Set IRQ priority — arch: riscv32 PLIC priority register."""
+    pass_todo("arch: riscv32 interrupt set_priority not yet implemented")
+
+# ============================================================================
+# Timer (4 functions)
+# ============================================================================
+
+@cfg(x86_64)
+fn hal_timer_init(frequency_hz: u64):
+    """Initialize timer — x86_64 APIC timer calibrated via PIT."""
+    var timer = X86Timer()
+    timer.init()
+
+@cfg(arm64)
+fn hal_timer_init(frequency_hz: u64):
+    """Initialize timer — arch: arm64 Generic Timer (CNTV)."""
+    pass_todo("arch: arm64 Generic Timer init not yet implemented")
+
+@cfg(arm32)
+fn hal_timer_init(frequency_hz: u64):
+    """Initialize timer — arch: arm32 Generic Timer or SP804."""
+    pass_todo("arch: arm32 timer init not yet implemented")
+
+@cfg(riscv64)
+fn hal_timer_init(frequency_hz: u64):
+    """Initialize timer — arch: riscv64 mtime/mtimecmp via SBI."""
+    pass_todo("arch: riscv64 timer init not yet implemented")
+
+@cfg(riscv32)
+fn hal_timer_init(frequency_hz: u64):
+    """Initialize timer — arch: riscv32 mtime/mtimecmp via SBI."""
+    pass_todo("arch: riscv32 timer init not yet implemented")
+
+@cfg(x86_64)
+fn hal_timer_set_deadline(delay_us: u64):
+    """Set one-shot timer deadline in microseconds.
+
+    HAL contract: delay_us is a relative delay in microseconds.
+    The x86_64 implementation converts to APIC timer ticks internally.
+    """
+    var timer = X86Timer()
+    timer.set_oneshot(delay_us)
+
+@cfg(arm64)
+fn hal_timer_set_deadline(delay_us: u64):
+    """Set timer deadline — arch: arm64 CNTV_CVAL_EL0."""
+    pass_todo("arch: arm64 timer set_deadline not yet implemented")
+
+@cfg(arm32)
+fn hal_timer_set_deadline(delay_us: u64):
+    """Set timer deadline — arch: arm32."""
+    pass_todo("arch: arm32 timer set_deadline not yet implemented")
+
+@cfg(riscv64)
+fn hal_timer_set_deadline(delay_us: u64):
+    """Set timer deadline — arch: riscv64 mtimecmp via SBI."""
+    pass_todo("arch: riscv64 timer set_deadline not yet implemented")
+
+@cfg(riscv32)
+fn hal_timer_set_deadline(delay_us: u64):
+    """Set timer deadline — arch: riscv32 mtimecmp via SBI."""
+    pass_todo("arch: riscv32 timer set_deadline not yet implemented")
+
+@cfg(x86_64)
+fn hal_timer_current_ticks() -> u64:
+    """Read current tick count — x86_64 TSC via RDTSC."""
+    var timer = X86Timer()
+    timer.current_ticks()
+
+@cfg(arm64)
+fn hal_timer_current_ticks() -> u64:
+    """Read ticks — arch: arm64 CNTVCT_EL0."""
+    pass_todo("arch: arm64 timer current_ticks not yet implemented")
+
+@cfg(arm32)
+fn hal_timer_current_ticks() -> u64:
+    """Read ticks — arch: arm32."""
+    pass_todo("arch: arm32 timer current_ticks not yet implemented")
+
+@cfg(riscv64)
+fn hal_timer_current_ticks() -> u64:
+    """Read ticks — arch: riscv64 rdtime CSR."""
+    pass_todo("arch: riscv64 timer current_ticks not yet implemented")
+
+@cfg(riscv32)
+fn hal_timer_current_ticks() -> u64:
+    """Read ticks — arch: riscv32 rdtime CSR."""
+    pass_todo("arch: riscv32 timer current_ticks not yet implemented")
+
+@cfg(x86_64)
+fn hal_timer_ticks_per_second() -> u64:
+    """Return timer frequency — x86_64 calibrated TSC/APIC frequency."""
+    var timer = X86Timer()
+    timer.ticks_per_second()
+
+@cfg(arm64)
+fn hal_timer_ticks_per_second() -> u64:
+    """Return timer frequency — arch: arm64 CNTFRQ_EL0."""
+    pass_todo("arch: arm64 timer ticks_per_second not yet implemented")
+
+@cfg(arm32)
+fn hal_timer_ticks_per_second() -> u64:
+    """Return timer frequency — arch: arm32."""
+    pass_todo("arch: arm32 timer ticks_per_second not yet implemented")
+
+@cfg(riscv64)
+fn hal_timer_ticks_per_second() -> u64:
+    """Return timer frequency — arch: riscv64 timebase-frequency from DTB."""
+    pass_todo("arch: riscv64 timer ticks_per_second not yet implemented")
+
+@cfg(riscv32)
+fn hal_timer_ticks_per_second() -> u64:
+    """Return timer frequency — arch: riscv32 timebase-frequency from DTB."""
+    pass_todo("arch: riscv32 timer ticks_per_second not yet implemented")
+
+# ============================================================================
+# Context (3 functions)
+# ============================================================================
+
+@cfg(x86_64)
+fn hal_context_save() -> ArchContext:
+    """Save current CPU state — x86_64 GPRs + rflags + segments.
+
+    Note: A true register save requires inline assembly or a dedicated
+    save trampoline. This function creates a minimal context suitable
+    for use as the 'from' side of context_switch, where the switch
+    assembly itself saves the live registers into this slot.
+    The returned context is a placeholder that context_switch will
+    overwrite with actual register values.
+    """
+    var ctx_switch = X86ContextSwitch()
+    val x86_ctx = ctx_switch.create(0, 0, false)
+    ArchContext.X86_64(ctx: x86_ctx)
+
+@cfg(arm64)
+fn hal_context_save() -> ArchContext:
+    """Save CPU state — arch: arm64 x0..x30 + sp + elr + spsr."""
+    pass_todo("arch: arm64 context save not yet implemented")
+
+@cfg(arm32)
+fn hal_context_save() -> ArchContext:
+    """Save CPU state — arch: arm32 r0..r15 + cpsr."""
+    pass_todo("arch: arm32 context save not yet implemented")
+
+@cfg(riscv64)
+fn hal_context_save() -> ArchContext:
+    """Save CPU state — arch: riscv64 x1..x31 + sepc + sstatus."""
+    pass_todo("arch: riscv64 context save not yet implemented")
+
+@cfg(riscv32)
+fn hal_context_save() -> ArchContext:
+    """Save CPU state — arch: riscv32 x1..x31 + sepc + sstatus."""
+    pass_todo("arch: riscv32 context save not yet implemented")
+
+@cfg(x86_64)
+fn hal_context_restore(ctx: ArchContext):
+    """Restore CPU state — x86_64 load GPRs + rflags + segments."""
+    match ctx:
+        ArchContext.X86_64(x86_ctx):
+            var ctx_switch = X86ContextSwitch()
+            # Create a dummy "from" context; switch loads "to" context
+            val dummy = ctx_switch.create(0, 0, false)
+            ctx_switch.switch(dummy, x86_ctx)
+        _:
+            pass_todo("context_restore: architecture mismatch")
+
+@cfg(arm64)
+fn hal_context_restore(ctx: ArchContext):
+    """Restore CPU state — arch: arm64."""
+    pass_todo("arch: arm64 context restore not yet implemented")
+
+@cfg(arm32)
+fn hal_context_restore(ctx: ArchContext):
+    """Restore CPU state — arch: arm32."""
+    pass_todo("arch: arm32 context restore not yet implemented")
+
+@cfg(riscv64)
+fn hal_context_restore(ctx: ArchContext):
+    """Restore CPU state — arch: riscv64."""
+    pass_todo("arch: riscv64 context restore not yet implemented")
+
+@cfg(riscv32)
+fn hal_context_restore(ctx: ArchContext):
+    """Restore CPU state — arch: riscv32."""
+    pass_todo("arch: riscv32 context restore not yet implemented")
+
+@cfg(x86_64)
+fn hal_context_init(entry: u64, stack: u64, arg: u64) -> ArchContext:
+    """Create new task context — x86_64 set rip=entry, rsp=stack, rdi=arg."""
+    var ctx_switch = X86ContextSwitch()
+    var x86_ctx = ctx_switch.create(entry, stack, false)
+    # Pass arg as first parameter (rdi in System V ABI)
+    x86_ctx.rdi = arg
+    ArchContext.X86_64(ctx: x86_ctx)
+
+@cfg(arm64)
+fn hal_context_init(entry: u64, stack: u64, arg: u64) -> ArchContext:
+    """Create task context — arch: arm64 set elr=entry, sp=stack, x0=arg."""
+    pass_todo("arch: arm64 context init not yet implemented")
+
+@cfg(arm32)
+fn hal_context_init(entry: u64, stack: u64, arg: u64) -> ArchContext:
+    """Create task context — arch: arm32 set pc=entry, sp=stack, r0=arg."""
+    pass_todo("arch: arm32 context init not yet implemented")
+
+@cfg(riscv64)
+fn hal_context_init(entry: u64, stack: u64, arg: u64) -> ArchContext:
+    """Create task context — arch: riscv64 set sepc=entry, sp=stack, a0=arg."""
+    pass_todo("arch: riscv64 context init not yet implemented")
+
+@cfg(riscv32)
+fn hal_context_init(entry: u64, stack: u64, arg: u64) -> ArchContext:
+    """Create task context — arch: riscv32 set sepc=entry, sp=stack, a0=arg."""
+    pass_todo("arch: riscv32 context init not yet implemented")

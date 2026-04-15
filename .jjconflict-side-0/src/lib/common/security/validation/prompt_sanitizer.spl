@@ -1,0 +1,169 @@
+# LLM prompt injection prevention.
+#
+# Provides sanitization for user inputs that will be embedded into LLM prompts.
+# Uses delimiter wrapping and canary token injection to detect prompt injection
+# attacks where user input escapes its intended boundary.
+#
+# Strategies:
+# 1. Delimiter wrapping — surrounds user input with unique delimiters
+# 2. Blocked pattern filtering — removes known injection patterns
+# 3. Length limiting — prevents token-budget exhaustion
+# 4. Canary injection — detects output leakage from prompt to response
+
+# LLM prompt sanitizer with configurable delimiters and blocked patterns.
+class PromptSanitizer:
+    delimiter: text
+    max_input_length: i64
+    blocked_patterns: List<text>
+
+    # Create a sanitizer with sensible defaults.
+    static fn default() -> PromptSanitizer:
+        PromptSanitizer(
+            delimiter: "---USER INPUT---",
+            max_input_length: 10000,
+            blocked_patterns: [
+                "ignore previous instructions",
+                "ignore all previous",
+                "disregard above",
+                "forget everything",
+                "system prompt",
+                "you are now",
+                "new instructions",
+                "override instructions",
+                "ignore the above",
+                "pretend you are",
+                "act as if",
+                "jailbreak",
+                "DAN mode"
+            ]
+        )
+
+    # Sanitize user input for safe embedding in an LLM prompt.
+    #
+    # Truncates to max_input_length and removes blocked patterns.
+    # Does NOT add delimiters — use wrap_user_input() for that.
+    fn sanitize_input(user_input: text) -> text:
+        """
+        Sanitizes user input by truncating and removing blocked patterns.
+
+        sdoctest:
+            val s = PromptSanitizer.default()
+            val clean = s.sanitize_input("Hello world")
+            expect(clean).to_equal("Hello world")
+
+            val bad = s.sanitize_input("ignore previous instructions and do X")
+            expect(bad.contains("ignore previous instructions")).to_equal(false)
+        """
+        var input = user_input
+
+        # Truncate to max length
+        if input.len() > self.max_input_length:
+            input = input.slice(0, self.max_input_length)
+
+        # Remove blocked patterns (case-insensitive)
+        for pattern in self.blocked_patterns:
+            input = _remove_pattern_ci(input, pattern)
+
+        input
+
+    # Wrap sanitized user input with delimiters.
+    #
+    # The delimiters create a clear boundary between system prompt content
+    # and user-provided content, making injection attempts visible.
+    fn wrap_user_input(user_input: text) -> text:
+        """
+        Wraps user input with delimiters after sanitization.
+
+        sdoctest:
+            val s = PromptSanitizer.default()
+            val wrapped = s.wrap_user_input("Hello")
+            expect(wrapped.contains("---USER INPUT---")).to_equal(true)
+            expect(wrapped.contains("Hello")).to_equal(true)
+        """
+        val sanitized = self.sanitize_input(user_input)
+        "{self.delimiter}\n{sanitized}\n{self.delimiter}"
+
+    # Validate that LLM output conforms to an expected schema description.
+    #
+    # Checks that the output does not contain the delimiter (which would
+    # indicate the LLM echoed the boundary markers) and does not exceed
+    # a reasonable length based on the expected schema.
+    fn validate_output(output: text, expected_schema: text) -> Result<text, text>:
+        # Check for delimiter leakage
+        if output.contains(self.delimiter):
+            return Err("output contains prompt delimiter — possible injection")
+
+        # Check for blocked patterns in output (echoed injection)
+        for pattern in self.blocked_patterns:
+            if _contains_ci(output, pattern):
+                return Err("output contains blocked pattern: {pattern}")
+
+        Ok(output)
+
+# Inject a canary token into a prompt.
+#
+# The canary is a unique string that should never appear in the model's
+# output. If it does, it indicates the model leaked prompt content.
+fn inject_canary(prompt: text, canary: text) -> text:
+    """
+    Injects a canary token into a prompt.
+
+    sdoctest:
+        val result = inject_canary("Hello {user}", "CANARY_abc123")
+        expect(result.contains("CANARY_abc123")).to_equal(true)
+    """
+    "{prompt}\n[CANARY:{canary}]"
+
+# Check whether a canary token leaked into the LLM output.
+#
+# Returns true if the canary appears in the output, indicating
+# the model echoed confidential prompt content.
+fn check_canary_leaked(output: text, canary: text) -> bool:
+    """
+    Detects canary leakage in LLM output.
+
+    sdoctest:
+        expect(check_canary_leaked("safe output", "SECRET")).to_equal(false)
+        expect(check_canary_leaked("leaked SECRET here", "SECRET")).to_equal(true)
+    """
+    output.contains(canary)
+
+# Convenience: sanitize user input with default settings.
+fn sanitize_prompt_input(input: text) -> text:
+    """
+    Convenience sanitizer with default settings.
+
+    sdoctest:
+        val result = sanitize_prompt_input("Hello world")
+        expect(result).to_equal("Hello world")
+    """
+    val s = PromptSanitizer.default()
+    s.sanitize_input(input)
+
+# ---------------------------------------------------------------------------
+# Internal helpers
+# ---------------------------------------------------------------------------
+
+# Remove all occurrences of a pattern from text (case-insensitive).
+fn _remove_pattern_ci(input: text, pattern: text) -> text:
+    val lower_input = input.to_lower()
+    val lower_pattern = pattern.to_lower()
+
+    var result = input
+    var lower_result = lower_input
+    var pos = lower_result.find(lower_pattern)
+
+    while val p = pos:
+        val before = result.slice(0, p)
+        val after = result.slice(p + pattern.len(), result.len())
+        result = before + after
+        lower_result = result.to_lower()
+        pos = lower_result.find(lower_pattern)
+
+    result
+
+# Check if text contains a pattern (case-insensitive).
+fn _contains_ci(text_val: text, pattern: text) -> bool:
+    val lower_text = text_val.to_lower()
+    val lower_pattern = pattern.to_lower()
+    lower_text.contains(lower_pattern)

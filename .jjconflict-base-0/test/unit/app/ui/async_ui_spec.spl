@@ -1,0 +1,357 @@
+# Async UI Framework Specification
+#
+# Tests the async event loop, event bus, render queue batching,
+# async reactive store notifications, and async state dispatch.
+
+use std.spec.*
+
+use common.ui.widget.{UIState, UITree, UIMode, UIEvent, WidgetNode}
+use common.ui.builder.{column, text_widget, button, build_tree}
+use common.ui.state.{init_state, update_state}
+use common.ui.async_loop.{UIEventBus, new_event_bus, send_event, stop_event_bus}
+use common.ui.async_state.{AsyncUIState, new_async_state, dispatch, get_current}
+use common.ui.async_state.{dispatch_quit, dispatch_key, dispatch_focus_next, dispatch_focus_prev}
+use common.ui.async_state.{get_current_mode, get_focused_id}
+use common.ui.async_reactive.{AsyncReactiveStore, ReactiveChange}
+use common.ui.async_reactive.{new_async_store, async_define, async_get, async_set}
+use common.ui.async_reactive.{async_observe, async_store_close, async_is_dirty, async_clear_dirty}
+use nogc_async_mut.concurrent.channel.{channel_new}
+
+# ============================================================================
+# Helpers
+# ============================================================================
+
+fn make_async_test_tree() -> UITree:
+    val root = column("async_root", [
+        text_widget("async_w1", "First"),
+        text_widget("async_w2", "Second"),
+        text_widget("async_w3", "Third")
+    ])
+    return build_tree(root)
+
+# ============================================================================
+# UIEventBus
+# ============================================================================
+
+describe "UIEventBus creation":
+
+    it "creates bus with running flag true":
+        val bus = new_event_bus()
+        expect(bus.running).to_equal(true)
+
+    it "creates bus with open event channel":
+        val bus = new_event_bus()
+        expect(bus.events.is_closed()).to_equal(false)
+
+    it "creates bus with open render queue":
+        val bus = new_event_bus()
+        expect(bus.render_queue.is_closed()).to_equal(false)
+
+# ============================================================================
+# Event send / try_recv
+# ============================================================================
+
+describe "event send and try_recv":
+
+    it "sends and receives a KeyPress event":
+        val bus = new_event_bus()
+        bus.events.send(UIEvent.KeyPress(key: "j"))
+        val received = bus.events.try_recv()
+        expect(received != nil).to_equal(true)
+
+    it "returns nil when no events pending":
+        val bus = new_event_bus()
+        val received = bus.events.try_recv()
+        expect(received == nil).to_equal(true)
+
+    it "sends and receives Quit event":
+        val bus = new_event_bus()
+        bus.events.send(UIEvent.Quit)
+        val received = bus.events.try_recv()
+        expect(received != nil).to_equal(true)
+
+    it "preserves FIFO order":
+        val bus = new_event_bus()
+        bus.events.send(UIEvent.FocusNext)
+        bus.events.send(UIEvent.FocusPrev)
+        bus.events.send(UIEvent.Quit)
+        val e1 = bus.events.try_recv()
+        val e2 = bus.events.try_recv()
+        val e3 = bus.events.try_recv()
+        val e4 = bus.events.try_recv()
+        expect(e1 != nil).to_equal(true)
+        expect(e2 != nil).to_equal(true)
+        expect(e3 != nil).to_equal(true)
+        expect(e4 == nil).to_equal(true)
+
+# ============================================================================
+# send_event helper
+# ============================================================================
+
+describe "send_event helper":
+
+    it "pushes event through the bus":
+        val bus = new_event_bus()
+        send_event(bus, UIEvent.FocusNext)
+        val received = bus.events.try_recv()
+        expect(received != nil).to_equal(true)
+
+# ============================================================================
+# Render queue batching
+# ============================================================================
+
+describe "render queue batching":
+
+    it "sends state to render queue":
+        val bus = new_event_bus()
+        val tree = make_async_test_tree()
+        val state = init_state(tree)
+        bus.render_queue.send(state)
+        val received = bus.render_queue.try_recv()
+        expect(received != nil).to_equal(true)
+
+    it "drains all queued renders leaving only latest":
+        val bus = new_event_bus()
+        val tree = make_async_test_tree()
+        val s1 = init_state(tree)
+        val s2 = update_state(s1, UIEvent.FocusNext)
+        val s3 = update_state(s2, UIEvent.FocusNext)
+        # Queue three renders
+        bus.render_queue.send(s1)
+        bus.render_queue.send(s2)
+        bus.render_queue.send(s3)
+        # Drain to find latest (simulates loop batching)
+        var latest: UIState? = nil
+        var has_render = true
+        while has_render:
+            val queued = bus.render_queue.try_recv()
+            if queued != nil:
+                latest = queued
+            else:
+                has_render = false
+        expect(latest != nil).to_equal(true)
+        # Queue should now be empty
+        val empty = bus.render_queue.try_recv()
+        expect(empty == nil).to_equal(true)
+
+# ============================================================================
+# stop_event_bus
+# ============================================================================
+
+describe "stop_event_bus":
+
+    it "sets running to false":
+        val bus = new_event_bus()
+        stop_event_bus(bus)
+        expect(bus.running).to_equal(false)
+
+    it "closes event channel":
+        val bus = new_event_bus()
+        stop_event_bus(bus)
+        expect(bus.events.is_closed()).to_equal(true)
+
+    it "closes render queue channel":
+        val bus = new_event_bus()
+        stop_event_bus(bus)
+        expect(bus.render_queue.is_closed()).to_equal(true)
+
+# ============================================================================
+# AsyncReactiveStore
+# ============================================================================
+
+describe "AsyncReactiveStore":
+
+    it "creates empty store":
+        val store = new_async_store()
+        val value = async_get(store, "x")
+        expect(value).to_equal("")
+
+    it "defines and gets a value":
+        val store = new_async_store()
+        async_define(store, "counter", "0")
+        val value = async_get(store, "counter")
+        expect(value).to_equal("0")
+
+    it "sets value and returns true on change":
+        val store = new_async_store()
+        async_define(store, "name", "alice")
+        val changed = async_set(store, "name", "bob")
+        expect(changed).to_equal(true)
+        expect(async_get(store, "name")).to_equal("bob")
+
+    it "returns false when value unchanged":
+        val store = new_async_store()
+        async_define(store, "name", "alice")
+        val changed = async_set(store, "name", "alice")
+        expect(changed).to_equal(false)
+
+# ============================================================================
+# Async reactive change notifications
+# ============================================================================
+
+describe "async reactive change notifications":
+
+    it "emits change on primary channel":
+        val store = new_async_store()
+        async_define(store, "count", "0")
+        async_set(store, "count", "1")
+        val notification = store.change_channel.try_recv()
+        expect(notification != nil).to_equal(true)
+
+    it "emits no notification when value unchanged":
+        val store = new_async_store()
+        async_define(store, "count", "5")
+        async_set(store, "count", "5")
+        val notification = store.change_channel.try_recv()
+        expect(notification == nil).to_equal(true)
+
+    it "observer channel receives changes":
+        val store = new_async_store()
+        async_define(store, "status", "idle")
+        val observer = async_observe(store)
+        async_set(store, "status", "busy")
+        val notification = observer.try_recv()
+        expect(notification != nil).to_equal(true)
+
+    it "multiple observers each receive change":
+        val store = new_async_store()
+        async_define(store, "x", "0")
+        val obs1 = async_observe(store)
+        val obs2 = async_observe(store)
+        async_set(store, "x", "1")
+        val n1 = obs1.try_recv()
+        val n2 = obs2.try_recv()
+        expect(n1 != nil).to_equal(true)
+        expect(n2 != nil).to_equal(true)
+
+    it "close stops notifications":
+        val store = new_async_store()
+        async_define(store, "v", "0")
+        async_store_close(store)
+        expect(store.change_channel.is_closed()).to_equal(true)
+
+# ============================================================================
+# Async dirty tracking
+# ============================================================================
+
+describe "async dirty tracking":
+
+    it "starts clean":
+        val store = new_async_store()
+        expect(async_is_dirty(store)).to_equal(false)
+
+    it "becomes dirty after set":
+        val store = new_async_store()
+        async_define(store, "v", "0")
+        async_set(store, "v", "1")
+        expect(async_is_dirty(store)).to_equal(true)
+
+    it "clears dirty flag":
+        val store = new_async_store()
+        async_define(store, "v", "0")
+        async_set(store, "v", "1")
+        async_clear_dirty(store)
+        expect(async_is_dirty(store)).to_equal(false)
+
+# ============================================================================
+# AsyncUIState — dispatch sends to event bus
+# ============================================================================
+
+describe "AsyncUIState dispatch":
+
+    it "dispatch sends event to bus":
+        val bus = new_event_bus()
+        val tree = make_async_test_tree()
+        val state = init_state(tree)
+        val async_state = new_async_state(state, bus)
+        dispatch(async_state, UIEvent.FocusNext)
+        val received = bus.events.try_recv()
+        expect(received != nil).to_equal(true)
+
+    it "dispatch_quit sends Quit event":
+        val bus = new_event_bus()
+        val tree = make_async_test_tree()
+        val state = init_state(tree)
+        val async_state = new_async_state(state, bus)
+        dispatch_quit(async_state)
+        val received = bus.events.try_recv()
+        expect(received != nil).to_equal(true)
+
+    it "dispatch_key sends KeyPress event":
+        val bus = new_event_bus()
+        val tree = make_async_test_tree()
+        val state = init_state(tree)
+        val async_state = new_async_state(state, bus)
+        dispatch_key(async_state, "x")
+        val received = bus.events.try_recv()
+        expect(received != nil).to_equal(true)
+
+    it "dispatch_focus_next sends FocusNext event":
+        val bus = new_event_bus()
+        val tree = make_async_test_tree()
+        val state = init_state(tree)
+        val async_state = new_async_state(state, bus)
+        dispatch_focus_next(async_state)
+        val received = bus.events.try_recv()
+        expect(received != nil).to_equal(true)
+
+    it "dispatch_focus_prev sends FocusPrev event":
+        val bus = new_event_bus()
+        val tree = make_async_test_tree()
+        val state = init_state(tree)
+        val async_state = new_async_state(state, bus)
+        dispatch_focus_prev(async_state)
+        val received = bus.events.try_recv()
+        expect(received != nil).to_equal(true)
+
+# ============================================================================
+# AsyncUIState — read access
+# ============================================================================
+
+describe "AsyncUIState read access":
+
+    it "get_current returns initial state":
+        val bus = new_event_bus()
+        val tree = make_async_test_tree()
+        val state = init_state(tree)
+        val async_state = new_async_state(state, bus)
+        val current = get_current(async_state)
+        expect(current.mode_name()).to_equal("NORMAL")
+
+    it "get_current_mode returns mode name":
+        val bus = new_event_bus()
+        val tree = make_async_test_tree()
+        val state = init_state(tree)
+        val async_state = new_async_state(state, bus)
+        expect(get_current_mode(async_state)).to_equal("NORMAL")
+
+    it "get_focused_id returns focused widget":
+        val bus = new_event_bus()
+        val tree = make_async_test_tree()
+        val state = init_state(tree)
+        val async_state = new_async_state(state, bus)
+        val ids = tree.all_widget_ids()
+        expect(get_focused_id(async_state)).to_equal(ids[0])
+
+# ============================================================================
+# Channel close stops loop
+# ============================================================================
+
+describe "channel close behaviour":
+
+    it "closed event channel returns nil on try_recv":
+        val bus = new_event_bus()
+        bus.events.close()
+        val received = bus.events.try_recv()
+        expect(received == nil).to_equal(true)
+
+    it "closed event channel is detected by is_closed":
+        val bus = new_event_bus()
+        bus.events.close()
+        expect(bus.events.is_closed()).to_equal(true)
+
+    it "closed render queue returns nil on try_recv":
+        val bus = new_event_bus()
+        bus.render_queue.close()
+        val received = bus.render_queue.try_recv()
+        expect(received == nil).to_equal(true)

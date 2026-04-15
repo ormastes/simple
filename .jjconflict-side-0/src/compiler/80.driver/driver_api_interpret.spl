@@ -1,0 +1,59 @@
+#![allow(export_outside_init)]
+# Driver API Interpret [Tier 1] - Interpreter and SMF cache helpers.
+#
+# Dependency rules:
+#   - May import from: driver_api_types (Tier 0), driver_core_types
+#   - Must NOT import from Tier 2+ files
+#   - Uses `use lazy` for CompilerDriver and cache/watcher modules
+
+use compiler.driver.driver_api_types.{rt_file_exists}
+use compiler.common.driver_core_types.{CompileOptions, CompileMode, CompileResult, OutputFormat}
+use lazy compiler.driver.driver.{CompilerDriver}
+
+fn interpret_file(path: text) -> CompileResult:
+    val cached = try_load_smf_cached(path)
+    if cached.?:
+        return cached.unwrap()
+    val options = CompileOptions.default()
+    options.input_files = [path]
+    options.mode = CompileMode.Interpret
+    val driver = CompilerDriver.create(options)
+    CompilerDriver.run_compile(driver)
+
+fn try_load_smf_cached(path: text) -> CompileResult?:
+    use compiler.driver.watcher.smf_manifest.{
+        load_smf_manifest_default, smf_manifest_find
+    }
+    use compiler.driver.cache.cache_validator.{
+        validate_smf
+    }
+    use compiler.driver.cache.compile_options_hash.{
+        compile_options_hash_zero
+    }
+    use compiler.driver.cache.cache_types.{CACHE_FRESH}
+
+    val manifest = load_smf_manifest_default()
+    val entry = smf_manifest_find(manifest, path)
+    if not entry.?:
+        return nil
+
+    val smf_entry = entry.unwrap()
+    val smf_path = smf_entry.smf_path
+
+    if not rt_file_exists(smf_path):
+        return nil
+
+    val freshness = validate_smf(path, smf_path, compile_options_hash_zero())
+    if freshness.status != CACHE_FRESH:
+        return nil
+
+    print "[interp] Loading pre-compiled SMF: {smf_path}"
+    val options = CompileOptions.default()
+    options.input_files = [smf_path]
+    options.mode = CompileMode.SmfExec
+    val driver = CompilerDriver.create(options)
+    val result = CompilerDriver.run_compile(driver)
+    Some(result)
+
+export interpret_file
+export try_load_smf_cached

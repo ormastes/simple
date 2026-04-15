@@ -1,0 +1,90 @@
+# @cover src/lib/skia/feature/text/line_break.spl 80%
+"""
+# Skia Text Line-Break Specification
+
+**Feature IDs:** #SKI-TEXT-LB-001
+**Category:** Stdlib
+**Difficulty:** 2/5
+**Status:** Implemented
+
+## Overview
+
+Tests for find_break_opportunities and wrap_text — the simplified UAX#14
+line breaker that mirrors Skia's SkShaper line-break logic for
+English/Latin scripts.
+
+Width measurement uses a fixed per-character width (6.0 px) because
+passing `fn` callbacks across module boundaries is not yet stable in the
+bootstrap compiler; callers scale max_width accordingly.
+"""
+
+use std.sspec.*
+use std.skia.feature.text.{
+    BreakKind,
+    BreakPoint,
+    WrappedLine,
+    find_break_opportunities,
+    wrap_text
+}
+
+describe "line_break":
+    it "find_break_opportunities: 'hello world' has break at position 5 (space), kind Soft":
+        val bps = find_break_opportunities("hello world")
+        expect(bps.len()).to_equal(1)
+        val bp = bps[0]
+        expect(bp.position).to_equal(5)
+        val is_soft = bp.kind == BreakKind.Soft
+        expect(is_soft).to_equal(true)
+        expect(bp.break_before).to_equal(true)
+
+    it "find_break_opportunities: 'a\\nb' has break at position 1, kind Hard":
+        val bps = find_break_opportunities("a\nb")
+        expect(bps.len()).to_equal(1)
+        val bp = bps[0]
+        expect(bp.position).to_equal(1)
+        val is_hard = bp.kind == BreakKind.Hard
+        expect(is_hard).to_equal(true)
+
+    it "find_break_opportunities: empty string returns empty list":
+        val bps = find_break_opportunities("")
+        expect(bps.len()).to_equal(0)
+
+    it "wrap_text: 'hello world' with width 66 (at 6px/char) fits on one line":
+        # 11 chars * 6px = 66px — width budget 66 exactly fits.
+        val lines = wrap_text("hello world", 66.0, 6.0)
+        expect(lines.len()).to_equal(1)
+        val ln = lines[0]
+        expect(ln.start).to_equal(0)
+        expect(ln.end).to_equal(11)
+        expect(ln.width).to_be_less_than(66.001)
+
+    it "wrap_text: 'hello world' with width 36 breaks into two lines":
+        # 'hello' = 30px fits under 36; adding ' world' overflows.
+        val lines = wrap_text("hello world", 36.0, 6.0)
+        expect(lines.len()).to_equal(2)
+        val first = lines[0]
+        expect(first.start).to_equal(0)
+        expect(first.end).to_equal(5)
+        val second = lines[1]
+        expect(second.start).to_equal(6)
+        expect(second.end).to_equal(11)
+
+    it "wrap_text: 'a\\nb\\nc' with large width produces 3 lines":
+        val lines = wrap_text("a\nb\nc", 600.0, 6.0)
+        expect(lines.len()).to_equal(3)
+        expect(lines[0].start).to_equal(0)
+        expect(lines[0].end).to_equal(1)
+        expect(lines[1].start).to_equal(2)
+        expect(lines[1].end).to_equal(3)
+        expect(lines[2].start).to_equal(4)
+        expect(lines[2].end).to_equal(5)
+
+    it "wrap_text: 'verylongwordhere' with width 30 breaks mid-word":
+        # 16 chars, width 30 = only 5 chars per line — must split mid-word.
+        val lines = wrap_text("verylongwordhere", 30.0, 6.0)
+        expect(lines.len()).to_be_greater_than(1)
+        val first = lines[0]
+        expect(first.start).to_equal(0)
+        val first_len = first.end - first.start
+        expect(first_len).to_be_less_than(6)
+        expect(first_len).to_be_greater_than(0)

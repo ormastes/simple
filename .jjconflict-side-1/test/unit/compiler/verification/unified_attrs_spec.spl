@@ -1,0 +1,97 @@
+import sspec
+import verification.models.contracts as contracts
+import verification.lean.contracts as lean_contracts
+
+describe "Unified Verification Attributes":
+    context "Contract expressions":
+        it "classifies operators and renders summaries":
+            expect(contracts.ContractExprKind.Forall.is_quantifier()).to_equal(true)
+            expect(contracts.ContractExprKind.And.is_logical_operator()).to_equal(true)
+            expect(contracts.ContractExprKind.Ge.is_comparison()).to_equal(true)
+            expect(contracts.ContractExprKind.Neg.is_arithmetic()).to_equal(true)
+            expect(contracts.ContractExprKind.Len.is_unary_op()).to_equal(true)
+            expect(contracts.ContractExprKind.Call.is_variable_reference()).to_equal(false)
+            expect(contracts.ContractExprKind.Len.to_string()).to_equal("len")
+            expect(contracts.ContractExprKind.Not.summary()).to_contain("unary op")
+
+    context "Function contracts":
+        it "tracks requires, ensures, invariants, and termination":
+            var contract = contracts.FunctionContract.new()
+            contract = contract.add_precondition(
+                contracts.ContractClause.new(
+                    contracts.ContractExpr.ge(
+                        contracts.ContractExpr.variable("n"),
+                        contracts.ContractExpr.int_val(0)
+                    )
+                )
+            )
+            contract = contract.add_postcondition(
+                contracts.ContractClause.new(
+                    contracts.ContractExpr.gt(
+                        contracts.ContractExpr.result(),
+                        contracts.ContractExpr.int_val(0)
+                    )
+                )
+            )
+            contract = contract.add_invariant(
+                contracts.ContractClause.new(
+                    contracts.ContractExpr.ge(
+                        contracts.ContractExpr.variable("n"),
+                        contracts.ContractExpr.int_val(0)
+                    )
+                )
+            )
+            contract = contract.with_termination(
+                contracts.TerminationClause.single(contracts.ContractExpr.variable("n"))
+            )
+            contract = contract.with_modifies(contracts.ModifiesClause.nothing())
+
+            expect(contract.has_preconditions()).to_equal(true)
+            expect(contract.has_postconditions()).to_equal(true)
+            expect(contract.has_invariants()).to_equal(true)
+            expect(contract.is_total()).to_equal(true)
+
+    context "Contract validation":
+        it "rejects impure calls in contracts":
+            var contract = contracts.FunctionContract.new()
+            contract = contract.add_precondition(
+                contracts.ContractClause.new(
+                    contracts.ContractExpr.call(
+                        "read_file",
+                        [contracts.ContractExpr.variable("path")]
+                    )
+                )
+            )
+
+            val errors = contracts.validate_contract(contract)
+            expect(errors.len()).to_equal(1)
+            expect(errors[0]).to_contain("pure expression")
+
+    context "Class invariants":
+        it "can be marked public":
+            val inv = contracts.ClassInvariant.new(
+                "Counter",
+                contracts.ContractExpr.ge(
+                    contracts.ContractExpr.variable("value"),
+                    contracts.ContractExpr.int_val(0)
+                )
+            )
+            val public_inv = inv.public()
+
+            expect(public_inv.class_name).to_equal("Counter")
+            expect(public_inv.is_public).to_equal(true)
+
+    context "Lean contract translation":
+        it "renders invariant and theorem scaffolding":
+            val inv = lean_contracts.generate_invariant_prop("State", ["x >= 0", "y >= 0"])
+            val theorem = lean_contracts.LeanTheorem.create(
+                "counter_preserves_bounds",
+                [("n", "Nat")],
+                "n >= 0",
+                "rfl"
+            )
+
+            expect(inv.to_lean()).to_contain("def inv_State")
+            expect(inv.to_lean()).to_contain("x >= 0")
+            expect(theorem.to_lean()).to_contain("theorem counter_preserves_bounds")
+            expect(theorem.to_lean()).to_contain("rfl")

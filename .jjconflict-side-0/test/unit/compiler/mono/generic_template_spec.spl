@@ -1,0 +1,356 @@
+# Generic Template Storage Tests
+#
+# Self-contained parser-safe coverage for generic template partitioning,
+# metadata tracking, deferred instantiation, specialization keys, and
+# concrete type formatting.
+
+class MiniFunctionDef:
+    name: text
+    generic_params: [text]
+    specialization_of: text
+
+class MiniStructDef:
+    name: text
+    generic_params: [text]
+    specialization_of: text
+
+class MiniModule:
+    functions: [MiniFunctionDef]
+    structs: [MiniStructDef]
+
+class MiniTemplates:
+    functions: [MiniFunctionDef]
+    structs: [MiniStructDef]
+
+class MiniSpecializedInstances:
+    functions: [MiniFunctionDef]
+    structs: [MiniStructDef]
+
+class MiniSpecializationRecord:
+    mangled_name: text
+
+class MiniMetadataEntry:
+    name: text
+    specializations: [MiniSpecializationRecord]
+
+class MiniMetadata:
+    functions: [MiniMetadataEntry]
+
+class MiniStats:
+    template_count: i64
+    specialization_count: i64
+    mode: text
+
+class MiniResult:
+    ok: bool
+    message: text
+    specialized_name: text
+
+class MiniMonomorphizer:
+    mode: text
+    templates: [MiniFunctionDef]
+    specializations: [MiniFunctionDef]
+
+class MiniSpecializationKey:
+    name: text
+    type_args: [text]
+
+fn mini_function(name: text, generic_params: [text], specialization_of: text) -> MiniFunctionDef:
+    MiniFunctionDef(name: name, generic_params: generic_params, specialization_of: specialization_of)
+
+fn mini_struct(name: text, generic_params: [text], specialization_of: text) -> MiniStructDef:
+    MiniStructDef(name: name, generic_params: generic_params, specialization_of: specialization_of)
+
+fn mini_module(functions: [MiniFunctionDef], structs: [MiniStructDef]) -> MiniModule:
+    MiniModule(functions: functions, structs: structs)
+
+fn mini_partition_generic_constructs(module: MiniModule) -> (MiniTemplates, MiniSpecializedInstances):
+    var template_functions: [MiniFunctionDef] = []
+    var specialized_functions: [MiniFunctionDef] = []
+    var template_structs: [MiniStructDef] = []
+    var specialized_structs: [MiniStructDef] = []
+
+    for function_def in module.functions:
+        if function_def.generic_params.len() > 0:
+            template_functions = template_functions + [function_def]
+        else:
+            specialized_functions = specialized_functions + [function_def]
+
+    for struct_def in module.structs:
+        if struct_def.generic_params.len() > 0:
+            template_structs = template_structs + [struct_def]
+        else:
+            specialized_structs = specialized_structs + [struct_def]
+
+    val templates = MiniTemplates(functions: template_functions, structs: template_structs)
+    val specialized = MiniSpecializedInstances(functions: specialized_functions, structs: specialized_structs)
+    (templates, specialized)
+
+fn mini_templates_count(templates: MiniTemplates) -> i64:
+    templates.functions.len() + templates.structs.len()
+
+fn mini_templates_is_empty(templates: MiniTemplates) -> bool:
+    mini_templates_count(templates) == 0
+
+fn mini_build_metadata(templates: MiniTemplates, specialized: MiniSpecializedInstances) -> MiniMetadata:
+    var entries: [MiniMetadataEntry] = []
+
+    for template in templates.functions:
+        var specializations: [MiniSpecializationRecord] = []
+        for spec in specialized.functions:
+            if spec.specialization_of == template.name:
+                specializations = specializations + [MiniSpecializationRecord(mangled_name: spec.name)]
+        entries = entries + [MiniMetadataEntry(name: template.name, specializations: specializations)]
+
+    MiniMetadata(functions: entries)
+
+fn mini_stats(mono: MiniMonomorphizer) -> MiniStats:
+    MiniStats(
+        template_count: mono.templates.len(),
+        specialization_count: mono.specializations.len(),
+        mode: mono.mode
+    )
+
+fn mini_get_template(mono: MiniMonomorphizer, name: text) -> text:
+    for template in mono.templates:
+        if template.name == name:
+            return template.name
+    ""
+
+fn mini_instantiate_function(mono: MiniMonomorphizer, name: text, type_args: [text]) -> MiniResult:
+    var found = false
+    var expected_param_count = 0
+
+    for template in mono.templates:
+        if template.name == name:
+            found = true
+            expected_param_count = template.generic_params.len()
+
+    if not found:
+        MiniResult(ok: false, message: "No template found", specialized_name: "")
+    else:
+        if expected_param_count != type_args.len():
+            MiniResult(ok: false, message: "Wrong number of type args", specialized_name: "")
+        else:
+            val specialized_name = name + "$" + type_args[0]
+            MiniResult(ok: true, message: "", specialized_name: specialized_name)
+
+fn mini_key_equals(left: MiniSpecializationKey, right: MiniSpecializationKey) -> bool:
+    if left.name != right.name:
+        false
+    else:
+        if left.type_args.len() != right.type_args.len():
+            false
+        else:
+            var same = true
+            var index = 0
+            while index < left.type_args.len():
+                if left.type_args[index] != right.type_args[index]:
+                    same = false
+                index = index + 1
+            same
+
+fn mini_primitive_type(name: text) -> text:
+    name
+
+fn mini_array_type(element_type: text) -> text:
+    "Array<" + element_type + ">"
+
+fn mini_tuple_type(left: text, right: text) -> text:
+    "Tuple<" + left + "," + right + ">"
+
+fn mini_generic_type(name: text, arg: text) -> text:
+    name + "<" + arg + ">"
+
+fn check(condition: bool):
+    expect(condition).to_equal(true)
+
+fn check_text(actual: text, expected: text):
+    expect(actual).to_equal(expected)
+
+fn make_identity_function() -> MiniFunctionDef:
+    mini_function("identity", ["T"], "")
+
+fn make_add_function() -> MiniFunctionDef:
+    mini_function("add", [], "")
+
+fn make_container_struct() -> MiniStructDef:
+    mini_struct("Container", ["T"], "")
+
+fn make_plain_struct() -> MiniStructDef:
+    mini_struct("Plain", [], "")
+
+fn make_templates_with_identity() -> MiniTemplates:
+    MiniTemplates(functions: [make_identity_function()], structs: [])
+
+fn make_specialized_identity_int() -> MiniSpecializedInstances:
+    MiniSpecializedInstances(
+        functions: [mini_function("identity$Int", [], "identity")],
+        structs: []
+    )
+
+fn make_specialized_square_pair() -> MiniSpecializedInstances:
+    MiniSpecializedInstances(
+        functions: [
+            mini_function("square$Int", [], "square"),
+            mini_function("square$Float", [], "square")
+        ],
+        structs: []
+    )
+
+describe "Generic Template Partitioning":
+    it "separates generic function into templates":
+        val module = mini_module([make_identity_function(), make_add_function()], [])
+        val (templates, specialized) = mini_partition_generic_constructs(module)
+
+        check(templates.functions.len() == 1)
+        check_text(templates.functions[0].name, "identity")
+        check(specialized.functions.len() == 1)
+        check_text(specialized.functions[0].name, "add")
+
+    it "separates generic struct":
+        val module = mini_module([], [make_container_struct(), make_plain_struct()])
+        val (templates, specialized) = mini_partition_generic_constructs(module)
+
+        check(templates.structs.len() == 1)
+        check_text(templates.structs[0].name, "Container")
+        check(specialized.structs.len() == 1)
+        check_text(specialized.structs[0].name, "Plain")
+
+    it "separates mixed generic and non-generic correctly":
+        val module = mini_module([make_identity_function(), make_add_function()], [make_container_struct()])
+        val (templates, specialized) = mini_partition_generic_constructs(module)
+
+        check(templates.functions.len() == 1)
+        check(templates.structs.len() == 1)
+        check(specialized.functions.len() == 1)
+
+    it "empty templates object has zero count":
+        val empty = MiniTemplates(functions: [], structs: [])
+
+        check(mini_templates_count(empty) == 0)
+        check(mini_templates_is_empty(empty))
+
+    it "templates with multiple constructs count correctly":
+        val templates = MiniTemplates(
+            functions: [make_identity_function()],
+            structs: [make_container_struct(), make_plain_struct()]
+        )
+
+        check(mini_templates_count(templates) > 1)
+        check(not mini_templates_is_empty(templates))
+
+describe "Monomorphization Metadata":
+    it "should register function template in metadata":
+        val templates = make_templates_with_identity()
+        val specialized = MiniSpecializedInstances(functions: [], structs: [])
+        val metadata = mini_build_metadata(templates, specialized)
+
+        check(metadata.functions.len() == 1)
+        check_text(metadata.functions[0].name, "identity")
+        check(metadata.functions[0].specializations.len() == 0)
+
+    it "should track specialization entry":
+        val templates = make_templates_with_identity()
+        val specialized = make_specialized_identity_int()
+        val metadata = mini_build_metadata(templates, specialized)
+
+        check(metadata.functions[0].specializations.len() == 1)
+        check_text(metadata.functions[0].specializations[0].mangled_name, "identity$Int")
+
+    it "should track multiple specializations":
+        val templates = MiniTemplates(functions: [mini_function("square", ["T"], "")], structs: [])
+        val specialized = make_specialized_square_pair()
+        val metadata = mini_build_metadata(templates, specialized)
+
+        check(metadata.functions[0].specializations.len() == 2)
+        check_text(metadata.functions[0].specializations[0].mangled_name, "square$Int")
+        check_text(metadata.functions[0].specializations[1].mangled_name, "square$Float")
+
+describe "Deferred Monomorphization":
+    it "should initialize with empty caches":
+        val mono = MiniMonomorphizer(mode: "LinkTime", templates: [], specializations: [])
+        val stats = mini_stats(mono)
+
+        check(stats.template_count == 0)
+        check(stats.specialization_count == 0)
+        check_text(stats.mode, "LinkTime")
+
+    it "cache template in monomorphizer":
+        val mono = MiniMonomorphizer(mode: "LinkTime", templates: [make_identity_function()], specializations: [])
+        val retrieved = mini_get_template(mono, "identity")
+
+        check_text(retrieved, "identity")
+
+    it "instantiate function from template":
+        val mono = MiniMonomorphizer(mode: "LinkTime", templates: [make_identity_function()], specializations: [])
+        val result = mini_instantiate_function(mono, "identity", ["Int"])
+
+        check(result.ok)
+        check_text(result.specialized_name, "identity$Int")
+
+    it "error on wrong type argument count":
+        val pair_template = mini_function("pair", ["T", "U"], "")
+        val mono = MiniMonomorphizer(mode: "LinkTime", templates: [pair_template], specializations: [])
+        val result = mini_instantiate_function(mono, "pair", ["Int"])
+
+        check(not result.ok)
+        check_text(result.message, "Wrong number of type args")
+
+    it "error on missing template":
+        val mono = MiniMonomorphizer(mode: "LinkTime", templates: [], specializations: [])
+        val result = mini_instantiate_function(mono, "nonexistent", ["Int"])
+
+        check(not result.ok)
+        check_text(result.message, "No template found")
+
+    it "cache specializations":
+        val mono = MiniMonomorphizer(
+            mode: "JitTime",
+            templates: [make_identity_function()],
+            specializations: [mini_function("identity$Int", [], "identity")]
+        )
+        val stats = mini_stats(mono)
+
+        check(stats.template_count == 1)
+        check(stats.specialization_count == 1)
+        check_text(mini_get_template(mono, "identity"), "identity")
+
+describe "Specialization Keys":
+    it "specialization keys are equal":
+        val key1 = MiniSpecializationKey(name: "identity", type_args: ["Int"])
+        val key2 = MiniSpecializationKey(name: "identity", type_args: ["Int"])
+
+        check(mini_key_equals(key1, key2))
+
+    it "different type args not equal":
+        val key1 = MiniSpecializationKey(name: "identity", type_args: ["Int"])
+        val key2 = MiniSpecializationKey(name: "identity", type_args: ["Float"])
+
+        check(not mini_key_equals(key1, key2))
+
+    it "nested type args in keys":
+        val nested = mini_generic_type("Result", mini_tuple_type("Int", "String"))
+        val key = MiniSpecializationKey(name: "process", type_args: [nested])
+
+        check_text(key.name, "process")
+        check(key.type_args.len() == 1)
+        check_text(key.type_args[0], "Result<Tuple<Int,String>>")
+
+describe "Concrete Types":
+    it "differentiates primitives":
+        check_text(mini_primitive_type("Int"), "Int")
+        check_text(mini_primitive_type("Float"), "Float")
+        check(mini_primitive_type("Int") != mini_primitive_type("Float"))
+
+    it "array types with different elements":
+        val array_int = mini_array_type("Int")
+        val array_float = mini_array_type("Float")
+
+        check(array_int != array_float)
+
+    it "tuple types preserve order":
+        val tuple = mini_tuple_type("Int", "String")
+
+        check_text(tuple, "Tuple<Int,String>")
+        check(tuple != mini_tuple_type("String", "Int"))

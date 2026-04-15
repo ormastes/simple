@@ -1,0 +1,188 @@
+# LMS Render Adapter
+#
+# Bridges the LMS (Language Model Server) app to the shared ui.render
+# contract. Produces text and html views of model listings, download
+# status, and server information.
+
+use app.ui.render.types.{RenderConfig, RenderResult}
+use app.ui.render.fmt.{fmt_bytes, fmt_number, fmt_percent}
+use app.ui.render.html.{html_page, html_card, html_metric_card, html_grid,
+    html_badge, html_kv_table, html_escape, css_reset, css_dark_theme,
+    css_light_theme}
+use app.ui.render.progress.{progress_bar, progress_bar_html}
+use app.ui.render.table.{TableBuilder, ALIGN_LEFT, ALIGN_RIGHT}
+
+# =========================================================================
+# Data Types
+# =========================================================================
+
+class ModelInfo:
+    name: text
+    size_bytes: i64
+    status: text
+    provider: text
+    quantization: text
+
+class DownloadStatus:
+    model_name: text
+    downloaded_bytes: i64
+    total_bytes: i64
+    active: bool
+
+class ServerInfo:
+    name: text
+    version: text
+    port: i64
+    uptime_secs: i64
+    requests_served: i64
+
+class LmsRenderData:
+    models: [ModelInfo]
+    downloads: [DownloadStatus]
+    server: ServerInfo
+
+# =========================================================================
+# Render Adapter Entry Point
+# =========================================================================
+
+fn render_lms(config: RenderConfig, data: LmsRenderData) -> RenderResult:
+    """Render the LMS app via the shared render contract.
+
+    Produces text or HTML output showing model catalog, download
+    progress, and server status.
+    """
+    match config.format:
+        "html":
+            return render_as_html(data, config)
+        "both":
+            val text_out = render_as_text(data, config)
+            val html_out = render_as_html(data, config)
+            return RenderResult.both(text_out.text_output, html_out.html_output)
+        _:
+            return render_as_text(data, config)
+
+# =========================================================================
+# Text Rendering
+# =========================================================================
+
+fn render_as_text(data: LmsRenderData, config: RenderConfig) -> RenderResult:
+    """Render LMS data as plain text with tables and progress bars."""
+    var lines: [text] = []
+
+    # Server info header
+    lines.push("LMS Server: {data.server.name} v{data.server.version}")
+    lines.push("  Port: {data.server.port}")
+    lines.push("  Requests served: {fmt_number(data.server.requests_served)}")
+    lines.push("")
+
+    # Model list
+    lines.push("Models ({data.models.len()}):")
+    if data.models.len() == 0:
+        lines.push("  (no models available)")
+    else:
+        var table = TableBuilder.new(["Name", "Size", "Provider", "Quant", "Status"])
+        table = table.set_alignment(1, ALIGN_RIGHT)
+        for model in data.models:
+            table = table.add_row([
+                model.name,
+                fmt_bytes(model.size_bytes),
+                model.provider,
+                model.quantization,
+                model.status
+            ])
+        lines.push(table.build())
+
+    # Download status
+    if data.downloads.len() > 0:
+        lines.push("")
+        lines.push("Downloads:")
+        for dl in data.downloads:
+            val status = if dl.active: "downloading" else: "paused"
+            val bar = progress_bar(dl.downloaded_bytes, dl.total_bytes, 30)
+            lines.push("  {dl.model_name} [{status}]")
+            lines.push("    {bar} {fmt_bytes(dl.downloaded_bytes)}/{fmt_bytes(dl.total_bytes)}")
+
+    return RenderResult.text(join_lines(lines))
+
+# =========================================================================
+# HTML Rendering
+# =========================================================================
+
+fn render_as_html(data: LmsRenderData, config: RenderConfig) -> RenderResult:
+    """Render LMS data as an HTML page with model cards and progress bars."""
+    val theme_css = if config.theme == "light": css_light_theme() else: css_dark_theme()
+    var css = ""
+    css = "{css}{css_reset()}\n{theme_css}\n"
+    css = "{css}.container { max-width: 1200px; margin: 0 auto; }\n"
+    css = "{css}.card { background: var(--bg-card); border: 1px solid var(--border); border-radius: 8px; padding: 16px; }\n"
+    css = "{css}.card h3 { margin-bottom: 8px; }\n"
+    css = "{css}.card-body { color: var(--text-dim); font-size: 14px; }\n"
+    css = "{css}.value { font-size: 28px; font-weight: bold; color: var(--blue); }\n"
+    css = "{css}.sub { font-size: 13px; color: var(--text-dim); margin-top: 4px; }\n"
+    css = "{css}.badge { display: inline-block; padding: 2px 8px; border-radius: 12px; font-size: 12px; font-weight: 500; color: #fff; }\n"
+    css = "{css}table { border-collapse: collapse; width: 100%; }\n"
+    css = "{css}th, td { border: 1px solid var(--border); padding: 8px; font-size: 13px; }\n"
+    css = "{css}th { background: var(--bg-card); text-align: left; }\n"
+
+    var body = ""
+    body = "{body}<div class=\"container\">\n"
+    body = "{body}<h1>LMS - Language Model Server</h1>\n"
+
+    # Server metric cards
+    val server_cards = [
+        html_metric_card("Server", "{data.server.name} v{data.server.version}", "Port {data.server.port}"),
+        html_metric_card("Requests", fmt_number(data.server.requests_served), "total served"),
+        html_metric_card("Models", "{data.models.len()}", "available")
+    ]
+    body = "{body}{html_grid(3, \"12px\", server_cards)}\n"
+
+    # Model catalog cards
+    body = "{body}<h2 style=\"margin:20px 0 12px\">Model Catalog</h2>\n"
+    if data.models.len() == 0:
+        body = "{body}{html_card(\"No Models\", \"<p>No models available. Download a model to get started.</p>\")}\n"
+    else:
+        var model_cards: [text] = []
+        for model in data.models:
+            val status_color = match model.status:
+                "ready" => "var(--green, #3fb950)"
+                "downloading" => "var(--yellow, #d29922)"
+                "error" => "var(--red, #f85149)"
+                _ => "var(--gray, #8b949e)"
+            val badge = html_badge(model.status, status_color)
+            var card_body = ""
+            card_body = "{card_body}<p>Size: {fmt_bytes(model.size_bytes)}</p>"
+            card_body = "{card_body}<p>Provider: {html_escape(model.provider)}</p>"
+            card_body = "{card_body}<p>Quantization: {html_escape(model.quantization)}</p>"
+            card_body = "{card_body}<p>Status: {badge}</p>"
+            model_cards.push(html_card(model.name, card_body))
+        body = "{body}{html_grid(2, \"12px\", model_cards)}\n"
+
+    # Download progress
+    if data.downloads.len() > 0:
+        body = "{body}<h2 style=\"margin:20px 0 12px\">Downloads</h2>\n"
+        for dl in data.downloads:
+            val status_label = if dl.active: "downloading" else: "paused"
+            val status_color = if dl.active: "var(--green, #3fb950)" else: "var(--yellow, #d29922)"
+            var dl_body = ""
+            dl_body = "{dl_body}<p>{html_badge(status_label, status_color)}</p>"
+            dl_body = "{dl_body}<p>{fmt_bytes(dl.downloaded_bytes)} / {fmt_bytes(dl.total_bytes)}</p>"
+            dl_body = "{dl_body}{progress_bar_html(dl.downloaded_bytes, dl.total_bytes)}"
+            body = "{body}{html_card(dl.model_name, dl_body)}\n"
+
+    body = "{body}</div>\n"
+
+    return RenderResult.html(html_page("LMS Dashboard", css, body))
+
+# =========================================================================
+# Helpers
+# =========================================================================
+
+fn join_lines(lines: [text]) -> text:
+    var result = ""
+    var first = true
+    for line in lines:
+        if not first:
+            result = "{result}\n"
+        result = "{result}{line}"
+        first = false
+    return result

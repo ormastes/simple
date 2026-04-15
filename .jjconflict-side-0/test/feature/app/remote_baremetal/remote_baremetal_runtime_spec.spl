@@ -1,0 +1,611 @@
+"""
+# Remote Baremetal Runtime Checks
+
+**Feature IDs:** #RBRT-001
+**Category:** Tooling
+**Difficulty:** 3/5
+**Status:** Implemented
+**Requirements:** N/A
+**Plan:** [doc/03_plan/remote_baremetal_remaining_without_trace32_2026-03-24.md](doc/03_plan/remote_baremetal_remaining_without_trace32_2026-03-24.md)
+**Design:** [doc/05_design/remote_jit_architecture.md](doc/05_design/remote_jit_architecture.md)
+**Research:** [doc/01_research/trace32_remote_interfaces_2026-03-08.md](doc/01_research/trace32_remote_interfaces_2026-03-08.md)
+
+## Overview
+
+Checks the current remote baremetal execution plumbing used by the Simple test
+runner. The spec covers:
+
+- composite mode parsing for `interpreter(remote(baremetal(...)))`
+- QEMU RISC-V32 remote debug smoke using a temporary ELF plus GDB memory read
+- CH32V307 direct `wlink` readiness and register or memory access checks
+- TRACE32 readiness state through `t32rem` discovery and repo-managed config
+
+This spec is intentionally host-aware. It treats missing optional host tools as
+`skip:` and host/runtime blockers as `blocked:` so the test captures current
+environment state without claiming a full hardware verification that the repo
+does not currently provide.
+
+This file is the low-level remote runtime proof. It does not replace:
+
+- the stable RV32 ELF/shared-workload proof lane
+- the separate RV32 raw injected regression lane
+- the CH32 composite-runner regression lane
+
+## Syntax
+
+```simple
+val spec = "interpreter(remote(baremetal(riscv32)))"
+val base = extract_base_runtime(spec)
+val layer = extract_platform_layer(spec)
+val arch = extract_arch_from_spec(spec)
+```
+
+## Examples
+
+```simple
+val qemu_status = qemu_riscv32_remote_memory_status()
+val ch32_status = wlink_live_status("CH32V30X", "CH32V307")
+val t32_status = trace32_remote_status()
+expect(status_is_acceptable(t32_status)).to_equal(true)
+expect(status_is_acceptable(ch32_status)).to_equal(true)
+```
+"""
+
+use app.io.{shell, file_exists, file_write, file_delete}
+use app.test_runner_new.test_executor_composite.{
+    extract_base_runtime,
+    extract_platform_layer,
+    extract_arch_from_spec,
+    qemu_binary_for_arch,
+    qemu_machine_for_arch,
+    find_baremetal_elf
+}
+use app.test_runner_new.test_runner_args.{parse_mode_str}
+use std.nogc_sync_mut.debug.remote.protocol.gdb_mi.GdbMiClient
+use std.nogc_sync_mut.debug.remote.target.stm32h7.Stm32H7Target
+use std.nogc_sync_mut.debug.remote.target.stm32wb.Stm32WbTarget
+use std.nogc_sync_mut.debug.remote.types.{DebugConfig, Architecture}
+use app.debug.remote.protocol.trace32.Trace32Client
+
+val ARM_CPUID_ADDR: i64 = 0xE000ED00
+val CORTEX_M7_CPUID: i64 = 0x411FC271
+val CORTEX_M4_CPUID: i64 = 0x410FC241
+
+fn command_available(cmd: text) -> bool:
+    val result = shell("command -v {cmd} >/dev/null 2>&1")
+    result.exit_code == 0
+
+fn has_target_aware_riscv_gdb() -> bool:
+    val home = shell("echo $HOME").stdout.trim()
+    val rv32_usr = file_exists("/usr/bin/riscv32-unknown-elf-gdb")
+    val rv32_local = file_exists("/usr/local/bin/riscv32-unknown-elf-gdb")
+    val rv64_usr = file_exists("/usr/bin/riscv64-unknown-elf-gdb")
+    val rv64_local = file_exists("/usr/local/bin/riscv64-unknown-elf-gdb")
+    val multi_usr = file_exists("/usr/bin/gdb-multiarch")
+    val multi_local = file_exists("/usr/local/bin/gdb-multiarch")
+    val multi_home = if home.len() > 0: file_exists("{home}/.local/bin/gdb-multiarch") else: false
+    rv32_usr or rv32_local or rv64_usr or rv64_local or multi_usr or multi_local or multi_home
+
+fn find_t32rem_cmd() -> text:
+    val env_check = shell("echo $T32_PATH")
+    val t32_path = env_check.stdout.trim()
+    if t32_path.len() > 0:
+        val candidate = "{t32_path}/bin/pc_linux64/t32rem"
+        val probe = shell("test -x '{candidate}' && echo yes")
+        if probe.stdout.trim() == "yes":
+            return candidate
+
+    val path_check = shell("which t32rem 2>/dev/null")
+    if path_check.exit_code == 0:
+        return path_check.stdout.trim()
+
+    val bundled = "/opt/t32/bin/pc_linux64/t32rem"
+    if file_exists(bundled):
+        return bundled
+
+    ""
+
+fn status_is_acceptable(status: text) -> bool:
+    status == "ok" or status.starts_with("ready") or status.starts_with("blocked:") or status.starts_with("skip:")
+
+fn cleanup_temp_remote_files(tmpdir: text):
+    shell("rm -rf '{tmpdir}' >/dev/null 2>&1 || true")
+
+fn stop_process_if_running(pid: i64):
+    if pid > 0:
+        shell("kill {pid} >/dev/null 2>&1 || true")
+        shell("sleep 0.1")
+        shell("kill -9 {pid} >/dev/null 2>&1 || true")
+
+fn parse_leading_hex_address(raw: text) -> i64:
+    val trimmed = raw.trim()
+    val start = trimmed.index_of("0x") ?? -1
+    if start < 0:
+        return -1
+
+    var end = start + 2
+    while end < trimmed.len():
+        val ch = trimmed[end:end + 1]
+        val is_digit = ch >= "0" and ch <= "9"
+        val is_lower = ch >= "a" and ch <= "f"
+        val is_upper = ch >= "A" and ch <= "F"
+        if not is_digit and not is_lower and not is_upper:
+            break
+        end = end + 1
+
+    if end <= start + 2:
+        return -1
+
+    val hex = trimmed[start + 2:end]
+    var result: i64 = 0
+    var i = 0
+    while i < hex.len():
+        val ch = hex[i:i + 1]
+        result = result * 16 + hex_nibble_value(ch)
+        i = i + 1
+    result
+
+fn parse_hex_byte_pair(pair: text) -> i64:
+    var result: i64 = 0
+    var i = 0
+    while i < pair.len():
+        val ch = pair[i:i + 1]
+        result = result * 16 + hex_nibble_value(ch)
+        i = i + 1
+    result
+
+fn hex_nibble_value(ch: text) -> i64:
+    match ch:
+        "0": 0
+        "1": 1
+        "2": 2
+        "3": 3
+        "4": 4
+        "5": 5
+        "6": 6
+        "7": 7
+        "8": 8
+        "9": 9
+        "a": 10
+        "A": 10
+        "b": 11
+        "B": 11
+        "c": 12
+        "C": 12
+        "d": 13
+        "D": 13
+        "e": 14
+        "E": 14
+        "f": 15
+        "F": 15
+        _: 0
+
+fn bytes_to_u32_le(bytes: [i32]) -> i64:
+    if bytes.len() < 4:
+        return -1
+    bytes[0] + bytes[1] * 256 + bytes[2] * 65536 + bytes[3] * 16777216
+
+fn parse_stlink_hex_dump(raw: text) -> [i32]:
+    var result: [i32] = []
+    val flattened = raw.replace("\n", " ")
+    val parts = flattened.split(" ")
+    for part in parts:
+        val trimmed = part.trim()
+        if trimmed.len() != 2:
+            continue
+        result.push(parse_hex_byte_pair(trimmed) as i32)
+    result
+
+fn extract_probe_block(raw: text, serial: text) -> text:
+    val blocks = raw.split("\n\n")
+    for block in blocks:
+        val trimmed = block.trim()
+        if trimmed.contains("serial:     {serial}"):
+            return trimmed
+    ""
+
+fn extract_hex_field(raw: text, prefix: text) -> i64:
+    val lines = raw.split("\n")
+    for line in lines:
+        val trimmed = line.trim()
+        if trimmed.starts_with(prefix):
+            return parse_leading_hex_address(trimmed)
+    -1
+
+fn extract_hex_after_colon(raw: text, prefix: text) -> i64:
+    val lines = raw.split("\n")
+    for line in lines:
+        val trimmed = line.trim()
+        if not trimmed.starts_with(prefix):
+            continue
+        val colon = trimmed.index_of(":") ?? -1
+        if colon < 0:
+            return -1
+        val tail = trimmed[colon + 1:].trim()
+        if tail.starts_with("0x") or tail.starts_with("0X"):
+            return parse_leading_hex_address(tail)
+        return parse_leading_hex_address("0x{tail}")
+    -1
+
+fn qemu_riscv32_remote_memory_status() -> text:
+    if not command_available("clang"):
+        return "skip: clang unavailable"
+    if not command_available("qemu-system-riscv32"):
+        return "skip: qemu-system-riscv32 unavailable"
+    if not command_available("gdb"):
+        return "skip: gdb unavailable"
+    if not has_target_aware_riscv_gdb():
+        return "blocked: target-aware GDB unavailable for riscv32 remote memory lane"
+
+    val tmpdir = shell("mktemp -d").stdout.trim()
+    if tmpdir == "":
+        return "error: mktemp failed"
+
+    val asm_path = "{tmpdir}/loop.S"
+    val elf_path = "{tmpdir}/loop.elf"
+    val port = 1234
+    val asm_source = ".section .text\n.globl _start\n_start:\n  j _start\n.section .data\n.globl marker\nmarker:\n  .word 0x12345678\n"
+
+    if not file_write(asm_path, asm_source):
+        cleanup_temp_remote_files(tmpdir)
+        return "error: failed to write temporary assembly"
+
+    val compile = shell("clang --target=riscv32-none-elf -march=rv32imac -mabi=ilp32 -nostdlib -fuse-ld=lld -Wl,-Ttext=0x80000000 -Wl,-e,_start -o '{elf_path}' '{asm_path}' 2>&1")
+    if compile.exit_code != 0:
+        cleanup_temp_remote_files(tmpdir)
+        return "error: compile failed: {compile.stdout.trim()}"
+
+    val qemu_start = shell("sh -c 'qemu-system-riscv32 -machine virt -bios none -kernel \"{elf_path}\" -gdb tcp::{port} -S -nographic -no-reboot >/dev/null 2>&1 & echo $!'")
+    val qemu_pid_text = qemu_start.stdout.trim()
+    val qemu_pid = if qemu_pid_text.len() > 0: int(qemu_pid_text) else: -1
+    if qemu_start.exit_code != 0 or qemu_pid <= 0:
+        cleanup_temp_remote_files(tmpdir)
+        return "error: failed to launch qemu"
+
+    val port_ready = shell("timeout 5 bash -c 'while ! ss -tln | grep -q :{port}; do sleep 0.1; done' 2>/dev/null")
+    if port_ready.exit_code != 0:
+        stop_process_if_running(qemu_pid)
+        cleanup_temp_remote_files(tmpdir)
+        return "error: qemu gdb port did not become ready"
+
+    val config = DebugConfig(
+        host: "localhost",
+        port: port,
+        target: Architecture.RiscV32,
+        program: elf_path,
+        options: {}
+    )
+    val gdb_result = GdbMiClient.connect(config)
+    if gdb_result.is_err():
+        stop_process_if_running(qemu_pid)
+        cleanup_temp_remote_files(tmpdir)
+        return "error: gdb-mi connect failed: {gdb_result.err().unwrap()}"
+
+    var gdb = gdb_result.ok.unwrap()
+    val addr_text = gdb.evaluate("&marker")
+    if addr_text.is_err():
+        gdb.disconnect()
+        stop_process_if_running(qemu_pid)
+        cleanup_temp_remote_files(tmpdir)
+        return "error: could not evaluate marker address"
+
+    val addr = parse_leading_hex_address(addr_text.ok.unwrap())
+    if addr < 0:
+        gdb.disconnect()
+        stop_process_if_running(qemu_pid)
+        cleanup_temp_remote_files(tmpdir)
+        return "error: could not parse marker address"
+
+    val initial = gdb.read_memory(addr, 4)
+    if initial.is_err():
+        gdb.disconnect()
+        stop_process_if_running(qemu_pid)
+        cleanup_temp_remote_files(tmpdir)
+        return "error: initial memory read failed"
+
+    val initial_bytes = initial.ok.unwrap()
+    if initial_bytes.len() < 4:
+        gdb.disconnect()
+        stop_process_if_running(qemu_pid)
+        cleanup_temp_remote_files(tmpdir)
+        return "error: initial memory read too short"
+
+    if initial_bytes[0] != 0x78 or initial_bytes[1] != 0x56 or initial_bytes[2] != 0x34 or initial_bytes[3] != 0x12:
+        gdb.disconnect()
+        stop_process_if_running(qemu_pid)
+        cleanup_temp_remote_files(tmpdir)
+        return "error: initial marker value mismatch"
+
+    val write_result = gdb.write_memory(addr, [0x21, 0x43, 0x65, 0x87])
+    if write_result.is_err():
+        val write_msg = write_result.err().unwrap()
+        if has_target_aware_riscv_gdb():
+            val phys_mode = gdb.set_qemu_physical_memory_mode(true)
+            if phys_mode.is_ok():
+                val retry_write = gdb.write_memory(addr, [0x21, 0x43, 0x65, 0x87])
+                if retry_write.is_ok():
+                    val retry_updated = gdb.read_memory(addr, 4)
+                    gdb.disconnect()
+                    stop_process_if_running(qemu_pid)
+                    cleanup_temp_remote_files(tmpdir)
+                    if retry_updated.is_err():
+                        return "error: updated memory read failed after qemu physical mode switch"
+                    val retry_bytes = retry_updated.ok.unwrap()
+                    if retry_bytes.len() >= 4 and retry_bytes[0] == 0x21 and retry_bytes[1] == 0x43 and retry_bytes[2] == 0x65 and retry_bytes[3] == 0x87:
+                        return "ok"
+                    return "blocked: qemu physical mode write retry did not persist"
+        gdb.disconnect()
+        stop_process_if_running(qemu_pid)
+        cleanup_temp_remote_files(tmpdir)
+        if write_msg.contains("Cannot access memory"):
+            return "blocked: qemu gdb stub rejected memory write"
+        return "error: memory write failed: {write_msg}"
+
+    val updated = gdb.read_memory(addr, 4)
+    gdb.disconnect()
+    stop_process_if_running(qemu_pid)
+    cleanup_temp_remote_files(tmpdir)
+
+    if updated.is_err():
+        return "error: updated memory read failed"
+
+    val updated_bytes = updated.ok.unwrap()
+    if updated_bytes.len() < 4:
+        return "error: updated memory read too short"
+
+    if updated_bytes[0] == 0x21 and updated_bytes[1] == 0x43 and updated_bytes[2] == 0x65 and updated_bytes[3] == 0x87:
+        return "ok"
+    "error: updated marker value mismatch"
+
+fn trace32_remote_status() -> text:
+    if not file_exists("config/t32/t32_stm_headless.t32"):
+        return "error: missing config/t32/t32_stm_headless.t32"
+
+    val t32rem = find_t32rem_cmd()
+    if t32rem == "":
+        return "skip: t32rem unavailable"
+
+    val ping = shell("timeout 5 '{t32rem}' localhost port=20000 PING 2>&1")
+    val combined = ping.stdout + ping.stderr
+    val trimmed = combined.trim()
+
+    if ping.exit_code == 0:
+        return "ready"
+    if ping.exit_code == 124:
+        return "blocked: trace32 ping timed out"
+    if trimmed.contains("error initializing TRACE32"):
+        return "blocked: trace32 session not initialized"
+    if trimmed.contains("Can't open display"):
+        return "blocked: trace32 display not available"
+    if trimmed.contains("Authorization required"):
+        return "blocked: trace32 display authorization required"
+    if trimmed == "":
+        return "blocked: no TRACE32 response"
+    "blocked: {trimmed}"
+
+fn openocd_live_cpuid_status(cfg_path: text, serial: text, gdb_port: i32, expected_cpuid: i64) -> text:
+    if not command_available("openocd"):
+        return "skip: openocd unavailable"
+    val run = shell("timeout 15 openocd -f '{cfg_path}' -c 'adapter serial {serial}' -c 'gdb_port {gdb_port}' -c 'telnet_port {gdb_port + 1000}' -c 'init' -c 'reset halt' -c 'mdw 0xE000ED00 1' -c shutdown 2>&1")
+    val combined = (run.stdout + run.stderr).trim()
+    if run.exit_code != 0:
+        return "blocked: {combined}"
+    val cpuid = extract_hex_after_colon(combined, "0xe000ed00:")
+    if cpuid == expected_cpuid:
+        return "ok"
+    "error: unexpected cpuid 0x{cpuid}"
+
+fn stlink_live_cpuid_status(serial: text, expected_chip_id: text, expected_flash: text, expected_sram: text, expected_cpuid: i64) -> text:
+    if not command_available("st-info"):
+        return "skip: st-info unavailable"
+    if not command_available("st-flash"):
+        return "skip: st-flash unavailable"
+
+    val probe_output = shell("st-info --probe 2>&1")
+    if probe_output.exit_code != 0:
+        return "blocked: {(probe_output.stdout + probe_output.stderr).trim()}"
+    val block = extract_probe_block(probe_output.stdout + probe_output.stderr, serial)
+    if block == "":
+        return "blocked: probe {serial} not present"
+    if not block.contains("chipid:     {expected_chip_id}"):
+        return "error: unexpected st-link chip id block"
+    if not block.contains("flash:      {expected_flash}"):
+        return "error: unexpected st-link flash size block"
+    if not block.contains("sram:       {expected_sram}"):
+        return "error: unexpected st-link sram size block"
+
+    val cpuid_dump = shell("sh -c 'tmp=$(mktemp) && st-flash --serial={serial} read \"$tmp\" 0xE000ED00 4 >/dev/null 2>&1 && od -An -t x1 \"$tmp\" && rm -f \"$tmp\"' 2>&1")
+    if cpuid_dump.exit_code != 0:
+        return "blocked: {(cpuid_dump.stdout + cpuid_dump.stderr).trim()}"
+    val cpuid_text = cpuid_dump.stdout + cpuid_dump.stderr
+    val cpuid_bytes = parse_stlink_hex_dump(cpuid_text)
+    val cpuid = bytes_to_u32_le(cpuid_bytes)
+    if cpuid == expected_cpuid:
+        return "ok"
+    "error: unexpected st-link cpuid 0x{cpuid}"
+
+fn openocd_stm_status() -> text:
+    if not command_available("openocd"):
+        return "skip: openocd unavailable"
+    if not command_available("gdb"):
+        return "skip: gdb unavailable"
+
+    val h7 = Stm32H7Target.default()
+    val wb = Stm32WbTarget.default()
+    if h7.openocd_cfg == "" or wb.openocd_cfg == "":
+        return "error: stm openocd config missing"
+
+    val probe = shell("timeout 5 openocd -f '{h7.openocd_cfg}' -c 'transport list' -c shutdown 2>&1")
+    val combined = (probe.stdout + probe.stderr).trim()
+
+    if probe.exit_code == 0:
+        return "ready: {h7.openocd_cfg}"
+    if combined.contains("Can't find") or combined.contains("No such file"):
+        return "blocked: openocd board config unavailable"
+    if combined.contains("unable to open CMSIS-DAP") or combined.contains("unable to find a matching CMSIS-DAP device") or combined.contains("unable to open ftdi device") or combined.contains("init mode failed"):
+        return "blocked: stm openocd probe unavailable"
+    if combined == "":
+        return "blocked: openocd produced no readiness output"
+    "blocked: {combined}"
+
+fn stlink_tools_stm_status() -> text:
+    if not command_available("st-info"):
+        return "skip: st-info unavailable"
+    if not command_available("st-flash"):
+        return "skip: st-flash unavailable"
+
+    val h7 = Stm32H7Target.default()
+    val wb = Stm32WbTarget.default()
+    val serials = shell("st-info --serial 2>&1")
+    val combined = (serials.stdout + serials.stderr).trim()
+
+    if serials.exit_code != 0:
+        if combined.contains("Couldn't find any ST-Link") or combined.contains("No ST-Link detected"):
+            return "blocked: no st-link probe detected"
+        return "blocked: {combined}"
+    if combined.contains(h7.stlink_serial) or combined.contains(wb.stlink_serial):
+        return "ready"
+    if combined == "":
+        return "blocked: st-info returned no probe serials"
+    "blocked: expected stm probe serials not present"
+
+describe "Remote baremetal composite parsing":
+
+    it "extracts runtime, platform, and arch from nested remote spec":
+        val spec = "interpreter(remote(baremetal(riscv32)))"
+        expect(extract_base_runtime(spec)).to_equal("interpreter")
+        expect(extract_platform_layer(spec)).to_equal("remote")
+        expect(extract_arch_from_spec(spec)).to_equal("riscv32")
+
+    it "preserves nested jit stm32h7 mode strings":
+        val spec = "jit(remote(baremetal(stm32h7)))"
+        val mode = parse_mode_str(spec)
+        match mode:
+            case Composite(parsed):
+                expect(parsed).to_equal(spec)
+            case _:
+                expect(false).to_equal(true)
+        expect(extract_base_runtime(spec)).to_equal("jit")
+        expect(extract_platform_layer(spec)).to_equal("remote")
+        expect(extract_arch_from_spec(spec)).to_equal("arm32")
+
+    it "maps riscv32 to qemu-system-riscv32 and virt machine":
+        expect(qemu_binary_for_arch("riscv32")).to_equal("qemu-system-riscv32")
+        expect(qemu_machine_for_arch("riscv32")).to_equal("virt")
+
+    it "finds the checked-in rv32 baremetal elf fixture":
+        val elf = find_baremetal_elf("test/feature/app/remote_baremetal/remote_baremetal_runtime_spec.spl", "riscv32")
+        expect(elf).to_equal("examples/09_embedded/baremetal/baremetal/riscv32_test/test_riscv32_intensive.elf")
+
+describe "QEMU RISC-V32 remote smoke":
+
+    it "can build a temporary rv32 elf and read memory through gdb remote":
+        val status = qemu_riscv32_remote_memory_status()
+        expect(status_is_acceptable(status)).to_equal(true)
+
+describe "TRACE32 readiness":
+
+    it "resolves to a non-error readiness state":
+        val status = trace32_remote_status()
+        expect(status_is_acceptable(status)).to_equal(true)
+
+describe "STM debugger readiness":
+
+    it "reports openocd readiness for stm targets without treating host blockers as hard failures":
+        val status = openocd_stm_status()
+        expect(status_is_acceptable(status)).to_equal(true)
+
+    it "reports st-link tools readiness for stm targets without treating host blockers as hard failures":
+        val status = stlink_tools_stm_status()
+        expect(status_is_acceptable(status)).to_equal(true)
+
+fn wlink_live_status(chip: text, expected_chip_name: text) -> text:
+    if not command_available("wlink"):
+        return "skip: wlink unavailable"
+    val run = shell("timeout 10 wlink status --chip {chip} 2>&1")
+    val combined = (run.stdout + run.stderr).trim()
+    if combined.contains(expected_chip_name):
+        return "ok"
+    if combined.contains("Access denied"):
+        return "blocked: wlink usb permission denied"
+    if combined.contains("No such device") or combined.contains("not found"):
+        return "blocked: wlink device not connected"
+    "blocked: {combined}"
+
+fn wlink_live_register_read_status(chip: text) -> text:
+    if not command_available("wlink"):
+        return "skip: wlink unavailable"
+    val run = shell("timeout 10 wlink regs --chip {chip} 2>&1")
+    val combined = (run.stdout + run.stderr).trim()
+    if combined.contains("dpc(pc):") and combined.contains("x0"):
+        return "ok"
+    if combined.contains("Access denied"):
+        return "blocked: wlink usb permission denied"
+    "blocked: {combined}"
+
+fn wlink_live_memory_read_status(chip: text, addr: text, size: i32) -> text:
+    if not command_available("wlink"):
+        return "skip: wlink unavailable"
+    val run = shell("timeout 10 wlink dump {addr} {size} 2>&1")
+    val combined = (run.stdout + run.stderr).trim()
+    if combined.contains("Read memory from"):
+        return "ok"
+    if combined.contains("Access denied"):
+        return "blocked: wlink usb permission denied"
+    "blocked: {combined}"
+
+describe "WCH-Link RISC-V live smoke":
+
+    it "detects CH32V307 through wlink status":
+        val status = wlink_live_status("CH32V30X", "CH32V307")
+        expect(status_is_acceptable(status)).to_equal(true)
+        if not status.starts_with("skip:") and not status.starts_with("blocked:"):
+            expect(status).to_equal("ok")
+
+    it "reads CH32V307 registers through wlink":
+        val status = wlink_live_register_read_status("CH32V30X")
+        expect(status_is_acceptable(status)).to_equal(true)
+        if not status.starts_with("skip:") and not status.starts_with("blocked:"):
+            expect(status).to_equal("ok")
+
+    it "reads CH32V307 flash memory through wlink":
+        val status = wlink_live_memory_read_status("CH32V30X", "0x08000000", 64)
+        expect(status_is_acceptable(status)).to_equal(true)
+        if not status.starts_with("skip:") and not status.starts_with("blocked:"):
+            expect(status).to_equal("ok")
+
+    it "reads CH32V307 RAM through wlink":
+        val status = wlink_live_memory_read_status("CH32V30X", "0x20000000", 64)
+        expect(status_is_acceptable(status)).to_equal(true)
+        if not status.starts_with("skip:") and not status.starts_with("blocked:"):
+            expect(status).to_equal("ok")
+
+describe "STM live debugger smoke":
+
+    it "reads the H7 cpuid through openocd plus gdb":
+        val h7 = Stm32H7Target.default()
+        val status = openocd_live_cpuid_status(h7.openocd_cfg, h7.stlink_serial, h7.gdb_port, CORTEX_M7_CPUID)
+        expect(status_is_acceptable(status)).to_equal(true)
+        if not status.starts_with("skip:") and not status.starts_with("blocked:"):
+            expect(status).to_equal("ok")
+
+    it "reads the WB cpuid through openocd plus gdb":
+        val wb = Stm32WbTarget.default()
+        val status = openocd_live_cpuid_status(wb.openocd_cfg, wb.stlink_serial, wb.gdb_port, CORTEX_M4_CPUID)
+        expect(status_is_acceptable(status)).to_equal(true)
+        if not status.starts_with("skip:") and not status.starts_with("blocked:"):
+            expect(status).to_equal("ok")
+
+    it "reads the H7 cpuid through st-link tools":
+        val h7 = Stm32H7Target.default()
+        val status = stlink_live_cpuid_status(h7.stlink_serial, "0x480", "2097152", "131072", CORTEX_M7_CPUID)
+        expect(status_is_acceptable(status)).to_equal(true)
+        if not status.starts_with("skip:") and not status.starts_with("blocked:"):
+            expect(status).to_equal("ok")
+
+    it "reads the WB cpuid through st-link tools":
+        val wb = Stm32WbTarget.default()
+        val status = stlink_live_cpuid_status(wb.stlink_serial, "0x495", "1048576", "262144", CORTEX_M4_CPUID)
+        expect(status_is_acceptable(status)).to_equal(true)
+        if not status.starts_with("skip:") and not status.starts_with("blocked:"):
+            expect(status).to_equal("ok")

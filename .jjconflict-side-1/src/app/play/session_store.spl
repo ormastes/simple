@@ -1,0 +1,181 @@
+@allow(primitive_api)
+# app.play.session_store — File-backed CLI session registry
+#
+# CLI processes are short-lived, so a `simple play click <sid>` invocation
+# must be able to look up a PlaySession that was created by an earlier
+# `simple play launch` call. This module persists each session as a
+# simple line-based record at /tmp/simple-play/<sid>.session.
+#
+# Format (one key=value per line, URL-decoded on read):
+#   id=play-1712345
+#   backend=cdp
+#   state=ready
+#   pid=12345
+#   ws_url=ws://127.0.0.1:9222/devtools/browser/abcd
+#   artifacts_dir=doc/08_tracking/test/play/play-1712345
+#   first_window_id=
+#   stdout_path=...
+#   stderr_path=...
+#   console_log_path=...
+#   cdp_trace_path=...
+#   cwd=...
+#   executable_path=...
+#   created_at_us=1712345000000
+#   last_activity_us=1712345000000
+#
+# Values are %-escaped to keep newlines and `=` safe. No locking: race
+# windows are negligible because only one `simple play launch` writes a
+# given <sid>, and reads are idempotent.
+
+use std.play.types.*
+
+extern fn rt_mkdir_p(path: text) -> bool
+extern fn rt_file_write_text(path: text, content: text) -> bool
+extern fn rt_file_read_text(path: text) -> text
+extern fn rt_file_exists(path: text) -> bool
+extern fn rt_file_delete(path: text) -> bool
+extern fn rt_dir_list(path: text) -> [text]
+
+val SESSION_STORE_ROOT = "/tmp/simple-play"
+
+fn session_store_init() -> bool:
+    rt_mkdir_p(SESSION_STORE_ROOT)
+
+fn _session_path(session_id: text) -> text:
+    "{SESSION_STORE_ROOT}/{session_id}.session"
+
+fn _encode(s: text) -> text:
+    var r = s.replace("%", "%25")
+    r = r.replace("\n", "%0A")
+    r = r.replace("\r", "%0D")
+    r = r.replace("=", "%3D")
+    r
+
+fn _decode(s: text) -> text:
+    var r = s.replace("%3D", "=")
+    r = r.replace("%0D", "\r")
+    r = r.replace("%0A", "\n")
+    r = r.replace("%25", "%")
+    r
+
+fn _join_args(args: [text]) -> text:
+    var parts: [text] = []
+    for a in args:
+        parts.push(_encode(a))
+    parts.join("|")
+
+fn _split_args(encoded: text) -> [text]:
+    if encoded == "": return []
+    var out: [text] = []
+    val parts = encoded.split("|")
+    for p in parts:
+        out.push(_decode(p))
+    out
+
+fn _serialize(sess: PlaySession) -> text:
+    var lines: [text] = []
+    lines.push("id=" + _encode(sess.id))
+    lines.push("backend=" + _encode(sess.backend))
+    lines.push("state=" + _encode(sess.state))
+    lines.push("pid={sess.pid}")
+    lines.push("cwd=" + _encode(sess.cwd))
+    lines.push("executable_path=" + _encode(sess.executable_path))
+    lines.push("args=" + _join_args(sess.args))
+    lines.push("ws_url=" + _encode(sess.ws_url))
+    lines.push("http_url=" + _encode(sess.http_url))
+    lines.push("artifacts_dir=" + _encode(sess.artifacts_dir))
+    lines.push("first_window_id=" + _encode(sess.first_window_id))
+    lines.push("created_at_us={sess.created_at_us}")
+    lines.push("last_activity_us={sess.last_activity_us}")
+    lines.push("stdout_path=" + _encode(sess.stdout_path))
+    lines.push("stderr_path=" + _encode(sess.stderr_path))
+    lines.push("console_log_path=" + _encode(sess.console_log_path))
+    lines.push("cdp_trace_path=" + _encode(sess.cdp_trace_path))
+    lines.join("\n") + "\n"
+
+fn _split_lines(s: text) -> [text]:
+    val cleaned = s.replace("\r", "")
+    val parts = cleaned.split("\n")
+    var out: [text] = []
+    for p in parts:
+        if p != "":
+            out.push(p)
+    out
+
+fn _split_kv(line: text) -> (text, text):
+    val parts = line.split("=")
+    if parts.length() < 2: return (line, "")
+    val k = parts[0]
+    var rest: [text] = []
+    var i = 1
+    while i < parts.length():
+        rest.push(parts[i])
+        i = i + 1
+    (k, rest.join("="))
+
+fn _parse_int(s: text, fallback: i64) -> i64:
+    val trimmed = s.trim()
+    if trimmed == "": return fallback
+    int(trimmed)
+
+fn _deserialize(body: text) -> PlaySession:
+    var sess = empty_play_session()
+    val lines = _split_lines(body)
+    for line in lines:
+        if line == "": pass_do_nothing
+        else:
+            val (k, v_raw) = _split_kv(line)
+            match k:
+                case "id": sess.id = _decode(v_raw)
+                case "backend": sess.backend = _decode(v_raw)
+                case "state": sess.state = _decode(v_raw)
+                case "pid": sess.pid = _parse_int(v_raw, -1)
+                case "cwd": sess.cwd = _decode(v_raw)
+                case "executable_path": sess.executable_path = _decode(v_raw)
+                case "args": sess.args = _split_args(v_raw)
+                case "ws_url": sess.ws_url = _decode(v_raw)
+                case "http_url": sess.http_url = _decode(v_raw)
+                case "artifacts_dir": sess.artifacts_dir = _decode(v_raw)
+                case "first_window_id": sess.first_window_id = _decode(v_raw)
+                case "created_at_us": sess.created_at_us = _parse_int(v_raw, 0)
+                case "last_activity_us": sess.last_activity_us = _parse_int(v_raw, 0)
+                case "stdout_path": sess.stdout_path = _decode(v_raw)
+                case "stderr_path": sess.stderr_path = _decode(v_raw)
+                case "console_log_path": sess.console_log_path = _decode(v_raw)
+                case "cdp_trace_path": sess.cdp_trace_path = _decode(v_raw)
+                case _: pass_do_nothing
+    sess
+
+fn session_store_save(sess: PlaySession) -> bool:
+    session_store_init()
+    val path = _session_path(sess.id)
+    rt_file_write_text(path, _serialize(sess))
+
+fn session_store_load(session_id: text) -> PlaySession?:
+    val path = _session_path(session_id)
+    if not rt_file_exists(path):
+        return nil
+    val body = rt_file_read_text(path)
+    if body == "":
+        return nil
+    _deserialize(body)
+
+fn session_store_delete(session_id: text) -> bool:
+    val path = _session_path(session_id)
+    if rt_file_exists(path):
+        return rt_file_delete(path)
+    true
+
+fn session_store_list() -> [PlaySession]:
+    var out: [PlaySession] = []
+    if not rt_file_exists(SESSION_STORE_ROOT):
+        return out
+    val entries = rt_dir_list(SESSION_STORE_ROOT)
+    for name in entries:
+        if name.ends_with(".session"):
+            val path = "{SESSION_STORE_ROOT}/{name}"
+            if rt_file_exists(path):
+                val body = rt_file_read_text(path)
+                if body != "":
+                    out.push(_deserialize(body))
+    out

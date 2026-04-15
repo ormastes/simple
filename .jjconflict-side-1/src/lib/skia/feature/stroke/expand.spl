@@ -1,0 +1,768 @@
+# Stroke expansion — converts a stroked path to a filled path outline.
+#
+# Given an input path + stroke width + join type + cap type, produces a new
+# closed path representing the stroke geometry. Filling this path yields
+# the same pixels as stroking the original path.
+#
+# Mirrors Skia's SkStroke::strokePath.
+#
+# Algorithm (simplified — a full Skia implementation is ~3000 LOC):
+#   1. Flatten input to line segments (reuse depth-4 quad/cubic subdivision).
+#   2. For each contiguous run of segments, compute left/right offset polylines
+#      using perpendicular = (-dy, dx) * (width/2).
+#   3. Connect adjacent offsets via the chosen Join style (Bevel / Miter / Round).
+#   4. Cap open-path endpoints with the chosen Cap style (Butt / Round / Square).
+#   5. Emit a single closed polygon that walks the left polyline forward,
+#      end-cap, right polyline reversed, and start-cap.
+#
+# Curves are flattened, so the result won't match Skia pixel-for-pixel on
+# curved inputs — correctness is guaranteed for straight-segment paths.
+
+use std.skia.entity.path.{SkPath, SkPathSegment, SkPathVerb, sk_path_new}
+use std.skia.entity.geometry.{SkPoint}
+
+# ============================================================================
+# Public types
+# ============================================================================
+
+enum StrokeJoin:
+    Miter
+    Round
+    Bevel
+
+enum StrokeCap:
+    Butt
+    Round
+    Square
+
+class StrokeParams:
+    width: f64
+    cap: StrokeCap
+    join: StrokeJoin
+    miter_limit: f64
+
+fn stroke_params_new(width: f64, cap: StrokeCap, join: StrokeJoin, miter_limit: f64) -> StrokeParams:
+    StrokeParams(width: width, cap: cap, join: join, miter_limit: miter_limit)
+
+# ============================================================================
+# Internal math helpers
+# ============================================================================
+
+# Newton 8-iteration sqrt.
+fn _sqrt(x: f64) -> f64:
+    if x <= 0.0:
+        return 0.0
+    var g = x
+    if g > 1.0:
+        g = x * 0.5
+    var i = 0
+    while i < 8:
+        g = 0.5 * (g + x / g)
+        i = i + 1
+    g
+
+fn _abs(x: f64) -> f64:
+    if x < 0.0:
+        return 0.0 - x
+    x
+
+fn _length(dx: f64, dy: f64) -> f64:
+    _sqrt(dx * dx + dy * dy)
+
+# ============================================================================
+# Flatten input to line chords (depth-4 midpoint subdivision for curves).
+# ============================================================================
+
+fn _flatten_segments(input: SkPath) -> [(f64, f64, f64, f64, bool)]:
+    # Returns [(x0, y0, x1, y1, starts_new_contour)]
+    # starts_new_contour is true for the first segment after a Move verb
+    # (or the first segment overall) — used for cap placement.
+    var out: [(f64, f64, f64, f64, bool)] = []
+    var cur_x = 0.0
+    var cur_y = 0.0
+    var start_x = 0.0
+    var start_y = 0.0
+    var has_cur = false
+    var new_contour = true
+    var i = 0
+    while i < input.segments.length():
+        val opt = input.segments.at(i)
+        match opt:
+            Some(seg):
+                match seg.verb:
+                    SkPathVerb.Move:
+                        val p_opt = seg.pts.at(0)
+                        match p_opt:
+                            Some(p):
+                                cur_x = p.x
+                                cur_y = p.y
+                                start_x = p.x
+                                start_y = p.y
+                                has_cur = true
+                                new_contour = true
+                            None:
+                                pass_do_nothing
+                    SkPathVerb.Line:
+                        val p_opt = seg.pts.at(0)
+                        match p_opt:
+                            Some(p):
+                                if has_cur:
+                                    out.append((cur_x, cur_y, p.x, p.y, new_contour))
+                                    new_contour = false
+                                cur_x = p.x
+                                cur_y = p.y
+                                has_cur = true
+                            None:
+                                pass_do_nothing
+                    SkPathVerb.Quad:
+                        val p1_opt = seg.pts.at(0)
+                        val p2_opt = seg.pts.at(1)
+                        match p1_opt:
+                            Some(p1):
+                                match p2_opt:
+                                    Some(p2):
+                                        if has_cur:
+                                            var k = 1
+                                            var px = cur_x
+                                            var py = cur_y
+                                            var first_chord = new_contour
+                                            while k <= 16:
+                                                val t = (k as f64) / 16.0
+                                                val omt = 1.0 - t
+                                                val bx = omt * omt * cur_x + 2.0 * omt * t * p1.x + t * t * p2.x
+                                                val by = omt * omt * cur_y + 2.0 * omt * t * p1.y + t * t * p2.y
+                                                out.append((px, py, bx, by, first_chord))
+                                                first_chord = false
+                                                px = bx
+                                                py = by
+                                                k = k + 1
+                                            new_contour = false
+                                        cur_x = p2.x
+                                        cur_y = p2.y
+                                        has_cur = true
+                                    None:
+                                        pass_do_nothing
+                            None:
+                                pass_do_nothing
+                    SkPathVerb.Conic:
+                        val p1_opt = seg.pts.at(0)
+                        val p2_opt = seg.pts.at(1)
+                        match p1_opt:
+                            Some(p1):
+                                match p2_opt:
+                                    Some(p2):
+                                        if has_cur:
+                                            var k = 1
+                                            var px = cur_x
+                                            var py = cur_y
+                                            var first_chord = new_contour
+                                            while k <= 16:
+                                                val t = (k as f64) / 16.0
+                                                val omt = 1.0 - t
+                                                val bx = omt * omt * cur_x + 2.0 * omt * t * p1.x + t * t * p2.x
+                                                val by = omt * omt * cur_y + 2.0 * omt * t * p1.y + t * t * p2.y
+                                                out.append((px, py, bx, by, first_chord))
+                                                first_chord = false
+                                                px = bx
+                                                py = by
+                                                k = k + 1
+                                            new_contour = false
+                                        cur_x = p2.x
+                                        cur_y = p2.y
+                                        has_cur = true
+                                    None:
+                                        pass_do_nothing
+                            None:
+                                pass_do_nothing
+                    SkPathVerb.Cubic:
+                        val p1_opt = seg.pts.at(0)
+                        val p2_opt = seg.pts.at(1)
+                        val p3_opt = seg.pts.at(2)
+                        match p1_opt:
+                            Some(p1):
+                                match p2_opt:
+                                    Some(p2):
+                                        match p3_opt:
+                                            Some(p3):
+                                                if has_cur:
+                                                    var k = 1
+                                                    var px = cur_x
+                                                    var py = cur_y
+                                                    var first_chord = new_contour
+                                                    while k <= 16:
+                                                        val t = (k as f64) / 16.0
+                                                        val omt = 1.0 - t
+                                                        val b0 = omt * omt * omt
+                                                        val b1 = 3.0 * omt * omt * t
+                                                        val b2 = 3.0 * omt * t * t
+                                                        val b3 = t * t * t
+                                                        val bx = b0 * cur_x + b1 * p1.x + b2 * p2.x + b3 * p3.x
+                                                        val by = b0 * cur_y + b1 * p1.y + b2 * p2.y + b3 * p3.y
+                                                        out.append((px, py, bx, by, first_chord))
+                                                        first_chord = false
+                                                        px = bx
+                                                        py = by
+                                                        k = k + 1
+                                                    new_contour = false
+                                                cur_x = p3.x
+                                                cur_y = p3.y
+                                                has_cur = true
+                                            None:
+                                                pass_do_nothing
+                                    None:
+                                        pass_do_nothing
+                            None:
+                                pass_do_nothing
+                    SkPathVerb.Close:
+                        if has_cur:
+                            out.append((cur_x, cur_y, start_x, start_y, false))
+                            cur_x = start_x
+                            cur_y = start_y
+                            new_contour = true
+            None:
+                pass_do_nothing
+        i = i + 1
+    out
+
+# ============================================================================
+# Contour partitioning
+# ============================================================================
+#
+# Splits the flattened chord list into a list of contiguous contours. Each
+# contour is a list of chords sharing start/end points, plus a flag telling
+# us whether the contour is closed (start == end of the run).
+
+class _Contour:
+    chords: [(f64, f64, f64, f64)]
+    closed: bool
+
+fn _split_contours(flat: [(f64, f64, f64, f64, bool)]) -> [_Contour]:
+    var contours: [_Contour] = []
+    var cur_chords: [(f64, f64, f64, f64)] = []
+    var i = 0
+    while i < flat.length():
+        val opt = flat.at(i)
+        match opt:
+            Some(c):
+                val x0 = c.0
+                val y0 = c.1
+                val x1 = c.2
+                val y1 = c.3
+                val new_contour = c.4
+                if new_contour and cur_chords.length() > 0:
+                    # Flush current
+                    val first_opt = cur_chords.at(0)
+                    val last_opt = cur_chords.at(cur_chords.length() - 1)
+                    var closed = false
+                    match first_opt:
+                        Some(fc):
+                            match last_opt:
+                                Some(lc):
+                                    val dx = fc.0 - lc.2
+                                    val dy = fc.1 - lc.3
+                                    if _length(dx, dy) < 1.0e-9:
+                                        closed = true
+                                None:
+                                    pass_do_nothing
+                        None:
+                            pass_do_nothing
+                    contours.append(_Contour(chords: cur_chords, closed: closed))
+                    cur_chords = []
+                cur_chords.append((x0, y0, x1, y1))
+            None:
+                pass_do_nothing
+        i = i + 1
+    if cur_chords.length() > 0:
+        val first_opt = cur_chords.at(0)
+        val last_opt = cur_chords.at(cur_chords.length() - 1)
+        var closed = false
+        match first_opt:
+            Some(fc):
+                match last_opt:
+                    Some(lc):
+                        val dx = fc.0 - lc.2
+                        val dy = fc.1 - lc.3
+                        if _length(dx, dy) < 1.0e-9:
+                            closed = true
+                    None:
+                        pass_do_nothing
+            None:
+                pass_do_nothing
+        contours.append(_Contour(chords: cur_chords, closed: closed))
+    contours
+
+# ============================================================================
+# Offset polyline construction
+# ============================================================================
+#
+# For each chord, compute an outward normal (left) and an inward normal (right)
+# displaced by half_w. Returns two parallel arrays with 2 * N_chords points
+# each — (left_start, left_end) for each chord and similarly for right.
+
+class _OffsetEdge:
+    lsx: f64
+    lsy: f64
+    lex: f64
+    ley: f64
+    rsx: f64
+    rsy: f64
+    rex: f64
+    rey: f64
+    nx: f64   # unit normal pointing to the left
+    ny: f64
+
+fn _build_edges(chords: [(f64, f64, f64, f64)], half_w: f64) -> [_OffsetEdge]:
+    var edges: [_OffsetEdge] = []
+    var i = 0
+    while i < chords.length():
+        val opt = chords.at(i)
+        match opt:
+            Some(c):
+                val x0 = c.0
+                val y0 = c.1
+                val x1 = c.2
+                val y1 = c.3
+                val dx = x1 - x0
+                val dy = y1 - y0
+                val len = _length(dx, dy)
+                if len > 1.0e-12:
+                    val ux = dx / len
+                    val uy = dy / len
+                    # Left normal = (-uy, ux)
+                    val nx = 0.0 - uy
+                    val ny = ux
+                    val ox = nx * half_w
+                    val oy = ny * half_w
+                    edges.append(_OffsetEdge(
+                        lsx: x0 + ox, lsy: y0 + oy,
+                        lex: x1 + ox, ley: y1 + oy,
+                        rsx: x0 - ox, rsy: y0 - oy,
+                        rex: x1 - ox, rey: y1 - oy,
+                        nx: nx, ny: ny
+                    ))
+            None:
+                pass_do_nothing
+        i = i + 1
+    edges
+
+# ============================================================================
+# Join construction
+# ============================================================================
+#
+# Given the "outgoing" end of edge i and the "incoming" start of edge i+1,
+# emit the polyline that connects them on one side (left or right).
+
+fn _emit_join(path: SkPath, join: StrokeJoin, miter_limit: f64,
+              ax: f64, ay: f64,      # end of previous offset edge
+              bx: f64, by: f64,      # start of next offset edge
+              pivot_x: f64, pivot_y: f64,  # the shared corner vertex on the centerline
+              half_w: f64) -> SkPath:
+    var out = path
+    val dx = bx - ax
+    val dy = by - ay
+    val gap = _length(dx, dy)
+    if gap < 1.0e-9:
+        # Collinear — no join needed.
+        return out
+
+    match join:
+        StrokeJoin.Bevel:
+            out = out.line_to(bx, by)
+        StrokeJoin.Round:
+            # 8-segment arc between a and b, centered at pivot, radius = half_w.
+            val steps = 8
+            var k = 1
+            # Angle from pivot to a.
+            val a_ang_x = ax - pivot_x
+            val a_ang_y = ay - pivot_y
+            val b_ang_x = bx - pivot_x
+            val b_ang_y = by - pivot_y
+            # Use slerp-style spherical blend in 2D via normalized lerp then renormalize.
+            while k < steps:
+                val t = (k as f64) / (steps as f64)
+                val ix = a_ang_x + (b_ang_x - a_ang_x) * t
+                val iy = a_ang_y + (b_ang_y - a_ang_y) * t
+                val ilen = _length(ix, iy)
+                if ilen > 1.0e-12:
+                    val px = pivot_x + (ix / ilen) * half_w
+                    val py = pivot_y + (iy / ilen) * half_w
+                    out = out.line_to(px, py)
+                k = k + 1
+            out = out.line_to(bx, by)
+        StrokeJoin.Miter:
+            # Solve for intersection of line through a with direction (pivot->a rotated 90deg)
+            # and line through b with direction (pivot->b rotated 90deg). In practice, each
+            # offset edge is parallel to its centerline, so we can use the centerline tangent
+            # at each side. We approximate: project from a along (a - prev_pivot_offset) and
+            # from b along (next_pivot_offset - b). Simpler robust form: find intersection
+            # of rays (a, a - pivot)-perpendicular and (b, b - pivot)-perpendicular.
+            val ra_x = ax - pivot_x
+            val ra_y = ay - pivot_y
+            val rb_x = bx - pivot_x
+            val rb_y = by - pivot_y
+            # Tangent to the miter at a is perpendicular to ra.
+            val ta_x = 0.0 - ra_y
+            val ta_y = ra_x
+            val tb_x = 0.0 - rb_y
+            val tb_y = rb_x
+            # Solve a + t * ta = b + s * tb for (t, s).
+            val denom = ta_x * tb_y - ta_y * tb_x
+            if _abs(denom) < 1.0e-9:
+                # Degenerate — fall back to Bevel.
+                out = out.line_to(bx, by)
+            else:
+                val dex = bx - ax
+                val dey = by - ay
+                val t = (dex * tb_y - dey * tb_x) / denom
+                val mx = ax + t * ta_x
+                val my = ay + t * ta_y
+                # Miter length = distance from pivot to miter tip.
+                val mlx = mx - pivot_x
+                val mly = my - pivot_y
+                val mlen = _length(mlx, mly)
+                val limit_px = half_w * miter_limit
+                if mlen > limit_px:
+                    # Fall back to Bevel.
+                    out = out.line_to(bx, by)
+                else:
+                    out = out.line_to(mx, my)
+                    out = out.line_to(bx, by)
+    out
+
+# ============================================================================
+# Cap construction
+# ============================================================================
+
+fn _emit_cap(path: SkPath, cap: StrokeCap,
+             lx: f64, ly: f64,   # current side point (where we are)
+             rx: f64, ry: f64,   # opposite-side point (destination)
+             tx: f64, ty: f64,   # unit tangent in the direction AWAY from the stroke (outward)
+             half_w: f64) -> SkPath:
+    var out = path
+    match cap:
+        StrokeCap.Butt:
+            out = out.line_to(rx, ry)
+        StrokeCap.Square:
+            # Extend outward by half_w on both sides, then close.
+            val ex1 = lx + tx * half_w
+            val ey1 = ly + ty * half_w
+            val ex2 = rx + tx * half_w
+            val ey2 = ry + ty * half_w
+            out = out.line_to(ex1, ey1)
+            out = out.line_to(ex2, ey2)
+            out = out.line_to(rx, ry)
+        StrokeCap.Round:
+            # 8 segments of a semicircle around the midpoint of (l, r).
+            val cx = (lx + rx) * 0.5
+            val cy = (ly + ry) * 0.5
+            # Compute starting vector (cx -> lx, ly).
+            val v_lx = lx - cx
+            val v_ly = ly - cy
+            # Rotate by pi in 8 steps: we go from v_l through tangent outward to v_r.
+            # Use a linear interpolation between v_l -> tangent*half_w -> v_r,
+            # renormalized on each step. 8 mid-points -> 8 line_to calls.
+            val steps = 8
+            var k = 1
+            while k < steps:
+                val t = (k as f64) / (steps as f64)
+                # Blend between v_l and tangent*half_w for first half,
+                # tangent*half_w and v_r for second half.
+                var bx = 0.0
+                var by = 0.0
+                if t < 0.5:
+                    val tt = t * 2.0
+                    bx = v_lx + (tx * half_w - v_lx) * tt
+                    by = v_ly + (ty * half_w - v_ly) * tt
+                else:
+                    val tt = (t - 0.5) * 2.0
+                    bx = tx * half_w + ((0.0 - v_lx) - tx * half_w) * tt
+                    by = ty * half_w + ((0.0 - v_ly) - ty * half_w) * tt
+                val blen = _length(bx, by)
+                if blen > 1.0e-12:
+                    val px = cx + (bx / blen) * half_w
+                    val py = cy + (by / blen) * half_w
+                    out = out.line_to(px, py)
+                k = k + 1
+            out = out.line_to(rx, ry)
+    out
+
+# ============================================================================
+# Expand a single contour
+# ============================================================================
+
+fn _expand_open_contour(path: SkPath, edges: [_OffsetEdge],
+                         chords: [(f64, f64, f64, f64)],
+                         params: StrokeParams) -> SkPath:
+    var out = path
+    val n = edges.length()
+    if n == 0:
+        return out
+    val half_w = params.width * 0.5
+
+    # First edge — start cap.
+    val first_opt = edges.at(0)
+    val first_chord_opt = chords.at(0)
+    match first_opt:
+        Some(e0):
+            match first_chord_opt:
+                Some(c0):
+                    val start_x = c0.0
+                    val start_y = c0.1
+                    val end_x = c0.2
+                    val end_y = c0.3
+                    val dxs = end_x - start_x
+                    val dys = end_y - start_y
+                    val lens = _length(dxs, dys)
+                    var tsx = 0.0
+                    var tsy = 0.0
+                    if lens > 1.0e-12:
+                        # Outward tangent points AWAY from the stroke = opposite of travel direction.
+                        tsx = 0.0 - (dxs / lens)
+                        tsy = 0.0 - (dys / lens)
+
+                    # Open path at the left-start.
+                    out = out.move_to(e0.lsx, e0.lsy)
+                    # Walk left polyline forward.
+                    out = out.line_to(e0.lex, e0.ley)
+                    var i = 1
+                    while i < n:
+                        val prev_opt = edges.at(i - 1)
+                        val cur_opt = edges.at(i)
+                        val chord_cur_opt = chords.at(i)
+                        match prev_opt:
+                            Some(ep):
+                                match cur_opt:
+                                    Some(ec):
+                                        match chord_cur_opt:
+                                            Some(cc):
+                                                val pivot_x = cc.0
+                                                val pivot_y = cc.1
+                                                out = _emit_join(out, params.join, params.miter_limit,
+                                                                 ep.lex, ep.ley,
+                                                                 ec.lsx, ec.lsy,
+                                                                 pivot_x, pivot_y, half_w)
+                                                out = out.line_to(ec.lex, ec.ley)
+                                            None:
+                                                pass_do_nothing
+                                    None:
+                                        pass_do_nothing
+                            None:
+                                pass_do_nothing
+                        i = i + 1
+
+                    # End cap.
+                    val last_opt = edges.at(n - 1)
+                    val last_chord_opt = chords.at(n - 1)
+                    match last_opt:
+                        Some(el):
+                            match last_chord_opt:
+                                Some(cl):
+                                    val ex = cl.2
+                                    val ey = cl.3
+                                    val sx = cl.0
+                                    val sy = cl.1
+                                    val dxe = ex - sx
+                                    val dye = ey - sy
+                                    val lene = _length(dxe, dye)
+                                    var tex = 0.0
+                                    var tey = 0.0
+                                    if lene > 1.0e-12:
+                                        tex = dxe / lene
+                                        tey = dye / lene
+                                    out = _emit_cap(out, params.cap,
+                                                    el.lex, el.ley,
+                                                    el.rex, el.rey,
+                                                    tex, tey, half_w)
+
+                                    # Walk right polyline reversed.
+                                    var j = n - 1
+                                    out = out.line_to(el.rsx, el.rsy)
+                                    j = j - 1
+                                    while j >= 0:
+                                        val next_opt = edges.at(j + 1)
+                                        val cur2_opt = edges.at(j)
+                                        val chord_j_opt = chords.at(j + 1)
+                                        match next_opt:
+                                            Some(en):
+                                                match cur2_opt:
+                                                    Some(ec2):
+                                                        match chord_j_opt:
+                                                            Some(cj):
+                                                                val pivot_x = cj.0
+                                                                val pivot_y = cj.1
+                                                                out = _emit_join(out, params.join, params.miter_limit,
+                                                                                 en.rsx, en.rsy,
+                                                                                 ec2.rex, ec2.rey,
+                                                                                 pivot_x, pivot_y, half_w)
+                                                                out = out.line_to(ec2.rsx, ec2.rsy)
+                                                            None:
+                                                                pass_do_nothing
+                                                    None:
+                                                        pass_do_nothing
+                                            None:
+                                                pass_do_nothing
+                                        j = j - 1
+
+                                    # Start cap — close back to e0.lsx, e0.lsy.
+                                    out = _emit_cap(out, params.cap,
+                                                    e0.rsx, e0.rsy,
+                                                    e0.lsx, e0.lsy,
+                                                    tsx, tsy, half_w)
+                                    out = out.close()
+                                None:
+                                    pass_do_nothing
+                        None:
+                            pass_do_nothing
+                None:
+                    pass_do_nothing
+        None:
+            pass_do_nothing
+    out
+
+fn _expand_closed_contour(path: SkPath, edges: [_OffsetEdge],
+                           chords: [(f64, f64, f64, f64)],
+                           params: StrokeParams) -> SkPath:
+    var out = path
+    val n = edges.length()
+    if n == 0:
+        return out
+    val half_w = params.width * 0.5
+
+    # Outer loop (left side): move_to first left-start, walk forward with joins,
+    # join from last->first, close.
+    val e0_opt = edges.at(0)
+    match e0_opt:
+        Some(e0):
+            out = out.move_to(e0.lsx, e0.lsy)
+            out = out.line_to(e0.lex, e0.ley)
+            var i = 1
+            while i < n:
+                val prev_opt = edges.at(i - 1)
+                val cur_opt = edges.at(i)
+                val chord_cur_opt = chords.at(i)
+                match prev_opt:
+                    Some(ep):
+                        match cur_opt:
+                            Some(ec):
+                                match chord_cur_opt:
+                                    Some(cc):
+                                        val pivot_x = cc.0
+                                        val pivot_y = cc.1
+                                        out = _emit_join(out, params.join, params.miter_limit,
+                                                         ep.lex, ep.ley,
+                                                         ec.lsx, ec.lsy,
+                                                         pivot_x, pivot_y, half_w)
+                                        out = out.line_to(ec.lex, ec.ley)
+                                    None:
+                                        pass_do_nothing
+                            None:
+                                pass_do_nothing
+                    None:
+                        pass_do_nothing
+                i = i + 1
+            # Closing join from last edge back to first.
+            val last_opt = edges.at(n - 1)
+            val first_chord_opt = chords.at(0)
+            match last_opt:
+                Some(el):
+                    match first_chord_opt:
+                        Some(fc):
+                            val pivot_x = fc.0
+                            val pivot_y = fc.1
+                            out = _emit_join(out, params.join, params.miter_limit,
+                                             el.lex, el.ley,
+                                             e0.lsx, e0.lsy,
+                                             pivot_x, pivot_y, half_w)
+                        None:
+                            pass_do_nothing
+                None:
+                    pass_do_nothing
+            out = out.close()
+        None:
+            pass_do_nothing
+
+    # Inner loop (right side): opposite winding — walk reversed.
+    match e0_opt:
+        Some(e0):
+            val last_opt = edges.at(n - 1)
+            match last_opt:
+                Some(el):
+                    out = out.move_to(el.rex, el.rey)
+                    out = out.line_to(el.rsx, el.rsy)
+                    var j = n - 2
+                    while j >= 0:
+                        val next_opt = edges.at(j + 1)
+                        val cur_opt = edges.at(j)
+                        val chord_j_opt = chords.at(j + 1)
+                        match next_opt:
+                            Some(en):
+                                match cur_opt:
+                                    Some(ec):
+                                        match chord_j_opt:
+                                            Some(cj):
+                                                val pivot_x = cj.0
+                                                val pivot_y = cj.1
+                                                out = _emit_join(out, params.join, params.miter_limit,
+                                                                 en.rsx, en.rsy,
+                                                                 ec.rex, ec.rey,
+                                                                 pivot_x, pivot_y, half_w)
+                                                out = out.line_to(ec.rsx, ec.rsy)
+                                            None:
+                                                pass_do_nothing
+                                    None:
+                                        pass_do_nothing
+                            None:
+                                pass_do_nothing
+                        j = j - 1
+                    # Closing join from first-right back to last-right.
+                    val first_chord_opt = chords.at(0)
+                    match first_chord_opt:
+                        Some(fc):
+                            val pivot_x = fc.0
+                            val pivot_y = fc.1
+                            out = _emit_join(out, params.join, params.miter_limit,
+                                             e0.rsx, e0.rsy,
+                                             el.rex, el.rey,
+                                             pivot_x, pivot_y, half_w)
+                        None:
+                            pass_do_nothing
+                    out = out.close()
+                None:
+                    pass_do_nothing
+        None:
+            pass_do_nothing
+    out
+
+# ============================================================================
+# Public entry point
+# ============================================================================
+
+fn expand_stroke(input: SkPath, params: StrokeParams) -> SkPath:
+    val out0 = sk_path_new()
+    if input.is_empty():
+        return out0
+    if params.width <= 0.0:
+        return out0
+
+    val flat = _flatten_segments(input)
+    if flat.length() == 0:
+        return out0
+
+    val contours = _split_contours(flat)
+    var out = out0
+    val half_w = params.width * 0.5
+    var ci = 0
+    while ci < contours.length():
+        val con_opt = contours.at(ci)
+        match con_opt:
+            Some(con):
+                val edges = _build_edges(con.chords, half_w)
+                if edges.length() > 0:
+                    if con.closed:
+                        out = _expand_closed_contour(out, edges, con.chords, params)
+                    else:
+                        out = _expand_open_contour(out, edges, con.chords, params)
+            None:
+                pass_do_nothing
+        ci = ci + 1
+    out

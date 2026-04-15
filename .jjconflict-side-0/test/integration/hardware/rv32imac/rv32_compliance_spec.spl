@@ -1,0 +1,125 @@
+"""
+# RV32IMAC Compliance Test Harness
+
+**Feature IDs:** #RV32-COMPLIANCE-001
+**Category:** Hardware
+**Difficulty:** 4/5
+**Status:** In Progress
+
+## Overview
+
+Harness for running riscv-arch-test compliance suite.
+Compiles test programs, loads into simulation ROM, and compares signatures.
+"""
+
+# @req REQ-RV32IMAC
+# @feature rv32imac
+# tag: only-compiled, vhdl, slow
+
+import std.spec
+
+use hardware.rv32imac.core.rv32_execute.alu_execute
+use hardware.rv32imac.core.rv32_decode.*
+use hardware.rv32imac.ext.rv32_muldiv.muldiv_execute
+use hardware.rv32imac.ext.rv32_atomics.{ReservationSet, amo_execute, AmoOp}
+use hardware.rv32imac.pkg.rv32_types_pkg.*
+use hardware.rv32imac.pkg.rv32_isa_pkg.*
+
+describe "RV32I Compliance":
+    """
+    ## RV32I Base Integer Instruction Set
+
+    Tests all RV32I instructions using computed expected values.
+    """
+
+    it "ADD: rd = rs1 + rs2":
+        expect(alu_execute(AluOp.Add, 100, 200)).to_equal(300)
+        expect(alu_execute(AluOp.Add, 0xFFFFFFFF, 1)).to_equal(0)  # Overflow wraps
+
+    it "SUB: rd = rs1 - rs2":
+        expect(alu_execute(AluOp.Sub, 200, 100)).to_equal(100)
+        expect(alu_execute(AluOp.Sub, 0, 1)).to_equal(0xFFFFFFFF)  # Underflow wraps
+
+    it "AND/OR/XOR: bitwise operations":
+        expect(alu_execute(AluOp.And, 0xF0F0, 0xFF00)).to_equal(0xF000)
+        expect(alu_execute(AluOp.Or, 0xF0F0, 0x0F0F)).to_equal(0xFFFF)
+        expect(alu_execute(AluOp.Xor, 0xFFFF, 0xF0F0)).to_equal(0x0F0F)
+
+    it "SLL/SRL/SRA: shift operations":
+        expect(alu_execute(AluOp.Sll, 1, 10)).to_equal(1024)
+        expect(alu_execute(AluOp.Srl, 1024, 10)).to_equal(1)
+
+    it "SLT/SLTU: comparison operations":
+        # Signed: -1 < 0
+        expect(alu_execute(AluOp.Slt, 0xFFFFFFFF, 0)).to_equal(1)
+        # Unsigned: 0xFFFFFFFF > 0
+        expect(alu_execute(AluOp.Sltu, 0xFFFFFFFF, 0)).to_equal(0)
+
+describe "RV32M Compliance":
+    """
+    ## M Extension
+
+    Tests MUL/DIV/REM operations including edge cases.
+    """
+
+    it "MUL: rd = (rs1 * rs2)[31:0]":
+        expect(muldiv_execute(AluOp.Mul, 7, 6)).to_equal(42)
+
+    it "MUL: handles overflow":
+        expect(muldiv_execute(AluOp.Mul, 0x80000000, 2)).to_equal(0)
+
+    it "DIV: rd = rs1 / rs2 (signed)":
+        expect(muldiv_execute(AluOp.Div, 20, 3)).to_equal(6)
+
+    it "DIV: division by zero returns all ones":
+        # Use var to prevent const-evaluator from folding 42/0
+        var zero = 0
+        expect(muldiv_execute(AluOp.Div, 42, zero)).to_equal(0xFFFFFFFF)
+
+    it "DIVU: unsigned division":
+        expect(muldiv_execute(AluOp.Divu, 20, 3)).to_equal(6)
+
+    it "REM: remainder":
+        expect(muldiv_execute(AluOp.Rem, 20, 3)).to_equal(2)
+
+    it "REMU: unsigned remainder":
+        expect(muldiv_execute(AluOp.Remu, 20, 3)).to_equal(2)
+
+describe "RV32A Compliance":
+    """
+    ## A Extension
+
+    Tests LR/SC reservation mechanism and AMO operations.
+    """
+
+    it "LR/SC succeeds on uncontested reservation":
+        """
+        **Given:** Fresh reservation set
+        **When:** LR then SC to same address
+        **Then:** SC succeeds (returns true)
+        """
+        var rs = ReservationSet.create()
+        rs.reserve(0x80000100)
+        val success = rs.check_and_clear(0x80000100)
+        expect(success).to_equal(true)
+
+    it "SC fails after intervening store":
+        """
+        **Given:** Active reservation
+        **When:** Intervening store to same address, then SC
+        **Then:** SC fails (returns false)
+        """
+        var rs = ReservationSet.create()
+        rs.reserve(0x80000100)
+        rs.invalidate_if_match(0x80000100)
+        val success = rs.check_and_clear(0x80000100)
+        expect(success).to_equal(false)
+
+    it "AMOADD computes correctly":
+        expect(amo_execute(AmoOp.AmoAdd, 100, 50)).to_equal(150)
+
+    it "AMOSWAP returns rs2":
+        expect(amo_execute(AmoOp.AmoSwap, 100, 200)).to_equal(200)
+
+    it "AMOAND computes correctly":
+        expect(amo_execute(AmoOp.AmoAnd, 0xFF00, 0x0FF0)).to_equal(0x0F00)

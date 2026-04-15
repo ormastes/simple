@@ -1,0 +1,122 @@
+@allow(primitive_api)
+# std.play.electron_application — ElectronApplication class
+#
+# Mirrors Playwright's ElectronApplication. An ElectronApplication wraps a
+# PlaySession + a CdpClient and manages one or more Pages (BrowserWindows).
+
+use std.play.cdp.client.{CdpClient}
+use std.play.cdp.session.{CdpSession}
+use std.play.cdp.domains.{cdp_target_get_targets, cdp_target_set_discover, cdp_runtime_evaluate_global}
+use std.play.launcher.{launcher_launch, launcher_kill}
+use std.play.page.{Page}
+use std.play.types.*
+
+extern fn rt_process_is_running(pid: i64) -> bool
+extern fn rt_process_kill(pid: i64) -> bool
+extern fn rt_time_now_unix_micros() -> i64
+
+class ElectronApplication:
+    session: PlaySession
+    client: CdpClient
+    pages: [Page]
+    closed: bool
+
+    static fn launch(opts: LaunchOptions) -> Result<ElectronApplication, PlayError>:
+        val sess = launcher_launch(opts)?
+        val client = CdpClient.connect(sess.ws_url, opts.timeout_ms)?
+        cdp_target_set_discover(client, true)?
+        val app = ElectronApplication(
+            session: sess,
+            client: client,
+            pages: [],
+            closed: false
+        )
+        Ok(app)
+
+    me first_window() -> Result<Page, PlayError>:
+        """Return the first page/window. If none, polls Target.getTargets
+        until one appears or times out."""
+        if self.pages.length() > 0:
+            return Ok(self.pages[0])
+
+        val deadline = rt_time_now_unix_micros() + (DEFAULT_LAUNCH_TIMEOUT_MS * 1000)
+        while rt_time_now_unix_micros() < deadline:
+            val body = cdp_target_get_targets(self.client)?
+            val target_id = _extract_first_page_target_id(body)
+            if target_id != "":
+                val cdp_sess = CdpSession.attach(self.client, target_id)?
+                cdp_sess.enable()?
+                val page = Page.from_cdp(cdp_sess, target_id, self.session.artifacts_dir)
+                self.pages.push(page)
+                return Ok(page)
+        Err(play_error(ERR_TIMEOUT, "first_window: no page target found"))
+
+    me windows() -> Result<[Page], PlayError>:
+        """Enumerate all current page targets and attach to any new ones."""
+        val body = cdp_target_get_targets(self.client)?
+        val target_ids = _extract_all_page_target_ids(body)
+        for tid in target_ids:
+            var have = false
+            for p in self.pages:
+                if p.session.target_id == tid:
+                    have = true
+            if not have:
+                val cdp_sess = CdpSession.attach(self.client, tid)?
+                cdp_sess.enable()?
+                val page = Page.from_cdp(cdp_sess, tid, self.session.artifacts_dir)
+                self.pages.push(page)
+        Ok(self.pages)
+
+    me evaluate(expression: text) -> Result<text, PlayError>:
+        """Run JS in the Electron main process context."""
+        cdp_runtime_evaluate_global(self.client, expression)
+
+    me process_id() -> i64:
+        self.session.pid
+
+    me is_running() -> bool:
+        if self.closed: return false
+        if self.session.pid <= 0: return false
+        rt_process_is_running(self.session.pid)
+
+    me artifacts_dir() -> text:
+        self.session.artifacts_dir
+
+    me close() -> Result<(), PlayError>:
+        if self.closed: return Ok(())
+        self.client.close()
+        if self.session.pid > 0 and rt_process_is_running(self.session.pid):
+            rt_process_kill(self.session.pid)
+        self.closed = true
+        Ok(())
+
+# ============================================================================
+# Target-id extraction from Target.getTargets response body
+# ============================================================================
+
+fn _extract_first_page_target_id(body: text) -> text:
+    """Find the first targetInfo with type=="page" and return its targetId."""
+    val ids = _extract_all_page_target_ids(body)
+    if ids.length() > 0: ids[0] else: ""
+
+fn _extract_all_page_target_ids(body: text) -> [text]:
+    """Scan for `"type":"page"` blocks and return their targetId values.
+    Uses .split()-based extraction to avoid char_at."""
+    var out: [text] = []
+    if not body.contains("\"type\":\"page\""): return out
+    # Split on the type marker; each segment after [0] had "type":"page" before it
+    val segments = body.split("\"type\":\"page\"")
+    var i = 0
+    while i < segments.length() - 1:
+        val before = segments[i]
+        # Find "targetId":"<value>" in the preceding text
+        if before.contains("\"targetId\":"):
+            val tid_parts = before.split("\"targetId\":\"")
+            if tid_parts.length() >= 2:
+                # Take the last occurrence (closest to the type marker)
+                val last_part = tid_parts[tid_parts.length() - 1]
+                val id_value = last_part.split("\"")[0]
+                if id_value != "":
+                    out.push(id_value)
+        i = i + 1
+    out

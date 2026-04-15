@@ -1,0 +1,134 @@
+"""
+# RV64 Sv39 Page Table Walker
+
+Sv39 virtual memory: 39-bit virtual address, 3-level page table,
+4KiB pages, supports megapages (2MiB) and gigapages (1GiB).
+"""
+
+use hardware.rv64gc.pkg.rv64_types_pkg.{AccessType, TRAP_LOAD_PAGE_FAULT, TRAP_STORE_PAGE_FAULT, TRAP_INSTR_PAGE_FAULT}
+use hardware.rv64gc.core.rv64_memory.{MemResult, mem_ok, mem_fault}
+
+# Page table entry bits
+val PTE_V: i64 = 0x01   # Valid
+val PTE_R: i64 = 0x02   # Read
+val PTE_W: i64 = 0x04   # Write
+val PTE_X: i64 = 0x08   # Execute
+val PTE_U: i64 = 0x10   # User
+val PTE_G: i64 = 0x20   # Global
+val PTE_A: i64 = 0x40   # Accessed
+val PTE_D: i64 = 0x80   # Dirty
+
+val PAGE_SHIFT: i64 = 12
+val PAGE_SIZE: i64 = 4096
+val PTE_SIZE: i64 = 8
+val LEVELS: i64 = 3
+
+# Sv39 VPN extraction
+fn vpn(vaddr: i64, level: i64) -> i64:
+    """Extract VPN[level] (9 bits each) from virtual address."""
+    (vaddr >> (PAGE_SHIFT + level * 9)) and 0x1FF
+
+fn pte_ppn(pte: i64) -> i64:
+    """Extract PPN from page table entry."""
+    (pte >> 10) and 0xFFFFFFFFFFF  # 44 bits
+
+fn pte_ppn_level(pte: i64, level: i64) -> i64:
+    """Extract PPN[level] from PTE."""
+    if level == 0: (pte >> 10) and 0x1FF
+    elif level == 1: (pte >> 19) and 0x1FF
+    else: (pte >> 28) and 0x3FFFFFF  # PPN[2] is 26 bits
+
+fn fault_cause(access: AccessType) -> i64:
+    """Get page fault trap cause for access type."""
+    match access:
+        AccessType.Read_: TRAP_LOAD_PAGE_FAULT
+        AccessType.Write_: TRAP_STORE_PAGE_FAULT
+        AccessType.Execute: TRAP_INSTR_PAGE_FAULT
+
+fn check_pte_perms(pte: i64, access: AccessType, is_user: bool) -> bool:
+    """Check if PTE permissions allow the access."""
+    if (pte and PTE_V) == 0: false
+    elif is_user and (pte and PTE_U) == 0: false
+    else:
+        match access:
+            AccessType.Read_: (pte and PTE_R) != 0
+            AccessType.Write_: (pte and PTE_W) != 0
+            AccessType.Execute: (pte and PTE_X) != 0
+
+class Sv39Walker:
+    """Sv39 page table walker. Needs a bus reference for PTE reads."""
+    dummy: i64  # Placeholder field
+
+    static fn create() -> Sv39Walker:
+        Sv39Walker(dummy: 0)
+
+fn translate_sv39(vaddr: i64, access: AccessType, is_user: bool,
+                  satp: i64, ptes: [i64]) -> MemResult:
+    """Translate a virtual address using Sv39 page tables.
+
+    Args:
+        vaddr: Virtual address to translate
+        access: Access type (Read/Write/Execute)
+        is_user: Whether the access is from user mode
+        satp: SATP register value (mode in bits [63:60], PPN in bits [43:0])
+        ptes: Pre-fetched page table entries for 3 levels [level2, level1, level0]
+
+    Returns: MemResult with physical address or fault.
+    """
+    val mode = (satp >> 60) and 0xF
+    if mode != 8:
+        # Sv39 mode is 8; if not enabled, identity-map
+        mem_ok(vaddr)
+    else:
+        val root_ppn = satp and 0xFFFFFFFFFFF  # 44 bits
+
+        # Walk 3 levels
+        var level = 2
+        var paddr: i64 = 0
+        var found = false
+        var faulted = false
+
+        while level >= 0 and (found == false) and (faulted == false):
+            val pte = if level < 3: ptes[2 - level] else: 0
+
+            if (pte and PTE_V) == 0:
+                faulted = true
+            elif (pte and PTE_R) != 0 or (pte and PTE_X) != 0:
+                # Leaf PTE found
+                if check_pte_perms(pte, access, is_user) == false:
+                    faulted = true
+                elif (pte and PTE_A) == 0:
+                    faulted = true  # A-bit not set
+                elif access == AccessType.Write_ and (pte and PTE_D) == 0:
+                    faulted = true  # D-bit not set for write
+                else:
+                    # Check superpage alignment
+                    val ppn = pte_ppn(pte)
+                    if level == 2:
+                        # Gigapage: PPN[1] and PPN[0] must be 0
+                        if (ppn and 0x3FFFF) != 0:
+                            faulted = true
+                        else:
+                            paddr = (ppn << PAGE_SHIFT) or (vaddr and 0x3FFFFFFFFF)
+                            found = true
+                    elif level == 1:
+                        # Megapage: PPN[0] must be 0
+                        if (ppn and 0x1FF) != 0:
+                            faulted = true
+                        else:
+                            paddr = (ppn << PAGE_SHIFT) or (vaddr and 0x1FFFFF)
+                            found = true
+                    else:
+                        # 4KiB page
+                        paddr = (ppn << PAGE_SHIFT) or (vaddr and 0xFFF)
+                        found = true
+            else:
+                # Non-leaf: continue walking
+                level = level - 1
+
+        if faulted:
+            mem_fault(fault_cause(access))
+        elif found:
+            mem_ok(paddr)
+        else:
+            mem_fault(fault_cause(access))

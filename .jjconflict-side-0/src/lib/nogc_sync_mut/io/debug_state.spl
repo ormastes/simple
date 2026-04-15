@@ -1,0 +1,283 @@
+@allow(primitive_api)
+# Debug State - Real in-memory debug state management
+# Module-level vars for breakpoints, watches, call stack, and stepping
+#
+# All functions use ds_ prefix to avoid name collisions.
+# JSON is built via string concatenation (not interpolation) to avoid }} escape issues.
+
+extern fn rt_file_read_text(path: text) -> text
+
+# ============================================================================
+# State
+# ============================================================================
+
+struct _BreakpointEntry:
+    id: i64
+    file: text
+    line: i64
+    condition: text
+    hit_condition: text
+    log_message: text
+    is_temporary: bool
+    enabled: bool
+    function_name: text
+
+var _breakpoints: [_BreakpointEntry] = []
+var _next_bp_id: i64 = 1
+var _watches: [text] = []
+var _call_stack: [text] = []
+var _step_mode: i64 = 0
+var _is_active: bool = false
+var _current_file: text = ""
+var _current_line: i64 = 0
+var _selected_frame: i64 = 0
+
+# ============================================================================
+# Helpers
+# ============================================================================
+
+fn _bool_str(v: bool) -> text:
+    if v:
+        return "true"
+    "false"
+
+# ============================================================================
+# Active state
+# ============================================================================
+
+fn ds_set_active(active: bool):
+    _is_active = active
+
+# ============================================================================
+# Breakpoint management
+# ============================================================================
+
+fn ds_add_breakpoint(bp_file: text, bp_line: i64) -> i64:
+    val bp_id = _next_bp_id
+    val entry = _BreakpointEntry(
+        id: bp_id,
+        file: bp_file,
+        line: bp_line,
+        condition: "",
+        hit_condition: "",
+        log_message: "",
+        is_temporary: false,
+        enabled: true,
+        function_name: ""
+    )
+    _breakpoints = _breakpoints + [entry]
+    _next_bp_id = _next_bp_id + 1
+    bp_id
+
+fn ds_add_breakpoint_rich(bp_file: text, bp_line: i64, condition: text, hit_condition: text, log_message: text, is_temporary: i64) -> i64:
+    val bp_id = _next_bp_id
+    val tmp = is_temporary != 0
+    val entry = _BreakpointEntry(
+        id: bp_id,
+        file: bp_file,
+        line: bp_line,
+        condition: condition,
+        hit_condition: hit_condition,
+        log_message: log_message,
+        is_temporary: tmp,
+        enabled: true,
+        function_name: ""
+    )
+    _breakpoints = _breakpoints + [entry]
+    _next_bp_id = _next_bp_id + 1
+    bp_id
+
+fn ds_add_function_breakpoint(func_name: text, condition: text) -> i64:
+    val bp_id = _next_bp_id
+    val entry = _BreakpointEntry(
+        id: bp_id,
+        file: "",
+        line: -1,
+        condition: condition,
+        hit_condition: "",
+        log_message: "",
+        is_temporary: false,
+        enabled: true,
+        function_name: func_name
+    )
+    _breakpoints = _breakpoints + [entry]
+    _next_bp_id = _next_bp_id + 1
+    bp_id
+
+fn ds_remove_breakpoint(bp_file: text, bp_line: i64):
+    var kept: [_BreakpointEntry] = []
+    for bp in _breakpoints:
+        if bp.file != bp_file or bp.line != bp_line:
+            kept.push(bp)
+    _breakpoints = kept
+
+fn ds_set_breakpoint_enabled(bp_id: i64, enabled: i64):
+    var updated: [_BreakpointEntry] = []
+    val en = enabled != 0
+    for bp in _breakpoints:
+        if bp.id == bp_id:
+            val new_bp = _BreakpointEntry(
+                id: bp.id,
+                file: bp.file,
+                line: bp.line,
+                condition: bp.condition,
+                hit_condition: bp.hit_condition,
+                log_message: bp.log_message,
+                is_temporary: bp.is_temporary,
+                enabled: en,
+                function_name: bp.function_name
+            )
+            updated.push(new_bp)
+        else:
+            updated.push(bp)
+    _breakpoints = updated
+
+fn ds_get_breakpoint_info(bp_id: i64) -> text:
+    for bp in _breakpoints:
+        if bp.id == bp_id:
+            var parts: [text] = []
+            parts.push("{")
+            parts.push("\"id\": " + str(bp.id))
+            parts.push(", \"file\": \"" + bp.file + "\"")
+            parts.push(", \"line\": " + str(bp.line))
+            parts.push(", \"enabled\": " + _bool_str(bp.enabled))
+            parts.push(", \"condition\": \"" + bp.condition + "\"")
+            parts.push(", \"hit_condition\": \"" + bp.hit_condition + "\"")
+            parts.push(", \"log_message\": \"" + bp.log_message + "\"")
+            parts.push(", \"is_temporary\": " + _bool_str(bp.is_temporary))
+            parts.push(", \"function_name\": \"" + bp.function_name + "\"")
+            parts.push("}")
+            return parts.join("")
+    "{}"
+
+fn ds_list_breakpoints() -> text:
+    var entries: [text] = []
+    for bp in _breakpoints:
+        var entry_parts: [text] = []
+        entry_parts.push("{")
+        entry_parts.push("\"id\": " + str(bp.id))
+        entry_parts.push(", \"file\": \"" + bp.file + "\"")
+        entry_parts.push(", \"line\": " + str(bp.line))
+        entry_parts.push(", \"enabled\": " + _bool_str(bp.enabled))
+        entry_parts.push(", \"function_name\": \"" + bp.function_name + "\"")
+        entry_parts.push("}")
+        entries.push(entry_parts.join(""))
+    "[" + entries.join(", ") + "]"
+
+# ============================================================================
+# Execution control
+# ============================================================================
+
+fn ds_continue_exec():
+    _step_mode = 0
+
+fn ds_pause_exec():
+    pass
+
+fn ds_set_step_mode(mode: i64):
+    _step_mode = mode
+
+# ============================================================================
+# Stack and variables
+# ============================================================================
+
+fn ds_stack_trace() -> [text]:
+    _call_stack
+
+fn ds_local_vars() -> [text]:
+    []
+
+fn ds_get_current_file() -> text:
+    _current_file
+
+fn ds_get_current_line() -> i64:
+    _current_line
+
+# ============================================================================
+# Frame navigation
+# ============================================================================
+
+fn ds_select_frame(index: i64) -> i64:
+    _selected_frame = index
+    0
+
+fn ds_get_selected_frame() -> i64:
+    _selected_frame
+
+fn ds_frame_locals(frame_index: i64) -> text:
+    ""
+
+# ============================================================================
+# Source file reading
+# ============================================================================
+
+fn ds_get_source_lines(src_file: text, start_line: i64, line_count: i64) -> text:
+    val content = rt_file_read_text(src_file) ?? ""
+    if content == "":
+        return ""
+    val all_lines = content.split("\n")
+    val total = all_lines.len()
+    var result_lines: [text] = []
+    var idx = start_line
+    var count = 0
+    while idx < total and count < line_count:
+        result_lines.push(all_lines[idx])
+        idx = idx + 1
+        count = count + 1
+    result_lines.join("\n")
+
+# ============================================================================
+# Watch expressions
+# ============================================================================
+
+fn ds_add_watch(expr: text) -> i64:
+    _watches = _watches + [expr]
+    _watches.len()
+
+fn ds_remove_watch(expr: text) -> i64:
+    var kept: [text] = []
+    for w in _watches:
+        if w != expr:
+            kept.push(w)
+    _watches = kept
+    0
+
+fn ds_list_watches() -> text:
+    var items: [text] = []
+    for w in _watches:
+        items.push("\"" + w + "\"")
+    "[" + items.join(", ") + "]"
+
+# ============================================================================
+# Variable modification (stub)
+# ============================================================================
+
+fn ds_set_variable(var_name: text, value_str: text, frame_index: i64) -> i64:
+    0
+
+# ============================================================================
+# Expression evaluation (stub)
+# ============================================================================
+
+fn ds_eval_expression(expr: text, frame_index: i64) -> text:
+    "{\"result\": \"(not implemented)\", \"type\": \"error\"}"
+
+# ============================================================================
+# Terminate
+# ============================================================================
+
+fn ds_terminate():
+    _breakpoints = []
+    _next_bp_id = 1
+    _watches = []
+    _call_stack = []
+    _step_mode = 0
+    _is_active = false
+    _current_file = ""
+    _current_line = 0
+    _selected_frame = 0
+
+# ============================================================================
+# Exports
+# ============================================================================
+

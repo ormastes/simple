@@ -1,0 +1,334 @@
+# Genetic and Derivative-Free Optimization Module
+# Nelder-Mead, coordinate descent, simulated annealing, and PSO
+
+fn nelder_mead(f: fn(List<f64>) -> f64, x0: List<f64>,
+              config: OptimizationConfig) -> OptimizationResult:
+    val n = x0.length()
+    val simplex = []
+    val values = []
+
+    # Initialize simplex
+    simplex.append(vector_copy(x0))
+    values.append(f(x0))
+
+    var i = 0
+    while i < n:
+        val vertex = vector_copy(x0)
+        vertex[i] = vertex[i] + 0.1
+        simplex.append(vertex)
+        values.append(f(vertex))
+        i = i + 1
+
+    val alpha = 1.0   # Reflection
+    val gamma = 2.0   # Expansion
+    val rho = 0.5     # Contraction
+    val sigma = 0.5   # Shrinkage
+
+    var iteration = 0
+
+    while iteration < config.max_iterations:
+        # Sort simplex by function values
+        var sorted = true
+        while sorted:
+            sorted = false
+            i = 0
+            while i < values.length() - 1:
+                if values[i] > values[i + 1]:
+                    val temp_val = values[i]
+                    values[i] = values[i + 1]
+                    values[i + 1] = temp_val
+
+                    val temp_vertex = simplex[i]
+                    simplex[i] = simplex[i + 1]
+                    simplex[i + 1] = temp_vertex
+
+                    sorted = true
+                i = i + 1
+
+        # Check convergence
+        val range = values[n] - values[0]
+        if range < config.tolerance:
+            return OptimizationResult(
+                solution: simplex[0],
+                objective_value: values[0],
+                iterations: iteration,
+                converged: true,
+                gradient_norm: 0.0,
+                message: "Converged: function value range below tolerance"
+            )
+
+        # Compute centroid
+        val centroid = vector_zeros(n)
+        i = 0
+        while i < n:
+            var j = 0
+            while j < n:
+                centroid[j] = centroid[j] + simplex[i][j]
+                j = j + 1
+            i = i + 1
+
+        i = 0
+        while i < n:
+            centroid[i] = centroid[i] / float(n)
+            i = i + 1
+
+        # Reflection
+        val worst = simplex[n]
+        val diff = vector_subtract(centroid, worst)
+        val reflected = vector_add(centroid, vector_scale(diff, alpha))
+        val f_reflected = f(reflected)
+
+        if values[0] <= f_reflected and f_reflected < values[n - 1]:
+            simplex[n] = reflected
+            values[n] = f_reflected
+        else:
+            if f_reflected < values[0]:
+                # Expansion
+                val diff2 = vector_subtract(reflected, centroid)
+                val expanded = vector_add(centroid, vector_scale(diff2, gamma))
+                val f_expanded = f(expanded)
+
+                if f_expanded < f_reflected:
+                    simplex[n] = expanded
+                    values[n] = f_expanded
+                else:
+                    simplex[n] = reflected
+                    values[n] = f_reflected
+            else:
+                # Contraction
+                val diff3 = vector_subtract(worst, centroid)
+                val contracted = vector_add(centroid, vector_scale(diff3, rho))
+                val f_contracted = f(contracted)
+
+                if f_contracted < values[n]:
+                    simplex[n] = contracted
+                    values[n] = f_contracted
+                else:
+                    # Shrinkage
+                    i = 1
+                    while i <= n:
+                        val diff4 = vector_subtract(simplex[i], simplex[0])
+                        simplex[i] = vector_add(simplex[0], vector_scale(diff4, sigma))
+                        values[i] = f(simplex[i])
+                        i = i + 1
+
+        iteration = iteration + 1
+
+    OptimizationResult(
+        solution: simplex[0],
+        objective_value: values[0],
+        iterations: iteration,
+        converged: false,
+        gradient_norm: 0.0,
+        message: "Maximum iterations reached"
+    )
+
+fn coordinate_descent(f: fn(List<f64>) -> f64, x0: List<f64>,
+                     config: OptimizationConfig) -> OptimizationResult:
+    var x = vector_copy(x0)
+    val n = x.length()
+    var iteration = 0
+    var converged = false
+    var prev_value = f(x)
+
+    while iteration < config.max_iterations:
+        var coord_idx = 0
+        var any_improvement = false
+
+        while coord_idx < n:
+            fn f_coord(alpha: f64) -> f64:
+                val x_temp = vector_copy(x)
+                x_temp[coord_idx] = alpha
+                f(x_temp)
+
+            val x_old = x[coord_idx]
+            val a = x_old - 1.0
+            val b = x_old + 1.0
+            val optimal_alpha = golden_section_search(f_coord, a, b, config.tolerance)
+
+            x[coord_idx] = optimal_alpha
+
+            if abs(optimal_alpha - x_old) > config.tolerance:
+                any_improvement = true
+
+            coord_idx = coord_idx + 1
+
+        val new_value = f(x)
+
+        if check_value_convergence(prev_value, new_value, config.value_tolerance):
+            converged = true
+            return OptimizationResult(
+                solution: x,
+                objective_value: new_value,
+                iterations: iteration,
+                converged: true,
+                gradient_norm: 0.0,
+                message: "Converged: function value change below tolerance"
+            )
+
+        if not any_improvement:
+            converged = true
+            return OptimizationResult(
+                solution: x,
+                objective_value: new_value,
+                iterations: iteration,
+                converged: true,
+                gradient_norm: 0.0,
+                message: "Converged: no coordinate improvement"
+            )
+
+        prev_value = new_value
+        iteration = iteration + 1
+
+    OptimizationResult(
+        solution: x,
+        objective_value: f(x),
+        iterations: iteration,
+        converged: converged,
+        gradient_norm: 0.0,
+        message: "Maximum iterations reached"
+    )
+
+fn simulated_annealing(f: fn(List<f64>) -> f64, x0: List<f64>,
+                      temp_init: f64, temp_min: f64, alpha: f64,
+                      config: OptimizationConfig) -> OptimizationResult:
+    var x = vector_copy(x0)
+    var best_x = vector_copy(x)
+    var f_x = f(x)
+    var best_f = f_x
+    var temp = temp_init
+    var iteration = 0
+
+    while iteration < config.max_iterations and temp > temp_min:
+        # Generate random neighbor
+        val neighbor = []
+        var i = 0
+        while i < x.length():
+            val perturbation = (random() - 0.5) * 0.2
+            neighbor.append(x[i] + perturbation)
+            i = i + 1
+
+        val f_neighbor = f(neighbor)
+        val delta = f_neighbor - f_x
+
+        # Accept or reject
+        var accept = false
+        if delta < 0.0:
+            accept = true
+        else:
+            val prob = exp(-delta / temp)
+            if random() < prob:
+                accept = true
+
+        if accept:
+            x = neighbor
+            f_x = f_neighbor
+
+            if f_x < best_f:
+                best_x = vector_copy(x)
+                best_f = f_x
+
+        temp = temp * alpha
+        iteration = iteration + 1
+
+    OptimizationResult(
+        solution: best_x,
+        objective_value: best_f,
+        iterations: iteration,
+        converged: temp <= temp_min,
+        gradient_norm: 0.0,
+        message: "Simulated annealing completed"
+    )
+
+fn pso_optimize(f: fn(List<f64>) -> f64, bounds_low: List<f64>, bounds_high: List<f64>,
+               num_particles: i64, config: OptimizationConfig) -> OptimizationResult:
+    val n = bounds_low.length()
+    val particles = []
+    var global_best_position = vector_zeros(n)
+    var global_best_value = 1e10
+
+    # Initialize particles
+    var p = 0
+    while p < num_particles:
+        val position = []
+        val velocity = []
+        var i = 0
+        while i < n:
+            val pos = bounds_low[i] + random() * (bounds_high[i] - bounds_low[i])
+            val vel = (random() - 0.5) * (bounds_high[i] - bounds_low[i]) * 0.1
+            position.append(pos)
+            velocity.append(vel)
+            i = i + 1
+
+        val value = f(position)
+        val particle = Particle(
+            position: position,
+            velocity: velocity,
+            best_position: vector_copy(position),
+            best_value: value
+        )
+        particles.append(particle)
+
+        if value < global_best_value:
+            global_best_position = vector_copy(position)
+            global_best_value = value
+
+        p = p + 1
+
+    val w = 0.7      # Inertia weight
+    val c1 = 1.5     # Cognitive parameter
+    val c2 = 1.5     # Social parameter
+
+    var iteration = 0
+    while iteration < config.max_iterations:
+        p = 0
+        while p < num_particles:
+            val particle = particles[p]
+
+            # Update velocity
+            var i = 0
+            while i < n:
+                val r1 = random()
+                val r2 = random()
+                val cognitive = c1 * r1 * (particle.best_position[i] - particle.position[i])
+                val social = c2 * r2 * (global_best_position[i] - particle.position[i])
+                particle.velocity[i] = w * particle.velocity[i] + cognitive + social
+                i = i + 1
+
+            # Update position
+            i = 0
+            while i < n:
+                particle.position[i] = particle.position[i] + particle.velocity[i]
+
+                # Enforce bounds
+                if particle.position[i] < bounds_low[i]:
+                    particle.position[i] = bounds_low[i]
+                if particle.position[i] > bounds_high[i]:
+                    particle.position[i] = bounds_high[i]
+                i = i + 1
+
+            # Evaluate
+            val value = f(particle.position)
+
+            # Update personal best
+            if value < particle.best_value:
+                particle.best_position = vector_copy(particle.position)
+                particle.best_value = value
+
+            # Update global best
+            if value < global_best_value:
+                global_best_position = vector_copy(particle.position)
+                global_best_value = value
+
+            p = p + 1
+
+        iteration = iteration + 1
+
+    OptimizationResult(
+        solution: global_best_position,
+        objective_value: global_best_value,
+        iterations: iteration,
+        converged: false,
+        gradient_norm: 0.0,
+        message: "PSO optimization completed"
+    )

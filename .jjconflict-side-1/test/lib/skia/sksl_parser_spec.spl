@@ -1,0 +1,156 @@
+# @cover src/lib/skia/feature/sksl/parser.spl 80%
+"""
+# SkSL Parser Specification
+
+**Feature IDs:** #SKI-SKSL-002
+**Category:** Stdlib
+**Difficulty:** 3/5
+**Status:** Implemented
+
+## Overview
+
+Tests for `parse_sksl` — the minimal SkSL AST builder that consumes a
+`Token` stream produced by `tokenize_sksl` and emits a small AST. The
+subset is: uniform declarations, function definitions, return /
+variable-decl / assign / expression statements, and a flat expression
+grammar with left-chained binary ops.
+
+Tokens are constructed manually here so the parser is exercised in
+isolation (without depending on tokenize_sksl semantics bleeding into
+parser tests).
+"""
+
+use std.sspec.*
+use std.skia.feature.sksl.{
+    TokenKind, Token,
+    AstNodeKind, AstNode, ParseResult,
+    parse_sksl
+}
+
+# Helpers — keep test token-list construction readable.
+
+fn _tok(kind: TokenKind, text: String) -> Token:
+    Token(kind: kind, text: text, line: 1, column: 1)
+
+fn _eof() -> Token:
+    Token(kind: TokenKind.Eof, text: "", line: 1, column: 1)
+
+describe "sksl_parser":
+    it "parse_sksl: empty token list (just Eof) returns empty ast, no errors":
+        var toks: [Token] = []
+        toks.push(_eof())
+        val r = parse_sksl(toks)
+        expect(r.ast.len()).to_equal(0)
+        expect(r.errors.len()).to_equal(0)
+
+    it "parse_sksl: uniform declaration \"uniform float u_time ;\" produces one Uniform AST node":
+        var toks: [Token] = []
+        toks.push(_tok(TokenKind.Keyword, "uniform"))
+        toks.push(_tok(TokenKind.Keyword, "float"))
+        toks.push(_tok(TokenKind.Identifier, "u_time"))
+        toks.push(_tok(TokenKind.Punctuation, ";"))
+        toks.push(_eof())
+        val r = parse_sksl(toks)
+        expect(r.errors.len()).to_equal(0)
+        expect(r.ast.len()).to_equal(1)
+        expect(r.ast[0].kind == AstNodeKind.Uniform).to_equal(true)
+        expect(r.ast[0].text).to_equal("u_time")
+        expect(r.ast[0].type_name).to_equal("float")
+
+    it "parse_sksl: function definition \"void main() {}\" produces one Function AST node":
+        var toks: [Token] = []
+        toks.push(_tok(TokenKind.Keyword, "void"))
+        toks.push(_tok(TokenKind.Identifier, "main"))
+        toks.push(_tok(TokenKind.Punctuation, "("))
+        toks.push(_tok(TokenKind.Punctuation, ")"))
+        toks.push(_tok(TokenKind.Punctuation, "{"))
+        toks.push(_tok(TokenKind.Punctuation, "}"))
+        toks.push(_eof())
+        val r = parse_sksl(toks)
+        expect(r.errors.len()).to_equal(0)
+        expect(r.ast.len()).to_equal(1)
+        expect(r.ast[0].kind == AstNodeKind.Function).to_equal(true)
+        expect(r.ast[0].text).to_equal("main")
+        expect(r.ast[0].type_name).to_equal("void")
+
+    it "parse_sksl: return statement inside function body produces a ReturnStmt child":
+        # void main() { return 0 ; }
+        var toks: [Token] = []
+        toks.push(_tok(TokenKind.Keyword, "void"))
+        toks.push(_tok(TokenKind.Identifier, "main"))
+        toks.push(_tok(TokenKind.Punctuation, "("))
+        toks.push(_tok(TokenKind.Punctuation, ")"))
+        toks.push(_tok(TokenKind.Punctuation, "{"))
+        toks.push(_tok(TokenKind.Keyword, "return"))
+        toks.push(_tok(TokenKind.IntLiteral, "0"))
+        toks.push(_tok(TokenKind.Punctuation, ";"))
+        toks.push(_tok(TokenKind.Punctuation, "}"))
+        toks.push(_eof())
+        val r = parse_sksl(toks)
+        expect(r.errors.len()).to_equal(0)
+        expect(r.ast.len()).to_equal(1)
+        val fn_node = r.ast[0]
+        expect(fn_node.kind == AstNodeKind.Function).to_equal(true)
+        expect(fn_node.children.len()).to_be_greater_than(0)
+        expect(fn_node.children[0].kind == AstNodeKind.ReturnStmt).to_equal(true)
+
+    it "parse_sksl: int literal is parsed into IntLit":
+        # int x = 42 ;  (top-level to exercise a decl path; the int literal
+        # expression lives on the VarDecl's child expression.)
+        # Build as a function body: void f() { int x = 42 ; }
+        var toks: [Token] = []
+        toks.push(_tok(TokenKind.Keyword, "void"))
+        toks.push(_tok(TokenKind.Identifier, "f"))
+        toks.push(_tok(TokenKind.Punctuation, "("))
+        toks.push(_tok(TokenKind.Punctuation, ")"))
+        toks.push(_tok(TokenKind.Punctuation, "{"))
+        toks.push(_tok(TokenKind.Keyword, "int"))
+        toks.push(_tok(TokenKind.Identifier, "x"))
+        toks.push(_tok(TokenKind.Operator, "="))
+        toks.push(_tok(TokenKind.IntLiteral, "42"))
+        toks.push(_tok(TokenKind.Punctuation, ";"))
+        toks.push(_tok(TokenKind.Punctuation, "}"))
+        toks.push(_eof())
+        val r = parse_sksl(toks)
+        expect(r.ast.len()).to_equal(1)
+        val fn_node = r.ast[0]
+        expect(fn_node.children.len()).to_equal(1)
+        val decl = fn_node.children[0]
+        expect(decl.kind == AstNodeKind.VarDecl).to_equal(true)
+        expect(decl.children.len()).to_equal(1)
+        val lit = decl.children[0]
+        expect(lit.kind == AstNodeKind.IntLit).to_equal(true)
+        expect(lit.int_value).to_equal(42)
+
+    it "parse_sksl: identifier expression is parsed into Identifier":
+        # void f() { x ; }
+        var toks: [Token] = []
+        toks.push(_tok(TokenKind.Keyword, "void"))
+        toks.push(_tok(TokenKind.Identifier, "f"))
+        toks.push(_tok(TokenKind.Punctuation, "("))
+        toks.push(_tok(TokenKind.Punctuation, ")"))
+        toks.push(_tok(TokenKind.Punctuation, "{"))
+        toks.push(_tok(TokenKind.Identifier, "x"))
+        toks.push(_tok(TokenKind.Punctuation, ";"))
+        toks.push(_tok(TokenKind.Punctuation, "}"))
+        toks.push(_eof())
+        val r = parse_sksl(toks)
+        expect(r.ast.len()).to_equal(1)
+        val fn_node = r.ast[0]
+        expect(fn_node.children.len()).to_equal(1)
+        val stmt = fn_node.children[0]
+        expect(stmt.kind == AstNodeKind.ExpressionStmt).to_equal(true)
+        expect(stmt.children.len()).to_equal(1)
+        val ident = stmt.children[0]
+        expect(ident.kind == AstNodeKind.Identifier).to_equal(true)
+        expect(ident.text).to_equal("x")
+
+    it "parse_sksl: malformed input records a non-empty errors list":
+        # garbage top-level: `? ;` — a bare operator+semicolon doesn't
+        # match any top-level construct and should be flagged.
+        var toks: [Token] = []
+        toks.push(_tok(TokenKind.Operator, "?"))
+        toks.push(_tok(TokenKind.Punctuation, ";"))
+        toks.push(_eof())
+        val r = parse_sksl(toks)
+        expect(r.errors.len()).to_be_greater_than(0)

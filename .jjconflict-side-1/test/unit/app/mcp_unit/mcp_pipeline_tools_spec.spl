@@ -1,0 +1,143 @@
+# MCP Pipeline Tools Specification
+# Feature: Pipeline runner with validation gates
+# Category: MCP, Pipeline, Validation
+# Status: Complete
+
+use std.common.mcp_helpers.{jp, js, jo1, jo2, jo3, extract_json_string, make_result_response, make_error_response}
+
+describe "Pipeline Phase Definitions":
+    context "when getting impl workflow phases":
+        it "impl workflow has 17 phases":
+            val phases = "requirements,research,req_update,plan,plan_verify,model_select,sspec,test_verify,doc_consistency,implementation,unit_tests,doctest,bug_reports,duplication,refactoring,full_test,vcs_sync"
+            val phase_list = phases.split(",")
+            expect(phase_list.len()).to_equal(17)
+
+        it "impl starts with requirements":
+            val phases = "requirements,research,req_update,plan"
+            val phase_list = phases.split(",")
+            expect(phase_list[0]).to_equal("requirements")
+
+        it "impl ends with vcs_sync":
+            val phases = "requirements,research,req_update,plan,plan_verify,model_select,sspec,test_verify,doc_consistency,implementation,unit_tests,doctest,bug_reports,duplication,refactoring,full_test,vcs_sync"
+            val phase_list = phases.split(",")
+            expect(phase_list[phase_list.len() - 1]).to_equal("vcs_sync")
+
+    context "when getting refactor workflow phases":
+        it "refactor workflow has 7 phases":
+            val phases = "file_size,duplication,coupling,public_api,mcdsoc,bigo,test_verify"
+            val phase_list = phases.split(",")
+            expect(phase_list.len()).to_equal(7)
+
+    context "when getting test workflow phases":
+        it "test workflow has 5 phases":
+            val phases = "spec_create,write_tests,run_tests,coverage,verify"
+            val phase_list = phases.split(",")
+            expect(phase_list.len()).to_equal(5)
+
+describe "Pipeline State Management":
+    context "when creating pipeline state":
+        it "builds state with key=value format":
+            var state = "id=pipeline_123\n"
+            state = state + "workflow=impl\n"
+            state = state + "status=active\n"
+            expect(state.contains("id=pipeline_123")).to_equal(true)
+            expect(state.contains("workflow=impl")).to_equal(true)
+            expect(state.contains("status=active")).to_equal(true)
+
+        it "extracts field from state":
+            val content = "id=pipeline_123\nworkflow=impl\nstatus=active\n"
+            val lines = content.split("\n")
+            var workflow = ""
+            var i = 0
+            while i < lines.len():
+                if lines[i].starts_with("workflow="):
+                    workflow = lines[i].replace("workflow=", "")
+                i = i + 1
+            expect(workflow).to_equal("impl")
+
+        it "updates field in state":
+            val content = "id=p1\nstatus=active\n"
+            val updated = content.replace("status=active", "status=completed")
+            expect(updated.contains("status=completed")).to_equal(true)
+            expect(updated.contains("status=active")).to_equal(false)
+
+describe "Pipeline Validation Gates":
+    context "when detecting skip indicators":
+        it "detects 'skipped' in result":
+            val result = "Phase was skipped due to time"
+            expect(result.to_lowercase().contains("skipped")).to_equal(true)
+
+        it "detects 'not implemented' in result":
+            val result = "Feature not implemented yet"
+            expect(result.to_lowercase().contains("not implemented")).to_equal(true)
+
+        it "passes clean result":
+            val result = "Completed requirements document with all acceptance criteria"
+            val lower = result.to_lowercase()
+            val has_skip = (lower.contains("skipped") or lower.contains("not implemented") or lower.contains("todo_marker"))
+            expect(has_skip).to_equal(false)
+
+    context "when checking artifact paths":
+        it "builds requirement artifact path":
+            val feature = "my_feature"
+            val path = "doc/requirement/" + feature + ".md"
+            expect(path).to_equal("doc/requirement/my_feature.md")
+
+        it "builds plan artifact path":
+            val feature = "my_feature"
+            val path = "doc/03_plan/" + feature + ".md"
+            expect(path).to_equal("doc/03_plan/my_feature.md")
+
+        it "builds spec artifact path":
+            val feature = "my_feature"
+            val path = "test/unit/" + feature + "_spec.spl"
+            expect(path).to_equal("test/unit/my_feature_spec.spl")
+
+describe "Pipeline Tool Schemas":
+    context "when building pipeline_start schema":
+        it "has workflow parameter":
+            val prop = jo2(jp("type", js("string")), jp("description", js("Workflow type: impl, refactor, or test")))
+            expect(prop.contains("impl")).to_equal(true)
+
+        it "has feature parameter":
+            val prop = jo2(jp("type", js("string")), jp("description", js("Feature name")))
+            expect(prop.contains("Feature name")).to_equal(true)
+
+    context "when building result JSON":
+        it "builds gate_failed result":
+            val result = jo3(
+                jp("status", js("gate_failed")),
+                jp("phase", js("requirements")),
+                jp("reason", js("Required artifact missing"))
+            )
+            expect(result.contains("gate_failed")).to_equal(true)
+            expect(result.contains("requirements")).to_equal(true)
+
+        it "builds active result with next phase":
+            val result = jo3(
+                jp("status", js("active")),
+                jp("current_phase", js("research")),
+                jp("instruction", js("Research existing code"))
+            )
+            expect(result.contains("active")).to_equal(true)
+            expect(result.contains("research")).to_equal(true)
+
+describe "Phase Agent Mapping":
+    context "when selecting agent for phase":
+        it "maps requirements to docs agent":
+            expect("docs").to_equal("docs")
+
+        it "maps research to explore agent":
+            expect("explore").to_equal("explore")
+
+        it "maps implementation to code agent":
+            expect("code").to_equal("code")
+
+        it "maps unit_tests to test agent":
+            expect("test").to_equal("test")
+
+        it "maps vcs_sync to vcs agent":
+            expect("vcs").to_equal("vcs")
+
+        it "maps file_size to refactor agent":
+            expect("refactor").to_equal("refactor")

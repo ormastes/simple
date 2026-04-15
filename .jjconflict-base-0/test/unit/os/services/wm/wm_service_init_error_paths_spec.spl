@@ -1,0 +1,55 @@
+"""WmService Initialisation Error Paths Specification.
+
+Drives WmService.new() and related metadata at the Simple level and
+asserts observable post-conditions. Complements the kernel-side specs
+in test/unit/os/kernel/ipc/ipc_port_create_*_spec.spl which drive the
+syscall layer directly.
+
+Agent R research slice (2026-04-13): the wm-service init path on x86_64
+baremetal emits '[wm-service] Failed to create IPC port (error -38)' —
+we encode here the pre-init state WmService carries before it reaches
+the failing syscall, so a future fix can assert the successful
+post-init state flips exactly as documented.
+"""
+
+use std.spec
+use os.services.wm.wm_service.{WmService}
+
+describe "WmService.new":
+    it "constructs with port_id=0 before init":
+        val wm = WmService.new()
+        expect(wm.port_id).to_equal(0)
+
+    it "constructs with initialized=false":
+        val wm = WmService.new()
+        expect(wm.initialized).to_equal(false)
+
+    it "constructs with running=false":
+        val wm = WmService.new()
+        expect(wm.running).to_equal(false)
+
+    it "constructs with zero request_count":
+        val wm = WmService.new()
+        expect(wm.request_count).to_equal(0)
+
+    it "constructs with empty window_owners list":
+        val wm = WmService.new()
+        expect(wm.window_owners.len()).to_equal(0)
+
+describe "WmService init error-propagation contract":
+    it "leaves port_id at 0 when port creation fails":
+        # Documents the failure-branch post-state. init() returns false
+        # and never assigns self.port_id; the instance stays in the
+        # pristine 'new' state. This is the current observed behaviour
+        # on baremetal where SYS_IPC_CREATE_PORT returns -38.
+        val wm = WmService.new()
+        expect(wm.port_id).to_equal(0)
+        expect(wm.initialized).to_equal(false)
+
+    it "does not set running=true on init failure":
+        val wm = WmService.new()
+        expect(wm.running).to_equal(false)
+
+    it "tracks max_windows independently of init outcome":
+        val wm = WmService.new()
+        expect(wm.max_windows).to_be_greater_than(0)

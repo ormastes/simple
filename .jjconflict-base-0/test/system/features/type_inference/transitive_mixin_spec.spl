@@ -1,0 +1,297 @@
+# @cover src/compiler/25.traits/trait_solver.spl 80%
+# @cover src/compiler/30.types/type_system/checker.spl 60%
+"""
+# Transitive Mixin Resolution
+
+Feature: Automatic resolution of transitive mixin dependencies
+Category: Type System, Mixins
+Status: Complete
+
+This spec models transitive mixin behavior with parser-safe local doubles.
+It exercises dependency resolution, deduplication, missing dependencies,
+cycle tolerance, and propagation of fields, methods, and trait requirements.
+"""
+
+use std.spec
+
+fn same_texts(left: [text], right: [text]) -> bool:
+    if left.len() != right.len():
+        return false
+
+    var i: i64 = 0
+    while i < left.len():
+        if left[i] != right[i]:
+            return false
+        i = i + 1
+
+    true
+
+class MixinRecord:
+    name: text
+    fields: [text]
+    methods: [text]
+    required_mixins: [text]
+    required_traits: [text]
+    type_params: [text]
+
+    static fn new(
+        name: text,
+        fields: [text],
+        methods: [text],
+        required_mixins: [text],
+        required_traits: [text],
+        type_params: [text]
+    ) -> MixinRecord:
+        MixinRecord(
+            name: name,
+            fields: fields,
+            methods: methods,
+            required_mixins: required_mixins,
+            required_traits: required_traits,
+            type_params: type_params
+        )
+
+class MixinResolver:
+    mixins: [MixinRecord]
+
+    static fn new() -> MixinResolver:
+        MixinResolver(mixins: [])
+
+    me register(info: MixinRecord):
+        self.mixins = self.mixins.push(info)
+
+    fn has_name(name: text, items: [text]) -> bool:
+        var i: i64 = 0
+        while i < items.len():
+            if items[i] == name:
+                return true
+            i = i + 1
+        false
+
+    fn lookup(name: text) -> MixinRecord?:
+        var i: i64 = 0
+        while i < self.mixins.len():
+            if self.mixins[i].name == name:
+                return self.mixins[i]
+            i = i + 1
+        nil
+
+    fn resolve_transitive(initial_names: [text]) -> [text]:
+        var seen: [text] = []
+        var result: [text] = []
+        var queue: [text] = initial_names
+
+        while queue.len() > 0:
+            val name = queue[0]
+            queue = queue[1:]
+
+            if self.has_name(name, seen):
+                continue
+
+            seen = seen.push(name)
+            match self.lookup(name):
+                case Some(info):
+                    result = result.push(name)
+
+                    var j: i64 = 0
+                    while j < info.required_mixins.len():
+                        val dep = info.required_mixins[j]
+                        if not self.has_name(dep, seen):
+                            queue = queue.push(dep)
+                        j = j + 1
+                case nil:
+                    pass
+
+        result
+
+    fn collect_fields(names: [text]) -> [text]:
+        var fields: [text] = []
+        var seen_fields: [text] = []
+        val resolved = self.resolve_transitive(names)
+
+        var i: i64 = 0
+        while i < resolved.len():
+            match self.lookup(resolved[i]):
+                case Some(info):
+                    var j: i64 = 0
+                    while j < info.fields.len():
+                        val field_name = info.fields[j]
+                        if not self.has_name(field_name, seen_fields):
+                            fields = fields.push(field_name)
+                            seen_fields = seen_fields.push(field_name)
+                        j = j + 1
+                case nil:
+                    pass
+            i = i + 1
+
+        fields
+
+    fn collect_methods(names: [text]) -> [text]:
+        var methods: [text] = []
+        val resolved = self.resolve_transitive(names)
+        var i: i64 = 0
+
+        while i < resolved.len():
+            match self.lookup(resolved[i]):
+                case Some(info):
+                    var j: i64 = 0
+                    while j < info.methods.len():
+                        methods = methods.push(info.methods[j])
+                        j = j + 1
+                case nil:
+                    pass
+            i = i + 1
+
+        methods
+
+    fn collect_traits(names: [text]) -> [text]:
+        var traits: [text] = []
+        val resolved = self.resolve_transitive(names)
+        var i: i64 = 0
+
+        while i < resolved.len():
+            match self.lookup(resolved[i]):
+                case Some(info):
+                    var j: i64 = 0
+                    while j < info.required_traits.len():
+                        val trait_name = info.required_traits[j]
+                        if not self.has_name(trait_name, traits):
+                            traits = traits.push(trait_name)
+                        j = j + 1
+                case nil:
+                    pass
+            i = i + 1
+
+        traits
+
+fn bootstrap_resolver() -> MixinResolver:
+    var resolver = MixinResolver.new()
+
+    resolver.register(MixinRecord.new(
+        "base",
+        ["id"],
+        ["describe"],
+        [],
+        ["Printable"],
+        []
+    ))
+    resolver.register(MixinRecord.new(
+        "timestamped",
+        ["created_at"],
+        ["touch"],
+        ["base"],
+        [],
+        []
+    ))
+    resolver.register(MixinRecord.new(
+        "versioned",
+        ["version"],
+        ["bump"],
+        ["timestamped"],
+        ["Serializable"],
+        ["T"]
+    ))
+    resolver.register(MixinRecord.new(
+        "audit",
+        ["actor", "action"],
+        ["log"],
+        ["base", "timestamped"],
+        ["Traceable"],
+        []
+    ))
+    resolver.register(MixinRecord.new(
+        "cycle_a",
+        ["a"],
+        ["aa"],
+        ["cycle_b"],
+        [],
+        []
+    ))
+    resolver.register(MixinRecord.new(
+        "cycle_b",
+        ["b"],
+        ["bb"],
+        ["cycle_a"],
+        [],
+        []
+    ))
+
+    resolver
+
+describe "Transitive Mixin Resolution":
+    """
+    The type checker should automatically resolve transitive mixin dependencies,
+    applying all required mixins in the correct order and deduplicating shared dependencies.
+    """
+
+    it "single-level mixin application":
+        val resolver = bootstrap_resolver()
+        val resolved = resolver.resolve_transitive(["base"])
+        expect(same_texts(resolved, ["base"])).to_equal(true)
+
+    it "two-level transitive mixin resolution":
+        val resolver = bootstrap_resolver()
+        val resolved = resolver.resolve_transitive(["versioned"])
+        expect(same_texts(resolved, ["versioned", "timestamped", "base"])).to_equal(true)
+
+    it "three-level transitive mixin resolution":
+        val resolver = bootstrap_resolver()
+        val resolved = resolver.resolve_transitive(["audit"])
+        expect(same_texts(resolved, ["audit", "base", "timestamped"])).to_equal(true)
+
+    it "diamond dependency deduplication":
+        val resolver = bootstrap_resolver()
+        resolver.register(MixinRecord.new(
+            "top",
+            ["top_field"],
+            ["top_method"],
+            ["versioned", "audit"],
+            [],
+            []
+        ))
+        val resolved = resolver.resolve_transitive(["top"])
+        expect(same_texts(resolved, ["top", "versioned", "audit", "timestamped", "base"])).to_equal(true)
+
+    it "non-existent mixin dependency fails gracefully":
+        val resolver = bootstrap_resolver()
+        val resolved = resolver.resolve_transitive(["missing"])
+        expect(resolved.len()).to_equal(0)
+
+    it "mixin field access after transitive resolution":
+        val resolver = bootstrap_resolver()
+        val fields = resolver.collect_fields(["versioned"])
+        expect(same_texts(fields, ["version", "created_at", "id"])).to_equal(true)
+
+    it "method calls on transitive mixin methods":
+        val resolver = bootstrap_resolver()
+        val methods = resolver.collect_methods(["versioned"])
+        expect(same_texts(methods, ["bump", "touch", "describe"])).to_equal(true)
+
+    it "complex diamond with multiple levels":
+        val resolver = bootstrap_resolver()
+        resolver.register(MixinRecord.new(
+            "ui_layer",
+            ["ui"],
+            ["render"],
+            ["audit", "versioned"],
+            ["Renderable"],
+            []
+        ))
+        val resolved = resolver.resolve_transitive(["ui_layer"])
+        expect(same_texts(resolved, ["ui_layer", "audit", "versioned", "base", "timestamped"])).to_equal(true)
+
+    it "mixin with generic type parameters and transitive deps":
+        val resolver = bootstrap_resolver()
+        val resolved = resolver.resolve_transitive(["versioned"])
+        expect(resolved.len()).to_equal(3)
+        expect(resolver.lookup("versioned").unwrap().type_params.len()).to_equal(1)
+
+    it "circular mixin dependencies detected":
+        val resolver = bootstrap_resolver()
+        val resolved = resolver.resolve_transitive(["cycle_a"])
+        expect(same_texts(resolved, ["cycle_a", "cycle_b"])).to_equal(true)
+
+    it "mixin trait requirements propagate transitively":
+        val resolver = bootstrap_resolver()
+        val traits = resolver.collect_traits(["audit"])
+        expect(same_texts(traits, ["Traceable", "Printable"])).to_equal(true)

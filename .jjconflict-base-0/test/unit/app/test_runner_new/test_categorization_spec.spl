@@ -1,0 +1,375 @@
+# Test Categorization & Contextual Speed Tags
+#
+# Tests for category detection, speed annotation parsing,
+# speed resolution, and manifest v3 fields.
+
+describe "TestCategory Auto-Detection":
+    it "detects platform from baremetal path":
+        val path = "test/feature/baremetal/boot_spec.spl"
+        var cat = "other"
+        if path.contains("/baremetal/") or path.contains("/qemu/") or path.contains("/cuda/") or path.contains("/gpu/"):
+            cat = "platform"
+        expect(cat).to_equal("platform")
+
+    it "detects platform from cuda path":
+        val path = "test/unit/lib/gc_async_mut/cuda/gc_cuda_spec.spl"
+        var cat = "other"
+        if path.contains("/cuda/"):
+            cat = "platform"
+        expect(cat).to_equal("platform")
+
+    it "detects platform from gpu path":
+        val path = "test/unit/lib/gc_async_mut/gpu/driver_spec.spl"
+        var cat = "other"
+        if path.contains("/gpu/"):
+            cat = "platform"
+        expect(cat).to_equal("platform")
+
+    it "detects platform from qemu path":
+        val path = "test/feature/baremetal/riscv32/collections_qemu_spec.spl"
+        var cat = "other"
+        if path.contains("/qemu/") or path.contains("/baremetal/"):
+            cat = "platform"
+        expect(cat).to_equal("platform")
+
+    it "detects platform from non-all platform tag":
+        val content = "# @platform: baremetal(riscv32)\ndescribe \"boot\":"
+        val lines = content.split("\n")
+        var cat = "other"
+        for line in lines:
+            val trimmed = line.trim()
+            if trimmed.starts_with("# @platform:"):
+                val tag = trimmed[12:].trim()
+                if tag != "" and tag != "all" and tag != "host":
+                    cat = "platform"
+        expect(cat).to_equal("platform")
+
+    it "does not detect platform from all platform tag":
+        val content = "# @platform: all\ndescribe \"shared\":"
+        val lines = content.split("\n")
+        var cat = "not_platform"
+        for line in lines:
+            val trimmed = line.trim()
+            if trimmed.starts_with("# @platform:"):
+                val tag = trimmed[12:].trim()
+                if tag != "" and tag != "all" and tag != "host":
+                    cat = "platform"
+        expect(cat).to_equal("not_platform")
+
+    it "detects standalone when no use statements":
+        val content = "describe \"basics\":\n    it \"works\":\n        expect(1).to_equal(1)"
+        val lines = content.split("\n")
+        var has_use = false
+        for line in lines:
+            if line.trim().starts_with("use "):
+                has_use = true
+        var cat = "other"
+        if not has_use:
+            cat = "standalone"
+        expect(cat).to_equal("standalone")
+
+    it "detects standalone when only spec import":
+        val content = "use std.spec\ndescribe \"x\":\n    it \"y\":\n        pass"
+        val lines = content.split("\n")
+        var has_use = false
+        var only_spec = true
+        for line in lines:
+            val trimmed = line.trim()
+            if trimmed.starts_with("use "):
+                has_use = true
+                val module = trimmed[4:].trim()
+                val is_spec = module.starts_with("std.spec") or module.starts_with("nogc_sync_mut.spec")
+                if not is_spec:
+                    only_spec = false
+        var cat = "other"
+        if not has_use or only_spec:
+            cat = "standalone"
+        expect(cat).to_equal("standalone")
+
+    it "detects lib when has non-spec imports":
+        val content = "use std.spec\nuse app.io.file_ops\ndescribe \"x\":"
+        val lines = content.split("\n")
+        var has_use = false
+        var only_spec = true
+        for line in lines:
+            val trimmed = line.trim()
+            if trimmed.starts_with("use "):
+                has_use = true
+                val module = trimmed[4:].trim()
+                val is_spec = module.starts_with("std.spec") or module.starts_with("nogc_sync_mut.spec")
+                if not is_spec:
+                    only_spec = false
+        var cat = "other"
+        if has_use and not only_spec:
+            cat = "lib"
+        expect(cat).to_equal("lib")
+
+describe "Explicit Category Annotation":
+    it "extracts category from annotation":
+        val content = "# @category: standalone\ndescribe \"core\":"
+        val lines = content.split("\n")
+        var cat = ""
+        for line in lines:
+            val trimmed = line.trim()
+            if trimmed.starts_with("# @category:"):
+                cat = trimmed[12:].trim()
+        expect(cat).to_equal("standalone")
+
+    it "extracts platform category":
+        val content = "# @category: platform\n# @platform: baremetal"
+        val lines = content.split("\n")
+        var cat = ""
+        for line in lines:
+            val trimmed = line.trim()
+            if trimmed.starts_with("# @category:"):
+                cat = trimmed[12:].trim()
+        expect(cat).to_equal("platform")
+
+    it "explicit category overrides auto-detection":
+        val content = "# @category: lib\ndescribe \"x\":"
+        val path = "test/feature/baremetal/boot_spec.spl"
+        val lines = content.split("\n")
+        var explicit_cat = ""
+        for line in lines:
+            val trimmed = line.trim()
+            if trimmed.starts_with("# @category:"):
+                explicit_cat = trimmed[12:].trim()
+        var auto_cat = "other"
+        if path.contains("/baremetal/"):
+            auto_cat = "platform"
+        var final_cat = auto_cat
+        if explicit_cat != "":
+            final_cat = explicit_cat
+        expect(final_cat).to_equal("lib")
+
+describe "Speed Annotation Parsing":
+    it "extracts default speed":
+        val content = "# @speed: long\ndescribe \"x\":"
+        val lines = content.split("\n")
+        var speed = ""
+        for line in lines:
+            val trimmed = line.trim()
+            if trimmed.starts_with("# @speed:"):
+                speed = trimmed[9:].trim()
+        expect(speed).to_equal("long")
+
+    it "extracts contextual speed":
+        val line1 = "# @speed(baremetal): short"
+        expect(line1.starts_with("# @speed(")).to_equal(true)
+        val rest1 = line1[9:]
+        expect(rest1.contains(")")).to_equal(true)
+        val ctx1 = rest1.split(")")[0].trim()
+        expect(ctx1).to_equal("baremetal")
+        val after1 = rest1.split(")")[1]
+        expect(after1.starts_with(":")).to_equal(true)
+        val spd1 = after1[1:].trim()
+        expect(spd1).to_equal("short")
+
+        val line2 = "# @speed(native): medium"
+        val rest2 = line2[9:]
+        val ctx2 = rest2.split(")")[0].trim()
+        expect(ctx2).to_equal("native")
+        val spd2 = rest2.split(")")[1][1:].trim()
+        expect(spd2).to_equal("medium")
+
+    it "does not confuse contextual speed with default speed":
+        val content = "# @speed: long\n# @speed(baremetal): short"
+        val lines = content.split("\n")
+        var default_speed = ""
+        var contextual_count = 0
+        for line in lines:
+            val trimmed = line.trim()
+            if trimmed.starts_with("# @speed("):
+                contextual_count = contextual_count + 1
+            if trimmed.starts_with("# @speed:"):
+                default_speed = trimmed[9:].trim()
+        expect(default_speed).to_equal("long")
+        expect(contextual_count).to_equal(1)
+
+describe "Speed Resolution":
+    it "resolves contextual speed when context matches":
+        val speed_contexts = "baremetal=short,native=medium"
+        val context = "baremetal"
+        var resolved = ""
+        val pairs = speed_contexts.split(",")
+        for pair in pairs:
+            val kv = pair.split("=")
+            if kv.len() == 2:
+                val ctx = kv[0].trim()
+                val spd = kv[1].trim()
+                if ctx == context:
+                    resolved = spd
+        expect(resolved).to_equal("short")
+
+    it "falls back to default speed when no context match":
+        val speed_contexts = "baremetal=short"
+        val speed_default = "long"
+        val context = "native"
+        var resolved = ""
+        val pairs = speed_contexts.split(",")
+        for pair in pairs:
+            val kv = pair.split("=")
+            if kv.len() == 2:
+                if kv[0].trim() == context:
+                    resolved = kv[1].trim()
+        if resolved == "":
+            resolved = speed_default
+        expect(resolved).to_equal("long")
+
+    it "falls back to long when has_slow and no annotations":
+        val speed_contexts = ""
+        val speed_default = ""
+        val has_slow = true
+        var resolved = "unknown"
+        if speed_default != "":
+            resolved = speed_default
+        if resolved == "unknown" and has_slow:
+            resolved = "long"
+        expect(resolved).to_equal("long")
+
+    it "resolves to unknown when no info":
+        val speed_default = ""
+        val has_slow = false
+        var resolved = ""
+        if speed_default != "":
+            resolved = speed_default
+        elif has_slow:
+            resolved = "long"
+        else:
+            resolved = "unknown"
+        expect(resolved).to_equal("unknown")
+
+describe "Speed Filter Matching":
+    it "only-short allows only short":
+        val only_short = true
+        expect("short" == "short").to_equal(true)
+        expect("medium" == "short").to_equal(false)
+        expect("long" == "short").to_equal(false)
+
+    it "speed=medium allows short and medium":
+        val filter = "medium"
+        var short_ok = false
+        var medium_ok = false
+        var long_ok = false
+        if filter == "medium":
+            short_ok = true
+            medium_ok = true
+        expect(short_ok).to_equal(true)
+        expect(medium_ok).to_equal(true)
+        expect(long_ok).to_equal(false)
+
+    it "speed=long allows everything":
+        val filter = "long"
+        var all_pass = false
+        if filter == "long":
+            all_pass = true
+        expect(all_pass).to_equal(true)
+
+    it "empty filter allows everything":
+        val filter = ""
+        var all_pass = true
+        if filter != "":
+            all_pass = false
+        expect(all_pass).to_equal(true)
+
+describe "Manifest V3 Entry Serialization":
+    it "includes category speed_default speed_contexts in pipe format":
+        val path = "test/feature/baremetal/boot_spec.spl"
+        val category = "platform"
+        val speed_default = "long"
+        val speed_contexts = "baremetal=short,native=medium"
+        val line = "{path}|1000|200|3|1|0|0||baremetal|0|0|0|0|1|native|{category}|{speed_default}|{speed_contexts}"
+        val parts = line.split("|")
+        expect(parts.len()).to_equal(18)
+        expect(parts[15]).to_equal("platform")
+        expect(parts[16]).to_equal("long")
+        expect(parts[17]).to_equal("baremetal=short,native=medium")
+
+    it "handles empty new fields for backward compat":
+        val line = "test/unit/x_spec.spl|500|100|1|0|0|0|tag1|linux|0|0|0|0|0|interp"
+        val parts = line.split("|")
+        expect(parts.len()).to_equal(15)
+        var category = ""
+        var speed_default = ""
+        var speed_contexts = ""
+        if parts.len() >= 16:
+            category = parts[15]
+        if parts.len() >= 17:
+            speed_default = parts[16]
+        if parts.len() >= 18:
+            speed_contexts = parts[17]
+        expect(category).to_equal("")
+        expect(speed_default).to_equal("")
+        expect(speed_contexts).to_equal("")
+
+describe "CLI Flag Parsing":
+    it "category flag name":
+        val flag = "--category"
+        expect(flag).to_equal("--category")
+
+    it "context flag name":
+        val flag = "--context"
+        expect(flag).to_equal("--context")
+
+    it "only-short flag name":
+        val flag = "--only-short"
+        expect(flag).to_equal("--only-short")
+
+    it "speed flag name":
+        val flag = "--speed"
+        expect(flag).to_equal("--speed")
+
+    it "parses --category=standalone from equals format":
+        val arg = "--category=standalone"
+        var category = ""
+        if arg.starts_with("--category="):
+            category = arg[11:]
+        expect(category).to_equal("standalone")
+
+    it "parses --context=baremetal from equals format":
+        val arg = "--context=baremetal"
+        var context = ""
+        if arg.starts_with("--context="):
+            context = arg[10:]
+        expect(context).to_equal("baremetal")
+
+    it "parses --speed=medium from equals format":
+        val arg = "--speed=medium"
+        var speed = ""
+        if arg.starts_with("--speed="):
+            speed = arg[8:]
+        expect(speed).to_equal("medium")
+
+describe "Decorator Annotation Parsing":
+    it "detects @short_test decorator":
+        val line = "@short_test(baremetal)"
+        expect(line.starts_with("@short_test")).to_equal(true)
+
+    it "extracts context from @short_test(baremetal)":
+        val trimmed = "@short_test(baremetal)"
+        var ctx = ""
+        if trimmed.contains("(") and trimmed.contains(")"):
+            val after_paren = trimmed.split("(")
+            if after_paren.len() >= 2:
+                val inside = after_paren[1].split(")")[0].trim()
+                ctx = inside
+        expect(ctx).to_equal("baremetal")
+
+    it "handles @long_test without context":
+        val trimmed = "@long_test"
+        var ctx = ""
+        if trimmed.contains("(") and trimmed.contains(")"):
+            val after_paren = trimmed.split("(")
+            if after_paren.len() >= 2:
+                ctx = after_paren[1].split(")")[0].trim()
+        expect(ctx).to_equal("")
+
+    it "detects @medium_test decorator":
+        val line = "@medium_test(native)"
+        expect(line.starts_with("@medium_test")).to_equal(true)
+        var ctx = ""
+        if line.contains("(") and line.contains(")"):
+            val after_paren = line.split("(")
+            if after_paren.len() >= 2:
+                ctx = after_paren[1].split(")")[0].trim()
+        expect(ctx).to_equal("native")

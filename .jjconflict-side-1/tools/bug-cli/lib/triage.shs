@@ -1,0 +1,112 @@
+#!/bin/bash
+# bug-cli triage — keyword-based severity/component classification
+# Depends on: config.shs (sourced by main entry point)
+
+bug_classify_severity() {
+  local text="$1"
+  local text_lower
+  text_lower=$(echo "$text" | tr '[:upper:]' '[:lower:]')
+
+  # Check keywords in priority order
+  local keywords
+
+  # Critical
+  for kw in crash "data loss" security vulnerability segfault corruption panic oom; do
+    if echo "$text_lower" | grep -q "$kw"; then
+      echo "critical"; return
+    fi
+  done
+
+  # High
+  for kw in broken fails error exception regression blocker hang freeze deadlock; do
+    if echo "$text_lower" | grep -q "$kw"; then
+      echo "high"; return
+    fi
+  done
+
+  # Medium
+  for kw in incorrect wrong unexpected inconsistent slow timeout "does not" missing; do
+    if echo "$text_lower" | grep -q "$kw"; then
+      echo "medium"; return
+    fi
+  done
+
+  # Low
+  for kw in cosmetic typo minor enhancement improvement "nice to" cleanup style; do
+    if echo "$text_lower" | grep -q "$kw"; then
+      echo "low"; return
+    fi
+  done
+
+  echo "unknown"
+}
+
+bug_classify_component() {
+  local text="$1"
+  local text_lower
+  text_lower=$(echo "$text" | tr '[:upper:]' '[:lower:]')
+
+  # Match component from file paths or keywords
+  if echo "$text_lower" | grep -qE '(compiler|parser|lexer|codegen|backend|mir)'; then
+    echo "compiler"
+  elif echo "$text_lower" | grep -qE '(runtime|gc|memory|allocat)'; then
+    echo "runtime"
+  elif echo "$text_lower" | grep -qE '(test|spec|assert)'; then
+    echo "testing"
+  elif echo "$text_lower" | grep -qE '(build|bootstrap|link)'; then
+    echo "build"
+  elif echo "$text_lower" | grep -qE '(lsp|mcp|tool|cli)'; then
+    echo "tooling"
+  elif echo "$text_lower" | grep -qE '(doc|readme|comment)'; then
+    echo "docs"
+  elif echo "$text_lower" | grep -qE '(ui|gui|tui|display|render)'; then
+    echo "ui"
+  elif echo "$text_lower" | grep -qE '(net|http|api|server|client)'; then
+    echo "network"
+  else
+    echo "other"
+  fi
+}
+
+bug_triage_item() {
+  local bug_json="$1"
+  local title body severity component
+  title=$(echo "$bug_json" | jq -r '.title // ""')
+  body=$(echo "$bug_json" | jq -r '.body // ""')
+  local combined="${title} ${body}"
+
+  severity=$(bug_classify_severity "$combined")
+  component=$(bug_classify_component "$combined")
+
+  echo "$bug_json" | jq \
+    --arg sev "$severity" \
+    --arg comp "$component" \
+    '. + { severity: $sev, component: $comp }'
+}
+
+bug_triage_all() {
+  local bugs_json="$1"
+  local count
+  count=$(echo "$bugs_json" | jq 'length')
+
+  local result="[]"
+  local i=0
+  while [ "$i" -lt "$count" ]; do
+    local item
+    item=$(echo "$bugs_json" | jq ".[$i]")
+    local triaged
+    triaged=$(bug_triage_item "$item")
+    result=$(printf '%s\n%s' "$result" "[$triaged]" | jq -s 'flatten')
+    i=$((i + 1))
+  done
+
+  # Sort by severity priority: critical > high > medium > low > unknown
+  echo "$result" | jq '
+    def sev_order:
+      if . == "critical" then 0
+      elif . == "high" then 1
+      elif . == "medium" then 2
+      elif . == "low" then 3
+      else 4 end;
+    sort_by(.severity | sev_order)'
+}

@@ -1,0 +1,89 @@
+# frame_scheduler_spec.spl — tests for the Viz FrameScheduler.
+#
+# Mirrors viz::FrameScheduler: a tick-based cadence controller that throttles
+# frame production to a target refresh interval and tracks deadline misses.
+
+use std.viz.feature.frame_scheduler.{
+    frame_scheduler_new,
+    FrameState,
+    FrameArgs,
+    FrameScheduler
+}
+
+# ---------------------------------------------------------------------------
+# Test suite
+# ---------------------------------------------------------------------------
+
+describe "frame_scheduler":
+
+    # 1. Fresh scheduler is Idle with no missed frames
+    it "frame_scheduler_new: state is Idle, missed_count is 0":
+        val s = frame_scheduler_new(16.667)
+        s.missed_frames().to_equal(0)
+        match s.state:
+            case FrameState.Idle:
+                (true).to_equal(true)
+            case _:
+                (false).to_equal(true)
+
+    # 2. First advance always emits a FrameArgs (elapsed >= interval for now>=interval)
+    it "advance: first call emits FrameArgs":
+        var s = frame_scheduler_new(16.667)
+        val maybe = s.advance(20.0)
+        match maybe:
+            case Some(args):
+                args.frame_id.to_equal(0)
+                args.interval_ms.to_be_greater_than(16.0)
+            case None:
+                (false).to_equal(true)
+
+    # 3. A second advance inside the interval returns None
+    it "advance: within interval returns None":
+        var s = frame_scheduler_new(16.667)
+        val first = s.advance(20.0)
+        val second = s.advance(25.0)
+        second.to_be_nil()
+
+    # 4. Advancing past the interval emits another FrameArgs with next id
+    it "advance: after interval emits another FrameArgs with incremented frame_id":
+        var s = frame_scheduler_new(16.667)
+        val first = s.advance(20.0)
+        val second = s.advance(40.0)
+        match second:
+            case Some(args):
+                args.frame_id.to_equal(1)
+            case None:
+                (false).to_equal(true)
+
+    # 5. target_fps derived from interval_ms should land near 60
+    it "target_fps: 16.667ms interval gives ~60 FPS":
+        val s = frame_scheduler_new(16.667)
+        val fps = s.target_fps()
+        fps.to_be_greater_than(59.0)
+        fps.to_be_less_than(61.0)
+
+    # 6. end_frame past the deadline bumps missed_count
+    it "end_frame past deadline: increments missed_count":
+        var s = frame_scheduler_new(16.667)
+        val maybe = s.advance(20.0)
+        match maybe:
+            case Some(args):
+                s.begin_frame(args)
+                s.end_frame(args.deadline + 5.0, args.deadline)
+            case None:
+                (false).to_equal(true)
+        s.missed_frames().to_equal(1)
+
+    # 7. reset returns the missed counter to zero
+    it "reset: missed_count returns to 0":
+        var s = frame_scheduler_new(16.667)
+        val maybe = s.advance(20.0)
+        match maybe:
+            case Some(args):
+                s.begin_frame(args)
+                s.end_frame(args.deadline + 5.0, args.deadline)
+            case None:
+                (false).to_equal(true)
+        s.missed_frames().to_equal(1)
+        s.reset()
+        s.missed_frames().to_equal(0)

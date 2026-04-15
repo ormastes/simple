@@ -1,0 +1,306 @@
+"""
+# Display List
+
+Tests for display list functionality.
+"""
+#![allow(unnamed_duplicate_typed_args)]
+use std.spec
+use examples.browser.entity.dom.paint_types.{Color, PaintOp, DisplayList, DisplayItem, from_rgb, black, transparent}
+use examples.browser.entity.dom.box_types.{LayoutBox, BoxKind, BoxModel}
+# Color is imported from paint_types (which already uses std.common.color.types).
+# Computed style subset needed for painting
+class PaintStyle:
+    background_color: Color
+    color: Color
+    visibility: text
+    display: text
+    overflow: text
+    opacity: f64
+
+    static fn default() -> PaintStyle:
+        PaintStyle(
+            background_color: transparent(),
+            color: black(),
+            visibility: "visible",
+            display: "block",
+            overflow: "visible",
+            opacity: 1.0
+        )
+
+# A paintable node combining layout box and style
+class PaintNode:
+    layout: LayoutBox
+    style: PaintStyle
+    text_content: text
+    image_id: i64
+    children: [PaintNode]
+
+    static fn create(layout: LayoutBox, style: PaintStyle) -> PaintNode:
+        PaintNode(
+            layout: layout,
+            style: style,
+            text_content: "",
+            image_id: -1,
+            children: [PaintNode]()
+        )
+
+# Build display list from a paint node tree
+fn build_display_list(node: PaintNode) -> DisplayList:
+    var dl = DisplayList.empty()
+    if node.style.display == "none":
+        return dl
+    if node.style.visibility == "hidden":
+        return dl
+
+    # Push clip for overflow hidden
+    if node.style.overflow == "hidden":
+        var clip = PaintOp.PushClip(
+            x: node.layout.x, y: node.layout.y,
+            w: node.layout.width, h: node.layout.height
+        )
+        dl.ops.push(clip)
+
+    # Push opacity if < 1
+    if node.style.opacity < 1.0:
+        dl.ops.push(PaintOp.PushOpacity(alpha: node.style.opacity))
+
+    # Background color
+    if node.style.background_color.a > 0:
+        var fill = PaintOp.FillRect(
+            x: node.layout.x, y: node.layout.y,
+            w: node.layout.width, h: node.layout.height,
+            color: node.style.background_color
+        )
+        dl.ops.push(fill)
+
+    # Border
+    var bm = node.layout.box_model
+    if bm.border_top > 0.0 or bm.border_right > 0.0 or bm.border_bottom > 0.0 or bm.border_left > 0.0:
+        var border = PaintOp.DrawBorder(
+            x: node.layout.x, y: node.layout.y,
+            w: node.layout.width, h: node.layout.height,
+            widths: [bm.border_top, bm.border_right, bm.border_bottom, bm.border_left],
+            colors: [black(), black(), black(), black()]
+        )
+        dl.ops.push(border)
+
+    # Text
+    if node.text_content != "":
+        var text_op = PaintOp.DrawText(
+            x: node.layout.x, y: node.layout.y,
+            text_content: node.text_content,
+            font_size: 16.0,
+            color: node.style.color
+        )
+        dl.ops.push(text_op)
+
+    # Image
+    if node.image_id >= 0:
+        var img = PaintOp.DrawImage(
+            x: node.layout.x, y: node.layout.y,
+            w: node.layout.width, h: node.layout.height,
+            image_id: node.image_id
+        )
+        dl.ops.push(img)
+
+    # Children
+    for child in node.children:
+        var child_dl = build_display_list(child)
+        for op in child_dl.ops:
+            dl.ops.push(op)
+
+    # Pop opacity
+    if node.style.opacity < 1.0:
+        dl.ops.push(PaintOp.PopOpacity)
+
+    # Pop clip
+    if node.style.overflow == "hidden":
+        dl.ops.push(PaintOp.PopClip)
+
+    dl
+
+# Helper to make a simple layout box
+fn make_box(x: f64, y: f64, w: f64, h: f64) -> LayoutBox:
+    var box = LayoutBox.create(0, BoxKind.Block)
+    box.x = x
+    box.y = y
+    box.width = w
+    box.height = h
+    box
+
+fn make_box_with_border(x: f64, y: f64, w: f64, h: f64, bw: f64) -> LayoutBox:
+    var box = make_box(x, y, w, h)
+    box.box_model.border_top = bw
+    box.box_model.border_right = bw
+    box.box_model.border_bottom = bw
+    box.box_model.border_left = bw
+    box
+
+fn count_ops_of_kind(dl: DisplayList, kind: text) -> i64:
+    var count = 0
+    for op in dl.ops:
+        match op:
+            FillRect(x, y, w, h, color):
+                if kind == "FillRect":
+                    count = count + 1
+            DrawText(x, y, text_content, font_size, color):
+                if kind == "DrawText":
+                    count = count + 1
+            DrawBorder(x, y, w, h, widths, colors):
+                if kind == "DrawBorder":
+                    count = count + 1
+            DrawImage(x, y, w, h, image_id):
+                if kind == "DrawImage":
+                    count = count + 1
+            PushClip(x, y, w, h):
+                if kind == "PushClip":
+                    count = count + 1
+            PopClip:
+                if kind == "PopClip":
+                    count = count + 1
+            PushOpacity(alpha):
+                if kind == "PushOpacity":
+                    count = count + 1
+            PopOpacity:
+                if kind == "PopOpacity":
+                    count = count + 1
+    count
+
+describe "DisplayList":
+    """
+    ## Displaylist Tests
+
+    Validates DisplayList functionality.
+    """
+
+    describe "basic painting":
+        it "empty layout produces empty display list":
+            var layout = make_box(0.0, 0.0, 0.0, 0.0)
+            var style = PaintStyle.default()
+            var node = PaintNode.create(layout, style)
+            var dl = build_display_list(node)
+            expect(dl.ops.len()).to_equal(0)
+
+        it "single box generates fill rect":
+            var layout = make_box(10.0, 20.0, 100.0, 50.0)
+            var style = PaintStyle.default()
+            style.background_color = from_rgb(255, 0, 0)
+            var node = PaintNode.create(layout, style)
+            var dl = build_display_list(node)
+            expect(count_ops_of_kind(dl, "FillRect")).to_equal(1)
+
+        it "box with text generates draw text":
+            var layout = make_box(0.0, 0.0, 200.0, 30.0)
+            var style = PaintStyle.default()
+            var node = PaintNode.create(layout, style)
+            node.text_content = "Hello"
+            var dl = build_display_list(node)
+            expect(count_ops_of_kind(dl, "DrawText")).to_equal(1)
+
+        it "background color generates fill rect with correct color":
+            var layout = make_box(0.0, 0.0, 100.0, 100.0)
+            var style = PaintStyle.default()
+            style.background_color = from_rgb(0, 128, 255)
+            var node = PaintNode.create(layout, style)
+            var dl = build_display_list(node)
+            var fill_found = false
+            for op in dl.ops:
+                match op:
+                    FillRect(x, y, w, h, color):
+                        fill_found = true
+                        expect(color.r).to_equal(0)
+                        expect(color.g).to_equal(128)
+                        expect(color.b).to_equal(255)
+                    _: pass_dn
+            expect(fill_found).to_equal(true)
+
+    describe "borders":
+        it "border generates draw border op":
+            var layout = make_box_with_border(0.0, 0.0, 100.0, 100.0, 2.0)
+            var style = PaintStyle.default()
+            var node = PaintNode.create(layout, style)
+            var dl = build_display_list(node)
+            expect(count_ops_of_kind(dl, "DrawBorder")).to_equal(1)
+
+    describe "visibility and display":
+        it "hidden visibility skips painting":
+            var layout = make_box(0.0, 0.0, 100.0, 100.0)
+            var style = PaintStyle.default()
+            style.visibility = "hidden"
+            style.background_color = from_rgb(255, 0, 0)
+            var node = PaintNode.create(layout, style)
+            var dl = build_display_list(node)
+            expect(dl.ops.len()).to_equal(0)
+
+        it "display none skips painting":
+            var layout = make_box(0.0, 0.0, 100.0, 100.0)
+            var style = PaintStyle.default()
+            style.display = "none"
+            style.background_color = from_rgb(255, 0, 0)
+            var node = PaintNode.create(layout, style)
+            var dl = build_display_list(node)
+            expect(dl.ops.len()).to_equal(0)
+
+    describe "clipping and opacity":
+        it "clip rect pushed for overflow hidden":
+            var layout = make_box(10.0, 20.0, 200.0, 100.0)
+            var style = PaintStyle.default()
+            style.overflow = "hidden"
+            style.background_color = from_rgb(200, 200, 200)
+            var node = PaintNode.create(layout, style)
+            var dl = build_display_list(node)
+            expect(count_ops_of_kind(dl, "PushClip")).to_equal(1)
+            expect(count_ops_of_kind(dl, "PopClip")).to_equal(1)
+
+        it "opacity pushes PushOpacity":
+            var layout = make_box(0.0, 0.0, 100.0, 100.0)
+            var style = PaintStyle.default()
+            style.opacity = 0.5
+            style.background_color = from_rgb(255, 0, 0)
+            var node = PaintNode.create(layout, style)
+            var dl = build_display_list(node)
+            expect(count_ops_of_kind(dl, "PushOpacity")).to_equal(1)
+            expect(count_ops_of_kind(dl, "PopOpacity")).to_equal(1)
+
+    describe "tree order and content types":
+        it "nested boxes paint in tree order":
+            var parent_layout = make_box(0.0, 0.0, 300.0, 200.0)
+            var parent_style = PaintStyle.default()
+            parent_style.background_color = from_rgb(200, 200, 200)
+            var parent_node = PaintNode.create(parent_layout, parent_style)
+
+            var child_layout = make_box(10.0, 10.0, 100.0, 50.0)
+            var child_style = PaintStyle.default()
+            child_style.background_color = from_rgb(100, 100, 100)
+            var child_node = PaintNode.create(child_layout, child_style)
+
+            parent_node.children = [child_node]
+            var dl = build_display_list(parent_node)
+            # Parent fill first, then child fill
+            expect(count_ops_of_kind(dl, "FillRect")).to_equal(2)
+            expect(dl.ops.len()).to_equal(2)
+
+        it "text color uses computed color":
+            var layout = make_box(0.0, 0.0, 200.0, 30.0)
+            var style = PaintStyle.default()
+            style.color = from_rgb(255, 0, 0)
+            var node = PaintNode.create(layout, style)
+            node.text_content = "Red text"
+            var dl = build_display_list(node)
+            var found_text = false
+            for op in dl.ops:
+                match op:
+                    DrawText(x, y, text_content, font_size, color):
+                        found_text = true
+                        expect(color.r).to_equal(255)
+                        expect(color.g).to_equal(0)
+                    _: pass_dn
+            expect(found_text).to_equal(true)
+
+        it "image generates DrawImage op":
+            var layout = make_box(0.0, 0.0, 200.0, 150.0)
+            var style = PaintStyle.default()
+            var node = PaintNode.create(layout, style)
+            node.image_id = 42
+            var dl = build_display_list(node)
+            expect(count_ops_of_kind(dl, "DrawImage")).to_equal(1)

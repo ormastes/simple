@@ -1,0 +1,432 @@
+# ICC profile writer — serializes SkColorSpace to ICC v4 profile bytes.
+#
+# Inverse of icc_profile.spl's parse_icc_header + detect_named_space.
+# Produces a minimal valid ICC v4 RGB display profile containing:
+#   - 128-byte header with magic "acsp"
+#   - Tag table with wtpt, rXYZ, gXYZ, bXYZ, rTRC/gTRC/bTRC (all minimal curves)
+#
+# Full ICC tooling (per-channel parametric curves, colorant order, device
+# model description) is out of scope.
+
+use std.skia.entity.color_space.{SkColorSpace, SkColorSpaceKind}
+use std.skia.feature.color_management.icc_profile.{text2u32, ICC_MAGIC}
+
+# ============================================================================
+# Constants
+# ============================================================================
+
+const _HEADER_SIZE     = 128
+const _ICC_VERSION_V4  = 69206016   # 0x04200000
+const _SIG_RGB         = 1380401696 # "RGB "
+const _SIG_XYZ         = 1482250784 # "XYZ "
+const _PCS_XYZ         = 1482250784 # "XYZ "
+
+# ============================================================================
+# Byte-encode primitives
+# ============================================================================
+
+fn encode_u32_be(value: i64) -> [i64]:
+    """Returns 4 bytes big-endian as an [i64] list (caller converts to u8)."""
+    var out: [i64] = []
+    val b0 = (value / 16777216) % 256
+    val b1 = (value / 65536) % 256
+    val b2 = (value / 256) % 256
+    val b3 = value % 256
+    out.append(b0)
+    out.append(b1)
+    out.append(b2)
+    out.append(b3)
+    out
+
+fn encode_u16_be(value: i64) -> [i64]:
+    """Returns 2 bytes big-endian as an [i64] list."""
+    var out: [i64] = []
+    val b0 = (value / 256) % 256
+    val b1 = value % 256
+    out.append(b0)
+    out.append(b1)
+    out
+
+fn encode_s15fixed16(value: f64) -> [i64]:
+    """Encodes an s15Fixed16Number (signed 16.16 fixed-point) as 4 big-endian bytes."""
+    val scaled = value * 65536.0
+    var raw = scaled as i64
+    if raw < 0:
+        raw = raw + 4294967296
+    encode_u32_be(raw)
+
+fn encode_string_asc(s: String, pad_to: i64) -> [i64]:
+    """Encodes String as ASCII bytes, padded with zeros to `pad_to` length."""
+    var out: [i64] = []
+    val bytes = s.bytes()
+    val n = bytes.length()
+    var i: i64 = 0
+    while i < n:
+        if i >= pad_to:
+            return out
+        val maybe = bytes.at(i)
+        match maybe:
+            Some(b):
+                out.append(b as i64)
+            None:
+                out.append(0)
+        i = i + 1
+    while out.length() < pad_to:
+        out.append(0)
+    out
+
+# ============================================================================
+# Tag-body encoders
+# ============================================================================
+
+fn encode_xyz_tag(x: f64, y: f64, z: f64) -> [i64]:
+    """Returns 20-byte XYZ tag type payload:
+        4 bytes 'XYZ ' signature + 4 bytes reserved + 12 bytes s15Fixed16 triplet.
+    """
+    var out: [i64] = []
+    val sig_bytes = encode_u32_be(_SIG_XYZ)
+    var i: i64 = 0
+    while i < sig_bytes.length():
+        val maybe = sig_bytes.at(i)
+        match maybe:
+            Some(b):
+                out.append(b)
+            None:
+                out.append(0)
+        i = i + 1
+    # 4 reserved zero bytes
+    out.append(0)
+    out.append(0)
+    out.append(0)
+    out.append(0)
+    val xb = encode_s15fixed16(x)
+    val yb = encode_s15fixed16(y)
+    val zb = encode_s15fixed16(z)
+    var j: i64 = 0
+    while j < xb.length():
+        val mx = xb.at(j)
+        match mx:
+            Some(b):
+                out.append(b)
+            None:
+                out.append(0)
+        j = j + 1
+    var k: i64 = 0
+    while k < yb.length():
+        val my = yb.at(k)
+        match my:
+            Some(b):
+                out.append(b)
+            None:
+                out.append(0)
+        k = k + 1
+    var m: i64 = 0
+    while m < zb.length():
+        val mz = zb.at(m)
+        match mz:
+            Some(b):
+                out.append(b)
+            None:
+                out.append(0)
+        m = m + 1
+    out
+
+fn _encode_identity_curve() -> [i64]:
+    """Minimal 'curv' tag body with count=0 (identity):
+        4 bytes 'curv' signature + 4 reserved + 4 byte count=0 = 12 bytes total.
+    """
+    var out: [i64] = []
+    val sig_curv = text2u32("curv")
+    val sig_bytes = encode_u32_be(sig_curv)
+    var i: i64 = 0
+    while i < sig_bytes.length():
+        val mb = sig_bytes.at(i)
+        match mb:
+            Some(b):
+                out.append(b)
+            None:
+                out.append(0)
+        i = i + 1
+    # 4 reserved zero bytes
+    out.append(0)
+    out.append(0)
+    out.append(0)
+    out.append(0)
+    # count = 0 → identity curve
+    val count_bytes = encode_u32_be(0)
+    var j: i64 = 0
+    while j < count_bytes.length():
+        val mb = count_bytes.at(j)
+        match mb:
+            Some(b):
+                out.append(b)
+            None:
+                out.append(0)
+        j = j + 1
+    out
+
+# ============================================================================
+# Header + tag-table encoders
+# ============================================================================
+
+fn encode_icc_header(profile_size: i64, color_space_kind: SkColorSpaceKind, pcs_kind: i64) -> [i64]:
+    """Returns a 128-byte ICC v4 header:
+        0..3    profile size
+        4..7    preferred CMM type (zero)
+        8..11   version = 0x04200000
+        12..15  device class ('mntr' = monitor)
+        16..19  color space signature (derived from kind; RGB for all named variants)
+        20..23  PCS signature (XYZ)
+        24..35  date/time (zero)
+        36..39  magic "acsp"
+        40..127 zero-padded
+    """
+    var out: [i64] = []
+    val size_bytes = encode_u32_be(profile_size)
+    var i: i64 = 0
+    while i < size_bytes.length():
+        val mb = size_bytes.at(i)
+        match mb:
+            Some(b):
+                out.append(b)
+            None:
+                out.append(0)
+        i = i + 1
+    # CMM type: zero 4 bytes
+    out.append(0)
+    out.append(0)
+    out.append(0)
+    out.append(0)
+    # Version 0x04200000
+    val ver = encode_u32_be(_ICC_VERSION_V4)
+    var v: i64 = 0
+    while v < ver.length():
+        val mb = ver.at(v)
+        match mb:
+            Some(b):
+                out.append(b)
+            None:
+                out.append(0)
+        v = v + 1
+    # Device class 'mntr'
+    val mntr = encode_u32_be(text2u32("mntr"))
+    var d: i64 = 0
+    while d < mntr.length():
+        val mb = mntr.at(d)
+        match mb:
+            Some(b):
+                out.append(b)
+            None:
+                out.append(0)
+        d = d + 1
+    # Color space signature: we currently only emit RGB display profiles.
+    # Kind is reserved for future variants (e.g., grayscale).
+    var cs_sig = _SIG_RGB
+    if color_space_kind == SkColorSpaceKind.Unknown:
+        cs_sig = _SIG_RGB
+    val cs_bytes = encode_u32_be(cs_sig)
+    var cb: i64 = 0
+    while cb < cs_bytes.length():
+        val mb = cs_bytes.at(cb)
+        match mb:
+            Some(b):
+                out.append(b)
+            None:
+                out.append(0)
+        cb = cb + 1
+    # PCS signature
+    val pcs_bytes = encode_u32_be(pcs_kind)
+    var pb: i64 = 0
+    while pb < pcs_bytes.length():
+        val mb = pcs_bytes.at(pb)
+        match mb:
+            Some(b):
+                out.append(b)
+            None:
+                out.append(0)
+        pb = pb + 1
+    # Date/time: 12 bytes zero (offsets 24..35)
+    var dt: i64 = 0
+    while dt < 12:
+        out.append(0)
+        dt = dt + 1
+    # Magic "acsp" at offset 36
+    val magic = encode_u32_be(ICC_MAGIC)
+    var mg: i64 = 0
+    while mg < magic.length():
+        val mb = magic.at(mg)
+        match mb:
+            Some(b):
+                out.append(b)
+            None:
+                out.append(0)
+        mg = mg + 1
+    # Pad remaining bytes (offsets 40..127) with zeros.
+    while out.length() < _HEADER_SIZE:
+        out.append(0)
+    out
+
+fn encode_tag_table(tag_count: i64, tags: [(i64, i64, i64)]) -> [i64]:
+    """Encodes tag count (4 bytes) + per-tag entries (12 bytes each: sig, offset, size)."""
+    var out: [i64] = []
+    val count_bytes = encode_u32_be(tag_count)
+    var c: i64 = 0
+    while c < count_bytes.length():
+        val mb = count_bytes.at(c)
+        match mb:
+            Some(b):
+                out.append(b)
+            None:
+                out.append(0)
+        c = c + 1
+    var i: i64 = 0
+    while i < tags.length():
+        val maybe = tags.at(i)
+        match maybe:
+            Some(entry):
+                val sig_bytes = encode_u32_be(entry.0)
+                var a: i64 = 0
+                while a < sig_bytes.length():
+                    val mb = sig_bytes.at(a)
+                    match mb:
+                        Some(b):
+                            out.append(b)
+                        None:
+                            out.append(0)
+                    a = a + 1
+                val off_bytes = encode_u32_be(entry.1)
+                var d: i64 = 0
+                while d < off_bytes.length():
+                    val mb = off_bytes.at(d)
+                    match mb:
+                        Some(b):
+                            out.append(b)
+                        None:
+                            out.append(0)
+                    d = d + 1
+                val size_bytes = encode_u32_be(entry.2)
+                var e: i64 = 0
+                while e < size_bytes.length():
+                    val mb = size_bytes.at(e)
+                    match mb:
+                        Some(b):
+                            out.append(b)
+                        None:
+                            out.append(0)
+                    e = e + 1
+            None:
+                pass_do_nothing
+        i = i + 1
+    out
+
+# ============================================================================
+# Private helpers
+# ============================================================================
+
+fn _append_all(dst: [i64], src: [i64]) -> [i64]:
+    var out = dst
+    var i: i64 = 0
+    while i < src.length():
+        val maybe = src.at(i)
+        match maybe:
+            Some(b):
+                out.append(b)
+            None:
+                out.append(0)
+        i = i + 1
+    out
+
+fn _xy_to_xyz_d50(x: f64, y: f64) -> (f64, f64, f64):
+    """Approximate xy chromaticity → tristimulus XYZ (Y=1, D50-ish).
+    Minimal: we only need a plausible XYZ triple for the wtpt/rXYZ/gXYZ/bXYZ
+    tags. For true parity with the parser's D50→D65 adaptation the caller
+    should adapt upstream; here we simply reconstruct XYZ via Y=1.
+    """
+    if y == 0.0:
+        return (0.0, 0.0, 0.0)
+    val X = x / y
+    val Y = 1.0
+    val Z = (1.0 - x - y) / y
+    (X, Y, Z)
+
+# ============================================================================
+# Top-level encoder
+# ============================================================================
+
+fn encode_icc_profile(cs: SkColorSpace) -> [i64]:
+    """Encodes a minimal valid ICC v4 RGB display profile for the given SkColorSpace.
+
+    Layout:
+      0..127       header
+      128..131     tag count = 7
+      132..215     7 × 12-byte tag table entries (wtpt, rXYZ, gXYZ, bXYZ, rTRC, gTRC, bTRC)
+      216..235     wtpt XYZ tag body (20 bytes)
+      236..255     rXYZ XYZ tag body (20 bytes)
+      256..275     gXYZ XYZ tag body (20 bytes)
+      276..295     bXYZ XYZ tag body (20 bytes)
+      296..307     rTRC curv identity (12 bytes)
+      308..319     gTRC identity (12 bytes) — re-points to rTRC space in table to save room (each tag gets own bytes here for simplicity)
+      320..331     bTRC identity (12 bytes)
+    Total = 332 bytes. profile_size is back-patched into the header.
+    """
+    val chromas = cs.chromaticities
+    val wtpt_xyz = _xy_to_xyz_d50(chromas.white_x, chromas.white_y)
+    val r_xyz = _xy_to_xyz_d50(chromas.red_x, chromas.red_y)
+    val g_xyz = _xy_to_xyz_d50(chromas.green_x, chromas.green_y)
+    val b_xyz = _xy_to_xyz_d50(chromas.blue_x, chromas.blue_y)
+
+    val wtpt_body = encode_xyz_tag(wtpt_xyz.0, wtpt_xyz.1, wtpt_xyz.2)
+    val r_body = encode_xyz_tag(r_xyz.0, r_xyz.1, r_xyz.2)
+    val g_body = encode_xyz_tag(g_xyz.0, g_xyz.1, g_xyz.2)
+    val b_body = encode_xyz_tag(b_xyz.0, b_xyz.1, b_xyz.2)
+    val rtrc_body = _encode_identity_curve()
+    val gtrc_body = _encode_identity_curve()
+    val btrc_body = _encode_identity_curve()
+
+    # Offsets after header+tag-table:
+    # header = 128, tag-table-header = 4, 7 entries × 12 = 84 → bodies start @ 216
+    val tag_count = 7
+    val table_size = 4 + (tag_count * 12)
+    val bodies_start = _HEADER_SIZE + table_size
+
+    val off_wtpt = bodies_start
+    val off_rxyz = off_wtpt + 20
+    val off_gxyz = off_rxyz + 20
+    val off_bxyz = off_gxyz + 20
+    val off_rtrc = off_bxyz + 20
+    val off_gtrc = off_rtrc + 12
+    val off_btrc = off_gtrc + 12
+    val total_size = off_btrc + 12
+
+    val sig_wtpt = text2u32("wtpt")
+    val sig_rxyz = text2u32("rXYZ")
+    val sig_gxyz = text2u32("gXYZ")
+    val sig_bxyz = text2u32("bXYZ")
+    val sig_rtrc = text2u32("rTRC")
+    val sig_gtrc = text2u32("gTRC")
+    val sig_btrc = text2u32("bTRC")
+
+    val tag_entries: [(i64, i64, i64)] = [
+        (sig_wtpt, off_wtpt, 20),
+        (sig_rxyz, off_rxyz, 20),
+        (sig_gxyz, off_gxyz, 20),
+        (sig_bxyz, off_bxyz, 20),
+        (sig_rtrc, off_rtrc, 12),
+        (sig_gtrc, off_gtrc, 12),
+        (sig_btrc, off_btrc, 12)
+    ]
+
+    val header = encode_icc_header(total_size, cs.kind, _PCS_XYZ)
+    val table = encode_tag_table(tag_count, tag_entries)
+
+    var out: [i64] = []
+    out = _append_all(out, header)
+    out = _append_all(out, table)
+    out = _append_all(out, wtpt_body)
+    out = _append_all(out, r_body)
+    out = _append_all(out, g_body)
+    out = _append_all(out, b_body)
+    out = _append_all(out, rtrc_body)
+    out = _append_all(out, gtrc_body)
+    out = _append_all(out, btrc_body)
+    out

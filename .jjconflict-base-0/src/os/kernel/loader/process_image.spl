@@ -1,0 +1,85 @@
+#![allow(unnamed_duplicate_typed_args)]
+# Kernel Process Image Builder — ELF Load Plan to UserProcessImage
+#
+# Phase-3 additions:
+#   * Replaces the fixed 64 KB user stack with stack_builder.compute_stack_size(),
+#     which scales with binary size and caps at 128 MB.
+#   * Populates UserProcessImage.initial_sp and .initial_stack_bytes via
+#     stack_builder.build_initial_stack() so libc `_start` can recover argc,
+#     argv, envp, and the auxv vector per the System V ABI.
+
+use os.kernel.arch.arch_context.{Architecture}
+use os.kernel.loader.elf_loader.{load_user_executable}
+use os.kernel.loader.stack_builder.{build_initial_stack, compute_stack_size, AuxEntry}
+use os.kernel.types.task_types.{UserLoadSegment, UserProcessImage}
+
+val X86_64_USER_STACK_TOP: u64 = 0x00007FFFFFFFF000
+val RV64_USER_STACK_TOP: u64 = 0x0000004000000000
+val RV32_USER_STACK_TOP: u64 = 0x0000000081000000
+
+fn _slice_bytes(data: [u8], offset: u64, size: u64) -> [u8]:
+    var out: [u8] = []
+    var i: u64 = 0
+    while i < size:
+        out.push(data[(offset + i) as i64])
+        i = i + 1
+    out
+
+fn _default_stack_top(arch: Architecture) -> Result<u64, text>:
+    match arch:
+        case Architecture.X86_64:
+            Ok(X86_64_USER_STACK_TOP)
+        case Architecture.Riscv64:
+            Ok(RV64_USER_STACK_TOP)
+        case Architecture.Riscv32:
+            Ok(RV32_USER_STACK_TOP)
+        case _:
+            Err("unsupported architecture for process image")
+
+fn build_user_process_image(
+    path: text,
+    data: [u8],
+    arch: Architecture,
+    argv: [text],
+    envp: [text]
+) -> Result<UserProcessImage, text>:
+    """Load an ELF and build a user process image.
+
+    `argv`/`envp` flow in from the spawn syscall. If the caller has no
+    explicit argv (legacy path), it passes `[]` and we seed argv with the
+    binary path so libc `_start` still observes argv[0].
+    """
+    val elf = load_user_executable(data, arch)?
+    val stack_top = _default_stack_top(arch)?
+    val stack_size = compute_stack_size(data.len() as u64)
+
+    var effective_argv: [text] = argv
+    if effective_argv.len() == 0:
+        effective_argv = [path]
+
+    var segments: [UserLoadSegment] = []
+    for seg in elf.segments:
+        segments.push(UserLoadSegment(
+            virt_addr: seg.virt_addr,
+            mem_size: seg.mem_size,
+            file_size: seg.file_size,
+            flags: seg.flags,
+            align: seg.align,
+            data: _slice_bytes(data, seg.file_offset, seg.file_size)
+        ))
+
+    val extra_aux: [AuxEntry] = [AuxEntry(aux_type: 9, val: elf.entry)]  # AT_ENTRY
+    val stack_frame = build_initial_stack(stack_top, effective_argv, envp, extra_aux)
+
+    Ok(UserProcessImage(
+        binary_path: path,
+        entry: elf.entry,
+        stack_top: stack_top,
+        stack_size: stack_size,
+        argv: effective_argv,
+        envp: envp,
+        segments: segments,
+        file_bytes: data,
+        initial_sp: stack_frame.sp,
+        initial_stack_bytes: stack_frame.bytes
+    ))

@@ -1,0 +1,219 @@
+# Actor Spawn - Create Actors and Obtain References
+#
+# @tag:api
+# @tag:stdlib
+#
+# Provides the spawn() function and ActorRef handle for interacting
+# with actors. ActorRef is a lightweight handle that allows sending
+# messages to an actor without direct access to its internals.
+#
+# Usage:
+#   use std.actor.spawn.{spawn, ActorRef}
+#   use std.actor.actor.{HandlerTable}
+#
+#   var h = HandlerTable.new()
+#   h.register("double", \\args: "{args[0].to_i64() * 2}")
+#   val worker = spawn(h)
+#   worker.send("double", ["21"])
+#   run_all()  # process pending messages
+#   val result = worker.ask("double", ["5"])
+
+use std.actor.actor.{Actor, HandlerTable}
+use std.actor.mailbox.{ActorMailbox, ActorMessage}
+use std.actor.scheduler.{get_scheduler, run_all, ActorScheduler}
+
+# ================================================================
+# Actor Reference
+# ================================================================
+
+struct ActorRef:
+    """Lightweight handle for sending messages to an actor.
+
+    ActorRef holds only the actor's ID and a reference to its mailbox.
+    It can be freely copied and passed between functions.
+
+    Example:
+        val ref = spawn(handlers)
+        ref.send("process", ["data"])
+        val reply_id = ref.ask("compute", ["42"])
+    """
+    actor_id: i64
+    _mailbox: ActorMailbox
+
+impl ActorRef:
+    fn send(method: text, args: [text]):
+        """Send a fire-and-forget message to the actor.
+
+        The message is placed in the actor's mailbox and will be
+        dispatched when the scheduler processes it. Does not wait
+        for the message to be processed.
+
+        Args:
+            method: Name of the receive handler to invoke
+            args: Arguments as text values
+        """
+        val msg = ActorMessage.fire_and_forget(method, args)
+        self._mailbox.enqueue(msg)
+        # Ensure actor is in the scheduler's ready queue
+        get_scheduler()._enqueue_ready(self.actor_id)
+
+    fn ask(method: text, args: [text]) -> i64:
+        """Send a message and get a reply ID for later retrieval.
+
+        The scheduler stores the handler's return value under the
+        reply ID. After calling run() or run_until_idle(), retrieve
+        the result with get_scheduler().get_reply(reply_id).
+
+        Args:
+            method: Name of the receive handler to invoke
+            args: Arguments as text values
+
+        Returns:
+            Reply ID for retrieving the response (-1 on failure)
+        """
+        get_scheduler().ask_message(self.actor_id, method, args)
+
+    fn ask_sync(method: text, args: [text]) -> text?:
+        """Send a message, run the scheduler, and return the reply.
+
+        Convenience method that combines ask + run + get_reply.
+        Only suitable for single-threaded use where you want
+        an immediate synchronous response.
+
+        Args:
+            method: Name of the receive handler to invoke
+            args: Arguments as text values
+
+        Returns:
+            The handler's return value, or nil on failure
+        """
+        val reply_id = self.ask(method, args)
+        if reply_id < 0:
+            return nil
+        get_scheduler().run_until_idle()
+        get_scheduler().consume_reply(reply_id)
+
+    fn get_id() -> i64:
+        """Return the actor's unique ID."""
+        self.actor_id
+
+    fn has_messages() -> bool:
+        """Check if the actor has pending messages."""
+        not self._mailbox.is_empty()
+
+    fn to_string() -> text:
+        """Debug representation."""
+        "ActorRef(id={self.actor_id})"
+
+# ================================================================
+# Spawn Functions
+# ================================================================
+
+fn spawn(handlers: HandlerTable) -> ActorRef:
+    """Spawn a new actor on the global scheduler.
+
+    Creates an actor with the given handler table and registers
+    it with the global scheduler. Returns an ActorRef handle
+    for sending messages.
+
+    Example:
+        var h = HandlerTable.new()
+        h.register("greet", \\args: "Hello, {args[0]}!")
+        val greeter = spawn(h)
+        greeter.send("greet", ["World"])
+        run_all()
+    """
+    val actor = Actor.new(handlers)
+    val mailbox = actor.mailbox
+    val aid = actor.id
+    get_scheduler().register_actor(actor)
+    ActorRef(actor_id: aid, _mailbox: mailbox)
+
+fn spawn_with_mailbox(handlers: HandlerTable, mailbox: ActorMailbox) -> ActorRef:
+    """Spawn an actor with a custom mailbox configuration.
+
+    Args:
+        handlers: Handler table for message dispatch
+        mailbox: Custom-configured mailbox (e.g., different capacity)
+
+    Returns:
+        ActorRef handle to the new actor
+    """
+    val actor = Actor.with_mailbox(handlers, mailbox)
+    val mb = actor.mailbox
+    val aid = actor.id
+    get_scheduler().register_actor(actor)
+    ActorRef(actor_id: aid, _mailbox: mb)
+
+fn spawn_on(scheduler: ActorScheduler, handlers: HandlerTable) -> ActorRef:
+    """Spawn an actor on a specific scheduler (not the global one).
+
+    Args:
+        scheduler: The scheduler to register the actor with
+        handlers: Handler table for message dispatch
+
+    Returns:
+        ActorRef handle to the new actor
+    """
+    val actor = Actor.new(handlers)
+    val mailbox = actor.mailbox
+    val aid = actor.id
+    scheduler.register_actor(actor)
+    ActorRef(actor_id: aid, _mailbox: mailbox)
+
+# ================================================================
+# Pool and Broadcast Utilities
+# ================================================================
+
+fn spawn_pool(count: i64, factory: fn() -> HandlerTable) -> [ActorRef]:
+    """Spawn N actors using a handler table factory.
+
+    Each actor gets its own handler table from the factory function.
+
+    Args:
+        count: Number of actors to spawn
+        factory: Function that creates a new HandlerTable
+
+    Returns:
+        Array of ActorRef handles
+
+    Example:
+        val workers = spawn_pool(4, \\: make_worker_handlers())
+    """
+    var pool: [ActorRef] = []
+    for i in 0..count:
+        val handlers = factory()
+        pool.push(spawn(handlers))
+    pool
+
+fn broadcast(actors: [ActorRef], method: text, args: [text]):
+    """Send the same message to all actors.
+
+    Example:
+        broadcast(workers, "reset", [])
+    """
+    for ref in actors:
+        ref.send(method, args)
+
+fn round_robin_dispatch(actors: [ActorRef], tasks: [[text]]):
+    """Distribute task argument lists across actors in round-robin.
+
+    Each task is sent as the "process" method to the next actor
+    in rotation.
+
+    Args:
+        actors: Pool of actor references
+        tasks: List of argument lists to distribute
+
+    Example:
+        round_robin_dispatch(workers, [["task1"], ["task2"], ["task3"]])
+    """
+    val actor_count = actors.len()
+    if actor_count == 0:
+        return
+    var index = 0
+    for task_args in tasks:
+        val target_idx = index % actor_count
+        val target = actors[target_idx]
+        target.send("process", task_args)
+        index = index + 1

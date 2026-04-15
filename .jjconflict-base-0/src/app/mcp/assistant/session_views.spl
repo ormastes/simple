@@ -1,0 +1,156 @@
+#![allow(unnamed_duplicate_typed_args)]
+@allow(unnamed_duplicate_typed_args)
+# Assistant Session Views and Queries
+#
+# Reads the file-backed assistant store and exposes small reusable views for
+# session detail, compact briefs, and timeline/notification collection.
+
+use std.common.json.parser.{json_parse}
+use std.common.json.types.{json_get_type, json_to_string, json_to_number}
+use std.common.json.object_ops.{json_object_get}
+use app.mcp.assistant.types.{
+    AssistantSessionRecord, AssistantTimelineRecord, assistant_first_non_empty,
+    assistant_timeline_severity, assistant_timeline_title, assistant_timeline_detail
+}
+use app.mcp.assistant.session_store.{assistant_store_load_session}
+
+extern fn rt_file_exists(path: text) -> bool
+extern fn rt_file_read_text(path: text) -> text
+
+val ASSISTANT_STORE_ROOT = ".build/llm_dashboard/assistant"
+
+# =========================================================================
+# Public Views
+# =========================================================================
+
+fn assistant_store_session_detail(root: text, session_id: text) -> AssistantSessionRecord?:
+    assistant_store_load_session(root, session_id)
+
+fn assistant_store_session_brief(root: text, session_id: text) -> text:
+    if val session = assistant_store_load_session(root, session_id):
+        val timeline_count = assistant_store_count_jsonl_entries(assistant_store_timeline_path(root, session_id))
+        val notification_count = assistant_store_count_jsonl_entries(assistant_store_notifications_path(root, session_id))
+        var lines: [text] = []
+        lines.push("session: " + session.session_id)
+        lines.push("name: " + session.name)
+        lines.push("state: " + session.state)
+        lines.push("mode: " + session.mode)
+        if session.summary.trim() != "":
+            lines.push("summary: " + session.summary)
+        lines.push("timeline events: " + "{timeline_count}")
+        lines.push("notifications: " + "{notification_count}")
+        if session.last_event_kind.trim() != "":
+            var tail = "last event: " + session.last_event_kind
+            if session.last_event_detail.trim() != "":
+                tail = tail + " - " + session.last_event_detail
+            lines.push(tail)
+        lines.join("\n")
+    ""
+
+fn assistant_store_collect_timeline(root: text, session_id: text, limit: i64, since_ts: i64) -> [AssistantTimelineRecord]:
+    assistant_store_collect_stream(assistant_store_timeline_path(root, session_id), limit, since_ts)
+
+fn assistant_store_collect_notifications(root: text, session_id: text, limit: i64, since_ts: i64) -> [AssistantTimelineRecord]:
+    assistant_store_collect_stream(assistant_store_notifications_path(root, session_id), limit, since_ts)
+
+# =========================================================================
+# Path Helpers
+# =========================================================================
+
+fn assistant_store_resolve_root(root: text) -> text:
+    if root.trim() == "":
+        ASSISTANT_STORE_ROOT
+    else:
+        root
+
+fn assistant_store_timeline_path(root: text, session_id: text) -> text:
+    "{assistant_store_resolve_root(root)}/timelines/{session_id}.jsonl"
+
+fn assistant_store_notifications_path(root: text, session_id: text) -> text:
+    "{assistant_store_resolve_root(root)}/notifications/{session_id}.jsonl"
+
+# =========================================================================
+# Collection Helpers
+# =========================================================================
+
+fn assistant_store_collect_stream(path: text, limit: i64, since_ts: i64) -> [AssistantTimelineRecord]:
+    if path.trim() == "" or not rt_file_exists(path):
+        return []
+    var events: [AssistantTimelineRecord] = []
+    val content = rt_file_read_text(path)
+    if content.trim() == "":
+        return events
+    for raw in content.split("\n"):
+        val line = raw.trim()
+        if line == "":
+            continue
+        val record = json_parse(line)
+        if record == nil:
+            continue
+        val event = assistant_store_timeline_record_from_json(record)
+        if since_ts > 0 and event.timestamp_ms <= since_ts:
+            continue
+        events.push(event)
+    if limit <= 0 or events.len() <= limit:
+        return events
+    events.slice(events.len() - limit)
+
+fn assistant_store_count_jsonl_entries(path: text) -> i64:
+    if path.trim() == "" or not rt_file_exists(path):
+        return 0
+    val content = rt_file_read_text(path)
+    if content.trim() == "":
+        return 0
+    var count: i64 = 0
+    for raw in content.split("\n"):
+        if raw.trim() != "":
+            count = count + 1
+    count
+
+fn assistant_store_timeline_record_from_json(value: any) -> AssistantTimelineRecord:
+    val kind = assistant_first_non_empty([assistant_store_json_text_any(value, ["kind", "event_type"]), "note"])
+    val message = assistant_store_json_text_any(value, ["message", "summary", "detail"])
+    val signal = assistant_store_json_text_any(value, ["signal", "wake_reason"])
+    AssistantTimelineRecord(
+        event_id: assistant_store_json_text_any(value, ["id", "event_id"]),
+        session_id: assistant_store_json_text_any(value, ["session_id"]),
+        parent_session_id: assistant_store_json_text_any(value, ["parent_session_id"]),
+        child_task_id: assistant_store_json_text_any(value, ["child_task_id"]),
+        timestamp_ms: assistant_store_json_number_any(value, ["timestamp_ms", "timestamp", "created_at_ms", "created_at"]),
+        kind: kind,
+        severity: assistant_first_non_empty([assistant_store_json_text_any(value, ["severity"]), assistant_timeline_severity(kind)]),
+        title: assistant_first_non_empty([assistant_store_json_text_any(value, ["title"]), assistant_timeline_title(kind, message, signal)]),
+        detail: assistant_first_non_empty([assistant_store_json_text_any(value, ["detail", "summary"]), assistant_timeline_detail(kind, message, signal)]),
+        message: message,
+        signal: signal,
+        source: assistant_first_non_empty([assistant_store_json_text_any(value, ["source"]), "assistant"]),
+        correlation_id: assistant_store_json_text_any(value, ["correlation_id"])
+    )
+
+fn assistant_store_json_text_any(value: any, keys: [text]) -> text:
+    for key in keys:
+        val target = json_object_get(value, key)
+        if target == nil:
+            continue
+        val kind = json_get_type(target)
+        if kind == "string":
+            val s = json_to_string(target)
+            if s != nil and s.trim() != "":
+                return s
+        elif kind == "number":
+            val n = json_to_number(target)
+            if n != nil:
+                return "{n as i64}"
+    ""
+
+fn assistant_store_json_number_any(value: any, keys: [text]) -> i64:
+    for key in keys:
+        val target = json_object_get(value, key)
+        if target == nil:
+            continue
+        if json_get_type(target) != "number":
+            continue
+        val n = json_to_number(target)
+        if n != nil:
+            return n as i64
+    0

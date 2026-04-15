@@ -1,0 +1,167 @@
+use std.sspec.*
+
+# Inline fault detection state to test in interpreter mode
+var _signal_detected = false
+var _signal_number: i64 = 0
+var _signal_name = ""
+var _memory_exceeded = false
+var _memory_used: i64 = 0
+var _memory_limit: i64 = 0
+var _interrupt = false
+var _timeout = false
+var _stack_overflow = false
+var _recursion_depth: i64 = 0
+var _max_depth: i64 = 1000
+
+fn set_signal(num: i64, name: text):
+    _signal_detected = true
+    _signal_number = num
+    _signal_name = name
+
+fn clear_signal():
+    _signal_detected = false
+    _signal_number = 0
+    _signal_name = ""
+
+fn set_memory(used: i64, limit: i64):
+    _memory_exceeded = true
+    _memory_used = used
+    _memory_limit = limit
+
+fn clear_memory():
+    _memory_exceeded = false
+    _memory_used = 0
+    _memory_limit = 0
+
+fn set_interrupt():
+    _interrupt = true
+
+fn clear_all():
+    _signal_detected = false
+    _signal_number = 0
+    _signal_name = ""
+    _memory_exceeded = false
+    _memory_used = 0
+    _memory_limit = 0
+    _interrupt = false
+    _timeout = false
+    _stack_overflow = false
+    _recursion_depth = 0
+    _max_depth = 1000
+
+fn check() -> text:
+    if _signal_detected:
+        return "signal:" + str(_signal_number) + ":" + _signal_name
+    if _memory_exceeded:
+        return "memory:" + str(_memory_used) + ":" + str(_memory_limit)
+    if _timeout:
+        return "timeout"
+    if _stack_overflow or _recursion_depth > _max_depth:
+        return "stack_overflow:" + str(_recursion_depth) + ":" + str(_max_depth)
+    if _interrupt:
+        return "interrupt"
+    ""
+
+describe "Enhanced Fault Detection":
+    context "signal fault":
+        it "not detected initially":
+            expect(_signal_detected).to_equal(false)
+
+        it "set marks active":
+            clear_all()
+            set_signal(11, "SIGSEGV")
+            expect(_signal_detected).to_equal(true)
+
+        it "stores signal number":
+            clear_all()
+            set_signal(6, "SIGABRT")
+            expect(_signal_number).to_equal(6)
+
+        it "stores signal name":
+            clear_all()
+            set_signal(6, "SIGABRT")
+            expect(_signal_name).to_equal("SIGABRT")
+
+        it "clear resets":
+            clear_all()
+            set_signal(11, "SIGSEGV")
+            clear_signal()
+            expect(_signal_detected).to_equal(false)
+
+    context "memory exceeded":
+        it "not exceeded initially":
+            expect(_memory_exceeded).to_equal(false)
+
+        it "set marks active":
+            clear_all()
+            set_memory(512, 256)
+            expect(_memory_exceeded).to_equal(true)
+
+        it "stores used and limit":
+            clear_all()
+            set_memory(512, 256)
+            expect(_memory_used).to_equal(512)
+            expect(_memory_limit).to_equal(256)
+
+        it "clear resets":
+            clear_all()
+            set_memory(512, 256)
+            clear_memory()
+            expect(_memory_exceeded).to_equal(false)
+
+    context "interrupt":
+        it "not requested initially":
+            expect(_interrupt).to_equal(false)
+
+        it "set marks active":
+            clear_all()
+            set_interrupt()
+            expect(_interrupt).to_equal(true)
+
+    context "fault priority":
+        it "signal highest":
+            clear_all()
+            set_signal(11, "SIGSEGV")
+            _timeout = true
+            _interrupt = true
+            expect(check()).to_start_with("signal:")
+
+        it "memory over timeout":
+            clear_all()
+            set_memory(512, 256)
+            _timeout = true
+            expect(check()).to_start_with("memory:")
+
+        it "timeout over stack overflow":
+            clear_all()
+            _timeout = true
+            _recursion_depth = 2000
+            expect(check()).to_equal("timeout")
+
+        it "stack overflow over interrupt":
+            clear_all()
+            _recursion_depth = 2000
+            _interrupt = true
+            expect(check()).to_start_with("stack_overflow:")
+
+        it "interrupt lowest":
+            clear_all()
+            _interrupt = true
+            expect(check()).to_equal("interrupt")
+
+        it "no fault returns empty":
+            clear_all()
+            expect(check()).to_equal("")
+
+    context "reset":
+        it "clears all state":
+            set_signal(11, "SIGSEGV")
+            set_memory(512, 256)
+            set_interrupt()
+            _timeout = true
+            clear_all()
+            expect(check()).to_equal("")
+
+        it "restores defaults":
+            clear_all()
+            expect(_max_depth).to_equal(1000)

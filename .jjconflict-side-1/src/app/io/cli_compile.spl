@@ -1,0 +1,698 @@
+#![allow(unnamed_duplicate_typed_args)]
+@allow(unnamed_duplicate_typed_args)
+# CLI Compile Functions - Compilation pipeline
+# Extracted from cli_ops.spl for modularity
+# Functions here reference helpers in cli_ops.spl (same directory, no imports needed)
+
+# Helpers from cli_ops.spl
+use app.io.cli_ops.{rt_cli_handle_compile, rt_env_get, _cli_eprint, _cli_dir_create_impl, _cli_file_write_impl, _cli_file_copy_impl, _cli_process_run, _cli_shell, _cli_shell_bool, _cli_file_exists_impl, _cli_file_read_impl}
+
+# Pure Simple compiler driver (use desugared static methods for interpreter compatibility)
+use compiler.driver.driver.{CompilerDriver, aot_file, aot_c_file, aot_cuda_file, aot_vhdl_file, compile_to_smf}
+use compiler.driver.driver_api.{aot_native_file_with_backend, aot_native_project_with_backend}
+use app.compile.native.{compile_native}
+use compiler.driver.driver_types.{CompileOptions, CompileMode, CompileResult, OutputFormat}
+
+extern fn rt_compile_to_llvm_ir(source_file: text, target_triple: text, bare_metal: bool) -> (text, text, i64)
+extern fn rt_native_build(args: [text]) -> i64
+
+# Pure Simple compiler implementation (no Rust FFI dependency)
+fn cli_compile_pure_simple(source_file: text, output_file: text, output_format: text, backend: text, verbose: bool, release: bool, low_memory: bool) -> i64:
+    var out = output_file
+    if out == "":
+        # Default output based on format
+        if output_format == "smf":
+            # Place SMF in .simple/build/ next to source (not same directory)
+            val parts = source_file.split("/")
+            var parent = "."
+            var filename = source_file
+            if parts.len() > 1:
+                filename = parts[parts.len() - 1]
+                var p = ""
+                var i = 0
+                while i < parts.len() - 1:
+                    if i > 0:
+                        p = p + "/"
+                    p = p + parts[i]
+                    i = i + 1
+                parent = p
+            val build_dir = "{parent}/.simple/build"
+            _cli_dir_create_impl(build_dir, true)
+            out = "{build_dir}/{filename.replace(".spl", ".smf")}"
+        else:
+            out = "a.out"
+
+    if verbose:
+        _cli_eprint("[Pure Simple Compiler] Compiling {source_file} -> {out}")
+
+    # Use the Pure Simple compiler driver directly
+    # (use desugared __default/__create for interpreter compatibility)
+    var options = CompileOptions.default()
+    options.mode = CompileMode.Aot
+    options.input_files = [source_file]
+    options.output_file = out
+    options.verbose = verbose
+    options.low_memory = low_memory
+    if release:
+        options.release = true
+        options.optimize = true
+    if backend != "" and backend != "auto":
+        options.backend = backend
+
+    val driver = CompilerDriver.create(options)
+    val result = CompilerDriver.run_compile(driver)
+
+    match result:
+        case CompileResult.Success(_):
+            if verbose:
+                _cli_eprint("[Pure Simple Compiler] Compilation successful: {out}")
+            return 0
+        case _:
+            val errors = result.get_errors()
+            if errors.len() > 0:
+                for err in errors:
+                    _cli_eprint("error: {err}")
+            else:
+                _cli_eprint("error: Compilation failed")
+            return 1
+
+fn cli_compile(args: [text]) -> i64:
+    _cli_eprint("[cli_compile] args = {args}")
+
+    var source_file: text = ""
+    var output_file: text = ""
+    var target: text = ""
+    var emit: text = "elf"
+    var output_format: text = ""
+    var backend: text = "auto"
+    var verbose: bool = false
+    var release: bool = false
+    var use_lto: bool = false
+    var march_target: text = ""
+    var pgo_generate: bool = false
+    var pgo_use_path: text = ""
+    var release_optimized: bool = false
+    var emit_c: bool = false
+    var low_memory: bool = false
+
+    var i = 0
+    if args.len() > 0 and args[0] == "compile":
+        i = 1
+
+    while i < args.len():
+        val arg = args[i]
+
+        if arg == "--help" or arg == "-h":
+            print "Simple Compiler"
+            print ""
+            print "Usage: simple compile [options] <source.spl>"
+            print ""
+            print "Options:"
+            print "  --target=<target>     Target: baremetal-x86, x86_64-simpleos, etc."
+            print "  --emit=<format>       Output: llvm-ir, object, elf (default: elf)"
+            print "  --format=<fmt>        Output: native, smf, self-contained (sc), both"
+            print "  --native              Compile to native binary via C codegen + gcc"
+            print "  --backend=<backend>   Backend: auto, cranelift, llvm, vhdl, c, cuda, vulkan (default: auto)"
+            print "  --emit-c              Emit C++20 source code (C backend)"
+            print "  --coverage            Enable coverage instrumentation"
+            print "  --coverage-output=<p> Coverage output file path"
+            print "  --release             Release build (optimized, prefers LLVM)"
+            print "  --release-optimized   Max optimization: -O2 + x86-64-v3 + ThinLTO"
+            print "  --lto                 Enable ThinLTO (+2-3% speed)"
+            print "  --march=<target>      CPU target: native, x86-64-v2, x86-64-v3, x86-64-v4"
+            print "  --pgo-generate        Build instrumented binary for PGO"
+            print "  --pgo-use=<path>      Use PGO profile for optimization (+5-20% speed)"
+            print "  -o <output>           Output file path"
+            print "  --low-memory          Aggressive memory eviction (for large codebases)"
+            print "  --verbose, -v         Verbose output"
+            print "  --help, -h            Show this help"
+            print ""
+            print "Output Formats (--format):"
+            print "  native                Native executable (default)"
+            print "  smf                   SMF module file"
+            print "  self-contained, sc    Self-contained binary (runtime + SMF in one file)"
+            print "  both                  Both native executable and SMF module"
+            print ""
+            print "Examples:"
+            print "  simple compile hello.spl"
+            print "  simple compile hello.spl --backend=llvm"
+            print "  simple compile hello.spl --release -o hello.smf"
+            print "  simple compile hello.spl --format=self-contained -o hello"
+            print "  simple compile --native -o hello hello.spl"
+            print "  simple compile --target=baremetal-x86 --emit=llvm-ir kernel.spl"
+            print "  simple compile --backend=vhdl -o counter.vhd counter.spl"
+            return 0
+        elif arg.starts_with("--target="):
+            target = arg.substring(9)
+        elif arg == "--target":
+            i = i + 1
+            if i < args.len():
+                target = args[i]
+            else:
+                _cli_eprint("Error: --target requires an argument")
+                return 1
+        elif arg.starts_with("--emit="):
+            emit = arg.substring(7)
+        elif arg.starts_with("--format="):
+            output_format = arg.substring(9)
+        elif arg.starts_with("--backend="):
+            backend = arg.substring(10)
+        elif arg == "--release":
+            release = true
+        elif arg == "--release-optimized":
+            release_optimized = true
+            release = true
+            use_lto = true
+            march_target = "x86-64-v3"
+        elif arg == "--lto":
+            use_lto = true
+        elif arg.starts_with("--march="):
+            march_target = arg.substring(8)
+        elif arg == "--pgo-generate":
+            pgo_generate = true
+        elif arg.starts_with("--pgo-use="):
+            pgo_use_path = arg.substring(10)
+        elif arg == "--coverage":
+            # Pass-through (compiler config reads env/args)
+            pass
+        elif arg.starts_with("--coverage-output="):
+            # Pass-through (handled by compiler)
+            pass
+        elif arg == "--emit-c":
+            emit_c = true
+            backend = "c"
+        elif arg == "--low-memory":
+            low_memory = true
+        elif arg == "--native":
+            emit = "native"
+        elif arg == "-o":
+            i = i + 1
+            if i < args.len():
+                output_file = args[i]
+            else:
+                _cli_eprint("Error: -o requires an argument")
+                return 1
+        elif arg == "--verbose" or arg == "-v":
+            verbose = true
+        elif not arg.starts_with("-"):
+            if source_file == "":
+                source_file = arg
+            else:
+                # Ignore additional positional args; keep the first as the source.
+                _cli_eprint("[cli_compile] ignoring extra positional arg: {arg}")
+        else:
+            _cli_eprint("Error: Unknown option: {arg}")
+            return 1
+
+        i = i + 1
+
+    if source_file == "":
+        _cli_eprint("Error: No source file specified")
+        _cli_eprint("Usage: simple compile [options] <source.spl>")
+        return 1
+
+    if not _cli_file_exists_impl(source_file):
+        _cli_eprint("Error: Source file not found: {source_file}")
+        return 1
+
+    if backend == "vhdl":
+        return compile_vhdl(source_file, output_file, verbose)
+
+    if backend == "cuda" or backend == "ptx":
+        return compile_cuda(source_file, output_file, verbose)
+
+    if backend == "c" or backend == "cpp" or backend == "ccodegen" or emit_c:
+        return compile_c_backend(source_file, output_file, verbose)
+
+    # LLVM and native compilation — route through Pure Simple driver or native pipeline
+    if backend == "llvm" or backend == "llvm-lib" or backend == "llvmlib" or emit == "native":
+        var out = output_file
+        if out == "":
+            out = source_file.replace(".spl", "")
+        # Use Pure Simple compiler driver for all LLVM backends
+        if backend == "llvm-lib" or backend == "llvmlib":
+            return cli_compile_pure_simple(source_file, out, output_format, backend, verbose, release, low_memory)
+        return compile_native(source_file, out, verbose, "", false, backend)
+
+    if target.starts_with("baremetal-"):
+        return compile_baremetal(source_file, target, emit, output_file, verbose)
+
+    # SimpleOS targets — route through Pure Simple compiler (bare-metal ELF)
+    if target.contains("simpleos"):
+        return compile_simpleos(source_file, target, emit, output_file, verbose)
+
+    if output_format != "":
+        if output_format != "native" and output_format != "smf" and output_format != "self-contained" and output_format != "sc" and output_format != "both":
+            _cli_eprint("Error: Unknown format: {output_format}")
+            _cli_eprint("Valid formats: native, smf, self-contained (sc), both")
+            return 1
+
+    if target != "" and not target.starts_with("baremetal-"):
+        # Route non-baremetal targets through the Rust frontend so wasm and
+        # full target triples share the same canonical build path.
+        return rt_cli_handle_compile(args)
+
+    # Use Pure Simple compiler driver for all compilation
+    return cli_compile_pure_simple(source_file, output_file, output_format, backend, verbose, release, low_memory)
+
+fn compile_baremetal(source_file: text, target: text, emit: text, output_file: text, verbose: bool) -> i64:
+    if verbose:
+        print "Compiling {source_file} for {target}"
+        print "  Emit: {emit}"
+        if output_file != "":
+            print "  Output: {output_file}"
+
+    _cli_eprint("[NOTE] Using shell-based baremetal build; direct BaremetalBuilder import not yet available")
+
+    val arch = if target == "baremetal-x86":
+        "i686"
+    elif target == "baremetal-x86_64":
+        "x86_64"
+    elif target == "baremetal-arm":
+        "armv7"
+    elif target == "baremetal-aarch64":
+        "aarch64"
+    elif target == "baremetal-riscv32":
+        "riscv32"
+    elif target == "baremetal-riscv64":
+        "riscv64"
+    else:
+        _cli_eprint("Error: Unknown bare-metal target: {target}")
+        _cli_eprint("Supported: baremetal-x86, baremetal-x86_64, baremetal-arm,")
+        _cli_eprint("           baremetal-aarch64, baremetal-riscv32, baremetal-riscv64")
+        return 1
+
+    if not _cli_dir_create_impl("build/baremetal", true):
+        _cli_eprint("Error: Failed to create build/baremetal directory")
+        return 1
+
+    val target_triple = arch + "-unknown-none"
+
+    if verbose:
+        print "Compiling Simple -> LLVM IR (pure Simple compiler)..."
+        print "  Target triple: {target_triple}"
+
+    val (llvm_ir, compile_err, compile_exit) = rt_compile_to_llvm_ir(source_file, target_triple, true)
+
+    if compile_exit != 0 or llvm_ir == "":
+        _cli_eprint("Error: LLVM IR generation failed")
+        if compile_err != "":
+            _cli_eprint(compile_err)
+        return 1
+
+    # Keep bootstrap-safe: avoid nested method calls on str/text
+    val base_name = "baremetal_stub"
+    val ir_file = "build/baremetal/{base_name}.ll"
+    if not _cli_file_write_impl(ir_file, llvm_ir):
+        _cli_eprint("Error: Failed to write LLVM IR to {ir_file}")
+        return 1
+
+    if verbose:
+        print "  Generated: {ir_file}"
+
+    if emit == "llvm-ir":
+        if output_file != "":
+            if not _cli_file_copy_impl(ir_file, output_file):
+                _cli_eprint("Error: Failed to copy to {output_file}")
+                return 1
+            print "Output: {output_file}"
+        else:
+            print "Output: {ir_file}"
+        return 0
+
+    if verbose:
+        print "Compiling LLVM IR -> Object file..."
+
+    val obj_file = "build/baremetal/{base_name}.o"
+    val (llc_out, llc_err, llc_exit) = _cli_process_run("llc", [
+        "--filetype=obj",
+        "--relocation-model=static",
+        ir_file,
+        "-o", obj_file
+    ])
+
+    if llc_exit != 0:
+        _cli_eprint("Error: llc compilation failed")
+        _cli_eprint(llc_err)
+        return 1
+
+    if verbose:
+        print "  Generated: {obj_file}"
+
+    if emit == "object":
+        if output_file != "":
+            if not _cli_file_copy_impl(obj_file, output_file):
+                _cli_eprint("Error: Failed to copy to {output_file}")
+                return 1
+            print "Output: {output_file}"
+        else:
+            print "Output: {obj_file}"
+        return 0
+
+    if verbose:
+        print "Linking Object -> ELF binary..."
+
+    val elf_file = if output_file != "":
+        output_file
+    else:
+        "build/baremetal/kernel.elf"
+
+    val linker_script = "build/baremetal/linker.ld"
+    if not _cli_file_exists_impl(linker_script):
+        val fmt = if arch == "i686": "elf32-i386" else: "elf64-x86-64"
+        val script = "OUTPUT_FORMAT(" + fmt + ")\nENTRY(_start)\nSECTIONS {\n  . = 0x00100000;\n  .text : { *(.text*) }\n  .rodata : { *(.rodata*) }\n  .data : { *(.data*) }\n  .bss : { *(.bss*) *(COMMON) }\n}\n"
+        if not _cli_file_write_impl(linker_script, script):
+            _cli_eprint("Error: Failed to write linker script {linker_script}")
+            return 1
+
+    val (ld_out, ld_err, ld_exit) = _cli_process_run("ld", [
+        "-T", linker_script,
+        "-nostdlib",
+        "--entry=_start",
+        # Force 32-bit output for i686 target
+        "-m", if arch == "i686": "elf_i386" else: "elf64_x86_64",
+        obj_file,
+        "-o", elf_file
+    ])
+
+    if ld_exit != 0:
+        _cli_eprint("Error: Linking failed")
+        _cli_eprint(ld_err)
+        _cli_eprint("")
+        _cli_eprint("Note: Linker script should be at: {linker_script}")
+        _cli_eprint("Generate it using: simple linker-gen resources/boards/qemu_x86.sdn")
+        return 1
+
+    if verbose:
+        print "  Generated: {elf_file}"
+
+    print "Success: {elf_file}"
+    return 0
+
+# ============================================================================
+# SimpleOS Target Compilation
+# ============================================================================
+
+fn compile_simpleos(source_file: text, target: text, emit: text, output_file: text, verbose: bool) -> i64:
+    """Compile for SimpleOS targets (bare-metal ELF with SimpleOS conventions).
+
+    Supported target strings:
+    - x86_64-simpleos, x86_64-unknown-simpleos, simpleos  -> x86_64-unknown-none-elf
+    """
+    # Parse architecture from target string
+    val arch = if target == "simpleos" or target == "x86_64-simpleos" or target == "x86_64-unknown-simpleos":
+        "x86_64"
+    else:
+        _cli_eprint("Error: Unknown SimpleOS target: {target}")
+        _cli_eprint("Supported: x86_64-simpleos, x86_64-unknown-simpleos, simpleos")
+        return 1
+
+    val target_triple = "{arch}-unknown-none-elf"
+
+    if verbose:
+        print "Compiling {source_file} for SimpleOS ({target})"
+        print "  Architecture: {arch}"
+        print "  Target triple: {target_triple}"
+        print "  Emit: {emit}"
+        if output_file != "":
+            print "  Output: {output_file}"
+
+    if not _cli_dir_create_impl("build/simpleos", true):
+        _cli_eprint("Error: Failed to create build/simpleos directory")
+        return 1
+
+    val (llvm_ir, compile_err, compile_exit) = rt_compile_to_llvm_ir(source_file, target_triple, true)
+
+    if compile_exit != 0 or llvm_ir == "":
+        _cli_eprint("Error: LLVM IR generation failed for SimpleOS target")
+        if compile_err != "":
+            _cli_eprint(compile_err)
+        return 1
+
+    val base_name = "simpleos_kernel"
+    val ir_file = "build/simpleos/{base_name}.ll"
+    if not _cli_file_write_impl(ir_file, llvm_ir):
+        _cli_eprint("Error: Failed to write LLVM IR to {ir_file}")
+        return 1
+
+    if verbose:
+        print "  Generated: {ir_file}"
+
+    if emit == "llvm-ir":
+        if output_file != "":
+            if not _cli_file_copy_impl(ir_file, output_file):
+                _cli_eprint("Error: Failed to copy to {output_file}")
+                return 1
+            print "Output: {output_file}"
+        else:
+            print "Output: {ir_file}"
+        return 0
+
+    if verbose:
+        print "Compiling LLVM IR -> Object file..."
+
+    val obj_file = "build/simpleos/{base_name}.o"
+    val (llc_out, llc_err, llc_exit) = _cli_process_run("llc", [
+        "--filetype=obj",
+        "--relocation-model=static",
+        ir_file,
+        "-o", obj_file
+    ])
+
+    if llc_exit != 0:
+        _cli_eprint("Error: llc compilation failed")
+        _cli_eprint(llc_err)
+        return 1
+
+    if verbose:
+        print "  Generated: {obj_file}"
+
+    if emit == "object":
+        if output_file != "":
+            if not _cli_file_copy_impl(obj_file, output_file):
+                _cli_eprint("Error: Failed to copy to {output_file}")
+                return 1
+            print "Output: {output_file}"
+        else:
+            print "Output: {obj_file}"
+        return 0
+
+    if verbose:
+        print "Linking Object -> ELF binary (SimpleOS)..."
+
+    val elf_file = if output_file != "":
+        output_file
+    else:
+        "build/simpleos/kernel.elf"
+
+    # Use ld.lld for SimpleOS (matches toolchain_simpleos_x86_64 in llvm_cross_target.spl)
+    val linker = "ld.lld"
+    val (ld_out, ld_err, ld_exit) = _cli_process_run(linker, [
+        "--no-relax",
+        "-nostdlib",
+        "--entry=_start",
+        obj_file,
+        "-o", elf_file
+    ])
+
+    if ld_exit != 0:
+        # Fallback to ld if ld.lld is not available
+        val (ld2_out, ld2_err, ld2_exit) = _cli_process_run("ld", [
+            "-nostdlib",
+            "--entry=_start",
+            obj_file,
+            "-o", elf_file
+        ])
+        if ld2_exit != 0:
+            _cli_eprint("Error: Linking failed for SimpleOS target")
+            _cli_eprint(ld2_err)
+            _cli_eprint("")
+            _cli_eprint("Install: apt install lld (provides ld.lld)")
+            return 1
+
+    if verbose:
+        print "  Generated: {elf_file}"
+
+    print "Success: {elf_file}"
+    return 0
+
+# ============================================================================
+# Advanced Features
+# ============================================================================
+
+fn compile_c_backend(source_file: text, output_file: text, verbose: bool) -> i64:
+    var out = output_file
+    if out == "":
+        out = source_file.replace(".spl", ".cpp")
+
+    if verbose:
+        print "Compiling {source_file} to C++20 (MIR C backend)"
+        print "  Output: {out}"
+
+    val aot_result = aot_c_file(source_file, out)
+    match aot_result:
+        case CompileResult.Success(_):
+            print "Output: {out}"
+            print "Build with: clang -std=gnu11 -O2 {out} src/runtime/runtime.c -I src/runtime -o output"
+            return 0
+        case _:
+            val errors = aot_result.get_errors()
+            for err in errors:
+                _cli_eprint("error: {err}")
+            _cli_eprint("Error: C backend generation failed")
+            return 1
+
+fn compile_cuda(source_file: text, output_file: text, verbose: bool) -> i64:
+    var out = output_file
+    if out == "":
+        out = source_file.replace(".spl", ".ptx")
+
+    if verbose:
+        print "Compiling {source_file} to PTX (CUDA backend)"
+        print "  Output: {out}"
+
+    val aot_result = aot_cuda_file(source_file, out)
+    match aot_result:
+        case CompileResult.Success(_):
+            print "Output: {out}"
+            return 0
+        case _:
+            val errors = aot_result.get_errors()
+            for err in errors:
+                _cli_eprint("error: {err}")
+            _cli_eprint("Error: CUDA/PTX compilation failed")
+            return 1
+
+fn compile_vhdl(source_file: text, output_file: text, verbose: bool) -> i64:
+    var out = output_file
+    if out == "":
+        out = source_file.replace(".spl", ".vhd")
+
+    if verbose:
+        print "Compiling {source_file} to VHDL"
+        print "  Output: {out}"
+
+    val aot_result = aot_vhdl_file(source_file, out)
+    match aot_result:
+        case CompileResult.Success(_):
+            print "Output: {out}"
+            return 0
+        case _:
+            val errors = aot_result.get_errors()
+            for err in errors:
+                _cli_eprint("error: {err}")
+            _cli_eprint("Error: VHDL compilation failed")
+            return 1
+
+# Native build: compile entire project to native binary
+# Supports --backend=llvm-lib for pure Simple LLVM compilation (Stage 3 bootstrap),
+# otherwise delegates to Rust NativeProjectBuilder FFI.
+fn cli_native_build(args: [text]) -> i64:
+    # Check for --backend=llvm-lib flag to use pure Simple LLVM pipeline
+    var backend = ""
+    var backend_explicit = false
+    var i = 0
+    while i < args.len():
+        val arg = args[i]
+        if arg.starts_with("--backend="):
+            backend = arg.substring(10)
+            backend_explicit = true
+        elif arg == "--backend" and i + 1 < args.len():
+            i = i + 1
+            backend = args[i]
+            backend_explicit = true
+        i = i + 1
+
+    if backend_explicit and (backend == "llvm-lib" or backend == "llvmlib"):
+        # Pure Simple path: use CompilerDriver with LLVM lib backend
+        # Parse native-build args: --source, --entry, -o, --strip, --no-mangle, etc.
+        var entry_point = ""
+        var output = "a.out"
+        var verbose = false
+        var strip = false
+        var emit_smf = false
+        var source_dirs: [text] = []
+        var j = 0
+        # Skip "native-build" command name
+        if args.len() > 0 and args[0] == "native-build":
+            j = 1
+        while j < args.len():
+            val a = args[j]
+            if a.starts_with("--entry"):
+                if a.contains("="):
+                    entry_point = a.substring(a.index_of("=").unwrap() + 1)
+                elif j + 1 < args.len():
+                    j = j + 1
+                    entry_point = args[j]
+            elif a == "--source":
+                if j + 1 < args.len():
+                    j = j + 1
+                    source_dirs = source_dirs.push(args[j])
+            elif a.starts_with("--source="):
+                source_dirs = source_dirs.push(a.substring(9))
+            elif a == "-o":
+                if j + 1 < args.len():
+                    j = j + 1
+                    output = args[j]
+            elif a.starts_with("-o"):
+                output = a.substring(2)
+            elif a == "--verbose" or a == "-v":
+                verbose = true
+            elif a == "--strip":
+                strip = true
+            elif a == "--emit-smf":
+                emit_smf = true
+            elif a == "--no-mangle":
+                pass  # Accepted but not used in llvm-lib path
+            elif a == "--clean":
+                pass  # Accepted but not used in llvm-lib path
+            elif a.starts_with("--backend=") or a == "--backend":
+                if a == "--backend" and j + 1 < args.len():
+                    j = j + 1
+                # Already handled above
+            elif not a.starts_with("-") and entry_point == "":
+                entry_point = a
+            j = j + 1
+
+        if entry_point == "":
+            _cli_eprint("Error: No entry point specified for llvm-lib backend")
+            _cli_eprint("Usage: simple native-build --backend=llvm-lib --entry <file.spl> -o <output> [--source <dir>]...")
+            return 1
+
+        if verbose:
+            _cli_eprint("[native-build] Using pure Simple LLVM lib backend")
+            _cli_eprint("[native-build] Entry: {entry_point}, Output: {output}")
+            if source_dirs.len() > 0:
+                _cli_eprint("[native-build] Source dirs: {source_dirs}")
+
+        val result = if emit_smf:
+            # --emit-smf: produce native binary + SMF cache file
+            use compiler.driver.driver_types.{CompileOptions, CompileMode, OutputFormat}
+            use compiler.driver.driver.{CompilerDriver}
+            var options = CompileOptions.default()
+            options.input_files = if source_dirs.len() > 0: source_dirs + [entry_point] else: [entry_point]
+            options.mode = CompileMode.Aot
+            options.output_file = Some(output)
+            options.output_format = OutputFormat.Both
+            options.backend = "llvm-lib"
+            options.release = true
+            options.optimize = true
+            options.opt_level = 3
+            val driver = CompilerDriver.create(options)
+            CompilerDriver.run_compile(driver)
+        elif source_dirs.len() > 0:
+            aot_native_project_with_backend(source_dirs, entry_point, output, "llvm-lib", strip)
+        else:
+            aot_native_file_with_backend(entry_point, output, "llvm-lib")
+        match result:
+            case CompileResult.Success(_):
+                if verbose:
+                    _cli_eprint("[native-build] Build successful: {output}")
+                return 0
+            case _:
+                val errors = result.get_errors()
+                for err in errors:
+                    _cli_eprint("error: {err}")
+                return 1
+    else:
+        return rt_native_build(args)

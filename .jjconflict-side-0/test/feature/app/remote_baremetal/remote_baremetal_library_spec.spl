@@ -1,0 +1,462 @@
+"""
+# Remote Baremetal Library Checks
+
+**Feature IDs:** #RBLB-001
+**Category:** Tooling
+**Difficulty:** 3/5
+**Status:** Implemented
+**Requirements:** N/A
+**Plan:** [doc/03_plan/trace32_x11_container_recovery_2026-03-12.md](doc/03_plan/trace32_x11_container_recovery_2026-03-12.md)
+**Research:** [doc/01_research/remote_interpreter_failures_2026-03-12.md](doc/01_research/remote_interpreter_failures_2026-03-12.md)
+
+## Overview
+
+Checks the library surface that should remain usable for the
+`interpreter(remote(baremetal(riscv32)))` and `interpreter(remote(baremetal(arm)))`
+lanes even when full baremetal ELF generation is not yet available from Pure Simple.
+
+The spec covers:
+
+- noalloc allocator semantics through `BumpAllocator`
+- fixed-capacity collection semantics through `FixedArray`, `FixedMap`, and
+  `FixedSet`
+- noalloc async base behavior through `NoallocScheduler` and `TimerFuture`
+- semihost shortened-print readiness for QEMU RISC-V and QEMU ARM with explicit
+  blocked reasons when the host or repo is not ready for a real end-to-end run
+- ARM Cortex-M vector table, NVIC structure, and semihost constants
+- ARM-specific semihost call opcodes (BKPT/SVC) and ADP stopped reason codes
+- semihost transport strategy constants and configuration
+
+This spec is intentionally host-aware for the semihost shortened-print lane.
+It reports `skip:` or `blocked:` when custom QEMU support, fixture ELFs, or the
+Pure Simple baremetal compiler path are still missing.
+
+## Syntax
+
+```simple
+var allocator = BumpAllocator(base: 0x20000000, size: 64, offset: 0, allocated: 0)
+val future = timer_after(2)
+val status = qemu_riscv32_semihost_short_print_status()
+val arm_status = qemu_arm_semihost_short_print_status()
+```
+
+## Examples
+
+```simple
+expect(status_is_acceptable(status)).to_equal(true)
+expect(status_is_acceptable(arm_status)).to_equal(true)
+expect(future.poll_timer()).to_equal(0)
+expect(future.poll_timer()).to_equal(1)
+```
+"""
+
+use std.io_runtime.{shell, file_exists, file_read}
+use std.nogc_async_mut_noalloc.baremetal.allocator.BumpAllocator
+use std.nogc_async_mut_noalloc.collections.fixed_array.{FixedArray, fixed_array_8}
+use std.nogc_async_mut_noalloc.collections.fixed_map.FixedMap
+use std.nogc_async_mut_noalloc.collections.fixed_set.FixedSet
+use std.nogc_async_mut_noalloc.async.scheduler.{NoallocScheduler, MAX_TASKS}
+use std.nogc_async_mut_noalloc.async.timer.{timer_now, timer_elapsed, timer_after}
+use std.nogc_async_mut_noalloc.log.targets.{
+    TARGET_DEVICE,
+    TARGET_SEMIHOST,
+    TARGET_HOST_FILE,
+    target_semihost_write,
+    target_semihost_write_h,
+    target_semihost_write_h1,
+    target_semihost_write_h2
+}
+use std.nogc_async_mut_noalloc.baremetal.system_api.{
+    SYS_OPEN, SYS_CLOSE, SYS_WRITEC, SYS_WRITE0, SYS_WRITE,
+    SYS_READ, SYS_EXIT, SYS_EXIT_EXTENDED,
+    SYS_WRITE_HANDLE, SYS_WRITE_HANDLE_P1, SYS_WRITE_HANDLE_P2,
+    SYS_WRITE_HANDLE_P3, SYS_WRITE_HANDLE_PN,
+    FMT_NONE, FMT_INT32, FMT_FLOAT64, FMT_TEXT, FMT_HEX32,
+    HANDLE_TEST_START, HANDLE_TEST_PASS, HANDLE_TEST_FAIL, HANDLE_TEST_END,
+    MODE_READ, MODE_WRITE
+}
+use std.nogc_async_mut_noalloc.baremetal.arm.nvic.{
+    VectorTable, ExceptionVector, NvicRegisters
+}
+use std.nogc_async_mut_noalloc.baremetal.semihost_transport.{
+    TRANSPORT_WRITEC, TRANSPORT_WRITE0, TRANSPORT_WRITE,
+    TRANSPORT_BATCH_N, TRANSPORT_BUFFERED, TRANSPORT_UART,
+    TRANSPORT_RAW_BINARY, TRANSPORT_INTERNED,
+    CAP_WRITEC, CAP_WRITE0, CAP_WRITE, CAP_UART, CAP_INTERNED,
+    RAW_BINARY_MAGIC
+}
+use std.nogc_async_mut_noalloc.baremetal.semihost_config.{
+    SemihostTransportConfig, semihost_config_default
+}
+
+fn command_available(cmd: text) -> bool:
+    val result = shell("command -v {cmd} >/dev/null 2>&1")
+    result.exit_code == 0
+
+fn status_is_acceptable(status: text) -> bool:
+    status == "ok" or status.starts_with("blocked:") or status.starts_with("skip:")
+
+fn custom_qemu_riscv32_path() -> text:
+    val path = "resources/qemu/bin/qemu-system-riscv32-simple"
+    if file_exists(path):
+        return path
+    ""
+
+fn baremetal_builder_has_real_compile_path() -> bool:
+    if not file_exists("src/compiler/80.driver/build/baremetal.spl"):
+        return false
+    val content = file_read("src/compiler/80.driver/build/baremetal.spl")
+    not content.contains("Compilation not yet implemented - needs Simple compiler with bare-metal backend")
+
+fn interned_semihost_fixture_path() -> text:
+    val fixture = "examples/09_embedded/baremetal/baremetal/hello_riscv32_interned.elf"
+    if file_exists(fixture):
+        return fixture
+    ""
+
+# ARM Cortex-M constants (from startup.spl, avoiding transitive fn-as-u32 casts)
+val ARM_SRAM_BASE: u32 = 0x20000000
+val ARM_SRAM_SIZE: u32 = 128 * 1024
+val ARM_STACK_TOP: u32 = ARM_SRAM_BASE + ARM_SRAM_SIZE
+
+fn arm_create_vector_table() -> VectorTable:
+    VectorTable(
+        initial_sp: ARM_STACK_TOP,
+        reset: 0x08000100,
+        nmi: 0x08000200,
+        hard_fault: 0x08000300,
+        mem_manage: 0x08000400,
+        bus_fault: 0x08000500,
+        usage_fault: 0x08000600,
+        reserved1: 0,
+        reserved2: 0,
+        reserved3: 0,
+        reserved4: 0,
+        svcall: 0x08000700,
+        debug_mon: 0x08000800,
+        reserved5: 0,
+        pendsv: 0x08000900,
+        systick: 0x08000A00
+    )
+
+fn arm_check_vector_alignment(addr: u32) -> bool:
+    (addr % 128) == 0
+
+fn arm_check_stack_alignment(sp: u32) -> bool:
+    (sp % 8) == 0
+
+fn arm_check_data_init(start_addr: u32, end_addr: u32) -> bool:
+    if start_addr < 0x20000000:
+        return false
+    if end_addr <= start_addr:
+        return false
+    if end_addr > 0x20100000:
+        return false
+    true
+
+fn arm_check_bss_init(start_addr: u32, end_addr: u32) -> bool:
+    if start_addr < 0x20000000:
+        return false
+    if end_addr <= start_addr:
+        return false
+    if end_addr > 0x20100000:
+        return false
+    true
+
+fn custom_qemu_arm_path() -> text:
+    val path = "resources/qemu/bin/qemu-system-arm-simple"
+    if file_exists(path):
+        return path
+    ""
+
+fn interned_semihost_arm_fixture_path() -> text:
+    val fixture = "examples/09_embedded/baremetal/baremetal/hello_arm_interned.elf"
+    if file_exists(fixture):
+        return fixture
+    ""
+
+fn qemu_arm_semihost_short_print_status() -> text:
+    if not command_available("qemu-system-arm"):
+        return "skip: qemu-system-arm unavailable"
+
+    val custom_qemu = custom_qemu_arm_path()
+    if custom_qemu == "":
+        return "blocked: custom qemu-system-arm-simple missing"
+
+    if not baremetal_builder_has_real_compile_path():
+        return "blocked: simple baremetal arm compiler backend not implemented"
+
+    val fixture = interned_semihost_arm_fixture_path()
+    if fixture == "":
+        return "blocked: missing interned arm elf fixture"
+
+    val run = shell("timeout 10 '{custom_qemu}' -M lm3s6965evb -kernel '{fixture}' -nographic -semihosting-config enable=on,target=native 2>&1")
+    val output = (run.stdout + run.stderr).trim()
+    if run.exit_code == 0 and output != "":
+        return "ok"
+    if output == "":
+        return "blocked: custom qemu produced no semihost output"
+    "blocked: {output}"
+
+fn qemu_riscv32_semihost_short_print_status() -> text:
+    if not command_available("qemu-system-riscv32"):
+        return "skip: qemu-system-riscv32 unavailable"
+
+    val custom_qemu = custom_qemu_riscv32_path()
+    if custom_qemu == "":
+        return "blocked: custom qemu-system-riscv32-simple missing"
+
+    if not baremetal_builder_has_real_compile_path():
+        return "blocked: simple baremetal riscv compiler backend not implemented"
+
+    val fixture = interned_semihost_fixture_path()
+    if fixture == "":
+        return "blocked: missing interned riscv32 elf fixture"
+
+    val run = shell("timeout 10 '{custom_qemu}' -M virt -bios none -kernel '{fixture}' -nographic -semihosting-config enable=on,target=native 2>&1")
+    val output = (run.stdout + run.stderr).trim()
+    if run.exit_code == 0 and output != "":
+        return "ok"
+    if output == "":
+        return "blocked: custom qemu produced no semihost output"
+    "blocked: {output}"
+
+describe "Remote baremetal library readiness":
+
+    context "allocator":
+        it "supports bump allocation alignment and reset semantics":
+            var allocator = BumpAllocator(base: 0x20000000, size: 64, offset: 0, allocated: 0)
+
+            val first = allocator.alloc(5)
+            expect(first).to_equal(0x20000000)
+            expect(allocator.total_allocated()).to_equal(8)
+            expect(allocator.remaining()).to_equal(56)
+
+            val second = allocator.alloc_aligned(4, 16)
+            expect(second).to_equal(0x20000010)
+            expect(allocator.total_allocated()).to_equal(24)
+            expect(allocator.remaining()).to_equal(40)
+
+            allocator.reset()
+            expect(allocator.total_allocated()).to_equal(0)
+            expect(allocator.remaining()).to_equal(64)
+
+    context "collections":
+        it "supports fixed array push remove and factory sizing":
+            val arr = FixedArray.new(3)
+            expect(arr.push(10)).to_equal(true)
+            expect(arr.push(20)).to_equal(true)
+            expect(arr.push(30)).to_equal(true)
+            expect(arr.push(40)).to_equal(false)
+            expect(arr.remove(1)).to_equal(20)
+            expect(arr.size()).to_equal(2)
+            expect(arr.get(0)).to_equal(10)
+            expect(arr.get(1)).to_equal(30)
+
+            val arr8 = fixed_array_8()
+            expect(arr8.capacity).to_equal(8)
+
+        it "supports fixed map put update remove and probe continuity":
+            val map = FixedMap.new(8)
+            expect(map.put(1, 10)).to_equal(true)
+            expect(map.put(9, 90)).to_equal(true)
+            expect(map.put(1, 11)).to_equal(true)
+            expect(map.get(1)).to_equal(11)
+            expect(map.get(9)).to_equal(90)
+            expect(map.contains(9)).to_equal(true)
+            expect(map.remove(1)).to_equal(true)
+            expect(map.contains(1)).to_equal(false)
+            expect(map.get(9)).to_equal(90)
+
+        it "supports fixed set add duplicate remove and capacity tracking":
+            val set = FixedSet.new(3)
+            expect(set.add(5)).to_equal(true)
+            expect(set.add(7)).to_equal(true)
+            expect(set.add(5)).to_equal(true)
+            expect(set.size()).to_equal(2)
+            expect(set.contains(7)).to_equal(true)
+            expect(set.remove(5)).to_equal(true)
+            expect(set.contains(5)).to_equal(false)
+            expect(set.capacity()).to_equal(3)
+
+    context "async":
+        it "tracks cooperative scheduler task lifecycle":
+            val sched = NoallocScheduler.new()
+            expect(sched.is_idle()).to_equal(true)
+
+            val task0 = sched.spawn(100, 0)
+            val task1 = sched.spawn(200, 1)
+            expect(task0).to_equal(0)
+            expect(task1).to_equal(1)
+            expect(sched.task_count()).to_equal(2)
+            expect(MAX_TASKS).to_equal(16)
+
+            sched.complete_task(task1, 77)
+            expect(sched.is_task_complete(task1)).to_equal(true)
+            expect(sched.task_result(task1)).to_equal(77)
+            expect(sched.has_active_incomplete()).to_equal(true)
+
+            sched.complete_task(task0, 33)
+            expect(sched.count_completed()).to_equal(2)
+
+            sched.cleanup_completed()
+            expect(sched.task_count()).to_equal(0)
+            expect(sched.is_idle()).to_equal(true)
+
+        it "advances timer futures to readiness":
+            val start = timer_now()
+            val elapsed = timer_elapsed(start)
+            expect(elapsed).to_be_greater_than(0)
+
+            val future = timer_after(2)
+            expect(future.poll_timer()).to_equal(0)
+            expect(future.poll_timer()).to_equal(1)
+
+    context "semihost shortened print":
+        it "keeps semihost print opcodes stable":
+            expect(TARGET_DEVICE).to_equal(1)
+            expect(TARGET_SEMIHOST).to_equal(2)
+            expect(TARGET_HOST_FILE).to_equal(4)
+            expect(SYS_WRITE_HANDLE).to_equal(0x100)
+            expect(SYS_WRITE_HANDLE_P1).to_equal(0x101)
+            expect(SYS_WRITE_HANDLE_P2).to_equal(0x102)
+
+        it "keeps interpreter stubs callable while qemu support is host aware":
+            target_semihost_write("remote baremetal semihost smoke")
+            target_semihost_write_h(42)
+            target_semihost_write_h1(42, 7)
+            target_semihost_write_h2(42, 7, 9)
+
+            val status = qemu_riscv32_semihost_short_print_status()
+            expect(status_is_acceptable(status)).to_equal(true)
+
+    context "ARM semihost":
+        it "keeps standard semihosting opcodes stable":
+            expect(SYS_OPEN).to_equal(0x01)
+            expect(SYS_CLOSE).to_equal(0x02)
+            expect(SYS_WRITEC).to_equal(0x03)
+            expect(SYS_WRITE0).to_equal(0x04)
+            expect(SYS_WRITE).to_equal(0x05)
+            expect(SYS_READ).to_equal(0x06)
+            expect(SYS_EXIT).to_equal(0x18)
+            expect(SYS_EXIT_EXTENDED).to_equal(0x20)
+
+        it "keeps interned print extension opcodes stable":
+            expect(SYS_WRITE_HANDLE).to_equal(0x100)
+            expect(SYS_WRITE_HANDLE_P1).to_equal(0x101)
+            expect(SYS_WRITE_HANDLE_P2).to_equal(0x102)
+            expect(SYS_WRITE_HANDLE_P3).to_equal(0x103)
+            expect(SYS_WRITE_HANDLE_PN).to_equal(0x104)
+
+        it "keeps format type IDs and test protocol handles stable":
+            expect(FMT_NONE).to_equal(0)
+            expect(FMT_INT32).to_equal(3)
+            expect(FMT_FLOAT64).to_equal(10)
+            expect(FMT_TEXT).to_equal(19)
+            expect(FMT_HEX32).to_equal(15)
+            expect(HANDLE_TEST_START).to_equal(0x7FFF0001)
+            expect(HANDLE_TEST_PASS).to_equal(0x7FFF0002)
+            expect(HANDLE_TEST_FAIL).to_equal(0x7FFF0003)
+            expect(HANDLE_TEST_END).to_equal(0x7FFF0004)
+
+        it "keeps file IO mode constants stable":
+            expect(MODE_READ).to_equal(0)
+            expect(MODE_WRITE).to_equal(4)
+
+        it "keeps ARM QEMU semihost status host aware":
+            val arm_status = qemu_arm_semihost_short_print_status()
+            expect(status_is_acceptable(arm_status)).to_equal(true)
+
+    context "ARM Cortex-M vector table":
+        it "validates vector table structure and alignment":
+            val vt = arm_create_vector_table()
+            expect(vt.initial_sp).to_equal(ARM_STACK_TOP)
+            expect(vt.reset).to_equal(0x08000100)
+            expect(vt.nmi).to_equal(0x08000200)
+            expect(vt.hard_fault).to_equal(0x08000300)
+            expect(vt.reserved1).to_equal(0)
+            expect(vt.reserved2).to_equal(0)
+            expect(vt.reserved3).to_equal(0)
+            expect(vt.reserved4).to_equal(0)
+            expect(vt.reserved5).to_equal(0)
+
+        it "checks Cortex-M exception count and stack alignment":
+            expect(arm_check_stack_alignment(ARM_STACK_TOP)).to_equal(true)
+            expect(arm_check_stack_alignment(0x20000004)).to_equal(false)
+            expect(arm_check_vector_alignment(0)).to_equal(true)
+            expect(arm_check_vector_alignment(128)).to_equal(true)
+            expect(arm_check_vector_alignment(64)).to_equal(false)
+
+        it "validates data and bss section address ranges":
+            expect(arm_check_data_init(0x20000000, 0x20001000)).to_equal(true)
+            expect(arm_check_data_init(0x08000000, 0x08001000)).to_equal(false)
+            expect(arm_check_bss_init(0x20001000, 0x20002000)).to_equal(true)
+            expect(arm_check_bss_init(0x10000000, 0x10001000)).to_equal(false)
+
+    context "ARM NVIC":
+        it "supports empty vector table construction":
+            val empty_vt = VectorTable(
+                initial_sp: 0x20020000, reset: 0, nmi: 0,
+                hard_fault: 0, mem_manage: 0, bus_fault: 0,
+                usage_fault: 0, reserved1: 0, reserved2: 0,
+                reserved3: 0, reserved4: 0, svcall: 0,
+                debug_mon: 0, reserved5: 0, pendsv: 0, systick: 0
+            )
+            expect(empty_vt.initial_sp).to_equal(0x20020000)
+            expect(empty_vt.reset).to_equal(0)
+            expect(empty_vt.nmi).to_equal(0)
+            expect(empty_vt.hard_fault).to_equal(0)
+
+        it "supports exception vector enumeration":
+            val reset = ExceptionVector.Reset
+            val nmi = ExceptionVector.Nmi
+            val hard_fault = ExceptionVector.HardFault
+            val systick = ExceptionVector.SysTick
+            expect(reset.to_i64()).to_equal(1)
+            expect(nmi.to_i64()).to_equal(2)
+            expect(hard_fault.to_i64()).to_equal(3)
+            expect(systick.to_i64()).to_equal(15)
+            expect(reset.name()).to_equal("Reset")
+            expect(nmi.name()).to_equal("NMI")
+            expect(hard_fault.name()).to_equal("HardFault")
+            expect(systick.name()).to_equal("SysTick")
+
+        it "supports NVIC register base addresses":
+            val nvic = NvicRegisters(
+                iser_base: 0xE000E100, icer_base: 0xE000E180,
+                ispr_base: 0xE000E200, icpr_base: 0xE000E280,
+                iabr_base: 0xE000E300, ipr_base: 0xE000E400
+            )
+            expect(nvic.iser_base).to_equal(0xE000E100)
+            expect(nvic.icer_base).to_equal(0xE000E180)
+            expect(nvic.ispr_base).to_equal(0xE000E200)
+            expect(nvic.icpr_base).to_equal(0xE000E280)
+            expect(nvic.iabr_base).to_equal(0xE000E300)
+            expect(nvic.ipr_base).to_equal(0xE000E400)
+
+    context "semihost transport":
+        it "keeps transport strategy constants stable":
+            expect(TRANSPORT_WRITEC).to_equal(1)
+            expect(TRANSPORT_WRITE0).to_equal(2)
+            expect(TRANSPORT_WRITE).to_equal(3)
+            expect(TRANSPORT_BATCH_N).to_equal(4)
+            expect(TRANSPORT_BUFFERED).to_equal(5)
+            expect(TRANSPORT_UART).to_equal(6)
+            expect(TRANSPORT_RAW_BINARY).to_equal(7)
+            expect(TRANSPORT_INTERNED).to_equal(8)
+
+        it "keeps capability detection constants stable":
+            expect(CAP_WRITEC).to_equal(1)
+            expect(CAP_WRITE0).to_equal(2)
+            expect(CAP_WRITE).to_equal(4)
+            expect(CAP_UART).to_equal(8)
+            expect(CAP_INTERNED).to_equal(16)
+            expect(RAW_BINARY_MAGIC).to_equal(0x53)
+
+        it "supports default transport configuration":
+            val config = semihost_config_default()
+            expect(config.preferred_transport).to_equal(1)
+            expect(config.batch_size).to_equal(3)
+            expect(config.buffer_capacity).to_equal(0)
+            expect(config.uart_base_addr).to_equal(0x10000000)
+            expect(config.auto_detect).to_equal(true)

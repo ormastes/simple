@@ -1,0 +1,532 @@
+# CSS filter pipeline — parsing and per-pixel application.
+# Parses the `filter` and `backdrop-filter` properties into a list of
+# FilterFunctions, then applies color transformations to RGBA pixels.
+# Spec: https://www.w3.org/TR/filter-effects-1/
+#
+# Supported filters:
+#   blur(radius), brightness(amount), contrast(amount), grayscale(amount),
+#   hue-rotate(angle), invert(amount), opacity(amount), saturate(amount),
+#   sepia(amount), drop-shadow(x y blur color)
+
+use std.common.color.types.{Color, from_rgb, from_rgba}
+use std.common.math.{MATH_PI, math_abs, math_max, math_min}
+use std.common.math3d.math_util.{sin3d, cos3d}
+use examples.browser.shared.logging.(Logger, LogLevel)
+use examples.browser.shared.named_colors.named_color_lookup
+
+# =========================================================================
+# FilterFunction — a single CSS filter function
+# =========================================================================
+
+enum FilterFunction:
+    Blur(radius: f64)
+    Brightness(amount: f64)
+    Contrast(amount: f64)
+    Grayscale(amount: f64)
+    HueRotate(angle: f64)
+    Invert(amount: f64)
+    Opacity(amount: f64)
+    Saturate(amount: f64)
+    Sepia(amount: f64)
+    DropShadow(x: f64, y: f64, blur: f64, color: Color)
+
+# =========================================================================
+# Parsing
+# =========================================================================
+
+fn parse_filter(value: text) -> [FilterFunction]:
+    """Parse a CSS filter property value into a list of FilterFunctions.
+
+    Examples:
+        'blur(5px) brightness(1.2)'
+        'grayscale(100%) sepia(50%)'
+        'drop-shadow(2px 4px 6px black)'
+        'none' -> empty list
+    """
+    val trimmed = value.trim()
+    if trimmed == "none" or trimmed.len() == 0:
+        return [FilterFunction]()
+
+    var filters = [FilterFunction]()
+    var i = 0
+    val len = trimmed.len()
+
+    while i < len:
+        # Skip whitespace
+        while i < len and trimmed.slice(i, i + 1) == " ":
+            i = i + 1
+        if i >= len:
+            break
+
+        # Read function name until '('
+        val name_start = i
+        while i < len and trimmed.slice(i, i + 1) != "(":
+            i = i + 1
+        if i >= len:
+            break
+
+        val fn_name = trimmed.slice(name_start, i).trim()
+        i = i + 1  # skip '('
+
+        # Read args until matching ')'
+        val args_start = i
+        var depth = 1
+        while i < len and depth > 0:
+            val ch = trimmed.slice(i, i + 1)
+            if ch == "(":
+                depth = depth + 1
+            else if ch == ")":
+                depth = depth - 1
+            i = i + 1
+
+        val args_str = trimmed.slice(args_start, i - 1)
+        val filter = _parse_single_filter(fn_name, args_str.trim())
+        if val f = filter:
+            filters.push(f)
+
+    filters
+
+# =========================================================================
+# Per-pixel color filter application
+# =========================================================================
+
+fn apply_color_filter(pixel: u32, filters: [FilterFunction]) -> u32:
+    """Apply a chain of color filters to a single RGBA pixel (0xRRGGBBAA).
+
+    Blur and drop-shadow are spatial filters — they are skipped here and
+    must be handled by the compositor. Only color-transformation filters
+    are applied.
+    """
+    var r = _extract_r(pixel).to_f64()
+    var g = _extract_g(pixel).to_f64()
+    var b = _extract_b(pixel).to_f64()
+    var a = _extract_a(pixel).to_f64()
+
+    for filter in filters:
+        match filter:
+            FilterFunction.Brightness(amount):
+                r = r * amount
+                g = g * amount
+                b = b * amount
+
+            FilterFunction.Contrast(amount):
+                r = _contrast(r, amount)
+                g = _contrast(g, amount)
+                b = _contrast(b, amount)
+
+            FilterFunction.Grayscale(amount):
+                val clamped = math_min(1.0, math_max(0.0, amount))
+                val lum = 0.2126 * r + 0.7152 * g + 0.0722 * b
+                r = r + (lum - r) * clamped
+                g = g + (lum - g) * clamped
+                b = b + (lum - b) * clamped
+
+            FilterFunction.HueRotate(angle):
+                val rad = angle * MATH_PI / 180.0
+                val c = cos3d(rad)
+                val s = sin3d(rad)
+                # Hue rotation matrix (preserving luminance)
+                val nr = r * (0.213 + 0.787 * c - 0.213 * s) + g * (0.715 - 0.715 * c - 0.715 * s) + b * (0.072 - 0.072 * c + 0.928 * s)
+                val ng = r * (0.213 - 0.213 * c + 0.143 * s) + g * (0.715 + 0.285 * c + 0.140 * s) + b * (0.072 - 0.072 * c - 0.283 * s)
+                val nb = r * (0.213 - 0.213 * c - 0.787 * s) + g * (0.715 - 0.715 * c + 0.715 * s) + b * (0.072 + 0.928 * c + 0.072 * s)
+                r = nr
+                g = ng
+                b = nb
+
+            FilterFunction.Invert(amount):
+                val clamped = math_min(1.0, math_max(0.0, amount))
+                r = r + (255.0 - 2.0 * r) * clamped
+                g = g + (255.0 - 2.0 * g) * clamped
+                b = b + (255.0 - 2.0 * b) * clamped
+
+            FilterFunction.Opacity(amount):
+                a = a * math_min(1.0, math_max(0.0, amount))
+
+            FilterFunction.Saturate(amount):
+                val lum = 0.2126 * r + 0.7152 * g + 0.0722 * b
+                r = lum + (r - lum) * amount
+                g = lum + (g - lum) * amount
+                b = lum + (b - lum) * amount
+
+            FilterFunction.Sepia(amount):
+                val clamped = math_min(1.0, math_max(0.0, amount))
+                val sr = r * 0.393 + g * 0.769 + b * 0.189
+                val sg = r * 0.349 + g * 0.686 + b * 0.168
+                val sb = r * 0.272 + g * 0.534 + b * 0.131
+                r = r + (sr - r) * clamped
+                g = g + (sg - g) * clamped
+                b = b + (sb - b) * clamped
+
+            FilterFunction.Blur(_):
+                # Spatial filter — no-op at per-pixel level
+                pass_dn
+
+            FilterFunction.DropShadow(_, _, _, _):
+                # Spatial filter — no-op at per-pixel level
+                pass_dn
+
+    _pack_rgba(_clamp_channel(r), _clamp_channel(g), _clamp_channel(b), _clamp_channel(a))
+
+fn apply_color_filter_to_color(color: Color, filters: [FilterFunction]) -> Color:
+    """Convenience: apply color filters to a Color value."""
+    val pixel = _color_to_u32(color)
+    val result = apply_color_filter(pixel, filters)
+    _u32_to_color(result)
+
+# =========================================================================
+# Internal: single filter parsing
+# =========================================================================
+
+fn _parse_single_filter(name: text, args: text) -> FilterFunction?:
+    if name == "blur":
+        val radius = _parse_length_value(args)
+        return FilterFunction.Blur(radius: radius)
+
+    if name == "brightness":
+        val amount = _parse_amount(args, 1.0)
+        return FilterFunction.Brightness(amount: amount)
+
+    if name == "contrast":
+        val amount = _parse_amount(args, 1.0)
+        return FilterFunction.Contrast(amount: amount)
+
+    if name == "grayscale":
+        val amount = _parse_amount(args, 0.0)
+        return FilterFunction.Grayscale(amount: amount)
+
+    if name == "hue-rotate":
+        val angle = _parse_angle_value(args)
+        return FilterFunction.HueRotate(angle: angle)
+
+    if name == "invert":
+        val amount = _parse_amount(args, 0.0)
+        return FilterFunction.Invert(amount: amount)
+
+    if name == "opacity":
+        val amount = _parse_amount(args, 1.0)
+        return FilterFunction.Opacity(amount: amount)
+
+    if name == "saturate":
+        val amount = _parse_amount(args, 1.0)
+        return FilterFunction.Saturate(amount: amount)
+
+    if name == "sepia":
+        val amount = _parse_amount(args, 0.0)
+        return FilterFunction.Sepia(amount: amount)
+
+    if name == "drop-shadow":
+        return _parse_drop_shadow(args)
+
+    nil
+
+fn _parse_drop_shadow(args: text) -> FilterFunction?:
+    """Parse drop-shadow(offset-x offset-y blur-radius color)."""
+    val tokens = _tokenize_by_space(args)
+    if tokens.len() < 2:
+        return nil
+
+    var numeric_values = [f64]()
+    var color_text = ""
+
+    for tok in tokens:
+        val t = tok.trim()
+        if _is_numeric(t):
+            numeric_values.push(_parse_length_value(t))
+        else:
+            if color_text.len() > 0:
+                color_text = color_text + " " + t
+            else:
+                color_text = t
+
+    if numeric_values.len() < 2:
+        return nil
+
+    val x = _safe_get_f64(numeric_values, 0, 0.0)
+    val y = _safe_get_f64(numeric_values, 1, 0.0)
+    val blur = _safe_get_f64(numeric_values, 2, 0.0)
+    val color = if color_text.len() > 0: _resolve_color(color_text) else: from_rgba(0, 0, 0, 255)
+
+    FilterFunction.DropShadow(x: x, y: y, blur: blur, color: color)
+
+fn _parse_amount(s: text, default_val: f64) -> f64:
+    """Parse a filter amount value. Percentages are converted to 0-1 range."""
+    val trimmed = s.trim()
+    if trimmed.len() == 0:
+        return default_val
+    if trimmed.ends_with("%"):
+        val num_str = trimmed.slice(0, trimmed.len() - 1)
+        val parsed = num_str.trim().to_f64()
+        if val v = parsed:
+            return v / 100.0
+        return default_val
+    val parsed = trimmed.to_f64()
+    if val v = parsed:
+        return v
+    default_val
+
+fn _parse_length_value(s: text) -> f64:
+    val trimmed = s.trim()
+    var num_str = trimmed
+    if trimmed.ends_with("px"):
+        num_str = trimmed.slice(0, trimmed.len() - 2)
+    else if trimmed.ends_with("em"):
+        num_str = trimmed.slice(0, trimmed.len() - 2)
+    else if trimmed.ends_with("rem"):
+        num_str = trimmed.slice(0, trimmed.len() - 3)
+    val parsed = num_str.trim().to_f64()
+    if val v = parsed:
+        return v
+    0.0
+
+fn _parse_angle_value(s: text) -> f64:
+    val trimmed = s.trim()
+    if trimmed.ends_with("deg"):
+        val num_str = trimmed.slice(0, trimmed.len() - 3)
+        val parsed = num_str.trim().to_f64()
+        if val v = parsed:
+            return v
+        return 0.0
+    if trimmed.ends_with("turn"):
+        val num_str = trimmed.slice(0, trimmed.len() - 4)
+        val parsed = num_str.trim().to_f64()
+        if val v = parsed:
+            return v * 360.0
+        return 0.0
+    if trimmed.ends_with("rad"):
+        val num_str = trimmed.slice(0, trimmed.len() - 3)
+        val parsed = num_str.trim().to_f64()
+        if val v = parsed:
+            return v * 180.0 / MATH_PI
+        return 0.0
+    val parsed = trimmed.to_f64()
+    if val v = parsed:
+        return v
+    0.0
+
+# =========================================================================
+# Pixel manipulation helpers (u32 RGBA: 0xRRGGBBAA)
+# =========================================================================
+
+fn _extract_r(pixel: u32) -> i64:
+    ((pixel / 16777216) % 256).to_i64()
+
+fn _extract_g(pixel: u32) -> i64:
+    ((pixel / 65536) % 256).to_i64()
+
+fn _extract_b(pixel: u32) -> i64:
+    ((pixel / 256) % 256).to_i64()
+
+fn _extract_a(pixel: u32) -> i64:
+    (pixel % 256).to_i64()
+
+fn _pack_rgba(r: i64, g: i64, b: i64, a: i64) -> u32:
+    val ru = r.to_u32()
+    val gu = g.to_u32()
+    val bu = b.to_u32()
+    val au = a.to_u32()
+    ru * 16777216 + gu * 65536 + bu * 256 + au
+
+fn _clamp_channel(v: f64) -> i64:
+    if v < 0.0:
+        return 0
+    if v > 255.0:
+        return 255
+    _f64_to_i64(v)
+
+fn _contrast(channel: f64, amount: f64) -> f64:
+    """Apply contrast adjustment: shift channel toward/away from 128."""
+    (channel - 128.0) * amount + 128.0
+
+fn _color_to_u32(color: Color) -> u32:
+    _pack_rgba(color.r, color.g, color.b, color.a)
+
+fn _u32_to_color(pixel: u32) -> Color:
+    from_rgba(_extract_r(pixel), _extract_g(pixel), _extract_b(pixel), _extract_a(pixel))
+
+# =========================================================================
+# Tokenization and color resolution
+# =========================================================================
+
+fn _tokenize_by_space(s: text) -> [text]:
+    """Split by spaces, keeping parenthesized groups together."""
+    var tokens = [text]()
+    var current = ""
+    var depth = 0
+    var i = 0
+    while i < s.len():
+        val ch = s.slice(i, i + 1)
+        if ch == "(":
+            depth = depth + 1
+            current = current + ch
+        else if ch == ")":
+            depth = depth - 1
+            current = current + ch
+        else if ch == " " and depth == 0:
+            if current.trim().len() > 0:
+                tokens.push(current.trim())
+            current = ""
+        else:
+            current = current + ch
+        i = i + 1
+    if current.trim().len() > 0:
+        tokens.push(current.trim())
+    tokens
+
+fn _is_numeric(s: text) -> bool:
+    val trimmed = s.trim()
+    if trimmed.len() == 0:
+        return false
+    val first = trimmed.slice(0, 1)
+    if first == "0" or first == "1" or first == "2" or first == "3":
+        return true
+    if first == "4" or first == "5" or first == "6" or first == "7":
+        return true
+    if first == "8" or first == "9" or first == "." or first == "-" or first == "+":
+        return true
+    false
+
+fn _resolve_color(s: text) -> Color:
+    val trimmed = s.trim()
+    if trimmed.len() == 0:
+        return from_rgba(0, 0, 0, 255)
+    if trimmed.starts_with("#"):
+        return _parse_hex(trimmed)
+    if trimmed.starts_with("rgb"):
+        return _parse_rgb_func(trimmed)
+    val named = named_color_lookup(trimmed)
+    if val c = named:
+        return c
+    from_rgba(0, 0, 0, 255)
+
+fn _parse_hex(s: text) -> Color:
+    if s.len() == 4:
+        val r = _hex_digit(s.slice(1, 2))
+        val g = _hex_digit(s.slice(2, 3))
+        val b = _hex_digit(s.slice(3, 4))
+        return from_rgb(r * 17, g * 17, b * 17)
+    if s.len() == 7:
+        val r = _hex_pair(s, 1)
+        val g = _hex_pair(s, 3)
+        val b = _hex_pair(s, 5)
+        return from_rgb(r, g, b)
+    if s.len() == 9:
+        val r = _hex_pair(s, 1)
+        val g = _hex_pair(s, 3)
+        val b = _hex_pair(s, 5)
+        val a = _hex_pair(s, 7)
+        return from_rgba(r, g, b, a)
+    from_rgba(0, 0, 0, 255)
+
+fn _parse_rgb_func(s: text) -> Color:
+    val paren_start = _find_char(s, "(")
+    val paren_end = _find_char(s, ")")
+    if paren_start < 0 or paren_end < 0:
+        return from_rgba(0, 0, 0, 255)
+    val inner = s.slice(paren_start + 1, paren_end)
+    val parts = _split_by_sep(inner, ",")
+    if parts.len() < 3:
+        return from_rgba(0, 0, 0, 255)
+    val r = _parse_component(parts[0])
+    val g = _parse_component(parts[1])
+    val b = _parse_component(parts[2])
+    if parts.len() >= 4:
+        val a_str = parts[3].trim()
+        val parsed = a_str.to_f64()
+        if val a_val = parsed:
+            val a = if a_val <= 1.0: _f64_to_i64(a_val * 255.0) else: _f64_to_i64(a_val)
+            return from_rgba(r, g, b, a)
+    from_rgb(r, g, b)
+
+fn _parse_component(s: text) -> i64:
+    val trimmed = s.trim()
+    if trimmed.ends_with("%"):
+        val num_str = trimmed.slice(0, trimmed.len() - 1)
+        val parsed = num_str.trim().to_f64()
+        if val v = parsed:
+            return _f64_to_i64(v * 255.0 / 100.0)
+        return 0
+    val parsed = trimmed.to_f64()
+    if val v = parsed:
+        return _f64_to_i64(v)
+    0
+
+fn _split_by_sep(s: text, sep: text) -> [text]:
+    var parts = [text]()
+    var current = ""
+    var i = 0
+    while i < s.len():
+        val ch = s.slice(i, i + 1)
+        if ch == sep:
+            parts.push(current.trim())
+            current = ""
+        else:
+            current = current + ch
+        i = i + 1
+    if current.trim().len() > 0:
+        parts.push(current.trim())
+    parts
+
+fn _find_char(s: text, ch: text) -> i64:
+    var i = 0
+    while i < s.len():
+        if s.slice(i, i + 1) == ch:
+            return i
+        i = i + 1
+    -1
+
+fn _hex_pair(s: text, offset: i64) -> i64:
+    _hex_digit(s.slice(offset, offset + 1)) * 16 + _hex_digit(s.slice(offset + 1, offset + 2))
+
+fn _hex_digit(ch: text) -> i64:
+    match ch:
+        "0": 0
+        "1": 1
+        "2": 2
+        "3": 3
+        "4": 4
+        "5": 5
+        "6": 6
+        "7": 7
+        "8": 8
+        "9": 9
+        "a": 10
+        "b": 11
+        "c": 12
+        "d": 13
+        "e": 14
+        "f": 15
+        "A": 10
+        "B": 11
+        "C": 12
+        "D": 13
+        "E": 14
+        "F": 15
+        _: 0
+
+fn _safe_get_f64(arr: [f64], index: i64, default_val: f64) -> f64:
+    if index >= 0 and index < arr.len():
+        val v = arr.get(index)
+        if val a = v:
+            return a
+    default_val
+
+fn _f64_to_i64(v: f64) -> i64:
+    if v >= 0.0:
+        return _positive_f64_to_i64(v)
+    val pos = _positive_f64_to_i64(-v)
+    -pos
+
+fn _positive_f64_to_i64(v: f64) -> i64:
+    if v <= 0.0:
+        return 0
+    if v >= 2147483647.0:
+        return 2147483647
+    var result = 0
+    var remaining = v
+    while remaining >= 1000.0:
+        result = result + 1000
+        remaining = remaining - 1000.0
+    while remaining >= 1.0:
+        result = result + 1
+        remaining = remaining - 1.0
+    result

@@ -1,0 +1,151 @@
+# Instruction Retirement Trace
+#
+# Records retired instruction trace for tandem checking between
+# fast, timing, and RTL execution modes (REQ-SIM-011).
+
+use timing.types.{SimMode}
+
+# ============================================================================
+# Retirement Record
+# ============================================================================
+
+struct RetirementRecord:
+    """One retired instruction in the trace log."""
+    sequence: i64           # Global sequence number
+    pc: i64                 # Instruction address
+    inst_word: i64          # Raw instruction word
+    rd: i64                 # Destination register (-1 for none)
+    rd_value: i64           # Value written to rd (0 if rd == -1)
+    mode: SimMode           # Execution mode that produced this record
+
+impl RetirementRecord:
+    static fn new(sequence: i64, pc: i64, inst_word: i64, rd: i64, rd_value: i64, mode: SimMode) -> RetirementRecord:
+        RetirementRecord(sequence: sequence, pc: pc, inst_word: inst_word, rd: rd, rd_value: rd_value, mode: mode)
+
+    fn to_text() -> text:
+        var out = "[{self.sequence}] pc=0x{self.pc} word=0x{self.inst_word}"
+        if self.rd >= 0:
+            out = out + " x{self.rd}=0x{self.rd_value}"
+        out = out + " ({self.mode.to_text()})"
+        out
+
+# ============================================================================
+# Trace Divergence
+# ============================================================================
+
+struct TraceDivergence:
+    """A detected divergence between two retirement traces."""
+    sequence: i64
+    pc_a: i64
+    pc_b: i64
+    rd_a: i64
+    rd_b: i64
+    value_a: i64
+    value_b: i64
+    mode_a: SimMode
+    mode_b: SimMode
+    reason: text
+
+impl TraceDivergence:
+    fn to_text() -> text:
+        "DIVERGENCE at seq={self.sequence}: {self.reason} [{self.mode_a.to_text()}] pc=0x{self.pc_a} vs [{self.mode_b.to_text()}] pc=0x{self.pc_b}"
+
+# ============================================================================
+# Retirement Trace
+# ============================================================================
+
+class RetirementTrace:
+    """Accumulates retirement records and supports tandem comparison."""
+    records: [RetirementRecord]
+    next_sequence: i64
+
+impl RetirementTrace:
+    static fn new() -> RetirementTrace:
+        RetirementTrace(records: [], next_sequence: 0)
+
+    me record(pc: i64, inst_word: i64, rd: i64, rd_value: i64, mode: SimMode) -> RetirementRecord:
+        """Record a retired instruction."""
+        val rec = RetirementRecord.new(self.next_sequence, pc, inst_word, rd, rd_value, mode)
+        self.records.push(rec)
+        self.next_sequence = self.next_sequence + 1
+        rec
+
+    me clear():
+        """Clear all trace records."""
+        self.records = []
+        self.next_sequence = 0
+
+    fn len() -> i64:
+        self.records.len()
+
+    fn get(index: i64) -> RetirementRecord?:
+        if index >= 0:
+            if index < self.records.len():
+                return Some(self.records[index])
+        nil
+
+    fn to_text() -> text:
+        var out = "RetirementTrace: {self.records.len()} records\n"
+        for rec in self.records:
+            out = out + "  " + rec.to_text() + "\n"
+        out
+
+# ============================================================================
+# Tandem Checker
+# ============================================================================
+
+class TandemChecker:
+    """Compares two retirement traces to detect the first divergence (AC-011)."""
+
+impl TandemChecker:
+    static fn new() -> TandemChecker:
+        TandemChecker()
+
+    fn compare(trace_a: RetirementTrace, trace_b: RetirementTrace) -> TraceDivergence?:
+        """Compare two traces and return the first divergence, if any.
+
+        Compares instruction-by-instruction up to the shorter trace length.
+        """
+        val len = if trace_a.len() < trace_b.len(): trace_a.len() else: trace_b.len()
+        var i: i64 = 0
+        while i < len:
+            val a = trace_a.records[i]
+            val b = trace_b.records[i]
+
+            # Check PC match
+            if a.pc != b.pc:
+                return Some(TraceDivergence(
+                    sequence: i,
+                    pc_a: a.pc, pc_b: b.pc,
+                    rd_a: a.rd, rd_b: b.rd,
+                    value_a: a.rd_value, value_b: b.rd_value,
+                    mode_a: a.mode, mode_b: b.mode,
+                    reason: "PC mismatch: 0x{a.pc} vs 0x{b.pc}"
+                ))
+
+            # Check rd match
+            if a.rd != b.rd:
+                return Some(TraceDivergence(
+                    sequence: i,
+                    pc_a: a.pc, pc_b: b.pc,
+                    rd_a: a.rd, rd_b: b.rd,
+                    value_a: a.rd_value, value_b: b.rd_value,
+                    mode_a: a.mode, mode_b: b.mode,
+                    reason: "rd mismatch: x{a.rd} vs x{b.rd}"
+                ))
+
+            # Check rd value match (only for non-zero rd)
+            if a.rd > 0:
+                if a.rd_value != b.rd_value:
+                    return Some(TraceDivergence(
+                        sequence: i,
+                        pc_a: a.pc, pc_b: b.pc,
+                        rd_a: a.rd, rd_b: b.rd,
+                        value_a: a.rd_value, value_b: b.rd_value,
+                        mode_a: a.mode, mode_b: b.mode,
+                        reason: "x{a.rd} value mismatch: 0x{a.rd_value} vs 0x{b.rd_value}"
+                    ))
+
+            i = i + 1
+
+        nil

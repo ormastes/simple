@@ -1,0 +1,147 @@
+# Glass Pipeline Compare
+#
+# Renders UI demos through both the Electron/Web HTML pipeline and
+# the browser engine pipeline, producing pixel buffers for comparison.
+#
+# Path A (Web HTML): SDN → UITree → render_html_tree + generate_css → HTML string
+#                    → browser engine html_string_to_dom → render_dom_to_pixels → [u32]
+# Path B (Engine):   SDN → UITree → widget_to_dom → render_dom_to_pixels → [u32]
+
+use common.ui.widget.{UIState, UITree, UIMode}
+use common.ui.parse.sdn_tree.{parse_ui_to_tree}
+use common.ui.state.{init_state}
+use app.ui.web.html.{generate_html_page, generate_css}
+use app.ui.render.widgets.{render_html_tree}
+use std.gc_async_mut.gpu.browser_engine.browser_renderer.{BrowserRenderer, BeRenderResult}
+use std.gc_async_mut.gpu.browser_engine.dom.{BeDomNode}
+use std.gc_async_mut.gpu.browser_engine.widget_to_dom.{ui_tree_to_dom}
+
+# ============================================================================
+# Types
+# ============================================================================
+
+struct PipelineOutput:
+    """Output from rendering a demo through both pipelines."""
+    demo_name: text
+    theme: text
+    web_html: text            # full HTML from Electron/web path
+    web_pixels: [u32]         # browser engine rendering of that HTML (cross-check)
+    engine_pixels: [u32]      # browser engine rendering of widget tree (direct)
+    width: i32
+    height: i32
+    web_node_count: i32
+    engine_node_count: i32
+    error: text               # empty if success
+
+# ============================================================================
+# Dual-Pipeline Renderer
+# ============================================================================
+
+fn render_both_pipelines(sdn_path: text, theme: text, width: i32, height: i32) -> PipelineOutput:
+    """Render a single SDN demo through both pipelines.
+
+    Args:
+        sdn_path: Path to .ui.sdn file
+        theme: Theme to apply ("glass_dark" or "glass_light")
+        width: Viewport width
+        height: Viewport height
+
+    Returns:
+        PipelineOutput with pixel buffers from both pipelines
+    """
+    # Parse the SDN file into a UITree
+    val tree_result = parse_ui_to_tree(sdn_path)
+    match tree_result:
+        Err(e):
+            return PipelineOutput(
+                demo_name: sdn_path, theme: theme,
+                web_html: "", web_pixels: [], engine_pixels: [],
+                width: width, height: height,
+                web_node_count: 0, engine_node_count: 0,
+                error: "Parse error: {e}"
+            )
+        Ok(tree):
+            # Override theme
+            val themed_tree = tree.with_theme(theme)
+            val state = init_state(themed_tree)
+
+            # ── Path A: Web HTML pipeline ──
+            # Generate the HTML page that Electron/Chromium would render
+            val web_html = generate_html_page(state, 0)
+
+            # Feed the HTML into the browser engine to get pixels
+            var web_renderer = BrowserRenderer.create(width, height)
+            val web_result = web_renderer.render_html_to_pixels(web_html)
+
+            # ── Path B: Browser Engine widget pipeline ──
+            # Convert widget tree to DOM and render to pixels
+            var engine_renderer = BrowserRenderer.create(width, height)
+            val dom = ui_tree_to_dom(themed_tree, state)
+            val engine_result = engine_renderer.render_dom_to_pixels(dom)
+
+            return PipelineOutput(
+                demo_name: sdn_path, theme: theme,
+                web_html: web_html,
+                web_pixels: web_result.pixel_data,
+                engine_pixels: engine_result.pixel_data,
+                width: width, height: height,
+                web_node_count: web_result.node_count,
+                engine_node_count: engine_result.node_count,
+                error: ""
+            )
+
+fn render_web_pipeline_only(sdn_path: text, theme: text, width: i32, height: i32) -> PipelineOutput:
+    """Render only the web HTML pipeline (faster for HTML-only inspection)."""
+    val tree_result = parse_ui_to_tree(sdn_path)
+    match tree_result:
+        Err(e):
+            return PipelineOutput(
+                demo_name: sdn_path, theme: theme,
+                web_html: "", web_pixels: [], engine_pixels: [],
+                width: width, height: height,
+                web_node_count: 0, engine_node_count: 0,
+                error: "Parse error: {e}"
+            )
+        Ok(tree):
+            val themed_tree = tree.with_theme(theme)
+            val state = init_state(themed_tree)
+            val web_html = generate_html_page(state, 0)
+            var renderer = BrowserRenderer.create(width, height)
+            val result = renderer.render_html_to_pixels(web_html)
+            return PipelineOutput(
+                demo_name: sdn_path, theme: theme,
+                web_html: web_html,
+                web_pixels: result.pixel_data,
+                engine_pixels: [],
+                width: width, height: height,
+                web_node_count: result.node_count, engine_node_count: 0,
+                error: ""
+            )
+
+fn render_engine_pipeline_only(sdn_path: text, theme: text, width: i32, height: i32) -> PipelineOutput:
+    """Render only the browser engine widget pipeline."""
+    val tree_result = parse_ui_to_tree(sdn_path)
+    match tree_result:
+        Err(e):
+            return PipelineOutput(
+                demo_name: sdn_path, theme: theme,
+                web_html: "", web_pixels: [], engine_pixels: [],
+                width: width, height: height,
+                web_node_count: 0, engine_node_count: 0,
+                error: "Parse error: {e}"
+            )
+        Ok(tree):
+            val themed_tree = tree.with_theme(theme)
+            val state = init_state(themed_tree)
+            var renderer = BrowserRenderer.create(width, height)
+            val dom = ui_tree_to_dom(themed_tree, state)
+            val result = renderer.render_dom_to_pixels(dom)
+            return PipelineOutput(
+                demo_name: sdn_path, theme: theme,
+                web_html: "",
+                web_pixels: [],
+                engine_pixels: result.pixel_data,
+                width: width, height: height,
+                web_node_count: 0, engine_node_count: result.node_count,
+                error: ""
+            )

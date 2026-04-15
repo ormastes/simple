@@ -1,0 +1,198 @@
+# Chromium Shell Acid2 — DesktopShell Golden Guard (V3 simple_browser — M12)
+#
+# M12's second acceptance criterion is "No regressions in DesktopShell
+# golden frames." This module owns that guard: it remembers a set of
+# named golden frames (each a `PixelGrid`) and, given a candidate frame,
+# reports whether the candidate matches the stored golden or has drifted.
+#
+# The harness does not touch the real DesktopShell rasteriser — that is
+# still an SFFI placeholder inside the compositor subtree we cannot
+# modify. Instead, the guard exposes a pure-data contract the chromium
+# shell (or wm_compare) can feed with whichever backend is live.
+
+use app.ui.chromium.acid2.pixel_grid.{PixelGrid}
+
+# =========================================================================
+# Golden-frame regression verdict constants
+# =========================================================================
+
+val GOLDEN_VERDICT_UNKNOWN:   i32 = 0     # name not registered
+val GOLDEN_VERDICT_MATCH:     i32 = 1     # identical pixels
+val GOLDEN_VERDICT_DRIFTED:   i32 = 2     # registered but not identical
+val GOLDEN_VERDICT_SIZE_DIFF: i32 = 3     # dimensions changed
+
+# =========================================================================
+# GoldenVerdict
+# =========================================================================
+
+class GoldenVerdict:
+    """Result of a single `compare_frame` call. Diff count is 0 for a
+    MATCH, a positive number for DRIFTED / SIZE_DIFF, and -1 for
+    UNKNOWN so the harness never silently promotes an unseen name."""
+    code: i32
+    diff_pixels: i32
+
+impl GoldenVerdict:
+
+    static fn match() -> GoldenVerdict:
+        GoldenVerdict(code: GOLDEN_VERDICT_MATCH, diff_pixels: 0)
+
+    static fn drifted(diff: i32) -> GoldenVerdict:
+        GoldenVerdict(code: GOLDEN_VERDICT_DRIFTED, diff_pixels: diff)
+
+    static fn size_diff(diff: i32) -> GoldenVerdict:
+        GoldenVerdict(code: GOLDEN_VERDICT_SIZE_DIFF, diff_pixels: diff)
+
+    static fn unknown() -> GoldenVerdict:
+        GoldenVerdict(code: GOLDEN_VERDICT_UNKNOWN, diff_pixels: -1)
+
+    fn code_of() -> i32:
+        self.code
+
+    fn diff_pixels_of() -> i32:
+        self.diff_pixels
+
+    fn is_match() -> bool:
+        self.code == GOLDEN_VERDICT_MATCH
+
+    fn is_drifted() -> bool:
+        self.code == GOLDEN_VERDICT_DRIFTED
+
+    fn is_size_diff() -> bool:
+        self.code == GOLDEN_VERDICT_SIZE_DIFF
+
+    fn is_unknown() -> bool:
+        self.code == GOLDEN_VERDICT_UNKNOWN
+
+    fn is_regression() -> bool:
+        """Drift OR size difference. UNKNOWN is *not* a regression —
+        the runner tracks those separately because a new golden frame
+        is expected when adding a test."""
+        if self.code == GOLDEN_VERDICT_DRIFTED:
+            return true
+        self.code == GOLDEN_VERDICT_SIZE_DIFF
+
+    fn label() -> text:
+        if self.code == GOLDEN_VERDICT_MATCH:
+            return "match"
+        if self.code == GOLDEN_VERDICT_DRIFTED:
+            return "drifted"
+        if self.code == GOLDEN_VERDICT_SIZE_DIFF:
+            return "size_diff"
+        "unknown"
+
+# =========================================================================
+# GoldenGuard
+# =========================================================================
+
+class GoldenGuard:
+    """Registry of named DesktopShell golden frames plus a running tally
+    of regressions observed during the current reftest pass. Parallel
+    arrays keep name -> frame with insertion order preserved, which
+    matters so `regression_names()` reports deterministic failures."""
+    names:           [text]
+    frames:          [PixelGrid]
+    regression_log:  [text]
+    compare_calls:   i32
+    match_calls:     i32
+
+impl GoldenGuard:
+
+    static fn new() -> GoldenGuard:
+        GoldenGuard(
+            names:          [],
+            frames:         [],
+            regression_log: [],
+            compare_calls:  0,
+            match_calls:    0
+        )
+
+    fn is_empty() -> bool:
+        self.names.len() == 0
+
+    fn count() -> i32:
+        self.names.len().to_i32()
+
+    fn compare_calls_of() -> i32:
+        self.compare_calls
+
+    fn match_calls_of() -> i32:
+        self.match_calls
+
+    fn regression_count() -> i32:
+        self.regression_log.len().to_i32()
+
+    fn regression_names() -> [text]:
+        self.regression_log
+
+    fn index_of(name: text) -> i32:
+        """Linear lookup by name. Returns -1 if missing. The guard tops
+        out at a handful of frames per DesktopShell skin, so linear scan
+        beats carrying a hash map."""
+        var i: i32 = 0
+        val n = self.names.len().to_i32()
+        while i < n:
+            if self.names[i] == name:
+                return i
+            i = i + 1
+        -1
+
+    fn has_golden(name: text) -> bool:
+        self.index_of(name) >= 0
+
+    fn golden_for(name: text) -> PixelGrid:
+        """Return the stored golden frame, or a blank grid if the name
+        is unknown. Callers should prefer `has_golden` first."""
+        val idx = self.index_of(name)
+        if idx < 0:
+            return PixelGrid.new()
+        self.frames[idx]
+
+    me register(name: text, golden: PixelGrid) -> bool:
+        """Record (or replace) a golden frame by name. Replacing an
+        existing entry does *not* reset the running regression log —
+        the log is per-pass, not per-frame."""
+        val idx = self.index_of(name)
+        if idx >= 0:
+            self.frames[idx] = golden
+            return true
+        self.names.push(name)
+        self.frames.push(golden)
+        true
+
+    me reset_pass():
+        """Clear the per-pass counters. The registry itself is kept so
+        callers can run multiple comparison passes in a loop."""
+        self.regression_log = []
+        self.compare_calls  = 0
+        self.match_calls    = 0
+
+    me compare_frame(name: text, candidate: PixelGrid) -> GoldenVerdict:
+        """Compare a candidate rasterised frame against the stored
+        golden. The verdict is also appended to the regression log when
+        it counts as a regression, so the M12 runner can print a clean
+        failure list at the end of the pass."""
+        self.compare_calls = self.compare_calls + 1
+        val idx = self.index_of(name)
+        if idx < 0:
+            return GoldenVerdict.unknown()
+        val golden = self.frames[idx]
+        if golden.width_of() != candidate.width_of():
+            val d1 = golden.diff_count(candidate)
+            self.regression_log.push(name)
+            return GoldenVerdict.size_diff(d1)
+        if golden.height_of() != candidate.height_of():
+            val d2 = golden.diff_count(candidate)
+            self.regression_log.push(name)
+            return GoldenVerdict.size_diff(d2)
+        if golden.equals(candidate):
+            self.match_calls = self.match_calls + 1
+            return GoldenVerdict.match()
+        val d = golden.diff_count(candidate)
+        self.regression_log.push(name)
+        GoldenVerdict.drifted(d)
+
+    fn no_regressions() -> bool:
+        """True when the current pass has zero logged regressions.
+        Used by the M12 runner as the second acceptance gate."""
+        self.regression_log.len() == 0

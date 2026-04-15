@@ -1,0 +1,184 @@
+#![allow(unnamed_duplicate_typed_args)]
+# Backend Screenshot Capture
+#
+# Multi-backend pixel capture facility for browser engine rendering.
+# Renders the same content through different Engine2D backends and
+# effect engines, returning pixel buffers for comparison.
+#
+# Usage:
+#   use std.gc_async_mut.gpu.browser_engine.backend_screenshot_capture.{
+#       capture_with_backend, capture_all_available, capture_with_effect_engine}
+
+use std.gc_async_mut.gpu.engine2d.engine.{Engine2D}
+use std.gc_async_mut.gpu.browser_engine.browser_renderer.{BrowserRenderer, BeRenderResult}
+use std.gc_async_mut.gpu.browser_engine.browser_engine2d_bridge.{
+    create_gpu_browser_renderer_with_backend, create_software_browser_renderer}
+use common.render_scene.executor.{set_effect_engine, get_effect_engine, select_effect_engine}
+use common.render_scene.engine_trait.{EffectEngine}
+use common.render_scene.engine_int.{int_effect_engine}
+use common.render_scene.engine_float.{float_effect_engine}
+
+# ============================================================================
+# Types
+# ============================================================================
+
+struct BackendCapture:
+    """Result of rendering content through a specific backend."""
+    backend_name: text
+    pixels: [u32]
+    width: i32
+    height: i32
+    success: bool
+    error: text
+
+# ============================================================================
+# Capture Functions
+# ============================================================================
+
+fn capture_with_backend(html: text, width: i32, height: i32, backend_name: text) -> BackendCapture:
+    """Render HTML through a specific Engine2D backend and capture pixels.
+
+    Args:
+        html: Complete HTML document string
+        width: Viewport width
+        height: Viewport height
+        backend_name: One of "cuda", "vulkan", "opengl", "metal", "rocm",
+                      "intel", "software", "cpu"
+
+    Returns:
+        BackendCapture with pixel buffer and status
+    """
+    var renderer = create_gpu_browser_renderer_with_backend(width, height, backend_name)
+
+    val result = renderer.render_html_to_pixels(html)
+    val pixels = result.pixel_data
+
+    if pixels.len() == 0:
+        return BackendCapture(
+            backend_name: backend_name,
+            pixels: [],
+            width: width,
+            height: height,
+            success: false,
+            error: "Rendering produced empty pixel buffer"
+        )
+
+    BackendCapture(
+        backend_name: backend_name,
+        pixels: pixels,
+        width: width,
+        height: height,
+        success: true,
+        error: ""
+    )
+
+fn capture_software(html: text, width: i32, height: i32) -> BackendCapture:
+    """Render HTML through the software rasterizer (no Engine2D).
+
+    Uses the legacy software path: BrowserRenderer → execute_scene_to_buffer().
+
+    Args:
+        html: Complete HTML document string
+        width: Viewport width
+        height: Viewport height
+
+    Returns:
+        BackendCapture with pixel buffer
+    """
+    var renderer = create_software_browser_renderer(width, height)
+    val result = renderer.render_html_to_pixels(html)
+    val pixels = result.pixel_data
+
+    if pixels.len() == 0:
+        return BackendCapture(
+            backend_name: "software_rasterizer",
+            pixels: [],
+            width: width,
+            height: height,
+            success: false,
+            error: "Software rasterizer produced empty pixel buffer"
+        )
+
+    BackendCapture(
+        backend_name: "software_rasterizer",
+        pixels: pixels,
+        width: width,
+        height: height,
+        success: true,
+        error: ""
+    )
+
+fn capture_all_available(html: text, width: i32, height: i32) -> [BackendCapture]:
+    """Render HTML through all available Engine2D backends.
+
+    Discovers available backends at runtime via Engine2D.list_backends(),
+    then captures pixels from each.
+
+    Args:
+        html: Complete HTML document string
+        width: Viewport width
+        height: Viewport height
+
+    Returns:
+        List of BackendCapture, one per available backend
+    """
+    val backends = Engine2D.list_backends()
+    var captures: [BackendCapture] = []
+
+    for backend_name in backends:
+        val cap = capture_with_backend(html, width, height, backend_name)
+        captures = captures + [cap]
+
+    captures
+
+fn capture_with_effect_engine(html: text, width: i32, height: i32, engine_name: text) -> BackendCapture:
+    """Render HTML through the software rasterizer with a specific effect engine.
+
+    Swaps the active effect engine, renders, then restores the original.
+
+    Args:
+        html: Complete HTML document string
+        width: Viewport width
+        height: Viewport height
+        engine_name: "int" for IntEffectEngine, "float" for FloatEffectEngine
+
+    Returns:
+        BackendCapture with pixel buffer
+    """
+    # Save current engine
+    val original = get_effect_engine()
+
+    # Set the requested engine
+    if engine_name == "float" or engine_name == "float64":
+        set_effect_engine(float_effect_engine())
+    else:
+        set_effect_engine(int_effect_engine())
+
+    # Render via software rasterizer (uses the effect engine)
+    var renderer = create_software_browser_renderer(width, height)
+    val result = renderer.render_html_to_pixels(html)
+    val pixels = result.pixel_data
+
+    # Restore original engine
+    set_effect_engine(original)
+
+    val label = if engine_name == "float" or engine_name == "float64": "float64" else: "int32"
+
+    if pixels.len() == 0:
+        return BackendCapture(
+            backend_name: label,
+            pixels: [],
+            width: width,
+            height: height,
+            success: false,
+            error: "Effect engine '{label}' rendering produced empty pixel buffer"
+        )
+
+    BackendCapture(
+        backend_name: label,
+        pixels: pixels,
+        width: width,
+        height: height,
+        success: true,
+        error: ""
+    )

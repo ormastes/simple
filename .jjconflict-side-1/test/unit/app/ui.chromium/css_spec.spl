@@ -1,0 +1,170 @@
+# Feature: Chromium Shell DesktopShell CSS Subset (V3, Row 5 — M3)
+# Category: UI Components
+# Status: Implemented
+#
+# Compile-only smoke spec. Verifies the CSS subset that the
+# `DesktopShell` widget tree and `browser_compositor_backend` dark/light
+# theme constants actually exercise is wired through the browser engine:
+#
+#   - `flex-flow` shorthand expands to `flex-direction` + `flex-wrap`
+#     (`style_block.expand_flex_flow`).
+#   - `hsl()` / `hsla()` color functions parse to u32 RGBA
+#     (`dom.parse_color_value`).
+#   - `currentColor` keyword resolves `border-color` to the element's
+#     own `color` (`dom.be_dom_set_style` — the explicit branch in the
+#     `border-color` arm).
+#   - The DesktopShell glass-theme properties (`background-color`,
+#     `border-color`, `border-radius`, `border-width`, `color`,
+#     `padding`, `display: flex`, `flex-direction`, `gap`) all flow
+#     through `be_dom_set_style` without panicking.
+#
+# No winit / FFI / compositor bring-up — the parsers and setters are
+# pure.
+
+use std.gc_async_mut.gpu.browser_engine.dom.{BeDomNode, be_dom_set_style,
+    parse_color_value, be_dom_get_style}
+use std.gc_async_mut.gpu.browser_engine.style_block.{expand_flex_flow,
+    CssDecl}
+
+# =========================================================================
+# Test Group 1: flex-flow shorthand expansion
+# =========================================================================
+
+describe "Chromium CSS subset — flex-flow shorthand":
+
+    it "expands 'row wrap' into flex-direction=row + flex-wrap=wrap":
+        val out = expand_flex_flow("row wrap")
+        expect(out.len() == 2).to_be_true()
+        var saw_dir = false
+        var saw_wrap = false
+        var i = 0
+        while i < out.len():
+            val d = out[i]
+            i = i + 1
+            if d.property == "flex-direction" and d.value == "row":
+                saw_dir = true
+            if d.property == "flex-wrap" and d.value == "wrap":
+                saw_wrap = true
+        expect(saw_dir).to_be_true()
+        expect(saw_wrap).to_be_true()
+
+    it "expands bare 'column-reverse' with default nowrap":
+        val out = expand_flex_flow("column-reverse")
+        expect(out.len() == 2).to_be_true()
+        var saw_dir = false
+        var saw_wrap = false
+        var j = 0
+        while j < out.len():
+            val d = out[j]
+            j = j + 1
+            if d.property == "flex-direction" and d.value == "column-reverse":
+                saw_dir = true
+            if d.property == "flex-wrap" and d.value == "nowrap":
+                saw_wrap = true
+        expect(saw_dir).to_be_true()
+        expect(saw_wrap).to_be_true()
+
+    it "expands 'wrap-reverse row' (order-independent)":
+        val out = expand_flex_flow("wrap-reverse row")
+        expect(out.len() == 2).to_be_true()
+        var saw_dir = false
+        var saw_wrap = false
+        var k = 0
+        while k < out.len():
+            val d = out[k]
+            k = k + 1
+            if d.property == "flex-direction" and d.value == "row":
+                saw_dir = true
+            if d.property == "flex-wrap" and d.value == "wrap-reverse":
+                saw_wrap = true
+        expect(saw_dir).to_be_true()
+        expect(saw_wrap).to_be_true()
+
+# =========================================================================
+# Test Group 2: hsl() / hsla() color parsing
+# =========================================================================
+
+describe "Chromium CSS subset — hsl/hsla color parsing":
+
+    it "parses hsl(0, 100%, 50%) as pure red":
+        val c = parse_color_value("hsl(0, 100%, 50%)")
+        # RGBA packed as 0xRRGGBBAA — red = 0xFF0000FF
+        expect(c == 0xFF0000FF).to_be_true()
+
+    it "parses hsl(120, 100%, 50%) as pure green":
+        val c = parse_color_value("hsl(120, 100%, 50%)")
+        expect(c == 0x00FF00FF).to_be_true()
+
+    it "parses hsl(240, 100%, 50%) as pure blue":
+        val c = parse_color_value("hsl(240, 100%, 50%)")
+        expect(c == 0x0000FFFF).to_be_true()
+
+    it "parses hsla(0, 0%, 0%, 1.0) as opaque black":
+        val c = parse_color_value("hsla(0, 0%, 0%, 1.0)")
+        expect(c == 0x000000FF).to_be_true()
+
+    it "parses hsl(0, 0%, 100%) as white":
+        val c = parse_color_value("hsl(0, 0%, 100%)")
+        expect(c == 0xFFFFFFFF).to_be_true()
+
+# =========================================================================
+# Test Group 3: currentColor keyword for border-color
+# =========================================================================
+
+describe "Chromium CSS subset — currentColor keyword":
+
+    it "resolves border-color: currentColor to the element's color":
+        var node = BeDomNode.element("div")
+        # Establish the element's color first.
+        be_dom_set_style(node, "color", "#FF00FFFF")  # magenta
+        be_dom_set_style(node, "border-width", "2px")
+        be_dom_set_style(node, "border-color", "currentColor")
+        val s = be_dom_get_style(node)
+        expect(s.border.color == 0xFF00FFFF).to_be_true()
+
+    it "accepts the mixed-case spelling 'currentColor'":
+        var node = BeDomNode.element("div")
+        be_dom_set_style(node, "color", "#112233FF")
+        be_dom_set_style(node, "border-color", "currentColor")
+        val s = be_dom_get_style(node)
+        expect(s.border.color == 0x112233FF).to_be_true()
+
+# =========================================================================
+# Test Group 4: DesktopShell glass-theme property subset
+# =========================================================================
+# These mirror the exact properties apply_glass_theme_styles emits for a
+# `panel` widget — the DesktopShell's dominant widget kind.
+
+describe "Chromium CSS subset — DesktopShell glass-theme properties":
+
+    it "accepts the full panel property set without losing values":
+        var node = BeDomNode.element("div")
+        be_dom_set_style(node, "display", "flex")
+        be_dom_set_style(node, "flex-direction", "column")
+        be_dom_set_style(node, "gap", "8px")
+        be_dom_set_style(node, "padding", "10px")
+        be_dom_set_style(node, "background-color", "rgba(30,30,35,0.72)")
+        be_dom_set_style(node, "border-width", "1px")
+        be_dom_set_style(node, "border-color", "rgba(255,255,255,0.08)")
+        be_dom_set_style(node, "border-radius", "20px")
+        be_dom_set_style(node, "color", "#F5F5F7FF")
+        val s = be_dom_get_style(node)
+        expect(s.display == "flex").to_be_true()
+        expect(s.flex_direction == "column").to_be_true()
+        expect(s.gap == 8).to_be_true()
+        expect(s.padding.top == 10).to_be_true()
+        expect(s.padding.left == 10).to_be_true()
+        expect(s.border.width == 1).to_be_true()
+        expect(s.border_radius == 20).to_be_true()
+
+    it "stores display: flow-root and display: contents as freeform values":
+        # These are not emitted by widget_to_dom for DesktopShell today
+        # (waived per M3 acceptance), but set_style must not panic if a
+        # future widget set-style path feeds them in.
+        var node1 = BeDomNode.element("div")
+        be_dom_set_style(node1, "display", "flow-root")
+        expect(be_dom_get_style(node1).display == "flow-root").to_be_true()
+
+        var node2 = BeDomNode.element("div")
+        be_dom_set_style(node2, "display", "contents")
+        expect(be_dom_get_style(node2).display == "contents").to_be_true()

@@ -1,0 +1,309 @@
+#![allow(export_outside_init)]
+# Security Lint: Missing Auth Annotation Detection
+#
+# Flags HTTP handler functions that lack a security annotation, which
+# means authentication/authorization behavior is implicit and potentially
+# unintended.
+#
+# SEC-AUTH001: HTTP handler without security annotation                 WARN
+#
+# Triggers when a function matches handler naming patterns AND is within
+# a module matching web/http/controller/handler, but has no security
+# annotation (@public, @requires_auth, @requires_capability, @deny_all).
+#
+# Handler patterns detected:
+# - fn handle_*(request: ...) — generic handler pattern
+# - fn action_*(request: ...) — action-based routing
+# - fn get_*, post_*, put_*, patch_*, delete_* — HTTP verb handlers
+# - fn @route decorated functions — route annotation
+#
+# Does NOT flag:
+# - Functions with @public annotation (explicitly no auth)
+# - Functions with @requires_auth annotation
+# - Functions with @requires_capability(...) annotation
+# - Functions with @deny_all annotation
+# - Private helper functions (not handler-shaped)
+# - Functions in test files
+# - Functions with @allow(missing_auth) annotation
+#
+# Rationale: LLMs generate HTTP handlers without considering authentication.
+# Every handler should explicitly declare its security posture. "Default
+# secure" means no annotation = warning, not silent acceptance.
+#
+# Fix: Add @public (explicitly open), @requires_auth (session needed),
+#      @requires_capability("role") (specific permission), or
+#      @deny_all (disabled) before the handler function.
+#
+# ============================================================================
+
+use std.io_runtime
+
+
+# ============================================================================
+# Warning Struct
+# ============================================================================
+
+struct MissingAuthWarning:
+    code: text
+    severity: text
+    message: text
+    hint: text
+    handler_name: text
+    line_num: i64
+    file_path: text
+
+    fn fmt() -> text:
+        "[{self.code}] {self.severity}: {self.file_path}:{self.line_num} -- {self.message} (handler: {self.handler_name}) -- {self.hint}"
+
+
+# ============================================================================
+# Main Entry Point
+# ============================================================================
+
+fn check_missing_auth(source: text, path: text) -> [MissingAuthWarning]:
+    """Scan source text for HTTP handler functions without security annotations.
+
+    For each function definition that matches handler naming conventions and
+    appears in a web/http/controller module, checks whether the function or
+    its preceding lines contain a security annotation.
+
+    Test files are skipped entirely.
+
+    Returns a list of MissingAuthWarning for each handler without annotation.
+    """
+    var warnings: [MissingAuthWarning] = []
+
+    # Skip test files
+    if path.ends_with("_spec.spl") or path.ends_with("_test.spl"):
+        return warnings
+
+    # Only check files in web/http/controller/handler modules
+    if not _is_web_module(path):
+        return warnings
+
+    val lines = source.split("\n")
+    var in_docstring = false
+
+    var li = 0
+    while li < lines.len():
+        val line = lines[li]
+
+        # Track triple-quoted docstring regions
+        if _count_triple_quotes(line) % 2 == 1:
+            in_docstring = not in_docstring
+
+        if not in_docstring:
+            val trimmed = line.trim()
+
+            # Skip comment lines
+            if not trimmed.starts_with("#"):
+                # Check if this is a function definition
+                if trimmed.starts_with("fn ") or trimmed.starts_with("me "):
+                    val fn_name = _extract_fn_name(trimmed)
+
+                    # Check if function name matches handler pattern
+                    if _is_handler_function(fn_name):
+                        # Check if function has a request parameter (confirms it's a handler)
+                        if _has_request_param(trimmed):
+                            # Check if preceding lines have a security annotation
+                            if not _has_security_annotation(lines, li):
+                                # Check for inline allow annotation
+                                if not trimmed.contains("@allow(missing_auth)"):
+                                    warnings.push(MissingAuthWarning(
+                                        code: "SEC-AUTH001",
+                                        severity: "WARN",
+                                        message: "handler '{fn_name}' has no security annotation; defaults to implicit auth policy",
+                                        hint: "add @public, @requires_auth, @requires_capability(\"role\"), or @deny_all before the handler",
+                                        handler_name: fn_name,
+                                        line_num: li + 1,
+                                        file_path: path
+                                    ))
+
+        li = li + 1
+
+    warnings
+
+
+# ============================================================================
+# Handler Detection
+# ============================================================================
+
+fn _is_handler_function(name: text) -> bool:
+    """Check if function name matches HTTP handler naming patterns."""
+    # Generic handler patterns
+    if name.starts_with("handle_"):
+        return true
+    if name.starts_with("action_"):
+        return true
+
+    # HTTP verb patterns
+    if name.starts_with("get_"):
+        return true
+    if name.starts_with("post_"):
+        return true
+    if name.starts_with("put_"):
+        return true
+    if name.starts_with("patch_"):
+        return true
+    if name.starts_with("delete_"):
+        return true
+
+    # Direct verb names with suffixes
+    if name == "index" or name == "show" or name == "create" or name == "update" or name == "destroy":
+        return true
+
+    # Dispatch pattern
+    if name.starts_with("dispatch_"):
+        return true
+
+    false
+
+fn _has_request_param(fn_line: text) -> bool:
+    """Check if function signature includes a request-like parameter.
+
+    Looks for parameter types: Request, HttpRequest, Req, WebRequest
+    or parameter names: request, req, ctx
+    """
+    if fn_line.contains("Request") or fn_line.contains("HttpRequest"):
+        return true
+    if fn_line.contains("request:") or fn_line.contains("req:"):
+        return true
+    if fn_line.contains("WebRequest") or fn_line.contains("Context"):
+        return true
+    if fn_line.contains("ctx:"):
+        return true
+    false
+
+fn _has_security_annotation(lines: [text], fn_line_idx: i64) -> bool:
+    """Check if the function at fn_line_idx has a security annotation.
+
+    Looks at the 5 lines preceding the function definition for:
+    - @public
+    - @requires_auth
+    - @requires_capability(...)
+    - @deny_all
+    - @route(..., auth: ...) — route with explicit auth
+    """
+    val security_annotations = ["@public", "@requires_auth", "@requires_capability",
+                                 "@deny_all", "@authenticated", "@authorize"]
+
+    # Check preceding lines (up to 5 lines back)
+    var look_back = fn_line_idx - 1
+    val min_line = fn_line_idx - 5
+    if min_line < 0:
+        pass_dn
+
+    while look_back >= 0 and look_back >= min_line:
+        val prev_line = lines[look_back].trim()
+
+        # Stop if we hit another function definition or class/struct boundary
+        if prev_line.starts_with("fn ") or prev_line.starts_with("me ") or prev_line.starts_with("class ") or prev_line.starts_with("struct "):
+            break
+
+        # Check for security annotations
+        var ai = 0
+        while ai < security_annotations.len():
+            if prev_line.contains(security_annotations[ai]):
+                return true
+            ai = ai + 1
+
+        # Check for @route with auth parameter
+        if prev_line.contains("@route") and prev_line.contains("auth"):
+            return true
+
+        look_back = look_back - 1
+
+    # Also check the function line itself (annotations can be inline in some styles)
+    val fn_line = lines[fn_line_idx].trim()
+    var ai2 = 0
+    while ai2 < security_annotations.len():
+        if fn_line.contains(security_annotations[ai2]):
+            return true
+        ai2 = ai2 + 1
+
+    false
+
+
+# ============================================================================
+# Module Detection
+# ============================================================================
+
+fn _is_web_module(path: text) -> bool:
+    """Check if file path indicates a web/HTTP module."""
+    if path.contains("/http/"):
+        return true
+    if path.contains("/web/"):
+        return true
+    if path.contains("/controller/"):
+        return true
+    if path.contains("/handler/"):
+        return true
+    if path.contains("/api/"):
+        return true
+    if path.contains("/routes/"):
+        return true
+    if path.contains("/endpoint/"):
+        return true
+    if path.contains("/server/"):
+        return true
+    # Also check filename patterns
+    if path.ends_with("_handler.spl"):
+        return true
+    if path.ends_with("_controller.spl"):
+        return true
+    if path.ends_with("_api.spl"):
+        return true
+    if path.ends_with("_routes.spl"):
+        return true
+    if path.ends_with("_endpoint.spl"):
+        return true
+    false
+
+
+# ============================================================================
+# Utility Helpers
+# ============================================================================
+
+fn _extract_fn_name(trimmed: text) -> text:
+    """Extract function name from a fn/me declaration line."""
+    var start = 0
+    if trimmed.starts_with("fn "):
+        start = 3
+    elif trimmed.starts_with("me "):
+        start = 3
+    elif trimmed.starts_with("static fn "):
+        start = 10
+    else:
+        return ""
+
+    var end = start
+    while end < trimmed.len():
+        val ch = trimmed.slice(end, end + 1)
+        if ch == "(" or ch == " " or ch == ":":
+            break
+        end = end + 1
+
+    if end <= start:
+        return ""
+    trimmed.slice(start, end)
+
+fn _count_triple_quotes(line: text) -> i64:
+    """Count the number of triple-quote sequences in a line."""
+    var count = 0
+    var i = 0
+    while i + 2 < line.len():
+        val chunk = line.slice(i, i + 3)
+        if chunk == "\"\"\"":
+            count = count + 1
+            i = i + 3
+        else:
+            i = i + 1
+    count
+
+
+# ============================================================================
+# Exports
+# ============================================================================
+
+export MissingAuthWarning
+export check_missing_auth

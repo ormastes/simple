@@ -1,0 +1,515 @@
+# Huffman Tree Module
+# Tree construction, analysis, and serialization
+
+import huffman.types
+
+# ============================================================================
+# FREQUENCY ANALYSIS
+# ============================================================================
+
+fn huffman_count_frequencies(data):
+    """Count frequency of each byte in data, returns array of 256 frequencies"""
+    var freq_table = array_new(HUFFMAN_MAX_SYMBOLS, 0)
+    var i = 0
+    val data_len = string_length(data)
+
+    while i < data_len:
+        val byte_val = string_byte_at(data, i)
+        val old_count = array_get(freq_table, byte_val)
+        var new_count = old_count + 1
+        array_set(freq_table, byte_val, new_count)
+        i = i + 1
+
+    freq_table
+
+fn huffman_create_frequency_list(freq_table):
+    """Convert frequency array to list of (symbol, frequency) tuples"""
+    var result = []
+    var i = 0
+
+    while i < HUFFMAN_MAX_SYMBOLS:
+        val freq = array_get(freq_table, i)
+        if freq > 0:
+            result = array_append(result, (i, freq))
+        i = i + 1
+
+    result
+
+fn huffman_get_unique_symbols(data):
+    """Get count of unique symbols in data"""
+    val freq_table = huffman_count_frequencies(data)
+    var count = 0
+    var i = 0
+
+    while i < HUFFMAN_MAX_SYMBOLS:
+        val freq = array_get(freq_table, i)
+        if freq > 0:
+            count = count + 1
+        i = i + 1
+
+    count
+
+# ============================================================================
+# TREE CONSTRUCTION - PRIORITY QUEUE HELPERS
+# ============================================================================
+
+fn huffman_pq_insert(queue, node):
+    """Insert node into priority queue (sorted by frequency)"""
+    var result = []
+    val node_freq = huffman_get_frequency(node)
+    var inserted = false
+    var i = 0
+    val queue_len = array_length(queue)
+
+    while i < queue_len:
+        val curr = array_get(queue, i)
+        val curr_freq = huffman_get_frequency(curr)
+
+        if not inserted:
+            if node_freq <= curr_freq:
+                result = array_append(result, node)
+                inserted = true
+
+        result = array_append(result, curr)
+        i = i + 1
+
+    if not inserted:
+        result = array_append(result, node)
+
+    result
+
+fn huffman_pq_pop(queue):
+    """Remove and return minimum frequency node from priority queue"""
+    val queue_len = array_length(queue)
+    if queue_len == 0:
+        nil
+    else:
+        val min_node = array_get(queue, 0)
+        var new_queue = []
+        var i = 1
+
+        while i < queue_len:
+            val node = array_get(queue, i)
+            new_queue = array_append(new_queue, node)
+            i = i + 1
+
+        (min_node, new_queue)
+
+fn huffman_pq_size(queue):
+    """Get size of priority queue"""
+    array_length(queue)
+
+# ============================================================================
+# TREE CONSTRUCTION - MAIN ALGORITHM
+# ============================================================================
+
+fn huffman_build_tree(freq_table):
+    """Build Huffman tree from frequency table using greedy algorithm"""
+    val freq_list = huffman_create_frequency_list(freq_table)
+    val list_len = array_length(freq_list)
+
+    if list_len == 0:
+        nil
+    else:
+        if list_len == 1:
+            val pair = array_get(freq_list, 0)
+            val symbol = pair[0]
+            val freq = pair[1]
+            huffman_create_leaf(symbol, freq)
+        else:
+            var pq = []
+            var i = 0
+
+            while i < list_len:
+                val pair = array_get(freq_list, i)
+                val symbol = pair[0]
+                val freq = pair[1]
+                val leaf = huffman_create_leaf(symbol, freq)
+                pq = huffman_pq_insert(pq, leaf)
+                i = i + 1
+
+            while huffman_pq_size(pq) > 1:
+                val pop1 = huffman_pq_pop(pq)
+                val left = pop1[0]
+                val pq1 = pop1[1]
+
+                val pop2 = huffman_pq_pop(pq1)
+                val right = pop2[0]
+                val pq2 = pop2[1]
+
+                val internal = huffman_create_internal(left, right)
+                pq = huffman_pq_insert(pq2, internal)
+
+            val final_pop = huffman_pq_pop(pq)
+            final_pop[0]
+
+fn huffman_build_tree_from_data(data):
+    """Build Huffman tree directly from input data"""
+    val freq_table = huffman_count_frequencies(data)
+    huffman_build_tree(freq_table)
+
+# ============================================================================
+# TREE ANALYSIS
+# ============================================================================
+
+fn huffman_tree_height_helper(node):
+    """Calculate tree height"""
+    if node == nil:
+        0
+    else:
+        val is_leaf = huffman_is_leaf(node)
+        if is_leaf:
+            1
+        else:
+            val left = huffman_get_left(node)
+            val right = huffman_get_right(node)
+            val left_height = huffman_tree_height_helper(left)
+            val right_height = huffman_tree_height_helper(right)
+            val max_height = if left_height > right_height: left_height else: right_height
+            max_height + 1
+
+fn huffman_tree_height(tree):
+    """Get height of Huffman tree"""
+    huffman_tree_height_helper(tree)
+
+fn huffman_count_nodes(node):
+    """Count total nodes in tree"""
+    if node == nil:
+        0
+    else:
+        val is_leaf = huffman_is_leaf(node)
+        if is_leaf:
+            1
+        else:
+            val left = huffman_get_left(node)
+            val right = huffman_get_right(node)
+            val left_count = huffman_count_nodes(left)
+            val right_count = huffman_count_nodes(right)
+            1 + left_count + right_count
+
+fn huffman_count_leaves(node):
+    """Count leaf nodes in tree"""
+    if node == nil:
+        0
+    else:
+        val is_leaf = huffman_is_leaf(node)
+        if is_leaf:
+            1
+        else:
+            val left = huffman_get_left(node)
+            val right = huffman_get_right(node)
+            val left_count = huffman_count_leaves(left)
+            val right_count = huffman_count_leaves(right)
+            left_count + right_count
+
+fn huffman_validate_tree(node):
+    """Validate that tree structure is correct"""
+    if node == nil:
+        false
+    else:
+        val is_leaf = huffman_is_leaf(node)
+        if is_leaf:
+            val symbol = huffman_get_symbol(node)
+            val freq = huffman_get_frequency(node)
+            var valid = symbol >= 0
+            valid = valid and symbol < HUFFMAN_MAX_SYMBOLS
+            valid = valid and freq > 0
+            valid
+        else:
+            val left = huffman_get_left(node)
+            val right = huffman_get_right(node)
+            val freq = huffman_get_frequency(node)
+
+            if left == nil or right == nil:
+                false
+            else:
+                val left_freq = huffman_get_frequency(left)
+                val right_freq = huffman_get_frequency(right)
+                val freq_valid = freq == left_freq + right_freq
+                val left_valid = huffman_validate_tree(left)
+                val right_valid = huffman_validate_tree(right)
+
+                var result = freq_valid
+                result = result and left_valid
+                result = result and right_valid
+                result
+
+# ============================================================================
+# TREE SERIALIZATION
+# ============================================================================
+
+fn huffman_serialize_tree(node):
+    """Serialize tree to string format (preorder traversal)"""
+    if node == nil:
+        "N"
+    else:
+        val is_leaf = huffman_is_leaf(node)
+        if is_leaf:
+            val symbol = huffman_get_symbol(node)
+            val sym_str = int_to_string(symbol)
+            string_concat("L", sym_str)
+        else:
+            val left = huffman_get_left(node)
+            val right = huffman_get_right(node)
+            val left_str = huffman_serialize_tree(left)
+            val right_str = huffman_serialize_tree(right)
+            var result = "I"
+            result = string_concat(result, ",")
+            result = string_concat(result, left_str)
+            result = string_concat(result, ",")
+            result = string_concat(result, right_str)
+            result
+
+fn huffman_deserialize_tree_helper(tokens, pos):
+    """Helper to deserialize tree, returns (node, next_position)"""
+    val tokens_len = array_length(tokens)
+    if pos >= tokens_len:
+        (nil, pos)
+    else:
+        val token = array_get(tokens, pos)
+        val token_len = string_length(token)
+        if token_len == 0:
+            (nil, pos + 1)
+        else:
+            val first_char = string_char_at(token, 0)
+            if first_char == "N":
+                (nil, pos + 1)
+            else:
+                if first_char == "L":
+                    val sym_str = string_substring(token, 1, token_len)
+                    val symbol = string_to_int(sym_str)
+                    val leaf = huffman_create_leaf(symbol, 0)
+                    (leaf, pos + 1)
+                else:
+                    if first_char == "I":
+                        val left_result = huffman_deserialize_tree_helper(tokens, pos + 1)
+                        val left = left_result[0]
+                        val pos2 = left_result[1]
+
+                        val right_result = huffman_deserialize_tree_helper(tokens, pos2)
+                        val right = right_result[0]
+                        val pos3 = right_result[1]
+
+                        val internal = huffman_create_internal(left, right)
+                        (internal, pos3)
+                    else:
+                        (nil, pos + 1)
+
+fn huffman_deserialize_tree(serialized):
+    """Deserialize tree from string format"""
+    val tokens = string_split(serialized, ",")
+    val result = huffman_deserialize_tree_helper(tokens, 0)
+    result[0]
+
+fn huffman_tree_depth_at_symbol(node, symbol, depth):
+    """Find depth of a symbol in the tree"""
+    if node == nil:
+        -1
+    else:
+        val is_leaf = huffman_is_leaf(node)
+        if is_leaf:
+            val node_symbol = huffman_get_symbol(node)
+            if node_symbol == symbol:
+                depth
+            else:
+                -1
+        else:
+            val left = huffman_get_left(node)
+            val right = huffman_get_right(node)
+            val left_depth = huffman_tree_depth_at_symbol(left, symbol, depth + 1)
+            if left_depth >= 0:
+                left_depth
+            else:
+                huffman_tree_depth_at_symbol(right, symbol, depth + 1)
+
+fn huffman_get_symbol_at_depth(node, target_depth, current_depth):
+    """Get first symbol found at specific depth"""
+    if node == nil:
+        -1
+    else:
+        val is_leaf = huffman_is_leaf(node)
+        if is_leaf:
+            if current_depth == target_depth:
+                huffman_get_symbol(node)
+            else:
+                -1
+        else:
+            val left = huffman_get_left(node)
+            val left_result = huffman_get_symbol_at_depth(left, target_depth, current_depth + 1)
+            if left_result >= 0:
+                left_result
+            else:
+                val right = huffman_get_right(node)
+                huffman_get_symbol_at_depth(right, target_depth, current_depth + 1)
+
+fn huffman_tree_balance_factor(node):
+    """Calculate balance factor (height difference between subtrees)"""
+    if node == nil:
+        0
+    else:
+        val is_leaf = huffman_is_leaf(node)
+        if is_leaf:
+            0
+        else:
+            val left = huffman_get_left(node)
+            val right = huffman_get_right(node)
+            val left_height = huffman_tree_height_helper(left)
+            val right_height = huffman_tree_height_helper(right)
+            left_height - right_height
+
+fn huffman_is_balanced_tree(node, threshold):
+    """Check if tree is balanced within threshold"""
+    if node == nil:
+        true
+    else:
+        val is_leaf = huffman_is_leaf(node)
+        if is_leaf:
+            true
+        else:
+            val balance = huffman_tree_balance_factor(node)
+            val abs_balance = if balance < 0: -balance else: balance
+            if abs_balance > threshold:
+                false
+            else:
+                val left = huffman_get_left(node)
+                val right = huffman_get_right(node)
+                val left_balanced = huffman_is_balanced_tree(left, threshold)
+                val right_balanced = huffman_is_balanced_tree(right, threshold)
+                var result = left_balanced
+                result = result and right_balanced
+                result
+
+fn huffman_collect_all_symbols(node):
+    """Collect all symbols from tree in array"""
+    if node == nil:
+        []
+    else:
+        val is_leaf = huffman_is_leaf(node)
+        if is_leaf:
+            val symbol = huffman_get_symbol(node)
+            [symbol]
+        else:
+            val left = huffman_get_left(node)
+            val right = huffman_get_right(node)
+            val left_symbols = huffman_collect_all_symbols(left)
+            val right_symbols = huffman_collect_all_symbols(right)
+            array_concat(left_symbols, right_symbols)
+
+fn huffman_symbol_exists(tree, symbol):
+    """Check if symbol exists in tree"""
+    val symbols = huffman_collect_all_symbols(tree)
+    var i = 0
+    val symbols_len = array_length(symbols)
+
+    while i < symbols_len:
+        val s = array_get(symbols, i)
+        if s == symbol:
+            return true
+        i = i + 1
+
+    false
+
+fn huffman_compare_trees(tree1, tree2):
+    """Check if two trees are structurally equal"""
+    if tree1 == nil and tree2 == nil:
+        true
+    else:
+        if tree1 == nil or tree2 == nil:
+            false
+        else:
+            val is_leaf1 = huffman_is_leaf(tree1)
+            val is_leaf2 = huffman_is_leaf(tree2)
+
+            if is_leaf1 and is_leaf2:
+                val sym1 = huffman_get_symbol(tree1)
+                val sym2 = huffman_get_symbol(tree2)
+                sym1 == sym2
+            else:
+                if is_leaf1 or is_leaf2:
+                    false
+                else:
+                    val left1 = huffman_get_left(tree1)
+                    val left2 = huffman_get_left(tree2)
+                    val right1 = huffman_get_right(tree1)
+                    val right2 = huffman_get_right(tree2)
+
+                    val left_eq = huffman_compare_trees(left1, left2)
+                    val right_eq = huffman_compare_trees(right1, right2)
+
+                    var result = left_eq
+                    result = result and right_eq
+                    result
+
+fn huffman_merge_frequency_tables(freq1, freq2):
+    """Merge two frequency tables"""
+    var result = array_new(HUFFMAN_MAX_SYMBOLS, 0)
+    var i = 0
+
+    while i < HUFFMAN_MAX_SYMBOLS:
+        val f1 = array_get(freq1, i)
+        val f2 = array_get(freq2, i)
+        val combined = f1 + f2
+        result = array_set(result, i, combined)
+        i = i + 1
+
+    result
+
+fn huffman_scale_frequencies(freq_table, scale_factor):
+    """Scale all frequencies by a factor"""
+    var result = array_new(HUFFMAN_MAX_SYMBOLS, 0)
+    var i = 0
+
+    while i < HUFFMAN_MAX_SYMBOLS:
+        val freq = array_get(freq_table, i)
+        val scaled = freq * scale_factor
+        result = array_set(result, i, scaled)
+        i = i + 1
+
+    result
+
+fn huffman_normalize_frequencies(freq_table, target_sum):
+    """Normalize frequencies to sum to target value"""
+    var current_sum = 0
+    var i = 0
+
+    while i < HUFFMAN_MAX_SYMBOLS:
+        val freq = array_get(freq_table, i)
+        current_sum = current_sum + freq
+        i = i + 1
+
+    if current_sum == 0:
+        freq_table
+    else:
+        val scale = target_sum / current_sum
+        huffman_scale_frequencies(freq_table, scale)
+
+fn huffman_get_most_frequent_symbol(freq_table):
+    """Find symbol with highest frequency"""
+    var max_freq = 0
+    var max_symbol = -1
+    var i = 0
+
+    while i < HUFFMAN_MAX_SYMBOLS:
+        val freq = array_get(freq_table, i)
+        if freq > max_freq:
+            max_freq = freq
+            max_symbol = i
+        i = i + 1
+
+    max_symbol
+
+fn huffman_get_least_frequent_symbol(freq_table):
+    """Find symbol with lowest non-zero frequency"""
+    var min_freq = 999999999
+    var min_symbol = -1
+    var i = 0
+
+    while i < HUFFMAN_MAX_SYMBOLS:
+        val freq = array_get(freq_table, i)
+        if freq > 0:
+            if freq < min_freq:
+                min_freq = freq
+                min_symbol = i
+        i = i + 1
+
+    min_symbol

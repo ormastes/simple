@@ -1,0 +1,444 @@
+# Lean 4 Invocation and Proof Checking
+#
+# This module handles:
+# - Writing generated Lean files to disk
+# - Invoking Lean to check proofs
+# - Parsing Lean output for errors
+# - Tracking proof status
+
+use io.fs as fs
+use host.process as process
+
+# Result of running Lean on a file
+class LeanCheckResult:
+    file: text
+    success: bool
+    stdout: text
+    stderr: text
+    goals_solved: i32
+    goals_remaining: i32
+    exit_code: Option<i32>
+
+    static fn new(file: text) -> LeanCheckResult:
+        LeanCheckResult(file, false, "", "", 0, 0, nil)
+
+    # Check if this result has unproven theorems
+    fn has_unproven() -> bool:
+        self.goals_remaining > 0
+
+    # Check if this result is fully proven
+    fn is_fully_proven() -> bool:
+        self.success and self.goals_remaining == 0
+
+    # Check if check passed (may have sorrys)
+    fn passed() -> bool:
+        self.success
+
+    # Format as a human-readable string
+    fn format() -> text:
+        var status = "PASSED"
+        if not self.success:
+            status = "FAILED"
+
+        var result = "[{status}] {self.file}\n"
+
+        if self.goals_solved > 0:
+            result = result + "  Goals solved: {self.goals_solved}\n"
+
+        if self.goals_remaining > 0:
+            result = result + "  Goals remaining (sorry): {self.goals_remaining}\n"
+
+        if self.stderr.len() > 0:
+            result = result + "  Errors:\n"
+            for line in self.stderr.split("\n"):
+                if line.len() > 0:
+                    result = result + "    {line}\n"
+
+        result
+
+# Individual theorem failure detail
+class TheoremFailure:
+    theorem_name: text
+    file: text
+    line: Option<i32>
+    error_message: text
+
+    static fn new(theorem_name: text, file: text, error_message: text) -> TheoremFailure:
+        TheoremFailure(theorem_name, file, nil, error_message)
+
+    fn format(self) -> text:
+        var out = "  FAIL: {self.theorem_name} in {self.file}"
+        if self.line.?:
+            out = out + ":{self.line.unwrap()}"
+        out = out + "\n    {self.error_message}\n"
+        out
+
+# Structured proof check result separating environment errors from proof failures
+class StructuredProofResult:
+    success: bool
+    theorems_checked: i32
+    theorems_proven: i32
+    theorems_failed: i32
+    theorems_admitted: i32           # sorry count
+    failures: List<TheoremFailure>
+    environment_error: Option<text>  # nil = proof failure, Some = env/setup issue
+    lean_version: text
+    duration_ms: i64
+
+    # Create a result representing an environment failure (not a proof failure)
+    static fn env_error(error: text, duration_ms: i64) -> StructuredProofResult:
+        StructuredProofResult(false, 0, 0, 0, 0, [], Some(error), "", duration_ms)
+
+    # Create from a successful proof check
+    static fn from_check(checked: i32, proven: i32, failed: i32, admitted: i32,
+                         failures: List<TheoremFailure>, lean_version: text,
+                         duration_ms: i64) -> StructuredProofResult:
+        val success = failed == 0
+        StructuredProofResult(success, checked, proven, failed, admitted, failures, nil, lean_version, duration_ms)
+
+    # True when the failure was an environment/toolchain issue, not a proof issue
+    fn is_environment_error(self) -> bool:
+        self.environment_error.?
+
+    # True when all theorems are proven with no sorrys
+    fn is_fully_proven(self) -> bool:
+        self.success and self.theorems_admitted == 0
+
+    fn format(self) -> text:
+        if self.environment_error.?:
+            return "ENVIRONMENT ERROR: {self.environment_error.unwrap()}\n"
+
+        var out = "Proof Check Result:\n"
+        out = out + "  Checked:  {self.theorems_checked}\n"
+        out = out + "  Proven:   {self.theorems_proven}\n"
+        if self.theorems_failed > 0:
+            out = out + "  Failed:   {self.theorems_failed}\n"
+        if self.theorems_admitted > 0:
+            out = out + "  Admitted: {self.theorems_admitted} (sorry)\n"
+        out = out + "  Duration: {self.duration_ms}ms\n"
+        out = out + "  Lean:     {self.lean_version}\n"
+
+        if self.failures.len() > 0:
+            out = out + "  Failures:\n"
+            for f in self.failures:
+                out = out + f.format()
+
+        out
+
+# Lean runner for proof checking
+class LeanRunner:
+    lean_path: text
+    output_dir: text
+    generate_stubs: bool
+    verbose: bool
+
+    static fn new(lean_path: text, output_dir: text) -> LeanRunner:
+        LeanRunner(lean_path, output_dir, true, false)
+
+    # Create with default paths
+    static fn default() -> LeanRunner:
+        LeanRunner.new("lean", "build/lean")
+
+    me with_stubs(generate: bool) -> LeanRunner:
+        self.generate_stubs = generate
+        self
+
+    me with_verbose(verbose: bool) -> LeanRunner:
+        self.verbose = verbose
+        self
+
+    # Ensure the output directory exists
+    fn ensure_output_dir():
+        fs.create_dir_all(self.output_dir)
+
+    # Write a Lean file to the output directory
+    fn write_lean_file(name: text, content: text) -> text:
+        self.ensure_output_dir()
+        val file_path = "{self.output_dir}/{name}.lean"
+        fs.write_text(file_path, content)
+        if self.verbose:
+            print("[lean] Wrote {file_path}")
+        file_path
+
+    # Check if Lean is available
+    fn is_lean_available() -> bool:
+        val result = process.run(self.lean_path, ["--version"])
+        result.success
+
+    # Get Lean version
+    fn lean_version() -> Option<text>:
+        val result = process.run(self.lean_path, ["--version"])
+        if result.success:
+            Some(result.stdout.trim())
+        else:
+            nil
+
+    # Run Lean on a file to check proofs
+    fn check_file(file: text) -> LeanCheckResult:
+        if self.verbose:
+            print("[lean] Checking {file}")
+
+        val result = process.run(self.lean_path, [file])
+        self.parse_output(file, result)
+
+    # Run Lean on generated content
+    fn check_content(name: text, content: text) -> LeanCheckResult:
+        val file_path = self.write_lean_file(name, content)
+        self.check_file(file_path)
+
+    # Parse Lean output
+    fn parse_output(file: text, result: process.ProcessResult) -> LeanCheckResult:
+        val stdout = result.stdout
+        val stderr = result.stderr
+
+        # Count sorry occurrences as remaining goals
+        val goals_remaining = count_occurrences(haystack=stdout, needle="sorry") + count_occurrences(haystack=stderr, needle="sorry")
+
+        # Count solved goals from Lean output
+        val goals_solved = count_solved_goals(stdout, stderr)
+
+        LeanCheckResult(file, result.success, stdout, stderr, goals_solved, goals_remaining, Some(result.exit_code))
+
+    # Check multiple files
+    fn check_files(files: List<text>) -> List<LeanCheckResult>:
+        var results: List<LeanCheckResult> = []
+        for file in files:
+            results = results + [self.check_file(file)]
+        results
+
+    # Run Lake build on a project
+    fn run_lake_build(project_dir: text) -> bool:
+        if self.verbose:
+            print("[lean] Running lake build in {project_dir}")
+
+        val result = process.run("lake", ["build"], project_dir)
+        if not result.success and self.verbose:
+            print("[lean] Lake build failed:")
+            print(result.stderr)
+        result.success
+
+    # Check a file with full toolchain validation first.
+    # Environment failures are returned as StructuredProofResult with
+    # environment_error set (distinct from proof-level failures).
+    fn check_with_toolchain(file: text) -> StructuredProofResult:
+        use verification.toolchain as toolchain
+
+        val start_ms = process.monotonic_ms()
+
+        # Validate toolchain
+        val tc_info = toolchain.ToolchainInfo.detect()
+        if not tc_info.lean_available:
+            val elapsed = process.monotonic_ms() - start_ms
+            return StructuredProofResult.env_error(
+                toolchain.ToolchainError.LeanNotFound.to_string(), elapsed)
+
+        # Run the proof check
+        val check_result = self.check_file(file)
+        val elapsed = process.monotonic_ms() - start_ms
+
+        # Parse into structured result
+        val lean_ver = tc_info.lean_version ?? "unknown"
+        self.to_structured(check_result, lean_ver, elapsed)
+
+    # Convert a LeanCheckResult into a StructuredProofResult by parsing
+    # the Lean output for theorem-level detail.
+    fn to_structured(check_result: LeanCheckResult, lean_version: text,
+                     duration_ms: i64) -> StructuredProofResult:
+        val sorry_count = check_result.goals_remaining
+        var failures: List<TheoremFailure> = []
+        var theorems_failed = 0
+
+        # Parse stderr for theorem-level errors
+        # Lean error format: "file.lean:LINE:COL: error: ..."
+        if check_result.stderr.len() > 0:
+            for line in check_result.stderr.split("\n"):
+                if line.contains("error:"):
+                    val failure = parse_theorem_failure(check_result.file, line)
+                    if failure.?:
+                        failures = failures + [failure.unwrap()]
+                        theorems_failed = theorems_failed + 1
+
+        # If check failed but we found no parsed failures, add a generic one
+        if not check_result.success and theorems_failed == 0:
+            val generic = TheoremFailure.new("(unknown)", check_result.file, check_result.stderr)
+            failures = failures + [generic]
+            theorems_failed = 1
+
+        val theorems_checked = check_result.goals_solved + sorry_count + theorems_failed
+        val theorems_proven = check_result.goals_solved
+
+        StructuredProofResult.from_check(
+            theorems_checked, theorems_proven, theorems_failed,
+            sorry_count, failures, lean_version, duration_ms)
+
+# Parse a Lean error line into a TheoremFailure.
+# Lean format: "file.lean:LINE:COL: error: MESSAGE"
+fn parse_theorem_failure(file: text, error_line: text) -> Option<TheoremFailure>:
+    val trimmed = error_line.trim()
+    if trimmed.len() == 0:
+        return nil
+
+    val error_idx = trimmed.find("error:")
+    if error_idx < 0:
+        return nil
+
+    val error_msg = trimmed.substring(error_idx + 6).trim()
+    var line_num: Option<i32> = nil
+    var theorem_name = "(unknown)"
+
+    # Try to extract line number from "file:LINE:COL:" prefix
+    val colon1 = trimmed.find(":")
+    if colon1 > 0:
+        val after1 = trimmed.substring(colon1 + 1)
+        val colon2 = after1.find(":")
+        if colon2 > 0:
+            val line_str = after1.substring(0, colon2).trim()
+            val parsed = line_str.parse_int()
+            if parsed.?:
+                line_num = Some(parsed.unwrap())
+
+    # Try to extract theorem name from error message
+    if error_msg.contains("theorem"):
+        val thm_idx = error_msg.find("theorem")
+        val after_thm = error_msg.substring(thm_idx + 7).trim()
+        val space_idx = after_thm.find(" ")
+        if space_idx > 0:
+            theorem_name = after_thm.substring(0, space_idx)
+        else:
+            if after_thm.len() > 0:
+                theorem_name = after_thm
+
+    val failure = TheoremFailure(theorem_name, file, line_num, error_msg)
+    Some(failure)
+
+# Count occurrences of a substring
+fn count_occurrences(haystack: text, needle: text) -> i32:
+    var count = 0
+    var pos = 0
+    while pos < haystack.len():
+        val idx = haystack.find(needle, pos)
+        if idx >= 0:
+            count = count + 1
+            pos = idx + needle.len()
+        else:
+            break
+    count
+
+# Count solved goals from Lean output
+fn count_solved_goals(stdout: text, stderr: text) -> i32:
+    val combined = stdout + "\n" + stderr
+    val accomplished = count_occurrences(haystack=combined, needle="goals accomplished")
+    val no_goals = count_occurrences(haystack=combined, needle="no goals")
+    accomplished + no_goals
+
+# Summary of verification results
+class VerificationSummary:
+    files_checked: i32
+    files_passed: i32
+    files_failed: i32
+    total_theorems: i32
+    proven_theorems: i32
+    unproven_theorems: i32
+    admitted_theorems: i32           # sorry count across all files
+    errors: List<text>
+    environment_errors: List<text>   # separate from proof errors
+
+    static fn empty() -> VerificationSummary:
+        VerificationSummary(0, 0, 0, 0, 0, 0, 0, [], [])
+
+    # Create a summary from check results
+    static fn from_results(results: List<LeanCheckResult>) -> VerificationSummary:
+        var summary = VerificationSummary.empty()
+
+        for result in results:
+            summary.files_checked = summary.files_checked + 1
+            if result.success:
+                summary.files_passed = summary.files_passed + 1
+            else:
+                summary.files_failed = summary.files_failed + 1
+                if result.stderr.len() > 0:
+                    summary.errors = summary.errors + [result.stderr]
+
+            summary.proven_theorems = summary.proven_theorems + result.goals_solved
+            summary.unproven_theorems = summary.unproven_theorems + result.goals_remaining
+            summary.admitted_theorems = summary.admitted_theorems + result.goals_remaining
+
+        summary.total_theorems = summary.proven_theorems + summary.unproven_theorems
+        summary
+
+    # Create a summary from structured proof results
+    static fn from_structured(results: List<StructuredProofResult>) -> VerificationSummary:
+        var summary = VerificationSummary.empty()
+
+        for result in results:
+            summary.files_checked = summary.files_checked + 1
+
+            if result.is_environment_error():
+                summary.files_failed = summary.files_failed + 1
+                summary.environment_errors = summary.environment_errors + [result.environment_error.unwrap()]
+            else:
+                if result.success:
+                    summary.files_passed = summary.files_passed + 1
+                else:
+                    summary.files_failed = summary.files_failed + 1
+                    for f in result.failures:
+                        summary.errors = summary.errors + [f.error_message]
+
+                summary.proven_theorems = summary.proven_theorems + result.theorems_proven
+                summary.unproven_theorems = summary.unproven_theorems + result.theorems_failed
+                summary.admitted_theorems = summary.admitted_theorems + result.theorems_admitted
+
+        summary.total_theorems = summary.proven_theorems + summary.unproven_theorems + summary.admitted_theorems
+        summary
+
+    # Check if verification was successful
+    fn is_success() -> bool:
+        self.files_failed == 0
+
+    # Check if all theorems are proven
+    fn is_fully_proven() -> bool:
+        self.is_success() and self.unproven_theorems == 0
+
+    # Format as a human-readable string
+    fn format() -> text:
+        var out = "Verification Summary:\n"
+        out = out + "  Files: {self.files_passed}/{self.files_checked} passed\n"
+
+        if self.total_theorems > 0:
+            out = out + "  Theorems: {self.proven_theorems}/{self.total_theorems} proven\n"
+
+        if self.admitted_theorems > 0:
+            out = out + "  Admitted (sorry): {self.admitted_theorems}\n"
+
+        if self.unproven_theorems > 0:
+            out = out + "  Unproven: {self.unproven_theorems}\n"
+
+        if self.environment_errors.len() > 0:
+            out = out + "  Environment errors: {self.environment_errors.len()}\n"
+            for env_err in self.environment_errors:
+                out = out + "    - {env_err}\n"
+
+        if self.errors.len() > 0:
+            out = out + "  Proof errors: {self.errors.len()}\n"
+
+        out
+
+# Quick check functions
+
+# Check if Lean is installed
+fn is_lean_installed() -> bool:
+    val runner = LeanRunner.default()
+    runner.is_lean_available()
+
+# Check a single Lean file
+fn check_lean_file(file: text) -> LeanCheckResult:
+    val runner = LeanRunner.default()
+    runner.check_file(file)
+
+# Check and summarize multiple files
+fn check_and_summarize(files: List<text>) -> VerificationSummary:
+    val runner = LeanRunner.default()
+    val results = runner.check_files(files)
+    VerificationSummary.from_results(results)
+
+# Export public API

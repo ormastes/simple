@@ -1,0 +1,541 @@
+#![allow(unnamed_duplicate_typed_args)]
+use std.nogc_sync_mut.ffi.spl_fonts.{FontRasterizer, GlyphBitmap}
+
+# Shared Font Renderer — unified text rendering for both OS and browser
+#
+# Provides buffer-based text rendering using three font backends:
+#   1. TrueType (via stb_truetype FFI) — full Unicode, AA, proportional
+#   2. Vector font (outline commands) — 29 glyphs, 2x2 sub-pixel AA
+#   3. Bitmap 8x16 (VGA fallback) — monospace, no AA
+#
+# The renderer auto-selects the best available backend per glyph:
+#   - If TrueType font loaded → use TrueType
+#   - If vector glyph available → use vector
+#   - Otherwise → bitmap fallback
+#
+# This module has NO dependency on CompositorBackend, so it can be used
+# by the OS compositor, browser engine, and game engine alike.
+
+# ============================================================================
+# Font Backend Selection
+# ============================================================================
+
+enum FontBackend:
+    TrueType
+    Vector
+    Bitmap
+
+# ============================================================================
+# Glyph Cache Entry
+# ============================================================================
+
+class CachedGlyph:
+    codepoint: i32
+    font_size: i32
+    width: i32
+    height: i32
+    advance: i32
+    pixels: [u8]    # grayscale alpha (0-255) per pixel, row-major
+
+    static fn empty(cp: i32, fs: i32) -> CachedGlyph:
+        CachedGlyph(codepoint: cp, font_size: fs, width: 0, height: 0, advance: 0, pixels: [])
+
+# ============================================================================
+# Glyph Cache
+# ============================================================================
+
+class GlyphCache:
+    entries: [CachedGlyph]
+    max_entries: i32
+
+    static fn new(max_size: i32) -> GlyphCache:
+        GlyphCache(entries: [], max_entries: max_size)
+
+    fn lookup(codepoint: i32, font_size: i32) -> CachedGlyph?:
+        for entry in self.entries:
+            if entry.codepoint == codepoint and entry.font_size == font_size:
+                return entry
+        nil
+
+    me insert(glyph: CachedGlyph):
+        # Evict oldest if cache full
+        if self.entries.len() >= self.max_entries:
+            self.entries = self.entries.slice(1, self.entries.len())
+        self.entries = self.entries + [glyph]
+
+# ============================================================================
+# Font Renderer
+# ============================================================================
+
+class FontRenderer:
+    cache: GlyphCache
+    ttf_handle: i64     # TrueType font handle (0 = not loaded)
+    use_vector: bool     # enable vector font fallback
+    use_bitmap: bool     # enable bitmap font fallback
+    ttf_rasterizer: FontRasterizer?  # Phase 3b: SFFI spl_fonts TTF backend (nil = disabled)
+
+    static fn new() -> FontRenderer:
+        FontRenderer(
+            cache: GlyphCache.new(512),
+            ttf_handle: 0,
+            use_vector: true,
+            use_bitmap: true,
+            ttf_rasterizer: nil
+        )
+
+    static fn with_ttf(handle: i64) -> FontRenderer:
+        FontRenderer(
+            cache: GlyphCache.new(512),
+            ttf_handle: handle,
+            use_vector: true,
+            use_bitmap: true,
+            ttf_rasterizer: nil
+        )
+
+    fn has_ttf() -> bool:
+        self.ttf_handle != 0
+
+    # -----------------------------------------------------------------------
+    # Phase 3b: opt-in SFFI spl_fonts TrueType backend
+    # -----------------------------------------------------------------------
+    # Attempts to load `dylib_path` and initialize it with `ttf_path`. On
+    # success the renderer will prefer the SFFI spl_fonts rasterizer for
+    # glyphs (highest-priority backend). On any failure the renderer stays
+    # in its default state and callers fall through to the vector/bitmap
+    # paths unchanged. Caller opt-in only — default FontRenderer.new()
+    # instances behave exactly as before.
+    me try_enable_ttf(dylib_path: text, ttf_path: text) -> bool:
+        val r = FontRasterizer.load(dylib_path, ttf_path)
+        if r != nil:
+            self.ttf_rasterizer = r
+            return true
+        false
+
+    fn has_sffi_ttf() -> bool:
+        self.ttf_rasterizer != nil
+
+    # -----------------------------------------------------------------------
+    # Get glyph (cached) — returns rasterized alpha bitmap
+    # -----------------------------------------------------------------------
+    me get_glyph(codepoint: i32, font_size: i32) -> CachedGlyph:
+        # Check cache first
+        val cached = self.cache.lookup(codepoint, font_size)
+        if val Some(g) = cached:
+            return g
+
+        # Rasterize
+        var glyph = CachedGlyph.empty(codepoint, font_size)
+
+        # Phase 3b: prefer SFFI spl_fonts TrueType backend when the caller
+        # has opted in via try_enable_ttf(). Any failure falls through to
+        # the existing vector/bitmap path unchanged. Under the interpreter,
+        # static-fn Option<T> returns are typed as T directly, so we use
+        # `!= nil` rather than `if val Some(x) =` destructuring.
+        var handled = false
+        val rast = self.ttf_rasterizer
+        if rast != nil:
+            val gb = rast.rasterize(codepoint.to_i64(), font_size.to_i64())
+            if gb != nil:
+                glyph = _sffi_glyph_to_cached(gb, codepoint, font_size)
+                handled = true
+
+        if handled:
+            pass_do_nothing
+        else if self.has_ttf():
+            glyph = rasterize_ttf(self.ttf_handle, codepoint, font_size)
+        else if self.use_vector:
+            val vector_cmds = vf_glyph_commands(codepoint)
+            if vector_cmds.len() > 0:
+                glyph = rasterize_vector(vector_cmds, codepoint, font_size)
+            else if self.use_bitmap:
+                glyph = rasterize_bitmap(codepoint, font_size)
+        else if self.use_bitmap:
+            glyph = rasterize_bitmap(codepoint, font_size)
+
+        self.cache.insert(glyph)
+        glyph
+
+    # -----------------------------------------------------------------------
+    # Measure text width using actual glyph advances
+    # -----------------------------------------------------------------------
+    me measure_text_width(content: text, font_size: i32) -> i32:
+        var total_w = 0
+        for ch in content:
+            val cp = ch.char_code_at(0)
+            val glyph = self.get_glyph(cp, font_size)
+            if glyph.advance > 0:
+                total_w = total_w + glyph.advance
+            else:
+                # Fallback: approximate
+                total_w = total_w + font_size * 55 / 100
+        total_w
+
+    # -----------------------------------------------------------------------
+    # Render text into a pixel buffer (ARGB u32)
+    # -----------------------------------------------------------------------
+    me render_text(buffer: mut [u32], buf_w: i32, buf_h: i32,
+                   x: i32, y: i32, content: text,
+                   color: u32, font_size: i32):
+        """Render text string into an ARGB pixel buffer with anti-aliased glyphs."""
+        var cx = x
+        for ch in content:
+            val cp = ch.char_code_at(0)
+            val glyph = self.get_glyph(cp, font_size)
+            if glyph.width > 0 and glyph.height > 0:
+                blit_glyph(buffer, buf_w, buf_h, cx, y, glyph, color)
+            cx = cx + glyph.advance
+
+# ============================================================================
+# Phase 3b: SFFI spl_fonts GlyphBitmap → CachedGlyph adapter
+# ============================================================================
+#
+# Converts the (i64-typed) GlyphBitmap returned by the typed spl_fonts
+# wrapper into the ([u8]-pixel) CachedGlyph used by the renderer's cache
+# and blit path. Alpha values are guaranteed 0..255 by the Rust dylib, so
+# the .to_i32().to_u8() chain (same pattern used for rt_font_bitmap_get_pixel
+# and the vector rasterizer) is safe here.
+
+fn _sffi_glyph_to_cached(gb: GlyphBitmap, codepoint: i32, font_size: i32) -> CachedGlyph:
+    val w = gb.width.to_i32()
+    val h = gb.height.to_i32()
+    val adv_raw = gb.advance.to_i32()
+    val adv = if adv_raw > 0: adv_raw else: w + 1
+
+    var pixels: [u8] = []
+    val total = gb.pixels.len()
+    var i = 0
+    while i < total:
+        val alpha = gb.pixels[i]
+        pixels = pixels + [alpha.to_i32().to_u8()]
+        i = i + 1
+
+    CachedGlyph(
+        codepoint: codepoint,
+        font_size: font_size,
+        width: w,
+        height: h,
+        advance: adv,
+        pixels: pixels
+    )
+
+# ============================================================================
+# TrueType Rasterization (via FFI)
+# ============================================================================
+
+extern fn rt_font_glyph_bitmap(font_handle: i64, codepoint: i64, size: f64) -> i64
+extern fn rt_font_bitmap_width(bitmap_handle: i64) -> i64
+extern fn rt_font_bitmap_height(bitmap_handle: i64) -> i64
+extern fn rt_font_bitmap_get_pixel(bitmap_handle: i64, x: i64, y: i64) -> i64
+extern fn rt_font_bitmap_free(bitmap_handle: i64)
+extern fn rt_font_glyph_advance(font_handle: i64, codepoint: i64, size: f64) -> i64
+
+fn rasterize_ttf(font_handle: i64, codepoint: i32, font_size: i32) -> CachedGlyph:
+    val bmp = rt_font_glyph_bitmap(font_handle, codepoint.to_i64(), font_size.to_f64())
+    if bmp == 0:
+        return CachedGlyph.empty(codepoint, font_size)
+    val w = rt_font_bitmap_width(bmp).to_i32()
+    val h = rt_font_bitmap_height(bmp).to_i32()
+    val adv = rt_font_glyph_advance(font_handle, codepoint.to_i64(), font_size.to_f64()).to_i32()
+
+    # Copy bitmap pixels to our cache
+    var pixels: [u8] = []
+    var row = 0
+    while row < h:
+        var col = 0
+        while col < w:
+            val alpha = rt_font_bitmap_get_pixel(bmp, col.to_i64(), row.to_i64())
+            pixels = pixels + [alpha.to_i32().to_u8()]
+            col = col + 1
+        row = row + 1
+
+    rt_font_bitmap_free(bmp)
+
+    CachedGlyph(
+        codepoint: codepoint,
+        font_size: font_size,
+        width: w,
+        height: h,
+        advance: if adv > 0: adv else: w + 1,
+        pixels: pixels
+    )
+
+# ============================================================================
+# Vector Font Rasterization (Pure Simple, ported from compositor)
+# ============================================================================
+
+val VF_MOVE: i32 = 0
+val VF_LINE: i32 = 1
+val VF_CLOSE: i32 = 2
+val VF_END: i32 = 3
+
+fn rasterize_vector(cmds: [i32], codepoint: i32, font_size: i32) -> CachedGlyph:
+    val glyph_w = vf_glyph_width(codepoint)
+    val pixel_w = glyph_w * font_size / 24
+    val pixel_h = font_size
+    if pixel_w <= 0 or pixel_h <= 0:
+        return CachedGlyph.empty(codepoint, font_size)
+
+    var pixels: [u8] = []
+    val scale_n = font_size * 2
+    val scale_d: i32 = 48
+
+    var row = 0
+    while row < pixel_h:
+        var col = 0
+        while col < pixel_w:
+            # 2x2 sub-pixel AA sampling
+            var coverage = 0
+            if vf_point_inside(cmds, col * 2, row * 2, scale_n, scale_d):
+                coverage = coverage + 1
+            if vf_point_inside(cmds, col * 2 + 1, row * 2, scale_n, scale_d):
+                coverage = coverage + 1
+            if vf_point_inside(cmds, col * 2, row * 2 + 1, scale_n, scale_d):
+                coverage = coverage + 1
+            if vf_point_inside(cmds, col * 2 + 1, row * 2 + 1, scale_n, scale_d):
+                coverage = coverage + 1
+            val alpha = coverage * 255 / 4
+            pixels = pixels + [alpha.to_i32().to_u8()]
+            col = col + 1
+        row = row + 1
+
+    CachedGlyph(
+        codepoint: codepoint,
+        font_size: font_size,
+        width: pixel_w,
+        height: pixel_h,
+        advance: pixel_w + 1,
+        pixels: pixels
+    )
+
+fn vf_point_inside(cmds: [i32], px: i32, py: i32, scale_n: i32, scale_d: i32) -> bool:
+    """Ray-casting point-in-polygon test (even-odd rule)."""
+    var crossings = 0
+    var i = 0
+    var move_x = 0
+    var move_y = 0
+    var cur_x = 0
+    var cur_y = 0
+    while i + 2 < cmds.len():
+        val cmd = cmds[i]
+        val cx = cmds[i + 1] * scale_n / scale_d
+        val cy = cmds[i + 2] * scale_n / scale_d
+        if cmd == VF_MOVE:
+            move_x = cx
+            move_y = cy
+            cur_x = cx
+            cur_y = cy
+        else if cmd == VF_LINE:
+            val y1 = cur_y
+            val y2 = cy
+            if (y1 <= py and py < y2) or (y2 <= py and py < y1):
+                val dy = y2 - y1
+                if dy != 0:
+                    val ix = cur_x + (py - y1) * (cx - cur_x) / dy
+                    if px < ix:
+                        crossings = crossings + 1
+            cur_x = cx
+            cur_y = cy
+        else if cmd == VF_CLOSE:
+            val y1 = cur_y
+            val y2 = move_y
+            if (y1 <= py and py < y2) or (y2 <= py and py < y1):
+                val dy = y2 - y1
+                if dy != 0:
+                    val ix = cur_x + (py - y1) * (move_x - cur_x) / dy
+                    if px < ix:
+                        crossings = crossings + 1
+            cur_x = move_x
+            cur_y = move_y
+        else if cmd == VF_END:
+            return crossings % 2 == 1
+        i = i + 3
+    crossings % 2 == 1
+
+# ============================================================================
+# Bitmap Font Rasterization (8x16 VGA fallback)
+# ============================================================================
+
+extern fn rt_gui_get_glyph_8x16(ch: i32) -> [u8]
+
+fn rasterize_bitmap(codepoint: i32, font_size: i32) -> CachedGlyph:
+    # Scale factor from 16px base
+    val scale = if font_size > 16: font_size / 16 else: 1
+    val base_w = 8
+    val base_h = 16
+    val out_w = base_w * scale
+    val out_h = base_h * scale
+
+    val glyph_data = rt_gui_get_glyph_8x16(codepoint)
+    if glyph_data.len() < 16:
+        return CachedGlyph(
+            codepoint: codepoint,
+            font_size: font_size,
+            width: out_w,
+            height: out_h,
+            advance: out_w,
+            pixels: []
+        )
+
+    var pixels: [u8] = []
+    var row = 0
+    while row < out_h:
+        val base_row = row / scale
+        val bits = if base_row < 16: glyph_data[base_row] else: 0
+        var col = 0
+        while col < out_w:
+            val base_col = col / scale
+            val mask = 0x80 >> base_col
+            if (bits & mask) != 0:
+                pixels = pixels + [255]
+            else:
+                pixels = pixels + [0]
+            col = col + 1
+        row = row + 1
+
+    CachedGlyph(
+        codepoint: codepoint,
+        font_size: font_size,
+        width: out_w,
+        height: out_h,
+        advance: out_w,
+        pixels: pixels
+    )
+
+# ============================================================================
+# Glyph Blitting (alpha-blend into ARGB buffer)
+# ============================================================================
+
+fn blit_glyph(buffer: mut [u32], buf_w: i32, buf_h: i32,
+              x: i32, y: i32, glyph: CachedGlyph, color: u32):
+    """Alpha-blend a rasterized glyph into an ARGB pixel buffer."""
+    val fg_r = (color >> 16) & 0xFF
+    val fg_g = (color >> 8) & 0xFF
+    val fg_b = color & 0xFF
+
+    var row = 0
+    while row < glyph.height:
+        val py = y + row
+        if py >= 0 and py < buf_h:
+            var col = 0
+            while col < glyph.width:
+                val px = x + col
+                if px >= 0 and px < buf_w:
+                    val glyph_idx = row * glyph.width + col
+                    if glyph_idx < glyph.pixels.len():
+                        val alpha = glyph.pixels[glyph_idx].to_i32()
+                        if alpha > 0:
+                            val buf_idx = py * buf_w + px
+                            if buf_idx >= 0 and buf_idx < buffer.len():
+                                if alpha >= 255:
+                                    buffer[buf_idx] = 0xFF000000 | (fg_r << 16) | (fg_g << 8) | fg_b
+                                else:
+                                    # Alpha blend
+                                    val dst = buffer[buf_idx]
+                                    val dst_r = (dst >> 16) & 0xFF
+                                    val dst_g = (dst >> 8) & 0xFF
+                                    val dst_b = dst & 0xFF
+                                    val inv = 255 - alpha
+                                    val out_r = (fg_r * alpha + dst_r * inv) / 255
+                                    val out_g = (fg_g * alpha + dst_g * inv) / 255
+                                    val out_b = (fg_b * alpha + dst_b * inv) / 255
+                                    buffer[buf_idx] = 0xFF000000 | (out_r << 16) | (out_g << 8) | out_b
+                col = col + 1
+        row = row + 1
+
+# ============================================================================
+# Vector Font Glyph Data (design space: 24 units)
+# Shared from OS compositor's outline definitions
+# ============================================================================
+
+fn vf_glyph_commands(codepoint: i32) -> [i32]:
+    """Return vector outline commands for a codepoint, or empty if not available."""
+    if codepoint == 65: return _vf_A()
+    if codepoint == 66: return _vf_B()
+    if codepoint == 67: return _vf_C()
+    if codepoint == 68: return _vf_D()
+    if codepoint == 69: return _vf_E()
+    if codepoint == 70: return _vf_F()
+    if codepoint == 72: return _vf_H()
+    if codepoint == 73: return _vf_I()
+    if codepoint == 76: return _vf_L()
+    if codepoint == 77: return _vf_M()
+    if codepoint == 78: return _vf_N()
+    if codepoint == 79: return _vf_O()
+    if codepoint == 80: return _vf_P()
+    if codepoint == 82: return _vf_R()
+    if codepoint == 83: return _vf_S()
+    if codepoint == 84: return _vf_T()
+    if codepoint == 87: return _vf_W()
+    # Lowercase
+    if codepoint == 97: return _vf_a()
+    if codepoint == 101: return _vf_e()
+    if codepoint == 105: return _vf_i()
+    if codepoint == 108: return _vf_l()
+    if codepoint == 110: return _vf_n()
+    if codepoint == 111: return _vf_o()
+    if codepoint == 114: return _vf_r()
+    if codepoint == 115: return _vf_s()
+    if codepoint == 116: return _vf_t()
+    []
+
+fn vf_glyph_width(codepoint: i32) -> i32:
+    """Return design-space width for a vector glyph (24 units = full height)."""
+    if codepoint == 65: return 11    # A
+    if codepoint == 66: return 10    # B
+    if codepoint == 67: return 10    # C
+    if codepoint == 68: return 10    # D
+    if codepoint == 69: return 9     # E
+    if codepoint == 70: return 9     # F
+    if codepoint == 72: return 10    # H
+    if codepoint == 73: return 4     # I
+    if codepoint == 76: return 9     # L
+    if codepoint == 77: return 12    # M
+    if codepoint == 78: return 10    # N
+    if codepoint == 79: return 11    # O
+    if codepoint == 80: return 10    # P
+    if codepoint == 82: return 10    # R
+    if codepoint == 83: return 10    # S
+    if codepoint == 84: return 10    # T
+    if codepoint == 87: return 14    # W
+    if codepoint == 97: return 9     # a
+    if codepoint == 101: return 9    # e
+    if codepoint == 105: return 4    # i
+    if codepoint == 108: return 4    # l
+    if codepoint == 110: return 9    # n
+    if codepoint == 111: return 9    # o
+    if codepoint == 114: return 7    # r
+    if codepoint == 115: return 8    # s
+    if codepoint == 116: return 7    # t
+    8  # default
+
+# Vector glyph outlines — each glyph is [cmd, x, y, ...] triplets
+# cmd: 0=MOVE, 1=LINE, 2=CLOSE, 3=END
+
+fn _vf_A() -> [i32]: [0,0,24, 1,5,0, 1,6,0, 1,11,24, 1,9,24, 1,7,16, 1,4,16, 1,2,24, 2,0,0, 0,4,14, 1,5,8, 1,6,8, 1,7,14, 2,0,0, 3,0,0]
+fn _vf_B() -> [i32]: [0,0,0, 1,0,24, 1,7,24, 1,9,22, 1,9,18, 1,7,16, 1,0,16, 0,7,16, 1,10,14, 1,10,2, 1,7,0, 1,0,0, 2,0,0, 0,2,2, 1,7,2, 1,8,4, 1,8,14, 1,7,14, 1,2,14, 2,0,0, 0,2,18, 1,7,18, 1,7,22, 1,2,22, 2,0,0, 3,0,0]
+fn _vf_C() -> [i32]: [0,10,4, 1,8,1, 1,3,1, 1,1,4, 1,1,20, 1,3,23, 1,8,23, 1,10,20, 0,3,3, 1,3,21, 1,5,23, 1,8,23, 0,8,1, 1,5,1, 1,3,3, 2,0,0, 3,0,0]
+fn _vf_D() -> [i32]: [0,0,0, 1,0,24, 1,6,24, 1,10,20, 1,10,4, 1,6,0, 2,0,0, 0,2,2, 1,6,2, 1,8,5, 1,8,19, 1,6,22, 1,2,22, 2,0,0, 3,0,0]
+fn _vf_E() -> [i32]: [0,0,0, 1,0,24, 1,9,24, 1,9,22, 1,2,22, 1,2,13, 1,7,13, 1,7,11, 1,2,11, 1,2,2, 1,9,2, 1,9,0, 2,0,0, 3,0,0]
+fn _vf_F() -> [i32]: [0,0,0, 1,0,24, 1,2,24, 1,2,13, 1,7,13, 1,7,11, 1,2,11, 1,2,2, 1,9,2, 1,9,0, 2,0,0, 3,0,0]
+fn _vf_H() -> [i32]: [0,0,0, 1,0,24, 1,2,24, 1,2,13, 1,8,13, 1,8,24, 1,10,24, 1,10,0, 1,8,0, 1,8,11, 1,2,11, 1,2,0, 2,0,0, 3,0,0]
+fn _vf_I() -> [i32]: [0,0,0, 1,0,24, 1,2,24, 1,2,0, 2,0,0, 3,0,0]
+fn _vf_L() -> [i32]: [0,0,0, 1,0,24, 1,2,24, 1,2,2, 1,9,2, 1,9,0, 2,0,0, 3,0,0]
+fn _vf_M() -> [i32]: [0,0,24, 1,0,0, 1,2,0, 1,6,8, 1,10,0, 1,12,0, 1,12,24, 1,10,24, 1,10,6, 1,6,14, 1,2,6, 1,2,24, 2,0,0, 3,0,0]
+fn _vf_N() -> [i32]: [0,0,24, 1,0,0, 1,2,0, 1,8,18, 1,8,0, 1,10,0, 1,10,24, 1,8,24, 1,2,6, 1,2,24, 2,0,0, 3,0,0]
+fn _vf_O() -> [i32]: [0,3,0, 1,1,3, 1,1,21, 1,3,24, 1,8,24, 1,10,21, 1,10,3, 1,8,0, 2,0,0, 0,3,2, 1,3,22, 1,5,24, 1,6,24, 1,8,22, 1,8,2, 1,6,0, 1,5,0, 2,0,0, 3,0,0]
+fn _vf_P() -> [i32]: [0,0,0, 1,0,24, 1,2,24, 1,2,13, 1,7,13, 1,9,11, 1,9,2, 1,7,0, 2,0,0, 0,2,2, 1,7,2, 1,7,11, 1,2,11, 2,0,0, 3,0,0]
+fn _vf_R() -> [i32]: [0,0,0, 1,0,24, 1,2,24, 1,2,13, 1,6,13, 1,10,24, 1,8,24, 1,5,14, 1,7,14, 1,9,12, 1,9,2, 1,7,0, 2,0,0, 0,2,2, 1,7,2, 1,7,12, 1,2,12, 2,0,0, 3,0,0]
+fn _vf_S() -> [i32]: [0,9,3, 1,7,1, 1,3,1, 1,1,3, 1,1,10, 1,3,12, 1,7,12, 1,9,14, 1,9,21, 1,7,23, 1,3,23, 1,1,21, 0,3,3, 1,3,10, 1,7,10, 1,7,3, 2,0,0, 0,3,14, 1,3,21, 1,7,21, 1,7,14, 2,0,0, 3,0,0]
+fn _vf_T() -> [i32]: [0,0,0, 1,10,0, 1,10,2, 1,6,2, 1,6,24, 1,4,24, 1,4,2, 1,0,2, 2,0,0, 3,0,0]
+fn _vf_W() -> [i32]: [0,0,0, 1,2,0, 1,3,16, 1,7,6, 1,11,16, 1,12,0, 1,14,0, 1,11,24, 1,9,24, 1,7,12, 1,5,24, 1,3,24, 2,0,0, 3,0,0]
+
+# Lowercase
+fn _vf_a() -> [i32]: [0,1,8, 1,3,6, 1,7,6, 1,9,8, 1,9,24, 1,7,24, 1,7,20, 1,3,24, 1,1,22, 1,1,14, 1,3,12, 1,7,12, 0,3,14, 1,3,22, 1,7,18, 2,0,0, 3,0,0]
+fn _vf_e() -> [i32]: [0,1,14, 1,1,8, 1,3,6, 1,7,6, 1,9,8, 1,9,14, 1,3,14, 1,3,16, 1,9,16, 1,9,20, 1,7,24, 1,3,24, 1,1,22, 1,1,14, 2,0,0, 3,0,0]
+fn _vf_i() -> [i32]: [0,1,6, 1,3,6, 1,3,24, 1,1,24, 2,0,0, 0,1,1, 1,3,1, 1,3,4, 1,1,4, 2,0,0, 3,0,0]
+fn _vf_l() -> [i32]: [0,1,0, 1,3,0, 1,3,24, 1,1,24, 2,0,0, 3,0,0]
+fn _vf_n() -> [i32]: [0,0,6, 1,2,6, 1,2,8, 1,6,6, 1,8,8, 1,8,24, 1,6,24, 1,6,10, 1,4,10, 1,2,12, 1,2,24, 1,0,24, 2,0,0, 3,0,0]
+fn _vf_o() -> [i32]: [0,3,6, 1,1,8, 1,1,22, 1,3,24, 1,7,24, 1,9,22, 1,9,8, 1,7,6, 2,0,0, 0,3,8, 1,3,22, 1,7,22, 1,7,8, 2,0,0, 3,0,0]
+fn _vf_r() -> [i32]: [0,0,6, 1,2,6, 1,2,10, 1,4,6, 1,7,6, 1,7,8, 1,4,8, 1,2,12, 1,2,24, 1,0,24, 2,0,0, 3,0,0]
+fn _vf_s() -> [i32]: [0,8,8, 1,6,6, 1,2,6, 1,0,8, 1,0,13, 1,2,15, 1,6,15, 1,8,17, 1,8,22, 1,6,24, 1,2,24, 1,0,22, 2,0,0, 3,0,0]
+fn _vf_t() -> [i32]: [0,2,0, 1,4,0, 1,4,6, 1,7,6, 1,7,8, 1,4,8, 1,4,22, 1,5,24, 1,7,24, 1,7,22, 1,6,22, 1,6,8, 0,0,6, 1,4,6, 1,4,8, 1,0,8, 2,0,0, 3,0,0]

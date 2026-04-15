@@ -1,0 +1,483 @@
+
+# CSS Property Resolution
+#
+# Style property types and resolution for the browser engine.
+# Provides a flat StyleProps structure that is computed per-node,
+# with inheritance from parent styles where applicable.
+
+# =========================================================================
+# CSS Value Types
+# =========================================================================
+
+class CssValue:
+    """A CSS length/size value with unit.
+
+    Fields:
+        value - numeric value
+        unit  - "px", "%", "auto", "em", "rem"
+    """
+    value: f32
+    unit: text
+
+    static fn px(v: f32) -> CssValue:
+        return CssValue(value: v, unit: "px")
+
+    static fn pct(v: f32) -> CssValue:
+        return CssValue(value: v, unit: "%")
+
+    static fn auto() -> CssValue:
+        return CssValue(value: 0.0, unit: "auto")
+
+    fn is_auto() -> bool:
+        return self.unit == "auto"
+
+    fn is_percent() -> bool:
+        return self.unit == "%"
+
+    fn value_as_i32() -> i32:
+        """Convert the value to i32, truncating."""
+        return self.value.to_i32()
+
+    fn resolve_px(container_size: i32) -> i32:
+        """Resolve this value to pixels given a container size for percentages."""
+        if self.unit == "auto":
+            return 0
+        if self.unit == "%":
+            return (self.value * container_size.to_f32() / 100.0).to_i32()
+        # px, em, rem all treated as px for now
+        return self.value.to_i32()
+
+# =========================================================================
+# Box Edges
+# =========================================================================
+
+class BoxEdges:
+    """Margin or padding edge values (top, right, bottom, left)."""
+    top: i32
+    right: i32
+    bottom: i32
+    left: i32
+
+    static fn zero() -> BoxEdges:
+        return BoxEdges(top: 0, right: 0, bottom: 0, left: 0)
+
+    static fn uniform(v: i32) -> BoxEdges:
+        return BoxEdges(top: v, right: v, bottom: v, left: v)
+
+    fn horizontal() -> i32:
+        return self.left + self.right
+
+    fn vertical() -> i32:
+        return self.top + self.bottom
+
+# =========================================================================
+# Border Properties
+# =========================================================================
+
+class BorderProps:
+    """Border properties for all four sides."""
+    width: i32
+    color: u32
+    style: text  # "solid", "dashed", "dotted", "none"
+
+    static fn none() -> BorderProps:
+        return BorderProps(width: 0, color: 0x000000FF, style: "none")
+
+    static fn solid(width: i32, color: u32) -> BorderProps:
+        return BorderProps(width: width, color: color, style: "solid")
+
+# =========================================================================
+# Box Shadow
+# =========================================================================
+
+class BoxShadow:
+    """A single CSS box-shadow value."""
+    offset_x: i32
+    offset_y: i32
+    blur_radius: i32
+    spread_radius: i32
+    color: u32
+    inset: bool
+
+    static fn none() -> BoxShadow:
+        return BoxShadow(offset_x: 0, offset_y: 0, blur_radius: 0,
+            spread_radius: 0, color: 0x00000000, inset: false)
+
+# =========================================================================
+# Style Properties
+# =========================================================================
+
+class StyleProps:
+    """Computed style properties for a DOM node.
+
+    Contains all CSS properties needed for layout and painting.
+    """
+    display: text           # "block", "flex", "grid", "inline", "none"
+    width: CssValue
+    height: CssValue
+    min_width: CssValue
+    max_width: CssValue
+    min_height: CssValue
+    max_height: CssValue
+    margin: BoxEdges
+    padding: BoxEdges
+    border: BorderProps
+    background_color: u32
+    color: u32
+    font_size: i32
+    font_weight: text
+    text_align: text
+    text_decoration: text
+    text_transform: text
+    white_space: text
+    letter_spacing: i32
+    flex_direction: text
+    flex_wrap: text
+    justify_content: text
+    align_items: text
+    flex_grow: f32
+    flex_shrink: f32
+    flex_basis: CssValue
+    gap: i32
+    row_gap: i32
+    column_gap: i32
+    border_radius: i32
+    overflow: text
+    position: text
+    top: CssValue
+    right: CssValue
+    bottom: CssValue
+    left: CssValue
+    opacity: f32
+    z_index: i32
+    visibility: text
+    # Gradient background
+    gradient_set: bool
+    gradient_color1: u32      # start color
+    gradient_color2: u32      # end color
+    gradient_angle: i32       # degrees (180 = top-to-bottom, 90 = left-to-right)
+    # Box shadow
+    box_shadows: [BoxShadow]
+    # Backdrop filter
+    backdrop_filter_blur: i32  # blur radius in px (0 = none)
+    # Flex item alignment (appended at end to preserve field offsets)
+    align_self: text
+    # M8 CSS extensions — routed via css_ext semantics
+    float_code: i32          # 0=none 1=left 2=right 3=inline-start 4=inline-end
+    clear_code: i32          # 0=none 1=left 2=right 3=both 4=inline-start 5=inline-end
+    outline_width: i32       # px
+    outline_style: text      # none/hidden/dotted/dashed/solid/double/groove/ridge/inset/outset
+    outline_color: u32       # 0xAARRGGBB
+    outline_offset: i32      # px (can be negative)
+
+fn be_default_style() -> StyleProps:
+    """Create a StyleProps with default values (block display, no margins, black text)."""
+    return StyleProps(
+        display: "block",
+        width: CssValue.auto(),
+        height: CssValue.auto(),
+        min_width: CssValue.auto(),
+        max_width: CssValue.auto(),
+        min_height: CssValue.auto(),
+        max_height: CssValue.auto(),
+        margin: BoxEdges.zero(),
+        padding: BoxEdges.zero(),
+        border: BorderProps.none(),
+        background_color: 0x00000000,
+        color: 0x000000FF,
+        font_size: 16,
+        font_weight: "normal",
+        text_align: "left",
+        text_decoration: "none",
+        text_transform: "none",
+        white_space: "normal",
+        letter_spacing: 0,
+        flex_direction: "row",
+        flex_wrap: "nowrap",
+        justify_content: "flex-start",
+        align_items: "stretch",
+        flex_grow: 0.0,
+        flex_shrink: 1.0,
+        flex_basis: CssValue.auto(),
+        gap: 0,
+        row_gap: 0,
+        column_gap: 0,
+        border_radius: 0,
+        overflow: "visible",
+        position: "static",
+        top: CssValue.auto(),
+        right: CssValue.auto(),
+        bottom: CssValue.auto(),
+        left: CssValue.auto(),
+        opacity: 1.0,
+        z_index: 0,
+        visibility: "visible",
+        gradient_set: false,
+        gradient_color1: 0x00000000,
+        gradient_color2: 0x00000000,
+        gradient_angle: 180,
+        box_shadows: [],
+        backdrop_filter_blur: 0,
+        align_self: "auto",
+        float_code: 0,
+        clear_code: 0,
+        outline_width: 0,
+        outline_style: "none",
+        outline_color: 0x000000FF,
+        outline_offset: 0
+    )
+
+# =========================================================================
+# CSS Value Parsing
+# =========================================================================
+
+# =========================================================================
+# StyleProps text-field accessors (avoid cross-module FieldGet bug for text fields)
+# =========================================================================
+
+pub fn css_get_display(s: StyleProps) -> text:
+    s.display
+
+pub fn css_get_visibility(s: StyleProps) -> text:
+    s.visibility
+
+pub fn css_get_font_weight(s: StyleProps) -> text:
+    s.font_weight
+
+pub fn css_get_text_align(s: StyleProps) -> text:
+    s.text_align
+
+pub fn css_get_flex_direction(s: StyleProps) -> text:
+    s.flex_direction
+
+pub fn css_get_flex_wrap(s: StyleProps) -> text:
+    s.flex_wrap
+
+pub fn css_get_justify_content(s: StyleProps) -> text:
+    s.justify_content
+
+pub fn css_get_align_items(s: StyleProps) -> text:
+    s.align_items
+
+pub fn css_get_position(s: StyleProps) -> text:
+    s.position
+
+pub fn css_get_overflow(s: StyleProps) -> text:
+    s.overflow
+
+# M8 CSS extension accessors — route callers to the new fields without
+# having to touch the StyleProps layout every time.
+pub fn css_get_float_code(s: StyleProps) -> i32:
+    s.float_code
+
+pub fn css_get_clear_code(s: StyleProps) -> i32:
+    s.clear_code
+
+pub fn css_get_outline_width(s: StyleProps) -> i32:
+    s.outline_width
+
+pub fn css_get_outline_style(s: StyleProps) -> text:
+    s.outline_style
+
+pub fn css_get_outline_color(s: StyleProps) -> u32:
+    s.outline_color
+
+pub fn css_get_outline_offset(s: StyleProps) -> i32:
+    s.outline_offset
+
+pub fn css_get_align_self(s: StyleProps) -> text:
+    s.align_self
+
+@allow(primitive_api)
+pub fn css_get_opacity(s: StyleProps) -> f32:
+    s.opacity
+
+# =========================================================================
+# Nested-struct field accessors (border/margin/padding + dimension/flex)
+# =========================================================================
+
+@allow(primitive_api)
+pub fn css_get_border_width(s: StyleProps) -> i32:
+    s.border.width
+
+@allow(primitive_api)
+pub fn css_get_border_color(s: StyleProps) -> u32:
+    s.border.color
+
+pub fn css_get_border_style_text(s: StyleProps) -> text:
+    s.border.style
+
+@allow(primitive_api)
+pub fn css_get_margin_top(s: StyleProps) -> i32:
+    s.margin.top
+
+@allow(primitive_api)
+pub fn css_get_margin_right(s: StyleProps) -> i32:
+    s.margin.right
+
+@allow(primitive_api)
+pub fn css_get_margin_bottom(s: StyleProps) -> i32:
+    s.margin.bottom
+
+@allow(primitive_api)
+pub fn css_get_margin_left(s: StyleProps) -> i32:
+    s.margin.left
+
+@allow(primitive_api)
+pub fn css_get_padding_left(s: StyleProps) -> i32:
+    s.padding.left
+
+@allow(primitive_api)
+pub fn css_get_padding_top(s: StyleProps) -> i32:
+    s.padding.top
+
+@allow(primitive_api)
+pub fn css_get_padding_right(s: StyleProps) -> i32:
+    s.padding.right
+
+@allow(primitive_api)
+pub fn css_get_padding_bottom(s: StyleProps) -> i32:
+    s.padding.bottom
+
+pub fn css_get_width(s: StyleProps) -> CssValue:
+    s.width
+
+pub fn css_get_height(s: StyleProps) -> CssValue:
+    s.height
+
+pub fn css_get_min_width(s: StyleProps) -> CssValue:
+    s.min_width
+
+pub fn css_get_max_width(s: StyleProps) -> CssValue:
+    s.max_width
+
+pub fn css_get_min_height(s: StyleProps) -> CssValue:
+    s.min_height
+
+pub fn css_get_max_height(s: StyleProps) -> CssValue:
+    s.max_height
+
+@allow(primitive_api)
+pub fn css_get_flex_grow(s: StyleProps) -> f32:
+    s.flex_grow
+
+@allow(primitive_api)
+pub fn css_get_flex_shrink(s: StyleProps) -> f32:
+    s.flex_shrink
+
+pub fn css_get_flex_basis(s: StyleProps) -> CssValue:
+    s.flex_basis
+
+@allow(primitive_api)
+pub fn css_get_gap(s: StyleProps) -> i32:
+    s.gap
+
+@allow(primitive_api)
+pub fn css_get_row_gap(s: StyleProps) -> i32:
+    s.row_gap
+
+@allow(primitive_api)
+pub fn css_get_column_gap(s: StyleProps) -> i32:
+    s.column_gap
+
+fn parse_css_value(s: text) -> CssValue:
+    """Parse a CSS value string like '100px', '50%', or 'auto'."""
+    val trimmed = s.trim()
+
+    if trimmed == "auto" or trimmed == "":
+        return CssValue.auto()
+
+    if trimmed.ends_with("px"):
+        val num_str = trimmed.slice(0, trimmed.len() - 2)
+        val n = css_parse_num(num_str)
+        return CssValue.px(n.to_f32())
+
+    if trimmed.ends_with("%"):
+        val num_str = trimmed.slice(0, trimmed.len() - 1)
+        val n = css_parse_num(num_str)
+        return CssValue.pct(n.to_f32())
+
+    if trimmed.ends_with("em"):
+        val num_str = trimmed.slice(0, trimmed.len() - 2)
+        val n = css_parse_num(num_str)
+        return CssValue.px(n.to_f32() * 16.0)
+
+    if trimmed.ends_with("rem"):
+        val num_str = trimmed.slice(0, trimmed.len() - 3)
+        val n = css_parse_num(num_str)
+        return CssValue.px(n.to_f32() * 16.0)
+
+    # Try as plain number (treat as px)
+    val n = css_parse_num(trimmed)
+    if n != 0 or trimmed == "0":
+        return CssValue.px(n.to_f32())
+
+    return CssValue.auto()
+
+fn css_parse_num(s: text) -> i64:
+    """Manual number parser avoiding f64? optional (Cranelift bug)."""
+    val t = s.trim()
+    if t.len() == 0:
+        return 0
+    var neg = false
+    var start = 0
+    if t.slice(0, 1) == "-":
+        neg = true
+        start = 1
+    elif t.slice(0, 1) == "+":
+        start = 1
+    var result = 0
+    var idx = start
+    val slen = t.len()
+    while idx < slen:
+        val ch = t.slice(idx, idx + 1)
+        if ch == "." or ch == "e" or ch == "E":
+            break
+        val d = css_digit(ch)
+        if d < 0:
+            break
+        result = result * 10 + d
+        idx = idx + 1
+    if neg:
+        return 0 - result
+    result
+
+fn css_digit(ch: text) -> i64:
+    if ch == "0": return 0
+    if ch == "1": return 1
+    if ch == "2": return 2
+    if ch == "3": return 3
+    if ch == "4": return 4
+    if ch == "5": return 5
+    if ch == "6": return 6
+    if ch == "7": return 7
+    if ch == "8": return 8
+    if ch == "9": return 9
+    return 0 - 1
+
+# =========================================================================
+# Style Resolution (Inheritance)
+# =========================================================================
+
+fn resolve_style(node: BeDomNode, parent_style: StyleProps) -> StyleProps:
+    """Resolve the computed style for a node, inheriting from parent where appropriate.
+
+    Inherited properties (per CSS spec): color, font_size, font_weight, text_align.
+    Non-inherited properties use their own values or defaults.
+    """
+    var s = node.style
+
+    # Inherit text-related properties from parent if not explicitly set
+    if s.color == 0x000000FF and parent_style.color != 0x000000FF:
+        s.color = parent_style.color
+
+    if s.font_size == 16 and parent_style.font_size != 16:
+        s.font_size = parent_style.font_size
+
+    if s.font_weight == "normal" and parent_style.font_weight != "normal":
+        s.font_weight = parent_style.font_weight
+
+    if s.text_align == "left" and parent_style.text_align != "left":
+        s.text_align = parent_style.text_align
+
+    return s

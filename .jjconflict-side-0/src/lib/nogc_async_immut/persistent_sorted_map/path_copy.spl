@@ -1,0 +1,248 @@
+#![allow(export_outside_init)]
+#![allow(unnamed_duplicate_typed_args)]
+@allow(unnamed_duplicate_typed_args)
+# Path-Copying Insert/Delete with LLRB Rebalancing
+#
+# Left-Leaning Red-Black Tree (LLRB) operations with persistent (immutable)
+# path copying. Based on Sedgewick's 2008 simplified red-black tree algorithm.
+#
+# LLRB invariants:
+#   1. No node has two red children (3-nodes lean left)
+#   2. Red links lean left (if right child is red and left is black, rotate left)
+#   3. No two consecutive red links on any path (if left and left.left are both
+#      red, rotate right)
+#
+# All operations return NEW trees via structural sharing. The original tree
+# is never modified.
+#
+# Insert is O(log n) with at most 2 rotations + 1 color flip per level.
+# Delete uses a simplified rebuild approach for correctness.
+
+use std.persistent_sorted_map.rb_node.{RB_RED, RB_BLACK, rb_node, rb_is_red, rb_is_black, rb_collect_entries}
+
+# ============================================================================
+# Rotations and Color Flips
+# ============================================================================
+
+# Rotate a node left: the right child becomes the new root of this subtree.
+# Preserves BST ordering. The new root inherits the old root's color,
+# and the old root becomes RED.
+#
+#     X (color)          R (color)
+#    / \         =>     / \
+#   a   R (red)        X   c
+#      / \            / \
+#     b   c          a   b
+fn rb_rotate_left_llrb(node):
+    val right_child = node[4]
+    # New left node: old root with old root's left and right's left, colored RED
+    val new_left = [RB_RED, node[1], node[2], node[3], right_child[3]]
+    # New root: right child with old root's color
+    [node[0], right_child[1], right_child[2], new_left, right_child[4]]
+
+# Rotate a node right: the left child becomes the new root of this subtree.
+# Preserves BST ordering. The new root takes the color of the old root,
+# and the old root becomes red.
+#
+#       X (color)       L (color)
+#      / \        =>   / \
+#     L   c           a   X
+#    / \                  / \
+#   a   b               b   c
+fn rb_rotate_right_llrb(node):
+    val left_child = node[3]
+    # New right node: old root with left's right and old root's right, colored RED
+    val new_right = [RB_RED, node[1], node[2], left_child[4], node[4]]
+    # New root: left child with old root's color
+    [node[0], left_child[1], left_child[2], left_child[3], new_right]
+
+# Flip the colors of a node and both its children.
+# Used when both children are red (represents a temporary 4-node in 2-3-4 tree
+# that needs to be split).
+fn rb_flip_colors(node):
+    val left = node[3]
+    val right = node[4]
+    # Flip the node's color
+    var new_color = RB_RED
+    if node[0] == RB_RED:
+        new_color = RB_BLACK
+    # Flip children's colors
+    var new_left_color = RB_RED
+    if left[0] == RB_RED:
+        new_left_color = RB_BLACK
+    var new_right_color = RB_RED
+    if right[0] == RB_RED:
+        new_right_color = RB_BLACK
+    val new_left = [new_left_color, left[1], left[2], left[3], left[4]]
+    val new_right = [new_right_color, right[1], right[2], right[3], right[4]]
+    [new_color, node[1], node[2], new_left, new_right]
+
+# ============================================================================
+# LLRB Fix-Up
+# ============================================================================
+
+# Apply LLRB invariant fixes after an insertion or deletion:
+#   1. Right-leaning red link => rotate left
+#   2. Two consecutive left red links => rotate right
+#   3. Both children red => flip colors
+fn rb_fix_up(node):
+    if node == nil:
+        return nil
+    var h = node
+    # 1. Right child red, left child black => rotate left
+    val right_is_red = rb_is_red(h[4])
+    val left_is_black = rb_is_black(h[3])
+    if right_is_red:
+        if left_is_black:
+            h = rb_rotate_left_llrb(h)
+    # 2. Left child red AND left.left red => rotate right
+    val left = h[3]
+    if rb_is_red(left):
+        if left != nil:
+            if rb_is_red(left[3]):
+                h = rb_rotate_right_llrb(h)
+    # 3. Both children red => flip colors
+    if rb_is_red(h[3]):
+        if rb_is_red(h[4]):
+            h = rb_flip_colors(h)
+    h
+
+# ============================================================================
+# Insert
+# ============================================================================
+
+# Insert a key-value pair into the LLRB tree.
+# Returns a NEW tree root. The root is always colored black.
+#
+# Parameters:
+#   node    - current tree root (nil for empty tree)
+#   key     - key to insert
+#   value   - value to associate with the key
+#   compare - fn(a, b) -> i64 comparison function
+fn rb_insert(node, key, value, compare):
+    val new_root = rb_insert_rec(node, key, value, compare)
+    # Root must always be black
+    if new_root == nil:
+        return nil
+    if new_root[0] == RB_BLACK:
+        return new_root
+    [RB_BLACK, new_root[1], new_root[2], new_root[3], new_root[4]]
+
+# Recursive insert helper. Returns a new subtree with the key inserted.
+fn rb_insert_rec(node, key, value, compare):
+    # Base case: empty subtree, create a new red leaf
+    if node == nil:
+        return [RB_RED, key, value, nil, nil]
+
+    val cmp = compare(key, node[1])
+
+    if cmp == 0:
+        # Key already exists: update value
+        if node[2] == value:
+            return node
+        return [node[0], node[1], value, node[3], node[4]]
+
+    var new_node = node
+    if cmp < 0:
+        # Insert into left subtree
+        val new_left = rb_insert_rec(node[3], key, value, compare)
+        new_node = [node[0], node[1], node[2], new_left, node[4]]
+    else:
+        # Insert into right subtree
+        val new_right = rb_insert_rec(node[4], key, value, compare)
+        new_node = [node[0], node[1], node[2], node[3], new_right]
+
+    # Fix up LLRB invariants on the way back up
+    rb_fix_up(new_node)
+
+# ============================================================================
+# Delete
+# ============================================================================
+
+# Remove a key from the tree.
+# Returns a NEW tree root with the key removed, or nil if the tree becomes empty.
+#
+# This uses a simplified rebuild approach: collect all entries except the
+# target key, then rebuild the tree. This is O(n log n) but is correct and
+# simple. A true LLRB delete with move-red-left/move-red-right is complex
+# and can be added as an optimization later.
+#
+# Parameters:
+#   node    - current tree root
+#   key     - key to remove
+#   compare - fn(a, b) -> i64 comparison function
+fn rb_remove(node, key, compare):
+    if node == nil:
+        return nil
+    # Quick check: if the key is not in the tree, return unchanged
+    val has_key = rb_has_key(node, key, compare)
+    if not has_key:
+        return node
+    val entries = rb_collect_except(node, key, compare)
+    val n = entries.len()
+    if n == 0:
+        return nil
+    # Rebuild a balanced tree from the sorted entries
+    rb_build_from_sorted(entries, 0, n - 1)
+
+# Check if a key exists in the tree. Iterative for efficiency.
+fn rb_has_key(node, key, compare) -> bool:
+    var current = node
+    while current != nil:
+        val cmp = compare(key, current[1])
+        if cmp == 0:
+            return true
+        if cmp < 0:
+            current = current[3]
+        else:
+            current = current[4]
+    false
+
+# Collect all [key, value] pairs except the one matching `exclude_key`.
+# Returns an array of [key, value] pairs in sorted (in-order) order.
+fn rb_collect_except(node, exclude_key, compare):
+    if node == nil:
+        return []
+    val left_entries = rb_collect_except(node[3], exclude_key, compare)
+    val right_entries = rb_collect_except(node[4], exclude_key, compare)
+    var result = []
+    var i = 0
+    val ln = left_entries.len()
+    while i < ln:
+        result.push(left_entries[i])
+        i = i + 1
+    val cmp = compare(node[1], exclude_key)
+    if cmp != 0:
+        result.push([node[1], node[2]])
+    i = 0
+    val rn = right_entries.len()
+    while i < rn:
+        result.push(right_entries[i])
+        i = i + 1
+    result
+
+# Build a balanced black-height-uniform tree from a sorted array of [key, value] pairs.
+# Uses a median-split approach to create a perfectly balanced BST, then colors it
+# as a valid red-black tree (all black nodes for simplicity — valid RB tree).
+fn rb_build_from_sorted(entries, lo: i64, hi: i64):
+    if lo > hi:
+        return nil
+    if lo == hi:
+        val pair = entries[lo]
+        return [RB_BLACK, pair[0], pair[1], nil, nil]
+    val mid = lo + ((hi - lo) / 2)
+    val pair = entries[mid]
+    val left = rb_build_from_sorted(entries, lo, mid - 1)
+    val right = rb_build_from_sorted(entries, mid + 1, hi)
+    [RB_BLACK, pair[0], pair[1], left, right]
+
+# ============================================================================
+# Exports
+# ============================================================================
+
+export rb_rotate_left_llrb, rb_rotate_right_llrb, rb_flip_colors
+export rb_fix_up
+export rb_insert, rb_insert_rec
+export rb_remove
+export rb_build_from_sorted
+

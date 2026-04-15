@@ -1,0 +1,247 @@
+# MCP T32 Error Check spec — tests error query, auto-append, and error_check tool logic
+# Covers: message type→has_error, stderr capture, errors block construction, practice state
+
+# --- Helpers (ec_ prefix to avoid name collisions) ---
+
+fn ec_parse_msg_type(mtype: i64) -> text:
+    if mtype == 0:
+        return "info"
+    if mtype == 1:
+        return "warning"
+    if mtype == 2:
+        return "error"
+    "info"
+
+fn ec_has_error(msg_type: text, stderr: text) -> bool:
+    if msg_type == "warning":
+        return true
+    if msg_type == "error":
+        return true
+    if stderr != "":
+        return true
+    false
+
+fn ec_find_pos(haystack: text, needle: text) -> i64:
+    var i = 0
+    while i + needle.len() <= haystack.len():
+        if haystack.substring(i, i + needle.len()) == needle:
+            return i
+        i = i + 1
+    -1
+
+fn ec_contains(s: text, sub: text) -> bool:
+    ec_find_pos(s, sub) >= 0
+
+# Simulates building the errors array JSON
+fn ec_build_errors_json(msg: text, msg_type: text, stderr: text) -> text:
+    val has_err = ec_has_error(msg_type, stderr)
+    if not has_err:
+        return ""
+    var errors_arr = "["
+    var efirst = true
+    if msg_type == "warning" or msg_type == "error":
+        var e = "{\"source\":\"t32_message\""
+        e = e + ",\"type\":\"" + msg_type + "\""
+        e = e + ",\"message\":\"" + msg + "\"}"
+        errors_arr = errors_arr + e
+        efirst = false
+    if stderr != "":
+        if not efirst:
+            errors_arr = errors_arr + ","
+        var e = "{\"source\":\"stderr\""
+        e = e + ",\"type\":\"error\""
+        e = e + ",\"message\":\"" + stderr + "\"}"
+        errors_arr = errors_arr + e
+    errors_arr = errors_arr + "]"
+    errors_arr
+
+# Simulates error_check response
+fn ec_build_response(msg: text, msg_type: text, stderr: text, practice_state: i64) -> text:
+    var r = "{\"message\":\"" + msg + "\""
+    r = r + ",\"type\":\"" + msg_type + "\""
+    r = r + ",\"stderr\":\"" + stderr + "\""
+    r = r + ",\"practice_state\":" + str(practice_state)
+    val has_err = ec_has_error(msg_type, stderr)
+    if has_err:
+        r = r + ",\"has_error\":true"
+    else:
+        r = r + ",\"has_error\":false"
+    r = r + "}"
+    r
+
+fn ec_build_tool_error(msg: text) -> text:
+    var gui = "{\"message_line\":\"\""
+    gui = gui + ",\"message_type\":\"info\""
+    gui = gui + ",\"cursor\":\"\""
+    gui = gui + ",\"debug\":\"\""
+    gui = gui + ",\"debugger_activity\":\"\""
+    gui = gui + ",\"trace\":\"\""
+    gui = gui + ",\"mode\":\"\""
+    gui = gui + ",\"system\":\"\""
+    gui = gui + ",\"task\":\"\""
+    gui = gui + ",\"cores\":\"\""
+    gui = gui + ",\"target\":\"\""
+    gui = gui + ",\"monitor\":\"\""
+    gui = gui + ",\"target_state\":\"unknown\"}"
+    var payload = "{\"error\":{\"code\":-32602,\"message\":\"" + msg + "\"}"
+    payload = payload + ",\"gui_status\":" + gui
+    payload = payload + ",\"status_bar\":{\"message\":\"\",\"type\":\"info\"}"
+    payload = payload + ",\"target_state\":\"unknown\"}"
+    payload
+
+# --- SSpec tests ---
+
+describe "T32 Error Check":
+    context "error detection logic":
+        it "has_error true when type is error":
+            expect(ec_has_error("error", "")).to_equal(true)
+
+        it "has_error true when type is warning":
+            expect(ec_has_error("warning", "")).to_equal(true)
+
+        it "has_error false when type is info and no stderr":
+            expect(ec_has_error("info", "")).to_equal(false)
+
+        it "has_error true when stderr non-empty even if type is info":
+            expect(ec_has_error("info", "some error output")).to_equal(true)
+
+        it "has_error true when both error type and stderr present":
+            expect(ec_has_error("error", "stderr output")).to_equal(true)
+
+        it "has_error false for empty strings":
+            expect(ec_has_error("info", "")).to_equal(false)
+
+    context "message type mapping":
+        it "maps 0 to info":
+            expect(ec_parse_msg_type(0)).to_equal("info")
+
+        it "maps 1 to warning":
+            expect(ec_parse_msg_type(1)).to_equal("warning")
+
+        it "maps 2 to error":
+            expect(ec_parse_msg_type(2)).to_equal("error")
+
+        it "maps unknown to info":
+            expect(ec_parse_msg_type(42)).to_equal("info")
+
+        it "maps negative to info":
+            expect(ec_parse_msg_type(-1)).to_equal("info")
+
+    context "errors block construction":
+        it "returns empty when no error":
+            val result = ec_build_errors_json("ready", "info", "")
+            expect(result).to_equal("")
+
+        it "contains t32_message source on error":
+            val result = ec_build_errors_json("access denied", "error", "")
+            expect(ec_contains(result, "\"source\":\"t32_message\"")).to_equal(true)
+            expect(ec_contains(result, "\"type\":\"error\"")).to_equal(true)
+            expect(ec_contains(result, "access denied")).to_equal(true)
+
+        it "contains t32_message source on warning":
+            val result = ec_build_errors_json("deprecated", "warning", "")
+            expect(ec_contains(result, "\"source\":\"t32_message\"")).to_equal(true)
+            expect(ec_contains(result, "\"type\":\"warning\"")).to_equal(true)
+
+        it "contains stderr source when stderr present":
+            val result = ec_build_errors_json("", "info", "t32rem: connection refused")
+            expect(ec_contains(result, "\"source\":\"stderr\"")).to_equal(true)
+            expect(ec_contains(result, "connection refused")).to_equal(true)
+
+        it "contains both sources when both present":
+            val result = ec_build_errors_json("timeout", "error", "t32rem: timeout")
+            expect(ec_contains(result, "\"source\":\"t32_message\"")).to_equal(true)
+            expect(ec_contains(result, "\"source\":\"stderr\"")).to_equal(true)
+
+        it "starts with array bracket":
+            val result = ec_build_errors_json("err", "error", "")
+            expect(result.starts_with("[")).to_equal(true)
+
+        it "ends with array bracket":
+            val result = ec_build_errors_json("err", "error", "")
+            expect(result.ends_with("]")).to_equal(true)
+
+        it "has comma between two error entries":
+            val result = ec_build_errors_json("err", "error", "stderr")
+            expect(ec_contains(result, "},{")).to_equal(true)
+
+    context "error check response":
+        it "includes message field":
+            val resp = ec_build_response("system halted", "info", "", 0)
+            expect(ec_contains(resp, "\"message\":\"system halted\"")).to_equal(true)
+
+        it "includes type field":
+            val resp = ec_build_response("", "error", "", 0)
+            expect(ec_contains(resp, "\"type\":\"error\"")).to_equal(true)
+
+        it "includes stderr field":
+            val resp = ec_build_response("", "info", "some stderr", 0)
+            expect(ec_contains(resp, "\"stderr\":\"some stderr\"")).to_equal(true)
+
+        it "includes practice_state field":
+            val resp = ec_build_response("", "info", "", 1)
+            expect(ec_contains(resp, "\"practice_state\":1")).to_equal(true)
+
+        it "has_error true on error type":
+            val resp = ec_build_response("fail", "error", "", 0)
+            expect(ec_contains(resp, "\"has_error\":true")).to_equal(true)
+
+        it "has_error true on warning type":
+            val resp = ec_build_response("warn", "warning", "", 0)
+            expect(ec_contains(resp, "\"has_error\":true")).to_equal(true)
+
+        it "has_error true on stderr present":
+            val resp = ec_build_response("", "info", "stderr", 0)
+            expect(ec_contains(resp, "\"has_error\":true")).to_equal(true)
+
+        it "has_error false on info with no stderr":
+            val resp = ec_build_response("ok", "info", "", 0)
+            expect(ec_contains(resp, "\"has_error\":false")).to_equal(true)
+
+        it "includes empty stderr when none":
+            val resp = ec_build_response("ok", "info", "", 0)
+            expect(ec_contains(resp, "\"stderr\":\"\"")).to_equal(true)
+
+    context "practice state values":
+        it "practice_state 0 means idle":
+            val resp = ec_build_response("", "info", "", 0)
+            expect(ec_contains(resp, "\"practice_state\":0")).to_equal(true)
+
+        it "practice_state 1 means running":
+            val resp = ec_build_response("", "info", "", 1)
+            expect(ec_contains(resp, "\"practice_state\":1")).to_equal(true)
+
+        it "practice_state -1 means unknown":
+            val resp = ec_build_response("", "info", "", -1)
+            expect(ec_contains(resp, "\"practice_state\":-1")).to_equal(true)
+
+        it "practice_state 2 means dialog open":
+            val resp = ec_build_response("", "info", "", 2)
+            expect(ec_contains(resp, "\"practice_state\":2")).to_equal(true)
+
+    context "edge cases":
+        it "tool error payload includes gui_status":
+            val resp = ec_build_tool_error("No active session")
+            expect(ec_contains(resp, "\"gui_status\":")).to_equal(true)
+            expect(ec_contains(resp, "\"target_state\":\"unknown\"")).to_equal(true)
+
+        it "empty message with error type still triggers has_error":
+            expect(ec_has_error("error", "")).to_equal(true)
+
+        it "empty message with empty stderr and info is no error":
+            expect(ec_has_error("info", "")).to_equal(false)
+
+        it "errors block with special chars in message":
+            val result = ec_build_errors_json("error: addr 0xFF", "error", "")
+            expect(ec_contains(result, "error: addr 0xFF")).to_equal(true)
+
+        it "long stderr message preserved":
+            val stderr = "t32rem: connection refused to localhost:20000 after 3 attempts"
+            val result = ec_build_errors_json("", "info", stderr)
+            expect(ec_contains(result, "connection refused")).to_equal(true)
+            expect(ec_contains(result, "3 attempts")).to_equal(true)
+
+        it "response is valid JSON structure":
+            val resp = ec_build_response("ok", "info", "", 0)
+            expect(resp.starts_with("{")).to_equal(true)
+            expect(resp.ends_with("}")).to_equal(true)

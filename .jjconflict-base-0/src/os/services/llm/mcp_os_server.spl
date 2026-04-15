@@ -1,0 +1,974 @@
+# OS MCP Server — LLM Control of SimpleOS
+#
+# MCP server exposing OS operations as tools for LLM control.
+# Uses existing MCP SDK (std.nogc_async_mut.mcp) for protocol handling
+# and existing VFS service for file operations.
+#
+# Tools exposed:
+#   File:    file_read, file_write, file_list, file_search
+#   Process: process_list, process_spawn, process_kill
+#   Window:  window_create, window_close, window_list, window_focus
+#   Widget:  widget_set, widget_read, widget_action
+#   UIAccess: ui_access_snapshot, ui_access_surface, ui_access_find, ui_access_act, ui_access_history, ui_access_observe, ui_access_state, ui_access_query
+#   Screen:  screenshot, screen_read_text
+#   System:  system_info, system_exec
+
+use os.services.vfs.vfs.{VfsManager, MountEntry}
+use os.kernel.types.fs_types.{DirEntry, FsNode, FsNodeKind, FileFlags, FileDescriptor}
+use os.kernel.types.task_types.{TaskId, TaskState}
+use os.kernel.types.syscall_types.{SyscallId}
+use os.services.llm.widget_eval.{WidgetDslEvaluator}
+use os.services.llm.cli_gui_bridge.{CliGuiBridge}
+use os.services.llm.tool_registry.{register_os_tools}
+use common.ui.session.{UISession}
+use common.ui.widget.{UITree, WidgetNode, UIEvent}
+use common.ui.builder.{build_tree}
+use common.ui.access.{UiAccessNode, UiAccessSnapshot, UiAccessSurface, ui_access_find_nodes, ui_access_find_node, ui_access_resolve_action_name, ui_access_snapshot_to_json, ui_access_surface_to_json, ui_access_events_to_json, ui_access_snapshot_to_text, ui_access_query_to_json}
+
+# =========================================================================
+# Window Tracking
+# =========================================================================
+
+struct WindowInfo:
+    """Tracked window state."""
+    id: u64
+    title: text
+    width: i32
+    height: i32
+    focused: bool
+    surface_id: text
+
+# =========================================================================
+# Process Tracking
+# =========================================================================
+
+struct ProcessInfo:
+    """Tracked process info for MCP reporting."""
+    pid: u64
+    name: text
+    state: text
+    cpu_pct: text
+
+# =========================================================================
+# OsMcpServer
+# =========================================================================
+
+class OsMcpServer:
+    """MCP server for LLM control of SimpleOS.
+
+    Exposes tools for:
+    - File operations (read, write, list, search)
+    - Process management (spawn, kill, list)
+    - Window management (create, close, resize, focus)
+    - Widget manipulation (set widget tree, read widget state)
+    - Screen capture (screenshot as text description)
+    - System info (memory, CPU, disk)
+    """
+    vfs: VfsManager
+    bridge: CliGuiBridge
+    evaluator: WidgetDslEvaluator
+    windows: [WindowInfo]
+    processes: [ProcessInfo]
+    next_window_id: u64
+    hostname: text
+    uptime_sec: u64
+
+impl OsMcpServer:
+
+    static fn new(vfs: VfsManager, bridge: CliGuiBridge) -> OsMcpServer:
+        """Create a new OS MCP server with VFS and rendering bridge."""
+        return OsMcpServer(
+            vfs: vfs,
+            bridge: bridge,
+            evaluator: WidgetDslEvaluator.new(),
+            windows: [],
+            processes: [],
+            next_window_id: 1,
+            hostname: "simpleos",
+            uptime_sec: 0
+        )
+
+    # =================================================================
+    # Tool Dispatch
+    # =================================================================
+
+    me dispatch(tool_name: text, args: text) -> text:
+        """Dispatch an MCP tool call by name. Returns result text."""
+        if tool_name == "file_read":
+            val path = _extract_arg(args, "path")
+            return self.tool_file_read(path)
+        elif tool_name == "file_write":
+            val path = _extract_arg(args, "path")
+            val content = _extract_arg(args, "content")
+            return self.tool_file_write(path, content)
+        elif tool_name == "file_list":
+            val path = _extract_arg(args, "path")
+            return self.tool_file_list(path)
+        elif tool_name == "file_search":
+            val path = _extract_arg(args, "path")
+            val pattern = _extract_arg(args, "pattern")
+            return self.tool_file_search(path, pattern)
+        elif tool_name == "process_list":
+            return self.tool_process_list()
+        elif tool_name == "process_spawn":
+            val binary = _extract_arg(args, "binary")
+            return self.tool_process_spawn(binary)
+        elif tool_name == "process_kill":
+            val pid_str = _extract_arg(args, "pid")
+            return self.tool_process_kill(pid_str)
+        elif tool_name == "window_create":
+            val title = _extract_arg(args, "title")
+            val width_str = _extract_arg(args, "width")
+            val height_str = _extract_arg(args, "height")
+            return self.tool_window_create(title, width_str, height_str)
+        elif tool_name == "window_close":
+            val id_str = _extract_arg(args, "id")
+            return self.tool_window_close(id_str)
+        elif tool_name == "window_list":
+            return self.tool_window_list()
+        elif tool_name == "window_focus":
+            val id_str = _extract_arg(args, "id")
+            return self.tool_window_focus(id_str)
+        elif tool_name == "widget_set":
+            val wid_str = _extract_arg(args, "window_id")
+            val dsl = _extract_arg(args, "widget_dsl")
+            return self.tool_widget_set(wid_str, dsl)
+        elif tool_name == "widget_read":
+            val wid_str = _extract_arg(args, "window_id")
+            return self.tool_widget_read(wid_str)
+        elif tool_name == "widget_action":
+            val wid_str = _extract_arg(args, "window_id")
+            val action = _extract_arg(args, "action")
+            return self.tool_widget_action(wid_str, action)
+        elif tool_name == "ui_access_snapshot":
+            return self.tool_ui_access_snapshot()
+        elif tool_name == "ui_access_surface":
+            val surface_id = _extract_arg(args, "surface_id")
+            return self.tool_ui_access_surface(surface_id)
+        elif tool_name == "ui_access_find":
+            val surface_id = _extract_arg(args, "surface_id")
+            val kind = _extract_arg(args, "kind")
+            val text_query = _extract_arg(args, "text")
+            val focused_only = _extract_arg(args, "focused_only")
+            return self.tool_ui_access_find(surface_id, kind, text_query, focused_only)
+        elif tool_name == "ui_access_act":
+            val surface_id = _extract_arg(args, "surface_id")
+            val canonical_id = _extract_arg(args, "canonical_id")
+            val action = _extract_arg(args, "action")
+            return self.tool_ui_access_act(surface_id, canonical_id, action)
+        elif tool_name == "ui_access_history":
+            val surface_id = _extract_arg(args, "surface_id")
+            val count_str = _extract_arg(args, "count")
+            return self.tool_ui_access_history(surface_id, count_str)
+        elif tool_name == "ui_access_observe":
+            val surface_id = _extract_arg(args, "surface_id")
+            val canonical_id = _extract_arg(args, "canonical_id")
+            val kind = _extract_arg(args, "kind")
+            val text_query = _extract_arg(args, "text")
+            val focused_only = _extract_arg(args, "focused_only")
+            return self.tool_ui_access_observe(surface_id, canonical_id, kind, text_query, focused_only)
+        elif tool_name == "ui_access_state":
+            val surface_id = _extract_arg(args, "surface_id")
+            val canonical_id = _extract_arg(args, "canonical_id")
+            val state_key = _extract_arg(args, "state_key")
+            val state_value = _extract_arg(args, "state_value")
+            return self.tool_ui_access_state(surface_id, canonical_id, state_key, state_value)
+        elif tool_name == "ui_access_query":
+            val surface_id = _extract_arg(args, "surface_id")
+            val canonical_id = _extract_arg(args, "canonical_id")
+            val kind = _extract_arg(args, "kind")
+            val text_query = _extract_arg(args, "text")
+            val focused_only = _extract_arg(args, "focused_only")
+            val limit = _extract_arg(args, "limit")
+            return self.tool_ui_access_query(surface_id, canonical_id, kind, text_query, focused_only, limit)
+        elif tool_name == "screenshot":
+            return self.tool_screenshot()
+        elif tool_name == "screen_read_text":
+            return self.tool_screen_read_text()
+        elif tool_name == "system_info":
+            return self.tool_system_info()
+        elif tool_name == "system_exec":
+            val command = _extract_arg(args, "command")
+            return self.tool_system_exec(command)
+        else:
+            return "error: unknown tool '{tool_name}'"
+
+    # =================================================================
+    # File Tools
+    # =================================================================
+
+    me tool_file_read(path: text) -> text:
+        """Read file contents via VFS.
+        Opens the file with read flags, reads up to 64KB, then closes."""
+        val flags = FileFlags(
+            read: true, write: false, append: false,
+            create: false, truncate: false, directory: false
+        )
+        val open_result = self.vfs.open(path, flags)
+        match open_result:
+            Ok(fd):
+                val mount = self.vfs.resolve_mount(path)
+                if mount == nil:
+                    return "error: no filesystem for {path}"
+                val entry = mount
+                val read_result = entry.fs.read(fd.node, 65536)
+                entry.fs.close(fd.node)
+                match read_result:
+                    Ok(bytes):
+                        # Convert bytes to text (simplified)
+                        var content = ""
+                        for b in bytes:
+                            content = "{content}{b}"
+                        return content
+                    Err(e):
+                        return "error: read failed: {e}"
+            Err(e):
+                return "error: {e}"
+
+    me tool_file_write(path: text, content: text) -> text:
+        """Write file via VFS.
+        Opens with write+create flags, writes content, then closes."""
+        val flags = FileFlags(
+            read: false, write: true, append: false,
+            create: true, truncate: true, directory: false
+        )
+        val open_result = self.vfs.open(path, flags)
+        match open_result:
+            Ok(fd):
+                val mount = self.vfs.resolve_mount(path)
+                if mount == nil:
+                    return "error: no filesystem for {path}"
+                val entry = mount
+                # Convert text to bytes (simplified)
+                var data: [u8] = []
+                var i = 0
+                while i < content.len():
+                    data = data + [content[i]]
+                    i = i + 1
+                val write_result = entry.fs.write(fd.node, data)
+                entry.fs.close(fd.node)
+                match write_result:
+                    Ok(bytes_written):
+                        return "ok: wrote {bytes_written} bytes to {path}"
+                    Err(e):
+                        return "error: write failed: {e}"
+            Err(e):
+                return "error: {e}"
+
+    fn tool_file_list(path: text) -> text:
+        """List directory via VFS, return as formatted text."""
+        val result = self.vfs.readdir(path)
+        match result:
+            Ok(entries):
+                var out = "Directory: {path}\n"
+                for entry in entries:
+                    val kind_str = _fs_node_kind_str(entry.node.kind)
+                    val size_str = "{entry.node.size}"
+                    out = "{out}  {kind_str}  {size_str}  {entry.name}\n"
+                return out
+            Err(e):
+                return "error: {e}"
+
+    fn tool_file_search(path: text, pattern: text) -> text:
+        """Search files by name pattern under path."""
+        val result = self.vfs.readdir(path)
+        match result:
+            Ok(entries):
+                var matches: [text] = []
+                for entry in entries:
+                    if entry.name.contains(pattern):
+                        matches = matches + [entry.name]
+                if matches.len() == 0:
+                    return "No files matching '{pattern}' in {path}"
+                var out = "Matches for '{pattern}' in {path}:\n"
+                for m in matches:
+                    out = "{out}  {m}\n"
+                return out
+            Err(e):
+                return "error: {e}"
+
+    # =================================================================
+    # Process Tools
+    # =================================================================
+
+    fn tool_process_list() -> text:
+        """List running processes (PID, name, state, CPU%)."""
+        if self.processes.len() == 0:
+            return "No processes running."
+        var out = "PID     Name                State       CPU%\n"
+        out = "{out}------  ------------------  ----------  ----\n"
+        for proc in self.processes:
+            out = "{out}{proc.pid}  {proc.name}  {proc.state}  {proc.cpu_pct}\n"
+        return out
+
+    me tool_process_spawn(binary: text) -> text:
+        """Spawn new process. Returns PID."""
+        val pid = self.next_window_id
+        self.next_window_id = self.next_window_id + 1
+        val proc = ProcessInfo(
+            pid: pid,
+            name: binary,
+            state: "Running",
+            cpu_pct: "0.0"
+        )
+        self.processes = self.processes + [proc]
+        return "ok: spawned process {pid} ({binary})"
+
+    me tool_process_kill(pid_str: text) -> text:
+        """Kill process by PID."""
+        var new_procs: [ProcessInfo] = []
+        var found = false
+        for proc in self.processes:
+            if "{proc.pid}" == pid_str:
+                found = true
+            else:
+                new_procs = new_procs + [proc]
+        if found:
+            self.processes = new_procs
+            return "ok: killed process {pid_str}"
+        else:
+            return "error: process {pid_str} not found"
+
+    # =================================================================
+    # Window Tools
+    # =================================================================
+
+    me tool_window_create(title: text, width_str: text, height_str: text) -> text:
+        """Create new window, return window ID."""
+        val wid = self.next_window_id
+        self.next_window_id = self.next_window_id + 1
+        val surface_id = "window_{wid}"
+
+        # Create empty tree for the window surface
+        val root = WidgetNode.new(surface_id, "panel")
+        val tree = build_tree(root)
+        self.bridge.session.open_surface(surface_id, tree)
+
+        # Unfocus all, focus new
+        var updated: [WindowInfo] = []
+        for w in self.windows:
+            val unfocused = WindowInfo(
+                id: w.id,
+                title: w.title,
+                width: w.width,
+                height: w.height,
+                focused: false,
+                surface_id: w.surface_id
+            )
+            updated = updated + [unfocused]
+        self.windows = updated
+
+        val info = WindowInfo(
+            id: wid,
+            title: title,
+            width: _parse_dim_or_default(width_str, 800),
+            height: _parse_dim_or_default(height_str, 600),
+            focused: true,
+            surface_id: surface_id
+        )
+        self.windows = self.windows + [info]
+        self.bridge.session.bind_window_surface("{wid}", surface_id, 0, "", title)
+        self.bridge.session.set_active_surface(surface_id)
+        return "ok: created window {wid} ({title})"
+
+    me tool_window_close(id_str: text) -> text:
+        """Close window by ID."""
+        var new_wins: [WindowInfo] = []
+        var found = false
+        for w in self.windows:
+            if "{w.id}" == id_str:
+                found = true
+                # Close the surface
+                val surface_id = w.surface_id
+                if self.bridge.session.has_surface(surface_id):
+                    val handle = self.bridge.session.surface_handle(surface_id)
+                    if handle != nil:
+                        self.bridge.session.close_surface(handle)
+                    else:
+                        self.bridge.session.clear_window_surface_binding(surface_id)
+                else:
+                    self.bridge.session.clear_window_binding("{w.id}")
+            else:
+                new_wins = new_wins + [w]
+        if found:
+            self.windows = new_wins
+            return "ok: closed window {id_str}"
+        else:
+            return "error: window {id_str} not found"
+
+    fn tool_window_list() -> text:
+        """List open windows (ID, title, size, focused)."""
+        if self.windows.len() == 0:
+            return "No windows open."
+        var out = "ID    Title               Size        Focused\n"
+        out = "{out}----  ------------------  ----------  -------\n"
+        for w in self.windows:
+            val focused_str = if w.focused: "yes" else: "no"
+            out = "{out}{w.id}  {w.title}  {w.width}x{w.height}  {focused_str}\n"
+        return out
+
+    me tool_window_focus(id_str: text) -> text:
+        """Focus a window by ID."""
+        var found = false
+        var target_surface_id = ""
+        var updated: [WindowInfo] = []
+        for w in self.windows:
+            val is_target = "{w.id}" == id_str
+            if is_target:
+                found = true
+                target_surface_id = w.surface_id
+            val new_w = WindowInfo(
+                id: w.id,
+                title: w.title,
+                width: w.width,
+                height: w.height,
+                focused: is_target,
+                surface_id: w.surface_id
+            )
+            updated = updated + [new_w]
+        if found:
+            self.windows = updated
+            if target_surface_id != "":
+                self.bridge.session.set_active_surface(target_surface_id)
+            return "ok: focused window {id_str}"
+        else:
+            return "error: window {id_str} not found"
+
+    # =================================================================
+    # Widget Tools (LLM-friendly GUI)
+    # =================================================================
+
+    me tool_widget_set(window_id_str: text, widget_dsl: text) -> text:
+        """Parse widget DSL and set as window's widget tree.
+
+        Example DSL:
+          column:
+            text("Hello, World!")
+            button("Click me", action: "greet")
+            table(headers: ["Name", "Value"], rows: [["foo", "42"]])
+        """
+        val win = _find_window(self.windows, window_id_str)
+        if win == nil:
+            return "error: window {window_id_str} not found"
+
+        val surface_id = win.surface_id
+        val result = self.evaluator.evaluate(widget_dsl)
+        match result:
+            Ok(session):
+                val new_tree = session.current_tree()
+                val handle = self.bridge.session.surface_handle(surface_id)
+                if handle == nil:
+                    return "error: surface {surface_id} not found"
+                self.bridge.session.update_surface_tree(handle, new_tree)
+                self.bridge.session.set_active_surface(surface_id)
+                self.bridge.render()
+                return "ok: widget tree updated for window {window_id_str}"
+            Err(e):
+                return "error: DSL parse failed: {e}"
+
+    fn tool_widget_read(window_id_str: text) -> text:
+        """Return current widget tree as text description.
+        LLM can read this to understand current UI state."""
+        val win = _find_window(self.windows, window_id_str)
+        if win == nil:
+            return "error: window {window_id_str} not found"
+
+        val surface_id = win.surface_id
+        val tree_opt = self.bridge.session.get_surface(surface_id)
+        if tree_opt == nil:
+            return "error: no surface for window {window_id_str}"
+
+        val tree = tree_opt
+        val root = tree.root_node()
+        return _render_widget_tree_text(root, 0)
+
+    me tool_widget_action(window_id_str: text, action: text) -> text:
+        """Trigger a UI action (button click, menu select)."""
+        val win = _find_window(self.windows, window_id_str)
+        if win == nil:
+            return "error: window {window_id_str} not found"
+
+        self.bridge.session.set_active_surface(win.surface_id)
+        self.bridge.session.dispatch(UIEvent.Action(name: action))
+        self.bridge.render()
+        return "ok: dispatched action '{action}' to window {window_id_str}"
+
+    # =================================================================
+    # UI Access Tools
+    # =================================================================
+
+    fn tool_ui_access_snapshot() -> text:
+        """Return the canonical UI access snapshot as JSON."""
+        val snapshot = self.bridge.session.access_snapshot()
+        return ui_access_snapshot_to_json(snapshot)
+
+    fn tool_ui_access_surface(surface_id: text) -> text:
+        """Return one surface with its nodes as JSON."""
+        if surface_id == "":
+            return "error: missing surface_id"
+        val snapshot = self.bridge.session.access_snapshot()
+        val json = ui_access_surface_to_json(snapshot, surface_id)
+        if json == "{}":
+            return "error: surface {surface_id} not found"
+        return json
+
+    fn tool_ui_access_find(surface_id: text, kind: text, text_query: text, focused_only: text) -> text:
+        """Find nodes within the canonical access snapshot."""
+        val snapshot = self.bridge.session.access_snapshot()
+        val focused = focused_only == "true" or focused_only == "1" or focused_only == "yes"
+        val persisted = self.bridge.session.access_search_nodes(surface_id, kind, text_query, 200)
+        val matches = match persisted:
+            Ok(nodes):
+                if not focused:
+                    nodes
+                else:
+                    var focused_nodes: [UiAccessNode] = []
+                    for node in nodes:
+                        if node.focused:
+                            focused_nodes = focused_nodes.push(node)
+                    focused_nodes
+            Err(_):
+                ui_access_find_nodes(snapshot, surface_id, kind, text_query, focused)
+        val filtered = UiAccessSnapshot(
+            protocol_version: snapshot.protocol_version,
+            mode: snapshot.mode,
+            active_surface: snapshot.active_surface,
+            surfaces: snapshot.surfaces,
+            nodes: matches,
+            recent_events: []
+        )
+        return ui_access_snapshot_to_text(filtered)
+
+    me tool_ui_access_act(surface_id: text, canonical_id: text, action: text) -> text:
+        """Dispatch a UI action against a canonical node reference."""
+        if action == "":
+            return "error: missing action"
+        var resolved_surface_id = surface_id
+        var widget_id = ""
+        if canonical_id != "":
+            val idx = canonical_id.find("#")
+            if idx < 0:
+                return "error: invalid canonical_id"
+            resolved_surface_id = canonical_id.slice(0, idx)
+            widget_id = canonical_id.slice(idx + 1, canonical_id.len())
+        if resolved_surface_id == "":
+            return "error: missing surface_id"
+        if not self.bridge.session.has_surface(resolved_surface_id):
+            return "error: surface {resolved_surface_id} not found"
+        self.bridge.session.set_active_surface(resolved_surface_id)
+        val action_name = if canonical_id != "":
+            ui_access_resolve_action_name(self.bridge.session.access_snapshot(), canonical_id, action)
+        elif widget_id == "":
+            action
+        else:
+            "{action}_{widget_id}"
+        self.bridge.session.dispatch(UIEvent.Action(name: action_name))
+        self.bridge.render()
+        return "ok: dispatched {action_name}"
+
+    fn tool_ui_access_history(surface_id: text, count_str: text) -> text:
+        """Return recent UI access events as JSON."""
+        var count = 20
+        if count_str != "":
+            count = count_str.to_i32()
+        val persisted = self.bridge.session.access_persisted_events(surface_id, count.to_i64())
+        val events = match persisted:
+            Ok(found):
+                found
+            Err(_):
+                if surface_id == "":
+                    self.bridge.session.access_recent_events(count)
+                else:
+                    self.bridge.session.access_recent_surface_events(surface_id, count)
+        return ui_access_events_to_json(events)
+
+    fn tool_ui_access_observe(surface_id: text, canonical_id: text, kind: text, text_query: text, focused_only: text) -> text:
+        """Declarative read layer over canonical UI access tools."""
+        val snapshot = self.bridge.session.access_snapshot()
+        if canonical_id != "":
+            val node = ui_access_find_node(snapshot, canonical_id)
+            if node == nil:
+                return "error: canonical node {canonical_id} not found"
+            var surfaces: [UiAccessSurface] = []
+            for surface in snapshot.surfaces:
+                if surface.surface_id == node.surface_id:
+                    surfaces = surfaces.push(surface)
+            val filtered = UiAccessSnapshot(
+                protocol_version: snapshot.protocol_version,
+                mode: snapshot.mode,
+                active_surface: snapshot.active_surface,
+                surfaces: surfaces,
+                nodes: [node],
+                recent_events: []
+            )
+            return ui_access_snapshot_to_json(filtered)
+        if kind != "" or text_query != "" or focused_only != "":
+            return self.tool_ui_access_find(surface_id, kind, text_query, focused_only)
+        if surface_id != "":
+            return self.tool_ui_access_surface(surface_id)
+        return self.tool_ui_access_snapshot()
+
+    me tool_ui_access_state(surface_id: text, canonical_id: text, state_key: text, state_value: text) -> text:
+        """Declarative state read/write layer over canonical UI access tools."""
+        val snapshot = self.bridge.session.access_snapshot()
+        if state_value == "":
+            if canonical_id != "":
+                val node = ui_access_find_node(snapshot, canonical_id)
+                if node == nil:
+                    return "error: canonical node {canonical_id} not found"
+                if state_key == "":
+                    return self.tool_ui_access_observe(surface_id, canonical_id, "", "", "")
+                val node_value = _node_state_value(node, state_key)
+                if node_value == nil:
+                    return "error: unsupported state key {state_key}"
+                return "{\"canonical_id\":\"{canonical_id}\",\"state_key\":\"{state_key}\",\"state_value\":\"{node_value}\"}"
+            if surface_id != "":
+                val surface = _find_surface(snapshot, surface_id)
+                if surface == nil:
+                    return "error: surface {surface_id} not found"
+                if state_key == "":
+                    return self.tool_ui_access_surface(surface_id)
+                val surface_value = _surface_state_value(surface, state_key)
+                if surface_value == nil:
+                    return "error: unsupported state key {state_key}"
+                return "{\"surface_id\":\"{surface_id}\",\"state_key\":\"{state_key}\",\"state_value\":\"{surface_value}\"}"
+            return "error: missing target"
+
+        var resolved_surface_id = surface_id
+        if canonical_id != "":
+            val idx = canonical_id.find("#")
+            if idx < 0:
+                return "error: invalid canonical_id"
+            resolved_surface_id = canonical_id.slice(0, idx)
+        if state_key == "active":
+            if resolved_surface_id == "":
+                return "error: missing surface_id"
+            if not _is_truthy(state_value):
+                return "error: unsupported state transition active={state_value}"
+            if not self.bridge.session.has_surface(resolved_surface_id):
+                return "error: surface {resolved_surface_id} not found"
+            self.bridge.session.set_active_surface(resolved_surface_id)
+            self.bridge.render()
+            return "ok: state active=true on {resolved_surface_id}"
+
+        if canonical_id == "":
+            return "error: missing canonical_id"
+        if not self.bridge.session.has_surface(resolved_surface_id):
+            return "error: surface {resolved_surface_id} not found"
+        val node = ui_access_find_node(snapshot, canonical_id)
+        if node == nil:
+            return "error: canonical node {canonical_id} not found"
+
+        val lower_key = state_key.to_lower()
+        var action = ""
+        if lower_key == "focus" or lower_key == "focused":
+            if not _is_truthy(state_value):
+                return "error: unsupported state transition {state_key}={state_value}"
+            action = "focus"
+        elif lower_key == "invoke" or lower_key == "invoked" or lower_key == "press" or lower_key == "pressed":
+            if not _is_truthy(state_value):
+                return "error: unsupported state transition {state_key}={state_value}"
+            action = "invoke"
+        elif lower_key == "submit" or lower_key == "submitted":
+            if not _is_truthy(state_value):
+                return "error: unsupported state transition {state_key}={state_value}"
+            action = "submit"
+        elif lower_key == "select":
+            if not _is_truthy(state_value):
+                return "error: unsupported state transition {state_key}={state_value}"
+            if node.selected:
+                return "ok: state {state_key}={state_value} on {canonical_id}"
+            action = "select"
+        elif lower_key == "selected":
+            if _state_matches_toggle_target(node, state_value):
+                return "ok: state {state_key}={state_value} on {canonical_id}"
+            if _is_truthy(state_value):
+                action = "select"
+            elif _is_falsy(state_value):
+                action = "toggle"
+            else:
+                return "error: unsupported state transition {state_key}={state_value}"
+        elif lower_key == "toggle" or lower_key == "toggled" or lower_key == "checked" or lower_key == "expanded":
+            if _state_matches_toggle_target(node, state_value):
+                return "ok: state {state_key}={state_value} on {canonical_id}"
+            action = "toggle"
+        elif lower_key == "action":
+            if state_value == "":
+                return "error: missing state_value"
+            action = state_value
+        else:
+            return "error: unsupported state key {state_key}"
+
+        self.bridge.session.set_active_surface(resolved_surface_id)
+        val action_name = ui_access_resolve_action_name(snapshot, canonical_id, action)
+        self.bridge.session.dispatch(UIEvent.Action(name: action_name))
+        self.bridge.render()
+        return "ok: state {state_key}={state_value} -> {action_name}"
+
+    fn tool_ui_access_query(surface_id: text, canonical_id: text, kind: text, text_query: text, focused_only: text, limit_str: text) -> text:
+        """Structured query layer over the canonical UI access snapshot."""
+        val snapshot = self.bridge.session.access_snapshot()
+        if canonical_id != "":
+            val node = ui_access_find_node(snapshot, canonical_id)
+            if node == nil:
+                return "error: canonical node {canonical_id} not found"
+        var limit = 50
+        if limit_str != "":
+            limit = limit_str.to_i32()
+        val focused = _is_truthy(focused_only)
+        return ui_access_query_to_json(snapshot, surface_id, canonical_id, kind, text_query, focused, limit)
+
+    # =================================================================
+    # Screen Tools
+    # =================================================================
+
+    fn tool_screenshot() -> text:
+        """Return text description of current screen state.
+        Lists windows, their positions, and widget tree summaries."""
+        if self.windows.len() == 0:
+            return "Screen: empty (no windows)"
+        val snapshot = self.bridge.session.access_snapshot()
+        return ui_access_snapshot_to_text(snapshot)
+
+    fn tool_screen_read_text() -> text:
+        """Extract all visible text from screen (accessibility).
+        Returns plain text content from all windows."""
+        var out = ""
+        for w in self.windows:
+            val surface_id = w.surface_id
+            val tree_opt = self.bridge.session.get_surface(surface_id)
+            if tree_opt != nil:
+                val tree = tree_opt
+                val root = tree.root_node()
+                out = "{out}{_extract_text_content(root)}"
+        if out == "":
+            return "(no visible text)"
+        return out
+
+    # =================================================================
+    # System Tools
+    # =================================================================
+
+    fn tool_system_info() -> text:
+        """Memory usage, CPU usage, uptime, hostname."""
+        var out = "System Information\n"
+        out = "{out}==================\n"
+        out = "{out}Hostname:  {self.hostname}\n"
+        out = "{out}Uptime:    {self.uptime_sec}s\n"
+        out = "{out}Processes: {self.processes.len()}\n"
+        out = "{out}Windows:   {self.windows.len()}\n"
+        out = "{out}Surfaces:  {self.bridge.session.surface_count()}\n"
+        return out
+
+    fn tool_system_exec(command: text) -> text:
+        """Execute shell command, return output.
+        In OS context, this dispatches to the shell service."""
+        return "exec: command execution not yet available in SimpleOS"
+
+    me update_uptime(seconds: u64):
+        """Update tracked uptime (called by OS tick)."""
+        self.uptime_sec = seconds
+
+    me register_process(pid: u64, name: text):
+        """Register a process in the tracking list."""
+        val proc = ProcessInfo(
+            pid: pid,
+            name: name,
+            state: "Running",
+            cpu_pct: "0.0"
+        )
+        self.processes = self.processes + [proc]
+
+# =========================================================================
+# Module-level Helpers
+# =========================================================================
+
+fn _extract_arg(args_json: text, key: text) -> text:
+    """Simple JSON field extraction for tool arguments.
+    Expects flat JSON object like {"key": "value", ...}."""
+    val search = "\"" + key + "\""
+    val idx = args_json.index_of(search)
+    match idx:
+        Some(i):
+            # Find the colon after the key
+            val after_key = args_json[i + search.len():]
+            val colon_idx = after_key.index_of(":")
+            match colon_idx:
+                Some(ci):
+                    val after_colon = after_key[ci + 1:].strip()
+                    if after_colon.starts_with("\""):
+                        # String value: find closing quote
+                        val value_start = 1
+                        val rest = after_colon[1:]
+                        val end_quote = rest.index_of("\"")
+                        match end_quote:
+                            Some(ei):
+                                return rest[0:ei]
+                            _:
+                                return rest
+                    else:
+                        # Number or other: read until comma or }
+                        var end_idx = after_colon.len()
+                        val comma = after_colon.index_of(",")
+                        match comma:
+                            Some(ci2):
+                                end_idx = ci2
+                            _:
+                                pass_dn
+                        val brace = after_colon.index_of("}")
+                        match brace:
+                            Some(bi):
+                                if bi < end_idx:
+                                    end_idx = bi
+                            _:
+                                pass_dn
+                        return after_colon[0:end_idx].strip()
+                _:
+                    return ""
+        _:
+            return ""
+
+fn _is_truthy(value: text) -> bool:
+    val lower = value.to_lower()
+    return lower == "true" or lower == "1" or lower == "yes" or lower == "on"
+
+fn _is_falsy(value: text) -> bool:
+    val lower = value.to_lower()
+    return lower == "false" or lower == "0" or lower == "no" or lower == "off"
+
+fn _state_matches_toggle_target(node: UiAccessNode, desired: text) -> bool:
+    if _is_truthy(desired):
+        return node.selected
+    if _is_falsy(desired):
+        return not node.selected
+    return false
+
+fn _find_surface(snapshot: UiAccessSnapshot, surface_id: text) -> UiAccessSurface?:
+    for surface in snapshot.surfaces:
+        if surface.surface_id == surface_id:
+            return surface
+    return nil
+
+fn _node_state_value(node: UiAccessNode, state_key: text) -> text?:
+    val lower_key = state_key.to_lower()
+    if lower_key == "canonical_id":
+        return node.canonical_id
+    if lower_key == "surface_id":
+        return node.surface_id
+    if lower_key == "widget_id":
+        return node.widget_id
+    if lower_key == "kind":
+        return node.kind
+    if lower_key == "visible":
+        return if node.visible: "true" else: "false"
+    if lower_key == "focused":
+        return if node.focused: "true" else: "false"
+    if lower_key == "enabled":
+        return if node.enabled: "true" else: "false"
+    if lower_key == "selected" or lower_key == "checked" or lower_key == "expanded":
+        return if node.selected: "true" else: "false"
+    if lower_key == "text":
+        return node.text
+    if lower_key == "actions" or lower_key == "action_names":
+        return _join_text(node.action_names, ",")
+    return nil
+
+fn _surface_state_value(surface: UiAccessSurface, state_key: text) -> text?:
+    val lower_key = state_key.to_lower()
+    if lower_key == "surface_id":
+        return surface.surface_id
+    if lower_key == "title":
+        return surface.title
+    if lower_key == "active":
+        return if surface.active: "true" else: "false"
+    if lower_key == "window_id":
+        return surface.window_id
+    if lower_key == "app_id":
+        return surface.app_id
+    if lower_key == "root_canonical_id":
+        return surface.root_canonical_id
+    return nil
+
+fn _join_text(values: [text], separator: text) -> text:
+    var out = ""
+    var first = true
+    for value in values:
+        if first:
+            out = value
+            first = false
+        else:
+            out = "{out}{separator}{value}"
+    return out
+
+fn _find_window(windows: [WindowInfo], id_str: text) -> WindowInfo?:
+    """Find a window by ID string."""
+    for w in windows:
+        if "{w.id}" == id_str:
+            return w
+    return nil
+
+fn _snapshot_with_window_metadata(snapshot: UiAccessSnapshot, windows: [WindowInfo]) -> UiAccessSnapshot:
+    """Overlay window IDs and titles onto snapshot surfaces when known."""
+    var enriched: [UiAccessSurface] = []
+    for surface in snapshot.surfaces:
+        var window_id = surface.window_id
+        var title = surface.title
+        for window in windows:
+            if window.surface_id == surface.surface_id:
+                window_id = "{window.id}"
+                if title == "":
+                    title = window.title
+        enriched = enriched.push(UiAccessSurface(
+            surface_id: surface.surface_id,
+            title: title,
+            active: surface.active,
+            window_id: window_id,
+            app_id: surface.app_id,
+            root_canonical_id: surface.root_canonical_id
+        ))
+    return UiAccessSnapshot(
+        protocol_version: snapshot.protocol_version,
+        mode: snapshot.mode,
+        active_surface: snapshot.active_surface,
+        surfaces: enriched,
+        nodes: snapshot.nodes,
+        recent_events: snapshot.recent_events
+    )
+
+fn _parse_dim_or_default(value: text, default_value: i32) -> i32:
+    if value == "":
+        return default_value
+    return value.to_i32()
+
+fn _fs_node_kind_str(kind: FsNodeKind) -> text:
+    """Convert FsNodeKind to display string."""
+    match kind:
+        File: return "FILE"
+        Directory: return "DIR "
+        Symlink: return "LINK"
+        Device: return "DEV "
+        Pipe: return "PIPE"
+
+fn _render_widget_tree_text(node: WidgetNode, depth: i32) -> text:
+    """Render a widget tree as indented text for LLM reading."""
+    var indent = ""
+    var i = 0
+    while i < depth:
+        indent = "{indent}  "
+        i = i + 1
+    var out = "{indent}{node.widget_summary()}\n"
+    val children = node.children()
+    for child in children:
+        out = "{out}{_render_widget_tree_text(child, depth + 1)}"
+    return out
+
+fn _extract_text_content(node: WidgetNode) -> text:
+    """Recursively extract all text content from a widget tree."""
+    var out = ""
+    val summary = node.widget_summary()
+    if summary != "":
+        out = "{out}{summary}\n"
+    val children = node.children()
+    for child in children:
+        out = "{out}{_extract_text_content(child)}"
+    return out

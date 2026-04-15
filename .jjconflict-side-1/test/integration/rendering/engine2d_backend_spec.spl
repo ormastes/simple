@@ -1,0 +1,131 @@
+# @tag: rendering, engine2d, backend, lifecycle
+# @cover src/lib/gc_async_mut/gpu/engine2d/engine.spl 80%
+# @cover src/lib/gc_async_mut/gpu/engine2d/backend.spl 40%
+#
+# Engine2D Backend Discovery and Lifecycle Tests
+#
+# Verifies backend enumeration, auto-detection, explicit selection,
+# priority-based creation, and shutdown/resource release.
+
+use std.spec.{describe, context, it, expect}
+use std.gc_async_mut.gpu.engine2d.engine.{Engine2D}
+use std.gc_async_mut.gpu.engine2d.color.{rgb}
+
+# ============================================================================
+# Tests
+# ============================================================================
+
+describe "Engine2D Backend Discovery":
+
+    context "list_backends":
+
+        it "returns at least software and cpu":
+            val backends = Engine2D.list_backends()
+            var has_software = false
+            var has_cpu = false
+            for b in backends:
+                if b == "software":
+                    has_software = true
+                if b == "cpu":
+                    has_cpu = true
+            expect(has_software).to_equal(true)
+            expect(has_cpu).to_equal(true)
+
+        it "returns a non-empty list":
+            val backends = Engine2D.list_backends()
+            expect(backends.len()).to_be_greater_than(1)
+
+    context "create auto-detect":
+
+        it "creates engine with correct dimensions":
+            var engine = Engine2D.create(100, 100)
+            expect(engine.width()).to_equal(100)
+            expect(engine.height()).to_equal(100)
+            engine.shutdown()
+
+        it "selects a known backend name":
+            var engine = Engine2D.create(80, 60)
+            val name = engine.backend_name()
+            val backends = Engine2D.list_backends()
+            var found = false
+            for b in backends:
+                if b == name:
+                    found = true
+            expect(found).to_equal(true)
+            engine.shutdown()
+
+    context "create_with_backend":
+
+        it "software backend initializes":
+            var engine = Engine2D.create_with_backend(100, 100, "software")
+            expect(engine.backend_name()).to_equal("software")
+            expect(engine.width()).to_equal(100)
+            expect(engine.height()).to_equal(100)
+            engine.shutdown()
+
+        it "cpu backend initializes":
+            var engine = Engine2D.create_with_backend(100, 100, "cpu")
+            expect(engine.backend_name()).to_equal("cpu")
+            expect(engine.width()).to_equal(100)
+            expect(engine.height()).to_equal(100)
+            engine.shutdown()
+
+        it "unknown backend falls back to cpu":
+            var engine = Engine2D.create_with_backend(100, 100, "nonexistent")
+            expect(engine.backend_name()).to_equal("cpu")
+            expect(engine.width()).to_equal(100)
+            expect(engine.height()).to_equal(100)
+            engine.shutdown()
+
+        it "respects requested width and height":
+            var engine = Engine2D.create_with_backend(320, 240, "software")
+            expect(engine.width()).to_equal(320)
+            expect(engine.height()).to_equal(240)
+            engine.shutdown()
+
+    context "create_with_priority":
+
+        it "selects first available backend from priority list":
+            var engine = Engine2D.create_with_priority(100, 100, ["software", "cpu"])
+            expect(engine.backend_name()).to_equal("software")
+            engine.shutdown()
+
+        it "falls back to second when first is unavailable":
+            var engine = Engine2D.create_with_priority(100, 100, ["nonexistent", "cpu"])
+            expect(engine.backend_name()).to_equal("cpu")
+            engine.shutdown()
+
+        it "falls back to cpu when entire list is unavailable":
+            var engine = Engine2D.create_with_priority(100, 100, ["nonexistent_a", "nonexistent_b"])
+            expect(engine.backend_name()).to_equal("cpu")
+            engine.shutdown()
+
+        it "selects cpu when listed first":
+            var engine = Engine2D.create_with_priority(100, 100, ["cpu", "software"])
+            expect(engine.backend_name()).to_equal("cpu")
+            engine.shutdown()
+
+    context "shutdown and lifecycle":
+
+        it "shutdown does not crash":
+            var engine = Engine2D.create_with_backend(50, 50, "software")
+            engine.clear(rgb(0, 0, 0))
+            engine.present()
+            engine.shutdown()
+            # If we reach here without crash, the test passes
+            expect(true).to_equal(true)
+
+        it "can create multiple engines sequentially":
+            var e1 = Engine2D.create_with_backend(64, 64, "software")
+            e1.shutdown()
+            var e2 = Engine2D.create_with_backend(128, 128, "cpu")
+            e2.shutdown()
+            var e3 = Engine2D.create_with_backend(32, 32, "software")
+            expect(e3.width()).to_equal(32)
+            e3.shutdown()
+
+        it "read_pixels works after initialization":
+            var engine = Engine2D.create_with_backend(10, 10, "software")
+            val pixels = engine.read_pixels()
+            expect(pixels.len()).to_equal(100)
+            engine.shutdown()

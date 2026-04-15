@@ -1,0 +1,70 @@
+#![allow(unnamed_duplicate_typed_args)]
+# @tag: sys, wm_compare, parity, v1, v2
+# @cover src/app/wm_compare/v1_v2_parity.spl 0%
+# @cover src/os/drivers/framebuffer/fb_driver.spl 0%
+#
+# wm_compare V1/V2 Parity — Row 2 of GUI drawing-layer matrix
+#
+# Locks the contract that the same drawing scene rendered through V1
+# (`FramebufferDriver.from_buffer`, the fb_backend code path) and V2
+# (the pure-Simple stand-in for the hosted_backend FFI math) produces
+# byte-identical ARGB8888 buffers on the cells both code paths agree on.
+#
+# Scenes are deliberately tiny (32x16) so a failing run can dump the
+# whole buffer to a PPM without bloating the spec output.
+#
+# Plan: doc/03_plan/sys_test/wm_compare_v1_v2_parity.md
+
+use std.spec.{describe, context, it, expect}
+use app.wm_compare.v1_v2_parity.{
+    run_parity, render_v1, render_v2, diff_buffers,
+    scene_solid_fill, scene_fill_rect_row_edge, scene_text_with_bg, scene_glass_blend,
+}
+
+describe "wm_compare V1/V2 parity":
+
+    context "solid fill — clear() on both backends":
+
+        it "produces zero per-channel delta":
+            val r = run_parity(scene_solid_fill())
+            expect(r.pass_exact).to_be_true()
+
+        it "produces zero perceptual diff":
+            val r = run_parity(scene_solid_fill())
+            expect(r.pass_perceptual).to_be_true()
+
+    context "fill_rect on the row edge — exercises [x,x+w) half-open contract":
+
+        it "row 0 + row h-1 fill_rect matches V1↔V2":
+            val r = run_parity(scene_fill_rect_row_edge())
+            expect(r.pass_exact).to_be_true()
+
+        it "differs in zero pixels":
+            val r = run_parity(scene_fill_rect_row_edge())
+            expect(r.differing_pixels == 0u32).to_be_true()
+
+    context "text+bg — draw_text background cells match between backends":
+
+        it "max channel delta on bg cells is 0":
+            val r = run_parity(scene_text_with_bg())
+            # V2's flat-block glyph stub matches V1's bg writes; this
+            # validates the bg-cell contract, NOT the glyph rasterizer.
+            expect(r.pass_exact).to_be_true()
+
+    context "glass blend — degraded blend_rect math":
+
+        it "exact-match blend output":
+            val r = run_parity(scene_glass_blend())
+            expect(r.pass_exact).to_be_true()
+
+        it "stays within ≤1% perceptual budget":
+            val r = run_parity(scene_glass_blend())
+            expect(r.pass_perceptual).to_be_true()
+
+    context "diff harness self-check":
+
+        it "reports identical buffers as exact":
+            val v1 = render_v1(scene_solid_fill())
+            val v2 = render_v2(scene_solid_fill())
+            val r = diff_buffers("self_check", 32u32, 16u32, v1, v2)
+            expect(r.max_channel_delta == 0u32).to_be_true()

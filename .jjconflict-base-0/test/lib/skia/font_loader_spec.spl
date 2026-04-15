@@ -1,0 +1,99 @@
+# @cover src/lib/skia/feature/font_loader/registry.spl 80%
+"""
+# Skia Font Loader Specification
+
+**Feature IDs:** #SKI-FONT-LOADER
+**Category:** Stdlib
+**Difficulty:** 2/5
+**Status:** Implemented
+
+## Overview
+
+Tests for FontRegistry — the in-memory stub backing SkFontMgr-style family
+enumeration and matchFamilyStyle lookup.
+"""
+
+use std.sspec.*
+use std.skia.feature.font_loader.{
+    FontWeight,
+    FontSlant,
+    FontStyle,
+    FontFamilyEntry,
+    FontRegistry,
+    font_registry_new,
+    default_font_registry
+}
+
+describe "font_loader":
+    it "font_registry_new: empty registry has zero families":
+        val reg = font_registry_new()
+        expect(reg.family_count()).to_equal(0)
+        expect(reg.list_families().length()).to_equal(0)
+
+    it "register + list_families: returns added family names":
+        val reg = font_registry_new()
+        val style = FontStyle(weight: FontWeight.Regular, slant: FontSlant.Upright)
+        reg.register(FontFamilyEntry(
+            family: "Alpha",
+            style: style,
+            typeface_name: "",
+            path: ""
+        ))
+        reg.register(FontFamilyEntry(
+            family: "Beta",
+            style: style,
+            typeface_name: "",
+            path: ""
+        ))
+        val families = reg.list_families()
+        expect(families.length()).to_equal(2)
+        expect(families[0]).to_equal("Alpha")
+        expect(families[1]).to_equal("Beta")
+        expect(reg.family_count()).to_equal(2)
+
+    it "default_font_registry: has Sans, Serif, Monospace":
+        val reg = default_font_registry()
+        expect(reg.family_count()).to_equal(3)
+        val families = reg.list_families()
+        expect(families[0]).to_equal("Sans")
+        expect(families[1]).to_equal("Serif")
+        expect(families[2]).to_equal("Monospace")
+
+    it "match_family_style: exact match returns Some":
+        val reg = default_font_registry()
+        val style = FontStyle(weight: FontWeight.Regular, slant: FontSlant.Upright)
+        val result = reg.match_family_style("Serif", style)
+        val entry = result.unwrap()
+        expect(entry.family).to_equal("Serif")
+
+    it "match_family_style: unknown family returns None":
+        val reg = default_font_registry()
+        val style = FontStyle(weight: FontWeight.Regular, slant: FontSlant.Upright)
+        val result = reg.match_family_style("Nonexistent", style)
+        expect(result).to_be_nil()
+
+    it "match_family_style: fallback to closest weight when exact weight missing":
+        val reg = font_registry_new()
+        # Register only Thin (100) and Black (900) upright variants.
+        reg.register(FontFamilyEntry(
+            family: "Custom",
+            style: FontStyle(weight: FontWeight.Thin, slant: FontSlant.Upright),
+            typeface_name: "",
+            path: ""
+        ))
+        reg.register(FontFamilyEntry(
+            family: "Custom",
+            style: FontStyle(weight: FontWeight.Black, slant: FontSlant.Upright),
+            typeface_name: "",
+            path: ""
+        ))
+        # Request Medium (500) — closer to Black (900, dist 400) than Thin (100, dist 400)?
+        # Thin dist = |500 - 100| = 400; Black dist = |500 - 900| = 400. Tie — first wins (Thin).
+        # Use Bold (700) instead: Thin dist 600, Black dist 200 -> Black wins.
+        val style = FontStyle(weight: FontWeight.Bold, slant: FontSlant.Upright)
+        val result = reg.match_family_style("Custom", style)
+        val entry = result.unwrap()
+        expect(entry.family).to_equal("Custom")
+        val is_black = entry.style.weight == FontWeight.Black
+        expect(is_black).to_equal(true)
+        expect(reg.family_count()).to_be_greater_than(0)

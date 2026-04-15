@@ -1,0 +1,84 @@
+# x86_64 GUI Entry -- Browser Engine variant
+#
+# Boots the same BGA framebuffer path as gui_entry_engine2d.spl, but
+# instead of hand-drawing rectangles through Engine2D, routes a real
+# HTML page through the browser_engine pipeline:
+#
+#   HTML -> DOM (html_string_to_dom)
+#        -> BrowserRenderer.render_dom_to_engine
+#        -> layout -> paint -> scene
+#        -> execute_scene_to_engine2d
+#        -> Engine2D (BaremetalBackend)
+#        -> BGA framebuffer
+#
+# This is the first in-guest demonstration of actual HTML rendering
+# on SimpleOS. The rendered frame stays on screen via a halt loop so
+# QMP capture can read it back.
+#
+# Boot sequence:
+#   1. Serial init
+#   2. BGA framebuffer init (1024x768x32)
+#   3. Create FramebufferDriver from boot info
+#   4. create_baremetal_browser_renderer(fb)
+#   5. html_string_to_dom(welcome_html())
+#   6. renderer.render_dom_to_engine(dom)
+#   7. Halt loop (no Compositor, no DesktopShell)
+
+use os.kernel.arch.x86_64.console.{serial_init, serial_writeln}
+use os.drivers.framebuffer.bga_init.{bga_init_framebuffer}
+use os.drivers.framebuffer.fb_driver.{FramebufferDriver}
+use std.gc_async_mut.gpu.browser_engine.browser_engine2d_bridge.{create_baremetal_browser_renderer}
+use std.gc_async_mut.gpu.browser_engine.widget_to_dom.{html_string_to_dom}
+use examples.simple_os.assets.welcome.{welcome_html}
+
+extern fn serial_println(msg: text)
+extern fn rt_gui_set_fb(addr: u64, width: u64)
+extern fn rt_hlt()
+
+fn spl_start():
+    """x86_64 GUI entry -- browser_engine + Engine2D + BaremetalBackend.
+
+    Initializes the BGA framebuffer, constructs a BrowserRenderer bound
+    to the real framebuffer via BaremetalBackend, parses the SimpleOS
+    welcome HTML into a DOM, and runs the full browser_engine pipeline
+    through Engine2D. The rendered frame is preserved via a halt loop.
+    """
+    serial_init()
+    serial_writeln("SimpleOS x86_64 GUI boot (BGA mode, browser_engine variant)")
+    serial_writeln("[BOOT] COM1 serial initialized at 0x3F8")
+
+    # BGA framebuffer
+    serial_writeln("[BOOT] Initializing BGA framebuffer (1024x768x32)...")
+    val fb_info = bga_init_framebuffer(1024, 768, 32)
+    serial_writeln("[BOOT] BGA framebuffer ready")
+
+    # C runtime hook for rt_gui_* glass rendering
+    serial_println("[GUI] Setting up C runtime framebuffer...")
+    rt_gui_set_fb(fb_info.addr.addr, fb_info.width.to_u64())
+    serial_println("[GUI] rt_gui_set_fb done")
+
+    # FramebufferDriver
+    serial_println("[GUI] Creating FramebufferDriver...")
+    var fb = FramebufferDriver.from_boot_info(fb_info)
+    serial_println("[GUI] FramebufferDriver created")
+
+    # ---- Browser engine pipeline ----
+    serial_println("[BE] Creating BrowserRenderer (Engine2D + BaremetalBackend)...")
+    var renderer = create_baremetal_browser_renderer(fb)
+    serial_println("[BE] BrowserRenderer created")
+
+    serial_println("[BE] Loading welcome HTML...")
+    val html = welcome_html()
+    serial_println("[BE] Welcome HTML loaded")
+
+    serial_println("[BE] Parsing HTML to DOM...")
+    val dom = html_string_to_dom(html)
+    serial_println("[BE] DOM parsed")
+
+    serial_println("[BE] Rendering DOM through Engine2D pipeline...")
+    renderer.render_dom_to_engine(dom)
+    serial_println("[BE] Frame painted: HTML -> DOM -> layout -> paint -> scene -> Engine2D -> framebuffer")
+
+    serial_println("[GUI] Entering halt loop (rendered frame held for QMP capture)")
+    while true:
+        rt_hlt()

@@ -1,0 +1,84 @@
+# CompositorFrame, FrameMetadata and RenderPass unit tests
+
+use std.sspec.*
+use std.skia.entity.geometry.{SkRect}
+use std.skia.entity.matrix.{Matrix3x3}
+use std.skia.entity.color.{SkColor4f}
+use std.skia.entity.enums.{SkBlendMode}
+use std.viz.entity.draw_quad.{DrawQuad, SharedQuadState}
+use std.viz.entity.render_pass.{RenderPass}
+use std.viz.entity.compositor_frame.{CompositorFrame, FrameMetadata}
+use std.viz.entity.surface_id.{SurfaceId, FrameSinkId, LocalSurfaceId}
+
+fn _rect(l: f64, t: f64, r: f64, b: f64) -> SkRect:
+    SkRect(left: l, top: t, right: r, bottom: b)
+
+fn _sqs() -> SharedQuadState:
+    SharedQuadState(
+        quad_to_target_transform: Matrix3x3.identity(),
+        visible_layer_rect: _rect(0.0, 0.0, 100.0, 100.0),
+        clip_rect: _rect(0.0, 0.0, 100.0, 100.0),
+        is_clipped: false,
+        opacity: 1.0,
+        blend_mode: SkBlendMode.SrcOver,
+        sorting_context_id: 0
+    )
+
+describe "CompositorFrame::empty":
+    it "empty frame has 0 passes":
+        val f = CompositorFrame.empty()
+        expect f.render_pass_list.len() to_equal 0
+
+    it "empty frame total_quad_count is 0":
+        val f = CompositorFrame.empty()
+        expect f.total_quad_count() to_equal 0
+
+    it "empty frame root_render_pass_id is -1":
+        val f = CompositorFrame.empty()
+        expect f.root_render_pass_id() to_equal -1
+
+describe "CompositorFrame with passes":
+    it "adding one RenderPass bumps pass count":
+        var f = CompositorFrame.empty()
+        val rp = RenderPass.new(1, _rect(0.0, 0.0, 800.0, 600.0))
+        f.render_pass_list = f.render_pass_list + [rp]
+        expect f.render_pass_list.len() to_equal 1
+
+    it "root_render_pass_id returns last pass id":
+        var f = CompositorFrame.empty()
+        val rp1 = RenderPass.new(10, _rect(0.0, 0.0, 800.0, 600.0))
+        val rp2 = RenderPass.new(20, _rect(0.0, 0.0, 800.0, 600.0))
+        f.render_pass_list = f.render_pass_list + [rp1, rp2]
+        expect f.root_render_pass_id() to_equal 20
+
+    it "total_quad_count sums across multiple passes":
+        var f = CompositorFrame.empty()
+        var rp1 = RenderPass.new(1, _rect(0.0, 0.0, 100.0, 100.0))
+        var rp2 = RenderPass.new(2, _rect(0.0, 0.0, 100.0, 100.0))
+        val color = SkColor4f(r: 1.0, g: 0.0, b: 0.0, a: 1.0)
+        val q = DrawQuad.solid_color(0, _rect(0.0, 0.0, 50.0, 50.0), color)
+        rp1.add_quad(q)
+        rp1.add_quad(q)
+        rp2.add_quad(q)
+        f.render_pass_list = f.render_pass_list + [rp1, rp2]
+        expect f.total_quad_count() to_equal 3
+
+describe "FrameMetadata":
+    it "fields round-trip through constructor":
+        val meta = FrameMetadata(
+            device_scale_factor: 2.0,
+            root_scroll_offset_x: 10.5,
+            root_scroll_offset_y: 20.0,
+            frame_token: 7
+        )
+        expect meta.device_scale_factor to_equal 2.0
+        expect meta.frame_token to_equal 7
+
+describe "RenderPass::new":
+    it "new(42, rect) has id=42":
+        val rp = RenderPass.new(42, _rect(0.0, 0.0, 100.0, 100.0))
+        expect rp.id to_equal 42
+
+    it "new pass starts with 0 quads":
+        val rp = RenderPass.new(1, _rect(0.0, 0.0, 100.0, 100.0))
+        expect rp.quad_count() to_equal 0

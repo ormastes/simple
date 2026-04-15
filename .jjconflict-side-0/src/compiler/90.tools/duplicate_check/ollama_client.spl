@@ -1,0 +1,124 @@
+#![allow(unnamed_duplicate_typed_args)]
+@allow(unnamed_duplicate_typed_args)
+# Ollama embedding API client
+
+extern fn rt_http_request(method: text, url: text, headers: text, body: text) -> (i64, text, text)
+
+use std.text.{escape_json}
+use std.nogc_async_mut.mcp.helpers.{Q, LB, RB}
+use compiler.tools.duplicate_check.math_utils.{find_substr, parse_float_safe}
+
+struct EmbeddingResult:
+    vector: [f64]
+    error: text
+
+fn check_ollama_available(base_url: text) -> bool:
+    val url = base_url + "/api/tags"
+    val result = rt_http_request("GET", url, "", "")
+    val (status, body, err) = result
+    status == 200
+
+fn get_embedding(base_url: text, model: text, input_text: text) -> EmbeddingResult:
+    val url = base_url + "/api/embed"
+    val escaped = escape_json(input_text)
+    val body = LB() + Q() + "model" + Q() + ":" + Q() + model + Q() + "," + Q() + "input" + Q() + ":" + Q() + escaped + Q() + RB()
+    val headers = "Content-Type: application/json"
+
+    val result = rt_http_request("POST", url, headers, body)
+    val (status, response_body, err) = result
+
+    if status != 200:
+        var error_msg = "Ollama request failed with status {status}"
+        if err.len() > 0:
+            error_msg = error_msg + ": " + err
+        return EmbeddingResult(vector: [], error: error_msg)
+
+    val vec = parse_embedding_response(response_body)
+    if vec.len() == 0:
+        return EmbeddingResult(vector: [], error: "Failed to parse embedding from response")
+
+    EmbeddingResult(vector: vec, error: "")
+
+fn get_embeddings_batch(base_url: text, model: text, texts: [text], batch_size: i64) -> [EmbeddingResult]:
+    var results: [EmbeddingResult] = []
+    var i = 0
+    while i < texts.len():
+        val result = get_embedding(base_url, model, texts[i])
+        results.push(result)
+        i = i + 1
+    results
+
+fn parse_embedding_response(json: text) -> [f64]:
+    # Response format: {"embeddings":[[0.1, 0.2, ...]]}
+    # Find the inner array
+    val embed_key = Q() + "embeddings" + Q()
+    val key_idx = find_substr(json, embed_key)
+    if key_idx < 0:
+        # Try alternate key "embedding" (singular)
+        val alt_key = Q() + "embedding" + Q()
+        val alt_idx = find_substr(json, alt_key)
+        if alt_idx < 0:
+            return []
+        return parse_first_float_array(json, alt_idx)
+
+    parse_first_float_array(json, key_idx)
+
+fn parse_first_float_array(json: text, start_from: i64) -> [f64]:
+    # Find first '[' after start_from, then find matching inner '['
+    var i = start_from
+    var bracket_count = 0
+    var array_start = -1
+
+    while i < json.len():
+        val ch = json[i:i+1]
+        if ch == "[":
+            bracket_count = bracket_count + 1
+            if bracket_count == 2:
+                array_start = i + 1
+                break
+            if bracket_count == 1:
+                # Check if next non-space char is not '[' (flat array)
+                var j = i + 1
+                while j < json.len():
+                    val jch = json[j:j+1]
+                    if jch != " " and jch != "\n" and jch != "\r" and jch != "\t":
+                        break
+                    j = j + 1
+                if j < json.len() and json[j:j+1] != "[":
+                    array_start = i + 1
+                    break
+        i = i + 1
+
+    if array_start < 0:
+        return []
+
+    parse_float_array_from(json, array_start)
+
+fn parse_float_array_from(json: text, start: i64) -> [f64]:
+    var result: [f64] = []
+    var current_num = ""
+    var i = start
+
+    while i < json.len():
+        val ch = json[i:i+1]
+        if ch == "]":
+            if current_num.len() > 0:
+                val num_trimmed = current_num.trim()
+                if num_trimmed.len() > 0:
+                    val f = parse_float_safe(num_trimmed)
+                    result.push(f)
+            break
+        elif ch == ",":
+            if current_num.len() > 0:
+                val num_trimmed = current_num.trim()
+                if num_trimmed.len() > 0:
+                    val f = parse_float_safe(num_trimmed)
+                    result.push(f)
+            current_num = ""
+        else:
+            current_num = current_num + ch
+        i = i + 1
+
+    result
+
+

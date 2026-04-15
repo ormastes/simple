@@ -1,0 +1,155 @@
+"""
+# RV64 PLIC Unit Tests
+
+**Feature IDs:** #RV64-PLIC-001
+**Category:** Hardware
+**Difficulty:** 2/5
+**Status:** Draft
+
+## Overview
+
+Unit tests for Platform-Level Interrupt Controller.
+PLIC base address: 0xC000000.
+"""
+
+# tag: only-compiled
+
+import std.spec
+
+class _Plic:
+    priorities: [i64]       # Per-source priority (0-7)
+    pending: [bool]         # Per-source pending bit
+    enable: [[bool]]        # [context][source] enable masks
+    thresholds: [i64]       # Per-context threshold
+    claimed: [i64]          # Per-context: currently claimed source
+
+    fn claim(context: i64) -> i64:
+        var best_source: i64 = 0
+        var best_prio: i64 = 0
+        var i = 1
+        while i < self.priorities.len():
+            if (self.pending[i] and self.enable[context][i] and
+                self.priorities[i] > self.thresholds[context] and
+                self.priorities[i] > best_prio):
+                best_source = i
+                best_prio = self.priorities[i]
+            i = i + 1
+        if best_source != 0:
+            self.pending[best_source] = false
+        best_source
+
+    me complete(context: i64, source: i64):
+        self.claimed[context] = 0
+
+    me trigger(source: i64):
+        if self.priorities[source] > 0:
+            self.pending[source] = true
+
+fn _create_plic(num_sources: i64, num_contexts: i64) -> _Plic:
+    var prios: [i64] = []
+    var pend: [bool] = []
+    var enables: [[bool]] = []
+    var thresh: [i64] = []
+    var claims: [i64] = []
+    var i = 0
+    while i < num_sources:
+        prios = prios + [0]
+        pend = pend + [false]
+        i = i + 1
+    i = 0
+    while i < num_contexts:
+        var ctx_en: [bool] = []
+        var j = 0
+        while j < num_sources:
+            ctx_en = ctx_en + [false]
+            j = j + 1
+        enables = enables + [ctx_en]
+        thresh = thresh + [0]
+        claims = claims + [0]
+        i = i + 1
+    _Plic(priorities: prios, pending: pend, enable: enables, thresholds: thresh, claimed: claims)
+
+describe "Priority":
+    it "set priority for source":
+        var plic = _create_plic(4, 2)
+        plic.priorities[1] = 5
+        expect(plic.priorities[1]).to_equal(5)
+
+    it "priority 0 disables source":
+        var plic = _create_plic(4, 2)
+        plic.priorities[1] = 0
+        plic.pending[1] = true
+        plic.enable[0][1] = true
+        expect(plic.claim(0)).to_equal(0)
+
+describe "Enable":
+    it "enable source for context":
+        var plic = _create_plic(4, 2)
+        plic.enable[0][1] = true
+        expect(plic.enable[0][1]).to_equal(true)
+
+    it "disabled source not visible in claim":
+        var plic = _create_plic(4, 2)
+        plic.priorities[1] = 5
+        plic.pending[1] = true
+        plic.enable[0][1] = false
+        expect(plic.claim(0)).to_equal(0)
+
+describe "Threshold":
+    it "set threshold":
+        var plic = _create_plic(4, 2)
+        plic.thresholds[0] = 3
+        expect(plic.thresholds[0]).to_equal(3)
+
+    it "source below threshold not claimed":
+        var plic = _create_plic(4, 2)
+        plic.priorities[1] = 2
+        plic.pending[1] = true
+        plic.enable[0][1] = true
+        plic.thresholds[0] = 5
+        expect(plic.claim(0)).to_equal(0)
+
+describe "Claim/Complete":
+    it "claim returns highest-priority pending":
+        var plic = _create_plic(4, 2)
+        plic.priorities[1] = 3
+        plic.priorities[2] = 5
+        plic.pending[1] = true
+        plic.pending[2] = true
+        plic.enable[0][1] = true
+        plic.enable[0][2] = true
+        expect(plic.claim(0)).to_equal(2)
+
+    it "claim clears pending":
+        var plic = _create_plic(4, 2)
+        plic.priorities[1] = 5
+        plic.pending[1] = true
+        plic.enable[0][1] = true
+        plic.claim(0)
+        expect(plic.pending[1]).to_equal(false)
+
+    it "no pending returns 0":
+        var plic = _create_plic(4, 2)
+        expect(plic.claim(0)).to_equal(0)
+
+    it "priority tie: lower-numbered source wins":
+        var plic = _create_plic(4, 2)
+        plic.priorities[1] = 5
+        plic.priorities[2] = 5
+        plic.pending[1] = true
+        plic.pending[2] = true
+        plic.enable[0][1] = true
+        plic.enable[0][2] = true
+        expect(plic.claim(0)).to_equal(1)
+
+describe "Context Routing":
+    it "different contexts see different enables":
+        var plic = _create_plic(4, 2)
+        plic.priorities[1] = 5
+        plic.pending[1] = true
+        plic.enable[0][1] = true
+        plic.enable[1][1] = false
+        expect(plic.claim(0)).to_equal(1)
+        # Re-trigger for context 1 test
+        plic.pending[1] = true
+        expect(plic.claim(1)).to_equal(0)

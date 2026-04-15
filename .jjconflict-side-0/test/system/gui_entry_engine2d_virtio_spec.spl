@@ -1,0 +1,97 @@
+# @tag:system
+# @tag:gui-entry-engine2d-virtio
+#
+# System spec — wrapper VirtIO-GPU Engine2D proof lane in QEMU
+#
+# Builds gui_entry_engine2d_virtio.spl into a baremetal x86_64 kernel, boots it
+# under QEMU, waits for the wrapper proof marker, and captures a screendump via
+# QMP. This is a smoke/regression gate for the wrapper lane; baseline-image
+# comparison stays with SYS-GUI-008.
+
+use std.spec.*
+
+use os.kernel.arch.arch_context.{Architecture}
+use os.qemu_runner.{OsTarget, build_os}
+use os.compositor.qemu_capture.{capture_qemu_vm}
+use std.nogc_sync_mut.ffi.io.{dir_create_all}
+
+use test.qemu.os.common.qemu_os_harness.{
+    can_run_target, file_exists, spawn_guest_with_qmp, stop_guest,
+    wait_for_serial_marker}
+
+extern fn rt_get_cwd() -> text
+
+fn _wrapper_virtio_gpu_target() -> OsTarget:
+    OsTarget(
+        arch: Architecture.X86_64,
+        entry: "examples/simple_os/arch/x86_64/gui_entry_engine2d_virtio.spl",
+        linker_script: "examples/simple_os/arch/x86_64/linker.ld",
+        target_triple: "x86_64-unknown-none",
+        output: "build/os/gui_entry_engine2d_virtio_x86_64.elf",
+        qemu_system: "qemu-system-x86_64",
+        qemu_machine: "q35",
+        qemu_cpu: "qemu64",
+        qemu_memory: "512M",
+        qemu_bios: "",
+        qemu_extra: [
+            "-device", "virtio-gpu,disable-modern=on,disable-legacy=off",
+            "-vga", "none",
+            "-device", "isa-debug-exit,iobase=0xf4,iosize=0x04"
+        ],
+        gui_mode: false
+    )
+
+fn _build_once(target: OsTarget) -> bool:
+    if file_exists(target.output):
+        true
+    else:
+        build_os(target)
+
+describe "Wrapper VirtIO-GPU Engine2D proof lane":
+
+    it "builds gui_entry_engine2d_virtio.spl into a baremetal kernel":
+        val target = _wrapper_virtio_gpu_target()
+        val ok = build_os(target)
+        expect(ok).to_equal(true)
+        expect(file_exists(target.output)).to_equal(true)
+
+    it "boots the wrapper lane and reaches the render-ready marker":
+        val target = _wrapper_virtio_gpu_target()
+        expect(_build_once(target)).to_equal(true)
+        expect(file_exists(target.output)).to_equal(true)
+
+        if not can_run_target(target):
+            print "[gui_entry_engine2d_virtio_spec] qemu-system-x86_64 not available, skipping live wrapper smoke"
+            expect(true).to_equal(true)
+            return
+
+        val qmp_socket = "/tmp/gui_entry_engine2d_virtio_qmp.sock"
+        val serial_log = "build/os/gui_entry_engine2d_virtio_serial.log"
+        val cwd = rt_get_cwd()
+        val capture_ppm = "{cwd}/build/os/gui_entry_engine2d_virtio_capture.ppm"
+
+        dir_create_all("build/os")
+
+        match spawn_guest_with_qmp(target, qmp_socket, serial_log):
+            Ok(handle):
+                val saw_ready = wait_for_serial_marker(
+                    handle, "[gui-e2d-virtio] render-ready", 60000)
+                if not saw_ready:
+                    print "[gui_entry_engine2d_virtio_spec] render-ready marker not seen within 60s"
+                    stop_guest(handle)
+                    expect(saw_ready).to_equal(true)
+                    return
+
+                val result = capture_qemu_vm(qmp_socket, capture_ppm)
+                if not result.success:
+                    print "[gui_entry_engine2d_virtio_spec] QMP screendump failed: {result.error}"
+                    stop_guest(handle)
+                    expect(result.success).to_equal(true)
+                    return
+
+                stop_guest(handle)
+                expect(file_exists(capture_ppm)).to_equal(true)
+                expect(result.pixels.len() > 0).to_equal(true)
+            Err(err):
+                print "[gui_entry_engine2d_virtio_spec] failed to spawn guest: {err}"
+                expect(false).to_equal(true)

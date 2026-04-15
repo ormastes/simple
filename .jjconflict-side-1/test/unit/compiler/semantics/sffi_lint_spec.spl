@@ -1,0 +1,442 @@
+"""
+# SFFI Lint Rules Specification
+
+**Feature IDs:** #SFFI-LINT-001..005
+**Category:** Compiler / Semantics / Lint
+**Difficulty:** 3/5
+**Status:** Implemented
+**Requirements:** SFFI bidirectional class interop — layout safety
+**Plan:** parsed-questing-goose.md
+**Design:** sffi_external_library_pattern.md
+
+## Overview
+
+Tests the five SFFI lint rules that validate @export("C") classes have
+C-compatible layouts and types:
+- SFFI001: Non-C-compatible field type (ERROR)
+- SFFI002: text field needs marshalling (WARNING)
+- SFFI003: Missing @repr("C") layout (ERROR)
+- SFFI004: Bitfield without explicit width (ERROR)
+- SFFI005: Platform-dependent type size (WARNING)
+
+## Key Concepts
+
+| Concept | Description |
+|---------|-------------|
+| SffiLintWarning | Lint diagnostic with code, severity, message, hint |
+| lint_sffi_export | Main entry — runs all checks on a HirClass |
+| C-compatible | i8..i64, u8..u64, f32, f64, bool, Ptr |
+"""
+
+use compiler.semantics.lint.sffi_lint.{
+    SffiLintWarning, lint_sffi_export,
+    check_sffi001_c_compatible_types,
+    check_sffi002_text_field,
+    check_sffi003_repr_required,
+    check_sffi004_bitfield_width,
+    check_sffi005_platform_dependent
+}
+from hir_definitions import {HirClass, HirField, HirExpr, HirExprKind}
+from hir_types import {HirType, HirTypeKind, SymbolId}
+from lexer import {Span}
+use compiler.types.type_layout.{LayoutAttr, LayoutKind}
+use compiler.common.attributes.{ExportAttr}
+
+# ============================================================================
+# Helpers: Build test data
+# ============================================================================
+
+fn empty_span() -> Span:
+    Span(start: 0, end_pos: 0, line: 1, col: 1)
+
+fn make_hir_type(kind: HirTypeKind) -> HirType:
+    HirType(kind: kind, span: empty_span())
+
+fn make_i32_type() -> HirType:
+    make_hir_type(HirTypeKind.Int(32, true))
+
+fn make_i64_type() -> HirType:
+    make_hir_type(HirTypeKind.Int(64, true))
+
+fn make_f64_type() -> HirType:
+    make_hir_type(HirTypeKind.Float(64))
+
+fn make_bool_type() -> HirType:
+    make_hir_type(HirTypeKind.Bool)
+
+fn make_str_type() -> HirType:
+    make_hir_type(HirTypeKind.Str)
+
+fn make_u8_type() -> HirType:
+    make_hir_type(HirTypeKind.Int(8, false))
+
+fn make_ref_type() -> HirType:
+    make_hir_type(HirTypeKind.Ref(make_i32_type(), false))
+
+fn make_optional_type() -> HirType:
+    make_hir_type(HirTypeKind.Optional(make_i32_type()))
+
+fn make_dict_type() -> HirType:
+    make_hir_type(HirTypeKind.Dict(make_str_type(), make_i32_type()))
+
+fn make_array_type() -> HirType:
+    make_hir_type(HirTypeKind.Array(make_i32_type(), nil))
+
+fn make_function_type() -> HirType:
+    make_hir_type(HirTypeKind.Function([make_i32_type()], make_i32_type(), []))
+
+fn dummy_expr() -> HirExpr:
+    """Create a dummy HirExpr (UnitLit) for fields without defaults."""
+    HirExpr(
+        kind: HirExprKind.UnitLit,
+        has_type_: false,
+        type_: make_hir_type(HirTypeKind.Unit),
+        span: empty_span()
+    )
+
+fn make_field(name: text, type_: HirType) -> HirField:
+    """Create a minimal HirField for testing."""
+    HirField(
+        symbol: SymbolId(id: 0),
+        name: name,
+        type_: type_,
+        has_default: false,
+        default: dummy_expr(),
+        is_public: true,
+        is_volatile: false,
+        has_bits_attr: false,
+        bits_width: 0,
+        has_fixed_address: false,
+        fixed_address: 0,
+        span: empty_span()
+    )
+
+fn make_bits_field(name: text, type_: HirType, bits_width: i64) -> HirField:
+    val field = make_field(name, type_)
+    field.has_bits_attr = true
+    field.bits_width = bits_width
+    field
+
+fn make_exported_class(name: text, fields: [HirField], has_repr_c: bool) -> HirClass:
+    """Create a HirClass with @export("C") and optional @repr("C")."""
+    val layout = if has_repr_c:
+        LayoutAttr(layout_kind: LayoutKind.C, is_packed: false)
+    else:
+        LayoutAttr(layout_kind: LayoutKind.Simple, is_packed: false)
+
+    HirClass(
+        symbol: SymbolId(id: 1),
+        name: name,
+        type_params: [],
+        fields: fields,
+        methods: {},
+        is_public: true,
+        has_doc_comment: false,
+        doc_comment: "",
+        span: empty_span(),
+        has_layout_attr: has_repr_c,
+        layout_attr: layout,
+        has_export_attr: true,
+        export_attr: ExportAttr(is_export_c: true, export_name: ""),
+        is_generic_template: false,
+        has_specialization_of: false,
+        specialization_of: "",
+        type_bindings: {}
+    )
+
+fn make_non_exported_class(name: text, fields: [HirField]) -> HirClass:
+    """Create a HirClass without @export("C")."""
+    HirClass(
+        symbol: SymbolId(id: 2),
+        name: name,
+        type_params: [],
+        fields: fields,
+        methods: {},
+        is_public: true,
+        has_doc_comment: false,
+        doc_comment: "",
+        span: empty_span(),
+        has_layout_attr: false,
+        layout_attr: LayoutAttr(layout_kind: LayoutKind.Simple, is_packed: false),
+        has_export_attr: false,
+        export_attr: ExportAttr(is_export_c: false, export_name: ""),
+        is_generic_template: false,
+        has_specialization_of: false,
+        specialization_of: "",
+        type_bindings: {}
+    )
+
+fn find_by_code(warnings: [SffiLintWarning], code: text) -> [SffiLintWarning]:
+    """Filter warnings by lint code."""
+    var result: [SffiLintWarning] = []
+    for w in warnings:
+        if w.code == code:
+            result.push(w)
+    result
+
+# ============================================================================
+# Test Group 1: SFFI001 — C-compatible types
+# ============================================================================
+
+describe "SFFI Lint Rules":
+    """
+    ## SFFI Export Lint
+
+    Validates that @export("C") classes use C-compatible types and layouts.
+    """
+
+    describe "SFFI001 - C-compatible types":
+        """
+        ## Type Compatibility
+
+        Only C-compatible primitive types are allowed in exported classes.
+        """
+
+        it "passes for i32, i64, f64, bool fields":
+            val fields = [
+                make_field("x", make_i32_type()),
+                make_field("y", make_i64_type()),
+                make_field("z", make_f64_type()),
+                make_field("flag", make_bool_type())
+            ]
+            val cls = make_exported_class("Point", fields, true)
+            val warnings = check_sffi001_c_compatible_types(cls, "test.spl")
+            expect(warnings.len()).to_equal(0)
+
+        it "errors for List field":
+            val fields = [
+                make_field("items", make_array_type())
+            ]
+            val cls = make_exported_class("BadClass", fields, true)
+            val warnings = check_sffi001_c_compatible_types(cls, "test.spl")
+            expect(warnings.len()).to_equal(1)
+            expect(warnings[0].code).to_equal("SFFI001")
+            expect(warnings[0].severity).to_equal("ERROR")
+
+        it "errors for Dict field":
+            val fields = [
+                make_field("data", make_dict_type())
+            ]
+            val cls = make_exported_class("BadClass", fields, true)
+            val warnings = check_sffi001_c_compatible_types(cls, "test.spl")
+            expect(warnings.len()).to_equal(1)
+            expect(warnings[0].code).to_equal("SFFI001")
+            expect(warnings[0].severity).to_equal("ERROR")
+
+        it "errors for Option field":
+            val fields = [
+                make_field("maybe", make_optional_type())
+            ]
+            val cls = make_exported_class("BadClass", fields, true)
+            val warnings = check_sffi001_c_compatible_types(cls, "test.spl")
+            expect(warnings.len()).to_equal(1)
+            expect(warnings[0].code).to_equal("SFFI001")
+            expect(warnings[0].severity).to_equal("ERROR")
+            expect(warnings[0].message).to_contain("Optional")
+
+        it "errors for Function field":
+            val fields = [
+                make_field("callback", make_function_type())
+            ]
+            val cls = make_exported_class("BadClass", fields, true)
+            val warnings = check_sffi001_c_compatible_types(cls, "test.spl")
+            expect(warnings.len()).to_equal(1)
+            expect(warnings[0].code).to_equal("SFFI001")
+            expect(warnings[0].message).to_contain("Function")
+
+        it "reports multiple errors for multiple non-C fields":
+            val fields = [
+                make_field("items", make_array_type()),
+                make_field("data", make_dict_type()),
+                make_field("ok_field", make_i32_type())
+            ]
+            val cls = make_exported_class("BadClass", fields, true)
+            val warnings = check_sffi001_c_compatible_types(cls, "test.spl")
+            expect(warnings.len()).to_equal(2)
+
+    # ============================================================================
+    # Test Group 2: SFFI002 — text field warning
+    # ============================================================================
+
+    describe "SFFI002 - text field warning":
+        """
+        ## Text Type Warning
+
+        text fields in exported classes need special marshalling (char* in C).
+        """
+
+        it "warns for text field in exported class":
+            val fields = [
+                make_field("name", make_str_type())
+            ]
+            val cls = make_exported_class("Person", fields, true)
+            val warnings = check_sffi002_text_field(cls, "test.spl")
+            expect(warnings.len()).to_equal(1)
+            expect(warnings[0].code).to_equal("SFFI002")
+            expect(warnings[0].severity).to_equal("WARNING")
+            expect(warnings[0].message).to_contain("text")
+
+        it "no warning for non-text fields":
+            val fields = [
+                make_field("x", make_i32_type()),
+                make_field("y", make_f64_type())
+            ]
+            val cls = make_exported_class("Point", fields, true)
+            val warnings = check_sffi002_text_field(cls, "test.spl")
+            expect(warnings.len()).to_equal(0)
+
+    # ============================================================================
+    # Test Group 3: SFFI003 — repr(C) required
+    # ============================================================================
+
+    describe "SFFI003 - repr(C) required":
+        """
+        ## Layout Safety
+
+        @export("C") classes must have @repr("C") to guarantee C-compatible layout.
+        """
+
+        it "errors when @export(C) without @repr(C)":
+            val fields = [make_field("x", make_i32_type())]
+            val cls = make_exported_class("BadLayout", fields, false)
+            val warnings = check_sffi003_repr_required(cls, "test.spl")
+            expect(warnings.len()).to_equal(1)
+            expect(warnings[0].code).to_equal("SFFI003")
+            expect(warnings[0].severity).to_equal("ERROR")
+            expect(warnings[0].message).to_contain("@repr")
+
+        it "passes when both @export(C) and @repr(C) present":
+            val fields = [make_field("x", make_i32_type())]
+            val cls = make_exported_class("GoodLayout", fields, true)
+            val warnings = check_sffi003_repr_required(cls, "test.spl")
+            expect(warnings.len()).to_equal(0)
+
+    # ============================================================================
+    # Test Group 4: SFFI004 — bitfield width
+    # ============================================================================
+
+    describe "SFFI004 - bitfield width":
+        """
+        ## Bitfield Safety
+
+        Uses explicit @bits metadata when available, and falls back to
+        a heuristic for older parse paths.
+        """
+
+        it "passes for valid explicit @bits metadata":
+            val fields = [
+                make_bits_field("mode", make_u8_type(), 4),
+                make_bits_field("output", make_bool_type(), 1),
+                make_bits_field("input", make_bool_type(), 1),
+                make_bits_field("speed", make_u8_type(), 2)
+            ]
+            val cls = make_exported_class("GpioRegister", fields, true)
+            val warnings = check_sffi004_bitfield_width(cls, "test.spl")
+            expect(warnings.len()).to_equal(0)
+
+        it "errors when explicit @bits width exceeds the field capacity":
+            val fields = [
+                make_bits_field("mode", make_u8_type(), 9)
+            ]
+            val cls = make_exported_class("BadBits", fields, true)
+            val warnings = check_sffi004_bitfield_width(cls, "test.spl")
+            expect(warnings.len()).to_equal(1)
+            expect(warnings[0].code).to_equal("SFFI004")
+            expect(warnings[0].message).to_contain("@bits(9)")
+
+        it "errors on 4+ consecutive sub-word fields without @bits":
+            val fields = [
+                make_field("mode", make_u8_type()),
+                make_field("output", make_u8_type()),
+                make_field("input", make_u8_type()),
+                make_field("speed", make_u8_type())
+            ]
+            val cls = make_exported_class("GpioRegister", fields, true)
+            val warnings = check_sffi004_bitfield_width(cls, "test.spl")
+            expect(warnings.len()).to_equal(1)
+            expect(warnings[0].code).to_equal("SFFI004")
+            expect(warnings[0].severity).to_equal("ERROR")
+            expect(warnings[0].message).to_contain("bitfield")
+
+        it "no error for fewer than 4 consecutive sub-word fields":
+            val fields = [
+                make_field("a", make_u8_type()),
+                make_field("b", make_u8_type()),
+                make_field("c", make_i32_type())
+            ]
+            val cls = make_exported_class("SmallStruct", fields, true)
+            val warnings = check_sffi004_bitfield_width(cls, "test.spl")
+            expect(warnings.len()).to_equal(0)
+
+    # ============================================================================
+    # Test Group 5: SFFI005 — platform-dependent types
+    # ============================================================================
+
+    describe "SFFI005 - platform-dependent types":
+        """
+        ## Platform Independence
+
+        Reference types have platform-dependent size and should be flagged.
+        """
+
+        it "warns on reference types in exported class":
+            val fields = [
+                make_field("data_ref", make_ref_type())
+            ]
+            val cls = make_exported_class("RefHolder", fields, true)
+            val warnings = check_sffi005_platform_dependent(cls, "test.spl")
+            expect(warnings.len()).to_equal(1)
+            expect(warnings[0].code).to_equal("SFFI005")
+            expect(warnings[0].severity).to_equal("WARNING")
+            expect(warnings[0].message).to_contain("reference")
+
+        it "no warning for fixed-size types":
+            val fields = [
+                make_field("x", make_i32_type()),
+                make_field("y", make_f64_type())
+            ]
+            val cls = make_exported_class("FixedSize", fields, true)
+            val warnings = check_sffi005_platform_dependent(cls, "test.spl")
+            expect(warnings.len()).to_equal(0)
+
+    # ============================================================================
+    # Test Group 6: lint_sffi_export — Main Entry Point
+    # ============================================================================
+
+    describe "lint_sffi_export - main entry":
+        """
+        ## Full Lint Pipeline
+
+        Tests the main entry point that runs all checks.
+        """
+
+        it "returns empty list for non-exported class":
+            val fields = [make_field("data", make_dict_type())]
+            val cls = make_non_exported_class("Internal", fields)
+            val warnings = lint_sffi_export(cls, "test.spl")
+            expect(warnings.len()).to_equal(0)
+
+        it "collects warnings from all checks on exported class":
+            val fields = [
+                make_field("name", make_str_type()),
+                make_field("items", make_array_type())
+            ]
+            # Without @repr("C") to also trigger SFFI003
+            val cls = make_exported_class("MultiWarn", fields, false)
+            val warnings = lint_sffi_export(cls, "test.spl")
+            # Should have: SFFI001 (array), SFFI002 (text), SFFI003 (no repr)
+            val sffi001 = find_by_code(warnings, "SFFI001")
+            val sffi002 = find_by_code(warnings, "SFFI002")
+            val sffi003 = find_by_code(warnings, "SFFI003")
+            expect(sffi001.len()).to_be_greater_than(0)
+            expect(sffi002.len()).to_be_greater_than(0)
+            expect(sffi003.len()).to_be_greater_than(0)
+
+        it "clean class passes all checks":
+            val fields = [
+                make_field("x", make_i32_type()),
+                make_field("y", make_f64_type())
+            ]
+            val cls = make_exported_class("CleanClass", fields, true)
+            val warnings = lint_sffi_export(cls, "test.spl")
+            expect(warnings.len()).to_equal(0)

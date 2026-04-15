@@ -1,0 +1,72 @@
+#![allow(unnamed_duplicate_typed_args)]
+
+# Spec for the SYSCALL kernel-entry trampoline wiring.
+#
+# Wave 7B introduced a real SYSCALL trampoline in
+#   examples/simple_os/arch/x86_64/boot/syscall_entry.s
+# plus a C-side dispatcher in baremetal_stubs.c and a Simple-side
+# helper `kernel_syscall_entry_addr()` exposed from cpu.spl that
+# returns the runtime address of the asm trampoline.
+#
+# Invariants this spec locks in:
+#
+#   1. `kernel_syscall_entry_addr` is exported from cpu.spl and callable.
+#   2. After `install_syscall_entry()` runs, the trampoline is visible
+#      via the address helper (non-zero on a real build; in the host
+#      test harness the C helper is stubbed, so we only assert the
+#      function is callable without error).
+#   3. `install_syscall_entry` remains idempotent (re-asserting the
+#      guarantee from msr_lstar_install_spec.spl so a refactor cannot
+#      accidentally drop the latch when wiring the trampoline).
+#   4. The documented MSR bit constants that the future wrmsr flip
+#      will use (EFER_SCE, SYSCALL_FMASK_IF) match the AMD64 spec.
+#
+# Run:
+#   bin/simple test test/os/kernel/arch/syscall_entry_spec.spl
+
+use std.spec
+use os.kernel.arch.x86_64.cpu.{
+    install_syscall_entry,
+    syscall_entry_installed,
+    kernel_syscall_entry_addr,
+    EFER_SCE,
+    SYSCALL_FMASK_IF
+}
+
+describe "kernel.arch.x86_64 SYSCALL trampoline wiring":
+    """Guardrails around the SYSCALL kernel-entry trampoline that
+    Wave 7B introduced. The install itself is still a logged no-op —
+    this spec covers only the link-visible pieces so the follow-up
+    wrmsr flip has a regression safety net."""
+
+    it "exposes the trampoline address helper":
+        """`kernel_syscall_entry_addr` must be importable from cpu.spl.
+        The function simply wraps the C-side `get_kernel_syscall_entry_addr`
+        so the Simple side can fetch the trampoline address for the
+        future wrmsr flip without dealing with raw symbol coercion."""
+        # Call it twice — the contract is "callable without error AND
+        # deterministic"; link-time presence is verified at kernel build.
+        val a: u64 = kernel_syscall_entry_addr()
+        val b: u64 = kernel_syscall_entry_addr()
+        expect(a).to_equal(b)
+
+    it "install_syscall_entry is idempotent":
+        """The installer is called from both os_main and
+        desktop_e2e_main via arch_x86_64_early_init. It must tolerate
+        repeat invocations without flipping state back or erroring."""
+        install_syscall_entry()
+        install_syscall_entry()
+        install_syscall_entry()
+        expect(syscall_entry_installed()).to_equal(true)
+
+    it "documents EFER_SCE as bit 0":
+        """EFER bit 0 enables the SYSCALL/SYSRET instructions. The
+        planned wrmsr flip will set this bit as the first step, so
+        lock the numeric value into a spec to guard against typos."""
+        expect(EFER_SCE).to_equal(0x1)
+
+    it "documents SYSCALL_FMASK_IF as RFLAGS bit 9":
+        """MSR_SFMASK is programmed to clear IF (RFLAGS bit 9 = 0x200)
+        on SYSCALL entry so the kernel runs with interrupts disabled
+        until it is ready to re-enable them. Lock the numeric value."""
+        expect(SYSCALL_FMASK_IF).to_equal(0x200)

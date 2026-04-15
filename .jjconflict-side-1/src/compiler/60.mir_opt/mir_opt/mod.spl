@@ -1,0 +1,451 @@
+# MIR Optimization Framework
+#
+# Mid-level IR optimization passes for the Simple compiler.
+#
+# Architecture:
+# - Pass trait for implementing optimization passes
+# - OptimizationPipeline for sequencing passes
+# - Support for different optimization levels
+#
+# Optimization Levels:
+# - nil: No optimizations (debug builds)
+# - Size: Optimize for binary size
+# - Speed: Optimize for execution speed
+# - Aggressive: Maximum optimization (may increase compile time)
+
+use compiler.mir.mir_data.*
+use compiler.mir.mir.*
+use compiler.mir_opt.mir_opt.dce (create_dce_pass, dce_run_on_function)
+use compiler.mir_opt.mir_opt.const_fold (create_const_fold_pass, cf_run_on_function)
+use compiler.mir_opt.mir_opt.collection_opt (create_collection_opt_pass, collection_opt_run_on_function)
+use compiler.mir_opt.mir_opt.copy_prop (create_copy_prop_pass, copypropagation_run_on_function)
+use compiler.mir_opt.mir_opt.cse (create_cse_pass, cse_run_on_function)
+use compiler.mir_opt.mir_opt.inline (create_inline_small_pass, create_inline_pass, create_inline_aggressive_pass, inline_run_on_function)
+use compiler.mir_opt.mir_opt.loop_opt (create_loop_opt_conservative, create_loop_opt_pass, loop_opt_run_on_function)
+use compiler.mir_opt.mir_opt.loop_strength (create_strength_reduction_pass, strength_reduction_run_on_function)
+use compiler.mir_opt.mir_opt.string_builder_opt (create_string_builder_opt_pass, string_builder_opt_run_on_function)
+use compiler.mir_opt.mir_opt.outline (create_outline_pass, outline_run_on_function, outline_run_on_module)
+use compiler.mir_opt.mir_opt.generator_sm (create_generator_sm_pass, generator_sm_run_on_function)
+use compiler.mir_opt.mir_opt.tco (create_tco_pass, tco_run_on_function)
+use compiler.mir_opt.mir_opt.gvn (create_gvn_pass, gvn_run_on_function)
+
+# ============================================================================
+# Optimization Level
+# ============================================================================
+
+enum OptLevel:
+    """Optimization level for compilation."""
+    NoOpt       # No optimization (fastest compile, slowest runtime)
+    Size        # Optimize for binary size
+    Speed       # Optimize for execution speed (default for release)
+    Aggressive  # Maximum optimization (slowest compile, fastest runtime)
+
+
+# ============================================================================
+# OptLevel Methods (was: impl OptLevel:)
+# ============================================================================
+
+# ============================================================================
+# Optimization Pass Trait
+# ============================================================================
+
+trait MirPass:
+    """
+    Optimization pass over MIR.
+
+    Each pass transforms a MirFunction and returns a modified version.
+    Passes should be idempotent when possible.
+    """
+
+    fn name() -> text:
+        """Human-readable pass name."""
+
+    fn description() -> text:
+        """Brief description of what this pass does."""
+
+    me run_on_function(func: MirFunction) -> MirFunction:
+        """
+        Run optimization pass on a single function.
+
+        Args:
+            func: Function to optimize
+
+        Returns:
+            Optimized function (may be same object if no changes)
+        """
+
+    fn is_analysis_pass() -> bool:
+        """Whether this pass only analyzes (doesn't modify IR)."""
+        false
+
+    fn dependencies() -> [text]:
+        """List of pass names this pass depends on."""
+        []
+
+# ============================================================================
+# Pass Manager
+# ============================================================================
+
+class PassManager:
+    """
+    Manages optimization passes and their execution order.
+
+    Handles:
+    - Pass dependencies
+    - Pass ordering
+    - Pass statistics
+    """
+    passes: [text]  # Pass instances (placeholder - should be [Box<dyn MirPass>])
+    stats: PassStatistics
+
+
+# ============================================================================
+# PassManager Methods (was: impl PassManager:)
+# ============================================================================
+
+fn passmanager_new() -> PassManager:
+        PassManager(
+            passes: [],
+            stats: passstatistics_new()
+        )
+
+
+fn passmanager_run_on_module(self: PassManager, module: MirModule) -> MirModule:
+        """
+        Run all passes on a module.
+
+        Processes each function in the module through the pass pipeline.
+        Iterates passes in the outer loop to avoid repeated name-dispatch
+        overhead per function.
+        """
+        var optimized_module = module
+
+        # Run each pass across all functions (outer=pass, inner=function)
+        for pass_name in self.passes:
+            optimized_module = run_pass_on_module(pass_name, optimized_module)
+            self.stats_record_pass_run(stats, pass_name)
+
+        optimized_module
+
+
+class PassStatistics:
+    """Statistics about pass execution."""
+    pass_run_count: Dict<text, i64>
+    total_runs: i64
+
+
+# ============================================================================
+# PassStatistics Methods (was: impl PassStatistics:)
+# ============================================================================
+
+fn passstatistics_new() -> PassStatistics:
+        PassStatistics(
+            pass_run_count: {},
+            total_runs: 0
+        )
+
+
+# ============================================================================
+# Optimization Pipeline
+# ============================================================================
+
+class OptimizationPipeline:
+    """
+    Standard optimization pipelines for different levels.
+
+    Provides pre-configured pass sequences for common optimization scenarios.
+    """
+    level: OptLevel
+    passes: [text]  # Pass names
+
+
+# ============================================================================
+# OptimizationPipeline Methods (was: impl OptimizationPipeline:)
+# ============================================================================
+
+fn optimizationpipeline_for_level(level: OptLevel) -> OptimizationPipeline:
+        """
+        Create pipeline for given optimization level.
+
+        Pass ordering matters! Passes are run in the order they appear.
+
+        General strategy:
+        1. Cleanup passes (DCE, simplify)
+        2. Analysis passes (alias analysis, escape analysis)
+        3. Transform passes (inline, unroll, vectorize)
+        4. Final cleanup (DCE again)
+        """
+        match level:
+            case NoOpt:
+                # No optimization
+                OptimizationPipeline(level: level, passes: [])
+
+            case Size:
+                # Optimize for binary size — more aggressive than NoOpt but
+                # prioritizes code dedup and elimination over speed transforms
+                OptimizationPipeline(
+                    level: level,
+                    passes: [
+                        "dead_code_elimination",    # Remove unused code
+                        "constant_folding",         # Fold constants
+                        "copy_propagation",         # Propagate copies (enables more DCE)
+                        "global_value_numbering",   # Eliminate redundant computations
+                        "collection_optimization",  # Optimize collection operations
+                        "string_builder_opt",       # Reduce string alloc overhead
+                        "inline_small_functions",   # Inline only tiny functions (threshold: 50 bytes)
+                        "body_outlining",           # Extract cold paths to reduce hot-path size
+                        "dead_code_elimination"     # Final cleanup
+                    ]
+                )
+
+            case Speed:
+                # Optimize for execution speed (default release)
+                OptimizationPipeline(
+                    level: level,
+                    passes: [
+                        "generator_state_machine",  # Transform generators before other opts
+                        "dead_code_elimination",    # Initial cleanup
+                        "constant_folding",         # Fold constants
+                        "copy_propagation",         # Propagate copies
+                        "global_value_numbering",   # Eliminate redundant computations (subsumes CSE)
+                        "common_subexpr_elim",      # CSE for remaining local cases
+                        "tail_call_optimization",   # Convert tail recursion to loops
+                        "inline_functions",         # Inline functions (threshold: 500 bytes)
+                        "body_outlining",           # Extract cold paths after inlining
+                        "loop_invariant_motion",    # Hoist invariants
+                        "collection_opt",           # Array concat -> push, hoist pure calls
+                        "string_builder_opt",       # String concat in loops -> push+join
+                        "dead_code_elimination"     # Final cleanup
+                    ]
+                )
+
+            case Aggressive:
+                # Maximum optimization
+                OptimizationPipeline(
+                    level: level,
+                    passes: [
+                        "generator_state_machine",  # Transform generators first
+                        "dead_code_elimination",
+                        "constant_folding",
+                        "copy_propagation",
+                        "global_value_numbering",   # GVN before inlining
+                        "common_subexpr_elim",
+                        "tail_call_optimization",   # TCO before inlining
+                        "inline_aggressive",        # Aggressive inlining (threshold: 2000 bytes)
+                        "body_outlining",           # Extract cold paths after inlining
+                        "loop_invariant_motion",
+                        "collection_opt",           # Array concat -> push, hoist pure calls
+                        "string_builder_opt",       # String concat in loops -> push+join
+                        "loop_unroll",              # Unroll small loops
+                        "strength_reduction",       # Replace expensive ops with cheap ones
+                        "global_value_numbering",   # GVN again after inlining
+                        "vectorization",            # Auto-vectorize loops
+                        "dead_code_elimination",    # Cleanup
+                        "constant_folding"          # Final constant folding
+                    ]
+                )
+
+
+# ============================================================================
+# Helper Functions
+# ============================================================================
+
+fn optimize_module(module: MirModule, level: OptLevel) -> MirModule:
+    """
+    Convenience function to optimize a module.
+
+    Example:
+        val optimized = optimize_module(mir_module, OptLevel.Speed)
+    """
+    val pipeline = optimizationpipeline_for_level(level)
+    pipeline_optimize(pipeline, module)
+
+fn optimize_function(func: MirFunction, passes: [text]) -> MirFunction:
+    """
+    Run specific passes on a function.
+
+    Example:
+        val optimized = optimize_function(func, ["dead_code_elimination", "constant_folding"])
+    """
+    var result = func
+
+    for pass_name in passes:
+        result = run_named_pass(pass_name, result)
+
+    result
+
+# ============================================================================
+# Pass Dispatch
+# ============================================================================
+
+fn run_named_pass(pass_name: text, func: MirFunction) -> MirFunction:
+    """Dispatch optimization pass by name."""
+    match pass_name:
+        case "dead_code_elimination":
+            var dce = create_dce_pass()
+            dce_run_on_function(dce, func)
+        case "dce":
+            var dce = create_dce_pass()
+            dce_run_on_function(dce, func)
+        case "constant_folding":
+            var cf = create_const_fold_pass()
+            cf_run_on_function(cf, func)
+        case "const_fold":
+            var cf = create_const_fold_pass()
+            cf_run_on_function(cf, func)
+        case "copy_propagation":
+            var cp = create_copy_prop_pass()
+            copypropagation_run_on_function(cp, func)
+        case "common_subexpr_elim":
+            var cse = create_cse_pass()
+            cse_run_on_function(cse, func)
+        case "inline_small_functions":
+            var inl = create_inline_small_pass()
+            inline_run_on_function(inl, func)
+        case "inline_functions":
+            var inl = create_inline_pass()
+            inline_run_on_function(inl, func)
+        case "inline_aggressive":
+            var inl = create_inline_aggressive_pass()
+            inline_run_on_function(inl, func)
+        case "loop_invariant_motion":
+            var lo = create_loop_opt_conservative()
+            loop_opt_run_on_function(lo, func)
+        case "loop_unroll":
+            var lo = create_loop_opt_pass()
+            loop_opt_run_on_function(lo, func)
+        case "strength_reduction":
+            var sr = create_strength_reduction_pass()
+            strength_reduction_run_on_function(sr, func)
+        case "collection_opt":
+            var co = create_collection_opt_pass()
+            collection_opt_run_on_function(co, func)
+        case "string_builder_opt":
+            var sb = create_string_builder_opt_pass()
+            string_builder_opt_run_on_function(sb, func)
+        case "body_outlining":
+            var ol = create_outline_pass()
+            outline_run_on_function(ol, func)
+        case "generator_state_machine":
+            var gsm = create_generator_sm_pass()
+            generator_sm_run_on_function(gsm, func)
+        case "tail_call_optimization":
+            var tco = create_tco_pass()
+            tco_run_on_function(tco, func)
+        case "global_value_numbering":
+            var gvn = create_gvn_pass()
+            gvn_run_on_function(gvn, func)
+        case "vectorization":
+            # Module-level pass, not per-function — no-op here
+            func
+        case _:
+            # Unknown pass - return function unchanged
+            func
+
+fn pipeline_optimize(pipeline: OptimizationPipeline, module: MirModule) -> MirModule:
+    """Run pipeline passes on all functions in a module.
+
+    Optimization: Instead of dispatching run_named_pass (string match +
+    allocation) for every (pass, function) pair, we iterate passes in the
+    outer loop and functions in the inner loop.  run_pass_on_module handles
+    one pass across all functions, performing the name-match only once.
+    """
+    var optimized_module = module
+    for pass_name in pipeline.passes:
+        optimized_module = run_pass_on_module(pass_name, optimized_module)
+    optimized_module
+
+fn run_pass_on_module(pass_name: text, module: MirModule) -> MirModule:
+    """Apply a single named pass to every function in a module.
+
+    The pass name is matched once; a fresh pass instance is created per
+    function (passes accumulate per-function analysis state via `me` methods,
+    so they cannot be shared across functions).  This avoids the overhead of
+    re-dispatching run_named_pass for every function.
+    """
+    var result_module = module
+    match pass_name:
+        case "dead_code_elimination":
+            for sym in module.functions.keys():
+                var p = create_dce_pass()
+                result_module.functions[sym] = dce_run_on_function(p, result_module.functions[sym])
+        case "dce":
+            for sym in module.functions.keys():
+                var p = create_dce_pass()
+                result_module.functions[sym] = dce_run_on_function(p, result_module.functions[sym])
+        case "constant_folding":
+            for sym in module.functions.keys():
+                var p = create_const_fold_pass()
+                result_module.functions[sym] = cf_run_on_function(p, result_module.functions[sym])
+        case "const_fold":
+            for sym in module.functions.keys():
+                var p = create_const_fold_pass()
+                result_module.functions[sym] = cf_run_on_function(p, result_module.functions[sym])
+        case "copy_propagation":
+            for sym in module.functions.keys():
+                var p = create_copy_prop_pass()
+                result_module.functions[sym] = copypropagation_run_on_function(p, result_module.functions[sym])
+        case "common_subexpr_elim":
+            for sym in module.functions.keys():
+                var p = create_cse_pass()
+                result_module.functions[sym] = cse_run_on_function(p, result_module.functions[sym])
+        case "inline_small_functions":
+            for sym in module.functions.keys():
+                var p = create_inline_small_pass()
+                result_module.functions[sym] = inline_run_on_function(p, result_module.functions[sym])
+        case "inline_functions":
+            for sym in module.functions.keys():
+                var p = create_inline_pass()
+                result_module.functions[sym] = inline_run_on_function(p, result_module.functions[sym])
+        case "inline_aggressive":
+            for sym in module.functions.keys():
+                var p = create_inline_aggressive_pass()
+                result_module.functions[sym] = inline_run_on_function(p, result_module.functions[sym])
+        case "loop_invariant_motion":
+            for sym in module.functions.keys():
+                var p = create_loop_opt_conservative()
+                result_module.functions[sym] = loop_opt_run_on_function(p, result_module.functions[sym])
+        case "loop_unroll":
+            for sym in module.functions.keys():
+                var p = create_loop_opt_pass()
+                result_module.functions[sym] = loop_opt_run_on_function(p, result_module.functions[sym])
+        case "strength_reduction":
+            for sym in module.functions.keys():
+                var p = create_strength_reduction_pass()
+                result_module.functions[sym] = strength_reduction_run_on_function(p, result_module.functions[sym])
+        case "collection_opt":
+            for sym in module.functions.keys():
+                var p = create_collection_opt_pass()
+                result_module.functions[sym] = collection_opt_run_on_function(p, result_module.functions[sym])
+        case "string_builder_opt":
+            for sym in module.functions.keys():
+                var p = create_string_builder_opt_pass()
+                result_module.functions[sym] = string_builder_opt_run_on_function(p, result_module.functions[sym])
+        case "body_outlining":
+            # Module-level pass: outlining creates new functions
+            var ol = create_outline_pass()
+            result_module = outline_run_on_module(ol, result_module)
+        case "generator_state_machine":
+            for sym in module.functions.keys():
+                var p = create_generator_sm_pass()
+                result_module.functions[sym] = generator_sm_run_on_function(p, result_module.functions[sym])
+        case "tail_call_optimization":
+            for sym in module.functions.keys():
+                var p = create_tco_pass()
+                result_module.functions[sym] = tco_run_on_function(p, result_module.functions[sym])
+        case "global_value_numbering":
+            for sym in module.functions.keys():
+                var p = create_gvn_pass()
+                result_module.functions[sym] = gvn_run_on_function(p, result_module.functions[sym])
+        case "vectorization":
+            # Module-level pass, not per-function — no-op here
+            pass_do_nothing
+        case _:
+            # Unknown pass — return module unchanged
+            pass_do_nothing
+    result_module
+
+# ============================================================================
+# Exports
+# ============================================================================
+

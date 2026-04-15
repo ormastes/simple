@@ -1,0 +1,125 @@
+# Publish all MCP server npm packages
+# Triggers on version tags (e.g., v1.0.0) or manual dispatch
+#
+# Publishes 5 packages:
+#   @simple-lang/mcp-server         (simple-mcp)
+#   @simple-lang/lsp-mcp-server     (simple-lsp-mcp)
+#   @simple-lang/t32-mcp-server     (t32-mcp)
+#   @simple-lang/t32-lsp-mcp-server (t32-lsp-mcp)
+#   @simple-lang/obsidian-search    (obsidian-search)
+
+name: Publish npm Packages
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to publish (e.g., 1.0.0). Leave empty to use tag version.'
+        required: false
+        type: string
+      packages:
+        description: 'Packages to publish (all, mcp, lsp-mcp, t32-mcp, t32-lsp-mcp, obsidian-search)'
+        required: false
+        default: 'all'
+        type: choice
+        options:
+          - all
+          - mcp
+          - lsp-mcp
+          - t32-mcp
+          - t32-lsp-mcp
+          - obsidian-search
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  packages: write
+  contents: read
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - name: mcp
+            dir: tools/mcp-registry
+            pkg: "@simple-lang/mcp-server"
+          - name: lsp-mcp
+            dir: tools/lsp-mcp-registry
+            pkg: "@simple-lang/lsp-mcp-server"
+          - name: t32-mcp
+            dir: tools/t32-mcp-registry
+            pkg: "@simple-lang/t32-mcp-server"
+          - name: t32-lsp-mcp
+            dir: tools/t32-lsp-mcp-registry
+            pkg: "@simple-lang/t32-lsp-mcp-server"
+          - name: obsidian-lsp-mcp
+            dir: tools/obsidian-lsp-mcp-registry
+            pkg: "@simple-lang/obsidian-lsp-mcp-server"
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          registry-url: 'https://registry.npmjs.org'
+
+      - name: Check if package should be published
+        id: check
+        run: |
+          SELECTED="${{ inputs.packages || 'all' }}"
+          if [ "$SELECTED" = "all" ] || [ "$SELECTED" = "${{ matrix.name }}" ]; then
+            echo "should_publish=true" >> $GITHUB_OUTPUT
+          else
+            echo "should_publish=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Extract version
+        if: steps.check.outputs.should_publish == 'true'
+        id: version
+        run: |
+          if [ -n "${{ inputs.version }}" ]; then
+            echo "version=${{ inputs.version }}" >> $GITHUB_OUTPUT
+          else
+            echo "version=${GITHUB_REF#refs/tags/v}" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Update package version
+        if: steps.check.outputs.should_publish == 'true'
+        working-directory: ${{ matrix.dir }}
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          # Update version in package.json
+          node -e "
+            const fs = require('fs');
+            const pkg = JSON.parse(fs.readFileSync('package.json', 'utf8'));
+            pkg.version = '${VERSION}';
+            if (Object.prototype.hasOwnProperty.call(pkg, 'runtimeVersion')) {
+              pkg.runtimeVersion = '${VERSION}';
+            }
+            fs.writeFileSync('package.json', JSON.stringify(pkg, null, 2) + '\n');
+          "
+          # Update version in server.json
+          node -e "
+            const fs = require('fs');
+            const srv = JSON.parse(fs.readFileSync('server.json', 'utf8'));
+            srv.version = '${VERSION}';
+            if (srv.packages) srv.packages.forEach(p => p.version = '${VERSION}');
+            fs.writeFileSync('server.json', JSON.stringify(srv, null, 2) + '\n');
+          "
+          echo "Publishing ${{ matrix.pkg }}@${VERSION}"
+
+      - name: Publish to npm
+        if: steps.check.outputs.should_publish == 'true'
+        working-directory: ${{ matrix.dir }}
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: npm publish --access public

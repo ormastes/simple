@@ -1,0 +1,97 @@
+"""
+Engine3D — Facade integration tests
+
+Tests Engine3D creation, node management, component attachment,
+physics stepping, and renderer output.
+"""
+
+use std.spec.{describe, it, expect}
+use std.common.engine.ids.{NodeId, RawHandle}
+use std.common.engine.math3d.{Vec3, Quaternion}
+use std.common.engine.color.{EngineColor}
+use std.common.engine.units.{Seconds, Angle}
+use std.nogc_sync_mut.engine.scene.node3d.{NodeStore3D}
+use std.nogc_sync_mut.engine.component.registry3d.{ComponentRegistry3D, Component3D}
+use std.nogc_sync_mut.engine.component.mesh.{MeshData, Vertex3D, create_cube, directional_light, LightData}
+use std.nogc_sync_mut.engine.component.camera3d.{Camera3DData}
+use std.nogc_sync_mut.engine.render.material3d.{Material3D, unlit_material, pbr_material}
+use std.nogc_sync_mut.engine.render.renderer3d.{ForwardRenderer3D}
+use std.nogc_sync_mut.engine.physics.types3d.{default_physics_config_3d}
+use std.nogc_sync_mut.engine.physics.world3d.{PhysicsWorld3D}
+
+describe "Engine3D":
+    it "create initializes all subsystems":
+        var nodes = NodeStore3D.create()
+        var components = ComponentRegistry3D.create()
+        val config = default_physics_config_3d()
+        var physics = PhysicsWorld3D.create(config)
+        var renderer = ForwardRenderer3D.create(320, 240)
+        # All subsystems should start empty
+        expect(nodes.node_count()).to_equal(0)
+        expect(physics.bodies.len()).to_equal(0)
+        expect(renderer.width).to_equal(320)
+        expect(renderer.height).to_equal(240)
+        physics.destroy()
+
+    it "create_node returns valid id":
+        var nodes = NodeStore3D.create()
+        val node_id = nodes.create_node("player")
+        val maybe_node = nodes.get_node(node_id)
+        if val Some(node) = maybe_node:
+            expect(node.name).to_equal("player")
+        else:
+            expect("node not found").to_equal("found")
+        expect(nodes.node_count()).to_equal(1)
+
+    it "attach mesh component and retrieve":
+        var nodes = NodeStore3D.create()
+        var components = ComponentRegistry3D.create()
+        val node_id = nodes.create_node("cube")
+        val mesh = create_cube(1.0)
+        val material = unlit_material(EngineColor.red())
+        components.attach(node_id, Component3D.Mesh(mesh: mesh, material: material))
+        val retrieved = components.get_mesh(node_id)
+        if val Some(pair) = retrieved:
+            val mesh_data = pair.0
+            # Cube has 24 vertices
+            expect(mesh_data.vertex_count()).to_equal(24)
+        else:
+            expect("mesh not found").to_equal("found")
+
+    it "physics step does not crash":
+        val config = default_physics_config_3d()
+        var physics = PhysicsWorld3D.create(config)
+        val node_id = NodeId(raw: RawHandle.new(0, 1))
+        physics.add_dynamic_body(node_id, 0.0, 10.0, 0.0)
+        physics.add_sphere_collider(node_id, 0.5)
+        physics.step(Seconds(value: 0.016666))
+        physics.step(Seconds(value: 0.016666))
+        val pos = physics.get_position(node_id)
+        # Body should have fallen
+        expect(pos.y).to_be_less_than(10.0)
+        physics.destroy()
+
+    it "renderer produces pixels after render_scene":
+        var nodes = NodeStore3D.create()
+        var components = ComponentRegistry3D.create()
+        var renderer = ForwardRenderer3D.create(64, 64)
+        # Create camera node
+        val cam_id = nodes.create_node("camera")
+        nodes.set_position(cam_id, Vec3(x: 0.0, y: 0.0, z: 5.0))
+        val cam = Camera3DData.perspective(Angle(radians: 1.0), 1.0, 0.1, 100.0)
+        components.attach(cam_id, Component3D.Camera(data: cam))
+        # Create light node
+        val light_id = nodes.create_node("light")
+        val light = directional_light(Vec3(x: 0.0, y: -1.0, z: 0.0), EngineColor.white(), 1.0)
+        components.attach(light_id, Component3D.Light(data: light))
+        # Create mesh node
+        val mesh_id = nodes.create_node("cube")
+        val mesh = create_cube(1.0)
+        val material = pbr_material(EngineColor.red(), 0.0, 0.5)
+        components.attach(mesh_id, Component3D.Mesh(mesh: mesh, material: material))
+        # Render
+        renderer.clear()
+        val stats = renderer.render_scene(nodes, components, cam_id)
+        val pixels = renderer.get_pixels()
+        expect(pixels.len()).to_be_greater_than(0)
+        expect(stats.draw_calls).to_be_greater_than(0)

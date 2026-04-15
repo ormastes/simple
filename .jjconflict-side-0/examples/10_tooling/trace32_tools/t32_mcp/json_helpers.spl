@@ -1,0 +1,261 @@
+#![allow(unnamed_duplicate_typed_args)]
+@allow(unnamed_duplicate_typed_args)
+# T32 MCP Server — JSON helpers
+#
+# Inlined implementations with _jh_ prefix to avoid function name collision
+# with frontend_cold.spl (which defines identically-named bare functions).
+# Provides t32_-prefixed wrappers consumed by T32 MCP tool files.
+
+# --- JSON building helpers (_jh_ prefixed to avoid shadowing) ---
+
+fn _jh_Q() -> text:
+    return "\""
+
+fn _jh_LB() -> text:
+    return "{"
+
+fn _jh_RB() -> text:
+    return "}"
+
+fn _jh_SB_L() -> text:
+    return "["
+
+fn _jh_SB_R() -> text:
+    return "]"
+
+fn _jh_escape_json(s: text) -> text:
+    var out = s
+    out = out.replace("\\", "\\\\")
+    out = out.replace("\"", "\\\"")
+    out = out.replace("\n", "\\n")
+    out = out.replace("\r", "\\r")
+    out = out.replace("\t", "\\t")
+    return out
+
+fn _jh_js(value: text) -> text:
+    return _jh_Q() + _jh_escape_json(value) + _jh_Q()
+
+fn _jh_jp(key: text, value: text) -> text:
+    return _jh_Q() + key + _jh_Q() + ":" + value
+
+fn _jh_jo1(p1: text) -> text:
+    return _jh_LB() + p1 + _jh_RB()
+
+fn _jh_jo2(p1: text, p2: text) -> text:
+    return _jh_LB() + p1 + "," + p2 + _jh_RB()
+
+fn _jh_jo3(p1: text, p2: text, p3: text) -> text:
+    return _jh_LB() + p1 + "," + p2 + "," + p3 + _jh_RB()
+
+fn _jh_jo4(p1: text, p2: text, p3: text, p4: text) -> text:
+    return _jh_LB() + p1 + "," + p2 + "," + p3 + "," + p4 + _jh_RB()
+
+# --- JSON parsing helpers ---
+
+fn _jh_char_at(s: text, i: i64) -> text:
+    return s.substring(i, i + 1)
+
+fn _jh_is_ws(ch: text) -> bool:
+    return ch == " " or ch == "\n" or ch == "\r" or ch == "\t"
+
+fn _jh_find_json_value_start(json: text, key: text) -> i64:
+    val search = _jh_Q() + key + _jh_Q()
+    var offset = 0
+    while offset + search.len() <= json.len():
+        if json.substring(offset, offset + search.len()) != search:
+            offset = offset + 1
+            continue
+        var j = offset + search.len()
+        while j < json.len() and _jh_is_ws(_jh_char_at(json, j)):
+            j = j + 1
+        if j < json.len() and _jh_char_at(json, j) == ":":
+            j = j + 1
+            while j < json.len() and _jh_is_ws(_jh_char_at(json, j)):
+                j = j + 1
+            return j
+        offset = offset + search.len()
+    return -1
+
+fn _jh_extract_field(json: text, key: text) -> text:
+    val start = _jh_find_json_value_start(json, key)
+    if start < 0 or start >= json.len():
+        return ""
+    val first = _jh_char_at(json, start)
+    if first == _jh_Q():
+        var i = start + 1
+        var escaped = false
+        while i < json.len():
+            val ch = _jh_char_at(json, i)
+            if escaped:
+                escaped = false
+            elif ch == "\\":
+                escaped = true
+            elif ch == _jh_Q():
+                return json.substring(start + 1, i)
+            i = i + 1
+        return ""
+    var end = start
+    while end < json.len():
+        val ch = _jh_char_at(json, end)
+        if ch == "," or ch == _jh_RB() or ch == "]" or _jh_is_ws(ch):
+            break
+        end = end + 1
+    return json.substring(start, end)
+
+fn _jh_extract_field_raw(json: text, key: text) -> text:
+    val start = _jh_find_json_value_start(json, key)
+    if start < 0 or start >= json.len():
+        return "null"
+    val first = _jh_char_at(json, start)
+    if first == _jh_Q():
+        var i2 = start + 1
+        var escaped = false
+        while i2 < json.len():
+            val ch = _jh_char_at(json, i2)
+            if escaped:
+                escaped = false
+            elif ch == "\\":
+                escaped = true
+            elif ch == _jh_Q():
+                return json.substring(start, i2 + 1)
+            i2 = i2 + 1
+        return "null"
+    if first == _jh_LB() or first == "[":
+        var depth = 0
+        var i3 = start
+        var in_str = false
+        var esc = false
+        while i3 < json.len():
+            val ch = _jh_char_at(json, i3)
+            if in_str:
+                if esc:
+                    esc = false
+                elif ch == "\\":
+                    esc = true
+                elif ch == _jh_Q():
+                    in_str = false
+            else:
+                if ch == _jh_Q():
+                    in_str = true
+                elif ch == _jh_LB() or ch == "[":
+                    depth = depth + 1
+                elif ch == _jh_RB() or ch == "]":
+                    depth = depth - 1
+                    if depth == 0:
+                        return json.substring(start, i3 + 1)
+            i3 = i3 + 1
+        return "null"
+    var end = start
+    while end < json.len():
+        val ch = _jh_char_at(json, end)
+        if ch == "," or ch == _jh_RB() or ch == "]" or _jh_is_ws(ch):
+            break
+        end = end + 1
+    val raw = json.substring(start, end)
+    if raw == "":
+        return "null"
+    return raw
+
+fn _jh_extract_id(json: text) -> text:
+    return _jh_extract_field_raw(json, "id")
+
+fn _jh_unescape_json_string(s: text) -> text:
+    var parts: [text] = []
+    var i = 0
+    while i < s.len():
+        val ch = s.substring(i, i + 1)
+        if ch != "\\":
+            parts.push(ch)
+            i = i + 1
+            continue
+        if i + 1 >= s.len():
+            parts.push(ch)
+            i = i + 1
+            continue
+        val next = s.substring(i + 1, i + 2)
+        if next == "n":
+            parts.push("\n")
+        elif next == "r":
+            parts.push("\r")
+        elif next == "t":
+            parts.push("\t")
+        elif next == "\"":
+            parts.push("\"")
+        elif next == "\\":
+            parts.push("\\")
+        else:
+            parts.push(next)
+        i = i + 2
+    return parts.join("")
+
+fn _jh_extract_nested(json: text, key: text) -> text:
+    val params = _jh_extract_field_raw(json, "params")
+    if params == "null":
+        return ""
+    return _jh_extract_field(params, key)
+
+# --- JSON-RPC builders ---
+
+fn _jh_jsonrpc_result(id: text, result: text) -> text:
+    return _jh_jo3(_jh_jp("jsonrpc", _jh_js("2.0")), _jh_jp("id", id), _jh_jp("result", result))
+
+fn _jh_jsonrpc_error(id: text, code: i64, message: text) -> text:
+    val err = _jh_jo2(_jh_jp("code", code.to_string()), _jh_jp("message", _jh_js(_jh_escape_json(message))))
+    return _jh_jo3(_jh_jp("jsonrpc", _jh_js("2.0")), _jh_jp("id", id), _jh_jp("error", err))
+
+# --- Safe string helpers (local to t32_mcp) ---
+
+fn t32_strip_last(s: text) -> text:
+    if s.len() <= 1:
+        return ""
+    s.substring(0, s.len() - 1)
+
+fn strip_last(s: text) -> text:
+    t32_strip_last(s)
+
+fn t32_strip_first_last(s: text) -> text:
+    if s.len() <= 2:
+        return ""
+    s.substring(1, s.len() - 1)
+
+fn strip_first_last(s: text) -> text:
+    t32_strip_first_last(s)
+
+# --- Bare aliases (importable by protocol.spl and other files) ---
+# Building functions delegate to _jh_ internals. Safe even if frontend_cold.spl
+# defines identically-named functions, because the import targets this file.
+
+fn Q() -> text: _jh_Q()
+fn LB() -> text: _jh_LB()
+fn RB() -> text: _jh_RB()
+fn SB_L() -> text: _jh_SB_L()
+fn SB_R() -> text: _jh_SB_R()
+fn escape_json(s: text) -> text: _jh_escape_json(s)
+fn js(value: text) -> text: _jh_js(value)
+fn jp(key: text, value: text) -> text: _jh_jp(key, value)
+fn jo1(p1: text) -> text: _jh_jo1(p1)
+fn jo2(p1: text, p2: text) -> text: _jh_jo2(p1, p2)
+fn jo3(p1: text, p2: text, p3: text) -> text: _jh_jo3(p1, p2, p3)
+fn jo4(p1: text, p2: text, p3: text, p4: text) -> text: _jh_jo4(p1, p2, p3, p4)
+fn jsonrpc_result(id: text, result: text) -> text: _jh_jsonrpc_result(id, result)
+fn jsonrpc_error(id: text, code: i64, message: text) -> text: _jh_jsonrpc_error(id, code, message)
+
+# --- t32_-prefixed public API (delegates to _jh_ internal functions) ---
+
+fn t32_Q() -> text: _jh_Q()
+fn t32_LB() -> text: _jh_LB()
+fn t32_RB() -> text: _jh_RB()
+fn t32_SB_L() -> text: _jh_SB_L()
+fn t32_SB_R() -> text: _jh_SB_R()
+fn t32_escape_json(s: text) -> text: _jh_escape_json(s)
+fn t32_js(s: text) -> text: _jh_js(s)
+fn t32_jp(key: text, value: text) -> text: _jh_jp(key, value)
+fn t32_jo1(p1: text) -> text: _jh_jo1(p1)
+fn t32_jo2(p1: text, p2: text) -> text: _jh_jo2(p1, p2)
+fn t32_jo3(p1: text, p2: text, p3: text) -> text: _jh_jo3(p1, p2, p3)
+fn t32_jo4(p1: text, p2: text, p3: text, p4: text) -> text: _jh_jo4(p1, p2, p3, p4)
+fn t32_extract_field(json: text, key: text) -> text: _jh_extract_field(json, key)
+fn t32_extract_field_raw(json: text, key: text) -> text: _jh_extract_field_raw(json, key)
+fn t32_extract_id(json: text) -> text: _jh_extract_id(json)
+fn t32_extract_nested(json: text, key: text) -> text: _jh_extract_nested(json, key)
+fn t32_unescape_json_string(s: text) -> text: _jh_unescape_json_string(s)

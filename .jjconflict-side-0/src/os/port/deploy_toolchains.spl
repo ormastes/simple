@@ -1,0 +1,514 @@
+## Unified SimpleOS Toolchain Deployment Script
+##
+## Builds and validates the complete cross-compilation toolchain:
+##   1. Sysroot (libc headers, libraries, linker script, crt0.o)
+##   2. LLVM/Clang for host (targeting SimpleOS)
+##   3. Rust core/alloc for SimpleOS
+##   4. Smoke tests
+##   5. (Optional) Cross-build LLVM for self-hosting on SimpleOS
+##
+## Usage:
+##   bin/simple run src/os/port/deploy_toolchains.spl
+##   bin/simple run src/os/port/deploy_toolchains.spl -- --stage sysroot
+##   bin/simple run src/os/port/deploy_toolchains.spl -- --stage llvm
+##   bin/simple run src/os/port/deploy_toolchains.spl -- --stage rust
+##   bin/simple run src/os/port/deploy_toolchains.spl -- --stage test
+##   bin/simple run src/os/port/deploy_toolchains.spl -- --cross
+##   bin/simple run src/os/port/deploy_toolchains.spl -- --status
+
+use std.fs
+use std.process
+use std.text
+use std.cli
+
+val VERSION = "1.0.0"
+
+# Supported architectures
+val TARGETS = [
+    "x86_64-simpleos",
+    "aarch64-simpleos",
+    "riscv64gc-simpleos",
+    "riscv32imac-simpleos",
+]
+
+class DeployConfig:
+    stage: text           # "" = all, or specific stage name
+    run_cross: bool       # Include the cross-build (LLVM running ON SimpleOS)
+    show_status: bool     # Just show status and exit
+    target: text          # Target triple for LLVM build (default: x86_64-simpleos)
+    llvm_jobs: i64        # Parallel jobs for LLVM build (0 = auto)
+    skip_tests: bool      # Skip smoke tests after build
+    verbose: bool         # Verbose output
+
+fn parse_args(args: List<text>) -> DeployConfig:
+    var stage = ""
+    var run_cross = false
+    var show_status = false
+    var target = "x86_64-simpleos"
+    var llvm_jobs = 0
+    var skip_tests = false
+    var verbose = false
+
+    var i = 0
+    while i < args.len():
+        val arg = args[i]
+        if arg == "--stage":
+            i = i + 1
+            stage = args[i]
+        else if arg == "--cross":
+            run_cross = true
+        else if arg == "--status":
+            show_status = true
+        else if arg == "--target":
+            i = i + 1
+            target = args[i]
+        else if arg == "--jobs":
+            i = i + 1
+            llvm_jobs = args[i].parse_int()
+        else if arg == "--skip-tests":
+            skip_tests = true
+        else if arg == "--verbose":
+            verbose = true
+        else if arg == "--help":
+            print_help()
+            process.exit(0)
+        i = i + 1
+
+    DeployConfig(
+        stage: stage,
+        run_cross: run_cross,
+        show_status: show_status,
+        target: target,
+        llvm_jobs: llvm_jobs,
+        skip_tests: skip_tests,
+        verbose: verbose,
+    )
+
+fn print_help():
+    print "SimpleOS Toolchain Deployment Script v{VERSION}"
+    print ""
+    print "Usage:"
+    print "  bin/simple run src/os/port/deploy_toolchains.spl -- [OPTIONS]"
+    print ""
+    print "Options:"
+    print "  --stage <name>    Run a specific stage only:"
+    print "                      sysroot  - Build sysroot (libc + headers)"
+    print "                      llvm     - Build LLVM/Clang for host"
+    print "                      rust     - Build Rust core/alloc"
+    print "                      test     - Run smoke tests"
+    print "  --cross           Also build LLVM for self-hosting on SimpleOS"
+    print "  --status          Show current build status and exit"
+    print "  --target <triple> Target triple (default: x86_64-simpleos)"
+    print "  --jobs <N>        Parallel build jobs (default: auto)"
+    print "  --skip-tests      Skip smoke tests after build"
+    print "  --verbose         Verbose output"
+    print "  --help            Show this help"
+
+# ===========================================================================
+# Status reporting
+# ===========================================================================
+
+class StageStatus:
+    name: text
+    status: text    # "READY", "NOT BUILT", "PARTIAL", "ERROR"
+    detail: text
+
+fn check_status() -> List<StageStatus>:
+    """Check the status of all toolchain stages."""
+    var stages: List<StageStatus> = []
+
+    # 1. Sysroot
+    var sysroot_status = "NOT BUILT"
+    var sysroot_detail = ""
+    if fs.dir_exists("build/os/sysroot"):
+        var have_headers = fs.exists("build/os/sysroot/include/stdio.h")
+        var have_lib = fs.exists("build/os/sysroot/lib/libsimpleos_c.a")
+        var have_crt0 = fs.exists("build/os/sysroot/lib/crt0.o")
+        var have_ld = fs.exists("build/os/sysroot/share/simpleos/simpleos.ld")
+
+        if have_headers and have_lib and have_crt0 and have_ld:
+            sysroot_status = "READY"
+        else:
+            sysroot_status = "PARTIAL"
+            var missing: List<text> = []
+            if not have_headers:
+                missing = missing + ["headers"]
+            if not have_lib:
+                missing = missing + ["libsimpleos_c.a"]
+            if not have_crt0:
+                missing = missing + ["crt0.o"]
+            if not have_ld:
+                missing = missing + ["linker script"]
+            sysroot_detail = "missing: {missing.join(", ")}"
+    stages = stages + [StageStatus(name: "sysroot", status: sysroot_status, detail: sysroot_detail)]
+
+    # 2. Libc (source build)
+    var libc_status = "NOT BUILT"
+    if fs.exists("src/os/libc/libsimpleos_c.a"):
+        libc_status = "READY"
+    stages = stages + [StageStatus(name: "libc", status: libc_status, detail: "")]
+
+    # 3. LLVM/Clang (host build for cross-compilation)
+    var llvm_status = "NOT BUILT"
+    if fs.dir_exists("build/os/llvm/host-tools/bin"):
+        llvm_status = "HOST TOOLS ONLY"
+    if fs.dir_exists("build/os/llvm/cross/bin"):
+        llvm_status = "READY"
+    stages = stages + [StageStatus(name: "llvm-cross", status: llvm_status, detail: "")]
+
+    # 4. Compiler-RT
+    var rt_status = "NOT BUILT"
+    if fs.dir_exists("build/os/llvm/compiler-rt"):
+        rt_status = "READY"
+    stages = stages + [StageStatus(name: "compiler-rt", status: rt_status, detail: "")]
+
+    # 5. Rust target specs
+    val spec_files = [
+        "src/os/toolchain/rust/x86_64-unknown-simpleos.json",
+        "src/os/toolchain/rust/aarch64-unknown-simpleos.json",
+        "src/os/toolchain/rust/riscv64gc-unknown-simpleos.json",
+        "src/os/toolchain/rust/riscv32imac-unknown-simpleos.json",
+    ]
+    var specs_found = 0
+    for spec in spec_files:
+        if fs.exists(spec):
+            specs_found = specs_found + 1
+    var rust_spec_status = if specs_found == spec_files.len(): "READY" else if specs_found > 0: "PARTIAL ({specs_found}/{spec_files.len()})" else: "NOT FOUND"
+    stages = stages + [StageStatus(name: "rust-specs", status: rust_spec_status, detail: "")]
+
+    # 6. Rust examples
+    var rust_ex_status = "NOT BUILT"
+    var hello_built = fs.exists("build/os/rust/hello")
+    var ipc_built = fs.exists("build/os/rust/ipc_sample")
+    if hello_built and ipc_built:
+        rust_ex_status = "READY"
+    else if hello_built or ipc_built:
+        rust_ex_status = "PARTIAL"
+    stages = stages + [StageStatus(name: "rust-examples", status: rust_ex_status, detail: "")]
+
+    stages
+
+fn print_status():
+    """Print formatted status of all toolchain stages."""
+    print "=== SimpleOS Toolchain Status ==="
+    print ""
+
+    val stages = check_status()
+    for stage in stages:
+        var line = "  {stage.name}"
+        # Pad to 20 characters
+        while line.len() < 22:
+            line = line + " "
+        line = line + stage.status
+        if stage.detail != "":
+            line = line + " ({stage.detail})"
+        print line
+
+    print ""
+
+# ===========================================================================
+# Stage 1: Build sysroot
+# ===========================================================================
+
+fn stage_build_sysroot() -> bool:
+    """Build the SimpleOS sysroot with libc, headers, and linker script."""
+    print ""
+    print "=== Stage 1: Building Sysroot ==="
+    print ""
+
+    # First ensure libc is compiled
+    if not fs.exists("src/os/libc/libsimpleos_c.a"):
+        print "[deploy] Building SimpleOS libc..."
+        val make_result = process.run("make", ["-C", "src/os/libc"])
+        if make_result.exit_code != 0:
+            print "[deploy] ERROR: libc build failed"
+            print make_result.stderr
+            return false
+        print "[deploy] libc built successfully"
+    else:
+        print "[deploy] libc already built"
+
+    # Run sysroot builder
+    print "[deploy] Running sysroot builder..."
+    val result = process.run("sh", ["src/os/port/llvm/sysroot.shs"])
+    if result.exit_code != 0:
+        print "[deploy] ERROR: sysroot build failed"
+        print result.stderr
+        return false
+
+    # Verify sysroot
+    val required = [
+        "build/os/sysroot/include/stdio.h",
+        "build/os/sysroot/include/stdlib.h",
+        "build/os/sysroot/include/string.h",
+        "build/os/sysroot/lib/libsimpleos_c.a",
+        "build/os/sysroot/lib/crt0.o",
+        "build/os/sysroot/share/simpleos/simpleos.ld",
+    ]
+
+    var ok = true
+    for path in required:
+        if not fs.exists(path):
+            print "[deploy] ERROR: sysroot missing: {path}"
+            ok = false
+
+    if ok:
+        print "[deploy] Sysroot ready at build/os/sysroot/"
+    ok
+
+# ===========================================================================
+# Stage 2: Build LLVM/Clang
+# ===========================================================================
+
+fn stage_build_llvm(config: DeployConfig) -> bool:
+    """Build LLVM/Clang for host, targeting SimpleOS."""
+    print ""
+    print "=== Stage 2: Building LLVM/Clang ==="
+    print ""
+
+    var args = ["--target", config.target]
+    if config.llvm_jobs > 0:
+        args = args + ["--jobs", "{config.llvm_jobs}"]
+
+    print "[deploy] Building LLVM for target: {config.target}"
+    val result = process.run("bin/simple", [
+        "run", "src/os/port/llvm/build.spl", "--"
+    ] + args)
+
+    if result.exit_code != 0:
+        print "[deploy] ERROR: LLVM build failed"
+        print result.stderr
+        return false
+
+    print "[deploy] LLVM build complete"
+    true
+
+# ===========================================================================
+# Stage 3: Build Rust core/alloc
+# ===========================================================================
+
+fn stage_build_rust(config: DeployConfig) -> bool:
+    """Validate Rust cross-compilation setup and build examples."""
+    print ""
+    print "=== Stage 3: Rust Cross-Compilation Setup ==="
+    print ""
+
+    # Validate target specs
+    print "[deploy] Validating Rust target specs..."
+    val validate_result = process.run("bin/simple", [
+        "run", "src/os/port/rust/build.spl", "--", "validate"
+    ])
+    if validate_result.exit_code != 0:
+        print "[deploy] ERROR: Rust validation failed"
+        print validate_result.stderr
+        return false
+    print validate_result.stdout
+
+    # Build examples if rustc nightly is available
+    val rustc_check = process.run("rustc", ["+nightly", "--version"])
+    if rustc_check.exit_code == 0:
+        print "[deploy] Building Rust examples..."
+        val build_result = process.run("sh", ["src/os/port/rust/build.shs", "all"])
+        if build_result.exit_code != 0:
+            print "[deploy] WARN: Rust example build failed (non-fatal)"
+            print build_result.stderr
+            # Non-fatal: examples are optional
+        else:
+            print "[deploy] Rust examples built successfully"
+    else:
+        print "[deploy] INFO: Rust nightly not found -- skipping example builds"
+        print "[deploy] INFO: Install with: rustup install nightly && rustup +nightly component add rust-src"
+
+    print "[deploy] Rust setup complete"
+    true
+
+# ===========================================================================
+# Stage 4: Smoke tests
+# ===========================================================================
+
+fn stage_run_tests() -> bool:
+    """Run LLVM and Rust smoke tests."""
+    print ""
+    print "=== Stage 4: Smoke Tests ==="
+    print ""
+
+    val result = process.run("bin/simple", [
+        "run", "src/os/port/llvm/test_smoke.spl"
+    ])
+
+    print result.stdout
+    if result.exit_code != 0:
+        print "[deploy] ERROR: Smoke tests failed"
+        return false
+
+    print "[deploy] Smoke tests passed"
+    true
+
+# ===========================================================================
+# Stage 5: Cross-build LLVM (optional, for self-hosting)
+# ===========================================================================
+
+fn stage_cross_build(config: DeployConfig) -> bool:
+    """Build LLVM/Clang that runs ON SimpleOS (self-hosting)."""
+    print ""
+    print "=== Stage 5: LLVM Cross-Build for Self-Hosting ==="
+    print ""
+
+    var args = ["run", "src/os/port/llvm/build.spl", "--", "--cross"]
+    if config.target != "x86_64-simpleos":
+        args = args + ["--target", config.target]
+
+    val result = process.run("bin/simple", args)
+    if result.exit_code != 0:
+        print "[deploy] ERROR: LLVM cross-build failed"
+        print result.stderr
+        return false
+
+    print "[deploy] LLVM cross-build complete (self-hosting ready)"
+    true
+
+# ===========================================================================
+# Main entry point
+# ===========================================================================
+
+fn main():
+    print "=== SimpleOS Toolchain Deployment v{VERSION} ==="
+    print ""
+
+    val args = cli.args()
+    val config = parse_args(args)
+
+    # Status check mode
+    if config.show_status:
+        print_status()
+        return
+
+    # Track per-stage results
+    var results: List<StageStatus> = []
+
+    # Single stage mode
+    if config.stage != "":
+        val ok = if config.stage == "sysroot":
+            stage_build_sysroot()
+        else if config.stage == "llvm":
+            stage_build_llvm(config)
+        else if config.stage == "rust":
+            stage_build_rust(config)
+        else if config.stage == "test":
+            stage_run_tests()
+        else if config.stage == "cross":
+            stage_cross_build(config)
+        else:
+            print "Unknown stage: {config.stage}"
+            print "Valid stages: sysroot, llvm, rust, test, cross"
+            false
+
+        if not ok:
+            process.exit(1)
+        return
+
+    # Full deployment pipeline
+    print "Running full toolchain deployment..."
+    print ""
+
+    # Stage 1: Sysroot
+    var sysroot_ok = stage_build_sysroot()
+    results = results + [StageStatus(
+        name: "sysroot",
+        status: if sysroot_ok: "OK" else: "FAILED",
+        detail: "",
+    )]
+    if not sysroot_ok:
+        print "[deploy] Cannot continue without sysroot."
+        print_final_report(results)
+        process.exit(1)
+
+    # Stage 2: LLVM (optional -- may not have LLVM source)
+    var llvm_ok = true
+    val llvm_src_dir = process.env("LLVM_SRC")
+    if llvm_src_dir != "" or fs.dir_exists("llvm-project"):
+        llvm_ok = stage_build_llvm(config)
+    else:
+        print ""
+        print "[deploy] SKIP: LLVM build (no LLVM source found)"
+        print "[deploy]   Set LLVM_SRC or clone into ./llvm-project"
+    results = results + [StageStatus(
+        name: "llvm",
+        status: if llvm_ok: "OK" else: "FAILED",
+        detail: if llvm_src_dir == "" and not fs.dir_exists("llvm-project"): "skipped (no source)" else: "",
+    )]
+
+    # Stage 3: Rust
+    var rust_ok = stage_build_rust(config)
+    results = results + [StageStatus(
+        name: "rust",
+        status: if rust_ok: "OK" else: "FAILED",
+        detail: "",
+    )]
+
+    # Stage 4: Smoke tests
+    if not config.skip_tests:
+        var test_ok = stage_run_tests()
+        results = results + [StageStatus(
+            name: "tests",
+            status: if test_ok: "OK" else: "FAILED",
+            detail: "",
+        )]
+    else:
+        results = results + [StageStatus(
+            name: "tests",
+            status: "SKIPPED",
+            detail: "",
+        )]
+
+    # Stage 5: Cross-build (optional)
+    if config.run_cross:
+        var cross_ok = stage_cross_build(config)
+        results = results + [StageStatus(
+            name: "cross-build",
+            status: if cross_ok: "OK" else: "FAILED",
+            detail: "",
+        )]
+
+    print_final_report(results)
+
+    # Exit with error if any stage failed
+    for result in results:
+        if result.status == "FAILED":
+            process.exit(1)
+
+fn print_final_report(results: List<StageStatus>):
+    """Print final deployment summary."""
+    print ""
+    print "================================================"
+    print "  SimpleOS Toolchain Deployment Summary"
+    print "================================================"
+    print ""
+
+    var ok_count = 0
+    var fail_count = 0
+    var skip_count = 0
+
+    for result in results:
+        var icon = if result.status == "OK": "  [OK]     " else if result.status == "FAILED": "  [FAIL]   " else: "  [SKIP]   "
+        var line = "{icon}{result.name}"
+        if result.detail != "":
+            line = line + " ({result.detail})"
+        print line
+
+        if result.status == "OK":
+            ok_count = ok_count + 1
+        else if result.status == "FAILED":
+            fail_count = fail_count + 1
+        else:
+            skip_count = skip_count + 1
+
+    print ""
+    print "  Total: {ok_count} OK, {fail_count} failed, {skip_count} skipped"
+    print ""
+
+    if fail_count == 0:
+        print "  Deployment successful!"
+    else:
+        print "  Deployment had failures. Check output above."
+    print ""

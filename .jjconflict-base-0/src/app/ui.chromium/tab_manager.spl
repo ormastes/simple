@@ -1,0 +1,257 @@
+# Chromium Shell Tab Manager (V3 simple_browser shell — M6)
+#
+# Multi-window / tabs support for the chromium shell. A `TabManager`
+# owns an ordered collection of `BrowserTab`s, each with its own logical
+# render target (pixel buffer) and input modifier state, so several
+# `DesktopShell` instances (or browser tabs) can coexist inside one
+# `ChromiumApp`.
+#
+# This module is a pure data structure — no winit, no FFI, no
+# compositor bring-up. The `ChromiumApp` render loop integration
+# is deliberately deferred to M7+; M6 only requires that the manager
+# compile and support the create / count / switch / close operations
+# so that later milestones can wire it into the event pump.
+#
+# Scope (per doc/03_plan/v3_simple_browser_milestones.md M6):
+#   - Window manager tracks N logical windows.              — done here
+#   - Per-window render-scene + damage region.              — per-tab buffer
+#   - Focus and z-order between windows.                    — active index
+#   - Shutdown of one window does not affect siblings.      — close_tab
+#
+# No new FFI is introduced. The per-tab pixel buffer is a plain `[u32]`
+# that the compositor can later render into; the manager does not
+# present pixels to the host window itself.
+
+use app.ui.chromium.event_bridge.{ChromiumEventBridge}
+
+# =========================================================================
+# Defaults
+# =========================================================================
+
+val DEFAULT_TAB_WIDTH: i32 = 1280
+val DEFAULT_TAB_HEIGHT: i32 = 720
+val DEFAULT_TAB_CLEAR: u32 = 0xFF000000
+
+# =========================================================================
+# BrowserTab
+# =========================================================================
+
+class BrowserTab:
+    """One logical browser tab / top-level window.
+
+    Each tab owns its own render target (a [u32] pixel buffer plus
+    width/height), its own input modifier bridge, a damage flag, and a
+    z-order value used by the manager to resolve focus.
+    """
+    id: i64
+    title: text
+    width: i32
+    height: i32
+    pixels: [u32]
+    input_bridge: ChromiumEventBridge
+    dirty: bool
+    z_order: i32
+    closed: bool
+
+impl BrowserTab:
+
+    static fn new(id: i64, title: text, width: i32, height: i32) -> BrowserTab:
+        """Create a new tab with a solid-colour initial pixel buffer.
+
+        The buffer is sized `width * height` and filled with
+        `DEFAULT_TAB_CLEAR` (opaque black) so the first compositor
+        render has a well-defined starting state.
+        """
+        val total: i32 = width * height
+        var buf: [u32] = []
+        var i: i32 = 0
+        while i < total:
+            buf = buf + [DEFAULT_TAB_CLEAR]
+            i = i + 1
+        BrowserTab(
+            id: id,
+            title: title,
+            width: width,
+            height: height,
+            pixels: buf,
+            input_bridge: ChromiumEventBridge.new(),
+            dirty: true,
+            z_order: 0,
+            closed: false
+        )
+
+    fn pixel_count() -> i32:
+        """Return the number of pixels in the render target."""
+        self.width * self.height
+
+    fn is_closed() -> bool:
+        self.closed
+
+    me mark_dirty():
+        """Flag the tab as needing a redraw on the next composite pass."""
+        self.dirty = true
+
+    me clear_dirty():
+        """Clear the redraw flag after the compositor has consumed it."""
+        self.dirty = false
+
+    me set_title(new_title: text):
+        """Update the tab title (e.g. from a <title> DOM node update)."""
+        self.title = new_title
+
+    me set_z_order(z: i32):
+        """Set the z-order value; higher values render on top."""
+        self.z_order = z
+
+    me close():
+        """Mark the tab as closed. The manager will reap it on the next
+        `close_tab` / `compact` pass."""
+        self.closed = true
+
+# =========================================================================
+# TabManager
+# =========================================================================
+
+class TabManager:
+    """Owns a collection of `BrowserTab`s plus an active-tab index and a
+    monotonic id counter.
+
+    The collection is order-preserving: the order of `tabs` is the
+    user-visible tab-strip order. The active tab is identified by
+    `active_index`; if there are zero open tabs `active_index` is -1.
+    """
+    tabs: [BrowserTab]
+    active_index: i32
+    next_id: i64
+
+impl TabManager:
+
+    static fn new() -> TabManager:
+        """Create an empty tab manager. No tabs are open; `active_index`
+        is -1 until the first `new_tab` call."""
+        TabManager(
+            tabs: [],
+            active_index: -1,
+            next_id: 1
+        )
+
+    fn count() -> i32:
+        """Return the number of tabs currently open (including those
+        flagged closed but not yet compacted)."""
+        self.tabs.len().to_i32()
+
+    fn is_empty() -> bool:
+        self.tabs.len() == 0
+
+    fn active_index_of() -> i32:
+        """Return the index of the currently focused tab, or -1 if
+        there are no open tabs."""
+        self.active_index
+
+    fn has_tab(idx: i32) -> bool:
+        """Return true iff `idx` is a valid tab index."""
+        idx >= 0 and idx < self.tabs.len().to_i32()
+
+    fn tab_at(idx: i32) -> BrowserTab:
+        """Return the tab at `idx`. Caller must ensure `has_tab(idx)`."""
+        self.tabs[idx]
+
+    fn active_tab() -> BrowserTab:
+        """Return the currently focused tab.
+
+        Caller must ensure `not is_empty()` — calling `active_tab` on an
+        empty manager is a programming error.
+        """
+        self.tabs[self.active_index]
+
+    fn find_index_by_id(id: i64) -> i32:
+        """Return the index of the tab with the given id, or -1."""
+        var i: i32 = 0
+        val n = self.tabs.len().to_i32()
+        while i < n:
+            if self.tabs[i].id == id:
+                return i
+            i = i + 1
+        return -1
+
+    me new_tab(title: text) -> i64:
+        """Create a new tab with the default size and return its id.
+
+        The newly created tab becomes the active tab and is placed on
+        top of the z-order stack. Its id is stable for the lifetime of
+        the manager and monotonically increasing.
+        """
+        self.new_tab_sized(title, DEFAULT_TAB_WIDTH, DEFAULT_TAB_HEIGHT)
+
+    me new_tab_sized(title: text, width: i32, height: i32) -> i64:
+        """Like `new_tab`, but with an explicit render-target size."""
+        val id = self.next_id
+        self.next_id = self.next_id + 1
+        val tab = BrowserTab.new(id, title, width, height)
+        tab.set_z_order(self.count() + 1)
+        self.tabs = self.tabs + [tab]
+        self.active_index = self.count() - 1
+        return id
+
+    me switch_to(idx: i32) -> bool:
+        """Focus the tab at `idx`.
+
+        Returns true if the index was valid; false otherwise. The
+        focused tab is promoted to the top of the z-order so siblings
+        composite below it.
+        """
+        if not self.has_tab(idx):
+            return false
+        self.active_index = idx
+        val n = self.count()
+        self.tabs[idx].set_z_order(n + 1)
+        return true
+
+    me switch_to_id(id: i64) -> bool:
+        """Focus the tab with the given id. Returns true on success."""
+        val idx = self.find_index_by_id(id)
+        if idx < 0:
+            return false
+        self.switch_to(idx)
+
+    me close_tab(idx: i32) -> bool:
+        """Close the tab at `idx` and remove it from the collection.
+
+        Adjusts `active_index` so that:
+          * closing the last tab leaves `active_index = -1`
+          * closing the active tab focuses the previous tab (or index 0)
+          * closing a tab before the active one shifts `active_index`
+            down by one so the same logical tab stays focused
+        Returns true if the index was valid.
+        """
+        if not self.has_tab(idx):
+            return false
+        val n = self.count()
+        var new_tabs: [BrowserTab] = []
+        var i: i32 = 0
+        while i < n:
+            if i != idx:
+                new_tabs = new_tabs + [self.tabs[i]]
+            i = i + 1
+        self.tabs = new_tabs
+        val new_n = self.count()
+        if new_n == 0:
+            self.active_index = -1
+        elif idx < self.active_index:
+            self.active_index = self.active_index - 1
+        elif idx == self.active_index:
+            if self.active_index >= new_n:
+                self.active_index = new_n - 1
+        return true
+
+    me close_tab_by_id(id: i64) -> bool:
+        """Close the tab with the given id."""
+        val idx = self.find_index_by_id(id)
+        if idx < 0:
+            return false
+        self.close_tab(idx)
+
+    me close_all():
+        """Close every tab. Leaves the manager empty but reusable."""
+        self.tabs = []
+        self.active_index = -1

@@ -1,0 +1,468 @@
+# Log Viewer — Kernel and Service Log Viewer
+#
+# Displays system, kernel, service, and application logs in a
+# scrollable, filterable view with tab-based source selection
+# and level-based filtering. Renders as a widget tree using
+# the existing UI builder DSL.
+#
+# MDSOC: feature dimension, apps layer
+
+use common.ui.builder.{
+    column, row, panel, button, text_widget, label,
+    statusbar, menubar, build_tree_with_title,
+    with_flex, with_width, tabs
+}
+use common.ui.widget.{WidgetNode, UITree, UIEvent}
+use common.ui.session.{UISession}
+
+# =========================================================================
+# Log Level
+# =========================================================================
+
+enum LogLevel:
+    """Severity level for a log entry."""
+    Debug
+    Info
+    Warning
+    Error
+
+fn level_tag(level: LogLevel) -> text:
+    """Short bracket tag for display."""
+    match level:
+        LogLevel.Debug: "[DBG]"
+        LogLevel.Info: "[INF]"
+        LogLevel.Warning: "[WRN]"
+        LogLevel.Error: "[ERR]"
+
+fn level_name(level: LogLevel) -> text:
+    """Human-readable level name."""
+    match level:
+        LogLevel.Debug: "Debug"
+        LogLevel.Info: "Info"
+        LogLevel.Warning: "Warning"
+        LogLevel.Error: "Error"
+
+fn level_matches(level: LogLevel, filter: text) -> bool:
+    """Check whether a log level passes the current level filter."""
+    if filter == "All":
+        return true
+    match level:
+        LogLevel.Debug: filter == "Debug"
+        LogLevel.Info: filter == "Info"
+        LogLevel.Warning: filter == "Warning"
+        LogLevel.Error: filter == "Error"
+
+# =========================================================================
+# Log Entry
+# =========================================================================
+
+struct LogEntry:
+    """A single log message with metadata."""
+    timestamp: text
+    source: text
+    level: LogLevel
+    message: text
+
+fn source_tab(source: text) -> text:
+    """Map a source name to its tab category."""
+    if source == "kernel" or source == "mm" or source == "scheduler" or source == "irq":
+        return "Kernel"
+    if source == "eth0" or source == "wifi" or source == "dns" or source == "dhcp" or source == "firewall":
+        return "Network"
+    if source == "editor" or source == "shell" or source == "calculator" or source == "browser" or source == "paint":
+        return "Apps"
+    return "System"
+
+# =========================================================================
+# Log Viewer App
+# =========================================================================
+
+class LogViewerApp:
+    """Kernel and service log viewer.
+
+    Displays log entries filtered by source tab, severity level,
+    and free-text search. Supports auto-scroll, keyboard navigation,
+    and clear.
+    """
+    entries: [LogEntry]
+    current_tab: text
+    level_filter: text
+    search_text: text
+    auto_scroll: bool
+    scroll_offset: i32
+    visible_rows: i32
+
+impl LogViewerApp:
+
+    static fn new() -> LogViewerApp:
+        """Create a log viewer pre-populated with sample entries."""
+        var app = LogViewerApp(
+            entries: [],
+            current_tab: "All",
+            level_filter: "All",
+            search_text: "",
+            auto_scroll: true,
+            scroll_offset: 0,
+            visible_rows: 24
+        )
+        app._load_sample_entries()
+        return app
+
+    # -- Sample Data ---------------------------------------------------------
+
+    me _load_sample_entries():
+        """Populate with 50 sample log entries from various subsystems."""
+        self.entries = []
+        # Kernel boot sequence
+        self.entries = self.entries.push(LogEntry(timestamp: "00:00:00.001", source: "kernel", level: LogLevel.Info, message: "SimpleOS kernel v0.9.1 starting"))
+        self.entries = self.entries.push(LogEntry(timestamp: "00:00:00.003", source: "kernel", level: LogLevel.Info, message: "CPU: 4 cores detected (x86_64)"))
+        self.entries = self.entries.push(LogEntry(timestamp: "00:00:00.005", source: "kernel", level: LogLevel.Debug, message: "ACPI tables parsed, MADT found"))
+        self.entries = self.entries.push(LogEntry(timestamp: "00:00:00.008", source: "mm", level: LogLevel.Info, message: "Physical memory: 2048 MB available"))
+        self.entries = self.entries.push(LogEntry(timestamp: "00:00:00.012", source: "mm", level: LogLevel.Info, message: "Kernel heap: 16 MB mapped at 0xFFFF800000000000"))
+        self.entries = self.entries.push(LogEntry(timestamp: "00:00:00.015", source: "irq", level: LogLevel.Info, message: "APIC initialized, 24 IRQ lines"))
+        self.entries = self.entries.push(LogEntry(timestamp: "00:00:00.020", source: "scheduler", level: LogLevel.Info, message: "Scheduler started, idle task PID 0"))
+        self.entries = self.entries.push(LogEntry(timestamp: "00:00:00.025", source: "scheduler", level: LogLevel.Debug, message: "Time slice: 10 ms, priority queues: 5"))
+        # VFS and storage
+        self.entries = self.entries.push(LogEntry(timestamp: "00:00:00.030", source: "vfs", level: LogLevel.Info, message: "VFS layer initialized"))
+        self.entries = self.entries.push(LogEntry(timestamp: "00:00:00.035", source: "vfs", level: LogLevel.Info, message: "Mounted rootfs on /"))
+        self.entries = self.entries.push(LogEntry(timestamp: "00:00:00.045", source: "storage", level: LogLevel.Info, message: "AHCI controller found at PCI 0:1f.2"))
+        self.entries = self.entries.push(LogEntry(timestamp: "00:00:00.050", source: "storage", level: LogLevel.Info, message: "sda: 120 GB SSD detected"))
+        self.entries = self.entries.push(LogEntry(timestamp: "00:00:00.055", source: "storage", level: LogLevel.Warning, message: "sdb: SMART threshold approaching for reallocated sectors"))
+        # Network
+        self.entries = self.entries.push(LogEntry(timestamp: "00:00:00.060", source: "eth0", level: LogLevel.Info, message: "Link up: 1000 Mbps full-duplex"))
+        self.entries = self.entries.push(LogEntry(timestamp: "00:00:00.065", source: "dhcp", level: LogLevel.Info, message: "DHCP request sent on eth0"))
+        self.entries = self.entries.push(LogEntry(timestamp: "00:00:00.120", source: "dhcp", level: LogLevel.Info, message: "Lease obtained: 192.168.1.42/24, gw 192.168.1.1"))
+        self.entries = self.entries.push(LogEntry(timestamp: "00:00:00.125", source: "dns", level: LogLevel.Info, message: "Resolver configured: 8.8.8.8, 8.8.4.4"))
+        self.entries = self.entries.push(LogEntry(timestamp: "00:00:00.130", source: "firewall", level: LogLevel.Info, message: "Default policy: deny incoming, allow outgoing"))
+        self.entries = self.entries.push(LogEntry(timestamp: "00:00:00.135", source: "wifi", level: LogLevel.Warning, message: "No wireless adapter detected"))
+        # Services
+        self.entries = self.entries.push(LogEntry(timestamp: "00:00:00.200", source: "init", level: LogLevel.Info, message: "Starting system services"))
+        self.entries = self.entries.push(LogEntry(timestamp: "00:00:00.210", source: "syslog", level: LogLevel.Info, message: "Syslog daemon started, logging to /var/log/syslog"))
+        self.entries = self.entries.push(LogEntry(timestamp: "00:00:00.220", source: "cron", level: LogLevel.Info, message: "Cron daemon started, 3 jobs scheduled"))
+        self.entries = self.entries.push(LogEntry(timestamp: "00:00:00.230", source: "sshd", level: LogLevel.Info, message: "SSH server listening on port 22"))
+        self.entries = self.entries.push(LogEntry(timestamp: "00:00:00.250", source: "display", level: LogLevel.Info, message: "Framebuffer: 1920x1080x32 at 0xFD000000"))
+        self.entries = self.entries.push(LogEntry(timestamp: "00:00:00.270", source: "compositor", level: LogLevel.Info, message: "Window compositor started"))
+        # App launches
+        self.entries = self.entries.push(LogEntry(timestamp: "00:00:01.000", source: "shell", level: LogLevel.Info, message: "Shell started for user root (PID 12)"))
+        self.entries = self.entries.push(LogEntry(timestamp: "00:00:01.100", source: "editor", level: LogLevel.Info, message: "Editor opened: /etc/hosts"))
+        self.entries = self.entries.push(LogEntry(timestamp: "00:00:01.200", source: "calculator", level: LogLevel.Debug, message: "Calculator app initialized"))
+        self.entries = self.entries.push(LogEntry(timestamp: "00:00:01.300", source: "browser", level: LogLevel.Info, message: "Browser engine started, cache at /tmp/browser_cache"))
+        self.entries = self.entries.push(LogEntry(timestamp: "00:00:01.350", source: "browser", level: LogLevel.Warning, message: "TLS certificate cache empty, first connections will be slow"))
+        # Runtime warnings and errors
+        self.entries = self.entries.push(LogEntry(timestamp: "00:00:02.000", source: "kernel", level: LogLevel.Warning, message: "Soft lockup detected on CPU 2 for 5 ms"))
+        self.entries = self.entries.push(LogEntry(timestamp: "00:00:02.500", source: "mm", level: LogLevel.Warning, message: "Low memory: 128 MB free, starting reclaim"))
+        self.entries = self.entries.push(LogEntry(timestamp: "00:00:02.600", source: "mm", level: LogLevel.Info, message: "Reclaimed 256 MB from page cache"))
+        self.entries = self.entries.push(LogEntry(timestamp: "00:00:03.000", source: "eth0", level: LogLevel.Error, message: "RX checksum error on packet from 10.0.0.5"))
+        self.entries = self.entries.push(LogEntry(timestamp: "00:00:03.500", source: "sshd", level: LogLevel.Warning, message: "Authentication failure from 192.168.1.99 (user: admin)"))
+        self.entries = self.entries.push(LogEntry(timestamp: "00:00:03.510", source: "firewall", level: LogLevel.Info, message: "Rate-limiting 192.168.1.99: 3 failed attempts"))
+        self.entries = self.entries.push(LogEntry(timestamp: "00:00:04.000", source: "storage", level: LogLevel.Error, message: "I/O error on sdb: sector 1048576 read failed"))
+        self.entries = self.entries.push(LogEntry(timestamp: "00:00:04.010", source: "storage", level: LogLevel.Warning, message: "sdb: marking sector 1048576 as bad"))
+        self.entries = self.entries.push(LogEntry(timestamp: "00:00:04.500", source: "scheduler", level: LogLevel.Warning, message: "PID 47 exceeded CPU quota (200 ms), throttled"))
+        self.entries = self.entries.push(LogEntry(timestamp: "00:00:05.000", source: "paint", level: LogLevel.Error, message: "Out of memory allocating 4096x4096 canvas"))
+        self.entries = self.entries.push(LogEntry(timestamp: "00:00:05.500", source: "cron", level: LogLevel.Info, message: "Running job: /etc/cron.d/cleanup"))
+        self.entries = self.entries.push(LogEntry(timestamp: "00:00:06.000", source: "dns", level: LogLevel.Error, message: "DNS lookup failed for api.example.com: timeout"))
+        self.entries = self.entries.push(LogEntry(timestamp: "00:00:06.100", source: "dns", level: LogLevel.Info, message: "Retrying with secondary resolver 8.8.4.4"))
+        self.entries = self.entries.push(LogEntry(timestamp: "00:00:06.200", source: "dns", level: LogLevel.Info, message: "Resolved api.example.com -> 93.184.216.34"))
+        self.entries = self.entries.push(LogEntry(timestamp: "00:00:07.000", source: "kernel", level: LogLevel.Debug, message: "Timer tick: 700000 ticks since boot"))
+        self.entries = self.entries.push(LogEntry(timestamp: "00:00:07.500", source: "sshd", level: LogLevel.Info, message: "Session opened for user dev from 192.168.1.10"))
+        self.entries = self.entries.push(LogEntry(timestamp: "00:00:08.000", source: "shell", level: LogLevel.Debug, message: "Command executed: ls -la /home"))
+        self.entries = self.entries.push(LogEntry(timestamp: "00:00:08.500", source: "irq", level: LogLevel.Warning, message: "IRQ 11 spurious interrupt detected"))
+        self.entries = self.entries.push(LogEntry(timestamp: "00:00:09.000", source: "compositor", level: LogLevel.Debug, message: "Repaint 14 dirty regions, 2.1 ms"))
+        self.entries = self.entries.push(LogEntry(timestamp: "00:00:09.500", source: "eth0", level: LogLevel.Info, message: "ARP resolved 192.168.1.1 -> aa:bb:cc:dd:ee:ff"))
+
+    # -- Filtering -----------------------------------------------------------
+
+    fn _matches_filter(entry: LogEntry) -> bool:
+        """Check if a log entry passes current tab, level, and search filters."""
+        # Tab filter
+        if self.current_tab != "All":
+            val tab = source_tab(entry.source)
+            if tab != self.current_tab:
+                return false
+        # Level filter
+        if not level_matches(entry.level, self.level_filter):
+            return false
+        # Search text filter
+        if self.search_text != "":
+            val msg_lower = entry.message.to_lower()
+            val src_lower = entry.source.to_lower()
+            val search_lower = self.search_text.to_lower()
+            if not msg_lower.contains(search_lower) and not src_lower.contains(search_lower):
+                return false
+        return true
+
+    fn _filtered_entries() -> [LogEntry]:
+        """Return all entries that pass the current filters."""
+        var result = []
+        for entry in self.entries:
+            if self._matches_filter(entry):
+                result = result.push(entry)
+        return result
+
+    fn _format_entry(entry: LogEntry) -> text:
+        """Format a single log entry for display."""
+        val tag = level_tag(entry.level)
+        return "{entry.timestamp} {tag} [{entry.source}] {entry.message}"
+
+    # -- Navigation ----------------------------------------------------------
+
+    me _scroll_to_bottom(filtered: [LogEntry]):
+        """Scroll so the last entry is visible."""
+        val total = filtered.len()
+        if total > self.visible_rows:
+            self.scroll_offset = total - self.visible_rows
+        else:
+            self.scroll_offset = 0
+
+    me _clamp_scroll(filtered_count: i32):
+        """Ensure scroll offset stays within valid bounds."""
+        val max_offset = if filtered_count > self.visible_rows:
+            filtered_count - self.visible_rows
+        else:
+            0
+        if self.scroll_offset > max_offset:
+            self.scroll_offset = max_offset
+        if self.scroll_offset < 0:
+            self.scroll_offset = 0
+
+    # -- Input Handling ------------------------------------------------------
+
+    me handle_key(key: text):
+        """Handle keyboard input.
+
+        Keys: Up/Down = scroll, Tab = next tab, / = focus search,
+              a = toggle auto-scroll, c = clear, 1-4 = level filter
+        """
+        val filtered = self._filtered_entries()
+        match key:
+            "up":
+                self.auto_scroll = false
+                self.scroll_offset = self.scroll_offset - 1
+                self._clamp_scroll(filtered.len())
+            "down":
+                self.scroll_offset = self.scroll_offset + 1
+                self._clamp_scroll(filtered.len())
+            "page_up":
+                self.auto_scroll = false
+                self.scroll_offset = self.scroll_offset - self.visible_rows
+                self._clamp_scroll(filtered.len())
+            "page_down":
+                self.scroll_offset = self.scroll_offset + self.visible_rows
+                self._clamp_scroll(filtered.len())
+            "home":
+                self.auto_scroll = false
+                self.scroll_offset = 0
+            "end":
+                self._scroll_to_bottom(filtered)
+                self.auto_scroll = true
+            "tab":
+                # Cycle through tabs: All -> Kernel -> System -> Network -> Apps -> All
+                match self.current_tab:
+                    "All": self.current_tab = "Kernel"
+                    "Kernel": self.current_tab = "System"
+                    "System": self.current_tab = "Network"
+                    "Network": self.current_tab = "Apps"
+                    "Apps": self.current_tab = "All"
+                    _: self.current_tab = "All"
+                self.scroll_offset = 0
+                if self.auto_scroll:
+                    val new_filtered = self._filtered_entries()
+                    self._scroll_to_bottom(new_filtered)
+            "a":
+                self.auto_scroll = not self.auto_scroll
+                if self.auto_scroll:
+                    self._scroll_to_bottom(filtered)
+            "c":
+                self.entries = []
+                self.scroll_offset = 0
+            "1":
+                self.level_filter = "Debug"
+                self.scroll_offset = 0
+            "2":
+                self.level_filter = "Info"
+                self.scroll_offset = 0
+            "3":
+                self.level_filter = "Warning"
+                self.scroll_offset = 0
+            "4":
+                self.level_filter = "Error"
+                self.scroll_offset = 0
+            "0":
+                self.level_filter = "All"
+                self.scroll_offset = 0
+            "escape":
+                self.search_text = ""
+                self.level_filter = "All"
+                self.current_tab = "All"
+                self.scroll_offset = 0
+            _: pass_dn
+
+    me handle_action(action: text):
+        """Handle button and menu actions dispatched from the UI."""
+        match action:
+            "tab_All":
+                self.current_tab = "All"
+                self.scroll_offset = 0
+            "tab_Kernel":
+                self.current_tab = "Kernel"
+                self.scroll_offset = 0
+            "tab_System":
+                self.current_tab = "System"
+                self.scroll_offset = 0
+            "tab_Network":
+                self.current_tab = "Network"
+                self.scroll_offset = 0
+            "tab_Apps":
+                self.current_tab = "Apps"
+                self.scroll_offset = 0
+            "level_All":
+                self.level_filter = "All"
+                self.scroll_offset = 0
+            "level_Debug":
+                self.level_filter = "Debug"
+                self.scroll_offset = 0
+            "level_Info":
+                self.level_filter = "Info"
+                self.scroll_offset = 0
+            "level_Warning":
+                self.level_filter = "Warning"
+                self.scroll_offset = 0
+            "level_Error":
+                self.level_filter = "Error"
+                self.scroll_offset = 0
+            "clear":
+                self.entries = []
+                self.scroll_offset = 0
+            "auto_scroll":
+                self.auto_scroll = not self.auto_scroll
+                if self.auto_scroll:
+                    val filtered = self._filtered_entries()
+                    self._scroll_to_bottom(filtered)
+            "search":
+                pass_dn  # search_text set externally
+            _ => pass_dn
+
+    me set_search(query: text):
+        """Update the search filter text."""
+        self.search_text = query
+        self.scroll_offset = 0
+        if self.auto_scroll:
+            val filtered = self._filtered_entries()
+            self._scroll_to_bottom(filtered)
+
+    me add_entry(entry: LogEntry):
+        """Append a new log entry (for live log streaming)."""
+        self.entries = self.entries.push(entry)
+        if self.auto_scroll:
+            val filtered = self._filtered_entries()
+            self._scroll_to_bottom(filtered)
+
+    # -- UI Construction -----------------------------------------------------
+
+    fn build_ui() -> UISession:
+        """Build the log viewer UI.
+
+        Layout:
+          Menubar: File | View | Filter
+          Tabs: All | Kernel | System | Network | Apps
+          Row: level filter buttons | search label | auto-scroll toggle
+          Log lines panel (scrollable)
+          Statusbar: filtered/total count | current filter info
+        """
+        val filtered = self._filtered_entries()
+
+        # Tab bar
+        val tab_labels = ["All", "Kernel", "System", "Network", "Apps"]
+        val tab_bar = row("lv_tabs", [
+            _tab_button("All", self.current_tab),
+            _tab_button("Kernel", self.current_tab),
+            _tab_button("System", self.current_tab),
+            _tab_button("Network", self.current_tab),
+            _tab_button("Apps", self.current_tab)
+        ])
+
+        # Level filter buttons
+        val level_bar = row("lv_levels", [
+            label("lv_level_label", "Level: "),
+            _level_button("All", self.level_filter),
+            _level_button("Debug", self.level_filter),
+            _level_button("Info", self.level_filter),
+            _level_button("Warning", self.level_filter),
+            _level_button("Error", self.level_filter)
+        ])
+
+        # Control row: search display + auto-scroll toggle + clear
+        val auto_label = if self.auto_scroll: "[x] Auto-scroll" else: "[ ] Auto-scroll"
+        val search_display = if self.search_text != "":
+            "Search: \"{self.search_text}\""
+        else:
+            "Search: (none)"
+        val control_bar = row("lv_controls", [
+            label("lv_search_label", search_display),
+            with_flex(label("lv_spacer", ""), 1),
+            button("lv_btn_auto", auto_label, "auto_scroll"),
+            button("lv_btn_clear", "Clear", "clear")
+        ])
+
+        # Log lines — visible window
+        var line_widgets = []
+        var row_idx = self.scroll_offset
+        var visible = 0
+        while visible < self.visible_rows and row_idx < filtered.len():
+            val entry = filtered[row_idx]
+            val formatted = self._format_entry(entry)
+            line_widgets = line_widgets.push(
+                text_widget("lv_line_{row_idx}", formatted)
+            )
+            row_idx = row_idx + 1
+            visible = visible + 1
+
+        # Fill remaining visible rows with empty lines
+        while visible < self.visible_rows:
+            line_widgets = line_widgets.push(
+                text_widget("lv_line_empty_{visible}", "")
+            )
+            visible = visible + 1
+
+        val log_panel = panel("lv_log_panel", "Log Output", line_widgets)
+
+        # Count entries per level in filtered set
+        var debug_count = 0
+        var info_count = 0
+        var warn_count = 0
+        var error_count = 0
+        for entry in filtered:
+            match entry.level:
+                LogLevel.Debug: debug_count = debug_count + 1
+                LogLevel.Info: info_count = info_count + 1
+                LogLevel.Warning: warn_count = warn_count + 1
+                LogLevel.Error: error_count = error_count + 1
+
+        val left_status = "{filtered.len()}/{self.entries.len()} entries | D:{debug_count} I:{info_count} W:{warn_count} E:{error_count}"
+        val right_status = "Tab: {self.current_tab} | Level: {self.level_filter}"
+
+        val root = column("lv_root", [
+            menubar("lv_menu", ["File", "View", "Filter"]),
+            tab_bar,
+            level_bar,
+            control_bar,
+            with_flex(log_panel, 1),
+            statusbar("lv_status", left_status, right_status)
+        ])
+
+        val tree = build_tree_with_title(root, "Log Viewer", "dark")
+        return UISession.new(tree)
+
+# =========================================================================
+# Helpers
+# =========================================================================
+
+fn _tab_button(tab_name: text, current: text) -> WidgetNode:
+    """Create a tab button, visually marking the active tab."""
+    val display = if tab_name == current: "[{tab_name}]" else: " {tab_name} "
+    return button("lv_tab_{tab_name}", display, "tab_{tab_name}")
+
+fn _level_button(level_name: text, current: text) -> WidgetNode:
+    """Create a level filter button, visually marking the active level."""
+    val display = if level_name == current: "[{level_name}]" else: " {level_name} "
+    return button("lv_lvl_{level_name}", display, "level_{level_name}")

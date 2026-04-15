@@ -1,0 +1,286 @@
+#!/usr/bin/env simple
+@allow(primitive_api)
+# Coverage SFFI Wrapper - Using Existing Runtime Functions
+#
+# This version uses the EXISTING rt_coverage_* functions in the runtime.
+# No Rust changes needed - works immediately!
+#
+# Provides runtime coverage tracking for decisions, conditions, and paths.
+
+# ============================================================================
+# Tier 1: Extern Declarations (Existing Runtime Functions)
+# ============================================================================
+
+# These functions ALREADY EXIST in the runtime!
+
+extern fn rt_coverage_enabled() -> bool
+extern fn rt_coverage_decision_probe(file: text, line: i64, decision_id: i64, taken: bool)
+extern fn rt_coverage_condition_probe(file: text, line: i64, condition_id: i64, result: bool)
+extern fn rt_coverage_path_probe(file: text, line: i64, path_id: i64)
+extern fn rt_coverage_path_finalizer(file: text, line: i64)
+extern fn rt_coverage_dump_sdn() -> text
+extern fn rt_coverage_free_sdn(sdn: text)
+extern fn rt_coverage_clear()
+
+# ============================================================================
+# Tier 2: Simple-Friendly Wrapper Functions
+# ============================================================================
+
+# --- Coverage State ---
+
+fn coverage_enabled() -> bool:
+    """Check if coverage tracking is enabled
+
+    Returns: true if SIMPLE_COVERAGE=1 environment variable is set
+
+    Example:
+        if coverage_enabled():
+            print "Coverage tracking is active"
+    """
+    rt_coverage_enabled()
+
+fn coverage_clear():
+    """Clear all coverage data
+
+    Resets all tracked decisions, conditions, and paths.
+
+    Example:
+        coverage_clear()
+        run_tests()
+        val report = coverage_report()
+    """
+    rt_coverage_clear()
+
+# --- Coverage Probes ---
+
+fn coverage_decision(file: text, line: i64, decision_id: i64, taken: bool):
+    """Record a decision point (if/match branch taken)
+
+    Args:
+        file: Source file path
+        line: Line number
+        decision_id: Unique ID for this decision point
+        taken: Whether this branch was taken
+
+    Example:
+        if condition:
+            coverage_decision("test.spl", 42, 1, true)
+            do_something()
+        else:
+            coverage_decision("test.spl", 42, 2, false)
+    """
+    rt_coverage_decision_probe(file, line, decision_id, taken)
+
+fn coverage_condition(file: text, line: i64, condition_id: i64, result: bool):
+    """Record a condition evaluation (boolean expression)
+
+    Args:
+        file: Source file path
+        line: Line number
+        condition_id: Unique ID for this condition
+        result: Boolean result of condition
+
+    Example:
+        val result = (x > 5)
+        coverage_condition("test.spl", 10, 1, result)
+        if result:
+            process(x)
+    """
+    rt_coverage_condition_probe(file, line, condition_id, result)
+
+fn coverage_path(file: text, line: i64, path_id: i64):
+    """Record a path segment execution
+
+    Args:
+        file: Source file path
+        line: Line number
+        path_id: Unique ID for this path segment
+
+    Example:
+        coverage_path("test.spl", 20, 1)
+        step1()
+        coverage_path("test.spl", 21, 2)
+        step2()
+    """
+    rt_coverage_path_probe(file, line, path_id)
+
+fn coverage_path_end(file: text, line: i64):
+    """Mark end of a path sequence
+
+    Args:
+        file: Source file path
+        line: Line number where path ends
+
+    Example:
+        coverage_path("test.spl", 20, 1)
+        do_work()
+        coverage_path_end("test.spl", 25)
+    """
+    rt_coverage_path_finalizer(file, line)
+
+# --- Coverage Reports ---
+
+fn coverage_report() -> text:
+    """Get coverage report in SDN format
+
+    Returns: SDN-formatted coverage data with all tracked probes
+
+    Example:
+        val report = coverage_report()
+        file_write("build/coverage/coverage.sdn", report)
+    """
+    rt_coverage_dump_sdn()
+
+fn coverage_report_free(sdn: text):
+    """Free coverage report memory
+
+    Args:
+        sdn: SDN report string to free
+
+    Note: Usually not needed, but available if managing memory manually
+
+    Example:
+        val report = coverage_report()
+        process(report)
+        coverage_report_free(report)
+    """
+    rt_coverage_free_sdn(sdn)
+
+# --- High-Level Coverage Tracking ---
+
+fn with_coverage<T>(block: fn() -> T) -> T:
+    """Run code block with fresh coverage tracking
+
+    Clears coverage before running block, returns result and coverage report.
+
+    Args:
+        block: Function to run with coverage
+
+    Returns: Result of block execution
+
+    Example:
+        val result = with_coverage(\:
+            run_tests()
+            42
+        )
+        val report = coverage_report()
+        print "Result: {result}"
+        print "Coverage:\\n{report}"
+    """
+    coverage_clear()
+    val result = block()
+    result
+
+# --- Coverage Statistics ---
+
+struct CoverageStats:
+    decisions_total: i64
+    decisions_covered: i64
+    conditions_total: i64
+    conditions_covered: i64
+    paths_total: i64
+    paths_covered: i64
+    decision_coverage_percent: i64
+    condition_coverage_percent: i64
+    path_coverage_percent: i64
+
+fn parse_coverage_stats(sdn: text) -> CoverageStats:
+    """Parse coverage report SDN to extract statistics using section-aware parsing.
+
+    Correctly skips section headers and only counts data lines within
+    decisions/conditions/paths sections. A decision/condition is "covered"
+    when it has been observed both true AND false (true_count > 0 and false_count > 0).
+
+    sdoctest:
+        val sdn = "decisions |id, file, line, column, true_count, false_count|\n    1, a.spl, 10, 5, 3, 2\n    2, a.spl, 15, 5, 1, 0\nsummary:\n"
+        val stats = parse_coverage_stats(sdn)
+        expect(stats.decisions_total).to_equal(2)
+        expect(stats.decisions_covered).to_equal(1)
+
+    Args:
+        sdn: SDN coverage report from coverage_report()
+    Returns: CoverageStats with coverage percentages
+    """
+    var decisions_total = 0
+    var decisions_covered = 0
+    var conditions_total = 0
+    var conditions_covered = 0
+    var paths_total = 0
+    var paths_covered = 0
+
+    var section = ""
+    val lines = sdn.split("\n")
+    for line in lines:
+        val trimmed = line.trim()
+        if trimmed == "" or trimmed.starts_with("#"):
+            continue
+
+        # Detect section transitions
+        if trimmed.starts_with("decisions"):
+            section = "decisions"
+            continue
+        if trimmed.starts_with("conditions"):
+            section = "conditions"
+            continue
+        if trimmed.starts_with("paths"):
+            section = "paths"
+            continue
+        if trimmed.starts_with("summary") or trimmed.starts_with("version"):
+            section = ""
+            continue
+
+        # Process data lines within sections
+        if section == "decisions":
+            val parts = trimmed.split(",")
+            if parts.len() >= 6:
+                val t = _parse_count(parts[4])
+                val f = _parse_count(parts[5])
+                decisions_total = decisions_total + 1
+                if t > 0 and f > 0:
+                    decisions_covered = decisions_covered + 1
+        elif section == "conditions":
+            val parts = trimmed.split(",")
+            if parts.len() >= 7:
+                val t = _parse_count(parts[5])
+                val f = _parse_count(parts[6])
+                conditions_total = conditions_total + 1
+                if t > 0 and f > 0:
+                    conditions_covered = conditions_covered + 1
+        elif section == "paths":
+            paths_total = paths_total + 1
+            paths_covered = paths_covered + 1
+
+    var decision_pct = 0
+    if decisions_total > 0:
+        decision_pct = (decisions_covered * 100) / decisions_total
+
+    var condition_pct = 0
+    if conditions_total > 0:
+        condition_pct = (conditions_covered * 100) / conditions_total
+
+    var path_pct = 0
+    if paths_total > 0:
+        path_pct = (paths_covered * 100) / paths_total
+
+    CoverageStats(
+        decisions_total: decisions_total,
+        decisions_covered: decisions_covered,
+        conditions_total: conditions_total,
+        conditions_covered: conditions_covered,
+        paths_total: paths_total,
+        paths_covered: paths_covered,
+        decision_coverage_percent: decision_pct,
+        condition_coverage_percent: condition_pct,
+        path_coverage_percent: path_pct
+    )
+
+fn _parse_count(s: text) -> i64:
+    val trimmed = s.trim()
+    if trimmed == "":
+        return 0
+    to_int(trimmed)
+
+# ============================================================================
+# Export Functions
+# ============================================================================
+

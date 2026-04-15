@@ -1,0 +1,277 @@
+# @cover src/compiler/70.backend/backend/vhdl_backend.spl 60%
+"""
+# RV32IMAC Processor System Tests
+
+**Feature IDs:** #RV32-SYS-001
+**Category:** Hardware
+**Difficulty:** 3/5
+**Status:** In Progress
+
+## Overview
+
+BDD system tests for the RV32IMAC processor.
+Tests instruction decode, pipeline hazards, CSR operations,
+M/A extensions, and compressed instruction decompression.
+"""
+
+# @req REQ-RV32IMAC
+# @feature rv32imac
+# tag: only-compiled, vhdl, slow
+
+import std.spec
+
+use hardware.rv32imac.core.rv32_decode.*
+use hardware.rv32imac.core.rv32_execute.*
+use hardware.rv32imac.core.rv32_compressed.{is_compressed, decompress_rvc, rvc_reg}
+use hardware.rv32imac.core.rv32_csr.Rv32CsrFile
+use hardware.rv32imac.core.rv32_pipeline_ctrl.*
+use hardware.rv32imac.ext.rv32_muldiv.muldiv_execute
+use hardware.rv32imac.ext.rv32_atomics.{ReservationSet, AmoOp, amo_execute}
+use hardware.rv32imac.pkg.rv32_types_pkg.*
+use hardware.rv32imac.pkg.rv32_isa_pkg.*
+
+# ============================================================================
+# Instruction Decode Tests
+# ============================================================================
+
+describe "RV32IMAC Processor":
+    """
+    ## Processor System Tests
+
+    Comprehensive BDD tests covering all major processor features.
+    """
+
+    context "instruction decode":
+        """
+        ### Instruction Decoding
+
+        Verifies correct extraction of instruction fields
+        for all RV32IMAC instruction formats.
+        """
+
+        it "extracts opcode correctly":
+            """
+            **Given:** Instruction 0x00A00513 (ADDI x10, x0, 10)
+            **When:** Decoding opcode field
+            **Then:** Returns OP_IMM (0x13)
+            """
+            val instr = 0x00A00513
+            expect(decode_opcode(instr)).to_equal(OP_OP_IMM)
+
+        it "extracts rd correctly":
+            val instr = 0x00A00513  # ADDI x10, x0, 10
+            expect(decode_rd(instr)).to_equal(10)
+
+        it "extracts rs1 correctly":
+            val instr = 0x00A00513  # ADDI x10, x0, 10
+            expect(decode_rs1(instr)).to_equal(0)
+
+        it "extracts funct3 correctly":
+            val instr = 0x00A00513  # ADDI x10, x0, 10
+            expect(decode_funct3(instr)).to_equal(0)
+
+        it "decodes I-type immediate":
+            val instr = 0x00A00513  # ADDI x10, x0, 10
+            expect(decode_imm_i(instr)).to_equal(10)
+
+        it "decodes negative I-type immediate":
+            """
+            **Given:** ADDI with imm = -5 (0xFFB)
+            **When:** Decoding immediate
+            **Then:** Returns sign-extended -5
+            """
+            val instr = 0xFFB00513  # ADDI x10, x0, -5
+            val imm = decode_imm_i(instr)
+            expect(imm and 0xFFFFFFFF).to_equal(0xFFFFFFFB)
+
+        it "decodes R-type ALU operation":
+            """
+            **Given:** ADD instruction
+            **When:** Decoding alu_op
+            **Then:** Returns AluOp.Add
+            """
+            val op = decode_alu_op(OP_OP, F3_ADD_SUB, F7_NORMAL)
+            expect(op == AluOp.Add).to_equal(true)
+
+        it "distinguishes ADD from SUB":
+            val add_op = decode_alu_op(OP_OP, F3_ADD_SUB, F7_NORMAL)
+            val sub_op = decode_alu_op(OP_OP, F3_ADD_SUB, F7_SUB_SRA)
+            expect(add_op == AluOp.Add).to_equal(true)
+            expect(sub_op == AluOp.Sub).to_equal(true)
+
+        it "decodes M-extension operations":
+            val mul_op = decode_alu_op(OP_OP, F3_MUL, F7_MULDIV)
+            expect(mul_op == AluOp.Mul).to_equal(true)
+
+        it "decompresses RVC instructions":
+            """
+            **Given:** C.SLLI rd, shamt (Quadrant 2)
+            **When:** Decompressing
+            **Then:** Returns valid 32-bit SLLI instruction
+            """
+            # C.SLLI x10, 4: quadrant=2, funct3=0, rd=10, shamt=4
+            val c_slli = 0x0512  # Example encoding
+            val decompressed = decompress_rvc(c_slli)
+            # Should be a valid 32-bit instruction
+            expect((decompressed and 0x3) == 0x3 or decompressed == c_slli).to_equal(true)
+
+    context "pipeline hazards":
+        """
+        ### Pipeline Hazard Handling
+
+        Verifies correct forwarding, stalling, and flushing.
+        """
+
+        it "detects load-use hazard":
+            """
+            **Given:** Load in EX stage targeting rs1 of ID stage
+            **When:** detect_load_use_hazard() called
+            **Then:** Returns true
+            """
+            val hazard = detect_load_use_hazard(5, 0, 5, MemOp.Load, true)
+            expect(hazard).to_equal(true)
+
+        it "no hazard when EX is not a load":
+            val hazard = detect_load_use_hazard(5, 0, 5, MemOp.None, true)
+            expect(hazard).to_equal(false)
+
+        it "no hazard when rd is x0":
+            val hazard = detect_load_use_hazard(0, 3, 0, MemOp.Load, true)
+            expect(hazard).to_equal(false)
+
+        it "forwards from EX to ID (RAW)":
+            """
+            **Given:** EX stage writing to register that ID stage reads
+            **When:** resolve_forward_rs1() called
+            **Then:** Returns ForwardSrc.ExStage
+            """
+            val src = resolve_forward_rs1(5, 5, true, 0, false)
+            expect(src == ForwardSrc.ExStage).to_equal(true)
+
+        it "forwards from MEM to ID when EX doesn't match":
+            val src = resolve_forward_rs1(5, 3, true, 5, true)
+            expect(src == ForwardSrc.MemStage).to_equal(true)
+
+        it "stalls on load-use hazard":
+            val ctrl = compute_pipeline_control(true, false, false)
+            expect(ctrl.stall_if).to_equal(true)
+            expect(ctrl.stall_id).to_equal(true)
+            expect(ctrl.flush_ex).to_equal(true)
+
+        it "flushes on taken branch":
+            val ctrl = compute_pipeline_control(false, true, false)
+            expect(ctrl.flush_if).to_equal(true)
+            expect(ctrl.flush_id).to_equal(true)
+
+    context "CSR operations":
+        """
+        ### Control and Status Registers
+
+        Verifies CSR read/write and trap handling.
+        """
+
+        it "reads/writes mstatus correctly":
+            """
+            **Given:** CSR file
+            **When:** Writing then reading mstatus
+            **Then:** Value roundtrips correctly
+            """
+            var csr = Rv32CsrFile.create()
+            csr.write(CSR_MSTATUS, 0x00001808)
+            val val_read = csr.read(CSR_MSTATUS)
+            expect(val_read and 0x00001808).to_equal(0x00001808)
+
+        it "reads misa correctly":
+            val csr = Rv32CsrFile.create()
+            val misa = csr.read(CSR_MISA)
+            expect(misa).to_equal(0x40101104)
+
+        it "handles CSRRW (atomic read/write)":
+            var csr = Rv32CsrFile.create()
+            csr.write(CSR_MSCRATCH, 0x12345678)
+            val old = csr.csrrw(CSR_MSCRATCH, 0xDEADBEEF)
+            expect(old).to_equal(0x12345678)
+            expect(csr.read(CSR_MSCRATCH)).to_equal(0xDEADBEEF)
+
+        it "handles CSRRS (atomic read and set)":
+            var csr = Rv32CsrFile.create()
+            csr.write(CSR_MIE, 0x00)
+            val old = csr.csrrs(CSR_MIE, 0x80)
+            expect(old).to_equal(0x00)
+            expect(csr.read(CSR_MIE)).to_equal(0x80)
+
+        it "handles CSRRC (atomic read and clear)":
+            var csr = Rv32CsrFile.create()
+            csr.write(CSR_MIE, 0xFF)
+            val old = csr.csrrc(CSR_MIE, 0x80)
+            expect(old).to_equal(0xFF)
+            expect(csr.read(CSR_MIE)).to_equal(0x7F)
+
+        it "handles ECALL trap":
+            """
+            **Given:** CSR file with mtvec set
+            **When:** Trap with ECALL cause (11)
+            **Then:** mepc saved, mcause set, trap_vector returns mtvec
+            """
+            var csr = Rv32CsrFile.create()
+            csr.write(CSR_MTVEC, 0x80000100)
+            csr.trap_enter(11, 0x80001000, 0)
+            expect(csr.read(CSR_MEPC)).to_equal(0x80001000)
+            expect(csr.read(CSR_MCAUSE)).to_equal(11)
+            expect(csr.trap_vector()).to_equal(0x80000100)
+
+        it "returns from trap via mret":
+            """
+            **Given:** CSR file in trapped state
+            **When:** trap_return() called (mret)
+            **Then:** Returns to mepc, restores MIE from MPIE
+            """
+            var csr = Rv32CsrFile.create()
+            csr.write(CSR_MSTATUS, 0x08)  # MIE=1
+            csr.write(CSR_MTVEC, 0x80000100)
+            csr.trap_enter(11, 0x80001000, 0)
+            val return_pc = csr.trap_return()
+            expect(return_pc).to_equal(0x80001000)
+
+    context "M extension":
+        """
+        ### Multiply/Divide Operations
+        """
+
+        it "computes MUL correctly":
+            expect(muldiv_execute(AluOp.Mul, 12, 13)).to_equal(156)
+
+        it "handles division by zero":
+            """
+            **Given:** DIV by zero
+            **When:** muldiv_execute called
+            **Then:** Returns all-ones (spec-defined)
+            """
+            # Use var to prevent const-evaluator from folding 42/0
+            var divisor = 0
+            expect(muldiv_execute(AluOp.Div, 42, divisor)).to_equal(0xFFFFFFFF)
+
+        it "handles signed division overflow":
+            var overflow_divisor = 0xFFFFFFFF
+            expect(muldiv_execute(AluOp.Div, 0x80000000, overflow_divisor)).to_equal(0x80000000)
+
+    context "A extension":
+        """
+        ### Atomic Operations
+        """
+
+        it "LR/SC succeeds on uncontested reservation":
+            var rs = ReservationSet.create()
+            rs.reserve(0x80000000)
+            expect(rs.check_and_clear(0x80000000)).to_equal(true)
+
+        it "SC fails after intervening store":
+            var rs = ReservationSet.create()
+            rs.reserve(0x80000000)
+            rs.invalidate_if_match(0x80000000)
+            expect(rs.check_and_clear(0x80000000)).to_equal(false)
+
+        it "SC fails on address mismatch":
+            var rs = ReservationSet.create()
+            rs.reserve(0x80000000)
+            expect(rs.check_and_clear(0x80000004)).to_equal(false)

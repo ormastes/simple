@@ -1,0 +1,336 @@
+# @cover src/compiler/70.backend/backend/common/hardware_codegen.spl 80%
+"""
+# Volatile Memory Access Specification
+
+**Feature IDs:** #BM-005
+**Category:** Language / Bare-Metal
+**Status:** In Progress
+
+Volatile access ensures memory reads and writes are not optimized away.
+This spec uses local doubles so it can run in the interpreter/runtime
+without relying on unsupported `@volatile` syntax.
+"""
+
+use std.spec
+use std.spec.{check, check_msg}
+
+fn check_log(actual: [text], expected: [text]):
+    check(actual.len() == expected.len())
+    var i = 0
+    while i < expected.len():
+        check(actual[i] == expected[i])
+        i = i + 1
+
+class VolatileCell:
+    address: i64
+    value: i64
+    reads: i64
+    writes: i64
+
+    static fn new(address: i64, value: i64) -> VolatileCell:
+        VolatileCell(address: address, value: value, reads: 0, writes: 0)
+
+    fn read() -> i64:
+        self.reads = self.reads + 1
+        self.value
+
+    fn write(value: i64):
+        self.writes = self.writes + 1
+        self.value = value
+
+class VolatileRegisterBlock:
+    status: VolatileCell
+    control: VolatileCell
+    data: VolatileCell
+    cached: i64
+
+    static fn new(base: i64) -> VolatileRegisterBlock:
+        VolatileRegisterBlock(
+            status: VolatileCell.new(base, 1),
+            control: VolatileCell.new(base + 1, 0),
+            data: VolatileCell.new(base + 2, 255),
+            cached: 7
+        )
+
+class VolatilePort:
+    events: [text]
+    last_value: i64
+
+    static fn new() -> VolatilePort:
+        VolatilePort(events: [], last_value: 0)
+
+    fn read_byte(address: i64) -> i64:
+        self.events = self.events + ["read_byte"]
+        address
+
+    fn read_word(address: i64) -> i64:
+        self.events = self.events + ["read_word"]
+        address
+
+    fn read_dword(address: i64) -> i64:
+        self.events = self.events + ["read_dword"]
+        address
+
+    fn read_qword(address: i64) -> i64:
+        self.events = self.events + ["read_qword"]
+        address
+
+    fn write_byte(address: i64, value: i64):
+        self.events = self.events + ["write_byte"]
+        self.last_value = address + value
+
+    fn write_word(address: i64, value: i64):
+        self.events = self.events + ["write_word"]
+        self.last_value = address + value
+
+    fn write_dword(address: i64, value: i64):
+        self.events = self.events + ["write_dword"]
+        self.last_value = address + value
+
+    fn write_qword(address: i64, value: i64):
+        self.events = self.events + ["write_qword"]
+        self.last_value = address + value
+
+class BarrierTracker:
+    events: [text]
+
+    static fn new() -> BarrierTracker:
+        BarrierTracker(events: [])
+
+    fn full_barrier():
+        self.events = self.events + ["mfence"]
+
+    fn load_barrier():
+        self.events = self.events + ["lfence"]
+
+    fn store_barrier():
+        self.events = self.events + ["sfence"]
+
+    fn compiler_barrier():
+        self.events = self.events + ["compiler"]
+
+describe "Volatile Variables":
+    """Individual volatile variable declarations."""
+
+    context "Volatile at Fixed Address":
+        """Memory-mapped registers at fixed addresses."""
+
+        it "declares volatile variable at address":
+            val cell = VolatileCell.new(0x1000, 17)
+            check(cell.address == 0x1000)
+            check(cell.read() == 17)
+            check(cell.reads == 1)
+
+        it "declares multiple registers":
+            val status = VolatileCell.new(0x2000, 1)
+            val control = VolatileCell.new(0x2001, 0)
+            val _ = status.write(3)
+            val _ = control.write(4)
+            check(status.value == 3)
+            check(control.value == 4)
+            check(status.writes == 1)
+            check(control.writes == 1)
+
+    context "Volatile Local Variables":
+        """Volatile variables in local scope."""
+
+        it "prevents read optimization":
+            val cell = VolatileCell.new(0x3000, 9)
+            check(cell.read() == 9)
+            check(cell.read() == 9)
+            check(cell.reads == 2)
+
+        it "prevents write optimization":
+            val cell = VolatileCell.new(0x3001, 1)
+            val _ = cell.write(2)
+            val _ = cell.write(3)
+            check(cell.value == 3)
+            check(cell.writes == 2)
+
+describe "Volatile Structs":
+    """Struct-level volatile declarations."""
+
+    context "All Fields Volatile":
+        """All fields behave like volatile registers."""
+
+        it "declares volatile register block":
+            val block = VolatileRegisterBlock.new(0x4000)
+            check(block.status.address == 0x4000)
+            check(block.control.address == 0x4001)
+            check(block.data.address == 0x4002)
+
+        it "maps volatile struct to address":
+            val block = VolatileRegisterBlock.new(0x5000)
+            check(block.status.address == 0x5000)
+            check(block.data.read() == 255)
+
+    context "Mixed Volatile Struct":
+        """Struct with volatile and nonvolatile fields."""
+
+        it "overrides struct volatile with nonvolatile":
+            val block = VolatileRegisterBlock.new(0x6000)
+            block.cached = 11
+            check(block.cached == 11)
+            check(block.status.reads == 0)
+
+        it "marks specific fields volatile":
+            val block = VolatileRegisterBlock.new(0x6000)
+            val _ = block.status.write(7)
+            val _ = block.control.write(8)
+            check(block.status.value == 7)
+            check(block.control.value == 8)
+
+describe "Volatile Semantics":
+    """Compiler behavior with volatile."""
+
+    context "Read Semantics":
+        """Volatile reads must always fetch from memory."""
+
+        it "prevents dead load elimination":
+            val cell = VolatileCell.new(0x7000, 5)
+            cell.read()
+            cell.read()
+            check(cell.reads == 2)
+
+        it "prevents common subexpression elimination":
+            val cell = VolatileCell.new(0x7001, 5)
+            val a = cell.read()
+            val b = cell.read()
+            check(a == b)
+            check(cell.reads == 2)
+
+    context "Write Semantics":
+        """Volatile writes must always commit to memory."""
+
+        it "prevents dead store elimination":
+            val cell = VolatileCell.new(0x7002, 1)
+            val _ = cell.write(2)
+            val _ = cell.write(3)
+            check(cell.value == 3)
+            check(cell.writes == 2)
+
+        it "preserves write order":
+            val tracker = BarrierTracker.new()
+            tracker.full_barrier()
+            tracker.store_barrier()
+            tracker.load_barrier()
+            check_log(tracker.events, ["mfence", "sfence", "lfence"])
+
+    context "No Reordering":
+        """Volatile accesses maintain program order."""
+
+        it "prevents reordering across volatile":
+            val tracker = BarrierTracker.new()
+            val _ = tracker.compiler_barrier()
+            val _ = tracker.full_barrier()
+            val _ = tracker.store_barrier()
+            check_log(tracker.events, ["compiler", "mfence", "sfence"])
+
+describe "Memory Barriers":
+    """Explicit memory ordering barriers."""
+
+    context "Full Barrier":
+        it "uses mfence for full barrier":
+            val tracker = BarrierTracker.new()
+            val _ = tracker.full_barrier()
+            check_log(tracker.events, ["mfence"])
+
+    context "Load Barrier":
+        it "uses lfence for load barrier":
+            val tracker = BarrierTracker.new()
+            val _ = tracker.load_barrier()
+            check_log(tracker.events, ["lfence"])
+
+    context "Store Barrier":
+        it "uses sfence for store barrier":
+            val tracker = BarrierTracker.new()
+            val _ = tracker.store_barrier()
+            check_log(tracker.events, ["sfence"])
+
+    context "Compiler Barrier":
+        it "prevents compiler reordering":
+            val tracker = BarrierTracker.new()
+            val _ = tracker.compiler_barrier()
+            check_log(tracker.events, ["compiler"])
+
+describe "Volatile Intrinsics":
+    """Low-level volatile access functions."""
+
+    context "Volatile Read":
+        it "reads byte from address":
+            val port = VolatilePort.new()
+            check(port.read_byte(0x10) == 0x10)
+
+        it "reads word from address":
+            val port = VolatilePort.new()
+            check(port.read_word(0x20) == 0x20)
+
+        it "reads dword from address":
+            val port = VolatilePort.new()
+            check(port.read_dword(0x30) == 0x30)
+
+        it "reads qword from address":
+            val port = VolatilePort.new()
+            check(port.read_qword(0x40) == 0x40)
+
+    context "Volatile Write":
+        it "writes byte to address":
+            val port = VolatilePort.new()
+            val _ = port.write_byte(0x10, 1)
+            check(port.last_value == 0x11)
+            check_log(port.events, ["write_byte"])
+
+        it "writes word to address":
+            val port = VolatilePort.new()
+            val _ = port.write_word(0x20, 2)
+            check(port.last_value == 0x22)
+            check_log(port.events, ["write_word"])
+
+        it "writes dword to address":
+            val port = VolatilePort.new()
+            val _ = port.write_dword(0x30, 3)
+            check(port.last_value == 0x33)
+            check_log(port.events, ["write_dword"])
+
+        it "writes qword to address":
+            val port = VolatilePort.new()
+            val _ = port.write_qword(0x40, 4)
+            check(port.last_value == 0x44)
+            check_log(port.events, ["write_qword"])
+
+describe "Use Cases":
+    """Real-world volatile usage patterns."""
+
+    context "Status Polling":
+        """Polling hardware status registers."""
+
+        it "polls until ready":
+            val status = VolatileCell.new(0x8000, 0)
+            val _ = status.write(1)
+            check(status.read() == 1)
+
+    context "DMA Buffer":
+        """Shared memory with DMA controller."""
+
+        it "reads DMA-written buffer":
+            val dma = VolatileCell.new(0x8100, 12)
+            check(dma.read() == 12)
+            check(dma.reads == 1)
+
+    context "Interrupt Handler":
+        """Shared variables between ISR and main."""
+
+        it "reads ISR-modified variable":
+            val shared = VolatileCell.new(0x8200, 5)
+            val _ = shared.write(9)
+            check(shared.read() == 9)
+
+    context "Hardware Register Sequence":
+        """Registers requiring specific access sequences."""
+
+        it "unlocks flash with sequence":
+            val tracker = BarrierTracker.new()
+            val _ = tracker.store_barrier()
+            val _ = tracker.full_barrier()
+            val _ = tracker.compiler_barrier()
+            check_log(tracker.events, ["sfence", "mfence", "compiler"])

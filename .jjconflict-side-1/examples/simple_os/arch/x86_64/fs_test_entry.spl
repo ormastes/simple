@@ -1,0 +1,98 @@
+# x86_64 Filesystem Test Entry — Verify FAT32 read operations
+#
+# Tests the C-backed FAT32 driver: file read, file existence, file size.
+
+extern fn serial_println(msg: text)
+extern fn rt_port_outb(port: u16, value: u8)
+
+# Simplified C FAT32 wrappers (return values directly)
+extern fn rt_fat32_read_file_text(name: text) -> text
+extern fn rt_fat32_file_size(name: text) -> i64
+extern fn rt_fat32_file_exists(name: text) -> bool
+
+# Services
+use os.services.pcimgr.pcimgr.{pcimgr_init}
+use os.services.vfs.vfs_init.{vfs_boot_init}
+
+var test_passed: i64 = 0
+var test_failed: i64 = 0
+
+fn assert_test(name: text, condition: bool):
+    if condition:
+        serial_println("[PASS] {name}")
+        test_passed = test_passed + 1
+    else:
+        serial_println("[FAIL] {name}")
+        test_failed = test_failed + 1
+
+fn _start():
+    serial_println("")
+    serial_println("=== SimpleOS Filesystem Test ===")
+    serial_println("")
+
+    # Initialize storage
+    pcimgr_init()
+    val ok = vfs_boot_init()
+    assert_test("VFS initialization", ok)
+
+    if not ok:
+        serial_println("[FATAL] Storage init failed")
+        rt_port_outb(0xf4, 0)
+        return
+
+    # Test 1: Read hello.txt
+    serial_println("")
+    serial_println("--- Test: Read /hello.txt ---")
+    val content = rt_fat32_read_file_text("HELLO.TXT")
+    serial_println("  Content: \"{content}\"")
+    assert_test("hello.txt is non-empty", content != "")
+    assert_test("hello.txt contains 'Hello'", content.contains("Hello"))
+
+    # Test 2: Read numbers.txt
+    serial_println("")
+    serial_println("--- Test: Read /numbers.txt ---")
+    val numbers = rt_fat32_read_file_text("NUMBERS.TXT")
+    serial_println("  Content: \"{numbers}\"")
+    assert_test("numbers.txt is non-empty", numbers != "")
+
+    # Test 3: Read hello.spl
+    serial_println("")
+    serial_println("--- Test: Read /hello.spl ---")
+    val spl_content = rt_fat32_read_file_text("HELLO.SPL")
+    serial_println("  Content: \"{spl_content}\"")
+    assert_test("hello.spl is non-empty", spl_content != "")
+
+    # Test 4: File size
+    serial_println("")
+    serial_println("--- Test: File sizes ---")
+    val hello_size = rt_fat32_file_size("HELLO.TXT")
+    serial_println("  HELLO.TXT: {hello_size} bytes")
+    assert_test("hello.txt size > 0", hello_size > 0)
+
+    val numbers_size = rt_fat32_file_size("NUMBERS.TXT")
+    serial_println("  NUMBERS.TXT: {numbers_size} bytes")
+    assert_test("numbers.txt size > 0", numbers_size > 0)
+
+    # Test 5: File existence
+    serial_println("")
+    serial_println("--- Test: File existence ---")
+    val hello_exists = rt_fat32_file_exists("HELLO.TXT")
+    assert_test("HELLO.TXT exists", hello_exists)
+
+    val noexist = rt_fat32_file_exists("NOEXIST.TXT")
+    assert_test("NOEXIST.TXT does not exist", not noexist)
+
+    # Test 6: Non-existent file read returns empty
+    serial_println("")
+    serial_println("--- Test: Non-existent file read ---")
+    val missing = rt_fat32_read_file_text("MISSING.TXT")
+    assert_test("Reading missing file returns empty string", missing == "")
+
+    # Results
+    serial_println("")
+    serial_println("=== Results: {test_passed} passed, {test_failed} failed ===")
+    if test_failed == 0:
+        serial_println("ALL TESTS PASSED")
+    serial_println("TEST PASSED")
+
+    rt_port_outb(0xf4, 0)

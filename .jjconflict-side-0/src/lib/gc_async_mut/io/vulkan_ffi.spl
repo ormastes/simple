@@ -1,0 +1,419 @@
+@allow(primitive_api)
+# Vulkan Compute Runtime SFFI Bindings
+#
+# SFFI pattern for Vulkan compute.
+# Note: These require Vulkan SDK to be installed.
+
+# ============================================================================
+# Tier 1: Extern Declarations (Raw FFI)
+# ============================================================================
+
+extern fn rt_vulkan_init() -> bool
+extern fn rt_vulkan_shutdown() -> bool
+extern fn rt_vulkan_is_available() -> bool
+extern fn rt_vulkan_device_count() -> i64
+extern fn rt_vulkan_select_device(id: i64) -> bool
+extern fn rt_vulkan_get_device() -> i64
+extern fn rt_vulkan_device_name(id: i64) -> text
+extern fn rt_vulkan_device_memory(id: i64) -> i64
+extern fn rt_vulkan_device_type(id: i64) -> text
+extern fn rt_vulkan_api_version(id: i64) -> (i64, i64, i64)
+extern fn rt_vulkan_alloc_buffer(size: i64, usage: i64) -> i64
+extern fn rt_vulkan_free_buffer(handle: i64) -> bool
+extern fn rt_vulkan_map_memory(handle: i64) -> i64
+extern fn rt_vulkan_unmap_memory(handle: i64) -> bool
+extern fn rt_vulkan_copy_to_buffer(handle: i64, data: [u8], offset: i64) -> bool
+extern fn rt_vulkan_copy_from_buffer(data: [u8], handle: i64, offset: i64) -> bool
+extern fn rt_vulkan_copy_buffer(dst: i64, src: i64, size: i64) -> bool
+extern fn rt_vulkan_compile_spirv(spirv_bytes: [u8]) -> i64
+extern fn rt_vulkan_compile_glsl(glsl_source: text) -> i64
+extern fn rt_vulkan_destroy_shader(module: i64) -> bool
+extern fn rt_vulkan_create_compute_pipeline(shader_module: i64, entry_point: text, push_constant_size: i64) -> i64
+extern fn rt_vulkan_destroy_pipeline(pipe: i64) -> bool
+extern fn rt_vulkan_create_descriptor_set(pipe: i64) -> i64
+extern fn rt_vulkan_bind_buffer(descriptor_set: i64, binding: i64, buf: i64) -> bool
+extern fn rt_vulkan_destroy_descriptor_set(descriptor_set: i64) -> bool
+extern fn rt_vulkan_begin_compute() -> i64
+extern fn rt_vulkan_bind_pipeline(cmd: i64, pipe: i64) -> bool
+extern fn rt_vulkan_bind_descriptors(cmd: i64, descriptor_set: i64) -> bool
+extern fn rt_vulkan_push_constants(cmd: i64, pipe: i64, data: [u8]) -> bool
+extern fn rt_vulkan_dispatch(cmd: i64, x: i64, y: i64, z: i64) -> bool
+extern fn rt_vulkan_end_compute(cmd: i64) -> bool
+extern fn rt_vulkan_submit_and_wait(cmd: i64) -> bool
+extern fn rt_vulkan_wait_idle() -> bool
+extern fn rt_vulkan_create_fence() -> i64
+extern fn rt_vulkan_destroy_fence(fence: i64) -> bool
+extern fn rt_vulkan_wait_fence(fence: i64, timeout_ns: i64) -> bool
+extern fn rt_vulkan_reset_fence(fence: i64) -> bool
+extern fn rt_vulkan_get_last_error() -> text
+
+# ============================================================================
+# Tier 2: Simple-Friendly Wrapper Functions
+# ============================================================================
+
+fn vulkan_available() -> bool:
+    rt_vulkan_is_available()
+
+fn vulkan_init() -> bool:
+    rt_vulkan_init()
+
+fn vulkan_shutdown() -> bool:
+    rt_vulkan_shutdown()
+
+fn vulkan_device_count() -> i64:
+    rt_vulkan_device_count()
+
+fn vulkan_select_device(id: i64) -> bool:
+    rt_vulkan_select_device(id)
+
+fn vulkan_get_device() -> i64:
+    rt_vulkan_get_device()
+
+enum VulkanDeviceType:
+    Discrete
+    Integrated
+    Virtual
+    CpuOnly
+    Unknown
+
+fn parse_device_type(type_str: text) -> VulkanDeviceType:
+    if type_str == "discrete":
+        VulkanDeviceType.Discrete
+    elif type_str == "integrated":
+        VulkanDeviceType.Integrated
+    elif type_str == "virtual":
+        VulkanDeviceType.Virtual
+    elif type_str == "cpu":
+        VulkanDeviceType.CpuOnly
+    else:
+        VulkanDeviceType.Unknown
+
+struct VulkanDeviceInfo:
+    id: i64
+    name: text
+    device_type: VulkanDeviceType
+    total_memory: i64
+    api_version: (i64, i64, i64)
+
+fn vulkan_device_info(id: i64) -> VulkanDeviceInfo:
+    VulkanDeviceInfo(id: id, name: rt_vulkan_device_name(id), device_type: parse_device_type(rt_vulkan_device_type(id)), total_memory: rt_vulkan_device_memory(id), api_version: rt_vulkan_api_version(id))
+
+enum VulkanBufferUsage:
+    Storage
+    Uniform
+    TransferSrc
+    TransferDst
+
+fn buffer_usage_to_flags(usage: VulkanBufferUsage) -> i64:
+    if usage == VulkanBufferUsage.Storage:
+        0x80
+    elif usage == VulkanBufferUsage.Uniform:
+        0x10
+    elif usage == VulkanBufferUsage.TransferSrc:
+        0x1
+    else:
+        0x2
+
+struct VulkanBuffer:
+    handle: i64
+    size: i64
+    usage: VulkanBufferUsage
+    is_valid: bool
+
+fn vulkan_alloc_buffer(size: i64, usage: VulkanBufferUsage) -> VulkanBuffer:
+    val flags = buffer_usage_to_flags(usage)
+    val handle = rt_vulkan_alloc_buffer(size, flags)
+    VulkanBuffer(handle: handle, size: size, usage: usage, is_valid: handle != 0)
+
+fn vulkan_alloc_storage(size: i64) -> VulkanBuffer:
+    vulkan_alloc_buffer(size, VulkanBufferUsage.Storage)
+
+fn vulkan_free_buffer(buf: VulkanBuffer) -> bool:
+    if buf.is_valid:
+        rt_vulkan_free_buffer(buf.handle)
+    else:
+        true
+
+fn vulkan_copy_to(buf: VulkanBuffer, data: [u8]) -> bool:
+    if not buf.is_valid:
+        false
+    else:
+        rt_vulkan_copy_to_buffer(buf.handle, data, 0)
+
+fn vulkan_copy_from(data: [u8], buf: VulkanBuffer) -> bool:
+    if not buf.is_valid:
+        false
+    else:
+        rt_vulkan_copy_from_buffer(data, buf.handle, 0)
+
+fn vulkan_copy_buffer(dst: VulkanBuffer, src: VulkanBuffer, size: i64) -> bool:
+    if not dst.is_valid or not src.is_valid:
+        false
+    else:
+        rt_vulkan_copy_buffer(dst.handle, src.handle, size)
+
+struct VulkanShader:
+    handle: i64
+    is_valid: bool
+
+fn vulkan_compile_spirv(spirv_bytes: [u8]) -> VulkanShader:
+    val handle = rt_vulkan_compile_spirv(spirv_bytes)
+    VulkanShader(handle: handle, is_valid: handle != 0)
+
+fn vulkan_compile_glsl(glsl_source: text) -> VulkanShader:
+    val handle = rt_vulkan_compile_glsl(glsl_source)
+    VulkanShader(handle: handle, is_valid: handle != 0)
+
+fn vulkan_destroy_shader(shader: VulkanShader) -> bool:
+    if shader.is_valid:
+        rt_vulkan_destroy_shader(shader.handle)
+    else:
+        true
+
+struct VulkanPipeline:
+    handle: i64
+    shader: VulkanShader
+    entry_point: text
+    is_valid: bool
+
+fn vulkan_create_pipeline(shader: VulkanShader, entry_point: text) -> VulkanPipeline:
+    if not shader.is_valid:
+        VulkanPipeline(handle: 0, shader: shader, entry_point: entry_point, is_valid: false)
+    else:
+        val handle = rt_vulkan_create_compute_pipeline(shader.handle, entry_point, 0)
+        VulkanPipeline(handle: handle, shader: shader, entry_point: entry_point, is_valid: handle != 0)
+
+fn vulkan_create_pipeline_with_push(shader: VulkanShader, entry_point: text, push_size: i64) -> VulkanPipeline:
+    if not shader.is_valid:
+        VulkanPipeline(handle: 0, shader: shader, entry_point: entry_point, is_valid: false)
+    else:
+        val handle = rt_vulkan_create_compute_pipeline(shader.handle, entry_point, push_size)
+        VulkanPipeline(handle: handle, shader: shader, entry_point: entry_point, is_valid: handle != 0)
+
+fn vulkan_destroy_pipeline(pipe: VulkanPipeline) -> bool:
+    if pipe.is_valid:
+        rt_vulkan_destroy_pipeline(pipe.handle)
+    else:
+        true
+
+struct VulkanDescriptorSet:
+    handle: i64
+    pipe: VulkanPipeline
+    is_valid: bool
+
+fn vulkan_create_descriptors(pipe: VulkanPipeline) -> VulkanDescriptorSet:
+    if not pipe.is_valid:
+        VulkanDescriptorSet(handle: 0, pipe: pipe, is_valid: false)
+    else:
+        val handle = rt_vulkan_create_descriptor_set(pipe.handle)
+        VulkanDescriptorSet(handle: handle, pipe: pipe, is_valid: handle != 0)
+
+fn vulkan_bind_buffer(descriptors: VulkanDescriptorSet, binding: i64, buf: VulkanBuffer) -> bool:
+    if not descriptors.is_valid or not buf.is_valid:
+        false
+    else:
+        rt_vulkan_bind_buffer(descriptors.handle, binding, buf.handle)
+
+fn vulkan_destroy_descriptors(descriptors: VulkanDescriptorSet) -> bool:
+    if descriptors.is_valid:
+        rt_vulkan_destroy_descriptor_set(descriptors.handle)
+    else:
+        true
+
+struct VulkanCommandBuffer:
+    handle: i64
+    is_valid: bool
+
+fn vulkan_begin_compute() -> VulkanCommandBuffer:
+    val handle = rt_vulkan_begin_compute()
+    VulkanCommandBuffer(handle: handle, is_valid: handle != 0)
+
+fn vulkan_cmd_bind_pipeline(cmd: VulkanCommandBuffer, pipe: VulkanPipeline) -> bool:
+    if not cmd.is_valid or not pipe.is_valid:
+        false
+    else:
+        rt_vulkan_bind_pipeline(cmd.handle, pipe.handle)
+
+fn vulkan_cmd_bind_descriptors(cmd: VulkanCommandBuffer, descriptors: VulkanDescriptorSet) -> bool:
+    if not cmd.is_valid or not descriptors.is_valid:
+        false
+    else:
+        rt_vulkan_bind_descriptors(cmd.handle, descriptors.handle)
+
+fn vulkan_cmd_push_constants(cmd: VulkanCommandBuffer, pipe: VulkanPipeline, data: [u8]) -> bool:
+    if not cmd.is_valid or not pipe.is_valid:
+        false
+    else:
+        rt_vulkan_push_constants(cmd.handle, pipe.handle, data)
+
+fn vulkan_cmd_dispatch(cmd: VulkanCommandBuffer, x: i64, y: i64, z: i64) -> bool:
+    if not cmd.is_valid:
+        false
+    else:
+        rt_vulkan_dispatch(cmd.handle, x, y, z)
+
+fn vulkan_end_compute(cmd: VulkanCommandBuffer) -> bool:
+    if not cmd.is_valid:
+        false
+    else:
+        rt_vulkan_end_compute(cmd.handle)
+
+fn vulkan_submit_and_wait(cmd: VulkanCommandBuffer) -> bool:
+    if not cmd.is_valid:
+        false
+    else:
+        rt_vulkan_submit_and_wait(cmd.handle)
+
+fn vulkan_wait_idle() -> bool:
+    rt_vulkan_wait_idle()
+
+fn vulkan_last_error() -> text:
+    rt_vulkan_get_last_error()
+
+struct VulkanDispatchConfig:
+    wx: i64
+    wy: i64
+    wz: i64
+    lx: i64
+    ly: i64
+    lz: i64
+
+fn vulkan_dispatch_1d(total_elements: i64, local_size: i64) -> VulkanDispatchConfig:
+    val workgroups = (total_elements + local_size - 1) / local_size
+    VulkanDispatchConfig(wx: workgroups, wy: 1, wz: 1, lx: local_size, ly: 1, lz: 1)
+
+# ============================================================================
+# Graphics — Render Pass
+# ============================================================================
+
+extern fn rt_vulkan_create_render_pass(device: i64, color_format: i64, depth_format: i64, load_op: i64, store_op: i64) -> i64
+extern fn rt_vulkan_destroy_render_pass(render_pass: i64) -> bool
+
+# ============================================================================
+# Graphics — Graphics Pipeline
+# ============================================================================
+
+extern fn rt_vulkan_create_graphics_pipeline(device: i64, vertex_shader: i64, fragment_shader: i64, render_pass: i64, blend_mode: i64, topology: i64) -> i64
+extern fn rt_vulkan_destroy_graphics_pipeline(pipeline: i64) -> bool
+
+# ============================================================================
+# Graphics — Image / Texture
+# ============================================================================
+
+extern fn rt_vulkan_create_image(device: i64, width: i64, height: i64, format: i64, usage: i64) -> i64
+extern fn rt_vulkan_destroy_image(image: i64) -> bool
+extern fn rt_vulkan_create_sampler(device: i64) -> i64
+extern fn rt_vulkan_destroy_sampler(sampler: i64) -> bool
+
+# ============================================================================
+# Graphics — Framebuffer
+# ============================================================================
+
+extern fn rt_vulkan_create_framebuffer(device: i64, render_pass: i64, image: i64, width: i64, height: i64) -> i64
+extern fn rt_vulkan_destroy_framebuffer(fb: i64) -> bool
+
+# ============================================================================
+# Graphics — Swapchain
+# ============================================================================
+
+extern fn rt_vulkan_create_swapchain(device: i64, surface: i64, width: i64, height: i64, format: i64, vsync: i64) -> i64
+extern fn rt_vulkan_destroy_swapchain(swapchain: i64) -> bool
+extern fn rt_vulkan_acquire_next_image(swapchain: i64) -> i64
+extern fn rt_vulkan_present(swapchain: i64, image_index: i64) -> bool
+
+# ============================================================================
+# Graphics — Draw Commands (within a render pass)
+# ============================================================================
+
+extern fn rt_vulkan_begin_render_pass_gfx(cmd: i64, render_pass: i64, framebuffer: i64, clear_r: f64, clear_g: f64, clear_b: f64, clear_a: f64) -> bool
+extern fn rt_vulkan_end_render_pass_gfx(cmd: i64) -> bool
+extern fn rt_vulkan_bind_graphics_pipeline(cmd: i64, pipeline: i64) -> bool
+extern fn rt_vulkan_bind_vertex_buffer(cmd: i64, buffer: i64) -> bool
+extern fn rt_vulkan_bind_index_buffer(cmd: i64, buffer: i64) -> bool
+extern fn rt_vulkan_bind_texture(cmd: i64, slot: i64, image: i64, sampler: i64) -> bool
+extern fn rt_vulkan_set_viewport(cmd: i64, x: f64, y: f64, w: f64, h: f64) -> bool
+extern fn rt_vulkan_set_scissor(cmd: i64, x: i64, y: i64, w: i64, h: i64) -> bool
+extern fn rt_vulkan_draw(cmd: i64, vertex_count: i64) -> bool
+extern fn rt_vulkan_draw_indexed(cmd: i64, index_count: i64) -> bool
+
+# ============================================================================
+# Graphics Wrapper Structs
+# ============================================================================
+
+struct VulkanRenderPass:
+    handle: i64
+
+impl VulkanRenderPass:
+    fn is_valid() -> bool:
+        self.handle > 0
+
+struct VulkanGraphicsPipeline:
+    handle: i64
+
+impl VulkanGraphicsPipeline:
+    fn is_valid() -> bool:
+        self.handle > 0
+
+struct VulkanImage:
+    handle: i64
+    width: i64
+    height: i64
+
+impl VulkanImage:
+    fn is_valid() -> bool:
+        self.handle > 0
+
+struct VulkanSampler:
+    handle: i64
+
+impl VulkanSampler:
+    fn is_valid() -> bool:
+        self.handle > 0
+
+struct VulkanFramebuffer:
+    handle: i64
+    width: i64
+    height: i64
+
+impl VulkanFramebuffer:
+    fn is_valid() -> bool:
+        self.handle > 0
+
+struct VulkanSwapchain:
+    handle: i64
+    width: i64
+    height: i64
+
+impl VulkanSwapchain:
+    fn is_valid() -> bool:
+        self.handle > 0
+
+# Graphics wrapper functions
+fn vulkan_create_render_pass(device: i64, color_format: i64, depth_format: i64, load_op: i64, store_op: i64) -> VulkanRenderPass:
+    val h = rt_vulkan_create_render_pass(device, color_format, depth_format, load_op, store_op)
+    VulkanRenderPass(handle: h)
+
+fn vulkan_create_graphics_pipeline(device: i64, vs: i64, fs: i64, rp: i64, blend: i64, topo: i64) -> VulkanGraphicsPipeline:
+    val h = rt_vulkan_create_graphics_pipeline(device, vs, fs, rp, blend, topo)
+    VulkanGraphicsPipeline(handle: h)
+
+fn vulkan_create_image(device: i64, width: i64, height: i64, format: i64, usage: i64) -> VulkanImage:
+    val h = rt_vulkan_create_image(device, width, height, format, usage)
+    VulkanImage(handle: h, width: width, height: height)
+
+fn vulkan_create_sampler(device: i64) -> VulkanSampler:
+    val h = rt_vulkan_create_sampler(device)
+    VulkanSampler(handle: h)
+
+fn vulkan_create_framebuffer(device: i64, rp: i64, image: i64, width: i64, height: i64) -> VulkanFramebuffer:
+    val h = rt_vulkan_create_framebuffer(device, rp, image, width, height)
+    VulkanFramebuffer(handle: h, width: width, height: height)
+
+fn vulkan_create_swapchain(device: i64, surface: i64, width: i64, height: i64, format: i64, vsync: i64) -> VulkanSwapchain:
+    val h = rt_vulkan_create_swapchain(device, surface, width, height, format, vsync)
+    VulkanSwapchain(handle: h, width: width, height: height)
+
+# ============================================================================
+# Exports
+# ============================================================================
+

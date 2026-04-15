@@ -1,0 +1,99 @@
+# Interpreter Variable & Object Mutation Tests
+# Tests for EnvironmentStack flat array fix and ObjectStore writeback.
+# These specifically test the copy-semantics blocker where .get().field.mutate()
+# was silently discarding mutations in interpreter mode.
+# @cover src/lib/common/js/engine/interpreter_types.spl 80%
+
+use std.js.engine.js_error.{Logger, LogLevel}
+use std.js.engine.parser.{JsParser}
+use std.js.engine.interpreter.{JsInterpreter}
+use std.js.types.js_types.{JsValue}
+
+fn _run_js(source: text) -> text:
+    val logger = Logger.new("test", LogLevel.Error)
+    val parser = JsParser.new(source, logger)
+    val program = parser.parse_program()
+    match program:
+        Ok(stmts):
+            val interp = JsInterpreter.new(logger)
+            val result = interp.execute(stmts)
+            match result:
+                Ok(value):
+                    return _display(value)
+                Err(e):
+                    return "Error: {e.message}"
+        Err(e):
+            return "SyntaxError: {e.message}"
+
+fn _display(v: JsValue) -> text:
+    match v:
+        JsValue.Undefined: "undefined"
+        JsValue.Null: "null"
+        JsValue.Boolean(b): if b: "true" else: "false"
+        JsValue.Number(n):
+            var s = "{n}"
+            if s.ends_with(".0"):
+                s = s.slice(0, s.len() - 2)
+            s
+        JsValue.String(s): s
+        JsValue.Object(id): "[object Object]"
+        JsValue.Array(id): "[object Array]"
+        JsValue.Function(id): "[Function]"
+        JsValue.Symbol(id): "Symbol()"
+
+describe "Interpreter Variable Mutation":
+    describe "Variable declaration and access":
+        it "var declaration persists":
+            expect(_run_js("var x = 5; x")).to_equal("5")
+        it "var reassignment":
+            expect(_run_js("var x = 1; x = 10; x")).to_equal("10")
+        it "multiple var declarations":
+            expect(_run_js("var a = 1; var b = 2; a + b")).to_equal("3")
+        it "let declaration":
+            expect(_run_js("let x = 42; x")).to_equal("42")
+        it "const declaration":
+            expect(_run_js("const y = 99; y")).to_equal("99")
+
+    describe "Function declaration and call":
+        it "function decl and call":
+            expect(_run_js("function f(n) { return n * 2; } f(5)")).to_equal("10")
+        it "function with multiple params":
+            expect(_run_js("function add(a, b) { return a + b; } add(3, 4)")).to_equal("7")
+        it "function closes over outer var":
+            expect(_run_js("var x = 1; function f() { return x; } f()")).to_equal("1")
+
+    describe "Closures":
+        it "closure captures parameter":
+            expect(_run_js("function make(n) { return function() { return n; }; } make(5)()")).to_equal("5")
+        it "arrow function":
+            expect(_run_js("var f = (x) => x + 1; f(9)")).to_equal("10")
+
+    describe "Object literals":
+        it "object property access":
+            expect(_run_js("var o = {a: 1, b: 2}; o.a + o.b")).to_equal("3")
+        it "object property assignment":
+            expect(_run_js("var o = {x: 1}; o.x = 42; o.x")).to_equal("42")
+        it "nested object creation":
+            expect(_run_js("var o = {a: 10}; o.a")).to_equal("10")
+
+    describe "Array operations":
+        it "array element access":
+            expect(_run_js("var a = [10, 20, 30]; a[1]")).to_equal("20")
+        it "array length":
+            expect(_run_js("[1, 2, 3].length")).to_equal("3")
+
+    describe "Scope chain":
+        it "block scope":
+            expect(_run_js("var x = 1; { var y = 2; x + y }")).to_equal("3")
+        it "for loop with accumulator":
+            expect(_run_js("var sum = 0; for (var i = 0; i < 3; i++) { sum = sum + i; } sum")).to_equal("3")
+        it "for loop counter":
+            expect(_run_js("var c = 0; for (var i = 0; i < 5; i++) { c = c + 1; } c")).to_equal("5")
+
+    describe "Type coercion and equality":
+        it "null == undefined":
+            expect(_run_js("null == undefined")).to_equal("true")
+        it "typeof number":
+            expect(_run_js("typeof 42")).to_equal("number")
+        it "string length":
+            expect(_run_js("'hello'.length")).to_equal("5")

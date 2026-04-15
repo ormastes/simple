@@ -1,0 +1,132 @@
+# Journal — Kernel Log Reader
+# MDSOC: feature dimension, apps layer
+
+use os.userlib.log.{LogLevel, read_log, read_recent}
+use os.kernel.types.syscall_types.{KLogEntry}
+
+struct JournalFilter:
+    min_level: LogLevel?
+    source: text?           # facility name filter
+    since_ns: u64?          # timestamp filter
+
+class JournalReader:
+    filter: JournalFilter
+    entries: [KLogEntry]
+    offset: u64
+
+impl JournalReader:
+    static fn new() -> JournalReader:
+        JournalReader(
+            filter: JournalFilter(
+                min_level: nil,
+                source: nil,
+                since_ns: nil
+            ),
+            entries: [],
+            offset: 0
+        )
+
+    me refresh() -> Result<bool, text>:
+        """Fetch new log entries from kernel ring buffer."""
+        val result = read_log(self.offset)
+        if val Err(e) = result:
+            return Err("failed to read log: {e}")
+
+        val new_entries = result.unwrap()
+        if new_entries.len() == 0:
+            return Ok(false)
+
+        for entry in new_entries:
+            self.entries = self.entries + [entry]
+            if entry.sequence > self.offset:
+                self.offset = entry.sequence
+
+        Ok(true)
+
+    me set_filter(filter: JournalFilter):
+        self.filter = filter
+
+    fn filtered_entries() -> [KLogEntry]:
+        var result: [KLogEntry] = []
+        for entry in self.entries:
+            var include = true
+
+            if val Some(min_lvl) = self.filter.min_level:
+                if entry.level > min_lvl.value():
+                    include = false
+
+            if val Some(src) = self.filter.source:
+                val fac_name = facility_name(entry.facility)
+                if fac_name != src:
+                    include = false
+
+            if val Some(since) = self.filter.since_ns:
+                if entry.timestamp_ns < since:
+                    include = false
+
+            if include:
+                result = result + [entry]
+        result
+
+    fn format_entry(entry: KLogEntry) -> text:
+        """Format: [timestamp] LEVEL [facility] message"""
+        val ts = _format_timestamp(entry.timestamp_ns)
+        val lvl = level_name(entry.level)
+        val fac = facility_name(entry.facility)
+        val color = level_color(entry.level)
+        val reset = "\x1b[0m"
+        "{ts} {color}{lvl}{reset} [{fac}] {entry.message}"
+
+    fn format_all() -> text:
+        val filtered = self.filtered_entries()
+        var lines: [text] = []
+        for entry in filtered:
+            lines = lines + [self.format_entry(entry)]
+        lines.join("\n")
+
+fn facility_name(facility: u16) -> text:
+    match facility:
+        0: "kernel"
+        1: "vfs"
+        2: "net"
+        3: "compositor"
+        4: "shell"
+        5: "app"
+        6: "init"
+        _: "unknown"
+
+fn level_name(level: u8) -> text:
+    match level:
+        0: "EMERG"
+        1: "ALERT"
+        2: "CRIT"
+        3: "ERROR"
+        4: "WARN"
+        5: "NOTICE"
+        6: "INFO"
+        7: "DEBUG"
+        _: "TRACE"
+
+fn level_color(level: u8) -> text:
+    """ANSI color escape for log level."""
+    match level:
+        0: "\x1b[1;31m"    # bold red - EMERG
+        1: "\x1b[1;31m"    # bold red - ALERT
+        2: "\x1b[31m"      # red - CRIT
+        3: "\x1b[31m"      # red - ERROR
+        4: "\x1b[33m"      # yellow - WARN
+        5: "\x1b[36m"      # cyan - NOTICE
+        6: "\x1b[32m"      # green - INFO
+        7: "\x1b[90m"      # gray - DEBUG
+        _: "\x1b[90m"      # gray - TRACE
+
+fn _format_timestamp(ns: u64) -> text:
+    val secs = ns / 1000000000
+    val millis = (ns % 1000000000) / 1000000
+    "[{secs}.{_pad_left_zero("{millis}", 3)}]"
+
+fn _pad_left_zero(s: text, width: i32) -> text:
+    var result = s
+    while result.len() < width:
+        result = "0" + result
+    result

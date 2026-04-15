@@ -1,0 +1,143 @@
+#!/bin/bash
+# SStack Monitor
+# Watches the SStack orchestrator health by reading .agent/STATUS.json.
+# Reports DEAD, HUNG, or OK with status details.
+#
+# Usage: scripts/sstack-monitor.sh
+#   Runs continuously, checking every 60s. Ctrl-C to stop.
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+
+AGENT_DIR="$PROJECT_ROOT/.agent"
+STATUS_FILE="$AGENT_DIR/STATUS.json"
+PID_FILE="$AGENT_DIR/pid"
+MONITOR_LOG="$AGENT_DIR/monitor.log"
+
+CHECK_INTERVAL=60       # seconds between checks
+HEARTBEAT_THRESHOLD=120 # seconds before declaring HUNG
+
+# --- Helpers ---
+
+log() {
+    local ts
+    ts="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+    echo "[$ts] $*" | tee -a "$MONITOR_LOG"
+}
+
+# Parse a JSON field (simple extraction, no jq dependency required)
+json_field() {
+    local file="$1"
+    local field="$2"
+    # Try jq first, fall back to python3, then grep
+    if command -v jq &>/dev/null; then
+        jq -r ".$field // empty" "$file" 2>/dev/null
+    elif command -v python3 &>/dev/null; then
+        python3 -c "import json,sys; d=json.load(open('$file')); print(d.get('$field',''))" 2>/dev/null
+    else
+        grep -o "\"$field\"[[:space:]]*:[[:space:]]*\"[^\"]*\"" "$file" 2>/dev/null \
+            | sed 's/.*: *"\(.*\)"/\1/'
+    fi
+}
+
+# Get epoch timestamp of a heartbeat ISO string
+heartbeat_epoch() {
+    local hb="$1"
+    if [[ -z "$hb" ]]; then
+        echo 0
+        return
+    fi
+    date -d "$hb" '+%s' 2>/dev/null || echo 0
+}
+
+# --- Main loop ---
+
+main() {
+    mkdir -p "$AGENT_DIR"
+    touch "$MONITOR_LOG"
+
+    log "SStack Monitor started"
+    log "Watching: $STATUS_FILE (every ${CHECK_INTERVAL}s, heartbeat threshold ${HEARTBEAT_THRESHOLD}s)"
+
+    while true; do
+        local status="UNKNOWN"
+        local details=""
+
+        # Check PID file
+        if [[ ! -f "$PID_FILE" ]]; then
+            status="DEAD"
+            details="No PID file found"
+            log "$status - $details"
+            # Uncomment below to auto-restart:
+            # log "Auto-restarting orchestrator..."
+            # nohup "$PROJECT_ROOT/scripts/sstack-orchestrator.sh" &
+            sleep "$CHECK_INTERVAL"
+            continue
+        fi
+
+        local pid
+        pid="$(cat "$PID_FILE")"
+
+        # Check if process is alive
+        if ! kill -0 "$pid" 2>/dev/null; then
+            status="DEAD"
+            details="PID $pid is not running"
+            log "$status - $details"
+            # Uncomment below to auto-restart:
+            # log "Auto-restarting orchestrator..."
+            # rm -f "$PID_FILE"
+            # nohup "$PROJECT_ROOT/scripts/sstack-orchestrator.sh" &
+            sleep "$CHECK_INTERVAL"
+            continue
+        fi
+
+        # Process is alive, check status file
+        if [[ ! -f "$STATUS_FILE" ]]; then
+            status="OK"
+            details="PID $pid alive, no status file yet"
+            log "$status - $details"
+            sleep "$CHECK_INTERVAL"
+            continue
+        fi
+
+        # Read status fields
+        local state task tasks_remaining last_heartbeat
+        state="$(json_field "$STATUS_FILE" "state")"
+        task="$(json_field "$STATUS_FILE" "task")"
+        tasks_remaining="$(json_field "$STATUS_FILE" "tasks_remaining")"
+        last_heartbeat="$(json_field "$STATUS_FILE" "last_heartbeat")"
+
+        # Check heartbeat age
+        local now_epoch hb_epoch age
+        now_epoch="$(date '+%s')"
+        hb_epoch="$(heartbeat_epoch "$last_heartbeat")"
+        age=$((now_epoch - hb_epoch))
+
+        if [[ $hb_epoch -eq 0 ]]; then
+            status="OK"
+            details="PID $pid alive, state=$state, heartbeat not parseable"
+        elif [[ $age -gt $HEARTBEAT_THRESHOLD ]]; then
+            status="HUNG"
+            details="PID $pid, state=$state, heartbeat age=${age}s (threshold=${HEARTBEAT_THRESHOLD}s)"
+        else
+            status="OK"
+            details="PID $pid, state=$state, heartbeat age=${age}s"
+        fi
+
+        # Add task info
+        if [[ -n "$task" ]]; then
+            details="$details, task=\"$task\""
+        fi
+        if [[ -n "$tasks_remaining" ]]; then
+            details="$details, remaining=$tasks_remaining"
+        fi
+
+        log "$status - $details"
+
+        sleep "$CHECK_INTERVAL"
+    done
+}
+
+main "$@"

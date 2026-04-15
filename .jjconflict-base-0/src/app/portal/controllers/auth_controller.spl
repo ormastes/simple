@@ -1,0 +1,138 @@
+#![allow(unknown_decorator)]
+"""
+# Auth Controller
+
+Login, registration, and logout actions.
+Login and registration forms are public; logout requires auth.
+"""
+
+use std.http_server.types.{HttpResponseData}
+use std.web_framework.controller.{
+    ControllerContext, render_page, render_redirect, render_error,
+    get_param, has_param
+}
+use std.web_framework.form_validation.{
+    Validator, validator_new, validator_add_rule, validator_validate,
+    validator_first_error, validator_has_errors, ValidationRule
+}
+
+# ============================================================================
+# Actions
+# ============================================================================
+
+@public
+fn action_login_form(ctx: ControllerContext) -> HttpResponseData:
+    """Render the login form page."""
+    var data: Dict<text, text> = {}
+    data["title"] = "Log In"
+    data["error_message"] = ""
+    render_page(ctx, "src/app/portal/views/auth/login.html", data)
+
+@public
+fn action_login(ctx: ControllerContext) -> HttpResponseData:
+    """Process login form submission.
+
+    Validates credentials, creates session, and redirects to dashboard.
+    On failure, re-renders the login form with an error message.
+    """
+    val username = get_param(ctx, "username")
+    val password = get_param(ctx, "password")
+
+    # Validate input
+    if username.len() == 0 or password.len() == 0:
+        var data: Dict<text, text> = {}
+        data["title"] = "Log In"
+        data["error_message"] = "Please enter your username and password."
+        data["username"] = username
+        return render_page(ctx, "src/app/portal/views/auth/login.html", data)
+
+    # In production, authenticate against database via auth_service.authenticate()
+    # For now, render success redirect
+    # val auth_result = authenticate(db, username, password)
+    # match auth_result:
+    #     Ok(user):
+    #         val session_id = session_store.create("{user.id}")?
+    #         return render_redirect("/dashboard")
+    #     Err(e):
+    #         error_message = e
+
+    var data: Dict<text, text> = {}
+    data["title"] = "Log In"
+    data["error_message"] = "Invalid username or password."
+    data["username"] = username
+    render_page(ctx, "src/app/portal/views/auth/login.html", data)
+
+@public
+fn action_register_form(ctx: ControllerContext) -> HttpResponseData:
+    """Render the registration form page."""
+    var data: Dict<text, text> = {}
+    data["title"] = "Create Account"
+    data["error_message"] = ""
+    render_page(ctx, "src/app/portal/views/auth/register.html", data)
+
+@public
+fn action_register(ctx: ControllerContext) -> HttpResponseData:
+    """Process registration form submission.
+
+    Validates input, creates user, logs them in, and redirects to dashboard.
+    On failure, re-renders the registration form with errors.
+    """
+    val username = get_param(ctx, "username")
+    val email = get_param(ctx, "email")
+    val password = get_param(ctx, "password")
+    val password_confirm = get_param(ctx, "password_confirm")
+
+    # Validate input
+    var v = validator_new()
+    v = validator_add_rule(v, "username", ValidationRule.Required)
+    v = validator_add_rule(v, "username", ValidationRule.MinLength(3))
+    v = validator_add_rule(v, "username", ValidationRule.MaxLength(40))
+    v = validator_add_rule(v, "email", ValidationRule.Required)
+    v = validator_add_rule(v, "email", ValidationRule.Email)
+    v = validator_add_rule(v, "password", ValidationRule.Required)
+    v = validator_add_rule(v, "password", ValidationRule.MinLength(8))
+
+    val form_params: Dict<text, text> = {
+        "username": username,
+        "email": email,
+        "password": password
+    }
+    val valid = validator_validate(v, form_params)
+
+    if not valid:
+        var data: Dict<text, text> = {}
+        data["title"] = "Create Account"
+        data["error_message"] = validator_first_error(v)
+        data["username"] = username
+        data["email"] = email
+        return render_page(ctx, "src/app/portal/views/auth/register.html", data)
+
+    # Check password confirmation
+    if password != password_confirm:
+        var data: Dict<text, text> = {}
+        data["title"] = "Create Account"
+        data["error_message"] = "Passwords do not match."
+        data["username"] = username
+        data["email"] = email
+        return render_page(ctx, "src/app/portal/views/auth/register.html", data)
+
+    # In production, create user via auth_service.create_user()
+    # val user_result = create_user(db, username, email, password)
+    # match user_result:
+    #     Ok(user_id):
+    #         val session_id = session_store.create("{user_id}")?
+    #         return render_redirect("/dashboard")
+    #     Err(e):
+    #         error_message = e
+
+    # Redirect to login for now
+    render_redirect("/login")
+
+@requires_auth
+fn action_logout(ctx: ControllerContext) -> HttpResponseData:
+    """Log out the current user.
+
+    Destroys the session and redirects to the landing page.
+    """
+    # In production, destroy session via session_store.destroy(session_id)
+    render_redirect("/")

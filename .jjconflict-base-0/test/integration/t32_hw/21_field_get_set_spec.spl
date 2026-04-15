@@ -1,0 +1,74 @@
+# T32 Hardware -- Field Get/Set (Registers)
+#
+# Reads and writes CPU registers via T32 eval and run_command.
+# Verifies that register values can be queried and modified through
+# the T32 remote interface.
+#
+# @session-kind: trace32_board
+# @target: arm
+# @tag: t32_hw, new_tools
+# @reuse: exclusive_reused
+
+use std.sspec.{describe, context, it, expect, before_all, after_all}
+use test.integration.t32_hw.t32_hw_helpers.{
+    t32_hw_probe_available, t32_hw_connect, t32_hw_run_cmd, t32_hw_eval,
+    t32_hw_host, t32_hw_port, t32_hw_version_gate_new,
+    t32_hw_relay_power_on, t32_hw_relay_power_off, t32_hw_relay_power_state
+}
+
+describe "T32 field get/set":
+    var client = nil
+
+    before_all:
+        val result = t32_hw_connect()
+        match result:
+            Ok(c): client = c
+            Err(e): expect("connect failed: {e}").to_equal("")
+
+    after_all:
+        if client != nil:
+            client.disconnect()
+
+    context "register reads":
+        it "reads PC register via eval":
+            val result = t32_hw_eval(client, "Register(PC)")
+            match result:
+                Ok(v):
+                    # PC should return a hex value string
+                    expect(v.len()).to_be_greater_than(0)
+                Err(e):
+                    expect("eval PC failed: {e}").to_equal("")
+
+        it "reads SP register via eval":
+            val result = t32_hw_eval(client, "Register(SP)")
+            match result:
+                Ok(v):
+                    expect(v.len()).to_be_greater_than(0)
+                Err(e):
+                    expect("eval SP failed: {e}").to_equal("")
+
+    context "register writes":
+        it "writes PC register":
+            val result = t32_hw_run_cmd(client, "Register.Set PC 0x08000000")
+            match result:
+                Ok(_): expect("cmd ok").to_contain("ok")
+                Err(e): expect("Register.Set PC failed: {e}").to_equal("")
+
+        it "verifies PC was set":
+            # Write a known value then read it back
+            t32_hw_run_cmd(client, "Register.Set PC 0x08000000")
+            val result = t32_hw_eval(client, "Register(PC)")
+            match result:
+                Ok(v):
+                    expect(v).to_contain("08000000")
+                Err(e):
+                    expect("verify PC failed: {e}").to_equal("")
+
+    context "system mode":
+        it "reads system mode field":
+            val result = t32_hw_eval(client, "SYStem.MODE()")
+            match result:
+                Ok(v):
+                    expect(v.len()).to_be_greater_than(0)
+                Err(e):
+                    expect("SYStem.MODE() failed: {e}").to_equal("")

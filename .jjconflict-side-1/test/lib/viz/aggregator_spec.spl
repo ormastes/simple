@@ -1,0 +1,61 @@
+# Aggregator and DisplayCompositor unit tests
+
+use std.sspec.*
+use std.skia.entity.geometry.{SkRect}
+use std.viz.entity.compositor_frame.{CompositorFrame}
+use std.viz.entity.surface_id.{SurfaceId, FrameSinkId, LocalSurfaceId}
+use std.viz.entity.render_pass.{RenderPass}
+use std.viz.feature.aggregator.{Aggregator, AggregatorEntry}
+
+fn _rect(l: f64, t: f64, r: f64, b: f64) -> SkRect:
+    SkRect(left: l, top: t, right: r, bottom: b)
+
+fn _sid(client: i32, sink: i32, parent: i32, child: i32) -> SurfaceId:
+    SurfaceId(
+        frame_sink_id: FrameSinkId(client_id: client, sink_id: sink),
+        local_surface_id: LocalSurfaceId(parent_sequence_number: parent, child_sequence_number: child)
+    )
+
+fn _frame_with_passes(n: i32) -> CompositorFrame:
+    var f = CompositorFrame.empty()
+    var i = 0
+    while i < n:
+        val rp = RenderPass.new(i, _rect(0.0, 0.0, 100.0, 100.0))
+        f.render_pass_list = f.render_pass_list + [rp]
+        i = i + 1
+    f
+
+describe "Aggregator":
+    it "new Aggregator has 0 known_frames":
+        val agg = Aggregator.new()
+        expect agg.known_frames.len() to_equal 0
+
+    it "register_frame adds one entry":
+        var agg = Aggregator.new()
+        val sid = _sid(1, 2, 0, 1)
+        val entry = AggregatorEntry(surface_id: sid, frame: CompositorFrame.empty())
+        agg.register_frame(entry)
+        expect agg.known_frames.len() to_equal 1
+
+    it "register_frame with duplicate SurfaceId replaces, size stays 1":
+        var agg = Aggregator.new()
+        val sid = _sid(1, 2, 0, 1)
+        val entry1 = AggregatorEntry(surface_id: sid, frame: _frame_with_passes(1))
+        val entry2 = AggregatorEntry(surface_id: sid, frame: _frame_with_passes(3))
+        agg.register_frame(entry1)
+        agg.register_frame(entry2)
+        expect agg.known_frames.len() to_equal 1
+
+    it "aggregate with unknown root returns empty frame":
+        var agg = Aggregator.new()
+        val unknown = _sid(99, 99, 0, 0)
+        val result = agg.aggregate(unknown)
+        expect result.render_pass_list.len() to_equal 0
+
+    it "aggregate with known root returns that frame's pass count":
+        var agg = Aggregator.new()
+        val sid = _sid(1, 1, 0, 1)
+        val entry = AggregatorEntry(surface_id: sid, frame: _frame_with_passes(2))
+        agg.register_frame(entry)
+        val result = agg.aggregate(sid)
+        expect result.render_pass_list.len() to_equal 2

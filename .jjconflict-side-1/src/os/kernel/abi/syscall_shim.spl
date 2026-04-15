@@ -1,0 +1,1495 @@
+#![allow(unnamed_duplicate_typed_args)]
+#![allow(unknown_decorator)]
+# Weak C-ABI shim layer for SYSCALL dispatch (Wave 10D).
+#
+# Exports extern symbols matching the weak default stubs in
+# examples/simple_os/arch/x86_64/boot/baremetal_stubs.c.
+# When this module is linked, the strong Simple-emitted definitions
+# override the weak defaults, and syscalls forward into the real Simple
+# kernel handlers in src/os/kernel/ipc/syscall.spl.
+#
+# @export("C") IS implemented in the Simple compiler.
+# See: src/compiler/00.common/attributes.spl
+#      src/compiler/70.backend/backend/c_backend_translate.spl
+#      src/compiler/20.hir/hir_lowering/items.spl
+#
+# STATUS: Wave 10F — 53 shims implemented; device_grant wired via scheduler.
+
+use os.kernel.types.syscall_types.{SyscallArgs, SyscallResult}
+use os.kernel.ipc.syscall.{_handle_debug_write}
+use os.kernel.ipc.syscall.{_handle_exit}
+use os.kernel.ipc.syscall.{_handle_yield}
+use os.kernel.ipc.syscall.{_handle_getpid}
+use os.kernel.ipc.syscall.{_handle_spawn_binary}
+use os.kernel.ipc.syscall.{_handle_wait}
+use os.kernel.ipc.syscall.{_handle_memory_map}
+use os.kernel.ipc.syscall.{_handle_file_open}
+use os.kernel.ipc.syscall.{_handle_file_read}
+use os.kernel.ipc.syscall.{_handle_file_write}
+use os.kernel.ipc.syscall.{_handle_file_close}
+use os.kernel.ipc.syscall.{_handle_spawn}
+use os.kernel.ipc.syscall.{_handle_list_tasks}
+use os.kernel.ipc.syscall.{_handle_get_task_info}
+use os.kernel.ipc.syscall.{_handle_signal}
+use os.kernel.ipc.syscall.{_handle_set_priority}
+use os.kernel.ipc.syscall.{_handle_get_parent_pid}
+use os.kernel.ipc.syscall.{_handle_memory_unmap}
+use os.kernel.ipc.syscall.{_handle_memory_protect}
+use os.kernel.ipc.syscall.{_handle_ipc_send}
+use os.kernel.ipc.syscall.{_handle_ipc_recv}
+use os.kernel.ipc.syscall.{_handle_ipc_create_port}
+use os.kernel.ipc.syscall.{_handle_ipc_connect}
+use os.kernel.ipc.syscall.{_handle_notification_create}
+use os.kernel.ipc.syscall.{_handle_notification_signal}
+use os.kernel.ipc.syscall.{_handle_notification_wait}
+use os.kernel.ipc.syscall.{_handle_notification_poll}
+use os.kernel.ipc.syscall.{_handle_notification_destroy}
+use os.kernel.ipc.syscall.{_handle_notification_wait_any}
+use os.kernel.ipc.syscall.{_handle_file_stat}
+use os.kernel.ipc.syscall.{_handle_file_mkdir}
+use os.kernel.ipc.syscall.{_handle_file_readdir}
+use os.kernel.ipc.syscall.{_handle_mount}
+use os.kernel.ipc.syscall.{_handle_unmount}
+use os.kernel.ipc.syscall.{_handle_file_unlink}
+use os.kernel.ipc.syscall.{_handle_pledge}
+use os.kernel.ipc.syscall.{_handle_unveil}
+use os.kernel.ipc.syscall.{_handle_cap_grant}
+use os.kernel.ipc.syscall.{_handle_ftruncate}
+use os.kernel.ipc.syscall.{_handle_file_rename}
+use os.kernel.ipc.syscall.{_handle_file_rmdir}
+use os.kernel.ipc.syscall.{_handle_lseek}
+use os.kernel.ipc.syscall.{_handle_getcwd}
+use os.kernel.ipc.syscall.{_handle_chdir}
+use os.kernel.ipc.syscall.{_handle_clock_get_time}
+use os.kernel.ipc.syscall.{_handle_sleep}
+use os.kernel.ipc.syscall.{_handle_net_socket}
+use os.kernel.ipc.syscall.{_handle_net_bind}
+use os.kernel.ipc.syscall.{_handle_net_listen}
+use os.kernel.ipc.syscall.{_handle_net_connect}
+use os.kernel.ipc.syscall.{_handle_net_accept}
+use os.kernel.ipc.syscall.{_handle_net_send_to}
+use os.kernel.ipc.syscall.{_handle_net_recv_from}
+use os.kernel.ipc.syscall.{_handle_net_if_config}
+use os.kernel.ipc.syscall.{_handle_dev_enumerate}
+use os.kernel.ipc.syscall.{_handle_dev_get_info}
+use os.kernel.ipc.syscall.{_handle_map_bar}
+use os.kernel.ipc.syscall.{_handle_alloc_dma}
+use os.kernel.ipc.syscall.{_handle_free_dma}
+use os.kernel.ipc.syscall.{_handle_log_write}
+use os.kernel.ipc.syscall.{_handle_log_read}
+use os.kernel.ipc.syscall.{_handle_sysinfo}
+use os.kernel.ipc.syscall.{_handle_get_hostname}
+use os.kernel.ipc.syscall.{_handle_set_hostname}
+use os.kernel.scheduler.scheduler.{Scheduler}
+use os.kernel.ipc.ipc.{IpcManager}
+use os.kernel.log.klog.{KernelLog}
+
+# ---------------------------------------------------------------------------
+# Module-level singletons — populated once at boot by shim_init().
+# No get_global_* accessors exist yet in the kernel; these vars serve that
+# role for the shim layer.  Reentrancy: safe for single-core baremetal;
+# multi-core will need spinlocks (Wave 10E).
+# ---------------------------------------------------------------------------
+var g_shim_scheduler: Scheduler = Scheduler.new()
+var g_shim_ipc: IpcManager = IpcManager.new()
+var g_shim_klog: KernelLog = KernelLog.new(256)
+
+# ---------------------------------------------------------------------------
+# DCE keepalive: force the compiler to retain all spl_handle_* functions
+# even though they're only reached from C code via the weak-override link.
+# Without this, --entry-closure DCE drops the whole file.
+# ---------------------------------------------------------------------------
+@allow(primitive_api)
+fn _shim_keepalive() -> u64:
+    """Returns the sum of function addresses for every spl_handle_* exported
+    by this module. The function itself is never called at runtime — we just
+    want the compiler to treat these functions as reachable from shim_init."""
+    var total: u64 = 0
+    total = total + (spl_handle_debug_write as u64)
+    total = total + (spl_handle_exit as u64)
+    total = total + (spl_handle_yield as u64)
+    total = total + (spl_handle_spawn as u64)
+    total = total + (spl_handle_wait as u64)
+    total = total + (spl_handle_getpid as u64)
+    total = total + (spl_handle_list_tasks as u64)
+    total = total + (spl_handle_get_task_info as u64)
+    total = total + (spl_handle_signal as u64)
+    total = total + (spl_handle_set_priority as u64)
+    total = total + (spl_handle_get_parent_pid as u64)
+    total = total + (spl_handle_mmap as u64)
+    total = total + (spl_handle_munmap as u64)
+    total = total + (spl_handle_mprotect as u64)
+    total = total + (spl_handle_spawn_binary as u64)
+    total = total + (spl_handle_ipc_send as u64)
+    total = total + (spl_handle_ipc_recv as u64)
+    total = total + (spl_handle_ipc_create_port as u64)
+    total = total + (spl_handle_ipc_connect as u64)
+    total = total + (spl_handle_notification_create as u64)
+    total = total + (spl_handle_notification_signal as u64)
+    total = total + (spl_handle_notification_wait as u64)
+    total = total + (spl_handle_notification_poll as u64)
+    total = total + (spl_handle_notification_destroy as u64)
+    total = total + (spl_handle_notification_wait_any as u64)
+    total = total + (spl_handle_file_open as u64)
+    total = total + (spl_handle_file_read as u64)
+    total = total + (spl_handle_file_write as u64)
+    total = total + (spl_handle_file_close as u64)
+    total = total + (spl_handle_file_stat as u64)
+    total = total + (spl_handle_file_mkdir as u64)
+    total = total + (spl_handle_file_readdir as u64)
+    total = total + (spl_handle_mount as u64)
+    total = total + (spl_handle_unmount as u64)
+    total = total + (spl_handle_unlink as u64)
+    total = total + (spl_handle_pledge as u64)
+    total = total + (spl_handle_unveil as u64)
+    total = total + (spl_handle_cap_grant as u64)
+    total = total + (spl_handle_ftruncate as u64)
+    total = total + (spl_handle_rename as u64)
+    total = total + (spl_handle_rmdir as u64)
+    total = total + (spl_handle_lseek as u64)
+    total = total + (spl_handle_getcwd as u64)
+    total = total + (spl_handle_chdir as u64)
+    total = total + (spl_handle_clock_gettime as u64)
+    total = total + (spl_handle_sleep as u64)
+    total = total + (spl_handle_net_socket as u64)
+    total = total + (spl_handle_net_bind as u64)
+    total = total + (spl_handle_net_listen as u64)
+    total = total + (spl_handle_net_connect as u64)
+    total = total + (spl_handle_net_accept as u64)
+    total = total + (spl_handle_net_send_to as u64)
+    total = total + (spl_handle_net_recv_from as u64)
+    total = total + (spl_handle_net_if_config as u64)
+    total = total + (spl_handle_dev_enumerate as u64)
+    total = total + (spl_handle_dev_get_info as u64)
+    total = total + (spl_handle_map_bar as u64)
+    total = total + (spl_handle_alloc_dma as u64)
+    total = total + (spl_handle_free_dma as u64)
+    total = total + (spl_handle_log_write as u64)
+    total = total + (spl_handle_log_read as u64)
+    total = total + (spl_handle_sysinfo as u64)
+    total = total + (spl_handle_get_hostname as u64)
+    total = total + (spl_handle_set_hostname as u64)
+    total = total + (spl_handle_device_grant as u64)
+    total
+
+@export("C", name: "shim_init")
+fn shim_init(sched: Scheduler, ipc: IpcManager, klog: KernelLog):
+    """Boot-time initializer.  Call once before any SYSCALL can arrive."""
+    g_shim_scheduler = sched
+    g_shim_ipc = ipc
+    g_shim_klog = klog
+    # Keep the keepalive reference alive under DCE. The compiler treats
+    # the assignment's RHS as used even if we ignore the result.
+    val _keepalive = _shim_keepalive()
+
+# ---------------------------------------------------------------------------
+# Helper: pack six u64 values into a SyscallArgs with a known syscall id.
+# ---------------------------------------------------------------------------
+fn _make_args(id: u64, a0: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64) -> SyscallArgs:
+    SyscallArgs(id: id, arg0: a0, arg1: a1, arg2: a2, arg3: a3, arg4: a4, arg5: a5)
+
+# ===========================================================================
+# syscall 60 — debug_write   [IMPLEMENTED]
+#
+# a0 = byte value to write to the debug serial port
+# a1..a5 unused
+# returns 0 on success
+# ===========================================================================
+@allow(primitive_api)
+@export("C", name: "spl_handle_debug_write")
+fn spl_handle_debug_write(a0: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64) -> i64:
+    """Strong override for the weak spl_handle_debug_write stub.
+
+    Unpacks a0 (byte to write) into a SyscallArgs and delegates to the
+    arch-cfg'd _handle_debug_write() in syscall.spl, which emits the byte
+    via COM1 port I/O (x86_64) or MMIO UART (other arches).
+    """
+    val args = _make_args(60, a0, a1, a2, a3, a4, a5)
+    val result = _handle_debug_write(args)
+    result.value
+
+# ===========================================================================
+# syscall 0 — exit   [IMPLEMENTED]
+#
+# a0 = exit code (i64 cast from u64)
+# a1..a5 unused
+# does not return (scheduler terminates current task)
+# ===========================================================================
+@export("C", name: "spl_handle_exit")
+fn spl_handle_exit(a0: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64) -> i64:
+    """Strong override for the weak spl_handle_exit stub.
+
+    Forwards to _handle_exit() in syscall.spl.
+    Syscall number 0: terminate the calling task with the given exit code.
+    """
+    val args = _make_args(0, a0, a1, a2, a3, a4, a5)
+    val result = _handle_exit(args, g_shim_scheduler, g_shim_ipc)
+    result.value
+
+# ===========================================================================
+# syscall 1 — yield   [IMPLEMENTED]
+#
+# a0..a5 unused
+# returns 0
+# ===========================================================================
+@export("C", name: "spl_handle_yield")
+fn spl_handle_yield(a0: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64) -> i64:
+    """Strong override for the weak spl_handle_yield stub.
+
+    Forwards to _handle_yield() in syscall.spl.
+    Syscall number 1: voluntarily yield the CPU to the scheduler.
+    """
+    val result = _handle_yield(g_shim_scheduler)
+    result.value
+
+# ===========================================================================
+# syscall 2 — spawn   [IMPLEMENTED]
+#
+# a0 = pointer to executable path string (user VA)
+# a1 = path length
+# a2..a5 unused
+# returns new task ID on success, negative errno on failure
+# ===========================================================================
+@export("C", name: "spl_handle_spawn")
+fn spl_handle_spawn(a0: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64) -> i64:
+    """Strong override for the weak spl_handle_spawn stub.
+
+    Forwards to _handle_spawn() in syscall.spl.
+    Syscall number 2: create a new task from an in-memory image.
+    """
+    val args = _make_args(2, a0, a1, a2, a3, a4, a5)
+    val result = _handle_spawn(args, g_shim_scheduler)
+    result.value
+
+# ===========================================================================
+# syscall 3 — wait   [IMPLEMENTED]
+#
+# a0 = target task ID to wait on (0 = any child)
+# a1..a5 unused
+# returns exit code of waited task, or negative errno
+# ===========================================================================
+@export("C", name: "spl_handle_wait")
+fn spl_handle_wait(a0: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64) -> i64:
+    """Strong override for the weak spl_handle_wait stub.
+
+    Forwards to _handle_wait() in syscall.spl.
+    Syscall number 3: block until the specified child task exits.
+    """
+    val args = _make_args(3, a0, a1, a2, a3, a4, a5)
+    val result = _handle_wait(args, g_shim_scheduler)
+    result.value
+
+# ===========================================================================
+# syscall 4 — getpid   [IMPLEMENTED]
+#
+# a0..a5 unused
+# returns current task ID as i64
+# ===========================================================================
+@export("C", name: "spl_handle_getpid")
+fn spl_handle_getpid(a0: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64) -> i64:
+    """Strong override for the weak spl_handle_getpid stub.
+
+    Forwards to _handle_getpid() in syscall.spl.
+    Syscall number 4: return the current task's process ID.
+    """
+    val result = _handle_getpid(g_shim_scheduler)
+    result.value
+
+# ===========================================================================
+# syscall 5 — list_tasks   [IMPLEMENTED]
+#
+# a0 = pointer to output buffer (user VA)
+# a1 = buffer capacity (number of task entries)
+# a2..a5 unused
+# returns number of tasks written, or negative errno
+# ===========================================================================
+@export("C", name: "spl_handle_list_tasks")
+fn spl_handle_list_tasks(a0: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64) -> i64:
+    """Strong override for the weak spl_handle_list_tasks stub.
+
+    Forwards to _handle_list_tasks() in syscall.spl.
+    Syscall number 5: enumerate all active task IDs into a user buffer.
+    """
+    val result = _handle_list_tasks(g_shim_scheduler)
+    result.value
+
+# ===========================================================================
+# syscall 6 — get_task_info   [IMPLEMENTED]
+#
+# a0 = task ID to query
+# a1 = pointer to output TaskInfo struct (user VA)
+# a2..a5 unused
+# returns 0 on success, negative errno on failure
+# ===========================================================================
+@export("C", name: "spl_handle_get_task_info")
+fn spl_handle_get_task_info(a0: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64) -> i64:
+    """Strong override for the weak spl_handle_get_task_info stub.
+
+    Forwards to _handle_get_task_info() in syscall.spl.
+    Syscall number 6: retrieve scheduling info for a given task.
+    """
+    val args = _make_args(6, a0, a1, a2, a3, a4, a5)
+    val result = _handle_get_task_info(args, g_shim_scheduler)
+    result.value
+
+# ===========================================================================
+# syscall 7 — signal   [IMPLEMENTED]
+#
+# a0 = target task ID
+# a1 = signal number
+# a2..a5 unused
+# returns 0 on success, negative errno on failure
+# ===========================================================================
+@export("C", name: "spl_handle_signal")
+fn spl_handle_signal(a0: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64) -> i64:
+    """Strong override for the weak spl_handle_signal stub.
+
+    Forwards to _handle_signal() in syscall.spl.
+    Syscall number 7: deliver a signal to the specified task.
+    """
+    val args = _make_args(7, a0, a1, a2, a3, a4, a5)
+    val result = _handle_signal(args, g_shim_scheduler)
+    result.value
+
+# ===========================================================================
+# syscall 8 — set_priority   [IMPLEMENTED]
+#
+# a0 = task ID (0 = self)
+# a1 = new priority level
+# a2..a5 unused
+# returns 0 on success, negative errno on failure
+# ===========================================================================
+@export("C", name: "spl_handle_set_priority")
+fn spl_handle_set_priority(a0: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64) -> i64:
+    """Strong override for the weak spl_handle_set_priority stub.
+
+    Forwards to _handle_set_priority() in syscall.spl.
+    Syscall number 8: change the scheduling priority of a task.
+    """
+    val args = _make_args(8, a0, a1, a2, a3, a4, a5)
+    val result = _handle_set_priority(args, g_shim_scheduler)
+    result.value
+
+# ===========================================================================
+# syscall 9 — get_parent_pid   [IMPLEMENTED]
+#
+# a0..a5 unused
+# returns parent task ID as i64, or negative errno
+# ===========================================================================
+@export("C", name: "spl_handle_get_parent_pid")
+fn spl_handle_get_parent_pid(a0: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64) -> i64:
+    """Strong override for the weak spl_handle_get_parent_pid stub.
+
+    Forwards to _handle_get_parent_pid() in syscall.spl.
+    Syscall number 9: return the calling task's parent task ID.
+    """
+    val result = _handle_get_parent_pid(g_shim_scheduler)
+    result.value
+
+# ===========================================================================
+# syscall 10 — mmap   [IMPLEMENTED]
+#
+# a0 = address hint (0 = kernel chooses)
+# a1 = length in bytes
+# a2 = VM flags
+# a3..a5 unused
+# returns mapped virtual address on success, negative errno on failure
+# ===========================================================================
+@export("C", name: "spl_handle_mmap")
+fn spl_handle_mmap(a0: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64) -> i64:
+    """Strong override for the weak spl_handle_mmap stub.
+
+    Forwards to _handle_memory_map() in syscall.spl.
+    Syscall number 10: map anonymous pages into the calling task's address space.
+    """
+    val args = _make_args(10, a0, a1, a2, a3, a4, a5)
+    val result = _handle_memory_map(args, g_shim_scheduler)
+    result.value
+
+# ===========================================================================
+# syscall 11 — munmap   [IMPLEMENTED]
+#
+# a0 = virtual address to unmap
+# a1 = length in bytes
+# a2..a5 unused
+# returns 0 on success, negative errno on failure
+# ===========================================================================
+@export("C", name: "spl_handle_munmap")
+fn spl_handle_munmap(a0: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64) -> i64:
+    """Strong override for the weak spl_handle_munmap stub.
+
+    Forwards to _handle_memory_unmap() in syscall.spl.
+    Syscall number 11: release a previously mapped memory region.
+    """
+    val args = _make_args(11, a0, a1, a2, a3, a4, a5)
+    val result = _handle_memory_unmap(args, g_shim_scheduler)
+    result.value
+
+# ===========================================================================
+# syscall 12 — mprotect   [IMPLEMENTED]
+#
+# a0 = virtual address
+# a1 = length in bytes
+# a2 = new protection flags
+# a3..a5 unused
+# returns 0 on success, negative errno on failure
+# ===========================================================================
+@export("C", name: "spl_handle_mprotect")
+fn spl_handle_mprotect(a0: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64) -> i64:
+    """Strong override for the weak spl_handle_mprotect stub.
+
+    Forwards to _handle_memory_protect() in syscall.spl.
+    Syscall number 12: change memory protection on a mapped region.
+    """
+    val args = _make_args(12, a0, a1, a2, a3, a4, a5)
+    val result = _handle_memory_protect(args, g_shim_scheduler)
+    result.value
+
+# ===========================================================================
+# syscall 13 — spawn_binary   [IMPLEMENTED]
+#
+# a0 = pointer to path string (user VA)
+# a1 = path length in bytes
+# a2..a5 unused
+# returns new task ID on success, negative errno on failure
+# ===========================================================================
+@export("C", name: "spl_handle_spawn_binary")
+fn spl_handle_spawn_binary(a0: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64) -> i64:
+    """Strong override for the weak spl_handle_spawn_binary stub.
+
+    Forwards to _handle_spawn_binary() in syscall.spl.
+    Syscall number 13: load and launch an ELF binary from the given path.
+    """
+    val args = _make_args(13, a0, a1, a2, a3, a4, a5)
+    val result = _handle_spawn_binary(args, g_shim_scheduler, g_shim_klog)
+    result.value
+
+# ===========================================================================
+# syscall 20 — ipc_send   [IMPLEMENTED]
+#
+# a0 = destination port ID
+# a1 = pointer to message data (user VA)
+# a2 = message length in bytes
+# a3..a5 unused
+# returns 0 on success, negative errno on failure
+# ===========================================================================
+@export("C", name: "spl_handle_ipc_send")
+fn spl_handle_ipc_send(a0: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64) -> i64:
+    """Strong override for the weak spl_handle_ipc_send stub.
+
+    Forwards to _handle_ipc_send() in syscall.spl.
+    Syscall number 20: send a message to a kernel IPC port.
+    """
+    val args = _make_args(20, a0, a1, a2, a3, a4, a5)
+    val result = _handle_ipc_send(args, g_shim_scheduler, g_shim_ipc)
+    result.value
+
+# ===========================================================================
+# syscall 21 — ipc_recv   [IMPLEMENTED]
+#
+# a0 = port ID to receive from
+# a1 = pointer to message buffer (user VA)
+# a2 = buffer capacity in bytes
+# a3..a5 unused
+# returns bytes received, or negative errno
+# ===========================================================================
+@export("C", name: "spl_handle_ipc_recv")
+fn spl_handle_ipc_recv(a0: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64) -> i64:
+    """Strong override for the weak spl_handle_ipc_recv stub.
+
+    Forwards to _handle_ipc_recv() in syscall.spl.
+    Syscall number 21: receive a message from a kernel IPC port.
+    """
+    val args = _make_args(21, a0, a1, a2, a3, a4, a5)
+    val result = _handle_ipc_recv(args, g_shim_scheduler, g_shim_ipc)
+    result.value
+
+# ===========================================================================
+# syscall 22 — ipc_create_port   [IMPLEMENTED]
+#
+# a0 = port name hash (or 0 for anonymous)
+# a1..a5 unused
+# returns new port ID on success, negative errno on failure
+# ===========================================================================
+@export("C", name: "spl_handle_ipc_create_port")
+fn spl_handle_ipc_create_port(a0: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64) -> i64:
+    """Strong override for the weak spl_handle_ipc_create_port stub.
+
+    Forwards to _handle_ipc_create_port() in syscall.spl.
+    Syscall number 22: allocate a new IPC message port.
+    """
+    val args = _make_args(22, a0, a1, a2, a3, a4, a5)
+    val result = _handle_ipc_create_port(args, g_shim_scheduler, g_shim_ipc)
+    result.value
+
+# ===========================================================================
+# syscall 23 — ipc_connect   [IMPLEMENTED]
+#
+# a0 = target port ID
+# a1..a5 unused
+# returns connection handle on success, negative errno on failure
+# ===========================================================================
+@export("C", name: "spl_handle_ipc_connect")
+fn spl_handle_ipc_connect(a0: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64) -> i64:
+    """Strong override for the weak spl_handle_ipc_connect stub.
+
+    Forwards to _handle_ipc_connect() in syscall.spl.
+    Syscall number 23: connect to an existing IPC port.
+    Note: _handle_ipc_connect takes (args, ipc) only — no scheduler.
+    """
+    val args = _make_args(23, a0, a1, a2, a3, a4, a5)
+    val result = _handle_ipc_connect(args, g_shim_ipc)
+    result.value
+
+# ===========================================================================
+# syscall 24 — notification_create   [IMPLEMENTED]
+#
+# a0 = notification ID / name
+# a1..a5 unused
+# returns 0 on success, negative errno on failure
+# ===========================================================================
+@export("C", name: "spl_handle_notification_create")
+fn spl_handle_notification_create(a0: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64) -> i64:
+    """Strong override for the weak spl_handle_notification_create stub.
+
+    Forwards to _handle_notification_create() in syscall.spl.
+    Syscall number 24: create a new notification object.
+    """
+    val args = _make_args(24, a0, a1, a2, a3, a4, a5)
+    val result = _handle_notification_create(args)
+    result.value
+
+# ===========================================================================
+# syscall 25 — notification_signal   [IMPLEMENTED]
+#
+# a0 = notification handle
+# a1..a5 unused
+# returns 0 on success, negative errno on failure
+# ===========================================================================
+@export("C", name: "spl_handle_notification_signal")
+fn spl_handle_notification_signal(a0: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64) -> i64:
+    """Strong override for the weak spl_handle_notification_signal stub.
+
+    Forwards to _handle_notification_signal() in syscall.spl.
+    Syscall number 25: raise a notification, waking any waiting tasks.
+    """
+    val args = _make_args(25, a0, a1, a2, a3, a4, a5)
+    val result = _handle_notification_signal(args, g_shim_scheduler)
+    result.value
+
+# ===========================================================================
+# syscall 26 — notification_wait   [IMPLEMENTED]
+#
+# a0 = notification handle
+# a1..a5 unused
+# returns 0 on success, negative errno on failure
+# ===========================================================================
+@export("C", name: "spl_handle_notification_wait")
+fn spl_handle_notification_wait(a0: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64) -> i64:
+    """Strong override for the weak spl_handle_notification_wait stub.
+
+    Forwards to _handle_notification_wait() in syscall.spl.
+    Syscall number 26: block until a notification is signalled.
+    """
+    val args = _make_args(26, a0, a1, a2, a3, a4, a5)
+    val result = _handle_notification_wait(args, g_shim_scheduler)
+    result.value
+
+# ===========================================================================
+# syscall 27 — notification_poll   [IMPLEMENTED]
+#
+# a0 = notification handle
+# a1..a5 unused
+# returns 1 if signalled (non-blocking), 0 if not, negative errno on error
+# ===========================================================================
+@export("C", name: "spl_handle_notification_poll")
+fn spl_handle_notification_poll(a0: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64) -> i64:
+    """Strong override for the weak spl_handle_notification_poll stub.
+
+    Forwards to _handle_notification_poll() in syscall.spl.
+    Syscall number 27: non-blocking check whether a notification is pending.
+    """
+    val args = _make_args(27, a0, a1, a2, a3, a4, a5)
+    val result = _handle_notification_poll(args)
+    result.value
+
+# ===========================================================================
+# syscall 28 — notification_destroy   [IMPLEMENTED]
+#
+# a0 = notification handle
+# a1..a5 unused
+# returns 0 on success, negative errno on failure
+# ===========================================================================
+@export("C", name: "spl_handle_notification_destroy")
+fn spl_handle_notification_destroy(a0: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64) -> i64:
+    """Strong override for the weak spl_handle_notification_destroy stub.
+
+    Forwards to _handle_notification_destroy() in syscall.spl.
+    Syscall number 28: release a notification object.
+    """
+    val args = _make_args(28, a0, a1, a2, a3, a4, a5)
+    val result = _handle_notification_destroy(args)
+    result.value
+
+# ===========================================================================
+# syscall 29 — notification_wait_any   [IMPLEMENTED]
+#
+# a0 = pointer to array of notification handles (user VA)
+# a1 = number of handles in array
+# a2..a5 unused
+# returns index of first signalled handle, or negative errno
+# ===========================================================================
+@export("C", name: "spl_handle_notification_wait_any")
+fn spl_handle_notification_wait_any(a0: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64) -> i64:
+    """Strong override for the weak spl_handle_notification_wait_any stub.
+
+    Forwards to _handle_notification_wait_any() in syscall.spl.
+    Syscall number 29: block until any one of a set of notifications fires.
+    """
+    val args = _make_args(29, a0, a1, a2, a3, a4, a5)
+    val result = _handle_notification_wait_any(args, g_shim_scheduler)
+    result.value
+
+# ===========================================================================
+# syscall 30 — file_open   [IMPLEMENTED]
+#
+# a0 = pointer to path string (user VA)
+# a1 = path length in bytes
+# a2 = flags (O_RDONLY / O_WRONLY / O_RDWR / O_CREAT ...)
+# a3..a5 unused
+# returns file descriptor (non-negative) on success, negative errno on failure
+# ===========================================================================
+@export("C", name: "spl_handle_file_open")
+fn spl_handle_file_open(a0: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64) -> i64:
+    """Strong override for the weak spl_handle_file_open stub.
+
+    Forwards to _handle_file_open() in syscall.spl.
+    Syscall number 30: open a file by path and return a file descriptor.
+    """
+    val args = _make_args(30, a0, a1, a2, a3, a4, a5)
+    val result = _handle_file_open(args, g_shim_scheduler, g_shim_ipc)
+    result.value
+
+# ===========================================================================
+# syscall 31 — file_read   [IMPLEMENTED]
+#
+# a0 = file descriptor
+# a1 = pointer to user-space buffer (user VA)
+# a2 = maximum bytes to read
+# a3..a5 unused
+# returns bytes actually read, or negative errno
+# ===========================================================================
+@export("C", name: "spl_handle_file_read")
+fn spl_handle_file_read(a0: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64) -> i64:
+    """Strong override for the weak spl_handle_file_read stub.
+
+    Forwards to _handle_file_read() in syscall.spl.
+    Syscall number 31: read bytes from an open file descriptor into a user buffer.
+    """
+    val args = _make_args(31, a0, a1, a2, a3, a4, a5)
+    val result = _handle_file_read(args, g_shim_scheduler, g_shim_ipc)
+    result.value
+
+# ===========================================================================
+# syscall 32 — file_write   [IMPLEMENTED]
+#
+# a0 = file descriptor
+# a1 = pointer to user-space buffer (user VA)
+# a2 = number of bytes to write
+# a3..a5 unused
+# returns bytes written, or negative errno
+# ===========================================================================
+@export("C", name: "spl_handle_file_write")
+fn spl_handle_file_write(a0: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64) -> i64:
+    """Strong override for the weak spl_handle_file_write stub.
+
+    Forwards to _handle_file_write() in syscall.spl.
+    Syscall number 32: write bytes from a user buffer into an open file descriptor.
+    """
+    val args = _make_args(32, a0, a1, a2, a3, a4, a5)
+    val result = _handle_file_write(args, g_shim_scheduler, g_shim_ipc)
+    result.value
+
+# ===========================================================================
+# syscall 33 — file_close   [IMPLEMENTED]
+#
+# a0 = file descriptor
+# a1..a5 unused
+# returns 0 on success, negative errno on failure
+# ===========================================================================
+@export("C", name: "spl_handle_file_close")
+fn spl_handle_file_close(a0: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64) -> i64:
+    """Strong override for the weak spl_handle_file_close stub.
+
+    Forwards to _handle_file_close() in syscall.spl.
+    Syscall number 33: release an open file descriptor and free associated resources.
+    """
+    val args = _make_args(33, a0, a1, a2, a3, a4, a5)
+    val result = _handle_file_close(args, g_shim_scheduler, g_shim_ipc)
+    result.value
+
+# ===========================================================================
+# syscall 34 — file_stat   [IMPLEMENTED]
+#
+# a0 = pointer to path string (user VA)
+# a1 = path length in bytes
+# a2 = pointer to output stat struct (user VA)
+# a3..a5 unused
+# returns 0 on success, negative errno on failure
+# ===========================================================================
+@export("C", name: "spl_handle_file_stat")
+fn spl_handle_file_stat(a0: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64) -> i64:
+    """Strong override for the weak spl_handle_file_stat stub.
+
+    Forwards to _handle_file_stat() in syscall.spl.
+    Syscall number 34: query file metadata (size, type, timestamps).
+    """
+    val args = _make_args(34, a0, a1, a2, a3, a4, a5)
+    val result = _handle_file_stat(args, g_shim_scheduler, g_shim_ipc)
+    result.value
+
+# ===========================================================================
+# syscall 35 — file_mkdir   [IMPLEMENTED]
+#
+# a0 = pointer to path string (user VA)
+# a1 = path length in bytes
+# a2 = mode bits
+# a3..a5 unused
+# returns 0 on success, negative errno on failure
+# ===========================================================================
+@export("C", name: "spl_handle_file_mkdir")
+fn spl_handle_file_mkdir(a0: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64) -> i64:
+    """Strong override for the weak spl_handle_file_mkdir stub.
+
+    Forwards to _handle_file_mkdir() in syscall.spl.
+    Syscall number 35: create a new directory.
+    """
+    val args = _make_args(35, a0, a1, a2, a3, a4, a5)
+    val result = _handle_file_mkdir(args, g_shim_scheduler, g_shim_ipc)
+    result.value
+
+# ===========================================================================
+# syscall 36 — file_readdir   [IMPLEMENTED]
+#
+# a0 = file descriptor of open directory
+# a1 = pointer to output buffer (user VA)
+# a2 = buffer capacity in bytes
+# a3..a5 unused
+# returns number of entries written, or negative errno
+# ===========================================================================
+@export("C", name: "spl_handle_file_readdir")
+fn spl_handle_file_readdir(a0: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64) -> i64:
+    """Strong override for the weak spl_handle_file_readdir stub.
+
+    Forwards to _handle_file_readdir() in syscall.spl.
+    Syscall number 36: read directory entries from an open directory fd.
+    """
+    val args = _make_args(36, a0, a1, a2, a3, a4, a5)
+    val result = _handle_file_readdir(args, g_shim_scheduler, g_shim_ipc)
+    result.value
+
+# ===========================================================================
+# syscall 37 — mount   [IMPLEMENTED]
+#
+# a0 = pointer to device path (user VA)
+# a1 = device path length
+# a2 = pointer to mount point path (user VA)
+# a3 = mount point path length
+# a4 = filesystem type flags
+# a5 unused
+# returns 0 on success, negative errno on failure
+# ===========================================================================
+@export("C", name: "spl_handle_mount")
+fn spl_handle_mount(a0: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64) -> i64:
+    """Strong override for the weak spl_handle_mount stub.
+
+    Forwards to _handle_mount() in syscall.spl.
+    Syscall number 37: mount a filesystem at a given path.
+    """
+    val args = _make_args(37, a0, a1, a2, a3, a4, a5)
+    val result = _handle_mount(args, g_shim_scheduler, g_shim_ipc)
+    result.value
+
+# ===========================================================================
+# syscall 38 — unmount   [IMPLEMENTED]
+#
+# a0 = pointer to mount point path (user VA)
+# a1 = path length
+# a2..a5 unused
+# returns 0 on success, negative errno on failure
+# ===========================================================================
+@export("C", name: "spl_handle_unmount")
+fn spl_handle_unmount(a0: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64) -> i64:
+    """Strong override for the weak spl_handle_unmount stub.
+
+    Forwards to _handle_unmount() in syscall.spl.
+    Syscall number 38: unmount a filesystem.
+    """
+    val args = _make_args(38, a0, a1, a2, a3, a4, a5)
+    val result = _handle_unmount(args, g_shim_scheduler, g_shim_ipc)
+    result.value
+
+# ===========================================================================
+# syscall 39 — unlink   [IMPLEMENTED]
+#
+# a0 = pointer to path string (user VA)
+# a1 = path length in bytes
+# a2..a5 unused
+# returns 0 on success, negative errno on failure
+# ===========================================================================
+@export("C", name: "spl_handle_unlink")
+fn spl_handle_unlink(a0: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64) -> i64:
+    """Strong override for the weak spl_handle_unlink stub.
+
+    Forwards to _handle_file_unlink() in syscall.spl.
+    Syscall number 39: remove a file from the filesystem.
+    """
+    val args = _make_args(39, a0, a1, a2, a3, a4, a5)
+    val result = _handle_file_unlink(args, g_shim_scheduler, g_shim_ipc)
+    result.value
+
+# ===========================================================================
+# syscall 40 — pledge   [IMPLEMENTED]
+#
+# a0 = pointer to pledge string (user VA)
+# a1 = pledge string length
+# a2..a5 unused
+# returns 0 on success, negative errno on failure
+# ===========================================================================
+@export("C", name: "spl_handle_pledge")
+fn spl_handle_pledge(a0: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64) -> i64:
+    """Strong override for the weak spl_handle_pledge stub.
+
+    Forwards to _handle_pledge() in syscall.spl.
+    Syscall number 40: restrict future syscall capabilities (OpenBSD-style).
+    """
+    val args = _make_args(40, a0, a1, a2, a3, a4, a5)
+    val result = _handle_pledge(args, g_shim_scheduler, g_shim_ipc)
+    result.value
+
+# ===========================================================================
+# syscall 41 — unveil   [IMPLEMENTED]
+#
+# a0 = pointer to path string (user VA)
+# a1 = path length
+# a2 = pointer to permissions string (user VA)
+# a3 = permissions string length
+# a4..a5 unused
+# returns 0 on success, negative errno on failure
+# ===========================================================================
+@export("C", name: "spl_handle_unveil")
+fn spl_handle_unveil(a0: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64) -> i64:
+    """Strong override for the weak spl_handle_unveil stub.
+
+    Forwards to _handle_unveil() in syscall.spl.
+    Syscall number 41: reveal a filesystem path to a pledged process.
+    """
+    val args = _make_args(41, a0, a1, a2, a3, a4, a5)
+    val result = _handle_unveil(args, g_shim_scheduler, g_shim_ipc)
+    result.value
+
+# ===========================================================================
+# syscall 42 — cap_grant   [IMPLEMENTED]
+#
+# a0 = target task ID
+# a1 = capability bits to grant
+# a2..a5 unused
+# returns 0 on success, negative errno on failure
+# ===========================================================================
+@export("C", name: "spl_handle_cap_grant")
+fn spl_handle_cap_grant(a0: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64) -> i64:
+    """Strong override for the weak spl_handle_cap_grant stub.
+
+    Forwards to _handle_cap_grant() in syscall.spl.
+    Syscall number 42: grant capability rights to another task.
+    """
+    val args = _make_args(42, a0, a1, a2, a3, a4, a5)
+    val result = _handle_cap_grant(args, g_shim_scheduler, g_shim_ipc)
+    result.value
+
+# ===========================================================================
+# syscall 43 — ftruncate   [IMPLEMENTED]
+#
+# a0 = file descriptor
+# a1 = new length in bytes
+# a2..a5 unused
+# returns 0 on success, negative errno on failure
+# ===========================================================================
+@export("C", name: "spl_handle_ftruncate")
+fn spl_handle_ftruncate(a0: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64) -> i64:
+    """Strong override for the weak spl_handle_ftruncate stub.
+
+    Forwards to _handle_ftruncate() in syscall.spl.
+    Syscall number 43: truncate an open file to a specified length.
+    """
+    val args = _make_args(43, a0, a1, a2, a3, a4, a5)
+    val result = _handle_ftruncate(args)
+    result.value
+
+# ===========================================================================
+# syscall 44 — rename   [IMPLEMENTED]
+#
+# a0 = pointer to old path (user VA)
+# a1 = old path length
+# a2 = pointer to new path (user VA)
+# a3 = new path length
+# a4..a5 unused
+# returns 0 on success, negative errno on failure
+# ===========================================================================
+@export("C", name: "spl_handle_rename")
+fn spl_handle_rename(a0: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64) -> i64:
+    """Strong override for the weak spl_handle_rename stub.
+
+    Forwards to _handle_file_rename() in syscall.spl.
+    Syscall number 44: atomically rename a file or directory.
+    """
+    val args = _make_args(44, a0, a1, a2, a3, a4, a5)
+    val result = _handle_file_rename(args, g_shim_scheduler, g_shim_ipc)
+    result.value
+
+# ===========================================================================
+# syscall 45 — rmdir   [IMPLEMENTED]
+#
+# a0 = pointer to path string (user VA)
+# a1 = path length in bytes
+# a2..a5 unused
+# returns 0 on success, negative errno on failure
+# ===========================================================================
+@export("C", name: "spl_handle_rmdir")
+fn spl_handle_rmdir(a0: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64) -> i64:
+    """Strong override for the weak spl_handle_rmdir stub.
+
+    Forwards to _handle_file_rmdir() in syscall.spl.
+    Syscall number 45: remove an empty directory.
+    """
+    val args = _make_args(45, a0, a1, a2, a3, a4, a5)
+    val result = _handle_file_rmdir(args, g_shim_scheduler, g_shim_ipc)
+    result.value
+
+# ===========================================================================
+# syscall 46 — lseek   [IMPLEMENTED]
+#
+# a0 = file descriptor
+# a1 = offset (bytes)
+# a2 = whence (SEEK_SET=0, SEEK_CUR=1, SEEK_END=2)
+# a3..a5 unused
+# returns new file offset on success, negative errno on failure
+# ===========================================================================
+@export("C", name: "spl_handle_lseek")
+fn spl_handle_lseek(a0: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64) -> i64:
+    """Strong override for the weak spl_handle_lseek stub.
+
+    Forwards to _handle_lseek() in syscall.spl.
+    Syscall number 46: reposition a file descriptor's read/write cursor.
+    """
+    val args = _make_args(46, a0, a1, a2, a3, a4, a5)
+    val result = _handle_lseek(args)
+    result.value
+
+# ===========================================================================
+# syscall 47 — getcwd   [IMPLEMENTED]
+#
+# a0 = pointer to output buffer (user VA)
+# a1 = buffer capacity in bytes
+# a2..a5 unused
+# returns number of bytes written (including NUL), or negative errno
+# ===========================================================================
+@export("C", name: "spl_handle_getcwd")
+fn spl_handle_getcwd(a0: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64) -> i64:
+    """Strong override for the weak spl_handle_getcwd stub.
+
+    Forwards to _handle_getcwd() in syscall.spl.
+    Syscall number 47: retrieve the current working directory path.
+    """
+    val args = _make_args(47, a0, a1, a2, a3, a4, a5)
+    val result = _handle_getcwd(args, g_shim_scheduler)
+    result.value
+
+# ===========================================================================
+# syscall 48 — chdir   [IMPLEMENTED]
+#
+# a0 = pointer to path string (user VA)
+# a1 = path length in bytes
+# a2..a5 unused
+# returns 0 on success, negative errno on failure
+# ===========================================================================
+@export("C", name: "spl_handle_chdir")
+fn spl_handle_chdir(a0: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64) -> i64:
+    """Strong override for the weak spl_handle_chdir stub.
+
+    Forwards to _handle_chdir() in syscall.spl.
+    Syscall number 48: change the calling task's current working directory.
+    """
+    val args = _make_args(48, a0, a1, a2, a3, a4, a5)
+    val result = _handle_chdir(args, g_shim_scheduler)
+    result.value
+
+# ===========================================================================
+# syscall 50 — clock_gettime   [IMPLEMENTED]
+#
+# a0 = clock ID (CLOCK_MONOTONIC=0, CLOCK_REALTIME=1, etc.)
+# a1 = pointer to output timespec struct (user VA)
+# a2..a5 unused
+# returns 0 on success, negative errno on failure
+# ===========================================================================
+@export("C", name: "spl_handle_clock_gettime")
+fn spl_handle_clock_gettime(a0: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64) -> i64:
+    """Strong override for the weak spl_handle_clock_gettime stub.
+
+    Forwards to _handle_clock_get_time() in syscall.spl.
+    Syscall number 50: read a kernel clock (monotonic or wall-clock).
+    """
+    val args = _make_args(50, a0, a1, a2, a3, a4, a5)
+    val result = _handle_clock_get_time(args, g_shim_scheduler)
+    result.value
+
+# ===========================================================================
+# syscall 51 — sleep   [IMPLEMENTED]
+#
+# a0 = sleep duration in nanoseconds
+# a1..a5 unused
+# returns 0 on success, negative errno on failure
+# ===========================================================================
+@export("C", name: "spl_handle_sleep")
+fn spl_handle_sleep(a0: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64) -> i64:
+    """Strong override for the weak spl_handle_sleep stub.
+
+    Forwards to _handle_sleep() in syscall.spl.
+    Syscall number 51: suspend the calling task for the given duration.
+    """
+    val args = _make_args(51, a0, a1, a2, a3, a4, a5)
+    val result = _handle_sleep(args, g_shim_scheduler)
+    result.value
+
+# ===========================================================================
+# syscall 70 — net_socket   [IMPLEMENTED]
+#
+# a0 = domain (AF_INET=2, AF_INET6=10, etc.)
+# a1 = type (SOCK_STREAM=1, SOCK_DGRAM=2, etc.)
+# a2 = protocol (0 = auto)
+# a3..a5 unused
+# returns socket fd on success, negative errno on failure
+# ===========================================================================
+@export("C", name: "spl_handle_net_socket")
+fn spl_handle_net_socket(a0: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64) -> i64:
+    """Strong override for the weak spl_handle_net_socket stub.
+
+    Forwards to _handle_net_socket() in syscall.spl.
+    Syscall number 70: create a network socket.
+    """
+    val args = _make_args(70, a0, a1, a2, a3, a4, a5)
+    val result = _handle_net_socket(args)
+    result.value
+
+# ===========================================================================
+# syscall 71 — net_bind   [IMPLEMENTED]
+#
+# a0 = socket fd
+# a1 = pointer to sockaddr struct (user VA)
+# a2 = sockaddr length
+# a3..a5 unused
+# returns 0 on success, negative errno on failure
+# ===========================================================================
+@export("C", name: "spl_handle_net_bind")
+fn spl_handle_net_bind(a0: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64) -> i64:
+    """Strong override for the weak spl_handle_net_bind stub.
+
+    Forwards to _handle_net_bind() in syscall.spl.
+    Syscall number 71: bind a socket to a local address and port.
+    """
+    val args = _make_args(71, a0, a1, a2, a3, a4, a5)
+    val result = _handle_net_bind(args)
+    result.value
+
+# ===========================================================================
+# syscall 72 — net_listen   [IMPLEMENTED]
+#
+# a0 = socket fd
+# a1 = backlog (max pending connections)
+# a2..a5 unused
+# returns 0 on success, negative errno on failure
+# ===========================================================================
+@export("C", name: "spl_handle_net_listen")
+fn spl_handle_net_listen(a0: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64) -> i64:
+    """Strong override for the weak spl_handle_net_listen stub.
+
+    Forwards to _handle_net_listen() in syscall.spl.
+    Syscall number 72: mark a socket as passive (listening for connections).
+    """
+    val args = _make_args(72, a0, a1, a2, a3, a4, a5)
+    val result = _handle_net_listen(args)
+    result.value
+
+# ===========================================================================
+# syscall 73 — net_connect   [IMPLEMENTED]
+#
+# a0 = socket fd
+# a1 = pointer to sockaddr struct (user VA)
+# a2 = sockaddr length
+# a3..a5 unused
+# returns 0 on success, negative errno on failure
+# ===========================================================================
+@export("C", name: "spl_handle_net_connect")
+fn spl_handle_net_connect(a0: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64) -> i64:
+    """Strong override for the weak spl_handle_net_connect stub.
+
+    Forwards to _handle_net_connect() in syscall.spl.
+    Syscall number 73: initiate a connection to a remote address.
+    """
+    val args = _make_args(73, a0, a1, a2, a3, a4, a5)
+    val result = _handle_net_connect(args)
+    result.value
+
+# ===========================================================================
+# syscall 74 — net_accept   [IMPLEMENTED]
+#
+# a0 = listening socket fd
+# a1 = pointer to sockaddr output buffer (user VA, may be 0)
+# a2 = pointer to sockaddr length output (user VA, may be 0)
+# a3..a5 unused
+# returns new connected socket fd on success, negative errno on failure
+# ===========================================================================
+@export("C", name: "spl_handle_net_accept")
+fn spl_handle_net_accept(a0: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64) -> i64:
+    """Strong override for the weak spl_handle_net_accept stub.
+
+    Forwards to _handle_net_accept() in syscall.spl.
+    Syscall number 74: accept an incoming connection on a listening socket.
+    """
+    val args = _make_args(74, a0, a1, a2, a3, a4, a5)
+    val result = _handle_net_accept(args)
+    result.value
+
+# ===========================================================================
+# syscall 75 — net_send_to   [IMPLEMENTED]
+#
+# a0 = socket fd
+# a1 = pointer to data buffer (user VA)
+# a2 = data length in bytes
+# a3 = pointer to destination sockaddr (user VA, 0 for connected sockets)
+# a4 = sockaddr length (0 for connected sockets)
+# a5 = flags
+# returns bytes sent on success, negative errno on failure
+# ===========================================================================
+@export("C", name: "spl_handle_net_send_to")
+fn spl_handle_net_send_to(a0: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64) -> i64:
+    """Strong override for the weak spl_handle_net_send_to stub.
+
+    Forwards to _handle_net_send_to() in syscall.spl.
+    Syscall number 75: send data through a socket to a specified address.
+    """
+    val args = _make_args(75, a0, a1, a2, a3, a4, a5)
+    val result = _handle_net_send_to(args)
+    result.value
+
+# ===========================================================================
+# syscall 76 — net_recv_from   [IMPLEMENTED]
+#
+# a0 = socket fd
+# a1 = pointer to receive buffer (user VA)
+# a2 = buffer capacity in bytes
+# a3 = pointer to source sockaddr output (user VA, may be 0)
+# a4 = pointer to sockaddr length output (user VA, may be 0)
+# a5 = flags
+# returns bytes received on success, negative errno on failure
+# ===========================================================================
+@export("C", name: "spl_handle_net_recv_from")
+fn spl_handle_net_recv_from(a0: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64) -> i64:
+    """Strong override for the weak spl_handle_net_recv_from stub.
+
+    Forwards to _handle_net_recv_from() in syscall.spl.
+    Syscall number 76: receive data from a socket along with source address.
+    """
+    val args = _make_args(76, a0, a1, a2, a3, a4, a5)
+    val result = _handle_net_recv_from(args)
+    result.value
+
+# ===========================================================================
+# syscall 77 — net_if_config   [IMPLEMENTED]
+#
+# a0 = pointer to interface name string (user VA)
+# a1 = interface name length
+# a2 = pointer to config struct (user VA)
+# a3..a5 unused
+# returns 0 on success, negative errno on failure
+# ===========================================================================
+@export("C", name: "spl_handle_net_if_config")
+fn spl_handle_net_if_config(a0: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64) -> i64:
+    """Strong override for the weak spl_handle_net_if_config stub.
+
+    Forwards to _handle_net_if_config() in syscall.spl.
+    Syscall number 77: configure a network interface (IP, MTU, flags).
+    """
+    val args = _make_args(77, a0, a1, a2, a3, a4, a5)
+    val result = _handle_net_if_config(args)
+    result.value
+
+# ===========================================================================
+# syscall 80 — dev_enumerate   [IMPLEMENTED]
+#
+# a0 = pointer to output device list buffer (user VA)
+# a1 = buffer capacity in entries
+# a2..a5 unused
+# returns number of devices written, or negative errno
+# ===========================================================================
+@export("C", name: "spl_handle_dev_enumerate")
+fn spl_handle_dev_enumerate(a0: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64) -> i64:
+    """Strong override for the weak spl_handle_dev_enumerate stub.
+
+    Forwards to _handle_dev_enumerate() in syscall.spl.
+    Syscall number 80: list all kernel-visible hardware devices.
+    """
+    val args = _make_args(80, a0, a1, a2, a3, a4, a5)
+    val result = _handle_dev_enumerate(args)
+    result.value
+
+# ===========================================================================
+# syscall 81 — dev_get_info   [IMPLEMENTED]
+#
+# a0 = device ID
+# a1 = pointer to output DeviceInfo struct (user VA)
+# a2..a5 unused
+# returns 0 on success, negative errno on failure
+# ===========================================================================
+@export("C", name: "spl_handle_dev_get_info")
+fn spl_handle_dev_get_info(a0: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64) -> i64:
+    """Strong override for the weak spl_handle_dev_get_info stub.
+
+    Forwards to _handle_dev_get_info() in syscall.spl.
+    Syscall number 81: retrieve detailed information about a specific device.
+    """
+    val args = _make_args(81, a0, a1, a2, a3, a4, a5)
+    val result = _handle_dev_get_info(args)
+    result.value
+
+# ===========================================================================
+# syscall 82 — device_grant   [IMPLEMENTED]
+#
+# Fetches the caller's TaskId from the scheduler singleton at the moment of
+# dispatch.  This is valid because SYSCALL entry is single-threaded and the
+# scheduler always knows which task issued the call.
+# ===========================================================================
+
+@allow(primitive_api)
+@export("C", name: "spl_handle_device_grant")
+fn spl_handle_device_grant(a0: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64) -> i64:
+    """Strong override for the weak spl_handle_device_grant stub.
+
+    Extracts the caller's TaskId from the scheduler singleton (valid because
+    SYSCALL entry is single-threaded and the scheduler always knows which
+    task issued the call) and passes it through to _handle_device_grant.
+    """
+    val args = _make_args(82, a0, a1, a2, a3, a4, a5)
+    val caller = g_shim_scheduler.get_current()
+    val result = _handle_device_grant(args, g_shim_scheduler, caller)
+    result.value
+
+# ===========================================================================
+# syscall 83 — map_bar   [IMPLEMENTED]
+#
+# a0 = device ID
+# a1 = BAR index (0-5)
+# a2 = pointer to output mapped address (user VA)
+# a3..a5 unused
+# returns 0 on success, negative errno on failure
+# ===========================================================================
+@export("C", name: "spl_handle_map_bar")
+fn spl_handle_map_bar(a0: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64) -> i64:
+    """Strong override for the weak spl_handle_map_bar stub.
+
+    Forwards to _handle_map_bar() in syscall.spl.
+    Syscall number 83: map a PCI Base Address Register into user address space.
+    """
+    val args = _make_args(83, a0, a1, a2, a3, a4, a5)
+    val result = _handle_map_bar(args)
+    result.value
+
+# ===========================================================================
+# syscall 84 — alloc_dma   [IMPLEMENTED]
+#
+# a0 = size in bytes
+# a1 = alignment (power-of-two, minimum 4096)
+# a2 = pointer to output physical address (user VA)
+# a3..a5 unused
+# returns virtual address on success, negative errno on failure
+# ===========================================================================
+@export("C", name: "spl_handle_alloc_dma")
+fn spl_handle_alloc_dma(a0: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64) -> i64:
+    """Strong override for the weak spl_handle_alloc_dma stub.
+
+    Forwards to _handle_alloc_dma() in syscall.spl.
+    Syscall number 84: allocate physically-contiguous DMA-safe memory.
+    """
+    val args = _make_args(84, a0, a1, a2, a3, a4, a5)
+    val result = _handle_alloc_dma(args)
+    result.value
+
+# ===========================================================================
+# syscall 85 — free_dma   [IMPLEMENTED]
+#
+# a0 = virtual address previously returned by alloc_dma
+# a1 = size in bytes
+# a2..a5 unused
+# returns 0 on success, negative errno on failure
+# ===========================================================================
+@export("C", name: "spl_handle_free_dma")
+fn spl_handle_free_dma(a0: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64) -> i64:
+    """Strong override for the weak spl_handle_free_dma stub.
+
+    Forwards to _handle_free_dma() in syscall.spl.
+    Syscall number 85: release a DMA buffer previously allocated with alloc_dma.
+    """
+    val args = _make_args(85, a0, a1, a2, a3, a4, a5)
+    val result = _handle_free_dma(args)
+    result.value
+
+# ===========================================================================
+# syscall 90 — log_write   [IMPLEMENTED]
+#
+# a0 = log level (0=TRACE, 1=DEBUG, 2=INFO, 3=WARN, 4=ERROR)
+# a1 = pointer to message string (user VA)
+# a2 = message length in bytes
+# a3..a5 unused
+# returns 0 on success, negative errno on failure
+# ===========================================================================
+@export("C", name: "spl_handle_log_write")
+fn spl_handle_log_write(a0: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64) -> i64:
+    """Strong override for the weak spl_handle_log_write stub.
+
+    Forwards to _handle_log_write() in syscall.spl.
+    Syscall number 90: write a structured log entry to the kernel log ring.
+    """
+    val args = _make_args(90, a0, a1, a2, a3, a4, a5)
+    val result = _handle_log_write(args, g_shim_scheduler, g_shim_klog)
+    result.value
+
+# ===========================================================================
+# syscall 91 — log_read   [IMPLEMENTED]
+#
+# a0 = pointer to output buffer (user VA)
+# a1 = buffer capacity in bytes
+# a2 = start sequence number (0 = oldest available)
+# a3..a5 unused
+# returns bytes written to buffer, or negative errno
+# ===========================================================================
+@export("C", name: "spl_handle_log_read")
+fn spl_handle_log_read(a0: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64) -> i64:
+    """Strong override for the weak spl_handle_log_read stub.
+
+    Forwards to _handle_log_read() in syscall.spl.
+    Syscall number 91: read entries from the kernel log ring buffer.
+    """
+    val args = _make_args(91, a0, a1, a2, a3, a4, a5)
+    val result = _handle_log_read(args, g_shim_klog)
+    result.value
+
+# ===========================================================================
+# syscall 95 — sysinfo   [IMPLEMENTED]
+#
+# a0 = pointer to output SysInfo struct (user VA)
+# a1..a5 unused
+# returns 0 on success, negative errno on failure
+# ===========================================================================
+@export("C", name: "spl_handle_sysinfo")
+fn spl_handle_sysinfo(a0: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64) -> i64:
+    """Strong override for the weak spl_handle_sysinfo stub.
+
+    Forwards to _handle_sysinfo() in syscall.spl.
+    Syscall number 95: return system-wide resource statistics.
+    """
+    val args = _make_args(95, a0, a1, a2, a3, a4, a5)
+    val result = _handle_sysinfo(args, g_shim_scheduler)
+    result.value
+
+# ===========================================================================
+# syscall 96 — get_hostname   [IMPLEMENTED]
+#
+# a0..a5 unused
+# returns pointer to null-terminated hostname string (kernel VA), or 0
+# ===========================================================================
+@export("C", name: "spl_handle_get_hostname")
+fn spl_handle_get_hostname(a0: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64) -> i64:
+    """Strong override for the weak spl_handle_get_hostname stub.
+
+    Forwards to _handle_get_hostname() in syscall.spl.
+    Syscall number 96: retrieve the system hostname.
+    Note: _handle_get_hostname takes no arguments.
+    """
+    val result = _handle_get_hostname()
+    result.value
+
+# ===========================================================================
+# syscall 97 — set_hostname   [IMPLEMENTED]
+#
+# a0 = pointer to hostname string (user VA)
+# a1 = hostname length in bytes
+# a2..a5 unused
+# returns 0 on success, negative errno on failure
+# ===========================================================================
+@export("C", name: "spl_handle_set_hostname")
+fn spl_handle_set_hostname(a0: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64) -> i64:
+    """Strong override for the weak spl_handle_set_hostname stub.
+
+    Forwards to _handle_set_hostname() in syscall.spl.
+    Syscall number 97: set the system hostname.
+    """
+    val args = _make_args(97, a0, a1, a2, a3, a4, a5)
+    val result = _handle_set_hostname(args)
+    result.value
+
+# ============================================================================
+# IF-01 Wave-3 Scaffolds — Fork/Exec/Wait/Pipe/Dup2
+# ============================================================================
+# All five dispatch to scheduler::clone_task / exec_into / wait_for in wave-4.
+# Wave-3 returns ENOSYS (-38) so userspace linking resolves and callers
+# can fail loudly instead of deadlocking.
+
+@export("C", name: "spl_handle_fork")
+fn spl_handle_fork(a0: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64) -> i64:
+    """Strong override for the weak spl_handle_fork stub.
+
+    Syscall number 57: clone the calling task into a new child.
+    Wave-3 scaffold returns -38 (ENOSYS); wave-4 calls scheduler.clone_task().
+    """
+    val _a = _make_args(57, a0, a1, a2, a3, a4, a5)
+    -38
+
+@export("C", name: "spl_handle_exec")
+fn spl_handle_exec(a0: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64) -> i64:
+    """Strong override for the weak spl_handle_exec stub.
+
+    Syscall number 59: execve(path, argv, envp).
+    Wave-3 scaffold returns -38; wave-4 calls scheduler.exec_into().
+    """
+    val _a = _make_args(59, a0, a1, a2, a3, a4, a5)
+    -38
+
+@export("C", name: "spl_handle_wait")
+fn spl_handle_wait(a0: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64) -> i64:
+    """Strong override for the weak spl_handle_wait stub.
+
+    Syscall number 61: wait4(pid, wstatus, options, rusage).
+    Wave-3 scaffold returns -38; wave-4 calls scheduler.wait_for().
+    """
+    val _a = _make_args(61, a0, a1, a2, a3, a4, a5)
+    -38
+
+@export("C", name: "spl_handle_pipe")
+fn spl_handle_pipe(a0: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64) -> i64:
+    """Strong override for the weak spl_handle_pipe stub.
+
+    Syscall number 22: pipe(int fd[2]).
+    Wave-3 scaffold returns -38; wave-4 allocates a pipe pair via IPC.
+    """
+    val _a = _make_args(22, a0, a1, a2, a3, a4, a5)
+    -38
+
+@export("C", name: "spl_handle_dup2")
+fn spl_handle_dup2(a0: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64) -> i64:
+    """Strong override for the weak spl_handle_dup2 stub.
+
+    Syscall number 33: dup2(oldfd, newfd).
+    Wave-3 scaffold returns -38; wave-4 copies the fd in the task's FD table.
+    """
+    val _a = _make_args(33, a0, a1, a2, a3, a4, a5)
+    -38

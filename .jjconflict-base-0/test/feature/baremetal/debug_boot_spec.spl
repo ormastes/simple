@@ -1,0 +1,174 @@
+"""
+# Debug Boot with GDB Integration
+
+**Category:** Baremetal
+**Status:** In Progress
+
+## Overview
+
+Tests debug-enabled boot sequences with GDB integration using a self-contained
+harness. Models the QEMU/GDB flow with local doubles to verify debug boot
+configuration, breakpoint placement, and symbol loading.
+"""
+# Debug Boot Testing with GDB Integration
+#
+# Self-contained harness for debug-enabled boot testing.
+# The real QEMU/GDB flow is modeled with local doubles so the spec
+# remains parser-safe and executable in the runtime test runner.
+
+fn check(condition: bool):
+    expect(condition).to_equal(true)
+
+class DebugSession:
+    target: text
+    qemu_available: bool
+    gdb_available: bool
+    connected: bool
+    breakpoints: [text]
+    step_count: i64
+    crash_kind: text
+    crash_trace: text
+
+    static fn create(target: text, qemu_available: bool, gdb_available: bool) -> DebugSession:
+        DebugSession(
+            target: target,
+            qemu_available: qemu_available,
+            gdb_available: gdb_available,
+            connected: false,
+            breakpoints: [],
+            step_count: 0,
+            crash_kind: "",
+            crash_trace: ""
+        )
+
+    fn can_connect() -> bool:
+        self.qemu_available and self.gdb_available
+
+    fn connect() -> bool:
+        self.connected = self.can_connect()
+        self.connected
+
+    fn add_breakpoint(name: text):
+        self.breakpoints = self.breakpoints + [name]
+
+    fn has_breakpoint(name: text) -> bool:
+        self.breakpoints.contains(name)
+
+    fn read_registers() -> text:
+        if self.connected:
+            "pc=0x1000 sp=0x2000"
+        else:
+            "disconnected"
+
+    fn single_step() -> bool:
+        if self.connected:
+            self.step_count = self.step_count + 1
+            true
+        else:
+            false
+
+    fn capture_crash(kind: text):
+        self.crash_kind = kind
+        self.crash_trace = "stack:main->debug_boot->{kind}"
+
+    fn analyze_crash() -> text:
+        if self.crash_kind == "":
+            "no crash"
+        else:
+            "analysis:{self.crash_kind}:{self.crash_trace}"
+
+    fn debug_info() -> text:
+        "target={self.target};connected={self.connected};bps={self.breakpoints.len()};steps={self.step_count}"
+
+describe "Debug Connection":
+    it "can connect when qemu and gdb are available":
+        val session = DebugSession.create("x86", true, true)
+        check(session.can_connect())
+        check(session.connect())
+        check(session.connected)
+
+    it "does not connect when qemu is missing":
+        val session = DebugSession.create("x86", false, true)
+        check(not session.can_connect())
+        check(not session.connect())
+
+    it "does not connect when gdb is missing":
+        val session = DebugSession.create("x86", true, false)
+        check(not session.can_connect())
+        check(not session.connect())
+
+    it "reads registers after connection":
+        val session = DebugSession.create("x86", true, true)
+        session.connect()
+        check(session.read_registers().contains("pc=0x1000"))
+        check(session.read_registers().contains("sp=0x2000"))
+
+describe "Crash Analysis":
+    it "detects null pointer crashes":
+        val session = DebugSession.create("x86", true, true)
+        session.capture_crash("null_pointer")
+        check(session.analyze_crash().contains("null_pointer"))
+        check(session.analyze_crash().contains("stack:main"))
+
+    it "extracts stack traces":
+        val session = DebugSession.create("arm", true, true)
+        session.capture_crash("stack_overflow")
+        check(session.analyze_crash().contains("stack_overflow"))
+        check(session.analyze_crash().contains("debug_boot"))
+
+    it "shows register state on crash":
+        val session = DebugSession.create("riscv", true, true)
+        session.connect()
+        session.capture_crash("illegal_instruction")
+        check(session.read_registers().contains("pc=0x1000"))
+        check(session.analyze_crash().contains("illegal_instruction"))
+
+describe "Debug Output":
+    it "formats debug info":
+        val session = DebugSession.create("x86", true, true)
+        session.connect()
+        session.add_breakpoint("entry")
+        session.single_step()
+        check(session.debug_info().contains("target=x86"))
+        check(session.debug_info().contains("connected=true"))
+        check(session.debug_info().contains("bps=1"))
+        check(session.debug_info().contains("steps=1"))
+
+describe "Multi-Architecture Debug":
+    it "supports x86 targets":
+        val session = DebugSession.create("x86", true, true)
+        check(session.target == "x86")
+        check(session.can_connect())
+
+    it "supports ARM targets":
+        val session = DebugSession.create("arm", true, true)
+        check(session.target == "arm")
+        check(session.can_connect())
+
+    it "supports RISC-V targets":
+        val session = DebugSession.create("riscv", true, true)
+        check(session.target == "riscv")
+        check(session.can_connect())
+
+describe "Breakpoint Management":
+    it "stores multiple breakpoints":
+        val session = DebugSession.create("x86", true, true)
+        session.add_breakpoint("entry")
+        session.add_breakpoint("panic")
+        check(session.has_breakpoint("entry"))
+        check(session.has_breakpoint("panic"))
+
+    it "continues after a breakpoint":
+        val session = DebugSession.create("x86", true, true)
+        session.connect()
+        session.add_breakpoint("entry")
+        check(session.single_step())
+        check(session.step_count == 1)
+
+describe "Single-Step Debugging":
+    it "single-steps through code":
+        val session = DebugSession.create("x86", true, true)
+        session.connect()
+        check(session.single_step())
+        check(session.single_step())
+        check(session.step_count == 2)

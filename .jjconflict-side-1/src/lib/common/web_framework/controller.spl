@@ -1,0 +1,288 @@
+"""
+# Controller
+
+Controller context and response helpers. Controllers use composition
+via ControllerContext rather than inheritance.
+
+A controller action receives a ControllerContext and returns an
+HttpResponseData. Helper functions simplify common response patterns.
+
+## Usage
+
+```simple
+fn index(ctx: ControllerContext) -> HttpResponseData:
+    var data = {"title": "Posts"}
+    render_page(ctx, "posts/index.html", data)
+
+fn create(ctx: ControllerContext) -> HttpResponseData:
+    val name = ctx.params.get("name") ?? ""
+    if name.len() == 0:
+        return render_error(400, "Name is required")
+    render_redirect("/posts")
+
+fn api_list(ctx: ControllerContext) -> HttpResponseData:
+    render_json("[{\"id\": 1}]")
+```
+"""
+
+use std.http_server.types.{HttpRequestData, HttpResponseData}
+use std.http_server.response.{build_html, build_json, build_text, build_redirect, build_error, build_ok}
+use std.web_framework.flash.{FlashMessage}
+
+# ============================================================================
+# Controller Context
+# ============================================================================
+
+class ControllerContext:
+    """Context passed to every controller action.
+
+    Aggregates the request, session, flash messages, and merged
+    parameters (route params + query params + body params).
+    Controllers access everything they need through this single object.
+    """
+    request: HttpRequestData
+    session_data: Dict<text, text>
+    flash_messages: [FlashMessage]
+    params: Dict<text, text>
+    current_user_id: text?
+
+fn make_context(request: HttpRequestData,
+                session_data: Dict<text, text>,
+                flash_messages: [FlashMessage],
+                params: Dict<text, text>,
+                user_id: text?) -> ControllerContext:
+    """Create a controller context from its parts.
+
+    Args:
+        request: HTTP request data
+        session_data: Current session key-value data
+        flash_messages: Flash messages from previous request
+        params: Merged route + query + body parameters
+        user_id: Authenticated user ID or nil
+
+    Returns:
+        ControllerContext ready for controller action
+    """
+    ControllerContext(
+        request: request,
+        session_data: session_data,
+        flash_messages: flash_messages,
+        params: params,
+        current_user_id: user_id
+    )
+
+# ============================================================================
+# Response Helpers
+# ============================================================================
+
+fn render_page(ctx: ControllerContext, view_path: text, data: Dict<text, text>) -> HttpResponseData:
+    """Render an HTML page using the template engine.
+
+    Reads the template file at view_path, merges data with flash
+    messages and session info, and renders via the template engine.
+
+    Args:
+        ctx: Controller context
+        view_path: Path to the template file
+        data: Template variables
+
+    Returns:
+        200 OK HTML response with rendered content
+    """
+    # Read template file
+    val template_content = read_template_file(view_path)
+    if template_content.len() == 0:
+        return build_error(500, "Template not found: {view_path}")
+
+    # Build template context with data + flash messages + user info
+    var template_data = data
+    if ctx.current_user_id != nil:
+        template_data["current_user_id"] = ctx.current_user_id ?? ""
+
+    # Add flash messages as HTML
+    if ctx.flash_messages.len() > 0:
+        var flash_html: [text] = []
+        for msg in ctx.flash_messages:
+            val flash_type = match msg.flash_type:
+                FlashType.Success: "success"
+                FlashType.Error: "error"
+                FlashType.Warning: "warning"
+                FlashType.Info: "info"
+                _: "info"
+            flash_html.push("<div class=\"flash flash-{flash_type}\">{msg.message}</div>")
+        template_data["_flash_html"] = flash_html.join("\n")
+
+    # Simple template rendering: replace {{key}} with values
+    var rendered = template_content
+    for key in template_data.keys():
+        val value = template_data.get(key) ?? ""
+        rendered = rendered.replace("{{" + key + "}}", value)
+
+    build_html(rendered)
+
+fn render_json(data: text) -> HttpResponseData:
+    """Return a JSON response.
+
+    Args:
+        data: JSON string body
+
+    Returns:
+        200 OK application/json response
+    """
+    build_json(data)
+
+fn render_redirect(url: text) -> HttpResponseData:
+    """Return a 302 redirect response.
+
+    Args:
+        url: URL to redirect to
+
+    Returns:
+        302 Found redirect response
+    """
+    build_redirect(url, 302)
+
+fn render_redirect_permanent(url: text) -> HttpResponseData:
+    """Return a 301 permanent redirect response.
+
+    Args:
+        url: URL to redirect to
+
+    Returns:
+        301 Moved Permanently redirect response
+    """
+    build_redirect(url, 301)
+
+fn render_text(content: text) -> HttpResponseData:
+    """Return a plain text response.
+
+    Args:
+        content: Text body
+
+    Returns:
+        200 OK text/plain response
+    """
+    build_text(content)
+
+fn render_html(content: text) -> HttpResponseData:
+    """Return an HTML response with raw HTML content.
+
+    Args:
+        content: HTML string body
+
+    Returns:
+        200 OK text/html response
+    """
+    build_html(content)
+
+fn render_error(status: i64, message: text) -> HttpResponseData:
+    """Return an error response.
+
+    Args:
+        status: HTTP status code
+        message: Error message
+
+    Returns:
+        Error response with HTML body
+    """
+    build_error(status, message)
+
+fn render_not_found() -> HttpResponseData:
+    """Return a 404 Not Found response."""
+    build_error(404, "The requested resource was not found.")
+
+fn render_forbidden() -> HttpResponseData:
+    """Return a 403 Forbidden response."""
+    build_error(403, "You do not have permission to access this resource.")
+
+fn render_created(body: text) -> HttpResponseData:
+    """Return a 201 Created response.
+
+    Args:
+        body: Response body (typically JSON of created resource)
+
+    Returns:
+        201 Created response
+    """
+    HttpResponseData(
+        status: 201,
+        reason: "Created",
+        headers: [
+            ("Content-Type", "application/json"),
+            ("Server", "SimpleServer")
+        ],
+        body: body,
+        body_file: "",
+        body_offset: 0,
+        body_length: 0,
+        chunked: false
+    )
+
+fn render_no_content() -> HttpResponseData:
+    """Return a 204 No Content response (e.g., after DELETE)."""
+    HttpResponseData(
+        status: 204,
+        reason: "No Content",
+        headers: [("Server", "SimpleServer")],
+        body: "",
+        body_file: "",
+        body_offset: 0,
+        body_length: 0,
+        chunked: false
+    )
+
+# ============================================================================
+# Template File Reading
+# ============================================================================
+
+fn read_template_file(path: text) -> text:
+    """Read a template file from disk.
+
+    Args:
+        path: File path to template
+
+    Returns:
+        Template content or empty string if not found
+    """
+    val content = rt_file_read_text(path)
+    content
+
+extern fn rt_file_read_text(path: text) -> text
+
+# ============================================================================
+# Parameter Helpers
+# ============================================================================
+
+fn get_param(ctx: ControllerContext, key: text) -> text:
+    """Get a parameter value from the context, or empty string."""
+    ctx.params.get(key) ?? ""
+
+fn get_param_or(ctx: ControllerContext, key: text, default: text) -> text:
+    """Get a parameter value with a default."""
+    val value = ctx.params.get(key)
+    if value != nil:
+        return value ?? default
+    default
+
+fn get_param_i64(ctx: ControllerContext, key: text) -> i64:
+    """Get a parameter as an integer, defaulting to 0."""
+    val value = ctx.params.get(key) ?? "0"
+    value.to_i64() ?? 0
+
+fn has_param(ctx: ControllerContext, key: text) -> bool:
+    """Check if a parameter exists in the context."""
+    ctx.params.get(key) != nil
+
+fn get_header(ctx: ControllerContext, name: text) -> text:
+    """Get a request header value by name (case-insensitive)."""
+    val lower_name = name.to_lower()
+    for header in ctx.request.headers:
+        if header.0.to_lower() == lower_name:
+            return header.1
+    ""
+
+fn is_json_request(ctx: ControllerContext) -> bool:
+    """Check if the request expects JSON (Accept or Content-Type)."""
+    val accept = get_header(ctx, "accept")
+    val ct = get_header(ctx, "content-type")
+    accept.contains("application/json") or ct.contains("application/json")

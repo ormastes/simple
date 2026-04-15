@@ -1,0 +1,243 @@
+# x86_64 Interrupt HAL — IDT, APIC, PIC
+#
+# HAL-compatible wrapper for the x86_64 interrupt subsystem.
+# Delegates to the existing fully-implemented modules:
+#   - os.kernel.interrupts.idt   (IDT setup, handler table, dispatch)
+#   - os.kernel.interrupts.apic  (Local APIC init, EOI)
+#   - os.kernel.interrupts.pic   (legacy 8259 PIC disable/masking)
+#   - os.kernel.arch.x86_64.cpu  (CLI/STI/HLT wrappers)
+
+use os.kernel.interrupts.idt.{idt_init, idt_set_handler, idt_register_handler,
+    VEC_IRQ_BASE, VEC_SPURIOUS}
+use os.kernel.interrupts.apic.{apic_init, apic_eoi, apic_write, apic_read,
+    APIC_BASE, APIC_REG_EOI}
+use os.kernel.interrupts.pic.{pic_disable}
+use os.kernel.arch.x86_64.cpu.{cli, sti}
+use os.kernel.arch.x86_64.trap_runtime.{X86TrapRuntime}
+use os.kernel.types.task_types.{TaskContext}
+use os.kernel.types.syscall_types.{SyscallArgs, SyscallResult, KLogEntry}
+use os.kernel.scheduler.scheduler.{Scheduler}
+use os.kernel.ipc.ipc.{IpcManager}
+use os.kernel.log.klog.{KernelLog}
+use os.kernel.ipc.syscall.{syscall_handler, dispatch_spawn_binary_direct}
+use std.baremetal.x86.io.{outb, inb}
+
+# ============================================================================
+# PIC Port Constants (for IRQ mask control when PIC is in use)
+# ============================================================================
+
+val PIC1_CMD_PORT: i32  = 0x20
+val PIC1_DATA_PORT: i32 = 0x21
+val PIC2_CMD_PORT: i32  = 0xA0
+val PIC2_DATA_PORT: i32 = 0xA1
+
+val PIC_EOI: i32 = 0x20    # End-of-interrupt command byte
+
+# ============================================================================
+# X86Interrupt
+# ============================================================================
+
+struct X86Interrupt:
+    """x86_64 interrupt management (IDT + APIC/PIC).
+
+    Thin HAL wrapper that delegates to the existing interrupt subsystem
+    modules in os.kernel.interrupts/.
+    """
+    pass_dn
+
+# ============================================================================
+# Runtime Ownership
+# ============================================================================
+
+var g_trap_runtime_installed: bool = false
+var g_trap_runtime: X86TrapRuntime? = nil
+
+impl X86Interrupt:
+    fn init():
+        """Initialize IDT with 256 entries, remap and disable legacy PIC,
+        then initialize the Local APIC.
+
+        After this call, interrupts are NOT enabled — caller must call
+        enable() (STI) when ready.
+        """
+        # Set up the 256-entry IDT with exception handlers
+        idt_init()
+
+        # APIC init handles: PIC disable, APIC enable via MSR, SVR setup,
+        # TPR=0, ESR clear, initial EOI, mask all LVT, calibrate timer
+        apic_init()
+
+    fn install_runtime(scheduler: Scheduler, ipc: IpcManager, klog: KernelLog):
+        """Install the runtime objects used by trap/syscall dispatch."""
+        x86_install_runtime(scheduler, ipc, klog)
+
+    fn install_runtime_bundle(runtime: X86TrapRuntime):
+        """Install a precomposed runtime bundle for trap dispatch."""
+        x86_install_runtime_bundle(runtime)
+
+    fn install_bootstrap_runtime(log_capacity: u64):
+        """Install the minimal early-boot runtime bundle."""
+        x86_install_bootstrap_runtime(log_capacity)
+
+    fn runtime_installed() -> bool:
+        """Report whether the x86_64 trap runtime has been installed."""
+        x86_runtime_installed()
+
+    fn enable():
+        """Enable maskable interrupts (STI instruction)."""
+        sti()
+
+    fn disable():
+        """Disable maskable interrupts (CLI instruction)."""
+        cli()
+
+    fn register_handler(vector: u64, handler_addr: u64):
+        """Register an interrupt handler for a given vector number.
+
+        Sets the IDT entry so the CPU dispatches to handler_addr when
+        this vector fires. The handler_addr must point to a valid ISR
+        stub that saves context and calls the handler table.
+        """
+        idt_set_handler(vector as u32, handler_addr, 0)
+
+    fn unregister_handler(vector: u64):
+        """Remove interrupt handler for a given vector.
+
+        Restores the vector to a default no-op handler by installing
+        _default_unhandled as the high-level handler.
+        """
+        idt_register_handler(vector as u32, _default_unhandled)
+
+    fn send_eoi(vector: u64):
+        """Send End-Of-Interrupt for the given vector.
+
+        For vectors in the PIC range (32-47), sends EOI to the legacy
+        PIC(s) as well. For all vectors, sends EOI to the Local APIC.
+
+        PIC EOI protocol:
+        - Master PIC (IRQ 0-7, vectors 32-39): outb 0x20, 0x20
+        - Slave PIC (IRQ 8-15, vectors 40-47): outb 0xA0, 0x20 then outb 0x20, 0x20
+        """
+        val vec = vector as u32
+
+        # If this is a slave PIC IRQ (vectors 40-47), EOI the slave first
+        if vec >= 40 and vec < 48:
+            outb(PIC2_CMD_PORT, PIC_EOI)
+
+        # If this is any PIC IRQ (vectors 32-47), EOI the master
+        if vec >= 32 and vec < 48:
+            outb(PIC1_CMD_PORT, PIC_EOI)
+
+        # Always send LAPIC EOI (write 0 to EOI register)
+        apic_eoi()
+
+    fn set_irq_mask(irq: u64, masked: bool):
+        """Mask or unmask a hardware IRQ line on the legacy PIC.
+
+        irq: IRQ number 0-15
+        masked: true = disable IRQ, false = enable IRQ
+
+        IRQ 0-7 are on the master PIC (data port 0x21).
+        IRQ 8-15 are on the slave PIC (data port 0xA1).
+        Each bit in the mask register corresponds to one IRQ line.
+        """
+        if irq > 15:
+            return
+
+        var port = PIC1_DATA_PORT
+        var bit = irq
+        if irq >= 8:
+            port = PIC2_DATA_PORT
+            bit = irq - 8
+
+        val current_mask = inb(port)
+        val bit_mask = 1 << (bit as i32)
+
+        if masked:
+            # Set the bit to mask (disable) the IRQ
+            outb(port, current_mask | bit_mask)
+        else:
+            # Clear the bit to unmask (enable) the IRQ
+            outb(port, current_mask & (bit_mask ^ 0xFF))
+
+    fn acknowledge():
+        """Acknowledge the current interrupt by sending EOI to the Local APIC.
+
+        This is the generic EOI path used when the specific vector is not
+        known (e.g., from a timer or IPI handler). For PIC-routed IRQs,
+        use send_eoi(vector) instead to also acknowledge the PIC.
+        """
+        apic_eoi()
+
+# ============================================================================
+# Default Handler
+# ============================================================================
+
+fn _default_unhandled(ctx: TaskContext):
+    """Default handler installed when a vector is unregistered.
+    Silently ignores the interrupt.
+    """
+    pass_dn
+
+fn _log_bridge_failure(message: text):
+    """Record x86 bridge/runtime failures in the installed kernel log."""
+    if g_trap_runtime != nil:
+        var runtime = g_trap_runtime.unwrap()
+        runtime.klog.write(3, 0, 0, message)
+        g_trap_runtime = Some(runtime)
+
+fn x86_install_runtime(scheduler: Scheduler, ipc: IpcManager, klog: KernelLog):
+    """Install the kernel runtime objects used by the x86_64 trap bridge."""
+    g_trap_runtime = Some(X86TrapRuntime.new(scheduler, ipc, klog))
+    g_trap_runtime_installed = true
+
+fn x86_install_runtime_bundle(runtime: X86TrapRuntime):
+    """Install a precomposed runtime bundle for x86_64 trap dispatch."""
+    g_trap_runtime = Some(runtime)
+    g_trap_runtime_installed = true
+
+fn x86_install_bootstrap_runtime(log_capacity: u64):
+    """Install the minimal early-boot runtime bundle."""
+    g_trap_runtime = Some(X86TrapRuntime.bootstrap(log_capacity))
+    g_trap_runtime_installed = true
+
+fn x86_runtime_installed() -> bool:
+    """Report whether the x86_64 trap bridge has runtime objects installed."""
+    g_trap_runtime_installed and g_trap_runtime != nil
+
+fn x86_read_trap_log(min_level: u8, offset: u64, max_count: u64) -> [KLogEntry]:
+    """Read entries from the installed x86_64 trap runtime log buffer."""
+    if g_trap_runtime == nil:
+        return []
+    g_trap_runtime.unwrap().klog.read(min_level, offset, max_count)
+
+fn x86_dispatch_installed_syscall(args: SyscallArgs) -> Result<SyscallResult, text>:
+    """Dispatch syscall arguments through the installed x86_64 runtime."""
+    if not x86_runtime_installed():
+        val message = "x86 trap runtime is not installed"
+        _log_bridge_failure(message)
+        return Err(message)
+
+    val runtime = g_trap_runtime.unwrap()
+    Ok(syscall_handler(args, runtime.scheduler, runtime.ipc, runtime.klog))
+
+fn x86_dispatch_installed_syscall_abi(id: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u64, arg4: u64, arg5: u64) -> i64:
+    """C-callable primitive ABI for the installed x86_64 syscall bridge."""
+    if id == 13:
+        if not x86_runtime_installed():
+            return -38
+        val runtime = g_trap_runtime.unwrap()
+        return dispatch_spawn_binary_direct(arg0, arg1, arg2, runtime.scheduler, runtime.klog)
+
+    val result = x86_dispatch_installed_syscall(SyscallArgs(
+        id: id,
+        arg0: arg0,
+        arg1: arg1,
+        arg2: arg2,
+        arg3: arg3,
+        arg4: arg4,
+        arg5: arg5
+    ))
+    if result.is_err():
+        return -38
+    result.unwrap().value

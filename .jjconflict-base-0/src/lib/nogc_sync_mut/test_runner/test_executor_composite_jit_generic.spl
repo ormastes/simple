@@ -1,0 +1,188 @@
+#![allow(unnamed_duplicate_typed_args)]
+@allow(unnamed_duplicate_typed_args)
+# Generic Composite JIT Helpers
+#
+# Shared QEMU/STM32WB JIT runner helpers extracted out of the STM32H7-first
+# composite runner so STM32H7 can load without the generic enum-heavy paths.
+
+use test_runner_types.{TestFileResult, TestOptions}
+use std.io.{time_now_unix_micros}
+use std.io_runtime.{shell}
+use std.nogc_sync_mut.debug.remote.types.{Architecture}
+use std.nogc_sync_mut.debug.remote.exec.{ExecResult, MemoryMap}
+use std.nogc_sync_mut.debug.remote.exec.manager.{RemoteExecutionManager}
+use std.nogc_sync_mut.debug.remote.exec.adapter_qemu_rv32.{QemuRv32Adapter}
+use std.nogc_sync_mut.debug.remote.exec.adapter_qemu_arm.{QemuArmAdapter}
+use std.nogc_sync_mut.debug.remote.exec.adapter_stm32wb.{Stm32WbAdapter}
+use std.nogc_sync_mut.debug.remote.exec.adapter_stm32h7.{Stm32H7Adapter}
+use std.nogc_sync_mut.debug.remote.exec.adapter_ch32v307.{Ch32V307Adapter}
+use std.nogc_sync_mut.debug.remote.exec.adapter_trace32.{Trace32Adapter}
+use std.nogc_sync_mut.debug.remote.exec.adapter_ghdl_rv32.{GhdlRv32Adapter}
+use std.nogc_sync_mut.debug.remote.exec.compiler_bridge.{compile_remote_binary}
+use std.nogc_sync_mut.jit.jit_types.{JitBinary}
+use std.nogc_sync_mut.jit.jit_layout.{plan_binary_layout}
+
+fn run_test_file_jit_qemu_rv32(file_path: text, source: text, options: TestOptions) -> TestFileResult:
+    var adapter = QemuRv32Adapter.new()
+    run_test_file_jit_with_adapter(
+        file_path, source, options,
+        Architecture.RiscV32, MemoryMap.qemu_rv32(),
+        \: adapter.connect(),
+        \: adapter.create_manager(),
+        \: adapter.disconnect()
+    )
+
+fn run_test_file_jit_qemu_arm(file_path: text, source: text, options: TestOptions) -> TestFileResult:
+    var adapter = QemuArmAdapter.new()
+    run_test_file_jit_with_adapter(
+        file_path, source, options,
+        Architecture.Arm32, MemoryMap.qemu_arm(),
+        \: adapter.connect(),
+        \: adapter.create_manager(),
+        \: adapter.disconnect()
+    )
+
+fn run_test_file_jit_stm32wb(file_path: text, source: text, options: TestOptions) -> TestFileResult:
+    var adapter = Stm32WbAdapter.new()
+    run_test_file_jit_with_adapter(
+        file_path, source, options,
+        Architecture.Arm32, MemoryMap.stm32wb(),
+        \: adapter.connect(),
+        \: adapter.create_manager(),
+        \: adapter.disconnect()
+    )
+
+fn run_test_file_jit_stm32h7_adapter(file_path: text, source: text, options: TestOptions) -> TestFileResult:
+    var adapter = Stm32H7Adapter.new()
+    run_test_file_jit_with_adapter(
+        file_path, source, options,
+        Architecture.Arm32, MemoryMap.stm32h7(),
+        \: adapter.connect(),
+        \: adapter.create_manager(),
+        \: adapter.disconnect()
+    )
+
+fn run_test_file_jit_ch32v307(file_path: text, source: text, options: TestOptions) -> TestFileResult:
+    val setup_start = time_now_unix_micros()
+    val wlink = shell("command -v wlink >/dev/null 2>&1")
+    val detected = shell("timeout 10 wlink status --chip CH32V30X 2>&1")
+    val setup_end = time_now_unix_micros()
+    val setup_ms = (setup_end - setup_start) / 1000
+
+    if wlink.exit_code != 0:
+        return TestFileResult(path: file_path, passed: 0, failed: 0, skipped: 1, pending: 0,
+            duration_ms: 0, setup_ms: setup_ms,
+            error: "CH32V307 direct hardware path unavailable: wlink not installed", timed_out: false, cached: false)
+
+    val combined = detected.stdout + detected.stderr
+    if detected.exit_code != 0 or not combined.contains("CH32V307"):
+        return TestFileResult(path: file_path, passed: 0, failed: 0, skipped: 1, pending: 0,
+            duration_ms: 0, setup_ms: setup_ms,
+            error: "CH32V307 direct hardware path unavailable: probe not detected through wlink", timed_out: false, cached: false)
+
+    var adapter = Ch32V307Adapter.new()
+    run_test_file_jit_with_adapter(
+        file_path, source, options,
+        Architecture.RiscV32, MemoryMap.ch32v307(),
+        \: adapter.connect(),
+        \: adapter.create_manager(),
+        \: adapter.disconnect()
+    )
+
+fn run_test_file_jit_ghdl_rv32(file_path: text, source: text, options: TestOptions) -> TestFileResult:
+    var adapter = GhdlRv32Adapter.new()
+    run_test_file_jit_with_adapter(
+        file_path, source, options,
+        Architecture.RiscV32, MemoryMap.ghdl_rv32(),
+        \: adapter.connect(),
+        \: adapter.create_manager(),
+        \: adapter.disconnect()
+    )
+
+fn run_test_file_jit_trace32_stm32h7(file_path: text, source: text, options: TestOptions) -> TestFileResult:
+    var adapter = Trace32Adapter.for_stm32h7()
+    run_test_file_jit_with_adapter(
+        file_path, source, options,
+        Architecture.Arm32, MemoryMap.stm32h7(),
+        \: adapter.connect(),
+        \: adapter.create_manager(),
+        \: adapter.disconnect()
+    )
+
+fn run_test_file_jit_trace32_stm32wb(file_path: text, source: text, options: TestOptions) -> TestFileResult:
+    var adapter = Trace32Adapter.for_stm32wb()
+    run_test_file_jit_with_adapter(
+        file_path, source, options,
+        Architecture.Arm32, MemoryMap.stm32wb(),
+        \: adapter.connect(),
+        \: adapter.create_manager(),
+        \: adapter.disconnect()
+    )
+
+fn run_test_file_jit_with_adapter(
+    file_path: text,
+    source: text,
+    options: TestOptions,
+    arch: Architecture,
+    memory_map: MemoryMap,
+    connect_fn: fn() -> Result<text, text>,
+    create_manager_fn: fn() -> Result<RemoteExecutionManager, text>,
+    disconnect_fn: fn()
+) -> TestFileResult:
+    val setup_start = time_now_unix_micros()
+    val connect_result = connect_fn()
+    if connect_result.is_err():
+        val end = time_now_unix_micros()
+        return TestFileResult(path: file_path, passed: 0, failed: 1, skipped: 0, pending: 0,
+            duration_ms: 0, setup_ms: (end - setup_start) / 1000,
+            error: "JIT target connect failed: {connect_result.err().unwrap()}", timed_out: false, cached: false)
+
+    val compile_result = compile_remote_binary(source, arch, memory_map.code_start)
+    if compile_result.is_err():
+        disconnect_fn()
+        val end = time_now_unix_micros()
+        return TestFileResult(path: file_path, passed: 0, failed: 1, skipped: 0, pending: 0,
+            duration_ms: 0, setup_ms: (end - setup_start) / 1000,
+            error: "JIT compile failed: {compile_result.err().unwrap()}", timed_out: false, cached: false)
+
+    val bytes = compile_result.ok.unwrap()
+    val binary = JitBinary(name: file_path, bytes: bytes, entry_offset: 0, stack_bytes: 0, arch: arch)
+    val layout_result = plan_binary_layout(binary, memory_map, arch)
+    if layout_result.is_err():
+        disconnect_fn()
+        val end = time_now_unix_micros()
+        return TestFileResult(path: file_path, passed: 0, failed: 1, skipped: 0, pending: 0,
+            duration_ms: 0, setup_ms: (end - setup_start) / 1000,
+            error: "JIT layout failed: {layout_result.err().unwrap()}", timed_out: false, cached: false)
+
+    val manager_result = create_manager_fn()
+    if manager_result.is_err():
+        disconnect_fn()
+        val end = time_now_unix_micros()
+        return TestFileResult(path: file_path, passed: 0, failed: 1, skipped: 0, pending: 0,
+            duration_ms: 0, setup_ms: (end - setup_start) / 1000,
+            error: "JIT manager creation failed: {manager_result.err().unwrap()}", timed_out: false, cached: false)
+
+    val setup_end = time_now_unix_micros()
+    val setup_ms = (setup_end - setup_start) / 1000
+    var manager = manager_result.ok.unwrap()
+    val exec_result = manager.execute_bytes(file_path, bytes, [])
+    disconnect_fn()
+    make_jit_result(file_path, exec_result, options, setup_ms)
+
+fn make_jit_result(file_path: text, exec_result: Result<ExecResult, text>, options: TestOptions, setup_ms: i64) -> TestFileResult:
+    if exec_result.is_err():
+        return TestFileResult(path: file_path, passed: 0, failed: 1, skipped: 0, pending: 0,
+            duration_ms: options.timeout * 1000, setup_ms: setup_ms,
+            error: "JIT execute failed: {exec_result.err().unwrap()}", timed_out: false, cached: false)
+
+    val exec = exec_result.ok.unwrap()
+    if not exec.is_ok():
+        return TestFileResult(path: file_path, passed: 0, failed: 1, skipped: 0, pending: 0,
+            duration_ms: exec.duration_ms, setup_ms: setup_ms, error: exec.error, timed_out: false, cached: false)
+
+    val passed = if exec.return_value == 0: 1 else: 0
+    val failed = if exec.return_value == 0: 0 else: 1
+    val error = if exec.return_value == 0: "" else: "JIT program returned non-zero: {exec.return_value}"
+    TestFileResult(path: file_path, passed: passed, failed: failed, skipped: 0, pending: 0,
+        duration_ms: exec.duration_ms, setup_ms: setup_ms, error: error, timed_out: false, cached: false)

@@ -1,0 +1,68 @@
+# LLVM Native Linking Integration Tests
+#
+# Tests the complete LLVM native linking pipeline:
+# MIR → LLVM IR → .o + C runtime → native executable
+
+use compiler.backend.backend.runtime_compiler.{find_c_compiler, find_runtime_source_dir, compile_runtime_objects}
+use compiler.backend.backend.llvm_backend.{find_llc, llc_available}
+use compiler.backend.backend.entry_point.{generate_entry_point_ir}
+use compiler.backend.backend.llvm_native_link.{link_llvm_native, NativeLinkOptions}
+use std.io_runtime.*
+
+fn slow_it(name: text, block: fn()):
+    it(name, block)
+
+describe "LLVM Native Linking":
+    context "prerequisites":
+        slow_it "has C compiler available":
+            val cc = find_c_compiler()
+            # Most systems should have clang or gcc
+            if cc != "":
+                expect(cc.len()).to_be_greater_than(0)
+            else:
+                pending("C compiler unavailable")
+
+        slow_it "has runtime source directory":
+            val rt_dir = find_runtime_source_dir()
+            if rt_dir != "":
+                expect(rt_dir).to_contain("runtime")
+            else:
+                pending("runtime source directory unavailable")
+
+    context "entry point generation":
+        slow_it "generates valid LLVM IR for hosted entry point":
+            val ir = generate_entry_point_ir("test_program")
+            expect(ir).to_contain("@__simple_runtime_init")
+            expect(ir).to_contain("@__simple_main")
+            expect(ir).to_contain("@__simple_runtime_shutdown")
+            expect(ir).to_contain("define i32 @main")
+
+    context "runtime compilation":
+        slow_it "compiles runtime objects":
+            val cc = find_c_compiler()
+            val rt_dir = find_runtime_source_dir()
+            if cc == "" or rt_dir == "":
+                # Skip if prerequisites missing
+                pending("native link prerequisites not available")
+            else:
+                val result = compile_runtime_objects(false, false)
+                if result.is_ok():
+                    val objects = result.unwrap()
+                    expect(objects.len()).to_be_greater_than(0)
+                else:
+                    # May fail in CI without all headers
+                    pending("runtime compilation prerequisites not available")
+
+    context "native executable link":
+        slow_it "links a native executable when prerequisites are present":
+            val cc = find_c_compiler()
+            val rt_dir = find_runtime_source_dir()
+            if cc == "" or rt_dir == "":
+                pending("native link prerequisites not available")
+            else:
+                val output = "/tmp/simple_llvm_native_link_spec.out"
+                val opts = NativeLinkOptions.default()
+                val result = link_llvm_native([], output, opts)
+                expect(result.is_ok()).to_equal(true)
+                expect(file_exists(output)).to_equal(true)
+                file_delete(output)

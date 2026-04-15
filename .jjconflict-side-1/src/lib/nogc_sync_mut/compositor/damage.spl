@@ -1,0 +1,96 @@
+@allow(primitive_api)
+# Damage region tracking for incremental repaint.
+# Collects damaged rectangles, merges overlapping regions, and determines
+# whether a full repaint is needed based on damage coverage.
+#
+# Generic compositor module — no browser-specific dependencies.
+
+use std.common.engine.rect.{Rect2}
+use core.collections.{List}
+
+# ---------------------------------------------------------------------------
+# DamageTracker — accumulates and manages damage regions per frame.
+# ---------------------------------------------------------------------------
+
+class DamageTracker:
+    regions: List<Rect2>
+    trace_enabled: bool
+
+    static fn new() -> DamageTracker:
+        DamageTracker(regions: List.new(), trace_enabled: false)
+
+    static fn with_trace() -> DamageTracker:
+        DamageTracker(regions: List.new(), trace_enabled: true)
+
+    # Add a damaged rectangular region.
+    me add_damage(x: f64, y: f64, w: f64, h: f64):
+        if w <= 0.0 or h <= 0.0:
+            return
+        val rect = Rect2.new(x, y, w, h)
+        self.regions.push(rect)
+
+    # Merge all overlapping damage rects to reduce repaint work.
+    # Uses iterative pairwise merging until no more overlaps exist.
+    me merge_overlapping():
+        var changed = true
+        while changed:
+            changed = false
+            var i = 0
+            while i < self.regions.len():
+                var j = i + 1
+                while j < self.regions.len():
+                    val a = self.regions.get(i)
+                    val b = self.regions.get(j)
+                    if val ra = a:
+                        if val rb = b:
+                            if rects_overlap(ra, rb):
+                                val merged = merge_rects(ra, rb)
+                                self.regions.set(i, merged)
+                                self.regions.remove(j)
+                                changed = true
+                                # Don't increment j — the list shifted
+                                j = j  # re-check same index
+                            else:
+                                j = j + 1
+                        else:
+                            j = j + 1
+                    else:
+                        j = j + 1
+                i = i + 1
+
+    # Get the current list of damage rects.
+    fn get_damage_rects() -> List<Rect2>:
+        self.regions
+
+    # Clear all damage regions after a repaint cycle.
+    me clear():
+        self.regions = List.new()
+
+    # Calculate the total damaged area (sum of all rect areas).
+    fn total_damage_area() -> f64:
+        var total = 0.0
+        for rect in self.regions:
+            total = total + (rect.width * rect.height)
+        total
+
+    # Determine if the damage is extensive enough to warrant a full repaint.
+    # Threshold: damage exceeds 80% of the viewport area.
+    fn is_full_repaint(viewport_w: f64, viewport_h: f64) -> bool:
+        val viewport_area = viewport_w * viewport_h
+        if viewport_area <= 0.0:
+            return true
+        val damage_area = self.total_damage_area()
+        val ratio = damage_area / viewport_area
+        ratio >= 0.8
+
+# ---------------------------------------------------------------------------
+# Rect geometry helpers
+# ---------------------------------------------------------------------------
+
+# Test whether two damage rects overlap (including touching edges).
+fn rects_overlap(a: Rect2, b: Rect2) -> bool:
+    not (a.right() < b.x or b.right() < a.x or a.bottom() < b.y or b.bottom() < a.y)
+
+# Merge two rects into their union bounding box.
+fn merge_rects(a: Rect2, b: Rect2) -> Rect2:
+    a.merge(b)

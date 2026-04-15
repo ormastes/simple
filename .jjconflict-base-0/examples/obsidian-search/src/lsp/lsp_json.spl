@@ -1,0 +1,186 @@
+#![allow(export_outside_init)]
+#![allow(unnamed_duplicate_typed_args)]
+# Obsidian LSP — JSON Helpers
+# Re-exports json_helpers from src/util and adds LSP-specific builders.
+#
+# All base JSON construction (js, jp, jo, ja, ji, jf, jb, jnull, escape_json,
+# safe_substr, extract_field, LB, RB, SB_L, SB_R) is imported from
+# src/util/json_helpers.spl. This file adds LSP-specific convenience functions.
+
+export make_response, make_error_response, make_notification
+export make_position, make_range, make_location
+export extract_method, extract_id, extract_params
+export extract_td_uri, extract_td_text, extract_td_version
+export extract_position_line, extract_position_char
+export extract_content_changes_text
+
+use src.util.json_helpers.{js, jp, jo, jo0, jo1, jo2, jo3, jo4, jo5, ja, ji, jf, jb, jnull}
+use src.util.json_helpers.{escape_json, safe_substr, extract_field, extract_field_raw, extract_nested}
+use src.util.json_helpers.{LB, RB, SB_L, SB_R, Q}
+
+# ---------------------------------------------------------------------------
+# JSON-RPC response builders
+# ---------------------------------------------------------------------------
+
+fn make_response(id: text, result: text) -> text:
+    jo3(jp("jsonrpc", js("2.0")), jp("id", id), jp("result", result))
+
+fn make_error_response(id: text, code: i64, message: text) -> text:
+    val err = jo2(jp("code", ji(code)), jp("message", js(message)))
+    jo3(jp("jsonrpc", js("2.0")), jp("id", id), jp("error", err))
+
+fn make_notification(method: text, params: text) -> text:
+    jo3(jp("jsonrpc", js("2.0")), jp("method", js(method)), jp("params", params))
+
+# ---------------------------------------------------------------------------
+# LSP position / range / location builders
+# ---------------------------------------------------------------------------
+
+fn make_position(line: i64, character: i64) -> text:
+    jo2(jp("line", ji(line)), jp("character", ji(character)))
+
+fn make_range(start_line: i64, start_char: i64, end_line: i64, end_char: i64) -> text:
+    val start_pos = make_position(start_line, start_char)
+    val end_pos = make_position(end_line, end_char)
+    jo2(jp("start", start_pos), jp("end", end_pos))
+
+fn make_location(uri: text, line: i64, character: i64) -> text:
+    val range = make_range(line, character, line, character)
+    jo2(jp("uri", js(uri)), jp("range", range))
+
+# ---------------------------------------------------------------------------
+# JSON field extraction for LSP messages
+# ---------------------------------------------------------------------------
+
+fn extract_method(json: text) -> text:
+    extract_field(json, "method")
+
+fn extract_id(json: text) -> text:
+    extract_field_raw(json, "id")
+
+fn extract_params(json: text) -> text:
+    # Find the params object substring
+    val search = Q() + "params" + Q() + ":"
+    val idx_result = json.index_of(search)
+    var idx = -1
+    match idx_result:
+        Some(i): idx = i
+        nil: return "{}"
+    if idx < 0:
+        return "{}"
+    val start = idx + search.len()
+    val rest = safe_substr(json, start, json.len()).trim()
+    if rest.starts_with(LB()):
+        # Extract balanced braces
+        var depth = 0
+        var pos = 0
+        var in_str = false
+        while pos < rest.len():
+            val ch = safe_substr(rest, pos, pos + 1)
+            if in_str:
+                if ch == "\\":
+                    pos = pos + 2
+                    continue
+                if ch == Q():
+                    in_str = false
+                pos = pos + 1
+                continue
+            if ch == Q():
+                in_str = true
+            elif ch == LB():
+                depth = depth + 1
+            elif ch == RB():
+                depth = depth - 1
+                if depth == 0:
+                    return safe_substr(rest, 0, pos + 1)
+            pos = pos + 1
+    "{}"
+
+fn extract_td_uri(params: text) -> text:
+    # Extract textDocument.uri from params
+    val td_search = Q() + "textDocument" + Q() + ":"
+    val td_idx_result = params.index_of(td_search)
+    var td_idx = -1
+    match td_idx_result:
+        Some(i): td_idx = i
+        nil: return ""
+    if td_idx < 0:
+        return ""
+    val td_start = td_idx + td_search.len()
+    val td_rest = safe_substr(params, td_start, params.len())
+    extract_field(td_rest, "uri")
+
+fn extract_td_text(params: text) -> text:
+    val td_search = Q() + "textDocument" + Q() + ":"
+    val td_idx_result = params.index_of(td_search)
+    var td_idx = -1
+    match td_idx_result:
+        Some(i): td_idx = i
+        nil: return ""
+    if td_idx < 0:
+        return ""
+    val td_start = td_idx + td_search.len()
+    val td_rest = safe_substr(params, td_start, params.len())
+    extract_field(td_rest, "text")
+
+fn extract_td_version(params: text) -> i64:
+    val td_search = Q() + "textDocument" + Q() + ":"
+    val td_idx_result = params.index_of(td_search)
+    var td_idx = -1
+    match td_idx_result:
+        Some(i): td_idx = i
+        nil: return 0
+    if td_idx < 0:
+        return 0
+    val td_start = td_idx + td_search.len()
+    val td_rest = safe_substr(params, td_start, params.len())
+    val ver_str = extract_field(td_rest, "version")
+    if ver_str == "":
+        return 0
+    int(ver_str) ?? 0
+
+fn extract_position_line(params: text) -> i64:
+    val pos_search = Q() + "position" + Q() + ":"
+    val pos_idx_result = params.index_of(pos_search)
+    var pos_idx = -1
+    match pos_idx_result:
+        Some(i): pos_idx = i
+        nil: return 0
+    if pos_idx < 0:
+        return 0
+    val pos_start = pos_idx + pos_search.len()
+    val pos_rest = safe_substr(params, pos_start, params.len())
+    val line_str = extract_field(pos_rest, "line")
+    if line_str == "":
+        return 0
+    int(line_str) ?? 0
+
+fn extract_position_char(params: text) -> i64:
+    val pos_search = Q() + "position" + Q() + ":"
+    val pos_idx_result = params.index_of(pos_search)
+    var pos_idx = -1
+    match pos_idx_result:
+        Some(i): pos_idx = i
+        nil: return 0
+    if pos_idx < 0:
+        return 0
+    val pos_start = pos_idx + pos_search.len()
+    val pos_rest = safe_substr(params, pos_start, params.len())
+    val char_str = extract_field(pos_rest, "character")
+    if char_str == "":
+        return 0
+    int(char_str) ?? 0
+
+fn extract_content_changes_text(params: text) -> text:
+    # Extract text from contentChanges[0].text (full sync mode)
+    val cc_search = Q() + "contentChanges" + Q() + ":"
+    val cc_idx_result = params.index_of(cc_search)
+    var cc_idx = -1
+    match cc_idx_result:
+        Some(i): cc_idx = i
+        nil: return ""
+    if cc_idx < 0:
+        return ""
+    val cc_start = cc_idx + cc_search.len()
+    val cc_rest = safe_substr(params, cc_start, params.len())
+    extract_field(cc_rest, "text")

@@ -1,0 +1,119 @@
+#!/bin/sh
+# Chrome Screenshot Generator for Browser Rendering Comparison
+#
+# Takes screenshots of HTML files using headless Chrome and saves as PNG.
+# Used to generate reference images for comparing with Simple's renderer.
+#
+# Usage:
+#   ./chrome_screenshot.shs <html_file_or_string> <output.png> [width] [height]
+#   ./chrome_screenshot.shs test.html output.png 800 600
+#   ./chrome_screenshot.shs "<div style='background:red;width:100px;height:100px'></div>" red_box.png
+#
+# Dependencies:
+#   - Chrome/Chromium installed, OR
+#   - Playwright CLI with Chromium installed
+
+HTML_INPUT="$1"
+OUTPUT="${2:-screenshot.png}"
+WIDTH="${3:-800}"
+HEIGHT="${4:-600}"
+
+if [ -z "$HTML_INPUT" ]; then
+    echo "Usage: $0 <html_file_or_url> <output.png> [width] [height]"
+    exit 1
+fi
+
+# Detect Chrome binary
+CHROME=""
+if command -v google-chrome >/dev/null 2>&1; then
+    CHROME="google-chrome"
+elif command -v chromium >/dev/null 2>&1; then
+    CHROME="chromium"
+elif command -v chromium-browser >/dev/null 2>&1; then
+    CHROME="chromium-browser"
+elif [ -x "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" ]; then
+    CHROME="/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
+elif [ -x "/Applications/Chromium.app/Contents/MacOS/Chromium" ]; then
+    CHROME="/Applications/Chromium.app/Contents/MacOS/Chromium"
+fi
+
+USE_PLAYWRIGHT=0
+if [ -z "$CHROME" ]; then
+    if command -v npx >/dev/null 2>&1; then
+        USE_PLAYWRIGHT=1
+    else
+        echo "Error: Chrome/Chromium not found and npx is unavailable"
+        exit 1
+    fi
+fi
+
+# Normalize local file paths to file:// URLs for Playwright/Chrome
+case "$HTML_INPUT" in
+    http://*|https://*|file://*)
+        ;;
+    *)
+        if [ -f "$HTML_INPUT" ]; then
+            ABS_HTML="$(cd "$(dirname "$HTML_INPUT")" && pwd)/$(basename "$HTML_INPUT")"
+            HTML_INPUT="file://$ABS_HTML"
+        else
+            TEMP_HTML=$(mktemp /tmp/chrome_compare_XXXXXX.html)
+            cat > "$TEMP_HTML" << HTMLEOF
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>* { margin: 0; padding: 0; box-sizing: border-box; }</style>
+</head>
+<body>
+$HTML_INPUT
+</body>
+</html>
+HTMLEOF
+            HTML_INPUT="file://$TEMP_HTML"
+            CLEANUP_TEMP=1
+        fi
+        ;;
+esac
+
+if [ "$USE_PLAYWRIGHT" = "1" ]; then
+    npx playwright screenshot \
+        --browser=chromium \
+        --viewport-size="${WIDTH},${HEIGHT}" \
+        --wait-for-timeout=500 \
+        "$HTML_INPUT" \
+        "$OUTPUT" \
+        >/dev/null 2>&1
+else
+    "$CHROME" \
+        --headless \
+        --disable-gpu \
+        --no-sandbox \
+        --window-size="${WIDTH},${HEIGHT}" \
+        --screenshot="$OUTPUT" \
+        --hide-scrollbars \
+        --default-background-color=0 \
+        "$HTML_INPUT" \
+        2>/dev/null
+fi
+
+if [ ! -f "$OUTPUT" ] && command -v npx >/dev/null 2>&1; then
+    npx playwright screenshot \
+        --browser=chromium \
+        --viewport-size="${WIDTH},${HEIGHT}" \
+        --wait-for-timeout=500 \
+        "$HTML_INPUT" \
+        "$OUTPUT" \
+        >/dev/null 2>&1
+fi
+
+# Cleanup temp file
+if [ -n "$CLEANUP_TEMP" ] && [ -f "$TEMP_HTML" ]; then
+    rm -f "$TEMP_HTML"
+fi
+
+if [ -f "$OUTPUT" ]; then
+    echo "Screenshot saved: $OUTPUT (${WIDTH}x${HEIGHT})"
+else
+    echo "Error: screenshot failed"
+    exit 1
+fi

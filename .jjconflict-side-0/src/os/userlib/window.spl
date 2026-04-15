@@ -1,0 +1,605 @@
+# Window Client Library — user-space API for window management
+#
+# Provides a high-level interface for applications to create and manage
+# windows through the compositor's IPC service. Handles connection
+# setup, request serialization, and event polling.
+#
+# Usage:
+#   var client = WindowClient.new()
+#   client.connect()
+#   val wid = client.create_window("My App", 100, 100, 640, 480)
+#   while true:
+#       val event = client.poll_event()
+#       if event != nil:
+#           handle_event(event)
+#   client.destroy_window()
+#   client.disconnect()
+#
+# Wire protocol:
+#   Outgoing requests to compositor use the same encoding as wm_service.spl.
+#   Incoming events (input, close, focus) are pushed by the WM service.
+
+use os.userlib.syscall_raw.{syscall}
+use os.userlib.ipc_protocol.{COMP_CREATE_WINDOW, COMP_DESTROY_WINDOW, COMP_UPDATE_TREE, COMP_FOCUS, COMP_RESIZE, COMP_MOVE, COMP_SET_TITLE, COMP_MINIMIZE, COMP_MAXIMIZE, COMP_RESTORE, COMP_INPUT_EVENT, COMP_CLOSE_REQUEST, COMP_FOCUS_CHANGED}
+use common.window_protocol.window_protocol.{WmCreateRequest, WmCreateResponse, WmInputEvent, WmCloseRequest, WmResizeRequest, WmMoveRequest, WmFocusEvent, WM_STATUS_OK, WM_STATUS_ERROR, WM_EVENT_CLOSE, WM_EVENT_FOCUS, WM_EVENT_RESIZE, wm_input_event}
+use common.window_protocol.geometry.{WindowId, Point, Px, KeyCode, Modifiers, WmEventType}
+use os.userlib.process.{getpid}
+
+extern fn serial_println(msg: text)
+extern fn rt_get_args() -> [text]
+
+# Syscall numbers — canonical values from src/os/kernel/ipc/syscall.spl
+# dispatcher cases 20..23. Keep in sync with test/unit/os/kernel/ipc/
+# syscall_number_consistency_spec.spl.
+val SYS_IPC_SEND: u64 = 20
+val SYS_IPC_RECV: u64 = 21
+val SYS_IPC_CREATE_PORT: u64 = 22
+val SYS_IPC_CONNECT: u64 = 23
+
+# Named port for compositor service discovery
+val WM_PORT_NAME: text = "compositor"
+
+fn window_default_app_identity_from_args(args: [text]) -> text:
+    """Derive a stable app identity from argv[0] when available."""
+    if args.len() == 0:
+        return ""
+    val program = args[0]
+    if program == "":
+        return ""
+    program
+
+fn _runtime_window_app_identity() -> text:
+    window_default_app_identity_from_args(rt_get_args())
+
+# ============================================================================
+# Window Client
+# ============================================================================
+
+class WindowClient:
+    """High-level client for window management via compositor IPC.
+
+    Each WindowClient instance represents a single application's
+    connection to the compositor. An application can create multiple
+    windows, but typically uses one WindowClient for its lifetime.
+
+    Thread safety: Not thread-safe. Use one WindowClient per thread,
+    or protect with external synchronization.
+    """
+    compositor_port: u64    # IPC port connected to compositor service
+    app_port: u64           # This app's IPC reply port
+    window_id: u64          # Current primary window ID (0 if none)
+    app_id: text            # Stable launcher/manifest identity when known
+    connected: bool
+    event_queue: [WmInputEvent]  # Buffered incoming events
+
+impl WindowClient:
+    static fn new() -> WindowClient:
+        """Create a new disconnected window client."""
+        WindowClient(
+            compositor_port: 0,
+            app_port: 0,
+            window_id: 0,
+            app_id: "",
+            connected: false,
+            event_queue: []
+        )
+
+    me set_app_identity(app_id: text):
+        """Attach a stable manifest-owned app identity to future create requests."""
+        self.app_id = app_id
+
+    # -- Connection ----------------------------------------------------------
+
+    me connect() -> bool:
+        """Connect to the compositor's named IPC port "compositor".
+
+        Creates this app's reply port and resolves the compositor
+        port by name. Returns true on success.
+        """
+        # Create our own reply port
+        val port = syscall(SYS_IPC_CREATE_PORT, 0, 0, 0, 0, 0)
+        if port < 0:
+            serial_println("[window-client] Failed to create reply port (error {port})")
+            return false
+        self.app_port = port.to_u64()
+
+        # Connect to compositor by name
+        # SYS_IPC_CONNECT = 23 (kernel dispatcher case 23, _handle_ipc_connect):
+        # (name_ptr, name_len, 0, 0, 0) -> port_id or negative error
+        extern fn unsafe_addr_of(ref: any) -> u64
+        val name_ptr = unsafe_addr_of(WM_PORT_NAME)
+        val name_len = WM_PORT_NAME.len().to_u64()
+        val comp_port = syscall(SYS_IPC_CONNECT, name_ptr, name_len, 0, 0, 0)
+        if comp_port < 0:
+            serial_println("[window-client] Failed to connect to compositor (error {comp_port})")
+            return false
+
+        self.compositor_port = comp_port.to_u64()
+        self.connected = true
+        if self.app_id == "":
+            self.app_id = _runtime_window_app_identity()
+        serial_println("[window-client] Connected to compositor (port {self.compositor_port}), reply port {self.app_port}")
+        true
+
+    me disconnect():
+        """Close the connection and release IPC ports.
+
+        If a window is still open, it will be destroyed first.
+        """
+        if self.window_id > 0:
+            self.destroy_window()
+        self.connected = false
+        self.compositor_port = 0
+        self.app_port = 0
+        serial_println("[window-client] Disconnected")
+
+    # -- Window Creation & Destruction ---------------------------------------
+
+    me create_window(title: text, x: i32, y: i32, width: i32, height: i32) -> u64:
+        """Create a window using the current process identity."""
+        self.create_window_with_process_id(title, x, y, width, height, getpid())
+
+    me create_window_with_process_id(title: text, x: i32, y: i32, width: i32, height: i32, process_id: u64) -> u64:
+        """Create a new window via the compositor.
+
+        Sends COMP_CREATE_WINDOW with the given parameters and waits
+        for the compositor's response containing the window ID.
+
+        Returns the window_id (>0 on success, 0 on failure).
+        """
+        if not self.connected:
+            serial_println("[window-client] Not connected")
+            return 0
+
+        # Build request payload:
+        # title_len(u32) | title(bytes) | x(i32) | y(i32) | w(i32) | h(i32)
+        # | process_id(u64) | app_id_len(u32) | app_id(bytes)
+        var payload: [u8] = []
+        val title_len = title.len().to_u32()
+        if self.app_id == "":
+            self.app_id = _runtime_window_app_identity()
+        val app_id_len = self.app_id.len().to_u32()
+        _push_u32(payload, title_len)
+        for ch in title:
+            payload.push(ch.to_u8())
+        _push_i32(payload, x)
+        _push_i32(payload, y)
+        _push_i32(payload, width)
+        _push_i32(payload, height)
+        _push_u64(payload, process_id)
+        _push_u32(payload, app_id_len)
+        for ch in self.app_id:
+            payload.push(ch.to_u8())
+
+        # Send request
+        self._send_request(COMP_CREATE_WINDOW, payload)
+
+        # Wait for response: status(i32) | window_id(u64)
+        val reply = self._recv_reply()
+        if reply.len() < 12:
+            serial_println("[window-client] Invalid create response (len={reply.len()})")
+            return 0
+
+        val status = _decode_i32(reply, 0)
+        val wid = _decode_u64(reply, 4)
+
+        if status == WM_STATUS_OK.value and wid > 0:
+            self.window_id = wid
+            serial_println("[window-client] Created window {wid}: '{title}' ({width}x{height})")
+            return wid
+        else:
+            serial_println("[window-client] Create window failed with status {status}")
+            return 0
+
+    me destroy_window():
+        """Destroy the current primary window.
+
+        Sends COMP_DESTROY_WINDOW to the compositor.
+        """
+        if not self.connected or self.window_id == 0:
+            return
+
+        var payload: [u8] = []
+        _push_u64(payload, self.window_id)
+        self._send_request(COMP_DESTROY_WINDOW, payload)
+
+        # Wait for acknowledgment
+        val reply = self._recv_reply()
+        serial_println("[window-client] Destroyed window {self.window_id}")
+        self.window_id = 0
+
+    # -- Window Operations ---------------------------------------------------
+
+    me set_title(title: text):
+        """Change the title of the current window.
+
+        Sends COMP_SET_TITLE to the compositor.
+        """
+        if not self.connected or self.window_id == 0:
+            return
+
+        var payload: [u8] = []
+        _push_u64(payload, self.window_id)
+        val title_len = title.len().to_u32()
+        _push_u32(payload, title_len)
+        for ch in title:
+            payload.push(ch.to_u8())
+        self._send_request(COMP_SET_TITLE, payload)
+
+        # Wait for acknowledgment
+        val reply = self._recv_reply()
+
+    me resize(width: i32, height: i32):
+        """Resize the current window.
+
+        Sends COMP_RESIZE to the compositor.
+        """
+        if not self.connected or self.window_id == 0:
+            return
+
+        var payload: [u8] = []
+        _push_u64(payload, self.window_id)
+        _push_i32(payload, width)
+        _push_i32(payload, height)
+        self._send_request(COMP_RESIZE, payload)
+
+        val reply = self._recv_reply()
+
+    me move_to(x: i32, y: i32):
+        """Move the current window to a new position.
+
+        Sends COMP_MOVE to the compositor.
+        """
+        if not self.connected or self.window_id == 0:
+            return
+
+        var payload: [u8] = []
+        _push_u64(payload, self.window_id)
+        _push_i32(payload, x)
+        _push_i32(payload, y)
+        self._send_request(COMP_MOVE, payload)
+
+        val reply = self._recv_reply()
+
+    me request_focus():
+        """Request that the compositor focus this window.
+
+        Sends COMP_FOCUS to the compositor.
+        """
+        if not self.connected or self.window_id == 0:
+            return
+
+        var payload: [u8] = []
+        _push_u64(payload, self.window_id)
+        self._send_request(COMP_FOCUS, payload)
+
+        val reply = self._recv_reply()
+
+    me minimize():
+        """Minimize the current window.
+
+        Sends COMP_MINIMIZE to the compositor.
+        """
+        if not self.connected or self.window_id == 0:
+            return
+
+        var payload: [u8] = []
+        _push_u64(payload, self.window_id)
+        self._send_request(COMP_MINIMIZE, payload)
+
+        val reply = self._recv_reply()
+
+    me maximize():
+        """Maximize the current window to fill the screen.
+
+        Sends COMP_MAXIMIZE to the compositor.
+        """
+        if not self.connected or self.window_id == 0:
+            return
+
+        var payload: [u8] = []
+        _push_u64(payload, self.window_id)
+        self._send_request(COMP_MAXIMIZE, payload)
+
+        val reply = self._recv_reply()
+
+    me restore():
+        """Restore the current window from minimized/maximized.
+
+        Sends COMP_RESTORE to the compositor.
+        """
+        if not self.connected or self.window_id == 0:
+            return
+
+        var payload: [u8] = []
+        _push_u64(payload, self.window_id)
+        self._send_request(COMP_RESTORE, payload)
+
+        val reply = self._recv_reply()
+
+    me update_content(content: text):
+        """Update the window content text.
+
+        Sends COMP_UPDATE_TREE to the compositor with a text payload.
+        The WM service rebuilds a widget tree from this content and
+        applies it to the window's UISession.
+
+        Payload: window_id(u64) | content_len(u32) | content_text(bytes)
+        """
+        if not self.connected or self.window_id == 0:
+            return
+
+        var payload: [u8] = []
+        _push_u64(payload, self.window_id)
+        val content_len = content.len().to_u32()
+        _push_u32(payload, content_len)
+        for ch in content:
+            payload.push(ch.to_u8())
+        self._send_request(COMP_UPDATE_TREE, payload)
+
+        val reply = self._recv_reply()
+
+    # -- Event Handling ------------------------------------------------------
+
+    me poll_event() -> WmInputEvent?:
+        """Non-blocking poll for the next input event.
+
+        Checks the local event queue first. If empty, does a non-blocking
+        IPC recv to check for new events from the compositor.
+
+        Returns nil if no events are pending.
+        """
+        # Drain any buffered events first
+        if self.event_queue.len() > 0:
+            val event = self.event_queue[0]
+            var remaining: [WmInputEvent] = []
+            var i = 1
+            while i < self.event_queue.len():
+                remaining = remaining.push(self.event_queue[i])
+                i = i + 1
+            self.event_queue = remaining
+            return event
+
+        # Non-blocking IPC recv on our reply port
+        # timeout = 0, flags = 1 (poll mode) for non-blocking
+        if not self.connected:
+            return nil
+
+        val msg_raw = syscall(SYS_IPC_RECV, self.app_port, 0, 1, 0, 0)
+        if msg_raw <= 0:
+            return nil
+
+        return self._parse_incoming_event(msg_raw.to_u64())
+
+    me wait_event() -> WmInputEvent:
+        """Blocking wait for the next input event.
+
+        If the local event queue has events, returns immediately.
+        Otherwise blocks on IPC recv until an event arrives.
+
+        Returns a synthetic close event if an error occurs.
+        """
+        # Check buffered events first
+        if self.event_queue.len() > 0:
+            val event = self.event_queue[0]
+            var remaining: [WmInputEvent] = []
+            var i = 1
+            while i < self.event_queue.len():
+                remaining = remaining.push(self.event_queue[i])
+                i = i + 1
+            self.event_queue = remaining
+            return event
+
+        # Blocking IPC recv
+        val msg_raw = syscall(SYS_IPC_RECV, self.app_port, 0xFFFFFFFF, 0, 0, 0)
+        if msg_raw <= 0:
+            # Error: synthesize a close event
+            return wm_input_event(
+                WindowId(value: self.window_id),
+                WM_EVENT_CLOSE,
+                KeyCode(value: 0),
+                Point.xy(0, 0)
+            )
+
+        val event = self._parse_incoming_event(msg_raw.to_u64())
+        if event != nil:
+            return event
+        # Fallback: synthetic close event
+        return wm_input_event(
+            WindowId(value: self.window_id),
+            WM_EVENT_CLOSE,
+            KeyCode(value: 0),
+            Point.xy(0, 0)
+        )
+
+    # -- Queries -------------------------------------------------------------
+
+    fn is_connected() -> bool:
+        """Check if the client is connected to the compositor."""
+        self.connected
+
+    fn get_window_id() -> u64:
+        """Get the current primary window ID. Returns 0 if no window."""
+        self.window_id
+
+    fn has_pending_events() -> bool:
+        """Check if there are buffered events waiting."""
+        self.event_queue.len() > 0
+
+    # -- Internal: IPC Communication -----------------------------------------
+
+    me _send_request(method: u32, payload: [u8]):
+        """Send a request to the compositor.
+
+        Builds an IPC message with the given method and payload,
+        sends it to the compositor's port with our app_port as source.
+        """
+        # Build message: method_header(u32) + payload
+        var msg: [u8] = []
+        _push_u32(msg, method)
+        var i = 0
+        while i < payload.len():
+            msg.push(payload[i])
+            i = i + 1
+        _ipc_send(self.compositor_port, self.app_port, msg)
+
+    fn _recv_reply() -> [u8]:
+        """Receive a reply from the compositor.
+
+        Blocking recv on our app_port. Returns the raw reply bytes.
+        Returns empty array on error.
+        """
+        val msg_raw = syscall(SYS_IPC_RECV, self.app_port, 0xFFFFFFFF, 0, 0, 0)
+        if msg_raw <= 0:
+            return []
+
+        # Read payload from message buffer
+        val msg_addr = msg_raw.to_u64()
+        val payload_len = _read_u32_at(msg_addr + 24)
+        val payload_addr = msg_addr + 32
+
+        var result: [u8] = []
+        var i: u32 = 0
+        while i < payload_len:
+            result.push(_read_u8_at(payload_addr + i.to_u64()))
+            i = i + 1
+        result
+
+    fn _parse_incoming_event(msg_addr: u64) -> WmInputEvent?:
+        """Parse an incoming event message from the compositor.
+
+        The WM service sends events with a leading method u32:
+          COMP_INPUT_EVENT:  method(u32) | window_id(u64) | event_type(u32) |
+                             key_code(u32) | mouse_x(i32) | mouse_y(i32) | modifiers(u32)
+          COMP_CLOSE_REQUEST: method(u32) | window_id(u64)
+          COMP_FOCUS_CHANGED: method(u32) | window_id(u64) | focused(u8)
+        """
+        val payload_len = _read_u32_at(msg_addr + 24)
+        val payload_addr = msg_addr + 32
+
+        if payload_len < 4:
+            return nil
+
+        val method = _read_u32_at(payload_addr)
+
+        match method:
+            COMP_INPUT_EVENT:
+                if payload_len < 28:
+                    return nil
+                val wid = _read_u64_at(payload_addr + 4)
+                val event_type = _read_u32_at(payload_addr + 12)
+                val key_code = _read_u32_at(payload_addr + 16)
+                val mouse_x = _read_i32_at(payload_addr + 20)
+                val mouse_y = _read_i32_at(payload_addr + 24)
+                var modifiers: u32 = 0
+                if payload_len >= 32:
+                    modifiers = _read_u32_at(payload_addr + 28)
+                return WmInputEvent(
+                    window_id: WindowId(value: wid),
+                    event_type: WmEventType(value: event_type),
+                    key_code: KeyCode(value: key_code),
+                    mouse_pos: Point.xy(mouse_x, mouse_y),
+                    modifiers: Modifiers(value: modifiers)
+                )
+            COMP_CLOSE_REQUEST:
+                if payload_len < 12:
+                    return nil
+                val wid = _read_u64_at(payload_addr + 4)
+                return wm_input_event(
+                    WindowId(value: wid),
+                    WM_EVENT_CLOSE,
+                    KeyCode(value: 0),
+                    Point.xy(0, 0)
+                )
+            COMP_FOCUS_CHANGED:
+                if payload_len < 13:
+                    return nil
+                val wid = _read_u64_at(payload_addr + 4)
+                val focused_byte = _read_u8_at(payload_addr + 12)
+                return wm_input_event(
+                    WindowId(value: wid),
+                    WM_EVENT_FOCUS,
+                    KeyCode(value: focused_byte.to_u32()),
+                    Point.xy(0, 0)
+                )
+            _:
+                serial_println("[window-client] Unknown event method {method}")
+                return nil
+
+# ============================================================================
+# Memory Access Helpers
+# ============================================================================
+
+extern fn mmio_read8(addr: u64) -> u8
+extern fn mmio_read32(addr: u64) -> u32
+extern fn mmio_read64(addr: u64) -> u64
+
+fn _read_u8_at(addr: u64) -> u8:
+    mmio_read8(addr)
+
+fn _read_u32_at(addr: u64) -> u32:
+    mmio_read32(addr)
+
+fn _read_u64_at(addr: u64) -> u64:
+    mmio_read64(addr)
+
+fn _read_i32_at(addr: u64) -> i32:
+    mmio_read32(addr).to_i32()
+
+# ============================================================================
+# Serialization Helpers
+# ============================================================================
+
+fn _push_u32(buf: [u8], val: u32):
+    buf.push((val & 0xFF).to_u8())
+    buf.push(((val >> 8) & 0xFF).to_u8())
+    buf.push(((val >> 16) & 0xFF).to_u8())
+    buf.push(((val >> 24) & 0xFF).to_u8())
+
+fn _push_i32(buf: [u8], val: i32):
+    val u = val.to_u32()
+    buf.push((u & 0xFF).to_u8())
+    buf.push(((u >> 8) & 0xFF).to_u8())
+    buf.push(((u >> 16) & 0xFF).to_u8())
+    buf.push(((u >> 24) & 0xFF).to_u8())
+
+fn _push_u64(buf: [u8], val: u64):
+    buf.push((val & 0xFF).to_u8())
+    buf.push(((val >> 8) & 0xFF).to_u8())
+    buf.push(((val >> 16) & 0xFF).to_u8())
+    buf.push(((val >> 24) & 0xFF).to_u8())
+    buf.push(((val >> 32) & 0xFF).to_u8())
+    buf.push(((val >> 40) & 0xFF).to_u8())
+    buf.push(((val >> 48) & 0xFF).to_u8())
+    buf.push(((val >> 56) & 0xFF).to_u8())
+
+fn _decode_i32(data: [u8], offset: i32) -> i32:
+    """Decode a little-endian i32 from a byte array."""
+    val b0 = data[offset].to_u32()
+    val b1 = data[offset + 1].to_u32()
+    val b2 = data[offset + 2].to_u32()
+    val b3 = data[offset + 3].to_u32()
+    (b0 | (b1 << 8) | (b2 << 16) | (b3 << 24)).to_i32()
+
+fn _decode_u64(data: [u8], offset: i32) -> u64:
+    """Decode a little-endian u64 from a byte array."""
+    val b0 = data[offset].to_u64()
+    val b1 = data[offset + 1].to_u64()
+    val b2 = data[offset + 2].to_u64()
+    val b3 = data[offset + 3].to_u64()
+    val b4 = data[offset + 4].to_u64()
+    val b5 = data[offset + 5].to_u64()
+    val b6 = data[offset + 6].to_u64()
+    val b7 = data[offset + 7].to_u64()
+    b0 | (b1 << 8) | (b2 << 16) | (b3 << 24) | (b4 << 32) | (b5 << 40) | (b6 << 48) | (b7 << 56)
+
+# ============================================================================
+# IPC Send Helper
+# ============================================================================
+
+fn _ipc_send(dst_port: u64, src_port: u64, data: [u8]):
+    """Send data via IPC syscall."""
+    extern fn unsafe_addr_of(ref: any) -> u64
+    val data_ptr = unsafe_addr_of(data)
+    val data_len = data.len().to_u64()
+    syscall(SYS_IPC_SEND, dst_port, src_port, data_ptr, data_len, 0)

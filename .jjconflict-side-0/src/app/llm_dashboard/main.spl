@@ -1,0 +1,128 @@
+# LLM Agent Dashboard — Entry Point
+#
+# CLI entry point for the LLM Agent Dashboard.
+# Supports TUI mode (default) and web GUI mode.
+
+use app.llm_dashboard.data.store.{AgentDashboardStore}
+use app.llm_dashboard.tui.app.{run_tui_dashboard}
+use app.web_dashboard.server.{DashboardServer}
+use std.text.{to_int_or}
+use std.cli.cli_util (get_cli_args)
+use app.dashboard.framework_policy.{strip_framework_flags}
+
+# =========================================================================
+# Entry Point
+# =========================================================================
+
+fn main() -> i64:
+    """Standalone entry point."""
+    val args = get_cli_args()
+    return run_llm_dashboard(args)
+
+fn run_llm_dashboard(args: [text]) -> i64:
+    """Main entry point for LLM Agent Dashboard.
+
+    Args:
+        args: CLI arguments after 'agents' subcommand
+
+    Returns:
+        Exit code (0 = success)
+    """
+    val clean_args = strip_framework_flags(args)
+    var mode = "tui"
+    var port = 3001
+    var watch_dir = ""
+    var enable_terminal = false
+    var enable_tmux = false
+
+    # Parse arguments
+    var i = 0
+    while i < clean_args.len():
+        val arg = clean_args[i]
+        match arg:
+            "--gui" => mode = "gui"
+            "--web" => mode = "gui"
+            "--tui" => mode = "tui"
+            "--terminal" => enable_terminal = true
+            "--tmux" => enable_tmux = true
+            "--port" =>
+                if i + 1 < clean_args.len():
+                    port = to_int_or(clean_args[i + 1], 3001)
+                    i = i + 1
+            "--dir" =>
+                if i + 1 < clean_args.len():
+                    watch_dir = clean_args[i + 1]
+                    i = i + 1
+            "--help" =>
+                print_agents_help()
+                return 0
+            "-h" =>
+                print_agents_help()
+                return 0
+            _ => pass_dn
+        i = i + 1
+
+    # --terminal and --tmux imply GUI mode
+    if enable_terminal or enable_tmux:
+        mode = "gui"
+
+    # Create store
+    var store = if watch_dir != "":
+        AgentDashboardStore.with_dir(watch_dir)
+    else:
+        AgentDashboardStore.new()
+
+    match mode:
+        "tui":
+            run_tui_dashboard(store)
+            return 0
+        "gui":
+            run_gui_dashboard(store, port)
+            return 0
+        _:
+            run_tui_dashboard(store)
+            return 0
+
+fn run_gui_dashboard(store: AgentDashboardStore, port: i32):
+    """Start the web-based GUI dashboard.
+
+    The server routes /api/tmux/* and /ws/terminal through the
+    terminal and tmux panels now living in llm_dashboard.gui.
+    """
+    val _ = store
+    val server = DashboardServer.new(port)
+    server.start()
+
+fn print_agents_help():
+    """Print help for the agents subcommand."""
+    print "LLM Agent Dashboard"
+    print ""
+    print "USAGE:"
+    print "  simple dashboard agents [options]"
+    print ""
+    print "OPTIONS:"
+    print "  --tui          Terminal UI mode (default)"
+    print "  --gui, --web   Web browser GUI mode"
+    print "  --terminal     Enable terminal panel in GUI (implies --gui)"
+    print "  --tmux         Enable tmux panel in GUI (implies --gui)"
+    print "  --port <N>     Port for GUI mode (default: 3001)"
+    print "  --dir <path>   Custom JSONL watch directory"
+    print "  --help, -h     Show this help"
+    print ""
+    print "DESCRIPTION:"
+    print "  Real-time monitoring of LLM agent activity."
+    print "  Watches ~/.claude/projects/ for JSONL transcripts."
+    print "  Shows agent hierarchy, file I/O, URL fetches, tool usage."
+    print ""
+    print "EXAMPLES:"
+    print "  simple dashboard agents              # TUI mode"
+    print "  simple dashboard agents --gui        # Web GUI"
+    print "  simple dashboard agents --port 8080  # Custom port"
+    print ""
+    print "TUI KEYS:"
+    print "  1-7     Switch rooms (Research/Code/Skills/Servers/Chat/Feed/Tasks)"
+    print "  Tab     Cycle through rooms"
+    print "  j/k     Scroll activity feed"
+    print "  r       Force refresh"
+    print "  c       Clear filters"
+    print "  q       Quit"

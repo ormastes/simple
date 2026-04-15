@@ -1,0 +1,192 @@
+# @cover src/lib/blink/layout/flex.spl 80%
+"""
+# Blink Flex Layout Specification
+
+**Category:** Browser / Blink / Layout
+**Status:** Active
+
+## Overview
+
+Tests for the CSS Flexbox Level 1 subset layout engine.
+Covers item construction defaults, row/column sizing, flex-grow distribution,
+flex-shrink absorption, justify-content variants, and align-items variants.
+"""
+
+use std.sspec.*
+use std.lib.blink.layout.flex.{
+    FlexDirection, JustifyContent, AlignItems,
+    FlexItem, FlexContainer,
+    flex_item_new, flex_container_row, flex_container_column,
+    layout_flex
+}
+
+# ============================================================================
+# Helpers
+# ============================================================================
+
+fn approx_eq(a: f64, b: f64) -> bool:
+    val diff = a - b
+    val abs_diff = if diff < 0.0: diff * -1.0 else: diff
+    abs_diff < 0.0001
+
+# ============================================================================
+# flex_item_new defaults
+# ============================================================================
+
+describe "flex_item_new":
+    it "grow 0, shrink 1 by default":
+        val item = flex_item_new(100.0, 50.0)
+        expect(approx_eq(item.flex_grow, 0.0)).to_equal(true)
+        expect(approx_eq(item.flex_shrink, 1.0)).to_equal(true)
+        expect(approx_eq(item.intrinsic_main_size, 100.0)).to_equal(true)
+        expect(approx_eq(item.intrinsic_cross_size, 50.0)).to_equal(true)
+
+# ============================================================================
+# Row: fixed-size items (no flex-grow, no overflow)
+# ============================================================================
+
+describe "layout_flex Row fixed sizes":
+    it "Row with 3 fixed-size items: main_pos increments by prev.main_size":
+        val c = flex_container_row(600.0, 200.0)
+        val items: [FlexItem] = []
+        items.push(flex_item_new(100.0, 50.0))
+        items.push(flex_item_new(150.0, 60.0))
+        items.push(flex_item_new(200.0, 40.0))
+        val out = layout_flex(c, items)
+        # item 0 starts at 0
+        expect(approx_eq(out[0].main_pos, 0.0)).to_equal(true)
+        # item 1 starts at 100
+        expect(approx_eq(out[1].main_pos, 100.0)).to_equal(true)
+        # item 2 starts at 250
+        expect(approx_eq(out[2].main_pos, 250.0)).to_equal(true)
+        # sizes unchanged
+        expect(approx_eq(out[0].main_size, 100.0)).to_equal(true)
+        expect(approx_eq(out[1].main_size, 150.0)).to_equal(true)
+        expect(approx_eq(out[2].main_size, 200.0)).to_equal(true)
+
+# ============================================================================
+# flex-grow distribution
+# ============================================================================
+
+describe "layout_flex flex-grow":
+    it "items with flex_grow distribute free space":
+        val c = flex_container_row(500.0, 100.0)
+        val items: [FlexItem] = []
+        val a = flex_item_new(100.0, 50.0)
+        a.flex_grow = 1.0
+        val b = flex_item_new(100.0, 50.0)
+        b.flex_grow = 2.0
+        items.push(a)
+        items.push(b)
+        val out = layout_flex(c, items)
+        # free = 500 - 200 = 300; a gets 100, b gets 200
+        expect(approx_eq(out[0].main_size, 200.0)).to_equal(true)
+        expect(approx_eq(out[1].main_size, 300.0)).to_equal(true)
+        # total must equal container
+        val total = out[0].main_size + out[1].main_size
+        expect(approx_eq(total, 500.0)).to_equal(true)
+
+# ============================================================================
+# flex-shrink absorption
+# ============================================================================
+
+describe "layout_flex flex-shrink":
+    it "items with flex_shrink absorb overflow":
+        val c = flex_container_row(300.0, 100.0)
+        val items: [FlexItem] = []
+        val a = flex_item_new(200.0, 50.0)
+        a.flex_shrink = 1.0
+        val b = flex_item_new(200.0, 50.0)
+        b.flex_shrink = 1.0
+        items.push(a)
+        items.push(b)
+        val out = layout_flex(c, items)
+        # overflow = 100; each shrinks by 50
+        expect(approx_eq(out[0].main_size, 150.0)).to_equal(true)
+        expect(approx_eq(out[1].main_size, 150.0)).to_equal(true)
+        val total = out[0].main_size + out[1].main_size
+        expect(approx_eq(total, 300.0)).to_equal(true)
+
+# ============================================================================
+# JustifyContent.Center
+# ============================================================================
+
+describe "layout_flex JustifyContent.Center":
+    it "Center shifts items toward middle":
+        val c = flex_container_row(600.0, 100.0)
+        c.justify = JustifyContent.Center
+        val items: [FlexItem] = []
+        items.push(flex_item_new(100.0, 50.0))
+        items.push(flex_item_new(100.0, 50.0))
+        val out = layout_flex(c, items)
+        # free = 400; offset = 200; item0 at 200, item1 at 300
+        expect(approx_eq(out[0].main_pos, 200.0)).to_equal(true)
+        expect(approx_eq(out[1].main_pos, 300.0)).to_equal(true)
+        # both items start after the left half of the free space
+        expect(out[0].main_pos).to_be_greater_than(0.0)
+
+# ============================================================================
+# JustifyContent.SpaceBetween
+# ============================================================================
+
+describe "layout_flex JustifyContent.SpaceBetween":
+    it "SpaceBetween puts gaps between items":
+        val c = flex_container_row(500.0, 100.0)
+        c.justify = JustifyContent.SpaceBetween
+        val items: [FlexItem] = []
+        items.push(flex_item_new(100.0, 50.0))
+        items.push(flex_item_new(100.0, 50.0))
+        items.push(flex_item_new(100.0, 50.0))
+        val out = layout_flex(c, items)
+        # free = 200; gap between items = 100
+        # item0 at 0, item1 at 200, item2 at 400
+        expect(approx_eq(out[0].main_pos, 0.0)).to_equal(true)
+        expect(approx_eq(out[1].main_pos, 200.0)).to_equal(true)
+        expect(approx_eq(out[2].main_pos, 400.0)).to_equal(true)
+        # gaps are equal and larger than zero
+        val gap1 = out[1].main_pos - (out[0].main_pos + out[0].main_size)
+        val gap2 = out[2].main_pos - (out[1].main_pos + out[1].main_size)
+        expect(approx_eq(gap1, gap2)).to_equal(true)
+        expect(gap1).to_be_greater_than(0.0)
+
+# ============================================================================
+# AlignItems.Stretch
+# ============================================================================
+
+describe "layout_flex AlignItems.Stretch":
+    it "Stretch sets cross_size to container":
+        val c = flex_container_row(400.0, 200.0)
+        c.align = AlignItems.Stretch
+        val items: [FlexItem] = []
+        items.push(flex_item_new(100.0, 50.0))
+        items.push(flex_item_new(120.0, 80.0))
+        val out = layout_flex(c, items)
+        expect(approx_eq(out[0].cross_size, 200.0)).to_equal(true)
+        expect(approx_eq(out[1].cross_size, 200.0)).to_equal(true)
+        expect(approx_eq(out[0].cross_pos, 0.0)).to_equal(true)
+        expect(approx_eq(out[1].cross_pos, 0.0)).to_equal(true)
+
+# ============================================================================
+# AlignItems.Center
+# ============================================================================
+
+describe "layout_flex AlignItems.Center":
+    it "Center positions items along cross midline":
+        val c = flex_container_row(400.0, 200.0)
+        c.align = AlignItems.Center
+        val items: [FlexItem] = []
+        items.push(flex_item_new(100.0, 60.0))
+        items.push(flex_item_new(120.0, 40.0))
+        val out = layout_flex(c, items)
+        # item0 cross_pos = (200 - 60) / 2 = 70
+        expect(approx_eq(out[0].cross_pos, 70.0)).to_equal(true)
+        # item1 cross_pos = (200 - 40) / 2 = 80
+        expect(approx_eq(out[1].cross_pos, 80.0)).to_equal(true)
+        # cross_size unchanged
+        expect(approx_eq(out[0].cross_size, 60.0)).to_equal(true)
+        expect(approx_eq(out[1].cross_size, 40.0)).to_equal(true)
+        # both positions are within container bounds
+        expect(out[0].cross_pos).to_be_greater_than(0.0)
+        expect(out[1].cross_pos).to_be_greater_than(0.0)
+        expect(out[0].cross_pos).to_be_less_than(200.0)
+        expect(out[1].cross_pos).to_be_less_than(200.0)

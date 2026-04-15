@@ -1,0 +1,140 @@
+@allow(primitive_api)
+# Spring Animation — Physics-based smooth transitions
+#
+# Implements a critically/under-damped spring for iOS-style animations.
+# The spring equation: F = -k*(x - target) - c*velocity
+#
+# Usage:
+#   var anim = SpringAnimation.create(SpringConfig.default_config(), 0.0, 100.0)
+#   while not spring_is_at_rest(anim):
+#       anim = spring_step(anim, 0.016)
+#       val current = anim.current
+
+# ============================================================================
+# Spring Configuration
+# ============================================================================
+
+struct SpringConfig:
+    """Parameters controlling spring behavior."""
+    stiffness: f64       # Spring constant (k)
+    damping: f64         # Damping coefficient (c)
+    mass: f64            # Mass (m)
+
+impl SpringConfig:
+
+    static fn default_config() -> SpringConfig:
+        """Standard iOS-like spring: smooth with slight overshoot."""
+        SpringConfig(stiffness: 200.0, damping: 20.0, mass: 1.0)
+
+    static fn bouncy() -> SpringConfig:
+        """High stiffness, low damping = visible bounce."""
+        SpringConfig(stiffness: 300.0, damping: 10.0, mass: 1.0)
+
+    static fn smooth() -> SpringConfig:
+        """Low stiffness, high damping = smooth slide without bounce."""
+        SpringConfig(stiffness: 100.0, damping: 20.0, mass: 1.0)
+
+    static fn stiff() -> SpringConfig:
+        """Very stiff, moderately damped = fast snap."""
+        SpringConfig(stiffness: 500.0, damping: 30.0, mass: 1.0)
+
+# ============================================================================
+# Spring Animation State
+# ============================================================================
+
+struct SpringAnimation:
+    """Immutable snapshot of a spring animation at a point in time."""
+    config: SpringConfig
+    from_value: f64
+    to_value: f64
+    velocity: f64
+    current: f64
+    elapsed: f64
+    is_complete: bool
+
+impl SpringAnimation:
+
+    static fn create(config: SpringConfig, from_val: f64, to_val: f64) -> SpringAnimation:
+        """Create a new spring animation from one value to another."""
+        SpringAnimation(
+            config: config,
+            from_value: from_val,
+            to_value: to_val,
+            velocity: 0.0,
+            current: from_val,
+            elapsed: 0.0,
+            is_complete: false
+        )
+
+# ============================================================================
+# Spring Step Function
+# ============================================================================
+
+fn spring_step(anim: SpringAnimation, dt: f64) -> SpringAnimation:
+    """Advance the spring simulation by dt seconds.
+
+    Returns a new SpringAnimation with updated position, velocity,
+    and completion status. Uses Euler integration.
+    """
+    if anim.is_complete:
+        return anim
+
+    # F = -k(x - target) - c*v
+    val displacement = anim.current - anim.to_value
+    val spring_force = -anim.config.stiffness * displacement
+    val damping_force = -anim.config.damping * anim.velocity
+    val acceleration = (spring_force + damping_force) / anim.config.mass
+
+    val new_velocity = anim.velocity + acceleration * dt
+    val new_position = anim.current + new_velocity * dt
+    val new_elapsed = anim.elapsed + dt
+
+    # Check if at rest (displacement and velocity both near zero)
+    var disp_abs = new_position - anim.to_value
+    if disp_abs < 0.0:
+        disp_abs = -disp_abs
+    var vel_abs = new_velocity
+    if vel_abs < 0.0:
+        vel_abs = -vel_abs
+
+    val at_rest = disp_abs < 0.1 and vel_abs < 0.1
+
+    if at_rest:
+        # Snap to target when at rest
+        return SpringAnimation(
+            config: anim.config,
+            from_value: anim.from_value,
+            to_value: anim.to_value,
+            velocity: 0.0,
+            current: anim.to_value,
+            elapsed: new_elapsed,
+            is_complete: true
+        )
+
+    SpringAnimation(
+        config: anim.config,
+        from_value: anim.from_value,
+        to_value: anim.to_value,
+        velocity: new_velocity,
+        current: new_position,
+        elapsed: new_elapsed,
+        is_complete: false
+    )
+
+# ============================================================================
+# Query Functions
+# ============================================================================
+
+fn spring_is_at_rest(anim: SpringAnimation) -> bool:
+    """Check if the spring animation has settled to its target."""
+    anim.is_complete
+
+fn spring_progress(anim: SpringAnimation) -> f64:
+    """Compute normalized progress (0.0 to ~1.0) of the animation.
+
+    May overshoot 1.0 for bouncy springs.
+    """
+    val range = anim.to_value - anim.from_value
+    if range == 0.0:
+        return 1.0
+    (anim.current - anim.from_value) / range

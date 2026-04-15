@@ -1,0 +1,324 @@
+# Kernel Executable Source — Path-to-Bytes Lookup
+#
+# Resolves binary paths to executable bytes. Phase 4 wires this through the
+# in-kernel initramfs reader so SimpleOS can load arbitrary toolchain binaries
+# (clang, rust-lld, simple, ...) from the packed initramfs instead of a
+# hardcoded whitelist of minimal RV64 proof-of-concept stubs.
+#
+# Resolution order:
+#   1. If the path starts with `/` and an initramfs is mounted, ask the
+#      in-kernel initramfs reader for the file bytes.
+#   2. On ENOENT from the reader, fall back to the LEGACY_BOOT_STUBS allowlist
+#      which maps to minimal inlined RV32/RV64 ELF stubs used for boot-time
+#      smoke tests before full ELF-backed exec lands.
+#   3. Everything else: return Err("ENOENT: ...") so callers surface -2.
+#
+# TODO (Phase 4.5): the kernel currently has no zstd/cpio decompressor wired,
+# so _initramfs_read_file below always reports ENOENT for real archive paths
+# and prints a one-time TODO notice. When decompression is wired, replace the
+# body of _initramfs_read_file with a call into the kernel initramfs module.
+
+use os.kernel.arch.arch_context.{Architecture}
+
+val RV64_PROOF_BINARY_PATH: text = "/sys/apps/rv64_user_proof"
+val RV32_PROOF_BINARY_PATH: text = "/sys/apps/rv32_user_proof"
+
+# POSIX-ish errno string prefixes. The kernel error channel is `text`, so we
+# encode the numeric code in the message so callers can classify without
+# parsing free-form prose.
+val ERR_ENOENT: text = "ENOENT: -2"
+val ERR_EINVAL: text = "EINVAL: -22"
+val ERR_EBADF: text = "EBADF: -9"
+val ERR_ENOSPC: text = "ENOSPC: -28"
+
+# Legacy boot-test fallback: minimal inlined RV32/RV64 ELF stubs used by early
+# smoke tests. Everything else MUST come from the initramfs.
+val LEGACY_BOOT_STUBS: [text] = [
+    RV64_PROOF_BINARY_PATH,
+    RV32_PROOF_BINARY_PATH,
+    "/sbin/init_min",
+    "/sys/services/vfs",
+    "/sys/services/net",
+    "/sys/services/compositor",
+    "/sys/services/llm_mcp",
+    "/sys/apps/desktop",
+    "/sys/apps/terminal",
+    "/sys/apps/shell",
+    "/sys/apps/editor",
+    "/sys/apps/file_manager",
+    "/sys/apps/sysmon",
+    "/sys/apps/settings",
+    "/sys/apps/calculator",
+    "/sys/apps/memo",
+    "/sys/apps/file_explorer",
+    "/sys/apps/paint",
+    "/sys/apps/clock",
+    "/sys/apps/calendar",
+    "/sys/apps/screenshot",
+    "/sys/apps/image_viewer",
+    "/sys/apps/disk_manager",
+    "/sys/apps/log_viewer",
+    "/sys/apps/pkg",
+]
+
+# ----------------------------------------------------------------------------
+# Synthetic initramfs override — test-only injection point.
+#
+# Real kernel boots must go through the initramfs reader (`_initramfs_read_file`).
+# Specs that need to assert "VFS path X returns bytes Y" inject a synthetic
+# entry via `_set_synthetic_initramfs_for_test`; the production reader remains
+# untouched. The override is cleared with `_clear_synthetic_initramfs_for_test`.
+# ----------------------------------------------------------------------------
+
+struct SyntheticEntry:
+    path: text
+    bytes: [u8]
+
+var g_synthetic_entries: [SyntheticEntry] = []
+var g_initramfs_todo_warned: bool = false
+
+fn _set_synthetic_initramfs_for_test(path: text, bytes: [u8]):
+    """Test hook: register a synthetic initramfs entry resolvable by path."""
+    g_synthetic_entries.push(SyntheticEntry(path: path, bytes: bytes))
+
+fn _clear_synthetic_initramfs_for_test():
+    """Test hook: drop all synthetic entries installed during the test."""
+    g_synthetic_entries = []
+
+fn _lookup_synthetic(path: text) -> Result<[u8], text>:
+    for entry in g_synthetic_entries:
+        if entry.path == path:
+            return Ok(entry.bytes)
+    Err(ERR_ENOENT)
+
+# ----------------------------------------------------------------------------
+# In-kernel initramfs reader.
+#
+# Production signature: `_initramfs_read_file(path) -> Result<[u8], text>`.
+# On ENOENT the error message begins with "ENOENT:"; callers match on that
+# prefix to decide whether to fall back to LEGACY_BOOT_STUBS.
+#
+# Today the kernel does not yet have zstd+cpio-newc decode wired, so this
+# function always reports ENOENT and prints a one-time TODO notice. Phase 4.5
+# replaces this body with a real initramfs lookup.
+# ----------------------------------------------------------------------------
+
+fn _initramfs_read_file(path: text) -> Result<[u8], text>:
+    # First consult the synthetic test map — this is the injection point used
+    # by `executable_source_vfs_spec.spl` and is a no-op in production.
+    val synthetic = _lookup_synthetic(path)
+    if synthetic.is_ok():
+        return synthetic
+
+    # Production path — not yet wired. Warn once so Phase 4.5 is obvious.
+    if not g_initramfs_todo_warned:
+        g_initramfs_todo_warned = true
+        print "[loader] TODO: initramfs decompression not yet wired"
+    Err(ERR_ENOENT)
+
+fn _is_legacy_stub(path: text) -> bool:
+    for p in LEGACY_BOOT_STUBS:
+        if p == path:
+            return true
+    false
+
+fn _push_u16_le(buf: [u8], value: i64) -> [u8]:
+    buf.push((value & 0xFF).to_u8())
+    buf.push(((value >> 8) & 0xFF).to_u8())
+    buf
+
+fn _push_u32_le(buf: [u8], value: i64) -> [u8]:
+    buf.push((value & 0xFF).to_u8())
+    buf.push(((value >> 8) & 0xFF).to_u8())
+    buf.push(((value >> 16) & 0xFF).to_u8())
+    buf.push(((value >> 24) & 0xFF).to_u8())
+    buf
+
+fn _push_u64_le(buf: [u8], value: i64) -> [u8]:
+    var out = buf
+    out = _push_u32_le(out, value & 0xFFFFFFFF)
+    out = _push_u32_le(out, (value >> 32) & 0xFFFFFFFF)
+    out
+
+fn _minimal_rv64_exec() -> [u8]:
+    var bytes: [u8] = []
+    bytes.push(0x7F.to_u8())
+    bytes.push(0x45.to_u8())
+    bytes.push(0x4C.to_u8())
+    bytes.push(0x46.to_u8())
+    bytes.push(2.to_u8())
+    bytes.push(1.to_u8())
+    bytes.push(1.to_u8())
+    bytes.push(0.to_u8())
+    bytes.push(0.to_u8())
+    while bytes.len() < 16:
+        bytes.push(0.to_u8())
+    bytes = _push_u16_le(bytes, 2)
+    bytes = _push_u16_le(bytes, 243)
+    bytes = _push_u32_le(bytes, 1)
+    bytes = _push_u64_le(bytes, 0x400000)
+    bytes = _push_u64_le(bytes, 64)
+    bytes = _push_u64_le(bytes, 0)
+    bytes = _push_u32_le(bytes, 0)
+    bytes = _push_u16_le(bytes, 64)
+    bytes = _push_u16_le(bytes, 56)
+    bytes = _push_u16_le(bytes, 1)
+    bytes = _push_u16_le(bytes, 0)
+    bytes = _push_u16_le(bytes, 0)
+    bytes = _push_u16_le(bytes, 0)
+    bytes = _push_u32_le(bytes, 1)
+    bytes = _push_u32_le(bytes, 5)
+    bytes = _push_u64_le(bytes, 0x1000)
+    bytes = _push_u64_le(bytes, 0x400000)
+    bytes = _push_u64_le(bytes, 0x400000)
+    bytes = _push_u64_le(bytes, 32)
+    bytes = _push_u64_le(bytes, 32)
+    bytes = _push_u64_le(bytes, 0x1000)
+    # Update segment sizes: 8 instructions * 4 bytes = 32 bytes of code
+    while bytes.len() < 0x1000:
+        bytes.push(0.to_u8())
+
+    # Instruction 1: li a7, 60  (addi a7, zero, 60) — SYS_DEBUG_WRITE
+    # Encoding: imm[11:0]=60=0x3C, rs1=x0, funct3=000, rd=x17(a7), opcode=0010011
+    # = 0x03C00893
+    bytes.push(0x93.to_u8())
+    bytes.push(0x08.to_u8())
+    bytes.push(0xC0.to_u8())
+    bytes.push(0x03.to_u8())
+
+    # Instruction 2: li a0, 0x50  (addi a0, zero, 80) — 'P' ASCII
+    # = 0x05000513
+    bytes.push(0x13.to_u8())
+    bytes.push(0x05.to_u8())
+    bytes.push(0x00.to_u8())
+    bytes.push(0x05.to_u8())
+
+    # Instruction 3: ecall — trap to kernel
+    # = 0x00000073
+    bytes.push(0x73.to_u8())
+    bytes.push(0x00.to_u8())
+    bytes.push(0x00.to_u8())
+    bytes.push(0x00.to_u8())
+
+    # Instruction 4: li a7, 4  (addi a7, zero, 4) — SYS_GETPID
+    # = 0x00400893
+    bytes.push(0x93.to_u8())
+    bytes.push(0x08.to_u8())
+    bytes.push(0x40.to_u8())
+    bytes.push(0x00.to_u8())
+
+    # Instruction 5: ecall — getpid
+    # = 0x00000073
+    bytes.push(0x73.to_u8())
+    bytes.push(0x00.to_u8())
+    bytes.push(0x00.to_u8())
+    bytes.push(0x00.to_u8())
+
+    # Instruction 6: li a7, 0  (addi a7, zero, 0) — SYS_EXIT
+    # = 0x00000893
+    bytes.push(0x93.to_u8())
+    bytes.push(0x08.to_u8())
+    bytes.push(0x00.to_u8())
+    bytes.push(0x00.to_u8())
+
+    # Instruction 7: li a0, 0  (addi a0, zero, 0) — exit code 0
+    # = 0x00000513
+    bytes.push(0x13.to_u8())
+    bytes.push(0x05.to_u8())
+    bytes.push(0x00.to_u8())
+    bytes.push(0x00.to_u8())
+
+    # Instruction 8: ecall — exit
+    # = 0x00000073
+    bytes.push(0x73.to_u8())
+    bytes.push(0x00.to_u8())
+    bytes.push(0x00.to_u8())
+    bytes.push(0x00.to_u8())
+
+    bytes
+
+fn _minimal_rv32_exec() -> [u8]:
+    var bytes: [u8] = []
+    bytes.push(0x7F.to_u8())
+    bytes.push(0x45.to_u8())
+    bytes.push(0x4C.to_u8())
+    bytes.push(0x46.to_u8())
+    bytes.push(1.to_u8())
+    bytes.push(1.to_u8())
+    bytes.push(1.to_u8())
+    bytes.push(0.to_u8())
+    bytes.push(0.to_u8())
+    while bytes.len() < 16:
+        bytes.push(0.to_u8())
+    bytes = _push_u16_le(bytes, 2)
+    bytes = _push_u16_le(bytes, 243)
+    bytes = _push_u32_le(bytes, 1)
+    bytes = _push_u32_le(bytes, 0x80000000)
+    bytes = _push_u32_le(bytes, 52)
+    bytes = _push_u32_le(bytes, 0)
+    bytes = _push_u32_le(bytes, 0)
+    bytes = _push_u16_le(bytes, 52)
+    bytes = _push_u16_le(bytes, 32)
+    bytes = _push_u16_le(bytes, 1)
+    bytes = _push_u16_le(bytes, 0)
+    bytes = _push_u16_le(bytes, 0)
+    bytes = _push_u16_le(bytes, 0)
+    bytes = _push_u32_le(bytes, 1)
+    bytes = _push_u32_le(bytes, 0x100)
+    bytes = _push_u32_le(bytes, 0x80000000)
+    bytes = _push_u32_le(bytes, 0x80000000)
+    bytes = _push_u32_le(bytes, 4)
+    bytes = _push_u32_le(bytes, 4)
+    bytes = _push_u32_le(bytes, 5)
+    bytes = _push_u32_le(bytes, 0x1000)
+    while bytes.len() < 0x104:
+        bytes.push(0.to_u8())
+    bytes.push(0x13.to_u8())
+    bytes.push(0x00.to_u8())
+    bytes.push(0x00.to_u8())
+    bytes.push(0x00.to_u8())
+    bytes
+
+fn _legacy_stub_bytes(path: text, arch: Architecture) -> Result<[u8], text>:
+    if not _is_legacy_stub(path):
+        return Err(ERR_ENOENT)
+    match arch:
+        case Architecture.Riscv64:
+            Ok(_minimal_rv64_exec())
+        case Architecture.Riscv32:
+            Ok(_minimal_rv32_exec())
+        case _:
+            Err("unsupported architecture for executable source")
+
+fn resolve_executable_bytes(path: text, arch: Architecture) -> Result<[u8], text>:
+    """Resolve a binary path to executable bytes.
+
+    1. Paths beginning with '/' are first looked up via the in-kernel
+       initramfs reader (`_initramfs_read_file`).
+    2. If the initramfs reports ENOENT, fall back to the LEGACY_BOOT_STUBS
+       allowlist with inlined RV32/RV64 proof stubs used for early boot tests.
+    3. Otherwise return ENOENT.
+    """
+    if path.len() == 0:
+        return Err(ERR_EINVAL)
+
+    if path.starts_with("/"):
+        val initramfs_result = _initramfs_read_file(path)
+        if initramfs_result.is_ok():
+            return initramfs_result
+
+    # Reader said ENOENT — try the boot-test fallback.
+    _legacy_stub_bytes(path, arch)
+
+fn resolve_executable_size(path: text, arch: Architecture) -> Result<u64, text>:
+    """Return the size in bytes of the executable at `path`.
+
+    Used by Phase 2/3 for pre-allocation sizing without materialising the
+    full byte buffer twice. Current implementation resolves the bytes and
+    returns their length; a future optimisation can query the initramfs
+    metadata directly once decompression is wired.
+    """
+    val bytes_result = resolve_executable_bytes(path, arch)
+    if bytes_result.is_err():
+        return Err(bytes_result.err().unwrap())
+    Ok(bytes_result.unwrap().len().to_u64())

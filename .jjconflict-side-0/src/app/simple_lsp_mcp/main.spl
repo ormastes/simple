@@ -1,0 +1,90 @@
+@allow(unnamed_duplicate_typed_args)
+# Simple LSP MCP Server — Simple-native replacement for the Python shim
+#
+# Uses shared mcp_sdk for JSON, transport, and shell helpers.
+
+use app.simple_lsp_mcp.json_helpers.{read_stdin_message, write_stdout_message, LB, RB, extract_field, extract_id, jsonrpc_result, jsonrpc_error, has_method}
+use app.simple_lsp_mcp.protocol
+use app.simple_lsp_mcp.tools
+use app.simple_lsp_mcp.startup_log
+
+val SERVER_NAME = "simple-lsp-mcp"
+val SERVER_VERSION = "0.2.0"
+
+var TOOLS_CACHE = ""
+var INIT_CACHE = ""
+
+fn main():
+    mcp_startup_log(SERVER_NAME, SERVER_VERSION)
+    while true:
+        val msg = read_stdin_message()
+        if msg == "":
+            return
+
+        val method = detect_mcp_method(msg)
+        val id = extract_id(msg)
+        var response = ""
+
+        if method == "initialize":
+            response = make_init_response(id)
+        elif method == "initialized" or method == "notifications/initialized" or method == "notifications/cancelled" or method == "notifications/roots/list_changed":
+            response = ""
+        elif method == "shutdown":
+            response = jsonrpc_result(id, "null")
+        elif method == "ping":
+            response = jsonrpc_result(id, LB() + RB())
+        elif method == "tools/list":
+            response = make_tools_list(id)
+        elif method == "tools/call":
+            response = handle_tool_call(id, msg)
+        elif method == "resources/list":
+            response = handle_resources_list(id)
+        elif method == "resources/templates/list":
+            response = handle_resource_templates_list(id)
+        elif method == "prompts/list":
+            response = handle_prompts_list(id)
+        elif method == "roots/list":
+            response = handle_roots_list(id)
+        elif method == "logging/setLevel" or method == "logging/setlevel":
+            response = handle_logging_set_level(id, msg)
+        else:
+            if id != "" and id != "null":
+                response = jsonrpc_error(id, -32601, "Method not found: " + method)
+
+        if response != "":
+            write_stdout_message(response)
+
+main()
+
+fn detect_mcp_method(msg: text) -> text:
+    if has_method(msg, "initialize"):
+        return "initialize"
+    if has_method(msg, "initialized"):
+        return "initialized"
+    if has_method(msg, "notifications/initialized"):
+        return "notifications/initialized"
+    if has_method(msg, "notifications/cancelled"):
+        return "notifications/cancelled"
+    if has_method(msg, "notifications/roots/list_changed"):
+        return "notifications/roots/list_changed"
+    if has_method(msg, "shutdown"):
+        return "shutdown"
+    if has_method(msg, "ping"):
+        return "ping"
+    if has_method(msg, "tools/list"):
+        return "tools/list"
+    if has_method(msg, "tools/call"):
+        return "tools/call"
+    if has_method(msg, "resources/list"):
+        return "resources/list"
+    if has_method(msg, "resources/templates/list"):
+        return "resources/templates/list"
+    if has_method(msg, "prompts/list"):
+        return "prompts/list"
+    if has_method(msg, "roots/list"):
+        return "roots/list"
+    if has_method(msg, "logging/setLevel"):
+        return "logging/setLevel"
+    if has_method(msg, "logging/setlevel"):
+        return "logging/setLevel"
+    extract_field(msg, "method")

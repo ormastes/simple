@@ -1,0 +1,1145 @@
+# 8086 Instruction Decoder — Guest Binary to IR_TC
+#
+# Translates Intel 8086 machine code into IR_TC operations.
+# Uses the opcode table from opcodes.spl and emits through IrTcBuilder.
+#
+# Design:
+# - Each instruction reads guest registers, computes results, writes back
+# - FLAGS are updated per-instruction (CF, ZF, SF, OF, PF, AF)
+# - Memory operands use segment:offset resolution from segment.spl
+# - Variable-length instructions: 1-6 bytes
+
+use core.types.{IrTcTypeKind, IrTcValue, IrTcCond, GuestArch}
+use core.ops.{IrTcOp}
+use core.mem_op.{MemOp, Endian, GuestRegId}
+use core.builder.{IrTcBuilder}
+use core.block.{BlockId}
+use guest.cpu_def.{GuestCpuDef}
+use guest.i8086.cpu.{
+    X86_REG_AX, X86_REG_BX, X86_REG_CX, X86_REG_DX,
+    X86_REG_SI, X86_REG_DI, X86_REG_BP, X86_REG_SP,
+    X86_REG_CS, X86_REG_DS, X86_REG_SS, X86_REG_ES,
+    X86_REG_IP, X86_REG_FLAGS,
+    X86_FLAG_CF, X86_FLAG_PF, X86_FLAG_AF, X86_FLAG_ZF,
+    X86_FLAG_SF, X86_FLAG_OF, X86_FLAG_DF, X86_FLAG_IF, X86_FLAG_TF
+}
+use guest.i8086.segment.{SegmentKind, emit_segment_resolve, default_segment_for_base}
+use guest.i8086.opcodes.{
+    X86Opcode, OperandKind, DecodedInst,
+    decode_opcode, decode_modrm, modrm_ea_operand,
+    reg8_parent, reg8_is_high, reg16_index, seg_reg_index,
+    sign_extend_8to16
+}
+
+# ============================================================================
+# Decoder Error
+# ============================================================================
+
+enum DecoderError:
+    """Errors that can occur during instruction decoding."""
+    UnknownOpcode(byte: i64, pc: i64)
+    TruncatedInstruction(pc: i64)
+    InvalidOperand(msg: text, pc: i64)
+    Unimplemented(opcode: text, pc: i64)
+
+impl DecoderError:
+    fn to_text() -> text:
+        match self:
+            UnknownOpcode(b, pc): "unknown opcode 0x{b} at PC=0x{pc}"
+            TruncatedInstruction(pc): "truncated instruction at PC=0x{pc}"
+            InvalidOperand(msg, pc): "invalid operand: {msg} at PC=0x{pc}"
+            Unimplemented(op, pc): "unimplemented: {op} at PC=0x{pc}"
+
+# ============================================================================
+# I8086 Decoder
+# ============================================================================
+
+class I8086Decoder:
+    """Translates 8086 guest binary into IR_TC operations.
+
+    Usage:
+        var decoder = I8086Decoder.create(builder, cpu_def)
+        val consumed = decoder.decode_instruction(bytes, 0, pc)
+    """
+    builder: IrTcBuilder
+    cpu_def: GuestCpuDef
+    segment_override: SegmentKind?
+
+impl I8086Decoder:
+    static fn create(builder: IrTcBuilder, cpu_def: GuestCpuDef) -> I8086Decoder:
+        I8086Decoder(
+            builder: builder,
+            cpu_def: cpu_def,
+            segment_override: nil
+        )
+
+    # ── Register Helpers ──
+
+    fn _make_reg_id(index: i64, name: text) -> GuestRegId:
+        GuestRegId.new(GuestArch.I8086, index, name)
+
+    fn _reg_names() -> [text]:
+        ["AX", "BX", "CX", "DX", "SI", "DI", "BP", "SP",
+         "CS", "DS", "SS", "ES", "IP", "FLAGS"]
+
+    fn _reg_name(index: i64) -> text:
+        val names = self._reg_names()
+        if index >= 0 and index < names.len():
+            names[index]
+        else:
+            "R{index}"
+
+    me _read_reg16(index: i64) -> IrTcValue:
+        """Read a 16-bit guest register."""
+        val reg_id = self._make_reg_id(index, self._reg_name(index))
+        self.builder.read_guest_reg(reg_id, IrTcTypeKind.I16)
+
+    me _write_reg16(index: i64, value: IrTcValue):
+        """Write a 16-bit guest register."""
+        val reg_id = self._make_reg_id(index, self._reg_name(index))
+        self.builder.write_guest_reg(reg_id, value)
+
+    me _read_reg8(reg_field: i64) -> IrTcValue:
+        """Read an 8-bit sub-register (AL/CL/DL/BL/AH/CH/DH/BH).
+
+        For low bytes: trunc the 16-bit parent to 8 bits.
+        For high bytes: shift right by 8, then trunc.
+        """
+        val parent = reg8_parent(reg_field)
+        val parent_val = self._read_reg16(parent)
+        if reg8_is_high(reg_field):
+            val eight = self._const_i16(8)
+            val shifted = self.builder.shr(parent_val, eight)
+            self.builder.trunc(shifted, IrTcTypeKind.I8)
+        else:
+            self.builder.trunc(parent_val, IrTcTypeKind.I8)
+
+    me _write_reg8(reg_field: i64, value: IrTcValue):
+        """Write an 8-bit sub-register, preserving the other byte."""
+        val parent = reg8_parent(reg_field)
+        val parent_val = self._read_reg16(parent)
+        val ext_val = self.builder.ext(value, IrTcTypeKind.I16, false)
+
+        if reg8_is_high(reg_field):
+            # Clear high byte: parent & 0x00FF
+            val lo_mask = self._const_i16(0x00FF)
+            val cleared = self.builder.and_(parent_val, lo_mask)
+            # Shift new value into high byte
+            val eight = self._const_i16(8)
+            val shifted = self.builder.shl(ext_val, eight)
+            val result = self.builder.or_(cleared, shifted)
+            self._write_reg16(parent, result)
+        else:
+            # Clear low byte: parent & 0xFF00
+            val hi_mask = self._const_i16(0xFF00)
+            val cleared = self.builder.and_(parent_val, hi_mask)
+            val result = self.builder.or_(cleared, ext_val)
+            self._write_reg16(parent, result)
+
+    # ── Constant Helpers ──
+
+    me _const_i8(val_: i64) -> IrTcValue:
+        # Emit a constant by creating a new value — builder tracks SSA IDs
+        # In a real system, constants would be materialized differently,
+        # but for IR_TC we use new_value as a placeholder for const operands.
+        self.builder.new_value(IrTcTypeKind.I8)
+
+    me _const_i16(val_: i64) -> IrTcValue:
+        self.builder.new_value(IrTcTypeKind.I16)
+
+    me _const_i32(val_: i64) -> IrTcValue:
+        self.builder.new_value(IrTcTypeKind.I32)
+
+    me _const_i1(val_: bool) -> IrTcValue:
+        self.builder.new_value(IrTcTypeKind.I1)
+
+    # ── FLAGS Helpers ──
+
+    me _read_flags() -> IrTcValue:
+        self._read_reg16(X86_REG_FLAGS)
+
+    me _write_flags(value: IrTcValue):
+        self._write_reg16(X86_REG_FLAGS, value)
+
+    me _set_flag_bit(flags: IrTcValue, bit_pos: i64, flag_val: IrTcValue) -> IrTcValue:
+        """Set a single flag bit in the FLAGS register value.
+
+        flags: current FLAGS value (i16)
+        bit_pos: bit position of the flag
+        flag_val: i1 value (0 or 1)
+        """
+        val bit_mask = self._const_i16(1 << bit_pos)
+        val inv_mask = self._const_i16(0xFFFF ^ (1 << bit_pos))
+        # Clear the bit
+        val cleared = self.builder.and_(flags, inv_mask)
+        # Extend flag_val to i16 and shift into position
+        val ext_flag = self.builder.ext(flag_val, IrTcTypeKind.I16, false)
+        val shift_amt = self._const_i16(bit_pos)
+        val shifted = self.builder.shl(ext_flag, shift_amt)
+        # Set the bit
+        self.builder.or_(cleared, shifted)
+
+    me _update_zf_sf(flags: IrTcValue, result: IrTcValue, is_word: bool) -> IrTcValue:
+        """Update ZF and SF based on result value."""
+        val zero = if is_word: self._const_i16(0) else: self._const_i8(0)
+        val zf = self.builder.cmp(IrTcCond.Eq, result, zero)
+        var new_flags = self._set_flag_bit(flags, X86_FLAG_ZF, zf)
+
+        # SF = high bit of result
+        val sign_bit = if is_word: self._const_i16(15) else: self._const_i8(7)
+        val shifted = self.builder.shr(result, sign_bit)
+        val sf_val = if is_word:
+            val one16 = self._const_i16(1)
+            val masked = self.builder.and_(shifted, one16)
+            self.builder.trunc(masked, IrTcTypeKind.I1)
+        else:
+            val one8 = self._const_i8(1)
+            val masked = self.builder.and_(shifted, one8)
+            self.builder.trunc(masked, IrTcTypeKind.I1)
+        new_flags = self._set_flag_bit(new_flags, X86_FLAG_SF, sf_val)
+        new_flags
+
+    me _update_pf(flags: IrTcValue, result: IrTcValue) -> IrTcValue:
+        """Update PF (parity of low byte). PF=1 if even number of set bits."""
+        # Simplified: emit a helper call or compute parity of low byte
+        # For now, approximate by checking if low byte is zero (partial)
+        val low_byte = self.builder.trunc(result, IrTcTypeKind.I8)
+        val zero8 = self._const_i8(0)
+        val pf = self.builder.cmp(IrTcCond.Eq, low_byte, zero8)
+        self._set_flag_bit(flags, X86_FLAG_PF, pf)
+
+    me _update_flags_arithmetic(a: IrTcValue, b: IrTcValue, result: IrTcValue, is_sub: bool, is_word: bool) -> IrTcValue:
+        """Update CF, ZF, SF, OF, PF, AF for arithmetic operations.
+
+        For ADD: CF = carry out, OF = signed overflow
+        For SUB/CMP: CF = borrow, OF = signed overflow
+        """
+        var flags = self._read_flags()
+
+        # ZF and SF
+        flags = self._update_zf_sf(flags, result, is_word)
+
+        # PF (parity of low byte)
+        flags = self._update_pf(flags, result)
+
+        # CF — carry/borrow
+        val cf = if is_sub:
+            self.builder.cmp(IrTcCond.Ltu, a, b)
+        else:
+            # For ADD, carry if result < a (unsigned)
+            self.builder.cmp(IrTcCond.Ltu, result, a)
+        flags = self._set_flag_bit(flags, X86_FLAG_CF, cf)
+
+        # OF — signed overflow
+        # ADD: OF = (sign(a) == sign(b)) && (sign(result) != sign(a))
+        # SUB: OF = (sign(a) != sign(b)) && (sign(result) != sign(a))
+        val zero_val = if is_word: self._const_i16(0) else: self._const_i8(0)
+        val a_neg = self.builder.cmp(IrTcCond.Lt, a, zero_val)
+        val b_neg = self.builder.cmp(IrTcCond.Lt, b, zero_val)
+        val r_neg = self.builder.cmp(IrTcCond.Lt, result, zero_val)
+        val signs_same = self.builder.cmp(IrTcCond.Eq, a_neg, b_neg)
+        val result_diff = self.builder.cmp(IrTcCond.Ne, r_neg, a_neg)
+        val of_cond = if is_sub:
+            val signs_diff = self.builder.cmp(IrTcCond.Ne, a_neg, b_neg)
+            self.builder.and_(signs_diff, result_diff)
+        else:
+            self.builder.and_(signs_same, result_diff)
+        val of_bit = self.builder.trunc(of_cond, IrTcTypeKind.I1)
+        flags = self._set_flag_bit(flags, X86_FLAG_OF, of_bit)
+
+        # AF — auxiliary carry (bit 4 carry). Simplified: placeholder
+        val af = self._const_i1(false)
+        flags = self._set_flag_bit(flags, X86_FLAG_AF, af)
+
+        self._write_flags(flags)
+        flags
+
+    me _update_flags_logical(result: IrTcValue, is_word: bool):
+        """Update flags for logical operations (AND, OR, XOR, TEST).
+
+        CF=0, OF=0, ZF and SF from result, PF from low byte.
+        """
+        var flags = self._read_flags()
+        flags = self._update_zf_sf(flags, result, is_word)
+        flags = self._update_pf(flags, result)
+        val zero_bit = self._const_i1(false)
+        flags = self._set_flag_bit(flags, X86_FLAG_CF, zero_bit)
+        flags = self._set_flag_bit(flags, X86_FLAG_OF, zero_bit)
+        self._write_flags(flags)
+
+    # ── Segment Helpers ──
+
+    me _effective_segment(operand: OperandKind) -> SegmentKind:
+        """Determine which segment to use for a memory operand."""
+        if val override_ = self.segment_override:
+            return override_
+
+        # Default segment depends on base register
+        match operand:
+            Mem(ea_base, _, _, _):
+                if ea_base >= 0:
+                    default_segment_for_base(ea_base)
+                else:
+                    SegmentKind.DS
+            _: SegmentKind.DS
+
+    # ── Operand Load / Store ──
+
+    me _compute_ea(operand: OperandKind) -> IrTcValue:
+        """Compute effective address for a memory operand (16-bit offset)."""
+        match operand:
+            Mem(ea_base, ea_index, disp, _):
+                var addr = self._const_i16(disp)
+                if ea_base >= 0:
+                    val base_val = self._read_reg16(ea_base)
+                    addr = self.builder.add(addr, base_val)
+                if ea_index >= 0:
+                    val idx_val = self._read_reg16(ea_index)
+                    addr = self.builder.add(addr, idx_val)
+                addr
+            _:
+                # Should not be called for non-memory operands
+                self._const_i16(0)
+
+    me _load_operand(operand: OperandKind) -> IrTcValue:
+        """Load a value from an operand (register, memory, or immediate)."""
+        match operand:
+            Reg8(index):
+                self._read_reg8(index)
+            Reg16(index):
+                self._read_reg16(index)
+            SegReg(index):
+                self._read_reg16(index)
+            Imm8(value):
+                self._const_i8(value)
+            Imm16(value):
+                self._const_i16(value)
+            Mem(_, _, _, width):
+                val offset_val = self._compute_ea(operand)
+                val segment = self._effective_segment(operand)
+                val phys_addr = emit_segment_resolve(self.builder, segment, offset_val)
+                if width == 8:
+                    self.builder.guest_load(phys_addr, IrTcTypeKind.I8, MemOp.byte(Endian.Little), 0)
+                else:
+                    self.builder.guest_load(phys_addr, IrTcTypeKind.I16, MemOp.word16(Endian.Little), 0)
+            None_:
+                self._const_i16(0)
+
+    me _store_operand(operand: OperandKind, value: IrTcValue):
+        """Store a value to an operand (register or memory)."""
+        match operand:
+            Reg8(index):
+                self._write_reg8(index, value)
+            Reg16(index):
+                self._write_reg16(index, value)
+            SegReg(index):
+                self._write_reg16(index, value)
+            Mem(_, _, _, width):
+                val offset_val = self._compute_ea(operand)
+                val segment = self._effective_segment(operand)
+                val phys_addr = emit_segment_resolve(self.builder, segment, offset_val)
+                if width == 8:
+                    self.builder.guest_store(value, phys_addr, MemOp.byte(Endian.Little), 0)
+                else:
+                    self.builder.guest_store(value, phys_addr, MemOp.word16(Endian.Little), 0)
+            _:
+                pass_do_nothing
+
+    fn _operand_is_word(operand: OperandKind) -> bool:
+        match operand:
+            Reg16(_): true
+            SegReg(_): true
+            Imm16(_): true
+            Mem(_, _, _, width): width == 16
+            _: false
+
+    # ── Stack Helpers ──
+
+    me _push16(value: IrTcValue):
+        """PUSH a 16-bit value onto the stack: SP -= 2, [SS:SP] = value."""
+        val sp = self._read_reg16(X86_REG_SP)
+        val two = self._const_i16(2)
+        val new_sp = self.builder.sub(sp, two)
+        self._write_reg16(X86_REG_SP, new_sp)
+        val phys = emit_segment_resolve(self.builder, SegmentKind.SS, new_sp)
+        self.builder.guest_store(value, phys, MemOp.word16(Endian.Little), 0)
+
+    me _pop16() -> IrTcValue:
+        """POP a 16-bit value from stack: value = [SS:SP], SP += 2."""
+        val sp = self._read_reg16(X86_REG_SP)
+        val phys = emit_segment_resolve(self.builder, SegmentKind.SS, sp)
+        val value = self.builder.guest_load(phys, IrTcTypeKind.I16, MemOp.word16(Endian.Little), 0)
+        val two = self._const_i16(2)
+        val new_sp = self.builder.add(sp, two)
+        self._write_reg16(X86_REG_SP, new_sp)
+        value
+
+    # ── Main Decode Entry Point ──
+
+    me decode_instruction(bytes: [i64], offset: i64, pc: i64) -> Result<i64, DecoderError>:
+        """Decode and emit IR_TC for one 8086 instruction.
+
+        Args:
+            bytes: Guest memory content
+            offset: Byte offset into bytes to start decoding
+            pc: Current guest program counter (for relative branches)
+
+        Returns:
+            Ok(bytes_consumed) on success, Err(DecoderError) on failure.
+        """
+        if offset >= bytes.len():
+            return Err(DecoderError.TruncatedInstruction(pc: pc))
+
+        # Handle prefix bytes
+        self.segment_override = nil
+        var cur_offset = offset
+        var has_prefix = true
+
+        while has_prefix:
+            if cur_offset >= bytes.len():
+                return Err(DecoderError.TruncatedInstruction(pc: pc))
+            val prefix_byte = bytes[cur_offset]
+            match prefix_byte:
+                0x26:
+                    self.segment_override = Some(SegmentKind.ES)
+                    cur_offset = cur_offset + 1
+                0x2E:
+                    self.segment_override = Some(SegmentKind.CS)
+                    cur_offset = cur_offset + 1
+                0x36:
+                    self.segment_override = Some(SegmentKind.SS)
+                    cur_offset = cur_offset + 1
+                0x3E:
+                    self.segment_override = Some(SegmentKind.DS)
+                    cur_offset = cur_offset + 1
+                _:
+                    has_prefix = false
+
+        # Decode the instruction
+        val decoded_opt = decode_opcode(bytes, cur_offset)
+        if val decoded = decoded_opt:
+            val total_bytes = (cur_offset - offset) + decoded.bytes_consumed
+            val result = self._emit_instruction(decoded, pc, total_bytes)
+            match result:
+                Ok(_): Ok(total_bytes)
+                Err(e): Err(e)
+        else:
+            Err(DecoderError.UnknownOpcode(byte: bytes[cur_offset], pc: pc))
+
+    # ── Instruction Emission ──
+
+    me _emit_instruction(inst: DecodedInst, pc: i64, total_bytes: i64) -> Result<i64, DecoderError>:
+        """Emit IR_TC operations for a decoded instruction."""
+        match inst.opcode:
+            # ── Data Movement ──
+            MOV:
+                val src_val = self._load_operand(inst.src)
+                self._store_operand(inst.dst, src_val)
+                Ok(total_bytes)
+
+            XCHG:
+                val a_val = self._load_operand(inst.dst)
+                val b_val = self._load_operand(inst.src)
+                self._store_operand(inst.dst, b_val)
+                self._store_operand(inst.src, a_val)
+                Ok(total_bytes)
+
+            LEA:
+                # Load effective address — compute EA without memory access
+                val ea = self._compute_ea(inst.src)
+                self._store_operand(inst.dst, ea)
+                Ok(total_bytes)
+
+            PUSH:
+                val val_ = self._load_operand(inst.dst)
+                self._push16(val_)
+                Ok(total_bytes)
+
+            POP:
+                val val_ = self._pop16()
+                self._store_operand(inst.dst, val_)
+                Ok(total_bytes)
+
+            PUSHF:
+                val flags = self._read_flags()
+                self._push16(flags)
+                Ok(total_bytes)
+
+            POPF:
+                val flags = self._pop16()
+                self._write_flags(flags)
+                Ok(total_bytes)
+
+            LAHF:
+                # AH = FLAGS low byte (SF:ZF:0:AF:0:PF:1:CF)
+                val flags = self._read_flags()
+                val low_byte = self.builder.trunc(flags, IrTcTypeKind.I8)
+                self._write_reg8(4, low_byte)  # AH = reg_field 4
+                Ok(total_bytes)
+
+            SAHF:
+                # FLAGS low byte = AH
+                val ah = self._read_reg8(4)
+                val flags = self._read_flags()
+                val hi_mask = self._const_i16(0xFF00)
+                val cleared = self.builder.and_(flags, hi_mask)
+                val ext_ah = self.builder.ext(ah, IrTcTypeKind.I16, false)
+                val new_flags = self.builder.or_(cleared, ext_ah)
+                self._write_flags(new_flags)
+                Ok(total_bytes)
+
+            # ── Arithmetic ──
+            ADD:
+                self._emit_alu_add_sub(inst, false, false)
+                Ok(total_bytes)
+
+            ADC:
+                self._emit_alu_add_sub(inst, false, true)
+                Ok(total_bytes)
+
+            SUB:
+                self._emit_alu_add_sub(inst, true, false)
+                Ok(total_bytes)
+
+            SBB:
+                self._emit_alu_add_sub(inst, true, true)
+                Ok(total_bytes)
+
+            CMP:
+                # Same as SUB but discard result (only update flags)
+                val a = self._load_operand(inst.dst)
+                val b = self._load_operand(inst.src)
+                val is_word = self._operand_is_word(inst.dst)
+                val result = self.builder.sub(a, b)
+                self._update_flags_arithmetic(a, b, result, true, is_word)
+                Ok(total_bytes)
+
+            INC:
+                val a = self._load_operand(inst.dst)
+                val is_word = self._operand_is_word(inst.dst)
+                val one = if is_word: self._const_i16(1) else: self._const_i8(1)
+                val result = self.builder.add(a, one)
+                self._store_operand(inst.dst, result)
+                # INC does NOT affect CF — update ZF, SF, OF, PF, AF only
+                var flags = self._read_flags()
+                flags = self._update_zf_sf(flags, result, is_word)
+                flags = self._update_pf(flags, result)
+                self._write_flags(flags)
+                Ok(total_bytes)
+
+            DEC:
+                val a = self._load_operand(inst.dst)
+                val is_word = self._operand_is_word(inst.dst)
+                val one = if is_word: self._const_i16(1) else: self._const_i8(1)
+                val result = self.builder.sub(a, one)
+                self._store_operand(inst.dst, result)
+                # DEC does NOT affect CF
+                var flags = self._read_flags()
+                flags = self._update_zf_sf(flags, result, is_word)
+                flags = self._update_pf(flags, result)
+                self._write_flags(flags)
+                Ok(total_bytes)
+
+            NEG:
+                val a = self._load_operand(inst.dst)
+                val result = self.builder.neg(a)
+                self._store_operand(inst.dst, result)
+                val is_word = self._operand_is_word(inst.dst)
+                val zero = if is_word: self._const_i16(0) else: self._const_i8(0)
+                self._update_flags_arithmetic(zero, a, result, true, is_word)
+                Ok(total_bytes)
+
+            # ── Logic / Bitwise ──
+            AND:
+                val a = self._load_operand(inst.dst)
+                val b = self._load_operand(inst.src)
+                val result = self.builder.and_(a, b)
+                self._store_operand(inst.dst, result)
+                val is_word = self._operand_is_word(inst.dst)
+                self._update_flags_logical(result, is_word)
+                Ok(total_bytes)
+
+            OR:
+                val a = self._load_operand(inst.dst)
+                val b = self._load_operand(inst.src)
+                val result = self.builder.or_(a, b)
+                self._store_operand(inst.dst, result)
+                val is_word = self._operand_is_word(inst.dst)
+                self._update_flags_logical(result, is_word)
+                Ok(total_bytes)
+
+            XOR:
+                val a = self._load_operand(inst.dst)
+                val b = self._load_operand(inst.src)
+                val result = self.builder.xor_(a, b)
+                self._store_operand(inst.dst, result)
+                val is_word = self._operand_is_word(inst.dst)
+                self._update_flags_logical(result, is_word)
+                Ok(total_bytes)
+
+            NOT:
+                val a = self._load_operand(inst.dst)
+                val result = self.builder.not_(a)
+                self._store_operand(inst.dst, result)
+                # NOT does not affect any flags
+                Ok(total_bytes)
+
+            TEST:
+                val a = self._load_operand(inst.dst)
+                val b = self._load_operand(inst.src)
+                val result = self.builder.and_(a, b)
+                val is_word = self._operand_is_word(inst.dst)
+                self._update_flags_logical(result, is_word)
+                Ok(total_bytes)
+
+            SHL:
+                val a = self._load_operand(inst.dst)
+                val cnt = self._load_operand(inst.src)
+                val is_word = self._operand_is_word(inst.dst)
+                val result = self.builder.shl(a, cnt)
+                self._store_operand(inst.dst, result)
+                # Simplified FLAGS update
+                var flags = self._read_flags()
+                flags = self._update_zf_sf(flags, result, is_word)
+                flags = self._update_pf(flags, result)
+                self._write_flags(flags)
+                Ok(total_bytes)
+
+            SHR:
+                val a = self._load_operand(inst.dst)
+                val cnt = self._load_operand(inst.src)
+                val is_word = self._operand_is_word(inst.dst)
+                val result = self.builder.shr(a, cnt)
+                self._store_operand(inst.dst, result)
+                var flags = self._read_flags()
+                flags = self._update_zf_sf(flags, result, is_word)
+                flags = self._update_pf(flags, result)
+                self._write_flags(flags)
+                Ok(total_bytes)
+
+            SAR:
+                val a = self._load_operand(inst.dst)
+                val cnt = self._load_operand(inst.src)
+                val is_word = self._operand_is_word(inst.dst)
+                val result = self.builder.sar(a, cnt)
+                self._store_operand(inst.dst, result)
+                var flags = self._read_flags()
+                flags = self._update_zf_sf(flags, result, is_word)
+                flags = self._update_pf(flags, result)
+                self._write_flags(flags)
+                Ok(total_bytes)
+
+            ROL:
+                pass_todo  # ROL: rotate left with CF update
+                Err(DecoderError.Unimplemented(opcode: "ROL", pc: pc))
+
+            ROR:
+                pass_todo  # ROR: rotate right with CF update
+                Err(DecoderError.Unimplemented(opcode: "ROR", pc: pc))
+
+            RCL:
+                pass_todo  # RCL: rotate left through carry
+                Err(DecoderError.Unimplemented(opcode: "RCL", pc: pc))
+
+            RCR:
+                pass_todo  # RCR: rotate right through carry
+                Err(DecoderError.Unimplemented(opcode: "RCR", pc: pc))
+
+            # ── Control Flow ──
+            JMP:
+                self._emit_jmp(inst, pc, total_bytes)
+                Ok(total_bytes)
+
+            CALL:
+                self._emit_call(inst, pc, total_bytes)
+                Ok(total_bytes)
+
+            RET:
+                self._emit_ret(inst)
+                Ok(total_bytes)
+
+            RETF:
+                self._emit_retf(inst)
+                Ok(total_bytes)
+
+            # ── Conditional Jumps ──
+            JE:  self._emit_jcc(inst, pc, total_bytes, X86_FLAG_ZF, true);  Ok(total_bytes)
+            JNE: self._emit_jcc(inst, pc, total_bytes, X86_FLAG_ZF, false); Ok(total_bytes)
+            JB:  self._emit_jcc(inst, pc, total_bytes, X86_FLAG_CF, true);  Ok(total_bytes)
+            JNB: self._emit_jcc(inst, pc, total_bytes, X86_FLAG_CF, false); Ok(total_bytes)
+            JS:  self._emit_jcc(inst, pc, total_bytes, X86_FLAG_SF, true);  Ok(total_bytes)
+            JNS: self._emit_jcc(inst, pc, total_bytes, X86_FLAG_SF, false); Ok(total_bytes)
+            JO:  self._emit_jcc(inst, pc, total_bytes, X86_FLAG_OF, true);  Ok(total_bytes)
+            JNO: self._emit_jcc(inst, pc, total_bytes, X86_FLAG_OF, false); Ok(total_bytes)
+            JP:  self._emit_jcc(inst, pc, total_bytes, X86_FLAG_PF, true);  Ok(total_bytes)
+            JNP: self._emit_jcc(inst, pc, total_bytes, X86_FLAG_PF, false); Ok(total_bytes)
+
+            JL:
+                # JL: SF != OF
+                self._emit_jcc_compound(inst, pc, total_bytes, X86_FLAG_SF, X86_FLAG_OF, false)
+                Ok(total_bytes)
+
+            JGE:
+                # JGE: SF == OF
+                self._emit_jcc_compound(inst, pc, total_bytes, X86_FLAG_SF, X86_FLAG_OF, true)
+                Ok(total_bytes)
+
+            JLE:
+                # JLE: ZF=1 OR SF!=OF
+                pass_todo  # JLE: compound condition ZF=1 OR SF!=OF
+                Err(DecoderError.Unimplemented(opcode: "JLE", pc: pc))
+
+            JG:
+                # JG: ZF=0 AND SF==OF
+                pass_todo  # JG: compound condition ZF=0 AND SF==OF
+                Err(DecoderError.Unimplemented(opcode: "JG", pc: pc))
+
+            JBE:
+                # JBE: CF=1 OR ZF=1
+                pass_todo  # JBE: compound condition CF=1 OR ZF=1
+                Err(DecoderError.Unimplemented(opcode: "JBE", pc: pc))
+
+            JA:
+                # JA: CF=0 AND ZF=0
+                pass_todo  # JA: compound condition CF=0 AND ZF=0
+                Err(DecoderError.Unimplemented(opcode: "JA", pc: pc))
+
+            LOOP:
+                self._emit_loop(inst, pc, total_bytes, false, false)
+                Ok(total_bytes)
+
+            LOOPE:
+                pass_todo  # LOOPE: decrement CX, jump if CX!=0 AND ZF=1
+                Err(DecoderError.Unimplemented(opcode: "LOOPE", pc: pc))
+
+            LOOPNE:
+                pass_todo  # LOOPNE: decrement CX, jump if CX!=0 AND ZF=0
+                Err(DecoderError.Unimplemented(opcode: "LOOPNE", pc: pc))
+
+            JCXZ:
+                pass_todo  # JCXZ: jump if CX==0
+                Err(DecoderError.Unimplemented(opcode: "JCXZ", pc: pc))
+
+            # ── Software Interrupt ──
+            INT:
+                self._emit_int(inst, pc, total_bytes)
+                Ok(total_bytes)
+
+            INTO:
+                pass_todo  # INTO: INT 4 if OF=1
+                Err(DecoderError.Unimplemented(opcode: "INTO", pc: pc))
+
+            IRET:
+                pass_todo  # IRET: pop IP, CS, FLAGS from stack
+                Err(DecoderError.Unimplemented(opcode: "IRET", pc: pc))
+
+            # ── Flag Control ──
+            NOP:
+                self.builder.nop()
+                Ok(total_bytes)
+
+            HLT:
+                # HLT — exit translation block
+                self.builder.exit_tb(0)
+                Ok(total_bytes)
+
+            CLC:
+                var flags = self._read_flags()
+                val zero_bit = self._const_i1(false)
+                flags = self._set_flag_bit(flags, X86_FLAG_CF, zero_bit)
+                self._write_flags(flags)
+                Ok(total_bytes)
+
+            STC:
+                var flags = self._read_flags()
+                val one_bit = self._const_i1(true)
+                flags = self._set_flag_bit(flags, X86_FLAG_CF, one_bit)
+                self._write_flags(flags)
+                Ok(total_bytes)
+
+            CMC:
+                var flags = self._read_flags()
+                val cf_mask = self._const_i16(1 << X86_FLAG_CF)
+                val new_flags = self.builder.xor_(flags, cf_mask)
+                self._write_flags(new_flags)
+                Ok(total_bytes)
+
+            CLD:
+                var flags = self._read_flags()
+                val zero_bit = self._const_i1(false)
+                flags = self._set_flag_bit(flags, X86_FLAG_DF, zero_bit)
+                self._write_flags(flags)
+                Ok(total_bytes)
+
+            STD:
+                var flags = self._read_flags()
+                val one_bit = self._const_i1(true)
+                flags = self._set_flag_bit(flags, X86_FLAG_DF, one_bit)
+                self._write_flags(flags)
+                Ok(total_bytes)
+
+            CLI:
+                var flags = self._read_flags()
+                val zero_bit = self._const_i1(false)
+                flags = self._set_flag_bit(flags, X86_FLAG_IF, zero_bit)
+                self._write_flags(flags)
+                Ok(total_bytes)
+
+            STI:
+                var flags = self._read_flags()
+                val one_bit = self._const_i1(true)
+                flags = self._set_flag_bit(flags, X86_FLAG_IF, one_bit)
+                self._write_flags(flags)
+                Ok(total_bytes)
+
+            # ── BCD / Misc ──
+            CBW:
+                pass_todo  # CBW: sign-extend AL into AX
+                Err(DecoderError.Unimplemented(opcode: "CBW", pc: pc))
+
+            CWD:
+                pass_todo  # CWD: sign-extend AX into DX:AX
+                Err(DecoderError.Unimplemented(opcode: "CWD", pc: pc))
+
+            DAA:
+                pass_todo  # DAA: decimal adjust AL after addition
+                Err(DecoderError.Unimplemented(opcode: "DAA", pc: pc))
+
+            DAS:
+                pass_todo  # DAS: decimal adjust AL after subtraction
+                Err(DecoderError.Unimplemented(opcode: "DAS", pc: pc))
+
+            AAA:
+                pass_todo  # AAA: ASCII adjust AL after addition
+                Err(DecoderError.Unimplemented(opcode: "AAA", pc: pc))
+
+            AAS:
+                pass_todo  # AAS: ASCII adjust AL after subtraction
+                Err(DecoderError.Unimplemented(opcode: "AAS", pc: pc))
+
+            # ── Multiply / Divide ──
+            MUL:
+                pass_todo  # MUL: unsigned multiply AX = AL * r/m8 or DX:AX = AX * r/m16
+                Err(DecoderError.Unimplemented(opcode: "MUL", pc: pc))
+
+            IMUL:
+                pass_todo  # IMUL: signed multiply
+                Err(DecoderError.Unimplemented(opcode: "IMUL", pc: pc))
+
+            DIV:
+                pass_todo  # DIV: unsigned divide AX/r/m8 -> AL,AH or DX:AX/r/m16 -> AX,DX
+                Err(DecoderError.Unimplemented(opcode: "DIV", pc: pc))
+
+            IDIV:
+                pass_todo  # IDIV: signed divide
+                Err(DecoderError.Unimplemented(opcode: "IDIV", pc: pc))
+
+            # ── String Operations ──
+            MOVSB:
+                pass_todo  # MOVSB: move byte [DS:SI] -> [ES:DI], update SI/DI
+                Err(DecoderError.Unimplemented(opcode: "MOVSB", pc: pc))
+
+            MOVSW:
+                pass_todo  # MOVSW: move word [DS:SI] -> [ES:DI], update SI/DI
+                Err(DecoderError.Unimplemented(opcode: "MOVSW", pc: pc))
+
+            CMPSB:
+                pass_todo  # CMPSB: compare byte [DS:SI] vs [ES:DI], update flags+SI/DI
+                Err(DecoderError.Unimplemented(opcode: "CMPSB", pc: pc))
+
+            CMPSW:
+                pass_todo  # CMPSW: compare word [DS:SI] vs [ES:DI], update flags+SI/DI
+                Err(DecoderError.Unimplemented(opcode: "CMPSW", pc: pc))
+
+            STOSB:
+                pass_todo  # STOSB: store AL to [ES:DI], update DI
+                Err(DecoderError.Unimplemented(opcode: "STOSB", pc: pc))
+
+            STOSW:
+                pass_todo  # STOSW: store AX to [ES:DI], update DI
+                Err(DecoderError.Unimplemented(opcode: "STOSW", pc: pc))
+
+            LODSB:
+                pass_todo  # LODSB: load [DS:SI] into AL, update SI
+                Err(DecoderError.Unimplemented(opcode: "LODSB", pc: pc))
+
+            LODSW:
+                pass_todo  # LODSW: load [DS:SI] into AX, update SI
+                Err(DecoderError.Unimplemented(opcode: "LODSW", pc: pc))
+
+            SCASB:
+                pass_todo  # SCASB: compare AL vs [ES:DI], update flags+DI
+                Err(DecoderError.Unimplemented(opcode: "SCASB", pc: pc))
+
+            SCASW:
+                pass_todo  # SCASW: compare AX vs [ES:DI], update flags+DI
+                Err(DecoderError.Unimplemented(opcode: "SCASW", pc: pc))
+
+            # ── I/O ──
+            IN:
+                pass_todo  # IN: read port to AL/AX
+                Err(DecoderError.Unimplemented(opcode: "IN", pc: pc))
+
+            OUT:
+                pass_todo  # OUT: write AL/AX to port
+                Err(DecoderError.Unimplemented(opcode: "OUT", pc: pc))
+
+            # ── Address loads ──
+            LDS:
+                pass_todo  # LDS: load far pointer into reg + DS
+                Err(DecoderError.Unimplemented(opcode: "LDS", pc: pc))
+
+            LES:
+                pass_todo  # LES: load far pointer into reg + ES
+                Err(DecoderError.Unimplemented(opcode: "LES", pc: pc))
+
+            XLAT:
+                pass_todo  # XLAT: AL = [DS:BX + AL]
+                Err(DecoderError.Unimplemented(opcode: "XLAT", pc: pc))
+
+    # ── ALU Helpers ──
+
+    me _emit_alu_add_sub(inst: DecodedInst, is_sub: bool, with_carry: bool):
+        """Emit ADD/ADC/SUB/SBB with full FLAGS update."""
+        val a = self._load_operand(inst.dst)
+        var b = self._load_operand(inst.src)
+        val is_word = self._operand_is_word(inst.dst)
+
+        # Widen src if needed (imm8 to 16-bit for sign-extended immediate ALU)
+        match inst.src:
+            Imm8(_):
+                if is_word:
+                    b = self.builder.ext(b, IrTcTypeKind.I16, true)
+            _: pass_do_nothing
+
+        var result = if is_sub: self.builder.sub(a, b) else: self.builder.add(a, b)
+
+        if with_carry:
+            # Add/subtract carry flag
+            val flags = self._read_flags()
+            val cf_mask = self._const_i16(1 << X86_FLAG_CF)
+            val cf_masked = self.builder.and_(flags, cf_mask)
+            val cf_bit = self.builder.trunc(cf_masked, IrTcTypeKind.I1)
+            val cf_ext = if is_word:
+                self.builder.ext(cf_bit, IrTcTypeKind.I16, false)
+            else:
+                self.builder.ext(cf_bit, IrTcTypeKind.I8, false)
+            result = if is_sub: self.builder.sub(result, cf_ext) else: self.builder.add(result, cf_ext)
+
+        self._store_operand(inst.dst, result)
+        self._update_flags_arithmetic(a, b, result, is_sub, is_word)
+
+    # ── Control Flow Helpers ──
+
+    me _emit_jmp(inst: DecodedInst, pc: i64, total_bytes: i64):
+        """Emit JMP — update IP and exit translation block."""
+        match inst.dst:
+            Imm16(rel):
+                # Relative jump: new_ip = pc + total_bytes + rel
+                val next_ip = pc + total_bytes + rel
+                val new_ip_val = self._const_i16(next_ip & 0xFFFF)
+                self._write_reg16(X86_REG_IP, new_ip_val)
+                # Sync guest PC and exit
+                self.builder.sync_guest_pc(new_ip_val)
+                self.builder.lookup_goto_tb(new_ip_val)
+            _:
+                # Indirect JMP (register or memory)
+                val target = self._load_operand(inst.dst)
+                self._write_reg16(X86_REG_IP, target)
+                self.builder.sync_guest_pc(target)
+                self.builder.lookup_goto_tb(target)
+
+    me _emit_call(inst: DecodedInst, pc: i64, total_bytes: i64):
+        """Emit CALL — push return address, then jump."""
+        val return_ip = (pc + total_bytes) & 0xFFFF
+        val return_val = self._const_i16(return_ip)
+        self._push16(return_val)
+
+        match inst.dst:
+            Imm16(rel):
+                val next_ip = pc + total_bytes + rel
+                val target_val = self._const_i16(next_ip & 0xFFFF)
+                self._write_reg16(X86_REG_IP, target_val)
+                self.builder.sync_guest_pc(target_val)
+                self.builder.lookup_goto_tb(target_val)
+            _:
+                val target = self._load_operand(inst.dst)
+                self._write_reg16(X86_REG_IP, target)
+                self.builder.sync_guest_pc(target)
+                self.builder.lookup_goto_tb(target)
+
+    me _emit_ret(inst: DecodedInst):
+        """Emit RET — pop IP from stack."""
+        val new_ip = self._pop16()
+
+        # If RET imm16, also adjust SP
+        match inst.dst:
+            Imm16(adjust):
+                val sp = self._read_reg16(X86_REG_SP)
+                val adj_val = self._const_i16(adjust)
+                val new_sp = self.builder.add(sp, adj_val)
+                self._write_reg16(X86_REG_SP, new_sp)
+            _: pass_do_nothing
+
+        self._write_reg16(X86_REG_IP, new_ip)
+        self.builder.sync_guest_pc(new_ip)
+        self.builder.lookup_goto_tb(new_ip)
+
+    me _emit_retf(inst: DecodedInst):
+        """Emit RETF — pop IP and CS from stack."""
+        val new_ip = self._pop16()
+        val new_cs = self._pop16()
+
+        match inst.dst:
+            Imm16(adjust):
+                val sp = self._read_reg16(X86_REG_SP)
+                val adj_val = self._const_i16(adjust)
+                val new_sp = self.builder.add(sp, adj_val)
+                self._write_reg16(X86_REG_SP, new_sp)
+            _: pass_do_nothing
+
+        self._write_reg16(X86_REG_CS, new_cs)
+        self._write_reg16(X86_REG_IP, new_ip)
+        self.builder.sync_guest_pc(new_ip)
+        self.builder.lookup_goto_tb(new_ip)
+
+    me _emit_jcc(inst: DecodedInst, pc: i64, total_bytes: i64, flag_bit: i64, jump_if_set: bool):
+        """Emit a simple conditional jump (test single flag bit)."""
+        val flags = self._read_flags()
+        val mask = self._const_i16(1 << flag_bit)
+        val masked = self.builder.and_(flags, mask)
+        val zero16 = self._const_i16(0)
+        val flag_is_set = self.builder.cmp(IrTcCond.Ne, masked, zero16)
+
+        # Compute target addresses
+        match inst.dst:
+            Imm16(rel):
+                val taken_ip = (pc + total_bytes + rel) & 0xFFFF
+                val fallthru_ip = (pc + total_bytes) & 0xFFFF
+
+                val taken_block = self.builder.new_block("jcc_taken")
+                val fallthru_block = self.builder.new_block("jcc_fallthru")
+
+                val cond = if jump_if_set: flag_is_set else: self.builder.cmp(IrTcCond.Eq, masked, zero16)
+                self.builder.br_cond(cond, taken_block, fallthru_block)
+
+                # Taken path
+                self.builder.set_block(taken_block)
+                val taken_val = self._const_i16(taken_ip)
+                self._write_reg16(X86_REG_IP, taken_val)
+                self.builder.sync_guest_pc(taken_val)
+                self.builder.lookup_goto_tb(taken_val)
+
+                # Fall-through path
+                self.builder.set_block(fallthru_block)
+                val fallthru_val = self._const_i16(fallthru_ip)
+                self._write_reg16(X86_REG_IP, fallthru_val)
+                self.builder.sync_guest_pc(fallthru_val)
+                self.builder.lookup_goto_tb(fallthru_val)
+            _:
+                pass_do_nothing
+
+    me _emit_jcc_compound(inst: DecodedInst, pc: i64, total_bytes: i64, flag_a: i64, flag_b: i64, jump_if_equal: bool):
+        """Emit conditional jump comparing two flag bits (JL: SF!=OF, JGE: SF==OF)."""
+        val flags = self._read_flags()
+
+        val mask_a = self._const_i16(1 << flag_a)
+        val masked_a = self.builder.and_(flags, mask_a)
+        val zero16 = self._const_i16(0)
+        val a_set = self.builder.cmp(IrTcCond.Ne, masked_a, zero16)
+
+        val mask_b = self._const_i16(1 << flag_b)
+        val masked_b = self.builder.and_(flags, mask_b)
+        val b_set = self.builder.cmp(IrTcCond.Ne, masked_b, zero16)
+
+        val cond = if jump_if_equal:
+            self.builder.cmp(IrTcCond.Eq, a_set, b_set)
+        else:
+            self.builder.cmp(IrTcCond.Ne, a_set, b_set)
+
+        match inst.dst:
+            Imm16(rel):
+                val taken_ip = (pc + total_bytes + rel) & 0xFFFF
+                val fallthru_ip = (pc + total_bytes) & 0xFFFF
+
+                val taken_block = self.builder.new_block("jcc_taken")
+                val fallthru_block = self.builder.new_block("jcc_fallthru")
+
+                self.builder.br_cond(cond, taken_block, fallthru_block)
+
+                self.builder.set_block(taken_block)
+                val taken_val = self._const_i16(taken_ip)
+                self._write_reg16(X86_REG_IP, taken_val)
+                self.builder.sync_guest_pc(taken_val)
+                self.builder.lookup_goto_tb(taken_val)
+
+                self.builder.set_block(fallthru_block)
+                val fallthru_val = self._const_i16(fallthru_ip)
+                self._write_reg16(X86_REG_IP, fallthru_val)
+                self.builder.sync_guest_pc(fallthru_val)
+                self.builder.lookup_goto_tb(fallthru_val)
+            _:
+                pass_do_nothing
+
+    me _emit_loop(inst: DecodedInst, pc: i64, total_bytes: i64, check_zf: bool, zf_value: bool):
+        """Emit LOOP: decrement CX, jump if CX != 0."""
+        val cx = self._read_reg16(X86_REG_CX)
+        val one = self._const_i16(1)
+        val new_cx = self.builder.sub(cx, one)
+        self._write_reg16(X86_REG_CX, new_cx)
+
+        val zero16 = self._const_i16(0)
+        val cx_not_zero = self.builder.cmp(IrTcCond.Ne, new_cx, zero16)
+
+        match inst.dst:
+            Imm16(rel):
+                val taken_ip = (pc + total_bytes + rel) & 0xFFFF
+                val fallthru_ip = (pc + total_bytes) & 0xFFFF
+
+                val taken_block = self.builder.new_block("loop_taken")
+                val fallthru_block = self.builder.new_block("loop_done")
+
+                self.builder.br_cond(cx_not_zero, taken_block, fallthru_block)
+
+                self.builder.set_block(taken_block)
+                val taken_val = self._const_i16(taken_ip)
+                self._write_reg16(X86_REG_IP, taken_val)
+                self.builder.sync_guest_pc(taken_val)
+                self.builder.lookup_goto_tb(taken_val)
+
+                self.builder.set_block(fallthru_block)
+                val fallthru_val = self._const_i16(fallthru_ip)
+                self._write_reg16(X86_REG_IP, fallthru_val)
+                self.builder.sync_guest_pc(fallthru_val)
+                self.builder.lookup_goto_tb(fallthru_val)
+            _:
+                pass_do_nothing
+
+    me _emit_int(inst: DecodedInst, pc: i64, total_bytes: i64):
+        """Emit INT n: push FLAGS, CS, return IP, then call interrupt helper."""
+        val flags = self._read_flags()
+        self._push16(flags)
+
+        val cs = self._read_reg16(X86_REG_CS)
+        self._push16(cs)
+
+        val return_ip = (pc + total_bytes) & 0xFFFF
+        val return_val = self._const_i16(return_ip)
+        self._push16(return_val)
+
+        # Clear IF and TF
+        val if_tf_mask = self._const_i16(0xFFFF ^ ((1 << X86_FLAG_IF) | (1 << X86_FLAG_TF)))
+        val new_flags = self.builder.and_(flags, if_tf_mask)
+        self._write_flags(new_flags)
+
+        # Call interrupt helper with the interrupt number
+        match inst.dst:
+            Imm8(int_num):
+                val int_val = self._const_i16(int_num)
+                # Use CallHelper to invoke the interrupt handler
+                # helper_id encodes the interrupt number
+                self.builder.call_helper(int_num, [int_val], IrTcTypeKind.Void)
+                # After helper returns, exit TB (handler sets new IP/CS)
+                self.builder.exit_tb(0)
+            _:
+                pass_do_nothing

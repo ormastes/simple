@@ -1,0 +1,219 @@
+# Allowlist-based URL validator for SSRF prevention.
+#
+# Blocks requests to private IP ranges, localhost, and link-local addresses.
+# Supports both allowlist (only specified hosts) and blocklist (deny private IPs)
+# modes. When allowed_hosts is set, only those hosts are permitted.
+#
+# Blocked by default:
+#   IPv4: 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 127.0.0.0/8, 169.254.0.0/16
+#   IPv6: ::1, fd00::/8, fe80::/10
+
+# URL validator with configurable scheme allowlist and host blocking.
+class UrlValidator:
+    allowed_schemes: List<text>
+    blocked_hosts: List<text>
+    allowed_hosts: List<text>?
+
+    # Create a validator with sensible defaults.
+    #
+    # Default allowed schemes: http, https.
+    # Default blocked hosts: private IP ranges, localhost.
+    static fn default() -> UrlValidator:
+        UrlValidator(
+            allowed_schemes: ["http", "https"],
+            blocked_hosts: [
+                "localhost",
+                "127.0.0.1",
+                "0.0.0.0",
+                "::1",
+                "[::1]"
+            ],
+            allowed_hosts: nil
+        )
+
+    # Validate a URL against the configured rules.
+    #
+    # Checks scheme allowlist, host blocklist, and private IP ranges.
+    # If allowed_hosts is set, only those hosts are permitted.
+    fn validate(url: text) -> Result<(), text>:
+        """
+        Validates URLs against security rules.
+
+        sdoctest:
+            val v = UrlValidator.default()
+            expect(v.validate("https://example.com/path").is_ok()).to_equal(true)
+            expect(v.validate("javascript:alert(1)").is_err()).to_equal(true)
+            expect(v.validate("http://127.0.0.1/admin").is_err()).to_equal(true)
+        """
+        val trimmed = url.trim()
+        if trimmed == "":
+            return Err("empty URL")
+
+        val lower = trimmed.to_lower()
+
+        # Check scheme
+        val scheme = _extract_scheme(lower)
+        if val s = scheme:
+            if not self.allowed_schemes.contains(s):
+                return Err("scheme not allowed: {s}")
+        else:
+            return Err("no scheme found in URL")
+
+        # Extract host
+        val host = _extract_host(trimmed)
+        if val h = host:
+            # Check blocked hosts
+            if self._is_blocked_host(h):
+                return Err("blocked host: {h}")
+
+            # Check private IP ranges
+            if is_private_ip(h):
+                return Err("private IP address not allowed: {h}")
+
+            # Check localhost
+            if is_localhost(h):
+                return Err("localhost not allowed: {h}")
+
+            # Check allowlist (if configured)
+            if val allowed = self.allowed_hosts:
+                if not allowed.contains(h):
+                    return Err("host not in allowlist: {h}")
+
+        Ok(())
+
+    # Internal: check if a host is in the blocked list.
+    fn _is_blocked_host(host: text) -> bool:
+        val lower_host = host.to_lower()
+        for blocked in self.blocked_hosts:
+            if lower_host == blocked.to_lower():
+                return true
+        false
+
+# Check whether a host string is a private IP address.
+#
+# Covers: 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 127.0.0.0/8,
+#        169.254.0.0/16, fd00::/8, fe80::/10, ::1
+fn is_private_ip(host: text) -> bool:
+    """
+    Detects private/reserved IP addresses.
+
+    sdoctest:
+        expect(is_private_ip("10.0.0.1")).to_equal(true)
+        expect(is_private_ip("192.168.1.1")).to_equal(true)
+        expect(is_private_ip("172.16.0.1")).to_equal(true)
+        expect(is_private_ip("8.8.8.8")).to_equal(false)
+        expect(is_private_ip("::1")).to_equal(true)
+    """
+    val lower = host.to_lower()
+
+    # IPv6 private ranges
+    if lower == "::1" or lower == "[::1]":
+        return true
+    if lower.starts_with("fd") or lower.starts_with("[fd"):
+        return true
+    if lower.starts_with("fe80") or lower.starts_with("[fe80"):
+        return true
+
+    # IPv4 private ranges
+    if host.starts_with("10."):
+        return true
+    if host.starts_with("127."):
+        return true
+    if host.starts_with("169.254."):
+        return true
+    if host.starts_with("192.168."):
+        return true
+
+    # 172.16.0.0/12 = 172.16.x.x through 172.31.x.x
+    if host.starts_with("172."):
+        val parts = host.split(".")
+        if parts.len() >= 2:
+            val second_octet = _parse_int(parts[1])
+            if val octet = second_octet:
+                if octet >= 16 and octet <= 31:
+                    return true
+
+    # 0.0.0.0
+    if host == "0.0.0.0":
+        return true
+
+    false
+
+# Check whether a host string refers to localhost.
+fn is_localhost(host: text) -> bool:
+    """
+    Detects localhost references.
+
+    sdoctest:
+        expect(is_localhost("localhost")).to_equal(true)
+        expect(is_localhost("127.0.0.1")).to_equal(true)
+        expect(is_localhost("example.com")).to_equal(false)
+    """
+    val lower = host.to_lower()
+    lower == "localhost" or
+        lower == "127.0.0.1" or
+        lower == "::1" or
+        lower == "[::1]" or
+        lower == "0.0.0.0" or
+        lower.ends_with(".localhost")
+
+# Convenience: validate a URL with default settings.
+fn validate_url(url: text) -> Result<(), text>:
+    """
+    Convenience validator with default settings.
+
+    sdoctest:
+        expect(validate_url("https://example.com").is_ok()).to_equal(true)
+        expect(validate_url("http://10.0.0.1/secret").is_err()).to_equal(true)
+    """
+    val v = UrlValidator.default()
+    v.validate(url)
+
+# Convenience: check if a URL is safe (no private IPs, safe scheme).
+fn is_safe_url(url: text) -> bool:
+    validate_url(url).is_ok()
+
+# ---------------------------------------------------------------------------
+# Internal helpers
+# ---------------------------------------------------------------------------
+
+# Extract the scheme from a URL (e.g., "https" from "https://example.com").
+fn _extract_scheme(url: text) -> text?:
+    val sep = url.find("://")
+    if val pos = sep:
+        return url.slice(0, pos)
+    # Handle scheme: without // (e.g., javascript:)
+    val colon = url.find(":")
+    if val pos = colon:
+        return url.slice(0, pos)
+    nil
+
+# Extract the host from a URL (e.g., "example.com" from "https://example.com/path").
+fn _extract_host(url: text) -> text?:
+    val sep = url.find("://")
+    if val pos = sep:
+        val after_scheme = url.slice(pos + 3, url.len())
+        # Find end of host (first / or : for port)
+        var end = after_scheme.len()
+        val slash = after_scheme.find("/")
+        if val s = slash:
+            end = s
+        val colon = after_scheme.find(":")
+        if val c = colon:
+            if c < end:
+                end = c
+        return after_scheme.slice(0, end)
+    nil
+
+# Parse a string to an integer. Returns nil on failure.
+fn _parse_int(s: text) -> i64?:
+    var result: i64 = 0
+    var i = 0
+    while i < s.len():
+        val c = s.char_at(i)
+        if c >= '0' and c <= '9':
+            result = result * 10 + (c.to_i64() - '0'.to_i64())
+        else:
+            return nil
+        i = i + 1
+    result

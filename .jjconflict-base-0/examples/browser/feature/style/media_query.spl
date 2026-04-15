@@ -1,0 +1,335 @@
+#![allow(unnamed_duplicate_typed_args)]
+# CSS @media query parsing and evaluation.
+# Supports feature queries (min-width, max-width, orientation, etc.),
+# boolean media features (hover, pointer), preference queries
+# (prefers-color-scheme, prefers-reduced-motion), and combinators (and/or/not).
+
+# ---------------------------------------------------------------------------
+# ViewportInfo — describes the current browsing context for media evaluation.
+# ---------------------------------------------------------------------------
+
+class ViewportInfo:
+    width: f64
+    height: f64
+    device_pixel_ratio: f64
+    prefers_color_scheme: text
+    prefers_reduced_motion: text
+    orientation: text
+    hover: text
+    pointer: text
+
+    static fn default_viewport() -> ViewportInfo:
+        ViewportInfo(
+            width: 1280.0,
+            height: 720.0,
+            device_pixel_ratio: 1.0,
+            prefers_color_scheme: "light",
+            prefers_reduced_motion: "no-preference",
+            orientation: "landscape",
+            hover: "hover",
+            pointer: "fine"
+        )
+
+# ---------------------------------------------------------------------------
+# MediaCondition — a single feature test inside a media query.
+# op is "min", "max", or "exact".
+# For boolean/keyword features the value field is unused (0.0) and the
+# feature name itself carries the semantics.
+# ---------------------------------------------------------------------------
+
+class MediaCondition:
+    feature: text
+    op: text
+    value: f64
+
+    static fn create(feature: text, op: text, value: f64) -> MediaCondition:
+        MediaCondition(feature: feature, op: op, value: value)
+
+# ---------------------------------------------------------------------------
+# MediaCombinator — how multiple conditions are joined.
+# ---------------------------------------------------------------------------
+
+enum MediaCombinator:
+    And
+    Or
+    Not
+
+# ---------------------------------------------------------------------------
+# MediaQuery — a parsed @media rule with one or more conditions.
+# ---------------------------------------------------------------------------
+
+class MediaQuery:
+    conditions: [MediaCondition]
+    combinator: MediaCombinator
+
+    static fn create(conditions: [MediaCondition], combinator: MediaCombinator) -> MediaQuery:
+        MediaQuery(conditions: conditions, combinator: combinator)
+
+# ---------------------------------------------------------------------------
+# Parsing helpers.
+# ---------------------------------------------------------------------------
+
+# Strip leading/trailing whitespace from a text value.
+fn strip(s: text) -> text:
+    var start = 0
+    var end = s.len()
+    while start < end:
+        val ch = s.char_at(start)
+        if ch == " " or ch == "\t" or ch == "\n" or ch == "\r":
+            start = start + 1
+        else:
+            start = end  # break
+    # reset start to its found position
+    start = 0
+    while start < s.len():
+        val ch = s.char_at(start)
+        if ch == " " or ch == "\t" or ch == "\n" or ch == "\r":
+            start = start + 1
+        else:
+            break
+    end = s.len()
+    while end > start:
+        val ch = s.char_at(end - 1)
+        if ch == " " or ch == "\t" or ch == "\n" or ch == "\r":
+            end = end - 1
+        else:
+            break
+    s.slice(start, end)
+
+# Check if a character is a digit.
+fn is_digit_char(ch: text) -> bool:
+    ch == "0" or ch == "1" or ch == "2" or ch == "3" or ch == "4" or
+    ch == "5" or ch == "6" or ch == "7" or ch == "8" or ch == "9"
+
+# Parse a numeric value from text, stripping a trailing "px" unit if present.
+fn parse_px_value(raw: text) -> f64:
+    var s = strip(raw)
+    # Remove trailing "px"
+    if s.len() >= 2:
+        val suffix = s.slice(s.len() - 2, s.len())
+        if suffix == "px":
+            s = s.slice(0, s.len() - 2)
+    # Remove trailing "dppx" for device-pixel-ratio
+    if s.len() >= 4:
+        val suffix4 = s.slice(s.len() - 4, s.len())
+        if suffix4 == "dppx":
+            s = s.slice(0, s.len() - 4)
+    s = strip(s)
+    s.to_f64()
+
+# Parse a single parenthesised condition like "(min-width: 768px)".
+fn parse_single_condition(part: text) -> MediaCondition:
+    var s = strip(part)
+
+    # Remove surrounding parentheses if present
+    if s.len() >= 2 and s.char_at(0) == "(":
+        s = s.slice(1, s.len())
+    if s.len() >= 1 and s.char_at(s.len() - 1) == ")":
+        s = s.slice(0, s.len() - 1)
+    s = strip(s)
+
+    # Split on ":"
+    var colon_pos = -1
+    var idx = 0
+    while idx < s.len():
+        if s.char_at(idx) == ":":
+            colon_pos = idx
+            idx = s.len()  # break
+        idx = idx + 1
+
+    if colon_pos < 0:
+        # Boolean feature like "(hover)" or bare keyword
+        return MediaCondition.create(s, "exact", 0.0)
+
+    val feature_raw = strip(s.slice(0, colon_pos))
+    val value_raw = strip(s.slice(colon_pos + 1, s.len()))
+
+    # Determine operator from feature name prefix
+    if feature_raw.starts_with("min-"):
+        val feature_name = feature_raw.slice(4, feature_raw.len())
+        val num = parse_px_value(value_raw)
+        return MediaCondition.create(feature_name, "min", num)
+
+    if feature_raw.starts_with("max-"):
+        val feature_name = feature_raw.slice(4, feature_raw.len())
+        val num = parse_px_value(value_raw)
+        return MediaCondition.create(feature_name, "max", num)
+
+    # Exact/keyword feature — store the keyword text as the feature name,
+    # and store 0.0 as the numeric value. For keyword matches we encode the
+    # expected keyword into the feature field as "feature=keyword".
+    MediaCondition.create("{feature_raw}={value_raw}", "exact", 0.0)
+
+# ---------------------------------------------------------------------------
+# parse_media_query — main entry point.
+# Parses a CSS media query string into a MediaQuery struct.
+#
+# Supported syntax examples:
+#   (min-width: 768px)
+#   (max-width: 1024px) and (orientation: landscape)
+#   (prefers-color-scheme: dark)
+#   not (hover: hover)
+#   (min-width: 600px) or (max-width: 400px)
+# ---------------------------------------------------------------------------
+
+fn parse_media_query(query_text: text) -> MediaQuery:
+    var s = strip(query_text)
+    var conditions = [MediaCondition]()
+    var combinator = MediaCombinator.And
+
+    # Detect leading "not"
+    var is_not = false
+    if s.len() >= 4 and s.slice(0, 4) == "not ":
+        is_not = true
+        s = strip(s.slice(4, s.len()))
+        combinator = MediaCombinator.Not
+
+    # Determine combinator by scanning for " and " or " or "
+    if not is_not:
+        if s.contains(" and "):
+            combinator = MediaCombinator.And
+        else if s.contains(" or "):
+            combinator = MediaCombinator.Or
+
+    # Split on the combinator keyword
+    var parts = [text]()
+    if combinator == MediaCombinator.And or combinator == MediaCombinator.Not:
+        # Split on " and " (or just a single condition for Not)
+        var remaining = s
+        var found = true
+        while found:
+            val and_pos = remaining.find(" and ")
+            if and_pos >= 0:
+                parts.push(strip(remaining.slice(0, and_pos)))
+                remaining = strip(remaining.slice(and_pos + 5, remaining.len()))
+            else:
+                parts.push(strip(remaining))
+                found = false
+    else:
+        # Split on " or "
+        var remaining = s
+        var found = true
+        while found:
+            val or_pos = remaining.find(" or ")
+            if or_pos >= 0:
+                parts.push(strip(remaining.slice(0, or_pos)))
+                remaining = strip(remaining.slice(or_pos + 4, remaining.len()))
+            else:
+                parts.push(strip(remaining))
+                found = false
+
+    # Parse each part into a MediaCondition
+    for part in parts:
+        conditions.push(parse_single_condition(part))
+
+    MediaQuery.create(conditions, combinator)
+
+# ---------------------------------------------------------------------------
+# Condition evaluation against a ViewportInfo.
+# ---------------------------------------------------------------------------
+
+fn evaluate_condition(cond: MediaCondition, viewport: ViewportInfo) -> bool:
+    val feature = cond.feature
+    val op = cond.op
+
+    # Handle keyword features encoded as "feature=keyword"
+    val eq_pos = find_char(feature, "=")
+    if eq_pos >= 0:
+        val feat_name = feature.slice(0, eq_pos)
+        val expected = feature.slice(eq_pos + 1, feature.len())
+        return evaluate_keyword_feature(feat_name, expected, viewport)
+
+    # Numeric / dimensional features
+    if feature == "width":
+        return compare_value(viewport.width, op, cond.value)
+    if feature == "height":
+        return compare_value(viewport.height, op, cond.value)
+    if feature == "device-pixel-ratio":
+        return compare_value(viewport.device_pixel_ratio, op, cond.value)
+
+    # Boolean features — just check that the feature is supported
+    if feature == "hover":
+        return viewport.hover == "hover"
+    if feature == "pointer":
+        return viewport.pointer == "fine" or viewport.pointer == "coarse"
+    if feature == "any-hover":
+        return viewport.hover == "hover"
+    if feature == "any-pointer":
+        return viewport.pointer == "fine" or viewport.pointer == "coarse"
+
+    # Unknown feature — evaluates to false per spec
+    false
+
+fn evaluate_keyword_feature(feature: text, expected: text, viewport: ViewportInfo) -> bool:
+    val expected_trimmed = strip(expected)
+    if feature == "orientation":
+        return viewport.orientation == expected_trimmed
+    if feature == "prefers-color-scheme":
+        return viewport.prefers_color_scheme == expected_trimmed
+    if feature == "prefers-reduced-motion":
+        return viewport.prefers_reduced_motion == expected_trimmed
+    if feature == "hover":
+        return viewport.hover == expected_trimmed
+    if feature == "pointer":
+        return viewport.pointer == expected_trimmed
+    if feature == "any-hover":
+        return viewport.hover == expected_trimmed
+    if feature == "any-pointer":
+        return viewport.pointer == expected_trimmed
+    false
+
+fn compare_value(actual: f64, op: text, expected: f64) -> bool:
+    if op == "min":
+        return actual >= expected
+    if op == "max":
+        return actual <= expected
+    if op == "exact":
+        # Allow a small epsilon for floating point comparison
+        val diff = actual - expected
+        val abs_diff = if diff < 0.0: 0.0 - diff else: diff
+        return abs_diff < 0.001
+    false
+
+fn find_char(s: text, ch: text) -> i64:
+    var idx = 0
+    while idx < s.len():
+        if s.char_at(idx) == ch:
+            return idx
+        idx = idx + 1
+    -1
+
+# ---------------------------------------------------------------------------
+# evaluate_media_query — evaluate a full MediaQuery against a viewport.
+# ---------------------------------------------------------------------------
+
+fn evaluate_media_query(query: MediaQuery, viewport: ViewportInfo) -> bool:
+    val conditions = query.conditions
+
+    if conditions.len() == 0:
+        return true
+
+    match query.combinator:
+        MediaCombinator.And:
+            # All conditions must be true
+            var idx = 0
+            while idx < conditions.len():
+                if not evaluate_condition(conditions.get(idx), viewport):
+                    return false
+                idx = idx + 1
+            return true
+        MediaCombinator.Or:
+            # At least one condition must be true
+            var idx = 0
+            while idx < conditions.len():
+                if evaluate_condition(conditions.get(idx), viewport):
+                    return true
+                idx = idx + 1
+            return false
+        MediaCombinator.Not:
+            # Negate the AND of all conditions
+            var idx = 0
+            while idx < conditions.len():
+                if not evaluate_condition(conditions.get(idx), viewport):
+                    return true
+                idx = idx + 1
+            return false

@@ -1,0 +1,274 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline';">
+    <title>Simple UI</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        /* Stitch Obsidian deep-space gradient (pulled from project 12496218458601315145).
+           #060612 top, #1A0830 bottom — matches StitchMetadata.obsidian overrides and
+           glass_obsidian_dark() in src/lib/common/ui/glass_theme.spl. */
+        body {
+            background:
+                radial-gradient(circle at top left, rgba(255,255,255,0.08), transparent 42%),
+                radial-gradient(circle at 78% 10%, rgba(198,198,200,0.10), transparent 36%),
+                linear-gradient(180deg, #060612 0%, #0e0820 45%, #1A0830 100%);
+            color: #E3E0F3;
+            font-family: "Space Grotesk", "Manrope", "Inter", "SF Pro Text", -apple-system, BlinkMacSystemFont, sans-serif;
+            font-size: 15px;
+            line-height: 1.5;
+            overflow: hidden;
+            width: 100vw;
+            height: 100vh;
+            -webkit-font-smoothing: antialiased;
+            text-rendering: optimizeLegibility;
+        }
+        #app {
+            width: 100%;
+            height: 100%;
+            position: relative;
+            overflow: hidden;
+        }
+        #app.loading {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            color: rgba(227, 224, 243, 0.86);
+            font-size: 16px;
+            letter-spacing: 0.01em;
+        }
+        /* The WM draws here. electron_wm.spl ships the system bar / dock via
+           the `render` IPC message; floating windows arrive via `wm-add-window`
+           forwards and are rendered as absolute-positioned divs inside. */
+        #wm-chrome {
+            position: absolute;
+            inset: 0;
+            pointer-events: auto;
+            z-index: 1;
+        }
+        #wm-desktop {
+            position: absolute;
+            inset: 0;
+            pointer-events: auto;
+            z-index: 2;
+        }
+        #wm-taskbar {
+            position: fixed;
+            bottom: 6px;
+            left: 50%;
+            transform: translateX(-50%);
+            display: flex;
+            gap: 4px;
+            z-index: 10000;
+            pointer-events: auto;
+        }
+    </style>
+</head>
+<body>
+    <div id="app" class="loading">
+        <div id="wm-chrome"></div>
+        <div id="wm-desktop"></div>
+        <div id="wm-taskbar"></div>
+        <div id="wm-loading-text">Loading...</div>
+    </div>
+    <script src="./wm.js"></script>
+    <script>
+        const appEl = document.getElementById('app');
+        const chromeEl = document.getElementById('wm-chrome');
+        const desktopEl = document.getElementById('wm-desktop');
+        const taskbarEl = document.getElementById('wm-taskbar');
+        const loadingEl = document.getElementById('wm-loading-text');
+        const runtimeStyleId = 'simple-ui-runtime-style';
+
+        // SimpleWindowManager ships WebSocket-shaped handleMessage() — we
+        // stub out its _sendEvent so it stops trying to reach a ws server
+        // when running inside Electron's stdin/stdout IPC path.
+        window.simpleWM = new SimpleWindowManager();
+        window.simpleWM._sendEvent = function() { /* no-op under Electron */ };
+
+        function applyRuntimeStyle(cssText) {
+            let styleEl = document.getElementById(runtimeStyleId);
+            if (!cssText || !cssText.trim()) {
+                if (styleEl) styleEl.remove();
+                return;
+            }
+            if (!styleEl) {
+                styleEl = document.createElement('style');
+                styleEl.id = runtimeStyleId;
+                document.head.appendChild(styleEl);
+            }
+            styleEl.textContent = cssText;
+        }
+
+        function normalizeRenderedHtml(html) {
+            if (typeof html !== 'string') return { html: '', css: '' };
+            if (html.indexOf('<html') === -1) return { html, css: '' };
+            try {
+                var parser = new DOMParser();
+                var doc = parser.parseFromString(html, 'text/html');
+                if (doc.title) document.title = doc.title;
+                var styles = Array.from(doc.querySelectorAll('style'))
+                    .map(function(s) { return s.textContent || ''; })
+                    .join('\n');
+                return {
+                    html: doc.body ? doc.body.innerHTML : html,
+                    css: styles
+                };
+            } catch (e) {
+                return { html, css: '' };
+            }
+        }
+
+        // Receive rendered HTML from the Simple process. Render output is the
+        // desktop chrome (system bar, dock, background) — NOT the floating
+        // windows. Floating windows arrive via `wm-add-window`.
+        if (window.simpleUI && typeof window.simpleUI.onRender === 'function') {
+            window.simpleUI.onRender(function(html) {
+                var normalized = normalizeRenderedHtml(html);
+                applyRuntimeStyle(normalized.css);
+                appEl.classList.remove('loading');
+                if (loadingEl && loadingEl.parentNode) loadingEl.parentNode.removeChild(loadingEl);
+                chromeEl.innerHTML = normalized.html;
+            });
+        }
+
+        // WM message handlers — forwarded from main.js (previously created
+        // separate BrowserWindow instances; now routed to SimpleWindowManager
+        // so windows draw as floating divs inside the main Electron window).
+        if (window.simpleUI && typeof window.simpleUI.onWmMessage === 'function') {
+            window.simpleUI.onWmMessage(function(msg) {
+                if (!window.simpleWM || !msg || !msg.type) return;
+                try {
+                    window.simpleWM.handleMessage(msg);
+                } catch (err) {
+                    console.error('wm handleMessage failed', err, msg);
+                }
+            });
+        }
+
+        // Forward keyboard events (skip when focused on form elements)
+        document.addEventListener('keydown', function(e) {
+            var tag = e.target.tagName.toLowerCase();
+            if (tag === 'input' || tag === 'textarea' || tag === 'select') return;
+            var key = e.key;
+            if (key === ' ') key = 'Space';
+            if (window.simpleUI && typeof window.simpleUI.sendKeypress === 'function') {
+                window.simpleUI.sendKeypress(key);
+            }
+            if (['j','k','Tab','Escape',':','i'].indexOf(key) >= 0) e.preventDefault();
+        });
+
+        // Click event delegation for all widget types
+        document.addEventListener('click', function(e) {
+            var el = e.target;
+
+            // Button clicks (data-action)
+            var btn = el.closest('.widget-button, [data-action]');
+            if (btn) {
+                var action = btn.getAttribute('data-action');
+                if (action && window.simpleUI && typeof window.simpleUI.sendAction === 'function') window.simpleUI.sendAction(action);
+                return;
+            }
+
+            // Checkbox toggle
+            var cb = el.closest('.widget-checkbox');
+            if (cb) {
+                var action = cb.getAttribute('data-action');
+                if (action && window.simpleUI && typeof window.simpleUI.sendAction === 'function') window.simpleUI.sendAction(action);
+                return;
+            }
+
+            // List item selection
+            var li = el.closest('.list-item');
+            if (li) {
+                var list = li.closest('.widget-list');
+                if (list) {
+                    var items = list.querySelectorAll('.list-item');
+                    for (var i = 0; i < items.length; i++) {
+                        if (items[i] === li) {
+                            if (window.simpleUI && typeof window.simpleUI.sendAction === 'function') window.simpleUI.sendAction('select_' + list.id + '_' + i);
+                            break;
+                        }
+                    }
+                }
+                return;
+            }
+
+            // Tab switching
+            var tab = el.closest('.tab-item');
+            if (tab) {
+                var tabs = tab.parentElement;
+                if (tabs) {
+                    var items = tabs.querySelectorAll('.tab-item');
+                    for (var i = 0; i < items.length; i++) {
+                        items[i].classList.remove('active');
+                        if (items[i] === tab) {
+                            tab.classList.add('active');
+                            if (window.simpleUI && typeof window.simpleUI.sendAction === 'function') window.simpleUI.sendAction('tab_' + tabs.id + '_' + i);
+                        }
+                    }
+                }
+                return;
+            }
+
+            // Tree node toggle
+            var toggle = el.closest('.tree-toggle');
+            if (toggle) {
+                var action = toggle.getAttribute('data-action');
+                if (action && window.simpleUI && typeof window.simpleUI.sendAction === 'function') window.simpleUI.sendAction(action);
+                return;
+            }
+
+            // Table header sort
+            var th = el.closest('th[data-action]');
+            if (th) {
+                var action = th.getAttribute('data-action');
+                if (action && window.simpleUI && typeof window.simpleUI.sendAction === 'function') window.simpleUI.sendAction(action);
+                return;
+            }
+
+            // Submenu item clicks
+            var sub = el.closest('.submenu-item');
+            if (sub) {
+                var action = sub.getAttribute('data-action');
+                if (action && window.simpleUI && typeof window.simpleUI.sendAction === 'function') window.simpleUI.sendAction(action);
+                return;
+            }
+        });
+
+        // Dropdown change handler
+        document.addEventListener('change', function(e) {
+            var dd = e.target.closest('.widget-dropdown');
+            if (dd) {
+                if (window.simpleUI && typeof window.simpleUI.sendAction === 'function') window.simpleUI.sendAction('select_' + dd.id + '_' + e.target.selectedIndex);
+                return;
+            }
+            var inp = e.target.closest('.widget-input, .widget-textfield');
+            if (inp && inp.id && window.simpleUI && typeof window.simpleUI.sendAction === 'function') window.simpleUI.sendAction('change_' + inp.id);
+            var ta = e.target.closest('.widget-textarea');
+            if (ta && ta.id && window.simpleUI && typeof window.simpleUI.sendAction === 'function') window.simpleUI.sendAction('change_' + ta.id);
+        });
+
+        // Table filter input handler
+        document.addEventListener('input', function(e) {
+            if (e.target.classList.contains('table-filter')) {
+                var action = e.target.getAttribute('data-action');
+                if (action && window.simpleUI && typeof window.simpleUI.sendAction === 'function') window.simpleUI.sendAction(action);
+            }
+        });
+
+        // Notify Simple process on window close
+        window.addEventListener('beforeunload', function() {
+            if (window.simpleUI && typeof window.simpleUI.sendQuit === 'function') {
+                window.simpleUI.sendQuit();
+            }
+        });
+    </script>
+</body>
+</html>

@@ -1,0 +1,101 @@
+#![allow(unnamed_duplicate_typed_args)]
+@allow(unnamed_duplicate_typed_args)
+# Agent Client — Client-side API for test execution agents
+#
+# Provides functions for agents to register with the daemon,
+# claim test batches, report results, and run a worker loop.
+
+
+use std.daemon_sdk.types.{DaemonRequest, DaemonResponse, daemon_request_new}
+use std.daemon_sdk.client.{daemon_send_request}
+use app.test_daemon.types.{
+    TestDaemonConfig,
+    TREQ_AGENT_REGISTER, TREQ_AGENT_CLAIM_BATCH,
+    TREQ_AGENT_REPORT_RESULT, TREQ_AGENT_DEREGISTER,
+    TRESP_COMPLETED, TRESP_ERROR
+}
+
+extern fn rt_shell_exec(cmd: text) -> text
+extern fn rt_shell_exit_code() -> i64
+extern fn rt_sleep_ms(ms: i64)
+extern fn rt_time_now_unix_micros() -> i64
+
+# ============================================================================
+# Agent API
+# ============================================================================
+
+fn agent_register(config: TestDaemonConfig, agent_id: text, capabilities: text) -> bool:
+    var req = daemon_request_new(TREQ_AGENT_REGISTER)
+    req.fields["agent_id"] = agent_id
+    req.fields["capabilities"] = capabilities
+    val resp = daemon_send_request(config.daemon, req)
+    resp.status == TRESP_COMPLETED
+
+fn agent_claim_batch(config: TestDaemonConfig, agent_id: text) -> [text]:
+    var req = daemon_request_new(TREQ_AGENT_CLAIM_BATCH)
+    req.fields["agent_id"] = agent_id
+    val resp = daemon_send_request(config.daemon, req)
+    if resp.status != TRESP_COMPLETED:
+        return []
+
+    # Parse batch from response fields
+    val batch_csv = resp.fields["batch"] ?? ""
+    if batch_csv == "":
+        return []
+
+    batch_csv.split(",")
+
+fn agent_report_result(config: TestDaemonConfig, agent_id: text, test_path: text, passed: i64, failed: i64, duration_ms: i64, output: text) -> bool:
+    var req = daemon_request_new(TREQ_AGENT_REPORT_RESULT)
+    req.fields["agent_id"] = agent_id
+    req.fields["test_path"] = test_path
+    req.fields["passed"] = "{passed}"
+    req.fields["failed"] = "{failed}"
+    req.fields["duration_ms"] = "{duration_ms}"
+    req.fields["output"] = output
+    val status = if failed > 0: 3 else: 2
+    req.fields["status"] = "{status}"
+    val resp = daemon_send_request(config.daemon, req)
+    resp.status == TRESP_COMPLETED
+
+fn agent_deregister(config: TestDaemonConfig, agent_id: text) -> bool:
+    var req = daemon_request_new(TREQ_AGENT_DEREGISTER)
+    req.fields["agent_id"] = agent_id
+    val resp = daemon_send_request(config.daemon, req)
+    resp.status == TRESP_COMPLETED
+
+# ============================================================================
+# Worker Loop
+# ============================================================================
+
+fn agent_run_loop(config: TestDaemonConfig, agent_id: text, capabilities: text):
+    val registered = agent_register(config, agent_id, capabilities)
+    if not registered:
+        print "[agent {agent_id}] Registration failed"
+        return
+
+    print "[agent {agent_id}] Registered, starting work loop"
+
+    var idle_count = 0
+    while idle_count < 5:
+        val batch = agent_claim_batch(config, agent_id)
+        if batch.len() == 0:
+            idle_count = idle_count + 1
+            rt_sleep_ms(1000)
+            continue
+
+        idle_count = 0
+        for test_path in batch:
+            print "[agent {agent_id}] Running: {test_path}"
+            val start = rt_time_now_unix_micros()
+            val cmd = "bin/simple test {test_path} 2>&1"
+            val output = rt_shell_exec(cmd)
+            val exit_code = rt_shell_exit_code()
+            val elapsed = (rt_time_now_unix_micros() - start) / 1000
+
+            val passed = if exit_code == 0: 1 else: 0
+            val failed = if exit_code != 0: 1 else: 0
+            agent_report_result(config, agent_id, test_path, passed, failed, elapsed, output)
+
+    print "[agent {agent_id}] No more work, deregistering"
+    agent_deregister(config, agent_id)

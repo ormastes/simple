@@ -1,0 +1,272 @@
+#![allow(export_outside_init)]
+# Red-Black Tree Node Operations
+#
+# Persistent (immutable) red-black tree node representation and accessors.
+# Every node is a 5-element array: [color, key, value, left, right]
+# where color is 0 (RED) or 1 (BLACK), and left/right are child nodes or nil.
+#
+# All operations return NEW nodes via structural sharing — the original
+# tree is never modified.
+#
+# This module provides low-level node primitives. Higher-level insert/delete
+# with rebalancing lives in path_copy.spl.
+
+# ============================================================================
+# Constants
+# ============================================================================
+
+val RB_RED = 0
+val RB_BLACK = 1
+
+# ============================================================================
+# Node Constructor
+# ============================================================================
+
+# Create a new red-black tree node.
+# color: RB_RED (0) or RB_BLACK (1)
+# key, value: the key-value pair stored at this node
+# left, right: child subtrees (nil = empty)
+fn rb_node(color, key, value, left, right):
+    [color, key, value, left, right]
+
+# ============================================================================
+# Field Accessors
+# ============================================================================
+
+# Get the color of a node (0 = RED, 1 = BLACK).
+fn rb_color(node) -> i64:
+    node[0]
+
+# Get the key stored at this node.
+fn rb_key(node):
+    node[1]
+
+# Get the value stored at this node.
+fn rb_value(node):
+    node[2]
+
+# Get the left child subtree (nil if empty).
+fn rb_left(node):
+    node[3]
+
+# Get the right child subtree (nil if empty).
+fn rb_right(node):
+    node[4]
+
+# ============================================================================
+# Color Predicates
+# ============================================================================
+
+# Return true if the node is red. Nil nodes are considered black.
+fn rb_is_red(node) -> bool:
+    if node == nil:
+        return false
+    node[0] == RB_RED
+
+# Return true if the node is black. Nil nodes are considered black.
+fn rb_is_black(node) -> bool:
+    if node == nil:
+        return true
+    node[0] == RB_BLACK
+
+# ============================================================================
+# Immutable "Setters" (return new nodes)
+# ============================================================================
+
+# Return a new node identical to `node` but with color changed.
+fn rb_set_color(node, color):
+    [color, node[1], node[2], node[3], node[4]]
+
+# Return a new node identical to `node` but with value changed.
+fn rb_set_value(node, value):
+    [node[0], node[1], value, node[3], node[4]]
+
+# Return a new node identical to `node` but with left child changed.
+fn rb_set_left(node, left):
+    [node[0], node[1], node[2], left, node[4]]
+
+# Return a new node identical to `node` but with right child changed.
+fn rb_set_right(node, right):
+    [node[0], node[1], node[2], node[3], right]
+
+# ============================================================================
+# Lookup Operations
+# ============================================================================
+
+# Look up a key in the red-black tree.
+# Uses the provided `compare(a, b)` function which returns:
+#   negative if a < b, 0 if a == b, positive if a > b
+# Returns the value associated with the key, or nil if not found.
+fn rb_get(node, key, compare):
+    var current = node
+    while current != nil:
+        val cmp = compare(key, current[1])
+        if cmp == 0:
+            return current[2]
+        if cmp < 0:
+            current = current[3]
+        else:
+            current = current[4]
+    nil
+
+# Check whether a key exists in the tree.
+# Returns true if the key is present, false otherwise.
+fn rb_contains(node, key, compare) -> bool:
+    var current = node
+    while current != nil:
+        val cmp = compare(key, current[1])
+        if cmp == 0:
+            return true
+        if cmp < 0:
+            current = current[3]
+        else:
+            current = current[4]
+    false
+
+# ============================================================================
+# Min / Max
+# ============================================================================
+
+# Find the leftmost (minimum) node in the tree.
+# Returns the node itself (not just the key), or nil if empty.
+fn rb_min_node(node):
+    if node == nil:
+        return nil
+    var current = node
+    while current[3] != nil:
+        current = current[3]
+    current
+
+# Find the rightmost (maximum) node in the tree.
+# Returns the node itself (not just the key), or nil if empty.
+fn rb_max_node(node):
+    if node == nil:
+        return nil
+    var current = node
+    while current[4] != nil:
+        current = current[4]
+    current
+
+# ============================================================================
+# Counting
+# ============================================================================
+
+# Count the total number of nodes in the tree.
+fn rb_count(node) -> i64:
+    if node == nil:
+        return 0
+    val left_count = rb_count(node[3])
+    val right_count = rb_count(node[4])
+    1 + left_count + right_count
+
+# ============================================================================
+# In-Order Traversal
+# ============================================================================
+
+# Collect all [key, value] pairs from the tree in sorted (in-order) order.
+# Returns an array of [key, value] pairs.
+fn rb_collect_entries(node):
+    if node == nil:
+        return []
+    val left_entries = rb_collect_entries(node[3])
+    val right_entries = rb_collect_entries(node[4])
+    var result = []
+    var i = 0
+    val ln = left_entries.len()
+    while i < ln:
+        result.push(left_entries[i])
+        i = i + 1
+    result.push([node[1], node[2]])
+    i = 0
+    val rn = right_entries.len()
+    while i < rn:
+        result.push(right_entries[i])
+        i = i + 1
+    result
+
+# Collect all [key, value] pairs within a key range [from_key, to_key] inclusive.
+# Uses the compare function to determine range boundaries.
+# Returns an array of matching pairs in sorted order.
+fn rb_collect_range(node, from_key, to_key, compare):
+    if node == nil:
+        return []
+    val key = node[1]
+    val cmp_from = compare(key, from_key)
+    val cmp_to = compare(key, to_key)
+    var result = []
+    # Recurse into left subtree if keys less than from_key might exist
+    if cmp_from >= 0:
+        val left_entries = rb_collect_range(node[3], from_key, to_key, compare)
+        var i = 0
+        val n = left_entries.len()
+        while i < n:
+            result.push(left_entries[i])
+            i = i + 1
+    # Include this node if it is within the range
+    if cmp_from >= 0:
+        if cmp_to <= 0:
+            result.push([key, node[2]])
+    # Recurse into right subtree if keys greater than to_key might exist
+    if cmp_to <= 0:
+        val right_entries = rb_collect_range(node[4], from_key, to_key, compare)
+        var i = 0
+        val n = right_entries.len()
+        while i < n:
+            result.push(right_entries[i])
+            i = i + 1
+    result
+
+# ============================================================================
+# Floor / Ceiling
+# ============================================================================
+
+# Find the greatest entry with key <= the given key.
+# Returns [key, value] or nil if no such entry exists.
+fn rb_floor(node, key, compare):
+    if node == nil:
+        return nil
+    val cmp = compare(key, node[1])
+    if cmp == 0:
+        return [node[1], node[2]]
+    if cmp < 0:
+        # Target is smaller than this node, floor must be in left subtree
+        return rb_floor(node[3], key, compare)
+    # Target is larger than this node. This node is a candidate,
+    # but there might be a closer one in the right subtree.
+    val right_result = rb_floor(node[4], key, compare)
+    if right_result != nil:
+        return right_result
+    [node[1], node[2]]
+
+# Find the smallest entry with key >= the given key.
+# Returns [key, value] or nil if no such entry exists.
+fn rb_ceiling(node, key, compare):
+    if node == nil:
+        return nil
+    val cmp = compare(key, node[1])
+    if cmp == 0:
+        return [node[1], node[2]]
+    if cmp > 0:
+        # Target is larger than this node, ceiling must be in right subtree
+        return rb_ceiling(node[4], key, compare)
+    # Target is smaller than this node. This node is a candidate,
+    # but there might be a closer one in the left subtree.
+    val left_result = rb_ceiling(node[3], key, compare)
+    if left_result != nil:
+        return left_result
+    [node[1], node[2]]
+
+# ============================================================================
+# Exports
+# ============================================================================
+
+export RB_RED, RB_BLACK
+export rb_node
+export rb_color, rb_key, rb_value, rb_left, rb_right
+export rb_is_red, rb_is_black
+export rb_set_color, rb_set_value, rb_set_left, rb_set_right
+export rb_get, rb_contains
+export rb_min_node, rb_max_node
+export rb_count, rb_collect_entries, rb_collect_range
+export rb_floor, rb_ceiling
+

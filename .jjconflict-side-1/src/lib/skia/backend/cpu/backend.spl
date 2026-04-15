@@ -1,0 +1,248 @@
+# Skia CPU Backend
+#
+# Software rasterizer backend — no GPU required.
+
+use std.skia.entity.canvas.{SkCanvas, sk_canvas_make}
+use std.skia.entity.image.{SkImage, SkImageInfo, sk_image_info_n32_premul}
+use std.skia.entity.geometry.{SkIRect, SkRect}
+use std.skia.entity.matrix.{Matrix3x3}
+use std.skia.capability.{SkCapability, sk_capability_cpu}
+use std.skia.entity.picture.{SkPicture, SkPictureOp, SkPictureOpKind}
+use std.skia.entity.paint.{SkPaint}
+use std.skia.entity.enums.{SkPaintStyle}
+use std.skia.entity.color.{SkColor4f, sk_color_alpha, sk_color_red, sk_color_green, sk_color_blue}
+use std.skia.backend.cpu.raster_prims.{Bitmap, fill_rect, fill_rrect, fill_path_aa, stroke_path}
+use std.skia.backend.cpu.shaders.{sample_image_bilinear, apply_blend}
+use std.viz.feature.damage.{intersect_rect}
+
+# ============================================================================
+# SkCpuSurface — CPU-backed pixel buffer
+# ============================================================================
+
+class SkCpuSurface:
+    info: SkImageInfo
+    pixels: [i64]
+    canvas: SkCanvas
+
+fn sk_cpu_surface_make(width: i64, height: i64) -> SkCpuSurface:
+    val info = sk_image_info_n32_premul(width, height)
+    val pixel_count = width * height * 4
+    val pixels: [i64] = [0 for _ in 0..pixel_count]
+    val canvas = sk_canvas_make(width, height)
+    SkCpuSurface(info: info, pixels: pixels, canvas: canvas)
+
+impl SkCpuSurface:
+    fn canvas() -> SkCanvas:
+        self.canvas
+
+    fn capability() -> SkCapability:
+        sk_capability_cpu()
+
+    fn width() -> i64:
+        self.info.width
+
+    fn height() -> i64:
+        self.info.height
+
+    fn snapshot() -> SkImage:
+        pass_todo
+
+    fn read_pixels(dst_rect: SkIRect) -> [i64]:
+        pass_todo
+
+    fn flush() -> SkCpuSurface:
+        self
+
+# ============================================================================
+# Color unpacking helper — SkColor (packed i64 ARGB) -> SkColor4f
+# ============================================================================
+
+fn _paint_color4f(paint: SkPaint) -> SkColor4f:
+    val c = paint.color
+    val a = sk_color_alpha(c).to_f64() / 255.0
+    val r = sk_color_red(c).to_f64() / 255.0
+    val g = sk_color_green(c).to_f64() / 255.0
+    val b = sk_color_blue(c).to_f64() / 255.0
+    SkColor4f(r: r, g: g, b: b, a: a)
+
+# Scale only the alpha channel of an SkColor4f by `factor`.
+fn _scale_alpha(color: SkColor4f, factor: f64) -> SkColor4f:
+    SkColor4f(r: color.r, g: color.g, b: color.b, a: color.a * factor)
+
+# ============================================================================
+# CanvasState — per-frame save/restore stack entry
+# ============================================================================
+
+class CanvasState:
+    alpha: f64
+    clip: SkRect
+    transform: Matrix3x3
+
+fn _clone_state(src: CanvasState) -> CanvasState:
+    CanvasState(
+        alpha: src.alpha,
+        clip: SkRect(
+            left: src.clip.left,
+            top: src.clip.top,
+            right: src.clip.right,
+            bottom: src.clip.bottom
+        ),
+        transform: src.transform
+    )
+
+fn _rect_is_empty(r: SkRect) -> bool:
+    (r.right <= r.left) or (r.bottom <= r.top)
+
+# ============================================================================
+# CpuBackend — dispatch recorded SkPicture ops to CPU rasterizer
+# ============================================================================
+
+class CpuBackend:
+    pass_do_nothing
+
+fn cpu_backend_new() -> CpuBackend:
+    CpuBackend()
+
+impl CpuBackend:
+    fn render_picture(picture: SkPicture, cull: SkRect) -> Bitmap:
+        val w = (cull.right - cull.left).to_i64()
+        val h = (cull.bottom - cull.top).to_i64()
+        val safe_w = if w > 0: w else: 1
+        val safe_h = if h > 0: h else: 1
+        val bitmap = Bitmap.zeros(safe_w, safe_h)
+
+        # Initialize state stack with the root state (full bitmap clip, identity).
+        val root_clip = SkRect(
+            left: 0.0,
+            top: 0.0,
+            right: safe_w.to_f64(),
+            bottom: safe_h.to_f64()
+        )
+        var state_stack: [CanvasState] = [
+            CanvasState(alpha: 1.0, clip: root_clip, transform: Matrix3x3.identity())
+        ]
+        var stack_depth = 1
+
+        var i = 0
+        while i < picture.ops.len():
+            val op = picture.ops[i]
+
+            if op.kind == SkPictureOpKind.Save:
+                val top = state_stack.at(stack_depth - 1).unwrap()
+                state_stack.push(_clone_state(top))
+                stack_depth = stack_depth + 1
+            else:
+                if op.kind == SkPictureOpKind.SaveLayer:
+                    val top = state_stack.at(stack_depth - 1).unwrap()
+                    val layer_color = _paint_color4f(op.paint)
+                    val new_state = CanvasState(
+                        alpha: top.alpha * layer_color.a,
+                        clip: SkRect(
+                            left: top.clip.left,
+                            top: top.clip.top,
+                            right: top.clip.right,
+                            bottom: top.clip.bottom
+                        ),
+                        transform: top.transform
+                    )
+                    state_stack.push(new_state)
+                    stack_depth = stack_depth + 1
+                else:
+                    if op.kind == SkPictureOpKind.Restore:
+                        if stack_depth > 1:
+                            state_stack.pop()
+                            stack_depth = stack_depth - 1
+                        else:
+                            pass_do_nothing
+                    else:
+                        if op.kind == SkPictureOpKind.ClipRect:
+                            val cur = state_stack.at(stack_depth - 1).unwrap()
+                            val new_clip = intersect_rect(cur.clip, op.rect)
+                            val replaced = CanvasState(
+                                alpha: cur.alpha,
+                                clip: new_clip,
+                                transform: cur.transform
+                            )
+                            state_stack[stack_depth - 1] = replaced
+                        else:
+                            if op.kind == SkPictureOpKind.SetMatrix:
+                                val cur = state_stack.at(stack_depth - 1).unwrap()
+                                # rect slots: left=tx, top=ty, right=sx, bottom=sy
+                                val tx = op.rect.left
+                                val ty = op.rect.top
+                                val sx = op.rect.right
+                                val sy = op.rect.bottom
+                                val new_xform = if (sx == 0.0) or (sy == 0.0):
+                                    Matrix3x3.identity()
+                                else:
+                                    Matrix3x3.translate(tx, ty).mul(Matrix3x3.scale(sx, sy))
+                                val replaced = CanvasState(
+                                    alpha: cur.alpha,
+                                    clip: cur.clip,
+                                    transform: new_xform
+                                )
+                                state_stack[stack_depth - 1] = replaced
+                            else:
+                                # ---- Draw ops honour current state ----
+                                val cur = state_stack.at(stack_depth - 1).unwrap()
+
+                                if op.kind == SkPictureOpKind.DrawRect:
+                                    val visible = intersect_rect(cur.clip, op.rect)
+                                    if _rect_is_empty(visible):
+                                        pass_do_nothing
+                                    else:
+                                        val color = _scale_alpha(_paint_color4f(op.paint), cur.alpha)
+                                        fill_rect(bitmap, op.rect, color)
+                                else:
+                                    if op.kind == SkPictureOpKind.DrawRRect:
+                                        val visible = intersect_rect(cur.clip, op.rect)
+                                        if _rect_is_empty(visible):
+                                            pass_do_nothing
+                                        else:
+                                            val color = _scale_alpha(_paint_color4f(op.paint), cur.alpha)
+                                            fill_rrect(bitmap, op.rect, op.rx, op.ry, color)
+                                    else:
+                                        if op.kind == SkPictureOpKind.DrawPath:
+                                            if val p = op.path:
+                                                val color = _scale_alpha(_paint_color4f(op.paint), cur.alpha)
+                                                if op.paint.style == SkPaintStyle.Fill:
+                                                    fill_path_aa(bitmap, p, color)
+                                                else:
+                                                    stroke_path(bitmap, p, color, op.paint.stroke_width)
+                                        else:
+                                            if op.kind == SkPictureOpKind.DrawImage:
+                                                if val img = op.image:
+                                                    val img_w = img.info.width
+                                                    val img_h = img.info.height
+                                                    var py = 0 as i64
+                                                    while py < img_h:
+                                                        var px = 0 as i64
+                                                        while px < img_w:
+                                                            val u = px.to_f64()
+                                                            val v = py.to_f64()
+                                                            val sampled = sample_image_bilinear(img, u, v)
+                                                            val dst_x = (op.x.to_i64()) + px
+                                                            val dst_y = (op.y.to_i64()) + py
+                                                            val blended = apply_blend(sampled, SkColor4f(r: 0.0, g: 0.0, b: 0.0, a: 0.0), op.paint.blend_mode)
+                                                            bitmap.blend_pixel(dst_x, dst_y, blended, cur.alpha)
+                                                            px = px + 1
+                                                        py = py + 1
+                                            else:
+                                                if op.kind == SkPictureOpKind.DrawPaint:
+                                                    val color = _scale_alpha(_paint_color4f(op.paint), cur.alpha)
+                                                    val fill_target = SkRect(
+                                                        left: cur.clip.left,
+                                                        top: cur.clip.top,
+                                                        right: cur.clip.right,
+                                                        bottom: cur.clip.bottom
+                                                    )
+                                                    if _rect_is_empty(fill_target):
+                                                        pass_do_nothing
+                                                    else:
+                                                        fill_rect(bitmap, fill_target, color)
+                                                else:
+                                                    # DrawText / DrawOval / DrawPoints / DrawTextBlob:
+                                                    # not yet implemented
+                                                    pass_do_nothing
+            i = i + 1
+        bitmap

@@ -1,0 +1,191 @@
+# T32 Dialog Manager — dialog item state, snapshots, and change tracking
+#
+# Pure state management layer. Does NOT perform I/O.
+# MCP handlers or protocol clients call this to track dialog state.
+# Provides data types for dialog items, snapshots of dialog state,
+# and change detection between snapshots.
+
+# A single control in a T32 PRACTICE dialog
+class T32DialogItem:
+    name: text
+    kind: text        # "button", "edit", "checkbox", "dropdown", "label", "unknown"
+    value: text
+    exists: bool
+
+# Snapshot of dialog state at a point in time
+class T32DialogSnapshot:
+    session_id: text
+    practice_state: text   # "dialog", "running", "idle", "stopped", etc.
+    items: [T32DialogItem]
+    window_names: [text]   # open windows at snapshot time
+
+# A single change detected between two snapshots
+class T32DialogChange:
+    change_type: text      # "dialog_opened", "dialog_closed", "item_changed",
+                           # "item_added", "item_removed", "window_opened", "window_closed"
+    window_name: text
+    item_name: text
+    old_value: text
+    new_value: text
+
+# ---------------------------------------------------------------------------
+# Module-level state — last snapshot per session
+# ---------------------------------------------------------------------------
+var _snapshots: [T32DialogSnapshot] = []
+
+fn dialog_snapshot_store(snap: T32DialogSnapshot):
+    var i = 0
+    while i < _snapshots.len():
+        if _snapshots[i].session_id == snap.session_id:
+            _snapshots[i] = snap
+            return
+        i = i + 1
+    _snapshots.push(snap)
+
+fn dialog_snapshot_get(session_id: text) -> Option<T32DialogSnapshot>:
+    for s in _snapshots:
+        if s.session_id == session_id:
+            return Some(s)
+    nil
+
+fn dialog_snapshot_remove(session_id: text):
+    var new_list: [T32DialogSnapshot] = []
+    for s in _snapshots:
+        if s.session_id != session_id:
+            new_list.push(s)
+    _snapshots = new_list
+
+# ---------------------------------------------------------------------------
+# Change detection — diff two snapshots
+# ---------------------------------------------------------------------------
+fn dialog_compute_changes(old_snap: T32DialogSnapshot, new_snap: T32DialogSnapshot) -> [T32DialogChange]:
+    var changes: [T32DialogChange] = []
+
+    # Practice state transitions
+    if old_snap.practice_state != "dialog" and new_snap.practice_state == "dialog":
+        changes.push(T32DialogChange(
+            change_type: "dialog_opened",
+            window_name: "practice_dialog",
+            item_name: "",
+            old_value: old_snap.practice_state,
+            new_value: "dialog"
+        ))
+    elif old_snap.practice_state == "dialog" and new_snap.practice_state != "dialog":
+        changes.push(T32DialogChange(
+            change_type: "dialog_closed",
+            window_name: "practice_dialog",
+            item_name: "",
+            old_value: "dialog",
+            new_value: new_snap.practice_state
+        ))
+
+    # Item-level changes (only meaningful when both snapshots are in dialog state)
+    if old_snap.practice_state == "dialog" and new_snap.practice_state == "dialog":
+        # Check for changed or removed items
+        for old_item in old_snap.items:
+            var found = false
+            for new_item in new_snap.items:
+                if old_item.name == new_item.name:
+                    found = true
+                    if old_item.value != new_item.value:
+                        changes.push(T32DialogChange(
+                            change_type: "item_changed",
+                            window_name: "practice_dialog",
+                            item_name: old_item.name,
+                            old_value: old_item.value,
+                            new_value: new_item.value
+                        ))
+                    break
+            if not found:
+                changes.push(T32DialogChange(
+                    change_type: "item_removed",
+                    window_name: "practice_dialog",
+                    item_name: old_item.name,
+                    old_value: old_item.value,
+                    new_value: ""
+                ))
+        # Check for newly appeared items
+        for new_item in new_snap.items:
+            var found = false
+            for old_item in old_snap.items:
+                if old_item.name == new_item.name:
+                    found = true
+                    break
+            if not found:
+                changes.push(T32DialogChange(
+                    change_type: "item_added",
+                    window_name: "practice_dialog",
+                    item_name: new_item.name,
+                    old_value: "",
+                    new_value: new_item.value
+                ))
+
+    # Window-level changes
+    for wn in new_snap.window_names:
+        var found = false
+        for ow in old_snap.window_names:
+            if ow == wn:
+                found = true
+                break
+        if not found:
+            changes.push(T32DialogChange(
+                change_type: "window_opened",
+                window_name: wn,
+                item_name: "",
+                old_value: "",
+                new_value: ""
+            ))
+    for ow in old_snap.window_names:
+        var found = false
+        for wn in new_snap.window_names:
+            if wn == ow:
+                found = true
+                break
+        if not found:
+            changes.push(T32DialogChange(
+                change_type: "window_closed",
+                window_name: ow,
+                item_name: "",
+                old_value: "",
+                new_value: ""
+            ))
+
+    changes
+
+# ---------------------------------------------------------------------------
+# Parsing helpers
+# ---------------------------------------------------------------------------
+
+# Parse "name=value" entries (from t32_collect_dialog) into DialogItems
+fn dialog_parse_collected(entries: [text]) -> [T32DialogItem]:
+    var items: [T32DialogItem] = []
+    for entry in entries:
+        val parts = entry.split("=")
+        if parts.len() >= 2:
+            val name = parts[0].trim()
+            # Rejoin remaining parts in case value contains "="
+            var value = parts[1].trim()
+            var pi = 2
+            while pi < parts.len():
+                value = value + "=" + parts[pi]
+                pi = pi + 1
+            val exists = value != "<not found>"
+            var kind = "unknown"
+            if exists:
+                val upper = value.to_upper()
+                if (upper == "TRUE()" or upper == "TRUE" or
+                    upper == "FALSE()" or upper == "FALSE"):
+                    kind = "checkbox"
+                else:
+                    kind = "edit"
+            items.push(T32DialogItem(name: name, kind: kind, value: value, exists: exists))
+    items
+
+# Create an empty snapshot for a session
+fn dialog_empty_snapshot(session_id: text, practice_state: text) -> T32DialogSnapshot:
+    T32DialogSnapshot(
+        session_id: session_id,
+        practice_state: practice_state,
+        items: [],
+        window_names: []
+    )

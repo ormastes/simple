@@ -1,0 +1,740 @@
+#![allow(unnamed_duplicate_typed_args)]
+@allow(primitive_api)
+# Grid Layout — generic grid formatting context.
+# Implements grid track definition, item placement (explicit + auto),
+# track sizing algorithm, fr-unit distribution, and cell positioning.
+#
+# Extracted from browser CSS Grid Layout Level 1 implementation.
+# Works on any box model, not just CSS boxes.
+#
+# Reference: https://www.w3.org/TR/css-grid-1/
+
+use std.common.layout.box_model.{LayoutBox, BoxModel, BoxKind}
+
+# ---------------------------------------------------------------------------
+# Grid track definition — parsed from grid template columns / rows.
+# ---------------------------------------------------------------------------
+
+enum GridTrackDef:
+    Fixed(size: f64)
+    Fraction(fr: f64)
+    MinMax(min_val: f64, max_val: f64)
+    Auto
+    MinContent
+    MaxContent
+    Repeat(count: i64, tracks: List<GridTrackDef>)
+
+# ---------------------------------------------------------------------------
+# GridTrack — a resolved column or row track with sizing state.
+# ---------------------------------------------------------------------------
+
+class GridTrack:
+    index: i64
+    base_size: f64
+    growth_limit: f64
+    is_flexible: bool
+    flex_factor: f64
+
+    static fn create(index: i64) -> GridTrack:
+        GridTrack(
+            index: index, base_size: 0.0, growth_limit: 999999.0,
+            is_flexible: false, flex_factor: 0.0
+        )
+
+    static fn from_def(index: i64, def: GridTrackDef) -> GridTrack:
+        match def:
+            GridTrackDef.Fixed(size):
+                GridTrack(
+                    index: index, base_size: size, growth_limit: size,
+                    is_flexible: false, flex_factor: 0.0
+                )
+            GridTrackDef.Fraction(fr):
+                GridTrack(
+                    index: index, base_size: 0.0, growth_limit: 999999.0,
+                    is_flexible: true, flex_factor: fr
+                )
+            GridTrackDef.MinMax(min_val, max_val):
+                GridTrack(
+                    index: index, base_size: min_val, growth_limit: max_val,
+                    is_flexible: false, flex_factor: 0.0
+                )
+            GridTrackDef.Auto:
+                GridTrack(
+                    index: index, base_size: 0.0, growth_limit: 999999.0,
+                    is_flexible: false, flex_factor: 0.0
+                )
+            GridTrackDef.MinContent:
+                GridTrack(
+                    index: index, base_size: 0.0, growth_limit: 999999.0,
+                    is_flexible: false, flex_factor: 0.0
+                )
+            GridTrackDef.MaxContent:
+                GridTrack(
+                    index: index, base_size: 0.0, growth_limit: 999999.0,
+                    is_flexible: false, flex_factor: 0.0
+                )
+            GridTrackDef.Repeat(count, tracks):
+                # Repeat should be expanded before creating tracks
+                GridTrack(
+                    index: index, base_size: 0.0, growth_limit: 999999.0,
+                    is_flexible: false, flex_factor: 0.0
+                )
+
+# ---------------------------------------------------------------------------
+# GridArea — named or numeric grid placement region.
+# ---------------------------------------------------------------------------
+
+class GridArea:
+    row_start: i64
+    row_end: i64
+    col_start: i64
+    col_end: i64
+    name: text
+
+    static fn create(rs: i64, re: i64, cs: i64, ce: i64) -> GridArea:
+        GridArea(row_start: rs, row_end: re, col_start: cs, col_end: ce, name: "")
+
+    static fn named(name: text, rs: i64, re: i64, cs: i64, ce: i64) -> GridArea:
+        GridArea(row_start: rs, row_end: re, col_start: cs, col_end: ce, name: name)
+
+# ---------------------------------------------------------------------------
+# GridItem — a child element placed in the grid.
+# ---------------------------------------------------------------------------
+
+class GridItem:
+    node_id: i64
+    area: GridArea
+    box_node: LayoutBox
+    min_width: f64
+    min_height: f64
+
+    static fn from_box(child: LayoutBox) -> GridItem:
+        GridItem(
+            node_id: child.node_id,
+            area: GridArea.create(0, 0, 0, 0),
+            box_node: child,
+            min_width: 0.0,
+            min_height: 0.0
+        )
+
+# ---------------------------------------------------------------------------
+# GridDefinition — the full parsed grid template.
+# ---------------------------------------------------------------------------
+
+class GridDefinition:
+    columns: List<GridTrackDef>
+    rows: List<GridTrackDef>
+    column_gap: f64
+    row_gap: f64
+    auto_columns: GridTrackDef
+    auto_rows: GridTrackDef
+    areas: List<GridArea>
+
+    static fn create() -> GridDefinition:
+        GridDefinition(
+            columns: List<GridTrackDef>(),
+            rows: List<GridTrackDef>(),
+            column_gap: 0.0,
+            row_gap: 0.0,
+            auto_columns: GridTrackDef.Auto,
+            auto_rows: GridTrackDef.Auto,
+            areas: List<GridArea>()
+        )
+
+# ---------------------------------------------------------------------------
+# GridFormatter — main entry point for grid layout.
+# ---------------------------------------------------------------------------
+
+class GridFormatter:
+    # Full grid layout algorithm.
+    #
+    # 1. Parse grid template columns/rows into track definitions.
+    # 2. Place grid items (explicit placement + auto-placement).
+    # 3. Resolve track sizes (initialize, intrinsic, maximize, distribute fr).
+    # 4. Apply gaps between tracks.
+    # 5. Position items in their grid cells.
+    # 6. Return positioned container.
+    me layout_grid(container: LayoutBox, grid_def: GridDefinition) -> LayoutBox:
+        # Step 1 — use track definitions from grid_def
+        var col_defs = _expand_all_repeats(grid_def.columns)
+        var row_defs = _expand_all_repeats(grid_def.rows)
+
+        # Step 2 — generate grid items from children
+        var items = List<GridItem>()
+        for child in container.children:
+            val item = GridItem.from_box(child)
+            items.push(item)
+
+        # Determine grid dimensions
+        val num_cols = _max_i64(col_defs.len(), 1)
+        val num_rows_explicit = row_defs.len()
+
+        # Ensure enough rows for all items
+        val items_count = items.len()
+        val needed_rows = (items_count + num_cols - 1) / num_cols
+        val num_rows = _max_i64(num_rows_explicit, needed_rows)
+
+        # Auto-place items that don't have explicit placement
+        items = auto_place_items(items, num_cols, num_rows)
+
+        # Step 3 — create and resolve column tracks
+        var col_tracks = _create_tracks_from_defs(col_defs, num_cols)
+        col_tracks = resolve_track_sizes(col_tracks, container.width)
+
+        # Distribute fr space for columns
+        val col_gap_total = if num_cols > 1: grid_def.column_gap * (num_cols - 1).to_f64() else: 0.0
+        val col_fixed_total = _sum_fixed_track_sizes(col_tracks)
+        val col_free = container.width - col_fixed_total - col_gap_total
+        if col_free > 0.0:
+            col_tracks = distribute_fr_space(col_tracks, col_free)
+
+        # Step 3b — create and resolve row tracks
+        var row_tracks = _create_tracks_from_defs(row_defs, num_rows)
+        row_tracks = resolve_track_sizes(row_tracks, container.height)
+
+        # Distribute fr space for rows
+        val row_gap_total = if num_rows > 1: grid_def.row_gap * (num_rows - 1).to_f64() else: 0.0
+        val row_fixed_total = _sum_fixed_track_sizes(row_tracks)
+        val row_free = container.height - row_fixed_total - row_gap_total
+        if row_free > 0.0:
+            row_tracks = distribute_fr_space(row_tracks, row_free)
+
+        # Step 4 — compute column and row widths (including gap)
+        val gap_x = grid_def.column_gap
+        val gap_y = grid_def.row_gap
+
+        # Step 5 — position items in their grid cells
+        var result_children = List<LayoutBox>()
+        for item in items:
+            var child = item.box_node
+            val col_pos = get_track_position(item.area.col_start, col_tracks, gap_x)
+            val row_pos = get_track_position(item.area.row_start, row_tracks, gap_y)
+            val cell_width = get_track_span_size(item.area.col_start, item.area.col_end, col_tracks, gap_x)
+            val cell_height = get_track_span_size(item.area.row_start, item.area.row_end, row_tracks, gap_y)
+
+            child.x = container.x + col_pos
+            child.y = container.y + row_pos
+            child.width = cell_width
+            child.height = cell_height
+            result_children.push(child)
+
+        var result = container
+        result.children = result_children
+        result
+
+# ---------------------------------------------------------------------------
+# Track list parser — parse "1fr 200px auto minmax(100px, 1fr)" into defs.
+# ---------------------------------------------------------------------------
+
+fn parse_track_list(template: text) -> List<GridTrackDef>:
+    var defs = List<GridTrackDef>()
+
+    if template == "none" or template == "":
+        return defs
+
+    # Tokenize by spaces (simplified; does not handle nested parens fully)
+    val tokens = _split_track_tokens(template)
+
+    var i = 0
+    while i < tokens.len():
+        val token = tokens[i]
+
+        if _ends_with_px(token):
+            # Fixed pixel size
+            val num_str = _strip_suffix(token, "px")
+            val size = _parse_f64(num_str)
+            defs.push(GridTrackDef.Fixed(size: size))
+        elif _ends_with_fr(token):
+            # Fractional unit
+            val num_str = _strip_suffix(token, "fr")
+            val fr = _parse_f64(num_str)
+            defs.push(GridTrackDef.Fraction(fr: fr))
+        elif token == "auto":
+            defs.push(GridTrackDef.Auto)
+        elif token == "min-content":
+            defs.push(GridTrackDef.MinContent)
+        elif token == "max-content":
+            defs.push(GridTrackDef.MaxContent)
+        elif _starts_with(token, "minmax("):
+            # Parse minmax(min, max) — may span multiple tokens
+            val inner = _extract_paren_args(token, tokens, i)
+            val parts = _split_by_comma(inner)
+            if parts.len() >= 2:
+                val min_v = _parse_track_value(parts[0])
+                val max_v = _parse_track_value(parts[1])
+                defs.push(GridTrackDef.MinMax(min_val: min_v, max_val: max_v))
+            else:
+                defs.push(GridTrackDef.Auto)
+        elif _starts_with(token, "repeat("):
+            # Parse repeat(count, track-list)
+            val inner = _extract_paren_args(token, tokens, i)
+            val parts = _split_by_comma(inner)
+            if parts.len() >= 2:
+                val count = _parse_i64(parts[0])
+                var sub_defs = List<GridTrackDef>()
+                var si = 1
+                while si < parts.len():
+                    val sub_token = _trim(parts[si])
+                    if _ends_with_px(sub_token):
+                        val ns = _strip_suffix(sub_token, "px")
+                        sub_defs.push(GridTrackDef.Fixed(size: _parse_f64(ns)))
+                    elif _ends_with_fr(sub_token):
+                        val ns = _strip_suffix(sub_token, "fr")
+                        sub_defs.push(GridTrackDef.Fraction(fr: _parse_f64(ns)))
+                    else:
+                        sub_defs.push(GridTrackDef.Auto)
+                    si = si + 1
+                defs.push(GridTrackDef.Repeat(count: count, tracks: sub_defs))
+            else:
+                defs.push(GridTrackDef.Auto)
+        elif _ends_with_percent(token):
+            # Percentage treated as fixed for now (resolved against container)
+            val num_str = _strip_suffix(token, "%")
+            val pct = _parse_f64(num_str)
+            defs.push(GridTrackDef.Fixed(size: pct))  # Will be resolved later
+        else:
+            # Unknown token, treat as auto
+            defs.push(GridTrackDef.Auto)
+
+        i = i + 1
+
+    defs
+
+# ---------------------------------------------------------------------------
+# Track sizing algorithm.
+# ---------------------------------------------------------------------------
+
+fn resolve_track_sizes(tracks: List<GridTrack>, available: f64) -> List<GridTrack>:
+    var resolved = List<GridTrack>()
+    for track in tracks:
+        var rt = track
+        # Initialize: if base_size is 0 and not flexible, use a default
+        if rt.base_size == 0.0 and not rt.is_flexible:
+            # Auto tracks get sized by content; default to equal share
+            val non_flex_count = _count_non_flexible(tracks)
+            val flex_count = _count_flexible(tracks)
+            if non_flex_count > 0 and flex_count == 0:
+                rt.base_size = available / tracks.len().to_f64()
+                rt.growth_limit = rt.base_size
+        resolved.push(rt)
+
+    # Maximize tracks: grow base sizes to fill growth limits
+    var total_base = 0.0
+    for track in resolved:
+        total_base = total_base + track.base_size
+
+    if total_base < available:
+        val remaining = available - total_base
+        val growable = _count_growable(resolved)
+        if growable > 0:
+            val extra = remaining / growable.to_f64()
+            var maximized = List<GridTrack>()
+            for track in resolved:
+                var mt = track
+                if not mt.is_flexible and mt.base_size < mt.growth_limit:
+                    val can_grow = mt.growth_limit - mt.base_size
+                    val growth = _min_f64(extra, can_grow)
+                    mt.base_size = mt.base_size + growth
+                maximized.push(mt)
+            resolved = maximized
+
+    resolved
+
+# ---------------------------------------------------------------------------
+# Fr-unit distribution — allocate remaining space to flexible tracks.
+# ---------------------------------------------------------------------------
+
+fn distribute_fr_space(tracks: List<GridTrack>, free_space: f64) -> List<GridTrack>:
+    # Sum all fr factors
+    var total_fr = 0.0
+    for track in tracks:
+        if track.is_flexible:
+            total_fr = total_fr + track.flex_factor
+
+    if total_fr == 0.0:
+        return tracks
+
+    val px_per_fr = free_space / total_fr
+
+    var result = List<GridTrack>()
+    for track in tracks:
+        var rt = track
+        if rt.is_flexible:
+            rt.base_size = rt.flex_factor * px_per_fr
+            rt.growth_limit = rt.base_size
+        result.push(rt)
+
+    result
+
+# ---------------------------------------------------------------------------
+# Auto-placement algorithm — place items sequentially into grid cells.
+# ---------------------------------------------------------------------------
+
+fn auto_place_items(items: List<GridItem>, num_cols: i64, num_rows: i64) -> List<GridItem>:
+    var placed = List<GridItem>()
+    var row_cursor = 0
+    var col_cursor = 0
+
+    for item in items:
+        var pi = item
+
+        # If the item already has explicit placement, keep it
+        val has_explicit = (pi.area.col_start > 0 or pi.area.row_start > 0)
+        if has_explicit:
+            # Adjust to 0-based indexing if needed
+            if pi.area.col_start > 0:
+                pi.area.col_start = pi.area.col_start - 1
+            if pi.area.row_start > 0:
+                pi.area.row_start = pi.area.row_start - 1
+            if pi.area.col_end == 0:
+                pi.area.col_end = pi.area.col_start + 1
+            if pi.area.row_end == 0:
+                pi.area.row_end = pi.area.row_start + 1
+        else:
+            # Auto-place: sequential row-major placement
+            pi.area = GridArea(
+                row_start: row_cursor,
+                row_end: row_cursor + 1,
+                col_start: col_cursor,
+                col_end: col_cursor + 1,
+                name: ""
+            )
+            col_cursor = col_cursor + 1
+            if col_cursor >= num_cols:
+                col_cursor = 0
+                row_cursor = row_cursor + 1
+
+        placed.push(pi)
+
+    placed
+
+# ---------------------------------------------------------------------------
+# Track position — cumulative offset of a track, including gaps.
+# ---------------------------------------------------------------------------
+
+fn get_track_position(index: i64, tracks: List<GridTrack>, gap: f64) -> f64:
+    var pos = 0.0
+    var i = 0
+    while i < index and i < tracks.len():
+        pos = pos + tracks[i].base_size
+        if i < index - 1:
+            pos = pos + gap
+        i = i + 1
+    # Add leading gap for non-zero index
+    if index > 0:
+        pos = pos + gap
+    pos
+
+# ---------------------------------------------------------------------------
+# Track span size — total size across a span of tracks plus internal gaps.
+# ---------------------------------------------------------------------------
+
+fn get_track_span_size(start: i64, end_idx: i64, tracks: List<GridTrack>, gap: f64) -> f64:
+    var size = 0.0
+    var i = start
+    while i < end_idx and i < tracks.len():
+        size = size + tracks[i].base_size
+        if i < end_idx - 1:
+            size = size + gap
+        i = i + 1
+    size
+
+# ---------------------------------------------------------------------------
+# Named area parser — parse grid-template-areas string.
+# Example: "header header" "sidebar main" "footer footer"
+# ---------------------------------------------------------------------------
+
+fn resolve_named_areas(areas_template: text) -> List<GridArea>:
+    var areas = List<GridArea>()
+
+    if areas_template == "none" or areas_template == "":
+        return areas
+
+    # Split by quoted row strings
+    val rows = _split_area_rows(areas_template)
+    var row_idx = 0
+
+    # Track which named areas we've seen and their bounds
+    var area_names = List<text>()
+    var area_bounds = List<GridArea>()
+
+    for row in rows:
+        val cells = _split_by_whitespace(row)
+        var col_idx = 0
+        for cell in cells:
+            if cell != ".":
+                # Find or create the named area
+                var found = false
+                var ai = 0
+                while ai < area_names.len():
+                    if area_names[ai] == cell:
+                        # Expand existing area
+                        var existing = area_bounds[ai]
+                        if row_idx + 1 > existing.row_end:
+                            existing.row_end = row_idx + 1
+                        if col_idx + 1 > existing.col_end:
+                            existing.col_end = col_idx + 1
+                        area_bounds[ai] = existing
+                        found = true
+                    ai = ai + 1
+                if not found:
+                    area_names.push(cell)
+                    area_bounds.push(GridArea.named(
+                        cell, row_idx, row_idx + 1, col_idx, col_idx + 1
+                    ))
+            col_idx = col_idx + 1
+        row_idx = row_idx + 1
+
+    # Copy bounds to result
+    var bi = 0
+    while bi < area_bounds.len():
+        areas.push(area_bounds[bi])
+        bi = bi + 1
+
+    areas
+
+# ---------------------------------------------------------------------------
+# Expand repeat() track definitions.
+# ---------------------------------------------------------------------------
+
+fn expand_repeat(def: GridTrackDef) -> List<GridTrackDef>:
+    match def:
+        GridTrackDef.Repeat(count, tracks):
+            var expanded = List<GridTrackDef>()
+            var i = 0
+            while i < count:
+                for track in tracks:
+                    expanded.push(track)
+                i = i + 1
+            expanded
+        _:
+            var single = List<GridTrackDef>()
+            single.push(def)
+            single
+
+# ---------------------------------------------------------------------------
+# Internal helpers.
+# ---------------------------------------------------------------------------
+
+fn _expand_all_repeats(defs: List<GridTrackDef>) -> List<GridTrackDef>:
+    var result = List<GridTrackDef>()
+    for def in defs:
+        val expanded = expand_repeat(def)
+        for e in expanded:
+            result.push(e)
+    result
+
+fn _create_tracks_from_defs(defs: List<GridTrackDef>, min_count: i64) -> List<GridTrack>:
+    var tracks = List<GridTrack>()
+    var i = 0
+    while i < defs.len():
+        tracks.push(GridTrack.from_def(i, defs[i]))
+        i = i + 1
+    # Fill remaining with auto tracks
+    while tracks.len() < min_count:
+        val idx = tracks.len()
+        tracks.push(GridTrack.create(idx))
+    tracks
+
+fn _count_non_flexible(tracks: List<GridTrack>) -> i64:
+    var count = 0
+    for track in tracks:
+        if not track.is_flexible:
+            count = count + 1
+    count
+
+fn _count_flexible(tracks: List<GridTrack>) -> i64:
+    var count = 0
+    for track in tracks:
+        if track.is_flexible:
+            count = count + 1
+    count
+
+fn _count_growable(tracks: List<GridTrack>) -> i64:
+    var count = 0
+    for track in tracks:
+        if not track.is_flexible and track.base_size < track.growth_limit:
+            count = count + 1
+    count
+
+fn _sum_fixed_track_sizes(tracks: List<GridTrack>) -> f64:
+    var total = 0.0
+    for track in tracks:
+        if not track.is_flexible:
+            total = total + track.base_size
+    total
+
+fn _max_i64(a: i64, b: i64) -> i64:
+    if a > b: a else: b
+
+fn _min_f64(a: f64, b: f64) -> f64:
+    if a < b: a else: b
+
+# ---------------------------------------------------------------------------
+# String parsing utilities.
+# ---------------------------------------------------------------------------
+
+fn _split_track_tokens(input: text) -> List<text>:
+    # Simple space-aware tokenizer that keeps parenthesized groups together
+    var tokens = List<text>()
+    var current = ""
+    var depth = 0
+    var i = 0
+    while i < input.len():
+        val ch = input[i]
+        if ch == '(':
+            depth = depth + 1
+            current = current + ch.to_text()
+        elif ch == ')':
+            depth = depth - 1
+            current = current + ch.to_text()
+        elif ch == ' ' and depth == 0:
+            if current.len() > 0:
+                tokens.push(current)
+                current = ""
+        else:
+            current = current + ch.to_text()
+        i = i + 1
+    if current.len() > 0:
+        tokens.push(current)
+    tokens
+
+fn _ends_with_px(s: text) -> bool:
+    if s.len() < 3:
+        return false
+    val suffix = s[s.len() - 2 : s.len()]
+    suffix == "px"
+
+fn _ends_with_fr(s: text) -> bool:
+    if s.len() < 3:
+        return false
+    val suffix = s[s.len() - 2 : s.len()]
+    suffix == "fr"
+
+fn _ends_with_percent(s: text) -> bool:
+    if s.len() < 2:
+        return false
+    val last = s[s.len() - 1 : s.len()]
+    last == "%"
+
+fn _starts_with(s: text, prefix: text) -> bool:
+    if s.len() < prefix.len():
+        return false
+    val sub = s[0 : prefix.len()]
+    sub == prefix
+
+fn _strip_suffix(s: text, suffix: text) -> text:
+    val end = s.len() - suffix.len()
+    if end <= 0:
+        return "0"
+    s[0 : end]
+
+fn _trim(s: text) -> text:
+    var start = 0
+    while start < s.len() and s[start] == ' ':
+        start = start + 1
+    var end_pos = s.len()
+    while end_pos > start and s[end_pos - 1] == ' ':
+        end_pos = end_pos - 1
+    if start >= end_pos:
+        return ""
+    s[start : end_pos]
+
+fn _parse_f64(s: text) -> f64:
+    val trimmed = _trim(s)
+    if trimmed == "":
+        return 0.0
+    # Use built-in conversion
+    trimmed.to_f64()
+
+fn _parse_i64(s: text) -> i64:
+    val trimmed = _trim(s)
+    if trimmed == "":
+        return 0
+    trimmed.to_i64()
+
+fn _parse_track_value(s: text) -> f64:
+    val trimmed = _trim(s)
+    if _ends_with_px(trimmed):
+        val ns = _strip_suffix(trimmed, "px")
+        return _parse_f64(ns)
+    if _ends_with_fr(trimmed):
+        val ns = _strip_suffix(trimmed, "fr")
+        return _parse_f64(ns)
+    _parse_f64(trimmed)
+
+fn _split_by_comma(s: text) -> List<text>:
+    var parts = List<text>()
+    var current = ""
+    var i = 0
+    while i < s.len():
+        val ch = s[i]
+        if ch == ',':
+            parts.push(_trim(current))
+            current = ""
+        else:
+            current = current + ch.to_text()
+        i = i + 1
+    if current.len() > 0:
+        parts.push(_trim(current))
+    parts
+
+fn _split_by_whitespace(s: text) -> List<text>:
+    var parts = List<text>()
+    var current = ""
+    var i = 0
+    while i < s.len():
+        val ch = s[i]
+        if ch == ' ' or ch == '\t':
+            if current.len() > 0:
+                parts.push(current)
+                current = ""
+        else:
+            current = current + ch.to_text()
+        i = i + 1
+    if current.len() > 0:
+        parts.push(current)
+    parts
+
+fn _split_area_rows(template: text) -> List<text>:
+    # Split "header header" "sidebar main" by quoted strings
+    var rows = List<text>()
+    var current = ""
+    var in_quote = false
+    var i = 0
+    while i < template.len():
+        val ch = template[i]
+        if ch == '"':
+            if in_quote:
+                rows.push(current)
+                current = ""
+                in_quote = false
+            else:
+                in_quote = true
+        elif in_quote:
+            current = current + ch.to_text()
+        i = i + 1
+    # Handle unquoted single row
+    if rows.len() == 0 and template.len() > 0:
+        rows.push(template)
+    rows
+
+fn _extract_paren_args(token: text, tokens: List<text>, start_idx: i64) -> text:
+    # Extract content between the first "(" and its matching ")"
+    var content = ""
+    var depth = 0
+    var i = 0
+    while i < token.len():
+        val ch = token[i]
+        if ch == '(':
+            depth = depth + 1
+            if depth > 1:
+                content = content + ch.to_text()
+        elif ch == ')':
+            depth = depth - 1
+            if depth > 0:
+                content = content + ch.to_text()
+        elif depth >= 1:
+            content = content + ch.to_text()
+        i = i + 1
+    content

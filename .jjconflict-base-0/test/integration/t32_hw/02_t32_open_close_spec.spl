@@ -1,0 +1,80 @@
+# T32 Hardware Session Open/Close Tests
+#
+# Validates that a T32 session can be opened, used, and closed cleanly.
+# Each test is isolated (fresh_per_test) -- every test creates and tears
+# down its own connection independently.
+#
+# @session-kind: trace32_board
+# @tag: t32_hw
+# @reuse: fresh_per_test
+
+use std.sspec.{describe, context, it, expect}
+use std.debug.remote.protocol.trace32.{Trace32Client}
+use app.debug.remote.types.{DebugConfig}
+use test.integration.t32_hw.t32_hw_helpers.{
+    t32_hw_probe_available, t32_hw_t32rem_available, t32_hw_relay_available,
+    t32_hw_query_version, t32_hw_connect, t32_hw_run_cmd, t32_hw_eval,
+    t32_hw_relay_power_on, t32_hw_relay_power_off, t32_hw_relay_power_reset,
+    t32_hw_relay_power_state, t32_hw_host, t32_hw_port,
+    T32_HW_MIN_VERSION_OLD, T32_HW_MIN_VERSION_NEW
+}
+
+describe "T32 hardware session open/close":
+    context "successful connection":
+        it "opens T32 session":
+            val result = t32_hw_connect()
+            match result:
+                Ok(client):
+                    expect(client.connected).to_equal(true)
+                    client.disconnect()
+                Err(e):
+                    expect("connect failed: {e}").to_equal("connected")
+
+        it "session responds to ping":
+            val result = t32_hw_connect()
+            match result:
+                Ok(client):
+                    val ping = t32_hw_run_cmd(client, "PING")
+                    match ping:
+                        Ok(_): expect("ping ok").to_contain("ok")
+                        Err(e): expect("ping failed: {e}").to_equal("ok")
+                    client.disconnect()
+                Err(e):
+                    expect("connect failed: {e}").to_equal("connected")
+
+        it "evaluates VERSION.BUILD()":
+            val result = t32_hw_connect()
+            match result:
+                Ok(client):
+                    val ver = t32_hw_eval(client, "VERSION.BUILD()")
+                    match ver:
+                        Ok(v): expect(v.len()).to_be_greater_than(0)
+                        Err(e): expect("eval failed: {e}").to_equal("ok")
+                    client.disconnect()
+                Err(e):
+                    expect("connect failed: {e}").to_equal("connected")
+
+    context "session teardown":
+        it "closes session cleanly":
+            val result = t32_hw_connect()
+            match result:
+                Ok(client):
+                    client.disconnect()
+                    expect(client.connected).to_equal(false)
+                Err(e):
+                    expect("connect failed: {e}").to_equal("connected")
+
+    context "negative cases":
+        it "connection fails on bad port":
+            val config = DebugConfig(
+                host: t32_hw_host(),
+                port: 19999,
+                program: "",
+                args: [],
+                debugger: "t32",
+                remote: true
+            )
+            val result = Trace32Client.connect(config)
+            match result:
+                Ok(_): expect("should not connect").to_equal("error")
+                Err(_): expect("bad port rejected").to_contain("rejected")

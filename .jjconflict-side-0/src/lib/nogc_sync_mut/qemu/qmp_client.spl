@@ -1,0 +1,162 @@
+#![allow(unnamed_duplicate_typed_args)]
+# QMP Client — QEMU Machine Protocol for snapshot/restore
+#
+# Communicates with QEMU via QMP over a persistent Unix-domain socket fd.
+# QMP is a greeting-then-capabilities protocol: QEMU sends a JSON greeting
+# on connect, waits for {"execute":"qmp_capabilities"}, then stays open.
+# Single-shot socat calls hang because the connection never closes from
+# QEMU's side. This implementation keeps a persistent fd open for the session.
+
+# ============================================================================
+# FFI — Unix socket and raw fd primitives (implemented in unix_common.h)
+# ============================================================================
+
+extern fn rt_unix_socket_connect(path: text) -> i64
+extern fn rt_fd_write(fd: i64, data: text, len: i64) -> i64
+extern fn rt_fd_read_until(fd: i64, stop_byte: i64, max: i64) -> text
+extern fn rt_fd_close(fd: i64) -> bool
+
+# ============================================================================
+# QMP Client
+# ============================================================================
+
+struct QmpClient:
+    socket_path: text
+    fd: i64           # -1 when disconnected
+
+# ============================================================================
+# Internal helpers
+# ============================================================================
+
+fn qmp_write_line(fd: i64, json: text) -> bool:
+    """Write a JSON line (appends newline) to the socket fd."""
+    val line = "{json}\n"
+    val n = rt_fd_write(fd, line, line.len())
+    n >= 0
+
+fn qmp_read_line(fd: i64) -> text:
+    """Read one newline-terminated JSON response (up to 64 KB)."""
+    # stop_byte = 10 = '\n'
+    rt_fd_read_until(fd, 10, 65536)
+
+# ============================================================================
+# Connection
+# ============================================================================
+
+fn qmp_connect(socket_path: text) -> QmpClient:
+    """Open a persistent QMP session.
+
+    Connects to the Unix socket, reads the QEMU greeting, then sends
+    qmp_capabilities so the session enters command mode.
+    Returns a QmpClient with fd >= 0 on success, fd == -1 on failure.
+    """
+    val fd = rt_unix_socket_connect(socket_path)
+    if fd < 0:
+        print "[qmp] connect failed: {socket_path}"
+        return QmpClient(socket_path: socket_path, fd: -1)
+
+    # Read greeting (e.g. {"QMP": {"version": {...}, "capabilities": [...]}})
+    val greeting = qmp_read_line(fd)
+    if greeting.len() == 0:
+        print "[qmp] no greeting from {socket_path}"
+        rt_fd_close(fd)
+        return QmpClient(socket_path: socket_path, fd: -1)
+
+    # Send capabilities handshake
+    val ok = qmp_write_line(fd, "{\"execute\": \"qmp_capabilities\"}")
+    if not ok:
+        print "[qmp] failed to send qmp_capabilities to {socket_path}"
+        rt_fd_close(fd)
+        return QmpClient(socket_path: socket_path, fd: -1)
+
+    # Read capabilities ACK ({"return": {}})
+    val ack = qmp_read_line(fd)
+    if ack.contains("error"):
+        print "[qmp] qmp_capabilities error: {ack}"
+        rt_fd_close(fd)
+        return QmpClient(socket_path: socket_path, fd: -1)
+
+    QmpClient(socket_path: socket_path, fd: fd)
+
+fn qmp_disconnect(client: QmpClient) -> bool:
+    """Close the persistent QMP socket fd."""
+    if client.fd < 0:
+        return false
+    rt_fd_close(client.fd)
+
+# ============================================================================
+# Internal: Send QMP Command on persistent fd
+# ============================================================================
+
+fn qmp_send(client: QmpClient, json_payload: text) -> (text, text, i64):
+    """Send a QMP JSON command on the persistent fd.
+
+    Returns (response_line, "", 0) on success, ("", error_text, 1) on failure.
+    """
+    if client.fd < 0:
+        return ("", "qmp not connected", 1)
+    val ok = qmp_write_line(client.fd, json_payload)
+    if not ok:
+        return ("", "write failed", 1)
+    val resp = qmp_read_line(client.fd)
+    (resp, "", 0)
+
+fn qmp_send_check(client: QmpClient, json_payload: text, label: text) -> bool:
+    """Send a QMP command and return true on success, false on error."""
+    val (out, err, exit_code) = qmp_send(client, json_payload)
+    if exit_code != 0:
+        print "[qmp] {label} failed: {err}"
+        return false
+    if out.contains("error"):
+        print "[qmp] {label} error: {out}"
+        return false
+    true
+
+# ============================================================================
+# Snapshot Operations
+# ============================================================================
+
+fn qmp_savevm(client: QmpClient, name: text) -> bool:
+    val hmc = "savevm {name}"
+    val json = "{\"execute\": \"human-monitor-command\", \"arguments\": {\"command-line\": \"{hmc}\"}}"
+    qmp_send_check(client, json, "savevm '{name}'")
+
+fn qmp_loadvm(client: QmpClient, name: text) -> bool:
+    val hmc = "loadvm {name}"
+    val json = "{\"execute\": \"human-monitor-command\", \"arguments\": {\"command-line\": \"{hmc}\"}}"
+    qmp_send_check(client, json, "loadvm '{name}'")
+
+# ============================================================================
+# Status Queries
+# ============================================================================
+
+fn qmp_query_status(client: QmpClient) -> text:
+    val (out, err, exit_code) = qmp_send(client, "{\"execute\": \"query-status\"}")
+    if exit_code != 0:
+        return "error: {err}"
+    out
+
+fn qmp_system_reset(client: QmpClient) -> bool:
+    val (out, err, exit_code) = qmp_send(client, "{\"execute\": \"system_reset\"}")
+    exit_code == 0
+
+# ============================================================================
+# Screenshot Capture
+# ============================================================================
+
+fn qmp_screendump(client: QmpClient, filename: text, format: text) -> bool:
+    """Capture QEMU framebuffer to file via QMP screendump command.
+
+    Args:
+        client: QMP client connected to QEMU instance
+        filename: Output file path for the screenshot
+        format: Image format ("png" or "ppm")
+
+    Returns:
+        true if screendump was successful, false on error
+    """
+    if client.socket_path.len() == 0:
+        print "[qmp] screendump failed: empty socket path"
+        return false
+    val json = "{\"execute\": \"screendump\", \"arguments\": {\"filename\": \"{filename}\", \"format\": \"{format}\"}}"
+    qmp_send_check(client, json, "screendump")

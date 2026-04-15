@@ -1,0 +1,523 @@
+# Box and text shadow painting.
+# Parses the CSS `box-shadow` property and generates PaintOp commands
+# that approximate the blur via concentric rectangles with decreasing alpha.
+# Spec: https://www.w3.org/TR/css-backgrounds-3/#box-shadow
+#
+# Shadow format:
+#   [inset?] offset-x offset-y [blur-radius] [spread-radius] [color]
+# Multiple shadows are comma-separated; later entries paint first (back to front).
+
+use std.common.color.types.{Color, from_rgb, from_rgba}
+use std.common.math.{math_abs, math_max, math_min}
+use examples.browser.entity.dom.paint_types.(PaintOp)
+use examples.browser.shared.logging.(Logger, LogLevel)
+use examples.browser.shared.named_colors.named_color_lookup
+
+# =========================================================================
+# ShadowValue — parsed representation of a single shadow
+# =========================================================================
+
+class ShadowValue:
+    offset_x: f64
+    offset_y: f64
+    blur_radius: f64
+    spread_radius: f64
+    color: Color
+    inset: bool
+
+    static fn create(offset_x: f64, offset_y: f64, blur_radius: f64, spread_radius: f64, color: Color, inset: bool) -> ShadowValue:
+        ShadowValue(
+            offset_x: offset_x,
+            offset_y: offset_y,
+            blur_radius: blur_radius,
+            spread_radius: spread_radius,
+            color: color,
+            inset: inset
+        )
+
+    static fn simple(offset_x: f64, offset_y: f64, blur_radius: f64, color: Color) -> ShadowValue:
+        ShadowValue(
+            offset_x: offset_x,
+            offset_y: offset_y,
+            blur_radius: blur_radius,
+            spread_radius: 0.0,
+            color: color,
+            inset: false
+        )
+
+# =========================================================================
+# Parsing
+# =========================================================================
+
+fn parse_box_shadow(value: text) -> [ShadowValue]:
+    """Parse a CSS box-shadow value. Supports comma-separated multiple shadows.
+
+    Examples:
+        '2px 4px 8px rgba(0,0,0,0.3)'
+        'inset 0 2px 4px 0 black, 3px 3px 10px red'
+        'none' -> empty list
+    """
+    val trimmed = value.trim()
+    if trimmed == "none" or trimmed.len() == 0:
+        return [ShadowValue]()
+
+    val shadow_parts = _split_shadows(trimmed)
+    var result = [ShadowValue]()
+    for part in shadow_parts:
+        val shadow = _parse_single_shadow(part.trim())
+        if val s = shadow:
+            result.push(s)
+    result
+
+fn _parse_single_shadow(s: text) -> ShadowValue?:
+    """Parse a single shadow definition."""
+    val trimmed = s.trim()
+    if trimmed.len() == 0:
+        return nil
+
+    val tokens = _tokenize_shadow(trimmed)
+    if tokens.len() < 2:
+        return nil
+
+    var inset = false
+    var numeric_values = [f64]()
+    var color_text = ""
+
+    for tok in tokens:
+        val t = tok.trim()
+        if t == "inset":
+            inset = true
+        else if _is_numeric_token(t):
+            val v = _parse_length(t)
+            numeric_values.push(v)
+        else:
+            # Treat as color
+            if color_text.len() > 0:
+                color_text = color_text + " " + t
+            else:
+                color_text = t
+
+    # Need at least 2 numeric values (offset-x, offset-y)
+    if numeric_values.len() < 2:
+        return nil
+
+    val offset_x = _safe_get(numeric_values, 0, 0.0)
+    val offset_y = _safe_get(numeric_values, 1, 0.0)
+    val blur = _safe_get(numeric_values, 2, 0.0)
+    val spread = _safe_get(numeric_values, 3, 0.0)
+
+    val color = _resolve_shadow_color(color_text)
+
+    ShadowValue.create(offset_x, offset_y, blur, spread, color, inset)
+
+# =========================================================================
+# Paint command generation
+# =========================================================================
+
+fn generate_shadow_commands(shadow: ShadowValue, box_x: f64, box_y: f64, box_w: f64, box_h: f64) -> [PaintOp]:
+    """Generate PaintOp commands for a single shadow.
+
+    Approximates Gaussian blur by painting concentric rectangles with
+    decreasing alpha. The number of rings scales with the blur radius.
+    Spread expands or contracts the shadow shape before blur.
+    """
+    var ops = [PaintOp]()
+
+    if shadow.inset:
+        return _generate_inset_shadow(shadow, box_x, box_y, box_w, box_h)
+
+    # Shadow base rect: offset + spread
+    val sx = box_x + shadow.offset_x - shadow.spread_radius
+    val sy = box_y + shadow.offset_y - shadow.spread_radius
+    val sw = box_w + shadow.spread_radius * 2.0
+    val sh = box_h + shadow.spread_radius * 2.0
+
+    val blur = math_max(shadow.blur_radius, 0.0)
+    if blur < 0.5:
+        # No blur — single solid rect
+        ops.push(PaintOp.FillRect(x: sx, y: sy, w: sw, h: sh, color: shadow.color))
+        return ops
+
+    # Approximate blur with concentric rings
+    val ring_count = _blur_ring_count(blur)
+    val base_alpha = shadow.color.a.to_f64()
+
+    var ring = 0
+    while ring < ring_count:
+        val t = ring.to_f64() / ring_count.to_f64()
+        val expand = blur * t
+        val ring_alpha = base_alpha * (1.0 - t) / ring_count.to_f64()
+        val alpha_i = _clamp_i64(_f64_to_i64(ring_alpha), 0, 255)
+        if alpha_i > 0:
+            val ring_color = from_rgba(shadow.color.r, shadow.color.g, shadow.color.b, alpha_i)
+            val rx = sx - expand
+            val ry = sy - expand
+            val rw = sw + expand * 2.0
+            val rh = sh + expand * 2.0
+            ops.push(PaintOp.FillRect(x: rx, y: ry, w: rw, h: rh, color: ring_color))
+        ring = ring + 1
+
+    ops
+
+fn generate_all_shadow_commands(shadows: [ShadowValue], box_x: f64, box_y: f64, box_w: f64, box_h: f64) -> [PaintOp]:
+    """Generate paint commands for a list of shadows.
+    Shadows are painted back-to-front (last in list paints first).
+    """
+    var ops = [PaintOp]()
+    # Iterate in reverse so last-declared shadow is painted first (behind)
+    var i = shadows.len() - 1
+    while i >= 0:
+        val shadow_opt = shadows.get(i)
+        if val s = shadow_opt:
+            val cmds = generate_shadow_commands(s, box_x, box_y, box_w, box_h)
+            for cmd in cmds:
+                ops.push(cmd)
+        i = i - 1
+    ops
+
+# =========================================================================
+# Inset shadow
+# =========================================================================
+
+fn _generate_inset_shadow(shadow: ShadowValue, box_x: f64, box_y: f64, box_w: f64, box_h: f64) -> [PaintOp]:
+    """Generate inset shadow ops. Paints inside the box from each edge."""
+    var ops = [PaintOp]()
+
+    val blur = math_max(shadow.blur_radius, 0.0)
+    val spread = shadow.spread_radius
+    val ring_count = _blur_ring_count(blur)
+    val base_alpha = shadow.color.a.to_f64()
+
+    # Inset shadow shrinks the inner rect by spread, offset by offsets
+    val inner_x = box_x + spread + math_max(shadow.offset_x, 0.0)
+    val inner_y = box_y + spread + math_max(shadow.offset_y, 0.0)
+    val inner_w = box_w - spread * 2.0 - math_abs(shadow.offset_x)
+    val inner_h = box_h - spread * 2.0 - math_abs(shadow.offset_y)
+
+    if inner_w <= 0.0 or inner_h <= 0.0:
+        # Shadow fills entire box
+        ops.push(PaintOp.FillRect(x: box_x, y: box_y, w: box_w, h: box_h, color: shadow.color))
+        return ops
+
+    # Paint concentric inward rings between box edge and inner rect
+    var ring = 0
+    while ring < ring_count:
+        val t = ring.to_f64() / ring_count.to_f64()
+        val inset_amount = blur * (1.0 - t)
+        val ring_alpha = base_alpha * (1.0 - t) / ring_count.to_f64()
+        val alpha_i = _clamp_i64(_f64_to_i64(ring_alpha), 0, 255)
+        if alpha_i > 0:
+            val ring_color = from_rgba(shadow.color.r, shadow.color.g, shadow.color.b, alpha_i)
+            # Top edge
+            ops.push(PaintOp.FillRect(
+                x: box_x, y: box_y,
+                w: box_w, h: inset_amount,
+                color: ring_color
+            ))
+            # Bottom edge
+            ops.push(PaintOp.FillRect(
+                x: box_x, y: box_y + box_h - inset_amount,
+                w: box_w, h: inset_amount,
+                color: ring_color
+            ))
+            # Left edge
+            ops.push(PaintOp.FillRect(
+                x: box_x, y: box_y + inset_amount,
+                w: inset_amount, h: box_h - inset_amount * 2.0,
+                color: ring_color
+            ))
+            # Right edge
+            ops.push(PaintOp.FillRect(
+                x: box_x + box_w - inset_amount, y: box_y + inset_amount,
+                w: inset_amount, h: box_h - inset_amount * 2.0,
+                color: ring_color
+            ))
+        ring = ring + 1
+
+    ops
+
+# =========================================================================
+# Internal helpers
+# =========================================================================
+
+fn _blur_ring_count(blur: f64) -> i64:
+    """Choose a reasonable number of blur rings based on blur radius."""
+    if blur <= 0.0:
+        return 1
+    # Roughly 2 rings per pixel of blur, capped at 64 for performance
+    val count = _f64_to_i64(blur * 2.0)
+    if count < 4:
+        return 4
+    if count > 64:
+        return 64
+    count
+
+fn _split_shadows(s: text) -> [text]:
+    """Split multiple shadow definitions by comma, respecting parentheses for rgba()."""
+    var parts = [text]()
+    var current = ""
+    var depth = 0
+    var i = 0
+    while i < s.len():
+        val ch = s.slice(i, i + 1)
+        if ch == "(":
+            depth = depth + 1
+            current = current + ch
+        else if ch == ")":
+            depth = depth - 1
+            current = current + ch
+        else if ch == "," and depth == 0:
+            parts.push(current.trim())
+            current = ""
+        else:
+            current = current + ch
+        i = i + 1
+    if current.trim().len() > 0:
+        parts.push(current.trim())
+    parts
+
+fn _tokenize_shadow(s: text) -> [text]:
+    """Tokenize a single shadow into space-separated tokens,
+    keeping parenthesized groups (like rgba(...)) as one token."""
+    var tokens = [text]()
+    var current = ""
+    var depth = 0
+    var i = 0
+    while i < s.len():
+        val ch = s.slice(i, i + 1)
+        if ch == "(":
+            depth = depth + 1
+            current = current + ch
+        else if ch == ")":
+            depth = depth - 1
+            current = current + ch
+        else if ch == " " and depth == 0:
+            if current.trim().len() > 0:
+                tokens.push(current.trim())
+            current = ""
+        else:
+            current = current + ch
+        i = i + 1
+    if current.trim().len() > 0:
+        tokens.push(current.trim())
+    tokens
+
+fn _is_numeric_token(s: text) -> bool:
+    """Check whether a token looks like a numeric value (possibly with a unit)."""
+    val trimmed = s.trim()
+    if trimmed.len() == 0:
+        return false
+    val first = trimmed.slice(0, 1)
+    # Starts with digit, '+', '-', or '.'
+    if first == "0" or first == "1" or first == "2" or first == "3":
+        return true
+    if first == "4" or first == "5" or first == "6" or first == "7":
+        return true
+    if first == "8" or first == "9" or first == "." or first == "-" or first == "+":
+        return true
+    false
+
+fn _parse_length(s: text) -> f64:
+    """Parse a CSS length value (e.g., '4px', '0', '2.5em')."""
+    val trimmed = s.trim()
+    var num_str = trimmed
+    if trimmed.ends_with("px"):
+        num_str = trimmed.slice(0, trimmed.len() - 2)
+    else if trimmed.ends_with("em"):
+        num_str = trimmed.slice(0, trimmed.len() - 2)
+    else if trimmed.ends_with("rem"):
+        num_str = trimmed.slice(0, trimmed.len() - 3)
+    val parsed = num_str.trim().to_f64()
+    if val v = parsed:
+        return v
+    0.0
+
+fn _resolve_shadow_color(color_str: text) -> Color:
+    """Resolve a color string to a Color. Supports hex, rgb/rgba(), and named colors."""
+    val trimmed = color_str.trim()
+    if trimmed.len() == 0:
+        # Default shadow color: semi-transparent black
+        return from_rgba(0, 0, 0, 128)
+
+    # Try hex
+    if trimmed.starts_with("#"):
+        return _parse_hex_color(trimmed)
+
+    # Try rgb()/rgba()
+    if trimmed.starts_with("rgb"):
+        return _parse_rgb_function(trimmed)
+
+    # Try named colors
+    val named = named_color_lookup(trimmed)
+    if val c = named:
+        return c
+
+    # Fallback: semi-transparent black
+    from_rgba(0, 0, 0, 128)
+
+fn _parse_hex_color(s: text) -> Color:
+    """Parse #RGB, #RRGGBB, or #RRGGBBAA hex colors."""
+    if s.len() == 4:
+        # #RGB -> expand to #RRGGBB
+        val r = _hex_digit(s.slice(1, 2))
+        val g = _hex_digit(s.slice(2, 3))
+        val b = _hex_digit(s.slice(3, 4))
+        return from_rgb(r * 17, g * 17, b * 17)
+    if s.len() == 7:
+        val r = _hex_pair(s, 1)
+        val g = _hex_pair(s, 3)
+        val b = _hex_pair(s, 5)
+        return from_rgb(r, g, b)
+    if s.len() == 9:
+        val r = _hex_pair(s, 1)
+        val g = _hex_pair(s, 3)
+        val b = _hex_pair(s, 5)
+        val a = _hex_pair(s, 7)
+        return from_rgba(r, g, b, a)
+    from_rgba(0, 0, 0, 128)
+
+fn _parse_rgb_function(s: text) -> Color:
+    """Parse rgb(r,g,b) or rgba(r,g,b,a) function strings."""
+    # Find the parentheses
+    val paren_start = _find_char(s, "(")
+    val paren_end = _find_char(s, ")")
+    if paren_start < 0 or paren_end < 0:
+        return from_rgba(0, 0, 0, 128)
+
+    val inner = s.slice(paren_start + 1, paren_end)
+    val parts = _split_by_comma_or_space(inner)
+
+    if parts.len() < 3:
+        return from_rgba(0, 0, 0, 128)
+
+    val r = _parse_color_component(parts[0])
+    val g = _parse_color_component(parts[1])
+    val b = _parse_color_component(parts[2])
+    if parts.len() >= 4:
+        val a_str = parts[3].trim()
+        # Alpha can be 0-1 float or 0-255 integer
+        val parsed = a_str.to_f64()
+        if val a_val = parsed:
+            val a = if a_val <= 1.0: _f64_to_i64(a_val * 255.0) else: _f64_to_i64(a_val)
+            return from_rgba(r, g, b, a)
+    from_rgb(r, g, b)
+
+fn _parse_color_component(s: text) -> i64:
+    """Parse a single color component (0-255 integer or percentage)."""
+    val trimmed = s.trim()
+    if trimmed.ends_with("%"):
+        val num_str = trimmed.slice(0, trimmed.len() - 1)
+        val parsed = num_str.trim().to_f64()
+        if val v = parsed:
+            return _f64_to_i64(v * 255.0 / 100.0)
+        return 0
+    val parsed = trimmed.to_f64()
+    if val v = parsed:
+        return _f64_to_i64(v)
+    0
+
+fn _split_by_comma_or_space(s: text) -> [text]:
+    """Split by commas first; if no commas, split by spaces."""
+    val comma_parts = _split_by_char(s, ",")
+    if comma_parts.len() > 1:
+        return comma_parts
+    # Modern CSS syntax: rgb(255 128 0 / 0.5)
+    val space_parts = _split_by_char(s, " ")
+    # Filter out the '/' separator used in modern rgba syntax
+    var result = [text]()
+    for part in space_parts:
+        val t = part.trim()
+        if t != "/" and t.len() > 0:
+            result.push(t)
+    result
+
+fn _split_by_char(s: text, sep: text) -> [text]:
+    """Split a string by a single-character separator."""
+    var parts = [text]()
+    var current = ""
+    var i = 0
+    while i < s.len():
+        val ch = s.slice(i, i + 1)
+        if ch == sep:
+            parts.push(current.trim())
+            current = ""
+        else:
+            current = current + ch
+        i = i + 1
+    if current.trim().len() > 0:
+        parts.push(current.trim())
+    parts
+
+fn _find_char(s: text, ch: text) -> i64:
+    """Find the first occurrence of a character in a string. Returns -1 if not found."""
+    var i = 0
+    while i < s.len():
+        if s.slice(i, i + 1) == ch:
+            return i
+        i = i + 1
+    -1
+
+fn _hex_pair(s: text, offset: i64) -> i64:
+    _hex_digit(s.slice(offset, offset + 1)) * 16 + _hex_digit(s.slice(offset + 1, offset + 2))
+
+fn _hex_digit(ch: text) -> i64:
+    match ch:
+        "0": 0
+        "1": 1
+        "2": 2
+        "3": 3
+        "4": 4
+        "5": 5
+        "6": 6
+        "7": 7
+        "8": 8
+        "9": 9
+        "a": 10
+        "b": 11
+        "c": 12
+        "d": 13
+        "e": 14
+        "f": 15
+        "A": 10
+        "B": 11
+        "C": 12
+        "D": 13
+        "E": 14
+        "F": 15
+        _: 0
+
+fn _safe_get(arr: [f64], index: i64, default_val: f64) -> f64:
+    if index >= 0 and index < arr.len():
+        val v = arr.get(index)
+        if val a = v:
+            return a
+    default_val
+
+fn _f64_to_i64(v: f64) -> i64:
+    """Truncate f64 to i64 via floor-like iterative approach."""
+    if v >= 0.0:
+        return _positive_f64_to_i64(v)
+    val pos = _positive_f64_to_i64(-v)
+    -pos
+
+fn _positive_f64_to_i64(v: f64) -> i64:
+    if v <= 0.0:
+        return 0
+    if v >= 2147483647.0:
+        return 2147483647
+    var result = 0
+    var remaining = v
+    while remaining >= 1000.0:
+        result = result + 1000
+        remaining = remaining - 1000.0
+    while remaining >= 1.0:
+        result = result + 1
+        remaining = remaining - 1.0
+    result
+
+fn _clamp_i64(v: i64, lo: i64, hi: i64) -> i64:
+    if v < lo:
+        return lo
+    if v > hi:
+        return hi
+    v

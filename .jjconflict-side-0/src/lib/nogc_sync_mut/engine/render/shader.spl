@@ -1,0 +1,87 @@
+@allow(primitive_api)
+# Shader Management — GLSL source loading and program handles
+#
+# Manages shader source code and compiled shader program handles.
+# The builtin 2D shaders provide position+UV+color vertex format
+# suitable for sprite batch rendering.
+#
+# Usage:
+#   val source = load_builtin_2d_shader()
+#   val program = create_shader_program(source)
+
+use std.gc_async_mut.gpu.graphics.{GpuShader, GpuShaderStage}
+
+# Shader source code (GLSL or other)
+struct ShaderSource:
+    vertex_code: text
+    fragment_code: text
+    name: text
+
+impl ShaderSource:
+    fn is_valid() -> bool:
+        self.vertex_code.len() > 0 and self.fragment_code.len() > 0
+
+    fn to_text() -> text:
+        "ShaderSource({self.name})"
+
+# Compiled shader program (pair of GPU shader handles)
+struct ShaderProgram:
+    vertex_shader: GpuShader
+    fragment_shader: GpuShader
+    name: text
+    is_compiled: bool
+
+impl ShaderProgram:
+    static fn invalid() -> ShaderProgram:
+        ShaderProgram(
+            vertex_shader: GpuShader(handle: 0, stage: GpuShaderStage.Vertex),
+            fragment_shader: GpuShader(handle: 0, stage: GpuShaderStage.Fragment),
+            name: "",
+            is_compiled: false
+        )
+
+    fn is_valid() -> bool:
+        self.is_compiled and self.vertex_shader.is_valid() and self.fragment_shader.is_valid()
+
+# ============================================================================
+# Builtin 2D Shader
+# ============================================================================
+
+fn load_builtin_2d_shader() -> ShaderSource:
+    # Standard 2D vertex shader: transforms position by push constant screen size
+    # Input: vec2 pos, vec2 uv, vec4 color
+    # Output: gl_Position (NDC), v_uv, v_color
+    val vertex = "#version 450\nlayout(push_constant) uniform PushConstants { vec2 screen_size; } pc;\nlayout(location = 0) in vec2 a_pos;\nlayout(location = 1) in vec2 a_uv;\nlayout(location = 2) in vec4 a_color;\nlayout(location = 0) out vec2 v_uv;\nlayout(location = 1) out vec4 v_color;\nvoid main() {\n    vec2 ndc = (a_pos / pc.screen_size) * 2.0 - 1.0;\n    gl_Position = vec4(ndc.x, -ndc.y, 0.0, 1.0);\n    v_uv = a_uv;\n    v_color = a_color;\n}\n"
+
+    # Standard 2D fragment shader: texture sampling with vertex color tint
+    val fragment = "#version 450\nlayout(set = 0, binding = 0) uniform sampler2D u_texture;\nlayout(location = 0) in vec2 v_uv;\nlayout(location = 1) in vec4 v_color;\nlayout(location = 0) out vec4 frag_color;\nvoid main() {\n    vec4 tex = texture(u_texture, v_uv);\n    frag_color = tex * v_color;\n    if (frag_color.a < 0.01) discard;\n}\n"
+
+    ShaderSource(vertex_code: vertex, fragment_code: fragment, name: "builtin_2d")
+
+# ============================================================================
+# Builtin 3D Shader
+# ============================================================================
+
+fn load_builtin_3d_shader() -> ShaderSource:
+    # Basic Phong vertex shader
+    val vertex = "#version 450\nlayout(push_constant) uniform PushConstants { mat4 mvp; mat4 model; } pc;\nlayout(location = 0) in vec3 a_pos;\nlayout(location = 1) in vec3 a_normal;\nlayout(location = 2) in vec2 a_uv;\nlayout(location = 3) in vec4 a_color;\nlayout(location = 0) out vec3 v_world_pos;\nlayout(location = 1) out vec3 v_normal;\nlayout(location = 2) out vec2 v_uv;\nlayout(location = 3) out vec4 v_color;\nvoid main() {\n    gl_Position = pc.mvp * vec4(a_pos, 1.0);\n    v_world_pos = (pc.model * vec4(a_pos, 1.0)).xyz;\n    v_normal = mat3(pc.model) * a_normal;\n    v_uv = a_uv;\n    v_color = a_color;\n}\n"
+
+    # Basic Phong fragment shader
+    val fragment = "#version 450\nlayout(location = 0) in vec3 v_world_pos;\nlayout(location = 1) in vec3 v_normal;\nlayout(location = 2) in vec2 v_uv;\nlayout(location = 3) in vec4 v_color;\nlayout(location = 0) out vec4 frag_color;\nvoid main() {\n    vec3 n = normalize(v_normal);\n    vec3 light_dir = normalize(vec3(0.5, -1.0, 0.3));\n    float diff = max(dot(n, -light_dir), 0.0);\n    vec3 ambient = v_color.rgb * 0.1;\n    vec3 diffuse = v_color.rgb * diff;\n    frag_color = vec4(ambient + diffuse, v_color.a);\n}\n"
+
+    ShaderSource(vertex_code: vertex, fragment_code: fragment, name: "builtin_3d")
+
+# ============================================================================
+# Shader Program Creation
+# ============================================================================
+
+fn create_shader_program(source: ShaderSource) -> ShaderProgram:
+    # Returns uncompiled program — GLSL to SPIR-V compilation requires
+    # rt_vulkan_compile_glsl runtime support (not yet implemented).
+    # Callers should check is_compiled before using.
+    ShaderProgram(
+        vertex_shader: GpuShader(handle: 0, stage: GpuShaderStage.Vertex),
+        fragment_shader: GpuShader(handle: 0, stage: GpuShaderStage.Fragment),
+        name: source.name,
+        is_compiled: false
+    )

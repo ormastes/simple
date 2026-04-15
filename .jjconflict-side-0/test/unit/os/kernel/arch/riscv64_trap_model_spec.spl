@@ -1,0 +1,67 @@
+use std.spec
+use os.kernel.arch.riscv64.trap_model.{RV64_CAUSE_INTERRUPT_BIT, RV64_CAUSE_S_TIMER_INTERRUPT, RV64_CAUSE_ECALL_FROM_U, RV64_SSTATUS_SPIE, RV64_SSTATUS_SPP, Rv64TrapKind, rv64_initial_kernel_sstatus, rv64_initial_user_sstatus, create_rv64_user_context, create_rv64_kernel_context, classify_rv64_trap, rv64_syscall_args_from_context, rv64_apply_syscall_result}
+use os.kernel.arch.arch_context.{Riscv64Context}
+use os.kernel.types.syscall_types.{SyscallResult}
+
+describe "rv64 trap model":
+    it "builds kernel contexts that return to supervisor mode":
+        val ctx = create_rv64_kernel_context(0x80200000, 0x80400000, 7)
+        expect((rv64_initial_kernel_sstatus() & RV64_SSTATUS_SPIE) != 0).to_equal(true)
+        expect((rv64_initial_kernel_sstatus() & RV64_SSTATUS_SPP) != 0).to_equal(true)
+        expect(ctx.sepc).to_equal(0x80200000)
+        expect(ctx.sp).to_equal(0x80400000)
+        expect(ctx.a0).to_equal(7)
+        expect((ctx.sstatus & RV64_SSTATUS_SPP) != 0).to_equal(true)
+
+    it "builds user contexts that return to user mode":
+        val ctx = create_rv64_user_context(0x400000, 0x410000, 11)
+        expect((rv64_initial_user_sstatus() & RV64_SSTATUS_SPIE) != 0).to_equal(true)
+        expect((rv64_initial_user_sstatus() & RV64_SSTATUS_SPP) != 0).to_equal(false)
+        expect(ctx.sepc).to_equal(0x400000)
+        expect(ctx.sp).to_equal(0x410000)
+        expect(ctx.a0).to_equal(11)
+        expect((ctx.sstatus & RV64_SSTATUS_SPP) != 0).to_equal(false)
+
+    it "classifies user ecalls":
+        val kind = classify_rv64_trap(RV64_CAUSE_ECALL_FROM_U)
+        match kind:
+            case Rv64TrapKind.UserEcall:
+                expect(true).to_equal(true)
+            case _:
+                expect(false).to_equal(true)
+
+    it "classifies supervisor timer interrupts":
+        val kind = classify_rv64_trap(RV64_CAUSE_INTERRUPT_BIT | RV64_CAUSE_S_TIMER_INTERRUPT)
+        match kind:
+            case Rv64TrapKind.TimerInterrupt:
+                expect(true).to_equal(true)
+            case _:
+                expect(false).to_equal(true)
+
+    it "marshals syscall registers from rv64 user context":
+        val ctx = Riscv64Context(
+            ra: 0, sp: 0, gp: 0, tp: 0,
+            t0: 0, t1: 0, t2: 0,
+            s0: 0, s1: 0,
+            a0: 10, a1: 11, a2: 12, a3: 13, a4: 14, a5: 15, a6: 0, a7: 60,
+            s2: 0, s3: 0, s4: 0, s5: 0, s6: 0, s7: 0, s8: 0, s9: 0, s10: 0, s11: 0,
+            t3: 0, t4: 0, t5: 0, t6: 0,
+            sepc: 0x1000,
+            sstatus: 0,
+            scause: 0
+        )
+        val args = rv64_syscall_args_from_context(ctx)
+        expect(args.id).to_equal(60)
+        expect(args.arg0).to_equal(10)
+        expect(args.arg1).to_equal(11)
+        expect(args.arg2).to_equal(12)
+        expect(args.arg3).to_equal(13)
+        expect(args.arg4).to_equal(14)
+        expect(args.arg5).to_equal(15)
+
+    it "applies syscall results back into rv64 user context":
+        val ctx = create_rv64_user_context(0x400000, 0x410000, 1)
+        val updated = rv64_apply_syscall_result(ctx, SyscallResult(value: 42))
+        expect(updated.a0).to_equal(42)
+        expect(updated.sepc).to_equal(0x400004)
+        expect(updated.sp).to_equal(0x410000)

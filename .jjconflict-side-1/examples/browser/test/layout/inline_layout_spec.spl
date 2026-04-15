@@ -1,0 +1,146 @@
+"""
+# Inline Layout
+
+Tests for inline layout functionality.
+"""
+#![allow(unnamed_duplicate_typed_args)]
+use std.spec
+
+# Represents a run of inline content with measured width and height
+class InlineRun:
+    text_content: text
+    width: f64
+    height: f64
+    baseline: f64
+
+    static fn create(t: text, w: f64, h: f64, baseline: f64) -> InlineRun:
+        InlineRun(text_content: t, width: w, height: h, baseline: baseline)
+
+# A line box holding positioned inline runs
+class LineBox:
+    x: f64
+    y: f64
+    width: f64
+    height: f64
+    runs: [InlineRun]
+
+    static fn empty(x: f64, y: f64, max_width: f64) -> LineBox:
+        LineBox(x: x, y: y, width: 0.0, height: 0.0, runs: [InlineRun]())
+
+# Layout inline runs into line boxes, wrapping at container_width
+fn layout_inline(runs: [InlineRun], container_width: f64, line_height: f64) -> [LineBox]:
+    var lines = [LineBox]()
+    var current = LineBox.empty(0.0, 0.0, container_width)
+    var cursor_x = 0.0
+    var cursor_y = 0.0
+    for run in runs:
+        if cursor_x + run.width > container_width and current.runs.len() > 0:
+            current.width = cursor_x
+            current.height = line_height
+            lines.push(current)
+            cursor_y = cursor_y + line_height
+            current = LineBox.empty(0.0, cursor_y, container_width)
+            cursor_x = 0.0
+        current.runs.push(run)
+        cursor_x = cursor_x + run.width
+    if current.runs.len() > 0:
+        current.width = cursor_x
+        current.height = line_height
+        lines.push(current)
+    lines
+
+# Align line content within line box
+fn align_line(line_width: f64, container_width: f64, alignment: text) -> f64:
+    if alignment == "center":
+        (container_width - line_width) / 2.0
+    else:
+        if alignment == "right":
+            container_width - line_width
+        else:
+            0.0
+
+# Calculate whitespace width between words
+fn whitespace_width(font_size: f64) -> f64:
+    font_size * 0.25
+
+describe "InlineLayout":
+    """
+    ## Inlinelayout Tests
+
+    Validates InlineLayout functionality.
+    """
+
+    describe "flow":
+        it "inline items flow horizontally":
+            var runs = [
+                InlineRun.create("Hello", 50.0, 16.0, 12.0),
+                InlineRun.create("World", 50.0, 16.0, 12.0)
+            ]
+            var lines = layout_inline(runs, 200.0, 20.0)
+            expect(lines.len()).to_equal(1)
+            expect(lines[0].width).to_equal(100.0)
+
+        it "text wraps at container edge":
+            var runs = [
+                InlineRun.create("Alpha", 80.0, 16.0, 12.0),
+                InlineRun.create("Beta", 80.0, 16.0, 12.0),
+                InlineRun.create("Gamma", 80.0, 16.0, 12.0)
+            ]
+            var lines = layout_inline(runs, 150.0, 20.0)
+            expect(lines.len()).to_equal(2)
+            expect(lines[0].runs.len()).to_equal(1)
+            expect(lines[1].runs.len()).to_equal(2)
+
+        it "multiple words wrap correctly":
+            var runs = [
+                InlineRun.create("A", 40.0, 16.0, 12.0),
+                InlineRun.create("B", 40.0, 16.0, 12.0),
+                InlineRun.create("C", 40.0, 16.0, 12.0),
+                InlineRun.create("D", 40.0, 16.0, 12.0),
+                InlineRun.create("E", 40.0, 16.0, 12.0)
+            ]
+            var lines = layout_inline(runs, 100.0, 20.0)
+            # 100px container: A+B = 80 fits, C+D = 80 fits, E alone
+            expect(lines.len()).to_equal(3)
+
+    describe "line height":
+        it "line height determines line box height":
+            var runs = [InlineRun.create("Text", 50.0, 14.0, 10.0)]
+            var lines = layout_inline(runs, 200.0, 24.0)
+            expect(lines[0].height).to_equal(24.0)
+
+    describe "text alignment":
+        it "text-align center centers line content":
+            var offset = align_line(100.0, 400.0, "center")
+            expect(offset).to_equal(150.0)
+
+        it "text-align right aligns to right edge":
+            var offset = align_line(100.0, 400.0, "right")
+            expect(offset).to_equal(300.0)
+
+    describe "whitespace":
+        it "whitespace between words":
+            var ws = whitespace_width(16.0)
+            expect(ws).to_equal(4.0)
+
+    describe "edge cases":
+        it "empty inline has zero width":
+            var runs = [InlineRun]()
+            var lines = layout_inline(runs, 200.0, 20.0)
+            expect(lines.len()).to_equal(0)
+
+        it "baseline alignment":
+            var run1 = InlineRun.create("Big", 60.0, 24.0, 18.0)
+            var run2 = InlineRun.create("Small", 30.0, 12.0, 9.0)
+            # Offset to align baselines: difference in baseline positions
+            var offset = run1.baseline - run2.baseline
+            expect(offset).to_equal(9.0)
+
+        it "mixed inline and text":
+            var text_run = InlineRun.create("text", 40.0, 16.0, 12.0)
+            var inline_box = InlineRun.create("box", 60.0, 20.0, 15.0)
+            var runs = [text_run, inline_box]
+            var lines = layout_inline(runs, 200.0, 20.0)
+            expect(lines.len()).to_equal(1)
+            expect(lines[0].runs.len()).to_equal(2)
+            expect(lines[0].width).to_equal(100.0)

@@ -1,0 +1,168 @@
+# YUV <-> RGB conversion -- mirrors Skia's SkYUVAInfo YUV-to-RGB math.
+#
+# Supports three common matrices:
+#   - BT.601 (SDTV, classic NTSC/PAL)
+#   - BT.709 (HDTV)
+#   - BT.2020 (UHDTV/HDR)
+#
+# All formulas assume Y in [16/255, 235/255] and UV in [16/255, 240/255] for
+# "limited" range, or Y in [0, 1] and UV in [0, 1] centered at 0.5 for "full" range.
+
+use std.skia.backend.cpu.raster_prims.{Bitmap}
+use std.skia.entity.color.{SkColor4f}
+
+# ============================================================================
+# Matrix + range enums
+# ============================================================================
+
+enum YuvMatrix:
+    BT601
+    BT709
+    BT2020
+
+enum YuvRange:
+    Limited
+    Full
+
+# ============================================================================
+# Internal helpers
+# ============================================================================
+
+fn _clamp01(v: f64) -> f64:
+    if v < 0.0:
+        0.0
+    else:
+        if v > 1.0:
+            1.0
+        else:
+            v
+
+# Limited-range Y normalization: (y - 16/255) * 255/219
+fn _normalize_y_limited(y: f64) -> f64:
+    (y - 16.0 / 255.0) * 255.0 / 219.0
+
+# Limited-range UV normalization and re-centering: (c - 128/255) * 255/224
+fn _normalize_uv_limited(c: f64) -> f64:
+    (c - 128.0 / 255.0) * 255.0 / 224.0
+
+# Full-range UV re-centering: c - 0.5
+fn _normalize_uv_full(c: f64) -> f64:
+    c - 0.5
+
+# ============================================================================
+# yuv_to_rgb -- decode one YUV triple into linear RGB, clamped to [0, 1]
+# ============================================================================
+
+fn yuv_to_rgb(y: f64, u: f64, v: f64, matrix: YuvMatrix, range: YuvRange) -> (f64, f64, f64):
+    var yn = 0.0
+    var un = 0.0
+    var vn = 0.0
+    if range == YuvRange.Limited:
+        yn = _normalize_y_limited(y)
+        un = _normalize_uv_limited(u)
+        vn = _normalize_uv_limited(v)
+    else:
+        yn = y
+        un = _normalize_uv_full(u)
+        vn = _normalize_uv_full(v)
+
+    var r = 0.0
+    var g = 0.0
+    var b = 0.0
+    if matrix == YuvMatrix.BT601:
+        r = yn + 1.402 * vn
+        g = yn - 0.344136 * un - 0.714136 * vn
+        b = yn + 1.772 * un
+    else:
+        if matrix == YuvMatrix.BT709:
+            r = yn + 1.5748 * vn
+            g = yn - 0.187324 * un - 0.468124 * vn
+            b = yn + 1.8556 * un
+        else:
+            # BT.2020
+            r = yn + 1.4746 * vn
+            g = yn - 0.164553 * un - 0.571353 * vn
+            b = yn + 1.8814 * un
+
+    (_clamp01(r), _clamp01(g), _clamp01(b))
+
+# ============================================================================
+# rgb_to_yuv -- encode one RGB triple into YUV per matrix/range
+# ============================================================================
+
+fn rgb_to_yuv(r: f64, g: f64, b: f64, matrix: YuvMatrix, range: YuvRange) -> (f64, f64, f64):
+    # Matrix-dependent luma coefficients and chroma scale
+    var kr = 0.299
+    var kg = 0.587
+    var kb = 0.114
+    var cu_scale = 1.772
+    var cv_scale = 1.402
+    if matrix == YuvMatrix.BT601:
+        kr = 0.299
+        kg = 0.587
+        kb = 0.114
+        cu_scale = 1.772
+        cv_scale = 1.402
+    else:
+        if matrix == YuvMatrix.BT709:
+            kr = 0.2126
+            kg = 0.7152
+            kb = 0.0722
+            cu_scale = 1.8556
+            cv_scale = 1.5748
+        else:
+            # BT.2020
+            kr = 0.2627
+            kg = 0.6780
+            kb = 0.0593
+            cu_scale = 1.8814
+            cv_scale = 1.4746
+
+    val y_lin = kr * r + kg * g + kb * b
+    val u_full = (b - y_lin) / cu_scale + 0.5
+    val v_full = (r - y_lin) / cv_scale + 0.5
+
+    var y_out = 0.0
+    var u_out = 0.0
+    var v_out = 0.0
+    if range == YuvRange.Limited:
+        # Rescale to limited legal ranges
+        y_out = y_lin * 219.0 / 255.0 + 16.0 / 255.0
+        u_out = (u_full - 0.5) * 224.0 / 255.0 + 128.0 / 255.0
+        v_out = (v_full - 0.5) * 224.0 / 255.0 + 128.0 / 255.0
+    else:
+        y_out = y_lin
+        u_out = u_full
+        v_out = v_full
+
+    (y_out, u_out, v_out)
+
+# ============================================================================
+# yuv_bitmap_to_rgba -- decode three same-size single-channel planes into RGBA
+#
+# Simplification: no subsampling (4:4:4). Each plane must share width/height.
+# We read channel 0 from each plane (bitmap is stored as RGBA; the Y/U/V value
+# comes from the R byte of each plane).
+# ============================================================================
+
+fn yuv_bitmap_to_rgba(y_plane: Bitmap, u_plane: Bitmap, v_plane: Bitmap, matrix: YuvMatrix, range: YuvRange) -> Bitmap:
+    val w = y_plane.width
+    val h = y_plane.height
+    if w != u_plane.width or h != u_plane.height or w != v_plane.width or h != v_plane.height:
+        Bitmap.zeros(0, 0)
+    else:
+        val out = Bitmap.zeros(w, h)
+        var py = 0
+        while py < h:
+            var px = 0
+            while px < w:
+                val idx = (py * w + px) * 4
+                val y_val = (y_plane.pixels[idx] as f64) / 255.0
+                val u_val = (u_plane.pixels[idx] as f64) / 255.0
+                val v_val = (v_plane.pixels[idx] as f64) / 255.0
+                val rgb = yuv_to_rgb(y_val, u_val, v_val, matrix, range)
+                val color = SkColor4f(r: rgb.0, g: rgb.1, b: rgb.2, a: 1.0)
+                out.set_pixel(px, py, color)
+                px = px + 1
+            py = py + 1
+        out

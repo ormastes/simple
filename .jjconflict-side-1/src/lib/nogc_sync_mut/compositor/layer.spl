@@ -1,0 +1,147 @@
+@allow(primitive_api)
+# Compositing layer tree — manages GPU-composited layers.
+# Each layer can be independently rasterized and composited,
+# enabling efficient scrolling and animation.
+#
+# Generic compositor module — no browser-specific dependencies.
+# Uses generic display items (i64 id + z_index) instead of browser DOM types.
+
+use core.collections.{List}
+
+# ---------------------------------------------------------------------------
+# DisplayEntry — a generic display item for compositing layers.
+# Replaces browser-specific DisplayItem with a minimal generic version.
+# ---------------------------------------------------------------------------
+
+class DisplayEntry:
+    id: i64
+    z_index: i64
+
+    static fn create(id: i64, z_index: i64) -> DisplayEntry:
+        DisplayEntry(id: id, z_index: z_index)
+
+# ---------------------------------------------------------------------------
+# CompositeLayer — a single compositing layer.
+# ---------------------------------------------------------------------------
+
+class CompositeLayer:
+    id: i64
+    node_id: i64
+    bounds_x: f64
+    bounds_y: f64
+    bounds_w: f64
+    bounds_h: f64
+    transform: List<f64>
+    opacity: f64
+    clips_children: bool
+    children: List<i64>
+    display_items: List<DisplayEntry>
+    needs_repaint: bool
+
+    static fn create(id: i64, node_id: i64, x: f64, y: f64, w: f64, h: f64) -> CompositeLayer:
+        # Identity transform (4x4 matrix flattened to 16 elements)
+        val identity = [
+            1.0, 0.0, 0.0, 0.0,
+            0.0, 1.0, 0.0, 0.0,
+            0.0, 0.0, 1.0, 0.0,
+            0.0, 0.0, 0.0, 1.0
+        ]
+        CompositeLayer(
+            id: id,
+            node_id: node_id,
+            bounds_x: x,
+            bounds_y: y,
+            bounds_w: w,
+            bounds_h: h,
+            transform: identity,
+            opacity: 1.0,
+            clips_children: false,
+            children: List<i64>(),
+            display_items: List<DisplayEntry>(),
+            needs_repaint: true
+        )
+
+# ---------------------------------------------------------------------------
+# LayerTree — the tree of compositing layers.
+# ---------------------------------------------------------------------------
+
+class LayerTree:
+    layers: List<CompositeLayer>
+    root_layer_id: i64
+    next_id: i64
+
+    static fn new() -> LayerTree:
+        LayerTree(
+            layers: List<CompositeLayer>(),
+            root_layer_id: -1,
+            next_id: 0
+        )
+
+    # Create a new layer with the given bounds.
+    me create_layer(node_id: i64, bounds_x: f64, bounds_y: f64, w: f64, h: f64) -> i64:
+        val id = self.next_id
+        self.next_id = self.next_id + 1
+        val layer = CompositeLayer.create(id, node_id, bounds_x, bounds_y, w, h)
+        self.layers.push(layer)
+        id
+
+    # Set the root layer for this tree.
+    me set_root(layer_id: i64):
+        self.root_layer_id = layer_id
+
+    # Add a child layer to a parent layer.
+    me add_child(parent_id: i64, child_id: i64):
+        val parent = self.get_layer(parent_id)
+        if val p = parent:
+            p.children.push(child_id)
+
+    # Mark a layer as needing repaint.
+    me invalidate_layer(layer_id: i64):
+        val layer = self.get_layer(layer_id)
+        if val l = layer:
+            l.needs_repaint = true
+
+    # Look up a layer by ID.
+    fn get_layer(layer_id: i64) -> CompositeLayer?:
+        for layer in self.layers:
+            if layer.id == layer_id:
+                return layer
+        nil
+
+    # Update the bounds of a layer.
+    me update_bounds(layer_id: i64, x: f64, y: f64, w: f64, h: f64):
+        val layer = self.get_layer(layer_id)
+        if val l = layer:
+            l.bounds_x = x
+            l.bounds_y = y
+            l.bounds_w = w
+            l.bounds_h = h
+            l.needs_repaint = true
+
+# ---------------------------------------------------------------------------
+# Layer promotion criteria (generic)
+# ---------------------------------------------------------------------------
+
+# Determine whether a box needs its own compositing layer based on
+# common properties. Elements with opacity < 1, fixed/sticky position,
+# or scroll overflow are promoted to their own layer for GPU compositing.
+fn needs_own_layer(opacity: f64, position: text, overflow_x: text, overflow_y: text) -> bool:
+    # opacity < 1 needs its own layer for blending
+    if opacity < 1.0:
+        return true
+
+    # Positioned elements with fixed position need their own layer
+    if position == "fixed":
+        return true
+
+    # overflow: scroll needs its own layer for smooth scrolling
+    if overflow_x == "scroll" or overflow_y == "scroll":
+        return true
+    if overflow_x == "auto" or overflow_y == "auto":
+        return true
+
+    # position: sticky needs own layer for scroll-linked transforms
+    if position == "sticky":
+        return true
+
+    false

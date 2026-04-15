@@ -1,0 +1,110 @@
+# Browser Engine — Engine2D Bridge
+#
+# Convenience factories for creating BrowserRenderers backed by Engine2D
+# GPU backends. Provides easy one-call setup for GPU-accelerated browser
+# rendering.
+#
+# Usage:
+#   use std.gc_async_mut.gpu.browser_engine.browser_engine2d_bridge.{
+#       create_gpu_browser_renderer, create_software_browser_renderer}
+#
+#   # Auto-detect best GPU backend (CUDA > Vulkan > OpenGL > Software > CPU)
+#   var renderer = create_gpu_browser_renderer(800, 600)
+#
+#   # Or use the legacy software rasterizer (no Engine2D)
+#   var renderer = create_software_browser_renderer(800, 600)
+
+use std.gc_async_mut.gpu.engine2d.engine.{Engine2D}
+use std.gc_async_mut.gpu.engine2d.backend_baremetal.{BaremetalBackend}
+use std.gc_async_mut.gpu.engine2d.backend_virtio_gpu.{VirtioGpuBackend}
+use os.drivers.framebuffer.fb_driver.{FramebufferDriver}
+use os.drivers.virtio.virtio_gpu.{VirtioGpuDriver}
+use std.gc_async_mut.gpu.browser_engine.browser_renderer.{BrowserRenderer}
+
+# ============================================================================
+# Factory functions
+# ============================================================================
+
+fn create_gpu_browser_renderer(w: i32, h: i32) -> BrowserRenderer:
+    """Create a BrowserRenderer backed by the best available GPU backend.
+
+    Auto-detects the best available Engine2D backend in priority order:
+    CUDA > Vulkan > OpenGL > Software > CPU.
+
+    The resulting renderer uses Engine2D for all pixel rendering, enabling
+    GPU acceleration when available.
+
+    Args:
+        w: Viewport width in pixels
+        h: Viewport height in pixels
+
+    Returns:
+        BrowserRenderer with Engine2D backend
+    """
+    val engine = Engine2D.create(w, h)
+    BrowserRenderer.create_with_engine(w, h, engine)
+
+fn create_gpu_browser_renderer_with_backend(w: i32, h: i32, backend_name: text) -> BrowserRenderer:
+    """Create a BrowserRenderer backed by a specific Engine2D backend.
+
+    Args:
+        w: Viewport width in pixels
+        h: Viewport height in pixels
+        backend_name: One of "cuda", "vulkan", "opengl", "software", "cpu"
+
+    Returns:
+        BrowserRenderer with the specified Engine2D backend
+    """
+    val engine = Engine2D.create_with_backend(w, h, backend_name)
+    BrowserRenderer.create_with_engine(w, h, engine)
+
+fn create_software_browser_renderer(w: i32, h: i32) -> BrowserRenderer:
+    """Create a BrowserRenderer backed by the software rasterizer (no Engine2D).
+
+    This is the default/legacy path that uses execute_scene_to_buffer()
+    from the render_scene executor. No GPU involvement.
+
+    Args:
+        w: Viewport width in pixels
+        h: Viewport height in pixels
+
+    Returns:
+        BrowserRenderer using the software rasterizer
+    """
+    BrowserRenderer.create(w, h)
+
+fn create_baremetal_browser_renderer(fb: FramebufferDriver) -> BrowserRenderer:
+    """Create a BrowserRenderer backed by a baremetal framebuffer.
+
+    Wraps the FramebufferDriver in a BaremetalBackend, then in an Engine2D,
+    producing a BrowserRenderer suitable for OS-level rendering without
+    any hosted GPU stack.
+
+    Args:
+        fb: Initialized FramebufferDriver (from Limine/multiboot)
+
+    Returns:
+        BrowserRenderer rendering to the framebuffer
+    """
+    val backend = BaremetalBackend.create(fb)
+    val engine = Engine2D.create_with_baremetal_backend(backend)
+    BrowserRenderer.create_with_engine(engine.width(), engine.height(), engine)
+
+fn create_virtio_gpu_browser_renderer(gpu: VirtioGpuDriver) -> BrowserRenderer:
+    """Create a BrowserRenderer backed by a VirtIO-GPU driver.
+
+    Wraps the VirtioGpuDriver in a VirtioGpuBackend, then in an Engine2D,
+    producing a BrowserRenderer for QEMU/KVM virtual GPU rendering.
+
+    Args:
+        gpu: Initialized VirtioGpuDriver (init_from_grant() already called)
+
+    Returns:
+        BrowserRenderer rendering through VirtIO-GPU
+    """
+    val w = gpu.width.to_i32()
+    val h = gpu.height.to_i32()
+    var backend = VirtioGpuBackend.create(gpu)
+    backend.init(w, h)
+    val engine = Engine2D(backend: backend, w: w, h: h)
+    BrowserRenderer.create_with_engine(w, h, engine)

@@ -1,0 +1,141 @@
+# Chrome vs Electron Comparison Driver
+#
+# Compares Chrome and Electron screenshots of the same HTML test files.
+# Used to verify that both reference renderers produce consistent output,
+# and to choose the better reference for Simple engine comparison.
+#
+# Usage:
+#   val driver = ChromeVsElectron.new(800, 600, logger)
+#   val report = driver.compare_directory("examples/browser/test/compat/html",
+#                                         "/tmp/chrome_shots", "/tmp/electron_shots")
+
+use examples.browser.test.compat.image_export.{ComparisonMetrics, compare_pixel_buffers,
+    load_ppm_to_pixels, generate_diff_image, export_ppm}
+use examples.browser.test.compat.test_manifest.{TestManifest, TestEntry}
+use examples.browser.shared.logging.{Logger, LogLevel}
+
+extern fn rt_file_read_text(path: text) -> text
+extern fn rt_fs_file_exists(path: text) -> bool
+
+# =========================================================================
+# Comparison Result
+# =========================================================================
+
+class EngineCompareResult:
+    test_name: text
+    category: text
+    metrics: ComparisonMetrics
+    chrome_path: text
+    electron_path: text
+    verdict: text
+
+class EngineCompareReport:
+    results: [EngineCompareResult]
+    total: i64
+    matched_count: i64
+    diverged_count: i64
+    skipped_count: i64
+
+    static fn empty() -> EngineCompareReport:
+        EngineCompareReport(results: [], total: 0, matched_count: 0, diverged_count: 0, skipped_count: 0)
+
+    me add(result: EngineCompareResult):
+        self.results = self.results + [result]
+        self.total = self.total + 1
+        if result.verdict == "MATCH":
+            self.matched_count = self.matched_count + 1
+        else if result.verdict == "SKIPPED":
+            self.skipped_count = self.skipped_count + 1
+        else:
+            self.diverged_count = self.diverged_count + 1
+
+    fn agreement_pct() -> f64:
+        if self.total == 0:
+            return 0.0
+        val compared = self.total - self.skipped_count
+        if compared == 0:
+            return 0.0
+        (self.matched_count.to_f64() / compared.to_f64()) * 100.0
+
+    fn report() -> text:
+        var r = "# Chrome vs Electron Comparison Report\n\n"
+        r = "{r}## Summary\n"
+        r = "{r}- Total tests: {self.total}\n"
+        r = "{r}- Matched (>=99%): {self.matched_count}\n"
+        r = "{r}- Diverged (<99%): {self.diverged_count}\n"
+        r = "{r}- Skipped (missing): {self.skipped_count}\n"
+        r = "{r}- Agreement rate: {self.agreement_pct()}%\n\n"
+
+        r = "{r}## Per-Test Results\n\n"
+        r = "{r}| Test | Category | Match % | RMSE | Verdict |\n"
+        r = "{r}|------|----------|---------|------|--------|\n"
+        for result in self.results:
+            r = "{r}| {result.test_name} | {result.category} | {result.metrics.match_percentage}% | {result.metrics.rmse} | {result.verdict} |\n"
+
+        r
+
+# =========================================================================
+# ChromeVsElectron Driver
+# =========================================================================
+
+class ChromeVsElectron:
+    viewport_width: i32
+    viewport_height: i32
+    logger: Logger
+
+    static fn new(width: i32, height: i32, logger: Logger) -> ChromeVsElectron:
+        ChromeVsElectron(
+            viewport_width: width,
+            viewport_height: height,
+            logger: logger
+        )
+
+    me compare_directory(html_dir: text, chrome_dir: text, electron_dir: text) -> EngineCompareReport:
+        """Compare Chrome and Electron screenshots for all tests in html_dir.
+        chrome_dir and electron_dir contain PNG files named <test_name>.png.
+        Since we use PPM for pixel comparison, expects .ppm files converted from PNG.
+        """
+        val manifest = TestManifest.from_directory(html_dir)
+        var report = EngineCompareReport.empty()
+
+        for entry in manifest.all_tests():
+            val chrome_ppm = "{chrome_dir}/{entry.name}.ppm"
+            val electron_ppm = "{electron_dir}/{entry.name}.ppm"
+
+            if not rt_fs_file_exists(chrome_ppm) or not rt_fs_file_exists(electron_ppm):
+                self.logger.info("  SKIP {entry.name}: missing screenshot")
+                val skip_metrics = ComparisonMetrics(
+                    total_pixels: 0, matching_pixels: 0, different_pixels: 0,
+                    max_channel_diff: 0, avg_channel_diff: 0.0,
+                    match_percentage: 0.0, rmse: 0.0
+                )
+                val skip_result = EngineCompareResult(
+                    test_name: entry.name, category: entry.category,
+                    metrics: skip_metrics,
+                    chrome_path: chrome_ppm, electron_path: electron_ppm,
+                    verdict: "SKIPPED"
+                )
+                report.add(skip_result)
+            else:
+                val chrome_pixels = load_ppm_to_pixels(chrome_ppm)
+                val electron_pixels = load_ppm_to_pixels(electron_ppm)
+                val metrics = compare_pixel_buffers(chrome_pixels, electron_pixels,
+                    self.viewport_width, self.viewport_height)
+
+                var verdict = "DIVERGED"
+                if metrics.match_percentage >= 99.0:
+                    verdict = "MATCH"
+                else if metrics.match_percentage >= 95.0:
+                    verdict = "CLOSE"
+
+                val result = EngineCompareResult(
+                    test_name: entry.name, category: entry.category,
+                    metrics: metrics,
+                    chrome_path: chrome_ppm, electron_path: electron_ppm,
+                    verdict: verdict
+                )
+                report.add(result)
+                self.logger.info("  {entry.name}: {metrics.match_percentage}% — {verdict}")
+
+        self.logger.info(report.report())
+        report

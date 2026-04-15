@@ -1,0 +1,81 @@
+# Raw RGBA bitmap codec — trivial binary format for tests/snapshots.
+#
+# Format:
+#   offset 0..4:   magic 0x52425041 ("RBPA" ≈ raw bitmap pixel array, big-endian)
+#   offset 4..8:   version u32 = 1
+#   offset 8..12:  width u32 big-endian
+#   offset 12..16: height u32 big-endian
+#   offset 16..:   width*height*4 bytes RGBA (row-major, top-left origin)
+#
+# Not a real image format — don't interoperate with PNG/JPEG.
+
+use std.skia.backend.cpu.raster_prims.{Bitmap}
+
+# Magic marker: bytes 'R','B','P','A' = 0x52 0x42 0x50 0x41 big-endian u32.
+# = 0x52425041 = 1380012353
+const RAW_RGBA_MAGIC: i64 = 1380012353
+
+# ============================================================================
+# Private helpers — big-endian u32 read/write on [u8]
+# ============================================================================
+
+fn _write_u32_be(out: [u8], value: i64) -> [u8]:
+    val b0 = ((value >> 24) & 0xFF) as u8
+    val b1 = ((value >> 16) & 0xFF) as u8
+    val b2 = ((value >> 8) & 0xFF) as u8
+    val b3 = (value & 0xFF) as u8
+    out.push(b0)
+    out.push(b1)
+    out.push(b2)
+    out.push(b3)
+    out
+
+fn _read_u32_be(data: [u8], offset: i64) -> i64:
+    if offset < 0 or offset + 3 >= data.len():
+        return 0
+    val b0 = data[offset] as i64
+    val b1 = data[offset + 1] as i64
+    val b2 = data[offset + 2] as i64
+    val b3 = data[offset + 3] as i64
+    (b0 << 24) | (b1 << 16) | (b2 << 8) | b3
+
+# ============================================================================
+# Public codec API
+# ============================================================================
+
+fn encode_raw_rgba(bmp: Bitmap) -> [u8]:
+    var out = [u8]()
+    out = _write_u32_be(out, RAW_RGBA_MAGIC)
+    out = _write_u32_be(out, 1)
+    out = _write_u32_be(out, bmp.width)
+    out = _write_u32_be(out, bmp.height)
+    val total = bmp.width * bmp.height * 4
+    var i = 0
+    while i < total:
+        out.push(bmp.pixels[i])
+        i = i + 1
+    out
+
+fn decode_raw_rgba(data: [u8]) -> Option<Bitmap>:
+    if data.len() < 16:
+        return None
+    val magic = _read_u32_be(data, 0)
+    if magic != RAW_RGBA_MAGIC:
+        return None
+    val version = _read_u32_be(data, 4)
+    if version != 1:
+        return None
+    val width = _read_u32_be(data, 8)
+    val height = _read_u32_be(data, 12)
+    if width < 0 or height < 0:
+        return None
+    val expected = width * height * 4
+    val available = data.len() - 16
+    if available < expected:
+        return None
+    var pixels = [u8]()
+    var i = 0
+    while i < expected:
+        pixels.push(data[16 + i])
+        i = i + 1
+    Some(Bitmap(width: width, height: height, pixels: pixels))

@@ -1,0 +1,183 @@
+# IR_TC Printer
+#
+# Human-readable text format for IR_TC modules.
+# Follows LLVM IR text format conventions where applicable.
+
+use core.types.{IrTcTypeKind, IrTcValue, IrTcCond, CallConv}
+use core.ops.{IrTcOp, IrTcInst}
+use core.mem_op.{MemOp, BarrierKind, GuestRegId}
+use core.block.{BlockId, IrTcBlock, IrTcFunction, IrTcParam, IrTcModule, IrTcGlobal}
+
+# ============================================================================
+# Printer
+# ============================================================================
+
+class IrTcPrinter:
+    """Prints IR_TC modules in human-readable text format."""
+    indent: i64
+    output: [text]
+
+impl IrTcPrinter:
+    static fn new() -> IrTcPrinter:
+        IrTcPrinter(indent: 0, output: [])
+
+    fn print_module(module: IrTcModule) -> text:
+        """Print an entire module to text."""
+        var printer = IrTcPrinter.new()
+        printer.emit_module(module)
+        printer.output.join("\n")
+
+    # ── Module ──
+
+    me emit_module(module: IrTcModule):
+        self.line("; module: {module.name}")
+        self.line("; mode: {module.mode.to_text()}")
+        if val arch = module.target_arch:
+            self.line("; target: {arch.to_text()}")
+        self.line("")
+
+        # Globals
+        for global in module.globals:
+            self.emit_global(global)
+        if module.globals.len() > 0:
+            self.line("")
+
+        # Functions
+        for func in module.functions:
+            self.emit_function(func)
+            self.line("")
+
+    # ── Globals ──
+
+    me emit_global(global: IrTcGlobal):
+        var prefix = if global.is_const: "constant" else: "global"
+        var as_suffix = if global.addr_space != 0: " addrspace({global.addr_space})" else: ""
+        self.line("@{global.name} = {prefix} {global.type_.to_text()}{as_suffix}")
+
+    # ── Functions ──
+
+    me emit_function(func: IrTcFunction):
+        var params_str = func.params.map(\p: "{p.type_.to_text()} %{p.name}").join(", ")
+        if func.is_declaration:
+            self.line("declare {func.return_type.to_text()} @{func.name}({params_str})")
+            return
+
+        self.line("define {func.return_type.to_text()} @{func.name}({params_str}) {{")
+        self.indent = self.indent + 1
+        for block in func.blocks:
+            self.emit_block(block)
+        self.indent = self.indent - 1
+        self.line("}")
+
+    # ── Blocks ──
+
+    me emit_block(block: IrTcBlock):
+        self.line("{block.display_label()}:")
+        self.indent = self.indent + 1
+        for inst in block.instructions:
+            self.emit_instruction(inst)
+        self.indent = self.indent - 1
+
+    # ── Instructions ──
+
+    me emit_instruction(inst: IrTcInst):
+        val s = self.format_op(inst.kind)
+        self.line(s)
+
+    fn format_op(op: IrTcOp) -> text:
+        match op:
+            # Arithmetic
+            Add(d, a, b): "{d.to_text()} = add {a.to_text()}, {b.to_text()}"
+            Sub(d, a, b): "{d.to_text()} = sub {a.to_text()}, {b.to_text()}"
+            Mul(d, a, b): "{d.to_text()} = mul {a.to_text()}, {b.to_text()}"
+            Div(d, a, b, s): "{d.to_text()} = {if s: "sdiv" else: "udiv"} {a.to_text()}, {b.to_text()}"
+            Rem(d, a, b, s): "{d.to_text()} = {if s: "srem" else: "urem"} {a.to_text()}, {b.to_text()}"
+            Neg(d, a): "{d.to_text()} = neg {a.to_text()}"
+
+            # Bitwise
+            And(d, a, b): "{d.to_text()} = and {a.to_text()}, {b.to_text()}"
+            Or(d, a, b): "{d.to_text()} = or {a.to_text()}, {b.to_text()}"
+            Xor(d, a, b): "{d.to_text()} = xor {a.to_text()}, {b.to_text()}"
+            Not(d, a): "{d.to_text()} = not {a.to_text()}"
+            Shl(d, a, b): "{d.to_text()} = shl {a.to_text()}, {b.to_text()}"
+            Shr(d, a, b): "{d.to_text()} = lshr {a.to_text()}, {b.to_text()}"
+            Sar(d, a, b): "{d.to_text()} = ashr {a.to_text()}, {b.to_text()}"
+            RotL(d, a, b): "{d.to_text()} = rotl {a.to_text()}, {b.to_text()}"
+            RotR(d, a, b): "{d.to_text()} = rotr {a.to_text()}, {b.to_text()}"
+
+            # Comparison
+            Cmp(d, c, a, b): "{d.to_text()} = cmp {c.to_text()} {a.to_text()}, {b.to_text()}"
+
+            # Width conversion
+            Ext(d, s, signed): "{d.to_text()} = {if signed: "sext" else: "zext"} {s.to_text()} to {d.type_.to_text()}"
+            Trunc(d, s): "{d.to_text()} = trunc {s.to_text()} to {d.type_.to_text()}"
+            Bitcast(d, s): "{d.to_text()} = bitcast {s.to_text()} to {d.type_.to_text()}"
+
+            # Memory (compilation)
+            Load(d, addr, mem): "{d.to_text()} = load {mem.to_text()} {addr.to_text()}"
+            Store(v, addr, mem): "store {mem.to_text()} {v.to_text()}, {addr.to_text()}"
+            Alloca(d, t, _): "{d.to_text()} = alloca {t.to_text()}"
+
+            # Memory (emulation)
+            GuestLoad(d, addr, mem, idx): "{d.to_text()} = guest_load {mem.to_text()} {addr.to_text()} mmu={idx}"
+            GuestStore(v, addr, mem, idx): "guest_store {mem.to_text()} {v.to_text()}, {addr.to_text()} mmu={idx}"
+
+            # Control flow
+            Br(target): "br {target.to_text()}"
+            BrCond(c, t, f): "br {c.to_text()}, {t.to_text()}, {f.to_text()}"
+            Switch(v, _, d): "switch {v.to_text()}, default {d.to_text()}"
+            Ret(v):
+                if val rv = v:
+                    "ret {rv.to_text()}"
+                else:
+                    "ret void"
+
+            # Calls
+            Call(d, func, args, cc):
+                var args_str = args.map(\a: a.to_text()).join(", ")
+                var cc_str = if cc != CallConv.Default: " {cc.to_text()}" else: ""
+                if val dv = d:
+                    "{dv.to_text()} = call{cc_str} {func.to_text()}({args_str})"
+                else:
+                    "call{cc_str} {func.to_text()}({args_str})"
+            CallHelper(d, id, args):
+                var args_str = args.map(\a: a.to_text()).join(", ")
+                if val dv = d:
+                    "{dv.to_text()} = call_helper #{id}({args_str})"
+                else:
+                    "call_helper #{id}({args_str})"
+
+            # Guest state
+            ReadGuestReg(d, reg): "{d.to_text()} = read_guest_reg {reg.to_text()}"
+            WriteGuestReg(reg, v): "write_guest_reg {reg.to_text()}, {v.to_text()}"
+
+            # Translation block
+            ExitTB(code): "exit_tb {code}"
+            GotoTB(idx): "goto_tb {idx}"
+            LookupGotoTB(pc): "lookup_goto_tb {pc.to_text()}"
+
+            # Aggregates
+            GetElementPtr(d, base, indices):
+                var idx_str = indices.map(\i: i.to_text()).join(", ")
+                "{d.to_text()} = gep {base.to_text()}, {idx_str}"
+            ExtractValue(d, agg, idx): "{d.to_text()} = extractvalue {agg.to_text()}, {idx}"
+            InsertValue(d, agg, v, idx): "{d.to_text()} = insertvalue {agg.to_text()}, {v.to_text()}, {idx}"
+
+            # SSA
+            Phi(d, incoming):
+                var entries = incoming.map(\e: "[{e.value.to_text()}, {e.block.to_text()}]").join(", ")
+                "{d.to_text()} = phi {entries}"
+
+            # Special
+            SyncGuestPC(v): "sync_guest_pc {v.to_text()}"
+            Barrier(k): "barrier {k.to_text()}"
+            Nop: "nop"
+            Unreachable: "unreachable"
+
+    # ── Output helpers ──
+
+    me line(s: text):
+        var prefix = ""
+        for _ in 0..self.indent:
+            prefix = prefix + "  "
+        self.output.push("{prefix}{s}")

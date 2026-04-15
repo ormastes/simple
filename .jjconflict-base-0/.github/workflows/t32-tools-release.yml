@@ -1,0 +1,452 @@
+name: T32 Tools Release
+
+on:
+  push:
+    tags:
+      - 't32-v*.*.*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Release version (e.g. 0.1.2)'
+        required: true
+        default: '0.1.2'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  # ── Determine version ──────────────────────────────────────────────────
+  version:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.ver.outputs.version }}
+      tag: ${{ steps.ver.outputs.tag }}
+    steps:
+      - name: Determine version
+        id: ver
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/t32-v* ]]; then
+            VER="${GITHUB_REF#refs/tags/t32-v}"
+          else
+            VER="${{ github.event.inputs.version }}"
+          fi
+          echo "version=${VER}" >> "$GITHUB_OUTPUT"
+          echo "tag=t32-v${VER}" >> "$GITHUB_OUTPUT"
+          echo "Release version: ${VER}"
+
+  # ── Build Rust bootstrap seed ──────────────────────────────────────────
+  build-seed:
+    needs: version
+    runs-on: ubuntu-latest
+    name: Build Seed
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          targets: x86_64-unknown-linux-gnu
+
+      - name: Cache Cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            src/compiler_rust/target
+          key: t32-rel-seed-${{ hashFiles('src/compiler_rust/Cargo.lock') }}
+          restore-keys: |
+            t32-rel-seed-
+            t32-seed-linux-
+
+      - name: Install LLVM 18 development libraries
+        run: |
+          wget -qO- https://apt.llvm.org/llvm-snapshot.gpg.key | sudo tee /etc/apt/trusted.gpg.d/apt.llvm.org.asc
+          echo "deb http://apt.llvm.org/jammy/ llvm-toolchain-jammy-18 main" | sudo tee /etc/apt/sources.list.d/llvm-18.list
+          sudo apt-get update
+          sudo apt-get install -y llvm-18-dev libpolly-18-dev
+
+      - name: Build seed
+        working-directory: src/compiler_rust
+        env:
+          LLVM_SYS_180_PREFIX: /usr/lib/llvm-18
+        run: cargo build --profile bootstrap -p simple-driver
+
+      - name: Build native_all library
+        working-directory: src/compiler_rust
+        env:
+          LLVM_SYS_180_PREFIX: /usr/lib/llvm-18
+        run: cargo build --profile bootstrap -p simple-native-all
+
+      - name: Verify seed
+        run: |
+          SEED="src/compiler_rust/target/bootstrap/simple"
+          chmod +x "$SEED"
+          "$SEED" --version
+
+      - name: Upload seed
+        uses: actions/upload-artifact@v4
+        with:
+          name: t32-release-seed-${{ github.sha }}
+          path: src/compiler_rust/target/bootstrap/simple
+          retention-days: 1
+
+  # ── Build all T32 tools (Linux x86_64) ─────────────────────────────────
+  build-tools:
+    needs: [version, build-seed]
+    strategy:
+      fail-fast: false
+      matrix:
+        tool:
+          - name: t32_mcp
+            entry: examples/10_tooling/trace32_tools/t32_mcp/main.spl
+            extra_source: examples/10_tooling/trace32_tools/t32_mcp
+            desc: T32 MCP Server
+            binary: t32-mcp-server
+
+          - name: t32_lsp_mcp
+            entry: examples/10_tooling/trace32_tools/t32_lsp_mcp/main.spl
+            extra_source: examples/10_tooling/trace32_tools
+            desc: T32 LSP MCP Server
+            binary: t32-lsp-mcp-server
+
+          - name: cmm_lsp
+            entry: examples/10_tooling/trace32_tools/cmm_lsp/mod.spl
+            extra_source: examples/10_tooling/trace32_tools/cmm_lsp
+            desc: CMM Language Server
+            binary: cmm-lsp
+
+          - name: t32_cli
+            entry: examples/10_tooling/trace32_tools/t32_cli/mod.spl
+            extra_source: examples/10_tooling/trace32_tools/t32_cli
+            desc: T32 CLI Shell
+            binary: t32-cli
+
+    runs-on: ubuntu-latest
+    name: Build — ${{ matrix.tool.desc }}
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Download seed
+        uses: actions/download-artifact@v4
+        with:
+          name: t32-release-seed-${{ github.sha }}
+          path: seed-download
+
+      - name: Restore native_all library
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            src/compiler_rust/target
+          key: t32-rel-seed-${{ hashFiles('src/compiler_rust/Cargo.lock') }}
+          restore-keys: |
+            t32-rel-seed-
+            t32-seed-linux-
+
+      - name: Install build tools
+        run: sudo apt-get update && sudo apt-get install -y clang lld gcc-mingw-w64-x86-64 libunwind-dev
+
+      - name: Ensure symlinks exist
+        run: |
+          ln -sfn ../../examples/10_tooling/trace32_tools/t32_mcp src/app/mcp_t32
+          ln -sfn ../../examples/10_tooling/trace32_tools/t32_cli src/app/t32_cli
+          ln -sfn ../../examples/10_tooling/trace32_tools/t32_lsp_mcp src/app/t32_lsp_mcp
+          ls -la src/app/mcp_t32 src/app/t32_cli src/app/t32_lsp_mcp
+
+      - name: Build ${{ matrix.tool.name }} (Linux x86_64)
+        run: |
+          SEED="seed-download/simple"
+          chmod +x "$SEED"
+          mkdir -p artifacts/linux
+
+          SOURCES="--source src"
+          if [ -n "${{ matrix.tool.extra_source }}" ]; then
+            SOURCES="$SOURCES --source ${{ matrix.tool.extra_source }}"
+          fi
+
+          echo "Building ${{ matrix.tool.name }} for Linux x86_64..."
+          RUST_LOG=error SIMPLE_BOOTSTRAP=1 \
+            "$SEED" native-build \
+            $SOURCES \
+            --entry-closure \
+            --entry ${{ matrix.tool.entry }} \
+            -o artifacts/linux/${{ matrix.tool.binary }} \
+            2>&1
+
+          chmod +x "artifacts/linux/${{ matrix.tool.binary }}"
+          file "artifacts/linux/${{ matrix.tool.binary }}"
+          ls -lh "artifacts/linux/${{ matrix.tool.binary }}"
+
+      - name: Build ${{ matrix.tool.name }} (Windows MinGW x86_64)
+        continue-on-error: true
+        run: |
+          SEED="seed-download/simple"
+          mkdir -p artifacts/windows
+
+          SOURCES="--source src"
+          if [ -n "${{ matrix.tool.extra_source }}" ]; then
+            SOURCES="$SOURCES --source ${{ matrix.tool.extra_source }}"
+          fi
+
+          RUST_LOG=error SIMPLE_BOOTSTRAP=1 \
+            "$SEED" native-build \
+            $SOURCES \
+            --entry-closure \
+            --entry ${{ matrix.tool.entry }} \
+            -o artifacts/windows/${{ matrix.tool.binary }}.exe \
+            --target x86_64-pc-windows-gnu \
+            2>&1 || true
+
+          if [ -f "artifacts/windows/${{ matrix.tool.binary }}.exe" ]; then
+            echo "Windows binary built:"
+            file "artifacts/windows/${{ matrix.tool.binary }}.exe"
+            ls -lh "artifacts/windows/${{ matrix.tool.binary }}.exe"
+          fi
+
+      - name: Upload Linux binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.tool.binary }}-linux-x86_64
+          path: artifacts/linux/${{ matrix.tool.binary }}
+          retention-days: 90
+
+      - name: Upload Windows binary
+        if: hashFiles('artifacts/windows/${{ matrix.tool.binary }}.exe') != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.tool.binary }}-windows-x86_64
+          path: artifacts/windows/${{ matrix.tool.binary }}.exe
+          retention-days: 90
+
+  # ── Smoke test ─────────────────────────────────────────────────────────
+  smoke-test:
+    needs: build-tools
+    runs-on: ubuntu-latest
+    name: Smoke Test
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Download all Linux binaries
+        uses: actions/download-artifact@v4
+        with:
+          pattern: '*-linux-x86_64'
+          path: bin/
+          merge-multiple: true
+
+      - name: Run smoke tests
+        run: |
+          mkdir -p smoke-bin
+          find bin -maxdepth 2 -type f -exec cp {} smoke-bin/ \;
+          chmod +x smoke-bin/*
+
+          assert_framed_jsonrpc() {
+            local binary="$1"
+            local body="$2"
+            local expect="$3"
+            local tmp
+            shift 3
+            tmp="$(mktemp)"
+            printf 'Content-Length: %s\r\n\r\n%s' "${#body}" "$body" \
+              | timeout 5s "$binary" "$@" > "$tmp"
+            if ! grep -q "$expect" "$tmp"; then
+              echo "::error::Protocol smoke test failed for $binary"
+              echo "Expected pattern: $expect"
+              echo "Response:"
+              cat "$tmp"
+              rm -f "$tmp"
+              exit 1
+            fi
+            rm -f "$tmp"
+          }
+
+          echo "=== T32 Tools Smoke Test ==="
+          for binary in smoke-bin/*; do
+            file "$binary" | grep -q "ELF"
+          done
+
+          assert_framed_jsonrpc \
+            "smoke-bin/t32-mcp-server" \
+            '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"capabilities":{}}}' \
+            '"protocolVersion":"2025-06-18"'
+
+          assert_framed_jsonrpc \
+            "smoke-bin/t32-lsp-mcp-server" \
+            '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"capabilities":{}}}' \
+            '"protocolVersion":"2025-06-18"'
+
+          assert_framed_jsonrpc \
+            "smoke-bin/cmm-lsp" \
+            '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"capabilities":{}}}' \
+            '"capabilities"' \
+            --lsp
+
+          timeout 5s smoke-bin/t32-cli --help > /tmp/t32-cli-help.txt
+          grep -q "Usage" /tmp/t32-cli-help.txt
+
+      - name: Validate CMM LSP plugin bundle
+        run: |
+          test -f examples/10_tooling/trace32_tools/claude-plugin/cmm-lsp/.claude-plugin/plugin.json
+          test -f examples/10_tooling/trace32_tools/claude-plugin/cmm-lsp/.lsp.json
+          test -f examples/10_tooling/trace32_tools/claude-plugin/cmm-lsp/README.md
+          sh tools/claude-plugin/package_release_plugins.shs --plugin cmm-lsp --version 0.1.2 --output-dir build/release-plugins
+          tar -xOf build/release-plugins/cmm-lsp-claude-plugin-0.1.2.tar.gz cmm-lsp/.lsp.json | grep -q '"command": \["cmm-lsp"\]'
+          ! tar -xOf build/release-plugins/cmm-lsp-claude-plugin-0.1.2.tar.gz cmm-lsp/.lsp.json | grep -q 'examples/'
+          ! tar -xOf build/release-plugins/cmm-lsp-claude-plugin-0.1.2.tar.gz cmm-lsp/.lsp.json | grep -q 'src/'
+
+  # ── Create GitHub Release ──────────────────────────────────────────────
+  release:
+    needs: [version, smoke-test, build-tools]
+    runs-on: ubuntu-latest
+    name: Create Release
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts/
+
+      - name: Package release assets
+        run: |
+          VERSION="${{ needs.version.outputs.version }}"
+          mkdir -p release
+
+          # Package Linux binaries
+          cd artifacts
+          for dir in *-linux-x86_64; do
+            [ -d "$dir" ] || continue
+            name="${dir%-linux-x86_64}"
+            cp "$dir"/* "../release/${name}-linux-x86_64" 2>/dev/null || true
+          done
+
+          # Package Windows binaries
+          for dir in *-windows-x86_64; do
+            [ -d "$dir" ] || continue
+            name="${dir%-windows-x86_64}"
+            cp "$dir"/* "../release/${name}-windows-x86_64.exe" 2>/dev/null || true
+          done
+          cd ..
+
+          sh tools/claude-plugin/package_release_plugins.shs --plugin cmm-lsp --version "${VERSION}" --output-dir release
+
+          cd release
+          sha256sum * > SHA256SUMS.txt
+          echo "=== Release Assets ==="
+          ls -lh
+          echo ""
+          cat SHA256SUMS.txt
+
+      - name: Create or update tag
+        if: github.event_name == 'workflow_dispatch'
+        run: |
+          TAG="${{ needs.version.outputs.tag }}"
+          git tag -f "$TAG"
+          git push origin "$TAG" --force
+
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Build bootstrap Simple runtime
+        run: cargo build --manifest-path src/compiler_rust/Cargo.toml --profile bootstrap -p simple-driver
+
+      - name: Write release notes
+        run: |
+          cat > release-notes.md <<'EOF'
+          ## TRACE32 MCP Tools ${{ needs.version.outputs.version }}
+
+          Pre-built native binaries for TRACE32 development tools.
+
+          ### Downloads
+
+          | Tool | Linux x86_64 | Windows x86_64 | Description |
+          |------|:---:|:---:|-------------|
+          | **t32-mcp-server** | ✅ | ✅ | TRACE32 debug session control — 20 MCP tools |
+          | **t32-lsp-mcp-server** | ✅ | ✅ | CMM language intelligence — 6 MCP tools |
+          | **cmm-lsp** | ✅ | ✅ | CMM Language Server (LSP over stdio) |
+          | **t32-cli** | ✅ | ✅ | Interactive TRACE32 CLI shell |
+
+          ### Claude Code Plugin
+
+          - **Plugin bundle**: `cmm-lsp-claude-plugin-${{ needs.version.outputs.version }}.tar.gz`
+          - **Marketplace install**:
+
+          ```bash
+          claude plugin marketplace add tools/claude-plugin/marketplace
+          claude plugin install cmm-lsp@simple-local
+          ```
+
+          ### Quick Install (Linux)
+
+          ```bash
+          curl -fsSL https://raw.githubusercontent.com/ormastes/simple/main/examples/10_tooling/trace32_tools/install.shs | bash
+          ```
+
+          ### Manual Install
+
+          1. Download the binary for your platform
+          2. Make executable: `chmod +x t32-mcp-server`
+          3. Add to your Claude Code `.mcp.json`:
+
+          ```json
+          {
+            "mcpServers": {
+              "t32-mcp": {
+                "command": "/path/to/t32-mcp-server"
+              },
+              "t32-lsp-mcp": {
+                "command": "/path/to/t32-lsp-mcp-server"
+              }
+            }
+          }
+          ```
+
+          ### Requirements
+
+          - **T32 MCP Server**: Lauterbach TRACE32 installation with `t32rem` accessible in PATH
+          - **T32 LSP MCP Server**: Standalone (no TRACE32 needed — pure CMM analysis)
+          - **CMM LSP**: Standalone (for IDE integration)
+          - **T32 CLI**: Lauterbach TRACE32 installation
+
+          ### Verification
+
+          ```bash
+          msg='{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"capabilities":{}}}'
+          printf 'Content-Length: %s\r\n\r\n%s' "${#msg}" "$msg" | ./t32-mcp-server
+          ```
+
+          See [SHA256SUMS.txt](SHA256SUMS.txt) for binary checksums.
+
+          ---
+          Built from [`examples/10_tooling/trace32_tools/`](https://github.com/ormastes/simple/tree/main/examples/10_tooling/trace32_tools/) in the [Simple](https://github.com/ormastes/simple) compiler project.
+          EOF
+
+      - name: Create GitHub Release
+        run: |
+          src/compiler_rust/target/bootstrap/simple src/app/release/main.spl github \
+            --repo="${{ github.repository }}" \
+            --tag="${{ needs.version.outputs.tag }}" \
+            --name="T32 Tools ${{ needs.version.outputs.version }}" \
+            --body-file=release-notes.md \
+            --files-dir=release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

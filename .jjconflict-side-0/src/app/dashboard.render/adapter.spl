@@ -1,0 +1,387 @@
+# Dashboard Render Adapter
+#
+# Bridges the dashboard app to the shared UI render contract.
+# Produces RenderResult (text and/or html) from dashboard data,
+# delegating to existing dashboard.render and dashboard.views modules.
+#
+# Design ref: doc/05_design/ui_render_feature_caret.md (Phase 4 adapter)
+
+use app.dashboard.render.colors.{BOLD, RESET, CYAN, GREEN, YELLOW, RED, DIM,
+    colorize_status, status_css_class, threshold_css_color, html_badge}
+use app.dashboard.render.progress.{render_progress_bar, render_percentage,
+    render_fraction, render_progress_bar_html, render_fraction_html}
+use app.dashboard.render.table.{TableBuilder, render_html_table_limited,
+    pad_right}
+
+use app.dashboard.assistant_collectors.{AssistantDashboardSnapshot, collect_assistant_snapshot}
+use app.dashboard.views.assistant.{render_assistant_text, render_assistant_html}
+use app.ui.render.types.{RenderConfig, RenderRequest, RenderResult}
+
+# =========================================================================
+# Dashboard-specific render request (extends shared RenderRequest with summary)
+# =========================================================================
+
+struct DashboardRenderRequest:
+    config: RenderConfig
+    summary: Dict<text, text>
+
+fn dashboard_render_request(config: RenderConfig, summary: Dict<text, text>) -> DashboardRenderRequest:
+    DashboardRenderRequest(config: config, summary: summary)
+
+fn default_dashboard_config() -> RenderConfig:
+    var cfg = RenderConfig.default()
+    cfg.adapter_name = "dashboard"
+    cfg.mode = "status"
+    return cfg
+
+# =========================================================================
+# Dashboard Summary — lightweight snapshot for rendering
+# =========================================================================
+
+struct DashboardSummary:
+    features_total: i64
+    features_complete: i64
+    features_in_progress: i64
+    features_planned: i64
+    todos_total: i64
+    todos_open: i64
+    todos_blocked: i64
+    tests_total: i64
+    tests_passed: i64
+    tests_failed: i64
+    tests_skipped: i64
+    lines_total: i64
+    lines_covered: i64
+    coverage_pct: i64
+
+fn summary_from_dict(d: Dict<text, text>) -> DashboardSummary:
+    """Build a DashboardSummary from the Dict<text,text> returned by compute_summary."""
+    DashboardSummary(
+        features_total: dict_int(d, "features_total"),
+        features_complete: dict_int(d, "features_complete"),
+        features_in_progress: dict_int(d, "features_in_progress"),
+        features_planned: dict_int(d, "features_planned"),
+        todos_total: dict_int(d, "todos_total"),
+        todos_open: dict_int(d, "todos_open"),
+        todos_blocked: dict_int(d, "todos_blocked"),
+        tests_total: dict_int(d, "tests_total"),
+        tests_passed: dict_int(d, "tests_passed"),
+        tests_failed: dict_int(d, "tests_failed"),
+        tests_skipped: dict_int(d, "tests_skipped"),
+        lines_total: dict_int(d, "lines_total"),
+        lines_covered: dict_int(d, "lines_covered"),
+        coverage_pct: dict_int(d, "coverage_pct")
+    )
+
+fn dict_int(d: Dict<text, text>, key: text) -> i64:
+    if d.has(key):
+        d[key].to_i64() ?? 0
+    else:
+        0
+
+# =========================================================================
+# Main Adapter Entry Point
+# =========================================================================
+
+fn render_dashboard(request: DashboardRenderRequest) -> RenderResult:
+    """Render dashboard data according to the request config.
+
+    Produces text and/or html output depending on config.format.
+    Delegates to per-mode renderers for status, sspec, todos, coverage, or full.
+    """
+    val fmt = request.config.format
+    val mode = request.config.mode
+
+    if mode == "assistant":
+        val snapshot = collect_assistant_snapshot()
+        var result = RenderResult.empty()
+        if fmt == "text" or fmt == "both":
+            result = RenderResult(
+                format: fmt,
+                text_output: render_assistant_text(snapshot, request.config),
+                html_output: result.html_output,
+                metadata: result.metadata,
+                warnings: result.warnings
+            )
+        if fmt == "html" or fmt == "both":
+            result = RenderResult(
+                format: fmt,
+                text_output: result.text_output,
+                html_output: render_assistant_html(snapshot, request.config),
+                metadata: result.metadata,
+                warnings: result.warnings
+            )
+        result = RenderResult(
+            format: result.format,
+            text_output: result.text_output,
+            html_output: result.html_output,
+            metadata: assistant_metadata(snapshot, fmt),
+            warnings: result.warnings
+        )
+        return result
+
+    val summary = summary_from_dict(request.summary)
+
+    var result = RenderResult.empty()
+    result = RenderResult(
+        format: fmt,
+        text_output: result.text_output,
+        html_output: result.html_output,
+        metadata: result.metadata,
+        warnings: result.warnings
+    )
+
+    if fmt == "text" or fmt == "both":
+        val text_output = match mode:
+            "status": render_status_text(summary)
+            "sspec": render_sspec_text(summary)
+            "todos": render_todos_text(summary)
+            "coverage": render_coverage_text(summary)
+            "full": render_full_text(summary)
+            _: render_status_text(summary)
+        result = RenderResult(
+            format: result.format,
+            text_output: text_output,
+            html_output: result.html_output,
+            metadata: result.metadata,
+            warnings: result.warnings
+        )
+
+    if fmt == "html" or fmt == "both":
+        val html_output = match mode:
+            "status": render_status_html(summary, request.config)
+            "sspec": render_sspec_html(summary)
+            "todos": render_todos_html(summary)
+            "coverage": render_coverage_html(summary)
+            "full": render_full_html(summary, request.config)
+            _: render_status_html(summary, request.config)
+        result = RenderResult(
+            format: result.format,
+            text_output: result.text_output,
+            html_output: html_output,
+            metadata: result.metadata,
+            warnings: result.warnings
+        )
+
+    val meta = {
+        "adapter": "dashboard",
+        "mode": mode,
+        "format": fmt
+    }
+    result = RenderResult(
+        format: result.format,
+        text_output: result.text_output,
+        html_output: result.html_output,
+        metadata: meta,
+        warnings: result.warnings
+    )
+    result
+
+# =========================================================================
+# Text Renderers
+# =========================================================================
+
+fn render_status_text(s: DashboardSummary) -> text:
+    var out = ""
+    out = "{out}==================================\n"
+    out = "{out}  Project Status Overview\n"
+    out = "{out}==================================\n\n"
+    out = "{out}Features: {s.features_total} (complete: {s.features_complete}, in_progress: {s.features_in_progress}, planned: {s.features_planned})\n"
+    out = "{out}Todos: {s.todos_total} (open: {s.todos_open}, blocked: {s.todos_blocked})\n"
+    out = "{out}Tests: {s.tests_total} (passed: {s.tests_passed}, failed: {s.tests_failed}, skipped: {s.tests_skipped})\n"
+    out = "{out}Coverage: {s.coverage_pct}% ({s.lines_covered}/{s.lines_total} lines)\n"
+    out
+
+fn render_sspec_text(s: DashboardSummary) -> text:
+    var out = ""
+    out = "{out}==================================\n"
+    out = "{out}  SSpec Test Summary\n"
+    out = "{out}==================================\n\n"
+    out = "{out}Tests: {s.tests_total} (passed: {s.tests_passed}, failed: {s.tests_failed})\n"
+    out
+
+fn render_todos_text(s: DashboardSummary) -> text:
+    var out = ""
+    out = "{out}==================================\n"
+    out = "{out}  TODO Summary\n"
+    out = "{out}==================================\n\n"
+    out = "{out}Total: {s.todos_total}\n"
+    out = "{out}Open: {s.todos_open}\n"
+    out = "{out}Blocked: {s.todos_blocked}\n"
+    out
+
+fn render_coverage_text(s: DashboardSummary) -> text:
+    var out = ""
+    out = "{out}==================================\n"
+    out = "{out}  Coverage Summary\n"
+    out = "{out}==================================\n\n"
+    out = "{out}Total lines: {s.lines_total}\n"
+    out = "{out}Covered lines: {s.lines_covered}\n"
+    out = "{out}Coverage: {s.coverage_pct}%\n"
+    out
+
+fn render_full_text(s: DashboardSummary) -> text:
+    var out = ""
+    out = "{out}{render_status_text(s)}\n"
+    out = "{out}{render_sspec_text(s)}\n"
+    out = "{out}{render_todos_text(s)}\n"
+    out = "{out}{render_coverage_text(s)}\n"
+    out
+
+# =========================================================================
+# HTML Renderers
+# =========================================================================
+
+fn render_status_html(s: DashboardSummary, config: RenderConfig) -> text:
+    val feat_pct = if s.features_total > 0: (s.features_complete * 100) / s.features_total else: 0
+    val feat_color = threshold_css_color(feat_pct as f64)
+    val cov_color = threshold_css_color(s.coverage_pct as f64)
+    val test_color = if s.tests_failed > 0: "var(--red, #f85149)" else: "var(--green, #3fb950)"
+    val todo_color = if s.todos_blocked > 0: "var(--red, #f85149)" else: "var(--yellow, #d29922)"
+
+    var h = ""
+    h = "{h}{html_head("Simple Dashboard")}"
+    h = "{h}<body>\n<div class=\"container\">\n"
+    h = "{h}<h1>Simple Dashboard</h1>\n"
+
+    # Summary cards
+    h = "{h}<div class=\"card-grid\">\n"
+
+    h = "{h}<div class=\"card\"><h3>Features</h3>"
+    h = "{h}<div class=\"value\" style=\"color:{feat_color}\">{s.features_complete}/{s.features_total}</div>"
+    h = "{h}<div class=\"sub\">complete: {s.features_complete}, in_progress: {s.features_in_progress}, planned: {s.features_planned}</div></div>\n"
+
+    h = "{h}<div class=\"card\"><h3>Coverage</h3>"
+    h = "{h}<div class=\"value\" style=\"color:{cov_color}\">{s.coverage_pct}%</div>"
+    h = "{h}<div class=\"sub\">{s.lines_covered}/{s.lines_total} lines</div></div>\n"
+
+    h = "{h}<div class=\"card\"><h3>Tests</h3>"
+    h = "{h}<div class=\"value\" style=\"color:{test_color}\">{s.tests_total}</div>"
+    h = "{h}<div class=\"sub\">passed: {s.tests_passed}, failed: {s.tests_failed}, skipped: {s.tests_skipped}</div></div>\n"
+
+    h = "{h}<div class=\"card\"><h3>TODOs</h3>"
+    h = "{h}<div class=\"value\" style=\"color:{todo_color}\">{s.todos_total}</div>"
+    h = "{h}<div class=\"sub\">open: {s.todos_open}, blocked: {s.todos_blocked}</div></div>\n"
+
+    h = "{h}</div>\n"
+
+    # Alerts
+    if s.tests_failed > 0:
+        h = "{h}<div class=\"alert alert-critical\">{s.tests_failed} test(s) failing</div>\n"
+    if s.coverage_pct < 60:
+        h = "{h}<div class=\"alert alert-warning\">Coverage below 60%</div>\n"
+
+    h = "{h}</div>\n</body>\n</html>\n"
+    h
+
+fn render_sspec_html(s: DashboardSummary) -> text:
+    var h = ""
+    h = "{h}{html_head("SSpec Summary")}"
+    h = "{h}<body>\n<div class=\"container\">\n"
+    h = "{h}<h1>SSpec Test Summary</h1>\n"
+    h = "{h}<div class=\"card\"><h3>Tests</h3>"
+    h = "{h}<div class=\"value\">{s.tests_total}</div>"
+    h = "{h}<div class=\"sub\">passed: {s.tests_passed}, failed: {s.tests_failed}</div></div>\n"
+    h = "{h}</div>\n</body>\n</html>\n"
+    h
+
+fn render_todos_html(s: DashboardSummary) -> text:
+    var h = ""
+    h = "{h}{html_head("TODO Summary")}"
+    h = "{h}<body>\n<div class=\"container\">\n"
+    h = "{h}<h1>TODO Summary</h1>\n"
+    h = "{h}<div class=\"card\"><h3>TODOs</h3>"
+    h = "{h}<div class=\"value\">{s.todos_total}</div>"
+    h = "{h}<div class=\"sub\">open: {s.todos_open}, blocked: {s.todos_blocked}</div></div>\n"
+    h = "{h}</div>\n</body>\n</html>\n"
+    h
+
+fn render_coverage_html(s: DashboardSummary) -> text:
+    var h = ""
+    h = "{h}{html_head("Coverage Summary")}"
+    h = "{h}<body>\n<div class=\"container\">\n"
+    h = "{h}<h1>Coverage Summary</h1>\n"
+    val cov_color = threshold_css_color(s.coverage_pct as f64)
+    h = "{h}<div class=\"card\"><h3>Coverage</h3>"
+    h = "{h}<div class=\"value\" style=\"color:{cov_color}\">{s.coverage_pct}%</div>"
+    h = "{h}<div class=\"sub\">{s.lines_covered}/{s.lines_total} lines</div></div>\n"
+    h = "{h}</div>\n</body>\n</html>\n"
+    h
+
+fn render_full_html(s: DashboardSummary, config: RenderConfig) -> text:
+    # Full HTML combines all sections without repeated html/body wrappers
+    val feat_pct = if s.features_total > 0: (s.features_complete * 100) / s.features_total else: 0
+    val feat_color = threshold_css_color(feat_pct as f64)
+    val cov_color = threshold_css_color(s.coverage_pct as f64)
+    val test_color = if s.tests_failed > 0: "var(--red, #f85149)" else: "var(--green, #3fb950)"
+    val todo_color = if s.todos_blocked > 0: "var(--red, #f85149)" else: "var(--yellow, #d29922)"
+
+    var h = ""
+    h = "{h}{html_head("Simple Dashboard — Full Report")}"
+    h = "{h}<body>\n<div class=\"container\">\n"
+    h = "{h}<h1>Simple Dashboard — Full Report</h1>\n"
+
+    # Cards row
+    h = "{h}<div class=\"card-grid\">\n"
+    h = "{h}<div class=\"card\"><h3>Features</h3><div class=\"value\" style=\"color:{feat_color}\">{s.features_complete}/{s.features_total}</div></div>\n"
+    h = "{h}<div class=\"card\"><h3>Coverage</h3><div class=\"value\" style=\"color:{cov_color}\">{s.coverage_pct}%</div></div>\n"
+    h = "{h}<div class=\"card\"><h3>Tests</h3><div class=\"value\" style=\"color:{test_color}\">{s.tests_total}</div></div>\n"
+    h = "{h}<div class=\"card\"><h3>TODOs</h3><div class=\"value\" style=\"color:{todo_color}\">{s.todos_total}</div></div>\n"
+    h = "{h}</div>\n"
+
+    # Details sections
+    h = "{h}<div class=\"card\" style=\"margin-top:12px\"><h3>Feature Breakdown</h3>"
+    h = "{h}<p>Complete: {s.features_complete} | In Progress: {s.features_in_progress} | Planned: {s.features_planned}</p></div>\n"
+
+    h = "{h}<div class=\"card\" style=\"margin-top:12px\"><h3>Test Breakdown</h3>"
+    h = "{h}<p>Passed: {s.tests_passed} | Failed: {s.tests_failed} | Skipped: {s.tests_skipped}</p></div>\n"
+
+    h = "{h}<div class=\"card\" style=\"margin-top:12px\"><h3>TODO Breakdown</h3>"
+    h = "{h}<p>Open: {s.todos_open} | Blocked: {s.todos_blocked}</p></div>\n"
+
+    h = "{h}<div class=\"card\" style=\"margin-top:12px\"><h3>Coverage Details</h3>"
+    h = "{h}<p>{s.lines_covered}/{s.lines_total} lines covered ({s.coverage_pct}%)</p></div>\n"
+
+    h = "{h}</div>\n</body>\n</html>\n"
+    h
+
+fn assistant_metadata(snapshot: AssistantDashboardSnapshot, fmt: text) -> Dict<text, text>:
+    var meta: Dict<text, text> = {}
+    meta["adapter"] = "dashboard"
+    meta["mode"] = "assistant"
+    meta["format"] = fmt
+    meta["surface_state"] = snapshot.surface_state
+    meta["selected_session_id"] = snapshot.selected_session_id
+    meta["sessions"] = "{snapshot.total_sessions}"
+    meta["live_sessions"] = "{snapshot.live_sessions}"
+    meta["replay_sessions"] = "{snapshot.replay_sessions}"
+    meta["degraded_sessions"] = "{snapshot.degraded_sessions}"
+    meta["total_events"] = "{snapshot.total_events}"
+    meta
+
+# =========================================================================
+# HTML Helpers
+# =========================================================================
+
+fn html_head(title: text) -> text:
+    var h = ""
+    h = "{h}<!DOCTYPE html>\n<html>\n<head>\n"
+    h = "{h}  <meta charset=\"utf-8\">\n"
+    h = "{h}  <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n"
+    h = "{h}  <title>{title}</title>\n"
+    h = "{h}  <style>\n"
+    h = "{h}    body { font-family: system-ui, sans-serif; margin: 0; padding: 20px; background: #f5f5f5; }\n"
+    h = "{h}    .container { max-width: 1200px; margin: 0 auto; }\n"
+    h = "{h}    .card { background: #fff; padding: 20px; margin: 10px 0; border-radius: 8px; box-shadow: 0 2px 6px rgba(0,0,0,0.08); }\n"
+    h = "{h}    .card-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 12px; }\n"
+    h = "{h}    .value { font-size: 28px; font-weight: bold; color: #1565c0; }\n"
+    h = "{h}    .sub { font-size: 13px; color: #666; margin-top: 4px; }\n"
+    h = "{h}    .alert { padding: 10px 16px; border-radius: 6px; margin: 8px 0; }\n"
+    h = "{h}    .alert-critical { background: #fdd; color: #c00; }\n"
+    h = "{h}    .alert-warning { background: #fff3cd; color: #856404; }\n"
+    h = "{h}    table { border-collapse: collapse; width: 100%; }\n"
+    h = "{h}    th, td { border: 1px solid #ddd; padding: 8px; font-size: 13px; }\n"
+    h = "{h}    th { background: #fafafa; text-align: left; }\n"
+    h = "{h}  </style>\n"
+    h = "{h}</head>\n"
+    h

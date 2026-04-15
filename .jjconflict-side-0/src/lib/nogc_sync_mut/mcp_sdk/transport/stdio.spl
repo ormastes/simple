@@ -1,0 +1,118 @@
+# MCP SDK - Stdio Transport
+#
+# Content-Length (LSP-style) and JSON Lines framing for MCP over stdio.
+# Auto-detects which framing is in use based on the first message.
+#
+# NOTE: This module uses extern fn stdin_read_char() which only works
+# in compiled mode or when declared in app-local modules.
+# In interpreter mode, std.* module extern fns are NOT resolved,
+# causing hangs. Servers that run in interpreter mode should use
+# inlined transport code in their own json_helpers.spl instead of
+# importing from this module.
+
+use std.mcp_sdk.core.json.{LB}
+
+extern fn stdin_read_char() -> text
+
+# Module state for framing mode
+var STDIO_USE_JSON_LINES = false
+var STDIO_FRAMING_DETECTED = false
+
+fn stdio_read_line() -> text:
+    var parts: [text] = []
+    while true:
+        val ch = stdin_read_char()
+        if ch == "":
+            if parts.length() == 0:
+                return ""
+            return parts.join("")
+        parts.push(ch)
+        if ch == "\n":
+            return parts.join("")
+
+fn stdio_read_chars(count: i64) -> text:
+    var parts: [text] = []
+    var i = 0
+    while i < count:
+        val ch = stdin_read_char()
+        if ch == "":
+            break
+        parts.push(ch)
+        i = i + 1
+    parts.join("")
+
+# Read a single JSON-RPC message from stdin
+# Auto-detects Content-Length vs JSON Lines framing.
+fn read_stdin_message() -> text:
+    var content_length = 0
+    while true:
+        var line = stdio_read_line()
+        if line == "":
+            if content_length > 0:
+                break
+            return ""
+        if line == "\r\n" or line == "\r" or line == "\n":
+            if content_length > 0:
+                break
+            continue
+        if line.ends_with("\r\n"):
+            line = line.substring(0, line.len() - 2)
+        elif line.ends_with("\n"):
+            line = line.substring(0, line.len() - 1)
+        elif line.ends_with("\r"):
+            line = line.substring(0, line.len() - 1)
+
+        if line.starts_with(LB()):
+            STDIO_USE_JSON_LINES = true
+            STDIO_FRAMING_DETECTED = true
+            return line
+
+        if line.starts_with("Content-Length:"):
+            STDIO_FRAMING_DETECTED = true
+            var len_str = line.replace("Content-Length:", "")
+            len_str = len_str.trim()
+            content_length = int(len_str)
+    if content_length <= 0:
+        return ""
+    stdio_read_chars(content_length)
+
+# Write a JSON-RPC message to stdout using the detected framing
+fn write_stdout_message(body: text):
+    val nl = "\n"
+    if STDIO_USE_JSON_LINES:
+        print_raw(body + nl)
+    else:
+        var header = "Content-Length: " + str(body.len()) + "\r" + nl + "\r" + nl
+        print_raw(header)
+        print_raw(body)
+
+# Write using explicit Content-Length framing
+fn write_content_length(body: text):
+    val nl = "\n"
+    var header = "Content-Length: " + str(body.len()) + "\r" + nl + "\r" + nl
+    print_raw(header)
+    print_raw(body)
+
+# Write using JSON Lines framing
+fn write_json_lines(body: text):
+    val nl = "\n"
+    print_raw(body + nl)
+
+# Force a specific framing mode
+fn set_json_lines_mode(use_json_lines: bool):
+    STDIO_USE_JSON_LINES = use_json_lines
+    STDIO_FRAMING_DETECTED = true
+
+# Check current framing mode
+fn is_json_lines_mode() -> bool:
+    STDIO_USE_JSON_LINES
+
+fn is_framing_detected() -> bool:
+    STDIO_FRAMING_DETECTED
+
+# Build Content-Length header for a message
+fn content_length_header(body: text) -> text:
+    val nl = "\n"
+    "Content-Length: " + str(body.len()) + "\r" + nl + "\r" + nl
+
+# --- Exports ---

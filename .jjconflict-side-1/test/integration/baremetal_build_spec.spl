@@ -1,0 +1,111 @@
+"""
+# Bare-Metal Build Checks
+
+Verifies that the checked-in bare-metal build path has a real compile pipeline
+and that the ARM support files can be linked into a valid ELF on hosts with the
+required LLVM tools installed.
+"""
+
+use app.io.{shell}
+
+extern fn rt_file_exists(path: text) -> bool
+extern fn rt_file_read_text(path: text) -> text
+extern fn rt_file_write_text(path: text, content: text) -> bool
+
+fn command_available(cmd: text) -> bool:
+    val result = shell("command -v {cmd} >/dev/null 2>&1")
+    result.exit_code == 0
+
+fn cleanup_tmpdir(tmpdir: text):
+    if tmpdir != "":
+        shell("rm -rf '{tmpdir}' >/dev/null 2>&1 || true")
+
+fn build_source_is_ready() -> bool:
+    if not rt_file_exists("src/compiler/80.driver/build/baremetal.spl"):
+        return false
+    val content = rt_file_read_text("src/compiler/80.driver/build/baremetal.spl") ?? ""
+    if content.contains("Compilation not yet implemented - needs Simple compiler with bare-metal backend"):
+        return false
+    val has_compile = content.contains("compile_to_llvm_ir_pure")
+    val has_assets = content.contains("src/compiler/70.backend/baremetal/arm/linker.ld")
+    val has_runtime = content.contains("runtime_minimal.c")
+    has_compile and has_assets and has_runtime
+
+fn compile_to_llvm_target_selection_ready() -> bool:
+    if not rt_file_exists("src/compiler/80.driver/build/compile_to_llvm.spl"):
+        return false
+    val content = rt_file_read_text("src/compiler/80.driver/build/compile_to_llvm.spl") ?? ""
+    val has_arm = content.contains("CodegenTarget.Arm")
+    val has_riscv32 = content.contains("CodegenTarget.Riscv32")
+    val has_x86_64 = content.contains("CodegenTarget.X86_64")
+    has_arm and has_riscv32 and has_x86_64
+
+fn arm_minimal_link_status() -> text:
+    if not command_available("clang"):
+        return "skip: clang unavailable"
+    if not command_available("llc"):
+        return "skip: llc unavailable"
+    if not command_available("ld.lld"):
+        return "skip: ld.lld unavailable"
+    if not command_available("llvm-readobj"):
+        return "skip: llvm-readobj unavailable"
+    if not command_available("llvm-objdump"):
+        return "skip: llvm-objdump unavailable"
+
+    val tmpdir = shell("mktemp -d").stdout.trim()
+    if tmpdir == "":
+        return "blocked: mktemp failed"
+
+    val ir_path = "{tmpdir}/minimal.ll"
+    val elf_path = "{tmpdir}/kernel.elf"
+    val ir = "; ModuleID = 'minimal'\n" +
+        "target triple = \"armv7m-none-eabi\"\n\n" +
+        "define i64 @__simple_main() {\n" +
+        "entry:\n" +
+        "  ret i64 0\n" +
+        "}\n"
+
+    if not rt_file_write_text(ir_path, ir):
+        cleanup_tmpdir(tmpdir)
+        return "blocked: failed to write temporary LLVM IR"
+
+    val cmd = "clang --target=armv7m-none-eabi -mcpu=cortex-m4 -mthumb -x assembler-with-cpp -c " +
+        "src/compiler/70.backend/baremetal/arm/crt0.s -o '{tmpdir}/crt0.o' && " +
+        "clang --target=armv7m-none-eabi -mcpu=cortex-m4 -ffreestanding -fno-builtin " +
+        "-fdata-sections -ffunction-sections -fno-stack-protector -fno-exceptions -c " +
+        "src/runtime/startup/baremetal/runtime_minimal.c -o '{tmpdir}/runtime_minimal.o' && " +
+        "llc --filetype=obj --relocation-model=static -mtriple armv7m-none-eabi " +
+        "'{ir_path}' -o '{tmpdir}/minimal.o' -mcpu=cortex-m4 -mattr=+thumb2 && " +
+        "ld.lld -T src/compiler/70.backend/baremetal/arm/linker.ld -nostdlib " +
+        "--entry=reset_handler --gc-sections '{tmpdir}/crt0.o' '{tmpdir}/runtime_minimal.o' " +
+        "'{tmpdir}/minimal.o' -o '{elf_path}' && " +
+        "llvm-readobj -h '{elf_path}' && llvm-objdump -t '{elf_path}'"
+
+    val run = shell(cmd)
+    val output = (run.stdout + run.stderr).trim()
+    cleanup_tmpdir(tmpdir)
+
+    if run.exit_code != 0:
+        if output == "":
+            return "blocked: arm minimal link command failed without output"
+        return "blocked: {output}"
+
+    val has_machine = output.contains("Machine: EM_ARM")
+    val has_reset = output.contains("reset_handler")
+    val has_start = output.contains("__spl_start_bare")
+    val has_main = output.contains("__simple_main")
+    if has_machine and has_reset and has_start and has_main:
+        return "ok"
+
+    "blocked: arm link output missing expected symbols"
+
+describe "Bare-metal build readiness":
+    it "uses a real source compile path in the checked-in builder":
+        expect(build_source_is_ready()).to_equal(true)
+
+    it "selects ARM and RISC-V32 LLVM targets in the pure compiler path":
+        expect(compile_to_llvm_target_selection_ready()).to_equal(true)
+
+    it "links a minimal ARM bare-metal ELF with the checked-in support files":
+        val status = arm_minimal_link_status()
+        expect(status == "ok" or status.starts_with("skip:")).to_equal(true)

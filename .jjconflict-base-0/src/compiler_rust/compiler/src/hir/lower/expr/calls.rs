@@ -1,0 +1,399 @@
+//! Function call expression lowering
+//!
+//! This module contains expression lowering logic for function calls,
+//! including special builtins (async, I/O, math/conversion) and spawn.
+
+use simple_parser::{self as ast, Expr, Span};
+
+use crate::hir::lower::context::FunctionContext;
+use crate::hir::lower::deprecation_warning::DeprecationWarning;
+use crate::hir::lower::error::{LowerError, LowerResult};
+use crate::hir::lower::lowerer::Lowerer;
+use crate::hir::types::*;
+use crate::value::{BUILTIN_JOIN, BUILTIN_REPLY, BUILTIN_SPAWN};
+
+impl Lowerer {
+    /// Lower a function call expression to HIR
+    ///
+    /// Handles:
+    /// - Class/struct construction: ClassName(args) - Python-style constructors
+    /// - Async/generator builtins (generator, future, await)
+    /// - I/O builtins (print, println, eprint, eprintln)
+    /// - Math/conversion builtins (abs, min, max, sqrt, etc.)
+    /// - Actor spawn
+    /// - Regular function calls
+    ///
+    /// Also enforces purity constraints in contract expressions.
+    pub(super) fn lower_call(
+        &mut self,
+        callee: &Expr,
+        args: &[ast::Argument],
+        ctx: &mut FunctionContext,
+    ) -> LowerResult<HirExpr> {
+        // Check for special builtins: generator, future, spawn, await, print, etc.
+        if let Expr::Identifier(name) = callee {
+            // Check if this is a class/struct constructor call: ClassName(args)
+            // Python-style construction: Service() calls the class constructor
+            if let Some(struct_ty) = self.module.types.lookup(name) {
+                // Lower arguments as positional field initializers
+                let mut fields_hir = Vec::new();
+                for arg in args {
+                    let field_hir = self.lower_expr(&arg.value, ctx)?;
+                    fields_hir.push(field_hir);
+                }
+                return Ok(HirExpr {
+                    kind: HirExprKind::StructInit {
+                        ty: struct_ty,
+                        fields: fields_hir,
+                    },
+                    ty: struct_ty,
+                });
+            } else if self.lenient_types
+                && name.starts_with(|c: char| c.is_ascii_uppercase())
+                && args.iter().any(|a| a.name.is_some())
+            {
+                // In lenient mode, uppercase identifier with named arguments is likely
+                // a struct construction even if the type isn't in the registry.
+                // Use TypeId::ANY since we don't have the actual type info.
+                let mut fields_hir = Vec::new();
+                for arg in args {
+                    let field_hir = self.lower_expr(&arg.value, ctx)?;
+                    fields_hir.push(field_hir);
+                }
+                return Ok(HirExpr {
+                    kind: HirExprKind::StructInit {
+                        ty: TypeId::ANY,
+                        fields: fields_hir,
+                    },
+                    ty: TypeId::ANY,
+                });
+            }
+
+            // Handle special async/generator builtins
+            if let Some(result) = self.lower_async_builtin(name, args, ctx)? {
+                return Ok(result);
+            }
+
+            // Handle I/O builtins
+            if let Some(result) = self.lower_io_builtin(name, args, ctx)? {
+                return Ok(result);
+            }
+
+            // Handle math/conversion builtins
+            if let Some(result) = self.lower_utility_builtin(name, args, ctx)? {
+                return Ok(result);
+            }
+
+            // Check for spawn
+            if name == BUILTIN_SPAWN && args.len() == 1 {
+                let body_hir = Box::new(self.lower_expr(&args[0].value, ctx)?);
+                return Ok(HirExpr {
+                    kind: HirExprKind::ActorSpawn { body: body_hir },
+                    ty: TypeId::I64,
+                });
+            }
+
+            // Check for join
+            if name == BUILTIN_JOIN && args.len() == 1 {
+                let actor_hir = self.lower_expr(&args[0].value, ctx)?;
+                return Ok(HirExpr {
+                    kind: HirExprKind::BuiltinCall {
+                        name: "join".to_string(),
+                        args: vec![actor_hir],
+                    },
+                    ty: TypeId::I64,
+                });
+            }
+
+            // Check for reply
+            if name == BUILTIN_REPLY && args.len() == 1 {
+                let message_hir = self.lower_expr(&args[0].value, ctx)?;
+                return Ok(HirExpr {
+                    kind: HirExprKind::BuiltinCall {
+                        name: "reply".to_string(),
+                        args: vec![message_hir],
+                    },
+                    ty: TypeId::NIL,
+                });
+            }
+
+            // GPU intrinsics: gpu_global_id_x, gpu_local_id_x, gpu_syncthreads, etc.
+            if let Some(gpu_result) = self.lower_gpu_function_intrinsic(name, args, ctx)? {
+                return Ok(gpu_result);
+            }
+
+            // CTR-030-032: Check for impure function calls in contract expressions
+            if ctx.contract_ctx.is_some() {
+                self.check_contract_purity(name)?;
+            }
+
+            // Check for deprecated function usage
+            if self.is_deprecated(name) {
+                let message = self.deprecation_message(name).map(|s| s.to_string());
+                let suggestion = self.find_non_deprecated_function_alternative(name);
+                let span = if let Expr::Identifier(_) = callee {
+                    // Use a dummy span for now - in a real implementation we'd get the actual span
+                    Span::new(0, 0, 1, 1)
+                } else {
+                    Span::new(0, 0, 1, 1)
+                };
+                self.deprecation_warnings
+                    .add(DeprecationWarning::function(span, name.clone(), message, suggestion));
+            }
+        }
+
+        // Handle static method calls: ClassName.method(args)
+        // This handles Expr::Path with 2 segments like Container.with_profile()
+        if let Expr::Path(segments) = callee {
+            if segments.len() == 2 {
+                return self.lower_static_method_call(&segments[0], &segments[1], args, ctx);
+            }
+        }
+
+        // Regular function call
+        let func_hir = Box::new(self.lower_expr(callee, ctx)?);
+        let mut args_hir = Vec::new();
+        for arg in args {
+            args_hir.push(self.lower_expr(&arg.value, ctx)?);
+        }
+
+        // Return type comes from function type
+        let ret_ty = func_hir.ty; // Simplified - would need function type lookup
+
+        Ok(HirExpr {
+            kind: HirExprKind::Call {
+                func: func_hir,
+                args: args_hir,
+            },
+            ty: ret_ty,
+        })
+    }
+
+    /// Handle async/generator builtins: generator, future, await
+    ///
+    /// Returns Some(HirExpr) if the name matches a builtin, None otherwise.
+    fn lower_async_builtin(
+        &mut self,
+        name: &str,
+        args: &[ast::Argument],
+        ctx: &mut FunctionContext,
+    ) -> LowerResult<Option<HirExpr>> {
+        match name {
+            "generator" => {
+                if args.len() == 1 {
+                    let body_hir = Box::new(self.lower_expr(&args[0].value, ctx)?);
+                    return Ok(Some(HirExpr {
+                        kind: HirExprKind::GeneratorCreate { body: body_hir },
+                        ty: TypeId::I64,
+                    }));
+                }
+                // 2+ args → not a builtin, fall through to regular call
+                Ok(None)
+            }
+            "future" => {
+                if args.len() != 1 {
+                    return Err(LowerError::Unsupported(
+                        "future expects exactly one argument".to_string(),
+                    ));
+                }
+                let body_hir = Box::new(self.lower_expr(&args[0].value, ctx)?);
+                Ok(Some(HirExpr {
+                    kind: HirExprKind::FutureCreate { body: body_hir },
+                    ty: TypeId::I64,
+                }))
+            }
+            "await" => {
+                if args.len() != 1 {
+                    return Err(LowerError::Unsupported(
+                        "await expects exactly one argument".to_string(),
+                    ));
+                }
+                let future_hir = Box::new(self.lower_expr(&args[0].value, ctx)?);
+                Ok(Some(HirExpr {
+                    kind: HirExprKind::Await(future_hir),
+                    ty: TypeId::I64,
+                }))
+            }
+            _ => Ok(None),
+        }
+    }
+
+    /// Handle I/O builtins: print, print_raw, eprint, eprint_raw, dprint
+    ///
+    /// Note: println and eprintln are deprecated (show runtime errors)
+    /// Returns Some(HirExpr) if the name matches a builtin, None otherwise.
+    fn lower_io_builtin(
+        &mut self,
+        name: &str,
+        args: &[ast::Argument],
+        ctx: &mut FunctionContext,
+    ) -> LowerResult<Option<HirExpr>> {
+        if matches!(
+            name,
+            "print" | "print_raw" | "eprint" | "eprint_raw" | "dprint" | "println" | "eprintln"
+        ) {
+            Ok(Some(self.lower_builtin_call(name, args, TypeId::NIL, ctx)?))
+        } else {
+            Ok(None)
+        }
+    }
+
+    /// Handle math/conversion builtins
+    ///
+    /// Includes: abs, min, max, sqrt, floor, ceil, pow, to_string, to_int
+    /// Returns Some(HirExpr) if the name matches a builtin, None otherwise.
+    fn lower_utility_builtin(
+        &mut self,
+        name: &str,
+        args: &[ast::Argument],
+        ctx: &mut FunctionContext,
+    ) -> LowerResult<Option<HirExpr>> {
+        match name {
+            "abs" | "min" | "max" | "sqrt" | "floor" | "ceil" | "pow" => {
+                Ok(Some(self.lower_builtin_call(name, args, TypeId::I64, ctx)?))
+            }
+            "to_string" => Ok(Some(self.lower_builtin_call(name, args, TypeId::STRING, ctx)?)),
+            "to_int" => Ok(Some(self.lower_builtin_call(name, args, TypeId::I64, ctx)?)),
+            // Option/Result constructors (needed for stdlib)
+            "Some" | "Ok" => {
+                // Wrap value in Some/Ok variant - return ANY since it's a generic wrapper
+                Ok(Some(self.lower_builtin_call(name, args, TypeId::ANY, ctx)?))
+            }
+            "None" | "Err" => {
+                // None/Err variants - no argument needed for None
+                Ok(Some(self.lower_builtin_call(name, args, TypeId::ANY, ctx)?))
+            }
+            _ => Ok(None),
+        }
+    }
+
+    /// Check if a function can be called in contract expressions
+    ///
+    /// Contract expressions (in:, out:, invariant:) must only call pure functions.
+    /// Some functions are implicitly pure (math builtins, accessors, converters).
+    /// Other functions must be explicitly marked as pure.
+    fn check_contract_purity(&self, name: &str) -> LowerResult<()> {
+        let is_implicitly_pure = matches!(
+            name,
+            "abs"
+                | "min"
+                | "max"
+                | "sqrt"
+                | "floor"
+                | "ceil"
+                | "pow"
+                | "len"
+                | "is_empty"
+                | "contains"
+                | "to_string"
+                | "to_int"
+                | "old"     // Contract expression: captures value at function entry
+                | "result" // Contract expression: accesses return value in postcondition
+        );
+        if !is_implicitly_pure && !self.is_pure_function(name) {
+            return Err(LowerError::ImpureFunctionInContract {
+                func_name: name.to_string(),
+            });
+        }
+        Ok(())
+    }
+
+    /// Recognize gpu_*_x/y/z function calls as GPU intrinsics.
+    fn lower_gpu_function_intrinsic(
+        &mut self,
+        name: &str,
+        args: &[ast::Argument],
+        ctx: &mut FunctionContext,
+    ) -> LowerResult<Option<HirExpr>> {
+        let (kind, dim) = match name {
+            "gpu_global_id_x" => (GpuIntrinsicKind::GlobalId, 0u8),
+            "gpu_global_id_y" => (GpuIntrinsicKind::GlobalId, 1),
+            "gpu_global_id_z" => (GpuIntrinsicKind::GlobalId, 2),
+            "gpu_thread_id_x" => (GpuIntrinsicKind::LocalId, 0),
+            "gpu_thread_id_y" => (GpuIntrinsicKind::LocalId, 1),
+            "gpu_thread_id_z" => (GpuIntrinsicKind::LocalId, 2),
+            "gpu_local_id_x" => (GpuIntrinsicKind::LocalId, 0),
+            "gpu_local_id_y" => (GpuIntrinsicKind::LocalId, 1),
+            "gpu_local_id_z" => (GpuIntrinsicKind::LocalId, 2),
+            "gpu_block_id_x" => (GpuIntrinsicKind::GroupId, 0),
+            "gpu_block_id_y" => (GpuIntrinsicKind::GroupId, 1),
+            "gpu_block_id_z" => (GpuIntrinsicKind::GroupId, 2),
+            "gpu_block_dim_x" => (GpuIntrinsicKind::LocalSize, 0),
+            "gpu_block_dim_y" => (GpuIntrinsicKind::LocalSize, 1),
+            "gpu_block_dim_z" => (GpuIntrinsicKind::LocalSize, 2),
+            "gpu_grid_dim_x" => (GpuIntrinsicKind::NumGroups, 0),
+            "gpu_grid_dim_y" => (GpuIntrinsicKind::NumGroups, 1),
+            "gpu_grid_dim_z" => (GpuIntrinsicKind::NumGroups, 2),
+            "gpu_syncthreads" => {
+                return Ok(Some(HirExpr {
+                    kind: HirExprKind::GpuIntrinsic {
+                        intrinsic: GpuIntrinsicKind::Barrier,
+                        args: vec![],
+                    },
+                    ty: TypeId::NIL,
+                }));
+            }
+            // GPU memory load/store intrinsics with arguments
+            "gpu_load_f64" => {
+                let ptr_arg = self.lower_expr(&args[0].value, ctx)?;
+                let index_arg = self.lower_expr(&args[1].value, ctx)?;
+                return Ok(Some(HirExpr {
+                    kind: HirExprKind::GpuIntrinsic {
+                        intrinsic: GpuIntrinsicKind::GpuLoadF64,
+                        args: vec![ptr_arg, index_arg],
+                    },
+                    ty: TypeId::F64,
+                }));
+            }
+            "gpu_store_f64" => {
+                let ptr_arg = self.lower_expr(&args[0].value, ctx)?;
+                let index_arg = self.lower_expr(&args[1].value, ctx)?;
+                let value_arg = self.lower_expr(&args[2].value, ctx)?;
+                return Ok(Some(HirExpr {
+                    kind: HirExprKind::GpuIntrinsic {
+                        intrinsic: GpuIntrinsicKind::GpuStoreF64,
+                        args: vec![ptr_arg, index_arg, value_arg],
+                    },
+                    ty: TypeId::NIL,
+                }));
+            }
+            "gpu_load_i64" => {
+                let ptr_arg = self.lower_expr(&args[0].value, ctx)?;
+                let index_arg = self.lower_expr(&args[1].value, ctx)?;
+                return Ok(Some(HirExpr {
+                    kind: HirExprKind::GpuIntrinsic {
+                        intrinsic: GpuIntrinsicKind::GpuLoadI64,
+                        args: vec![ptr_arg, index_arg],
+                    },
+                    ty: TypeId::I64,
+                }));
+            }
+            "gpu_store_i64" => {
+                let ptr_arg = self.lower_expr(&args[0].value, ctx)?;
+                let index_arg = self.lower_expr(&args[1].value, ctx)?;
+                let value_arg = self.lower_expr(&args[2].value, ctx)?;
+                return Ok(Some(HirExpr {
+                    kind: HirExprKind::GpuIntrinsic {
+                        intrinsic: GpuIntrinsicKind::GpuStoreI64,
+                        args: vec![ptr_arg, index_arg, value_arg],
+                    },
+                    ty: TypeId::NIL,
+                }));
+            }
+            _ => return Ok(None),
+        };
+
+        // Create a constant dimension argument
+        let dim_arg = HirExpr {
+            kind: HirExprKind::Integer(dim as i64),
+            ty: TypeId::I64,
+        };
+        Ok(Some(HirExpr {
+            kind: HirExprKind::GpuIntrinsic {
+                intrinsic: kind,
+                args: vec![dim_arg],
+            },
+            ty: TypeId::I64,
+        }))
+    }
+}

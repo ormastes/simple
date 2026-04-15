@@ -1,0 +1,168 @@
+# Typed SQL Database Library - Core Types
+#
+# Provides typed value containers, error types, and row abstraction
+# for the SQL database layer built on top of sqlite_ffi.
+
+# ============================================================================
+# DbType — SQLite column types
+# ============================================================================
+
+enum DbType:
+    Integer
+    Real
+    Text
+    Blob
+    Null
+
+# ============================================================================
+# DbValue — typed value container
+# ============================================================================
+
+enum DbValue:
+    Integer(value: i64)
+    Real(value: f64)
+    Text(value: text)
+    Blob(value: [u8])
+    Null
+    Bool(value: bool)
+
+impl DbValue:
+    fn as_int() -> i64?:
+        match self:
+            DbValue.Integer(value): Some(value)
+            DbValue.Bool(value):
+                if value:
+                    Some(1)
+                else:
+                    Some(0)
+            _: nil
+
+    fn as_real() -> f64?:
+        match self:
+            DbValue.Real(value): Some(value)
+            _: nil
+
+    fn as_text() -> text?:
+        match self:
+            DbValue.Text(value): Some(value)
+            _: nil
+
+    fn as_bool() -> bool?:
+        match self:
+            DbValue.Bool(value): Some(value)
+            DbValue.Integer(value):
+                if value == 0:
+                    Some(false)
+                elif value == 1:
+                    Some(true)
+                else:
+                    nil
+            _: nil
+
+    fn is_null() -> bool:
+        match self:
+            DbValue.Null: true
+            _: false
+
+    fn db_type() -> DbType:
+        match self:
+            DbValue.Integer(_): DbType.Integer
+            DbValue.Real(_): DbType.Real
+            DbValue.Text(_): DbType.Text
+            DbValue.Blob(_): DbType.Blob
+            DbValue.Null: DbType.Null
+            DbValue.Bool(_): DbType.Integer
+
+    fn to_text() -> text:
+        match self:
+            DbValue.Integer(value): "{value}"
+            DbValue.Real(value): "{value}"
+            DbValue.Text(value): value
+            DbValue.Blob(value): "<blob:{value.len()} bytes>"
+            DbValue.Null: "NULL"
+            DbValue.Bool(value):
+                if value:
+                    "true"
+                else:
+                    "false"
+
+# ============================================================================
+# DbError — all possible database errors
+# ============================================================================
+
+enum DbError:
+    ConnectionFailed(path: text, message: text)
+    QueryFailed(sql: text, message: text)
+    BindFailed(index: i64, message: text)
+    TypeMismatch(column: text, expected: text, actual: text)
+    NotFound(description: text)
+    ConstraintViolation(message: text)
+    MigrationFailed(id: text, reason: text)
+    TransactionFailed(reason: text)
+    Closed
+    Other(message: text)
+
+impl DbError:
+    fn message() -> text:
+        match self:
+            DbError.ConnectionFailed(path, message): "Connection failed to '{path}': {message}"
+            DbError.QueryFailed(sql, message): "Query failed '{sql}': {message}"
+            DbError.BindFailed(index, message): "Bind failed at index {index}: {message}"
+            DbError.TypeMismatch(column, expected, actual): "Type mismatch on column '{column}': expected {expected}, got {actual}"
+            DbError.NotFound(description): "Not found: {description}"
+            DbError.ConstraintViolation(message): "Constraint violation: {message}"
+            DbError.MigrationFailed(id, reason): "Migration '{id}' failed: {reason}"
+            DbError.TransactionFailed(reason): "Transaction failed: {reason}"
+            DbError.Closed: "Database connection is closed"
+            DbError.Other(message): message
+
+# ============================================================================
+# DbRow — a single typed database row
+# ============================================================================
+
+struct DbRow:
+    columns: [text]
+    values: [DbValue]
+
+impl DbRow:
+    static fn empty() -> DbRow:
+        DbRow(columns: [], values: [])
+
+    fn get(column: text) -> DbValue?:
+        for i in 0..self.columns.len():
+            if self.columns[i] == column:
+                return Some(self.values[i])
+        nil
+
+    fn get_text(column: text) -> text?:
+        val v = self.get(column)?
+        v.as_text()
+
+    fn get_int(column: text) -> i64?:
+        val v = self.get(column)?
+        v.as_int()
+
+    fn get_real(column: text) -> f64?:
+        val v = self.get(column)?
+        v.as_real()
+
+    fn get_bool(column: text) -> bool?:
+        val v = self.get(column)?
+        v.as_bool()
+
+    fn get_at(index: i64) -> DbValue?:
+        if index < 0 or index >= self.values.len():
+            return nil
+        Some(self.values[index])
+
+    fn column_count() -> i64:
+        self.columns.len()
+
+    fn column_names() -> [text]:
+        self.columns
+
+    fn has_column(name: text) -> bool:
+        for col in self.columns:
+            if col == name:
+                return true
+        false

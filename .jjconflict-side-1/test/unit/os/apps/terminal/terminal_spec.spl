@@ -1,0 +1,270 @@
+# Terminal Emulator Unit Tests
+#
+# Tests for TerminalChar, TerminalLine, and Terminal class:
+# construction, write_char, newline, scroll_up, clear, ANSI parsing.
+
+# ============================================================================
+# TerminalChar Construction
+# ============================================================================
+
+describe "TerminalChar":
+    it "constructs with default values":
+        val ch = TerminalChar(ch: " ", fg: 7, bg: 0, bold: false)
+        expect(ch.ch).to_equal(" ")
+        expect(ch.fg).to_equal(7)
+        expect(ch.bg).to_equal(0)
+        expect(ch.bold).to_equal(false)
+
+    it "constructs with custom color":
+        val ch = TerminalChar(ch: "A", fg: 1, bg: 4, bold: true)
+        expect(ch.ch).to_equal("A")
+        expect(ch.fg).to_equal(1)
+        expect(ch.bg).to_equal(4)
+        expect(ch.bold).to_equal(true)
+
+    it "default_char returns space with white-on-black":
+        val ch = default_char()
+        expect(ch.ch).to_equal(" ")
+        expect(ch.fg).to_equal(7)
+        expect(ch.bg).to_equal(0)
+        expect(ch.bold).to_equal(false)
+
+# ============================================================================
+# TerminalLine Construction
+# ============================================================================
+
+describe "TerminalLine":
+    it "new_line creates line with correct width":
+        val line = new_line(80)
+        expect(line.chars.len()).to_equal(80)
+
+    it "new_line fills with blank chars":
+        val line = new_line(10)
+        expect(line.chars[0].ch).to_equal(" ")
+        expect(line.chars[9].ch).to_equal(" ")
+
+    it "line_to_text renders plain text":
+        var line = new_line(5)
+        line.chars[0] = TerminalChar(ch: "H", fg: 7, bg: 0, bold: false)
+        line.chars[1] = TerminalChar(ch: "i", fg: 7, bg: 0, bold: false)
+        val text_out = line_to_text(line)
+        expect(text_out).to_start_with("Hi")
+
+# ============================================================================
+# Terminal Construction
+# ============================================================================
+
+describe "Terminal":
+    context "when newly created":
+        it "has correct cols":
+            val term = Terminal.new(80, 25)
+            expect(term.cols).to_equal(80)
+
+        it "has correct rows":
+            val term = Terminal.new(80, 25)
+            expect(term.rows).to_equal(25)
+
+        it "starts with cursor at row 0":
+            val term = Terminal.new(80, 25)
+            expect(term.cursor_row).to_equal(0)
+
+        it "starts with cursor at col 0":
+            val term = Terminal.new(80, 25)
+            expect(term.cursor_col).to_equal(0)
+
+        it "has correct number of lines":
+            val term = Terminal.new(80, 25)
+            expect(term.lines.len()).to_equal(25)
+
+        it "starts with default fg color (white)":
+            val term = Terminal.new(80, 25)
+            expect(term.fg_color).to_equal(7)
+
+        it "starts with default bg color (black)":
+            val term = Terminal.new(80, 25)
+            expect(term.bg_color).to_equal(0)
+
+        it "starts not bold":
+            val term = Terminal.new(80, 25)
+            expect(term.bold).to_equal(false)
+
+        it "starts with empty input buffer":
+            val term = Terminal.new(80, 25)
+            expect(term.input_buffer).to_equal("")
+
+        it "starts with empty output buffer":
+            val term = Terminal.new(80, 25)
+            expect(term.output_buffer).to_equal("")
+
+        it "starts with ANSI state Normal":
+            val term = Terminal.new(80, 25)
+            expect(term.ansi_state).to_equal(AnsiState.Normal)
+
+        it "starts with max_scrollback of 1000":
+            val term = Terminal.new(80, 25)
+            expect(term.max_scrollback).to_equal(1000)
+
+    context "with small dimensions":
+        it "creates 1x1 terminal":
+            val term = Terminal.new(1, 1)
+            expect(term.cols).to_equal(1)
+            expect(term.rows).to_equal(1)
+            expect(term.lines.len()).to_equal(1)
+
+# ============================================================================
+# Terminal write_char
+# ============================================================================
+
+describe "Terminal write_char":
+    it "places character at cursor position":
+        var term = Terminal.new(80, 25)
+        term.write_char("A")
+        val ch = term.lines[0].chars[0]
+        expect(ch.ch).to_equal("A")
+
+    it "advances cursor column after write":
+        var term = Terminal.new(80, 25)
+        term.write_char("A")
+        expect(term.cursor_col).to_equal(1)
+
+    it "writes multiple characters sequentially":
+        var term = Terminal.new(80, 25)
+        term.write_char("H")
+        term.write_char("i")
+        expect(term.cursor_col).to_equal(2)
+        expect(term.lines[0].chars[0].ch).to_equal("H")
+        expect(term.lines[0].chars[1].ch).to_equal("i")
+
+    it "wraps at end of line":
+        var term = Terminal.new(3, 2)
+        term.write_char("A")
+        term.write_char("B")
+        term.write_char("C")
+        # After writing 3 chars in a 3-col terminal, cursor should wrap
+        expect(term.cursor_row).to_be_greater_than(0)
+
+    it "handles newline character":
+        var term = Terminal.new(80, 25)
+        term.write_char("A")
+        term.write_char("\n")
+        expect(term.cursor_row).to_equal(1)
+        expect(term.cursor_col).to_equal(0)
+
+# ============================================================================
+# Terminal newline and scroll
+# ============================================================================
+
+describe "Terminal newline":
+    it "moves cursor to next row":
+        var term = Terminal.new(80, 25)
+        term.newline()
+        expect(term.cursor_row).to_equal(1)
+        expect(term.cursor_col).to_equal(0)
+
+    it "resets cursor_col to 0":
+        var term = Terminal.new(80, 25)
+        term.write_char("X")
+        term.write_char("Y")
+        term.newline()
+        expect(term.cursor_col).to_equal(0)
+
+    it "scrolls when at last row":
+        var term = Terminal.new(80, 3)
+        term.cursor_row = 2
+        term.newline()
+        # After newline at last row, cursor stays at last row
+        expect(term.cursor_row).to_equal(2)
+
+describe "Terminal scroll_up":
+    it "shifts buffer up by one line":
+        var term = Terminal.new(10, 3)
+        term.lines[0].chars[0] = TerminalChar(ch: "A", fg: 7, bg: 0, bold: false)
+        term.lines[1].chars[0] = TerminalChar(ch: "B", fg: 7, bg: 0, bold: false)
+        term.lines[2].chars[0] = TerminalChar(ch: "C", fg: 7, bg: 0, bold: false)
+        term.scroll_up()
+        # Line 0 should now be what was line 1
+        expect(term.lines[0].chars[0].ch).to_equal("B")
+        expect(term.lines[1].chars[0].ch).to_equal("C")
+
+    it "adds blank line at bottom after scroll":
+        var term = Terminal.new(10, 3)
+        term.lines[2].chars[0] = TerminalChar(ch: "X", fg: 7, bg: 0, bold: false)
+        term.scroll_up()
+        # Last line should be blank
+        expect(term.lines[2].chars[0].ch).to_equal(" ")
+
+    it "preserves line count after scroll":
+        var term = Terminal.new(10, 5)
+        term.scroll_up()
+        expect(term.lines.len()).to_equal(5)
+
+# ============================================================================
+# Terminal clear
+# ============================================================================
+
+describe "Terminal clear":
+    it "resets all lines to blank":
+        var term = Terminal.new(10, 3)
+        term.write_char("A")
+        term.write_char("B")
+        term.clear()
+        expect(term.lines[0].chars[0].ch).to_equal(" ")
+        expect(term.lines[0].chars[1].ch).to_equal(" ")
+
+    it "resets cursor to origin":
+        var term = Terminal.new(80, 25)
+        term.cursor_row = 10
+        term.cursor_col = 20
+        term.clear()
+        expect(term.cursor_row).to_equal(0)
+        expect(term.cursor_col).to_equal(0)
+
+    it "preserves number of lines":
+        var term = Terminal.new(80, 25)
+        term.clear()
+        expect(term.lines.len()).to_equal(25)
+
+# ============================================================================
+# ANSI Escape State Machine
+# ============================================================================
+
+describe "Terminal ANSI parsing":
+    it "starts in Normal state":
+        val term = Terminal.new(80, 25)
+        expect(term.ansi_state).to_equal(AnsiState.Normal)
+
+    it "AnsiState enum has Normal variant":
+        val state = AnsiState.Normal
+        expect(state).to_equal(AnsiState.Normal)
+
+    it "AnsiState enum has Escape variant":
+        val state = AnsiState.Escape
+        expect(state).to_equal(AnsiState.Escape)
+
+    it "AnsiState enum has Bracket variant":
+        val state = AnsiState.Bracket
+        expect(state).to_equal(AnsiState.Bracket)
+
+    it "AnsiState enum has Param variant":
+        val state = AnsiState.Param
+        expect(state).to_equal(AnsiState.Param)
+
+# ============================================================================
+# Terminal write_string (integration)
+# ============================================================================
+
+describe "Terminal write_string":
+    it "writes multiple characters":
+        var term = Terminal.new(80, 25)
+        term.write_string("Hello")
+        expect(term.cursor_col).to_equal(5)
+        expect(term.lines[0].chars[0].ch).to_equal("H")
+        expect(term.lines[0].chars[4].ch).to_equal("o")
+
+    it "handles embedded newlines":
+        var term = Terminal.new(80, 25)
+        term.write_string("AB\nCD")
+        expect(term.lines[0].chars[0].ch).to_equal("A")
+        expect(term.lines[0].chars[1].ch).to_equal("B")
+        expect(term.lines[1].chars[0].ch).to_equal("C")
+        expect(term.lines[1].chars[1].ch).to_equal("D")

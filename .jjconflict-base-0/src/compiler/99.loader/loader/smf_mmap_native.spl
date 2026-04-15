@@ -1,0 +1,310 @@
+# Native Simple mmap Implementation for SMF Files
+#
+# Uses runtime FFI wrappers around libc mmap/munmap/etc. to provide executable
+# memory and file-backed mappings for the loader. Keeps a thin Simple layer for
+# basic helpers and statistics.
+
+extern fn rt_file_size(path: text) -> i64
+
+# Pointer write FFI for memory patching and relocation
+extern fn rt_ptr_write_u8(addr: i64, offset: i64, value: i64)
+extern fn rt_ptr_write_i32(addr: i64, offset: i64, value: i32)
+extern fn rt_ptr_write_i64(addr: i64, offset: i64, value: i64)
+
+# Low-level syscall FFI (raw address-based wrappers in C runtime)
+extern fn rt_mmap_raw(addr: i64, length: i64, prot: i64, flags: i64, fd: i64, offset: i64) -> i64
+extern fn rt_munmap_raw(addr: i64, length: i64) -> i64
+extern fn rt_mprotect(addr: i64, length: i64, prot: i64) -> i64
+extern fn rt_madvise_raw(addr: i64, length: i64, advice: i64) -> i64
+extern fn rt_msync_flags(addr: i64, length: i64, flags: i64) -> i64
+extern fn rt_mlock(addr: i64, length: i64) -> i64
+extern fn rt_munlock(addr: i64, length: i64) -> i64
+extern fn rt_open_fd(path: text, flags: i64, mode: i64) -> i64
+extern fn rt_close_fd(fd: i64) -> i64
+extern fn rt_page_size() -> i64
+
+# ============================================================================
+# Constants (libc values)
+# ============================================================================
+
+val PROT_NONE: i64 = 0x0
+val PROT_READ: i64 = 0x1
+val PROT_WRITE: i64 = 0x2
+val PROT_EXEC: i64 = 0x4
+
+val MAP_SHARED: i64 = 0x1
+val MAP_PRIVATE: i64 = 0x2
+val MAP_ANONYMOUS: i64 = 0x20
+val MAP_FAILED: i64 = -1
+val O_RDONLY: i64 = 0x0
+
+val MADV_NORMAL: i64 = 0
+val MADV_RANDOM: i64 = 1
+val MADV_SEQUENTIAL: i64 = 2
+val MADV_WILLNEED: i64 = 3
+val MADV_DONTNEED: i64 = 4
+
+# ============================================================================
+# Native mmap Implementation (Simple + unsafe)
+# ============================================================================
+
+fn native_mmap_file(path: text, prot: i64, flags: i64, offset: i64, length: i64) -> (i64, i64):
+    """Map file using native Simple unsafe operations.
+
+    val _tv_0 = [address, size]
+    Returns: _tv_0 or (0, 0) on error
+    """
+    # Open file first
+    val fd = rt_open_fd(path, O_RDONLY, 0)
+    if fd < 0:
+        return [0, 0]
+
+    # Get file size if length == 0
+    var actual_size = length
+    if length == 0:
+        val size = rt_file_size(path)
+        if size < 0:
+            _ = rt_close_fd(fd)
+            return [0, 0]
+        actual_size = size
+
+    # Call mmap syscall
+    val addr = rt_mmap_raw(0, actual_size, prot, flags, fd, offset)
+
+    # Close file descriptor (mmap keeps reference)
+    _ = rt_close_fd(fd)
+
+    # Check for error
+    if addr == MAP_FAILED:
+        return [0, 0]
+
+    [addr, actual_size]
+
+fn native_munmap(address: i64, size: i64) -> bool:
+    """Unmap memory region."""
+    rt_munmap_raw(address, size) == 0
+
+fn native_mmap_read_bytes(address: i64, offset: i64, length: i64) -> [u8]:
+    """Read bytes from mapped memory using unsafe pointer operations."""
+    unsafe:
+        # Calculate pointer to data
+        val ptr = (address + offset) as *u8
+
+        # Create slice from raw pointer
+        val slice = slice_from_raw_parts(ptr, length)
+
+        # Copy to array (safer than returning slice)
+        var result: [u8] = []
+        result_reserve(result, length)
+
+        for i in 0..length:
+            val _asv_0 = i as usize
+            result_push(result, slice[_asv_0])
+
+        result
+
+fn native_mmap_read_string(address: i64, offset: i64, max_length: i64) -> text:
+    """Read string from mapped memory."""
+    unsafe:
+        val ptr = (address + offset) as *u8
+
+        # Find string length (until null terminator or max_length)
+        var len = 0i64
+        val max_len = if max_length == 0: 4096 else: max_length
+
+        while len < max_len:
+            val byte = ptr_read_u8(ptr, len)
+            if byte == 0:
+                break
+            len = len + 1
+
+        # Create slice and convert to string
+        val slice = slice_from_raw_parts(ptr, len)
+        str_from_utf8_lossy(slice)
+
+fn native_madvise(address: i64, size: i64, advice: i64) -> bool:
+    """Give kernel memory advice."""
+    rt_madvise_raw(address, size, advice) == 0
+
+fn native_msync(address: i64, size: i64, is_async: bool) -> bool:
+    """Sync memory to disk."""
+    val flags = if is_async: 1 else: 2  # MS_ASYNC=1, MS_SYNC=2
+    rt_msync_flags(address, size, flags) == 0
+
+fn native_mlock(address: i64, size: i64) -> bool:
+    """Lock memory in RAM."""
+    rt_mlock(address, size) == 0
+
+fn native_munlock(address: i64, size: i64) -> bool:
+    """Unlock memory."""
+    rt_munlock(address, size) == 0
+
+# ============================================================================
+# Native Executable Memory (Simple + unsafe)
+# ============================================================================
+
+# Global tracking for statistics (using dictionary as simple storage)
+var EXEC_MEMORY_ALLOCS: Dict<i64, i64> = {}
+
+fn native_alloc_exec_memory(size: i64) -> i64:
+    """Allocate executable memory (RWX)."""
+    val prot = PROT_READ | PROT_WRITE | PROT_EXEC
+    val flags = MAP_PRIVATE | MAP_ANONYMOUS
+
+    val addr = rt_mmap_raw(0, size, prot, flags, -1, 0)
+
+    if addr == MAP_FAILED:
+        return 0
+
+    # Track allocation
+    EXEC_MEMORY_ALLOCS[addr] = size
+
+    addr
+
+fn native_alloc_rw_memory(size: i64) -> i64:
+    """Allocate read-write memory (no execute)."""
+    val prot = PROT_READ | PROT_WRITE
+    val flags = MAP_PRIVATE | MAP_ANONYMOUS
+
+    val addr = rt_mmap_raw(0, size, prot, flags, -1, 0)
+
+    if addr == MAP_FAILED:
+        return 0
+
+    addr
+
+fn native_free_exec_memory(address: i64, size: i64) -> bool:
+    """Free executable memory."""
+    val result = rt_munmap_raw(address, size)
+
+    if result == 0:
+        # Remove from tracking
+        exec_memory_allocs_remove(address)
+        true
+    else:
+        false
+
+fn native_write_exec_memory(address: i64, code: [u8], offset: i64) -> i64:
+    """Write code to executable memory."""
+    unsafe:
+        val dest_ptr = (address + offset) as *u8
+
+        for i in 0..code_bytes_len(code):
+            val _asv_1 = i as i64
+            ptr_write_u8(dest_ptr, _asv_1, code[i])
+
+        code_bytes_len(code) as i64
+
+fn native_make_executable(address: i64, size: i64) -> bool:
+    """Change protection to read-execute (W^X security)."""
+    val prot = PROT_READ | PROT_EXEC
+    rt_mprotect(address, size, prot) == 0
+
+fn native_make_rw(address: i64, size: i64) -> bool:
+    """Change protection to read-write (for relocation patching)."""
+    val prot = PROT_READ | PROT_WRITE
+    rt_mprotect(address, size, prot) == 0
+
+fn native_flush_icache(address: i64, size: i64):
+    """Flush instruction cache (required on ARM/RISC-V)."""
+    # x86/x64: no-op (hardware cache coherence)
+    # ARM: would need __clear_cache syscall
+    # For now, just document the requirement
+
+fn native_get_function_pointer(address: i64) -> i64:
+    """Get function pointer from address."""
+    address  # Function pointer is same as address
+
+fn native_call_function_0(fn_ptr: i64) -> i64:
+    """Call function with no arguments."""
+    unsafe:
+        # Cast pointer to function type and call
+        val func = fn_ptr as fn() -> i64
+        func()
+
+fn native_call_function_1(fn_ptr: i64, arg1: i64) -> i64:
+    """Call function with one argument."""
+    unsafe:
+        val func = fn_ptr as fn(i64) -> i64
+        func(arg1)
+
+fn native_call_function_2(fn_ptr: i64, arg1: i64, arg2: i64) -> i64:
+    """Call function with two arguments."""
+    unsafe:
+        val func = fn_ptr as fn(i64, i64) -> i64
+        func(arg1, arg2)
+
+fn native_exec_memory_total() -> i64:
+    """Get total executable memory allocated."""
+    var total = 0i64
+    for _item_0 in EXEC_MEMORY_ALLOCS:
+        val addr = _item_0[0]
+        val size = _item_0[1]
+        total = total + size
+    total
+
+fn native_exec_memory_count() -> i64:
+    """Get number of executable memory allocations."""
+    exec_memory_allocs_len() as i64
+
+# ============================================================================
+# Unsafe Syscall Wrappers (Platform-specific)
+# ============================================================================
+#
+# NOTE: legacy unsafe_* stubs removed in favor of runtime FFI (rt_mmap, etc.).
+
+fn ptr_read_u8(ptr: *u8, offset: i64) -> u8:
+    """Read byte from pointer with offset."""
+    unsafe:
+        val offset_ptr = (ptr + offset) as *u8
+        *offset_ptr
+
+fn ptr_write_u8(ptr: *u8, offset: i64, value: u8):
+    """Write byte to pointer with offset."""
+    val addr = ptr as i64
+    rt_ptr_write_u8(addr, offset, value as i64)
+
+fn slice_from_raw_parts(ptr: *u8, len: usize) -> [u8]:
+    """Copy bytes from raw pointer into a Simple array."""
+    unsafe:
+        var result: [u8] = []
+        var i: i64 = 0
+        while i < len:
+            val byte = ptr_read_u8(ptr, i)
+            result.push(byte)
+            i = i + 1
+        result
+
+fn str_from_utf8_lossy(bytes: [u8]) -> text:
+    """Convert bytes to string, replacing invalid UTF-8."""
+    # Convert byte array to string
+    var chars: [text] = []
+    for b in bytes:
+        chars_push(chars, char_from_byte(b))
+    chars.join("")
+
+fn char_from_byte(b: u8) -> text:
+    """Convert byte to character."""
+    # Simple char conversion
+    "{b as char}"
+
+# ============================================================================
+# Relocation Patching Functions
+# ============================================================================
+
+fn native_reloc_write_i32(address: i64, offset: i64, value: i32):
+    """Write a 32-bit value at address+offset (for Pc32/Plt32 relocations)."""
+    rt_ptr_write_i32(address, offset, value)
+
+fn native_reloc_write_i64(address: i64, offset: i64, value: i64):
+    """Write a 64-bit value at address+offset (for Abs64 relocations)."""
+    rt_ptr_write_i64(address, offset, value)
+
+# ============================================================================
+# Exports
+# ============================================================================
+
+
+# Relocation patching
+
+# Constants

@@ -1,0 +1,445 @@
+# CSS Tokenizer following CSS Syntax Level 3 (W3C CR).
+# Converts a CSS source string into a stream of CssToken values.
+# Implements section 4 "Tokenization" of the spec, covering ident,
+# function, at-keyword, hash, string, url, number, percentage,
+# dimension, delimiter, and all bracket/brace/paren tokens.
+#
+# Spec reference: https://www.w3.org/TR/css-syntax-3/#tokenization
+
+use examples.browser.shared.logging.Logger
+
+# ---------- Token enum ----------
+
+enum CssToken:
+    Ident(value: text)
+    Function(name: text)
+    AtKeyword(value: text)
+    Hash(value: text, is_id: bool)
+    String(value: text)
+    BadString
+    Url(value: text)
+    BadUrl
+    Delim(value: text)
+    Number(value: f64, is_integer: bool)
+    Percentage(value: f64)
+    Dimension(value: f64, unit: text)
+    Whitespace
+    Colon
+    Semicolon
+    Comma
+    OpenParen
+    CloseParen
+    OpenBracket
+    CloseBracket
+    OpenBrace
+    CloseBrace
+    CdoToken
+    CdcToken
+    Eof
+
+# ---------- Helper predicates (module-level) ----------
+
+fn is_digit(c: text) -> bool:
+    c == "0" or c == "1" or c == "2" or c == "3" or c == "4" or c == "5" or c == "6" or c == "7" or c == "8" or c == "9"
+
+fn is_whitespace(c: text) -> bool:
+    c == " " or c == "\t" or c == "\n" or c == "\r" or c == "\f"
+
+fn is_letter(c: text) -> bool:
+    val code = c.char_code_at(0)
+    val is_upper = code >= 65 and code <= 90
+    val is_lower = code >= 97 and code <= 122
+    is_upper or is_lower
+
+fn is_non_ascii(c: text) -> bool:
+    if c.len() == 0:
+        return false
+    val code = c.char_code_at(0)
+    code >= 128
+
+fn is_ident_start(c: text) -> bool:
+    is_letter(c) or c == "_" or is_non_ascii(c)
+
+fn is_ident_char(c: text) -> bool:
+    is_ident_start(c) or is_digit(c) or c == "-"
+
+fn starts_identifier(c1: text, c2: text, c3: text) -> bool:
+    if is_ident_start(c1):
+        return true
+    if c1 == "-":
+        val second_ok = is_ident_start(c2) or c2 == "-"
+        return second_ok
+    if c1 == "\\":
+        return c2 != "\n"
+    false
+
+fn starts_number(c1: text, c2: text, c3: text) -> bool:
+    if is_digit(c1):
+        return true
+    if c1 == "+" or c1 == "-":
+        if is_digit(c2):
+            return true
+        if c2 == "." and is_digit(c3):
+            return true
+    if c1 == ".":
+        return is_digit(c2)
+    false
+
+# ---------- Tokenizer class ----------
+
+class CssTokenizer:
+    input: text
+    pos: i64
+    logger: Logger
+
+    static fn new(input: text, logger: Logger) -> CssTokenizer:
+        CssTokenizer(input: input, pos: 0, logger: logger)
+
+    fn is_eof() -> bool:
+        self.pos >= self.input.len()
+
+    fn peek() -> text:
+        if self.pos >= self.input.len():
+            return ""
+        self.input.char_at(self.pos)
+
+    fn peek_at(offset: i64) -> text:
+        val idx = self.pos + offset
+        if idx >= self.input.len() or idx < 0:
+            return ""
+        self.input.char_at(idx)
+
+    me consume() -> text:
+        if self.pos >= self.input.len():
+            return ""
+        val c = self.input.char_at(self.pos)
+        self.pos = self.pos + 1
+        c
+
+    me reconsume():
+        if self.pos > 0:
+            self.pos = self.pos - 1
+
+    # --- consume helpers ---
+
+    me consume_whitespace() -> CssToken:
+        while not self.is_eof():
+            val c = self.peek()
+            if not is_whitespace(c):
+                break
+            self.consume()
+        CssToken.Whitespace
+
+    me consume_comment():
+        # Assumes we already consumed '/' and '*'
+        while not self.is_eof():
+            val c = self.consume()
+            if c == "*" and self.peek() == "/":
+                self.consume()
+                return
+        self.logger.warn("Unterminated CSS comment")
+
+    me consume_escape() -> text:
+        val c = self.consume()
+        if c == "":
+            return "\u{FFFD}"
+        # Simplified: return escaped char directly (hex escapes not fully implemented)
+        if is_digit(c) or is_letter(c):
+            # Could be hex escape -- simplified: collect up to 6 hex digits
+            var hex_str = c
+            var count = 1
+            while count < 6 and not self.is_eof():
+                val next = self.peek()
+                val code = next.char_code_at(0)
+                val is_hex_alpha = (code >= 65 and code <= 70) or (code >= 97 and code <= 102)
+                val is_hex = is_digit(next) or is_hex_alpha
+                if not is_hex:
+                    break
+                hex_str = hex_str + self.consume()
+                count = count + 1
+            # Skip optional trailing whitespace after hex escape
+            if not self.is_eof() and is_whitespace(self.peek()):
+                self.consume()
+            # Simplified: return replacement character for hex escapes
+            # Full implementation would parse hex_str to codepoint
+            return "\u{FFFD}"
+        c
+
+    me consume_string(quote: text) -> CssToken:
+        var result = ""
+        while not self.is_eof():
+            val c = self.consume()
+            if c == quote:
+                return CssToken.String(value: result)
+            if c == "\n":
+                self.reconsume()
+                self.logger.warn("Newline in string")
+                return CssToken.BadString
+            if c == "\\":
+                val next = self.peek()
+                if next == "":
+                    # EOF after backslash -- ignore
+                    pass_dn
+                else if next == "\n":
+                    # Escaped newline -- consume and continue
+                    self.consume()
+                else:
+                    val escaped = self.consume_escape()
+                    result = result + escaped
+            else:
+                result = result + c
+        self.logger.warn("Unterminated string")
+        CssToken.String(value: result)
+
+    me consume_numeric() -> CssToken:
+        var num_str = ""
+        var is_integer = true
+
+        # Optional sign
+        val first = self.peek()
+        if first == "+" or first == "-":
+            num_str = num_str + self.consume()
+
+        # Integer part
+        while not self.is_eof() and is_digit(self.peek()):
+            num_str = num_str + self.consume()
+
+        # Decimal part
+        if self.peek() == "." and is_digit(self.peek_at(1)):
+            is_integer = false
+            num_str = num_str + self.consume()  # the dot
+            while not self.is_eof() and is_digit(self.peek()):
+                num_str = num_str + self.consume()
+
+        # Exponent part
+        val e_char = self.peek()
+        if e_char == "e" or e_char == "E":
+            val after_e = self.peek_at(1)
+            val has_exp_digit = is_digit(after_e)
+            val has_sign_digit = (after_e == "+" or after_e == "-") and is_digit(self.peek_at(2))
+            if has_exp_digit or has_sign_digit:
+                is_integer = false
+                num_str = num_str + self.consume()  # e/E
+                if self.peek() == "+" or self.peek() == "-":
+                    num_str = num_str + self.consume()
+                while not self.is_eof() and is_digit(self.peek()):
+                    num_str = num_str + self.consume()
+
+        val value = num_str.to_f64()
+
+        # Check for percentage or dimension
+        if self.peek() == "%":
+            self.consume()
+            return CssToken.Percentage(value: value)
+
+        val p1 = self.peek()
+        val p2 = self.peek_at(1)
+        val p3 = self.peek_at(2)
+        if starts_identifier(p1, p2, p3):
+            val unit = self._consume_name()
+            return CssToken.Dimension(value: value, unit: unit)
+
+        CssToken.Number(value: value, is_integer: is_integer)
+
+    me _consume_name() -> text:
+        var result = ""
+        while not self.is_eof():
+            val c = self.peek()
+            if is_ident_char(c):
+                result = result + self.consume()
+            else if c == "\\":
+                val next = self.peek_at(1)
+                if next != "\n" and next != "":
+                    self.consume()
+                    val escaped = self.consume_escape()
+                    result = result + escaped
+                else:
+                    break
+            else:
+                break
+        result
+
+    me consume_ident() -> CssToken:
+        var name = self._consume_name()
+
+        # Check for function token
+        if self.peek() == "(":
+            self.consume()
+            val lower_name = name.to_lower()
+            if lower_name == "url":
+                return self.consume_url()
+            return CssToken.Function(name: name)
+
+        CssToken.Ident(value: name)
+
+    me consume_hash() -> CssToken:
+        # '#' already consumed by caller
+        val c = self.peek()
+        val c2 = self.peek_at(1)
+        val c3 = self.peek_at(2)
+        if is_ident_char(c) or c == "\\":
+            val is_id = starts_identifier(c, c2, c3)
+            val name = self._consume_name()
+            return CssToken.Hash(value: name, is_id: is_id)
+        CssToken.Delim(value: "#")
+
+    me consume_url() -> CssToken:
+        # Called after "url(" consumed. Handles both url(foo) and url("foo").
+        # Skip leading whitespace
+        while not self.is_eof() and is_whitespace(self.peek()):
+            self.consume()
+
+        if self.is_eof():
+            return CssToken.Url(value: "")
+
+        val first = self.peek()
+        # Quoted URL -- delegate to string token then wrap
+        if first == "\"" or first == "'":
+            val quote = self.consume()
+            val str_tok = self.consume_string(quote)
+            # Skip whitespace before closing paren
+            while not self.is_eof() and is_whitespace(self.peek()):
+                self.consume()
+            if self.peek() == ")":
+                self.consume()
+            match str_tok:
+                CssToken.String(value: v):
+                    return CssToken.Url(value: v)
+                _:
+                    return CssToken.BadUrl
+
+        # Unquoted URL
+        var url_value = ""
+        while not self.is_eof():
+            val c = self.consume()
+            if c == ")":
+                return CssToken.Url(value: url_value)
+            if is_whitespace(c):
+                # Skip whitespace, expect closing paren
+                while not self.is_eof() and is_whitespace(self.peek()):
+                    self.consume()
+                if self.peek() == ")":
+                    self.consume()
+                    return CssToken.Url(value: url_value)
+                # Bad URL -- consume remnants
+                self.logger.warn("Bad URL token")
+                return CssToken.BadUrl
+            if c == "\"" or c == "'" or c == "(":
+                self.logger.warn("Bad URL token: invalid char")
+                return CssToken.BadUrl
+            if c == "\\":
+                val next = self.peek()
+                if next == "\n" or next == "":
+                    return CssToken.BadUrl
+                val escaped = self.consume_escape()
+                url_value = url_value + escaped
+            else:
+                url_value = url_value + c
+        self.logger.warn("Unterminated URL")
+        CssToken.Url(value: url_value)
+
+    # --- Main tokenizer entry ---
+
+    me next_token() -> CssToken:
+        if self.is_eof():
+            return CssToken.Eof
+
+        val c = self.consume()
+
+        # Whitespace
+        if is_whitespace(c):
+            return self.consume_whitespace()
+
+        # Comments
+        if c == "/" and self.peek() == "*":
+            self.consume()
+            self.consume_comment()
+            return self.next_token()
+
+        # Strings
+        if c == "\"" or c == "'":
+            return self.consume_string(c)
+
+        # Hash
+        if c == "#":
+            return self.consume_hash()
+
+        # Numeric -- must check before ident due to sign ambiguity
+        val p1 = self.peek()
+        val p2 = self.peek_at(1)
+        if is_digit(c):
+            self.reconsume()
+            return self.consume_numeric()
+        if c == "." and is_digit(p1):
+            self.reconsume()
+            return self.consume_numeric()
+        if (c == "+" or c == "-") and starts_number(c, p1, p2):
+            self.reconsume()
+            return self.consume_numeric()
+
+        # At-keyword
+        if c == "@":
+            val a1 = self.peek()
+            val a2 = self.peek_at(1)
+            val a3 = self.peek_at(2)
+            if starts_identifier(a1, a2, a3):
+                val name = self._consume_name()
+                return CssToken.AtKeyword(value: name)
+            return CssToken.Delim(value: "@")
+
+        # Identifiers / functions
+        if is_ident_start(c):
+            self.reconsume()
+            return self.consume_ident()
+        if c == "-":
+            val n1 = self.peek()
+            val n2 = self.peek_at(1)
+            if starts_identifier(c, n1, n2):
+                self.reconsume()
+                return self.consume_ident()
+            # CDC -->
+            if n1 == "-" and n2 == ">":
+                self.consume()
+                self.consume()
+                return CssToken.CdcToken
+            return CssToken.Delim(value: "-")
+
+        # Backslash -- possibly escape
+        if c == "\\":
+            val next = self.peek()
+            if next != "\n":
+                self.reconsume()
+                return self.consume_ident()
+            return CssToken.Delim(value: "\\")
+
+        # CDO <!--
+        if c == "<":
+            if self.peek() == "!" and self.peek_at(1) == "-" and self.peek_at(2) == "-":
+                self.consume()
+                self.consume()
+                self.consume()
+                return CssToken.CdoToken
+            return CssToken.Delim(value: "<")
+
+        # Simple single-char tokens
+        if c == "(":
+            return CssToken.OpenParen
+        if c == ")":
+            return CssToken.CloseParen
+        if c == "[":
+            return CssToken.OpenBracket
+        if c == "]":
+            return CssToken.CloseBracket
+        if c == "{":
+            return CssToken.OpenBrace
+        if c == "}":
+            return CssToken.CloseBrace
+        if c == ":":
+            return CssToken.Colon
+        if c == ";":
+            return CssToken.Semicolon
+        if c == ",":
+            return CssToken.Comma
+
+        # Anything else is a delimiter
+        CssToken.Delim(value: c)

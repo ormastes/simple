@@ -1,0 +1,437 @@
+# @covers src/lib/common/sdn/ 60%
+"""
+# SDN Coverage Specification
+
+**Feature IDs:** #LIB-SDN
+**Category:** Stdlib
+**Difficulty:** 3/5
+**Status:** In Progress
+**Requirements:** N/A
+**Plan:** N/A
+**Design:** N/A
+**Research:** N/A
+
+## Overview
+
+Comprehensive branch-coverage tests for the SDN parser library:
+- `src/lib/common/sdn/` -- SDN value, lexer, parser, document, handler, error
+
+Targets 90%+ branch coverage by exercising both true and false branches of every
+conditional in each module.
+
+Split from `parsers_coverage_spec.spl` to avoid memory pressure (404 it-blocks hit 2048MB RSS cap).
+"""
+
+import std.spec
+
+use lib.sdn.value.{SdnValue, Span}
+use lib.sdn.error.{SdnError}
+use lib.sdn.lexer.{Token, TokenKind, Lexer, tokenize}
+use lib.sdn.parser.{parse, parse_untrusted, parse_config, parse_safe}
+
+
+# ============================================================================
+# SDN Value Types
+# ============================================================================
+
+describe "SDN Value":
+    """
+    ## SDN Value Construction and Access
+
+    Tests for SdnValue enum constructors, type checks, value extraction,
+    mutation, path access, type_name, and display.
+    """
+
+    context "constructors":
+        it "creates null":
+            val v = SdnValue.null()
+            expect(v.is_null()).to_equal(true)
+
+        it "creates bool true":
+            val v = SdnValue.bool(true)
+            expect(v.is_bool()).to_equal(true)
+
+        it "creates bool false":
+            val v = SdnValue.bool(false)
+            expect(v.is_bool()).to_equal(true)
+
+        it "creates int":
+            val v = SdnValue.int(42)
+            expect(v.is_int()).to_equal(true)
+
+        it "creates float":
+            val v = SdnValue.float(3.14)
+            expect(v.is_float()).to_equal(true)
+
+        it "creates string":
+            val v = SdnValue.string("hello")
+            expect(v.is_string()).to_equal(true)
+
+        it "creates array":
+            val v = SdnValue.array([SdnValue.int(1)])
+            expect(v.is_array()).to_equal(true)
+
+        it "creates empty array":
+            val v = SdnValue.empty_array()
+            expect(v.is_array()).to_equal(true)
+
+        it "creates dict":
+            val v = SdnValue.empty_dict()
+            expect(v.is_dict()).to_equal(true)
+
+    context "type checks - negative":
+        """Each type check returns false for other types."""
+
+        it "is_null false for non-null":
+            expect(SdnValue.int(1).is_null()).to_equal(false)
+
+        it "is_bool false for non-bool":
+            expect(SdnValue.int(1).is_bool()).to_equal(false)
+
+        it "is_int false for non-int":
+            expect(SdnValue.string("x").is_int()).to_equal(false)
+
+        it "is_float false for non-float":
+            expect(SdnValue.int(1).is_float()).to_equal(false)
+
+        it "is_number true for int":
+            expect(SdnValue.int(1).is_number()).to_equal(true)
+
+        it "is_number true for float":
+            expect(SdnValue.float(1.0).is_number()).to_equal(true)
+
+        it "is_number false for string":
+            expect(SdnValue.string("x").is_number()).to_equal(false)
+
+        it "is_string false for non-string":
+            expect(SdnValue.int(1).is_string()).to_equal(false)
+
+        it "is_array false for non-array":
+            expect(SdnValue.int(1).is_array()).to_equal(false)
+
+        it "is_dict false for non-dict":
+            expect(SdnValue.int(1).is_dict()).to_equal(false)
+
+        it "is_table false for non-table":
+            expect(SdnValue.int(1).is_table()).to_equal(false)
+
+    context "value extraction":
+        it "as_bool returns Some for bool":
+            val b = SdnValue.bool(true).as_bool()
+            expect(b.?).to_equal(true)
+
+        it "as_bool returns nil for non-bool":
+            val b = SdnValue.int(1).as_bool()
+            expect(b.?).to_equal(false)
+
+        it "as_i64 returns Some for int":
+            val i = SdnValue.int(42).as_i64()
+            expect(i.?).to_equal(true)
+
+        it "as_i64 returns nil for non-int":
+            val i = SdnValue.string("x").as_i64()
+            expect(i.?).to_equal(false)
+
+        it "as_f64 returns Some for float":
+            val f = SdnValue.float(3.14).as_f64()
+            expect(f.?).to_equal(true)
+
+        it "as_f64 returns Some for int (coercion)":
+            val f = SdnValue.int(42).as_f64()
+            expect(f.?).to_equal(true)
+
+        it "as_f64 returns nil for non-numeric":
+            val f = SdnValue.string("x").as_f64()
+            expect(f.?).to_equal(false)
+
+        it "as_str returns Some for string":
+            val s = SdnValue.string("hi").as_str()
+            expect(s.?).to_equal(true)
+
+        it "as_str returns nil for non-string":
+            val s = SdnValue.int(1).as_str()
+            expect(s.?).to_equal(false)
+
+        it "as_array returns Some for array":
+            val a = SdnValue.array([SdnValue.int(1)]).as_array()
+            expect(a.?).to_equal(true)
+
+        it "as_array returns nil for non-array":
+            val a = SdnValue.int(1).as_array()
+            expect(a.?).to_equal(false)
+
+        it "as_dict returns Some for dict":
+            val d = SdnValue.empty_dict().as_dict()
+            expect(d.?).to_equal(true)
+
+        it "as_dict returns nil for non-dict":
+            val d = SdnValue.int(1).as_dict()
+            expect(d.?).to_equal(false)
+
+    context "mutation":
+        it "insert into dict succeeds":
+            var d = SdnValue.empty_dict()
+            val ok = d.insert("key", SdnValue.string("value"))
+            expect(ok).to_equal(true)
+
+        it "insert into non-dict returns false":
+            var v = SdnValue.int(1)
+            val ok = v.insert("key", SdnValue.string("value"))
+            expect(ok).to_equal(false)
+
+        it "push into array succeeds":
+            var arr = SdnValue.empty_array()
+            val ok = arr.push(SdnValue.int(1))
+            expect(ok).to_equal(true)
+
+        it "push into non-array returns false":
+            var v = SdnValue.int(1)
+            val ok = v.push(SdnValue.int(2))
+            expect(ok).to_equal(false)
+
+    context "get and get_path":
+        it "get by key from dict":
+            var d = SdnValue.empty_dict()
+            d.insert("name", SdnValue.string("Alice"))
+            val result = d.get("name")
+            expect(result.?).to_equal(true)
+
+        it "get returns nil for missing key":
+            val d = SdnValue.empty_dict()
+            val result = d.get("missing")
+            expect(result.?).to_equal(false)
+
+        it "get returns nil for non-dict non-array":
+            val v = SdnValue.int(1)
+            val result = v.get("x")
+            expect(result.?).to_equal(false)
+
+        it "get by index from array":
+            val arr = SdnValue.array([SdnValue.int(10), SdnValue.int(20)])
+            val result = arr.get("0")
+            expect(result.?).to_equal(true)
+
+        it "get by out-of-bounds index returns nil":
+            val arr = SdnValue.array([SdnValue.int(10)])
+            val result = arr.get("5")
+            expect(result.?).to_equal(false)
+
+    context "type_name":
+        it "returns correct type names":
+            expect(SdnValue.Null.type_name()).to_equal("null")
+            expect(SdnValue.bool(true).type_name()).to_equal("bool")
+            expect(SdnValue.int(1).type_name()).to_equal("int")
+            expect(SdnValue.float(1.0).type_name()).to_equal("float")
+            expect(SdnValue.string("x").type_name()).to_equal("string")
+            expect(SdnValue.empty_array().type_name()).to_equal("array")
+            expect(SdnValue.empty_dict().type_name()).to_equal("dict")
+
+    context "to_text display":
+        it "displays null":
+            expect(SdnValue.Null.to_text()).to_equal("null")
+
+        it "displays true":
+            expect(SdnValue.bool(true).to_text()).to_equal("true")
+
+        it "displays false":
+            expect(SdnValue.bool(false).to_text()).to_equal("false")
+
+        it "displays integer":
+            expect(SdnValue.int(42).to_text()).to_equal("42")
+
+        it "displays simple string without quotes":
+            expect(SdnValue.string("hello").to_text()).to_equal("hello")
+
+        it "displays string with spaces in quotes":
+            val result = SdnValue.string("hello world").to_text()
+            expect(result).to_start_with("\"")
+            expect(result).to_end_with("\"")
+
+        it "displays empty array":
+            expect(SdnValue.empty_array().to_text()).to_equal("[]")
+
+        it "displays array with items":
+            val arr = SdnValue.array([SdnValue.int(1), SdnValue.int(2)])
+            val result = arr.to_text()
+            expect(result).to_equal("[1, 2]")
+
+
+# ============================================================================
+# SDN Span
+# ============================================================================
+
+describe "SDN Span":
+    """
+    ## Span Location Tracking
+
+    Tests for Span struct constructors and merge.
+    """
+
+    context "construction":
+        it "creates empty span":
+            val s = Span.empty()
+            expect(s.start).to_equal(0)
+            expect(s.end).to_equal(0)
+            expect(s.line).to_equal(0)
+            expect(s.column).to_equal(0)
+
+        it "creates span with values":
+            val s = Span(start: 10, end: 20, line: 1, column: 5)
+            expect(s.start).to_equal(10)
+            expect(s.end).to_equal(20)
+
+    context "merge":
+        it "merges two spans":
+            val a = Span(start: 0, end: 5, line: 1, column: 0)
+            val b = Span(start: 5, end: 10, line: 1, column: 5)
+            val merged = a.merge(b)
+            expect(merged.start).to_equal(0)
+            expect(merged.end).to_equal(10)
+
+
+# ============================================================================
+# SDN Lexer
+# ============================================================================
+
+describe "SDN Lexer":
+    """
+    ## SDN Tokenization
+
+    Tests for SDN tokenize function.
+    """
+
+    context "tokenize":
+        it "tokenizes simple key-value":
+            val tokens = tokenize("name: Alice")
+            expect(tokens.len()).to_be_greater_than(0)
+
+        it "tokenizes integer value":
+            val tokens = tokenize("count: 42")
+            expect(tokens.len()).to_be_greater_than(0)
+
+        it "tokenizes boolean":
+            val tokens = tokenize("flag: true")
+            expect(tokens.len()).to_be_greater_than(0)
+
+        it "tokenizes empty input":
+            val tokens = tokenize("")
+            expect(tokens.len()).to_equal(0)
+
+
+# ============================================================================
+# SDN Parser
+# ============================================================================
+
+describe "SDN Parser":
+    """
+    ## SDN Parsing
+
+    Tests for parse, parse_untrusted, parse_config, parse_safe functions.
+    """
+
+    context "parse valid input":
+        it "parses simple key-value":
+            val result = parse("name: Alice")
+            match result:
+                case Ok(v):
+                    expect(v.is_dict()).to_equal(true)
+                case Err(e):
+                    expect("parse failed").to_equal("should not fail")
+
+        it "parses integer value":
+            val result = parse("count: 42")
+            match result:
+                case Ok(v):
+                    expect(v.is_dict()).to_equal(true)
+                case Err(e):
+                    expect("parse failed").to_equal("should not fail")
+
+        it "parses boolean values":
+            val result = parse("flag: true")
+            match result:
+                case Ok(v):
+                    expect(v.is_dict()).to_equal(true)
+                case Err(e):
+                    expect("parse failed").to_equal("should not fail")
+
+        it "parses array value":
+            val result = parse("items: [1, 2, 3]")
+            match result:
+                case Ok(v):
+                    expect(v.is_dict()).to_equal(true)
+                case Err(e):
+                    expect("parse failed").to_equal("should not fail")
+
+        it "parses multiple key-values":
+            val result = parse("name: Alice\nage: 30")
+            match result:
+                case Ok(v):
+                    expect(v.is_dict()).to_equal(true)
+                case Err(e):
+                    expect("parse failed").to_equal("should not fail")
+
+    context "parse_untrusted":
+        it "parses with size limits":
+            val result = parse_untrusted("name: Alice")
+            match result:
+                case Ok(v):
+                    expect(v.is_dict()).to_equal(true)
+                case Err(e):
+                    expect("parse failed").to_equal("should not fail")
+
+    context "parse_config":
+        it "parses config-style input":
+            val result = parse_config("name: Alice")
+            match result:
+                case Ok(v):
+                    expect(v.is_dict()).to_equal(true)
+                case Err(e):
+                    expect("parse failed").to_equal("should not fail")
+
+    context "parse_safe":
+        it "parses safely":
+            val result = parse_safe("name: Alice")
+            match result:
+                case Ok(v):
+                    expect(v.is_dict()).to_equal(true)
+                case Err(e):
+                    expect("parse failed").to_equal("should not fail")
+
+
+# ============================================================================
+# SDN Error
+# ============================================================================
+
+describe "SDN Error":
+    """
+    ## SDN Error Types
+
+    Tests for SdnError constructors and methods.
+    """
+
+    context "error constructors":
+        it "creates syntax error":
+            val err = SdnError.syntax_error("bad token", 1, 5)
+            expect(err.message()).to_contain("bad token")
+
+        it "creates syntax error with span":
+            val span = Span(start: 0, end: 5, line: 1, column: 0)
+            val err = SdnError.syntax_error_with_span("bad", span)
+            expect(err.message()).to_contain("bad")
+
+        it "creates unexpected token error":
+            val span = Span(start: 0, end: 1, line: 1, column: 0)
+            val err = SdnError.unexpected_token("COLON", "IDENT", span)
+            expect(err.message()).to_contain("COLON")
+
+        it "creates security error":
+            val span = Span(start: 0, end: 1, line: 1, column: 0)
+            val err = SdnError.security_error("blocked", span)
+            expect(err.is_security_error()).to_equal(true)
+
+        it "non-security error returns false":
+            val err = SdnError.syntax_error("msg", 1, 1)
+            expect(err.is_security_error()).to_equal(false)
+
+
+# @allow(unnamed_duplicate_typed_args)

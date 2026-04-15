@@ -1,0 +1,528 @@
+#![allow(unnamed_duplicate_typed_args)]
+# Screenshot Comparison Engine
+#
+# Pixel-level comparison of two ARGB u32 pixel buffers.
+# Used to verify visual consistency between native (winit) and
+# browser engine rendering backends.
+#
+# All comparisons operate on [u32] arrays in ARGB (0xAARRGGBB) format.
+
+use os.compositor.tolerance_profile.{ToleranceProfile}
+
+# ============================================================================
+# Comparison Result
+# ============================================================================
+
+struct ComparisonResult:
+    """Result of comparing two pixel buffers."""
+    total_pixels: i64
+    matching_pixels: i64
+    different_pixels: i64
+    match_percentage: i64    # 0-10000 (100.00% * 100 for integer precision)
+    max_channel_diff: i32
+    total_channel_diff: i64
+
+struct DiffRegion:
+    """A rectangular region containing differing pixels."""
+    x: i32
+    y: i32
+    w: i32
+    h: i32
+    pixel_count: i32
+
+# ============================================================================
+# Core Comparison Functions
+# ============================================================================
+
+fn compare_pixel_buffers(a: [u32], b: [u32], width: i32, height: i32, threshold: i32) -> ComparisonResult:
+    """Compare two pixel buffers with a per-channel threshold.
+
+    Args:
+        a: First pixel buffer (ARGB u32 array)
+        b: Second pixel buffer (ARGB u32 array)
+        width: Image width in pixels
+        height: Image height in pixels
+        threshold: Maximum allowed per-channel difference (0 = exact match)
+
+    Returns:
+        ComparisonResult with match statistics
+    """
+    val total: i64 = width.to_i64() * height.to_i64()
+    var matching: i64 = 0
+    var different: i64 = 0
+    var max_diff: i32 = 0
+    var total_diff: i64 = 0
+
+    var i: i32 = 0
+    val len = if a.len() < b.len(): a.len() else: b.len()
+    while i < len:
+        val pa = a[i]
+        val pb = b[i]
+
+        # Extract ARGB channels. Alpha is included so comparison matches the
+        # full pixel format, not just visible RGB.
+        val ra: i32 = ((pa >> 16) & 0xFF).to_i32()
+        val ga: i32 = ((pa >> 8) & 0xFF).to_i32()
+        val ba_ch: i32 = (pa & 0xFF).to_i32()
+        val aa: i32 = ((pa >> 24) & 0xFF).to_i32()
+
+        val rb: i32 = ((pb >> 16) & 0xFF).to_i32()
+        val gb: i32 = ((pb >> 8) & 0xFF).to_i32()
+        val bb: i32 = (pb & 0xFF).to_i32()
+        val ab: i32 = ((pb >> 24) & 0xFF).to_i32()
+
+        val dr = abs_i32(ra - rb)
+        val dg = abs_i32(ga - gb)
+        val db = abs_i32(ba_ch - bb)
+        val da = abs_i32(aa - ab)
+
+        var max_ch = max3_i32(dr, dg, db)
+        if da > max_ch:
+            max_ch = da
+        total_diff = total_diff + dr.to_i64() + dg.to_i64() + db.to_i64() + da.to_i64()
+
+        if max_ch > max_diff:
+            max_diff = max_ch
+
+        if max_ch <= threshold:
+            matching = matching + 1
+        else:
+            different = different + 1
+
+        i = i + 1
+
+    # Handle size mismatch — extra pixels count as different
+    if a.len() != b.len():
+        val extra = abs_i64(a.len().to_i64() - b.len().to_i64())
+        different = different + extra
+
+    val pct = if total > 0: (matching * 10000) / total else: 0
+
+    ComparisonResult(
+        total_pixels: total,
+        matching_pixels: matching,
+        different_pixels: different,
+        match_percentage: pct,
+        max_channel_diff: max_diff,
+        total_channel_diff: total_diff
+    )
+
+fn compare_exact(a: [u32], b: [u32], width: i32, height: i32) -> ComparisonResult:
+    """Compare two pixel buffers for exact match (threshold = 0)."""
+    compare_pixel_buffers(a, b, width, height, 0)
+
+# ============================================================================
+# Diff Image Generation
+# ============================================================================
+
+fn generate_diff_image(a: [u32], b: [u32], width: i32, height: i32) -> [u32]:
+    """Generate a visual diff image.
+
+    Matching pixels are shown in green, different pixels in red.
+    Brightness of the color indicates the magnitude of the difference.
+
+    Returns a new [u32] pixel buffer.
+    """
+    generate_diff_image_threshold(a, b, width, height, 0)
+
+# ============================================================================
+# Report Generation
+# ============================================================================
+
+fn print_comparison_report(result: ComparisonResult):
+    """Print a human-readable comparison report."""
+    val pct_whole = result.match_percentage / 100
+    val pct_frac = result.match_percentage % 100
+    print "=========================================="
+    print "  Screenshot Comparison Report"
+    print "=========================================="
+    print "  Total pixels:     {result.total_pixels}"
+    print "  Matching pixels:  {result.matching_pixels}"
+    print "  Different pixels: {result.different_pixels}"
+    print "  Match:            {pct_whole}.{pct_frac}%"
+    print "  Max channel diff: {result.max_channel_diff}"
+    print "  Total channel diff: {result.total_channel_diff}"
+    if result.different_pixels == 0:
+        print "  Result: IDENTICAL"
+    else:
+        if pct_whole >= 95:
+            print "  Result: SIMILAR (>= 95%)"
+        else:
+            if pct_whole >= 80:
+                print "  Result: MODERATE DIFFERENCES"
+            else:
+                print "  Result: SIGNIFICANT DIFFERENCES"
+    print "=========================================="
+
+fn format_percentage(match_pct: i64) -> text:
+    """Format match percentage (0-10000) as 'XX.XX%' string."""
+    val whole = match_pct / 100
+    val frac = match_pct % 100
+    "{whole}.{frac}%"
+
+# ============================================================================
+# Convenience: Compare With Tolerance
+# ============================================================================
+
+fn compare_with_tolerance(a: [u32], b: [u32], width: i32, height: i32, threshold: i32, min_pct: i64) -> bool:
+    """Compare two pixel buffers and return true if match percentage >= min_pct.
+
+    Args:
+        a, b: Pixel buffers to compare
+        width, height: Image dimensions
+        threshold: Per-channel tolerance (0 = exact)
+        min_pct: Minimum acceptable match percentage (0-10000, e.g. 9990 = 99.90%)
+
+    Returns:
+        true if match_percentage >= min_pct
+    """
+    val result = compare_pixel_buffers(a, b, width, height, threshold)
+    result.match_percentage >= min_pct
+
+# ============================================================================
+# Multi-Backend Report
+# ============================================================================
+
+struct BackendCompareEntry:
+    """Single row in a multi-backend comparison report."""
+    backend_name: text
+    result: ComparisonResult
+    threshold: i32
+    passed: bool
+
+fn print_multi_backend_report(demo_name: text, baseline_name: text, entries: [BackendCompareEntry]):
+    """Print a summary table of cross-backend comparison results.
+
+    Args:
+        demo_name: Name of the demo/test being compared
+        baseline_name: Name of the baseline backend (e.g. "software")
+        entries: List of comparison results against the baseline
+    """
+    print "=========================================="
+    print "  Cross-Backend Comparison Report"
+    print "=========================================="
+    print "  Demo: {demo_name}"
+    print "  Baseline: {baseline_name}"
+    print ""
+    print "  Backend    | Match%  | MaxDiff | Thresh | Status"
+    print "  -----------|---------|---------|--------|-------"
+    for entry in entries:
+        val pct_w = entry.result.match_percentage / 100
+        val pct_f = entry.result.match_percentage % 100
+        val pct_str = "{pct_w}.{pct_f}%"
+        val status = if entry.passed: "PASS" else: "FAIL"
+        print "  {entry.backend_name} | {pct_str} | {entry.result.max_channel_diff} | {entry.threshold} | {status}"
+    print "=========================================="
+
+# ============================================================================
+# Helper Functions
+# ============================================================================
+
+fn abs_i32(x: i32) -> i32:
+    if x < 0: return 0 - x
+    x
+
+fn abs_i64(x: i64) -> i64:
+    if x < 0: return 0 - x
+    x
+
+fn max3_i32(a: i32, b: i32, c: i32) -> i32:
+    var m = a
+    if b > m: m = b
+    if c > m: m = c
+    m
+
+fn max4_i32(a: i32, b: i32, c: i32, d: i32) -> i32:
+    var m = max3_i32(a, b, c)
+    if d > m: m = d
+    m
+
+# ============================================================================
+# Per-Channel Comparison (Bit-Field Level)
+# ============================================================================
+
+struct ChannelDiffResult:
+    """Result of comparing a single color channel across two buffers."""
+    channel: text       # "R", "G", "B", "A"
+    matching: i64
+    different: i64
+    match_pct: i64      # 0-10000 (100.00% * 100)
+    max_diff: i32
+
+fn compare_per_channel(a: [u32], b: [u32], width: i32, height: i32, threshold: i32) -> [ChannelDiffResult]:
+    """Compare two pixel buffers channel-by-channel (R, G, B, A).
+
+    Returns a list of 4 ChannelDiffResult, one per channel.
+    Each channel is compared independently at bit-field level.
+    """
+    val total: i64 = width.to_i64() * height.to_i64()
+    val len = if a.len() < b.len(): a.len() else: b.len()
+
+    var r_match: i64 = 0
+    var g_match: i64 = 0
+    var b_match: i64 = 0
+    var a_match: i64 = 0
+    var r_max: i32 = 0
+    var g_max: i32 = 0
+    var b_max: i32 = 0
+    var a_max: i32 = 0
+
+    var i: i32 = 0
+    while i < len:
+        val pa = a[i]
+        val pb = b[i]
+
+        val ra: i32 = ((pa >> 16) & 0xFF).to_i32()
+        val ga: i32 = ((pa >> 8) & 0xFF).to_i32()
+        val ba_ch: i32 = (pa & 0xFF).to_i32()
+        val aa: i32 = ((pa >> 24) & 0xFF).to_i32()
+
+        val rb: i32 = ((pb >> 16) & 0xFF).to_i32()
+        val gb: i32 = ((pb >> 8) & 0xFF).to_i32()
+        val bb: i32 = (pb & 0xFF).to_i32()
+        val ab: i32 = ((pb >> 24) & 0xFF).to_i32()
+
+        val dr = abs_i32(ra - rb)
+        val dg = abs_i32(ga - gb)
+        val db = abs_i32(ba_ch - bb)
+        val da = abs_i32(aa - ab)
+
+        if dr <= threshold: r_match = r_match + 1
+        if dg <= threshold: g_match = g_match + 1
+        if db <= threshold: b_match = b_match + 1
+        if da <= threshold: a_match = a_match + 1
+
+        if dr > r_max: r_max = dr
+        if dg > g_max: g_max = dg
+        if db > b_max: b_max = db
+        if da > a_max: a_max = da
+
+        i = i + 1
+
+    val r_pct = if total > 0: (r_match * 10000) / total else: 0
+    val g_pct = if total > 0: (g_match * 10000) / total else: 0
+    val b_pct = if total > 0: (b_match * 10000) / total else: 0
+    val a_pct = if total > 0: (a_match * 10000) / total else: 0
+
+    [
+        ChannelDiffResult(channel: "R", matching: r_match, different: total - r_match, match_pct: r_pct, max_diff: r_max),
+        ChannelDiffResult(channel: "G", matching: g_match, different: total - g_match, match_pct: g_pct, max_diff: g_max),
+        ChannelDiffResult(channel: "B", matching: b_match, different: total - b_match, match_pct: b_pct, max_diff: b_max),
+        ChannelDiffResult(channel: "A", matching: a_match, different: total - a_match, match_pct: a_pct, max_diff: a_max)
+    ]
+
+fn print_channel_report(channels: [ChannelDiffResult]):
+    """Print per-channel comparison results."""
+    print "  Per-Channel Breakdown:"
+    for ch in channels:
+        val pct_whole = ch.match_pct / 100
+        val pct_frac = ch.match_pct % 100
+        print "    {ch.channel}: {pct_whole}.{pct_frac}% match (max diff: {ch.max_diff})"
+
+# ============================================================================
+# Diff Region Detection
+# ============================================================================
+
+fn find_diff_regions(a: [u32], b: [u32], width: i32, height: i32, threshold: i32) -> [DiffRegion]:
+    """Find rectangular regions containing differing pixels.
+
+    Uses scanline-based detection: scans rows for runs of differing
+    pixels and merges adjacent rows into bounding rectangles.
+    Returns a list of DiffRegion bounding boxes.
+    """
+    var regions: [DiffRegion] = []
+    val len = if a.len() < b.len(): a.len() else: b.len()
+
+    # Track per-row diff spans
+    var y: i32 = 0
+    while y < height:
+        var x: i32 = 0
+        while x < width:
+            val idx = y * width + x
+            if idx >= len:
+                x = x + 1
+                continue
+
+            val pa = a[idx]
+            val pb = b[idx]
+            val ra: i32 = ((pa >> 16) & 0xFF).to_i32()
+            val ga: i32 = ((pa >> 8) & 0xFF).to_i32()
+            val ba_ch: i32 = (pa & 0xFF).to_i32()
+            val aa: i32 = ((pa >> 24) & 0xFF).to_i32()
+            val rb: i32 = ((pb >> 16) & 0xFF).to_i32()
+            val gb: i32 = ((pb >> 8) & 0xFF).to_i32()
+            val bb: i32 = (pb & 0xFF).to_i32()
+            val ab: i32 = ((pb >> 24) & 0xFF).to_i32()
+            val max_ch = max4_i32(
+                abs_i32(ra - rb), abs_i32(ga - gb),
+                abs_i32(ba_ch - bb), abs_i32(aa - ab))
+
+            if max_ch > threshold:
+                # Found start of a diff run
+                val start_x = x
+                while x < width:
+                    val idx2 = y * width + x
+                    if idx2 >= len:
+                        break
+                    val pa2 = a[idx2]
+                    val pb2 = b[idx2]
+                    val r2a: i32 = ((pa2 >> 16) & 0xFF).to_i32()
+                    val g2a: i32 = ((pa2 >> 8) & 0xFF).to_i32()
+                    val b2a: i32 = (pa2 & 0xFF).to_i32()
+                    val a2a: i32 = ((pa2 >> 24) & 0xFF).to_i32()
+                    val r2b: i32 = ((pb2 >> 16) & 0xFF).to_i32()
+                    val g2b: i32 = ((pb2 >> 8) & 0xFF).to_i32()
+                    val b2b: i32 = (pb2 & 0xFF).to_i32()
+                    val a2b: i32 = ((pb2 >> 24) & 0xFF).to_i32()
+                    val mc2 = max4_i32(
+                        abs_i32(r2a - r2b), abs_i32(g2a - g2b),
+                        abs_i32(b2a - b2b), abs_i32(a2a - a2b))
+                    if mc2 <= threshold:
+                        break
+                    x = x + 1
+
+                val run_w = x - start_x
+                # Try to merge with an existing region on the previous row
+                var merged = false
+                var ri: i32 = 0
+                while ri < regions.len():
+                    val r = regions[ri]
+                    if r.y + r.h == y and r.x <= start_x + 2 and r.x + r.w >= start_x - 2:
+                        # Merge: expand bounding box
+                        val new_x = if start_x < r.x: start_x else: r.x
+                        val new_right = if x > r.x + r.w: x else: r.x + r.w
+                        regions[ri] = DiffRegion(
+                            x: new_x, y: r.y,
+                            w: new_right - new_x, h: r.h + 1,
+                            pixel_count: r.pixel_count + run_w
+                        )
+                        merged = true
+                        break
+                    ri = ri + 1
+
+                if not merged:
+                    regions = regions + [DiffRegion(
+                        x: start_x, y: y,
+                        w: run_w, h: 1,
+                        pixel_count: run_w
+                    )]
+            x = x + 1
+        y = y + 1
+
+    regions
+
+# ============================================================================
+# Profile-Based Comparison
+# ============================================================================
+
+fn compare_with_profile(a: [u32], b: [u32], width: i32, height: i32, profile: ToleranceProfile) -> ComparisonResult:
+    """Compare two pixel buffers using a tolerance profile.
+
+    Uses the profile's default_threshold for the comparison.
+
+    Args:
+        a, b: Pixel buffers to compare
+        width, height: Image dimensions
+        profile: ToleranceProfile with default_threshold field
+
+    Returns:
+        ComparisonResult with match statistics
+    """
+    val threshold: i32 = profile.default_threshold
+    compare_pixel_buffers(a, b, width, height, threshold)
+
+# ============================================================================
+# Extended Diff Image (with threshold)
+# ============================================================================
+
+fn generate_diff_image_threshold(a: [u32], b: [u32], width: i32, height: i32, threshold: i32) -> [u32]:
+    """Generate a visual diff image with threshold-based matching.
+
+    Pixels within threshold are shown in green, beyond threshold in red.
+    """
+    var result: [u32] = []
+    val len = if a.len() < b.len(): a.len() else: b.len()
+    var i: i32 = 0
+    while i < len:
+        val pa = a[i]
+        val pb = b[i]
+
+        val ra: i32 = ((pa >> 16) & 0xFF).to_i32()
+        val ga: i32 = ((pa >> 8) & 0xFF).to_i32()
+        val ba_ch: i32 = (pa & 0xFF).to_i32()
+        val aa: i32 = ((pa >> 24) & 0xFF).to_i32()
+
+        val rb: i32 = ((pb >> 16) & 0xFF).to_i32()
+        val gb: i32 = ((pb >> 8) & 0xFF).to_i32()
+        val bb: i32 = (pb & 0xFF).to_i32()
+        val ab: i32 = ((pb >> 24) & 0xFF).to_i32()
+
+        val dr = abs_i32(ra - rb)
+        val dg = abs_i32(ga - gb)
+        val db = abs_i32(ba_ch - bb)
+        val da = abs_i32(aa - ab)
+        val max_ch = max4_i32(dr, dg, db, da)
+
+        if max_ch <= threshold:
+            # Match — green tint
+            val green_r = (ra / 2).to_u32()
+            val green_g = (ga / 2 + 128).to_u32()
+            val green_b = (ba_ch / 2).to_u32()
+            val clamped_g = if green_g > 255: 255 else: green_g
+            result = result + [0xFF000000 | (green_r << 16) | (clamped_g << 8) | green_b]
+        else:
+            # Difference — red
+            val brightness = if max_ch * 3 > 255: 255 else: max_ch * 3
+            val red_val = (128 + brightness / 2).to_u32()
+            val clamped_r = if red_val > 255: 255 else: red_val
+            result = result + [0xFF000000 | (clamped_r << 16)]
+
+        i = i + 1
+
+    while i < width * height:
+        result = result + [0xFFFF0000]
+        i = i + 1
+
+    result
+
+# ============================================================================
+# Single-Channel Diff Image
+# ============================================================================
+
+fn generate_channel_diff_image(a: [u32], b: [u32], width: i32, height: i32, channel: text) -> [u32]:
+    """Generate a grayscale diff image for a single channel.
+
+    Intensity = magnitude of difference in the specified channel.
+    Channel must be "R", "G", "B", or "A".
+    """
+    var result: [u32] = []
+    val len = if a.len() < b.len(): a.len() else: b.len()
+
+    var i: i32 = 0
+    while i < len:
+        val pa = a[i]
+        val pb = b[i]
+
+        var diff: i32 = 0
+        if channel == "R":
+            diff = abs_i32(((pa >> 16) & 0xFF).to_i32() - ((pb >> 16) & 0xFF).to_i32())
+        elif channel == "G":
+            diff = abs_i32(((pa >> 8) & 0xFF).to_i32() - ((pb >> 8) & 0xFF).to_i32())
+        elif channel == "B":
+            diff = abs_i32((pa & 0xFF).to_i32() - (pb & 0xFF).to_i32())
+        elif channel == "A":
+            diff = abs_i32(((pa >> 24) & 0xFF).to_i32() - ((pb >> 24) & 0xFF).to_i32())
+
+        # Scale diff to grayscale (0=black=no diff, 255=white=max diff)
+        val intensity = if diff > 255: 255 else: diff
+        val gray = intensity.to_u32()
+        result = result + [0xFF000000 | (gray << 16) | (gray << 8) | gray]
+
+        i = i + 1
+
+    # Pad if sizes differ
+    while i < width * height:
+        result = result + [0xFFFF00FF]  # Magenta for missing pixels
+        i = i + 1
+
+    result

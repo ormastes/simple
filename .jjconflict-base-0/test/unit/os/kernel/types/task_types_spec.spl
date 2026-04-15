@@ -1,0 +1,303 @@
+"""
+# Task Types Specification
+
+**Feature IDs:** #OS-002
+**Category:** Runtime
+**Difficulty:** 2/5
+**Status:** Implemented
+**Requirements:** N/A
+**Plan:** N/A
+**Design:** N/A
+**Research:** N/A
+
+## Overview
+
+Tests for TaskId, TaskState, TaskPriority, TaskContext, and BlockReason
+kernel types. Validates construction and field access for all task-related
+structures used by the scheduler, IPC, and capability layers.
+"""
+
+use std.spec.{describe, it, expect}
+use os.kernel.types.task_types.{TaskId, TaskState, TaskPriority, TaskContext, BlockReason, UserLoadSegment, UserProcessImage}
+
+
+# ============================================================================
+# Test Group 1: TaskId
+# ============================================================================
+
+describe "TaskId":
+    it "stores the task identifier":
+        val id = TaskId(id: 1)
+        expect(id.id).to_equal(1)
+
+    it "supports zero id":
+        val id = TaskId(id: 0)
+        expect(id.id).to_equal(0)
+
+    it "supports large id":
+        val id = TaskId(id: 999999)
+        expect(id.id).to_equal(999999)
+
+    it "can compare two equal ids":
+        val a = TaskId(id: 42)
+        val b = TaskId(id: 42)
+        expect(a.id).to_equal(b.id)
+
+    it "can distinguish different ids":
+        val a = TaskId(id: 1)
+        val b = TaskId(id: 2)
+        val same = a.id == b.id
+        expect(same).to_equal(false)
+
+
+# ============================================================================
+# Test Group 2: TaskState
+# ============================================================================
+
+describe "TaskState":
+    describe "Ready":
+        it "can be constructed":
+            val state = TaskState.Ready
+            val is_ready = match state:
+                TaskState.Ready: true
+                _: false
+            expect(is_ready).to_equal(true)
+
+    describe "Running":
+        it "can be constructed":
+            val state = TaskState.Running
+            val is_running = match state:
+                TaskState.Running: true
+                _: false
+            expect(is_running).to_equal(true)
+
+    describe "Blocked":
+        it "can be constructed with IpcRecv reason":
+            val reason = BlockReason.IpcRecv(port: 5)
+            val state = TaskState.Blocked(reason: reason)
+            val is_blocked = match state:
+                TaskState.Blocked(reason): true
+                _: false
+            expect(is_blocked).to_equal(true)
+
+        it "can be constructed with Sleep reason":
+            val reason = BlockReason.Sleep(until_ns: 1000000)
+            val state = TaskState.Blocked(reason: reason)
+            val is_blocked = match state:
+                TaskState.Blocked(reason): true
+                _: false
+            expect(is_blocked).to_equal(true)
+
+    describe "Zombie":
+        it "can be constructed":
+            val state = TaskState.Zombie
+            val is_zombie = match state:
+                TaskState.Zombie: true
+                _: false
+            expect(is_zombie).to_equal(true)
+
+
+# ============================================================================
+# Test Group 3: TaskPriority
+# ============================================================================
+
+describe "TaskPriority":
+    describe "Realtime":
+        it "can be constructed":
+            val prio = TaskPriority.Realtime
+            val is_rt = match prio:
+                TaskPriority.Realtime: true
+                _: false
+            expect(is_rt).to_equal(true)
+
+    describe "High":
+        it "can be constructed":
+            val prio = TaskPriority.High
+            val is_high = match prio:
+                TaskPriority.High: true
+                _: false
+            expect(is_high).to_equal(true)
+
+    describe "Normal":
+        it "can be constructed":
+            val prio = TaskPriority.Normal
+            val is_normal = match prio:
+                TaskPriority.Normal: true
+                _: false
+            expect(is_normal).to_equal(true)
+
+    describe "Low":
+        it "can be constructed":
+            val prio = TaskPriority.Low
+            val is_low = match prio:
+                TaskPriority.Low: true
+                _: false
+            expect(is_low).to_equal(true)
+
+    describe "Idle":
+        it "can be constructed":
+            val prio = TaskPriority.Idle
+            val is_idle = match prio:
+                TaskPriority.Idle: true
+                _: false
+            expect(is_idle).to_equal(true)
+
+
+# ============================================================================
+# Test Group 4: BlockReason
+# ============================================================================
+
+describe "BlockReason":
+    it "IpcRecv carries port number":
+        val reason = BlockReason.IpcRecv(port: 42)
+        val port_val = match reason:
+            BlockReason.IpcRecv(port): port
+            _: 0
+        expect(port_val).to_equal(42)
+
+    it "IpcSend carries port number":
+        val reason = BlockReason.IpcSend(port: 7)
+        val port_val = match reason:
+            BlockReason.IpcSend(port): port
+            _: 0
+        expect(port_val).to_equal(7)
+
+    it "Sleep carries timestamp":
+        val reason = BlockReason.Sleep(until_ns: 5000000)
+        val ts = match reason:
+            BlockReason.Sleep(until_ns): until_ns
+            _: 0
+        expect(ts).to_equal(5000000)
+
+    it "PageFault carries faulting address":
+        val reason = BlockReason.PageFault(addr: 0xDEAD)
+        val fault_addr = match reason:
+            BlockReason.PageFault(addr): addr
+            _: 0
+        expect(fault_addr).to_equal(0xDEAD)
+
+    it "Exit has no payload":
+        val reason = BlockReason.Exit
+        val is_exit = match reason:
+            BlockReason.Exit: true
+            _: false
+        expect(is_exit).to_equal(true)
+
+
+# ============================================================================
+# Test Group 5: TaskContext
+# ============================================================================
+
+describe "TaskContext":
+    it "stores general-purpose registers":
+        val ctx = TaskContext(
+            rax: 1, rbx: 2, rcx: 3, rdx: 4,
+            rsi: 5, rdi: 6, rbp: 7, rsp: 8,
+            r8: 9, r9: 10, r10: 11, r11: 12,
+            r12: 13, r13: 14, r14: 15, r15: 16,
+            rip: 0x1000, rflags: 0x202,
+            cs: 0x23, ss: 0x1B, fpu_state: 0
+        )
+        expect(ctx.rax).to_equal(1)
+        expect(ctx.rbx).to_equal(2)
+        expect(ctx.rcx).to_equal(3)
+        expect(ctx.rdx).to_equal(4)
+        expect(ctx.rsi).to_equal(5)
+        expect(ctx.rdi).to_equal(6)
+
+    it "stores stack and instruction pointers":
+        val ctx = TaskContext(
+            rax: 0, rbx: 0, rcx: 0, rdx: 0,
+            rsi: 0, rdi: 0, rbp: 0xFFFF0000, rsp: 0xFFFF1000,
+            r8: 0, r9: 0, r10: 0, r11: 0,
+            r12: 0, r13: 0, r14: 0, r15: 0,
+            rip: 0x401000, rflags: 0x202,
+            cs: 0x23, ss: 0x1B, fpu_state: 0
+        )
+        expect(ctx.rbp).to_equal(0xFFFF0000)
+        expect(ctx.rsp).to_equal(0xFFFF1000)
+        expect(ctx.rip).to_equal(0x401000)
+
+describe "UserProcessImage":
+    it "stores executable path, entry, and stack":
+        val image = UserProcessImage(
+            binary_path: "/sys/services/vfs",
+            entry: 0x400000,
+            stack_top: 0x4000000000,
+            stack_size: 65536,
+            argv: ["/sys/services/vfs"],
+            envp: [],
+            segments: [],
+            file_bytes: [0x13.to_u8(), 0, 0, 0],
+            initial_sp: 0x3fffffff80,
+            initial_stack_bytes: [0x01.to_u8(), 0x02, 0x03, 0x04]
+        )
+        expect(image.binary_path).to_equal("/sys/services/vfs")
+        expect(image.entry).to_equal(0x400000)
+        expect(image.stack_top).to_equal(0x4000000000)
+        expect(image.initial_sp).to_equal(0x3fffffff80)
+        expect(image.initial_stack_bytes.len()).to_equal(4)
+
+    it "stores loadable user segments":
+        val seg = UserLoadSegment(
+            virt_addr: 0x400000,
+            mem_size: 4,
+            file_size: 4,
+            flags: 5,
+            align: 0x1000,
+            data: [0x13.to_u8(), 0, 0, 0]
+        )
+        expect(seg.virt_addr).to_equal(0x400000)
+        expect(seg.data.len()).to_equal(4)
+
+    it "stores segment selectors":
+        val ctx = TaskContext(
+            rax: 0, rbx: 0, rcx: 0, rdx: 0,
+            rsi: 0, rdi: 0, rbp: 0, rsp: 0,
+            r8: 0, r9: 0, r10: 0, r11: 0,
+            r12: 0, r13: 0, r14: 0, r15: 0,
+            rip: 0, rflags: 0x202,
+            cs: 0x08, ss: 0x10, fpu_state: 0
+        )
+        expect(ctx.cs).to_equal(0x08)
+        expect(ctx.ss).to_equal(0x10)
+
+    it "stores rflags":
+        val ctx = TaskContext(
+            rax: 0, rbx: 0, rcx: 0, rdx: 0,
+            rsi: 0, rdi: 0, rbp: 0, rsp: 0,
+            r8: 0, r9: 0, r10: 0, r11: 0,
+            r12: 0, r13: 0, r14: 0, r15: 0,
+            rip: 0, rflags: 0x202,
+            cs: 0, ss: 0, fpu_state: 0
+        )
+        expect(ctx.rflags).to_equal(0x202)
+
+    it "stores extended registers r8-r15":
+        val ctx = TaskContext(
+            rax: 0, rbx: 0, rcx: 0, rdx: 0,
+            rsi: 0, rdi: 0, rbp: 0, rsp: 0,
+            r8: 100, r9: 200, r10: 300, r11: 400,
+            r12: 500, r13: 600, r14: 700, r15: 800,
+            rip: 0, rflags: 0,
+            cs: 0, ss: 0, fpu_state: 0
+        )
+        expect(ctx.r8).to_equal(100)
+        expect(ctx.r9).to_equal(200)
+        expect(ctx.r10).to_equal(300)
+        expect(ctx.r11).to_equal(400)
+        expect(ctx.r12).to_equal(500)
+        expect(ctx.r13).to_equal(600)
+        expect(ctx.r14).to_equal(700)
+        expect(ctx.r15).to_equal(800)
+
+    it "stores fpu_state pointer":
+        val ctx = TaskContext(
+            rax: 0, rbx: 0, rcx: 0, rdx: 0,
+            rsi: 0, rdi: 0, rbp: 0, rsp: 0,
+            r8: 0, r9: 0, r10: 0, r11: 0,
+            r12: 0, r13: 0, r14: 0, r15: 0,
+            rip: 0, rflags: 0,
+            cs: 0, ss: 0, fpu_state: 0xBEEF0000
+        )
+        expect(ctx.fpu_state).to_equal(0xBEEF0000)

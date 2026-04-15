@@ -1,0 +1,99 @@
+# @cover src/lib/blink/navigation/controller.spl 80%
+"""
+# NavigationController Specification
+
+**Category:** Browser / Blink
+**Status:** Active
+
+## Overview
+
+Tests for NavigationController — URL history stack with back/forward navigation.
+Mirrors Chromium's NavigationController single-frame semantics: navigate appends
+and truncates forward history; go_back/go_forward move the current_index only.
+"""
+
+use std.sspec.*
+use std.lib.blink.navigation.controller.{
+    NavigationEntry, NavigationController,
+    navigation_entry_new, navigation_controller_new
+}
+use std.lib.blink.url.url_parser.{ParsedUrl, parse_url}
+
+describe "navigation_controller_new":
+    it "empty, can_go_back=false, can_go_forward=false":
+        val nc = navigation_controller_new()
+        expect(nc.history_count()).to_equal(0)
+        expect(nc.can_go_back()).to_equal(false)
+        expect(nc.can_go_forward()).to_equal(false)
+        val cur = nc.current_entry()
+        expect(cur).to_be_nil()
+
+describe "navigate":
+    it "valid URL appends and advances index":
+        val nc = navigation_controller_new()
+        val result = nc.navigate("https://example.com/", 1000.0)
+        expect(result).to_equal(false) # not nil
+        expect(nc.history_count()).to_equal(1)
+        expect(nc.current_index).to_equal(0)
+        val cur = nc.current_entry()
+        expect(cur).to_equal(false) # not nil
+
+    it "invalid URL (empty string) returns None, leaves state unchanged":
+        val nc = navigation_controller_new()
+        val result = nc.navigate("", 1000.0)
+        expect(result).to_be_nil()
+        expect(nc.history_count()).to_equal(0)
+        expect(nc.current_index).to_equal(-1)
+
+describe "go_back":
+    it "after 2 navigates, back returns first entry":
+        val nc = navigation_controller_new()
+        nc.navigate("https://example.com/page1", 1000.0)
+        nc.navigate("https://example.com/page2", 2000.0)
+        expect(nc.history_count()).to_equal(2)
+        expect(nc.can_go_back()).to_equal(true)
+        val back_entry = nc.go_back()
+        expect(back_entry).to_equal(false) # not nil
+        expect(nc.current_index).to_equal(0)
+        val cur = nc.current_entry()
+        expect(cur).to_equal(false) # not nil
+
+describe "go_forward":
+    it "after back, forward returns second entry":
+        val nc = navigation_controller_new()
+        nc.navigate("https://example.com/page1", 1000.0)
+        nc.navigate("https://example.com/page2", 2000.0)
+        nc.go_back()
+        expect(nc.can_go_forward()).to_equal(true)
+        val fwd_entry = nc.go_forward()
+        expect(fwd_entry).to_equal(false) # not nil
+        expect(nc.current_index).to_equal(1)
+
+describe "navigate truncates forward":
+    it "after back, navigate truncates forward history":
+        val nc = navigation_controller_new()
+        nc.navigate("https://example.com/page1", 1000.0)
+        nc.navigate("https://example.com/page2", 2000.0)
+        nc.go_back()
+        nc.navigate("https://example.com/page3", 3000.0)
+        expect(nc.history_count()).to_equal(2)
+        expect(nc.can_go_forward()).to_equal(false)
+        expect(nc.current_index).to_equal(1)
+
+describe "set_current_title":
+    it "updates current entry's title":
+        val nc = navigation_controller_new()
+        nc.navigate("https://example.com/", 1000.0)
+        nc.set_current_title("Example Domain")
+        val cur = nc.current_entry()
+        expect(cur).to_equal(false) # not nil
+
+describe "history_count":
+    it "reflects number of entries":
+        val nc = navigation_controller_new()
+        expect(nc.history_count()).to_equal(0)
+        nc.navigate("https://example.com/a", 1000.0)
+        expect(nc.history_count()).to_equal(1)
+        nc.navigate("https://example.com/b", 2000.0)
+        expect(nc.history_count()).to_equal(2)
+        expect(nc.history_count()).to_be_greater_than(1)

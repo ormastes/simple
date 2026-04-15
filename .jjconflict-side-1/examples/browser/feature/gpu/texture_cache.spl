@@ -1,0 +1,256 @@
+# Texture atlas and cache management for the GPU compositor.
+# Packs small textures into larger atlases to reduce draw calls,
+# and evicts least-recently-used entries when memory is exceeded.
+
+use examples.browser.feature.gpu.surface.(SurfaceFormat, bytes_per_pixel)
+use examples.browser.shared.error.(BrowserError, BrowserErrorKind, BrowserResult, paint_error)
+use examples.browser.shared.logging.(Logger, LogLevel)
+
+# ---------------------------------------------------------------------------
+# TextureEntry — a cached texture region within an atlas.
+# ---------------------------------------------------------------------------
+
+class TextureEntry:
+    id: i64
+    width: i64
+    height: i64
+    format: SurfaceFormat
+    atlas_id: i64
+    atlas_x: i64
+    atlas_y: i64
+    last_used_frame: i64
+
+    static fn create(id: i64, width: i64, height: i64, format: SurfaceFormat, atlas_id: i64, atlas_x: i64, atlas_y: i64) -> TextureEntry:
+        TextureEntry(
+            id: id,
+            width: width,
+            height: height,
+            format: format,
+            atlas_id: atlas_id,
+            atlas_x: atlas_x,
+            atlas_y: atlas_y,
+            last_used_frame: 0
+        )
+
+# ---------------------------------------------------------------------------
+# TextureAtlas — a large backing texture that holds many small textures.
+# ---------------------------------------------------------------------------
+
+class TextureAtlas:
+    id: i64
+    width: i64
+    height: i64
+    entries: [TextureEntry]
+    free_rects: [Pair<Pair<i64, i64], Pair<i64, i64>> >
+    surface_id: i64
+
+    static fn create(id: i64, width: i64, height: i64, surface_id: i64) -> TextureAtlas:
+        # Initialize with one free rect covering the entire atlas
+        var free = [Pair<Pair<i64, i64], Pair<i64, i64>> >()
+        val pos = Pair(first: 0, second: 0)
+        val sz = Pair(first: width, second: height)
+        free.push(Pair(first: pos, second: sz))
+
+        TextureAtlas(
+            id: id,
+            width: width,
+            height: height,
+            entries: [TextureEntry](),
+            free_rects: free,
+            surface_id: surface_id
+        )
+
+# ---------------------------------------------------------------------------
+# Shelf-based rectangle packing
+# ---------------------------------------------------------------------------
+
+# Try to pack a rectangle of the given size into an atlas.
+# Returns the position (x, y) if space is found, nil otherwise.
+# Uses a simple first-fit shelf-based algorithm.
+fn pack_rect(atlas: TextureAtlas, width: i64, height: i64) -> Pair<i64, i64>?:
+    var best_idx = -1
+    var best_area = -1
+
+    var idx = 0
+    while idx < atlas.free_rects.len():
+        val rect = atlas.free_rects.get(idx)
+        if val r = rect:
+            val rw = r.second.first
+            val rh = r.second.second
+            if rw >= width and rh >= height:
+                val area = rw * rh
+                if best_idx == -1 or area < best_area:
+                    best_idx = idx
+                    best_area = area
+        idx = idx + 1
+
+    if best_idx == -1:
+        return nil
+
+    val chosen = atlas.free_rects.get(best_idx)
+    if val c = chosen:
+        val rx = c.first.first
+        val ry = c.first.second
+        val rw = c.second.first
+        val rh = c.second.second
+
+        # Remove the chosen free rect
+        atlas.free_rects.remove(best_idx)
+
+        # Split remaining space: right strip
+        val right_w = rw - width
+        if right_w > 0:
+            val right_pos = Pair(first: rx + width, second: ry)
+            val right_sz = Pair(first: right_w, second: height)
+            atlas.free_rects.push(Pair(first: right_pos, second: right_sz))
+
+        # Split remaining space: bottom strip
+        val bottom_h = rh - height
+        if bottom_h > 0:
+            val bottom_pos = Pair(first: rx, second: ry + height)
+            val bottom_sz = Pair(first: rw, second: bottom_h)
+            atlas.free_rects.push(Pair(first: bottom_pos, second: bottom_sz))
+
+        return Pair(first: rx, second: ry)
+
+    nil
+
+# ---------------------------------------------------------------------------
+# TextureCache — manages atlases and cached texture entries.
+# ---------------------------------------------------------------------------
+
+class TextureCache:
+    atlases: [TextureAtlas]
+    entries: [TextureEntry]
+    max_memory: i64
+    current_frame: i64
+    next_id: i64
+    atlas_size: i64
+    logger: Logger
+
+    static fn new(max_memory_mb: i64, atlas_size: i64, logger: Logger) -> TextureCache:
+        val max_bytes = max_memory_mb * 1048576
+        logger.info("TextureCache created: max={max_memory_mb}MB, atlas_size={atlas_size}")
+        TextureCache(
+            atlases: [TextureAtlas](),
+            entries: [TextureEntry](),
+            max_memory: max_bytes,
+            current_frame: 0,
+            next_id: 1,
+            atlas_size: atlas_size,
+            logger: logger
+        )
+
+    # Allocate space for a texture of the given dimensions.
+    # Tries existing atlases first, then creates a new atlas if needed.
+    me allocate(width: i64, height: i64) -> BrowserResult<TextureEntry>:
+        if width <= 0 or height <= 0:
+            return Err(paint_error("invalid texture dimensions: {width}x{height}"))
+
+        if width > self.atlas_size or height > self.atlas_size:
+            return Err(paint_error("texture too large for atlas: {width}x{height} > {self.atlas_size}"))
+
+        # Try to pack into an existing atlas
+        for atlas in self.atlases:
+            val pos = pack_rect(atlas, width, height)
+            if val p = pos:
+                val entry = self._create_entry(width, height, atlas.id, p.first, p.second)
+                atlas.entries.push(entry)
+                self.logger.trace("allocated texture {entry.id} in atlas {atlas.id} at ({p.first},{p.second})")
+                return Ok(entry)
+
+        # No space in existing atlases — create a new one
+        self.logger.debug("creating new atlas for {width}x{height} texture")
+        val new_atlas = self._create_atlas()
+        val pos = pack_rect(new_atlas, width, height)
+        if val p = pos:
+            val entry = self._create_entry(width, height, new_atlas.id, p.first, p.second)
+            new_atlas.entries.push(entry)
+            self.logger.trace("allocated texture {entry.id} in new atlas {new_atlas.id}")
+            return Ok(entry)
+
+        Err(paint_error("failed to allocate texture {width}x{height}"))
+
+    # Release a texture entry by ID.
+    me release(texture_id: i64):
+        var new_entries = [TextureEntry]()
+        var found = false
+        for entry in self.entries:
+            if entry.id == texture_id:
+                found = true
+                self.logger.trace("released texture {texture_id}")
+            else:
+                new_entries.push(entry)
+        self.entries = new_entries
+
+        # Also remove from atlas entries
+        for atlas in self.atlases:
+            var kept = [TextureEntry]()
+            for e in atlas.entries:
+                if e.id != texture_id:
+                    kept.push(e)
+            atlas.entries = kept
+
+        if not found:
+            self.logger.warn("release: texture {texture_id} not found")
+
+    # Evict the least recently used texture entries to free memory.
+    me evict_lru():
+        if self.entries.len() == 0:
+            return
+
+        # Find the entry with the smallest last_used_frame
+        var oldest_id = -1
+        var oldest_frame = self.current_frame + 1
+
+        for entry in self.entries:
+            if entry.last_used_frame < oldest_frame:
+                oldest_frame = entry.last_used_frame
+                oldest_id = entry.id
+
+        if oldest_id >= 0:
+            self.logger.debug("evicting LRU texture {oldest_id} (last used frame {oldest_frame})")
+            self.release(oldest_id)
+
+    # Look up a texture entry by ID.
+    fn lookup(texture_id: i64) -> TextureEntry?:
+        for entry in self.entries:
+            if entry.id == texture_id:
+                return entry
+        nil
+
+    # Mark a texture as recently used (update last_used_frame).
+    me touch(texture_id: i64):
+        for entry in self.entries:
+            if entry.id == texture_id:
+                entry.last_used_frame = self.current_frame
+                return
+
+    # Advance the frame counter.
+    me advance_frame():
+        self.current_frame = self.current_frame + 1
+
+    # Calculate total memory used by all atlases.
+    fn total_memory() -> i64:
+        var total = 0
+        for atlas in self.atlases:
+            val bpp = bytes_per_pixel(SurfaceFormat.BGRA8)
+            total = total + atlas.width * atlas.height * bpp
+        total
+
+    # Create a new texture entry and register it.
+    me _create_entry(width: i64, height: i64, atlas_id: i64, atlas_x: i64, atlas_y: i64) -> TextureEntry:
+        val id = self.next_id
+        self.next_id = self.next_id + 1
+        val entry = TextureEntry.create(id, width, height, SurfaceFormat.BGRA8, atlas_id, atlas_x, atlas_y)
+        entry.last_used_frame = self.current_frame
+        self.entries.push(entry)
+        entry
+
+    # Create a new atlas and add it to the list.
+    me _create_atlas() -> TextureAtlas:
+        val id = self.atlases.len()
+        val atlas = TextureAtlas.create(id, self.atlas_size, self.atlas_size, -1)
+        self.atlases.push(atlas)
+        self.logger.info("created atlas {id} ({self.atlas_size}x{self.atlas_size})")
+        atlas

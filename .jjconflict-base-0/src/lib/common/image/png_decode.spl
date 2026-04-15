@@ -1,0 +1,279 @@
+#![allow(unnamed_duplicate_typed_args)]
+# PNG Decode — Minimal PNG to ARGB [u32] decoder
+#
+# Decodes PNG bytes to raw ARGB pixel buffer for comparison.
+# Supports 8-bit RGB and RGBA PNG images (color types 2 and 6).
+# Does NOT implement full PNG spec — just enough for screenshot comparison.
+#
+# PNG format reference: http://www.w3.org/TR/PNG/
+
+use std.common.image.deflate_inflate.{deflate_inflate}
+
+# ============================================================================
+# Data Structures
+# ============================================================================
+
+struct PngImage:
+    """Decoded PNG image as ARGB pixel buffer."""
+    pixels: [u32]
+    width: i32
+    height: i32
+
+# ============================================================================
+# PNG Signature
+# ============================================================================
+
+val PNG_SIG_0: u8 = 137
+val PNG_SIG_1: u8 = 80
+val PNG_SIG_2: u8 = 78
+val PNG_SIG_3: u8 = 71
+val PNG_SIG_4: u8 = 13
+val PNG_SIG_5: u8 = 10
+val PNG_SIG_6: u8 = 26
+val PNG_SIG_7: u8 = 10
+
+# ============================================================================
+# Public API
+# ============================================================================
+
+fn decode_png_to_argb(data: [u8]) -> Result<PngImage, text>:
+    """Decode PNG bytes to ARGB [u32] pixel buffer.
+
+    Args:
+        data: Raw PNG file bytes
+
+    Returns:
+        Ok(PngImage) on success, Err(message) on failure
+    """
+    # Validate minimum size (8 bytes signature + at least some chunk data)
+    if data.len() < 8:
+        return Err("PNG data too short: need at least 8 bytes for signature")
+
+    # Validate PNG signature
+    if data[0] != PNG_SIG_0 or data[1] != PNG_SIG_1 or data[2] != PNG_SIG_2 or data[3] != PNG_SIG_3:
+        return Err("Invalid PNG signature: first 4 bytes do not match")
+
+    if data[4] != PNG_SIG_4 or data[5] != PNG_SIG_5 or data[6] != PNG_SIG_6 or data[7] != PNG_SIG_7:
+        return Err("Invalid PNG signature: bytes 4-7 do not match")
+
+    # Need at least signature (8) + IHDR chunk (25 bytes: 4 length + 4 type + 13 data + 4 crc)
+    if data.len() < 33:
+        return Err("PNG data truncated: no IHDR chunk found")
+
+    # Parse IHDR chunk
+    # IHDR must be first chunk after signature
+    val ihdr_len = read_u32_be(data, 8)
+    val ihdr_type_i = data[12]
+    val ihdr_type_h = data[13]
+    val ihdr_type_d = data[14]
+    val ihdr_type_r = data[15]
+
+    # Verify IHDR type bytes = 'I', 'H', 'D', 'R' (73, 72, 68, 82)
+    if ihdr_type_i != 73 or ihdr_type_h != 72 or ihdr_type_d != 68 or ihdr_type_r != 82:
+        return Err("First chunk is not IHDR")
+
+    val img_width = read_u32_be(data, 16).to_i32()
+    val img_height = read_u32_be(data, 20).to_i32()
+    val bit_depth = data[24]
+    val color_type = data[25]
+
+    if img_width <= 0 or img_height <= 0:
+        return Err("Invalid image dimensions: {img_width}x{img_height}")
+
+    if bit_depth != 8:
+        return Err("Unsupported bit depth: {bit_depth} (only 8-bit supported)")
+
+    # color_type 2 = RGB, color_type 6 = RGBA
+    if color_type != 2 and color_type != 6:
+        return Err("Unsupported color type: {color_type} (only RGB=2 and RGBA=6 supported)")
+
+    # Collect IDAT chunks
+    var idat_data: [u8] = []
+    var pos: i32 = 8  # after signature
+
+    while pos + 8 < data.len().to_i32():
+        val chunk_len = read_u32_be(data, pos).to_i32()
+        val ct0 = data[pos + 4]
+        val ct1 = data[pos + 5]
+        val ct2 = data[pos + 6]
+        val ct3 = data[pos + 7]
+
+        # Check for IDAT (73, 68, 65, 84)
+        if ct0 == 73 and ct1 == 68 and ct2 == 65 and ct3 == 84:
+            var j: i32 = 0
+            while j < chunk_len and (pos + 8 + j) < data.len().to_i32():
+                idat_data = idat_data + [data[pos + 8 + j]]
+                j = j + 1
+
+        # Check for IEND (73, 69, 78, 68)
+        if ct0 == 73 and ct1 == 69 and ct2 == 78 and ct3 == 68:
+            break
+
+        pos = pos + 12 + chunk_len  # 4 len + 4 type + data + 4 crc
+
+    if idat_data.len() == 0:
+        return Err("No IDAT chunks found in PNG")
+
+    # Decompress IDAT data (zlib/deflate)
+    # For a minimal implementation, we attempt raw decompression
+    val raw_pixels = decompress_idat(idat_data, img_width, img_height, color_type)
+
+    if raw_pixels.len() == 0:
+        return Err("Failed to decompress IDAT data")
+
+    # Convert reconstructed bytes to ARGB [u32]
+    # raw_pixels is already filter-reconstructed: pure RGB(A) bytes, no filter prefix
+    var pixels: [u32] = []
+    val channels: i32 = if color_type == 6: 4 else: 3
+
+    var i: i32 = 0
+    val total_pixels = img_width * img_height
+    while i < total_pixels:
+        val px_start = i * channels
+        if px_start + channels <= raw_pixels.len().to_i32():
+            val r = raw_pixels[px_start].to_u32()
+            val g = raw_pixels[px_start + 1].to_u32()
+            val b = raw_pixels[px_start + 2].to_u32()
+            val a: u32 = if color_type == 6: raw_pixels[px_start + 3].to_u32() else: 255
+            pixels = pixels + [(a << 24) | (r << 16) | (g << 8) | b]
+        else:
+            pixels = pixels + [0xFF000000]  # black fallback
+        i = i + 1
+
+    Ok(PngImage(pixels: pixels, width: img_width, height: img_height))
+
+# ============================================================================
+# Helper Functions
+# ============================================================================
+
+fn read_u32_be(data: [u8], offset: i32) -> u32:
+    """Read a big-endian 32-bit unsigned integer from byte array."""
+    val b0 = data[offset].to_u32()
+    val b1 = data[offset + 1].to_u32()
+    val b2 = data[offset + 2].to_u32()
+    val b3 = data[offset + 3].to_u32()
+    (b0 << 24) | (b1 << 16) | (b2 << 8) | b3
+
+fn decompress_idat(compressed: [u8], width: i32, height: i32, color_type: u8) -> [u8]:
+    """Decompress zlib-compressed IDAT data and apply PNG filter reconstruction.
+
+    Uses deflate_inflate to decompress the zlib stream, then reconstructs
+    scanlines by applying PNG filter reversal (None/Sub/Up/Average/Paeth).
+
+    Returns raw RGB(A) bytes without filter byte prefixes.
+    """
+    if compressed.len() < 3:
+        return []
+
+    val channels: i32 = if color_type == 6: 4 else: 3
+    val bpp = channels  # bytes per pixel (8-bit depth)
+    val stride = width * channels  # bytes per row (without filter byte)
+
+    # Inflate the DEFLATE stream, skipping 2-byte zlib header
+    val inflated = deflate_inflate(compressed, 2)
+
+    if inflated.len() == 0:
+        return []
+
+    # Apply PNG filter reconstruction
+    val reconstructed = reconstruct_scanlines(inflated, width, height, bpp, stride)
+
+    reconstructed
+
+# ============================================================================
+# PNG Filter Reconstruction
+# ============================================================================
+
+fn reconstruct_scanlines(data: [u8], width: i32, height: i32, bpp: i32, stride: i32) -> [u8]:
+    """Reconstruct pixels from filtered scanlines.
+
+    Each scanline is prefixed with a 1-byte filter type.
+    Output is raw pixel bytes without filter prefix.
+
+    Args:
+        data: Inflated data with filter bytes
+        width: Image width in pixels
+        height: Image height in pixels
+        bpp: Bytes per pixel
+        stride: Bytes per row (width * channels)
+
+    Returns:
+        Reconstructed pixel bytes (stride * height bytes)
+    """
+    var pixels: [u8] = []
+    var prev_row: [u8] = []
+
+    # Initialize previous row to zeros
+    var init: i32 = 0
+    while init < stride:
+        prev_row = prev_row + [0]
+        init = init + 1
+
+    var row: i32 = 0
+    var data_pos: i32 = 0
+
+    while row < height:
+        # Read filter type byte
+        val filter_type: i32 = if data_pos < data.len().to_i32(): data[data_pos].to_i32() else: 0
+        data_pos = data_pos + 1
+
+        var current_row: [u8] = []
+        var col: i32 = 0
+
+        while col < stride:
+            val raw_byte: i32 = if data_pos < data.len().to_i32(): data[data_pos].to_i32() else: 0
+            data_pos = data_pos + 1
+
+            var reconstructed: i32 = 0
+
+            if filter_type == 0:
+                # None
+                reconstructed = raw_byte
+            else if filter_type == 1:
+                # Sub: Recon(x) = Filt(x) + Recon(a)
+                val a: i32 = if col >= bpp: current_row[col - bpp].to_i32() else: 0
+                reconstructed = (raw_byte + a) % 256
+            else if filter_type == 2:
+                # Up: Recon(x) = Filt(x) + Recon(b)
+                val b: i32 = prev_row[col].to_i32()
+                reconstructed = (raw_byte + b) % 256
+            else if filter_type == 3:
+                # Average: Recon(x) = Filt(x) + floor((Recon(a) + Recon(b)) / 2)
+                val a: i32 = if col >= bpp: current_row[col - bpp].to_i32() else: 0
+                val b: i32 = prev_row[col].to_i32()
+                reconstructed = (raw_byte + (a + b) / 2) % 256
+            else if filter_type == 4:
+                # Paeth: Recon(x) = Filt(x) + PaethPredictor(a, b, c)
+                val a: i32 = if col >= bpp: current_row[col - bpp].to_i32() else: 0
+                val b: i32 = prev_row[col].to_i32()
+                val c: i32 = if col >= bpp: prev_row[col - bpp].to_i32() else: 0
+                val paeth = paeth_predictor(a, b, c)
+                reconstructed = (raw_byte + paeth) % 256
+            else:
+                reconstructed = raw_byte
+
+            current_row = current_row + [reconstructed.to_u8()]
+            pixels = pixels + [reconstructed.to_u8()]
+            col = col + 1
+
+        prev_row = current_row
+        row = row + 1
+
+    pixels
+
+fn paeth_predictor(a: i32, b: i32, c: i32) -> i32:
+    """Paeth predictor function per PNG spec."""
+    val p = a + b - c
+    val pa = abs_i32(p - a)
+    val pb = abs_i32(p - b)
+    val pc = abs_i32(p - c)
+    if pa <= pb and pa <= pc:
+        return a
+    if pb <= pc:
+        return b
+    c
+
+fn abs_i32(x: i32) -> i32:
+    """Absolute value for i32."""
+    if x < 0: return -x
+    x

@@ -1,0 +1,66 @@
+#!/bin/sh
+# Export a single-file HTML snapshot from the Electron UI renderer.
+#
+# Usage:
+#   sh scripts/export_ui_snapshot.shs <entry.spl> <out.html> [out.png]
+#
+# The script launches the Electron shell, captures the exact rendered HTML
+# payload to a standalone HTML file, and optionally renders a PNG preview.
+# This is the artifact you can hand to Stitch for visual analysis.
+
+set -eu
+
+REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+cd "$REPO_ROOT" || exit 1
+
+ENTRY="${1:-}"
+OUT_HTML="${2:-}"
+OUT_PNG="${3:-}"
+
+if [ -z "$ENTRY" ] || [ -z "$OUT_HTML" ]; then
+    echo "Usage: sh scripts/export_ui_snapshot.shs <entry.spl> <out.html> [out.png]"
+    exit 1
+fi
+
+ELECTRON_BIN="${ELECTRON_BIN:-$REPO_ROOT/tools/electron-shell/node_modules/.bin/electron}"
+if [ ! -x "$ELECTRON_BIN" ]; then
+    if command -v npx >/dev/null 2>&1; then
+        ELECTRON_BIN="npx -y electron"
+    else
+        echo "ERROR: electron not found"
+        exit 1
+    fi
+fi
+
+mkdir -p "$(dirname "$OUT_HTML")"
+
+TMP_LOG="$(mktemp -t simple-ui-html.XXXXXX)"
+trap 'rm -f "$TMP_LOG"' EXIT
+
+SIMPLE_UI_DUMP_HTML_PATH="$OUT_HTML" \
+    sh -c "$ELECTRON_BIN \"$REPO_ROOT/tools/electron-shell\" \"$ENTRY\"" >"$TMP_LOG" 2>&1 &
+ELECTRON_PID="$!"
+
+for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
+    if [ -s "$OUT_HTML" ]; then
+        break
+    fi
+    sleep 1
+done
+
+if [ ! -s "$OUT_HTML" ]; then
+    kill "$ELECTRON_PID" 2>/dev/null || true
+    cat "$TMP_LOG"
+    echo "ERROR: Electron render export timed out"
+    exit 1
+fi
+
+kill "$ELECTRON_PID" 2>/dev/null || true
+wait "$ELECTRON_PID" 2>/dev/null || true
+
+echo "HTML snapshot written: $OUT_HTML"
+
+if [ -n "$OUT_PNG" ]; then
+    node tools/electron-shell/screenshot.js "$OUT_HTML" "$OUT_PNG" 1360 840
+    echo "PNG preview written: $OUT_PNG"
+fi

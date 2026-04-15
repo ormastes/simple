@@ -1,0 +1,377 @@
+# Style cascade — applies CSS stylesheet to DOM, producing per-element ComputedStyle.
+#
+# Mirrors Blink's StyleResolver. For each Element DomNode, finds all matching
+# CssStyleRules, computes a ComputedStyle by:
+#   1. Starting from parent's ComputedStyle (inheritance)
+#   2. Applying each matching rule's declarations (in order, later wins; !important wins over non-important)
+#
+# Scope: handful of CSS properties (color, background-color, display, opacity,
+# width, height, margin, padding, font-size, font-weight, visibility,
+# text-align, overflow, z-index). Others ignored.
+#
+# Out of scope: specificity-based ordering (uses rule order only), shorthand
+# expansion (margin: 10px 20px), computed-value resolution (calc, var, em).
+
+use std.lib.blink.dom.node.{DomTree, DomNode, NodeType}
+use std.lib.blink.entity.computed_style.{
+    ComputedStyle, Display, Position, Overflow, Visibility, TextAlign, Length,
+    computed_style_default
+}
+use std.lib.blink.css_parser.parser.{CssStyleSheet, CssStyleRule, CssDeclaration}
+use std.lib.blink.css_parser.selector.{parse_selector, matches_complex}
+use std.lib.skia.entity.color.{SkColor4f, sk_color4f}
+
+# ============================================================================
+# parse_length_value — parse "100px", "2em", "50%" etc. into Length
+# ============================================================================
+
+fn parse_length_value(value: String) -> Length:
+    val n = value.len()
+    if n == 0:
+        return Length(value: 0.0, unit: "px")
+
+    # Find where the numeric part ends
+    var num_end = 0
+    var i = 0
+    while i < n:
+        val ch = value[i].to_i64()
+        # digits 0-9, dot, minus sign
+        val is_digit = ch >= 48 && ch <= 57
+        val is_dot   = ch == 46
+        val is_minus = ch == 45 && i == 0
+        if is_digit || is_dot || is_minus:
+            num_end = i + 1
+        else:
+            i = n   # break
+        i = i + 1
+
+    if num_end == 0:
+        return Length(value: 0.0, unit: "px")
+
+    val num_str = value.slice(0, num_end)
+    val unit_str = value.slice(num_end, n)
+
+    val unit = if unit_str == "": "px" else: unit_str
+    val parsed = num_str.parse_f64()
+    match parsed:
+        Some(v):
+            Length(value: v, unit: unit)
+        None:
+            Length(value: 0.0, unit: "px")
+
+# ============================================================================
+# _hex_digit — decode a single hex character (0-9, a-f, A-F) to i64 value
+# ============================================================================
+
+fn _hex_digit(ch: i64) -> i64:
+    if ch >= 48 && ch <= 57:
+        return ch - 48
+    if ch >= 97 && ch <= 102:
+        return ch - 87
+    if ch >= 65 && ch <= 70:
+        return ch - 55
+    0
+
+# ============================================================================
+# _parse_hex_color — parse "#rgb" or "#rrggbb" into SkColor4f
+# ============================================================================
+
+fn _parse_hex_color(value: String) -> SkColor4f:
+    val n = value.len()
+    # value starts with '#' already stripped
+    if n == 3:
+        val r = _hex_digit(value[0].to_i64())
+        val g = _hex_digit(value[1].to_i64())
+        val b = _hex_digit(value[2].to_i64())
+        val rf = (r * 17).to_f64() / 255.0
+        val gf = (g * 17).to_f64() / 255.0
+        val bf = (b * 17).to_f64() / 255.0
+        return sk_color4f(rf, gf, bf, 1.0)
+    if n == 6:
+        val r = _hex_digit(value[0].to_i64()) * 16 + _hex_digit(value[1].to_i64())
+        val g = _hex_digit(value[2].to_i64()) * 16 + _hex_digit(value[3].to_i64())
+        val b = _hex_digit(value[4].to_i64()) * 16 + _hex_digit(value[5].to_i64())
+        val rf = r.to_f64() / 255.0
+        val gf = g.to_f64() / 255.0
+        val bf = b.to_f64() / 255.0
+        return sk_color4f(rf, gf, bf, 1.0)
+    sk_color4f(0.0, 0.0, 0.0, 1.0)
+
+# ============================================================================
+# _parse_rgb_args — parse "r, g, b" or "r, g, b, a" number list
+# ============================================================================
+
+fn _parse_rgb_args(args: String, has_alpha: bool) -> SkColor4f:
+    # Split on comma
+    val parts = [String]()
+    val n = args.len()
+    var seg_start = 0
+    var i = 0
+    while i < n:
+        val ch = args[i].to_i64()
+        if ch == 44:   # comma
+            parts.push(args.slice(seg_start, i))
+            seg_start = i + 1
+        i = i + 1
+    parts.push(args.slice(seg_start, n))
+
+    if parts.len() < 3:
+        return sk_color4f(0.0, 0.0, 0.0, 1.0)
+
+    # Trim whitespace helper inline: parse_f64 tolerates leading spaces in most impls;
+    # use slice from first non-space char
+    fn trim_part(s: String) -> String:
+        val slen = s.len()
+        var lo = 0
+        while lo < slen:
+            val c = s[lo].to_i64()
+            if c != 32 && c != 9:
+                lo = slen + 1   # found
+            else:
+                lo = lo + 1
+        if lo == slen:
+            return ""
+        lo = lo - 1
+        # Re-scan properly
+        var left = 0
+        var found = false
+        while left < slen && !found:
+            val c = s[left].to_i64()
+            if c != 32 && c != 9:
+                found = true
+            else:
+                left = left + 1
+        s.slice(left, slen)
+
+    val r_str = trim_part(parts[0])
+    val g_str = trim_part(parts[1])
+    val b_str = trim_part(parts[2])
+
+    val rp = r_str.parse_f64()
+    val gp = g_str.parse_f64()
+    val bp = b_str.parse_f64()
+
+    val r_val = match rp: Some(v): v None: 0.0
+    val g_val = match gp: Some(v): v None: 0.0
+    val b_val = match bp: Some(v): v None: 0.0
+
+    val rf = r_val / 255.0
+    val gf = g_val / 255.0
+    val bf = b_val / 255.0
+
+    if has_alpha && parts.len() >= 4:
+        val a_str = trim_part(parts[3])
+        val ap = a_str.parse_f64()
+        val a_val = match ap: Some(v): v None: 1.0
+        sk_color4f(rf, gf, bf, a_val)
+    else:
+        sk_color4f(rf, gf, bf, 1.0)
+
+# ============================================================================
+# parse_color_value — named colors, hex, rgb(), rgba()
+# ============================================================================
+
+fn parse_color_value(value: String) -> SkColor4f:
+    val black = sk_color4f(0.0, 0.0, 0.0, 1.0)
+
+    # Named colors
+    if value == "black":
+        return sk_color4f(0.0, 0.0, 0.0, 1.0)
+    if value == "white":
+        return sk_color4f(1.0, 1.0, 1.0, 1.0)
+    if value == "red":
+        return sk_color4f(1.0, 0.0, 0.0, 1.0)
+    if value == "green":
+        return sk_color4f(0.0, 0.502, 0.0, 1.0)
+    if value == "blue":
+        return sk_color4f(0.0, 0.0, 1.0, 1.0)
+    if value == "transparent":
+        return sk_color4f(0.0, 0.0, 0.0, 0.0)
+
+    val n = value.len()
+
+    # Hex colors: #rgb or #rrggbb
+    if n >= 1 && value[0].to_i64() == 35:   # '#'
+        return _parse_hex_color(value.slice(1, n))
+
+    # rgb(r, g, b)
+    if n > 4 && value.slice(0, 4) == "rgb(":
+        val args = value.slice(4, n - 1)
+        return _parse_rgb_args(args, false)
+
+    # rgba(r, g, b, a)
+    if n > 5 && value.slice(0, 5) == "rgba(":
+        val args = value.slice(5, n - 1)
+        return _parse_rgb_args(args, true)
+
+    black
+
+# ============================================================================
+# parse_f64_value — parse a plain float string; 0.0 on error
+# ============================================================================
+
+fn parse_f64_value(value: String) -> f64:
+    val parsed = value.parse_f64()
+    match parsed:
+        Some(v): v
+        None:    0.0
+
+# ============================================================================
+# apply_declaration — apply one CssDeclaration to a ComputedStyle
+# ============================================================================
+
+fn apply_declaration(style: ComputedStyle, decl: CssDeclaration) -> ComputedStyle:
+    val prop = decl.property
+    val val_ = decl.value
+
+    if prop == "color":
+        style.color = parse_color_value(val_)
+    else if prop == "background-color":
+        style.background_color = parse_color_value(val_)
+    else if prop == "opacity":
+        style.opacity = parse_f64_value(val_)
+    else if prop == "display":
+        if val_ == "none":
+            style.display = Display.None
+        else if val_ == "block":
+            style.display = Display.Block
+        else if val_ == "inline":
+            style.display = Display.Inline
+        else if val_ == "flex":
+            style.display = Display.Flex
+        else if val_ == "grid":
+            style.display = Display.Grid
+        else if val_ == "inline-block":
+            style.display = Display.InlineBlock
+        else if val_ == "table":
+            style.display = Display.Table
+    else if prop == "visibility":
+        if val_ == "visible":
+            style.visibility = Visibility.Visible
+        else if val_ == "hidden":
+            style.visibility = Visibility.Hidden
+        else if val_ == "collapse":
+            style.visibility = Visibility.Collapse
+    else if prop == "width":
+        style.width = parse_length_value(val_)
+    else if prop == "height":
+        style.height = parse_length_value(val_)
+    else if prop == "margin-top":
+        style.margin_top = parse_length_value(val_)
+    else if prop == "margin-right":
+        style.margin_right = parse_length_value(val_)
+    else if prop == "margin-bottom":
+        style.margin_bottom = parse_length_value(val_)
+    else if prop == "margin-left":
+        style.margin_left = parse_length_value(val_)
+    else if prop == "padding-top":
+        style.padding_top = parse_length_value(val_)
+    else if prop == "padding-right":
+        style.padding_right = parse_length_value(val_)
+    else if prop == "padding-bottom":
+        style.padding_bottom = parse_length_value(val_)
+    else if prop == "padding-left":
+        style.padding_left = parse_length_value(val_)
+    else if prop == "font-size":
+        val len = parse_length_value(val_)
+        style.font_size = len.value
+    else if prop == "font-weight":
+        val fw = parse_f64_value(val_)
+        style.font_weight = fw.to_i64()
+    else if prop == "text-align":
+        if val_ == "start":
+            style.text_align = TextAlign.Start
+        else if val_ == "end":
+            style.text_align = TextAlign.End
+        else if val_ == "left":
+            style.text_align = TextAlign.Left
+        else if val_ == "right":
+            style.text_align = TextAlign.Right
+        else if val_ == "center":
+            style.text_align = TextAlign.Center
+        else if val_ == "justify":
+            style.text_align = TextAlign.Justify
+    else if prop == "overflow-x":
+        if val_ == "visible":
+            style.overflow_x = Overflow.Visible
+        else if val_ == "hidden":
+            style.overflow_x = Overflow.Hidden
+        else if val_ == "scroll":
+            style.overflow_x = Overflow.Scroll
+        else if val_ == "auto":
+            style.overflow_x = Overflow.Auto
+    else if prop == "overflow-y":
+        if val_ == "visible":
+            style.overflow_y = Overflow.Visible
+        else if val_ == "hidden":
+            style.overflow_y = Overflow.Hidden
+        else if val_ == "scroll":
+            style.overflow_y = Overflow.Scroll
+        else if val_ == "auto":
+            style.overflow_y = Overflow.Auto
+    else if prop == "z-index":
+        val zi = parse_f64_value(val_)
+        style.z_index = zi.to_i64()
+    # All other properties are ignored.
+
+    style
+
+# ============================================================================
+# resolve_style — compute final style for one node, given parent style + sheet
+# ============================================================================
+#
+# Inheritance: color, font-size, font-weight, text-align, visibility are
+# inherited from parent. All other properties start from their initial values
+# (see computed_style_default).
+#
+# Two-pass application:
+#   Pass 1: apply non-important declarations from all matching rules (rule order)
+#   Pass 2: apply !important declarations from all matching rules (rule order)
+# This ensures !important always wins over non-important of the same property.
+
+fn resolve_style(tree: DomTree, node_id: i64, parent_style: ComputedStyle, stylesheet: CssStyleSheet) -> ComputedStyle:
+    # Start from initial values
+    var style = computed_style_default()
+
+    # Inherit properties from parent
+    style.color      = parent_style.color
+    style.font_size  = parent_style.font_size
+    style.font_weight = parent_style.font_weight
+    style.text_align = parent_style.text_align
+    style.visibility = parent_style.visibility
+
+    # Pass 1: non-important declarations
+    var ri = 0
+    while ri < stylesheet.rules.len():
+        val rule = stylesheet.rules[ri]
+        val maybe_sel = parse_selector(rule.selector)
+        val matches = match maybe_sel:
+            Some(sel): matches_complex(tree, node_id, sel)
+            None:      false
+        if matches:
+            var di = 0
+            while di < rule.declarations.len():
+                val decl = rule.declarations[di]
+                if !decl.important:
+                    style = apply_declaration(style, decl)
+                di = di + 1
+        ri = ri + 1
+
+    # Pass 2: !important declarations
+    var ri2 = 0
+    while ri2 < stylesheet.rules.len():
+        val rule = stylesheet.rules[ri2]
+        val maybe_sel = parse_selector(rule.selector)
+        val matches = match maybe_sel:
+            Some(sel): matches_complex(tree, node_id, sel)
+            None:      false
+        if matches:
+            var di = 0
+            while di < rule.declarations.len():
+                val decl = rule.declarations[di]
+                if decl.important:
+                    style = apply_declaration(style, decl)
+                di = di + 1
+        ri2 = ri2 + 1
+
+    style

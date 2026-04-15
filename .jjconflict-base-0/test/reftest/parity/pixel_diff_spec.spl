@@ -1,0 +1,78 @@
+# pixel_diff_spec — integration tests for real pixel-diff via CpuBackend
+
+use std.sspec.*
+use std.skia.entity.geometry.{SkRect, SkIRect}
+use std.skia.entity.picture.{
+    SkPicture, SkPictureRecorder, SkPictureOp,
+    sk_picture_empty, sk_picture_recorder_new,
+    sk_picture_op_draw_rect
+}
+use std.skia.entity.paint.{SkPaint, sk_paint_new}
+use std.skia.entity.color.{sk_color_rgb, sk_color_argb}
+use test.reftest.parity.pixel_diff.{
+    PixelDiffResult, compare_pictures, compare_with_threshold
+}
+
+# ============================================================================
+# Helpers
+# ============================================================================
+
+fn _cull_10x10() -> SkRect:
+    SkRect(left: 0.0, top: 0.0, right: 10.0, bottom: 10.0)
+
+fn _empty_picture() -> SkPicture:
+    sk_picture_empty()
+
+fn _picture_with_rect(r: i64, g: i64, b: i64) -> SkPicture:
+    var recorder = sk_picture_recorder_new()
+    val recorder2 = recorder.begin_recording(_cull_10x10())
+    var paint = sk_paint_new()
+    paint.color = sk_color_rgb(r, g, b)
+    val op = sk_picture_op_draw_rect(
+        SkRect(left: 0.0, top: 0.0, right: 10.0, bottom: 10.0),
+        paint
+    )
+    recorder2.record(op)
+    recorder2.finish_recording()
+
+# ============================================================================
+# Tests
+# ============================================================================
+
+describe "compare_pictures":
+    it "two empty pictures have ratio 0.0":
+        val a = _empty_picture()
+        val b = _empty_picture()
+        val result = compare_pictures(a, b, _cull_10x10(), 0)
+        expect result.ratio to_equal 0.0
+
+    it "identical pictures (same DrawRect color) have ratio 0.0":
+        val a = _picture_with_rect(255, 0, 0)
+        val b = _picture_with_rect(255, 0, 0)
+        val result = compare_pictures(a, b, _cull_10x10(), 0)
+        expect result.ratio to_equal 0.0
+
+    it "different pictures (different rect colors) have ratio > 0.0":
+        val a = _picture_with_rect(255, 0, 0)
+        val b = _picture_with_rect(0, 0, 255)
+        val result = compare_pictures(a, b, _cull_10x10(), 0)
+        expect result.ratio to_be_greater_than 0.0
+
+    it "max_delta reports channel difference magnitude for two-color pictures":
+        val a = _picture_with_rect(255, 0, 0)
+        val b = _picture_with_rect(0, 0, 0)
+        val result = compare_pictures(a, b, _cull_10x10(), 0)
+        expect result.max_delta to_be_greater_than 0
+
+describe "compare_with_threshold":
+    it "passes when ratio <= threshold":
+        val a = _empty_picture()
+        val b = _empty_picture()
+        val result = compare_with_threshold(a, b, _cull_10x10(), 0.01, 0)
+        expect result.passed to_equal true
+
+    it "fails when ratio > threshold":
+        val a = _picture_with_rect(255, 0, 0)
+        val b = _picture_with_rect(0, 0, 255)
+        val result = compare_with_threshold(a, b, _cull_10x10(), 0.0, 0)
+        expect result.passed to_equal false

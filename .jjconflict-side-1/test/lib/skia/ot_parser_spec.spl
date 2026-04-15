@@ -1,0 +1,625 @@
+# @cover src/lib/skia/feature/glyph/ot_parser.spl 80%
+
+use std.sspec.*
+use std.skia.entity.path.{sk_path_new}
+use std.skia.feature.glyph.ot_parser.{
+    read_u16_be, read_i16_be, read_u32_be, read_fixed_1616, read_f2dot14,
+    OtTable, OtFont,
+    parse_offset_table, find_table,
+    CmapFormat4, parse_cmap_format4, cmap_lookup,
+    HorizontalMetrics, parse_hmtx,
+    parse_glyf_simple, parse_glyf_compound,
+    parse_cff_charstring,
+    GsubLookup, GposLookup, parse_gsub_skeleton, parse_gpos_skeleton,
+    GlyphClass, parse_gdef_glyph_class,
+    FvarAxis, parse_fvar_axes, parse_avar_mapping,
+    GvarTable, parse_gvar, apply_glyph_deltas,
+    decode_packed_point_numbers, decode_packed_deltas,
+    TupleVariationHeader, parse_tuple_variation_header,
+    _compute_tuple_scalar
+}
+
+describe "read_u16_be":
+    it "reads big-endian u16 correctly":
+        val buf: [u8] = [18, 52]
+        val result = read_u16_be(buf, 0)
+        expect(result).to_equal(4660)
+
+    it "returns 0 for out-of-bounds offset":
+        val buf: [u8] = [0]
+        val result = read_u16_be(buf, 5)
+        expect(result).to_equal(0)
+
+describe "read_i16_be":
+    it "reads negative signed i16 correctly":
+        val buf: [u8] = [255, 254]
+        val result = read_i16_be(buf, 0)
+        expect(result).to_equal(-2)
+
+    it "reads positive signed i16 correctly":
+        val buf: [u8] = [0, 42]
+        val result = read_i16_be(buf, 0)
+        expect(result).to_equal(42)
+
+describe "read_u32_be":
+    it "reads big-endian u32 correctly":
+        val buf: [u8] = [0, 0, 0, 1]
+        val result = read_u32_be(buf, 0)
+        expect(result).to_equal(1)
+
+    it "reads multi-byte u32 correctly":
+        val buf: [u8] = [0, 1, 0, 0]
+        val result = read_u32_be(buf, 0)
+        expect(result).to_equal(65536)
+
+describe "parse_offset_table":
+    it "returns None for empty blob":
+        val buf: [u8] = []
+        val result = parse_offset_table(buf)
+        expect(result == None).to_equal(true)
+
+    it "returns None for invalid sfnt magic":
+        val buf: [u8] = [0, 0, 0, 0, 0, 2, 0, 0, 0, 0, 0, 0,
+                         0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+                         0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+        val result = parse_offset_table(buf)
+        expect(result == None).to_equal(true)
+
+    it "parses valid TrueType sfnt header with 1 table":
+        # sfnt version 0x00010000, numTables=1, searchRange=16, entrySelector=0, rangeShift=0
+        # then one table record: tag, checksum, offset, length (4 bytes each)
+        # tag 'cmap'=0x636D6170, checksum=0, offset=28, length=4
+        val buf: [u8] = [
+            0, 1, 0, 0,    # sfnt version = 65536
+            0, 1,          # numTables = 1
+            0, 16,         # searchRange
+            0, 0,          # entrySelector
+            0, 1,          # rangeShift
+            # table record:
+            99, 109, 97, 112,  # tag 'cmap'
+            0, 0, 0, 0,        # checksum
+            0, 0, 0, 28,       # offset = 28
+            0, 0, 0, 4,        # length = 4
+            # dummy table data
+            0, 0, 0, 0
+        ]
+        val result = parse_offset_table(buf)
+        expect(result == None).to_equal(false)
+        val font = result.unwrap()
+        expect(font.tables.len()).to_equal(1)
+
+describe "find_table":
+    it "returns Some for a known tag":
+        val buf: [u8] = [
+            0, 1, 0, 0,
+            0, 1,
+            0, 16,
+            0, 0,
+            0, 1,
+            99, 109, 97, 112,
+            0, 0, 0, 0,
+            0, 0, 0, 28,
+            0, 0, 0, 4,
+            0, 0, 0, 0
+        ]
+        val font_opt = parse_offset_table(buf)
+        val font = font_opt.unwrap()
+        # cmap tag = 0x636D6170 = 1668112752
+        val cmap_tag: u32 = 1668112752
+        val result = find_table(font, cmap_tag)
+        expect(result == None).to_equal(false)
+
+    it "returns None for an absent tag":
+        val buf: [u8] = [
+            0, 1, 0, 0,
+            0, 1,
+            0, 16,
+            0, 0,
+            0, 1,
+            99, 109, 97, 112,
+            0, 0, 0, 0,
+            0, 0, 0, 28,
+            0, 0, 0, 4,
+            0, 0, 0, 0
+        ]
+        val font_opt = parse_offset_table(buf)
+        val font = font_opt.unwrap()
+        # 'glyf' tag = 0x676C7966
+        val glyf_tag: u32 = 1735162214
+        val result = find_table(font, glyf_tag)
+        expect(result == None).to_equal(true)
+
+describe "cmap_lookup":
+    it "returns correct glyph id for codepoint in segment with delta":
+        # Minimal format-4 cmap: 1 real segment + terminal segment
+        # seg_count=2, end_codes=[65, 0xFFFF], start_codes=[65, 0xFFFF]
+        # id_deltas=[1, 1], id_range_offsets=[0, 0]
+        # codepoint 65 ('A') -> glyph id = (65 + 1) & 0xFFFF = 66
+        val cmap = CmapFormat4(
+            seg_count: 2,
+            end_codes: [65, 65535],
+            start_codes: [65, 65535],
+            id_deltas: [1, 1],
+            id_range_offsets: [0, 0],
+            glyph_ids: []
+        )
+        val gid = cmap_lookup(cmap, 65)
+        expect(gid).to_equal(66)
+
+    it "returns 0 for codepoint not in any segment":
+        val cmap = CmapFormat4(
+            seg_count: 2,
+            end_codes: [65, 65535],
+            start_codes: [65, 65535],
+            id_deltas: [1, 1],
+            id_range_offsets: [0, 0],
+            glyph_ids: []
+        )
+        val gid = cmap_lookup(cmap, 90)
+        expect(gid).to_equal(0)
+
+describe "parse_hmtx":
+    it "returns last advance for glyph beyond num_long_metrics":
+        # Build a minimal font blob with hmtx table
+        # hmtx tag = 0x686D7478 = 1752003704
+        # We'll put the table at offset 28
+        # 1 long metric: advance=1000(0x03E8), lsb=0
+        # Then 1 extra lsb entry: 50(0x0032)
+        val buf: [u8] = [
+            0, 1, 0, 0,
+            0, 1,
+            0, 16,
+            0, 0,
+            0, 1,
+            # table record for hmtx: tag=0x686D7478
+            104, 109, 116, 120,
+            0, 0, 0, 0,
+            0, 0, 0, 28,
+            0, 0, 0, 6,
+            # hmtx data: 1 long metric (aw=1000, lsb=0) + 1 extra lsb=50
+            3, 232, 0, 0,  # advance=1000, lsb=0
+            0, 50           # extra lsb for glyph 1
+        ]
+        val font_opt = parse_offset_table(buf)
+        val font = font_opt.unwrap()
+        # glyph_id=1, num_long_metrics=1 => use last advance (1000), lsb from extra array
+        val metrics_opt = parse_hmtx(font, 1, 1)
+        expect(metrics_opt == None).to_equal(false)
+        val metrics = metrics_opt.unwrap()
+        expect(metrics.advance_width).to_equal(1000)
+        expect(metrics.left_side_bearing).to_equal(50)
+
+describe "parse_glyf_simple":
+    it "parses a 1-contour 3-point triangle and produces a path with moves and lines":
+        # Build a minimal glyf table for a triangle with 3 on-curve points
+        # glyf header: numContours=1(i16), xMin, yMin, xMax, yMax (i16 each)
+        # endPtsOfContours: [2] (1 entry for contour 0 ending at point 2)
+        # instructionLength: 0
+        # flags: 3 x on-curve (1)
+        # xCoordinates: 3 i16 absolute (using long format, id_range_offsets=0)
+        #   point 0: x=0 (delta from 0 = 0) -> 0x0000
+        #   point 1: x=100 (delta = 100) -> 0x0064
+        #   point 2: x=50 (delta = -50) -> 0xFFCE
+        # yCoordinates: 3 i16 absolute
+        #   point 0: y=0 -> 0x0000
+        #   point 1: y=0 (delta=0, same flag) -> encoded as same
+        #   point 2: y=100 (delta=100) -> 0x0064
+        # We use flags = 0x01 (on_curve, no shorts, no repeats)
+        # For deltas: use full i16 (not short)
+        # flags byte = 0x01 for all 3 points
+        # x coords as i16: 0, 100, -50 (delta from prev)
+        # y coords as i16: 0, 0, 100
+
+        # Build font blob with glyf table at offset 28
+        val buf: [u8] = [
+            0, 1, 0, 0,
+            0, 1,
+            0, 16,
+            0, 0,
+            0, 1,
+            # table record for glyf: tag=0x676C7966
+            103, 108, 121, 102,
+            0, 0, 0, 0,
+            0, 0, 0, 28,    # offset = 28
+            0, 0, 0, 60,    # length = 60 (enough)
+            # glyf data at offset 28:
+            0, 1,           # numContours = 1
+            0, 0,           # xMin = 0
+            0, 0,           # yMin = 0
+            0, 100,         # xMax = 100
+            0, 100,         # yMax = 100
+            0, 2,           # endPtsOfContours[0] = 2
+            0, 0,           # instructionLength = 0
+            # flags: 3 on-curve points, no short coords
+            1, 1, 1,
+            # x coords as i16 deltas:
+            0, 0,           # point 0: x delta = 0
+            0, 100,         # point 1: x delta = 100
+            255, 206,       # point 2: x delta = -50 (0xFFCE)
+            # y coords as i16 deltas:
+            0, 0,           # point 0: y delta = 0
+            0, 0,           # point 1: y delta = 0
+            0, 100          # point 2: y delta = 100
+        ]
+        val font_opt = parse_offset_table(buf)
+        val font = font_opt.unwrap()
+        val glyf_tag: u32 = 1735162214
+        val tbl_opt = find_table(font, glyf_tag)
+        val tbl = tbl_opt.unwrap()
+        val path_opt = parse_glyf_simple(font, tbl.offset)
+        expect(path_opt == None).to_equal(false)
+        val path = path_opt.unwrap()
+        # Path should have: move, line, line, close = 4 segments minimum
+        expect(path.count_verbs()).to_be_greater_than(2)
+
+describe "parse_glyf_compound":
+    it "returns None (pass_todo placeholder)":
+        val buf: [u8] = [0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+        val font_opt = parse_offset_table(buf)
+        # compound just returns None regardless
+        val empty_font = OtFont(blob: buf, tables: [])
+        val result = parse_glyf_compound(empty_font, 0)
+        expect(result == None).to_equal(true)
+
+describe "parse_cff_charstring":
+    it "returns Some empty path for endchar-only charstring":
+        # Build font with CFF table containing just an endchar opcode (14)
+        # CFF tag = 0x43464620 = 1128678944
+        # hdrSize = 4, so charstring scanning starts at base+4
+        val buf: [u8] = [
+            0, 1, 0, 0,
+            0, 1,
+            0, 16,
+            0, 0,
+            0, 1,
+            # table record for CFF:
+            67, 70, 70, 32,
+            0, 0, 0, 0,
+            0, 0, 0, 28,
+            0, 0, 0, 5,
+            # CFF data: header major=1 minor=0 hdrSize=4 offSize=1, then endchar
+            1, 0, 4, 1,
+            14                 # endchar opcode
+        ]
+        val font_opt = parse_offset_table(buf)
+        val font = font_opt.unwrap()
+        val result = parse_cff_charstring(font, 0)
+        expect(result == None).to_equal(false)
+        val path = result.unwrap()
+        expect(path.is_empty()).to_equal(true)
+
+describe "parse_gsub_skeleton":
+    it "returns empty list when GSUB table is absent":
+        val buf: [u8] = [0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+        val empty_font = OtFont(blob: buf, tables: [])
+        val result = parse_gsub_skeleton(empty_font)
+        expect(result.len()).to_equal(0)
+
+describe "parse_gpos_skeleton":
+    it "returns empty list when GPOS table is absent":
+        val buf: [u8] = [0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+        val empty_font = OtFont(blob: buf, tables: [])
+        val result = parse_gpos_skeleton(empty_font)
+        expect(result.len()).to_equal(0)
+
+describe "parse_gdef_glyph_class":
+    it "returns Unknown when GDEF table is absent":
+        val buf: [u8] = [0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+        val empty_font = OtFont(blob: buf, tables: [])
+        val result = parse_gdef_glyph_class(empty_font, 5)
+        expect(result == GlyphClass.Unknown).to_equal(true)
+
+describe "parse_avar_mapping":
+    it "returns normalized unchanged (stub)":
+        val buf: [u8] = [0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+        val empty_font = OtFont(blob: buf, tables: [])
+        val result = parse_avar_mapping(empty_font, 0, 0.5)
+        expect(result).to_equal(0.5)
+
+    it "returns normalized unchanged when no avar table":
+        # font with only a cmap table (no avar), axis_index=0, normalized=0.75
+        val buf: [u8] = [
+            0, 1, 0, 0,
+            0, 1,
+            0, 16,
+            0, 0,
+            0, 1,
+            99, 109, 97, 112,
+            0, 0, 0, 0,
+            0, 0, 0, 28,
+            0, 0, 0, 4,
+            0, 0, 0, 0
+        ]
+        val font_opt = parse_offset_table(buf)
+        val font = font_opt.unwrap()
+        val result = parse_avar_mapping(font, 0, 0.75)
+        expect(result).to_equal(0.75)
+
+    it "returns exact to-coordinate for 3-point segment map when input matches from-coordinate":
+        # avar table with 1 axis, 3 AxisValueMaps: (-1→-1), (0→0.25), (1→1)
+        # input normalized=0.0 should return 0.25 exactly (exact segment boundary match)
+        # F2DOT14: -1.0 = 0xC000 (-16384 as i16), 0.0 = 0x0000, 0.25 = 0x1000 (4096), 1.0 = 0x4000 (16384)
+        # avar tag = 0x61766172 = [97, 118, 97, 114]
+        # Header: majorVersion=1(u16), minorVersion=0(u16), reserved=0(u16), axisCount=1(u16) -> 8 bytes
+        # SegmentMap: positionMapCount=3(u16) -> 2 bytes
+        # Pair 0: from=-1.0(0xC000=-16384 as i16 -> bytes [192,0]), to=-1.0([192,0])
+        # Pair 1: from=0.0([0,0]), to=0.25(4096=[16,0])
+        # Pair 2: from=1.0(16384=[64,0]), to=1.0([64,0])
+        val avar_data: [u8] = [
+            0, 1,        # majorVersion = 1
+            0, 0,        # minorVersion = 0
+            0, 0,        # reserved
+            0, 1,        # axisCount = 1
+            0, 3,        # positionMapCount = 3
+            192, 0,      # from=-1.0
+            192, 0,      # to=-1.0
+            0, 0,        # from=0.0
+            16, 0,       # to=0.25 (4096/16384)
+            64, 0,       # from=1.0
+            64, 0        # to=1.0
+        ]
+        # Build font blob with avar table at offset 28
+        # avar tag bytes: 97=a, 118=v, 97=a, 114=r
+        val avar_len = avar_data.len() as u8
+        val buf: [u8] = [
+            0, 1, 0, 0,
+            0, 1,
+            0, 16,
+            0, 0,
+            0, 1,
+            97, 118, 97, 114,   # 'avar'
+            0, 0, 0, 0,
+            0, 0, 0, 28,        # offset = 28
+            0, 0, 0, 22,        # length = 22 (avar_data size)
+            0, 1,               # majorVersion=1
+            0, 0,               # minorVersion=0
+            0, 0,               # reserved
+            0, 1,               # axisCount=1
+            0, 3,               # positionMapCount=3
+            192, 0,             # from=-1.0
+            192, 0,             # to=-1.0
+            0, 0,               # from=0.0
+            16, 0,              # to=0.25
+            64, 0,              # from=1.0
+            64, 0               # to=1.0
+        ]
+        val font_opt = parse_offset_table(buf)
+        val font = font_opt.unwrap()
+        val result = parse_avar_mapping(font, 0, 0.0)
+        # 0.0 matches from-coord of pair 1 exactly -> to=0.25
+        val diff = result - 0.25
+        val abs_diff = if diff < 0.0: -diff else: diff
+        expect(abs_diff < 0.000001).to_equal(true)
+
+    it "returns linearly interpolated value for input halfway between two segment boundaries":
+        # Same 3-point map: (-1→-1), (0→0.25), (1→1)
+        # input=0.5 is halfway between from=0.0 and from=1.0
+        # t = (0.5 - 0.0) / (1.0 - 0.0) = 0.5
+        # result = 0.25 + 0.5*(1.0 - 0.25) = 0.25 + 0.375 = 0.625
+        val buf: [u8] = [
+            0, 1, 0, 0,
+            0, 1,
+            0, 16,
+            0, 0,
+            0, 1,
+            97, 118, 97, 114,
+            0, 0, 0, 0,
+            0, 0, 0, 28,
+            0, 0, 0, 22,
+            0, 1,
+            0, 0,
+            0, 0,
+            0, 1,
+            0, 3,
+            192, 0,
+            192, 0,
+            0, 0,
+            16, 0,
+            64, 0,
+            64, 0
+        ]
+        val font_opt = parse_offset_table(buf)
+        val font = font_opt.unwrap()
+        val result = parse_avar_mapping(font, 0, 0.5)
+        val expected = 0.625
+        val diff = result - expected
+        val abs_diff = if diff < 0.0: -diff else: diff
+        expect(abs_diff < 0.000001).to_equal(true)
+
+describe "parse_gvar":
+    it "returns None when no gvar table":
+        val buf: [u8] = [
+            0, 1, 0, 0,
+            0, 1,
+            0, 16,
+            0, 0,
+            0, 1,
+            99, 109, 97, 112,
+            0, 0, 0, 0,
+            0, 0, 0, 28,
+            0, 0, 0, 4,
+            0, 0, 0, 0
+        ]
+        val font_opt = parse_offset_table(buf)
+        val font = font_opt.unwrap()
+        val result = parse_gvar(font)
+        expect(result == None).to_equal(true)
+
+    it "returns Some with correct glyph_variation_data_offsets length when given valid gvar header":
+        # gvar tag = 0x67766172 = [103,118,97,114]
+        # gvar header (20 bytes): majorVersion(2), minorVersion(2), axisCount(2),
+        #   sharedTupleCount(2), sharedTuplesOffset(4), glyphCount(2), flags(2),
+        #   glyphVariationDataArrayOffset(4)
+        # glyphCount=2, flags=0 (u16 offsets), so offsets array = 3 × u16 = 6 bytes
+        # Total gvar table = 20 + 6 = 26 bytes
+        val buf: [u8] = [
+            0, 1, 0, 0,
+            0, 1,
+            0, 16,
+            0, 0,
+            0, 1,
+            103, 118, 97, 114,   # 'gvar'
+            0, 0, 0, 0,
+            0, 0, 0, 28,         # offset = 28
+            0, 0, 0, 26,         # length = 26
+            # gvar header at offset 28:
+            0, 1,                # majorVersion=1
+            0, 0,                # minorVersion=0
+            0, 2,                # axisCount=2
+            0, 0,                # sharedTupleCount=0
+            0, 0, 0, 48,         # sharedTuplesOffset=48
+            0, 2,                # glyphCount=2
+            0, 0,                # flags=0 (u16 offsets, ×2)
+            0, 0, 0, 54,         # glyphVariationDataArrayOffset=54
+            # offsets array (3 × u16): glyph 0 start, glyph 1 start, end
+            0, 0,                # offset[0]=0 -> byte 0 from array base
+            0, 4,                # offset[1]=4 -> byte 8 (×2)
+            0, 8                 # offset[2]=8 -> byte 16
+        ]
+        val font_opt = parse_offset_table(buf)
+        val font = font_opt.unwrap()
+        val result = parse_gvar(font)
+        expect(result == None).to_equal(false)
+        val gvar = result.unwrap()
+        # glyph_count=2 so offsets should have glyph_count+1 = 3 entries
+        expect(gvar.glyph_variation_data_offsets.len()).to_equal(3)
+
+describe "apply_glyph_deltas":
+    it "returns outline unchanged when normalized_coords is empty":
+        val gvar = GvarTable(
+            axis_count: 1,
+            shared_tuple_count: 0,
+            shared_tuples_offset: 0,
+            glyph_count: 1,
+            flags: 0,
+            glyph_variation_data_array_offset: 0,
+            glyph_variation_data_offsets: [0, 0]
+        )
+        val path = sk_path_new()
+        val coords: [f64] = []
+        val result = apply_glyph_deltas(path, gvar, 0, coords)
+        expect(result.is_empty()).to_equal(true)
+
+describe "decode_packed_point_numbers":
+    it "empty list (count byte = 0) returns []":
+        # control byte 0x00 means count = 0 (single-byte count form) -> "all points"
+        val data: [u8] = [0, 99, 99]
+        val result = decode_packed_point_numbers(data, 0)
+        val nums = result.0
+        val new_off = result.1
+        expect(nums.len()).to_equal(0)
+        expect(new_off).to_equal(1)
+
+    it "1-byte count, 3 u8 deltas produces running sum":
+        # count=3; run ctrl 0x02 -> u8 deltas, run_length = (0x02 & 0x7F)+1 = 3.
+        # Deltas 1,2,3 -> running sums 1,3,6.
+        val data: [u8] = [3, 2, 1, 2, 3]
+        val result = decode_packed_point_numbers(data, 0)
+        val nums = result.0
+        val new_off = result.1
+        expect(nums.len()).to_equal(3)
+        expect(nums.at(0).unwrap()).to_equal(1)
+        expect(nums.at(1).unwrap()).to_equal(3)
+        expect(nums.at(2).unwrap()).to_equal(6)
+        expect(new_off).to_equal(5)
+
+    it "2-byte count (high bit set) correctly computed":
+        # control byte 0x81, next byte 0x02 -> count = ((0x81 & 0x7F) << 8) | 0x02 = 258.
+        # After count bytes, run ctrl 0x01 = u8 deltas, run_len=2, deltas 5,7.
+        # The decoder will stop at end-of-buffer after those 2 numbers.
+        val data: [u8] = [0x81, 0x02, 0x01, 5, 7]
+        val result = decode_packed_point_numbers(data, 0)
+        val nums = result.0
+        val new_off = result.1
+        expect(nums.len() >= 2).to_equal(true)
+        expect(nums.at(0).unwrap()).to_equal(5)
+        expect(nums.at(1).unwrap()).to_equal(12)
+        # Consumed: 2-byte count + run ctrl + 2 u8 deltas = 5 bytes.
+        expect(new_off).to_equal(5)
+
+describe "decode_packed_deltas":
+    it "zero-run of 5 produces [0,0,0,0,0]":
+        # 0x80 | 0x04 = 0x84: zero-run bit set, run_len = (0x04 & 0x3F)+1 = 5.
+        val data: [u8] = [0x84]
+        val result = decode_packed_deltas(data, 0, 5)
+        val deltas = result.0
+        val new_off = result.1
+        expect(deltas.len()).to_equal(5)
+        expect(deltas.at(0).unwrap()).to_equal(0)
+        expect(deltas.at(1).unwrap()).to_equal(0)
+        expect(deltas.at(2).unwrap()).to_equal(0)
+        expect(deltas.at(3).unwrap()).to_equal(0)
+        expect(deltas.at(4).unwrap()).to_equal(0)
+        expect(new_off).to_equal(1)
+
+    it "i8 run produces sign-extended values":
+        # ctrl 0x02: bit7=0 (not zero-run), bit6=0 (i8), run_len = (0x02 & 0x3F)+1 = 3.
+        # Bytes: 1, 0xFF (-1), 0x80 (-128).
+        val data: [u8] = [0x02, 1, 0xFF, 0x80]
+        val result = decode_packed_deltas(data, 0, 3)
+        val deltas = result.0
+        val new_off = result.1
+        expect(deltas.len()).to_equal(3)
+        expect(deltas.at(0).unwrap()).to_equal(1)
+        expect(deltas.at(1).unwrap()).to_equal(-1)
+        expect(deltas.at(2).unwrap()).to_equal(-128)
+        expect(new_off).to_equal(4)
+
+    it "i16 run produces sign-extended values from 2-byte pairs":
+        # ctrl 0x41: bit7=0, bit6=1 (i16), run_len = (0x01 & 0x3F)+1 = 2.
+        # Bytes: 0x01,0x00 -> 256; 0xFF,0xFE -> -2.
+        val data: [u8] = [0x41, 0x01, 0x00, 0xFF, 0xFE]
+        val result = decode_packed_deltas(data, 0, 2)
+        val deltas = result.0
+        val new_off = result.1
+        expect(deltas.len()).to_equal(2)
+        expect(deltas.at(0).unwrap()).to_equal(256)
+        expect(deltas.at(1).unwrap()).to_equal(-2)
+        expect(new_off).to_equal(5)
+
+describe "parse_tuple_variation_header":
+    it "parses minimal header without embedded peak or intermediate":
+        # variation_data_size=0x0010=16, flags_and_index=0x0003 -> tuple_index=3.
+        val data: [u8] = [0x00, 0x10, 0x00, 0x03]
+        val result = parse_tuple_variation_header(data, 0, 2, 4)
+        val header = result.0
+        val new_off = result.1
+        expect(header.variation_data_size).to_equal(16)
+        expect(header.tuple_index).to_equal(3)
+        expect(header.embedded_peak.len()).to_equal(0)
+        expect(header.intermediate_start.len()).to_equal(0)
+        expect(header.intermediate_end.len()).to_equal(0)
+        expect(header.private_point_numbers).to_equal(false)
+        expect(new_off).to_equal(4)
+
+    it "parses header with embedded peak tuple (F2DOT14 coords)":
+        # size=0x0020=32, flags=EMBEDDED_PEAK (0x8000). axis_count=2.
+        # Peak F2DOT14: 0x4000 -> 1.0, 0xC000 -> -1.0.
+        val data: [u8] = [0x00, 0x20, 0x80, 0x00, 0x40, 0x00, 0xC0, 0x00]
+        val result = parse_tuple_variation_header(data, 0, 2, 0)
+        val header = result.0
+        val new_off = result.1
+        expect(header.variation_data_size).to_equal(32)
+        expect(header.embedded_peak.len()).to_equal(2)
+        expect(header.embedded_peak.at(0).unwrap()).to_equal(1.0)
+        expect(header.embedded_peak.at(1).unwrap()).to_equal(-1.0)
+        expect(new_off).to_equal(8)
+
+describe "_compute_tuple_scalar":
+    it "user=peak returns 1.0":
+        val peak: [f64] = [1.0, -0.5]
+        val user: [f64] = [1.0, -0.5]
+        val result = _compute_tuple_scalar(peak, user)
+        expect(result).to_equal(1.0)
+
+    it "user=0 with non-zero peak returns 0.0":
+        val peak: [f64] = [1.0]
+        val user: [f64] = [0.0]
+        val result = _compute_tuple_scalar(peak, user)
+        expect(result).to_equal(0.0)
+
+    it "user=0.5*peak returns 0.5":
+        val peak: [f64] = [1.0]
+        val user: [f64] = [0.5]
+        val result = _compute_tuple_scalar(peak, user)
+        expect(result).to_equal(0.5)

@@ -1,0 +1,457 @@
+"""
+# Layout Verification Specification
+
+**Feature IDs:** #SFFI-LAYOUT-001
+**Category:** Compiler / Types / Layout
+**Difficulty:** 3/5
+**Status:** Implemented
+**Requirements:** SFFI bidirectional class interop — struct layout safety
+**Plan:** parsed-questing-goose.md
+**Design:** sffi_external_library_pattern.md
+
+## Overview
+
+Tests struct layout computation, C ABI layout rules, _Static_assert generation,
+and C struct definition generation for @export("C") types.
+
+## Key Concepts
+
+| Concept | Description |
+|---------|-------------|
+| TypeLayout | Computed struct layout: size, align, fields, stride |
+| FieldLayout | Per-field: name, offset, size, alignment |
+| verify_c_layout | Compute + verify C-compatible layout |
+| generate_c_static_asserts | Emit _Static_assert for headers |
+| generate_c_struct_def | Emit typedef struct for headers |
+"""
+
+use compiler.types.type_layout.{
+    LayoutAttr, LayoutKind, TypeLayout, FieldLayout,
+    layoutattr_default_, layoutattr_c_repr, layoutattr_packed,
+    compute_struct_layout, compute_c_layout, compute_packed_layout,
+    align_up, is_aligned, is_power_of_two,
+    primitive_size, primitive_align,
+    verify_c_layout, LayoutVerification, LayoutMismatch,
+    generate_c_static_asserts, generate_c_struct_def,
+    compute_padding_bytes
+}
+from hir_definitions import {HirField, HirExpr, HirExprKind}
+from hir_types import {HirType, HirTypeKind, SymbolId}
+from lexer import {Span}
+
+# ============================================================================
+# Helpers
+# ============================================================================
+
+fn empty_span() -> Span:
+    Span(start: 0, end_pos: 0, line: 1, col: 1)
+
+fn make_hir_type(kind: HirTypeKind) -> HirType:
+    HirType(kind: kind, span: empty_span())
+
+fn make_i32_type() -> HirType:
+    make_hir_type(HirTypeKind.Int(32, true))
+
+fn make_i64_type() -> HirType:
+    make_hir_type(HirTypeKind.Int(64, true))
+
+fn make_i8_type() -> HirType:
+    make_hir_type(HirTypeKind.Int(8, true))
+
+fn make_u8_type() -> HirType:
+    make_hir_type(HirTypeKind.Int(8, false))
+
+fn make_f64_type() -> HirType:
+    make_hir_type(HirTypeKind.Float(64))
+
+fn make_bool_type() -> HirType:
+    make_hir_type(HirTypeKind.Bool)
+
+fn dummy_expr() -> HirExpr:
+    """Create a dummy HirExpr (UnitLit) for fields without defaults."""
+    HirExpr(
+        kind: HirExprKind.UnitLit,
+        has_type_: false,
+        type_: make_hir_type(HirTypeKind.Unit),
+        span: empty_span()
+    )
+
+fn make_field(name: text, type_: HirType) -> HirField:
+    HirField(
+        symbol: SymbolId(id: 0),
+        name: name,
+        type_: type_,
+        has_default: false,
+        default: dummy_expr(),
+        is_public: true,
+        is_volatile: false,
+        has_bits_attr: false,
+        bits_width: 0,
+        has_fixed_address: false,
+        fixed_address: 0,
+        span: empty_span()
+    )
+
+fn make_bits_field(name: text, type_: HirType, bits_width: i64) -> HirField:
+    val field = make_field(name, type_)
+    field.has_bits_attr = true
+    field.bits_width = bits_width
+    field
+
+# ============================================================================
+# Test Group 1: Primitive Size and Alignment
+# ============================================================================
+
+describe "Layout Verification":
+    """
+    ## Type Layout Computation
+
+    Tests struct layout computation following C ABI rules.
+    """
+
+    describe "primitive sizes":
+        """
+        ## Primitive Type Sizes
+
+        Fixed-size primitives must have correct sizes.
+        """
+
+        it "i8 is 1 byte":
+            val s = primitive_size("i8")
+            expect(s.?).to_equal(true)
+            expect(s ?? 0).to_equal(1)
+
+        it "i32 is 4 bytes":
+            val s = primitive_size("i32")
+            expect(s.?).to_equal(true)
+            expect(s ?? 0).to_equal(4)
+
+        it "i64 is 8 bytes":
+            val s = primitive_size("i64")
+            expect(s.?).to_equal(true)
+            expect(s ?? 0).to_equal(8)
+
+        it "f64 is 8 bytes":
+            val s = primitive_size("f64")
+            expect(s.?).to_equal(true)
+            expect(s ?? 0).to_equal(8)
+
+        it "bool is 1 byte":
+            val s = primitive_size("bool")
+            expect(s.?).to_equal(true)
+            expect(s ?? 0).to_equal(1)
+
+        it "returns nil for unknown type":
+            val s = primitive_size("unknown_type")
+            expect(s).to_be_nil()
+
+    describe "primitive alignment":
+        """
+        ## Primitive Type Alignment
+
+        Alignment must match C ABI requirements.
+        """
+
+        it "i8 aligns to 1":
+            val a = primitive_align("i8")
+            expect(a ?? 0).to_equal(1)
+
+        it "i32 aligns to 4":
+            val a = primitive_align("i32")
+            expect(a ?? 0).to_equal(4)
+
+        it "i64 aligns to 8":
+            val a = primitive_align("i64")
+            expect(a ?? 0).to_equal(8)
+
+    # ============================================================================
+    # Test Group 2: C Layout Computation
+    # ============================================================================
+
+    describe "C layout computation":
+        """
+        ## C ABI Struct Layout
+
+        Fields laid out in declaration order with alignment-based padding.
+        """
+
+        it "computes correct size for simple struct (i32, i32)":
+            val fields = [
+                make_field("x", make_i32_type()),
+                make_field("y", make_i32_type())
+            ]
+            val layout = compute_struct_layout(fields, layoutattr_c_repr())
+            expect(layout.size).to_equal(8)
+            expect(layout.align).to_equal(4)
+            expect(layout.fields.len()).to_equal(2)
+            expect(layout.fields[0].offset).to_equal(0)
+            expect(layout.fields[1].offset).to_equal(4)
+
+        it "adds padding for alignment (i8, i32)":
+            val fields = [
+                make_field("a", make_i8_type()),
+                make_field("b", make_i32_type())
+            ]
+            val layout = compute_struct_layout(fields, layoutattr_c_repr())
+            # i8 at offset 0 (1 byte), then 3 bytes padding, i32 at offset 4
+            expect(layout.fields[0].offset).to_equal(0)
+            expect(layout.fields[1].offset).to_equal(4)
+            # Total: 4 + 4 = 8 bytes
+            expect(layout.size).to_equal(8)
+
+        it "computes max alignment for struct":
+            val fields = [
+                make_field("a", make_i8_type()),
+                make_field("b", make_i64_type())
+            ]
+            val layout = compute_struct_layout(fields, layoutattr_c_repr())
+            # Max alignment is 8 (from i64)
+            expect(layout.align).to_equal(8)
+
+        it "handles empty field list":
+            val fields: [HirField] = []
+            val layout = compute_struct_layout(fields, layoutattr_c_repr())
+            expect(layout.size).to_equal(0)
+            expect(layout.fields.len()).to_equal(0)
+
+        it "pads struct size to alignment boundary":
+            val fields = [
+                make_field("a", make_i64_type()),
+                make_field("b", make_i8_type())
+            ]
+            val layout = compute_struct_layout(fields, layoutattr_c_repr())
+            # i64 at offset 0 (8 bytes), i8 at offset 8 (1 byte)
+            # Total data: 9, but struct align is 8, so padded to 16
+            expect(layout.fields[0].offset).to_equal(0)
+            expect(layout.fields[1].offset).to_equal(8)
+            expect(layout.size).to_equal(16)
+            expect(layout.align).to_equal(8)
+
+    # ============================================================================
+    # Test Group 3: Packed Layout
+    # ============================================================================
+
+    describe "packed layout":
+        """
+        ## Packed Structs
+
+        No padding, alignment = 1.
+        """
+
+        it "packs fields without padding":
+            val fields = [
+                make_field("a", make_i8_type()),
+                make_field("b", make_i32_type())
+            ]
+            val layout = compute_struct_layout(fields, layoutattr_packed())
+            expect(layout.fields[0].offset).to_equal(0)
+            expect(layout.fields[1].offset).to_equal(1)
+            expect(layout.size).to_equal(5)
+            expect(layout.align).to_equal(1)
+
+    # ============================================================================
+    # Test Group 4: Alignment Helpers
+    # ============================================================================
+
+    describe "alignment helpers":
+        """
+        ## Alignment Utility Functions
+        """
+
+        it "align_up rounds up correctly":
+            expect(align_up(1, 4)).to_equal(4)
+            expect(align_up(4, 4)).to_equal(4)
+            expect(align_up(5, 4)).to_equal(8)
+            expect(align_up(0, 8)).to_equal(0)
+
+        it "is_aligned checks correctly":
+            expect(is_aligned(0, 4)).to_equal(true)
+            expect(is_aligned(4, 4)).to_equal(true)
+            expect(is_aligned(3, 4)).to_equal(false)
+            expect(is_aligned(8, 8)).to_equal(true)
+
+        it "is_power_of_two validates":
+            expect(is_power_of_two(1)).to_equal(true)
+            expect(is_power_of_two(2)).to_equal(true)
+            expect(is_power_of_two(4)).to_equal(true)
+            expect(is_power_of_two(8)).to_equal(true)
+            expect(is_power_of_two(3)).to_equal(false)
+            expect(is_power_of_two(0)).to_equal(false)
+
+    # ============================================================================
+    # Test Group 5: Layout Verification (verify_c_layout)
+    # ============================================================================
+
+    describe "verify_c_layout":
+        """
+        ## Layout Verification
+
+        Computes layout and checks for consistency.
+        """
+
+        it "verifies simple struct is valid":
+            val fields = [
+                make_field("x", make_i32_type()),
+                make_field("y", make_i32_type())
+            ]
+            val v = verify_c_layout("Point", fields, layoutattr_c_repr())
+            expect(v.is_valid).to_equal(true)
+            expect(v.class_name).to_equal("Point")
+            expect(v.total_size).to_equal(8)
+            expect(v.alignment).to_equal(4)
+            expect(v.mismatches.len()).to_equal(0)
+
+        it "computes correct field offsets with padding":
+            val fields = [
+                make_field("version", make_u8_type()),
+                make_field("flags", make_u8_type()),
+                make_field("length", make_i32_type())
+            ]
+            val v = verify_c_layout("PacketHeader", fields, layoutattr_c_repr())
+            expect(v.is_valid).to_equal(true)
+            expect(v.fields[0].offset).to_equal(0)   # version at 0
+            expect(v.fields[1].offset).to_equal(1)   # flags at 1
+            expect(v.fields[2].offset).to_equal(4)   # length at 4 (after 2 bytes padding)
+            expect(v.total_size).to_equal(8)
+
+    # ============================================================================
+    # Test Group 6: _Static_assert Generation
+    # ============================================================================
+
+    describe "_Static_assert generation":
+        """
+        ## C Header _Static_assert Output
+
+        Generates compile-time layout verification for C headers.
+        """
+
+        it "generates sizeof assert":
+            val fields = [
+                make_field("x", make_i32_type()),
+                make_field("y", make_i32_type())
+            ]
+            val v = verify_c_layout("Point", fields, layoutattr_c_repr())
+            val asserts = generate_c_static_asserts(v)
+            expect(asserts).to_contain("_Static_assert")
+            expect(asserts).to_contain("sizeof")
+            expect(asserts).to_contain("spl_Point")
+            expect(asserts).to_contain("8")
+
+        it "generates offsetof asserts for each field":
+            val fields = [
+                make_field("x", make_i32_type()),
+                make_field("y", make_i32_type())
+            ]
+            val v = verify_c_layout("Point", fields, layoutattr_c_repr())
+            val asserts = generate_c_static_asserts(v)
+            expect(asserts).to_contain("offsetof")
+            expect(asserts).to_contain("spl_Point")
+            expect(asserts).to_contain("x")
+            expect(asserts).to_contain("y")
+
+        it "generates alignment assert":
+            val fields = [
+                make_field("a", make_i64_type())
+            ]
+            val v = verify_c_layout("Aligned", fields, layoutattr_c_repr())
+            val asserts = generate_c_static_asserts(v)
+            expect(asserts).to_contain("_Alignof")
+
+        it "skips offsetof asserts for explicit bitfields":
+            val fields = [
+                make_bits_field("mode", make_u8_type(), 4),
+                make_bits_field("speed", make_u8_type(), 2)
+            ]
+            val v = verify_c_layout("Flags", fields, layoutattr_c_repr())
+            val asserts = generate_c_static_asserts(v)
+            expect(asserts).to_contain("sizeof")
+            expect(asserts).to_not_contain("offsetof(spl_Flags, mode)")
+            expect(asserts).to_not_contain("offsetof(spl_Flags, speed)")
+
+    # ============================================================================
+    # Test Group 7: C Struct Definition Generation
+    # ============================================================================
+
+    describe "C struct definition":
+        """
+        ## C typedef struct Generation
+
+        Generates matching C struct definitions.
+        """
+
+        it "generates valid C typedef struct":
+            val fields = [
+                make_field("precision", make_i32_type()),
+                make_field("value", make_f64_type())
+            ]
+            val v = verify_c_layout("Calculator", fields, layoutattr_c_repr())
+            val def = generate_c_struct_def(v)
+            expect(def).to_contain("typedef struct spl_Calculator")
+            expect(def).to_contain("precision")
+            expect(def).to_contain("value")
+            expect(def).to_contain("} spl_Calculator;")
+
+        it "generates struct with correct field types":
+            val fields = [
+                make_field("flag", make_bool_type()),
+                make_field("count", make_i32_type())
+            ]
+            val v = verify_c_layout("Config", fields, layoutattr_c_repr())
+            val def = generate_c_struct_def(v)
+            expect(def).to_contain("uint8_t")  # bool maps to uint8_t
+            expect(def).to_contain("int32_t")  # i32 maps to int32_t
+
+        it "generates C bitfield syntax for explicit bit widths":
+            val fields = [
+                make_bits_field("mode", make_u8_type(), 4),
+                make_bits_field("output", make_bool_type(), 1),
+                make_bits_field("input", make_bool_type(), 1),
+                make_bits_field("speed", make_u8_type(), 2)
+            ]
+            val v = verify_c_layout("GpioRegister", fields, layoutattr_c_repr())
+            val def = generate_c_struct_def(v)
+            expect(v.total_size).to_equal(1)
+            expect(def).to_contain("uint8_t mode : 4;")
+            expect(def).to_contain("uint8_t output : 1;")
+            expect(def).to_contain("uint8_t input : 1;")
+            expect(def).to_contain("uint8_t speed : 2;")
+
+    # ============================================================================
+    # Test Group 8: Padding Computation
+    # ============================================================================
+
+    describe "padding computation":
+        """
+        ## Padding Analysis
+
+        Compute wasted padding bytes for struct optimization hints.
+        """
+
+        it "computes zero padding for tightly packed fields":
+            val fields = [
+                make_field("a", make_i32_type()),
+                make_field("b", make_i32_type())
+            ]
+            val v = verify_c_layout("Tight", fields, layoutattr_c_repr())
+            val padding = compute_padding_bytes(v)
+            expect(padding).to_equal(0)
+
+        it "computes padding bytes for misaligned struct":
+            val fields = [
+                make_field("a", make_i8_type()),
+                make_field("b", make_i32_type())
+            ]
+            val v = verify_c_layout("Padded", fields, layoutattr_c_repr())
+            val padding = compute_padding_bytes(v)
+            # Total size 8, data bytes 5 (1 + 4), padding = 3
+            expect(padding).to_equal(3)
+
+        it "computes tail padding":
+            val fields = [
+                make_field("a", make_i64_type()),
+                make_field("b", make_i8_type())
+            ]
+            val v = verify_c_layout("TailPad", fields, layoutattr_c_repr())
+            val padding = compute_padding_bytes(v)
+            # Total size 16, data bytes 9 (8 + 1), padding = 7
+            expect(padding).to_equal(7)

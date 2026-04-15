@@ -1,0 +1,147 @@
+#![allow(unnamed_duplicate_typed_args)]
+@allow(primitive_api)
+# Tile-based rasterization — splits compositing layers into tiles that
+# can be independently rasterized and uploaded as GPU textures.
+# Dirty tracking ensures only changed tiles are re-rasterized.
+#
+# Generic compositor module — no browser-specific dependencies.
+
+use std.compositor.layer.{CompositeLayer}
+use core.collections.{List}
+
+# ---------------------------------------------------------------------------
+# Tile — a fixed-size rasterization unit within a layer.
+# ---------------------------------------------------------------------------
+
+class Tile:
+    id: i64
+    layer_id: i64
+    x: i64
+    y: i64
+    width: i64
+    height: i64
+    is_dirty: bool
+    texture_id: i64
+
+    static fn create(id: i64, layer_id: i64, x: i64, y: i64, width: i64, height: i64) -> Tile:
+        Tile(
+            id: id,
+            layer_id: layer_id,
+            x: x,
+            y: y,
+            width: width,
+            height: height,
+            is_dirty: true,
+            texture_id: -1
+        )
+
+# ---------------------------------------------------------------------------
+# TileManager — creates, tracks, and rasterizes tiles for layers.
+# ---------------------------------------------------------------------------
+
+class TileManager:
+    tiles: List<Tile>
+    tile_size: i64
+    next_id: i64
+
+    static fn new(tile_size: i64) -> TileManager:
+        TileManager(
+            tiles: List<Tile>(),
+            tile_size: tile_size,
+            next_id: 0
+        )
+
+    # Create a grid of tiles covering a compositing layer.
+    me create_tiles_for_layer(layer: CompositeLayer, tile_size: i64) -> List<Tile>:
+        var new_tiles = List<Tile>()
+        val layer_w = layer.bounds_w.to_i64()
+        val layer_h = layer.bounds_h.to_i64()
+
+        if layer_w <= 0 or layer_h <= 0:
+            return new_tiles
+
+        # Calculate tile grid dimensions
+        val cols = (layer_w + tile_size - 1) / tile_size
+        val rows = (layer_h + tile_size - 1) / tile_size
+
+        var row = 0
+        while row < rows:
+            var col = 0
+            while col < cols:
+                val tile_x = col * tile_size
+                val tile_y = row * tile_size
+
+                # Clamp tile dimensions at layer boundary
+                val tw = if tile_x + tile_size > layer_w: layer_w - tile_x else: tile_size
+                val th = if tile_y + tile_size > layer_h: layer_h - tile_y else: tile_size
+
+                val tile = Tile.create(self.next_id, layer.id, tile_x, tile_y, tw, th)
+                self.next_id = self.next_id + 1
+                new_tiles.push(tile)
+                self.tiles.push(tile)
+                col = col + 1
+            row = row + 1
+
+        new_tiles
+
+    # Mark a single tile as dirty (needs re-rasterization).
+    me mark_dirty(tile_id: i64):
+        for tile in self.tiles:
+            if tile.id == tile_id:
+                tile.is_dirty = true
+                return
+
+    # Mark all tiles that overlap a damaged region within a layer.
+    me mark_dirty_region(layer_id: i64, x: f64, y: f64, w: f64, h: f64):
+        var count = 0
+        for tile in self.tiles:
+            if tile.layer_id == layer_id:
+                if tile_intersects(tile, x, y, w, h):
+                    tile.is_dirty = true
+                    count = count + 1
+
+    # Get all tiles that are marked dirty.
+    fn get_dirty_tiles() -> List<Tile>:
+        var dirty = List<Tile>()
+        for tile in self.tiles:
+            if tile.is_dirty:
+                dirty.push(tile)
+        dirty
+
+    # Mark a tile as clean and assign a texture ID after rasterization.
+    me complete_rasterize(tile: Tile) -> i64:
+        tile.is_dirty = false
+        val texture_id = tile.id  # Placeholder texture ID
+        tile.texture_id = texture_id
+        texture_id
+
+# ---------------------------------------------------------------------------
+# Tile query functions
+# ---------------------------------------------------------------------------
+
+# Get tiles for a specific layer that overlap the viewport.
+fn tiles_for_viewport(tiles: List<Tile>, layer_id: i64, vp_x: f64, vp_y: f64, vp_w: f64, vp_h: f64) -> List<Tile>:
+    var visible = List<Tile>()
+    for tile in tiles:
+        if tile.layer_id == layer_id:
+            if tile_intersects(tile, vp_x, vp_y, vp_w, vp_h):
+                visible.push(tile)
+    visible
+
+# Test whether a tile intersects a rectangular region.
+fn tile_intersects(tile: Tile, x: f64, y: f64, w: f64, h: f64) -> bool:
+    val tx = tile.x.to_f64()
+    val ty = tile.y.to_f64()
+    val tw = tile.width.to_f64()
+    val th = tile.height.to_f64()
+
+    # AABB intersection test
+    if tx + tw <= x:
+        return false
+    if ty + th <= y:
+        return false
+    if x + w <= tx:
+        return false
+    if y + h <= ty:
+        return false
+    true

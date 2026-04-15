@@ -1,0 +1,268 @@
+# Dashboard Status View
+#
+# Displays summary overview of all dashboard metrics.
+
+use tooling.dashboard.types.{DashboardData}
+use dashboard.render.colors.{BOLD, GREEN, YELLOW, RED, CYAN, RESET, colorize_status, status_css_class, threshold_css_color, html_badge}
+use dashboard.render.progress.{render_progress_bar, render_percentage, render_fraction, render_progress_bar_html, render_fraction_html}
+use dashboard.render.table.{TableBuilder, render_html_table_limited}
+use std.json.builder.{escape_json}
+
+# =========================================================================
+# Status View Renderer
+# =========================================================================
+
+# Render complete status view
+fn render_status(data: DashboardData) -> text:
+    var output = ""
+
+    # Header
+    output = "{output}{render_header()}\n\n"
+
+    # Summary cards
+    output = "{output}{render_summary_cards(data)}\n"
+
+    # VCS state
+    output = "{output}{render_vcs_state(data.vcs_state)}\n"
+
+    # Critical alerts
+    output = "{output}{render_critical_alerts(data)}\n"
+
+    return output
+
+# Render header
+fn render_header() -> text:
+    return "{BOLD}{CYAN}Simple Compiler Dashboard{RESET}"
+
+# Render summary cards
+fn render_summary_cards(data: DashboardData) -> text:
+    var output = ""
+
+    # Features card
+    val feature_percent = if data.total_features() == 0:
+        0.0
+    else:
+        ((data.completed_features() as f64) / (data.total_features() as f64)) * 100.0
+
+    output = "{output}{BOLD}Features:{RESET}\n"
+    output = "{output}  {render_progress_bar(feature_percent, 30)}\n"
+    output = "{output}  {data.completed_features()}/{data.total_features()} complete\n\n"
+
+    # TODOs card
+    val total_todos = data.total_todos()
+    val critical_todos = data.critical_todos()
+
+    output = "{output}{BOLD}TODOs:{RESET}\n"
+    output = "{output}  Total: {total_todos}\n"
+    if critical_todos > 0:
+        output = "{output}  {RED}Critical (P0): {critical_todos}{RESET}\n"
+    else:
+        output = "{output}  {GREEN}Critical (P0): 0{RESET}\n"
+    output = "{output}\n"
+
+    # Coverage card
+    val coverage_percent = data.overall_coverage()
+
+    output = "{output}{BOLD}Coverage:{RESET}\n"
+    output = "{output}  {render_progress_bar(coverage_percent, 30)}\n\n"
+
+    # SSpec tests card
+    val total_tests = data.sspec_tests.len()
+    var passing_tests = 0
+    for test in data.sspec_tests:
+        if test.success_rate() == 100.0:
+            passing_tests = passing_tests + 1
+
+    output = "{output}{BOLD}SSpec Tests:{RESET}\n"
+    output = "{output}  Files: {total_tests}\n"
+    output = "{output}  Passing: {render_fraction(passing_tests, total_tests)}\n\n"
+
+    # Plans card
+    val total_plans = data.plans.len()
+    var completed_plans = 0
+    for plan in data.plans:
+        if plan.status == "completed":
+            completed_plans = completed_plans + 1
+
+    output = "{output}{BOLD}Plans:{RESET}\n"
+    output = "{output}  Total: {total_plans}\n"
+    output = "{output}  Completed: {render_fraction(completed_plans, total_plans)}\n\n"
+
+    return output
+
+# Render VCS state
+fn render_vcs_state(vcs: VcsState) -> text:
+    var output = "{BOLD}VCS State:{RESET}\n"
+
+    if vcs.bookmark != "":
+        output = "{output}  Bookmark: {CYAN}{vcs.bookmark}{RESET}\n"
+
+    if vcs.commit_id != "":
+        output = "{output}  Commit: {vcs.commit_id}\n"
+
+    if vcs.commit_message != "":
+        output = "{output}  Message: {vcs.commit_message}\n"
+
+    if vcs.is_clean():
+        output = "{output}  Status: {GREEN}Clean{RESET}\n"
+    else:
+        output = "{output}  Status: {YELLOW}Modified{RESET}\n"
+        if vcs.uncommitted_files > 0:
+            output = "{output}    Uncommitted: {vcs.uncommitted_files}\n"
+        if vcs.untracked_files > 0:
+            output = "{output}    Untracked: {vcs.untracked_files}\n"
+
+    output = "{output}\n"
+    return output
+
+# Render critical alerts
+fn render_critical_alerts(data: DashboardData) -> text:
+    var has_alerts = false
+    var output = ""
+
+    # Check for P0 TODOs
+    if data.critical_todos() > 0:
+        if not has_alerts:
+            output = "{output}{BOLD}{RED}Critical Alerts:{RESET}\n"
+            has_alerts = true
+        output = "{output}  {RED}[P0]{RESET} {data.critical_todos()} critical TODOs need attention\n"
+
+    # Check for low coverage
+    if data.overall_coverage() < 60.0:
+        if not has_alerts:
+            output = "{output}{BOLD}{RED}Critical Alerts:{RESET}\n"
+            has_alerts = true
+        output = "{output}  {YELLOW}[WARN]{RESET} Code coverage below 60%\n"
+
+    if not has_alerts:
+        output = "{output}{GREEN}No critical alerts{RESET}\n"
+
+    output = "{output}\n"
+    return output
+
+# =========================================================================
+# HTML Rendering (shared logic, HTML output)
+# =========================================================================
+
+fn render_status_html(data: DashboardData) -> text:
+    var h = ""
+
+    # Summary metric cards
+    h = "{h}{render_summary_cards_html(data)}"
+
+    # Alerts
+    h = "{h}{render_critical_alerts_html(data)}"
+
+    # Features table
+    h = "{h}{render_features_table_html(data)}"
+
+    # TODOs table
+    h = "{h}{render_todos_table_html(data)}"
+
+    return h
+
+fn render_summary_cards_html(data: DashboardData) -> text:
+    val feature_pct = if data.total_features() == 0: 0.0
+        else: ((data.completed_features() as f64) / (data.total_features() as f64)) * 100.0
+    val coverage_pct = data.overall_coverage()
+    val total_tests = data.sspec_tests.len()
+    var passing_tests = 0
+    for test in data.sspec_tests:
+        if test.success_rate() == 100.0:
+            passing_tests = passing_tests + 1
+    val total_todos = data.total_todos()
+    val critical_todos = data.critical_todos()
+    val total_plans = data.plans.len()
+
+    var h = "<div class=\"card-grid\">"
+
+    # Features card
+    val feat_color = threshold_css_color(feature_pct)
+    h = "{h}<div class=\"card\"><h3>Features</h3>"
+    h = "{h}<div class=\"value\" style=\"color:{feat_color}\">{data.completed_features()}/{data.total_features()}</div>"
+    h = "{h}{render_progress_bar_html(feature_pct, \"complete\")}</div>"
+
+    # Coverage card
+    val cov_color = threshold_css_color(coverage_pct)
+    h = "{h}<div class=\"card\"><h3>Coverage</h3>"
+    h = "{h}<div class=\"value\" style=\"color:{cov_color}\">{coverage_pct}%</div>"
+    h = "{h}{render_progress_bar_html(coverage_pct, \"line coverage\")}</div>"
+
+    # Tests card
+    h = "{h}<div class=\"card\"><h3>SSpec Tests</h3>"
+    h = "{h}<div class=\"value\" style=\"color:var(--green,#3fb950)\">{total_tests}</div>"
+    h = "{h}<div class=\"sub\">Passing: {render_fraction_html(passing_tests, total_tests)}</div></div>"
+
+    # TODOs card
+    val todo_color = if critical_todos > 0: "var(--red,#f85149)" else: "var(--yellow,#d29922)"
+    h = "{h}<div class=\"card\"><h3>TODOs</h3>"
+    h = "{h}<div class=\"value\" style=\"color:{todo_color}\">{total_todos}</div>"
+    h = "{h}<div class=\"sub\">{critical_todos} critical</div></div>"
+
+    # Plans card
+    h = "{h}<div class=\"card\"><h3>Plans</h3>"
+    h = "{h}<div class=\"value\" style=\"color:var(--purple,#bc8cff)\">{total_plans}</div>"
+    h = "{h}<div class=\"sub\">active plans</div></div>"
+
+    h = "{h}</div>"
+    return h
+
+fn render_vcs_state_html(vcs: VcsState) -> text:
+    val status_label = if vcs.is_clean(): "Clean" else: "Modified"
+    val status_cls = if vcs.is_clean(): "badge-green" else: "badge-yellow"
+    val bookmark = if vcs.bookmark != "": vcs.bookmark else: "--"
+    val commit = if vcs.commit_id != "": vcs.commit_id[0:8] else: "--"
+    "<span>{bookmark} @ {commit}</span> <span class=\"badge {status_cls}\">{status_label}</span>"
+
+fn render_critical_alerts_html(data: DashboardData) -> text:
+    var alerts: [text] = []
+
+    if data.critical_todos() > 0:
+        alerts.push("<div class=\"alert alert-critical\"><span class=\"alert-icon\">&#9888;</span> {data.critical_todos()} critical TODOs need attention</div>")
+
+    if data.overall_coverage() < 60.0:
+        alerts.push("<div class=\"alert alert-warning\"><span class=\"alert-icon\">&#9432;</span> Code coverage below 60%</div>")
+
+    if alerts.len() == 0:
+        return ""
+
+    var h = "<div class=\"alerts-panel\">"
+    for alert in alerts:
+        h = "{h}{alert}"
+    h = "{h}</div>"
+    return h
+
+fn render_features_table_html(data: DashboardData) -> text:
+    if data.features.len() == 0:
+        return "<div class=\"card\" style=\"margin-top:12px\"><div class=\"section-title\">Features <span class=\"count\">0</span></div><div class=\"empty-state\">No features data. Run simple dashboard collect</div></div>"
+
+    var rows: [[text]] = []
+    for f in data.features:
+        val badge = html_badge(f.status, f.status)
+        rows.push(["{f.id}", f.category, f.name, badge])
+
+    var h = "<div class=\"card\" style=\"margin-top:12px\">"
+    h = "{h}<div class=\"section-title\">Features <span class=\"count\">{data.features.len()}</span></div>"
+    h = "{h}{render_html_table_limited([\"ID\", \"Category\", \"Name\", \"Status\"], rows, 20)}"
+    h = "{h}</div>"
+    return h
+
+fn render_todos_table_html(data: DashboardData) -> text:
+    if data.todos.len() == 0:
+        return "<div class=\"card\" style=\"margin-top:12px\"><div class=\"section-title\">TODOs <span class=\"count\">0</span></div><div class=\"empty-state\">No TODOs data. Run simple dashboard collect</div></div>"
+
+    var rows: [[text]] = []
+    for t in data.todos:
+        val badge = html_badge(t.priority, if t.priority == "P0": "failed" elif t.priority == "P1": "in_progress" else: "planned")
+        rows.push(["{t.id}", badge, t.area, t.description, "<span style=\"font-size:11px;color:var(--text-dim,#8b949e)\">{t.file}</span>"])
+
+    var h = "<div class=\"card\" style=\"margin-top:12px\">"
+    h = "{h}<div class=\"section-title\">TODOs <span class=\"count\">{data.todos.len()}</span></div>"
+    h = "{h}{render_html_table_limited([\"ID\", \"Priority\", \"Area\", \"Description\", \"File\"], rows, 15)}"
+    h = "{h}</div>"
+    return h
+
+# =========================================================================
+# Exports
+# =========================================================================
+

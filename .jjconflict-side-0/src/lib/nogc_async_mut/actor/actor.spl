@@ -1,0 +1,284 @@
+# Actor - Base Actor Trait and Message Dispatch
+#
+# @tag:api
+# @tag:stdlib
+#
+# Core actor abstraction providing message dispatch via handler tables.
+# Actors are isolated concurrent entities that communicate exclusively
+# through asynchronous message passing. Each actor has:
+#   - A unique ID
+#   - A private mailbox (ActorMailbox)
+#   - A handler table mapping method names to handler functions
+#   - Lifecycle state tracking
+#
+# Usage:
+#   use std.actor.actor.{Actor, ActorState}
+#   use std.actor.mailbox.{ActorMailbox, ActorMessage}
+#
+#   var actor = Actor.new(handlers)
+#   actor.mailbox.enqueue(ActorMessage.fire_and_forget("ping", []))
+#   val result = actor.process_one()
+
+use std.actor.mailbox.{ActorMailbox, ActorMessage}
+
+# ================================================================
+# Actor ID Generation
+# ================================================================
+
+var _next_actor_id: i64 = 1
+
+fn next_actor_id() -> i64:
+    """Generate a unique actor ID. Thread-unsafe (single-threaded scheduler)."""
+    val id = _next_actor_id
+    _next_actor_id = _next_actor_id + 1
+    id
+
+# ================================================================
+# Handler Table
+# ================================================================
+
+struct HandlerEntry:
+    """A single named message handler."""
+    name: text
+    handler: fn([text]) -> text
+
+struct HandlerTable:
+    """Dispatch table mapping method names to handler functions.
+
+    When an actor receives a message, the method name is looked up
+    in this table and the matching handler is invoked with the args.
+
+    Example:
+        var table = HandlerTable.new()
+        table.register("greet", \\args: "Hello, {args[0]}!")
+        val result = table.dispatch("greet", ["World"])
+    """
+    entries: [HandlerEntry]
+
+impl HandlerTable:
+    static fn new() -> HandlerTable:
+        """Create an empty handler table."""
+        HandlerTable(entries: [])
+
+    me register(name: text, handler: fn([text]) -> text):
+        """Register a named method handler.
+
+        If a handler with the same name exists, it is replaced.
+
+        Args:
+            name: Method name that messages will target
+            handler: Function that processes [text] args and returns text
+        """
+        var new_entries: [HandlerEntry] = []
+        var replaced = false
+        for entry in self.entries:
+            if entry.name == name:
+                new_entries.push(HandlerEntry(name: name, handler: handler))
+                replaced = true
+            else:
+                new_entries.push(entry)
+        if not replaced:
+            new_entries.push(HandlerEntry(name: name, handler: handler))
+        self.entries = new_entries
+
+    fn has_method(name: text) -> bool:
+        """Check if a method handler is registered."""
+        for entry in self.entries:
+            if entry.name == name:
+                return true
+        false
+
+    fn method_names() -> [text]:
+        """Return list of all registered method names."""
+        var names: [text] = []
+        for entry in self.entries:
+            names.push(entry.name)
+        names
+
+    fn dispatch(method: text, args: [text]) -> DispatchResult:
+        """Look up method by name and invoke its handler.
+
+        Returns:
+            DispatchResult with status and value/error.
+        """
+        for entry in self.entries:
+            if entry.name == method:
+                val handler_fn = entry.handler
+                val result = handler_fn(args)
+                return DispatchResult.ok(result)
+        DispatchResult.not_found(method)
+
+# ================================================================
+# Dispatch Result
+# ================================================================
+
+enum DispatchStatus:
+    """Result status of dispatching a message."""
+    Ok
+    MethodNotFound
+    HandlerError
+
+struct DispatchResult:
+    """Result of dispatching a single message."""
+    status: DispatchStatus
+    value: text
+    error_msg: text
+
+impl DispatchResult:
+    static fn ok(value: text) -> DispatchResult:
+        DispatchResult(status: DispatchStatus.Ok, value: value, error_msg: "")
+
+    static fn not_found(method: text) -> DispatchResult:
+        DispatchResult(
+            status: DispatchStatus.MethodNotFound,
+            value: "",
+            error_msg: "method not found: {method}"
+        )
+
+    static fn handler_error(msg: text) -> DispatchResult:
+        DispatchResult(status: DispatchStatus.HandlerError, value: "", error_msg: msg)
+
+    fn is_ok() -> bool:
+        self.status == DispatchStatus.Ok
+
+    fn is_error() -> bool:
+        self.status != DispatchStatus.Ok
+
+# ================================================================
+# Actor Lifecycle State
+# ================================================================
+
+enum ActorState:
+    """Lifecycle state of an actor."""
+    Created
+    Running
+    Suspended
+    Stopping
+    Stopped
+
+impl ActorState:
+    fn is_alive() -> bool:
+        """Check if the actor can still process messages."""
+        if self == ActorState.Stopped:
+            return false
+        if self == ActorState.Stopping:
+            return false
+        true
+
+    fn to_string() -> text:
+        if self == ActorState.Created: return "created"
+        if self == ActorState.Running: return "running"
+        if self == ActorState.Suspended: return "suspended"
+        if self == ActorState.Stopping: return "stopping"
+        "stopped"
+
+# ================================================================
+# Actor
+# ================================================================
+
+struct Actor:
+    """An actor instance with mailbox, handlers, and lifecycle state.
+
+    Fields:
+        id: Unique actor identifier
+        mailbox: Message queue for incoming messages
+        handlers: Dispatch table for message handlers
+        state: Current lifecycle state
+        processed_count: Total messages processed
+        error_count: Total handler errors
+        last_error: Most recent error message
+    """
+    id: i64
+    mailbox: ActorMailbox
+    handlers: HandlerTable
+    state: ActorState
+    processed_count: i64
+    error_count: i64
+    last_error: text
+
+impl Actor:
+    static fn new(handlers: HandlerTable) -> Actor:
+        """Create a new actor with the given handlers.
+
+        The actor starts in Created state. The scheduler transitions
+        it to Running when it begins processing messages.
+        """
+        Actor(
+            id: next_actor_id(),
+            mailbox: ActorMailbox.default(),
+            handlers: handlers,
+            state: ActorState.Created,
+            processed_count: 0,
+            error_count: 0,
+            last_error: ""
+        )
+
+    static fn with_mailbox(handlers: HandlerTable, mailbox: ActorMailbox) -> Actor:
+        """Create an actor with a custom mailbox configuration."""
+        Actor(
+            id: next_actor_id(),
+            mailbox: mailbox,
+            handlers: handlers,
+            state: ActorState.Created,
+            processed_count: 0,
+            error_count: 0,
+            last_error: ""
+        )
+
+    me process_one() -> DispatchResult?:
+        """Process one message from the mailbox.
+
+        Dequeues the next message and dispatches it to the matching handler.
+        Returns nil if the mailbox is empty or the actor is not alive.
+        Returns the DispatchResult otherwise.
+        """
+        if not self.state.is_alive():
+            return nil
+
+        val msg = self.mailbox.dequeue()
+        if not msg.?:
+            return nil
+
+        val the_msg = msg.unwrap()
+        val result = self.handlers.dispatch(the_msg.method, the_msg.args)
+
+        if result.is_ok():
+            self.processed_count = self.processed_count + 1
+        else:
+            self.error_count = self.error_count + 1
+            self.last_error = result.error_msg
+
+        Some(result)
+
+    me start():
+        """Transition to Running state."""
+        self.state = ActorState.Running
+
+    me suspend():
+        """Transition to Suspended state (stops processing, retains mailbox)."""
+        self.state = ActorState.Suspended
+
+    me resume():
+        """Resume from Suspended to Running state."""
+        if self.state == ActorState.Suspended:
+            self.state = ActorState.Running
+
+    me stop():
+        """Begin graceful shutdown. Drains remaining messages."""
+        self.state = ActorState.Stopping
+        self.mailbox.drain()
+        self.state = ActorState.Stopped
+
+    fn is_alive() -> bool:
+        """Check if the actor can process messages."""
+        self.state.is_alive()
+
+    fn has_messages() -> bool:
+        """Check if the actor has pending messages."""
+        not self.mailbox.is_empty()
+
+    fn to_string() -> text:
+        """Debug representation."""
+        val methods = self.handlers.method_names()
+        val method_str = methods.join(", ")
+        "Actor(id={self.id}, state={self.state.to_string()}, processed={self.processed_count}, errors={self.error_count}, methods=[{method_str}])"

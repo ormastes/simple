@@ -1,0 +1,117 @@
+#![allow(unnamed_duplicate_typed_args)]
+@allow(unnamed_duplicate_typed_args)
+@allow(primitive_api)
+# Baremetal Hash Utilities
+#
+# Allocation-free hashing functions for bare-metal and embedded targets.
+# Implements FNV-1a and CRC32 without any dynamic memory.
+#
+# FNV-1a (Fowler–Noll–Vo) is a fast, non-cryptographic hash suitable
+# for hash tables and quick data integrity checks. CRC32 provides
+# stronger error-detection properties for hardware/communication contexts.
+#
+# Functions:
+#   fnv1a_hash_bytes  - FNV-1a hash over a byte array
+#   fnv1a_hash_i64    - FNV-1a hash of a single i64 value
+#   crc32_byte        - CRC32 step for one byte
+#   crc32_bytes       - CRC32 over a byte array
+#
+# Usage:
+#   use std.hash.{fnv1a_hash_bytes, fnv1a_hash_i64}
+#   use std.hash.{crc32_byte, crc32_bytes}
+
+
+# ============================================================================
+# FNV-1a Constants
+# ============================================================================
+
+# FNV-1a 64-bit offset basis and prime (standard values)
+val FNV1A_OFFSET_BASIS: i64 = -3750763034362895579  # 0xcbf29ce484222325 as signed i64
+val FNV1A_PRIME: i64 = 1099511628211               # 0x00000100000001b3
+
+# ============================================================================
+# FNV-1a Hash
+# ============================================================================
+
+fn fnv1a_hash_bytes(data: [i64], len: i64) -> i64:
+    """Compute FNV-1a 64-bit hash over a byte array.
+
+    Each element of data is treated as an 8-bit byte (low 8 bits used).
+    The result is suitable for hash table indexing.
+
+    Example:
+        val buf: [i64] = [0x48, 0x69]   # "Hi"
+        fnv1a_hash_bytes(buf, 2)         # => some hash value
+    """
+    var hash = FNV1A_OFFSET_BASIS
+    var i: i64 = 0
+    while i < len:
+        val byte = data[i] & 0xFF
+        hash = hash ^ byte
+        hash = hash * FNV1A_PRIME
+        i = i + 1
+    hash
+
+fn fnv1a_hash_i64(value: i64) -> i64:
+    """Compute FNV-1a 64-bit hash of a single i64 value.
+
+    Hashes all 8 bytes of the i64 in little-endian order.
+    Useful as a mixing function for integer keys in hash maps.
+
+    Example:
+        fnv1a_hash_i64(0)    # => deterministic hash
+        fnv1a_hash_i64(42)   # => deterministic hash
+    """
+    var hash = FNV1A_OFFSET_BASIS
+    var v = value
+    var i = 0
+    while i < 8:
+        val byte = v & 0xFF
+        hash = hash ^ byte
+        hash = hash * FNV1A_PRIME
+        v = v >> 8
+        i = i + 1
+    hash
+
+# ============================================================================
+# CRC32
+# ============================================================================
+
+fn crc32_byte(crc: i64, byte: i64) -> i64:
+    """Apply one byte to a running CRC32 computation.
+
+    Uses the standard IEEE 802.3 polynomial 0xEDB88320 (reflected).
+    Initialize crc with 0xFFFFFFFF and XOR the final result with 0xFFFFFFFF.
+
+    Example:
+        var crc: i64 = 0xFFFFFFFF
+        crc = crc32_byte(crc, 0x48)
+        crc = crc32_byte(crc, 0x69)
+        val result = crc ^ 0xFFFFFFFF
+    """
+    var c = crc ^ (byte & 0xFF)
+    var i = 0
+    while i < 8:
+        if (c & 1) != 0:
+            c = (c >> 1) ^ 0xEDB88320
+        else:
+            c = c >> 1
+        i = i + 1
+    c
+
+fn crc32_bytes(data: [i64], len: i64) -> i64:
+    """Compute CRC32 checksum over a byte array.
+
+    Each element of data is treated as an 8-bit byte (low 8 bits used).
+    Returns the final 32-bit CRC value (fits in i64, upper bits are 0).
+
+    Example:
+        val buf: [i64] = [0x31, 0x32, 0x33]  # "123"
+        crc32_bytes(buf, 3)                    # => CRC32 of "123"
+    """
+    var crc: i64 = 0xFFFFFFFF
+    var i: i64 = 0
+    while i < len:
+        crc = crc32_byte(crc, data[i])
+        i = i + 1
+    crc ^ 0xFFFFFFFF

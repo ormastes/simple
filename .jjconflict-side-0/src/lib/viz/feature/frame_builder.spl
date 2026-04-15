@@ -1,0 +1,240 @@
+# CompositorFrame builder — accumulates render passes + quads for Viz.
+#
+# Mirrors cc::CompositorFrame + viz::CompositorFrame. A frame is a tree of
+# RenderPasses, each with a list of DrawQuads. The root pass is the one
+# directly composited to the display surface.
+#
+# Builder usage:
+#   var b = frame_builder_new()
+#   val pass_id = b.begin_render_pass(bounds)
+#   b.add_solid_color_quad(rect, color)
+#   b.end_render_pass()
+#   val frame = b.build()
+
+use std.skia.entity.geometry.{SkRect}
+use std.skia.entity.color.{SkColor4f}
+
+# ============================================================================
+# enum DrawQuadKind
+# Mirrors viz::DrawQuad::Material discriminator for the quads this builder
+# emits.  SolidColor/DebugBorder read the color field; TextureQuad reads
+# texture_id; SurfaceQuad/RenderPassQuad read surface_id.
+# ============================================================================
+
+enum DrawQuadKind:
+    SolidColor
+    TextureQuad
+    SurfaceQuad
+    RenderPassQuad
+    DebugBorder
+
+# ============================================================================
+# class DrawQuad
+# Flat-field quad record appended to a RenderPass's quad list.
+# ============================================================================
+
+class DrawQuad:
+    kind: DrawQuadKind
+    rect: SkRect
+    visible_rect: SkRect
+    color: SkColor4f
+    texture_id: i64
+    surface_id: i64
+    opacity: f64
+
+# ============================================================================
+# class RenderPass
+# Ordered quad list bounded by output_rect.  needs_sync_tokens indicates a
+# pass references a texture that may require GPU sync before composite.
+# ============================================================================
+
+class RenderPass:
+    id: i64
+    output_rect: SkRect
+    quads: [DrawQuad]
+    needs_sync_tokens: bool
+
+# ============================================================================
+# class CompositorFrame
+# Tree of RenderPasses plus the root_pass_id the compositor should rasterize
+# directly to the display surface.
+# ============================================================================
+
+class CompositorFrame:
+    render_passes: [RenderPass]
+    root_pass_id: i64
+
+# ============================================================================
+# class CompositorFrameBuilder
+# Accumulator state.  passes holds completed passes; current_pass is the
+# in-progress pass between begin_render_pass / end_render_pass.  next_pass_id
+# is monotonically incremented on each begin.
+# ============================================================================
+
+class CompositorFrameBuilder:
+    passes: [RenderPass]
+    current_pass: Option<RenderPass>
+    next_pass_id: i64
+
+# ============================================================================
+# fn frame_builder_new
+# Construct an empty builder with no passes and next_pass_id starting at 1.
+# ============================================================================
+
+fn frame_builder_new() -> CompositorFrameBuilder:
+    """Construct an empty CompositorFrameBuilder."""
+    CompositorFrameBuilder(
+        passes: [],
+        current_pass: None,
+        next_pass_id: 1
+    )
+
+# ============================================================================
+# helpers
+# ============================================================================
+
+fn _zero_color() -> SkColor4f:
+    SkColor4f(r: 0.0, g: 0.0, b: 0.0, a: 0.0)
+
+fn _append_to_current(builder: CompositorFrameBuilder, q: DrawQuad) -> CompositorFrameBuilder:
+    """Append quad q to builder.current_pass, if any.  Returns builder unchanged
+    when current_pass is None (mirrors viz's silent-drop on stray appends)."""
+    match builder.current_pass:
+        case Some(p):
+            p.quads = p.quads + [q]
+            builder.current_pass = Some(p)
+        case None:
+            pass_do_nothing
+    builder
+
+# ============================================================================
+# impl CompositorFrameBuilder
+# ============================================================================
+
+impl CompositorFrameBuilder:
+
+    me begin_render_pass(output_rect: SkRect) -> i64:
+        """Start a new render pass with output_rect; returns the new pass id."""
+        val pid = me.next_pass_id
+        me.next_pass_id = me.next_pass_id + 1
+        val rp = RenderPass(
+            id: pid,
+            output_rect: output_rect,
+            quads: [],
+            needs_sync_tokens: false
+        )
+        me.current_pass = Some(rp)
+        pid
+
+    me end_render_pass() -> ():
+        """Push current_pass into passes and clear current_pass."""
+        match me.current_pass:
+            case Some(p):
+                me.passes = me.passes + [p]
+                me.current_pass = None
+            case None:
+                pass_do_nothing
+
+    me add_solid_color_quad(rect: SkRect, color: SkColor4f) -> ():
+        """Append a SolidColor DrawQuad to the current pass."""
+        val q = DrawQuad(
+            kind: DrawQuadKind.SolidColor,
+            rect: rect,
+            visible_rect: rect,
+            color: color,
+            texture_id: 0,
+            surface_id: 0,
+            opacity: 1.0
+        )
+        match me.current_pass:
+            case Some(p):
+                p.quads = p.quads + [q]
+                me.current_pass = Some(p)
+            case None:
+                pass_do_nothing
+
+    me add_texture_quad(rect: SkRect, texture_id: i64, opacity: f64) -> ():
+        """Append a TextureQuad referencing texture_id with the given opacity."""
+        val q = DrawQuad(
+            kind: DrawQuadKind.TextureQuad,
+            rect: rect,
+            visible_rect: rect,
+            color: _zero_color(),
+            texture_id: texture_id,
+            surface_id: 0,
+            opacity: opacity
+        )
+        match me.current_pass:
+            case Some(p):
+                p.quads = p.quads + [q]
+                p.needs_sync_tokens = true
+                me.current_pass = Some(p)
+            case None:
+                pass_do_nothing
+
+    me add_surface_quad(rect: SkRect, surface_id: i64) -> ():
+        """Append a SurfaceQuad referencing an external surface id."""
+        val q = DrawQuad(
+            kind: DrawQuadKind.SurfaceQuad,
+            rect: rect,
+            visible_rect: rect,
+            color: _zero_color(),
+            texture_id: 0,
+            surface_id: surface_id,
+            opacity: 1.0
+        )
+        match me.current_pass:
+            case Some(p):
+                p.quads = p.quads + [q]
+                me.current_pass = Some(p)
+            case None:
+                pass_do_nothing
+
+    me add_render_pass_quad(rect: SkRect, referenced_pass_id: i64, opacity: f64) -> ():
+        """Append a RenderPassQuad referencing a previously-built pass id."""
+        val q = DrawQuad(
+            kind: DrawQuadKind.RenderPassQuad,
+            rect: rect,
+            visible_rect: rect,
+            color: _zero_color(),
+            texture_id: 0,
+            surface_id: referenced_pass_id,
+            opacity: opacity
+        )
+        match me.current_pass:
+            case Some(p):
+                p.quads = p.quads + [q]
+                me.current_pass = Some(p)
+            case None:
+                pass_do_nothing
+
+    me add_debug_border(rect: SkRect, color: SkColor4f) -> ():
+        """Append a DebugBorder quad with the given color."""
+        val q = DrawQuad(
+            kind: DrawQuadKind.DebugBorder,
+            rect: rect,
+            visible_rect: rect,
+            color: color,
+            texture_id: 0,
+            surface_id: 0,
+            opacity: 1.0
+        )
+        match me.current_pass:
+            case Some(p):
+                p.quads = p.quads + [q]
+                me.current_pass = Some(p)
+            case None:
+                pass_do_nothing
+
+    me build() -> CompositorFrame:
+        """Finalize and return a CompositorFrame.  root_pass_id is the id of
+        the LAST added pass; returns an empty frame with root_pass_id=0 when
+        no passes have been added."""
+        val n = me.passes.len().to_i64()
+        var root_id = 0
+        if n > 0:
+            root_id = me.passes[n - 1].id
+        CompositorFrame(
+            render_passes: me.passes,
+            root_pass_id: root_id
+        )

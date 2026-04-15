@@ -1,0 +1,184 @@
+"""
+# C Backend Export Wrapper Specification
+
+**Feature IDs:** #SFFI-BIDIR #SFFI-EXPORT-ABI
+**Category:** Compiler / Backend / C Export
+**Difficulty:** 3/5
+**Status:** Implemented
+
+## Overview
+
+Checks that the C backend emits exported symbols using the same ABI-visible
+names as the header generators. In particular, standalone exported functions
+must use the `spl_` prefix unless the user provides an explicit custom name.
+"""
+
+use compiler.backend.{MirToC}
+use compiler.mir.mir_data.*
+from hir_types import {SymbolId}
+from lexer import {Span}
+
+fn empty_span() -> Span:
+    Span(start: 0, end_pos: 0, line: 1, col: 1)
+
+fn make_i32() -> MirType:
+    MirType(kind: MirTypeKind.I32)
+
+fn make_exported_fn(name: text, export_name: text) -> MirFunction:
+    MirFunction(
+        symbol: SymbolId(id: 1),
+        name: name,
+        signature: MirSignature(
+            params: [make_i32(), make_i32()],
+            return_type: make_i32(),
+            is_variadic: false
+        ),
+        locals: [],
+        blocks: [],
+        entry_block: BlockId.entry(),
+        span: empty_span(),
+        generic_params: [],
+        is_generic_template: false,
+        specialization_of: nil,
+        type_bindings: {},
+        layout_phase: nil,
+        is_kernel: false,
+        is_export_c: true,
+        export_name: export_name
+    )
+
+fn make_module_with_export(func: MirFunction) -> MirModule:
+    var functions: Dict<SymbolId, MirFunction> = {}
+    functions[func.symbol] = func
+    MirModule(
+        name: "test.export",
+        functions: functions,
+        statics: {},
+        constants: {},
+        types: {}
+    )
+
+fn make_calc_type_def() -> MirTypeDef:
+    MirTypeDef(
+        symbol: SymbolId(id: 10),
+        name: "Calculator",
+        kind: MirTypeDefKind.Struct([
+            MirFieldDef(name: "precision", type_: make_i32(), offset: 0, has_bits_attr: false, bits_width: 0)
+        ]),
+        is_export_c: true,
+        export_name: ""
+    )
+
+fn make_gpio_type_def() -> MirTypeDef:
+    MirTypeDef(
+        symbol: SymbolId(id: 12),
+        name: "GpioRegister",
+        kind: MirTypeDefKind.Struct([
+            MirFieldDef(name: "mode", type_: MirType(kind: MirTypeKind.U8), offset: 0, has_bits_attr: true, bits_width: 4),
+            MirFieldDef(name: "output", type_: MirType(kind: MirTypeKind.Bool), offset: 0, has_bits_attr: true, bits_width: 1),
+            MirFieldDef(name: "input", type_: MirType(kind: MirTypeKind.Bool), offset: 0, has_bits_attr: true, bits_width: 1),
+            MirFieldDef(name: "speed", type_: MirType(kind: MirTypeKind.U8), offset: 0, has_bits_attr: true, bits_width: 2)
+        ]),
+        is_export_c: true,
+        export_name: ""
+    )
+
+fn make_calc_method() -> MirFunction:
+    MirFunction(
+        symbol: SymbolId(id: 11),
+        name: "__simple_Calculator_add",
+        signature: MirSignature(
+            params: [
+                MirType(kind: MirTypeKind.Struct(SymbolId(id: 10))),
+                make_i32(),
+                make_i32()
+            ],
+            return_type: make_i32(),
+            is_variadic: false
+        ),
+        locals: [],
+        blocks: [],
+        entry_block: BlockId.entry(),
+        span: empty_span(),
+        generic_params: [],
+        is_generic_template: false,
+        specialization_of: nil,
+        type_bindings: {},
+        layout_phase: nil,
+        is_kernel: false,
+        is_export_c: false,
+        export_name: ""
+    )
+
+fn make_module_with_exported_type() -> MirModule:
+    var functions: Dict<SymbolId, MirFunction> = {}
+    val method = make_calc_method()
+    functions[method.symbol] = method
+    var types: Dict<SymbolId, MirTypeDef> = {}
+    val type_def = make_calc_type_def()
+    types[type_def.symbol] = type_def
+    MirModule(
+        name: "test.export",
+        functions: functions,
+        statics: {},
+        constants: {},
+        types: types
+    )
+
+fn make_module_with_bitfield_type() -> MirModule:
+    var types: Dict<SymbolId, MirTypeDef> = {}
+    val type_def = make_gpio_type_def()
+    types[type_def.symbol] = type_def
+    MirModule(
+        name: "test.export",
+        functions: {},
+        statics: {},
+        constants: {},
+        types: types
+    )
+
+describe "C backend export wrappers":
+    it "prefixes standalone exported function names with spl":
+        val func = make_exported_fn("__simple_add_numbers", "")
+        val module = make_module_with_export(func)
+        val translator = MirToC.create("test.export")
+
+        val output = translator.translate_module(module)
+
+        expect(output).to_contain("extern \"C\" int32_t spl_add_numbers(")
+        expect(output).to_not_contain("extern \"C\" int32_t add_numbers(")
+
+    it "preserves explicit custom export names":
+        val func = make_exported_fn("__simple_add_numbers", "custom_add")
+        val module = make_module_with_export(func)
+        val translator = MirToC.create("test.export")
+
+        val output = translator.translate_module(module)
+
+        expect(output).to_contain("extern \"C\" int32_t custom_add(")
+        expect(output).to_not_contain("extern \"C\" int32_t spl_add_numbers(")
+
+    it "emits typed opaque-handle wrappers for exported classes":
+        val module = make_module_with_exported_type()
+        val translator = MirToC.create("test.export")
+
+        val output = translator.translate_module(module)
+
+        expect(output).to_contain("struct spl_Calculator {")
+        expect(output).to_contain("Calculator inner;")
+        expect(output).to_contain("extern \"C\" spl_Calculator_t spl_Calculator_create(")
+        expect(output).to_contain("obj->inner.precision = precision;")
+        expect(output).to_contain("extern \"C\" int32_t spl_Calculator_add(spl_Calculator_t self")
+        expect(output).to_contain("__simple_Calculator_add(&self->inner")
+
+    it "emits bitfield syntax in backend type definitions":
+        val module = make_module_with_bitfield_type()
+        val translator = MirToC.create("test.export")
+
+        val output = translator.translate_module(module)
+
+        expect(output).to_contain("struct GpioRegister_s {")
+        expect(output).to_contain("uint8_t mode : 4;")
+        expect(output).to_contain("bool output : 1;")
+        expect(output).to_contain("bool input : 1;")
+        expect(output).to_contain("uint8_t speed : 2;")

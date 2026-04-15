@@ -1,0 +1,98 @@
+# AOP auth advice — woven at matched join points by the MDSOC weaving engine.
+#
+# These functions are NOT called directly by business code.
+# The capsule.sdn weaving rules inject them at compile time.
+
+use std.security.types.{SecurityContext, SecurityEvent, AuditEntry, AuditConfig}
+use std.security.audit_log.{log_security_event}
+use compiler.mdsoc.weaving.join_point.{JoinPointContext}
+
+## Before advice that checks SecurityContext for authentication.
+##
+## If the current context is not authenticated, logs an AccessDenied event
+## and returns an error to deny access. Otherwise proceeds normally.
+## Woven at: execution(*.handle_request) & within(std.http.**) & annotation(@requires_auth)
+fn check_auth_before(ctx: JoinPointContext):
+    val sec_ctx = resolve_security_context(ctx)
+
+    if not sec_ctx.is_authenticated():
+        val config = AuditConfig.default()
+
+        val event = SecurityEvent.AccessDenied(
+            resource: ctx.function_name,
+            capability: "authenticated",
+            peer: sec_ctx.peer_addr
+        )
+
+        val entry = AuditEntry.new(
+            event: event,
+            correlation_id: sec_ctx.correlation_id,
+            module_path: ctx.module_path
+        )
+
+        log_security_event(entry, config)
+        return Err("authentication required for {ctx.function_name}")
+
+## Before advice checking a specific capability on the SecurityContext.
+##
+## Inspects the @requires_capability annotation to determine which capability
+## is needed, then checks whether the current session holds it.
+## Woven at: execution(*.handle_request) & within(std.http.**) & annotation(@requires_capability)
+fn check_capability_before(ctx: JoinPointContext, required_cap: text):
+    val sec_ctx = resolve_security_context(ctx)
+
+    if not sec_ctx.has_capability(required_cap):
+        val config = AuditConfig.default()
+
+        val event = SecurityEvent.CapabilityDenied(
+            capability: required_cap,
+            window_id: ctx.function_name
+        )
+
+        val entry = AuditEntry.new(
+            event: event,
+            correlation_id: sec_ctx.correlation_id,
+            module_path: ctx.module_path
+        )
+
+        log_security_event(entry, config)
+        return Err("capability '{required_cap}' required for {ctx.function_name}")
+
+# ---------------------------------------------------------------------------
+# Internal helpers
+# ---------------------------------------------------------------------------
+
+## Resolve SecurityContext from join point attributes.
+## Falls back to an anonymous context if no session information is available.
+fn resolve_security_context(ctx: JoinPointContext) -> SecurityContext:
+    var peer_addr = "unknown"
+    var session_id = ""
+    var user_id = ""
+    var capabilities: List<text> = []
+
+    for attr in ctx.attributes:
+        if attr.starts_with("peer="):
+            peer_addr = attr.slice(5, attr.len())
+        else if attr.starts_with("session="):
+            session_id = attr.slice(8, attr.len())
+        else if attr.starts_with("user="):
+            user_id = attr.slice(5, attr.len())
+        else if attr.starts_with("cap="):
+            capabilities = capabilities.push(attr.slice(4, attr.len()))
+
+    if user_id == "":
+        return SecurityContext.anonymous(peer_addr)
+
+    SecurityContext(
+        peer_addr: peer_addr,
+        session_id: session_id,
+        user_id: user_id,
+        correlation_id: generate_correlation_id(ctx),
+        capabilities: capabilities
+    )
+
+## Generate a correlation ID for the current request context.
+fn generate_correlation_id(ctx: JoinPointContext) -> text:
+    use std.time
+    val ts = time.now_ms()
+    "{ts}-{ctx.module_path}"

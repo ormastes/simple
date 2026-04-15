@@ -1,0 +1,162 @@
+"""
+# Math Blocks Autograd Runtime
+
+**Category:** Runtime
+**Status:** In Progress
+
+## Overview
+
+Compiled-mode proof tests for m{}, loss{}, and nograd{} runtime semantics. Verifies
+that MIR lowering emits real runtime calls and the torch autograd backend produces
+correct gradient behavior, including scalar math evaluation, loss backward with
+automatic gradient computation, nograd gradient suppression, and loss/nograd interaction.
+"""
+
+# Math Blocks Autograd Runtime Spec
+#
+# Compiled-mode proof tests for m{}, loss{}, nograd{} runtime semantics.
+# These tests verify that the MIR lowering emits real runtime calls
+# and that the torch autograd backend produces correct gradient behavior.
+#
+# @cover src/compiler/50.mir/mir_lowering_ml.spl 80%
+# @feature #1099 loss{} autograd semantics
+# @feature #1100 nograd{} gradient suppression
+# @feature #1101 nested loss/nograd interaction
+# @feature #1102 compiled-mode math block execution
+
+use std.spec.{describe, context, it, expect}
+use std.torch.{Tensor}
+
+fn escaped_nograd(w: Tensor, x: Tensor) -> Result<Tensor, text>:
+    Ok(nograd{
+        val inner = w * x
+        val _ = Err("nograd escape")?
+        inner
+    })
+
+describe "Math Blocks Autograd Runtime":
+    describe "m{} evaluation":
+        it "evaluates scalar math expression":
+            val x = 3.0
+            val result = m{ x^2 + 1 }
+            expect(result).to_equal(10.0)
+
+        it "evaluates with implicit multiplication":
+            val x = 2.0
+            val y = 3.0
+            val result = m{ 2x + 3y }
+            expect(result).to_equal(13.0)
+
+    describe "loss{} backward semantics":
+        context "simple quadratic loss":
+            it "computes gradients on requires_grad parameter":
+                val w = Tensor.from_data([2.0], requires_grad: true)
+                val target = Tensor.from_data([5.0])
+
+                val loss_val = loss{ (w - target)^2 }
+
+                # After loss{} exits, backward() has been called automatically.
+                # The gradient of (w - target)^2 w.r.t. w is 2*(w - target) = 2*(2-5) = -6
+                val grad = w.grad()
+                expect(grad.?.to_equal(true))
+                expect(grad.item()).to_equal(-6.0)
+
+        context "repeated loss evaluation":
+            it "accumulates gradients across loss blocks":
+                val w = Tensor.from_data([1.0], requires_grad: true)
+                val target = Tensor.from_data([0.0])
+
+                # First loss: grad = 2*(1-0) = 2.0
+                loss{ (w - target)^2 }
+                val grad1 = w.grad().item()
+                expect(grad1).to_equal(2.0)
+
+                # Second loss without zero_grad: grad accumulates
+                loss{ (w - target)^2 }
+                val grad2 = w.grad().item()
+                expect(grad2).to_equal(4.0)
+
+        context "detached input and escape-path restore":
+            it "keeps detached values out of autograd and restores gradient tracking after escaped nograd":
+                val source = Tensor.from_data([2.0], requires_grad: true)
+                val detached = source.detach()
+                expect(detached.requires_grad()).to_equal(false)
+
+                val restore_w = Tensor.from_data([1.0], requires_grad: true)
+                val restore_x = Tensor.from_data([3.0], requires_grad: true)
+                val outcome = escaped_nograd(restore_w, restore_x)
+                match outcome:
+                    case Err(msg):
+                        expect(msg).to_equal("nograd escape")
+                    case Ok(_):
+                        expect(false)
+
+                val restored = restore_w * restore_x
+                expect(restored.requires_grad()).to_equal(true)
+
+    describe "nograd{} suppression semantics":
+        context "basic suppression":
+            it "prevents gradient recording":
+                val w = Tensor.from_data([3.0], requires_grad: true)
+                val x = Tensor.from_data([2.0])
+
+                val result = nograd{ w * x }
+
+                # Result should be computed (3*2 = 6)
+                expect(result.item()).to_equal(6.0)
+                # But no gradient graph was built
+                expect(result.requires_grad()).to_equal(false)
+
+        context "nesting":
+            it "nested nograd does not leak state":
+                val w = Tensor.from_data([1.0], requires_grad: true)
+                val x = Tensor.from_data([2.0])
+
+                # Outer nograd
+                val outer = nograd{
+                    val inner = nograd{ w * x }
+                    inner + w
+                }
+                # After both nograd blocks exit, grad tracking is restored
+                # The result inside nograd should not require grad
+                expect(outer.requires_grad()).to_equal(false)
+
+                # But operations after nograd{} resume tracking
+                val tracked = w * x
+                expect(tracked.requires_grad()).to_equal(true)
+
+    describe "loss{} and nograd{} interaction":
+        context "nograd inside loss":
+            it "only tracks gradient-enabled parts":
+                val w = Tensor.from_data([2.0], requires_grad: true)
+                val bias = Tensor.from_data([1.0], requires_grad: true)
+                val target = Tensor.from_data([4.0])
+
+                # The nograd part does not contribute to gradient computation
+                # loss = (nograd{bias} + w - target)^2
+                # = (1 + 2 - 4)^2 = 1.0
+                # d(loss)/dw = 2*(1+2-4) = -2
+                # d(loss)/dbias = 0 (bias inside nograd, detached)
+                val loss_val = loss{
+                    val const_part = nograd{ bias }
+                    (const_part + w - target)^2
+                }
+
+                expect(w.grad().item()).to_equal(-2.0)
+                # bias gradient should be nil or zero (not tracked through nograd)
+
+        context "loss after nograd":
+            it "resumes normal gradient behavior":
+                val w = Tensor.from_data([3.0], requires_grad: true)
+                val target = Tensor.from_data([1.0])
+
+                # nograd block — no gradient ops
+                val _ = nograd{ w * w }
+
+                # loss block after nograd — should work normally
+                loss{ (w - target)^2 }
+
+                # grad = 2*(3-1) = 4.0
+                val grad = w.grad()
+                expect(grad.?.to_equal(true))
+                expect(grad.item()).to_equal(4.0)

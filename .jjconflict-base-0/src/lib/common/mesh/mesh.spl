@@ -1,0 +1,231 @@
+@allow(primitive_api)
+# Mesh — Vertex, Mesh, and primitive generators
+#
+# Pure mesh data structures for 3D rendering.
+# No GPU or rendering code — just geometry data.
+#
+# Usage:
+#   val cube = mesh_cube(1.0)
+#   val sphere = mesh_sphere(1.0, 16, 8)
+#   val plane = mesh_plane(10.0, 10.0)
+#   val v = cube.vertices[0]
+#   val pos = v.position
+
+use std.common.math.{MATH_PI}
+use std.common.math3d.vec.{Vec2, Vec3}
+use std.common.math3d.math_util.{sin3d, cos3d}
+
+# ============================================================================
+# Vertex
+# ============================================================================
+
+class Vertex:
+    position: Vec3
+    normal: Vec3
+    uv: Vec2
+
+impl Vertex:
+    static fn create(pos: Vec3, norm: Vec3, u: f64, v: f64) -> Vertex:
+        Vertex(
+            position: pos,
+            normal: norm,
+            uv: Vec2(x: u, y: v)
+        )
+
+# ============================================================================
+# Mesh
+# ============================================================================
+
+class Mesh:
+    vertices: [Vertex]
+    indices: [i32]
+
+impl Mesh:
+    fn vertex_count() -> i64:
+        self.vertices.len()
+
+    fn index_count() -> i64:
+        self.indices.len()
+
+    static fn empty() -> Mesh:
+        Mesh(vertices: [], indices: [])
+
+# ============================================================================
+# AABB computation
+# ============================================================================
+
+fn compute_aabb_min(mesh: Mesh) -> Vec3:
+    """Compute the minimum corner of the axis-aligned bounding box."""
+    if mesh.vertices.len() == 0:
+        return Vec3.zero()
+    val first = mesh.vertices[0].position
+    var min_x = first.x
+    var min_y = first.y
+    var min_z = first.z
+    var i = 1
+    while i < mesh.vertices.len():
+        val p = mesh.vertices[i].position
+        if p.x < min_x:
+            min_x = p.x
+        if p.y < min_y:
+            min_y = p.y
+        if p.z < min_z:
+            min_z = p.z
+        i = i + 1
+    Vec3(x: min_x, y: min_y, z: min_z)
+
+fn compute_aabb_max(mesh: Mesh) -> Vec3:
+    """Compute the maximum corner of the axis-aligned bounding box."""
+    if mesh.vertices.len() == 0:
+        return Vec3.zero()
+    val first = mesh.vertices[0].position
+    var max_x = first.x
+    var max_y = first.y
+    var max_z = first.z
+    var i = 1
+    while i < mesh.vertices.len():
+        val p = mesh.vertices[i].position
+        if p.x > max_x:
+            max_x = p.x
+        if p.y > max_y:
+            max_y = p.y
+        if p.z > max_z:
+            max_z = p.z
+        i = i + 1
+    Vec3(x: max_x, y: max_y, z: max_z)
+
+# ============================================================================
+# Primitive generators
+# ============================================================================
+
+fn mesh_cube(size: f64) -> Mesh:
+    """Create a cube with 24 vertices (4 per face, proper normals), 36 indices."""
+    val h = size / 2.0
+    var verts: [Vertex] = []
+    var idxs: [i32] = []
+
+    # Front face (+Z)
+    val nf = Vec3(x: 0.0, y: 0.0, z: 1.0)
+    verts.push(Vertex.create(Vec3(x: -h, y: -h, z: h), nf, 0.0, 0.0))
+    verts.push(Vertex.create(Vec3(x: h, y: -h, z: h), nf, 1.0, 0.0))
+    verts.push(Vertex.create(Vec3(x: h, y: h, z: h), nf, 1.0, 1.0))
+    verts.push(Vertex.create(Vec3(x: -h, y: h, z: h), nf, 0.0, 1.0))
+
+    # Back face (-Z)
+    val nb = Vec3(x: 0.0, y: 0.0, z: -1.0)
+    verts.push(Vertex.create(Vec3(x: h, y: -h, z: -h), nb, 0.0, 0.0))
+    verts.push(Vertex.create(Vec3(x: -h, y: -h, z: -h), nb, 1.0, 0.0))
+    verts.push(Vertex.create(Vec3(x: -h, y: h, z: -h), nb, 1.0, 1.0))
+    verts.push(Vertex.create(Vec3(x: h, y: h, z: -h), nb, 0.0, 1.0))
+
+    # Right face (+X)
+    val nr = Vec3(x: 1.0, y: 0.0, z: 0.0)
+    verts.push(Vertex.create(Vec3(x: h, y: -h, z: h), nr, 0.0, 0.0))
+    verts.push(Vertex.create(Vec3(x: h, y: -h, z: -h), nr, 1.0, 0.0))
+    verts.push(Vertex.create(Vec3(x: h, y: h, z: -h), nr, 1.0, 1.0))
+    verts.push(Vertex.create(Vec3(x: h, y: h, z: h), nr, 0.0, 1.0))
+
+    # Left face (-X)
+    val nl = Vec3(x: -1.0, y: 0.0, z: 0.0)
+    verts.push(Vertex.create(Vec3(x: -h, y: -h, z: -h), nl, 0.0, 0.0))
+    verts.push(Vertex.create(Vec3(x: -h, y: -h, z: h), nl, 1.0, 0.0))
+    verts.push(Vertex.create(Vec3(x: -h, y: h, z: h), nl, 1.0, 1.0))
+    verts.push(Vertex.create(Vec3(x: -h, y: h, z: -h), nl, 0.0, 1.0))
+
+    # Top face (+Y)
+    val nt = Vec3(x: 0.0, y: 1.0, z: 0.0)
+    verts.push(Vertex.create(Vec3(x: -h, y: h, z: h), nt, 0.0, 0.0))
+    verts.push(Vertex.create(Vec3(x: h, y: h, z: h), nt, 1.0, 0.0))
+    verts.push(Vertex.create(Vec3(x: h, y: h, z: -h), nt, 1.0, 1.0))
+    verts.push(Vertex.create(Vec3(x: -h, y: h, z: -h), nt, 0.0, 1.0))
+
+    # Bottom face (-Y)
+    val nbot = Vec3(x: 0.0, y: -1.0, z: 0.0)
+    verts.push(Vertex.create(Vec3(x: -h, y: -h, z: -h), nbot, 0.0, 0.0))
+    verts.push(Vertex.create(Vec3(x: h, y: -h, z: -h), nbot, 1.0, 0.0))
+    verts.push(Vertex.create(Vec3(x: h, y: -h, z: h), nbot, 1.0, 1.0))
+    verts.push(Vertex.create(Vec3(x: -h, y: -h, z: h), nbot, 0.0, 1.0))
+
+    # Indices: 2 triangles per face, 6 faces = 36 indices
+    var face = 0
+    while face < 6:
+        val base = face * 4
+        idxs.push(base)
+        idxs.push(base + 1)
+        idxs.push(base + 2)
+        idxs.push(base)
+        idxs.push(base + 2)
+        idxs.push(base + 3)
+        face = face + 1
+
+    Mesh(vertices: verts, indices: idxs)
+
+fn mesh_plane(width: f64, height: f64) -> Mesh:
+    """Create a plane on XZ with 4 vertices, 6 indices, normal pointing up (+Y)."""
+    val hw = width / 2.0
+    val hh = height / 2.0
+    val n = Vec3(x: 0.0, y: 1.0, z: 0.0)
+
+    var verts: [Vertex] = []
+    verts.push(Vertex.create(Vec3(x: -hw, y: 0.0, z: -hh), n, 0.0, 0.0))
+    verts.push(Vertex.create(Vec3(x: hw, y: 0.0, z: -hh), n, 1.0, 0.0))
+    verts.push(Vertex.create(Vec3(x: hw, y: 0.0, z: hh), n, 1.0, 1.0))
+    verts.push(Vertex.create(Vec3(x: -hw, y: 0.0, z: hh), n, 0.0, 1.0))
+
+    var idxs: [i32] = [0, 1, 2, 0, 2, 3]
+
+    Mesh(vertices: verts, indices: idxs)
+
+fn mesh_sphere(radius: f64, segments: i64, rings: i64) -> Mesh:
+    """Create a UV sphere."""
+    var verts: [Vertex] = []
+    var idxs: [i32] = []
+
+    var ring = 0
+    while ring <= rings:
+        val v_ratio = ring / (rings * 1.0)
+        val phi = MATH_PI * v_ratio
+        val sin_phi = sin3d(phi)
+        val cos_phi = cos3d(phi)
+
+        var seg = 0
+        while seg <= segments:
+            val u_ratio = seg / (segments * 1.0)
+            val theta = 2.0 * MATH_PI * u_ratio
+
+            val x = radius * sin_phi * cos3d(theta)
+            val y = radius * cos_phi
+            val z = radius * sin_phi * sin3d(theta)
+
+            val nx = sin_phi * cos3d(theta)
+            val ny = cos_phi
+            val nz = sin_phi * sin3d(theta)
+
+            val pos = Vec3(x: x, y: y, z: z)
+            val norm = Vec3(x: nx, y: ny, z: nz)
+            verts.push(Vertex.create(pos, norm, u_ratio, v_ratio))
+
+            seg = seg + 1
+        ring = ring + 1
+
+    # Generate indices
+    var r = 0
+    while r < rings:
+        var s = 0
+        while s < segments:
+            val row_len = segments + 1
+            val curr = r * row_len + s
+            val next_row = (r + 1) * row_len + s
+
+            idxs.push(curr)
+            idxs.push(next_row)
+            idxs.push(curr + 1)
+
+            idxs.push(curr + 1)
+            idxs.push(next_row)
+            idxs.push(next_row + 1)
+
+            s = s + 1
+        r = r + 1
+
+    Mesh(vertices: verts, indices: idxs)

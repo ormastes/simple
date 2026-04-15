@@ -1,0 +1,174 @@
+# GUI backend matrix verification for the shared widget API.
+
+use std.spec.*
+
+use common.ui.parse.sdn_tree.{parse_ui_to_tree}
+use common.ui.state.{init_state}
+use common.ui.layout.{compute_layout}
+use app.ui.render.widgets.{render_html_tree, render_tui_tree}
+use app.ui.tui.screen.{Screen}
+use app.ui.web.backend.{WebBackend}
+use app.ui.tauri.backend.{TauriBackend}
+use app.ui.electron.backend.{ElectronBackend}
+use app.ui.build.{generate_gui_entry}
+
+val sample_ui = "examples/ui/widget_matrix.ui.sdn"
+
+describe "GUI widget matrix parser":
+
+    it "preserves layout aliases and widget props from SDN":
+        val tree_result = parse_ui_to_tree(sample_ui)
+        match tree_result:
+            Err(e):
+                expect(e).to_equal("")
+            Ok(tree):
+                expect(tree.title).to_equal("Widget Matrix")
+
+                val main = tree.find_widget("main")
+                expect(main != nil).to_equal(true)
+                if main != nil:
+                    expect(main.layout).to_equal("hbox")
+
+                val progress = tree.find_widget("progress")
+                expect(progress != nil).to_equal(true)
+                if progress != nil:
+                    expect(progress.get_prop("value")).to_equal("42")
+
+                val checkbox = tree.find_widget("sync_checkbox")
+                expect(checkbox != nil).to_equal(true)
+                if checkbox != nil:
+                    expect(checkbox.get_prop("checked")).to_equal("true")
+
+                val textfield = tree.find_widget("name_field")
+                expect(textfield != nil).to_equal(true)
+                if textfield != nil:
+                    expect(textfield.get_prop("value")).to_equal("alice")
+                    expect(textfield.get_prop("placeholder")).to_equal("User name")
+
+                val image = tree.find_widget("logo")
+                expect(image != nil).to_equal(true)
+                if image != nil:
+                    expect(image.get_prop("src")).to_equal("/static/logo.png")
+                    expect(image.get_prop("alt")).to_equal("Simple Logo")
+
+                val tooltip = tree.find_widget("help_tip")
+                expect(tooltip != nil).to_equal(true)
+                if tooltip != nil:
+                    expect(tooltip.get_prop("target")).to_equal("save_button")
+
+describe "GUI widget matrix rendering":
+
+    it "renders all widget families into shared HTML":
+        val tree_result = parse_ui_to_tree(sample_ui)
+        match tree_result:
+            Err(e):
+                expect(e).to_equal("")
+            Ok(tree):
+                val state = init_state(tree)
+                val st = state.tree
+                val rn = st.root_node()
+                val html = render_html_tree(rn, state)
+                expect(html).to_contain("widget-menubar")
+                expect(html).to_contain("widget-progress")
+                expect(html).to_contain("widget-tabs")
+                expect(html).to_contain("widget-list")
+                expect(html).to_contain("widget-input")
+                expect(html).to_contain("widget-textfield")
+                expect(html).to_contain("widget-checkbox")
+                expect(html).to_contain("widget-dropdown")
+                expect(html).to_contain("widget-button")
+                expect(html).to_contain("widget-divider")
+                expect(html).to_contain("widget-table")
+                expect(html).to_contain("widget-image")
+                expect(html).to_contain("widget-tooltip")
+                expect(html).to_contain("widget-dialog")
+                expect(html).to_contain("Apply pending changes?")
+                expect(html).to_contain("data-target=\"save_button\"")
+
+    it "renders all interactive widget markers into TUI output":
+        val tree_result = parse_ui_to_tree(sample_ui)
+        match tree_result:
+            Err(e):
+                expect(e).to_equal("")
+            Ok(tree):
+                val state = init_state(tree)
+                val st2 = state.tree
+                val rn2 = st2.root_node()
+                val rects = compute_layout(rn2, 0, 0, 140, 40)
+                var screen = Screen.new(140, 40)
+                val st3 = state.tree
+                val rn3 = st3.root_node()
+                screen = render_tui_tree(screen, rn3, rects, state)
+                val output = screen.render()
+                expect(output).to_contain("Widget coverage sample")
+                expect(output).to_contain("42%")
+                expect(output).to_contain("Overview")
+                expect(output).to_contain("[x] Enable sync")
+                expect(output).to_contain("[v] Auto")
+                expect(output).to_contain("|alice|")
+                expect(output).to_contain("[ Save ]")
+                expect(output).to_contain("[IMG: Simple Logo]")
+                expect(output).to_contain("Ready")
+
+describe "GUI backend matrix":
+
+    it "web backend renders the widget matrix":
+        val tree_result = parse_ui_to_tree(sample_ui)
+        match tree_result:
+            Err(e):
+                expect(e).to_equal("")
+            Ok(tree):
+                val state = init_state(tree)
+                val backend = WebBackend.new(4010)
+                expect(backend.backend_name()).to_equal("web")
+                expect(backend.supports_mouse()).to_equal(true)
+                val html = backend.render_html(state)
+                expect(html).to_contain("widget-dialog")
+                expect(html).to_contain("widget-tooltip")
+
+    it "tauri backend renders the widget matrix":
+        val tree_result = parse_ui_to_tree(sample_ui)
+        match tree_result:
+            Err(e):
+                expect(e).to_equal("")
+            Ok(tree):
+                val state = init_state(tree)
+                val backend_result = TauriBackend.new(4011)
+                match backend_result:
+                    Err(e):
+                        expect(e).to_equal("")
+                    Ok(backend):
+                        expect(backend.backend_name()).to_equal("tauri")
+                        expect(backend.supports_images()).to_equal(true)
+                        val html = backend.render_html(state)
+                        expect(html).to_contain("widget-dropdown")
+                        expect(html).to_contain("widget-image")
+
+    it "electron backend renders the widget matrix":
+        val tree_result = parse_ui_to_tree(sample_ui)
+        match tree_result:
+            Err(e):
+                expect(e).to_equal("")
+            Ok(tree):
+                val state = init_state(tree)
+                val backend_result = ElectronBackend.new(4012)
+                match backend_result:
+                    Err(e):
+                        expect(e).to_equal("")
+                    Ok(backend):
+                        expect(backend.backend_name()).to_equal("electron")
+                        expect(backend.supports_color()).to_equal(true)
+                        val html = backend.render_html(state)
+                        expect(html).to_contain("widget-button")
+                        expect(html).to_contain("widget-statusbar")
+
+    it "generates desktop and browser entries for the same sample app":
+        val web_src = generate_gui_entry(sample_ui, "web", 4020)
+        val tauri_src = generate_gui_entry(sample_ui, "tauri", 4021)
+        val electron_src = generate_gui_entry(sample_ui, "electron", 4022)
+        val tui_src = generate_gui_entry(sample_ui, "tui", 0)
+
+        expect(web_src).to_contain("run_web")
+        expect(tauri_src).to_contain("run_tauri")
+        expect(electron_src).to_contain("run_electron")
+        expect(tui_src).to_contain("run_tui")

@@ -1,0 +1,273 @@
+# POSIX File I/O — sync wrappers over async IPC
+#
+# These functions provide the standard POSIX file I/O API.
+# Internally they use async_io.spl for non-blocking IPC to the VFS service.
+# posix_open sends an IPC request to the VFS service (port 1) to open files.
+# FDs 0-2 are reserved for stdin/stdout/stderr (serial on baremetal).
+
+use os.posix.errno.{EBADF, EINVAL, ENOENT, ENOSYS, EMFILE, EIO}
+use os.posix.fd_table.{fd_is_valid, fd_alloc, fd_set, fd_close, fd_dup, fd_dup2, fd_types, fd_flags, fd_offsets, fd_ports, FD_TYPE_FILE, FD_TYPE_SERIAL, FD_TYPE_PIPE_READ, FD_TYPE_PIPE_WRITE, FD_TYPE_SOCKET, O_RDONLY, O_WRONLY, O_RDWR, SEEK_SET, SEEK_CUR, SEEK_END, MAX_FDS}
+use os.posix.async_io.{sync_read, sync_write}
+use os.userlib.syscall_raw.{syscall}
+use os.userlib.ipc_protocol.{VFS_OPEN, VFS_READ, VFS_WRITE, VFS_CLOSE}
+
+# Well-known VFS service IPC port
+val _VFS_PORT: u64 = 1
+
+# Syscall numbers for IPC
+val _SYS_IPC_SEND: u64 = 20
+val _SYS_IPC_RECV: u64 = 21
+
+extern fn unsafe_addr_of(ref: any) -> u64
+
+fn posix_open(path: text, flags: u32, mode: u32) -> i32:
+    """Open a file via VFS IPC service. Returns FD on success, -errno on error.
+
+    Sends an IPC message to the VFS service (port 1) with VFS_OPEN method.
+    The VFS service returns a handle which we map to a local FD.
+    """
+    # Allocate a local FD
+    val fd = fd_alloc()
+    if fd < 0:
+        return fd  # -EMFILE
+
+    # Build IPC payload: method(u32) | flags(u32) | mode(u32) | path(bytes)
+    var payload: [u8] = []
+    _push_u32(payload, VFS_OPEN)
+    _push_u32(payload, flags)
+    _push_u32(payload, mode)
+    var pi: u64 = 0
+    while pi < path.len():
+        payload.push(path.byte_at(pi))
+        pi = pi + 1
+
+    # Send IPC to VFS service
+    val payload_ptr = unsafe_addr_of(payload)
+    val payload_len = payload.len()
+    val send_result = syscall(_SYS_IPC_SEND, _VFS_PORT, VFS_OPEN as u64, 0, payload_ptr, payload_len)
+    if send_result < 0:
+        return 0 - EIO
+
+    # Receive reply from VFS
+    var reply_buf: [u8; 64] = [0; 64]
+    val reply_ptr = unsafe_addr_of(reply_buf)
+    val recv_result = syscall(_SYS_IPC_RECV, _VFS_PORT, reply_ptr, 64, 0, 0)
+    if recv_result < 0:
+        return 0 - EIO
+
+    # Parse reply: status(i32) | vfs_handle(u64)
+    val status = _read_i32(reply_buf, 0)
+    if status < 0:
+        return status  # VFS returned an error
+
+    val vfs_handle = _read_u64(reply_buf, 4)
+
+    # Set up the FD entry
+    fd_set(fd, FD_TYPE_FILE, flags, vfs_handle)
+    fd
+
+fn posix_read(fd: i32, buf: u64, count: u64) -> i64:
+    """Read from a file descriptor. Returns bytes read or -errno.
+
+    For serial FDs (0-2), uses the sync_read path.
+    For file FDs, sends VFS_READ IPC with the VFS handle from the FD table.
+    """
+    if not fd_is_valid(fd):
+        return 0 - EBADF as i64
+    val idx: u64 = fd as u64
+
+    # Serial: use existing async_io path
+    if fd_types[idx] == FD_TYPE_SERIAL:
+        return sync_read(fd, buf, count)
+
+    # Pipe and socket reads are handled by their respective modules
+    if fd_types[idx] == FD_TYPE_PIPE_READ or fd_types[idx] == FD_TYPE_SOCKET:
+        return sync_read(fd, buf, count)
+
+    # File: send VFS_READ IPC
+    val vfs_handle = fd_ports[idx]
+    val offset = fd_offsets[idx]
+
+    var payload: [u8] = []
+    _push_u32(payload, VFS_READ)
+    _push_u64(payload, vfs_handle)
+    _push_u64(payload, offset)
+    _push_u64(payload, count)
+
+    val payload_ptr = unsafe_addr_of(payload)
+    val send_result = syscall(_SYS_IPC_SEND, _VFS_PORT, VFS_READ as u64, 0, payload_ptr, payload.len())
+    if send_result < 0:
+        return 0 - EIO as i64
+
+    # Receive reply: status(i32) | bytes_read(u64) | data(bytes)
+    var reply_buf: [u8; 4096] = [0; 4096]
+    val reply_ptr = unsafe_addr_of(reply_buf)
+    val recv_result = syscall(_SYS_IPC_RECV, _VFS_PORT, reply_ptr, 4096, 0, 0)
+    if recv_result < 0:
+        return 0 - EIO as i64
+
+    val status = _read_i32(reply_buf, 0)
+    if status < 0:
+        return status as i64
+
+    val bytes_read = _read_u64(reply_buf, 4)
+
+    # Copy data to user buffer
+    extern fn mmio_write8(addr: u64, val_: u8)
+    var ci: u64 = 0
+    while ci < bytes_read and ci < count:
+        mmio_write8(buf + ci, reply_buf[12 + ci])
+        ci = ci + 1
+
+    # Advance file offset
+    fd_offsets[idx] = fd_offsets[idx] + bytes_read
+    bytes_read as i64
+
+fn posix_write(fd: i32, buf: u64, count: u64) -> i64:
+    """Write to a file descriptor. Returns bytes written or -errno.
+
+    For serial FDs (0-2), uses the sync_write path.
+    For file FDs, sends VFS_WRITE IPC with the VFS handle from the FD table.
+    """
+    if not fd_is_valid(fd):
+        return 0 - EBADF as i64
+    val idx: u64 = fd as u64
+
+    # Serial: use existing async_io path
+    if fd_types[idx] == FD_TYPE_SERIAL:
+        return sync_write(fd, buf, count)
+
+    # Pipe and socket writes are handled by their respective modules
+    if fd_types[idx] == FD_TYPE_PIPE_WRITE or fd_types[idx] == FD_TYPE_SOCKET:
+        return sync_write(fd, buf, count)
+
+    # File: send VFS_WRITE IPC
+    val vfs_handle = fd_ports[idx]
+    val offset = fd_offsets[idx]
+
+    # Read data from user buffer
+    extern fn mmio_read8(addr: u64) -> u8
+    var payload: [u8] = []
+    _push_u32(payload, VFS_WRITE)
+    _push_u64(payload, vfs_handle)
+    _push_u64(payload, offset)
+    _push_u64(payload, count)
+    var ci: u64 = 0
+    while ci < count:
+        payload.push(mmio_read8(buf + ci))
+        ci = ci + 1
+
+    val payload_ptr = unsafe_addr_of(payload)
+    val send_result = syscall(_SYS_IPC_SEND, _VFS_PORT, VFS_WRITE as u64, 0, payload_ptr, payload.len())
+    if send_result < 0:
+        return 0 - EIO as i64
+
+    # Receive reply: status(i32) | bytes_written(u64)
+    var reply_buf: [u8; 16] = [0; 16]
+    val reply_ptr = unsafe_addr_of(reply_buf)
+    val recv_result = syscall(_SYS_IPC_RECV, _VFS_PORT, reply_ptr, 16, 0, 0)
+    if recv_result < 0:
+        return 0 - EIO as i64
+
+    val status = _read_i32(reply_buf, 0)
+    if status < 0:
+        return status as i64
+
+    val bytes_written = _read_u64(reply_buf, 4)
+
+    # Advance file offset
+    fd_offsets[idx] = fd_offsets[idx] + bytes_written
+    bytes_written as i64
+
+fn posix_close(fd: i32) -> i32:
+    """Close a file descriptor.
+
+    For file FDs, sends VFS_CLOSE IPC to release the VFS handle.
+    Then frees the local FD table entry.
+    """
+    if not fd_is_valid(fd):
+        return 0 - EBADF
+    val idx: u64 = fd as u64
+
+    # Send VFS_CLOSE for file FDs
+    if fd_types[idx] == FD_TYPE_FILE:
+        val vfs_handle = fd_ports[idx]
+        var payload: [u8] = []
+        _push_u32(payload, VFS_CLOSE)
+        _push_u64(payload, vfs_handle)
+        val payload_ptr = unsafe_addr_of(payload)
+        syscall(_SYS_IPC_SEND, _VFS_PORT, VFS_CLOSE as u64, 0, payload_ptr, payload.len())
+        # Best-effort close: ignore IPC errors
+
+    fd_close(fd)
+
+fn posix_lseek(fd: i32, offset: i64, whence: u32) -> i64:
+    """Reposition file offset. Returns new offset or -errno."""
+    if not fd_is_valid(fd):
+        return 0 - EBADF as i64
+    val idx: u64 = fd as u64
+    if whence == SEEK_SET:
+        fd_offsets[idx] = offset as u64
+    elif whence == SEEK_CUR:
+        fd_offsets[idx] = (fd_offsets[idx] as i64 + offset) as u64
+    elif whence == SEEK_END:
+        # Query VFS for file size
+        val vfs_handle = fd_ports[idx]
+        var payload: [u8] = []
+        _push_u32(payload, 5)  # VFS_STAT
+        _push_u64(payload, vfs_handle)
+        val payload_ptr = unsafe_addr_of(payload)
+        val send_result = syscall(_SYS_IPC_SEND, _VFS_PORT, 5, 0, payload_ptr, payload.len())
+        if send_result < 0:
+            return 0 - EIO as i64
+        var reply_buf: [u8; 16] = [0; 16]
+        val reply_ptr = unsafe_addr_of(reply_buf)
+        val recv_result = syscall(_SYS_IPC_RECV, _VFS_PORT, reply_ptr, 16, 0, 0)
+        if recv_result < 0:
+            return 0 - EIO as i64
+        val status = _read_i32(reply_buf, 0)
+        if status < 0:
+            return status as i64
+        val file_size = _read_u64(reply_buf, 4)
+        fd_offsets[idx] = (file_size as i64 + offset) as u64
+    else:
+        return 0 - EINVAL as i64
+    fd_offsets[idx] as i64
+
+fn posix_dup(fd: i32) -> i32:
+    """Duplicate a file descriptor."""
+    fd_dup(fd)
+
+fn posix_dup2(old_fd: i32, new_fd: i32) -> i32:
+    """Duplicate fd to specific number."""
+    fd_dup2(old_fd, new_fd)
+
+# ============================================================================
+# Serialization Helpers
+# ============================================================================
+
+fn _push_u32(buf: [u8], val_: u32):
+    """Push a u32 in little-endian byte order."""
+    buf.push((val_ & 0xFF) as u8)
+    buf.push(((val_ >> 8) & 0xFF) as u8)
+    buf.push(((val_ >> 16) & 0xFF) as u8)
+    buf.push(((val_ >> 24) & 0xFF) as u8)
+
+fn _push_u64(buf: [u8], val_: u64):
+    """Push a u64 in little-endian byte order."""
+    _push_u32(buf, (val_ & 0xFFFFFFFF) as u32)
+    _push_u32(buf, ((val_ >> 32) & 0xFFFFFFFF) as u32)
+
+fn _read_i32(buf: [u8], offset: u64) -> i32:
+    """Read a little-endian i32 from a byte buffer."""
+    val b0 = buf[offset] as u32
+    val b1 = buf[offset + 1] as u32
+    val b2 = buf[offset + 2] as u32
+    val b3 = buf[offset + 3] as u32
+    (b0 | (b1 << 8) | (b2 << 16) | (b3 << 24)) as i32
+
+fn _read_u64(buf: [u8], offset: u64) -> u64:
+    """Read a little-endian u64 from a byte buffer."""
+    val lo = _read_i32(buf, offset) as u64 & 0xFFFFFFFF
+    val hi = _read_i32(buf, offset + 4) as u64 & 0xFFFFFFFF
+    lo | (hi << 32)

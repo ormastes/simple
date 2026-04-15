@@ -1,0 +1,94 @@
+# @cover src/lib/skia/feature/color_management/icc_writer.spl 80%
+"""
+# Skia ICC Profile Writer Specification
+
+**Feature IDs:** #SKI-012
+**Category:** Stdlib
+**Difficulty:** 3/5
+**Status:** Implemented
+
+## Overview
+
+Tests for encode_u32_be, encode_s15fixed16, encode_icc_header, and
+encode_icc_profile — the ICC v4 serialization helpers that form the
+inverse of the parser in icc_profile.spl.
+"""
+
+use std.sspec.*
+use std.skia.entity.color_space.{SkColorSpace, srgb}
+use std.skia.feature.color_management.icc_writer.{
+    encode_u32_be, encode_s15fixed16, encode_icc_header, encode_icc_profile
+}
+use std.skia.feature.color_management.icc_profile.{parse_icc_header}
+
+# ============================================================================
+# Test helpers
+# ============================================================================
+
+fn _byte_at(bytes: [i64], idx: i64) -> i64:
+    val maybe = bytes.at(idx)
+    match maybe:
+        Some(b):
+            return b
+        None:
+            return -1
+
+# ============================================================================
+# Specs
+# ============================================================================
+
+describe "icc_writer":
+    it "encode_u32_be: 0 produces [0,0,0,0]":
+        val out = encode_u32_be(0)
+        expect(out.length()).to_equal(4)
+        expect(_byte_at(out, 0)).to_equal(0)
+        expect(_byte_at(out, 1)).to_equal(0)
+        expect(_byte_at(out, 2)).to_equal(0)
+        expect(_byte_at(out, 3)).to_equal(0)
+
+    it "encode_u32_be: 0x12345678 produces [0x12, 0x34, 0x56, 0x78]":
+        val out = encode_u32_be(305419896)
+        expect(out.length()).to_equal(4)
+        expect(_byte_at(out, 0)).to_equal(18)    # 0x12
+        expect(_byte_at(out, 1)).to_equal(52)    # 0x34
+        expect(_byte_at(out, 2)).to_equal(86)    # 0x56
+        expect(_byte_at(out, 3)).to_equal(120)   # 0x78
+
+    it "encode_s15fixed16: 1.0 produces [0, 1, 0, 0]":
+        val out = encode_s15fixed16(1.0)
+        expect(out.length()).to_equal(4)
+        expect(_byte_at(out, 0)).to_equal(0)
+        expect(_byte_at(out, 1)).to_equal(1)
+        expect(_byte_at(out, 2)).to_equal(0)
+        expect(_byte_at(out, 3)).to_equal(0)
+
+    it "encode_icc_header: produces 128-byte blob with acsp magic at offset 36":
+        val hdr = encode_icc_header(128, std.skia.entity.color_space.SkColorSpaceKind.Srgb, 1482250784)
+        expect(hdr.length()).to_equal(128)
+        # "acsp" = 0x61 0x63 0x73 0x70
+        expect(_byte_at(hdr, 36)).to_equal(97)   # 0x61
+        expect(_byte_at(hdr, 37)).to_equal(99)   # 0x63
+        expect(_byte_at(hdr, 38)).to_equal(115)  # 0x73
+        expect(_byte_at(hdr, 39)).to_equal(112)  # 0x70
+
+    it "encode_icc_profile: for sRGB produces at least 128 bytes and starts with valid header":
+        val cs = srgb()
+        val out = encode_icc_profile(cs)
+        expect(out.length()).to_be_greater_than(127)
+        # acsp magic at offset 36
+        expect(_byte_at(out, 36)).to_equal(97)
+        expect(_byte_at(out, 37)).to_equal(99)
+        expect(_byte_at(out, 38)).to_equal(115)
+        expect(_byte_at(out, 39)).to_equal(112)
+
+    it "encode_icc_profile: profile_size field in header matches total byte length":
+        val cs = srgb()
+        val out = encode_icc_profile(cs)
+        val total = out.length()
+        # First 4 bytes = profile size (big-endian u32)
+        val b0 = _byte_at(out, 0)
+        val b1 = _byte_at(out, 1)
+        val b2 = _byte_at(out, 2)
+        val b3 = _byte_at(out, 3)
+        val encoded_size = (b0 * 16777216) + (b1 * 65536) + (b2 * 256) + b3
+        expect(encoded_size).to_equal(total)

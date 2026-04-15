@@ -1,0 +1,126 @@
+#![allow(unnamed_duplicate_typed_args)]
+@allow(unnamed_duplicate_typed_args)
+@allow(primitive_api)
+# Baremetal Sort Utilities
+#
+# Allocation-free sorting and searching algorithms for bare-metal targets.
+# All algorithms operate in-place on a caller-supplied [i64] array slice
+# (arr + len pair), without any dynamic memory.
+#
+# Algorithms:
+#   bm_insertion_sort  - O(n^2) stable sort; fast for small or nearly-sorted data
+#   bm_heapsort        - O(n log n) in-place sort; worst-case guarantee
+#   bm_binary_search   - O(log n) search in a sorted array
+#
+# Usage:
+#   use std.sort.{bm_insertion_sort, bm_heapsort, bm_binary_search}
+
+
+# ============================================================================
+# Insertion Sort
+# ============================================================================
+
+fn bm_insertion_sort(arr: [i64], len: i64):
+    """Sort arr[0..len) in ascending order using insertion sort (in-place).
+
+    Stable sort. O(n^2) worst case, O(n) best case (already sorted).
+    Recommended for small arrays (len <= 32) or nearly-sorted data.
+
+    Example:
+        var a: [i64] = [3, 1, 4, 1, 5]
+        bm_insertion_sort(a, 5)
+        # a is now [1, 1, 3, 4, 5]
+    """
+    var i: i64 = 1
+    while i < len:
+        val key = arr[i]
+        var j = i - 1
+        while (j >= 0) and (arr[j] > key):
+            arr[j + 1] = arr[j]
+            j = j - 1
+        arr[j + 1] = key
+        i = i + 1
+
+# ============================================================================
+# Heapsort (helpers)
+# ============================================================================
+
+fn _bm_sift_down(arr: [i64], root: i64, end: i64):
+    """Sift the element at root down to restore the max-heap property.
+
+    Operates on arr[root..end). Internal helper for bm_heapsort.
+    """
+    var r = root
+    while true:
+        val left = 2 * r + 1
+        if left >= end:
+            return
+        var largest = r
+        if arr[left] > arr[largest]:
+            largest = left
+        val right = left + 1
+        if (right < end) and (arr[right] > arr[largest]):
+            largest = right
+        if largest == r:
+            return
+        # Swap arr[r] and arr[largest]
+        val tmp = arr[r]
+        arr[r] = arr[largest]
+        arr[largest] = tmp
+        r = largest
+
+fn bm_heapsort(arr: [i64], len: i64):
+    """Sort arr[0..len) in ascending order using heapsort (in-place).
+
+    Not stable. O(n log n) worst case. No allocation. Suitable for
+    bare-metal targets where stack depth must be bounded.
+
+    Example:
+        var a: [i64] = [5, 3, 8, 1, 9]
+        bm_heapsort(a, 5)
+        # a is now [1, 3, 5, 8, 9]
+    """
+    if len <= 1:
+        return
+    # Build max-heap (Floyd's algorithm)
+    var i = len / 2 - 1
+    while i >= 0:
+        _bm_sift_down(arr, i, len)
+        i = i - 1
+    # Extract elements from heap one by one
+    var end = len - 1
+    while end > 0:
+        # Swap root (max) with last unsorted element
+        val tmp = arr[0]
+        arr[0] = arr[end]
+        arr[end] = tmp
+        _bm_sift_down(arr, 0, end)
+        end = end - 1
+
+# ============================================================================
+# Binary Search
+# ============================================================================
+
+fn bm_binary_search(arr: [i64], len: i64, target: i64) -> i64:
+    """Search for target in sorted arr[0..len). Returns index or -1.
+
+    The array must be sorted in ascending order (e.g., after bm_heapsort).
+    Returns the index of any matching element if duplicates exist.
+
+    Example:
+        val a: [i64] = [1, 3, 5, 7, 9]
+        bm_binary_search(a, 5, 7)   # => 3
+        bm_binary_search(a, 5, 4)   # => -1
+    """
+    var lo: i64 = 0
+    var hi = len - 1
+    while lo <= hi:
+        val mid = lo + (hi - lo) / 2
+        val v = arr[mid]
+        if v == target:
+            return mid
+        if v < target:
+            lo = mid + 1
+        else:
+            hi = mid - 1
+    -1

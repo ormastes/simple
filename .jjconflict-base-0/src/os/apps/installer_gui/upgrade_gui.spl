@@ -1,0 +1,350 @@
+# OS Upgrade GUI — macOS Software Update Style
+#
+# System update interface for upgrading an existing SimpleOS installation.
+# Inspired by:
+#   - macOS System Preferences > Software Update
+#   - Ubuntu Software Updater
+#   - Fedora GNOME Software updates tab
+#
+# Layout:
+#   ┌───────────────────────────────────────────────┐
+#   │  Software Update                    [Check Now]│
+#   ├───────────────────────────────────────────────┤
+#   │  SimpleOS 1.1.0 is available                  │
+#   │                                               │
+#   │  ┌─────────────────────────────────────────┐  │
+#   │  │ simpleos-kernel     1.2.0 → 1.3.0  4MB │  │
+#   │  │ simpleos-core       1.2.0 → 1.3.0  8MB │  │
+#   │  │ simpleos-tools      1.0.0 → 1.1.0  3MB │  │
+#   │  └─────────────────────────────────────────┘  │
+#   │                                               │
+#   │  Total download: 15 MB                        │
+#   │  [More Info]        [Update Now / Restart]    │
+#   ├───────────────────────────────────────────────┤
+#   │  Last checked: 2 hours ago      [Auto-update] │
+#   └───────────────────────────────────────────────┘
+#
+# Uses pkg_core for update detection and operations.
+# Glass theme for consistent SimpleOS look.
+#
+# MDSOC: feature dimension, apps layer
+
+use common.ui.builder.{
+    column, row, panel, button, text_widget, label,
+    statusbar, progress, divider, table_widget, scroll,
+    with_flex, with_width, with_height, build_tree_with_title,
+    checkbox, list_widget, with_disabled
+}
+use common.ui.widget.{WidgetNode, UITree, UIEvent}
+use common.ui.session.{UISession}
+use os.tools.pkg.pkg_core.{PkgCore, PackageInfo, PkgStatus, PkgOperationResult}
+
+# =========================================================================
+# Upgrade States
+# =========================================================================
+
+enum UpgradeState:
+    Checking       # Checking for updates
+    UpToDate       # No updates available
+    UpdatesReady   # Updates found, waiting for user
+    Downloading    # Downloading packages
+    Installing     # Installing updates
+    NeedsRestart   # Done, needs reboot
+    Failed         # Update failed
+
+# =========================================================================
+# Upgrade GUI App
+# =========================================================================
+
+class UpgradeGuiApp:
+    """macOS-style Software Update panel.
+
+    Shows available OS and app updates, with download/install progress.
+    """
+    core: PkgCore
+    state: UpgradeState
+    updatable: [PackageInfo]
+    selected_updates: [bool]    # Which updates are checked
+    download_progress: i32
+    install_progress: i32
+    current_pkg: text
+    completed_count: i32
+    total_count: i32
+    total_size: text
+    error_message: text
+    last_check: text
+    auto_update: bool
+
+impl UpgradeGuiApp:
+
+    static fn new() -> UpgradeGuiApp:
+        var core = PkgCore.new()
+        core.init()
+        var app = UpgradeGuiApp(
+            core: core,
+            state: UpgradeState.Checking,
+            updatable: [],
+            selected_updates: [],
+            download_progress: 0,
+            install_progress: 0,
+            current_pkg: "",
+            completed_count: 0,
+            total_count: 0,
+            total_size: "",
+            error_message: "",
+            last_check: "just now",
+            auto_update: false
+        )
+        app._check_updates()
+        return app
+
+    me _check_updates():
+        """Check for available updates."""
+        self.state = UpgradeState.Checking
+        self.updatable = self.core.list_updatable()
+        self.selected_updates = []
+        for _pkg in self.updatable:
+            self.selected_updates.push(true)  # Select all by default
+
+        if self.updatable.len() == 0:
+            self.state = UpgradeState.UpToDate
+        else:
+            self.state = UpgradeState.UpdatesReady
+            self.total_count = self.updatable.len()
+            self.total_size = "{self.updatable.len() * 3} MB"  # Estimate
+        self.last_check = "just now"
+
+    me _start_update():
+        """Begin downloading and installing selected updates."""
+        self.state = UpgradeState.Downloading
+        self.download_progress = 0
+        self.install_progress = 0
+        self.completed_count = 0
+
+        # Count selected
+        var to_update: [PackageInfo] = []
+        var i = 0
+        while i < self.updatable.len():
+            if self.selected_updates[i]:
+                to_update.push(self.updatable[i])
+            i = i + 1
+        self.total_count = to_update.len()
+
+        if self.total_count == 0:
+            self.state = UpgradeState.UpToDate
+            return
+
+        # Simulate download phase
+        self.download_progress = 100
+        self.state = UpgradeState.Installing
+
+        # Install each update
+        var all_success = true
+        for pkg in to_update:
+            self.current_pkg = pkg.name
+            val result = self.core.update(pkg.name)
+            if result.success:
+                self.completed_count = self.completed_count + 1
+                self.install_progress = (self.completed_count * 100) / self.total_count
+            else:
+                all_success = false
+                self.error_message = result.message
+                break
+
+        if all_success:
+            self.state = UpgradeState.NeedsRestart
+        else:
+            self.state = UpgradeState.Failed
+
+    # -- Input ----------------------------------------------------------------
+
+    me handle_key(key: text):
+        match key:
+            "c":
+                self._check_updates()
+            "u":
+                if self.state == UpgradeState.UpdatesReady:
+                    self._start_update()
+            "r":
+                if self.state == UpgradeState.NeedsRestart:
+                    pass_todo("Trigger system reboot")
+            "a":
+                self.auto_update = not self.auto_update
+            "Escape":
+                pass_dn  # Close handled by window manager
+            "up":
+                pass_dn
+            "down":
+                pass_dn
+            _: pass_dn
+
+    me handle_action(action: text):
+        if action == "check_updates":
+            self._check_updates()
+        elif action == "update_now":
+            self._start_update()
+        elif action == "restart":
+            pass_todo("Trigger system reboot")
+        elif action == "toggle_auto":
+            self.auto_update = not self.auto_update
+        elif action.starts_with("toggle_"):
+            val idx = _parse_int(action.slice(7, action.len()))
+            if idx >= 0 and idx < self.selected_updates.len():
+                self.selected_updates[idx] = not self.selected_updates[idx]
+        else:
+            pass_dn
+
+    # -- UI Construction ------------------------------------------------------
+
+    me build_ui() -> UISession:
+        val content = match self.state:
+            UpgradeState.Checking: self._build_checking()
+            UpgradeState.UpToDate: self._build_up_to_date()
+            UpgradeState.UpdatesReady: self._build_updates_ready()
+            UpgradeState.Downloading: self._build_downloading()
+            UpgradeState.Installing: self._build_installing()
+            UpgradeState.NeedsRestart: self._build_needs_restart()
+            UpgradeState.Failed: self._build_failed()
+
+        val auto_label = if self.auto_update: "[x] Automatically check for updates" else: "[ ] Automatically check for updates"
+
+        val main = column("upg_root", [
+            # Header
+            row("upg_header", [
+                label("upg_title", "Software Update"),
+                with_flex(label("upg_spacer", ""), 1),
+                button("upg_check", "Check Now", "check_updates")
+            ]),
+            divider("upg_div_top"),
+            # Content
+            with_flex(content, 1),
+            divider("upg_div_bot"),
+            # Footer
+            row("upg_footer", [
+                label("upg_last_check", "Last checked: {self.last_check}"),
+                with_flex(label("upg_spacer2", ""), 1),
+                button("upg_auto", auto_label, "toggle_auto")
+            ])
+        ])
+
+        val tree = build_tree_with_title(main, "Software Update", "glass_dark")
+        return UISession.new(tree)
+
+    # -- State-Specific Views -------------------------------------------------
+
+    fn _build_checking() -> WidgetNode:
+        column("upg_checking", [
+            label("upg_chk_msg", "Checking for updates..."),
+            progress("upg_chk_progress", 50)
+        ])
+
+    fn _build_up_to_date() -> WidgetNode:
+        column("upg_up_to_date", [
+            text_widget("upg_utd_icon", "✓"),
+            text_widget("upg_utd_title", "SimpleOS is up to date"),
+            label("upg_utd_ver", "Version 1.0.0"),
+            label("upg_utd_msg", "Your system has the latest software updates.")
+        ])
+
+    fn _build_updates_ready() -> WidgetNode:
+        # Build update list
+        var update_rows: [[text]] = []
+        var i = 0
+        while i < self.updatable.len():
+            val pkg = self.updatable[i]
+            val checked = if self.selected_updates[i]: "[x]" else: "[ ]"
+            update_rows.push([
+                "{checked} {pkg.name}",
+                "{pkg.installed_version} → {pkg.version}",
+                pkg.size
+            ])
+            i = i + 1
+
+        # Count selected
+        var selected_count = 0
+        for sel in self.selected_updates:
+            if sel:
+                selected_count = selected_count + 1
+
+        column("upg_ready", [
+            row("upg_ready_header", [
+                text_widget("upg_ready_title", "{self.updatable.len()} update(s) available"),
+                with_flex(label("upg_spacer3", ""), 1),
+                label("upg_ready_size", "Total: {self.total_size}")
+            ]),
+            divider("upg_ready_div"),
+            panel("upg_update_list", "Available Updates", [
+                table_widget("upg_update_table",
+                    ["Package", "Version", "Size"],
+                    update_rows
+                )
+            ]),
+            divider("upg_ready_div2"),
+            row("upg_ready_actions", [
+                label("upg_sel_count", "{selected_count} of {self.updatable.len()} selected"),
+                with_flex(label("upg_spacer4", ""), 1),
+                button("upg_update_btn", "Update Now", "update_now")
+            ])
+        ])
+
+    fn _build_downloading() -> WidgetNode:
+        column("upg_downloading", [
+            label("upg_dl_title", "Downloading updates..."),
+            progress("upg_dl_progress", self.download_progress),
+            label("upg_dl_status", "Downloading {self.current_pkg}...")
+        ])
+
+    fn _build_installing() -> WidgetNode:
+        column("upg_installing", [
+            label("upg_inst_title", "Installing updates..."),
+            progress("upg_inst_progress", self.install_progress),
+            label("upg_inst_pkg", "Installing: {self.current_pkg}"),
+            label("upg_inst_count", "{self.completed_count} of {self.total_count} complete"),
+            divider("upg_inst_div"),
+            text_widget("upg_inst_warn", "Do not turn off your computer.")
+        ])
+
+    fn _build_needs_restart() -> WidgetNode:
+        column("upg_restart", [
+            text_widget("upg_rst_icon", "✓"),
+            text_widget("upg_rst_title", "Updates installed successfully"),
+            label("upg_rst_count", "{self.completed_count} package(s) updated"),
+            divider("upg_rst_div"),
+            text_widget("upg_rst_msg", "Your computer needs to restart to finish\napplying the updates."),
+            divider("upg_rst_div2"),
+            row("upg_rst_actions", [
+                button("upg_rst_later", "Later", "close"),
+                with_flex(label("upg_rst_spacer", ""), 1),
+                button("upg_rst_now", "Restart Now", "restart")
+            ])
+        ])
+
+    fn _build_failed() -> WidgetNode:
+        column("upg_failed", [
+            text_widget("upg_fail_icon", "✗"),
+            text_widget("upg_fail_title", "Update Failed"),
+            divider("upg_fail_div"),
+            text_widget("upg_fail_msg", "An error occurred while installing updates:\n\n{self.error_message}"),
+            divider("upg_fail_div2"),
+            row("upg_fail_actions", [
+                button("upg_fail_retry", "Try Again", "update_now"),
+                button("upg_fail_close", "Close", "close")
+            ])
+        ])
+
+# =========================================================================
+# Helpers
+# =========================================================================
+
+fn _parse_int(s: text) -> i32:
+    var result: i32 = 0
+    for ch in s:
+        if ch >= "0" and ch <= "9":
+            val digit = match ch:
+                "0" => 0  "1" => 1  "2" => 2  "3" => 3  "4" => 4
+                "5" => 5  "6" => 6  "7" => 7  "8" => 8  "9" => 9
+                _ => 0
+            result = result * 10 + digit
+        else:
+            return result
+    return result

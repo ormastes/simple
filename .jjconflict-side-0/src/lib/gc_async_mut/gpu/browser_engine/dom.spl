@@ -1,0 +1,1701 @@
+#![allow(bare_bool)]
+
+#![allow(unnamed_duplicate_typed_args)]
+# Simplified DOM for UI Rendering
+#
+# A lightweight DOM tree that the browser engine uses internally.
+# Unlike the full browser DOM (examples/browser/entity/dom/), this is
+# optimized for UI widget rendering: fewer node types, inline style props,
+# and a tree structure using direct child references rather than ID-based
+# lookups.
+
+use std.gc_async_mut.gpu.browser_engine.css.{StyleProps, CssValue, BorderProps, BoxShadow, BoxEdges, be_default_style, parse_css_value}
+use app.ui.chromium.css_ext.{parse_float_keyword, parse_clear_keyword, parse_outline_style, calc_apply, calc_resolve, CalcValue, CALC_OP_ADD, CALC_OP_SUB, CALC_OP_MUL, CALC_OP_DIV}
+
+class BeDomNode:
+    """A DOM node in the browser engine's simplified tree.
+
+    Fields:
+        tag          - element tag name ("div", "span", "button", "input", etc.)
+        id           - unique identifier for this node
+        classes      - CSS class names applied to this node
+        style        - inline style properties
+        children     - child nodes (direct references, not IDs)
+        text_content - text content for text nodes
+        attributes   - key-value attribute pairs stored as flat [key, value, key, value, ...]
+    """
+    tag: text
+    id: text
+    classes: [text]
+    style: StyleProps
+    children: [BeDomNode]
+    text_content: text
+    attributes: [text]
+
+    static fn element(tag: text) -> BeDomNode:
+        """Create an element node with the given tag name."""
+        return BeDomNode(
+            tag: tag,
+            id: "",
+            classes: [],
+            style: be_default_style(),
+            children: [],
+            text_content: "",
+            attributes: []
+        )
+
+    static fn text(content: text) -> BeDomNode:
+        """Create a text node with the given content."""
+        return BeDomNode(
+            tag: "#text",
+            id: "",
+            classes: [],
+            style: be_default_style(),
+            children: [],
+            text_content: content,
+            attributes: []
+        )
+
+    me add_child(child: BeDomNode):
+        """Append a child node."""
+        self.children.push(child)
+
+    me set_style(prop: text, value: text):
+        """Set a style property by name and string value."""
+        var s = self.style
+        match prop:
+            "display" =>
+                s.display = value
+            "width" =>
+                s.width = parse_length_or_calc(value)
+            "height" =>
+                s.height = parse_length_or_calc(value)
+            "min-width" =>
+                s.min_width = parse_css_value(value)
+            "max-width" =>
+                s.max_width = parse_css_value(value)
+            "min-height" =>
+                s.min_height = parse_css_value(value)
+            "max-height" =>
+                s.max_height = parse_css_value(value)
+            "background-color" =>
+                s.background_color = parse_color_value(value)
+            "background_color" =>
+                s.background_color = parse_color_value(value)
+            "color" =>
+                s.color = parse_color_value(value)
+            "font-size" =>
+                val cv = parse_css_value(value)
+                s.font_size = cv.value_as_i32()
+            "font_size" =>
+                val cv = parse_css_value(value)
+                s.font_size = cv.value_as_i32()
+            "font-weight" =>
+                s.font_weight = value
+            "font_weight" =>
+                s.font_weight = value
+            "text-align" =>
+                s.text_align = value
+            "text_align" =>
+                s.text_align = value
+            "text-decoration" =>
+                s.text_decoration = value
+            "text-transform" =>
+                s.text_transform = value
+            "white-space" =>
+                s.white_space = value
+            "letter-spacing" =>
+                val cv = parse_css_value(value)
+                s.letter_spacing = cv.value_as_i32()
+            "flex-direction" =>
+                s.flex_direction = value
+            "flex_direction" =>
+                s.flex_direction = value
+            "flex-wrap" =>
+                s.flex_wrap = value
+            "justify-content" =>
+                s.justify_content = value
+            "align-items" =>
+                s.align_items = value
+            "flex-grow" =>
+                s.flex_grow = parse_float_value(value)
+            "flex-shrink" =>
+                s.flex_shrink = parse_float_value(value)
+            "flex-basis" =>
+                s.flex_basis = parse_css_value(value)
+            "gap" =>
+                val cv = parse_css_value(value)
+                val v = cv.value_as_i32()
+                s.gap = v
+                s.row_gap = v
+                s.column_gap = v
+            "row-gap" =>
+                val cv = parse_css_value(value)
+                s.row_gap = cv.value_as_i32()
+            "column-gap" =>
+                val cv = parse_css_value(value)
+                s.column_gap = cv.value_as_i32()
+            "border" =>
+                val bparts = sb_dom_split_ws(value)
+                var bw = 1
+                var bc = 0x000000FF
+                for bp in bparts:
+                    if bp.ends_with("px") or bp.ends_with("em") or bp == "thin" or bp == "medium" or bp == "thick":
+                        val cv = parse_css_value(bp)
+                        bw = cv.value_as_i32()
+                    elif bp != "solid" and bp != "dashed" and bp != "dotted" and bp != "none" and bp != "double":
+                        bc = parse_color_value(bp)
+                s.border = BorderProps.solid(bw, bc)
+            "border-width" =>
+                val cv = parse_css_value(value)
+                s.border = BorderProps(width: cv.value_as_i32(), color: s.border.color, style: "solid")
+            "border-style" =>
+                s.border = BorderProps(width: s.border.width, color: s.border.color, style: value)
+            "border-color" =>
+                val bc_val = if value.to_lower() == "currentcolor": s.color else: parse_color_value(value)
+                s.border = BorderProps(width: s.border.width, color: bc_val, style: s.border.style)
+            "border-radius" =>
+                val cv = parse_css_value(value)
+                s.border_radius = cv.value_as_i32()
+            "border_radius" =>
+                val cv = parse_css_value(value)
+                s.border_radius = cv.value_as_i32()
+            "overflow" =>
+                s.overflow = value
+            "position" =>
+                s.position = value
+            "top" =>
+                s.top = parse_length_or_calc(value)
+            "right" =>
+                s.right = parse_length_or_calc(value)
+            "bottom" =>
+                s.bottom = parse_length_or_calc(value)
+            "left" =>
+                s.left = parse_length_or_calc(value)
+            "opacity" =>
+                s.opacity = parse_float_value(value)
+            "visibility" =>
+                s.visibility = value
+            "z-index" =>
+                s.z_index = parse_int_value(value)
+            "z_index" =>
+                s.z_index = parse_int_value(value)
+            "margin" =>
+                val cv = parse_css_value(value)
+                val v = cv.value_as_i32()
+                s.margin = BoxEdges(top: v, right: v, bottom: v, left: v)
+            "margin-top" =>
+                val cv = parse_css_value(value)
+                s.margin = BoxEdges(top: cv.value_as_i32(), right: s.margin.right, bottom: s.margin.bottom, left: s.margin.left)
+            "margin-right" =>
+                val cv = parse_css_value(value)
+                s.margin = BoxEdges(top: s.margin.top, right: cv.value_as_i32(), bottom: s.margin.bottom, left: s.margin.left)
+            "margin-bottom" =>
+                val cv = parse_css_value(value)
+                s.margin = BoxEdges(top: s.margin.top, right: s.margin.right, bottom: cv.value_as_i32(), left: s.margin.left)
+            "margin-left" =>
+                val cv = parse_css_value(value)
+                s.margin = BoxEdges(top: s.margin.top, right: s.margin.right, bottom: s.margin.bottom, left: cv.value_as_i32())
+            "padding" =>
+                val cv = parse_css_value(value)
+                val v = cv.value_as_i32()
+                s.padding = BoxEdges(top: v, right: v, bottom: v, left: v)
+            "padding-top" =>
+                val cv = parse_css_value(value)
+                s.padding = BoxEdges(top: cv.value_as_i32(), right: s.padding.right, bottom: s.padding.bottom, left: s.padding.left)
+            "padding-right" =>
+                val cv = parse_css_value(value)
+                s.padding = BoxEdges(top: s.padding.top, right: cv.value_as_i32(), bottom: s.padding.bottom, left: s.padding.left)
+            "padding-bottom" =>
+                val cv = parse_css_value(value)
+                s.padding = BoxEdges(top: s.padding.top, right: s.padding.right, bottom: cv.value_as_i32(), left: s.padding.left)
+            "padding-left" =>
+                val cv = parse_css_value(value)
+                s.padding = BoxEdges(top: s.padding.top, right: s.padding.right, bottom: s.padding.bottom, left: cv.value_as_i32())
+            "background" =>
+                val bg_trimmed = value.trim()
+                if bg_trimmed.starts_with("linear-gradient"):
+                    val grad = parse_linear_gradient(bg_trimmed)
+                    if grad.gradient_set:
+                        s.gradient_set = true
+                        s.gradient_color1 = grad.gradient_color1
+                        s.gradient_color2 = grad.gradient_color2
+                        s.gradient_angle = grad.gradient_angle
+                elif not bg_trimmed.starts_with("url(") and not bg_trimmed.starts_with("radial-gradient"):
+                    s.background_color = parse_color_value(bg_trimmed)
+            "line-height" =>
+                pass_dn  # parsed but not stored yet
+            "align-self" =>
+                s.align_self = value
+            "box-sizing" =>
+                pass_dn  # would need box_sizing field in StyleProps
+            "list-style" =>
+                pass_dn  # accept silently
+            "list-style-type" =>
+                pass_dn
+            "float" =>
+                # Routed via css_ext::parse_float_keyword.
+                val fc = parse_float_keyword(value.trim())
+                if fc >= 0:
+                    s.float_code = fc
+            "clear" =>
+                # Routed via css_ext::parse_clear_keyword.
+                val cc = parse_clear_keyword(value.trim())
+                if cc >= 0:
+                    s.clear_code = cc
+            "text-indent" =>
+                pass_dn
+            "vertical-align" =>
+                pass_dn
+            "inline-size" =>
+                s.width = parse_css_value(value)
+            "block-size" =>
+                s.height = parse_css_value(value)
+            "margin-inline-start" =>
+                val cv = parse_css_value(value)
+                s.margin = BoxEdges(top: s.margin.top, right: s.margin.right, bottom: s.margin.bottom, left: cv.value_as_i32())
+            "margin-inline-end" =>
+                val cv = parse_css_value(value)
+                s.margin = BoxEdges(top: s.margin.top, right: cv.value_as_i32(), bottom: s.margin.bottom, left: s.margin.left)
+            "writing-mode" =>
+                pass_dn
+            "direction" =>
+                pass_dn
+            "outline" =>
+                # Shorthand: width style color (any order). Route style keyword
+                # through css_ext::parse_outline_style and length/color through
+                # the existing helpers.
+                val oparts = sb_dom_split_ws(value)
+                for op in oparts:
+                    val os_code = parse_outline_style(op)
+                    if os_code >= 0:
+                        s.outline_style = op
+                    elif op.ends_with("px") or op.ends_with("em"):
+                        val ocv = parse_css_value(op)
+                        s.outline_width = ocv.value_as_i32()
+                    else:
+                        s.outline_color = parse_color_value(op)
+            "outline-color" =>
+                s.outline_color = parse_color_value(value)
+            "outline-style" =>
+                val os_code2 = parse_outline_style(value.trim())
+                if os_code2 >= 0:
+                    s.outline_style = value.trim()
+            "outline-width" =>
+                val ocv2 = parse_css_value(value)
+                s.outline_width = ocv2.value_as_i32()
+            "outline-offset" =>
+                val ocv3 = parse_css_value(value)
+                s.outline_offset = ocv3.value_as_i32()
+            "border-spacing" =>
+                pass_dn
+            "box-shadow" =>
+                # Local parse_box_shadows (below, ~line 1359) handles: inset keyword
+                # (prefix and suffix), offset-x/y, blur-radius, spread-radius,
+                # multi-shadow (comma-separated), and rgba()/color-function tokens.
+                # Coverage is adequate for the browser engine renderer.
+                #
+                # css_ext.spl also defines BoxShadow but with different field names
+                # (offset_x_px/blur_px/color_argb vs offset_x/blur_radius/color) and
+                # packs color as 0xAARRGGBB ARGB for the chromium shell consumer.
+                # Do NOT migrate to css_ext parser — the two types serve different
+                # rendering stacks. If css_ext gains new features (e.g. named colors,
+                # percentage lengths), mirror them here.
+                # TODO: [gpu][P3] add named-color support (e.g. "red", "blue") to
+                # parse_color_value if/when css_ext.spl gains it, to keep parsers in sync.
+                s.box_shadows = parse_box_shadows(value)
+            "text-shadow" =>
+                pass_dn
+            "cursor" =>
+                pass_dn
+            "word-spacing" =>
+                pass_dn
+            "transform" =>
+                pass_dn
+            "transition" =>
+                pass_dn
+            "animation" =>
+                pass_dn
+            "backdrop-filter" =>
+                s.backdrop_filter_blur = parse_blur_value(value)
+            "-webkit-backdrop-filter" =>
+                if s.backdrop_filter_blur == 0:
+                    s.backdrop_filter_blur = parse_blur_value(value)
+            "filter" =>
+                pass_dn
+            "content" =>
+                pass_dn
+            "background-clip" =>
+                pass_dn
+            "background-image" =>
+                pass_dn
+            "background-size" =>
+                pass_dn
+            "background-position" =>
+                pass_dn
+            "background-repeat" =>
+                pass_dn
+            _ =>
+                pass_dn
+        self.style = s
+
+    me set_attr(key: text, value: text):
+        """Set an attribute key-value pair."""
+        # Check if key already exists and update it
+        var new_attrs: [text] = []
+        var found = false
+        var i = 0
+        while i + 1 < self.attributes.len():
+            if self.attributes[i] == key:
+                new_attrs.push(key)
+                new_attrs.push(value)
+                found = true
+            else:
+                new_attrs.push(self.attributes[i])
+                new_attrs.push(self.attributes[i + 1])
+            i = i + 2
+        if not found:
+            new_attrs.push(key)
+            new_attrs.push(value)
+        self.attributes = new_attrs
+
+    fn get_attr(key: text) -> text:
+        """Get an attribute value by key. Returns empty string if not found."""
+        var i = 0
+        while i + 1 < self.attributes.len():
+            if self.attributes[i] == key:
+                return self.attributes[i + 1]
+            i = i + 2
+        return ""
+
+    fn is_text_node() -> bool:
+        """True if this is a text node (tag == '#text')."""
+        return self.tag == "#text"
+
+    fn is_element() -> bool:
+        """True if this is an element node (not a text node)."""
+        return self.tag != "#text"
+
+    fn has_class(name: text) -> bool:
+        """Check if this node has a given CSS class."""
+        for cls in self.classes:
+            if cls == name:
+                return true
+        return false
+
+pub fn be_dom_get_style(node: BeDomNode) -> StyleProps:
+    """Same-module accessor for node.style to avoid cross-module FieldGet issues."""
+    node.style
+
+@allow(primitive_api)
+pub fn be_dom_get_bg_color(node: BeDomNode) -> u32:
+    node.style.background_color
+
+pub fn be_dom_get_display(node: BeDomNode) -> text:
+    css_get_display(node.style)
+
+pub fn be_dom_get_visibility(node: BeDomNode) -> text:
+    css_get_visibility(node.style)
+
+@allow(primitive_api)
+pub fn be_dom_get_opacity(node: BeDomNode) -> f32:
+    node.style.opacity
+
+@allow(primitive_api)
+pub fn be_dom_get_color(node: BeDomNode) -> u32:
+    node.style.color
+
+@allow(primitive_api)
+pub fn be_dom_get_font_size(node: BeDomNode) -> i32:
+    node.style.font_size
+
+@allow(primitive_api)
+pub fn be_dom_get_border_radius(node: BeDomNode) -> i32:
+    node.style.border_radius
+
+@allow(primitive_api)
+pub fn be_dom_get_border_width(node: BeDomNode) -> i32:
+    node.style.border.width
+
+@allow(primitive_api)
+pub fn be_dom_get_border_color(node: BeDomNode) -> u32:
+    node.style.border.color
+
+pub fn be_dom_get_border_style(node: BeDomNode) -> text:
+    node.style.border.style
+
+@allow(primitive_api)
+pub fn be_dom_get_padding_left(node: BeDomNode) -> i32:
+    node.style.padding.left
+
+@allow(primitive_api)
+pub fn be_dom_get_padding_top(node: BeDomNode) -> i32:
+    node.style.padding.top
+
+@allow(primitive_api)
+pub fn be_dom_get_padding_h(node: BeDomNode) -> i32:
+    node.style.padding.horizontal()
+
+@allow(primitive_api)
+pub fn be_dom_get_padding_v(node: BeDomNode) -> i32:
+    node.style.padding.vertical()
+
+@allow(primitive_api)
+pub fn be_dom_get_has_gradient(node: BeDomNode) -> bool:
+    node.style.gradient_set
+
+@allow(primitive_api)
+pub fn be_dom_get_gradient_c1(node: BeDomNode) -> u32:
+    node.style.gradient_color1
+
+@allow(primitive_api)
+pub fn be_dom_get_gradient_c2(node: BeDomNode) -> u32:
+    node.style.gradient_color2
+
+pub fn be_dom_get_text(node: BeDomNode) -> text:
+    node.text_content
+
+pub fn be_dom_get_children(node: BeDomNode) -> [BeDomNode]:
+    node.children
+
+pub fn be_dom_get_tag(node: BeDomNode) -> text:
+    node.tag
+
+pub fn be_dom_get_id(node: BeDomNode) -> text:
+    node.id
+
+pub fn be_dom_get_classes(node: BeDomNode) -> [text]:
+    node.classes
+
+@allow(primitive_api)
+pub fn be_dom_get_is_text(node: BeDomNode) -> bool:
+    node.tag == "#text"
+
+pub fn be_dom_get_attributes(node: BeDomNode) -> [text]:
+    node.attributes
+
+pub fn be_dom_get_box_shadows(node: BeDomNode) -> [BoxShadow]:
+    node.style.box_shadows
+
+@allow(primitive_api)
+pub fn be_dom_get_backdrop_blur(node: BeDomNode) -> i32:
+    node.style.backdrop_filter_blur
+
+@allow(primitive_api)
+pub fn be_dom_get_gradient_angle(node: BeDomNode) -> i32:
+    node.style.gradient_angle
+
+pub fn be_dom_get_text_decoration(node: BeDomNode) -> text:
+    node.style.text_decoration
+
+pub fn be_dom_set_style(node: BeDomNode, prop: text, value: text):
+    """Standalone wrapper for node.set_style() — avoids cross-module method call stub."""
+    node.set_style(prop, value)
+
+pub fn be_dom_add_child(parent: BeDomNode, child: BeDomNode):
+    """Standalone wrapper for parent.add_child() — avoids cross-module method call stub."""
+    parent.add_child(child)
+
+pub fn be_dom_set_children(node: BeDomNode, new_children: [BeDomNode]):
+    """Replace this node's children array wholesale. Needed by tree-walk
+    passes (style application, layout) because the interpreter copies class
+    instances on array push/index, so a child fetched via `children[i]` is
+    detached from the original; callers must rebuild the children array and
+    write it back via this accessor to make mutations stick.
+    """
+    node.children = new_children
+
+# Cross-module method resolution aliases — the import map indexes these
+# with double-underscore convention matching ClassName__method lookups
+pub fn BeDomNode__set_style(node: BeDomNode, prop: text, value: text):
+    node.set_style(prop, value)
+
+pub fn BeDomNode__add_child(parent: BeDomNode, child: BeDomNode):
+    parent.add_child(child)
+
+class BeDomFactory:
+    static fn element(tag: text) -> BeDomNode:
+        BeDomNode.element(tag)
+
+    static fn text(content: text) -> BeDomNode:
+        BeDomNode.text(content)
+
+# =========================================================================
+# Color Parsing Helpers
+# =========================================================================
+
+pub fn parse_color_value(s: text) -> u32:
+    """Parse a color string to a u32 RGBA value.
+    Supports: '#RRGGBB', '#RRGGBBAA', '#RGB', 'rgb(r,g,b)',
+    'rgba(r,g,b,a)', 'hsl(h,s%,l%)', 'hsla(h,s%,l%,a)',
+    modern space-separated syntax, named colors, currentColor,
+    and decimal numbers.
+    """
+    val cleaned = strip_css_comments(s.trim())
+    if cleaned.len() == 0:
+        return 0x000000FF
+
+    val lower = cleaned.to_lower()
+
+    if lower == "currentcolor":
+        # Sentinel: caller should resolve. Return black as fallback.
+        return 0x000000FF
+
+    if cleaned.starts_with("#"):
+        return parse_hex_color(cleaned)
+
+    # hsl/hsla before rgb so they're matched first
+    if lower.starts_with("hsla(") and cleaned.ends_with(")"):
+        return parse_hsl_func(cleaned, true)
+    if lower.starts_with("hsl(") and cleaned.ends_with(")"):
+        return parse_hsl_func(cleaned, false)
+
+    # rgba/rgb — unified parser handles both
+    if lower.starts_with("rgba(") and cleaned.ends_with(")"):
+        val rgba_inner = cleaned.slice(5, cleaned.len() - 1)
+        return parse_rgb_unified(rgba_inner)
+    if lower.starts_with("rgb(") and cleaned.ends_with(")"):
+        val rgb_inner = cleaned.slice(4, cleaned.len() - 1)
+        return parse_rgb_unified(rgb_inner)
+
+    if cleaned.starts_with("var("):
+        return 0x00000000
+
+    val named = named_color_to_u32(cleaned)
+    if named != nil:
+        val c = named ?? 0
+        return c
+
+    val num = cleaned.parse_i64()
+    if num != nil:
+        val nval = num ?? 0
+        return nval.to_u32()
+    return 0x000000FF
+
+fn strip_css_comments(s: text) -> text:
+    """Remove CSS comments /* ... */ from a string."""
+    var result = ""
+    var i = 0
+    while i < s.len():
+        if i + 1 < s.len() and s.slice(i, i + 2) == "/*":
+            val end = dom_find_str(s, "*/", i + 2)
+            if end < 999999999:
+                i = end + 2
+            else:
+                i = s.len()
+        else:
+            result = "{result}{s.slice(i, i + 1)}"
+            i = i + 1
+    result
+
+fn dom_find_str(s: text, needle: text, start: i64) -> i64:
+    val nlen = needle.len()
+    var i = start
+    val slen = s.len()
+    while i + nlen <= slen:
+        if s.slice(i, i + nlen) == needle:
+            return i
+        i = i + 1
+    999999999
+
+fn parse_hex_color(s: text) -> u32:
+    """Parse a hex color string like '#RRGGBB', '#RRGGBBAA', or '#RGB' to u32 RGBA."""
+    val hex = s.slice(1, s.len())
+    if hex.len() == 8:
+        val r = hex_byte(hex.slice(0, 2))
+        val g = hex_byte(hex.slice(2, 4))
+        val b = hex_byte(hex.slice(4, 6))
+        val a = hex_byte(hex.slice(6, 8))
+        return (r * 16777216) + (g * 65536) + (b * 256) + a
+    if hex.len() == 6:
+        val r = hex_byte(hex.slice(0, 2))
+        val g = hex_byte(hex.slice(2, 4))
+        val b = hex_byte(hex.slice(4, 6))
+        return (r * 16777216) + (g * 65536) + (b * 256) + 255
+    elif hex.len() == 3:
+        val r = hex_nibble(hex.slice(0, 1))
+        val g = hex_nibble(hex.slice(1, 2))
+        val b = hex_nibble(hex.slice(2, 3))
+        val rr = r * 17
+        val gg = g * 17
+        val bb = b * 17
+        return (rr * 16777216) + (gg * 65536) + (bb * 256) + 255
+    return 0x000000FF
+
+fn parse_rgb_unified(inner_raw: text) -> u32:
+    """Parse rgb/rgba inner content. Supports:
+    - Comma-separated: '128, 0, 255' or '128, 0, 255, 0.5'
+    - Space-separated: '128 0 255' or '128 0 255 / 0.5'
+    - Percentage values: '50% 0% 100%' or '50%, 0%, 100%'
+    """
+    val inner_stripped = strip_css_comments(inner_raw)
+    val inner = inner_stripped.trim()
+    if inner.len() == 0:
+        return 0x000000FF
+
+    # Determine separator: comma or space
+    var has_comma = false
+    var idx_1 = 0
+    val inner_len = inner.len()
+    while idx_1 < inner_len:
+        val ch = inner.slice(idx_1, idx_1 + 1)
+        if ch == ",":
+            has_comma = true
+        idx_1 = idx_1 + 1
+
+    var color_parts: [text] = []
+    var alpha_str = ""
+
+    if has_comma:
+        val comma_parts = split_comma(inner)
+        color_parts = comma_parts
+    else:
+        # Space-separated, may have / for alpha
+        val slash_pos = dom_find_str(inner, "/", 0)
+        if slash_pos < 999999999:
+            val before_slash_raw = inner.slice(0, slash_pos)
+            val before_slash = before_slash_raw.trim()
+            val alpha_raw = inner.slice(slash_pos + 1, inner.len())
+            alpha_str = alpha_raw.trim()
+            color_parts = dom_split_ws(before_slash)
+        else:
+            color_parts = dom_split_ws(inner)
+
+    if color_parts.len() < 3:
+        return 0x000000FF
+
+    val r_str = color_parts[0].trim()
+    val r = parse_color_component(r_str)
+    val g_str = color_parts[1].trim()
+    val g = parse_color_component(g_str)
+    val b_str = color_parts[2].trim()
+    val b = parse_color_component(b_str)
+
+    var a: u32 = 255
+    if alpha_str.len() > 0:
+        val a_trimmed = alpha_str.trim()
+        a = parse_alpha_component(a_trimmed)
+    elif color_parts.len() >= 4:
+        val a4_str = color_parts[3].trim()
+        a = parse_alpha_component(a4_str)
+
+    return (r * 16777216) + (g * 65536) + (b * 256) + a
+
+fn parse_color_component(s: text) -> u32:
+    """Parse a single color component (integer 0-255 or percentage 0%-100%)."""
+    val trimmed = s.trim()
+    if trimmed.ends_with("%"):
+        # Parse percentage: manual integer parse of number before %
+        val pct_str = trimmed.slice(0, trimmed.len() - 1)
+        val pct_i = pcc_parse_int(pct_str)
+        var v = (pct_i * 255) / 100
+        if v < 0:
+            v = 0
+        if v > 255:
+            v = 255
+        return v.to_u32()
+    # Parse integer directly — avoid f64? optional bug in Cranelift
+    val n = pcc_parse_int(trimmed)
+    if n < 0:
+        return 0
+    if n > 255:
+        return 255
+    return n.to_u32()
+
+fn pcc_parse_int(s: text) -> i64:
+    """Manual integer parser that avoids optional types (Cranelift f64? bug)."""
+    val trimmed = s.trim()
+    if trimmed.len() == 0:
+        return 0
+    var neg = false
+    var start = 0
+    if trimmed.slice(0, 1) == "-":
+        neg = true
+        start = 1
+    elif trimmed.slice(0, 1) == "+":
+        start = 1
+    var result = 0
+    var idx = start
+    val slen = trimmed.len()
+    while idx < slen:
+        val ch = trimmed.slice(idx, idx + 1)
+        if ch == "." or ch == "e" or ch == "E":
+            break
+        val d = pcc_digit(ch)
+        if d < 0:
+            break
+        result = result * 10 + d
+        idx = idx + 1
+    if neg:
+        return 0 - result
+    result
+
+fn pcc_digit(ch: text) -> i64:
+    if ch == "0": return 0
+    if ch == "1": return 1
+    if ch == "2": return 2
+    if ch == "3": return 3
+    if ch == "4": return 4
+    if ch == "5": return 5
+    if ch == "6": return 6
+    if ch == "7": return 7
+    if ch == "8": return 8
+    if ch == "9": return 9
+    return 0 - 1
+
+fn parse_alpha_component(s: text) -> u32:
+    """Parse an alpha component (float 0-1, percentage 0%-100%, or integer)."""
+    val trimmed = s.trim()
+    if trimmed.ends_with("%"):
+        val pct_str = trimmed.slice(0, trimmed.len() - 1)
+        val pct_i = pcc_parse_int(pct_str)
+        var v = (pct_i * 255) / 100
+        if v < 0:
+            v = 0
+        if v > 255:
+            v = 255
+        return v.to_u32()
+    # Check if it looks like a decimal 0.0-1.0 (contains '.')
+    var has_dot = false
+    var ai = 0
+    val alen = trimmed.len()
+    while ai < alen:
+        if trimmed.slice(ai, ai + 1) == ".":
+            has_dot = true
+        ai = ai + 1
+    if has_dot:
+        # Parse as integer fraction: "0.5" → 5/10 → 127
+        # Simple approach: parse the part before and after dot
+        val dot_pos = pcc_find_dot(trimmed)
+        val int_part = pcc_parse_int(trimmed.slice(0, dot_pos))
+        val frac_str = trimmed.slice(dot_pos + 1, alen)
+        val frac_val = pcc_parse_int(frac_str)
+        var divisor = 1
+        var di = 0
+        while di < frac_str.len():
+            divisor = divisor * 10
+            di = di + 1
+        # Combined value in thousandths
+        val combined = int_part * 1000 + (frac_val * 1000) / divisor
+        if combined <= 1000:
+            var v = (combined * 255) / 1000
+            if v < 0:
+                v = 0
+            if v > 255:
+                v = 255
+            return v.to_u32()
+    # Plain integer 0-255
+    val n = pcc_parse_int(trimmed)
+    if n < 0:
+        return 0
+    if n > 255:
+        return 255
+    return n.to_u32()
+
+fn pcc_find_dot(s: text) -> i64:
+    var i = 0
+    val slen = s.len()
+    while i < slen:
+        if s.slice(i, i + 1) == ".":
+            return i
+        i = i + 1
+    999999999
+    255
+
+fn dom_split_ws(s: text) -> [text]:
+    var parts: [text] = []
+    var current = ""
+    var idx_2 = 0
+    while idx_2 < s.len():
+        val ch = s.slice(idx_2, idx_2 + 1)
+        if ch == " " or ch == "\t" or ch == "\n" or ch == "\r":
+            if current.len() > 0:
+                parts.push(current)
+                current = ""
+        else:
+            current = "{current}{ch}"
+        idx_2 = idx_2 + 1
+    if current.len() > 0:
+        parts.push(current)
+    parts
+
+# =========================================================================
+# HSL/HSLA Color Parsing
+# =========================================================================
+
+fn parse_hsl_func(s: text, is_hsla: bool) -> u32:
+    """Parse hsl() or hsla() color function.
+    Supports: hsl(120, 75%, 50%), hsla(120, 75%, 50%, 0.5),
+    hsl(120 75% 50%), hsl(120 75% 50% / 0.5)
+    """
+    val prefix_len = if is_hsla: 5 else: 4
+    val inner_raw_hsl = strip_css_comments(s.slice(prefix_len, s.len() - 1))
+    val inner = inner_raw_hsl.trim()
+
+    var has_comma = false
+    var idx_3 = 0
+    while idx_3 < inner.len():
+        val ch = inner.slice(idx_3, idx_3 + 1)
+        if ch == ",":
+            has_comma = true
+        idx_3 = idx_3 + 1
+
+    var parts: [text] = []
+    var alpha_str = ""
+
+    if has_comma:
+        parts = split_comma(inner)
+    else:
+        val slash_pos = dom_find_str(inner, "/", 0)
+        if slash_pos < 999999999:
+            val before_slash_raw_hsl = inner.slice(0, slash_pos)
+            val before_slash = before_slash_raw_hsl.trim()
+            val alpha_raw_hsl = inner.slice(slash_pos + 1, inner.len())
+            alpha_str = alpha_raw_hsl.trim()
+            parts = dom_split_ws(before_slash)
+        else:
+            parts = dom_split_ws(inner)
+
+    if parts.len() < 3:
+        return 0x000000FF
+
+    # Parse H (degrees), S (percentage), L (percentage)
+    val h_str = parts[0].trim()
+    val s_str = parts[1].trim()
+    val l_str = parts[2].trim()
+
+    val h_val_opt = h_str.parse_f64()
+    if h_val_opt == nil:
+        return 0x000000FF
+    var h_val_unwrapped: f64 = 0.0
+    if h_val_opt != nil:
+        val hv = h_val_opt ?? 0.0
+        h_val_unwrapped = hv
+    var h = h_val_unwrapped.to_f32()
+    # Normalize hue to [0, 360)
+    while h < 0.0:
+        h = h + 360.0
+    while h >= 360.0:
+        h = h - 360.0
+
+    val s_pct = parse_pct_value(s_str)
+    val l_pct = parse_pct_value(l_str)
+
+    # Convert HSL to RGB
+    val sat = s_pct / 100.0
+    val lit = l_pct / 100.0
+
+    val c = (1.0 - f32_abs(2.0 * lit - 1.0)) * sat
+    val hp = h / 60.0
+    val x = c * (1.0 - f32_abs(f32_fmod(hp, 2.0) - 1.0))
+    val m = lit - c / 2.0
+
+    var r1 = 0.0
+    var g1 = 0.0
+    var b1 = 0.0
+
+    if hp < 1.0:
+        r1 = c
+        g1 = x
+    elif hp < 2.0:
+        r1 = x
+        g1 = c
+    elif hp < 3.0:
+        g1 = c
+        b1 = x
+    elif hp < 4.0:
+        g1 = x
+        b1 = c
+    elif hp < 5.0:
+        r1 = x
+        b1 = c
+    else:
+        r1 = c
+        b1 = x
+
+    var r = ((r1 + m) * 255.0 + 0.5).to_i32()
+    var g = ((g1 + m) * 255.0 + 0.5).to_i32()
+    var b = ((b1 + m) * 255.0 + 0.5).to_i32()
+    if r < 0: r = 0
+    if r > 255: r = 255
+    if g < 0: g = 0
+    if g > 255: g = 255
+    if b < 0: b = 0
+    if b > 255: b = 255
+
+    var a: u32 = 255
+    if alpha_str.len() > 0:
+        a = parse_alpha_component(alpha_str)
+    elif parts.len() >= 4:
+        a = parse_alpha_component(parts[3].trim())
+
+    return (r.to_u32() * 16777216) + (g.to_u32() * 65536) + (b.to_u32() * 256) + a
+
+fn parse_pct_value(s: text) -> f32:
+    """Parse a percentage value like '75%' to float (75.0)."""
+    val trimmed = s.trim()
+    if trimmed.ends_with("%"):
+        val num_str = trimmed.slice(0, trimmed.len() - 1)
+        val n = num_str.parse_f64()
+        if n != nil:
+            val nval = n ?? 0.0
+            return nval.to_f32()
+        return 0.0
+    val n = trimmed.parse_f64()
+    if n != nil:
+        val nval = n ?? 0.0
+        return nval.to_f32()
+    0.0
+
+fn f32_abs(v: f32) -> f32:
+    if v < 0.0: 0.0 - v else: v
+
+fn f32_fmod(a: f32, b: f32) -> f32:
+    """Float modulo."""
+    if b == 0.0:
+        return 0.0
+    val div = (a / b).to_i32().to_f32()
+    a - div * b
+
+fn split_comma(s: text) -> [text]:
+    """Split a string by commas."""
+    var parts: [text] = []
+    var current = ""
+    var idx_4 = 0
+    while idx_4 < s.len():
+        val ch = s.slice(idx_4, idx_4 + 1)
+        if ch == ",":
+            parts.push(current)
+            current = ""
+        else:
+            current = "{current}{ch}"
+        idx_4 = idx_4 + 1
+    if current.len() > 0:
+        parts.push(current)
+    return parts
+
+fn parse_int_clamped(s: text, min_val: u32, max_val: u32) -> u32:
+    """Parse an integer string, clamp to [min_val, max_val]."""
+    val n = s.parse_i64()
+    if n == nil:
+        return 0
+    var v: u32 = 0
+    if n != nil:
+        val nval = n ?? 0
+        v = nval.to_u32()
+    if v < min_val:
+        v = min_val
+    if v > max_val:
+        v = max_val
+    return v
+
+fn hex_byte(s: text) -> u32:
+    """Parse a two-character hex string to a byte value (0-255)."""
+    if s.len() != 2:
+        return 0
+    val high = hex_digit(s[0])
+    val low = hex_digit(s[1])
+    return high * 16 + low
+
+fn hex_nibble(s: text) -> u32:
+    """Parse a single hex character to a nibble value (0-15)."""
+    if s.len() != 1:
+        return 0
+    return hex_digit(s[0])
+
+fn hex_digit(ch: text) -> u32:
+    """Convert a single hex digit character to its numeric value."""
+    match ch:
+        "0" => 0
+        "1" => 1
+        "2" => 2
+        "3" => 3
+        "4" => 4
+        "5" => 5
+        "6" => 6
+        "7" => 7
+        "8" => 8
+        "9" => 9
+        "a" => 10
+        "A" => 10
+        "b" => 11
+        "B" => 11
+        "c" => 12
+        "C" => 12
+        "d" => 13
+        "D" => 13
+        "e" => 14
+        "E" => 14
+        "f" => 15
+        "F" => 15
+        _ => 0
+
+fn parse_float_value(s: text) -> f32:
+    """Parse a string to f32. Returns 1.0 on failure.
+    Uses manual int parser to avoid Cranelift f64? optional bug."""
+    val n = pcc_parse_int(s)
+    if n != 0 or s.trim() == "0":
+        return n.to_f32()
+    return 1.0
+
+fn parse_int_value(s: text) -> i32:
+    """Parse a string to i32. Returns 0 on failure.
+    Uses manual int parser to avoid Cranelift optional bug."""
+    val n = pcc_parse_int(s)
+    return n.to_i32()
+
+# =========================================================================
+# CSS Level 4 Named Color Table (148 colors)
+# =========================================================================
+
+fn named_color_to_u32(name: text) -> u32?:
+    """Look up a CSS named color, returning u32 RGBA value."""
+    val n = name.to_lower()
+    # Most common colors first for fast-path
+    if n == "black": return 0x000000FF
+    if n == "white": return 0xFFFFFFFF
+    if n == "red": return 0xFF0000FF
+    if n == "green": return 0x008000FF
+    if n == "blue": return 0x0000FFFF
+    if n == "transparent": return 0x00000000
+    if n == "yellow": return 0xFFFF00FF
+    if n == "orange": return 0xFFA500FF
+    if n == "gray" or n == "grey": return 0x808080FF
+    if n == "cyan" or n == "aqua": return 0x00FFFFFF
+    if n == "magenta" or n == "fuchsia": return 0xFF00FFFF
+    if n == "silver": return 0xC0C0C0FF
+    if n == "maroon": return 0x800000FF
+    if n == "olive": return 0x808000FF
+    if n == "navy": return 0x000080FF
+    if n == "teal": return 0x008080FF
+    if n == "purple": return 0x800080FF
+    if n == "lime": return 0x00FF00FF
+    # Extended colors
+    if n == "aliceblue": return 0xF0F8FFFF
+    if n == "antiquewhite": return 0xFAEBD7FF
+    if n == "aquamarine": return 0x7FFFD4FF
+    if n == "azure": return 0xF0FFFFFF
+    if n == "beige": return 0xF5F5DCFF
+    if n == "bisque": return 0xFFE4C4FF
+    if n == "blanchedalmond": return 0xFFEBCDFF
+    if n == "blueviolet": return 0x8A2BE2FF
+    if n == "brown": return 0xA52A2AFF
+    if n == "burlywood": return 0xDEB887FF
+    if n == "cadetblue": return 0x5F9EA0FF
+    if n == "chartreuse": return 0x7FFF00FF
+    if n == "chocolate": return 0xD2691EFF
+    if n == "coral": return 0xFF7F50FF
+    if n == "cornflowerblue": return 0x6495EDFF
+    if n == "cornsilk": return 0xFFF8DCFF
+    if n == "crimson": return 0xDC143CFF
+    if n == "darkblue": return 0x00008BFF
+    if n == "darkcyan": return 0x008B8BFF
+    if n == "darkgoldenrod": return 0xB8860BFF
+    if n == "darkgray" or n == "darkgrey": return 0xA9A9A9FF
+    if n == "darkgreen": return 0x006400FF
+    if n == "darkkhaki": return 0xBDB76BFF
+    if n == "darkmagenta": return 0x8B008BFF
+    if n == "darkolivegreen": return 0x556B2FFF
+    if n == "darkorange": return 0xFF8C00FF
+    if n == "darkorchid": return 0x9932CCFF
+    if n == "darkred": return 0x8B0000FF
+    if n == "darksalmon": return 0xE9967AFF
+    if n == "darkseagreen": return 0x8FBC8FFF
+    if n == "darkslateblue": return 0x483D8BFF
+    if n == "darkslategray" or n == "darkslategrey": return 0x2F4F4FFF
+    if n == "darkturquoise": return 0x00CED1FF
+    if n == "darkviolet": return 0x9400D3FF
+    if n == "deeppink": return 0xFF1493FF
+    if n == "deepskyblue": return 0x00BFFFFF
+    if n == "dimgray" or n == "dimgrey": return 0x696969FF
+    if n == "dodgerblue": return 0x1E90FFFF
+    if n == "firebrick": return 0xB22222FF
+    if n == "floralwhite": return 0xFFFAF0FF
+    if n == "forestgreen": return 0x228B22FF
+    if n == "gainsboro": return 0xDCDCDCFF
+    if n == "ghostwhite": return 0xF8F8FFFF
+    if n == "gold": return 0xFFD700FF
+    if n == "goldenrod": return 0xDAA520FF
+    if n == "greenyellow": return 0xADFF2FFF
+    if n == "honeydew": return 0xF0FFF0FF
+    if n == "hotpink": return 0xFF69B4FF
+    if n == "indianred": return 0xCD5C5CFF
+    if n == "indigo": return 0x4B0082FF
+    if n == "ivory": return 0xFFFFF0FF
+    if n == "khaki": return 0xF0E68CFF
+    if n == "lavender": return 0xE6E6FAFF
+    if n == "lavenderblush": return 0xFFF0F5FF
+    if n == "lawngreen": return 0x7CFC00FF
+    if n == "lemonchiffon": return 0xFFFACDFF
+    if n == "lightblue": return 0xADD8E6FF
+    if n == "lightcoral": return 0xF08080FF
+    if n == "lightcyan": return 0xE0FFFFFF
+    if n == "lightgoldenrodyellow": return 0xFAFAD2FF
+    if n == "lightgray" or n == "lightgrey": return 0xD3D3D3FF
+    if n == "lightgreen": return 0x90EE90FF
+    if n == "lightpink": return 0xFFB6C1FF
+    if n == "lightsalmon": return 0xFFA07AFF
+    if n == "lightseagreen": return 0x20B2AAFF
+    if n == "lightskyblue": return 0x87CEFAFF
+    if n == "lightslategray" or n == "lightslategrey": return 0x778899FF
+    if n == "lightsteelblue": return 0xB0C4DEFF
+    if n == "lightyellow": return 0xFFFFE0FF
+    if n == "limegreen": return 0x32CD32FF
+    if n == "linen": return 0xFAF0E6FF
+    if n == "mediumaquamarine": return 0x66CDAAFF
+    if n == "mediumblue": return 0x0000CDFF
+    if n == "mediumorchid": return 0xBA55D3FF
+    if n == "mediumpurple": return 0x9370DBFF
+    if n == "mediumseagreen": return 0x3CB371FF
+    if n == "mediumslateblue": return 0x7B68EEFF
+    if n == "mediumspringgreen": return 0x00FA9AFF
+    if n == "mediumturquoise": return 0x48D1CCFF
+    if n == "mediumvioletred": return 0xC71585FF
+    if n == "midnightblue": return 0x191970FF
+    if n == "mintcream": return 0xF5FFFAFF
+    if n == "mistyrose": return 0xFFE4E1FF
+    if n == "moccasin": return 0xFFE4B5FF
+    if n == "navajowhite": return 0xFFDEADFF
+    if n == "oldlace": return 0xFDF5E6FF
+    if n == "olivedrab": return 0x6B8E23FF
+    if n == "orangered": return 0xFF4500FF
+    if n == "orchid": return 0xDA70D6FF
+    if n == "palegoldenrod": return 0xEEE8AAFF
+    if n == "palegreen": return 0x98FB98FF
+    if n == "paleturquoise": return 0xAFEEEEFF
+    if n == "palevioletred": return 0xDB7093FF
+    if n == "papayawhip": return 0xFFEFD5FF
+    if n == "peachpuff": return 0xFFDAB9FF
+    if n == "peru": return 0xCD853FFF
+    if n == "pink": return 0xFFC0CBFF
+    if n == "plum": return 0xDDA0DDFF
+    if n == "powderblue": return 0xB0E0E6FF
+    if n == "rebeccapurple": return 0x663399FF
+    if n == "rosybrown": return 0xBC8F8FFF
+    if n == "royalblue": return 0x4169E1FF
+    if n == "saddlebrown": return 0x8B4513FF
+    if n == "salmon": return 0xFA8072FF
+    if n == "sandybrown": return 0xF4A460FF
+    if n == "seagreen": return 0x2E8B57FF
+    if n == "seashell": return 0xFFF5EEFF
+    if n == "sienna": return 0xA0522DFF
+    if n == "skyblue": return 0x87CEEBFF
+    if n == "slateblue": return 0x6A5ACDFF
+    if n == "slategray" or n == "slategrey": return 0x708090FF
+    if n == "snow": return 0xFFFAFAFF
+    if n == "springgreen": return 0x00FF7FFF
+    if n == "steelblue": return 0x4682B4FF
+    if n == "tan": return 0xD2B48CFF
+    if n == "thistle": return 0xD8BFD8FF
+    if n == "tomato": return 0xFF6347FF
+    if n == "turquoise": return 0x40E0D0FF
+    if n == "violet": return 0xEE82EEFF
+    if n == "wheat": return 0xF5DEB3FF
+    if n == "whitesmoke": return 0xF5F5F5FF
+    if n == "yellowgreen": return 0x9ACD32FF
+    nil
+
+fn sb_dom_split_ws(s: text) -> [text]:
+    var parts: [text] = []
+    var current = ""
+    var idx_5 = 0
+    while idx_5 < s.len():
+        val ch = s.slice(idx_5, idx_5 + 1)
+        if ch == " " or ch == "\t" or ch == "\n" or ch == "\r":
+            if current.len() > 0:
+                parts.push(current)
+                current = ""
+        else:
+            current = "{current}{ch}"
+        idx_5 = idx_5 + 1
+    if current.len() > 0:
+        parts.push(current)
+    parts
+
+# =========================================================================
+# Linear Gradient Parser
+# =========================================================================
+
+struct GradientParseResult:
+    gradient_set: bool
+    gradient_color1: u32
+    gradient_color2: u32
+    gradient_angle: i32
+
+fn parse_linear_gradient(value: text) -> GradientParseResult:
+    """Parse linear-gradient(angle, color1, color2).
+
+    Handles common patterns from glass CSS:
+      linear-gradient(180deg, rgba(255,255,255,0.09), rgba(255,255,255,0.02))
+      linear-gradient(90deg, #007AFF, #30D158)
+
+    Multi-layer gradients (with commas separating gradient() calls) use
+    only the first gradient.
+    """
+    val empty = GradientParseResult(gradient_set: false, gradient_color1: 0, gradient_color2: 0, gradient_angle: 180)
+
+    # Find opening paren
+    val open = find_char_in(value, "(", 0)
+    if open >= 999999999:
+        return empty
+
+    # Find matching closing paren (handle nested parens for rgba)
+    var depth: i32 = 0
+    var close: i32 = 999999999
+    var i: i32 = open
+    while i < value.len():
+        val ch = value.slice(i, i + 1)
+        if ch == "(":
+            depth = depth + 1
+        elif ch == ")":
+            depth = depth - 1
+            if depth == 0:
+                close = i
+                break
+        i = i + 1
+
+    if close >= 999999999:
+        return empty
+
+    val inner_raw_grad = value.slice(open + 1, close)
+    val inner = inner_raw_grad.trim()
+
+    # Split by top-level commas (not inside parens)
+    val parts = split_top_level_commas(inner)
+    if parts.len() < 2:
+        return empty
+
+    # First part: angle or color
+    var angle: i32 = 180
+    var color_start_idx: i32 = 0
+
+    val first = parts[0].trim()
+    if first.ends_with("deg"):
+        val deg_str_raw = first.slice(0, first.len() - 3)
+        val deg_str = deg_str_raw.trim()
+        val parsed = deg_str.parse_f64()
+        if parsed != nil:
+            val pval = parsed ?? 0.0
+            angle = pval.to_i32()
+        color_start_idx = 1
+    elif first == "to bottom":
+        angle = 180
+        color_start_idx = 1
+    elif first == "to top":
+        angle = 0
+        color_start_idx = 1
+    elif first == "to right":
+        angle = 90
+        color_start_idx = 1
+    elif first == "to left":
+        angle = 270
+        color_start_idx = 1
+
+    if color_start_idx + 1 >= parts.len():
+        return empty
+
+    val c1_str = parts[color_start_idx].trim()
+    val c2_str = parts[color_start_idx + 1].trim()
+
+    # Strip optional stop positions (e.g., "rgba(0,0,0,0.2) 50%")
+    val c1 = parse_color_value(strip_stop_position(c1_str))
+    val c2 = parse_color_value(strip_stop_position(c2_str))
+
+    GradientParseResult(gradient_set: true, gradient_color1: c1, gradient_color2: c2, gradient_angle: angle)
+
+fn strip_stop_position(s: text) -> text:
+    """Strip trailing percentage or length from a gradient color stop."""
+    val trimmed = s.trim()
+    # If it ends with % or px after a space, strip the position
+    val last_space = find_last_space(trimmed)
+    if last_space > 0 and last_space < 999999999:
+        val after_raw = trimmed.slice(last_space + 1, trimmed.len())
+        val after = after_raw.trim()
+        if after.ends_with("%") or after.ends_with("px"):
+            val before_stop = trimmed.slice(0, last_space)
+            return before_stop.trim()
+    trimmed
+
+fn find_last_space(s: text) -> i32:
+    var last: i32 = 999999999
+    var depth: i32 = 0
+    var i: i32 = 0
+    while i < s.len():
+        val ch = s.slice(i, i + 1)
+        if ch == "(": depth = depth + 1
+        elif ch == ")": depth = depth - 1
+        elif ch == " " and depth == 0: last = i
+        i = i + 1
+    last
+
+fn split_top_level_commas(s: text) -> [text]:
+    """Split a string by commas, but not inside parentheses."""
+    var parts: [text] = []
+    var current = ""
+    var depth: i32 = 0
+
+    var idx_6 = 0
+    while idx_6 < s.len():
+        val ch = s.slice(idx_6, idx_6 + 1)
+        if ch == "(":
+            depth = depth + 1
+            current = "{current}{ch}"
+        elif ch == ")":
+            depth = depth - 1
+            current = "{current}{ch}"
+        elif ch == "," and depth == 0:
+            parts.push(current.trim())
+            current = ""
+        else:
+            current = "{current}{ch}"
+        idx_6 = idx_6 + 1
+
+    if current.trim().len() > 0:
+        parts.push(current.trim())
+
+    parts
+
+fn find_char_in(s: text, target: text, start: i64) -> i64:
+    """Find the first occurrence of target character in s starting at position start."""
+    var i = start
+    val slen = s.len()
+    while i < slen:
+        if s.slice(i, i + 1) == target:
+            return i
+        i = i + 1
+    return 999999999
+
+# =========================================================================
+# Box Shadow Parser
+# =========================================================================
+
+fn parse_box_shadows(value: text) -> [BoxShadow]:
+    """Parse CSS box-shadow value, supporting multiple comma-separated shadows.
+
+    Format: [inset] offset-x offset-y [blur [spread]] color
+    Multiple: shadow1, shadow2, ...
+    """
+    val shadow_strs = split_top_level_commas(value)
+    var shadows: [BoxShadow] = []
+
+    for shadow_str in shadow_strs:
+        val shadow = parse_single_box_shadow(shadow_str.trim())
+        if shadow.color != 0x00000000 or shadow.blur_radius > 0 or shadow.offset_x != 0 or shadow.offset_y != 0:
+            shadows.push(shadow)
+
+    shadows
+
+fn parse_single_box_shadow(s: text) -> BoxShadow:
+    """Parse a single box-shadow value.
+
+    Examples:
+      0 2px 4px rgba(0,0,0,0.2)
+      0 0 0 1px rgba(255,255,255,0.05)
+      0 1px 0 rgba(255,255,255,0.1) inset
+      inset 0 1px 0 rgba(255,255,255,0.1)
+    """
+    val trimmed = s.trim()
+    if trimmed.len() == 0:
+        return BoxShadow.none()
+
+    var inset = false
+    var work = trimmed
+
+    # Check for 'inset' keyword
+    if work.starts_with("inset ") or work.starts_with("inset\t"):
+        inset = true
+        val work_after_inset = work.slice(6, work.len())
+        work = work_after_inset.trim()
+    elif work.ends_with(" inset"):
+        inset = true
+        val work_before_inset = work.slice(0, work.len() - 6)
+        work = work_before_inset.trim()
+
+    # Split into tokens respecting parens
+    val tokens = split_shadow_tokens(work)
+    if tokens.len() < 3:
+        return BoxShadow.none()
+
+    # First 2-4 tokens are numeric values, last is color
+    var offset_x: i32 = 0
+    var offset_y: i32 = 0
+    var blur: i32 = 0
+    var spread: i32 = 0
+    var color: u32 = 0x000000FF
+
+    # Parse numeric values from the front
+    var num_count: i32 = 0
+    var nums: [i32] = []
+    var color_start: i32 = 0
+
+    for tok in tokens:
+        val tv = tok.trim()
+        if num_count < 4:
+            # Try to parse as a number (px value)
+            val stripped = if tv.ends_with("px"): tv.slice(0, tv.len() - 2) else: tv
+            val parsed = stripped.parse_f64()
+            if parsed != nil:
+                val pval = parsed ?? 0.0
+                nums.push(pval.to_i32())
+                num_count = num_count + 1
+                color_start = color_start + 1
+                continue
+        # Not a number — must be start of color
+        break
+
+    if nums.len() >= 2:
+        offset_x = nums[0]
+        offset_y = nums[1]
+    if nums.len() >= 3:
+        blur = nums[2]
+    if nums.len() >= 4:
+        spread = nums[3]
+
+    # Remaining tokens form the color
+    if color_start < tokens.len():
+        var color_str = ""
+        var ci = color_start
+        while ci < tokens.len():
+            val t = tokens[ci].trim()
+            if t == "inset":
+                inset = true
+            else:
+                if color_str.len() > 0:
+                    color_str = "{color_str} {t}"
+                else:
+                    color_str = t
+            ci = ci + 1
+        if color_str.len() > 0:
+            color = parse_color_value(color_str)
+
+    BoxShadow(offset_x: offset_x, offset_y: offset_y,
+        blur_radius: blur, spread_radius: spread,
+        color: color, inset: inset)
+
+fn split_shadow_tokens(s: text) -> [text]:
+    """Split shadow value into tokens, keeping function calls like rgba(...) together."""
+    var tokens: [text] = []
+    var current = ""
+    var depth: i32 = 0
+
+    var idx_7 = 0
+    while idx_7 < s.len():
+        val ch = s.slice(idx_7, idx_7 + 1)
+        if ch == "(":
+            depth = depth + 1
+            current = "{current}{ch}"
+        elif ch == ")":
+            depth = depth - 1
+            current = "{current}{ch}"
+        elif (ch == " " or ch == "\t") and depth == 0:
+            if current.trim().len() > 0:
+                tokens.push(current.trim())
+            current = ""
+        else:
+            current = "{current}{ch}"
+        idx_7 = idx_7 + 1
+
+    if current.trim().len() > 0:
+        tokens.push(current.trim())
+
+    tokens
+
+# =========================================================================
+# Backdrop Filter Parser
+# =========================================================================
+
+fn parse_blur_value(value: text) -> i32:
+    """Parse backdrop-filter/filter value to extract blur radius.
+
+    Handles: blur(20px), blur(20px) saturate(180%), etc.
+    Returns blur radius in px, or 0 if not found.
+    """
+    val trimmed = value.trim()
+    val blur_idx = find_substr(trimmed, "blur(")
+    if blur_idx >= 999999999:
+        return 0
+
+    val start = blur_idx + 5  # length of "blur("
+    val end = find_char_in(trimmed, ")", start)
+    if end >= 999999999:
+        return 0
+
+    val inner_raw_blur = trimmed.slice(start, end)
+    val inner = inner_raw_blur.trim()
+    val num_str = if inner.ends_with("px"):
+        inner.slice(0, inner.len() - 2)
+    else:
+        inner
+
+    val parsed = num_str.parse_f64()
+    if parsed != nil:
+        val pval = parsed ?? 0.0
+        return pval.to_i32()
+    0
+
+fn find_substr(haystack: text, needle: text) -> i32:
+    """Find the first occurrence of needle in haystack. Returns 999999999 if not found."""
+    val nlen = needle.len()
+    if nlen == 0 or nlen > haystack.len():
+        return 999999999
+    var i: i32 = 0
+    while i + nlen <= haystack.len():
+        if haystack.slice(i, i + nlen) == needle:
+            return i
+        i = i + 1
+    return 999999999
+
+# =========================================================================
+# calc() wiring — routes length-valued properties through css_ext::calc_resolve
+# =========================================================================
+
+pub fn parse_length_or_calc(value: text) -> CssValue:
+    """Length/percentage parser with a `calc(...)` fast path.
+
+    Detects the `calc(` prefix and delegates to `css_ext::calc_resolve`; on
+    success yields a pixel-valued `CssValue`. Any parse failure — malformed
+    expression, divide-by-zero, mixed units — falls back to the plain
+    `parse_css_value` path so unrelated declarations keep working.
+    """
+    val trimmed = value.trim()
+    val lower = trimmed.to_lower()
+    if lower.starts_with("calc("):
+        val end = find_char_in(trimmed, ")", 5)
+        if end < 999999999:
+            val inner_raw = trimmed.slice(5, end)
+            val inner = inner_raw.trim()
+            val resolved = calc_resolve_text(inner)
+            if resolved.ok:
+                return CssValue.px(resolved.pixels.to_f32())
+    parse_css_value(value)
+
+fn calc_resolve_text(expr: text) -> CalcValue:
+    """Tokenise a linear calc() expression into the (values, ops) streams
+    that `css_ext::calc_resolve` expects.
+
+    Supports integer-px, unitless-int, `+`, `-`, `*`, `/`. Mixed units or
+    unknown tokens produce a failed `CalcValue` so the caller falls back.
+    """
+    val toks = calc_tokenize(expr)
+    if toks.len() == 0:
+        return CalcValue.failed()
+    var values: [i32] = []
+    var ops: [i32] = []
+    var expect_value = true
+    var ti = 0
+    while ti < toks.len():
+        val tok = toks[ti]
+        ti = ti + 1
+        if expect_value:
+            val px = calc_parse_length_px(tok)
+            if px < -999999:
+                return CalcValue.failed()
+            values = values + [px]
+            expect_value = false
+        else:
+            if tok == "+":
+                ops = ops + [CALC_OP_ADD]
+            elif tok == "-":
+                ops = ops + [CALC_OP_SUB]
+            elif tok == "*":
+                ops = ops + [CALC_OP_MUL]
+            elif tok == "/":
+                ops = ops + [CALC_OP_DIV]
+            else:
+                return CalcValue.failed()
+            expect_value = true
+    if expect_value:
+        return CalcValue.failed()
+    calc_resolve(values, ops)
+
+fn calc_tokenize(expr: text) -> [text]:
+    """Split a calc() body into whitespace-separated tokens.
+
+    The CSS spec requires whitespace around `+` / `-` but allows none
+    around `*` / `/`, so we split on spaces and then peel leading/trailing
+    `*` and `/` off each token.
+    """
+    var raw: [text] = []
+    var cur = ""
+    var i = 0
+    val n = expr.len()
+    while i < n:
+        val ch = expr.slice(i, i + 1)
+        if ch == " " or ch == "\t" or ch == "\n" or ch == "\r":
+            if cur.len() > 0:
+                raw.push(cur)
+                cur = ""
+        else:
+            cur = "{cur}{ch}"
+        i = i + 1
+    if cur.len() > 0:
+        raw.push(cur)
+    # Secondary split: peel `*` and `/` that are glued to operands.
+    var out: [text] = []
+    var ri = 0
+    while ri < raw.len():
+        val r = raw[ri]
+        ri = ri + 1
+        calc_split_muldiv(r, out)
+    out
+
+fn calc_split_muldiv(tok: text, out: [text]):
+    """Split a single token on `*` / `/` boundaries, preserving order."""
+    var buf = ""
+    var i = 0
+    val n = tok.len()
+    while i < n:
+        val ch = tok.slice(i, i + 1)
+        if ch == "*" or ch == "/":
+            if buf.len() > 0:
+                out.push(buf)
+                buf = ""
+            out.push(ch)
+        else:
+            buf = "{buf}{ch}"
+        i = i + 1
+    if buf.len() > 0:
+        out.push(buf)
+
+fn calc_parse_length_px(tok: text) -> i32:
+    """Parse a calc() operand into integer pixels.
+
+    Accepts `<n>px` and bare integers (used as scalars by `*` / `/`).
+    Returns a sentinel < -999999 on unknown input so the caller can fail.
+    """
+    val t = tok.trim()
+    if t.len() == 0:
+        return -1000000
+    var body = t
+    if t.ends_with("px"):
+        body = t.slice(0, t.len() - 2)
+    var neg = false
+    var start = 0
+    if body.slice(0, 1) == "-":
+        neg = true
+        start = 1
+    elif body.slice(0, 1) == "+":
+        start = 1
+    var result = 0
+    var idx = start
+    val blen = body.len()
+    while idx < blen:
+        val ch = body.slice(idx, idx + 1)
+        var digit = -1
+        if ch == "0": digit = 0
+        elif ch == "1": digit = 1
+        elif ch == "2": digit = 2
+        elif ch == "3": digit = 3
+        elif ch == "4": digit = 4
+        elif ch == "5": digit = 5
+        elif ch == "6": digit = 6
+        elif ch == "7": digit = 7
+        elif ch == "8": digit = 8
+        elif ch == "9": digit = 9
+        if digit < 0:
+            return -1000000
+        result = result * 10 + digit
+        idx = idx + 1
+    if neg:
+        return 0 - result
+    result

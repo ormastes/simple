@@ -1,0 +1,107 @@
+@allow(unnamed_duplicate_typed_args)
+# Simple CLI - watch command
+# Watch files for changes and auto-rebuild/test
+#
+# Usage:
+#   simple watch                      - Watch src/ and rebuild on changes
+#   simple watch test                 - Watch src/ and run all tests on changes
+#   simple watch test path/to/spec.spl - Watch src/ and run specific test
+#   simple watch --cmd="simple build" - Watch with custom command
+#   simple watch --path=lib/          - Watch specific directory
+#   simple watch --clear              - Clear screen between rebuilds
+#   simple watch --no-deps            - Disable dependency tracking
+
+use std.cli.cli_util (get_cli_args)
+use app.watch.runner.{WatchConfig, watch_config_default, watch_loop}
+
+extern fn rt_file_exists(path: text) -> bool
+
+fn print_help():
+    print "Usage: simple watch [subcommand] [options]"
+    print ""
+    print "Watch files for changes and auto-rebuild."
+    print ""
+    print "Subcommands:"
+    print "  (none)           Watch and rebuild (simple build)"
+    print "  test             Watch and run all tests"
+    print "  test <path>      Watch and run specific test file"
+    print ""
+    print "Options:"
+    print "  --path=<dir>     Directory to watch (default: src/)"
+    print "  --cmd=<command>  Full command to run on change"
+    print "  --interval=<ms>  Poll interval in ms (default: 1000)"
+    print "  --debounce=<ms>  Debounce delay in ms (default: 200)"
+    print "  --ext=<ext>      File extension filter (default: .spl)"
+    print "  --clear          Clear screen between rebuilds"
+    print "  --no-deps        Disable dependency tracking"
+    print "  -h, --help       Show this help"
+
+fn parse_watch_args(args: [text]) -> WatchConfig:
+    var config = watch_config_default()
+    var i = 0
+    var subcmd_handled = false
+
+    while i < args.len():
+        val arg = args[i]
+
+        if arg == "-h" or arg == "--help":
+            print_help()
+            # Signal help was printed by returning config with empty watch_paths
+            config.watch_paths = []
+            return config
+        elif arg == "--clear":
+            config.clear_screen = true
+        elif arg == "--no-deps":
+            config.track_deps = false
+        elif arg.starts_with("--path="):
+            config.watch_paths = [arg[7:]]
+        elif arg.starts_with("--cmd="):
+            val full_cmd = arg[6:]
+            val parts = full_cmd.split(" ")
+            if parts.len() > 0:
+                config.command = parts[0]
+                var cmd_args: [text] = []
+                var j = 1
+                while j < parts.len():
+                    cmd_args.push(parts[j])
+                    j = j + 1
+                config.command_args = cmd_args
+        elif arg.starts_with("--interval="):
+            config.poll_interval_ms = arg[11:].to_int()
+        elif arg.starts_with("--debounce="):
+            config.debounce_ms = arg[11:].to_int()
+        elif arg.starts_with("--ext="):
+            config.ext = arg[6:]
+        elif arg == "test" and not subcmd_handled:
+            subcmd_handled = true
+            # Check if next arg is a test file path
+            if i + 1 < args.len() and not args[i + 1].starts_with("-"):
+                i = i + 1
+                val test_path = args[i]
+                config.command_args = ["test", test_path]
+            else:
+                config.command_args = ["test"]
+        elif not arg.starts_with("-") and not subcmd_handled:
+            # Treat as watch path
+            config.watch_paths = [arg]
+
+        i = i + 1
+
+    config
+
+fn main() -> i64:
+    val args = get_cli_args()
+
+    val config = parse_watch_args(args)
+
+    # If watch_paths is empty, help was printed
+    if config.watch_paths.len() == 0:
+        return 0
+
+    # Validate watch paths exist
+    for path in config.watch_paths:
+        if not rt_file_exists(path):
+            print "Error: watch path not found: {path}"
+            return 1
+
+    watch_loop(config)

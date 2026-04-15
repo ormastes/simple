@@ -1,0 +1,249 @@
+# MCP T32 Dialog Tools spec — tests dialog_get/set/click validation and command generation
+# Covers: label validation, action validation, command construction, error codes
+
+# --- Inlined validation helpers (mirrors json_helpers.spl / dialog_tools.spl logic) ---
+
+fn test_validate_ident(name: text) -> bool:
+    if name == "":
+        return false
+    var i = 0
+    while i < name.len():
+        val ch = name.substring(i, i + 1)
+        if ch == " ":
+            return false
+        if ch == ";":
+            return false
+        if ch == "|":
+            return false
+        if ch == "&":
+            return false
+        if ch == ">":
+            return false
+        if ch == "<":
+            return false
+        if ch == "`":
+            return false
+        if ch == "$":
+            return false
+        if ch == "(":
+            return false
+        if ch == ")":
+            return false
+        i = i + 1
+    true
+
+fn validate_dialog_action(action: text) -> bool:
+    if action == "set":
+        return true
+    if action == "select":
+        return true
+    if action == "deselect":
+        return true
+    if action == "disable":
+        return true
+    if action == "enable":
+        return true
+    false
+
+fn build_dialog_get_cmd(label: text, query_type: text) -> text:
+    if query_type == "boolean":
+        return "EVAL DIALOG.BOOLEAN(" + label + ")"
+    if query_type == "string":
+        return "EVAL DIALOG.STRING(" + label + ")"
+    if query_type == "value":
+        return "EVAL DIALOG.VALUE(" + label + ")"
+    ""
+
+fn build_dialog_set_cmd(label: text, action: text) -> text:
+    if action == "set":
+        return "DIALOG.Set " + label
+    if action == "select":
+        return "DIALOG.Set " + label
+    if action == "deselect":
+        return "DIALOG.Deselect " + label
+    if action == "disable":
+        return "DIALOG.Disable " + label
+    if action == "enable":
+        return "DIALOG.Enable " + label
+    ""
+
+fn build_dialog_exist_cmd(label: text) -> text:
+    "EVAL DIALOG.EXIST(" + label + ")"
+
+fn build_dialog_execute_cmd(label: text) -> text:
+    "DIALOG.EXECUTE " + label
+
+fn parse_exist_result(result: text) -> bool:
+    val lower = result.trim().to_lower()
+    if lower == "true":
+        return true
+    if lower == "true.":
+        return true
+    if lower == "1":
+        return true
+    false
+
+fn dialog_error_not_found(label: text) -> text:
+    "T4100: Dialog element '" + label + "' not found.\n  Use t32_dialog_parse to discover available labels."
+
+fn dialog_error_no_dialog() -> text:
+    "T4101: No active dialog in current session.\n  Open a dialog first via t32_cmm_run with a CMM script containing a DIALOG block."
+
+fn dialog_error_invalid_action(action: text) -> text:
+    "T4102: Invalid dialog action '" + action + "'.\n  Valid actions: set, select, deselect, disable, enable"
+
+fn parse_dialog_mode(mode: text) -> text:
+    val lower = mode.trim().to_lower()
+    if lower == "":
+        return "sync"
+    if lower == "sync" or lower == "async":
+        return lower
+    ""
+
+# --- SSpec tests ---
+
+describe "T32 Dialog Tools":
+    context "label validation":
+        it "accepts simple identifier":
+            expect(test_validate_ident("mycheck")).to_equal(true)
+
+        it "accepts identifier with underscore":
+            expect(test_validate_ident("ok_btn")).to_equal(true)
+
+        it "accepts identifier with digits":
+            expect(test_validate_ident("field123")).to_equal(true)
+
+        it "rejects empty string":
+            expect(test_validate_ident("")).to_equal(false)
+
+        it "rejects label with space":
+            expect(test_validate_ident("my check")).to_equal(false)
+
+        it "rejects label with semicolon":
+            expect(test_validate_ident("label;rm")).to_equal(false)
+
+        it "rejects label with pipe":
+            expect(test_validate_ident("label|cmd")).to_equal(false)
+
+        it "rejects label with ampersand":
+            expect(test_validate_ident("label&cmd")).to_equal(false)
+
+        it "rejects label with backtick":
+            expect(test_validate_ident("x`y")).to_equal(false)
+
+        it "rejects label with parenthesis":
+            expect(test_validate_ident("fn(x)")).to_equal(false)
+
+    context "action validation":
+        it "accepts set action":
+            expect(validate_dialog_action("set")).to_equal(true)
+
+        it "accepts disable action":
+            expect(validate_dialog_action("disable")).to_equal(true)
+
+        it "accepts enable action":
+            expect(validate_dialog_action("enable")).to_equal(true)
+
+        it "accepts deselect action":
+            expect(validate_dialog_action("deselect")).to_equal(true)
+
+        it "rejects unknown action":
+            expect(validate_dialog_action("toggle")).to_equal(false)
+
+        it "rejects empty action":
+            expect(validate_dialog_action("")).to_equal(false)
+
+        it "rejects click as action":
+            expect(validate_dialog_action("click")).to_equal(false)
+
+    context "dialog_get command generation":
+        it "builds boolean query":
+            val cmd = build_dialog_get_cmd("mycheck", "boolean")
+            expect(cmd).to_equal("EVAL DIALOG.BOOLEAN(mycheck)")
+
+        it "builds string query":
+            val cmd = build_dialog_get_cmd("myedit", "string")
+            expect(cmd).to_equal("EVAL DIALOG.STRING(myedit)")
+
+        it "builds value query":
+            val cmd = build_dialog_get_cmd("myval", "value")
+            expect(cmd).to_equal("EVAL DIALOG.VALUE(myval)")
+
+        it "returns empty for unknown type":
+            val cmd = build_dialog_get_cmd("x", "integer")
+            expect(cmd).to_equal("")
+
+    context "dialog_set command generation":
+        it "builds set command":
+            val cmd = build_dialog_set_cmd("mycheck", "set")
+            expect(cmd).to_equal("DIALOG.Set mycheck")
+
+        it "builds disable command":
+            val cmd = build_dialog_set_cmd("mycheck", "disable")
+            expect(cmd).to_equal("DIALOG.Disable mycheck")
+
+        it "builds enable command":
+            val cmd = build_dialog_set_cmd("mycheck", "enable")
+            expect(cmd).to_equal("DIALOG.Enable mycheck")
+
+        it "builds deselect command":
+            val cmd = build_dialog_set_cmd("mycheck", "deselect")
+            expect(cmd).to_equal("DIALOG.Deselect mycheck")
+
+        it "returns empty for invalid action":
+            val cmd = build_dialog_set_cmd("mycheck", "toggle")
+            expect(cmd).to_equal("")
+
+    context "dialog_click command generation":
+        it "builds exist check command":
+            val cmd = build_dialog_exist_cmd("ok_btn")
+            expect(cmd).to_equal("EVAL DIALOG.EXIST(ok_btn)")
+
+        it "builds execute command":
+            val cmd = build_dialog_execute_cmd("ok_btn")
+            expect(cmd).to_equal("DIALOG.EXECUTE ok_btn")
+
+    context "exist result parsing":
+        it "parses TRUE as exists":
+            expect(parse_exist_result("TRUE")).to_equal(true)
+
+        it "parses true lowercase as exists":
+            expect(parse_exist_result("true")).to_equal(true)
+
+        it "parses 1 as exists":
+            expect(parse_exist_result("1")).to_equal(true)
+
+        it "parses FALSE as not exists":
+            expect(parse_exist_result("FALSE")).to_equal(false)
+
+        it "parses 0 as not exists":
+            expect(parse_exist_result("0")).to_equal(false)
+
+        it "parses empty as not exists":
+            expect(parse_exist_result("")).to_equal(false)
+
+    context "error messages":
+        it "not found error includes label":
+            val err = dialog_error_not_found("mycheck")
+            expect(err).to_start_with("T4100")
+            expect(err).to_contain("mycheck")
+
+        it "no dialog error includes hint":
+            val err = dialog_error_no_dialog()
+            expect(err).to_start_with("T4101")
+            expect(err).to_contain("t32_cmm_run")
+
+        it "invalid action error includes action name":
+            val err = dialog_error_invalid_action("toggle")
+            expect(err).to_start_with("T4102")
+            expect(err).to_contain("toggle")
+
+    context "mode parsing":
+        it "defaults to sync":
+            expect(parse_dialog_mode("")).to_equal("sync")
+
+        it "accepts async":
+            expect(parse_dialog_mode("async")).to_equal("async")
+
+        it "rejects invalid mode":
+            expect(parse_dialog_mode("background")).to_equal("")

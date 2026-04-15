@@ -1,0 +1,162 @@
+@allow(primitive_api)
+# UTF-16 Encoding / Decoding
+#
+# Pure Simple implementation of UTF-16 codec.
+# Supports both big-endian (UTF-16BE) and little-endian (UTF-16LE).
+#
+# UTF-16 encoding:
+#   U+0000..U+D7FF, U+E000..U+FFFF  — single 16-bit code unit
+#   U+10000..U+10FFFF                — surrogate pair (two 16-bit code units)
+#     High surrogate: 0xD800 + ((cp - 0x10000) >> 10)
+#     Low surrogate:  0xDC00 + ((cp - 0x10000) & 0x3FF)
+
+use std.common.encoding.utf8.{utf8_encode_one, utf8_decode_all}
+
+# ============================================================================
+# UTF-16 encode codepoint
+# ============================================================================
+
+fn utf16_encode_one(codepoint: i64) -> [i64]:
+    """Encode a Unicode codepoint to UTF-16 code units (16-bit values).
+    Returns 1 or 2 code units. Returns [0xFFFD] for invalid."""
+    if codepoint < 0 or codepoint > 0x10FFFF:
+        return [0xFFFD]
+    if codepoint >= 0xD800 and codepoint <= 0xDFFF:
+        return [0xFFFD]  # surrogates
+
+    if codepoint < 0x10000:
+        return [codepoint]
+
+    # Surrogate pair
+    val adjusted = codepoint - 0x10000
+    val high = 0xD800 + (adjusted >> 10)
+    val low = 0xDC00 + (adjusted & 0x3FF)
+    [high, low]
+
+# ============================================================================
+# UTF-16 decode
+# ============================================================================
+
+fn utf16_decode_one(units: [i64], offset: i64) -> [i64]:
+    """Decode one codepoint from UTF-16 code units starting at offset.
+    Returns [codepoint, units_consumed]."""
+    if offset < 0 or offset >= units.len():
+        return [-1, 0]
+
+    val u0 = units[offset] & 0xFFFF
+
+    # Check for high surrogate
+    if u0 >= 0xD800 and u0 <= 0xDBFF:
+        if offset + 1 >= units.len():
+            return [0xFFFD, 1]  # lone high surrogate
+        val u1 = units[offset + 1] & 0xFFFF
+        if u1 < 0xDC00 or u1 > 0xDFFF:
+            return [0xFFFD, 1]  # invalid low surrogate
+        val cp = 0x10000 + ((u0 - 0xD800) << 10) + (u1 - 0xDC00)
+        return [cp, 2]
+
+    # Lone low surrogate
+    if u0 >= 0xDC00 and u0 <= 0xDFFF:
+        return [0xFFFD, 1]
+
+    [u0, 1]
+
+# ============================================================================
+# Bulk encode / decode
+# ============================================================================
+
+fn utf16_encode_all(codepoints: [i64]) -> [i64]:
+    """Encode array of codepoints to UTF-16 code units."""
+    var result: [i64] = []
+    var i: i64 = 0
+    while i < codepoints.len():
+        val encoded = utf16_encode_one(codepoints[i])
+        var j: i64 = 0
+        while j < encoded.len():
+            result.push(encoded[j])
+            j = j + 1
+        i = i + 1
+    result
+
+fn utf16_decode_all(units: [i64]) -> [i64]:
+    """Decode UTF-16 code units to array of codepoints."""
+    var result: [i64] = []
+    var i: i64 = 0
+    while i < units.len():
+        val decoded = utf16_decode_one(units, i)
+        result.push(decoded[0])
+        val consumed = decoded[1]
+        if consumed <= 0:
+            i = i + 1
+        else:
+            i = i + consumed
+    result
+
+# ============================================================================
+# UTF-16 to/from bytes (with endianness)
+# ============================================================================
+
+fn utf16_to_bytes_le(units: [i64]) -> [i64]:
+    """Convert UTF-16 code units to little-endian byte array."""
+    var result: [i64] = []
+    var i: i64 = 0
+    while i < units.len():
+        val u = units[i] & 0xFFFF
+        result.push(u & 0xFF)
+        result.push((u >> 8) & 0xFF)
+        i = i + 1
+    result
+
+fn utf16_to_bytes_be(units: [i64]) -> [i64]:
+    """Convert UTF-16 code units to big-endian byte array."""
+    var result: [i64] = []
+    var i: i64 = 0
+    while i < units.len():
+        val u = units[i] & 0xFFFF
+        result.push((u >> 8) & 0xFF)
+        result.push(u & 0xFF)
+        i = i + 1
+    result
+
+fn utf16_from_bytes_le(bytes: [i64]) -> [i64]:
+    """Convert little-endian byte array to UTF-16 code units."""
+    var result: [i64] = []
+    var i: i64 = 0
+    while i + 1 < bytes.len():
+        val u = (bytes[i] & 0xFF) | ((bytes[i + 1] & 0xFF) << 8)
+        result.push(u)
+        i = i + 2
+    result
+
+fn utf16_from_bytes_be(bytes: [i64]) -> [i64]:
+    """Convert big-endian byte array to UTF-16 code units."""
+    var result: [i64] = []
+    var i: i64 = 0
+    while i + 1 < bytes.len():
+        val u = ((bytes[i] & 0xFF) << 8) | (bytes[i + 1] & 0xFF)
+        result.push(u)
+        i = i + 2
+    result
+
+# ============================================================================
+# Cross-codec: UTF-16 <-> UTF-8
+# ============================================================================
+
+fn utf16_to_utf8(units: [i64]) -> [i64]:
+    """Convert UTF-16 code units to UTF-8 byte array."""
+    val codepoints = utf16_decode_all(units)
+    var result: [i64] = []
+    var i: i64 = 0
+    while i < codepoints.len():
+        val encoded = utf8_encode_one(codepoints[i])
+        var j: i64 = 0
+        while j < encoded.len():
+            result.push(encoded[j])
+            j = j + 1
+        i = i + 1
+    result
+
+fn utf8_to_utf16(bytes: [i64]) -> [i64]:
+    """Convert UTF-8 byte array to UTF-16 code units."""
+    val codepoints = utf8_decode_all(bytes)
+    utf16_encode_all(codepoints)

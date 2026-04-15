@@ -1,0 +1,156 @@
+#![allow(unnamed_duplicate_typed_args)]
+# CLI Socket Server
+#
+# TCP server for cross-process CLI attach. Listens on localhost,
+# writes a discovery file, and handles NDJSON commands.
+
+use std.nogc_sync_mut.io.tcp.{TcpListener, TcpStream}
+use common.ui.session.{UISession}
+use common.ui.widget.{UIState, UITree}
+
+extern fn rt_file_write_text(path: text, content: text) -> bool
+extern fn rt_file_exists(path: text) -> bool
+extern fn rt_getpid() -> i64
+
+# =========================================================================
+# Command Processing
+# =========================================================================
+
+fn process_command(session: UISession, cmd: text) -> text:
+    """Dispatch an NDJSON command and return JSON response."""
+    val trimmed = cmd.trim()
+    if trimmed == "" or trimmed == "{}":
+        return "{\"error\": \"empty command\"}\n"
+
+    # Parse simple command field from NDJSON
+    val command_name = _extract_json_field(trimmed, "command")
+
+    match command_name:
+        "get_state":
+            return _state_json(session)
+        "get_changes":
+            val count_str = _extract_json_field(trimmed, "count")
+            val count = if count_str != "": count_str.to_int() else: 10
+            return _changes_json(session, count)
+        "subscribe":
+            # Subscribe returns current state as initial payload
+            return _state_json(session)
+        "ping":
+            return "{\"status\": \"pong\"}\n"
+        _:
+            return "{\"error\": \"unknown command: {command_name}\"}\n"
+
+# =========================================================================
+# JSON Helpers
+# =========================================================================
+
+fn _state_json(session: UISession) -> text:
+    """Serialize session state to JSON."""
+    val state = session.current_state()
+    val mode = state.mode_name()
+    val focused = state.focused_id
+    val vp = session.viewport
+    val surfaces = session.surfaces
+    val surface_count = surfaces.surface_count()
+    var json = "{"
+    json = "{json}\"mode\": \"{mode}\","
+    json = "{json}\"focused\": \"{focused}\","
+    json = "{json}\"viewport\": \"{vp.describe()}\","
+    json = "{json}\"surface_count\": {surface_count}"
+    json = "{json}}\n"
+    return json
+
+fn _changes_json(session: UISession, count: i32) -> text:
+    """Serialize recent changes to JSON."""
+    val changes = session.recent_changes(count)
+    var items = ""
+    var first = true
+    for desc in changes:
+        val sep = if first: "" else: ","
+        first = false
+        items = "{items}{sep}\"{desc}\""
+    return "{\"changes\": [{items}]}\n"
+
+fn _extract_json_field(json: text, field: text) -> text:
+    """Extract a simple string field from JSON (naive parser)."""
+    val needle = "\"{field}\":"
+    val idx = json.index_of(needle)
+    if idx < 0:
+        return ""
+    val after = json[idx + needle.len():]
+    val trimmed = after.trim()
+    if trimmed.len() == 0:
+        return ""
+    # Handle string values
+    if trimmed[0] == "\"":
+        val rest = trimmed[1:]
+        val end_idx = rest.index_of("\"")
+        if end_idx < 0:
+            return rest
+        return rest[0:end_idx]
+    # Handle numeric values
+    var num_end = 0
+    for ch in trimmed:
+        if ch >= "0" and ch <= "9":
+            num_end = num_end + 1
+        else:
+            break
+    if num_end > 0:
+        return trimmed[0:num_end]
+    return ""
+
+# =========================================================================
+# Socket Server
+# =========================================================================
+
+class CLISocketServer:
+    session: UISession
+    port: i32
+
+    static fn new(session: UISession, port: i32) -> CLISocketServer:
+        return CLISocketServer(session: session, port: port)
+
+impl CLISocketServer:
+
+    fn start():
+        """Start the TCP server and write discovery file."""
+        val pid = rt_getpid()
+        val discovery_path = "/tmp/simple-ui-{pid}.sock"
+        rt_file_write_text(discovery_path, "localhost:{self.port}")
+        print "CLI socket server on port {self.port} (discovery: {discovery_path})"
+
+        match TcpListener.bind("127.0.0.1:{self.port}"):
+            Err(e):
+                print "Error: Failed to bind to port {self.port}: {e}"
+                return
+            Ok(listener):
+                self._serve_loop(listener)
+
+    fn _serve_loop(listener: TcpListener):
+        """Accept connections and handle commands."""
+        loop:
+            match listener.accept():
+                Ok(stream):
+                    self._handle_client(stream)
+                Err(e):
+                    print "Accept error: {e}"
+
+    fn _handle_client(stream: TcpStream):
+        """Handle a single client connection with NDJSON protocol."""
+        loop:
+            match stream.read_line():
+                Ok(line):
+                    val trimmed = line.trim()
+                    if trimmed == "":
+                        break
+                    val response = process_command(self.session, trimmed)
+                    match stream.write_text(response):
+                        Err(e):
+                            break
+                        Ok(()):
+                            pass_dn
+                Err(e):
+                    break
+        match stream.close():
+            Err(_): pass_dn
+            Ok(()): pass_dn

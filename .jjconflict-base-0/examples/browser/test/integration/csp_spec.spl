@@ -1,0 +1,165 @@
+# ============================================================================
+# Integration: Content Security Policy Tests
+# Category: Browser Platform Integration
+# Status: Active
+#
+# Validates the CSP enforcement engine: header parsing, directive extraction,
+# source matching for scripts/styles/images, default-src fallback, special
+# tokens ('none', 'unsafe-inline', 'unsafe-eval', 'self'), and report-uri
+# extraction.
+#
+# Run with: bin/simple test examples/browser/test/integration/csp_spec.spl
+# ============================================================================
+
+use std.spec
+use examples.browser.feature.sandbox.csp.{
+    CspDirective, CspPolicy, parse_csp,
+    check_source, check_script, check_style, check_image
+}
+use examples.browser.shared.logging.{Logger, LogLevel}
+
+# ============================================================================
+# Helpers
+# ============================================================================
+
+fn make_logger() -> Logger:
+    Logger.new("csp_test", LogLevel.Debug)
+
+fn make_directive(name: text, sources: [text]) -> CspDirective:
+    CspDirective.create(name, sources)
+
+fn make_policy(directives: [CspDirective]) -> CspPolicy:
+    CspPolicy.create(directives, "")
+
+fn make_policy_with_report(directives: [CspDirective], report_uri: text) -> CspPolicy:
+    CspPolicy.create(directives, report_uri)
+
+fn single_directive_policy(name: text, sources: [text]) -> CspPolicy:
+    var directives: [CspDirective] = []
+    directives = directives + [make_directive(name, sources)]
+    make_policy(directives)
+
+# ============================================================================
+# Tests
+# ============================================================================
+
+describe "Content Security Policy Integration":
+
+    # ========================================================================
+    # CSP parsing
+    # ========================================================================
+
+    context "parse_csp":
+        it "parse_csp extracts default-src directive":
+            val policy = parse_csp("default-src 'self'")
+            expect(policy.directives.len()).to_equal(1)
+            expect(policy.directives[0].name).to_equal("default-src")
+            expect(policy.directives[0].sources[0]).to_equal("'self'")
+
+        it "parse_csp extracts script-src directive":
+            val policy = parse_csp("script-src 'self' https://cdn.example.com")
+            expect(policy.directives.len()).to_equal(1)
+            expect(policy.directives[0].name).to_equal("script-src")
+            expect(policy.directives[0].sources.len()).to_equal(2)
+            expect(policy.directives[0].sources[1]).to_equal("https://cdn.example.com")
+            expect(policy.report_uri).to_equal("")
+
+        it "parse_csp handles multiple directives":
+            val policy = parse_csp("default-src 'none'; script-src 'self'; style-src 'self'")
+            expect(policy.directives.len()).to_equal(3)
+
+        it "parse_csp extracts report-uri separately":
+            val policy = parse_csp("default-src 'self'; report-uri https://report.example.com/csp")
+            expect(policy.directives.len()).to_equal(1)
+            expect(policy.report_uri).to_equal("https://report.example.com/csp")
+
+    # ========================================================================
+    # Source checking — scripts
+    # ========================================================================
+
+    context "script source checking":
+        it "check_script allows whitelisted source":
+            val sources = ["https://cdn.example.com", "https://api.example.com"]
+            val policy = single_directive_policy("script-src", sources)
+            val allowed = check_script(policy, "https://cdn.example.com")
+            expect(allowed).to_equal(true)
+
+        it "check_script blocks non-whitelisted source":
+            val sources = ["https://cdn.example.com"]
+            val policy = single_directive_policy("script-src", sources)
+            val allowed = check_script(policy, "https://evil.example.com")
+            expect(allowed).to_equal(false)
+
+    # ========================================================================
+    # Source checking — styles
+    # ========================================================================
+
+    context "style source checking":
+        it "check_style allows 'self'":
+            """'self' is treated as a literal token match in the current
+            implementation. The source must exactly equal \"'self'\"."""
+            val sources = ["'self'"]
+            val policy = single_directive_policy("style-src", sources)
+            val allowed = check_style(policy, "'self'")
+            expect(allowed).to_equal(true)
+
+    # ========================================================================
+    # Source checking — images
+    # ========================================================================
+
+    context "image source checking":
+        it "check_image allows data: URI":
+            val sources = ["data:", "https://img.example.com"]
+            val policy = single_directive_policy("img-src", sources)
+            val allowed = check_image(policy, "data:")
+            expect(allowed).to_equal(true)
+
+    # ========================================================================
+    # default-src fallback
+    # ========================================================================
+
+    context "default-src fallback":
+        it "default-src applies when specific directive missing":
+            """When script-src is not present, check_script falls back
+            to default-src."""
+            val sources = ["https://allowed.example.com"]
+            val policy = single_directive_policy("default-src", sources)
+            # No script-src directive — should fall back to default-src
+            val allowed = check_script(policy, "https://allowed.example.com")
+            expect(allowed).to_equal(true)
+            val blocked = check_script(policy, "https://blocked.example.com")
+            expect(blocked).to_equal(false)
+
+    # ========================================================================
+    # Special tokens
+    # ========================================================================
+
+    context "special CSP tokens":
+        it "'none' blocks all sources":
+            val sources = ["'none'"]
+            val policy = single_directive_policy("script-src", sources)
+            val allowed = check_script(policy, "https://any.example.com")
+            expect(allowed).to_equal(false)
+
+        it "'unsafe-inline' allows inline scripts":
+            """'unsafe-inline' as a source token is matched literally."""
+            val sources = ["'unsafe-inline'"]
+            val policy = single_directive_policy("script-src", sources)
+            val allowed = check_script(policy, "'unsafe-inline'")
+            expect(allowed).to_equal(true)
+
+        it "'unsafe-eval' allows eval()":
+            val sources = ["'unsafe-eval'"]
+            val policy = single_directive_policy("script-src", sources)
+            val allowed = check_script(policy, "'unsafe-eval'")
+            expect(allowed).to_equal(true)
+
+    # ========================================================================
+    # Report URI
+    # ========================================================================
+
+    context "report-uri":
+        it "report-uri is extracted from policy":
+            val directives = [make_directive("default-src", ["'self'"])]
+            val policy = make_policy_with_report(directives, "https://report.example.com/csp")
+            expect(policy.report_uri).to_equal("https://report.example.com/csp")

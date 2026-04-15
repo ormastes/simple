@@ -1,0 +1,126 @@
+# SYS-GUI-003 — Hello World single-window launcher lifecycle spec
+#
+# Exercises the launcher → shell → WM → compositor ownership join for the
+# Hello World built-in app without requiring a QEMU boot. The built-in
+# registry entry for Hello World (slot 0) is seeded by `launcher_init`, so
+# this spec drives the same identity path a live launcher spawn takes and
+# asserts that the resulting window is owned by `/sys/apps/hello_world`.
+#
+# Covers SYS-GUI-003 Single-window app live test (serial / unit half).
+
+use std.spec
+use os.desktop.shell.{DesktopShell}
+use os.compositor.compositor.{Compositor}
+use os.compositor.browser_compositor_backend.{BrowserCompositorBackend}
+use os.compositor.input_backend.{InputBackend}
+use os.drivers.input.ps2_keyboard.{KeyEvent, Key}
+use os.drivers.input.ps2_mouse.{MouseEvent}
+use os.services.launcher.launcher.{
+    launcher_init, launcher_record_process,
+    launcher_get_process_app_id_for_pid, launcher_get_process_window_count,
+    launcher_get_process_state, launcher_get_running_process_count,
+    launcher_get_app_launch_state, launcher_get_app_exit_code,
+    launcher_get_app_window_count, launcher_get_app_last_pid,
+    launcher_get_app_path, launcher_get_app_identity,
+    launcher_note_task_probe
+}
+use os.services.wm.wm_service.{WmAction}
+
+class SilentInputBackend:
+    _unused: bool
+
+impl InputBackend for SilentInputBackend:
+    me poll_key() -> KeyEvent?:
+        nil
+
+    me poll_mouse() -> MouseEvent?:
+        nil
+
+    fn alt_held() -> bool:
+        false
+
+    fn shift_held() -> bool:
+        false
+
+    fn ctrl_held() -> bool:
+        false
+
+    fn key_to_char(key: Key) -> text?:
+        nil
+
+impl SilentInputBackend:
+    static fn new() -> SilentInputBackend:
+        SilentInputBackend(_unused: false)
+
+describe "Hello World launcher lifecycle":
+    it "exposes the built-in hello_world manifest identity":
+        launcher_init()
+        expect(launcher_get_app_path(0)).to_equal("/sys/apps/hello_world")
+        expect(launcher_get_app_identity(0)).to_equal("/sys/apps/hello_world")
+
+    it "joins launcher pid, shell WM ownership, and compositor on one window":
+        launcher_init()
+        val pid: u64 = 7101
+        expect(launcher_record_process(pid, 0, "running", 0, 0, true)).to_be(true)
+
+        var shell = _make_test_shell()
+        shell.apply_wm_action(_create_window_action("Hello World", pid, 301))
+
+        expect(shell.compositor.window_count()).to_equal(1)
+        val ids = shell.compositor.windows_for_process(pid)
+        expect(ids.len()).to_equal(1)
+        val wid = ids[0]
+        expect(shell.compositor.window_process_id(wid)).to_equal(pid)
+        expect(shell.compositor.window_app_id(wid)).to_equal("/sys/apps/hello_world")
+        expect(shell.wm.window_owner_process_id(wid)).to_equal(pid)
+        expect(shell.wm.window_owner_app_id(wid)).to_equal("/sys/apps/hello_world")
+        expect(launcher_get_process_app_id_for_pid(pid)).to_equal("/sys/apps/hello_world")
+        expect(launcher_get_process_window_count(0)).to_equal(1)
+        expect(launcher_get_app_launch_state(0)).to_equal("running")
+        expect(launcher_get_app_window_count(0)).to_equal(1)
+        expect(launcher_get_app_last_pid(0)).to_equal(pid)
+
+    it "handles graceful exit: window is reaped and app slot returns to exited":
+        launcher_init()
+        val pid: u64 = 7202
+        expect(launcher_record_process(pid, 0, "running", 0, 0, true)).to_be(true)
+
+        var shell = _make_test_shell()
+        shell.apply_wm_action(_create_window_action("Hello World", pid, 302))
+        expect(shell.compositor.window_count()).to_equal(1)
+
+        # Graceful exit: exit code 0 → classified as "exited".
+        launcher_note_task_probe(pid, false, 0)
+        expect(launcher_get_process_state(0)).to_equal("exited")
+        expect(launcher_get_running_process_count()).to_equal(0)
+
+        shell.reconcile_dead_process_windows()
+        expect(shell.compositor.window_count()).to_equal(0)
+        expect(shell.wm.window_count_for_process(pid)).to_equal(0)
+        expect(launcher_get_app_launch_state(0)).to_equal("exited")
+        expect(launcher_get_app_exit_code(0)).to_equal(0)
+        expect(launcher_get_app_window_count(0)).to_equal(0)
+
+fn _make_test_shell() -> DesktopShell:
+    val backend = BrowserCompositorBackend.new(1024, 768)
+    val input = SilentInputBackend.new()
+    val compositor = Compositor.with_backends(backend, input, 1024, 768)
+    var shell = DesktopShell.new(compositor)
+    shell.set_task_reaper_enabled(false)
+    shell
+
+fn _create_window_action(title: text, process_id: u64, owner_port: u64) -> WmAction:
+    WmAction(
+        kind: "create_window",
+        window_id: 0,
+        title: title,
+        x: 32,
+        y: 48,
+        width: 420,
+        height: 220,
+        content: "",
+        process_id: process_id,
+        app_id: "",
+        owner_port: owner_port,
+        src_port: owner_port
+    )

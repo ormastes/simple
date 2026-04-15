@@ -1,0 +1,320 @@
+#![allow(unnamed_duplicate_typed_args)]
+# Verify tooling gate for MCP/LSP/tool-server performance regression checks.
+#
+# This module does not run the wrapper/request/perf audits itself. It consumes
+# their artifacts and integrates them into the app-level `verify` workflow.
+
+use app.io.mod.{file_exists, file_read, file_write, dir_create_all, process_run, env_get}
+
+struct VerifyEvidenceInput:
+    label: text
+    path: text
+    present: bool
+    content: text
+    required_tokens: [text]
+
+struct VerifyFinding:
+    level: text
+    subject: text
+    message: text
+
+struct VerifyReport:
+    scope: text
+    tooling_paths: [text]
+    findings: [VerifyFinding]
+    failures: i64
+    warnings: i64
+    passes: i64
+    status: text
+
+fn make_evidence_input(label: text, path: text, present: bool, content: text, required_tokens: [text]) -> VerifyEvidenceInput:
+    VerifyEvidenceInput(
+        label: label,
+        path: path,
+        present: present,
+        content: content,
+        required_tokens: required_tokens
+    )
+
+fn make_finding(level: text, subject: text, message: text) -> VerifyFinding:
+    VerifyFinding(level: level, subject: subject, message: message)
+
+fn count_findings(findings: [VerifyFinding], level: text) -> i64:
+    var count = 0
+    for finding in findings:
+        if finding.level == level:
+            count = count + 1
+    count
+
+fn overall_status(findings: [VerifyFinding]) -> text:
+    val failures = count_findings(findings, "FAIL")
+    val warnings = count_findings(findings, "WARN")
+    if failures > 0:
+        return "FAIL"
+    if warnings > 0:
+        return "WARN"
+    "PASS"
+
+fn report_from_findings(scope: text, tooling_paths: [text], findings: [VerifyFinding]) -> VerifyReport:
+    VerifyReport(
+        scope: scope,
+        tooling_paths: tooling_paths,
+        findings: findings,
+        failures: count_findings(findings, "FAIL"),
+        warnings: count_findings(findings, "WARN"),
+        passes: count_findings(findings, "PASS"),
+        status: overall_status(findings)
+    )
+
+fn trim_status_suffix(line: text, prefix_len: i64) -> text:
+    line.substring(prefix_len).trim()
+
+fn extract_artifact_status(content: text) -> text:
+    val lines = content.split("\n")
+    for line in lines:
+        val trimmed = line.trim()
+        val lower = trimmed.lower()
+        if lower.starts_with("status:"):
+            return trim_status_suffix(trimmed, 7).upper()
+        if lower.starts_with("result:"):
+            return trim_status_suffix(trimmed, 7).upper()
+    ""
+
+fn missing_required_tokens(content: text, required_tokens: [text]) -> [text]:
+    val lowered = content.lower()
+    var missing: [text] = []
+    for token in required_tokens:
+        if not lowered.contains(token.lower()):
+            missing.push(token)
+    missing
+
+fn evaluate_evidence_input(input: VerifyEvidenceInput) -> VerifyFinding:
+    if not input.present:
+        return make_finding(
+            "FAIL",
+            input.path,
+            "{input.label} evidence is missing"
+        )
+
+    val status = extract_artifact_status(input.content)
+    if status == "":
+        return make_finding(
+            "FAIL",
+            input.path,
+            "{input.label} evidence is missing a STATUS marker"
+        )
+
+    if status == "FAIL":
+        return make_finding(
+            "FAIL",
+            input.path,
+            "{input.label} reported FAIL"
+        )
+
+    val missing = missing_required_tokens(input.content, input.required_tokens)
+    if missing.len() > 0:
+        return make_finding(
+            "FAIL",
+            input.path,
+            "{input.label} is missing required evidence: {missing.join(\", \")}"
+        )
+
+    if status == "WARN":
+        return make_finding(
+            "WARN",
+            input.path,
+            "{input.label} reported WARN"
+        )
+
+    make_finding(
+        "PASS",
+        input.path,
+        "{input.label} reported PASS"
+    )
+
+fn push_unique(paths: [text], value: text) -> [text]:
+    if value == "":
+        return paths
+    for existing in paths:
+        if existing == value:
+            return paths
+    var result = paths
+    result.push(value)
+    result
+
+fn parse_name_only_output(stdout: text) -> [text]:
+    var paths: [text] = []
+    val lines = stdout.split("\n")
+    for line in lines:
+        val trimmed = line.trim()
+        if trimmed != "":
+            paths = push_unique(paths, trimmed)
+    paths
+
+fn parse_git_status_output(stdout: text) -> [text]:
+    var paths: [text] = []
+    val lines = stdout.split("\n")
+    for line in lines:
+        if line.len() < 4:
+            continue
+        val trimmed = line.trim()
+        if trimmed == "":
+            continue
+        var path = line.substring(3).trim()
+        if path.contains(" -> "):
+            val rename_parts = path.split(" -> ")
+            if rename_parts.len() > 1:
+                path = rename_parts[1].trim()
+        paths = push_unique(paths, path)
+    paths
+
+fn list_changed_files() -> [text]:
+    var paths: [text] = []
+
+    val (jj_out, _jj_err, jj_exit) = process_run("jj", ["--no-pager", "diff", "--name-only"])
+    if jj_exit == 0:
+        for path in parse_name_only_output(jj_out):
+            paths = push_unique(paths, path)
+
+    val (git_diff_out, _git_diff_err, git_diff_exit) = process_run("git", ["diff", "--name-only", "HEAD"])
+    if git_diff_exit == 0:
+        for path in parse_name_only_output(git_diff_out):
+            paths = push_unique(paths, path)
+
+    val (git_status_out, _git_status_err, git_status_exit) = process_run("git", ["status", "--short"])
+    if git_status_exit == 0:
+        for path in parse_git_status_output(git_status_out):
+            paths = push_unique(paths, path)
+
+    paths
+
+fn split_csv_files(csv: text) -> [text]:
+    var files: [text] = []
+    if csv == "":
+        return files
+    val parts = csv.split(",")
+    for part in parts:
+        val trimmed = part.trim()
+        if trimmed != "":
+            files = push_unique(files, trimmed)
+    files
+
+fn is_tooling_sensitive_path(path: text) -> bool:
+    if path == ".mcp.json":
+        return true
+    if path == "src/app/io/cli_commands.spl":
+        return true
+    if path.starts_with("src/app/verify/"):
+        return true
+    if path.starts_with("src/app/mcp/"):
+        return true
+    if path.starts_with("src/app/lsp/"):
+        return true
+    if path.starts_with("src/app/ui.mcp/"):
+        return true
+    if path.starts_with("src/lib/nogc_sync_mut/mcp/"):
+        return true
+    if path.starts_with("examples/obsidian-search/src/mcp/"):
+        return true
+    if path.starts_with("examples/obsidian-search/src/lsp_mcp/"):
+        return true
+    if path.starts_with("examples/obsidian-search/src/core/"):
+        return true
+    if path.starts_with("examples/10_tooling/trace32_tools/"):
+        return true
+    if path.starts_with("tools/claude-plugin/obsidian-search/"):
+        return true
+    if path.starts_with("bin/") and (path.contains("mcp") or path.contains("lsp")):
+        return true
+    false
+
+fn collect_tooling_sensitive_paths(paths: [text]) -> [text]:
+    var tooling_paths: [text] = []
+    for path in paths:
+        if is_tooling_sensitive_path(path):
+            tooling_paths = push_unique(tooling_paths, path)
+    tooling_paths
+
+fn env_or_default(key: text, fallback: text) -> text:
+    val value = env_get(key)
+    if value == nil or value == "":
+        fallback
+    else:
+        value
+
+fn default_report_dir() -> text:
+    env_or_default("SIMPLE_VERIFY_REPORT_DIR", "doc/09_report/verify")
+
+fn load_evidence_input(default_path: text, env_key: text, label: text, required_tokens: [text]) -> VerifyEvidenceInput:
+    val path = env_or_default(env_key, default_path)
+    if not file_exists(path):
+        return make_evidence_input(label, path, false, "", required_tokens)
+    make_evidence_input(label, path, true, file_read(path), required_tokens)
+
+fn build_tooling_verify_report(scope: text, changed_files: [text], wrapper_input: VerifyEvidenceInput, request_input: VerifyEvidenceInput, perf_input: VerifyEvidenceInput) -> VerifyReport:
+    val tooling_paths = collect_tooling_sensitive_paths(changed_files)
+    var findings: [VerifyFinding] = []
+
+    if tooling_paths.len() == 0:
+        findings.push(make_finding("PASS", scope, "No MCP/LSP/tool-server changes detected; tooling gate skipped"))
+        return report_from_findings(scope, tooling_paths, findings)
+
+    findings.push(make_finding("PASS", scope, "Detected {tooling_paths.len()} tooling-sensitive file(s)"))
+    findings.push(evaluate_evidence_input(wrapper_input))
+    findings.push(evaluate_evidence_input(request_input))
+    findings.push(evaluate_evidence_input(perf_input))
+    report_from_findings(scope, tooling_paths, findings)
+
+fn render_verify_report(report: VerifyReport) -> text:
+    var lines: [text] = []
+    lines.push("=== Verification Report: MCP/LSP Tooling ===")
+    lines.push("")
+    lines.push("Scope: {report.scope}")
+
+    if report.tooling_paths.len() == 0:
+        lines.push("Tooling-sensitive files: none")
+    else:
+        lines.push("Tooling-sensitive files:")
+        for path in report.tooling_paths:
+            lines.push("  - {path}")
+
+    lines.push("")
+    for finding in report.findings:
+        lines.push("[{finding.level}] {finding.subject} - {finding.message}")
+
+    lines.push("")
+    lines.push("STATUS: {report.status} ({report.failures} failures, {report.warnings} warnings)")
+    lines.join("\n")
+
+fn write_verify_report(report: VerifyReport, report_dir: text) -> text:
+    val _ = dir_create_all(report_dir)
+    val report_path = "{report_dir}/mcp_lsp_tooling_verify_latest.md"
+    val content = render_verify_report(report)
+    val ok = file_write(report_path, content)
+    if ok:
+        report_path
+    else:
+        ""
+
+fn build_default_tooling_verify_report(changed_files: [text], scope: text) -> VerifyReport:
+    val report_dir = default_report_dir()
+    val wrapper_input = load_evidence_input(
+        "{report_dir}/mcp_wrapper_audit.md",
+        "SIMPLE_VERIFY_WRAPPER_AUDIT",
+        "Wrapper audit",
+        []
+    )
+    val request_input = load_evidence_input(
+        "{report_dir}/mcp_request_path_audit.md",
+        "SIMPLE_VERIFY_REQUEST_AUDIT",
+        "Request-path audit",
+        []
+    )
+    val perf_input = load_evidence_input(
+        "{report_dir}/mcp_perf_evidence.md",
+        "SIMPLE_VERIFY_PERF_EVIDENCE",
+        "Performance evidence",
+        ["warm startup", "representative request", "max rss"]
+    )
+
+    build_tooling_verify_report(scope, changed_files, wrapper_input, request_input, perf_input)

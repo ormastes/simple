@@ -1,0 +1,131 @@
+#![allow(unnamed_duplicate_typed_args)]
+"""
+# Portal Auth Middleware
+
+Portal-specific authentication middleware. Checks session cookies
+for web requests and Bearer tokens for API requests.
+Enforces @requires_auth and @requires_capability annotations.
+"""
+
+use std.http_server.types.{HttpRequestData, HttpResponseData}
+use std.http_server.response.{build_error}
+use std.web_framework.session.{SessionStore}
+use std.web_framework.auth_middleware.{
+    session_auth_middleware, jwt_auth_middleware,
+    extract_bearer_token, extract_session_cookie
+}
+use std.web_framework.controller.{ControllerContext}
+use std.database.sql.connection.{Database}
+use portal.services.auth_service.{verify_api_token, find_user_by_id}
+
+# ============================================================================
+# Auth Check Results
+# ============================================================================
+
+class AuthResult:
+    """Result of an authentication check."""
+    authenticated: bool
+    user_id: text
+    role: text
+
+fn auth_not_authenticated() -> AuthResult:
+    """Create a not-authenticated result."""
+    AuthResult(authenticated: false, user_id: "", role: "")
+
+fn auth_authenticated(user_id: text, role: text) -> AuthResult:
+    """Create an authenticated result."""
+    AuthResult(authenticated: true, user_id: user_id, role: role)
+
+# ============================================================================
+# Portal Authentication
+# ============================================================================
+
+fn check_portal_auth(request: HttpRequestData, session_store: SessionStore, db: Database) -> AuthResult:
+    """Check if a request is authenticated via session or API token.
+
+    Tries session cookie first, then Bearer token.
+
+    Args:
+        request: HTTP request to check
+        session_store: Session store for cookie-based auth
+        db: Database for API token verification
+
+    Returns:
+        AuthResult with authentication status
+    """
+    # Try session-based auth first
+    val session_result = session_auth_middleware(request, session_store, "_portal_session")
+    match session_result:
+        Ok(user_id):
+            # Look up user role
+            val uid = user_id.to_i64() ?? 0
+            if uid > 0:
+                val user_result = find_user_by_id(db, uid)
+                match user_result:
+                    Ok(user_opt):
+                        if user_opt != nil:
+                            val user = user_opt ?? return auth_not_authenticated()
+                            return auth_authenticated(user_id, user.role)
+                    Err(e): pass_do_nothing
+            return auth_authenticated(user_id, "user")
+        Err(e):
+            pass_do_nothing
+
+    # Try API token auth
+    val token = extract_bearer_token(request)
+    if token != nil:
+        val raw_token = token ?? ""
+        val token_result = verify_api_token(db, raw_token)
+        match token_result:
+            Ok(api_token):
+                val user_id_str = "{api_token.user_id}"
+                return auth_authenticated(user_id_str, "api")
+            Err(e):
+                pass_do_nothing
+
+    auth_not_authenticated()
+
+fn require_auth(auth: AuthResult) -> Result<text, HttpResponseData>:
+    """Enforce authentication. Returns user_id or error response.
+
+    Args:
+        auth: Authentication result to check
+
+    Returns:
+        Ok(user_id) if authenticated, Err(redirect_response) otherwise
+    """
+    if not auth.authenticated:
+        return Err(build_redirect_to_login())
+    Ok(auth.user_id)
+
+fn require_capability(auth: AuthResult, capability: text) -> Result<text, HttpResponseData>:
+    """Enforce a capability (role-based check).
+
+    Args:
+        auth: Authentication result
+        capability: Required capability (e.g., "admin")
+
+    Returns:
+        Ok(user_id) if authorized, Err(error_response) otherwise
+    """
+    if not auth.authenticated:
+        return Err(build_redirect_to_login())
+    if auth.role != capability and auth.role != "admin":
+        return Err(build_error(403, "Forbidden: requires {capability} capability"))
+    Ok(auth.user_id)
+
+fn build_redirect_to_login() -> HttpResponseData:
+    """Build a redirect response to the login page."""
+    HttpResponseData(
+        status: 302,
+        reason: "Found",
+        headers: [
+            ("Location", "/login"),
+            ("Server", "SimpleServer")
+        ],
+        body: "",
+        body_file: "",
+        body_offset: 0,
+        body_length: 0,
+        chunked: false
+    )

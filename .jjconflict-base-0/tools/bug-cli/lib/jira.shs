@@ -1,0 +1,107 @@
+#!/bin/bash
+# bug-cli Jira Issues backend — wraps our bin/jira CLI
+# Depends on: config.shs (sourced by main entry point)
+
+# Resolve path to our jira CLI
+_bug_jira_bin() {
+  local repo_root
+  repo_root="$(cd "${BIN_DIR}/../.." 2>/dev/null && pwd)"
+  if [ -x "${repo_root}/bin/jira" ]; then
+    echo "${repo_root}/bin/jira"
+  else
+    echo "jira"
+  fi
+}
+
+bug_jira_available() {
+  local jira_bin
+  jira_bin=$(_bug_jira_bin)
+  "$jira_bin" auth status >/dev/null 2>&1
+}
+
+bug_jira_list() {
+  local jira_bin status="open" limit=25
+  jira_bin=$(_bug_jira_bin)
+
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --status) status="$2"; shift 2 ;;
+      --limit)  limit="$2"; shift 2 ;;
+      *) shift ;;
+    esac
+  done
+
+  # Map status to JQL
+  local jql_status
+  case "$status" in
+    open)   jql_status='status != "Done" AND status != "Closed"' ;;
+    closed) jql_status='status in ("Done", "Closed")' ;;
+    *)      jql_status="" ;;
+  esac
+
+  local jql="issuetype = Bug"
+  [ -n "$jql_status" ] && jql="${jql} AND ${jql_status}"
+  jql="${jql} ORDER BY updated DESC"
+
+  "$jira_bin" api "search" \
+    -f "jql=${jql}" \
+    -f "maxResults=${limit}" \
+    -f 'fields=["summary","status","issuetype","priority","assignee","created","description"]' \
+    --jq '[.issues[] | {
+      id: ("jira:" + .key),
+      source: "jira",
+      key: .key,
+      title: .fields.summary,
+      status: .fields.status.name,
+      severity: (.fields.priority.name // "unknown"),
+      assignee: ((.fields.assignee.displayName) // "unassigned"),
+      labels: [],
+      url: ("browse/" + .key),
+      created: .fields.created,
+      body: (.fields.description.content[0].content[0].text // "")
+    }]' 2>/dev/null || echo '[]'
+}
+
+bug_jira_view() {
+  local jira_bin key="$1"
+  jira_bin=$(_bug_jira_bin)
+  # Strip "jira:" prefix if present
+  key="${key#jira:}"
+
+  "$jira_bin" api "issue/${key}" \
+    --jq '{
+      id: ("jira:" + .key),
+      source: "jira",
+      key: .key,
+      title: .fields.summary,
+      status: .fields.status.name,
+      severity: (.fields.priority.name // "unknown"),
+      assignee: ((.fields.assignee.displayName) // "unassigned"),
+      labels: [(.fields.labels[]? // empty)],
+      created: .fields.created,
+      body: (.fields.description.content[0].content[0].text // ""),
+      comments: []
+    }' 2>/dev/null
+}
+
+bug_jira_search() {
+  local jira_bin query="$1"
+  jira_bin=$(_bug_jira_bin)
+
+  "$jira_bin" api "search" \
+    -f "jql=issuetype = Bug AND text ~ \"${query}\" ORDER BY updated DESC" \
+    -f "maxResults=25" \
+    -f 'fields=["summary","status","priority","assignee","created"]' \
+    --jq '[.issues[] | {
+      id: ("jira:" + .key),
+      source: "jira",
+      key: .key,
+      title: .fields.summary,
+      status: .fields.status.name,
+      severity: (.fields.priority.name // "unknown"),
+      assignee: ((.fields.assignee.displayName) // "unassigned"),
+      labels: [],
+      created: .fields.created,
+      body: ""
+    }]' 2>/dev/null || echo '[]'
+}

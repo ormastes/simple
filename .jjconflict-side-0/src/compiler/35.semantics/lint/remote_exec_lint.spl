@@ -1,0 +1,582 @@
+#![allow(export_outside_init)]
+#![allow(unnamed_duplicate_typed_args)]
+# Remote Exec Lint
+#
+# Source-level lint checks that catch bug classes discovered in the remote
+# JIT execution module.  All checks are text-based (they scan raw .spl
+# source lines) so they run before the AST is formed.
+#
+# RJIT001: Diff markers left in source file                           WARNING
+# RJIT002: Leading-space corruption (whole file shifted right)        WARNING
+# RJIT003: Export references undefined symbol in directory            WARNING
+# RJIT004: Wrong shell import in library code (use app.io)            WARNING
+# RJIT005: Zero-capacity MemoryMap constructor                        WARNING
+#
+# Does NOT flag:
+# - Comment lines starting with '# -' or '# +' (valid documentation)
+# - String literals containing diff-like text
+# - Lines inside triple-quoted docstrings
+# - Exports in non-__init__.spl files (not re-export facades)
+# - app.io usage outside src/lib/
+# - MemoryMap calls where start != end
+#
+# ============================================================================
+
+use std.io_runtime
+
+
+# ============================================================================
+# Warning Struct
+# ============================================================================
+
+struct RemoteExecLintWarning:
+    code: text
+    severity: text
+    message: text
+    hint: text
+    line_num: i64
+    file_path: text
+
+    fn fmt() -> text:
+        "[{self.code}] {self.severity}: {self.file_path}:{self.line_num} — {self.message} — {self.hint}"
+
+
+# ============================================================================
+# RJIT001: Diff Markers in Source
+# ============================================================================
+
+fn lint_diff_markers(source: text, path: text) -> [RemoteExecLintWarning]:
+    """Detect lines that look like diff hunks accidentally left in source.
+
+    Matches lines starting with '+' or '-' followed by at least 4 spaces
+    (indent-level diff markers).  Excludes:
+    - Comment lines (trimmed line starts with '#')
+    - Lines inside triple-quoted docstrings
+    - Lines where the '+'/'-' is part of a string literal on the same line
+    """
+    var warnings: [RemoteExecLintWarning] = []
+    val lines = source.split("\n")
+    var in_docstring = false
+
+    var li = 0
+    while li < lines.len():
+        val line = lines[li]
+
+        # Track triple-quoted docstring regions
+        if _count_triple_quotes(line) % 2 == 1:
+            in_docstring = not in_docstring
+
+        if not in_docstring:
+            val stripped = line.trim()
+            # Skip comment lines
+            if not stripped.starts_with("#"):
+                # Check for diff marker pattern: line starts with +/- then 4+ spaces
+                if _is_diff_marker(line):
+                    val marker = line.slice(0, 1)
+                    warnings.push(RemoteExecLintWarning(
+                        code: "RJIT001",
+                        severity: "WARNING",
+                        message: "diff marker '{marker}' at start of line — possible unmerged diff hunk",
+                        hint: "remove the leading '{marker}' or fix the merge conflict",
+                        line_num: li + 1,
+                        file_path: path
+                    ))
+
+        li = li + 1
+
+    warnings
+
+
+# ============================================================================
+# RJIT002: Leading Space Corruption
+# ============================================================================
+
+fn lint_leading_space_corruption(source: text, path: text) -> [RemoteExecLintWarning]:
+    """Detect files where the first meaningful line has a leading space before
+    any keyword, indicating the whole file was shifted right by accident.
+
+    Scans for the first non-empty, non-comment line and checks whether it
+    starts with a space followed by a top-level keyword (fn, class, struct,
+    use, import, val, var, enum, trait, impl, pub, extern, static, export).
+    """
+    var warnings: [RemoteExecLintWarning] = []
+    val lines = source.split("\n")
+    val top_keywords = [
+        "fn ", "class ", "struct ", "use ", "import ", "val ", "var ",
+        "enum ", "trait ", "impl ", "pub ", "extern ", "static ", "export ",
+        "fn\t", "class\t", "struct\t", "use\t", "import\t"
+    ]
+
+    var li = 0
+    while li < lines.len():
+        val line = lines[li]
+
+        # Skip empty lines
+        if line.trim().len() == 0:
+            li = li + 1
+            continue
+
+        # Skip comment-only lines
+        if line.trim().starts_with("#"):
+            li = li + 1
+            continue
+
+        # Skip lines that are only whitespace
+        if line.trim().len() == 0:
+            li = li + 1
+            continue
+
+        # First meaningful line found
+        if line.starts_with(" "):
+            val trimmed = line.trim()
+            var matches_keyword = false
+            var ki = 0
+            while ki < top_keywords.len():
+                if trimmed.starts_with(top_keywords[ki]):
+                    matches_keyword = true
+                ki = ki + 1
+
+            if matches_keyword:
+                warnings.push(RemoteExecLintWarning(
+                    code: "RJIT002",
+                    severity: "WARNING",
+                    message: "file appears to have leading-space corruption — first code line is indented",
+                    hint: "remove the extra leading whitespace from the file",
+                    line_num: li + 1,
+                    file_path: path
+                ))
+
+        # Only check the first meaningful line
+        li = lines.len()
+
+    warnings
+
+
+# ============================================================================
+# RJIT003: Exports Referencing Undefined Symbols
+# ============================================================================
+
+fn lint_undefined_exports(dir_path: text) -> [RemoteExecLintWarning]:
+    """Check that each 'export Foo' in __init__.spl has a matching definition
+    somewhere in the same directory's .spl files.
+
+    Reads __init__.spl from dir_path, collects all bare export symbols
+    (ignoring wildcard re-exports like 'export module.*'), then scans all
+    other .spl files in the same directory for class/fn/struct/enum/trait
+    definitions matching each symbol.
+    """
+    var warnings: [RemoteExecLintWarning] = []
+
+    # Read __init__.spl
+    val init_path = dir_path + "/__init__.spl"
+    val init_source = _safe_read_file(init_path)
+    if init_source == "":
+        return warnings
+
+    # Collect exported symbol names
+    val init_lines = init_source.split("\n")
+    var exported_symbols: [text] = []
+    var export_line_nums: [i64] = []
+
+    var li = 0
+    while li < init_lines.len():
+        val line = init_lines[li]
+        val trimmed = line.trim()
+
+        if trimmed.starts_with("export "):
+            val rest = trimmed.slice(7).trim()
+
+            # Skip wildcard re-exports (e.g., "export module.*")
+            if not rest.contains(".*"):
+                # Parse comma-separated symbols: "export Foo, Bar, Baz"
+                val symbols = rest.split(",")
+                var si = 0
+                while si < symbols.len():
+                    val sym = symbols[si].trim()
+                    if sym.len() > 0 and not sym.contains("."):
+                        exported_symbols.push(sym)
+                        export_line_nums.push(li + 1)
+                    si = si + 1
+
+        li = li + 1
+
+    # Collect all definitions from sibling .spl files
+    var defined_symbols: {text: bool} = {}
+    val spl_files = _list_spl_files(dir_path)
+
+    var fi = 0
+    while fi < spl_files.len():
+        val file_path = spl_files[fi]
+        # Skip __init__.spl itself
+        if not file_path.ends_with("__init__.spl"):
+            val file_source = _safe_read_file(file_path)
+            _collect_definitions(file_source, defined_symbols)
+        fi = fi + 1
+
+    # Also collect definitions from __init__.spl itself
+    _collect_definitions(init_source, defined_symbols)
+
+    # Check each exported symbol has a definition
+    var ei = 0
+    while ei < exported_symbols.len():
+        val sym = exported_symbols[ei]
+        val line_num = export_line_nums[ei]
+
+        if not defined_symbols.contains_key(sym):
+            warnings.push(RemoteExecLintWarning(
+                code: "RJIT003",
+                severity: "WARNING",
+                message: "exported symbol '{sym}' has no definition in this directory",
+                hint: "add a class/fn/struct/enum/trait definition for '{sym}' or remove the export",
+                line_num: line_num,
+                file_path: init_path
+            ))
+        ei = ei + 1
+
+    warnings
+
+
+# ============================================================================
+# RJIT004: Wrong Shell Import in Library Code
+# ============================================================================
+
+fn lint_wrong_shell_import(source: text, path: text) -> [RemoteExecLintWarning]:
+    """Detect 'use app.io' imports in library code (files under src/lib/).
+
+    The app.io module is for the CLI application layer and causes 120s+
+    timeout when used from library or test code.  Library code should use
+    'use std.io_runtime' instead.
+    """
+    var warnings: [RemoteExecLintWarning] = []
+
+    # Only check files under src/lib/
+    if not path.contains("src/lib/"):
+        return warnings
+
+    val lines = source.split("\n")
+    var in_docstring = false
+
+    var li = 0
+    while li < lines.len():
+        val line = lines[li]
+
+        # Track triple-quoted docstring regions
+        if _count_triple_quotes(line) % 2 == 1:
+            in_docstring = not in_docstring
+
+        if not in_docstring:
+            val trimmed = line.trim()
+
+            # Skip comment lines
+            if not trimmed.starts_with("#"):
+                # Check for "use app.io" or "import app.io"
+                if _is_app_io_import(trimmed):
+                    warnings.push(RemoteExecLintWarning(
+                        code: "RJIT004",
+                        severity: "WARNING",
+                        message: "library code imports 'app.io' which causes 120s+ timeout in tests",
+                        hint: "replace with 'use std.io_runtime'",
+                        line_num: li + 1,
+                        file_path: path
+                    ))
+
+        li = li + 1
+
+    warnings
+
+
+# ============================================================================
+# RJIT005: Zero-Capacity Memory Map
+# ============================================================================
+
+fn lint_zero_capacity_memory_map(source: text, path: text) -> [RemoteExecLintWarning]:
+    """Detect MemoryMap constructors where data_start == data_end or
+    code_start == code_end, which creates a zero-capacity region.
+
+    Scans for MemoryMap( constructor calls and checks for patterns like:
+    - data_start: X, data_end: X  (same identifier for both)
+    - code_start: 0, code_end: 0  (both zero literal)
+    """
+    var warnings: [RemoteExecLintWarning] = []
+    val lines = source.split("\n")
+    var in_docstring = false
+
+    # We need to accumulate lines that form a MemoryMap constructor
+    var in_mmap = false
+    var mmap_start_line = 0
+    var mmap_buffer = ""
+
+    var li = 0
+    while li < lines.len():
+        val line = lines[li]
+
+        # Track triple-quoted docstring regions
+        if _count_triple_quotes(line) % 2 == 1:
+            in_docstring = not in_docstring
+
+        if not in_docstring:
+            val trimmed = line.trim()
+
+            # Skip comment lines
+            if not trimmed.starts_with("#"):
+                # Detect start of MemoryMap constructor
+                if trimmed.contains("MemoryMap("):
+                    in_mmap = true
+                    mmap_start_line = li + 1
+                    mmap_buffer = trimmed
+
+                elif in_mmap:
+                    mmap_buffer = mmap_buffer + " " + trimmed
+
+                # Check if the constructor closes
+                if in_mmap and mmap_buffer.contains(")"):
+                    # Check for zero-capacity data region
+                    val data_zero = _detect_zero_capacity(mmap_buffer, "data_start", "data_end")
+                    if data_zero:
+                        warnings.push(RemoteExecLintWarning(
+                            code: "RJIT005",
+                            severity: "WARNING",
+                            message: "MemoryMap has zero data capacity (data_start == data_end)",
+                            hint: "ensure data_end > data_start for a usable data region",
+                            line_num: mmap_start_line,
+                            file_path: path
+                        ))
+
+                    # Check for zero-capacity code region
+                    val code_zero = _detect_zero_capacity(mmap_buffer, "code_start", "code_end")
+                    if code_zero:
+                        warnings.push(RemoteExecLintWarning(
+                            code: "RJIT005",
+                            severity: "WARNING",
+                            message: "MemoryMap has zero code capacity (code_start == code_end)",
+                            hint: "ensure code_end > code_start for a usable code region",
+                            line_num: mmap_start_line,
+                            file_path: path
+                        ))
+
+                    in_mmap = false
+                    mmap_buffer = ""
+
+        li = li + 1
+
+    warnings
+
+
+# ============================================================================
+# Helper Functions
+# ============================================================================
+
+fn _is_diff_marker(line: text) -> bool:
+    """Check if a line starts with '+' or '-' followed by at least 4 spaces."""
+    if line.len() < 5:
+        return false
+    val first = line.slice(0, 1)
+    if first != "+" and first != "-":
+        return false
+    val rest = line.slice(1, 5)
+    rest == "    "
+
+fn _count_triple_quotes(line: text) -> i64:
+    """Count the number of triple-quote sequences in a line."""
+    var count = 0
+    var i = 0
+    while i + 2 < line.len():
+        val chunk = line.slice(i, i + 3)
+        if chunk == "\"\"\"":
+            count = count + 1
+            i = i + 3
+        else:
+            i = i + 1
+    count
+
+fn _is_app_io_import(trimmed: text) -> bool:
+    """Check if a trimmed line imports app.io."""
+    if trimmed.starts_with("use app.io"):
+        # Must be exactly "use app.io" or "use app.io." or "use app.io\n"
+        if trimmed == "use app.io":
+            return true
+        if trimmed.len() > 10:
+            val after = trimmed.slice(10, 11)
+            if after == "." or after == " ":
+                return true
+        return false
+    if trimmed.starts_with("import app.io"):
+        if trimmed == "import app.io":
+            return true
+        if trimmed.len() > 13:
+            val after = trimmed.slice(13, 14)
+            if after == "." or after == " ":
+                return true
+        return false
+    false
+
+fn _detect_zero_capacity(buffer: text, start_field: text, end_field: text) -> bool:
+    """Check if start_field and end_field in a constructor call have the same value.
+
+    Looks for patterns like:
+    - field_start: X, ... field_end: X   (same identifier)
+    - field_start: 0, ... field_end: 0   (both zero)
+    """
+    val start_val = _extract_field_value(buffer, start_field)
+    val end_val = _extract_field_value(buffer, end_field)
+
+    if start_val == "" or end_val == "":
+        return false
+
+    # Both fields have the same value
+    start_val == end_val
+
+fn _extract_field_value(buffer: text, field_name: text) -> text:
+    """Extract the value assigned to a named field in a constructor call.
+
+    Given buffer like 'MemoryMap(data_start: 0x1000, data_end: 0x1000)'
+    and field_name 'data_start', returns '0x1000'.
+    """
+    val pattern = field_name + ":"
+    val idx = _find_substring(buffer, pattern)
+    if idx < 0:
+        return ""
+
+    # Skip past "field_name:"
+    var start = idx + pattern.len()
+
+    # Skip whitespace
+    while start < buffer.len():
+        val ch = buffer.slice(start, start + 1)
+        if ch != " " and ch != "\t":
+            break
+        start = start + 1
+
+    # Read until comma, paren, or whitespace
+    var end = start
+    while end < buffer.len():
+        val ch = buffer.slice(end, end + 1)
+        if ch == "," or ch == ")" or ch == " " or ch == "\t":
+            break
+        end = end + 1
+
+    if end <= start:
+        return ""
+
+    buffer.slice(start, end)
+
+fn _find_substring(haystack: text, needle: text) -> i64:
+    """Find the first occurrence of needle in haystack. Returns -1 if not found."""
+    if needle.len() == 0:
+        return 0
+    if haystack.len() < needle.len():
+        return -1
+    var i = 0
+    val limit = haystack.len() - needle.len() + 1
+    while i < limit:
+        val chunk = haystack.slice(i, i + needle.len())
+        if chunk == needle:
+            return i
+        i = i + 1
+    -1
+
+fn _safe_read_file(path: text) -> text:
+    """Read a file, returning empty string on any error."""
+    val result = rt_file_read_text(path)
+    if result.?:
+        return result
+    ""
+
+fn _list_spl_files(dir_path: text) -> [text]:
+    """List all .spl files in a directory (non-recursive)."""
+    val entries = rt_list_dir(dir_path)
+    var result: [text] = []
+    if entries.?:
+        var i = 0
+        while i < entries.len():
+            val entry = entries[i]
+            if entry.ends_with(".spl"):
+                result.push(dir_path + "/" + entry)
+            i = i + 1
+    result
+
+fn _collect_definitions(source: text, defined: {text: bool}):
+    """Scan source text for class/fn/struct/enum/trait definitions and add
+    their names to the defined map."""
+    val lines = source.split("\n")
+    val prefixes = ["class ", "fn ", "struct ", "enum ", "trait ", "me ", "static fn "]
+
+    var li = 0
+    while li < lines.len():
+        val trimmed = lines[li].trim()
+
+        # Skip comments
+        if not trimmed.starts_with("#"):
+            var pi = 0
+            while pi < prefixes.len():
+                val prefix = prefixes[pi]
+                if trimmed.starts_with(prefix):
+                    val rest = trimmed.slice(prefix.len())
+                    val name = _extract_identifier(rest)
+                    if name.len() > 0:
+                        defined[name] = true
+                pi = pi + 1
+
+            # Also check "pub class", "pub struct", etc.
+            if trimmed.starts_with("pub "):
+                val after_pub = trimmed.slice(4)
+                var pi2 = 0
+                while pi2 < prefixes.len():
+                    val prefix = prefixes[pi2]
+                    if after_pub.starts_with(prefix):
+                        val rest = after_pub.slice(prefix.len())
+                        val name = _extract_identifier(rest)
+                        if name.len() > 0:
+                            defined[name] = true
+                    pi2 = pi2 + 1
+
+        li = li + 1
+
+fn _extract_identifier(s: text) -> text:
+    """Extract the leading identifier from a string (letters, digits, underscore)."""
+    var end = 0
+    while end < s.len():
+        val ch = s.slice(end, end + 1)
+        if _is_ident_char(ch):
+            end = end + 1
+        else:
+            break
+    if end == 0:
+        return ""
+    s.slice(0, end)
+
+fn _is_ident_char(ch: text) -> bool:
+    """Check if a single character is valid in an identifier."""
+    if ch.len() != 1:
+        return false
+    # a-z, A-Z, 0-9, _
+    val c = ch.to_byte()
+    if c >= 97 and c <= 122:
+        return true
+    if c >= 65 and c <= 90:
+        return true
+    if c >= 48 and c <= 57:
+        return true
+    if c == 95:
+        return true
+    false
+
+
+# ============================================================================
+# Extern declarations for file I/O
+# ============================================================================
+
+extern fn rt_file_read_text(path: text) -> text
+extern fn rt_list_dir(path: text) -> [text]
+
+
+# ============================================================================
+# Exports
+# ============================================================================
+
+export RemoteExecLintWarning
+export lint_diff_markers
+export lint_leading_space_corruption
+export lint_undefined_exports
+export lint_wrong_shell_import
+export lint_zero_capacity_memory_map

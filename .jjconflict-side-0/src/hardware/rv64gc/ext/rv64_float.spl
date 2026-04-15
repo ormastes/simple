@@ -1,0 +1,546 @@
+"""
+# RV64F Single-Precision Floating-Point Extension
+
+All functions operate on i64 bit patterns representing IEEE 754 single-precision
+values (lower 32 bits). Results are NaN-boxed where appropriate.
+"""
+
+use hardware.rv64gc.pkg.rv64_fp_types_pkg.*
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+fn _sp_sign(x: i64) -> i64:
+    (x >> 31) and 1
+
+fn _sp_exp(x: i64) -> i64:
+    (x >> 23) and 0xFF
+
+fn _sp_frac(x: i64) -> i64:
+    x and SP_FRAC_MASK
+
+fn _sp_is_nan(x: i64) -> bool:
+    val bits = x and 0xFFFFFFFF
+    (_sp_exp(bits) == 0xFF) and (_sp_frac(bits) != 0)
+
+fn _sp_is_snan(x: i64) -> bool:
+    _sp_is_nan(x) and ((_sp_frac(x) and 0x00400000) == 0)
+
+fn _sp_is_inf(x: i64) -> bool:
+    val bits = x and 0xFFFFFFFF
+    (_sp_exp(bits) == 0xFF) and (_sp_frac(bits) == 0)
+
+fn _sp_is_zero(x: i64) -> bool:
+    (x and 0x7FFFFFFF) == 0
+
+fn _fp_result(value: i64, flags: i64) -> FpResult:
+    FpResult(value: value and 0xFFFFFFFF, flags: flags)
+
+fn _check_nan_inputs_s(a: i64, b: i64) -> i64:
+    """Returns NV flag if either input is signaling NaN, 0 otherwise."""
+    if _sp_is_snan(a) or _sp_is_snan(b): FP_FLAG_NV
+    else: 0
+
+# ---------------------------------------------------------------------------
+# IEEE 754 single-precision internal helpers
+# ---------------------------------------------------------------------------
+
+val _SP_BIAS: i64 = 127
+val _SP_MANT_BITS: i64 = 23
+val _SP_IMPLICIT_BIT: i64 = 0x800000
+
+fn _sp_pack(sign: i64, exp: i64, frac: i64) -> i64:
+    """Pack sign, exponent, fraction into SP float."""
+    ((sign and 1) << 31) or ((exp and 0xFF) << 23) or (frac and SP_FRAC_MASK)
+
+fn _sp_unpack_mant(x: i64) -> i64:
+    """Unpack mantissa with implicit bit (1.fraction for normals, 0.fraction for subnormals)."""
+    val exp = _sp_exp(x)
+    val frac = _sp_frac(x)
+    if exp == 0: frac  # subnormal: no implicit bit
+    else: frac or _SP_IMPLICIT_BIT
+
+fn _sp_make_result(sign: i64, exp: i64, mant: i64, flags: i64) -> FpResult:
+    """Normalize mantissa, handle overflow/underflow, pack result."""
+    var e = exp
+    var m = mant
+    var f = flags
+    # Normalize: shift mantissa until implicit bit is at position 23
+    if m != 0:
+        while m >= (1 << 24):
+            m = m >> 1
+            e = e + 1
+        while m < _SP_IMPLICIT_BIT and e > 0:
+            m = m << 1
+            e = e - 1
+    # Overflow → infinity
+    if e >= 0xFF:
+        return _fp_result(_sp_pack(sign, 0xFF, 0), f or FP_FLAG_OF or FP_FLAG_NX)
+    # Underflow → zero (flush to zero for simplicity)
+    if e <= 0 and m < _SP_IMPLICIT_BIT:
+        if m != 0:
+            f = f or FP_FLAG_UF or FP_FLAG_NX
+        return _fp_result(_sp_pack(sign, 0, 0), f)
+    _fp_result(_sp_pack(sign, e, m and SP_FRAC_MASK), f)
+
+# ---------------------------------------------------------------------------
+# Arithmetic operations
+# ---------------------------------------------------------------------------
+
+fn fp_add_s(a: i64, b: i64, rm: RoundMode) -> FpResult:
+    """Single-precision addition."""
+    # NaN handling
+    if _sp_is_nan(a) or _sp_is_nan(b):
+        val nv = _check_nan_inputs_s(a, b)
+        return _fp_result(SP_QNAN, nv)
+    # Inf handling
+    if _sp_is_inf(a):
+        if _sp_is_inf(b) and _sp_sign(a) != _sp_sign(b):
+            return _fp_result(SP_QNAN, FP_FLAG_NV)
+        return _fp_result(a and 0xFFFFFFFF, 0)
+    if _sp_is_inf(b):
+        return _fp_result(b and 0xFFFFFFFF, 0)
+    # Zero handling
+    if _sp_is_zero(a) and _sp_is_zero(b):
+        val sign = if _sp_sign(a) == 1 and _sp_sign(b) == 1: 1 else: 0
+        return _fp_result(_sp_pack(sign, 0, 0), 0)
+    if _sp_is_zero(a): return _fp_result(b and 0xFFFFFFFF, 0)
+    if _sp_is_zero(b): return _fp_result(a and 0xFFFFFFFF, 0)
+    # Normal addition
+    val sa = _sp_sign(a)
+    val sb = _sp_sign(b)
+    var ea = _sp_exp(a)
+    var eb = _sp_exp(b)
+    var ma = _sp_unpack_mant(a)
+    var mb = _sp_unpack_mant(b)
+    if ea == 0: ea = 1  # subnormal exponent adjust
+    if eb == 0: eb = 1
+    # Align exponents — shift smaller mantissa right
+    if ea > eb:
+        val diff = ea - eb
+        if diff < 32: mb = mb >> diff
+        else: mb = 0
+        eb = ea
+    elif eb > ea:
+        val diff = eb - ea
+        if diff < 32: ma = ma >> diff
+        else: ma = 0
+        ea = eb
+    # Add/subtract mantissas based on signs
+    var result_sign: i64 = 0
+    var result_mant: i64 = 0
+    if sa == sb:
+        result_sign = sa
+        result_mant = ma + mb
+    else:
+        if ma >= mb:
+            result_sign = sa
+            result_mant = ma - mb
+        else:
+            result_sign = sb
+            result_mant = mb - ma
+    if result_mant == 0:
+        return _fp_result(_sp_pack(0, 0, 0), 0)
+    _sp_make_result(result_sign, ea, result_mant, 0)
+
+fn fp_sub_s(a: i64, b: i64, rm: RoundMode) -> FpResult:
+    """Single-precision subtraction: a - b = a + (-b)."""
+    val neg_b = (b xor SP_SIGN_MASK) and 0xFFFFFFFF
+    fp_add_s(a, neg_b, rm)
+
+fn fp_mul_s(a: i64, b: i64, rm: RoundMode) -> FpResult:
+    """Single-precision multiplication."""
+    val result_sign = _sp_sign(a) xor _sp_sign(b)
+    # NaN
+    if _sp_is_nan(a) or _sp_is_nan(b):
+        return _fp_result(SP_QNAN, _check_nan_inputs_s(a, b))
+    # 0 * inf = NaN
+    if (_sp_is_zero(a) and _sp_is_inf(b)) or (_sp_is_inf(a) and _sp_is_zero(b)):
+        return _fp_result(SP_QNAN, FP_FLAG_NV)
+    # Inf
+    if _sp_is_inf(a) or _sp_is_inf(b):
+        return _fp_result(_sp_pack(result_sign, 0xFF, 0), 0)
+    # Zero
+    if _sp_is_zero(a) or _sp_is_zero(b):
+        return _fp_result(_sp_pack(result_sign, 0, 0), 0)
+    # Normal multiplication
+    var ea = _sp_exp(a)
+    var eb = _sp_exp(b)
+    val ma = _sp_unpack_mant(a)
+    val mb = _sp_unpack_mant(b)
+    if ea == 0: ea = 1
+    if eb == 0: eb = 1
+    # Multiply mantissas (24-bit * 24-bit = 48-bit, fits in i64)
+    val product = ma * mb
+    # Result exponent (subtract bias since both have it)
+    var re = ea + eb - _SP_BIAS
+    # Normalize: product has implicit bit at position 46 (23+23)
+    # Shift right by 23 to get it to position 23
+    var rm_ = product >> _SP_MANT_BITS
+    val lost_bits = product and SP_FRAC_MASK
+    var flags: i64 = 0
+    if lost_bits != 0:
+        flags = FP_FLAG_NX
+    _sp_make_result(result_sign, re, rm_, flags)
+
+fn fp_div_s(a: i64, b: i64, rm: RoundMode) -> FpResult:
+    """Single-precision division."""
+    val result_sign = _sp_sign(a) xor _sp_sign(b)
+    # NaN
+    if _sp_is_nan(a) or _sp_is_nan(b):
+        return _fp_result(SP_QNAN, _check_nan_inputs_s(a, b))
+    # 0/0 or inf/inf = NaN
+    if _sp_is_zero(a) and _sp_is_zero(b):
+        return _fp_result(SP_QNAN, FP_FLAG_NV)
+    if _sp_is_inf(a) and _sp_is_inf(b):
+        return _fp_result(SP_QNAN, FP_FLAG_NV)
+    # x/0 = inf (DZ flag)
+    if _sp_is_zero(b):
+        return _fp_result(_sp_pack(result_sign, 0xFF, 0), FP_FLAG_DZ)
+    # 0/x = 0
+    if _sp_is_zero(a):
+        return _fp_result(_sp_pack(result_sign, 0, 0), 0)
+    # inf/x = inf
+    if _sp_is_inf(a):
+        return _fp_result(_sp_pack(result_sign, 0xFF, 0), 0)
+    # x/inf = 0
+    if _sp_is_inf(b):
+        return _fp_result(_sp_pack(result_sign, 0, 0), 0)
+    # Normal division
+    var ea = _sp_exp(a)
+    var eb = _sp_exp(b)
+    val ma = _sp_unpack_mant(a)
+    val mb = _sp_unpack_mant(b)
+    if ea == 0: ea = 1
+    if eb == 0: eb = 1
+    # Shift dividend left by 23 bits for precision, then divide
+    val shifted_a = ma << _SP_MANT_BITS
+    val quotient = shifted_a / mb
+    val remainder = shifted_a % mb
+    var re = ea - eb + _SP_BIAS
+    var flags: i64 = 0
+    if remainder != 0:
+        flags = FP_FLAG_NX
+    _sp_make_result(result_sign, re, quotient, flags)
+
+fn fp_sqrt_s(a: i64, rm: RoundMode) -> FpResult:
+    """Single-precision square root."""
+    # NaN
+    if _sp_is_nan(a):
+        return _fp_result(SP_QNAN, _check_nan_inputs_s(a, a))
+    # Negative → NaN + NV
+    if _sp_sign(a) == 1 and (a and 0x7FFFFFFF) != 0:
+        return _fp_result(SP_QNAN, FP_FLAG_NV)
+    # +0 → +0, -0 → -0
+    if _sp_is_zero(a):
+        return _fp_result(a and 0xFFFFFFFF, 0)
+    # +inf → +inf
+    if _sp_is_inf(a):
+        return _fp_result(a and 0xFFFFFFFF, 0)
+    # Normal: bit-by-bit sqrt algorithm
+    var ea = _sp_exp(a)
+    val ma = _sp_unpack_mant(a)
+    if ea == 0: ea = 1
+    # Adjust exponent: result_exp = (ea - bias) / 2 + bias
+    # Shift mantissa to have even exponent adjustment
+    var adj_exp = ea - _SP_BIAS
+    var adj_mant = ma
+    if (adj_exp and 1) != 0:
+        adj_mant = adj_mant << 1
+        adj_exp = adj_exp - 1
+    val re = (adj_exp >> 1) + _SP_BIAS
+    # Integer sqrt of shifted mantissa (shift up for precision)
+    var x = adj_mant << _SP_MANT_BITS
+    var result: i64 = 0
+    var bit: i64 = 1 << 24
+    while bit > 0:
+        val trial = result + bit
+        if trial * trial <= x:
+            result = trial
+        bit = bit >> 1
+    var flags: i64 = 0
+    if result * result != x:
+        flags = FP_FLAG_NX
+    _sp_make_result(0, re, result, flags)
+
+# ---------------------------------------------------------------------------
+# Fused multiply-add
+# ---------------------------------------------------------------------------
+
+fn fp_fmadd_s(a: i64, b: i64, c: i64, rm: RoundMode) -> FpResult:
+    """Fused multiply-add: a*b + c."""
+    # NaN
+    if _sp_is_nan(a) or _sp_is_nan(b) or _sp_is_nan(c):
+        return _fp_result(SP_QNAN, _check_nan_inputs_s(a, b) or (if _sp_is_snan(c): FP_FLAG_NV else: 0))
+    # inf*0 = NaN
+    if (_sp_is_zero(a) and _sp_is_inf(b)) or (_sp_is_inf(a) and _sp_is_zero(b)):
+        return _fp_result(SP_QNAN, FP_FLAG_NV)
+    # Compute a*b first, then add c
+    val mul_result = fp_mul_s(a, b, rm)
+    if mul_result.value == SP_QNAN:
+        return mul_result
+    fp_add_s(mul_result.value, c, rm)
+
+fn fp_fmsub_s(a: i64, b: i64, c: i64, rm: RoundMode) -> FpResult:
+    """Fused multiply-subtract: a*b - c."""
+    val neg_c = (c xor SP_SIGN_MASK) and 0xFFFFFFFF
+    fp_fmadd_s(a, b, neg_c, rm)
+
+fn fp_fnmadd_s(a: i64, b: i64, c: i64, rm: RoundMode) -> FpResult:
+    """FNMADD: -(a*b) - c."""
+    val neg_a = (a xor SP_SIGN_MASK) and 0xFFFFFFFF
+    val neg_c = (c xor SP_SIGN_MASK) and 0xFFFFFFFF
+    fp_fmadd_s(neg_a, b, neg_c, rm)
+
+fn fp_fnmsub_s(a: i64, b: i64, c: i64, rm: RoundMode) -> FpResult:
+    """FNMSUB: -(a*b) + c."""
+    val neg_a = (a xor SP_SIGN_MASK) and 0xFFFFFFFF
+    fp_fmadd_s(neg_a, b, c, rm)
+
+# ---------------------------------------------------------------------------
+# Comparison operations
+# ---------------------------------------------------------------------------
+
+fn fp_eq_s(a: i64, b: i64) -> i64:
+    """FEQ.S: returns 1 if a == b, 0 otherwise. NaN -> 0, signals on sNaN."""
+    if _sp_is_nan(a) or _sp_is_nan(b): 0
+    elif _sp_is_zero(a) and _sp_is_zero(b): 1  # +0 == -0
+    elif (a and 0xFFFFFFFF) == (b and 0xFFFFFFFF): 1
+    else: 0
+
+fn fp_lt_s(a: i64, b: i64) -> i64:
+    """FLT.S: returns 1 if a < b, 0 otherwise. NaN -> 0."""
+    if _sp_is_nan(a) or _sp_is_nan(b): 0
+    else:
+        val sa = _sp_sign(a)
+        val sb = _sp_sign(b)
+        if sa != sb:
+            if _sp_is_zero(a) and _sp_is_zero(b): 0
+            else: sa  # Negative < positive
+        elif sa == 0:
+            if (a and 0x7FFFFFFF) < (b and 0x7FFFFFFF): 1 else: 0
+        else:
+            if (a and 0x7FFFFFFF) > (b and 0x7FFFFFFF): 1 else: 0
+
+fn fp_le_s(a: i64, b: i64) -> i64:
+    """FLE.S: returns 1 if a <= b, 0 otherwise."""
+    if _sp_is_nan(a) or _sp_is_nan(b): 0
+    elif fp_eq_s(a, b) == 1: 1
+    else: fp_lt_s(a, b)
+
+# ---------------------------------------------------------------------------
+# Min / Max
+# ---------------------------------------------------------------------------
+
+fn fp_min_s(a: i64, b: i64) -> i64:
+    """FMIN.S: returns the minimum of a and b."""
+    if _sp_is_nan(a) and _sp_is_nan(b): SP_QNAN
+    elif _sp_is_nan(a): b and 0xFFFFFFFF
+    elif _sp_is_nan(b): a and 0xFFFFFFFF
+    elif _sp_is_zero(a) and _sp_is_zero(b):
+        # -0.0 < +0.0
+        if _sp_sign(a) == 1: a and 0xFFFFFFFF else: b and 0xFFFFFFFF
+    elif fp_lt_s(a, b) == 1: a and 0xFFFFFFFF
+    else: b and 0xFFFFFFFF
+
+fn fp_max_s(a: i64, b: i64) -> i64:
+    """FMAX.S: returns the maximum of a and b."""
+    if _sp_is_nan(a) and _sp_is_nan(b): SP_QNAN
+    elif _sp_is_nan(a): b and 0xFFFFFFFF
+    elif _sp_is_nan(b): a and 0xFFFFFFFF
+    elif _sp_is_zero(a) and _sp_is_zero(b):
+        if _sp_sign(a) == 0: a and 0xFFFFFFFF else: b and 0xFFFFFFFF
+    elif fp_lt_s(b, a) == 1: a and 0xFFFFFFFF
+    else: b and 0xFFFFFFFF
+
+# ---------------------------------------------------------------------------
+# Sign injection
+# ---------------------------------------------------------------------------
+
+fn fp_sgnj_s(a: i64, b: i64) -> i64:
+    """FSGNJ.S: result = |a| with sign of b."""
+    val mag = a and 0x7FFFFFFF
+    val sign = b and SP_SIGN_MASK
+    (mag or sign) and 0xFFFFFFFF
+
+fn fp_sgnjn_s(a: i64, b: i64) -> i64:
+    """FSGNJN.S: result = |a| with negated sign of b."""
+    val mag = a and 0x7FFFFFFF
+    val sign = (b xor SP_SIGN_MASK) and SP_SIGN_MASK
+    (mag or sign) and 0xFFFFFFFF
+
+fn fp_sgnjx_s(a: i64, b: i64) -> i64:
+    """FSGNJX.S: result = a with sign = sign(a) XOR sign(b)."""
+    val sign = (a xor b) and SP_SIGN_MASK
+    val mag = a and 0x7FFFFFFF
+    (mag or sign) and 0xFFFFFFFF
+
+# ---------------------------------------------------------------------------
+# Classify
+# ---------------------------------------------------------------------------
+
+fn fp_class_s(a: i64) -> i64:
+    """FCLASS.S: returns 10-bit classification mask."""
+    val bits = a and 0xFFFFFFFF
+    val sign = _sp_sign(bits)
+    val exp = _sp_exp(bits)
+    val frac = _sp_frac(bits)
+
+    if exp == 0xFF:
+        if frac == 0:
+            if sign == 1: 1       # bit 0: -inf
+            else: 0x80            # bit 7: +inf
+        elif (frac and 0x00400000) != 0:
+            0x200                 # bit 9: quiet NaN
+        else:
+            0x100                 # bit 8: signaling NaN
+    elif exp == 0:
+        if frac == 0:
+            if sign == 1: 0x8    # bit 3: -0
+            else: 0x10           # bit 4: +0
+        else:
+            if sign == 1: 0x4    # bit 2: -subnormal
+            else: 0x20           # bit 5: +subnormal
+    else:
+        if sign == 1: 0x2        # bit 1: -normal
+        else: 0x40               # bit 6: +normal
+
+# ---------------------------------------------------------------------------
+# Conversions
+# ---------------------------------------------------------------------------
+
+fn _sp_to_i64(a: i64) -> i64:
+    """Convert SP float bit pattern to i64 value (truncate toward zero)."""
+    if _sp_is_nan(a): return 0x7FFFFFFFFFFFFFFF
+    if _sp_is_inf(a):
+        if _sp_sign(a) == 1: return 0x8000000000000000
+        else: return 0x7FFFFFFFFFFFFFFF
+    val sign = _sp_sign(a)
+    val exp = _sp_exp(a)
+    val mant = _sp_unpack_mant(a)
+    if exp == 0 and mant == 0: return 0
+    val unbiased = exp - _SP_BIAS
+    if unbiased < 0: return 0
+    if unbiased >= 63:
+        if sign == 1: return 0x8000000000000000
+        else: return 0x7FFFFFFFFFFFFFFF
+    var result: i64 = 0
+    if unbiased >= _SP_MANT_BITS:
+        result = mant << (unbiased - _SP_MANT_BITS)
+    else:
+        result = mant >> (_SP_MANT_BITS - unbiased)
+    if sign == 1: 0 - result else: result
+
+fn _i64_to_sp(v: i64) -> FpResult:
+    """Convert signed i64 to SP float bit pattern."""
+    if v == 0: return _fp_result(SP_POS_ZERO, 0)
+    var sign: i64 = 0
+    var abs_v = v
+    if v < 0:
+        sign = 1
+        abs_v = 0 - v
+    # Find highest set bit
+    var exp = _SP_BIAS + _SP_MANT_BITS
+    var m = abs_v
+    while m >= (1 << 24):
+        m = m >> 1
+        exp = exp + 1
+    while m < _SP_IMPLICIT_BIT:
+        m = m << 1
+        exp = exp - 1
+    var flags: i64 = 0
+    # Check if precision was lost (original had more than 24 significant bits)
+    if abs_v != 0:
+        val reconstructed = if exp - _SP_BIAS >= _SP_MANT_BITS: (m and SP_FRAC_MASK) << (exp - _SP_BIAS - _SP_MANT_BITS) else: m >> (_SP_MANT_BITS - (exp - _SP_BIAS))
+        if reconstructed != abs_v:
+            flags = FP_FLAG_NX
+    _fp_result(_sp_pack(sign, exp, m and SP_FRAC_MASK), flags)
+
+fn fcvt_w_s(a: i64, rm: RoundMode) -> FpResult:
+    """Convert single-precision float to signed 32-bit integer."""
+    if _sp_is_nan(a) or (_sp_is_inf(a) and _sp_sign(a) == 0):
+        return FpResult(value: 0x7FFFFFFF, flags: FP_FLAG_NV)
+    if _sp_is_inf(a) and _sp_sign(a) == 1:
+        return FpResult(value: 0xFFFFFFFF80000000, flags: FP_FLAG_NV)
+    val result = _sp_to_i64(a)
+    if result > 0x7FFFFFFF:
+        FpResult(value: 0x7FFFFFFF, flags: FP_FLAG_NV)
+    elif result < -2147483648:
+        FpResult(value: 0xFFFFFFFF80000000, flags: FP_FLAG_NV)
+    else:
+        FpResult(value: result, flags: 0)
+
+fn fcvt_wu_s(a: i64, rm: RoundMode) -> FpResult:
+    """Convert single-precision float to unsigned 32-bit integer."""
+    if _sp_is_nan(a): return FpResult(value: 0xFFFFFFFF, flags: FP_FLAG_NV)
+    if _sp_sign(a) == 1 and not _sp_is_zero(a):
+        return FpResult(value: 0, flags: FP_FLAG_NV)
+    val result = _sp_to_i64(a)
+    if result > 0xFFFFFFFF:
+        FpResult(value: 0xFFFFFFFF, flags: FP_FLAG_NV)
+    else:
+        FpResult(value: result, flags: 0)
+
+fn fcvt_s_w(a: i64, rm: RoundMode) -> FpResult:
+    """Convert signed 32-bit integer to single-precision float."""
+    # Sign-extend 32-bit to 64-bit
+    var v = a and 0xFFFFFFFF
+    if (v and 0x80000000) != 0:
+        v = v or 0xFFFFFFFF00000000
+    _i64_to_sp(v)
+
+fn fcvt_s_wu(a: i64, rm: RoundMode) -> FpResult:
+    """Convert unsigned 32-bit integer to single-precision float."""
+    _i64_to_sp(a and 0xFFFFFFFF)
+
+fn fcvt_l_s(a: i64, rm: RoundMode) -> FpResult:
+    """Convert single-precision float to signed 64-bit integer (RV64)."""
+    if _sp_is_nan(a) or (_sp_is_inf(a) and _sp_sign(a) == 0):
+        return FpResult(value: 0x7FFFFFFFFFFFFFFF, flags: FP_FLAG_NV)
+    if _sp_is_inf(a) and _sp_sign(a) == 1:
+        return FpResult(value: 0x8000000000000000, flags: FP_FLAG_NV)
+    FpResult(value: _sp_to_i64(a), flags: 0)
+
+fn fcvt_lu_s(a: i64, rm: RoundMode) -> FpResult:
+    """Convert single-precision float to unsigned 64-bit integer (RV64)."""
+    if _sp_is_nan(a): return FpResult(value: 0xFFFFFFFFFFFFFFFF, flags: FP_FLAG_NV)
+    if _sp_sign(a) == 1 and not _sp_is_zero(a):
+        return FpResult(value: 0, flags: FP_FLAG_NV)
+    FpResult(value: _sp_to_i64(a), flags: 0)
+
+fn fcvt_s_l(a: i64, rm: RoundMode) -> FpResult:
+    """Convert signed 64-bit integer to single-precision float (RV64)."""
+    _i64_to_sp(a)
+
+fn fcvt_s_lu(a: i64, rm: RoundMode) -> FpResult:
+    """Convert unsigned 64-bit integer to single-precision float (RV64)."""
+    if a < 0:
+        # Treat as unsigned: handle large positive values
+        # Split into high and low parts
+        val high = (a >> 1) and 0x7FFFFFFFFFFFFFFF
+        val result = _i64_to_sp(high)
+        # Double the result by incrementing exponent
+        val exp = _sp_exp(result.value) + 1
+        val frac = _sp_frac(result.value)
+        if (a and 1) != 0:
+            return _fp_result(_sp_pack(0, exp, frac), FP_FLAG_NX)
+        _fp_result(_sp_pack(0, exp, frac), result.flags)
+    else:
+        _i64_to_sp(a)
+
+# ---------------------------------------------------------------------------
+# Move (bit-level reinterpret)
+# ---------------------------------------------------------------------------
+
+fn fmv_x_w(a: i64) -> i64:
+    """FMV.X.W: move float bits to integer register (sign-extended)."""
+    val bits = a and 0xFFFFFFFF
+    if (bits and 0x80000000) != 0:
+        bits or 0xFFFFFFFF00000000
+    else:
+        bits
+
+fn fmv_w_x(a: i64) -> i64:
+    """FMV.W.X: move integer bits to float register (NaN-boxed)."""
+    a and 0xFFFFFFFF

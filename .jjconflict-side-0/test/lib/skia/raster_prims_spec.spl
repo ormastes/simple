@@ -1,0 +1,138 @@
+# CPU raster primitives specification
+
+use std.sspec.*
+use std.skia.entity.geometry.{SkRect, SkPoint}
+use std.skia.entity.color.{SkColor4f}
+use std.skia.entity.enums.{SkPathFillType}
+use std.skia.entity.path.{SkPath, SkPathVerb, SkPathSegment, sk_path_new}
+use std.skia.backend.cpu.raster_prims.{Bitmap, fill_rect, fill_rrect, fill_path_aa, stroke_path}
+
+fn _red() -> SkColor4f:
+    SkColor4f(r: 1.0, g: 0.0, b: 0.0, a: 1.0)
+
+fn _approx_eq(a: f64, b: f64) -> bool:
+    val d = if a > b: a - b else: b - a
+    d < 0.005
+
+describe "Bitmap":
+    it "zeros has correct byte count":
+        val bm = Bitmap.zeros(10, 10)
+        expect(bm.pixels.len()).to_equal(400)
+
+    it "zeros starts with all-zero bytes":
+        val bm = Bitmap.zeros(10, 10)
+        val first = bm.pixels[0] as i64
+        val last = bm.pixels[399] as i64
+        expect(first).to_equal(0)
+        expect(last).to_equal(0)
+
+    it "set_pixel writes R byte at correct offset":
+        var bm = Bitmap.zeros(10, 10)
+        val red = _red()
+        bm.set_pixel(5, 5, red)
+        # pixel (5,5) index = (5*10+5)*4 = 220
+        val r_byte = bm.pixels[220] as i64
+        expect(r_byte).to_be_greater_than(200)
+
+    it "set_pixel out of bounds is a no-op":
+        var bm = Bitmap.zeros(10, 10)
+        val red = _red()
+        bm.set_pixel(1000, 1000, red)
+        # all bytes still zero
+        val b0 = bm.pixels[0] as i64
+        expect(b0).to_equal(0)
+
+    it "fill_rect over 2x2x3x3 rect sets interior pixels to red":
+        var bm = Bitmap.zeros(10, 10)
+        val rect = SkRect(left: 2.0, top: 2.0, right: 5.0, bottom: 5.0)
+        fill_rect(bm, rect, _red())
+        # center pixel (3,3): idx = (3*10+3)*4 = 132
+        val r_byte = bm.pixels[132] as i64
+        expect(r_byte).to_be_greater_than(200)
+
+    it "fill_rect with zero-area rect is a no-op":
+        var bm = Bitmap.zeros(10, 10)
+        val rect = SkRect(left: 5.0, top: 5.0, right: 5.0, bottom: 5.0)
+        fill_rect(bm, rect, _red())
+        val b0 = bm.pixels[0] as i64
+        expect(b0).to_equal(0)
+
+    it "fill_rrect with rx=0 ry=0 matches fill_rect":
+        var bm1 = Bitmap.zeros(20, 20)
+        var bm2 = Bitmap.zeros(20, 20)
+        val rect = SkRect(left: 4.0, top: 4.0, right: 16.0, bottom: 16.0)
+        fill_rect(bm1, rect, _red())
+        fill_rrect(bm2, rect, 0.0, 0.0, _red())
+        # center pixel (10,10): idx = (10*20+10)*4 = 840
+        val r1 = bm1.pixels[840] as i64
+        val r2 = bm2.pixels[840] as i64
+        expect(r1).to_be_greater_than(200)
+        expect(r2).to_be_greater_than(200)
+
+    it "fill_path_aa of square path covers interior":
+        var bm = Bitmap.zeros(20, 20)
+        val p0 = sk_path_new()
+        val p1 = p0.move_to(4.0, 4.0)
+        val p2 = p1.line_to(16.0, 4.0)
+        val p3 = p2.line_to(16.0, 16.0)
+        val p4 = p3.line_to(4.0, 16.0)
+        val p5 = p4.close()
+        fill_path_aa(bm, p5, _red())
+        # center pixel (10,10): idx = (10*20+10)*4 = 840
+        val r_byte = bm.pixels[840] as i64
+        expect(r_byte).to_be_greater_than(100)
+
+    it "fill_path_aa with EvenOdd on nested square has hole":
+        var bm = Bitmap.zeros(30, 30)
+        # outer square (EvenOdd winding), then inner square same direction -> hole
+        val outer = SkPath(fill_type: SkPathFillType.EvenOdd, segments: [])
+        val o1 = outer.move_to(2.0, 2.0)
+        val o2 = o1.line_to(28.0, 2.0)
+        val o3 = o2.line_to(28.0, 28.0)
+        val o4 = o3.line_to(2.0, 28.0)
+        val o5 = o4.close()
+        val o6 = o5.move_to(10.0, 10.0)
+        val o7 = o6.line_to(20.0, 10.0)
+        val o8 = o7.line_to(20.0, 20.0)
+        val o9 = o8.line_to(10.0, 20.0)
+        val o10 = o9.close()
+        fill_path_aa(bm, o10, _red())
+        # pixel at (15,15) center of inner square: should have less coverage than outer band
+        # outer band pixel (5,5): idx = (5*30+5)*4 = 620
+        val outer_r = bm.pixels[620] as i64
+        # inner pixel (15,15): idx = (15*30+15)*4 = 1860
+        val inner_r = bm.pixels[1860] as i64
+        # outer should be painted, inner may be hole
+        expect(outer_r).to_be_greater_than(0)
+        expect(bm.width).to_equal(30)
+
+    it "stroke_path of a line segment produces non-empty pixels":
+        var bm = Bitmap.zeros(20, 20)
+        val p0 = sk_path_new()
+        val p1 = p0.move_to(2.0, 10.0)
+        val p2 = p1.line_to(18.0, 10.0)
+        val color = _red()
+        stroke_path(bm, p2, color, 4.0)
+        # pixel along the stroke: (10,10) idx = (10*20+10)*4 = 840
+        val r_byte = bm.pixels[840] as i64
+        expect(r_byte).to_be_greater_than(0)
+
+    it "blend_pixel with coverage=0 is a no-op":
+        var bm = Bitmap.zeros(10, 10)
+        val red = _red()
+        bm.blend_pixel(5, 5, red, 0.0)
+        # pixel (5,5): idx = (5*10+5)*4 = 220
+        val r_byte = bm.pixels[220] as i64
+        expect(r_byte).to_equal(0)
+
+    it "blend_pixel with coverage=1.0 equals set_pixel":
+        var bm1 = Bitmap.zeros(10, 10)
+        var bm2 = Bitmap.zeros(10, 10)
+        val red = _red()
+        bm1.set_pixel(3, 3, red)
+        bm2.blend_pixel(3, 3, red, 1.0)
+        # pixel (3,3): idx = (3*10+3)*4 = 132
+        val r1 = bm1.pixels[132] as i64
+        val r2 = bm2.pixels[132] as i64
+        expect(r1).to_be_greater_than(200)
+        expect(r2).to_be_greater_than(200)

@@ -1,0 +1,259 @@
+# LLM Diagnostics — Core Types
+#
+# Event types, token metrics, agent graph, and configuration
+# for Claude Code hook observability.
+
+# --- Configuration ---
+
+struct DiagConfig:
+    capture_content: bool       # capture tool payloads (off by default, privacy)
+    max_payload_size: i64       # truncate payloads at this char count
+    log_path: text              # JSONL output file path
+    enable_ws: bool             # WebSocket live export
+    ws_port: i64                # WebSocket port
+    token_ratio: f64            # chars per token estimate (default 4.0)
+
+fn new_diag_config() -> DiagConfig:
+    DiagConfig(
+        capture_content: false,
+        max_payload_size: 4096,
+        log_path: "",
+        enable_ws: false,
+        ws_port: 3002,
+        token_ratio: 4.0
+    )
+
+fn diag_config_with_log(path: text) -> DiagConfig:
+    var cfg = new_diag_config()
+    cfg.log_path = path
+    cfg
+
+fn diag_config_with_content(path: text) -> DiagConfig:
+    var cfg = new_diag_config()
+    cfg.log_path = path
+    cfg.capture_content = true
+    cfg
+
+# --- Token Usage ---
+
+struct TokenUsage:
+    input_tokens: i64
+    output_tokens: i64
+    cache_read_input_tokens: i64
+    cache_creation_input_tokens: i64
+
+fn new_token_usage() -> TokenUsage:
+    TokenUsage(
+        input_tokens: 0,
+        output_tokens: 0,
+        cache_read_input_tokens: 0,
+        cache_creation_input_tokens: 0
+    )
+
+fn token_usage_total_input(u: TokenUsage) -> i64:
+    u.input_tokens + u.cache_read_input_tokens + u.cache_creation_input_tokens
+
+fn token_usage_total(u: TokenUsage) -> i64:
+    token_usage_total_input(u) + u.output_tokens
+
+fn token_usage_add(a: TokenUsage, b: TokenUsage) -> TokenUsage:
+    TokenUsage(
+        input_tokens: a.input_tokens + b.input_tokens,
+        output_tokens: a.output_tokens + b.output_tokens,
+        cache_read_input_tokens: a.cache_read_input_tokens + b.cache_read_input_tokens,
+        cache_creation_input_tokens: a.cache_creation_input_tokens + b.cache_creation_input_tokens
+    )
+
+# --- Diagnostic Event ---
+
+struct DiagEvent:
+    event_type: text            # "session_start", "tool_pre", "tool_post", etc.
+    timestamp: i64              # unix millis
+    session_id: text
+    agent_id: text              # "" for main agent
+    parent_agent_id: text       # "" for root
+    data: text                  # JSON payload (event-specific)
+
+fn new_diag_event(event_type: text, session_id: text) -> DiagEvent:
+    DiagEvent(
+        event_type: event_type,
+        timestamp: 0,
+        session_id: session_id,
+        agent_id: "",
+        parent_agent_id: "",
+        data: ""
+    )
+
+# --- Tool Call ---
+
+struct ToolCall:
+    tool_use_id: text
+    tool_name: text
+    server_name: text           # extracted from mcp__<server>__<tool>
+    is_mcp: bool
+    request_payload: text       # tool_input JSON (if capture_content)
+    response_payload: text      # tool_response (if capture_content)
+    error: text                 # failure only
+    start_time: i64             # millis
+    end_time: i64               # millis
+    estimated_request_tokens: i64
+    estimated_response_tokens: i64
+
+fn new_tool_call(tool_use_id: text, tool_name: text) -> ToolCall:
+    ToolCall(
+        tool_use_id: tool_use_id,
+        tool_name: tool_name,
+        server_name: "",
+        is_mcp: false,
+        request_payload: "",
+        response_payload: "",
+        error: "",
+        start_time: 0,
+        end_time: 0,
+        estimated_request_tokens: 0,
+        estimated_response_tokens: 0
+    )
+
+fn tool_call_latency_ms(tc: ToolCall) -> i64:
+    if tc.end_time > tc.start_time:
+        tc.end_time - tc.start_time
+    else:
+        0
+
+# --- Agent Node ---
+
+struct AgentNode:
+    agent_id: text
+    agent_type: text
+    parent_tool_use_id: text
+    transcript_path: text
+    start_time: i64
+    end_time: i64
+    total_usage: TokenUsage
+    children: [text]            # child agent_ids
+
+fn new_agent_node(agent_id: text, agent_type: text) -> AgentNode:
+    AgentNode(
+        agent_id: agent_id,
+        agent_type: agent_type,
+        parent_tool_use_id: "",
+        transcript_path: "",
+        start_time: 0,
+        end_time: 0,
+        total_usage: new_token_usage(),
+        children: []
+    )
+
+fn agent_node_duration_ms(node: AgentNode) -> i64:
+    if node.end_time > node.start_time:
+        node.end_time - node.start_time
+    else:
+        0
+
+# --- MCP Server Stats ---
+
+struct McpServerStats:
+    server_name: text
+    call_count: i64
+    total_request_bytes: i64
+    total_response_bytes: i64
+    total_latency_ms: i64
+    estimated_request_tokens: i64
+    estimated_response_tokens: i64
+    calls: [ToolCall]
+
+fn new_mcp_server_stats(name: text) -> McpServerStats:
+    McpServerStats(
+        server_name: name,
+        call_count: 0,
+        total_request_bytes: 0,
+        total_response_bytes: 0,
+        total_latency_ms: 0,
+        estimated_request_tokens: 0,
+        estimated_response_tokens: 0,
+        calls: []
+    )
+
+fn mcp_stats_avg_latency(s: McpServerStats) -> i64:
+    if s.call_count > 0:
+        s.total_latency_ms / s.call_count
+    else:
+        0
+
+# --- Cache Analysis ---
+
+struct TurnCache:
+    turn_index: i64
+    cache_read: i64
+    cache_write: i64
+    uncached: i64
+    was_hit: bool
+
+fn new_turn_cache(index: i64) -> TurnCache:
+    TurnCache(
+        turn_index: index,
+        cache_read: 0,
+        cache_write: 0,
+        uncached: 0,
+        was_hit: false
+    )
+
+struct CacheAnalysis:
+    total_cache_reads: i64
+    total_cache_writes: i64
+    total_uncached: i64
+    cache_efficiency: f64       # cache_read / total_input
+    per_turn: [TurnCache]
+
+fn new_cache_analysis() -> CacheAnalysis:
+    CacheAnalysis(
+        total_cache_reads: 0,
+        total_cache_writes: 0,
+        total_uncached: 0,
+        cache_efficiency: 0.0,
+        per_turn: []
+    )
+
+# --- Session Diagnostics ---
+
+struct SessionDiag:
+    session_id: text
+    session_type: text          # "fresh", "resume", "clear", "compact"
+    start_time: i64
+    events: [DiagEvent]
+    total_usage: TokenUsage
+    mcp_stats: [McpServerStats]
+    agent_tree: [AgentNode]
+    turn_count: i64
+
+fn new_session_diag(session_id: text) -> SessionDiag:
+    SessionDiag(
+        session_id: session_id,
+        session_type: "fresh",
+        start_time: 0,
+        events: [],
+        total_usage: new_token_usage(),
+        mcp_stats: [],
+        agent_tree: [],
+        turn_count: 0
+    )
+
+# --- Event Type Constants ---
+
+val EVENT_SESSION_START = "session_start"
+val EVENT_SESSION_END = "session_end"
+val EVENT_TOOL_PRE = "tool_pre"
+val EVENT_TOOL_POST = "tool_post"
+val EVENT_TOOL_FAILURE = "tool_failure"
+val EVENT_SUBAGENT_START = "subagent_start"
+val EVENT_SUBAGENT_STOP = "subagent_stop"
+val EVENT_ELICITATION = "elicitation"
+val EVENT_ELICITATION_RESULT = "elicitation_result"
+val EVENT_PERMISSION_REQUEST = "permission_request"
+val EVENT_PERMISSION_DENIED = "permission_denied"
+val EVENT_USER_PROMPT = "user_prompt"
+val EVENT_PRE_COMPACT = "pre_compact"
+val EVENT_NOTIFICATION = "notification"
+val EVENT_STOP = "stop"
+val EVENT_TASK_COMPLETED = "task_completed"
+val EVENT_TRANSCRIPT_TURN = "transcript_turn"

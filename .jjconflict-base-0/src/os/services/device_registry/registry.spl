@@ -1,0 +1,264 @@
+# Device Registry — maps logical device classes to active driver endpoints
+#
+# Services discover drivers through the registry instead of hardcoded names.
+# The PCI manager and driver supervisor register drivers here.
+#
+# IPC Methods:
+#   REGISTRY_REGISTER (1): register a driver for a device class
+#   REGISTRY_LOOKUP (2): look up a driver by device class
+#   REGISTRY_UNREGISTER (3): remove a driver registration
+#   REGISTRY_LIST (4): list all registered drivers
+
+use os.userlib.syscall_raw.{syscall}
+
+extern fn serial_println(msg: text)
+
+# ============================================================================
+# IPC Method IDs
+# ============================================================================
+
+val REGISTRY_REGISTER: u32 = 1
+val REGISTRY_LOOKUP: u32 = 2
+val REGISTRY_UNREGISTER: u32 = 3
+val REGISTRY_LIST: u32 = 4
+
+# ============================================================================
+# Device Classes
+# ============================================================================
+
+val CLASS_BLOCK: u8 = 1     # Block storage (NVMe, VirtIO-blk)
+val CLASS_NET: u8 = 2       # Network (VirtIO-net)
+val CLASS_GPU: u8 = 3       # GPU (VirtIO-GPU)
+val CLASS_SERIAL: u8 = 4    # Serial port
+val CLASS_INPUT: u8 = 5     # Input (keyboard, mouse)
+val CLASS_DISPLAY: u8 = 6   # Display service
+val CLASS_AUDIO: u8 = 7     # Audio
+
+# ============================================================================
+# Syscall IDs
+# ============================================================================
+
+val SYS_IPC_RECV: u64 = 21
+val SYS_IPC_CREATE_PORT: u64 = 22
+
+# ============================================================================
+# Registration Table (flat arrays for baremetal safety)
+# ============================================================================
+
+val MAX_REGISTRATIONS: u64 = 64
+
+var reg_class: [u8; 64]
+var reg_driver_name: [text; 64]
+var reg_ipc_port: [i64; 64]
+var reg_task_id: [u64; 64]
+var reg_active: [bool; 64]
+var reg_count: u64 = 0
+
+# ============================================================================
+# Initialization
+# ============================================================================
+
+fn registry_init():
+    """Initialize the device registry, clearing all slots."""
+    var i: u64 = 0
+    while i < MAX_REGISTRATIONS:
+        reg_class[i] = 0
+        reg_driver_name[i] = ""
+        reg_ipc_port[i] = -1
+        reg_task_id[i] = 0
+        reg_active[i] = false
+        i = i + 1
+    reg_count = 0
+    serial_println("[registry] Device registry initialized")
+
+# ============================================================================
+# Register / Update
+# ============================================================================
+
+fn registry_register(class: u8, name: text, port: i64, task: u64) -> bool:
+    """Register a driver for a device class.
+
+    If a driver is already registered for the given class, updates the
+    existing entry. Otherwise allocates a new slot.
+
+    Args:
+      class: device class constant (CLASS_BLOCK, CLASS_NET, etc.)
+      name:  human-readable driver name (e.g. "virtio-blk")
+      port:  IPC port handle the driver listens on
+      task:  task ID of the driver process
+
+    Returns true on success, false if the table is full.
+    """
+    # Check for existing registration — update in place
+    var i: u64 = 0
+    while i < reg_count:
+        if reg_class[i] == class and reg_active[i]:
+            reg_driver_name[i] = name
+            reg_ipc_port[i] = port
+            reg_task_id[i] = task
+            serial_println("[registry] Updated {name} for class {_class_name(class)}")
+            return true
+        i = i + 1
+
+    # New registration
+    if reg_count >= MAX_REGISTRATIONS:
+        serial_println("[registry] Registry full ({MAX_REGISTRATIONS} slots)")
+        return false
+
+    val idx = reg_count
+    reg_class[idx] = class
+    reg_driver_name[idx] = name
+    reg_ipc_port[idx] = port
+    reg_task_id[idx] = task
+    reg_active[idx] = true
+    reg_count = reg_count + 1
+    serial_println("[registry] Registered {name} for class {_class_name(class)} (port={port}, task={task})")
+    true
+
+# ============================================================================
+# Lookup
+# ============================================================================
+
+fn registry_lookup(class: u8) -> i64:
+    """Look up the IPC port for a device class. Returns -1 if not found."""
+    var i: u64 = 0
+    while i < reg_count:
+        if reg_class[i] == class and reg_active[i]:
+            return reg_ipc_port[i]
+        i = i + 1
+    -1
+
+fn registry_lookup_name(class: u8) -> text:
+    """Look up the driver name for a device class. Returns "" if not found."""
+    var i: u64 = 0
+    while i < reg_count:
+        if reg_class[i] == class and reg_active[i]:
+            return reg_driver_name[i]
+        i = i + 1
+    ""
+
+fn registry_lookup_task(class: u8) -> u64:
+    """Look up the task ID for a device class. Returns 0 if not found."""
+    var i: u64 = 0
+    while i < reg_count:
+        if reg_class[i] == class and reg_active[i]:
+            return reg_task_id[i]
+        i = i + 1
+    0
+
+# ============================================================================
+# Unregister
+# ============================================================================
+
+fn registry_unregister(class: u8, task: u64) -> bool:
+    """Unregister a driver. Only the owning task can unregister.
+
+    Args:
+      class: device class to unregister
+      task:  task ID that must match the registration owner
+
+    Returns true if a matching registration was deactivated.
+    """
+    var i: u64 = 0
+    while i < reg_count:
+        if reg_class[i] == class and reg_task_id[i] == task and reg_active[i]:
+            reg_active[i] = false
+            serial_println("[registry] Unregistered {reg_driver_name[i]} for class {_class_name(class)}")
+            return true
+        i = i + 1
+    false
+
+# ============================================================================
+# Listing / Debug
+# ============================================================================
+
+fn registry_list():
+    """Print all active registrations to serial."""
+    serial_println("[registry] Active registrations:")
+    var i: u64 = 0
+    var active_count: u64 = 0
+    while i < reg_count:
+        if reg_active[i]:
+            val cn = _class_name(reg_class[i])
+            serial_println("  [{cn}] {reg_driver_name[i]} port={reg_ipc_port[i]} task={reg_task_id[i]}")
+            active_count = active_count + 1
+        i = i + 1
+    serial_println("[registry] Total: {active_count} active")
+
+fn registry_active_count() -> u64:
+    """Return the number of active registrations."""
+    var count: u64 = 0
+    var i: u64 = 0
+    while i < reg_count:
+        if reg_active[i]:
+            count = count + 1
+        i = i + 1
+    count
+
+# ============================================================================
+# IPC Service Loop
+# ============================================================================
+
+fn registry_start():
+    """Start the device registry IPC service.
+
+    Creates an IPC port, then enters a blocking receive loop to handle
+    registration, lookup, unregistration, and list requests from other
+    services and drivers.
+    """
+    registry_init()
+
+    val port_result = syscall(SYS_IPC_CREATE_PORT, 0, 0, 0, 0, 0)
+    if port_result < 0:
+        serial_println("[registry] FATAL: Failed to create IPC port (error {port_result})")
+        return
+
+    val port_handle = port_result as u64
+    serial_println("[registry] Service ready on IPC port (handle={port_handle})")
+
+    registry_service_loop(port_handle)
+
+fn registry_service_loop(port_handle: u64):
+    """Main service loop — receive IPC messages and dispatch.
+
+    IPC message layout (expected):
+      word 0: method ID (REGISTRY_REGISTER, etc.)
+      word 1: sender task ID
+      word 2..N: method-specific arguments
+
+    Dispatch will be wired when IPC message framing is finalized
+    in the kernel IPC layer.
+    """
+    serial_println("[registry] Entering service loop...")
+
+    while true:
+        val msg_result = syscall(SYS_IPC_RECV, port_handle, 0, 0, 0, 0)
+        if msg_result < 0:
+            serial_println("[registry] IPC recv error: {msg_result}")
+            continue
+
+        serial_println("[registry] Received IPC request (raw={msg_result})")
+
+        # TODO: [driver][P2] Parse IPC message buffer to extract method ID and arguments.
+        # Expected dispatch:
+        #   REGISTRY_REGISTER   -> registry_register(class, name, port, task)
+        #   REGISTRY_LOOKUP     -> registry_lookup(class) -> reply with port
+        #   REGISTRY_UNREGISTER -> registry_unregister(class, sender_task)
+        #   REGISTRY_LIST       -> registry_list()
+        pass_dn
+
+# ============================================================================
+# Internal Helpers
+# ============================================================================
+
+fn _class_name(class: u8) -> text:
+    """Convert a device class constant to a human-readable name."""
+    match class:
+        1: "block"
+        2: "net"
+        3: "gpu"
+        4: "serial"
+        5: "input"
+        6: "display"
+        7: "audio"
+        _: "unknown({class})"

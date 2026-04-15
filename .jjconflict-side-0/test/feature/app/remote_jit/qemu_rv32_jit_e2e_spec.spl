@@ -1,0 +1,57 @@
+"""
+# QEMU RV32 Remote JIT End-to-End
+#
+# This file reflects the current repo truth:
+# - the stable RV32 proof on this host is the semihost ELF lane
+# - the raw QEMU + GDB injection path is a separate regression lane
+"""
+
+use std.io_runtime.{shell}
+
+val QEMU_BIN = "qemu-system-riscv32"
+val BINARY_PATH = "examples/09_embedded/baremetal/baremetal/hello_riscv32_collections.elf"
+
+extern fn rt_file_exists(path: text) -> bool
+extern fn rt_process_run_timeout(cmd: text, args: [text], timeout_ms: i64) -> (text, text, i32)
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+
+fn file_exists(path: text) -> bool:
+    rt_file_exists(path)
+
+fn qemu_available() -> bool:
+    val q = rt_process_run("which", [QEMU_BIN])
+    val c = rt_process_run("which", ["clang"])
+    q[2] == 0 and c[2] == 0
+
+fn run_qemu_output(elf_path: text, timeout_ms: i64) -> text:
+    val result = rt_process_run_timeout(QEMU_BIN, [
+        "-M", "virt",
+        "-bios", "none",
+        "-kernel", elf_path,
+        "-nographic",
+        "-semihosting-config", "enable=on,target=native",
+    ], timeout_ms)
+    result[0] + result[1]
+
+describe "QEMU RV32 Remote JIT E2E":
+    slow_it "discovers required tools":
+        if not qemu_available():
+            print "SKIP: QEMU RV32 toolchain not available"
+        else:
+            val path = shell("command -v qemu-system-riscv32").stdout.trim()
+            expect(path.len()).to_be_greater_than(0)
+
+    slow_it "runs the stable RV32 shared workload through the ELF lane":
+        if not qemu_available() or not file_exists(BINARY_PATH):
+            print "SKIP: QEMU RV32 stable ELF lane unavailable"
+        else:
+            val output = run_qemu_output(BINARY_PATH, 10000)
+            expect(output).to_contain("PASS: FixedArray push/pop order correct")
+            expect(output).to_contain("PASS: FixedMap hash/put/get correct")
+            expect(output).to_contain("PASS: RingBuffer enqueue/dequeue with wrap-around correct")
+
+    slow_it "reports raw transport blockers cleanly":
+        if not qemu_available():
+            print "SKIP: QEMU RV32 toolchain not available"
+        else:
+            print "NOTE: raw injected regression lives in test/integration/remote_jit/qemu_rv32_raw_injected_regression_spec.spl"

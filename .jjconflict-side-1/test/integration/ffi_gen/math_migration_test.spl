@@ -1,0 +1,183 @@
+# FFI Generator - Math Migration Integration Test
+#
+# Verifies that the math spec produces a complete, correct interpreter_extern
+# module that can replace the hand-written math.rs.
+#
+# This test imports the real intern_codegen and specs/math modules,
+# generates the Rust code, and checks for structural correctness.
+
+use compiler.tools.ffi_gen.intern_codegen (InternFnSpec, InternParamSpec, generate_module, generate_dispatch_entries, parse_intern_specs)
+
+# ============================================================================
+# Read the spec file via the text parser
+# ============================================================================
+
+extern fn rt_file_read_text(path: text) -> text
+
+fn read_spec_source() -> text:
+    # Read the math spec source so we can parse it as text
+    val source = rt_file_read_text("src/compiler/90.tools/ffi_gen/specs/math.spl")
+    if source == nil or source == "":
+        # Fallback: construct inline for test isolation
+        return ""
+    source
+
+describe "math migration integration":
+
+    it "parses explicit math function specs from spec file via text parser":
+        val source = read_spec_source()
+        if source == "":
+            # Skip if file not available (CI isolation)
+            expect(true).to_equal(true)
+        else:
+            val specs = parse_intern_specs(source)
+            # All 31 specs are now explicit push() calls with literal string fields
+            # (7 integer + 17 unary float + 2 binary float + 2 zero-arg + 3 bool = 31)
+            expect(specs.len()).to_equal(31)
+
+    it "generates module header with correct imports":
+        # Construct a minimal mixed set manually
+        var specs: [InternFnSpec] = []
+        specs.push(InternFnSpec(
+            name: "abs", category: "math",
+            params: [InternParamSpec(name: "n", value_type: "i64")],
+            return_type: "i64", runtime_fn: "",
+            doc: "Absolute value of an integer",
+            inline_expr: "n.abs()"
+        ))
+        specs.push(InternFnSpec(
+            name: "rt_math_sin", category: "math",
+            params: [InternParamSpec(name: "x", value_type: "f64")],
+            return_type: "f64", runtime_fn: "rt_math_sin",
+            doc: "Sine (radians)",
+            inline_expr: ""
+        ))
+        specs.push(InternFnSpec(
+            name: "rt_math_is_nan", category: "math",
+            params: [InternParamSpec(name: "x", value_type: "f64")],
+            return_type: "bool", runtime_fn: "rt_math_is_nan",
+            doc: "Check if value is NaN",
+            inline_expr: ""
+        ))
+
+        val module_code = generate_module("math", specs)
+
+        # Check header
+        expect(module_code.contains("Auto-generated")).to_equal(true)
+        expect(module_code.contains("use crate::error")).to_equal(true)
+        expect(module_code.contains("use crate::value::Value")).to_equal(true)
+
+        # Check FFI imports: sin and is_nan but NOT abs
+        expect(module_code.contains("rt_math_sin as ffi_rt_math_sin")).to_equal(true)
+        expect(module_code.contains("rt_math_is_nan as ffi_rt_math_is_nan")).to_equal(true)
+        expect(module_code.contains("abs as ffi_abs")).to_equal(false)
+
+        # Check inline abs
+        expect(module_code.contains("pub fn abs(")).to_equal(true)
+        expect(module_code.contains("n.abs()")).to_equal(true)
+
+        # Check FFI sin
+        expect(module_code.contains("pub fn rt_math_sin_fn(")).to_equal(true)
+        expect(module_code.contains("ffi_rt_math_sin(x)")).to_equal(true)
+        expect(module_code.contains("Value::Float")).to_equal(true)
+
+        # Check bool return for is_nan
+        expect(module_code.contains("Value::Bool")).to_equal(true)
+
+    it "generates all 28 dispatch entries for the full math spec":
+        # Build the complete spec set manually (matching specs/math.spl)
+        var specs: [InternFnSpec] = []
+
+        # Integer math (inline)
+        val int_fns = [
+            ("abs", [InternParamSpec(name: "n", value_type: "i64")], "n.abs()"),
+            ("min", [InternParamSpec(name: "a", value_type: "i64"), InternParamSpec(name: "b", value_type: "i64")], "a.min(b)"),
+            ("max", [InternParamSpec(name: "a", value_type: "i64"), InternParamSpec(name: "b", value_type: "i64")], "a.max(b)"),
+            ("pow", [InternParamSpec(name: "base", value_type: "i64"), InternParamSpec(name: "exp", value_type: "i64")], "base.pow(exp as u32)"),
+            ("sqrt", [InternParamSpec(name: "n", value_type: "i64")], "(n as f64).sqrt() as i64"),
+            ("floor", [InternParamSpec(name: "n", value_type: "i64")], "n"),
+            ("ceil", [InternParamSpec(name: "n", value_type: "i64")], "n")
+        ]
+        for entry in int_fns:
+            specs.push(InternFnSpec(
+                name: entry.0, category: "math",
+                params: entry.1, return_type: "i64",
+                runtime_fn: "", doc: "",
+                inline_expr: entry.2
+            ))
+
+        # Float unary (FFI)
+        val float_fns = ["rt_math_log", "rt_math_log10", "rt_math_log2", "rt_math_exp",
+            "rt_math_sqrt", "rt_math_cbrt", "rt_math_sin", "rt_math_cos", "rt_math_tan",
+            "rt_math_asin", "rt_math_acos", "rt_math_atan", "rt_math_sinh", "rt_math_cosh",
+            "rt_math_tanh", "rt_math_floor", "rt_math_ceil"]
+        for fn_name in float_fns:
+            specs.push(InternFnSpec(
+                name: fn_name, category: "math",
+                params: [InternParamSpec(name: "x", value_type: "f64")],
+                return_type: "f64", runtime_fn: fn_name,
+                doc: "", inline_expr: ""
+            ))
+
+        # Float binary (FFI)
+        specs.push(InternFnSpec(
+            name: "rt_math_pow", category: "math",
+            params: [InternParamSpec(name: "base", value_type: "f64"), InternParamSpec(name: "exp", value_type: "f64")],
+            return_type: "f64", runtime_fn: "rt_math_pow",
+            doc: "", inline_expr: ""
+        ))
+        specs.push(InternFnSpec(
+            name: "rt_math_atan2", category: "math",
+            params: [InternParamSpec(name: "y", value_type: "f64"), InternParamSpec(name: "x", value_type: "f64")],
+            return_type: "f64", runtime_fn: "rt_math_atan2",
+            doc: "", inline_expr: ""
+        ))
+
+        # Zero-arg (FFI)
+        specs.push(InternFnSpec(
+            name: "rt_math_nan", category: "math",
+            params: [], return_type: "f64", runtime_fn: "rt_math_nan",
+            doc: "", inline_expr: ""
+        ))
+        specs.push(InternFnSpec(
+            name: "rt_math_inf", category: "math",
+            params: [], return_type: "f64", runtime_fn: "rt_math_inf",
+            doc: "", inline_expr: ""
+        ))
+
+        # Bool return (FFI)
+        specs.push(InternFnSpec(
+            name: "rt_math_is_nan", category: "math",
+            params: [InternParamSpec(name: "x", value_type: "f64")],
+            return_type: "bool", runtime_fn: "rt_math_is_nan",
+            doc: "", inline_expr: ""
+        ))
+        specs.push(InternFnSpec(
+            name: "rt_math_is_inf", category: "math",
+            params: [InternParamSpec(name: "x", value_type: "f64")],
+            return_type: "bool", runtime_fn: "rt_math_is_inf",
+            doc: "", inline_expr: ""
+        ))
+        specs.push(InternFnSpec(
+            name: "rt_math_is_finite", category: "math",
+            params: [InternParamSpec(name: "x", value_type: "f64")],
+            return_type: "bool", runtime_fn: "rt_math_is_finite",
+            doc: "", inline_expr: ""
+        ))
+
+        # Total: 7 + 17 + 2 + 2 + 3 = 31 functions
+        expect(specs.len()).to_equal(31)
+
+        val dispatch = generate_dispatch_entries(specs)
+        # Verify key dispatch entries: plain names have no suffix, rt_* names get _fn suffix
+        # (matching the hand-written mod.rs convention)
+        expect(dispatch.contains("\"abs\" => math::abs(")).to_equal(true)
+        expect(dispatch.contains("\"min\" => math::min(")).to_equal(true)
+        expect(dispatch.contains("\"max\" => math::max(")).to_equal(true)
+        expect(dispatch.contains("\"pow\" => math::pow(")).to_equal(true)
+        expect(dispatch.contains("\"sqrt\" => math::sqrt(")).to_equal(true)
+        expect(dispatch.contains("\"rt_math_sin\" => math::rt_math_sin_fn")).to_equal(true)
+        expect(dispatch.contains("\"rt_math_pow\" => math::rt_math_pow_fn")).to_equal(true)
+        expect(dispatch.contains("\"rt_math_nan\" => math::rt_math_nan_fn")).to_equal(true)
+        expect(dispatch.contains("\"rt_math_is_nan\" => math::rt_math_is_nan_fn")).to_equal(true)
+        expect(dispatch.contains("\"rt_math_is_finite\" => math::rt_math_is_finite_fn")).to_equal(true)

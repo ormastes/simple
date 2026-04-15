@@ -1,0 +1,127 @@
+# QEMU Capture — QEMU screenshot capture for consistency testing
+#
+# Two capture paths:
+# (a) In-process: renders scene on BrowserCompositorBackend, returns pixel buffer
+# (b) VM: captures running QEMU framebuffer via QMP screendump
+#
+# Both paths return CaptureResult for uniform comparison.
+
+use os.compositor.wm_scene.{WmSceneSpec, render_scene_to_backend}
+use os.compositor.electron_capture.{CaptureResult, capture_error}
+use std.common.image.ppm_decode.{decode_ppm_to_argb}
+use std.nogc_sync_mut.ffi.io.{file_read_bytes}
+
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+
+# ============================================================================
+# In-Process Capture
+# ============================================================================
+
+fn capture_qemu_inprocess(scene: WmSceneSpec) -> CaptureResult:
+    """Capture by rendering scene on BrowserCompositorBackend in-process.
+
+    This uses the same software compositor that runs inside Simple OS.
+    No actual QEMU VM is needed — the pixel buffer is produced directly.
+
+    Args:
+        scene: WM scene specification to render
+
+    Returns:
+        CaptureResult with ARGB pixel buffer
+    """
+    val pixels = render_scene_to_backend(scene, nil)
+
+    CaptureResult(
+        pixels: pixels,
+        width: scene.width,
+        height: scene.height,
+        backend_name: "browser_compositor",
+        success: pixels.len() > 0,
+        error: if pixels.len() > 0: "" else: "Failed to render scene"
+    )
+
+# ============================================================================
+# VM Capture via QMP
+# ============================================================================
+
+fn _qmp_screendump_via_python(qmp_socket: text, output_path: text) -> (bool, text):
+    """Issue a QMP screendump through a one-shot Python Unix-socket client.
+
+    The interpreter does not reliably expose the low-level Unix-socket
+    externs used by std.nogc_sync_mut.qemu.qmp_client during system-spec
+    execution. Use rt_process_run, which is already available in specs,
+    to perform the same greeting -> qmp_capabilities -> screendump flow.
+    """
+    val script = """
+import json, socket, sys
+sock_path, out_path = sys.argv[1], sys.argv[2]
+try:
+    s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    s.connect(sock_path)
+    f = s.makefile("rwb", buffering=0)
+    greeting = f.readline()
+    if not greeting:
+        sys.stderr.write("no greeting")
+        sys.exit(2)
+    f.write(b'{"execute":"qmp_capabilities"}\n')
+    ack = f.readline()
+    if b"error" in ack:
+        sys.stderr.write(ack.decode("utf-8", "replace"))
+        sys.exit(3)
+    payload = json.dumps({
+        "execute": "screendump",
+        "arguments": {"filename": out_path, "format": "ppm"}
+    }).encode("utf-8") + b"\n"
+    f.write(payload)
+    resp = f.readline()
+    if b"error" in resp:
+        sys.stderr.write(resp.decode("utf-8", "replace"))
+        sys.exit(4)
+    s.close()
+except Exception as exc:
+    sys.stderr.write(str(exc))
+    sys.exit(1)
+"""
+    val result = rt_process_run("python3", ["-c", script, qmp_socket, output_path])
+    if result[2] != 0:
+        return (false, result[1])
+    (true, result[0])
+
+fn capture_qemu_vm(qmp_socket: text, output_path: text) -> CaptureResult:
+    """Capture QEMU framebuffer via QMP screendump command.
+
+    Connects to a running QEMU instance via QMP socket, captures the
+    framebuffer to a PNG file, then decodes it to ARGB pixel buffer.
+
+    Args:
+        qmp_socket: Path to QEMU QMP Unix socket
+        output_path: Path for the screenshot output file
+
+    Returns:
+        CaptureResult with ARGB pixel buffer or error
+    """
+    val (success, err) = _qmp_screendump_via_python(qmp_socket, output_path)
+    if not success:
+        return capture_error("qemu_vm", 0, 0, "QMP screendump failed for socket: {qmp_socket} ({err})")
+
+    # Read and decode the screenshot file (rt_file_read_bytes returns Option<[u8]>)
+    val ppm_data_opt = file_read_bytes(output_path)
+    match ppm_data_opt:
+        Some(ppm_data):
+            if ppm_data.len() == 0:
+                return capture_error("qemu_vm", 0, 0, "Empty screenshot file: {output_path}")
+            val decode_result = decode_ppm_to_argb(ppm_data)
+            match decode_result:
+                Ok(img):
+                    return CaptureResult(
+                        pixels: img.pixels,
+                        width: img.width,
+                        height: img.height,
+                        backend_name: "qemu_vm",
+                        success: true,
+                        error: ""
+                    )
+                Err(msg):
+                    return capture_error("qemu_vm", 0, 0, "PPM decode failed: {msg}")
+        nil:
+            return capture_error("qemu_vm", 0, 0, "Failed to read screenshot file: {output_path}")

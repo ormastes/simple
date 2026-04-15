@@ -1,0 +1,88 @@
+# UI CLI Backend - Module Entry
+#
+# Dispatches CLI subcommands for observing UI session state.
+# Subcommands: state, changes [N], tree, watch, or default adaptive.
+
+use common.ui.session.{UISession, new_session}
+use common.ui.access_store.{ui_access_store_runtime_open, ui_access_store_runtime_open_with_override}
+use common.ui.widget.{UITree}
+use common.ui.parse.sdn_tree.{parse_ui_to_tree}
+use app.ui.cli.observer.{CLIObserver}
+
+extern fn rt_file_read_text(path: text) -> text
+extern fn rt_file_exists(path: text) -> bool
+extern fn rt_thread_sleep(millis: i64)
+
+# =========================================================================
+# CLI Observer Entry Point
+# =========================================================================
+
+fn run_cli_observer(file_path: text, args: [text]) -> i64:
+    return run_cli_observer_with_access_store(file_path, args, "")
+
+fn run_cli_observer_with_access_store(file_path: text, args: [text], access_db_path: text) -> i64:
+    """Run CLI observer mode for a .ui.sdn file."""
+    if not rt_file_exists(file_path):
+        print "Error: File not found: {file_path}"
+        return 1
+
+    val tree_result = parse_ui_to_tree(file_path)
+    match tree_result:
+        Err(e):
+            print "Error: {e}"
+            return 1
+        Ok(tree):
+            var session = new_session(tree)
+            val store = ui_access_store_runtime_open_with_override(access_db_path, file_path, "cli")
+            if store != nil:
+                session.attach_access_store(store)
+            val observer = CLIObserver.new(session)
+            val subcommand = if args.len() > 0: args[0] else: "adaptive"
+            match subcommand:
+                "state":
+                    print observer.render_summary()
+                    return 0
+                "changes":
+                    val count = if args.len() > 1: args[1].to_int() else: 10
+                    print observer.render_changes(count)
+                    return 0
+                "tree":
+                    print observer.render_tree_outline()
+                    return 0
+                "watch":
+                    return _watch_loop(file_path, session, observer)
+                _:
+                    print observer.render_adaptive()
+                    return 0
+
+# =========================================================================
+# Watch Loop
+# =========================================================================
+
+fn _watch_loop(file_path: text, session: UISession, observer: CLIObserver) -> i64:
+    """Poll for file changes and re-render."""
+    var last_content = rt_file_read_text(file_path)
+    print "Watching {file_path} (Ctrl+C to stop)\n"
+    print observer.render_adaptive()
+    loop:
+        rt_thread_sleep(1000)
+        if not rt_file_exists(file_path):
+            continue
+        val current = rt_file_read_text(file_path)
+        if current != last_content:
+            last_content = current
+            val tree_result = parse_ui_to_tree(file_path)
+            match tree_result:
+                Ok(new_tree):
+                    session.update_tree(new_tree)
+                    print "--- file changed ---"
+                    print observer.render_adaptive()
+                Err(e):
+                    print "Warning: parse error: {e}"
+    return 0
+
+# =========================================================================
+# Re-exports
+# =========================================================================
+
+export CLIObserver, run_cli_observer

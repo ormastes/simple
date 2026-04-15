@@ -1,0 +1,193 @@
+@allow(primitive_api)
+# 2D Engine — Layer Compositing
+#
+# Manages an ordered stack of pixel layers and composites them onto
+# the engine's framebuffer using alpha blending. Each layer has its
+# own pixel buffer, position, z-order, opacity, and visibility.
+#
+# Usage:
+#   use std.gpu.engine2d.compositor.{Layer, Compositor}
+
+use std.gpu.engine2d.color.{color_r, color_g, color_b, color_a, rgba, blend}
+
+# ============================================================================
+# Layer
+# ============================================================================
+
+class Layer:
+    """A single compositing layer with its own pixel buffer.
+
+    Layers are positioned at (x, y) in screen coordinates and have
+    independent width/height. z_order controls draw order (lower first).
+    opacity scales the alpha channel of all pixels (0.0=invisible, 1.0=opaque).
+    """
+
+    pixels: [u32]
+    x: i32
+    y: i32
+    width: i32
+    height: i32
+    z_order: i32
+    opacity: f32
+    visible: bool
+
+    static fn create(x: i32, y: i32, width: i32, height: i32) -> Layer:
+        """Create a new transparent layer at the given position and size."""
+        val total = width * height
+        Layer(
+            pixels: [0u32; total],
+            x: x,
+            y: y,
+            width: width,
+            height: height,
+            z_order: 0,
+            opacity: 1.0,
+            visible: true
+        )
+
+    static fn from_pixels(x: i32, y: i32, width: i32, height: i32, pixels: [u32]) -> Layer:
+        """Create a layer from existing pixel data."""
+        Layer(
+            pixels: pixels,
+            x: x,
+            y: y,
+            width: width,
+            height: height,
+            z_order: 0,
+            opacity: 1.0,
+            visible: true
+        )
+
+    me set_pixel(lx: i32, ly: i32, color: u32):
+        """Set a pixel in layer-local coordinates."""
+        if lx >= 0 and lx < self.width and ly >= 0 and ly < self.height:
+            self.pixels[ly * self.width + lx] = color
+
+    fn get_pixel(lx: i32, ly: i32) -> u32:
+        """Get a pixel in layer-local coordinates."""
+        if lx >= 0 and lx < self.width and ly >= 0 and ly < self.height:
+            return self.pixels[ly * self.width + lx]
+        0u32
+
+    me fill(color: u32):
+        """Fill the entire layer with a single color."""
+        var i = 0
+        while i < self.pixels.len():
+            self.pixels[i] = color
+            i = i + 1
+
+    me clear():
+        """Clear the layer to fully transparent."""
+        self.fill(0u32)
+
+# ============================================================================
+# Compositor
+# ============================================================================
+
+class Compositor:
+    """Composites multiple layers onto a target framebuffer.
+
+    Layers are drawn in z_order (ascending). Each layer's pixels are
+    alpha-blended onto the destination, with the layer's opacity applied
+    as an additional alpha multiplier.
+    """
+
+    layers: [Layer]
+
+    static fn create() -> Compositor:
+        """Create an empty compositor."""
+        Compositor(layers: [])
+
+    me add_layer(layer: Layer):
+        """Add a layer to the compositor. Maintains z_order sort."""
+        self.layers.push(layer)
+        # Insertion sort by z_order (stable, efficient for small N)
+        var i = self.layers.len() - 1
+        while i > 0:
+            if self.layers[i].z_order < self.layers[i - 1].z_order:
+                val tmp = self.layers[i]
+                self.layers[i] = self.layers[i - 1]
+                self.layers[i - 1] = tmp
+                i = i - 1
+            else:
+                return
+            i = i - 1
+
+    me remove_layer(index: i32):
+        """Remove a layer by index."""
+        if index >= 0 and index < self.layers.len():
+            self.layers.remove(index)
+
+    fn layer_count() -> i32:
+        self.layers.len()
+
+    me composite_to_buffer(dst: [u32], dst_w: i32, dst_h: i32):
+        """Alpha-blend all visible layers onto a destination pixel buffer.
+
+        Layers are drawn in z_order (ascending). The destination buffer
+        must be pre-allocated with dst_w * dst_h elements.
+
+        Args:
+            dst: Destination pixel buffer (modified in place)
+            dst_w: Destination width in pixels
+            dst_h: Destination height in pixels
+        """
+        var li = 0
+        while li < self.layers.len():
+            val layer = self.layers[li]
+            if not layer.visible:
+                li = li + 1
+                continue
+
+            val layer_has_opacity = layer.opacity < 1.0
+
+            var ly = 0
+            while ly < layer.height:
+                val dst_y = layer.y + ly
+                if dst_y < 0 or dst_y >= dst_h:
+                    ly = ly + 1
+                    continue
+
+                var lx = 0
+                while lx < layer.width:
+                    val dst_x = layer.x + lx
+                    if dst_x < 0 or dst_x >= dst_w:
+                        lx = lx + 1
+                        continue
+
+                    val src_idx = ly * layer.width + lx
+                    var src_color = layer.pixels[src_idx]
+
+                    # Skip fully transparent pixels
+                    val src_a = color_a(src_color)
+                    if src_a == 0:
+                        lx = lx + 1
+                        continue
+
+                    # Apply layer opacity
+                    if layer_has_opacity:
+                        val scaled_a = _f32_to_i32(_i32_to_f32(src_a) * layer.opacity)
+                        src_color = rgba(
+                            color_r(src_color),
+                            color_g(src_color),
+                            color_b(src_color),
+                            scaled_a
+                        )
+
+                    val dst_idx = dst_y * dst_w + dst_x
+                    val dst_color = dst[dst_idx]
+                    dst[dst_idx] = blend(src_color, dst_color)
+
+                    lx = lx + 1
+                ly = ly + 1
+            li = li + 1
+
+# ============================================================================
+# Conversion Helpers
+# ============================================================================
+
+fn _i32_to_f32(v: i32) -> f32:
+    v as f32
+
+fn _f32_to_i32(v: f32) -> i32:
+    v as i32

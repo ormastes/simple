@@ -1,0 +1,233 @@
+# UI Access Vision Sidecar
+#
+# Read-only sidecar contracts for image-grounded inspection. The default
+# provider reports structured issues instead of pretending to inspect pixels.
+
+use common.ui.access.{UiAccessSnapshot, UiAccessNode}
+
+struct UiAccessVisionBounds:
+    surface_id: text
+    canonical_id: text
+    x: i32
+    y: i32
+    w: i32
+    h: i32
+
+struct UiAccessVisionMark:
+    mark_id: text
+    surface_id: text
+    canonical_id: text
+    label: text
+    kind: text
+    bounds: UiAccessVisionBounds
+    confidence: i32
+    details: text
+
+struct UiAccessVisionIssue:
+    code: text
+    severity: text
+    message: text
+    surface_id: text
+    canonical_id: text
+    bounds: Option<UiAccessVisionBounds>
+    details: text
+
+struct UiAccessVisionCaptureResult:
+    snapshot_protocol_version: i32
+    snapshot_mode: text
+    active_surface: text
+    image_ref: text
+    bounds: [UiAccessVisionBounds]
+    marks: [UiAccessVisionMark]
+    issues: [UiAccessVisionIssue]
+    captured: bool
+
+struct UiAccessVisionProvider:
+    provider_name: text
+
+class UiAccessNoImageVisionProvider:
+
+impl UiAccessNoImageVisionProvider:
+    static fn new() -> UiAccessNoImageVisionProvider:
+        UiAccessNoImageVisionProvider()
+
+    fn provider_name() -> text:
+        return "no_image"
+
+    fn capture(snapshot: UiAccessSnapshot, image_ref: text, bounds: [UiAccessVisionBounds]) -> UiAccessVisionCaptureResult:
+        val issue = if image_ref == "":
+            UiAccessVisionIssue(
+                code: "vision.no_image",
+                severity: "warning",
+                message: "No image source was provided to the vision sidecar.",
+                surface_id: if bounds.len() > 0: bounds[0].surface_id else: snapshot.active_surface,
+                canonical_id: if bounds.len() > 0: bounds[0].canonical_id else: "",
+                bounds: if bounds.len() > 0: Some(bounds[0]) else: None,
+                details: "Provide a screenshot or image reference before asking for pixel inspection."
+            )
+        else:
+            UiAccessVisionIssue(
+                code: "vision.unsupported_image",
+                severity: "info",
+                message: "Image-backed pixel capture is not configured.",
+                surface_id: if bounds.len() > 0: bounds[0].surface_id else: snapshot.active_surface,
+                canonical_id: if bounds.len() > 0: bounds[0].canonical_id else: "",
+                bounds: if bounds.len() > 0: Some(bounds[0]) else: None,
+                details: "Current provider only reports structured sidecar issues."
+            )
+        return UiAccessVisionCaptureResult(
+            snapshot_protocol_version: snapshot.protocol_version,
+            snapshot_mode: snapshot.mode,
+            active_surface: snapshot.active_surface,
+            image_ref: image_ref,
+            bounds: bounds,
+            marks: [],
+            issues: [issue],
+            captured: false
+        )
+
+fn ui_access_default_vision_provider() -> UiAccessNoImageVisionProvider:
+    return UiAccessNoImageVisionProvider.new()
+
+fn ui_access_visual_probe_from_snapshot(snapshot: UiAccessSnapshot, surface_id: text) -> UiAccessVisionCaptureResult:
+    var bounds: [UiAccessVisionBounds] = []
+    var marks: [UiAccessVisionMark] = []
+    var idx = 0
+    for node in snapshot.nodes:
+        if surface_id != "" and node.surface_id != surface_id:
+            pass_dn
+        else:
+            idx = idx + 1
+            val b = UiAccessVisionBounds(
+                surface_id: node.surface_id,
+                canonical_id: node.canonical_id,
+                x: 0,
+                y: 0,
+                w: 0,
+                h: 0
+            )
+            bounds = bounds.push(b)
+            marks = marks.push(_node_to_mark(idx, node, b))
+    val provider = ui_access_default_vision_provider()
+    var result = provider.capture(snapshot, "", bounds)
+    result.marks = marks
+    return result
+
+fn ui_access_vision_capture_to_json(result: UiAccessVisionCaptureResult) -> text:
+    return "{" +
+        _json_pair("snapshot_protocol_version", "{result.snapshot_protocol_version}") + "," +
+        _json_pair("snapshot_mode", _json_str(result.snapshot_mode)) + "," +
+        _json_pair("active_surface", _json_str(result.active_surface)) + "," +
+        _json_pair("image_ref", _json_str(result.image_ref)) + "," +
+        _json_pair("bounds", _bounds_to_json(result.bounds)) + "," +
+        _json_pair("marks", _marks_to_json(result.marks)) + "," +
+        _json_pair("issues", _issues_to_json(result.issues)) + "," +
+        _json_pair("captured", if result.captured: "true" else: "false") +
+        "}"
+
+fn _node_to_mark(index: i32, node: UiAccessNode, bounds: UiAccessVisionBounds) -> UiAccessVisionMark:
+    return UiAccessVisionMark(
+        mark_id: "mark_{index}",
+        surface_id: node.surface_id,
+        canonical_id: node.canonical_id,
+        label: if node.text != "": node.text else: node.widget_id,
+        kind: node.kind,
+        bounds: bounds,
+        confidence: 97,
+        details: "semantic projection"
+    )
+
+fn _bounds_to_json(items: [UiAccessVisionBounds]) -> text:
+    var out = "["
+    var first = true
+    for item in items:
+        if not first:
+            out = "{out},"
+        out = "{out}{_bound_to_json(item)}"
+        first = false
+    out = "{out}]"
+    return out
+
+fn _bound_to_json(item: UiAccessVisionBounds) -> text:
+    return "{" +
+        _json_pair("surface_id", _json_str(item.surface_id)) + "," +
+        _json_pair("canonical_id", _json_str(item.canonical_id)) + "," +
+        _json_pair("x", "{item.x}") + "," +
+        _json_pair("y", "{item.y}") + "," +
+        _json_pair("w", "{item.w}") + "," +
+        _json_pair("h", "{item.h}") +
+        "}"
+
+fn _marks_to_json(items: [UiAccessVisionMark]) -> text:
+    var out = "["
+    var first = true
+    for item in items:
+        if not first:
+            out = "{out},"
+        out = "{out}{_mark_to_json(item)}"
+        first = false
+    out = "{out}]"
+    return out
+
+fn _mark_to_json(item: UiAccessVisionMark) -> text:
+    return "{" +
+        _json_pair("mark_id", _json_str(item.mark_id)) + "," +
+        _json_pair("surface_id", _json_str(item.surface_id)) + "," +
+        _json_pair("canonical_id", _json_str(item.canonical_id)) + "," +
+        _json_pair("label", _json_str(item.label)) + "," +
+        _json_pair("kind", _json_str(item.kind)) + "," +
+        _json_pair("bounds", _bound_to_json(item.bounds)) + "," +
+        _json_pair("confidence", "{item.confidence}") + "," +
+        _json_pair("details", _json_str(item.details)) +
+        "}"
+
+fn _issues_to_json(items: [UiAccessVisionIssue]) -> text:
+    var out = "["
+    var first = true
+    for item in items:
+        if not first:
+            out = "{out},"
+        out = "{out}{_issue_to_json(item)}"
+        first = false
+    out = "{out}]"
+    return out
+
+fn _issue_to_json(item: UiAccessVisionIssue) -> text:
+    var bounds_json = "null"
+    if val Some(bounds) = item.bounds:
+        bounds_json = _bound_to_json(bounds)
+    return "{" +
+        _json_pair("code", _json_str(item.code)) + "," +
+        _json_pair("severity", _json_str(item.severity)) + "," +
+        _json_pair("message", _json_str(item.message)) + "," +
+        _json_pair("surface_id", _json_str(item.surface_id)) + "," +
+        _json_pair("canonical_id", _json_str(item.canonical_id)) + "," +
+        _json_pair("bounds", bounds_json) + "," +
+        _json_pair("details", _json_str(item.details)) +
+        "}"
+
+fn _json_pair(key: text, value: text) -> text:
+    return "{_json_str(key)}:{value}"
+
+fn _json_str(value: text) -> text:
+    return "\"{_escape_json(value)}\""
+
+fn _escape_json(value: text) -> text:
+    var result = ""
+    var idx = 0
+    while idx < value.len():
+        val ch = value[idx]
+        if ch == "\"":
+            result = "{result}\\\""
+        elif ch == "\\":
+            result = "{result}\\\\"
+        elif ch == "\n":
+            result = "{result}\\n"
+        elif ch == "\r":
+            result = "{result}\\r"
+        elif ch == "\t":
+            result = "{result}\\t"
+        else:
+            result = "{result}{ch}"
+        idx = idx + 1
+    return result

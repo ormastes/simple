@@ -1,0 +1,143 @@
+use std.sspec.*
+
+# Inline CrashRecord/CrashLog for interpreter-mode testing
+
+class CrashRecord:
+    reason: text
+    exit_code: i64
+    message: text
+    restart_attempt: i64
+
+    fn is_fatal() -> bool:
+        self.reason == "trap" or self.reason == "abort" or self.reason == "invariant_violation"
+
+    fn summary() -> text:
+        self.reason + " (exit=" + str(self.exit_code) + ", attempt=" + str(self.restart_attempt) + ")"
+
+class CrashLog:
+    component_id: text
+    records: [CrashRecord]
+    max_records: i64
+
+    static fn create(id: text) -> CrashLog:
+        CrashLog(component_id: id, records: [], max_records: 100)
+
+    me add(record: CrashRecord):
+        self.records = self.records + [record]
+        if self.records.len() > self.max_records:
+            self.records = self.records[self.records.len() - self.max_records..]
+
+    fn count() -> i64:
+        self.records.len()
+
+    fn last() -> CrashRecord?:
+        if self.records.len() == 0:
+            return nil
+        Some(self.records[self.records.len() - 1])
+
+    fn recent(n: i64) -> [CrashRecord]:
+        if n >= self.records.len():
+            return self.records
+        self.records[self.records.len() - n..]
+
+    fn has_fatal() -> bool:
+        for r in self.records:
+            if r.is_fatal():
+                return true
+        false
+
+fn rec(reason: text, code: i64, attempt: i64) -> CrashRecord:
+    CrashRecord(reason: reason, exit_code: code, message: "test", restart_attempt: attempt)
+
+describe "CrashRecord":
+    it "is_fatal for trap":
+        expect(rec("trap", 132, 0).is_fatal()).to_equal(true)
+
+    it "is_fatal for abort":
+        expect(rec("abort", 134, 0).is_fatal()).to_equal(true)
+
+    it "is_fatal for invariant_violation":
+        expect(rec("invariant_violation", 1, 0).is_fatal()).to_equal(true)
+
+    it "not fatal for panic":
+        expect(rec("panic", 101, 0).is_fatal()).to_equal(false)
+
+    it "not fatal for timeout":
+        expect(rec("timeout", 124, 0).is_fatal()).to_equal(false)
+
+    it "not fatal for clean_exit":
+        expect(rec("clean_exit", 0, 0).is_fatal()).to_equal(false)
+
+    it "summary includes reason and exit code":
+        val s = rec("panic", 101, 2).summary()
+        expect(s).to_contain("panic")
+        expect(s).to_contain("101")
+        expect(s).to_contain("2")
+
+describe "CrashLog":
+    it "starts empty":
+        var log = CrashLog.create("worker")
+        expect(log.count()).to_equal(0)
+
+    it "add increases count":
+        var log = CrashLog.create("worker")
+        log.add(rec("panic", 101, 0))
+        expect(log.count()).to_equal(1)
+
+    it "last returns most recent":
+        var log = CrashLog.create("worker")
+        log.add(rec("panic", 101, 0))
+        log.add(rec("timeout", 124, 1))
+        val last = log.last()
+        match last:
+            Some(r): expect(r.reason).to_equal("timeout")
+            nil: expect("should not be nil").to_equal("")
+
+    it "last returns nil when empty":
+        var log = CrashLog.create("worker")
+        val last = log.last()
+        expect(last).to_be_nil()
+
+    it "recent returns N items":
+        var log = CrashLog.create("worker")
+        log.add(rec("a", 1, 0))
+        log.add(rec("b", 2, 1))
+        log.add(rec("c", 3, 2))
+        val r = log.recent(2)
+        expect(r.len()).to_equal(2)
+        expect(r[0].reason).to_equal("b")
+
+    it "recent returns all when N exceeds count":
+        var log = CrashLog.create("worker")
+        log.add(rec("a", 1, 0))
+        expect(log.recent(10).len()).to_equal(1)
+
+    it "trims when over max":
+        var log = CrashLog(component_id: "w", records: [], max_records: 3)
+        log.add(rec("a", 1, 0))
+        log.add(rec("b", 2, 1))
+        log.add(rec("c", 3, 2))
+        log.add(rec("d", 4, 3))
+        expect(log.count()).to_equal(3)
+        val last = log.last()
+        match last:
+            Some(r): expect(r.reason).to_equal("d")
+            nil: expect("should not be nil").to_equal("")
+
+    it "has_fatal detects fatal records":
+        var log = CrashLog.create("worker")
+        log.add(rec("panic", 101, 0))
+        log.add(rec("trap", 132, 1))
+        expect(log.has_fatal()).to_equal(true)
+
+    it "has_fatal returns false with no fatals":
+        var log = CrashLog.create("worker")
+        log.add(rec("panic", 101, 0))
+        log.add(rec("timeout", 124, 1))
+        expect(log.has_fatal()).to_equal(false)
+
+    it "crashes_in_window counts records":
+        var log = CrashLog.create("worker")
+        log.add(rec("a", 1, 0))
+        log.add(rec("b", 2, 1))
+        expect(log.count()).to_equal(2)

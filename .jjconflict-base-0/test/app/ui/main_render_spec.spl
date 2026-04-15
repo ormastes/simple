@@ -1,0 +1,317 @@
+# @cover src/app/ui/main.spl 60%
+"""
+# UI Main Render CLI Parsing Specification
+
+**Feature IDs:** #UI-RENDER-003
+**Category:** Tooling
+**Difficulty:** 2/5
+**Status:** Implemented
+**Requirements:** N/A
+**Plan:** N/A
+**Design:** doc/05_design/ui_render_feature_caret.md
+**Research:** N/A
+
+## Overview
+
+Tests the CLI argument parsing for the `simple ui render` command.
+The parse_render_args function converts raw CLI arguments into a
+RenderConfig, handling flags like --format, --adapter, --mode, --output,
+--theme, --demo, and positional file paths.
+
+## Key Concepts
+
+| Concept | Description |
+|---------|-------------|
+| parse_render_args | Parses CLI args after "render" into RenderConfig |
+| run_render | Dispatches render to appropriate adapter based on config |
+| --format | Sets output format: text, html, both |
+| --adapter | Selects app adapter: dashboard, llm_dashboard, word, etc. |
+| --demo | Enables built-in demo asset with default path |
+
+## Behavior
+
+- parse_render_args skips the first arg ("render") and processes remaining flags
+- --format sets config.format to the next arg value
+- --adapter sets config.adapter_name to the next arg value
+- --mode sets config.mode to the next arg value
+- --output sets config.output_path to the target file
+- --demo sets use_default_demo=true and asset_path to widget_matrix demo
+- Bare positional args (not starting with --) set asset_path
+- Unknown flags are silently skipped
+"""
+
+use std.sspec.*
+use app.ui.render.types.{RenderConfig}
+use app.ui.main.{parse_render_args, run_render}
+
+
+# ============================================================================
+# Test Group 1: Format Parsing
+# ============================================================================
+
+describe "parse_render_args Format Parsing":
+    """
+    ## Format flag handling
+
+    The --format flag sets the output format in RenderConfig.
+    Supports "text", "html", and "both".
+    """
+
+    context "when --format is specified":
+        """
+        ### Scenario: Explicit format flag
+
+        --format followed by a value should set config.format.
+        """
+
+        it "sets format to html":
+            val args = ["render", "--format", "html"]
+            val cfg = parse_render_args(args)
+            expect(cfg.format).to_equal("html")
+
+        it "sets format to both":
+            val args = ["render", "--format", "both"]
+            val cfg = parse_render_args(args)
+            expect(cfg.format).to_equal("both")
+
+        it "sets format to text":
+            val args = ["render", "--format", "text"]
+            val cfg = parse_render_args(args)
+            expect(cfg.format).to_equal("text")
+
+    context "when --format= is used":
+        """
+        ### Scenario: Equals-sign format syntax
+
+        --format=value should also work.
+        """
+
+        it "sets format with equals syntax":
+            val args = ["render", "--format=html"]
+            val cfg = parse_render_args(args)
+            expect(cfg.format).to_equal("html")
+
+    context "when no format is specified":
+        """
+        ### Scenario: Default format
+
+        Without --format, the default should be "text".
+        """
+
+        it "defaults to text format":
+            val args = ["render"]
+            val cfg = parse_render_args(args)
+            expect(cfg.format).to_equal("text")
+
+
+# ============================================================================
+# Test Group 2: Adapter Parsing
+# ============================================================================
+
+describe "parse_render_args Adapter Parsing":
+    """
+    ## Adapter name flag handling
+
+    The --adapter flag selects which app adapter handles the render request.
+    """
+
+    context "when --adapter is specified":
+        """
+        ### Scenario: Explicit adapter flag
+
+        --adapter followed by a value should set config.adapter_name.
+        """
+
+        it "sets adapter_name to dashboard":
+            val args = ["render", "--adapter", "dashboard"]
+            val cfg = parse_render_args(args)
+            expect(cfg.adapter_name).to_equal("dashboard")
+
+        it "sets adapter_name to word":
+            val args = ["render", "--adapter", "word"]
+            val cfg = parse_render_args(args)
+            expect(cfg.adapter_name).to_equal("word")
+
+        it "sets adapter_name to llm_dashboard":
+            val args = ["render", "--adapter", "llm_dashboard"]
+            val cfg = parse_render_args(args)
+            expect(cfg.adapter_name).to_equal("llm_dashboard")
+
+    context "when --adapter= is used":
+        """
+        ### Scenario: Equals-sign adapter syntax
+
+        --adapter=value should also work.
+        """
+
+        it "sets adapter with equals syntax":
+            val args = ["render", "--adapter=sheets"]
+            val cfg = parse_render_args(args)
+            expect(cfg.adapter_name).to_equal("sheets")
+
+    context "when no adapter is specified":
+        """
+        ### Scenario: Default adapter
+
+        Without --adapter, adapter_name should be empty.
+        """
+
+        it "defaults to empty adapter_name":
+            val args = ["render"]
+            val cfg = parse_render_args(args)
+            expect(cfg.adapter_name).to_equal("")
+
+
+# ============================================================================
+# Test Group 3: Demo Flag
+# ============================================================================
+
+describe "parse_render_args Demo Flag":
+    """
+    ## Demo mode flag handling
+
+    The --demo flag enables the built-in demo asset and sets asset_path
+    to the widget_matrix example.
+    """
+
+    context "when --demo is specified":
+        """
+        ### Scenario: Demo mode activation
+
+        --demo should set use_default_demo to true and asset_path to the demo file.
+        """
+
+        it "sets use_default_demo to true":
+            val args = ["render", "--demo"]
+            val cfg = parse_render_args(args)
+            expect(cfg.use_default_demo).to_equal(true)
+
+        it "sets asset_path to widget_matrix demo":
+            val args = ["render", "--demo"]
+            val cfg = parse_render_args(args)
+            expect(cfg.asset_path).to_contain("widget_matrix")
+
+        it "sets asset_path ending with .ui.sdn":
+            val args = ["render", "--demo"]
+            val cfg = parse_render_args(args)
+            expect(cfg.asset_path).to_end_with(".ui.sdn")
+
+
+# ============================================================================
+# Test Group 4: Positional File Path
+# ============================================================================
+
+describe "parse_render_args File Path":
+    """
+    ## Positional file path handling
+
+    A bare argument (not starting with --) is treated as asset_path.
+    """
+
+    context "when a file path is given":
+        """
+        ### Scenario: Positional asset path
+
+        A positional argument should be stored as asset_path.
+        """
+
+        it "sets asset_path from positional arg":
+            val args = ["render", "file.ui.sdn"]
+            val cfg = parse_render_args(args)
+            expect(cfg.asset_path).to_equal("file.ui.sdn")
+
+        it "sets asset_path for nested path":
+            val args = ["render", "examples/ui/test.ui.sdn"]
+            val cfg = parse_render_args(args)
+            expect(cfg.asset_path).to_equal("examples/ui/test.ui.sdn")
+
+
+# ============================================================================
+# Test Group 5: Combined Arguments
+# ============================================================================
+
+describe "parse_render_args Combined Arguments":
+    """
+    ## Multiple flags combined
+
+    Multiple flags should be parsed correctly when combined.
+    """
+
+    context "when multiple flags are combined":
+        """
+        ### Scenario: Format + adapter + mode
+
+        All flags should be parsed independently.
+        """
+
+        it "parses format and adapter together":
+            val args = ["render", "--format", "html", "--adapter", "dashboard"]
+            val cfg = parse_render_args(args)
+            expect(cfg.format).to_equal("html")
+            expect(cfg.adapter_name).to_equal("dashboard")
+
+        it "parses mode flag":
+            val args = ["render", "--mode", "sspec"]
+            val cfg = parse_render_args(args)
+            expect(cfg.mode).to_equal("sspec")
+
+        it "parses theme flag":
+            val args = ["render", "--theme", "light"]
+            val cfg = parse_render_args(args)
+            expect(cfg.theme).to_equal("light")
+
+        it "parses output flag":
+            val args = ["render", "--output", "out/render.html"]
+            val cfg = parse_render_args(args)
+            expect(cfg.output_path).to_equal("out/render.html")
+
+        it "parses short output flag":
+            val args = ["render", "-o", "out/render.txt"]
+            val cfg = parse_render_args(args)
+            expect(cfg.output_path).to_equal("out/render.txt")
+
+        it "parses format adapter and file together":
+            val args = ["render", "--format", "html", "--adapter", "word", "myfile.ui.sdn"]
+            val cfg = parse_render_args(args)
+            expect(cfg.format).to_equal("html")
+            expect(cfg.adapter_name).to_equal("word")
+            expect(cfg.asset_path).to_equal("myfile.ui.sdn")
+
+        it "parses output with equals syntax":
+            val args = ["render", "--output=out/render.html"]
+            val cfg = parse_render_args(args)
+            expect(cfg.output_path).to_equal("out/render.html")
+
+
+# ============================================================================
+# Test Group 6: run_render Dispatch
+# ============================================================================
+
+describe "run_render Dispatch":
+    """
+    ## Render dispatch to adapters
+
+    run_render routes to the correct adapter based on config.adapter_name.
+    With no adapter and no asset_path, it returns an empty result.
+    """
+
+    context "when adapter_name is empty and no asset_path":
+        """
+        ### Scenario: Empty dispatch returns empty result
+
+        With no adapter and no file, run_render should return an empty result.
+        """
+
+        it "returns empty text_output":
+            var cfg = RenderConfig.default()
+            cfg.adapter_name = ""
+            cfg.asset_path = ""
+            val result = run_render(cfg)
+            expect(result.text_output).to_equal("")
+
+        it "returns empty html_output":
+            var cfg = RenderConfig.default()
+            cfg.adapter_name = ""
+            cfg.asset_path = ""
+            val result = run_render(cfg)
+            expect(result.html_output).to_equal("")

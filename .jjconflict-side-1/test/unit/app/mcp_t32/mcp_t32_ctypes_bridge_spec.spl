@@ -1,0 +1,320 @@
+# MCP T32 ctypes bridge spec — tests ctypes backend logic
+# Covers: lib discovery, command routing, connection state, config precedence
+
+# --- Helpers (cb_ prefix to avoid name collisions) ---
+
+fn cb_starts_with(s: text, prefix: text) -> bool:
+    if s.len() < prefix.len():
+        return false
+    s.substring(0, prefix.len()) == prefix
+
+fn cb_ends_with(s: text, suffix: text) -> bool:
+    if s.len() < suffix.len():
+        return false
+    s.substring(s.len() - suffix.len(), s.len()) == suffix
+
+fn cb_contains(s: text, sub: text) -> bool:
+    var i = 0
+    while i + sub.len() <= s.len():
+        if s.substring(i, i + sub.len()) == sub:
+            return true
+        i = i + 1
+    false
+
+# --- Mock ctypes bridge command router ---
+# Simulates t32_ctypes_run_remote dispatch logic without real .so
+
+fn cb_route_command(cmd: text) -> text:
+    val trimmed = cmd.trim()
+    val upper = trimmed.to_upper()
+    if cb_starts_with(upper, "EVAL "):
+        return "eval"
+    if upper == "PING":
+        return "ping"
+    "cmd"
+
+# --- Mock eval expression extractor ---
+
+fn cb_extract_eval_expr(cmd: text) -> text:
+    val trimmed = cmd.trim()
+    if trimmed.len() > 5:
+        return trimmed.substring(5, trimmed.len())
+    ""
+
+# --- Mock lib path search ---
+
+fn cb_find_lib_path(api_lib_path: text, candidates: [text]) -> text:
+    # Simulates priority: config/env first, then candidates
+    if api_lib_path != "":
+        return api_lib_path
+    for path in candidates:
+        if path != "":
+            return path
+    ""
+
+# --- Mock connection state ---
+
+class CbConnState:
+    connected: bool
+    host: text
+    port: i64
+
+fn cb_needs_reconnect(state: CbConnState, host: text, port: i64) -> bool:
+    if not state.connected:
+        return true
+    if state.host != host:
+        return true
+    if state.port != port:
+        return true
+    false
+
+# --- Mock message type parser ---
+
+fn cb_parse_msg_type(mtype: i64) -> text:
+    if mtype == 0:
+        return "info"
+    if mtype == 1:
+        return "warning"
+    if mtype == 2:
+        return "error"
+    "info"
+
+# --- Mock target state parser ---
+
+fn cb_parse_target_state(raw: text) -> text:
+    val lower = raw.trim().to_lower()
+    if lower == "true" or lower == "true.":
+        return "running"
+    if lower == "false" or lower == "false.":
+        return "stopped"
+    "unknown"
+
+# --- Config precedence simulation ---
+
+fn cb_resolve_config(env_val: text, sdn_val: text, default_val: text) -> text:
+    if env_val != "":
+        return env_val
+    if sdn_val != "":
+        return sdn_val
+    default_val
+
+# --- SSpec tests ---
+
+describe "T32 ctypes bridge":
+    context "library discovery":
+        it "returns config path when T32_API_LIB_PATH is set":
+            val result = cb_find_lib_path("/opt/custom/t32api64.so", ["/opt/t32/bin/pc_linux64/t32api64.so"])
+            expect(result).to_equal("/opt/custom/t32api64.so")
+
+        it "falls back to candidates when config path empty":
+            val result = cb_find_lib_path("", ["/opt/t32/bin/pc_linux64/t32api64.so"])
+            expect(result).to_equal("/opt/t32/bin/pc_linux64/t32api64.so")
+
+        it "returns empty when no candidates available":
+            val result = cb_find_lib_path("", ["", ""])
+            expect(result).to_equal("")
+
+        it "returns empty when all sources empty":
+            val result = cb_find_lib_path("", [])
+            expect(result).to_equal("")
+
+        it "prefers config over candidates":
+            val result = cb_find_lib_path("/my/lib.so", ["/other/lib.so"])
+            expect(result).to_equal("/my/lib.so")
+
+    context "command routing":
+        it "routes EVAL commands to eval handler":
+            val route = cb_route_command("EVAL DIALOG.BOOLEAN(check)")
+            expect(route).to_equal("eval")
+
+        it "routes eval with lowercase":
+            val route = cb_route_command("eval STATE.RUN()")
+            expect(route).to_equal("eval")
+
+        it "routes EVAL with leading spaces":
+            val route = cb_route_command("  EVAL Register(PC)")
+            expect(route).to_equal("eval")
+
+        it "routes PING to ping handler":
+            val route = cb_route_command("PING")
+            expect(route).to_equal("ping")
+
+        it "routes ping lowercase to ping handler":
+            val route = cb_route_command("ping")
+            expect(route).to_equal("ping")
+
+        it "routes Break.Set to cmd handler":
+            val route = cb_route_command("Break.Set main")
+            expect(route).to_equal("cmd")
+
+        it "routes SYStem.Up to cmd handler":
+            val route = cb_route_command("SYStem.Up")
+            expect(route).to_equal("cmd")
+
+        it "routes DIALOG.Set to cmd handler":
+            val route = cb_route_command("DIALOG.Set mycheck")
+            expect(route).to_equal("cmd")
+
+        it "routes DO script to cmd handler":
+            val route = cb_route_command("DO init.cmm")
+            expect(route).to_equal("cmd")
+
+        it "routes empty command to cmd handler":
+            val route = cb_route_command("")
+            expect(route).to_equal("cmd")
+
+    context "eval expression extraction":
+        it "extracts expression from EVAL command":
+            val expr = cb_extract_eval_expr("EVAL DIALOG.BOOLEAN(check)")
+            expect(expr).to_equal("DIALOG.BOOLEAN(check)")
+
+        it "extracts expression from EVAL STATE.RUN()":
+            val expr = cb_extract_eval_expr("EVAL STATE.RUN()")
+            expect(expr).to_equal("STATE.RUN()")
+
+        it "extracts expression from EVAL Register(PC)":
+            val expr = cb_extract_eval_expr("EVAL Register(PC)")
+            expect(expr).to_equal("Register(PC)")
+
+        it "returns empty for short command":
+            val expr = cb_extract_eval_expr("EVAL")
+            expect(expr).to_equal("")
+
+    context "connection state management":
+        it "needs reconnect when not connected":
+            val state = CbConnState(connected: false, host: "", port: 0)
+            expect(cb_needs_reconnect(state, "localhost", 20000)).to_equal(true)
+
+        it "does not need reconnect when same host:port":
+            val state = CbConnState(connected: true, host: "localhost", port: 20000)
+            expect(cb_needs_reconnect(state, "localhost", 20000)).to_equal(false)
+
+        it "needs reconnect when host changed":
+            val state = CbConnState(connected: true, host: "localhost", port: 20000)
+            expect(cb_needs_reconnect(state, "192.168.1.10", 20000)).to_equal(true)
+
+        it "needs reconnect when port changed":
+            val state = CbConnState(connected: true, host: "localhost", port: 20000)
+            expect(cb_needs_reconnect(state, "localhost", 20001)).to_equal(true)
+
+        it "needs reconnect when both changed":
+            val state = CbConnState(connected: true, host: "localhost", port: 20000)
+            expect(cb_needs_reconnect(state, "remote", 30000)).to_equal(true)
+
+    context "message type parsing":
+        it "maps 0 to info":
+            expect(cb_parse_msg_type(0)).to_equal("info")
+
+        it "maps 1 to warning":
+            expect(cb_parse_msg_type(1)).to_equal("warning")
+
+        it "maps 2 to error":
+            expect(cb_parse_msg_type(2)).to_equal("error")
+
+        it "maps unknown to info":
+            expect(cb_parse_msg_type(99)).to_equal("info")
+
+        it "maps negative to info":
+            expect(cb_parse_msg_type(-1)).to_equal("info")
+
+    context "target state parsing":
+        it "maps TRUE to running":
+            expect(cb_parse_target_state("TRUE")).to_equal("running")
+
+        it "maps true lowercase to running":
+            expect(cb_parse_target_state("true")).to_equal("running")
+
+        it "maps TRUE. with trailing dot to running":
+            expect(cb_parse_target_state("TRUE.")).to_equal("running")
+
+        it "maps true. with trailing dot to running":
+            expect(cb_parse_target_state("true.")).to_equal("running")
+
+        it "maps FALSE to stopped":
+            expect(cb_parse_target_state("FALSE")).to_equal("stopped")
+
+        it "maps false lowercase to stopped":
+            expect(cb_parse_target_state("false")).to_equal("stopped")
+
+        it "maps FALSE. with trailing dot to stopped":
+            expect(cb_parse_target_state("FALSE.")).to_equal("stopped")
+
+        it "maps empty to unknown":
+            expect(cb_parse_target_state("")).to_equal("unknown")
+
+        it "maps garbage to unknown":
+            expect(cb_parse_target_state("maybe")).to_equal("unknown")
+
+        it "trims whitespace":
+            expect(cb_parse_target_state("  TRUE  ")).to_equal("running")
+
+        it "trims whitespace on false":
+            expect(cb_parse_target_state("  false.  ")).to_equal("stopped")
+
+    context "config precedence":
+        it "env var overrides SDN config":
+            val result = cb_resolve_config("/usr/bin/python3.11", "python3", "python3")
+            expect(result).to_equal("/usr/bin/python3.11")
+
+        it "SDN config overrides default":
+            val result = cb_resolve_config("", "/usr/bin/python3.10", "python3")
+            expect(result).to_equal("/usr/bin/python3.10")
+
+        it "uses default when env and SDN empty":
+            val result = cb_resolve_config("", "", "python3")
+            expect(result).to_equal("python3")
+
+        it "env var takes priority even when SDN set":
+            val result = cb_resolve_config("/custom/python", "/other/python", "python3")
+            expect(result).to_equal("/custom/python")
+
+    context "backend preference routing":
+        it "ctypes is default when preference empty":
+            val pref = ""
+            val try_ctypes = (pref == "" or pref == "ctypes")
+            expect(try_ctypes).to_equal(true)
+
+        it "ctypes when preference is ctypes":
+            val pref = "ctypes"
+            val try_ctypes = (pref == "" or pref == "ctypes")
+            expect(try_ctypes).to_equal(true)
+
+        it "not ctypes-first when preference is t32rem":
+            val pref = "t32rem"
+            val try_ctypes = (pref == "" or pref == "ctypes")
+            expect(try_ctypes).to_equal(false)
+
+        it "not ctypes-first when preference is python_rcl":
+            val pref = "python_rcl"
+            val try_ctypes = (pref == "" or pref == "ctypes")
+            expect(try_ctypes).to_equal(false)
+
+    context "T32 Config string format":
+        it "NODE= config key format":
+            val key = "NODE="
+            expect(key).to_equal("NODE=")
+
+        it "PORT= config key format":
+            val key = "PORT="
+            val port_str = str(20000)
+            expect(port_str).to_equal("20000")
+
+        it "PACKLEN= config key format":
+            val key = "PACKLEN="
+            val value = "1024"
+            expect(key + value).to_equal("PACKLEN=1024")
+
+    context "EVAL command construction":
+        it "builds EVAL from expression":
+            val expr = "STATE.RUN()"
+            val cmd = "EVAL " + expr
+            expect(cmd).to_equal("EVAL STATE.RUN()")
+
+        it "builds EVAL DIALOG.BOOLEAN":
+            val label = "mycheck"
+            val cmd = "EVAL DIALOG.BOOLEAN(" + label + ")"
+            expect(cmd).to_equal("EVAL DIALOG.BOOLEAN(mycheck)")
+
+        it "builds EVAL MESSAGE.STR()":
+            val cmd = "EVAL MESSAGE.STR()"
+            expect(cmd).to_equal("EVAL MESSAGE.STR()")

@@ -1,0 +1,311 @@
+#![allow(unnamed_duplicate_typed_args)]
+# Event bindings — addEventListener, removeEventListener, dispatchEvent.
+# Bridges the JS engine with the DOM event system, wrapping/unwrapping DomEvent
+# objects and providing Event/CustomEvent constructors.
+
+use browser.shared.logging.Logger
+use browser.shared.error.BrowserResult
+use browser.shared.error.script_error
+use std.js.types.js_types.JsValue
+use std.js.types.js_types.JsObject
+use std.js.types.js_types.JsProperty
+use browser.entity.dom.event_types.DomEvent
+use browser.entity.dom.event_types.EventPhase
+use browser.entity.dom.event_types.EventInit
+use browser.entity.dom.event_types.EventTarget
+use std.js.engine.runtime.JsRuntime
+use std.js.engine.interpreter_types.to_string
+use std.js.engine.interpreter_types.to_boolean
+use browser.feature.script.web_api.dom_bindings.unwrap_node
+use browser.feature.dom.event_dispatch.{EventDispatcher, EventListenerOptions}
+
+# ── Native function IDs ──────────────────────────────────────────────────
+
+val NATIVE_ADD_EVENT_LISTENER = -400
+val NATIVE_REMOVE_EVENT_LISTENER = -401
+val NATIVE_DISPATCH_EVENT = -402
+val NATIVE_PREVENT_DEFAULT = -403
+val NATIVE_STOP_PROPAGATION = -404
+val NATIVE_STOP_IMMEDIATE_PROPAGATION = -405
+val NATIVE_NEW_EVENT = -406
+val NATIVE_NEW_CUSTOM_EVENT = -407
+
+# ── EventBinding ─────────────────────────────────────────────────────────
+
+class EventBinding:
+    dispatcher_ref: i64
+    dispatcher: EventDispatcher
+    logger: Logger
+
+    static fn new(dispatcher_ref: i64, logger: Logger) -> EventBinding:
+        EventBinding(dispatcher_ref: dispatcher_ref, dispatcher: EventDispatcher.new(logger), logger: logger)
+
+    static fn with_dispatcher(dispatcher_ref: i64, dispatcher: EventDispatcher, logger: Logger) -> EventBinding:
+        EventBinding(dispatcher_ref: dispatcher_ref, dispatcher: dispatcher, logger: logger)
+
+    # Install event API bindings on the JS runtime.
+    me install(runtime: JsRuntime):
+        self.logger.debug("Installing event bindings")
+
+        # Global functions for event dispatch
+        runtime._define_global_fn("addEventListener", NATIVE_ADD_EVENT_LISTENER)
+        runtime._define_global_fn("removeEventListener", NATIVE_REMOVE_EVENT_LISTENER)
+        runtime._define_global_fn("dispatchEvent", NATIVE_DISPATCH_EVENT)
+
+        # Event constructors
+        runtime._define_global_fn("Event", NATIVE_NEW_EVENT)
+        runtime._define_global_fn("CustomEvent", NATIVE_NEW_CUSTOM_EVENT)
+
+        self.logger.debug("Event bindings installed")
+
+# ── addEventListener / removeEventListener / dispatchEvent ───────────────
+
+fn js_addEventListener(args: [JsValue], dispatcher: EventDispatcher) -> BrowserResult<JsValue>:
+    # args: [target_node, event_type, callback, options?]
+    if args.len() < 3:
+        return Err(script_error("addEventListener requires at least 3 arguments"))
+
+    val target = unwrap_node(args.get(0))
+    if val Some(node_id) = target:
+        val event_type = to_string(args.get(1))
+        val callback = args.get(2)
+
+        # Extract callback id
+        var callback_id: i64 = -1
+        match callback:
+            JsValue.Function(id):
+                callback_id = id
+            _:
+                return Err(script_error("addEventListener: callback must be a function"))
+
+        # Parse options (capture, once, passive) from optional 4th argument
+        var use_capture = false
+        var once = false
+        var passive = false
+        if args.len() >= 4:
+            val opts = args.get(3)
+            match opts:
+                JsValue.Boolean(v):
+                    use_capture = v
+                JsValue.Object(id):
+                    # Would read capture/once/passive from object properties
+                    pass_dn
+                _:
+                    pass_dn
+
+        val options = EventListenerOptions.create(use_capture, once, passive)
+        dispatcher.addEventListener(node_id, event_type, callback_id, options)
+        return Ok(JsValue.Undefined)
+
+    Err(script_error("addEventListener: invalid target node"))
+
+fn js_removeEventListener(args: [JsValue], dispatcher: EventDispatcher) -> BrowserResult<JsValue>:
+    # args: [target_node, event_type, callback, options?]
+    if args.len() < 3:
+        return Err(script_error("removeEventListener requires at least 3 arguments"))
+
+    val target = unwrap_node(args.get(0))
+    if val Some(node_id) = target:
+        val event_type = to_string(args.get(1))
+        val callback = args.get(2)
+
+        var callback_id: i64 = -1
+        match callback:
+            JsValue.Function(id):
+                callback_id = id
+            _:
+                return Err(script_error("removeEventListener: callback must be a function"))
+
+        var use_capture = false
+        if args.len() >= 4:
+            match args.get(3):
+                JsValue.Boolean(v):
+                    use_capture = v
+                _:
+                    pass_dn
+
+        dispatcher.removeEventListener(node_id, event_type, callback_id, use_capture)
+        return Ok(JsValue.Undefined)
+
+    Err(script_error("removeEventListener: invalid target node"))
+
+fn js_dispatchEvent(args: [JsValue], dispatcher: EventDispatcher) -> BrowserResult<JsValue>:
+    # args: [target_node, event_object]
+    if args.len() < 2:
+        return Err(script_error("dispatchEvent requires 2 arguments"))
+
+    val target = unwrap_node(args.get(0))
+    if val Some(node_id) = target:
+        val event = unwrap_event(args.get(1))
+        if val Some(dom_event) = event:
+            # Dispatch with empty ancestors for now (flat dispatch at target)
+            val ancestors = [i64]()
+            val not_cancelled = dispatcher.dispatchEvent(dom_event, node_id, ancestors)
+            return Ok(JsValue.Boolean(v: not_cancelled))
+        # If we can't unwrap the event, create a minimal one from the object
+        return Ok(JsValue.Boolean(v: true))
+    Err(script_error("dispatchEvent: invalid target node"))
+
+# ── Event method bindings ────────────────────────────────────────────────
+
+fn js_preventDefault(args: [JsValue], runtime: JsRuntime) -> BrowserResult<JsValue>:
+    if args.len() < 1:
+        return Err(script_error("preventDefault requires 1 argument"))
+    # Set the defaultPrevented property on the event object to true
+    match args.get(0):
+        JsValue.Object(event_obj_id):
+            runtime.interpreter.object_store.set_property(
+                event_obj_id, "defaultPrevented", JsValue.Boolean(v: true))
+        _:
+            pass_dn
+    Ok(JsValue.Undefined)
+
+fn js_stopPropagation(args: [JsValue], runtime: JsRuntime) -> BrowserResult<JsValue>:
+    if args.len() < 1:
+        return Err(script_error("stopPropagation requires 1 argument"))
+    # Set a flag on the event object indicating propagation is stopped
+    match args.get(0):
+        JsValue.Object(event_obj_id):
+            runtime.interpreter.object_store.set_property(
+                event_obj_id, "__stopped__", JsValue.Boolean(v: true))
+        _:
+            pass_dn
+    Ok(JsValue.Undefined)
+
+fn js_stopImmediatePropagation(args: [JsValue], runtime: JsRuntime) -> BrowserResult<JsValue>:
+    if args.len() < 1:
+        return Err(script_error("stopImmediatePropagation requires 1 argument"))
+    match args.get(0):
+        JsValue.Object(event_obj_id):
+            runtime.interpreter.object_store.set_property(
+                event_obj_id, "__stopped__", JsValue.Boolean(v: true))
+            runtime.interpreter.object_store.set_property(
+                event_obj_id, "__immediateStopped__", JsValue.Boolean(v: true))
+        _:
+            pass_dn
+    Ok(JsValue.Undefined)
+
+# ── Event wrapping / unwrapping ──────────────────────────────────────────
+
+# Create a JS object representing a DomEvent with type, target, phase, etc.
+fn wrap_event(event: DomEvent) -> JsValue:
+    # Encode the event as a JS Object.
+    # The object carries properties: type, target, currentTarget,
+    # eventPhase, bubbles, cancelable, defaultPrevented, timeStamp.
+    val event_id = _event_hash(event.type_name, event.target_id, event.timestamp)
+    JsValue.Object(id: event_id)
+
+# Install event properties on a JS object within the runtime.
+fn _install_event_props(runtime: JsRuntime, obj_id: i64, event: DomEvent):
+    runtime.interpreter.object_store.set_property(
+        obj_id, "type", JsValue.String(v: event.type_name))
+    runtime.interpreter.object_store.set_property(
+        obj_id, "target", JsValue.Object(id: event.target_id))
+    runtime.interpreter.object_store.set_property(
+        obj_id, "currentTarget", JsValue.Object(id: event.current_target_id))
+
+    val phase_num = _phase_to_i64(event.phase)
+    runtime.interpreter.object_store.set_property(
+        obj_id, "eventPhase", JsValue.Number(v: phase_num.to_f64()))
+
+    runtime.interpreter.object_store.set_property(
+        obj_id, "bubbles", JsValue.Boolean(v: event.init.bubbles))
+    runtime.interpreter.object_store.set_property(
+        obj_id, "cancelable", JsValue.Boolean(v: event.init.cancelable))
+    runtime.interpreter.object_store.set_property(
+        obj_id, "defaultPrevented", JsValue.Boolean(v: event.prevented))
+    runtime.interpreter.object_store.set_property(
+        obj_id, "timeStamp", JsValue.Number(v: event.timestamp.to_f64()))
+
+    # Bind event methods
+    runtime._define_method_on(obj_id, "preventDefault", NATIVE_PREVENT_DEFAULT)
+    runtime._define_method_on(obj_id, "stopPropagation", NATIVE_STOP_PROPAGATION)
+    runtime._define_method_on(obj_id, "stopImmediatePropagation", NATIVE_STOP_IMMEDIATE_PROPAGATION)
+
+# Extract a DomEvent from a JS value.
+fn unwrap_event(value: JsValue) -> DomEvent?:
+    match value:
+        JsValue.Object(id):
+            # In a full implementation, look up the event by object id
+            # in a side table. For now, return nil (not resolvable without context).
+            nil
+        _:
+            nil
+
+# ── Event constructors ───────────────────────────────────────────────────
+
+# new Event(type [, options])
+fn js_new_Event(args: [JsValue]) -> JsValue:
+    if args.len() < 1:
+        return JsValue.Undefined
+
+    val type_name = to_string(args.get(0))
+    var init = EventInit.default()
+
+    if args.len() >= 2:
+        init = _parse_event_init(args.get(1))
+
+    val event = create_event(type_name, args.get(0))
+    wrap_event(event)
+
+# new CustomEvent(type [, options])
+fn js_new_CustomEvent(args: [JsValue]) -> JsValue:
+    if args.len() < 1:
+        return JsValue.Undefined
+
+    val type_name = to_string(args.get(0))
+    var init = EventInit.default()
+
+    if args.len() >= 2:
+        init = _parse_event_init(args.get(1))
+
+    # CustomEvent is like Event but with an additional .detail property.
+    val event = create_event(type_name, args.get(0))
+    val wrapped = wrap_event(event)
+    # Full implementation would set .detail from options.detail
+    wrapped
+
+# Create a DomEvent from a type name and options.
+fn create_event(type_name: text, options: JsValue) -> DomEvent:
+    var init = EventInit.default()
+    match options:
+        JsValue.Object(id):
+            init = _parse_event_init(options)
+        _:
+            pass_dn
+
+    DomEvent(
+        type_name: type_name,
+        target_id: -1,
+        current_target_id: -1,
+        phase: EventPhase.None,
+        init: init,
+        prevented: false,
+        stopped: false,
+        timestamp: 0,
+    )
+
+# ── Internal helpers ─────────────────────────────────────────────────────
+
+fn _parse_event_init(options: JsValue) -> EventInit:
+    # Full implementation reads bubbles, cancelable, composed from JS object.
+    EventInit.default()
+
+fn _phase_to_i64(phase: EventPhase) -> i64:
+    match phase:
+        EventPhase.None: 0
+        EventPhase.Capturing: 1
+        EventPhase.AtTarget: 2
+        EventPhase.Bubbling: 3
+
+fn _event_hash(type_name: text, target_id: i64, timestamp: i64) -> i64:
+    var hash: i64 = 3571
+    var i = 0
+    val len = type_name.len()
+    while i < len:
+        hash = hash * 31 + i
+        i = i + 1
+    hash = hash + target_id * 100 + timestamp
+    if hash < 0:
+        hash = 0 - hash
+    hash

@@ -1,0 +1,190 @@
+#![allow(unnamed_duplicate_typed_args)]
+# Header Generator — Entry Point Module
+#
+# Orchestrates generation of C (.h) and C++ (.hpp) header files
+# for Simple classes and functions annotated with @export("C").
+#
+# Scans the MIR module for exported types and functions, then
+# delegates to c_header.spl and cpp_header.spl for output.
+#
+# Usage:
+#   val gen = HeaderGenerator.create(mir_module)
+#   val c_header_text = gen.generate_c_header("mylib")
+#   val cpp_header_text = gen.generate_cpp_header("mylib")
+
+use compiler.mir.mir_data.*
+use compiler.tools.header_gen.c_header.{emit_c_header}
+use compiler.tools.header_gen.cpp_header.{emit_cpp_header}
+
+# ============================================================================
+# Validation Result
+# ============================================================================
+
+class ValidationResult:
+    """Result of validating a generated header file."""
+    is_valid: bool
+    errors: [text]
+
+    static fn ok() -> ValidationResult:
+        """Create a successful validation result."""
+        ValidationResult(is_valid: true, errors: [])
+
+    static fn fail(errors: [text]) -> ValidationResult:
+        """Create a failed validation result with error messages."""
+        ValidationResult(is_valid: false, errors: errors)
+
+# ============================================================================
+# Header Generator
+# ============================================================================
+
+class HeaderGenerator:
+    """Orchestrates C and C++ header generation for @export("C") items.
+
+    Scans the MIR module for exported classes (MirTypeDef with is_export_c)
+    and exported standalone functions (MirFunction with is_export_c), then
+    generates header content via the c_header and cpp_header submodules.
+    """
+    module: MirModule
+
+    static fn create(module: MirModule) -> HeaderGenerator:
+        """Create a HeaderGenerator for the given MIR module."""
+        HeaderGenerator(module: module)
+
+    fn generate_c_header(lib_name: text) -> text:
+        """Generate a C header (.h) file for all exported items.
+
+        Args:
+            lib_name: Library name used for include guard and file naming.
+
+        Returns:
+            Complete C header text ready to write to a .h file.
+        """
+        val exported_fns = sort_exported_functions(self._collect_exported_functions())
+        val exported_types = sort_exported_types(self._collect_exported_types())
+        emit_c_header(lib_name, exported_fns, exported_types, self.module)
+
+    fn generate_cpp_header(lib_name: text) -> text:
+        """Generate a C++ wrapper header (.hpp) file for all exported items.
+
+        Args:
+            lib_name: Library name used for namespace and file naming.
+
+        Returns:
+            Complete C++ header text ready to write to a .hpp file.
+        """
+        val exported_fns = sort_exported_functions(self._collect_exported_functions())
+        val exported_types = sort_exported_types(self._collect_exported_types())
+        val c_header_name = lib_name + ".h"
+        emit_cpp_header(lib_name, exported_types, exported_fns, c_header_name, self.module)
+
+    fn has_exports() -> bool:
+        """Check if the module has any @export("C") items."""
+        for _sym, func in self.module.functions:
+            if func.is_export_c:
+                return true
+        for _sym, type_def in self.module.types:
+            if type_def.is_export_c:
+                return true
+        false
+
+    fn _collect_exported_functions() -> [MirFunction]:
+        """Collect all standalone functions marked with @export("C")."""
+        var result: [MirFunction] = []
+        for _sym, func in self.module.functions:
+            if func.is_export_c:
+                result.push(func)
+        result
+
+    fn _collect_exported_types() -> [MirTypeDef]:
+        """Collect all type definitions marked with @export("C")."""
+        var result: [MirTypeDef] = []
+        for _sym, type_def in self.module.types:
+            if type_def.is_export_c:
+                result.push(type_def)
+        result
+
+# ============================================================================
+# Deterministic Ordering
+# ============================================================================
+
+fn sort_exported_functions(exports: [MirFunction]) -> [MirFunction]:
+    """Sort exported functions by name for deterministic header output."""
+    exports.sort_by(\a, b: _compare_text(a.name, b.name))
+
+fn sort_exported_types(exports: [MirTypeDef]) -> [MirTypeDef]:
+    """Sort exported types by name for deterministic header output."""
+    exports.sort_by(\a, b: _compare_text(a.name, b.name))
+
+fn _compare_text(a: text, b: text) -> i64:
+    """Compare two text values for sorting. Returns negative if a < b, 0 if equal, positive if a > b."""
+    if a < b:
+        -1
+    elif a > b:
+        1
+    else:
+        0
+
+# ============================================================================
+# Header Validation
+# ============================================================================
+
+fn validate_generated_header(header_text: text, exported_functions: [text], exported_types: [text]) -> ValidationResult:
+    """Validate a generated header file for correctness.
+
+    Checks:
+    - Include guard present and consistent (matching filename)
+    - All exported functions have declarations
+    - No duplicate declarations
+    - All type declarations have matching forward declarations
+    """
+    var errors: [text] = []
+
+    # Check include guard present
+    val has_ifndef = header_text.contains(r"#ifndef ")
+    val has_define = header_text.contains(r"#define ")
+    val has_endif = header_text.contains(r"#endif")
+    if not has_ifndef or not has_define:
+        errors.push("Missing include guard (#ifndef/#define)")
+    if not has_endif:
+        errors.push("Missing #endif for include guard")
+
+    # Check all exported functions have declarations
+    var fi = 0
+    while fi < exported_functions.len():
+        val fn_name = exported_functions[fi]
+        if not header_text.contains(fn_name + "("):
+            errors.push("Missing declaration for exported function: {fn_name}")
+        fi = fi + 1
+
+    # Check for duplicate declarations
+    var seen_decls: [text] = []
+    val lines = header_text.split("\n")
+    var li = 0
+    while li < lines.len():
+        val line = lines[li].trim()
+        # A declaration line ends with ");" and is not a comment or static_assert
+        if line.ends_with(");") and not line.starts_with("/*") and not line.starts_with("//") and not line.starts_with("_Static_assert") and not line.starts_with("static_assert"):
+            if seen_decls.contains(line):
+                errors.push("Duplicate declaration: {line}")
+            else:
+                seen_decls.push(line)
+        li = li + 1
+
+    # Check all exported types have forward declarations (typedef or struct)
+    var ti = 0
+    while ti < exported_types.len():
+        val type_name = exported_types[ti]
+        val has_typedef = header_text.contains("typedef struct " + type_name) or header_text.contains("typedef " + type_name)
+        val has_class = header_text.contains("class " + type_name)
+        if not has_typedef and not has_class:
+            errors.push("Missing forward declaration for exported type: {type_name}")
+        ti = ti + 1
+
+    if errors.len() > 0:
+        ValidationResult.fail(errors)
+    else:
+        ValidationResult.ok()
+
+# ============================================================================
+# Export
+# ============================================================================

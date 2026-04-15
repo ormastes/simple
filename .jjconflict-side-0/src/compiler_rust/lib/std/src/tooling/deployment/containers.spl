@@ -1,0 +1,483 @@
+#![allow(unknown_attribute, bare_bool)]
+# Container Image Generation
+# Generate Docker/OCI container images
+
+@allow(primitive_api, bare_bool)
+
+use tooling.core.project.Language
+use core.result.{Result, Ok, Err}
+
+# FFI for process execution and file operations
+@extern("runtime", "rt_process_run")
+fn _rt_process_run(cmd_ptr: &u8, cmd_len: u64, args_ptr: &u8, args_len: u64) -> (i32, text, text)
+
+@extern("runtime", "rt_file_write_text")
+fn _rt_file_write_text(path_ptr: &u8, path_len: u64, content_ptr: &u8, content_len: u64) -> bool
+
+# Base image selection
+pub enum BaseImage:
+    Alpine(text)      # Alpine Linux version
+    Debian(text)      # Debian version
+    Ubuntu(text)      # Ubuntu version
+    Scratch             # Empty base image
+    Custom(text)      # Custom base image
+
+    pub fn to_string(self) -> text:
+        """Convert base image to string.
+
+        Returns:
+            Image string
+        """
+        match self:
+            BaseImage.Alpine(v): "alpine:{v}"
+            BaseImage.Debian(v): "debian:{v}"
+            BaseImage.Ubuntu(v): "ubuntu:{v}"
+            BaseImage.Scratch: "scratch"
+            BaseImage.Custom(img): img
+
+    pub fn description(self) -> text:
+        """Get base image description.
+
+        Returns:
+            Human-readable description
+        """
+        match self:
+            BaseImage.Alpine(_): "Alpine Linux (minimal)"
+            BaseImage.Debian(_): "Debian GNU/Linux"
+            BaseImage.Ubuntu(_): "Ubuntu Linux"
+            BaseImage.Scratch: "Empty base image"
+            BaseImage.Custom(_): "Custom base image"
+
+    pub fn is_alpine(self) -> bool:
+        """Check if Alpine base.
+
+        Returns:
+            True for Alpine
+        """
+        match self:
+            BaseImage.Alpine(_): true
+            _: false
+
+    pub fn is_scratch(self) -> bool:
+        """Check if scratch base.
+
+        Returns:
+            True for Scratch
+        """
+        match self:
+            BaseImage.Scratch: true
+            _: false
+
+    pub fn is_debian(self) -> bool:
+        """Check if Debian base.
+
+        Returns:
+            True for Debian
+        """
+        match self:
+            BaseImage.Debian(_): true
+            _: false
+
+    pub fn is_ubuntu(self) -> bool:
+        """Check if Ubuntu base.
+
+        Returns:
+            True for Ubuntu
+        """
+        match self:
+            BaseImage.Ubuntu(_): true
+            _: false
+
+    pub fn is_custom(self) -> bool:
+        """Check if Custom base.
+
+        Returns:
+            True for Custom
+        """
+        match self:
+            BaseImage.Custom(_): true
+            _: false
+
+    pub fn is_minimal(self) -> bool:
+        """Check if minimal base image.
+
+        Returns:
+            True for Alpine or Scratch
+
+        Example:
+            BaseImage.Alpine("3.18").is_minimal()  # → true
+        """
+        match self:
+            BaseImage.Alpine(_): true
+            BaseImage.Scratch: true
+            _: false
+
+    pub fn is_debian_based(self) -> bool:
+        """Check if Debian-based distribution.
+
+        Returns:
+            True for Debian or Ubuntu
+
+        Example:
+            BaseImage.Ubuntu("22.04").is_debian_based()  # → true
+        """
+        match self:
+            BaseImage.Debian(_): true
+            BaseImage.Ubuntu(_): true
+            _: false
+
+    pub fn summary(self) -> text:
+        """Get base image summary.
+
+        Returns:
+            Human-readable summary
+
+        Example:
+            BaseImage.Alpine("3.18").summary()
+            # → "BaseImage: alpine:3.18 (Alpine Linux (minimal), minimal)"
+        """
+        val name = self.to_string()
+        val desc = self.description()
+        var props = []
+
+        if self.is_minimal():
+            props.append("minimal")
+        if self.is_debian_based():
+            props.append("debian-based")
+
+        if props.len() > 0:
+            val props_str = props.join(", ")
+            "BaseImage: {name} ({desc}, {props_str})"
+        else:
+            "BaseImage: {name} ({desc})"
+
+# Platform target
+pub enum Platform:
+    LinuxAmd64
+    LinuxArm64
+    LinuxArm
+    LinuxS390x
+
+    pub fn to_string(self) -> text:
+        """Convert platform to Docker platform string.
+
+        Returns:
+            Docker platform string
+
+        Example:
+            Platform.LinuxAmd64.to_string()  # → "linux/amd64"
+        """
+        match self:
+            Platform.LinuxAmd64: "linux/amd64"
+            Platform.LinuxArm64: "linux/arm64"
+            Platform.LinuxArm: "linux/arm/v7"
+            Platform.LinuxS390x: "linux/s390x"
+
+    pub fn from_string(platform_str: text) -> Option<Platform>:
+        """Parse platform from string.
+
+        Args:
+            platform_str: Platform string
+
+        Returns:
+            Platform or none
+
+        Example:
+            Platform.from_string("linux/amd64")  # → some(Platform.LinuxAmd64)
+        """
+        match platform_str:
+            "linux/amd64": some(Platform.LinuxAmd64)
+            "linux/arm64": some(Platform.LinuxArm64)
+            "linux/arm/v7": some(Platform.LinuxArm)
+            "linux/s390x": some(Platform.LinuxS390x)
+            _: none
+
+    pub fn description(self) -> text:
+        """Get platform description.
+
+        Returns:
+            Human-readable description
+        """
+        match self:
+            Platform.LinuxAmd64: "Linux AMD64/x86_64"
+            Platform.LinuxArm64: "Linux ARM64/aarch64"
+            Platform.LinuxArm: "Linux ARM v7"
+            Platform.LinuxS390x: "Linux S390x (mainframe)"
+
+    pub fn is_amd64(self) -> bool:
+        """Check if AMD64 platform."""
+        match self:
+            Platform.LinuxAmd64: true
+            _: false
+
+    pub fn is_arm(self) -> bool:
+        """Check if ARM platform."""
+        match self:
+            Platform.LinuxAmd64: false
+            Platform.LinuxArm64: true
+            Platform.LinuxArm: true
+            Platform.LinuxS390x: false
+
+    pub fn is_arm64(self) -> bool:
+        """Check if ARM64 platform.
+
+        Returns:
+            True for LinuxArm64
+        """
+        match self:
+            Platform.LinuxArm64: true
+            _: false
+
+    pub fn is_arm_v7(self) -> bool:
+        """Check if ARM v7 platform.
+
+        Returns:
+            True for LinuxArm
+        """
+        match self:
+            Platform.LinuxArm: true
+            _: false
+
+    pub fn is_s390x(self) -> bool:
+        """Check if S390x platform.
+
+        Returns:
+            True for LinuxS390x
+        """
+        match self:
+            Platform.LinuxS390x: true
+            _: false
+
+    pub fn is_x86_64(self) -> bool:
+        """Check if x86_64/AMD64 platform.
+
+        Returns:
+            True for LinuxAmd64
+
+        Example:
+            Platform.LinuxAmd64.is_x86_64()  # → true
+        """
+        match self:
+            Platform.LinuxAmd64: true
+            _: false
+
+    pub fn is_64_bit(self) -> bool:
+        """Check if 64-bit platform.
+
+        Returns:
+            True for AMD64, ARM64, or S390x
+
+        Example:
+            Platform.LinuxArm64.is_64_bit()  # → true
+            Platform.LinuxArm.is_64_bit()  # → false (32-bit ARM)
+        """
+        match self:
+            Platform.LinuxAmd64: true
+            Platform.LinuxArm64: true
+            Platform.LinuxS390x: true
+            Platform.LinuxArm: false
+
+    pub fn is_common_platform(self) -> bool:
+        """Check if commonly used platform.
+
+        Returns:
+            True for AMD64 or ARM64
+
+        Example:
+            Platform.LinuxAmd64.is_common_platform()  # → true
+        """
+        match self:
+            Platform.LinuxAmd64: true
+            Platform.LinuxArm64: true
+            _: false
+
+    pub fn summary(self) -> text:
+        """Get platform summary.
+
+        Returns:
+            Human-readable summary
+
+        Example:
+            Platform.LinuxAmd64.summary()
+            # → "Platform: linux/amd64 (Linux AMD64/x86_64, x86_64, 64-bit, common)"
+        """
+        val name = self.to_string()
+        val desc = self.description()
+        var props = []
+
+        if self.is_x86_64():
+            props.append("x86_64")
+        if self.is_arm():
+            props.append("arm")
+        if self.is_64_bit():
+            props.append("64-bit")
+        else:
+            props.append("32-bit")
+        if self.is_common_platform():
+            props.append("common")
+
+        val props_str = props.join(", ")
+        "Platform: {name} ({desc}, {props_str})"
+
+# Dockerfile instruction
+pub class DockerInstruction:
+    pub instruction: text
+    pub args: List<text>
+
+    pub fn new(instruction: text, args: List<text>) -> DockerInstruction:
+        """Create Dockerfile instruction.
+
+        Args:
+            instruction: Instruction name (FROM, RUN, COPY, etc.)
+            args: Instruction arguments
+
+        Returns:
+            Dockerfile instruction
+        """
+        DockerInstruction {
+            instruction: instruction,
+            args: args
+        }
+
+    pub fn to_string(self) -> text:
+        """Convert to Dockerfile line.
+
+        Returns:
+            Dockerfile line
+
+        Example:
+            DockerInstruction.new("FROM", ["alpine:3.18"]).to_string()
+            # → "FROM alpine:3.18"
+        """
+        "{self.instruction} {self.args.join(' ')}"
+
+# Dockerfile builder
+@allow(primitive_api)
+pub class DockerfileBuilder:
+    pub instructions: List<DockerInstruction>
+    pub multi_stage: bool
+
+    pub fn new() -> DockerfileBuilder:
+        """Create Dockerfile builder.
+
+        Returns:
+            Empty builder
+        """
+        DockerfileBuilder {
+            instructions: [],
+            multi_stage: false
+        }
+
+    pub fn from_base(self, base: BaseImage):
+        """Add FROM instruction.
+
+        Args:
+            base: Base image
+        """
+        val base_str = match base:
+            BaseImage.Alpine(version): "alpine:{version}"
+            BaseImage.Debian(version): "debian:{version}"
+            BaseImage.Ubuntu(version): "ubuntu:{version}"
+            BaseImage.Scratch: "scratch"
+            BaseImage.Custom(image): image
+
+        self.add_instruction("FROM", [base_str])
+
+    pub fn add_instruction(self, instruction: text, args: List<text>):
+        """Add instruction.
+
+        Args:
+            instruction: Instruction name
+            args: Arguments
+        """
+        val instr = DockerInstruction.new(instruction, args)
+        self.instructions.append(instr)
+
+    pub fn run(self, command: text):
+        """Add RUN instruction.
+
+        Args:
+            command: Command to run
+        """
+        self.add_instruction("RUN", [command])
+
+    pub fn copy(self, source: text, dest: text):
+        """Add COPY instruction.
+
+        Args:
+            source: Source path
+            dest: Destination path
+        """
+        self.add_instruction("COPY", [source, dest])
+
+    pub fn workdir(self, dir: text):
+        """Add WORKDIR instruction.
+
+        Args:
+            dir: Working directory
+        """
+        self.add_instruction("WORKDIR", [dir])
+
+    pub fn entrypoint(self, cmd: List<text>):
+        """Add ENTRYPOINT instruction.
+
+        Args:
+            cmd: Entrypoint command
+        """
+        val json_array = "[{cmd.map(fn(s): f'\"{s}\"').join(', ')}]"
+        self.add_instruction("ENTRYPOINT", [json_array])
+
+    pub fn env(self, key: text, value: text):
+        """Add ENV instruction.
+
+        Args:
+            key: Environment variable name
+            value: Environment variable value
+        """
+        self.add_instruction("ENV", ["{key}={value}"])
+
+    pub fn generate(self) -> text:
+        """Generate Dockerfile content.
+
+        Returns:
+            Dockerfile as string
+
+        Example:
+            val dockerfile = builder.generate()
+            # Write to file
+        """
+        var content = ""
+
+        for instr in self.instructions:
+            content += instr.to_string() + "\n"
+
+        content
+
+    pub fn validate(self) -> bool:
+        """Validate Dockerfile has required instructions.
+
+        Returns:
+            True if valid
+
+        Checks for:
+        - At least one FROM instruction
+        - Instructions in valid order
+        """
+        if self.instructions.len() == 0:
+            return false
+
+        # First instruction must be FROM
+        if self.instructions[0].instruction != "FROM":
+            return false
+
+        true
+
+    pub fn instruction_count(self) -> i32:
+        """Get instruction count.
+
+        Returns:
+            Number of instructions
+        """
+        self.instructions.len()
+
+# ContainerBuilder and ContainerImage are in containers_build.spl

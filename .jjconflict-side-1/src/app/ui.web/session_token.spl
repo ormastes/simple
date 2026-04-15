@@ -1,0 +1,146 @@
+# Session Token — HMAC-SHA256-signed bearer tokens for the Web UI.
+#
+# Token format (URL-safe, dot-separated):
+#   <token_id>.<grant_id>.<origin_b64>.<expires_at_ms>.<signature_hex>
+#
+# HMAC primitive: common.crypto.hmac::hmac_sha256(key: text, message: text) -> list
+#   Path: src/lib/common/crypto/hmac.spl
+#   hex encoding: common.crypto.types::bytes_to_hex
+#
+# Secret source: env SIMPLE_UI_WEB_TOKEN_SECRET (required in TLS mode;
+#   in plain-TCP dev mode a random-looking secret is derived from startup time
+#   and a warning is logged).
+
+use app.ui.web.origin_guard.{AuthError}
+use common.crypto.hmac.{hmac_sha256}
+use common.crypto.types.{bytes_to_hex}
+
+extern fn rt_env_get(key: text) -> text
+extern fn rt_random_hex(len: i64) -> text   # runtime: produce N hex-encoded random bytes
+extern fn rt_time_ms() -> u64               # runtime: current epoch milliseconds
+
+# =========================================================================
+# SessionToken
+# =========================================================================
+
+val TOKEN_TTL_DEFAULT_MS: u64 = 3600000u64  # 1 hour
+
+class SessionToken:
+    token_id: text       # opaque 32-byte random, hex-encoded (64 hex chars)
+    grant_id: text       # CapabilityPolicy grant id
+    origin: text
+    expires_at_ms: u64
+    signature: text      # HMAC-SHA256 over (token_id || "." || grant_id || "." || origin || "." || str(expires_at_ms))
+
+    static fn issue(grant_id: text, origin: text, ttl_ms: u64, secret: text) -> SessionToken:
+        """Mint a new signed SessionToken."""
+        val token_id = rt_random_hex(32)
+        val exp = rt_time_ms() + ttl_ms
+        val payload = _token_payload(token_id, grant_id, origin, exp)
+        val sig = bytes_to_hex(hmac_sha256(secret, payload))
+        return SessionToken(
+            token_id: token_id,
+            grant_id: grant_id,
+            origin: origin,
+            expires_at_ms: exp,
+            signature: sig
+        )
+
+    fn serialize(self) -> text:
+        """Serialize to dot-separated URL-safe string."""
+        val origin_enc = _url_encode(self.origin)
+        return "{self.token_id}.{self.grant_id}.{origin_enc}.{self.expires_at_ms}.{self.signature}"
+
+    static fn parse(s: text) -> Result<SessionToken, AuthError>:
+        """Parse a serialized token string."""
+        val parts = s.split(".")
+        # We need exactly 5 parts: token_id, grant_id, origin_enc, expires_at_ms, signature
+        # Note: signature is 64 hex chars (no dots), origin_enc may contain %2E but not raw dots
+        if parts.len() != 5:
+            return Err(AuthError.InvalidToken)
+        val token_id = parts[0]
+        val grant_id = parts[1]
+        val origin = _url_decode(parts[2])
+        val exp_str = parts[3]
+        val sig = parts[4]
+        if token_id == "" or grant_id == "" or exp_str == "" or sig == "":
+            return Err(AuthError.InvalidToken)
+        val exp = exp_str.to_u64()
+        return Ok(SessionToken(
+            token_id: token_id,
+            grant_id: grant_id,
+            origin: origin,
+            expires_at_ms: exp,
+            signature: sig
+        ))
+
+# =========================================================================
+# verify — top-level function per contract
+# =========================================================================
+
+fn verify(serialized: text, origin: text, secret: text, now_ms: u64) -> Result<SessionToken, AuthError>:
+    """Verify a serialized token: parse, check expiry, check origin, verify HMAC."""
+    val tok_result = SessionToken.parse(serialized)
+    match tok_result:
+        Err(e): return Err(e)
+        Ok(tok):
+            if tok.expires_at_ms < now_ms:
+                return Err(AuthError.ExpiredToken)
+            if tok.origin != origin:
+                return Err(AuthError.OriginMismatch)
+            val payload = _token_payload(tok.token_id, tok.grant_id, tok.origin, tok.expires_at_ms)
+            val expected_sig = bytes_to_hex(hmac_sha256(secret, payload))
+            if expected_sig != tok.signature:
+                return Err(AuthError.InvalidToken)
+            return Ok(tok)
+
+# =========================================================================
+# load_secret — read HMAC secret from env; dev-mode fallback
+# =========================================================================
+
+fn load_secret(tls_mode: bool) -> text:
+    """Read SIMPLE_UI_WEB_TOKEN_SECRET from env.
+    In TLS mode the variable is required — panics if missing.
+    In plain-TCP dev mode a deterministic fallback is used and a warning is printed."""
+    val s = rt_env_get("SIMPLE_UI_WEB_TOKEN_SECRET") ?? ""
+    if s != "":
+        return s
+    if tls_mode:
+        print "FATAL: SIMPLE_UI_WEB_TOKEN_SECRET env var is required in --tls mode"
+        # We cannot panic; return empty — caller must check
+        return ""
+    print "WARNING: SIMPLE_UI_WEB_TOKEN_SECRET unset; using insecure dev secret. Do not use in production."
+    return "dev-insecure-secret-" + rt_random_hex(8)
+
+# =========================================================================
+# Private helpers
+# =========================================================================
+
+fn _token_payload(token_id: text, grant_id: text, origin: text, exp: u64) -> text:
+    return "{token_id}.{grant_id}.{origin}.{exp}"
+
+fn _url_encode(s: text) -> text:
+    """Minimal percent-encode: replace '.' with '%2E' so origin dots don't split."""
+    var result = ""
+    var i = 0
+    while i < s.len():
+        val ch = s[i]
+        if ch == ".":
+            result = "{result}%2E"
+        else:
+            result = "{result}{ch}"
+        i = i + 1
+    return result
+
+fn _url_decode(s: text) -> text:
+    """Decode %2E back to '.'."""
+    var result = ""
+    var i = 0
+    while i < s.len():
+        if (i + 2 < s.len()) and s[i] == "%" and s[i+1] == "2" and (s[i+2] == "E" or s[i+2] == "e"):
+            result = "{result}."
+            i = i + 3
+        else:
+            result = "{result}{s[i]}"
+            i = i + 1
+    return result

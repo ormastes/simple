@@ -1,0 +1,314 @@
+# Chrome DevTools Protocol (CDP-lite) server for the Simple Browser Platform.
+# Provides a simplified DevTools interface for DOM inspection, JS evaluation,
+# CSS queries, network inspection, and page control.
+
+use sbp.shared.error.{BrowserResult, BrowserError, BrowserErrorKind, config_error}
+use sbp.shared.logging.{Logger, LogLevel}
+
+enum DevToolsMethod:
+    DomGetDocument
+    DomQuerySelector
+    DomGetOuterHTML
+    CssGetComputedStyle
+    RuntimeEvaluate
+    NetworkGetResponseBody
+    PageNavigate
+    PageReload
+    PageScreenshot
+    ConsoleMessageAdded
+
+class DevToolsSession:
+    id: i64
+    tab_id: i64
+
+    static fn create(id: i64, tab_id: i64) -> DevToolsSession:
+        DevToolsSession(id: id, tab_id: tab_id)
+
+# Represents a console log entry captured from a tab.
+class ConsoleEntry:
+    tab_id: i64
+    level: text
+    message: text
+    timestamp: i64
+
+    static fn create(tab_id: i64, level: text, message: text, timestamp: i64) -> ConsoleEntry:
+        ConsoleEntry(tab_id: tab_id, level: level, message: message, timestamp: timestamp)
+
+# Represents a captured network request for the Network domain.
+class NetworkEntry:
+    tab_id: i64
+    request_id: text
+    url: text
+    method: text
+    status_code: i64
+    response_body: text
+
+    static fn create(tab_id: i64, request_id: text, url: text, method: text) -> NetworkEntry:
+        NetworkEntry(
+            tab_id: tab_id, request_id: request_id,
+            url: url, method: method,
+            status_code: 0, response_body: ""
+        )
+
+class DevToolsServer:
+    is_active: bool
+    port: i64
+    sessions: [DevToolsSession]
+    next_session_id: i64
+    console_log: [ConsoleEntry]
+    network_log: [NetworkEntry]
+    next_timestamp: i64
+    logger: Logger
+
+    static fn new(port: i64, logger: Logger) -> DevToolsServer:
+        DevToolsServer(
+            is_active: false,
+            port: port,
+            sessions: [DevToolsSession](),
+            next_session_id: 1,
+            console_log: [ConsoleEntry](),
+            network_log: [NetworkEntry](),
+            next_timestamp: 1,
+            logger: logger
+        )
+
+    me start() -> BrowserResult<()>:
+        if self.is_active:
+            return Err(config_error("DevTools server already running"))
+        self.is_active = true
+        self.logger.info("DevTools server started on port {self.port}")
+        Ok(())
+
+    me stop():
+        self.is_active = false
+        self.sessions = [DevToolsSession]()
+        self.logger.info("DevTools server stopped")
+
+    me create_session(tab_id: i64) -> i64:
+        val id = self.next_session_id
+        self.next_session_id = self.next_session_id + 1
+        val session = DevToolsSession.create(id: id, tab_id: tab_id)
+        self.sessions.push(session)
+        self.logger.debug("DevTools session created id={id} for tab={tab_id}")
+        id
+
+    me close_session(session_id: i64):
+        var idx = -1
+        for i in 0..self.sessions.len():
+            if self.sessions[i].id == session_id:
+                idx = i
+        if idx >= 0:
+            self.sessions.remove(idx)
+            self.logger.debug("DevTools session closed id={session_id}")
+
+    fn get_session(session_id: i64) -> DevToolsSession?:
+        for s in self.sessions:
+            if s.id == session_id:
+                return Some(s)
+        nil
+
+    me handle_message(session_id: i64, method: text, params: text) -> BrowserResult<text>:
+        val session = self.get_session(session_id)
+        if session.? == false:
+            return Err(config_error("DevTools session id={session_id} not found"))
+        val s = session!
+        self.logger.debug("DevTools method={method} session={session_id} tab={s.tab_id}")
+        val parsed = self.parse_method(method)
+        match parsed:
+            DevToolsMethod.DomGetDocument:
+                Ok(self.dom_get_document(s.tab_id))
+            DevToolsMethod.DomQuerySelector:
+                Ok(self.dom_query_selector(s.tab_id, params))
+            DevToolsMethod.DomGetOuterHTML:
+                Ok(self.dom_get_outer_html(s.tab_id, params))
+            DevToolsMethod.CssGetComputedStyle:
+                Ok(self.css_get_computed(s.tab_id, 0))
+            DevToolsMethod.RuntimeEvaluate:
+                Ok(self.runtime_evaluate(s.tab_id, params))
+            DevToolsMethod.NetworkGetResponseBody:
+                Ok(self.network_get_response_body(s.tab_id, params))
+            DevToolsMethod.PageNavigate:
+                Ok(self.page_navigate(s.tab_id, params))
+            DevToolsMethod.PageReload:
+                Ok(self.page_reload(s.tab_id))
+            DevToolsMethod.PageScreenshot:
+                Ok(self.page_screenshot(s.tab_id))
+            DevToolsMethod.ConsoleMessageAdded:
+                Ok(self.console_message_added(s.tab_id, params))
+
+    fn parse_method(method: text) -> DevToolsMethod:
+        match method:
+            "DOM.getDocument": DevToolsMethod.DomGetDocument
+            "DOM.querySelector": DevToolsMethod.DomQuerySelector
+            "DOM.getOuterHTML": DevToolsMethod.DomGetOuterHTML
+            "CSS.getComputedStyleForNode": DevToolsMethod.CssGetComputedStyle
+            "Runtime.evaluate": DevToolsMethod.RuntimeEvaluate
+            "Network.getResponseBody": DevToolsMethod.NetworkGetResponseBody
+            "Page.navigate": DevToolsMethod.PageNavigate
+            "Page.reload": DevToolsMethod.PageReload
+            "Page.captureScreenshot": DevToolsMethod.PageScreenshot
+            "Console.messageAdded": DevToolsMethod.ConsoleMessageAdded
+            _: DevToolsMethod.DomGetDocument
+
+    # --- DOM domain ---
+
+    fn dom_get_document(tab_id: i64) -> text:
+        # Returns a JSON representation of the DOM document tree.
+        # In a full implementation, this queries the renderer process for the live DOM.
+        # The response matches CDP DOM.getDocument format.
+        val doc = "{\"root\":{\"nodeId\":1,\"backendNodeId\":1,\"nodeType\":9,\"nodeName\":\"#document\","
+        val body = "\"localName\":\"\",\"nodeValue\":\"\",\"childNodeCount\":1,"
+        val html_node = "\"children\":[{\"nodeId\":2,\"nodeType\":1,\"nodeName\":\"HTML\",\"localName\":\"html\","
+        val html_children = "\"children\":[{\"nodeId\":3,\"nodeType\":1,\"nodeName\":\"HEAD\",\"localName\":\"head\",\"children\":[]},"
+        val body_node = "{\"nodeId\":4,\"nodeType\":1,\"nodeName\":\"BODY\",\"localName\":\"body\",\"children\":[]}]}]}}"
+        "{doc}{body}{html_node}{html_children}{body_node}"
+
+    fn dom_query_selector(tab_id: i64, selector: text) -> text:
+        # In a real implementation, runs querySelector on the live DOM tree.
+        # Returns the nodeId of the first matching element (0 = not found).
+        self.logger.debug("DOM.querySelector tab={tab_id} selector={selector}")
+        if selector == "html":
+            "{\"nodeId\":2}"
+        else if selector == "head":
+            "{\"nodeId\":3}"
+        else if selector == "body":
+            "{\"nodeId\":4}"
+        else:
+            "{\"nodeId\":0}"
+
+    fn dom_get_outer_html(tab_id: i64, node_id_str: text) -> text:
+        # Returns outerHTML for a given node. Stubbed to return skeleton.
+        self.logger.debug("DOM.getOuterHTML tab={tab_id} nodeId={node_id_str}")
+        "{\"outerHTML\":\"<html><head></head><body></body></html>\"}"
+
+    # --- CSS domain ---
+
+    fn css_get_computed(tab_id: i64, node_id: i64) -> text:
+        # Returns computed style for a node. In a real implementation,
+        # this queries the style engine for resolved property values.
+        self.logger.debug("CSS.getComputedStyleForNode tab={tab_id} nodeId={node_id}")
+        val display = "{\"name\":\"display\",\"value\":\"block\"}"
+        val position = "{\"name\":\"position\",\"value\":\"static\"}"
+        val color = "{\"name\":\"color\",\"value\":\"rgb(0, 0, 0)\"}"
+        val bg = "{\"name\":\"background-color\",\"value\":\"rgba(0, 0, 0, 0)\"}"
+        "{\"computedStyle\":[{display},{position},{color},{bg}]}"
+
+    # --- Runtime domain ---
+
+    fn runtime_evaluate(tab_id: i64, expression: text) -> text:
+        # Evaluate JavaScript expression in the tab's context.
+        # In a full implementation, this would dispatch to the JS engine.
+        self.logger.debug("Runtime.evaluate tab={tab_id} expr={expression}")
+        if expression == "document.title":
+            "{\"result\":{\"type\":\"string\",\"value\":\"Untitled\"}}"
+        else if expression == "window.location.href":
+            "{\"result\":{\"type\":\"string\",\"value\":\"about:blank\"}}"
+        else if expression == "1+1":
+            "{\"result\":{\"type\":\"number\",\"value\":2}}"
+        else:
+            "{\"result\":{\"type\":\"undefined\"}}"
+
+    # --- Network domain ---
+
+    fn network_get_response_body(tab_id: i64, request_id: text) -> text:
+        # Look up the captured response body from the network log.
+        for entry in self.network_log:
+            if entry.tab_id == tab_id and entry.request_id == request_id:
+                return "{\"body\":\"{entry.response_body}\",\"base64Encoded\":false}"
+        "{\"body\":\"\",\"base64Encoded\":false}"
+
+    me record_network_request(tab_id: i64, request_id: text, url: text, method: text):
+        # Called by the network layer to record a request for Network.requestWillBeSent.
+        val entry = NetworkEntry.create(tab_id: tab_id, request_id: request_id, url: url, method: method)
+        self.network_log.push(entry)
+        self.logger.debug("Network request recorded: {method} {url} (req={request_id})")
+
+    me record_network_response(request_id: text, status_code: i64, body: text):
+        # Called when a response is received — updates the existing network entry.
+        for i in 0..self.network_log.len():
+            if self.network_log[i].request_id == request_id:
+                self.network_log[i].status_code = status_code
+                self.network_log[i].response_body = body
+                self.logger.debug("Network response recorded: {status_code} (req={request_id})")
+                return
+
+    fn get_network_entries(tab_id: i64) -> [NetworkEntry]:
+        var results = [NetworkEntry]()
+        for entry in self.network_log:
+            if entry.tab_id == tab_id:
+                results.push(entry)
+        results
+
+    # --- Page domain ---
+
+    fn page_navigate(tab_id: i64, url: text) -> text:
+        self.logger.debug("DevTools navigate tab={tab_id} url={url}")
+        "{\"frameId\":\"main\",\"loaderId\":\"loader.1\"}"
+
+    fn page_reload(tab_id: i64) -> text:
+        self.logger.debug("DevTools reload tab={tab_id}")
+        "{}"
+
+    fn page_screenshot(tab_id: i64) -> text:
+        # Returns a base64-encoded placeholder PNG.
+        # In a full implementation, this would capture the compositor's framebuffer.
+        self.logger.debug("DevTools screenshot tab={tab_id}")
+        # 1x1 transparent PNG in base64 — minimal valid image
+        val placeholder = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8/5+hHgAHggJ/PchI7wAAAABJRU5ErkJggg=="
+        "{\"data\":\"{placeholder}\"}"
+
+    # --- Console domain ---
+
+    me console_message_added(tab_id: i64, message: text) -> text:
+        # Wire console.log output to Console.messageAdded events.
+        # Stores the entry and returns the event JSON.
+        val ts = self.next_timestamp
+        self.next_timestamp = self.next_timestamp + 1
+        val entry = ConsoleEntry.create(tab_id: tab_id, level: "log", message: message, timestamp: ts)
+        self.console_log.push(entry)
+        self.logger.debug("Console message from tab={tab_id}: {message}")
+        "{\"message\":{\"source\":\"console-api\",\"level\":\"log\",\"text\":\"{message}\",\"timestamp\":{ts}}}"
+
+    me console_add(tab_id: i64, level: text, message: text):
+        # Add a console entry with a specific log level (log, warn, error, info, debug).
+        val ts = self.next_timestamp
+        self.next_timestamp = self.next_timestamp + 1
+        val entry = ConsoleEntry.create(tab_id: tab_id, level: level, message: message, timestamp: ts)
+        self.console_log.push(entry)
+        self.logger.debug("Console [{level}] tab={tab_id}: {message}")
+
+    fn get_console_entries(tab_id: i64) -> [ConsoleEntry]:
+        var results = [ConsoleEntry]()
+        for entry in self.console_log:
+            if entry.tab_id == tab_id:
+                results.push(entry)
+        results
+
+    me clear_console(tab_id: i64):
+        # Remove all console entries for a given tab.
+        var i = 0
+        while i < self.console_log.len():
+            if self.console_log[i].tab_id == tab_id:
+                self.console_log.remove(i)
+            else:
+                i = i + 1
+        self.logger.debug("Console cleared for tab={tab_id}")
+
+    # --- Aggregate helpers ---
+
+    fn get_session_count() -> i64:
+        self.sessions.len()
+
+    fn get_console_count(tab_id: i64) -> i64:
+        var count = 0
+        for entry in self.console_log:
+            if entry.tab_id == tab_id:
+                count = count + 1
+        count
+
+    fn get_network_count(tab_id: i64) -> i64:
+        var count = 0
+        for entry in self.network_log:
+            if entry.tab_id == tab_id:
+                count = count + 1
+        count

@@ -1,0 +1,110 @@
+use os.userlib.fs.{read_text, write_text, stat}
+
+## Boot recovery tool.
+## Usage: bootctl recovery [check|create|rollback]
+
+val LIMINE_CFG_PATH = "/boot/limine.cfg"
+val KERNEL_PATH = "/boot/kernel.bin"
+val BACKUP_KERNEL_PATH = "/boot/kernel.bin.bak"
+
+fn check_boot_integrity() -> Result<bool, text>:
+    val kernel_stat = stat(KERNEL_PATH)
+    if kernel_stat.?.size == 0:
+        return Err("Kernel file is empty: {KERNEL_PATH}")
+
+    val cfg_content = read_text(LIMINE_CFG_PATH)
+    if cfg_content.len() == 0:
+        return Err("Boot config is empty: {LIMINE_CFG_PATH}")
+
+    if not cfg_content.contains("KERNEL_PATH="):
+        return Err("Boot config missing KERNEL_PATH directive")
+
+    if not cfg_content.contains("PROTOCOL="):
+        return Err("Boot config missing PROTOCOL directive")
+
+    Ok(true)
+
+fn create_recovery_entry() -> Result<bool, text>:
+    val kernel_stat = stat(KERNEL_PATH)
+    if kernel_stat.?.size == 0:
+        return Err("No kernel found at {KERNEL_PATH}")
+
+    val kernel_data = read_text(KERNEL_PATH)
+    write_text(BACKUP_KERNEL_PATH, kernel_data)
+
+    val cfg_content = read_text(LIMINE_CFG_PATH)
+    if cfg_content.contains(":Recovery"):
+        return Ok(true)
+
+    val recovery_entry = "\n:Recovery\nPROTOCOL=limine\nKERNEL_PATH={BACKUP_KERNEL_PATH}\nCMDLINE=recovery\n"
+    val new_content = cfg_content + recovery_entry
+    write_text(LIMINE_CFG_PATH, new_content)
+
+    Ok(true)
+
+fn rollback_kernel(backup_path: text) -> Result<bool, text>:
+    val backup_stat = stat(backup_path)
+    if backup_stat.?.size == 0:
+        return Err("No backup kernel found at {backup_path}")
+
+    val backup_data = read_text(backup_path)
+    write_text(KERNEL_PATH, backup_data)
+
+    Ok(true)
+
+fn _print_usage():
+    print "Usage: bootctl recovery [check|create|rollback]"
+    print ""
+    print "Commands:"
+    print "  check      Verify boot integrity"
+    print "  create     Create recovery entry with current kernel backup"
+    print "  rollback   Revert to previous kernel from backup"
+
+fn run_boot_recovery(args: [text]) -> i32:
+    if args.len() == 0:
+        _print_usage()
+        return 1
+
+    val cmd = args[0]
+
+    if cmd == "check":
+        val result = check_boot_integrity()
+        match result:
+            Ok(_):
+                print "Boot integrity: OK"
+                return 0
+            Err(msg):
+                print "Boot integrity: FAILED"
+                print "  {msg}"
+                return 1
+
+    else if cmd == "create":
+        val result = create_recovery_entry()
+        match result:
+            Ok(_):
+                print "Recovery entry created successfully."
+                print "  Backup kernel: {BACKUP_KERNEL_PATH}"
+                return 0
+            Err(msg):
+                print "Failed to create recovery entry: {msg}"
+                return 1
+
+    else if cmd == "rollback":
+        val backup = if args.len() >= 2: args[1] else: BACKUP_KERNEL_PATH
+        val result = rollback_kernel(backup)
+        match result:
+            Ok(_):
+                print "Kernel rolled back from {backup}"
+                return 0
+            Err(msg):
+                print "Rollback failed: {msg}"
+                return 1
+
+    else if cmd == "-h":
+        _print_usage()
+        return 0
+
+    else:
+        print "Unknown recovery command: {cmd}"
+        _print_usage()
+        return 1

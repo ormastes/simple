@@ -1,0 +1,121 @@
+# Vulkan backend specification
+# Tests PipelineKey caching, triangulation, vertex buffers, render passes,
+# and CommandBufferRecord production from SkPicture.
+
+use std.sspec.*
+use std.skia.entity.geometry.{SkRect, SkPoint}
+use std.skia.entity.paint.{SkPaint, sk_paint_new, sk_paint_fill, sk_paint_stroke}
+use std.skia.entity.path.{SkPath, SkPathVerb, SkPathSegment, sk_path_new}
+use std.skia.entity.picture.{SkPicture, SkPictureOp, sk_picture_empty}
+use std.skia.entity.enums.{SkBlendMode, SkPaintStyle}
+use std.skia.entity.color.{SkColor, sk_color_black}
+use std.skia.backend.vulkan.backend.{
+    VulkanBackend, PipelineKey, ShaderModule, ShaderKind,
+    Vertex, VertexBuffer, DescriptorSet, RenderPassDesc,
+    CommandBufferRecord, VkCommandKind,
+    vk_backend_new,
+    triangulate_path, build_vertex_buffer,
+    compile_shader_module, allocate_descriptor_set,
+    render_pass_for_save_layer
+}
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+fn _fill_paint() -> SkPaint:
+    sk_paint_new()
+
+fn _stroke_paint() -> SkPaint:
+    val base = sk_paint_new()
+    base.with_style(SkPaintStyle.Stroke)
+
+fn _blend_paint(bm: SkBlendMode) -> SkPaint:
+    val base = sk_paint_new()
+    base.with_blend_mode(bm)
+
+fn _triangle_path() -> SkPath:
+    val p0 = sk_path_new()
+    val p1 = p0.move_to(0.0, 0.0)
+    val p2 = p1.line_to(10.0, 0.0)
+    val p3 = p2.line_to(5.0, 8.0)
+    p3.close()
+
+fn _square_path() -> SkPath:
+    val p0 = sk_path_new()
+    val p1 = p0.move_to(0.0, 0.0)
+    val p2 = p1.line_to(10.0, 0.0)
+    val p3 = p2.line_to(10.0, 10.0)
+    val p4 = p3.line_to(0.0, 10.0)
+    p4.close()
+
+fn _picture_with_ops(n: i64) -> SkPicture:
+    val cull = SkRect(left: 0.0, top: 0.0, right: 100.0, bottom: 100.0)
+    SkPicture(cull_rect: cull, op_count: n, ops: [SkPictureOp]())
+
+# ---------------------------------------------------------------------------
+# Tests
+# ---------------------------------------------------------------------------
+
+describe "VulkanBackend":
+    it "empty picture produces empty CommandBufferRecord":
+        var backend = vk_backend_new()
+        val picture = sk_picture_empty()
+        val cull = SkRect(left: 0.0, top: 0.0, right: 100.0, bottom: 100.0)
+        val cb = backend.render_picture(picture, cull)
+        expect(cb.commands.len()).to_equal(0)
+
+    it "pipeline cache: same paint twice yields 1 unique pipeline and 2 cache hits":
+        var backend = vk_backend_new()
+        val paint = _fill_paint()
+        # Prime cache with first op
+        val p1 = backend.get_or_compile_pipeline(paint)
+        # Second call — should hit cache
+        val p2 = backend.get_or_compile_pipeline(paint)
+        expect(p1.pipeline_id).to_equal(p2.pipeline_id)
+        expect(backend.pipeline_cache.len()).to_equal(1)
+
+    it "different blend modes produce different PipelineKeys":
+        val paint_src_over = _blend_paint(SkBlendMode.SrcOver)
+        val paint_multiply = _blend_paint(SkBlendMode.Multiply)
+        val key1 = PipelineKey(blend_mode: paint_src_over.blend_mode, style: paint_src_over.style, shader_kind: ShaderKind.SolidColor)
+        val key2 = PipelineKey(blend_mode: paint_multiply.blend_mode, style: paint_multiply.style, shader_kind: ShaderKind.SolidColor)
+        val same = key1.equals(key2)
+        expect(same).to_equal(false)
+
+    it "different SkPaintStyle (fill vs stroke) produce different PipelineKeys":
+        val paint_fill   = _fill_paint()
+        val paint_stroke = _stroke_paint()
+        val key1 = PipelineKey(blend_mode: paint_fill.blend_mode,   style: paint_fill.style,   shader_kind: ShaderKind.SolidColor)
+        val key2 = PipelineKey(blend_mode: paint_stroke.blend_mode, style: paint_stroke.style, shader_kind: ShaderKind.SolidColor)
+        val same = key1.equals(key2)
+        expect(same).to_equal(false)
+
+    it "triangulate_path of a triangle yields 3 vertices (1 triangle)":
+        val path = _triangle_path()
+        val verts = triangulate_path(path)
+        expect(verts.len()).to_equal(3)
+
+    it "triangulate_path of a square yields 6 vertices (2 triangles)":
+        val path = _square_path()
+        val verts = triangulate_path(path)
+        expect(verts.len()).to_equal(6)
+
+    it "build_vertex_buffer computes correct byte_count (verts * 16 bytes)":
+        val path = _triangle_path()
+        val verts = triangulate_path(path)
+        val vbuf = build_vertex_buffer(verts)
+        val expected = verts.len() * 16
+        expect(vbuf.byte_count).to_equal(expected)
+
+    it "render_pass_for_save_layer returns RenderPassDesc with matching bounds":
+        val bounds = SkRect(left: 10.0, top: 20.0, right: 80.0, bottom: 60.0)
+        val rp = render_pass_for_save_layer(bounds)
+        val left_ok  = rp.bounds.left  == 10.0
+        val top_ok   = rp.bounds.top   == 20.0
+        val right_ok = rp.bounds.right == 80.0
+        val bot_ok   = rp.bounds.bottom == 60.0
+        expect(left_ok).to_equal(true)
+        expect(top_ok).to_equal(true)
+        expect(right_ok).to_equal(true)
+        expect(bot_ok).to_equal(true)

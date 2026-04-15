@@ -1,0 +1,431 @@
+#![allow(unnamed_duplicate_typed_args)]
+# Simple Language - Query Lint Infrastructure
+#
+# Lint infrastructure and basic checks: source lint entry point,
+# AST lint passes, deprecated patterns, unused variables, unreachable code.
+
+use app.cli.query_helpers.{_count_indent}
+use app.cli.query_rich_common.{_diag_emit_or_collect, _find_in_line, _find_in_line_from, _extract_decl_name, query_file_read_rich, query_file_exists}
+use app.cli.query_lint_checks.{_check_match_exhaustiveness_text, _check_closure_capture_text, _check_ignored_return_text, _check_multiline_bool_text, _check_safety_text, _check_visibility_text}
+use std.report.emitter.lsp.{LspEmitter}
+
+# AST-based lint pass imports
+use compiler.core.ast.{ast_reset, module_get_decls}
+use compiler.core.parser.{parse_module}
+use compiler.semantics.lint.argument_count.{check_argument_count}
+use compiler.semantics.lint.collection_patterns.{check_collection_patterns}
+use compiler.semantics.lint.duplicate_typed_args.{check_duplicate_typed_args}
+use compiler.semantics.lint.stub_impl.{check_stub_impl}
+use compiler.semantics.lint.star_import.{check_star_import_file}
+use compiler.semantics.lint.wide_public.{check_wide_public_file}
+
+fn _emit_lint_if_readable(file: text, format: text):
+    """Emit lint diagnostics if the file is readable."""
+    if query_file_exists(file):
+        val source = query_file_read_rich(file) ?? ""
+        if source != "":
+            _emit_source_lint_diagnostics(file, source, format)
+
+fn _emit_source_lint_diagnostics(file: text, source: text, format: text) -> i64:
+    """Run lint checks and emit diagnostics.
+
+    Performs text-level analysis for:
+    - Unused variables/imports (text heuristic: val/var declarations not referenced)
+    - Deprecated patterns (Type__method syntax, .new() constructors, bare pass)
+    - Unreachable code (statements after return)
+    - Match exhaustiveness (match without wildcard arm)
+
+    Then runs AST-based lint passes for:
+    - ARG001/ARG002: argument count (>7 warn, >12 error)
+    - COLL001-008: collection efficiency anti-patterns
+    - DTYP001: duplicate typed argument detection
+    - STUB001/002: stub implementation detection
+    - W0406: star import warnings
+    - W0404: wide public API warnings
+
+    Returns the number of diagnostics emitted.
+    """
+    val lines = source.split("\n")
+    var count = 0
+    val emitter = LspEmitter.default_emitter()
+
+    # --- Deprecated pattern detection (text-based) ---
+    var li = 0
+    while li < lines.len():
+        val line = lines[li]
+        val trimmed = line.trim()
+        val line_num = li + 1
+
+        # DEPR001: Type__method() calls — identifier containing __ not at start/end
+        count = count + _check_deprecated_double_underscore(trimmed, line_num, file, format, emitter)
+
+        # DEPR002: .new() constructor calls
+        if trimmed.contains(".new("):
+            if format == "json":
+                val col = _find_in_line(trimmed, ".new(") + 1
+                _diag_emit_or_collect("{\"severity\":2,\"code\":\"DEPR002\",\"message\":\"'.new()' constructor is deprecated, use StructName(field: value) syntax\",\"line\":{line_num},\"col\":{col},\"end_line\":{line_num},\"end_col\":{col + 5},\"tags\":[2],\"source\":\"simple-lint\"}")
+            else:
+                print "{file}:{line_num}: warning[DEPR002]: '.new()' constructor is deprecated"
+            count = count + 1
+
+        # DEPR003: Bare 'pass' (not pass_todo, pass_do_nothing, pass_dn)
+        if (trimmed == "pass" or trimmed.starts_with("pass ") or trimmed.starts_with("pass#")):
+            if not trimmed.starts_with("pass_"):
+                if format == "json":
+                    _diag_emit_or_collect("{\"severity\":2,\"code\":\"DEPR003\",\"message\":\"bare 'pass' is deprecated, use pass_do_nothing or pass_todo\",\"line\":{line_num},\"col\":1,\"end_line\":{line_num},\"end_col\":5,\"tags\":[2],\"source\":\"simple-lint\"}")
+                else:
+                    print "{file}:{line_num}: warning[DEPR003]: bare 'pass' is deprecated"
+                count = count + 1
+
+        # UNREACH: Statements after return in same block
+        if _is_return_statement(trimmed):
+            val next_unreachable = _find_next_statement_in_block(lines, li)
+            if next_unreachable > 0:
+                if format == "json":
+                    _diag_emit_or_collect("{\"severity\":2,\"code\":\"UNREACH001\",\"message\":\"unreachable code after return\",\"line\":{next_unreachable},\"col\":1,\"end_line\":{next_unreachable},\"end_col\":1,\"tags\":[1],\"source\":\"simple-lint\"}")
+                else:
+                    print "{file}:{next_unreachable}: warning[UNREACH001]: unreachable code after return"
+                count = count + 1
+
+        li = li + 1
+
+    # --- Unused variable detection (text-based heuristic) ---
+    count = count + _check_unused_vars_text(lines, file, format, emitter)
+
+    # --- Match exhaustiveness (text-based heuristic) ---
+    count = count + _check_match_exhaustiveness_text(lines, file, format, emitter)
+
+    # --- Closure capture warning (text-based heuristic) ---
+    count = count + _check_closure_capture_text(lines, file, format, emitter)
+
+    # --- Ignored return value (text-based heuristic) ---
+    count = count + _check_ignored_return_text(lines, file, format, emitter)
+
+    # --- Multiline boolean without parens (text-based heuristic) ---
+    count = count + _check_multiline_bool_text(lines, file, format, emitter)
+
+    # --- Safety: unsafe operations outside unsafe block (text-based heuristic) ---
+    count = count + _check_safety_text(lines, file, format, emitter)
+
+    # --- Visibility: private access across modules (text-based heuristic) ---
+    count = count + _check_visibility_text(lines, file, format, emitter)
+
+    # --- AST-based lint passes (argument count, collection patterns, etc.) ---
+    count = count + _run_ast_lint_passes(source, file, format, emitter)
+
+    count
+
+fn _is_return_statement(trimmed: text) -> bool:
+    """Check if a trimmed line is a return statement."""
+    (trimmed == "return" or trimmed.starts_with("return "))
+
+fn _find_next_statement_in_block(lines: [text], return_idx: i64) -> i64:
+    """Find the next non-empty statement at the same indentation level after a return.
+    Returns the 1-based line number, or 0 if no unreachable code found.
+    """
+    if return_idx >= lines.len() - 1:
+        return 0
+    val return_line = lines[return_idx]
+    val return_indent = _count_indent(return_line)
+
+    var ni = return_idx + 1
+    while ni < lines.len():
+        val next_line = lines[ni]
+        val next_trimmed = next_line.trim()
+        if next_trimmed == "":
+            ni = ni + 1
+            continue
+        val next_indent = _count_indent(next_line)
+        # If indentation decreased, we left the block
+        if next_indent < return_indent:
+            return 0
+        # If at same indent, it's unreachable code in the same block
+        if next_indent == return_indent:
+            return ni + 1
+        ni = ni + 1
+    0
+
+fn _check_deprecated_double_underscore(trimmed: text, line_num: i64, file: text, format: text, emitter: LspEmitter) -> i64:
+    """Check for Type__method() deprecated call pattern in a line."""
+    # Look for identifier__identifier( pattern
+    var ci = 0
+    var found = 0
+    while ci < trimmed.len() - 3:
+        val ch = trimmed.substring(ci, ci + 1)
+        val is_alpha = (ch >= "a" and ch <= "z") or (ch >= "A" and ch <= "Z") or ch == "_"
+        if is_alpha:
+            var end_ci = ci + 1
+            while end_ci < trimmed.len():
+                val wc = trimmed.substring(end_ci, end_ci + 1)
+                val ww = (wc >= "a" and wc <= "z") or (wc >= "A" and wc <= "Z") or (wc >= "0" and wc <= "9") or wc == "_"
+                if not ww:
+                    break
+                end_ci = end_ci + 1
+            val word = trimmed.substring(ci, end_ci)
+            # Check for __ in the middle (not at start/end, not dunder)
+            if (word.len() > 4 and not word.starts_with("__") and
+                not word.ends_with("__") and word.contains("__")):
+                # Check if followed by (
+                if end_ci < trimmed.len() and trimmed.substring(end_ci, end_ci + 1) == "(":
+                    if format == "json":
+                        _diag_emit_or_collect("{\"severity\":2,\"code\":\"DEPR001\",\"message\":\"'{word}()' uses deprecated Type__method() syntax\",\"line\":{line_num},\"col\":{ci + 1},\"end_line\":{line_num},\"end_col\":{end_ci + 1},\"tags\":[2],\"source\":\"simple-lint\"}")
+                    else:
+                        print "{file}:{line_num}: warning[DEPR001]: '{word}()' uses deprecated Type__method() syntax"
+                    found = found + 1
+            ci = end_ci
+        else:
+            ci = ci + 1
+    found
+
+fn _check_unused_vars_text(lines: [text], file: text, format: text, emitter: LspEmitter) -> i64:
+    """Text-based heuristic for unused variable detection.
+
+    Scans for val/var declarations with _ prefix convention NOT used,
+    and checks if the declared name appears elsewhere in the function body.
+    """
+    var count = 0
+    var li = 0
+    while li < lines.len():
+        val line = lines[li]
+        val trimmed = line.trim()
+
+        # Look for val/var declarations (not _-prefixed names)
+        var decl_name = ""
+        if trimmed.starts_with("val "):
+            decl_name = _extract_decl_name(trimmed.substring(4))
+        elif trimmed.starts_with("var "):
+            decl_name = _extract_decl_name(trimmed.substring(4))
+
+        if decl_name != "" and not decl_name.starts_with("_"):
+            # Find the enclosing function boundaries
+            val fn_range = _find_enclosing_fn_range(lines, li)
+            if fn_range.0 >= 0:
+                # Check if decl_name is referenced elsewhere in the function
+                var referenced = false
+                var ri = fn_range.0
+                while ri <= fn_range.1 and ri < lines.len():
+                    if ri != li:
+                        val rline = lines[ri]
+                        if _word_occurs_in(rline, decl_name):
+                            referenced = true
+                            break
+                    ri = ri + 1
+                if not referenced:
+                    val line_num = li + 1
+                    if format == "json":
+                        val col = _find_in_line(trimmed, decl_name) + 1
+                        val end_col = col + decl_name.len()
+                        _diag_emit_or_collect("{\"severity\":2,\"code\":\"UNUSED001\",\"message\":\"variable '{decl_name}' is declared but never used\",\"line\":{line_num},\"col\":{col},\"end_line\":{line_num},\"end_col\":{end_col},\"tags\":[1],\"source\":\"simple-lint\"}")
+                    else:
+                        print "{file}:{line_num}: warning[UNUSED001]: variable '{decl_name}' is declared but never used"
+                    count = count + 1
+        li = li + 1
+    count
+
+fn _find_enclosing_fn_range(lines: [text], target_idx: i64) -> (i64, i64):
+    """Find the start and end line indices of the enclosing function body.
+    Returns (-1, -1) if not inside a function.
+    """
+    val target_indent = _count_indent(lines[target_idx])
+    # Find function header above
+    var fn_start = -1
+    var si = target_idx - 1
+    while si >= 0:
+        val sline = lines[si]
+        val st = sline.trim()
+        if (st.starts_with("fn ") or st.starts_with("me ") or
+            st.starts_with("static fn ")):
+            fn_start = si
+            break
+        # If we hit a line at indent 0 that is not blank and not a comment, stop
+        val sindent = _count_indent(sline)
+        if sindent == 0 and st != "" and not st.starts_with("#"):
+            if (not st.starts_with("fn ") and not st.starts_with("me ") and
+                not st.starts_with("static fn ")):
+                break
+        si = si - 1
+    if fn_start < 0:
+        return (-1, -1)
+
+    # Find function end (where indent returns to 0 or less than body)
+    var fn_end = fn_start
+    var ei = fn_start + 1
+    while ei < lines.len():
+        val eline = lines[ei]
+        val et = eline.trim()
+        if et == "":
+            ei = ei + 1
+            continue
+        val eindent = _count_indent(eline)
+        if eindent == 0:
+            break
+        fn_end = ei
+        ei = ei + 1
+    (fn_start, fn_end)
+
+fn _word_occurs_in(line: text, word: text) -> bool:
+    """Check if a word occurs as a whole word in a line."""
+    if line.len() < word.len():
+        return false
+    var pos = 0
+    while pos <= line.len() - word.len():
+        val candidate = line.substring(pos, pos + word.len())
+        if candidate == word:
+            var left_ok = true
+            var right_ok = true
+            if pos > 0:
+                val lch = line.substring(pos - 1, pos)
+                val lw = (lch >= "a" and lch <= "z") or (lch >= "A" and lch <= "Z") or (lch >= "0" and lch <= "9") or lch == "_"
+                if lw:
+                    left_ok = false
+            if pos + word.len() < line.len():
+                val rch = line.substring(pos + word.len(), pos + word.len() + 1)
+                val rw = (rch >= "a" and rch <= "z") or (rch >= "A" and rch <= "Z") or (rch >= "0" and rch <= "9") or rch == "_"
+                if rw:
+                    right_ok = false
+            if left_ok and right_ok:
+                return true
+        pos = pos + 1
+    false
+
+fn _find_fn_line_in_source(lines: [text], fn_name: text) -> i64:
+    """Find the 1-based line number of a function definition by name.
+    Searches for 'fn <name>(' or 'me <name>(' patterns.
+    Returns 1 if not found.
+    """
+    var li = 0
+    while li < lines.len():
+        val trimmed = lines[li].trim()
+        if (trimmed.contains("fn {fn_name}(") or
+            trimmed.contains("me {fn_name}(") or
+            trimmed.contains("fn {fn_name} (") or
+            trimmed.starts_with("fn {fn_name}:") or
+            trimmed.starts_with("me {fn_name}:")):
+            return li + 1
+        li = li + 1
+    1
+
+fn _find_use_line_in_source(lines: [text], module_path: text) -> i64:
+    """Find the 1-based line number of a use/import statement by module path.
+    Returns 1 if not found.
+    """
+    var li = 0
+    while li < lines.len():
+        val trimmed = lines[li].trim()
+        if trimmed.starts_with("use ") and trimmed.contains(module_path):
+            return li + 1
+        if trimmed.starts_with("import ") and trimmed.contains(module_path):
+            return li + 1
+        li = li + 1
+    1
+
+fn _severity_text_to_json(severity: text) -> i64:
+    """Convert severity string to LSP severity number.
+    1=Error, 2=Warning, 3=Information, 4=Hint
+    """
+    if severity == "error" or severity == "ERROR" or severity == "CRITICAL":
+        return 1
+    if severity == "WARNING" or severity == "warning":
+        return 2
+    if severity == "INFO" or severity == "info" or severity == "MEDIUM":
+        return 3
+    if severity == "HIGH":
+        return 2
+    2
+
+fn _run_ast_lint_passes(source: text, file: text, format: text, emitter: LspEmitter) -> i64:
+    """Parse source into AST and run all AST-based lint passes.
+
+    Runs the following checks after parsing the source:
+    - ARG001/ARG002: argument count (>7 warn, >12 error)
+    - COLL001-008: collection efficiency anti-patterns
+    - DTYP001: duplicate typed argument detection
+    - STUB001/002: stub implementation detection
+    - W0406: star import warnings
+    - W0404: wide public API warnings
+
+    Returns the number of diagnostics emitted.
+    """
+    var count = 0
+    val lines = source.split("\n")
+
+    # Parse source into AST arena
+    ast_reset()
+    parse_module(source, file)
+    val decl_indices = module_get_decls()
+
+    if decl_indices.len() == 0:
+        return 0
+
+    # --- C1: ARG001/ARG002 — argument count checks ---
+    val arg_warnings = check_argument_count(decl_indices)
+    for w in arg_warnings:
+        val line_num = _find_fn_line_in_source(lines, w.fn_name)
+        val sev = _severity_text_to_json(w.severity)
+        if format == "json":
+            val msg = emitter.escape_string(w.message)
+            _diag_emit_or_collect("{\"severity\":{sev},\"code\":\"{w.code}\",\"message\":\"{msg}\",\"line\":{line_num},\"col\":1,\"end_line\":{line_num},\"end_col\":1,\"tags\":[],\"source\":\"simple-lint\"}")
+        else:
+            print "{file}:{line_num}: {w.severity}[{w.code}]: {w.message}"
+        count = count + 1
+
+    # --- C2: COLL001-008 — collection efficiency patterns ---
+    val coll_warnings = check_collection_patterns(decl_indices)
+    for w in coll_warnings:
+        val line_num = _find_fn_line_in_source(lines, w.item_name)
+        val sev = _severity_text_to_json(w.severity)
+        if format == "json":
+            val msg = emitter.escape_string(w.message)
+            _diag_emit_or_collect("{\"severity\":{sev},\"code\":\"{w.code}\",\"message\":\"{msg}\",\"line\":{line_num},\"col\":1,\"end_line\":{line_num},\"end_col\":1,\"tags\":[],\"source\":\"simple-lint\"}")
+        else:
+            print "{file}:{line_num}: {w.severity}[{w.code}]: {w.message}"
+        count = count + 1
+
+    # --- C3: DTYP001 — duplicate typed argument detection ---
+    val dtyp_warnings = check_duplicate_typed_args(decl_indices)
+    for w in dtyp_warnings:
+        val line_num = _find_fn_line_in_source(lines, w.fn_name)
+        val sev = _severity_text_to_json(w.severity)
+        if format == "json":
+            val msg = emitter.escape_string(w.message)
+            _diag_emit_or_collect("{\"severity\":{sev},\"code\":\"{w.code}\",\"message\":\"{msg}\",\"line\":{line_num},\"col\":1,\"end_line\":{line_num},\"end_col\":1,\"tags\":[],\"source\":\"simple-lint\"}")
+        else:
+            print "{file}:{line_num}: {w.severity}[{w.code}]: {w.message}"
+        count = count + 1
+
+    # --- C4: STUB001/002 — stub implementation detection ---
+    val stub_warnings = check_stub_impl(decl_indices)
+    for w in stub_warnings:
+        val line_num = _find_fn_line_in_source(lines, w.fn_name)
+        val sev = _severity_text_to_json(w.severity)
+        # STUB warnings get Unnecessary tag (faded rendering in IDE)
+        if format == "json":
+            val msg = emitter.escape_string(w.message)
+            _diag_emit_or_collect("{\"severity\":{sev},\"code\":\"{w.code}\",\"message\":\"{msg}\",\"line\":{line_num},\"col\":1,\"end_line\":{line_num},\"end_col\":1,\"tags\":[1],\"source\":\"simple-lint\"}")
+        else:
+            print "{file}:{line_num}: {w.severity}[{w.code}]: {w.message}"
+        count = count + 1
+
+    # --- C5a: Star import warnings (W0406) ---
+    val star_warnings = check_star_import_file(decl_indices, file)
+    for w in star_warnings:
+        val line_num = _find_use_line_in_source(lines, w.module_path)
+        if format == "json":
+            val msg = emitter.escape_string(w.message)
+            _diag_emit_or_collect("{\"severity\":2,\"code\":\"{w.code}\",\"message\":\"{msg}\",\"line\":{line_num},\"col\":1,\"end_line\":{line_num},\"end_col\":1,\"tags\":[],\"source\":\"simple-lint\"}")
+        else:
+            print "{file}:{line_num}: warning[{w.code}]: {w.message}"
+        count = count + 1
+
+    # --- C5b: Wide public API warnings (W0404) ---
+    val wide_warnings = check_wide_public_file(decl_indices, file)
+    for w in wide_warnings:
+        # Module-level warning, report on line 1
+        if format == "json":
+            val msg = emitter.escape_string(w.message)
+            _diag_emit_or_collect("{\"severity\":2,\"code\":\"{w.code}\",\"message\":\"{msg} ({w.export_count} symbols, threshold {w.threshold})\",\"line\":1,\"col\":1,\"end_line\":1,\"end_col\":1,\"tags\":[],\"source\":\"simple-lint\"}")
+        else:
+            print "{file}:1: warning[{w.code}]: {w.message} ({w.export_count} symbols, threshold {w.threshold})"
+        count = count + 1
+
+    count

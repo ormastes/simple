@@ -1,0 +1,193 @@
+# DOM-to-Script bridge for the Simple Browser Platform.
+# Dispatches DOM events and notifications to the JavaScript runtime so that
+# registered event listeners, mutation observers, and lifecycle callbacks
+# are invoked at the correct time.
+
+use sbp.shared.logging.{Logger, LogLevel}
+use sbp.shared.error.{BrowserResult, script_error}
+use sbp.entity.dom.event_types.{DomEvent, EventPhase, EventInit}
+use sbp.entity.script.js_types.{JsValue, JsObject, JsProperty}
+use sbp.feature.script.engine.runtime.{JsRuntime}
+use sbp.feature.dom.mutation_observer.{MutationRecord, MutationType}
+use sbp.feature.dom.event_dispatch.{EventDispatcher, EventListener, EventListenerOptions}
+use sbp.feature.script.web_api.event_binding.{_install_event_props}
+
+# ---------------------------------------------------------------------------
+# DomToScriptBridge
+# ---------------------------------------------------------------------------
+class DomToScriptBridge:
+    dispatcher: EventDispatcher
+    logger: Logger
+
+    static fn new(logger: Logger) -> DomToScriptBridge:
+        DomToScriptBridge(
+            dispatcher: EventDispatcher.new(logger),
+            logger: logger,
+        )
+
+    # --- Event dispatch ------------------------------------------------------
+
+    # Dispatch a DOM event to the JS runtime.
+    # Finds all registered listeners for the event type on the target node,
+    # wraps the DomEvent as a JS object, and invokes each callback.
+    me dispatch_event_to_js(event: DomEvent, runtime: JsRuntime) -> BrowserResult<()>:
+        self.logger.debug("DomToScript: dispatching '{event.type_name}' to node {event.target_id}")
+
+        # Create a JS object representing the event and install its properties
+        val event_obj_id = runtime.interpreter.object_store.create_object()
+        _install_event_props(runtime, event_obj_id, event)
+        val js_event = JsValue.Object(id: event_obj_id)
+
+        # Collect listeners for this event type on the target node
+        val target_id = event.target_id
+        var fired = 0
+        var i = 0
+        while i < self.dispatcher.listeners.len():
+            val listener = self.dispatcher.listeners.get(i)
+            if listener.node_id == target_id and listener.type_name == event.type_name:
+                # Invoke the callback via the runtime
+                var args = [JsValue]()
+                args.push(js_event)
+                val result = runtime.call(listener.callback_id, args)
+                fired = fired + 1
+            i = i + 1
+
+        self.logger.debug("DomToScript: fired {fired} listeners for '{event.type_name}'")
+        Ok(())
+
+    # --- Mutation observer notifications -------------------------------------
+
+    # Deliver a MutationRecord to any observing JS callbacks.
+    fn notify_mutation(record: MutationRecord, runtime: JsRuntime) -> BrowserResult<()>:
+        self.logger.debug("DomToScript: mutation notification target={record.target_id}")
+        # Create a JS object representing the MutationRecord
+        val record_obj_id = runtime.interpreter.object_store.create_object()
+
+        # Set the type property
+        val type_str = match record.type_val:
+            MutationType.ChildList: "childList"
+            MutationType.Attributes: "attributes"
+            MutationType.CharacterData: "characterData"
+        runtime.interpreter.object_store.set_property(
+            record_obj_id, "type", JsValue.String(v: type_str))
+        runtime.interpreter.object_store.set_property(
+            record_obj_id, "target", JsValue.Number(v: record.target_id.to_f64()))
+
+        if record.attribute_name.len() > 0:
+            runtime.interpreter.object_store.set_property(
+                record_obj_id, "attributeName", JsValue.String(v: record.attribute_name))
+        if record.old_value.len() > 0:
+            runtime.interpreter.object_store.set_property(
+                record_obj_id, "oldValue", JsValue.String(v: record.old_value))
+
+        self.logger.debug("DomToScript: mutation record created for type={type_str}")
+        Ok(())
+
+    # --- Window / document lifecycle events ----------------------------------
+
+    # Notify JS that the viewport was resized.
+    me notify_resize(width: i64, height: i64, runtime: JsRuntime) -> BrowserResult<()>:
+        self.logger.debug("DomToScript: resize {width}x{height}")
+        val event = DomEvent(
+            type_name: "resize",
+            target_id: -1,
+            current_target_id: -1,
+            phase: EventPhase.None,
+            init: EventInit.default(),
+            prevented: false,
+            stopped: false,
+            timestamp: 0,
+        )
+        # Create a JS event object with width/height properties
+        val event_obj_id = runtime.interpreter.object_store.create_object()
+        _install_event_props(runtime, event_obj_id, event)
+        runtime.interpreter.object_store.set_property(
+            event_obj_id, "innerWidth", JsValue.Number(v: width.to_f64()))
+        runtime.interpreter.object_store.set_property(
+            event_obj_id, "innerHeight", JsValue.Number(v: height.to_f64()))
+
+        # Fire all "resize" listeners on the window (node_id = -1)
+        _fire_type_listeners(self.dispatcher, "resize", -1, JsValue.Object(id: event_obj_id), runtime)
+        Ok(())
+
+    # Notify JS of a scroll position change.
+    me notify_scroll(scroll_x: f64, scroll_y: f64, runtime: JsRuntime) -> BrowserResult<()>:
+        self.logger.debug("DomToScript: scroll ({scroll_x}, {scroll_y})")
+        val event = DomEvent(
+            type_name: "scroll",
+            target_id: -1,
+            current_target_id: -1,
+            phase: EventPhase.None,
+            init: EventInit.default(),
+            prevented: false,
+            stopped: false,
+            timestamp: 0,
+        )
+        val event_obj_id = runtime.interpreter.object_store.create_object()
+        _install_event_props(runtime, event_obj_id, event)
+        runtime.interpreter.object_store.set_property(
+            event_obj_id, "scrollX", JsValue.Number(v: scroll_x))
+        runtime.interpreter.object_store.set_property(
+            event_obj_id, "scrollY", JsValue.Number(v: scroll_y))
+
+        _fire_type_listeners(self.dispatcher, "scroll", -1, JsValue.Object(id: event_obj_id), runtime)
+        Ok(())
+
+    # Fire the `load` event (window.onload).
+    me notify_load(runtime: JsRuntime) -> BrowserResult<()>:
+        self.logger.info("DomToScript: load event")
+        val event = DomEvent(
+            type_name: "load",
+            target_id: -1,
+            current_target_id: -1,
+            phase: EventPhase.None,
+            init: EventInit.default(),
+            prevented: false,
+            stopped: false,
+            timestamp: 0,
+        )
+        val event_obj_id = runtime.interpreter.object_store.create_object()
+        _install_event_props(runtime, event_obj_id, event)
+        _fire_type_listeners(self.dispatcher, "load", -1, JsValue.Object(id: event_obj_id), runtime)
+        Ok(())
+
+    # Fire the `DOMContentLoaded` event.
+    me notify_dom_content_loaded(runtime: JsRuntime) -> BrowserResult<()>:
+        self.logger.info("DomToScript: DOMContentLoaded event")
+        val event = DomEvent(
+            type_name: "DOMContentLoaded",
+            target_id: -1,
+            current_target_id: -1,
+            phase: EventPhase.None,
+            init: EventInit(bubbles: true, cancelable: false, composed: false),
+            prevented: false,
+            stopped: false,
+            timestamp: 0,
+        )
+        val event_obj_id = runtime.interpreter.object_store.create_object()
+        _install_event_props(runtime, event_obj_id, event)
+        _fire_type_listeners(self.dispatcher, "DOMContentLoaded", -1, JsValue.Object(id: event_obj_id), runtime)
+        Ok(())
+
+# ---------------------------------------------------------------------------
+# Pure helpers
+# ---------------------------------------------------------------------------
+
+# Fire all listeners of a given type on a given node_id.
+fn _fire_type_listeners(dispatcher: EventDispatcher, type_name: text, node_id: i64, js_event: JsValue, runtime: JsRuntime):
+    var i = 0
+    while i < dispatcher.listeners.len():
+        val listener = dispatcher.listeners.get(i)
+        if listener.type_name == type_name and listener.node_id == node_id:
+            var args = [JsValue]()
+            args.push(js_event)
+            val result = runtime.call(listener.callback_id, args)
+        i = i + 1
+
+# Convert an EventPhase enum to its DOM Level 2 integer constant.
+fn event_phase_to_int(phase: EventPhase) -> i64:
+    match phase:
+        EventPhase.None: 0
+        EventPhase.Capturing: 1
+        EventPhase.AtTarget: 2
+        EventPhase.Bubbling: 3

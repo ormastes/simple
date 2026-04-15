@@ -1,0 +1,127 @@
+# Test Daemon Session Adapter — Interface for environment-specific session management
+#
+# Each adapter handles one session kind (QEMU, container, service, etc.).
+# The broker delegates lifecycle operations to the appropriate adapter.
+
+use app.test_daemon.session_types.{
+    SessionKey, SessionDescriptor, SessionLease, TestSessionMeta,
+    LEASE_IDLE, LEASE_ACTIVE, LEASE_STOPPING,
+    session_lease_new
+}
+use app.test_daemon.types.{TestResult}
+
+extern fn rt_time_now_unix_micros() -> i64
+
+# ============================================================================
+# Adapter Interface
+# ============================================================================
+#
+# Each adapter must implement these functions. Since Simple uses composition
+# rather than inheritance, adapters are classes with a `kind` field and
+# matching method signatures. The broker dispatches by kind.
+
+class SessionAdapter:
+    kind: i64
+    name: text
+
+fn session_adapter_new(kind: i64, name: text) -> SessionAdapter:
+    SessionAdapter(kind: kind, name: name)
+
+impl SessionAdapter:
+    fn can_handle(meta: TestSessionMeta) -> bool:
+        """
+        Returns true if this adapter can handle tests with the given metadata.
+        """
+        self.kind == meta.session_kind
+
+    fn session_key(meta: TestSessionMeta) -> SessionKey:
+        """
+        Computes a session key from test metadata. Tests with matching keys
+        can share a session.
+        """
+        pass_todo("subclass must override session_key")
+
+    me start(desc: SessionDescriptor) -> SessionLease:
+        """
+        Starts a new session environment. Returns a lease with PID, socket, etc.
+        Returns lease with status LEASE_ACTIVE on success.
+        """
+        pass_todo("subclass must override start")
+
+    fn health(lease: SessionLease) -> bool:
+        """
+        Returns true if the session is still alive and healthy.
+        """
+        lease.pid > 0
+
+    me reset(lease: SessionLease, policy: i64) -> bool:
+        """
+        Resets the session according to the given policy.
+        Returns true on success.
+        """
+        pass_todo("subclass must override reset")
+
+    me execute(lease: SessionLease, test_path: text, timeout_ms: i64) -> TestResult:
+        """
+        Executes a test inside the session environment.
+        Returns test result with pass/fail/duration.
+        """
+        pass_todo("subclass must override execute")
+
+    me snapshot_create(lease: SessionLease, name: text) -> bool:
+        """
+        Creates a named snapshot of the session state.
+        Returns true on success.
+        """
+        false
+
+    me snapshot_restore(lease: SessionLease, name: text) -> bool:
+        """
+        Restores a previously created snapshot.
+        Returns true on success.
+        """
+        false
+
+    me stop(lease: SessionLease) -> bool:
+        """
+        Stops the session environment and frees resources.
+        Returns true on success.
+        """
+        pass_todo("subclass must override stop")
+
+# ============================================================================
+# Adapter Registry — holds all registered adapters
+# ============================================================================
+
+class AdapterRegistry:
+    adapters: [SessionAdapter]
+
+fn adapter_registry_new() -> AdapterRegistry:
+    AdapterRegistry(adapters: [])
+
+impl AdapterRegistry:
+    me register(adapter: SessionAdapter):
+        self.adapters.push(adapter)
+
+    fn find_for_meta(meta: TestSessionMeta) -> SessionAdapter:
+        """
+        Finds the first adapter that can handle the given test metadata.
+        Returns the adapter, or nil if none found.
+        """
+        var i = 0
+        while i < self.adapters.len():
+            if self.adapters[i].can_handle(meta):
+                return self.adapters[i]
+            i = i + 1
+        nil
+
+    fn find_by_kind(kind: i64) -> SessionAdapter:
+        """
+        Finds adapter by session kind.
+        """
+        var i = 0
+        while i < self.adapters.len():
+            if self.adapters[i].kind == kind:
+                return self.adapters[i]
+            i = i + 1
+        nil

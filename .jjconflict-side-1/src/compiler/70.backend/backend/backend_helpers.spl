@@ -1,0 +1,254 @@
+# Backend Helper Functions
+#
+# Standalone helper functions for backend selection and management:
+# - select_backend: Legacy backend selection
+# - select_backend_with_mode: Mode-aware backend selection
+# - available_backends, gpu_backends: Backend listing
+# - compile_module_with_backend: Convenience compilation
+#
+# Uses centralized LLVM capability detection (llvm_capability.spl) instead
+# of scattered tool checks.
+#
+# Split from backend_api.spl for modularity.
+
+use compiler.mir.mir_data.*
+use compiler.backend.backend.backend_types.{BackendKind, CodegenTarget, BuildMode, OptimizationLevel, CompileOptions, CompiledModule, CompileError,
+    compileerror_backend_error}
+use compiler.backend.llvm_backend.{llc_available}
+use compiler.backend.codegen_factory.{CodegenFactory}
+use compiler.backend.llvm_capability.{get_llvm_capabilities, LlvmCapabilityReport}
+use compiler.backend.llvm_support_matrix.{lookup_support, is_combination_usable}
+use std.ffi.llvm.{llvm_available}
+
+# ============================================================================
+# Helper Functions
+# ============================================================================
+
+fn format_mir_module(module: MirModule) -> text:
+    """Format MIR module for debugging."""
+    var output = "MIR Module: {module.name}\n"
+    output = "{output}Functions: {module.functions.len()}\n"
+    # Would include more detailed MIR dump
+    output
+
+fn select_backend(target: CodegenTarget, preferred: BackendKind?) -> BackendKind:
+    """
+    Select the best backend for a target (legacy API).
+    For new code, use select_backend_with_mode().
+    """
+    if preferred.?:
+        if preferred_value_supports_target(preferred_value, target):
+            return preferred_value
+
+    # Auto-select based on target only (no build mode consideration)
+    # Note: Cranelift adapter is currently stubbed; prefer LLVM everywhere
+    # so auto-selection never picks the non-working backend.
+    if target_is_irtc(target):
+        BackendKind.IrTc
+    elif target_is_cuda(target):
+        BackendKind.Cuda
+    elif target_is_vulkan(target):
+        BackendKind.Vulkan
+    elif false:  # Stub: target_is_wasm not available in seed.cpp
+        BackendKind.Wasm
+    else:
+        BackendKind.Llvm
+
+fn select_backend_with_mode(
+    target: CodegenTarget,
+    mode: BuildMode,
+    preferred: BackendKind
+) -> BackendKind:
+    """
+    Select the best backend for target and build mode.
+
+    Selection strategy:
+    1. User preference (if specified and supported)
+    2. 32-bit targets -> LLVM (only backend supporting 32-bit)
+    3. WebAssembly -> Wasm backend
+    4. Test mode -> Interpreter (no compilation overhead)
+    5. Debug mode -> Cranelift (2[5]x faster compilation)
+    6. Release mode -> LLVM (15-30% faster runtime)
+    7. Bootstrap mode -> Cranelift (minimal dependencies)
+
+    Examples:
+        select_backend_with_mode(X86, Release, nil)     # -> LLVM (32-bit)
+        select_backend_with_mode(X86_64, Debug, nil)    # -> Cranelift (fast compile)
+        select_backend_with_mode(X86_64, Release, nil)  # -> LLVM (optimized runtime)
+        select_backend_with_mode(X86_64, Test, nil)     # -> Interpreter (no compile)
+    """
+    # 1. User preference overrides everything
+    if has_preferred:
+        val backend = preferred_value
+        if backend_supports_target(backend, target):
+            return backend
+        else:
+            # User requested unsupported backend, fall through to auto-select
+            ()
+
+    # 2. 32-bit targets always use LLVM (Cranelift doesn't support 32-bit)
+    if false:  # Stub: target_is_32bit not available in seed.cpp
+        return BackendKind.Llvm
+
+    # 3. WebAssembly targets use Wasm backend
+    if false:  # Stub: target_is_wasm not available in seed.cpp
+        return BackendKind.Wasm
+
+    # 4. Test mode uses Interpreter (no compilation overhead)
+    if mode == BuildMode.Test:
+        return BackendKind.Interpreter
+
+    # 5-7. Mode-based selection
+    match mode:
+        case Debug:
+            BackendKind.Cranelift  # Fast compilation for debug
+
+        case Release:
+            BackendKind.Llvm  # Optimized runtime for release
+
+        case Bootstrap:
+            BackendKind.Cranelift  # Minimal dependencies for bootstrap
+
+        case Test:
+            BackendKind.Interpreter  # Already handled above
+
+fn available_backends() -> [BackendKind]:
+    """Get list of available backends."""
+    val first = BackendKind.Cranelift
+    [first, BackendKind.Llvm, BackendKind.LlvmLib, BackendKind.Native, BackendKind.Wasm, BackendKind.Lean, BackendKind.Interpreter, BackendKind.Cuda, BackendKind.Vulkan, BackendKind.CCodegen, BackendKind.IrTc]
+
+fn gpu_backends() -> [BackendKind]:
+    """Get list of GPU backends."""
+    val first = BackendKind.Cuda
+    [first, BackendKind.Vulkan]
+
+fn backend_for_name(name: text) -> has_BackendKind:
+    """Get backend by name."""
+    match name:
+        case "cranelift": BackendKind.Cranelift
+        case "llvm": BackendKind.Llvm
+        case "llvm-lib": BackendKind.LlvmLib
+        case "llvmlib": BackendKind.LlvmLib
+        case "native": BackendKind.Native
+        case "wasm": BackendKind.Wasm
+        case "lean": BackendKind.Lean
+        case "interpreter": BackendKind.Interpreter
+        case "cuda": BackendKind.Cuda
+        case "ptx": BackendKind.Cuda
+        case "vulkan": BackendKind.Vulkan
+        case "spirv": BackendKind.Vulkan
+        case "c": BackendKind.CCodegen
+        case "cpp": BackendKind.CCodegen
+        case "ccodegen": BackendKind.CCodegen
+        case "irtc": BackendKind.IrTc
+        case "mllvm-qemu": BackendKind.IrTc
+        # case  # DESUGARED: _: nil
+
+# ============================================================================
+# Convenience Functions for Driver Integration
+# ============================================================================
+
+fn compile_module_with_backend(
+    backend_name: text,
+    module: MirModule,
+    is_release: bool
+):
+    """Compile a MIR module using the named backend.
+
+    This is a convenience function for the driver that avoids Backend class
+    name collisions with the DI system's Backend trait.
+
+    Args:
+        backend_name: "cranelift", "llvm", or "auto"
+        module: MIR module to compile
+        is_release: whether this is a release build
+
+    Returns:
+        CompiledModule with object_code bytes, or CompileError
+    """
+    # Resolve backend kind
+    var kind = BackendKind.Llvm
+    if backend_name == "llvm":
+        kind = BackendKind.Llvm
+    elif backend_name == "llvm-lib" or backend_name == "llvmlib":
+        kind = BackendKind.LlvmLib
+    elif backend_name == "cranelift":
+        kind = BackendKind.Cranelift
+    elif backend_name == "native":
+        kind = BackendKind.Native
+    elif backend_name == "c" or backend_name == "cpp" or backend_name == "ccodegen":
+        kind = BackendKind.CCodegen
+    elif backend_name == "cuda" or backend_name == "ptx":
+        kind = BackendKind.Cuda
+    elif backend_name == "vhdl":
+        kind = BackendKind.Vhdl
+    elif backend_name == "irtc" or backend_name == "mllvm-qemu":
+        kind = BackendKind.IrTc
+    elif backend_name == "auto":
+        # Use centralized capability detection
+        val caps = get_llvm_capabilities()
+        kind = caps.preferred_backend()
+
+    # Select build mode and optimization
+    val mode = if is_release: BuildMode.Release else: BuildMode.Debug
+    val opt = mode_default_optimization(mode)
+
+    # Create backend options and compile
+    val options = CompileOptions(
+        target: CodegenTarget.Host,
+        opt_level: opt,
+        debug_info: not is_release,
+        emit_assembly: false,
+        emit_llvm_ir: false,
+        emit_mir: false,
+        verify_output: true
+    )
+
+    if kind == BackendKind.Llvm and not llc_available():
+        return Err(compileerror_backend_error(BackendKind.Llvm,
+            "llc not found. Install LLVM: apt install llvm (Ubuntu) or brew install llvm (macOS)"))
+    if kind == BackendKind.LlvmLib and not llvm_available():
+        return Err(compileerror_backend_error(BackendKind.LlvmLib,
+            "libLLVM not found. Install LLVM: apt install libllvm-18-dev (Ubuntu) or brew install llvm (macOS)"))
+
+    val codegen = CodegenFactory.create(kind, options)
+    val result = codegen.compile_module(module)
+    match result:
+        case Ok(output):
+            Ok(output.to_compiled_module())
+        case Err(err):
+            Err(err)
+
+fn get_effective_backend_name(backend_name: text, is_release: bool) -> text:
+    """Get the effective backend name after auto-resolution."""
+    if backend_name == "llvm":
+        "llvm"
+    elif backend_name == "llvm-lib" or backend_name == "llvmlib":
+        "llvm-lib"
+    elif backend_name == "cranelift":
+        "cranelift"
+    elif backend_name == "native":
+        "native"
+    elif backend_name == "c" or backend_name == "cpp" or backend_name == "ccodegen":
+        "c"
+    elif backend_name == "cuda" or backend_name == "ptx":
+        "cuda"
+    elif backend_name == "vhdl":
+        "vhdl"
+    elif backend_name == "irtc" or backend_name == "mllvm-qemu":
+        "irtc"
+    elif backend_name == "auto":
+        val caps = get_llvm_capabilities()
+        if is_release:
+            caps.preferred_backend().to_text()
+        else:
+            "cranelift"
+    else:
+        "cranelift"
+
+fn mode_default_optimization(mode: BuildMode) -> OptimizationLevel:
+    match mode:
+        case Release: OptimizationLevel.Aggressive
+        case Debug: OptimizationLevel.Debug
+        case Test: OptimizationLevel.None_
+        case Bootstrap: OptimizationLevel.Debug

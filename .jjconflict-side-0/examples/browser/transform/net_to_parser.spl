@@ -1,0 +1,189 @@
+# Net-to-Parser bridge for the Simple Browser Platform.
+# Converts a FetchResponse from the network layer into a ParserInput
+# that the HTML/CSS/JS parsers can consume, handling content-type
+# detection, character encoding sniffing, and resource classification.
+
+use sbp.shared.logging.{Logger, LogLevel}
+use sbp.entity.net.request_types.{FetchResponse}
+
+# ---------------------------------------------------------------------------
+# ParserInput — the parsed-and-decoded payload ready for a parser.
+# ---------------------------------------------------------------------------
+class ParserInput:
+    url: text
+    content: text
+    content_type: text
+    encoding: text
+    is_complete: bool
+
+    static fn create(url: text, content: text, content_type: text, encoding: text) -> ParserInput:
+        ParserInput(
+            url: url,
+            content: content,
+            content_type: content_type,
+            encoding: encoding,
+            is_complete: true,
+        )
+
+    static fn partial(url: text, content: text, content_type: text, encoding: text) -> ParserInput:
+        ParserInput(
+            url: url,
+            content: content,
+            content_type: content_type,
+            encoding: encoding,
+            is_complete: false,
+        )
+
+# ---------------------------------------------------------------------------
+# NetToParserBridge
+# ---------------------------------------------------------------------------
+class NetToParserBridge:
+    logger: Logger
+
+    static fn new(logger: Logger) -> NetToParserBridge:
+        NetToParserBridge(logger: logger)
+
+    # Convert a complete FetchResponse into a ParserInput.
+    fn feed_response(response: FetchResponse) -> ParserInput:
+        val url_str = response.url.href
+        val ct = detect_content_type(response.headers, url_str)
+        val enc = detect_encoding(response.headers, response.body)
+        val decoded = decode_content(response.body, enc)
+
+        self.logger.debug("NetToParser: url={url_str} type={ct} enc={enc} len={decoded.len()}")
+        ParserInput.create(url_str, decoded, ct, enc)
+
+# ---------------------------------------------------------------------------
+# Content-type detection
+# ---------------------------------------------------------------------------
+
+# Determine content type from headers first, then fall back to URL extension.
+fn detect_content_type(headers: [Pair<text, text>], url: text) -> text:
+    # 1. Check Content-Type header
+    for pair in headers:
+        if pair.first.to_lower() == "content-type":
+            # Strip parameters (e.g. "text/html; charset=utf-8" -> "text/html")
+            val value = pair.second
+            val semi = value.index_of(";")
+            if semi >= 0:
+                return value.substring(0, semi).trim()
+            return value.trim()
+
+    # 2. Fall back to URL extension
+    if url.ends_with(".html") or url.ends_with(".htm"):
+        return "text/html"
+    if url.ends_with(".css"):
+        return "text/css"
+    if url.ends_with(".js") or url.ends_with(".mjs"):
+        return "application/javascript"
+    if url.ends_with(".json"):
+        return "application/json"
+    if url.ends_with(".png"):
+        return "image/png"
+    if url.ends_with(".jpg") or url.ends_with(".jpeg"):
+        return "image/jpeg"
+    if url.ends_with(".gif"):
+        return "image/gif"
+    if url.ends_with(".svg"):
+        return "image/svg+xml"
+    if url.ends_with(".woff2"):
+        return "font/woff2"
+    if url.ends_with(".woff"):
+        return "font/woff"
+
+    # Default
+    "application/octet-stream"
+
+# ---------------------------------------------------------------------------
+# Encoding detection
+# ---------------------------------------------------------------------------
+
+# Detect character encoding from Content-Type charset parameter or BOM.
+fn detect_encoding(headers: [Pair<text, text>], content: text) -> text:
+    # 1. Check Content-Type charset parameter
+    for pair in headers:
+        if pair.first.to_lower() == "content-type":
+            val value = pair.second.to_lower()
+            val charset_idx = value.index_of("charset=")
+            if charset_idx >= 0:
+                val start = charset_idx + 8
+                val rest = value.substring(start, value.len())
+                # Strip trailing parameters or whitespace
+                val semi = rest.index_of(";")
+                if semi >= 0:
+                    return rest.substring(0, semi).trim()
+                return rest.trim()
+
+    # 2. Check for UTF-8 BOM (EF BB BF)
+    if content.len() >= 3:
+        if content.starts_with("\xEF\xBB\xBF"):
+            return "utf-8"
+
+    # 3. Check for UTF-16 BOM
+    if content.len() >= 2:
+        if content.starts_with("\xFF\xFE"):
+            return "utf-16le"
+        if content.starts_with("\xFE\xFF"):
+            return "utf-16be"
+
+    # Default to UTF-8 per the HTML spec
+    "utf-8"
+
+# ---------------------------------------------------------------------------
+# Resource classification helpers
+# ---------------------------------------------------------------------------
+
+fn is_html_content(content_type: text) -> bool:
+    content_type == "text/html" or content_type == "application/xhtml+xml"
+
+fn is_css_content(content_type: text) -> bool:
+    content_type == "text/css"
+
+fn is_javascript_content(content_type: text) -> bool:
+    (content_type == "application/javascript" or
+     content_type == "text/javascript" or
+     content_type == "application/x-javascript")
+
+fn is_image_content(content_type: text) -> bool:
+    content_type.starts_with("image/")
+
+fn is_font_content(content_type: text) -> bool:
+    content_type.starts_with("font/")
+
+# ---------------------------------------------------------------------------
+# Decode raw bytes using the detected encoding.
+# Handles UTF-8 (pass-through), strips BOM markers for UTF-8/UTF-16,
+# and returns the content as-is for other encodings (Simple strings are
+# inherently UTF-8, so non-UTF-8 data requires external transcoding).
+# ---------------------------------------------------------------------------
+fn decode_content(raw: text, encoding: text) -> text:
+    val enc_lower = encoding.to_lower()
+
+    # UTF-8: strip BOM if present, otherwise pass through
+    if enc_lower == "utf-8":
+        if raw.len() >= 3 and raw.starts_with("\xEF\xBB\xBF"):
+            return raw.substring(3, raw.len())
+        return raw
+
+    # UTF-16LE: strip BOM if present
+    if enc_lower == "utf-16le":
+        if raw.len() >= 2 and raw.starts_with("\xFF\xFE"):
+            return raw.substring(2, raw.len())
+        return raw
+
+    # UTF-16BE: strip BOM if present
+    if enc_lower == "utf-16be":
+        if raw.len() >= 2 and raw.starts_with("\xFE\xFF"):
+            return raw.substring(2, raw.len())
+        return raw
+
+    # ASCII is a subset of UTF-8 — pass through
+    if enc_lower == "ascii" or enc_lower == "us-ascii":
+        return raw
+
+    # ISO-8859-1 / Latin-1: pass through (lower 256 codepoints overlap with Unicode)
+    if enc_lower == "iso-8859-1" or enc_lower == "latin1" or enc_lower == "latin-1":
+        return raw
+
+    # Unrecognized encoding — return raw content with best-effort assumption
+    raw

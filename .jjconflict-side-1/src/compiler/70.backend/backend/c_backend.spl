@@ -1,0 +1,54 @@
+# C Backend - MIR to C++20 Translation
+#
+# Translates MIR to C++20 source code that links against runtime.h.
+# Follows the pattern of MirToLlvm in llvm_ir_builder.spl.
+# Generated code uses the spl_ runtime API for strings, arrays, dicts.
+#
+# Output is C++20 suitable for clang++/g++ compilation:
+#   clang++ -std=c++20 -O2 generated.cpp runtime.c -o output
+#
+# Split into modules:
+#   c_backend_translate.spl — MirToC class with all translation methods
+
+use compiler.mir.mir_data.*
+use compiler.backend.c_type_mapper.{CTypeMapper}
+use compiler.backend.c_ir_builder.{CIRBuilder, escape_c_string}
+use compiler.backend.backend.backend_types.{CodegenTarget, CompileOptions, CompiledModule}
+
+# Import MirToC class and utility from split module
+use compiler.backend.c_backend_translate.{MirToC, sanitize_c_name}
+
+# ============================================================================
+# CCodegenBackend - Backend interface for BackendFactory
+# ============================================================================
+
+class CCodegenBackend:
+    """Backend wrapper for C++20 code generation via MIR.
+
+    Used by BackendFactory.create_specific() to create a C backend instance.
+    Translates MIR modules to C++20 source stored in CompiledModule.assembly.
+    """
+    target: CodegenTarget
+    options: CompileOptions
+
+    static fn create(target: CodegenTarget, options: CompileOptions) -> CCodegenBackend:
+        CCodegenBackend(target: target, options: options)
+
+    fn compile(module: MirModule) -> CompiledModule:
+        var translator = MirToC.create(module.name)
+        val c_source = translator.translate_module(module)
+        val h_source = translator.build_header()
+        CompiledModule(
+            name: module.name,
+            object_code: nil,
+            assembly: c_source,
+            has_llvm_ir: true,
+            llvm_ir: h_source,
+            symbols: [],
+            compile_time_ms: 0
+        )
+
+# ============================================================================
+# Export
+# ============================================================================
+

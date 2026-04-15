@@ -1,0 +1,135 @@
+# Warning rules — evaluates search results and emits warnings
+#
+# Analyzes search results and query context to generate appropriate
+# warnings about search quality, missing features, and suggestions.
+
+use src.core.warnings.{SearchWarning, clear_warnings, add_warning, get_warnings, make_search_quality_json}
+use src.core.search_engine.{SearchResult}
+use src.core.ranker.{ScoredResult}
+
+# --- Always-present baseline warning (lexical-only search) ---
+
+fn emit_baseline_warnings():
+    add_warning(SearchWarning(
+        code: "FL-001",
+        severity: "info",
+        message: "Semantic/embedding search is not available. Results use lexical text matching + graph authority ranking. Conceptual queries may miss semantically related notes.",
+        action_type: "acknowledge",
+        action_tool: "",
+        action_reason: "Embedding support requires FR-20. Use graph-based tools for conceptual discovery."
+    ))
+
+# --- Zero-result warning ---
+
+fn emit_zero_result_warning(query: text):
+    add_warning(SearchWarning(
+        code: "SQ-003",
+        severity: "warning",
+        message: "No results found for query. Lexical search requires exact term matches — the query terms may not appear literally in any notes.",
+        action_type: "reformulate_query",
+        action_tool: "",
+        action_reason: "Try broader keywords, synonyms, or partial terms."
+    ))
+    add_warning(SearchWarning(
+        code: "QR-001",
+        severity: "info",
+        message: "Consider using fuzzy_search for typo-tolerant matching, or find_related/graph_walk for link-based discovery.",
+        action_type: "use_tool",
+        action_tool: "fuzzy_search",
+        action_reason: "Fuzzy search uses trigram matching which tolerates spelling variations."
+    ))
+
+# --- Low confidence warning ---
+
+fn emit_low_confidence_warning(top_score: f64):
+    add_warning(SearchWarning(
+        code: "SQ-002",
+        severity: "warning",
+        message: "Top result score is low ({top_score}). Results may not be highly relevant to the query.",
+        action_type: "use_tool",
+        action_tool: "find_related",
+        action_reason: "Graph-based discovery may find better results through link relationships."
+    ))
+
+# --- Missing operator suggestion ---
+
+fn emit_operator_suggestion(query: text):
+    val has_operator = query.contains("tag:") or query.contains("path:") or query.contains("title:") or query.contains("heading:")
+    if not has_operator:
+        add_warning(SearchWarning(
+            code: "QR-002",
+            severity: "info",
+            message: "Search supports operators: tag:, path:, title:, heading:, linkto:, linkedfrom:, type:, modified: — these can narrow results significantly.",
+            action_type: "reformulate_query",
+            action_tool: "",
+            action_reason: "Operators filter results before ranking, improving precision."
+        ))
+
+# --- Evaluate scored results and emit appropriate warnings ---
+
+fn evaluate_search_warnings(query: text, results: [ScoredResult]) -> text:
+    clear_warnings()
+    emit_baseline_warnings()
+
+    if results.len() == 0:
+        emit_zero_result_warning(query)
+    elif results.len() > 0:
+        val top_score = results[0].final_score
+        if top_score < 1.5:
+            emit_low_confidence_warning(top_score)
+
+    emit_operator_suggestion(query)
+
+    # Compute confidence: ratio of top score to max possible
+    var confidence = 0.0
+    if results.len() > 0:
+        val top = results[0].final_score
+        if top >= 5.0:
+            confidence = 0.9
+        elif top >= 3.0:
+            confidence = 0.7
+        elif top >= 1.5:
+            confidence = 0.5
+        else:
+            confidence = 0.3
+
+    var suggestions: [text] = []
+    suggestions.push("Use find_related for graph-based discovery")
+    suggestions.push("Use fuzzy_search for typo-tolerant matching")
+    suggestions.push("Use explain_search to understand score breakdowns")
+    if results.len() == 0:
+        suggestions.push("Try search_with_aliases to match note aliases")
+
+    make_search_quality_json("lexical_tf", confidence, suggestions)
+
+# --- Evaluate raw search results (no ranking) ---
+
+fn evaluate_raw_search_warnings(query: text, results: [SearchResult]) -> text:
+    clear_warnings()
+    emit_baseline_warnings()
+
+    if results.len() == 0:
+        emit_zero_result_warning(query)
+    elif results.len() > 0:
+        if results[0].bm25_score < 1.5:
+            emit_low_confidence_warning(results[0].bm25_score)
+
+    emit_operator_suggestion(query)
+
+    var confidence = 0.0
+    if results.len() > 0:
+        val top = results[0].bm25_score
+        if top >= 5.0:
+            confidence = 0.9
+        elif top >= 3.0:
+            confidence = 0.7
+        elif top >= 1.5:
+            confidence = 0.5
+        else:
+            confidence = 0.3
+
+    var suggestions: [text] = []
+    suggestions.push("Use find_related for graph-based discovery")
+    suggestions.push("Use fuzzy_search for typo-tolerant matching")
+
+    make_search_quality_json("lexical_tf", confidence, suggestions)

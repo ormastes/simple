@@ -1,0 +1,182 @@
+# @cover src/app/cli/query_engine.spl 80%
+# @cover src/app/cli/query_lsp_extras.spl 80%
+# @cover src/app/cli/query_rich.spl 80%
+# LSP System Test: lib/nogc_sync_mut
+
+extern fn rt_dir_list(path: text) -> [text]
+extern fn rt_file_read_text(path: text) -> text
+extern fn rt_file_exists(path: text) -> bool
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+
+fn find_simple_binary() -> text:
+    if rt_file_exists("src/compiler_rust/target/release/simple"):
+        return "src/compiler_rust/target/release/simple"
+    if rt_file_exists("src/compiler_rust/target/bootstrap/simple"):
+        return "src/compiler_rust/target/bootstrap/simple"
+    if rt_file_exists("bin/simple"):
+        return "bin/simple"
+    if rt_file_exists("bin/release/aarch64-apple-darwin-macho/simple"):
+        return "bin/release/aarch64-apple-darwin-macho/simple"
+    if rt_file_exists("bin/release/macos-arm64/simple"):
+        return "bin/release/macos-arm64/simple"
+    if rt_file_exists("bin/release/darwin-aarch64/simple"):
+        return "bin/release/darwin-aarch64/simple"
+    if rt_file_exists("bin/release/macos-x86_64/simple"):
+        return "bin/release/macos-x86_64/simple"
+    if rt_file_exists("bin/release/linux-x86_64/simple"):
+        return "bin/release/linux-x86_64/simple"
+    "bin/simple"
+
+fn _check_release_binary() -> bool:
+    val simple_bin = find_simple_binary()
+    if simple_bin == "" or not rt_file_exists(simple_bin):
+        print "SKIP: Simple runtime not found"
+        false
+    else:
+        val (stdout, stderr, code) = rt_process_run(simple_bin, ["--version"])
+        if code > 1:
+            print "SKIP: Simple runtime not executable on this platform"
+            false
+        else:
+            true
+
+val _can_run = _check_release_binary()
+
+fn find_spl_files(dir: text) -> [text]:
+    var result: [text] = []
+    val entries = rt_dir_list(dir) ?? []
+    var i = 0
+    while i < entries.len():
+        val name = entries[i]
+        val full = "{dir}/{name}"
+        if name.ends_with(".spl"):
+            result.push(full)
+        elif not name.starts_with("."):
+            val subs = find_spl_files(full)
+            var j = 0
+            while j < subs.len():
+                result.push(subs[j])
+                j = j + 1
+        i = i + 1
+    result
+
+fn find_first_code_line(file: text) -> i64:
+    val content = rt_file_read_text(file) ?? ""
+    if content == "":
+        return 1
+    val lines = content.split("\n")
+    var i = 0
+    while i < lines.len():
+        val trimmed = lines[i].trim()
+        if trimmed != "" and not trimmed.starts_with("#"):
+            return i + 1
+        i = i + 1
+    1
+
+fn run_lsp(subcmd: text, file: text, line: i64, col: i64) -> i64:
+    val (stdout, stderr, code) = rt_process_run(find_simple_binary(), ["run", "src/app/cli/query.spl", subcmd, file, "{line}", "{col}"])
+    code
+
+fn run_lsp_no_pos(subcmd: text, file: text) -> i64:
+    val (stdout, stderr, code) = rt_process_run(find_simple_binary(), ["run", "src/app/cli/query.spl", subcmd, file])
+    code
+
+fn batch_lsp(subcmd: text, files: [text]) -> [text]:
+    var crashes: [text] = []
+    var i = 0
+    while i < files.len():
+        val line = find_first_code_line(files[i])
+        val code = run_lsp(subcmd, files[i], line, 5)
+        if code > 1:
+            crashes.push(files[i])
+        i = i + 1
+    crashes
+
+fn batch_lsp_no_pos(subcmd: text, files: [text]) -> [text]:
+    var crashes: [text] = []
+    var i = 0
+    while i < files.len():
+        val code = run_lsp_no_pos(subcmd, files[i])
+        if code > 1:
+            crashes.push(files[i])
+        i = i + 1
+    crashes
+
+fn report_crashes(label: text, crashes: [text]) -> i64:
+    if crashes.len() == 0:
+        print "  PASS: {label} — 0 crashes"
+    else:
+        print "  FAIL: {label} — {crashes.len()} crashes:"
+        var k = 0
+        while k < crashes.len():
+            print "    - {crashes[k]}"
+            k = k + 1
+    crashes.len()
+
+var files = find_spl_files("src/lib/nogc_sync_mut")
+print "Discovered {files.len()} files"
+
+describe "LSP System: lib/nogc_sync_mut":
+    slow_it "hover: no crashes":
+        if _can_run:
+            val crashes = batch_lsp("hover", files)
+            report_crashes("hover", crashes)
+            expect(crashes.len()).to_equal(0)
+        else:
+            print "SKIP: Simple runtime not available"
+
+    slow_it "definition: no crashes":
+        if _can_run:
+            val crashes = batch_lsp("definition", files)
+            report_crashes("definition", crashes)
+            expect(crashes.len()).to_equal(0)
+        else:
+            print "SKIP: Simple runtime not available"
+
+    slow_it "references: no crashes":
+        if _can_run:
+            val crashes = batch_lsp("references", files)
+            report_crashes("references", crashes)
+            expect(crashes.len()).to_equal(0)
+        else:
+            print "SKIP: Simple runtime not available"
+
+    slow_it "completions: no crashes":
+        if _can_run:
+            val crashes = batch_lsp("completions", files)
+            report_crashes("completions", crashes)
+            expect(crashes.len()).to_equal(0)
+        else:
+            print "SKIP: Simple runtime not available"
+
+    slow_it "semantic-tokens: no crashes":
+        if _can_run:
+            val crashes = batch_lsp_no_pos("semantic-tokens", files)
+            report_crashes("semantic-tokens", crashes)
+            expect(crashes.len()).to_equal(0)
+        else:
+            print "SKIP: Simple runtime not available"
+
+    slow_it "folding-range: no crashes":
+        if _can_run:
+            val crashes = batch_lsp_no_pos("folding-range", files)
+            report_crashes("folding-range", crashes)
+            expect(crashes.len()).to_equal(0)
+        else:
+            print "SKIP: Simple runtime not available"
+
+    slow_it "document-highlight: no crashes":
+        if _can_run:
+            val crashes = batch_lsp("document-highlight", files)
+            report_crashes("document-highlight", crashes)
+            expect(crashes.len()).to_equal(0)
+        else:
+            print "SKIP: Simple runtime not available"
+
+    slow_it "type-definition: no crashes":
+        if _can_run:
+            val crashes = batch_lsp("type-definition", files)
+            report_crashes("type-definition", crashes)
+            expect(crashes.len()).to_equal(0)
+        else:
+            print "SKIP: Simple runtime not available"

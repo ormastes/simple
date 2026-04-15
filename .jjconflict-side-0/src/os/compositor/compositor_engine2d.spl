@@ -1,0 +1,285 @@
+# Engine2D-backed Compositor
+#
+# CompositorEngine2D is the "Engine2D actually drives the compositor"
+# variant of the window compositor. Instead of handing a raw
+# FramebufferDriver to `Compositor.new`, this module builds a
+# `Compositor` whose `CompositorBackend` delegates every paint-leaf call
+# (clear / fill_rect / draw_text / put_pixel / present / ...) to an
+# `Engine2D`.
+#
+# Design (wrapper approach):
+#
+#   CompositorEngine2D
+#     ├── engine:  Engine2D                    (Engine2D facade)
+#     ├── backend: Engine2dCompositorBackend   (implements CompositorBackend)
+#     └── inner:   Compositor                  (built via with_backends)
+
+use os.drivers.framebuffer.fb_driver.{get_glyph_8x16}
+use os.drivers.input.ps2_keyboard.{Ps2Keyboard}
+use os.drivers.input.ps2_mouse.{Ps2Mouse}
+use os.compositor.compositor.{Compositor}
+use os.compositor.display_backend.{CompositorBackend, CompositorGlassCapable}
+use os.compositor.input_backend.{InputBackend, Ps2InputBackend}
+use std.gc_async_mut.gpu.engine2d.engine.{Engine2D}
+use std.gc_async_mut.gpu.engine2d.color.{rgba, blend, color_r, color_g, color_b, color_a}
+use std.common.window_protocol.geometry.{Px, Point, Rect, Argb32, Alpha, BlurRadius}
+
+# ============================================================================
+# Engine2D Compositor Backend
+# ============================================================================
+
+class Engine2dCompositorBackend:
+    """CompositorBackend that routes every paint call through Engine2D.
+
+    The backing Engine2D is expected to be created via
+    `create_fb_engine(fb)` (or any other Engine2D factory). In Phase 2
+    the glass ops also paint through this Engine2D — no separate
+    `rt_gui_*` write path is taken.
+    """
+    engine: Engine2D
+    w: i32
+    h: i32
+
+impl CompositorBackend for Engine2dCompositorBackend:
+
+    fn width() -> Px:
+        Px(value: self.w)
+
+    fn height() -> Px:
+        Px(value: self.h)
+
+    me clear(color: Argb32):
+        self.engine.clear(color.to_u32())
+
+    me fill_rect(rect: Rect, color: Argb32):
+        val x = rect.origin.x.to_i32()
+        val y = rect.origin.y.to_i32()
+        val w = rect.size.width.to_i32()
+        val h = rect.size.height.to_i32()
+        self.engine.draw_rect_filled(x, y, w, h, color.to_u32())
+
+    me draw_text(origin: Point, text_str: text, fg: Argb32, bg: Argb32):
+        # D3 (2026-04-14): delegate to Engine2D's `draw_text_bg`.
+        self.engine.draw_text_bg(origin.x.to_i32(), origin.y.to_i32(), text_str, fg.to_u32(), bg.to_u32(), 16)
+
+    me draw_char_8x16(origin: Point, ch: u8, fg: Argb32, bg: Argb32):
+        """Draw a single 8x16 glyph pixel-by-pixel through Engine2D."""
+        val x = origin.x.to_i32()
+        val y = origin.y.to_i32()
+        val glyph = get_glyph_8x16(ch)
+        var row: i32 = 0
+        while row < 16:
+            val bits = glyph[row]
+            var col: i32 = 0
+            while col < 8:
+                val mask = 0x80 >> col
+                val color = if (bits & mask) != 0: fg.to_u32() else: bg.to_u32()
+                self.engine.draw_rect_filled(x + col, y + row, 1, 1, color)
+                col = col + 1
+            row = row + 1
+
+    me put_pixel(p: Point, color: Argb32):
+        self.engine.draw_rect_filled(p.x.to_i32(), p.y.to_i32(), 1, 1, color.to_u32())
+
+    me present():
+        self.engine.present()
+
+    me present_rect(rect: Rect):
+        # Engine2D has no partial-present API; degrade to a full present.
+        self.engine.present()
+
+    fn as_glass_capable() -> CompositorGlassCapable?:
+        self
+
+impl CompositorGlassCapable for Engine2dCompositorBackend:
+
+    me blend_rect(rect: Rect, color: Argb32, alpha: Alpha):
+        """Alpha-blend a solid colour over the rect via Engine2D."""
+        val x = rect.origin.x.to_i32()
+        val y = rect.origin.y.to_i32()
+        val w = rect.size.width.to_i32()
+        val h = rect.size.height.to_i32()
+        if w <= 0 or h <= 0:
+            return
+        val c = color.to_u32()
+        val sr = color_r(c)
+        val sg = color_g(c)
+        val sb = color_b(c)
+        val src = rgba(sr, sg, sb, alpha.to_u8().to_i32())
+
+        val full = self.engine.read_pixels()
+        val fb_w = self.engine.width()
+        val fb_h = self.engine.height()
+        var rx = x
+        var ry = y
+        var rw = w
+        var rh = h
+        if rx < 0:
+            rw = rw + rx
+            rx = 0
+        if ry < 0:
+            rh = rh + ry
+            ry = 0
+        if rx + rw > fb_w:
+            rw = fb_w - rx
+        if ry + rh > fb_h:
+            rh = fb_h - ry
+        if rw <= 0 or rh <= 0:
+            return
+
+        var region: [u32] = [0u32; rw * rh]
+        var row: i32 = 0
+        while row < rh:
+            var col: i32 = 0
+            while col < rw:
+                val dst = full[(ry + row) * fb_w + (rx + col)]
+                val mixed = blend(src, dst)
+                val mr = color_r(mixed)
+                val mg = color_g(mixed)
+                val mb = color_b(mixed)
+                region[row * rw + col] = rgba(mr, mg, mb, 255)
+                col = col + 1
+            row = row + 1
+        self.engine.draw_image(rx, ry, rw, rh, region)
+
+    me blur_region(rect: Rect, radius: BlurRadius):
+        """Native blur via a simple 3x3 box kernel through Engine2D."""
+        val x = rect.origin.x.to_i32()
+        val y = rect.origin.y.to_i32()
+        val w = rect.size.width.to_i32()
+        val h = rect.size.height.to_i32()
+        if w <= 0 or h <= 0:
+            return
+        val fb_w = self.engine.width()
+        val fb_h = self.engine.height()
+        var rx = x
+        var ry = y
+        var rw = w
+        var rh = h
+        if rx < 0:
+            rw = rw + rx
+            rx = 0
+        if ry < 0:
+            rh = rh + ry
+            ry = 0
+        if rx + rw > fb_w:
+            rw = fb_w - rx
+        if ry + rh > fb_h:
+            rh = fb_h - ry
+        if rw <= 0 or rh <= 0:
+            return
+
+        var passes: i32 = 1
+        if radius.value >= 2u32:
+            passes = 2
+        if radius.value >= 4u32:
+            passes = 3
+
+        var src_full = self.engine.read_pixels()
+        var pass_i: i32 = 0
+        while pass_i < passes:
+            var out: [u32] = [0u32; rw * rh]
+            var row: i32 = 0
+            while row < rh:
+                var col: i32 = 0
+                while col < rw:
+                    var sumR: i32 = 0
+                    var sumG: i32 = 0
+                    var sumB: i32 = 0
+                    var n: i32 = 0
+                    var dy: i32 = -1
+                    while dy <= 1:
+                        var dx: i32 = -1
+                        while dx <= 1:
+                            val sx = rx + col + dx
+                            val sy = ry + row + dy
+                            if sx >= 0 and sx < fb_w and sy >= 0 and sy < fb_h:
+                                val p = src_full[sy * fb_w + sx]
+                                sumR = sumR + color_r(p)
+                                sumG = sumG + color_g(p)
+                                sumB = sumB + color_b(p)
+                                n = n + 1
+                            dx = dx + 1
+                        dy = dy + 1
+                    if n > 0:
+                        out[row * rw + col] = rgba(sumR / n, sumG / n, sumB / n, 255)
+                    else:
+                        out[row * rw + col] = src_full[(ry + row) * fb_w + (rx + col)]
+                    col = col + 1
+                row = row + 1
+            self.engine.draw_image(rx, ry, rw, rh, out)
+            if pass_i + 1 < passes:
+                src_full = self.engine.read_pixels()
+            pass_i = pass_i + 1
+
+    me gradient_v(rect: Rect, color1: Argb32, color2: Argb32):
+        """Vertical gradient via the Engine2D facade primitive."""
+        val x = rect.origin.x.to_i32()
+        val y = rect.origin.y.to_i32()
+        val w = rect.size.width.to_i32()
+        val h = rect.size.height.to_i32()
+        self.engine.draw_gradient_rect(x, y, w, h, color1.to_u32(), color2.to_u32())
+
+    fn read_pixel(p: Point) -> Argb32:
+        """Single-pixel read via Engine2D.read_pixels."""
+        val x = p.x.to_i32()
+        val y = p.y.to_i32()
+        if x < 0 or y < 0:
+            return Argb32(value: 0u32)
+        val w = self.engine.width()
+        val h = self.engine.height()
+        if x >= w or y >= h:
+            return Argb32(value: 0u32)
+        val pixels = self.engine.read_pixels()
+        Argb32(value: pixels[y * w + x])
+
+impl Engine2dCompositorBackend:
+
+    static fn create(engine: Engine2D) -> Engine2dCompositorBackend:
+        """Wrap an Engine2D as a CompositorBackend."""
+        val w = engine.width()
+        val h = engine.height()
+        Engine2dCompositorBackend(engine: engine, w: w, h: h)
+
+# ============================================================================
+# CompositorEngine2D — Engine2D-driven compositor facade
+# ============================================================================
+
+class CompositorEngine2D:
+    """Engine2D-backed window compositor facade.
+
+    Composition (not inheritance):
+      - `engine`  is the Engine2D the compositor paints through.
+      - `backend` adapts that Engine2D to the `CompositorBackend` trait.
+      - `inner`   is the standard `Compositor` built via
+                  `Compositor.with_backends(backend, input, w, h)`.
+    """
+    engine: Engine2D
+    backend: Engine2dCompositorBackend
+    inner: Compositor
+
+impl CompositorEngine2D:
+
+    static fn new(engine: Engine2D, kb: Ps2Keyboard, mouse: Ps2Mouse) -> CompositorEngine2D:
+        """Create a compositor whose paint path runs through Engine2D."""
+        val w = engine.width()
+        val h = engine.height()
+        val backend = Engine2dCompositorBackend.create(engine)
+        val input = Ps2InputBackend.create(kb, mouse)
+        val compositor = Compositor.with_backends(backend, input, w, h)
+        CompositorEngine2D(
+            engine: engine,
+            backend: backend,
+            inner: compositor
+        )
+
+    me run():
+        """Run the compositor event loop."""
+        self.inner.running = true
+        while self.inner.running:
+            self.inner.handle_input()
+            self.inner.render_all()
+
+    me as_compositor() -> Compositor:
+        """Return the underlying `Compositor`."""
+        self.inner

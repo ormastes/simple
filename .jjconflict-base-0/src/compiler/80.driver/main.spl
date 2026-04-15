@@ -1,0 +1,590 @@
+# Simple Compiler - Main Entry Point
+#
+# Self-hosting compiler for the Simple programming language.
+# This is the entry point when running the compiler as a standalone tool.
+#
+# Usage:
+#   simple-compiler [options] <files...>
+#   simple-compiler --mode=jit script.spl
+#   simple-compiler --mode=aot -o output src/*.spl
+#   simple-compiler --check src/
+#   simple-compiler --sdn config.sdn
+
+use driver.*
+use app.io.mod (rt_debug_stack_trace_lines)
+
+fn format_runtime_error_message(msg: text) -> text:
+    var message = "Runtime error: {msg}"
+    val frames = rt_debug_stack_trace_lines()
+    if frames.len() > 0:
+        message = message + "\nCall stack:"
+        for frame in frames:
+            message = message + "\n  " + frame
+    message
+
+# ------------------------------------------------------------------------------
+# Command Line Interface
+# ------------------------------------------------------------------------------
+
+struct CliArgs:
+    mode: CompileMode
+    input_files: [text]
+    output_file: text?
+    optimize: bool
+    opt_level: i64?
+    debug_info: bool
+    verbose: bool
+    log_level: i64
+    profile: text
+    help: bool
+    version: bool
+
+    static fn default() -> CliArgs:
+        # Explicit construction to avoid bootstrap codegen eliding struct returns.
+        # Use from_text instead of enum literal to avoid reliance on global enum
+        # constants, which currently miscompile in the bootstrap pipeline.
+        val default_mode = CompileMode.from_text("jit").unwrap()
+
+        var args = CliArgs(
+            mode: default_mode,
+            input_files: [],
+            output_file: nil,
+            optimize: false,
+            opt_level: nil,
+            debug_info: true,
+            verbose: false,
+            log_level: 4,
+            profile: "dev",
+            help: false,
+            version: false
+        )
+        args
+
+    fn to_options(self) -> CompileOptions:
+        var opts = CompileOptions.default()
+        opts.mode = self.mode
+        opts.input_files = self.input_files
+        opts.output_file = self.output_file
+        opts.optimize = self.optimize
+        opts.opt_level = self.opt_level
+        opts.debug_info = self.debug_info
+        opts.verbose = self.verbose
+        opts.log_level = self.log_level
+        opts.profile = self.profile
+        opts.release = self.optimize or self.profile == "prod"
+        opts
+
+# ------------------------------------------------------------------------------
+# Argument Parser
+# ------------------------------------------------------------------------------
+
+class ArgParser:
+    args: [text]
+    pos: i64
+
+    static fn create(args: [text]) -> ArgParser:
+        ArgParser(args: args, pos: 0)
+
+    fn has_next() -> bool:
+        self.pos < self.args.len()
+
+    me next() -> text?:
+        if self.pos >= self.args.len():
+            return nil
+        val arg = self.args[self.pos]
+        self.pos = self.pos + 1
+        Some(arg)
+
+    me peek() -> text?:
+        if self.pos >= self.args.len():
+            return nil
+        Some(self.args[self.pos])
+
+    me parse() -> Result<CliArgs, text>:
+        var result = CliArgs.default()
+
+        while self.has_next():
+            val arg = self.next().unwrap()
+
+            if arg == "--":
+                # End of options marker - rest are positional args
+                while self.has_next():
+                    val file = self.next().unwrap()
+                    var files = result.input_files
+                    files.push(file)
+                    result.input_files = files
+            elif arg.starts_with("--"):
+                # Long option
+                match self.parse_long_option(arg, result):
+                    case Ok(r): result = r
+                    case Err(e): return Err(e)
+            elif arg.starts_with("-"):
+                # Short option
+                match self.parse_short_option(arg, result):
+                    case Ok(r): result = r
+                    case Err(e): return Err(e)
+            else:
+                # Input file
+                var files = result.input_files
+                files.push(arg)
+                result.input_files = files
+
+        # Defensive: in bootstrap builds we occasionally observed a nil payload
+        # making it into the Result value and crashing the destructuring match
+        # in `main`. Guard against that by materializing a fresh CliArgs record
+        # just before returning.
+        if result == nil:
+            result = CliArgs.default()
+
+        Ok(result)
+
+    me parse_long_option(arg: text, result: CliArgs) -> Result<CliArgs, text>:
+        val opt = arg.slice(2, arg.len())
+
+        # Options with values (--option=value or --option value)
+        if opt.contains("="):
+            val parts = opt.split("=")
+            val name = parts[0]
+            val value = parts[1]
+            return self.apply_option(name, value, result)
+
+        # Boolean flags
+        match opt:
+            case "help" | "h":
+                result.help = true
+                return Ok(result)
+            case "version" | "V":
+                result.version = true
+                return Ok(result)
+            case "optimize" | "O":
+                result.optimize = true
+                return Ok(result)
+            case "debug" | "g":
+                result.debug_info = true
+                return Ok(result)
+            case "no-debug":
+                result.debug_info = false
+                return Ok(result)
+            case "verbose" | "v":
+                result.verbose = true
+                return Ok(result)
+            case "O0":
+                result.opt_level = Some(0)
+                return Ok(result)
+            case "O1":
+                result.opt_level = Some(1)
+                result.optimize = true
+                return Ok(result)
+            case "O2":
+                result.opt_level = Some(2)
+                result.optimize = true
+                return Ok(result)
+            case "O3":
+                result.opt_level = Some(3)
+                result.optimize = true
+                return Ok(result)
+            case "check":
+                result.mode = CompileMode.Check
+                return Ok(result)
+            case "sdn":
+                result.mode = CompileMode.Sdn
+                return Ok(result)
+            case "interpret":
+                result.mode = CompileMode.Interpret
+                return Ok(result)
+            case "jit":
+                result.mode = CompileMode.Jit
+                return Ok(result)
+            case "aot" | "compile" | "native":
+                result.mode = CompileMode.Aot
+                return Ok(result)
+            case _:
+                pass
+
+        # Options requiring a value
+        val value = self.next()
+        if value.is_none():
+            return Err("Option --{opt} requires a value")
+
+        self.apply_option(opt, value.unwrap(), result)
+
+    fn apply_option(name: text, value: text, result: CliArgs) -> Result<CliArgs, text>:
+        match name:
+            case "mode" | "m":
+                val mode = CompileMode.from_text(value)
+                if mode.is_none():
+                    return Err("Unknown mode: {value}")
+                result.mode = mode.unwrap()
+
+            case "output" | "o":
+                result.output_file = Some(value)
+
+            case "log-level" | "l":
+                val level = value.parse_int()
+                if level.is_none():
+                    return Err("Invalid log level: {value}")
+                result.log_level = level.unwrap()
+
+            case "opt-level":
+                val level = value.parse_int()
+                if level.is_none():
+                    return Err("Invalid optimization level: {value}")
+                val lv = level.unwrap()
+                if lv < 0 or lv > 3:
+                    return Err("Optimization level must be 0-3, got: {value}")
+                result.opt_level = Some(lv)
+                if lv > 0:
+                    result.optimize = true
+
+            case "profile" | "p":
+                result.profile = value
+
+            case _:
+                return Err("Unknown option: --{name}")
+
+        Ok(result)
+
+    me parse_short_option(arg: text, result: CliArgs) -> Result<CliArgs, text>:
+        val opts = arg.slice(1, arg.len())
+        var i = 0
+        while i < opts.len():
+            val c = opts.char_at(i)
+            match c:
+                case 'h':
+                    result.help = true
+                case 'V':
+                    result.version = true
+                case 'O':
+                    result.optimize = true
+                case 'g':
+                    result.debug_info = true
+                case 'v':
+                    result.verbose = true
+                case 'c':
+                    result.mode = CompileMode.Aot
+                case 'i':
+                    result.mode = CompileMode.Interpret
+                case 'j':
+                    result.mode = CompileMode.Jit
+                case 'k':
+                    result.mode = CompileMode.Check
+                case 's':
+                    result.mode = CompileMode.Sdn
+                case 'o':
+                    # -o requires a value (rest of arg or next arg)
+                    if i + 1 < opts.len():
+                        result.output_file = Some(opts.slice(i + 1, opts.len()))
+                        return Ok(result)
+                    else:
+                        match self.next():
+                            case Some(v):
+                                result.output_file = Some(v)
+                                return Ok(result)
+                            case nil:
+                                return Err("Option -o requires a value")
+                case 'm':
+                    # -m requires a value
+                    val value = self.next()
+                    if value.is_none():
+                        return Err("Option -m requires a value")
+                    val mode = CompileMode.from_text(value.unwrap())
+                    if mode.is_none():
+                        return Err("Unknown mode: {value.unwrap()}")
+                    result.mode = mode.unwrap()
+                    return Ok(result)
+                case 'l':
+                    # -l requires a value
+                    val value = self.next()
+                    if value.is_none():
+                        return Err("Option -l requires a value")
+                    val level = value.unwrap().parse_int()
+                    if level.is_none():
+                        return Err("Invalid log level")
+                    result.log_level = level.unwrap()
+                    return Ok(result)
+                case _:
+                    return Err("Unknown option: -{c}")
+            i = i + 1
+
+        Ok(result)
+
+# ------------------------------------------------------------------------------
+# Help and Version
+# ------------------------------------------------------------------------------
+
+fn print_help():
+    print "Simple Compiler v0.3.0"
+    print ""
+    print "Usage: simple-compiler [options] <files...>"
+    print ""
+    print "Modes:"
+    print "  -i, --interpret     Interpret (default)"
+    print "  -j, --jit           JIT compile and run"
+    print "  -c, --aot           Compile to executable"
+    print "  -k, --check         Type check only"
+    print "  -s, --sdn           Parse as SDN data"
+    print "  -m, --mode=MODE     Set mode explicitly"
+    print ""
+    print "Options:"
+    print "  -o, --output=FILE   Output file (for --aot)"
+    print "  -O, --optimize      Enable optimizations (default: speed)"
+    print "  --opt-level=N       Optimization level: 0=none, 1=size, 2=speed, 3=aggressive"
+    print "  --O0/--O1/--O2/--O3 Short optimization level flags"
+    print "  -g, --debug         Include debug info (default)"
+    print "  --no-debug          Exclude debug info"
+    print "  -v, --verbose       Verbose output"
+    print "  -l, --log-level=N   Log level 0-10 (default: 4)"
+    print "  -p, --profile=NAME  Profile: dev, test, prod"
+    print ""
+    print "  -h, --help          Show this help"
+    print "  -V, --version       Show version"
+    print "  --bootstrap-test    Run bootstrap self-compile test"
+    print ""
+    print "Examples:"
+    print "  simple-compiler script.spl           # Interpret"
+    print "  simple-compiler -j script.spl        # JIT compile"
+    print "  simple-compiler -c -o out src/*.spl  # AOT compile"
+    print "  simple-compiler -k src/              # Type check"
+    print "  simple-compiler -s config.sdn        # Parse SDN"
+
+fn print_version():
+    print "simple-compiler 0.3.0 (2026-01)"
+    print "Self-hosting compiler for the Simple programming language"
+    print ""
+    print "Backends:"
+    print "  - Interpreter (tree-walking)"
+    print "  - JIT (Cranelift)"
+    print "  - AOT (Cranelift)"
+    print ""
+    print "Features:"
+    print "  - Indentation-based syntax"
+    print "  - Pattern matching"
+    print "  - Effect system"
+    print "  - Reference capabilities"
+    print "  - Algebraic data types"
+
+# ------------------------------------------------------------------------------
+# Main Entry Point
+# ------------------------------------------------------------------------------
+
+fn print_error_list(prefix: text, errors: [text]):
+    if errors.len() == 0:
+        return
+    print "{prefix}:"
+    var i = 0
+    while i < errors.len():
+        print "  {errors[i]}"
+        i = i + 1
+
+# Wrapper to force a concrete symbol in the entry module; used by main().
+fn run_compile_entry(opts: CompileOptions) -> CompileResult:
+    val drv = CompilerDriver.create(opts)
+    CompilerDriver.run_compile(drv)
+
+fn main() -> i32:
+    # Allow overriding CLI args via env to avoid bootstrap crashes in new compiler builds.
+    # When SIMPLE_FORCE_ARGS is set, we skip sys_get_args() and use the provided list.
+    val forced = rt_env_get("SIMPLE_FORCE_ARGS")
+    val args = if forced == nil or forced == "":
+        sys_get_args()
+    else:
+        forced.split(" ")
+    print "[boot] args.len={args.len()} first={if args.len() > 0: args[0] else: \"(none)\"}"
+    var idx = 1
+    var cli_args = CliArgs.default()
+
+    while idx < args.len():
+        print "[boot] loop idx={idx} len={args.len()}"
+        val arg = args[idx]
+        print "[boot] arg={arg}"
+        idx = idx + 1
+
+        # Ignore legacy "compile" subcommand
+        if arg == "compile":
+            continue
+
+        if arg == "-h" or arg == "--help":
+            print_help()
+            return 0
+        elif arg == "-V" or arg == "--version":
+            print_version()
+            return 0
+        elif arg == "-c" or arg == "--aot" or arg == "--compile" or arg == "--native":
+            cli_args.mode = CompileMode.from_text("aot").unwrap()
+        elif arg == "-i" or arg == "--interpret":
+            cli_args.mode = CompileMode.from_text("interpret").unwrap()
+        elif arg == "-j" or arg == "--jit":
+            cli_args.mode = CompileMode.from_text("jit").unwrap()
+        elif arg == "-k" or arg == "--check":
+            cli_args.mode = CompileMode.from_text("check").unwrap()
+        elif arg == "-s" or arg == "--sdn":
+            cli_args.mode = CompileMode.from_text("sdn").unwrap()
+        elif arg == "-O" or arg == "--optimize":
+            cli_args.optimize = true
+        elif arg == "--O0":
+            cli_args.opt_level = Some(0)
+        elif arg == "--O1":
+            cli_args.opt_level = Some(1)
+            cli_args.optimize = true
+        elif arg == "--O2":
+            cli_args.opt_level = Some(2)
+            cli_args.optimize = true
+        elif arg == "--O3":
+            cli_args.opt_level = Some(3)
+            cli_args.optimize = true
+        elif arg.starts_with("--opt-level="):
+            val level_str = arg.slice(12, arg.len())
+            val parsed = level_str.parse_int()
+            if parsed.?:
+                cli_args.opt_level = Some(parsed.unwrap())
+        elif arg == "-g" or arg == "--debug":
+            cli_args.debug_info = true
+        elif arg == "--no-debug":
+            cli_args.debug_info = false
+        elif arg == "-v" or arg == "--verbose":
+            cli_args.verbose = true
+        elif arg.starts_with("--mode="):
+            val text = arg.slice(7, arg.len())
+            val m = CompileMode.from_text(text)
+            if m.?:
+                cli_args.mode = m.unwrap()
+        elif arg.starts_with("--profile="):
+            cli_args.profile = arg.slice(10, arg.len())
+        elif arg == "-p":
+            if idx >= args.len():
+                print "Error: -p requires a value"
+                return 1
+            cli_args.profile = args[idx]
+            idx = idx + 1
+        elif arg.starts_with("--output="):
+            cli_args.output_file = Some(arg.slice(9, arg.len()))
+        elif arg == "-o":
+            if idx >= args.len():
+                print "Error: -o requires a value"
+                return 1
+            cli_args.output_file = Some(args[idx])
+            idx = idx + 1
+        elif arg.starts_with("--log-level="):
+            val level_text = arg.slice(12, arg.len())
+            val parsed_level = level_text.parse_int()
+            if parsed_level.?:
+                cli_args.log_level = parsed_level.unwrap()
+        elif arg == "-l":
+            if idx >= args.len():
+                print "Error: -l requires a value"
+                return 1
+            val level_opt = args[idx].parse_int()
+            if level_opt.?:
+                cli_args.log_level = level_opt.unwrap()
+            idx = idx + 1
+        elif arg.starts_with("-"):
+            print "Error: unknown option {arg}"
+            return 1
+        else:
+            cli_args.input_files.push(arg)
+
+    if cli_args.input_files.len() == 0:
+        print "Error: no input files provided"
+        print ""
+        print_help()
+        return 1
+    print "[boot] parsed args ok; files={cli_args.input_files.len()} optimize={cli_args.optimize}"
+
+    # Build compile options from CLI args
+    var options = CompileOptions.default()
+    options.mode = cli_args.mode
+    options.input_files = cli_args.input_files
+    options.output_file = cli_args.output_file
+    options.optimize = cli_args.optimize
+    options.opt_level = cli_args.opt_level
+    options.release = cli_args.optimize or cli_args.profile == "prod"
+    options.debug_info = cli_args.debug_info
+    options.verbose = cli_args.verbose
+    options.log_level = cli_args.log_level
+    options.profile = cli_args.profile
+    val result = run_compile_entry(options)
+
+    match result:
+        case CompileResult.Success(_):
+            if options.mode == CompileMode.Aot:
+                val out_path = options.output_file ?? "a.out"
+                print "AOT output written to {out_path}"
+            return 0
+        case CompileResult.TypeError(errors):
+            print_error_list("Type errors", errors)
+            return 1
+        case CompileResult.ParseError(errors):
+            print_error_list("Parse errors", errors)
+            return 1
+        case CompileResult.BlockError(errors):
+            print_error_list("Block resolution errors", errors)
+            return 1
+        case CompileResult.ResolveError(errors):
+            print_error_list("Method resolution errors", errors)
+            return 1
+        case CompileResult.BorrowError(errors):
+            print_error_list("Borrow checking errors", errors)
+            return 1
+        case CompileResult.CodegenError(message):
+            print "Codegen error: {message}"
+            return 1
+        case CompileResult.RuntimeError(message):
+            print "Runtime error: {message}"
+            return 1
+        case _:
+            print "Unknown compilation result"
+            return 1
+
+# ------------------------------------------------------------------------------
+# Bootstrap Self-Compile Test
+# ------------------------------------------------------------------------------
+
+## Bootstrap test function
+## Verifies the compiler can compile itself
+fn bootstrap_test() -> bool:
+    print "=== Bootstrap Self-Compile Test ==="
+    print ""
+
+    # Step 1: Compile the compiler itself
+    print "Step 1: Compiling simple/compiler/ to simple-compiler-v1..."
+    val step1 = aot_file("src/compiler/main.spl", "simple-compiler-v1")
+    if not step1.is_success():
+        print "  FAILED: {step1.get_errors()}"
+        return false
+    print "  OK"
+
+    # Step 2: Use v1 to compile itself
+    print "Step 2: Using v1 to compile to simple-compiler-v2..."
+    val step2_result = rt_exec("./simple-compiler-v1 -c -o simple-compiler-v2 simple/compiler/main.spl")
+    if step2_result != 0:
+        print "  FAILED: v1 could not compile itself"
+        return false
+    print "  OK"
+
+    # Step 3: Use v2 to compile itself
+    print "Step 3: Using v2 to compile to simple-compiler-v3..."
+    val step3_result = rt_exec("./simple-compiler-v2 -c -o simple-compiler-v3 simple/compiler/main.spl")
+    if step3_result != 0:
+        print "  FAILED: v2 could not compile itself"
+        return false
+    print "  OK"
+
+    # Step 4: Verify v2 == v3
+    print "Step 4: Verifying v2 and v3 are identical..."
+    val v2_hash = rt_file_hash("simple-compiler-v2")
+    val v3_hash = rt_file_hash("simple-compiler-v3")
+
+    if v2_hash != v3_hash:
+        print "  FAILED: v2 and v3 differ"
+        print "    v2 hash: {v2_hash}"
+        print "    v3 hash: {v3_hash}"
+        return false
+
+    print "  OK (hash: {v2_hash})"
+    print ""
+    print "=== Bootstrap Test PASSED ==="
+    print "The Simple compiler can compile itself!"
+    true
+
+# FFI for main entry
+extern fn sys_get_args() -> [text]

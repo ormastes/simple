@@ -1,0 +1,359 @@
+#![allow(export_outside_init)]
+#![allow(unnamed_duplicate_typed_args)]
+# Security Lint: SSRF (Server-Side Request Forgery) Detection
+#
+# Detects patterns where user-controlled URLs are passed to HTTP fetch
+# functions without validation, enabling attackers to reach internal
+# services, cloud metadata endpoints, and private networks.
+#
+# SEC-SSRF001: User input passed directly to HTTP fetch function       WARN
+# SEC-SSRF002: URL from request parameter without validation           WARN
+#
+# Triggers when a variable sourced from request parameters/body/query
+# is passed to http_get, http_post, fetch, http_request, download,
+# or similar functions without going through validate_url() or
+# UrlValidator first.
+#
+# Does NOT flag:
+# - URLs constructed from hardcoded strings (no user input)
+# - URLs validated through UrlValidator or validate_url()
+# - Lines with @allow(ssrf) annotation
+# - Comment lines or docstrings
+# - Test files (*_spec.spl, *_test.spl)
+#
+# Rationale: LLMs generate URL-fetching code that directly uses user
+# input. The 2019 Capital One breach was caused by SSRF against an
+# AWS metadata endpoint. This lint catches the most common pattern:
+# request parameter -> HTTP function without validation.
+#
+# Fix: Use UrlValidator.validate(url, allow_internal: false) or
+#      validate_url(url) before passing to fetch functions.
+#
+# ============================================================================
+
+use std.io_runtime
+
+
+# ============================================================================
+# Warning Struct
+# ============================================================================
+
+struct SsrfWarning:
+    code: text
+    severity: text
+    message: text
+    hint: text
+    line_num: i64
+    file_path: text
+
+    fn fmt() -> text:
+        "[{self.code}] {self.severity}: {self.file_path}:{self.line_num} -- {self.message} -- {self.hint}"
+
+
+# ============================================================================
+# Main Entry Point
+# ============================================================================
+
+fn check_ssrf(source: text, path: text) -> [SsrfWarning]:
+    """Scan source text for SSRF patterns: user input flowing to HTTP functions.
+
+    Uses a two-pass approach:
+    1. First pass: identify variables that receive values from request params/body/query
+    2. Second pass: check if those variables are passed to HTTP fetch functions
+       without going through URL validation first
+
+    Test files are skipped entirely.
+
+    Returns a list of SsrfWarning for each potential SSRF vector found.
+    """
+    var warnings: [SsrfWarning] = []
+
+    # Skip test files
+    if path.ends_with("_spec.spl") or path.ends_with("_test.spl"):
+        return warnings
+
+    val lines = source.split("\n")
+    var in_docstring = false
+
+    # Pass 1: collect user-input variables
+    var tainted_vars: [text] = []
+    var li = 0
+    while li < lines.len():
+        val line = lines[li]
+
+        if _count_triple_quotes(line) % 2 == 1:
+            in_docstring = not in_docstring
+
+        if not in_docstring:
+            val trimmed = line.trim()
+            if not trimmed.starts_with("#"):
+                val tainted = _extract_tainted_var(trimmed)
+                if tainted != "":
+                    tainted_vars.push(tainted)
+
+        li = li + 1
+
+    # Pass 2: check for tainted vars flowing to fetch functions
+    in_docstring = false
+    var validated_vars: [text] = []
+
+    li = 0
+    while li < lines.len():
+        val line = lines[li]
+
+        if _count_triple_quotes(line) % 2 == 1:
+            in_docstring = not in_docstring
+
+        if not in_docstring:
+            val trimmed = line.trim()
+
+            if not trimmed.starts_with("#"):
+                if not trimmed.contains("@allow(ssrf)"):
+                    # Track variables that go through validation
+                    val validated = _extract_validated_var(trimmed)
+                    if validated != "":
+                        validated_vars.push(validated)
+
+                    # Check if line passes a tainted var to a fetch function
+                    if _has_fetch_call(trimmed):
+                        val used_tainted = _find_tainted_in_fetch(trimmed, tainted_vars, validated_vars)
+                        if used_tainted != "":
+                            warnings.push(SsrfWarning(
+                                code: "SEC-SSRF001",
+                                severity: "WARN",
+                                message: "user-controlled variable '{used_tainted}' passed to HTTP fetch without URL validation",
+                                hint: "use UrlValidator.validate({used_tainted}, allow_internal: false) or validate_url({used_tainted}) before fetching",
+                                line_num: li + 1,
+                                file_path: path
+                            ))
+
+                    # Also check for direct inline patterns: fetch(request.params["url"])
+                    if _has_direct_request_in_fetch(trimmed):
+                        warnings.push(SsrfWarning(
+                            code: "SEC-SSRF002",
+                            severity: "WARN",
+                            message: "request parameter passed directly to HTTP fetch function",
+                            hint: "extract to a variable, validate with UrlValidator, then pass to fetch",
+                            line_num: li + 1,
+                            file_path: path
+                        ))
+
+        li = li + 1
+
+    warnings
+
+
+# ============================================================================
+# Taint Tracking
+# ============================================================================
+
+fn _extract_tainted_var(line: text) -> text:
+    """Extract variable name that receives user input from request.
+
+    Detects patterns like:
+    - val url = request.params["url"]
+    - val target = request.query["target"]
+    - val callback = request.body["callback_url"]
+    - val data = request.json()
+    """
+    val request_sources = ["request.params", "request.query", "request.body",
+                           "request.json()", "request.form", "request.get(",
+                           "req.params", "req.query", "req.body", "req.json()"]
+
+    var si = 0
+    while si < request_sources.len():
+        if line.contains(request_sources[si]):
+            # Extract the variable name from the assignment
+            val var_name = _extract_assignment_target(line)
+            if var_name != "":
+                return var_name
+        si = si + 1
+
+    ""
+
+fn _extract_validated_var(line: text) -> text:
+    """Extract variable name that receives a validated URL.
+
+    Detects patterns like:
+    - val safe_url = validate_url(url)
+    - val validated = UrlValidator.validate(url)
+    """
+    if line.contains("validate_url(") or line.contains("UrlValidator"):
+        val var_name = _extract_assignment_target(line)
+        if var_name != "":
+            return var_name
+    ""
+
+fn _extract_assignment_target(line: text) -> text:
+    """Extract the variable name from a val/var assignment.
+
+    From "val url = request.params[\"url\"]" returns "url".
+    """
+    var start = -1
+    if line.starts_with("val "):
+        start = 4
+    elif line.starts_with("var "):
+        start = 4
+
+    if start < 0:
+        # Check for walrus operator
+        val walrus_idx = _find_substring(line, " := ")
+        if walrus_idx > 0:
+            # Extract identifier before :=
+            return _extract_identifier_before(line, walrus_idx)
+        return ""
+
+    # Find end of variable name
+    var end = start
+    while end < line.len():
+        val ch = line.slice(end, end + 1)
+        if ch == " " or ch == "=" or ch == ":" or ch == "\t":
+            break
+        end = end + 1
+
+    if end <= start:
+        return ""
+    line.slice(start, end)
+
+
+# ============================================================================
+# Fetch Function Detection
+# ============================================================================
+
+fn _has_fetch_call(line: text) -> bool:
+    """Check if line contains an HTTP fetch function call."""
+    val fetch_fns = ["http_get(", "http_post(", "http_put(", "http_patch(",
+                     "http_delete(", "http_request(", "fetch(", "download(",
+                     "http_fetch(", "url_fetch(", "request_url(",
+                     "get_url(", "post_url("]
+
+    var fi = 0
+    while fi < fetch_fns.len():
+        if line.contains(fetch_fns[fi]):
+            return true
+        fi = fi + 1
+    false
+
+fn _find_tainted_in_fetch(line: text, tainted: [text], validated: [text]) -> text:
+    """Check if any tainted variable appears as an argument to a fetch function
+    on this line, and is not in the validated list.
+    """
+    var ti = 0
+    while ti < tainted.len():
+        val var_name = tainted[ti]
+        if line.contains(var_name):
+            # Check if this variable has been validated
+            var is_validated = false
+            var vi = 0
+            while vi < validated.len():
+                if validated[vi] == var_name:
+                    is_validated = true
+                vi = vi + 1
+
+            if not is_validated:
+                return var_name
+        ti = ti + 1
+    ""
+
+fn _has_direct_request_in_fetch(line: text) -> bool:
+    """Check if a fetch call directly contains a request.params/query/body access.
+
+    Detects patterns like:
+    - http_get(request.params["url"])
+    - fetch(request.query["target"])
+    """
+    val fetch_fns = ["http_get(", "http_post(", "http_put(", "http_patch(",
+                     "http_delete(", "http_request(", "fetch(", "download("]
+    val request_sources = ["request.params", "request.query", "request.body",
+                           "req.params", "req.query", "req.body"]
+
+    var fi = 0
+    while fi < fetch_fns.len():
+        if line.contains(fetch_fns[fi]):
+            # Check if any request source appears after the fetch function call
+            var si = 0
+            while si < request_sources.len():
+                if line.contains(request_sources[si]):
+                    # Make sure the request source is inside the fetch call parentheses
+                    val fetch_idx = _find_substring(line, fetch_fns[fi])
+                    val source_idx = _find_substring(line, request_sources[si])
+                    if source_idx > fetch_idx:
+                        return true
+                si = si + 1
+        fi = fi + 1
+
+    false
+
+
+# ============================================================================
+# Utility Helpers
+# ============================================================================
+
+fn _extract_identifier_before(line: text, idx: i64) -> text:
+    """Extract the identifier immediately before position idx."""
+    var end = idx
+    # Skip trailing whitespace
+    while end > 0 and line.slice(end - 1, end) == " ":
+        end = end - 1
+
+    var start = end
+    while start > 0:
+        val ch = line.slice(start - 1, start)
+        if _is_ident_char(ch):
+            start = start - 1
+        else:
+            break
+
+    if start >= end:
+        return ""
+    line.slice(start, end)
+
+fn _is_ident_char(ch: text) -> bool:
+    """Check if a single character is valid in an identifier."""
+    if ch.len() != 1:
+        return false
+    val c = ch.to_byte()
+    if c >= 97 and c <= 122:
+        return true
+    if c >= 65 and c <= 90:
+        return true
+    if c >= 48 and c <= 57:
+        return true
+    if c == 95:
+        return true
+    false
+
+fn _find_substring(haystack: text, needle: text) -> i64:
+    """Find the first occurrence of needle in haystack."""
+    if needle.len() == 0:
+        return 0
+    if haystack.len() < needle.len():
+        return -1
+    var i = 0
+    val limit = haystack.len() - needle.len() + 1
+    while i < limit:
+        if haystack.slice(i, i + needle.len()) == needle:
+            return i
+        i = i + 1
+    -1
+
+fn _count_triple_quotes(line: text) -> i64:
+    """Count the number of triple-quote sequences in a line."""
+    var count = 0
+    var i = 0
+    while i + 2 < line.len():
+        val chunk = line.slice(i, i + 3)
+        if chunk == "\"\"\"":
+            count = count + 1
+            i = i + 3
+        else:
+            i = i + 1
+    count
+
+
+# ============================================================================
+# Exports
+# ============================================================================
+
+export SsrfWarning
+export check_ssrf

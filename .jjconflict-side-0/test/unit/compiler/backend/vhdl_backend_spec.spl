@@ -1,0 +1,462 @@
+# VHDL Backend Integration Specification
+#
+# Tests VhdlBackend compilation pipeline via VhdlBuilder integration.
+# Verifies that generated VHDL is structurally valid for common patterns.
+#
+# **Feature IDs:** #vhdl-backend
+# **Category:** Backend
+# **Difficulty:** 3/5
+
+use compiler.backend.backend.vhdl.vhdl_builder.VhdlBuilder
+use compiler.backend.backend.vhdl_backend.VhdlBackend
+use compiler.backend.backend.backend_types.{CodegenTarget, compileoptions_default_options}
+use compiler.backend.backend.vhdl_type_mapper.VhdlTypeMapper
+use compiler.backend.backend.common.type_mapper.PrimitiveType
+use compiler.mir.mir_data.*
+from hir_types import {SymbolId}
+from lexer import {Span}
+
+fn check(condition: bool):
+    expect(condition).to_equal(true)
+
+fn empty_span() -> Span:
+    Span(start: 0, end_pos: 0, line: 1, col: 1)
+
+fn make_i32() -> MirType:
+    MirType(kind: MirTypeKind.I32)
+
+fn make_bool() -> MirType:
+    MirType(kind: MirTypeKind.Bool)
+
+fn make_arg_local(id: i64, index: i64, name: text, ty: MirType) -> MirLocal:
+    MirLocal(id: LocalId(id: id), name: Some(name), type_: ty, kind: LocalKind.Arg(index))
+
+fn make_return_local(id: i64, ty: MirType) -> MirLocal:
+    MirLocal(id: LocalId(id: id), name: nil, type_: ty, kind: LocalKind.Return)
+
+fn make_temp_local(id: i64, name: text, ty: MirType) -> MirLocal:
+    MirLocal(id: LocalId(id: id), name: Some(name), type_: ty, kind: LocalKind.Temp)
+
+fn make_simple_backend() -> VhdlBackend:
+    val options = compileoptions_default_options()
+    VhdlBackend.create(CodegenTarget.Riscv32, options)
+
+fn single_block_module(name: text, func: MirFunction) -> MirModule:
+    var functions: Dict<SymbolId, MirFunction> = {}
+    functions[func.symbol] = func
+    MirModule(name: name, functions: functions, statics: {}, constants: {}, types: {})
+
+# ============================================================================
+# Simple Function (Entity + Architecture)
+# ============================================================================
+
+describe "VHDL Backend - simple function compilation":
+    """
+    ## Simple Function → Entity + Architecture
+
+    Verifies that a simple add function compiles to a valid
+    VHDL entity with input ports, output port, and architecture body
+    with signal assignment.
+    """
+
+    it "generates entity with input/output ports for add function":
+        var builder = VhdlBuilder.create("add")
+        builder.emit_library_header()
+        builder.emit_entity_begin("add")
+        builder.emit_port_begin()
+        builder.emit_port("a", "in", "signed(31 downto 0)", false)
+        builder.emit_port("b", "in", "signed(31 downto 0)", false)
+        builder.emit_port("result_out", "out", "signed(31 downto 0)", true)
+        builder.emit_port_end()
+        builder.emit_entity_end("add")
+        builder.emit_architecture_begin("add", "rtl")
+        builder.emit_architecture_body_begin()
+        builder.emit_signal_assign("result_out", "a + b")
+        builder.emit_architecture_end("rtl")
+        val vhdl = builder.build()
+
+        # Verify structural VHDL validity
+        check(vhdl.contains("library ieee;"))
+        check(vhdl.contains("use ieee.std_logic_1164.all;"))
+        check(vhdl.contains("use ieee.numeric_std.all;"))
+        check(vhdl.contains("entity add is"))
+        check(vhdl.contains("a : in signed(31 downto 0);"))
+        check(vhdl.contains("b : in signed(31 downto 0);"))
+        check(vhdl.contains("result_out : out signed(31 downto 0)"))
+        check(vhdl.contains("end entity add;"))
+        check(vhdl.contains("architecture rtl of add is"))
+        check(vhdl.contains("result_out <= a + b;"))
+        check(vhdl.contains("end architecture rtl;"))
+
+# ============================================================================
+# Type Declarations (Package)
+# ============================================================================
+
+describe "VHDL Backend - type declaration package":
+    """
+    ## Type Declarations → VHDL Package
+
+    Verifies that struct and enum type declarations compile to a valid
+    VHDL package with record and enumeration type definitions.
+    """
+
+    it "generates package with record and enum types":
+        val mapper = VhdlTypeMapper.create()
+        var builder = VhdlBuilder.create("types_mod")
+        builder.emit_library_header()
+        builder.emit_package_begin("types_mod")
+
+        # Enum type
+        val enum_def = mapper.map_enum_type(["Idle", "Running", "Done"])
+        builder.emit_type_decl("state_t", enum_def)
+
+        # Record type
+        val record_def = mapper.map_record([("x", "signed(31 downto 0)"), ("y", "signed(31 downto 0)")])
+        builder.emit_type_decl("point_t", record_def)
+
+        # Constant
+        builder.emit_constant_decl("MAX_COUNT", "integer", "255")
+        builder.emit_package_end("types_mod")
+        val vhdl = builder.build()
+
+        check(vhdl.contains("package types_mod_pkg is"))
+        check(vhdl.contains("type state_t is (Idle, Running, Done);"))
+        check(vhdl.contains("type point_t is record"))
+        check(vhdl.contains("x : signed(31 downto 0);"))
+        check(vhdl.contains("constant MAX_COUNT : integer := 255;"))
+        check(vhdl.contains("end package types_mod_pkg;"))
+
+# ============================================================================
+# Signal Assignments
+# ============================================================================
+
+describe "VHDL Backend - signal assignments":
+    """
+    ## Signal Assignments
+
+    Verifies basic arithmetic and bitwise operations map to VHDL correctly.
+    """
+
+    it "generates arithmetic signal assignments":
+        var builder = VhdlBuilder.create("arith")
+        builder.emit_architecture_begin("arith", "rtl")
+        builder.emit_signal_decl("sum", "signed(31 downto 0)", nil)
+        builder.emit_signal_decl("diff", "signed(31 downto 0)", nil)
+        builder.emit_architecture_body_begin()
+        builder.emit_signal_assign("sum", "a + b")
+        builder.emit_signal_assign("diff", "a - b")
+        builder.emit_architecture_end("rtl")
+        val vhdl = builder.build()
+
+        check(vhdl.contains("signal sum : signed(31 downto 0);"))
+        check(vhdl.contains("signal diff : signed(31 downto 0);"))
+        check(vhdl.contains("sum <= a + b;"))
+        check(vhdl.contains("diff <= a - b;"))
+
+    it "generates bitwise signal assignments":
+        var builder = VhdlBuilder.create("bitwise")
+        builder.emit_architecture_begin("bitwise", "rtl")
+        builder.emit_architecture_body_begin()
+        builder.emit_signal_assign("result", "a and b")
+        builder.emit_signal_assign("result2", "a or b")
+        builder.emit_signal_assign("result3", "a xor b")
+        builder.emit_architecture_end("rtl")
+        val vhdl = builder.build()
+
+        check(vhdl.contains("result <= a and b;"))
+        check(vhdl.contains("result2 <= a or b;"))
+        check(vhdl.contains("result3 <= a xor b;"))
+
+# ============================================================================
+# Type Mapper Integration
+# ============================================================================
+
+describe "VHDL Backend - type mapper integration":
+    """
+    ## Type Mapper with Builder
+
+    Verifies that VhdlTypeMapper produces correct type strings
+    that are used consistently in entity port declarations.
+    """
+
+    it "maps all integer types for port declarations":
+        val mapper = VhdlTypeMapper.create()
+        var builder = VhdlBuilder.create("typed")
+        builder.emit_entity_begin("typed")
+        builder.emit_port_begin()
+        builder.emit_port("a8", "in", mapper.map_primitive(PrimitiveType.I8), false)
+        builder.emit_port("a16", "in", mapper.map_primitive(PrimitiveType.I16), false)
+        builder.emit_port("a32", "in", mapper.map_primitive(PrimitiveType.I32), false)
+        builder.emit_port("a64", "in", mapper.map_primitive(PrimitiveType.I64), false)
+        builder.emit_port("u8", "in", mapper.map_primitive(PrimitiveType.U8), false)
+        builder.emit_port("flag", "in", mapper.map_primitive(PrimitiveType.Bool), true)
+        builder.emit_port_end()
+        builder.emit_entity_end("typed")
+        val vhdl = builder.build()
+
+        check(vhdl.contains("a8 : in signed(7 downto 0);"))
+        check(vhdl.contains("a16 : in signed(15 downto 0);"))
+        check(vhdl.contains("a32 : in signed(31 downto 0);"))
+        check(vhdl.contains("a64 : in signed(63 downto 0);"))
+        check(vhdl.contains("u8 : in unsigned(7 downto 0);"))
+        check(vhdl.contains("flag : in bit"))
+
+    it "maps resolved types for std_logic ports":
+        val mapper = VhdlTypeMapper.create_resolved()
+        var builder = VhdlBuilder.create("resolved")
+        builder.emit_entity_begin("resolved")
+        builder.emit_port_begin()
+        builder.emit_port("clk", "in", mapper.map_primitive(PrimitiveType.Bool), false)
+        builder.emit_port("data", "in", mapper.bit_vector_type(8), true)
+        builder.emit_port_end()
+        builder.emit_entity_end("resolved")
+        val vhdl = builder.build()
+
+        check(vhdl.contains("clk : in std_logic;"))
+        check(vhdl.contains("data : in std_logic_vector(7 downto 0)"))
+
+# ============================================================================
+# Complete Module (Package + Entity + Architecture)
+# ============================================================================
+
+describe "VHDL Backend - complete module compilation":
+    """
+    ## Complete Module
+
+    Simulates full VhdlBackend.compile_module() by generating package,
+    entity, and architecture together — verifying the complete output
+    is structurally valid VHDL-2008.
+    """
+
+    it "generates complete ALU module with package":
+        val mapper = VhdlTypeMapper.create()
+
+        # Package
+        var pkg = VhdlBuilder.create("alu")
+        pkg.emit_library_header()
+        pkg.emit_package_begin("alu")
+        val op_enum = mapper.map_enum_type(["OpAdd", "OpSub", "OpAnd", "OpOr"])
+        pkg.emit_type_decl("alu_op_t", op_enum)
+        pkg.emit_constant_decl("WIDTH", "integer", "32")
+        pkg.emit_package_end("alu")
+
+        # Entity
+        var ent = VhdlBuilder.create("alu")
+        ent.emit_library_header()
+        ent.emit_use_package("work", "alu_pkg")
+        ent.emit_entity_begin("alu")
+        ent.emit_port_begin()
+        ent.emit_port("op", "in", "alu_op_t", false)
+        ent.emit_port("a", "in", "signed(31 downto 0)", false)
+        ent.emit_port("b", "in", "signed(31 downto 0)", false)
+        ent.emit_port("result_out", "out", "signed(31 downto 0)", true)
+        ent.emit_port_end()
+        ent.emit_entity_end("alu")
+        ent.emit_architecture_begin("alu", "rtl")
+        ent.emit_architecture_body_begin()
+        ent.emit_process_begin(Some("alu_proc"), ["op", "a", "b"])
+        ent.emit_process_body_begin()
+        ent.emit_comment("ALU operation selection")
+        ent.emit_signal_assign("result_out", "a + b")
+        ent.emit_process_end(Some("alu_proc"))
+        ent.emit_architecture_end("rtl")
+
+        val pkg_vhdl = pkg.build()
+        val ent_vhdl = ent.build()
+
+        # Verify package
+        check(pkg_vhdl.contains("package alu_pkg is"))
+        check(pkg_vhdl.contains("type alu_op_t is (OpAdd, OpSub, OpAnd, OpOr);"))
+        check(pkg_vhdl.contains("constant WIDTH : integer := 32;"))
+
+        # Verify entity
+        check(ent_vhdl.contains("use work.alu_pkg.all;"))
+        check(ent_vhdl.contains("entity alu is"))
+        check(ent_vhdl.contains("alu_proc: process(op, a, b)"))
+        check(ent_vhdl.contains("end process alu_proc;"))
+        check(ent_vhdl.contains("end architecture rtl;"))
+
+describe "VHDL Backend - real backend compilation":
+    it "compiles MIR locals to ports and result output":
+        val a_local = make_arg_local(1, 0, "a", make_i32())
+        val b_local = make_arg_local(2, 1, "b", make_i32())
+        val ret_local = make_return_local(3, make_i32())
+        val sum_local = make_temp_local(4, "sum_sig", make_i32())
+
+        val block = MirBlock(
+            id: BlockId(id: 0),
+            label: Some("entry"),
+            instructions: [
+                MirInst(
+                    kind: MirInstKind.BinOp(
+                        LocalId(id: 4),
+                        MirBinOp.Add,
+                        MirOperand(kind: MirOperandKind.Copy(LocalId(id: 1))),
+                        MirOperand(kind: MirOperandKind.Copy(LocalId(id: 2)))
+                    ),
+                    span: nil
+                ),
+                MirInst(
+                    kind: MirInstKind.Copy(LocalId(id: 3), LocalId(id: 4)),
+                    span: nil
+                )
+            ],
+            terminator: MirTerminator.Return(nil)
+        )
+
+        val func = MirFunction(
+            symbol: SymbolId(id: 10),
+            name: "adder",
+            signature: MirSignature(params: [make_i32(), make_i32()], return_type: make_i32(), is_variadic: false),
+            locals: [a_local, b_local, ret_local, sum_local],
+            blocks: [block],
+            entry_block: BlockId.entry(),
+            span: empty_span(),
+            generic_params: [],
+            is_generic_template: false,
+            specialization_of: nil,
+            type_bindings: {},
+            layout_phase: nil,
+            is_kernel: false,
+            is_export_c: false,
+            export_name: ""
+        )
+
+        val backend = make_simple_backend()
+        val result = backend.compile(single_block_module("adder_mod", func))
+        check(result.is_ok())
+        val compiled = result.unwrap()
+
+        check(compiled.vhdl.contains("a : in signed(31 downto 0);"))
+        check(compiled.vhdl.contains("b : in signed(31 downto 0);"))
+        check(compiled.vhdl.contains("result_out : out signed(31 downto 0)"))
+        check(compiled.vhdl.contains("signal sum_sig : signed(31 downto 0);"))
+        check(compiled.vhdl.contains("sum_sig <= a + b;"))
+        check(compiled.vhdl.contains("result_out <= sum_sig;"))
+
+    it "compiles package declarations through the backend trait path":
+        val point_type = MirTypeDef(
+            symbol: SymbolId(id: 20),
+            name: "point_t",
+            kind: MirTypeDefKind.Struct([
+                MirFieldDef(name: "x", type_: make_i32(), offset: 0, has_bits_attr: false, bits_width: 0),
+                MirFieldDef(name: "valid", type_: make_bool(), offset: 4, has_bits_attr: false, bits_width: 0)
+            ]),
+            is_export_c: false,
+            export_name: ""
+        )
+        val max_constant = MirConstant(
+            symbol: SymbolId(id: 21),
+            name: "MAX_VALUE",
+            type_: make_i32(),
+            value: MirConstValue.Int(7)
+        )
+        var types: Dict<SymbolId, MirTypeDef> = {}
+        types[point_type.symbol] = point_type
+        var constants: Dict<SymbolId, MirConstant> = {}
+        constants[max_constant.symbol] = max_constant
+        val module = MirModule(name: "pkg_demo", functions: {}, statics: {}, constants: constants, types: types)
+
+        val backend = make_simple_backend()
+        val pkg_result = backend.compile_package(module)
+        check(pkg_result.is_ok())
+        val pkg_vhdl = pkg_result.unwrap()
+
+        check(pkg_vhdl.contains("package pkg_demo_pkg is"))
+        check(pkg_vhdl.contains("type point_t is record"))
+        check(pkg_vhdl.contains("x : signed(31 downto 0);"))
+        check(pkg_vhdl.contains("valid : bit;"))
+        check(pkg_vhdl.contains("constant MAX_VALUE : signed(31 downto 0) := to_signed(7, 32);"))
+
+    it "compiles MIR VHDL combinational processes with real block contents":
+        val src_local = make_arg_local(1, 0, "src_in", make_i32())
+        val ret_local = make_return_local(2, make_i32())
+        val body_block = MirBlock(
+            id: BlockId(id: 1),
+            label: Some("proc_body"),
+            instructions: [
+                MirInst(
+                    kind: MirInstKind.Copy(LocalId(id: 2), LocalId(id: 1)),
+                    span: nil
+                )
+            ],
+            terminator: MirTerminator.Return(nil)
+        )
+        val entry_block = MirBlock(
+            id: BlockId(id: 0),
+            label: Some("entry"),
+            instructions: [
+                MirInst(
+                    kind: MirInstKind.VhdlProcess(
+                        VhdlProcessKind.Combinational(["src_in"]),
+                        BlockId(id: 1)
+                    ),
+                    span: nil
+                )
+            ],
+            terminator: MirTerminator.Return(nil)
+        )
+        val func = MirFunction(
+            symbol: SymbolId(id: 30),
+            name: "passthrough",
+            signature: MirSignature(params: [make_i32()], return_type: make_i32(), is_variadic: false),
+            locals: [src_local, ret_local],
+            blocks: [entry_block, body_block],
+            entry_block: BlockId.entry(),
+            span: empty_span(),
+            generic_params: [],
+            is_generic_template: false,
+            specialization_of: nil,
+            type_bindings: {},
+            layout_phase: nil,
+            is_kernel: false,
+            is_export_c: false,
+            export_name: ""
+        )
+
+        val backend = make_simple_backend()
+        val result = backend.compile(single_block_module("proc_mod", func))
+        check(result.is_ok())
+        val compiled = result.unwrap()
+
+        check(compiled.vhdl.contains("process(src_in)"))
+        check(compiled.vhdl.contains("result_out <= src_in;"))
+
+    it "fails fast on unsupported MIR instructions":
+        val ret_local = make_return_local(1, make_i32())
+        val temp_local = make_temp_local(2, "tmp_sig", make_i32())
+        val block = MirBlock(
+            id: BlockId(id: 0),
+            label: Some("entry"),
+            instructions: [
+                MirInst(
+                    kind: MirInstKind.Alloc(LocalId(id: 2), make_i32()),
+                    span: nil
+                )
+            ],
+            terminator: MirTerminator.Return(nil)
+        )
+        val func = MirFunction(
+            symbol: SymbolId(id: 40),
+            name: "bad_alloc",
+            signature: MirSignature(params: [], return_type: make_i32(), is_variadic: false),
+            locals: [ret_local, temp_local],
+            blocks: [block],
+            entry_block: BlockId.entry(),
+            span: empty_span(),
+            generic_params: [],
+            is_generic_template: false,
+            specialization_of: nil,
+            type_bindings: {},
+            layout_phase: nil,
+            is_kernel: false,
+            is_export_c: false,
+            export_name: ""
+        )
+
+        val backend = make_simple_backend()
+        val result = backend.compile(single_block_module("bad_mod", func))
+        check(result.is_err())
+        val err = result.unwrap_err()
+        check(err.message.contains("Unsupported instruction"))
+        check(err.phase.contains("vhdl"))

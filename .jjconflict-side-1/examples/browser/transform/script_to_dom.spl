@@ -1,0 +1,275 @@
+#![allow(unnamed_duplicate_typed_args)]
+# Script-to-DOM bridge for the Simple Browser Platform.
+# Translates JavaScript DOM mutations (appendChild, removeChild,
+# setAttribute, innerHTML, classList changes, etc.) into concrete
+# tree updates on the Document model.
+#
+# Each mutation is classified for whether it invalidates layout,
+# paint, or both, so the pipeline can skip unnecessary stages.
+
+use sbp.shared.logging.{Logger, LogLevel}
+use sbp.shared.error.{BrowserResult, dom_error}
+use sbp.feature.dom.document.{Document}
+use sbp.feature.dom.element.{ElementOps}
+use sbp.feature.dom.text.{TextOps}
+use sbp.entity.dom.node_types.{DomNode, NodeKind, Element, TextNode}
+
+# ---------------------------------------------------------------------------
+# JsMutation — every DOM-mutating JS API call produces one of these.
+# ---------------------------------------------------------------------------
+enum JsMutation:
+    AppendChild(parent_id: i64, child_id: i64)
+    RemoveChild(parent_id: i64, child_id: i64)
+    SetAttribute(node_id: i64, name: text, value: text)
+    RemoveAttribute(node_id: i64, name: text)
+    SetTextContent(node_id: i64, content: text)
+    SetInnerHTML(node_id: i64, html: text)
+    InsertBefore(parent_id: i64, new_child: i64, ref_child: i64)
+    ReplaceChild(parent_id: i64, new_child: i64, old_child: i64)
+    SetStyle(node_id: i64, property: text, value: text)
+    AddClass(node_id: i64, class_name: text)
+    RemoveClass(node_id: i64, class_name: text)
+
+# ---------------------------------------------------------------------------
+# ScriptToDomBridge
+# ---------------------------------------------------------------------------
+class ScriptToDomBridge:
+    logger: Logger
+
+    static fn new(logger: Logger) -> ScriptToDomBridge:
+        ScriptToDomBridge(logger: logger)
+
+    # Apply a single JS mutation to the document tree.
+    me apply_js_mutation(mutation: JsMutation, doc: Document) -> BrowserResult<()>:
+        self.logger.debug("ScriptToDom: applying mutation")
+        match mutation:
+            JsMutation.AppendChild(parent_id, child_id):
+                self.logger.debug("ScriptToDom: appendChild parent={parent_id} child={child_id}")
+                doc.appendChild(parent_id, child_id)
+            JsMutation.RemoveChild(parent_id, child_id):
+                self.logger.debug("ScriptToDom: removeChild parent={parent_id} child={child_id}")
+                doc.removeChild(parent_id, child_id)
+            JsMutation.SetAttribute(node_id, name, value):
+                self.logger.debug("ScriptToDom: setAttribute node={node_id} {name}={value}")
+                ElementOps.setAttribute(doc, node_id, name, value)
+                Ok(())
+            JsMutation.RemoveAttribute(node_id, name):
+                self.logger.debug("ScriptToDom: removeAttribute node={node_id} {name}")
+                ElementOps.removeAttribute(doc, node_id, name)
+                Ok(())
+            JsMutation.SetTextContent(node_id, content):
+                self.logger.debug("ScriptToDom: setTextContent node={node_id}")
+                _set_text_content(doc, node_id, content)
+                Ok(())
+            JsMutation.SetInnerHTML(node_id, html):
+                self.logger.debug("ScriptToDom: setInnerHTML node={node_id}")
+                # innerHTML requires an HTML parser to produce child nodes.
+                # For now, treat the html string as a single text node child.
+                _set_inner_html_simple(doc, node_id, html)
+                Ok(())
+            JsMutation.InsertBefore(parent_id, new_child, ref_child):
+                self.logger.debug("ScriptToDom: insertBefore parent={parent_id}")
+                doc.insertBefore(parent_id, new_child, ref_child)
+            JsMutation.ReplaceChild(parent_id, new_child, old_child):
+                self.logger.debug("ScriptToDom: replaceChild parent={parent_id}")
+                doc.replaceChild(parent_id, new_child, old_child)
+            JsMutation.SetStyle(node_id, property, value):
+                self.logger.debug("ScriptToDom: setStyle node={node_id} {property}={value}")
+                _set_style_property(doc, node_id, property, value)
+                Ok(())
+            JsMutation.AddClass(node_id, class_name):
+                self.logger.debug("ScriptToDom: addClass node={node_id} '{class_name}'")
+                ElementOps.classList_add(doc, node_id, class_name)
+                Ok(())
+            JsMutation.RemoveClass(node_id, class_name):
+                self.logger.debug("ScriptToDom: removeClass node={node_id} '{class_name}'")
+                ElementOps.classList_remove(doc, node_id, class_name)
+                Ok(())
+
+    # Apply a batch of mutations in order.  Stops at the first error.
+    me batch_mutations(mutations: [JsMutation], doc: Document) -> BrowserResult<()>:
+        self.logger.info("ScriptToDom: applying batch of {mutations.len()} mutations")
+        for m in mutations:
+            self.apply_js_mutation(m, doc)?
+        Ok(())
+
+# ---------------------------------------------------------------------------
+# Invalidation queries — determine which pipeline stages must re-run
+# ---------------------------------------------------------------------------
+
+# Does this mutation change the tree structure or sizing, requiring layout?
+fn needs_layout(mutation: JsMutation) -> bool:
+    match mutation:
+        JsMutation.AppendChild(_, _): true
+        JsMutation.RemoveChild(_, _): true
+        JsMutation.SetTextContent(_, _): true
+        JsMutation.SetInnerHTML(_, _): true
+        JsMutation.InsertBefore(_, _, _): true
+        JsMutation.ReplaceChild(_, _, _): true
+        JsMutation.SetAttribute(_, name, _):
+            # Some attributes affect layout (e.g. width, height on <img>)
+            name == "width" or name == "height" or name == "hidden"
+        JsMutation.RemoveAttribute(_, name):
+            name == "width" or name == "height" or name == "hidden"
+        JsMutation.SetStyle(_, property, _):
+            # Layout-affecting CSS properties
+            is_layout_property(property)
+        _: false
+
+# Does this mutation require a repaint (but not necessarily layout)?
+fn needs_paint(mutation: JsMutation) -> bool:
+    match mutation:
+        # Anything that needs layout also needs paint
+        JsMutation.AppendChild(_, _): true
+        JsMutation.RemoveChild(_, _): true
+        JsMutation.SetTextContent(_, _): true
+        JsMutation.SetInnerHTML(_, _): true
+        JsMutation.InsertBefore(_, _, _): true
+        JsMutation.ReplaceChild(_, _, _): true
+        # Visual-only changes
+        JsMutation.SetStyle(_, _, _): true
+        JsMutation.AddClass(_, _): true
+        JsMutation.RemoveClass(_, _): true
+        JsMutation.SetAttribute(_, name, _):
+            name == "class" or name == "style" or name == "hidden"
+        JsMutation.RemoveAttribute(_, name):
+            name == "class" or name == "style" or name == "hidden"
+
+# --- DOM mutation helpers (private) -------------------------------------------
+
+# Set the text content of a node: remove all children and insert a single text node.
+fn _set_text_content(doc: Document, node_id: i64, content: text):
+    # Remove existing children
+    val node_opt = doc.node_store.get_node(node_id)
+    if val Some(node) = node_opt:
+        # Collect child IDs to remove (iterate copy to avoid mutation during iteration)
+        var children_copy = [i64]()
+        var ci = 0
+        while ci < node.children.len():
+            children_copy.push(node.children.get(ci))
+            ci = ci + 1
+        # Remove each child
+        var ri = 0
+        while ri < children_copy.len():
+            doc.removeChild(node_id, children_copy.get(ri))
+            ri = ri + 1
+
+    # For text/comment nodes, set data directly
+    val node_opt2 = doc.node_store.get_node(node_id)
+    if val Some(n) = node_opt2:
+        match n.kind:
+            NodeKind.Text:
+                TextOps.set_data(doc, node_id, content)
+                return
+            NodeKind.Comment:
+                TextOps.set_data(doc, node_id, content)
+                return
+            _:
+                pass_dn
+
+    # For element/document nodes, create a text child if content is non-empty
+    if content.len() > 0:
+        val text_id = doc.createTextNode(content)
+        doc.appendChild(node_id, text_id)
+
+# Simplified innerHTML: clear children and insert content as a single text node.
+# Full implementation would parse the HTML string into a DOM subtree.
+fn _set_inner_html_simple(doc: Document, node_id: i64, html: text):
+    # Remove all existing children
+    val node_opt = doc.node_store.get_node(node_id)
+    if val Some(node) = node_opt:
+        var children_copy = [i64]()
+        var ci = 0
+        while ci < node.children.len():
+            children_copy.push(node.children.get(ci))
+            ci = ci + 1
+        var ri = 0
+        while ri < children_copy.len():
+            doc.removeChild(node_id, children_copy.get(ri))
+            ri = ri + 1
+
+    # If html is non-empty, create a text node as a placeholder
+    if html.len() > 0:
+        val text_id = doc.createTextNode(html)
+        doc.appendChild(node_id, text_id)
+
+# Set an inline style property by updating the element's style attribute.
+fn _set_style_property(doc: Document, node_id: i64, property: text, value: text):
+    val existing = ElementOps.getAttribute(doc, node_id, "style")
+    if val Some(style_str) = existing:
+        # Parse existing style, replace or add the property
+        val new_style = _update_style_string(style_str, property, value)
+        ElementOps.setAttribute(doc, node_id, "style", new_style)
+    else:
+        ElementOps.setAttribute(doc, node_id, "style", "{property}: {value}")
+
+# Update a CSS style string by replacing or appending a property.
+fn _update_style_string(style: text, property: text, value: text) -> text:
+    val parts = style.split(";")
+    var result = [text]()
+    var found = false
+    var i = 0
+    while i < parts.len():
+        val part = parts.get(i).trim()
+        if part.len() > 0:
+            val colon_idx = _find_colon(part)
+            if colon_idx >= 0:
+                val prop_name = part.substring(0, colon_idx).trim()
+                if prop_name == property:
+                    result.push("{property}: {value}")
+                    found = true
+                else:
+                    result.push(part)
+            else:
+                result.push(part)
+        i = i + 1
+    if not found:
+        result.push("{property}: {value}")
+    _join_style_parts(result)
+
+fn _find_colon(s: text) -> i64:
+    var i = 0
+    while i < s.len():
+        if s.substring(i, i + 1) == ":":
+            return i
+        i = i + 1
+    -1
+
+fn _join_style_parts(parts: [text]) -> text:
+    var result = ""
+    var i = 0
+    while i < parts.len():
+        if i > 0:
+            result = result + "; "
+        result = result + parts.get(i)
+        i = i + 1
+    result
+
+# Check if a CSS property name affects layout.
+fn is_layout_property(property: text) -> bool:
+    match property:
+        "display": true
+        "position": true
+        "width": true
+        "height": true
+        "min-width": true
+        "max-width": true
+        "min-height": true
+        "max-height": true
+        "margin": true
+        "margin-top": true
+        "margin-right": true
+        "margin-bottom": true
+        "margin-left": true
+        "padding": true
+        "padding-top": true
+        "padding-right": true
+        "padding-bottom": true
+        "padding-left": true
+        "border-width": true
+        "float": true
+        "flex": true
+        "flex-direction": true
+        "grid-template-columns": true
+        "grid-template-rows": true
+        _: false

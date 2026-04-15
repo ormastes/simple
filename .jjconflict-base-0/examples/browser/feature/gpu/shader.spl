@@ -1,0 +1,221 @@
+# Shader management for the GPU compositor.
+# Manages shader sources, compilation, and program linking for
+# future GPU-accelerated rendering (Vulkan/WebGPU/OpenGL).
+
+use examples.browser.shared.error.(BrowserError, BrowserErrorKind, BrowserResult, paint_error)
+use examples.browser.shared.logging.(Logger, LogLevel)
+
+# ---------------------------------------------------------------------------
+# Shader enums
+# ---------------------------------------------------------------------------
+
+enum ShaderStage:
+    Vertex
+    Fragment
+    Compute
+
+enum ShaderLanguage:
+    Glsl
+    Spirv
+    Wgsl
+
+# ---------------------------------------------------------------------------
+# ShaderUniform — a uniform variable binding in a shader program.
+# ---------------------------------------------------------------------------
+
+class ShaderUniform:
+    name: text
+    uniform_type: text
+    location: i64
+
+    static fn create(name: text, uniform_type: text, location: i64) -> ShaderUniform:
+        ShaderUniform(name: name, uniform_type: uniform_type, location: location)
+
+# ---------------------------------------------------------------------------
+# ShaderSource — a single shader stage source.
+# ---------------------------------------------------------------------------
+
+class ShaderSource:
+    id: i64
+    stage: ShaderStage
+    language: ShaderLanguage
+    source: text
+    name: text
+
+    static fn create(id: i64, stage: ShaderStage, language: ShaderLanguage, source: text, name: text) -> ShaderSource:
+        ShaderSource(id: id, stage: stage, language: language, source: source, name: name)
+
+# ---------------------------------------------------------------------------
+# ShaderProgram — a linked vertex + fragment shader pair.
+# ---------------------------------------------------------------------------
+
+class ShaderProgram:
+    id: i64
+    vertex_id: i64
+    fragment_id: i64
+    uniforms: [ShaderUniform]
+    is_compiled: bool
+
+    static fn create(id: i64, vertex_id: i64, fragment_id: i64) -> ShaderProgram:
+        ShaderProgram(
+            id: id,
+            vertex_id: vertex_id,
+            fragment_id: fragment_id,
+            uniforms: [ShaderUniform](),
+            is_compiled: false
+        )
+
+# ---------------------------------------------------------------------------
+# Built-in shader sources
+# ---------------------------------------------------------------------------
+
+# Passthrough vertex shader for textured quads.
+val QUAD_VERTEX_SHADER = "#version 450
+layout(location = 0) in vec2 a_position;
+layout(location = 1) in vec2 a_texcoord;
+layout(location = 0) out vec2 v_texcoord;
+layout(set = 0, binding = 0) uniform Uniforms {
+    mat4 u_transform;
+};
+void main() {
+    v_texcoord = a_texcoord;
+    gl_Position = u_transform * vec4(a_position, 0.0, 1.0);
+}"
+
+# Texture sampling fragment shader for textured quads.
+val QUAD_FRAGMENT_SHADER = "#version 450
+layout(location = 0) in vec2 v_texcoord;
+layout(location = 0) out vec4 o_color;
+layout(set = 0, binding = 1) uniform sampler2D u_texture;
+layout(set = 0, binding = 2) uniform FragUniforms {
+    float u_opacity;
+};
+void main() {
+    vec4 tex_color = texture(u_texture, v_texcoord);
+    o_color = tex_color * u_opacity;
+}"
+
+# Solid color fragment shader (no texture sampling).
+val SOLID_FRAGMENT_SHADER = "#version 450
+layout(location = 0) out vec4 o_color;
+layout(set = 0, binding = 0) uniform FragUniforms {
+    vec4 u_color;
+};
+void main() {
+    o_color = u_color;
+}"
+
+# ---------------------------------------------------------------------------
+# ShaderManager — creates and manages shader sources and programs.
+# ---------------------------------------------------------------------------
+
+class ShaderManager:
+    shaders: [ShaderSource]
+    programs: [ShaderProgram]
+    next_id: i64
+    logger: Logger
+
+    static fn new(logger: Logger) -> ShaderManager:
+        logger.info("ShaderManager created")
+        ShaderManager(
+            shaders: [ShaderSource](),
+            programs: [ShaderProgram](),
+            next_id: 1,
+            logger: logger
+        )
+
+    # Create a new shader source and return its ID.
+    me create_shader(stage: ShaderStage, source: text, name: text) -> i64:
+        val id = self.next_id
+        self.next_id = self.next_id + 1
+
+        val stage_name = match stage:
+            ShaderStage.Vertex: "vertex"
+            ShaderStage.Fragment: "fragment"
+            ShaderStage.Compute: "compute"
+
+        val shader = ShaderSource.create(id, stage, ShaderLanguage.Glsl, source, name)
+        self.shaders.push(shader)
+        self.logger.debug("created {stage_name} shader '{name}' id={id}")
+        id
+
+    # Create a shader program by linking a vertex and fragment shader.
+    me create_program(vertex_id: i64, fragment_id: i64) -> BrowserResult<ShaderProgram>:
+        val vs = self._get_shader(vertex_id)
+        if val vs_shader = vs:
+            self.logger.trace("create_program: found vertex shader '{vs_shader.name}' id={vertex_id}")
+        else:
+            return Err(paint_error("vertex shader not found: id={vertex_id}"))
+
+        val fs = self._get_shader(fragment_id)
+        if val fs_shader = fs:
+            self.logger.trace("create_program: found fragment shader '{fs_shader.name}' id={fragment_id}")
+        else:
+            return Err(paint_error("fragment shader not found: id={fragment_id}"))
+
+        val prog_id = self.next_id
+        self.next_id = self.next_id + 1
+
+        val program = ShaderProgram.create(prog_id, vertex_id, fragment_id)
+        self.programs.push(program)
+        self.logger.debug("created program id={prog_id} (vs={vertex_id}, fs={fragment_id})")
+        Ok(program)
+
+    # Compile a shader (placeholder for actual SPIR-V / backend compilation).
+    # Software rendering path: mark as compiled (no-op — software rasterizer
+    # does not use GPU shaders, so compilation is a validation pass only).
+    me compile_shader(shader_id: i64) -> BrowserResult<()>:
+        val shader = self._get_shader(shader_id)
+        if val s = shader:
+            self.logger.debug("compiling shader '{s.name}' id={shader_id}")
+            # Software rendering path — no actual GPU compilation needed.
+            # Mark any program that references this shader as compiled.
+            var marked = 0
+            for prog in self.programs:
+                if prog.vertex_id == shader_id or prog.fragment_id == shader_id:
+                    prog.is_compiled = true
+                    marked = marked + 1
+            self.logger.trace("shader '{s.name}' compiled (software path, no-op); marked {marked} program(s)")
+            Ok(())
+        else:
+            Err(paint_error("shader not found: id={shader_id}"))
+
+    # Look up a program by ID.
+    fn get_program(program_id: i64) -> ShaderProgram?:
+        for prog in self.programs:
+            if prog.id == program_id:
+                return prog
+        nil
+
+    # Look up a shader source by ID.
+    fn _get_shader(shader_id: i64) -> ShaderSource?:
+        for shader in self.shaders:
+            if shader.id == shader_id:
+                return shader
+        nil
+
+    # Register built-in shaders and return a program for textured quads.
+    me register_builtins() -> BrowserResult<ShaderProgram>:
+        val vs_id = self.create_shader(ShaderStage.Vertex, QUAD_VERTEX_SHADER, "builtin_quad_vs")
+        val fs_id = self.create_shader(ShaderStage.Fragment, QUAD_FRAGMENT_SHADER, "builtin_quad_fs")
+        val program = self.create_program(vs_id, fs_id)?
+
+        # Add standard uniforms
+        program.uniforms.push(ShaderUniform.create("u_transform", "mat4", 0))
+        program.uniforms.push(ShaderUniform.create("u_texture", "sampler2D", 1))
+        program.uniforms.push(ShaderUniform.create("u_opacity", "float", 2))
+
+        self.logger.info("registered builtin quad shader program id={program.id}")
+        Ok(program)
+
+    # Register a solid-color shader program.
+    me register_solid_program() -> BrowserResult<ShaderProgram>:
+        val vs_id = self.create_shader(ShaderStage.Vertex, QUAD_VERTEX_SHADER, "builtin_solid_vs")
+        val fs_id = self.create_shader(ShaderStage.Fragment, SOLID_FRAGMENT_SHADER, "builtin_solid_fs")
+        val program = self.create_program(vs_id, fs_id)?
+
+        program.uniforms.push(ShaderUniform.create("u_transform", "mat4", 0))
+        program.uniforms.push(ShaderUniform.create("u_color", "vec4", 1))
+
+        self.logger.info("registered builtin solid shader program id={program.id}")
+        Ok(program)

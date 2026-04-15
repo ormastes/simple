@@ -1,0 +1,768 @@
+## SimpleOS Cross-Compilation Bootstrap Script
+##
+## Builds the Simple compiler for SimpleOS from a host machine.
+## Cross-compiles the Rust seed, then runs staged bootstrap targeting SimpleOS.
+##
+## Usage:
+##   bin/simple run src/os/port/bootstrap_cross.spl -- --target x86_64-simpleos
+##   bin/simple run src/os/port/bootstrap_cross.spl -- --target aarch64-simpleos
+##   bin/simple run src/os/port/bootstrap_cross.spl -- --status
+##   bin/simple run src/os/port/bootstrap_cross.spl -- --package
+
+use std.fs
+use std.process
+use std.text
+use std.cli
+use std.env
+
+# ============================================================================
+# Configuration
+# ============================================================================
+
+val SUPPORTED_TARGETS = [
+    "x86_64-simpleos",
+    "aarch64-simpleos",
+    "riscv64gc-simpleos",
+    "riscv32imac-simpleos",
+]
+
+val RUST_SEED_DIR = "src/compiler_rust"
+val DEFAULT_BUILD_DIR = "build/os/bootstrap"
+val DEFAULT_SYSROOT = "build/os/sysroot"
+val IN_GUEST_SYSROOT = "/usr/sysroot"
+
+# Maximum attempts for a transient cross-link invocation before giving up.
+val CROSS_LINK_MAX_ATTEMPTS = 3
+
+fn effective_sysroot(config_sysroot: text, target: text) -> text:
+    """Resolve the sysroot path, respecting SIMPLE_SYSROOT env and in-guest
+    layout.
+
+    Resolution order:
+      1. `SIMPLE_SYSROOT` env var, if set (explicit override).
+      2. `/usr/sysroot` when running in-guest (target ends `-simpleos`
+         AND the in-guest sysroot actually exists on disk).
+      3. The caller-supplied `config_sysroot` (host-relative default
+         `build/os/sysroot`).
+    """
+    val env_sysroot = env.get("SIMPLE_SYSROOT")
+    if env_sysroot != "" :
+        return env_sysroot
+    if target.ends_with("-simpleos") and fs.dir_exists(IN_GUEST_SYSROOT):
+        return IN_GUEST_SYSROOT
+    config_sysroot
+
+# Subtrees dropped from `--source` when cross-building for `-simpleos` targets.
+# These modules are dominated by host-only externs (GPU, TLS, CUDA, Torch) with
+# no SimpleOS implementation, producing the bulk of ~2367 auto-stubs at link
+# time. Paths are matched against each emitted `--source` entry.
+#
+# Layout note: the repo does not have a flat `src/lib/std/<subsystem>/` tree.
+# Subsystems are sharded across mutability tiers
+# (common/, nogc_sync_mut/, nogc_async_mut/, gc_async_mut/), so we list every
+# tier-qualified path that actually exists on disk. Phantom paths from the
+# original plan (db, gfx, vulkan, opencl — no such dirs) are omitted.
+val SIMPLEOS_EXCLUDED_SOURCE_SUBTREES: [text] = [
+    # gpu
+    "src/lib/common/gpu",
+    "src/lib/gc_async_mut/gpu",
+    "src/lib/nogc_async_mut/gpu",
+    "src/lib/nogc_sync_mut/gpu",
+    # net/tls (TLS lives as a sibling of net/, not under it)
+    "src/lib/nogc_sync_mut/tls",
+    # cuda
+    "src/lib/gc_async_mut/cuda",
+    "src/lib/nogc_async_mut/cuda",
+    "src/lib/nogc_sync_mut/cuda",
+    # torch
+    "src/lib/common/torch",
+    "src/lib/gc_async_mut/torch",
+    "src/lib/nogc_async_mut/torch",
+    "src/lib/nogc_sync_mut/torch",
+    # gpu_runtime (native GPU dispatch shims, no SimpleOS implementation)
+    "src/lib/gc_async_mut/gpu_runtime",
+    "src/lib/nogc_sync_mut/gpu_runtime",
+    # database (sqlite3 / native DB drivers, no SimpleOS port)
+    "src/lib/nogc_sync_mut/database",
+    # vulkan / opencl / ml — reserved paths; exclude if they appear
+    "src/lib/gc_async_mut/vulkan",
+    "src/lib/gc_async_mut/opencl",
+    "src/lib/gc_async_mut/ml",
+    "src/lib/nogc_sync_mut/vulkan",
+    "src/lib/nogc_sync_mut/opencl",
+    "src/lib/common/gfx",
+]
+
+fn is_simpleos_excluded(path: text) -> bool:
+    """True when `path` is (or lives under) a SimpleOS-excluded subtree.
+
+    Matches both bare (`src/lib/...`) and prefixed (`./src/lib/...`,
+    `/abs/path/src/lib/...`) forms by checking `ends_with(excluded)` and
+    `contains(excluded + "/")`.
+    """
+    for excluded in SIMPLEOS_EXCLUDED_SOURCE_SUBTREES:
+        if path == excluded or path.starts_with(excluded + "/"):
+            return true
+        if path.ends_with("/" + excluded):
+            return true
+        if path.contains("/" + excluded + "/"):
+            return true
+    false
+
+fn filter_simpleos_sources(paths: [text], target: text) -> [text]:
+    """Drop GPU/TLS/CUDA/Torch subtrees when target ends in `-simpleos`.
+
+    For host targets returns `paths` unchanged — host builds are byte-identical.
+    """
+    if not target.ends_with("-simpleos"):
+        return paths
+    var kept: [text] = []
+    for p in paths:
+        if not is_simpleos_excluded(p):
+            kept.push(p)
+        else:
+            print "[bootstrap-cross] excluding from SimpleOS build: {p}"
+    kept
+
+fn expand_lib_sources(src_root: text) -> [text]:
+    """Expand `{src_root}/src/lib` into concrete subtrees so the SimpleOS
+    filter can drop specific nested subsystems (gpu/, tls/, cuda/, torch/).
+
+    Returns top-level children of `src/lib` (common, gc_async_mut, …) with
+    mutability-tier dirs further expanded one level, so entries like
+    `src/lib/gc_async_mut/gpu` appear directly in the list.
+    """
+    var out: [text] = []
+    val lib_root = "{src_root}/src/lib"
+    val top = fs.list_dir(lib_root)
+    if not top.is_ok():
+        # Fall back to the un-expanded path; filter becomes a no-op.
+        out.push(lib_root)
+        return out
+    for entry in top.unwrap():
+        val top_path = "{lib_root}/{entry}"
+        if not fs.dir_exists(top_path):
+            continue
+        val children = fs.list_dir(top_path)
+        if not children.is_ok():
+            out.push(top_path)
+        else:
+            var any_sub = false
+            for sub in children.unwrap():
+                val sub_path = "{top_path}/{sub}"
+                if fs.dir_exists(sub_path):
+                    out.push(sub_path)
+                    any_sub = true
+            if not any_sub:
+                out.push(top_path)
+    out
+
+struct CrossConfig:
+    target: text              # Target triple (e.g. x86_64-simpleos)
+    build_dir: text           # Build output directory
+    sysroot_dir: text         # SimpleOS sysroot path
+    source_root: text         # Source tree root
+    jobs: i64                 # Parallel jobs (0 = auto)
+    package: bool             # Create deployable archive
+    skip_seed: bool           # Skip Rust seed cross-compilation
+    seed_path: text           # Override: use existing seed binary
+    verbose: bool             # Extra output
+    strip: bool               # Strip debug symbols
+
+impl CrossConfig:
+    static fn default() -> CrossConfig:
+        CrossConfig(
+            target: "x86_64-simpleos",
+            build_dir: DEFAULT_BUILD_DIR,
+            sysroot_dir: DEFAULT_SYSROOT,
+            source_root: ".",
+            jobs: 0,
+            package: false,
+            skip_seed: false,
+            seed_path: "",
+            verbose: false,
+            strip: true
+        )
+
+    fn target_arch() -> text:
+        """Extract architecture from target triple."""
+        if self.target.starts_with("x86_64"):
+            "x86_64"
+        else if self.target.starts_with("aarch64"):
+            "aarch64"
+        else if self.target.starts_with("riscv64"):
+            "riscv64gc"
+        else if self.target.starts_with("riscv32"):
+            "riscv32imac"
+        else:
+            "unknown"
+
+    fn seed_output_path() -> text:
+        """Path where the cross-compiled Rust seed will be placed."""
+        if self.seed_path != "":
+            return self.seed_path
+        "{self.build_dir}/{self.target}/seed/simple"
+
+    fn stage_path(stage: i64) -> text:
+        """Path for a stage binary."""
+        "{self.build_dir}/{self.target}/stage{stage}/simple"
+
+    fn archive_path() -> text:
+        """Path for the deployable archive."""
+        "{self.build_dir}/{self.target}/simple-{self.target}.tar.gz"
+
+# ============================================================================
+# Argument Parsing
+# ============================================================================
+
+fn parse_args(args: [text]) -> CrossConfig:
+    var config = CrossConfig.default()
+    var show_status = false
+    var show_help = false
+
+    var i = 0
+    while i < args.len():
+        val arg = args[i]
+        if arg == "--target":
+            i = i + 1
+            if i < args.len():
+                config.target = args[i]
+        else if arg.starts_with("--target="):
+            config.target = arg.slice(9, arg.len())
+        else if arg == "--build-dir":
+            i = i + 1
+            if i < args.len():
+                config.build_dir = args[i]
+        else if arg.starts_with("--build-dir="):
+            config.build_dir = arg.slice(12, arg.len())
+        else if arg == "--sysroot":
+            i = i + 1
+            if i < args.len():
+                config.sysroot_dir = args[i]
+        else if arg.starts_with("--sysroot="):
+            config.sysroot_dir = arg.slice(10, arg.len())
+        else if arg == "--jobs" or arg == "-j":
+            i = i + 1
+            if i < args.len():
+                config.jobs = args[i].to_int()
+        else if arg == "--package":
+            config.package = true
+        else if arg == "--skip-seed":
+            config.skip_seed = true
+        else if arg == "--seed":
+            i = i + 1
+            if i < args.len():
+                config.seed_path = args[i]
+                config.skip_seed = true
+        else if arg.starts_with("--seed="):
+            config.seed_path = arg.slice(7, arg.len())
+            config.skip_seed = true
+        else if arg == "--verbose" or arg == "-v":
+            config.verbose = true
+        else if arg == "--no-strip":
+            config.strip = false
+        else if arg == "--status":
+            show_status = true
+        else if arg == "--help" or arg == "-h":
+            show_help = true
+        i = i + 1
+
+    if show_help:
+        print_usage()
+        process.exit(0)
+
+    if show_status:
+        print_status(config)
+        process.exit(0)
+
+    # Validate target
+    if not SUPPORTED_TARGETS.contains(config.target):
+        print "ERROR: Unsupported target '{config.target}'"
+        print "Supported targets:"
+        for t in SUPPORTED_TARGETS:
+            print "  {t}"
+        process.exit(1)
+
+    config
+
+# ============================================================================
+# Status
+# ============================================================================
+
+fn print_status(config: CrossConfig):
+    """Print current cross-build status."""
+    print "=== SimpleOS Cross-Bootstrap Status ==="
+    print ""
+
+    for target in SUPPORTED_TARGETS:
+        var tc = config
+        tc.target = target
+
+        val seed = tc.seed_output_path()
+        val s1 = tc.stage_path(1)
+        val s2 = tc.stage_path(2)
+        val s3 = tc.stage_path(3)
+        val archive = tc.archive_path()
+
+        print "  {target}:"
+        print "    seed:     {if fs.exists(seed): \"BUILT\" else: \"not built\"}"
+        print "    stage 1:  {if fs.exists(s1): \"BUILT\" else: \"not built\"}"
+        print "    stage 2:  {if fs.exists(s2): \"BUILT\" else: \"not built\"}"
+        print "    stage 3:  {if fs.exists(s3): \"BUILT\" else: \"not built\"}"
+        print "    archive:  {if fs.exists(archive): \"READY\" else: \"not packaged\"}"
+        print ""
+
+    # Sysroot
+    print "  sysroot:"
+    print "    libc:     {if fs.exists(\"{config.sysroot_dir}/lib/libsimpleos_c.a\"): \"READY\" else: \"not built\"}"
+    print "    headers:  {if fs.dir_exists(\"{config.sysroot_dir}/include\"): \"READY\" else: \"not installed\"}"
+    print "    crt0:     {if fs.exists(\"{config.sysroot_dir}/lib/crt0.o\"): \"READY\" else: \"not built\"}"
+
+# ============================================================================
+# Sysroot
+# ============================================================================
+
+fn ensure_sysroot(config: CrossConfig) -> bool:
+    """Build sysroot if it does not exist."""
+    if fs.exists("{config.sysroot_dir}/lib/libsimpleos_c.a"):
+        print "[sysroot] Already built"
+        return true
+
+    print "[sysroot] Building SimpleOS sysroot..."
+    val result = process.run("sh", ["src/os/port/llvm/sysroot.shs"])
+    if result.exit_code != 0:
+        print "[sysroot] Build failed:"
+        print result.stderr
+        return false
+
+    print "[sysroot] Ready"
+    true
+
+# ============================================================================
+# Cross-Compile Rust Seed
+# ============================================================================
+
+fn cross_compile_seed(config: CrossConfig) -> bool:
+    """Cross-compile the Rust seed binary for SimpleOS target.
+
+    Uses cargo with -Z build-std to compile core/alloc for the custom target,
+    and links against the SimpleOS sysroot.
+    """
+    if config.skip_seed:
+        print "[seed] Skipping Rust seed build (using {config.seed_output_path()})"
+        return fs.exists(config.seed_output_path())
+
+    val output = config.seed_output_path()
+    print "[seed] Cross-compiling Rust seed for {config.target}..."
+    print "[seed] Output: {output}"
+
+    # Ensure output directory
+    val output_dir = output.rsplit_once("/")
+    if output_dir != nil:
+        fs.mkdir_p(output_dir.0)
+
+    # Build target spec path
+    val target_spec = "src/os/toolchain/rust/{config.target}.json"
+    if not fs.exists(target_spec):
+        # Fallback: use the triple directly and hope rustc knows it
+        print "[seed] WARNING: target spec {target_spec} not found, using triple directly"
+
+    # Linker flags for SimpleOS -- resolve sysroot via effective_sysroot()
+    # so that SIMPLE_SYSROOT / in-guest /usr/sysroot overrides are honored.
+    val sysroot = effective_sysroot(config_sysroot: config.sysroot_dir, target: config.target)
+    val linker_flags = [
+        "-nostdlib",
+        "-ffreestanding",
+        "-static",
+        "-T", "{sysroot}/share/simpleos/simpleos.ld",
+        "-L", "{sysroot}/lib",
+        "-lsimpleos_c",
+        "{sysroot}/lib/crt0.o",
+    ]
+    val link_args = linker_flags.join(" ")
+
+    # Set RUSTFLAGS for cross-linking
+    val rustflags = "-C linker=clang -C link-args={link_args}"
+
+    # Cargo command
+    val cargo_cmd = "cd {RUST_SEED_DIR} && " +
+        "RUSTFLAGS=\"{rustflags}\" " +
+        "cargo +nightly build --profile bootstrap " +
+        "-p simple-driver -p simple-native-all " +
+        "--target {target_spec} " +
+        "-Z build-std=core,alloc"
+
+    if config.verbose:
+        print "[seed] Command: {cargo_cmd}"
+
+    val result = process.run("sh", ["-c", cargo_cmd])
+    if result.exit_code != 0:
+        print "[seed] Cross-compilation failed:"
+        if result.stderr.len() > 0:
+            print result.stderr
+        return false
+
+    # Copy binary to output location
+    val cargo_output = "{RUST_SEED_DIR}/target/{config.target}/bootstrap/simple"
+    if not fs.exists(cargo_output):
+        # Try with the spec file name
+        val spec_name = target_spec.rsplit_once("/")
+        if spec_name != nil:
+            val base = spec_name.1.replace(".json", "")
+            val alt_path = "{RUST_SEED_DIR}/target/{base}/bootstrap/simple"
+            if fs.exists(alt_path):
+                fs.copy(alt_path, output)
+                print "[seed] Cross-compiled seed ready at {output}"
+                return true
+        print "[seed] ERROR: Could not find cargo output binary"
+        return false
+
+    fs.copy(cargo_output, output)
+    print "[seed] Cross-compiled seed ready at {output}"
+    true
+
+# ============================================================================
+# Build Stages
+# ============================================================================
+
+fn build_stage_cross_with_retry(config: CrossConfig, stage: i64, compiler: text) -> bool:
+    """Retry wrapper around `build_stage_cross`.
+
+    Cross-link invocations can fail transiently (filesystem races on tmpfs,
+    cargo/rustc lock contention under `-j`, NFS hiccups). We retry up to
+    `CROSS_LINK_MAX_ATTEMPTS` times, logging the attempt number so a human
+    can tell a retry from a fresh build.
+    """
+    var attempt = 1
+    while attempt <= CROSS_LINK_MAX_ATTEMPTS:
+        if attempt > 1:
+            print "[stage {stage}] Retrying cross-link (attempt {attempt}/{CROSS_LINK_MAX_ATTEMPTS})"
+        if build_stage_cross(config, stage, compiler):
+            return true
+        attempt = attempt + 1
+    print "[stage {stage}] FAILED after {CROSS_LINK_MAX_ATTEMPTS} attempts"
+    false
+
+fn build_stage_cross(config: CrossConfig, stage: i64, compiler: text) -> bool:
+    """Build one stage of the bootstrap.
+
+    For cross-compilation from host, the compiler runs on the host and produces
+    a binary for the SimpleOS target.
+    """
+    val output = config.stage_path(stage)
+    val src = config.source_root
+
+    print "[stage {stage}] Building with: {compiler}"
+    print "[stage {stage}] Output: {output}"
+
+    # Ensure output directory
+    val output_dir = output.rsplit_once("/")
+    if output_dir != nil:
+        fs.mkdir_p(output_dir.0)
+
+    # Build args.
+    #
+    # For `-simpleos` targets, expand `{src}/src/lib` into concrete subtrees
+    # and drop host-only subsystems (GPU, TLS, CUDA, Torch) that would
+    # otherwise generate ~2367 auto-stubs. Host targets pass `src/lib`
+    # through unchanged, so host builds remain byte-identical.
+    var lib_sources: [text] = []
+    if config.target.ends_with("-simpleos"):
+        lib_sources = filter_simpleos_sources(
+            expand_lib_sources(src),
+            config.target
+        )
+    else:
+        lib_sources.push("{src}/src/lib")
+    var args = "native-build" +
+        " --source {src}/src/compiler"
+    for s in lib_sources:
+        args = args + " --source {s}"
+    args = args +
+        " --source {src}/src/app" +
+        " --entry {src}/src/app/cli/main.spl" +
+        " -o {output}"
+
+    if config.strip:
+        args = args + " --strip"
+
+    # Environment
+    var env = "SIMPLE_LIB={src}/src"
+
+    if stage == 1:
+        env = env + " SIMPLE_BOOTSTRAP=1"
+
+    val cmd = "{env} {compiler} {args}"
+
+    if config.verbose:
+        print "[stage {stage}] Command: {cmd}"
+
+    val result = process.run("sh", ["-c", cmd])
+    if result.exit_code != 0:
+        print "[stage {stage}] BUILD FAILED"
+        if result.stderr.len() > 0:
+            print result.stderr
+        return false
+
+    if not fs.exists(output):
+        print "[stage {stage}] ERROR: Output binary not found"
+        return false
+
+    val stat = fs.stat(output)
+    if stat.is_ok():
+        val size_mb = stat.unwrap().size / (1024 * 1024)
+        print "[stage {stage}] SUCCESS ({size_mb} MB)"
+    else:
+        print "[stage {stage}] SUCCESS"
+
+    true
+
+# ============================================================================
+# Package
+# ============================================================================
+
+fn package_bootstrap(config: CrossConfig) -> bool:
+    """Create a deployable archive with the bootstrapped compiler.
+
+    Contents:
+    - simple                        -- the Stage 3 binary
+    - sysroot/                      -- headers, libs, linker script
+    - src/                          -- source tree (for self-hosting)
+    - bootstrap_verify.spl          -- verification script
+    """
+    val stage3 = config.stage_path(3)
+    if not fs.exists(stage3):
+        print "[package] ERROR: Stage 3 binary not found at {stage3}"
+        return false
+
+    val archive = config.archive_path()
+    val staging = "{config.build_dir}/{config.target}/package"
+
+    print "[package] Creating archive: {archive}"
+
+    # Create staging directory
+    fs.mkdir_p("{staging}/bin")
+    fs.mkdir_p("{staging}/sysroot")
+
+    # Copy binary
+    fs.copy(stage3, "{staging}/bin/simple")
+
+    # Copy sysroot
+    val cp_sysroot = process.run("cp", ["-R", config.sysroot_dir, "{staging}/sysroot"])
+    if cp_sysroot.exit_code != 0:
+        print "[package] WARNING: Could not copy sysroot"
+
+    # Copy verification script
+    fs.copy("src/os/port/bootstrap_verify.spl", "{staging}/bootstrap_verify.spl")
+
+    # Create archive
+    val tar_cmd = "tar -czf {archive} -C {staging} ."
+    val result = process.run("sh", ["-c", tar_cmd])
+    if result.exit_code != 0:
+        print "[package] ERROR: tar failed"
+        return false
+
+    # Archive validation: re-open the tarball and confirm it lists at least
+    # the binary + verification script we just put in. A corrupt gzip or a
+    # truncated tar would slip past the exit code above on some systems.
+    val verify_cmd = "tar -tzf {archive}"
+    val verify = process.run("sh", ["-c", verify_cmd])
+    if verify.exit_code != 0:
+        print "[package] ERROR: archive verification failed (tar -tzf)"
+        if verify.stderr.len() > 0:
+            print verify.stderr
+        return false
+    val listing = verify.stdout
+    if not listing.contains("bin/simple") or not listing.contains("bootstrap_verify.spl"):
+        print "[package] ERROR: archive is missing expected entries"
+        print "[package]   wanted: bin/simple, bootstrap_verify.spl"
+        return false
+    val entry_count = listing.split("\n").len()
+    if entry_count < 2:
+        print "[package] ERROR: archive entry count ({entry_count}) below expected"
+        return false
+
+    val stat = fs.stat(archive)
+    if stat.is_ok():
+        val size_mb = stat.unwrap().size / (1024 * 1024)
+        print "[package] Archive ready: {archive} ({size_mb} MB, {entry_count} entries)"
+    else:
+        print "[package] Archive ready: {archive} ({entry_count} entries)"
+
+    true
+
+# ============================================================================
+# Main Pipeline
+# ============================================================================
+
+fn run_cross_bootstrap(config: CrossConfig) -> bool:
+    """Run the full cross-compilation bootstrap pipeline."""
+    print "=== SimpleOS Cross-Compilation Bootstrap ==="
+    print ""
+    print "  Target:     {config.target}"
+    print "  Build dir:  {config.build_dir}"
+    print "  Sysroot:    {config.sysroot_dir}"
+    print "  Package:    {config.package}"
+    print ""
+
+    # Step 0: Sysroot
+    print "--- Step 0: Sysroot ---"
+    if not ensure_sysroot(config):
+        print "FAILED: Could not build sysroot"
+        return false
+
+    # Step 1: Cross-compile Rust seed
+    print ""
+    print "--- Step 1: Cross-compile Rust seed ---"
+    if not cross_compile_seed(config):
+        print "FAILED: Could not cross-compile Rust seed"
+        return false
+
+    val seed = config.seed_output_path()
+
+    # Step 2: Stage 1 (seed -> Stage 1) -- retry transient cross-link fails.
+    print ""
+    print "--- Step 2: Stage 1 (seed -> compiler) ---"
+    if not build_stage_cross_with_retry(config, 1, seed):
+        print "FAILED at Stage 1"
+        return false
+
+    # Step 3: Stage 2 (Stage 1 -> Stage 2) -- retry transient cross-link fails.
+    print ""
+    print "--- Step 3: Stage 2 (self-compile) ---"
+    if not build_stage_cross_with_retry(config, 2, config.stage_path(1)):
+        print "FAILED at Stage 2"
+        return false
+
+    # Step 4: Stage 3 (Stage 2 -> Stage 3)
+    print ""
+    print "--- Step 4: Stage 3 (verify self-host) ---"
+    if not build_stage_cross(config, 3, config.stage_path(2)):
+        print "FAILED at Stage 3"
+        return false
+
+    # Step 5: Convergence
+    print ""
+    print "--- Step 5: Convergence check ---"
+    val s2 = config.stage_path(2)
+    val s3 = config.stage_path(3)
+    val diff_result = process.run("diff", [s2, s3])
+    val converged = diff_result.exit_code == 0
+
+    if converged:
+        print "[verify] PASS: Stage 2 and Stage 3 are byte-identical"
+    else:
+        # Check stub counts
+        val nm_2 = process.run("sh", ["-c", "nm {s2} 2>/dev/null | grep auto_stub | wc -l"])
+        val nm_3 = process.run("sh", ["-c", "nm {s3} 2>/dev/null | grep auto_stub | wc -l"])
+        val stubs_2 = nm_2.stdout.trim()
+        val stubs_3 = nm_3.stdout.trim()
+        if stubs_2 == stubs_3 and stubs_2 != "0":
+            print "[verify] PASS: Stub counts match ({stubs_2} each) -- convergence achieved"
+        else:
+            print "[verify] FAIL: Binaries do not converge"
+            print "[verify]   Stage 2 stubs: {stubs_2}"
+            print "[verify]   Stage 3 stubs: {stubs_3}"
+
+    # Step 6: Package (optional)
+    if config.package:
+        print ""
+        print "--- Step 6: Package ---"
+        if not package_bootstrap(config):
+            print "WARNING: Packaging failed"
+
+    # Summary
+    print ""
+    print "=== Cross-Bootstrap Summary ==="
+    print "  Sysroot:     READY"
+    print "  Seed:        BUILT ({config.seed_output_path()})"
+    print "  Stage 1:     BUILT ({config.stage_path(1)})"
+    print "  Stage 2:     BUILT ({config.stage_path(2)})"
+    print "  Stage 3:     BUILT ({config.stage_path(3)})"
+    print "  Convergence: {if converged: \"PASS\" else: \"CHECK STUB COUNTS\"}"
+    if config.package:
+        print "  Archive:     {config.archive_path()}"
+    print ""
+
+    true
+
+# ============================================================================
+# Entry Point
+# ============================================================================
+
+fn print_usage():
+    print "bootstrap_cross -- Cross-compile Simple compiler for SimpleOS"
+    print ""
+    print "Usage:"
+    print "  bin/simple run src/os/port/bootstrap_cross.spl -- [options]"
+    print ""
+    print "Options:"
+    print "  --target TRIPLE        Target triple (default: x86_64-simpleos)"
+    print "  --build-dir PATH       Build output directory"
+    print "  --sysroot PATH         SimpleOS sysroot path"
+    print "  --seed PATH            Use existing seed binary (skip cross-compilation)"
+    print "  --skip-seed            Skip Rust seed cross-compilation"
+    print "  --package              Create deployable archive"
+    print "  --jobs N, -j N         Parallel jobs (0 = auto)"
+    print "  --no-strip             Do not strip debug symbols"
+    print "  --verbose, -v          Extra output"
+    print "  --status               Show current build status"
+    print "  --help, -h             Show this help"
+    print ""
+    print "Supported targets:"
+    for t in SUPPORTED_TARGETS:
+        print "  {t}"
+    print ""
+    print "Examples:"
+    print "  # Full cross-bootstrap for x86_64:"
+    print "  bin/simple run src/os/port/bootstrap_cross.spl -- --target x86_64-simpleos"
+    print ""
+    print "  # Use existing host seed, skip Rust cross-compile:"
+    print "  bin/simple run src/os/port/bootstrap_cross.spl -- \\"
+    print "    --seed src/compiler_rust/target/bootstrap/simple \\"
+    print "    --target x86_64-simpleos"
+    print ""
+    print "  # Cross-build and package for deployment:"
+    print "  bin/simple run src/os/port/bootstrap_cross.spl -- \\"
+    print "    --target x86_64-simpleos --package"
+    print ""
+    print "  # Check status of all targets:"
+    print "  bin/simple run src/os/port/bootstrap_cross.spl -- --status"
+
+# ============================================================================
+# Wave-3 Hardening — Target validation + retry helper (S-2)
+# ============================================================================
+
+fn is_supported_target(target: text) -> bool:
+    """Return true if `target` is a recognised SimpleOS triple.
+
+    Guards callers reading target strings from untrusted env (RUSTFLAGS,
+    CARGO_TARGET_*_LINKER) and would otherwise cascade into opaque
+    cross-build errors deep in the pipeline.
+    """
+    SUPPORTED_TARGETS.contains(target)
+
+fn retry_transient(attempts: i32, label: text, action: fn() -> bool) -> bool:
+    """Run `action` up to `attempts` times, surfacing label on failure.
+
+    Used to wrap cross-link invocations that fail intermittently because
+    of SIMPLEOS_SYSROOT staleness or racy initramfs rebuilds.
+    """
+    var i = 0
+    while i < attempts:
+        if action():
+            return true
+        i = i + 1
+    print "cross-bootstrap: " + label + " failed after " + attempts.to_text() + " attempts"
+    false
+
+fn main():
+    val args = cli.args()
+    val config = parse_args(args)
+    if not is_supported_target(config.target):
+        print "cross-bootstrap: unsupported target: " + config.target
+        print "supported: " + SUPPORTED_TARGETS.to_text()
+        process.exit(2)
+    val ok = run_cross_bootstrap(config)
+    if not ok:
+        process.exit(1)

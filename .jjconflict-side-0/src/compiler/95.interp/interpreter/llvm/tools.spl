@@ -1,0 +1,168 @@
+# LLVM Tool Invocations
+#
+# Shared LLVM tool discovery and invocation functions.
+# Used by both Full Simple and Core Simple LLVM backends.
+#
+# Bootstrap-compatible subset: no generics and no Option types in shared bootstrap-sensitive code.
+# Portable: uses `where` on Windows, `command -v` on Unix.
+
+use app.io.mod (shell, file_write, file_delete, file_read_bytes, getpid)
+
+# ============================================================================
+# Portable Tool Finder (shared helper)
+# ============================================================================
+
+fn _find_tool(candidates: [text]) -> text:
+    """Find a tool using platform-appropriate detection.
+
+    On Unix: `command -v`
+    On Windows: `where`
+    Bootstrap-safe.
+    """
+    # Detect Windows by trying `where` first on failure of `command -v`
+    for candidate in candidates:
+        val (out, err, code) = shell("command -v {candidate} >/dev/null 2>&1")
+        if code == 0:
+            return candidate
+        # Windows fallback
+        val (wout, werr, wcode) = shell("where {candidate} 2>NUL")
+        if wcode == 0 and wout.trim() != "":
+            return candidate
+    ""
+
+# ============================================================================
+# LLVM Tool Discovery
+# ============================================================================
+
+fn find_llc() -> text:
+    """
+    Find llc binary with fallback chain: llc-19 → llc-18 → llc-17 → llc-16 → llc.
+
+    Returns the command name if found, otherwise empty string.
+    Bootstrap-safe: Returns text (not text?) with "" for not found.
+    """
+    _find_tool(["llc-19", "llc-18", "llc-17", "llc-16", "llc"])
+
+fn find_opt() -> text:
+    """
+    Find LLVM opt binary with fallback chain: opt-19 → opt-18 → opt-17 → opt-16 → opt.
+
+    Returns the command name if found, otherwise empty string.
+    Bootstrap-safe: Returns text (not text?) with "" for not found.
+    """
+    _find_tool(["opt-19", "opt-18", "opt-17", "opt-16", "opt"])
+
+fn find_clang() -> text:
+    """
+    Find clang binary with fallback chain: clang-19 → clang-18 → clang-17 → clang-16 → clang.
+
+    Returns the command name if found, otherwise empty string.
+    Bootstrap-safe: Returns text (not text?) with "" for not found.
+    """
+    _find_tool(["clang-19", "clang-18", "clang-17", "clang-16", "clang"])
+
+# ============================================================================
+# WASM Tool Discovery
+# ============================================================================
+
+fn find_wasm_ld() -> text:
+    """
+    Find wasm-ld binary with fallback chain: wasm-ld-19 -> wasm-ld-18 -> wasm-ld-17 -> wasm-ld-16 -> wasm-ld.
+
+    Returns the command name if found, otherwise empty string.
+    """
+    _find_tool(["wasm-ld-19", "wasm-ld-18", "wasm-ld-17", "wasm-ld-16", "wasm-ld"])
+
+fn find_wasm_opt() -> text:
+    """
+    Find wasm-opt binary (from Binaryen).
+
+    Returns the command name if found, otherwise empty string.
+    """
+    _find_tool(["wasm-opt"])
+
+fn find_wat2wasm() -> text:
+    """
+    Find wat2wasm binary (from WABT).
+
+    Returns the command name if found, otherwise empty string.
+    """
+    _find_tool(["wat2wasm"])
+
+fn find_wasi_sysroot() -> text:
+    """
+    Find WASI sysroot directory.
+
+    Checks WASI_SYSROOT env var, then probes common locations.
+    Returns the path if found, otherwise empty string.
+    """
+    # Check env var first
+    val (env_out, env_err, env_code) = shell("echo $WASI_SYSROOT")
+    if env_code == 0:
+        val env_path = env_out.trim()
+        if env_path != "":
+            val (chk_out, chk_err, chk_code) = shell("test -d '{env_path}' && echo ok")
+            if chk_code == 0:
+                return env_path
+
+    # Probe common locations (Unix)
+    val probe_paths = [
+        "/opt/wasi-sdk/share/wasi-sysroot",
+        "/usr/share/wasi-sysroot",
+        "/usr/local/share/wasi-sysroot",
+        "/opt/wasi-sysroot"
+    ]
+    for probe in probe_paths:
+        val (p_out, p_err, p_code) = shell("test -d '{probe}' && echo ok")
+        if p_code == 0:
+            return probe
+
+    # Windows: check WASI_SDK_PATH
+    val (ws_out, ws_err, ws_code) = shell("echo %WASI_SDK_PATH% 2>NUL")
+    if ws_code == 0:
+        val ws_path = ws_out.trim()
+        if ws_path != "" and ws_path != "%WASI_SDK_PATH%":
+            return "{ws_path}/share/wasi-sysroot"
+    ""
+
+# ============================================================================
+# WASM Tool Availability Checks
+# ============================================================================
+
+fn wasm_ld_available() -> bool:
+    """Check if wasm-ld is available on PATH."""
+    val tool = find_wasm_ld()
+    tool != ""
+
+fn wasm_opt_available() -> bool:
+    """Check if wasm-opt (Binaryen optimizer) is available on PATH."""
+    val tool = find_wasm_opt()
+    tool != ""
+
+fn wat2wasm_available() -> bool:
+    """Check if wat2wasm (WABT) is available on PATH."""
+    val tool = find_wat2wasm()
+    tool != ""
+
+# ============================================================================
+# Tool Availability Checks
+# ============================================================================
+
+fn opt_available() -> bool:
+    """Check if opt (LLVM optimizer) is available on PATH."""
+    val tool = find_opt()
+    tool != ""
+
+fn llc_available() -> bool:
+    """Check if llc (LLVM static compiler) is available on PATH."""
+    val tool = find_llc()
+    tool != ""
+
+fn clang_available() -> bool:
+    """Check if clang (C compiler with LLVM backend) is available on PATH."""
+    val tool = find_clang()
+    tool != ""
+
+# ============================================================================
+# Exports
+# ============================================================================

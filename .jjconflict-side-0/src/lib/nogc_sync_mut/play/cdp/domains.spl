@@ -1,0 +1,172 @@
+@allow(primitive_api)
+# std.play.cdp.domains — Typed helpers for CDP domain commands
+#
+# Thin wrappers around CdpClient.send* that format params JSON for the
+# handful of CDP methods we use. Keeping these out of client.spl makes the
+# client pure transport and the domains pure protocol.
+
+use std.play.cdp.client.{CdpClient}
+use std.play.types.{PlayError}
+use std.json.builder.{JsonBuilder}
+
+val CDP_DEFAULT_TIMEOUT = 10000
+
+# ============================================================================
+# Target domain — browser-level target discovery
+# ============================================================================
+
+fn cdp_target_get_targets(client: CdpClient) -> Result<text, PlayError>:
+    client.send("Target.getTargets", "{}", CDP_DEFAULT_TIMEOUT)
+
+fn cdp_target_set_discover(client: CdpClient, discover: bool) -> Result<text, PlayError>:
+    val params = JsonBuilder.object().field_bool("discover", discover).build()
+    client.send("Target.setDiscoverTargets", params, CDP_DEFAULT_TIMEOUT)
+
+fn cdp_target_attach(client: CdpClient, target_id: text) -> Result<text, PlayError>:
+    val params = JsonBuilder.object()
+        .field("targetId", target_id)
+        .field_bool("flatten", true)
+        .build()
+    client.send("Target.attachToTarget", params, CDP_DEFAULT_TIMEOUT)
+
+fn cdp_target_create(client: CdpClient, url: text) -> Result<text, PlayError>:
+    val params = JsonBuilder.object().field("url", url).build()
+    client.send("Target.createTarget", params, CDP_DEFAULT_TIMEOUT)
+
+fn cdp_target_close(client: CdpClient, target_id: text) -> Result<text, PlayError>:
+    val params = JsonBuilder.object().field("targetId", target_id).build()
+    client.send("Target.closeTarget", params, CDP_DEFAULT_TIMEOUT)
+
+# ============================================================================
+# Page domain — per-tab lifecycle
+# ============================================================================
+
+fn cdp_page_enable(client: CdpClient, session_id: text) -> Result<text, PlayError>:
+    client.send_on_session(session_id, "Page.enable", "{}", CDP_DEFAULT_TIMEOUT)
+
+fn cdp_page_navigate(client: CdpClient, session_id: text, url: text) -> Result<text, PlayError>:
+    val params = JsonBuilder.object().field("url", url).build()
+    client.send_on_session(session_id, "Page.navigate", params, CDP_DEFAULT_TIMEOUT)
+
+fn cdp_page_reload(client: CdpClient, session_id: text) -> Result<text, PlayError>:
+    client.send_on_session(session_id, "Page.reload", "{}", CDP_DEFAULT_TIMEOUT)
+
+fn cdp_page_capture_screenshot(client: CdpClient, session_id: text, format: text, quality: i64, full_page: bool) -> Result<text, PlayError>:
+    val params = JsonBuilder.object()
+        .field("format", format)
+        .field_int("quality", quality)
+        .field_bool("captureBeyondViewport", full_page)
+        .build()
+    client.send_on_session(session_id, "Page.captureScreenshot", params, 30000)
+
+fn cdp_page_get_frame_tree(client: CdpClient, session_id: text) -> Result<text, PlayError>:
+    client.send_on_session(session_id, "Page.getFrameTree", "{}", CDP_DEFAULT_TIMEOUT)
+
+# ============================================================================
+# Runtime domain — JavaScript evaluation
+# ============================================================================
+
+fn cdp_runtime_enable(client: CdpClient, session_id: text) -> Result<text, PlayError>:
+    client.send_on_session(session_id, "Runtime.enable", "{}", CDP_DEFAULT_TIMEOUT)
+
+fn cdp_runtime_evaluate(client: CdpClient, session_id: text, expression: text, return_by_value: bool, await_promise: bool) -> Result<text, PlayError>:
+    val params = JsonBuilder.object()
+        .field("expression", expression)
+        .field_bool("returnByValue", return_by_value)
+        .field_bool("awaitPromise", await_promise)
+        .field_bool("includeCommandLineAPI", true)
+        .build()
+    client.send_on_session(session_id, "Runtime.evaluate", params, 30000)
+
+fn cdp_runtime_evaluate_global(client: CdpClient, expression: text) -> Result<text, PlayError>:
+    """Run an expression in the browser process (no page session)."""
+    val params = JsonBuilder.object()
+        .field("expression", expression)
+        .field_bool("returnByValue", true)
+        .field_bool("awaitPromise", true)
+        .build()
+    client.send("Runtime.evaluate", params, 30000)
+
+# ============================================================================
+# DOM domain — querying
+# ============================================================================
+
+fn cdp_dom_get_document(client: CdpClient, session_id: text) -> Result<text, PlayError>:
+    val params = JsonBuilder.object().field_int("depth", -1).field_bool("pierce", true).build()
+    client.send_on_session(session_id, "DOM.getDocument", params, CDP_DEFAULT_TIMEOUT)
+
+fn cdp_dom_query_selector(client: CdpClient, session_id: text, node_id: i64, selector: text) -> Result<text, PlayError>:
+    val params = JsonBuilder.object()
+        .field_int("nodeId", node_id)
+        .field("selector", selector)
+        .build()
+    client.send_on_session(session_id, "DOM.querySelector", params, CDP_DEFAULT_TIMEOUT)
+
+fn cdp_dom_query_selector_all(client: CdpClient, session_id: text, node_id: i64, selector: text) -> Result<text, PlayError>:
+    val params = JsonBuilder.object()
+        .field_int("nodeId", node_id)
+        .field("selector", selector)
+        .build()
+    client.send_on_session(session_id, "DOM.querySelectorAll", params, CDP_DEFAULT_TIMEOUT)
+
+fn cdp_dom_get_box_model(client: CdpClient, session_id: text, node_id: i64) -> Result<text, PlayError>:
+    val params = JsonBuilder.object().field_int("nodeId", node_id).build()
+    client.send_on_session(session_id, "DOM.getBoxModel", params, CDP_DEFAULT_TIMEOUT)
+
+fn cdp_dom_describe_node(client: CdpClient, session_id: text, node_id: i64) -> Result<text, PlayError>:
+    val params = JsonBuilder.object().field_int("nodeId", node_id).field_int("depth", 1).build()
+    client.send_on_session(session_id, "DOM.describeNode", params, CDP_DEFAULT_TIMEOUT)
+
+fn cdp_dom_focus(client: CdpClient, session_id: text, node_id: i64) -> Result<text, PlayError>:
+    val params = JsonBuilder.object().field_int("nodeId", node_id).build()
+    client.send_on_session(session_id, "DOM.focus", params, CDP_DEFAULT_TIMEOUT)
+
+# ============================================================================
+# Input domain — keyboard / mouse injection
+# ============================================================================
+
+fn cdp_input_dispatch_key(client: CdpClient, session_id: text, event_type: text, key: text, text_arg: text, code: text, modifiers: i64) -> Result<text, PlayError>:
+    val params = JsonBuilder.object()
+        .field("type", event_type)
+        .field("key", key)
+        .field("text", text_arg)
+        .field("code", code)
+        .field_int("modifiers", modifiers)
+        .build()
+    client.send_on_session(session_id, "Input.dispatchKeyEvent", params, CDP_DEFAULT_TIMEOUT)
+
+fn cdp_input_type_text(client: CdpClient, session_id: text, value: text) -> Result<text, PlayError>:
+    val params = JsonBuilder.object().field("text", value).build()
+    client.send_on_session(session_id, "Input.insertText", params, CDP_DEFAULT_TIMEOUT)
+
+fn cdp_input_dispatch_mouse(client: CdpClient, session_id: text, event_type: text, x: f64, y: f64, button: text, click_count: i64, modifiers: i64) -> Result<text, PlayError>:
+    val params = JsonBuilder.object()
+        .field("type", event_type)
+        .field_float("x", x)
+        .field_float("y", y)
+        .field("button", button)
+        .field_int("buttons", 0)
+        .field_int("clickCount", click_count)
+        .field_int("modifiers", modifiers)
+        .build()
+    client.send_on_session(session_id, "Input.dispatchMouseEvent", params, CDP_DEFAULT_TIMEOUT)
+
+# ============================================================================
+# Modifier-key bitmask (matches CDP spec)
+# ============================================================================
+
+val CDP_MOD_NONE = 0
+val CDP_MOD_ALT = 1
+val CDP_MOD_CTRL = 2
+val CDP_MOD_META = 4
+val CDP_MOD_SHIFT = 8
+
+fn cdp_modifiers_from(keys: [text]) -> i64:
+    var out: i64 = 0
+    for k in keys:
+        val lk = k.lower()
+        if lk == "alt": out = out | CDP_MOD_ALT
+        if lk == "ctrl" or lk == "control": out = out | CDP_MOD_CTRL
+        if lk == "meta" or lk == "command" or lk == "cmd": out = out | CDP_MOD_META
+        if lk == "shift": out = out | CDP_MOD_SHIFT
+    out

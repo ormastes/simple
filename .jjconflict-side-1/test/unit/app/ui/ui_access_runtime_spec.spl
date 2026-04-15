@@ -1,0 +1,105 @@
+# UI access runtime attachment specification
+#
+# Verifies that session-owning startup paths auto-attach the persisted UI
+# access store when a runtime DB path is configured.
+
+use std.spec.{describe, it, expect}
+use app.ui.web.{AsyncWebServer}
+use app.ui.tui_web.{TuiWebServer}
+use app.ui.browser.{BrowserApp}
+use common.ui.widget.{UIEvent}
+use common.ui.access_store.{ui_access_store_runtime_path, ui_access_store_runtime_path_with_override}
+use app.io.mod.{file_exists, file_delete}
+
+extern fn rt_env_set(key: text, value: text) -> bool
+
+describe "ui_access runtime attachment":
+    it "builds a deterministic default runtime path":
+        rt_env_set("SIMPLE_UI_ACCESS_DB_PATH", "")
+        val path = ui_access_store_runtime_path("examples/ui/hello_web.ui.sdn", "web")
+        expect(path).to_contain("ui_access")
+        expect(path).to_contain("web")
+        expect(path).to_end_with(".sqlite")
+
+    it "prefers explicit runtime config over the environment":
+        rt_env_set("SIMPLE_UI_ACCESS_DB_PATH", "/tmp/ui_access_env_override.sqlite")
+        val path = ui_access_store_runtime_path_with_override(
+            "/tmp/ui_access_config_override.sqlite",
+            "examples/ui/hello_web.ui.sdn",
+            "web"
+        )
+        expect(path).to_equal("/tmp/ui_access_config_override.sqlite")
+        rt_env_set("SIMPLE_UI_ACCESS_DB_PATH", "")
+
+    it "auto-attaches a store for AsyncWebServer startup when runtime path is configured":
+        val db_path = "/tmp/ui_access_async_web.sqlite"
+        rt_env_set("SIMPLE_UI_ACCESS_DB_PATH", db_path)
+        if file_exists(db_path):
+            file_delete(db_path)
+        val server = AsyncWebServer.new("test/system/ui_browser/fixtures/hello.ui.sdn", 3011)?
+        val nodes = server.session.access_search_nodes("", "", "", 20)?
+        expect(nodes.len()).to_be_greater_than(0)
+        expect(file_exists(db_path)).to_equal(true)
+        rt_env_set("SIMPLE_UI_ACCESS_DB_PATH", "")
+        if file_exists(db_path):
+            file_delete(db_path)
+
+    it "reuses persisted web history across server restarts with the same DB path":
+        val db_path = "/tmp/ui_access_async_web_restart.sqlite"
+        if file_exists(db_path):
+            file_delete(db_path)
+        val first = AsyncWebServer.new_with_access_store_path(
+            "test/system/ui_browser/fixtures/hello.ui.sdn",
+            3013,
+            db_path
+        )?
+        first.session.dispatch(UIEvent.Action(name: "submit"))
+        val first_events = first.session.access_persisted_events("main", 10)?
+        expect(first_events.len()).to_be_greater_than(0)
+        expect(first_events[0].surface_id).to_equal("main")
+        expect(first_events[0].event_kind).to_equal("action")
+        expect(first_events[0].payload).to_equal("submit")
+        val restarted = AsyncWebServer.new_with_access_store_path(
+            "test/system/ui_browser/fixtures/hello.ui.sdn",
+            3013,
+            db_path
+        )?
+        val restarted_events = restarted.session.access_persisted_events("main", 10)?
+        expect(restarted_events.len()).to_be_greater_than(0)
+        expect(restarted_events[0].surface_id).to_equal("main")
+        expect(restarted_events[0].event_kind).to_equal("action")
+        expect(restarted_events[0].payload).to_equal("submit")
+        if file_exists(db_path):
+            file_delete(db_path)
+
+    it "auto-attaches a store for TuiWebServer startup when runtime path is configured":
+        val db_path = "/tmp/ui_access_tui_web.sqlite"
+        rt_env_set("SIMPLE_UI_ACCESS_DB_PATH", db_path)
+        if file_exists(db_path):
+            file_delete(db_path)
+        val server = TuiWebServer.new("test/system/ui_browser/fixtures/hello.ui.sdn", 3012)?
+        val nodes = server.session.access_search_nodes("", "", "", 20)?
+        expect(nodes.len()).to_be_greater_than(0)
+        expect(file_exists(db_path)).to_equal(true)
+        rt_env_set("SIMPLE_UI_ACCESS_DB_PATH", "")
+        if file_exists(db_path):
+            file_delete(db_path)
+
+    it "auto-attaches a store for BrowserApp when an explicit runtime path is configured":
+        val db_path = "/tmp/ui_access_browser.sqlite"
+        if file_exists(db_path):
+            file_delete(db_path)
+        val app = BrowserApp.new_with_access_store_path(
+            "test/system/ui_browser/fixtures/hello.ui.sdn",
+            0,
+            "software",
+            db_path
+        )?
+        app.session.dispatch(UIEvent.Action(name: "submit"))
+        val events = app.session.access_persisted_events("main", 10)?
+        expect(events.len()).to_be_greater_than(0)
+        expect(events[0].surface_id).to_equal("main")
+        expect(events[0].event_kind).to_equal("action")
+        expect(file_exists(db_path)).to_equal(true)
+        if file_exists(db_path):
+            file_delete(db_path)

@@ -1,0 +1,174 @@
+"""
+# Dict.get() Optional Wrapping Regression Tests
+
+**Category:** Runtime | Testing
+**Bug ID:** INTERP-DICT-002
+**Status:** Confirmed (runtime limitation)
+
+## Overview
+
+Tests for Dict.get() return value handling. In the compiled runtime,
+Dict.get() auto-unwraps the optional, so .unwrap() fails with
+"method not found on type str".
+
+Workaround: compare the result directly without .unwrap().
+
+## Known Limitation
+
+`dict.get("key").unwrap()` — FAILS (value already unwrapped)
+`dict.get("key")` — WORKS (compare directly)
+`dict.get("key").?` — WORKS (check presence)
+"""
+
+use compiler.common.config.{CompilerConfig, Config}
+
+
+# ============================================================================
+# Config.get() — working patterns (direct comparison)
+# ============================================================================
+
+describe "Dict.get() Direct Comparison - Config":
+    context "present key":
+        it "returns value for existing key":
+            var config = Config.default()
+            config.set("key", "value")
+            expect(config.get("key")).to_equal("value")
+
+        it "returns truthy for existing key check":
+            var config = Config.default()
+            config.set("key", "value")
+            expect(config.get("key").?).to_equal(true)
+
+        it "retrieves overwritten value":
+            var config = Config.default()
+            config.set("key", "first")
+            config.set("key", "second")
+            expect(config.get("key")).to_equal("second")
+
+        it "retrieves multiple keys":
+            var config = Config.default()
+            config.set("a", "1")
+            config.set("b", "2")
+            config.set("c", "3")
+            expect(config.get("a")).to_equal("1")
+            expect(config.get("b")).to_equal("2")
+            expect(config.get("c")).to_equal("3")
+
+    context "missing key":
+        it "returns nil for missing key":
+            val config = Config.default()
+            expect(config.get("missing").?).to_equal(false)
+
+        it "is falsy for missing key":
+            val config = Config.default()
+            val result = config.get("nope")
+            expect(result.?).to_equal(false)
+
+    context "check-then-use pattern":
+        it "checks presence then uses value":
+            var config = Config.default()
+            config.set("port", "8080")
+            val result = config.get("port")
+            if result.?:
+                expect(result).to_equal("8080")
+            else:
+                expect(false).to_equal(true)
+
+        it "handles missing in check pattern":
+            val config = Config.default()
+            val result = config.get("missing")
+            if result.?:
+                expect(false).to_equal(true)
+            else:
+                expect(true).to_equal(true)
+
+        it "multiple checks":
+            var config = Config.default()
+            config.set("host", "localhost")
+            config.set("port", "3000")
+            val h = config.get("host")
+            val p = config.get("port")
+            expect(h.?).to_equal(true)
+            expect(p.?).to_equal(true)
+            expect(h).to_equal("localhost")
+            expect(p).to_equal("3000")
+
+
+# ============================================================================
+# CompilerConfig.get() — working patterns
+# ============================================================================
+
+describe "Dict.get() Direct Comparison - CompilerConfig":
+    context "CLI args key=value":
+        it "retrieves CLI-set value":
+            var config = CompilerConfig.default()
+            config.apply_cli_args(["--output=/tmp/out"])
+            expect(config.get("output")).to_equal("/tmp/out")
+
+        it "retrieves multiple CLI values":
+            var config = CompilerConfig.default()
+            config.apply_cli_args(["--dir=/build", "--mode=fast"])
+            expect(config.get("dir")).to_equal("/build")
+            expect(config.get("mode")).to_equal("fast")
+
+        it "returns nil for unset CLI key":
+            var config = CompilerConfig.default()
+            config.apply_cli_args(["--deterministic"])
+            expect(config.get("nonexistent").?).to_equal(false)
+
+    context "SDN values":
+        it "retrieves SDN-set value":
+            var config = CompilerConfig.default()
+            config.apply_sdn("output: dist")
+            expect(config.get("output")).to_equal("dist")
+
+        it "SDN value with spaces":
+            var config = CompilerConfig.default()
+            config.apply_sdn("desc: a description")
+            val result = config.get("desc")
+            expect(result.?).to_equal(true)
+
+    context "CLI precedence over SDN":
+        it "CLI value preserved over SDN":
+            var config = CompilerConfig.default()
+            config.apply_cli_args(["--key=from_cli"])
+            config.apply_sdn("key: from_sdn")
+            expect(config.get("key")).to_equal("from_cli")
+
+    context "empty and special values":
+        it "handles empty string value":
+            var config = CompilerConfig.default()
+            config.apply_cli_args(["--empty="])
+            val result = config.get("empty")
+            # Note: empty string is falsy for .? operator
+            expect(result).to_equal("")
+
+
+# ============================================================================
+# Combined scenarios: dict + enum field chain
+# ============================================================================
+
+describe "Combined Dict + Enum Patterns":
+    context "config with both dict and enum access":
+        it "dict get + enum field method":
+            var config = CompilerConfig.default()
+            config.apply_cli_args(["--profile", "prod"])
+            expect(config.profile.to_text()).to_equal("prod")
+            config.apply_cli_args(["--target=x86"])
+            expect(config.get("target")).to_equal("x86")
+
+        it "SDN then type inference enum":
+            var config = CompilerConfig.default()
+            config.apply_sdn("backend: cranelift")
+            expect(config.get("backend")).to_equal("cranelift")
+            expect(config.type_inference.empty_array_default.to_text()).to_equal("i32")
+
+        it "full config pipeline":
+            var config = CompilerConfig.default()
+            config.apply_sdn("opt_level: 2")
+            config.apply_cli_args(["--profile", "prod", "--deterministic", "--key=val"])
+            expect(config.get("opt_level")).to_equal("2")
+            expect(config.get("key")).to_equal("val")
+            expect(config.profile.to_text()).to_equal("prod")
+            expect(config.deterministic).to_equal(true)
+            expect(config.type_inference.empty_array_default.to_text()).to_equal("i32")

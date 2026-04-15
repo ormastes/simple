@@ -1,0 +1,82 @@
+# T32 Hardware -- Status Snapshot
+#
+# Reads various T32 status fields (STATE.RUN, STATE.TARGET, DEBUGMODE,
+# SYStem.MODE) and verifies they return consistent, non-empty results.
+#
+# @session-kind: trace32_board
+# @target: arm
+# @tag: t32_hw, old_tools
+# @reuse: exclusive_reused
+
+use std.sspec.{describe, context, it, expect, before_all, after_all}
+use test.integration.t32_hw.t32_hw_helpers.{
+    t32_hw_probe_available, t32_hw_connect, t32_hw_run_cmd, t32_hw_eval,
+    t32_hw_host, t32_hw_port
+}
+
+describe "T32 status snapshot":
+    var client = nil
+
+    before_all:
+        val result = t32_hw_connect()
+        match result:
+            Ok(c): client = c
+            Err(e): expect("connect failed: {e}").to_equal("")
+        # Bring system up so status fields are populated
+        t32_hw_run_cmd(client, "SYStem.Up")
+
+    after_all:
+        if client != nil:
+            client.disconnect()
+
+    context "individual status fields":
+        it "STATE.RUN() returns boolean":
+            val result = t32_hw_eval(client, "STATE.RUN()")
+            match result:
+                Ok(v):
+                    val valid = v.contains("TRUE") or v.contains("FALSE")
+                    expect(valid).to_equal(true)
+                Err(e):
+                    expect("STATE.RUN() failed: {e}").to_equal("")
+
+        it "STATE.TARGET() returns target info":
+            val result = t32_hw_eval(client, "STATE.TARGET()")
+            match result:
+                Ok(v):
+                    expect(v.len()).to_be_greater_than(0)
+                Err(e):
+                    expect("STATE.TARGET() failed: {e}").to_equal("")
+
+        it "DEBUGMODE() returns mode":
+            val result = t32_hw_eval(client, "DEBUGMODE()")
+            match result:
+                Ok(v):
+                    expect(v.len()).to_be_greater_than(0)
+                Err(e):
+                    expect("DEBUGMODE() failed: {e}").to_equal("")
+
+        it "SYStem.MODE() returns system mode":
+            val result = t32_hw_eval(client, "SYStem.MODE()")
+            match result:
+                Ok(v):
+                    expect(v.len()).to_be_greater_than(0)
+                Err(e):
+                    expect("SYStem.MODE() failed: {e}").to_equal("")
+
+    context "consistency":
+        it "status fields are consistent":
+            # Read multiple status fields and confirm they all succeed
+            val run_result = t32_hw_eval(client, "STATE.RUN()")
+            val target_result = t32_hw_eval(client, "STATE.TARGET()")
+            val mode_result = t32_hw_eval(client, "SYStem.MODE()")
+            val run_ok = match run_result:
+                Ok(_): true
+                Err(_): false
+            val target_ok = match target_result:
+                Ok(_): true
+                Err(_): false
+            val mode_ok = match mode_result:
+                Ok(_): true
+                Err(_): false
+            val all_ok = run_ok and target_ok and mode_ok
+            expect(all_ok).to_equal(true)

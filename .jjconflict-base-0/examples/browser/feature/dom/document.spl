@@ -1,0 +1,606 @@
+# Document — root of the DOM tree and node factory.
+# All nodes are stored centrally in NodeStore; tree relationships use i64 IDs.
+# Follows the W3C DOM Level 2 Core interface conventions.
+
+use examples.browser.entity.dom.node_types
+use examples.browser.entity.dom.attribute_types
+use examples.browser.shared.error
+use examples.browser.shared.logging
+
+# --- Enums -------------------------------------------------------------------
+
+enum QuirksMode:
+    NoQuirks
+    Quirks
+    LimitedQuirks
+
+enum ReadyState:
+    Loading
+    Interactive
+    Complete
+
+# --- NodeStore — central node storage ----------------------------------------
+
+class NodeStore:
+    nodes: [DomNode]
+    elements: [Element]
+    texts: [TextNode]
+    comments: [Comment]
+    next_id: i64
+
+    static fn create() -> NodeStore:
+        NodeStore(
+            nodes: [DomNode](),
+            elements: [Element](),
+            texts: [TextNode](),
+            comments: [Comment](),
+            next_id: 1
+        )
+
+    # Allocate a new DomNode, return its id.
+    me allocate_node(kind: NodeKind, data: text) -> i64:
+        val id = self.next_id
+        self.next_id = self.next_id + 1
+        val node = DomNode.create(id, kind, -1, data)
+        self.nodes.push(node)
+        id
+
+    # Lookup a node by id. Returns nil when not found.
+    fn get_node(id: i64) -> DomNode?:
+        var i = 0
+        while i < self.nodes.len():
+            val n = self.nodes.get(i)
+            if n.id == id:
+                return n
+            i = i + 1
+        nil
+
+    # Replace a node entry in-place.
+    me update_node(id: i64, node: DomNode):
+        var i = 0
+        while i < self.nodes.len():
+            if self.nodes.get(i).id == id:
+                self.nodes.set(i, node)
+                return
+            i = i + 1
+
+    # Get the Element data associated with a node id.
+    fn get_element(node_id: i64) -> Element?:
+        var i = 0
+        while i < self.elements.len():
+            val el = self.elements.get(i)
+            if el.node_id == node_id:
+                return el
+            i = i + 1
+        nil
+
+    # Get the TextNode data associated with a node id.
+    fn get_text(node_id: i64) -> TextNode?:
+        var i = 0
+        while i < self.texts.len():
+            val t = self.texts.get(i)
+            if t.node_id == node_id:
+                return t
+            i = i + 1
+        nil
+
+    # Get the Comment data associated with a node id.
+    fn get_comment(node_id: i64) -> Comment?:
+        var i = 0
+        while i < self.comments.len():
+            val c = self.comments.get(i)
+            if c.node_id == node_id:
+                return c
+            i = i + 1
+        nil
+
+    # Update an Element entry in-place by node_id.
+    me update_element(node_id: i64, elem: Element):
+        var i = 0
+        while i < self.elements.len():
+            if self.elements.get(i).node_id == node_id:
+                self.elements.set(i, elem)
+                return
+            i = i + 1
+
+    # Update a TextNode entry in-place by node_id.
+    me update_text(node_id: i64, t: TextNode):
+        var i = 0
+        while i < self.texts.len():
+            if self.texts.get(i).node_id == node_id:
+                self.texts.set(i, t)
+                return
+            i = i + 1
+
+    # Update a Comment entry in-place by node_id.
+    me update_comment(node_id: i64, c: Comment):
+        var i = 0
+        while i < self.comments.len():
+            if self.comments.get(i).node_id == node_id:
+                self.comments.set(i, c)
+                return
+            i = i + 1
+
+# --- Document ----------------------------------------------------------------
+
+class Document:
+    node_store: NodeStore
+    root_id: i64
+    head_id: i64
+    body_id: i64
+    title: text
+    url: text
+    content_type: text
+    encoding: text
+    quirks_mode: QuirksMode
+    ready_state: ReadyState
+    logger: Logger
+
+    # --- Factory: create a new blank Document ---------------------------------
+
+    static fn new(url: text, logger: Logger) -> Document:
+        var store = NodeStore.create()
+
+        # Allocate the document node itself (id 1)
+        val doc_id = store.allocate_node(NodeKind.Document, "")
+
+        # Create <html> root element (id 2)
+        val html_id = store.allocate_node(NodeKind.Element, "html")
+        store.elements.push(Element.create(html_id, "html", "http://www.w3.org/1999/xhtml"))
+
+        # Create <head> element (id 3)
+        val head_id = store.allocate_node(NodeKind.Element, "head")
+        store.elements.push(Element.create(head_id, "head", "http://www.w3.org/1999/xhtml"))
+
+        # Create <body> element (id 4)
+        val body_id = store.allocate_node(NodeKind.Element, "body")
+        store.elements.push(Element.create(body_id, "body", "http://www.w3.org/1999/xhtml"))
+
+        # Build initial tree: document -> html -> (head, body)
+        var doc_node = store.get_node(doc_id)
+        if val Some(dn) = doc_node:
+            var updated = DomNode(id: dn.id, kind: dn.kind, parent_id: dn.parent_id, children: [i64](), data: dn.data)
+            updated.children.push(html_id)
+            store.update_node(doc_id, updated)
+
+        var html_node = store.get_node(html_id)
+        if val Some(hn) = html_node:
+            var updated = DomNode(id: hn.id, kind: hn.kind, parent_id: doc_id, children: [i64](), data: hn.data)
+            updated.children.push(head_id)
+            updated.children.push(body_id)
+            store.update_node(html_id, updated)
+
+        # Set parent_id for head and body
+        var head_node = store.get_node(head_id)
+        if val Some(hdn) = head_node:
+            store.update_node(head_id, DomNode(id: hdn.id, kind: hdn.kind, parent_id: html_id, children: hdn.children, data: hdn.data))
+
+        var body_node = store.get_node(body_id)
+        if val Some(bdn) = body_node:
+            store.update_node(body_id, DomNode(id: bdn.id, kind: bdn.kind, parent_id: html_id, children: bdn.children, data: bdn.data))
+
+        Document(
+            node_store: store,
+            root_id: html_id,
+            head_id: head_id,
+            body_id: body_id,
+            title: "",
+            url: url,
+            content_type: "text/html",
+            encoding: "UTF-8",
+            quirks_mode: QuirksMode.NoQuirks,
+            ready_state: ReadyState.Loading,
+            logger: logger
+        )
+
+    # --- Node creation --------------------------------------------------------
+
+    me createElement(tag_name: text) -> i64:
+        val id = self.node_store.allocate_node(NodeKind.Element, tag_name)
+        self.node_store.elements.push(Element.create(id, tag_name, "http://www.w3.org/1999/xhtml"))
+        self.logger.debug("createElement: <{tag_name}> id={id}")
+        id
+
+    me createElementNS(elem_ns: text, tag_name: text) -> i64:
+        val id = self.node_store.allocate_node(NodeKind.Element, tag_name)
+        self.node_store.elements.push(Element.create(id, tag_name, elem_ns))
+        self.logger.debug("createElementNS: <{tag_name}> ns={elem_ns} id={id}")
+        id
+
+    me createTextNode(data: text) -> i64:
+        val id = self.node_store.allocate_node(NodeKind.Text, data)
+        self.node_store.texts.push(TextNode.create(id, data))
+        self.logger.debug("createTextNode: id={id}")
+        id
+
+    me createComment(data: text) -> i64:
+        val id = self.node_store.allocate_node(NodeKind.Comment, data)
+        self.node_store.comments.push(Comment.create(id, data))
+        self.logger.debug("createComment: id={id}")
+        id
+
+    me createDocumentFragment() -> i64:
+        val id = self.node_store.allocate_node(NodeKind.DocumentFragment, "")
+        self.logger.debug("createDocumentFragment: id={id}")
+        id
+
+    # --- Query methods --------------------------------------------------------
+
+    me getElementById(id_attr: text) -> i64?:
+        var i = 0
+        while i < self.node_store.elements.len():
+            val el = self.node_store.elements.get(i)
+            var j = 0
+            while j < el.attributes.len():
+                val attr = el.attributes.get(j)
+                if attr.name == "id" and attr.value == id_attr:
+                    return el.node_id
+                j = j + 1
+            i = i + 1
+        nil
+
+    me getElementsByTagName(tag: text) -> [i64]:
+        var result = [i64]()
+        val lower_tag = tag.to_lower()
+        var i = 0
+        while i < self.node_store.elements.len():
+            val el = self.node_store.elements.get(i)
+            if el.tag_name.to_lower() == lower_tag or tag == "*":
+                result.push(el.node_id)
+            i = i + 1
+        result
+
+    me getElementsByClassName(class_name: text) -> [i64]:
+        var result = [i64]()
+        var i = 0
+        while i < self.node_store.elements.len():
+            val el = self.node_store.elements.get(i)
+            var j = 0
+            while j < el.attributes.len():
+                val attr = el.attributes.get(j)
+                if attr.name == "class":
+                    val classes = attr.value.split(" ")
+                    var k = 0
+                    while k < classes.len():
+                        if classes.get(k) == class_name:
+                            result.push(el.node_id)
+                        k = k + 1
+                j = j + 1
+            i = i + 1
+        result
+
+    me querySelector(selector: text) -> i64?:
+        # Simple tag-name selector support; full CSS selectors delegated to selector_match
+        val matches = self.querySelectorAll(selector)
+        if matches.len() > 0:
+            return matches.get(0)
+        nil
+
+    me querySelectorAll(selector: text) -> [i64]:
+        # Basic selector: tag name, #id, .class
+        if selector.starts_with("#"):
+            val id_val = selector.substring(1, selector.len())
+            var result = [i64]()
+            val found = self.getElementById(id_val)
+            if val Some(fid) = found:
+                result.push(fid)
+            return result
+        if selector.starts_with("."):
+            val cls = selector.substring(1, selector.len())
+            return self.getElementsByClassName(cls)
+        self.getElementsByTagName(selector)
+
+    # --- Tree manipulation ----------------------------------------------------
+
+    me appendChild(parent_id: i64, child_id: i64) -> BrowserResult<()>:
+        val parent_opt = self.node_store.get_node(parent_id)
+        if val Some(parent) = parent_opt:
+            pass_dn
+        else:
+            return Err(dom_error("appendChild: parent node {parent_id} not found"))
+
+        val child_opt = self.node_store.get_node(child_id)
+        if val Some(child) = child_opt:
+            pass_dn
+        else:
+            return Err(dom_error("appendChild: child node {child_id} not found"))
+
+        # Remove child from old parent if it has one
+        val child_node = self.node_store.get_node(child_id)
+        if val Some(cn) = child_node:
+            if cn.parent_id >= 0 and cn.parent_id != parent_id:
+                self._remove_child_from_parent(cn.parent_id, child_id)
+
+        # Update child's parent_id
+        val cur_child = self.node_store.get_node(child_id)
+        if val Some(cc) = cur_child:
+            self.node_store.update_node(child_id, DomNode(id: cc.id, kind: cc.kind, parent_id: parent_id, children: cc.children, data: cc.data))
+
+        # Add child to parent's children list
+        val cur_parent = self.node_store.get_node(parent_id)
+        if val Some(cp) = cur_parent:
+            var new_children = self._copy_id_list(cp.children)
+            new_children.push(child_id)
+            self.node_store.update_node(parent_id, DomNode(id: cp.id, kind: cp.kind, parent_id: cp.parent_id, children: new_children, data: cp.data))
+
+        self.logger.trace("appendChild: child={child_id} -> parent={parent_id}")
+        Ok(())
+
+    me insertBefore(parent_id: i64, new_child: i64, ref_child: i64) -> BrowserResult<()>:
+        val parent_opt = self.node_store.get_node(parent_id)
+        if val Some(parent) = parent_opt:
+            pass_dn
+        else:
+            return Err(dom_error("insertBefore: parent node {parent_id} not found"))
+
+        # Remove new_child from old parent if present
+        val nc_opt = self.node_store.get_node(new_child)
+        if val Some(nc) = nc_opt:
+            if nc.parent_id >= 0:
+                self._remove_child_from_parent(nc.parent_id, new_child)
+
+        # Set new_child parent_id
+        val nc_cur = self.node_store.get_node(new_child)
+        if val Some(ncc) = nc_cur:
+            self.node_store.update_node(new_child, DomNode(id: ncc.id, kind: ncc.kind, parent_id: parent_id, children: ncc.children, data: ncc.data))
+
+        # Insert into parent's children before ref_child
+        val p = self.node_store.get_node(parent_id)
+        if val Some(pn) = p:
+            var new_children = [i64]()
+            var inserted = false
+            var i = 0
+            while i < pn.children.len():
+                val cid = pn.children.get(i)
+                if cid == ref_child and not inserted:
+                    new_children.push(new_child)
+                    inserted = true
+                new_children.push(cid)
+                i = i + 1
+            if not inserted:
+                new_children.push(new_child)
+            self.node_store.update_node(parent_id, DomNode(id: pn.id, kind: pn.kind, parent_id: pn.parent_id, children: new_children, data: pn.data))
+
+        self.logger.trace("insertBefore: new={new_child} before ref={ref_child} in parent={parent_id}")
+        Ok(())
+
+    me removeChild(parent_id: i64, child_id: i64) -> BrowserResult<()>:
+        val parent_opt = self.node_store.get_node(parent_id)
+        if val Some(parent) = parent_opt:
+            pass_dn
+        else:
+            return Err(dom_error("removeChild: parent node {parent_id} not found"))
+
+        val child_opt = self.node_store.get_node(child_id)
+        if val Some(child) = child_opt:
+            if child.parent_id != parent_id:
+                return Err(dom_error("removeChild: node {child_id} is not a child of {parent_id}"))
+        else:
+            return Err(dom_error("removeChild: child node {child_id} not found"))
+
+        self._remove_child_from_parent(parent_id, child_id)
+
+        # Clear child's parent_id
+        val cc = self.node_store.get_node(child_id)
+        if val Some(cn) = cc:
+            self.node_store.update_node(child_id, DomNode(id: cn.id, kind: cn.kind, parent_id: -1, children: cn.children, data: cn.data))
+
+        self.logger.trace("removeChild: child={child_id} from parent={parent_id}")
+        Ok(())
+
+    me replaceChild(parent_id: i64, new_child: i64, old_child: i64) -> BrowserResult<()>:
+        val parent_opt = self.node_store.get_node(parent_id)
+        if val Some(parent) = parent_opt:
+            pass_dn
+        else:
+            return Err(dom_error("replaceChild: parent node {parent_id} not found"))
+
+        # Remove new_child from its old parent if needed
+        val nc_opt = self.node_store.get_node(new_child)
+        if val Some(nc) = nc_opt:
+            if nc.parent_id >= 0:
+                self._remove_child_from_parent(nc.parent_id, new_child)
+
+        # Replace old_child with new_child in parent's children
+        val p = self.node_store.get_node(parent_id)
+        if val Some(pn) = p:
+            var new_children = [i64]()
+            var i = 0
+            while i < pn.children.len():
+                val cid = pn.children.get(i)
+                if cid == old_child:
+                    new_children.push(new_child)
+                else:
+                    new_children.push(cid)
+                i = i + 1
+            self.node_store.update_node(parent_id, DomNode(id: pn.id, kind: pn.kind, parent_id: pn.parent_id, children: new_children, data: pn.data))
+
+        # Update parent_ids
+        val new_c = self.node_store.get_node(new_child)
+        if val Some(ncn) = new_c:
+            self.node_store.update_node(new_child, DomNode(id: ncn.id, kind: ncn.kind, parent_id: parent_id, children: ncn.children, data: ncn.data))
+
+        val old_c = self.node_store.get_node(old_child)
+        if val Some(ocn) = old_c:
+            self.node_store.update_node(old_child, DomNode(id: ocn.id, kind: ocn.kind, parent_id: -1, children: ocn.children, data: ocn.data))
+
+        self.logger.trace("replaceChild: new={new_child} replaces old={old_child} in parent={parent_id}")
+        Ok(())
+
+    me cloneNode(node_id: i64, deep: bool) -> i64:
+        val orig_opt = self.node_store.get_node(node_id)
+        if val Some(orig) = orig_opt:
+            val new_id = self.node_store.allocate_node(orig.kind, orig.data)
+
+            # Clone element data if present
+            val elem_opt = self.node_store.get_element(node_id)
+            if val Some(el) = elem_opt:
+                var new_attrs = [Attr]()
+                var ai = 0
+                while ai < el.attributes.len():
+                    val a = el.attributes.get(ai)
+                    new_attrs.push(Attr(name: a.name, value: a.value, ns: a.ns))
+                    ai = ai + 1
+                self.node_store.elements.push(Element(node_id: new_id, tag_name: el.tag_name, attributes: new_attrs, ns: el.ns))
+
+            # Clone text data if present
+            val text_opt = self.node_store.get_text(node_id)
+            if val Some(tn) = text_opt:
+                self.node_store.texts.push(TextNode.create(new_id, tn.content))
+
+            # Clone comment data if present
+            val comment_opt = self.node_store.get_comment(node_id)
+            if val Some(cm) = comment_opt:
+                self.node_store.comments.push(Comment.create(new_id, cm.content))
+
+            # Deep clone: recursively clone children
+            if deep:
+                var ci = 0
+                while ci < orig.children.len():
+                    val child_id = orig.children.get(ci)
+                    val cloned_child = self.cloneNode(child_id, true)
+                    # Attach cloned child to new node
+                    val cur_new = self.node_store.get_node(new_id)
+                    if val Some(cn) = cur_new:
+                        var ch = self._copy_id_list(cn.children)
+                        ch.push(cloned_child)
+                        self.node_store.update_node(new_id, DomNode(id: cn.id, kind: cn.kind, parent_id: cn.parent_id, children: ch, data: cn.data))
+                    # Set child's parent
+                    val cloned_node = self.node_store.get_node(cloned_child)
+                    if val Some(ccn) = cloned_node:
+                        self.node_store.update_node(cloned_child, DomNode(id: ccn.id, kind: ccn.kind, parent_id: new_id, children: ccn.children, data: ccn.data))
+                    ci = ci + 1
+
+            self.logger.trace("cloneNode: orig={node_id} -> new={new_id} deep={deep}")
+            return new_id
+
+        # Fallback: return -1 for missing nodes
+        -1
+
+    # --- Tree traversal -------------------------------------------------------
+
+    fn parentNode(node_id: i64) -> i64?:
+        val n = self.node_store.get_node(node_id)
+        if val Some(node) = n:
+            if node.parent_id >= 0:
+                return node.parent_id
+        nil
+
+    fn firstChild(node_id: i64) -> i64?:
+        val n = self.node_store.get_node(node_id)
+        if val Some(node) = n:
+            if node.children.len() > 0:
+                return node.children.get(0)
+        nil
+
+    fn lastChild(node_id: i64) -> i64?:
+        val n = self.node_store.get_node(node_id)
+        if val Some(node) = n:
+            if node.children.len() > 0:
+                return node.children.get(node.children.len() - 1)
+        nil
+
+    fn nextSibling(node_id: i64) -> i64?:
+        val n = self.node_store.get_node(node_id)
+        if val Some(node) = n:
+            if node.parent_id < 0:
+                return nil
+            val parent = self.node_store.get_node(node.parent_id)
+            if val Some(p) = parent:
+                var i = 0
+                while i < p.children.len():
+                    if p.children.get(i) == node_id:
+                        if i + 1 < p.children.len():
+                            return p.children.get(i + 1)
+                        return nil
+                    i = i + 1
+        nil
+
+    fn previousSibling(node_id: i64) -> i64?:
+        val n = self.node_store.get_node(node_id)
+        if val Some(node) = n:
+            if node.parent_id < 0:
+                return nil
+            val parent = self.node_store.get_node(node.parent_id)
+            if val Some(p) = parent:
+                var i = 0
+                while i < p.children.len():
+                    if p.children.get(i) == node_id:
+                        if i > 0:
+                            return p.children.get(i - 1)
+                        return nil
+                    i = i + 1
+        nil
+
+    fn childNodes(node_id: i64) -> [i64]:
+        val n = self.node_store.get_node(node_id)
+        if val Some(node) = n:
+            return self._copy_id_list(node.children)
+        [i64]()
+
+    fn hasChildNodes(node_id: i64) -> bool:
+        val n = self.node_store.get_node(node_id)
+        if val Some(node) = n:
+            return node.children.len() > 0
+        false
+
+    # --- Helpers --------------------------------------------------------------
+
+    fn get_inner_text(node_id: i64) -> text:
+        val n = self.node_store.get_node(node_id)
+        if val Some(node) = n:
+            match node.kind:
+                NodeKind.Text:
+                    val t = self.node_store.get_text(node_id)
+                    if val Some(tn) = t:
+                        return tn.content
+                    return node.data
+                NodeKind.Comment:
+                    return ""
+                _:
+                    var result = ""
+                    var i = 0
+                    while i < node.children.len():
+                        val child_text = self.get_inner_text(node.children.get(i))
+                        result = result + child_text
+                        i = i + 1
+                    return result
+        ""
+
+    me set_title(new_title: text):
+        self.title = new_title
+        self.logger.debug("Document title set to: {new_title}")
+
+    fn is_ancestor(ancestor_id: i64, node_id: i64) -> bool:
+        if ancestor_id == node_id:
+            return false
+        val n = self.node_store.get_node(node_id)
+        if val Some(node) = n:
+            if node.parent_id < 0:
+                return false
+            if node.parent_id == ancestor_id:
+                return true
+            return self.is_ancestor(ancestor_id, node.parent_id)
+        false
+
+    # --- Internal helpers (prefixed with _) -----------------------------------
+
+    me _remove_child_from_parent(parent_id: i64, child_id: i64):
+        val p = self.node_store.get_node(parent_id)
+        if val Some(pn) = p:
+            var new_children = [i64]()
+            var i = 0
+            while i < pn.children.len():
+                val cid = pn.children.get(i)
+                if cid != child_id:
+                    new_children.push(cid)
+                i = i + 1
+            self.node_store.update_node(parent_id, DomNode(id: pn.id, kind: pn.kind, parent_id: pn.parent_id, children: new_children, data: pn.data))
+
+    fn _copy_id_list(ids: [i64]) -> [i64]:
+        var result = [i64]()
+        var i = 0
+        while i < ids.len():
+            result.push(ids.get(i))
+            i = i + 1
+        result

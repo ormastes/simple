@@ -1,0 +1,97 @@
+# GC Boundary Semantic Check
+#
+# Wires the GcBoundaryChecker into the semantic analysis pipeline.
+# Checks that cross-family imports respect GC mode boundaries:
+# - nogc_* modules should not import from gc_* families
+# - nogc_*_noalloc modules should not import from any allocating family
+#
+# Produces warnings (not errors) to alert developers about potential
+# ownership/lifetime issues at GC mode boundaries.
+
+use compiler.common.gc_config (GcMode, GcConfig, gc_mode_from_family_prefix, is_noalloc_family)
+use compiler.common.gc_boundary (GcBoundaryChecker, GC_BOUNDARY_LINT_NAME)
+from compiler.common.diagnostics.span import {Span}
+
+
+# ============================================================================
+# Cross-Family Import Warning
+# ============================================================================
+
+struct FamilyImportWarning:
+    """Warning about a cross-family import that crosses GC boundaries."""
+    source_module: text
+    imported_module: text
+    message: text
+
+
+# ============================================================================
+# GC Boundary Semantic Pass
+# ============================================================================
+
+fn check_gc_boundary_imports(source_module: text, imported_modules: [text]) -> [FamilyImportWarning]:
+    """Check a module's imports for GC boundary violations.
+
+    Arguments:
+    - source_module: The module path of the file being compiled (e.g., "std.nogc_sync_mut.fs")
+    - imported_modules: List of module paths imported by the source module
+
+    Returns a list of warnings for cross-GC-boundary imports.
+
+    sdoctest:
+        expect(check_gc_boundary_imports("nogc_sync_mut.fs", ["gc_async_mut.task"]).len()).to_equal(1)
+        expect(check_gc_boundary_imports("nogc_sync_mut.fs", ["common.text"]).len()).to_equal(0)
+        expect(check_gc_boundary_imports("gc_async_mut.task", ["nogc_sync_mut.fs"]).len()).to_equal(0)
+    """
+    var warnings: [FamilyImportWarning] = []
+
+    val source_gc = gc_mode_from_family_prefix(source_module)
+    val source_is_noalloc = is_noalloc_family(source_module)
+
+    # Only check if source module is in a nogc family
+    if source_gc.is_gc():
+        if not source_gc.explicit:
+            return warnings  # Unknown family, skip check
+
+    for imported in imported_modules:
+        val imported_gc = gc_mode_from_family_prefix(imported)
+
+        # Rule 1: nogc_*_noalloc must not import from any allocating family
+        if source_is_noalloc:
+            if imported_gc.explicit:
+                if imported_gc.is_gc():
+                    warnings.push(FamilyImportWarning(
+                        source_module: source_module,
+                        imported_module: imported,
+                        message: "warning[{GC_BOUNDARY_LINT_NAME}]: no-alloc module '{source_module}' imports GC family '{imported}'"
+                    ))
+                elif not is_noalloc_family(imported):
+                    # nogc but not noalloc — still allocates via unique ptrs
+                    warnings.push(FamilyImportWarning(
+                        source_module: source_module,
+                        imported_module: imported,
+                        message: "warning[{GC_BOUNDARY_LINT_NAME}]: no-alloc module '{source_module}' imports allocating family '{imported}'"
+                    ))
+
+        # Rule 2: nogc_* must not import from gc_* families
+        elif source_gc.is_nogc():
+            if imported_gc.explicit and imported_gc.is_gc():
+                warnings.push(FamilyImportWarning(
+                    source_module: source_module,
+                    imported_module: imported,
+                    message: "warning[{GC_BOUNDARY_LINT_NAME}]: no-gc module '{source_module}' imports GC family '{imported}'"
+                ))
+
+    warnings
+
+fn format_family_warnings(warnings: [FamilyImportWarning]) -> [text]:
+    """Format family import warnings as human-readable messages.
+
+    sdoctest:
+        expect(format_family_warnings([]).len()).to_equal(0)
+        expect(format_family_warnings([FamilyImportWarning(source_module: "a", imported_module: "b", message: "warn!")]).len()).to_equal(1)
+        expect(format_family_warnings([FamilyImportWarning(source_module: "a", imported_module: "b", message: "warn!")]).to_contain("warn!")).to_equal(true)
+    """
+    var messages: [text] = []
+    for w in warnings:
+        messages.push(w.message)
+    messages

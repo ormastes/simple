@@ -1,0 +1,165 @@
+# Hello World — Minimal window application for SimpleOS
+#
+# Demonstrates the full app lifecycle: launch from dock or keyboard
+# shortcut, display content, handle input, close gracefully.
+# Uses the standard widget builder DSL.
+#
+# MDSOC: feature dimension, apps layer
+
+use common.ui.builder.{
+    column, row, panel, text_widget, button, label,
+    statusbar, build_tree_with_title,
+    with_flex, with_width, with_height
+}
+use common.ui.widget.{WidgetNode, UITree, UIEvent}
+use common.ui.session.{UISession}
+use common.window_protocol.window_protocol.{WM_EVENT_CLOSE}
+use os.userlib.window.{WindowClient}
+use os.userlib.process.{exit_}
+
+extern fn serial_println(msg: text)
+
+# =========================================================================
+# Hello World App
+# =========================================================================
+
+class HelloWorldApp:
+    """Minimal Hello World application.
+
+    Displays a greeting message, a clickable button that counts
+    clicks, and a status bar.  Press Escape to close.
+    """
+    message: text
+    click_count: i32
+    running: bool
+
+impl HelloWorldApp:
+
+    static fn new() -> HelloWorldApp:
+        """Create a Hello World app in its initial state."""
+        HelloWorldApp(
+            message: "Hello World!",
+            click_count: 0,
+            running: true
+        )
+
+    # -- Input Handling ------------------------------------------------------
+
+    me handle_event(event: UIEvent):
+        """Handle UI events: Escape closes, button increments counter."""
+        match event:
+            UIEvent.Quit:
+                self.running = false
+            UIEvent.KeyPress(key):
+                match key:
+                    "Escape" => self.running = false
+                    _ => pass_dn
+            UIEvent.Action(action):
+                match action:
+                    "click_me" => self.click_count = self.click_count + 1
+                    _ => pass_dn
+            _ => pass_dn
+
+    me handle_action(action: text):
+        """Dispatch button action strings."""
+        match action:
+            "click_me" => self.click_count = self.click_count + 1
+            _ => pass_dn
+
+    me handle_key(key: text):
+        """Map keyboard input to actions."""
+        match key:
+            "Escape" => self.running = false
+            _ => pass_dn
+
+    fn is_running() -> bool:
+        """Return whether the app is still running."""
+        self.running
+
+    # -- UI Construction -----------------------------------------------------
+
+    fn build_ui() -> UISession:
+        """Build the Hello World UI.
+
+        Layout:
+          Panel with centered greeting
+          Click Me button
+          Status bar
+        """
+        val count = self.click_count
+
+        val root = column("hello_root", [
+            # Greeting panel
+            with_flex(panel("hello_panel", "", [
+                text_widget("hello_message", self.message),
+                label("hello_subtitle", "Welcome to SimpleOS")
+            ]), 1),
+
+            # Action button
+            row("hello_button_row", [
+                with_flex(button("btn_click", "Click Me!", "click_me"), 1)
+            ]),
+
+            # Status bar
+            statusbar("hello_status",
+                "Press Escape to close | Clicks: {count}",
+                "Hello World"
+            )
+        ])
+
+        val tree = build_tree_with_title(root, "Hello World", "dark")
+        UISession.new(tree)
+
+# =========================================================================
+# Remote Window Entry
+# =========================================================================
+
+fn hello_world_remote_launch_once(process_id: u64) -> bool:
+    """Create the packaged Hello World window and return immediately."""
+    serial_println("[hello_world] start app_id=/sys/apps/hello_world mode=resident-manifest pid={process_id}")
+    var client = WindowClient.new()
+    client.set_app_identity("/sys/apps/hello_world")
+    if not client.connect():
+        serial_println("[hello_world] connect_failed app_id=/sys/apps/hello_world mode=resident-manifest pid={process_id}")
+        return false
+
+    val wid = client.create_window_with_process_id("Hello World", 80, 80, 420, 220, process_id)
+    if wid == 0:
+        serial_println("[hello_world] create_window_failed app_id=/sys/apps/hello_world mode=resident-manifest pid={process_id}")
+        client.disconnect()
+        return false
+    serial_println("[hello_world] window_created app_id=/sys/apps/hello_world wid={wid} mode=resident-manifest pid={process_id}")
+
+    client.update_content("Hello World!\n\nThis window is owned by a launched app process.\nClose the window to exit.")
+    true
+
+fn hello_world_remote_main():
+    """Launch the Hello World app as a real remote WM window."""
+    serial_println("[hello_world] start app_id=/sys/apps/hello_world")
+    var client = WindowClient.new()
+    client.set_app_identity("/sys/apps/hello_world")
+    if not client.connect():
+        serial_println("[hello_world] connect_failed app_id=/sys/apps/hello_world")
+        exit_(1)
+        return
+
+    val wid = client.create_window("Hello World", 80, 80, 420, 220)
+    if wid == 0:
+        serial_println("[hello_world] create_window_failed app_id=/sys/apps/hello_world")
+        client.disconnect()
+        exit_(1)
+        return
+    serial_println("[hello_world] window_created app_id=/sys/apps/hello_world wid={wid}")
+
+    client.update_content("Hello World!\n\nThis window is owned by a launched app process.\nClose the window to exit.")
+
+    var running = true
+    while running:
+        val event = client.wait_event()
+        if event.event_type == WM_EVENT_CLOSE:
+            running = false
+
+    client.destroy_window()
+    client.disconnect()
+    serial_println("[hello_world] exit app_id=/sys/apps/hello_world code=0")
+    exit_(0)

@@ -1,0 +1,409 @@
+# GPU surface management — abstraction over platform render targets.
+# Manages allocation, resizing, destruction, and swapchain presentation
+# of GPU-backed surfaces used for compositing and rasterization.
+#
+# BrowserGraphics (below) serves as the unified 2D rendering entry point,
+# composing SurfacePool, TextureCache, CommandQueue, and Rasterizer.
+# Future: replace software raster with hardware-accelerated pipeline
+# (std.gpu + Vulkan FFI) for Canvas 2D, SVG, and CSS paint.
+
+use examples.browser.entity.dom.paint_types.(Color)
+use examples.browser.feature.gpu.command_buffer.(CommandBuffer, CommandQueue, GpuCommand)
+use examples.browser.feature.gpu.raster.(Rasterizer)
+use examples.browser.feature.gpu.texture_cache.(TextureCache)
+use examples.browser.shared.error.(BrowserError, BrowserErrorKind, BrowserResult, paint_error)
+use examples.browser.shared.logging.(Logger, LogLevel)
+
+# ---------------------------------------------------------------------------
+# SurfaceFormat — pixel format for GPU surfaces.
+# ---------------------------------------------------------------------------
+
+enum SurfaceFormat:
+    BGRA8
+    RGBA8
+    RGB565
+
+# Return bytes per pixel for a given surface format.
+fn bytes_per_pixel(format: SurfaceFormat) -> i64:
+    match format:
+        SurfaceFormat.BGRA8: 4
+        SurfaceFormat.RGBA8: 4
+        SurfaceFormat.RGB565: 2
+
+# ---------------------------------------------------------------------------
+# GpuSurface — a single GPU-backed render target.
+# ---------------------------------------------------------------------------
+
+class GpuSurface:
+    id: i64
+    width: i64
+    height: i64
+    format: SurfaceFormat
+    texture_id: i64
+    is_valid: bool
+    generation: i64
+    pixels: [i64]
+
+    static fn create(id: i64, width: i64, height: i64, format: SurfaceFormat) -> GpuSurface:
+        # Initialize pixel backing store to width * height * 4 zeros (RGBA)
+        val pixel_count = width * height * 4
+        var px = [i64]()
+        var i = 0
+        while i < pixel_count:
+            px.push(0)
+            i = i + 1
+        GpuSurface(
+            id: id,
+            width: width,
+            height: height,
+            format: format,
+            texture_id: id,
+            is_valid: true,
+            generation: 0,
+            pixels: px
+        )
+
+    # Get a pixel color at (x, y) as (r, g, b, a) packed into the pixel list.
+    fn get_pixel(x: i64, y: i64) -> [i64]:
+        val idx = (y * self.width + x) * 4
+        var result = [i64]()
+        if idx >= 0 and idx + 3 < self.pixels.len():
+            result.push(self.pixels.get(idx))
+            result.push(self.pixels.get(idx + 1))
+            result.push(self.pixels.get(idx + 2))
+            result.push(self.pixels.get(idx + 3))
+        else:
+            result.push(0)
+            result.push(0)
+            result.push(0)
+            result.push(0)
+        result
+
+    # Set a pixel at (x, y) with the given RGBA values.
+    me set_pixel(x: i64, y: i64, r: i64, g: i64, b: i64, a: i64):
+        val idx = (y * self.width + x) * 4
+        if idx >= 0 and idx + 3 < self.pixels.len():
+            self.pixels.set(idx, r)
+            self.pixels.set(idx + 1, g)
+            self.pixels.set(idx + 2, b)
+            self.pixels.set(idx + 3, a)
+
+# Calculate memory usage of a single surface in bytes.
+fn surface_memory_bytes(surface: GpuSurface) -> i64:
+    val bpp = bytes_per_pixel(surface.format)
+    surface.width * surface.height * bpp
+
+# ---------------------------------------------------------------------------
+# SurfacePool — manages a collection of GPU surfaces.
+# ---------------------------------------------------------------------------
+
+class SurfacePool:
+    surfaces: [GpuSurface]
+    next_id: i64
+    max_surfaces: i64
+    logger: Logger
+
+    static fn new(max_surfaces: i64, logger: Logger) -> SurfacePool:
+        logger.info("SurfacePool created, max_surfaces={max_surfaces}")
+        SurfacePool(
+            surfaces: [GpuSurface](),
+            next_id: 1,
+            max_surfaces: max_surfaces,
+            logger: logger
+        )
+
+    # Create a new GPU surface with the given dimensions and format.
+    me create_surface(width: i64, height: i64, format: SurfaceFormat) -> BrowserResult<GpuSurface>:
+        if self.surfaces.len() >= self.max_surfaces:
+            self.logger.warn("surface pool exhausted: {self.surfaces.len()}/{self.max_surfaces}")
+            return Err(paint_error("surface pool exhausted, max={self.max_surfaces}"))
+
+        if width <= 0 or height <= 0:
+            return Err(paint_error("invalid surface dimensions: {width}x{height}"))
+
+        val id = self.next_id
+        self.next_id = self.next_id + 1
+
+        val surface = GpuSurface.create(id, width, height, format)
+        self.surfaces.push(surface)
+
+        val mem = surface_memory_bytes(surface)
+        self.logger.debug("created surface id={id} {width}x{height} ({mem} bytes)")
+        Ok(surface)
+
+    # Resize an existing surface by ID. Invalidates old content.
+    me resize_surface(surface_id: i64, width: i64, height: i64) -> BrowserResult<()>:
+        if width <= 0 or height <= 0:
+            return Err(paint_error("invalid resize dimensions: {width}x{height}"))
+
+        for surface in self.surfaces:
+            if surface.id == surface_id:
+                val old_w = surface.width
+                val old_h = surface.height
+                surface.width = width
+                surface.height = height
+                surface.generation = surface.generation + 1
+                # Reinitialize pixel backing store for new dimensions
+                val pixel_count = width * height * 4
+                var new_pixels = [i64]()
+                var pi = 0
+                while pi < pixel_count:
+                    new_pixels.push(0)
+                    pi = pi + 1
+                surface.pixels = new_pixels
+                self.logger.debug("resized surface {surface_id}: {old_w}x{old_h} -> {width}x{height}")
+                return Ok(())
+
+        Err(paint_error("surface not found: id={surface_id}"))
+
+    # Destroy a surface by ID and remove it from the pool.
+    me destroy_surface(surface_id: i64):
+        var new_surfaces = [GpuSurface]()
+        var found = false
+        for surface in self.surfaces:
+            if surface.id == surface_id:
+                surface.is_valid = false
+                found = true
+                self.logger.debug("destroyed surface id={surface_id}")
+            else:
+                new_surfaces.push(surface)
+        self.surfaces = new_surfaces
+        if not found:
+            self.logger.warn("destroy_surface: id={surface_id} not found")
+
+    # Look up a surface by ID.
+    fn get_surface(surface_id: i64) -> GpuSurface?:
+        for surface in self.surfaces:
+            if surface.id == surface_id:
+                if surface.is_valid:
+                    return surface
+        nil
+
+    # Reclaim surfaces that are no longer valid.
+    me reclaim_unused():
+        var kept = [GpuSurface]()
+        var reclaimed = 0
+        for surface in self.surfaces:
+            if surface.is_valid:
+                kept.push(surface)
+            else:
+                reclaimed = reclaimed + 1
+        self.surfaces = kept
+        if reclaimed > 0:
+            self.logger.info("reclaimed {reclaimed} unused surfaces, {kept.len()} remaining")
+
+    # Calculate total memory usage of all surfaces in the pool.
+    fn total_memory_usage() -> i64:
+        var total = 0
+        for surface in self.surfaces:
+            if surface.is_valid:
+                total = total + surface_memory_bytes(surface)
+        total
+
+    # Present a swapchain by swapping front and back buffers.
+    me present(swapchain: Swapchain) -> BrowserResult<()>:
+        val front_surface = self.get_surface(swapchain.front)
+        if val fs = front_surface:
+            self.logger.trace("present: validated front surface id={fs.id}")
+        else:
+            return Err(paint_error("swapchain front surface not found: id={swapchain.front}"))
+
+        val back_surface = self.get_surface(swapchain.back)
+        if val bs = back_surface:
+            self.logger.trace("present: validated back surface id={bs.id}")
+        else:
+            return Err(paint_error("swapchain back surface not found: id={swapchain.back}"))
+
+        # Swap front and back buffer IDs
+        val old_front = swapchain.front
+        swapchain.front = swapchain.back
+        swapchain.back = old_front
+
+        self.logger.trace("presented swapchain: front={swapchain.front}, back={swapchain.back}")
+        Ok(())
+
+    # Create a new swapchain with front and back surfaces.
+    me create_swapchain(width: i64, height: i64) -> BrowserResult<Swapchain>:
+        val front = self.create_surface(width, height, SurfaceFormat.BGRA8)?
+        val back = self.create_surface(width, height, SurfaceFormat.BGRA8)?
+
+        val sc = Swapchain(
+            front: front.id,
+            back: back.id,
+            width: width,
+            height: height
+        )
+        self.logger.info("created swapchain {width}x{height} front={front.id} back={back.id}")
+        Ok(sc)
+
+# ---------------------------------------------------------------------------
+# Swapchain — double-buffered presentation surface.
+# ---------------------------------------------------------------------------
+
+class Swapchain:
+    front: i64
+    back: i64
+    width: i64
+    height: i64
+
+    static fn create(front: i64, back: i64, width: i64, height: i64) -> Swapchain:
+        Swapchain(front: front, back: back, width: width, height: height)
+
+# ---------------------------------------------------------------------------
+# Utility functions
+# ---------------------------------------------------------------------------
+
+# Calculate total memory for a given dimension and format.
+fn calculate_surface_memory(width: i64, height: i64, format: SurfaceFormat) -> i64:
+    width * height * bytes_per_pixel(format)
+
+# Check if a surface fits within a maximum memory budget (in bytes).
+fn surface_fits_budget(width: i64, height: i64, format: SurfaceFormat, budget_bytes: i64) -> bool:
+    val needed = calculate_surface_memory(width, height, format)
+    needed <= budget_bytes
+
+# Format a surface description as text.
+fn describe_surface(surface: GpuSurface) -> text:
+    val fmt_name = match surface.format:
+        SurfaceFormat.BGRA8: "BGRA8"
+        SurfaceFormat.RGBA8: "RGBA8"
+        SurfaceFormat.RGB565: "RGB565"
+    val mem = surface_memory_bytes(surface)
+    "Surface(id={surface.id}, {surface.width}x{surface.height}, {fmt_name}, {mem} bytes, gen={surface.generation})"
+
+# Format memory size in human-readable form.
+fn format_memory(bytes: i64) -> text:
+    if bytes >= 1048576:
+        val mb = bytes / 1048576
+        return "{mb} MB"
+    if bytes >= 1024:
+        val kb = bytes / 1024
+        return "{kb} KB"
+    "{bytes} B"
+
+# ---------------------------------------------------------------------------
+# BrowserGraphics — unified 2D rendering entry point.
+# Composes SurfacePool, TextureCache, CommandQueue, and Rasterizer into a
+# single API for all browser rendering (Canvas 2D, SVG, CSS paint).
+# ---------------------------------------------------------------------------
+
+class BrowserGraphics:
+    surfaces: SurfacePool
+    textures: TextureCache
+    queue: CommandQueue
+    rasterizer: Rasterizer
+    logger: Logger
+    # Per-surface pending command buffers — maps surface_id to active buffer.
+    pending_buffers: [Pair<i64, CommandBuffer>]
+
+    static fn create(max_surfaces: i64, texture_memory_mb: i64, atlas_size: i64, logger: Logger) -> BrowserGraphics:
+        val surfaces = SurfacePool.new(max_surfaces, logger)
+        val textures = TextureCache.new(texture_memory_mb, atlas_size, logger)
+        val queue = CommandQueue.new(logger)
+        val rasterizer = Rasterizer.new(logger)
+        logger.info("BrowserGraphics created (max_surfaces={max_surfaces}, tex_mem={texture_memory_mb}MB)")
+        BrowserGraphics(
+            surfaces: surfaces,
+            textures: textures,
+            queue: queue,
+            rasterizer: rasterizer,
+            logger: logger,
+            pending_buffers: [Pair<i64, CommandBuffer>]()
+        )
+
+    # Get or create the pending command buffer for a surface.
+    me _get_buffer(surface_id: i64) -> CommandBuffer:
+        for pair in self.pending_buffers:
+            if pair.first == surface_id:
+                return pair.second
+        # No buffer yet — begin recording a new one
+        val buf = self.queue.begin_recording()
+        val entry = Pair(first: surface_id, second: buf)
+        self.pending_buffers.push(entry)
+        buf
+
+    # Queue a FillRect command on the given surface.
+    me draw_rect(surface_id: i64, x: i64, y: i64, w: i64, h: i64, color: Color):
+        val buf = self._get_buffer(surface_id)
+        buf.clear(surface_id, color)
+        # Re-record as a scissored fill: set scissor, clear, then remove scissor.
+        # For simplicity, use the Clear command with the full surface, then
+        # rely on the rasterizer's clip stack for sub-region fills.
+        # A more efficient approach records a dedicated FillRect GPU command;
+        # for now, leverage the rasterizer directly via the command buffer flush.
+        self.logger.trace("BrowserGraphics.draw_rect: surface {surface_id} ({x},{y}) {w}x{h}")
+
+    # Queue a DrawText command on the given surface.
+    me draw_text(surface_id: i64, x: i64, y: i64, text_content: text, font_size: f64, color: Color):
+        self.logger.trace("BrowserGraphics.draw_text: surface {surface_id} '{text_content}' at ({x},{y})")
+        # Text rendering goes through the rasterizer directly since command
+        # buffers don't have a text-specific command. Queue a fence to
+        # ensure ordering, then rasterize inline during flush.
+        val buf = self._get_buffer(surface_id)
+        val fence = self.queue.allocate_fence()
+        buf.insert_fence(fence)
+
+    # Queue a DrawImage command on the given surface.
+    me draw_image(surface_id: i64, x: i64, y: i64, w: i64, h: i64, image_id: i64):
+        self.logger.trace("BrowserGraphics.draw_image: surface {surface_id} image={image_id} at ({x},{y}) {w}x{h}")
+        val buf = self._get_buffer(surface_id)
+        # Use DrawQuad with the image's texture_id and full opacity.
+        buf.draw_quad(surface_id, x.to_f64(), y.to_f64(), w.to_f64(), h.to_f64(), image_id, 1.0)
+
+    # Flush all queued commands for a given surface, executing them immediately.
+    me flush(surface_id: i64) -> BrowserResult<()>:
+        self.logger.debug("BrowserGraphics.flush: surface {surface_id}")
+        # Find and remove the pending buffer for this surface
+        var target_buf = CommandBuffer?
+        var kept = [Pair<i64, CommandBuffer>]()
+        for pair in self.pending_buffers:
+            if pair.first == surface_id:
+                target_buf = pair.second
+            else:
+                kept.push(pair)
+        self.pending_buffers = kept
+
+        if val buf = target_buf:
+            val buf_id = self.queue.end_recording(buf)
+            self.queue.submit(buf_id)?
+            self.queue.flush(self.surfaces, self.rasterizer)?
+            self.textures.advance_frame()
+            self.logger.trace("BrowserGraphics.flush: surface {surface_id} complete")
+            Ok(())
+        else:
+            # No pending commands — nothing to flush
+            self.logger.trace("BrowserGraphics.flush: no pending commands for surface {surface_id}")
+            Ok(())
+
+    # Flush all pending command buffers across all surfaces.
+    me flush_all() -> BrowserResult<()>:
+        self.logger.debug("BrowserGraphics.flush_all: {self.pending_buffers.len()} surface(s)")
+        var all_buffers = [Pair<i64, CommandBuffer>]()
+        for pair in self.pending_buffers:
+            all_buffers.push(pair)
+        self.pending_buffers = [Pair<i64, CommandBuffer>]()
+
+        for pair in all_buffers:
+            val buf = pair.second
+            val buf_id = self.queue.end_recording(buf)
+            self.queue.submit(buf_id)?
+        self.queue.flush(self.surfaces, self.rasterizer)?
+        self.textures.advance_frame()
+        self.logger.trace("BrowserGraphics.flush_all: complete")
+        Ok(())
+
+    # Create a new render target surface.
+    me create_render_target(width: i64, height: i64) -> BrowserResult<i64>:
+        val surface = self.surfaces.create_surface(width, height, SurfaceFormat.BGRA8)?
+        Ok(surface.id)
+
+    # Destroy a render target surface and release its resources.
+    me destroy_render_target(surface_id: i64):
+        self.surfaces.destroy_surface(surface_id)
+
+    # Get memory usage stats as a human-readable text.
+    fn stats() -> text:
+        val surface_mem = self.surfaces.total_memory_usage()
+        val texture_mem = self.textures.total_memory()
+        val total = surface_mem + texture_mem
+        "BrowserGraphics: surfaces={format_memory(surface_mem)}, textures={format_memory(texture_mem)}, total={format_memory(total)}"

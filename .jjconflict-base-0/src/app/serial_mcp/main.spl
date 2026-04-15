@@ -1,0 +1,67 @@
+@allow(unnamed_duplicate_typed_args)
+# Serial MCP Server
+#
+# Dedicated MCP server for SSH-over-serial and raw serial port access.
+# Follows the simple_lsp_mcp pattern (standalone, 5 tools).
+
+use app.simple_lsp_mcp.json_helpers.{read_stdin_message, write_stdout_message, LB, RB, extract_field, extract_id, jsonrpc_result, jsonrpc_error, has_method}
+use app.serial_mcp.protocol.{make_init_response, make_tools_list}
+use app.serial_mcp.tools.{handle_tool_call}
+use app.simple_lsp_mcp.startup_log.{mcp_startup_log}
+
+val SERVER_NAME = "serial-mcp"
+val SERVER_VERSION = "0.1.0"
+
+var TOOLS_CACHE = ""
+var INIT_CACHE = ""
+
+fn main():
+    mcp_startup_log(SERVER_NAME, SERVER_VERSION)
+    while true:
+        val msg = read_stdin_message()
+        if msg == "":
+            return
+
+        val method = detect_mcp_method(msg)
+        val id = extract_id(msg)
+        var response = ""
+
+        if method == "initialize":
+            response = make_init_response(id)
+        elif method == "initialized" or method == "notifications/initialized" or method == "notifications/cancelled":
+            response = ""
+        elif method == "shutdown":
+            response = jsonrpc_result(id, "null")
+        elif method == "ping":
+            response = jsonrpc_result(id, LB() + RB())
+        elif method == "tools/list":
+            response = make_tools_list(id)
+        elif method == "tools/call":
+            response = handle_tool_call(id, msg)
+        else:
+            if id != "" and id != "null":
+                response = jsonrpc_error(id, -32601, "Method not found: " + method)
+
+        if response != "":
+            write_stdout_message(response)
+
+main()
+
+fn detect_mcp_method(msg: text) -> text:
+    if has_method(msg, "initialize"):
+        return "initialize"
+    if has_method(msg, "initialized"):
+        return "initialized"
+    if has_method(msg, "notifications/initialized"):
+        return "notifications/initialized"
+    if has_method(msg, "notifications/cancelled"):
+        return "notifications/cancelled"
+    if has_method(msg, "shutdown"):
+        return "shutdown"
+    if has_method(msg, "ping"):
+        return "ping"
+    if has_method(msg, "tools/list"):
+        return "tools/list"
+    if has_method(msg, "tools/call"):
+        return "tools/call"
+    extract_field(msg, "method")

@@ -1,0 +1,46 @@
+"""Linker compilation context specification tests."""
+
+use compiler.backend.linker.linker_context.*
+use compiler.backend.compilation_context.*
+
+describe "Linker Context":
+    it "loads templates from the provided object map":
+        var templates: Dict<text, GenericTemplate> = {}
+        templates["Array"] = GenericTemplate(name: "Array", type_params: ["T"], ast_data: nil)
+
+        val ctx = linkercompilationcontext_from_objects(templates, nil, nil)
+        expect(ctx.has_template("Array")).to_equal(true)
+        expect(ctx.has_template("Vec")).to_equal(false)
+
+        val loaded = ctx.load_template("Array")
+        expect(loaded.is_ok()).to_equal(true)
+        expect(loaded.unwrap().name).to_equal("Array")
+
+    it "reports linker-specific modes":
+        val ctx = linkercompilationcontext_from_objects({}, nil, nil)
+        expect(ctx.contract_mode()).to_equal(ContractMode.All)
+        expect(ctx.coverage_enabled()).to_equal(false)
+        expect(ctx.instantiation_mode()).to_equal(InstantiationMode.LinkTime)
+        expect(ctx.recorded.len()).to_equal(0)
+
+    it "returns an error for missing templates":
+        val ctx = linkercompilationcontext_from_objects({}, nil, nil)
+        val result = ctx.load_template("Missing")
+        expect(result.is_err()).to_equal(true)
+        expect(result.unwrap_err()).to_contain("Template not in objects")
+
+    it "records instantiation metadata entries":
+        var ctx = linkercompilationcontext_from_objects({}, nil, nil)
+        ctx.record_instantiation(InstantiationEntry(
+            id: 0,
+            template_name: "Vec",
+            type_args: "i64",
+            mangled_name: "Vec$i64",
+            from_file: "main.spl",
+            from_loc: "1:1",
+            to_obj: "main.smf",
+            status: "completed"
+        ))
+
+        expect(ctx.recorded.len()).to_equal(1)
+        expect(ctx.recorded[0].mangled_name).to_equal("Vec$i64")

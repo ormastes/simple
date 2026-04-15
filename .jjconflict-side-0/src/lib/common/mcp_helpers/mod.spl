@@ -1,0 +1,469 @@
+#![allow(unnamed_duplicate_typed_args)]
+@allow(unnamed_duplicate_typed_args)
+# MCP Helpers - Standalone Module
+#
+# JSON building, string escaping, parsing utilities for MCP protocol.
+# Extracted to common/ to avoid triggering mcp/ package loading
+# (which causes hangs due to protocol.spl calling input() and
+# schema.spl running expensive module-level init).
+#
+# Import path: use std.common.mcp_helpers.{LB, RB, jp, js, ...}
+
+
+use std.common.text.{NL, escape_json, parse_i64}
+
+# --- Brace helpers (avoid f-string interpolation issues) ---
+fn LB() -> text:
+    (123 as char).to_string()
+
+fn RB() -> text:
+    (125 as char).to_string()
+
+fn Q() -> text:
+    "\""
+
+# --- Integer parsing ---
+fn parse_int(s: text) -> i64:
+    parse_i64(s)
+
+# --- Math helpers ---
+fn min_int(a: i64, b: i64) -> i64:
+    if a < b: a else: b
+
+# --- Option unwrap helpers ---
+fn unwrap_idx(opt_idx: i64) -> i64:
+    if opt_idx == -1: -1 else: opt_idx
+
+fn unwrap_str(s: text) -> text:
+    s
+
+# --- Argument processing ---
+fn get_clean_args(args: [text]) -> [text]:
+    var clean = []
+    var skip_next = false
+    for arg in args:
+        if skip_next:
+            skip_next = false
+        elif arg.starts_with("--jit"):
+            skip_next = true
+        elif arg.starts_with("--backend"):
+            skip_next = true
+        elif not arg.starts_with("--"):
+            clean.push(arg)
+    clean
+
+fn has_flag(args: [text], flag: text) -> bool:
+    for arg in args:
+        if arg == flag:
+            return true
+    false
+
+# --- JSON Pair Building ---
+fn jp(key: text, value: text) -> text:
+    Q() + key + Q() + ":" + value
+
+fn js(value: text) -> text:
+    Q() + escape_json(value) + Q()
+
+fn jo1(p1: text) -> text:
+    LB() + p1 + RB()
+
+fn jo2(p1: text, p2: text) -> text:
+    LB() + p1 + "," + p2 + RB()
+
+fn jo3(p1: text, p2: text, p3: text) -> text:
+    LB() + p1 + "," + p2 + "," + p3 + RB()
+
+fn jo4(p1: text, p2: text, p3: text, p4: text) -> text:
+    LB() + p1 + "," + p2 + "," + p3 + "," + p4 + RB()
+
+fn jo5(p1: text, p2: text, p3: text, p4: text, p5: text) -> text:
+    LB() + p1 + "," + p2 + "," + p3 + "," + p4 + "," + p5 + RB()
+
+# --- JSON String Extraction (simple parser) ---
+fn extract_json_string_v2(json: text, key: text) -> text:
+    val pattern = Q() + key + Q() + ":"
+    val idx = json.index_of(pattern) ?? -1
+    if idx == -1:
+        return ""
+
+    val after_colon = json.substring(idx + pattern.len())
+    var start = -1
+    var i = 0
+
+    # Skip whitespace
+    while i < after_colon.len():
+        val ch = after_colon[i]
+        if ch == '"':
+            start = i + 1
+            break
+        i = i + 1
+
+    if start == -1:
+        return ""
+
+    # Find closing quote
+    i = start
+    while i < after_colon.len():
+        val ch = after_colon[i]
+        if ch == '"':
+            return after_colon.substring(start, i)
+        i = i + 1
+
+    ""
+
+fn extract_json_string(json: text, key: text) -> text:
+    extract_json_string_v2(json, key)
+
+# Extract JSON value (numeric or string ID)
+fn extract_json_value(json: text, key: text) -> text:
+    val pattern = Q() + key + Q() + ":"
+    val idx = json.index_of(pattern) ?? -1
+    if idx == -1:
+        return "null"
+
+    val after_colon = json.substring(idx + pattern.len())
+    var start = -1
+    var i = 0
+
+    # Skip whitespace
+    while i < after_colon.len():
+        val ch = after_colon[i]
+        if ch != ' ' and ch != '\t' and ch != '\n':
+            start = i
+            break
+        i = i + 1
+
+    if start == -1:
+        return "null"
+
+    # Extract until comma or brace
+    i = start
+    var value_parts: [text] = []
+    while i < after_colon.len():
+        val ch = after_colon[i]
+        if ch == ',' or ch == '}' or ch == '\n':
+            break
+        value_parts.push(ch.to_string())
+        i = i + 1
+
+    value_parts.join("").trim()
+
+# Extract nested string: params.key
+fn extract_nested_string(json: text, parent: text, key: text) -> text:
+    val parent_pattern = Q() + parent + Q() + ":"
+    val idx = json.index_of(parent_pattern) ?? -1
+    if idx == -1:
+        return ""
+
+    val after_parent = json.substring(idx + parent_pattern.len())
+    extract_json_string_v2(after_parent, key)
+
+# Extract arguments dict from tools/call
+fn extract_arguments_dict(json: text) -> text:
+    val pattern = Q() + "arguments" + Q() + ":"
+    val idx = json.index_of(pattern) ?? -1
+    if idx == -1:
+        return "{}"
+
+    val after_colon = json.substring(idx + pattern.len())
+    var start = -1
+    var i = 0
+
+    # Skip whitespace, find opening brace
+    while i < after_colon.len():
+        val ch = after_colon[i]
+        if ch == '{':
+            start = i
+            break
+        i = i + 1
+
+    if start == -1:
+        return "{}"
+
+    # Find matching closing brace
+    var depth = 1
+    i = start + 1
+    while i < after_colon.len():
+        val ch = after_colon[i]
+        if ch == '{':
+            depth = depth + 1
+        elif ch == '}':
+            depth = depth - 1
+            if depth == 0:
+                return after_colon.substring(start, i + 1)
+        i = i + 1
+
+    "{}"
+
+# --- Argument Extraction ---
+fn extract_arg(body: text, key: text) -> text:
+    val search = Q() + key + Q() + ":"
+    val idx = body.index_of(search) ?? -1
+    if idx == -1:
+        return ""
+    val start = idx + search.len()
+    val rest = body.substring(start).trim()
+    if not rest.starts_with(Q()):
+        return ""
+    val after_quote = rest.substring(1)
+    val end_idx = after_quote.index_of(Q()) ?? -1
+    if end_idx == -1:
+        return ""
+    after_quote.substring(0, end_idx)
+
+# --- MCP Response Builders ---
+fn make_result_response(id: text, result: text) -> text:
+    jo3(jp("jsonrpc", js("2.0")), jp("id", id), jp("result", result))
+
+fn make_error_response(id: text, code: i64, message: text) -> text:
+    val error = jo2(jp("code", code.to_string()), jp("message", js(message)))
+    jo3(jp("jsonrpc", js("2.0")), jp("id", id), jp("error", error))
+
+fn make_tool_result(id: text, content_text: text) -> text:
+    val content_obj = jo2(jp("type", js("text")), jp("text", js(content_text)))
+    val result = jo2(jp("content", "[" + content_obj + "]"), jp("isError", "false"))
+    jo3(jp("jsonrpc", js("2.0")), jp("id", id), jp("result", result))
+
+fn make_notification(method: text, params: text) -> text:
+    jo3(jp("jsonrpc", js("2.0")), jp("method", js(method)), jp("params", params))
+
+fn make_notification_no_params(method: text) -> text:
+    jo2(jp("jsonrpc", js("2.0")), jp("method", js(method)))
+
+# --- List changed notifications ---
+fn make_tools_list_changed() -> text:
+    make_notification_no_params("notifications/tools/list_changed")
+
+fn make_resources_list_changed() -> text:
+    make_notification_no_params("notifications/resources/list_changed")
+
+fn make_prompts_list_changed() -> text:
+    make_notification_no_params("notifications/prompts/list_changed")
+
+# --- Log level conversion (syslog-style, MCP protocol) ---
+fn log_level_to_int(level: text) -> i64:
+    if level == "debug": 0
+    elif level == "info": 1
+    elif level == "notice": 2
+    elif level == "warning": 3
+    elif level == "error": 4
+    elif level == "critical": 5
+    elif level == "alert": 6
+    elif level == "emergency": 7
+    else: -1
+
+# --- Log notification builder ---
+fn make_log_notification(level: text, message: text, logger: text) -> text:
+    var params = jo2(jp("level", js(level)), jp("data", jo1(jp("message", js(message)))))
+    if logger != "":
+        params = jo3(jp("level", js(level)), jp("logger", js(logger)), jp("data", jo1(jp("message", js(message)))))
+    make_notification("notifications/message", params)
+
+# --- Progress notification builder ---
+fn make_progress_notification(progress_token: text, progress: i64, total: i64, message: text) -> text:
+    var params = jo3(
+        jp("progressToken", js(progress_token)),
+        jp("progress", progress.to_string()),
+        jp("total", total.to_string())
+    )
+    if message != "":
+        params = jo4(
+            jp("progressToken", js(progress_token)),
+            jp("progress", progress.to_string()),
+            jp("total", total.to_string()),
+            jp("message", js(message))
+        )
+    make_notification("notifications/progress", params)
+
+# --- Image content builder ---
+fn make_image_content(base64_data: text, mime_type: text) -> text:
+    jo3(jp("type", js("image")), jp("data", js(base64_data)), jp("mimeType", js(mime_type)))
+
+# --- Audio content builder ---
+fn make_audio_content(base64_data: text, mime_type: text) -> text:
+    jo3(jp("type", js("audio")), jp("data", js(base64_data)), jp("mimeType", js(mime_type)))
+
+# --- Resource link content builders ---
+fn make_resource_link_content(uri: text, name: text) -> text:
+    jo3(jp("type", js("resource_link")), jp("uri", js(uri)), jp("name", js(name)))
+
+fn make_resource_link_content_full(uri: text, name: text, title: text, description: text, mime_type: text, size: i64) -> text:
+    val parts = jp("type", js("resource_link")) + "," + jp("uri", js(uri)) + "," + jp("name", js(name)) + "," + jp("title", js(title)) + "," + jp("description", js(description)) + "," + jp("mimeType", js(mime_type))
+    LB() + parts + RB()
+
+# --- Embedded resource content builder ---
+fn make_embedded_resource_content(uri: text, content: text, mime_type: text) -> text:
+    val resource = jo3(jp("uri", js(uri)), jp("text", js(content)), jp("mimeType", js(mime_type)))
+    jo2(jp("type", js("resource")), jp("resource", resource))
+
+# --- Content annotations builder ---
+fn make_content_annotations(audience: [text], priority: text, last_modified: text) -> text:
+    var annotation_parts: [text] = []
+    if audience.len() > 0:
+        var aud_items: [text] = []
+        var i = 0
+        while i < audience.len():
+            aud_items.push(js(audience[i]))
+            i = i + 1
+        val arr = "[" + aud_items.join(",") + "]"
+        annotation_parts.push(jp("audience", arr))
+    if priority != "":
+        annotation_parts.push(jp("priority", priority))
+    if last_modified != "":
+        annotation_parts.push(jp("lastModified", js(last_modified)))
+    LB() + annotation_parts.join(",") + RB()
+
+# --- Tool result with structured content ---
+fn make_tool_result_with_structured(id: text, content: text, structured_content: text) -> text:
+    val result = jo3(jp("content", content), jp("structuredContent", structured_content), jp("isError", "false"))
+    jo3(jp("jsonrpc", js("2.0")), jp("id", id), jp("result", result))
+
+# --- Register tool (schema without outputSchema) ---
+fn register_tool(name: text, description: text, param_names: [text], param_descs: [text], required: [text], has_input: bool, has_streaming: bool, has_other: bool) -> text:
+    var prop_parts: [text] = []
+    var i = 0
+    while i < param_names.len():
+        prop_parts.push(jp(param_names[i], jo2(jp("type", js("string")), jp("description", js(param_descs[i])))))
+        i = i + 1
+    val props = prop_parts.join(",")
+    var req_parts: [text] = []
+    i = 0
+    while i < required.len():
+        req_parts.push(js(required[i]))
+        i = i + 1
+    val req_array = "[" + req_parts.join(",") + "]"
+    val input_schema = jo3(jp("type", js("object")), jp("properties", LB() + props + RB()), jp("required", req_array))
+    jo3(jp("name", js(name)), jp("description", js(description)), jp("inputSchema", input_schema))
+
+# --- Tool schema with output schema ---
+fn make_tool_schema_with_output(name: text, description: text, properties: text, required: text, output_schema: text, has_input_schema: bool, has_streaming: bool, has_other: bool) -> text:
+    val input_schema = jo3(
+        jp("type", js("object")),
+        jp("properties", properties),
+        jp("required", required)
+    )
+    jo4(
+        jp("name", js(name)),
+        jp("description", js(description)),
+        jp("inputSchema", input_schema),
+        jp("outputSchema", output_schema)
+    )
+
+# --- Tool schema builders ---
+fn make_tool_schema_multi(
+    name: text,
+    description: text,
+    required_params: [text],
+    param_types: [text],
+    param_descs: [text]
+) -> text:
+    var prop_parts: [text] = []
+    var i = 0
+    while i < required_params.len():
+        val param_name = required_params[i]
+        val param_type = param_types[i]
+        val param_desc = param_descs[i]
+        val prop = jo2(jp("type", js(param_type)), jp("description", js(param_desc)))
+        prop_parts.push(Q() + param_name + Q() + ":" + prop)
+        i = i + 1
+
+    var req_parts: [text] = []
+    i = 0
+    while i < required_params.len():
+        req_parts.push(js(required_params[i]))
+        i = i + 1
+    val req_array = "[" + req_parts.join(",") + "]"
+
+    val props_obj = LB() + prop_parts.join(",") + RB()
+    val input_schema = jo3(
+        jp("type", js("object")),
+        jp("properties", props_obj),
+        jp("required", req_array)
+    )
+
+    jo3(
+        jp("name", js(name)),
+        jp("description", js(description)),
+        jp("inputSchema", input_schema)
+    )
+
+# --- File content type detection ---
+fn detect_file_content_type(path: text) -> text:
+    val ext = _get_extension(path)
+    if ext == "png" or ext == "jpg" or ext == "jpeg" or ext == "gif" or ext == "webp" or ext == "svg" or ext == "bmp" or ext == "ico":
+        "image"
+    elif ext == "wav" or ext == "mp3" or ext == "ogg" or ext == "flac" or ext == "aac":
+        "audio"
+    elif ext == "mp4" or ext == "webm" or ext == "avi" or ext == "mkv":
+        "video"
+    elif ext == "pdf" or ext == "zip" or ext == "tar" or ext == "gz" or ext == "wasm":
+        "application"
+    else:
+        "text"
+
+fn detect_mime_type(path: text) -> text:
+    val ext = _get_extension(path)
+    if ext == "html" or ext == "htm": "text/html"
+    elif ext == "css": "text/css"
+    elif ext == "js": "text/javascript"
+    elif ext == "json": "application/json"
+    elif ext == "xml": "text/xml"
+    elif ext == "csv": "text/csv"
+    elif ext == "md": "text/markdown"
+    elif ext == "txt": "text/plain"
+    elif ext == "spl": "text/x-simple"
+    elif ext == "py": "text/x-python"
+    elif ext == "rs": "text/x-rust"
+    elif ext == "c" or ext == "h": "text/x-c"
+    elif ext == "cpp" or ext == "hpp": "text/x-c++"
+    elif ext == "java": "text/x-java"
+    elif ext == "go": "text/x-go"
+    elif ext == "rb": "text/x-ruby"
+    elif ext == "sh": "text/x-shellscript"
+    elif ext == "png": "image/png"
+    elif ext == "jpg" or ext == "jpeg": "image/jpeg"
+    elif ext == "gif": "image/gif"
+    elif ext == "svg": "image/svg+xml"
+    elif ext == "webp": "image/webp"
+    elif ext == "bmp": "image/bmp"
+    elif ext == "ico": "image/x-icon"
+    elif ext == "wav": "audio/wav"
+    elif ext == "mp3": "audio/mpeg"
+    elif ext == "ogg": "audio/ogg"
+    elif ext == "pdf": "application/pdf"
+    elif ext == "zip": "application/zip"
+    elif ext == "wasm": "application/wasm"
+    elif ext == "yaml" or ext == "yml": "text/yaml"
+    elif ext == "toml": "text/toml"
+    elif ext == "sdn": "text/x-sdn"
+    else: "text/plain"
+
+fn _get_extension(path: text) -> text:
+    val dot_idx = path.last_index_of(".") ?? -1
+    if dot_idx == -1:
+        return ""
+    path.substring(dot_idx + 1)
+
+# --- Resource updated notification ---
+fn make_resource_updated_notification(uri: text) -> text:
+    val params = jo1(jp("uri", js(uri)))
+    make_notification("notifications/resources/updated", params)
+
+# --- Sampling request builder ---
+fn make_sampling_request(id: text, messages: text, model_preferences: text, max_tokens: i64) -> text:
+    val params = jo3(
+        jp("messages", messages),
+        jp("modelPreferences", model_preferences),
+        jp("maxTokens", max_tokens.to_string())
+    )
+    jo4(jp("jsonrpc", js("2.0")), jp("id", id), jp("method", js("sampling/createMessage")), jp("params", params))
+
+# --- Elicitation request builder ---
+fn make_elicitation_request(id: text, message: text, requested_schema: text) -> text:
+    val params = jo2(jp("message", js(message)), jp("requestedSchema", requested_schema))
+    jo4(jp("jsonrpc", js("2.0")), jp("id", id), jp("method", js("elicitation/create")), jp("params", params))
+
+# --- Server request builder ---
+fn make_server_request(id: text, method: text, params: text) -> text:
+    jo4(jp("jsonrpc", js("2.0")), jp("id", id), jp("method", js(method)), jp("params", params))

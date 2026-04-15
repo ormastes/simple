@@ -1,0 +1,458 @@
+#![allow(unnamed_duplicate_typed_args)]
+# PPM Image Export for Browser Rendering Comparison
+#
+# Exports pixel buffers as PPM (Portable Pixmap) image files.
+# PPM is a simple uncompressed format readable by ImageMagick, GIMP,
+# and convertible to PNG for visual comparison with Chrome screenshots.
+#
+# Usage:
+#   val pixels = renderer.render_dom_to_pixels(dom)
+#   export_ppm("output.ppm", pixels.pixel_data, pixels.width, pixels.height)
+#
+# To compare with Chrome:
+#   1. Export Simple rendering as PPM
+#   2. Convert to PNG: `convert output.ppm output.png`
+#   3. Take Chrome screenshot: headless Chrome or Puppeteer
+#   4. Compare with pixelmatch or ImageMagick: `compare -metric RMSE simple.png chrome.png diff.png`
+
+# =========================================================================
+# PPM Export (P6 binary format)
+# =========================================================================
+
+fn export_ppm(path: text, pixels: [u32], width: i32, height: i32) -> bool:
+    """Export a pixel buffer as a PPM P6 (binary) file.
+    Pixel format: ARGB u32 (alpha in high byte).
+    PPM format: RGB 24-bit, no alpha.
+    """
+    # Build PPM header
+    var header = "P6\n{width} {height}\n255\n"
+
+    # Build pixel data as raw bytes (RGB, no alpha)
+    var data: [u8] = []
+    for pixel in pixels:
+        val r = ((pixel >> 16) & 0xFF).to_u8()
+        val g = ((pixel >> 8) & 0xFF).to_u8()
+        val b = (pixel & 0xFF).to_u8()
+        data = data + [r, g, b]
+
+    # Write file using runtime file I/O
+    rt_file_write_bytes(path, header, data)
+    true
+
+fn export_ppm_rgba(path: text, pixels: [u32], width: i32, height: i32) -> bool:
+    """Export as PPM from RGBA u32 pixels (alpha in low byte).
+    Used by the runtime renderer which uses RGBA format.
+    """
+    var header = "P6\n{width} {height}\n255\n"
+    var data: [u8] = []
+    for pixel in pixels:
+        val r = ((pixel >> 24) & 0xFF).to_u8()
+        val g = ((pixel >> 16) & 0xFF).to_u8()
+        val b = ((pixel >> 8) & 0xFF).to_u8()
+        data = data + [r, g, b]
+    rt_file_write_bytes(path, header, data)
+    true
+
+# =========================================================================
+# PPM Export (P3 text format — slower but portable)
+# =========================================================================
+
+fn export_ppm_text(path: text, pixels: [u32], width: i32, height: i32) -> text:
+    """Export a pixel buffer as PPM P3 (ASCII text) format.
+    Returns the PPM content as a string. Useful when binary I/O isn't available.
+    """
+    var ppm = "P3\n{width} {height}\n255\n"
+    var col = 0
+    for pixel in pixels:
+        val r = (pixel >> 16) & 0xFF
+        val g = (pixel >> 8) & 0xFF
+        val b = pixel & 0xFF
+        ppm = "{ppm}{r} {g} {b} "
+        col = col + 1
+        if col >= width:
+            ppm = "{ppm}\n"
+            col = 0
+    ppm
+
+# =========================================================================
+# Comparison Metrics
+# =========================================================================
+
+class ComparisonMetrics:
+    """Results of comparing two rendered images."""
+    total_pixels: i64
+    matching_pixels: i64
+    different_pixels: i64
+    max_channel_diff: i32
+    avg_channel_diff: f64
+    match_percentage: f64
+    rmse: f64  # Root Mean Square Error
+
+    fn summary() -> text:
+        "Match: {self.match_percentage}% ({self.matching_pixels}/{self.total_pixels}), RMSE: {self.rmse}, Max diff: {self.max_channel_diff}"
+
+fn compare_pixel_buffers(a: [u32], b: [u32], width: i32, height: i32) -> ComparisonMetrics:
+    """Compare two ARGB pixel buffers and compute similarity metrics."""
+    val total = width * height
+    var matching = 0
+    var different = 0
+    var max_diff = 0
+    var sum_sq_diff = 0.0
+    var sum_diff = 0.0
+
+    val len = if a.len() < b.len(): a.len() else: b.len()
+    var i = 0
+    while i < len:
+        val pa = a[i]
+        val pb = b[i]
+        if pa == pb:
+            matching = matching + 1
+        else:
+            different = different + 1
+            # Per-channel difference
+            val dr = abs_i32(((pa >> 16) & 0xFF) - ((pb >> 16) & 0xFF))
+            val dg = abs_i32(((pa >> 8) & 0xFF) - ((pb >> 8) & 0xFF))
+            val db = abs_i32((pa & 0xFF) - (pb & 0xFF))
+            val pixel_max = max_i32(dr, max_i32(dg, db))
+            if pixel_max > max_diff:
+                max_diff = pixel_max
+            val sq = (dr * dr + dg * dg + db * db).to_f64()
+            sum_sq_diff = sum_sq_diff + sq
+            sum_diff = sum_diff + (dr + dg + db).to_f64()
+        i = i + 1
+
+    val match_pct = if total > 0: (matching.to_f64() / total.to_f64()) * 100.0 else: 0.0
+    val avg_diff = if different > 0: sum_diff / (different.to_f64() * 3.0) else: 0.0
+    val rmse = if total > 0: sqrt_approx(sum_sq_diff / (total.to_f64() * 3.0)) else: 0.0
+
+    ComparisonMetrics(
+        total_pixels: total,
+        matching_pixels: matching,
+        different_pixels: different,
+        max_channel_diff: max_diff,
+        avg_channel_diff: avg_diff,
+        match_percentage: match_pct,
+        rmse: rmse
+    )
+
+# =========================================================================
+# Generate Comparison Report
+# =========================================================================
+
+fn generate_comparison_report(test_name: text, simple_pixels: [u32], chrome_pixels: [u32],
+                              width: i32, height: i32) -> text:
+    """Generate a detailed comparison report between Simple and Chrome rendering."""
+    val metrics = compare_pixel_buffers(simple_pixels, chrome_pixels, width, height)
+
+    var report = "# Rendering Comparison: {test_name}\n\n"
+    report = "{report}## Metrics\n"
+    report = "{report}- Total pixels: {metrics.total_pixels}\n"
+    report = "{report}- Matching: {metrics.matching_pixels} ({metrics.match_percentage}%)\n"
+    report = "{report}- Different: {metrics.different_pixels}\n"
+    report = "{report}- Max channel diff: {metrics.max_channel_diff}/255\n"
+    report = "{report}- Avg channel diff: {metrics.avg_channel_diff}\n"
+    report = "{report}- RMSE: {metrics.rmse}\n\n"
+
+    if metrics.match_percentage >= 99.0:
+        report = "{report}## Verdict: EXCELLENT — pixel-perfect match\n"
+    else if metrics.match_percentage >= 95.0:
+        report = "{report}## Verdict: GOOD — minor differences (anti-aliasing, subpixel)\n"
+    else if metrics.match_percentage >= 85.0:
+        report = "{report}## Verdict: FAIR — noticeable differences, layout correct\n"
+    else if metrics.match_percentage >= 70.0:
+        report = "{report}## Verdict: PARTIAL — significant differences, some layout issues\n"
+    else:
+        report = "{report}## Verdict: POOR — major rendering differences\n"
+
+    report
+
+# =========================================================================
+# Helpers
+# =========================================================================
+
+fn abs_i32(v: i32) -> i32:
+    if v < 0: 0 - v else: v
+
+fn max_i32(a: i32, b: i32) -> i32:
+    if a > b: a else: b
+
+fn sqrt_approx(v: f64) -> f64:
+    """Approximate square root using Newton's method."""
+    if v <= 0.0:
+        return 0.0
+    var guess = v / 2.0
+    var i = 0
+    while i < 10:
+        guess = (guess + v / guess) / 2.0
+        i = i + 1
+    guess
+
+extern fn rt_file_write_bytes(path: text, header: text, data: [u8])
+extern fn rt_file_read_text(path: text) -> text
+extern fn rt_file_read_bytes(path: text) -> [u8]?
+
+fn read_file_bytes(path: text) -> [u8]:
+    """Normalize runtime file-byte reads for both source and compiled execution."""
+    if val Some(bytes) = rt_file_read_bytes(path):
+        return bytes
+    []
+
+# =========================================================================
+# PPM Loader — read P6 binary PPM back to ARGB u32 array
+# =========================================================================
+
+fn load_ppm_to_pixels(path: text) -> [u32]:
+    """Read a PPM P6 binary file and return pixel data as ARGB u32 array.
+    Returns empty list on failure.
+    """
+    val raw = read_file_bytes(path)
+    if raw.len() < 3:
+        return []
+    if raw[0] == 80 and raw[1] == 51:
+        return load_ppm_text_to_pixels(path)
+
+    # Parse header: "P6\nWIDTH HEIGHT\nMAXVAL\n"
+    # Find end of header by scanning for 3 newlines
+    var newline_count = 0
+    var header_end = 0
+    var i = 0
+    while i < raw.len() and newline_count < 3:
+        if raw[i] == 10:  # '\n'
+            newline_count = newline_count + 1
+        i = i + 1
+        header_end = i
+
+    # Parse width and height from header text
+    val header_text = rt_file_read_text(path) ?? ""
+    val dims = parse_ppm_header_dimensions(header_text)
+    val width = dims.w
+    val height = dims.h
+    if width <= 0 or height <= 0:
+        return []
+
+    # Read RGB triplets from binary data after header
+    var pixels: [u32] = []
+    val expected = width * height
+    var pi = header_end
+    var count = 0
+    while count < expected and pi + 2 < raw.len():
+        val r = raw[pi]
+        val g = raw[pi + 1]
+        val b = raw[pi + 2]
+        # ARGB: alpha=255
+        val argb = 0xFF000000 | (r << 16) | (g << 8) | b
+        pixels = pixels + [argb]
+        pi = pi + 3
+        count = count + 1
+
+    pixels
+
+fn load_ppm_text_to_pixels(path: text) -> [u32]:
+    """Read a plain-text PPM P3 image and return ARGB pixels."""
+    val content = rt_file_read_text(path) ?? ""
+    if content.len() < 2 or not content.starts_with("P3"):
+        return []
+
+    val tokens = split_ppm_tokens(content)
+    if tokens.len() < 4:
+        return []
+    if tokens[0] != "P3":
+        return []
+
+    val width = parse_int_simple(tokens[1])
+    val height = parse_int_simple(tokens[2])
+    val max_value = parse_int_simple(tokens[3])
+    if width <= 0 or height <= 0 or max_value <= 0:
+        return []
+
+    val expected_values = width * height * 3
+    if tokens.len() - 4 < expected_values:
+        return []
+
+    var pixels: [u32] = []
+    var idx = 4
+    while idx + 2 < tokens.len() and pixels.len() < width * height:
+        val r = parse_int_simple(tokens[idx]) * 255 / max_value
+        val g = parse_int_simple(tokens[idx + 1]) * 255 / max_value
+        val b = parse_int_simple(tokens[idx + 2]) * 255 / max_value
+        pixels = pixels + [0xFF000000 | (r << 16) | (g << 8) | b]
+        idx = idx + 3
+
+    pixels
+
+fn load_pixels_from_image(path: text) -> [u32]:
+    """Load pixels from a supported compatibility image format."""
+    val lower = path.to_lower()
+    if lower.ends_with(".bmp"):
+        return load_bmp_to_pixels(path)
+    load_ppm_to_pixels(path)
+
+fn load_bmp_to_pixels(path: text) -> [u32]:
+    """Read a BMP file written by Chrome screenshot conversion tools.
+    Supports uncompressed 24-bit and 32-bit BMP variants.
+    """
+    val raw = read_file_bytes(path)
+    if raw.len() < 54:
+        return []
+    if raw[0] != 66 or raw[1] != 77:
+        return []
+
+    val pixel_offset = read_le_u32(raw, 10)
+    val header_size = read_le_u32(raw, 14)
+    val width = read_le_i32(raw, 18)
+    val height_signed = read_le_i32(raw, 22)
+    val planes = read_le_u16(raw, 26)
+    val bits_per_pixel = read_le_u16(raw, 28)
+    val compression = read_le_u32(raw, 30)
+
+    if header_size < 40 or width <= 0 or height_signed == 0:
+        return []
+    if planes != 1:
+        return []
+    if bits_per_pixel != 24 and bits_per_pixel != 32:
+        return []
+    if compression != 0:
+        return []
+
+    val top_down = height_signed < 0
+    val height = if top_down: 0 - height_signed else: height_signed
+    if height <= 0 or pixel_offset < 54 or pixel_offset >= raw.len():
+        return []
+
+    val bytes_per_pixel = bits_per_pixel / 8
+    val row_stride = (((bits_per_pixel * width) + 31) / 32) * 4
+    if row_stride <= 0:
+        return []
+
+    var pixels: [u32] = []
+    var row = 0
+    while row < height:
+        val source_row = if top_down: row else: (height - 1 - row)
+        val row_start = pixel_offset + source_row * row_stride
+        if row_start < 0 or row_start >= raw.len():
+            return []
+
+        var col = 0
+        while col < width:
+            val px = row_start + col * bytes_per_pixel
+            if px + bytes_per_pixel - 1 >= raw.len():
+                return []
+            val b = raw[px]
+            val g = raw[px + 1]
+            val r = raw[px + 2]
+            val a = if bytes_per_pixel == 4: raw[px + 3] else: 255
+            pixels = pixels + [(a << 24) | (r << 16) | (g << 8) | b]
+            col = col + 1
+        row = row + 1
+
+    pixels
+
+class PpmDimensions:
+    w: i32
+    h: i32
+
+fn parse_ppm_header_dimensions(header: text) -> PpmDimensions:
+    """Parse width and height from PPM P6 header text."""
+    val tokens = split_ppm_tokens(header)
+    if tokens.len() < 3:
+        return PpmDimensions(w: 0, h: 0)
+    val w = parse_int_simple(tokens[1])
+    val h = parse_int_simple(tokens[2])
+    PpmDimensions(w: w, h: h)
+
+fn parse_int_simple(s: text) -> i32:
+    """Parse a simple non-negative integer from text. Returns 0 on failure."""
+    s.parse_i32() ?? 0
+
+fn split_ppm_tokens(content: text) -> [text]:
+    var tokens: [text] = []
+    var current = ""
+    var in_comment = false
+    for ch in content:
+        if in_comment:
+            if ch == "\n":
+                in_comment = false
+            continue
+
+        if ch == "#":
+            if current.len() > 0:
+                tokens = tokens + [current]
+                current = ""
+            in_comment = true
+            continue
+
+        if ch == " " or ch == "\n" or ch == "\t" or ch == "\r":
+            if current.len() > 0:
+                tokens = tokens + [current]
+                current = ""
+        else:
+            current = "{current}{ch}"
+
+    if current.len() > 0:
+        tokens = tokens + [current]
+    tokens
+
+fn read_le_u16(raw: [u8], offset: i32) -> u32:
+    if offset < 0 or offset + 1 >= raw.len():
+        return 0
+    raw[offset] | (raw[offset + 1] << 8)
+
+fn read_le_u32(raw: [u8], offset: i32) -> u32:
+    if offset < 0 or offset + 3 >= raw.len():
+        return 0
+    raw[offset] |
+    (raw[offset + 1] << 8) |
+    (raw[offset + 2] << 16) |
+    (raw[offset + 3] << 24)
+
+fn read_le_i32(raw: [u8], offset: i32) -> i32:
+    val value = read_le_u32(raw, offset)
+    if value >= 2147483648:
+        value - 4294967296
+    else:
+        value
+
+# =========================================================================
+# Diff Image Generator
+# =========================================================================
+
+fn generate_diff_image(a: [u32], b: [u32], w: i32, h: i32) -> [u32]:
+    """Generate a visual diff image comparing two ARGB pixel buffers.
+    - Green pixels: match (within tolerance of 2 per channel)
+    - Red pixels: mismatch, brightness proportional to difference magnitude
+    - Dark pixels: one buffer shorter than expected
+    """
+    val total = w * h
+    var diff: [u32] = []
+    var i = 0
+
+    while i < total:
+        if i >= a.len() or i >= b.len():
+            # Out of bounds — dark gray
+            diff = diff + [0xFF333333]
+        else:
+            val pa = a[i]
+            val pb = b[i]
+            if pa == pb:
+                # Exact match — green
+                diff = diff + [0xFF00AA00]
+            else:
+                # Compute per-channel difference
+                val dr = abs_i32(((pa >> 16) & 0xFF) - ((pb >> 16) & 0xFF))
+                val dg = abs_i32(((pa >> 8) & 0xFF) - ((pb >> 8) & 0xFF))
+                val db = abs_i32((pa & 0xFF) - (pb & 0xFF))
+                val max_diff = max_i32(dr, max_i32(dg, db))
+
+                if max_diff <= 2:
+                    # Within tolerance — dark green (near match)
+                    diff = diff + [0xFF006600]
+                else:
+                    # Mismatch — red with brightness scaled by magnitude
+                    # Scale: max_diff 3..255 → brightness 80..255
+                    var brightness = 80 + (max_diff * 175 / 255)
+                    if brightness > 255:
+                        brightness = 255
+                    diff = diff + [0xFF000000 | (brightness << 16)]
+        i = i + 1
+
+    diff

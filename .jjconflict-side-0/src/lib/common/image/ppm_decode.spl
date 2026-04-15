@@ -1,0 +1,153 @@
+# PPM Decode — PPM P6 binary to ARGB [u32] decoder
+#
+# Decodes PPM P6 (binary) format to raw ARGB pixel buffer for comparison.
+# PPM P6 format: "P6\n{width} {height}\n{maxval}\n" + raw RGB bytes.
+# Comments (lines starting with '#') are allowed in the header.
+#
+# PPM format reference: http://netpbm.sourceforge.net/doc/ppm.html
+
+# ============================================================================
+# Data Structures
+# ============================================================================
+
+struct PpmImage:
+    """Decoded PPM image as ARGB pixel buffer."""
+    pixels: [u32]
+    width: i32
+    height: i32
+
+struct ParseIntResult:
+    """Result of parsing an integer: value and new position."""
+    first: i32
+    second: i32
+
+# ============================================================================
+# Public API
+# ============================================================================
+
+fn decode_ppm_to_argb(data: [u8]) -> Result<PpmImage, text>:
+    """Decode PPM P6 bytes to ARGB [u32] pixel buffer.
+
+    Args:
+        data: Raw PPM file bytes
+
+    Returns:
+        Ok(PpmImage) on success, Err(message) on failure
+    """
+    if data.len() < 3:
+        return Err("PPM data too short")
+
+    # Validate P6 magic: 'P' = 80, '6' = 54
+    if data[0] != 80 or data[1] != 54:
+        return Err("Invalid PPM magic: expected P6")
+
+    # Parse header: skip past magic, read width, height, maxval
+    var pos: i32 = 2
+
+    # Skip whitespace after magic
+    pos = skip_whitespace_and_comments(data, pos)
+
+    # Parse width
+    val width_result = parse_int(data, pos)
+    val img_width = width_result.first
+    pos = width_result.second
+
+    if img_width <= 0:
+        return Err("Invalid PPM width: {img_width}")
+
+    # Skip whitespace between width and height
+    pos = skip_whitespace_and_comments(data, pos)
+
+    # Parse height
+    val height_result = parse_int(data, pos)
+    val img_height = height_result.first
+    pos = height_result.second
+
+    if img_height <= 0:
+        return Err("Invalid PPM height: {img_height}")
+
+    # Skip whitespace before maxval
+    pos = skip_whitespace_and_comments(data, pos)
+
+    # Parse maxval
+    val maxval_result = parse_int(data, pos)
+    val maxval = maxval_result.first
+    pos = maxval_result.second
+
+    if maxval <= 0 or maxval > 255:
+        return Err("Unsupported PPM maxval: {maxval}")
+
+    # Skip exactly one whitespace character after maxval (per PPM spec)
+    if pos < data.len().to_i32():
+        pos = pos + 1
+
+    # Validate pixel data size
+    val expected_bytes = img_width * img_height * 3
+    val remaining = data.len().to_i32() - pos
+
+    if remaining < expected_bytes:
+        return Err("PPM pixel data truncated: expected {expected_bytes} bytes, got {remaining}")
+
+    # Convert RGB bytes to ARGB u32
+    var pixels: [u32] = []
+    val total_pixels = img_width * img_height
+    var i: i32 = 0
+
+    while i < total_pixels:
+        val byte_offset = pos + i * 3
+        val r = data[byte_offset].to_u32()
+        val g = data[byte_offset + 1].to_u32()
+        val b = data[byte_offset + 2].to_u32()
+        val argb: u32 = (0xFF << 24) | (r << 16) | (g << 8) | b
+        pixels = pixels + [argb]
+        i = i + 1
+
+    Ok(PpmImage(pixels: pixels, width: img_width, height: img_height))
+
+# ============================================================================
+# Helper Functions
+# ============================================================================
+
+fn skip_whitespace_and_comments(data: [u8], start: i32) -> i32:
+    """Skip whitespace and comment lines (starting with '#') in PPM header."""
+    var pos = start
+
+    while pos < data.len().to_i32():
+        val ch = data[pos]
+        if ch == 35:
+            # '#' = 35 — skip comment line until newline
+            while pos < data.len().to_i32() and data[pos] != 10:
+                pos = pos + 1
+            if pos < data.len().to_i32():
+                pos = pos + 1  # skip the newline
+        else if ch == 10 or ch == 13 or ch == 32 or ch == 9:
+            # \n=10, \r=13, space=32, tab=9
+            pos = pos + 1
+        else:
+            break
+
+    pos
+
+fn parse_int(data: [u8], start: i32) -> ParseIntResult:
+    """Parse a non-negative integer from ASCII bytes.
+
+    Returns (value, new_position).
+    """
+    var pos = start
+    var value: i32 = 0
+    var found = false
+
+    while pos < data.len().to_i32():
+        val ch = data[pos]
+        # '0'=48, '9'=57
+        if ch >= 48 and ch <= 57:
+            value = value * 10 + (ch.to_i32() - 48)
+            found = true
+            pos = pos + 1
+        else:
+            break
+
+    if not found:
+        return ParseIntResult(first: 0, second: pos)
+
+    ParseIntResult(first: value, second: pos)

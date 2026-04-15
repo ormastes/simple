@@ -1,0 +1,74 @@
+"""
+# RV64 Privilege Mode Transitions
+
+Manages privilege level transitions for M/S/U modes.
+"""
+
+use hardware.rv64gc.pkg.rv64_types_pkg.{PrivilegeMode, priv_to_i64, i64_to_priv}
+use hardware.rv64gc.pkg.rv64_csr_addrs.*
+
+class PrivilegeState:
+    current_mode: PrivilegeMode
+
+    static fn create() -> PrivilegeState:
+        """Start in Machine mode (reset state)."""
+        PrivilegeState(current_mode: PrivilegeMode.Machine)
+
+    fn get_mode() -> PrivilegeMode:
+        self.current_mode
+
+    fn is_machine() -> bool:
+        match self.current_mode:
+            PrivilegeMode.Machine: true
+            _: false
+
+    fn is_supervisor() -> bool:
+        match self.current_mode:
+            PrivilegeMode.Supervisor: true
+            _: false
+
+    fn is_user() -> bool:
+        match self.current_mode:
+            PrivilegeMode.User: true
+            _: false
+
+    me set_mode(mode: PrivilegeMode):
+        self.current_mode = mode
+
+fn can_access_supervisor(mode: PrivilegeMode) -> bool:
+    """Check if current mode can access S-mode resources."""
+    val level = priv_to_i64(mode)
+    level >= 1
+
+fn can_access_machine(mode: PrivilegeMode) -> bool:
+    """Check if current mode can access M-mode resources."""
+    val level = priv_to_i64(mode)
+    level >= 3
+
+fn determine_trap_target(cause: i64, medeleg: i64, mideleg: i64,
+                          is_interrupt: bool, current_mode: PrivilegeMode) -> PrivilegeMode:
+    """Determine which privilege mode handles a trap based on delegation registers."""
+    val deleg_reg = if is_interrupt: mideleg else: medeleg
+    val cause_bit = cause and 0x3F  # Strip interrupt bit
+
+    # Cannot delegate to a mode higher than current
+    val cur_level = priv_to_i64(current_mode)
+
+    if cur_level == 3:
+        # From M-mode: check if delegated to S-mode
+        if (deleg_reg and (1 << cause_bit)) != 0:
+            PrivilegeMode.Supervisor
+        else:
+            PrivilegeMode.Machine
+    elif cur_level == 1:
+        # From S-mode: if delegated, stays in S; otherwise goes to M
+        if (deleg_reg and (1 << cause_bit)) != 0:
+            PrivilegeMode.Supervisor
+        else:
+            PrivilegeMode.Machine
+    else:
+        # From U-mode: check delegation
+        if (deleg_reg and (1 << cause_bit)) != 0:
+            PrivilegeMode.Supervisor
+        else:
+            PrivilegeMode.Machine

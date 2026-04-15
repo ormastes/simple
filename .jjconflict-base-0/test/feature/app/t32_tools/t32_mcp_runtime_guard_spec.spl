@@ -1,0 +1,159 @@
+"""
+# T32 MCP Runtime Guard Tests
+
+**Feature IDs:** #T32-MCP-RUNTIME-001
+**Category:** Tooling
+**Difficulty:** 2/5
+**Status:** Implemented
+**Requirements:** N/A
+**Plan:** N/A
+
+## Overview
+
+Guards against T32 MCP server runtime failures:
+- Bug 11: `rt_time_ms()` missing in native runtime — replaced with
+  `rt_time_now_unix_micros() / 1000` wrapper
+- Bug 12: Process hangs silently — debug mode default flipped to ON
+- Bug 13: `rt_file_append_text("/proc/self/fd/1")` fails for stdout —
+  must use `stdout_write()` instead
+- Guard: All extern fns used by T32 MCP modules must exist in native runtime
+
+## Source
+
+- `examples/10_tooling/trace32_tools/t32_mcp/job_manager.spl`
+- `examples/10_tooling/trace32_tools/t32_mcp/snapshot_store.spl`
+- `examples/10_tooling/trace32_tools/t32_mcp/frontend_cold.spl`
+- `examples/10_tooling/trace32_tools/t32_mcp/protocol.spl`
+"""
+
+# Import the wrapper function from job_manager (tests the fix)
+use app.mcp_t32.job_manager.{rt_time_ms}
+use app.mcp_t32.frontend_cold.{t32_debug_enabled, write_stdout_message}
+
+# Extern fns that T32 MCP modules depend on — declare here to verify they
+# resolve at load time.  If any is missing from native_all the spec fails
+# to load, which is the point.
+extern fn rt_time_now_unix_micros() -> i64
+extern fn stdout_write(data: text) -> i64
+extern fn rt_stdout_flush() -> i64
+extern fn stderr_write(data: text) -> i64
+extern fn stderr_flush() -> i64
+extern fn rt_env_get(name: text) -> text
+extern fn rt_env_cwd() -> text
+extern fn rt_file_write_text(path: text, content: text) -> bool
+extern fn rt_file_append_text(path: text, content: text) -> bool
+extern fn rt_file_exists(path: text) -> bool
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+extern fn stdin_read_char() -> text
+
+# ============================================================================
+# Bug 11: rt_time_ms — wrapper must work (was missing extern in native_all)
+# ============================================================================
+
+describe "Bug 11 — rt_time_ms native availability":
+
+    context "rt_time_now_unix_micros (actual runtime function)":
+        it "returns a positive value":
+            val micros = rt_time_now_unix_micros()
+            expect(micros > 0).to_equal(true)
+
+        it "returns a plausible epoch timestamp":
+            # After 2024-01-01 in microseconds = 1_704_067_200_000_000
+            val micros = rt_time_now_unix_micros()
+            expect(micros > 1704067200000000).to_equal(true)
+
+    context "rt_time_ms (wrapper in job_manager)":
+        it "returns a positive value":
+            val ms = rt_time_ms()
+            expect(ms > 0).to_equal(true)
+
+        it "is roughly micros / 1000":
+            val micros = rt_time_now_unix_micros()
+            val ms = rt_time_ms()
+            # Should be within 1 second of each other
+            val diff = ms - (micros / 1000)
+            expect(diff > -1000).to_equal(true)
+            expect(diff < 1000).to_equal(true)
+
+# ============================================================================
+# Bug 12: Debug mode default — must be ON so hangs are visible
+# ============================================================================
+
+describe "Bug 12 — debug mode defaults to ON":
+
+    context "t32_debug_enabled (frontend_cold)":
+        it "returns true when T32_MCP_DEBUG_LOG is unset":
+            # When the env var is not set, debug should default to ON
+            # so that silent hangs produce stderr output
+            val enabled = t32_debug_enabled()
+            expect(enabled).to_equal(true)
+
+# ============================================================================
+# Bug 13: stdout_write — must NOT use rt_file_append_text for stdout
+# ============================================================================
+
+describe "Bug 13 — stdout_write extern exists":
+
+    context "stdout_write extern fn":
+        it "is callable and returns non-negative":
+            # Writing an empty string should succeed (return >= 0)
+            val result = stdout_write("")
+            expect(result >= 0).to_equal(true)
+
+    context "rt_stdout_flush extern fn":
+        it "is callable":
+            val result = rt_stdout_flush()
+            # flush returns 0 on success
+            expect(result >= 0).to_equal(true)
+
+# ============================================================================
+# Guard: All T32 MCP extern fns must exist in native runtime
+# ============================================================================
+
+describe "T32 MCP extern fn guard — prevents missing-function bugs":
+
+    context "I/O functions":
+        it "stderr_write exists":
+            val r = stderr_write("")
+            expect(r >= 0).to_equal(true)
+
+        it "stderr_flush exists":
+            val r = stderr_flush()
+            expect(r >= 0).to_equal(true)
+
+    context "environment functions":
+        it "rt_env_get exists":
+            val home = rt_env_get("HOME") ?? ""
+            # Should return something (or empty), not crash
+            expect(home.len() >= 0).to_equal(true)
+
+        it "rt_env_cwd exists":
+            val cwd = rt_env_cwd()
+            expect(cwd.len() > 0).to_equal(true)
+
+    context "file I/O functions":
+        it "rt_file_exists exists":
+            # /tmp always exists on Linux
+            val exists = rt_file_exists("/tmp")
+            expect(exists).to_equal(true)
+
+        it "rt_file_write_text exists":
+            val path = "/tmp/t32_mcp_test_guard_write.txt"
+            val ok = rt_file_write_text(path, "guard_test")
+            expect(ok).to_equal(true)
+
+        it "rt_file_append_text exists":
+            val path = "/tmp/t32_mcp_test_guard_write.txt"
+            val ok = rt_file_append_text(path, "\nappend_test")
+            expect(ok).to_equal(true)
+
+    context "process functions":
+        it "rt_process_run exists":
+            val (stdout, stderr, code) = rt_process_run("/bin/echo", ["guard_test"])
+            expect(code).to_equal(0)
+            expect(stdout).to_contain("guard_test")
+
+    context "time functions":
+        it "rt_time_now_unix_micros exists and returns epoch":
+            val micros = rt_time_now_unix_micros()
+            expect(micros > 1704067200000000).to_equal(true)

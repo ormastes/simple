@@ -1,0 +1,295 @@
+#!/usr/bin/env bash
+# bug — Unified bug tracker CLI (GitHub Issues + Jira)
+# Mirrors the gh/jira CLI interface pattern.
+#
+# CORE COMMANDS
+#   list       List bugs from GitHub Issues + Jira
+#   view <id>  View bug details
+#   search     Search bugs
+#   triage     Auto-classify bugs by severity/component
+#   fix <id>   Show bug context for fix analysis
+#
+# ADDITIONAL COMMANDS
+#   config     Manage configuration
+#   version    Show version
+#   help       Show help
+
+set -euo pipefail
+
+VERSION="0.1.0"
+
+# Resolve script directory (follow symlinks)
+SELF="$0"
+while [ -L "$SELF" ]; do
+  DIR="$(cd "$(dirname "$SELF")" && pwd)"
+  SELF="$(readlink "$SELF")"
+  case "$SELF" in /*) ;; *) SELF="${DIR}/${SELF}" ;; esac
+done
+BIN_DIR="$(cd "$(dirname "$SELF")" && pwd)"
+LIB_DIR="$(cd "${BIN_DIR}/../lib" && pwd)"
+
+# Source library modules
+. "${LIB_DIR}/config.shs"
+. "${LIB_DIR}/github.shs"
+. "${LIB_DIR}/jira.shs"
+. "${LIB_DIR}/aggregate.shs"
+. "${LIB_DIR}/triage.shs"
+. "${LIB_DIR}/format.shs"
+
+check_deps() {
+  for cmd in jq; do
+    if ! command -v "$cmd" >/dev/null 2>&1; then
+      echo "error: '${cmd}' is required but not installed." >&2
+      echo "  Install: brew install ${cmd}" >&2
+      exit 1
+    fi
+  done
+  # gh is optional but recommended
+  if ! command -v gh >/dev/null 2>&1; then
+    echo "warning: 'gh' not found — GitHub bugs will be unavailable" >&2
+  fi
+}
+
+cmd_list() {
+  bug_config_init
+  local output_mode="table" source_filter="all"
+  local -a passthrough_args=()
+
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --json)    output_mode="json"; shift ;;
+      --source)  source_filter="$2"; shift 2 ;;
+      *)         passthrough_args+=("$1"); shift ;;
+    esac
+  done
+
+  local bugs
+  case "$source_filter" in
+    gh|github)
+      bugs=$(bug_github_list "${passthrough_args[@]}" 2>/dev/null) || bugs="[]"
+      ;;
+    jira)
+      bugs=$(bug_jira_list "${passthrough_args[@]}" 2>/dev/null) || bugs="[]"
+      ;;
+    *)
+      bugs=$(bug_aggregate_list "${passthrough_args[@]}")
+      ;;
+  esac
+
+  case "$output_mode" in
+    json) bug_format_json "$bugs" ;;
+    *)    bug_format_table "$bugs" ;;
+  esac
+}
+
+cmd_view() {
+  bug_config_init
+  local id="${1:-}"
+  shift 2>/dev/null || true
+  local output_mode="detail"
+
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --json) output_mode="json"; shift ;;
+      *)      shift ;;
+    esac
+  done
+
+  if [ -z "$id" ]; then
+    echo "error: bug ID required (e.g., gh#42, jira:PROJ-123, or plain number)" >&2
+    return 1
+  fi
+
+  local bug
+  bug=$(bug_aggregate_view "$id")
+  if [ $? -ne 0 ] || [ -z "$bug" ]; then
+    echo "error: bug '${id}' not found" >&2
+    return 1
+  fi
+
+  case "$output_mode" in
+    json) bug_format_json "$bug" ;;
+    *)    bug_format_detail "$bug" ;;
+  esac
+}
+
+cmd_search() {
+  bug_config_init
+  local query="${1:-}"
+  if [ -z "$query" ]; then
+    echo "error: search query required" >&2
+    echo "Usage: bug search <query>" >&2
+    return 1
+  fi
+  shift
+  local output_mode="table"
+  [ "${1:-}" = "--json" ] && output_mode="json"
+
+  local bugs
+  bugs=$(bug_aggregate_search "$query")
+
+  case "$output_mode" in
+    json) bug_format_json "$bugs" ;;
+    *)    bug_format_table "$bugs" ;;
+  esac
+}
+
+cmd_triage() {
+  bug_config_init
+  local limit=25 output_mode="table"
+
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --limit) limit="$2"; shift 2 ;;
+      --json)  output_mode="json"; shift ;;
+      *)       shift ;;
+    esac
+  done
+
+  echo "Fetching open bugs..." >&2
+  local bugs
+  bugs=$(bug_aggregate_list --status open --limit "$limit")
+
+  local count
+  count=$(echo "$bugs" | jq 'length')
+  echo "Triaging ${count} bugs..." >&2
+
+  local triaged
+  triaged=$(bug_triage_all "$bugs")
+
+  echo "" >&2
+
+  case "$output_mode" in
+    json) bug_format_json "$triaged" ;;
+    *)    bug_format_table "$triaged" ;;
+  esac
+}
+
+cmd_fix() {
+  bug_config_init
+  local id="${1:-}"
+  if [ -z "$id" ]; then
+    echo "error: bug ID required" >&2
+    echo "Usage: bug fix <id>" >&2
+    return 1
+  fi
+
+  local bug
+  bug=$(bug_aggregate_view "$id")
+  if [ $? -ne 0 ] || [ -z "$bug" ]; then
+    echo "error: bug '${id}' not found" >&2
+    return 1
+  fi
+
+  # Triage the bug
+  bug=$(bug_triage_item "$bug")
+
+  bug_format_fix_context "$bug"
+}
+
+cmd_config() {
+  local subcmd="${1:-}"
+  shift 2>/dev/null || true
+
+  case "$subcmd" in
+    set)
+      if [ $# -lt 2 ]; then
+        echo "Usage: bug config set <key> <value>" >&2; return 1
+      fi
+      bug_config_set "$1" "$2"
+      echo "✓ Set ${1}"
+      ;;
+    get)
+      if [ $# -lt 1 ]; then
+        echo "Usage: bug config get <key>" >&2; return 1
+      fi
+      bug_config_get "$1"
+      ;;
+    list) bug_config_list ;;
+    init) bug_config_init; echo "✓ Config initialized at ${BUG_CONFIG_FILE}" ;;
+    *)
+      echo "Manage bug-cli configuration"
+      echo ""
+      echo "USAGE"
+      echo "  bug config <command>"
+      echo ""
+      echo "COMMANDS"
+      echo "  set <key> <value>   Set a config value"
+      echo "  get <key>           Get a config value"
+      echo "  list                List all config"
+      echo "  init                Initialize default config"
+      ;;
+  esac
+}
+
+cmd_version() {
+  echo "bug-cli version ${VERSION} (Simple Language Project)"
+  echo "  Config:  ${BUG_CONFIG_FILE}"
+  echo "  GitHub:  $(bug_github_available && echo 'available' || echo 'not available')"
+  echo "  Jira:    $(bug_jira_available && echo 'available' || echo 'not available')"
+}
+
+cmd_help() {
+  echo "bug — Unified bug tracker CLI (GitHub Issues + Jira)"
+  echo ""
+  echo "USAGE"
+  echo "  bug <command> [flags]"
+  echo ""
+  echo "CORE COMMANDS"
+  echo "  list       List bugs from all sources"
+  echo "  view <id>  View bug details"
+  echo "  search     Search bugs across sources"
+  echo "  triage     Auto-classify bugs by severity/component"
+  echo "  fix <id>   Show bug context for fix analysis"
+  echo ""
+  echo "ADDITIONAL COMMANDS"
+  echo "  config     Manage configuration"
+  echo "  version    Show version"
+  echo "  help       Show this help"
+  echo ""
+  echo "BUG ID FORMATS"
+  echo "  gh#42       GitHub Issue #42"
+  echo "  jira:KEY-1  Jira issue KEY-1"
+  echo "  42          Auto-detect (numeric → GitHub)"
+  echo "  KEY-1       Auto-detect (has dash → Jira)"
+  echo ""
+  echo "FLAGS"
+  echo "  --source gh|jira|all   Filter by source (default: all)"
+  echo "  --status open|closed   Filter by status (default: open)"
+  echo "  --limit N              Limit results (default: 25)"
+  echo "  --json                 Output as JSON"
+  echo ""
+  echo "EXAMPLES"
+  echo "  bug list                         # List all open bugs"
+  echo "  bug list --source gh             # GitHub bugs only"
+  echo "  bug view gh#42                   # View GitHub issue #42"
+  echo "  bug view PROJ-123               # View Jira bug PROJ-123"
+  echo "  bug search 'crash on startup'    # Search all sources"
+  echo "  bug triage                       # Auto-classify open bugs"
+  echo "  bug fix gh#42                    # Get fix context for bug"
+}
+
+main() {
+  check_deps
+
+  local command="${1:-help}"
+  shift 2>/dev/null || true
+
+  case "$command" in
+    list)    cmd_list "$@" ;;
+    view)    cmd_view "$@" ;;
+    search)  cmd_search "$@" ;;
+    triage)  cmd_triage "$@" ;;
+    fix)     cmd_fix "$@" ;;
+    config)  cmd_config "$@" ;;
+    version|--version|-v) cmd_version ;;
+    help|--help|-h)       cmd_help ;;
+    *)
+      echo "error: unknown command '${command}'" >&2
+      echo "Run 'bug help' for usage." >&2
+      exit 1
+      ;;
+  esac
+}
+
+main "$@"

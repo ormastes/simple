@@ -1,0 +1,506 @@
+#!/bin/bash
+# MCP Lifecycle Test — check, remove, reinstall, deploy-verify
+#
+# Usage:
+#   test/system/mcp/mcp_lifecycle_test_system.shs              # Run all checks
+#   test/system/mcp/mcp_lifecycle_test_system.shs check        # MCP startup only
+#   test/system/mcp/mcp_lifecycle_test_system.shs reinstall    # Remove + reinstall + verify
+#   test/system/mcp/mcp_lifecycle_test_system.shs deploy       # npm install from registry + verify
+#   test/system/mcp/mcp_lifecycle_test_system.shs config       # Check Claude/Codex/Gemini configs
+#
+# Exit: 0 = all pass, 1 = failures exist
+
+set -e
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+PROJECT_DIR="$(cd "$SCRIPT_DIR/../../.." && pwd)"
+cd "$PROJECT_DIR"
+
+PASS=0
+FAIL=0
+SKIP=0
+TOTAL=0
+MODE="${1:-all}"
+
+# --- Helpers ---
+
+frame_mcp() {
+    local body="$1"
+    local len=${#body}
+    printf 'Content-Length: %s\r\n\r\n%s' "$len" "$body"
+}
+
+check_result() {
+    local test_name="$1"
+    local output="$2"
+    local expected="$3"
+    TOTAL=$((TOTAL + 1))
+    if echo "$output" | grep -q "$expected"; then
+        PASS=$((PASS + 1))
+        echo "  PASS: $test_name"
+    else
+        FAIL=$((FAIL + 1))
+        echo "  FAIL: $test_name"
+        echo "    Expected: $expected"
+        echo "    Got: $(echo "$output" | head -2)"
+    fi
+}
+
+check_skip() {
+    local test_name="$1"
+    local reason="$2"
+    TOTAL=$((TOTAL + 1))
+    SKIP=$((SKIP + 1))
+    echo "  SKIP: $test_name ($reason)"
+}
+
+check_file_exists() {
+    local test_name="$1"
+    local path="$2"
+    TOTAL=$((TOTAL + 1))
+    if [ -e "$path" ]; then
+        PASS=$((PASS + 1))
+        echo "  PASS: $test_name"
+    else
+        FAIL=$((FAIL + 1))
+        echo "  FAIL: $test_name (not found: $path)"
+    fi
+}
+
+check_file_absent() {
+    local test_name="$1"
+    local path="$2"
+    TOTAL=$((TOTAL + 1))
+    if [ ! -e "$path" ]; then
+        PASS=$((PASS + 1))
+        echo "  PASS: $test_name"
+    else
+        FAIL=$((FAIL + 1))
+        echo "  FAIL: $test_name (still exists: $path)"
+    fi
+}
+
+# Quick MCP ping — send initialize, check for jsonrpc response
+mcp_ping() {
+    local server="$1"
+    local tmo="${2:-30}"
+    local init='{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"lifecycle-test","version":"1.0"}}}'
+    {
+        frame_mcp "$init"
+        sleep 1
+    } | timeout "$tmo" "$server" 2>/dev/null || true
+}
+
+# =========================================================================
+# Phase 1: CHECK — verify all MCP servers respond
+# =========================================================================
+
+run_check() {
+    echo ""
+    echo "=========================================="
+    echo "Phase 1: MCP Server Health Check"
+    echo "=========================================="
+
+    local servers=("simple-mcp:bin/simple_mcp_server"
+                   "simple-lsp-mcp:bin/simple_lsp_mcp_server"
+                   "t32-mcp:bin/t32_mcp_server"
+                   "t32-lsp-mcp:bin/t32_lsp_mcp_server")
+
+    for entry in "${servers[@]}"; do
+        local name="${entry%%:*}"
+        local wrapper="${entry##*:}"
+        echo ""
+        echo "--- $name ---"
+
+        if [ ! -x "$wrapper" ]; then
+            check_skip "$name: wrapper executable" "not found"
+            continue
+        fi
+
+        check_file_exists "$name: wrapper exists" "$wrapper"
+        local output
+        output=$(mcp_ping "$wrapper" 60)
+        if [ -n "$output" ]; then
+            check_result "$name: responds to initialize" "$output" '"jsonrpc"'
+        else
+            check_skip "$name: responds to initialize" "no output (compiled .smf stub)"
+        fi
+
+        # Check startup log
+        local log=".simple/logs/${name}_startup.log"
+        if [ "$name" = "simple-mcp" ]; then
+            log=".simple/logs/simple-mcp-full_startup.log"
+        fi
+        if [ -f "$log" ]; then
+            check_file_exists "$name: startup log" "$log"
+        else
+            check_skip "$name: startup log" "not yet written"
+        fi
+    done
+
+    # Direct binary test for t32-lsp-mcp (platform wrapper may still use compiled .smf stub)
+    echo ""
+    echo "--- t32-lsp-mcp (direct) ---"
+    local runtime=""
+    for candidate in bin/simple bin/release/*/simple; do
+        if [ -x "$candidate" ]; then runtime="$candidate"; break; fi
+    done
+    if [ -n "$runtime" ] && [ -f "examples/10_tooling/trace32_tools/t32_lsp_mcp/main.spl" ]; then
+        local init='{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}'
+        local output
+        output=$(printf 'Content-Length: %s\r\n\r\n%s' "${#init}" "$init" | \
+            SIMPLE_LIB=examples/10_tooling/trace32_tools SIMPLE_LOG=error RUST_LOG=error \
+            SIMPLE_TIMEOUT_SECONDS=60 SIMPLE_MEMORY_LIMIT_MB=200 \
+            timeout 60 "$runtime" run examples/10_tooling/trace32_tools/t32_lsp_mcp/main.spl 2>/dev/null || true)
+        check_result "t32-lsp-mcp direct: responds" "$output" '"jsonrpc"'
+    else
+        check_skip "t32-lsp-mcp direct: responds" "no runtime"
+    fi
+}
+
+# =========================================================================
+# Phase 2: CONFIG — verify Claude, Codex, Gemini configs
+# =========================================================================
+
+run_config() {
+    echo ""
+    echo "=========================================="
+    echo "Phase 2: AI CLI Config Verification"
+    echo "=========================================="
+
+    # --- Claude Code ---
+    echo ""
+    echo "--- Claude Code (.mcp.json) ---"
+    check_file_exists "claude: .mcp.json exists" ".mcp.json"
+    if [ -f ".mcp.json" ]; then
+        for srv in simple-mcp simple-lsp-mcp t32-mcp t32-lsp-mcp; do
+            local content
+            content=$(cat .mcp.json)
+            check_result "claude: $srv registered" "$content" "\"$srv\""
+        done
+    fi
+
+    # --- Codex CLI ---
+    echo ""
+    echo "--- Codex CLI ---"
+    if command -v codex >/dev/null 2>&1; then
+        # Check if codex has MCP config
+        if [ -f "$HOME/.codex/config.toml" ]; then
+            local codex_cfg
+            codex_cfg=$(cat "$HOME/.codex/config.toml" 2>/dev/null)
+            check_result "codex: config exists" "$codex_cfg" "mcp"
+        else
+            check_skip "codex: config exists" "no ~/.codex/config.toml"
+        fi
+    else
+        check_skip "codex: CLI installed" "codex not in PATH"
+    fi
+
+    # --- Gemini CLI ---
+    echo ""
+    echo "--- Gemini CLI ---"
+    check_file_exists "gemini: extension manifest" "gemini-extension.json"
+    if [ -f "gemini-extension.json" ]; then
+        local gem_content
+        gem_content=$(cat gemini-extension.json)
+        check_result "gemini: has mcp_servers" "$gem_content" '"mcp_servers"'
+        check_result "gemini: simple-mcp registered" "$gem_content" '"simple-mcp"'
+    fi
+
+    if [ -d ".gemini/commands" ]; then
+        local cmd_count
+        cmd_count=$(ls .gemini/commands/*.md 2>/dev/null | wc -l)
+        TOTAL=$((TOTAL + 1))
+        if [ "$cmd_count" -gt 0 ]; then
+            PASS=$((PASS + 1))
+            echo "  PASS: gemini: $cmd_count custom commands"
+        else
+            SKIP=$((SKIP + 1))
+            echo "  SKIP: gemini: no custom commands"
+        fi
+    fi
+
+    # --- Claude Plugin ---
+    echo ""
+    echo "--- Claude Plugin Marketplace ---"
+    check_file_exists "claude-plugin: marketplace dir" "tools/claude-plugin/marketplace"
+    if [ -f "tools/claude-plugin/marketplace/.claude-plugin/marketplace.json" ]; then
+        check_file_exists "claude-plugin: marketplace.json" "tools/claude-plugin/marketplace/.claude-plugin/marketplace.json"
+    fi
+
+    # --- Codex Skills ---
+    echo ""
+    echo "--- Codex Skills ---"
+    if [ -d ".codex/skills" ]; then
+        local skill_count
+        skill_count=$(ls .codex/skills/*.md 2>/dev/null | wc -l)
+        TOTAL=$((TOTAL + 1))
+        if [ "$skill_count" -gt 0 ]; then
+            PASS=$((PASS + 1))
+            echo "  PASS: codex: $skill_count skills"
+        else
+            SKIP=$((SKIP + 1))
+            echo "  SKIP: codex: no skills"
+        fi
+    else
+        check_skip "codex: skills dir" "no .codex/skills/"
+    fi
+}
+
+# =========================================================================
+# Phase 3: REINSTALL — remove config, reinstall, verify
+# =========================================================================
+
+run_reinstall() {
+    echo ""
+    echo "=========================================="
+    echo "Phase 3: Remove + Reinstall + Verify"
+    echo "=========================================="
+
+    # Step 1: Back up current .mcp.json
+    echo ""
+    echo "--- Step 1: Backup ---"
+    local backup="/tmp/mcp_lifecycle_backup_$$.mcp.json"
+    if [ -f ".mcp.json" ]; then
+        cp .mcp.json "$backup"
+        echo "  Backed up .mcp.json -> $backup"
+    fi
+
+    # Step 2: Remove .mcp.json and caches
+    echo ""
+    echo "--- Step 2: Remove ---"
+    rm -f .mcp.json
+    check_file_absent "remove: .mcp.json deleted" ".mcp.json"
+    rm -rf .simple/cache/simple_mcp .simple/cache/t32_mcp .simple/cache/t32_lsp_mcp
+    echo "  Cleared compilation caches"
+
+    # Step 3: Reinstall via install.shs
+    echo ""
+    echo "--- Step 3: Reinstall ---"
+    if [ -f "config/mcp/install.shs" ]; then
+        sh config/mcp/install.shs 2>&1 | head -20
+        check_file_exists "reinstall: .mcp.json restored" ".mcp.json"
+    else
+        check_skip "reinstall: install.shs" "not found"
+        # Restore backup
+        if [ -f "$backup" ]; then
+            cp "$backup" .mcp.json
+        fi
+        return
+    fi
+
+    # Step 4: Regenerate wrappers
+    echo ""
+    echo "--- Step 4: Regenerate wrappers ---"
+    if [ -f "scripts/setup.sh" ]; then
+        bash scripts/setup.sh 2>&1 | grep -E "mcp|Linked|simple_mcp|t32_mcp" | head -10
+        check_file_exists "reinstall: simple_mcp_server wrapper" "bin/simple_mcp_server"
+        check_file_exists "reinstall: simple_lsp_mcp_server wrapper" "bin/simple_lsp_mcp_server"
+        check_file_exists "reinstall: t32_mcp_server wrapper" "bin/t32_mcp_server"
+        check_file_exists "reinstall: t32_lsp_mcp_server wrapper" "bin/t32_lsp_mcp_server"
+    else
+        check_skip "reinstall: setup.sh" "not found"
+    fi
+
+    # Step 5: Verify servers respond after reinstall
+    echo ""
+    echo "--- Step 5: Post-reinstall health check ---"
+    for entry in "simple-mcp:bin/simple_mcp_server" "simple-lsp-mcp:bin/simple_lsp_mcp_server"; do
+        local name="${entry%%:*}"
+        local wrapper="${entry##*:}"
+        if [ -x "$wrapper" ]; then
+            local output
+            output=$(mcp_ping "$wrapper" 60)
+            check_result "reinstall-verify $name: responds" "$output" '"jsonrpc"'
+        else
+            check_skip "reinstall-verify $name" "wrapper not executable"
+        fi
+    done
+
+    # Clean up backup
+    rm -f "$backup"
+}
+
+# =========================================================================
+# Phase 4: DEPLOY — npm install from registry + verify
+# =========================================================================
+
+run_deploy() {
+    echo ""
+    echo "=========================================="
+    echo "Phase 4: Deploy Check (npm registry)"
+    echo "=========================================="
+
+    if ! command -v npm >/dev/null 2>&1; then
+        check_skip "deploy: npm available" "npm not in PATH"
+        return
+    fi
+
+    if ! command -v node >/dev/null 2>&1; then
+        check_skip "deploy: node available" "node not in PATH"
+        return
+    fi
+
+    local tmpdir
+    tmpdir=$(mktemp -d /tmp/mcp_deploy_test.XXXXXX)
+    echo "  Working directory: $tmpdir"
+
+    # Step 1: Check if package exists on registry
+    echo ""
+    echo "--- Step 1: Check npm registry ---"
+    local published
+    published=$(npm view @simple-lang/mcp-server version 2>/dev/null || echo "")
+    if [ -z "$published" ]; then
+        check_skip "deploy: @simple-lang/mcp-server published" "not on npm"
+        rm -rf "$tmpdir"
+        return
+    fi
+    TOTAL=$((TOTAL + 1))
+    PASS=$((PASS + 1))
+    echo "  PASS: deploy: @simple-lang/mcp-server@$published on npm"
+
+    # Step 2: Install in temp dir
+    echo ""
+    echo "--- Step 2: npm install ---"
+    cd "$tmpdir"
+    npm init -y >/dev/null 2>&1
+    local install_output
+    install_output=$(npm install @simple-lang/mcp-server 2>&1) || true
+    cd "$PROJECT_DIR"
+
+    local launcher="$tmpdir/node_modules/.bin/simple-mcp-server"
+    if [ ! -f "$launcher" ]; then
+        launcher="$tmpdir/node_modules/@simple-lang/mcp-server/bin/simple-mcp-launcher.js"
+    fi
+
+    if [ -f "$launcher" ]; then
+        check_file_exists "deploy: launcher installed" "$launcher"
+    else
+        check_skip "deploy: launcher installed" "binary not found after install"
+        rm -rf "$tmpdir"
+        return
+    fi
+
+    # Step 3: Check package structure
+    echo ""
+    echo "--- Step 3: Package structure ---"
+    local pkg_dir="$tmpdir/node_modules/@simple-lang/mcp-server"
+    check_file_exists "deploy: package.json" "$pkg_dir/package.json"
+    check_file_exists "deploy: server.json" "$pkg_dir/server.json"
+    check_file_exists "deploy: launcher script" "$pkg_dir/bin/simple-mcp-launcher.js"
+
+    # Step 4: Try to launch the MCP server
+    echo ""
+    echo "--- Step 4: Launch test ---"
+    local init='{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"deploy-test","version":"1.0"}}}'
+    local output
+    output=$({
+        frame_mcp "$init"
+        sleep 2
+    } | timeout 30 node "$pkg_dir/bin/simple-mcp-launcher.js" 2>/dev/null || true)
+
+    if [ -n "$output" ]; then
+        check_result "deploy: server responds to initialize" "$output" '"jsonrpc"'
+        check_result "deploy: has server info" "$output" '"serverInfo"'
+    else
+        check_skip "deploy: server responds" "no output (may need binary download)"
+    fi
+
+    # Step 5: Clean up
+    rm -rf "$tmpdir"
+    echo "  Cleaned up $tmpdir"
+}
+
+# =========================================================================
+# Phase 5: PERF — quick performance smoke test
+# =========================================================================
+
+run_perf() {
+    echo ""
+    echo "=========================================="
+    echo "Phase 5: Performance Smoke Test"
+    echo "=========================================="
+
+    for entry in "simple-mcp:bin/simple_mcp_server:2000" "simple-lsp-mcp:bin/simple_lsp_mcp_server:2000"; do
+        local name="${entry%%:*}"
+        local rest="${entry#*:}"
+        local wrapper="${rest%%:*}"
+        local budget_ms="${rest##*:}"
+
+        if [ ! -x "$wrapper" ]; then
+            check_skip "$name perf: startup" "wrapper not found"
+            continue
+        fi
+
+        echo ""
+        echo "--- $name (budget: ${budget_ms}ms) ---"
+        local start_ms
+        start_ms=$(date +%s%N 2>/dev/null || echo "0")
+        local output
+        output=$(mcp_ping "$wrapper" 30)
+        local end_ms
+        end_ms=$(date +%s%N 2>/dev/null || echo "0")
+
+        if [ "$start_ms" != "0" ] && [ "$end_ms" != "0" ]; then
+            local elapsed_ms=$(( (end_ms - start_ms) / 1000000 ))
+            TOTAL=$((TOTAL + 1))
+            if [ "$elapsed_ms" -le "$budget_ms" ]; then
+                PASS=$((PASS + 1))
+                echo "  PASS: $name startup: ${elapsed_ms}ms (budget: ${budget_ms}ms)"
+            else
+                FAIL=$((FAIL + 1))
+                echo "  FAIL: $name startup: ${elapsed_ms}ms exceeds ${budget_ms}ms budget"
+            fi
+        else
+            check_skip "$name perf: timing" "date +%s%N not supported"
+        fi
+    done
+}
+
+# =========================================================================
+# Main
+# =========================================================================
+
+echo "=== MCP Lifecycle Test (mode: $MODE) ==="
+
+case "$MODE" in
+    check)
+        run_check
+        ;;
+    config)
+        run_config
+        ;;
+    reinstall)
+        run_reinstall
+        ;;
+    deploy)
+        run_deploy
+        ;;
+    perf)
+        run_perf
+        ;;
+    all)
+        run_check
+        run_config
+        run_perf
+        ;;
+    full)
+        run_check
+        run_config
+        run_reinstall
+        run_deploy
+        run_perf
+        ;;
+    *)
+        echo "Unknown mode: $MODE"
+        echo "Usage: $0 [check|config|reinstall|deploy|perf|all|full]"
+        exit 1
+        ;;
+esac
+
+echo ""
+echo "=========================================="
+echo "=== Results: $PASS passed, $FAIL failed, $SKIP skipped (of $TOTAL) ==="
+echo "=========================================="
+if [ "$FAIL" -gt 0 ]; then exit 1; fi
+exit 0

@@ -1,0 +1,130 @@
+use std.spec
+use os.kernel.ipc.syscall.{syscall_handler}
+use os.kernel.types.syscall_types.{SyscallArgs}
+use os.kernel.scheduler.scheduler.{Scheduler}
+use os.kernel.ipc.ipc.{IpcManager}
+use os.kernel.log.klog.{KernelLog}
+use os.kernel.types.task_types.{TaskId}
+use os.kernel.loader.executable_source.{RV64_PROOF_BINARY_PATH}
+use os.apps.hello_world.hello_world.{hello_world_remote_main}
+
+describe "syscall_handler":
+    it "launches built-in service binaries through spawn_binary":
+        val path = "/sys/services/vfs"
+        var scheduler = Scheduler.new()
+        val result = syscall_handler(
+            SyscallArgs(
+                id: 13,
+                arg0: &path as u64,
+                arg1: path.len() as u64,
+                arg2: 2,
+                arg3: 0,
+                arg4: 0,
+                arg5: 0
+            ),
+            scheduler,
+            IpcManager.new(),
+            KernelLog.new(16)
+        )
+        expect(result.value).to_be_greater_than(0)
+        val spawned = scheduler.get_task(TaskId(id: result.value as u64))
+        expect(spawned == nil).to_equal(false)
+
+    it "launches the canonical rv64 proof binary path through spawn_binary":
+        val path = RV64_PROOF_BINARY_PATH
+        var scheduler = Scheduler.new()
+        val result = syscall_handler(
+            SyscallArgs(
+                id: 13,
+                arg0: &path as u64,
+                arg1: path.len() as u64,
+                arg2: 2,
+                arg3: 0,
+                arg4: 0,
+                arg5: 0
+            ),
+            scheduler,
+            IpcManager.new(),
+            KernelLog.new(16)
+        )
+        expect(result.value).to_be_greater_than(0)
+        val spawned = scheduler.get_task(TaskId(id: result.value as u64))
+        expect(spawned == nil).to_equal(false)
+
+    it "falls back to the builtin app entry when no executable bytes exist":
+        val path = "/sys/apps/hello_world"
+        var scheduler = Scheduler.new()
+        val result = syscall_handler(
+            SyscallArgs(
+                id: 13,
+                arg0: &path as u64,
+                arg1: path.len() as u64,
+                arg2: 2,
+                arg3: 0,
+                arg4: 0,
+                arg5: 0
+            ),
+            scheduler,
+            IpcManager.new(),
+            KernelLog.new(16)
+        )
+        expect(result.value).to_be_greater_than(0)
+        val spawned = scheduler.get_task(TaskId(id: result.value as u64))
+        expect(spawned == nil).to_equal(false)
+        if spawned != nil:
+            val task = spawned
+            expect(task.is_user).to_equal(false)
+            expect(task.entry_point).to_equal(hello_world_remote_main as u64)
+
+    it "rejects unknown spawn_binary paths":
+        val path = "/sys/apps/does_not_exist"
+        val result = syscall_handler(
+            SyscallArgs(
+                id: 13,
+                arg0: &path as u64,
+                arg1: path.len() as u64,
+                arg2: 2,
+                arg3: 0,
+                arg4: 0,
+                arg5: 0
+            ),
+            Scheduler.new(),
+            IpcManager.new(),
+            KernelLog.new(16)
+        )
+        expect(result.value).to_equal(-2)
+
+    it "rejects empty spawn_binary requests":
+        val result = syscall_handler(
+            SyscallArgs(
+                id: 13,
+                arg0: 0,
+                arg1: 0,
+                arg2: 2,
+                arg3: 0,
+                arg4: 0,
+                arg5: 0
+            ),
+            Scheduler.new(),
+            IpcManager.new(),
+            KernelLog.new(16)
+        )
+        expect(result.value).to_equal(-22)
+
+    it "rejects oversized spawn_binary paths":
+        val path = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        val result = syscall_handler(
+            SyscallArgs(
+                id: 13,
+                arg0: &path as u64,
+                arg1: path.len() as u64,
+                arg2: 2,
+                arg3: 0,
+                arg4: 0,
+                arg5: 0
+            ),
+            Scheduler.new(),
+            IpcManager.new(),
+            KernelLog.new(16)
+        )
+        expect(result.value).to_equal(-22)

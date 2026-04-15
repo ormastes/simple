@@ -1,0 +1,149 @@
+# pixel_diff_core_spec — unit tests for pure-math pixel comparison primitives
+
+use std.sspec.*
+use std.skia.entity.geometry.{SkIRect}
+use test.reftest.parity.pixel_diff_core.{
+    BitmapRef, PixelSample, PixelDiffSummary,
+    per_channel_delta, pixel_matches,
+    mismatch_ratio, max_channel_delta,
+    bitmap_diff_rect, summarize
+}
+
+# Helper: build a flat 1x1 RGBA bitmap with explicit channel values
+fn _bm1(r: u8, g: u8, b: u8, a: u8) -> BitmapRef:
+    BitmapRef.of(1, 1, [r, g, b, a])
+
+# Helper: 2x2 all-black bitmap (8 zero bytes × 4 channels = 16 bytes)
+fn _black_2x2() -> BitmapRef:
+    BitmapRef.of(2, 2, [
+        0, 0, 0, 255,  0, 0, 0, 255,
+        0, 0, 0, 255,  0, 0, 0, 255
+    ])
+
+# Helper: 2x2 all-red bitmap
+fn _red_2x2() -> BitmapRef:
+    BitmapRef.of(2, 2, [
+        255, 0, 0, 255,  255, 0, 0, 255,
+        255, 0, 0, 255,  255, 0, 0, 255
+    ])
+
+# Helper: sample from a 1x1 bitmap at (0,0)
+fn _s(bm: BitmapRef) -> PixelSample:
+    PixelSample.at(bm, 0, 0)
+
+describe "per_channel_delta":
+    it "identical pixels give delta 0":
+        val a = _s(_bm1(100, 150, 200, 255))
+        val b = _s(_bm1(100, 150, 200, 255))
+        val d = per_channel_delta(a, b)
+        expect d to_equal 0
+
+    it "single channel differs by 50 gives delta 50":
+        val a = _s(_bm1(100, 0, 0, 0))
+        val b = _s(_bm1(50, 0, 0, 0))
+        val d = per_channel_delta(a, b)
+        expect d to_equal 50
+
+    it "returns max across channels":
+        val a = _s(_bm1(255, 10, 0, 0))
+        val b = _s(_bm1(0, 0, 0, 0))
+        val d = per_channel_delta(a, b)
+        expect d to_equal 255
+
+describe "pixel_matches":
+    it "tolerance >= channel delta returns true":
+        val a = _s(_bm1(100, 0, 0, 0))
+        val b = _s(_bm1(98, 0, 0, 0))
+        val result = pixel_matches(a, b, 2)
+        expect result to_equal true
+
+    it "tolerance < channel delta returns false":
+        val a = _s(_bm1(100, 0, 0, 0))
+        val b = _s(_bm1(97, 0, 0, 0))
+        val result = pixel_matches(a, b, 2)
+        expect result to_equal false
+
+describe "mismatch_ratio":
+    it "identical bitmaps give ratio 0.0":
+        val a = _bm1(128, 64, 32, 255)
+        val b = _bm1(128, 64, 32, 255)
+        val r = mismatch_ratio(a, b, 0)
+        expect r to_equal 0.0
+
+    it "1-pixel differ at tolerance 0 gives ratio 1.0 for 1x1":
+        val a = _bm1(128, 0, 0, 255)
+        val b = _bm1(127, 0, 0, 255)
+        val r = mismatch_ratio(a, b, 0)
+        expect r to_equal 1.0
+
+    it "dimension mismatch returns 1.0":
+        val a = BitmapRef.of(1, 1, [0, 0, 0, 255])
+        val b = BitmapRef.of(2, 1, [0, 0, 0, 255, 0, 0, 0, 255])
+        val r = mismatch_ratio(a, b, 0)
+        expect r to_equal 1.0
+
+describe "max_channel_delta":
+    it "identical bitmaps give 0":
+        val a = _bm1(200, 100, 50, 255)
+        val b = _bm1(200, 100, 50, 255)
+        val d = max_channel_delta(a, b)
+        expect d to_equal 0
+
+    it "all-red vs all-black 2x2 gives 255":
+        val d = max_channel_delta(_red_2x2(), _black_2x2())
+        expect d to_equal 255
+
+    it "dimension mismatch returns 255":
+        val a = BitmapRef.of(1, 1, [0, 0, 0, 255])
+        val b = BitmapRef.of(2, 1, [0, 0, 0, 255, 0, 0, 0, 255])
+        val d = max_channel_delta(a, b)
+        expect d to_equal 255
+
+describe "bitmap_diff_rect":
+    it "identical bitmaps return empty rect (0,0,0,0)":
+        val a = _red_2x2()
+        val b = _red_2x2()
+        val rect = bitmap_diff_rect(a, b, 0)
+        expect rect.left to_equal 0
+        expect rect.top to_equal 0
+        expect rect.right to_equal 0
+        expect rect.bottom to_equal 0
+
+    it "2x2 with single differing pixel at (1,1) returns rect covering that pixel":
+        # Build a 2x2 bitmap: all pixels match except bottom-right (1,1)
+        val a = BitmapRef.of(2, 2, [
+            0, 0, 0, 255,  0, 0, 0, 255,
+            0, 0, 0, 255,  0, 0, 0, 255
+        ])
+        val b = BitmapRef.of(2, 2, [
+            0, 0, 0, 255,  0, 0, 0, 255,
+            0, 0, 0, 255,  255, 0, 0, 255
+        ])
+        val rect = bitmap_diff_rect(a, b, 0)
+        expect rect.left to_equal 1
+        expect rect.top to_equal 1
+        expect rect.right to_equal 2
+        expect rect.bottom to_equal 2
+
+describe "summarize":
+    it "populates all 4 fields correctly for a 1-pixel difference":
+        val a = _bm1(255, 0, 0, 255)
+        val b = _bm1(0, 0, 0, 255)
+        val s = summarize(a, b, 0)
+        expect s.ratio to_equal 1.0
+        expect s.max_channel_delta to_equal 255
+        expect s.mismatched_pixels to_equal 1
+        expect s.diff_rect.left to_equal 0
+        expect s.diff_rect.top to_equal 0
+        expect s.diff_rect.right to_equal 1
+        expect s.diff_rect.bottom to_equal 1
+
+    it "identical bitmaps give zeroed summary":
+        val a = _bm1(100, 100, 100, 255)
+        val b = _bm1(100, 100, 100, 255)
+        val s = summarize(a, b, 0)
+        expect s.ratio to_equal 0.0
+        expect s.max_channel_delta to_equal 0
+        expect s.mismatched_pixels to_equal 0
+        val empty = s.diff_rect.is_empty()
+        expect empty to_equal true

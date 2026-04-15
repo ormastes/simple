@@ -1,0 +1,738 @@
+# @covers src/lib/common/yaml/ 60%
+"""
+# YAML Coverage Specification
+
+**Feature IDs:** #LIB-YAML
+**Category:** Stdlib
+**Difficulty:** 3/5
+**Status:** In Progress
+**Requirements:** N/A
+**Plan:** N/A
+**Design:** N/A
+**Research:** N/A
+
+## Overview
+
+Comprehensive branch-coverage tests for the YAML parser library:
+- `src/lib/common/yaml/` -- YAML types, parse, serialize, utilities, validate
+
+Targets 90%+ branch coverage by exercising both true and false branches of every
+conditional in each module.
+
+Split from `parsers_coverage_spec.spl` to avoid memory pressure (404 it-blocks hit 2048MB RSS cap).
+"""
+
+import std.spec
+
+use lib.yaml.types.{yaml_null, yaml_boolean, yaml_number, yaml_string, yaml_sequence, yaml_mapping}
+use lib.yaml.types.{is_yaml_null, is_yaml_boolean, is_yaml_number, is_yaml_string, is_yaml_sequence, is_yaml_mapping, is_yaml_scalar}
+use lib.yaml.types.{yaml_get_scalar_type, yaml_get_scalar_content, yaml_get_sequence_items, yaml_get_mapping_pairs}
+use lib.yaml.parse.{yaml_parse, yaml_parse_scalar, yaml_parse_flow_sequence, yaml_parse_flow_mapping, yaml_parse_block}
+use lib.yaml.serialize.{yaml_serialize, yaml_serialize_block, yaml_serialize_flow, yaml_serialize_scalar, yaml_serialize_sequence_block, yaml_serialize_mapping_block, yaml_serialize_flow_sequence, yaml_serialize_flow_mapping}
+use lib.yaml.utilities.{yaml_escape_string, yaml_unescape_string, yaml_needs_quotes, yaml_quote_string}
+use lib.yaml.utilities.{yaml_mapping_get, yaml_mapping_has, yaml_mapping_set, yaml_mapping_remove, yaml_mapping_keys, yaml_mapping_values, yaml_mapping_size}
+use lib.yaml.utilities.{yaml_sequence_get, yaml_sequence_set, yaml_sequence_append, yaml_sequence_length, yaml_sequence_insert, yaml_sequence_remove}
+use lib.yaml.utilities.{yaml_pretty_print, yaml_compact_print, yaml_deep_copy, yaml_merge_mappings, yaml_equals, yaml_to_string, yaml_from_string}
+use lib.yaml.utilities.{yaml_mapping_contains_value, yaml_sequence_contains, yaml_sequence_index_of, yaml_sequence_reverse, yaml_sequence_slice}
+use lib.yaml.utilities.{yaml_mapping_filter_keys, yaml_mapping_exclude_keys}
+use lib.yaml.utilities.{yaml_is_empty, yaml_get_nested, yaml_set_nested, yaml_count_nodes, yaml_depth, yaml_flatten_mapping, yaml_validate_schema}
+use lib.yaml.utilities.{yaml_indent, yaml_detect_indentation, yaml_validate_indentation}
+use lib.yaml.validate.{yaml_parse_documents, yaml_create_anchor, yaml_create_alias, yaml_is_anchor, yaml_is_alias, yaml_get_anchor_name, yaml_get_anchor_value, yaml_get_alias_name, yaml_resolve_aliases}
+use lib.yaml.serialize.{yaml_serialize_documents}
+
+
+# ============================================================================
+# YAML Types
+# ============================================================================
+
+describe "YAML Types":
+    """
+    ## YAML Value Constructors and Type Checks
+
+    Tests for yaml_null, yaml_boolean, yaml_number, yaml_string,
+    yaml_sequence, yaml_mapping, and their type predicates.
+    """
+
+    context "constructors":
+        it "creates null":
+            val v = yaml_null()
+            expect(is_yaml_null(v)).to_equal(true)
+
+        it "creates boolean true":
+            val v = yaml_boolean(true)
+            expect(is_yaml_boolean(v)).to_equal(true)
+
+        it "creates boolean false":
+            val v = yaml_boolean(false)
+            expect(is_yaml_boolean(v)).to_equal(true)
+
+        it "creates number":
+            val v = yaml_number("42")
+            expect(is_yaml_number(v)).to_equal(true)
+
+        it "creates string":
+            val v = yaml_string("hello")
+            expect(is_yaml_string(v)).to_equal(true)
+
+        it "creates sequence":
+            val v = yaml_sequence([yaml_number("1")])
+            expect(is_yaml_sequence(v)).to_equal(true)
+
+        it "creates empty sequence":
+            val v = yaml_sequence([])
+            expect(is_yaml_sequence(v)).to_equal(true)
+
+        it "creates mapping":
+            val v = yaml_mapping([("key", yaml_string("val"))])
+            expect(is_yaml_mapping(v)).to_equal(true)
+
+        it "creates empty mapping":
+            val v = yaml_mapping([])
+            expect(is_yaml_mapping(v)).to_equal(true)
+
+    context "type checks - negative":
+        it "is_yaml_null false for non-null":
+            expect(is_yaml_null(yaml_string("x"))).to_equal(false)
+
+        it "is_yaml_boolean false for non-boolean":
+            expect(is_yaml_boolean(yaml_string("x"))).to_equal(false)
+
+        it "is_yaml_number false for non-number":
+            expect(is_yaml_number(yaml_string("x"))).to_equal(false)
+
+        it "is_yaml_string false for non-string":
+            expect(is_yaml_string(yaml_number("1"))).to_equal(false)
+
+        it "is_yaml_sequence false for non-sequence":
+            expect(is_yaml_sequence(yaml_string("x"))).to_equal(false)
+
+        it "is_yaml_mapping false for non-mapping":
+            expect(is_yaml_mapping(yaml_string("x"))).to_equal(false)
+
+        it "is_yaml_scalar true for scalar types":
+            expect(is_yaml_scalar(yaml_string("x"))).to_equal(true)
+            expect(is_yaml_scalar(yaml_number("1"))).to_equal(true)
+            expect(is_yaml_scalar(yaml_null())).to_equal(true)
+
+        it "is_yaml_scalar false for compound types":
+            expect(is_yaml_scalar(yaml_sequence([]))).to_equal(false)
+            expect(is_yaml_scalar(yaml_mapping([]))).to_equal(false)
+
+    context "value extraction":
+        it "gets scalar type":
+            val t = yaml_get_scalar_type(yaml_string("x"))
+            expect(t).to_equal("string")
+
+        it "gets scalar content":
+            val c = yaml_get_scalar_content(yaml_string("hello"))
+            expect(c).to_equal("hello")
+
+        it "gets sequence items":
+            val items = yaml_get_sequence_items(yaml_sequence([yaml_number("1"), yaml_number("2")]))
+            expect(items.length()).to_equal(2)
+
+        it "gets mapping pairs":
+            val pairs = yaml_get_mapping_pairs(yaml_mapping([("a", yaml_number("1"))]))
+            expect(pairs.length()).to_equal(1)
+
+
+# ============================================================================
+# YAML Parse
+# ============================================================================
+
+describe "YAML Parse":
+    """
+    ## YAML Parsing
+
+    Tests for yaml_parse, yaml_parse_scalar, yaml_parse_flow_sequence,
+    yaml_parse_flow_mapping, yaml_parse_block.
+    """
+
+    context "yaml_parse_scalar":
+        it "parses null values":
+            val result = yaml_parse_scalar("null")
+            expect(is_yaml_null(result)).to_equal(true)
+
+        it "parses tilde as null":
+            val result = yaml_parse_scalar("~")
+            expect(is_yaml_null(result)).to_equal(true)
+
+        it "parses true":
+            val result = yaml_parse_scalar("true")
+            expect(is_yaml_boolean(result)).to_equal(true)
+
+        it "parses false":
+            val result = yaml_parse_scalar("false")
+            expect(is_yaml_boolean(result)).to_equal(true)
+
+        it "parses integer":
+            val result = yaml_parse_scalar("42")
+            expect(is_yaml_number(result)).to_equal(true)
+
+        it "parses negative number":
+            val result = yaml_parse_scalar("-10")
+            expect(is_yaml_number(result)).to_equal(true)
+
+        it "parses decimal number":
+            val result = yaml_parse_scalar("3.14")
+            expect(is_yaml_number(result)).to_equal(true)
+
+        it "parses plain string":
+            val result = yaml_parse_scalar("hello")
+            expect(is_yaml_string(result)).to_equal(true)
+            expect(yaml_get_scalar_content(result)).to_equal("hello")
+
+        it "parses quoted string":
+            val result = yaml_parse_scalar("\"hello world\"")
+            expect(is_yaml_string(result)).to_equal(true)
+
+        it "parses empty string":
+            val result = yaml_parse_scalar("")
+            expect(is_yaml_null(result)).to_equal(true)
+
+    context "yaml_parse flow sequences":
+        it "parses flow sequence":
+            val result = yaml_parse_flow_sequence("[1, 2, 3]")
+            expect(is_yaml_sequence(result)).to_equal(true)
+            val items = yaml_get_sequence_items(result)
+            expect(items.length()).to_equal(3)
+
+        it "parses empty flow sequence":
+            val result = yaml_parse_flow_sequence("[]")
+            expect(is_yaml_sequence(result)).to_equal(true)
+            val items = yaml_get_sequence_items(result)
+            expect(items.length()).to_equal(0)
+
+    context "yaml_parse flow mappings":
+        it "parses flow mapping":
+            val result = yaml_parse_flow_mapping("{name: Alice, age: 30}")
+            expect(is_yaml_mapping(result)).to_equal(true)
+
+        it "parses empty flow mapping":
+            val result = yaml_parse_flow_mapping("{}")
+            expect(is_yaml_mapping(result)).to_equal(true)
+
+    context "yaml_parse main":
+        it "parses flow sequence via yaml_parse":
+            val result = yaml_parse("[1, 2, 3]")
+            expect(is_yaml_sequence(result)).to_equal(true)
+
+        it "parses flow mapping via yaml_parse":
+            val result = yaml_parse("{name: Alice}")
+            expect(is_yaml_mapping(result)).to_equal(true)
+
+        it "parses scalar via yaml_parse":
+            val result = yaml_parse("42")
+            expect(is_yaml_number(result)).to_equal(true)
+
+        it "parses null via yaml_parse":
+            val result = yaml_parse("null")
+            expect(is_yaml_null(result)).to_equal(true)
+
+        it "parses block mapping":
+            val input = "name: Alice\nage: 30"
+            val result = yaml_parse(input)
+            expect(is_yaml_mapping(result)).to_equal(true)
+
+        it "parses block sequence":
+            val input = "- 1\n- 2\n- 3"
+            val result = yaml_parse(input)
+            expect(is_yaml_sequence(result)).to_equal(true)
+
+
+# ============================================================================
+# YAML Serialize
+# ============================================================================
+
+describe "YAML Serialize":
+    """
+    ## YAML Serialization
+
+    Tests for yaml_serialize, yaml_serialize_block, yaml_serialize_flow,
+    and specific serializers.
+    """
+
+    context "flow style":
+        it "serializes scalar in flow":
+            val v = yaml_string("hello")
+            val result = yaml_serialize_flow(v)
+            expect(result).to_contain("hello")
+
+        it "serializes null in flow":
+            val result = yaml_serialize_flow(yaml_null())
+            expect(result).to_contain("null")
+
+        it "serializes boolean in flow":
+            val result = yaml_serialize_flow(yaml_boolean(true))
+            expect(result).to_contain("true")
+
+        it "serializes sequence in flow":
+            val seq = yaml_sequence([yaml_number("1"), yaml_number("2")])
+            val result = yaml_serialize_flow(seq)
+            expect(result).to_contain("1")
+            expect(result).to_contain("2")
+
+        it "serializes mapping in flow":
+            val m = yaml_mapping([("key", yaml_string("val"))])
+            val result = yaml_serialize_flow(m)
+            expect(result).to_contain("key")
+            expect(result).to_contain("val")
+
+    context "block style":
+        it "serializes scalar in block":
+            val v = yaml_string("hello")
+            val result = yaml_serialize_block(v)
+            expect(result).to_contain("hello")
+
+        it "serializes sequence in block":
+            val seq = yaml_sequence([yaml_number("1"), yaml_number("2")])
+            val result = yaml_serialize_block(seq)
+            expect(result).to_contain("1")
+
+        it "serializes mapping in block":
+            val m = yaml_mapping([("key", yaml_string("val"))])
+            val result = yaml_serialize_block(m)
+            expect(result).to_contain("key")
+            expect(result).to_contain("val")
+
+    context "yaml_serialize with style parameter":
+        it "uses block style":
+            val v = yaml_string("hello")
+            val result = yaml_serialize(v, "block")
+            expect(result).to_contain("hello")
+
+        it "uses flow style":
+            val v = yaml_string("hello")
+            val result = yaml_serialize(v, "flow")
+            expect(result).to_contain("hello")
+
+
+# ============================================================================
+# YAML Utilities - String Escaping
+# ============================================================================
+
+describe "YAML Utilities - Strings":
+    """
+    ## YAML String Escaping and Quoting
+
+    Tests for yaml_escape_string, yaml_unescape_string, yaml_needs_quotes, yaml_quote_string.
+    """
+
+    context "yaml_escape_string":
+        it "escapes backslash":
+            val result = yaml_escape_string("a\\b")
+            expect(result).to_contain("\\\\")
+
+        it "escapes double quote":
+            val result = yaml_escape_string("a\"b")
+            expect(result).to_contain("\\\"")
+
+        it "escapes newline":
+            val result = yaml_escape_string("a\nb")
+            expect(result).to_contain("\\n")
+
+        it "escapes tab":
+            val result = yaml_escape_string("a\tb")
+            expect(result).to_contain("\\t")
+
+        it "escapes carriage return":
+            val result = yaml_escape_string("a\rb")
+            expect(result).to_contain("\\r")
+
+        it "passes plain text through":
+            val result = yaml_escape_string("hello")
+            expect(result).to_equal("hello")
+
+    context "yaml_unescape_string":
+        it "unescapes backslash":
+            val result = yaml_unescape_string("a\\\\b")
+            expect(result).to_contain("\\")
+
+        it "unescapes newline":
+            val result = yaml_unescape_string("a\\nb")
+            expect(result).to_contain("\n")
+
+        it "unescapes tab":
+            val result = yaml_unescape_string("a\\tb")
+            expect(result).to_contain("\t")
+
+        it "passes plain text through":
+            val result = yaml_unescape_string("hello")
+            expect(result).to_equal("hello")
+
+    context "yaml_needs_quotes":
+        it "needs quotes for empty string":
+            expect(yaml_needs_quotes("")).to_equal(true)
+
+        it "plain alphanumeric does not need quotes":
+            expect(yaml_needs_quotes("hello")).to_equal(false)
+
+        it "string with colon needs quotes":
+            expect(yaml_needs_quotes("key: value")).to_equal(true)
+
+    context "yaml_quote_string":
+        it "quotes a string with double style":
+            val result = yaml_quote_string("hello world", "double")
+            expect(result).to_start_with("\"")
+            expect(result).to_end_with("\"")
+
+        it "quotes a string with single style":
+            val result = yaml_quote_string("hello world", "single")
+            expect(result).to_start_with("'")
+            expect(result).to_end_with("'")
+
+
+# ============================================================================
+# YAML Utilities - Mapping Operations
+# ============================================================================
+
+describe "YAML Mapping Operations":
+    """
+    ## YAML Mapping Get/Set/Has/Remove/Keys/Values/Size
+
+    Tests for mapping manipulation utilities.
+    """
+
+    context "get and has":
+        it "gets value by key":
+            val m = yaml_mapping([("name", yaml_string("Alice"))])
+            val result = yaml_mapping_get(m, "name")
+            expect(result).to_equal(yaml_string("Alice"))
+
+        it "returns nil for missing key":
+            val m = yaml_mapping([("name", yaml_string("Alice"))])
+            val result = yaml_mapping_get(m, "age")
+            expect(result).to_be_nil()
+
+        it "has returns true for existing key":
+            val m = yaml_mapping([("name", yaml_string("Alice"))])
+            expect(yaml_mapping_has(m, "name")).to_equal(true)
+
+        it "has returns false for missing key":
+            val m = yaml_mapping([("name", yaml_string("Alice"))])
+            expect(yaml_mapping_has(m, "age")).to_equal(false)
+
+    context "set and remove":
+        it "sets new key":
+            val m = yaml_mapping([])
+            val updated = yaml_mapping_set(m, "name", yaml_string("Alice"))
+            expect(yaml_mapping_has(updated, "name")).to_equal(true)
+
+        it "updates existing key":
+            val m = yaml_mapping([("name", yaml_string("Alice"))])
+            val updated = yaml_mapping_set(m, "name", yaml_string("Bob"))
+            val result = yaml_mapping_get(updated, "name")
+            expect(result).to_equal(yaml_string("Bob"))
+
+        it "removes existing key":
+            val m = yaml_mapping([("a", yaml_number("1")), ("b", yaml_number("2"))])
+            val updated = yaml_mapping_remove(m, "a")
+            expect(yaml_mapping_has(updated, "a")).to_equal(false)
+            expect(yaml_mapping_has(updated, "b")).to_equal(true)
+
+    context "keys, values, size":
+        it "gets keys":
+            val m = yaml_mapping([("a", yaml_number("1")), ("b", yaml_number("2"))])
+            val keys = yaml_mapping_keys(m)
+            expect(keys.length()).to_equal(2)
+
+        it "gets values":
+            val m = yaml_mapping([("a", yaml_number("1"))])
+            val vals = yaml_mapping_values(m)
+            expect(vals.length()).to_equal(1)
+
+        it "gets size":
+            val m = yaml_mapping([("a", yaml_number("1")), ("b", yaml_number("2"))])
+            expect(yaml_mapping_size(m)).to_equal(2)
+
+        it "empty mapping size is 0":
+            expect(yaml_mapping_size(yaml_mapping([]))).to_equal(0)
+
+    context "contains and filter":
+        it "contains_value finds existing value":
+            val m = yaml_mapping([("name", yaml_string("Alice"))])
+            expect(yaml_mapping_contains_value(m, yaml_string("Alice"))).to_equal(true)
+
+        it "contains_value returns false for missing value":
+            val m = yaml_mapping([("name", yaml_string("Alice"))])
+            expect(yaml_mapping_contains_value(m, yaml_string("Bob"))).to_equal(false)
+
+        it "filters keys":
+            val m = yaml_mapping([("a", yaml_number("1")), ("b", yaml_number("2")), ("c", yaml_number("3"))])
+            val filtered = yaml_mapping_filter_keys(m, ["a", "c"])
+            expect(yaml_mapping_size(filtered)).to_equal(2)
+
+        it "excludes keys":
+            val m = yaml_mapping([("a", yaml_number("1")), ("b", yaml_number("2")), ("c", yaml_number("3"))])
+            val excluded = yaml_mapping_exclude_keys(m, ["b"])
+            expect(yaml_mapping_has(excluded, "b")).to_equal(false)
+            expect(yaml_mapping_size(excluded)).to_equal(2)
+
+
+# ============================================================================
+# YAML Utilities - Sequence Operations
+# ============================================================================
+
+describe "YAML Sequence Operations":
+    """
+    ## YAML Sequence Get/Set/Append/Insert/Remove/Length
+
+    Tests for sequence manipulation utilities.
+    """
+
+    context "basic operations":
+        it "gets element by index":
+            val seq = yaml_sequence([yaml_number("10"), yaml_number("20")])
+            val result = yaml_sequence_get(seq, 0)
+            expect(result).to_equal(yaml_number("10"))
+
+        it "sets element at index":
+            val seq = yaml_sequence([yaml_number("10"), yaml_number("20")])
+            val updated = yaml_sequence_set(seq, 0, yaml_number("99"))
+            val result = yaml_sequence_get(updated, 0)
+            expect(result).to_equal(yaml_number("99"))
+
+        it "appends element":
+            val seq = yaml_sequence([yaml_number("1")])
+            val updated = yaml_sequence_append(seq, yaml_number("2"))
+            expect(yaml_sequence_length(updated)).to_equal(2)
+
+        it "gets length":
+            val seq = yaml_sequence([yaml_number("1"), yaml_number("2"), yaml_number("3")])
+            expect(yaml_sequence_length(seq)).to_equal(3)
+
+        it "inserts at index":
+            val seq = yaml_sequence([yaml_number("1"), yaml_number("3")])
+            val updated = yaml_sequence_insert(seq, 1, yaml_number("2"))
+            expect(yaml_sequence_length(updated)).to_equal(3)
+
+        it "removes at index":
+            val seq = yaml_sequence([yaml_number("1"), yaml_number("2"), yaml_number("3")])
+            val updated = yaml_sequence_remove(seq, 1)
+            expect(yaml_sequence_length(updated)).to_equal(2)
+
+    context "search and transform":
+        it "contains finds element":
+            val seq = yaml_sequence([yaml_number("1"), yaml_number("2")])
+            expect(yaml_sequence_contains(seq, yaml_number("2"))).to_equal(true)
+
+        it "contains returns false for missing":
+            val seq = yaml_sequence([yaml_number("1")])
+            expect(yaml_sequence_contains(seq, yaml_number("99"))).to_equal(false)
+
+        it "index_of finds element":
+            val seq = yaml_sequence([yaml_number("10"), yaml_number("20"), yaml_number("30")])
+            expect(yaml_sequence_index_of(seq, yaml_number("20"))).to_equal(1)
+
+        it "index_of returns -1 for missing":
+            val seq = yaml_sequence([yaml_number("1")])
+            expect(yaml_sequence_index_of(seq, yaml_number("99"))).to_equal(-1)
+
+        it "reverses sequence":
+            val seq = yaml_sequence([yaml_number("1"), yaml_number("2"), yaml_number("3")])
+            val reversed = yaml_sequence_reverse(seq)
+            val first = yaml_sequence_get(reversed, 0)
+            expect(first).to_equal(yaml_number("3"))
+
+        it "slices sequence":
+            val seq = yaml_sequence([yaml_number("1"), yaml_number("2"), yaml_number("3"), yaml_number("4")])
+            val sliced = yaml_sequence_slice(seq, 1, 3)
+            expect(yaml_sequence_length(sliced)).to_equal(2)
+
+
+# ============================================================================
+# YAML Utilities - Advanced
+# ============================================================================
+
+describe "YAML Advanced Utilities":
+    """
+    ## YAML Advanced Operations
+
+    Tests for yaml_equals, yaml_deep_copy, yaml_merge_mappings,
+    yaml_is_empty, yaml_count_nodes, yaml_depth, yaml_get_nested, yaml_set_nested.
+    """
+
+    context "equality and copy":
+        it "equal values are equal":
+            val a = yaml_string("hello")
+            val b = yaml_string("hello")
+            expect(yaml_equals(a, b)).to_equal(true)
+
+        it "different values are not equal":
+            val a = yaml_string("hello")
+            val b = yaml_string("world")
+            expect(yaml_equals(a, b)).to_equal(false)
+
+        it "deep copy produces equal value":
+            val orig = yaml_mapping([("key", yaml_string("val"))])
+            val copy = yaml_deep_copy(orig)
+            expect(yaml_equals(orig, copy)).to_equal(true)
+
+    context "merge":
+        it "merges two mappings":
+            val m1 = yaml_mapping([("a", yaml_number("1"))])
+            val m2 = yaml_mapping([("b", yaml_number("2"))])
+            val merged = yaml_merge_mappings(m1, m2)
+            expect(yaml_mapping_has(merged, "a")).to_equal(true)
+            expect(yaml_mapping_has(merged, "b")).to_equal(true)
+
+        it "second mapping overrides first":
+            val m1 = yaml_mapping([("a", yaml_number("1"))])
+            val m2 = yaml_mapping([("a", yaml_number("2"))])
+            val merged = yaml_merge_mappings(m1, m2)
+            val result = yaml_mapping_get(merged, "a")
+            expect(result).to_equal(yaml_number("2"))
+
+    context "emptiness check":
+        it "empty mapping is empty":
+            expect(yaml_is_empty(yaml_mapping([]))).to_equal(true)
+
+        it "empty sequence is empty":
+            expect(yaml_is_empty(yaml_sequence([]))).to_equal(true)
+
+        it "non-empty mapping is not empty":
+            expect(yaml_is_empty(yaml_mapping([("a", yaml_number("1"))]))).to_equal(false)
+
+        it "non-empty sequence is not empty":
+            expect(yaml_is_empty(yaml_sequence([yaml_number("1")]))).to_equal(false)
+
+    context "node counting and depth":
+        it "counts nodes in scalar":
+            expect(yaml_count_nodes(yaml_string("x"))).to_equal(1)
+
+        it "counts nodes in sequence":
+            val seq = yaml_sequence([yaml_number("1"), yaml_number("2")])
+            expect(yaml_count_nodes(seq)).to_be_greater_than(1)
+
+        it "depth of scalar is 1":
+            expect(yaml_depth(yaml_string("x"))).to_equal(1)
+
+        it "depth of nested structure":
+            val inner = yaml_mapping([("a", yaml_string("b"))])
+            val outer = yaml_mapping([("nested", inner)])
+            expect(yaml_depth(outer)).to_be_greater_than(1)
+
+    context "nested access":
+        it "gets nested value":
+            val inner = yaml_mapping([("b", yaml_string("value"))])
+            val outer = yaml_mapping([("a", inner)])
+            val result = yaml_get_nested(outer, ["a", "b"])
+            expect(result).to_equal(yaml_string("value"))
+
+        it "sets nested value":
+            val inner = yaml_mapping([("b", yaml_string("old"))])
+            val outer = yaml_mapping([("a", inner)])
+            val updated = yaml_set_nested(outer, ["a", "b"], yaml_string("new"))
+            val result = yaml_get_nested(updated, ["a", "b"])
+            expect(result).to_equal(yaml_string("new"))
+
+    context "to_string and from_string":
+        it "round-trips through string":
+            val v = yaml_mapping([("key", yaml_string("val"))])
+            val s = yaml_to_string(v)
+            expect(s).to_contain("key")
+
+    context "pretty and compact print":
+        it "pretty prints value":
+            val v = yaml_mapping([("key", yaml_string("val"))])
+            val result = yaml_pretty_print(v)
+            expect(result).to_contain("key")
+
+        it "compact prints value":
+            val v = yaml_mapping([("key", yaml_string("val"))])
+            val result = yaml_compact_print(v)
+            expect(result).to_contain("key")
+
+
+# ============================================================================
+# YAML Validate - Multi-document and Anchors
+# ============================================================================
+
+describe "YAML Validate":
+    """
+    ## Multi-Document and Anchor/Alias Support
+
+    Tests for yaml_parse_documents, yaml_serialize_documents, anchors and aliases.
+    """
+
+    context "multi-document":
+        it "parses multiple documents":
+            val input = "name: Alice\n---\nname: Bob"
+            val docs = yaml_parse_documents(input)
+            expect(docs.length()).to_be_greater_than(0)
+
+        it "serializes multiple documents":
+            val docs = [yaml_string("doc1"), yaml_string("doc2")]
+            val result = yaml_serialize_documents(docs, "flow")
+            expect(result).to_contain("doc1")
+            expect(result).to_contain("doc2")
+
+    context "anchors and aliases":
+        it "creates anchor":
+            val anchor = yaml_create_anchor("myanchor", yaml_string("value"))
+            expect(yaml_is_anchor(anchor)).to_equal(true)
+
+        it "creates alias":
+            val alias = yaml_create_alias("myanchor")
+            expect(yaml_is_alias(alias)).to_equal(true)
+
+        it "is_anchor false for non-anchor":
+            expect(yaml_is_anchor(yaml_string("x"))).to_equal(false)
+
+        it "is_alias false for non-alias":
+            expect(yaml_is_alias(yaml_string("x"))).to_equal(false)
+
+        it "gets anchor name":
+            val anchor = yaml_create_anchor("myanchor", yaml_string("value"))
+            expect(yaml_get_anchor_name(anchor)).to_equal("myanchor")
+
+        it "gets anchor value":
+            val anchor = yaml_create_anchor("myanchor", yaml_string("value"))
+            val v = yaml_get_anchor_value(anchor)
+            expect(yaml_equals(v, yaml_string("value"))).to_equal(true)
+
+        it "gets alias name":
+            val alias = yaml_create_alias("myanchor")
+            expect(yaml_get_alias_name(alias)).to_equal("myanchor")
+
+        it "resolves aliases":
+            val anchor = yaml_create_anchor("data", yaml_string("resolved"))
+            val alias = yaml_create_alias("data")
+            val resolved = yaml_resolve_aliases(alias, [anchor])
+            expect(yaml_equals(resolved, yaml_string("resolved"))).to_equal(true)
+
+    context "indentation utilities":
+        it "creates indent string":
+            val result = yaml_indent("text", 2, 2)
+            expect(result.length()).to_be_greater_than(4)
+
+
+# ============================================================================
+# YAML Schema Validation
+# ============================================================================
+
+describe "YAML Schema Validation":
+    """
+    ## YAML Schema Validation
+
+    Tests for yaml_validate_schema.
+    """
+
+    context "validation":
+        it "validates matching type":
+            val result = yaml_validate_schema(yaml_string("hello"), "string")
+            expect(result).to_equal(true)
+
+        it "rejects mismatched type":
+            val result = yaml_validate_schema(yaml_string("hello"), "number")
+            expect(result).to_equal(false)
+
+    context "flatten mapping":
+        it "flattens nested mapping":
+            val inner = yaml_mapping([("b", yaml_string("val"))])
+            val outer = yaml_mapping([("a", inner)])
+            val flat = yaml_flatten_mapping(outer)
+            expect(yaml_mapping_has(flat, "a.b")).to_equal(true)
+
+
+# @allow(unnamed_duplicate_typed_args)

@@ -1,0 +1,320 @@
+# @cover src/app/test_daemon/adapters/hardware_adapter.spl 80%
+"""
+# TRACE32 Adapter Specification
+
+**Feature IDs:** #T32-ADAPTER
+**Category:** Testing
+**Difficulty:** 3/5
+**Status:** Implemented
+**Design:** doc/05_design/t32_terminal_power_remote.md
+
+## Overview
+
+Tests for the configurable Trace32Adapter in the test daemon. Validates
+config construction (defaults, map-based, overrides), session key generation,
+endpoint parsing, and executable selection.
+
+## Key Concepts
+
+| Concept | Description |
+|---------|-------------|
+| Trace32AdapterConfig | Configurable struct for T32 adapter settings |
+| trace32_adapter_config_from_map | Factory from SDN string map |
+| Trace32Client | Proper RCL protocol client (replaces raw netcat) |
+"""
+
+use std.sspec.*
+use app.test_daemon.adapters.hardware_adapter.{
+    Trace32Adapter, Trace32AdapterConfig, Trace32Endpoint,
+    trace32_adapter_new, trace32_adapter_with_config, trace32_adapter_from_map,
+    trace32_adapter_config_default, trace32_adapter_config_from_map,
+    T32_DEFAULT_RCL_PORT, T32_DEFAULT_HOST, T32_DEFAULT_INSTALL_DIR,
+    T32_DEFAULT_STARTUP_WAIT_MS, T32_DEFAULT_MAX_RETRIES,
+    T32_DEFAULT_RETRY_INTERVAL_MS, T32_DEFAULT_RESET_SETTLE_MS,
+    T32_DEFAULT_FLASH_SETTLE_MS
+}
+use app.test_daemon.session_types.{
+    TestSessionMeta, SESSION_KIND_TRACE32, SESSION_KIND_LOCAL,
+    REUSE_EXCLUSIVE_REUSED, REUSE_SHARED_WITH_RESET,
+    RESET_RELOAD_BINARY, RESET_HARD,
+    test_session_meta_default
+}
+
+# ============================================================================
+# Test Group 1: Default Config
+# ============================================================================
+
+describe "Trace32AdapterConfig defaults":
+    it "has correct default host":
+        val cfg = trace32_adapter_config_default()
+        expect(cfg.t32_host).to_equal("localhost")
+
+    it "has correct default RCL port":
+        val cfg = trace32_adapter_config_default()
+        expect(cfg.rcl_port).to_equal(20000)
+
+    it "has correct default install dir":
+        val cfg = trace32_adapter_config_default()
+        expect(cfg.t32_install_dir).to_equal("/opt/t32")
+
+    it "has correct default startup wait":
+        val cfg = trace32_adapter_config_default()
+        expect(cfg.startup_wait_ms).to_equal(3000)
+
+    it "has correct default max retries":
+        val cfg = trace32_adapter_config_default()
+        expect(cfg.max_retries).to_equal(15)
+
+    it "has correct default retry interval":
+        val cfg = trace32_adapter_config_default()
+        expect(cfg.retry_interval_ms).to_equal(500)
+
+    it "has correct default reset settle time":
+        val cfg = trace32_adapter_config_default()
+        expect(cfg.reset_settle_ms).to_equal(1000)
+
+    it "has correct default flash settle time":
+        val cfg = trace32_adapter_config_default()
+        expect(cfg.flash_settle_ms).to_equal(1000)
+
+    it "has empty default practice script":
+        val cfg = trace32_adapter_config_default()
+        expect(cfg.practice_script).to_equal("")
+
+    it "defaults to exclusive_reused reuse mode":
+        val cfg = trace32_adapter_config_default()
+        expect(cfg.reuse_mode).to_equal(REUSE_EXCLUSIVE_REUSED)
+
+    it "defaults to reload_binary reset policy":
+        val cfg = trace32_adapter_config_default()
+        expect(cfg.reset_policy).to_equal(RESET_RELOAD_BINARY)
+
+# ============================================================================
+# Test Group 2: Config from Map
+# ============================================================================
+
+describe "Trace32AdapterConfig from map":
+    it "overrides host from map":
+        var m: {text: text} = {}
+        m["t32_host"] = "192.168.1.50"
+        val cfg = trace32_adapter_config_from_map(m)
+        expect(cfg.t32_host).to_equal("192.168.1.50")
+
+    it "overrides rcl_port from map":
+        var m: {text: text} = {}
+        m["rcl_port"] = "20001"
+        val cfg = trace32_adapter_config_from_map(m)
+        expect(cfg.rcl_port).to_equal(20001)
+
+    it "overrides install dir from map":
+        var m: {text: text} = {}
+        m["t32_install_dir"] = "/usr/local/t32"
+        val cfg = trace32_adapter_config_from_map(m)
+        expect(cfg.t32_install_dir).to_equal("/usr/local/t32")
+
+    it "overrides startup_wait_ms from map":
+        var m: {text: text} = {}
+        m["startup_wait_ms"] = "1500"
+        val cfg = trace32_adapter_config_from_map(m)
+        expect(cfg.startup_wait_ms).to_equal(1500)
+
+    it "overrides max_retries from map":
+        var m: {text: text} = {}
+        m["max_retries"] = "8"
+        val cfg = trace32_adapter_config_from_map(m)
+        expect(cfg.max_retries).to_equal(8)
+
+    it "overrides practice_script from map":
+        var m: {text: text} = {}
+        m["practice_script"] = "config/t32/startup.cmm"
+        val cfg = trace32_adapter_config_from_map(m)
+        expect(cfg.practice_script).to_equal("config/t32/startup.cmm")
+
+    it "overrides reuse_mode from map":
+        var m: {text: text} = {}
+        m["reuse_mode"] = "shared_with_reset"
+        val cfg = trace32_adapter_config_from_map(m)
+        expect(cfg.reuse_mode).to_equal(REUSE_SHARED_WITH_RESET)
+
+    it "overrides reset_policy from map":
+        var m: {text: text} = {}
+        m["reset_policy"] = "hard_reset"
+        val cfg = trace32_adapter_config_from_map(m)
+        expect(cfg.reset_policy).to_equal(RESET_HARD)
+
+    it "falls back to defaults for missing keys":
+        var m: {text: text} = {}
+        m["t32_host"] = "10.0.0.1"
+        val cfg = trace32_adapter_config_from_map(m)
+        expect(cfg.rcl_port).to_equal(20000)
+        expect(cfg.t32_install_dir).to_equal("/opt/t32")
+        expect(cfg.startup_wait_ms).to_equal(3000)
+
+    it "handles empty map as all defaults":
+        var m: {text: text} = {}
+        val cfg = trace32_adapter_config_from_map(m)
+        expect(cfg.t32_host).to_equal("localhost")
+        expect(cfg.rcl_port).to_equal(20000)
+
+# ============================================================================
+# Test Group 3: Adapter Construction
+# ============================================================================
+
+describe "Trace32Adapter construction":
+    it "creates with defaults via trace32_adapter_new":
+        val adapter = trace32_adapter_new()
+        expect(adapter.cfg.rcl_port).to_equal(20000)
+        expect(adapter.cfg.t32_host).to_equal("localhost")
+
+    it "creates with custom config via trace32_adapter_with_config":
+        var cfg = trace32_adapter_config_default()
+        cfg = Trace32AdapterConfig(
+            t32_host: "10.0.0.5",
+            rcl_port: 20002,
+            t32_install_dir: cfg.t32_install_dir,
+            startup_wait_ms: cfg.startup_wait_ms,
+            max_retries: cfg.max_retries,
+            retry_interval_ms: cfg.retry_interval_ms,
+            reset_settle_ms: cfg.reset_settle_ms,
+            flash_settle_ms: cfg.flash_settle_ms,
+            practice_script: cfg.practice_script,
+            reuse_mode: cfg.reuse_mode,
+            reset_policy: cfg.reset_policy
+        )
+        val adapter = trace32_adapter_with_config(cfg)
+        expect(adapter.cfg.t32_host).to_equal("10.0.0.5")
+        expect(adapter.cfg.rcl_port).to_equal(20002)
+
+    it "creates from map via trace32_adapter_from_map":
+        var m: {text: text} = {}
+        m["t32_host"] = "192.168.1.100"
+        m["rcl_port"] = "20010"
+        m["startup_wait_ms"] = "2000"
+        val adapter = trace32_adapter_from_map(m)
+        expect(adapter.cfg.t32_host).to_equal("192.168.1.100")
+        expect(adapter.cfg.rcl_port).to_equal(20010)
+        expect(adapter.cfg.startup_wait_ms).to_equal(2000)
+
+# ============================================================================
+# Test Group 4: Session Key Generation
+# ============================================================================
+
+describe "Trace32Adapter session key":
+    it "uses configured reuse_mode in session key":
+        var m: {text: text} = {}
+        m["reuse_mode"] = "shared_with_reset"
+        val adapter = trace32_adapter_from_map(m)
+        var meta = test_session_meta_default("test.spl")
+        meta = TestSessionMeta(
+            file_path: meta.file_path,
+            session_kind: SESSION_KIND_TRACE32,
+            target: "stm32h7",
+            reuse_mode: meta.reuse_mode,
+            reset_policy: meta.reset_policy,
+            artifact: "firmware.elf",
+            startup_cmd: meta.startup_cmd,
+            healthcheck: meta.healthcheck
+        )
+        val key = adapter.session_key(meta)
+        expect(key.reuse_mode).to_equal(REUSE_SHARED_WITH_RESET)
+
+    it "uses configured reset_policy in session key":
+        var m: {text: text} = {}
+        m["reset_policy"] = "hard_reset"
+        val adapter = trace32_adapter_from_map(m)
+        var meta = test_session_meta_default("test.spl")
+        meta = TestSessionMeta(
+            file_path: meta.file_path,
+            session_kind: SESSION_KIND_TRACE32,
+            target: "cortex-m4",
+            reuse_mode: meta.reuse_mode,
+            reset_policy: meta.reset_policy,
+            artifact: "",
+            startup_cmd: meta.startup_cmd,
+            healthcheck: meta.healthcheck
+        )
+        val key = adapter.session_key(meta)
+        expect(key.reset_policy).to_equal(RESET_HARD)
+
+    it "can_handle returns true for TRACE32 sessions":
+        val adapter = trace32_adapter_new()
+        var meta = test_session_meta_default("test.spl")
+        meta = TestSessionMeta(
+            file_path: meta.file_path,
+            session_kind: SESSION_KIND_TRACE32,
+            target: "arm",
+            reuse_mode: meta.reuse_mode,
+            reset_policy: meta.reset_policy,
+            artifact: meta.artifact,
+            startup_cmd: meta.startup_cmd,
+            healthcheck: meta.healthcheck
+        )
+        expect(adapter.can_handle(meta)).to_equal(true)
+
+    it "can_handle returns false for non-TRACE32 sessions":
+        val adapter = trace32_adapter_new()
+        val meta = test_session_meta_default("test.spl")
+        expect(adapter.can_handle(meta)).to_equal(false)
+
+# ============================================================================
+# Test Group 5: Target Executable Selection
+# ============================================================================
+
+describe "Trace32Adapter target executable":
+    it "selects t32marm for ARM targets":
+        val adapter = trace32_adapter_new()
+        val exe = adapter.t32_executable_for_target("cortex-m4")
+        expect(exe).to_equal("t32marm")
+
+    it "selects t32marm for arm keyword":
+        val adapter = trace32_adapter_new()
+        val exe = adapter.t32_executable_for_target("arm-none-eabi")
+        expect(exe).to_equal("t32marm")
+
+    it "selects t32mriscv for RISC-V targets":
+        val adapter = trace32_adapter_new()
+        val exe = adapter.t32_executable_for_target("rv32imac")
+        expect(exe).to_equal("t32mriscv")
+
+    it "selects t32mriscv for riscv keyword":
+        val adapter = trace32_adapter_new()
+        val exe = adapter.t32_executable_for_target("riscv64")
+        expect(exe).to_equal("t32mriscv")
+
+    it "selects t32mx86 for x86 targets":
+        val adapter = trace32_adapter_new()
+        val exe = adapter.t32_executable_for_target("x86_64")
+        expect(exe).to_equal("t32mx86")
+
+    it "selects t32mppc for PowerPC targets":
+        val adapter = trace32_adapter_new()
+        val exe = adapter.t32_executable_for_target("powerpc-e500")
+        expect(exe).to_equal("t32mppc")
+
+    it "defaults to t32marm for unknown targets":
+        val adapter = trace32_adapter_new()
+        val exe = adapter.t32_executable_for_target("unknown-target")
+        expect(exe).to_equal("t32marm")
+
+# ============================================================================
+# Test Group 6: Endpoint Parsing
+# ============================================================================
+
+describe "Trace32Adapter endpoint parsing":
+    it "parses host:port correctly":
+        val adapter = trace32_adapter_new()
+        val ep = adapter.parse_endpoint("192.168.1.50:20001")
+        expect(ep.host).to_equal("192.168.1.50")
+        expect(ep.port).to_equal(20001)
+
+    it "parses localhost:20000":
+        val adapter = trace32_adapter_new()
+        val ep = adapter.parse_endpoint("localhost:20000")
+        expect(ep.host).to_equal("localhost")
+        expect(ep.port).to_equal(20000)
+
+    it "falls back to config defaults for malformed input":
+        val adapter = trace32_adapter_new()
+        val ep = adapter.parse_endpoint("no-port-here")
+        expect(ep.host).to_equal("localhost")
+        expect(ep.port).to_equal(20000)

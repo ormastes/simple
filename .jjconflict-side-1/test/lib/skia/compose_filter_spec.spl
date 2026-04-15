@@ -1,0 +1,125 @@
+# @cover src/lib/skia/feature/filter/compose.spl 80%
+"""
+# Skia Compose Filter Specification
+
+**Feature IDs:** #SKI-COMPOSE
+**Category:** Stdlib
+**Difficulty:** 2/5
+**Status:** Implemented
+
+## Overview
+
+Tests for `compose_filter_new`, `compose_filter_new2`, and `apply_compose` —
+the multi-stage image-filter composer mirroring Skia's
+`SkImageFilters::Compose(outer, inner)`.
+"""
+
+use std.sspec.*
+use std.skia.backend.cpu.raster_prims.{Bitmap}
+use std.skia.feature.filter.{
+    BlurFilter, blur_filter_new,
+    ColorFilter, color_filter_invert,
+    FilterNode, FilterNodeKind,
+    filter_node_identity, filter_node_blur, filter_node_color,
+    ComposeFilter, compose_filter_new, compose_filter_new2, apply_compose
+}
+
+# ----------------------------------------------------------------------------
+# Test helpers
+# ----------------------------------------------------------------------------
+
+# Build a small RGBA bitmap with a deterministic gradient so blurs and inverts
+# produce different, comparable outputs.
+fn _make_test_bitmap(w: i64, h: i64) -> Bitmap:
+    val bmp = Bitmap.zeros(w, h)
+    var y = 0 as i64
+    while y < h:
+        var x = 0 as i64
+        while x < w:
+            val idx = (y * w + x) * 4
+            bmp.pixels[idx]     = ((x * 17) % 256) as u8
+            bmp.pixels[idx + 1] = ((y * 23) % 256) as u8
+            bmp.pixels[idx + 2] = (((x + y) * 11) % 256) as u8
+            bmp.pixels[idx + 3] = 255 as u8
+            x = x + 1
+        y = y + 1
+    bmp
+
+# Sum of absolute per-byte differences between two bitmaps. Returns -1 on
+# dimension mismatch so callers can assert "same shape" separately.
+fn _bitmap_diff(a: Bitmap, b: Bitmap) -> i64:
+    if a.width != b.width:
+        return 0 - 1
+    if a.height != b.height:
+        return 0 - 1
+    val total = a.width * a.height * 4
+    var i = 0 as i64
+    var acc = 0 as i64
+    while i < total:
+        val av = a.pixels[i] as i64
+        val bv = b.pixels[i] as i64
+        val d = if av >= bv: av - bv else: bv - av
+        acc = acc + d
+        i = i + 1
+    acc
+
+describe "compose_filter":
+    it "compose_filter: single Identity stage returns input unchanged":
+        val src = _make_test_bitmap(8, 6)
+        var stages = [FilterNode]()
+        stages.push(filter_node_identity())
+        val compose = compose_filter_new(stages)
+        val out = apply_compose(src, compose)
+        expect(out.width).to_equal(src.width)
+        expect(out.height).to_equal(src.height)
+        expect(_bitmap_diff(src, out)).to_equal(0 as i64)
+
+    it "compose_filter: two Identity stages return input unchanged":
+        val src = _make_test_bitmap(8, 6)
+        val compose = compose_filter_new2(filter_node_identity(), filter_node_identity())
+        val out = apply_compose(src, compose)
+        expect(out.width).to_equal(src.width)
+        expect(out.height).to_equal(src.height)
+        expect(_bitmap_diff(src, out)).to_equal(0 as i64)
+
+    it "compose_filter: Blur then Invert produces a visibly different output than either alone":
+        val src = _make_test_bitmap(12, 8)
+        val blur_node = filter_node_blur(blur_filter_new(2.0, 2.0))
+        val invert_node = filter_node_color(color_filter_invert())
+
+        var blur_only_stages = [FilterNode]()
+        blur_only_stages.push(blur_node)
+        val blur_only_out = apply_compose(src, compose_filter_new(blur_only_stages))
+
+        var invert_only_stages = [FilterNode]()
+        invert_only_stages.push(invert_node)
+        val invert_only_out = apply_compose(src, compose_filter_new(invert_only_stages))
+
+        val composed = apply_compose(src, compose_filter_new2(blur_node, invert_node))
+
+        # Composed result must differ from each single-stage result.
+        expect(_bitmap_diff(composed, blur_only_out)).to_be_greater_than(0 as i64)
+        expect(_bitmap_diff(composed, invert_only_out)).to_be_greater_than(0 as i64)
+        # And it should differ from the original src too.
+        expect(_bitmap_diff(composed, src)).to_be_greater_than(0 as i64)
+
+    it "compose_filter: empty stages list returns input unchanged (or handles gracefully)":
+        val src = _make_test_bitmap(5, 5)
+        val empty_stages = [FilterNode]()
+        val compose = compose_filter_new(empty_stages)
+        val out = apply_compose(src, compose)
+        expect(out.width).to_equal(src.width)
+        expect(out.height).to_equal(src.height)
+        expect(_bitmap_diff(src, out)).to_equal(0 as i64)
+
+    it "compose_filter: order matters — apply_compose(src, [Blur, Invert]) differs from apply_compose(src, [Invert, Blur])":
+        val src = _make_test_bitmap(12, 8)
+        val blur_node = filter_node_blur(blur_filter_new(2.5, 2.5))
+        val invert_node = filter_node_color(color_filter_invert())
+
+        val blur_then_invert = apply_compose(src, compose_filter_new2(blur_node, invert_node))
+        val invert_then_blur = apply_compose(src, compose_filter_new2(invert_node, blur_node))
+
+        # Blur and invert do not commute exactly because blur clamps then invert
+        # negates around 255; the orders must produce different bitmaps.
+        expect(_bitmap_diff(blur_then_invert, invert_then_blur)).to_be_greater_than(0 as i64)

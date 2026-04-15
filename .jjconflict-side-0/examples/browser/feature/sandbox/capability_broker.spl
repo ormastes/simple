@@ -1,0 +1,299 @@
+#![allow(unnamed_duplicate_typed_args)]
+# Capability-based sandboxing for the Simple Browser Platform.
+# Follows the OpenBSD pledge/unveil model. Each process gets a SandboxPolicy
+# loaded from sandbox.sdn profiles. The broker controls granting and revoking
+# capabilities at runtime.
+# MP-4: Inserts capability checks at IPC, file, and network boundaries.
+# Typed capability constants for FileRead, FileWrite, NetworkAccess,
+# DomAccess, GpuAccess, ScriptExecution.
+
+use std.io_runtime.{file_read}
+use examples.browser.entity.ipc.process_types.{ProcessId}
+use examples.browser.entity.ipc.message_types.{BrowserIpcMsg, BrowserIpcMethod}
+use examples.browser.shared.logging.{Logger}
+use examples.browser.shared.error.{BrowserError, sandbox_error}
+
+# MP-4: Capability type constants
+val CAP_FILE_READ = "FileRead"
+val CAP_FILE_WRITE = "FileWrite"
+val CAP_NETWORK_ACCESS = "NetworkAccess"
+val CAP_DOM_ACCESS = "DomAccess"
+val CAP_GPU_ACCESS = "GpuAccess"
+val CAP_SCRIPT_EXECUTION = "ScriptExecution"
+
+class SandboxPolicy:
+    capabilities: [text]
+    denied: [text]
+    pledge: bool
+    unveil_paths: [text]
+
+    static fn from_profile(capabilities: [text], denied: [text], pledge: bool, unveil_paths: [text]) -> SandboxPolicy:
+        SandboxPolicy(capabilities: capabilities, denied: denied, pledge: pledge, unveil_paths: unveil_paths)
+
+    static fn empty() -> SandboxPolicy:
+        SandboxPolicy(capabilities: [text](), denied: [text](), pledge: false, unveil_paths: [text]())
+
+class PolicyEntry:
+    pid_id: i64
+    policy: SandboxPolicy
+
+    static fn bind_policy(pid_id: i64, policy: SandboxPolicy) -> PolicyEntry:
+        PolicyEntry(pid_id: pid_id, policy: policy)
+
+class CapabilityBroker:
+    logger: Logger
+    policies: [PolicyEntry]
+
+    static fn create_broker(logger: Logger) -> CapabilityBroker:
+        CapabilityBroker(logger: logger, policies: [PolicyEntry]())
+
+    me apply_sandbox(pid: ProcessId, profile: text) -> Result<(), BrowserError>:
+        val policy = self.load_profile(profile)
+        match policy:
+            Ok(p):
+                val entry = PolicyEntry.bind_policy(pid.id, p)
+                self.policies.push(entry)
+                self.logger.info("Applied sandbox profile '{profile}' to pid={pid.id}")
+                Ok(())
+            Err(e):
+                Err(e)
+
+    fn check_capability(pid: ProcessId, cap: text) -> bool:
+        # MP-4: Core capability check — used at all IPC/file/network boundaries.
+        val policy = self.find_policy(pid)
+        match policy:
+            Some(p):
+                # Check denied list first — denied always wins
+                var i = 0
+                while i < p.denied.len():
+                    if p.denied.get(i) == cap:
+                        return false
+                    i = i + 1
+                # Check capabilities list
+                var j = 0
+                while j < p.capabilities.len():
+                    if p.capabilities.get(j) == cap:
+                        return true
+                    j = j + 1
+                false
+            nil:
+                false
+
+    fn check_ipc_send(sender_pid: ProcessId, msg: BrowserIpcMsg) -> Result<(), BrowserError>:
+        # MP-4: Verify sender has the required capability for this IPC method.
+        val required_cap = self.capability_for_method(msg.method)
+        if required_cap.len() == 0:
+            return Ok(())
+        if self.check_capability(sender_pid, required_cap):
+            Ok(())
+        else:
+            Err(sandbox_error("Process pid={sender_pid.id} lacks capability '{required_cap}' for IPC method {msg.method}"))
+
+    fn check_file_read(pid: ProcessId, path: text) -> Result<(), BrowserError>:
+        # MP-4: Verify process has FileRead capability before file read operations.
+        if self.check_capability(pid, CAP_FILE_READ):
+            # Also check unveil paths if pledge is active
+            val policy = self.find_policy(pid)
+            match policy:
+                Some(p):
+                    if p.pledge:
+                        if self.path_allowed(p.unveil_paths, path):
+                            Ok(())
+                        else:
+                            Err(sandbox_error("Process pid={pid.id} path '{path}' not in unveil list"))
+                    else:
+                        Ok(())
+                nil:
+                    Err(sandbox_error("No sandbox policy for pid={pid.id}"))
+        else:
+            Err(sandbox_error("Process pid={pid.id} lacks FileRead capability"))
+
+    fn check_file_write(pid: ProcessId, path: text) -> Result<(), BrowserError>:
+        # MP-4: Verify process has FileWrite capability before file write operations.
+        if self.check_capability(pid, CAP_FILE_WRITE):
+            val policy = self.find_policy(pid)
+            match policy:
+                Some(p):
+                    if p.pledge:
+                        if self.path_allowed(p.unveil_paths, path):
+                            Ok(())
+                        else:
+                            Err(sandbox_error("Process pid={pid.id} path '{path}' not in unveil list"))
+                    else:
+                        Ok(())
+                nil:
+                    Err(sandbox_error("No sandbox policy for pid={pid.id}"))
+        else:
+            Err(sandbox_error("Process pid={pid.id} lacks FileWrite capability"))
+
+    fn check_network(pid: ProcessId) -> Result<(), BrowserError>:
+        # MP-4: Verify process has NetworkAccess capability before network operations.
+        if self.check_capability(pid, CAP_NETWORK_ACCESS):
+            Ok(())
+        else:
+            Err(sandbox_error("Process pid={pid.id} lacks NetworkAccess capability"))
+
+    fn check_dom(pid: ProcessId) -> Result<(), BrowserError>:
+        # MP-4: Verify process has DomAccess capability.
+        if self.check_capability(pid, CAP_DOM_ACCESS):
+            Ok(())
+        else:
+            Err(sandbox_error("Process pid={pid.id} lacks DomAccess capability"))
+
+    fn check_gpu(pid: ProcessId) -> Result<(), BrowserError>:
+        # MP-4: Verify process has GpuAccess capability.
+        if self.check_capability(pid, CAP_GPU_ACCESS):
+            Ok(())
+        else:
+            Err(sandbox_error("Process pid={pid.id} lacks GpuAccess capability"))
+
+    fn check_script(pid: ProcessId) -> Result<(), BrowserError>:
+        # MP-4: Verify process has ScriptExecution capability.
+        if self.check_capability(pid, CAP_SCRIPT_EXECUTION):
+            Ok(())
+        else:
+            Err(sandbox_error("Process pid={pid.id} lacks ScriptExecution capability"))
+
+    me grant(pid: ProcessId, cap: text) -> Result<(), BrowserError>:
+        var i = 0
+        while i < self.policies.len():
+            val entry = self.policies.get(i)
+            if entry.pid_id == pid.id:
+                entry.policy.capabilities.push(cap)
+                self.logger.info("Granted '{cap}' to pid={pid.id}")
+                return Ok(())
+            i = i + 1
+        Err(sandbox_error("No sandbox policy for pid={pid.id}"))
+
+    me revoke(pid: ProcessId, cap: text) -> Result<(), BrowserError>:
+        var i = 0
+        while i < self.policies.len():
+            val entry = self.policies.get(i)
+            if entry.pid_id == pid.id:
+                # Add to denied list to override any existing grant
+                entry.policy.denied.push(cap)
+                self.logger.info("Revoked '{cap}' from pid={pid.id}")
+                return Ok(())
+            i = i + 1
+        Err(sandbox_error("No sandbox policy for pid={pid.id}"))
+
+    # --- internal helpers ---
+
+    fn find_policy(pid: ProcessId) -> Option<SandboxPolicy>:
+        var i = 0
+        while i < self.policies.len():
+            val entry = self.policies.get(i)
+            if entry.pid_id == pid.id:
+                return Some(entry.policy)
+            i = i + 1
+        nil
+
+    fn capability_for_method(method: BrowserIpcMethod) -> text:
+        # MP-4: Map IPC methods to required capabilities.
+        match method:
+            BrowserIpcMethod.NavigateTo: CAP_NETWORK_ACCESS
+            BrowserIpcMethod.CommitNavigation: CAP_DOM_ACCESS
+            BrowserIpcMethod.UpdateTitle: CAP_DOM_ACCESS
+            BrowserIpcMethod.PaintFrame: CAP_GPU_ACCESS
+            BrowserIpcMethod.RequestLayout: CAP_DOM_ACCESS
+            BrowserIpcMethod.DomUpdate: CAP_DOM_ACCESS
+            BrowserIpcMethod.FetchResource: CAP_NETWORK_ACCESS
+            BrowserIpcMethod.FetchResponse: CAP_NETWORK_ACCESS
+            BrowserIpcMethod.CancelFetch: CAP_NETWORK_ACCESS
+            BrowserIpcMethod.CookieRequest: CAP_NETWORK_ACCESS
+            BrowserIpcMethod.CookieResponse: CAP_NETWORK_ACCESS
+            BrowserIpcMethod.CreateSurface: CAP_GPU_ACCESS
+            BrowserIpcMethod.DestroySurface: CAP_GPU_ACCESS
+            BrowserIpcMethod.SubmitFrame: CAP_GPU_ACCESS
+            BrowserIpcMethod.SwapBuffers: CAP_GPU_ACCESS
+            BrowserIpcMethod.GpuMemoryReport: CAP_GPU_ACCESS
+
+    fn path_allowed(unveil_paths: [text], path: text) -> bool:
+        # MP-4: Check if path is under any unveiled directory.
+        var i = 0
+        while i < unveil_paths.len():
+            val allowed = unveil_paths.get(i)
+            if path.starts_with(allowed):
+                return true
+            i = i + 1
+        false
+
+    fn load_profile(profile: text) -> Result<SandboxPolicy, BrowserError>:
+        val content = file_read("examples/browser/sandbox.sdn")
+        if content.len() == 0:
+            return Err(sandbox_error("Failed to read sandbox policy file"))
+
+        var section = ""
+        var collecting_key = ""
+        var capabilities = [text]()
+        var denied = [text]()
+        var unveil_paths = [text]()
+        var pledge = false
+        var saw_profile = false
+
+        for raw_line in content.split("\n"):
+            val trimmed = raw_line.trim()
+            if trimmed == "" or trimmed.starts_with("#"):
+                pass_do_nothing
+            else if trimmed.ends_with(":") and not trimmed.contains(": "):
+                if collecting_key.len() > 0 and section == profile:
+                    collecting_key = ""
+                section = trimmed.substring(0, trimmed.len() - 1)
+                if section == profile:
+                    saw_profile = true
+            else if section == profile:
+                if collecting_key.len() > 0:
+                    if trimmed == "]":
+                        collecting_key = ""
+                    else:
+                        val item = _normalize_item(trimmed)
+                        if item.len() > 0:
+                            _push_list_item(collecting_key, item, capabilities, denied, unveil_paths)
+                else:
+                    val colon_index = trimmed.index_of(":")
+                    if colon_index < 0:
+                        pass_do_nothing
+                    else:
+                        val key = trimmed.substring(0, colon_index).trim()
+                        val value = trimmed.substring(colon_index + 1).trim()
+                        if value == "[":
+                            collecting_key = key
+                        else if value.starts_with("[") and value.ends_with("]"):
+                            _assign_inline_list(key, value, capabilities, denied, unveil_paths)
+                        else if key == "pledge":
+                            pledge = value == "true"
+
+        if not saw_profile:
+            return Err(sandbox_error("Sandbox profile not found: {profile}"))
+
+        Ok(SandboxPolicy.from_profile(
+            capabilities: capabilities,
+            denied: denied,
+            pledge: pledge,
+            unveil_paths: unveil_paths
+        ))
+
+fn _assign_inline_list(key: text, value: text, capabilities: [text], denied: [text], unveil_paths: [text]):
+    val inner = value.substring(1, value.len() - 1).trim()
+    if inner.len() == 0:
+        return
+    for piece in inner.split(","):
+        val item = _normalize_item(piece)
+        if item.len() > 0:
+            _push_list_item(key, item, capabilities, denied, unveil_paths)
+
+fn _push_list_item(key: text, item: text, capabilities: [text], denied: [text], unveil_paths: [text]):
+    if key == "capabilities":
+        capabilities.push(item)
+    else if key == "denied":
+        denied.push(item)
+    else if key == "unveil_paths":
+        unveil_paths.push(item)
+
+fn _normalize_item(raw: text) -> text:
+    var item = raw.trim()
+    if item.ends_with(","):
+        item = item.substring(0, item.len() - 1).trim()
+    if item.starts_with("\"") and item.ends_with("\"") and item.len() >= 2:
+        item = item.substring(1, item.len() - 1)
+    item

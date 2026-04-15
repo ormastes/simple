@@ -1,0 +1,307 @@
+# MIR Lowering - ML/Async/Custom Block Lowering
+#
+# Specialized lowering for non-core expression types:
+# - Custom blocks (sh{}, sql{}, re{}, etc.)
+# - ML/tensor blocks (loss{}, nograd{})
+# - Async/await expressions (await, yield, spawn, send, receive)
+
+use mir_data.*
+use hir.*
+use lexer.Span
+use compiler.blocks.value.BlockValue
+use compiler.mir.mir_lowering_types.{MirLowering, MirError}
+
+# ============================================================================
+# Runtime Function Operand Helpers
+# ============================================================================
+
+fn _rt_fn_operand_void(name: text) -> MirOperand:
+    """Create a MirOperand referencing a runtime function with no params returning void."""
+    MirOperand(kind: MirOperandKind.Const(
+        MirConstValue.Str(name),
+        MirType(kind: MirTypeKind.FuncPtr(MirSignature(
+            params: [],
+            return_type: MirType.unit(),
+            is_variadic: false
+        )))
+    ))
+
+fn _rt_fn_operand_i64_void(name: text) -> MirOperand:
+    """Create a MirOperand referencing a runtime function taking i64, returning void."""
+    MirOperand(kind: MirOperandKind.Const(
+        MirConstValue.Str(name),
+        MirType(kind: MirTypeKind.FuncPtr(MirSignature(
+            params: [MirType.i64()],
+            return_type: MirType.unit(),
+            is_variadic: false
+        )))
+    ))
+
+# ============================================================================
+# Custom Block Lowering
+# ============================================================================
+
+impl MirLowering:
+    me lower_custom_block(kind: text, value: BlockValue, span: Span) -> LocalId:
+        """Lower custom block to MIR.
+
+        Custom blocks are lowered by calling a runtime handler function
+        that processes the block value and returns a result.
+        """
+        # Create a local to hold the block kind as a constant
+        # Strings in MIR are lowered as (ptr, len) tuples
+        val str_type = MirType(kind: MirTypeKind.Tuple([
+            MirType(kind: MirTypeKind.Ptr(MirType(kind: MirTypeKind.U8), false)),
+            MirType(kind: MirTypeKind.U64)
+        ]))
+        val kind_dest = self.builder.new_temp(str_type)
+        self.builder.emit_const(kind_dest, MirConstValue.Str(kind), str_type)
+        val kind_local = kind_dest
+
+        # Emit call to runtime block handler
+        # rt_eval_block(kind: text, value: BlockValue) -> Any
+        val result = self.builder.new_temp(MirType.i64())
+
+        # For now, blocks that produce values just return unit
+        # The actual evaluation happens at runtime via the interpreter
+        # This is a placeholder for when we add full codegen support
+        result
+
+# ============================================================================
+# ML/Tensor Block Lowering
+# ============================================================================
+
+    me lower_loss_block(body: HirBlock) -> LocalId:
+        """Lower loss block to MIR.
+
+        Loss blocks:
+        1. Evaluate the body (loss expression)
+        2. Call rt_torch_autograd_backward() on the result tensor handle
+        3. Return the body result (the loss value)
+
+        The body is expected to produce a gradient-capable tensor handle (i64).
+        backward() computes gradients for all requires_grad parameters in the graph.
+        """
+        # Lower the body — evaluates the loss expression
+        val body_result = self.lower_block(body)
+
+        # Emit call to backward on the result tensor
+        # rt_torch_autograd_backward(handle: i64) -> void
+        if body_result.?:
+            val backward_fn = _rt_fn_operand_i64_void("rt_torch_autograd_backward")
+            self.builder.emit_call(backward_fn, [mir_operand_copy(body_result.unwrap())], MirType.unit())
+
+        match body_result:
+            case Some(result):
+                result
+            case nil:
+                self.error("loss{} body must produce a value", nil)
+                self.builder.new_temp(MirType.unit())
+
+    me lower_nograd_block(body: HirBlock) -> LocalId:
+        """Lower nograd block to MIR with failure-safe cleanup.
+
+        Nograd blocks:
+        1. Call rt_torch_autograd_no_grad_begin() to disable gradient tracking
+        2. Evaluate the body
+        3. Call rt_torch_autograd_no_grad_end() to restore gradient tracking
+
+        Begin/end calls are balanced and nesting-safe — the torch runtime
+        maintains an internal counter so nested nograd{} blocks restore
+        correctly.
+
+        Failure safety: after body lowering, every block that can escape the
+        nograd scope is patched with a no_grad_end() call.  Escape paths are:
+        - Return terminators (from ? operator or explicit return)
+        - Goto terminators targeting blocks outside the scope (break/continue
+          to an enclosing loop)
+        Panics/aborts are unrecoverable and cannot be guarded.
+        """
+        # Emit call to disable gradient tracking
+        val begin_fn = _rt_fn_operand_void("rt_torch_autograd_no_grad_begin")
+        self.builder.emit_call(begin_fn, [], MirType.unit())
+
+        # Save scope boundary: block IDs >= scope_start were created during
+        # body lowering and are "inside" the nograd scope.  A Goto whose
+        # target has id < scope_start is an escaping jump (break/continue).
+        val scope_start = self.builder.next_block_id
+        val blocks_before = self.builder.blocks.len()
+
+        # Lower the body
+        val body_result = self.lower_block(body)
+
+        # Emit cleanup on the success (fall-through) path
+        val end_fn = _rt_fn_operand_void("rt_torch_autograd_no_grad_end")
+        self.builder.emit_call(end_fn, [], MirType.unit())
+
+        # Patch every block created during body lowering whose terminator
+        # escapes the nograd scope.  We insert a no_grad_end() call at the
+        # end of the block's instruction list (which executes just before
+        # the terminator).
+        val cleanup_inst = MirInst(
+            kind: MirInstKind.Call(nil, _rt_fn_operand_void("rt_torch_autograd_no_grad_end"), []),
+            span: nil
+        )
+        var new_blocks: [MirBlock] = []
+        var i = 0
+        while i < self.builder.blocks.len():
+            var block = self.builder.blocks[i]
+            if i >= blocks_before:
+                var needs_cleanup = false
+                match block.terminator:
+                    case MirTerminator.Return(_):
+                        needs_cleanup = true
+                    case MirTerminator.Goto(target):
+                        if target.id < scope_start:
+                            needs_cleanup = true
+                    case _:
+                        pass
+                if needs_cleanup:
+                    block = MirBlock(
+                        id: block.id,
+                        label: block.label,
+                        instructions: block.instructions.push(cleanup_inst),
+                        terminator: block.terminator
+                    )
+            new_blocks = new_blocks.push(block)
+            i = i + 1
+        self.builder.blocks = new_blocks
+
+        body_result ?? self.builder.new_temp(MirType.unit())
+
+# ============================================================================
+# Async/Await Lowering
+# ============================================================================
+
+    me lower_await(future_expr: HirExpr) -> LocalId:
+        """Lower await expression to MIR.
+
+        await expr:
+        1. Lower the future/promise expression
+        2. Emit Await instruction that suspends until promise resolves
+        3. Return the resolved value
+        """
+        # Lower the future expression to get a Promise<T>
+        val promise_local = self.lower_expr(future_expr)
+
+        # Create destination for the awaited result
+        # The result type should be the inner type of Promise<T>
+        # For now, use i64 as placeholder (proper type inference in future)
+        val result_type = MirType.i64()
+        val dest = self.builder.new_temp(result_type)
+
+        # Emit Await instruction
+        self.builder.emit(MirInst(
+            kind: MirInstKind.Await(dest: dest, promise: mir_operand_copy(promise_local)),
+            span: nil
+        ))
+
+        dest
+
+    me lower_yield(value: HirExpr?) -> LocalId:
+        """Lower yield expression to MIR.
+
+        yield expr:
+        1. Lower the optional value expression
+        2. Emit Yield instruction that suspends the generator
+        3. Return unit (yield is a statement-like expression)
+        """
+        # Lower the optional value
+        val value_operand = if value.?:
+            val value_local = self.lower_expr(value.unwrap())
+            Some(mir_operand_copy(value_local))
+        else:
+            nil
+
+        # Emit Yield instruction
+        self.builder.emit(MirInst(
+            kind: MirInstKind.Yield(value: value_operand),
+            span: nil
+        ))
+
+        # Yield returns unit
+        self.builder.new_temp(MirType.unit())
+
+    me lower_spawn(handler: HirExpr, args: [HirExpr]) -> LocalId:
+        """Lower spawn expression to MIR.
+
+        spawn handler(args):
+        1. Lower the handler expression (async function)
+        2. Lower all argument expressions
+        3. Emit Spawn instruction
+        4. Return the spawned task/actor handle
+        """
+        # Lower handler
+        val handler_local = self.lower_expr(handler)
+
+        # Lower arguments
+        var arg_operands: [MirOperand] = []
+        for arg in args:
+            val arg_local = self.lower_expr(arg)
+            arg_operands = arg_operands.push(mir_operand_copy(arg_local))
+
+        # Create destination for the task handle
+        val dest = self.builder.new_temp(MirType.i64())  # Task handle type
+
+        # Emit Spawn instruction
+        self.builder.emit(MirInst(
+            kind: MirInstKind.Spawn(dest: dest, handler: mir_operand_copy(handler_local), args: arg_operands),
+            span: nil
+        ))
+
+        dest
+
+    me lower_send(target_expr: HirExpr, message: HirExpr) -> LocalId:
+        """Lower send expression to MIR.
+
+        target <- message:
+        1. Lower the target expression
+        2. Lower the message expression
+        3. Emit Send instruction
+        4. Return unit
+        """
+        # Lower target and message
+        val target_local = self.lower_expr(target_expr)
+        val message_local = self.lower_expr(message)
+
+        # Emit Send instruction
+        self.builder.emit(MirInst(
+            kind: MirInstKind.Send(target: mir_operand_copy(target_local), message: mir_operand_copy(message_local)),
+            span: nil
+        ))
+
+        # Send returns unit
+        self.builder.new_temp(MirType.unit())
+
+    me lower_receive(timeout: HirExpr?) -> LocalId:
+        """Lower receive expression to MIR.
+
+        receive or receive(timeout):
+        1. Lower optional timeout expression
+        2. Emit Receive instruction
+        3. Return the received message
+        """
+        # Lower optional timeout
+        val timeout_operand = if timeout.?:
+            val timeout_local = self.lower_expr(timeout.unwrap())
+            Some(mir_operand_copy(timeout_local))
+        else:
+            nil
+
+        # Create destination for received message
+        val dest = self.builder.new_temp(MirType.i64())  # Message type
+
+        # Emit Receive instruction
+        self.builder.emit(MirInst(
+            kind: MirInstKind.Receive(dest: dest, timeout: timeout_operand),
+            span: nil
+        ))
+
+        dest
+
+# ============================================================================
+# Exports
+# ============================================================================
+
+# Methods are attached to MirLowering via impl block above.
+# No separate exports needed -- they are accessed through MirLowering instances.

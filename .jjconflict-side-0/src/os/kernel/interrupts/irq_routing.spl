@@ -1,0 +1,79 @@
+# IRQ-to-Notification Routing — bridges hardware interrupts to L4-style notifications
+#
+# When a device fires an IRQ, the kernel interrupt handler looks up the
+# IRQ routing table and signals the corresponding notification object.
+# This allows user-space drivers to wait for interrupts via NotificationWait.
+
+use os.kernel.ipc.notif_global.{g_notification_table}
+use os.kernel.ipc.notification.{notification_signal}
+use os.kernel.interrupts.idt.{idt_register_handler, VEC_IRQ_BASE}
+use os.kernel.types.task_types.{TaskContext}
+
+# Route table: maps hardware IRQ vector to notification_id + bit
+val MAX_IRQ_ROUTES: u64 = 48  # vectors 32-79 (hardware IRQs)
+
+var route_notif_id: [u64; 48]
+var route_notif_bit: [u64; 48]
+var route_active: [bool; 48]
+
+fn irq_routing_init():
+    """Initialize IRQ routing table. All routes inactive."""
+    var i: u64 = 0
+    while i < MAX_IRQ_ROUTES:
+        route_notif_id[i] = 0
+        route_notif_bit[i] = 0
+        route_active[i] = false
+        i = i + 1
+
+fn irq_route_register(vector: u32, notif_id: u64, notif_bit: u64) -> bool:
+    """Register an IRQ route: when `vector` fires, signal `notif_id` with `notif_bit`.
+
+    Returns true on success, false if vector out of range.
+    """
+    val idx = (vector - VEC_IRQ_BASE) as u64
+    if idx >= MAX_IRQ_ROUTES:
+        return false
+    route_notif_id[idx] = notif_id
+    route_notif_bit[idx] = notif_bit
+    route_active[idx] = true
+    # Register our generic handler in the IDT handler table
+    idt_register_handler(vector, _irq_route_handler)
+    true
+
+fn irq_route_unregister(vector: u32):
+    """Remove an IRQ route."""
+    val idx = (vector - VEC_IRQ_BASE) as u64
+    if idx < MAX_IRQ_ROUTES:
+        route_active[idx] = false
+        route_notif_id[idx] = 0
+        route_notif_bit[idx] = 0
+
+fn _irq_route_handler(ctx: TaskContext):
+    """Generic IRQ handler — registered in handler_table for routed vectors.
+
+    Called from IDT dispatch for routed hardware IRQ vectors.
+    The actual notification signaling is done by irq_dispatch_routed(),
+    which is called from idt_dispatch with the vector number.
+    """
+    pass_dn  # Notification signaling handled by irq_dispatch_routed
+
+fn irq_dispatch_routed(vector: u32):
+    """Called from the IDT dispatch path with the actual vector number.
+    Signals the notification for this vector's route."""
+    val idx = (vector - VEC_IRQ_BASE) as u64
+    if idx >= MAX_IRQ_ROUTES:
+        return
+    if not route_active[idx]:
+        return
+    val notif_id = route_notif_id[idx]
+    val notif_bit = route_notif_bit[idx]
+    # Signal the notification — this may wake a blocked driver thread
+    notification_signal(g_notification_table, notif_id, notif_bit)
+    # EOI is handled by the ISR stub in idt.spl, not here
+
+fn irq_route_is_active(vector: u32) -> bool:
+    """Check if a vector has an active route."""
+    val idx = (vector - VEC_IRQ_BASE) as u64
+    if idx >= MAX_IRQ_ROUTES:
+        return false
+    route_active[idx]

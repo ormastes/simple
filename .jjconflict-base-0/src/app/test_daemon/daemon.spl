@@ -1,0 +1,492 @@
+#![allow(unnamed_duplicate_typed_args)]
+@allow(unnamed_duplicate_typed_args)
+# Test Daemon — Core daemon using DaemonRunner for test execution
+#
+# Handles concurrent test requests, caches results for unchanged tests,
+# manages QEMU session sharing, and deduplicates concurrent requests.
+
+
+use std.daemon_sdk.daemon.{DaemonRunner, daemon_runner_start}
+use std.daemon_sdk.types.{
+    DaemonConfig, DaemonRequest, DaemonResponse, DaemonState,
+    daemon_response_new
+}
+use app.test_daemon.types.{
+    TestDaemonConfig, test_daemon_config_default,
+    TREQ_RUN_SINGLE, TREQ_RUN_ALL, TREQ_CLEAN_RUN, TREQ_STATUS, TREQ_STOP,
+    TREQ_AGENT_REGISTER, TREQ_AGENT_CLAIM_BATCH,
+    TREQ_AGENT_REPORT_RESULT, TREQ_AGENT_DEREGISTER,
+    TREQ_SESSION_ACQUIRE, TREQ_SESSION_RELEASE, TREQ_SESSION_STATUS,
+    TREQ_SESSION_RESET, TREQ_SESSION_EXECUTE, TREQ_SESSION_STOP,
+    TRESP_QUEUED, TRESP_RUNNING, TRESP_COMPLETED, TRESP_FAILED,
+    TRESP_SKIPPED, TRESP_CACHED, TRESP_ERROR
+}
+use app.test_daemon.agent_pool.{AgentPool, agent_pool_new}
+use app.test_incremental_state_shared.{IncrementalTestState, incremental_test_state_load}
+use app.test_daemon.qemu_broker.{QemuBroker, qemu_broker_new}
+use app.test_daemon.session_broker.{SessionBroker, session_broker_new}
+use app.test_daemon.session_types.{
+    TestSessionMeta, test_session_meta_default,
+    session_kind_from_name, reuse_mode_from_name, reset_policy_from_name,
+    SESSION_KIND_LOCAL
+}
+use app.test_daemon.adapters.qemu_adapter.{QemuAdapter, qemu_adapter_new}
+use app.test_daemon.adapters.container_adapter.{ContainerAdapter, container_adapter_new}
+use app.test_daemon.adapters.service_adapter.{ServiceAdapter, service_adapter_new}
+use app.test_daemon.adapters.gui_adapter.{GuiAdapter, gui_adapter_new}
+use app.test_daemon.adapters.hardware_adapter.{OpenocdAdapter, Trace32Adapter, openocd_adapter_new, trace32_adapter_new}
+
+extern fn rt_time_now_unix_micros() -> i64
+extern fn rt_hash_text(s: text) -> i64
+extern fn rt_dir_list(path: text) -> [text]
+extern fn rt_file_exists(path: text) -> bool
+extern fn rt_mkdir_p(path: text) -> bool
+
+# ============================================================================
+# Test Daemon
+# ============================================================================
+
+class TestDaemon:
+    runner: DaemonRunner
+    config: TestDaemonConfig
+    incremental_state: IncrementalTestState
+    qemu_broker: QemuBroker
+    agent_pool: AgentPool
+    session_broker: SessionBroker
+    active_requests: {text: text}
+
+impl TestDaemon:
+    fn is_running() -> bool:
+        self.runner.is_running()
+
+    fn get_state() -> DaemonState:
+        self.runner.get_state()
+
+    # --- Main loop ---
+
+    me run():
+        while self.runner.is_running():
+            self.runner.run_poll_cycle(self.handle_request)
+
+            # Periodic session broker cleanup every 50 cycles
+            val state = self.runner.get_state()
+            if state.cycle_count % 50 == 0:
+                self.qemu_broker.cleanup_idle(self.config.qemu_session_timeout_ms)
+                self.session_broker.cleanup_idle()
+
+            # Periodic agent stale cleanup every 30 cycles
+            if state.cycle_count % 30 == 0:
+                self.agent_pool.cleanup_stale_agents(60000)
+
+            # Periodic cache save every 20 cycles
+            if state.cycle_count % 20 == 0:
+                self.incremental_state.save()
+
+            extern fn rt_sleep_ms(ms: i64)
+            rt_sleep_ms(self.config.daemon.poll_interval_ms)
+
+    # --- Request handler ---
+
+    fn handle_request(req: DaemonRequest) -> DaemonResponse:
+        val kind = req.kind
+        if kind == TREQ_RUN_SINGLE:
+            return self.handle_run_single(req)
+        elif kind == TREQ_RUN_ALL:
+            return self.handle_run_all(req)
+        elif kind == TREQ_CLEAN_RUN:
+            return self.handle_clean_run(req)
+        elif kind == TREQ_STATUS:
+            return self.handle_status(req)
+        elif kind == TREQ_STOP:
+            return self.handle_stop(req)
+        elif kind == TREQ_AGENT_REGISTER:
+            return self.handle_agent_register(req)
+        elif kind == TREQ_AGENT_CLAIM_BATCH:
+            return self.handle_agent_claim_batch(req)
+        elif kind == TREQ_AGENT_REPORT_RESULT:
+            return self.handle_agent_report_result(req)
+        elif kind == TREQ_AGENT_DEREGISTER:
+            return self.handle_agent_deregister(req)
+        elif kind == TREQ_SESSION_ACQUIRE:
+            return self.handle_session_acquire(req)
+        elif kind == TREQ_SESSION_RELEASE:
+            return self.handle_session_release(req)
+        elif kind == TREQ_SESSION_STATUS:
+            return self.handle_session_status(req)
+        elif kind == TREQ_SESSION_RESET:
+            return self.handle_session_reset(req)
+        elif kind == TREQ_SESSION_EXECUTE:
+            return self.handle_session_execute(req)
+        elif kind == TREQ_SESSION_STOP:
+            return self.handle_session_stop(req)
+        elif kind == -1:
+            # Generic stop signal from daemon_sdk
+            return self.handle_stop(req)
+
+        var resp = daemon_response_new(req.id, TRESP_ERROR)
+        resp.fields["error"] = "unknown request kind: {kind}"
+        resp
+
+    # --- Run single test ---
+
+    fn handle_run_single(req: DaemonRequest) -> DaemonResponse:
+        val test_path = req.fields["test_path"] ?? ""
+        val clean = req.fields["clean"] ?? ""
+
+        if test_path == "":
+            var resp = daemon_response_new(req.id, TRESP_ERROR)
+            resp.fields["error"] = "missing test_path"
+            return resp
+
+        # Dedup check
+        val dedup_key = rt_hash_text(test_path)
+        val existing = self.active_requests["{dedup_key}"]
+        if existing.? and existing != req.id:
+            var resp = daemon_response_new(req.id, TRESP_QUEUED)
+            resp.fields["redirect"] = existing
+            return resp
+
+        self.active_requests["{dedup_key}"] = req.id
+
+        # Change detection (unless clean run)
+        if clean != "true":
+            val cached = self.incremental_state.check_freshness(test_path)
+            if cached.test_path != "":
+                # Remove from active
+                self.active_requests["{dedup_key}"] = ""
+                var resp = daemon_response_new(req.id, TRESP_CACHED)
+                resp.fields["test_path"] = test_path
+                resp.fields["passed"] = "{cached.result_passed}"
+                resp.fields["failed"] = "{cached.result_failed}"
+                resp.fields["skipped"] = "{cached.result_skipped}"
+                resp.fields["duration_ms"] = "{cached.result_duration_ms}"
+                resp.fields["output"] = cached.result_output
+                resp.fields["cached"] = "true"
+                return resp
+
+        # Execute test
+        val result = self.execute_test(test_path)
+
+        # Remove from active
+        self.active_requests["{dedup_key}"] = ""
+
+        result
+
+    # --- Run all tests ---
+
+    fn handle_run_all(req: DaemonRequest) -> DaemonResponse:
+        val filter = req.fields["filter"] ?? ""
+        val test_files = discover_test_files(filter)
+
+        var total_passed: i64 = 0
+        var total_failed: i64 = 0
+        var total_skipped: i64 = 0
+        var total_cached: i64 = 0
+        val start_time = rt_time_now_unix_micros()
+
+        var i = 0
+        while i < test_files.len():
+            val test_path = test_files[i]
+            val cached = self.incremental_state.check_freshness(test_path)
+
+            if cached.test_path != "":
+                total_passed = total_passed + cached.result_passed
+                total_failed = total_failed + cached.result_failed
+                total_skipped = total_skipped + cached.result_skipped
+                total_cached = total_cached + 1
+            else:
+                self.execute_test(test_path)
+                val entry = self.incremental_state.check_freshness(test_path)
+                if entry.test_path != "":
+                    total_passed = total_passed + entry.result_passed
+                    total_failed = total_failed + entry.result_failed
+                    total_skipped = total_skipped + entry.result_skipped
+            i = i + 1
+
+        val elapsed = (rt_time_now_unix_micros() - start_time) / 1000
+
+        var resp = daemon_response_new(req.id, TRESP_COMPLETED)
+        resp.fields["passed"] = "{total_passed}"
+        resp.fields["failed"] = "{total_failed}"
+        resp.fields["skipped"] = "{total_skipped}"
+        resp.fields["cached"] = "{total_cached}"
+        resp.fields["total"] = "{test_files.len()}"
+        resp.fields["duration_ms"] = "{elapsed}"
+        resp
+
+    # --- Clean run (bypass cache) ---
+
+    fn handle_clean_run(req: DaemonRequest) -> DaemonResponse:
+        val test_path = req.fields["test_path"] ?? ""
+        if test_path == "":
+            var resp = daemon_response_new(req.id, TRESP_ERROR)
+            resp.fields["error"] = "missing test_path"
+            return resp
+
+        self.execute_test(test_path)
+
+    # --- Status query ---
+
+    fn handle_status(req: DaemonRequest) -> DaemonResponse:
+        val state = self.runner.get_state()
+        var resp = daemon_response_new(req.id, TRESP_COMPLETED)
+        resp.fields["daemon_status"] = state.status_text()
+        resp.fields["items_processed"] = "{state.items_processed}"
+        resp.fields["errors_count"] = "{state.errors_count}"
+        resp.fields["cycle_count"] = "{state.cycle_count}"
+        resp.fields["cache_entries"] = "{self.incremental_state.entries.keys().len()}"
+        resp.fields["qemu_active"] = "{self.qemu_broker.active_count()}"
+        resp.fields["qemu_idle"] = "{self.qemu_broker.idle_count()}"
+        resp.fields["agents_active"] = "{self.agent_pool.active_agent_count()}"
+        resp.fields["agents_pending"] = "{self.agent_pool.pending_count()}"
+        resp.fields["agents_completed"] = "{self.agent_pool.completed_count()}"
+        resp
+
+    # --- Stop ---
+
+    fn handle_stop(req: DaemonRequest) -> DaemonResponse:
+        self.incremental_state.save()
+        self.qemu_broker.shutdown_all()
+        self.session_broker.shutdown_all()
+        self.runner.shutdown()
+        daemon_response_new(req.id, TRESP_COMPLETED)
+
+    # --- Agent handlers ---
+
+    fn handle_agent_register(req: DaemonRequest) -> DaemonResponse:
+        val agent_id = req.fields["agent_id"] ?? ""
+        val capabilities = req.fields["capabilities"] ?? ""
+        if agent_id == "":
+            var resp = daemon_response_new(req.id, TRESP_ERROR)
+            resp.fields["error"] = "missing agent_id"
+            return resp
+        self.agent_pool.register_agent(agent_id, capabilities)
+        var resp = daemon_response_new(req.id, TRESP_COMPLETED)
+        resp.fields["agent_id"] = agent_id
+        resp
+
+    fn handle_agent_claim_batch(req: DaemonRequest) -> DaemonResponse:
+        val agent_id = req.fields["agent_id"] ?? ""
+        if agent_id == "":
+            var resp = daemon_response_new(req.id, TRESP_ERROR)
+            resp.fields["error"] = "missing agent_id"
+            return resp
+        val batch = self.agent_pool.claim_batch(agent_id)
+        var resp = daemon_response_new(req.id, TRESP_COMPLETED)
+        resp.fields["batch"] = batch.join(",")
+        resp.fields["count"] = "{batch.len()}"
+        resp
+
+    fn handle_agent_report_result(req: DaemonRequest) -> DaemonResponse:
+        val agent_id = req.fields["agent_id"] ?? ""
+        val test_path = req.fields["test_path"] ?? ""
+        val status = (req.fields["status"] ?? "0").to_i64() ?? 0
+        val passed = (req.fields["passed"] ?? "0").to_i64() ?? 0
+        val failed = (req.fields["failed"] ?? "0").to_i64() ?? 0
+        val duration_ms = (req.fields["duration_ms"] ?? "0").to_i64() ?? 0
+        val output = req.fields["output"] ?? ""
+        self.agent_pool.report_result(agent_id, test_path, status, passed, failed, duration_ms, output)
+
+        # Also record in cache
+        self.incremental_state.record_daemon_result(test_path, status, passed, failed, 0, duration_ms, output)
+
+        var resp = daemon_response_new(req.id, TRESP_COMPLETED)
+        resp.fields["test_path"] = test_path
+        resp
+
+    fn handle_agent_deregister(req: DaemonRequest) -> DaemonResponse:
+        val agent_id = req.fields["agent_id"] ?? ""
+        if agent_id == "":
+            var resp = daemon_response_new(req.id, TRESP_ERROR)
+            resp.fields["error"] = "missing agent_id"
+            return resp
+        self.agent_pool.deregister_agent(agent_id)
+        daemon_response_new(req.id, TRESP_COMPLETED)
+
+    # --- Session handlers ---
+
+    me handle_session_acquire(req: DaemonRequest) -> DaemonResponse:
+        val kind_name = req.fields["session_kind"] ?? "local"
+        val target = req.fields["target"] ?? ""
+        val reuse_name = req.fields["reuse"] ?? "fresh_per_test"
+        val reset_name = req.fields["reset"] ?? "none"
+        val artifact = req.fields["artifact"] ?? ""
+        val file_path = req.fields["test_path"] ?? ""
+
+        var meta = test_session_meta_default(file_path)
+        meta = TestSessionMeta(
+            file_path: file_path,
+            session_kind: session_kind_from_name(kind_name),
+            target: target,
+            reuse_mode: reuse_mode_from_name(reuse_name),
+            reset_policy: reset_policy_from_name(reset_name),
+            artifact: artifact,
+            startup_cmd: req.fields["startup"] ?? "",
+            healthcheck: req.fields["healthcheck"] ?? ""
+        )
+
+        val lease = self.session_broker.acquire(meta)
+        var resp = daemon_response_new(req.id, TRESP_COMPLETED)
+        resp.fields["session_id"] = lease.session_id
+        resp.fields["pid"] = "{lease.pid}"
+        resp.fields["qmp_socket"] = lease.qmp_socket
+        resp.fields["status"] = "{lease.status}"
+        resp
+
+    me handle_session_release(req: DaemonRequest) -> DaemonResponse:
+        val session_id = req.fields["session_id"] ?? ""
+        if session_id == "":
+            var resp = daemon_response_new(req.id, TRESP_ERROR)
+            resp.fields["error"] = "missing session_id"
+            return resp
+        self.session_broker.release(session_id)
+        daemon_response_new(req.id, TRESP_COMPLETED)
+
+    fn handle_session_status(req: DaemonRequest) -> DaemonResponse:
+        var resp = daemon_response_new(req.id, TRESP_COMPLETED)
+        resp.fields["report"] = self.session_broker.status_report()
+        resp.fields["active"] = "{self.session_broker.active_count()}"
+        resp.fields["idle"] = "{self.session_broker.idle_count()}"
+        resp.fields["total"] = "{self.session_broker.total_count()}"
+        resp
+
+    me handle_session_reset(req: DaemonRequest) -> DaemonResponse:
+        val session_id = req.fields["session_id"] ?? ""
+        val policy_name = req.fields["reset_policy"] ?? "none"
+        val policy = reset_policy_from_name(policy_name)
+        if session_id == "":
+            var resp = daemon_response_new(req.id, TRESP_ERROR)
+            resp.fields["error"] = "missing session_id"
+            return resp
+        val ok = self.session_broker.reset_session(session_id, policy)
+        var resp = daemon_response_new(req.id, if ok: TRESP_COMPLETED else: TRESP_FAILED)
+        resp.fields["session_id"] = session_id
+        resp.fields["reset"] = if ok: "true" else: "false"
+        resp
+
+    me handle_session_execute(req: DaemonRequest) -> DaemonResponse:
+        val session_id = req.fields["session_id"] ?? ""
+        val test_path = req.fields["test_path"] ?? ""
+        val timeout_ms = (req.fields["timeout_ms"] ?? "120000").to_i64() ?? 120000
+        if session_id == "" or test_path == "":
+            var resp = daemon_response_new(req.id, TRESP_ERROR)
+            resp.fields["error"] = "missing session_id or test_path"
+            return resp
+        val result = self.session_broker.execute_in_session(session_id, test_path, timeout_ms)
+        var resp = daemon_response_new(req.id, result.status)
+        resp.fields["test_path"] = result.test_path
+        resp.fields["passed"] = "{result.passed}"
+        resp.fields["failed"] = "{result.failed}"
+        resp.fields["skipped"] = "{result.skipped}"
+        resp.fields["duration_ms"] = "{result.duration_ms}"
+        resp.fields["output"] = result.output
+        resp
+
+    me handle_session_stop(req: DaemonRequest) -> DaemonResponse:
+        val session_id = req.fields["session_id"] ?? ""
+        if session_id == "":
+            var resp = daemon_response_new(req.id, TRESP_ERROR)
+            resp.fields["error"] = "missing session_id"
+            return resp
+        val ok = self.session_broker.stop_session(session_id)
+        daemon_response_new(req.id, if ok: TRESP_COMPLETED else: TRESP_FAILED)
+
+    # --- Execute a test ---
+
+    fn execute_test(test_path: text) -> DaemonResponse:
+        # Shell out to bin/simple test
+        extern fn rt_shell_exec(cmd: text) -> text
+        extern fn rt_shell_exit_code() -> i64
+
+        val setup_start = rt_time_now_unix_micros()
+        val cmd = "bin/simple test {test_path} 2>&1"
+        val setup_ms = (rt_time_now_unix_micros() - setup_start) / 1000
+
+        val test_start = rt_time_now_unix_micros()
+        val output = rt_shell_exec(cmd)
+        val exit_code = rt_shell_exit_code()
+        val duration_ms = (rt_time_now_unix_micros() - test_start) / 1000
+
+        val status = if exit_code == 0: TRESP_COMPLETED else: TRESP_FAILED
+        val passed = if exit_code == 0: 1 else: 0
+        val failed = if exit_code != 0: 1 else: 0
+
+        # Record in cache
+        self.incremental_state.record_daemon_result(test_path, status, passed, failed, 0, duration_ms, output)
+
+        var resp = daemon_response_new("", status)
+        resp.fields["test_path"] = test_path
+        resp.fields["passed"] = "{passed}"
+        resp.fields["failed"] = "{failed}"
+        resp.fields["skipped"] = "0"
+        resp.fields["duration_ms"] = "{duration_ms}"
+        resp.fields["setup_ms"] = "{setup_ms}"
+        resp.fields["output"] = output
+        resp.fields["cached"] = "false"
+        resp
+
+# ============================================================================
+# Factory
+# ============================================================================
+
+fn test_daemon_start(config: TestDaemonConfig) -> TestDaemon:
+    rt_mkdir_p(".build/test_daemon")
+
+    val runner = daemon_runner_start(config.daemon)
+    val incremental_state = incremental_test_state_load(config.cache_path, config.dep_graph_path, true)
+    val qemu_broker = qemu_broker_new(config.max_qemu_sessions)
+    val pool = agent_pool_new(5)
+
+    # Initialize session broker with all adapters
+    var broker = session_broker_new()
+    broker.idle_timeout_ms = config.session_idle_timeout_ms
+    broker.startup_timeout_ms = config.session_startup_timeout_ms
+
+    # Register adapters
+    val qemu_a = qemu_adapter_new()
+    broker.register_adapter(qemu_a.base)
+    val container_a = container_adapter_new()
+    broker.register_adapter(container_a.base)
+    val service_a = service_adapter_new()
+    broker.register_adapter(service_a.base)
+    val gui_a = gui_adapter_new()
+    broker.register_adapter(gui_a.base)
+    val openocd_a = openocd_adapter_new()
+    broker.register_adapter(openocd_a.base)
+    val trace32_a = trace32_adapter_new()
+    broker.register_adapter(trace32_a.base)
+
+    TestDaemon(
+        runner: runner,
+        config: config,
+        incremental_state: incremental_state,
+        qemu_broker: qemu_broker,
+        agent_pool: pool,
+        session_broker: broker,
+        active_requests: {}
+    )
+
+# ============================================================================
+# Test Discovery
+# ============================================================================
+
+fn discover_test_files(filter: text) -> [text]:
+    var files: [text] = []
+    discover_test_files_in_dir("test/", filter, files)
+    files
+
+fn discover_test_files_in_dir(dir: text, filter: text, files: [text]):
+    if not rt_file_exists(dir):
+        return
+
+    val entries = rt_dir_list(dir)
+    var i = 0
+    while i < entries.len():
+        val entry = entries[i]
+        if entry.ends_with("_spec.spl"):
+            if filter == "" or entry.contains(filter):
+                files.push(entry)
+        elif not entry.contains("."):
+            # Likely a directory — recurse
+            discover_test_files_in_dir(entry, filter, files)
+        i = i + 1

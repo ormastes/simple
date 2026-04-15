@@ -1,0 +1,219 @@
+#![allow(unnamed_duplicate_typed_args)]
+# Simple UI - Minimal CLI Entry
+#
+# A narrow entrypoint for `simple ui ...` command dispatch from the Rust driver.
+# This keeps argument parsing simple and avoids the direct-script fallback logic
+# used by src/app/ui/main.spl.
+
+# Import directly from app files to avoid __init__.spl bare-export preloading
+use app.ui.tui.app.{run_tui}
+use app.ui.web.server.{run_web, run_web_with_access_store}
+use app.ui.electron.app.{run_electron}
+use app.ui.tauri.app.{run_tauri}
+use app.ui.browser.app.{run_browser_gui, run_browser_gui_with_access_store}
+use app.ui.none.app.{run_headless, run_headless_with_access_store}
+use app.ui.detect.{detect_gui_backend}
+use app.ui.render.types.{RenderConfig, RenderResult}
+use app.ui.render.export.{export_to_file}
+use app.ui.render.parser.{parse_render_args}
+use app.dashboard.render.adapter.{render_dashboard, DashboardRenderRequest}
+use app.dashboard.dashboard_collectors.{compute_summary}
+use app.llm_dashboard.render_adapter.{render_dashboard as render_llm_dashboard}
+use app.llm_dashboard.data.store.{AgentDashboardStore}
+use app.office.render_adapter.{office_render}
+
+extern fn rt_cli_get_args() -> [text]
+extern fn rt_file_exists(path: text) -> bool
+
+fn main() -> i64:
+    val parsed = parse_ui_cli()
+    val arg_count = parsed.0
+    val mode = parsed.1
+    val file_path = parsed.2
+    val port = parsed.3
+    val access_db_path = parsed.4
+
+    if arg_count == 0:
+        print_usage()
+        return 1
+
+    if mode == "-h" or mode == "--help":
+        print_usage()
+        return 0
+
+    if mode == "tui":
+        if arg_count < 2:
+            print "Error: tui mode requires a .ui.sdn file path"
+            return 1
+        return run_tui(file_path)
+
+    if mode == "tauri":
+        if arg_count < 2:
+            print "Error: tauri mode requires a .ui.sdn file path"
+            return 1
+        return run_tauri(file_path, port)
+
+    if mode == "web":
+        if arg_count < 2:
+            print "Error: web mode requires a .ui.sdn file path"
+            return 1
+        return run_web_with_access_store(file_path, port, access_db_path)
+
+    if mode == "electron":
+        if arg_count < 2:
+            print "Error: electron mode requires a .ui.sdn file path"
+            return 1
+        return run_electron(file_path, port)
+
+    if mode == "browser":
+        if arg_count < 2:
+            print "Error: browser mode requires a .ui.sdn file path"
+            return 1
+        return run_browser_gui_with_access_store(file_path, port, access_db_path)
+
+    if mode == "headless" or mode == "none":
+        if arg_count < 2:
+            print "Error: headless mode requires a .ui.sdn file path"
+            return 1
+        return run_headless_with_access_store(file_path, access_db_path)
+
+    if mode == "gui" or mode == "desktop":
+        if arg_count < 2:
+            print "Error: gui mode requires a .ui.sdn file path"
+            return 1
+        return run_detected_backend(detect_gui_backend(), file_path, port, access_db_path)
+
+    if mode == "render":
+        val render_args = collect_render_args()
+        val rcfg = parse_render_args(render_args)
+        val result = run_render(rcfg)
+        if rcfg.output_path.len() > 0:
+            export_to_file(result, rcfg.output_path)
+        if rcfg.format == "html" or rcfg.format == "both":
+            if result.html_output.len() > 0:
+                print result.html_output
+        if rcfg.format == "text" or rcfg.format == "both":
+            if result.text_output.len() > 0:
+                print result.text_output
+        if result.warnings.len() > 0:
+            for w in result.warnings:
+                print "Warning: {w}"
+        return 0
+
+    if rt_file_exists(mode):
+        return run_detected_backend(detect_gui_backend(), mode, 3000, access_db_path)
+
+    print "Error: Unknown mode '{mode}'. Use 'tui', 'web', 'tauri', 'electron', 'browser', 'render', or 'headless'."
+    print_usage()
+    return 1
+
+fn parse_ui_cli() -> (i64, text, text, i32, text):
+    val raw_args = rt_cli_get_args()
+    var found_ui = false
+    var arg_count = 0
+    var mode = ""
+    var file_path = ""
+    var port = 3000
+    var access_db_path = ""
+    var prev_was_port = false
+    var prev_was_access_db = false
+    for arg in raw_args:
+        if not found_ui:
+            if arg == "ui":
+                found_ui = true
+            continue
+
+        if prev_was_port:
+            port = arg.to_int()
+            prev_was_port = false
+            continue
+        elif prev_was_access_db:
+            access_db_path = arg
+            prev_was_access_db = false
+            continue
+        elif arg == "--port":
+            prev_was_port = true
+            continue
+        elif arg.starts_with("--port="):
+            port = arg[7:].to_int()
+            continue
+        elif arg == "--ui-access-db":
+            prev_was_access_db = true
+            continue
+        elif arg.starts_with("--ui-access-db="):
+            access_db_path = arg[15:]
+            continue
+
+        if arg_count == 0:
+            mode = arg
+        elif arg_count == 1:
+            file_path = arg
+
+        arg_count = arg_count + 1
+    return (arg_count, mode, file_path, port, access_db_path)
+
+fn run_detected_backend(backend: text, file_path: text, port: i32, access_db_path: text) -> i64:
+    if backend == "tauri":
+        return run_tauri(file_path, port)
+    if backend == "electron":
+        return run_electron(file_path, port)
+    if backend == "browser":
+        return run_browser_gui_with_access_store(file_path, port, access_db_path)
+    if backend == "web":
+        return run_web_with_access_store(file_path, port, access_db_path)
+    if backend == "headless":
+        return run_headless_with_access_store(file_path, access_db_path)
+    return run_tui(file_path)
+
+fn collect_render_args() -> [text]:
+    val raw_args = rt_cli_get_args()
+    var result: [text] = ["render"]
+    var found_render = false
+    for arg in raw_args:
+        if found_render:
+            result = result.push(arg)
+        elif arg == "render":
+            found_render = true
+    return result
+
+fn run_render(config: RenderConfig) -> RenderResult:
+    match config.adapter_name:
+        "dashboard" =>
+            val summary = compute_summary()
+            val req = DashboardRenderRequest(config: config, summary: summary)
+            return render_dashboard(req)
+        "llm_dashboard" =>
+            var store = AgentDashboardStore.new()
+            return render_llm_dashboard(config, store)
+        "word" | "sheets" | "slides" | "mail" | "planner" | "launcher" =>
+            return office_render(config)
+        _ =>
+            if config.asset_path.len() > 0:
+                run_headless_with_access_store(config.asset_path, "")
+                return RenderResult.text("Rendered: {config.asset_path}")
+            return RenderResult.empty()
+
+fn print_usage():
+    print "Simple UI Renderer"
+    print ""
+    print "Usage:"
+    print "  simple ui <file.ui.sdn>                      Auto-detect backend (default)"
+    print "  simple ui tui <file.ui.sdn>                  TUI mode (terminal)"
+    print "  simple ui tauri <file.ui.sdn> [--port N]     Tauri desktop mode"
+    print "  simple ui web <file.ui.sdn> [--port N]       Web GUI mode"
+    print "  simple ui electron <file.ui.sdn> [--port N]  Electron desktop mode"
+    print "  simple ui browser <file.ui.sdn> [--port N]   Browser engine mode (GPU/software)"
+    print "  simple ui gui <file.ui.sdn> [--port N]       Auto-detect GUI backend"
+    print "  simple ui headless <file.ui.sdn>             Headless mode (testing/CI)"
+    print "  simple ui render [file] [options]             Export render (text/html)"
+    print ""
+    print "Render options:"
+    print "  --format text|html|both   Output format (default: text)"
+    print "  --adapter NAME            App adapter (dashboard, llm_dashboard, word, sheets, ...)"
+    print "  --mode MODE               Adapter-specific mode"
+    print "  --theme NAME              Theme name (default: dark)"
+    print "  --width N                 Viewport width (default: 80)"
+    print "  --height N                Viewport height (default: 24)"
+    print "  --output PATH, -o PATH    Write exported render to a file"
+    print "  --ui-access-db PATH       Override persisted UI access store path"
+    print "  --demo                    Use built-in demo asset"

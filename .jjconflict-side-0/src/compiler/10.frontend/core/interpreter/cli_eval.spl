@@ -1,0 +1,368 @@
+#![allow(unnamed_duplicate_typed_args)]
+@allow(unnamed_duplicate_typed_args)
+# Core Interpreter — CLI Declaration Evaluation
+#
+# Evaluates `cli Name:` declarations at runtime (interpreter mode).
+# Parses argv using the declared schema, constructs a struct with parsed values,
+# and defines it as a global variable.
+#
+# Option metadata is encoded in decl_field_names[] as:
+#   "name|type_char|default|short|doc"
+# where type_char is: b=bool, s=text, i=i64, f=f64, a=array
+
+extern fn rt_cli_get_args() -> [text]
+
+# ===== Metadata Parsing Helpers =====
+
+fn cli_meta_get_name(meta: text) -> text:
+    # Extract option name from "name|type|default|short|doc"
+    var i = 0
+    while i < meta.len():
+        if meta[i] == "|":
+            return meta[0:i]
+        i = i + 1
+    meta
+
+fn cli_meta_get_type_char(meta: text) -> text:
+    # Extract type char (b/s/i/f/a)
+    var pipe_count = 0
+    var start = 0
+    var i = 0
+    while i < meta.len():
+        if meta[i] == "|":
+            pipe_count = pipe_count + 1
+            if pipe_count == 1:
+                start = i + 1
+            if pipe_count == 2:
+                return meta[start:i]
+        i = i + 1
+    if pipe_count >= 1:
+        return meta[start:]
+    "s"
+
+fn cli_meta_get_default(meta: text) -> text:
+    # Extract default value string
+    var pipe_count = 0
+    var start = 0
+    var i = 0
+    while i < meta.len():
+        if meta[i] == "|":
+            pipe_count = pipe_count + 1
+            if pipe_count == 2:
+                start = i + 1
+            if pipe_count == 3:
+                return meta[start:i]
+        i = i + 1
+    if pipe_count >= 2:
+        return meta[start:]
+    ""
+
+fn cli_meta_get_short(meta: text) -> text:
+    # Extract short name
+    var pipe_count = 0
+    var start = 0
+    var i = 0
+    while i < meta.len():
+        if meta[i] == "|":
+            pipe_count = pipe_count + 1
+            if pipe_count == 3:
+                start = i + 1
+            if pipe_count == 4:
+                return meta[start:i]
+        i = i + 1
+    if pipe_count >= 3:
+        return meta[start:]
+    ""
+
+fn cli_meta_get_doc(meta: text) -> text:
+    # Extract docstring
+    var pipe_count = 0
+    var start = 0
+    var i = 0
+    while i < meta.len():
+        if meta[i] == "|":
+            pipe_count = pipe_count + 1
+            if pipe_count == 4:
+                start = i + 1
+        i = i + 1
+    if pipe_count >= 4:
+        return meta[start:]
+    ""
+
+# ===== Name Conversion =====
+
+fn cli_name_to_flag(name: text) -> text:
+    # Convert option_name to --option-name (underscore → hyphen)
+    var result = "--"
+    var i = 0
+    while i < name.len():
+        if name[i] == "_":
+            result = result + "-"
+        else:
+            result = result + name[i]
+        i = i + 1
+    result
+
+# ===== Help Text Generation =====
+
+fn cli_generate_help(cli_name: text, fields: [text], directives: [text]) -> text:
+    var help = ""
+
+    # Extract top-level docstring from directives
+    for dir in directives:
+        if dir.starts_with("doc:"):
+            help = help + dir[4:] + "\n\n"
+
+    help = help + "Usage: " + cli_name + " [options] [command] [args...]\n\n"
+    help = help + "Options:\n"
+
+    for meta in fields:
+        val name = cli_meta_get_name(meta)
+        val type_char = cli_meta_get_type_char(meta)
+        val default_str = cli_meta_get_default(meta)
+        val short = cli_meta_get_short(meta)
+        val doc = cli_meta_get_doc(meta)
+        val flag = cli_name_to_flag(name)
+        var line = "  "
+        if short != "":
+            line = line + "-" + short + ", "
+        else:
+            line = line + "    "
+        line = line + flag
+        if type_char != "b":
+            line = line + "=<" + name + ">"
+        # Pad to 30 chars
+        while line.len() < 30:
+            line = line + " "
+        if doc != "":
+            line = line + doc
+        if default_str != "" and default_str != "false" and default_str != "0" and default_str != "":
+            line = line + " (default: " + default_str + ")"
+        help = help + line + "\n"
+
+    help = help + "  -h, --help                  Show this help message\n"
+    help
+
+# ===== Argv Parser =====
+
+fn cli_parse_argv(fields: [text], directives: [text], sub_decls: [i64]) -> i64:
+    # Get command line arguments
+    val all_args = rt_cli_get_args()
+
+    # Skip program name and script path
+    var argv: [text] = []
+    var start_idx = 1
+    if all_args.len() > 1 and all_args[1].ends_with("main.spl"):
+        start_idx = 2
+    var skip_i = start_idx
+    while skip_i < all_args.len():
+        argv.push(all_args[skip_i])
+        skip_i = skip_i + 1
+
+    # Build field name/short lookup arrays
+    var opt_names: [text] = []
+    var opt_flags: [text] = []
+    var opt_shorts: [text] = []
+    var opt_types: [text] = []
+    var opt_defaults: [text] = []
+    for meta in fields:
+        opt_names.push(cli_meta_get_name(meta))
+        opt_flags.push(cli_name_to_flag(cli_meta_get_name(meta)))
+        opt_shorts.push(cli_meta_get_short(meta))
+        opt_types.push(cli_meta_get_type_char(meta))
+        opt_defaults.push(cli_meta_get_default(meta))
+
+    # Initialize field values with defaults
+    var field_values: [i64] = []
+    var fi = 0
+    while fi < opt_names.len():
+        val tc = opt_types[fi]
+        if tc == "b":
+            field_values.push(val_make_bool(opt_defaults[fi] == "true"))
+        elif tc == "s":
+            field_values.push(val_make_text(opt_defaults[fi]))
+        elif tc == "i":
+            field_values.push(val_make_int(opt_defaults[fi].to_int()))
+        elif tc == "f":
+            field_values.push(val_make_float(opt_defaults[fi].to_float()))
+        else:
+            field_values.push(val_make_array([]))
+        fi = fi + 1
+
+    # Track command, file_path, rest args
+    var command_val = val_make_text("")
+    var file_path_val = val_make_text("")
+    var rest_vals: [i64] = []
+
+    # Extract file extension from directives
+    var file_ext = ""
+    var default_cmd = ""
+    for dir in directives:
+        if dir.starts_with("file:"):
+            file_ext = dir[5:]
+        if dir.starts_with("default:"):
+            default_cmd = dir[8:]
+
+    # Parse argv
+    var ai = 0
+    while ai < argv.len():
+        val arg = argv[ai]
+
+        # Check --help/-h
+        if arg == "--help" or arg == "-h":
+            val help_text = cli_generate_help("simple", fields, directives)
+            print help_text
+            # Return a struct with help_requested = true
+            var help_names: [text] = ["help_requested"]
+            var help_vals: [i64] = [val_make_bool(true)]
+            return val_make_struct("CliResult", help_names, help_vals)
+
+        # Check if arg starts with --
+        if arg.starts_with("--"):
+            var matched = false
+            # Check for --key=value form
+            var eq_pos = -1
+            var eq_i = 2
+            while eq_i < arg.len():
+                if arg[eq_i] == "=":
+                    eq_pos = eq_i
+                    break
+                eq_i = eq_i + 1
+
+            if eq_pos > 0:
+                val arg_key = arg[0:eq_pos]
+                val arg_val = arg[eq_pos + 1:]
+                var oi = 0
+                while oi < opt_flags.len():
+                    if opt_flags[oi] == arg_key:
+                        val tc = opt_types[oi]
+                        if tc == "b":
+                            field_values[oi] = val_make_bool(arg_val == "true" or arg_val == "1")
+                        elif tc == "s":
+                            field_values[oi] = val_make_text(arg_val)
+                        elif tc == "i":
+                            field_values[oi] = val_make_int(arg_val.to_int())
+                        elif tc == "f":
+                            field_values[oi] = val_make_float(arg_val.to_float())
+                        matched = true
+                        break
+                    oi = oi + 1
+            else:
+                # Check for --flag (bool toggle) or --key value
+                var oi = 0
+                while oi < opt_flags.len():
+                    if opt_flags[oi] == arg:
+                        val tc = opt_types[oi]
+                        if tc == "b":
+                            field_values[oi] = val_make_bool(true)
+                        else:
+                            # Next arg is the value
+                            ai = ai + 1
+                            if ai < argv.len():
+                                val next_val = argv[ai]
+                                if tc == "s":
+                                    field_values[oi] = val_make_text(next_val)
+                                elif tc == "i":
+                                    field_values[oi] = val_make_int(next_val.to_int())
+                                elif tc == "f":
+                                    field_values[oi] = val_make_float(next_val.to_float())
+                        matched = true
+                        break
+                    oi = oi + 1
+
+            if not matched:
+                rest_vals.push(val_make_text(arg))
+            ai = ai + 1
+            continue
+
+        # Check short flags: -s
+        if arg.starts_with("-") and arg.len() == 2:
+            val short_char = arg[1:]
+            var matched = false
+            var oi = 0
+            while oi < opt_shorts.len():
+                if opt_shorts[oi] == short_char:
+                    val tc = opt_types[oi]
+                    if tc == "b":
+                        field_values[oi] = val_make_bool(true)
+                    else:
+                        ai = ai + 1
+                        if ai < argv.len():
+                            val next_val = argv[ai]
+                            if tc == "s":
+                                field_values[oi] = val_make_text(next_val)
+                            elif tc == "i":
+                                field_values[oi] = val_make_int(next_val.to_int())
+                            elif tc == "f":
+                                field_values[oi] = val_make_float(next_val.to_float())
+                    matched = true
+                    break
+                oi = oi + 1
+            if not matched:
+                rest_vals.push(val_make_text(arg))
+            ai = ai + 1
+            continue
+
+        # Check if it's a file path (by extension)
+        if file_ext != "" and arg.ends_with(file_ext):
+            file_path_val = val_make_text(arg)
+            ai = ai + 1
+            continue
+
+        # Check if it's a subcommand name
+        var is_subcmd = false
+        for sub_did in sub_decls:
+            val sub_node = decl_get(sub_did)
+            if sub_node.name == arg:
+                command_val = val_make_text(arg)
+                is_subcmd = true
+                break
+        # Also check passthrough directives
+        for dir in directives:
+            if dir.starts_with("passthrough:"):
+                val pass_list = dir[12:]
+                # Check if arg matches any name in comma-separated list
+                var pstart = 0
+                var pi = 0
+                while pi <= pass_list.len():
+                    if pi == pass_list.len() or pass_list[pi] == ",":
+                        val pname = pass_list[pstart:pi]
+                        if pname == arg:
+                            command_val = val_make_text(arg)
+                            is_subcmd = true
+                        pstart = pi + 1
+                    pi = pi + 1
+
+        if is_subcmd:
+            ai = ai + 1
+            continue
+
+        # Otherwise it's a rest/positional arg
+        rest_vals.push(val_make_text(arg))
+        ai = ai + 1
+
+    # Apply default command if none specified
+    if val_get_text(command_val) == "" and default_cmd != "":
+        command_val = val_make_text(default_cmd)
+
+    # Build result struct
+    var result_names: [text] = []
+    var result_values: [i64] = []
+
+    # Add all option fields
+    var ri = 0
+    while ri < opt_names.len():
+        result_names.push(opt_names[ri])
+        result_values.push(field_values[ri])
+        ri = ri + 1
+
+    # Add built-in fields
+    result_names.push("command")
+    result_values.push(command_val)
+    result_names.push("file_path")
+    result_values.push(file_path_val)
+    result_names.push("rest")
+    result_values.push(val_make_array(rest_vals))
+
+    val_make_struct("CliArgs", result_names, result_values)
+

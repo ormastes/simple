@@ -1,0 +1,297 @@
+# ICC v4 profile parser — detects named color spaces from ICC tags.
+#
+# Format reference: ICC v4.3 (2010-03) header at offset 0:
+#   128-byte header with magic "acsp" (0x61637370) at offset 36
+#   Tag table at offset 128: u32 tag_count, then tag_count entries of (sig u32, offset u32, size u32)
+#
+# This module is SFFI-free: it operates purely on [u8] byte slices and returns
+# plain Simple values. It is intended to be called from the color-management
+# feature layer to classify incoming ICC blobs into an SkColorSpaceKind.
+#
+# Tolerance: primary-chromaticity comparisons use a ±0.01 absolute tolerance
+# after converting the s15Fixed16 XYZ-tag values from ICC's D50 PCS reference
+# back to D65 via a Bradford-chromatic-adaptation inverse (approximate).
+
+use std.skia.entity.color_space.{SkColorSpaceKind}
+
+# ============================================================================
+# Constants
+# ============================================================================
+
+# "acsp" = 0x61 0x63 0x73 0x70 in big-endian = 1633907568
+const ICC_MAGIC = 1633907568
+
+# Header field offsets (ICC v4.3 §7.2)
+const _OFF_PROFILE_SIZE  = 0
+const _OFF_VERSION       = 8
+const _OFF_COLOR_SPACE   = 16
+const _OFF_PCS           = 20
+const _OFF_PLATFORM      = 40
+const _OFF_MAGIC         = 36
+const _HEADER_SIZE       = 128
+
+# ============================================================================
+# Public types
+# ============================================================================
+
+class IccHeader:
+    profile_size: i64
+    version: i64
+    color_space: i64
+    pcs: i64
+    platform: i64
+
+class IccTag:
+    signature: i64
+    offset: i64
+    size: i64
+
+# ============================================================================
+# Private byte-decode helpers (patterned after ot_parser helpers)
+# ============================================================================
+
+fn _read_u32_be(data: [u8], offset: i64) -> i64:
+    if offset < 0:
+        return 0
+    if offset + 3 >= data.length():
+        return 0
+    val b0 = data.at(offset)
+    val b1 = data.at(offset + 1)
+    val b2 = data.at(offset + 2)
+    val b3 = data.at(offset + 3)
+    match b0:
+        Some(v0):
+            match b1:
+                Some(v1):
+                    match b2:
+                        Some(v2):
+                            match b3:
+                                Some(v3):
+                                    val i0 = v0 as i64
+                                    val i1 = v1 as i64
+                                    val i2 = v2 as i64
+                                    val i3 = v3 as i64
+                                    (i0 * 16777216) + (i1 * 65536) + (i2 * 256) + i3
+                                None:
+                                    0
+                        None:
+                            0
+                None:
+                    0
+        None:
+            0
+
+fn _read_s15fixed16(data: [u8], offset: i64) -> f64:
+    """Reads an ICC s15Fixed16Number (signed 16.16 fixed-point) as f64."""
+    val raw = _read_u32_be(data, offset)
+    # Sign-extend from 32 bits
+    var signed_raw = raw
+    if signed_raw >= 2147483648:
+        signed_raw = signed_raw - 4294967296
+    val as_f = signed_raw as f64
+    as_f / 65536.0
+
+# ============================================================================
+# Public API
+# ============================================================================
+
+fn text2u32(s: String) -> i64:
+    """Converts a 4-char ASCII string to a u32 tag (big-endian)."""
+    val bytes = s.bytes()
+    if bytes.length() < 4:
+        return 0
+    val b0 = bytes.at(0)
+    val b1 = bytes.at(1)
+    val b2 = bytes.at(2)
+    val b3 = bytes.at(3)
+    match b0:
+        Some(v0):
+            match b1:
+                Some(v1):
+                    match b2:
+                        Some(v2):
+                            match b3:
+                                Some(v3):
+                                    val i0 = v0 as i64
+                                    val i1 = v1 as i64
+                                    val i2 = v2 as i64
+                                    val i3 = v3 as i64
+                                    (i0 * 16777216) + (i1 * 65536) + (i2 * 256) + i3
+                                None:
+                                    0
+                        None:
+                            0
+                None:
+                    0
+        None:
+            0
+
+fn parse_icc_header(data: [u8]) -> Option<IccHeader>:
+    """Parses the 128-byte ICC header; returns None if too short or magic mismatch."""
+    if data.length() < _HEADER_SIZE:
+        return None
+    val magic = _read_u32_be(data, _OFF_MAGIC)
+    if magic != ICC_MAGIC:
+        return None
+    val profile_size = _read_u32_be(data, _OFF_PROFILE_SIZE)
+    val version = _read_u32_be(data, _OFF_VERSION)
+    val color_space = _read_u32_be(data, _OFF_COLOR_SPACE)
+    val pcs = _read_u32_be(data, _OFF_PCS)
+    val platform = _read_u32_be(data, _OFF_PLATFORM)
+    Some(IccHeader(
+        profile_size: profile_size,
+        version: version,
+        color_space: color_space,
+        pcs: pcs,
+        platform: platform
+    ))
+
+fn parse_icc_tag_table(data: [u8]) -> [IccTag]:
+    """Reads u32 tag_count at offset 128, then tag_count * 12-byte entries."""
+    var tags: [IccTag] = []
+    if data.length() < _HEADER_SIZE + 4:
+        return tags
+    val tag_count = _read_u32_be(data, _HEADER_SIZE)
+    # Sanity: bound tag count so malformed data can't allocate absurd arrays.
+    if tag_count < 0:
+        return tags
+    if tag_count > 1024:
+        return tags
+    val table_end = _HEADER_SIZE + 4 + (tag_count * 12)
+    if data.length() < table_end:
+        return tags
+    var i: i64 = 0
+    while i < tag_count:
+        val entry_off = _HEADER_SIZE + 4 + (i * 12)
+        val sig = _read_u32_be(data, entry_off)
+        val off = _read_u32_be(data, entry_off + 4)
+        val sz = _read_u32_be(data, entry_off + 8)
+        tags.append(IccTag(signature: sig, offset: off, size: sz))
+        i = i + 1
+    tags
+
+fn find_tag(tags: [IccTag], sig: i64) -> Option<IccTag>:
+    """Linear search for a tag by signature."""
+    var i: i64 = 0
+    while i < tags.length():
+        val maybe = tags.at(i)
+        match maybe:
+            Some(t):
+                if t.signature == sig:
+                    return Some(t)
+            None:
+                pass_do_nothing
+        i = i + 1
+    None
+
+fn read_xyz_tag(data: [u8], tag: IccTag) -> (f64, f64, f64):
+    """Reads an "XYZ " type tag (tag body is 'XYZ ' magic, 4 reserved, then 3x s15Fixed16)."""
+    val base = tag.offset + 8
+    if base < 0:
+        return (0.0, 0.0, 0.0)
+    if base + 12 > data.length():
+        return (0.0, 0.0, 0.0)
+    val x = _read_s15fixed16(data, base)
+    val y = _read_s15fixed16(data, base + 4)
+    val z = _read_s15fixed16(data, base + 8)
+    (x, y, z)
+
+# ============================================================================
+# Private: D50 -> D65 Bradford adaptation inverse (approximate)
+# ============================================================================
+
+fn _d50_to_d65_xyz(x: f64, y: f64, z: f64) -> (f64, f64, f64):
+    """Bradford inverse chromatic adaptation from D50 PCS to D65.
+    Matrix values are the standard inverse Bradford adaptation from D50 to D65.
+    """
+    val nx = (0.9555766 * x) + (-0.0230393 * y) + (0.0631636 * z)
+    val ny = (-0.0282895 * x) + (1.0099416 * y) + (0.0210077 * z)
+    val nz = (0.0122982 * x) + (-0.0204830 * y) + (1.3299098 * z)
+    (nx, ny, nz)
+
+fn _xyz_to_xy(x: f64, y: f64, z: f64) -> (f64, f64):
+    """Converts tristimulus XYZ to CIE xy chromaticities."""
+    val sum = x + y + z
+    if sum == 0.0:
+        return (0.0, 0.0)
+    (x / sum, y / sum)
+
+fn _close(a: f64, b: f64, tol: f64) -> bool:
+    var d = a - b
+    if d < 0.0:
+        d = 0.0 - d
+    d < tol
+
+fn _matches_primaries(r_xy: (f64, f64), g_xy: (f64, f64), b_xy: (f64, f64),
+                      tr: (f64, f64), tg: (f64, f64), tb: (f64, f64),
+                      tol: f64) -> bool:
+    _close(r_xy.0, tr.0, tol) && _close(r_xy.1, tr.1, tol) &&
+        _close(g_xy.0, tg.0, tol) && _close(g_xy.1, tg.1, tol) &&
+        _close(b_xy.0, tb.0, tol) && _close(b_xy.1, tb.1, tol)
+
+fn detect_named_space(data: [u8]) -> SkColorSpaceKind:
+    """Classifies an ICC blob into a named SkColorSpaceKind.
+
+    Strategy: parse header, locate rXYZ/gXYZ/bXYZ tags, convert D50 XYZ to
+    xy chromaticities adapted to D65, then compare to known named-space
+    primaries with ±0.01 absolute tolerance. Returns Unknown on any failure.
+    """
+    val maybe_hdr = parse_icc_header(data)
+    match maybe_hdr:
+        None:
+            return SkColorSpaceKind.Unknown
+        Some(_):
+            pass_do_nothing
+    val tags = parse_icc_tag_table(data)
+    if tags.length() == 0:
+        return SkColorSpaceKind.Unknown
+    val r_sig = text2u32("rXYZ")
+    val g_sig = text2u32("gXYZ")
+    val b_sig = text2u32("bXYZ")
+    val r_tag = find_tag(tags, r_sig)
+    val g_tag = find_tag(tags, g_sig)
+    val b_tag = find_tag(tags, b_sig)
+    match r_tag:
+        None:
+            return SkColorSpaceKind.Unknown
+        Some(rt):
+            match g_tag:
+                None:
+                    return SkColorSpaceKind.Unknown
+                Some(gt):
+                    match b_tag:
+                        None:
+                            return SkColorSpaceKind.Unknown
+                        Some(bt):
+                            val r_xyz_d50 = read_xyz_tag(data, rt)
+                            val g_xyz_d50 = read_xyz_tag(data, gt)
+                            val b_xyz_d50 = read_xyz_tag(data, bt)
+                            val r_adapted = _d50_to_d65_xyz(r_xyz_d50.0, r_xyz_d50.1, r_xyz_d50.2)
+                            val g_adapted = _d50_to_d65_xyz(g_xyz_d50.0, g_xyz_d50.1, g_xyz_d50.2)
+                            val b_adapted = _d50_to_d65_xyz(b_xyz_d50.0, b_xyz_d50.1, b_xyz_d50.2)
+                            val r_xy = _xyz_to_xy(r_adapted.0, r_adapted.1, r_adapted.2)
+                            val g_xy = _xyz_to_xy(g_adapted.0, g_adapted.1, g_adapted.2)
+                            val b_xy = _xyz_to_xy(b_adapted.0, b_adapted.1, b_adapted.2)
+                            val tol = 0.01
+                            # sRGB: R(0.6400,0.3300) G(0.3000,0.6000) B(0.1500,0.0600)
+                            if _matches_primaries(r_xy, g_xy, b_xy,
+                                                  (0.6400, 0.3300),
+                                                  (0.3000, 0.6000),
+                                                  (0.1500, 0.0600),
+                                                  tol):
+                                return SkColorSpaceKind.Srgb
+                            # Display P3: R(0.6800,0.3200) G(0.2650,0.6900) B(0.1500,0.0600)
+                            if _matches_primaries(r_xy, g_xy, b_xy,
+                                                  (0.6800, 0.3200),
+                                                  (0.2650, 0.6900),
+                                                  (0.1500, 0.0600),
+                                                  tol):
+                                return SkColorSpaceKind.DisplayP3
+                            # Rec2020: R(0.7080,0.2920) G(0.1700,0.7970) B(0.1310,0.0460)
+                            if _matches_primaries(r_xy, g_xy, b_xy,
+                                                  (0.7080, 0.2920),
+                                                  (0.1700, 0.7970),
+                                                  (0.1310, 0.0460),
+                                                  tol):
+                                return SkColorSpaceKind.Rec2020
+                            SkColorSpaceKind.Unknown

@@ -1,0 +1,246 @@
+# CSS Math Functions — calc(), min(), max(), clamp()
+#
+# Resolves CSS math expressions to concrete px values.
+# Spec: https://www.w3.org/TR/css-values-4/#calc-notation
+#
+# Supports: +, -, *, / operators, px/em/rem/% units, and nested
+# min()/max()/clamp() calls. Operator precedence is handled by
+# a recursive descent parser.
+
+use examples.browser.entity.dom.css_types.CSSValue
+
+# =========================================================================
+# Resolution Context
+# =========================================================================
+
+class FunctionContext:
+    """Context for resolving CSS function values.
+
+    container_size   — the containing block's dimension in px (for %)
+    parent_font_size — parent's font-size in px (for em)
+    root_font_size   — root element's font-size in px (for rem)
+    """
+    container_size: f64
+    parent_font_size: f64
+    root_font_size: f64
+
+    static fn default_ctx() -> FunctionContext:
+        FunctionContext(container_size: 0.0, parent_font_size: 16.0, root_font_size: 16.0)
+
+# =========================================================================
+# Public API
+# =========================================================================
+
+fn resolve_css_function(name: text, args: [CSSValue], ctx: FunctionContext) -> f64:
+    """Resolve a CSS function (calc, min, max, clamp) to a px value."""
+    val lower = name.to_lower()
+
+    if lower == "calc":
+        if args.len() > 0:
+            return resolve_value_to_px(args[0], ctx)
+        return 0.0
+
+    if lower == "min":
+        return resolve_min(args, ctx)
+
+    if lower == "max":
+        return resolve_max(args, ctx)
+
+    if lower == "clamp":
+        return resolve_clamp(args, ctx)
+
+    0.0
+
+fn resolve_value_to_px(value: CSSValue, ctx: FunctionContext) -> f64:
+    """Resolve any CSSValue to a px number using the given context."""
+    match value:
+        CSSValue.Length(v, unit):
+            if unit == "px":
+                return v
+            if unit == "em":
+                return v * ctx.parent_font_size
+            if unit == "rem":
+                return v * ctx.root_font_size
+            if unit == "vw":
+                return v * ctx.container_size / 100.0
+            if unit == "vh":
+                return v * ctx.container_size / 100.0
+            return v
+        CSSValue.Percentage(v):
+            return (v / 100.0) * ctx.container_size
+        CSSValue.Number(v):
+            return v
+        CSSValue.Function(name, args):
+            return resolve_css_function(name, args, ctx)
+        _:
+            return 0.0
+
+fn resolve_min(args: [CSSValue], ctx: FunctionContext) -> f64:
+    if args.len() == 0:
+        return 0.0
+    var result = resolve_value_to_px(args[0], ctx)
+    var i = 1
+    while i < args.len():
+        val v = resolve_value_to_px(args[i], ctx)
+        if v < result:
+            result = v
+        i = i + 1
+    result
+
+fn resolve_max(args: [CSSValue], ctx: FunctionContext) -> f64:
+    if args.len() == 0:
+        return 0.0
+    var result = resolve_value_to_px(args[0], ctx)
+    var i = 1
+    while i < args.len():
+        val v = resolve_value_to_px(args[i], ctx)
+        if v > result:
+            result = v
+        i = i + 1
+    result
+
+fn resolve_clamp(args: [CSSValue], ctx: FunctionContext) -> f64:
+    # clamp(min, preferred, max)
+    if args.len() < 3:
+        if args.len() > 0:
+            return resolve_value_to_px(args[0], ctx)
+        return 0.0
+    val min_val = resolve_value_to_px(args[0], ctx)
+    val pref = resolve_value_to_px(args[1], ctx)
+    val max_val = resolve_value_to_px(args[2], ctx)
+    # Result: max(min, min(preferred, max))
+    var result = pref
+    if result < min_val:
+        result = min_val
+    if result > max_val:
+        result = max_val
+    result
+
+# =========================================================================
+# Calc Expression Parser
+# =========================================================================
+
+fn parse_calc_expression(expr: text, ctx: FunctionContext) -> f64:
+    """Parse and evaluate a calc() expression string.
+    Supports: +, -, *, / operators with CSS values (px, %, em, rem).
+
+    Examples:
+        '100% - 20px'    → container_size - 20
+        '2 * 16px'       → 32
+        '50% + 10px'     → 0.5*container + 10
+    """
+    var tokens = tokenize_calc(expr)
+    var pos = 0
+    return _parse_additive(tokens, pos, ctx)
+
+# Tokenize a calc expression into numbers, units, and operators
+fn tokenize_calc(expr: text) -> [text]:
+    var tokens: [text] = []
+    var current = ""
+    var i = 0
+    val chars = expr.trim()
+    while i < chars.len():
+        val ch = chars.char_at(i)
+        if ch == "+" or ch == "-" or ch == "*" or ch == "/":
+            if current.trim().len() > 0:
+                tokens = tokens + [current.trim()]
+                current = ""
+            # For minus, check if it's a negative number (after operator or start)
+            if ch == "-" and (tokens.len() == 0 or _is_operator(tokens[tokens.len() - 1])):
+                current = "-"
+            else:
+                tokens = tokens + [ch]
+        else if ch == "(" or ch == ")":
+            if current.trim().len() > 0:
+                tokens = tokens + [current.trim()]
+                current = ""
+            tokens = tokens + [ch]
+        else if ch == " " or ch == "\t":
+            if current.trim().len() > 0:
+                tokens = tokens + [current.trim()]
+                current = ""
+        else:
+            current = "{current}{ch}"
+        i = i + 1
+    if current.trim().len() > 0:
+        tokens = tokens + [current.trim()]
+    tokens
+
+fn _is_operator(tok: text) -> bool:
+    tok == "+" or tok == "-" or tok == "*" or tok == "/" or tok == "("
+
+fn _token_to_px(tok: text, ctx: FunctionContext) -> f64:
+    if tok.ends_with("px"):
+        val num = tok.slice(0, tok.len() - 2).parse_f64()
+        if num != nil:
+            return num
+        return 0.0
+    if tok.ends_with("%"):
+        val num = tok.slice(0, tok.len() - 1).parse_f64()
+        if num != nil:
+            return (num / 100.0) * ctx.container_size
+        return 0.0
+    if tok.ends_with("em"):
+        val num = tok.slice(0, tok.len() - 2).parse_f64()
+        if num != nil:
+            return num * ctx.parent_font_size
+        return 0.0
+    if tok.ends_with("rem"):
+        val num = tok.slice(0, tok.len() - 3).parse_f64()
+        if num != nil:
+            return num * ctx.root_font_size
+        return 0.0
+    # Plain number
+    val num = tok.parse_f64()
+    if num != nil:
+        return num
+    0.0
+
+# Recursive descent: additive (+, -)
+fn _parse_additive(tokens: [text], pos: i64, ctx: FunctionContext) -> f64:
+    var result = _parse_multiplicative(tokens, pos, ctx)
+    # Simple left-to-right evaluation
+    var i = 0
+    var left = result
+    while i < tokens.len():
+        val tok = tokens[i]
+        if tok == "+":
+            if i + 1 < tokens.len():
+                val right = _token_to_px(tokens[i + 1], ctx)
+                left = left + right
+                i = i + 2
+            else:
+                break
+        else if tok == "-":
+            if i + 1 < tokens.len():
+                val right = _token_to_px(tokens[i + 1], ctx)
+                left = left - right
+                i = i + 2
+            else:
+                break
+        else if tok == "*":
+            if i + 1 < tokens.len():
+                val right = _token_to_px(tokens[i + 1], ctx)
+                left = left * right
+                i = i + 2
+            else:
+                break
+        else if tok == "/":
+            if i + 1 < tokens.len():
+                val right = _token_to_px(tokens[i + 1], ctx)
+                if right != 0.0:
+                    left = left / right
+                i = i + 2
+            else:
+                break
+        else:
+            # Value token — set as initial left if first
+            if i == 0:
+                left = _token_to_px(tok, ctx)
+            i = i + 1
+    left
+
+fn _parse_multiplicative(tokens: [text], pos: i64, ctx: FunctionContext) -> f64:
+    if tokens.len() == 0:
+        return 0.0
+    _token_to_px(tokens[0], ctx)

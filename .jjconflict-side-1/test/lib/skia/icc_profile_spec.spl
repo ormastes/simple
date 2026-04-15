@@ -1,0 +1,135 @@
+# @cover src/lib/skia/feature/color_management/icc_profile.spl 80%
+"""
+# Skia ICC Profile Parser Specification
+
+**Feature IDs:** #SKI-012
+**Category:** Stdlib
+**Difficulty:** 3/5
+**Status:** Implemented
+
+## Overview
+
+Tests for parse_icc_header, parse_icc_tag_table, text2u32, and
+detect_named_space — the ICC v4 parsing helpers used to classify
+incoming ICC blobs into an SkColorSpaceKind.
+"""
+
+use std.sspec.*
+use std.skia.feature.color_management.icc_profile.{
+    IccHeader, IccTag, ICC_MAGIC,
+    text2u32, parse_icc_header, parse_icc_tag_table, find_tag
+}
+
+# ============================================================================
+# Test helpers — construct synthetic ICC-shaped byte buffers
+# ============================================================================
+
+fn _zero_bytes(n: i64) -> [u8]:
+    var out: [u8] = []
+    var i: i64 = 0
+    while i < n:
+        out.append(0 as u8)
+        i = i + 1
+    out
+
+fn _set_u32_be(buf: [u8], offset: i64, value: i64) -> [u8]:
+    var out = buf
+    val b0 = ((value / 16777216) % 256) as u8
+    val b1 = ((value / 65536) % 256) as u8
+    val b2 = ((value / 256) % 256) as u8
+    val b3 = (value % 256) as u8
+    out[offset] = b0
+    out[offset + 1] = b1
+    out[offset + 2] = b2
+    out[offset + 3] = b3
+    out
+
+fn _make_header_blob(profile_size: i64, with_magic: bool) -> [u8]:
+    var buf = _zero_bytes(128)
+    buf = _set_u32_be(buf, 0, profile_size)
+    if with_magic:
+        buf = _set_u32_be(buf, 36, ICC_MAGIC)
+    else:
+        buf = _set_u32_be(buf, 36, 305419896)  # 0x12345678 — wrong magic
+    buf
+
+fn _make_tag_table_blob(entries: [(i64, i64, i64)]) -> [u8]:
+    val count = entries.length()
+    val total = 128 + 4 + (count * 12)
+    var buf = _make_header_blob(total, true)
+    # Extend buffer to fit the tag table.
+    val extra = 4 + (count * 12)
+    var i: i64 = 0
+    while i < extra:
+        buf.append(0 as u8)
+        i = i + 1
+    buf = _set_u32_be(buf, 128, count)
+    var k: i64 = 0
+    while k < count:
+        val entry = entries.at(k)
+        match entry:
+            Some(e):
+                val eoff = 128 + 4 + (k * 12)
+                buf = _set_u32_be(buf, eoff, e.0)
+                buf = _set_u32_be(buf, eoff + 4, e.1)
+                buf = _set_u32_be(buf, eoff + 8, e.2)
+            None:
+                pass_do_nothing
+        k = k + 1
+    buf
+
+# ============================================================================
+# Specs
+# ============================================================================
+
+describe "icc_profile":
+    it "parse_icc_header: empty blob returns None":
+        val empty: [u8] = []
+        val result = parse_icc_header(empty)
+        expect(result).to_be_nil()
+
+    it "parse_icc_header: wrong magic returns None":
+        val blob = _make_header_blob(128, false)
+        val result = parse_icc_header(blob)
+        expect(result).to_be_nil()
+
+    it "parse_icc_header: valid 128-byte blob with acsp magic returns Some with profile_size":
+        val blob = _make_header_blob(12345, true)
+        val result = parse_icc_header(blob)
+        match result:
+            Some(hdr):
+                expect(hdr.profile_size).to_equal(12345)
+            None:
+                expect(false).to_equal(true)
+
+    it "parse_icc_tag_table: zero-tag table returns empty list":
+        val blob = _make_tag_table_blob([])
+        val tags = parse_icc_tag_table(blob)
+        expect(tags.length()).to_equal(0)
+
+    it "parse_icc_tag_table: 2-tag table returns list of 2 with correct signatures":
+        val sig_a = text2u32("rXYZ")
+        val sig_b = text2u32("gXYZ")
+        val entries: [(i64, i64, i64)] = [
+            (sig_a, 256, 20),
+            (sig_b, 276, 20)
+        ]
+        val blob = _make_tag_table_blob(entries)
+        val tags = parse_icc_tag_table(blob)
+        expect(tags.length()).to_equal(2)
+        val t0 = tags.at(0)
+        val t1 = tags.at(1)
+        match t0:
+            Some(tag0):
+                expect(tag0.signature).to_equal(sig_a)
+            None:
+                expect(false).to_equal(true)
+        match t1:
+            Some(tag1):
+                expect(tag1.signature).to_equal(sig_b)
+            None:
+                expect(false).to_equal(true)
+
+    it "text2u32: wtpt maps to 0x77747074 (2003789940)":
+        val v = text2u32("wtpt")
+        expect(v).to_equal(2003789940)

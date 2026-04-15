@@ -1,0 +1,246 @@
+# Ref -- Validated Atom Wrapper Tests
+#
+# Tests for the Ref class from nogc_async_immut/ref.
+# Ref wraps an Atom and adds a validator function that gates
+# every state transition. If the validator rejects a proposed
+# value, the transition is rejected and the old value preserved.
+
+use lib.ref.{Ref, Ref__new, Ref__of, Ref__unvalidated}
+
+describe "Ref":
+
+    # ========================================================================
+    # Creation
+    # ========================================================================
+
+    describe "creation":
+        it "creates with valid initial value":
+            val r = Ref.new(10, \x: x > 0)
+            expect(r.deref()).to_equal(10)
+
+        it "returns nil when initial value fails validation":
+            val r = Ref.new(-5, \x: x > 0)
+            expect(r).to_be_nil()
+
+        it "creates with zero when validator accepts zero":
+            val r = Ref.new(0, \x: x >= 0)
+            expect(r.deref()).to_equal(0)
+
+        it "Ref__of is alias for Ref__new":
+            val r = Ref.of(42, \x: x > 0)
+            expect(r.deref()).to_equal(42)
+
+        it "Ref__of returns nil on invalid initial":
+            val r = Ref.of(-1, \x: x > 0)
+            expect(r).to_be_nil()
+
+        it "Ref__unvalidated creates without constraint":
+            val r = Ref.unvalidated(0)
+            expect(r.deref()).to_equal(0)
+
+        it "Ref__unvalidated accepts any value":
+            val r = Ref.unvalidated(-999)
+            expect(r.deref()).to_equal(-999)
+
+        it "Ref__unvalidated accepts nil":
+            val r = Ref.unvalidated(nil)
+            expect(r.deref()).to_be_nil()
+
+    # ========================================================================
+    # Read operations
+    # ========================================================================
+
+    describe "deref":
+        it "returns current value":
+            val r = Ref.new(100, \x: x > 0)
+            expect(r.deref()).to_equal(100)
+
+        it "returns same value on repeated reads":
+            val r = Ref.new(55, \x: x > 0)
+            expect(r.deref()).to_equal(55)
+            expect(r.deref()).to_equal(55)
+
+    describe "version":
+        it "starts at 0":
+            val r = Ref.new(1, \x: x > 0)
+            expect(r.version()).to_equal(0)
+
+        it "unvalidated also starts at 0":
+            val r = Ref.unvalidated(42)
+            expect(r.version()).to_equal(0)
+
+    describe "is_valid":
+        it "returns true for valid value":
+            val r = Ref.new(10, \x: x > 0)
+            expect(r.is_valid(5)).to_equal(true)
+
+        it "returns false for invalid value":
+            val r = Ref.new(10, \x: x > 0)
+            expect(r.is_valid(-1)).to_equal(false)
+
+        it "does not modify the ref":
+            val r = Ref.new(10, \x: x > 0)
+            r.is_valid(999)
+            expect(r.deref()).to_equal(10)
+
+    # ========================================================================
+    # swap
+    # ========================================================================
+
+    describe "swap":
+        it "applies function when result is valid":
+            var r = Ref.new(10, \x: x > 0)
+            val result = r.swap(\x: x + 5)
+            expect(result).to_equal(15)
+            expect(r.deref()).to_equal(15)
+
+        it "returns old value when result is invalid":
+            var r = Ref.new(10, \x: x > 0)
+            val result = r.swap(\x: x - 100)
+            expect(result).to_equal(10)
+            expect(r.deref()).to_equal(10)
+
+        it "increments version on valid swap":
+            var r = Ref.new(1, \x: x > 0)
+            r.swap(\x: x + 1)
+            expect(r.version()).to_equal(1)
+
+        it "does not increment version on invalid swap":
+            var r = Ref.new(5, \x: x > 0)
+            r.swap(\x: x - 100)
+            expect(r.version()).to_equal(0)
+
+        it "identity function succeeds":
+            var r = Ref.new(42, \x: x > 0)
+            val result = r.swap(\x: x)
+            expect(result).to_equal(42)
+
+    # ========================================================================
+    # reset
+    # ========================================================================
+
+    describe "reset":
+        it "sets new value when valid":
+            var r = Ref.new(10, \x: x > 0)
+            val result = r.reset(99)
+            expect(result).to_equal(99)
+            expect(r.deref()).to_equal(99)
+
+        it "returns current value when invalid":
+            var r = Ref.new(10, \x: x > 0)
+            val result = r.reset(-5)
+            expect(result).to_equal(10)
+            expect(r.deref()).to_equal(10)
+
+        it "increments version on valid reset":
+            var r = Ref.new(1, \x: x > 0)
+            r.reset(50)
+            expect(r.version()).to_equal(1)
+
+        it "does not increment version on invalid reset":
+            var r = Ref.new(1, \x: x > 0)
+            r.reset(-1)
+            expect(r.version()).to_equal(0)
+
+    # ========================================================================
+    # compare_and_set
+    # ========================================================================
+
+    describe "compare_and_set":
+        it "succeeds when expected matches and value is valid":
+            var r = Ref.new(10, \x: x > 0)
+            val ok = r.compare_and_set(10, 20)
+            expect(ok).to_equal(true)
+            expect(r.deref()).to_equal(20)
+
+        it "fails when expected does not match":
+            var r = Ref.new(10, \x: x > 0)
+            val ok = r.compare_and_set(5, 20)
+            expect(ok).to_equal(false)
+            expect(r.deref()).to_equal(10)
+
+        it "fails when new value is invalid":
+            var r = Ref.new(10, \x: x > 0)
+            val ok = r.compare_and_set(10, -5)
+            expect(ok).to_equal(false)
+            expect(r.deref()).to_equal(10)
+
+        it "increments version on success":
+            var r = Ref.new(10, \x: x > 0)
+            r.compare_and_set(10, 20)
+            expect(r.version()).to_equal(1)
+
+        it "does not increment version on failure":
+            var r = Ref.new(10, \x: x > 0)
+            r.compare_and_set(10, -1)
+            expect(r.version()).to_equal(0)
+
+    # ========================================================================
+    # swap_validated
+    # ========================================================================
+
+    describe "swap_validated":
+        it "returns success pair on valid transition":
+            var r = Ref.new(10, \x: x > 0)
+            val result = r.swap_validated(\x: x * 2)
+            expect(result[0]).to_equal(true)
+            expect(result[1]).to_equal(20)
+
+        it "returns failure pair on invalid transition":
+            var r = Ref.new(10, \x: x > 0)
+            val result = r.swap_validated(\x: x - 100)
+            expect(result[0]).to_equal(false)
+            expect(result[1]).to_equal(10)
+
+        it "updates deref on success":
+            var r = Ref.new(5, \x: x > 0)
+            r.swap_validated(\x: x + 10)
+            expect(r.deref()).to_equal(15)
+
+        it "preserves deref on failure":
+            var r = Ref.new(5, \x: x > 0)
+            r.swap_validated(\x: x - 100)
+            expect(r.deref()).to_equal(5)
+
+    # ========================================================================
+    # Multiple operations
+    # ========================================================================
+
+    describe "multiple operations":
+        it "tracks version across valid transitions":
+            var r = Ref.new(1, \x: x > 0)
+            r.swap(\x: x + 1)
+            r.reset(10)
+            r.compare_and_set(10, 20)
+            expect(r.version()).to_equal(3)
+            expect(r.deref()).to_equal(20)
+
+        it "rejected transitions do not advance version":
+            var r = Ref.new(5, \x: x > 0)
+            r.swap(\x: x - 100)
+            r.reset(-1)
+            r.compare_and_set(5, -10)
+            expect(r.version()).to_equal(0)
+            expect(r.deref()).to_equal(5)
+
+    # ========================================================================
+    # Unvalidated operations
+    # ========================================================================
+
+    describe "unvalidated":
+        it "swap always succeeds":
+            var r = Ref.unvalidated(10)
+            val result = r.swap(\x: x - 100)
+            expect(result).to_equal(-90)
+            expect(r.deref()).to_equal(-90)
+
+        it "reset always succeeds":
+            var r = Ref.unvalidated(0)
+            r.reset(-999)
+            expect(r.deref()).to_equal(-999)
+
+        it "compare_and_set succeeds when expected matches":
+            var r = Ref.unvalidated(10)
+            val ok = r.compare_and_set(10, -5)
+            expect(ok).to_equal(true)
+            expect(r.deref()).to_equal(-5)

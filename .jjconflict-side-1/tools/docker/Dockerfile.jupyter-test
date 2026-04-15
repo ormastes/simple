@@ -1,0 +1,69 @@
+# Jupyter Kernel E2E Test Container
+#
+# Builds an isolated environment with Python, Jupyter, and the Simple kernel
+# to verify end-to-end kernel operation.
+#
+# Build:  docker build -t simple-jupyter-test -f tools/docker/Dockerfile.jupyter-test .
+# Run:    docker run --rm simple-jupyter-test
+#
+# The entrypoint runs test/system/jupyter/helpers/run_server_check.py
+# and exits 0 if all checks pass.
+
+FROM ubuntu:24.04
+
+ENV DEBIAN_FRONTEND=noninteractive
+ENV PYTHONDONTWRITEBYTECODE=1
+
+# System packages
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    python3 \
+    python3-pip \
+    python3-venv \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
+
+# Create non-root user
+RUN useradd -m -s /bin/bash testuser
+
+# Python virtual environment + Jupyter packages
+RUN python3 -m venv /opt/venv
+ENV PATH="/opt/venv/bin:$PATH"
+RUN pip install --no-cache-dir \
+    notebook \
+    jupyter_client \
+    pyzmq \
+    nbconvert \
+    ipykernel
+
+# Set up project directory
+WORKDIR /home/testuser/simple
+
+# Copy deployed runtime layout
+COPY bin/simple bin/simple
+COPY bin/release/ bin/release/
+
+# Copy kernel source
+COPY src/app/jupyter_kernel/ src/app/jupyter_kernel/
+
+# Copy kernel wrapper and tools
+COPY tools/jupyter/ tools/jupyter/
+
+# Copy test files
+COPY test/system/jupyter/ test/system/jupyter/
+
+# Ensure runtime is executable for kernel tests
+RUN chmod +x bin/simple
+
+# Own everything by testuser
+RUN chown -R testuser:testuser /home/testuser/simple
+
+# Switch to non-root user
+USER testuser
+
+# Install kernel spec into user's Jupyter data dir
+RUN mkdir -p /home/testuser/.local/share/jupyter/kernels/simple && \
+    echo '{"display_name":"Simple","language":"simple","argv":["python3","/home/testuser/simple/tools/jupyter/kernel_wrapper.py","-f","{connection_file}"],"file_extension":".spl"}' \
+    > /home/testuser/.local/share/jupyter/kernels/simple/kernel.json
+
+# Entrypoint: run the server E2E check
+ENTRYPOINT ["python3", "test/system/jupyter/helpers/run_server_check.py"]

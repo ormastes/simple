@@ -1,0 +1,253 @@
+# Kernel User-Stack Builder — SysV Initial Stack Frame
+#
+# Builds the initial userspace stack for a freshly spawned process so that
+# libc `_start` can recover `argc`, `argv`, `envp`, and the auxiliary vector
+# per the System V ABI (RISC-V and x86_64 both use the same protocol).
+#
+# Stack layout (low -> high addresses), after the kernel memcpy's the
+# serialized bytes to the TOP of the user stack page range:
+#
+#     initial_sp ->  argc (u64)
+#                    argv[0], argv[1], ..., NULL
+#                    envp[0], envp[1], ..., NULL
+#                    auxv entries (pairs of u64), terminated by AT_NULL,0
+#                    16 random bytes (for AT_RANDOM)
+#                    argv/envp string pool (NUL-terminated)
+#                    padding to 16-byte alignment of initial_sp
+#
+# The caller receives `StackBuildResult { sp, bytes }`. `bytes` is the
+# blob to memcpy to (stack_top - bytes.len()). `sp` is the final user
+# stack pointer to load into the context register (RISC-V sp, x86_64 rsp).
+
+val AT_NULL:     u64 = 0
+val AT_IGNORE:   u64 = 1
+val AT_EXECFD:   u64 = 2
+val AT_PHDR:     u64 = 3
+val AT_PHENT:    u64 = 4
+val AT_PHNUM:    u64 = 5
+val AT_PAGESZ:   u64 = 6
+val AT_BASE:     u64 = 7
+val AT_FLAGS:    u64 = 8
+val AT_ENTRY:    u64 = 9
+val AT_NOTELF:   u64 = 10
+val AT_UID:      u64 = 11
+val AT_EUID:     u64 = 12
+val AT_GID:      u64 = 13
+val AT_EGID:     u64 = 14
+val AT_PLATFORM: u64 = 15
+val AT_HWCAP:    u64 = 16
+val AT_CLKTCK:   u64 = 17
+val AT_SECURE:   u64 = 23
+val AT_BASE_PLATFORM: u64 = 24
+val AT_RANDOM:   u64 = 25
+val AT_HWCAP2:   u64 = 26
+val AT_EXECFN:   u64 = 31
+
+val DEFAULT_USER_STACK_SIZE: u64 = 8 * 1024 * 1024
+val MAX_USER_STACK_SIZE: u64 = 128 * 1024 * 1024
+val USER_PAGE_SIZE: u64 = 4096
+val AUX_RANDOM_BYTES: u64 = 16
+
+struct AuxEntry:
+    """Single auxiliary vector entry (type, value) written to the stack."""
+    aux_type: u64
+    val: u64
+
+struct StackBuildResult:
+    """Serialized initial stack frame ready to be copied to the user stack.
+
+    `sp` is the final user stack pointer (points at `argc`). `bytes` is the
+    full serialized frame — the kernel writes it so that the last byte sits
+    at (stack_top - 1). `sp = stack_top - bytes.len()` (after padding for
+    16-byte alignment).
+    """
+    sp: u64
+    bytes: [u8]
+
+fn compute_stack_size(image_size: u64) -> u64:
+    """Pick a user-stack size based on binary image size.
+
+    Toolchain binaries like clang need 80-120 MB of scratch. Scale with
+    binary size (/ 8) but never below 8 MB or above 128 MB.
+    """
+    var scaled: u64 = image_size / 8
+    if scaled < DEFAULT_USER_STACK_SIZE:
+        scaled = DEFAULT_USER_STACK_SIZE
+    if scaled > MAX_USER_STACK_SIZE:
+        scaled = MAX_USER_STACK_SIZE
+    scaled
+
+fn _push_u64_le(buf: [u8], value: u64) -> [u8]:
+    """Append a little-endian u64 to `buf` and return the new buffer."""
+    var out = buf
+    var v = value
+    var i: u64 = 0
+    while i < 8:
+        out.push((v & 0xff) as u8)
+        v = v >> 8
+        i = i + 1
+    out
+
+fn _push_bytes(buf: [u8], bytes: [u8]) -> [u8]:
+    """Append every byte of `bytes` to `buf`."""
+    var out = buf
+    var i: i64 = 0
+    val n = bytes.len()
+    while i < n:
+        out.push(bytes[i])
+        i = i + 1
+    out
+
+fn _push_cstr(buf: [u8], s: text) -> [u8]:
+    """Append the UTF-8 bytes of `s` plus a terminating NUL."""
+    var out = buf
+    val raw = s.to_bytes()
+    var i: i64 = 0
+    val n = raw.len()
+    while i < n:
+        out.push(raw[i])
+        i = i + 1
+    out.push(0 as u8)
+    out
+
+fn _zero_bytes(n: u64) -> [u8]:
+    """Return a buffer of `n` zero bytes."""
+    var out: [u8] = []
+    var i: u64 = 0
+    while i < n:
+        out.push(0 as u8)
+        i = i + 1
+    out
+
+fn build_initial_stack(stack_top: u64, argv: [text], envp: [text], auxv: [AuxEntry]) -> StackBuildResult:
+    """Construct the initial SysV user-mode stack frame.
+
+    The returned `bytes` are laid out so that position 0 of the blob is
+    the LOWEST address (where `argc` lives) and the last byte is at
+    `stack_top - 1`. The kernel memcpy's `bytes` to
+    `stack_top - bytes.len()`, then sets the userspace sp to that base.
+
+    Auxv defaults (AT_PAGESZ, AT_RANDOM, AT_EXECFN) are always included
+    even if the caller passes an empty list; caller entries are appended
+    before the AT_NULL terminator.
+    """
+    val argc: u64 = argv.len() as u64
+
+    # --- Pass 1: compute string pool starting at stack_top, growing down.
+    # We compute final absolute addresses for each argv/envp string and for
+    # the 16 AT_RANDOM bytes, then emit the pointer arrays with real addrs.
+    var top: u64 = stack_top
+
+    # Reserve AT_RANDOM bytes at the very top.
+    top = top - AUX_RANDOM_BYTES
+    val random_addr: u64 = top
+
+    # argv string pool (argv[0], argv[1], ...). Push strings high->low so
+    # argv[0] ends up at the highest address; track addresses in order.
+    var argv_addrs: [u64] = []
+    var i: i64 = 0
+    val argc_i = argv.len()
+    while i < argc_i:
+        val s = argv[i]
+        val raw = s.to_bytes()
+        val slen: u64 = (raw.len() as u64) + 1
+        top = top - slen
+        argv_addrs.push(top)
+        i = i + 1
+
+    var envp_addrs: [u64] = []
+    var j: i64 = 0
+    val envc_i = envp.len()
+    while j < envc_i:
+        val s2 = envp[j]
+        val raw2 = s2.to_bytes()
+        val slen2: u64 = (raw2.len() as u64) + 1
+        top = top - slen2
+        envp_addrs.push(top)
+        j = j + 1
+
+    val execfn_addr: u64 = if argv_addrs.len() > 0: argv_addrs[0] else: 0 as u64
+
+    # --- Build the full auxv: defaults + caller-supplied + AT_NULL terminator.
+    var full_aux: [AuxEntry] = []
+    full_aux.push(AuxEntry(aux_type: AT_PAGESZ, val: USER_PAGE_SIZE))
+    full_aux.push(AuxEntry(aux_type: AT_RANDOM, val: random_addr))
+    if execfn_addr != 0:
+        full_aux.push(AuxEntry(aux_type: AT_EXECFN, val: execfn_addr))
+    var k: i64 = 0
+    val auxc_i = auxv.len()
+    while k < auxc_i:
+        full_aux.push(auxv[k])
+        k = k + 1
+    full_aux.push(AuxEntry(aux_type: AT_NULL, val: 0))
+
+    # --- Compute total size of the fixed area (argc + argv ptrs + NUL
+    # + envp ptrs + NUL + auxv pairs). Each slot is 8 bytes.
+    val n_argv: u64 = argv.len() as u64
+    val n_envp: u64 = envp.len() as u64
+    val n_aux:  u64 = full_aux.len() as u64
+    val fixed_slots: u64 = 1 + (n_argv + 1) + (n_envp + 1) + (n_aux * 2)
+    val fixed_size: u64 = fixed_slots * 8
+
+    # --- The string/random region extends from `top` up to `stack_top`.
+    val strings_size: u64 = stack_top - top
+
+    # Base address of the fixed region must be 16-byte aligned (SysV).
+    # `sp` points at argc. Align by growing fixed_size downward.
+    var sp: u64 = top - fixed_size
+    val pad: u64 = sp & 0xf
+    sp = sp - pad
+    val total_size: u64 = stack_top - sp
+
+    # --- Serialize into `bytes`. Index 0 of the blob maps to address `sp`.
+    var bytes: [u8] = []
+
+    # 1. argc
+    bytes = _push_u64_le(bytes, n_argv)
+
+    # 2. argv pointers then NULL
+    var a: i64 = 0
+    while a < argc_i:
+        bytes = _push_u64_le(bytes, argv_addrs[a])
+        a = a + 1
+    bytes = _push_u64_le(bytes, 0)
+
+    # 3. envp pointers then NULL
+    var e: i64 = 0
+    while e < envc_i:
+        bytes = _push_u64_le(bytes, envp_addrs[e])
+        e = e + 1
+    bytes = _push_u64_le(bytes, 0)
+
+    # 4. auxv (already terminated with AT_NULL,0)
+    var x: i64 = 0
+    val auxn_i = full_aux.len()
+    while x < auxn_i:
+        val ent = full_aux[x]
+        bytes = _push_u64_le(bytes, ent.aux_type)
+        bytes = _push_u64_le(bytes, ent.val)
+        x = x + 1
+
+    # 5. alignment pad (zero bytes) to reach the string region boundary
+    bytes = _push_bytes(buf: bytes, bytes: _zero_bytes(pad))
+
+    # 6. envp strings (written low->high in stack order: envp[last]..envp[0])
+    var ee: i64 = envc_i - 1
+    while ee >= 0:
+        bytes = _push_cstr(bytes, envp[ee])
+        ee = ee - 1
+
+    # 7. argv strings (argv[last]..argv[0] — addr[0] is highest)
+    var aa: i64 = argc_i - 1
+    while aa >= 0:
+        bytes = _push_cstr(bytes, argv[aa])
+        aa = aa - 1
+
+    # 8. 16 bytes for AT_RANDOM. Fill with a fixed cookie; the kernel may
+    #    overwrite with real entropy after placement.
+    var r: u64 = 0
+    while r < AUX_RANDOM_BYTES:
+        bytes.push(0x5a as u8)
+        r = r + 1
+
+    StackBuildResult(sp: sp, bytes: bytes)

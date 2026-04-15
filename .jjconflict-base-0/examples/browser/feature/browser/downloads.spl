@@ -1,0 +1,177 @@
+# Download manager for the Simple Browser Platform.
+# Tracks download lifecycle: start, pause, resume, cancel, complete, fail.
+
+use sbp.shared.error.{BrowserResult, BrowserError, BrowserErrorKind, config_error, io_error}
+use sbp.shared.logging.{Logger, LogLevel}
+
+enum DownloadState:
+    Pending
+    InProgress
+    Paused
+    Complete
+    Failed
+    Cancelled
+
+class Download:
+    id: i64
+    url: text
+    filename: text
+    total_bytes: i64
+    received_bytes: i64
+    state: DownloadState
+    started_at: i64
+    mime_type: text
+    error_reason: text
+
+    static fn create(id: i64, url: text, filename: text) -> Download:
+        Download(
+            id: id, url: url, filename: filename,
+            total_bytes: 0, received_bytes: 0,
+            state: DownloadState.Pending,
+            started_at: 0, mime_type: "",
+            error_reason: ""
+        )
+
+class DownloadManager:
+    downloads: [Download]
+    next_id: i64
+    download_dir: text
+    logger: Logger
+    # Completion callbacks: list of (download_id, callback_name) pairs.
+    # When a download completes, any registered callback is invoked.
+    completion_callbacks: [Pair<i64, text>]
+
+    static fn new(download_dir: text, logger: Logger) -> DownloadManager:
+        DownloadManager(
+            downloads: [Download](),
+            next_id: 1,
+            download_dir: download_dir,
+            logger: logger,
+            completion_callbacks: [Pair<i64, text>]()
+        )
+
+    me start_download(url: text, filename: text) -> i64:
+        val id = self.next_id
+        self.next_id = self.next_id + 1
+        var dl = Download.create(id: id, url: url, filename: filename)
+        dl.state = DownloadState.InProgress
+        self.downloads.push(dl)
+        self.logger.info("Download started id={id}: {filename} from {url}")
+        id
+
+    me pause_download(id: i64):
+        for i in 0..self.downloads.len():
+            if self.downloads[i].id == id:
+                match self.downloads[i].state:
+                    DownloadState.InProgress:
+                        self.downloads[i].state = DownloadState.Paused
+                        self.logger.debug("Download paused id={id}")
+                    _:
+                        self.logger.warn("Cannot pause download id={id} — not in progress")
+                return
+        self.logger.warn("Download id={id} not found")
+
+    me resume_download(id: i64):
+        for i in 0..self.downloads.len():
+            if self.downloads[i].id == id:
+                match self.downloads[i].state:
+                    DownloadState.Paused:
+                        self.downloads[i].state = DownloadState.InProgress
+                        self.logger.debug("Download resumed id={id}")
+                    _:
+                        self.logger.warn("Cannot resume download id={id} — not paused")
+                return
+        self.logger.warn("Download id={id} not found")
+
+    me cancel_download(id: i64):
+        for i in 0..self.downloads.len():
+            if self.downloads[i].id == id:
+                match self.downloads[i].state:
+                    DownloadState.Complete:
+                        self.logger.warn("Cannot cancel download id={id} — already complete")
+                    DownloadState.Failed:
+                        self.logger.warn("Cannot cancel download id={id} — already failed")
+                    DownloadState.Cancelled:
+                        self.logger.warn("Download id={id} already cancelled")
+                    _:
+                        self.downloads[i].state = DownloadState.Cancelled
+                        self.logger.info("Download cancelled id={id}")
+                return
+        self.logger.warn("Download id={id} not found")
+
+    fn get_download(id: i64) -> Download?:
+        for dl in self.downloads:
+            if dl.id == id:
+                return Some(dl)
+        nil
+
+    fn get_active_downloads() -> [Download]:
+        var result = [Download]()
+        for dl in self.downloads:
+            match dl.state:
+                DownloadState.InProgress:
+                    result.push(dl)
+                DownloadState.Paused:
+                    result.push(dl)
+                DownloadState.Pending:
+                    result.push(dl)
+                _:
+                    pass_dn  # Intentionally skip inactive downloads
+        result
+
+    fn get_progress(id: i64) -> f64:
+        for dl in self.downloads:
+            if dl.id == id:
+                if dl.total_bytes <= 0:
+                    return 0.0
+                return (dl.received_bytes.to_f64() / dl.total_bytes.to_f64()) * 100.0
+        0.0
+
+    me update_progress(id: i64, received: i64, total: i64):
+        for i in 0..self.downloads.len():
+            if self.downloads[i].id == id:
+                self.downloads[i].received_bytes = received
+                self.downloads[i].total_bytes = total
+                return
+
+    me complete_download(id: i64):
+        for i in 0..self.downloads.len():
+            if self.downloads[i].id == id:
+                self.downloads[i].state = DownloadState.Complete
+                self.downloads[i].received_bytes = self.downloads[i].total_bytes
+                self.logger.info("Download complete id={id}: {self.downloads[i].filename}")
+                # Fire registered completion callbacks
+                self._fire_completion_callbacks(id)
+                return
+        self.logger.warn("Download id={id} not found")
+
+    # Register a completion callback for a specific download.
+    me on_complete(download_id: i64, callback_name: text):
+        val entry = Pair(first: download_id, second: callback_name)
+        self.completion_callbacks.push(entry)
+        self.logger.debug("Registered completion callback for download id={download_id}: {callback_name}")
+
+    # Fire and remove all completion callbacks for the given download.
+    me _fire_completion_callbacks(download_id: i64):
+        var remaining = [Pair<i64, text>]()
+        for cb in self.completion_callbacks:
+            if cb.first == download_id:
+                self.logger.info("Firing completion callback '{cb.second}' for download id={download_id}")
+            else:
+                remaining.push(cb)
+        self.completion_callbacks = remaining
+
+    me fail_download(id: i64, reason: text):
+        for i in 0..self.downloads.len():
+            if self.downloads[i].id == id:
+                self.downloads[i].state = DownloadState.Failed
+                self.downloads[i].error_reason = reason
+                self.logger.error("Download failed id={id}: {reason}")
+                return
+        self.logger.warn("Download id={id} not found")
+
+    fn get_all_downloads() -> [Download]:
+        self.downloads
+
+    fn get_download_count() -> i64:
+        self.downloads.len()

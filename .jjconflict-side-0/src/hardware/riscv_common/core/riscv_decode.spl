@@ -1,0 +1,136 @@
+"""
+# RISC-V Shared Instruction Decoder
+
+All RISC-V base instructions are 32-bit encoded. Field extraction is identical
+for RV32 and RV64. Immediates are sign-extended to i64 (works for both XLEN).
+
+Reference: RISC-V ISA Manual, Volume I, Chapter 2.
+"""
+
+use hardware.riscv_common.pkg.riscv_isa_pkg.*
+use hardware.riscv_common.pkg.riscv_types_pkg.*
+
+# ===========================================================================
+# Field Extractors
+# ===========================================================================
+
+fn decode_opcode(instr: i64) -> i64:
+    instr and 0x7F
+
+fn decode_rd(instr: i64) -> i64:
+    (instr >> 7) and 0x1F
+
+fn decode_funct3(instr: i64) -> i64:
+    (instr >> 12) and 0x7
+
+fn decode_rs1(instr: i64) -> i64:
+    (instr >> 15) and 0x1F
+
+fn decode_rs2(instr: i64) -> i64:
+    (instr >> 20) and 0x1F
+
+fn decode_funct7(instr: i64) -> i64:
+    (instr >> 25) and 0x7F
+
+# ===========================================================================
+# Immediate Extractors (sign-extended to i64)
+# ===========================================================================
+
+fn decode_imm_i(instr: i64) -> i64:
+    """I-type: bits [31:20], sign-extended."""
+    val raw = (instr >> 20) and 0xFFF
+    if (raw and 0x800) != 0:
+        raw or 0xFFFFFFFFFFFFF000
+    else:
+        raw
+
+fn decode_imm_s(instr: i64) -> i64:
+    """S-type: bits [31:25] | [11:7], sign-extended."""
+    val lo = (instr >> 7) and 0x1F
+    val hi = (instr >> 25) and 0x7F
+    val raw = (hi << 5) or lo
+    if (raw and 0x800) != 0:
+        raw or 0xFFFFFFFFFFFFF000
+    else:
+        raw
+
+fn decode_imm_b(instr: i64) -> i64:
+    """B-type: bits [31|7|30:25|11:8] << 1, sign-extended."""
+    val b11 = (instr >> 7) and 0x1
+    val b4_1 = (instr >> 8) and 0xF
+    val b10_5 = (instr >> 25) and 0x3F
+    val b12 = (instr >> 31) and 0x1
+    val raw = (b12 << 12) or (b11 << 11) or (b10_5 << 5) or (b4_1 << 1)
+    if (raw and 0x1000) != 0:
+        raw or 0xFFFFFFFFFFFFE000
+    else:
+        raw
+
+fn decode_imm_u(instr: i64) -> i64:
+    """U-type: bits [31:12] << 12, sign-extended to 64 bits."""
+    val raw = instr and 0xFFFFF000
+    # Sign-extend from bit 31
+    if (raw and 0x80000000) != 0:
+        raw or 0xFFFFFFFF00000000
+    else:
+        raw
+
+fn decode_imm_j(instr: i64) -> i64:
+    """J-type: bits [31|19:12|20|30:21] << 1, sign-extended."""
+    val b19_12 = (instr >> 12) and 0xFF
+    val b11 = (instr >> 20) and 0x1
+    val b10_1 = (instr >> 21) and 0x3FF
+    val b20 = (instr >> 31) and 0x1
+    val raw = (b20 << 20) or (b19_12 << 12) or (b11 << 11) or (b10_1 << 1)
+    if (raw and 0x100000) != 0:
+        raw or 0xFFFFFFFFFFE00000
+    else:
+        raw
+
+# ===========================================================================
+# ALU Op Decode
+# ===========================================================================
+
+fn decode_alu_op(opcode: i64, funct3: i64, funct7: i64) -> AluOp:
+    if funct3 == F3_ADD_SUB:
+        if opcode == OP_OP and funct7 == F7_SUB_SRA:
+            AluOp.Sub
+        else:
+            AluOp.Add
+    elif funct3 == F3_SLL:
+        AluOp.Sll
+    elif funct3 == F3_SLT:
+        AluOp.Slt
+    elif funct3 == F3_SLTU:
+        AluOp.Sltu
+    elif funct3 == F3_XOR:
+        AluOp.Xor
+    elif funct3 == F3_SRL_SRA:
+        if funct7 == F7_SUB_SRA:
+            AluOp.Sra
+        else:
+            AluOp.Srl
+    elif funct3 == F3_OR:
+        AluOp.Or
+    elif funct3 == F3_AND:
+        AluOp.And
+    else:
+        AluOp.Add
+
+# ===========================================================================
+# Branch Op Decode
+# ===========================================================================
+
+fn decode_branch_op(funct3: i64) -> BranchOp:
+    if funct3 == F3_BEQ:
+        BranchOp.Beq
+    elif funct3 == F3_BNE:
+        BranchOp.Bne
+    elif funct3 == F3_BLT:
+        BranchOp.Blt
+    elif funct3 == F3_BGE:
+        BranchOp.Bge
+    elif funct3 == F3_BLTU:
+        BranchOp.Bltu
+    else:
+        BranchOp.Bgeu

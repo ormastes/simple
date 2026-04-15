@@ -1,0 +1,159 @@
+## SimpleOS in-guest smoke /sbin/init
+##
+## Installed into the initramfs as `/sbin/init`. When SimpleOS boots via
+## `-append init=/sbin/init` it runs this program, which drives the 5
+## verification checks from `.claude/plans/mutable-giggling-raccoon.md`
+## and writes tagged output to the serial console so the host orchestrator
+## (src/os/port/e2e_verify.spl) can grep for pass markers.
+##
+## IMPORTANT: SimpleOS kernel today has no POSIX fork/exec. Where we would
+## normally spawn a child (simple --version, simple test, native-build,
+## clang, llvm-nm, the rust hello ELF) we emit a `SKIP: <reason>` tag so
+## the host does not receive a fabricated pass. The real implementation
+## drops in once the kernel gains a user-process spawn path (see
+## Deferred / Out-of-Scope in the plan, kernel features: fork, execve,
+## waitpid, VM fork-on-write).
+
+use std.fs
+use std.process
+
+val HELLO_C = "/usr/share/test/hello.c"
+val HELLO_OBJ = "/tmp/hello.o"
+val HELLO_RUST_ELF = "/usr/share/test/hello_rust"
+val CORPUS_DIR = "/src/test/bootstrap_corpus"
+val SIMPLE_BIN = "/bin/simple"
+val STAGE2_OUT = "/build/stage2_native/simple"
+val STAGE3_OUT = "/build/stage3_native/simple"
+
+fn banner():
+    print "SIMPLEOS_SMOKE_INIT_STARTED"
+    print "--- SimpleOS smoke init v1 ---"
+
+fn can_exec() -> bool:
+    # Probe: try running /bin/true. If the kernel lacks exec we fall
+    # through to SKIP on every step. This avoids fabricated passes.
+    if not fs.exists("/bin/true"):
+        return false
+    # Best-effort: an exception from process.run would already mean no
+    # exec support; catch by inspecting exit_code = -1 sentinel.
+    val r = process.run("/bin/true", [])
+    r.exit_code >= 0
+
+fn step_simple_version(have_exec: bool):
+    if not have_exec:
+        print "SIMPLE_VERSION: SKIP (kernel exec unsupported)"
+        return
+    if not fs.exists(SIMPLE_BIN):
+        print "SIMPLE_VERSION: SKIP (missing {SIMPLE_BIN})"
+        return
+    val r = process.run(SIMPLE_BIN, ["--version"])
+    if r.exit_code != 0:
+        print "SIMPLE_VERSION: FAIL (exit {r.exit_code})"
+        return
+    val line = r.stdout.trim()
+    print "SIMPLE_VERSION: {line}"
+
+fn step_bootstrap_corpus(have_exec: bool):
+    if not have_exec:
+        print "BOOTSTRAP_CORPUS_SKIP reason=no-exec"
+        return
+    if not fs.dir_exists(CORPUS_DIR):
+        print "BOOTSTRAP_CORPUS_SKIP reason=missing-dir:{CORPUS_DIR}"
+        return
+    val r = process.run(SIMPLE_BIN, ["test", CORPUS_DIR])
+    if r.exit_code == 0:
+        print "BOOTSTRAP_CORPUS_OK"
+    else:
+        print "BOOTSTRAP_CORPUS_FAIL exit={r.exit_code}"
+
+fn native_build_once(out_path: text) -> bool:
+    val args: [text] = [
+        "native-build",
+        "--source", "/src/compiler",
+        "--source", "/src/lib",
+        "--source", "/src/app",
+        "--entry", "/src/app/cli/main.spl",
+        "-o", out_path,
+    ]
+    val r = process.run(SIMPLE_BIN, args)
+    r.exit_code == 0
+
+fn step_selfhost(have_exec: bool):
+    if not have_exec:
+        print "STAGE2_EQ_STAGE3_SKIP reason=no-exec"
+        return
+    if not fs.exists(SIMPLE_BIN):
+        print "STAGE2_EQ_STAGE3_SKIP reason=missing-simple"
+        return
+    if not native_build_once(STAGE2_OUT):
+        print "STAGE2_EQ_STAGE3_FAIL phase=stage2"
+        return
+    if not native_build_once(STAGE3_OUT):
+        print "STAGE2_EQ_STAGE3_FAIL phase=stage3"
+        return
+    val cmp = process.run("cmp", [STAGE2_OUT, STAGE3_OUT])
+    if cmp.exit_code == 0:
+        print "STAGE2_EQ_STAGE3_OK"
+    else:
+        print "STAGE2_EQ_STAGE3_FAIL phase=cmp exit={cmp.exit_code}"
+
+fn step_clang_smoke(have_exec: bool):
+    if not have_exec:
+        print "SMOKE_CLANG_SKIP reason=no-exec"
+        return
+    if not fs.exists("/usr/bin/clang"):
+        print "SMOKE_CLANG_SKIP reason=missing-clang"
+        return
+    if not fs.exists(HELLO_C):
+        print "SMOKE_CLANG_SKIP reason=missing-source"
+        return
+    val compile = process.run(
+        "/usr/bin/clang",
+        [
+            "--target=x86_64-simpleos",
+            "--sysroot=/usr",
+            "-c", HELLO_C,
+            "-o", HELLO_OBJ,
+        ],
+    )
+    if compile.exit_code != 0:
+        print "SMOKE_CLANG_FAIL phase=compile exit={compile.exit_code}"
+        return
+    val nm = process.run("/usr/bin/llvm-nm", [HELLO_OBJ])
+    if nm.exit_code != 0:
+        print "SMOKE_CLANG_FAIL phase=nm exit={nm.exit_code}"
+        return
+    print "SMOKE_CLANG_OK"
+
+fn step_rust_smoke(have_exec: bool):
+    if not have_exec:
+        print "SMOKE_RUST_SKIP reason=no-exec"
+        return
+    if not fs.exists(HELLO_RUST_ELF):
+        print "SMOKE_RUST_SKIP reason=missing-elf:{HELLO_RUST_ELF}"
+        return
+    val r = process.run(HELLO_RUST_ELF, [])
+    if r.exit_code == 0 and r.stdout.contains("hello from rust"):
+        print "SMOKE_RUST_OK"
+        print r.stdout.trim()
+    else:
+        print "SMOKE_RUST_FAIL exit={r.exit_code}"
+
+fn halt():
+    print "SIMPLEOS_SMOKE_INIT_DONE"
+    # Serial-driver flush; a real shutdown hook would go here once
+    # SimpleOS exposes one. For now we exit the init task — the kernel
+    # will panic-halt, which QEMU captures as exit code 0 under -nographic.
+    process.exit(0)
+
+fn main():
+    banner()
+    val have_exec = can_exec()
+    if not have_exec:
+        print "NOTE: in-guest process exec unavailable; each step emits SKIP."
+    step_simple_version(have_exec)
+    step_bootstrap_corpus(have_exec)
+    step_selfhost(have_exec)
+    step_clang_smoke(have_exec)
+    step_rust_smoke(have_exec)
+    halt()

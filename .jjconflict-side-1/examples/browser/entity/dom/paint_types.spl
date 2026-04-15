@@ -1,0 +1,67 @@
+# Paint and display list types for rendering output.
+# The layout engine produces a DisplayList of PaintOps consumed by the compositor.
+
+use std.common.color.types.{Color, from_rgb, from_rgba, black, white}
+use std.common.color.convert.{from_hex, from_name}
+
+# Transparent color helper (stdlib has no transparent() function).
+fn transparent() -> Color: from_rgba(0, 0, 0, 0)
+
+class GradientStop:
+    color: Color
+    position: f64
+
+    static fn create(color: Color, position: f64) -> GradientStop:
+        GradientStop(color: color, position: position)
+
+class Gradient:
+    stops: [GradientStop]
+    angle: f64
+
+    static fn create(stops: [GradientStop], angle: f64) -> Gradient:
+        Gradient(stops: stops, angle: angle)
+
+# PaintOp inlines rect fields (x,y,w,h) directly for simplicity rather than wrapping in Rect2.
+# This avoids a dependency on std.common.engine.rect and keeps the enum self-contained.
+enum PaintOp:
+    FillRect(x: f64, y: f64, w: f64, h: f64, color: Color)
+    DrawText(x: f64, y: f64, text_content: text, font_size: f64, color: Color)
+    DrawBorder(x: f64, y: f64, w: f64, h: f64, widths: [f64], colors: [Color])
+    DrawImage(x: f64, y: f64, w: f64, h: f64, image_id: i64)
+    DrawGradient(x: f64, y: f64, w: f64, h: f64, gradient: Gradient)
+    PushClip(x: f64, y: f64, w: f64, h: f64)
+    PopClip
+    PushOpacity(alpha: f64)
+    PopOpacity
+    PushTransform(matrix: [f64])
+    PopTransform
+    PushFilter(filter_type: text, amount: f64)
+    PopFilter
+
+# Extract the rect (x, y, w, h) from rect-bearing PaintOp variants.
+# Returns nil for non-rect ops (DrawText, PushOpacity, PopOpacity, PopClip).
+fn paint_op_rect(op: PaintOp) -> Option<Pair<Pair<f64, f64>, Pair<f64, f64>> >:
+    match op:
+        PaintOp.FillRect(x, y, w, h, _):
+            Some(Pair(first: Pair(first: x, second: y), second: Pair(first: w, second: h)))
+        PaintOp.DrawBorder(x, y, w, h, _, _):
+            Some(Pair(first: Pair(first: x, second: y), second: Pair(first: w, second: h)))
+        PaintOp.DrawImage(x, y, w, h, _):
+            Some(Pair(first: Pair(first: x, second: y), second: Pair(first: w, second: h)))
+        PaintOp.PushClip(x, y, w, h):
+            Some(Pair(first: Pair(first: x, second: y), second: Pair(first: w, second: h)))
+        _: nil
+
+class DisplayList:
+    ops: [PaintOp]
+
+    static fn empty() -> DisplayList:
+        DisplayList(ops: [PaintOp]())
+
+# DisplayItem.z_index uses i64 directly for simplicity — no strongly-typed ZIndex wrapper needed at this layer.
+class DisplayItem:
+    z_index: i64
+    op: PaintOp
+
+    static fn create(z_index: i64, op: PaintOp) -> DisplayItem:
+        DisplayItem(z_index: z_index, op: op)

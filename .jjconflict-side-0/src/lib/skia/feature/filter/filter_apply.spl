@@ -1,0 +1,58 @@
+# Image filter dispatcher: routes SkImageFilter variants to implementation functions
+
+use std.skia.entity.imagefilter.{SkImageFilter}
+use std.skia.entity.color.{SkColor4f}
+use std.skia.entity.enums.{SkBlendMode}
+use std.skia.feature.filter.gaussian_blur.{ImageBuffer, gaussian_blur}
+use std.skia.feature.filter.color_matrix.{apply_color_matrix}
+use std.skia.feature.filter.drop_shadow.{drop_shadow}
+
+fn apply_image_filter(src: ImageBuffer, filter: SkImageFilter) -> ImageBuffer:
+    match filter:
+        SkImageFilter.Blur(sigma_x, sigma_y):
+            gaussian_blur(src, sigma_x, sigma_y)
+
+        SkImageFilter.ColorMatrix(matrix):
+            apply_color_matrix(src, matrix)
+
+        SkImageFilter.DropShadow(dx, dy, sigma_x, sigma_y, color):
+            drop_shadow(src, dx, dy, sigma_x, sigma_y, color)
+
+        SkImageFilter.Offset(dx, dy):
+            # TODO(skia-filter): sub-pixel offset; integer-only for now
+            _offset_buf(src, dx.to_i32(), dy.to_i32())
+
+        SkImageFilter.Compose(outer, inner):
+            val mid = apply_image_filter(src, *inner)
+            apply_image_filter(mid, *outer)
+
+        SkImageFilter.Tile(src_rect, dst_rect):
+            # TODO(skia-filter): tile filter not yet implemented
+            src
+
+        SkImageFilter.Merge(filters):
+            # TODO(skia-filter): merge filter not yet implemented
+            src
+
+        _:
+            # TODO(skia-filter): unrecognised filter variant, pass through
+            src
+
+fn _offset_buf(buf: ImageBuffer, dx: i32, dy: i32) -> ImageBuffer:
+    val w = buf.width
+    val h = buf.height
+    var out: [SkColor4f] = []
+    var y = 0
+    while y < h:
+        var x = 0
+        while x < w:
+            val sx = x - dx
+            val sy = y - dy
+            val p = if (sx >= 0 and sx < w and sy >= 0 and sy < h):
+                buf.pixels[(sy * w + sx).to_i64()]
+            else:
+                SkColor4f(r: 0.0, g: 0.0, b: 0.0, a: 0.0)
+            out = out + [p]
+            x = x + 1
+        y = y + 1
+    ImageBuffer(width: w, height: h, pixels: out)

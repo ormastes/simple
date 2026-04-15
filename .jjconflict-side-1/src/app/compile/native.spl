@@ -1,0 +1,486 @@
+#![allow(unnamed_duplicate_typed_args)]
+@allow(unnamed_duplicate_typed_args)
+# Native Compilation Pipeline
+#
+# C++ code generation from Simple source -> clang++/clang-cl compilation -> mold linking.
+# This bridges the gap until the full LLVM IR pipeline (MIR -> LLVM IR) is functional.
+#
+# Supports:
+#   - print statements (with string interpolation)
+#   - val/var declarations (integers, strings, arrays)
+#   - fn main(): wrapping
+#   - Function declarations and calls (fn name(args) -> type:)
+#   - if/elif/else
+#   - return statements
+#   - while loops
+#   - for i in range(start, end): loops
+#   - for item in array: loops
+#   - match value: / case X: / case _: (strings and integers)
+#   - Array literals and indexing (arr[i])
+#   - break / continue
+#   - Compound assignment (+=, -=, *=, /=)
+#   - Comments
+#
+# Usage: simple compile --native -o hello hello.spl
+#
+# Can be run as standalone script, or imported and called directly via compile_native()
+
+# Direct extern declarations to avoid module closure limitations
+extern fn rt_file_read_text(path: text) -> text
+extern fn rt_file_write_text(path: text, content: text) -> bool
+extern fn rt_file_exists(path: text) -> bool
+extern fn rt_cli_get_args() -> [text]
+extern fn rt_getpid() -> i64
+
+use app.io.file_shell.{shell, shell_output, file_write, file_delete, file_size}
+use std.log.{error, warn, info, debug}
+use compiler.driver.driver.{aot_c_file}
+use compiler.driver.driver_api.{aot_llvm_native_file, aot_native_file_with_backend}
+use compiler.driver.driver_types.{CompileResult}
+use compiler.backend.backend.runtime_compiler.{_get_temp_dir}
+
+# ============================================================================
+# Platform Detection
+# ============================================================================
+
+fn detect_platform() -> text:
+    val uname = shell_output("uname -s 2>/dev/null")
+    if uname.starts_with("Linux"):
+        return "linux"
+    if uname.starts_with("Darwin"):
+        return "macos"
+    if uname.starts_with("FreeBSD"):
+        return "freebsd"
+    if uname.starts_with("MINGW") or uname.starts_with("MSYS") or uname.starts_with("CYGWIN"):
+        return "windows"
+    if uname == "":
+        # uname failed - likely Windows without MSYS
+        val win_check = shell_output("cmd /c ver 2>NUL")
+        if win_check.contains("Windows"):
+            return "windows"
+    "unknown"
+
+# ============================================================================
+# Compiler Detection
+# ============================================================================
+
+fn find_c_compiler() -> text:
+    val compilers: [text] = ["clang", "clang-cl"]
+    for compiler in compilers:
+        val check = shell_output("which {compiler} 2>/dev/null")
+        if check.len() > 0:
+            return compiler
+    ""
+
+fn find_cpp_compiler() -> text:
+    val compilers: [text] = ["clang++", "clang-cl"]
+    for compiler in compilers:
+        val check = shell_output("which {compiler} 2>/dev/null")
+        if check.len() > 0:
+            return compiler
+    ""
+
+# ============================================================================
+# Mold Detection
+# ============================================================================
+
+fn find_mold_for_native() -> text:
+    # mold is Linux-only
+    val platform = detect_platform()
+    if platform != "linux":
+        return ""
+    val current_dir = shell_output("pwd")
+    val local_mold = current_dir + "/bin/mold/mold"
+    if rt_file_exists(local_mold):
+        return local_mold
+    val which_result = shell_output("which mold 2>/dev/null")
+    if which_result.len() > 0:
+        return which_result
+    ""
+
+# ============================================================================
+# Multi-File Dependency Collection
+# ============================================================================
+
+fn get_dir_of_file(path: text) -> text:
+    val last_slash = path.last_index_of("/") ?? -1
+    if last_slash >= 0:
+        return path.substring(0, last_slash)
+    "."
+
+fn extract_use_modules(source: text) -> [text]:
+    var modules: [text] = []
+    val lines = source.split("\n")
+    for line in lines:
+        val trimmed = line.trim()
+        if trimmed.starts_with("use "):
+            val rest = trimmed.substring(4).trim()
+            # Skip compiler internals (no local files to bundle)
+            if rest.starts_with("compiler."):
+                continue
+            # Extract module path (before { or .)
+            var module_path = rest
+            val brace_idx = rest.index_of("\{") ?? -1
+            if brace_idx >= 0:
+                module_path = rest.substring(0, brace_idx).trim()
+                if module_path.ends_with("."):
+                    module_path = module_path.substring(0, module_path.len() - 1)
+            if module_path.ends_with(".*"):
+                # Wildcard import: strip .* and include the base module
+                module_path = module_path.substring(0, module_path.len() - 2)
+            elif module_path.ends_with("*"):
+                continue
+            if module_path.len() > 0:
+                modules.push(module_path)
+    modules
+
+fn resolve_module_file(module_path: text, base_dir: text) -> text:
+    val rel_path = module_path.replace(".", "/")
+    val spl_path = base_dir + "/" + rel_path + ".spl"
+    if rt_file_exists(spl_path):
+        return spl_path
+    val init_path = base_dir + "/" + rel_path + "/__init__.spl"
+    if rt_file_exists(init_path):
+        return init_path
+    # Handle app.X.Y imports - resolve to src/app/X/Y.spl from project root
+    if module_path.starts_with("app."):
+        val parts = module_path.substring(4)
+        val app_rel = parts.replace(".", "/")
+        val app_path = "src/app/" + app_rel + ".spl"
+        if rt_file_exists(app_path):
+            return app_path
+        val app_init = "src/app/" + app_rel + "/__init__.spl"
+        if rt_file_exists(app_init):
+            return app_init
+    # Handle std.X.Y imports - resolve to src/lib/X/Y.spl from project root
+    if module_path.starts_with("std."):
+        val parts = module_path.substring(4)
+        val lib_rel = parts.replace(".", "/")
+        val lib_path = "src/lib/" + lib_rel + ".spl"
+        if rt_file_exists(lib_path):
+            return lib_path
+        val lib_init = "src/lib/" + lib_rel + "/__init__.spl"
+        if rt_file_exists(lib_init):
+            return lib_init
+    # Fallback: strip leading package prefix if it matches the base dir name
+    # Handles intra-package imports like "use compiler.core.tokens" when base_dir is src/core
+    val dot_pos = module_path.index_of(".") ?? -1
+    if dot_pos >= 0:
+        val pkg_prefix = module_path.substring(0, dot_pos)
+        val last_slash = base_dir.last_index_of("/") ?? -1
+        var dir_name = base_dir
+        if last_slash >= 0:
+            dir_name = base_dir.substring(last_slash + 1)
+        if pkg_prefix == dir_name:
+            val stripped_mod = module_path.substring(dot_pos + 1)
+            val stripped = stripped_mod.replace(".", "/")
+            val stripped_path = base_dir + "/" + stripped + ".spl"
+            if rt_file_exists(stripped_path):
+                return stripped_path
+            val stripped_init = base_dir + "/" + stripped + "/__init__.spl"
+            if rt_file_exists(stripped_init):
+                return stripped_init
+    ""
+
+fn collect_all_sources(source_file: text, source: text, verbose: bool) -> text:
+    val base_dir = get_dir_of_file(source_file)
+    var visited: [text] = [source_file]
+    var dep_sources: [text] = []
+    var queue: [text] = []
+
+    # Seed queue with main file's use imports
+    val main_modules = extract_use_modules(source)
+    for mod_path in main_modules:
+        val file_path = resolve_module_file(mod_path, base_dir)
+        if file_path != "" and not visited.contains(file_path):
+            visited.push(file_path)
+            queue.push(file_path)
+
+    # BFS over dependency files
+    var qi = 0
+    var combined_size = source.len()
+    while qi < queue.len():
+        val dep_file = queue[qi]
+        qi = qi + 1
+        val dep_source = rt_file_read_text(dep_file) ?? ""
+        if dep_source == "":
+            if verbose:
+                warn("compile", "cannot read dependency: {dep_file}")
+            continue
+        # Skip if combined source would exceed 500KB
+        if combined_size + dep_source.len() > 500000:
+            if verbose:
+                debug("compile", "Skipping dependency (size limit): {dep_file}")
+            continue
+        if verbose:
+            debug("compile", "Including dependency: {dep_file}")
+        dep_sources.push(dep_source)
+        combined_size = combined_size + dep_source.len()
+
+        # Discover transitive dependencies
+        val dep_dir = get_dir_of_file(dep_file)
+        val sub_modules = extract_use_modules(dep_source)
+        for sub_mod in sub_modules:
+            val sub_file = resolve_module_file(sub_mod, dep_dir)
+            if sub_file != "" and not visited.contains(sub_file):
+                visited.push(sub_file)
+                queue.push(sub_file)
+
+    if dep_sources.len() == 0:
+        return source
+
+    var combined = ""
+    for dep_src in dep_sources:
+        combined = combined + dep_src + "\n"
+    combined + source
+
+# ============================================================================
+# Compilation Pipeline
+# ============================================================================
+
+fn compile_native(source_file: text, output_file: text, verbose: bool, compiler_override: text, sanitize: bool, backend: text) -> i64:
+    # LLVM backends: MIR -> LLVM -> .o -> linker (all handled by driver)
+    if backend == "llvm" or backend == "llvm-lib":
+        if verbose:
+            info("compile", "Compiling {source_file} to native binary via {backend} backend...")
+        _cli_eprint("[DEBUG] Calling aot_native_file_with_backend({source_file}, {output_file}, {backend})")
+        val llvm_result = aot_native_file_with_backend(source_file, output_file, backend)
+        _cli_eprint("[DEBUG] aot_native_file_with_backend returned: {llvm_result}")
+        match llvm_result:
+            case CompileResult.Success(_):
+                if rt_file_exists(output_file):
+                    val size = file_size(output_file)
+                    info("compile", "Compiled: {output_file} ({size} bytes)")
+                return 0
+            case _:
+                error("compile", "LLVM native compilation failed")
+                val errors = llvm_result.get_errors()
+                _cli_eprint("[DEBUG] errors: {errors}")
+                for err in errors:
+                    error("compile", err)
+                return 1
+
+    if verbose:
+        info("compile", "Compiling {source_file} to native binary...")
+
+    # Step 1: Generate C via MIR C backend (in-process)
+    val pid = rt_getpid()
+    val temp_cpp = "{_get_temp_dir()}/simple_native_{pid}.c"
+    val aot_result = aot_c_file(source_file, temp_cpp)
+    match aot_result:
+        case CompileResult.Success(_):
+            pass
+        case _:
+            error("compile", "C generation failed")
+            val errors = aot_result.get_errors()
+            for err in errors:
+                error("compile", err)
+            return 1
+
+    if verbose:
+        val cpp_size = file_size(temp_cpp)
+        debug("compile", "Generated C++ ({cpp_size} bytes)")
+
+    # Step 2: Find C++ compiler
+    val cc = if compiler_override != "": compiler_override else: find_c_compiler()
+    if cc == "":
+        error("compile", "No C compiler found (tried clang, clang-cl, gcc)")
+        file_delete(temp_cpp)
+        return 1
+
+    # Step 3: Build compile command
+    val san_flags = if sanitize then "-fsanitize=address,leak -fno-omit-frame-pointer -g " else ""
+
+    val mold_path = find_mold_for_native()
+    var mold_link = ""
+    var used_mold = false
+    if mold_path != "":
+        var mold_dir = "."
+        val last_slash = mold_path.last_index_of("/") ?? -1
+        if last_slash >= 0:
+            mold_dir = mold_path.substring(0, last_slash)
+        mold_link = "-fuse-ld=mold -B {mold_dir}/ "
+        used_mold = true
+        if verbose:
+            debug("compile", "Using mold linker at: {mold_path}")
+    else:
+        if verbose:
+            debug("compile", "No mold found, using system linker")
+
+    # Compile runtime files as C even when using a C++ driver
+    val rt_sources = "-x c src/runtime/runtime.c src/runtime/runtime_thread.c src/runtime/runtime_memtrack.c src/runtime/runtime_fork.c"
+
+    # Link libsimple_native_all.a if available (provides Cranelift FFI + runtime)
+    var native_lib_flags = ""
+    val native_lib_path = "src/compiler_rust/target/release/libsimple_native_all.a"
+    if rt_file_exists(native_lib_path):
+        native_lib_flags = " {native_lib_path} -lstdc++ -lm"
+
+    val clang_cmd = "{cc} -std=gnu11 {san_flags}{mold_link}-I src/runtime/ -x c '{temp_cpp}' {rt_sources}{native_lib_flags} -o '{output_file}' -lpthread -ldl -lm 2>&1"
+    if verbose:
+        debug("compile", "Compiling: {cc} -std=c++20 ...")
+
+    val (clang_out, clang_err, clang_exit) = shell(clang_cmd)
+
+    # Step 4: Cleanup temp file
+    file_delete(temp_cpp)
+
+    # Step 5: Report results
+    if clang_exit != 0:
+        error("compile", "Compilation failed (exit code {clang_exit})")
+        if clang_out != "":
+            error("compile", clang_out)
+        return 1
+
+    if rt_file_exists(output_file):
+        val size = file_size(output_file)
+        info("compile", "Compiled: {output_file} ({size} bytes)")
+        if verbose:
+            val linker_name = if used_mold then "mold" else "system"
+            debug("compile", "Linker: {linker_name}")
+    else:
+        error("compile", "Output file not created: {output_file}")
+        return 1
+
+    0
+
+# ============================================================================
+# Multi-File Linked Compilation (separate compile + link via mold/clang++)
+# ============================================================================
+
+fn compile_c_to_object(c_file: text, obj_file: text, verbose: bool, cc: text, sanitize: bool) -> bool:
+    val san_flags = if sanitize then "-fsanitize=address,leak -fno-omit-frame-pointer -g " else ""
+    val cmd = "{cc} {san_flags}-c -fPIE -o '{obj_file}' '{c_file}'"
+    if verbose:
+        debug("compile", "{cc} -c: {c_file} -> {obj_file}")
+    val (out, err, exit_code) = shell(cmd)
+    if exit_code != 0:
+        error("compile", "compile failed for {c_file}")
+        if err != "":
+            error("compile", err)
+        return false
+    true
+
+fn link_objects(obj_files: [text], output_file: text, verbose: bool, cc: text) -> bool:
+    # Build link command: use mold if available, else system linker
+    val mold_path = find_mold_for_native()
+    var link_cmd = cc
+    if mold_path != "":
+        var mold_dir = "."
+        val last_slash = mold_path.last_index_of("/") ?? -1
+        if last_slash >= 0:
+            mold_dir = mold_path.substring(0, last_slash)
+        link_cmd = "{cc} -fuse-ld=mold -B {mold_dir}/"
+        if verbose:
+            debug("compile", "Using mold linker at: {mold_path}")
+    else:
+        if verbose:
+            debug("compile", "Using system linker ({cc})")
+
+    # Add object files
+    for obj in obj_files:
+        link_cmd = link_cmd + " '{obj}'"
+    link_cmd = link_cmd + " -o '{output_file}'"
+
+    if verbose:
+        debug("compile", "Link: {link_cmd}")
+
+    val (out, err, exit_code) = shell(link_cmd)
+    if exit_code != 0:
+        error("compile", "Linking failed (exit code {exit_code})")
+        if err != "":
+            error("compile", err)
+        return false
+    true
+
+fn compile_native_linked(source_file: text, output_file: text, verbose: bool, compiler_override: text, sanitize: bool, backend: text) -> i64:
+    # Delegate to compile_native — MIR C backend handles all modules in one pass
+    compile_native(source_file, output_file, verbose, compiler_override, sanitize, backend)
+
+# ============================================================================
+# Generate C Only (for cross-compilation workflows)
+# ============================================================================
+
+fn compile_gen_c_only(source_file: text, output_file: text, verbose: bool) -> i64:
+    if verbose:
+        info("compile", "Generating C++ code only for {source_file}...")
+
+    # If output is "-", use a temp file then print to stdout
+    val use_stdout = output_file == "-"
+    var actual_output = output_file
+    if use_stdout:
+        actual_output = shell_output("mktemp /tmp/simple_gen_c_XXXXXX.cpp")
+        if actual_output == "":
+            error("compile", "Failed to create temp file")
+            return 1
+
+    val aot_result = aot_c_file(source_file, actual_output)
+    match aot_result:
+        case CompileResult.Success(_):
+            pass
+        case _:
+            error("compile", "C generation failed")
+            val errors = aot_result.get_errors()
+            for err in errors:
+                error("compile", err)
+            if use_stdout:
+                file_delete(actual_output)
+            return 1
+
+    if use_stdout:
+        val content_raw = rt_file_read_text(actual_output)
+        val content = content_raw ?? ""
+        print content
+        file_delete(actual_output)
+        return 0
+
+    val size = file_size(actual_output)
+    info("compile", "Generated C++: {actual_output} ({size} bytes)")
+    0
+
+# ============================================================================
+# CLI Entry Point (when run as standalone script)
+# ============================================================================
+
+fn main() -> i64:
+    val args = rt_cli_get_args()
+    # Handle both invocation styles:
+    # 1) simple native.spl <src> <out> ...  (args[1] = script)
+    # 2) simple <src> <out> ...             (script omitted by runtime)
+    var arg_idx = 2
+    if args.len() >= 2 and not args[1].ends_with(".spl"):
+        # Runtime omitted script path; user args start at 1
+        arg_idx = 1
+
+    if args.len() <= arg_idx + 1:
+        print "Usage: native.spl <source.spl> <output> [--verbose] [--linked] [--gen-c-only] [--compiler=X]"
+        return 1
+
+    val source_file = args[arg_idx]
+    val output_file = args[arg_idx + 1]
+    var verbose = false
+    var use_linked = false
+    var gen_c_only = false
+    var compiler_override = ""
+    var sanitize = false
+    var backend = ""
+    for ai in range(4, args.len()):
+        if args[ai] == "--verbose":
+            verbose = true
+        if args[ai] == "--linked":
+            use_linked = true
+        if args[ai] == "--gen-c-only":
+            gen_c_only = true
+        if args[ai] == "--sanitize":
+            sanitize = true
+        if args[ai].starts_with("--compiler="):
+            compiler_override = args[ai].substring(11)
+        if args[ai].starts_with("--backend="):
+            backend = args[ai].substring(10)
+
+    if gen_c_only:
+        return compile_gen_c_only(source_file, output_file, verbose)
+    if use_linked:
+        return compile_native_linked(source_file, output_file, verbose, compiler_override, sanitize, backend)
+    compile_native(source_file, output_file, verbose, compiler_override, sanitize, backend)
+

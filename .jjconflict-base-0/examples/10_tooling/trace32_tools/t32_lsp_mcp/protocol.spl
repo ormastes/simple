@@ -1,0 +1,146 @@
+#![allow(unnamed_duplicate_typed_args)]
+@allow(unnamed_duplicate_typed_args)
+# T32 LSP MCP Protocol — initialize, tools list, schemas
+# Protocol: MCP 2025-06-18 (Content-Length framing + JSON-Lines auto-detect)
+#
+# MIGRATED: Transport I/O moved to std.mcp_sdk.transport.stdio.
+# JSON helpers moved to std.mcp_sdk.core.json.
+# JSON-RPC builders moved to std.mcp_sdk.core.jsonrpc.
+
+use t32_lsp_mcp.json_helpers.{LB, RB, Q, SB_L, SB_R, jp, js, jo1, jo2, jo3, jo4, extract_field, jsonrpc_result}
+
+# --- Initialize response ---
+
+fn lsp_make_init_response(id: text) -> text:
+    if LSP_INIT_CACHE != "":
+        return jsonrpc_result(id, LSP_INIT_CACHE)
+    var tools_cap = jo1(jp("listChanged", "true"))
+    var caps = jo1(jp("tools", tools_cap))
+    val server_info = jo3(
+        jp("name", js(LSP_SERVER_NAME)),
+        jp("version", js(LSP_SERVER_VERSION)),
+        jp("instructions", js("CMM language intelligence via MCP protocol. 9 tools for parsing, AST inspection, dialog extraction, diagnostics, completions, hover, symbols, definition, and CLI validation."))
+    )
+    val result = jo3(
+        jp("protocolVersion", js("2025-06-18")),
+        jp("capabilities", caps),
+        jp("serverInfo", server_info)
+    )
+    LSP_INIT_CACHE = result
+    jsonrpc_result(id, result)
+
+# --- Tools list (7 CMM LSP tools) ---
+
+fn lsp_make_tools_list(id: text) -> text:
+    if LSP_TOOLS_CACHE != "":
+        return jsonrpc_result(id, LSP_TOOLS_CACHE)
+
+    var tool_parts: [text] = []
+
+    tool_parts.push(lsp_make_tool_schema("cmm_parse", "Parse CMM source and return AST summary with node count and errors"))
+    tool_parts.push(lsp_make_tool_schema("cmm_diagnostics", "Run semantic diagnostics on CMM source (labels, macros, unreachable code)"))
+    tool_parts.push(lsp_make_tool_schema("cmm_complete", "Get completions at a position in CMM source"))
+    tool_parts.push(lsp_make_tool_schema("cmm_hover", "Get hover documentation for a word at a position in CMM source"))
+    tool_parts.push(lsp_make_tool_schema("cmm_symbols", "List symbols (labels, macros) in CMM source"))
+    tool_parts.push(lsp_make_tool_schema("cmm_definition", "Get definition location for a symbol at a position in CMM source"))
+    tool_parts.push(lsp_make_tool_schema("cmm_validate_cli", "Validate CLI conversion quality of a CMM script"))
+    tool_parts.push(lsp_make_tool_schema("cmm_ast", "Parse CMM source and return full AST tree as structured JSON"))
+    tool_parts.push(lsp_make_tool_schema("cmm_dialog_ast", "Extract DIALOG blocks from CMM source and return dialog AST as structured JSON"))
+
+    val tools = SB_L() + tool_parts.join(",") + SB_R()
+    val result = jo1(jp("tools", tools))
+    LSP_TOOLS_CACHE = result
+    jsonrpc_result(id, result)
+
+fn lsp_make_resources_list(id: text) -> text:
+    jsonrpc_result(id, jo1(jp("resources", SB_L() + SB_R())))
+
+fn lsp_make_resource_templates_list(id: text) -> text:
+    jsonrpc_result(id, jo1(jp("resourceTemplates", SB_L() + SB_R())))
+
+fn lsp_make_prompts_list(id: text) -> text:
+    jsonrpc_result(id, jo1(jp("prompts", SB_L() + SB_R())))
+
+fn lsp_make_roots_list(id: text) -> text:
+    jsonrpc_result(id, jo1(jp("roots", SB_L() + SB_R())))
+
+# --- Tool schema builder ---
+
+fn lsp_make_tool_schema(name: text, description: text) -> text:
+    var props = LB() + RB()
+    var req = "[]"
+
+    if name == "cmm_parse":
+        props = jo1(jp("source", jo2(jp("type", js("string")), jp("description", js("CMM source text to parse")))))
+        req = "[" + js("source") + "]"
+    elif name == "cmm_diagnostics":
+        props = jo1(jp("source", jo2(jp("type", js("string")), jp("description", js("CMM source text to analyze")))))
+        req = "[" + js("source") + "]"
+    elif name == "cmm_complete":
+        var p = LB()
+        p = p + jp("source", jo2(jp("type", js("string")), jp("description", js("CMM source text"))))
+        p = p + "," + jp("line", jo2(jp("type", js("integer")), jp("description", js("Line number (1-based)"))))
+        p = p + "," + jp("character", jo2(jp("type", js("integer")), jp("description", js("Character offset (0-based)"))))
+        p = p + RB()
+        props = p
+        req = "[" + js("source") + "," + js("line") + "," + js("character") + "]"
+    elif name == "cmm_hover":
+        var p = LB()
+        p = p + jp("source", jo2(jp("type", js("string")), jp("description", js("CMM source text"))))
+        p = p + "," + jp("line", jo2(jp("type", js("integer")), jp("description", js("Line number (1-based)"))))
+        p = p + "," + jp("character", jo2(jp("type", js("integer")), jp("description", js("Character offset (0-based)"))))
+        p = p + RB()
+        props = p
+        req = "[" + js("source") + "," + js("line") + "," + js("character") + "]"
+    elif name == "cmm_symbols":
+        props = jo1(jp("source", jo2(jp("type", js("string")), jp("description", js("CMM source text")))))
+        req = "[" + js("source") + "]"
+    elif name == "cmm_definition":
+        var p = LB()
+        p = p + jp("source", jo2(jp("type", js("string")), jp("description", js("CMM source text"))))
+        p = p + "," + jp("line", jo2(jp("type", js("integer")), jp("description", js("Line number (1-based)"))))
+        p = p + "," + jp("character", jo2(jp("type", js("integer")), jp("description", js("Character offset (0-based)"))))
+        p = p + RB()
+        props = p
+        req = "[" + js("source") + "," + js("line") + "," + js("character") + "]"
+    elif name == "cmm_validate_cli":
+        props = jo1(jp("source", jo2(jp("type", js("string")), jp("description", js("CMM CLI-converted source to validate")))))
+        req = "[" + js("source") + "]"
+    elif name == "cmm_ast":
+        var p = LB()
+        p = p + jp("source", jo2(jp("type", js("string")), jp("description", js("CMM source text to parse into AST"))))
+        p = p + "," + jp("resolve_includes", jo2(jp("type", js("boolean")), jp("description", js("Follow DO/RUN includes and return multi-file AST (default false)"))))
+        p = p + "," + jp("base_path", jo2(jp("type", js("string")), jp("description", js("Base directory for resolving relative include paths"))))
+        p = p + RB()
+        props = p
+        req = "[" + js("source") + "]"
+    elif name == "cmm_dialog_ast":
+        var p = LB()
+        p = p + jp("source", jo2(jp("type", js("string")), jp("description", js("CMM source text to extract DIALOG blocks from"))))
+        p = p + "," + jp("resolve_includes", jo2(jp("type", js("boolean")), jp("description", js("Follow DO/RUN includes and return multi-file dialog AST (default false)"))))
+        p = p + "," + jp("base_path", jo2(jp("type", js("string")), jp("description", js("Base directory for resolving relative include paths"))))
+        p = p + RB()
+        props = p
+        req = "[" + js("source") + "]"
+
+    var schema = LB()
+    schema = schema + jp("type", js("object"))
+    schema = schema + "," + jp("properties", props)
+    schema = schema + "," + jp("required", req)
+    schema = schema + RB()
+
+    # Annotations — all tools are read-only and idempotent
+    var annotations = LB()
+    annotations = annotations + jp("readOnlyHint", "true")
+    annotations = annotations + "," + jp("destructiveHint", "false")
+    annotations = annotations + "," + jp("idempotentHint", "true")
+    annotations = annotations + "," + jp("openWorldHint", "false")
+    annotations = annotations + RB()
+
+    var tool_obj = jo3(
+        jp("name", js(name)),
+        jp("description", js(description)),
+        jp("inputSchema", schema)
+    )
+    tool_obj = tool_obj.substring(0, tool_obj.len() - 1) + "," + jp("annotations", annotations) + RB()
+    tool_obj

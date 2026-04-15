@@ -1,0 +1,111 @@
+# Watcher Types Specification
+#
+# Tests request, config, and state types for the watcher service.
+#
+# **Feature IDs:** #WATCH-001 to #WATCH-010
+# **Category:** Infrastructure
+
+# ============================================================================
+# Mock types (self-contained for interpreter mode)
+# ============================================================================
+
+val REQ_SHB: i64 = 0
+val REQ_SMF: i64 = 1
+val REQ_BOTH: i64 = 2
+
+struct MockRequest:
+    source_path: text
+    kind: i64
+    source_hash: i64
+    options_hash: i64
+    timestamp: i64
+
+fn mock_request(path: text, kind: i64) -> MockRequest:
+    MockRequest(source_path: path, kind: kind, source_hash: 0, options_hash: 0, timestamp: 1000)
+
+struct MockConfig:
+    poll_interval_ms: i64
+    request_timeout_ms: i64
+    cache_dir: text
+    shb_dir: text
+    smf_dir: text
+    request_dir: text
+    lock_path: text
+    max_concurrent: i64
+
+fn mock_config_default() -> MockConfig:
+    MockConfig(
+        poll_interval_ms: 500,
+        request_timeout_ms: 30000,
+        cache_dir: ".build",
+        shb_dir: ".build/headers",
+        smf_dir: "build/smf",
+        request_dir: ".build/watcher/requests",
+        lock_path: ".build/watcher/watcher.lock",
+        max_concurrent: 50
+    )
+
+val STATE_IDLE: i64 = 0
+val STATE_POLLING: i64 = 1
+val STATE_PROCESSING: i64 = 2
+val STATE_SHUTTING_DOWN: i64 = 3
+
+struct MockState:
+    status: i64
+    last_poll_time: i64
+    files_processed: i64
+    errors_count: i64
+    cycle_count: i64
+
+fn mock_state_new() -> MockState:
+    MockState(status: STATE_IDLE, last_poll_time: 0, files_processed: 0, errors_count: 0, cycle_count: 0)
+
+# ============================================================================
+# Tests
+# ============================================================================
+
+describe "WatcherRequest":
+    it "creates request with path and kind":
+        val req = mock_request("src/main.spl", REQ_SHB)
+        expect(req.source_path).to_equal("src/main.spl")
+        expect(req.kind).to_equal(REQ_SHB)
+        expect(req.timestamp).to_equal(1000)
+
+    it "supports SMF request kind":
+        val req = mock_request("src/lib.spl", REQ_SMF)
+        expect(req.kind).to_equal(REQ_SMF)
+
+    it "supports BOTH request kind":
+        val req = mock_request("src/app.spl", REQ_BOTH)
+        expect(req.kind).to_equal(REQ_BOTH)
+
+describe "WatcherConfig":
+    it "has sensible defaults":
+        val cfg = mock_config_default()
+        expect(cfg.poll_interval_ms).to_equal(500)
+        expect(cfg.request_timeout_ms).to_equal(30000)
+        expect(cfg.shb_dir).to_equal(".build/headers")
+        expect(cfg.smf_dir).to_equal("build/smf")
+        expect(cfg.max_concurrent).to_equal(50)
+
+    it "uses .build as cache root":
+        val cfg = mock_config_default()
+        expect(cfg.cache_dir).to_equal(".build")
+        expect(cfg.lock_path).to_start_with(".build/watcher/")
+
+describe "WatcherState":
+    it "starts idle":
+        val state = mock_state_new()
+        expect(state.status).to_equal(STATE_IDLE)
+        expect(state.files_processed).to_equal(0)
+        expect(state.errors_count).to_equal(0)
+        expect(state.cycle_count).to_equal(0)
+
+    it "tracks processing state":
+        var state = mock_state_new()
+        state.status = STATE_PROCESSING
+        state.files_processed = 5
+        state.cycle_count = 10
+        expect(state.status).to_equal(STATE_PROCESSING)
+        expect(state.files_processed).to_equal(5)
+        expect(state.cycle_count).to_equal(10)

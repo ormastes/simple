@@ -1,0 +1,255 @@
+#![allow(export_outside_init)]
+#![allow(unnamed_duplicate_typed_args)]
+# Security Lint: SQL Injection Detection
+#
+# Detects string interpolation containing SQL keywords, which indicates
+# dynamic SQL query construction vulnerable to injection attacks.
+#
+# SEC-SQL001: String interpolation with SQL keywords                    DENY
+#
+# Triggers when a string literal contains BOTH:
+# - SQL keywords (SELECT, INSERT, UPDATE, DELETE, DROP, ALTER, CREATE, TRUNCATE)
+# - Variable interpolation ({var} patterns)
+#
+# Does NOT flag:
+# - Raw strings (r"...") without interpolation
+# - String constants without interpolation (safe SQL templates)
+# - Strings in QueryBuilder/PreparedStatement context
+# - Comment lines or docstrings
+# - Strings inside test files (*_spec.spl, *_test.spl)
+#
+# Rationale: LLMs generate "SELECT * FROM users WHERE id = '{id}'" instead
+# of parameterized queries. This is the most common LLM security hole and
+# also the easiest to detect statically.
+#
+# Fix: Use PreparedStatement("SELECT ... WHERE id = ?").bind(id) or
+#      QueryBuilder.select("table").where_eq("id", id)
+#
+# ============================================================================
+
+use std.io_runtime
+
+
+# ============================================================================
+# Warning Struct
+# ============================================================================
+
+struct SqlInjectionWarning:
+    code: text
+    severity: text
+    message: text
+    hint: text
+    line_num: i64
+    file_path: text
+
+    fn fmt() -> text:
+        "[{self.code}] {self.severity}: {self.file_path}:{self.line_num} -- {self.message} -- {self.hint}"
+
+
+# ============================================================================
+# SQL Keywords to Detect
+# ============================================================================
+
+fn _sql_keywords() -> [text]:
+    ["SELECT ", "INSERT ", "UPDATE ", "DELETE ", "DROP ", "ALTER ", "CREATE ", "TRUNCATE ",
+     "select ", "insert ", "update ", "delete ", "drop ", "alter ", "create ", "truncate ",
+     "Select ", "Insert ", "Update ", "Delete ", "Drop ", "Alter ", "Create ", "Truncate "]
+
+
+# ============================================================================
+# Main Entry Point
+# ============================================================================
+
+fn check_sql_injection(source: text, path: text) -> [SqlInjectionWarning]:
+    """Scan source text for string interpolation containing SQL keywords.
+
+    For each non-comment, non-docstring line, checks whether the line contains
+    a string literal with both SQL keywords and {variable} interpolation.
+    Lines inside test files are skipped.
+
+    Returns a list of SqlInjectionWarning for each violation found.
+    """
+    var warnings: [SqlInjectionWarning] = []
+
+    # Skip test files
+    if path.ends_with("_spec.spl") or path.ends_with("_test.spl"):
+        return warnings
+
+    val lines = source.split("\n")
+    val keywords = _sql_keywords()
+    var in_docstring = false
+
+    var li = 0
+    while li < lines.len():
+        val line = lines[li]
+
+        # Track triple-quoted docstring regions
+        if _count_triple_quotes(line) % 2 == 1:
+            in_docstring = not in_docstring
+
+        if not in_docstring:
+            val trimmed = line.trim()
+
+            # Skip comment lines
+            if not trimmed.starts_with("#"):
+                # Skip lines with @allow(sql_injection) annotation
+                if not trimmed.contains("@allow(sql_injection)"):
+                    # Skip lines that use PreparedStatement or QueryBuilder
+                    if not _is_safe_sql_context(trimmed):
+                        # Check if line has both SQL keywords and interpolation
+                        val found_keyword = _find_sql_keyword(trimmed, keywords)
+                        if found_keyword != "":
+                            if _has_interpolation(trimmed):
+                                # Verify the SQL keyword and interpolation are in the same string
+                                if _in_same_string(trimmed, found_keyword):
+                                    warnings.push(SqlInjectionWarning(
+                                        code: "SEC-SQL001",
+                                        severity: "DENY",
+                                        message: "SQL keyword '{found_keyword.trim()}' used with string interpolation -- potential SQL injection",
+                                        hint: "use PreparedStatement(\"... ?\").bind(value) or QueryBuilder instead of string interpolation",
+                                        line_num: li + 1,
+                                        file_path: path
+                                    ))
+
+        li = li + 1
+
+    warnings
+
+
+# ============================================================================
+# Helper Functions
+# ============================================================================
+
+fn _find_sql_keyword(line: text, keywords: [text]) -> text:
+    """Find the first SQL keyword present in the line. Returns the keyword or empty string."""
+    var ki = 0
+    while ki < keywords.len():
+        val kw = keywords[ki]
+        if line.contains(kw):
+            return kw
+        ki = ki + 1
+    ""
+
+fn _has_interpolation(line: text) -> bool:
+    """Check if a line contains {variable} interpolation patterns.
+
+    Looks for { followed by an identifier character and later }.
+    Skips escaped braces ({{ and }}).
+    """
+    var i = 0
+    while i < line.len():
+        val ch = line.slice(i, i + 1)
+        if ch == "{":
+            # Skip escaped brace {{
+            if i + 1 < line.len() and line.slice(i + 1, i + 2) == "{":
+                i = i + 2
+                continue
+            # Check if next char is an identifier char (not { or space)
+            if i + 1 < line.len():
+                val next = line.slice(i + 1, i + 2)
+                if _is_ident_char(next):
+                    # Find closing brace
+                    var j = i + 2
+                    while j < line.len():
+                        val jch = line.slice(j, j + 1)
+                        if jch == "}":
+                            return true
+                        j = j + 1
+        i = i + 1
+    false
+
+fn _is_safe_sql_context(trimmed: text) -> bool:
+    """Check if the line uses a safe SQL API (parameterized query)."""
+    if trimmed.contains("PreparedStatement("):
+        return true
+    if trimmed.contains("QueryBuilder."):
+        return true
+    if trimmed.contains("query.bind("):
+        return true
+    if trimmed.contains(".where_eq("):
+        return true
+    if trimmed.contains(".where_like("):
+        return true
+    if trimmed.contains(".where_in("):
+        return true
+    if trimmed.contains("parameterized("):
+        return true
+    false
+
+fn _in_same_string(line: text, keyword: text) -> bool:
+    """Heuristic: check if the SQL keyword appears inside a quoted string
+    on the same line that also has interpolation.
+
+    Looks for patterns like: "SELECT ... {var} ..."
+    """
+    # Find string literal boundaries (simple heuristic: look for quotes)
+    var in_string = false
+    var string_start = -1
+    var i = 0
+
+    while i < line.len():
+        val ch = line.slice(i, i + 1)
+        if ch == "\"":
+            if in_string:
+                # End of string -- check if this string contains both keyword and interpolation
+                val str_content = line.slice(string_start + 1, i)
+                if str_content.contains(keyword) and _has_interpolation(str_content):
+                    return true
+                in_string = false
+            else:
+                in_string = true
+                string_start = i
+        i = i + 1
+
+    # If we're still in a string at end of line (multi-line or unclosed), check it
+    if in_string and string_start >= 0:
+        val str_content = line.slice(string_start + 1)
+        if str_content.contains(keyword) and _has_interpolation(str_content):
+            return true
+
+    # Fallback: if no string delimiters found, the whole line might be a template
+    # In this case, trust the outer check (keyword + interpolation both present)
+    if string_start < 0:
+        return true
+
+    false
+
+fn _is_ident_char(ch: text) -> bool:
+    """Check if a single character is valid in an identifier."""
+    if ch.len() != 1:
+        return false
+    val c = ch.to_byte()
+    # a-z
+    if c >= 97 and c <= 122:
+        return true
+    # A-Z
+    if c >= 65 and c <= 90:
+        return true
+    # 0-9
+    if c >= 48 and c <= 57:
+        return true
+    # _
+    if c == 95:
+        return true
+    false
+
+fn _count_triple_quotes(line: text) -> i64:
+    """Count the number of triple-quote sequences in a line."""
+    var count = 0
+    var i = 0
+    while i + 2 < line.len():
+        val chunk = line.slice(i, i + 3)
+        if chunk == "\"\"\"":
+            count = count + 1
+            i = i + 3
+        else:
+            i = i + 1
+    count
+
+
+# ============================================================================
+# Exports
+# ============================================================================
+
+export SqlInjectionWarning
+export check_sql_injection

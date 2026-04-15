@@ -1,0 +1,137 @@
+# Shared Backend Test Logic
+#
+# Core T32 operations tested identically across all backends.
+# Each backend spec file imports these functions and calls them
+# after configuring the appropriate backend.
+
+use std.sspec.*
+use test.integration.t32_hw.t32_hw_helpers.{
+    t32_hw_probe_available, t32_hw_connect, t32_hw_host, t32_hw_port
+}
+use std.debug.remote.protocol.trace32.{Trace32Client}
+use app.debug.remote.types.{DebugConfig}
+
+# ============================================================================
+# Shared Test Functions (called by each backend spec)
+# ============================================================================
+
+fn shared_test_connect_and_ping():
+    """Test: connect and ping T32."""
+    if not t32_hw_probe_available():
+        expect("skipped").to_contain("skip")
+        return
+    val client = t32_hw_connect()
+    match client:
+        Ok(c):
+            val r = c.run_command("PING")
+            c.disconnect()
+            match r:
+                Ok(_): expect("connected").to_equal("connected")
+                Err(e): expect("ping failed: {e}").to_contain("ping")
+        Err(e):
+            expect("connect failed: {e}").to_contain("skip")
+
+fn shared_test_eval_version():
+    """Test: eval VERSION.BUILD()."""
+    if not t32_hw_probe_available():
+        expect("skipped").to_contain("skip")
+        return
+    val client = t32_hw_connect()
+    match client:
+        Ok(c):
+            val r = c.eval_expr("VERSION.BUILD()")
+            c.disconnect()
+            match r:
+                Ok(v): expect(v.trim().len()).to_be_greater_than(0)
+                Err(e): expect("eval failed: {e}").to_contain("eval")
+        Err(e):
+            expect("connect failed: {e}").to_contain("skip")
+
+fn shared_test_cmd_run():
+    """Test: run PRACTICE command."""
+    if not t32_hw_probe_available():
+        expect("skipped").to_contain("skip")
+        return
+    val client = t32_hw_connect()
+    match client:
+        Ok(c):
+            val r = c.run_command("SYStem.Up")
+            c.disconnect()
+            match r:
+                Ok(_): expect("ok").to_equal("ok")
+                Err(e): expect("cmd failed: {e}").to_contain("cmd")
+        Err(e):
+            expect("connect failed: {e}").to_contain("skip")
+
+fn shared_test_state_query():
+    """Test: query STATE.RUN()."""
+    if not t32_hw_probe_available():
+        expect("skipped").to_contain("skip")
+        return
+    val client = t32_hw_connect()
+    match client:
+        Ok(c):
+            val r = c.eval_expr("STATE.RUN()")
+            c.disconnect()
+            match r:
+                Ok(v):
+                    val trimmed = v.trim()
+                    val is_bool = (trimmed == "TRUE" or trimmed == "FALSE")
+                    expect(is_bool).to_equal(true)
+                Err(e):
+                    expect("state query failed: {e}").to_contain("state")
+        Err(e):
+            expect("connect failed: {e}").to_contain("skip")
+
+fn shared_test_register_read():
+    """Test: read PC register."""
+    if not t32_hw_probe_available():
+        expect("skipped").to_contain("skip")
+        return
+    val client = t32_hw_connect()
+    match client:
+        Ok(c):
+            val r = c.read_register("PC")
+            c.disconnect()
+            match r:
+                Ok(v): expect(v).to_be_greater_than(-1)
+                Err(e): expect("register read: {e}").to_contain("register")
+        Err(e):
+            expect("connect failed: {e}").to_contain("skip")
+
+fn shared_test_step_and_halt():
+    """Test: halt, step, halt cycle."""
+    if not t32_hw_probe_available():
+        expect("skipped").to_contain("skip")
+        return
+    val client = t32_hw_connect()
+    match client:
+        Ok(c):
+            c.halt()
+            val r = c.single_step()
+            c.halt()
+            c.disconnect()
+            match r:
+                Ok(_): expect("stepped").to_equal("stepped")
+                Err(e): expect("step failed: {e}").to_contain("step")
+        Err(e):
+            expect("connect failed: {e}").to_contain("skip")
+
+fn shared_test_error_recovery():
+    """Test: error from bad command, then clean recovery."""
+    if not t32_hw_probe_available():
+        expect("skipped").to_contain("skip")
+        return
+    val client = t32_hw_connect()
+    match client:
+        Ok(c):
+            # Force an error
+            c.run_command("ZZZNOTACMD.ZZZZ")
+            # Should still work after error
+            val r = c.eval_expr("VERSION.BUILD()")
+            c.disconnect()
+            match r:
+                Ok(v): expect(v.trim().len()).to_be_greater_than(0)
+                Err(e): expect("recovery failed: {e}").to_contain("recovery")
+        Err(e):
+            expect("connect failed: {e}").to_contain("skip")

@@ -1,0 +1,118 @@
+# Shared Shortcut Handler
+#
+# Maps keyboard scancodes and UART characters to WmAction commands.
+# Used by both the standalone WM (wm_entry.spl) and the compositor.
+# Standalone — no dependencies on platform-specific drivers.
+#
+# Shortcut table:
+#   Tab       → CycleFocus       (scancode 0x0F)
+#   1/2/3     → FocusWindow      (scancode 0x02/0x03/0x04)
+#   T         → ToggleTheme      (scancode 0x14)
+#   Q         → Quit             (scancode 0x10)
+#   M         → Minimize         (scancode 0x32)
+#   W         → Close            (scancode 0x11)
+#   R         → Restore          (scancode 0x13)
+
+use os.gui.input_event.{WmAction}
+
+# PS/2 Scancode Set 1 constants (make-code only, no break bit)
+val SC_TAB: u64 = 0x0F
+val SC_1: u64 = 0x02
+val SC_2: u64 = 0x03
+val SC_3: u64 = 0x04
+val SC_Q: u64 = 0x10
+val SC_W: u64 = 0x11
+val SC_R: u64 = 0x13
+val SC_T: u64 = 0x14
+val SC_M: u64 = 0x32
+val SC_LEFT_ALT: u64 = 0x38
+val SC_LEFT_CTRL: u64 = 0x1D
+val SC_LEFT_SHIFT: u64 = 0x2A
+val SC_RIGHT_SHIFT: u64 = 0x36
+val SC_F4: u64 = 0x3E
+val SC_F5: u64 = 0x3F
+
+class ShortcutHandler:
+    """Maps PS/2 scancodes to window manager actions.
+
+    Tracks modifier state (Alt, Ctrl, Shift) and matches
+    scancodes against a shortcut table.
+    """
+    alt_held: bool
+    ctrl_held: bool
+    shift_held: bool
+
+impl ShortcutHandler:
+    static fn new() -> ShortcutHandler:
+        ShortcutHandler(
+            alt_held: false,
+            ctrl_held: false,
+            shift_held: false
+        )
+
+    me handle_scancode(scancode: u64) -> WmAction:
+        """Process a raw PS/2 scancode and return the matching WM action.
+
+        Handles both press (bit 7 clear) and release (bit 7 set).
+        Returns WmAction.None if no shortcut matched.
+        """
+        if (scancode & 0x80) != 0:
+            # Release event — update modifiers only
+            val make = scancode & 0x7F
+            if make == SC_LEFT_ALT: self.alt_held = false
+            if make == SC_LEFT_CTRL: self.ctrl_held = false
+            if make == SC_LEFT_SHIFT: self.shift_held = false
+            if make == SC_RIGHT_SHIFT: self.shift_held = false
+            return WmAction.None
+
+        # Press event — update modifiers
+        if scancode == SC_LEFT_ALT: self.alt_held = true
+        if scancode == SC_LEFT_CTRL: self.ctrl_held = true
+        if scancode == SC_LEFT_SHIFT: self.shift_held = true
+        if scancode == SC_RIGHT_SHIFT: self.shift_held = true
+
+        # Match shortcuts
+        return self._match_scancode(scancode)
+
+    fn _match_scancode(scancode: u64) -> WmAction:
+        # Alt+key shortcuts (compositor mode)
+        if self.alt_held:
+            if scancode == SC_TAB: return WmAction.CycleFocus
+            if scancode == SC_F4: return WmAction.Close
+            if scancode == SC_F5: return WmAction.Minimize
+
+        # Direct key shortcuts (standalone WM mode)
+        if scancode == SC_TAB: return WmAction.CycleFocus
+        if scancode == SC_1: return WmAction.FocusWindow(idx: 0)
+        if scancode == SC_2: return WmAction.FocusWindow(idx: 1)
+        if scancode == SC_3: return WmAction.FocusWindow(idx: 2)
+        if scancode == SC_T: return WmAction.ToggleTheme
+        if scancode == SC_Q: return WmAction.Quit
+        if scancode == SC_M: return WmAction.Minimize
+        if scancode == SC_W: return WmAction.Close
+        if scancode == SC_R: return WmAction.Restore
+        WmAction.None
+
+
+# Convenience: map a UART character to WmAction (for ARM64 serial input)
+fn uart_char_to_action(ch: u64) -> WmAction:
+    """Map a UART ASCII character to a WM action.
+
+    Used on ARM64 where input comes from PL011 UART
+    instead of PS/2 scancodes.
+    """
+    if ch == 9: return WmAction.CycleFocus     # Tab
+    if ch == 49: return WmAction.FocusWindow(idx: 0)  # '1'
+    if ch == 50: return WmAction.FocusWindow(idx: 1)  # '2'
+    if ch == 51: return WmAction.FocusWindow(idx: 2)  # '3'
+    if ch == 116: return WmAction.ToggleTheme  # 't'
+    if ch == 84: return WmAction.ToggleTheme   # 'T'
+    if ch == 113: return WmAction.Quit         # 'q'
+    if ch == 81: return WmAction.Quit          # 'Q'
+    if ch == 109: return WmAction.Minimize     # 'm'
+    if ch == 77: return WmAction.Minimize      # 'M'
+    if ch == 119: return WmAction.Close        # 'w'
+    if ch == 87: return WmAction.Close         # 'W'
+    if ch == 114: return WmAction.Restore      # 'r'
+    if ch == 82: return WmAction.Restore       # 'R'
+    WmAction.None

@@ -1,0 +1,146 @@
+# OS Storage Integration Test
+#
+# Tests: NVMe driver -> FAT32 -> VFS -> file operations
+# QEMU scenario: x64-nvme-fat32
+# Expects: FAT32 image with hello.txt and numbers.txt fixtures
+#
+# Boot chain tested:
+#   PCI enumeration -> NVMe device discovery -> DeviceGrant ->
+#   NVMe init -> DMA bounce buffer -> FAT32 BPB read ->
+#   VFS mount at "/" -> posix_open/read/write/close
+#
+# This test runs as a baremetal OS entry point, not under the SSpec harness.
+# Output goes to serial and is parsed by the QEMU test runner.
+
+use os.kernel.boot.init_services.{init_services, services_storage_ready}
+use os.services.vfs.vfs_init.{g_vfs, g_vfs_initialized}
+use os.posix.mod.{posix_init}
+use os.posix.fd_io.{posix_open, posix_read, posix_write, posix_close, posix_lseek}
+use os.posix.fd_table.{O_RDONLY, O_WRONLY, O_RDWR, SEEK_SET}
+use os.userlib.syscall_raw.{syscall}
+
+extern fn serial_println(msg: text)
+extern fn rt_exit(code: i32)
+
+# ISA debug-exit port for QEMU (x86_64): writing 0 causes QEMU to exit with code 1
+val ISA_DEBUG_EXIT_PORT: u64 = 0xf4
+
+var _pass_count: u32 = 0
+var _fail_count: u32 = 0
+
+fn _assert(condition: bool, name: text):
+    if condition:
+        serial_println("[TEST PASS] {name}")
+        _pass_count = _pass_count + 1
+    else:
+        serial_println("[TEST FAIL: {name}]")
+        _fail_count = _fail_count + 1
+
+fn _report():
+    """Print summary and exit QEMU."""
+    serial_println("")
+    serial_println("Storage tests: {_pass_count} passed, {_fail_count} failed")
+    if _fail_count == 0:
+        serial_println("[ALL TESTS PASSED]")
+    else:
+        serial_println("[TESTS FAILED: {_fail_count}]")
+    # ISA debug-exit: write 0 -> QEMU exits with (0<<1)|1 = 1 (success for x86_64)
+    syscall(ISA_DEBUG_EXIT_PORT, 0, 0, 0, 0, 0)
+
+fn os_storage_test():
+    """Entry point for NVMe + FAT32 + VFS integration tests."""
+    serial_println("=== OS Storage Integration Test ===")
+    serial_println("")
+
+    # Initialize POSIX layer (FD table, async I/O, signals, pipes)
+    posix_init()
+
+    # Boot all services (PCI -> NVMe -> FAT32 -> VFS mount)
+    init_services()
+
+    # ---- Test 1: VFS initialized ----
+    _assert(g_vfs_initialized, "VFS initialized after boot")
+
+    # ---- Test 2: Storage service reports ready ----
+    _assert(services_storage_ready(), "Storage service reports ready")
+
+    # ---- Test 3: Open known fixture file ----
+    val fd = posix_open("/hello.txt", O_RDONLY, 0)
+    _assert(fd >= 0, "Open /hello.txt succeeds (fd={fd})")
+
+    # ---- Test 4: Read file content ----
+    if fd >= 0:
+        var buf: [u8; 256] = [0; 256]
+        val bytes_read = posix_read(fd, buf as u64, 256)
+        _assert(bytes_read > 0, "Read returns data (len={bytes_read})")
+        posix_close(fd)
+
+    # ---- Test 5: Open non-existent file returns error ----
+    val bad_fd = posix_open("/nonexistent_file_xyz.txt", O_RDONLY, 0)
+    _assert(bad_fd < 0, "Open nonexistent file returns error (fd={bad_fd})")
+
+    # ---- Test 6: Create and write a new file ----
+    # O_WRONLY=1 | O_CREAT=0x40 = 0x41 = 65
+    val wfd = posix_open("/test_output.txt", 65, 0)
+    _assert(wfd >= 0, "Create /test_output.txt succeeds (fd={wfd})")
+    if wfd >= 0:
+        val msg = "Hello from test!"
+        val msg_bytes = msg.to_bytes()
+        val written = posix_write(wfd, msg_bytes as u64, msg_bytes.len())
+        _assert(written > 0, "Write to file succeeds (bytes={written})")
+        posix_close(wfd)
+
+    # ---- Test 7: Read back the written file ----
+    val rfd = posix_open("/test_output.txt", O_RDONLY, 0)
+    if rfd >= 0:
+        var rbuf: [u8; 256] = [0; 256]
+        val rlen = posix_read(rfd, rbuf as u64, 256)
+        _assert(rlen > 0, "Read back written file succeeds (len={rlen})")
+        posix_close(rfd)
+    else:
+        _assert(false, "Read back written file succeeds (open failed)")
+
+    # ---- Test 8: VFS mkdir ----
+    if g_vfs != nil:
+        val mk_result = g_vfs.mkdir("/testdir")
+        _assert(mk_result.is_ok(), "mkdir /testdir succeeds")
+    else:
+        _assert(false, "mkdir /testdir succeeds (VFS is nil)")
+
+    # ---- Test 9: VFS readdir on root ----
+    if g_vfs != nil:
+        val entries = g_vfs.readdir("/")
+        _assert(entries.is_ok(), "readdir / succeeds")
+        if entries.is_ok():
+            val listing = entries.unwrap()
+            _assert(listing.len() > 0, "Root directory has entries (count={listing.len()})")
+        else:
+            _assert(false, "Root directory has entries (readdir failed)")
+    else:
+        _assert(false, "readdir / succeeds (VFS is nil)")
+
+    # ---- Test 10: Open second fixture file ----
+    val nfd = posix_open("/numbers.txt", O_RDONLY, 0)
+    _assert(nfd >= 0, "Open /numbers.txt succeeds (fd={nfd})")
+    if nfd >= 0:
+        var nbuf: [u8; 256] = [0; 256]
+        val nlen = posix_read(nfd, nbuf as u64, 256)
+        _assert(nlen > 0, "Read /numbers.txt returns data (len={nlen})")
+        posix_close(nfd)
+
+    # ---- Test 11: lseek on a file ----
+    val sfd = posix_open("/hello.txt", O_RDONLY, 0)
+    if sfd >= 0:
+        # Read first, then seek back to start and read again
+        var sbuf1: [u8; 16] = [0; 16]
+        val slen1 = posix_read(sfd, sbuf1 as u64, 16)
+        val seek_result = posix_lseek(sfd, 0, SEEK_SET)
+        _assert(seek_result == 0, "lseek to beginning returns 0 (got={seek_result})")
+        var sbuf2: [u8; 16] = [0; 16]
+        val slen2 = posix_read(sfd, sbuf2 as u64, 16)
+        _assert(slen2 == slen1, "Re-read after lseek returns same length")
+        posix_close(sfd)
+    else:
+        _assert(false, "lseek to beginning returns 0 (open failed)")
+
+    _report()

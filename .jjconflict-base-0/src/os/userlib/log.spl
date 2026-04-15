@@ -1,0 +1,62 @@
+# Structured logging via kernel syscalls.
+
+use os.userlib.syscall_raw
+use os.kernel.types.syscall_types(KLogEntry)
+
+enum LogLevel:
+    Emergency = 0
+    Alert = 1
+    Critical = 2
+    Error = 3
+    Warning = 4
+    Notice = 5
+    Info = 6
+    Debug = 7
+
+enum LogFacility:
+    Kernel = 0
+    Vfs = 1
+    Net = 2
+    Compositor = 3
+    Shell = 4
+    App = 5
+    Init = 6
+
+fn log(level: LogLevel, facility: LogFacility, msg: text) -> Result<bool, text>:
+    val encoded = (facility as u64) << 8 | (level as u64)
+    val result = syscall(90, encoded, &msg as u64, msg.len() as u64, 0, 0)
+    if result < 0:
+        return Err("log failed with code {result}")
+    Ok(true)
+
+fn log_info(msg: text):
+    log(LogLevel.Info, LogFacility.App, msg)
+    pass_do_nothing
+
+fn log_error(msg: text):
+    log(LogLevel.Error, LogFacility.App, msg)
+    pass_do_nothing
+
+fn log_debug(msg: text):
+    log(LogLevel.Debug, LogFacility.App, msg)
+    pass_do_nothing
+
+fn read_log(min_level: LogLevel, offset: u64, count: u32) -> Result<[KLogEntry], text>:
+    var entries: [KLogEntry] = []
+    var buf_size = count as u64 * 256
+    var buf: [u8] = [0; buf_size]
+    val result = syscall(91, min_level as u64, offset, count as u64, &buf as u64, buf_size)
+    if result < 0:
+        return Err("read_log failed with code {result}")
+    # Parse buf into KLogEntry array
+    val num_entries = result as u64
+    var i: u64 = 0
+    while i < num_entries:
+        val entry_offset = i * 256
+        val entry_bytes = buf.slice(entry_offset, entry_offset + 256)
+        entries.push(KLogEntry.from_bytes(entry_bytes))
+        i = i + 1
+    Ok(entries)
+
+fn read_recent(count: u32) -> Result<[KLogEntry], text>:
+    read_log(LogLevel.Debug, 0, count)

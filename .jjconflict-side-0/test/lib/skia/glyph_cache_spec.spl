@@ -1,0 +1,123 @@
+# @cover src/lib/skia/feature/glyph_cache/cache.spl 80%
+"""
+# Skia Glyph Cache Specification
+
+**Feature IDs:** #SKI-GLC-001
+**Category:** Stdlib
+**Difficulty:** 2/5
+**Status:** Implemented
+
+## Overview
+
+Tests for GlyphCache — a bounded LRU cache of rasterized glyph bitmaps
+keyed by (font hash, glyph_id, size). Mirrors Skia's SkGlyphCache /
+SkStrikeCache.
+"""
+
+use std.sspec.*
+use std.skia.feature.glyph_cache.cache.{
+    GlyphCacheKey, GlyphCacheEntry, GlyphCache,
+    glyph_cache_new, glyph_cache_key_equal, hash_font
+}
+use std.skia.feature.glyph.rasterize.{GlyphBitmap}
+
+# ============================================================================
+# Helpers
+# ============================================================================
+
+fn _make_bitmap(w: i64, h: i64, tag: u8) -> GlyphBitmap:
+    # Produce a trivially-distinguishable bitmap for identity checks.
+    var pixels: [u8] = []
+    val total = w * h
+    var i: i64 = 0
+    while i < total:
+        pixels = [...pixels, tag]
+        i = i + 1
+    GlyphBitmap(width: w, height: h, left: 0, top: 0, pixels: pixels)
+
+fn _key(font_hash: i64, glyph_id: i64, size_fixed: i64) -> GlyphCacheKey:
+    GlyphCacheKey(font_hash: font_hash, glyph_id: glyph_id, size_fixed: size_fixed)
+
+# ============================================================================
+# Specs
+# ============================================================================
+
+describe "glyph_cache":
+    it "glyph_cache_new: creates cache with zero entries and given capacity":
+        val cache = glyph_cache_new(16)
+        expect(cache.size()).to_equal(0)
+        expect(cache.capacity).to_equal(16)
+
+    it "insert then lookup: returns Some(bitmap)":
+        val cache = glyph_cache_new(4)
+        val k = _key(1001, 42, 12 * 256)
+        val bmp = _make_bitmap(2, 2, 7)
+        cache.insert(k, bmp)
+        val got = cache.lookup(k)
+        match got:
+            Some(found):
+                expect(found.width).to_equal(2)
+                expect(found.height).to_equal(2)
+                expect(found.pixels.length()).to_equal(4)
+            None:
+                expect(false).to_equal(true)
+
+    it "lookup: missing key returns None":
+        val cache = glyph_cache_new(4)
+        val k = _key(1001, 42, 12 * 256)
+        val missing = _key(9999, 1, 10 * 256)
+        cache.insert(k, _make_bitmap(1, 1, 3))
+        val got = cache.lookup(missing)
+        expect(got).to_be_nil()
+
+    it "insert beyond capacity: evicts least-recently-used entry":
+        val cache = glyph_cache_new(2)
+        val k1 = _key(1, 1, 10 * 256)
+        val k2 = _key(1, 2, 10 * 256)
+        val k3 = _key(1, 3, 10 * 256)
+        cache.insert(k1, _make_bitmap(1, 1, 1))
+        cache.insert(k2, _make_bitmap(1, 1, 2))
+        # k1 is now the LRU entry; inserting k3 should evict k1.
+        cache.insert(k3, _make_bitmap(1, 1, 3))
+        expect(cache.size()).to_equal(2)
+        val got_k1 = cache.lookup(k1)
+        expect(got_k1).to_be_nil()
+        val got_k3 = cache.lookup(k3)
+        match got_k3:
+            Some(b):
+                expect(b.width).to_equal(1)
+            None:
+                expect(false).to_equal(true)
+
+    it "lookup updates last_used (most recent key survives eviction)":
+        val cache = glyph_cache_new(2)
+        val k1 = _key(2, 1, 12 * 256)
+        val k2 = _key(2, 2, 12 * 256)
+        val k3 = _key(2, 3, 12 * 256)
+        cache.insert(k1, _make_bitmap(1, 1, 10))
+        cache.insert(k2, _make_bitmap(1, 1, 20))
+        # Touch k1 so it becomes MRU; k2 is now the LRU candidate.
+        val touch = cache.lookup(k1)
+        match touch:
+            Some(_):
+                expect(true).to_equal(true)
+            None:
+                expect(false).to_equal(true)
+        cache.insert(k3, _make_bitmap(1, 1, 30))
+        # k1 should still be present, k2 should have been evicted.
+        val got_k1 = cache.lookup(k1)
+        match got_k1:
+            Some(b1):
+                expect(b1.pixels.length()).to_be_greater_than(0)
+            None:
+                expect(false).to_equal(true)
+        val got_k2 = cache.lookup(k2)
+        expect(got_k2).to_be_nil()
+
+    it "clear: resets size to 0":
+        val cache = glyph_cache_new(4)
+        cache.insert(_key(5, 1, 8 * 256), _make_bitmap(1, 1, 1))
+        cache.insert(_key(5, 2, 8 * 256), _make_bitmap(1, 1, 2))
+        expect(cache.size()).to_be_greater_than(0)
+        cache.clear()
+        expect(cache.size()).to_equal(0)

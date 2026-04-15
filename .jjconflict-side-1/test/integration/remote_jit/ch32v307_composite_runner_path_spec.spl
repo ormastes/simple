@@ -1,0 +1,107 @@
+"""
+# CH32V307 Composite Runner Path Regression
+
+**Feature IDs:** #RJE-013
+**Category:** Integration
+**Difficulty:** 4/5
+**Status:** Implemented
+**Requirements:** N/A
+**Plan:** [doc/03_plan/remote_baremetal_remaining_without_trace32_2026-03-24.md](doc/03_plan/remote_baremetal_remaining_without_trace32_2026-03-24.md)
+**Design:** [doc/05_design/remote_jit_architecture.md](doc/05_design/remote_jit_architecture.md)
+**Research:** N/A
+
+## Overview
+
+Verifies that the CH32V307 composite runner no longer short-circuits through
+the old placeholder path and now routes `jit(remote(baremetal(ch32v307)))`
+through the real adapter-backed execution flow.
+
+This spec is intentionally host-aware:
+
+- if `wlink` or the probe is unavailable, the runner must skip cleanly
+- if hardware is available, the composite runner must take the real CH32
+  adapter path
+- the result must not regress to the old "not implemented" message
+
+This file is the authoritative regression for composite-runner wiring. The
+direct `wlink` readiness and SDI-output probe remains covered separately by
+`ch32v307_composite_runner_spec.spl`.
+
+## Syntax
+
+```simple
+val result = run_test_file_jit_ch32v307(
+    "test/fixtures/remote_jit/baremetal_lib_workload_main.spl",
+    source,
+    default_options()
+)
+```
+
+## Examples
+
+```simple
+expect(result.error.contains("not implemented")).to_equal(false)
+expect(result.skipped).to_equal(0)
+```
+"""
+
+use app.io.file_ops.{file_read}
+use std.io_runtime.{shell}
+use std.nogc_sync_mut.test_runner.{run_test_file_jit_ch32v307}
+use std.nogc_sync_mut.test_runner.test_runner_types.{TestOptions, TestLevel, TestExecutionMode}
+
+val SHARED_WORKLOAD = "test/fixtures/remote_jit/baremetal_lib_workload_main.spl"
+
+fn wlink_available() -> bool:
+    shell("command -v wlink >/dev/null 2>&1").exit_code == 0
+
+fn ch32v307_detected() -> bool:
+    val result = shell("timeout 10 wlink status --chip CH32V30X 2>&1")
+    val combined = result.stdout + result.stderr
+    result.exit_code == 0 and combined.contains("CH32V307")
+
+fn default_options() -> TestOptions:
+    TestOptions(
+        path: SHARED_WORKLOAD,
+        level: TestLevel.Integration,
+        tag: "",
+        fail_fast: false,
+        mode: TestExecutionMode.Composite(spec: "jit(remote(baremetal(ch32v307)))"),
+        timeout: 30,
+        list: false,
+        list_ignored: false,
+        only_slow: false,
+        only_skipped: false,
+        show_tags: false,
+        gc_log: false,
+        gc_off: false,
+        seed: 0,
+        has_seed: false
+    )
+
+describe "CH32V307 composite runner path":
+    slow_it "does not return the old not-implemented placeholder":
+        val source = file_read(SHARED_WORKLOAD)
+        val result = run_test_file_jit_ch32v307(SHARED_WORKLOAD, source, default_options())
+        expect(result.error.contains("not implemented")).to_equal(false)
+
+    slow_it "skips cleanly when wlink or hardware is unavailable":
+        if wlink_available() and ch32v307_detected():
+            print "[skip] live hardware path available on this host"
+            return
+        val source = file_read(SHARED_WORKLOAD)
+        val result = run_test_file_jit_ch32v307(SHARED_WORKLOAD, source, default_options())
+        expect(result.skipped).to_equal(1)
+        expect(result.failed).to_equal(0)
+
+    slow_it "uses the real adapter-backed execution path when hardware is available":
+        if not wlink_available():
+            print "[skip] wlink unavailable"
+            return
+        if not ch32v307_detected():
+            print "[skip] CH32V307 not detected through wlink"
+            return
+        val source = file_read(SHARED_WORKLOAD)
+        val result = run_test_file_jit_ch32v307(SHARED_WORKLOAD, source, default_options())
+        expect(result.skipped).to_equal(0)
+        expect(result.error.contains("not implemented")).to_equal(false)

@@ -1,0 +1,259 @@
+# Memory Tracker — Snapshot Diff Spec
+#
+# Tests snapshot comparison, diff, and tag grouping logic.
+# Uses mock implementations since spl_memtrack_* C functions
+# are not available in the interpreter binary.
+
+# ============================================================================
+# Type definitions (mirrors types.spl)
+# ============================================================================
+
+struct MemSnapshot:
+    id: i64
+    live_count: i64
+    live_bytes: i64
+
+struct MemLeakEntry:
+    alloc_id: i64
+    size: i64
+    tag: text
+
+struct MemDiff:
+    before_id: i64
+    before_count: i64
+    before_bytes: i64
+    after_id: i64
+    after_count: i64
+    after_bytes: i64
+    added_count: i64
+    added_bytes: i64
+    leaked_entries: [MemLeakEntry]
+
+struct MemTagGroup:
+    tag: text
+    count: i64
+    total_bytes: i64
+
+# ============================================================================
+# Mock memtrack state
+# ============================================================================
+
+var mock_snapshot_counter = 0
+var mock_alloc_count = 0
+var mock_alloc_bytes = 0
+
+fn mock_reset():
+    mock_snapshot_counter = 0
+    mock_alloc_count = 0
+    mock_alloc_bytes = 0
+
+fn mock_snapshot() -> i64:
+    mock_snapshot_counter = mock_snapshot_counter + 1
+    mock_snapshot_counter
+
+fn mock_capture_snapshot() -> MemSnapshot:
+    MemSnapshot(
+        id: mock_snapshot(),
+        live_count: mock_alloc_count,
+        live_bytes: mock_alloc_bytes
+    )
+
+fn mock_simulate_alloc(size: i64):
+    mock_alloc_count = mock_alloc_count + 1
+    mock_alloc_bytes = mock_alloc_bytes + size
+
+fn mock_get_alloc_count() -> i64:
+    mock_alloc_count
+
+fn mock_get_alloc_bytes() -> i64:
+    mock_alloc_bytes
+
+# ============================================================================
+# Pure functions under test (from mod.spl)
+# ============================================================================
+
+fn mem_diff_quick(before: MemSnapshot, after: MemSnapshot) -> MemDiff:
+    val added_count = after.live_count - before.live_count
+    val added_bytes = after.live_bytes - before.live_bytes
+    var empty_entries: [MemLeakEntry] = []
+    MemDiff(
+        before_id: before.id,
+        before_count: before.live_count,
+        before_bytes: before.live_bytes,
+        after_id: after.id,
+        after_count: after.live_count,
+        after_bytes: after.live_bytes,
+        added_count: added_count,
+        added_bytes: added_bytes,
+        leaked_entries: empty_entries
+    )
+
+fn mem_group_by_tag(entries: [MemLeakEntry]) -> [MemTagGroup]:
+    var tags: [text] = []
+    var counts: [i64] = []
+    var bytes_arr: [i64] = []
+    for entry in entries:
+        val idx = tags.index_of(entry.tag)
+        if idx >= 0:
+            # Update existing — rebuild arrays
+            fn set_i64(arr: [i64], at: i64, val_: i64) -> [i64]:
+                var result: [i64] = []
+                var i = 0
+                while i < arr.len():
+                    if i == at:
+                        result = result + [val_]
+                    else:
+                        result = result + [arr[i]]
+                    i = i + 1
+                result
+            counts = set_i64(counts, idx, counts[idx] + 1)
+            bytes_arr = set_i64(bytes_arr, idx, bytes_arr[idx] + entry.size)
+        else:
+            tags = tags + [entry.tag]
+            counts = counts + [1]
+            bytes_arr = bytes_arr + [entry.size]
+    var groups: [MemTagGroup] = []
+    var gi = 0
+    while gi < tags.len():
+        groups = groups + [MemTagGroup(tag: tags[gi], count: counts[gi], total_bytes: bytes_arr[gi])]
+        gi = gi + 1
+    groups
+
+# ============================================================================
+# Tests: mem_count_since / mem_bytes_since (mock equivalents)
+# ============================================================================
+
+describe "mem_count_since":
+
+    it "returns 0 when no allocations happened":
+        mock_reset()
+        val snap_before = mock_get_alloc_count()
+        val count = mock_get_alloc_count() - snap_before
+        expect(count).to_equal(0)
+
+    it "increases after allocations":
+        mock_reset()
+        val snap_before = mock_get_alloc_count()
+        mock_simulate_alloc(64)
+        mock_simulate_alloc(128)
+        mock_simulate_alloc(32)
+        val count = mock_get_alloc_count() - snap_before
+        expect(count).to_equal(3)
+
+    it "snapshot boundary is exclusive":
+        mock_reset()
+        mock_simulate_alloc(100)
+        val snap_before = mock_get_alloc_count()
+        mock_simulate_alloc(200)
+        val count = mock_get_alloc_count() - snap_before
+        expect(count).to_equal(1)
+
+describe "mem_bytes_since":
+
+    it "returns 0 after snapshot with no allocs":
+        mock_reset()
+        val snap_before = mock_get_alloc_bytes()
+        val bytes = mock_get_alloc_bytes() - snap_before
+        expect(bytes).to_equal(0)
+
+    it "increases with larger allocations":
+        mock_reset()
+        val snap_before = mock_get_alloc_bytes()
+        mock_simulate_alloc(512)
+        val bytes = mock_get_alloc_bytes() - snap_before
+        expect(bytes).to_equal(512)
+
+# ============================================================================
+# Tests: mem_diff_quick
+# ============================================================================
+
+describe "mem_diff_quick":
+
+    it "returns a MemDiff struct":
+        mock_reset()
+        val before = mock_capture_snapshot()
+        mock_simulate_alloc(64)
+        val after = mock_capture_snapshot()
+        val diff = mem_diff_quick(before, after)
+        expect(diff.before_id).to_equal(before.id)
+        expect(diff.after_id).to_equal(after.id)
+
+    it "added_count is non-negative":
+        mock_reset()
+        val before = mock_capture_snapshot()
+        val after = mock_capture_snapshot()
+        val diff = mem_diff_quick(before, after)
+        expect(diff.added_count >= 0).to_equal(true)
+
+    it "added_bytes is non-negative":
+        mock_reset()
+        val before = mock_capture_snapshot()
+        val after = mock_capture_snapshot()
+        val diff = mem_diff_quick(before, after)
+        expect(diff.added_bytes >= 0).to_equal(true)
+
+    it "leaked_entries is empty for quick diff":
+        mock_reset()
+        val before = mock_capture_snapshot()
+        val after = mock_capture_snapshot()
+        val diff = mem_diff_quick(before, after)
+        expect(diff.leaked_entries.len()).to_equal(0)
+
+    it "before/after counts are captured":
+        mock_reset()
+        val before = mock_capture_snapshot()
+        mock_simulate_alloc(256)
+        val after = mock_capture_snapshot()
+        val diff = mem_diff_quick(before, after)
+        expect(diff.before_count).to_equal(before.live_count)
+        expect(diff.after_count).to_equal(after.live_count)
+        expect(diff.before_bytes).to_equal(before.live_bytes)
+        expect(diff.after_bytes).to_equal(after.live_bytes)
+
+# ============================================================================
+# Tests: mem_group_by_tag
+# ============================================================================
+
+describe "mem_group_by_tag":
+
+    it "returns empty array for empty input":
+        var empty: [MemLeakEntry] = []
+        val groups = mem_group_by_tag(empty)
+        expect(groups.len()).to_equal(0)
+
+    it "groups entries by tag":
+        var entries: [MemLeakEntry] = []
+        entries = entries + [MemLeakEntry(alloc_id: 1, size: 64, tag: "str")]
+        entries = entries + [MemLeakEntry(alloc_id: 2, size: 128, tag: "arr")]
+        entries = entries + [MemLeakEntry(alloc_id: 3, size: 32, tag: "str")]
+        val groups = mem_group_by_tag(entries)
+        expect(groups.len()).to_equal(2)
+
+    it "accumulates count and bytes per tag":
+        var entries: [MemLeakEntry] = []
+        entries = entries + [MemLeakEntry(alloc_id: 1, size: 100, tag: "str")]
+        entries = entries + [MemLeakEntry(alloc_id: 2, size: 200, tag: "str")]
+        entries = entries + [MemLeakEntry(alloc_id: 3, size: 50, tag: "str")]
+        val groups = mem_group_by_tag(entries)
+        expect(groups.len()).to_equal(1)
+        expect(groups[0].tag).to_equal("str")
+        expect(groups[0].count).to_equal(3)
+        expect(groups[0].total_bytes).to_equal(350)
+
+    it "handles single entry":
+        var entries: [MemLeakEntry] = []
+        entries = entries + [MemLeakEntry(alloc_id: 42, size: 256, tag: "dict")]
+        val groups = mem_group_by_tag(entries)
+        expect(groups.len()).to_equal(1)
+        expect(groups[0].tag).to_equal("dict")
+        expect(groups[0].count).to_equal(1)
+        expect(groups[0].total_bytes).to_equal(256)
+
+    it "handles multiple distinct tags":
+        var entries: [MemLeakEntry] = []
+        entries = entries + [MemLeakEntry(alloc_id: 1, size: 10, tag: "str")]
+        entries = entries + [MemLeakEntry(alloc_id: 2, size: 20, tag: "arr")]
+        entries = entries + [MemLeakEntry(alloc_id: 3, size: 30, tag: "dict")]
+        entries = entries + [MemLeakEntry(alloc_id: 4, size: 40, tag: "buf")]
+        val groups = mem_group_by_tag(entries)
+        expect(groups.len()).to_equal(4)

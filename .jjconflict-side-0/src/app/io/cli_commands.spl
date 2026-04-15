@@ -1,0 +1,982 @@
+#![allow(unnamed_duplicate_typed_args)]
+@allow(unnamed_duplicate_typed_args)
+# CLI Command Handlers - Command dispatch functions
+# Extracted from cli_ops.spl for modularity
+# Functions here reference helpers in cli_ops.spl (same directory, no imports needed)
+
+use compiler.driver.driver_api_core.{interpret_file}
+use compiler.tools.formatter.main.{Formatter, make_formatter, check_formatting, format_file_inplace, read_file, print_diff}
+use compiler.tools.fix.main.{collect_fixes_from_source, FixApplicator}
+use compiler.tools.lint.main.{LintConfig, LintLevel, Linter}
+use std.tooling.easy_fix.{FixConfidence}
+use compiler.core.lexer_struct.{CoreLexer, make_core_lexer, core_lexer_next_token, core_lexer_token_text, core_lexer_token_line, core_lexer_token_col}
+use compiler.core.tokens.{TOK_EOF, TOK_ERROR}
+use app.io.cli_ops.{_cli_shell, _cli_eprint, _cli_process_run}
+
+extern fn rt_file_exists(path: text) -> bool
+extern fn rt_file_read_text(path: text) -> text
+extern fn rt_platform_name() -> text
+extern fn rt_env_get(key: text) -> text
+extern fn rt_env_set(key: text, value: text) -> bool
+
+fn _find_simple_binary() -> text:
+    val env_bin = rt_env_get("SIMPLE_BINARY") ?? ""
+    if env_bin != "":
+        return env_bin
+
+    val is_win = rt_platform_name() == "windows"
+    val ext = if is_win: ".exe" else: ""
+
+    if rt_file_exists("src/compiler_rust/target/release/simple{ext}"):
+        return "src/compiler_rust/target/release/simple{ext}"
+    if rt_file_exists("src/compiler_rust/target/bootstrap/simple{ext}"):
+        return "src/compiler_rust/target/bootstrap/simple{ext}"
+    if rt_file_exists("bin/simple{ext}"):
+        return "bin/simple{ext}"
+    if not is_win:
+        if rt_file_exists("bin/release/aarch64-apple-darwin-macho/simple"):
+            return "bin/release/aarch64-apple-darwin-macho/simple"
+        if rt_file_exists("bin/release/macos-arm64/simple"):
+            return "bin/release/macos-arm64/simple"
+        if rt_file_exists("bin/release/darwin-aarch64/simple"):
+            return "bin/release/darwin-aarch64/simple"
+        if rt_file_exists("bin/release/macos-x86_64/simple"):
+            return "bin/release/macos-x86_64/simple"
+        if rt_file_exists("bin/release/linux-x86_64/simple"):
+            return "bin/release/linux-x86_64/simple"
+    else:
+        if rt_file_exists("bin/release/x86_64-pc-windows-msvc/simple.exe"):
+            return "bin/release/x86_64-pc-windows-msvc/simple.exe"
+        if rt_file_exists("bin/release/x86_64-pc-windows-gnu/simple.exe"):
+            return "bin/release/x86_64-pc-windows-gnu/simple.exe"
+    "bin/simple{ext}"
+
+# ============================================================================
+# CLI Command Handlers
+# ============================================================================
+
+fn cli_run_code(code: text, gc_log: bool, gc_off: bool) -> i64:
+    print "=== Simple Code Execution ==="
+    print "Code: {code}"
+    print "Note: Interpreter would evaluate this code"
+    1
+
+fn cli_run_file(path: text, args: [text], gc_log: bool, gc_off: bool) -> i64:
+    val result = interpret_file(path)
+    match result:
+        case CompileResult.Success(_): 0
+        case CompileResult.ParseError(errs):
+            _cli_eprint("Parse error in {path}:")
+            for e in errs:
+                _cli_eprint("  {e}")
+            1
+        case CompileResult.TypeError(errs):
+            _cli_eprint("Type error in {path}:")
+            for e in errs:
+                _cli_eprint("  {e}")
+            1
+        case CompileResult.BlockError(errs):
+            _cli_eprint("Block error in {path}:")
+            for e in errs:
+                _cli_eprint("  {e}")
+            1
+        case CompileResult.ResolveError(errs):
+            _cli_eprint("Resolve error in {path}:")
+            for e in errs:
+                _cli_eprint("  {e}")
+            1
+        case CompileResult.BorrowError(errs):
+            _cli_eprint("Borrow error in {path}:")
+            for e in errs:
+                _cli_eprint("  {e}")
+            1
+        case CompileResult.CodegenError(msg):
+            _cli_eprint("Codegen error in {path}: {msg}")
+            1
+        case CompileResult.RuntimeError(msg):
+            _cli_eprint("Runtime error in {path}: {msg}")
+            1
+        case _:
+            _cli_eprint("Error running {path}")
+            1
+
+fn cli_watch_file(path: text) -> i64:
+    use app.watch.runner.{WatchConfig, watch_config_default, watch_loop}
+    var config = watch_config_default()
+    # If path looks like "test", set up test mode
+    if path == "test":
+        config.command_args = ["test"]
+    elif path.ends_with(".spl"):
+        # Specific test file
+        config.command_args = ["test", path]
+    else:
+        # Custom watch path
+        config.watch_paths = [path]
+    watch_loop(config)
+
+fn cli_run_repl(gc_log: bool, gc_off: bool) -> i64:
+    cli_run_file("src/app/repl/main.spl", [], gc_log, gc_off)
+
+fn cli_not_implemented(tool_name: text) -> i64:
+    print "{tool_name} not yet implemented in pure Simple"
+    1
+
+fn _cli_strip_command(args: [text], cmd: text) -> [text]:
+    if args.len() > 0 and args[0] == cmd:
+        args.slice(1, args.len())
+    else:
+        args
+
+fn ffi_gen_entry_path() -> text:
+    "src/compiler/90.tools/ffi_gen/main.spl"
+
+fn ffi_gen_force_args(args: [text]) -> text:
+    args.join(" ")
+
+extern fn rt_run_tests(args: [text], gc_log: i64, gc_off: i64) -> i64
+
+fn cli_run_tests(args: [text], gc_log: bool, gc_off: bool) -> i64:
+    # Use Rust FFI test runner directly (interpret_file path fails in native binaries)
+    var gc_log_flag = 0
+    var gc_off_flag = 0
+    if gc_log:
+        gc_log_flag = 1
+    if gc_off:
+        gc_off_flag = 1
+    return rt_run_tests(args, gc_log_flag, gc_off_flag)
+
+fn cli_run_lint(args: [text]) -> i64:
+    # Parse flags from args
+    var files: [text] = []
+    var run_mcp_perf = false
+    for arg in args:
+        if arg == "lint":
+            # Skip the command name itself
+            val _ = 0
+        elif arg == "--mcp-perf" or arg == "--all":
+            run_mcp_perf = true
+        elif not arg.starts_with("-"):
+            files.push(arg)
+
+    var exit_code = 0
+    if run_mcp_perf:
+        val (stdout, stderr, perf_exit) = _cli_process_run("python3", ["scripts/mcp_performance_guard.py", "static-audit", "--strict", "--context", "lint"])
+        if stdout.len() > 0:
+            print(stdout)
+        if stderr.len() > 0:
+            _cli_eprint(stderr)
+        if files.len() == 0:
+            return perf_exit
+        if perf_exit != 0:
+            exit_code = 1
+
+    if files.len() == 0:
+        print "Usage: simple lint <file.spl> [file2.spl ...] [--mcp-perf]"
+        print ""
+        print "Runs lint passes on Simple source files."
+        print "Checks for:"
+        print "  - Collection performance anti-patterns (COLL001-COLL008)"
+        print "  - Duplicate typed arguments (DTYP001)"
+        print "  - Bare primitive types in public APIs"
+        print "  - MCP wrapper, hot-path, and invalidation regressions (--mcp-perf)"
+        return 1
+
+    var total_warnings = 0
+    for file_path in files:
+        if not rt_file_exists(file_path):
+            _cli_eprint("Error: File not found: {file_path}")
+            exit_code = 1
+            continue
+
+        val source = rt_file_read_text(file_path)
+        var linter = Linter.new()
+        val results = linter.lint_source(file_path, source)
+        var visible_count = 0
+        for result in results:
+            visible_count = visible_count + 1
+            var level_text = "info"
+            match result.lint.level:
+                case LintLevel.Deny:
+                    level_text = "error"
+                case LintLevel.Warn:
+                    level_text = "warning"
+                case LintLevel.Allow:
+                    level_text = "info"
+            print "{file_path}:{result.line}: {level_text}[{result.lint.code}]: {result.lint.message}"
+
+        if visible_count == 0:
+            print "lint: {file_path} OK"
+        else:
+            _cli_eprint("lint: {file_path} has issues")
+            exit_code = 1
+            total_warnings = total_warnings + 1
+
+    if total_warnings > 0:
+        print ""
+        print "Lint found issues in {total_warnings} file(s)"
+    elif exit_code == 0:
+        print ""
+        print "Lint passed: all files clean"
+    exit_code
+
+fn cli_run_fmt(args: [text]) -> i64:
+    # Parse flags from args
+    var check_mode = false
+    var write_mode = false
+    var diff_mode = false
+    var files: [text] = []
+    for arg in args:
+        if arg == "--check":
+            check_mode = true
+        elif arg == "--write":
+            write_mode = true
+        elif arg == "--diff":
+            diff_mode = true
+        elif arg == "fmt":
+            # Skip the command name itself
+            val _ = 0
+        elif not arg.starts_with("-"):
+            files.push(arg)
+
+    if files.len() == 0:
+        print "Usage: simple fmt <file.spl> [--check] [--write] [--diff]"
+        print ""
+        print "Options:"
+        print "  --check   Check if file is formatted (exit 1 if not)"
+        print "  --write   Format file in place"
+        print "  --diff    Show formatting diff"
+        return 1
+
+    var exit_code = 0
+    for file_path in files:
+        if not rt_file_exists(file_path):
+            _cli_eprint("Error: File not found: {file_path}")
+            exit_code = 1
+            continue
+
+        if check_mode:
+            val result = check_formatting(file_path)
+            match result:
+                case Ok(is_formatted):
+                    if is_formatted:
+                        print "OK {file_path} is formatted"
+                    else:
+                        print "FAIL {file_path} needs formatting"
+                        exit_code = 1
+                case Err(e):
+                    _cli_eprint("Error: {e}")
+                    exit_code = 1
+        elif write_mode:
+            val result = format_file_inplace(file_path)
+            match result:
+                case Ok(_):
+                    print "OK Formatted {file_path}"
+                case Err(e):
+                    _cli_eprint("Error: {e}")
+                    exit_code = 1
+        elif diff_mode:
+            val fmt = make_formatter()
+            val orig_result = read_file(file_path)
+            match orig_result:
+                case Err(e):
+                    _cli_eprint("Error reading file: {e}")
+                    exit_code = 1
+                case Ok(original):
+                    val fmt_result = fmt.format_source(original)
+                    match fmt_result:
+                        case Err(e):
+                            _cli_eprint("Error: {e}")
+                            exit_code = 1
+                        case Ok(formatted):
+                            if original == formatted:
+                                print "OK {file_path} is correctly formatted"
+                            else:
+                                print_diff(original, formatted, file_path)
+                                exit_code = 1
+        else:
+            # Default: print formatted output to stdout
+            val fmt = make_formatter()
+            val result = fmt.format_file(file_path)
+            match result:
+                case Ok(formatted):
+                    print formatted
+                case Err(e):
+                    _cli_eprint("Error: {e}")
+                    exit_code = 1
+    exit_code
+
+fn cli_run_fix(args: [text]) -> i64:
+    # Parse flags from args
+    var dry_run = false
+    var fix_all = false
+    var files: [text] = []
+    for arg in args:
+        if arg == "--dry-run":
+            dry_run = true
+        elif arg == "--fix-all":
+            fix_all = true
+        elif arg == "fix":
+            # Skip the command name itself
+            val _ = 0
+        elif not arg.starts_with("-"):
+            files.push(arg)
+
+    if files.len() == 0:
+        print "Usage: simple fix <file.spl> [--dry-run] [--fix-all]"
+        print ""
+        print "Options:"
+        print "  --dry-run   Show what would be fixed without applying"
+        print "  --fix-all   Apply all fixes regardless of confidence"
+        return 1
+
+    var exit_code = 0
+    for file_path in files:
+        if not rt_file_exists(file_path):
+            _cli_eprint("Error: File not found: {file_path}")
+            exit_code = 1
+            continue
+
+        val source = rt_file_read_text(file_path) ?? ""
+        if source == "":
+            _cli_eprint("Error: Could not read file: {file_path}")
+            exit_code = 1
+            continue
+
+        val fixes = collect_fixes_from_source(file_path, source)
+        if fixes.len() == 0:
+            print "No fixes available for {file_path}"
+            continue
+
+        # Filter by confidence unless --fix-all
+        var filtered = fixes
+        if not fix_all:
+            filtered = FixApplicator.filter_by_confidence(filtered, FixConfidence.Safe)
+
+        if filtered.len() == 0:
+            print "No applicable fixes found for {file_path}"
+            continue
+
+        # Build sources registry for this file
+        var sources: Dict<text, text> = {}
+        sources[file_path] = source
+
+        val result = FixApplicator.apply_to_disk(filtered, sources, dry_run)
+        match result:
+            case Ok(report):
+                if dry_run:
+                    print "Dry run for {file_path}:"
+                else:
+                    print "Applied fixes to {file_path}:"
+                print "  {report.applied} fix(es) applied"
+                for detail in report.details:
+                    print "  {detail}"
+            case Err(e):
+                _cli_eprint("Error applying fixes to {file_path}: {e}")
+                exit_code = 1
+    exit_code
+
+fn cli_run_verify(args: [text], gc_log: bool, gc_off: bool) -> i64:
+    val simple_path = _find_simple_binary()
+    var child_args = ["run", "src/app/verify/main.spl"]
+    val forwarded = _cli_strip_command(args, "verify")
+    for arg in forwarded:
+        child_args.push(arg)
+    val (stdout, stderr, exit_code) = _cli_process_run(simple_path, child_args)
+    if stdout.len() > 0:
+        print(stdout)
+    if stderr.len() > 0:
+        _cli_eprint(stderr)
+    exit_code
+
+
+fn cli_run_migrate(args: [text]) -> i64:
+    print "[experimental] Migration tool is not yet implemented"
+    1
+
+fn cli_run_mcp(args: [text]) -> i64:
+    # Single canonical MCP entry via wrapper for fast startup and stable stdio framing.
+    var cmd = "./bin/simple_mcp_server"
+    var i = 1
+    while i < args.len():
+        cmd = cmd + " " + args[i]
+        i = i + 1
+
+    val result = _cli_shell(cmd)
+    if result.stdout.len() > 0:
+        print(result.stdout)
+    if result.stderr.len() > 0:
+        _cli_eprint(result.stderr)
+    result.exit_code
+
+fn cli_run_lsp(args: [text]) -> i64:
+    val run_args = _cli_strip_command(args, "lsp")
+    cli_run_file("src/app/lsp/main.spl", run_args, false, false)
+
+fn cli_run_diff(args: [text]) -> i64:
+    # Build diff command: prefer jj, fall back to git
+    var revision = ""
+    var paths: [text] = []
+    var i = 0
+    while i < args.len():
+        val arg = args[i]
+        if arg == "diff":
+            val _ = 0
+        elif arg == "-r" and i + 1 < args.len():
+            i = i + 1
+            revision = args[i]
+        elif arg.starts_with("-r"):
+            revision = arg[2:]
+        elif not arg.starts_with("-"):
+            paths.push(arg)
+        i = i + 1
+    # Try jj first
+    var cmd = "jj --no-pager --color never diff"
+    if revision != "":
+        cmd = cmd + " -r " + revision
+    for p in paths:
+        cmd = cmd + " " + p
+    cmd = cmd + " 2>&1"
+    val result = _cli_shell(cmd)
+    if result.exit_code == 0:
+        if result.stdout.len() > 0:
+            print result.stdout
+        else:
+            print "(no changes)"
+        return 0
+    # Fall back to git diff
+    var git_cmd = "git diff"
+    for p in paths:
+        git_cmd = git_cmd + " " + p
+    git_cmd = git_cmd + " 2>&1"
+    val git_result = _cli_shell(git_cmd)
+    if git_result.stdout.len() > 0:
+        print git_result.stdout
+    else:
+        print "(no changes)"
+    git_result.exit_code
+
+fn cli_constr(args: [text]) -> i64:
+    print "[experimental] Constraint checker is not yet implemented"
+    1
+
+fn cli_run_query(args: [text]) -> i64:
+    val run_args = _cli_strip_command(args, "query")
+    cli_run_file("src/app/cli/query.spl", run_args, false, false)
+
+fn cli_run_spec_coverage(args: [text]) -> i64:
+    val run_args = _cli_strip_command(args, "spec-coverage")
+    cli_run_file("src/app/spec_coverage/main.spl", run_args, false, false)
+
+fn cli_gen_lean(args: [text]) -> i64:
+    val (stdout, stderr, exit_code) = _cli_process_run("./bin/simple", args)
+    if stdout.len() > 0:
+        print(stdout)
+    if stderr.len() > 0:
+        _cli_eprint(stderr)
+    exit_code
+
+fn cli_run_feature_gen(args: [text]) -> i64:
+    val run_args = _cli_strip_command(args, "feature-gen")
+    cli_run_file("src/app/feature_gen/main.spl", run_args, false, false)
+
+fn cli_run_task_gen(args: [text]) -> i64:
+    val run_args = _cli_strip_command(args, "task-gen")
+    cli_run_file("src/app/task_gen/main.spl", run_args, false, false)
+
+fn cli_run_spec_gen(args: [text]) -> i64:
+    val run_args = _cli_strip_command(args, "spec-gen")
+    cli_run_file("src/app/spec_gen/main.spl", run_args, false, false)
+
+fn cli_run_sspec_docgen(args: [text]) -> i64:
+    val run_args = _cli_strip_command(args, "sspec-docgen")
+    cli_run_file("src/app/sspec_docgen/main.spl", run_args, false, false)
+
+fn cli_run_feature_doc(args: [text]) -> i64:
+    val run_args = _cli_strip_command(args, "feature-doc")
+    cli_run_file("src/app/feature_doc/main.spl", run_args, false, false)
+
+fn cli_run_todo_gen(args: [text]) -> i64:
+    cli_run_file("src/app/todo_scan/main.spl", args, false, false)
+
+fn cli_todo_scan(args: [text]) -> i64:
+    cli_run_file("src/app/todo_scan/main.spl", args, false, false)
+
+fn cli_run_lex(args: [text]) -> i64:
+    # Parse args: skip "lex" command name, find file path
+    var file_path = ""
+    for arg in args:
+        if arg == "lex":
+            val _ = 0
+        elif not arg.starts_with("-"):
+            if file_path == "":
+                file_path = arg
+    if file_path == "":
+        print "Usage: simple lex <file.spl>"
+        print ""
+        print "Tokenizes a Simple source file and prints the token stream."
+        return 1
+    if not rt_file_exists(file_path):
+        _cli_eprint("Error: File not found: {file_path}")
+        return 1
+    val source = rt_file_read_text(file_path) ?? ""
+    if source == "":
+        _cli_eprint("Error: Could not read file: {file_path}")
+        return 1
+    # Tokenize using CoreLexer
+    var lexer = make_core_lexer(source)
+    var token_count = 0
+    print "Tokens for {file_path}:"
+    print "  Line:Col  Kind  Text"
+    print "  ─────────────────────"
+    var done = false
+    while not done:
+        val (next_lexer, kind) = core_lexer_next_token(lexer)
+        lexer = next_lexer
+        val tok_text = core_lexer_token_text(lexer)
+        val tok_line = core_lexer_token_line(lexer)
+        val tok_col = core_lexer_token_col(lexer)
+        if kind == TOK_EOF:
+            done = true
+        else:
+            token_count = token_count + 1
+            print "  {tok_line}:{tok_col}  {kind}  {tok_text}"
+    print ""
+    print "Total: {token_count} tokens"
+    0
+
+fn cli_run_brief(args: [text]) -> i64:
+    # Brief project summary: file count, line count, test count
+    val file_count_result = _cli_shell("find src -name '*.spl' 2>/dev/null | wc -l")
+    val file_count = file_count_result.stdout.trim()
+    val line_count_result = _cli_shell("find src -name '*.spl' -not -path '*/release/*' -not -path '*/build/*' 2>/dev/null | xargs wc -l 2>/dev/null | tail -1 | awk '{print $1}'")
+    val line_count = line_count_result.stdout.trim()
+    val test_count_result = _cli_shell("find test -name '*_spec.spl' 2>/dev/null | wc -l")
+    val test_count = test_count_result.stdout.trim()
+    print "Simple Project Brief"
+    print "  Source files: {file_count}"
+    print "  Total lines:  {line_count}"
+    print "  Test specs:   {test_count}"
+    0
+
+fn cli_run_ffi_gen(args: [text]) -> i64:
+    # Route to the real generator implementation in compiler/90.tools.
+    val run_args = _cli_strip_command(args, "ffi-gen")
+    val previous_force_args = rt_env_get("SIMPLE_FORCE_ARGS")
+    rt_env_set("SIMPLE_FORCE_ARGS", ffi_gen_force_args(run_args))
+
+    val result = interpret_file(ffi_gen_entry_path())
+
+    if previous_force_args == nil or previous_force_args == "":
+        rt_env_set("SIMPLE_FORCE_ARGS", "")
+    else:
+        rt_env_set("SIMPLE_FORCE_ARGS", previous_force_args)
+
+    match result:
+        case CompileResult.Success(_): 0
+        case _:
+            _cli_eprint("Error running ffi-gen")
+            1
+
+fn cli_run_i18n(args: [text]) -> i64:
+    # List available i18n language files and their status
+    var subcmd = ""
+    for arg in args:
+        if arg == "i18n":
+            val _ = 0
+        elif not arg.starts_with("-"):
+            if subcmd == "":
+                subcmd = arg
+    if subcmd == "" or subcmd == "status":
+        # Show i18n status: count .ko.spl files vs .spl files
+        val en_result = _cli_shell("find src/i18n -maxdepth 1 -name 'strings_*.spl' -not -name '*.ko.spl' 2>/dev/null | wc -l")
+        val ko_result = _cli_shell("find src/i18n -maxdepth 1 -name 'strings_*.ko.spl' 2>/dev/null | wc -l")
+        val en_count = en_result.stdout.trim()
+        val ko_count = ko_result.stdout.trim()
+        print "Internationalization (i18n) Status"
+        print "=================================="
+        print ""
+        print "  String modules (English): {en_count}"
+        print "  String modules (Korean):  {ko_count}"
+        print ""
+        print "  Source directory: src/i18n/"
+        print ""
+        print "Categories:"
+        print "  strings_common       Parser errors (E0001-E0016)"
+        print "  strings_semantic     Type checking errors (E1000-E1999)"
+        print "  strings_advanced     Advanced features (generics, traits)"
+        print "  strings_codegen      Code generation (E2000-E2999)"
+        print "  strings_runtime      Runtime errors (E3000+)"
+        print "  strings_verification Static analysis"
+        print "  strings_lint         Code style warnings"
+        print "  strings_explanations Detailed help text"
+        print "  strings_extended     Additional diagnostics"
+        return 0
+    elif subcmd == "list":
+        # List all i18n files
+        val list_result = _cli_shell("find src/i18n -name '*.spl' -maxdepth 1 | sort")
+        print "i18n files:"
+        print list_result.stdout
+        return 0
+    else:
+        print "Usage: simple i18n [status|list]"
+        print ""
+        print "Subcommands:"
+        print "  status   Show i18n coverage (default)"
+        print "  list     List all i18n files"
+        return 1
+
+fn cli_handle_web(args: [text]) -> i64:
+    cli_not_implemented("Web handler")
+
+fn cli_handle_diagram(args: [text]) -> i64:
+    cli_not_implemented("Diagram generator")
+
+fn cli_handle_run(args: [text], gc_log: bool, gc_off: bool) -> i64:
+    if args.len() > 0:
+        cli_run_file(args[0], args[1:], gc_log, gc_off)
+    else:
+        print "No file specified"
+        1
+
+fn cli_handle_compile(args: [text]) -> i64:
+    cli_compile(args)
+
+fn cli_handle_linkers() -> i64:
+    # Detect available linkers on the system
+    print "Available native linkers:"
+    print ""
+    # Check mold
+    val mold_result = _cli_shell("which mold 2>/dev/null")
+    if mold_result.exit_code == 0:
+        print "  mold      Modern linker (fastest, recommended)  [installed]"
+    else:
+        print "  mold      Modern linker (fastest, recommended)  [not found]"
+    # Check lld
+    val lld_result = _cli_shell("which lld 2>/dev/null || which ld.lld 2>/dev/null")
+    if lld_result.exit_code == 0:
+        print "  lld       LLVM linker (fast, widely available)  [installed]"
+    else:
+        print "  lld       LLVM linker (fast, widely available)  [not found]"
+    # Check ld
+    val ld_result = _cli_shell("which ld 2>/dev/null")
+    if ld_result.exit_code == 0:
+        print "  ld        GNU linker (default, always available)  [installed]"
+    else:
+        print "  ld        GNU linker (default)  [not found]"
+    print ""
+    print "Auto-detection preference: mold > lld > ld"
+    print ""
+    print "Usage:"
+    print "  simple compile app.spl --linker mold"
+    0
+
+fn cli_replay(args: [text]) -> i64:
+    print "[experimental] Replay tool is not yet implemented"
+    1
+
+fn cli_check(args: [text]) -> i64:
+    # Parse flags from args
+    var files: [text] = []
+    for arg in args:
+        if arg == "check":
+            # Skip the command name itself
+            val _ = 0
+        elif not arg.starts_with("-"):
+            files.push(arg)
+
+    if files.len() == 0:
+        print "Usage: simple check <file.spl> [file2.spl ...]"
+        print ""
+        print "Type-checks Simple source files without compiling."
+        return 1
+
+    var exit_code = 0
+    var error_count = 0
+    for file_path in files:
+        if not rt_file_exists(file_path):
+            _cli_eprint("Error: File not found: {file_path}")
+            exit_code = 1
+            continue
+
+        val result = check_file(file_path)
+        match result:
+            case CompileResult.Success(_):
+                print "check: {file_path} OK"
+            case _:
+                _cli_eprint("check: {file_path} FAIL")
+                exit_code = 1
+                error_count = error_count + 1
+
+    if error_count > 0:
+        print ""
+        print "Type check failed: {error_count} file(s) with errors"
+    elif exit_code == 0:
+        print ""
+        print "Type check passed: all files OK"
+    exit_code
+
+fn cli_info(args: [text]) -> i64:
+    # Print project info from simple.sdn manifest
+    var sdn_path = "simple.sdn"
+    if not rt_file_exists(sdn_path):
+        print "No simple.sdn found in current directory."
+        print "Run 'simple init' to create a project."
+        return 1
+    val content = rt_file_read_text(sdn_path) ?? ""
+    if content == "":
+        _cli_eprint("Error: Could not read simple.sdn")
+        return 1
+    # Parse key fields from SDN
+    var name = ""
+    var version = ""
+    var license = ""
+    var main_file = ""
+    var run_config = ""
+    var in_package = false
+    var in_execution = false
+    val lines = content.split("\n")
+    for line in lines:
+        val trimmed = line.trim()
+        if trimmed == "" or trimmed.starts_with("#"):
+            continue
+        # Detect top-level sections (no indent, ends with :)
+        if not line.starts_with(" ") and not line.starts_with("\t"):
+            in_package = trimmed == "package:"
+            in_execution = trimmed == "execution:"
+            continue
+        if in_package:
+            if trimmed.starts_with("name:"):
+                name = trimmed[5:].trim()
+            elif trimmed.starts_with("version:"):
+                version = trimmed[8:].trim()
+            elif trimmed.starts_with("license:"):
+                license = trimmed[8:].trim()
+            elif trimmed.starts_with("main:"):
+                main_file = trimmed[5:].trim()
+        elif in_execution:
+            if trimmed.starts_with("run-config:"):
+                run_config = trimmed[11:].trim()
+    print "Project Info"
+    print "============"
+    if name != "":
+        print "  Name:        {name}"
+    if version != "":
+        print "  Version:     {version}"
+    if license != "":
+        print "  License:     {license}"
+    if main_file != "":
+        print "  Entry:       {main_file}"
+    if run_config != "":
+        print "  Run Config:  {run_config}"
+    print ""
+    print "  Manifest:    {sdn_path}"
+    0
+
+# ============================================================================
+# Test Daemon
+# ============================================================================
+
+fn cli_test_daemon(args: [text]) -> i64:
+    if args.len() == 0:
+        print "Usage:"
+        print "  simple test-daemon start       Start test daemon (foreground)"
+        print "  simple test-daemon stop        Stop test daemon"
+        print "  simple test-daemon status      Show daemon status"
+        print "  simple test-daemon run <path>  Run test via daemon (auto-starts)"
+        print "  simple test-daemon clean <path> Force-run bypassing cache"
+        return 1
+
+    val subcmd = args[0]
+    if subcmd == "start":
+        return cli_test_daemon_start()
+    elif subcmd == "stop":
+        return cli_test_daemon_stop()
+    elif subcmd == "status":
+        return cli_test_daemon_status()
+    elif subcmd == "run":
+        if args.len() < 2:
+            print "Usage: simple test-daemon run <path> [--filter F]"
+            return 1
+        return cli_test_daemon_run(args[1:], false)
+    elif subcmd == "clean":
+        if args.len() < 2:
+            print "Usage: simple test-daemon clean <path>"
+            return 1
+        return cli_test_daemon_run(args[1:], true)
+    else:
+        print "Unknown test-daemon subcommand: {subcmd}"
+        return 1
+
+fn cli_test_daemon_start() -> i64:
+    # Start the test daemon in foreground
+    use app.test_daemon.types.{test_daemon_config_default}
+    use app.test_daemon.daemon.{test_daemon_start}
+
+    print "Starting test daemon..."
+    val config = test_daemon_config_default()
+    val daemon = test_daemon_start(config)
+    if not daemon.is_running():
+        print "Failed to start test daemon (lock acquisition failed)"
+        return 1
+
+    print "Test daemon running (pid in .build/test_daemon/test_daemon.lock)"
+    daemon.run()
+    print "Test daemon stopped"
+    0
+
+fn cli_test_daemon_stop() -> i64:
+    use app.test_daemon.client.{test_daemon_stop}
+    use app.test_daemon.types.{test_daemon_config_default}
+
+    val config = test_daemon_config_default()
+    if test_daemon_stop(config):
+        print "Test daemon stopped"
+        return 0
+    print "Failed to stop test daemon (may not be running)"
+    1
+
+fn cli_test_daemon_status() -> i64:
+    val lock_path = ".build/test_daemon/test_daemon.lock"
+    if not rt_file_exists(lock_path):
+        print "Test daemon: not running"
+        return 0
+
+    val content = rt_file_read_text(lock_path) ?? ""
+    if content == "":
+        print "Test daemon: not running (empty lock)"
+        return 0
+
+    val lines = content.split("\n")
+    val pid_str = lines[0].trim()
+
+    extern fn rt_process_exists(pid: i64) -> bool
+    val pid = pid_str.to_i64() ?? 0
+    if pid > 0 and rt_process_exists(pid):
+        print "Test daemon: running (pid: {pid_str})"
+    else:
+        print "Test daemon: not running (stale lock, pid: {pid_str})"
+    0
+
+fn cli_test_daemon_run(args: [text], clean: bool) -> i64:
+    use app.test_daemon.client.{test_daemon_ensure_running, test_submit_and_wait}
+    use app.test_daemon.types.{test_daemon_config_default, TestResult}
+
+    val config = test_daemon_config_default()
+
+    # Ensure daemon is running (auto-start if needed)
+    if not test_daemon_ensure_running(config):
+        print "Failed to start test daemon"
+        return 1
+
+    val path = args[0]
+    val mode = if clean: "clean" else: "run"
+    print "Submitting test ({mode}): {path}"
+
+    # Submit and wait (10 min timeout)
+    val result = test_submit_and_wait(path, config, clean, 600000)
+
+    # Print result
+    if result.success:
+        print "PASS: {path}"
+        if result.output != "":
+            print result.output
+        return 0
+    else:
+        print "FAIL: {path}"
+        if result.output != "":
+            print result.output
+        return 1
+
+# ============================================================================
+# Watch Daemon Commands
+# ============================================================================
+
+fn cli_watch_daemon(args: [text]) -> i64:
+    if args.len() == 0:
+        print "Usage:"
+        print "  simple watch-daemon start       Start watch daemon (foreground, SHB+SMF)"
+        print "  simple watch-daemon stop        Stop watch daemon"
+        print "  simple watch-daemon status      Show daemon status"
+        return 1
+
+    val subcmd = args[0]
+    if subcmd == "start":
+        return cli_watch_daemon_start()
+    elif subcmd == "stop":
+        return cli_watch_daemon_stop()
+    elif subcmd == "status":
+        return cli_watch_daemon_status()
+    else:
+        print "Unknown watch-daemon subcommand: {subcmd}"
+        return 1
+
+fn cli_watch_daemon_start() -> i64:
+    use compiler.driver.watcher.watcher_types.{watcher_config_default}
+    use compiler.driver.watcher.watcher_daemon.{watcher_daemon_start}
+    use app.io.{thread_sleep_ms}
+
+    print "Starting watch daemon (SHB+SMF mode, Cranelift default)..."
+    var config = watcher_config_default()
+    val daemon = watcher_daemon_start(config)
+    if not daemon.is_running():
+        print "Failed to start watch daemon (lock acquisition failed)"
+        return 1
+
+    print "Watch daemon running (pid in {config.lock_path})"
+    print "Watching src/ for .spl changes. Press Ctrl+C to stop."
+    print ""
+
+    # Run poll loop in foreground
+    while daemon.is_running():
+        daemon.run_poll_cycle()
+        thread_sleep_ms(config.poll_interval_ms)
+
+    print "Watch daemon stopped"
+    0
+
+fn cli_watch_daemon_stop() -> i64:
+    val lock_path = ".build/watcher/watcher.lock"
+    if not rt_file_exists(lock_path):
+        print "Watch daemon: not running"
+        return 1
+
+    val content = rt_file_read_text(lock_path) ?? ""
+    if content == "":
+        print "Watch daemon: not running (empty lock)"
+        return 1
+
+    val lines = content.split("\n")
+    val pid_str = lines[0].trim()
+    extern fn rt_process_kill(pid: i64) -> bool
+    val pid = pid_str.to_i64() ?? 0
+    if pid > 0:
+        if rt_process_kill(pid):
+            print "Watch daemon stopped (pid: {pid_str})"
+            return 0
+        else:
+            print "Failed to stop watch daemon (pid: {pid_str})"
+            return 1
+    print "Watch daemon: not running (invalid pid)"
+    1
+
+fn cli_watch_daemon_status() -> i64:
+    val lock_path = ".build/watcher/watcher.lock"
+    if not rt_file_exists(lock_path):
+        print "Watch daemon: not running"
+        return 0
+
+    val content = rt_file_read_text(lock_path) ?? ""
+    if content == "":
+        print "Watch daemon: not running (empty lock)"
+        return 0
+
+    val lines = content.split("\n")
+    val pid_str = lines[0].trim()
+
+    extern fn rt_process_exists(pid: i64) -> bool
+    val pid = pid_str.to_i64() ?? 0
+    if pid > 0 and rt_process_exists(pid):
+        print "Watch daemon: running (pid: {pid_str})"
+    else:
+        print "Watch daemon: not running (stale lock, pid: {pid_str})"
+    0

@@ -1,0 +1,163 @@
+# Weaving configuration struct and factory functions
+
+
+use compiler.mdsoc.weaving.advice_form.{AdviceForm}
+use compiler.mdsoc.weaving.weaving_rule.{WeavingRule}
+use aop_config (AopConfig)
+use compiler.hir.hir.{HirAopAdvice}
+
+struct WeavingConfig:
+    """Weaving configuration loaded from TOML."""
+    enabled: bool
+    before_advices: [WeavingRule]
+    after_success_advices: [WeavingRule]
+    after_error_advices: [WeavingRule]
+    around_advices: [WeavingRule]
+
+
+# ============================================================================
+# WeavingConfig Methods (was: impl WeavingConfig:)
+# ============================================================================
+
+fn weavingconfig_disabled() -> WeavingConfig:
+        """Create an empty configuration (weaving disabled)."""
+        WeavingConfig(
+            enabled: false,
+            before_advices: [],
+            after_success_advices: [],
+            after_error_advices: [],
+            around_advices: []
+        )
+
+
+fn weavingconfig_from_aop_config(aop_config: AopConfig) -> WeavingConfig:
+        """Load from AOP configuration.
+
+        For now, treat runtime around as compile-time around.
+        In the future, we'll have separate compile-time config.
+        """
+        val around_advices = aop_config.around.map(\rule:
+            WeavingRule(
+                predicate_text: rule.raw_predicate_clone(raw_predicate),
+                advice_function: rule.advice_clone(advice),
+                form: AdviceForm.Around,
+                priority: rule.priority
+            )
+        )
+
+        WeavingConfig(
+            enabled: aop_config.runtime_enabled,
+            before_advices: [],
+            after_success_advices: [],
+            after_error_advices: [],
+            around_advices: around_advices
+        )
+
+
+fn weavingconfig_from_hir_advices(advices: [HirAopAdvice]) -> WeavingConfig:
+        """Load from HIR AOP advices (parsed from Simple source code)."""
+        var before_advices: [WeavingRule] = []
+        var after_success_advices: [WeavingRule] = []
+        var after_error_advices: [WeavingRule] = []
+        var around_advices: [WeavingRule] = []
+
+        for advice in advices:
+            val form = adviceform_from_str(advice.form) ?? AdviceForm.Before
+            val rule = WeavingRule(
+                predicate_text: advice.predicate_text,
+                advice_function: advice.advice_function,
+                form: form,
+                priority: advice.priority
+            )
+
+            match form:
+                case Before: before_advices = before_advices.push(rule)
+                case AfterSuccess: after_success_advices = after_success_advices.push(rule)
+                case AfterError: after_error_advices = after_error_advices.push(rule)
+                case Around: around_advices = around_advices.push(rule)
+
+        WeavingConfig(
+            enabled: not advices.is_empty(),
+            before_advices: before_advices,
+            after_success_advices: after_success_advices,
+            after_error_advices: after_error_advices,
+            around_advices: around_advices
+        )
+
+
+fn weavingconfig_with_security_aspects(base: WeavingConfig) -> WeavingConfig:
+        """Merge security dimension AOP aspects into an existing weaving config.
+
+        Adds audit logging, auth checking, and input validation aspects.
+        Security aspects are always-on when the security dimension is enabled.
+        """
+        # Audit: Around advice for HTTP request handling
+        val audit_request = WeavingRule(
+            predicate_text: "execution(*.handle_request) & within(http_server.**)",
+            advice_function: "std.security.aspects.audit_advice.log_request_advice",
+            form: AdviceForm.Around,
+            priority: 1000
+        )
+
+        # Audit: AfterSuccess for auth successes
+        val audit_auth_success = WeavingRule(
+            predicate_text: "execution(*.authenticate*) | execution(*.verify_password*)",
+            advice_function: "std.security.aspects.audit_advice.log_auth_success_advice",
+            form: AdviceForm.AfterSuccess,
+            priority: 900
+        )
+
+        # Audit: AfterError for auth failures
+        val audit_auth_failure = WeavingRule(
+            predicate_text: "execution(*.authenticate*) | execution(*.verify_password*)",
+            advice_function: "std.security.aspects.audit_advice.log_auth_failure_advice",
+            form: AdviceForm.AfterError,
+            priority: 900
+        )
+
+        # Auth: Before advice for @requires_auth functions
+        val auth_check = WeavingRule(
+            predicate_text: "attr(requires_auth) & within(http_server.**)",
+            advice_function: "std.security.aspects.auth_advice.check_auth_before",
+            form: AdviceForm.Before,
+            priority: 800
+        )
+
+        # Validation: Around advice for HTML render output sanitization
+        val sanitize_output = WeavingRule(
+            predicate_text: "execution(*.render_html*) & within(ui.**)",
+            advice_function: "std.security.aspects.validation_advice.sanitize_html_output",
+            form: AdviceForm.Around,
+            priority: 700
+        )
+
+        # Validation: Before advice for request input validation
+        val validate_input = WeavingRule(
+            predicate_text: "attr(validates_input) & within(http_server.**)",
+            advice_function: "std.security.aspects.validation_advice.validate_request_input",
+            form: AdviceForm.Before,
+            priority: 750
+        )
+
+        # Merge into base config
+        var new_before = base.before_advices
+        new_before = new_before.push(auth_check)
+        new_before = new_before.push(validate_input)
+
+        var new_after_success = base.after_success_advices
+        new_after_success = new_after_success.push(audit_auth_success)
+
+        var new_after_error = base.after_error_advices
+        new_after_error = new_after_error.push(audit_auth_failure)
+
+        var new_around = base.around_advices
+        new_around = new_around.push(audit_request)
+        new_around = new_around.push(sanitize_output)
+
+        WeavingConfig(
+            enabled: true,
+            before_advices: new_before,
+            after_success_advices: new_after_success,
+            after_error_advices: new_after_error,
+            around_advices: new_around
+        )

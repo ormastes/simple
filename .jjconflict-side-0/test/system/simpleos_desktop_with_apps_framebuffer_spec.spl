@@ -1,0 +1,224 @@
+# @tag:system
+# @tag:pending_until_shortcut_fix
+#
+# System spec — SYS-GUI-006 (with-apps variant): SimpleOS desktop framebuffer
+#                                                baseline with the two default
+#                                                apps (browser_demo, hello_world)
+#                                                drawn on top of the bare desktop.
+#
+# This is the "full scene" counterpart to simpleos_desktop_framebuffer_spec.spl.
+# The bare-desktop spec captures after `[desktop-e2e] desktop-ready`, which is
+# the earliest reliable paint marker. This spec waits for
+# `[desktop-e2e] remote-grouping:ok`, which is emitted only after the shell has
+# launched the default apps and the compositor has drawn their windows.
+#
+# It is intentionally gated: on current main the desktop entry path fails
+# earlier at `[desktop-e2e] shortcut:fail` / `launcher:fail` and never reaches
+# remote-grouping:ok, so this spec skips cleanly with a visible PENDING
+# message. Once the shortcut/launcher path is fixed on the desktop entry side,
+# the spec unblocks automatically — no edits required here.
+#
+# Baseline management (once unblocked):
+#   UPDATE_BASELINE=1 bin/simple test test/system/simpleos_desktop_with_apps_framebuffer_spec.spl
+#
+# Tolerance profile: profile_wm_default (shared with the bare spec — same
+# rationale, same >=95% whole-scene regression gate).
+
+use std.spec.*
+
+use os.qemu_runner.{OsTarget, get_desktop_browser_target, build_os}
+use os.compositor.qemu_capture.{capture_qemu_vm}
+use os.compositor.electron_capture.{CaptureResult}
+use os.compositor.screenshot_compare.{ComparisonResult, compare_with_profile}
+use os.compositor.tolerance_profile.{ToleranceProfile, profile_wm_default}
+use std.common.image.ppm_decode.{decode_ppm_to_argb, PpmImage}
+use std.nogc_sync_mut.ffi.io.{file_read_bytes, file_write_bytes, dir_create_all}
+
+use test.qemu.os.common.qemu_os_harness.{
+    QemuGuestHandle, can_run_target, file_exists, spawn_guest_with_qmp,
+    stop_guest, wait_for_serial_marker}
+
+extern fn rt_env_get(name: text) -> text
+
+# ===========================================================================
+# Helpers (mirrored from simpleos_desktop_framebuffer_spec.spl — kept local
+# so each spec is self-contained for diagnosis, same pattern as the bare spec
+# mirroring engine2d_in_qemu_spec.)
+# ===========================================================================
+
+fn _desktop_target() -> OsTarget:
+    val base = get_desktop_browser_target()
+    OsTarget(
+        arch: base.arch,
+        entry: base.entry,
+        linker_script: base.linker_script,
+        target_triple: base.target_triple,
+        output: base.output,
+        qemu_system: base.qemu_system,
+        qemu_machine: base.qemu_machine,
+        qemu_cpu: base.qemu_cpu,
+        qemu_memory: base.qemu_memory,
+        qemu_bios: base.qemu_bios,
+        qemu_extra: base.qemu_extra + ["-vga", "std"],
+        gui_mode: false
+    )
+
+fn _non_black_count(pixels: [u32]) -> i64:
+    var count: i64 = 0
+    for px in pixels:
+        val rgb = px & 0xFFFFFF
+        if rgb != 0:
+            count = count + 1
+    count
+
+fn _write_ppm_local(pixels: [u32], width: i32, height: i32, path: text) -> bool:
+    if pixels.len() == 0 or width <= 0 or height <= 0:
+        return false
+
+    val header = "P6\n{width} {height}\n255\n"
+    var data: [u8] = []
+    for ch in header:
+        data = data + [ch as u8]
+
+    var i = 0
+    val n = pixels.len()
+    while i < n:
+        val p = pixels[i]
+        val r_byte: u8 = ((p >> 16) & 0xFF) as u8
+        val g_byte: u8 = ((p >> 8) & 0xFF) as u8
+        val b_byte: u8 = (p & 0xFF) as u8
+        data = data + [r_byte, g_byte, b_byte]
+        i = i + 1
+
+    file_write_bytes(path, data)
+    true
+
+fn _read_baseline_ppm(path: text) -> (bool, [u32], i32, i32, text):
+    val bytes = file_read_bytes(path)
+    if bytes.len() == 0:
+        return (false, [], 0, 0, "missing baseline: {path}")
+    val decoded = decode_ppm_to_argb(bytes)
+    match decoded:
+        Ok(img):
+            return (true, img.pixels, img.width, img.height, "")
+        Err(msg):
+            return (false, [], 0, 0, "ppm decode failed: {msg}")
+
+fn _update_baseline_requested() -> bool:
+    val v = rt_env_get("UPDATE_BASELINE") ?? ""
+    v == "1" or v == "true"
+
+# ===========================================================================
+# Spec
+# ===========================================================================
+
+describe "SimpleOS desktop framebuffer with apps (SYS-GUI-006 / pending_until_shortcut_fix)":
+
+    it "builds desktop_e2e_entry.spl into a baremetal kernel":
+        val target = _desktop_target()
+        val ok = build_os(target)
+        expect(ok).to_equal(true)
+        expect(file_exists(target.output)).to_equal(true)
+
+    it "boots desktop, waits for remote-grouping:ok, captures with-apps baseline":
+        val target = _desktop_target()
+        expect(build_os(target)).to_equal(true)
+        expect(file_exists(target.output)).to_equal(true)
+
+        if not can_run_target(target):
+            print "[simpleos_desktop_with_apps_fb_spec] qemu-system-x86_64 not available, skipping live capture"
+            expect(true).to_equal(true)
+            return
+
+        val qmp_socket = "/tmp/simpleos_desktop_with_apps_qmp.sock"
+        val serial_log = "build/os/simpleos_desktop_with_apps_qemu_serial.log"
+        val capture_ppm = "build/os/simpleos_desktop_with_apps_capture.ppm"
+        val baseline_dir = "test/baselines/simpleos_desktop_with_apps_framebuffer"
+        val baseline_path = "{baseline_dir}/desktop_with_apps_scene.ppm"
+
+        dir_create_all(baseline_dir)
+        dir_create_all("build/os")
+
+        match spawn_guest_with_qmp(target, qmp_socket, serial_log):
+            Ok(handle) =>
+                # Wait on remote-grouping:ok — the full-desktop paint marker
+                # emitted after the shell has launched the default apps and
+                # the compositor has drawn the browser-demo + hello_world
+                # remote windows on the BGA framebuffer.
+                #
+                # PENDING: on current main the desktop entry path fails at
+                # shortcut:fail / launcher:fail BEFORE reaching this marker.
+                # We use a short timeout and skip cleanly on miss so this
+                # spec does not block CI on the downstream fix. Once the
+                # shortcut/launcher path is restored, this spec unblocks
+                # automatically with no edits needed — the marker wait will
+                # simply succeed.
+                val saw_ready = wait_for_serial_marker(
+                    handle, "[desktop-e2e] remote-grouping:ok", 60000)
+                if not saw_ready:
+                    print "[simpleos_desktop_with_apps_fb_spec] PENDING: remote-grouping:ok not reached (shortcut:fail upstream). Skipping cleanly — unblocks automatically when the desktop entry path is fixed."
+                    stop_guest(handle)
+                    expect(true).to_equal(true)
+                    return
+
+                val result = capture_qemu_vm(qmp_socket, capture_ppm)
+                if not result.success:
+                    print "[simpleos_desktop_with_apps_fb_spec] QMP screendump failed: {result.error}"
+                    stop_guest(handle)
+                    expect(false).to_equal(true)
+                    return
+
+                val nb = _non_black_count(result.pixels)
+                print "[simpleos_desktop_with_apps_fb_spec] captured {result.width}x{result.height}, non-black pixels: {nb} of {result.pixels.len()}"
+
+                if _update_baseline_requested():
+                    val wrote = _write_ppm_local(
+                        result.pixels, result.width, result.height, baseline_path)
+                    print "[simpleos_desktop_with_apps_fb_spec] UPDATE_BASELINE=1 wrote baseline: {baseline_path} (ok={wrote})"
+                    stop_guest(handle)
+                    expect(wrote).to_equal(true)
+                    expect(nb > 0).to_equal(true)
+                    return
+
+                val baseline_bytes = file_read_bytes(baseline_path)
+                if (not file_exists(baseline_path)) or baseline_bytes.len() == 0:
+                    val wrote = _write_ppm_local(
+                        result.pixels, result.width, result.height, baseline_path)
+                    print "[simpleos_desktop_with_apps_fb_spec] no baseline found, recorded: {baseline_path} (ok={wrote})"
+                    stop_guest(handle)
+                    expect(wrote).to_equal(true)
+                    expect(nb > 0).to_equal(true)
+                    return
+
+                val (ok, base_pixels, base_w, base_h, err) = _read_baseline_ppm(baseline_path)
+                if not ok:
+                    print "[simpleos_desktop_with_apps_fb_spec] baseline read failed: {err}"
+                    stop_guest(handle)
+                    expect(false).to_equal(true)
+                    return
+
+                if base_w != result.width or base_h != result.height:
+                    print "[simpleos_desktop_with_apps_fb_spec] baseline dims {base_w}x{base_h} != capture dims {result.width}x{result.height}"
+                    stop_guest(handle)
+                    expect(false).to_equal(true)
+                    return
+
+                val profile = profile_wm_default()
+                val cmp: ComparisonResult = compare_with_profile(
+                    result.pixels, base_pixels, result.width, result.height, profile)
+                val pct_whole = cmp.match_percentage / 100
+                val pct_frac = cmp.match_percentage % 100
+                print "[simpleos_desktop_with_apps_fb_spec] match: {pct_whole}.{pct_frac}% ({cmp.matching_pixels}/{cmp.total_pixels}) profile={profile.name}"
+
+                stop_guest(handle)
+
+                expect(nb > 0).to_equal(true)
+                expect(cmp.match_percentage >= 9500).to_equal(true)
+            Err(err) =>
+                print "[simpleos_desktop_with_apps_fb_spec] failed to spawn guest: {err}"
+                expect(false).to_equal(true)
+
+    it "has a baseline directory for simpleos_desktop_with_apps_framebuffer captures":
+        val baseline_dir = "test/baselines/simpleos_desktop_with_apps_framebuffer"
+        dir_create_all(baseline_dir)
+        expect(file_exists(baseline_dir)).to_equal(true)

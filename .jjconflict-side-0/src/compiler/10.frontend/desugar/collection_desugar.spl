@@ -1,0 +1,187 @@
+#![allow(unnamed_duplicate_typed_args)]
+# Collection Pattern Desugar
+#
+# Rewrites O(n²) collection anti-patterns into efficient in-place mutations
+# at AST level. This runs before type-checking and interpretation, so it
+# fixes performance for ALL code paths (interpreter, JIT, AOT).
+#
+# Patterns handled:
+#   Pattern A:  x = x + [item]           →  x.push(item)
+#   Pattern A2: x = x + [a, b, c]        →  (no rewrite — multi-element literal)
+#   Pattern B:  x = x + other_arr        →  x.merge(other_arr)
+#   Pattern C:  x += [item]              →  x.push(item)
+#   Pattern D:  dict[k] = dict[k] + [x]  →  dict[k].push(x)
+#   Pattern E:  x = x.push(item)         →  x.push(item)  (drop redundant assign)
+#
+# Safety: The rewrite is valid because:
+#   - .push(item) mutates the array in-place (O(1) amortized)
+#   - .merge(arr) extends the array in-place (O(m))
+#   - x = x + [item] creates a NEW array each time (O(n) per call → O(n²) in loop)
+#   - The patterns only match when LHS target == LHS of + (same variable)
+
+use compiler.core.ast_expr.{
+    EXPR_ASSIGN, EXPR_BINARY, EXPR_ARRAY_LIT, EXPR_IDENT,
+    EXPR_METHOD_CALL, EXPR_COMPOUND_ASSIGN, EXPR_INDEX,
+    EXPR_FIELD_ACCESS,
+    expr_tag, expr_i_val, expr_s_val, expr_left, expr_right,
+    expr_args, expr_count
+}
+use compiler.core.tokens.{TOK_PLUS}
+
+var _collection_desugar_rewrites: i64 = 0
+
+fn collection_desugar_rewrite_count() -> i64:
+    _collection_desugar_rewrites
+
+# ============================================================================
+# Main Entry Point
+# ============================================================================
+
+fn desugar_collections(start_from: i64):
+    """Scan expression arena from start_from and rewrite collection anti-patterns.
+
+    Called after parsing each file. start_from is the expr arena index
+    before parsing began, so only new nodes are processed.
+    """
+    _collection_desugar_rewrites = 0
+    var i = start_from
+    val count = expr_count()
+
+    while i < count:
+        val tag = expr_tag[i]
+
+        if tag == EXPR_ASSIGN:
+            try_rewrite_assign(i)
+
+        elif tag == EXPR_COMPOUND_ASSIGN:
+            try_rewrite_compound_assign(i)
+
+        i = i + 1
+
+# ============================================================================
+# Pattern A/B/D/E: x = x + [item] / x = x + arr / dict[k] / x = x.push()
+# ============================================================================
+
+fn try_rewrite_assign(e: i64):
+    val target = expr_left[e]
+    val value = expr_right[e]
+    if target < 0 or value < 0:
+        return
+
+    # Pattern E: x = x.push(item) → x.push(item)
+    # Drop redundant assignment wrapping an in-place mutation
+    if expr_tag[value] == EXPR_METHOD_CALL:
+        val method = expr_s_val[value]
+        val receiver = expr_left[value]
+        if method == "push" or method == "merge":
+            if exprs_refer_same(target, receiver):
+                # Rewrite: promote the method call, discard the assign
+                expr_tag[e] = EXPR_METHOD_CALL
+                expr_left[e] = receiver
+                expr_s_val[e] = method
+                expr_args[e] = expr_args[value]
+                expr_right[e] = -1
+                _collection_desugar_rewrites = _collection_desugar_rewrites + 1
+                return
+
+    # value must be BINARY(+, lhs, rhs)
+    if expr_tag[value] != EXPR_BINARY:
+        return
+    if expr_i_val[value] != TOK_PLUS:
+        return
+
+    val rhs_left = expr_left[value]
+    val rhs_right = expr_right[value]
+    if rhs_left < 0 or rhs_right < 0:
+        return
+
+    # LHS of + must match assignment target
+    if not exprs_refer_same(target, rhs_left):
+        return
+
+    # Pattern A: x = x + [single_item] → x.push(single_item)
+    if expr_tag[rhs_right] == EXPR_ARRAY_LIT:
+        val elements = expr_args[rhs_right]
+        if elements.len() == 1:
+            # Single element — rewrite to .push(element)
+            expr_tag[e] = EXPR_METHOD_CALL
+            expr_left[e] = target
+            expr_s_val[e] = "push"
+            expr_args[e] = elements
+            expr_right[e] = -1
+            _collection_desugar_rewrites = _collection_desugar_rewrites + 1
+            return
+        # Multi-element array literal [a, b, c] — don't rewrite
+        # (would need multiple push calls or a different pattern)
+        return
+
+    # Pattern B: x = x + other_arr → x.merge(other_arr)
+    expr_tag[e] = EXPR_METHOD_CALL
+    expr_left[e] = target
+    expr_s_val[e] = "merge"
+    expr_args[e] = [rhs_right]
+    expr_right[e] = -1
+    _collection_desugar_rewrites = _collection_desugar_rewrites + 1
+
+# ============================================================================
+# Pattern C: x += [item] → x.push(item)
+# ============================================================================
+
+fn try_rewrite_compound_assign(e: i64):
+    # Compound assign stores: i_val=operator, left=target, right=value
+    # We only handle += (TOK_PLUS)
+    if expr_i_val[e] != TOK_PLUS:
+        return
+
+    val target = expr_left[e]
+    val value = expr_right[e]
+    if target < 0 or value < 0:
+        return
+
+    if expr_tag[value] == EXPR_ARRAY_LIT:
+        val elements = expr_args[value]
+        if elements.len() == 1:
+            expr_tag[e] = EXPR_METHOD_CALL
+            expr_left[e] = target
+            expr_s_val[e] = "push"
+            expr_args[e] = elements
+            expr_right[e] = -1
+            _collection_desugar_rewrites = _collection_desugar_rewrites + 1
+            return
+        return
+
+    # x += other_arr → x.merge(other_arr)
+    expr_tag[e] = EXPR_METHOD_CALL
+    expr_left[e] = target
+    expr_s_val[e] = "merge"
+    expr_args[e] = [value]
+    expr_right[e] = -1
+    _collection_desugar_rewrites = _collection_desugar_rewrites + 1
+
+# ============================================================================
+# Expression Equality (structural — checks if two exprs refer to same target)
+# ============================================================================
+
+fn exprs_refer_same(a: i64, b: i64) -> bool:
+    """Check if two expression nodes refer to the same variable/location."""
+    if a < 0 or b < 0:
+        return false
+
+    val tag_a = expr_tag[a]
+    val tag_b = expr_tag[b]
+
+    # Both identifiers with same name: x == x
+    if tag_a == EXPR_IDENT and tag_b == EXPR_IDENT:
+        return expr_s_val[a] == expr_s_val[b]
+
+    # Both index expressions: dict[k] == dict[k]
+    if tag_a == EXPR_INDEX and tag_b == EXPR_INDEX:
+        return exprs_refer_same(expr_left[a], expr_left[b]) and exprs_refer_same(expr_right[a], expr_right[b])
+
+    # Both field access: obj.field == obj.field
+    if tag_a == EXPR_FIELD_ACCESS and tag_b == EXPR_FIELD_ACCESS:
+        if expr_s_val[a] != expr_s_val[b]:
+            return false
+        return exprs_refer_same(expr_left[a], expr_left[b])
+
+    false

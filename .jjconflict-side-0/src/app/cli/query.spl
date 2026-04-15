@@ -1,0 +1,345 @@
+#![allow(unnamed_duplicate_typed_args)]
+@allow(unnamed_duplicate_typed_args)
+# Simple Language - Query CLI
+#
+# Provides structured code query subcommands for IDE integration.
+# Uses outline-based parsing for scope-aware queries (not grep).
+# Called via: bin/simple query <subcommand> <file> <line> [column]
+#
+# Subcommands:
+#   definition          <file> <line> [column]  — Find definition of symbol at position
+#   references          <file> <line> [column]  — Find all references to symbol at position
+#   hover               <file> <line> [column]  — Show type + docs at position
+#   completions         <file> <line> [column] [--prefix X]  — Code completions at position
+#   type-at             <file> <line> [column]  — Type info at position
+#   signature-help      <file> <line> [column]  — Signature help for function call
+#   rename              <file> <line> [column] --new-name X [--apply]  — Rename symbol
+#   code-actions        <file> <line>           — Code actions / quick fixes at position
+#   call-hierarchy      <file> <line> [column] [--direction incoming|outgoing]
+#   type-hierarchy      <file> <line> [column] [--direction supertypes|subtypes]
+#   selection-range     <file> <line> [column]  — Nested selection ranges
+#   workspace-symbols   [--query X] [--kind fn|class|struct|enum|trait]
+#   semantic-tokens     <file> [--start-line N] [--end-line N]
+#   inlay-hints         <file> [--start-line N] [--end-line N]
+#   document-formatting <file>                  — Format file
+#   document-highlight  <file> <line> [col]     — Same-file references with R/W
+#   type-definition     <file> <line> [col]     — Find where type is defined
+#   implementation      <file> <line> [col]     — Find trait implementations
+#   folding-range       <file>                  — Folding ranges
+#   check               <file> [--format text|json]  — Type-check + lint
+#   workspace-diagnostics <dir> [--format text|json]  — Workspace-wide diagnostics
+#
+# Split into modules:
+#   query_helpers.spl   — Shared helper/utility functions
+#   query_rich.spl      — Complex/rich query command implementations
+
+extern fn rt_cli_get_args() -> [text]
+extern fn rt_file_read_text(path: text) -> text
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+extern fn rt_file_write_text(path: text, content: text) -> bool
+
+use app.cli.query_engine.{engine_find_definition, engine_find_references, engine_hover, engine_completions, engine_type_at, engine_signature_help, engine_document_symbols}
+use app.cli.query_sanitize.{sanitize_path, sanitize_symbol, safe_grep, safe_grep_file, safe_process}
+use app.cli.query_lsp_extras.{query_document_highlight, query_type_definition, query_implementation, query_folding_range}
+use app.cli.query_visibility.{
+    query_visibility_hover, query_visibility_completions,
+    query_visibility_symbols, query_visibility_workspace_symbols,
+    query_visibility_semantic_tokens
+}
+use app.cli.query_ast_query.{engine_ast_query}
+use app.cli.query_sem_query.{engine_sem_query}
+use app.cli.query_schema.{engine_query_schema}
+use app.cli.query_rich.{query_signature_help, query_rename, query_code_actions, query_workspace_symbols, query_call_hierarchy, query_type_hierarchy, query_semantic_tokens, query_inlay_hints, query_selection_range, query_document_formatting, query_ast_query, query_sem_query, query_query_schema, query_check, query_workspace_diagnostics}
+
+fn query_main() -> i64:
+    val all_args = rt_cli_get_args()
+    # Strip program name and script path (first 2 args: binary + script.spl)
+    var args: [text] = []
+    var i = 0
+    for arg in all_args:
+        if i >= 2:
+            args.push(arg)
+        i = i + 1
+    run_query(args)
+
+# Top-level entry point
+query_main()
+
+fn query_shell(command: text) -> (text, i64):
+    val (stdout, stderr, code) = rt_process_run("/bin/sh", ["-c", command])
+    (stdout, code)
+
+fn query_file_read(path: text) -> text:
+    rt_file_read_text(path) ?? ""
+
+# Extract the symbol name at a given line and optional column
+fn extract_symbol_at(file: text, line_num: i64, col: i64) -> text:
+    val content = query_file_read(file)
+    if content == "":
+        return ""
+    val lines = content.split("\n")
+    if line_num < 1 or line_num > lines.len():
+        return ""
+    val target_line = lines[line_num - 1]
+    if target_line.trim() == "":
+        return ""
+
+    # If column is specified, extract word at that position
+    if col > 0 and col <= target_line.len():
+        var start = col - 1
+        var end_pos = col - 1
+        # Scan backward to find word start
+        for _i in range(0, col):
+            if start <= 0:
+                break
+            val ch = target_line.substring(start - 1, start)
+            val is_word = (ch >= "a" and ch <= "z") or (ch >= "A" and ch <= "Z") or (ch >= "0" and ch <= "9") or ch == "_"
+            if not is_word:
+                break
+            start = start - 1
+        # Scan forward to find word end
+        for _i in range(0, 200):
+            if end_pos >= target_line.len():
+                break
+            val ch = target_line.substring(end_pos, end_pos + 1)
+            val is_word = (ch >= "a" and ch <= "z") or (ch >= "A" and ch <= "Z") or (ch >= "0" and ch <= "9") or ch == "_"
+            if not is_word:
+                break
+            end_pos = end_pos + 1
+        if end_pos > start:
+            return target_line.substring(start, end_pos)
+
+    # No column or column extraction failed — extract first identifier-like token
+    val trimmed = target_line.trim()
+    # Skip common keywords to find the symbol name
+    var rest = trimmed
+    if rest.starts_with("fn "):
+        rest = rest.substring(3)
+    elif rest.starts_with("val "):
+        rest = rest.substring(4)
+    elif rest.starts_with("var "):
+        rest = rest.substring(4)
+    elif rest.starts_with("class "):
+        rest = rest.substring(6)
+    elif rest.starts_with("struct "):
+        rest = rest.substring(7)
+    elif rest.starts_with("enum "):
+        rest = rest.substring(5)
+    elif rest.starts_with("use "):
+        rest = rest.substring(4)
+    elif rest.starts_with("import "):
+        rest = rest.substring(7)
+    elif rest.starts_with("me "):
+        rest = rest.substring(3)
+    elif rest.starts_with("static fn "):
+        rest = rest.substring(10)
+
+    # Extract first word
+    var parts: [text] = []
+    for ch in rest:
+        val is_word = (ch >= "a" and ch <= "z") or (ch >= "A" and ch <= "Z") or (ch >= "0" and ch <= "9") or ch == "_"
+        if not is_word:
+            break
+        parts.push(ch)
+    parts.join("")
+
+fn run_query(args: [text]) -> i64:
+    # Strip "query" from args if present
+    var cmd_args = args
+    if cmd_args.len() > 0 and cmd_args[0] == "query":
+        cmd_args = cmd_args[1:]
+
+    if cmd_args.len() == 0:
+        print "Usage: simple query <subcommand> <file> <line> [column]"
+        print ""
+        print "Subcommands:"
+        print "  definition          <file> <line> [col]  Find definition of symbol"
+        print "  references          <file> <line> [col]  Find all references"
+        print "  hover               <file> <line> [col]  Type + docs at position"
+        print "  completions         <file> <line> [col]  Code completions"
+        print "  type-at             <file> <line> [col]  Type info at position"
+        print "  signature-help      <file> <line> [col]  Signature help for call"
+        print "  rename              <file> <line> [col] --new-name X [--apply]  Rename"
+        print "  code-actions        <file> <line> [--format text|json]  Code actions"
+        print "  call-hierarchy      <file> <line> [col] [--direction incoming|outgoing]"
+        print "  type-hierarchy      <file> <line> [col] [--direction supertypes|subtypes]"
+        print "  selection-range     <file> <line> [col]  Nested selection ranges"
+        print "  workspace-symbols   [--query X] [--kind fn|class|struct|enum|trait]"
+        print "  semantic-tokens     <file> [--start-line N] [--end-line N]"
+        print "  lsp-hover-json      <file> <line> [col]  Structured hover with visibility"
+        print "  lsp-completions-json <file> <line> [col] Structured completions with visibility"
+        print "  lsp-symbols-json    <file> [--requester X]  Document symbols with visibility"
+        print "  lsp-workspace-symbols-json --query X --requester X"
+        print "  lsp-semantic-tokens-json <file> [--start-line N] [--end-line N]"
+        print "  inlay-hints         <file> [--start-line N] [--end-line N] [--format text|json]"
+        print "  document-formatting <file>               Format file"
+        print "  document-highlight  <file> <line> [col]  Same-file references (R/W)"
+        print "  type-definition     <file> <line> [col]  Find type definition"
+        print "  implementation      <file> <line> [col]  Find trait implementations"
+        print "  folding-range       <file>               Folding ranges"
+        print "  symbols             <file>               Document symbols"
+        print "  check               <file> [--format text|json]  Type-check + lint"
+        print "  workspace-diagnostics <dir> [--format text|json]  Diagnostics for all files"
+        print "  ast-query           '<pattern>' [--files path] [--format text|json|compact]"
+        print "  sem-query           '<query>' [--files path] [--format text|json|compact]"
+        print "  query-schema        [ast|sem]            Query language schema"
+        return 0
+
+    val subcmd = cmd_args[0]
+
+    # Subcommands with non-standard args (no file+line positional)
+    if subcmd == "ast-query":
+        return query_ast_query(cmd_args)
+    if subcmd == "sem-query":
+        return query_sem_query(cmd_args)
+    if subcmd == "query-schema":
+        return query_query_schema(cmd_args)
+    if subcmd == "workspace-symbols":
+        return query_workspace_symbols(cmd_args)
+    if subcmd == "document-formatting" and cmd_args.len() >= 2:
+        return query_document_formatting(cmd_args[1])
+    if subcmd == "lsp-symbols-json" and cmd_args.len() >= 2:
+        val sym_file = sanitize_path(cmd_args[1])
+        if sym_file == "":
+            print "[]"
+            return 1
+        val requester = _extract_flag(cmd_args, "--requester", sym_file)
+        return query_visibility_symbols(sym_file, requester)
+    if subcmd == "lsp-workspace-symbols-json":
+        val query = _extract_flag(cmd_args, "--query", "")
+        val requester = _extract_flag(cmd_args, "--requester", "")
+        return query_visibility_workspace_symbols(query, requester)
+    if subcmd == "semantic-tokens" and cmd_args.len() >= 2:
+        return query_semantic_tokens(cmd_args[1], cmd_args)
+    if subcmd == "lsp-semantic-tokens-json" and cmd_args.len() >= 2:
+        val st_file = sanitize_path(cmd_args[1])
+        if st_file == "":
+            print "{\"data\":[]}"
+            return 1
+        val start_line_str = _extract_flag(cmd_args, "--start-line", "0")
+        val end_line_str = _extract_flag(cmd_args, "--end-line", "0")
+        return query_visibility_semantic_tokens(st_file, start_line_str.to_int(), end_line_str.to_int())
+    if subcmd == "inlay-hints" and cmd_args.len() >= 2:
+        return query_inlay_hints(cmd_args[1], cmd_args)
+    if subcmd == "folding-range" and cmd_args.len() >= 2:
+        val fr_file = sanitize_path(cmd_args[1])
+        if fr_file == "":
+            print "Error: invalid file path"
+            return 1
+        return query_folding_range(fr_file)
+    if subcmd == "symbols" and cmd_args.len() >= 2:
+        val sym_file = sanitize_path(cmd_args[1])
+        if sym_file == "":
+            print "Error: invalid file path"
+            return 1
+        return engine_document_symbols(sym_file)
+    if subcmd == "check" and cmd_args.len() >= 2:
+        val check_file_path = sanitize_path(cmd_args[1])
+        if check_file_path == "":
+            print "Error: invalid file path"
+            return 1
+        return query_check(check_file_path, cmd_args)
+    if subcmd == "workspace-diagnostics" and cmd_args.len() >= 2:
+        val ws_dir = sanitize_path(cmd_args[1])
+        if ws_dir == "":
+            print "Error: invalid directory path"
+            return 1
+        return query_workspace_diagnostics(ws_dir, cmd_args)
+
+    if cmd_args.len() < 3:
+        print "Error: {subcmd} requires <file> and <line> arguments"
+        return 1
+
+    val raw_file = cmd_args[1]
+    val file = sanitize_path(raw_file)
+    if file == "":
+        print "Error: invalid file path"
+        return 1
+    val line_num = cmd_args[2].to_int()
+    var col = 0
+    if cmd_args.len() > 3 and not cmd_args[3].starts_with("--"):
+        col = cmd_args[3].to_int()
+
+    val symbol = extract_symbol_at(file, line_num, col)
+    if symbol == "":
+        print "No symbol found at {file}:{line_num}"
+        return 1
+
+    if subcmd == "definition":
+        return query_definition(symbol, file)
+    elif subcmd == "references":
+        return query_references(symbol, file)
+    elif subcmd == "hover":
+        return query_hover(symbol, file, line_num)
+    elif subcmd == "lsp-hover-json":
+        return query_visibility_hover(file, line_num, col)
+    elif subcmd == "completions":
+        var prefix = symbol
+        # Check for --prefix flag
+        var i = 3
+        while i < cmd_args.len():
+            if cmd_args[i] == "--prefix" and i + 1 < cmd_args.len():
+                prefix = cmd_args[i + 1]
+            i = i + 1
+        return query_completions(prefix, file)
+    elif subcmd == "lsp-completions-json":
+        return query_visibility_completions(file, line_num, col)
+    elif subcmd == "type-at":
+        return query_type_at(symbol, file, line_num)
+    elif subcmd == "signature-help":
+        return query_signature_help(symbol, file, line_num, col)
+    elif subcmd == "rename":
+        return query_rename(symbol, file, line_num, cmd_args)
+    elif subcmd == "code-actions":
+        return query_code_actions(file, line_num, cmd_args)
+    elif subcmd == "call-hierarchy":
+        return query_call_hierarchy(symbol, file, cmd_args)
+    elif subcmd == "type-hierarchy":
+        return query_type_hierarchy(symbol, file, cmd_args)
+    elif subcmd == "selection-range":
+        return query_selection_range(file, line_num, col)
+    elif subcmd == "document-highlight":
+        return query_document_highlight(file, line_num, col)
+    elif subcmd == "type-definition":
+        return query_type_definition(file, line_num, col)
+    elif subcmd == "implementation":
+        return query_implementation(file, line_num, col)
+    else:
+        print "Unknown query subcommand: {subcmd}"
+        return 1
+
+fn query_definition(symbol: text, file: text) -> i64:
+    val clean_sym = sanitize_symbol(symbol)
+    if clean_sym == "":
+        print "Error: invalid symbol name"
+        return 1
+    engine_find_definition(file, clean_sym)
+
+fn query_references(symbol: text, file: text) -> i64:
+    val clean_sym = sanitize_symbol(symbol)
+    if clean_sym == "":
+        print "Error: invalid symbol name"
+        return 1
+    engine_find_references(file, clean_sym)
+
+fn query_hover(symbol: text, file: text, line_num: i64) -> i64:
+    val clean_sym = sanitize_symbol(symbol)
+    if clean_sym == "":
+        print "Error: invalid symbol name"
+        return 1
+    engine_hover(file, line_num, clean_sym)
+
+fn query_completions(prefix: text, file: text) -> i64:
+    val clean_prefix = sanitize_symbol(prefix)
+    if clean_prefix == "":
+        # Allow empty prefix to show all symbols
+        engine_completions(file, 0, "")
+    else:
+        engine_completions(file, 0, clean_prefix)
+
+fn query_type_at(symbol: text, file: text, line_num: i64) -> i64:
+    val clean_sym = sanitize_symbol(symbol)
+    if clean_sym == "":
+        print "Error: invalid symbol name"
+        return 1
+    engine_type_at(file, line_num, clean_sym)

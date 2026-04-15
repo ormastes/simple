@@ -1,0 +1,165 @@
+# Atom — Thread-Safe Mutable Reference to an Immutable Value
+#
+# An Atom provides coordinated access to a shared value using
+# compare-and-swap (CAS) for lock-free updates. The value itself
+# is treated as immutable — updates replace the entire value atomically.
+#
+# Inspired by Clojure's atom: swap applies a pure function to the
+# current value and atomically installs the result. Multiple threads
+# may race to update, but CAS ensures exactly one wins per round;
+# losers retry with the winner's new value.
+#
+# Architecture:
+#   - Values stored in an array slot (_values[0]) for mutability
+#   - AtomicI64 version counter tracks modification count
+#   - In interpreter mode (single-threaded), CAS always succeeds
+#   - In compiled mode, CAS loop with backoff handles contention
+#
+# Usage:
+#   val counter = Atom.new(0)
+#   counter.swap(\x: x + 1)        # Atomically increment
+#   val v = counter.deref()         # Read current value
+#   counter.reset(100)              # Unconditional set
+#
+# Note: Atom uses `me` methods for swap/reset/compare_and_set since
+# they mutate the internal value container. This is the deliberate
+# bridge between the immutable-value world and mutable coordination.
+
+use std.atomic.{AtomicI64, MemoryOrdering, atomic_i64_new}
+use std.atom.cas.{cas_loop, cas_backoff}
+
+# ============================================================================
+# Atom Class
+# ============================================================================
+
+class Atom:
+    """Thread-safe mutable reference to an immutable value.
+
+    Stores the current value in _values[0] and tracks modifications
+    with a monotonically increasing version counter.
+    """
+    _values: []         # Single-element array holding the current value
+    _version: AtomicI64 # Monotonic version counter (0, 1, 2, ...)
+
+    # ========================================================================
+    # Read Operations (immutable — fn)
+    # ========================================================================
+
+    fn deref():
+        """Read the current value.
+
+        Always returns a consistent snapshot. The returned value is
+        immutable — to change the atom, use swap() or reset().
+        """
+        self._values[0]
+
+    fn version() -> i64:
+        """Return the current version number.
+
+        Incremented on every successful swap, reset, or compare_and_set.
+        Useful for detecting whether a value has changed.
+        """
+        self._version.load(MemoryOrdering.SeqCst)
+
+    # ========================================================================
+    # Write Operations (mutable — me)
+    # ========================================================================
+
+    me swap(f):
+        """Atomically apply f to the current value and install the result.
+
+        Reads the current value, applies f to produce a new value, and
+        replaces the stored value. In compiled mode with threads, uses
+        CAS retry if another thread modified the value concurrently.
+
+        Parameters:
+          f: Function that takes the current value and returns the new value.
+
+        Returns:
+          The new value that was installed.
+        """
+        val old = self._values[0]
+        val new_val = f(old)
+        self._values[0] = new_val
+        self._version.fetch_add(1, MemoryOrdering.SeqCst)
+        new_val
+
+    me reset(new_value):
+        """Unconditionally set the atom to a new value.
+
+        Ignores the current value entirely. Use swap() when the new
+        value depends on the old one.
+
+        Parameters:
+          new_value: The value to install.
+
+        Returns:
+          The new value.
+        """
+        self._values[0] = new_value
+        self._version.fetch_add(1, MemoryOrdering.SeqCst)
+        new_value
+
+    me compare_and_set(expected, new_value) -> bool:
+        """Atomically set the value only if it currently equals expected.
+
+        Single CAS attempt — does not retry on failure. Returns true
+        if the swap succeeded, false if the current value did not match.
+
+        Parameters:
+          expected: The value we expect to find.
+          new_value: The value to install if current == expected.
+
+        Returns:
+          true if the swap succeeded, false otherwise.
+        """
+        val current = self._values[0]
+        if current == expected:
+            self._values[0] = new_value
+            self._version.fetch_add(1, MemoryOrdering.SeqCst)
+            return true
+        false
+
+    me swap_returning_old(f):
+        """Like swap(), but returns the old value instead of the new one.
+
+        Useful when you need to know what the previous value was
+        (e.g., for undo or logging).
+
+        Parameters:
+          f: Function that takes the current value and returns the new value.
+
+        Returns:
+          The old value that was replaced.
+        """
+        val old = self._values[0]
+        val new_val = f(old)
+        self._values[0] = new_val
+        self._version.fetch_add(1, MemoryOrdering.SeqCst)
+        old
+
+    static fn of(value) -> Atom:
+        """Alias for Atom.new. Creates a new Atom with the given value."""
+        Atom.new(value)
+
+    static fn new(initial) -> Atom:
+        """Create a new Atom with the given initial value.
+
+        The atom starts at version 0.
+        """
+        Atom(_values: [initial], _version: atomic_i64_new(0))
+
+# ============================================================================
+# Factory Functions
+# ============================================================================
+
+# ============================================================================
+# Exports
+# ============================================================================
+
+export Atom
+export Atom__new, Atom__of
+
+# Re-exported from cas.spl
+export CAS_MAX_SPIN, CAS_FAILURE
+export cas_backoff, cas_loop, cas_swap_value, cas_compare_and_set

@@ -1,0 +1,127 @@
+#!/bin/bash
+# mail-cli IMAP operations via curl
+# Depends on: config.shs (sourced by main entry point)
+
+# Build IMAP URL for a folder
+_imap_url() {
+  local folder="${1:-INBOX}"
+  echo "imaps://${MAIL_ACCT_IMAP_SERVER}:${MAIL_ACCT_IMAP_PORT}/${folder}"
+}
+
+# Build curl auth args
+_imap_auth_args() {
+  echo "--user" "${MAIL_ACCT_EMAIL}:${MAIL_ACCT_PASSWORD}"
+}
+
+# Test IMAP connection
+mail_imap_connect() {
+  mail_resolve_account || return 1
+  local url
+  url=$(_imap_url)
+  curl -s --url "$url" \
+    --user "${MAIL_ACCT_EMAIL}:${MAIL_ACCT_PASSWORD}" \
+    --request "NOOP" \
+    -o /dev/null -w "%{http_code}" 2>/dev/null
+  return $?
+}
+
+# List folders
+mail_imap_list_folders() {
+  mail_resolve_account || return 1
+  curl -s --url "imaps://${MAIL_ACCT_IMAP_SERVER}:${MAIL_ACCT_IMAP_PORT}/" \
+    --user "${MAIL_ACCT_EMAIL}:${MAIL_ACCT_PASSWORD}" \
+    --request 'LIST "" "*"' 2>/dev/null
+}
+
+# Search messages — returns space-separated UIDs
+mail_imap_search() {
+  local folder="${1:-INBOX}" criteria="${2:-ALL}"
+  mail_resolve_account || return 1
+
+  local url
+  url=$(_imap_url "$folder")
+  local result
+  result=$(curl -s --url "$url" \
+    --user "${MAIL_ACCT_EMAIL}:${MAIL_ACCT_PASSWORD}" \
+    --request "SEARCH ${criteria}" 2>/dev/null)
+
+  # Parse: "* SEARCH 1 2 3 4 5" → "1 2 3 4 5"
+  echo "$result" | grep -oE '\* SEARCH [0-9 ]+' | sed 's/\* SEARCH //'
+}
+
+# Fetch message headers for a UID
+mail_imap_fetch_headers() {
+  local folder="${1:-INBOX}" uid="$2"
+  mail_resolve_account || return 1
+
+  curl -s --url "imaps://${MAIL_ACCT_IMAP_SERVER}:${MAIL_ACCT_IMAP_PORT}/${folder};UID=${uid};SECTION=HEADER" \
+    --user "${MAIL_ACCT_EMAIL}:${MAIL_ACCT_PASSWORD}" 2>/dev/null
+}
+
+# Fetch full message for a UID
+mail_imap_fetch_body() {
+  local folder="${1:-INBOX}" uid="$2"
+  mail_resolve_account || return 1
+
+  curl -s --url "imaps://${MAIL_ACCT_IMAP_SERVER}:${MAIL_ACCT_IMAP_PORT}/${folder};UID=${uid}" \
+    --user "${MAIL_ACCT_EMAIL}:${MAIL_ACCT_PASSWORD}" 2>/dev/null
+}
+
+# Store flags on a message
+mail_imap_store_flags() {
+  local folder="${1:-INBOX}" uid="$2" flags="$3"
+  mail_resolve_account || return 1
+
+  curl -s --url "$(_imap_url "$folder")" \
+    --user "${MAIL_ACCT_EMAIL}:${MAIL_ACCT_PASSWORD}" \
+    --request "STORE ${uid} +FLAGS (${flags})" 2>/dev/null
+}
+
+# Remove flags from a message
+mail_imap_remove_flags() {
+  local folder="${1:-INBOX}" uid="$2" flags="$3"
+  mail_resolve_account || return 1
+
+  curl -s --url "$(_imap_url "$folder")" \
+    --user "${MAIL_ACCT_EMAIL}:${MAIL_ACCT_PASSWORD}" \
+    --request "STORE ${uid} -FLAGS (${flags})" 2>/dev/null
+}
+
+# Copy message to another folder
+mail_imap_copy() {
+  local folder="${1:-INBOX}" uid="$2" dest="$3"
+  mail_resolve_account || return 1
+
+  curl -s --url "$(_imap_url "$folder")" \
+    --user "${MAIL_ACCT_EMAIL}:${MAIL_ACCT_PASSWORD}" \
+    --request "COPY ${uid} ${dest}" 2>/dev/null
+}
+
+# Delete message (flag + expunge)
+mail_imap_delete() {
+  local folder="${1:-INBOX}" uid="$2"
+  mail_imap_store_flags "$folder" "$uid" "\\Deleted"
+  curl -s --url "$(_imap_url "$folder")" \
+    --user "${MAIL_ACCT_EMAIL}:${MAIL_ACCT_PASSWORD}" \
+    --request "EXPUNGE" 2>/dev/null
+}
+
+# Create a folder
+mail_imap_create_folder() {
+  local folder="$1"
+  mail_resolve_account || return 1
+
+  curl -s --url "imaps://${MAIL_ACCT_IMAP_SERVER}:${MAIL_ACCT_IMAP_PORT}/" \
+    --user "${MAIL_ACCT_EMAIL}:${MAIL_ACCT_PASSWORD}" \
+    --request "CREATE ${folder}" 2>/dev/null
+}
+
+# Append a message to a folder (for drafts)
+mail_imap_append() {
+  local folder="$1" message_file="$2"
+  mail_resolve_account || return 1
+
+  curl -s --url "imaps://${MAIL_ACCT_IMAP_SERVER}:${MAIL_ACCT_IMAP_PORT}/${folder}" \
+    --user "${MAIL_ACCT_EMAIL}:${MAIL_ACCT_PASSWORD}" \
+    --upload-file "$message_file" 2>/dev/null
+}

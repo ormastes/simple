@@ -1,0 +1,329 @@
+@allow(primitive_api)
+# Text Encoding Codec Registry
+#
+# Provides a unified interface for encoding/decoding text between different
+# character encodings. Supports:
+#   - UTF-8 (default internal encoding)
+#   - UTF-16LE, UTF-16BE
+#   - UTF-32LE, UTF-32BE
+#   - ASCII (7-bit)
+#   - Latin-1 / ISO-8859-1
+#
+# Usage:
+#     use std.common.encoding.codec.{encode, decode, transcode, Encoding}
+#
+#     val bytes = encode("Hello", Encoding.Utf16LE)
+#     val text = decode(bytes, Encoding.Utf16LE)
+#     val converted = transcode(bytes, Encoding.Utf16LE, Encoding.Utf8)
+
+use std.common.encoding.utf8.{
+    utf8_encode_one, utf8_decode_all, utf8_encode_all, utf8_is_valid
+}
+use std.common.encoding.utf16.{
+    utf16_encode_all, utf16_decode_all,
+    utf16_to_bytes_le, utf16_to_bytes_be,
+    utf16_from_bytes_le, utf16_from_bytes_be
+}
+use std.common.encoding.utf32.{
+    utf32_encode_all, utf32_decode_all,
+    utf32_to_bytes_le, utf32_to_bytes_be,
+    utf32_from_bytes_le, utf32_from_bytes_be
+}
+
+# ============================================================================
+# Encoding enum
+# ============================================================================
+
+enum Encoding:
+    Utf8
+    Utf16LE
+    Utf16BE
+    Utf32LE
+    Utf32BE
+    Ascii
+    Latin1
+
+fn encoding_name(enc: Encoding) -> text:
+    """Return the canonical name for an encoding."""
+    match enc:
+        Encoding.Utf8: "UTF-8"
+        Encoding.Utf16LE: "UTF-16LE"
+        Encoding.Utf16BE: "UTF-16BE"
+        Encoding.Utf32LE: "UTF-32LE"
+        Encoding.Utf32BE: "UTF-32BE"
+        Encoding.Ascii: "ASCII"
+        Encoding.Latin1: "ISO-8859-1"
+
+fn encoding_from_name(name: text) -> Encoding:
+    """Parse an encoding name (case-insensitive). Returns Utf8 for unknown."""
+    val lower = name.to_lower()
+    if lower == "utf-8" or lower == "utf8":
+        return Encoding.Utf8
+    if lower == "utf-16le" or lower == "utf16le":
+        return Encoding.Utf16LE
+    if lower == "utf-16be" or lower == "utf16be":
+        return Encoding.Utf16BE
+    if lower == "utf-32le" or lower == "utf32le":
+        return Encoding.Utf32LE
+    if lower == "utf-32be" or lower == "utf32be":
+        return Encoding.Utf32BE
+    if lower == "ascii" or lower == "us-ascii":
+        return Encoding.Ascii
+    if lower == "latin-1" or lower == "latin1" or lower == "iso-8859-1" or lower == "iso8859-1":
+        return Encoding.Latin1
+    Encoding.Utf8  # default
+
+# ============================================================================
+# Encode: text -> bytes in target encoding
+# ============================================================================
+
+fn encode(s: text, enc: Encoding) -> [i64]:
+    """Encode a text string to a byte array in the specified encoding."""
+    match enc:
+        Encoding.Utf8:
+            # text is already UTF-8 internally
+            s.bytes()
+        Encoding.Ascii:
+            encode_ascii(s)
+        Encoding.Latin1:
+            encode_latin1(s)
+        Encoding.Utf16LE:
+            val cps = text_to_codepoints(s)
+            val units = utf16_encode_all(cps)
+            utf16_to_bytes_le(units)
+        Encoding.Utf16BE:
+            val cps = text_to_codepoints(s)
+            val units = utf16_encode_all(cps)
+            utf16_to_bytes_be(units)
+        Encoding.Utf32LE:
+            val cps = text_to_codepoints(s)
+            utf32_to_bytes_le(cps)
+        Encoding.Utf32BE:
+            val cps = text_to_codepoints(s)
+            utf32_to_bytes_be(cps)
+
+# ============================================================================
+# Decode: bytes in source encoding -> text (UTF-8)
+# ============================================================================
+
+fn decode(bytes: [i64], enc: Encoding) -> text:
+    """Decode a byte array from the specified encoding to text (UTF-8)."""
+    match enc:
+        Encoding.Utf8:
+            bytes_to_text(bytes)
+        Encoding.Ascii:
+            decode_ascii(bytes)
+        Encoding.Latin1:
+            decode_latin1(bytes)
+        Encoding.Utf16LE:
+            val units = utf16_from_bytes_le(bytes)
+            val cps = utf16_decode_all(units)
+            codepoints_to_text(cps)
+        Encoding.Utf16BE:
+            val units = utf16_from_bytes_be(bytes)
+            val cps = utf16_decode_all(units)
+            codepoints_to_text(cps)
+        Encoding.Utf32LE:
+            val cps = utf32_from_bytes_le(bytes)
+            codepoints_to_text(cps)
+        Encoding.Utf32BE:
+            val cps = utf32_from_bytes_be(bytes)
+            codepoints_to_text(cps)
+
+# ============================================================================
+# Transcode: bytes in source encoding -> bytes in target encoding
+# ============================================================================
+
+fn transcode(bytes: [i64], from_enc: Encoding, to_enc: Encoding) -> [i64]:
+    """Convert byte array from one encoding to another.
+    Goes through codepoints as intermediate representation."""
+    if from_enc == to_enc:
+        return bytes
+
+    # Decode to codepoints
+    val cps = decode_to_codepoints(bytes, from_enc)
+    # Encode from codepoints
+    encode_from_codepoints(cps, to_enc)
+
+# ============================================================================
+# Internal helpers
+# ============================================================================
+
+fn decode_to_codepoints(bytes: [i64], enc: Encoding) -> [i64]:
+    """Decode bytes to codepoint array."""
+    match enc:
+        Encoding.Utf8:
+            utf8_decode_all(bytes)
+        Encoding.Ascii:
+            var cps: [i64] = []
+            var i: i64 = 0
+            while i < bytes.len():
+                val b = bytes[i] & 0x7F
+                cps.push(b)
+                i = i + 1
+            cps
+        Encoding.Latin1:
+            var cps: [i64] = []
+            var i: i64 = 0
+            while i < bytes.len():
+                cps.push(bytes[i] & 0xFF)
+                i = i + 1
+            cps
+        Encoding.Utf16LE:
+            val units = utf16_from_bytes_le(bytes)
+            utf16_decode_all(units)
+        Encoding.Utf16BE:
+            val units = utf16_from_bytes_be(bytes)
+            utf16_decode_all(units)
+        Encoding.Utf32LE:
+            utf32_from_bytes_le(bytes)
+        Encoding.Utf32BE:
+            utf32_from_bytes_be(bytes)
+
+fn encode_from_codepoints(cps: [i64], enc: Encoding) -> [i64]:
+    """Encode codepoint array to bytes in target encoding."""
+    match enc:
+        Encoding.Utf8:
+            utf8_encode_all(cps)
+        Encoding.Ascii:
+            var result: [i64] = []
+            var i: i64 = 0
+            while i < cps.len():
+                if cps[i] < 128:
+                    result.push(cps[i])
+                else:
+                    result.push(0x3F)  # '?' for non-ASCII
+                i = i + 1
+            result
+        Encoding.Latin1:
+            var result: [i64] = []
+            var i: i64 = 0
+            while i < cps.len():
+                if cps[i] < 256:
+                    result.push(cps[i])
+                else:
+                    result.push(0x3F)  # '?' for out of range
+                i = i + 1
+            result
+        Encoding.Utf16LE:
+            val units = utf16_encode_all(cps)
+            utf16_to_bytes_le(units)
+        Encoding.Utf16BE:
+            val units = utf16_encode_all(cps)
+            utf16_to_bytes_be(units)
+        Encoding.Utf32LE:
+            utf32_to_bytes_le(cps)
+        Encoding.Utf32BE:
+            utf32_to_bytes_be(cps)
+
+# ============================================================================
+# ASCII codec
+# ============================================================================
+
+fn encode_ascii(s: text) -> [i64]:
+    """Encode text to ASCII bytes. Non-ASCII chars become '?'."""
+    val bytes = s.bytes()
+    var result: [i64] = []
+    var i: i64 = 0
+    while i < bytes.len():
+        val b = bytes[i]
+        if b < 128:
+            result.push(b)
+        else:
+            result.push(0x3F)  # '?'
+        i = i + 1
+    result
+
+fn decode_ascii(bytes: [i64]) -> text:
+    """Decode ASCII bytes to text. Bytes > 127 become replacement char."""
+    var parts: [text] = []
+    var i: i64 = 0
+    while i < bytes.len():
+        val b = bytes[i] & 0xFF
+        if b < 128:
+            parts.push(char_from_code_fast(b))
+        else:
+            parts.push("?")
+        i = i + 1
+    parts.join("")
+
+# ============================================================================
+# Latin-1 / ISO-8859-1 codec
+# ============================================================================
+
+fn encode_latin1(s: text) -> [i64]:
+    """Encode text to Latin-1 bytes. Codepoints > 255 become '?'."""
+    val cps = text_to_codepoints(s)
+    var result: [i64] = []
+    var i: i64 = 0
+    while i < cps.len():
+        if cps[i] < 256:
+            result.push(cps[i])
+        else:
+            result.push(0x3F)
+        i = i + 1
+    result
+
+fn decode_latin1(bytes: [i64]) -> text:
+    """Decode Latin-1 bytes to text (UTF-8).
+    Latin-1 is a 1:1 mapping of byte values 0-255 to Unicode U+0000..U+00FF."""
+    var cps: [i64] = []
+    var i: i64 = 0
+    while i < bytes.len():
+        cps.push(bytes[i] & 0xFF)
+        i = i + 1
+    codepoints_to_text(cps)
+
+# ============================================================================
+# Text <-> codepoint helpers
+# ============================================================================
+
+fn text_to_codepoints(s: text) -> [i64]:
+    """Convert text to array of Unicode codepoints."""
+    val bytes = s.bytes()
+    utf8_decode_all(bytes)
+
+fn codepoints_to_text(cps: [i64]) -> text:
+    """Convert array of Unicode codepoints to text."""
+    var parts: [text] = []
+    var i: i64 = 0
+    while i < cps.len():
+        val cp = cps[i]
+        if cp >= 0 and cp < 128:
+            parts.push(char_from_code_fast(cp))
+        else:
+            # Encode codepoint as UTF-8 bytes and build string
+            val encoded = utf8_encode_one(cp)
+            var byte_parts: [text] = []
+            var j: i64 = 0
+            while j < encoded.len():
+                byte_parts.push(char_from_code_fast(encoded[j]))
+                j = j + 1
+            parts.push(byte_parts.join(""))
+        i = i + 1
+    parts.join("")
+
+fn bytes_to_text(bytes: [i64]) -> text:
+    """Convert UTF-8 byte array to text string."""
+    var parts: [text] = []
+    var i: i64 = 0
+    while i < bytes.len():
+        parts.push(char_from_code_fast(bytes[i] & 0xFF))
+        i = i + 1
+    parts.join("")
+
+fn char_from_code_fast(code: i64) -> text:
+    """Fast byte-to-char for 0-255 range. Uses lookup table for ASCII."""
+    val table = " !\"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`abcdefghijklmnopqrstuvwxyz{|}~"
+    if code >= 32 and code < 127:
+        return table[code - 32:code - 31]
+    if code == 10:
+        return "\n"
+    if code == 13:
+        return "\r"
+    if code == 9:
+        return "\t"
+    if code == 0:
+        return "\x00"
+    # For other values, use runtime built-in
+    "\uFFFD"

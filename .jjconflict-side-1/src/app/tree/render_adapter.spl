@@ -1,0 +1,286 @@
+#![allow(unnamed_duplicate_typed_args)]
+# Tree Render Adapter
+#
+# Bridges the tree (dependency tree) app to the shared ui.render contract.
+# Produces text (indented tree with box-drawing chars) and HTML
+# (collapsible tree with file type badges) via RenderResult.
+
+use app.ui.render.types.{RenderConfig, RenderResult}
+use app.ui.render.html.{html_page, html_card, html_badge, html_escape, css_dark_theme, css_light_theme, css_reset}
+use app.ui.render.ansi.{colorize, RESET, BOLD, DIM, GREEN, CYAN, YELLOW, WHITE, BRIGHT_BLACK}
+use app.ui.render.border.{draw_border, border_single, BorderStyle, LayoutRect}
+use app.ui.render.css.{card_css, badge_css}
+
+# =========================================================================
+# Render Adapter Entry Point
+# =========================================================================
+
+fn render_tree(config: RenderConfig) -> RenderResult:
+    """Render dependency tree via the shared render contract.
+
+    Dispatches to text or HTML rendering based on config.format.
+    Shows project dependency tree with box-drawing characters.
+    """
+    match config.format:
+        "html":
+            return render_tree_html(config)
+        "both":
+            return RenderResult.both(
+                render_tree_text(config).text_output,
+                render_tree_html(config).html_output
+            )
+        _:
+            return render_tree_text(config)
+
+# =========================================================================
+# Text Rendering
+# =========================================================================
+
+fn render_tree_text(config: RenderConfig) -> RenderResult:
+    """Render dependency tree as text with box-drawing characters.
+
+    Shows project root, direct deps, and transitive deps with
+    Unicode box-drawing connectors.
+    """
+    var lines: [text] = []
+
+    # Header
+    lines.push(colorize("Dependency Tree", BOLD))
+    lines.push("")
+
+    # Project root
+    lines.push(colorize("my-project", BOLD) + " " + colorize("v0.1.0", DIM))
+
+    # Direct dependencies with box-drawing connectors
+    lines.push(tree_node("std.json", "lib", false, 0))
+    lines.push(tree_node("std.http", "lib", false, 0))
+
+    # Transitive deps under std.http
+    lines.push(tree_node("std.net", "lib", false, 1))
+    lines.push(tree_node("std.crypto", "lib", true, 1))
+
+    lines.push(tree_node("std.fs", "lib", false, 0))
+    lines.push(tree_node("std.cli", "lib", false, 0))
+
+    # Transitive deps under std.cli
+    lines.push(tree_node("std.text", "lib", true, 1))
+
+    lines.push(tree_node("std.test", "dev", true, 0))
+
+    # Summary
+    lines.push("")
+    lines.push(colorize("5 dependencies", DIM) + " (4 normal, 1 dev)")
+
+    var result = RenderResult.text(join_lines(lines))
+    result.metadata = tree_metadata()
+    return result
+
+fn tree_node(name: text, kind: text, is_last: bool, depth: i64) -> text:
+    """Format a tree node with box-drawing characters.
+
+    Uses Unicode box-drawing: vertical line, tee, and corner.
+    """
+    var prefix = ""
+    var d = 0
+    while d < depth:
+        prefix = "{prefix}    "
+        d = d + 1
+
+    val connector = if is_last: "└── " else: "├── "
+
+    val kind_marker = if kind == "dev": colorize(" (dev)", YELLOW) else: ""
+    val status = colorize(" (*)", GREEN)
+
+    return "{prefix}{connector}{colorize(name, CYAN)}{status}{kind_marker}"
+
+# =========================================================================
+# HTML Rendering
+# =========================================================================
+
+fn render_tree_html(config: RenderConfig) -> RenderResult:
+    """Render dependency tree as a full HTML page with collapsible nodes."""
+    val theme_css = if config.theme == "light": css_light_theme() else: css_dark_theme()
+    val css = css_reset() + theme_css + card_css() + badge_css() + tree_css()
+    val body = tree_html_body()
+    val js = tree_js()
+    val page = html_page("Dependency Tree", css + "\n<script>\n" + js + "\n</script>", body)
+
+    var result = RenderResult.html(page)
+    result.metadata = tree_metadata()
+    return result
+
+fn tree_css() -> text:
+    """Tree-specific CSS styles."""
+    var s = ""
+    s = "{s}.tree-container {\n"
+    s = "{s}  max-width: 800px;\n"
+    s = "{s}  margin: 0 auto;\n"
+    s = "{s}}\n"
+    s = "{s}.tree-header {\n"
+    s = "{s}  margin-bottom: 20px;\n"
+    s = "{s}}\n"
+    s = "{s}.tree-header h1 {\n"
+    s = "{s}  font-size: 20px;\n"
+    s = "{s}  color: var(--blue, #58a6ff);\n"
+    s = "{s}}\n"
+    s = "{s}.tree-root {\n"
+    s = "{s}  font-size: 16px;\n"
+    s = "{s}  font-weight: bold;\n"
+    s = "{s}  margin-bottom: 8px;\n"
+    s = "{s}  color: var(--text, #c9d1d9);\n"
+    s = "{s}}\n"
+    s = "{s}.tree-root .version {\n"
+    s = "{s}  font-weight: normal;\n"
+    s = "{s}  color: var(--text-dim, #8b949e);\n"
+    s = "{s}  font-size: 13px;\n"
+    s = "{s}}\n"
+    s = "{s}.tree-list {\n"
+    s = "{s}  list-style: none;\n"
+    s = "{s}  padding-left: 20px;\n"
+    s = "{s}  margin: 0;\n"
+    s = "{s}}\n"
+    s = "{s}.tree-list.root {\n"
+    s = "{s}  padding-left: 0;\n"
+    s = "{s}}\n"
+    s = "{s}.tree-item {\n"
+    s = "{s}  padding: 4px 0;\n"
+    s = "{s}  font-size: 14px;\n"
+    s = "{s}  color: var(--text, #c9d1d9);\n"
+    s = "{s}  cursor: pointer;\n"
+    s = "{s}}\n"
+    s = "{s}.tree-item .toggle {\n"
+    s = "{s}  display: inline-block;\n"
+    s = "{s}  width: 16px;\n"
+    s = "{s}  color: var(--text-dim, #8b949e);\n"
+    s = "{s}}\n"
+    s = "{s}.tree-item .name {\n"
+    s = "{s}  color: var(--blue, #58a6ff);\n"
+    s = "{s}  font-family: monospace;\n"
+    s = "{s}}\n"
+    s = "{s}.tree-children {\n"
+    s = "{s}  border-left: 1px solid var(--border, #30363d);\n"
+    s = "{s}  margin-left: 8px;\n"
+    s = "{s}  padding-left: 12px;\n"
+    s = "{s}}\n"
+    s = "{s}.tree-children.collapsed {\n"
+    s = "{s}  display: none;\n"
+    s = "{s}}\n"
+    s = "{s}.tree-summary {\n"
+    s = "{s}  margin-top: 16px;\n"
+    s = "{s}  font-size: 13px;\n"
+    s = "{s}  color: var(--text-dim, #8b949e);\n"
+    s = "{s}}\n"
+    return s
+
+fn tree_html_body() -> text:
+    """Generate tree HTML body content."""
+    var h = ""
+    h = "{h}<div class=\"tree-container\">\n"
+
+    # Header
+    h = "{h}  <div class=\"tree-header\">\n"
+    h = "{h}    <h1>Dependency Tree</h1>\n"
+    h = "{h}  </div>\n"
+
+    # Project root
+    h = "{h}  <div class=\"tree-root\">my-project <span class=\"version\">v0.1.0</span></div>\n"
+
+    # Tree card
+    val tree_content = tree_nodes_html()
+    h = "{h}  {html_card("Dependencies", tree_content)}\n"
+
+    # Summary
+    h = "{h}  <div class=\"tree-summary\">5 dependencies (4 normal, 1 dev)</div>\n"
+
+    h = "{h}</div>\n"
+    return h
+
+fn tree_nodes_html() -> text:
+    """Generate the nested tree node HTML."""
+    var h = ""
+    h = "{h}<ul class=\"tree-list root\">\n"
+
+    # std.json (leaf)
+    h = "{h}  <li class=\"tree-item\">\n"
+    h = "{h}    <span class=\"toggle\">&bull;</span>\n"
+    h = "{h}    <span class=\"name\">std.json</span> {html_badge("lib", "#3fb950")}\n"
+    h = "{h}  </li>\n"
+
+    # std.http (has children)
+    h = "{h}  <li class=\"tree-item\" onclick=\"toggleChildren(this)\">\n"
+    h = "{h}    <span class=\"toggle\">&#9660;</span>\n"
+    h = "{h}    <span class=\"name\">std.http</span> {html_badge("lib", "#3fb950")}\n"
+    h = "{h}    <div class=\"tree-children\">\n"
+    h = "{h}      <ul class=\"tree-list\">\n"
+    h = "{h}        <li class=\"tree-item\"><span class=\"toggle\">&bull;</span> <span class=\"name\">std.net</span> {html_badge("lib", "#3fb950")}</li>\n"
+    h = "{h}        <li class=\"tree-item\"><span class=\"toggle\">&bull;</span> <span class=\"name\">std.crypto</span> {html_badge("lib", "#3fb950")}</li>\n"
+    h = "{h}      </ul>\n"
+    h = "{h}    </div>\n"
+    h = "{h}  </li>\n"
+
+    # std.fs (leaf)
+    h = "{h}  <li class=\"tree-item\">\n"
+    h = "{h}    <span class=\"toggle\">&bull;</span>\n"
+    h = "{h}    <span class=\"name\">std.fs</span> {html_badge("lib", "#3fb950")}\n"
+    h = "{h}  </li>\n"
+
+    # std.cli (has children)
+    h = "{h}  <li class=\"tree-item\" onclick=\"toggleChildren(this)\">\n"
+    h = "{h}    <span class=\"toggle\">&#9660;</span>\n"
+    h = "{h}    <span class=\"name\">std.cli</span> {html_badge("lib", "#3fb950")}\n"
+    h = "{h}    <div class=\"tree-children\">\n"
+    h = "{h}      <ul class=\"tree-list\">\n"
+    h = "{h}        <li class=\"tree-item\"><span class=\"toggle\">&bull;</span> <span class=\"name\">std.text</span> {html_badge("lib", "#3fb950")}</li>\n"
+    h = "{h}      </ul>\n"
+    h = "{h}    </div>\n"
+    h = "{h}  </li>\n"
+
+    # std.test (dev)
+    h = "{h}  <li class=\"tree-item\">\n"
+    h = "{h}    <span class=\"toggle\">&bull;</span>\n"
+    h = "{h}    <span class=\"name\">std.test</span> {html_badge("dev", "#d29922")}\n"
+    h = "{h}  </li>\n"
+
+    h = "{h}</ul>\n"
+    return h
+
+fn tree_js() -> text:
+    """JavaScript for collapsible tree nodes."""
+    var s = ""
+    s = "{s}function toggleChildren(el) {\n"
+    s = "{s}  var children = el.querySelector('.tree-children');\n"
+    s = "{s}  var toggle = el.querySelector('.toggle');\n"
+    s = "{s}  if (children) {\n"
+    s = "{s}    if (children.classList.contains('collapsed')) {\n"
+    s = "{s}      children.classList.remove('collapsed');\n"
+    s = "{s}      toggle.innerHTML = '&#9660;';\n"
+    s = "{s}    } else {\n"
+    s = "{s}      children.classList.add('collapsed');\n"
+    s = "{s}      toggle.innerHTML = '&#9654;';\n"
+    s = "{s}    }\n"
+    s = "{s}  }\n"
+    s = "{s}}\n"
+    return s
+
+# =========================================================================
+# Helpers
+# =========================================================================
+
+fn join_lines(lines: [text]) -> text:
+    """Join lines with newline separator."""
+    var result = ""
+    var first = true
+    for line in lines:
+        if not first:
+            result = "{result}\n"
+        result = "{result}{line}"
+        first = false
+    return result
+
+fn tree_metadata() -> Dict<text, text>:
+    """Build metadata for tree render results."""
+    var meta: Dict<text, text> = {}
+    meta["adapter"] = "tree"
+    meta["dep_count"] = "5"
+    meta["dev_count"] = "1"
+    return meta

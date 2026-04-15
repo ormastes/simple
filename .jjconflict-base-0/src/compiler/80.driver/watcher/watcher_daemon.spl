@@ -1,0 +1,174 @@
+# Watcher Daemon — Background thread poll loop + request processing
+#
+# Uses DaemonRunner from daemon_sdk for request processing,
+# keeps domain-specific file change detection and SHB/SMF generation.
+
+
+use compiler.driver.watcher.watcher_types.{
+    WatcherConfig, WatcherState, WatcherRequest, WatcherRequestKind,
+    watcher_config_default, watcher_state_new,
+    watcher_config_to_daemon, daemon_request_to_watcher,
+    WATCHER_STATE_IDLE, WATCHER_STATE_POLLING, WATCHER_STATE_PROCESSING, WATCHER_STATE_SHUTTING_DOWN
+}
+use compiler.driver.watcher.watcher_lock.{
+    try_acquire_watcher_lock, release_watcher_lock, is_watcher_running
+}
+use compiler.driver.cache.cache_types.{
+    CacheCheckResult, CACHE_FRESH, CACHE_STALE, CACHE_MISSING, CACHE_ERROR,
+    cache_check_result_fresh, cache_check_result_error
+}
+use compiler.shb.shb_cache.{
+    ShbCacheManager, ShbCacheConfig, ShbChangeEvent,
+    compile_changed_to_shb, shb_batch_summary
+}
+use app.build.watch.{
+    FileSnapshot, FileChangeEvent,
+    build_file_snapshot, detect_changes
+}
+use std.daemon_sdk.daemon.{DaemonRunner, daemon_runner_start}
+use std.daemon_sdk.types.{DaemonConfig, DaemonRequest, DaemonResponse, daemon_response_new}
+
+extern fn rt_time_now_unix_micros() -> i64
+extern fn rt_mkdir_p(path: text) -> bool
+
+# ============================================================================
+# Watcher Daemon
+# ============================================================================
+
+class WatcherDaemon:
+    config: WatcherConfig
+    state: WatcherState
+    runner: DaemonRunner
+    shb_cache: ShbCacheManager
+    file_snapshot: FileSnapshot
+    lock_pid: i64
+    running: bool
+
+impl WatcherDaemon:
+    fn is_running() -> bool:
+        self.running
+
+    fn get_state() -> WatcherState:
+        self.state
+
+    # --- Poll cycle: file change detection + request dispatch ---
+
+    me run_poll_cycle():
+        if not self.running:
+            return
+
+        self.state.status = WATCHER_STATE_POLLING
+        self.state.last_poll_time = rt_time_now_unix_micros()
+
+        # Domain-specific: detect file changes
+        val current_snapshot = build_file_snapshot(["src/"], ["target/", ".git/", "*.swp", "*.tmp"])
+        val changes = detect_changes(self.file_snapshot, current_snapshot)
+
+        if changes.len() > 0:
+            self.state.status = WATCHER_STATE_PROCESSING
+            self.process_file_changes(changes)
+            self.file_snapshot = current_snapshot
+
+        # Delegate request processing to DaemonRunner
+        self.runner.run_poll_cycle(self.handle_daemon_request)
+
+        self.state.cycle_count = self.state.cycle_count + 1
+        self.state.status = WATCHER_STATE_IDLE
+
+    # --- Handle a single daemon request ---
+
+    fn handle_daemon_request(req: DaemonRequest) -> DaemonResponse:
+        val wr = daemon_request_to_watcher(req)
+        match wr.kind:
+            case WatcherRequestKind.Shb:
+                self.generate_shb(wr.source_path)
+            case WatcherRequestKind.Smf:
+                self.generate_smf(wr.source_path, wr.options_hash)
+            case WatcherRequestKind.Both:
+                self.generate_shb(wr.source_path)
+                self.generate_smf(wr.source_path, wr.options_hash)
+            case _:
+                pass_dn
+
+        self.state.files_processed = self.state.files_processed + 1
+        var resp = daemon_response_new(req.id, 0)
+        resp.fields["source_path"] = wr.source_path
+        resp
+
+    # --- Process file changes ---
+
+    me process_file_changes(changes: [FileChangeEvent]):
+        var shb_changes: [ShbChangeEvent] = []
+        var spl_paths: [text] = []
+        var i = 0
+        while i < changes.len():
+            val change = changes[i]
+            if change.path.ends_with(".spl"):
+                shb_changes.push(ShbChangeEvent(path: change.path, event_type: change.event_type))
+                if change.event_type != "deleted":
+                    spl_paths.push(change.path)
+            i = i + 1
+
+        if shb_changes.len() > 0:
+            # Step 1: Generate SHB headers (interface tracking)
+            val result = compile_changed_to_shb(shb_changes, self.shb_cache)
+            self.state.files_processed = self.state.files_processed + shb_changes.len()
+
+            # Step 2: Compile changed files to SMF (daemon mode: always do both)
+            for path in spl_paths:
+                self.generate_smf(path, 0)
+
+    # --- Generate artifacts ---
+
+    me generate_shb(source_path: text) -> CacheCheckResult:
+        val result = self.shb_cache.process_file(source_path)
+        if result.status < 0:
+            self.state.errors_count = self.state.errors_count + 1
+            return cache_check_result_error("SHB generation failed for {source_path}")
+        cache_check_result_fresh(result.interface_hash)
+
+    me generate_smf(source_path: text, options_hash: i64) -> CacheCheckResult:
+        use driver.{compile_to_smf}
+        use compiler.driver.cache.cache_validator.{source_to_cache_path}
+
+        val smf_path = source_to_cache_path(source_path, self.config.smf_dir, ".smf")
+        val result = compile_to_smf(source_path, smf_path)
+        if result.is_err():
+            self.state.errors_count = self.state.errors_count + 1
+            return cache_check_result_error("SMF generation failed for {source_path}: {result.unwrap_err()}")
+        cache_check_result_fresh(0)
+
+    me shutdown():
+        self.running = false
+        self.state.status = WATCHER_STATE_SHUTTING_DOWN
+        self.runner.shutdown()
+
+# ============================================================================
+# Factory Functions
+# ============================================================================
+
+fn watcher_daemon_start(config: WatcherConfig) -> WatcherDaemon:
+    rt_mkdir_p(config.shb_dir)
+    rt_mkdir_p(config.smf_dir)
+    rt_mkdir_p(config.request_dir)
+
+    val daemon_config = watcher_config_to_daemon(config)
+    val runner = daemon_runner_start(daemon_config)
+
+    val shb_config = ShbCacheConfig(cache_dir: config.shb_dir, enabled: true)
+    val shb_cache = ShbCacheManager.create(shb_config)
+
+    val snapshot = build_file_snapshot(["src/"], ["target/", ".git/", "*.swp", "*.tmp"])
+
+    WatcherDaemon(
+        config: config,
+        state: watcher_state_new(),
+        runner: runner,
+        shb_cache: shb_cache,
+        file_snapshot: snapshot,
+        lock_pid: runner.lock_pid,
+        running: runner.is_running()
+    )
+
+fn watcher_daemon_shutdown(daemon: WatcherDaemon):
+    daemon.shutdown()

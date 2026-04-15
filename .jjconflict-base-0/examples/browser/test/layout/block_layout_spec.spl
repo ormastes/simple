@@ -1,0 +1,204 @@
+"""
+# Block Layout
+
+Tests for block layout functionality.
+"""
+#![allow(unnamed_duplicate_typed_args)]
+use std.spec
+
+# Helper: create a block LayoutBox with given dimensions
+fn make_block(id: i64, x: f64, y: f64, w: f64, h: f64) -> LayoutBox:
+    var box = LayoutBox.create(id, BoxKind.Block)
+    box.x = x
+    box.y = y
+    box.width = w
+    box.height = h
+    box
+
+fn make_block_with_box_model(id: i64, w: f64, h: f64, model: BoxModel) -> LayoutBox:
+    var box = LayoutBox.create(id, BoxKind.Block)
+    box.width = w
+    box.height = h
+    box.box_model = model
+    box
+
+# Simulate block layout: stack children vertically within a container
+fn layout_block_children(parent: LayoutBox) -> LayoutBox:
+    var cursor_y = parent.y + parent.box_model.padding_top + parent.box_model.border_top
+    var content_width = parent.width - parent.box_model.padding_left - parent.box_model.padding_right - parent.box_model.border_left - parent.box_model.border_right
+    var new_children = [LayoutBox]()
+    for child in parent.children:
+        var laid = child
+        laid.x = parent.x + parent.box_model.padding_left + parent.box_model.border_left + child.box_model.margin_left
+        laid.y = cursor_y + child.box_model.margin_top
+        # child fills container width minus its own horizontal margins
+        if laid.width == 0.0:
+            laid.width = content_width - child.box_model.margin_left - child.box_model.margin_right
+        cursor_y = laid.y + laid.height + child.box_model.margin_bottom
+        new_children.push(laid)
+    var result = parent
+    result.children = new_children
+    # auto height: sum of children
+    if result.height == 0.0:
+        result.height = cursor_y - parent.y + parent.box_model.padding_bottom + parent.box_model.border_bottom
+    result
+
+# Collapse two vertical margins: the larger wins
+fn collapse_margins(m1: f64, m2: f64) -> f64:
+    if m1 > m2:
+        m1
+    else:
+        m2
+
+# Resolve percentage width against a parent width
+fn resolve_percentage_width(pct: f64, parent_width: f64) -> f64:
+    pct / 100.0 * parent_width
+
+# Clamp a value between min and max
+fn clamp(value: f64, min_val: f64, max_val: f64) -> f64:
+    if value < min_val:
+        min_val
+    else:
+        if value > max_val:
+            max_val
+        else:
+            value
+
+describe "BlockLayout":
+    """
+    ## Blocklayout Tests
+
+    Validates BlockLayout functionality.
+    """
+
+    describe "vertical stacking":
+        it "stacks children vertically":
+            var parent = make_block(0, 0.0, 0.0, 400.0, 0.0)
+            var child1 = make_block(1, 0.0, 0.0, 0.0, 50.0)
+            var child2 = make_block(2, 0.0, 0.0, 0.0, 30.0)
+            parent.children = [child1, child2]
+            var result = layout_block_children(parent)
+            expect(result.children[0].y).to_equal(0.0)
+            expect(result.children[1].y).to_equal(50.0)
+
+        it "child width fills container":
+            var parent = make_block(0, 0.0, 0.0, 400.0, 0.0)
+            var child = make_block(1, 0.0, 0.0, 0.0, 50.0)
+            parent.children = [child]
+            var result = layout_block_children(parent)
+            expect(result.children[0].width).to_equal(400.0)
+
+        it "respects explicit width":
+            var parent = make_block(0, 0.0, 0.0, 400.0, 0.0)
+            var child = make_block(1, 0.0, 0.0, 200.0, 50.0)
+            parent.children = [child]
+            var result = layout_block_children(parent)
+            expect(result.children[0].width).to_equal(200.0)
+
+    describe "auto margins":
+        it "auto margins center horizontally":
+            # Simulate auto margins: equal left and right margins
+            var container_width = 400.0
+            var child_width = 200.0
+            var auto_margin = (container_width - child_width) / 2.0
+            expect(auto_margin).to_equal(100.0)
+
+    describe "height computation":
+        it "auto height equals sum of children":
+            var parent = make_block(0, 0.0, 0.0, 400.0, 0.0)
+            var child1 = make_block(1, 0.0, 0.0, 0.0, 50.0)
+            var child2 = make_block(2, 0.0, 0.0, 0.0, 30.0)
+            parent.children = [child1, child2]
+            var result = layout_block_children(parent)
+            expect(result.height).to_equal(80.0)
+
+        it "respects explicit height":
+            var parent = make_block(0, 0.0, 0.0, 400.0, 300.0)
+            var child = make_block(1, 0.0, 0.0, 0.0, 50.0)
+            parent.children = [child]
+            var result = layout_block_children(parent)
+            expect(result.height).to_equal(300.0)
+
+    describe "box model":
+        it "applies padding to content area":
+            var model = BoxModel.zero()
+            model.padding_top = 10.0
+            model.padding_bottom = 10.0
+            model.padding_left = 20.0
+            model.padding_right = 20.0
+            var parent = make_block_with_box_model(0, 400.0, 0.0, model)
+            var child = make_block(1, 0.0, 0.0, 0.0, 50.0)
+            parent.children = [child]
+            var result = layout_block_children(parent)
+            # child width = 400 - 20 - 20 = 360
+            expect(result.children[0].width).to_equal(360.0)
+            # child y starts after padding_top
+            expect(result.children[0].y).to_equal(10.0)
+
+        it "applies border widths":
+            var model = BoxModel.zero()
+            model.border_top = 2.0
+            model.border_bottom = 2.0
+            model.border_left = 2.0
+            model.border_right = 2.0
+            var parent = make_block_with_box_model(0, 400.0, 0.0, model)
+            var child = make_block(1, 0.0, 0.0, 0.0, 50.0)
+            parent.children = [child]
+            var result = layout_block_children(parent)
+            # child width = 400 - 2 - 2 = 396
+            expect(result.children[0].width).to_equal(396.0)
+            # child y starts after border_top
+            expect(result.children[0].y).to_equal(2.0)
+
+    describe "margin collapsing":
+        it "margin collapsing takes larger margin":
+            var collapsed = collapse_margins(20.0, 15.0)
+            expect(collapsed).to_equal(20.0)
+
+        it "negative margin allows overlap":
+            var parent = make_block(0, 0.0, 0.0, 400.0, 0.0)
+            var child1 = make_block(1, 0.0, 0.0, 0.0, 50.0)
+            var child2 = make_block(2, 0.0, 0.0, 0.0, 30.0)
+            child2.box_model.margin_top = -10.0
+            parent.children = [child1, child2]
+            var result = layout_block_children(parent)
+            # child2.y = 50 + (-10) = 40, overlapping child1
+            expect(result.children[1].y).to_equal(40.0)
+
+    describe "min/max height":
+        it "min-height constrains minimum":
+            var auto_height = 30.0
+            var min_height = 100.0
+            var final_height = clamp(auto_height, min_height, 99999.0)
+            expect(final_height).to_equal(100.0)
+
+        it "max-height constrains maximum":
+            var auto_height = 500.0
+            var max_height = 200.0
+            var final_height = clamp(auto_height, 0.0, max_height)
+            expect(final_height).to_equal(200.0)
+
+    describe "nesting and special cases":
+        it "nested blocks layout recursively":
+            var root = make_block(0, 0.0, 0.0, 400.0, 0.0)
+            var mid = make_block(1, 0.0, 0.0, 0.0, 0.0)
+            var leaf = make_block(2, 0.0, 0.0, 0.0, 40.0)
+            mid.children = [leaf]
+            var laid_mid = layout_block_children(mid)
+            root.children = [laid_mid]
+            var result = layout_block_children(root)
+            expect(result.children[0].width).to_equal(400.0)
+            expect(result.children[0].height).to_equal(40.0)
+
+        it "anonymous block wraps inline children":
+            # An anonymous block created to wrap inline content
+            var anon = LayoutBox.create(0, BoxKind.Block)
+            anon.width = 400.0
+            anon.height = 20.0
+            expect(anon.kind).to_equal(BoxKind.Block)
+            expect(anon.width).to_equal(400.0)
+
+        it "percentage width resolves against parent":
+            var parent_width = 800.0
+            var child_width = resolve_percentage_width(50.0, parent_width)
+            expect(child_width).to_equal(400.0)

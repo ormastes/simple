@@ -1,0 +1,493 @@
+# TreeWalker and NodeIterator APIs for traversing the DOM tree.
+# TreeWalker provides directional navigation (parent, child, sibling, next, previous).
+# NodeIterator provides flat sequential traversal in document order.
+# Both support filtering by node type via WhatToShow.
+#
+# Depends on:
+#   entity/dom/node_types.spl   — DomNode, NodeKind
+
+# --- Filter result ---
+
+enum NodeFilter:
+    Accept
+    Reject
+    Skip
+
+# --- What to show filter ---
+
+enum WhatToShow:
+    All
+    Element
+    Text
+    Comment
+    Document
+
+# --- TreeWalker ---
+
+class TreeWalker:
+    root_id: i64
+    what_to_show: WhatToShow
+    current_id: i64
+    doc_nodes: [DomNode]
+
+    static fn new(root_id: i64, what_to_show: WhatToShow, doc_nodes: [DomNode]) -> TreeWalker:
+        TreeWalker(
+            root_id: root_id,
+            what_to_show: what_to_show,
+            current_id: root_id,
+            doc_nodes: doc_nodes
+        )
+
+    # Get the current node ID.
+    fn current() -> i64:
+        self.current_id
+
+    # Move to the parent node. Returns the new current node or nil if at root.
+    me parentNode() -> i64?:
+        var node_id = self.current_id
+        while true:
+            if node_id == self.root_id:
+                return nil
+
+            val parent = get_parent_node(node_id, self.doc_nodes)
+            match parent:
+                Some(pid):
+                    val result = filter_node(pid, self.what_to_show, self.doc_nodes)
+                    match result:
+                        NodeFilter.Accept:
+                            self.current_id = pid
+                            return pid
+                        _:
+                            # Even if filtered, parent navigation continues up
+                            if pid == self.root_id:
+                                return nil
+                            node_id = pid
+                nil:
+                    return nil
+        nil
+
+    # Move to the first child. Returns the new current node or nil if no children.
+    me firstChild() -> i64?:
+        self.traverse_children(true)
+
+    # Move to the last child. Returns the new current node or nil if no children.
+    me lastChild() -> i64?:
+        self.traverse_children(false)
+
+    # Move to the previous sibling. Returns the new current node or nil.
+    me previousSibling() -> i64?:
+        self.traverse_siblings(false)
+
+    # Move to the next sibling. Returns the new current node or nil.
+    me nextSibling() -> i64?:
+        self.traverse_siblings(true)
+
+    # Move to the next node in document order. Returns the new current or nil.
+    me nextNode() -> i64?:
+        var node_id = self.current_id
+
+        # First try children (depth-first)
+        val first = self.get_first_child_of(node_id)
+        match first:
+            Some(child_id):
+                val result = filter_node(child_id, self.what_to_show, self.doc_nodes)
+                match result:
+                    NodeFilter.Accept:
+                        self.current_id = child_id
+                        return child_id
+                    NodeFilter.Skip:
+                        # Skip this node but visit its children
+                        node_id = child_id
+                    NodeFilter.Reject:
+                        # Reject this node and all descendants — try next sibling
+                        pass_dn
+            nil:
+                pass_dn
+
+        # Try document_order_next repeatedly until we find an accepted node
+        var candidate = document_order_next(node_id, self.root_id, self.doc_nodes)
+        while true:
+            match candidate:
+                Some(cid):
+                    val result = filter_node(cid, self.what_to_show, self.doc_nodes)
+                    match result:
+                        NodeFilter.Accept:
+                            self.current_id = cid
+                            return cid
+                        NodeFilter.Skip:
+                            candidate = document_order_next(cid, self.root_id, self.doc_nodes)
+                        NodeFilter.Reject:
+                            candidate = document_order_next(cid, self.root_id, self.doc_nodes)
+                nil:
+                    return nil
+        nil
+
+    # Move to the previous node in document order. Returns the new current or nil.
+    me previousNode() -> i64?:
+        var node_id = self.current_id
+
+        if node_id == self.root_id:
+            return nil
+
+        var candidate = document_order_prev(node_id, self.root_id, self.doc_nodes)
+        while true:
+            match candidate:
+                Some(cid):
+                    if cid == self.root_id:
+                        return nil
+                    val result = filter_node(cid, self.what_to_show, self.doc_nodes)
+                    match result:
+                        NodeFilter.Accept:
+                            self.current_id = cid
+                            return cid
+                        NodeFilter.Skip:
+                            candidate = document_order_prev(cid, self.root_id, self.doc_nodes)
+                        NodeFilter.Reject:
+                            candidate = document_order_prev(cid, self.root_id, self.doc_nodes)
+                nil:
+                    return nil
+        nil
+
+    # --- Internal helpers ---
+
+    # Traverse to first or last child that passes the filter.
+    me traverse_children(first: bool) -> i64?:
+        val children = get_children_of(self.current_id, self.doc_nodes)
+        if children.len() == 0:
+            return nil
+
+        var i = 0
+        if !first:
+            i = children.len() - 1
+
+        while true:
+            if first and i >= children.len():
+                return nil
+            if !first and i < 0:
+                return nil
+
+            val child_id = children.get(i)
+            val result = filter_node(child_id, self.what_to_show, self.doc_nodes)
+            match result:
+                NodeFilter.Accept:
+                    self.current_id = child_id
+                    return child_id
+                NodeFilter.Skip:
+                    # Skip this node but try its children
+                    val grandchildren = get_children_of(child_id, self.doc_nodes)
+                    if grandchildren.len() > 0:
+                        val gc_id = if first: grandchildren.get(0) else: grandchildren.get(grandchildren.len() - 1)
+                        val gc_result = filter_node(gc_id, self.what_to_show, self.doc_nodes)
+                        match gc_result:
+                            NodeFilter.Accept:
+                                self.current_id = gc_id
+                                return gc_id
+                            _:
+                                pass_dn
+                NodeFilter.Reject:
+                    pass_dn  # Reject: skip this node and all its descendants
+
+            if first:
+                i = i + 1
+            else:
+                i = i - 1
+
+        nil
+
+    # Traverse to previous or next sibling that passes the filter.
+    me traverse_siblings(forward: bool) -> i64?:
+        var node_id = self.current_id
+        if node_id == self.root_id:
+            return nil
+
+        val siblings = get_siblings_of(node_id, self.doc_nodes)
+        val idx = index_in_list(node_id, siblings)
+
+        var i = if forward: idx + 1 else: idx - 1
+
+        while true:
+            if forward and i >= siblings.len():
+                return nil
+            if !forward and i < 0:
+                return nil
+
+            val sib_id = siblings.get(i)
+            val result = filter_node(sib_id, self.what_to_show, self.doc_nodes)
+            match result:
+                NodeFilter.Accept:
+                    self.current_id = sib_id
+                    return sib_id
+                NodeFilter.Skip:
+                    pass_dn  # Continue to next sibling
+                NodeFilter.Reject:
+                    pass_dn  # Continue to next sibling
+
+            if forward:
+                i = i + 1
+            else:
+                i = i - 1
+
+        nil
+
+    # Get first child of a node.
+    fn get_first_child_of(node_id: i64) -> i64?:
+        val children = get_children_of(node_id, self.doc_nodes)
+        if children.len() > 0:
+            return children.get(0)
+        nil
+
+# --- NodeIterator ---
+
+class NodeIterator:
+    root_id: i64
+    what_to_show: WhatToShow
+    reference_id: i64
+    pointer_before: bool
+    doc_nodes: [DomNode]
+
+    static fn new(root_id: i64, what_to_show: WhatToShow, doc_nodes: [DomNode]) -> NodeIterator:
+        NodeIterator(
+            root_id: root_id,
+            what_to_show: what_to_show,
+            reference_id: root_id,
+            pointer_before: true,
+            doc_nodes: doc_nodes
+        )
+
+    # Advance to the next matching node in document order.
+    me nextNode() -> i64?:
+        var candidate_id = self.reference_id
+
+        # If pointer is before reference, the reference itself is a candidate
+        if self.pointer_before:
+            val result = filter_node(candidate_id, self.what_to_show, self.doc_nodes)
+            self.pointer_before = false
+            match result:
+                NodeFilter.Accept:
+                    return candidate_id
+                _:
+                    pass_dn
+
+        # Walk forward in document order
+        var next = document_order_next(candidate_id, self.root_id, self.doc_nodes)
+        while true:
+            match next:
+                Some(nid):
+                    self.reference_id = nid
+                    val result = filter_node(nid, self.what_to_show, self.doc_nodes)
+                    match result:
+                        NodeFilter.Accept:
+                            return nid
+                        _:
+                            next = document_order_next(nid, self.root_id, self.doc_nodes)
+                nil:
+                    return nil
+        nil
+
+    # Go back to the previous matching node in document order.
+    me previousNode() -> i64?:
+        var candidate_id = self.reference_id
+
+        # If pointer is after reference, the reference itself is a candidate
+        if !self.pointer_before:
+            val result = filter_node(candidate_id, self.what_to_show, self.doc_nodes)
+            self.pointer_before = true
+            match result:
+                NodeFilter.Accept:
+                    return candidate_id
+                _:
+                    pass_dn
+
+        # Walk backward in document order
+        var prev = document_order_prev(candidate_id, self.root_id, self.doc_nodes)
+        while true:
+            match prev:
+                Some(pid):
+                    self.reference_id = pid
+                    self.pointer_before = true
+                    val result = filter_node(pid, self.what_to_show, self.doc_nodes)
+                    match result:
+                        NodeFilter.Accept:
+                            return pid
+                        _:
+                            prev = document_order_prev(pid, self.root_id, self.doc_nodes)
+                nil:
+                    return nil
+        nil
+
+# --- Shared helpers ---
+
+# Filter a node based on WhatToShow criteria.
+fn filter_node(node_id: i64, what_to_show: WhatToShow, doc_nodes: [DomNode]) -> NodeFilter:
+    match what_to_show:
+        WhatToShow.All:
+            return NodeFilter.Accept
+        _:
+            pass_dn
+
+    # Find the node to check its kind
+    var i = 0
+    while i < doc_nodes.len():
+        val node = doc_nodes.get(i)
+        if node.id == node_id:
+            val kind_matches = match what_to_show:
+                WhatToShow.Element:
+                    node.kind == NodeKind.Element
+                WhatToShow.Text:
+                    node.kind == NodeKind.Text
+                WhatToShow.Comment:
+                    node.kind == NodeKind.Comment
+                WhatToShow.Document:
+                    node.kind == NodeKind.Document
+                WhatToShow.All:
+                    true
+
+            if kind_matches:
+                return NodeFilter.Accept
+            else:
+                return NodeFilter.Skip
+        i = i + 1
+
+    # Node not found
+    NodeFilter.Reject
+
+# Check if a node is an inclusive descendant of root.
+fn is_inclusive_descendant(node_id: i64, root_id: i64, doc_nodes: [DomNode]) -> bool:
+    if node_id == root_id:
+        return true
+
+    var current = node_id
+    var searching = true
+    while searching:
+        searching = false
+        var i = 0
+        while i < doc_nodes.len():
+            val node = doc_nodes.get(i)
+            if node.id == current:
+                if node.parent_id == root_id:
+                    return true
+                if node.parent_id >= 0 and node.parent_id != current:
+                    current = node.parent_id
+                    searching = true
+                i = doc_nodes.len()  # break
+            i = i + 1
+
+    false
+
+# Get the next node in document order (depth-first pre-order).
+# Returns nil when there is no next node within the root's subtree.
+fn document_order_next(node_id: i64, root_id: i64, doc_nodes: [DomNode]) -> i64?:
+    # First try first child
+    val children = get_children_of(node_id, doc_nodes)
+    if children.len() > 0:
+        return children.get(0)
+
+    # Then try next sibling, walking up ancestors
+    var current = node_id
+    while current != root_id:
+        val sibling = get_next_sibling(current, doc_nodes)
+        match sibling:
+            Some(sid):
+                return sid
+            nil:
+                # Go up to parent
+                val parent = get_parent_node(current, doc_nodes)
+                match parent:
+                    Some(pid):
+                        if pid == root_id:
+                            # Check if root has a next sibling for current
+                            val root_sibling = get_next_sibling(current, doc_nodes)
+                            match root_sibling:
+                                Some(rs): return rs
+                                nil: return nil
+                        current = pid
+                    nil:
+                        return nil
+
+    nil
+
+# Get the previous node in document order (depth-first pre-order reverse).
+fn document_order_prev(node_id: i64, root_id: i64, doc_nodes: [DomNode]) -> i64?:
+    if node_id == root_id:
+        return nil
+
+    # Try previous sibling's deepest last descendant
+    val prev_sib = get_prev_sibling(node_id, doc_nodes)
+    match prev_sib:
+        Some(sid):
+            # Go to the deepest last child of the previous sibling
+            return deepest_last_child(sid, doc_nodes)
+        nil:
+            # No previous sibling — go to parent
+            val parent = get_parent_node(node_id, doc_nodes)
+            match parent:
+                Some(pid): return pid
+                nil: return nil
+
+# Get the deepest last child starting from a node (for reverse traversal).
+fn deepest_last_child(node_id: i64, doc_nodes: [DomNode]) -> i64:
+    var current = node_id
+    while true:
+        val children = get_children_of(current, doc_nodes)
+        if children.len() == 0:
+            return current
+        current = children.get(children.len() - 1)
+    current
+
+# --- Node lookup helpers ---
+
+# Get parent node ID.
+fn get_parent_node(node_id: i64, doc_nodes: [DomNode]) -> i64?:
+    var i = 0
+    while i < doc_nodes.len():
+        val node = doc_nodes.get(i)
+        if node.id == node_id:
+            if node.parent_id >= 0 and node.parent_id != node_id:
+                return node.parent_id
+            return nil
+        i = i + 1
+    nil
+
+# Get children of a node.
+fn get_children_of(node_id: i64, doc_nodes: [DomNode]) -> [i64]:
+    var i = 0
+    while i < doc_nodes.len():
+        val node = doc_nodes.get(i)
+        if node.id == node_id:
+            return node.children
+        i = i + 1
+    [i64]()
+
+# Get siblings (children of the same parent).
+fn get_siblings_of(node_id: i64, doc_nodes: [DomNode]) -> [i64]:
+    val parent = get_parent_node(node_id, doc_nodes)
+    match parent:
+        Some(pid):
+            get_children_of(pid, doc_nodes)
+        nil:
+            [i64]()
+
+# Get the next sibling of a node.
+fn get_next_sibling(node_id: i64, doc_nodes: [DomNode]) -> i64?:
+    val siblings = get_siblings_of(node_id, doc_nodes)
+    val idx = index_in_list(node_id, siblings)
+    if idx >= 0 and idx < siblings.len() - 1:
+        return siblings.get(idx + 1)
+    nil
+
+# Get the previous sibling of a node.
+fn get_prev_sibling(node_id: i64, doc_nodes: [DomNode]) -> i64?:
+    val siblings = get_siblings_of(node_id, doc_nodes)
+    val idx = index_in_list(node_id, siblings)
+    if idx > 0:
+        return siblings.get(idx - 1)
+    nil
+
+# Find the index of a value in a list of i64.
+fn index_in_list(value: i64, list: [i64]) -> i64:
+    var i = 0
+    while i < list.len():
+        if list.get(i) == value:
+            return i
+        i = i + 1
+    -1

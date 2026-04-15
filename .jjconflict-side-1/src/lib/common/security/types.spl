@@ -1,0 +1,112 @@
+# Security core types for audit logging, events, and security context.
+
+use std.time
+
+## Security event types for audit logging.
+enum SecurityEvent:
+    AuthSuccess(user: text, peer: text)
+    AuthFailure(user: text, peer: text, reason: text)
+    AccessDenied(resource: text, capability: text, peer: text)
+    CsrfViolation(peer: text, path: text)
+    RateLimitHit(peer: text, path: text)
+    InputSanitized(field: text, original_len: i64)
+    SessionCreated(session_id: text, peer: text)
+    SessionExpired(session_id: text)
+    CapabilityDenied(capability: text, window_id: text)
+    RequestProcessed(path: text, duration_ms: i64, status: i64)
+
+## Severity levels for security events.
+enum SecuritySeverity:
+    Info
+    Warning
+    Critical
+
+## A single structured audit log entry.
+class AuditEntry:
+    timestamp_ms: i64
+    event: SecurityEvent
+    correlation_id: text
+    module_path: text
+    severity: SecuritySeverity
+
+    static fn new(event: SecurityEvent, correlation_id: text, module_path: text) -> AuditEntry:
+        AuditEntry(
+            timestamp_ms: time_now_ms(),
+            event: event,
+            correlation_id: correlation_id,
+            module_path: module_path,
+            severity: severity_for_event(event)
+        )
+
+## Security context carried through a request/session lifecycle.
+class SecurityContext:
+    peer_addr: text
+    session_id: text
+    user_id: text
+    correlation_id: text
+    capabilities: List<text>
+
+    static fn anonymous(peer_addr: text) -> SecurityContext:
+        SecurityContext(
+            peer_addr: peer_addr,
+            session_id: "",
+            user_id: "",
+            correlation_id: generate_correlation_id(),
+            capabilities: []
+        )
+
+    fn is_authenticated() -> bool:
+        self.user_id != ""
+
+    fn has_capability(cap: text) -> bool:
+        self.capabilities.contains(cap)
+
+## Configuration for audit logging behavior.
+class AuditConfig:
+    enabled: bool
+    log_file: text
+    log_to_stdout: bool
+    min_severity: SecuritySeverity
+    mask_secrets: bool
+
+    static fn default() -> AuditConfig:
+        AuditConfig(
+            enabled: true,
+            log_file: "security_audit.log",
+            log_to_stdout: false,
+            min_severity: SecuritySeverity.Info,
+            mask_secrets: true
+        )
+
+## Determine severity from event type.
+fn severity_for_event(event: SecurityEvent) -> SecuritySeverity:
+    """
+    Maps security events to their severity level.
+
+    sdoctest:
+        val e1 = SecurityEvent.AuthSuccess(user: "u", peer: "p")
+        expect(severity_for_event(e1)).to_equal(SecuritySeverity.Info)
+        val e2 = SecurityEvent.CsrfViolation(peer: "p", path: "/")
+        expect(severity_for_event(e2)).to_equal(SecuritySeverity.Critical)
+    """
+    match event:
+        AuthFailure(_, _, _): SecuritySeverity.Warning
+        AccessDenied(_, _, _): SecuritySeverity.Warning
+        CsrfViolation(_, _): SecuritySeverity.Critical
+        CapabilityDenied(_, _): SecuritySeverity.Warning
+        _: SecuritySeverity.Info
+
+## Generate a unique correlation ID for request tracing.
+fn generate_correlation_id() -> text:
+    val ts = time_now_ms()
+    val rand = random_hex(8)
+    "{ts}-{rand}"
+
+## Time helper (delegates to runtime).
+fn time_now_ms() -> i64:
+    time.now_ms()
+
+## Random hex helper (delegates to crypto FFI).
+fn random_hex(bytes: i64) -> text:
+    use std.io.crypto_ffi
+    crypto_ffi.random_hex(bytes)
