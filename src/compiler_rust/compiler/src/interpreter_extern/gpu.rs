@@ -1,7 +1,7 @@
-//! GPU (Vulkan) extern functions
+//! GPU (Vulkan + WebGPU) extern functions
 //!
-//! Vulkan compute operations for GPU acceleration.
-//! Feature-gated behind the "vulkan" feature flag.
+//! Vulkan compute operations for GPU acceleration (feature-gated).
+//! WebGPU compute-draw stub for interpreter mode (always returns false).
 
 use crate::error::{codes, CompileError, ErrorContext};
 use crate::value::Value;
@@ -371,4 +371,12 @@ pub fn rt_vk_kernel_launch_1d_fn(args: &[Value]) -> Result<Value, CompileError> 
         .as_int()? as u32;
     let result = rt_vk_kernel_launch_1d(pipeline, buffer_handles, buffer_count, num_elements);
     Ok(Value::Int(result as i64))
+}
+
+/// WebGPU compute-draw stub — always returns false (0) in interpreter mode.
+///
+/// Signature: rt_webgpu_compute_draw(handle: i64, op_kind: i32, x: i32, y: i32, w: i32, h: i32, color: u32) -> bool
+/// Returns false so callers fall through to the CPU draw path.
+pub fn rt_webgpu_compute_draw_fn(_args: &[Value]) -> Result<Value, CompileError> {
+    Ok(Value::Int(0))
 }

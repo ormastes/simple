@@ -730,6 +730,11 @@ pub(crate) fn call_extern_function(
         "rt_vk_kernel_launch_1d" => gpu::rt_vk_kernel_launch_1d_fn(&evaluated),
 
         // ====================================================================
+        // WebGPU Functions (stub — interpreter always returns false)
+        // ====================================================================
+        "rt_webgpu_compute_draw" => gpu::rt_webgpu_compute_draw_fn(&evaluated),
+
+        // ====================================================================
         // Diagram FFI Functions (12 functions)
         // ====================================================================
         "rt_diagram_enable" => diagram::rt_diagram_enable(&evaluated),

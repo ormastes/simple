@@ -1,9 +1,10 @@
 //! Stub implementations for `rt_test262_*` SFFI symbols declared in
 //! `src/app/ui.chromium/js_audit.spl`.
 //!
-//! These are placeholder stubs only — the real test262 runner integration is
-//! out of scope for this crate. All functions return sentinel values so the
-//! Simple link step resolves without pulling in a real JS engine.
+//! By default all symbols are stubs (sentinel values, no JS engine linked).
+//! Enable the `test262-real` Cargo feature to replace `rt_test262_eval` with a
+//! real QuickJS evaluation via the `rquickjs` crate.  All other symbols remain
+//! stubs until a corpus loader lands.
 //!
 //! Sentinel convention (matches the rest of `src/runtime/hosted/`):
 //!   - handle / count returns  → `-1`  (invalid / not-found)
@@ -15,6 +16,49 @@ use std::os::raw::c_char;
 /// Static empty C string used as the sentinel `text` return value.
 static EMPTY: &[u8] = b"\0";
 
+// ---------------------------------------------------------------------------
+// rt_test262_eval — real implementation (feature = "test262-real")
+// ---------------------------------------------------------------------------
+
+#[cfg(feature = "test262-real")]
+/// Evaluate a JS `source` snippet via QuickJS.
+/// Returns 0 on success, -1 on any error (null pointer, eval exception, etc.).
+#[no_mangle]
+pub unsafe extern "C" fn rt_test262_eval(
+    _backend: *const c_char,
+    source: *const c_char,
+) -> i64 {
+    use rquickjs::{Context, Runtime};
+    use std::ffi::CStr;
+
+    if source.is_null() {
+        return -1;
+    }
+    let src = match CStr::from_ptr(source).to_str() {
+        Ok(s) => s,
+        Err(_) => return -1,
+    };
+    let rt = match Runtime::new() {
+        Ok(r) => r,
+        Err(_) => return -1,
+    };
+    let ctx = match Context::full(&rt) {
+        Ok(c) => c,
+        Err(_) => return -1,
+    };
+    ctx.with(|ctx| {
+        match ctx.eval::<(), _>(src) {
+            Ok(_) => 0i64,
+            Err(_) => -1i64,
+        }
+    })
+}
+
+// ---------------------------------------------------------------------------
+// rt_test262_eval — stub (default, no feature)
+// ---------------------------------------------------------------------------
+
+#[cfg(not(feature = "test262-real"))]
 /// Evaluate a JS `source` snippet against a named `backend`.
 /// Stub: always returns -1 (eval not available).
 #[no_mangle]

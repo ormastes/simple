@@ -249,19 +249,19 @@ RuntimeValue rt_string_format(RuntimeValue fmt, RuntimeValue val);
 void rt_print_value(RuntimeValue val);
 
 /* ===================================================================
- * 4. Heap allocator — bump allocator, 128 MB
+ * 4. Heap allocator — bump allocator, 256 MB
  *
  * NOTE: keep this within the QEMU scenario RAM budget minus a safety
  * margin for kernel code/rodata/data, linker-script .heap/.stack, and
  * page tables. x64-desktop-test runs with -m 512M, so the kernel must
- * fit (code ~5 MB + rodata/data ~1 MB + BSS ~0.3 MB + _heap 128 MB +
- * linker .heap 16 MB + .stack 8 MB = ~158 MB; stack top lands at
- * ~0x0A000000, well inside 0x20000000). Bumping this above ~300 MB
+ * fit (code ~5 MB + rodata/data ~1 MB + BSS ~0.3 MB + _heap 256 MB +
+ * linker .heap 16 MB + .stack 8 MB = ~286 MB; stack top lands at
+ * ~0x12000000, well inside 0x20000000). Bumping above ~380 MB
  * pushes _stack_top beyond physical RAM and every push/call silently
  * drops to unmapped memory — the cause of Agent M's 0x950a fault.
  * =================================================================== */
 
-static char   _heap[128ULL * 1024ULL * 1024ULL] __attribute__((aligned(16)));
+static char   _heap[256ULL * 1024ULL * 1024ULL] __attribute__((aligned(16)));
 static size_t _heap_off = 0;
 
 void *malloc(size_t sz)
