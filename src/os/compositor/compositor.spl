@@ -32,6 +32,8 @@ use os.compositor.render_extras.{draw_wallpaper_enhanced}
 use os.compositor.app_content.{render_app_content, render_app_content_stateful, AppState, app_state_new, handle_app_input, handle_app_click}
 use os.compositor.easing.{bounce_offset, ease_out_cubic, ease_in_cubic}
 use common.window_protocol.window_protocol.{WmInputEvent, wm_input_event, WM_EVENT_KEY_PRESS, WM_EVENT_MOUSE_CLICK, WM_EVENT_MOUSE_MOVE, WM_EVENT_MOUSE_RELEASE}
+use os.compositor.wm_core.{detect_resize_edge, raise_to_top, apply_resize}
+use common.window_protocol.input_translator.{key_char_to_wm_key_event}
 use common.window_protocol.geometry.{WindowId, ProcessId, AppId, Px, Point, Size, Rect, Argb32, Alpha, BlurRadius, KeyCode, Modifiers, WmEventType, WmStatus}
 use os.compositor.display_backend.{CompositorBackend, FbCompositorBackend}
 use os.compositor.input_backend.{InputBackend, Ps2InputBackend}
@@ -42,31 +44,6 @@ use os.compositor.glass_dispatch.{cap_blend_rect, cap_blur_region, cap_gradient_
 # because non-shortcut keys must route to focused windows -- importing
 # ShortcutHandler would intercept bare keys (T, Q, M, W, R) that should
 # reach in-process text editors and remote apps.
-
-# ============================================================================
-# Edge Resize Detection
-# ============================================================================
-
-fn _detect_resize_edge(mx: i32, my: i32, wx: i32, wy: i32, ww: i32, wh: i32) -> i32:
-    """Detect which resize edge the cursor is on (6px hit zone). Returns 0-8."""
-    val edge: i32 = 6
-    val on_left = mx >= wx - edge and mx < wx + edge
-    val on_right = mx >= wx + ww - edge and mx < wx + ww + edge
-    val on_top = my >= wy - edge and my < wy + edge
-    val on_bottom = my >= wy + wh - edge and my < wy + wh + edge
-    val in_x = mx >= wx - edge and mx < wx + ww + edge
-    val in_y = my >= wy - edge and my < wy + wh + edge
-    # Corners first
-    if on_left and on_top and in_x and in_y: return 5   # TL
-    if on_right and on_top and in_x and in_y: return 6  # TR
-    if on_left and on_bottom and in_x and in_y: return 7  # BL
-    if on_right and on_bottom and in_x and in_y: return 8  # BR
-    # Edges
-    if on_left and in_y: return 1   # left
-    if on_right and in_y: return 2  # right
-    if on_top and in_x: return 3    # top
-    if on_bottom and in_x: return 4 # bottom
-    0  # none
 
 # ============================================================================
 # Window Surface
@@ -429,21 +406,8 @@ impl Compositor:
             return
 
         # Move target to end of list (topmost Z-order), keeping app_states aligned
-        val target = self.surfaces[target_idx]
-        val target_state = if target_idx < self.app_states.len(): self.app_states[target_idx] else: app_state_new()
-        var reordered: [WindowSurface] = []
-        var reordered_states: [AppState] = []
-        var j: i32 = 0
-        while j < self.surfaces.len():
-            if self.surfaces[j].id.value != id.value:
-                reordered = reordered.push(self.surfaces[j])
-                if j < self.app_states.len():
-                    reordered_states = reordered_states.push(self.app_states[j])
-            j = j + 1
-        reordered = reordered.push(target)
-        reordered_states = reordered_states.push(target_state)
-        self.surfaces = reordered
-        self.app_states = reordered_states
+        self.surfaces = raise_to_top(self.surfaces, target_idx)
+        self.app_states = raise_to_top(self.app_states, target_idx)
         self.focused_idx = self.surfaces.len() - 1
 
     me move_window(id: WindowId, new_x: i32, new_y: i32):
@@ -1328,15 +1292,7 @@ impl Compositor:
             # Remote window: queue event for IPC delivery
             if focused.owner_port > 0:
                 val key_char = self.input.key_to_char(key)
-                var key_code: u32 = 0
-                if key_char != nil:
-                    key_code = key_char.to_u32()
-                val remote_event = wm_input_event(
-                    focused.id,
-                    WM_EVENT_KEY_PRESS,
-                    KeyCode(value: key_code),
-                    Point.xy(0, 0)
-                )
+                val remote_event = key_char_to_wm_key_event(focused.id.value, key_char)
                 self.queue_remote_event(remote_event)
                 return
 
@@ -1374,16 +1330,16 @@ impl Compositor:
         while shape_idx >= 0:
             val ss = self.surfaces[shape_idx]
             if ss.visible:
-                val ssx = ss.bounds.origin.x.value
-                val ssy = ss.bounds.origin.y.value
-                val ssw = ss.bounds.size.width.value
-                val ssh = ss.bounds.size.height.value
-                val edge = _detect_resize_edge(mx, my, ssx, ssy, ssw, ssh)
+                val edge = detect_resize_edge(ss.bounds, Point.xy(mx, my), Px(value: 6))
                 if edge > 0:
                     new_shape = 2  # hand/pointer for resize
                     shape_idx = -1  # break
                 else:
                     # Check if over content area (for I-beam on text apps)
+                    val ssx = ss.bounds.origin.x.value
+                    val ssy = ss.bounds.origin.y.value
+                    val ssw = ss.bounds.size.width.value
+                    val ssh = ss.bounds.size.height.value
                     val in_content = mx > ssx + 10 and mx < ssx + ssw - 10 and my > ssy + 44 and my < ssy + ssh - 10
                     if in_content and (ss.title == "Terminal" or ss.title == "Editor"):
                         new_shape = 1  # I-beam for text
@@ -1458,23 +1414,10 @@ impl Compositor:
         if self.resizing and event.left_pressed:
             val dx = mx - self.resize_start_mx
             val dy = my - self.resize_start_my
-            var nx = self.resize_orig_x
-            var ny = self.resize_orig_y
-            var nw = self.resize_orig_w
-            var nh = self.resize_orig_h
-            val e = self.resize_edge
-            if e == 2 or e == 6 or e == 8: nw = nw + dx
-            if e == 4 or e == 7 or e == 8: nh = nh + dy
-            if e == 1 or e == 5 or e == 7:
-                nw = nw - dx
-                nx = nx + dx
-            if e == 3 or e == 5 or e == 6:
-                nh = nh - dy
-                ny = ny + dy
-            if nw < 100: nw = 100
-            if nh < 80: nh = 80
-            self.move_window(self.resize_window_id, nx, ny)
-            self.resize_window(self.resize_window_id, nw, nh)
+            val orig = Rect.xywh(self.resize_orig_x, self.resize_orig_y, self.resize_orig_w, self.resize_orig_h)
+            val new_bounds = apply_resize(orig, self.resize_edge, Point.xy(dx, dy), Size.wh(100, 80))
+            self.move_window(self.resize_window_id, new_bounds.origin.x.value, new_bounds.origin.y.value)
+            self.resize_window(self.resize_window_id, new_bounds.size.width.value, new_bounds.size.height.value)
             return
 
         # Handle new left click — hit test windows back-to-front (topmost first)
@@ -1566,11 +1509,7 @@ impl Compositor:
             while ridx >= 0:
                 val rs = self.surfaces[ridx]
                 if rs.visible:
-                    val rsx = rs.bounds.origin.x.value
-                    val rsy = rs.bounds.origin.y.value
-                    val rsw = rs.bounds.size.width.value
-                    val rsh = rs.bounds.size.height.value
-                    val edge = _detect_resize_edge(mx, my, rsx, rsy, rsw, rsh)
+                    val edge = detect_resize_edge(rs.bounds, Point.xy(mx, my), Px(value: 6))
                     if edge > 0:
                         self.focus_window(rs.id)
                         self.resizing = true
@@ -1578,10 +1517,10 @@ impl Compositor:
                         self.resize_edge = edge
                         self.resize_start_mx = mx
                         self.resize_start_my = my
-                        self.resize_orig_x = rsx
-                        self.resize_orig_y = rsy
-                        self.resize_orig_w = rsw
-                        self.resize_orig_h = rsh
+                        self.resize_orig_x = rs.bounds.origin.x.value
+                        self.resize_orig_y = rs.bounds.origin.y.value
+                        self.resize_orig_w = rs.bounds.size.width.value
+                        self.resize_orig_h = rs.bounds.size.height.value
                         return
                 ridx = ridx - 1
 
