@@ -1,6 +1,6 @@
 # SimpleOS Phase-2 I5 bake harness — combines initramfs + FAT32 disk image.
 #
-# Pure in-process: no subprocess calls. Pre-built artifacts must exist:
+# Pre-built artifacts must exist:
 #   /tmp/hello_rs_simpleos/target/target/release/hello_rs  (Rust ELF)
 #   /tmp/hello_c.o  (cross-compiled C object)
 #
@@ -12,12 +12,13 @@
 # zero-pad in disk_image.build() was intractable (>30s/MiB). With
 # rt_file_truncate now available, disk_image.build() writes only the ~150 KiB
 # structural prefix and asks the kernel to zero-extend, so we can call the
-# real builder with embedded payloads here.
+# real builders with embedded payloads here.
 
 use std.io_runtime as io
 use os.port.disk_image.{DiskImageConfig, PayloadEntry, build}
+use os.port.initramfs_pack.{PackConfig, PayloadEntry as InitramfsPayloadEntry,
+    cmd_build, validate_image}
 
-extern fn rt_file_write_bytes(path: text, data: [u8]) -> bool
 extern fn rt_file_read_bytes(path: text) -> [u8]
 
 fn _load_payload(path: text, name83: text) -> Result<PayloadEntry, text>:
@@ -29,8 +30,38 @@ fn _load_payload(path: text, name83: text) -> Result<PayloadEntry, text>:
         return Err("bake: payload empty or unreadable: " + path)
     Ok(PayloadEntry(path: name83, data: data))
 
+fn _build_initramfs(out_initramfs: text, hello_rs_path: text, hello_c_path: text) -> Result<(), text>:
+    """Build a real initramfs image and inject the bake payloads into it."""
+    var payloads: List<InitramfsPayloadEntry> = [
+        InitramfsPayloadEntry(
+            host_path: hello_rs_path,
+            guest_path: "/usr/share/test/hello_rs",
+            is_dir: false,
+        ),
+    ]
+    if io.file_exists(hello_c_path):
+        payloads.push(InitramfsPayloadEntry(
+            host_path: hello_c_path,
+            guest_path: "/usr/share/test/hello_c.o",
+            is_dir: false,
+        ))
+
+    val config = PackConfig(
+        simple_binary: "build/bootstrap/stage3/simple_simpleos",
+        llvm_prefix: "build/os/llvm/cross/bin",
+        sysroot: "build/os/sysroot",
+        source_tree: "src",
+        output: out_initramfs,
+        staging: out_initramfs + ".staging",
+        payloads: payloads,
+    )
+    cmd_build(config)
+    if not validate_image(out_initramfs):
+        return Err("bake: initramfs validation failed: " + out_initramfs)
+    Ok(())
+
 fn bake(out_disk: text, out_initramfs: text) -> Result<(), text>:
-    """Produce FAT32 disk image + initramfs stub from pre-built ELF artifacts."""
+    """Produce FAT32 disk image + validated initramfs image from pre-built ELF artifacts."""
     val hello_rs_path = "/tmp/hello_rs_simpleos/target/target/release/hello_rs"
     val hello_c_path  = "/tmp/hello_c.o"
 
@@ -57,11 +88,12 @@ fn bake(out_disk: text, out_initramfs: text) -> Result<(), text>:
         case Err(e):
             return Err("bake: disk_image.build failed: " + e)
 
-    # --- Step 4: initramfs stub (TODO wave-6: call initramfs_pack.cmd_build) ---
-    val stub: [u8] = [0x28u8, 0x42u8, 0x35u8, 0x44u8, 0x36u8, 0x29u8, 0x0Au8]
-    if not rt_file_write_bytes(out_initramfs, stub):
-        return Err("bake: failed to write initramfs stub: " + out_initramfs)
-    print "bake: initramfs stub written: " + out_initramfs
+    # --- Step 4: build real initramfs image with injected payloads ---
+    match _build_initramfs(out_initramfs, hello_rs_path, hello_c_path):
+        case Ok(()):
+            print "bake: initramfs image written: " + out_initramfs
+        case Err(e):
+            return Err(e)
 
     Ok(())
 
