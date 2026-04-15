@@ -1,8 +1,9 @@
 # @cover src/lib/skia/feature/glyph/ot_parser.spl 80%
 
 use std.sspec.*
+use std.skia.entity.path.{sk_path_new}
 use std.skia.feature.glyph.ot_parser.{
-    read_u16_be, read_i16_be, read_u32_be, read_fixed_1616,
+    read_u16_be, read_i16_be, read_u32_be, read_fixed_1616, read_f2dot14,
     OtTable, OtFont,
     parse_offset_table, find_table,
     CmapFormat4, parse_cmap_format4, cmap_lookup,
@@ -11,7 +12,8 @@ use std.skia.feature.glyph.ot_parser.{
     parse_cff_charstring,
     GsubLookup, GposLookup, parse_gsub_skeleton, parse_gpos_skeleton,
     GlyphClass, parse_gdef_glyph_class,
-    FvarAxis, parse_fvar_axes, parse_avar_mapping
+    FvarAxis, parse_fvar_axes, parse_avar_mapping,
+    GvarTable, parse_gvar, apply_glyph_deltas
 }
 
 describe "read_u16_be":
@@ -310,3 +312,187 @@ describe "parse_avar_mapping":
         val empty_font = OtFont(blob: buf, tables: [])
         val result = parse_avar_mapping(empty_font, 0, 0.5)
         expect(result).to_equal(0.5)
+
+    it "returns normalized unchanged when no avar table":
+        # font with only a cmap table (no avar), axis_index=0, normalized=0.75
+        val buf: [u8] = [
+            0, 1, 0, 0,
+            0, 1,
+            0, 16,
+            0, 0,
+            0, 1,
+            99, 109, 97, 112,
+            0, 0, 0, 0,
+            0, 0, 0, 28,
+            0, 0, 0, 4,
+            0, 0, 0, 0
+        ]
+        val font_opt = parse_offset_table(buf)
+        val font = font_opt.unwrap()
+        val result = parse_avar_mapping(font, 0, 0.75)
+        expect(result).to_equal(0.75)
+
+    it "returns exact to-coordinate for 3-point segment map when input matches from-coordinate":
+        # avar table with 1 axis, 3 AxisValueMaps: (-1→-1), (0→0.25), (1→1)
+        # input normalized=0.0 should return 0.25 exactly (exact segment boundary match)
+        # F2DOT14: -1.0 = 0xC000 (-16384 as i16), 0.0 = 0x0000, 0.25 = 0x1000 (4096), 1.0 = 0x4000 (16384)
+        # avar tag = 0x61766172 = [97, 118, 97, 114]
+        # Header: majorVersion=1(u16), minorVersion=0(u16), reserved=0(u16), axisCount=1(u16) -> 8 bytes
+        # SegmentMap: positionMapCount=3(u16) -> 2 bytes
+        # Pair 0: from=-1.0(0xC000=-16384 as i16 -> bytes [192,0]), to=-1.0([192,0])
+        # Pair 1: from=0.0([0,0]), to=0.25(4096=[16,0])
+        # Pair 2: from=1.0(16384=[64,0]), to=1.0([64,0])
+        val avar_data: [u8] = [
+            0, 1,        # majorVersion = 1
+            0, 0,        # minorVersion = 0
+            0, 0,        # reserved
+            0, 1,        # axisCount = 1
+            0, 3,        # positionMapCount = 3
+            192, 0,      # from=-1.0
+            192, 0,      # to=-1.0
+            0, 0,        # from=0.0
+            16, 0,       # to=0.25 (4096/16384)
+            64, 0,       # from=1.0
+            64, 0        # to=1.0
+        ]
+        # Build font blob with avar table at offset 28
+        # avar tag bytes: 97=a, 118=v, 97=a, 114=r
+        val avar_len = avar_data.len() as u8
+        val buf: [u8] = [
+            0, 1, 0, 0,
+            0, 1,
+            0, 16,
+            0, 0,
+            0, 1,
+            97, 118, 97, 114,   # 'avar'
+            0, 0, 0, 0,
+            0, 0, 0, 28,        # offset = 28
+            0, 0, 0, 22,        # length = 22 (avar_data size)
+            0, 1,               # majorVersion=1
+            0, 0,               # minorVersion=0
+            0, 0,               # reserved
+            0, 1,               # axisCount=1
+            0, 3,               # positionMapCount=3
+            192, 0,             # from=-1.0
+            192, 0,             # to=-1.0
+            0, 0,               # from=0.0
+            16, 0,              # to=0.25
+            64, 0,              # from=1.0
+            64, 0               # to=1.0
+        ]
+        val font_opt = parse_offset_table(buf)
+        val font = font_opt.unwrap()
+        val result = parse_avar_mapping(font, 0, 0.0)
+        # 0.0 matches from-coord of pair 1 exactly -> to=0.25
+        val diff = result - 0.25
+        val abs_diff = if diff < 0.0: -diff else: diff
+        expect(abs_diff < 0.000001).to_equal(true)
+
+    it "returns linearly interpolated value for input halfway between two segment boundaries":
+        # Same 3-point map: (-1→-1), (0→0.25), (1→1)
+        # input=0.5 is halfway between from=0.0 and from=1.0
+        # t = (0.5 - 0.0) / (1.0 - 0.0) = 0.5
+        # result = 0.25 + 0.5*(1.0 - 0.25) = 0.25 + 0.375 = 0.625
+        val buf: [u8] = [
+            0, 1, 0, 0,
+            0, 1,
+            0, 16,
+            0, 0,
+            0, 1,
+            97, 118, 97, 114,
+            0, 0, 0, 0,
+            0, 0, 0, 28,
+            0, 0, 0, 22,
+            0, 1,
+            0, 0,
+            0, 0,
+            0, 1,
+            0, 3,
+            192, 0,
+            192, 0,
+            0, 0,
+            16, 0,
+            64, 0,
+            64, 0
+        ]
+        val font_opt = parse_offset_table(buf)
+        val font = font_opt.unwrap()
+        val result = parse_avar_mapping(font, 0, 0.5)
+        val expected = 0.625
+        val diff = result - expected
+        val abs_diff = if diff < 0.0: -diff else: diff
+        expect(abs_diff < 0.000001).to_equal(true)
+
+describe "parse_gvar":
+    it "returns None when no gvar table":
+        val buf: [u8] = [
+            0, 1, 0, 0,
+            0, 1,
+            0, 16,
+            0, 0,
+            0, 1,
+            99, 109, 97, 112,
+            0, 0, 0, 0,
+            0, 0, 0, 28,
+            0, 0, 0, 4,
+            0, 0, 0, 0
+        ]
+        val font_opt = parse_offset_table(buf)
+        val font = font_opt.unwrap()
+        val result = parse_gvar(font)
+        expect(result == None).to_equal(true)
+
+    it "returns Some with correct glyph_variation_data_offsets length when given valid gvar header":
+        # gvar tag = 0x67766172 = [103,118,97,114]
+        # gvar header (20 bytes): majorVersion(2), minorVersion(2), axisCount(2),
+        #   sharedTupleCount(2), sharedTuplesOffset(4), glyphCount(2), flags(2),
+        #   glyphVariationDataArrayOffset(4)
+        # glyphCount=2, flags=0 (u16 offsets), so offsets array = 3 × u16 = 6 bytes
+        # Total gvar table = 20 + 6 = 26 bytes
+        val buf: [u8] = [
+            0, 1, 0, 0,
+            0, 1,
+            0, 16,
+            0, 0,
+            0, 1,
+            103, 118, 97, 114,   # 'gvar'
+            0, 0, 0, 0,
+            0, 0, 0, 28,         # offset = 28
+            0, 0, 0, 26,         # length = 26
+            # gvar header at offset 28:
+            0, 1,                # majorVersion=1
+            0, 0,                # minorVersion=0
+            0, 2,                # axisCount=2
+            0, 0,                # sharedTupleCount=0
+            0, 0, 0, 48,         # sharedTuplesOffset=48
+            0, 2,                # glyphCount=2
+            0, 0,                # flags=0 (u16 offsets, ×2)
+            0, 0, 0, 54,         # glyphVariationDataArrayOffset=54
+            # offsets array (3 × u16): glyph 0 start, glyph 1 start, end
+            0, 0,                # offset[0]=0 -> byte 0 from array base
+            0, 4,                # offset[1]=4 -> byte 8 (×2)
+            0, 8                 # offset[2]=8 -> byte 16
+        ]
+        val font_opt = parse_offset_table(buf)
+        val font = font_opt.unwrap()
+        val result = parse_gvar(font)
+        expect(result == None).to_equal(false)
+        val gvar = result.unwrap()
+        # glyph_count=2 so offsets should have glyph_count+1 = 3 entries
+        expect(gvar.glyph_variation_data_offsets.len()).to_equal(3)
+
+describe "apply_glyph_deltas":
+    it "returns outline unchanged when normalized_coords is empty":
+        val gvar = GvarTable(
+            axis_count: 1,
+            shared_tuple_count: 0,
+            shared_tuples_offset: 0,
+            glyph_count: 1,
+            flags: 0,
+            glyph_variation_data_array_offset: 0,
+            glyph_variation_data_offsets: [0, 0]
+        )
+        val path = sk_path_new()
+        val coords: [f64] = []
+        val result = apply_glyph_deltas(path, gvar, 0, coords)
+        expect(result.is_empty()).to_equal(true)

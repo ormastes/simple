@@ -10,8 +10,12 @@ use std.skia.feature.glyph.colrv1.{
     PaintNode,
     decode_paint_subtable,
     find_base_glyph_v1,
-    route_color_glyph
+    route_color_glyph,
+    PaintGraphContext,
+    compose_paint_graph
 }
+use std.skia.entity.geometry.{SkRect}
+use std.skia.entity.color.{SkColor, sk_color_argb}
 
 describe "parse_colr_header":
     it "returns None when blob is too short":
@@ -146,3 +150,85 @@ describe "route_color_glyph":
         ]
         val result = route_color_glyph(1, buf)
         expect(result == None).to_equal(true)
+
+describe "PaintGraphContext":
+    it "constructor preserves all 3 fields":
+        val bounds = SkRect(left: 0.0, top: 0.0, right: 8.0, bottom: 8.0)
+        val palette: [SkColor] = [sk_color_argb(255, 200, 100, 50)]
+        val ctx = PaintGraphContext(bounds: bounds, palette: palette, em_units: 1000)
+        expect(ctx.em_units as i64).to_equal(1000)
+        expect(ctx.palette.len()).to_equal(1)
+        expect((ctx.bounds.right - ctx.bounds.left) as i64).to_equal(8)
+
+describe "compose_paint_graph":
+    it "Solid node fills bitmap center pixel with palette color alpha-scaled":
+        # blob: format=2 (Solid), palette_index=0 (bytes 1-2), then padding
+        # alpha_fixed is hardcoded to 0x4000 (16384) = 1.0 scale in decode_paint_subtable
+        val buf: [u8] = [2, 0, 0, 0, 0, 0]
+        val bounds = SkRect(left: 0.0, top: 0.0, right: 4.0, bottom: 4.0)
+        # Red fully-opaque color at palette index 0
+        val palette: [SkColor] = [sk_color_argb(255, 255, 0, 0)]
+        val ctx = PaintGraphContext(bounds: bounds, palette: palette, em_units: 1000)
+        val bmp = compose_paint_graph(buf, 0, ctx)
+        # Bitmap should be 4x4 and center pixel (2,2) should be red with full alpha
+        expect(bmp.width).to_equal(4)
+        expect(bmp.height).to_equal(4)
+        val cx = 2 as i64
+        val cy = 2 as i64
+        val idx = (cy * bmp.width + cx) * 4
+        # R channel should be non-zero (red)
+        expect(bmp.pixels[idx] as i64).to_be_greater_than(0)
+        # A channel should be non-zero (fully opaque)
+        expect(bmp.pixels[idx + 3] as i64).to_be_greater_than(0)
+
+    it "ColrLayers with two Solid layers — later layer color dominates under SrcOver":
+        # Build a minimal blob that has:
+        #   offset 0: format=11 (ColrLayers), num_layers=2, first_layer_idx=0
+        #   The layer index table at word-offset 0 means entries at byte 0,4
+        #   We'll place both child Solid records inline after the header.
+        #
+        # Layout:
+        #   [0]  format=11, num_layers=2, first_layer_idx (4 bytes) = 2  (word index 2 → byte 8)
+        #   [6]  padding to reach byte 8
+        #   [8]  word[2] = byte offset of first child solid = 14  (u32 BE: 0,0,0,14)
+        #   [12] word[3] = byte offset of second child solid = 20 (u32 BE: 0,0,0,20)
+        #   [14] solid1: format=2, palette_index=0 (green, palette[0])
+        #   [20] solid2: format=2, palette_index=1 (blue, palette[1])
+        val buf: [u8] = [
+            11, 2, 0, 0, 0, 2,   # ColrLayers header (6 bytes at offset 0)
+            0, 0,                  # 2 bytes padding to reach offset 8
+            0, 0, 0, 14,           # word[2]: child1 paint offset = 14
+            0, 0, 0, 20,           # word[3]: child2 paint offset = 20
+            2, 0, 0, 0, 0, 0,     # child1 Solid (palette_index=0) at offset 14
+            2, 0, 1, 0, 0, 0      # child2 Solid (palette_index=1) at offset 20
+        ]
+        val bounds = SkRect(left: 0.0, top: 0.0, right: 2.0, bottom: 2.0)
+        # palette[0] = green, palette[1] = blue (fully opaque)
+        val green: SkColor = sk_color_argb(255, 0, 200, 0)
+        val blue: SkColor  = sk_color_argb(255, 0, 0, 200)
+        val palette: [SkColor] = [green, blue]
+        val ctx = PaintGraphContext(bounds: bounds, palette: palette, em_units: 1000)
+        val bmp = compose_paint_graph(buf, 0, ctx)
+        # After SrcOver blending of blue over green, blue (index 1) should dominate.
+        # Check pixel (0,0): blue channel should exceed green channel.
+        val idx = 0 as i64
+        val r_ch = bmp.pixels[idx] as i64
+        val g_ch = bmp.pixels[idx + 1] as i64
+        val b_ch = bmp.pixels[idx + 2] as i64
+        val a_ch = bmp.pixels[idx + 3] as i64
+        expect(a_ch).to_be_greater_than(0)
+        expect(b_ch).to_be_greater_than(g_ch)
+
+    it "out-of-bounds paint_offset returns zeros bitmap without crashing":
+        val buf: [u8] = [2, 0, 0, 0, 0, 0]
+        val bounds = SkRect(left: 0.0, top: 0.0, right: 4.0, bottom: 4.0)
+        val palette: [SkColor] = []
+        val ctx = PaintGraphContext(bounds: bounds, palette: palette, em_units: 1000)
+        # Use an offset far beyond the blob
+        val bmp = compose_paint_graph(buf, 9999, ctx)
+        expect(bmp.width).to_equal(4)
+        expect(bmp.height).to_equal(4)
+        # All pixels should be zero (transparent)
+        val idx = 0 as i64
+        expect(bmp.pixels[idx] as i64).to_equal(0)
+        expect(bmp.pixels[idx + 3] as i64).to_equal(0)

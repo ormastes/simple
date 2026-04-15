@@ -67,9 +67,13 @@ if [ ${#missing_tools[@]} -gt 0 ]; then
     exit 3
 fi
 
-# --- 4. Verify toolchain file ------------------------------------------------
-
-[ -f "$TOOLCHAIN_FILE" ] || die "Toolchain file not found: $TOOLCHAIN_FILE" 4
+# --- 4. Note about toolchain file --------------------------------------------
+# The toolchain file at src/os/toolchain/llvm/simpleos_cross_toolchain.cmake
+# would cross-compile the LLVM BINARY to run INSIDE SimpleOS — that requires
+# a C++ runtime on SimpleOS which we don't have yet (wave-5+). This script
+# instead builds a HOST x86_64-linux clang binary that TARGETS SimpleOS via
+# clang source patches (SimpleOS ToolChain class, __simpleos__ macro). No
+# toolchain file needed for the binary itself.
 
 # --- 5a. Stage host-tools (llvm-tblgen / clang-tblgen) ----------------------
 
@@ -89,19 +93,18 @@ else
 fi
 
 # --- 5b. Stage cross: cmake config -------------------------------------------
+# Host x86_64-linux binary; SimpleOS appears only as a TARGET triple the
+# produced clang knows how to emit code for. No CMAKE_TOOLCHAIN_FILE.
 
 echo "==> Stage cross: cmake configure -> $LLVM_BUILD"
 run mkdir -p "$LLVM_BUILD"
 run cmake -S "$LLVM_SRC/llvm" -B "$LLVM_BUILD" \
     -G Ninja \
     -DCMAKE_BUILD_TYPE=Release \
-    -DCMAKE_TOOLCHAIN_FILE="$TOOLCHAIN_FILE" \
-    -DCMAKE_INSTALL_PREFIX="$SIMPLEOS_SYSROOT" \
     -DLLVM_TABLEGEN="$HOST_TOOLS_DIR/bin/llvm-tblgen" \
     -DCLANG_TABLEGEN="$HOST_TOOLS_DIR/bin/clang-tblgen" \
     -DLLVM_TARGETS_TO_BUILD="X86;AArch64;RISCV" \
-    -DLLVM_BUILD_STATIC=ON \
-    -DLLVM_ENABLE_PIC=OFF \
+    -DLLVM_DEFAULT_TARGET_TRIPLE=x86_64-unknown-simpleos \
     -DCLANG_DEFAULT_LINKER=lld \
     -DCLANG_SIMPLEOS_EMBED_LLD=ON \
     -DLLVM_ENABLE_PROJECTS="clang;lld"

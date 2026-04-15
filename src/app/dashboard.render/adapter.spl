@@ -13,6 +13,8 @@ use dashboard.render.progress.{render_progress_bar, render_percentage,
 use dashboard.render.table.{TableBuilder, render_html_table_limited,
     pad_right}
 
+use app.dashboard.assistant_collectors.{AssistantDashboardSnapshot, collect_assistant_snapshot}
+use dashboard.views.assistant.{render_assistant_text, render_assistant_html}
 use app.ui.render.types.{RenderConfig, RenderRequest, RenderResult}
 
 # =========================================================================
@@ -89,6 +91,36 @@ fn render_dashboard(request: DashboardRenderRequest) -> RenderResult:
     """
     val summary = summary_from_dict(request.summary)
     val fmt = request.config.format
+    val mode = request.config.mode
+
+    if mode == "assistant":
+        val snapshot = collect_assistant_snapshot()
+        var result = RenderResult.empty()
+        if fmt == "text" or fmt == "both":
+            result = RenderResult(
+                format: fmt,
+                text_output: render_assistant_text(snapshot, request.config),
+                html_output: result.html_output,
+                metadata: result.metadata,
+                warnings: result.warnings
+            )
+        if fmt == "html" or fmt == "both":
+            result = RenderResult(
+                format: fmt,
+                text_output: result.text_output,
+                html_output: render_assistant_html(snapshot, request.config),
+                metadata: result.metadata,
+                warnings: result.warnings
+            )
+        result = RenderResult(
+            format: result.format,
+            text_output: result.text_output,
+            html_output: result.html_output,
+            metadata: assistant_metadata(snapshot, fmt),
+            warnings: result.warnings
+        )
+        return result
+
     var result = RenderResult.empty()
     result = RenderResult(
         format: fmt,
@@ -98,7 +130,6 @@ fn render_dashboard(request: DashboardRenderRequest) -> RenderResult:
         warnings: result.warnings
     )
 
-    val mode = request.config.mode
     if fmt == "text" or fmt == "both":
         val text_output = match mode:
             "status": render_status_text(summary)
@@ -312,6 +343,20 @@ fn render_full_html(s: DashboardSummary, config: RenderConfig) -> text:
 
     h = "{h}</div>\n</body>\n</html>\n"
     h
+
+fn assistant_metadata(snapshot: AssistantDashboardSnapshot, fmt: text) -> Dict<text, text>:
+    var meta: Dict<text, text> = {}
+    meta["adapter"] = "dashboard"
+    meta["mode"] = "assistant"
+    meta["format"] = fmt
+    meta["surface_state"] = snapshot.surface_state
+    meta["selected_session_id"] = snapshot.selected_session_id
+    meta["sessions"] = "{snapshot.total_sessions}"
+    meta["live_sessions"] = "{snapshot.live_sessions}"
+    meta["replay_sessions"] = "{snapshot.replay_sessions}"
+    meta["degraded_sessions"] = "{snapshot.degraded_sessions}"
+    meta["total_events"] = "{snapshot.total_events}"
+    meta
 
 # =========================================================================
 # HTML Helpers

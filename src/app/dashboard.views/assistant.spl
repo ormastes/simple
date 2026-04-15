@@ -1,0 +1,485 @@
+#![allow(unnamed_duplicate_typed_args)]
+# Assistant Dashboard Views
+#
+# Renders the KAIROS-like assistant surface using the collector snapshot.
+# The view is intentionally standalone: it can render replay-only data,
+# live transcript data, or degraded fallback state.
+
+use app.dashboard.assistant_collectors.{
+    AssistantDashboardSnapshot, AssistantSession, assistant_session_by_id
+}
+use app.ui.render.types.{RenderConfig}
+use dashboard.render.colors.{
+    BOLD, DIM, CYAN, GREEN, YELLOW, RED, RESET, colorize, html_badge,
+    threshold_css_color
+}
+use dashboard.render.table.{TableBuilder, render_html_table_limited}
+
+# =========================================================================
+# Public Rendering Entry Points
+# =========================================================================
+
+fn render_assistant_text(snapshot: AssistantDashboardSnapshot, config: RenderConfig) -> text:
+    var out = ""
+    out = "{out}{assistant_text_header(snapshot)}\n\n"
+    out = "{out}{assistant_text_overview(snapshot)}\n\n"
+    out = "{out}{assistant_text_sessions(snapshot, config)}\n\n"
+    out = "{out}{assistant_text_timeline(snapshot, config)}\n\n"
+    out = "{out}{assistant_text_tree(snapshot, config)}\n"
+    if snapshot.warnings.len() > 0:
+        out = "{out}\n{assistant_text_warnings(snapshot)}\n"
+    out
+
+fn render_assistant_html(snapshot: AssistantDashboardSnapshot, config: RenderConfig) -> text:
+    var h = assistant_html_head("Assistant Dashboard")
+    h = "{h}<body>\n<div class=\"container\">\n"
+    h = "{h}{assistant_html_header(snapshot)}"
+    h = "{h}{assistant_html_overview(snapshot)}"
+    h = "{h}{assistant_html_sessions(snapshot, config)}"
+    h = "{h}{assistant_html_timeline(snapshot, config)}"
+    h = "{h}{assistant_html_tree(snapshot, config)}"
+    if snapshot.warnings.len() > 0:
+        h = "{h}{assistant_html_warnings(snapshot)}"
+    h = "{h}</div>\n</body>\n</html>\n"
+    h
+
+# =========================================================================
+# Text Rendering
+# =========================================================================
+
+fn assistant_text_header(snapshot: AssistantDashboardSnapshot) -> text:
+    var out = ""
+    out = "{out}{BOLD}{CYAN}Assistant Dashboard{RESET}\n"
+    out = "{out}Source: {snapshot.source_label} | State: {assistant_surface_label(snapshot.surface_state)} | Selected: {assistant_short_id(snapshot.selected_session_id)}"
+    out
+
+fn assistant_text_overview(snapshot: AssistantDashboardSnapshot) -> text:
+    var out = ""
+    out = "{out}{BOLD}Overview{RESET}\n"
+    out = "{out}  Sessions: {snapshot.total_sessions}  Live: {snapshot.live_sessions}  Replay: {snapshot.replay_sessions}  Degraded: {snapshot.degraded_sessions}\n"
+    out = "{out}  Events: {snapshot.total_events}\n"
+    out = "{out}  Collected: {snapshot.collected_at}\n"
+    if snapshot.selected_session_id != "":
+        val session = assistant_session_by_id(snapshot.sessions, snapshot.selected_session_id)
+        if session != nil:
+            out = "{out}  Focus: {assistant_session_summary(session)}\n"
+    out
+
+fn assistant_text_sessions(snapshot: AssistantDashboardSnapshot, config: RenderConfig) -> text:
+    var out = "{BOLD}Sessions{RESET}\n"
+    if snapshot.sessions.len() == 0:
+        out = "{out}  No assistant sessions found.\n"
+        return out
+
+    var tb = TableBuilder.new(["Session", "State", "Source", "Parent", "Title", "Turns", "Last Event"])
+    tb = tb.set_max_width(0, 16)
+    tb = tb.set_max_width(1, 10)
+    tb = tb.set_max_width(2, 10)
+    tb = tb.set_max_width(3, 12)
+    tb = tb.set_max_width(4, 34)
+    tb = tb.set_max_width(5, 8)
+    tb = tb.set_max_width(6, 28)
+
+    val limit = assistant_render_limit(config, snapshot.sessions.len())
+    var i = 0
+    for session in snapshot.sessions:
+        if i >= limit:
+            break
+        tb = tb.add_row([
+            assistant_short_id(session.session_id),
+            assistant_plain_state(session.session_state),
+            assistant_plain_source(session.source_state),
+            assistant_short_id(session.parent_session_id),
+            assistant_short_text(session.title, 34),
+            "{session.turn_count}",
+            assistant_short_text(session.last_event_detail, 28)
+        ])
+        i = i + 1
+
+    out = "{out}{tb.build()}"
+    out
+
+fn assistant_text_timeline(snapshot: AssistantDashboardSnapshot, config: RenderConfig) -> text:
+    var out = "{BOLD}Recent Timeline{RESET}\n"
+    if snapshot.timeline.len() == 0:
+        out = "{out}  No timeline events available for the selected session.\n"
+        return out
+
+    var tb = TableBuilder.new(["Time", "Kind", "Severity", "Title", "Detail"])
+    tb = tb.set_max_width(0, 12)
+    tb = tb.set_max_width(1, 14)
+    tb = tb.set_max_width(2, 10)
+    tb = tb.set_max_width(3, 30)
+    tb = tb.set_max_width(4, 40)
+
+    val limit = assistant_render_limit(config, snapshot.timeline.len())
+    var i = 0
+    for event in snapshot.timeline:
+        if i >= limit:
+            break
+        tb = tb.add_row([
+            assistant_short_text(event.timestamp, 12),
+            assistant_short_text(event.kind, 14),
+            assistant_short_text(event.severity, 10),
+            assistant_short_text(event.title, 30),
+            assistant_short_text(event.detail, 40)
+        ])
+        i = i + 1
+
+    out = "{out}{tb.build()}"
+    out
+
+fn assistant_text_tree(snapshot: AssistantDashboardSnapshot, config: RenderConfig) -> text:
+    var out = "{BOLD}Child Task Tree{RESET}\n"
+    val roots = assistant_root_sessions(snapshot)
+    if roots.len() == 0:
+        out = "{out}  No task tree available.\n"
+        return out
+
+    var lines: [text] = []
+    val depth_limit = assistant_tree_depth_limit(config)
+    for root in roots:
+        assistant_append_tree_lines(snapshot, root, 0, depth_limit, lines, [])
+    for line in lines:
+        out = "{out}{line}\n"
+    out
+
+fn assistant_text_warnings(snapshot: AssistantDashboardSnapshot) -> text:
+    var out = "{BOLD}{YELLOW}Warnings{RESET}\n"
+    for warning in snapshot.warnings:
+        out = "{out}  {warning}\n"
+    out
+
+# =========================================================================
+# HTML Rendering
+# =========================================================================
+
+fn assistant_html_header(snapshot: AssistantDashboardSnapshot) -> text:
+    var h = ""
+    h = "{h}<h1>Assistant Dashboard</h1>\n"
+    h = "{h}<div class=\"subtitle\">Source: {snapshot.source_label} | State: {assistant_surface_label(snapshot.surface_state)} | Selected: {assistant_short_id(snapshot.selected_session_id)}</div>\n"
+    h
+
+fn assistant_html_overview(snapshot: AssistantDashboardSnapshot) -> text:
+    val live_pct = if snapshot.total_sessions > 0: (snapshot.live_sessions * 100) / snapshot.total_sessions else: 0
+    val replay_pct = if snapshot.total_sessions > 0: (snapshot.replay_sessions * 100) / snapshot.total_sessions else: 0
+    val degraded_pct = if snapshot.total_sessions > 0: (snapshot.degraded_sessions * 100) / snapshot.total_sessions else: 0
+    val live_css = threshold_css_color(live_pct as f64)
+    val replay_css = threshold_css_color(replay_pct as f64)
+    val degraded_css = threshold_css_color(degraded_pct as f64)
+
+    var h = "<div class=\"card-grid\">"
+    h = "{h}<div class=\"card\"><h3>Sessions</h3><div class=\"value\">{snapshot.total_sessions}</div><div class=\"sub\">Collected {snapshot.collected_at}</div></div>"
+    h = "{h}<div class=\"card\"><h3>Live</h3><div class=\"value\" style=\"color:{live_css}\">{snapshot.live_sessions}</div><div class=\"sub\">{live_pct}% of sessions</div></div>"
+    h = "{h}<div class=\"card\"><h3>Replay</h3><div class=\"value\" style=\"color:{replay_css}\">{snapshot.replay_sessions}</div><div class=\"sub\">{replay_pct}% of sessions</div></div>"
+    h = "{h}<div class=\"card\"><h3>Degraded</h3><div class=\"value\" style=\"color:{degraded_css}\">{snapshot.degraded_sessions}</div><div class=\"sub\">{degraded_pct}% of sessions</div></div>"
+    h = "{h}<div class=\"card\"><h3>Events</h3><div class=\"value\">{snapshot.total_events}</div><div class=\"sub\">Recent timeline and task tree are derived from transcript replay</div></div>"
+    h = "{h}</div>"
+    if snapshot.selected_session_id != "":
+        val session = assistant_session_by_id(snapshot.sessions, snapshot.selected_session_id)
+        if session != nil:
+            h = "{h}<div class=\"card\" style=\"margin-top:12px\"><div class=\"section-title\">Focused Session</div><div class=\"sub\">{assistant_session_summary_html(session)}</div></div>"
+    h
+
+fn assistant_html_sessions(snapshot: AssistantDashboardSnapshot, config: RenderConfig) -> text:
+    if snapshot.sessions.len() == 0:
+        return "<div class=\"card\" style=\"margin-top:12px\"><div class=\"section-title\">Sessions</div><div class=\"empty-state\">No assistant sessions found.</div></div>"
+
+    var rows: [[text]] = []
+    val limit = assistant_render_limit(config, snapshot.sessions.len())
+    var i = 0
+    for session in snapshot.sessions:
+        if i >= limit:
+            break
+        rows.push([
+            assistant_short_id(session.session_id),
+            assistant_session_badge(session.session_state),
+            assistant_source_badge(session.source_state),
+            assistant_short_id(session.parent_session_id),
+            assistant_short_text(session.title, 42),
+            "{session.children.len()}",
+            assistant_short_text(session.last_event_detail, 32)
+        ])
+        i = i + 1
+
+    var h = "<div class=\"card\" style=\"margin-top:12px\">"
+    h = "{h}<div class=\"section-title\">Sessions <span class=\"count\">{snapshot.sessions.len()}</span></div>"
+    h = "{h}{render_html_table_limited([\"Session\", \"State\", \"Source\", \"Parent\", \"Title\", \"Children\", \"Last Event\"], rows, 24)}"
+    h = "{h}</div>"
+    h
+
+fn assistant_html_timeline(snapshot: AssistantDashboardSnapshot, config: RenderConfig) -> text:
+    if snapshot.timeline.len() == 0:
+        return "<div class=\"card\" style=\"margin-top:12px\"><div class=\"section-title\">Recent Timeline</div><div class=\"empty-state\">No timeline events available for the selected session.</div></div>"
+
+    var rows: [[text]] = []
+    val limit = assistant_render_limit(config, snapshot.timeline.len())
+    var i = 0
+    for event in snapshot.timeline:
+        if i >= limit:
+            break
+        rows.push([
+            assistant_short_text(event.timestamp, 12),
+            assistant_short_text(event.kind, 16),
+            assistant_short_text(event.severity, 10),
+            assistant_short_text(event.title, 42),
+            assistant_short_text(event.detail, 56)
+        ])
+        i = i + 1
+
+    var h = "<div class=\"card\" style=\"margin-top:12px\">"
+    h = "{h}<div class=\"section-title\">Recent Timeline <span class=\"count\">{snapshot.timeline.len()}</span></div>"
+    h = "{h}{render_html_table_limited([\"Time\", \"Kind\", \"Severity\", \"Title\", \"Detail\"], rows, 24)}"
+    h = "{h}</div>"
+    h
+
+fn assistant_html_tree(snapshot: AssistantDashboardSnapshot, config: RenderConfig) -> text:
+    val roots = assistant_root_sessions(snapshot)
+    if roots.len() == 0:
+        return "<div class=\"card\" style=\"margin-top:12px\"><div class=\"section-title\">Child Task Tree</div><div class=\"empty-state\">No task tree available.</div></div>"
+
+    var h = "<div class=\"card\" style=\"margin-top:12px\">"
+    h = "{h}<div class=\"section-title\">Child Task Tree <span class=\"count\">{roots.len()} roots</span></div>"
+    val depth_limit = assistant_tree_depth_limit(config)
+    for root in roots:
+        h = "{h}{assistant_tree_node_html(snapshot, root, 0, depth_limit, [])}"
+    h = "{h}</div>"
+    h
+
+fn assistant_html_warnings(snapshot: AssistantDashboardSnapshot) -> text:
+    var h = "<div class=\"card\" style=\"margin-top:12px\">"
+    h = "{h}<div class=\"section-title\">Warnings</div>"
+    for warning in snapshot.warnings:
+        h = "{h}<div class=\"alert alert-warning\">{warning}</div>"
+    h = "{h}</div>"
+    h
+
+fn assistant_tree_node_html(snapshot: AssistantDashboardSnapshot, session: AssistantSession, depth: i64, depth_limit: i64, visited: [text]) -> text:
+    if depth > depth_limit:
+        return ""
+    if assistant_contains_text(visited, session.session_id):
+        return ""
+
+    var next_visited = visited
+    next_visited.push(session.session_id)
+
+    var h = "<div class=\"tree-node\" style=\"margin-left:{depth * 18}px\">"
+    h = "{h}<div class=\"tree-line\">{assistant_session_badge(session.session_state)} <strong>{assistant_short_text(session.title, 48)}</strong> <span class=\"muted\">{assistant_short_id(session.session_id)}</span></div>"
+    h = "{h}<div class=\"tree-meta\">{assistant_session_summary_html(session)}</div>"
+    val children = assistant_child_sessions(snapshot, session)
+    for child in children:
+        h = "{h}{assistant_tree_node_html(snapshot, child, depth + 1, depth_limit, next_visited)}"
+    h = "{h}</div>"
+    h
+
+# =========================================================================
+# Shared Helpers
+# =========================================================================
+
+fn assistant_session_summary(session: AssistantSession) -> text:
+    var out = ""
+    out = "{out}{assistant_state_label(session.session_state)} {assistant_source_label(session.source_state)}"
+    if session.provider != "":
+        out = "{out} | {session.provider}"
+    if session.model != "":
+        out = "{out} | {assistant_short_text(session.model, 28)}"
+    if session.last_event_kind != "":
+        out = "{out} | {session.last_event_kind}"
+    if session.last_event_time != "":
+        out = "{out} | {session.last_event_time}"
+    out
+
+fn assistant_session_summary_html(session: AssistantSession) -> text:
+    var out = ""
+    out = "{out}{assistant_plain_state(session.session_state)} {assistant_plain_source(session.source_state)}"
+    if session.provider != "":
+        out = "{out} | {session.provider}"
+    if session.model != "":
+        out = "{out} | {assistant_short_text(session.model, 28)}"
+    if session.last_event_kind != "":
+        out = "{out} | {session.last_event_kind}"
+    if session.last_event_time != "":
+        out = "{out} | {session.last_event_time}"
+    out
+
+fn assistant_surface_label(surface_state: text) -> text:
+    match surface_state:
+        "live" => colorize("LIVE", GREEN)
+        "replay" => colorize("REPLAY", CYAN)
+        "degraded" => colorize("DEGRADED", RED)
+        _ => colorize(surface_state.to_upper(), YELLOW)
+
+fn assistant_state_label(state: text) -> text:
+    match state:
+        "live" => colorize("LIVE", GREEN)
+        "active" => colorize("ACTIVE", YELLOW)
+        "completed" => colorize("DONE", GREEN)
+        "failed" => colorize("FAILED", RED)
+        "stale" => colorize("STALE", DIM)
+        "degraded" => colorize("DEGRADED", RED)
+        _ => colorize(state.to_upper(), CYAN)
+
+fn assistant_source_label(state: text) -> text:
+    match state:
+        "live" => colorize("LIVE", GREEN)
+        "replay" => colorize("REPLAY", CYAN)
+        "degraded" => colorize("DEGRADED", RED)
+        _ => colorize(state.to_upper(), YELLOW)
+
+fn assistant_session_badge(state: text) -> text:
+    html_badge(assistant_plain_state(state), assistant_state_css(state))
+
+fn assistant_source_badge(state: text) -> text:
+    html_badge(assistant_plain_source(state), assistant_source_css(state))
+
+fn assistant_state_css(state: text) -> text:
+    match state:
+        "live" => "badge-green"
+        "active" => "badge-yellow"
+        "completed" => "badge-green"
+        "failed" => "badge-red"
+        "stale" => "badge-dim"
+        "degraded" => "badge-red"
+        _ => "badge-blue"
+
+fn assistant_source_css(state: text) -> text:
+    match state:
+        "live" => "badge-green"
+        "replay" => "badge-blue"
+        "degraded" => "badge-red"
+        _ => "badge-yellow"
+
+fn assistant_plain_state(state: text) -> text:
+    match state:
+        "live" => "LIVE"
+        "active" => "ACTIVE"
+        "completed" => "DONE"
+        "failed" => "FAILED"
+        "stale" => "STALE"
+        "degraded" => "DEGRADED"
+        _ => state.to_upper()
+
+fn assistant_plain_source(state: text) -> text:
+    match state:
+        "live" => "LIVE"
+        "replay" => "REPLAY"
+        "degraded" => "DEGRADED"
+        _ => state.to_upper()
+
+fn assistant_short_id(value: text) -> text:
+    assistant_short_text(value, 12)
+
+fn assistant_short_text(value: text, max_len: i64) -> text:
+    val trimmed = value.trim().replace("\n", " ")
+    if trimmed.len() <= max_len:
+        return trimmed
+    if max_len <= 3:
+        return trimmed.slice(0, max_len)
+    trimmed.slice(0, max_len - 3) + "..."
+
+fn assistant_render_limit(config: RenderConfig, max_available: i64) -> i64:
+    val target = if config.height > 0: config.height - 10 else: 16
+    if max_available < 6:
+        return max_available
+    if target < 6:
+        return 6
+    if target > max_available:
+        return max_available
+    target
+
+fn assistant_tree_depth_limit(config: RenderConfig) -> i64:
+    if config.height > 0:
+        val limit = config.height / 4
+        if limit < 3:
+            return 3
+        if limit > 8:
+            return 8
+        return limit
+    5
+
+fn assistant_contains_text(values: [text], value: text) -> bool:
+    for item in values:
+        if item == value:
+            return true
+    false
+
+fn assistant_root_sessions(snapshot: AssistantDashboardSnapshot) -> [AssistantSession]:
+    var roots: [AssistantSession] = []
+    for session in snapshot.sessions:
+        if session.parent_session_id == "":
+            roots.push(session)
+    if roots.len() == 0 and snapshot.sessions.len() > 0:
+        roots.push(snapshot.sessions[0])
+    roots
+
+fn assistant_child_sessions(snapshot: AssistantDashboardSnapshot, session: AssistantSession) -> [AssistantSession]:
+    var children: [AssistantSession] = []
+    for child_id in session.children:
+        val child = assistant_session_by_id(snapshot.sessions, child_id)
+        if child != nil:
+            children.push(child)
+    children
+
+fn assistant_append_tree_lines(snapshot: AssistantDashboardSnapshot, session: AssistantSession, depth: i64, depth_limit: i64, lines: [text], visited: [text]):
+    if depth > depth_limit:
+        return
+    if assistant_contains_text(visited, session.session_id):
+        return
+
+    var next_visited = visited
+    next_visited.push(session.session_id)
+
+    var indent = ""
+    var i = 0
+    while i < depth:
+        indent = "{indent}  "
+        i = i + 1
+
+    val prefix = if depth == 0: ">" else: "|-"
+    var line = "{indent}{prefix} {assistant_state_label(session.session_state)} {assistant_short_text(session.title, 44)}"
+    if session.children.len() > 0:
+        line = "{line} {DIM}[{session.children.len()} children]{RESET}"
+    lines.push(line)
+
+    val children = assistant_child_sessions(snapshot, session)
+    for child in children:
+        assistant_append_tree_lines(snapshot, child, depth + 1, depth_limit, lines, next_visited)
+
+# =========================================================================
+# HTML Helpers
+# =========================================================================
+
+fn assistant_html_head(title: text) -> text:
+    var h = "<!DOCTYPE html>\n<html>\n<head>\n<meta charset=\"utf-8\">\n"
+    h = "{h}<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n"
+    h = "{h}<title>{title}</title>\n"
+    h = "{h}<style>\n"
+    h = "{h}body{{font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; margin:0; background: #0d1117; color:#c9d1d9;}}\n"
+    h = "{h}.container{{max-width:1200px; margin:0 auto; padding:24px;}}\n"
+    h = "{h}.card{{background:#161b22; border:1px solid #30363d; border-radius:12px; padding:16px; box-shadow:0 8px 24px rgba(1,4,9,.18);}}\n"
+    h = "{h}.card-grid{{display:grid; gap:12px; grid-template-columns:repeat(auto-fit,minmax(180px,1fr));}}\n"
+    h = "{h}.value{{font-size:28px; font-weight:700; margin-top:6px;}}\n"
+    h = "{h}.sub,.muted,.tree-meta,.subtitle{{color:#8b949e; font-size:12px; line-height:1.5;}}\n"
+    h = "{h}.section-title{{display:flex; justify-content:space-between; align-items:center; margin-bottom:10px; font-weight:700;}}\n"
+    h = "{h}.count{{color:#8b949e; font-size:12px;}}\n"
+    h = "{h}.tree-node{{padding:8px 10px; border-left:2px solid #30363d; margin-top:4px;}}\n"
+    h = "{h}.tree-line{{font-size:13px;}}\n"
+    h = "{h}.alert{{padding:10px 12px; border-radius:8px; margin-top:8px;}}\n"
+    h = "{h}.alert-warning{{background:rgba(210,153,34,.12); color:#d29922;}}\n"
+    h = "{h}.alert-critical{{background:rgba(248,81,73,.12); color:#f85149;}}\n"
+    h = "{h}.empty-state{{padding:18px; color:#8b949e; text-align:center; border:1px dashed #30363d; border-radius:8px;}}\n"
+    h = "{h}.badge{{display:inline-block; padding:2px 7px; border-radius:999px; font-size:11px; font-weight:700; text-transform:uppercase; letter-spacing:.02em;}}\n"
+    h = "{h}.badge-green{{background:rgba(63,185,80,.15); color:#3fb950;}}\n"
+    h = "{h}.badge-yellow{{background:rgba(210,153,34,.15); color:#d29922;}}\n"
+    h = "{h}.badge-red{{background:rgba(248,81,73,.15); color:#f85149;}}\n"
+    h = "{h}.badge-blue{{background:rgba(88,166,255,.15); color:#58a6ff;}}\n"
+    h = "{h}.badge-dim{{background:rgba(139,148,158,.15); color:#8b949e;}}\n"
+    h = "{h}.data-table{{width:100%; border-collapse:collapse; font-size:12px;}}\n"
+    h = "{h}.data-table th,.data-table td{{border-bottom:1px solid #30363d; padding:8px 6px; text-align:left; vertical-align:top;}}\n"
+    h = "{h}.data-table th{{color:#8b949e; font-weight:700;}}\n"
+    h = "{h}</style>\n</head>\n"
+    h
+
+# =========================================================================
+# Exports
+# =========================================================================
