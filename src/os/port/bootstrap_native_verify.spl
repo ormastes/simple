@@ -191,17 +191,33 @@ fn main() -> i32:
             return 6
 
 # ============================================================================
-# IF-09 Public API — verify_native_convergence (wave-3 scaffold)
+# IF-09 Public API — verify_native_convergence (wave-4 ELF symbol comparison)
 # ============================================================================
+
+val INTERESTING_PREFIXES: [text] = ["spl_handle_", "simpleos_", "rt_"]
 
 fn verify_native_convergence(stage2: text, stage3: text) -> Result<(), text>:
     """Convergence predicate consumed by native_convergence_spec.spl.
 
-    Wave-3 scaffold: byte-equality. Wave-4 parses the blobs as ELF,
-    extracts symbol tables, and compares the exported set via
-    count_symbols_matching (IF-09).
+    Wave-4: fast-path byte-equality, then ELF symbol-table comparison for
+    the prefixes spl_handle_, simpleos_, and rt_ via count_symbols_matching
+    (IF-09). Returns Err on any count divergence or unreadable file.
     """
     if stage2 == stage3:
-        Ok(())
-    else:
-        Err("stage2 != stage3 (wave-3 byte-equality scaffold; wave-4 compares symbol tables)")
+        return Ok(())
+    match fs.read_bytes(stage2):
+        nil:
+            return Err("could not read stage2: {stage2}")
+        bytes_a:
+            match fs.read_bytes(stage3):
+                nil:
+                    return Err("could not read stage3: {stage3}")
+                bytes_b:
+                    if bytes_a == bytes_b:
+                        return Ok(())
+                    for prefix in INTERESTING_PREFIXES:
+                        val count_a = count_symbols_matching(bytes_a, prefix)
+                        val count_b = count_symbols_matching(bytes_b, prefix)
+                        if count_a != count_b:
+                            return Err("symbol-table divergence: prefix '{prefix}' stage2={count_a} stage3={count_b}")
+                    Ok(())
