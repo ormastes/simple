@@ -5,7 +5,6 @@
 
 use std.nogc_sync_mut.io.tcp.{TcpStream}
 use common.ui.widget.{UIState, UIEvent}
-use common.string_core.{char_from_code}
 use app.ui.render.widgets.{render_html_tree}
 use app.ui.ipc.protocol.{build_ipc_open_window}
 # Use runtime SHA-1/base64 directly to avoid as_bytes() interpreter limitation
@@ -13,6 +12,7 @@ extern fn rt_sha1_new() -> i64
 extern fn rt_sha1_write(handle: i64, data: text) -> i64
 extern fn rt_sha1_finish_base64(handle: i64) -> text
 extern fn rt_sha1_free(handle: i64)
+extern fn rt_text_to_bytes(s: text) -> [u8]
 
 # =========================================================================
 # WebSocket Upgrade
@@ -71,23 +71,36 @@ fn compute_ws_accept(key: text) -> text:
 # WebSocket Frame Operations
 # =========================================================================
 
-fn send_ws_text(stream: TcpStream, message: text):
-    """Send a text frame over WebSocket."""
-    val len = message.len()
+fn send_ws_text(stream: TcpStream, message: text) -> bool:
+    """Send a text frame over WebSocket as raw bytes.
 
-    # Build frame header
-    var header = ""
-    # Opcode 0x81 = final frame + text
-    header = "{header}\u{0081}"
+    Browser clients validate RFC6455 frame bytes strictly; `write_text()`
+    corrupts the 0x81 frame header because it encodes the header as text.
+    """
+    val payload = rt_text_to_bytes(message)
+    val len = payload.len()
+    var frame: [u8] = [0x81u8]
 
     if len < 126:
-        header = "{header}{chr(len)}"
+        frame = frame + [len.to_u8()]
     elif len < 65536:
-        header = "{header}\u{007e}"
-        header = "{header}{chr(len / 256)}"
-        header = "{header}{chr(len - ((len / 256) * 256))}"
+        frame = frame + [126u8]
+        frame = frame + [((len / 256) & 0xFF).to_u8()]
+        frame = frame + [(len & 0xFF).to_u8()]
+    else:
+        frame = frame + [127u8]
+        frame = frame + [0u8, 0u8, 0u8, 0u8]
+        frame = frame + [((len / 16777216) & 0xFF).to_u8()]
+        frame = frame + [((len / 65536) & 0xFF).to_u8()]
+        frame = frame + [((len / 256) & 0xFF).to_u8()]
+        frame = frame + [(len & 0xFF).to_u8()]
 
-    stream.write_text("{header}{message}")
+    frame = frame + payload
+    match stream.write_all(frame):
+        Err(_):
+            return false
+        Ok(()):
+            return true
 
 fn escape_json_string(s: text) -> text:
     """Escape a string for JSON embedding."""
@@ -110,10 +123,6 @@ fn escape_json_string(s: text) -> text:
                 result = "{result}{ch}"
         i = i + 1
     return result
-
-fn chr(code: i32) -> text:
-    """Convert integer byte code to single character for WebSocket framing."""
-    return char_from_code(code as i64)
 
 # =========================================================================
 # Window Manager WebSocket Handler
