@@ -322,6 +322,76 @@ src/app/wm_compare/                # Cross-backend parity harness
 See [`doc/03_plan/gui_drawing_layer_variations.md`](../03_plan/gui_drawing_layer_variations.md)
 for the gap-by-gap work plan.
 
+## FFI Coverage Matrix
+
+The hosted runtime (`src/runtime/hosted/`) exports `rt_*` SFFI primitives for
+per-platform native surfaces and optional GPU/JS backends. Every symbol has a
+stub implementation compiled by default; opting into a real backend requires
+the corresponding Cargo feature flag, which also enables the optional crate
+dependency:
+
+| Feature flag     | Crate dependency pulled in | Symbols affected              |
+|------------------|----------------------------|-------------------------------|
+| `cocoa-real`     | `objc2-app-kit`            | `rt_cocoa_*`                  |
+| `win32-real`     | `windows-sys`              | `rt_win32_*`                  |
+| `webgpu-real`    | `wgpu` + `pollster`        | `rt_webgpu_*`                 |
+| `test262-real`   | `rquickjs`                 | `rt_test262_eval`, `_list_cases`, `_case_path` |
+
+Legend: ✅ real — 🟡 stub — ❌ unavailable (feature/platform mismatch at link time).
+
+| Primitive                       | Linux | macOS | Windows | FreeBSD | Feature flag   | Status                          |
+|---------------------------------|:-----:|:-----:|:-------:|:-------:|----------------|---------------------------------|
+| **Cocoa surface**               |       |       |         |         |                |                                 |
+| `rt_cocoa_window_new`           | ❌    | ✅    | ❌      | ❌      | `cocoa-real`   | NSWindow + NSImageView          |
+| `rt_cocoa_window_resize`        | ❌    | ✅    | ❌      | ❌      | `cocoa-real`   |                                 |
+| `rt_cocoa_window_close`         | ❌    | ✅    | ❌      | ❌      | `cocoa-real`   |                                 |
+| `rt_cocoa_event_pump`           | ❌    | ✅    | ❌      | ❌      | `cocoa-real`   | NSRunLoop tick                  |
+| `rt_cocoa_layer_create`         | ❌    | ✅    | ❌      | ❌      | `cocoa-real`   | NSBitmapImageRep                |
+| `rt_cocoa_layer_free`           | ❌    | ✅    | ❌      | ❌      | `cocoa-real`   |                                 |
+| `rt_cocoa_layer_present`        | ❌    | ✅    | ❌      | ❌      | `cocoa-real`   | blit to NSImageView             |
+| `rt_cocoa_layer_fill_rect`      | ❌    | ✅    | ❌      | ❌      | `cocoa-real`   |                                 |
+| `rt_cocoa_layer_blend_rect`     | ❌    | ✅    | ❌      | ❌      | `cocoa-real`   |                                 |
+| `rt_cocoa_layer_gradient_v`     | ❌    | ✅    | ❌      | ❌      | `cocoa-real`   |                                 |
+| `rt_cocoa_layer_blur`           | ❌    | ✅    | ❌      | ❌      | `cocoa-real`   | CPU 3×3 box kernel              |
+| `rt_cocoa_layer_read_pixel`     | ❌    | ✅    | ❌      | ❌      | `cocoa-real`   |                                 |
+| **Win32 surface**               |       |       |         |         |                |                                 |
+| `rt_win32_window_new`           | ❌    | ❌    | ✅      | ❌      | `win32-real`   | HWND via CreateWindowExW        |
+| `rt_win32_window_resize`        | ❌    | ❌    | ✅      | ❌      | `win32-real`   |                                 |
+| `rt_win32_window_close`         | ❌    | ❌    | ✅      | ❌      | `win32-real`   |                                 |
+| `rt_win32_message_pump`         | ❌    | ❌    | ✅      | ❌      | `win32-real`   | PeekMessage tick                |
+| `rt_win32_dib_create`           | ❌    | ❌    | ✅      | ❌      | `win32-real`   | CreateDIBSection                |
+| `rt_win32_dib_free`             | ❌    | ❌    | ✅      | ❌      | `win32-real`   |                                 |
+| `rt_win32_dib_resize`           | ❌    | ❌    | ✅      | ❌      | `win32-real`   |                                 |
+| `rt_win32_dib_present`          | ❌    | ❌    | ✅      | ❌      | `win32-real`   | BitBlt to HWND DC               |
+| `rt_win32_dib_present_rect`     | ❌    | ❌    | ✅      | ❌      | `win32-real`   |                                 |
+| `rt_win32_dib_fill_rect`        | ❌    | ❌    | ✅      | ❌      | `win32-real`   |                                 |
+| `rt_win32_dib_blend_rect`       | ❌    | ❌    | ✅      | ❌      | `win32-real`   |                                 |
+| `rt_win32_dib_gradient_v`       | ❌    | ❌    | ✅      | ❌      | `win32-real`   |                                 |
+| `rt_win32_dib_blur`             | ❌    | ❌    | ✅      | ❌      | `win32-real`   | CPU 3×3 box kernel              |
+| `rt_win32_dib_read_pixel`       | ❌    | ❌    | ✅      | ❌      | `win32-real`   |                                 |
+| **WebGPU**                      |       |       |         |         |                |                                 |
+| `rt_webgpu_is_available`        | 🟡/✅ | 🟡/✅ | 🟡/✅   | 🟡/✅   | `webgpu-real`  | wgpu adapter probe when real    |
+| `rt_webgpu_init`                | 🟡/✅ | 🟡/✅ | 🟡/✅   | 🟡/✅   | `webgpu-real`  | Instance + Adapter + Device     |
+| `rt_webgpu_shutdown`            | 🟡/✅ | 🟡/✅ | 🟡/✅   | 🟡/✅   | `webgpu-real`  |                                 |
+| `rt_webgpu_create_surface`      | 🟡/✅ | 🟡/✅ | 🟡/✅   | 🟡/✅   | `webgpu-real`  |                                 |
+| `rt_webgpu_destroy_surface`     | 🟡/✅ | 🟡/✅ | 🟡/✅   | 🟡/✅   | `webgpu-real`  |                                 |
+| `rt_webgpu_upload_pixels`       | 🟡/✅ | 🟡/✅ | 🟡/✅   | 🟡/✅   | `webgpu-real`  | writeTexture fallback           |
+| `rt_webgpu_present`             | 🟡/✅ | 🟡/✅ | 🟡/✅   | 🟡/✅   | `webgpu-real`  | compute-draw shader when real   |
+| **JS / test262**                |       |       |         |         |                |                                 |
+| `rt_test262_eval`               | 🟡/✅ | 🟡/✅ | 🟡/✅   | 🟡/✅   | `test262-real` | rquickjs when real              |
+| `rt_test262_list_cases`         | 🟡/✅ | 🟡/✅ | 🟡/✅   | 🟡/✅   | `test262-real` | directory walk when real        |
+| `rt_test262_case_path`          | 🟡/✅ | 🟡/✅ | 🟡/✅   | 🟡/✅   | `test262-real` | thread-local corpus when real   |
+| `rt_test262_load_corpus`        | 🟡    | 🟡    | 🟡      | 🟡      | —              | stub until corpus manifest lands |
+| `rt_test262_case_source`        | 🟡    | 🟡    | 🟡      | 🟡      | —              |                                 |
+| `rt_test262_case_negative`      | 🟡    | 🟡    | 🟡      | 🟡      | —              |                                 |
+| `rt_test262_case_count`         | 🟡    | 🟡    | 🟡      | 🟡      | —              |                                 |
+| `rt_test262_corpus_free`        | 🟡    | 🟡    | 🟡      | 🟡      | —              |                                 |
+
+Linux and FreeBSD use `winit_ffi` for native surfaces; Cocoa and Win32 entries are
+❌ on the other platforms because the corresponding crates do not link there.
+WebGPU is cross-platform so it lists both stub (🟡) and real (✅) outcomes — the
+effective state depends on whether `webgpu-real` is enabled at build time.
+
 ## Winit FFI Functions Used
 
 Already in `winit_ffi.rs`:
