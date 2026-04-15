@@ -1,8 +1,8 @@
 # Drawing Stack Parity Matrix — Simple vs Chromium
 
-**Updated:** 2026-04-14  
-**Branch:** renderer-phase-5-6  
-**Total tests passing:** 224 (Phases 1–6) + Phase 8 additions (≥13 new `it` blocks)
+**Updated:** 2026-04-15  
+**Branch:** renderer-phase-5-6 (worktree)  
+**Total tests passing:** 224 (Phases 1–6) + ~225 new `it` blocks across Waves 1–3 (W1: 63, W2: 54, W3: 48 + 11 self-goldens)
 
 ---
 
@@ -21,13 +21,17 @@
 | Phase | Files | LOC (approx) | Tests | Status |
 |-------|-------|--------------|-------|--------|
 | Phase 1 (Skia API) | 29 | ~1 800 | 158 | ✅ API surface; backend stub |
+| Phase 1 final (CPU + Vulkan backends, Waves 1–2) | 4 | ~1 520 | 31 | ✅ raster_prims, shaders, CpuBackend dispatch, Vulkan pipeline cache |
 | Phase 2 (blends/filters) | 9 | ~700 | 29 | ✅ |
+| Phase 3 (text shaper) | 9 | ~600 | 12 | ✅ landed (script_detect, feature_tags, font_fallback, identity shaper) |
+| Phase 3 final (Waves 1–3: OT parser + real shaper + AA glyph + LCD subpixel + COLRv1) | 5 | ~1 870 | 41 | ✅ ot_parser, rasterize, subpixel, real shaper (GSUB/GPOS/Arabic/Indic), colrv1 stub |
 | Phase 4 (PaintArtifact + PropertyTrees) | 3 | ~360 | 12 | ✅ |
 | Phase 5 (cc LayerTreeHost) | 6 | ~350 | 17 | ✅ |
 | Phase 6 (viz CompositorFrame) | 7 | ~300 | 25 | ✅ |
-| Phase 3 (text shaper) | 9 | TBD | TBD | landing in parallel |
-| Phase 7 (content + gui) | 10 | TBD | TBD | landing in parallel |
-| Phase 8 (reftest harness) | 15 | ~700 | 13+ | this task |
+| Phase 6 final (Waves 1–3: aggregator walker + compose + damage) | 3 | ~555 | 30 | ✅ aggregator_walker, aggregator_compose, damage |
+| Phase 7 (content + gui) | 10 | ~640 | 14 | ✅ landed |
+| Phase 8 (reftest harness) | 15 | ~700 | 13 | ✅ |
+| Phase 8 final (Waves 1, 3: pixel-diff core + real diff + 11 scenes + 11 goldens) | 26 | ~990 | 28 | ✅ pixel_diff_core, pixel_diff, scenes/, goldens/ |
 
 ---
 
@@ -116,8 +120,8 @@
 | PropertyTrees (effect) | `cc::EffectTree` | ✅ impl | `src/lib/cc/entity/property_tree.spl` |
 | PropertyTrees (clip) | `cc::ClipTree` | ✅ impl | `src/lib/cc/entity/property_tree.spl` |
 | PropertyTrees (scroll) | `cc::ScrollTree` | 🟢 partial | `src/lib/cc/entity/property_tree.spl` |
-| DisplayItemList | `cc::DisplayItemList` | 🚧 Phase 7 | — |
-| PaintRecord | `cc::PaintRecord` | 🚧 Phase 7 | — |
+| DisplayItemList | `cc::DisplayItemList` | 🟢 partial (SkPicture.ops list) | `src/lib/skia/entity/picture.spl` |
+| PaintRecord | `cc::PaintRecord` | ✅ impl (SkPictureOp + 5 helper ctors) | `src/lib/skia/entity/picture.spl` |
 
 ---
 
@@ -128,10 +132,10 @@
 | LayerTreeHost | `cc::LayerTreeHost` | ✅ impl | `src/lib/cc/entity/layer.spl` |
 | Layer | `cc::Layer` | ✅ impl | `src/lib/cc/entity/layer.spl` |
 | PictureLayerImpl | `cc::PictureLayerImpl` | 🟢 partial | `src/lib/cc/entity/layer.spl` (verify) |
-| TileManager | `cc::TileManager` | 🚧 Phase 5 final | — |
-| RasterBufferProvider | `cc::RasterBufferProvider` | 🚧 Phase 5 final | — |
-| RasterSource | `cc::RasterSource` | 🚧 Phase 5 final | — |
-| DamageTracker | `cc::DamageTracker` | 🚧 Phase 8 final | — |
+| TileManager | `cc::TileManager` | ✅ impl | `src/lib/cc/feature/tile_manager.spl` |
+| RasterBufferProvider | `cc::RasterBufferProvider` | ✅ impl | `src/lib/cc/feature/raster_buffer_provider.spl` |
+| RasterSource | `cc::RasterSource` | ✅ impl | `src/lib/cc/feature/raster_source.spl` |
+| DamageTracker | `cc::DamageTracker` | ✅ impl (W3-6c) | `src/lib/viz/feature/damage.spl` |
 | AnimationHost | `cc::AnimationHost` | ❌ deferred | — |
 | Scheduler | `cc::Scheduler` | ❌ deferred | — |
 | BeginFrameSource | `viz::BeginFrameSource` | ❌ deferred | — |
@@ -147,10 +151,10 @@
 | DrawQuad (SolidColor) | `viz::SolidColorDrawQuad` | ✅ impl | `src/lib/viz/entity/compositor_frame.spl` (verify) |
 | DrawQuad (TileDrawQuad) | `viz::TileDrawQuad` | 🟢 partial | `src/lib/viz/entity/compositor_frame.spl` (verify) |
 | DrawQuad (TextureDrawQuad) | `viz::TextureDrawQuad` | 🟢 partial | `src/lib/viz/entity/compositor_frame.spl` (verify) |
-| DrawQuad (RenderPassDrawQuad) | `viz::CompositorRenderPassDrawQuad` | 🚧 Phase 6 final | — |
-| DrawQuad (VideoHoleDrawQuad) | `viz::VideoHoleDrawQuad` | ❌ deferred | — |
-| DrawQuad (YUVVideoDrawQuad) | `viz::YUVVideoDrawQuad` | ❌ deferred | — |
-| SurfaceAggregator | `viz::SurfaceAggregator` | 🚧 Phase 6 final | — |
+| DrawQuad (RenderPassDrawQuad) | `viz::CompositorRenderPassDrawQuad` | ✅ impl (W1-6a inlining) | `src/lib/viz/feature/aggregator_walker.spl` |
+| DrawQuad (VideoHoleDrawQuad) | `viz::VideoHoleDrawQuad` | ❌ out-of-scope | see `out_of_scope_register.md` |
+| DrawQuad (YUVVideoDrawQuad) | `viz::YUVVideoDrawQuad` | ❌ out-of-scope | see `out_of_scope_register.md` |
+| SurfaceAggregator | `viz::SurfaceAggregator` | ✅ impl (W1-6a walker + W2-6b compose) | `src/lib/viz/feature/aggregator_{walker,compose}.spl` |
 | DisplayCompositor | `viz::Display` | 🟢 partial | `src/lib/viz/entity/compositor_frame.spl` (verify) |
 | FrameSink | `viz::CompositorFrameSink` | ❌ deferred | — |
 
@@ -224,25 +228,29 @@ The following Chromium features have no coverage in any current or planned phase
 
 | Gap | Chromium area | Blocker |
 |-----|---------------|---------|
-| WebGL / WebGPU | `gpu::gles2`, `gpu::webgpu` | Needs real Vulkan backend (Phase 1 final) |
-| HDR / Display-P3 colour space | `gfx::ColorSpace`, `SkColorSpace` | No colour-managed surface stub yet |
-| COLRv1 emoji | `SkFontMgr` + OpenType COLRv1 | Needs Phase 3 text shaper final |
-| Variable fonts (OpenType fvar/gvar) | HarfBuzz variation | Phase 3 final |
-| Video decode (VAAPI/NVDEC) | `media::VideoDecoder` | Out of scope for drawing stack |
-| Real threaded compositor | `cc::Scheduler` + impl-thread | Needs async runtime integration |
-| Metal backend (macOS) | `GrMtlGpu` | Platform-specific; x86_64 QEMU target only |
-| Direct3D 12 backend (Windows) | `GrD3DGpu` | Platform-specific |
+| WebGL / WebGPU | `gpu::gles2`, `gpu::webgpu` | Out-of-scope (see register) — Vulkan landed without ANGLE-equivalent |
+| HDR / Display-P3 colour space | `gfx::ColorSpace`, `SkColorSpace` | Out-of-scope (see register) |
+| COLRv1 emoji (full paint-graph) | `SkFontMgr` + OpenType COLRv1 | 🟢 skeleton landed (W3-3f); paint-graph composition deferred |
+| Variable fonts (OpenType fvar/gvar) | HarfBuzz variation | 🟢 fvar axes parsed (W1-3a); avar mapping is identity stub |
+| Video decode (VAAPI/NVDEC) | `media::VideoDecoder` | Out-of-scope (see register) |
+| Real threaded compositor | `cc::Scheduler` + impl-thread | Out-of-scope (see register) |
+| Metal backend (macOS) | `GrMtlGpu` | Out-of-scope (see register) |
+| Direct3D 12 backend (Windows) | `GrD3DGpu` | Out-of-scope (see register) |
 | Ink Overflow / CSS Masking | `blink::MaskPainter` | Phase 7 |
 | CSS Container Queries | `blink::ContainerQueryEvaluator` | Phase 7 |
 | WebXR / Immersive AR | `device::mojom::XRDevice` | Deferred indefinitely |
 
 ---
 
-## 10. Next Landings
+## 10. Phase Finals — Status
 
-| Phase final | What it delivers |
-|-------------|-----------------|
-| **Phase 1 final** | CPU + Vulkan backends wired; `SkSurface::makeRasterN32Premul` returns real pixel buffer; `SkCanvas` ops actually rasterise |
-| **Phase 3 final** | HarfBuzz text shaper integration; `drawTextBlob` with real glyph positions; Arabic/CJK/Hebrew bidi; variable font support |
-| **Phase 6 final** | `SurfaceAggregator` produces merged `CompositorRenderPassDrawQuad`; `viz::Display` drives real swap chain |
-| **Phase 8 final** | `compare_pictures` replaced with real CPU raster + per-pixel delta; reference PNGs captured from headless Chromium 124; CI gate: ≤1% mismatched pixels per scene |
+| Phase final | Status (2026-04-15) | Implementation |
+|-------------|---------------------|----------------|
+| **Phase 1 final** | ✅ landed (Waves 1–2) | `raster_prims.spl` (analytic AA primitives), `shaders.spl` (gradient/image/blend eval), `backend.spl` (CpuBackend dispatch over SkPicture.ops), `vulkan/backend.spl` (PipelineKey cache, ear-clipping triangulation, CommandBufferRecord). Vulkan ioctl edge remains `pass_todo`. |
+| **Phase 3 final** | ✅ landed (Waves 1–3) | `ot_parser.spl` (cmap/glyf/hmtx/CFF/GSUB-GPOS skeleton/GDEF/fvar), `rasterize.spl` (analytic-AA scanline), `subpixel.spl` (FreeType 5-tap LCD filter + gamma), `shaper.spl` (script segmentation + GSUB/GPOS + Arabic joining + Devanagari Indic classification). COLRv1 paint-graph deferred. |
+| **Phase 6 final** | ✅ landed (Waves 1–3) | `aggregator_walker.spl` (BFS surface walk + inline_render_pass with sqs remap), `aggregator_compose.spl` (Matrix3x3 mul, clip intersect, effect composition), `damage.spl` (union/intersect/aggregate, propagate up via 4-corner AABB transform). |
+| **Phase 8 final** | ✅ landed (Waves 1, 3) | `pixel_diff_core.spl` (per-channel delta + mismatch_ratio + bitmap_diff_rect), `pixel_diff.spl` (compare_pictures drives CpuBackend → BitmapRef → summarize), 11 real scenes with distinct PaintOp recordings, 11 self-goldens (each rasters its own minimal SkPicture once). Real Chromium reference PNGs deferred (no headless Chrome harness in Simple yet — out-of-scope register). |
+
+## 11. Out-of-Scope Items
+
+See `doc/08_tracking/out_of_scope_register.md` for items intentionally deferred from the drawing-stack parity work.
