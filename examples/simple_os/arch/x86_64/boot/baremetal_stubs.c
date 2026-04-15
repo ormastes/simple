@@ -8347,8 +8347,7 @@ RuntimeValue rt_mmio_write_u8_real(RuntimeValue addr, RuntimeValue val)
 
 RuntimeValue rt_mmio_write_u16_real(RuntimeValue addr, RuntimeValue val)
 {
-    uintptr_t a = (uintptr_t)DECODE_INT(addr);
-    *(volatile uint16_t *)a = (uint16_t)DECODE_INT(val);
+    *(volatile uint16_t *)(uintptr_t)(uint64_t)addr = (uint16_t)(uint64_t)val;
     return 0;
 }
 
