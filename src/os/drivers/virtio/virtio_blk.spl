@@ -33,6 +33,12 @@ struct VirtioBlkReqHeader:
     reserved: u32
     sector: u64         # Starting sector (LBA)
 
+struct VirtioBlkDmaRegion:
+    """Caller-owned contiguous DMA region for zero-copy requests."""
+    virt_addr: u64      # CPU-visible base address
+    phys_addr: u64      # Device-visible base address
+    total_len: u64      # Total allocated bytes (header + payload + status)
+
 # ============================================================================
 # VirtIO Block Driver
 # ============================================================================
@@ -227,6 +233,229 @@ impl VirtioBlkDriver:
         self.device.queue.free_desc(fd2)
         val _ = free_dma(dma.virt_addr, dma_total)
 
+        Result.Ok(true)
+
+    me read_sectors_dma(lba: u64, count: u32, dma: VirtioBlkDmaRegion) -> Result<bool, text>:
+        """Read sectors directly into caller-owned DMA memory."""
+        if not self.initialized:
+            return Result.Err("device not initialized")
+        val count_u64 = count.to_u64()
+        if lba + count_u64 > self.capacity_sectors:
+            return Result.Err("read beyond disk capacity")
+        val data_len = count * self.sector_size
+        val required_total = 16 + data_len.to_u64() + 1
+        if dma.total_len < required_total:
+            return Result.Err("DMA region too small for {count} sectors")
+
+        var desc0 = self.device.queue.alloc_desc()
+        var desc1 = self.device.queue.alloc_desc()
+        var desc2 = self.device.queue.alloc_desc()
+        if desc0 < 0 or desc1 < 0 or desc2 < 0:
+            return Result.Err("no free descriptors")
+
+        mmio_write32(dma.virt_addr, VIRTIO_BLK_T_IN)
+        mmio_write32(dma.virt_addr + 4, 0)
+        val lba_low = lba & 0xFFFFFFFF
+        val lba_low_u32 = lba_low.to_u32()
+        mmio_write32(dma.virt_addr + 8, lba_low_u32)
+        val lba_high = lba >> 32
+        val lba_high_u32 = lba_high.to_u32()
+        mmio_write32(dma.virt_addr + 12, lba_high_u32)
+
+        val d0_off = desc0 * 16
+        val d0_off_u64 = d0_off.to_u64()
+        val d0_addr = self.device.queue.desc_addr + d0_off_u64
+        val header_low = dma.phys_addr & 0xFFFFFFFF
+        val header_low_u32 = header_low.to_u32()
+        mmio_write32(d0_addr, header_low_u32)
+        val header_high = dma.phys_addr >> 32
+        val header_high_u32 = header_high.to_u32()
+        mmio_write32(d0_addr + 4, header_high_u32)
+        mmio_write32(d0_addr + 8, 16)
+        val d1_u32 = desc1.to_u32()
+        val d0_flags = VIRTQ_DESC_F_NEXT.to_u32()
+        mmio_write32(d0_addr + 12, (d0_flags << 16) | d1_u32)
+
+        val data_phys = dma.phys_addr + 16
+        val d1_off = desc1 * 16
+        val d1_off_u64 = d1_off.to_u64()
+        val d1_addr = self.device.queue.desc_addr + d1_off_u64
+        val data_low = data_phys & 0xFFFFFFFF
+        val data_low_u32 = data_low.to_u32()
+        mmio_write32(d1_addr, data_low_u32)
+        val data_high = data_phys >> 32
+        val data_high_u32 = data_high.to_u32()
+        mmio_write32(d1_addr + 4, data_high_u32)
+        mmio_write32(d1_addr + 8, data_len)
+        val d1_flags = VIRTQ_DESC_F_NEXT.to_u32() | VIRTQ_DESC_F_WRITE.to_u32()
+        val d2_u32 = desc2.to_u32()
+        mmio_write32(d1_addr + 12, (d1_flags << 16) | d2_u32)
+
+        val status_phys = dma.phys_addr + 16 + data_len.to_u64()
+        val d2_off = desc2 * 16
+        val d2_off_u64 = d2_off.to_u64()
+        val d2_addr = self.device.queue.desc_addr + d2_off_u64
+        val status_low = status_phys & 0xFFFFFFFF
+        val status_low_u32 = status_low.to_u32()
+        mmio_write32(d2_addr, status_low_u32)
+        val status_high = status_phys >> 32
+        val status_high_u32 = status_high.to_u32()
+        mmio_write32(d2_addr + 4, status_high_u32)
+        mmio_write32(d2_addr + 8, 1)
+        val d2_flags = VIRTQ_DESC_F_WRITE.to_u32()
+        mmio_write32(d2_addr + 12, d2_flags << 16)
+
+        val d0_u16 = desc0.to_u16()
+        self.device.queue.push_avail(d0_u16)
+        self.device.notify_queue(0)
+
+        var timeout = 1000000
+        while timeout > 0:
+            val used_idx_addr = self.device.queue.used_addr + 2
+            val used_idx_raw = mmio_read32(used_idx_addr)
+            val used_idx = used_idx_raw.to_u16()
+            if used_idx != self.device.queue.last_used_idx:
+                self.device.queue.last_used_idx = used_idx
+                break
+            timeout = timeout - 1
+
+        if timeout == 0:
+            val fd0 = desc0.to_u16()
+            val fd1 = desc1.to_u16()
+            val fd2 = desc2.to_u16()
+            self.device.queue.free_desc(fd0)
+            self.device.queue.free_desc(fd1)
+            self.device.queue.free_desc(fd2)
+            return Result.Err("virtio-blk read timeout")
+
+        val status_virt = dma.virt_addr + 16 + data_len.to_u64()
+        val status = mmio_read8(status_virt)
+        if status != VIRTIO_BLK_S_OK:
+            val fd0 = desc0.to_u16()
+            val fd1 = desc1.to_u16()
+            val fd2 = desc2.to_u16()
+            self.device.queue.free_desc(fd0)
+            self.device.queue.free_desc(fd1)
+            self.device.queue.free_desc(fd2)
+            return Result.Err("virtio-blk read error (status={status})")
+
+        val fd0 = desc0.to_u16()
+        val fd1 = desc1.to_u16()
+        val fd2 = desc2.to_u16()
+        self.device.queue.free_desc(fd0)
+        self.device.queue.free_desc(fd1)
+        self.device.queue.free_desc(fd2)
+        Result.Ok(true)
+
+    me write_sector_dma(lba: u64, dma: VirtioBlkDmaRegion) -> Result<bool, text>:
+        """Write a sector directly from caller-owned DMA memory."""
+        if not self.initialized:
+            return Result.Err("device not initialized")
+        if lba >= self.capacity_sectors:
+            return Result.Err("write beyond disk capacity")
+        val data_len = self.sector_size.to_u64()
+        val required_total = 16 + data_len + 1
+        if dma.total_len < required_total:
+            return Result.Err("DMA region too small for one sector")
+
+        var desc0 = self.device.queue.alloc_desc()
+        var desc1 = self.device.queue.alloc_desc()
+        var desc2 = self.device.queue.alloc_desc()
+        if desc0 < 0 or desc1 < 0 or desc2 < 0:
+            return Result.Err("no free descriptors")
+
+        mmio_write32(dma.virt_addr, VIRTIO_BLK_T_OUT)
+        mmio_write32(dma.virt_addr + 4, 0)
+        val w_lba_low = lba & 0xFFFFFFFF
+        val w_lba_low_u32 = w_lba_low.to_u32()
+        mmio_write32(dma.virt_addr + 8, w_lba_low_u32)
+        val w_lba_high = lba >> 32
+        val w_lba_high_u32 = w_lba_high.to_u32()
+        mmio_write32(dma.virt_addr + 12, w_lba_high_u32)
+
+        val d0_off = desc0 * 16
+        val d0_off_u64 = d0_off.to_u64()
+        val d0_addr = self.device.queue.desc_addr + d0_off_u64
+        val header_low = dma.phys_addr & 0xFFFFFFFF
+        val header_low_u32 = header_low.to_u32()
+        mmio_write32(d0_addr, header_low_u32)
+        val header_high = dma.phys_addr >> 32
+        val header_high_u32 = header_high.to_u32()
+        mmio_write32(d0_addr + 4, header_high_u32)
+        mmio_write32(d0_addr + 8, 16)
+        val d1_u32 = desc1.to_u32()
+        val d0_flags = VIRTQ_DESC_F_NEXT.to_u32()
+        mmio_write32(d0_addr + 12, (d0_flags << 16) | d1_u32)
+
+        val data_phys = dma.phys_addr + 16
+        val d1_off = desc1 * 16
+        val d1_off_u64 = d1_off.to_u64()
+        val d1_addr = self.device.queue.desc_addr + d1_off_u64
+        val data_low = data_phys & 0xFFFFFFFF
+        val data_low_u32 = data_low.to_u32()
+        mmio_write32(d1_addr, data_low_u32)
+        val data_high = data_phys >> 32
+        val data_high_u32 = data_high.to_u32()
+        mmio_write32(d1_addr + 4, data_high_u32)
+        mmio_write32(d1_addr + 8, data_len.to_u32())
+        val d1_flags = VIRTQ_DESC_F_NEXT.to_u32()
+        val d2_u32 = desc2.to_u32()
+        mmio_write32(d1_addr + 12, (d1_flags << 16) | d2_u32)
+
+        val status_phys = dma.phys_addr + 16 + data_len
+        val d2_off = desc2 * 16
+        val d2_off_u64 = d2_off.to_u64()
+        val d2_addr = self.device.queue.desc_addr + d2_off_u64
+        val status_low = status_phys & 0xFFFFFFFF
+        val status_low_u32 = status_low.to_u32()
+        mmio_write32(d2_addr, status_low_u32)
+        val status_high = status_phys >> 32
+        val status_high_u32 = status_high.to_u32()
+        mmio_write32(d2_addr + 4, status_high_u32)
+        mmio_write32(d2_addr + 8, 1)
+        val d2_flags = VIRTQ_DESC_F_WRITE.to_u32()
+        mmio_write32(d2_addr + 12, d2_flags << 16)
+
+        val d0_u16 = desc0.to_u16()
+        self.device.queue.push_avail(d0_u16)
+        self.device.notify_queue(0)
+
+        var timeout = 1000000
+        while timeout > 0:
+            val used_idx_addr = self.device.queue.used_addr + 2
+            val used_idx_raw = mmio_read32(used_idx_addr)
+            val used_idx = used_idx_raw.to_u16()
+            if used_idx != self.device.queue.last_used_idx:
+                self.device.queue.last_used_idx = used_idx
+                break
+            timeout = timeout - 1
+
+        if timeout == 0:
+            val fd0 = desc0.to_u16()
+            val fd1 = desc1.to_u16()
+            val fd2 = desc2.to_u16()
+            self.device.queue.free_desc(fd0)
+            self.device.queue.free_desc(fd1)
+            self.device.queue.free_desc(fd2)
+            return Result.Err("virtio-blk write timeout")
+
+        val status_virt = dma.virt_addr + 16 + data_len
+        val status = mmio_read8(status_virt)
+        if status != VIRTIO_BLK_S_OK:
+            val fd0 = desc0.to_u16()
+            val fd1 = desc1.to_u16()
+            val fd2 = desc2.to_u16()
+            self.device.queue.free_desc(fd0)
+            self.device.queue.free_desc(fd1)
+            self.device.queue.free_desc(fd2)
+            return Result.Err("virtio-blk write error (status={status})")
+
+        val fd0 = desc0.to_u16()
+        val fd1 = desc1.to_u16()
+        val fd2 = desc2.to_u16()
+        self.device.queue.free_desc(fd0)
+        self.device.queue.free_desc(fd1)
+        self.device.queue.free_desc(fd2)
         Result.Ok(true)
 
     fn capacity_bytes() -> u64:

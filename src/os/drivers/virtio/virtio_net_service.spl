@@ -14,7 +14,7 @@
 
 use os.drivers.virtio.virtio_net.{VirtioNetDriver}
 use os.kernel.types.device_mem_types.{DeviceGrant}
-use os.kernel.boot.mmio.{mmio_read8, mmio_read32, mmio_write8, mmio_write32, mmio_write64}
+use os.kernel.boot.mmio.{mmio_write8}
 use os.userlib.syscall_raw.{syscall}
 
 extern fn serial_println(msg: text)
@@ -38,10 +38,6 @@ val NET_METHOD_SEND_ASYNC: u32 = 6
 var driver: VirtioNetDriver = VirtioNetDriver.new()
 var service_ready: bool = false
 
-# Receive scratch buffer (2048 bytes, allocated once)
-var recv_buf_virt: u64 = 0
-var recv_buf_phys: u64 = 0
-
 # ============================================================================
 # Service Entry Point
 # ============================================================================
@@ -60,16 +56,6 @@ fn virtio_net_service_start(grant: DeviceGrant):
         return
 
     serial_println("[virtio-net-svc] Driver initialized, MAC={driver.mac_string()}")
-
-    # Allocate a scratch buffer for receiving frames
-    var result_pair: [u64; 2]
-    val dma_result = syscall(84, 2048, &result_pair as u64, 0, 0, 0)
-    if dma_result >= 0:
-        recv_buf_phys = result_pair[0]
-        recv_buf_virt = dma_result as u64
-        serial_println("[virtio-net-svc] Recv scratch buffer at virt=0x{recv_buf_virt}")
-    else:
-        serial_println("[virtio-net-svc] Warning: scratch buffer alloc failed, recv disabled")
 
     # Create IPC port for "net0" service
     val port_result = syscall(22, 0, 0, 0, 0, 0)
@@ -146,8 +132,8 @@ fn handle_send_frame(frame_virt: u64, frame_phys: u64, frame_len: u64) -> i64:
 fn handle_recv_frame(dst_virt: u64, dst_len: u64) -> i64:
     """Handle NET_METHOD_RECV_FRAME: receive an Ethernet frame.
 
-    Blocks until a frame is available. Copies the frame into the
-    scratch buffer, then the caller can read from the IPC reply.
+    Blocks until a frame is available and writes it directly into the
+    caller-provided destination buffer.
 
     Args:
         dst_virt: virtual address of destination buffer
@@ -155,20 +141,11 @@ fn handle_recv_frame(dst_virt: u64, dst_len: u64) -> i64:
 
     Returns frame length on success, 0 if no frame, negative on error.
     """
-    if not service_ready or recv_buf_virt == 0:
+    if not service_ready:
         return -1
-    val frame_len = driver.recv_frame(recv_buf_virt, 2048)
+    val frame_len = driver.recv_frame(dst_virt, dst_len)
     if frame_len == 0:
         return 0
-
-    # Copy from scratch buffer to caller's destination
-    # (In a real implementation, the IPC reply would carry the data)
-    var i: u64 = 0
-    val copy_len = if frame_len < dst_len: frame_len else: dst_len
-    while i < copy_len:
-        val byte = mmio_read8(recv_buf_virt + i)
-        mmio_write8(dst_virt + i, byte)
-        i = i + 1
 
     frame_len as i64
 
@@ -214,19 +191,12 @@ fn handle_recv_async(dst_virt: u64, dst_len: u64) -> i64:
 
     Uses recv_frame_poll() which checks the RX used ring without blocking.
     """
-    if not service_ready or recv_buf_virt == 0:
+    if not service_ready:
         return -1
 
-    val result = driver.recv_frame_poll(recv_buf_virt, 2048)
+    val result = driver.recv_frame_poll(dst_virt, dst_len)
     match result:
         Ok(frame_len):
-            # Copy from scratch buffer to caller's destination
-            var i: u64 = 0
-            val copy_len = if frame_len < dst_len: frame_len else: dst_len
-            while i < copy_len:
-                val byte = mmio_read8(recv_buf_virt + i)
-                mmio_write8(dst_virt + i, byte)
-                i = i + 1
             frame_len as i64
         Err(msg):
             # "no frame available" is not a hard error, return 0
@@ -237,7 +207,9 @@ fn handle_send_async(frame_virt: u64, frame_phys: u64, frame_len: u64) -> i64:
 
     The service does not yet retain per-request future state across IPC calls.
     This path is a synchronous fallback: it waits for the driver send to
-    complete before returning so it does not falsely report async success.
+    complete before returning, and will use the owned-DMA TX path when the
+    caller provides a physical address, so it does not falsely report async
+    success.
 
     Returns 0 after the synchronous send completes, negative on error.
     """

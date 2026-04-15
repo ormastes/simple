@@ -438,6 +438,54 @@ impl VirtioNetDriver:
                         polls = polls + 1
             used_idx != self.rx_last_used
 
+    me send_frame_owned(data_phys: u64, len: u64) -> Result<bool, text>:
+        """Send using caller-owned payload DMA, keeping only the header local."""
+        if not self.initialized:
+            return Err("device not initialized")
+        if len > 1514:
+            return Err("frame too large: {len}")
+        if self.tx_queue_size < 2:
+            return Err("tx queue too small for owned send")
+
+        # Use two descriptors per packet: local header + caller-owned payload.
+        val packet_slots = (self.tx_queue_size / 2)
+        val slot = (self.tx_last_used % packet_slots).to_u64()
+        val head_idx = slot * 2
+        val payload_idx = head_idx + 1
+        val buf_virt = self.tx_bufs_virt + slot * BUFFER_SIZE
+        val buf_phys = self.tx_bufs_phys + slot * BUFFER_SIZE
+
+        mmio_write32(buf_virt, 0)
+        mmio_write32(buf_virt + 4, 0)
+        mmio_write16(buf_virt + 8, 0)
+
+        val header_off = self.tx_desc_virt + head_idx * 16
+        val header_low = (buf_phys & 0xFFFFFFFF).to_u32()
+        val header_high = (buf_phys >> 32).to_u32()
+        mmio_write32(header_off, header_low)
+        mmio_write32(header_off + 4, header_high)
+        mmio_write32(header_off + 8, VIRTIO_NET_HDR_SIZE.to_u32())
+        mmio_write32(header_off + 12, (VIRTQ_DESC_F_NEXT.to_u32() << 16) | payload_idx.to_u32())
+
+        val payload_off = self.tx_desc_virt + payload_idx * 16
+        val payload_low = (data_phys & 0xFFFFFFFF).to_u32()
+        val payload_high = (data_phys >> 32).to_u32()
+        mmio_write32(payload_off, payload_low)
+        mmio_write32(payload_off + 4, payload_high)
+        mmio_write32(payload_off + 8, len.to_u32())
+        mmio_write32(payload_off + 12, 0)
+
+        val avail_idx = mmio_read16(self.tx_avail_virt + 2)
+        val ring_slot = self.tx_avail_virt + 4 + (avail_idx % self.tx_queue_size).to_u64() * 2
+        mmio_write16(ring_slot, head_idx.to_u16())
+        mmio_write16(self.tx_avail_virt + 2, avail_idx + 1)
+
+        mmio_write16(self.bar0_virt + VIRTIO_PCI_QUEUE_NOTIFY, VIRTIO_NET_TX_QUEUE)
+        val wait_result = self.wait_for_tx_completion()
+        if wait_result.is_err():
+            return Err(wait_result.unwrap_err())
+        Ok(true)
+
     # ========================================================================
     # MAC Address
     # ========================================================================
@@ -474,13 +522,16 @@ impl VirtioNetDriver:
 
         Args:
             data_virt: virtual address of frame data to send
-            data_phys: physical address of frame data (unused, kept for API)
+            data_phys: physical address of frame data when caller owns DMA
             len: frame length in bytes (max 1514)
         """
         if not self.initialized:
             return Err("device not initialized")
         if len > 1514:
             return Err("frame too large: {len}")
+
+        if data_phys != 0:
+            return self.send_frame_owned(data_phys, len)
 
         # Pick a TX buffer slot (round-robin via tx_last_used as index)
         val slot = (self.tx_last_used % self.tx_queue_size).to_u64()
@@ -501,7 +552,7 @@ impl VirtioNetDriver:
             mmio_write8(buf_virt + VIRTIO_NET_HDR_SIZE + i, byte)
             i = i + 1
 
-        # Set up TX descriptor
+        # Set up TX descriptor by copying payload into driver-owned DMA.
         val desc_off = self.tx_desc_virt + slot * 16
         val total_len = VIRTIO_NET_HDR_SIZE + len
         val phys_low = (buf_phys & 0xFFFFFFFF).to_u32()

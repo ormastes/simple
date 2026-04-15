@@ -22,3 +22,4 @@
 
 1. `SYS-GUI-008` reaches `render-ready`
 2. virtio-gpu remains labeled experimental until that passes
+3. direct QEMU boot and `test/system/sys_gui_008_virtio_gpu_baseline_spec.spl` agree on the same healthy path

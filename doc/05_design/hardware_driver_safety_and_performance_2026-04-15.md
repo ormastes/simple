@@ -31,7 +31,16 @@ Add completion-mode selection (`poll`, `interrupt`, `auto`) to `virtio_blk` and 
 Target:
 Introduce zero-copy APIs using caller-owned DMA buffers.
 
+Current incremental step:
+- remove redundant service-layer copies where the driver already supports direct writes
+- keep ownership explicit before broader trait/API changes
+
 ## Phase 4
 
 Target:
 Finish `virtio_gpu` controlq DMA correctness using the same explicit ownership model.
+
+`SYS-GUI-008` check/fix scope:
+- keep `test/system/sys_gui_008_virtio_gpu_baseline_spec.spl` as the gate
+- require direct-QEMU proof of controlq request publication and response consumption
+- only treat virtio-gpu as acceleration-ready after `render-ready` is green

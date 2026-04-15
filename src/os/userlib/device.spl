@@ -91,10 +91,48 @@ fn device_class_name(class_code: u8, subclass: u8) -> text:
 # Device Grant Wrappers (syscalls 82-85)
 # ===========================================================================
 
-# Helper struct for DMA allocation results
+# Helper struct for DMA allocation results.
+#
+# Contract:
+# - `virt_addr` is owned by the caller and is safe for CPU reads/writes.
+# - `phys_addr` is the device-visible DMA address for the same buffer.
+# - Keep the allocation alive until `free_dma()` is called.
+# - On identity-mapped no-IOMMU lanes, `virt_addr` and `phys_addr` may
+#   numerically match, but callers should prefer the explicit field names
+#   instead of relying on that implementation detail.
 struct DmaAllocResult:
     virt_addr: u64    # Virtual address for CPU access
     phys_addr: u64    # Physical address for device DMA
+
+struct SharedDmaBuffer:
+    """Caller-owned DMA buffer with explicit CPU/device address accessors.
+
+    This is a small groundwork type for zero-copy driver paths: it keeps the
+    buffer size alongside both addresses so later callers can pass one object
+    around instead of separate raw integers. No hidden bounce buffer is added.
+    """
+    virt_addr: u64
+    phys_addr: u64
+    size_bytes: u64
+
+impl SharedDmaBuffer:
+    fn cpu_addr() -> u64:
+        self.virt_addr
+
+    fn device_addr() -> u64:
+        self.phys_addr
+
+    fn len() -> u64:
+        self.size_bytes
+
+    fn is_valid() -> bool:
+        self.virt_addr != 0 and self.phys_addr != 0 and self.size_bytes > 0
+
+    fn into_dma_result() -> DmaAllocResult:
+        DmaAllocResult(
+            virt_addr: self.virt_addr,
+            phys_addr: self.phys_addr
+        )
 
 fn request_device_grant(bus: u8, dev: u8, func: u8) -> Result<DeviceGrant, text>:
     """Request a DeviceGrant for a PCI device.
@@ -142,9 +180,32 @@ fn alloc_dma(size: u64) -> Result<DmaAllocResult, text>:
         phys_addr: result_buf[0]
     ))
 
+fn alloc_shared_dma(size: u64) -> Result<SharedDmaBuffer, text>:
+    """Allocate a caller-owned DMA buffer with explicit zero-copy metadata.
+
+    This is a thin wrapper over `alloc_dma()` intended for drivers that want
+    to keep the CPU pointer, device pointer, and size together without
+    changing their transport code yet.
+    """
+    val dma_result = alloc_dma(size)
+    if val Err(msg) = dma_result:
+        return Err("AllocSharedDma failed: {msg}")
+    val dma = dma_result.unwrap()
+    Ok(SharedDmaBuffer(
+        virt_addr: dma.virt_addr,
+        phys_addr: dma.phys_addr,
+        size_bytes: size
+    ))
+
 fn free_dma(virt_addr: u64, size: u64) -> Result<bool, text>:
     """Free a previously allocated DMA buffer."""
     val result = syscall(85, virt_addr, size, 0, 0, 0)
     if result < 0:
         return Err("FreeDma failed: error {result}")
     Ok(true)
+
+fn free_shared_dma(buf: SharedDmaBuffer) -> Result<bool, text>:
+    """Free a shared DMA buffer allocated by `alloc_shared_dma()`."""
+    if not buf.is_valid():
+        return Err("FreeSharedDma failed: invalid buffer")
+    free_dma(buf.virt_addr, buf.size_bytes)
