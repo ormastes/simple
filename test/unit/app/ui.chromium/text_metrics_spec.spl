@@ -1,0 +1,104 @@
+use std.spec.{describe, it, expect}
+use std.gc_async_mut.gpu.browser_engine.dom.{BeDomNode}
+use std.gc_async_mut.gpu.browser_engine.css.{be_default_style}
+use std.gc_async_mut.gpu.browser_engine.layout.{BeLayoutBox, layout_text, layout_get_height}
+use std.gc_async_mut.gpu.browser_engine.paint.{paint_layout_box}
+use common.text_layout.font_renderer.{FontRenderer}
+
+fn _container(content_width: i32, content_height: i32) -> BeLayoutBox:
+    BeLayoutBox(
+        x: 0, y: 0, width: content_width, height: content_height,
+        content_x: 0, content_y: 0,
+        content_width: content_width, content_height: content_height,
+        node: BeDomNode.element("div"),
+        children: []
+    )
+
+describe "browser text metrics":
+    it "layout_text increases height when narrow width forces wrapping":
+        val parent_style = be_default_style()
+        parent_style.font_size = 16
+        val node = BeDomNode.text("hello world")
+
+        val wide = layout_text(node, _container(200, 40), parent_style)
+        val narrow = layout_text(node, _container(24, 40), parent_style)
+
+        expect(layout_get_height(narrow) > layout_get_height(wide)).to_equal(true)
+
+    it "paint_layout_box uses shared renderer width for text decoration fallback":
+        val node = BeDomNode.text("iii")
+        node.set_style("font-size", "16px")
+        node.set_style("text-decoration", "underline")
+        node.set_style("color", "#FFFFFFFF")
+
+        val box = BeLayoutBox(
+            x: 0, y: 0, width: 0, height: 16,
+            content_x: 0, content_y: 0,
+            content_width: 0, content_height: 16,
+            node: node, children: []
+        )
+
+        val cmds = paint_layout_box(box, [])
+        expect(cmds.len()).to_equal(2)
+
+        val renderer = FontRenderer.new()
+        val expected_width = renderer.measure_text_width("iii", 16)
+        expect(cmds[1].width).to_equal(expected_width)
+
+    it "paint_layout_box emits multiple text commands for wrapped text":
+        val node = BeDomNode.text("hello world")
+        node.set_style("font-size", "16px")
+        node.set_style("color", "#FFFFFFFF")
+
+        val box = BeLayoutBox(
+            x: 0, y: 0, width: 24, height: 32,
+            content_x: 0, content_y: 0,
+            content_width: 24, content_height: 32,
+            node: node, children: []
+        )
+
+        val cmds = paint_layout_box(box, [])
+        expect(cmds.len() > 1).to_equal(true)
+        expect(cmds[0].kind).to_equal("text")
+        expect(cmds[1].kind).to_equal("text")
+        expect(cmds[1].y > cmds[0].y).to_equal(true)
+
+    it "paint_layout_box emits text decoration per wrapped line":
+        val node = BeDomNode.text("hello world")
+        node.set_style("font-size", "16px")
+        node.set_style("text-decoration", "underline")
+        node.set_style("color", "#FFFFFFFF")
+
+        val box = BeLayoutBox(
+            x: 0, y: 0, width: 24, height: 32,
+            content_x: 0, content_y: 0,
+            content_width: 24, content_height: 32,
+            node: node, children: []
+        )
+
+        val cmds = paint_layout_box(box, [])
+        expect(cmds.len() > 3).to_equal(true)
+        expect(cmds[0].kind).to_equal("text")
+        expect(cmds[1].kind).to_equal("rect")
+        expect(cmds[2].kind).to_equal("text")
+        expect(cmds[3].kind).to_equal("rect")
+
+    it "paint_layout_box emits separate text commands for explicit newlines":
+        val node = BeDomNode.text("alpha\nbeta")
+        node.set_style("font-size", "16px")
+        node.set_style("color", "#FFFFFFFF")
+
+        val box = BeLayoutBox(
+            x: 0, y: 0, width: 160, height: 40,
+            content_x: 0, content_y: 0,
+            content_width: 160, content_height: 40,
+            node: node, children: []
+        )
+
+        val cmds = paint_layout_box(box, [])
+        expect(cmds.len()).to_equal(2)
+        expect(cmds[0].kind).to_equal("text")
+        expect(cmds[0].text_val).to_equal("alpha")
+        expect(cmds[1].kind).to_equal("text")
+        expect(cmds[1].text_val).to_equal("beta")
+        expect(cmds[1].y > cmds[0].y).to_equal(true)
