@@ -124,3 +124,12 @@
 - `loader` - SMF loader
 - `pkg` - Package manager
 - `doc` - Documentation, specs, guides
+
+## Drawing Stack
+
+Chromium-parity renderer built across `src/lib/skia`, `src/lib/blink`,
+`src/lib/viz`, `src/lib/cc` (see session tasks #22–#88).
+
+- Architecture guide: [`doc/04_architecture/drawing_stack.md`](./04_architecture/drawing_stack.md)
+- Remaining work:   [`doc/08_tracking/drawing_stack_remains.md`](./08_tracking/drawing_stack_remains.md)
+- Known bugs:       [`doc/08_tracking/drawing_stack_bugs.md`](./08_tracking/drawing_stack_bugs.md)

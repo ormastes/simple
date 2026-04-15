@@ -448,7 +448,7 @@ impl VirtioGpuDriver:
         serial_println("[virtio-gpu] Scanout 0 bound to resource {self.resource_id_raw}")
 
         self.initialized = true
-        serial_println("[virtio-gpu] Device initialized: {self.width}x{self.height} BGRA")
+        serial_println("[virtio-gpu] Device initialized: {self.width_raw}x{self.height_raw} BGRA")
         Ok(true)
 
     me try_map_modern_pci_caps(grant: DeviceGrant) -> bool:
@@ -1027,10 +1027,10 @@ impl VirtioGpuDriver:
         self._write_ctrl_hdr(0x0105)
         ram_write32(self.cmd_buf_virt + 24, 0)               # rect.x
         ram_write32(self.cmd_buf_virt + 28, 0)               # rect.y
-        ram_write32(self.cmd_buf_virt + 32, self.width)      # rect.width
-        ram_write32(self.cmd_buf_virt + 36, self.height)     # rect.height
+        ram_write32_raw(self.cmd_buf_virt + 32, self.width_raw)      # rect.width
+        ram_write32_raw(self.cmd_buf_virt + 36, self.height_raw)     # rect.height
         ram_write64(self.cmd_buf_virt + 40, 0)               # offset
-        ram_write32(self.cmd_buf_virt + 48, self.resource_id)
+        ram_write32_raw(self.cmd_buf_virt + 48, self.resource_id_raw)
         ram_write32(self.cmd_buf_virt + 52, 0)               # padding
         self._send_command(56, 24)
 
@@ -1038,9 +1038,9 @@ impl VirtioGpuDriver:
         self._write_ctrl_hdr(0x0104)
         ram_write32(self.cmd_buf_virt + 24, 0)               # rect.x
         ram_write32(self.cmd_buf_virt + 28, 0)               # rect.y
-        ram_write32(self.cmd_buf_virt + 32, self.width)      # rect.width
-        ram_write32(self.cmd_buf_virt + 36, self.height)     # rect.height
-        ram_write32(self.cmd_buf_virt + 40, self.resource_id)
+        ram_write32_raw(self.cmd_buf_virt + 32, self.width_raw)      # rect.width
+        ram_write32_raw(self.cmd_buf_virt + 36, self.height_raw)     # rect.height
+        ram_write32_raw(self.cmd_buf_virt + 40, self.resource_id_raw)
         ram_write32(self.cmd_buf_virt + 44, 0)               # padding
         self._send_command(48, 24)
 
@@ -1055,20 +1055,20 @@ impl VirtioGpuDriver:
         # Clamp to display bounds
         var rw: u32 = w
         var rh: u32 = h
-        if x + rw > self.width:
-            rw = self.width - x
-        if y + rh > self.height:
-            rh = self.height - y
+        if x.to_u64() + rw.to_u64() > self.width_raw:
+            rw = (self.width_raw - x.to_u64()).to_u32()
+        if y.to_u64() + rh.to_u64() > self.height_raw:
+            rh = (self.height_raw - y.to_u64()).to_u32()
 
         # TRANSFER_TO_HOST_2D for the region
-        val offset = ((y as u64) * (self.width as u64) + (x as u64)) * 4
+        val offset = (y.to_u64() * self.width_raw + x.to_u64()) * 4
         self._write_ctrl_hdr(0x0105)
         ram_write32(self.cmd_buf_virt + 24, x)
         ram_write32(self.cmd_buf_virt + 28, y)
         ram_write32(self.cmd_buf_virt + 32, rw)
         ram_write32(self.cmd_buf_virt + 36, rh)
         ram_write64(self.cmd_buf_virt + 40, offset)
-        ram_write32(self.cmd_buf_virt + 48, self.resource_id)
+        ram_write32_raw(self.cmd_buf_virt + 48, self.resource_id_raw)
         ram_write32(self.cmd_buf_virt + 52, 0)
         self._send_command(56, 24)
 
@@ -1078,7 +1078,7 @@ impl VirtioGpuDriver:
         ram_write32(self.cmd_buf_virt + 28, y)
         ram_write32(self.cmd_buf_virt + 32, rw)
         ram_write32(self.cmd_buf_virt + 36, rh)
-        ram_write32(self.cmd_buf_virt + 40, self.resource_id)
+        ram_write32_raw(self.cmd_buf_virt + 40, self.resource_id_raw)
         ram_write32(self.cmd_buf_virt + 44, 0)
         self._send_command(48, 24)
 
@@ -1092,8 +1092,8 @@ impl VirtioGpuDriver:
         Color format: 0xAARRGGBB (alpha in high byte, blue in low byte).
         Does not flush — call flush() or flush_rect() after drawing.
         """
-        if x < self.width and y < self.height:
-            val offset = ((y as u64) * (self.width as u64) + (x as u64)) * 4
+        if x.to_u64() < self.width_raw and y.to_u64() < self.height_raw:
+            val offset = (y.to_u64() * self.width_raw + x.to_u64()) * 4
             ram_write32(self.fb_virt + offset, color)
 
     me fill_rect(x: u32, y: u32, w: u32, h: u32, color: u32):
@@ -1102,10 +1102,10 @@ impl VirtioGpuDriver:
         Does not flush — call flush() or flush_rect() after drawing.
         """
         var py: u32 = y
-        while py < y + h and py < self.height:
+        while py.to_u64() < (y + h).to_u64() and py.to_u64() < self.height_raw:
             var px: u32 = x
-            while px < x + w and px < self.width:
-                val offset = ((py as u64) * (self.width as u64) + (px as u64)) * 4
+            while px.to_u64() < (x + w).to_u64() and px.to_u64() < self.width_raw:
+                val offset = (py.to_u64() * self.width_raw + px.to_u64()) * 4
                 ram_write32(self.fb_virt + offset, color)
                 px = px + 1
             py = py + 1
@@ -1113,31 +1113,31 @@ impl VirtioGpuDriver:
     me clear(color: u32):
         """Fill the entire framebuffer with a solid color."""
         var y: u32 = 0
-        while y < self.height:
+        while y.to_u64() < self.height_raw:
             var x: u32 = 0
-            while x < self.width:
-                val offset = ((y as u64) * (self.width as u64) + (x as u64)) * 4
+            while x.to_u64() < self.width_raw:
+                val offset = (y.to_u64() * self.width_raw + x.to_u64()) * 4
                 ram_write32(self.fb_virt + offset, color)
                 x = x + 1
             y = y + 1
 
     me draw_hline(x: u32, y: u32, length: u32, color: u32):
         """Draw a horizontal line."""
-        if y >= self.height:
+        if y.to_u64() >= self.height_raw:
             return
         var px: u32 = x
-        while px < x + length and px < self.width:
-            val offset = ((y as u64) * (self.width as u64) + (px as u64)) * 4
+        while px.to_u64() < (x + length).to_u64() and px.to_u64() < self.width_raw:
+            val offset = (y.to_u64() * self.width_raw + px.to_u64()) * 4
             ram_write32(self.fb_virt + offset, color)
             px = px + 1
 
     me draw_vline(x: u32, y: u32, length: u32, color: u32):
         """Draw a vertical line."""
-        if x >= self.width:
+        if x.to_u64() >= self.width_raw:
             return
         var py: u32 = y
-        while py < y + length and py < self.height:
-            val offset = ((py as u64) * (self.width as u64) + (x as u64)) * 4
+        while py.to_u64() < (y + length).to_u64() and py.to_u64() < self.height_raw:
+            val offset = (py.to_u64() * self.width_raw + x.to_u64()) * 4
             ram_write32(self.fb_virt + offset, color)
             py = py + 1
 
@@ -1153,10 +1153,10 @@ impl VirtioGpuDriver:
     # ========================================================================
 
     fn get_width() -> u32:
-        self.width
+        self.width_raw.to_u32()
 
     fn get_height() -> u32:
-        self.height
+        self.height_raw.to_u32()
 
     fn get_fb_virt() -> u64:
         """Return framebuffer virtual address for direct pixel access."""
