@@ -21,6 +21,7 @@ this file in the same commit.
 - [IF-10 Cargo vendored protocol](#if-10-cargo-vendored-protocol)
 - [IF-11 In-process LLD FFI](#if-11-in-process-lld-ffi)
 - [IF-12 Stubs manifest format](#if-12-stubs-manifest-format)
+- [IF-13 Interpreter-perf blocker for disk-image bake](#if-13-interpreter-perf-blocker-for-disk-image-bake)
 
 ---
 
@@ -384,6 +385,12 @@ FAT32_BAD  : u32   # 0x0FFFFFF7
 **Consumers:** `src/os/kernel/` VFS layer, disk-image builder in
 `src/os/port/`, installer
 
+**Landed (wave-4, 2026-04-15):** `disk_image_bake.spl` produces a 32 MiB
+FAT32-signature stub (BPB jump + OEM + `0x55AA` + zero pad) — commit
+`a4ba52b6c5`. Real FAT32 payload embed is **deferred to wave-4d** pending
+`rt_file_truncate` extern (preferred) or interpreter-perf remediation — see
+IF-13 for the blocker description.
+
 ---
 
 ## IF-08 QEMU boot serial protocol
@@ -594,6 +601,33 @@ fn main()
 
 ---
 
+## IF-13 Interpreter-perf blocker for disk-image bake
+
+**Status:** new-this-cycle (known blocker, not a frozen contract)
+
+**Location:** `src/os/port/disk_image_bake.spl`, `src/os/port/disk_image.spl`
+
+Building a 32 MiB FAT32 byte-buffer under the Simple **interpreter** is
+prohibitively slow: even with the array-doubling trick `pad = pad + pad`,
+the allocator-copy per iteration is O(n) and timed out at 30 s for ≥1 MiB
+of payload. The native/compiled Simple backend does not hit this ceiling.
+
+**Current workaround (wave-4, commit `a4ba52b6c5`):** `disk_image_bake.spl`
+emits a 32 MiB FAT32-signature stub — BPB jump + OEM tag + `0x55AA` sector
+signature + zeroed pad — without embedding real payloads. Kernel boot can
+still probe the image but no files are readable.
+
+**Wave-4d candidates:**
+- A: add `extern fn rt_file_truncate(path: text, size: u64) -> bool` so
+  only structural bytes (~150 KiB) are built in Simple; libc `ftruncate()`
+  pads the tail.
+- B: compile `disk_image_bake.spl` to native via `bin/simple native-build`
+  and run the compiled binary (skips interpreter perf cost entirely).
+
+**Consumers:** Phase-2 Track I5, Phase-3 QEMU smoke (stub-tolerant path).
+
+---
+
 ## Verification
 
 ### Drift detection
@@ -676,3 +710,28 @@ Cross-toolchain milestones (not IF-id changes, recorded here for traceability):
 - I4 Rust cross-build green (out-of-tree): `e25b0de45c`. Script: `scripts/build_rust_hello_simpleos.sh`.
 - W4-A1 compiler-rt SimpleOS variant: `5fe74ee9ec` (main) / `6f4502542` (llvm-project fork).
   Archive: `build/os/llvm/cross-x86_64/lib/clang/20/lib/x86_64-unknown-simpleos/libclang_rt.builtins.a`.
+
+### 2026-04-15 (afternoon) — wave-4c landings
+
+- **I5 bake stub (IF-07)** — `src/os/port/disk_image_bake.spl`, commit `a4ba52b6c5` —
+  `disk_image_bake` executes end-to-end and produces a 32 MiB FAT32-signature stub
+  artifact. Real payload embed deferred to wave-4d; see IF-13 for the interpreter-perf
+  blocker description and candidate fixes.
+- **Sysroot compiler-rt install (IF-05)** — commit `0cfd73477f` —
+  `libclang_rt.builtins.a` is now staged into
+  `build/os/sysroot/lib/clang/20/lib/x86_64-unknown-simpleos/` as part of
+  `sysroot.shs`, so `clang --sysroot=$SIMPLEOS_SYSROOT` resolves builtins without
+  a separate `-L` flag (W4-A1 follow-up).
+- **Wave-4b changelog publish** — commit `2d52ba74c7` — published the wave-4b
+  landing changelog section above.
+- **Rust fork target-spec typed-enum migration (Agent C, IF-04 adjacent)** —
+  commits `8ae9c376` and `5de52281` on `ormastes/rust:simpleos` (NOT in this
+  repo; cited for traceability). `8ae9c376` migrates the four
+  `x86_64-unknown-simpleos*` target specs from legacy string fields to typed
+  `Arch`/`Env`/`Os` enums and adds `Os::SimpleOs` to the `target_spec_enum!`
+  registry (5 files). `5de52281` makes `pub fn target()` → `pub(crate) fn target()`
+  on all four specs to satisfy `unreachable_pub` and fixes an `Lld::No`
+  `link_args` assertion. Rust stage1 libstd remains red on 58 PAL errors
+  (cfg_select gaps, extern-block `unsafe` in edition 2024, unresolved
+  `libc::__errno_location` / `strerror_r` / `c_char`, `os::unix` missing,
+  `unsafe_op_in_unsafe_fn` in `thread.rs`); separate agent E in flight.
