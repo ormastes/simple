@@ -3,9 +3,10 @@
 use std.sspec.*
 use std.skia.feature.shaper.script_detect.{Script, script_of, script_is_rtl}
 use std.skia.feature.shaper.feature_tags.{OpenTypeFeature, feature_tag}
-use std.skia.feature.shaper.font_fallback.{FallbackChain, fallback_chain_new, fallback_chain_add, fallback_chain_font_for_script, system_default_chain}
+use std.skia.feature.shaper.font_fallback.{FallbackChain, fallback_chain_new, fallback_chain_add, fallback_chain_font_for_script, fallback_chain_font_for_run, system_default_chain}
 use std.skia.feature.shaper.shaper.{Shaper, ShapedRun, ShapedGlyph, ArabicJoinForm, IndicClass, ThaiClass, MyanmarClass, KhmerClass, TibetanClass, HangulClass, HebrewClass, MongolianClass, shaper_new, shaper_with_ot_font, ascii_to_codepoints, shaper_shape, arabic_join_form, devanagari_classify, classify_thai_char, classify_myanmar_char, classify_khmer_char, classify_tibetan_char, classify_hangul_char, classify_hebrew_char, classify_mongolian_char}
-use std.skia.entity.font.{sk_font_default, sk_typeface_from_name, sk_font_new, sk_font_style_normal}
+use std.skia.entity.font.{sk_font_default, sk_typeface_from_name, sk_typeface_from_attached_font, sk_font_new, sk_font_style_normal}
+use std.nogc_sync_mut.io.font_ffi.{load_font, free_font}
 
 describe "script_of: Latin range":
     it "ASCII 'A' (0x0041) is Latin":
@@ -93,6 +94,36 @@ describe "FallbackChain":
         val chain = fallback_chain_add(fallback_chain_new(primary), fallback)
         val selected = fallback_chain_font_for_script(chain, Script.CJK)
         expect selected.typeface.family_name to_equal "Fallback Sans"
+
+    it "prefers attached fallback font when it alone covers the run":
+        val demo = load_font("src/compiler_rust/vendor/ttf-parser/tests/fonts/demo.ttf")
+        expect (demo != nil) to_equal true
+        val handle = demo as std.nogc_sync_mut.io.font_ffi.FontHandle
+        val primary = sk_font_new(sk_typeface_from_name("Primary Sans", sk_font_style_normal()), 12.0)
+        val attached = sk_font_new(
+            sk_typeface_from_attached_font("Demo Latin", sk_font_style_normal(), handle.path, handle.handle),
+            12.0
+        )
+        val chain = fallback_chain_add(fallback_chain_new(primary), attached)
+        val cps: [u32] = [65 as u32]
+        val selected = fallback_chain_font_for_run(chain, Script.Latin, cps, 0, cps.len())
+        expect selected.typeface.family_name to_equal "Demo Latin"
+        free_font(handle)
+
+    it "falls back to heuristic script match when no attached font covers the run":
+        val demo = load_font("src/compiler_rust/vendor/ttf-parser/tests/fonts/demo.ttf")
+        expect (demo != nil) to_equal true
+        val handle = demo as std.nogc_sync_mut.io.font_ffi.FontHandle
+        val primary = sk_font_new(
+            sk_typeface_from_attached_font("Demo Latin", sk_font_style_normal(), handle.path, handle.handle),
+            12.0
+        )
+        val cjk = sk_font_new(sk_typeface_from_name("Noto Sans CJK", sk_font_style_normal()), 12.0)
+        val chain = fallback_chain_add(fallback_chain_new(primary), cjk)
+        val cps: [u32] = [19997 as u32]
+        val selected = fallback_chain_font_for_run(chain, Script.CJK, cps, 0, cps.len())
+        expect selected.typeface.family_name to_equal "Noto Sans CJK"
+        free_font(handle)
 
 describe "Shaper":
     it "shaper_new stores fallback chain":

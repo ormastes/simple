@@ -3,6 +3,8 @@
 use std.skia.entity.font.{SkFont, sk_typeface_default, sk_font_new}
 use std.skia.feature.shaper.script_detect.{Script}
 
+extern fn rt_font_glyph_index(font_handle: i64, codepoint: i64) -> i64
+
 class FallbackChain:
     primary: SkFont
     fallbacks: [SkFont]
@@ -53,6 +55,22 @@ fn _script_family_score(family_name: text, s: Script) -> i32:
         return 0
     0
 
+fn _font_supports_codepoint(font: SkFont, codepoint: u32) -> bool:
+    val handle = font.typeface.font_handle
+    if handle == 0:
+        return false
+    rt_font_glyph_index(handle, codepoint.to_i64()) > 0
+
+fn _font_supports_run(font: SkFont, codepoints: [u32], start: i64, end_idx: i64) -> bool:
+    if font.typeface.font_handle == 0:
+        return false
+    var i = start
+    while i < end_idx:
+        if not _font_supports_codepoint(font, codepoints[i]):
+            return false
+        i = i + 1
+    true
+
 fn fallback_chain_font_for_script(chain: FallbackChain, s: Script) -> SkFont:
     if s == Script.Latin or s == Script.Common or s == Script.Unknown:
         return chain.primary
@@ -76,6 +94,19 @@ fn fallback_chain_font_for_script(chain: FallbackChain, s: Script) -> SkFont:
         return chain.fallbacks[0]
 
     chain.primary
+
+fn fallback_chain_font_for_run(chain: FallbackChain, s: Script, codepoints: [u32], start: i64, end_idx: i64) -> SkFont:
+    if end_idx <= start:
+        return fallback_chain_font_for_script(chain, s)
+
+    if _font_supports_run(chain.primary, codepoints, start: start, end_idx: end_idx):
+        return chain.primary
+
+    for fb in chain.fallbacks:
+        if _font_supports_run(fb, codepoints, start: start, end_idx: end_idx):
+            return fb
+
+    fallback_chain_font_for_script(chain, s)
 
 fn system_default_chain() -> FallbackChain:
     val tf = sk_typeface_default()
