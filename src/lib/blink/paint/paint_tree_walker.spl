@@ -13,11 +13,14 @@
 
 use std.lib.blink.layout.block_flow.{LayoutContext, LayoutBox, BoxGeometry, layout_context_new, layout_box_new, box_geometry_zero}
 use std.lib.blink.entity.computed_style.{ComputedStyle, computed_style_default}
+use std.lib.blink.dom.interaction_state.{InteractionState, interaction_state_empty}
 use std.lib.skia.entity.canvas.{SkCanvas, sk_canvas_make}
 use std.lib.skia.entity.paint.{SkPaint, sk_paint_new, sk_paint_fill}
 use std.lib.skia.entity.picture.{SkPicture, SkPictureRecorder, sk_picture_recorder_new, sk_picture_empty}
 use std.lib.skia.entity.geometry.{SkRect}
 use std.lib.skia.entity.color.{SkColor4f, sk_color4f, sk_color_argb}
+use std.common.color.types.{Color, from_rgb, from_rgba, white}
+use examples.browser.entity.dom.paint_types.{PaintOp, DisplayList}
 
 # ============================================================================
 # StyledBox — pairs a layout_id with its resolved ComputedStyle
@@ -28,12 +31,53 @@ class StyledBox:
     style: ComputedStyle
 
 # ============================================================================
+# ImageEntry — pairs a layout_id with its <img> src URL.
+#
+# The paint walker has no DOM back-reference, so callers that have resolved
+# an <img> element's layout box register it here with the element's `src`
+# attribute. During paint_box, a matching layout_id emits a
+# PaintOp.DrawImage alongside the usual background-fill ops.
+# ============================================================================
+
+class ImageEntry:
+    layout_id: i64
+    src_url: text
+
+# ============================================================================
+# FormFieldPaintEntry — paint-side registration of an <input> or <button>.
+#
+# Mirrors the ImageEntry pattern: the walker has no DOM back-reference,
+# so callers that have resolved a form-control's layout box register it
+# here with the text to draw plus an `is_button` discriminator.
+#
+# layout_id   — LayoutBox id this entry paints.
+# value       — current value for <input>; empty for <button>.
+# placeholder — placeholder text to draw when value is empty.
+# label       — button label (unused when is_button is false).
+# is_button   — false → paint as <input> (bg + border + text);
+#               true  → paint as <button> (bg + text only).
+# node_id     — DomNode id used to check focus/hover against InteractionState.
+# ============================================================================
+
+class FormFieldPaintEntry:
+    layout_id: i64
+    value: String
+    placeholder: String
+    label: String
+    is_button: bool
+    node_id: i64
+
+# ============================================================================
 # PaintContext — mutable painting state threaded through the walk
 # ============================================================================
 
 class PaintContext:
     layout_context: LayoutContext
     styles: [StyledBox]
+    images: [ImageEntry]
+    form_fields: [FormFieldPaintEntry]
+    interaction: InteractionState
+    paint_ops: [PaintOp]
     canvas: SkCanvas
 
 # ============================================================================
@@ -51,6 +95,31 @@ impl PaintContext:
         while i < len:
             if self.styles[i].layout_id == layout_id:
                 result = Some(self.styles[i].style)
+            i = i + 1
+        result
+
+    # find_image — linear scan of images by layout_id.
+    # Returns None when no ImageEntry matches (box will still paint its
+    # background without emitting a DrawImage op).
+    fn find_image(layout_id: i64) -> Option<ImageEntry>:
+        val i = 0
+        val len = self.images.len()
+        val result: Option<ImageEntry> = None
+        while i < len:
+            if self.images[i].layout_id == layout_id:
+                result = Some(self.images[i])
+            i = i + 1
+        result
+
+    # find_form_field — linear scan of form_fields by layout_id.
+    # Returns None when the box is not a registered form control.
+    fn find_form_field(layout_id: i64) -> Option<FormFieldPaintEntry>:
+        val i = 0
+        val len = self.form_fields.len()
+        val result: Option<FormFieldPaintEntry> = None
+        while i < len:
+            if self.form_fields[i].layout_id == layout_id:
+                result = Some(self.form_fields[i])
             i = i + 1
         result
 
@@ -90,11 +159,99 @@ impl PaintContext:
                     val bg_paint = sk_paint_fill(packed_color)
                     self.canvas.draw_rect(abs_rect, bg_paint)
 
+            # --- 2. Image (Phase B2) ---
+            # If this layout box was registered as an <img> element, emit a
+            # PaintOp.DrawImage so the Canvas2D bridge can render it through
+            # the renderer-side <img> cache. image_id stays 0 for now — the
+            # Canvas2D executor falls back to id:<imageId> when the URL
+            # version isn't cached, but it prefers the URL when present.
+            val maybe_image = self.find_image(box_id)
+            if val img = maybe_image:
+                val img_w = abs_right - abs_left
+                val img_h = abs_bottom - abs_top
+                val draw_op = PaintOp.DrawImage(
+                    x: abs_left,
+                    y: abs_top,
+                    w: img_w,
+                    h: img_h,
+                    image_id: 0,
+                    src_url: img.src_url
+                )
+                self.paint_ops.push(draw_op)
+
             # WHY: Border painting skipped this round — border_color,
             # border_style, and border_*_width fields do not yet exist on
             # ComputedStyle (stub only carries BoxGeometry.border_* thickness
             # values, not the paint attributes needed for stroke ops).
             # Will be added in the next pass once ComputedStyle is extended.
+
+            # --- 2b. Form control (Phase B3) ---
+            # If this layout box was registered as an <input> or <button>, emit
+            # the widget's composite paint ops (background + optional border +
+            # text). Focused <input> gets the Stitch accent border (2px), all
+            # others get the outline gray (1px). Buttons have no border per
+            # the Stitch primary spec.
+            val maybe_form = self.find_form_field(box_id)
+            if val field = maybe_form:
+                val f_w = abs_right - abs_left
+                val f_h = abs_bottom - abs_top
+                val font_size: f64 = 16.0
+                val is_focused: bool = self.interaction.focused_id == field.node_id
+                if field.is_button:
+                    # Button: purple background + centered white label.
+                    val btn_bg = from_rgb(124, 105, 163)
+                    val bg_op = PaintOp.FillRect(
+                        x: abs_left, y: abs_top, w: f_w, h: f_h, color: btn_bg
+                    )
+                    self.paint_ops.push(bg_op)
+                    if field.label.len() > 0:
+                        val text_y = abs_top + (f_h + font_size) / 2.0 - 4.0
+                        val text_op = PaintOp.DrawText(
+                            x: abs_left + 16.0,
+                            y: text_y,
+                            text_content: field.label,
+                            font_size: font_size,
+                            color: white()
+                        )
+                        self.paint_ops.push(text_op)
+                else:
+                    # Input: white-ish background + 1/2px border + value or placeholder.
+                    val input_bg = from_rgba(255, 255, 255, 200)
+                    val bg_op = PaintOp.FillRect(
+                        x: abs_left, y: abs_top, w: f_w, h: f_h, color: input_bg
+                    )
+                    self.paint_ops.push(bg_op)
+
+                    val outline = from_rgba(0, 0, 0, 64)        # 25% black
+                    val accent = from_rgb(124, 105, 163)        # Stitch primary
+                    var border_w: f64 = 1.0
+                    var border_color: Color = outline
+                    if is_focused:
+                        border_w = 2.0
+                        border_color = accent
+                    val widths: [f64] = [border_w, border_w, border_w, border_w]
+                    val colors: [Color] = [border_color, border_color, border_color, border_color]
+                    val border_op = PaintOp.DrawBorder(
+                        x: abs_left, y: abs_top, w: f_w, h: f_h,
+                        widths: widths, colors: colors
+                    )
+                    self.paint_ops.push(border_op)
+
+                    var shown: String = field.value
+                    var text_color: Color = from_rgba(0, 0, 0, 220)
+                    if shown.len() == 0:
+                        shown = field.placeholder
+                        text_color = from_rgba(0, 0, 0, 120)  # lighter for placeholder
+                    if shown.len() > 0:
+                        val text_y = abs_top + (f_h + font_size) / 2.0 - 4.0
+                        val text_op = PaintOp.DrawText(
+                            x: abs_left + 12.0,
+                            y: text_y,
+                            text_content: shown,
+                            font_size: font_size,
+                            color: text_color
+                        )
+                        self.paint_ops.push(text_op)
 
             # --- 3. Recurse into children ---
             val c = 0
@@ -109,8 +266,37 @@ impl PaintContext:
 # ============================================================================
 
 # paint_tree_new — allocate a PaintContext backed by a recording SkCanvas.
-# The canvas dimensions come from the LayoutContext viewport.
+# The canvas dimensions come from the LayoutContext viewport. The image
+# registry starts empty; callers add ImageEntry values with add_image
+# before walking if any <img> boxes need to emit DrawImage ops.
 fn paint_tree_new(ctx: LayoutContext, styles: [StyledBox]) -> PaintContext:
+    paint_tree_new_with_images(ctx, styles, [ImageEntry]())
+
+# paint_tree_new_with_images — same as paint_tree_new but with a
+# preallocated list of <img> registrations.
+fn paint_tree_new_with_images(ctx: LayoutContext, styles: [StyledBox], images: [ImageEntry]) -> PaintContext:
+    paint_tree_new_full(ctx, styles, images, [FormFieldPaintEntry](), interaction_state_empty())
+
+# paint_tree_new_with_forms — same as paint_tree_new but with preallocated
+# <input>/<button> registrations and an InteractionState (for focus/hover).
+# The image registry starts empty.
+fn paint_tree_new_with_forms(
+    ctx: LayoutContext,
+    styles: [StyledBox],
+    form_fields: [FormFieldPaintEntry],
+    interaction: InteractionState
+) -> PaintContext:
+    paint_tree_new_full(ctx, styles, [ImageEntry](), form_fields, interaction)
+
+# paint_tree_new_full — full-fat constructor used by the other two.
+# Supplies both <img> and form-field registries plus the interaction state.
+fn paint_tree_new_full(
+    ctx: LayoutContext,
+    styles: [StyledBox],
+    images: [ImageEntry],
+    form_fields: [FormFieldPaintEntry],
+    interaction: InteractionState
+) -> PaintContext:
     val w = ctx.viewport_width.to_i64()
     val h = ctx.viewport_height.to_i64()
     val base_canvas = sk_canvas_make(w, h)
@@ -124,12 +310,23 @@ fn paint_tree_new(ctx: LayoutContext, styles: [StyledBox]) -> PaintContext:
     PaintContext(
         layout_context: ctx,
         styles:         styles,
+        images:         images,
+        form_fields:    form_fields,
+        interaction:    interaction,
+        paint_ops:      [PaintOp](),
         canvas:         recording_canvas
     )
 
 # finalize_paint — close the recording and return the resulting SkPicture.
 fn finalize_paint(pc: PaintContext) -> SkPicture:
     pc.canvas.end_recording()
+
+# collect_display_list — return the PaintOp accumulator as a DisplayList.
+# The SkPicture (from finalize_paint) and the DisplayList are parallel
+# outputs: the former drives the software rasterizer, the latter feeds
+# the Canvas2D JSON serializer for the Electron shell.
+fn collect_display_list(pc: PaintContext) -> DisplayList:
+    DisplayList(ops: pc.paint_ops)
 
 # paint_tree — top-level convenience: create context, walk from root, finalize.
 fn paint_tree(ctx: LayoutContext, styles: [StyledBox]) -> SkPicture:

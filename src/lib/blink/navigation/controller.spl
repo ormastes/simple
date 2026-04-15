@@ -10,6 +10,7 @@
 # serialization, no HTTP-level redirect handling.
 
 use std.lib.blink.url.url_parser.{ParsedUrl, parse_url}
+use std.lib.blink.network.fetch.{FetchResponse, fetch_text}
 
 # ============================================================================
 # NavigationEntry — one slot in the history list
@@ -117,3 +118,22 @@ impl NavigationController:
     me clear():
         self.entries = [NavigationEntry]()
         self.current_index = -1
+
+    # goto — validate URL, fetch the body via the network layer, and record the
+    # navigation in history on success. Returns the FetchResponse so the caller
+    # can hand the body to the HTML parser.
+    #
+    # On failure (invalid URL, unsupported scheme, HTTP error) the history is
+    # left untouched and Err(message) is returned.
+    me goto(url_string: String, timestamp: f64) -> Result<FetchResponse, String>:
+        val parsed = parse_url(url_string)
+        if not parsed.is_valid:
+            return Err("invalid URL: {url_string}")
+        val fetched = fetch_text(url_string)
+        if val Err(msg) = fetched:
+            return Err(msg)
+        val response = fetched.unwrap()
+        # Record the navigation only after the fetch succeeds — matches
+        # Chromium behaviour where failed loads do not push a new entry.
+        self.navigate(url_string, timestamp)
+        Ok(response)

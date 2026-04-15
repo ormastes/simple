@@ -1,30 +1,85 @@
-# Simple Browser
+# Simple Browser — pure-Simple rendering via the Blink-style paint pipeline.
 #
-# Standalone browser app. Single Electron window with one full-bleed
-# web view — no system bar, no dock, no WM chrome. The host macOS
-# title bar provides minimize/close.
+# Phase D: replaces the previous iframe-based chrome with a Canvas2D-driven
+# paint loop. The Electron shell is now just a Canvas2D host; the address
+# strip, input field, Go button, and content area are all composed from
+# PaintOps generated here in this file and serialized via
+# `display_list_to_canvas2d_ops`.
 #
 # Launch:
 #   ./tools/electron-shell/node_modules/.bin/electron \
 #       tools/electron-shell examples/ui/simple_browser.spl
 #
-# Override URL:
-#   SIMPLE_BROWSER_URL=https://example.com ./tools/electron-shell/...
+# Env vars:
+#   SIMPLE_THEME            "light" or default dark
+#   SIMPLE_BROWSER_URL      seed URL displayed in the address bar
+#                           (default https://example.com)
 #
-# Override theme (affects the address-strip color only):
-#   SIMPLE_THEME=light ./tools/electron-shell/...
+# IPC events handled in the main loop:
+#   MouseEvent(down)  — focus the input, or click the Go button
+#   KeyPress          — append to focused input; Enter runs Go
+#   InputChange       — also syncs the input value
+#   FocusEvent        — update focused box (input | none)
+#   ScrollEvent       — translate the content area by dy
+#   Resize            — update viewport and repaint
+#   Quit              — exit
+#
+# ---------------------------------------------------------------------------
+# HONEST SCOPING
+# ---------------------------------------------------------------------------
+# * The real Blink modules live under `std.lib.blink.*` and use that prefix
+#   internally; they are NOT importable from `examples/ui/`. This file
+#   therefore talks directly to the Canvas2D serializer without going
+#   through Blink's cascade/layout/paint walker.
+# * The chrome (address strip, input, Go button) is composed from PaintOps
+#   and sent through `display_list_to_canvas2d_ops` + `build_ipc_paint_canvas`
+#   — the same downstream path that `paint_tree_new_with_forms` would take.
+# * The content area is rendered as a single DrawText message summarising
+#   the current URL plus a scoping note. Wiring the toy
+#   `examples.browser.transform.pipeline.RenderPipeline` was attempted, but
+#   its `me parse()` chains into other `me` methods in a way the current
+#   bootstrap interpreter refuses ("value is not callable"). The full Blink
+#   pipeline (HTML parse -> cascade -> block/inline layout -> paint tree
+#   walker -> display list) is the next step once the required modules
+#   grow an examples/-reachable façade.
+# * Text shaping is delegated to Canvas2D's fillText; widths are estimates.
+# * Image decoding is handled by the Canvas2D <img> cache on the shell side.
+# * Navigation is stubbed: Go / Enter swap the summary DrawText but do NOT
+#   run an HTTP fetch. `blink/network/fetch.fetch_text` is reachable only
+#   under `std.lib.blink.*` today.
+# * Bidi, tables, flex, complex CSS, JS, video, web fonts: NOT supported.
+# ---------------------------------------------------------------------------
 
-use app.ui.ipc.protocol.{parse_ipc_message, build_ipc_render}
+use app.ui.ipc.protocol.{parse_ipc_message, build_ipc_paint_canvas}
 use common.ui.widget.{UIEvent}
+use common.render_scene.scene_to_canvas2d_json.{display_list_to_canvas2d_ops}
+use examples.browser.entity.dom.paint_types.{PaintOp, DisplayList}
+use std.common.color.types.{Color, from_rgb, from_rgba, white}
 
 extern fn rt_stdin_read_line() -> text?
 extern fn rt_env_get(key: text) -> text
 
+# ---------------------------------------------------------------------------
+# Layout constants (the chrome is fixed-size; content fills the rest)
+# ---------------------------------------------------------------------------
+
+val CHROME_HEIGHT: f64 = 52.0
+val INPUT_X: f64 = 16.0
+val INPUT_Y: f64 = 10.0
+val INPUT_H: f64 = 32.0
+val BUTTON_W: f64 = 64.0
+val BUTTON_H: f64 = 32.0
+val BUTTON_MARGIN: f64 = 16.0
+
+# ---------------------------------------------------------------------------
+# Env-var resolution
+# ---------------------------------------------------------------------------
+
 fn _resolve_theme() -> text:
     val env_val = rt_env_get("SIMPLE_THEME") ?? ""
     if env_val == "light" or env_val == "glass_obsidian_light":
-        return "glass_obsidian_light"
-    return "glass_obsidian_dark"
+        return "light"
+    return "dark"
 
 fn _resolve_url() -> text:
     val env_val = rt_env_get("SIMPLE_BROWSER_URL") ?? ""
@@ -32,55 +87,192 @@ fn _resolve_url() -> text:
         return env_val
     return "https://example.com"
 
-fn _build_browser_html(url: text, theme: text) -> text:
-    val is_light = theme == "glass_obsidian_light"
-    val bg = if is_light: "#F0ECF5" else: "#060612"
-    val fg = if is_light: "#1D1D1F" else: "#E3E0F3"
-    val accent = if is_light: "#7C69A3" else: "#C6C6C8"
-    val strip_bg = if is_light:
-        "linear-gradient(180deg,rgba(255,255,255,0.92),rgba(245,242,250,0.78))"
-    else:
-        "linear-gradient(180deg,rgba(18,18,31,0.92),rgba(13,13,26,0.78))"
-    val strip_border = if is_light: "rgba(74,69,77,0.18)" else: "rgba(149,142,152,0.20)"
-    # CSS uses raw strings (r"...") so the `{`/`}` braces don't trigger
-    # Simple's interpolation. Variables get glued in via `+`.
-    val btn_bg = if is_light: "rgba(124,105,163,0.14)" else: "rgba(198,198,200,0.14)"
-    # CSS uses raw strings (r"...") so the `{`/`}` braces don't trigger
-    # Simple's interpolation. Variables get glued in via `+`.
-    var css = r"<style>html,body{margin:0;padding:0;height:100vh;width:100vw;overflow:hidden;background:" + bg
-    css = css + r";color:" + fg
-    css = css + r";font-family:'Space Grotesk','Manrope','Inter',-apple-system,BlinkMacSystemFont,sans-serif;}"
-    css = css + r".sb-wrap{display:flex;flex-direction:column;height:100vh;width:100vw;}"
-    # The address strip is the window-drag region (mac hidden-inset titlebar).
-    # `-webkit-app-region:drag` lets the user grab the strip to move the window.
-    css = css + r".sb-strip{flex:0 0 auto;display:flex;align-items:center;gap:10px;padding:10px 16px 10px 88px;background:" + strip_bg
-    css = css + r";border-bottom:1px solid " + strip_border
-    css = css + r";backdrop-filter:blur(24px) saturate(170%);-webkit-backdrop-filter:blur(24px) saturate(170%);-webkit-app-region:drag;}"
-    css = css + r".sb-label{font-size:11px;text-transform:uppercase;letter-spacing:1.4px;color:" + accent
-    css = css + r";font-weight:650;}"
-    css = css + r".sb-form{flex:1;display:flex;align-items:center;gap:8px;-webkit-app-region:no-drag;}"
-    css = css + r".sb-input{flex:1;font-size:13px;color:" + fg
-    css = css + r";font-family:'Fira Code','SF Mono',monospace;padding:6px 12px;background:rgba(127,127,127,0.10);border-radius:8px;border:1px solid " + strip_border
-    css = css + r";outline:none;-webkit-app-region:no-drag;}"
-    css = css + r".sb-input:focus{border-color:" + accent
-    css = css + r";background:rgba(127,127,127,0.18);}"
-    css = css + r".sb-go{font-size:12px;color:" + fg
-    css = css + r";background:" + btn_bg
-    css = css + r";border:1px solid " + strip_border
-    css = css + r";padding:6px 12px;border-radius:8px;cursor:pointer;font-weight:600;-webkit-app-region:no-drag;}"
-    css = css + r".sb-go:hover{background:rgba(127,127,127,0.24);}"
-    css = css + r".sb-frame{flex:1;width:100%;height:100%;border:none;background:#FFFFFF;}</style>"
+# ---------------------------------------------------------------------------
+# Theme palette — glass_obsidian dark/light tokens
+# ---------------------------------------------------------------------------
 
-    # The form submits to the iframe via target="sb-frame" — pressing Enter
-    # in the input navigates the iframe to the typed URL. No JS, no IPC.
-    val body = "<div class=\"sb-wrap\"><div class=\"sb-strip\"><div class=\"sb-label\">Simple Browser</div><form class=\"sb-form\" action=\"\" target=\"sb-frame\" method=\"GET\" onsubmit=\"event.preventDefault(); document.getElementById('sb-frame').src=document.getElementById('sb-input').value; return false;\"><input class=\"sb-input\" id=\"sb-input\" type=\"text\" value=\"" + url + "\" spellcheck=\"false\" autocomplete=\"off\" /><button class=\"sb-go\" type=\"submit\">Go</button></form></div><iframe class=\"sb-frame\" id=\"sb-frame\" name=\"sb-frame\" src=\"" + url + "\" sandbox=\"allow-scripts allow-same-origin allow-forms allow-popups allow-popups-to-escape-sandbox\"></iframe></div>"
-    return "<html><head><title>Simple Browser</title></head><body>" + css + body + "</body></html>"
+class Palette:
+    strip_bg: Color
+    strip_border: Color
+    fg: Color
+    accent: Color
+    input_bg: Color
+    input_border: Color
+    placeholder: Color
+    content_bg: Color
+    subtle: Color
+
+fn _palette(theme: text) -> Palette:
+    if theme == "light":
+        Palette(
+            strip_bg: from_rgba(255, 255, 255, 235),
+            strip_border: from_rgba(74, 69, 77, 46),
+            fg: from_rgb(29, 29, 31),
+            accent: from_rgb(124, 105, 163),
+            input_bg: from_rgba(127, 127, 127, 36),
+            input_border: from_rgba(74, 69, 77, 70),
+            placeholder: from_rgba(29, 29, 31, 120),
+            content_bg: from_rgb(255, 255, 255),
+            subtle: from_rgba(29, 29, 31, 140)
+        )
+    else:
+        Palette(
+            strip_bg: from_rgba(18, 18, 31, 235),
+            strip_border: from_rgba(149, 142, 152, 51),
+            fg: from_rgb(227, 224, 243),
+            accent: from_rgb(198, 198, 200),
+            input_bg: from_rgba(127, 127, 127, 46),
+            input_border: from_rgba(149, 142, 152, 80),
+            placeholder: from_rgba(227, 224, 243, 120),
+            content_bg: from_rgb(20, 20, 30),
+            subtle: from_rgba(227, 224, 243, 140)
+        )
+
+# ---------------------------------------------------------------------------
+# Chrome painting — hand-crafted PaintOps for the address strip. This
+# mirrors what `paint_tree_new_with_forms` would emit for a minimal
+# <input>/<button> pair.
+# ---------------------------------------------------------------------------
+
+fn _input_x(vw: f64) -> f64: INPUT_X
+fn _input_w(vw: f64) -> f64: vw - INPUT_X - BUTTON_W - BUTTON_MARGIN - 8.0
+fn _button_x(vw: f64) -> f64: vw - BUTTON_W - BUTTON_MARGIN
+
+fn _build_chrome_ops(url: text, pal: Palette, vw: f64, focused_input: bool) -> [PaintOp]:
+    var ops: [PaintOp] = []
+    # strip background + 1px separator
+    ops = ops.push(PaintOp.FillRect(x: 0.0, y: 0.0, w: vw, h: CHROME_HEIGHT, color: pal.strip_bg))
+    ops = ops.push(PaintOp.FillRect(x: 0.0, y: CHROME_HEIGHT - 1.0, w: vw, h: 1.0, color: pal.strip_border))
+
+    # input field background + border
+    val ix = _input_x(vw)
+    val iy = INPUT_Y
+    val iw = _input_w(vw)
+    val ih = INPUT_H
+    ops = ops.push(PaintOp.FillRect(x: ix, y: iy, w: iw, h: ih, color: pal.input_bg))
+    val border_w: f64 = if focused_input: 2.0 else: 1.0
+    val border_color: Color = if focused_input: pal.accent else: pal.input_border
+    val widths: [f64] = [border_w, border_w, border_w, border_w]
+    val colors: [Color] = [border_color, border_color, border_color, border_color]
+    ops = ops.push(PaintOp.DrawBorder(x: ix, y: iy, w: iw, h: ih, widths: widths, colors: colors))
+
+    # input value (or placeholder when empty)
+    var shown = url
+    var text_color = pal.fg
+    if shown == "":
+        shown = "Enter URL..."
+        text_color = pal.placeholder
+    ops = ops.push(PaintOp.DrawText(
+        x: ix + 10.0,
+        y: iy + ih / 2.0 + 5.0,
+        text_content: shown,
+        font_size: 13.0,
+        color: text_color
+    ))
+
+    # Go button
+    val bx = _button_x(vw)
+    val by = INPUT_Y
+    val bw = BUTTON_W
+    val bh = BUTTON_H
+    ops = ops.push(PaintOp.FillRect(x: bx, y: by, w: bw, h: bh, color: pal.accent))
+    ops = ops.push(PaintOp.DrawText(
+        x: bx + 20.0,
+        y: by + bh / 2.0 + 5.0,
+        text_content: "Go",
+        font_size: 13.0,
+        color: white()
+    ))
+    return ops
+
+# ---------------------------------------------------------------------------
+# Content painting — stub body under the chrome. Fills the content area and
+# prints a short note. When the Blink HTML parser + cascade + layout + paint
+# tree walker gain an examples-reachable facade, this is the spot to swap in
+# `run_pipeline(html).ops` with a vertical translate by `CHROME_HEIGHT -
+# scroll_y`.
+# ---------------------------------------------------------------------------
+
+fn _build_content_ops(url: text, loaded: bool, pal: Palette, vw: f64, vh: f64, scroll_y: f64) -> [PaintOp]:
+    var ops: [PaintOp] = []
+    val content_y = CHROME_HEIGHT
+    val content_h = vh - CHROME_HEIGHT
+    ops = ops.push(PaintOp.FillRect(x: 0.0, y: content_y, w: vw, h: content_h, color: pal.content_bg))
+    ops = ops.push(PaintOp.PushClip(x: 0.0, y: content_y, w: vw, h: content_h))
+    val base_y = content_y + 40.0 - scroll_y
+    val title = if loaded: "Loaded: " + url else: "Simple Browser"
+    ops = ops.push(PaintOp.DrawText(
+        x: 24.0, y: base_y,
+        text_content: title, font_size: 24.0, color: pal.fg
+    ))
+    ops = ops.push(PaintOp.DrawText(
+        x: 24.0, y: base_y + 36.0,
+        text_content: "Pure-Simple paint pipeline", font_size: 14.0, color: pal.subtle
+    ))
+    ops = ops.push(PaintOp.DrawText(
+        x: 24.0, y: base_y + 60.0,
+        text_content: "Chrome drawn via DisplayList -> Canvas2D ops.", font_size: 13.0, color: pal.subtle
+    ))
+    ops = ops.push(PaintOp.DrawText(
+        x: 24.0, y: base_y + 82.0,
+        text_content: "Navigation + full HTML render land once Blink modules", font_size: 13.0, color: pal.subtle
+    ))
+    ops = ops.push(PaintOp.DrawText(
+        x: 24.0, y: base_y + 102.0,
+        text_content: "expose an examples/-reachable facade.", font_size: 13.0, color: pal.subtle
+    ))
+    ops = ops.push(PaintOp.PopClip)
+    return ops
+
+# ---------------------------------------------------------------------------
+# IPC emission
+# ---------------------------------------------------------------------------
+
+fn _emit_paint(ops: [PaintOp], vw: i32, vh: i32):
+    val dl = DisplayList(ops: ops)
+    val ops_json = display_list_to_canvas2d_ops(dl)
+    print build_ipc_paint_canvas(ops_json, vw, vh)
+
+fn _merge(chrome: [PaintOp], content: [PaintOp]) -> [PaintOp]:
+    var all: [PaintOp] = []
+    for op in content:
+        all = all.push(op)
+    for op in chrome:
+        all = all.push(op)
+    return all
+
+# ---------------------------------------------------------------------------
+# Hit testing for chrome zones
+# ---------------------------------------------------------------------------
+
+fn _hit_input(x: f64, y: f64, vw: f64) -> bool:
+    val ix = _input_x(vw)
+    val iw = _input_w(vw)
+    x >= ix and x <= ix + iw and y >= INPUT_Y and y <= INPUT_Y + INPUT_H
+
+fn _hit_button(x: f64, y: f64, vw: f64) -> bool:
+    val bx = _button_x(vw)
+    x >= bx and x <= bx + BUTTON_W and y >= INPUT_Y and y <= INPUT_Y + BUTTON_H
+
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
 
 fn main() -> i64:
     val theme = _resolve_theme()
-    val url = _resolve_url()
-    val page = _build_browser_html(url, theme)
-    print build_ipc_render(page)
+    val pal = _palette(theme)
+    var url = _resolve_url()
+    var loaded: bool = false
+    var focused_input: bool = false
+    var scroll_y: f64 = 0.0
+    var viewport_w: i32 = 1024
+    var viewport_h: i32 = 768
+
+    val vw_f = viewport_w.to_f64()
+    val vh_f = viewport_h.to_f64()
+    val chrome0 = _build_chrome_ops(url, pal, vw_f, focused_input)
+    val content0 = _build_content_ops(url, loaded, pal, vw_f, vh_f, scroll_y)
+    _emit_paint(_merge(chrome0, content0), viewport_w, viewport_h)
 
     var running = true
     while running:
@@ -88,10 +280,67 @@ fn main() -> i64:
         if line != nil and line != "":
             val event = parse_ipc_message(line)
             if event != nil:
+                var dirty = false
                 match event:
                     UIEvent.Quit:
                         running = false
+                    UIEvent.Resize(w, h):
+                        viewport_w = w
+                        viewport_h = h
+                        dirty = true
+                    UIEvent.MouseEvent(x, y, _, kind):
+                        val vw2 = viewport_w.to_f64()
+                        if kind == "down":
+                            if _hit_input(x, y, vw2):
+                                if not focused_input:
+                                    focused_input = true
+                                    dirty = true
+                            elif _hit_button(x, y, vw2):
+                                loaded = true
+                                scroll_y = 0.0
+                                focused_input = false
+                                dirty = true
+                            else:
+                                if focused_input:
+                                    focused_input = false
+                                    dirty = true
+                    UIEvent.KeyPress(key):
+                        if focused_input:
+                            if key == "Enter":
+                                loaded = true
+                                scroll_y = 0.0
+                                focused_input = false
+                                dirty = true
+                            elif key == "Backspace":
+                                if url.len() > 0:
+                                    url = url.substring(0, url.len() - 1)
+                                    dirty = true
+                            elif key.len() == 1:
+                                url = url + key
+                                dirty = true
+                    UIEvent.InputChange(_tid, value):
+                        if focused_input:
+                            url = value
+                            dirty = true
+                    UIEvent.FocusEvent(_tid, kind):
+                        if kind == "focus":
+                            if not focused_input:
+                                focused_input = true
+                                dirty = true
+                        else:
+                            if focused_input:
+                                focused_input = false
+                                dirty = true
+                    UIEvent.ScrollEvent(_sx, _sy, _dx, dy):
+                        val new_scroll = scroll_y + dy
+                        scroll_y = if new_scroll < 0.0: 0.0 else: new_scroll
+                        dirty = true
                     _:
                         pass_dn
-
+                if dirty:
+                    val vw_i = viewport_w.to_f64()
+                    val vh_i = viewport_h.to_f64()
+                    val chrome_ops = _build_chrome_ops(url, pal, vw_i, focused_input)
+                    val content_ops = _build_content_ops(url, loaded, pal, vw_i, vh_i, scroll_y)
+                    _emit_paint(_merge(chrome_ops, content_ops), viewport_w, viewport_h)
     return 0

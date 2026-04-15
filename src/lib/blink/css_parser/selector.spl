@@ -9,11 +9,13 @@
 #   - Descendant combinator: div p       → p anywhere inside div
 #   - Child combinator:      ul > li     → li directly under ul
 #   - Attribute presence:   [disabled]   → element has the attribute
+#   - Pseudo-class:         :hover, :focus (requires InteractionState)
 #
-# Out of scope: pseudo-classes (:hover, :nth-child), attribute value operators
-# (^= $= *=), adjacent-sibling (+), general-sibling (~), namespaces, :not().
+# Out of scope: other pseudo-classes (:nth-child, :not, ...), attribute value
+# operators (^= $= *=), adjacent-sibling (+), general-sibling (~), namespaces.
 
 use std.lib.blink.dom.node.{DomNode, DomTree, NodeType, Attribute}
+use std.lib.blink.dom.interaction_state.{InteractionState, interaction_state_empty}
 
 # ============================================================================
 # SimpleSelectorKind — discriminant for the five simple selector types
@@ -25,6 +27,7 @@ enum SimpleSelectorKind:
     Id
     Universal
     AttributePresence
+    PseudoClass
 
 # ============================================================================
 # SimpleSelector — one atomic selector part
@@ -178,7 +181,7 @@ fn parse_compound(raw: String) -> Option<CompoundSelector>:
     val compound = compound_selector_new()
     # Walk character by character building token runs.
     # State machine: track what kind of simple is being accumulated.
-    # NONE = 0, TYPE = 1, CLASS = 2, ID = 3, ATTR = 4
+    # NONE = 0, TYPE = 1, CLASS = 2, ID = 3, ATTR = 4, PSEUDO = 5
     var state = 0
     var token_start = 0
     var i = 0
@@ -187,7 +190,7 @@ fn parse_compound(raw: String) -> Option<CompoundSelector>:
         var ch: i64 = 0
         if i < length:
             ch = raw[i].to_i64()
-        val flush = i == length || ch == 46 || ch == 35 || ch == 91   # . # [
+        val flush = i == length || ch == 46 || ch == 35 || ch == 91 || ch == 58   # . # [ :
         if flush && state != 0:
             val token = raw.slice(token_start, i)
             if state == 1:
@@ -215,6 +218,11 @@ fn parse_compound(raw: String) -> Option<CompoundSelector>:
                 if attr_name.len() == 0:
                     return None
                 compound.simples.push(simple_selector_new(SimpleSelectorKind.AttributePresence, attr_name))
+            else if state == 5:
+                # Pseudo-class — only :hover and :focus are supported.
+                if token != "hover" && token != "focus":
+                    return None
+                compound.simples.push(simple_selector_new(SimpleSelectorKind.PseudoClass, token))
         if i < length:
             if ch == 46:   # .
                 state = 2
@@ -224,6 +232,9 @@ fn parse_compound(raw: String) -> Option<CompoundSelector>:
                 token_start = i + 1
             else if ch == 91:   # [
                 state = 4
+                token_start = i + 1
+            else if ch == 58:   # :
+                state = 5
                 token_start = i + 1
             else if state == 0:
                 # Start of a type selector (or universal).
@@ -319,8 +330,16 @@ fn parse_selector(selector_text: String) -> Option<ComplexSelector>:
 # ============================================================================
 # matches_compound — test a single node against a CompoundSelector
 # ============================================================================
+#
+# Backwards-compatible entry point: callers that don't have interaction state
+# forward to `matches_compound_with_state` with an empty state. In that case
+# any `:hover` / `:focus` pseudo-class cannot match (hovered_id/focused_id
+# are -1, and valid DOM ids are >= 0).
 
 fn matches_compound(node: DomNode, compound: CompoundSelector) -> bool:
+    matches_compound_with_state(node, node.id, compound, interaction_state_empty())
+
+fn matches_compound_with_state(node: DomNode, node_id: i64, compound: CompoundSelector, state: InteractionState) -> bool:
     var i = 0
     while i < compound.simples.len():
         val simple = compound.simples[i]
@@ -366,6 +385,19 @@ fn matches_compound(node: DomNode, compound: CompoundSelector) -> bool:
                 ai = ai + 1
             if !found_attr:
                 return false
+        else if kind == SimpleSelectorKind.PseudoClass:
+            if node.node_type != NodeType.Element:
+                return false
+            if simple.name == "hover":
+                if state.hovered_id != node_id:
+                    return false
+            else if simple.name == "focus":
+                if state.focused_id != node_id:
+                    return false
+            else:
+                # Any other pseudo-class name cannot match (parser rejects
+                # these, but guard defensively).
+                return false
         i = i + 1
     true
 
@@ -380,6 +412,9 @@ fn matches_compound(node: DomNode, compound: CompoundSelector) -> bool:
 #      - Descendant: any ancestor (parent or further up) must match.
 
 fn matches_complex(tree: DomTree, node_id: i64, selector: ComplexSelector) -> bool:
+    matches_complex_with_state(tree, node_id, selector, interaction_state_empty())
+
+fn matches_complex_with_state(tree: DomTree, node_id: i64, selector: ComplexSelector, state: InteractionState) -> bool:
     val num_compounds = selector.compounds.len()
     if num_compounds == 0:
         return false
@@ -389,7 +424,7 @@ fn matches_complex(tree: DomTree, node_id: i64, selector: ComplexSelector) -> bo
         return false
     val node = maybe_node.unwrap()
     val last_idx = num_compounds - 1
-    if !matches_compound(node, selector.compounds[last_idx]):
+    if !matches_compound_with_state(node, node_id, selector.compounds[last_idx], state):
         return false
     if num_compounds == 1:
         return true
@@ -408,7 +443,7 @@ fn matches_complex(tree: DomTree, node_id: i64, selector: ComplexSelector) -> bo
             if maybe_parent.is_none():
                 return false
             val parent_node = maybe_parent.unwrap()
-            if !matches_compound(parent_node, selector.compounds[compound_idx]):
+            if !matches_compound_with_state(parent_node, parent_id, selector.compounds[compound_idx], state):
                 return false
             current_id = parent_id
         else:
@@ -424,7 +459,7 @@ fn matches_complex(tree: DomTree, node_id: i64, selector: ComplexSelector) -> bo
                     ancestor_id = -1
                 else:
                     val anc_node = maybe_anc.unwrap()
-                    if matches_compound(anc_node, selector.compounds[compound_idx]):
+                    if matches_compound_with_state(anc_node, ancestor_id, selector.compounds[compound_idx], state):
                         found_ancestor = true
                         current_id = ancestor_id
                     else:

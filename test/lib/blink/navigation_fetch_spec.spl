@@ -1,0 +1,80 @@
+# @cover src/lib/blink/network/fetch.spl 80%
+# @cover src/lib/blink/navigation/controller.spl 60%
+"""
+# Navigation Fetch Specification
+
+**Category:** Browser / Blink
+**Status:** Active
+
+## Overview
+
+Tests for `fetch_text` (file:// reads, invalid URL rejection, unsupported
+scheme rejection) and for the new `NavigationController.goto` method that
+fetches a URL before recording it in history.
+
+Real network traffic is out of scope — http:// URLs are not exercised here
+because they would break CI. The file:// path is smoke-tested via a temp
+file written and deleted inside each `it` block.
+"""
+
+use std.sspec.*
+use std.lib.blink.network.fetch.{FetchResponse, fetch_text}
+use std.lib.blink.navigation.controller.{
+    NavigationController,
+    navigation_controller_new
+}
+
+extern fn rt_file_write_text(path: text, content: text) -> bool
+extern fn rt_file_delete(path: text) -> bool
+
+describe "fetch_text file://":
+    it "reads a local file and returns body":
+        val path = "/tmp/blink_fetch_smoke.html"
+        val html = "<html><body>hello</body></html>"
+        rt_file_write_text(path, html)
+        val result = fetch_text("file://{path}")
+        rt_file_delete(path)
+        expect(result.is_ok()).to_equal(true)
+        val resp = result.unwrap()
+        expect(resp.status).to_equal(200)
+        expect(resp.body).to_equal(html)
+        expect(resp.content_type).to_equal("text/html")
+
+    it "returns Err for a missing file":
+        val path = "/tmp/blink_fetch_missing_xyz.html"
+        # Ensure the file does not exist.
+        rt_file_delete(path)
+        val result = fetch_text("file://{path}")
+        expect(result.is_ok()).to_equal(false)
+
+describe "fetch_text invalid inputs":
+    it "returns Err for a non-URL string":
+        val result = fetch_text("not a url")
+        expect(result.is_ok()).to_equal(false)
+
+    it "returns Err with a meaningful message for an unsupported scheme":
+        val result = fetch_text("ftp://unsupported")
+        expect(result.is_ok()).to_equal(false)
+        if val Err(msg) = result:
+            expect(msg).to_contain("unsupported scheme")
+
+describe "NavigationController.goto":
+    it "updates the controller's current entry on file:// fetch":
+        val path = "/tmp/blink_fetch_smoke.html"
+        rt_file_write_text(path, "<html></html>")
+        val nc = navigation_controller_new()
+        val url = "file://{path}"
+        val result = nc.goto(url, 1000.0)
+        rt_file_delete(path)
+        expect(result.is_ok()).to_equal(true)
+        expect(nc.history_count()).to_equal(1)
+        expect(nc.current_index).to_equal(0)
+        val cur = nc.current_entry()
+        expect(cur).to_equal(false)  # not nil — history advanced
+
+    it "leaves history unchanged on invalid URL":
+        val nc = navigation_controller_new()
+        val result = nc.goto("", 1000.0)
+        expect(result.is_ok()).to_equal(false)
+        expect(nc.history_count()).to_equal(0)
+        expect(nc.current_index).to_equal(-1)

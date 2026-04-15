@@ -13,12 +13,13 @@
 # expansion (margin: 10px 20px), computed-value resolution (calc, var, em).
 
 use std.lib.blink.dom.node.{DomTree, DomNode, NodeType}
+use std.lib.blink.dom.interaction_state.{InteractionState, interaction_state_empty}
 use std.lib.blink.entity.computed_style.{
     ComputedStyle, Display, Position, Overflow, Visibility, TextAlign, Length,
     computed_style_default
 }
 use std.lib.blink.css_parser.parser.{CssStyleSheet, CssStyleRule, CssDeclaration}
-use std.lib.blink.css_parser.selector.{parse_selector, matches_complex}
+use std.lib.blink.css_parser.selector.{parse_selector, matches_complex, matches_complex_with_state}
 use std.lib.skia.entity.color.{SkColor4f, sk_color4f}
 
 # ============================================================================
@@ -364,6 +365,61 @@ fn resolve_style(tree: DomTree, node_id: i64, parent_style: ComputedStyle, style
         val maybe_sel = parse_selector(rule.selector)
         val matches = match maybe_sel:
             Some(sel): matches_complex(tree, node_id, sel)
+            None:      false
+        if matches:
+            var di = 0
+            while di < rule.declarations.len():
+                val decl = rule.declarations[di]
+                if decl.important:
+                    style = apply_declaration(style, decl)
+                di = di + 1
+        ri2 = ri2 + 1
+
+    style
+
+# ============================================================================
+# resolve_style_with_state — cascade variant that honours :hover / :focus
+# ============================================================================
+#
+# Same as `resolve_style`, but uses `matches_complex_with_state` so that rules
+# containing `:hover` / `:focus` pseudo-classes take effect when the given
+# node matches the interaction state.
+
+fn resolve_style_with_state(tree: DomTree, node_id: i64, parent_style: ComputedStyle, stylesheet: CssStyleSheet, state: InteractionState) -> ComputedStyle:
+    # Start from initial values
+    var style = computed_style_default()
+
+    # Inherit properties from parent
+    style.color      = parent_style.color
+    style.font_size  = parent_style.font_size
+    style.font_weight = parent_style.font_weight
+    style.text_align = parent_style.text_align
+    style.visibility = parent_style.visibility
+
+    # Pass 1: non-important declarations
+    var ri = 0
+    while ri < stylesheet.rules.len():
+        val rule = stylesheet.rules[ri]
+        val maybe_sel = parse_selector(rule.selector)
+        val matches = match maybe_sel:
+            Some(sel): matches_complex_with_state(tree, node_id, sel, state)
+            None:      false
+        if matches:
+            var di = 0
+            while di < rule.declarations.len():
+                val decl = rule.declarations[di]
+                if !decl.important:
+                    style = apply_declaration(style, decl)
+                di = di + 1
+        ri = ri + 1
+
+    # Pass 2: !important declarations
+    var ri2 = 0
+    while ri2 < stylesheet.rules.len():
+        val rule = stylesheet.rules[ri2]
+        val maybe_sel = parse_selector(rule.selector)
+        val matches = match maybe_sel:
+            Some(sel): matches_complex_with_state(tree, node_id, sel, state)
             None:      false
         if matches:
             var di = 0

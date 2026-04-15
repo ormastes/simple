@@ -108,6 +108,198 @@ fn inline_element(width: f64, height: f64, ref_id: i64) -> InlineItem:
         ref_id: ref_id
     )
 
+# inline_input — build an InlineItem for an <input type="text"> widget.
+# The layout emits InlineElement kind; the paint walker discriminates via
+# the element's registered FormFieldPaintEntry (kind-neutral at this layer).
+fn inline_input(width: f64, height: f64, ref_id: i64) -> InlineItem:
+    InlineItem(
+        kind: InlineItemKind.InlineElement,
+        text: "",
+        width: width,
+        height: height,
+        ref_id: ref_id
+    )
+
+# inline_button — build an InlineItem for a <button> widget.
+# Same shape as inline_input; discrimination happens at paint time.
+fn inline_button(width: f64, height: f64, ref_id: i64) -> InlineItem:
+    InlineItem(
+        kind: InlineItemKind.InlineElement,
+        text: "",
+        width: width,
+        height: height,
+        ref_id: ref_id
+    )
+
+# ============================================================================
+# IntrinsicSize — width/height pair returned by intrinsic_*_size helpers.
+# ============================================================================
+#
+# Simple lacks tuple return; Pair<f64, f64> is generic and loses naming.
+# IntrinsicSize gives named fields for clearer call sites.
+
+class IntrinsicSize:
+    width: f64
+    height: f64
+
+# intrinsic_input_size — compute content-box dimensions for an <input>.
+#   width  = max(estimate_text_width(text, font_size), font_size * 6.0) + 24.0
+#            (6em min content + 12px left/right padding)
+#   height = font_size + 16.0 (8px top/bottom padding)
+# Uses `value` when non-empty, else `placeholder` for sizing.
+fn intrinsic_input_size(value: String, placeholder: String, font_size: f64) -> IntrinsicSize:
+    var sample: String = value
+    if sample.len() == 0:
+        sample = placeholder
+    val text_w = estimate_text_width(sample, font_size)
+    val min_w = font_size * 6.0
+    var chosen: f64 = text_w
+    if min_w > chosen:
+        chosen = min_w
+    val w = chosen + 24.0
+    val h = font_size + 16.0
+    IntrinsicSize(width: w, height: h)
+
+# intrinsic_button_size — compute content-box dimensions for a <button>.
+#   width  = estimate_text_width(label, font_size) + 32.0
+#            (16px left/right padding)
+#   height = font_size + 16.0
+fn intrinsic_button_size(label: String, font_size: f64) -> IntrinsicSize:
+    val w = estimate_text_width(label, font_size) + 32.0
+    val h = font_size + 16.0
+    IntrinsicSize(width: w, height: h)
+
+# ===== estimate_text_width =====
+#
+# Heuristic per-character advance for pre-measuring text runs prior to
+# real glyph shaping. Matches the width used internally by wrap_text_run,
+# so callers can pre-measure non-wrapped text consistently.
+#
+# Formula: len * font_size * 0.55 — a reasonable average glyph advance
+# for proportional Latin fonts at v1. Real glyph metrics land later.
+
+fn estimate_text_width(text_content: String, font_size: f64) -> f64:
+    val n = text_content.len()
+    (n as f64) * font_size * 0.55
+
+# ===== _is_space_byte =====
+#
+# True for bytes that delimit word tokens in wrap_text_run: ASCII space,
+# tab, newline, carriage return. Hyphen (`-`) and underscore (`_`) are
+# intentionally treated as word-interior to keep identifiers intact.
+
+fn _is_space_byte(c: i64) -> bool:
+    if c == 32:
+        true
+    else if c == 9:
+        true
+    else if c == 10:
+        true
+    else if c == 13:
+        true
+    else:
+        false
+
+# ===== _split_words =====
+#
+# Tokenize `text_content` on ASCII whitespace runs. Empty runs at the
+# head/tail are discarded; consecutive whitespace collapses. `-` and `_`
+# remain part of the adjacent word.
+
+fn _split_words(text_content: String) -> [String]:
+    var words: [String] = []
+    val n = text_content.len()
+    var start: i64 = -1
+    var i: i64 = 0
+    while i < n:
+        val c = text_content[i].to_i64()
+        if _is_space_byte(c):
+            if start >= 0:
+                words.push(text_content.slice(start, i))
+                start = -1
+        else:
+            if start < 0:
+                start = i
+        i = i + 1
+    if start >= 0:
+        words.push(text_content.slice(start, n))
+    words
+
+# ===== wrap_text_run =====
+#
+# Splits `text_content` on whitespace into word tokens and greedily packs
+# them into InlineItem(Text) chunks each measured to fit within max_width.
+# Between words on the same chunk a single inter-word space is reserved
+# (width = font_size * 0.30); no trailing space is emitted.
+#
+# If a single word by itself exceeds max_width, it is emitted as its own
+# oversized chunk (no mid-word break — matches CSS overflow:visible).
+#
+# Each returned InlineItem fits on one line; combined with the greedy
+# packer in layout_inline_flow, callers get full text wrapping for free.
+#
+# text_content : source text; whitespace is collapsed.
+# max_width    : target chunk width in pixels (container content width).
+# font_size    : font size in pixels, used for the width heuristic.
+# line_height  : line-height to stamp onto each emitted InlineItem.
+
+fn wrap_text_run(text_content: String, max_width: f64, font_size: f64, line_height: f64) -> [InlineItem]:
+    var result: [InlineItem] = []
+    val words = _split_words(text_content)
+    val word_count = words.len()
+    if word_count == 0:
+        return result
+
+    val space_w = font_size * 0.30
+
+    var current_text: String = ""
+    var current_width: f64 = 0.0
+    var has_word: bool = false
+
+    var i: i64 = 0
+    while i < word_count:
+        val w = words[i]
+        val w_width = estimate_text_width(w, font_size)
+
+        if not has_word:
+            # First word on this chunk — always place, even if oversized.
+            current_text = w
+            current_width = w_width
+            has_word = true
+        else:
+            # Additional word: would adding " " + w keep us within max_width?
+            val tentative = current_width + space_w + w_width
+            if tentative <= max_width:
+                current_text = current_text + " " + w
+                current_width = tentative
+            else:
+                # Flush current chunk and start a new one with this word.
+                val item = InlineItem(
+                    kind: InlineItemKind.Text,
+                    text: current_text,
+                    width: current_width,
+                    height: line_height,
+                    ref_id: 0
+                )
+                result.push(item)
+                current_text = w
+                current_width = w_width
+
+        i = i + 1
+
+    # Flush trailing chunk.
+    if has_word:
+        val item = InlineItem(
+            kind: InlineItemKind.Text,
+            text: current_text,
+            width: current_width,
+            height: line_height,
+            ref_id: 0
+        )
+        result.push(item)
+
+    result
+
 # ===== _flush_line =====
 #
 # Internal helper: finalise the current working line and append it to

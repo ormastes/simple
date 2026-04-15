@@ -14,6 +14,10 @@ StyleResolver behaviour for a core set of CSS properties.
 
 use std.sspec.*
 use std.lib.blink.dom.node.{DomTree, dom_tree_new, NodeType}
+use std.lib.blink.dom.interaction_state.{
+    InteractionState,
+    interaction_state_empty, interaction_state_with_hover
+}
 use std.lib.blink.entity.computed_style.{
     ComputedStyle, Display, Position, Overflow, Visibility, TextAlign, Length,
     computed_style_default
@@ -23,7 +27,7 @@ use std.lib.blink.css_parser.parser.{
 }
 use std.lib.blink.style.cascade.{
     parse_length_value, parse_color_value, parse_f64_value,
-    apply_declaration, resolve_style
+    apply_declaration, resolve_style, resolve_style_with_state
 }
 use std.lib.skia.entity.color.{SkColor4f, sk_color4f}
 
@@ -133,3 +137,32 @@ describe "resolve_style":
         # color should remain inherited from parent (default black: r=0)
         val r_ok = result.color.r < 0.01
         expect(r_ok).to_equal(true)
+
+describe "resolve_style_with_state: :hover pseudo-class":
+    it ".btn:hover { background-color: red } only applies when hovered":
+        val tree = dom_tree_new()
+        val btn_id = tree.create_element("button")
+        tree.append_child(tree.root_id, btn_id)
+        tree.set_attribute(btn_id, "class", "btn")
+
+        val decl = CssDeclaration(property: "background-color", value: "red", important: false)
+        val decls = [CssDeclaration]()
+        decls.push(decl)
+        val rule = CssStyleRule(selector: ".btn:hover", declarations: decls)
+        val rules = [CssStyleRule]()
+        rules.push(rule)
+        val sheet = CssStyleSheet(rules: rules, errors: [String]())
+
+        val parent_style = computed_style_default()
+
+        # With empty state, :hover must not match — background stays at initial.
+        val idle = resolve_style_with_state(tree, btn_id, parent_style, sheet, interaction_state_empty())
+        val idle_not_red = idle.background_color.r < 0.99
+        expect(idle_not_red).to_equal(true)
+
+        # With hovered_id == btn_id, :hover matches — background becomes red.
+        val hovered = resolve_style_with_state(tree, btn_id, parent_style, sheet, interaction_state_with_hover(btn_id))
+        val hover_r_ok = hovered.background_color.r > 0.99
+        val hover_g_ok = hovered.background_color.g < 0.01
+        expect(hover_r_ok).to_equal(true)
+        expect(hover_g_ok).to_equal(true)

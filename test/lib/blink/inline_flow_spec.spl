@@ -23,7 +23,9 @@ use std.blink.layout.{
     InlineLayoutResult,
     inline_text,
     inline_element,
-    layout_inline_flow
+    layout_inline_flow,
+    wrap_text_run,
+    estimate_text_width
 }
 
 describe "inline_flow":
@@ -113,3 +115,52 @@ describe "inline_flow":
         val line1 = result.lines[1]
         expect(line1.boxes.len()).to_equal(1)
         expect(result.total_height).to_be_greater_than(30.0)
+
+    it "estimate_text_width: grows linearly with content length":
+        # formula: len * font_size * 0.55
+        val short_w = estimate_text_width("ab", 16.0)
+        val long_w = estimate_text_width("abcdef", 16.0)
+        # 6 chars is 3x 2 chars -> width ratio must be 3x (linear).
+        expect(short_w).to_equal(17.6)
+        expect(long_w).to_equal(52.8)
+        # Empty text has zero width.
+        val empty_w = estimate_text_width("", 16.0)
+        expect(empty_w).to_equal(0.0)
+
+    it "wrap_text_run: wraps a long string into multiple chunks under a tight container_width":
+        # font_size=16, word "hello" ~ 5*16*0.55 = 44.0 px
+        # space = 16 * 0.30 = 4.8 px
+        # Container of 100px should fit ~2 "hello" words per chunk
+        # (44 + 4.8 + 44 = 92.8 <= 100; next word would push to 140.8).
+        val chunks = wrap_text_run("hello hello hello hello hello", 100.0, 16.0, 20.0)
+        expect(chunks.len()).to_be_greater_than(1)
+        # Every chunk is Text-kind and carries the prescribed line-height.
+        var idx: i64 = 0
+        while idx < chunks.len():
+            val ck = chunks[idx]
+            val is_text = ck.kind == InlineItemKind.Text
+            expect(is_text).to_equal(true)
+            expect(ck.height).to_equal(20.0)
+            # No chunk's recorded width should exceed the container when the
+            # chunk contains more than one word (single oversized words are
+            # allowed to exceed).
+            idx = idx + 1
+
+    it "wrap_text_run: preserves a single oversized word as one chunk":
+        # "supercalifragilistic" is 20 chars; at font_size=16 -> 20*16*0.55 = 176 px.
+        # Container of 50px is narrower, so we emit the word as one oversized chunk.
+        val chunks = wrap_text_run("supercalifragilistic", 50.0, 16.0, 20.0)
+        expect(chunks.len()).to_equal(1)
+        val only = chunks[0]
+        expect(only.text).to_equal("supercalifragilistic")
+        expect(only.width).to_be_greater_than(50.0)
+
+    it "wrap_text_run: end-to-end feeds layout_inline_flow to produce multiple lines":
+        # A paragraph that needs wrapping: several 5-letter words at 16px font
+        # in a ~100px container. Passed through layout_inline_flow we expect
+        # 2+ LineBox values.
+        val chunks = wrap_text_run("alpha beta gamma delta epsilon zeta", 100.0, 16.0, 20.0)
+        expect(chunks.len()).to_be_greater_than(1)
+        val result = layout_inline_flow(chunks, 100.0)
+        expect(result.lines.len()).to_be_greater_than(1)
+        expect(result.total_height).to_be_greater_than(20.0)

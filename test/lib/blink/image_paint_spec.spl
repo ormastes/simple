@@ -1,0 +1,114 @@
+# @cover src/lib/blink/paint/paint_tree_walker.spl 85%
+"""
+# Blink Image Paint Specification
+
+**Category:** Browser / Blink / Paint
+**Status:** Active
+
+## Overview
+
+Tests the Phase B2 image-paint path: an <img> element registered on the
+paint walker must emit exactly one PaintOp.DrawImage entry into the
+PaintContext's display list, carrying the correct rect and src URL so
+the Canvas2D bridge can render it through the renderer-side <img>
+cache.
+"""
+
+use std.sspec.*
+use std.lib.blink.layout.block_flow.{
+    LayoutContext, LayoutBox, BoxGeometry,
+    box_geometry_new, layout_box_new, layout_context_new
+}
+use std.lib.blink.paint.paint_tree_walker.{
+    StyledBox, ImageEntry, PaintContext,
+    paint_tree_new_with_images, collect_display_list, finalize_paint
+}
+use examples.browser.entity.dom.paint_types.{PaintOp, DisplayList}
+
+# ============================================================================
+# Helpers
+# ============================================================================
+
+# Build a 800x600 layout context containing a single box that represents
+# an <img src="https://example.com/x.png" width="40" height="20"> element.
+# The box lives at the viewport origin so absolute coordinates match the
+# geometry inputs exactly.
+fn make_img_layout_ctx() -> LayoutContext:
+    val img_geo = box_geometry_new(40.0, 20.0, 0.0, 0.0, 0.0)
+    val img_box = layout_box_new(7, img_geo)
+    val ctx = layout_context_new(800.0, 600.0)
+    ctx.add_box(img_box)
+    ctx.set_root(7)
+    ctx.compute_layout()
+    ctx
+
+# Count DrawImage ops in a display list and capture the first one's shape.
+fn count_draw_image_ops(dl: DisplayList) -> i64:
+    var n: i64 = 0
+    for op in dl.ops:
+        match op:
+            PaintOp.DrawImage(x, y, w, h, image_id, src_url):
+                n = n + 1
+            _:
+                pass_do_nothing
+    n
+
+# Extract the first DrawImage op's rect + url as a simple tuple of fields.
+class ImageShape:
+    x: f64
+    y: f64
+    w: f64
+    h: f64
+    src_url: text
+
+fn first_draw_image_shape(dl: DisplayList) -> Option<ImageShape>:
+    var result: Option<ImageShape> = None
+    for op in dl.ops:
+        match op:
+            PaintOp.DrawImage(x, y, w, h, image_id, src_url):
+                if result is None:
+                    result = Some(ImageShape(x: x, y: y, w: w, h: h, src_url: src_url))
+            _:
+                pass_do_nothing
+    result
+
+# ============================================================================
+# Tests
+# ============================================================================
+
+describe "paint walker <img> emission":
+    it "emits a single DrawImage op for a registered <img> box":
+        val ctx = make_img_layout_ctx()
+        val styles = [StyledBox]()
+        val images = [ImageEntry]()
+        images.push(ImageEntry(layout_id: 7, src_url: "https://example.com/x.png"))
+        val pc = paint_tree_new_with_images(ctx, styles, images)
+        pc.paint_box(7, 0.0, 0.0)
+        val dl = collect_display_list(pc)
+        expect(count_draw_image_ops(dl)).to_equal(1)
+        expect(dl.ops.len().to_i64()).to_equal(1)
+
+    it "DrawImage op carries the correct rect and URL":
+        val ctx = make_img_layout_ctx()
+        val styles = [StyledBox]()
+        val images = [ImageEntry]()
+        images.push(ImageEntry(layout_id: 7, src_url: "https://example.com/x.png"))
+        val pc = paint_tree_new_with_images(ctx, styles, images)
+        pc.paint_box(7, 0.0, 0.0)
+        val dl = collect_display_list(pc)
+        val shape_opt = first_draw_image_shape(dl)
+        expect(shape_opt is None).to_equal(false)
+        if val shape = shape_opt:
+            expect(shape.x).to_equal(0.0)
+            expect(shape.y).to_equal(0.0)
+            expect(shape.w).to_equal(40.0)
+            expect(shape.h).to_equal(20.0)
+            expect(shape.src_url).to_equal("https://example.com/x.png")
+
+    it "layout boxes without an ImageEntry emit no DrawImage op":
+        val ctx = make_img_layout_ctx()
+        val styles = [StyledBox]()
+        val pc = paint_tree_new_with_images(ctx, styles, [ImageEntry]())
+        pc.paint_box(7, 0.0, 0.0)
+        val dl = collect_display_list(pc)
+        expect(count_draw_image_ops(dl)).to_equal(0)

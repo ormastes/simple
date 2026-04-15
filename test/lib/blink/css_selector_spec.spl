@@ -17,11 +17,17 @@ use std.lib.blink.css_parser.selector.{
     SimpleSelectorKind, SimpleSelector, CompoundSelector,
     Combinator, ComplexSelector,
     parse_selector, matches_compound, matches_complex,
+    matches_compound_with_state, matches_complex_with_state,
     simple_selector_new, compound_selector_new
 }
 use std.lib.blink.dom.node.{
     DomNode, DomTree, NodeType, Attribute,
     dom_node_new, dom_tree_new, attribute_new
+}
+use std.lib.blink.dom.interaction_state.{
+    InteractionState,
+    interaction_state_empty, interaction_state_with_hover,
+    interaction_state_with_focus
 }
 
 # ---------------------------------------------------------------------------
@@ -123,3 +129,84 @@ describe "matches_compound: class selector":
         expect(result.is_none()).to_equal(false)
         val compound = result.unwrap().compounds[0]
         expect(matches_compound(node, compound)).to_equal(false)
+
+# ---------------------------------------------------------------------------
+# Pseudo-class tests: :hover, :focus
+# ---------------------------------------------------------------------------
+
+describe "parse_selector: pseudo-class :hover":
+    it ".btn:hover produces 1 compound with 2 simples (Class + PseudoClass)":
+        val result = parse_selector(".btn:hover")
+        expect(result.is_none()).to_equal(false)
+        val sel = result.unwrap()
+        expect(sel.compounds.len()).to_equal(1)
+        val compound = sel.compounds[0]
+        expect(compound.simples.len()).to_equal(2)
+        val s0 = compound.simples[0]
+        val s1 = compound.simples[1]
+        expect(s0.kind == SimpleSelectorKind.Class).to_equal(true)
+        expect(s0.name).to_equal("btn")
+        expect(s1.kind == SimpleSelectorKind.PseudoClass).to_equal(true)
+        expect(s1.name).to_equal("hover")
+
+describe "parse_selector: pseudo-class :focus":
+    it "#input:focus produces 1 compound with 2 simples (Id + PseudoClass)":
+        val result = parse_selector("#input:focus")
+        expect(result.is_none()).to_equal(false)
+        val sel = result.unwrap()
+        expect(sel.compounds.len()).to_equal(1)
+        val compound = sel.compounds[0]
+        expect(compound.simples.len()).to_equal(2)
+        val s0 = compound.simples[0]
+        val s1 = compound.simples[1]
+        expect(s0.kind == SimpleSelectorKind.Id).to_equal(true)
+        expect(s0.name).to_equal("input")
+        expect(s1.kind == SimpleSelectorKind.PseudoClass).to_equal(true)
+        expect(s1.name).to_equal("focus")
+
+describe "parse_selector: rejects unsupported pseudo-class":
+    it ":nth-child(2) returns None":
+        val result = parse_selector(":nth-child(2)")
+        expect(result.is_none()).to_equal(true)
+
+describe "matches_compound_with_state: :hover":
+    it ".btn:hover matches when hovered_id equals node id":
+        val node = dom_node_new(7, NodeType.Element)
+        node.tag_name = "button"
+        node.attributes.push(attribute_new("class", "btn"))
+        val result = parse_selector(".btn:hover")
+        expect(result.is_none()).to_equal(false)
+        val compound = result.unwrap().compounds[0]
+        val state = interaction_state_with_hover(7)
+        expect(matches_compound_with_state(node, 7, compound, state)).to_equal(true)
+
+    it ".btn:hover does NOT match when hovered_id is -1":
+        val node = dom_node_new(7, NodeType.Element)
+        node.tag_name = "button"
+        node.attributes.push(attribute_new("class", "btn"))
+        val result = parse_selector(".btn:hover")
+        expect(result.is_none()).to_equal(false)
+        val compound = result.unwrap().compounds[0]
+        val state = interaction_state_empty()
+        expect(matches_compound_with_state(node, 7, compound, state)).to_equal(false)
+
+describe "matches_compound_with_state: :focus":
+    it "#input:focus matches when focused_id equals node id":
+        val node = dom_node_new(11, NodeType.Element)
+        node.tag_name = "input"
+        node.attributes.push(attribute_new("id", "input"))
+        val result = parse_selector("#input:focus")
+        expect(result.is_none()).to_equal(false)
+        val compound = result.unwrap().compounds[0]
+        val state = interaction_state_with_focus(11)
+        expect(matches_compound_with_state(node, 11, compound, state)).to_equal(true)
+
+    it "#input:focus does NOT match when focused_id is -1":
+        val node = dom_node_new(11, NodeType.Element)
+        node.tag_name = "input"
+        node.attributes.push(attribute_new("id", "input"))
+        val result = parse_selector("#input:focus")
+        expect(result.is_none()).to_equal(false)
+        val compound = result.unwrap().compounds[0]
+        val state = interaction_state_empty()
+        expect(matches_compound_with_state(node, 11, compound, state)).to_equal(false)
