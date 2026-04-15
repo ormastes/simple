@@ -375,8 +375,12 @@ impl ModuleResolver {
                         }
                     }
                     ImportTarget::Glob => {
-                        // Glob exports - would need to resolve the target module
-                        // For now, this is a placeholder
+                        // export * — re-export all public child modules (sibling .spl files)
+                        for child in &manifest.child_modules {
+                            if child.visibility == Visibility::Public {
+                                exports.push(child.name.clone());
+                            }
+                        }
                     }
                 }
             }

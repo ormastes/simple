@@ -40,7 +40,12 @@ impl DirectoryManifest {
                     }
                 }
                 ImportTarget::Glob => {
-                    // Glob exports are handled separately
+                    // export * — re-export all public child modules (sibling .spl files)
+                    for child in &self.child_modules {
+                        if child.visibility == Visibility::Public {
+                            manifest.add_export(tracker::visibility::SymbolId::new(&child.name));
+                        }
+                    }
                 }
             }
         }

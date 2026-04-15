@@ -157,6 +157,10 @@ fn export_target_names(target: &ImportTarget) -> Vec<String> {
 fn should_keep_selective_export(item: &Node, requested_names: &[String]) -> bool {
     match item {
         Node::ExportUseStmt(export_stmt) => {
+            // Glob target (export *) is a wildcard — always keep it
+            if matches!(export_stmt.target, ImportTarget::Glob) {
+                return true;
+            }
             let export_names = export_target_names(&export_stmt.target);
             !export_names.is_empty()
                 && export_names
