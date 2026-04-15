@@ -15,6 +15,62 @@ use simple_parser::ast::{ImportTarget, Module, Node, UseStmt};
 
 use crate::CompileError;
 
+fn dotted_dir_from(current: &Path, segment: &str) -> Option<PathBuf> {
+    let parent = current.parent()?;
+    let current_name = current.file_name()?.to_str()?;
+    let dotted_dir = parent.join(format!("{}.{}", current_name, segment));
+    if dotted_dir.is_dir() {
+        Some(dotted_dir)
+    } else {
+        None
+    }
+}
+
+fn resolve_parts_from_root(root: &Path, parts: &[String]) -> Option<PathBuf> {
+    let mut resolved = root.to_path_buf();
+    for part in parts {
+        resolved = resolved.join(part);
+    }
+    resolved.set_extension("spl");
+    if resolved.exists() && resolved.is_file() {
+        return Some(resolved);
+    }
+
+    if parts.is_empty() {
+        return None;
+    }
+
+    let mut current = root.to_path_buf();
+    for part in &parts[..parts.len().saturating_sub(1)] {
+        let direct = current.join(part);
+        if direct.exists() && direct.is_dir() {
+            current = direct;
+        } else if let Some(dotted_dir) = dotted_dir_from(&current, part) {
+            current = dotted_dir;
+        } else {
+            return None;
+        }
+    }
+
+    let last = &parts[parts.len() - 1];
+    let dotted_file = current.join(format!("{}.spl", last));
+    if dotted_file.exists() && dotted_file.is_file() {
+        return Some(dotted_file);
+    }
+    if let Some(dotted_dir) = dotted_dir_from(&current, last) {
+        let dotted_init = dotted_dir.join("__init__.spl");
+        if dotted_init.exists() && dotted_init.is_file() {
+            return Some(dotted_init);
+        }
+        let nested_file = dotted_dir.join(format!("{}.spl", last));
+        if nested_file.exists() && nested_file.is_file() {
+            return Some(nested_file);
+        }
+    }
+
+    None
+}
+
 /// Result of parsing a single file.
 #[derive(Debug)]
 pub struct ParsedFile {
@@ -236,32 +292,34 @@ fn resolve_use_to_path(use_stmt: &UseStmt, base: &Path) -> Option<PathBuf> {
 
     // Handle different import targets
     match &use_stmt.target {
-        ImportTarget::Single(name) => {
-            parts.push(name.clone());
+        ImportTarget::Single(name) | ImportTarget::Aliased { name, .. } => parts.push(name.clone()),
+        ImportTarget::Glob | ImportTarget::Group(_) => {}
+    }
+
+    if let Some(resolved) = resolve_parts_from_root(base, &parts) {
+        return Some(resolved);
+    }
+
+    let mut parent_dir = base.to_path_buf();
+    for _ in 0..10 {
+        let Some(parent) = parent_dir.parent() else {
+            break;
+        };
+        parent_dir = parent.to_path_buf();
+
+        if let Some(resolved) = resolve_parts_from_root(&parent_dir, &parts) {
+            return Some(resolved);
         }
-        ImportTarget::Aliased { name, .. } => {
-            parts.push(name.clone());
-        }
-        ImportTarget::Glob => {
-            // For glob imports, the path segments already contain the module path
-        }
-        ImportTarget::Group(_) => {
-            // Group imports need special handling - skip for now
-            return None;
+
+        let parent_src = parent_dir.join("src");
+        if parent_src.is_dir() {
+            if let Some(resolved) = resolve_parts_from_root(&parent_src, &parts) {
+                return Some(resolved);
+            }
         }
     }
 
-    let mut resolved = base.to_path_buf();
-    for part in &parts {
-        resolved = resolved.join(part);
-    }
-    resolved.set_extension("spl");
-
-    if resolved.exists() {
-        Some(resolved)
-    } else {
-        None
-    }
+    None
 }
 
 /// Parse multiple files in parallel using rayon.

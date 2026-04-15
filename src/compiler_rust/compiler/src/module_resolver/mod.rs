@@ -100,6 +100,32 @@ mod tests {
     }
 
     #[test]
+    fn test_resolve_dotted_backend_module() {
+        let dir = create_test_project();
+        let src = dir.path().join("src");
+        let app_ui = src.join("app").join("ui");
+        let app_ui_web = src.join("app").join("ui.web");
+        fs::create_dir_all(&app_ui).unwrap();
+        fs::create_dir_all(&app_ui_web).unwrap();
+
+        fs::write(app_ui.join("__init__.spl"), "mod ui").unwrap();
+        fs::write(app_ui_web.join("server.spl"), "fn run_web(): 0").unwrap();
+
+        let resolver = ModuleResolver::new(dir.path().to_path_buf(), src.clone());
+
+        let path = ModulePath::new(vec![
+            "crate".into(),
+            "app".into(),
+            "ui".into(),
+            "web".into(),
+            "server".into(),
+        ]);
+        let resolved = resolver.resolve(&path, &src.join("main.spl")).unwrap();
+
+        assert_eq!(resolved.path, app_ui_web.join("server.spl"));
+    }
+
+    #[test]
     fn test_resolve_module_not_found() {
         let dir = create_test_project();
         let src = dir.path().join("src");

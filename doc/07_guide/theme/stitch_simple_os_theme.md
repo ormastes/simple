@@ -134,6 +134,23 @@ colors**, not palette, and are intentionally left as literals.
 - **`src/app/ui.web/html.spl`** — imports `GlassColorTokens` directly for the web
   surfaces (HTML-rendered UI).
 
+### Web WM consumption
+
+The browser-hosted SimpleOS Web WM uses the same shared token path rather than a
+parallel browser-only palette.
+
+Current Web WM flow:
+
+- `examples/ui/simpleos_web_wm.ui.sdn` selects `glass_obsidian_dark`
+- `src/app/ui.web/html.spl::generate_wm_html_page()` embeds the WM shell
+- `generate_css(theme)` derives the page chrome from the shared glass token path
+- WM traffic-light colors are defined once in `html.spl` and used by the window
+  chrome classes instead of being copied across multiple files
+
+This is why the live Web WM and the Stitch token set now move together. If the
+obsidian theme changes, the Web WM should pick up the new background, borders,
+taskbar, and window chrome through the shared CSS generation path.
+
 ### Stitch round-trip
 
 - **Pull**: `/theme_sync pull` fetches the active design system from the Stitch

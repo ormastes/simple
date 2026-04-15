@@ -43,6 +43,17 @@ fn find_numbered_dir(parent: &Path, segment: &str) -> Option<PathBuf> {
     None
 }
 
+fn find_dotted_dir(current: &Path, segment: &str) -> Option<PathBuf> {
+    let parent = current.parent()?;
+    let current_name = current.file_name()?.to_str()?;
+    let dotted_dir = parent.join(format!("{}.{}", current_name, segment));
+    if dotted_dir.is_dir() {
+        Some(dotted_dir)
+    } else {
+        None
+    }
+}
+
 fn resolve_stdlib_from_root(
     resolver: &ModuleResolver,
     root: &Path,
@@ -230,6 +241,9 @@ impl ModuleResolver {
             } else if let Some(numbered) = find_numbered_dir(&current, segment) {
                 // Found numbered directory (e.g., 10.frontend for segment "frontend")
                 current = numbered;
+            } else if let Some(dotted) = find_dotted_dir(&current, segment) {
+                // Supports dotted backend directories such as src/app/ui.web/
+                current = dotted;
             } else {
                 // E1034 - Unresolved Import
                 let ctx = ErrorContext::new()
@@ -298,6 +312,30 @@ impl ModuleResolver {
             if numbered_file.exists() && numbered_file.is_file() {
                 return Ok(ResolvedModule {
                     path: numbered_file,
+                    module_path: original_path.clone(),
+                    is_directory: false,
+                    manifest: None,
+                });
+            }
+        }
+
+        // Try dotted directory fallback for the last segment
+        // e.g. app.ui.web -> src/app/ui.web/__init__.spl
+        if let Some(dotted_dir) = find_dotted_dir(&current, last) {
+            let dotted_init = dotted_dir.join("__init__.spl");
+            if dotted_init.exists() && dotted_init.is_file() {
+                return Ok(ResolvedModule {
+                    path: dotted_init,
+                    module_path: original_path.clone(),
+                    is_directory: true,
+                    manifest: None,
+                });
+            }
+
+            let dotted_file = dotted_dir.join(format!("{}.spl", last));
+            if dotted_file.exists() && dotted_file.is_file() {
+                return Ok(ResolvedModule {
+                    path: dotted_file,
                     module_path: original_path.clone(),
                     is_directory: false,
                     manifest: None,

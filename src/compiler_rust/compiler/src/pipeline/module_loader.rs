@@ -28,6 +28,72 @@ fn prefer_package_init_for_member_import(resolved: PathBuf, use_stmt: &UseStmt) 
     }
 }
 
+fn dotted_dir_from(current: &Path, segment: &str) -> Option<PathBuf> {
+    let parent = current.parent()?;
+    let current_name = current.file_name()?.to_str()?;
+    let dotted_dir = parent.join(format!("{}.{}", current_name, segment));
+    if dotted_dir.is_dir() {
+        Some(dotted_dir)
+    } else {
+        None
+    }
+}
+
+fn resolve_parts_from_root(root: &Path, parts: &[String], use_stmt: &UseStmt) -> Option<PathBuf> {
+    let mut resolved = root.to_path_buf();
+    for part in parts {
+        resolved = resolved.join(part);
+    }
+    resolved.set_extension("spl");
+    if resolved.exists() && resolved.is_file() {
+        return Some(prefer_package_init_for_member_import(resolved, use_stmt));
+    }
+
+    if parts.is_empty() {
+        return None;
+    }
+
+    let mut dotted_resolved = root.to_path_buf();
+    for part in &parts[..parts.len().saturating_sub(1)] {
+        let direct = dotted_resolved.join(part);
+        if direct.exists() && direct.is_dir() {
+            dotted_resolved = direct;
+        } else if let Some(dotted_dir) = dotted_dir_from(&dotted_resolved, part) {
+            dotted_resolved = dotted_dir;
+        } else {
+            dotted_resolved = PathBuf::new();
+            break;
+        }
+    }
+    if dotted_resolved.as_os_str().is_empty() {
+        return None;
+    }
+
+    let last = &parts[parts.len() - 1];
+    let dotted_file = dotted_resolved.join(format!("{}.spl", last));
+    if dotted_file.exists() && dotted_file.is_file() {
+        return Some(prefer_package_init_for_member_import(dotted_file, use_stmt));
+    }
+
+    let dotted_init = dotted_resolved.join(last).join("__init__.spl");
+    if dotted_init.exists() && dotted_init.is_file() {
+        return Some(dotted_init);
+    }
+
+    if let Some(dotted_dir) = dotted_dir_from(&dotted_resolved, last) {
+        let dotted_dir_init = dotted_dir.join("__init__.spl");
+        if dotted_dir_init.exists() && dotted_dir_init.is_file() {
+            return Some(dotted_dir_init);
+        }
+        let nested_file = dotted_dir.join(format!("{}.spl", last));
+        if nested_file.exists() && nested_file.is_file() {
+            return Some(prefer_package_init_for_member_import(nested_file, use_stmt));
+        }
+    }
+
+    None
+}
+
 fn requested_import_names(target: &ImportTarget, out: &mut Vec<String>) {
     match target {
         ImportTarget::Glob => {}
@@ -741,13 +807,8 @@ fn resolve_use_to_path(use_stmt: &UseStmt, base: &Path) -> Option<PathBuf> {
     }
 
     // Try resolving from base directory first (sibling files)
-    let mut resolved = base.to_path_buf();
-    for part in &parts {
-        resolved = resolved.join(part);
-    }
-    resolved.set_extension("spl");
-    if resolved.exists() && resolved.is_file() {
-        return Some(prefer_package_init_for_member_import(resolved, use_stmt));
+    if let Some(resolved) = resolve_parts_from_root(base, &parts, use_stmt) {
+        return Some(resolved);
     }
 
     // Try __init__.spl in directory (Python-style package imports)
@@ -788,6 +849,17 @@ fn resolve_use_to_path(use_stmt: &UseStmt, base: &Path) -> Option<PathBuf> {
             parent_resolved.set_extension("spl");
             if parent_resolved.exists() && parent_resolved.is_file() {
                 return Some(prefer_package_init_for_member_import(parent_resolved, use_stmt));
+            }
+
+            if let Some(parent_resolved) = resolve_parts_from_root(&parent_dir, &parts, use_stmt) {
+                return Some(parent_resolved);
+            }
+
+            let parent_src = parent_dir.join("src");
+            if parent_src.is_dir() {
+                if let Some(src_resolved) = resolve_parts_from_root(&parent_src, &parts, use_stmt) {
+                    return Some(src_resolved);
+                }
             }
 
             // Try __init__.spl
@@ -1010,6 +1082,62 @@ mod tests {
             .any(|item| matches!(item, Node::Function(func) if func.name == "env_get"));
 
         assert!(has_env_get);
+    }
+
+    #[test]
+    fn resolves_dotted_backend_imports_from_source_tree() {
+        let temp = tempfile::tempdir().unwrap();
+        let src = temp.path().join("src");
+        let app_ui = src.join("app").join("ui");
+        let app_ui_web = src.join("app").join("ui.web");
+        fs::create_dir_all(&app_ui).unwrap();
+        fs::create_dir_all(&app_ui_web).unwrap();
+
+        let entry = src.join("main.spl");
+        fs::write(
+            &entry,
+            "use app.ui.web.server.{run_web}\nfn main() -> int:\n    run_web()\n",
+        )
+        .unwrap();
+        fs::write(app_ui.join("__init__.spl"), "mod ui\n").unwrap();
+        fs::write(app_ui_web.join("server.spl"), "fn run_web() -> int:\n    0\n").unwrap();
+
+        let loaded = load_module_with_imports(&entry, &mut HashSet::new()).unwrap();
+        let has_run_web = loaded
+            .items
+            .iter()
+            .any(|item| matches!(item, Node::Function(func) if func.name == "run_web"));
+
+        assert!(has_run_web);
+    }
+
+    #[test]
+    fn resolves_dotted_backend_imports_from_examples_tree_via_src_root() {
+        let temp = tempfile::tempdir().unwrap();
+        let src = temp.path().join("src");
+        let examples = temp.path().join("examples").join("ui");
+        let app_ui = src.join("app").join("ui");
+        let app_ui_web = src.join("app").join("ui.web");
+        fs::create_dir_all(&examples).unwrap();
+        fs::create_dir_all(&app_ui).unwrap();
+        fs::create_dir_all(&app_ui_web).unwrap();
+
+        let entry = examples.join("hello_web.spl");
+        fs::write(
+            &entry,
+            "use app.ui.web.server.{run_web}\nfn main() -> int:\n    run_web()\n",
+        )
+        .unwrap();
+        fs::write(app_ui.join("__init__.spl"), "mod ui\n").unwrap();
+        fs::write(app_ui_web.join("server.spl"), "fn run_web() -> int:\n    0\n").unwrap();
+
+        let loaded = load_module_with_imports(&entry, &mut HashSet::new()).unwrap();
+        let has_run_web = loaded
+            .items
+            .iter()
+            .any(|item| matches!(item, Node::Function(func) if func.name == "run_web"));
+
+        assert!(has_run_web);
     }
 
     #[test]

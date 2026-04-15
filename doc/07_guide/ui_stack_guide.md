@@ -154,19 +154,15 @@ in app code:
 
 ## 6. Testing across backends
 
-`src/app/wm_compare/` is the parity harness. It takes a scene from
-`scene_registry.spl` and renders it through N backends, producing
-screenshots / text snapshots it can diff:
+`src/app/wm_compare/` is the screenshot capture and compare harness for the WM
+lanes, but its runtime CLI and source semantics have evolved beyond the old
+single-example form. Use the dedicated guide for current commands, source labels,
+and caveats:
 
-```
-wm_compare scene=calculator backends=cli,tui,render,browser,fb
-```
+- [tooling/wm_compare.md](tooling/wm_compare.md)
 
-Every new widget should land with a `wm_compare` scene if it has
-meaningful rendering. The golden-image gate in
-`doc/06_spec/app/compiler/feature/windows_spec.md` enforces that all
-four drawing-layer variations produce visually identical output (≤1%
-perceptual diff).
+Every new widget or renderer that needs visual parity should still land with a
+registered compare scene or an equivalent capture path.
 
 ## 7. Authoring checklist for a new backend
 
@@ -213,3 +209,4 @@ display), it's a `CompositorBackend` + `InputBackend` pair, not a
 - Architecture: [`doc/04_architecture/cross_platform_wm.md`](../04_architecture/cross_platform_wm.md)
 - Work plan: [`doc/03_plan/gui_drawing_layer_variations.md`](../03_plan/gui_drawing_layer_variations.md)
 - Cross-backend parity harness: `src/app/wm_compare/`
+- Semantic UI access surface: [tooling/ui_access.md](tooling/ui_access.md)

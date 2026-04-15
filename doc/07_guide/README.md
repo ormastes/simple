@@ -39,9 +39,11 @@ User-facing guides for the Simple programming language. For specifications see `
 | [tooling/jupyter.md](tooling/jupyter.md) | Jupyter kernel — notebooks, installation, testing |
 | [tooling/lsp_dap.md](tooling/lsp_dap.md) | LSP + DAP setup (VSCode, Neovim) |
 | [tooling/mcp.md](tooling/mcp.md) | MCP server setup and usage |
+| [tooling/ui_access.md](tooling/ui_access.md) | Canonical UI snapshot, act, and history workflow |
 | [tooling/treesitter.md](tooling/treesitter.md) | Tree-sitter integration |
 | [tooling/dashboard.md](tooling/dashboard.md) | Dashboard CLI, CI/CD |
 | [tooling/duplicate_check.md](tooling/duplicate_check.md) | Code duplication detection |
+| [tooling/wm_compare.md](tooling/wm_compare.md) | WM screenshot capture and compare harness |
 | [tooling/wm_ui_snapshot.md](tooling/wm_ui_snapshot.md) | WM/UI HTML snapshot export, PNG generation, Stitch handoff |
 | [tooling/script_layout_policy.md](tooling/script_layout_policy.md) | `scripts/` vs `bin/` policy, `.shs` rule, ignore list |
 
@@ -81,6 +83,7 @@ User-facing guides for the Simple programming language. For specifications see `
 | [platform/platforms.md](platform/platforms.md) | Platform support, FreeBSD, cross-compilation |
 | [platform/packaging.md](platform/packaging.md) | Packages, deployment, GitHub |
 | [platform/simpleos_dev_guide.md](platform/simpleos_dev_guide.md) | SimpleOS tooling, bootstrap, native build and run workflow |
+| [platform/simpleos_web_wm.md](platform/simpleos_web_wm.md) | Browser-hosted SimpleOS Web WM runtime |
 
 ## Architecture
 

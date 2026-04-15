@@ -9,3 +9,4 @@ Unified hub for project tracking databases and reports.
 | todo/ | TODO tracking | todo_db.sdn |
 | task/ | Task tracking | task_db.sdn |
 | build/ | Build status | recent_build.md |
+| wm_compare/ | WM compare phase tracking | phase1_report.md, phase5_report.md, README.md |
