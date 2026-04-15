@@ -186,3 +186,12 @@ Current validation note:
 - `simple dashboard status` works after the dashboard loader/runtime fixes landed.
 - `simple dashboard assistant` replay-data coercion bug was fixed on 2026-04-15; see [bug_report_dashboard_assistant_cast_runtime_2026-04-15.md](/home/ormastes/dev/pub/simple/doc/08_tracking/bug/bug_report_dashboard_assistant_cast_runtime_2026-04-15.md) for the resolution and the remaining `bug-resolve` tracking utility blocker.
 - Generic `n as i64` and `"{n as i64}"` semantics are covered by [cast_numeric_parity_spec.spl](/home/ormastes/dev/pub/simple/test/unit/compiler/interpreter/cast_numeric_parity_spec.spl), so the remaining defect should be treated as a collector/replay-path bug, not a language-level cast bug.
+
+Open follow-up TODO:
+
+- The MCP assistant surface is now backed by the extracted store/query modules under `src/app/mcp/assistant/**`, and `assistant_start`/dashboard replay are working end-to-end.
+- The remaining work is follow-up product work, not a confirmed defect:
+  - move the rest of the assistant/task lifecycle onto the extracted core API
+  - route child-task creation and task-tree state through the shared core
+  - continue dashboard live-bridge/session-tree integration on top of the extracted assistant core
+- Tracked in [doc/08_tracking/todo/kairos_like_simple_mcp_llm_dashboard_follow_up_2026-04-15.md](/home/ormastes/dev/pub/simple/doc/08_tracking/todo/kairos_like_simple_mcp_llm_dashboard_follow_up_2026-04-15.md)

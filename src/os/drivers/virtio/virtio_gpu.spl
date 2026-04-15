@@ -38,6 +38,12 @@ use os.drivers.virtio.virtio_common.{VIRTQ_DESC_F_NEXT, VIRTQ_DESC_F_WRITE}
 extern fn serial_println(msg: text)
 extern fn rt_alloc(size: u64) -> u64
 extern fn rt_memory_barrier()
+extern fn rt_mmio_read_u32(addr: u64) -> u32
+extern fn rt_mmio_read_u64(addr: u64) -> u64
+extern fn rt_mmio_write_u32(addr: u64, value: u32)
+extern fn rt_mmio_write_u64(addr: u64, value: u64)
+extern fn rt_mem_read_u32_boxed(addr: u64) -> u32
+extern fn rt_mem_write_u32_boxed(addr: u64, value: u32)
 extern fn rt_mmio_write_u16_real(addr: u64, value: u64)
 extern fn rt_mmio_write_u32_real(addr: u64, value: u64)
 extern fn rt_mmio_write_u64_real(addr: u64, value: u64)
@@ -137,10 +143,10 @@ fn ram_write16(addr: u64, value: u16):
     mmio_write16(addr, value)
 
 fn ram_write32(addr: u64, value: u32):
-    mmio_write32(addr, value)
+    rt_mem_write_u32_boxed(addr, value)
 
 fn ram_write64(addr: u64, value: u64):
-    mmio_write64(addr, value)
+    rt_mmio_write_u64(addr, value)
 
 fn ram_write16_raw(addr: u64, value: u64):
     rt_mmio_write_u16_real(addr, value)
@@ -156,6 +162,9 @@ fn ram_read32_raw(addr: u64) -> u32:
 
 fn ram_read64_raw(addr: u64) -> u64:
     rt_mmio_read_u64_real(addr)
+
+fn ram_read32_boxed(addr: u64) -> u32:
+    rt_mem_read_u32_boxed(addr)
 
 # ============================================================================
 # DMA Allocation Result (baremetal-safe, no heap)
@@ -216,6 +225,9 @@ struct VirtioGpuDriver:
     fb_virt: u64
     fb_phys: u64
     fb_size: u64
+    width_raw: u64
+    height_raw: u64
+    resource_id_raw: u64
     width: u32
     height: u32
     resource_id: u32
@@ -235,6 +247,7 @@ impl VirtioGpuDriver:
             cmd_buf_virt: 0, cmd_buf_phys: 0,
             resp_buf_virt: 0, resp_buf_phys: 0,
             fb_virt: 0, fb_phys: 0, fb_size: 0,
+            width_raw: 0, height_raw: 0, resource_id_raw: 0,
             width: 0, height: 0,
             resource_id: 0, next_resource_id: 1,
             initialized: false
@@ -309,16 +322,17 @@ impl VirtioGpuDriver:
             val display_result = self.cmd_get_display_info()
             if display_result.is_err():
                 return Err("GET_DISPLAY_INFO failed")
-            serial_println("[virtio-gpu] Display: {self.width}x{self.height}")
+            serial_println("[virtio-gpu] Display: {self.width_raw}x{self.height_raw}")
 
-            self.resource_id = self.next_resource_id
-            self.next_resource_id = self.next_resource_id + 1
-            val create_result = self.cmd_resource_create_2d(self.resource_id, self.width, self.height)
+            self.resource_id_raw = 1
+            self.resource_id = 1
+            self.next_resource_id = 2
+            val create_result = self.cmd_resource_create_2d_raw(self.resource_id_raw, self.width_raw, self.height_raw)
             if create_result.is_err():
                 return Err("RESOURCE_CREATE_2D failed")
-            serial_println("[virtio-gpu] Resource {self.resource_id} created")
+            serial_println("[virtio-gpu] Resource {self.resource_id_raw} created")
 
-            self.fb_size = (self.width as u64) * (self.height as u64) * 4
+            self.fb_size = self.width_raw * self.height_raw * 4
             val fb_dma = self.alloc_dma(self.fb_size)
             if fb_dma.is_err():
                 return Err("Framebuffer DMA alloc failed")
@@ -328,18 +342,18 @@ impl VirtioGpuDriver:
 
             self.clear(0x00000000)
 
-            val attach_result = self.cmd_resource_attach_backing(self.resource_id, self.fb_phys, self.fb_size)
+            val attach_result = self.cmd_resource_attach_backing_raw(self.resource_id_raw, self.fb_phys, self.fb_size)
             if attach_result.is_err():
                 return Err("RESOURCE_ATTACH_BACKING failed")
             serial_println("[virtio-gpu] Backing attached")
 
-            val scanout_result = self.cmd_set_scanout(0, self.resource_id, self.width, self.height)
+            val scanout_result = self.cmd_set_scanout_raw(0, self.resource_id_raw, self.width_raw, self.height_raw)
             if scanout_result.is_err():
                 return Err("SET_SCANOUT failed")
-            serial_println("[virtio-gpu] Scanout 0 bound to resource {self.resource_id}")
+            serial_println("[virtio-gpu] Scanout 0 bound to resource {self.resource_id_raw}")
 
             self.initialized = true
-            serial_println("[virtio-gpu] Device initialized: {self.width}x{self.height} BGRA (modern)")
+            serial_println("[virtio-gpu] Device initialized: {self.width_raw}x{self.height_raw} BGRA (modern)")
             return Ok(true)
 
         if (grant.bar0_phys & 1) != 0:
@@ -399,18 +413,19 @@ impl VirtioGpuDriver:
         val display_result = self.cmd_get_display_info()
         if display_result.is_err():
             return Err("GET_DISPLAY_INFO failed")
-        serial_println("[virtio-gpu] Display: {self.width}x{self.height}")
+        serial_println("[virtio-gpu] Display: {self.width_raw}x{self.height_raw}")
 
         # -- Step 7: RESOURCE_CREATE_2D --
-        self.resource_id = self.next_resource_id
-        self.next_resource_id = self.next_resource_id + 1
-        val create_result = self.cmd_resource_create_2d(self.resource_id, self.width, self.height)
+        self.resource_id_raw = 1
+        self.resource_id = 1
+        self.next_resource_id = 2
+        val create_result = self.cmd_resource_create_2d_raw(self.resource_id_raw, self.width_raw, self.height_raw)
         if create_result.is_err():
             return Err("RESOURCE_CREATE_2D failed")
-        serial_println("[virtio-gpu] Resource {self.resource_id} created")
+        serial_println("[virtio-gpu] Resource {self.resource_id_raw} created")
 
         # -- Step 8: Allocate framebuffer and ATTACH_BACKING --
-        self.fb_size = (self.width as u64) * (self.height as u64) * 4
+        self.fb_size = self.width_raw * self.height_raw * 4
         val fb_dma = self.alloc_dma(self.fb_size)
         if fb_dma.is_err():
             return Err("Framebuffer DMA alloc failed")
@@ -421,16 +436,16 @@ impl VirtioGpuDriver:
         # Zero the framebuffer
         self.clear(0x00000000)
 
-        val attach_result = self.cmd_resource_attach_backing(self.resource_id, self.fb_phys, self.fb_size)
+        val attach_result = self.cmd_resource_attach_backing_raw(self.resource_id_raw, self.fb_phys, self.fb_size)
         if attach_result.is_err():
             return Err("RESOURCE_ATTACH_BACKING failed")
         serial_println("[virtio-gpu] Backing attached")
 
         # -- Step 9: SET_SCANOUT --
-        val scanout_result = self.cmd_set_scanout(0, self.resource_id, self.width, self.height)
+        val scanout_result = self.cmd_set_scanout_raw(0, self.resource_id_raw, self.width_raw, self.height_raw)
         if scanout_result.is_err():
             return Err("SET_SCANOUT failed")
-        serial_println("[virtio-gpu] Scanout 0 bound to resource {self.resource_id}")
+        serial_println("[virtio-gpu] Scanout 0 bound to resource {self.resource_id_raw}")
 
         self.initialized = true
         serial_println("[virtio-gpu] Device initialized: {self.width}x{self.height} BGRA")
@@ -840,20 +855,66 @@ impl VirtioGpuDriver:
         var disp_idx: u64 = 0
         while disp_idx < 16:
             val entry_base = self.resp_buf_virt + CTRL_HDR_SIZE + disp_idx * 24
-            val enabled = ram_read32_raw(entry_base + 16)
+            val enabled = ram_read32_boxed(entry_base + 16)
             if enabled != 0:
-                val w = ram_read32_raw(entry_base + 8)    # rect.width
-                val h = ram_read32_raw(entry_base + 12)   # rect.height
+                val w = rt_mmio_read_u32_real(entry_base + 8).to_u64()    # rect.width
+                val h = rt_mmio_read_u32_real(entry_base + 12).to_u64()    # rect.height
                 if w > 0 and h > 0:
-                    self.width = w
-                    self.height = h
+                    self.width_raw = w
+                    self.height_raw = h
+                    self.width = 1024
+                    self.height = 768
                     return Ok(true)
             disp_idx = disp_idx + 1
 
         # No enabled display found — use default
+        self.width_raw = 1024
+        self.height_raw = 768
         self.width = 1024
         self.height = 768
-        serial_println("[virtio-gpu] No enabled display, using default {self.width}x{self.height}")
+        serial_println("[virtio-gpu] No enabled display, using default {self.width_raw}x{self.height_raw}")
+        Ok(true)
+
+    me cmd_resource_create_2d_raw(res_id: u64, w: u64, h: u64) -> Result<bool, text>:
+        self._write_ctrl_hdr(0x0101)
+        ram_write32_raw(self.cmd_buf_virt + 24, res_id)
+        ram_write32_raw(self.cmd_buf_virt + 28, 1)
+        ram_write32_raw(self.cmd_buf_virt + 32, w)
+        ram_write32_raw(self.cmd_buf_virt + 36, h)
+
+        val resp_type = self._send_command(40, 24)
+        if resp_type != 0x1100:
+            serial_println("[virtio-gpu] RESOURCE_CREATE_2D error: resp=0x{resp_type}")
+            return Err("RESOURCE_CREATE_2D failed")
+        Ok(true)
+
+    me cmd_resource_attach_backing_raw(res_id: u64, backing_phys: u64, backing_size: u64) -> Result<bool, text>:
+        self._write_ctrl_hdr(0x0106)
+        ram_write32_raw(self.cmd_buf_virt + 24, res_id)
+        ram_write32_raw(self.cmd_buf_virt + 28, 1)
+        ram_write64_raw(self.cmd_buf_virt + 32, backing_phys)
+        ram_write32_raw(self.cmd_buf_virt + 40, backing_size)
+        ram_write32_raw(self.cmd_buf_virt + 44, 0)
+
+        val resp_type = self._send_command(48, 24)
+        if resp_type != 0x1100:
+            serial_println("[virtio-gpu] ATTACH_BACKING error: resp=0x{resp_type}")
+            return Err("RESOURCE_ATTACH_BACKING failed")
+        Ok(true)
+
+    me cmd_set_scanout_raw(scanout_id: u64, res_id: u64, w: u64, h: u64) -> Result<bool, text>:
+        self._write_ctrl_hdr(0x0103)
+        ram_write32_raw(self.cmd_buf_virt + 24, 0)
+        ram_write32_raw(self.cmd_buf_virt + 28, 0)
+        ram_write32_raw(self.cmd_buf_virt + 32, w)
+        ram_write32_raw(self.cmd_buf_virt + 36, h)
+        ram_write32_raw(self.cmd_buf_virt + 40, scanout_id)
+        ram_write32_raw(self.cmd_buf_virt + 44, res_id)
+
+        val resp_type = self._send_command(48, 24)
+        if resp_type != 0x1100:
+            serial_println("[virtio-gpu] SET_SCANOUT error: resp=0x{resp_type}")
+            return Err("SET_SCANOUT failed")
         Ok(true)
 
     me cmd_resource_create_2d(res_id: u32, w: u32, h: u32) -> Result<bool, text>:
@@ -863,10 +924,10 @@ impl VirtioGpuDriver:
           hdr(24) + resource_id(4) + format(4) + width(4) + height(4) = 40 bytes
         """
         self._write_ctrl_hdr(0x0101)
-        ram_write32_raw(self.cmd_buf_virt + 24, res_id.to_u64())
-        ram_write32_raw(self.cmd_buf_virt + 28, 1)
-        ram_write32_raw(self.cmd_buf_virt + 32, w.to_u64())
-        ram_write32_raw(self.cmd_buf_virt + 36, h.to_u64())
+        ram_write32(self.cmd_buf_virt + 24, res_id)
+        ram_write32(self.cmd_buf_virt + 28, 1)
+        ram_write32(self.cmd_buf_virt + 32, w)
+        ram_write32(self.cmd_buf_virt + 36, h)
 
         val resp_type = self._send_command(40, 24)
         if resp_type != 0x1100:
@@ -883,13 +944,13 @@ impl VirtioGpuDriver:
           Total = 48 bytes
         """
         self._write_ctrl_hdr(0x0106)
-        ram_write32_raw(self.cmd_buf_virt + 24, res_id.to_u64())
-        ram_write32_raw(self.cmd_buf_virt + 28, 1)      # nr_entries = 1
+        ram_write32(self.cmd_buf_virt + 24, res_id)
+        ram_write32(self.cmd_buf_virt + 28, 1)      # nr_entries = 1
 
         # mem_entry[0]
-        ram_write64_raw(self.cmd_buf_virt + 32, backing_phys)            # addr
-        ram_write32_raw(self.cmd_buf_virt + 40, backing_size)            # length
-        ram_write32_raw(self.cmd_buf_virt + 44, 0)                       # padding
+        ram_write64(self.cmd_buf_virt + 32, backing_phys)            # addr
+        ram_write32(self.cmd_buf_virt + 40, backing_size.to_u32())   # length
+        ram_write32(self.cmd_buf_virt + 44, 0)                       # padding
 
         val resp_type = self._send_command(48, 24)
         if resp_type != 0x1100:
@@ -904,12 +965,12 @@ impl VirtioGpuDriver:
           hdr(24) + rect(x:4,y:4,w:4,h:4) + scanout_id(4) + resource_id(4) = 48 bytes
         """
         self._write_ctrl_hdr(0x0103)
-        ram_write32_raw(self.cmd_buf_virt + 24, 0)  # rect.x
-        ram_write32_raw(self.cmd_buf_virt + 28, 0)  # rect.y
-        ram_write32_raw(self.cmd_buf_virt + 32, w.to_u64())  # rect.width
-        ram_write32_raw(self.cmd_buf_virt + 36, h.to_u64())  # rect.height
-        ram_write32_raw(self.cmd_buf_virt + 40, scanout_id.to_u64())
-        ram_write32_raw(self.cmd_buf_virt + 44, res_id.to_u64())
+        ram_write32(self.cmd_buf_virt + 24, 0)  # rect.x
+        ram_write32(self.cmd_buf_virt + 28, 0)  # rect.y
+        ram_write32(self.cmd_buf_virt + 32, w)  # rect.width
+        ram_write32(self.cmd_buf_virt + 36, h)  # rect.height
+        ram_write32(self.cmd_buf_virt + 40, scanout_id)
+        ram_write32(self.cmd_buf_virt + 44, res_id)
 
         val resp_type = self._send_command(48, 24)
         if resp_type != 0x1100:
@@ -924,8 +985,8 @@ impl VirtioGpuDriver:
         Must be called before cmd_resource_unref to release backing memory.
         """
         self._write_ctrl_hdr(0x0107)
-        ram_write32_raw(self.cmd_buf_virt + 24, res_id.to_u64())
-        ram_write32_raw(self.cmd_buf_virt + 28, 0)   # padding
+        ram_write32(self.cmd_buf_virt + 24, res_id)
+        ram_write32(self.cmd_buf_virt + 28, 0)   # padding
 
         val resp_type = self._send_command(32, 24)
         if resp_type != 0x1100:
@@ -940,8 +1001,8 @@ impl VirtioGpuDriver:
         Call cmd_resource_detach_backing first to release backing memory.
         """
         self._write_ctrl_hdr(0x0102)
-        ram_write32_raw(self.cmd_buf_virt + 24, res_id.to_u64())
-        ram_write32_raw(self.cmd_buf_virt + 28, 0)   # padding
+        ram_write32(self.cmd_buf_virt + 24, res_id)
+        ram_write32(self.cmd_buf_virt + 28, 0)   # padding
 
         val resp_type = self._send_command(32, 24)
         if resp_type != 0x1100:
@@ -964,23 +1025,23 @@ impl VirtioGpuDriver:
 
         # TRANSFER_TO_HOST_2D: copy backing store → resource
         self._write_ctrl_hdr(0x0105)
-        ram_write32_raw(self.cmd_buf_virt + 24, 0)                   # rect.x
-        ram_write32_raw(self.cmd_buf_virt + 28, 0)                   # rect.y
-        ram_write32_raw(self.cmd_buf_virt + 32, self.width.to_u64()) # rect.width
-        ram_write32_raw(self.cmd_buf_virt + 36, self.height.to_u64())# rect.height
-        ram_write64_raw(self.cmd_buf_virt + 40, 0)                   # offset
-        ram_write32_raw(self.cmd_buf_virt + 48, self.resource_id.to_u64())
-        ram_write32_raw(self.cmd_buf_virt + 52, 0)                   # padding
+        ram_write32(self.cmd_buf_virt + 24, 0)               # rect.x
+        ram_write32(self.cmd_buf_virt + 28, 0)               # rect.y
+        ram_write32(self.cmd_buf_virt + 32, self.width)      # rect.width
+        ram_write32(self.cmd_buf_virt + 36, self.height)     # rect.height
+        ram_write64(self.cmd_buf_virt + 40, 0)               # offset
+        ram_write32(self.cmd_buf_virt + 48, self.resource_id)
+        ram_write32(self.cmd_buf_virt + 52, 0)               # padding
         self._send_command(56, 24)
 
         # RESOURCE_FLUSH: signal device to update scanout
         self._write_ctrl_hdr(0x0104)
-        ram_write32_raw(self.cmd_buf_virt + 24, 0)                   # rect.x
-        ram_write32_raw(self.cmd_buf_virt + 28, 0)                   # rect.y
-        ram_write32_raw(self.cmd_buf_virt + 32, self.width.to_u64()) # rect.width
-        ram_write32_raw(self.cmd_buf_virt + 36, self.height.to_u64())# rect.height
-        ram_write32_raw(self.cmd_buf_virt + 40, self.resource_id.to_u64())
-        ram_write32_raw(self.cmd_buf_virt + 44, 0)                   # padding
+        ram_write32(self.cmd_buf_virt + 24, 0)               # rect.x
+        ram_write32(self.cmd_buf_virt + 28, 0)               # rect.y
+        ram_write32(self.cmd_buf_virt + 32, self.width)      # rect.width
+        ram_write32(self.cmd_buf_virt + 36, self.height)     # rect.height
+        ram_write32(self.cmd_buf_virt + 40, self.resource_id)
+        ram_write32(self.cmd_buf_virt + 44, 0)               # padding
         self._send_command(48, 24)
 
     me flush_rect(x: u32, y: u32, w: u32, h: u32):
@@ -1002,23 +1063,23 @@ impl VirtioGpuDriver:
         # TRANSFER_TO_HOST_2D for the region
         val offset = ((y as u64) * (self.width as u64) + (x as u64)) * 4
         self._write_ctrl_hdr(0x0105)
-        ram_write32_raw(self.cmd_buf_virt + 24, x.to_u64())
-        ram_write32_raw(self.cmd_buf_virt + 28, y.to_u64())
-        ram_write32_raw(self.cmd_buf_virt + 32, rw.to_u64())
-        ram_write32_raw(self.cmd_buf_virt + 36, rh.to_u64())
-        ram_write64_raw(self.cmd_buf_virt + 40, offset)
-        ram_write32_raw(self.cmd_buf_virt + 48, self.resource_id.to_u64())
-        ram_write32_raw(self.cmd_buf_virt + 52, 0)
+        ram_write32(self.cmd_buf_virt + 24, x)
+        ram_write32(self.cmd_buf_virt + 28, y)
+        ram_write32(self.cmd_buf_virt + 32, rw)
+        ram_write32(self.cmd_buf_virt + 36, rh)
+        ram_write64(self.cmd_buf_virt + 40, offset)
+        ram_write32(self.cmd_buf_virt + 48, self.resource_id)
+        ram_write32(self.cmd_buf_virt + 52, 0)
         self._send_command(56, 24)
 
         # RESOURCE_FLUSH for the region
         self._write_ctrl_hdr(0x0104)
-        ram_write32_raw(self.cmd_buf_virt + 24, x.to_u64())
-        ram_write32_raw(self.cmd_buf_virt + 28, y.to_u64())
-        ram_write32_raw(self.cmd_buf_virt + 32, rw.to_u64())
-        ram_write32_raw(self.cmd_buf_virt + 36, rh.to_u64())
-        ram_write32_raw(self.cmd_buf_virt + 40, self.resource_id.to_u64())
-        ram_write32_raw(self.cmd_buf_virt + 44, 0)
+        ram_write32(self.cmd_buf_virt + 24, x)
+        ram_write32(self.cmd_buf_virt + 28, y)
+        ram_write32(self.cmd_buf_virt + 32, rw)
+        ram_write32(self.cmd_buf_virt + 36, rh)
+        ram_write32(self.cmd_buf_virt + 40, self.resource_id)
+        ram_write32(self.cmd_buf_virt + 44, 0)
         self._send_command(48, 24)
 
     # ========================================================================
@@ -1033,7 +1094,7 @@ impl VirtioGpuDriver:
         """
         if x < self.width and y < self.height:
             val offset = ((y as u64) * (self.width as u64) + (x as u64)) * 4
-            ram_write32_raw(self.fb_virt + offset, color.to_u64())
+            ram_write32(self.fb_virt + offset, color)
 
     me fill_rect(x: u32, y: u32, w: u32, h: u32, color: u32):
         """Fill a rectangle in the framebuffer with a solid color.
@@ -1045,7 +1106,7 @@ impl VirtioGpuDriver:
             var px: u32 = x
             while px < x + w and px < self.width:
                 val offset = ((py as u64) * (self.width as u64) + (px as u64)) * 4
-                ram_write32_raw(self.fb_virt + offset, color.to_u64())
+                ram_write32(self.fb_virt + offset, color)
                 px = px + 1
             py = py + 1
 
@@ -1056,7 +1117,7 @@ impl VirtioGpuDriver:
             var x: u32 = 0
             while x < self.width:
                 val offset = ((y as u64) * (self.width as u64) + (x as u64)) * 4
-                ram_write32_raw(self.fb_virt + offset, color.to_u64())
+                ram_write32(self.fb_virt + offset, color)
                 x = x + 1
             y = y + 1
 
@@ -1067,7 +1128,7 @@ impl VirtioGpuDriver:
         var px: u32 = x
         while px < x + length and px < self.width:
             val offset = ((y as u64) * (self.width as u64) + (px as u64)) * 4
-            ram_write32_raw(self.fb_virt + offset, color.to_u64())
+            ram_write32(self.fb_virt + offset, color)
             px = px + 1
 
     me draw_vline(x: u32, y: u32, length: u32, color: u32):
@@ -1077,7 +1138,7 @@ impl VirtioGpuDriver:
         var py: u32 = y
         while py < y + length and py < self.height:
             val offset = ((py as u64) * (self.width as u64) + (x as u64)) * 4
-            ram_write32_raw(self.fb_virt + offset, color.to_u64())
+            ram_write32(self.fb_virt + offset, color)
             py = py + 1
 
     me draw_rect(x: u32, y: u32, w: u32, h: u32, color: u32):

@@ -8405,6 +8405,19 @@ RuntimeValue rt_mmio_write_u8(RuntimeValue a, RuntimeValue v) { return rt_mmio_w
 RuntimeValue rt_mmio_write_u16(RuntimeValue a, RuntimeValue v) { return rt_mmio_write_u16_real(a, v); }
 RuntimeValue rt_mmio_write_u32(RuntimeValue a, RuntimeValue v) { return rt_mmio_write_u32_real(a, v); }
 RuntimeValue rt_mmio_write_u64(RuntimeValue a, RuntimeValue v) { return rt_mmio_write_u64_real(a, v); }
+
+RuntimeValue rt_mem_read_u32_boxed(RuntimeValue addr)
+{
+    uint32_t value = *(volatile uint32_t *)(uintptr_t)(uint64_t)addr;
+    return ENCODE_INT((int64_t)value);
+}
+
+RuntimeValue rt_mem_write_u32_boxed(RuntimeValue addr, RuntimeValue val)
+{
+    uint64_t raw = IS_INT(val) ? (uint64_t)DECODE_INT(val) : (uint64_t)val;
+    *(volatile uint32_t *)(uintptr_t)(uint64_t)addr = (uint32_t)raw;
+    return NIL_VALUE;
+}
 RuntimeValue rt_wait_u16_change(RuntimeValue a, RuntimeValue old_value, RuntimeValue spins) { return rt_wait_u16_change_real(a, old_value, spins); }
 
 RuntimeValue rt_virtq_avail_slot_addr(RuntimeValue base, RuntimeValue idx, RuntimeValue qsize)

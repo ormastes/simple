@@ -1,0 +1,195 @@
+# Inline formatting context — line-box layout for inline items.
+#
+# Mirrors Blink's LayoutInline + inline line-breaking. Given a sequence of
+# inline items (text runs, inline elements with widths), packs them into
+# line boxes constrained to a container width.
+#
+# Scope: single-paragraph text layout. No bidi, no text-align, no
+# vertical-align baseline adjustment beyond a fixed line-height.
+
+use std.skia.entity.{SkRect, sk_rect}
+
+# ===== InlineItemKind =====
+#
+# Text  — a text run; item.text holds the content, item.width holds the
+#         pre-measured pixel width, item.height holds the line-height.
+# InlineElement — a replaced or atomic inline (image, button, …); item.width
+#         and item.height give its layout dimensions; item.text is unused.
+
+enum InlineItemKind:
+    Text
+    InlineElement
+
+# ===== InlineItem =====
+#
+# kind    — discriminates Text vs InlineElement.
+# text    — raw text content (only meaningful when kind == Text).
+# width   — pixel width:
+#             Text:          pre-measured text advance (caller provides this).
+#             InlineElement: layout width of the element.
+# height  — pixel height:
+#             Text:          line-height (typically font-size * line-height factor).
+#             InlineElement: layout height of the element.
+# ref_id  — back-reference to the DomNode id that produced this item;
+#           0 means no associated node.
+
+class InlineItem:
+    kind: InlineItemKind
+    text: String
+    width: f64
+    height: f64
+    ref_id: i64
+
+# ===== InlineBox =====
+#
+# One positioned item within a LineBox.
+#
+# item_id — index of the InlineItem in the original items array.
+# rect    — bounding rectangle in the inline formatting context's coordinate
+#           space (top-left origin at the container's content edge).
+
+class InlineBox:
+    item_id: i64
+    rect: SkRect
+
+# ===== LineBox =====
+#
+# One horizontal strip of the inline formatting context.
+#
+# boxes       — ordered list of InlineBox values placed on this line.
+# baseline_y  — y coordinate of the baseline (bottom of the text box by
+#               convention here; items are placed with top = baseline_y - height).
+# total_width — sum of all box widths on this line.
+# max_height  — maximum item height on this line, which drives the advance
+#               to the next baseline.
+
+class LineBox:
+    boxes: [InlineBox]
+    baseline_y: f64
+    total_width: f64
+    max_height: f64
+
+# ===== InlineLayoutResult =====
+#
+# lines        — ordered list of LineBox values from top to bottom.
+# total_height — total pixel height consumed by all lines.
+
+class InlineLayoutResult:
+    lines: [LineBox]
+    total_height: f64
+
+# ===== Constructor helpers =====
+
+# inline_text — build an InlineItem for a text run.
+# text        : the text content.
+# width       : pre-measured advance width in pixels.
+# line_height : height (line-height) to reserve for the run.
+
+fn inline_text(text: String, width: f64, line_height: f64) -> InlineItem:
+    InlineItem(
+        kind: InlineItemKind.Text,
+        text: text,
+        width: width,
+        height: line_height,
+        ref_id: 0
+    )
+
+# inline_element — build an InlineItem for an atomic inline element.
+# width  : layout width in pixels.
+# height : layout height in pixels.
+# ref_id : DomNode id back-reference (0 if none).
+
+fn inline_element(width: f64, height: f64, ref_id: i64) -> InlineItem:
+    InlineItem(
+        kind: InlineItemKind.InlineElement,
+        text: "",
+        width: width,
+        height: height,
+        ref_id: ref_id
+    )
+
+# ===== _flush_line =====
+#
+# Internal helper: finalise the current working line and append it to
+# `lines`. Returns the new baseline_y for the next line.
+
+fn _flush_line(
+    boxes: [InlineBox],
+    baseline_y: f64,
+    total_width: f64,
+    max_height: f64,
+    lines: [LineBox]
+) -> f64:
+    val lb = LineBox(
+        boxes: boxes,
+        baseline_y: baseline_y,
+        total_width: total_width,
+        max_height: max_height
+    )
+    lines.push(lb)
+    baseline_y + max_height
+
+# ===== layout_inline_flow =====
+#
+# Greedy inline packer — Blink's simplified inline formatting context.
+#
+# Algorithm:
+#   1. Walk items in order.
+#   2. Tentatively add each item to the current line.
+#   3. If it would exceed container_width AND the line already has at least
+#      one box, flush the current line and start a new one with this item.
+#   4. If a single item alone exceeds container_width, it gets its own line
+#      (overflowing, as per CSS overflow:visible default).
+#   5. Position each box: left = running x cursor; top = baseline_y - item.height.
+#   6. After processing all items, flush any pending non-empty line.
+#
+# Items are treated atomically (no mid-item break). Callers who need
+# mid-text word wrapping should pre-split text items using wrap_text from
+# std.skia.feature.text before calling this function.
+
+fn layout_inline_flow(items: [InlineItem], container_width: f64) -> InlineLayoutResult:
+    var lines: [LineBox] = []
+    var current_boxes: [InlineBox] = []
+    var current_width: f64 = 0.0
+    var current_max_height: f64 = 0.0
+    var baseline_y: f64 = 0.0
+    var total_height: f64 = 0.0
+
+    val n = items.len()
+    var i: i64 = 0
+    while i < n:
+        val item = items[i]
+        val item_w = item.width
+        val item_h = item.height
+
+        # Determine if adding this item would overflow the current line.
+        val would_overflow = (current_width + item_w) > container_width
+
+        if would_overflow and current_boxes.len() > 0:
+            # Flush current line before placing this item.
+            baseline_y = _flush_line(current_boxes, baseline_y, current_width, current_max_height, lines)
+            total_height = baseline_y
+            current_boxes = []
+            current_width = 0.0
+            current_max_height = 0.0
+
+        # Place item on the current (possibly freshly started) line.
+        val left = current_width
+        val top = baseline_y - item_h
+        val right = left + item_w
+        val bottom = baseline_y
+        val r = sk_rect(left, top, right, bottom)
+        val box = InlineBox(item_id: i, rect: r)
+        current_boxes.push(box)
+        current_width = current_width + item_w
+        if item_h > current_max_height:
+            current_max_height = item_h
+
+        i = i + 1
+
+    # Flush final pending line.
+    if current_boxes.len() > 0:
+        baseline_y = _flush_line(current_boxes, baseline_y, current_width, current_max_height, lines)
+        total_height = baseline_y
+
+    InlineLayoutResult(lines: lines, total_height: total_height)
