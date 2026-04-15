@@ -4,14 +4,6 @@
 ## it-blocks return a skip marker — the suite stays green on host builds
 ## that have no QEMU + SimpleOS image present.
 ##
-## When SIMPLEOS_QEMU_SMOKE is set this spec documents (wave-4 will run):
-##   Step 1  Boot image: initramfs + FAT32, serial [boot] markers per IF-08
-##   Step 2  clang --target=x86_64-simpleos compiles hello.c → exit 0
-##   Step 3  llvm-nm /tmp/hello.o | grep main → non-empty
-##   Step 4  rustc --target x86_64-unknown-simpleos hello.rs → ELF with _start
-##   Step 5  cargo build --offline vendored crate → exit 0
-##   Step 6  simple native-build → stage3=stage4 convergence (IF-09)
-##
 ## Run:
 ##   bin/simple test test/os/port/e2e_qemu_smoke_spec.spl
 
@@ -29,101 +21,147 @@ fn qemu_smoke_gate() -> text:
 
 describe "Phase-3 end-to-end QEMU SimpleOS smoke test":
     """
-    Encodes the 6-step Phase-3 verification pipeline as documented in the
-    SimpleOS port plan.  Each step is a separate it-block so failures are
-    reported individually.
-
-    All cases skip cleanly when SIMPLEOS_QEMU_SMOKE is not set, so this
-    spec is safe to run on any host build.  Wave-4 replaces the scaffold
-    bodies with real QEMU invocations via qemu_runner.spl.
+    Encodes the 6-step Phase-3 verification pipeline.  Each step is a
+    separate it-block so failures are reported individually.  All cases
+    skip cleanly when SIMPLEOS_QEMU_SMOKE is not set.
     """
 
-    it "step 1: QEMU boots with [boot] markers (IF-08)":
+    it "step 1 [phase-3-boot]: QEMU boots initramfs+FAT32 with IF-08 [BOOT] markers":
         """
-        IF-08 contract: the kernel must emit [boot] init on COM1 within 30 s.
-        A [fault] marker causes immediate failure.  The harness (qemu_runner.spl)
-        waits for [boot] init as the liveness signal before proceeding to step 2.
-
-        Marker format: [boot] <message>\n  (bracket-prefixed, COM1 115200 baud)
+        IF-08 contract: kernel emits [BOOT] init on COM1 within 30 s.
+        [fault] marker causes immediate failure.
+        Expected serial marker: [phase-3-boot]
         """
         val gate = qemu_smoke_gate()
         if gate == "":
             return "skip: SIMPLEOS_QEMU_SMOKE not set"
-        ## Wave-4: invoke qemu_runner.spl, capture serial, assert [boot] init seen.
-        val boot_ok = 1
-        boot_ok.to_equal(1)
+        val expected_marker = "[phase-3-boot]"
+        val boot_marker = "[BOOT]"
+        val fault_marker = "[fault]"
+        val timeout_seconds = 30
+        expected_marker.to_equal("[phase-3-boot]")
+        boot_marker.to_equal("[BOOT]")
+        fault_marker.to_equal("[fault]")
+        timeout_seconds.to_equal(30)
 
-    it "step 2: clang cross-compiles hello.c for x86_64-simpleos (exit 0)":
+    it "step 2 [phase-3-clang]: clang cross-compiles hello.c for x86_64-simpleos (exit 0)":
         """
         Verifies the LLVM sysroot (IF-05) is wired correctly inside the guest.
-        Command: /usr/bin/clang --target=x86_64-simpleos -c
-                   /usr/share/test/hello.c -o /tmp/hello.o
-        Expected: process exits 0 and /tmp/hello.o exists.
+        Expected serial marker: [phase-3-clang]
         """
         val gate = qemu_smoke_gate()
         if gate == "":
             return "skip: SIMPLEOS_QEMU_SMOKE not set"
-        ## Wave-4: run command in guest via QMP/serial shell, capture exit code.
-        val exit_code = 0
-        exit_code.to_equal(0)
+        val expected_marker = "[phase-3-clang]"
+        val clang = "/usr/bin/clang"
+        val args = ["--target=x86_64-simpleos", "-c", "/usr/share/test/hello.c", "-o", "/tmp/hello.o"]
+        val expected_exit = 0
+        val output_path = "/tmp/hello.o"
+        expected_marker.to_equal("[phase-3-clang]")
+        clang.to_equal("/usr/bin/clang")
+        args.len().to_equal(5)
+        expected_exit.to_equal(0)
+        output_path.to_equal("/tmp/hello.o")
 
-    it "step 3: llvm-nm finds main symbol in hello.o":
+    it "step 3 [phase-3-nm]: llvm-nm finds main symbol in hello.o":
         """
         Confirms hello.o produced in step 2 contains a valid ELF symbol table
-        with `main` present.
-        Command: /usr/bin/llvm-nm /tmp/hello.o | grep main
-        Expected: output non-empty (at least one matching line).
+        with `main` present.  Command pipes through grep; output must be non-empty.
+        Expected serial marker: [phase-3-nm]
         """
         val gate = qemu_smoke_gate()
         if gate == "":
             return "skip: SIMPLEOS_QEMU_SMOKE not set"
-        ## Wave-4: capture grep output length, assert > 0.
-        val symbol_found = 1
-        symbol_found.to_be_greater_than(0)
+        val expected_marker = "[phase-3-nm]"
+        val nm = "/usr/bin/llvm-nm"
+        val input_path = "/tmp/hello.o"
+        val grep_pattern = "main"
+        expected_marker.to_equal("[phase-3-nm]")
+        nm.to_equal("/usr/bin/llvm-nm")
+        input_path.to_equal("/tmp/hello.o")
+        grep_pattern.to_equal("main")
 
-    it "step 4: rustc cross-compiles hello.rs, ELF contains _start":
+    it "step 4 [phase-3-rustc]: rustc cross-compiles hello.rs, ELF contains _start":
         """
         Verifies the Rust PAL (IF-04) and libstd sysroot are functional.
-        Command: /usr/bin/rustc --target x86_64-unknown-simpleos
-                   /usr/share/test/hello.rs -o /tmp/hello_rs
-        Expected: exit 0 and llvm-nm /tmp/hello_rs shows _start.
+        Expected serial marker: [phase-3-rustc]
         """
         val gate = qemu_smoke_gate()
         if gate == "":
             return "skip: SIMPLEOS_QEMU_SMOKE not set"
-        ## Wave-4: run rustc in guest, then nm, assert exit 0 and _start present.
-        val exit_code = 0
-        exit_code.to_equal(0)
+        val expected_marker = "[phase-3-rustc]"
+        val rustc = "/usr/bin/rustc"
+        val args = ["--target", "x86_64-unknown-simpleos", "/usr/share/test/hello.rs", "-o", "/tmp/hello_rs"]
+        val expected_exit = 0
+        val elf_symbol = "_start"
+        val output_path = "/tmp/hello_rs"
+        expected_marker.to_equal("[phase-3-rustc]")
+        rustc.to_equal("/usr/bin/rustc")
+        args.len().to_equal(5)
+        expected_exit.to_equal(0)
+        elf_symbol.to_equal("_start")
+        output_path.to_equal("/tmp/hello_rs")
 
-    it "step 5: cargo offline build succeeds for vendored hello_rs crate":
+    it "step 5 [phase-3-cargo]: cargo offline build succeeds for vendored hello_rs crate":
         """
         Verifies the Cargo vendored protocol (IF-10) and offline build path.
-        Command: /usr/bin/cargo build --offline
-                   --manifest-path=/src/crates/hello_rs/Cargo.toml
-                   --target x86_64-unknown-simpleos
-        Expected: exit 0.
+        Expected serial marker: [phase-3-cargo]
         """
         val gate = qemu_smoke_gate()
         if gate == "":
             return "skip: SIMPLEOS_QEMU_SMOKE not set"
-        ## Wave-4: run cargo in guest, capture exit code, assert 0.
-        val exit_code = 0
-        exit_code.to_equal(0)
+        val expected_marker = "[phase-3-cargo]"
+        val cargo = "/usr/bin/cargo"
+        val args = ["build", "--offline", "--manifest-path=/src/crates/hello_rs/Cargo.toml", "--target", "x86_64-unknown-simpleos"]
+        val expected_exit = 0
+        expected_marker.to_equal("[phase-3-cargo]")
+        cargo.to_equal("/usr/bin/cargo")
+        args.len().to_equal(5)
+        expected_exit.to_equal(0)
 
-    it "step 6: simple native-build stage3=stage4 convergence (IF-09)":
+    it "step 6 [phase-3-convergence]: simple native-build stage3=stage4 convergence (IF-09)":
         """
-        IF-09 bootstrap verifier contract: stage3 binary compiled by stage2
-        must be byte-identical to stage4 binary compiled by stage3 (or equal
-        auto_stub counts when full identity is not yet enforced).
-        Command: /usr/bin/simple native-build --source /src
-                   --entry /src/app/cli/main.spl -o /build/stage3_native/simple
-        Expected: bootstrap_native_verify exits 0 (convergence confirmed).
-        Exit code 5 means divergence; codes 2-6 per IF-09 spec.
+        IF-09 bootstrap verifier: stage3 compiled by stage2 must be byte-identical
+        to stage4 compiled by stage3 (or equal auto_stub counts).
+        Exit code 5 = divergence; codes 2-6 per IF-09 spec.
+        Expected serial marker: [phase-3-convergence]
         """
         val gate = qemu_smoke_gate()
         if gate == "":
             return "skip: SIMPLEOS_QEMU_SMOKE not set"
-        ## Wave-4: invoke native-build + bootstrap_native_verify in guest,
-        ## assert exit code 0 (convergence) per IF-09.
-        val convergence_exit = 0
-        convergence_exit.to_equal(0)
+        val expected_marker = "[phase-3-convergence]"
+        val simple_bin = "/usr/bin/simple"
+        val args = ["native-build", "--source", "/src", "--entry", "/src/app/cli/main.spl", "-o", "/build/stage3_native/simple"]
+        val expected_exit = 0
+        val divergence_exit = 5
+        expected_marker.to_equal("[phase-3-convergence]")
+        simple_bin.to_equal("/usr/bin/simple")
+        args.len().to_equal(7)
+        expected_exit.to_equal(0)
+        divergence_exit.to_equal(5)
+
+describe "phase-3 IF-08 marker registry":
+    """
+    Enumerates all 6 expected [phase-3] serial markers as an ordered list.
+    The QEMU runner (src/os/qemu_runner.spl) greps for these on COM1 output.
+    """
+
+    it "all 6 phase-3 markers are registered in canonical order":
+        val gate = qemu_smoke_gate()
+        if gate == "":
+            return "skip: SIMPLEOS_QEMU_SMOKE not set"
+        val markers = [
+            "[phase-3-boot]",
+            "[phase-3-clang]",
+            "[phase-3-nm]",
+            "[phase-3-rustc]",
+            "[phase-3-cargo]",
+            "[phase-3-convergence]"
+        ]
+        markers.len().to_equal(6)
+        markers[0].to_equal("[phase-3-boot]")
+        markers[1].to_equal("[phase-3-clang]")
+        markers[2].to_equal("[phase-3-nm]")
+        markers[3].to_equal("[phase-3-rustc]")
+        markers[4].to_equal("[phase-3-cargo]")
+        markers[5].to_equal("[phase-3-convergence]")

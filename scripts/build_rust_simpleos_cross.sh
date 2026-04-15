@@ -22,11 +22,11 @@ ARTIFACT="$CRATE_DIR/target/${TARGET}/release/simple"
 # ---------------------------------------------------------------------------
 echo "[preflight] checking prerequisites..."
 
-# 2a. nightly toolchain
-if ! rustup toolchain list 2>/dev/null | grep -q nightly; then
-    echo "ERROR: nightly toolchain not found."
-    echo "  Fix: rustup toolchain install nightly"
-    exit 2
+# 2a. nightly toolchain — pinned to avoid rustc-literal-escaper vendoring mismatch
+NIGHTLY_PIN="nightly-2024-09-01"
+if ! rustup toolchain list 2>/dev/null | grep -q "${NIGHTLY_PIN}"; then
+    echo "Installing pinned nightly toolchain ${NIGHTLY_PIN} ..."
+    rustup toolchain install "${NIGHTLY_PIN}" --profile minimal --component rust-src
 fi
 
 # 2b. sysroot library

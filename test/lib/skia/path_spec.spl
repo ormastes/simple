@@ -103,3 +103,122 @@ describe "SkPath immutability":
         expect(p0.count_verbs()).to_equal(0)
         expect(p1.count_verbs()).to_equal(1)
         expect(p2.count_verbs()).to_equal(2)
+
+describe "SkPath bounds":
+    it "empty path has degenerate bounds":
+        val p = sk_path_new()
+        val b = p.bounds()
+        expect(b.left).to_equal(0.0)
+        expect(b.right).to_equal(0.0)
+
+    it "rectangle path reports corner bounds":
+        val p = sk_path_new()
+            .move_to(10.0, 20.0)
+            .line_to(110.0, 20.0)
+            .line_to(110.0, 70.0)
+            .line_to(10.0, 70.0)
+            .close()
+        val b = p.bounds()
+        expect(b.left).to_equal(10.0)
+        expect(b.top).to_equal(20.0)
+        expect(b.right).to_equal(110.0)
+        expect(b.bottom).to_equal(70.0)
+
+describe "SkPath contains":
+    # Winding is the default fill rule (sk_path_new sets Winding).
+    # Edges: points that lie exactly on an edge can land either inside
+    # or outside depending on floating-point rounding. The half-open
+    # y-span rule (y_top <= y < y_bot) chosen here makes horizontal
+    # top edges "inside" and bottom edges "outside". Tests exercise
+    # the top edge to lock this behavior in.
+
+    it "point inside a rectangular path returns true":
+        val p = sk_path_new()
+            .move_to(0.0, 0.0)
+            .line_to(100.0, 0.0)
+            .line_to(100.0, 50.0)
+            .line_to(0.0, 50.0)
+            .close()
+        expect(p.contains(50.0, 25.0)).to_equal(true)
+
+    it "point outside the bounding box returns false":
+        val p = sk_path_new()
+            .move_to(0.0, 0.0)
+            .line_to(100.0, 0.0)
+            .line_to(100.0, 50.0)
+            .line_to(0.0, 50.0)
+            .close()
+        expect(p.contains(200.0, 25.0)).to_equal(false)
+
+    it "point far above the bounding box returns false":
+        val p = sk_path_new()
+            .move_to(0.0, 0.0)
+            .line_to(100.0, 0.0)
+            .line_to(100.0, 50.0)
+            .line_to(0.0, 50.0)
+            .close()
+        expect(p.contains(50.0, -10.0)).to_equal(false)
+
+    it "point on the top edge of a rectangle returns true (half-open span)":
+        val p = sk_path_new()
+            .move_to(0.0, 0.0)
+            .line_to(100.0, 0.0)
+            .line_to(100.0, 50.0)
+            .line_to(0.0, 50.0)
+            .close()
+        expect(p.contains(50.0, 0.0)).to_equal(true)
+
+    it "point inside a triangle returns true":
+        val p = sk_path_new()
+            .move_to(0.0, 0.0)
+            .line_to(100.0, 0.0)
+            .line_to(50.0, 80.0)
+            .close()
+        expect(p.contains(50.0, 20.0)).to_equal(true)
+
+    it "point outside a triangle (but inside bbox) returns false":
+        val p = sk_path_new()
+            .move_to(0.0, 0.0)
+            .line_to(100.0, 0.0)
+            .line_to(50.0, 80.0)
+            .close()
+        # Near the bottom-left corner of bbox, outside the triangle's slant.
+        expect(p.contains(5.0, 70.0)).to_equal(false)
+
+    it "point in the concave notch of a C-shape returns false":
+        # C-shape: a 100x100 square with a rectangular bite taken out of its
+        # right side from (40, 25) to (100, 75).
+        val p = sk_path_new()
+            .move_to(0.0, 0.0)
+            .line_to(100.0, 0.0)
+            .line_to(100.0, 25.0)
+            .line_to(40.0, 25.0)
+            .line_to(40.0, 75.0)
+            .line_to(100.0, 75.0)
+            .line_to(100.0, 100.0)
+            .line_to(0.0, 100.0)
+            .close()
+        # Point in the notch: x > 40, 25 < y < 75.
+        expect(p.contains(70.0, 50.0)).to_equal(false)
+        # Sanity check — a point in the solid spine of the C is inside.
+        expect(p.contains(20.0, 50.0)).to_equal(true)
+
+    it "closed path with hole — point inside hole returns false (even-odd rule)":
+        # Outer 100x100 square + inner 40x40 hole, both wound CW.
+        # Under EvenOdd fill, the inner region is "outside".
+        val outer = sk_path_new()
+            .move_to(0.0, 0.0)
+            .line_to(100.0, 0.0)
+            .line_to(100.0, 100.0)
+            .line_to(0.0, 100.0)
+            .close()
+            .move_to(30.0, 30.0)
+            .line_to(70.0, 30.0)
+            .line_to(70.0, 70.0)
+            .line_to(30.0, 70.0)
+            .close()
+        val p = outer.with_fill_type(SkPathFillType.EvenOdd)
+        # Inside the hole: outside per even-odd.
+        expect(p.contains(50.0, 50.0)).to_equal(false)
+        # Between outer and hole: inside per even-odd.
+        expect(p.contains(10.0, 50.0)).to_equal(true)
