@@ -47,14 +47,29 @@ that used to reach `desktop-ready` regressed.
 > `src/lib/nogc_sync_mut/qemu/qmp_client.spl` to use `shell.run(...)`
 > or a direct `rt_process_run` extern).
 
+## Round-20 update (2026-04-15)
+
+All prior blockers CLEARED. **Kernel is confirmed LIVE** — serial log from Round-20 run shows full successful boot:
+`paint-settle:done` → `shortcut:ok` → `remote-grouping:ok` → `TEST PASSED`. No heap panic.
+
+**Sole remaining blocker:** `src/os/compositor/qemu_capture.spl` line 59 creates `QmpClient` directly with `fd=0` (default int) instead of calling `qmp_connect`. Fix:
+```
+# Current (broken):
+val client = QmpClient(socket_path: qmp_socket)
+
+# Fix:
+val client = qmp_connect(qmp_socket)
+```
+One-line change in `src/os/compositor/qemu_capture.spl`. After this fix, LIVE-GREEN is expected on first attempt.
+
 ## One-command retry
 
-Once both blockers below are cleared, a single command records and
+Once the `qemu_capture.spl` fd fix is applied, a single command records and
 self-validates the baseline:
 
 ```bash
-UPDATE_BASELINE=1 bin/simple test test/system/simpleos_desktop_framebuffer_spec.spl --mode interpreter \
-  && bin/simple test test/system/simpleos_desktop_framebuffer_spec.spl --mode interpreter
+UPDATE_BASELINE=1 bin/simple test test/system/simpleos_desktop_framebuffer_spec.spl \
+  && bin/simple test test/system/simpleos_desktop_framebuffer_spec.spl
 ```
 
 The first invocation records `test/baselines/simpleos_desktop_framebuffer/desktop_scene.ppm`.

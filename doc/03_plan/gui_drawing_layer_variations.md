@@ -1,6 +1,6 @@
 # GUI Drawing Layer Variations — Plan
 
-**Status:** Rows 1, 2, 3, 5, 6, 7, 8 ✅ Done (2026-04-14); Row 4 Round-0 plan landed (2026-04-14 — [sys_gui_008_round0_plan_2026-04-14.md](../08_tracking/todo/sys_gui_008_round0_plan_2026-04-14.md)), Round-1 gated on sys-gui-006 LIVE-GREEN (Round-13 cleared harness race; Round-14 will fix qmp_client.shell) · **Date:** 2026-04-14 · **Owner:** GUI stack WG
+**Status:** Rows 1, 2, 3, 5, 6, 7, 8 ✅ Done (2026-04-14); Row 4 Round-0 plan landed (2026-04-14 — [sys_gui_008_round0_plan_2026-04-14.md](../08_tracking/todo/sys_gui_008_round0_plan_2026-04-14.md)), Round-1 gated on sys-gui-006 LIVE-GREEN (Round-20: kernel fully boots + TEST PASSED in serial, heap 256 MiB confirmed, one-line fix needed in qemu_capture.spl to call qmp_connect instead of direct struct creation) · **Date:** 2026-04-15 · **Owner:** GUI stack WG
 
 Goal: make the Simple GUI stack work under four host/runtime combinations
 with the *same* application code. The compositor + widget tree + 2D engine
