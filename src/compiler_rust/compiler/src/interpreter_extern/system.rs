@@ -618,6 +618,54 @@ pub fn rt_process_wait(args: &[Value]) -> Result<Value, CompileError> {
     }
 }
 
+/// Check if a previously spawned async process is still running.
+///
+/// Callable from Simple as: `rt_process_is_running(pid: i64) -> bool`
+///
+/// # Returns
+/// * Bool: true if the process is still running, false if exited or not found
+pub fn rt_process_is_running(args: &[Value]) -> Result<Value, CompileError> {
+    if args.is_empty() {
+        return Err(CompileError::runtime("rt_process_is_running requires 1 argument (pid)"));
+    }
+    let pid = match &args[0] {
+        Value::Int(n) => *n,
+        _ => return Err(CompileError::runtime("rt_process_is_running: pid must be an integer")),
+    };
+    let mut processes = SPAWNED_PROCESSES.lock().unwrap();
+    match processes.get_mut(&pid) {
+        Some(child) => match child.try_wait() {
+            Ok(None) => Ok(Value::Bool(true)),   // still running
+            _ => Ok(Value::Bool(false)),          // exited or error
+        },
+        None => Ok(Value::Bool(false)),           // not tracked
+    }
+}
+
+/// Kill a previously spawned async process.
+///
+/// Callable from Simple as: `rt_process_kill(pid: i64) -> bool`
+///
+/// # Returns
+/// * Bool: true if killed successfully, false otherwise
+pub fn rt_process_kill(args: &[Value]) -> Result<Value, CompileError> {
+    if args.is_empty() {
+        return Err(CompileError::runtime("rt_process_kill requires 1 argument (pid)"));
+    }
+    let pid = match &args[0] {
+        Value::Int(n) => *n,
+        _ => return Err(CompileError::runtime("rt_process_kill: pid must be an integer")),
+    };
+    let mut processes = SPAWNED_PROCESSES.lock().unwrap();
+    match processes.get_mut(&pid) {
+        Some(child) => match child.kill() {
+            Ok(()) => Ok(Value::Bool(true)),
+            Err(_) => Ok(Value::Bool(false)),
+        },
+        None => Ok(Value::Bool(false)),
+    }
+}
+
 /// Get platform name
 ///
 /// Callable from Simple as: `rt_platform_name()`

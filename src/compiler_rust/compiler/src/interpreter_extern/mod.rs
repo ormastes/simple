@@ -427,6 +427,8 @@ pub(crate) fn call_extern_function(
         "rt_process_execute" => system::rt_process_execute(&evaluated),
         "rt_process_spawn_async" => system::rt_process_spawn_async(&evaluated),
         "rt_process_wait" => system::rt_process_wait(&evaluated),
+        "rt_process_is_running" => system::rt_process_is_running(&evaluated),
+        "rt_process_kill" => system::rt_process_kill(&evaluated),
 
         // ====================================================================
         // Filesystem Operations (18 fs_* + 6 file_* = 24 functions)
