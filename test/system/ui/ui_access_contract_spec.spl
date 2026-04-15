@@ -15,7 +15,8 @@ tag: slow, system, contract
 use std.ui_test.client.{UITestClient}
 use std.ui_test.http.{test_get, test_post}
 use std.ui_test.parse.{extract_field, extract_bool_field}
-use test.system.ui.helpers.ui_test_helpers.{start_ui_server, stop_ui_server, free_port}
+use test.system.ui.helpers.ui_test_helpers.{start_ui_server, start_ui_server_with_args, stop_ui_server, free_port}
+use app.io.mod.{file_exists, file_delete}
 
 val sdn_path = "test/fixtures/ui/test_app.ui.sdn"
 
@@ -147,7 +148,7 @@ describe "UI Access Contract":
         stop_ui_server(web_pid)
         stop_ui_server(tui_pid)
 
-    slow_it "history stays empty without a session on tui_web":
+    slow_it "history is recorded with a live session on tui_web":
         val (web_port, tui_port) = backend_ports()
         val web_pid = start_backend("web", web_port)
         val tui_pid = start_backend("tui_web", tui_port)
@@ -165,9 +166,57 @@ describe "UI Access Contract":
         val tui_history = test_get("127.0.0.1", tui_port, history_path("main", "10"))
         match tui_history:
             Ok(resp):
-                expect resp to_equal "[]"
+                val has_focus = resp.index_of("\"event_kind\":\"surface_focus\"") != nil
+                val has_action = resp.index_of("\"event_kind\":\"action\"") != nil
+                expect has_focus to_equal true
+                expect has_action to_equal true
             Err(e):
                 expect e to_equal ""
 
         stop_ui_server(web_pid)
         stop_ui_server(tui_pid)
+
+    slow_it "persisted web history survives a full process restart":
+        val port = free_port() + 62
+        val db_path = "/tmp/ui_access_contract_restart_{port}.sqlite"
+        if file_exists(db_path):
+            file_delete(db_path)
+
+        val first_pid = start_ui_server_with_args(
+            "web",
+            sdn_path,
+            port,
+            ["--ui-access-db", db_path]
+        )
+        wait_ready(port)
+
+        val body = act_body("main", "main#action_btn", "click")
+        val first_act = test_post("127.0.0.1", port, "/api/test/ui/act", body)
+        match first_act:
+            Ok(resp):
+                assert_ok_act_body(resp)
+            Err(e):
+                expect e to_equal ""
+        stop_ui_server(first_pid)
+
+        val second_pid = start_ui_server_with_args(
+            "web",
+            sdn_path,
+            port,
+            ["--ui-access-db", db_path]
+        )
+        wait_ready(port)
+
+        val history = test_get("127.0.0.1", port, history_path("main", "10"))
+        match history:
+            Ok(resp):
+                val has_action = resp.index_of("\"event_kind\":\"action\"") != nil
+                val has_click = resp.index_of("\"payload\":\"click_action_btn\"") != nil
+                expect has_action to_equal true
+                expect has_click to_equal true
+            Err(e):
+                expect e to_equal ""
+
+        stop_ui_server(second_pid)
+        if file_exists(db_path):
+            file_delete(db_path)

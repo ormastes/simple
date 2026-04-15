@@ -5,13 +5,12 @@
 # This backend renders entirely in-process using the browser engine
 # and a GPU-accelerated (or software) 2D engine.
 
-use common.ui.widget.{UIState, UITree, UIEvent, UIMode}
+use common.ui.widget.{UIEvent}
 use common.ui.parse.sdn_tree.{parse_ui_to_tree}
-use common.ui.state.{init_state, update_state, update_tree, is_quit_event}
+use common.ui.session.{UISession}
+use common.ui.access_store.{ui_access_store_runtime_open_with_override}
 use app.ui.browser.backend.{BrowserBackend}
 use app.ui.browser.event_bridge.{translate_key_event, translate_mouse_event}
-use app.ui.render.widgets.{render_html_tree}
-use app.ui.web.html.{generate_css}
 
 extern fn rt_file_read_text(path: text) -> text
 extern fn rt_file_exists(path: text) -> bool
@@ -41,7 +40,7 @@ val HOST_WINDOW_TITLE: text = "Simple Browser"
 
 class BrowserApp:
     file_path: text
-    state: UIState
+    session: UISession
     backend: BrowserBackend
     running: bool
     last_file_content: text
@@ -49,12 +48,19 @@ class BrowserApp:
     last_mouse_y: i32
 
     static fn new(file_path: text, port: i32, gpu_backend: text) -> Result<BrowserApp, text>:
+        return BrowserApp.new_with_access_store_path(file_path, port, gpu_backend, "")
+
+    static fn new_with_access_store_path(file_path: text, port: i32, gpu_backend: text, access_db_path: text) -> Result<BrowserApp, text>:
         val tree_result = parse_ui_to_tree(file_path)
         match tree_result:
             Err(e):
                 return Err(e)
             Ok(tree):
-                val state = init_state(tree)
+                var session = UISession.new(tree)
+                session.set_active_backend("browser")
+                val store = ui_access_store_runtime_open_with_override(access_db_path, file_path, "browser")
+                if store != nil:
+                    session.attach_access_store(store)
                 val width: i32 = 1280
                 val height: i32 = 720
                 val backend_result = BrowserBackend.create(width, height, gpu_backend)
@@ -69,7 +75,7 @@ class BrowserApp:
 
                         return Ok(BrowserApp(
                             file_path: file_path,
-                            state: state,
+                            session: session,
                             backend: backend,
                             running: true,
                             last_file_content: content,
@@ -82,7 +88,8 @@ class BrowserApp:
 
         Returns 0 on success, 1 on failure.
         """
-        self.backend.render_frame(self.state.tree, self.state)
+        val state = self.session.current_state()
+        self.backend.render_frame(state.tree, state)
         val ok = self.backend.snapshot_ppm(snapshot_path)
         self.backend.shutdown()
         if ok:
@@ -106,7 +113,8 @@ class BrowserApp:
             self.backend.shutdown()
             return
 
-        self.backend.render_frame(self.state.tree, self.state)
+        val initial_state = self.session.current_state()
+        self.backend.render_frame(initial_state.tree, initial_state)
         self.present_host_window(window)
 
         while self.running:
@@ -122,7 +130,8 @@ class BrowserApp:
                 had_event = true
 
             if had_event:
-                self.backend.render_frame(self.state.tree, self.state)
+                val state = self.session.current_state()
+                self.backend.render_frame(state.tree, state)
                 self.present_host_window(window)
 
             rt_thread_sleep(16)
@@ -142,7 +151,7 @@ class BrowserApp:
             val tree_result = parse_ui_to_tree(self.file_path)
             match tree_result:
                 Ok(new_tree):
-                    self.state = update_tree(self.state, new_tree)
+                    self.session.update_tree(new_tree)
                     return true
                 Err(e):
                     # Keep old state on parse error
@@ -154,7 +163,7 @@ class BrowserApp:
             UIEvent.Quit:
                 self.running = false
             _:
-                self.state = update_state(self.state, event)
+                self.session.dispatch(event)
 
     me handle_host_event(ev: i64):
         val event_type = rt_winit_event_get_type(ev)
@@ -213,6 +222,9 @@ class BrowserApp:
 # =========================================================================
 
 fn run_browser_gui(file_path: text, port: i32) -> i64:
+    return run_browser_gui_with_access_store(file_path, port, "")
+
+fn run_browser_gui_with_access_store(file_path: text, port: i32, access_db_path: text) -> i64:
     """Start browser-engine mode for a .ui.sdn file."""
     if not rt_file_exists(file_path):
         print "Error: File not found: {file_path}"
@@ -220,7 +232,7 @@ fn run_browser_gui(file_path: text, port: i32) -> i64:
 
     val gpu_backend = parse_backend_flag()
 
-    val app_result = BrowserApp.new(file_path, port, gpu_backend)
+    val app_result = BrowserApp.new_with_access_store_path(file_path, port, gpu_backend, access_db_path)
     match app_result:
         Err(e):
             print "Error: {e}"

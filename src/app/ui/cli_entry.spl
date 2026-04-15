@@ -7,11 +7,11 @@
 
 # Import directly from app files to avoid __init__.spl bare-export preloading
 use app.ui.tui.app.{run_tui}
-use app.ui.web.server.{run_web}
+use app.ui.web.server.{run_web, run_web_with_access_store}
 use app.ui.electron.app.{run_electron}
 use app.ui.tauri.app.{run_tauri}
-use app.ui.browser.app.{run_browser_gui}
-use app.ui.none.app.{run_headless}
+use app.ui.browser.app.{run_browser_gui, run_browser_gui_with_access_store}
+use app.ui.none.app.{run_headless, run_headless_with_access_store}
 use app.ui.detect.{detect_gui_backend}
 use app.ui.render.types.{RenderConfig, RenderResult}
 use app.ui.render.export.{export_to_file}
@@ -31,6 +31,7 @@ fn main() -> i64:
     val mode = parsed.1
     val file_path = parsed.2
     val port = parsed.3
+    val access_db_path = parsed.4
 
     if arg_count == 0:
         print_usage()
@@ -56,7 +57,7 @@ fn main() -> i64:
         if arg_count < 2:
             print "Error: web mode requires a .ui.sdn file path"
             return 1
-        return run_web(file_path, port)
+        return run_web_with_access_store(file_path, port, access_db_path)
 
     if mode == "electron":
         if arg_count < 2:
@@ -68,19 +69,19 @@ fn main() -> i64:
         if arg_count < 2:
             print "Error: browser mode requires a .ui.sdn file path"
             return 1
-        return run_browser_gui(file_path, port)
+        return run_browser_gui_with_access_store(file_path, port, access_db_path)
 
     if mode == "headless" or mode == "none":
         if arg_count < 2:
             print "Error: headless mode requires a .ui.sdn file path"
             return 1
-        return run_headless(file_path)
+        return run_headless_with_access_store(file_path, access_db_path)
 
     if mode == "gui" or mode == "desktop":
         if arg_count < 2:
             print "Error: gui mode requires a .ui.sdn file path"
             return 1
-        return run_detected_backend(detect_gui_backend(), file_path, port)
+        return run_detected_backend(detect_gui_backend(), file_path, port, access_db_path)
 
     if mode == "render":
         val render_args = collect_render_args()
@@ -100,24 +101,47 @@ fn main() -> i64:
         return 0
 
     if rt_file_exists(mode):
-        return run_detected_backend(detect_gui_backend(), mode, 3000)
+        return run_detected_backend(detect_gui_backend(), mode, 3000, access_db_path)
 
     print "Error: Unknown mode '{mode}'. Use 'tui', 'web', 'tauri', 'electron', 'browser', 'render', or 'headless'."
     print_usage()
     return 1
 
-fn parse_ui_cli() -> (i64, text, text, i32):
+fn parse_ui_cli() -> (i64, text, text, i32, text):
     val raw_args = rt_cli_get_args()
     var found_ui = false
     var arg_count = 0
     var mode = ""
     var file_path = ""
     var port = 3000
+    var access_db_path = ""
     var prev_was_port = false
+    var prev_was_access_db = false
     for arg in raw_args:
         if not found_ui:
             if arg == "ui":
                 found_ui = true
+            continue
+
+        if prev_was_port:
+            port = arg.to_int()
+            prev_was_port = false
+            continue
+        elif prev_was_access_db:
+            access_db_path = arg
+            prev_was_access_db = false
+            continue
+        elif arg == "--port":
+            prev_was_port = true
+            continue
+        elif arg.starts_with("--port="):
+            port = arg[7:].to_int()
+            continue
+        elif arg == "--ui-access-db":
+            prev_was_access_db = true
+            continue
+        elif arg.starts_with("--ui-access-db="):
+            access_db_path = arg[15:]
             continue
 
         if arg_count == 0:
@@ -125,28 +149,20 @@ fn parse_ui_cli() -> (i64, text, text, i32):
         elif arg_count == 1:
             file_path = arg
 
-        if prev_was_port:
-            port = arg.to_int()
-            prev_was_port = false
-        elif arg == "--port":
-            prev_was_port = true
-        elif arg.starts_with("--port="):
-            port = arg[7:].to_int()
-
         arg_count = arg_count + 1
-    return (arg_count, mode, file_path, port)
+    return (arg_count, mode, file_path, port, access_db_path)
 
-fn run_detected_backend(backend: text, file_path: text, port: i32) -> i64:
+fn run_detected_backend(backend: text, file_path: text, port: i32, access_db_path: text) -> i64:
     if backend == "tauri":
         return run_tauri(file_path, port)
     if backend == "electron":
         return run_electron(file_path, port)
     if backend == "browser":
-        return run_browser_gui(file_path, port)
+        return run_browser_gui_with_access_store(file_path, port, access_db_path)
     if backend == "web":
-        return run_web(file_path, port)
+        return run_web_with_access_store(file_path, port, access_db_path)
     if backend == "headless":
-        return run_headless(file_path)
+        return run_headless_with_access_store(file_path, access_db_path)
     return run_tui(file_path)
 
 fn collect_render_args() -> [text]:
@@ -173,7 +189,7 @@ fn run_render(config: RenderConfig) -> RenderResult:
             return office_render(config)
         _ =>
             if config.asset_path.len() > 0:
-                run_headless(config.asset_path)
+                run_headless_with_access_store(config.asset_path, "")
                 return RenderResult.text("Rendered: {config.asset_path}")
             return RenderResult.empty()
 
@@ -199,4 +215,5 @@ fn print_usage():
     print "  --width N                 Viewport width (default: 80)"
     print "  --height N                Viewport height (default: 24)"
     print "  --output PATH, -o PATH    Write exported render to a file"
+    print "  --ui-access-db PATH       Override persisted UI access store path"
     print "  --demo                    Use built-in demo asset"

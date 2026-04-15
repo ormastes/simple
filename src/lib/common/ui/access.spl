@@ -8,6 +8,7 @@
 use common.ui.widget.{UIState, UITree, WidgetNode, widget_props, get_widget_record}
 use common.ui.surface.{SurfaceManager}
 use common.ui.lifecycle.{LifecycleEvent}
+use common.ui.window_surface_registry.{UiWindowSurfaceRegistry}
 
 val UI_ACCESS_PROTOCOL_VERSION = 1
 val UI_ACCESS_MAX_EVENTS = 200
@@ -104,7 +105,7 @@ fn ui_access_snapshot_from_state(state: UIState, recent_events: [UiAccessEvent])
         recent_events: recent_events
     )
 
-fn ui_access_snapshot_from_session(state: UIState, surfaces: SurfaceManager, active_surface: text, recent_events: [UiAccessEvent]) -> UiAccessSnapshot:
+fn ui_access_snapshot_from_session(state: UIState, surfaces: SurfaceManager, active_surface: text, recent_events: [UiAccessEvent], window_surfaces: UiWindowSurfaceRegistry) -> UiAccessSnapshot:
     var snapshot = ui_access_empty_snapshot(state.mode_name(), active_surface, recent_events)
     val ids = surfaces.surface_ids()
     if ids.len() == 0:
@@ -120,12 +121,21 @@ fn ui_access_snapshot_from_session(state: UIState, surfaces: SurfaceManager, act
             val tree = tree_opt
             val root = tree.root_node()
             val root_canonical_id = ui_access_canonical_id(surface_id, root.id)
+            val binding = window_surfaces.for_surface(surface_id)
+            var title = tree.title_text()
+            var window_id = ""
+            var app_id = ""
+            if binding != nil:
+                window_id = binding.window_id
+                app_id = binding.app_id
+                if title == "" and binding.title != "":
+                    title = binding.title
             snapshot_surfaces = snapshot_surfaces.push(UiAccessSurface(
                 surface_id: surface_id,
-                title: tree.title_text(),
+                title: title,
                 active: surface_id == active_surface,
-                window_id: "",
-                app_id: "",
+                window_id: window_id,
+                app_id: app_id,
                 root_canonical_id: root_canonical_id
             ))
             val nodes = _collect_access_nodes(surface_id, tree)
@@ -134,6 +144,26 @@ fn ui_access_snapshot_from_session(state: UIState, surfaces: SurfaceManager, act
     snapshot.surfaces = snapshot_surfaces
     snapshot.nodes = snapshot_nodes
     return snapshot
+
+fn ui_access_snapshot_persistable(snapshot: UiAccessSnapshot) -> UiAccessSnapshot:
+    var surfaces: [UiAccessSurface] = []
+    for surface in snapshot.surfaces:
+        surfaces = surfaces.push(UiAccessSurface(
+            surface_id: surface.surface_id,
+            title: surface.title,
+            active: surface.active,
+            window_id: "",
+            app_id: surface.app_id,
+            root_canonical_id: surface.root_canonical_id
+        ))
+    return UiAccessSnapshot(
+        protocol_version: snapshot.protocol_version,
+        mode: snapshot.mode,
+        active_surface: snapshot.active_surface,
+        surfaces: surfaces,
+        nodes: snapshot.nodes,
+        recent_events: snapshot.recent_events
+    )
 
 fn ui_access_recent_events(events: [UiAccessEvent], count: i32) -> [UiAccessEvent]:
     if count <= 0:

@@ -7,6 +7,7 @@ use common.ui.builder.{column, text_widget, button, build_tree}
 use common.ui.session.{UISession}
 use common.ui.widget.{UIEvent}
 use common.ui.access.{UiAccessEvent, ui_access_canonical_id, ui_access_snapshot_from_state, ui_access_find_nodes, ui_access_record_action, ui_access_resolve_action_name}
+use common.ui.access_store.{UiAccessStore}
 
 fn _demo_session() -> UISession:
     val root = column("root").child(
@@ -77,6 +78,33 @@ describe "UISession access history":
         val events = session.access_recent_surface_events("popup", 10)
         expect(events.len()).to_be_greater_than(0)
         expect(events[0].surface_id).to_equal("popup")
+
+describe "UISession persisted access":
+    it "reads persisted snapshot nodes and events after attaching a store":
+        var session = _demo_session()
+        var store = UiAccessStore.memory()?
+        session.attach_access_store(store)
+        session.dispatch(UIEvent.Action(name: "submit"))
+        val persisted_events = session.access_persisted_events("main", 10)?
+        expect(persisted_events.len()).to_be_greater_than(0)
+        expect(persisted_events[0].surface_id).to_equal("main")
+        val persisted_nodes = session.access_search_nodes("main", "button", "submit", 10)?
+        expect(persisted_nodes.len()).to_equal(1)
+        expect(persisted_nodes[0].canonical_id).to_equal("main#submit_btn")
+
+    it "enriches live snapshots from the window-surface registry without persisting runtime window ids":
+        var session = _demo_session()
+        session.bind_window_surface("77", "main", 4242, "app.demo", "Demo Window")
+        val live_snapshot = session.access_snapshot()
+        expect(live_snapshot.surfaces.len()).to_equal(1)
+        expect(live_snapshot.surfaces[0].window_id).to_equal("77")
+        expect(live_snapshot.surfaces[0].app_id).to_equal("app.demo")
+        var store = UiAccessStore.memory()?
+        session.attach_access_store(store)
+        val persisted_surfaces = store.list_surfaces()?
+        expect(persisted_surfaces.len()).to_equal(1)
+        expect(persisted_surfaces[0].window_id).to_equal("")
+        expect(persisted_surfaces[0].app_id).to_equal("app.demo")
 
 describe "ui_access history bounds":
     it "keeps recent event history bounded":

@@ -5,9 +5,15 @@
 use std.spec.{describe, it, expect}
 use common.ui.builder.{column, text_widget, button, build_tree}
 use common.ui.session.{UISession}
+use common.ui.widget.{UIEvent}
+use common.ui.access.{UiAccessNode, UiAccessSurface, UiAccessSnapshot, ui_access_canonical_id}
+use common.ui.access_store.{UiAccessStore}
 use os.services.vfs.vfs.{VfsManager}
 use os.services.llm.cli_gui_bridge.{CliGuiBridge}
 use os.services.llm.mcp_os_server.{OsMcpServer}
+use app.io.mod.{file_exists, file_delete}
+
+extern fn rt_env_set(key: text, value: text) -> bool
 
 fn _session_with_popup() -> UISession:
     val root = column("root").child(
@@ -23,6 +29,45 @@ fn _session_with_popup() -> UISession:
     session.open_surface("popup", popup_tree)
     session.set_active_surface("popup")
     return session
+
+fn _stored_surface(surface_id: text, title: text, active: bool, root_widget_id: text) -> UiAccessSurface:
+    UiAccessSurface(
+        surface_id: surface_id,
+        title: title,
+        active: active,
+        window_id: "",
+        app_id: "",
+        root_canonical_id: ui_access_canonical_id(surface_id, root_widget_id),
+    )
+
+fn _stored_node(surface_id: text, widget_id: text, kind: text, text: text, child_ids: [text], action_names: [text]) -> UiAccessNode:
+    UiAccessNode(
+        canonical_id: ui_access_canonical_id(surface_id, widget_id),
+        surface_id: surface_id,
+        widget_id: widget_id,
+        kind: kind,
+        visible: true,
+        focused: false,
+        enabled: true,
+        selected: false,
+        text: text,
+        props: [],
+        child_ids: child_ids,
+        action_names: action_names,
+    )
+
+fn _stored_snapshot() -> UiAccessSnapshot:
+    UiAccessSnapshot(
+        protocol_version: 1,
+        mode: "NORMAL",
+        active_surface: "popup",
+        surfaces: [_stored_surface("popup", "Popup", true, "root_popup")],
+        nodes: [
+            _stored_node("popup", "root_popup", "root", "Popup", ["popup#stored_ok_btn"], []),
+            _stored_node("popup", "stored_ok_btn", "button", "Stored OK", [], ["click"])
+        ],
+        recent_events: [],
+    )
 
 describe "ui_access_protocol MCP dispatch":
     it "routes snapshot and surface reads through the canonical dispatcher":
@@ -40,6 +85,19 @@ describe "ui_access_protocol MCP dispatch":
         val surface = server.dispatch("ui_access_surface", "{\"surface_id\":\"popup\"}")
         expect(surface).to_contain("\"surface_id\":\"popup\"")
         expect(surface).to_contain("popup#ok_btn")
+
+    it "binds window metadata through the shared session registry":
+        val session = _session_with_popup()
+        val bridge = CliGuiBridge.new(session)
+        val server = OsMcpServer.new(VfsManager.new(), bridge)
+        val created = server.dispatch(
+            "window_create",
+            "{\"title\":\"Inspector\",\"width\":\"640\",\"height\":\"480\"}"
+        )
+        expect(created).to_contain("ok: created window")
+        val snapshot = server.dispatch("ui_access_snapshot", "")
+        expect(snapshot).to_contain("\"window_id\":\"1\"")
+        expect(snapshot).to_contain("\"surface_id\":\"window_1\"")
 
     it "dispatches canonical actions and rejects invalid targets":
         val session = _session_with_popup()
@@ -65,3 +123,38 @@ describe "ui_access_protocol MCP dispatch":
         expect(missing_surface).to_contain("error: surface missing not found")
         val missing_target = server.dispatch("ui_access_act", "{\"action\":\"click\"}")
         expect(missing_target).to_contain("error: missing surface_id")
+
+    it "reads persisted find and history results when a store is attached":
+        var session = _session_with_popup()
+        var store = UiAccessStore.memory()?
+        session.attach_access_store(store)
+        store.persist_snapshot(_stored_snapshot())?
+        session.dispatch(UIEvent.Action(name: "submit"))
+        session.access_events = []
+        val bridge = CliGuiBridge.new(session)
+        val server = OsMcpServer.new(VfsManager.new(), bridge)
+        val find = server.dispatch(
+            "ui_access_find",
+            "{\"surface_id\":\"popup\",\"kind\":\"button\",\"text\":\"Stored\",\"focused_only\":\"false\"}"
+        )
+        expect(find).to_contain("popup#stored_ok_btn")
+        val history = server.dispatch("ui_access_history", "{\"surface_id\":\"popup\",\"count\":\"5\"}")
+        expect(history).to_contain("\"surface_id\":\"popup\"")
+        expect(history).to_contain("\"event_kind\":\"action\"")
+
+    it "auto-attaches a persisted store through CliGuiBridge.new when runtime path is configured":
+        val db_path = "/tmp/ui_access_bridge_auto.sqlite"
+        rt_env_set("SIMPLE_UI_ACCESS_DB_PATH", db_path)
+        if file_exists(db_path):
+            file_delete(db_path)
+        var session = _session_with_popup()
+        val bridge = CliGuiBridge.new(session)
+        bridge.session.dispatch(UIEvent.Action(name: "submit"))
+        bridge.session.access_events = []
+        val server = OsMcpServer.new(VfsManager.new(), bridge)
+        val history = server.dispatch("ui_access_history", "{\"surface_id\":\"popup\",\"count\":\"5\"}")
+        expect(history).to_contain("\"surface_id\":\"popup\"")
+        expect(history).to_contain("\"event_kind\":\"action\"")
+        rt_env_set("SIMPLE_UI_ACCESS_DB_PATH", "")
+        if file_exists(db_path):
+            file_delete(db_path)

@@ -10,10 +10,12 @@ use common.ui.widget_store.{WidgetStore}
 use common.ui.viewport.{Viewport, default_viewport}
 use common.ui.changelog.{ChangeLog, default_changelog}
 use common.ui.lifecycle.{LifecycleRegistry, LifecycleEvent, new_lifecycle_registry, emit_lifecycle_events, describe_lifecycle_event}
-use common.ui.access.{UiAccessSnapshot, UiAccessEvent, ui_access_record_action, ui_access_lifecycle_events, ui_access_recent_events, ui_access_recent_surface_events, ui_access_snapshot_from_session, ui_access_snapshot_from_state}
+use common.ui.access.{UiAccessSnapshot, UiAccessNode, UiAccessEvent, ui_access_record_action, ui_access_lifecycle_events, ui_access_recent_events, ui_access_recent_surface_events, ui_access_snapshot_from_session, ui_access_snapshot_from_state, ui_access_snapshot_persistable}
+use common.ui.access_store.{UiAccessStore}
 use common.ui.diff.{diff_trees_with}
 use common.ui.state.{update_state}
 use common.ui.surface.{SurfaceHandle, SurfaceManager, new_surface_manager}
+use common.ui.window_surface_registry.{UiWindowSurfaceRegistry}
 use common.ui.profile.{ProfileResolver, ProfileSet, ProfileSetEntry, Orientation, LayoutProfile, compute_profile}
 use common.ui.capability.{Capability}
 use common.ui.capability_policy.{CapabilityPolicy, check_capability, require_capability}
@@ -34,6 +36,8 @@ class UISession:
     capability_policy: CapabilityPolicy?
     access_events: [UiAccessEvent]
     access_sequence: i64
+    access_store: UiAccessStore?
+    window_surfaces: UiWindowSurfaceRegistry
 
     static fn new(tree: UITree) -> UISession:
         """Create a session with a main tree and default settings."""
@@ -51,7 +55,9 @@ class UISession:
             profile_sets: [],
             capability_policy: nil,
             access_events: [],
-            access_sequence: 0
+            access_sequence: 0,
+            access_store: nil,
+            window_surfaces: UiWindowSurfaceRegistry.new()
         )
 
     static fn new_with_store(tree: UITree, store: WidgetStore) -> UISession:
@@ -69,7 +75,9 @@ class UISession:
             profile_sets: [],
             capability_policy: nil,
             access_events: [],
-            access_sequence: 0
+            access_sequence: 0,
+            access_store: nil,
+            window_surfaces: UiWindowSurfaceRegistry.new()
         )
 
     static fn new_with_policy(tree: UITree, policy: CapabilityPolicy) -> UISession:
@@ -88,7 +96,9 @@ class UISession:
             profile_sets: [],
             capability_policy: policy,
             access_events: [],
-            access_sequence: 0
+            access_sequence: 0,
+            access_store: nil,
+            window_surfaces: UiWindowSurfaceRegistry.new()
         )
 
 # =========================================================================
@@ -141,7 +151,7 @@ impl UISession:
 
     fn access_snapshot() -> UiAccessSnapshot:
         """Build a canonical access snapshot for all open surfaces."""
-        return ui_access_snapshot_from_session(self.state, self.surfaces, self.surfaces.active(), self.access_events)
+        return ui_access_snapshot_from_session(self.state, self.surfaces, self.surfaces.active(), self.access_events, self.window_surfaces)
 
     fn access_recent_events(count: i32) -> [UiAccessEvent]:
         """Get the most recent UI access events."""
@@ -150,6 +160,31 @@ impl UISession:
     fn access_recent_surface_events(surface_id: text, count: i32) -> [UiAccessEvent]:
         """Get recent access events for one surface."""
         return ui_access_recent_surface_events(self.access_events, surface_id, count)
+
+    fn access_persisted_events(surface_id: text, count: i64) -> Result<[UiAccessEvent], text>:
+        """Read persisted access events when a store is attached."""
+        if self.access_store == nil:
+            return Err("no access store attached")
+        match self.access_store.list_events(surface_id, count):
+            Ok(events):
+                return Ok(events)
+            Err(e):
+                return Err(e.message())
+
+    fn access_search_nodes(surface_id: text, kind: text, text_query: text, limit: i64) -> Result<[UiAccessNode], text>:
+        """Query persisted latest-node rows when a store is attached."""
+        if self.access_store == nil:
+            return Err("no access store attached")
+        match self.access_store.query_nodes(surface_id, kind, text_query, limit):
+            Ok(nodes):
+                return Ok(nodes)
+            Err(e):
+                return Err(e.message())
+
+    me attach_access_store(store: UiAccessStore):
+        """Attach a persisted UI access store and immediately seed it."""
+        self.access_store = store
+        self._sync_access_store_snapshot()
 
     # -- State mutation ------------------------------------------------------
 
@@ -211,6 +246,8 @@ impl UISession:
             event_kind,
             payload
         )
+        self._persist_latest_access_event()
+        self._sync_access_store_snapshot()
         # Check for resize events and trigger profile switching
         match event:
             UIEvent.Resize(width, height):
@@ -249,6 +286,7 @@ impl UISession:
         # Update main surface
         if self.surfaces.has("main"):
             self.surfaces.update_tree("main", new_tree)
+        self._sync_access_store_snapshot()
 
     # -- Viewport management -------------------------------------------------
 
@@ -284,12 +322,15 @@ impl UISession:
             "surface_open",
             id
         )
+        self._persist_latest_access_event()
+        self._sync_access_store_snapshot()
         return handle
 
     me close_surface(handle: SurfaceHandle) -> bool:
         """Close a surface by its handle. Returns false if stale."""
         val closed = self.surfaces.close(handle)
         if closed:
+            self.window_surfaces.clear_surface(handle.id)
             self.access_sequence = self.access_sequence + 1
             self.access_events = ui_access_record_action(
                 self.access_events,
@@ -299,6 +340,8 @@ impl UISession:
                 "surface_close",
                 handle.id
             )
+            self._persist_latest_access_event()
+            self._sync_access_store_snapshot()
         return closed
 
     fn get_surface(id: text) -> UITree?:
@@ -325,6 +368,8 @@ impl UISession:
             "surface_focus",
             id
         )
+        self._persist_latest_access_event()
+        self._sync_access_store_snapshot()
 
     fn active_surface() -> text:
         """Get the active surface ID."""
@@ -337,6 +382,21 @@ impl UISession:
     fn surface_handle(id: text) -> SurfaceHandle?:
         """Get a current handle for an existing surface."""
         return self.surfaces.handle_for(id)
+
+    me bind_window_surface(window_id: text, surface_id: text, process_id: u64, app_id: text, title: text):
+        """Bind runtime window metadata to a surface."""
+        self.window_surfaces.bind(window_id, surface_id, process_id, app_id, title)
+        self._sync_access_store_snapshot()
+
+    me clear_window_surface_binding(surface_id: text):
+        """Remove any runtime window binding for a surface."""
+        self.window_surfaces.clear_surface(surface_id)
+        self._sync_access_store_snapshot()
+
+    me clear_window_binding(window_id: text):
+        """Remove any runtime window binding for a window id."""
+        self.window_surfaces.clear_window(window_id)
+        self._sync_access_store_snapshot()
 
     me update_surface_tree(handle: SurfaceHandle, new_tree: UITree):
         """Update a surface's tree. Does nothing if handle is stale."""
@@ -362,6 +422,7 @@ impl UISession:
         self.lifecycle.clear_log()
         # Commit new tree
         self.surfaces.update_tree(handle.id, new_tree)
+        self._sync_access_store_snapshot()
 
     # -- Profile management --------------------------------------------------
 
@@ -411,6 +472,28 @@ impl UISession:
     fn current_orientation() -> Orientation:
         """Get the current detected orientation."""
         return self.profile_resolver.orientation()
+
+    me _persist_latest_access_event():
+        if self.access_store == nil:
+            return
+        if self.access_events.len() == 0:
+            return
+        val latest = self.access_events[self.access_events.len() - 1]
+        match self.access_store.insert_event(latest):
+            Ok(_):
+                pass_dn
+            Err(_):
+                pass_dn
+
+    me _sync_access_store_snapshot():
+        if self.access_store == nil:
+            return
+        val snapshot = ui_access_snapshot_persistable(self.access_snapshot())
+        match self.access_store.persist_snapshot(snapshot):
+            Ok(_):
+                pass_dn
+            Err(_):
+                pass_dn
 
     # -- Capability enforcement -----------------------------------------------
 

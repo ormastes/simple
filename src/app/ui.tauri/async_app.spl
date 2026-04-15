@@ -12,6 +12,7 @@ use common.ui.widget.{UIState, UITree, UIEvent, UIMode}
 use common.ui.parse.sdn_tree.{parse_ui_to_tree}
 use common.ui.state.{init_state, update_state, update_tree, is_quit_event}
 use common.ui.session.{UISession}
+use common.ui.access_store.{ui_access_store_runtime_open, ui_access_store_runtime_open_with_override}
 use app.ui.tauri.backend.{TauriBackend}
 use app.ui.tauri.ipc.{parse_ipc_message, build_ipc_render}
 use app.ui.ipc.async_handler.{start_ipc_reader, start_ipc_writer}
@@ -57,6 +58,9 @@ class AsyncTauriApp:
     last_file_content: text
 
     static fn new(file_path: text) -> Result<AsyncTauriApp, text>:
+        return AsyncTauriApp.new_with_access_store_path(file_path, "")
+
+    static fn new_with_access_store_path(file_path: text, access_db_path: text) -> Result<AsyncTauriApp, text>:
         val tree_result = parse_ui_to_tree(file_path)
         match tree_result:
             Err(e):
@@ -64,6 +68,9 @@ class AsyncTauriApp:
             Ok(tree):
                 var session = UISession.new(tree)
                 session.set_active_backend("tauri")
+                val store = ui_access_store_runtime_open_with_override(access_db_path, file_path, "tauri")
+                if store != nil:
+                    session.attach_access_store(store)
                 val content = if rt_file_exists(file_path):
                     rt_file_read_text(file_path)
                 else:
@@ -162,6 +169,9 @@ class AsyncTauriApp:
 # =========================================================================
 
 fn run_async_tauri(file_path: text, port: i32) -> i64:
+    return run_async_tauri_with_access_store(file_path, port, "")
+
+fn run_async_tauri_with_access_store(file_path: text, port: i32, access_db_path: text) -> i64:
     """Start async Tauri mode for a .ui.sdn file."""
     val args = rt_cli_get_args()
     if _shared_wm_requested(args):
@@ -170,7 +180,7 @@ fn run_async_tauri(file_path: text, port: i32) -> i64:
         print "Error: File not found: {file_path}"
         return 1
 
-    val app_result = AsyncTauriApp.new(file_path)
+    val app_result = AsyncTauriApp.new_with_access_store_path(file_path, access_db_path)
     match app_result:
         Err(e):
             print "Error: {e}"

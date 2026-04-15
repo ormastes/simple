@@ -23,7 +23,7 @@ use os.services.llm.tool_registry.{register_os_tools}
 use common.ui.session.{UISession}
 use common.ui.widget.{UITree, WidgetNode, UIEvent}
 use common.ui.builder.{build_tree}
-use common.ui.access.{UiAccessSnapshot, UiAccessSurface, ui_access_find_nodes, ui_access_resolve_action_name, ui_access_snapshot_to_json, ui_access_surface_to_json, ui_access_events_to_json, ui_access_snapshot_to_text}
+use common.ui.access.{UiAccessNode, UiAccessSnapshot, UiAccessSurface, ui_access_find_nodes, ui_access_resolve_action_name, ui_access_snapshot_to_json, ui_access_surface_to_json, ui_access_events_to_json, ui_access_snapshot_to_text}
 
 # =========================================================================
 # Window Tracking
@@ -346,6 +346,8 @@ impl OsMcpServer:
             surface_id: surface_id
         )
         self.windows = self.windows + [info]
+        self.bridge.session.bind_window_surface("{wid}", surface_id, 0, "", title)
+        self.bridge.session.set_active_surface(surface_id)
         return "ok: created window {wid} ({title})"
 
     me tool_window_close(id_str: text) -> text:
@@ -358,8 +360,13 @@ impl OsMcpServer:
                 # Close the surface
                 val surface_id = w.surface_id
                 if self.bridge.session.has_surface(surface_id):
-                    val handle = self.bridge.session.open_surface(surface_id, build_tree(WidgetNode.new("empty", "panel")))
-                    self.bridge.session.close_surface(handle)
+                    val handle = self.bridge.session.surface_handle(surface_id)
+                    if handle != nil:
+                        self.bridge.session.close_surface(handle)
+                    else:
+                        self.bridge.session.clear_window_surface_binding(surface_id)
+                else:
+                    self.bridge.session.clear_window_binding("{w.id}")
             else:
                 new_wins = new_wins + [w]
         if found:
@@ -382,11 +389,13 @@ impl OsMcpServer:
     me tool_window_focus(id_str: text) -> text:
         """Focus a window by ID."""
         var found = false
+        var target_surface_id = ""
         var updated: [WindowInfo] = []
         for w in self.windows:
             val is_target = "{w.id}" == id_str
             if is_target:
                 found = true
+                target_surface_id = w.surface_id
             val new_w = WindowInfo(
                 id: w.id,
                 title: w.title,
@@ -398,6 +407,8 @@ impl OsMcpServer:
             updated = updated + [new_w]
         if found:
             self.windows = updated
+            if target_surface_id != "":
+                self.bridge.session.set_active_surface(target_surface_id)
             return "ok: focused window {id_str}"
         else:
             return "error: window {id_str} not found"
@@ -467,14 +478,14 @@ impl OsMcpServer:
 
     fn tool_ui_access_snapshot() -> text:
         """Return the canonical UI access snapshot as JSON."""
-        val snapshot = _snapshot_with_window_metadata(self.bridge.session.access_snapshot(), self.windows)
+        val snapshot = self.bridge.session.access_snapshot()
         return ui_access_snapshot_to_json(snapshot)
 
     fn tool_ui_access_surface(surface_id: text) -> text:
         """Return one surface with its nodes as JSON."""
         if surface_id == "":
             return "error: missing surface_id"
-        val snapshot = _snapshot_with_window_metadata(self.bridge.session.access_snapshot(), self.windows)
+        val snapshot = self.bridge.session.access_snapshot()
         val json = ui_access_surface_to_json(snapshot, surface_id)
         if json == "{}":
             return "error: surface {surface_id} not found"
@@ -482,9 +493,21 @@ impl OsMcpServer:
 
     fn tool_ui_access_find(surface_id: text, kind: text, text_query: text, focused_only: text) -> text:
         """Find nodes within the canonical access snapshot."""
-        val snapshot = _snapshot_with_window_metadata(self.bridge.session.access_snapshot(), self.windows)
+        val snapshot = self.bridge.session.access_snapshot()
         val focused = focused_only == "true" or focused_only == "1" or focused_only == "yes"
-        val matches = ui_access_find_nodes(snapshot, surface_id, kind, text_query, focused)
+        val persisted = self.bridge.session.access_search_nodes(surface_id, kind, text_query, 200)
+        val matches = match persisted:
+            Ok(nodes):
+                if not focused:
+                    nodes
+                else:
+                    var focused_nodes: [UiAccessNode] = []
+                    for node in nodes:
+                        if node.focused:
+                            focused_nodes = focused_nodes.push(node)
+                    focused_nodes
+            Err(_):
+                ui_access_find_nodes(snapshot, surface_id, kind, text_query, focused)
         val filtered = UiAccessSnapshot(
             protocol_version: snapshot.protocol_version,
             mode: snapshot.mode,
@@ -527,10 +550,15 @@ impl OsMcpServer:
         var count = 20
         if count_str != "":
             count = count_str.to_i32()
-        val events = if surface_id == "":
-            self.bridge.session.access_recent_events(count)
-        else:
-            self.bridge.session.access_recent_surface_events(surface_id, count)
+        val persisted = self.bridge.session.access_persisted_events(surface_id, count.to_i64())
+        val events = match persisted:
+            Ok(found):
+                found
+            Err(_):
+                if surface_id == "":
+                    self.bridge.session.access_recent_events(count)
+                else:
+                    self.bridge.session.access_recent_surface_events(surface_id, count)
         return ui_access_events_to_json(events)
 
     # =================================================================
@@ -542,7 +570,7 @@ impl OsMcpServer:
         Lists windows, their positions, and widget tree summaries."""
         if self.windows.len() == 0:
             return "Screen: empty (no windows)"
-        val snapshot = _snapshot_with_window_metadata(self.bridge.session.access_snapshot(), self.windows)
+        val snapshot = self.bridge.session.access_snapshot()
         return ui_access_snapshot_to_text(snapshot)
 
     fn tool_screen_read_text() -> text:

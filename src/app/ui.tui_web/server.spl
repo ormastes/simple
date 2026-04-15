@@ -9,6 +9,8 @@ use std.nogc_sync_mut.io.tcp.{TcpListener, TcpStream}
 use common.ui.widget.{UIState, UITree, UIEvent}
 use common.ui.parse.sdn.{parse_ui_file}
 use common.ui.state.{init_state, update_state, update_tree}
+use common.ui.session.{UISession}
+use common.ui.access_store.{ui_access_store_runtime_open, ui_access_store_runtime_open_with_override}
 use common.ui.event.{process_event}
 use app.ui.tui_web.backend.{TuiWebBackend}
 use app.ui.tui_web.html.{generate_tui_html_page}
@@ -25,19 +27,26 @@ extern fn rt_file_exists(path: text) -> bool
 
 class TuiWebServer:
     port: i32
-    state: UIState
+    session: UISession
     backend: TuiWebBackend
     file_path: text
     last_file_content: text
 
     static fn new(file_path: text, port: i32) -> Result<TuiWebServer, text>:
+        return TuiWebServer.new_with_access_store_path(file_path, port, "")
+
+    static fn new_with_access_store_path(file_path: text, port: i32, access_db_path: text) -> Result<TuiWebServer, text>:
         """Create a TUI web server by parsing the UI file."""
         val tree_result = parse_ui_file(file_path)
         match tree_result:
             Err(e):
                 return Err(e)
             Ok(tree):
-                val state = init_state(tree)
+                var session = UISession.new(tree)
+                session.set_active_backend("tui_web")
+                val store = ui_access_store_runtime_open_with_override(access_db_path, file_path, "tui_web")
+                if store != nil:
+                    session.attach_access_store(store)
                 var backend = TuiWebBackend.new()
                 val init_result = backend.init()
                 match init_result:
@@ -47,7 +56,7 @@ class TuiWebServer:
                         pass_dn
 
                 # Initial render
-                val render_result = backend.render(state)
+                val render_result = backend.render(session.current_state())
                 match render_result:
                     Err(e):
                         return Err("Initial render failed: {e}")
@@ -60,7 +69,7 @@ class TuiWebServer:
                     ""
                 return Ok(TuiWebServer(
                     port: port,
-                    state: state,
+                    session: session,
                     backend: backend,
                     file_path: file_path,
                     last_file_content: content
@@ -145,17 +154,20 @@ class TuiWebServer:
                     val response = http_response(200, "text/html", page)
                     stream.write_all(response)
                 elif path == "/api/state":
-                    val state_json = _state_to_json(self.state)
+                    val state_json = _state_to_json(self.session.current_state())
                     val response = http_response(200, "application/json", state_json)
                     stream.write_all(response)
                 elif path == "/api/widgets":
-                    val widgets_json = _widgets_to_json(self.state)
+                    val widgets_json = _widgets_to_json(self.session.current_state())
                     val response = http_response(200, "application/json", widgets_json)
                     stream.write_all(response)
                 elif path.starts_with("/api/test/"):
                     # Delegate to test API handler
-                    val inject_fn = \event: self.backend.push_event(event)
-                    val result = handle_test_request(path, method, body, self.state, inject_fn, nil)
+                    val inject_fn = \event:
+                        self.backend.push_event(event)
+                        self.session.dispatch(event)
+                        self._render_current_state()
+                    val result = handle_test_request(path, method, body, self.session.current_state(), inject_fn, self.session)
                     val response = http_response(result.0, result.1, result.2)
                     stream.write_all(response)
                 else:
@@ -173,14 +185,8 @@ class TuiWebServer:
             val tree_result = parse_ui_file(self.file_path)
             match tree_result:
                 Ok(new_tree):
-                    self.state = update_tree(self.state, new_tree)
-                    # Re-render with updated state
-                    val render_result = self.backend.render(self.state)
-                    match render_result:
-                        Err(e):
-                            print "Warning: Re-render failed: {e}"
-                        Ok(_):
-                            pass_dn
+                    self.session.update_tree(new_tree)
+                    self._render_current_state()
                 Err(e):
                     print "Warning: UI parse error: {e}"
 
@@ -215,20 +221,22 @@ class TuiWebServer:
                     val event = _parse_ws_event(frame_data)
                     if event != nil:
                         self.backend.push_event(event)
-                        # Process event and re-render
-                        self.state = update_state(self.state, event)
-                        val render_result = self.backend.render(self.state)
-                        match render_result:
-                            Err(_):
-                                pass_dn
-                            Ok(_):
-                                # Send updated render
-                                val updated_html = self.backend.current_html
-                                val esc = escape_json_string(updated_html)
-                                val update_msg = "{\"type\": \"render\", \"html\": \"{esc}\"}"
-                                send_ws_text(stream, update_msg)
+                        self.session.dispatch(event)
+                        self._render_current_state()
+                        val updated_html = self.backend.current_html
+                        val esc = escape_json_string(updated_html)
+                        val update_msg = "{\"type\": \"render\", \"html\": \"{esc}\"}"
+                        send_ws_text(stream, update_msg)
                 Err(_):
                     break
+
+    me _render_current_state():
+        val render_result = self.backend.render(self.session.current_state())
+        match render_result:
+            Err(e):
+                print "Warning: Re-render failed: {e}"
+            Ok(_):
+                pass_dn
 
 # =========================================================================
 # HTTP Response Helper

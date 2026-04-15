@@ -9,9 +9,11 @@ is not a general desktop automation layer.
 
 Runtime note:
 
-- session-owning startup paths such as `simple ui web`, CLI observer mode,
-  headless mode, and bridge-based MCP usage now auto-attach a file-backed
-  `UiAccessStore`
+- session-owning startup paths such as `simple ui web`, `simple ui tui_web`,
+  `simple ui browser`, CLI observer mode, headless mode, and bridge-based MCP
+  usage now auto-attach a file-backed `UiAccessStore`
+- pass `--ui-access-db /path/to/ui_access.sqlite` to override the runtime store
+  path explicitly; this takes precedence over the environment
 - set `SIMPLE_UI_ACCESS_DB_PATH=/path/to/ui_access.sqlite` to force the store
   location
 - set `SIMPLE_UI_ACCESS_DB_PATH=0` to disable runtime store attachment
