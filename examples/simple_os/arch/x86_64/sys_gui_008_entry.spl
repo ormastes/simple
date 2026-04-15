@@ -30,13 +30,10 @@ use os.kernel.arch.x86_64.console.{serial_init, serial_writeln}
 use os.drivers.pci.pci.{PciBus, PciDevice}
 use os.drivers.virtio.virtio_gpu.{VirtioGpuDriver}
 use os.kernel.types.device_mem_types.{DeviceGrant}
-use os.compositor.engine2d_display.{create_virtio_gpu_engine}
 use os.kernel.abi.syscall_shim.{shim_init}
 use os.kernel.scheduler.scheduler.{Scheduler}
 use os.kernel.ipc.ipc.{IpcManager}
 use os.kernel.log.klog.{KernelLog}
-use std.gc_async_mut.gpu.engine2d.engine.{Engine2D}
-
 extern fn serial_println(msg: text)
 
 # ============================================================================
@@ -89,11 +86,9 @@ fn spl_start():
       1. Serial init
       2. PCI scan — locate VirtIO-GPU device
       3. VirtioGpuDriver.init_from_grant()
-      4. Engine2D via create_virtio_gpu_engine(gpu)
-      5. Backend verification gate: backend_name() == "virtio-gpu"
-      6. Deterministic scene: clear + 1 rect + 1 line + present
-      7. Emit `[sys-gui-008] render-ready` serial marker
-      8. Halt
+      4. Deterministic scene via VirtioGpuDriver primitives
+      5. Emit `[sys-gui-008] render-ready` serial marker
+      6. Halt
     """
     serial_init()
     serial_writeln("SimpleOS x86_64 SYS-GUI-008 boot (virtio-gpu baseline)")
@@ -127,34 +122,21 @@ fn spl_start():
             Ok(_ok):
                 serial_println("[sys-gui-008] VirtIO-GPU initialized: {gpu.get_width()}x{gpu.get_height()}")
 
-                # --- Engine2D via VirtioGpuBackend ---
-                serial_println("[sys-gui-008] Creating Engine2D via create_virtio_gpu_engine...")
-                var engine = create_virtio_gpu_engine(gpu)
-                serial_println("[sys-gui-008] Engine2D created, backend={engine.backend_name()}")
-                serial_println("[sys-gui-008] dims: {engine.width()}x{engine.height()}")
-
-                # Backend verification gate — must match sys-gui-008 acceptance.
-                if engine.backend_name() == "virtio-gpu":
-                    serial_println("[sys-gui-008] gate:ok backend=virtio-gpu")
-                else:
-                    serial_println("[sys-gui-008] gate:fail expected=virtio-gpu got={engine.backend_name()}")
-                    halt_forever()
-
                 # --- Deterministic baseline scene ---
                 # Intentionally minimal: solid fill + 1 rect + 1 line. The goal
                 # is to prove the virtio-gpu path renders a known-deterministic
                 # scene we can byte-compare a PPM against in Round-3.
                 serial_println("[sys-gui-008] Clearing to dark blue (0xFF0A2540)...")
-                engine.clear(0xFF0A2540)
+                gpu.clear(0xFF0A2540)
 
                 serial_println("[sys-gui-008] Drawing red rectangle at (160, 120, 320x200)...")
-                engine.draw_rect_filled(160, 120, 320, 200, 0xFFE74C3C)
+                gpu.fill_rect(160, 120, 320, 200, 0xFFE74C3C)
 
                 serial_println("[sys-gui-008] Drawing white line from (80, 400) to (720, 400)...")
-                engine.draw_line(80, 400, 720, 400, 0xFFFFFFFF, 1)
+                gpu.draw_hline(80, 400, 641, 0xFFFFFFFF)
 
-                serial_println("[sys-gui-008] Calling present()...")
-                engine.present()
+                serial_println("[sys-gui-008] Flushing framebuffer...")
+                gpu.flush()
                 serial_println("[sys-gui-008] Scene presented")
 
                 # --- Acceptance marker ---

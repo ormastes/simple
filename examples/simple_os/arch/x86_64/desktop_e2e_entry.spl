@@ -49,6 +49,7 @@ use os.kernel.scheduler.scheduler.{Scheduler}
 use os.kernel.ipc.ipc.{IpcManager}
 use os.kernel.log.klog.{KernelLog}
 use os.kernel.fs.fat32.{Fat32Filesystem}
+use os.drivers.virtio.virtio_blk.{VirtioBlkDriver}
 
 extern fn serial_println(msg: text)
 extern fn rt_gui_set_fb(addr: u64, width: u64)
@@ -222,14 +223,20 @@ fn desktop_e2e_main() -> bool:
     true
 
 fn try_mount_fat32_disk():
-    """Boot-time FAT32 disk mount attempt (D-2 wave-4 / IF-07).
+    """Boot-time FAT32 disk mount attempt (wave-4b: virtio-blk MMIO probe).
 
-    Instantiates Fat32Filesystem and attempts mount(). No zero-arg
-    BlockDevice factory exists yet (wave-4b wires virtio-blk probe);
-    emits a clear marker so the serial lane stays green.
+    Probes well-known QEMU virtio-mmio slots for a block device and, if
+    found, attempts a FAT32 mount. Emits serial markers either way so the
+    serial lane stays green regardless of whether a disk is attached.
     """
-    var fs: Fat32Filesystem = Fat32Filesystem.new(0u64)
-    serial_println("[disk-boot] fat32: no block device implementor on main yet (wave-4b wires nvme); scaffold log")
+    match VirtioBlkDriver.probe():
+        nil:
+            serial_println("[disk-boot] fat32: no virtio-blk device found, skipping")
+        dev:
+            var fs: Fat32Filesystem = Fat32Filesystem.new(0u64)
+            match fs.mount(dev):
+                Ok(_):  serial_println("[disk-boot] fat32: mount OK")
+                Err(code): serial_println("[disk-boot] fat32: mount failed code={code}")
 
 fn spl_start():
     serial_init()

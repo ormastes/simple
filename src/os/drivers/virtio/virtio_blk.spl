@@ -11,6 +11,13 @@ use os.kernel.boot.mmio.{mmio_read8, mmio_read32, mmio_write8, mmio_write32, mmi
 use os.services.fat32.fat32.{BlockDevice}
 use os.userlib.device.{alloc_dma, free_dma}
 
+# VirtIO MMIO probe constants (QEMU virt machine layout)
+val VIRTIO_MMIO_BASE: u64 = 0xFEB00000
+val VIRTIO_MMIO_STRIDE: u64 = 0x200
+val VIRTIO_MMIO_SLOTS: u64 = 32
+val VIRTIO_MAGIC: u32 = 0x74726976     # "virt" little-endian
+val VIRTIO_DEV_BLK: u32 = 2
+
 # VirtIO block request types
 val VIRTIO_BLK_T_IN: u32 = 0           # Read
 val VIRTIO_BLK_T_OUT: u32 = 1          # Write
@@ -68,6 +75,24 @@ impl VirtioBlkDriver:
             sector_size: 512,
             initialized: false
         )
+
+    static fn probe() -> VirtioBlkDriver?:
+        """Scan well-known QEMU virtio-mmio addresses for a block device.
+
+        Reads the VirtIO magic at offset 0 and device type at offset 8.
+        Returns the first VirtioBlkDriver whose slot advertises type 2 (blk),
+        or nil if no device is found.
+        """
+        var i: u64 = 0
+        while i < VIRTIO_MMIO_SLOTS:
+            val addr = VIRTIO_MMIO_BASE + i * VIRTIO_MMIO_STRIDE
+            val magic = mmio_read32(addr)
+            if magic == VIRTIO_MAGIC:
+                val dev_type = mmio_read32(addr + 8)
+                if dev_type == VIRTIO_DEV_BLK:
+                    return VirtioBlkDriver.new(addr)
+            i = i + 1
+        nil
 
     me init() -> Result<bool, text>:
         """Initialize VirtIO block device."""

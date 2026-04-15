@@ -13,7 +13,7 @@ use std.common.json.parser.{json_parse}
 use app.mcp.assistant.types.{AssistantSessionRecord, AssistantTimelineRecord}
 use app.mcp.assistant.session_store.{
     assistant_store_create_session, assistant_store_load_session, assistant_store_list_sessions,
-    assistant_store_append_event, assistant_store_update_state
+    assistant_store_append_event, assistant_store_update_state, assistant_store_create_child_task
 }
 use app.mcp.assistant.session_views.{
     assistant_store_session_brief, assistant_store_collect_timeline, assistant_store_collect_notifications
@@ -412,6 +412,26 @@ fn _assistant_session_task_json_from_record(session: AssistantSessionRecord) -> 
     obj = obj + RB()
     obj
 
+fn _assistant_child_task_json(session: AssistantSessionRecord, task_id: text, objective: text, status: text, parent_task_id: text, child_session_id: text, resource_policy: text, owner_kind: text, result_summary: text, created_at_ms: i64, updated_at_ms: i64) -> text:
+    var obj = LB()
+    obj = obj + jp("id", js(task_id))
+    obj = obj + "," + jp("source", js("assistant"))
+    obj = obj + "," + jp("kind", js("child_task"))
+    obj = obj + "," + jp("state", js(status))
+    obj = obj + "," + jp("name", js(objective))
+    obj = obj + "," + jp("command", js(session.prompt))
+    obj = obj + "," + jp("session_id", js(session.session_id))
+    obj = obj + "," + jp("parent_session_id", js(session.session_id))
+    obj = obj + "," + jp("parent_task_id", js(parent_task_id))
+    obj = obj + "," + jp("child_session_id", js(child_session_id))
+    obj = obj + "," + jp("resource_policy", js(resource_policy))
+    obj = obj + "," + jp("owner_kind", js(owner_kind))
+    obj = obj + "," + jp("result_summary", js(result_summary))
+    obj = obj + "," + jp("created_at", str(created_at_ms))
+    obj = obj + "," + jp("updated_at", str(updated_at_ms))
+    obj = obj + RB()
+    obj
+
 fn _assistant_parse_json_object(text: text) -> any:
     json_parse(text)
 
@@ -508,6 +528,21 @@ fn handle_assistant_spawn_task(id: text, body: text) -> text:
     if event_obj == nil:
         return make_tool_error(id, -32603, "Failed to build assistant spawn event")
     assistant_store_append_event(ASSIST_ROOT, event_obj)
+    if parent_session_id != "":
+        var child_task_json = LB()
+        child_task_json = child_task_json + jp("session_id", js(parent_session_id))
+        child_task_json = child_task_json + "," + jp("objective", js(summary))
+        child_task_json = child_task_json + "," + jp("owner_kind", js("assistant"))
+        child_task_json = child_task_json + "," + jp("resource_policy", js("bounded"))
+        child_task_json = child_task_json + "," + jp("child_session_id", js(session_id))
+        child_task_json = child_task_json + "," + jp("status", js("running"))
+        child_task_json = child_task_json + "," + jp("result_summary", js(summary))
+        child_task_json = child_task_json + RB()
+        val child_task_obj = _assistant_parse_json_object(child_task_json)
+        if child_task_obj == nil:
+            return make_tool_error(id, -32603, "Failed to build assistant child task payload")
+        if assistant_store_create_child_task(ASSIST_ROOT, child_task_obj) == nil:
+            return make_tool_error(id, -32603, "Failed to record parent child-task state")
     if val session = assistant_store_load_session(ASSIST_ROOT, session_id):
         return make_tool_result(id, _assistant_session_detail_json(session))
     return make_tool_error(id, -32603, "Failed to record assistant spawn event")
@@ -635,6 +670,20 @@ fn handle_assistant_list_tasks(id: text, body: text) -> text:
     for session in assistant_store_list_sessions(ASSIST_ROOT):
         if source_filter == "" or source_filter == "assistant":
             items.push(_assistant_session_task_json_from_record(session))
+            for task in session.child_tasks:
+                items.push(_assistant_child_task_json(
+                    session,
+                    task.task_id,
+                    task.objective,
+                    task.status,
+                    task.parent_task_id,
+                    task.child_session_id,
+                    task.resource_policy,
+                    task.owner_kind,
+                    task.result_summary,
+                    task.created_at_ms,
+                    task.updated_at_ms
+                ))
     if source_filter == "" or source_filter == "dashboard":
         for task_json in _assistant_collect_dashboard_tasks():
             items.push(task_json)
