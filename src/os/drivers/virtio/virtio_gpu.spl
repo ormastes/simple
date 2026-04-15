@@ -37,12 +37,7 @@ use os.drivers.virtio.virtio_common.{VIRTQ_DESC_F_NEXT, VIRTQ_DESC_F_WRITE}
 
 extern fn serial_println(msg: text)
 extern fn rt_alloc(size: u64) -> u64
-extern fn rt_ptr_read_i16(addr: i64, offset: i64) -> i16
-extern fn rt_ptr_read_i32(addr: i64, offset: i64) -> i32
-extern fn rt_ptr_read_i64(addr: i64, offset: i64) -> i64
-extern fn rt_ptr_write_i16(addr: i64, offset: i64, value: i16)
-extern fn rt_ptr_write_i32(addr: i64, offset: i64, value: i32)
-extern fn rt_ptr_write_i64(addr: i64, offset: i64, value: i64)
+extern fn rt_memory_barrier()
 
 # ============================================================================
 # VirtIO Legacy PCI BAR0 Register Offsets
@@ -117,22 +112,22 @@ fn virtqueue_total_size(queue_size: u64) -> u64:
     aligned + us
 
 fn ram_read32(addr: u64) -> u32:
-    (rt_ptr_read_i32(addr as i64, 0) as u32)
+    mmio_read32(addr)
 
 fn ram_read16(addr: u64) -> u16:
-    (rt_ptr_read_i16(addr as i64, 0) as u16)
+    mmio_read16(addr)
 
 fn ram_read64(addr: u64) -> u64:
-    (rt_ptr_read_i64(addr as i64, 0) as u64)
+    mmio_read64(addr)
 
 fn ram_write16(addr: u64, value: u16):
-    rt_ptr_write_i16(addr as i64, 0, value as i16)
+    mmio_write16(addr, value)
 
 fn ram_write32(addr: u64, value: u32):
-    rt_ptr_write_i32(addr as i64, 0, value as i32)
+    mmio_write32(addr, value)
 
 fn ram_write64(addr: u64, value: u64):
-    rt_ptr_write_i64(addr as i64, 0, value as i64)
+    mmio_write64(addr, value)
 
 # ============================================================================
 # DMA Allocation Result (baremetal-safe, no heap)
@@ -246,7 +241,9 @@ impl VirtioGpuDriver:
             val host_features = self.modern_read32(MODERN_COMMON_DEVICE_FEATURE)
             serial_println("[virtio-gpu] modern host_features=0x{host_features}")
             self.modern_write32(MODERN_COMMON_DRIVER_FEATURE_SELECT, 0)
-            self.modern_write32(MODERN_COMMON_DRIVER_FEATURE, 0)
+            self.modern_write32(MODERN_COMMON_DRIVER_FEATURE, 0)        # no GPU features in word 0
+            self.modern_write32(MODERN_COMMON_DRIVER_FEATURE_SELECT, 1)
+            self.modern_write32(MODERN_COMMON_DRIVER_FEATURE, 1)        # bit 0 of word 1 = VIRTIO_F_VERSION_1 (bit 32)
 
             val feat_status = STATUS_ACKNOWLEDGE | STATUS_DRIVER | STATUS_FEATURES_OK
             self.modern_write8(MODERN_COMMON_DEVICE_STATUS, feat_status)
@@ -737,6 +734,9 @@ impl VirtioGpuDriver:
         ram_write32(d1_off + 8, resp_size.to_u32())     # len
         ram_write32(d1_off + 12, VIRTQ_DESC_F_WRITE.to_u32())
 
+        # Barrier: ensure descriptor writes are visible to device before avail ring update
+        rt_memory_barrier()
+
         # Add d0 to available ring
         val avail_idx = ram_read16(self.ctrl_avail_virt + 2)
         val ring_slot = self.ctrl_avail_virt + 4 + (avail_idx % self.ctrl_queue_size).to_u64() * 2
@@ -768,6 +768,8 @@ impl VirtioGpuDriver:
         serial_println("[virtio-gpu] pre-notify avail flags=0x{avail_flags} idx={avail_hdr_idx} ring0={avail_ring0}")
         serial_println("[virtio-gpu] pre-notify used flags=0x{used_flags} idx={used_hdr_idx}")
         serial_println("[virtio-gpu] send_command notify d0={d0} d1={d1} avail_idx={avail_idx} cmd_phys=0x{self.cmd_buf_phys} resp_phys=0x{self.resp_buf_phys}")
+        # Barrier: ensure avail ring write is visible before doorbell write
+        rt_memory_barrier()
         self.notify_queue(VIRTIO_GPU_CONTROLQ)
         serial_println("[virtio-gpu] send_command notified")
 

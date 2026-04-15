@@ -13,7 +13,9 @@ use std.skia.feature.glyph.ot_parser.{
     GsubLookup, GposLookup, parse_gsub_skeleton, parse_gpos_skeleton,
     GlyphClass, parse_gdef_glyph_class,
     FvarAxis, parse_fvar_axes, parse_avar_mapping,
-    GvarTable, parse_gvar, apply_glyph_deltas
+    GvarTable, parse_gvar, apply_glyph_deltas,
+    decode_packed_point_numbers, decode_packed_deltas,
+    TupleVariationHeader, parse_tuple_variation_header
 }
 
 describe "read_u16_be":
@@ -496,3 +498,108 @@ describe "apply_glyph_deltas":
         val coords: [f64] = []
         val result = apply_glyph_deltas(path, gvar, 0, coords)
         expect(result.is_empty()).to_equal(true)
+
+describe "decode_packed_point_numbers":
+    it "empty list (count byte = 0) returns []":
+        # control byte 0x00 means count = 0 (single-byte count form) -> "all points"
+        val data: [u8] = [0, 99, 99]
+        val result = decode_packed_point_numbers(data, 0)
+        val nums = result.0
+        val new_off = result.1
+        expect(nums.len()).to_equal(0)
+        expect(new_off).to_equal(1)
+
+    it "1-byte count, 3 u8 deltas produces running sum":
+        # count=3; run ctrl 0x02 -> u8 deltas, run_length = (0x02 & 0x7F)+1 = 3.
+        # Deltas 1,2,3 -> running sums 1,3,6.
+        val data: [u8] = [3, 2, 1, 2, 3]
+        val result = decode_packed_point_numbers(data, 0)
+        val nums = result.0
+        val new_off = result.1
+        expect(nums.len()).to_equal(3)
+        expect(nums.at(0).unwrap()).to_equal(1)
+        expect(nums.at(1).unwrap()).to_equal(3)
+        expect(nums.at(2).unwrap()).to_equal(6)
+        expect(new_off).to_equal(5)
+
+    it "2-byte count (high bit set) correctly computed":
+        # control byte 0x81, next byte 0x02 -> count = ((0x81 & 0x7F) << 8) | 0x02 = 258.
+        # After count bytes, run ctrl 0x01 = u8 deltas, run_len=2, deltas 5,7.
+        # The decoder will stop at end-of-buffer after those 2 numbers.
+        val data: [u8] = [0x81, 0x02, 0x01, 5, 7]
+        val result = decode_packed_point_numbers(data, 0)
+        val nums = result.0
+        val new_off = result.1
+        expect(nums.len() >= 2).to_equal(true)
+        expect(nums.at(0).unwrap()).to_equal(5)
+        expect(nums.at(1).unwrap()).to_equal(12)
+        # Consumed: 2-byte count + run ctrl + 2 u8 deltas = 5 bytes.
+        expect(new_off).to_equal(5)
+
+describe "decode_packed_deltas":
+    it "zero-run of 5 produces [0,0,0,0,0]":
+        # 0x80 | 0x04 = 0x84: zero-run bit set, run_len = (0x04 & 0x3F)+1 = 5.
+        val data: [u8] = [0x84]
+        val result = decode_packed_deltas(data, 0, 5)
+        val deltas = result.0
+        val new_off = result.1
+        expect(deltas.len()).to_equal(5)
+        expect(deltas.at(0).unwrap()).to_equal(0)
+        expect(deltas.at(1).unwrap()).to_equal(0)
+        expect(deltas.at(2).unwrap()).to_equal(0)
+        expect(deltas.at(3).unwrap()).to_equal(0)
+        expect(deltas.at(4).unwrap()).to_equal(0)
+        expect(new_off).to_equal(1)
+
+    it "i8 run produces sign-extended values":
+        # ctrl 0x02: bit7=0 (not zero-run), bit6=0 (i8), run_len = (0x02 & 0x3F)+1 = 3.
+        # Bytes: 1, 0xFF (-1), 0x80 (-128).
+        val data: [u8] = [0x02, 1, 0xFF, 0x80]
+        val result = decode_packed_deltas(data, 0, 3)
+        val deltas = result.0
+        val new_off = result.1
+        expect(deltas.len()).to_equal(3)
+        expect(deltas.at(0).unwrap()).to_equal(1)
+        expect(deltas.at(1).unwrap()).to_equal(-1)
+        expect(deltas.at(2).unwrap()).to_equal(-128)
+        expect(new_off).to_equal(4)
+
+    it "i16 run produces sign-extended values from 2-byte pairs":
+        # ctrl 0x41: bit7=0, bit6=1 (i16), run_len = (0x01 & 0x3F)+1 = 2.
+        # Bytes: 0x01,0x00 -> 256; 0xFF,0xFE -> -2.
+        val data: [u8] = [0x41, 0x01, 0x00, 0xFF, 0xFE]
+        val result = decode_packed_deltas(data, 0, 2)
+        val deltas = result.0
+        val new_off = result.1
+        expect(deltas.len()).to_equal(2)
+        expect(deltas.at(0).unwrap()).to_equal(256)
+        expect(deltas.at(1).unwrap()).to_equal(-2)
+        expect(new_off).to_equal(5)
+
+describe "parse_tuple_variation_header":
+    it "parses minimal header without embedded peak or intermediate":
+        # variation_data_size=0x0010=16, flags_and_index=0x0003 -> tuple_index=3.
+        val data: [u8] = [0x00, 0x10, 0x00, 0x03]
+        val result = parse_tuple_variation_header(data, 0, 2, 4)
+        val header = result.0
+        val new_off = result.1
+        expect(header.variation_data_size).to_equal(16)
+        expect(header.tuple_index).to_equal(3)
+        expect(header.embedded_peak.len()).to_equal(0)
+        expect(header.intermediate_start.len()).to_equal(0)
+        expect(header.intermediate_end.len()).to_equal(0)
+        expect(header.private_point_numbers).to_equal(false)
+        expect(new_off).to_equal(4)
+
+    it "parses header with embedded peak tuple (F2DOT14 coords)":
+        # size=0x0020=32, flags=EMBEDDED_PEAK (0x8000). axis_count=2.
+        # Peak F2DOT14: 0x4000 -> 1.0, 0xC000 -> -1.0.
+        val data: [u8] = [0x00, 0x20, 0x80, 0x00, 0x40, 0x00, 0xC0, 0x00]
+        val result = parse_tuple_variation_header(data, 0, 2, 0)
+        val header = result.0
+        val new_off = result.1
+        expect(header.variation_data_size).to_equal(32)
+        expect(header.embedded_peak.len()).to_equal(2)
+        expect(header.embedded_peak.at(0).unwrap()).to_equal(1.0)
+        expect(header.embedded_peak.at(1).unwrap()).to_equal(-1.0)
+        expect(new_off).to_equal(8)
