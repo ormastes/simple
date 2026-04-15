@@ -1,0 +1,148 @@
+# @cover src/lib/skia/feature/glyph/colrv1.spl 80%
+
+use std.sspec.*
+use std.skia.feature.glyph.colrv1.{
+    ColrV1Header,
+    parse_colr_header,
+    ColrLayer,
+    parse_layer_list,
+    PaintKind,
+    PaintNode,
+    decode_paint_subtable,
+    find_base_glyph_v1,
+    route_color_glyph
+}
+
+describe "parse_colr_header":
+    it "returns None when blob is too short":
+        val buf: [u8] = [0, 1, 0, 2]
+        val result = parse_colr_header(buf)
+        expect(result == None).to_equal(true)
+
+    it "returns Some with correct fields for a valid version-1 header":
+        # Byte layout (20 bytes):
+        #  0-1  version = 0x0001
+        #  2-3  numBaseGlyphRecords = 0x0002
+        #  4-7  baseGlyphRecordsOffset = 0x0000000E (14)
+        #  8-11 layerListOffset = 0x0000001C (28)
+        # 12-15 clipListOffset = 0x00000000
+        # 16-19 varIndexMapOffset = 0x00000000
+        val buf: [u8] = [
+            0, 1,
+            0, 2,
+            0, 0, 0, 14,
+            0, 0, 0, 28,
+            0, 0, 0, 0,
+            0, 0, 0, 0
+        ]
+        val result = parse_colr_header(buf)
+        expect(result == None).to_equal(false)
+        val hdr = result.unwrap()
+        expect(hdr.version as i64).to_equal(1)
+        expect(hdr.num_base_glyph_records as i64).to_equal(2)
+        expect(hdr.layer_list_offset as i64).to_equal(28)
+        expect(hdr.clip_list_offset as i64).to_equal(0)
+        expect(hdr.var_index_map_offset as i64).to_equal(0)
+
+    it "returns None for a version-0 COLR table (not v1)":
+        # version byte = 0x0000
+        val buf: [u8] = [
+            0, 0,
+            0, 2,
+            0, 0, 0, 14,
+            0, 0, 0, 28,
+            0, 0, 0, 0,
+            0, 0, 0, 0
+        ]
+        val result = parse_colr_header(buf)
+        expect(result == None).to_equal(true)
+
+describe "parse_layer_list":
+    it "returns empty list when layer_list_offset is 0":
+        val buf: [u8] = [
+            0, 1,
+            0, 0,
+            0, 0, 0, 14,
+            0, 0, 0, 0,
+            0, 0, 0, 0,
+            0, 0, 0, 0
+        ]
+        val maybe_hdr = parse_colr_header(buf)
+        val hdr = maybe_hdr.unwrap()
+        val layers = parse_layer_list(buf, hdr)
+        expect(layers.len()).to_equal(0)
+
+    it "returns layers when layer_list_offset points to valid data":
+        # Build a buffer that has:
+        #   COLR v1 header (20 bytes, offsets as above)
+        #   8 bytes padding to reach offset 28
+        #   layer list: numLayers=2 (4 bytes) + 2 records x 6 bytes = 16 bytes
+        # Total = 20 + 8 + 4 + 12 = 44 bytes
+        # header: version=1, numBase=0, baseGlyphOff=14, layerListOff=28, clip=0, var=0
+        # Pad bytes 20-27 = 8 zero bytes
+        # At offset 28: numLayers = 0x00000002
+        # Record 0: glyphId=0x0001, paintOffset=0x00000020
+        # Record 1: glyphId=0x0002, paintOffset=0x00000026
+        val buf: [u8] = [
+            0, 1,
+            0, 0,
+            0, 0, 0, 14,
+            0, 0, 0, 28,
+            0, 0, 0, 0,
+            0, 0, 0, 0,
+            0, 0, 0, 0, 0, 0, 0, 0,
+            0, 0, 0, 2,
+            0, 1, 0, 0, 0, 32,
+            0, 2, 0, 0, 0, 38
+        ]
+        val maybe_hdr = parse_colr_header(buf)
+        val hdr = maybe_hdr.unwrap()
+        val layers = parse_layer_list(buf, hdr)
+        expect(layers.len()).to_equal(2)
+        val l0 = layers[0]
+        expect(l0.glyph_id as i64).to_equal(1)
+        expect(l0.paint_offset as i64).to_equal(32)
+        val l1 = layers[1]
+        expect(l1.glyph_id as i64).to_equal(2)
+        expect(l1.paint_offset as i64).to_equal(38)
+
+describe "decode_paint_subtable":
+    it "returns Some(PaintNode) with kind Solid for format byte 2":
+        # format=2, palette_index=0x0003
+        val buf: [u8] = [2, 0, 3, 0, 0, 0]
+        val result = decode_paint_subtable(buf, 0)
+        expect(result == None).to_equal(false)
+        val node = result.unwrap()
+        expect(node.alpha_fixed).to_equal(16384)
+
+    it "returns Some with Solid fallback for unknown format byte":
+        # format=99 — unknown
+        val buf: [u8] = [99, 0, 0]
+        val result = decode_paint_subtable(buf, 0)
+        expect(result == None).to_equal(false)
+        val node = result.unwrap()
+        expect(node.alpha_fixed).to_equal(16384)
+
+    it "returns None when offset is out of bounds":
+        val buf: [u8] = [2, 0, 3]
+        val result = decode_paint_subtable(buf, 100)
+        expect(result == None).to_equal(true)
+
+describe "route_color_glyph":
+    it "returns None when colr_blob is empty":
+        val buf: [u8] = []
+        val result = route_color_glyph(1, buf)
+        expect(result == None).to_equal(true)
+
+    it "returns None when COLR table has wrong version":
+        # version=0, too short for v1
+        val buf: [u8] = [
+            0, 0,
+            0, 0,
+            0, 0, 0, 0,
+            0, 0, 0, 0,
+            0, 0, 0, 0,
+            0, 0, 0, 0
+        ]
+        val result = route_color_glyph(1, buf)
+        expect(result == None).to_equal(true)

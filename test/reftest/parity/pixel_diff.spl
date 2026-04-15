@@ -1,4 +1,10 @@
-# pixel_diff — stub pixel comparator for Phase 8 parity reftests
+# pixel_diff — real pixel comparator driving CpuBackend -> Bitmap -> pixel_diff_core
+
+use std.skia.entity.geometry.{SkRect, SkIRect}
+use std.skia.entity.picture.{SkPicture}
+use std.skia.backend.cpu.backend.{CpuBackend, cpu_backend_new}
+use std.skia.backend.cpu.raster_prims.{Bitmap}
+use test.reftest.parity.pixel_diff_core.{BitmapRef, PixelDiffSummary, summarize}
 
 # ============================================================================
 # PixelDiffResult — outcome of comparing two rasterised pictures
@@ -6,19 +12,38 @@
 
 class PixelDiffResult:
     ratio: f64
-    max_channel_delta: i32
-    mismatched_pixels: i64
+    rect: SkIRect
+    max_delta: i32
+    passed: bool
 
 # ============================================================================
-# compare_pictures — compare two scenes by op-stream signature
-#
-# Phase 8 stub: if signatures are equal the diff ratio is 0.0 (identical);
-# otherwise 1.0 (all-different). Phase 8 final wires real CPU + Vulkan raster.
-# TODO(reftest): wire real CPU + Vulkan raster pixel compare in Phase 8 final.
+# compare_pictures — render both pictures via CpuBackend and diff the pixels
 # ============================================================================
 
-fn compare_pictures(a_sig: i64, b_sig: i64) -> PixelDiffResult:
-    if a_sig == b_sig:
-        PixelDiffResult(ratio: 0.0, max_channel_delta: 0, mismatched_pixels: 0)
-    else:
-        PixelDiffResult(ratio: 1.0, max_channel_delta: 255, mismatched_pixels: -1)
+fn compare_pictures(a: SkPicture, b: SkPicture, cull: SkRect, tolerance: i32) -> PixelDiffResult:
+    val backend = cpu_backend_new()
+    val bitmap_a = backend.render_picture(a, cull)
+    val bitmap_b = backend.render_picture(b, cull)
+    val ref_a = BitmapRef(width: bitmap_a.width, height: bitmap_a.height, pixels: bitmap_a.pixels)
+    val ref_b = BitmapRef(width: bitmap_b.width, height: bitmap_b.height, pixels: bitmap_b.pixels)
+    val summary = summarize(ref_a, ref_b, tolerance)
+    PixelDiffResult(
+        ratio: summary.ratio,
+        rect: summary.diff_rect,
+        max_delta: summary.max_channel_delta,
+        passed: false
+    )
+
+# ============================================================================
+# compare_with_threshold — like compare_pictures, also sets passed flag
+# ============================================================================
+
+fn compare_with_threshold(a: SkPicture, b: SkPicture, cull: SkRect, ratio_threshold: f64, tolerance: i32) -> PixelDiffResult:
+    val base = compare_pictures(a, b, cull, tolerance)
+    val did_pass = base.ratio <= ratio_threshold
+    PixelDiffResult(
+        ratio: base.ratio,
+        rect: base.rect,
+        max_delta: base.max_delta,
+        passed: did_pass
+    )
