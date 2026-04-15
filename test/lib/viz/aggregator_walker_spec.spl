@@ -1,0 +1,230 @@
+# aggregator_walker_spec.spl — tests for aggregator_walker helpers
+
+use std.skia.entity.geometry.{SkRect}
+use std.skia.entity.color.{SkColor4f}
+use std.skia.entity.matrix.{Matrix3x3}
+use std.viz.entity.surface_id.{SurfaceId, FrameSinkId, LocalSurfaceId}
+use std.viz.entity.compositor_frame.{CompositorFrame, FrameMetadata}
+use std.viz.entity.render_pass.{RenderPass}
+use std.viz.entity.draw_quad.{DrawQuad, DrawQuadKind, SharedQuadState}
+use std.viz.entity.shared_image.{SharedImageMailbox}
+use std.viz.feature.aggregator.{AggregatorEntry}
+use std.viz.feature.aggregator_walker.{
+    WalkerContext,
+    find_frame_for,
+    walk_referenced_surfaces,
+    inline_render_pass,
+    drop_missing_surface,
+    placeholder_deferred_surface,
+    walk_and_inline
+}
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+fn _zero_rect() -> SkRect:
+    SkRect(left: 0.0, top: 0.0, right: 0.0, bottom: 0.0)
+
+fn _unit_rect() -> SkRect:
+    SkRect(left: 0.0, top: 0.0, right: 100.0, bottom: 100.0)
+
+fn _sid(client_id: i32, sink_id: i32) -> SurfaceId:
+    SurfaceId(
+        frame_sink_id: FrameSinkId(client_id: client_id, sink_id: sink_id),
+        local_surface_id: LocalSurfaceId(parent_sequence_number: 0, child_sequence_number: 0)
+    )
+
+fn _empty_frame(refs: [SurfaceId]) -> CompositorFrame:
+    val meta = FrameMetadata(
+        device_scale_factor: 1.0,
+        root_scroll_offset_x: 0.0,
+        root_scroll_offset_y: 0.0,
+        frame_token: 0
+    )
+    CompositorFrame(
+        metadata: meta,
+        render_pass_list: [],
+        referenced_surfaces: refs,
+        device_viewport_rect: _zero_rect()
+    )
+
+fn _pass_with_quads(id: i32, quads: [DrawQuad], sqs: [SharedQuadState]) -> RenderPass:
+    RenderPass(
+        id: id,
+        output_rect: _unit_rect(),
+        damage_rect: _unit_rect(),
+        transform_to_root_target: Matrix3x3.identity(),
+        filters_disabled: false,
+        quads: quads,
+        shared_quad_states: sqs,
+        backdrop_filter_bounds: None
+    )
+
+fn _sqs() -> SharedQuadState:
+    SharedQuadState(
+        quad_to_target_transform: Matrix3x3.identity(),
+        visible_layer_rect: _unit_rect(),
+        clip_rect: _unit_rect(),
+        is_clipped: false,
+        opacity: 1.0,
+        blend_mode: 0,
+        sorting_context_id: 0
+    )
+
+fn _solid_quad(sqs_index: i32) -> DrawQuad:
+    val zero_color = SkColor4f(r: 1.0, g: 0.0, b: 0.0, a: 1.0)
+    DrawQuad.solid_color(sqs_index, _unit_rect(), zero_color)
+
+fn _render_pass_quad(sqs_index: i32, pass_id: i32) -> DrawQuad:
+    DrawQuad.render_pass(sqs_index, _unit_rect(), pass_id)
+
+fn _frame_with_one_pass(refs: [SurfaceId], pass_id: i32, quads: [DrawQuad], sqs: [SharedQuadState]) -> CompositorFrame:
+    val meta = FrameMetadata(
+        device_scale_factor: 1.0,
+        root_scroll_offset_x: 0.0,
+        root_scroll_offset_y: 0.0,
+        frame_token: 1
+    )
+    val pass = _pass_with_quads(pass_id, quads, sqs)
+    CompositorFrame(
+        metadata: meta,
+        render_pass_list: [pass],
+        referenced_surfaces: refs,
+        device_viewport_rect: _unit_rect()
+    )
+
+fn _context_with(entries: [AggregatorEntry]) -> WalkerContext:
+    WalkerContext.new(entries)
+
+fn _entry(sid: SurfaceId, frame: CompositorFrame) -> AggregatorEntry:
+    AggregatorEntry(surface_id: sid, frame: frame)
+
+# ---------------------------------------------------------------------------
+# Test suite
+# ---------------------------------------------------------------------------
+
+describe "aggregator_walker":
+
+    # 1. walk_referenced_surfaces: root frame with no surface references → empty list
+    it "walk_referenced_surfaces returns empty list when root has no referenced surfaces":
+        val root = _empty_frame([])
+        val ctx = _context_with([])
+        val result = walk_referenced_surfaces(root, ctx)
+        result.len().to_equal(0)
+
+    # 2. walk_referenced_surfaces: root references one child → returns [child_id]
+    it "walk_referenced_surfaces returns one id when root references one child":
+        val child_sid = _sid(2, 0)
+        val root = _empty_frame([child_sid])
+        val child_frame = _empty_frame([])
+        val ctx = _context_with([_entry(child_sid, child_frame)])
+        val result = walk_referenced_surfaces(root, ctx)
+        result.len().to_equal(1)
+        val found = result[0]
+        val eq = found.equals(child_sid)
+        eq.to_equal(true)
+
+    # 3. walk_referenced_surfaces: cycle A → B → A terminates without duplicating ids
+    it "walk_referenced_surfaces terminates and dedups on a cycle A to B to A":
+        val sid_a = _sid(10, 0)
+        val sid_b = _sid(11, 0)
+        # A references B, B references A — cycle
+        val frame_a = _empty_frame([sid_b])
+        val frame_b = _empty_frame([sid_a])
+        val root = _empty_frame([sid_a])
+        val ctx = _context_with([
+            _entry(sid_a, frame_a),
+            _entry(sid_b, frame_b)
+        ])
+        val result = walk_referenced_surfaces(root, ctx)
+        # Should see each of sid_a, sid_b exactly once
+        result.len().to_equal(2)
+
+    # 4. find_frame_for: id present in context → returns Some
+    it "find_frame_for returns Some when id is in context":
+        val sid = _sid(1, 0)
+        val frame = _empty_frame([])
+        val ctx = _context_with([_entry(sid, frame)])
+        val maybe = find_frame_for(ctx, sid)
+        if val Some(f) = maybe:
+            f.referenced_surfaces.len().to_equal(0)
+        else:
+            # force failure: should have found it
+            true.to_equal(false)
+
+    # 5. find_frame_for: id not in context → returns None
+    it "find_frame_for returns None when id is not in context":
+        val known_sid = _sid(1, 0)
+        val unknown_sid = _sid(99, 0)
+        val frame = _empty_frame([])
+        val ctx = _context_with([_entry(known_sid, frame)])
+        val maybe = find_frame_for(ctx, unknown_sid)
+        val is_none = if val Some(_) = maybe: false else: true
+        is_none.to_equal(true)
+
+    # 6. inline_render_pass: appends child quads — count grows by child quad count
+    it "inline_render_pass appends child quads to parent quads":
+        val parent_sqs = [_sqs()]
+        val parent_quads = [_solid_quad(0)]
+        val parent_pass = _pass_with_quads(1, parent_quads, parent_sqs)
+
+        val child_sqs = [_sqs(), _sqs()]
+        val child_quads = [_solid_quad(0), _solid_quad(1), _solid_quad(1)]
+        val child_frame = _frame_with_one_pass([], 2, child_quads, child_sqs)
+
+        val result = inline_render_pass(parent_pass, child_frame)
+        # parent had 1 quad, child has 3 → merged has 4
+        result.quads.len().to_equal(4)
+
+    # 7. inline_render_pass: child sqs indices are remapped by parent's sqs count
+    it "inline_render_pass remaps child sqs indices by parent sqs count offset":
+        val parent_sqs = [_sqs(), _sqs()]   # 2 parent sqs → offset = 2
+        val parent_quads = [_solid_quad(0), _solid_quad(1)]
+        val parent_pass = _pass_with_quads(1, parent_quads, parent_sqs)
+
+        val child_sqs = [_sqs()]
+        # child quad references sqs index 0 in child's sqs list
+        val child_quads = [_solid_quad(0)]
+        val child_frame = _frame_with_one_pass([], 2, child_quads, child_sqs)
+
+        val result = inline_render_pass(parent_pass, child_frame)
+        # The appended (3rd) quad was child quad at sqs index 0, remapped to 0+2=2
+        val merged_third_quad = result.quads[2]
+        merged_third_quad.shared_quad_state_index.to_equal(2)
+
+    # 8. drop_missing_surface: removes RenderPassDrawQuads matching the hint, leaves others
+    it "drop_missing_surface removes RenderPass quads matching hint and preserves others":
+        val sqs_list = [_sqs()]
+        # One solid-color quad (not a RenderPass quad) and one RenderPass quad with pass_id=42
+        val solid = _solid_quad(0)
+        val rp_quad = _render_pass_quad(0, 42)
+        val pass = _pass_with_quads(1, [solid, rp_quad], sqs_list)
+
+        val result = drop_missing_surface(pass, "42")
+        # RenderPass quad with render_pass_id==42 should be dropped; solid kept
+        result.quads.len().to_equal(1)
+        val kept = result.quads[0]
+        val is_solid = if kept.kind == DrawQuadKind.SolidColor: true else: false
+        is_solid.to_equal(true)
+
+    # 9. drop_missing_surface: no matching quads → pass returned unchanged
+    it "drop_missing_surface returns all quads unchanged when no quad matches hint":
+        val sqs_list = [_sqs()]
+        val solid1 = _solid_quad(0)
+        val solid2 = _solid_quad(0)
+        val pass = _pass_with_quads(1, [solid1, solid2], sqs_list)
+
+        val result = drop_missing_surface(pass, "99")
+        result.quads.len().to_equal(2)
+
+    # 10. placeholder_deferred_surface: returns pass unmodified (current impl)
+    it "placeholder_deferred_surface returns pass with same quad count":
+        val sqs_list = [_sqs()]
+        val quads = [_solid_quad(0), _solid_quad(0)]
+        val pass = _pass_with_quads(1, quads, sqs_list)
+        val sid = _sid(5, 0)
+
+        val result = placeholder_deferred_surface(pass, sid)
+        result.quads.len().to_equal(2)
+        result.id.to_equal(1)

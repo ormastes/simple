@@ -130,7 +130,7 @@ Ordered by unlock value. Each item ends with the artifact that proves it.
 | 1 | Lock `Compositor` + `Engine2D` trait surfaces; mark unstable methods | all | `doc/04_architecture/gui_layer_contract.md` | [gui_layer_contract.md](../04_architecture/gui_layer_contract.md) (locked); fix plan: [sys_gui/gui_layer_contract_fix_plan.md](./sys_gui/gui_layer_contract_fix_plan.md) | ✅ Done 2026-04-14 |
 | 2 | Expand `wm_compare` to run the same scene through V1/V2 and diff | V1, V2 | `test/sys/wm_compare/v1_v2_parity_spec.spl` | [sys_test/wm_compare_v1_v2_parity.md](./sys_test/wm_compare_v1_v2_parity.md) | ✅ Done 2026-04-14 |
 | 3 | Land Cocoa + Win32 hosted surfaces behind `hosted_backend` | V2 | `src/os/compositor/hosted_backend_cocoa.spl`, `_win32.spl` | [v2_hosted_engine2d_rewiring.md](./v2_hosted_engine2d_rewiring.md) (Phase C) | ✅ Done 2026-04-14 |
-| 4 | virtio-gpu accelerated path in QEMU for V1 | V1 | `sys-gui-008` baseline in `doc/08_tracking/todo/` | [sys_gui_008_round0_plan_2026-04-14.md](../08_tracking/todo/sys_gui_008_round0_plan_2026-04-14.md) (long-form: [sys_gui_008_virtio_gpu_qemu.md](../08_tracking/todo/sys_gui_008_virtio_gpu_qemu.md)) | 📋 Round-0 plan landed 2026-04-14 · Round-1 gated on sys-gui-006 LIVE-GREEN (Round-13 cleared harness race; Round-14 will fix qmp_client.shell) |
+| 4 | virtio-gpu accelerated path in QEMU for V1 | V1 | `sys-gui-008` baseline in `doc/08_tracking/todo/` | [sys_gui_008_round0_plan_2026-04-14.md](../08_tracking/todo/sys_gui_008_round0_plan_2026-04-14.md) (long-form: [sys_gui_008_virtio_gpu_qemu.md](../08_tracking/todo/sys_gui_008_virtio_gpu_qemu.md)) | 🔄 sys-gui-006 ✅ LIVE-GREEN (2026-04-15); Round-2 landed — virtio-gpu reaches controlq notify, blocked on heap-exhausted post-notify ring fix; Round-3 plan: [sys_gui_008_round3_ppm_diff_plan_2026-04-15.md](../08_tracking/todo/sys_gui_008_round3_ppm_diff_plan_2026-04-15.md) |
 | 5 | CEF or simple_browser shell driving `browser_compositor_backend` | V3 | `src/app/ui.chromium/main.spl` + parity screenshots | [v3_simple_browser_milestones.md](./v3_simple_browser_milestones.md) — Option B chosen per [v3_shell_choice_2026-04-14.md](../01_research/domain/v3_shell_choice_2026-04-14.md) | ✅ Done 2026-04-14 (M1–M12 all landed) |
 | 6 | Electron main/renderer split using `electron_capture` + `ui.ipc` | V4 | `src/app/ui.electron/main.spl` green in `wm_compare` | not yet planned | ✅ Done 2026-04-14 |
 | 7 | Shared input-event conformance suite across all four | all | `test/unit/common/ui/input_event_conformance_spec.spl` | [sys_test/input_event_conformance.md](./sys_test/input_event_conformance.md) | ✅ Done 2026-04-14 |
@@ -142,7 +142,9 @@ Ordered by unlock value. Each item ends with the artifact that proves it.
 > M8 CSS extensions `ca`, M9 JS audit `cc`, M10 DevTools `05`,
 > M11 snapshot/record-replay `0f`, M12 Acid2 reftest `9ef`. Plus Gpu native
 > glass (D2 Phase 2) in `37`. Only remaining row is Row 4 (sys-gui-008
-> virtio-gpu QEMU), still blocked on sys-gui-006 reaching LIVE-GREEN.
+> virtio-gpu QEMU). **sys-gui-006 reached LIVE-GREEN on 2026-04-15**
+> (100.0 % pixel match); Row 4 is now unblocked and in Round-3 (virtio-gpu
+> ring fix → PPM diff harness).
 
 ## 5. Decisions still open
 
