@@ -378,23 +378,34 @@ RuntimeValue rt_volatile_write_u64(RuntimeValue addr, RuntimeValue val) {
 
 RuntimeValue rt_ptr_read_i32(RuntimeValue addr, RuntimeValue offset) {
     int32_t *p = (int32_t *)((uintptr_t)addr + (uintptr_t)offset);
-    return (RuntimeValue)(int64_t)*p;
+    return ENCODE_INT((int64_t)*p);
+}
+
+RuntimeValue rt_ptr_read_i16(RuntimeValue addr, RuntimeValue offset) {
+    int16_t *p = (int16_t *)((uintptr_t)addr + (uintptr_t)offset);
+    return ENCODE_INT((int64_t)*p);
 }
 
 RuntimeValue rt_ptr_read_i64(RuntimeValue addr, RuntimeValue offset) {
     int64_t *p = (int64_t *)((uintptr_t)addr + (uintptr_t)offset);
-    return (RuntimeValue)*p;
+    return ENCODE_INT(*p);
+}
+
+RuntimeValue rt_ptr_write_i16(RuntimeValue addr, RuntimeValue offset, RuntimeValue value) {
+    int16_t *p = (int16_t *)((uintptr_t)addr + (uintptr_t)offset);
+    *p = (int16_t)DECODE_INT(value);
+    return NIL_VALUE;
 }
 
 RuntimeValue rt_ptr_write_i32(RuntimeValue addr, RuntimeValue offset, RuntimeValue value) {
     int32_t *p = (int32_t *)((uintptr_t)addr + (uintptr_t)offset);
-    *p = (int32_t)value;
+    *p = (int32_t)DECODE_INT(value);
     return NIL_VALUE;
 }
 
 RuntimeValue rt_ptr_write_i64(RuntimeValue addr, RuntimeValue offset, RuntimeValue value) {
     int64_t *p = (int64_t *)((uintptr_t)addr + (uintptr_t)offset);
-    *p = (int64_t)value;
+    *p = DECODE_INT(value);
     return NIL_VALUE;
 }
 

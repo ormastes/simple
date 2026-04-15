@@ -94,6 +94,7 @@ echo "==> Stage cross: cmake configure -> $LLVM_BUILD"
 run mkdir -p "$LLVM_BUILD"
 run cmake -S "$LLVM_SRC/llvm" -B "$LLVM_BUILD" \
     -G Ninja \
+    -DCMAKE_BUILD_TYPE=Release \
     -DCMAKE_TOOLCHAIN_FILE="$TOOLCHAIN_FILE" \
     -DCMAKE_INSTALL_PREFIX="$SIMPLEOS_SYSROOT" \
     -DLLVM_TABLEGEN="$HOST_TOOLS_DIR/bin/llvm-tblgen" \

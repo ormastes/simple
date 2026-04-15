@@ -37,8 +37,10 @@ use os.drivers.virtio.virtio_common.{VIRTQ_DESC_F_NEXT, VIRTQ_DESC_F_WRITE}
 
 extern fn serial_println(msg: text)
 extern fn rt_alloc(size: u64) -> u64
+extern fn rt_ptr_read_i16(addr: i64, offset: i64) -> i16
 extern fn rt_ptr_read_i32(addr: i64, offset: i64) -> i32
 extern fn rt_ptr_read_i64(addr: i64, offset: i64) -> i64
+extern fn rt_ptr_write_i16(addr: i64, offset: i64, value: i16)
 extern fn rt_ptr_write_i32(addr: i64, offset: i64, value: i32)
 extern fn rt_ptr_write_i64(addr: i64, offset: i64, value: i64)
 
@@ -117,8 +119,14 @@ fn virtqueue_total_size(queue_size: u64) -> u64:
 fn ram_read32(addr: u64) -> u32:
     (rt_ptr_read_i32(addr as i64, 0) as u32)
 
+fn ram_read16(addr: u64) -> u16:
+    (rt_ptr_read_i16(addr as i64, 0) as u16)
+
 fn ram_read64(addr: u64) -> u64:
     (rt_ptr_read_i64(addr as i64, 0) as u64)
+
+fn ram_write16(addr: u64, value: u16):
+    rt_ptr_write_i16(addr as i64, 0, value as i16)
 
 fn ram_write32(addr: u64, value: u32):
     rt_ptr_write_i32(addr as i64, 0, value as i32)
@@ -483,10 +491,10 @@ impl VirtioGpuDriver:
         val last_off = self.ctrl_desc_virt + ((qsize - 1) * 16).to_u64()
         ram_write32(last_off + 12, (qsize.to_u32()) << 16)
 
-        mmio_write16(self.ctrl_avail_virt, 0)
-        mmio_write16(self.ctrl_avail_virt + 2, 0)
-        mmio_write16(self.ctrl_used_virt, 0)
-        mmio_write16(self.ctrl_used_virt + 2, 0)
+        ram_write16(self.ctrl_avail_virt, 0)
+        ram_write16(self.ctrl_avail_virt + 2, 0)
+        ram_write16(self.ctrl_used_virt, 0)
+        ram_write16(self.ctrl_used_virt + 2, 0)
 
         self.ctrl_desc_idx = 0
         self.ctrl_last_used = 0
@@ -597,12 +605,12 @@ impl VirtioGpuDriver:
         ram_write32(last_off + 12, (qsize.to_u32()) << 16)
 
         # Zero the avail ring header (flags=0, idx=0)
-        mmio_write16(self.ctrl_avail_virt, 0)
-        mmio_write16(self.ctrl_avail_virt + 2, 0)
+        ram_write16(self.ctrl_avail_virt, 0)
+        ram_write16(self.ctrl_avail_virt + 2, 0)
 
         # Zero the used ring header (flags=0, idx=0)
-        mmio_write16(self.ctrl_used_virt, 0)
-        mmio_write16(self.ctrl_used_virt + 2, 0)
+        ram_write16(self.ctrl_used_virt, 0)
+        ram_write16(self.ctrl_used_virt + 2, 0)
 
         self.ctrl_desc_idx = 0
         self.ctrl_last_used = 0
@@ -728,16 +736,16 @@ impl VirtioGpuDriver:
         ram_write32(d1_off + 12, VIRTQ_DESC_F_WRITE.to_u32())
 
         # Add d0 to available ring
-        val avail_idx = mmio_read16(self.ctrl_avail_virt + 2)
+        val avail_idx = ram_read16(self.ctrl_avail_virt + 2)
         val ring_slot = self.ctrl_avail_virt + 4 + (avail_idx % self.ctrl_queue_size).to_u64() * 2
-        mmio_write16(ring_slot, d0)
-        val ring_slot_readback = mmio_read16(ring_slot)
-        mmio_write16(self.ctrl_avail_virt + 2, avail_idx + 1)
-        val avail_idx_after = mmio_read16(self.ctrl_avail_virt + 2)
+        ram_write16(ring_slot, d0)
+        val ring_slot_readback = ram_read16(ring_slot)
+        ram_write16(self.ctrl_avail_virt + 2, avail_idx + 1)
+        val avail_idx_after = ram_read16(self.ctrl_avail_virt + 2)
         serial_println("[virtio-gpu] desc d0 addr=0x{self.cmd_buf_phys} len={cmd_size} tail=0x{ram_read32(d0_off + 12)}")
         serial_println("[virtio-gpu] desc d1 addr=0x{self.resp_buf_phys} len={resp_size} tail=0x{ram_read32(d1_off + 12)}")
         serial_println("[virtio-gpu] avail slot=0x{ring_slot} wrote={d0} readback={ring_slot_readback} idx_before={avail_idx} idx_after={avail_idx_after}")
-        serial_println("[virtio-gpu] used idx before notify={mmio_read16(self.ctrl_used_virt + 2)}")
+        serial_println("[virtio-gpu] used idx before notify={ram_read16(self.ctrl_used_virt + 2)}")
 
         # Notify device (controlq = queue 0)
         val d0_desc_lo = ram_read32(d0_off)
@@ -748,11 +756,11 @@ impl VirtioGpuDriver:
         val d1_desc_hi = ram_read32(d1_off + 4)
         val d1_desc_len = ram_read32(d1_off + 8)
         val d1_desc_flags = ram_read32(d1_off + 12)
-        val avail_flags = mmio_read16(self.ctrl_avail_virt)
-        val avail_hdr_idx = mmio_read16(self.ctrl_avail_virt + 2)
-        val avail_ring0 = mmio_read16(self.ctrl_avail_virt + 4)
-        val used_flags = mmio_read16(self.ctrl_used_virt)
-        val used_hdr_idx = mmio_read16(self.ctrl_used_virt + 2)
+        val avail_flags = ram_read16(self.ctrl_avail_virt)
+        val avail_hdr_idx = ram_read16(self.ctrl_avail_virt + 2)
+        val avail_ring0 = ram_read16(self.ctrl_avail_virt + 4)
+        val used_flags = ram_read16(self.ctrl_used_virt)
+        val used_hdr_idx = ram_read16(self.ctrl_used_virt + 2)
         serial_println("[virtio-gpu] pre-notify desc[d0] lo=0x{d0_desc_lo} hi=0x{d0_desc_hi} len={d0_desc_len} flags=0x{d0_desc_flags}")
         serial_println("[virtio-gpu] pre-notify desc[d1] lo=0x{d1_desc_lo} hi=0x{d1_desc_hi} len={d1_desc_len} flags=0x{d1_desc_flags}")
         serial_println("[virtio-gpu] pre-notify avail flags=0x{avail_flags} idx={avail_hdr_idx} ring0={avail_ring0}")
@@ -764,7 +772,7 @@ impl VirtioGpuDriver:
         # Poll used ring for completion
         var timeout: u64 = 10000000
         while timeout > 0:
-            val used_idx = mmio_read16(self.ctrl_used_virt + 2)
+            val used_idx = ram_read16(self.ctrl_used_virt + 2)
             if used_idx != self.ctrl_last_used:
                 self.ctrl_last_used = used_idx
                 serial_println("[virtio-gpu] send_command complete used_idx={used_idx}")

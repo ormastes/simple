@@ -185,7 +185,7 @@ fn collect_assistant_snapshot() -> AssistantDashboardSnapshot:
             break
 
     link_assistant_sessions(sessions)
-    sort_sessions_by_activity(sessions)
+    sessions = sort_sessions_by_activity(sessions)
 
     snapshot.sessions = sessions
     snapshot.total_sessions = sessions.len()
@@ -320,19 +320,17 @@ fn parse_assistant_session(path: text, now_secs: i64) -> AssistantSession:
 
         session.turn_count = session.turn_count + 1
 
-        if session.session_id == "" {
+        if session.session_id == "":
             val candidate = json_text_at(record, "sessionId")
             if candidate != "":
                 session.session_id = candidate
-            }
-        if session.parent_tool_use_id == "" {
+        if session.parent_tool_use_id == "":
             val parent_id = first_non_empty([
                 json_text_at(record, "parentToolUseID"),
                 json_text_at(record, "parent_tool_use_id")
             ])
             if parent_id != "":
                 session.parent_tool_use_id = parent_id
-        }
 
         match kind:
             "assistant":
@@ -406,7 +404,7 @@ fn parse_assistant_session(path: text, now_secs: i64) -> AssistantSession:
                 session.last_event_kind = "error"
                 session.last_event_detail = assistant_error_summary(record)
             _:
-                pass_dn
+                pass
 
         val turn_tokens = assistant_token_usage(record)
         session.token_input = session.token_input + turn_tokens.0
@@ -458,18 +456,16 @@ fn link_assistant_sessions(sessions: [AssistantSession]):
                     sessions[parent_idx].children.push(sessions[child_idx].session_id)
         child_idx = child_idx + 1
 
-fn sort_sessions_by_activity(sessions: [AssistantSession]):
+fn sort_sessions_by_activity(sessions: [AssistantSession]) -> [AssistantSession]:
     var sorted: [AssistantSession] = []
     for session in sessions:
-        insert_session_sorted(sorted, session)
-    sessions.clear()
-    for session in sorted:
-        sessions.push(session)
+        sorted = insert_session_sorted(sorted, session)
+    sorted
 
-fn insert_session_sorted(sorted: [AssistantSession], session: AssistantSession):
+fn insert_session_sorted(sorted: [AssistantSession], session: AssistantSession) -> [AssistantSession]:
     if sorted.len() == 0:
         sorted.push(session)
-        return
+        return sorted
     var inserted = false
     var out: [AssistantSession] = []
     var i = 0
@@ -481,9 +477,7 @@ fn insert_session_sorted(sorted: [AssistantSession], session: AssistantSession):
         i = i + 1
     if not inserted:
         out.push(session)
-    sorted.clear()
-    for item in out:
-        sorted.push(item)
+    out
 
 fn session_sort_key(session: AssistantSession) -> i64:
     var score = session.last_modified_time
@@ -523,6 +517,12 @@ fn assistant_find_parent_session_id(sessions: [AssistantSession], parent_tool_us
         if text_list_contains(session.tool_use_ids, parent_tool_use_id):
             return session.session_id
     ""
+
+fn assistant_session_by_id(sessions: [AssistantSession], session_id: text) -> AssistantSession:
+    for session in sessions:
+        if session.session_id == session_id:
+            return session
+    nil
 
 fn assistant_session_index(sessions: [AssistantSession], session_id: text) -> i64:
     var i = 0
@@ -799,6 +799,15 @@ fn assistant_project_name(path: text) -> text:
         return ""
     parts[parts.len() - 2]
 
+fn assistant_session_id(path: text) -> text:
+    val parts = path.split("/")
+    if parts.len() == 0:
+        return "assistant-session"
+    val leaf = parts[parts.len() - 1]
+    if leaf.ends_with(".jsonl"):
+        return leaf.slice(0, leaf.len() - 6)
+    leaf
+
 fn assistant_clock_from_iso(ts: text) -> text:
     if ts == "":
         return ""
@@ -894,4 +903,3 @@ fn json_number_at(value: any, path: text) -> i64:
     if n == nil:
         return 0
     n as i64
-
