@@ -10,6 +10,7 @@
 #   REGISTRY_LIST (4): list all registered drivers
 
 use os.userlib.syscall_raw.{syscall}
+use os.kernel.boot.mmio.{mmio_read32, mmio_read64}
 
 extern fn serial_println(msg: text)
 
@@ -239,13 +240,44 @@ fn registry_service_loop(port_handle: u64):
 
         serial_println("[registry] Received IPC request (raw={msg_result})")
 
-        # TODO: [driver][P2] Parse IPC message buffer to extract method ID and arguments.
-        # Expected dispatch:
-        #   REGISTRY_REGISTER   -> registry_register(class, name, port, task)
-        #   REGISTRY_LOOKUP     -> registry_lookup(class) -> reply with port
-        #   REGISTRY_UNREGISTER -> registry_unregister(class, sender_task)
-        #   REGISTRY_LIST       -> registry_list()
-        pass_dn
+        # IpcMessage layout (@repr("C")):
+        #   offset  0: src_port: u64  (sender task / port)
+        #   offset  8: dst_port: u64
+        #   offset 16: method: u32
+        #   offset 20: flags: u32
+        #   offset 24: payload_len: u32
+        #   offset 28: cap_count: u32
+        #   offset 32: payload words (u64 each)
+        val msg_ptr = msg_result as u64
+        val sender_task = mmio_read64(msg_ptr)
+        val method_id = mmio_read32(msg_ptr + 16) as u32
+
+        match method_id:
+            REGISTRY_REGISTER:
+                val class    = mmio_read64(msg_ptr + 32) as u8
+                val port     = mmio_read64(msg_ptr + 40) as i64
+                val task     = mmio_read64(msg_ptr + 48)
+                # Name is derived from the class code — no text-pointer IPC ABI available
+                val name     = _class_name(class)
+                val ok       = registry_register(class, name, port, task)
+                val ret: u64 = if ok: 0 else: 1
+                syscall(20, sender_task, 0, ret, 0, 0)
+            REGISTRY_LOOKUP:
+                val class    = mmio_read64(msg_ptr + 32) as u8
+                val ipc_port = registry_lookup(class)
+                syscall(20, sender_task, 0, ipc_port as u64, 0, 0)
+            REGISTRY_UNREGISTER:
+                val class    = mmio_read64(msg_ptr + 32) as u8
+                val task     = mmio_read64(msg_ptr + 40)
+                val ok       = registry_unregister(class, task)
+                val ret: u64 = if ok: 0 else: 1
+                syscall(20, sender_task, 0, ret, 0, 0)
+            REGISTRY_LIST:
+                registry_list()
+                syscall(20, sender_task, 0, 0, 0, 0)
+            _:
+                serial_println("[registry] Unknown method ID: {method_id}")
+                syscall(20, sender_task, 0xFFFF, 0, 0, 0)
 
 # ============================================================================
 # Internal Helpers

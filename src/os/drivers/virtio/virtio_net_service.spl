@@ -14,7 +14,7 @@
 
 use os.drivers.virtio.virtio_net.{VirtioNetDriver}
 use os.kernel.types.device_mem_types.{DeviceGrant}
-use os.kernel.boot.mmio.{mmio_write8}
+use os.kernel.boot.mmio.{mmio_write8, mmio_read32, mmio_read64}
 use os.userlib.syscall_raw.{syscall}
 
 extern fn serial_println(msg: text)
@@ -95,17 +95,51 @@ fn net_service_loop(port_handle: u64):
 
         serial_println("[virtio-net-svc] Received request (raw={msg_result})")
 
-        # TODO: [driver][P2] Parse IPC message buffer to extract method ID and arguments.
-        # The IPC buffer framing is shared with pcimgr; once the kernel IPC
-        # layer finalizes message structure, add dispatch here:
-        #
-        #   NET_METHOD_SEND_FRAME  → handle_send_frame(msg)
-        #   NET_METHOD_RECV_FRAME  → handle_recv_frame(msg)
-        #   NET_METHOD_GET_MAC     → handle_get_mac(msg)
-        #   NET_METHOD_LINK_STATUS → handle_link_status(msg)
-        #   NET_METHOD_RECV_ASYNC  → handle_recv_async(msg)
-        #   NET_METHOD_SEND_ASYNC  → handle_send_async(msg)
-        pass_dn
+        # IpcMessage layout (@repr("C")):
+        #   offset  0: src_port: u64
+        #   offset  8: dst_port: u64
+        #   offset 16: method: u32
+        #   offset 20: flags: u32
+        #   offset 24: payload_len: u32
+        #   offset 28: cap_count: u32
+        #   offset 32: payload words (u64 each)
+        val msg_ptr = msg_result as u64
+        val sender_task = mmio_read64(msg_ptr)
+        val method_id = mmio_read32(msg_ptr + 16) as u32
+
+        match method_id:
+            NET_METHOD_SEND_FRAME:
+                val frame_virt = mmio_read64(msg_ptr + 32)
+                val frame_phys = mmio_read64(msg_ptr + 40)
+                val frame_len  = mmio_read64(msg_ptr + 48)
+                val ret = handle_send_frame(frame_virt, frame_phys, frame_len)
+                syscall(20, sender_task, 0, ret as u64, 0, 0)
+            NET_METHOD_RECV_FRAME:
+                val dst_virt = mmio_read64(msg_ptr + 32)
+                val dst_len  = mmio_read64(msg_ptr + 40)
+                val ret = handle_recv_frame(dst_virt, dst_len)
+                syscall(20, sender_task, 0, ret as u64, 0, 0)
+            NET_METHOD_GET_MAC:
+                val dst_virt = mmio_read64(msg_ptr + 32)
+                val ret = handle_get_mac(dst_virt)
+                syscall(20, sender_task, 0, ret as u64, 0, 0)
+            NET_METHOD_LINK_STATUS:
+                val ret = handle_link_status()
+                syscall(20, sender_task, 0, ret as u64, 0, 0)
+            NET_METHOD_RECV_ASYNC:
+                val dst_virt = mmio_read64(msg_ptr + 32)
+                val dst_len  = mmio_read64(msg_ptr + 40)
+                val ret = handle_recv_async(dst_virt, dst_len)
+                syscall(20, sender_task, 0, ret as u64, 0, 0)
+            NET_METHOD_SEND_ASYNC:
+                val frame_virt = mmio_read64(msg_ptr + 32)
+                val frame_phys = mmio_read64(msg_ptr + 40)
+                val frame_len  = mmio_read64(msg_ptr + 48)
+                val ret = handle_send_async(frame_virt, frame_phys, frame_len)
+                syscall(20, sender_task, 0, ret as u64, 0, 0)
+            _:
+                serial_println("[virtio-net-svc] Unknown method ID: {method_id}")
+                syscall(20, sender_task, 0xFFFF, 0, 0, 0)
 
 # ============================================================================
 # Method Handlers
