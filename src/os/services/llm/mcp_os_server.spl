@@ -9,7 +9,7 @@
 #   Process: process_list, process_spawn, process_kill
 #   Window:  window_create, window_close, window_list, window_focus
 #   Widget:  widget_set, widget_read, widget_action
-#   UIAccess: ui_access_snapshot, ui_access_surface, ui_access_find, ui_access_act, ui_access_history, ui_access_observe, ui_access_state
+#   UIAccess: ui_access_snapshot, ui_access_surface, ui_access_find, ui_access_act, ui_access_history, ui_access_observe, ui_access_state, ui_access_query
 #   Screen:  screenshot, screen_read_text
 #   System:  system_info, system_exec
 
@@ -23,7 +23,7 @@ use os.services.llm.tool_registry.{register_os_tools}
 use common.ui.session.{UISession}
 use common.ui.widget.{UITree, WidgetNode, UIEvent}
 use common.ui.builder.{build_tree}
-use common.ui.access.{UiAccessNode, UiAccessSnapshot, UiAccessSurface, ui_access_find_nodes, ui_access_find_node, ui_access_resolve_action_name, ui_access_snapshot_to_json, ui_access_surface_to_json, ui_access_events_to_json, ui_access_snapshot_to_text}
+use common.ui.access.{UiAccessNode, UiAccessSnapshot, UiAccessSurface, ui_access_find_nodes, ui_access_find_node, ui_access_resolve_action_name, ui_access_snapshot_to_json, ui_access_surface_to_json, ui_access_events_to_json, ui_access_snapshot_to_text, ui_access_query_to_json}
 
 # =========================================================================
 # Window Tracking
@@ -173,6 +173,14 @@ impl OsMcpServer:
             val state_key = _extract_arg(args, "state_key")
             val state_value = _extract_arg(args, "state_value")
             return self.tool_ui_access_state(surface_id, canonical_id, state_key, state_value)
+        elif tool_name == "ui_access_query":
+            val surface_id = _extract_arg(args, "surface_id")
+            val canonical_id = _extract_arg(args, "canonical_id")
+            val kind = _extract_arg(args, "kind")
+            val text_query = _extract_arg(args, "text")
+            val focused_only = _extract_arg(args, "focused_only")
+            val limit = _extract_arg(args, "limit")
+            return self.tool_ui_access_query(surface_id, canonical_id, kind, text_query, focused_only, limit)
         elif tool_name == "screenshot":
             return self.tool_screenshot()
         elif tool_name == "screen_read_text":
@@ -696,6 +704,19 @@ impl OsMcpServer:
         self.bridge.session.dispatch(UIEvent.Action(name: action_name))
         self.bridge.render()
         return "ok: state {state_key}={state_value} -> {action_name}"
+
+    fn tool_ui_access_query(surface_id: text, canonical_id: text, kind: text, text_query: text, focused_only: text, limit_str: text) -> text:
+        """Structured query layer over the canonical UI access snapshot."""
+        val snapshot = self.bridge.session.access_snapshot()
+        if canonical_id != "":
+            val node = ui_access_find_node(snapshot, canonical_id)
+            if node == nil:
+                return "error: canonical node {canonical_id} not found"
+        var limit = 50
+        if limit_str != "":
+            limit = limit_str.to_i32()
+        val focused = _is_truthy(focused_only)
+        return ui_access_query_to_json(snapshot, surface_id, canonical_id, kind, text_query, focused, limit)
 
     # =================================================================
     # Screen Tools

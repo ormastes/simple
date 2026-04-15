@@ -41,6 +41,9 @@ fn history_path(surface_id: text, count: text) -> text:
 fn observe_path(canonical_id: text) -> text:
     return "/api/test/ui/observe?canonical_id={canonical_id}"
 
+fn query_path(surface_id: text, kind: text, text_query: text, focused_only: text, limit: text) -> text:
+    return "/api/test/ui/query?surface_id={surface_id}&kind={kind}&text={text_query}&focused_only={focused_only}&limit={limit}"
+
 fn act_body(surface_id: text, canonical_id: text, action: text) -> text:
     return "{\"surface_id\":\"{surface_id}\",\"canonical_id\":\"{canonical_id}\",\"action\":\"{action}\"}"
 
@@ -281,6 +284,35 @@ describe "UI Access Contract":
             Ok(resp):
                 val has_click = resp.index_of("\"payload\":\"click_action_btn\"") != nil
                 expect has_click to_equal true
+            Err(e):
+                expect e to_equal ""
+
+        stop_ui_server(web_pid)
+        stop_ui_server(tui_pid)
+
+    slow_it "query route returns structured filtered results on both backends":
+        val (web_port, tui_port) = backend_ports()
+        val web_pid = start_backend("web", web_port)
+        val tui_pid = start_backend("tui_web", tui_port)
+        wait_ready(web_port)
+        wait_ready(tui_port)
+
+        val web_query = test_get("127.0.0.1", web_port, query_path("main", "button", "Click", "false", "1"))
+        val tui_query = test_get("127.0.0.1", tui_port, query_path("main", "button", "Click", "false", "1"))
+        match web_query:
+            Ok(body):
+                val has_match_count = body.index_of("\"match_count\":1") != nil
+                val has_node = body.index_of("\"canonical_id\":\"main#action_btn\"") != nil
+                expect has_match_count to_equal true
+                expect has_node to_equal true
+            Err(e):
+                expect e to_equal ""
+        match tui_query:
+            Ok(body):
+                val has_match_count = body.index_of("\"match_count\":1") != nil
+                val has_node = body.index_of("\"canonical_id\":\"main#action_btn\"") != nil
+                expect has_match_count to_equal true
+                expect has_node to_equal true
             Err(e):
                 expect e to_equal ""
 

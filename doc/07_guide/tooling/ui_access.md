@@ -58,6 +58,7 @@ Declarative shortcuts now sit on top of that base flow:
 
 6. `ui_access_observe`
 7. `ui_access_state`
+8. `ui_access_query`
 
 This matches the repo-local agent skill at [.codex/skills/simple-ui/SKILL.md](../../../.codex/skills/simple-ui/SKILL.md).
 
@@ -65,7 +66,7 @@ This matches the repo-local agent skill at [.codex/skills/simple-ui/SKILL.md](..
 
 ## MCP Tools
 
-The MCP OS server exposes seven tools:
+The MCP OS server exposes eight tools:
 
 | Tool | Purpose | Result shape |
 |------|---------|--------------|
@@ -76,6 +77,7 @@ The MCP OS server exposes seven tools:
 | `ui_access_history` | Read recent access events globally or per surface | JSON |
 | `ui_access_observe` | Declaratively observe a node, surface, or filtered query | JSON or text |
 | `ui_access_state` | Read or set declarative state for a surface or node | JSON or text |
+| `ui_access_query` | Query canonical nodes with structured JSON results | JSON |
 
 Important behavior:
 
@@ -90,6 +92,8 @@ Important behavior:
 - `ui_access_state` reads current state when no `state_key` is supplied, and
   supports constrained declarative writes for `active`, `focused`, `invoke`,
   `submit`, `select`, `toggle`, and `action`.
+- `ui_access_query` keeps filtered reads in JSON form with `query`,
+  `match_count`, `truncated`, `surfaces`, and `nodes`.
 
 ---
 
@@ -106,6 +110,7 @@ The shared test API exposes additive routes under `/api/test/ui/*`:
 | `/api/test/ui/observe?...` | `GET` | Declaratively observe a node, surface, or filtered query |
 | `/api/test/ui/state?...` | `GET` | Read declarative state for a surface or node |
 | `/api/test/ui/state` | `POST` | Set constrained declarative state for a surface or node |
+| `/api/test/ui/query?...` | `GET` | Query canonical nodes with structured JSON results |
 
 Example action body:
 
@@ -125,6 +130,8 @@ Compatibility rules:
   tree and history returns `[]`.
 - `GET /api/test/ui/observe` requires at least one selector:
   `surface_id`, `canonical_id`, `kind`, `text`, or `focused_only`.
+- `GET /api/test/ui/query` accepts the same selectors as `observe`, plus
+  optional `limit`.
 - `POST /api/test/ui/state` requires `state_key` and either `surface_id` or
   `canonical_id`.
 
@@ -226,6 +233,12 @@ ui_access_observe(canonical_id="popup#ok_btn")
 
 ```text
 ui_access_state(canonical_id="main#submit_btn", state_key="invoke", state_value="true")
+```
+
+### Query structured matches
+
+```text
+ui_access_query(surface_id="popup", kind="button", text="OK", focused_only="false", limit="10")
 ```
 
 ### Confirm the result

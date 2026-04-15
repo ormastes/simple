@@ -4,8 +4,8 @@
 **Feature:** `ui_access_protocol`
 **Date:** 2026-04-15
 **Selected Scope:** internal UI only, protocol + tools + skill, plugin packaging
-**Status:** v1 shipped, including declarative observe/state parity; remaining
-items are post-v1 extensions
+**Status:** v1 shipped, including declarative observe/state parity plus
+structured query parity; remaining items are post-v1 extensions
 
 ## Agent 1: Shared UI Access Core
 
@@ -50,6 +50,8 @@ Delivered:
 - register new tools and schemas
 - route window metadata through the shared runtime registry
 - route actions/history/find through canonical access helpers
+- expose structured JSON query results without changing legacy find/observe
+  compatibility
 - keep screen/debug text derived from the same snapshot
 
 ## Agent 4: Docs, Plugin, and Skill
@@ -88,7 +90,7 @@ Delivered:
 
 ### Lane A: Richer declarative semantics
 
-- expand beyond the current constrained observe/state wrappers
+- expand beyond the current constrained observe/state/query wrappers
 - keep canonical node IDs and snapshot shape unchanged
 
 ### Lane B: Vision fallback

@@ -339,7 +339,8 @@ pub(crate) fn compile_method_call_static<M: Module>(
             if type_qualifier.is_none() && candidates.len() > 1 {
                 let cand_names: Vec<&str> = candidates.iter().map(|(k, _)| k.as_str()).collect();
                 eprintln!(
-                    "[CODEGEN-AMBIGUOUS-METHOD] bare method '{}' has {} candidates: [{}] — refusing to pick shortest (would silently miscall). Qualify the receiver type (e.g. `var x: Type = ...`) or import only one matching method.",
+                    "[CODEGEN-AMBIGUOUS-METHOD] in '{}' bare method '{}' has {} candidates: [{}] — refusing to pick shortest (would silently miscall). Qualify the receiver type (e.g. `var x: Type = ...`) or import only one matching method.",
+                    ctx.func.name,
                     method_part,
                     candidates.len(),
                     cand_names.join(", ")
