@@ -729,9 +729,40 @@ fn print_usage():
     print "  # Check status of all targets:"
     print "  bin/simple run src/os/port/bootstrap_cross.spl -- --status"
 
+# ============================================================================
+# Wave-3 Hardening — Target validation + retry helper (S-2)
+# ============================================================================
+
+fn is_supported_target(target: text) -> bool:
+    """Return true if `target` is a recognised SimpleOS triple.
+
+    Guards callers reading target strings from untrusted env (RUSTFLAGS,
+    CARGO_TARGET_*_LINKER) and would otherwise cascade into opaque
+    cross-build errors deep in the pipeline.
+    """
+    SUPPORTED_TARGETS.contains(target)
+
+fn retry_transient(attempts: i32, label: text, action: fn() -> bool) -> bool:
+    """Run `action` up to `attempts` times, surfacing label on failure.
+
+    Used to wrap cross-link invocations that fail intermittently because
+    of SIMPLEOS_SYSROOT staleness or racy initramfs rebuilds.
+    """
+    var i = 0
+    while i < attempts:
+        if action():
+            return true
+        i = i + 1
+    print "cross-bootstrap: " + label + " failed after " + attempts.to_text() + " attempts"
+    false
+
 fn main():
     val args = cli.args()
     val config = parse_args(args)
+    if not is_supported_target(config.target):
+        print "cross-bootstrap: unsupported target: " + config.target
+        print "supported: " + SUPPORTED_TARGETS.to_text()
+        process.exit(2)
     val ok = run_cross_bootstrap(config)
     if not ok:
         process.exit(1)

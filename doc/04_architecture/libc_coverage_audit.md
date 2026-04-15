@@ -13,6 +13,15 @@
 | Total audit gaps identified | 20 |
 | Closed this cycle | 20 |
 | Remaining | 0 |
+| Wave-3 scaffolds added (fork/ipc trampolines) | 10 |
+
+**Wave-3 additions (2026-04-15)**: `src/os/libc/simpleos_fork.c`
+(`fork`, `execve`, `execv`, `execvp`, `simpleos_waitpid`) and
+`src/os/libc/simpleos_ipc.c` (`pipe`, `dup`, `dup2`, `dup3`,
+`socketpair`) route through `_simpleos_syscall{0,3}` trampolines to
+the kernel SYSCALL arc. Fallback path returns `-ENOSYS` on host
+builds. Wave-4 wires the kernel handlers to `scheduler.clone_task` /
+`exec_into` / `wait_for`.
 
 ---
 
