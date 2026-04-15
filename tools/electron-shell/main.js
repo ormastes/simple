@@ -297,6 +297,7 @@ function spawnSimpleProcess() {
         env: {
             ...process.env,
             SIMPLE_UI_BACKEND: 'electron',
+            SIMPLE_ELECTRON_PLATFORM: process.platform,
             SIMPLE_HOME: projectRoot,
             SIMPLE_TIMEOUT_SECONDS: '0',
             SIMPLE_EXAMPLE_ISOLATED_CHILD: '1'

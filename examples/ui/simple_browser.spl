@@ -62,10 +62,13 @@ extern fn rt_env_get(key: text) -> text
 # ---------------------------------------------------------------------------
 # Layout constants (the chrome is fixed-size; content fills the rest)
 # ---------------------------------------------------------------------------
+# On macOS the Electron shell uses titleBarStyle:'hiddenInset' which reserves
+# the top 28px for a draggable title bar and places the red/yellow/green
+# traffic-light buttons at (x=16,y=14). To avoid painting over them and to
+# keep the title bar drag-region functional, we shift the entire chrome strip
+# down by TOP_INSET on macOS, and push the address-bar horizontal start past
+# the traffic lights with LEFT_INSET.
 
-val CHROME_HEIGHT: f64 = 52.0
-val INPUT_X: f64 = 16.0
-val INPUT_Y: f64 = 10.0
 val INPUT_H: f64 = 32.0
 val BUTTON_W: f64 = 64.0
 val BUTTON_H: f64 = 32.0
@@ -86,6 +89,24 @@ fn _resolve_url() -> text:
     if env_val != "":
         return env_val
     return "https://example.com"
+
+fn _is_mac() -> bool:
+    val plat = rt_env_get("SIMPLE_ELECTRON_PLATFORM") ?? ""
+    plat == "darwin"
+
+fn _top_inset() -> f64:
+    if _is_mac(): 28.0 else: 0.0
+
+fn _left_inset() -> f64:
+    # Traffic lights span ~16..84 (x,y) = (16,14) each ~14px wide with gaps.
+    # 92px keeps the input well clear with some padding.
+    if _is_mac(): 92.0 else: 16.0
+
+fn _input_y() -> f64:
+    _top_inset() + 10.0
+
+fn _chrome_height() -> f64:
+    _top_inset() + 52.0
 
 # ---------------------------------------------------------------------------
 # Theme palette — glass_obsidian dark/light tokens
@@ -134,19 +155,23 @@ fn _palette(theme: text) -> Palette:
 # <input>/<button> pair.
 # ---------------------------------------------------------------------------
 
-fn _input_x(vw: f64) -> f64: INPUT_X
-fn _input_w(vw: f64) -> f64: vw - INPUT_X - BUTTON_W - BUTTON_MARGIN - 8.0
+fn _input_x(vw: f64) -> f64: _left_inset()
+fn _input_w(vw: f64) -> f64: vw - _left_inset() - BUTTON_W - BUTTON_MARGIN - 8.0
 fn _button_x(vw: f64) -> f64: vw - BUTTON_W - BUTTON_MARGIN
 
 fn _build_chrome_ops(url: text, pal: Palette, vw: f64, focused_input: bool) -> [PaintOp]:
     var ops: [PaintOp] = []
-    # strip background + 1px separator
-    ops = ops.push(PaintOp.FillRect(x: 0.0, y: 0.0, w: vw, h: CHROME_HEIGHT, color: pal.strip_bg))
-    ops = ops.push(PaintOp.FillRect(x: 0.0, y: CHROME_HEIGHT - 1.0, w: vw, h: 1.0, color: pal.strip_border))
+    val ch = _chrome_height()
+    val ty = _top_inset()
+    # On macOS keep the top 28px transparent so the macOS traffic lights and
+    # the hiddenInset draggable title-bar region remain visible. The painted
+    # strip sits from y=ty downward.
+    ops = ops.push(PaintOp.FillRect(x: 0.0, y: ty, w: vw, h: ch - ty, color: pal.strip_bg))
+    ops = ops.push(PaintOp.FillRect(x: 0.0, y: ch - 1.0, w: vw, h: 1.0, color: pal.strip_border))
 
     # input field background + border
     val ix = _input_x(vw)
-    val iy = INPUT_Y
+    val iy = _input_y()
     val iw = _input_w(vw)
     val ih = INPUT_H
     ops = ops.push(PaintOp.FillRect(x: ix, y: iy, w: iw, h: ih, color: pal.input_bg))
@@ -172,7 +197,7 @@ fn _build_chrome_ops(url: text, pal: Palette, vw: f64, focused_input: bool) -> [
 
     # Go button
     val bx = _button_x(vw)
-    val by = INPUT_Y
+    val by = iy
     val bw = BUTTON_W
     val bh = BUTTON_H
     ops = ops.push(PaintOp.FillRect(x: bx, y: by, w: bw, h: bh, color: pal.accent))
@@ -281,8 +306,8 @@ fn _wrap_lines(content: text, max_chars: i64) -> [text]:
 
 fn _build_content_ops(url: text, loaded: bool, fetched_status: i32, fetched_body: text, fetched_error: text, pal: Palette, vw: f64, vh: f64, scroll_y: f64) -> [PaintOp]:
     var ops: [PaintOp] = []
-    val content_y = CHROME_HEIGHT
-    val content_h = vh - CHROME_HEIGHT
+    val content_y = _chrome_height()
+    val content_h = vh - _chrome_height()
     ops = ops.push(PaintOp.FillRect(x: 0.0, y: content_y, w: vw, h: content_h, color: pal.content_bg))
     ops = ops.push(PaintOp.PushClip(x: 0.0, y: content_y, w: vw, h: content_h))
     val base_y = content_y + 40.0 - scroll_y
@@ -382,11 +407,13 @@ fn _merge(chrome: [PaintOp], content: [PaintOp]) -> [PaintOp]:
 fn _hit_input(x: f64, y: f64, vw: f64) -> bool:
     val ix = _input_x(vw)
     val iw = _input_w(vw)
-    x >= ix and x <= ix + iw and y >= INPUT_Y and y <= INPUT_Y + INPUT_H
+    val iy = _input_y()
+    x >= ix and x <= ix + iw and y >= iy and y <= iy + INPUT_H
 
 fn _hit_button(x: f64, y: f64, vw: f64) -> bool:
     val bx = _button_x(vw)
-    x >= bx and x <= bx + BUTTON_W and y >= INPUT_Y and y <= INPUT_Y + BUTTON_H
+    val by = _input_y()
+    x >= bx and x <= bx + BUTTON_W and y >= by and y <= by + BUTTON_H
 
 # ---------------------------------------------------------------------------
 # Main
