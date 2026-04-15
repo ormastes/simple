@@ -5,7 +5,7 @@
 # process UI events, watch file changes, and broadcast renders.
 
 use std.nogc_sync_mut.io.tcp.{TcpListener, TcpStream}
-use std.nogc_async_mut.concurrent.channel.{Channel, channel_new}
+use app.ui.web.bounded_channel.{BoundedChannel, OverflowError}
 use std.nogc_async_mut.concurrent.thread.{thread_spawn, thread_spawn2, thread_sleep, ThreadHandle}
 use common.ui.widget.{UIState, UITree, UIEvent}
 use common.ui.parse.sdn_tree.{parse_ui_to_tree}
@@ -15,18 +15,20 @@ use common.ui.access_store.{ui_access_store_runtime_open, ui_access_store_runtim
 use common.ui.event.{process_event}
 use app.ui.web.html.{generate_html_page}
 use app.ui.web.async_ws.{start_ws_reader, ws_send_render}
-use app.ui.web.ws_handler.{extract_ws_key, compute_ws_accept, send_ws_text, escape_json_string}
-use app.ui.render.widgets.{render_html_tree}
+use app.ui.web.ws_handler.{extract_ws_key, compute_ws_accept, send_ws_text}
 use app.ui.test_api.handler.{handle_test_request}
+use app.ui.web.web_runtime_adapter.{WebRuntimeAdapter}
+use app.ui.web.ui_routes.{dispatch_ui_route}
+use app.ui.web.origin_guard.{OriginGuard}
+use app.ui.web.session_token.{load_secret}
 
 extern fn rt_file_read_text(path: text) -> text
 extern fn rt_file_exists(path: text) -> bool
+extern fn rt_text_to_bytes(s: text) -> [u8]
 
 # =========================================================================
 # Internal message types sent over the render channel
 # =========================================================================
-
-val MSG_TYPE_RENDER: text = "render"
 
 # =========================================================================
 # Async Web Server
@@ -36,11 +38,14 @@ class AsyncWebServer:
     file_path: text
     port: i32
     session: UISession
-    event_channel: Channel
-    render_channel: Channel
+    event_channel: BoundedChannel<UIEvent>
+    render_channel: BoundedChannel<text>
     ws_clients: [TcpStream]
+    ws_adapters: [WebRuntimeAdapter]
     last_file_content: text
     running: bool
+    origin_guard: OriginGuard
+    token_secret: text
 
     static fn new(file_path: text, port: i32) -> Result<AsyncWebServer, text>:
         return AsyncWebServer.new_with_access_store_path(file_path, port, "")
@@ -65,11 +70,14 @@ class AsyncWebServer:
                     file_path: file_path,
                     port: port,
                     session: session,
-                    event_channel: channel_new(),
-                    render_channel: channel_new(),
+                    event_channel: BoundedChannel<UIEvent>.new(256),
+                    render_channel: BoundedChannel<text>.new(256),
                     ws_clients: [],
+                    ws_adapters: [],
                     last_file_content: content,
-                    running: true
+                    running: true,
+                    origin_guard: OriginGuard.from_env(),
+                    token_secret: load_secret(false)
                 ))
 
     fn start():
@@ -157,6 +165,16 @@ class AsyncWebServer:
                     self.handle_ws_upgrade(stream, headers)
                     return
 
+                # Route /ui/* requests via ui_routes dispatcher
+                if path.starts_with("/ui/"):
+                    val method = parts[0]
+                    var body = ""
+                    if method == "POST":
+                        body = _read_request_body(stream, headers)
+                    val handled = dispatch_ui_route(path, method, headers, body, stream, self.session, self.origin_guard, self.token_secret)
+                    if handled:
+                        return
+
                 # Route test API requests (before normal routing)
                 if path.starts_with("/api/test/"):
                     val method = parts[0]
@@ -202,14 +220,20 @@ class AsyncWebServer:
         response = "{response}\r\n"
         stream.write_all(response)
 
-        # Send initial render to this new client
-        val ws_state = self.session.current_state()
-        val html = render_html_tree(ws_state.tree.root_node(), ws_state)
-        val msg = "{\"type\": \"render\", \"html\": \"{escape_json_string(html)}\"}"
-        send_ws_text(stream, msg)
+        # Build adapter and send initial snapshot (no HTML broadcast)
+        val out_ch = BoundedChannel<text>.new(256)
+        var adapter = WebRuntimeAdapter.new("async-{self.ws_clients.len()}", self.session, "", out_ch)
+        adapter.send_snapshot()
+        # Flush initial frames to client
+        loop:
+            val item = out_ch.try_recv()
+            if item == nil:
+                break
+            send_ws_text(stream, item as text)
 
         # Register as a WebSocket client
         self.ws_clients = self.ws_clients + [stream]
+        self.ws_adapters = self.ws_adapters + [adapter]
         print "WebSocket client connected (total: {self.ws_clients.len()})"
 
         # Spawn a reader thread for this WebSocket client
@@ -218,6 +242,23 @@ class AsyncWebServer:
             start_ws_reader(ws_stream, ch)
         )
         reader.free()
+
+    fn close_client_with_overflow(client: TcpStream):
+        """Send WS close frame with code 1013 (Try Again Later) and close connection."""
+        # WS close frame: opcode 0x88, payload = close code (2 bytes) + optional reason
+        # Close code 1013 = 0x03F5
+        val close_payload = "{\"retry_after\":5}"
+        val payload_bytes = rt_text_to_bytes(close_payload)
+        val plen = payload_bytes.len() + 2
+        var frame: [u8] = [0x88u8]
+        if plen < 126:
+            frame = frame + [plen.to_u8()]
+        else:
+            frame = frame + [126u8, ((plen / 256) & 0xFF).to_u8(), (plen & 0xFF).to_u8()]
+        # Close code 1013 big-endian
+        frame = frame + [0x03u8, 0xF5u8]
+        frame = frame + payload_bytes
+        val _ = client.write_all(frame)
 
     me process_events():
         """Process all pending events from the event channel."""
@@ -257,21 +298,33 @@ class AsyncWebServer:
                     print "Warning: UI parse error: {e}"
 
     me broadcast_render():
-        """Send current render HTML to all connected WebSocket clients."""
-        val bc_state = self.session.current_state()
-        val html = render_html_tree(bc_state.tree.root_node(), bc_state)
-        val msg = "{\"type\": \"render\", \"html\": \"{escape_json_string(html)}\"}"
-
+        """Emit patches to all connected WebSocket clients via their adapters."""
         var alive_clients: [TcpStream] = []
-        for client in self.ws_clients:
-            val ok = ws_send_render(client, msg)
-            if ok:
+        var alive_adapters: [WebRuntimeAdapter] = []
+        var idx = 0
+        while idx < self.ws_clients.len():
+            val client = self.ws_clients[idx]
+            var adapter = self.ws_adapters[idx]
+            adapter.emit_patches()
+            # Flush adapter output channel to client
+            var client_ok = true
+            loop:
+                val item = adapter.out.try_recv()
+                if item == nil:
+                    break
+                val ok = ws_send_render(client, item as text)
+                if not ok:
+                    client_ok = false
+            if client_ok:
                 alive_clients = alive_clients.push(client)
+                alive_adapters = alive_adapters.push(adapter)
+            idx = idx + 1
 
         # Prune disconnected clients
         if alive_clients.len() != self.ws_clients.len():
             print "Pruned {self.ws_clients.len() - alive_clients.len()} disconnected client(s)"
             self.ws_clients = alive_clients
+            self.ws_adapters = alive_adapters
 
     fn flush_render_queue():
         """Drain render channel messages (from file watcher thread)."""
@@ -315,7 +368,7 @@ fn file_watcher_loop(file_path: Any, event_channel: Any):
         val current = rt_file_read_text(path)
         if current != last_content:
             last_content = current
-            val ch = event_channel as Channel
+            val ch = event_channel as BoundedChannel<UIEvent>
             ch.send(UIEvent.FileChanged)
 
 # =========================================================================

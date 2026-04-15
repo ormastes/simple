@@ -428,12 +428,18 @@ int64_t  rt_image_get_pixel(int64_t handle, int64_t x, int64_t y);
 int64_t  rt_font_load(const char* path);
 void     rt_font_free(int64_t handle);
 int64_t  rt_font_glyph_bitmap(int64_t font_handle, int64_t codepoint, double size);
+int64_t  rt_font_glyph_index(int64_t font_handle, int64_t codepoint);
+int64_t  rt_font_glyph_bitmap_index(int64_t font_handle, int64_t glyph_index, double size);
 int64_t  rt_font_bitmap_width(int64_t bitmap_handle);
 int64_t  rt_font_bitmap_height(int64_t bitmap_handle);
 int64_t  rt_font_bitmap_get_pixel(int64_t bitmap_handle, int64_t x, int64_t y);
 void     rt_font_bitmap_free(int64_t bitmap_handle);
 int64_t  rt_font_glyph_advance(int64_t font_handle, int64_t codepoint, double size);
+int64_t  rt_font_glyph_advance_index(int64_t font_handle, int64_t glyph_index, double size);
 int64_t  rt_font_line_height(int64_t font_handle, double size);
+int64_t  rt_font_ascent(int64_t font_handle, double size);
+int64_t  rt_font_descent(int64_t font_handle, double size);
+int64_t  rt_font_line_gap(int64_t font_handle, double size);
 
 /* ===== SDL2 Windowing Runtime ===== */
 

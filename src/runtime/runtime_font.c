@@ -101,6 +101,36 @@ int64_t rt_font_glyph_bitmap(int64_t font_handle, int64_t codepoint, double size
     return (int64_t)(uintptr_t)bmp;
 }
 
+int64_t rt_font_glyph_index(int64_t font_handle, int64_t codepoint) {
+    if (!font_handle) return 0;
+    FontData* font = (FontData*)(uintptr_t)font_handle;
+    return (int64_t)stbtt_FindGlyphIndex(&font->info, (int)codepoint);
+}
+
+int64_t rt_font_glyph_bitmap_index(int64_t font_handle, int64_t glyph_index, double size) {
+    if (!font_handle || size <= 0.0 || glyph_index < 0) return 0;
+    FontData* font = (FontData*)(uintptr_t)font_handle;
+
+    float scale = stbtt_ScaleForPixelHeight(&font->info, (float)size);
+
+    int w, h, xoff, yoff;
+    unsigned char* pixels = stbtt_GetGlyphBitmap(
+        &font->info, 0, scale, (int)glyph_index, &w, &h, &xoff, &yoff);
+    if (!pixels) return 0;
+
+    BitmapData* bmp = (BitmapData*)malloc(sizeof(BitmapData));
+    if (!bmp) {
+        stbtt_FreeBitmap(pixels, NULL);
+        return 0;
+    }
+
+    bmp->data = pixels;
+    bmp->w    = w;
+    bmp->h    = h;
+
+    return (int64_t)(uintptr_t)bmp;
+}
+
 int64_t rt_font_bitmap_width(int64_t bitmap_handle) {
     if (!bitmap_handle) return 0;
     return (int64_t)((BitmapData*)(uintptr_t)bitmap_handle)->w;
@@ -143,6 +173,18 @@ int64_t rt_font_glyph_advance(int64_t font_handle, int64_t codepoint, double siz
     return (int64_t)(advance * scale);
 }
 
+int64_t rt_font_glyph_advance_index(int64_t font_handle, int64_t glyph_index, double size) {
+    if (!font_handle || size <= 0.0 || glyph_index < 0) return 0;
+    FontData* font = (FontData*)(uintptr_t)font_handle;
+
+    float scale = stbtt_ScaleForPixelHeight(&font->info, (float)size);
+
+    int advance, lsb;
+    stbtt_GetGlyphHMetrics(&font->info, (int)glyph_index, &advance, &lsb);
+
+    return (int64_t)(advance * scale);
+}
+
 int64_t rt_font_line_height(int64_t font_handle, double size) {
     if (!font_handle || size <= 0.0) return 0;
     FontData* font = (FontData*)(uintptr_t)font_handle;
@@ -153,4 +195,37 @@ int64_t rt_font_line_height(int64_t font_handle, double size) {
     stbtt_GetFontVMetrics(&font->info, &ascent, &descent, &line_gap);
 
     return (int64_t)((ascent - descent + line_gap) * scale);
+}
+
+int64_t rt_font_ascent(int64_t font_handle, double size) {
+    if (!font_handle || size <= 0.0) return 0;
+    FontData* font = (FontData*)(uintptr_t)font_handle;
+
+    float scale = stbtt_ScaleForPixelHeight(&font->info, (float)size);
+
+    int ascent, descent, line_gap;
+    stbtt_GetFontVMetrics(&font->info, &ascent, &descent, &line_gap);
+    return (int64_t)(ascent * scale);
+}
+
+int64_t rt_font_descent(int64_t font_handle, double size) {
+    if (!font_handle || size <= 0.0) return 0;
+    FontData* font = (FontData*)(uintptr_t)font_handle;
+
+    float scale = stbtt_ScaleForPixelHeight(&font->info, (float)size);
+
+    int ascent, descent, line_gap;
+    stbtt_GetFontVMetrics(&font->info, &ascent, &descent, &line_gap);
+    return (int64_t)(descent * scale);
+}
+
+int64_t rt_font_line_gap(int64_t font_handle, double size) {
+    if (!font_handle || size <= 0.0) return 0;
+    FontData* font = (FontData*)(uintptr_t)font_handle;
+
+    float scale = stbtt_ScaleForPixelHeight(&font->info, (float)size);
+
+    int ascent, descent, line_gap;
+    stbtt_GetFontVMetrics(&font->info, &ascent, &descent, &line_gap);
+    return (int64_t)(line_gap * scale);
 }

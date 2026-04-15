@@ -1,511 +1,632 @@
-// Window Manager for Simple Language Web UI
+// Window Manager for Simple Language Web UI — v2 (server-authoritative)
 //
-// Client-side multi-window management with drag, resize, z-order,
-// minimize/maximize, and a taskbar dock. Controlled via WebSocket
-// messages from the Simple process.
+// The server is the sole authority over window state (position, z-order,
+// focus, visibility). This client:
+//   1. Authenticates via POST /ui/login → bearer token.
+//   2. Opens WebSocket at /ui/ws?token=<token>.
+//   3. Sends hello → open_session (or resume_session on reconnect).
+//   4. Forwards raw input events to the server.
+//   5. Applies server-sent snapshot / patch_batch via RetainedRenderer.
+//
+// Optimistic drag/resize: a separate .wm-ghost overlay is shown during drag.
+// It is removed when the next patch_batch arrives (or after 60 ms TTL).
+// The server's patch_batch is the ground truth; the ghost is cosmetic only.
+
+// RetainedRenderer is loaded via dynamic import so this file can remain a
+// classic script (html.spl does not set type="module"). If html.spl gains
+// type="module", replace the dynamic import with a top-level import.
+
+const PROTOCOL_VERSION = 1;
+const RECONNECT_BASE_MS = 1000;
+const RECONNECT_MAX_MS  = 16000;
+const ACK_INTERVAL_MS   = 500;
+const GHOST_TTL_MS      = 60;  // optimistic ghost lifetime
 
 class SimpleWindowManager {
-    constructor() {
-        this.windows = new Map();
-        this.nextZ = 10;
-        this.desktop = document.getElementById('wm-desktop');
-        this.taskbar = document.getElementById('wm-taskbar');
-        this.activeId = null;
-        this.dragState = null;
-        this.resizeState = null;
-        this._bindGlobalEvents();
+  constructor() {
+    // DOM roots (populated from server state, not local decisions).
+    this.desktop  = document.getElementById('wm-desktop');
+    this.taskbar  = document.getElementById('wm-taskbar');
+
+    // Renderer — set after dynamic import resolves.
+    this.renderer = null;
+
+    // WebSocket + session state.
+    this.ws            = null;
+    this.sessionId     = null;
+    this.token         = null;
+    this.reconnectDelay = RECONNECT_BASE_MS;
+    this.reconnecting  = false;
+
+    // Drag/resize ghost state.
+    this.dragState     = null;  // { windowEl, startX, startY, origLeft, origTop, ghostEl, timer }
+    this.resizeState   = null;  // { windowEl, startX, startY, origRect, ghostEl, timer, direction }
+
+    // Periodic ack timer.
+    this._ackTimer = null;
+
+    // Load renderer then begin auth.
+    this._init();
+  }
+
+  // -------------------------------------------------------------------------
+  // Initialisation
+  // -------------------------------------------------------------------------
+
+  async _init() {
+    const mod = await import('./retained_renderer.js');
+    this.renderer = new mod.RetainedRenderer(this.desktop);
+    this._bindGlobalEvents();
+    await this._authenticate();
+  }
+
+  async _authenticate() {
+    try {
+      const resp = await fetch('/ui/login', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ capability_grant: 'dev' })
+      });
+      if (!resp.ok) throw new Error('login failed: ' + resp.status);
+      const data = await resp.json();
+      this.token = data.token;
+      this._connect();
+    } catch (err) {
+      console.error('[WM] auth error:', err);
+      setTimeout(() => this._authenticate(), this.reconnectDelay);
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  // WebSocket connection
+  // -------------------------------------------------------------------------
+
+  _connect() {
+    const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+    const url   = `${proto}://${location.host}/ui/ws?token=${encodeURIComponent(this.token)}`;
+    this.ws = new WebSocket(url);
+
+    this.ws.onopen = () => {
+      this.reconnectDelay = RECONNECT_BASE_MS;
+      this.reconnecting   = false;
+      this._send({ t: 'hello', v: PROTOCOL_VERSION, s: null,
+                   payload: { protocol_version: PROTOCOL_VERSION, client_caps: 0 } });
+    };
+
+    this.ws.onmessage = (e) => {
+      let frame;
+      try { frame = JSON.parse(e.data); } catch { return; }
+      this._dispatch(frame);
+    };
+
+    this.ws.onclose = (e) => {
+      this._stopAckTimer();
+      if (e.code === 1002) {
+        // Protocol mismatch — do not retry without software upgrade.
+        console.error('[WM] protocol version mismatch — cannot reconnect');
+        return;
+      }
+      this._scheduleReconnect();
+    };
+
+    this.ws.onerror = () => {
+      this.ws.close();
+    };
+  }
+
+  _scheduleReconnect() {
+    if (this.reconnecting) return;
+    this.reconnecting = true;
+    setTimeout(() => {
+      this.reconnecting = false;
+      this._reconnect();
+    }, this.reconnectDelay);
+    this.reconnectDelay = Math.min(this.reconnectDelay * 2, RECONNECT_MAX_MS);
+  }
+
+  _reconnect() {
+    // Send resume_session after reconnect so server can diff-patch instead of
+    // sending a full snapshot whenever possible (§8 of the protocol doc).
+    const rev = this.renderer ? this.renderer.snapshotRevision : 0;
+    const seq = this.renderer ? this.renderer.lastSequence : -1;
+
+    const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+    const url   = `${proto}://${location.host}/ui/ws?token=${encodeURIComponent(this.token)}`;
+    this.ws = new WebSocket(url);
+
+    this.ws.onopen = () => {
+      this.reconnectDelay = RECONNECT_BASE_MS;
+      this.reconnecting   = false;
+      // hello first, then resume.
+      this._send({ t: 'hello', v: PROTOCOL_VERSION, s: null,
+                   payload: { protocol_version: PROTOCOL_VERSION, client_caps: 0 } });
+      // After capabilities response we send resume_session — handled in _dispatch.
+      // Store resume params so _dispatch can use them.
+      this._pendingResume = { session_id: this.sessionId, snapshot_revision: rev, last_sequence: seq };
+    };
+
+    this.ws.onmessage = (e) => {
+      let frame;
+      try { frame = JSON.parse(e.data); } catch { return; }
+      this._dispatch(frame);
+    };
+
+    this.ws.onclose = (e) => {
+      this._stopAckTimer();
+      if (e.code === 1002) {
+        console.error('[WM] protocol version mismatch — cannot reconnect');
+        return;
+      }
+      this._scheduleReconnect();
+    };
+
+    this.ws.onerror = () => { this.ws.close(); };
+  }
+
+  // -------------------------------------------------------------------------
+  // Frame dispatch (S→C)
+  // -------------------------------------------------------------------------
+
+  _dispatch(frame) {
+    // Update session id from any server frame that carries one.
+    if (frame.s && !this.sessionId) {
+      this.sessionId = frame.s;
     }
 
-    // -- Window lifecycle ---------------------------------------------------
-
-    addWindow(id, title, html, opts) {
-        opts = opts || {};
-        const x = opts.x != null ? opts.x : 100 + (this.windows.size * 40);
-        const y = opts.y != null ? opts.y : 80 + (this.windows.size * 30);
-        const w = opts.w || opts.width || 600;
-        const h = opts.h || opts.height || 400;
-
-        // Remove existing window with same id
-        if (this.windows.has(id)) {
-            this.removeWindow(id);
-        }
-
-        const el = document.createElement('div');
-        el.className = 'wm-window';
-        el.id = 'wm-win-' + id;
-        el.dataset.windowId = id;
-        el.style.left = x + 'px';
-        el.style.top = y + 'px';
-        el.style.width = w + 'px';
-        el.style.height = h + 'px';
-        el.style.zIndex = this.nextZ;
-
-        // Title bar
-        const titlebar = document.createElement('div');
-        titlebar.className = 'wm-titlebar';
-        titlebar.dataset.windowId = id;
-
-        const lights = document.createElement('div');
-        lights.className = 'wm-traffic-lights';
-        lights.innerHTML =
-            '<button class="wm-btn-close" data-action="close" data-window-id="' + id + '"></button>' +
-            '<button class="wm-btn-minimize" data-action="minimize" data-window-id="' + id + '"></button>' +
-            '<button class="wm-btn-maximize" data-action="maximize" data-window-id="' + id + '"></button>';
-
-        const titleText = document.createElement('span');
-        titleText.className = 'wm-title-text';
-        titleText.textContent = title || id;
-
-        titlebar.appendChild(lights);
-        titlebar.appendChild(titleText);
-
-        // Content area
-        const content = document.createElement('div');
-        content.className = 'wm-content';
-        content.id = 'wm-content-' + id;
-        if (html) {
-            this._setContent(content, html);
-        }
-
-        // Resize handles
-        const directions = ['n', 'ne', 'e', 'se', 's', 'sw', 'w', 'nw'];
-        directions.forEach(dir => {
-            const handle = document.createElement('div');
-            handle.className = 'wm-resize-handle wm-resize-' + dir;
-            handle.dataset.windowId = id;
-            handle.dataset.direction = dir;
-            el.appendChild(handle);
-        });
-
-        el.appendChild(titlebar);
-        el.appendChild(content);
-        this.desktop.appendChild(el);
-
-        const state = {
-            el: el,
-            contentEl: content,
-            titleEl: titleText,
-            x: x, y: y, w: w, h: h,
-            zIndex: this.nextZ,
-            minimized: false,
-            maximized: false,
-            preMaxRect: null,
-            title: title || id
-        };
-        this.nextZ++;
-        this.windows.set(id, state);
-        this.focusWindow(id);
-        this.renderTaskbar();
-    }
-
-    removeWindow(id) {
-        const state = this.windows.get(id);
-        if (!state) return;
-        state.el.remove();
-        this.windows.delete(id);
-        if (this.activeId === id) {
-            this.activeId = null;
-            // Focus topmost remaining
-            let topZ = -1;
-            this.windows.forEach((s, wid) => {
-                if (!s.minimized && s.zIndex > topZ) {
-                    topZ = s.zIndex;
-                    this.activeId = wid;
-                }
-            });
-            this._updateFocusClasses();
-        }
-        this.renderTaskbar();
-    }
-
-    updateContent(id, html) {
-        const state = this.windows.get(id);
-        if (!state) return;
-        const scrollTop = state.contentEl.scrollTop;
-        this._setContent(state.contentEl, html);
-        state.contentEl.scrollTop = scrollTop;
-    }
-
-    // -- Focus / z-order ----------------------------------------------------
-
-    focusWindow(id) {
-        const state = this.windows.get(id);
-        if (!state) return;
-        if (state.minimized) {
-            state.minimized = false;
-            state.el.classList.remove('minimized');
-        }
-        state.zIndex = this.nextZ++;
-        state.el.style.zIndex = state.zIndex;
-        this.activeId = id;
-        this._updateFocusClasses();
-        this.renderTaskbar();
-        this._sendEvent({ type: 'windowFocused', windowId: id });
-    }
-
-    // -- Minimize / Maximize ------------------------------------------------
-
-    minimizeWindow(id) {
-        const state = this.windows.get(id);
-        if (!state) return;
-        state.minimized = true;
-        state.el.classList.add('minimized');
-        if (this.activeId === id) {
-            this.activeId = null;
-            let topZ = -1;
-            this.windows.forEach((s, wid) => {
-                if (!s.minimized && s.zIndex > topZ) {
-                    topZ = s.zIndex;
-                    this.activeId = wid;
-                }
-            });
-            this._updateFocusClasses();
-        }
-        this.renderTaskbar();
-        this._sendEvent({ type: 'windowMinimize', windowId: id });
-    }
-
-    maximizeWindow(id) {
-        const state = this.windows.get(id);
-        if (!state) return;
-        if (state.maximized) {
-            // Restore
-            state.maximized = false;
-            state.el.classList.remove('maximized');
-            if (state.preMaxRect) {
-                state.x = state.preMaxRect.x;
-                state.y = state.preMaxRect.y;
-                state.w = state.preMaxRect.w;
-                state.h = state.preMaxRect.h;
-                state.el.style.left = state.x + 'px';
-                state.el.style.top = state.y + 'px';
-                state.el.style.width = state.w + 'px';
-                state.el.style.height = state.h + 'px';
-                state.preMaxRect = null;
-            }
+    switch (frame.t) {
+      case 'capabilities':
+        // Server has greeted us. Send open_session or resume_session.
+        if (this._pendingResume) {
+          this._send({
+            t: 'resume_session', v: PROTOCOL_VERSION, s: this.sessionId, seq: null,
+            payload: this._pendingResume
+          });
+          this._pendingResume = null;
         } else {
-            state.preMaxRect = { x: state.x, y: state.y, w: state.w, h: state.h };
-            state.maximized = true;
-            state.el.classList.add('maximized');
+          const vp = { x: 0, y: 0, w: window.innerWidth, h: window.innerHeight };
+          this._send({
+            t: 'open_session', v: PROTOCOL_VERSION, s: null, seq: null,
+            payload: { viewport: vp }
+          });
         }
-        this.focusWindow(id);
+        this._startAckTimer();
+        break;
+
+      case 'snapshot':
+        if (!this.renderer) break;
+        this.sessionId = frame.s ?? this.sessionId;
+        this.renderer.applySnapshot(frame.payload);
+        this._cancelGhost();
+        this._updateTaskbar(frame.payload);
+        break;
+
+      case 'patch_batch':
+        if (!this.renderer) break;
+        this.renderer.applyPatchBatch(frame.payload);
+        this._cancelGhost();
+        this._updateTaskbarFromRenderer();
+        break;
+
+      case 'focus_changed':
+        if (!this.renderer) break;
+        this.renderer.setFocus(
+          frame.payload.surface_id,
+          frame.payload.widget_id
+        );
+        this._updateTaskbarFromRenderer();
+        break;
+
+      case 'ping':
+        this._send({ t: 'pong', v: PROTOCOL_VERSION, s: this.sessionId, seq: null,
+                     payload: { nonce: frame.payload.nonce } });
+        break;
+
+      case 'error':
+        console.error('[WM] server error:', frame.payload.code, frame.payload.message);
+        this._showToast(frame.payload.message);
+        if (frame.payload.retry_after_ms > 0) {
+          this.reconnectDelay = frame.payload.retry_after_ms;
+        }
+        break;
+
+      default:
+        // Unknown message type — ignore silently.
+        break;
     }
+  }
 
-    // -- Taskbar ------------------------------------------------------------
+  // -------------------------------------------------------------------------
+  // Sending (C→S)
+  // -------------------------------------------------------------------------
 
-    renderTaskbar() {
-        if (!this.taskbar) return;
-        this.taskbar.innerHTML = '';
-        this.windows.forEach((state, id) => {
-            const item = document.createElement('div');
-            item.className = 'wm-taskbar-item';
-            if (id === this.activeId) item.classList.add('active');
-            if (state.minimized) item.classList.add('minimized');
-            item.textContent = state.title;
-            item.dataset.windowId = id;
-            item.addEventListener('click', () => {
-                if (state.minimized) {
-                    this.focusWindow(id);
-                } else if (id === this.activeId) {
-                    this.minimizeWindow(id);
-                } else {
-                    this.focusWindow(id);
-                }
-            });
-            this.taskbar.appendChild(item);
+  _send(frame) {
+    if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+      this.ws.send(JSON.stringify(frame));
+    }
+  }
+
+  _sendInputEvent(surfaceId, widgetId, event) {
+    this._send({
+      t: 'input_event', v: PROTOCOL_VERSION, s: this.sessionId, seq: null,
+      payload: { surface_id: surfaceId, widget_id: widgetId, event }
+    });
+  }
+
+  _sendWindowCmd(kind, extra) {
+    this._send({
+      t: 'window_cmd', v: PROTOCOL_VERSION, s: this.sessionId, seq: null,
+      payload: { kind, ...extra }
+    });
+  }
+
+  // -------------------------------------------------------------------------
+  // Ack timer
+  // -------------------------------------------------------------------------
+
+  _startAckTimer() {
+    if (this._ackTimer) return;
+    this._ackTimer = setInterval(() => {
+      if (!this.renderer) return;
+      const seq = this.renderer.lastSequence;
+      if (seq >= 0) {
+        this._send({
+          t: 'ack', v: PROTOCOL_VERSION, s: this.sessionId, seq: null,
+          payload: { last_applied_sequence: seq }
         });
+      }
+    }, ACK_INTERVAL_MS);
+  }
+
+  _stopAckTimer() {
+    if (this._ackTimer) { clearInterval(this._ackTimer); this._ackTimer = null; }
+  }
+
+  // -------------------------------------------------------------------------
+  // Taskbar (populated from server-authoritative renderer state)
+  // -------------------------------------------------------------------------
+
+  _updateTaskbar(snapshotPayload) {
+    if (!this.taskbar) return;
+    this.taskbar.innerHTML = '';
+    const roots = Array.isArray(snapshotPayload.roots)
+      ? snapshotPayload.roots : (snapshotPayload.root ? [snapshotPayload.root] : []);
+    for (const node of roots) {
+      const title = (node.props && node.props.title) ? node.props.title : node.surface_id;
+      const active = this.renderer && this.renderer.activeSurface === node.surface_id;
+      const item = document.createElement('div');
+      item.className = 'wm-taskbar-item' + (active ? ' active' : '');
+      item.textContent = title;
+      item.dataset.surfaceId = node.surface_id;
+      item.addEventListener('click', () => {
+        this._sendWindowCmd('focus', { window_id_hint: node.surface_id });
+      });
+      this.taskbar.appendChild(item);
     }
+  }
 
-    // -- Drag handling ------------------------------------------------------
-
-    _onTitlebarMousedown(e, windowId) {
-        if (e.target.closest('.wm-traffic-lights')) return;
-        const state = this.windows.get(windowId);
-        if (!state || state.maximized) return;
-        this.focusWindow(windowId);
-        this.dragState = {
-            windowId: windowId,
-            startX: e.clientX,
-            startY: e.clientY,
-            origX: state.x,
-            origY: state.y
-        };
-        e.preventDefault();
+  _updateTaskbarFromRenderer() {
+    if (!this.taskbar || !this.renderer) return;
+    this.taskbar.innerHTML = '';
+    for (const [surfaceId, el] of this.renderer.surfaces) {
+      const title = el.dataset.title || el.title || surfaceId;
+      const active = this.renderer.activeSurface === surfaceId;
+      const minimized = el.classList.contains('minimized');
+      const item = document.createElement('div');
+      item.className = 'wm-taskbar-item'
+        + (active    ? ' active'    : '')
+        + (minimized ? ' minimized' : '');
+      item.textContent = title;
+      item.dataset.surfaceId = surfaceId;
+      item.addEventListener('click', () => {
+        this._sendWindowCmd('focus', { window_id_hint: surfaceId });
+      });
+      this.taskbar.appendChild(item);
     }
+  }
 
-    // -- Resize handling ----------------------------------------------------
+  // -------------------------------------------------------------------------
+  // Ghost overlay (optimistic drag/resize — 60 ms TTL)
+  // -------------------------------------------------------------------------
 
-    _onResizeMousedown(e, windowId, direction) {
-        const state = this.windows.get(windowId);
-        if (!state || state.maximized) return;
-        this.focusWindow(windowId);
-        this.resizeState = {
-            windowId: windowId,
-            direction: direction,
-            startX: e.clientX,
-            startY: e.clientY,
-            origX: state.x,
-            origY: state.y,
-            origW: state.w,
-            origH: state.h
-        };
-        e.preventDefault();
+  _createGhost(winEl) {
+    const ghost = document.createElement('div');
+    ghost.className = 'wm-ghost';
+    const r = winEl.getBoundingClientRect();
+    const dr = this.desktop.getBoundingClientRect();
+    ghost.style.cssText = `
+      position:absolute;
+      left:${r.left - dr.left}px;top:${r.top - dr.top}px;
+      width:${r.width}px;height:${r.height}px;
+      border:2px dashed rgba(120,140,255,.7);
+      pointer-events:none;box-sizing:border-box;z-index:99999;
+    `;
+    this.desktop.appendChild(ghost);
+    return ghost;
+  }
+
+  _cancelGhost() {
+    if (this.dragState && this.dragState.ghostEl) {
+      this.dragState.ghostEl.remove();
+      clearTimeout(this.dragState.timer);
+      this.dragState = null;
     }
-
-    // -- Global mouse events ------------------------------------------------
-
-    _onMousemove(e) {
-        if (this.dragState) {
-            const ds = this.dragState;
-            const state = this.windows.get(ds.windowId);
-            if (!state) return;
-            const dx = e.clientX - ds.startX;
-            const dy = e.clientY - ds.startY;
-            state.x = ds.origX + dx;
-            state.y = ds.origY + dy;
-            state.el.style.left = state.x + 'px';
-            state.el.style.top = state.y + 'px';
-        }
-        if (this.resizeState) {
-            const rs = this.resizeState;
-            const state = this.windows.get(rs.windowId);
-            if (!state) return;
-            const dx = e.clientX - rs.startX;
-            const dy = e.clientY - rs.startY;
-            const minW = 200;
-            const minH = 120;
-            const dir = rs.direction;
-
-            let newX = rs.origX, newY = rs.origY;
-            let newW = rs.origW, newH = rs.origH;
-
-            if (dir.includes('e')) newW = Math.max(minW, rs.origW + dx);
-            if (dir.includes('s')) newH = Math.max(minH, rs.origH + dy);
-            if (dir.includes('w')) {
-                newW = Math.max(minW, rs.origW - dx);
-                if (newW > minW) newX = rs.origX + dx;
-            }
-            if (dir.includes('n') && dir !== 'ne' && dir !== 'nw') {
-                newH = Math.max(minH, rs.origH - dy);
-                if (newH > minH) newY = rs.origY + dy;
-            }
-            if (dir === 'n') {
-                newH = Math.max(minH, rs.origH - dy);
-                if (newH > minH) newY = rs.origY + dy;
-            }
-            if (dir === 'nw') {
-                newW = Math.max(minW, rs.origW - dx);
-                newH = Math.max(minH, rs.origH - dy);
-                if (newW > minW) newX = rs.origX + dx;
-                if (newH > minH) newY = rs.origY + dy;
-            }
-            if (dir === 'ne') {
-                newW = Math.max(minW, rs.origW + dx);
-                newH = Math.max(minH, rs.origH - dy);
-                if (newH > minH) newY = rs.origY + dy;
-            }
-
-            state.x = newX;
-            state.y = newY;
-            state.w = newW;
-            state.h = newH;
-            state.el.style.left = newX + 'px';
-            state.el.style.top = newY + 'px';
-            state.el.style.width = newW + 'px';
-            state.el.style.height = newH + 'px';
-        }
+    if (this.resizeState && this.resizeState.ghostEl) {
+      this.resizeState.ghostEl.remove();
+      clearTimeout(this.resizeState.timer);
+      this.resizeState = null;
     }
+  }
 
-    _onMouseup(e) {
-        if (this.dragState) {
-            const ds = this.dragState;
-            const state = this.windows.get(ds.windowId);
-            if (state) {
-                this._sendEvent({
-                    type: 'windowMoved',
-                    windowId: ds.windowId,
-                    x: state.x,
-                    y: state.y
-                });
-            }
-            this.dragState = null;
-        }
-        if (this.resizeState) {
-            const rs = this.resizeState;
-            const state = this.windows.get(rs.windowId);
-            if (state) {
-                this._sendEvent({
-                    type: 'windowResized',
-                    windowId: rs.windowId,
-                    width: state.w,
-                    height: state.h
-                });
-            }
-            this.resizeState = null;
-        }
+  _scheduleGhostExpiry(state) {
+    clearTimeout(state.timer);
+    state.timer = setTimeout(() => {
+      if (state.ghostEl) state.ghostEl.remove();
+      if (this.dragState === state)   this.dragState = null;
+      if (this.resizeState === state) this.resizeState = null;
+    }, GHOST_TTL_MS);
+  }
+
+  // -------------------------------------------------------------------------
+  // Input / drag
+  // -------------------------------------------------------------------------
+
+  _onTitlebarMousedown(e, winEl) {
+    if (e.target.closest('.wm-traffic-lights')) return;
+    const surfaceId = winEl.dataset.surfaceId ?? '';
+    // Bring to front request (server decides z-order).
+    this._sendWindowCmd('focus', { window_id_hint: surfaceId });
+
+    const ghost = this._createGhost(winEl);
+    this.dragState = {
+      surfaceId, ghostEl: ghost, timer: null,
+      startX: e.clientX, startY: e.clientY,
+      origLeft: parseFloat(winEl.style.left || 0),
+      origTop:  parseFloat(winEl.style.top  || 0),
+      winEl
+    };
+    e.preventDefault();
+  }
+
+  _onResizeMousedown(e, winEl, direction) {
+    const surfaceId = winEl.dataset.surfaceId ?? '';
+    this._sendWindowCmd('focus', { window_id_hint: surfaceId });
+
+    const ghost = this._createGhost(winEl);
+    const r = winEl.getBoundingClientRect();
+    this.resizeState = {
+      surfaceId, ghostEl: ghost, timer: null, direction,
+      startX: e.clientX, startY: e.clientY,
+      origW: r.width, origH: r.height,
+      winEl
+    };
+    e.preventDefault();
+  }
+
+  _onMousemove(e) {
+    if (this.dragState) {
+      const ds = this.dragState;
+      const dx = e.clientX - ds.startX;
+      const dy = e.clientY - ds.startY;
+      // Move the ghost only — do NOT mutate the actual window element.
+      // Optimistic: ghost is a 60 ms cosmetic preview.
+      const dr = this.desktop.getBoundingClientRect();
+      ds.ghostEl.style.left = (ds.origLeft + dx) + 'px';
+      ds.ghostEl.style.top  = (ds.origTop  + dy) + 'px';
+      this._scheduleGhostExpiry(ds);
     }
-
-    // -- WebSocket message dispatch -----------------------------------------
-
-    handleMessage(data) {
-        switch (data.type) {
-            case 'openWindow':
-                this.addWindow(
-                    data.windowId || 'win_' + Date.now(),
-                    data.title || 'Window',
-                    data.html || '',
-                    { x: data.x, y: data.y, w: data.width, h: data.height }
-                );
-                break;
-            case 'closeWindow':
-                this.removeWindow(data.windowId);
-                break;
-            case 'renderWindow':
-                this.updateContent(data.windowId, data.html || '');
-                break;
-            case 'moveWindow':
-                this._moveFromServer(data.windowId, data.x, data.y);
-                break;
-            case 'resizeWindow':
-                this._resizeFromServer(data.windowId, data.width, data.height);
-                break;
-            case 'focusWindow':
-                this.focusWindow(data.windowId);
-                break;
-            case 'minimizeWindow':
-                this.minimizeWindow(data.windowId);
-                break;
-            case 'render':
-                // Legacy single-window mode: create or update main window
-                if (!this.windows.has('main')) {
-                    this.addWindow('main', document.title || 'Simple UI', data.html, {
-                        x: 100, y: 60, w: 900, h: 600
-                    });
-                } else {
-                    this.updateContent('main', data.html);
-                }
-                break;
-        }
+    if (this.resizeState) {
+      const rs = this.resizeState;
+      const dx = e.clientX - rs.startX;
+      const dy = e.clientY - rs.startY;
+      const dir = rs.direction;
+      const minW = 200, minH = 120;
+      let w = rs.origW, h = rs.origH;
+      if (dir.includes('e')) w = Math.max(minW, rs.origW + dx);
+      if (dir.includes('s')) h = Math.max(minH, rs.origH + dy);
+      if (dir.includes('w')) w = Math.max(minW, rs.origW - dx);
+      if (dir === 'n' || dir.includes('n')) h = Math.max(minH, rs.origH - dy);
+      rs.ghostEl.style.width  = w + 'px';
+      rs.ghostEl.style.height = h + 'px';
+      this._scheduleGhostExpiry(rs);
     }
+  }
 
-    // -- Internal helpers ---------------------------------------------------
-
-    _setContent(el, html) {
-        // Extract styles from the HTML and inject into content
-        const parser = new DOMParser();
-        const doc = parser.parseFromString(html, 'text/html');
-        const styles = doc.querySelectorAll('style');
-        const body = doc.body;
-
-        // Remove existing injected styles in content
-        el.querySelectorAll('style.wm-injected').forEach(s => s.remove());
-
-        // Inject styles
-        styles.forEach(style => {
-            const s = document.createElement('style');
-            s.className = 'wm-injected';
-            s.textContent = style.textContent;
-            el.appendChild(s);
-        });
-
-        // Set body content
-        if (body) {
-            // Check for #app wrapper
-            const appDiv = body.querySelector('#app');
-            el.innerHTML = '';
-            styles.forEach(style => {
-                const s = document.createElement('style');
-                s.className = 'wm-injected';
-                s.textContent = style.textContent;
-                el.appendChild(s);
-            });
-            if (appDiv) {
-                el.insertAdjacentHTML('beforeend', appDiv.innerHTML);
-            } else {
-                el.insertAdjacentHTML('beforeend', body.innerHTML);
-            }
-        } else {
-            el.innerHTML = html;
-        }
+  _onMouseup(e) {
+    if (this.dragState) {
+      const ds = this.dragState;
+      const dx = e.clientX - ds.startX;
+      const dy = e.clientY - ds.startY;
+      const newX = ds.origLeft + dx;
+      const newY = ds.origTop  + dy;
+      // Send authoritative move request; server will reconcile and patch back.
+      // window_id_hint is a HINT only; server resolves via UiWindowSurfaceRegistry.
+      this._sendWindowCmd('move', {
+        window_id_hint: ds.surfaceId,
+        x: Math.round(newX),
+        y: Math.round(newY)
+      });
+      if (ds.ghostEl) ds.ghostEl.remove();
+      clearTimeout(ds.timer);
+      this.dragState = null;
     }
-
-    _updateFocusClasses() {
-        this.windows.forEach((state, id) => {
-            if (id === this.activeId) {
-                state.el.classList.add('focused');
-            } else {
-                state.el.classList.remove('focused');
-            }
-        });
+    if (this.resizeState) {
+      const rs = this.resizeState;
+      const dx = e.clientX - rs.startX;
+      const dy = e.clientY - rs.startY;
+      const dir = rs.direction;
+      const minW = 200, minH = 120;
+      let w = rs.origW, h = rs.origH;
+      if (dir.includes('e')) w = Math.max(minW, rs.origW + dx);
+      if (dir.includes('s')) h = Math.max(minH, rs.origH + dy);
+      if (dir.includes('w')) w = Math.max(minW, rs.origW - dx);
+      if (dir === 'n' || dir.includes('n')) h = Math.max(minH, rs.origH - dy);
+      this._sendWindowCmd('resize', {
+        window_id_hint: rs.surfaceId,
+        w: Math.round(w),
+        h: Math.round(h)
+      });
+      if (rs.ghostEl) rs.ghostEl.remove();
+      clearTimeout(rs.timer);
+      this.resizeState = null;
     }
+  }
 
-    _moveFromServer(id, x, y) {
-        const state = this.windows.get(id);
-        if (!state) return;
-        state.x = x;
-        state.y = y;
-        state.el.style.left = x + 'px';
-        state.el.style.top = y + 'px';
-    }
+  // -------------------------------------------------------------------------
+  // Global event binding
+  // -------------------------------------------------------------------------
 
-    _resizeFromServer(id, w, h) {
-        const state = this.windows.get(id);
-        if (!state) return;
-        state.w = w;
-        state.h = h;
-        state.el.style.width = w + 'px';
-        state.el.style.height = h + 'px';
-    }
+  _bindGlobalEvents() {
+    document.addEventListener('mousemove', (e) => this._onMousemove(e));
+    document.addEventListener('mouseup',   (e) => this._onMouseup(e));
 
-    _sendEvent(msg) {
-        if (typeof sendEvent === 'function') {
-            sendEvent(msg);
-        } else if (typeof ws !== 'undefined' && ws && ws.readyState === 1) {
-            ws.send(JSON.stringify(msg));
-        }
-    }
+    document.addEventListener('mousedown', (e) => {
+      const titlebar = e.target.closest('.wm-titlebar');
+      if (titlebar) {
+        const winEl = titlebar.closest('.wm-window');
+        if (winEl) { this._onTitlebarMousedown(e, winEl); return; }
+      }
+      const handle = e.target.closest('.wm-resize-handle');
+      if (handle) {
+        const winEl = handle.closest('.wm-window');
+        if (winEl) { this._onResizeMousedown(e, winEl, handle.dataset.direction); return; }
+      }
+      // Click anywhere on a window — request focus.
+      const win = e.target.closest('.wm-window');
+      if (win) {
+        const surfaceId = win.dataset.surfaceId ?? win.dataset.canonicalId ?? '';
+        if (surfaceId) this._sendWindowCmd('focus', { window_id_hint: surfaceId });
+      }
+    });
 
-    _bindGlobalEvents() {
-        document.addEventListener('mousemove', (e) => this._onMousemove(e));
-        document.addEventListener('mouseup', (e) => this._onMouseup(e));
+    // Traffic-light buttons.
+    document.addEventListener('click', (e) => {
+      const btn = e.target.closest('.wm-traffic-lights button');
+      if (!btn) return;
+      const win = btn.closest('.wm-window');
+      if (!win) return;
+      const surfaceId = win.dataset.surfaceId ?? '';
+      const action = btn.dataset.action;
+      if      (action === 'close')    this._sendWindowCmd('close',    { window_id_hint: surfaceId });
+      else if (action === 'minimize') this._sendWindowCmd('minimize', { window_id_hint: surfaceId });
+      else if (action === 'maximize') this._sendWindowCmd('maximize', { window_id_hint: surfaceId });
+    });
 
-        // Delegate titlebar drag
-        document.addEventListener('mousedown', (e) => {
-            const titlebar = e.target.closest('.wm-titlebar');
-            if (titlebar) {
-                this._onTitlebarMousedown(e, titlebar.dataset.windowId);
-                return;
-            }
-            // Delegate resize handle
-            const handle = e.target.closest('.wm-resize-handle');
-            if (handle) {
-                this._onResizeMousedown(e, handle.dataset.windowId, handle.dataset.direction);
-                return;
-            }
-            // Click on window brings to front
-            const win = e.target.closest('.wm-window');
-            if (win && win.dataset.windowId !== this.activeId) {
-                this.focusWindow(win.dataset.windowId);
-            }
-        });
+    // Forward pointer events inside windows as input_event frames.
+    document.addEventListener('pointerdown', (e) => {
+      const widget = e.target.closest('[data-canonical-id]');
+      if (!widget) return;
+      const cid = widget.dataset.canonicalId ?? '';
+      const hash = cid.indexOf('#');
+      const surfId = hash >= 0 ? cid.slice(0, hash) : cid;
+      const widId  = hash >= 0 ? cid.slice(hash + 1) : '';
+      const r = this.desktop ? this.desktop.getBoundingClientRect() : { left: 0, top: 0 };
+      this._sendInputEvent(surfId, widId, {
+        kind: 'pointer_down',
+        x: Math.round(e.clientX - r.left),
+        y: Math.round(e.clientY - r.top),
+        button: e.button
+      });
+    });
 
-        // Delegate traffic light button clicks
-        document.addEventListener('click', (e) => {
-            const btn = e.target.closest('.wm-traffic-lights button');
-            if (!btn) return;
-            const windowId = btn.dataset.windowId;
-            const action = btn.dataset.action;
-            if (action === 'close') {
-                this.removeWindow(windowId);
-                this._sendEvent({ type: 'windowClose', windowId: windowId });
-            } else if (action === 'minimize') {
-                this.minimizeWindow(windowId);
-            } else if (action === 'maximize') {
-                this.maximizeWindow(windowId);
-            }
-        });
-    }
+    document.addEventListener('pointerup', (e) => {
+      const widget = e.target.closest('[data-canonical-id]');
+      if (!widget) return;
+      const cid = widget.dataset.canonicalId ?? '';
+      const hash = cid.indexOf('#');
+      const surfId = hash >= 0 ? cid.slice(0, hash) : cid;
+      const widId  = hash >= 0 ? cid.slice(hash + 1) : '';
+      const r = this.desktop ? this.desktop.getBoundingClientRect() : { left: 0, top: 0 };
+      this._sendInputEvent(surfId, widId, {
+        kind: 'pointer_up',
+        x: Math.round(e.clientX - r.left),
+        y: Math.round(e.clientY - r.top),
+        button: e.button
+      });
+    });
+
+    document.addEventListener('pointermove', (e) => {
+      // Only forward when inside a known surface.
+      const widget = e.target.closest('[data-surface-id]');
+      if (!widget) return;
+      const surfId = widget.dataset.surfaceId ?? '';
+      if (!surfId) return;
+      const r = this.desktop ? this.desktop.getBoundingClientRect() : { left: 0, top: 0 };
+      this._sendInputEvent(surfId, '', {
+        kind: 'pointer_move',
+        x: Math.round(e.clientX - r.left),
+        y: Math.round(e.clientY - r.top)
+      });
+    });
+
+    document.addEventListener('wheel', (e) => {
+      const widget = e.target.closest('[data-canonical-id]');
+      if (!widget) return;
+      const cid = widget.dataset.canonicalId ?? '';
+      const hash = cid.indexOf('#');
+      const surfId = hash >= 0 ? cid.slice(0, hash) : cid;
+      const widId  = hash >= 0 ? cid.slice(hash + 1) : '';
+      this._sendInputEvent(surfId, widId, {
+        kind: 'wheel',
+        delta_x: Math.round(e.deltaX),
+        delta_y: Math.round(e.deltaY)
+      });
+    });
+
+    document.addEventListener('keydown', (e) => {
+      if (!this.renderer || !this.renderer.activeSurface) return;
+      const surfId = this.renderer.activeSurface;
+      this._sendInputEvent(surfId, '', {
+        kind: 'key_down',
+        key_code: e.keyCode,
+        modifiers: _modifiers(e),
+        repeat: e.repeat
+      });
+    });
+
+    document.addEventListener('keyup', (e) => {
+      if (!this.renderer || !this.renderer.activeSurface) return;
+      const surfId = this.renderer.activeSurface;
+      this._sendInputEvent(surfId, '', {
+        kind: 'key_up',
+        key_code: e.keyCode,
+        modifiers: _modifiers(e)
+      });
+    });
+
+    document.addEventListener('input', (e) => {
+      const widget = e.target.closest('[data-canonical-id]');
+      if (!widget) return;
+      const cid = widget.dataset.canonicalId ?? '';
+      const hash = cid.indexOf('#');
+      const surfId = hash >= 0 ? cid.slice(0, hash) : cid;
+      const widId  = hash >= 0 ? cid.slice(hash + 1) : '';
+      this._sendInputEvent(surfId, widId, {
+        kind: 'text_input',
+        text: e.target.value ?? e.data ?? ''
+      });
+    });
+  }
+
+  // -------------------------------------------------------------------------
+  // Toast (error display)
+  // -------------------------------------------------------------------------
+
+  _showToast(msg) {
+    const t = document.createElement('div');
+    t.className = 'wm-toast';
+    t.textContent = msg;
+    document.body.appendChild(t);
+    setTimeout(() => t.remove(), 4000);
+  }
 }
 
-// Global instance — initialized by inline boot script
+// -------------------------------------------------------------------------
+// Helpers
+// -------------------------------------------------------------------------
+
+function _modifiers(e) {
+  return (e.shiftKey ? 1 : 0) | (e.ctrlKey ? 2 : 0) | (e.altKey ? 4 : 0) | (e.metaKey ? 8 : 0);
+}
+
+// Global instance — initialized by inline boot script.
 var simpleWM = null;

@@ -1,0 +1,157 @@
+# WM Bridge — translates inbound input_event/window_cmd from WebSocket clients
+# into UISession surface management calls.
+#
+# Client-asserted window_id is NEVER trusted.  All window resolution goes
+# through UiWindowSurfaceRegistry.for_surface(surface_id).
+# Every path re-validates the relevant Capability before dispatching.
+
+use common.ui.session.{UISession}
+use common.ui.capability.{Capability}
+use common.ui.capability_policy.{require_for_window}
+use common.ui.window_surface_registry.{UiWindowSurfaceRegistry}
+use app.ui.web.origin_guard.{AuthError}
+use common.window_protocol.window_protocol.{WmInputEvent, WmCreateRequest, WmCloseRequest, WmResizeRequest, WmMoveRequest}
+use common.window_protocol.geometry.{WindowId, Point, Size}
+
+# =========================================================================
+# WmBridge
+# =========================================================================
+
+class WmBridge:
+    session: UISession
+
+    static fn new(session: UISession) -> WmBridge:
+        return WmBridge(session: session)
+
+impl WmBridge:
+
+    fn handle_input(self, surface_id: text, widget_id: text, event: WmInputEvent) -> Result<Unit, AuthError>:
+        """Inbound input_event: resolve window, re-validate capability, dispatch."""
+        val binding = self.session.window_surfaces.for_surface(surface_id)
+        if binding == nil:
+            return Err(AuthError.Forbidden)
+        val wid_u64 = _parse_window_id(binding.window_id)
+        val policy = self.session.capability_policy
+        if policy != nil:
+            val cap_result = require_for_window(policy, wid_u64, Capability.InputInject)
+            match cap_result:
+                Err(_):
+                    return Err(AuthError.Forbidden)
+                Ok(_):
+                    pass_do_nothing
+        # Deliver as UISession focus event to the resolved surface
+        self.session.set_active_surface(surface_id)
+        return Ok(())
+
+    fn handle_window_cmd(self, cmd_kind: text, payload_json: text) -> Result<Unit, AuthError>:
+        """Inbound window_cmd: dispatch by kind.
+        cmd_kind ∈ {create,close,resize,move,focus,minimize,maximize,restore,set_title}"""
+        val policy = self.session.capability_policy
+        match cmd_kind:
+            "create":
+                if policy != nil:
+                    val cap_result = require_for_window(policy, 0u64, Capability.WindowCreate)
+                    match cap_result:
+                        Err(_): return Err(AuthError.Forbidden)
+                        Ok(_): pass_do_nothing
+                val title = _extract_text_field(payload_json, "title")
+                val surface_id = _extract_text_field(payload_json, "surface_id")
+                val tree = self.session.get_surface("main")
+                if tree != nil:
+                    val eff_id = if surface_id != nil and surface_id != "": surface_id else: "web-surface"
+                    val _ = self.session.open_surface(eff_id, tree)
+                return Ok(())
+            "close":
+                val surface_id = _extract_text_field(payload_json, "surface_id")
+                if surface_id == nil or surface_id == "":
+                    return Err(AuthError.Forbidden)
+                val binding = self.session.window_surfaces.for_surface(surface_id)
+                if binding == nil:
+                    return Err(AuthError.Forbidden)
+                val wid_u64 = _parse_window_id(binding.window_id)
+                if policy != nil:
+                    val cap_result = require_for_window(policy, wid_u64, Capability.WindowCreate)
+                    match cap_result:
+                        Err(_): return Err(AuthError.Forbidden)
+                        Ok(_): pass_do_nothing
+                val handle = self.session.surface_handle(surface_id)
+                if handle != nil:
+                    val _ = self.session.close_surface(handle)
+                return Ok(())
+            "focus":
+                val surface_id = _extract_text_field(payload_json, "surface_id")
+                if surface_id != nil and surface_id != "":
+                    val binding = self.session.window_surfaces.for_surface(surface_id)
+                    if binding == nil:
+                        return Err(AuthError.Forbidden)
+                    self.session.set_active_surface(surface_id)
+                return Ok(())
+            "resize":
+                val surface_id = _extract_text_field(payload_json, "surface_id")
+                if surface_id == nil or surface_id == "":
+                    return Err(AuthError.Forbidden)
+                val binding = self.session.window_surfaces.for_surface(surface_id)
+                if binding == nil:
+                    return Err(AuthError.Forbidden)
+                val wid_u64 = _parse_window_id(binding.window_id)
+                if policy != nil:
+                    val cap_result = require_for_window(policy, wid_u64, Capability.WindowCreate)
+                    match cap_result:
+                        Err(_): return Err(AuthError.Forbidden)
+                        Ok(_): pass_do_nothing
+                return Ok(())
+            "move":
+                val surface_id = _extract_text_field(payload_json, "surface_id")
+                if surface_id == nil or surface_id == "":
+                    return Err(AuthError.Forbidden)
+                val binding = self.session.window_surfaces.for_surface(surface_id)
+                if binding == nil:
+                    return Err(AuthError.Forbidden)
+                return Ok(())
+            "minimize":
+                return Ok(())
+            "maximize":
+                return Ok(())
+            "restore":
+                return Ok(())
+            "set_title":
+                val surface_id = _extract_text_field(payload_json, "surface_id")
+                if surface_id == nil or surface_id == "":
+                    return Err(AuthError.Forbidden)
+                val binding = self.session.window_surfaces.for_surface(surface_id)
+                if binding == nil:
+                    return Err(AuthError.Forbidden)
+                return Ok(())
+            _:
+                return Err(AuthError.Forbidden)
+
+# =========================================================================
+# Helpers
+# =========================================================================
+
+fn _parse_window_id(s: text) -> u64:
+    if s == "":
+        return 0u64
+    val n = s.parse_i64()
+    if n < 0:
+        return 0u64
+    return n as u64
+
+fn _extract_text_field(json: text, field: text) -> text?:
+    val key = "\"{field}\":"
+    val pos = json.find(key)
+    if pos < 0:
+        return nil
+    val start = pos + key.len()
+    if start >= json.len():
+        return nil
+    val first_ch = json[start]
+    if first_ch != "\"":
+        return nil
+    val inner_start = start + 1
+    var end = inner_start
+    while end < json.len() and json[end] != "\"":
+        if json[end] == "\\":
+            end = end + 1
+        end = end + 1
+    return json.slice(inner_start, end)

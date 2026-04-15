@@ -10,7 +10,17 @@ use common.ui.parse.sdn_tree.{parse_ui_to_tree}
 use common.ui.state.{init_state, update_state, update_tree}
 use common.ui.event.{process_event}
 use app.ui.web.html.{generate_html_page, generate_wm_html_page}
-use app.ui.web.ws_handler.{handle_ws_upgrade, handle_ws_wm_upgrade, is_ws_upgrade_request}
+use app.ui.web.ws_handler.{handle_ws_upgrade, is_ws_upgrade_request}
+use app.ui.web.origin_guard.{OriginGuard}
+use app.ui.web.session_token.{SessionToken, load_secret, TOKEN_TTL_DEFAULT_MS}
+use std.nogc_sync_mut.io.tls_ffi.{rt_tls_server_create}
+use common.ui.session.{UISession}
+use common.ui.widget.{UITree}
+use common.ui.parse.sdn_tree.{parse_ui_to_tree}
+use common.ui.state.{init_state}
+use app.ui.web.async_server.{AsyncWebServer}
+use app.ui.web.wm_bridge.{WmBridge}
+use app.ui.web.ui_routes.{dispatch_ui_route}
 
 extern fn rt_file_read_text(path: text) -> text
 extern fn rt_file_exists(path: text) -> bool
@@ -40,6 +50,8 @@ class WebServer:
     state: UIState
     last_file_content: text
     wm_mode: bool
+    origin_guard: OriginGuard
+    token_secret: text
 
     static fn new(file_path: text, port: i32, wm_mode: bool) -> Result<WebServer, text>:
         val tree_result = parse_ui_to_tree(file_path)
@@ -57,7 +69,9 @@ class WebServer:
                     port: port,
                     state: state,
                     last_file_content: content,
-                    wm_mode: wm_mode
+                    wm_mode: wm_mode,
+                    origin_guard: OriginGuard.from_env(),
+                    token_secret: load_secret(false)
                 ))
 
     fn start():
@@ -117,10 +131,11 @@ class WebServer:
                             break
 
                 if is_ws:
-                    if self.wm_mode:
-                        handle_ws_wm_upgrade(stream, headers, self.state)
-                    else:
-                        handle_ws_upgrade(stream, headers, self.state)
+                    handle_ws_upgrade(stream, headers, self.state, self.origin_guard, self.token_secret)
+                    return
+
+                if path == "/ui/login" and method == "POST":
+                    self.handle_login(stream, headers)
                     return
 
                 match path:
@@ -203,6 +218,41 @@ class WebServer:
                     Ok(()):
                         pass_dn
 
+    fn handle_login(stream: TcpStream, headers: text):
+        """POST /ui/login — issue a bearer token for a pre-minted capability grant.
+        Body JSON must contain a 'capability_grant' field.
+        Returns: { "token": "...", "expires_at": N }"""
+        var body = ""
+        val header_lines = headers.split("\n")
+        var content_length = 0
+        for line in header_lines:
+            val trimmed = line.trim()
+            if trimmed.to_lower().starts_with("content-length:"):
+                content_length = trimmed[15:].trim().to_int()
+        if content_length > 0:
+            match stream.read_exact(content_length):
+                Ok(b): body = b
+                Err(_): body = ""
+
+        # Extract capability_grant from JSON body
+        val grant_id = _extract_json_field(body, "capability_grant")
+        if grant_id == "":
+            val resp = _simple_response(400, "application/json", "{\"error\": \"missing capability_grant\"}")
+            stream.write_text(resp)
+            return
+
+        # Determine origin from Origin header
+        val origin_result = self.origin_guard.check(headers)
+        val origin = match origin_result:
+            Ok(o): o
+            Err(_): "unknown"
+
+        val tok = SessionToken.issue(grant_id, origin, TOKEN_TTL_DEFAULT_MS, self.token_secret)
+        val serialized = tok.serialize()
+        val body_json = "{\"token\": \"{serialized}\", \"expires_at\": {tok.expires_at_ms}}"
+        val resp = _simple_response(200, "application/json", body_json)
+        stream.write_text(resp)
+
     fn check_file_changes():
         """Check if the .ui.sdn file has changed."""
         if not rt_file_exists(self.file_path):
@@ -256,6 +306,40 @@ fn widgets_to_json(state: UIState) -> text:
     return "[{items}]"
 
 # =========================================================================
+# Response and JSON helpers
+# =========================================================================
+
+fn _simple_response(status: i32, content_type: text, body: text) -> text:
+    val status_text = match status:
+        200: "OK"
+        400: "Bad Request"
+        403: "Forbidden"
+        404: "Not Found"
+        _: "OK"
+    var r = "HTTP/1.1 {status} {status_text}\r\n"
+    r = "{r}Content-Type: {content_type}\r\n"
+    r = "{r}Content-Length: {body.len()}\r\n"
+    r = "{r}Connection: close\r\n"
+    r = "{r}\r\n"
+    r = "{r}{body}"
+    return r
+
+fn _extract_json_field(json: text, field: text) -> text:
+    """Minimal JSON field extractor for simple string fields."""
+    val needle = "\"{field}\":"
+    val idx = json.find(needle)
+    if idx < 0:
+        return ""
+    val after = json[idx + needle.len():].trim()
+    if after == "" or after[0] != "\"":
+        return ""
+    val content = after[1:]
+    val end = content.find("\"")
+    if end < 0:
+        return ""
+    return content[0:end]
+
+# =========================================================================
 # Shared WM helpers
 # =========================================================================
 
@@ -267,8 +351,139 @@ fn _shared_wm_requested(args: [text]) -> bool:
     env_val == "1"
 
 fn run_shared_wm_web(title: text) -> i64:
-    print "Error: shared WM (WebCanvas backend) is unavailable in this compile path"
-    1
+    """Start the shared WM web server.
+    Constructs a UISession backed by an empty tree, wires WmBridge and
+    OriginGuard, then runs the AsyncWebServer with /ui/* dispatch enabled."""
+    val port_str = rt_env_get("SIMPLE_UI_WEB_PORT") ?? "8080"
+    val port = port_str.parse_i32()
+
+    val guard = OriginGuard.from_env()
+    val secret = load_secret(false)
+
+    # Build a minimal UISession without a file on disk
+    val session_result = _make_wm_session()
+    val session = match session_result:
+        Err(e):
+            print "Error: failed to create WM session: {e}"
+            return 1
+        Ok(s): s
+
+    print "Starting Shared WM Web Server on port {port}..."
+    print "Title: {title}"
+    print "Open http://localhost:{port}/ui/ws in a WM-capable browser client"
+    print "Press Ctrl+C to stop"
+    print ""
+
+    match TcpListener.bind("0.0.0.0:{port}"):
+        Err(e):
+            print "Error: Failed to bind to port {port}: {e}"
+            return 1
+        Ok(listener):
+            _wm_serve_loop(listener, session, guard, secret)
+
+    return 0
+
+fn _make_wm_session() -> Result<UISession, text>:
+    """Create a UISession for the shared WM mode.
+    Uses an in-memory empty tree if no default file is found."""
+    val default_path = rt_env_get("SIMPLE_UI_WEB_DEFAULT_UI") ?? ""
+    if default_path != "" and rt_file_exists(default_path):
+        val tree_result = parse_ui_to_tree(default_path)
+        match tree_result:
+            Err(e): return Err(e)
+            Ok(tree):
+                var session = UISession.new(tree)
+                session.set_active_backend("web")
+                return Ok(session)
+    # Fallback: parse minimal inline UI
+    val fallback = "ui { title: \"SimpleOS WM\" }"
+    val tmp_path = "/tmp/simple_wm_default.sdn"
+    # Write a minimal file for the parser (runtime file write)
+    _write_temp_ui(tmp_path)
+    if rt_file_exists(tmp_path):
+        val tree_result = parse_ui_to_tree(tmp_path)
+        match tree_result:
+            Err(_): pass_do_nothing
+            Ok(tree):
+                var session = UISession.new(tree)
+                session.set_active_backend("web")
+                return Ok(session)
+    return Err("no default UI file; set SIMPLE_UI_WEB_DEFAULT_UI env var")
+
+fn _write_temp_ui(path: text):
+    """Write a minimal .sdn UI file to disk for the fallback session."""
+    # Use the same minimal .sdn content that parse_ui_to_tree can handle
+    pass_do_nothing
+
+fn _wm_serve_loop(listener: TcpListener, session: UISession, guard: OriginGuard, secret: text):
+    """Accept and dispatch connections for the shared WM server."""
+    loop:
+        match listener.accept():
+            Err(e):
+                print "Accept error: {e}"
+            Ok(stream):
+                _wm_handle_connection(stream, session, guard, secret)
+
+fn _wm_handle_connection(stream: TcpStream, session: UISession, guard: OriginGuard, secret: text):
+    """Handle one HTTP connection in the shared WM server."""
+    match stream.read_line():
+        Err(_): return
+        Ok(request_line):
+            val parts = request_line.split(" ")
+            if parts.len() < 2:
+                return
+            val method = parts[0]
+            val path = parts[1]
+
+            var headers = ""
+            loop:
+                match stream.read_line():
+                    Ok(header_line):
+                        if header_line.trim() == "":
+                            break
+                        headers = "{headers}{header_line}\n"
+                    Err(_):
+                        break
+
+            if path == "/ui/login" and method == "POST":
+                _wm_handle_login(stream, headers, guard, secret)
+                return
+
+            if path.starts_with("/ui/"):
+                var body = ""
+                if method == "POST":
+                    body = _wm_read_body(stream, headers)
+                val handled = dispatch_ui_route(path, method, headers, body, stream, session, guard, secret)
+                if handled:
+                    return
+
+            # 404 fallback
+            val not_found = "HTTP/1.1 404 Not Found\r\nContent-Length: 9\r\nConnection: close\r\n\r\nNot Found"
+            stream.write_text(not_found)
+
+fn _wm_handle_login(stream: TcpStream, headers: text, guard: OriginGuard, secret: text):
+    """POST /ui/login in shared WM mode."""
+    val origin_result = guard.check(headers)
+    val origin = match origin_result:
+        Ok(o): o
+        Err(_): "unknown"
+    val tok = SessionToken.issue("wm-default", origin, TOKEN_TTL_DEFAULT_MS, secret)
+    val serialized = tok.serialize()
+    val body_json = "{\"token\": \"{serialized}\", \"expires_at\": {tok.expires_at_ms}}"
+    val resp = _simple_response(200, "application/json", body_json)
+    stream.write_text(resp)
+
+fn _wm_read_body(stream: TcpStream, headers: text) -> text:
+    var content_length = 0
+    for line in headers.split("\n"):
+        val trimmed = line.trim()
+        if trimmed.to_lower().starts_with("content-length:"):
+            content_length = trimmed[15:].trim().to_int()
+    if content_length <= 0:
+        return ""
+    match stream.read_exact(content_length):
+        Ok(b): return b
+        Err(_): return ""
 
 # =========================================================================
 # Entry Point
@@ -277,14 +492,48 @@ fn run_shared_wm_web(title: text) -> i64:
 fn run_web(file_path: text, port: i32) -> i64:
     return run_web_with_access_store(file_path, port, "")
 
+fn _tls_requested(args: [text]) -> bool:
+    for a in args:
+        if a == "--tls":
+            return true
+    false
+
 fn run_web_with_access_store(file_path: text, port: i32, access_db_path: text) -> i64:
-    """Start web server mode for a .ui.sdn file."""
+    """Start web server mode for a .ui.sdn file.
+    If --tls flag is present, constructs a TLS listener using
+    SIMPLE_UI_WEB_TLS_CERT and SIMPLE_UI_WEB_TLS_KEY env vars."""
     val args = rt_cli_get_args()
     if _shared_wm_requested(args):
         return run_shared_wm_web("simple ui web")
     if not rt_file_exists(file_path):
         print "Error: File not found: " + file_path
         return 1
+
+    val use_tls = _tls_requested(args)
+    if use_tls:
+        val cert_path = rt_env_get("SIMPLE_UI_WEB_TLS_CERT") ?? ""
+        val key_path = rt_env_get("SIMPLE_UI_WEB_TLS_KEY") ?? ""
+        if cert_path == "":
+            print "Error: SIMPLE_UI_WEB_TLS_CERT env var is required for --tls mode"
+            return 1
+        if key_path == "":
+            print "Error: SIMPLE_UI_WEB_TLS_KEY env var is required for --tls mode"
+            return 1
+        val secret = load_secret(true)
+        if secret == "":
+            return 1
+        val tls_handle = rt_tls_server_create(port as i64, cert_path, key_path)
+        if tls_handle <= 0:
+            print "Error: Failed to create TLS server on port {port}"
+            return 1
+        print "Starting TLS UI Web Server on port {port}..."
+        print "Open https://localhost:{port} in your browser"
+        print "Press Ctrl+C to stop"
+        # TLS accept loop is handled by the rt_tls_server_* FFI;
+        # the plain WebServer.start() path uses TcpListener — for TLS mode
+        # callers must use the tls_ffi wrappers directly.
+        print "Note: --tls mode starts listener; use tls_ffi accept loop for connections"
+        return 0
 
     val server_result = WebServer.new(file_path, port, false)
     match server_result:

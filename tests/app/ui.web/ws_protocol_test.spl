@@ -1,0 +1,342 @@
+# WebSocket Wire Protocol Tests
+#
+# Exercises round-trips of patch_wire.spl and snapshot_wire.spl.
+# No real sockets required — pure encoding/decoding.
+#
+# FINDING: decode_envelope does not reconstruct patches from JSON (patches: []
+# hardcoded in v1). Envelope round-trip tests verify scalar fields only;
+# patch content must be verified through encode_patch / decode_patch directly.
+
+use std.sspec.*
+use common.ui.patch_wire.{
+    WireError,
+    PatchEnvelope,
+    UIPatch,
+    encode_patch,
+    decode_patch,
+    encode_envelope,
+    decode_envelope
+}
+use common.ui.patch.{PatchKind}
+use common.ui.snapshot_wire.{encode_snapshot, decode_snapshot}
+use common.ui.access.{
+    UiAccessSnapshot,
+    UiAccessSurface,
+    UiAccessNode,
+    UI_ACCESS_PROTOCOL_VERSION
+}
+
+# ============================================================================
+# Test Group 1: Envelope round-trip
+# ============================================================================
+
+describe "PatchEnvelope encoding":
+    """
+    ## Envelope encoding / decoding
+
+    Verifies that PatchEnvelope scalar fields survive a JSON round-trip.
+    Note: v1 decode_envelope does not parse the patches array — it returns
+    patches: [] always. Patch content is tested separately.
+    """
+
+    it "encodes to non-empty JSON starting with {":
+        val p1 = UIPatch(
+            kind: PatchKind.UpdateProp,
+            target_id: "surf1#w1",
+            parent_id: "",
+            prop_key: "text",
+            prop_value: "Hello",
+            node: nil
+        )
+        val p2 = UIPatch(
+            kind: PatchKind.InsertChild,
+            target_id: "surf1#w2",
+            parent_id: "surf1#root",
+            prop_key: "",
+            prop_value: "",
+            node: nil
+        )
+        val env = PatchEnvelope(
+            session_id: "session-abc",
+            snapshot_revision: 3u64,
+            from_sequence: 1i64,
+            to_sequence: 5i64,
+            patches: [p1, p2]
+        )
+        val encoded = encode_envelope(env)
+        expect(encoded.len()).to_be_greater_than(0)
+        expect(encoded.starts_with("{")).to_equal(true)
+
+    it "round-trips scalar fields through encode/decode":
+        val env = PatchEnvelope(
+            session_id: "session-xyz",
+            snapshot_revision: 7u64,
+            from_sequence: 10i64,
+            to_sequence: 20i64,
+            patches: []
+        )
+        val encoded = encode_envelope(env)
+        val result = decode_envelope(encoded)
+        expect(result.is_ok()).to_equal(true)
+        val decoded = result.unwrap()
+        expect(decoded.session_id).to_equal("session-xyz")
+        expect(decoded.snapshot_revision).to_equal(7u64)
+        expect(decoded.from_sequence).to_equal(10i64)
+        expect(decoded.to_sequence).to_equal(20i64)
+
+    it "encoded text contains patch JSON for each patch":
+        val p = UIPatch(
+            kind: PatchKind.UpdateProp,
+            target_id: "surf1#w1",
+            parent_id: "",
+            prop_key: "label",
+            prop_value: "World",
+            node: nil
+        )
+        val env = PatchEnvelope(
+            session_id: "s1",
+            snapshot_revision: 0u64,
+            from_sequence: 0i64,
+            to_sequence: 1i64,
+            patches: [p]
+        )
+        val encoded = encode_envelope(env)
+        expect(encoded.contains("update_prop")).to_equal(true)
+        expect(encoded.contains("label")).to_equal(true)
+
+# ============================================================================
+# Test Group 2: Snapshot round-trip
+# ============================================================================
+
+describe "UiAccessSnapshot encoding":
+    """
+    ## Snapshot encoding / decoding
+
+    encode_snapshot stamps the supplied revision; decode_snapshot parses
+    scalar fields only (surfaces/nodes returned empty — v1 behaviour).
+    """
+
+    it "round-trips snapshot_revision":
+        val snap = UiAccessSnapshot(
+            protocol_version: UI_ACCESS_PROTOCOL_VERSION,
+            snapshot_revision: 7u64,
+            mode: "cli",
+            active_surface: "main",
+            surfaces: [],
+            nodes: [],
+            recent_events: []
+        )
+        val encoded = encode_snapshot(snap, 7u64)
+        val result = decode_snapshot(encoded)
+        expect(result.is_ok()).to_equal(true)
+        val decoded = result.unwrap()
+        expect(decoded.snapshot.snapshot_revision).to_equal(7u64)
+        expect(decoded.revision).to_equal(7u64)
+
+    it "round-trips protocol_version":
+        val snap = UiAccessSnapshot(
+            protocol_version: UI_ACCESS_PROTOCOL_VERSION,
+            snapshot_revision: 1u64,
+            mode: "gui",
+            active_surface: "main",
+            surfaces: [],
+            nodes: [],
+            recent_events: []
+        )
+        val encoded = encode_snapshot(snap, 1u64)
+        val result = decode_snapshot(encoded)
+        expect(result.is_ok()).to_equal(true)
+        val decoded = result.unwrap()
+        expect(decoded.snapshot.protocol_version).to_equal(UI_ACCESS_PROTOCOL_VERSION)
+
+    it "decode_snapshot returns empty surfaces and nodes (v1 limitation)":
+        val snap = UiAccessSnapshot(
+            protocol_version: UI_ACCESS_PROTOCOL_VERSION,
+            snapshot_revision: 2u64,
+            mode: "tui",
+            active_surface: "surf1",
+            surfaces: [],
+            nodes: [],
+            recent_events: []
+        )
+        val encoded = encode_snapshot(snap, 2u64)
+        val result = decode_snapshot(encoded)
+        expect(result.is_ok()).to_equal(true)
+        val decoded = result.unwrap()
+        # v1 decoder returns empty arrays — callers rebuild from authoritative session
+        expect(decoded.snapshot.surfaces.len()).to_equal(0)
+        expect(decoded.snapshot.nodes.len()).to_equal(0)
+
+# ============================================================================
+# Test Group 3: Per-PatchKind encode + decode identity
+# ============================================================================
+
+describe "Per-PatchKind encoding round-trip":
+    """
+    ## PatchKind encoding
+
+    Each of the 8 PatchKind variants must encode to non-empty JSON and decode
+    back to the same kind without error.
+    """
+
+    it "UpdateProp encodes and decodes":
+        val p = UIPatch(
+            kind: PatchKind.UpdateProp,
+            target_id: "s#w1",
+            parent_id: "",
+            prop_key: "text",
+            prop_value: "hi",
+            node: nil
+        )
+        val encoded = encode_patch(p)
+        val result = decode_patch(encoded)
+        expect(result.is_ok()).to_equal(true)
+        val decoded = result.unwrap()
+        expect(decoded.kind).to_equal(PatchKind.UpdateProp)
+        expect(decoded.target_id).to_equal("s#w1")
+        expect(decoded.prop_key).to_equal("text")
+        expect(decoded.prop_value).to_equal("hi")
+
+    it "InsertChild encodes and decodes":
+        val p = UIPatch(
+            kind: PatchKind.InsertChild,
+            target_id: "s#child",
+            parent_id: "s#root",
+            prop_key: "",
+            prop_value: "",
+            node: nil
+        )
+        val encoded = encode_patch(p)
+        val result = decode_patch(encoded)
+        expect(result.is_ok()).to_equal(true)
+        val decoded = result.unwrap()
+        expect(decoded.kind).to_equal(PatchKind.InsertChild)
+        expect(decoded.parent_id).to_equal("s#root")
+
+    it "RemoveChild encodes and decodes":
+        val p = UIPatch(
+            kind: PatchKind.RemoveChild,
+            target_id: "",
+            parent_id: "s#root",
+            prop_key: "",
+            prop_value: "",
+            node: nil
+        )
+        val encoded = encode_patch(p)
+        val result = decode_patch(encoded)
+        expect(result.is_ok()).to_equal(true)
+        val decoded = result.unwrap()
+        expect(decoded.kind).to_equal(PatchKind.RemoveChild)
+        expect(decoded.parent_id).to_equal("s#root")
+
+    it "ReplaceNode encodes and decodes":
+        val p = UIPatch(
+            kind: PatchKind.ReplaceNode,
+            target_id: "s#w2",
+            parent_id: "",
+            prop_key: "",
+            prop_value: "",
+            node: nil
+        )
+        val encoded = encode_patch(p)
+        val result = decode_patch(encoded)
+        expect(result.is_ok()).to_equal(true)
+        val decoded = result.unwrap()
+        expect(decoded.kind).to_equal(PatchKind.ReplaceNode)
+        expect(decoded.target_id).to_equal("s#w2")
+
+    it "RemoveProp encodes and decodes":
+        val p = UIPatch(
+            kind: PatchKind.RemoveProp,
+            target_id: "s#w3",
+            parent_id: "",
+            prop_key: "color",
+            prop_value: "",
+            node: nil
+        )
+        val encoded = encode_patch(p)
+        val result = decode_patch(encoded)
+        expect(result.is_ok()).to_equal(true)
+        val decoded = result.unwrap()
+        expect(decoded.kind).to_equal(PatchKind.RemoveProp)
+        expect(decoded.prop_key).to_equal("color")
+
+    it "UpdateLayout encodes and decodes":
+        val p = UIPatch(
+            kind: PatchKind.UpdateLayout,
+            target_id: "s#w4",
+            parent_id: "",
+            prop_key: "",
+            prop_value: "",
+            node: nil
+        )
+        val encoded = encode_patch(p)
+        val result = decode_patch(encoded)
+        expect(result.is_ok()).to_equal(true)
+        val decoded = result.unwrap()
+        expect(decoded.kind).to_equal(PatchKind.UpdateLayout)
+        expect(decoded.target_id).to_equal("s#w4")
+
+    it "UpdateVisibility encodes and decodes":
+        val p = UIPatch(
+            kind: PatchKind.UpdateVisibility,
+            target_id: "s#w5",
+            parent_id: "",
+            prop_key: "",
+            prop_value: "true",
+            node: nil
+        )
+        val encoded = encode_patch(p)
+        val result = decode_patch(encoded)
+        expect(result.is_ok()).to_equal(true)
+        val decoded = result.unwrap()
+        expect(decoded.kind).to_equal(PatchKind.UpdateVisibility)
+        expect(decoded.target_id).to_equal("s#w5")
+
+    it "MoveChild encodes and decodes":
+        val p = UIPatch(
+            kind: PatchKind.MoveChild,
+            target_id: "",
+            parent_id: "s#root",
+            prop_key: "",
+            prop_value: "",
+            node: nil
+        )
+        val encoded = encode_patch(p)
+        val result = decode_patch(encoded)
+        expect(result.is_ok()).to_equal(true)
+        val decoded = result.unwrap()
+        expect(decoded.kind).to_equal(PatchKind.MoveChild)
+
+# ============================================================================
+# Test Group 4: Malformed JSON error handling
+# ============================================================================
+
+describe "Malformed patch JSON":
+    """
+    ## Error handling for malformed input
+
+    decode_patch must return Err(WireError) rather than crashing on bad JSON.
+    """
+
+    it "returns Err with code missing_op for non-JSON input":
+        val result = decode_patch("not json")
+        expect(result.is_err()).to_equal(true)
+        val err = result.unwrap_err()
+        expect(err.code).to_equal("missing_op")
+
+    it "returns Err for empty string":
+        val result = decode_patch("")
+        expect(result.is_err()).to_equal(true)
+
+    it "returns Err with code unknown_op for unknown op field":
+        val result = decode_patch("{\"op\":\"bogus_op\",\"id\":\"x\"}")
+        expect(result.is_err()).to_equal(true)
+        val err = result.unwrap_err()
+        expect(err.code).to_equal("unknown_op")
+
+    it "returns Err for malformed envelope JSON missing mode in snapshot":
+        val result = decode_snapshot("{\"snapshot_revision\":\"1\"}")
+        expect(result.is_err()).to_equal(true)
+        val err = result.unwrap_err()
+        expect(err.code).to_equal("missing_mode")
