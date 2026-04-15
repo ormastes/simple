@@ -652,6 +652,24 @@ New wave-4 code citations for interfaces with real implementations this cycle:
   symbol-table counts for prefixes `spl_handle_`, `simpleos_`, `rt_`:
   `src/os/port/bootstrap_native_verify.spl:199` (commit `05b552c4e8`). 3/3 tests pass.
 
+### 2026-04-15 (afternoon) — wave-4b expansion
+
+- **IF-07 BlockDevice probe** — `src/os/drivers/virtio/virtio_blk.spl:79`, commit `1948b85f0d` —
+  `static fn probe() -> VirtioBlkDriver?` MMIO-scans `0xFEB00000..+32*0x200` for virtio-blk magic
+  `0x74726976`; returns first matching device or nil. Unblocks the real-mount path in e2e tests.
+- **IF-07 FAT32 readdir** — `src/os/kernel/fs/fat32.spl:161`, commit `2646266e96` —
+  `Fat32Filesystem.mount()` now stashes the root-dir cluster sectors into `self.root_dir_data`
+  (wave-4b shortcut); `readdir("/")` walks that buffer without a FAT-chain traversal.
+  `next_cluster` + `read_cluster_chain` are stubbed public for wave-4c.
+- **IF-02 COW scaffold** — `src/os/kernel/memory/vmm.spl:532`, commit `6bdd540c6e` —
+  `fn vmm_cow_clone_pages(pml4_phys: u64) -> u64` marks parent PTEs read-only and returns a
+  shallow-cloned PML4. Scheduler wire at `src/os/kernel/scheduler/scheduler.spl:514` calls
+  `vmm_cow_clone_pages(parent.address_space)` inside `clone_task`.
+- **IF-08 Phase-3 QEMU runner** — `src/os/qemu_runner.spl:1191`, commit `a08fe8f697` —
+  `fn boot_disk_image_serial(image: text, timeout_ms: i64) -> (text, text, i32)` boots a raw disk
+  image and returns captured serial output; `test/os/port/e2e_qemu_smoke_spec.spl:46` dispatches
+  all 6 Phase-3 steps by grepping the shared capture for `[phase-3-*]` markers.
+
 Cross-toolchain milestones (not IF-id changes, recorded here for traceability):
 
 - I3 LLVM cross-clang green: `ec87deb5ef` + `f874b685c1`. Artifact: `build/os/llvm/cross-x86_64/bin/clang`.
