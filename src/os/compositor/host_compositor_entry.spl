@@ -1,0 +1,85 @@
+# Host Compositor Entry Point
+#
+# Shared entry point for host-side UI applications (Cocoa, Win32, Browser,
+# Electron, WebCanvas, TUI).  Callers construct a `HostWmConfig`, call
+# `init_host_wm`, then drive the event loop with `run_once` (single tick)
+# or `tick_forever` (blocking loop).
+#
+# The compositor and WM are represented here as lightweight host-side
+# wrappers that select the right hosted backend at runtime.
+
+use common.window_protocol.geometry.{Size}
+use os.compositor.display_backend.{CompositorBackend}
+use os.compositor.hosted_backend.{HostedCompositorBackend, select_hosted_backend}
+
+# =========================================================================
+# Public types
+# =========================================================================
+
+enum HostBackendKind:
+    Cocoa
+    Win32
+    Browser
+    Electron
+    WebCanvas
+    Tui
+
+struct HostWmConfig:
+    backend: HostBackendKind
+    initial_size: Size
+    title: text
+
+# WmService — thin lifecycle wrapper around the host event loop
+class WmService:
+    running: bool
+
+    static fn new() -> WmService:
+        WmService(running: true)
+
+    me stop():
+        self.running = false
+
+    me is_running() -> bool:
+        self.running
+
+# HostCompositor — host-side compositor front-end (no bare-metal drivers)
+class HostCompositor:
+    backend: CompositorBackend
+    width: i32
+    height: i32
+
+    static fn new(backend: CompositorBackend, size: Size) -> HostCompositor:
+        HostCompositor(backend: backend, width: size.w, height: size.h)
+
+    me tick():
+        """Process one compositor frame through the hosted backend."""
+        self.backend.present()
+
+# HostWmHandle — returned by init_host_wm; owns compositor and wm
+class HostWmHandle:
+    compositor: HostCompositor
+    wm: WmService
+
+    me run_once():
+        """Run a single compositor tick."""
+        if self.wm.is_running():
+            self.compositor.tick()
+
+    me tick_forever():
+        """Block-loop: run compositor ticks until the WM stops."""
+        while self.wm.is_running():
+            self.compositor.tick()
+
+# =========================================================================
+# Factory
+# =========================================================================
+
+fn init_host_wm(config: HostWmConfig) -> HostWmHandle?:
+    """Initialise a shared HostCompositor + WmService for the given host backend.
+
+    Returns nil if the backend cannot be created (e.g. missing driver).
+    """
+    val backend = select_hosted_backend(0, config.initial_size.w, config.initial_size.h, 0)
+    val comp = HostCompositor.new(backend, config.initial_size)
+    val wm = WmService.new()
+    HostWmHandle(compositor: comp, wm: wm)
