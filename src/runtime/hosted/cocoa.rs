@@ -157,10 +157,9 @@ mod imp {
     use std::sync::Mutex;
 
     use objc2::rc::Retained;
-    use objc2::runtime::ProtocolObject;
     use objc2_app_kit::{
-        NSApplication, NSApplicationActivationPolicy, NSBackingStoreType, NSBitmapImageRep,
-        NSEvent, NSEventMask, NSImage, NSImageView, NSWindow, NSWindowStyleMask,
+        NSApplication, NSApplicationActivationPolicy, NSBackingStoreType,
+        NSEventMask, NSImage, NSImageView, NSWindow, NSWindowStyleMask,
     };
     use objc2_foundation::{
         MainThreadMarker, NSData, NSDate, NSDefaultRunLoopMode, NSPoint, NSRect, NSSize,
@@ -244,7 +243,7 @@ mod imp {
             | NSWindowStyleMask::Miniaturizable;
         let ns_window = unsafe {
             NSWindow::initWithContentRect_styleMask_backing_defer(
-                NSWindow::alloc(mtm),
+                mtm.alloc::<NSWindow>(),
                 frame,
                 style,
                 NSBackingStoreType::NSBackingStoreBuffered,
@@ -252,18 +251,14 @@ mod imp {
             )
         };
         let ns_title = NSString::from_str(&title_str);
-        unsafe {
-            ns_window.setTitle(&ns_title);
-            ns_window.center();
-        }
+        ns_window.setTitle(&ns_title);
+        ns_window.center();
 
         // Image view fills the content rect; `layer_present` reassigns its
         // image each frame.
-        let ns_view = unsafe { NSImageView::initWithFrame(NSImageView::alloc(mtm), frame) };
-        unsafe {
-            ns_window.setContentView(Some(&ns_view));
-            ns_window.makeKeyAndOrderFront(None);
-        }
+        let ns_view = unsafe { NSImageView::initWithFrame(mtm.alloc::<NSImageView>(), frame) };
+        ns_window.setContentView(Some(&ns_view));
+        ns_window.makeKeyAndOrderFront(None);
 
         let id = next_handle();
         state().lock().unwrap().windows.insert(
@@ -309,7 +304,7 @@ mod imp {
             return false;
         };
         // `Retained` drops here will release the AppKit objects.
-        unsafe { wnd.ns_window.orderOut(None) };
+        wnd.ns_window.orderOut(None);
         true
     }
 
@@ -364,7 +359,7 @@ mod imp {
         // window's NSImageView. This is the Phase C "BitBlt-style" path —
         // Metal-backed CAMetalLayer lands later. The pixel buffer is treated
         // as little-endian ARGB which matches what the Simple side writes.
-        let Some(_mtm) = MainThreadMarker::new() else {
+        let Some(mtm) = MainThreadMarker::new() else {
             return false;
         };
         let s = state().lock().unwrap();
@@ -390,19 +385,7 @@ mod imp {
             rgba.extend_from_slice(&[r, g, b, a]);
         }
         let data = NSData::with_bytes(&rgba);
-        let image = unsafe {
-            let img = NSImage::initWithData(
-                NSImage::alloc(),
-                &data,
-            );
-            // Fall back to a sized image if the raw RGBA wasn't decoded
-            // (NSImage prefers TIFF/PNG headers — see TODO below for a
-            // proper NSBitmapImageRep path).
-            if img.is_none() {
-                let _ = NSBitmapImageRep::class();
-            }
-            img
-        };
+        let image = NSImage::initWithData(mtm.alloc::<NSImage>(), &data);
         if let Some(img) = image {
             unsafe { wnd.ns_view.setImage(Some(&img)) };
         } else {
@@ -553,7 +536,7 @@ mod imp {
         let mask = NSEventMask::Any;
         let evt = unsafe {
             app.nextEventMatchingMask_untilDate_inMode_dequeue(
-                mask.0,
+                mask,
                 Some(&until),
                 mode,
                 true,
