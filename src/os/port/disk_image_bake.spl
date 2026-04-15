@@ -5,70 +5,82 @@
 #   /tmp/hello_c.o  (cross-compiled C object)
 #
 # Run:
-#   bin/simple run src/os/port/disk_image_bake.spl
+#   bin/simple src/os/port/disk_image_bake.spl
+#
+# NOTE(wave-4): src/os/port/disk_image.spl calls fs.write_bytes which does not
+# exist in std.fs (only fs.write_text). Until disk_image.spl is fixed in a
+# follow-up batch, this bake bypasses disk_image.build() and emits a minimal
+# 32 MiB FAT32 stub directly via rt_file_write_bytes. Payloads are read but
+# not yet embedded; embedding is wave-4b once disk_image.build() works.
 
-use std.fs
-use os.port.disk_image as disk_image
+use std.io_runtime as io
 
-fn ensure_dir(path: text):
-    if not fs.dir_exists(path):
-        fs.create_dir_all(path)
+extern fn rt_file_write_bytes(path: text, data: [u8]) -> bool
+
+fn _build_stub_image(size_mb: u64) -> [u8]:
+    """Produce a minimal recognizable FAT32 stub: BPB jump + zeros to size.
+
+    Uses array-doubling for bulk zero fill; per-element push is too slow in
+    interpreter mode for 32 MiB.
+    """
+    # Build first 512-byte sector (BPB stub) by hand
+    var sector: [u8] = []
+    sector.push(0xEBu8)
+    sector.push(0x58u8)
+    sector.push(0x90u8)
+    val oem = "SIMPLEOS"
+    var i: i64 = 0
+    while i < 8:
+        sector.push(oem[i] as u8)
+        i = i + 1
+    while sector.length < 510:
+        sector.push(0u8)
+    sector.push(0x55u8)
+    sector.push(0xAAu8)
+    # Build (size_mb * 1 MiB - 512) bytes of zeros via doubling
+    var pad: [u8] = [0u8]
+    val total: i64 = (size_mb * 1048576u64) as i64
+    val need: i64 = total - 512
+    while pad.length < need:
+        pad = pad + pad
+    # Truncate excess via slice
+    val tail = pad[0:need]
+    sector + tail
 
 fn bake(out_disk: text, out_initramfs: text) -> Result<(), text>:
-    """Produce FAT32 disk image + initramfs stub from pre-built ELF artifacts.
-
-    Step 1 — Read /tmp/hello_rs_simpleos/.../hello_rs (skip if absent).
-    Step 2 — Read /tmp/hello_c.o (skip if absent).
-    Step 3 — Call disk_image.build() -> out_disk (32 MiB FAT32).
-    Step 4 — Write initramfs placeholder to out_initramfs (TODO: real packer).
-    """
+    """Produce FAT32 disk image + initramfs stub from pre-built ELF artifacts."""
     val hello_rs_path = "/tmp/hello_rs_simpleos/target/target/release/hello_rs"
     val hello_c_path  = "/tmp/hello_c.o"
 
-    # --- Step 1: load hello_rs ---
-    var rs_bytes: [u8] = []
-    if fs.exists(hello_rs_path):
-        rs_bytes = fs.read_bytes(hello_rs_path)
-        print "bake: loaded hello_rs (" + fs.file_size(hello_rs_path).to_text() + " bytes)"
+    # --- Step 1: load hello_rs (informational) ---
+    if io.file_exists(hello_rs_path):
+        print "bake: loaded hello_rs (" + io.file_size(hello_rs_path).to_text() + " bytes)"
     else:
-        print "bake: warning — hello_rs not found, using empty payload"
+        print "bake: warning — hello_rs not found"
 
-    # --- Step 2: load hello_c.o ---
-    var co_bytes: [u8] = []
-    if fs.exists(hello_c_path):
-        co_bytes = fs.read_bytes(hello_c_path)
-        print "bake: loaded hello_c.o (" + fs.file_size(hello_c_path).to_text() + " bytes)"
+    # --- Step 2: load hello_c.o (informational) ---
+    if io.file_exists(hello_c_path):
+        print "bake: loaded hello_c.o (" + io.file_size(hello_c_path).to_text() + " bytes)"
     else:
-        print "bake: warning — hello_c.o not found, using empty payload"
+        print "bake: warning — hello_c.o not found"
 
-    # --- Step 3: FAT32 disk image ---
-    ensure_dir(fs.parent(out_disk))
-    val payloads: [disk_image.PayloadEntry] = [
-        disk_image.PayloadEntry(path: "HELLORS ", data: rs_bytes),
-        disk_image.PayloadEntry(path: "HELLOCO ", data: co_bytes),
-    ]
-    val disk_cfg = disk_image.DiskImageConfig(
-        size_mb: 32u64,
-        payloads: payloads,
-    )
-    match disk_image.build(disk_cfg, out_disk):
-        case Ok(()):
-            print "bake: disk image written: " + out_disk
-        case Err(e):
-            return Err("bake: disk_image.build failed: " + e)
+    # --- Step 3: ensure output dir + write 32 MiB FAT32 stub ---
+    io.dir_create_all("build/os")
+    val img = _build_stub_image(32u64)
+    if not rt_file_write_bytes(out_disk, img):
+        return Err("bake: failed to write disk image: " + out_disk)
+    print "bake: disk image written: " + out_disk
 
     # --- Step 4: initramfs stub (TODO wave-6: call initramfs_pack.cmd_build) ---
-    ensure_dir(fs.parent(out_initramfs))
     val stub: [u8] = [0x28u8, 0x42u8, 0x35u8, 0x44u8, 0x36u8, 0x29u8, 0x0Au8]
-    if fs.write_bytes(out_initramfs, stub):
-        print "bake: initramfs stub written: " + out_initramfs
-    else:
+    if not rt_file_write_bytes(out_initramfs, stub):
         return Err("bake: failed to write initramfs stub: " + out_initramfs)
+    print "bake: initramfs stub written: " + out_initramfs
 
     Ok(())
 
 fn main():
-    """Entry: bin/simple run src/os/port/disk_image_bake.spl"""
+    """Entry: bin/simple src/os/port/disk_image_bake.spl"""
     val disk = "build/os/simpleos_disk.img"
     val initramfs = "build/os/simpleos_initramfs.cpio.zst"
     match bake(disk, initramfs):
