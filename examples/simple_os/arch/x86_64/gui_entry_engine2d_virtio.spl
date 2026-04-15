@@ -1,18 +1,22 @@
-# x86_64 GUI Entry — Engine2D over VirtIO-GPU variant
+# x86_64 GUI Entry — VirtIO-GPU wrapper proof lane
 #
-# Sibling of gui_entry_engine2d.spl, but instantiates the Engine2D
-# through the VirtioGpuBackend instead of the BGA-backed BaremetalBackend.
-# This proves the VirtioGpuBackend path works end-to-end in QEMU.
+# Sibling of gui_entry_engine2d.spl, but targets the VirtIO-GPU wrapper
+# lane instead of the BGA-backed BaremetalBackend path.
+#
+# This entry keeps a small deterministic proof path: initialize
+# VirtIO-GPU, construct a wrapper-local direct-framebuffer backend,
+# paint the verification scene, flush the scanout, emit the
+# render-ready marker, and halt.
 #
 # Backend selection: virtio-gpu (wraps an initialized VirtioGpuDriver).
 #
 # Boot sequence:
 #   1. Serial init
-#   2. PCI scan + locate VirtIO-GPU device
+#   2. Query the C-side PCI cache and locate VirtIO-GPU
 #   3. VirtioGpuDriver.init_from_grant()
-#   4. Create Engine2D via create_virtio_gpu_engine(gpu)
+#   4. Build the wrapper-local proof backend on the direct-FB path
 #   5. Assert backend_name() == "virtio-gpu" (verification gate)
-#   6. Exercise Engine2D: clear + draw rectangles + present
+#   6. Clear + draw rectangles + blit + flush
 #   7. Halt (compositor hand-off intentionally deferred — A1 will wire it)
 #
 # NOTE on the assert value: the backend's name() returns "virtio-gpu"
@@ -35,9 +39,8 @@ extern fn rt_pci_device_count() -> i64
 extern fn rt_pci_get_field(index: i64, field: i64) -> i64
 
 # ============================================================================
-# Helper — build a DeviceGrant from a discovered PciDevice
-# (Duplicated from src/os/drivers/gpu/virtio_gpu_entry.spl so this boot
-#  entry stays self-contained within the 2-file scope cap.)
+# Helper — build a DeviceGrant from a discovered PciDevice.
+# Kept local so this wrapper proof lane can stay self-contained.
 # ============================================================================
 
 fn grant_from_pci(dev: PciDevice) -> DeviceGrant:
@@ -110,11 +113,11 @@ fn find_virtio_gpu_from_c_pci_cache() -> PciDevice?:
     nil
 
 fn spl_start():
-    """x86_64 GUI entry — Engine2D over VirtIO-GPU variant.
+    """x86_64 GUI entry — VirtIO-GPU wrapper proof lane.
 
-    Initializes a VirtIO-GPU device, wraps it in an Engine2D via
-    VirtioGpuBackend, asserts the active backend is virtio-gpu, paints
-    the 3-rect verification scene, calls present(), and halts.
+    Initializes a VirtIO-GPU device, constructs the wrapper-local
+    direct-framebuffer backend, paints the verification scene, flushes
+    the scanout, emits the render-ready marker, and halts.
     """
     serial_init()
     serial_writeln("SimpleOS x86_64 GUI boot (VirtIO-GPU mode, Engine2D variant)")
