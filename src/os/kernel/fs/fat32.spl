@@ -103,13 +103,17 @@ class Fat32Filesystem:
     """FAT32 filesystem over a block device (IF-07).
 
     Wave-4a: mount() parses BPB and stores geometry.
-    Wave-4b will add open/read/write/readdir via cluster-chain walking.
+    Wave-4b: readdir("/") via stashed root-dir data; next_cluster + read_cluster_chain public for wave-4c.
     """
     device_id: u64          # BlockDevice handle assigned by bus registration
     bpb_parsed: bool        # True once mount() has validated the BPB
     cluster_size: u32       # Bytes per cluster (512 * sectors-per-cluster)
     fat_start_sector: u32   # First sector of the FAT region
     data_start_sector: u32  # First sector of the cluster-heap region
+    root_cluster: u32       # First cluster of root directory
+    sectors_per_cluster: u32
+    bytes_per_sector: u32
+    root_dir_data: [u8]     # First cluster of root dir, stashed at mount
 
 impl Fat32Filesystem:
     static fn new(device_id: u64) -> Fat32Filesystem:
@@ -119,7 +123,11 @@ impl Fat32Filesystem:
             bpb_parsed: false,
             cluster_size: 0u32,
             fat_start_sector: 0u32,
-            data_start_sector: 0u32
+            data_start_sector: 0u32,
+            root_cluster: 0u32,
+            sectors_per_cluster: 0u32,
+            bytes_per_sector: 512u32,
+            root_dir_data: []
         )
 
     fn mount(self, dev: BlockDevice) -> Result<(), i32>:
@@ -142,10 +150,31 @@ impl Fat32Filesystem:
             return Result.Err(bpb_result.unwrap_err())
 
         val bpb = bpb_result.unwrap()
-        self.bpb_parsed      = true
-        self.fat_start_sector = bpb.reserved_sectors.to_u32()
-        self.data_start_sector = (bpb.reserved_sectors.to_u32() + bpb.num_fats.to_u32() * bpb.fat_size_32)
-        self.cluster_size    = bpb.sectors_per_cluster.to_u32() * bpb.bytes_per_sector.to_u32()
+        self.bpb_parsed           = true
+        self.fat_start_sector     = bpb.reserved_sectors.to_u32()
+        self.data_start_sector    = (bpb.reserved_sectors.to_u32() + bpb.num_fats.to_u32() * bpb.fat_size_32)
+        self.cluster_size         = bpb.sectors_per_cluster.to_u32() * bpb.bytes_per_sector.to_u32()
+        self.root_cluster         = bpb.root_cluster
+        self.sectors_per_cluster  = bpb.sectors_per_cluster.to_u32()
+        self.bytes_per_sector     = bpb.bytes_per_sector.to_u32()
+
+        # Stash root dir cluster sectors for readdir (wave-4b shortcut)
+        val root_lba = cluster_to_lba(bpb, bpb.root_cluster)
+        var sec_idx: u32 = 0
+        while sec_idx < bpb.sectors_per_cluster.to_u32():
+            var sec_buf: [u8] = []
+            var bi = 0
+            while bi < 512:
+                sec_buf.push(0u8)
+                bi = bi + 1
+            val r = dev.read_sector(root_lba + sec_idx.to_u64(), sec_buf)
+            if r.is_err():
+                return Result.Err(EIO)
+            var ci = 0
+            while ci < 512:
+                self.root_dir_data.push(sec_buf[ci])
+                ci = ci + 1
+            sec_idx = sec_idx + 1
 
         Result.Ok(())
 
