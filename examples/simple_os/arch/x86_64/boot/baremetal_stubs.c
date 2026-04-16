@@ -1748,13 +1748,25 @@ static int8_t _fat32_write_text_impl(const char *name, int64_t name_len, const c
     char path_buf[128];
     const uint8_t *content_bytes = (const uint8_t *)"";
     uint32_t write_len = 0;
-    if (_fat32_copy_path_arg(name, name_len, path_buf, sizeof(path_buf)) <= 0)
+    int path_copy_len = _fat32_copy_path_arg(name, name_len, path_buf, sizeof(path_buf));
+    if (path_copy_len <= 0)
         return 0;
     if (content && content_len > 0) {
         content_bytes = (const uint8_t *)content;
         write_len = (uint32_t)content_len;
     }
-    return fat32_write_file(path_buf, content_bytes, write_len) == 0 ? 1 : 0;
+    serial_puts("[fat32-c] rt_file_write_text path=");
+    serial_puts(path_buf);
+    serial_puts(" path_len=");
+    serial_put_dec((int64_t)path_copy_len);
+    serial_puts(" content_len=");
+    serial_put_dec((int64_t)write_len);
+    serial_puts("\r\n");
+    int rc = fat32_write_file(path_buf, content_bytes, write_len);
+    serial_puts("[fat32-c] rt_file_write_text rc=");
+    serial_put_dec((int64_t)rc);
+    serial_puts("\r\n");
+    return rc == 0 ? 1 : 0;
 }
 
 static struct {
