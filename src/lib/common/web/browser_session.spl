@@ -86,6 +86,9 @@ class BrowserRuntimeState:
         val chrome_id = runtime.interpreter.object_store.create_object()
         val chrome_runtime_id = runtime.interpreter.object_store.create_object()
         runtime.interpreter.object_store.set_property(chrome_id, "runtime", JsValue.Object(id: chrome_runtime_id))
+        runtime.interpreter.object_store.set_property(chrome_id, "__simple_fetch_host", JsValue.Boolean(v: true))
+        runtime.interpreter.object_store.set_property(chrome_id, "__simple_base_url", JsValue.String(v: url))
+        runtime.interpreter.object_store.set_property(chrome_id, "__simple_cookie_header", JsValue.String(v: cookie_text))
 
         val session_storage_id = storage_object_from_pairs(runtime, session_storage)
         val local_storage_id = storage_object_from_pairs(runtime, local_storage)
@@ -108,6 +111,9 @@ class BrowserRuntimeState:
         runtime.interpreter.object_store.set_property(window_id, "chrome", JsValue.Object(id: chrome_id))
         runtime.interpreter.object_store.set_property(window_id, "sessionStorage", JsValue.Object(id: session_storage_id))
         runtime.interpreter.object_store.set_property(window_id, "localStorage", JsValue.Object(id: local_storage_id))
+        runtime.interpreter.object_store.set_property(window_id, "__simple_fetch_host", JsValue.Boolean(v: true))
+        runtime.interpreter.object_store.set_property(window_id, "__simple_base_url", JsValue.String(v: url))
+        runtime.interpreter.object_store.set_property(window_id, "__simple_cookie_header", JsValue.String(v: cookie_text))
 
         if val Some(console_val) = runtime.interpreter.env_stack.get_var(global_env, "console"):
             runtime.interpreter.object_store.set_property(window_id, "console", console_val)
@@ -130,8 +136,10 @@ class BrowserRuntimeState:
         runtime.interpreter.env_stack.define_var(global_env, "localStorage", JsValue.Object(id: local_storage_id))
 
         install_storage_api(runtime)
+        install_browser_fetch_api(runtime)
         sync_storage_runtime_state(runtime, session_storage_id, session_storage)
         sync_storage_runtime_state(runtime, local_storage_id, local_storage)
+        sync_browser_runtime_state(runtime, window_id, chrome_id, url, cookie_text)
 
         BrowserRuntimeState(
             runtime: runtime,
@@ -418,6 +426,7 @@ impl BrowserSession:
             "cookie",
             JsValue.String(v: visible_cookie_text)
         )
+        sync_browser_runtime_state(state.runtime, state.window_id, state.chrome_id, self.current_url, visible_cookie_text)
         state.runtime.interpreter.object_store.set_property(
             state.document_id,
             "readyState",
@@ -499,12 +508,21 @@ fn storage_pairs_from_object(state: BrowserRuntimeState, object_id: i64) -> [Pai
 fn install_storage_api(runtime: JsRuntime):
     val _ = runtime.eval(storage_api_bootstrap_js())
 
+fn install_browser_fetch_api(runtime: JsRuntime):
+    val _ = runtime.eval(browser_fetch_bootstrap_js())
+
 fn sync_storage_runtime_state(runtime: JsRuntime, object_id: i64, pairs: [Pair<text, text>]):
     runtime.interpreter.object_store.set_property(
         object_id,
         "length",
         JsValue.Number(v: pairs.len().to_f64())
     )
+
+fn sync_browser_runtime_state(runtime: JsRuntime, window_id: i64, chrome_id: i64, url: text, cookie_text: text):
+    runtime.interpreter.object_store.set_property(window_id, "__simple_base_url", JsValue.String(v: url))
+    runtime.interpreter.object_store.set_property(window_id, "__simple_cookie_header", JsValue.String(v: cookie_text))
+    runtime.interpreter.object_store.set_property(chrome_id, "__simple_base_url", JsValue.String(v: url))
+    runtime.interpreter.object_store.set_property(chrome_id, "__simple_cookie_header", JsValue.String(v: cookie_text))
 
 fn is_storage_api_property(key: text) -> bool:
     key == "__proto__" or
@@ -516,76 +534,76 @@ fn is_storage_api_property(key: text) -> bool:
     key == "length"
 
 fn storage_api_bootstrap_js() -> text:
-    "
-function __simpleStorageKeys(storage) {
-  var raw = Object.keys(storage);
-  var out = [];
-  var i = 0;
-  while (i < raw.length) {
-    var key = raw[i];
-    if (key !== 'getItem' &&
-        key !== 'setItem' &&
-        key !== 'removeItem' &&
-        key !== 'clear' &&
-        key !== 'key' &&
-        key !== 'length') {
-      out.push(key);
-    }
-    i = i + 1;
-  }
-  return out;
-}
+    join_text([
+        "function __simpleStorageKeys(storage) {{\n",
+        "  var raw = Object.keys(storage);\n",
+        "  var out = [];\n",
+        "  var i = 0;\n",
+        "  while (i < raw.length) {{\n",
+        "    var key = raw[i];\n",
+        "    if (key !== 'getItem' &&\n",
+        "        key !== 'setItem' &&\n",
+        "        key !== 'removeItem' &&\n",
+        "        key !== 'clear' &&\n",
+        "        key !== 'key' &&\n",
+        "        key !== 'length') {{\n",
+        "      out.push(key);\n",
+        "    }}\n",
+        "    i = i + 1;\n",
+        "  }}\n",
+        "  return out;\n",
+        "}}\n\n",
+        "function __simpleStorageSyncLength(storage) {{\n",
+        "  storage.length = __simpleStorageKeys(storage).length;\n",
+        "}}\n\n",
+        "function __simpleInstallStorageApi(storage) {{\n",
+        "  storage.getItem = function(key) {{\n",
+        "    var name = '' + key;\n",
+        "    var value = this[name];\n",
+        "    if (value === undefined) {{\n",
+        "      return null;\n",
+        "    }}\n",
+        "    return '' + value;\n",
+        "  }};\n\n",
+        "  storage.setItem = function(key, value) {{\n",
+        "    var name = '' + key;\n",
+        "    this[name] = '' + value;\n",
+        "    __simpleStorageSyncLength(this);\n",
+        "  }};\n\n",
+        "  storage.removeItem = function(key) {{\n",
+        "    var name = '' + key;\n",
+        "    delete this[name];\n",
+        "    __simpleStorageSyncLength(this);\n",
+        "  }};\n\n",
+        "  storage.clear = function() {{\n",
+        "    var keys = __simpleStorageKeys(this);\n",
+        "    var i = 0;\n",
+        "    while (i < keys.length) {{\n",
+        "      delete this[keys[i]];\n",
+        "      i = i + 1;\n",
+        "    }}\n",
+        "    __simpleStorageSyncLength(this);\n",
+        "  }};\n\n",
+        "  storage.key = function(index) {{\n",
+        "    var keys = __simpleStorageKeys(this);\n",
+        "    if (index < 0 || index >= keys.length) {{\n",
+        "      return null;\n",
+        "    }}\n",
+        "    return keys[index];\n",
+        "  }};\n\n",
+        "  __simpleStorageSyncLength(storage);\n",
+        "}}\n\n",
+        "__simpleInstallStorageApi(sessionStorage);\n",
+        "__simpleInstallStorageApi(localStorage);\n"
+    ], "")
 
-function __simpleStorageSyncLength(storage) {
-  storage.length = __simpleStorageKeys(storage).length;
-}
-
-function __simpleInstallStorageApi(storage) {
-  storage.getItem = function(key) {
-    var name = '' + key;
-    var value = this[name];
-    if (value === undefined) {
-      return null;
-    }
-    return '' + value;
-  };
-
-  storage.setItem = function(key, value) {
-    var name = '' + key;
-    this[name] = '' + value;
-    __simpleStorageSyncLength(this);
-  };
-
-  storage.removeItem = function(key) {
-    var name = '' + key;
-    delete this[name];
-    __simpleStorageSyncLength(this);
-  };
-
-  storage.clear = function() {
-    var keys = __simpleStorageKeys(this);
-    var i = 0;
-    while (i < keys.length) {
-      delete this[keys[i]];
-      i = i + 1;
-    }
-    __simpleStorageSyncLength(this);
-  };
-
-  storage.key = function(index) {
-    var keys = __simpleStorageKeys(this);
-    if (index < 0 || index >= keys.length) {
-      return null;
-    }
-    return keys[index];
-  };
-
-  __simpleStorageSyncLength(storage);
-}
-
-__simpleInstallStorageApi(sessionStorage);
-__simpleInstallStorageApi(localStorage);
-"
+fn browser_fetch_bootstrap_js() -> text:
+    join_text([
+        "window.fetchSync = function(url, method, headersText, body, contentType) {\n",
+        "  return chrome.fetchSync(url, method, headersText, body, contentType);\n",
+        "};\n",
+        "window.fetch = window.fetchSync;\n"
+    ], "")
 
 fn pair_value(pairs: [Pair<text, text>], key: text) -> text?:
     var i = 0

@@ -1690,6 +1690,9 @@ RuntimeValue rt_fat32_select_file(RuntimeValue name_rv)
     __builtin_memcpy(_fat32_selected_name, name, name_len);
     _fat32_selected_name[name_len] = '\0';
     _fat32_selected_name_len = name_len;
+    serial_puts("[fat32-c] select name=");
+    serial_puts(_fat32_selected_name);
+    serial_puts("\r\n");
     return TRUE_VALUE;
 }
 
@@ -1706,7 +1709,18 @@ RuntimeValue rt_fat32_write_selected_file_text(RuntimeValue content_rv)
             content_len = s->len;
         }
     }
+    serial_puts("[fat32-c] write_selected name=");
+    serial_puts(_fat32_selected_name);
+    serial_puts(" len=");
+    serial_put_dec((int64_t)content_len);
+    serial_puts("\r\n");
     return fat32_write_file(_fat32_selected_name, content, content_len) == 0 ? TRUE_VALUE : FALSE_VALUE;
+}
+
+RuntimeValue rt_fat32_write_editor_smoke(void)
+{
+    static const uint8_t content[] = "SimpleOS editor smoke saved from GUI";
+    return fat32_write_file("EDITOR.TXT", content, (uint32_t)(sizeof(content) - 1)) == 0 ? TRUE_VALUE : FALSE_VALUE;
 }
 
 static struct {

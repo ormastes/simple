@@ -13,6 +13,9 @@ use std.js.types.ast_types.SwitchCase
 use std.js.engine.runtime.{dispatch_native}
 use std.js.builtins.array.{array_map, array_filter, array_reduce, array_forEach, array_find, array_findIndex, array_some, array_every, array_sort_with, array_isArray, array_from_values}
 
+extern fn rt_file_read_text(path: text) -> text
+extern fn rt_http_request(method: text, url: text, headers: text, body: text) -> (i64, text, text)
+
 # ── Types, helpers, coercion (extracted to interpreter_types.spl) ────────
 use std.js.engine.interpreter_types.{Environment, EnvironmentStack, CallFrame, JsFunction, to_number, js_to_string, to_boolean, is_truthy, typeof_value, strict_equals, abstract_equals, RETURN_SIGNAL, _is_array_method, _is_string_method, _get_obj_id, _get_fn_id, f64_to_i64}
 
@@ -25,6 +28,136 @@ fn _ident_name(expr: Expression) -> text:
     match expr:
         Expression.Identifier(name): name
         _: ""
+
+fn _simple_fetch_marker(obj_id: i64, store: ObjectStore) -> bool:
+    match store.get_property(obj_id, "__simple_fetch_host"):
+        JsValue.Boolean(v): v
+        _:
+            false
+
+fn _simple_fetch_base_url(obj_id: i64, store: ObjectStore) -> text:
+    match store.get_property(obj_id, "__simple_base_url"):
+        JsValue.String(v): v
+        _:
+            ""
+
+fn _simple_fetch_cookie_header(obj_id: i64, store: ObjectStore) -> text:
+    match store.get_property(obj_id, "__simple_cookie_header"):
+        JsValue.String(v): v
+        _:
+            ""
+
+fn _scheme(url: text) -> text:
+    match url.index_of("://"):
+        Some(idx): url.substring(0, idx)
+        nil: "https"
+
+fn _origin(url: text) -> text:
+    val scheme_end_opt = url.index_of("://")
+    match scheme_end_opt:
+        Some(scheme_end):
+            val after_scheme = scheme_end + 3
+            match url.substring(after_scheme).index_of("/"):
+                Some(rel_idx): url.substring(0, after_scheme + rel_idx)
+                nil: url
+        nil:
+            ""
+
+fn _without_fragment(url: text) -> text:
+    match url.index_of("#"):
+        Some(idx): url.substring(0, idx)
+        nil: url
+
+fn _without_query(url: text) -> text:
+    val clean = _without_fragment(url)
+    match clean.index_of("?"):
+        Some(idx): clean.substring(0, idx)
+        nil: clean
+
+fn _base_dir(url: text) -> text:
+    val clean = _without_query(url)
+    val origin = _origin(clean)
+    if origin == "":
+        return ""
+    if clean == origin:
+        return origin + "/"
+    val after_origin = clean.substring(origin.len())
+    match after_origin.last_index_of("/"):
+        Some(rel_idx): origin + after_origin.substring(0, rel_idx + 1)
+        nil: origin + "/"
+
+fn _resolve_fetch_url(base_url: text, href: text) -> text:
+    if href == "":
+        return base_url
+    if href.starts_with("http://") or href.starts_with("https://") or href.starts_with("file://") or href.starts_with("about:"):
+        return href
+    if href.starts_with("//"):
+        return _scheme(base_url) + ":" + href
+    if href.starts_with("#"):
+        return _without_fragment(base_url) + href
+    if href.starts_with("?"):
+        return _without_query(base_url) + href
+    if href.starts_with("/"):
+        val origin = _origin(base_url)
+        if origin != "":
+            return origin + href
+        return href
+    _base_dir(base_url) + href
+
+fn _simple_fetch_sync(store: ObjectStore, obj_id: i64, args: [JsValue]) -> JsValue:
+    var request_url = _simple_fetch_base_url(obj_id, store)
+    if args.len() > 0:
+        request_url = _resolve_fetch_url(request_url, js_to_string(args.get(0)))
+    var method = "GET"
+    if args.len() > 1:
+        val maybe_method = js_to_string(args.get(1)).trim().to_upper()
+        if maybe_method != "":
+            method = maybe_method
+    var headers_text = ""
+    if args.len() > 2:
+        headers_text = js_to_string(args.get(2))
+    val cookie_header = _simple_fetch_cookie_header(obj_id, store)
+    if cookie_header != "":
+        if headers_text != "":
+            headers_text = headers_text + "\n"
+        headers_text = headers_text + "Cookie: " + cookie_header
+    var body = ""
+    if args.len() > 3:
+        body = js_to_string(args.get(3))
+    var content_type = ""
+    if args.len() > 4:
+        content_type = js_to_string(args.get(4))
+    if content_type != "":
+        if headers_text != "":
+            headers_text = headers_text + "\n"
+        headers_text = headers_text + "Content-Type: " + content_type
+
+    var status: i64 = 0
+    var response_body = ""
+    var error_text = ""
+    if request_url.starts_with("file://"):
+        val path = request_url.slice(7, request_url.len())
+        val content = rt_file_read_text(path) ?? ""
+        if content != "":
+            status = 200
+            response_body = content
+        else:
+            status = 404
+            error_text = "file not found"
+    else:
+        val result = rt_http_request(method, request_url, headers_text, body)
+        status = result.0
+        response_body = result.1
+        error_text = result.2
+
+    val response_id = store.create_object()
+    store.set_property(response_id, "url", JsValue.String(v: request_url))
+    store.set_property(response_id, "status", JsValue.Number(v: status.to_f64()))
+    store.set_property(response_id, "ok", JsValue.Boolean(v: status >= 200 and status < 300 and error_text == ""))
+    store.set_property(response_id, "headersText", JsValue.String(v: ""))
+    store.set_property(response_id, "body", JsValue.String(v: response_body))
+    store.set_property(response_id, "error", JsValue.String(v: error_text))
+    JsValue.Object(id: response_id)
 
 # ── Interpreter ──────────────────────────────────────────────────────────
 
@@ -1220,6 +1353,17 @@ class JsInterpreter:
                         self.object_store.set_property(new_id, "length", JsValue.Number(v: arr_len.to_f64()))
                         return Ok(JsValue.Array(id: new_id))
                 return Ok(JsValue.Array(id: self.object_store.create_object()))
+
+        if is_member and member_method == "fetchSync":
+            val host_val = self.eval_expression(member_obj_expr, env)?
+            val host_id = _get_obj_id(host_val)
+            if host_id >= 0 and _simple_fetch_marker(host_id, self.object_store):
+                var arg_vals: [JsValue] = []
+                var fi = 0
+                while fi < args.len():
+                    arg_vals.push(self.eval_expression(args.get(fi), env)?)
+                    fi = fi + 1
+                return Ok(_simple_fetch_sync(self.object_store, host_id, arg_vals))
 
         val callee_val = self.eval_expression(callee, env)?
 

@@ -1,11 +1,12 @@
 use os.userlib.device.{DeviceEntry, enumerate_devices}
+use os.drivers.usb.xhci_driver.{xhci_probe, xhci_init}
+use os.drivers.usb.xhci_enum.{xhci_enumerate, UsbDevice}
 
-## List USB host controllers found on the PCI bus.
+## List USB host controllers + attached USB devices.
 ## Flags: -h (help)
 ##
-## Filters PCI class 0x0C, subclass 0x03 (USB controller).
-## prog_if (UHCI/OHCI/EHCI/XHCI distinction) is not exposed by DeviceEntry,
-## so all USB controllers are reported generically as "USB Controller".
+## First lists PCI USB controllers (class 0x0C, subclass 0x03), then probes
+## XHCI and enumerates any attached USB devices via port scan + descriptor fetch.
 
 val USB_CLASS: u8 = 0x0C
 val USB_SUBCLASS: u8 = 0x03
@@ -51,5 +52,26 @@ fn run_lsusb(args: [text]) -> i32:
 
     if found == 0:
         print "No USB host controllers found"
+
+    # Attempt XHCI device enumeration for attached USB devices
+    val ctrl_opt = xhci_probe()
+    if val Some(ctrl) = ctrl_opt:
+        if val Ok(_) = xhci_init(ctrl):
+            val devices = xhci_enumerate(ctrl)
+            if devices.len() == 0:
+                print ""
+                print "No USB devices attached"
+            else:
+                print ""
+                print "Attached USB devices:"
+                for dev in devices:
+                    val bus = dev.bus
+                    val port = dev.port
+                    val slot = dev.slot
+                    val vid = dev.vid
+                    val pid = dev.pid
+                    val cls = dev.dev_class
+                    val spd = dev.speed
+                    print "  Bus {bus:02x} Port {port:02x} Slot {slot}: ID {vid:04x}:{pid:04x} (class {cls:02x}, speed {spd})"
 
     0

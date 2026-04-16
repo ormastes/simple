@@ -295,6 +295,12 @@ fn xhci_ring_doorbell(ctrl: XhciController, slot: u32, target: u32):
 # Command Submission
 # ============================================================================
 
+# Result type for commands that return both completion code and slot ID
+class CmdCompletionResult:
+    """Result of an xHCI command completion event."""
+    completion_code: u32   # Completion code from event status bits [31:24]
+    slot_id: u32           # Slot ID from event control bits [31:24]
+
 fn xhci_send_command(ctrl: XhciController, trb_type: u32, param: u64, slot: u32) -> Result<u32, text>:
     """Enqueue a command TRB, ring doorbell, poll event ring for completion.
 
@@ -337,3 +343,44 @@ fn xhci_send_command(ctrl: XhciController, trb_type: u32, param: u64, slot: u32)
         return Result.Err("xhci: command timeout — no completion event")
 
     Result.Ok(completion_code)
+
+fn xhci_send_command_with_slot(ctrl: XhciController, trb_type: u32, param: u64, slot: u32) -> Result<CmdCompletionResult, text>:
+    """Enqueue a command TRB, ring doorbell, poll event ring for completion.
+
+    Like xhci_send_command, but returns both the completion code and the
+    slot ID from the command completion event (bits [31:24] of control word).
+    Used for Enable Slot commands where the hardware assigns a slot ID.
+    """
+    val cycle_bit: u32 = if ctrl.event_ring_cycle: 1 else: 0
+    val control = (trb_type << 10) | cycle_bit
+    trb_write(ctrl.cmd_ring, param, 0, control)
+
+    # Ring host-controller doorbell (slot=0, target=0)
+    xhci_ring_doorbell(ctrl, 0, 0)
+
+    # Poll event ring for a CMD_COMPLETION event
+    val evt_base = ctrl.event_ring_base
+    var poll_i: u32 = 0
+    var found = false
+    var completion_code: u32 = 0
+    var out_slot_id: u32 = 0
+
+    while poll_i < POLL_CMD_ITERS and not found:
+        val trb_addr = evt_base + (poll_i % EVENT_RING_SEGMENT_SIZE * 16).to_u64()
+        val status = mmio_read32(trb_addr + 8)
+        val control_word = mmio_read32(trb_addr + 12)
+        val evt_type = (control_word >> 10) & 0x3F
+        val evt_cycle = control_word & 1
+        val expected_cycle: u32 = if ctrl.event_ring_cycle: 1 else: 0
+        if evt_type == TRB_TYPE_CMD_COMPLETION and evt_cycle == expected_cycle:
+            completion_code = (status >> 24) & 0xFF
+            out_slot_id = (control_word >> 24) & 0xFF
+            found = true
+            val next_dequeue = evt_base + ((poll_i % EVENT_RING_SEGMENT_SIZE + 1) * 16).to_u64()
+            xhci_rt_write64(ctrl, 0, 0x18, next_dequeue)
+        poll_i = poll_i + 1
+
+    if not found:
+        return Result.Err("xhci: command timeout — no completion event")
+
+    Result.Ok(CmdCompletionResult(completion_code: completion_code, slot_id: out_slot_id))
