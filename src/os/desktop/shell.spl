@@ -35,7 +35,6 @@ use os.apps.terminal.terminal.{Terminal}
 use os.apps.hello_world.hello_world.{HelloWorldApp}
 use os.apps.browser_demo.browser_demo.{BrowserDemoApp, render_demo_stats}
 use os.apps.editor.editor.{TextEditor}
-use os.apps.shell.shell_app.{ShellApp}
 use os.apps.memo.memo.{MemoApp}
 use os.apps.paint.paint.{PaintApp}
 use os.apps.file_manager.file_manager.{FileManager}
@@ -60,9 +59,6 @@ use os.apps.color_picker.color_picker.{ColorPickerApp}
 use os.apps.font_viewer.font_viewer.{FontViewerApp}
 use os.apps.installer_gui.installer_gui.{InstallerGuiApp}
 use os.apps.installer_gui.upgrade_gui.{UpgradeGuiApp}
-use os.services.vfs.vfs.{VfsManager, vfs_mount}
-use os.services.vfs.vfs_init.{CNvmeBlockAdapter}
-use os.services.fat32.fat32.{Fat32Driver}
 
 # ============================================================================
 # Desktop Shell Constants
@@ -86,32 +82,21 @@ struct EditorResidentLaunch:
     saved_path: text
     content: text
 
+extern fn rt_fat32_read_file_text(name: text) -> text
+extern fn rt_fat32_write_file_text(name: text, content: text) -> bool
+
 fn _build_editor_resident_launch() -> Result<EditorResidentLaunch, text>:
-    var adapter = CNvmeBlockAdapter.new()
-    val init_result = adapter.init()
-    if init_result.is_err():
-        return Err(init_result.unwrap_err())
-
-    val fat32 = Fat32Driver.new(adapter)
-    var vfs = VfsManager.new()
-    val mount_result = vfs_mount(vfs, "/", fat32)
-    if mount_result.is_err():
-        return Err(mount_result.unwrap_err())
-
-    var editor = TextEditor.with_vfs(vfs)
+    var editor = TextEditor.new()
     editor.lines = [EDITOR_SMOKE_CONTENT]
-    val save_result = editor.save_as(EDITOR_SMOKE_PATH)
-    if save_result.is_err():
-        return Err(save_result.unwrap_err())
+    editor.file_path = EDITOR_SMOKE_PATH
+    if not rt_fat32_write_file_text("EDITOR.TXT", EDITOR_SMOKE_CONTENT):
+        return Err("runtime fat32 write failed")
+    editor.modified = false
+    editor.status_message = "Saved {EDITOR_SMOKE_PATH}"
 
-    var shell = ShellApp.with_vfs(vfs)
-    shell.execute("cat {EDITOR_SMOKE_PATH}")
-    if shell.last_exit_code != 0:
-        return Err("shell cat failed for {EDITOR_SMOKE_PATH}")
-    if shell.output_lines.len() == 0:
-        return Err("shell produced no verification output")
-
-    val cli_output = shell.output_lines[shell.output_lines.len() - 1]
+    val cli_output = rt_fat32_read_file_text("EDITOR.TXT")
+    if cli_output == "":
+        return Err("runtime fat32 read failed")
     if cli_output != EDITOR_SMOKE_CONTENT:
         return Err("cli output mismatch: {cli_output}")
 

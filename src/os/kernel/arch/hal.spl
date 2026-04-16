@@ -5,8 +5,8 @@
 # implementations via @cfg conditional compilation.
 #
 # x86_64: fully implemented, delegates to x86_64/ submodules.
-# arm64: Phase A+B implemented (console, cpu, boot, paging, interrupts, timer). Context (Phase C) pending.
-# riscv64: Phase A+B implemented (console, cpu, boot, paging, interrupts, timer). Context (Phase C) pending.
+# arm64: Phase A+B+C implemented (console, cpu, boot, paging, interrupts, timer, context switch).
+# riscv64: Phase A+B+C implemented (console, cpu, boot, paging, interrupts, timer, context switch).
 # arm32, riscv32: pass_todo — awaiting arch implementations.
 #
 # Compile-time arch selection: @cfg(x86_64), @cfg(arm64), etc.
@@ -33,6 +33,7 @@ use os.kernel.arch.arm64.cpu.{daif_set, daif_clr, wfi, tlbi_vae1, tlbi_alle1, ds
 use os.kernel.arch.arm64.paging.{Arm64Paging}
 use os.kernel.arch.arm64.interrupt.{Arm64Interrupt}
 use os.kernel.arch.arm64.timer.{Arm64Timer}
+use os.kernel.arch.arm64.context.{Arm64ContextSwitch}
 
 # riscv64 arch imports
 use os.kernel.arch.riscv64.console.{serial_init as rv64_serial_init, serial_write_byte as rv64_serial_write_byte, serial_write as rv64_serial_write, serial_writeln as rv64_serial_writeln}
@@ -41,6 +42,7 @@ use os.kernel.arch.riscv64.cpu.{csrc_sstatus, csrs_sstatus, wfi as rv64_wfi, sfe
 use os.kernel.arch.riscv64.paging.{Rv64Paging, vmm_init as rv64_vmm_init, vmm_map_page as rv64_vmm_map_page, vmm_unmap_page as rv64_vmm_unmap_page, vmm_translate as rv64_vmm_translate, vmm_create_address_space as rv64_vmm_create_address_space, vmm_switch_address_space as rv64_vmm_switch_address_space}
 use os.kernel.arch.riscv64.interrupt.{Rv64Interrupt}
 use os.kernel.arch.riscv64.timer.{Rv64Timer}
+use os.kernel.arch.riscv64.context.{Rv64ContextSwitch}
 
 # ============================================================================
 # Traits (interface definitions)
@@ -955,7 +957,9 @@ fn hal_context_save() -> ArchContext:
 @cfg(arm64)
 fn hal_context_save() -> ArchContext:
     """Save CPU state — arch: arm64 x0..x30 + sp + elr + spsr."""
-    pass_todo("arch: arm64 context save not yet implemented")
+    var ctx_switch = Arm64ContextSwitch()
+    val arm_ctx = ctx_switch.save_current()
+    ArchContext.Arm64(ctx: arm_ctx)
 
 @cfg(arm32)
 fn hal_context_save() -> ArchContext:
@@ -965,7 +969,8 @@ fn hal_context_save() -> ArchContext:
 @cfg(riscv64)
 fn hal_context_save() -> ArchContext:
     """Save CPU state — arch: riscv64 x1..x31 + sepc + sstatus."""
-    pass_todo("arch: riscv64 context save not yet implemented")
+    var ctx_switch = Rv64ContextSwitch()
+    ctx_switch.save()
 
 @cfg(riscv32)
 fn hal_context_save() -> ArchContext:
@@ -987,7 +992,12 @@ fn hal_context_restore(ctx: ArchContext):
 @cfg(arm64)
 fn hal_context_restore(ctx: ArchContext):
     """Restore CPU state — arch: arm64."""
-    pass_todo("arch: arm64 context restore not yet implemented")
+    match ctx:
+        ArchContext.Arm64(arm_ctx):
+            var ctx_switch = Arm64ContextSwitch()
+            ctx_switch.restore(arm_ctx)
+        _:
+            pass_do_nothing
 
 @cfg(arm32)
 fn hal_context_restore(ctx: ArchContext):
@@ -997,7 +1007,8 @@ fn hal_context_restore(ctx: ArchContext):
 @cfg(riscv64)
 fn hal_context_restore(ctx: ArchContext):
     """Restore CPU state — arch: riscv64."""
-    pass_todo("arch: riscv64 context restore not yet implemented")
+    var ctx_switch = Rv64ContextSwitch()
+    ctx_switch.restore(ctx)
 
 @cfg(riscv32)
 fn hal_context_restore(ctx: ArchContext):
@@ -1016,7 +1027,9 @@ fn hal_context_init(entry: u64, stack: u64, arg: u64) -> ArchContext:
 @cfg(arm64)
 fn hal_context_init(entry: u64, stack: u64, arg: u64) -> ArchContext:
     """Create task context — arch: arm64 set elr=entry, sp=stack, x0=arg."""
-    pass_todo("arch: arm64 context init not yet implemented")
+    var ctx_switch = Arm64ContextSwitch()
+    val arm_ctx = ctx_switch.create_kernel_with_arg(entry, stack, arg)
+    ArchContext.Arm64(ctx: arm_ctx)
 
 @cfg(arm32)
 fn hal_context_init(entry: u64, stack: u64, arg: u64) -> ArchContext:
@@ -1026,7 +1039,8 @@ fn hal_context_init(entry: u64, stack: u64, arg: u64) -> ArchContext:
 @cfg(riscv64)
 fn hal_context_init(entry: u64, stack: u64, arg: u64) -> ArchContext:
     """Create task context — arch: riscv64 set sepc=entry, sp=stack, a0=arg."""
-    pass_todo("arch: riscv64 context init not yet implemented")
+    var ctx_switch = Rv64ContextSwitch()
+    ctx_switch.context_init(entry, stack, arg)
 
 @cfg(riscv32)
 fn hal_context_init(entry: u64, stack: u64, arg: u64) -> ArchContext:
