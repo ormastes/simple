@@ -21,6 +21,26 @@ use os.drivers.virtio.virtio_gpu.{VirtioGpuDriver}
 use os.kernel.boot.mmio.{mmio_write32, mmio_read32}
 
 # ============================================================================
+# Platform Capability Probe
+# ============================================================================
+
+class PlatformCaps:
+    """Minimal capability record produced by the OS platform probe."""
+    has_gpu: bool
+
+# ============================================================================
+# Backend Factory Functions (used by select_backend)
+# ============================================================================
+
+fn make_fb_compositor_backend(fb: FramebufferDriver) -> FbCompositorBackend:
+    """Construct the software framebuffer compositor backend."""
+    FbCompositorBackend.new(fb)
+
+fn make_gpu_compositor_backend(gpu: VirtioGpuDriver) -> GpuCompositorBackend:
+    """Construct the VirtIO-GPU compositor backend."""
+    GpuCompositorBackend.new(gpu)
+
+# ============================================================================
 # Compositor Backend Trait
 # ============================================================================
 
@@ -490,3 +510,19 @@ impl GpuCompositorBackend:
         val gw = gpu.width.to_i32()
         val gh = gpu.height.to_i32()
         GpuCompositorBackend(gpu: gpu, w: gw, h: gh)
+
+# ============================================================================
+# OS-Tier Backend Selector
+# ============================================================================
+
+fn select_backend(caps: PlatformCaps, fb: FramebufferDriver, gpu: VirtioGpuDriver) -> CompositorBackend:
+    """Select the compositor backend based on platform capability.
+
+    Routes to the GPU path (Engine2D via compositor_engine2d adapter) when
+    caps.has_gpu is true, or falls back to the software framebuffer path.
+    """
+    if caps.has_gpu:
+        # GPU path — delegates to Engine2D via compositor_engine2d adapter
+        return make_gpu_compositor_backend(gpu)
+    # Software fallback — framebuffer + lib rasterizer
+    make_fb_compositor_backend(fb)

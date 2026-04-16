@@ -5,10 +5,9 @@
 # HTML page through the browser_engine pipeline:
 #
 #   HTML -> DOM (html_string_to_dom)
-#        -> BrowserRenderer.render_dom_to_engine
-#        -> layout -> paint -> scene
-#        -> execute_scene_to_engine2d
-#        -> Engine2D (BaremetalBackend)
+#        -> BrowserRenderer.render_dom_to_pixels
+#        -> layout -> paint -> scene -> software rasterizer
+#        -> framebuffer blit
 #        -> BGA framebuffer
 #
 # This is the first in-guest demonstration of actual HTML rendering
@@ -17,17 +16,25 @@
 #
 # Boot sequence:
 #   1. Serial init
-#   2. BGA framebuffer init (1024x768x32)
-#   3. Create FramebufferDriver from boot info
-#   4. create_baremetal_browser_renderer(fb)
-#   5. html_string_to_dom(welcome_html())
-#   6. renderer.render_dom_to_engine(dom)
-#   7. Halt loop (no Compositor, no DesktopShell)
+#   2. Install bootstrap trap + syscall shim exports
+#   3. BGA framebuffer init (1024x768x32)
+#   4. Create FramebufferDriver from boot info
+#   5. Create BrowserRenderer
+#   6. html_string_to_dom(welcome_html())
+#   7. renderer.render_dom_to_pixels(dom)
+#   8. Blit pixels to FramebufferDriver
+#   9. Halt loop (no Compositor, no DesktopShell)
 
 use os.kernel.arch.x86_64.console.{serial_init, serial_writeln}
+use os.kernel.arch.x86_64.interrupt.{X86Interrupt}
+use os.kernel.arch.x86_64.arch_init.{arch_x86_64_early_init}
+use os.kernel.abi.syscall_shim.{shim_init}
+use os.kernel.scheduler.scheduler.{Scheduler}
+use os.kernel.ipc.ipc.{IpcManager}
+use os.kernel.log.klog.{KernelLog}
 use os.drivers.framebuffer.bga_init.{bga_init_framebuffer}
-use os.drivers.framebuffer.fb_driver.{FramebufferDriver}
-use std.gc_async_mut.gpu.browser_engine.browser_engine2d_bridge.{create_baremetal_browser_renderer}
+use os.drivers.framebuffer.fb_driver.{FramebufferDriver, Color}
+use std.gc_async_mut.gpu.browser_engine.browser_renderer.{BrowserRenderer}
 use std.gc_async_mut.gpu.browser_engine.widget_to_dom.{html_string_to_dom}
 use examples.simple_os.assets.welcome.{welcome_html}
 
@@ -35,17 +42,32 @@ extern fn serial_println(msg: text)
 extern fn rt_gui_set_fb(addr: u64, width: u64)
 extern fn rt_hlt()
 
-fn spl_start():
-    """x86_64 GUI entry -- browser_engine + Engine2D + BaremetalBackend.
+fn _argb_to_color(pixel: u32) -> Color:
+    Color(
+        r: ((pixel >> 16) & 0xFF) as u8,
+        g: ((pixel >> 8) & 0xFF) as u8,
+        b: (pixel & 0xFF) as u8,
+        a: ((pixel >> 24) & 0xFF) as u8
+    )
 
-    Initializes the BGA framebuffer, constructs a BrowserRenderer bound
-    to the real framebuffer via BaremetalBackend, parses the SimpleOS
-    welcome HTML into a DOM, and runs the full browser_engine pipeline
-    through Engine2D. The rendered frame is preserved via a halt loop.
+fn spl_start():
+    """x86_64 GUI entry -- browser_engine + software rasterizer + framebuffer.
+
+    Initializes the BGA framebuffer, parses the SimpleOS welcome HTML
+    into a DOM, renders it through the in-repo browser_engine pipeline to
+    a software pixel buffer, and blits that buffer to the real framebuffer.
+    The rendered frame is preserved via a halt loop for QMP capture.
     """
     serial_init()
     serial_writeln("SimpleOS x86_64 GUI boot (BGA mode, browser_engine variant)")
     serial_writeln("[BOOT] COM1 serial initialized at 0x3F8")
+
+    # Mirror the desktop wrapper boot path enough to install the strong
+    # syscall shim exports required by the freestanding linker aliases.
+    arch_x86_64_early_init()
+    shim_init(Scheduler.new(), IpcManager.new(), KernelLog.new(256))
+    if not X86Interrupt.runtime_installed():
+        X86Interrupt.install_bootstrap_runtime(64)
 
     # BGA framebuffer
     serial_writeln("[BOOT] Initializing BGA framebuffer (1024x768x32)...")
@@ -63,8 +85,8 @@ fn spl_start():
     serial_println("[GUI] FramebufferDriver created")
 
     # ---- Browser engine pipeline ----
-    serial_println("[BE] Creating BrowserRenderer (Engine2D + BaremetalBackend)...")
-    var renderer = create_baremetal_browser_renderer(fb)
+    serial_println("[BE] Creating BrowserRenderer...")
+    var renderer = BrowserRenderer.create(fb.width.to_i32(), fb.height.to_i32())
     serial_println("[BE] BrowserRenderer created")
 
     serial_println("[BE] Loading welcome HTML...")
@@ -75,9 +97,22 @@ fn spl_start():
     val dom = html_string_to_dom(html)
     serial_println("[BE] DOM parsed")
 
-    serial_println("[BE] Rendering DOM through Engine2D pipeline...")
-    renderer.render_dom_to_engine(dom)
-    serial_println("[BE] Frame painted: HTML -> DOM -> layout -> paint -> scene -> Engine2D -> framebuffer")
+    serial_println("[BE] Rendering DOM to pixels...")
+    val result = renderer.render_dom_to_pixels(dom)
+    serial_println("[BE] Pixel buffer generated")
+
+    serial_println("[BE] Blitting pixels to framebuffer...")
+    val pixels = result.pixel_data
+    var y: u32 = 0
+    while y < fb.height:
+        var x: u32 = 0
+        while x < fb.width:
+            val idx = (y * fb.width + x).to_i64()
+            if idx < pixels.length().to_i64():
+                fb.put_pixel(x, y, _argb_to_color(pixels[idx]))
+            x = x + 1
+        y = y + 1
+    serial_println("[BE] Frame painted: HTML -> DOM -> layout -> paint -> scene -> software rasterizer -> framebuffer")
 
     serial_println("[GUI] Entering halt loop (rendered frame held for QMP capture)")
     while true:

@@ -1,0 +1,92 @@
+@allow(primitive_api)
+# game2d — SpriteBatch
+#
+# Groups sprites sharing the same texture_id, sorts by z-order,
+# and flushes them to an Engine2D via draw_image calls.
+#
+# Usage:
+#   use std.game2d.batch.{SpriteBatch}
+
+use std.gpu.engine2d.engine.{Engine2D}
+use std.game2d.sprite.{Sprite}
+
+# ============================================================================
+# SpriteBatch
+# ============================================================================
+
+class SpriteBatch:
+    """Collection of Sprites sharing a texture, flushed together sorted by z.
+
+    flush() draws each visible sprite onto the Engine2D using draw_image
+    with a solid-color placeholder pixel array (real texture lookup would
+    require a TextureRegistry not defined in this module).
+    """
+
+    texture_id: u64
+    sprites: [Sprite]
+
+    static fn create(texture_id: u64) -> SpriteBatch:
+        """Create an empty batch for the given texture."""
+        SpriteBatch(texture_id: texture_id, sprites: [])
+
+    me add(sprite: Sprite):
+        """Append a sprite to the batch."""
+        self.sprites.push(sprite)
+
+    me clear():
+        """Remove all sprites."""
+        self.sprites = []
+
+    fn len() -> i32:
+        """Return the number of sprites in this batch."""
+        self.sprites.len()
+
+    # -------------------------------------------------------------------------
+    # Sorting (insertion sort — batches are typically small)
+    # -------------------------------------------------------------------------
+
+    me _sort_by_z():
+        """Sort sprites ascending by z (lower z drawn first)."""
+        val n = self.sprites.len()
+        var i = 1
+        while i < n:
+            var j = i
+            while j > 0 and _sprite_z(self.sprites[j-1]) > _sprite_z(self.sprites[j]):
+                val tmp = self.sprites[j]
+                self.sprites[j] = self.sprites[j-1]
+                self.sprites[j-1] = tmp
+                j = j - 1
+            i = i + 1
+
+    # -------------------------------------------------------------------------
+    # Flush
+    # -------------------------------------------------------------------------
+
+    me flush(engine: Engine2D):
+        """Sort and draw all visible sprites onto engine.
+
+        Each sprite is drawn as a filled rectangle tinted with its tint_color.
+        The position is taken from the world_position() of the sprite's transform.
+        """
+        self._sort_by_z()
+        for sprite in self.sprites:
+            if not sprite.visible:
+                continue
+            val (wx, wy) = sprite.transform.world_position()
+            val px = _f64_to_i32(wx)
+            val py = _f64_to_i32(wy)
+            val w = sprite.width
+            val h = sprite.height
+            # Build a flat pixel buffer filled with tint_color
+            val total = w * h
+            var pixels: [u32] = [sprite.tint_color; total]
+            engine.draw_image(px, py, w, h, pixels)
+
+# ============================================================================
+# Helpers
+# ============================================================================
+
+fn _sprite_z(s: Sprite) -> f32:
+    s.z
+
+@extern fn _f64_to_i32(x: f64) -> i32

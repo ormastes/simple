@@ -1,0 +1,144 @@
+@allow(primitive_api)
+# game2d — Transform2D
+#
+# 2D spatial transform: position, rotation, scale, optional parent.
+# World-matrix is cached and recomputed lazily when dirty.
+#
+# Usage:
+#   use std.game2d.transform.{Transform2D}
+
+# ============================================================================
+# Transform2D
+# ============================================================================
+
+class Transform2D:
+    """2D spatial transform with position, rotation, scale and optional parent.
+
+    Caches the world-space 3x3 affine matrix as a flat 9-element f64 array
+    [m00, m01, m02, m10, m11, m12, m20, m21, m22] (row-major).
+    The cache is invalidated whenever any field is mutated.
+
+    Parent chain is followed during world-matrix computation so child
+    transforms are expressed relative to their parent.
+    """
+
+    pos_x: f64
+    pos_y: f64
+    rotation: f64
+    scale_x: f64
+    scale_y: f64
+    parent: Transform2D?
+    _matrix_cache: [f64]
+    _dirty: bool
+
+    static fn create(px: f64, py: f64) -> Transform2D:
+        """Create a transform at (px, py) with no rotation, unit scale."""
+        Transform2D(
+            pos_x: px,
+            pos_y: py,
+            rotation: 0.0,
+            scale_x: 1.0,
+            scale_y: 1.0,
+            parent: nil,
+            _matrix_cache: [0.0; 9],
+            _dirty: true
+        )
+
+    static fn create_full(px: f64, py: f64, rot: f64, sx: f64, sy: f64) -> Transform2D:
+        """Create a transform with explicit rotation and scale."""
+        Transform2D(
+            pos_x: px,
+            pos_y: py,
+            rotation: rot,
+            scale_x: sx,
+            scale_y: sy,
+            parent: nil,
+            _matrix_cache: [0.0; 9],
+            _dirty: true
+        )
+
+    me set_position(px: f64, py: f64):
+        """Set world/local position and mark matrix dirty."""
+        self.pos_x = px
+        self.pos_y = py
+        self._dirty = true
+
+    me set_rotation(rot: f64):
+        """Set rotation in radians and mark matrix dirty."""
+        self.rotation = rot
+        self._dirty = true
+
+    me set_scale(sx: f64, sy: f64):
+        """Set scale and mark matrix dirty."""
+        self.scale_x = sx
+        self.scale_y = sy
+        self._dirty = true
+
+    me set_parent(p: Transform2D?):
+        """Attach a parent transform and mark matrix dirty."""
+        self.parent = p
+        self._dirty = true
+
+    # -------------------------------------------------------------------------
+    # Matrix helpers (simple 3x3 row-major multiply: C = A * B)
+    # -------------------------------------------------------------------------
+
+    fn _local_matrix() -> [f64]:
+        """Compute local 3x3 affine matrix from position/rotation/scale."""
+        val c = _cos(self.rotation)
+        val s = _sin(self.rotation)
+        val sx = self.scale_x
+        val sy = self.scale_y
+        val tx = self.pos_x
+        val ty = self.pos_y
+        # Row-major: [m00, m01, m02, m10, m11, m12, m20, m21, m22]
+        [
+            c * sx, -s * sy, tx,
+            s * sx,  c * sy, ty,
+            0.0,     0.0,    1.0
+        ]
+
+    fn _mat_mul(a: [f64], b: [f64]) -> [f64]:
+        """Multiply two 3x3 row-major matrices."""
+        var r: [f64] = [0.0; 9]
+        r[0] = a[0]*b[0] + a[1]*b[3] + a[2]*b[6]
+        r[1] = a[0]*b[1] + a[1]*b[4] + a[2]*b[7]
+        r[2] = a[0]*b[2] + a[1]*b[5] + a[2]*b[8]
+        r[3] = a[3]*b[0] + a[4]*b[3] + a[5]*b[6]
+        r[4] = a[3]*b[1] + a[4]*b[4] + a[5]*b[7]
+        r[5] = a[3]*b[2] + a[4]*b[5] + a[5]*b[8]
+        r[6] = a[6]*b[0] + a[7]*b[3] + a[8]*b[6]
+        r[7] = a[6]*b[1] + a[7]*b[4] + a[8]*b[7]
+        r[8] = a[6]*b[2] + a[7]*b[5] + a[8]*b[8]
+        r
+
+    me _recompute_matrix():
+        """Recompute and cache the world matrix."""
+        val local = self._local_matrix()
+        if val Some(p) = self.parent:
+            val pm = p.world_matrix()
+            self._matrix_cache = self._mat_mul(pm, local)
+        else:
+            var i = 0
+            while i < 9:
+                self._matrix_cache[i] = local[i]
+                i = i + 1
+        self._dirty = false
+
+    me world_matrix() -> [f64]:
+        """Return the cached world-space matrix, recomputing if dirty."""
+        if self._dirty:
+            self._recompute_matrix()
+        self._matrix_cache
+
+    fn world_position() -> (f64, f64):
+        """Extract world-space position from the world matrix."""
+        val m = self.world_matrix()
+        (m[2], m[5])
+
+# ============================================================================
+# FFI stubs (implemented by the native runtime for f64 trig)
+# ============================================================================
+
+@extern fn _cos(x: f64) -> f64
+@extern fn _sin(x: f64) -> f64

@@ -1,0 +1,173 @@
+@allow(primitive_api)
+# game2d — Sprite & AnimatedSprite
+#
+# Sprite: single textured quad positioned by a Transform2D.
+# AnimatedSprite: cycles through a list of frame references on tick.
+#
+# Usage:
+#   use std.game2d.sprite.{Sprite, AnimatedSprite, FrameRef}
+
+use std.game2d.transform.{Transform2D}
+
+# ============================================================================
+# FrameRef — index into a texture atlas or standalone texture
+# ============================================================================
+
+class FrameRef:
+    """Reference to one animation frame: texture id plus UV rect."""
+
+    texture_id: u64
+    u0: f32
+    v0: f32
+    u1: f32
+    v1: f32
+
+    static fn create(tid: u64, u0: f32, v0: f32, u1: f32, v1: f32) -> FrameRef:
+        FrameRef(texture_id: tid, u0: u0, v0: v0, u1: u1, v1: v1)
+
+# ============================================================================
+# Sprite
+# ============================================================================
+
+class Sprite:
+    """A single textured quad.
+
+    Fields:
+        texture_id  — opaque handle into a texture registry
+        uv          — UV rect as (u0, v0, u1, v1) in [0,1]^2
+        width       — display width in pixels
+        height      — display height in pixels
+        tint_color  — ARGB u32 tint applied at draw time (0xFFFFFFFF = no tint)
+        z           — depth sort key (lower = drawn first)
+        transform   — local-space Transform2D
+        visible     — skip draw when false
+    """
+
+    texture_id: u64
+    uv_u0: f32
+    uv_v0: f32
+    uv_u1: f32
+    uv_v1: f32
+    width: i32
+    height: i32
+    tint_color: u32
+    z: f32
+    transform: Transform2D
+    visible: bool
+
+    static fn create(tid: u64, px: f64, py: f64, w: i32, h: i32) -> Sprite:
+        """Create a sprite at (px,py) covering full UV and white tint."""
+        Sprite(
+            texture_id: tid,
+            uv_u0: 0.0,
+            uv_v0: 0.0,
+            uv_u1: 1.0,
+            uv_v1: 1.0,
+            width: w,
+            height: h,
+            tint_color: 0xFFFFFFFF,
+            z: 0.0,
+            transform: Transform2D.create(px, py),
+            visible: true
+        )
+
+    static fn create_full(tid: u64, px: f64, py: f64, w: i32, h: i32,
+                           u0: f32, v0: f32, u1: f32, v1: f32,
+                           tint: u32, z: f32) -> Sprite:
+        """Create a sprite with explicit UV, tint and z."""
+        Sprite(
+            texture_id: tid,
+            uv_u0: u0,
+            uv_v0: v0,
+            uv_u1: u1,
+            uv_v1: v1,
+            width: w,
+            height: h,
+            tint_color: tint,
+            z: z,
+            transform: Transform2D.create(px, py),
+            visible: true
+        )
+
+    me set_z(new_z: f32):
+        self.z = new_z
+
+    me set_tint(color: u32):
+        self.tint_color = color
+
+    me set_visible(v: bool):
+        self.visible = v
+
+# ============================================================================
+# AnimatedSprite
+# ============================================================================
+
+class AnimatedSprite:
+    """A sprite that cycles through animation frames.
+
+    tick(dt_ms) advances elapsed_ms and updates current_frame.
+    When playing reaches the last frame it wraps back to 0.
+    """
+
+    frames: [FrameRef]
+    current_frame: i32
+    frame_duration_ms: f64
+    elapsed_ms: f64
+    playing: bool
+    texture_id: u64
+    width: i32
+    height: i32
+    tint_color: u32
+    z: f32
+    transform: Transform2D
+    visible: bool
+
+    static fn create(frames: [FrameRef], frame_duration_ms: f64,
+                     px: f64, py: f64, w: i32, h: i32) -> AnimatedSprite:
+        """Create an animated sprite from a list of frames."""
+        val tid = if frames.len() > 0: frames[0].texture_id else: 0
+        AnimatedSprite(
+            frames: frames,
+            current_frame: 0,
+            frame_duration_ms: frame_duration_ms,
+            elapsed_ms: 0.0,
+            playing: true,
+            texture_id: tid,
+            width: w,
+            height: h,
+            tint_color: 0xFFFFFFFF,
+            z: 0.0,
+            transform: Transform2D.create(px, py),
+            visible: true
+        )
+
+    me tick(dt_ms: f64):
+        """Advance animation by dt_ms milliseconds."""
+        if not self.playing:
+            return
+        if self.frames.len() == 0:
+            return
+        self.elapsed_ms = self.elapsed_ms + dt_ms
+        if self.elapsed_ms >= self.frame_duration_ms:
+            self.elapsed_ms = self.elapsed_ms - self.frame_duration_ms
+            self.current_frame = self.current_frame + 1
+            if self.current_frame >= self.frames.len():
+                self.current_frame = 0
+
+    fn current_frame_ref() -> FrameRef?:
+        """Return the FrameRef for the current animation frame, or nil."""
+        if self.frames.len() == 0:
+            return nil
+        if self.current_frame < 0 or self.current_frame >= self.frames.len():
+            return nil
+        Some(self.frames[self.current_frame])
+
+    me play():
+        self.playing = true
+
+    me stop():
+        self.playing = false
+
+    me reset():
+        self.current_frame = 0
+        self.elapsed_ms = 0.0
