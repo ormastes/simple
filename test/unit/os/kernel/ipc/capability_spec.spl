@@ -305,3 +305,50 @@ describe "CapabilityManager destroy_task":
 
         mgr.destroy_task(task)
         expect(mgr.check(task, CapabilityKind.ProcessSpawn)).to_equal(false)
+
+
+# ============================================================================
+# Test Group 6: init_task_record at spawn
+# ============================================================================
+
+describe "CapabilityManager init_task_record":
+    it "new tasks get full capability record at spawn":
+        """After init_task_record(task, full: true), check() no longer falls
+        through to the (removed) default-ALLOW path — the explicit record
+        exists and returns false for a capability not in the empty set."""
+        var mgr = CapabilityManager.new()
+        val task = TaskId(id: 42)
+
+        # Before init_task_record: no record, check returns false
+        expect(mgr.check(task, CapabilityKind.ProcessSpawn)).to_equal(false)
+
+        # After init_task_record(full: true): record exists, still false
+        # because CapabilitySet.full() starts as empty (unpledged full trust)
+        mgr.init_task_record(task, true)
+        val result = mgr.check(task, CapabilityKind.ProcessSpawn)
+        expect(result).to_equal(false)
+
+    it "init_task_record is idempotent":
+        """Calling init_task_record twice for the same task must not
+        overwrite an existing record."""
+        var mgr = CapabilityManager.new()
+        val task = TaskId(id: 7)
+        val token = CapabilityToken(
+            kind: CapabilityKind.NetRaw,
+            generation: 1,
+            owner: 7
+        )
+        # Initialize with an explicit token
+        mgr.init_task(task, CapabilitySet(caps: [token], is_pledged: false))
+        expect(mgr.check(task, CapabilityKind.NetRaw)).to_equal(true)
+
+        # Second init_task_record must not overwrite
+        mgr.init_task_record(task, false)
+        expect(mgr.check(task, CapabilityKind.NetRaw)).to_equal(true)
+
+    it "init_task_record with full=false creates pledged empty record":
+        var mgr = CapabilityManager.new()
+        val task = TaskId(id: 99)
+        mgr.init_task_record(task, false)
+        # Pledged + empty: check returns false
+        expect(mgr.check(task, CapabilityKind.SystemReboot)).to_equal(false)

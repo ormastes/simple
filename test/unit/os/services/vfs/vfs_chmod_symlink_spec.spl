@@ -1,0 +1,101 @@
+# @cover src/os/services/vfs/vfs.spl 80%
+# @cover src/os/services/vfs/vfs_service.spl 80%
+"""
+# VFS chmod + symlink IPC Operations
+
+**Feature IDs:** #B1
+**Category:** Infrastructure
+**Difficulty:** 2/5
+**Status:** Implemented
+**Artifacts:** N/A
+"""
+
+use std.sspec.*
+
+# ============================================================================
+# MockFs — minimal Filesystem implementation for testing
+# ============================================================================
+
+class MockFs:
+    """Mock filesystem that records chmod and symlink calls."""
+    last_chmod_path: text
+    last_chmod_mode: u16
+    last_symlink_target: text
+    last_symlink_link: text
+    chmod_called: bool
+    symlink_called: bool
+
+impl MockFs:
+    static fn new() -> MockFs:
+        MockFs(
+            last_chmod_path: "",
+            last_chmod_mode: 0,
+            last_symlink_target: "",
+            last_symlink_link: "",
+            chmod_called: false,
+            symlink_called: false
+        )
+
+use os.services.vfs.vfs.{Filesystem, SeekWhence}
+use os.kernel.types.fs_types.{FileFlags, FsNode, FsNodeKind, DirEntry}
+
+impl Filesystem for MockFs:
+    fn fs_name() -> text: "mock"
+    fn mount(device: text, options: text) -> Result<bool, text>: Ok(true)
+    fn unmount() -> Result<bool, text>: Ok(true)
+    fn open(path: text, flags: FileFlags) -> Result<u64, text>: Ok(0)
+    fn read(handle: u64, size: u64) -> Result<[u8], text>: Ok([])
+    fn write(handle: u64, data: [u8]) -> Result<u64, text>: Ok(0)
+    fn close(handle: u64) -> Result<bool, text>: Ok(true)
+    fn seek(handle: u64, offset: i64, whence: SeekWhence) -> Result<u64, text>: Ok(0)
+    fn stat(path: text) -> Result<FsNode, text>:
+        Ok(FsNode(kind: FsNodeKind.File, size: 0, permissions: 0o644, name: path))
+    fn chmod(path: text, mode: u16) -> Result<bool, text>:
+        self.last_chmod_path = path
+        self.last_chmod_mode = mode
+        self.chmod_called = true
+        Ok(true)
+    fn mkdir(path: text) -> Result<bool, text>: Ok(true)
+    fn rmdir(path: text) -> Result<bool, text>: Ok(true)
+    fn readdir(path: text) -> Result<[DirEntry], text>: Ok([])
+    fn unlink(path: text) -> Result<bool, text>: Ok(true)
+    fn rename(old_path: text, new_path: text) -> Result<bool, text>: Ok(true)
+    fn symlink(target: text, link_path: text) -> Result<bool, text>:
+        self.last_symlink_target = target
+        self.last_symlink_link = link_path
+        self.symlink_called = true
+        Ok(true)
+
+# ============================================================================
+# Tests
+# ============================================================================
+
+use os.services.vfs.vfs.{VfsManager}
+
+describe "VFS chmod routing":
+    it "chmod routes to filesystem":
+        var mgr = VfsManager.new()
+        val fs = MockFs.new()
+        mgr.mount("/", "mock", "", false, fs)
+        val result = mgr.mounts[0].fs.chmod("/etc/foo", 0o755)
+        expect(result.is_ok()).to_equal(true)
+        expect(fs.chmod_called).to_equal(true)
+        expect(fs.last_chmod_path).to_equal("/etc/foo")
+        expect(fs.last_chmod_mode).to_equal(0o755 as u16)
+
+describe "VFS symlink routing":
+    it "symlink routes to filesystem":
+        var mgr = VfsManager.new()
+        val fs = MockFs.new()
+        mgr.mount("/", "mock", "", false, fs)
+        val result = mgr.symlink("/usr/bin/sh", "/bin/sh")
+        expect(result.is_ok()).to_equal(true)
+        expect(fs.symlink_called).to_equal(true)
+        expect(fs.last_symlink_target).to_equal("/usr/bin/sh")
+
+    it "symlink on read-only mount returns error":
+        var mgr = VfsManager.new()
+        val fs = MockFs.new()
+        mgr.mount("/", "mock", "", true, fs)
+        val result = mgr.symlink("/usr/bin/sh", "/bin/sh")
+        expect(result.is_err()).to_equal(true)

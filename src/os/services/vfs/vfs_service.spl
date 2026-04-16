@@ -20,6 +20,8 @@
 #   RENAME: old_path (text) \0 new_path (text)
 #   SEEK:   fd (u64) | offset (i64) | whence (u8)
 #   MOUNT_LIST: (empty)
+#   CHMOD:  path (text) \0 mode (u16)
+#   SYMLINK: target (text) \0 link_path (text)
 
 use os.services.vfs.vfs.{VfsManager, Filesystem, SeekWhence}
 use os.kernel.types.fs_types.{FileDescriptor, FileFlags, FsNode, FsNodeKind, DirEntry}
@@ -41,6 +43,8 @@ val VFS_UNLINK: u32 = 8
 val VFS_RENAME: u32 = 9
 val VFS_MOUNT_LIST: u32 = 10
 val VFS_SEEK: u32 = 11
+val VFS_CHMOD: u32 = 12
+val VFS_SYMLINK: u32 = 13
 
 # Syscall numbers — canonical values from src/os/kernel/ipc/syscall.spl
 # dispatcher cases 20..23. Keep in sync with test/unit/os/kernel/ipc/
@@ -168,6 +172,8 @@ impl VfsService:
             VFS_RENAME: self.dispatch_rename(src_port, payload_addr, payload_len)
             VFS_MOUNT_LIST: self.dispatch_mount_list(src_port)
             VFS_SEEK: self.dispatch_seek(src_port, payload_addr, payload_len)
+            VFS_CHMOD: self.dispatch_chmod(src_port, payload_addr, payload_len)
+            VFS_SYMLINK: self.dispatch_symlink(src_port, payload_addr, payload_len)
             _: self.send_error_reply(src_port, STATUS_INVALID, "unknown VFS method")
 
     # ========================================================================
@@ -314,6 +320,43 @@ impl VfsService:
             val rel_old = self.vfs.strip_mount_prefix(old_path, entry.point.path)
             val rel_new = self.vfs.strip_mount_prefix(new_path, entry.point.path)
             match entry.fs.rename(rel_old, rel_new):
+                Result.Ok(v):
+                    self.send_u64_reply(src_port, STATUS_OK, 1)
+                Result.Err(e):
+                    self.send_error_reply(src_port, STATUS_ERR, e)
+        else:
+            self.send_error_reply(src_port, STATUS_NOT_FOUND, "no filesystem for path")
+
+    me dispatch_chmod(src_port: u64, payload_addr: u64, payload_len: u32):
+        """Parse CHMOD request: path\0mode(u16)."""
+        val path = _read_text_until_null(payload_addr, payload_len)
+        val mode_offset = path.len().to_u32() + 1
+        var mode: u16 = 0
+        if mode_offset + 2 <= payload_len:
+            mode = _read_u16(payload_addr + mode_offset.to_u64())
+        val mount = self.vfs.resolve_mount(path)
+        if mount.?:
+            val entry = mount.unwrap()
+            val relative = self.vfs.strip_mount_prefix(path, entry.point.path)
+            match entry.fs.chmod(relative, mode):
+                Result.Ok(v):
+                    self.send_u64_reply(src_port, STATUS_OK, 1)
+                Result.Err(e):
+                    self.send_error_reply(src_port, STATUS_ERR, e)
+        else:
+            self.send_error_reply(src_port, STATUS_NOT_FOUND, "no filesystem for path")
+
+    me dispatch_symlink(src_port: u64, payload_addr: u64, payload_len: u32):
+        """Parse SYMLINK request: target\0link_path."""
+        val target = _read_text_until_null(payload_addr, payload_len)
+        val link_offset = target.len().to_u32() + 1
+        val remaining = payload_len - link_offset
+        val link_path = _read_text(payload_addr + link_offset.to_u64(), remaining)
+        val mount = self.vfs.resolve_mount(link_path)
+        if mount.?:
+            val entry = mount.unwrap()
+            val rel_link = self.vfs.strip_mount_prefix(link_path, entry.point.path)
+            match entry.fs.symlink(target, rel_link):
                 Result.Ok(v):
                     self.send_u64_reply(src_port, STATUS_OK, 1)
                 Result.Err(e):

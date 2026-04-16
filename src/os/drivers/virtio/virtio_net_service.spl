@@ -13,9 +13,13 @@
 #   26 (NotificationWait) — IRQ-driven frame receive
 
 use os.drivers.virtio.virtio_net.{VirtioNetDriver}
+use os.drivers.virtio.virtio_net_async.{VirtioNetSendFuture}
 use os.kernel.types.device_mem_types.{DeviceGrant}
 use os.kernel.boot.mmio.{mmio_write8, mmio_read32, mmio_read64}
 use os.userlib.syscall_raw.{syscall}
+use os.async.os_waker.{OsWaker}
+use os.async.os_poll.{OsPoll}
+use os.async.os_future.{OsFuture}
 
 extern fn serial_println(msg: text)
 
@@ -37,6 +41,8 @@ val NET_METHOD_SEND_ASYNC: u32 = 6
 # Module-level driver instance (single NIC supported)
 var driver: VirtioNetDriver = VirtioNetDriver.new()
 var service_ready: bool = false
+var pending_sends: [VirtioNetSendFuture] = []
+var next_send_handle: i64 = 1
 
 # ============================================================================
 # Service Entry Point
@@ -239,21 +245,31 @@ fn handle_recv_async(dst_virt: u64, dst_len: u64) -> i64:
 fn handle_send_async(frame_virt: u64, frame_phys: u64, frame_len: u64) -> i64:
     """Handle NET_METHOD_SEND_ASYNC: non-blocking send.
 
-    The service does not yet retain per-request future state across IPC calls.
-    This path is a synchronous fallback: it waits for the driver send to
-    complete before returning, and will use the owned-DMA TX path when the
-    caller provides a physical address, so it does not falsely report async
-    success.
-
-    Returns 0 after the synchronous send completes, negative on error.
+    Creates a VirtioNetSendFuture via send_frame_async and pushes it onto
+    pending_sends. Returns a handle ID immediately; tick_pending_sends()
+    advances the futures on each service tick.
     """
     if not service_ready:
         return -1
 
-    val result = driver.send_frame(frame_virt, frame_phys, frame_len)
-    match result:
-        Ok(done):
-            0
-        Err(msg):
-            serial_println("[virtio-net-svc] Async send failed: {msg}")
-            -1
+    val future_result = driver.send_frame_async(frame_virt, frame_phys, frame_len)
+    if future_result.is_err():
+        serial_println("[virtio-net-svc] Async send setup failed: {future_result.unwrap_err()}")
+        return -1
+    pending_sends.push(future_result.unwrap())
+    val handle = next_send_handle
+    next_send_handle = next_send_handle + 1
+    handle
+
+fn tick_pending_sends():
+    """Poll all pending send futures; remove completed ones."""
+    # No-op waker: notification_id=0, bit=0 (futures use their own notif_id field)
+    val waker = OsWaker.new(0, 0)
+    var i = 0
+    while i < pending_sends.len():
+        val result = pending_sends[i].poll(waker)
+        match result:
+            OsPoll.Ready(v):
+                pending_sends.remove(i)
+            OsPoll.Pending:
+                i = i + 1

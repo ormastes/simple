@@ -25,7 +25,7 @@
 
 use os.kernel.types.memory_types.{PhysAddr, VirtAddr, PageFrame, VmFlags}
 use os.kernel.types.task_types.{AddressSpace}
-use os.kernel.boot.mmio.{mmio_read64, mmio_write64}
+use os.kernel.boot.mmio.{mmio_read64, mmio_write64, mmio_write8}
 use os.kernel.memory.pmm.{PhysMemManager}
 
 # ============================================================================
@@ -547,14 +547,17 @@ fn vmm_cow_clone_pages(pml4_phys: u64) -> u64:
     val new_pml4_virt = _phys_to_virt(new_pml4_phys)
     val src_pml4_virt = _phys_to_virt(pml4_phys)
 
-    # User-half (0..255): copy present entries with writable bit cleared (COW)
-    # TODO(wave-4c): deep-walk PDPT/PD/PT levels to clear writable on leaf PTEs
+    # User-half (0..255): copy present entries then deep-walk to clear writable
+    # on all leaf PTEs via _cow_clear_writable_recursive so both parent and
+    # child fault into the CoW handler on first write.
     var i: u64 = 0
     while i < 256:
         val entry = _read_pte(src_pml4_virt, i)
         if _pte_is_present(entry):
             _write_pte(new_pml4_virt, i, entry & ~PTE_WRITABLE)
         i = i + 1
+    # Clear writable on source PML4 user-half leaf PTEs (level 3 = PML4)
+    _cow_clear_writable_recursive(pml4_phys, 3)
 
     # Kernel-half (256..511): shared unchanged
     i = 256
@@ -568,20 +571,16 @@ fn vmm_cow_clone_pages(pml4_phys: u64) -> u64:
 fn destroy_user_address_space(space: AddressSpace):
     """Release page-table pages owned by a user address space.
 
-    Frees the top-level PML4 page. Intermediate tables (PDPT/PD/PT) that
-    were allocated by `vmm_map_page` for user-half mappings are NOT yet
-    walked and freed here — that requires a PTE-tree walker. Kernel-half
-    entries (indices 256..511) are shared and must never be freed.
-
-    TODO(phase-1.1): Implement a full PTE-tree walker so intermediate
-    user-half tables are reclaimed. Next action: add
-    `_free_user_half_subtree(pml4_virt)` that walks indices 0..255 and
-    frees any present intermediate tables via `pmm_free_page`.
+    Frees intermediate user-half page table pages (PDPT/PD/PT) via
+    `_free_user_half_subtree`, then frees the PML4 page itself.
+    Kernel-half entries (indices 256..511) are shared and are never freed.
     """
     if space.phys_root == 0 or space.phys_root == 1:
         # Legacy sentinel or never-allocated — nothing to free.
         return
 
+    val pml4_virt = _phys_to_virt(space.phys_root)
+    _free_user_half_subtree(pml4_virt)
     val frame = PageFrame.from_phys_addr(PhysAddr(addr: space.phys_root))
     pmm_free_page(frame)
 
@@ -666,6 +665,119 @@ fn vmm_translate(virt: VirtAddr) -> PhysAddr?:
     val base = _pte_phys_addr(pt_entry)
     val offset = vaddr & 0xFFF  # Lower 12 bits
     PhysAddr(addr: base + offset)
+
+# ============================================================================
+# Phase-2 VMM APIs
+# ============================================================================
+
+fn vmm_write_byte_through_hhdm(phys: u64, byte: u8):
+    """Write a single byte to a physical address via the HHDM mapping."""
+    val virt = _phys_to_virt(phys)
+    mmio_write8(virt, byte)
+
+fn vmm_map_page_in(space: AddressSpace, virt: VirtAddr, phys: PhysAddr, flags: VmFlags) -> bool:
+    """Map a 4KB page in an explicit address space without switching CR3.
+
+    Walks the page table rooted at space.phys_root, creating intermediate
+    tables as needed. Does NOT touch CR3 / the current address space.
+    Returns true on success, false on failure.
+    """
+    if space.phys_root == 0 or space.phys_root == 1:
+        return false
+
+    val vaddr = virt.addr
+    val paddr = phys.addr
+
+    # W^X enforcement
+    var safe_flags = flags
+    if flags.writable and not flags.no_execute:
+        safe_flags = VmFlags(
+            present: flags.present,
+            writable: true,
+            user: flags.user,
+            write_through: flags.write_through,
+            cache_disable: flags.cache_disable,
+            no_execute: true
+        )
+
+    val pml4_virt = _phys_to_virt(space.phys_root)
+
+    val pdpt_virt = _ensure_table_entry(pml4_virt, _pml4_index(vaddr))
+    if pdpt_virt == 0:
+        return false
+
+    val pd_virt = _ensure_table_entry(pdpt_virt, _pdpt_index(vaddr))
+    if pd_virt == 0:
+        return false
+
+    val pt_virt = _ensure_table_entry(pd_virt, _pd_index(vaddr))
+    if pt_virt == 0:
+        return false
+
+    val pte_flags = _flags_to_pte_bits(safe_flags)
+    val entry = (paddr & PTE_ADDR_MASK) | pte_flags
+    _write_pte(pt_virt, _pt_index(vaddr), entry)
+
+    true
+
+fn _cow_clear_writable_recursive(table_phys: u64, level: u32):
+    """Recursively clear PTE_WRITABLE on all leaf PTEs in the user half.
+
+    level 3 = PML4, level 2 = PDPT, level 1 = PD, level 0 = PT (leaf).
+    Only iterates user-half entries (indices 0..255) at the PML4 level.
+    At lower levels, iterates all 512 entries.
+    """
+    val table_virt = _phys_to_virt(table_phys)
+    # At PML4 (level 3) only walk user half (0..255); at lower levels walk all 512
+    var limit: u64 = ENTRIES_PER_TABLE
+    if level == 3:
+        limit = 256
+    var i: u64 = 0
+    while i < limit:
+        val entry = _read_pte(table_virt, i)
+        if _pte_is_present(entry):
+            if level == 0:
+                # Leaf PT: clear writable bit
+                _write_pte(table_virt, i, entry & ~PTE_WRITABLE)
+            else:
+                # Intermediate: recurse
+                val child_phys = _pte_phys_addr(entry)
+                _cow_clear_writable_recursive(child_phys, level - 1)
+        i = i + 1
+
+fn _free_user_half_subtree(pml4_virt: u64):
+    """Walk the user half of a PML4 and free all intermediate page table pages.
+
+    Frees PDPT, PD, and PT pages that were allocated for user mappings.
+    Does NOT free the PML4 page itself — caller owns that.
+    Does NOT free mapped physical frames — only intermediate table pages.
+    """
+    var i: u64 = 0
+    while i < 256:
+        val pdpt_entry = _read_pte(pml4_virt, i)
+        if _pte_is_present(pdpt_entry):
+            val pdpt_phys = _pte_phys_addr(pdpt_entry)
+            val pdpt_virt = _phys_to_virt(pdpt_phys)
+            var j: u64 = 0
+            while j < ENTRIES_PER_TABLE:
+                val pd_entry = _read_pte(pdpt_virt, j)
+                if _pte_is_present(pd_entry):
+                    val pd_phys = _pte_phys_addr(pd_entry)
+                    val pd_virt = _phys_to_virt(pd_phys)
+                    var k: u64 = 0
+                    while k < ENTRIES_PER_TABLE:
+                        val pt_entry = _read_pte(pd_virt, k)
+                        if _pte_is_present(pt_entry):
+                            val pt_phys = _pte_phys_addr(pt_entry)
+                            val pt_frame = PageFrame.from_phys_addr(PhysAddr(addr: pt_phys))
+                            pmm_free_page(pt_frame)
+                        k = k + 1
+                    val pd_frame = PageFrame.from_phys_addr(PhysAddr(addr: pd_phys))
+                    pmm_free_page(pd_frame)
+                j = j + 1
+            val pdpt_frame = PageFrame.from_phys_addr(PhysAddr(addr: pdpt_phys))
+            pmm_free_page(pdpt_frame)
+        i = i + 1
 
 # ============================================================================
 # CPU Primitives (inline assembly)

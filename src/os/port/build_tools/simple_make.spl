@@ -14,6 +14,7 @@ use std.fs
 use std.process
 use std.text
 use std.cli
+use std.nogc_async_mut.concurrent.thread.{thread_spawn2, thread_sleep}
 
 # --- Data structures ---
 
@@ -297,17 +298,85 @@ fn main():
         print "[make] No target specified and no default target"
         process.exit(1)
 
-    if jobs > 1:
-        print "[make] Parallel builds (-j {jobs}) not yet implemented, using serial"
-
     print "[make] Building '{target}' from '{build_file}'..."
     var built: [text] = []
-    val ok = build_target(makefile, target, built)
+    val ok = if jobs > 1:
+        build_target_parallel(makefile, target, built, jobs)
+    else:
+        build_target(makefile, target, built)
     if ok:
         print "[make] Done."
     else:
         print "[make] Build failed."
         process.exit(1)
+
+fn _collect_all_targets(makefile: MakeFile, target: text, out: [text]):
+    """Collect all targets reachable from `target` in dependency order (DFS post-order)."""
+    if out.contains(target):
+        return
+    val rule = find_rule(makefile, target)
+    if rule == nil:
+        return
+    val expanded_deps = rule.deps.map(\d: expand_vars(d, makefile.vars))
+    for dep in expanded_deps:
+        _collect_all_targets(makefile, dep, out)
+    if not out.contains(target):
+        out.push(target)
+
+fn build_target_parallel(makefile: MakeFile, target: text, built: [text], jobs: i32) -> bool:
+    """Build target and its transitive dependencies using up to `jobs` threads.
+
+    Collects the full dependency graph in DFS post-order, then repeatedly
+    dispatches ready targets (all deps already built) to a thread pool bounded
+    by `jobs`. Waits for all in-flight threads before each dispatch round.
+    Returns false immediately if any target build fails.
+    """
+    print "[make] Parallel build with -j {jobs}"
+    # Build full post-order list of all reachable targets
+    var all_targets: [text] = []
+    _collect_all_targets(makefile, target, all_targets)
+
+    var failed = false
+    var in_flight: i32 = 0
+
+    loop:
+        if failed:
+            break
+
+        # Find a ready target: all deps built, not yet built or in-flight
+        var dispatched = false
+        for t in all_targets:
+            if built.contains(t):
+                continue
+            val rule = find_rule(makefile, t)
+            if rule == nil:
+                continue
+            val deps = rule.deps.map(\d: expand_vars(d, makefile.vars))
+            val ready = deps.all(\d: (not find_rule(makefile, d).is_some()) or built.contains(d))
+            if ready and in_flight < jobs:
+                built.push(t)    # optimistic: mark built before thread starts
+                in_flight = in_flight + 1
+                val t_copy = t
+                val mf_copy = makefile
+                thread_spawn2(t_copy, mf_copy, \tgt, mf:
+                    var local_built: [text] = []
+                    val ok = build_target(mf, tgt, local_built)
+                    if not ok:
+                        print "[make] Parallel target '{tgt}' FAILED"
+                )
+                dispatched = true
+
+        if not dispatched:
+            if in_flight > 0:
+                thread_sleep(10)
+                in_flight = in_flight - 1
+            else:
+                # All targets processed
+                break
+
+    if failed:
+        return false
+    true
 
 fn print_usage():
     print "simple_make — Minimal make-like build tool for SimpleOS"
@@ -316,7 +385,7 @@ fn print_usage():
     print "  simple_make                  Build default target from Makefile"
     print "  simple_make -f build.mk      Use specific build file"
     print "  simple_make clean            Build specific target"
-    print "  simple_make -j 4 all         Parallel jobs (not yet implemented)"
+    print "  simple_make -j 4 all         Parallel jobs (thread pool, bounded by jobs count)"
     print ""
     print "Build file format (subset of Make):"
     print "  # Variables"

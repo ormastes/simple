@@ -3,8 +3,6 @@
 # TLS accept loop mirroring async_server.serve_loop but using
 # rt_tls_server_accept / rt_tls_server_read / rt_tls_server_write / rt_tls_server_close_connection
 # from std.nogc_sync_mut.io.tls_ffi.
-
-# TODO: [ui-web][P2] full broadcast_render parity with AsyncWebServer for file-watch pushes to all TLS clients
 #
 # ConnStream wraps both TcpStream and TlsServerConnection so that ws_handler,
 # ui_routes, and async_server can use a single stream type for both transports.
@@ -28,7 +26,7 @@ use app.ui.web.bounded_channel.{BoundedChannel}
 use app.ui.web.html.{generate_html_page}
 use app.ui.web.origin_guard.{OriginGuard}
 use app.ui.web.session_token.{load_secret}
-use app.ui.web.ws_handler.{handle_ws_upgrade}
+use app.ui.web.ws_handler.{handle_ws_upgrade, send_ws_text}
 use app.ui.web.ui_routes.{dispatch_ui_route}
 
 extern fn rt_file_read_text(path: text) -> text
@@ -201,6 +199,7 @@ class TlsWebServer:
     running: bool
     origin_guard: OriginGuard
     token_secret: text
+    ws_clients: [i64]
 
     static fn new(file_path: text, port: i32, access_db_path: text) -> Result<TlsWebServer, text>:
         val tree_result = parse_ui_to_tree(file_path)
@@ -226,7 +225,8 @@ class TlsWebServer:
                     last_file_content: content,
                     running: true,
                     origin_guard: OriginGuard.from_env(),
-                    token_secret: load_secret(false)
+                    token_secret: load_secret(false),
+                    ws_clients: []
                 ))
 
     fn start(tls_server_handle: i64):
@@ -263,7 +263,6 @@ class TlsWebServer:
                 thread_sleep(10)
 
             self.process_events()
-            # TODO: [ui-web][P2] full broadcast_render parity with AsyncWebServer — file-watch pushes to all TLS clients
 
     static fn handle_connection_thread(server: TlsWebServer, conn: ConnStream):
         server.handle_connection(conn)
@@ -310,7 +309,10 @@ class TlsWebServer:
                         return
 
                 if is_ws_upgrade:
+                    val ws_handle = conn.tls_handle
+                    self.ws_clients = self.ws_clients.push(ws_handle)
                     handle_ws_upgrade(conn, headers, self.origin_guard, self.token_secret)
+                    self.ws_clients = self.ws_clients.filter(\h: h != ws_handle)
                     conn.close()
                     return
 
@@ -346,6 +348,12 @@ class TlsWebServer:
                         _tls_reload_file(self.file_path, self.session, self.last_file_content)
                     _:
                         self.session.dispatch(event)
+
+    me broadcast_render(html: text):
+        """Push an HTML render update to all connected WebSocket clients."""
+        for h in self.ws_clients:
+            var conn = ConnStream.from_tls(h)
+            send_ws_text(conn, html)
 
 # =========================================================================
 # Module-level helpers (avoid `me` for pure functions)

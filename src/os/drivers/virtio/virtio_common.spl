@@ -8,6 +8,7 @@
 
 use os.kernel.boot.mmio.{mmio_read32, mmio_write32}
 use os.kernel.types.memory_types.{PhysAddr}
+use os.kernel.memory.pmm.{pmm_alloc_pages}
 
 # ============================================================================
 # VirtIO MMIO Registers (offset from device base address)
@@ -212,9 +213,11 @@ impl VirtioDevice:
         val queue_size = if max_queue > VIRTQUEUE_SIZE.to_u32(): VIRTQUEUE_SIZE.to_u32() else: max_queue
         self.write_reg(VIRTIO_MMIO_QUEUE_NUM, queue_size)
 
-        # Virtqueue memory would be allocated from PMM
-        # For now, use a fixed address (TODO: proper allocation)
-        val queue_base: u64 = 0x200000  # 2MB
+        # Allocate virtqueue memory from PMM (3 pages = 12KB for descriptors + rings)
+        val alloc_result = pmm_alloc_pages(3)
+        if not alloc_result.?:
+            return Result.Err("virtio: failed to allocate virtqueue pages from PMM")
+        val queue_base: u64 = alloc_result.unwrap().addr
         self.queue = Virtqueue.new(queue_base, queue_size.to_i32())
         self.queue.init_free_list()
 

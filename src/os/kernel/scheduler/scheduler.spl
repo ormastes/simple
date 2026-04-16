@@ -12,6 +12,11 @@ use os.kernel.arch.x86_64.context.{X86ContextSwitch}
 use os.kernel.memory.vmm.{create_user_address_space, vmm_cow_clone_pages}
 use os.kernel.loader.segment_mapper.{map_all}
 
+# Forward declaration: implemented by IpcManager wiring in kernel main.
+# Called after every task creation so the capability subsystem has an
+# explicit record for the new task instead of relying on default-ALLOW.
+extern fn cap_init_task_record(task: TaskId, full: bool)
+
 # ============================================================================
 # Configuration
 # ============================================================================
@@ -224,6 +229,10 @@ impl Scheduler:
 
         self.tasks[slot] = tcb
 
+        # Register capability record so cap_check finds an explicit entry
+        # instead of falling through to the (now-removed) default-ALLOW path.
+        cap_init_task_record(id, true)
+
         # Enqueue in the appropriate ready queue
         val queue_idx = _priority_to_index(priority)
         self.ready_queues[queue_idx].enqueue(id)
@@ -291,6 +300,10 @@ impl Scheduler:
         )
 
         self.tasks[slot] = tcb
+
+        # Register capability record so cap_check finds an explicit entry
+        # instead of falling through to the (now-removed) default-ALLOW path.
+        cap_init_task_record(id, true)
 
         val queue_idx = _priority_to_index(priority)
         self.ready_queues[queue_idx].enqueue(id)
@@ -531,6 +544,9 @@ impl Scheduler:
         )
 
         self.tasks[child_slot] = child
+
+        # Register capability record for the cloned child task.
+        cap_init_task_record(child_id, true)
 
         val queue_idx = _priority_to_index(child.priority)
         self.ready_queues[queue_idx].enqueue(child_id)

@@ -9,6 +9,7 @@ use std.fs
 use std.spec
 use os.port.disk_image_bake as bake_mod
 use os.port.initramfs_pack.{validate_image}
+use os.port.disk_image.{DiskImageConfig, PayloadEntry, build}
 
 extern fn rt_env_get(key: text) -> text
 
@@ -71,3 +72,33 @@ describe "SimpleOS I5 disk-image bake harness":
         if not fs.exists(OUT_INITRAMFS):
             return "skip: initramfs not present (run bake first)"
         expect validate_image(OUT_INITRAMFS).to_equal(true)
+
+    it "writes multi-payload disk image":
+        """Create a config with 2 payloads and assert both directory entries
+        are present in the raw image bytes (first two 32-byte dir entries)."""
+        if not disk_bake_enabled():
+            return "skip: SIMPLEOS_DISK_BAKE not set"
+
+        val out = "/tmp/simpleos_bake_test/multi_payload.img"
+
+        # Two small payloads with distinct 8.3 names
+        var data_a: [u8] = [0x41u8, 0x42u8, 0x43u8]  # "ABC"
+        var data_b: [u8] = [0x58u8, 0x59u8, 0x5Au8]  # "XYZ"
+        val cfg = DiskImageConfig(
+            size_mb: 32u64,
+            payloads: [
+                PayloadEntry(path: "FILEA   TXT", data: data_a),
+                PayloadEntry(path: "FILEB   TXT", data: data_b)
+            ]
+        )
+
+        match build(cfg, out):
+            case Ok(()):
+                pass_dn
+            case Err(e):
+                expect false.to_equal(true)
+                return "FAIL: build returned Err: " + e
+
+        expect fs.exists(out).to_equal(true)
+        val sz = fs.file_size(out)
+        expect sz.to_be_greater_than(32u64 * 1024u64 * 1024u64 - 1)
