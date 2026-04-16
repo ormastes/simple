@@ -1,0 +1,114 @@
+# @tag:system
+#
+# Pixel regression for the deterministic browser guest in QEMU.
+# This stays separate from browser_in_qemu_spec.spl so the marker smoke
+# and the framebuffer byte-compare can fail independently.
+
+use std.spec.*
+
+use os.qemu_runner.{OsTarget, build_os}
+use os.kernel.arch.arch_context.{Architecture}
+use std.nogc_sync_mut.ffi.io.{dir_create_all}
+use test.qemu.os.common.qemu_os_harness.{
+    can_run_target, file_exists, spawn_guest_with_qmp, stop_guest, wait_for_serial_marker}
+
+fn _browser_target() -> OsTarget:
+    OsTarget(
+        arch: Architecture.X86_64,
+        entry: "examples/simple_os/arch/x86_64/gui_entry_browser.spl",
+        linker_script: "examples/simple_os/arch/x86_64/linker.ld",
+        target_triple: "x86_64-unknown-none",
+        output: "build/os/simpleos_browser_x86_64.elf",
+        qemu_system: "qemu-system-x86_64",
+        qemu_machine: "q35",
+        qemu_cpu: "qemu64",
+        qemu_memory: "2G",
+        qemu_bios: "",
+        qemu_extra: ["-vga", "std", "-device", "isa-debug-exit,iobase=0xf4,iosize=0x04"],
+        gui_mode: false
+    )
+
+extern fn rt_process_run_timeout(cmd: text, args: [text], timeout_ms: i64) -> (text, text, i32)
+
+fn _capture_qmp_ppm_with_timeout(qmp_socket: text, output_path: text) -> bool:
+    val script = "import json,os,socket,sys;" +
+        "s=socket.socket(socket.AF_UNIX);" +
+        "s.settimeout(5);" +
+        "s.connect(sys.argv[1]);" +
+        "f=s.makefile('rwb', buffering=0);" +
+        "f.readline();" +
+        "cap=json.dumps(dict(execute='qmp_capabilities')).encode()+b'\\n';" +
+        "f.write(cap);" +
+        "f.flush();" +
+        "f.readline();" +
+        "cmd=json.dumps(dict(execute='screendump', arguments=dict(filename=sys.argv[2], format='ppm'))).encode()+b'\\n';" +
+        "f.write(cmd);" +
+        "f.flush();" +
+        "f.readline();" +
+        "sys.exit(0 if os.path.exists(sys.argv[2]) else 3)"
+    val result = rt_process_run_timeout("python3", ["-c", script, qmp_socket, output_path], 10000)
+    result[2] == 0 and file_exists(output_path)
+
+fn _ppm_capture_matches_baseline(capture_path: text, baseline_path: text) -> bool:
+    val script = "import sys;" +
+        "def read_ppm(path):\n" +
+        " f=open(path,'rb');\n" +
+        " if f.readline().strip()!=b'P6': raise SystemExit(4);\n" +
+        " dims=f.readline().strip().split();\n" +
+        " w=int(dims[0]); h=int(dims[1]);\n" +
+        " if f.readline().strip()!=b'255': raise SystemExit(5);\n" +
+        " data=f.read();\n" +
+        " return w,h,data\n" +
+        "cw,ch,cd=read_ppm(sys.argv[1]);\n" +
+        "bw,bh,bd=read_ppm(sys.argv[2]);\n" +
+        "ok=(ch==bh and cw>=bw);\n" +
+        "rowc=cw*3; rowb=bw*3;\n" +
+        "i=0;\n" +
+        "while ok and i<bh:\n" +
+        " ok = cd[i*rowc:i*rowc+rowb] == bd[i*rowb:(i+1)*rowb];\n" +
+        " i += 1\n" +
+        "raise SystemExit(0 if ok else 6)"
+    val result = rt_process_run_timeout("python3", ["-c", script, capture_path, baseline_path], 10000)
+    result[2] == 0
+
+describe "Browser webrendering in QEMU Simple OS guest pixel regression":
+
+    slow_it "matches the deterministic framebuffer baseline":
+        val target = _browser_target()
+        expect(build_os(target)).to_equal(true)
+        expect(file_exists(target.output)).to_equal(true)
+
+        if not can_run_target(target):
+            print "[browser_in_qemu_pixel_spec] qemu-system-x86_64 not available, skipping live capture"
+            expect(true).to_equal(true)
+            return
+
+        val qmp_socket = "/tmp/simpleos_browser_pixel_qmp.sock"
+        val serial_log = "build/os/browser_qemu_pixel_serial.log"
+        val capture_ppm = "build/os/browser_capture_pixel.ppm"
+        val baseline_path = "test/baselines/browser_in_qemu/session.ppm"
+        dir_create_all("build/os")
+
+        if not file_exists(baseline_path):
+            print "[browser_in_qemu_pixel_spec] missing baseline: {baseline_path}"
+            expect(false).to_equal(true)
+            return
+
+        match spawn_guest_with_qmp(target, qmp_socket, serial_log):
+            Ok(handle):
+                expect(wait_for_serial_marker(
+                    handle,
+                    "[BE] Frame painted: HTML -> DOM -> layout -> paint -> scene -> software rasterizer -> framebuffer",
+                    30000)).to_equal(true)
+
+                if not _capture_qmp_ppm_with_timeout(qmp_socket, capture_ppm):
+                    stop_guest(handle)
+                    print "[browser_in_qemu_pixel_spec] QMP screendump timed out or failed"
+                    expect(false).to_equal(true)
+                    return
+                stop_guest(handle)
+
+                expect(_ppm_capture_matches_baseline(capture_ppm, baseline_path)).to_equal(true)
+            Err(err):
+                print "[browser_in_qemu_pixel_spec] failed to spawn guest: {err}"
+                expect(false).to_equal(true)

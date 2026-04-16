@@ -784,12 +784,39 @@ class BrowserScriptBlock:
     kind: text
     content: text
     src: text
+    script_type: text
+    is_async: bool
+    is_defer: bool
 
     static fn inline(content: text) -> BrowserScriptBlock:
-        BrowserScriptBlock(kind: "inline", content: content, src: "")
+        BrowserScriptBlock(
+            kind: "inline",
+            content: content,
+            src: "",
+            script_type: "",
+            is_async: false,
+            is_defer: false
+        )
 
     static fn external(src: text) -> BrowserScriptBlock:
-        BrowserScriptBlock(kind: "external", content: "", src: src)
+        BrowserScriptBlock(
+            kind: "external",
+            content: "",
+            src: src,
+            script_type: "",
+            is_async: false,
+            is_defer: false
+        )
+
+    static fn with_attrs(kind: text, content: text, src: text, script_type: text, is_async: bool, is_defer: bool) -> BrowserScriptBlock:
+        BrowserScriptBlock(
+            kind: kind,
+            content: content,
+            src: src,
+            script_type: script_type,
+            is_async: is_async,
+            is_defer: is_defer
+        )
 
 fn blank_page_html() -> text:
     "<!DOCTYPE html><html><head><title>about:blank</title></head><body></body></html>"
@@ -1105,6 +1132,16 @@ fn parse_cookie_line(cookie_line: text) -> BrowserCookie?:
         return nil
     val name = base.slice(0, eq).trim()
     val value = base.slice(eq + 1, base.len()).trim()
+    val lowered_name = name.to_lower()
+    if lowered_name == "path" or
+       lowered_name == "domain" or
+       lowered_name == "expires" or
+       lowered_name == "max-age" or
+       lowered_name == "secure" or
+       lowered_name == "samesite" or
+       lowered_name == "httponly" or
+       lowered_name == "partitioned":
+        return nil
     var path = ""
     var domain = ""
     var i = 1
@@ -1238,12 +1275,15 @@ fn extract_script_blocks(html: text) -> [BrowserScriptBlock]:
         val tag_content = html.slice(start, tag_end + 1)
         val close = find_text(html, "</script>", tag_end + 1)
         val src_value = extract_attr_value(tag_content, "src")
+        val script_type = extract_attr_value(tag_content, "type").to_lower()
+        val is_async = has_tag_attr(tag_content, "async")
+        val is_defer = has_tag_attr(tag_content, "defer")
         if src_value != "":
-            blocks = blocks + [BrowserScriptBlock.external(src_value)]
+            blocks = blocks + [BrowserScriptBlock.with_attrs("external", "", src_value, script_type, is_async, is_defer)]
         else if close >= 0:
             val content = html.slice(tag_end + 1, close)
             if content.trim().len() > 0:
-                blocks = blocks + [BrowserScriptBlock.inline(content)]
+                blocks = blocks + [BrowserScriptBlock.with_attrs("inline", content, "", script_type, is_async, is_defer)]
         if close < 0:
             return blocks
         pos = close + 9
@@ -1271,6 +1311,14 @@ fn extract_attr_value(tag_content: text, attr_name: text) -> text:
             return tag_content.slice(start, end)
         end = end + 1
     tag_content.slice(start, tag_content.len())
+
+fn has_tag_attr(tag_content: text, attr_name: text) -> bool:
+    val lower = tag_content.to_lower()
+    val padded = " " + attr_name.to_lower()
+    lower.contains(padded + " ") or
+        lower.contains(padded + ">") or
+        lower.contains(padded + "=") or
+        lower.ends_with(padded)
 
 fn find_text(haystack: text, needle: text, start: i32) -> i32:
     if needle.len() == 0:
