@@ -21,7 +21,8 @@ use os.tls13.handshake13.{
     build_finished_bytes, ServerHello13, ParsedHandshake, CertVerifyFields
 }
 use os.tls13.cert_verify.{
-    extract_ed25519_pubkey_from_cert, verify_certificate_verify_msg,
+    extract_ed25519_pubkey_from_cert, extract_rsa_pubkey_spki_from_cert,
+    verify_certificate_verify_msg_scheme,
     CertVerifyResult
 }
 use os.crypto.curve25519.{x25519, x25519_base}
@@ -211,6 +212,7 @@ fn tls13_connect(tcp_fd: i64, hostname: text) -> Tls13ConnectResult:
 
     var cert_der: [u8] = []
     var cert_verify_sig: [u8] = []
+    var cert_verify_algo: u16 = 0
     var server_verify_data: [u8] = []
 
     # Saved transcript snapshots for verification
@@ -284,6 +286,7 @@ fn tls13_connect(tcp_fd: i64, hostname: text) -> Tls13ConnectResult:
                                 transcript = transcript_add(transcript, msg_bytes)
                                 val cv_fields = parse_certificate_verify(ph.body)
                                 cert_verify_sig = cv_fields.signature
+                                cert_verify_algo = cv_fields.algorithm
                                 have_cv = true
 
                             elif ph.msg_type == _HS_FINISHED:
@@ -307,9 +310,14 @@ fn tls13_connect(tcp_fd: i64, hostname: text) -> Tls13ConnectResult:
     # ------------------------------------------------------------------
     # Step 9: Verify CertificateVerify
     # ------------------------------------------------------------------
-    val server_pubkey = extract_ed25519_pubkey_from_cert(cert_der)
     val cv_hash = transcript_hash(transcript_before_cv)
-    val cv_result = verify_certificate_verify_msg(server_pubkey, cv_hash, cert_verify_sig)
+    val sig_scheme = cert_verify_algo
+    var pubkey_for_verify: [u8] = []
+    if sig_scheme == 0x0807:
+        pubkey_for_verify = extract_ed25519_pubkey_from_cert(cert_der)
+    elif (sig_scheme == 0x0804) or (sig_scheme == 0x0805) or (sig_scheme == 0x0806):
+        pubkey_for_verify = extract_rsa_pubkey_spki_from_cert(cert_der)
+    val cv_result = verify_certificate_verify_msg_scheme(pubkey_for_verify, sig_scheme, cv_hash, cert_verify_sig)
 
     if val CertVerifyResult.Err(cv_err) = cv_result:
         return Tls13ConnectResult.Failed(reason: cv_err)

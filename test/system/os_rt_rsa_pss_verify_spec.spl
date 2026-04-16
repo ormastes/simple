@@ -1,0 +1,187 @@
+@allow(primitive_api)
+"""
+# RSA-PSS Verify FFI Specification
+
+**Feature IDs:** N/A
+**Category:** Infrastructure
+**Difficulty:** 3/5
+**Status:** Implemented
+
+## Overview
+
+Structural tests for the three RSA-PSS verify FFI wrappers landed in commit
+`a2c5361f5e04`:
+
+  - `rsa_pss_sha256_verify(pubkey, msg, sig) -> bool`
+  - `rsa_pss_sha384_verify(pubkey, msg, sig) -> bool`
+  - `rsa_pss_sha512_verify(pubkey, msg, sig) -> bool`
+
+Goal: reference-cross-check structure (design option b) so when compiled mode
+lands, tests actually exercise the FFI.  In interpreter mode, `it` blocks reach
+"unknown extern function: rt_rsa_pss_sha*_verify" — that is the expected state
+until native compilation runs the externs.
+
+`bin/simple check` gives load-time type-check coverage today.
+
+tag: slow, system, crypto
+"""
+
+use std.sspec.*
+use std.nogc_sync_mut.io.signature_ffi.{
+    rsa_pss_sha256_verify,
+    rsa_pss_sha384_verify,
+    rsa_pss_sha512_verify
+}
+use test.system.os_crypto_ref_helpers.{hex_to_bytes}
+
+# ============================================================================
+# Fixtures — same 2048-bit RSA key as os_crypto_ref_signature_spec.spl
+# ============================================================================
+
+# RSA 2048-bit SPKI DER public key (SubjectPublicKeyInfo).
+# Source: src/compiler_rust/vendor/ring/tests/rsa_test_private_key_2048.p8
+# Extraction: openssl pkey -pubout -outform DER -in key.der -out pub.der
+val RSA_SPKI_HEX = "30820122300d06092a864886f70d01010105000382010f003082010a0282010100c8a78500a5a250db8ed36c85b8dcf83c4be1953114faaac7616e0ea24922fa6b7ab01f85582c815cc3bdeb5ed46762bc536accaa8b72705b00cef316b2ec508fb9697241b9e34238419cccf7339eeb8b062147af4f5932f613d9bc0ae70bf6d56d4432e83e13767587531bfa9dd56531741244be75e8bc9226b9fa44b4b8a101358d7e8bb75d0c724a4f11ece77776263faefe79612eb1d71646e77e8982866be1400eafc3580d3139b41aaa7380187372f22e35bd55b288496165c881ed154d5811245c52d56cc09d4916d4f2a50bcf5ae0a2637f4cfa6bf9daafc113dba8383b6dd7da6dd8db22d8510a8d3115983308909a1a0332517aa55e896e154249b30203010001"
+
+# Message used for all three PSS fixture signatures below.
+# Must match exactly (byte-for-byte) what was passed to openssl at signing time.
+val PSS_MSG = "The quick brown fox jumps over the lazy dog"
+
+# ============================================================================
+# PSS fixture signatures (hardcoded hex, generated offline).
+#
+# NOTE: RSA-PSS is NON-DETERMINISTIC — every sign call produces a different
+# valid signature (the salt is freshly randomised each time).  These constants
+# are one valid signature, not THE valid signature.  Do not compare them
+# byte-for-byte against a second openssl invocation; use the verify function.
+#
+# Signing commands (run once to produce these constants):
+#
+#   echo -n "The quick brown fox jumps over the lazy dog" > /tmp/msg.bin
+#   echo "<RSA_PKCS8_HEX>" | xxd -r -p > /tmp/key.der
+#
+#   SHA-256:
+#     openssl dgst -sha256 -sign /tmp/key.der \
+#       -sigopt rsa_padding_mode:pss -sigopt rsa_pss_saltlen:-1 \
+#       -out /tmp/sig256.bin /tmp/msg.bin
+#     xxd -p /tmp/sig256.bin | tr -d '\n'
+#
+#   SHA-384:
+#     openssl dgst -sha384 -sign /tmp/key.der \
+#       -sigopt rsa_padding_mode:pss -sigopt rsa_pss_saltlen:-1 \
+#       -out /tmp/sig384.bin /tmp/msg.bin
+#     xxd -p /tmp/sig384.bin | tr -d '\n'
+#
+#   SHA-512:
+#     openssl dgst -sha512 -sign /tmp/key.der \
+#       -sigopt rsa_padding_mode:pss -sigopt rsa_pss_saltlen:-1 \
+#       -out /tmp/sig512.bin /tmp/msg.bin
+#     xxd -p /tmp/sig512.bin | tr -d '\n'
+#
+# Salt length -1 means saltLen == digestLen, matching Ring's
+# RSA_PSS_2048_8192_SHA{256,384,512} algorithms.
+# ============================================================================
+
+val VALID_PSS_SIG_SHA256_HEX = "6b1d53cf95c4f872094c846e3e7e960cac890e63df9c0126ae128189ba45f0a09c7e027c73562eeb2d0853882c7b704939fd01a0c80e1c119a71150becde3482c9f436408c589176b86de6e87af14d5b46594a564688715a92eb751bc9478ed6273dba50053dedb1f61400b43d3da5325040288667de2083d0e91d6e9b62a643af05d9dd7e4d22f7326ee0098d220bf88729042629f89a07af4e54a5c19e52b2fdede5f16ecb173976df9c7b0d6045710d260519be6950d64e960eae8d890e4b132462b59b18b804b0e8967e9ddad6636e37c33d2f097b5ef478e33ec6ed89384708cdfb58ec5ce50e080ac2c94f82d56dfbced5bfeb2510e8d875eb9bdc9311"
+
+val VALID_PSS_SIG_SHA384_HEX = "06de39183b9185ff39eec0b0d87ae88f78e35b1e7f7fb67fbe93555b136be3d77f958a79c4cdfa3b94d049f737a069fea201f05cc271288f3b10d0859546b6bcabf5e8b2d0e260970ec323fe46668fb4fc0ec3502307a45d92b2167d4f24b9d3b3861b60da9d408c9d270dd42db7e82cb6e579e622a2a1cf23ae96ec396e5e9c5da443897c0d4fed0c6ee39f26fa8514c04141327a175e7cc8cdc6e8f7d05ab7251551424f743a49f7d6e2bfb3ca8a8a4c024d2cd003476736e3f4fd35ab1d7efb320d0cabfada2e118a081eec09d09f72d12a9e4c11a04fe717a99a64ac8d7c0c79266a59587ba0ad82cc7ec600df3a9ac718d3ac75d9366bc755d1f0d87a9d"
+
+val VALID_PSS_SIG_SHA512_HEX = "26451684da613d856f05ff92748f56d10c423a48ae6274737f2cd32a0560b0581af6f4234a94d05d2554eed67cfa14c27da4171a1207e45e19b5d53a641a84f4387d8b73c280a52051d514d552d1b99078daf7481c455b20d67b56c5892ddf7a297e7417b094a96a35e0a58eaa8742472158966805302bbeef5360a79d9eee159e3a9d3be1f8bbaa764b20721c9ad50e5c04c900aad0f3c87d503b02f793c19fe549ca96df5679941622f0e97568d80ed9e0ba1d4caa1054a608ad2bf320642587b946f318ffb1e51861920cfc07464c4208c12376fe93208f0ae3067415531acc9dcb9d0e801133c6973f2242dd820b63ed071a3d8903b7c92b3b7ade607cae"
+
+# ============================================================================
+# Helper: flip one byte in a byte array (for tamper tests)
+# ============================================================================
+
+fn _flip_byte(buf: [u8], idx: u64) -> [u8]:
+    """Return a copy of buf with buf[idx] XOR'd with 0xFF."""
+    var out: [u8] = []
+    var i: u64 = 0
+    while i < buf.len():
+        if i == idx:
+            out.push((buf[i].to_u64() ^ 0xFFu64).to_u8())
+        else:
+            out.push(buf[i])
+        i = i + 1
+    out
+
+# ============================================================================
+# Test suite
+# ============================================================================
+
+describe "rsa_pss_sha256_verify":
+    it "accepts a valid PSS-SHA256 signature":
+        val spki = hex_to_bytes(RSA_SPKI_HEX)
+        val sig  = hex_to_bytes(VALID_PSS_SIG_SHA256_HEX)
+        val msg  = PSS_MSG.to_bytes()
+        expect(rsa_pss_sha256_verify(spki, msg, sig)).to_equal(true)
+
+    it "rejects a tampered PSS-SHA256 signature":
+        val spki        = hex_to_bytes(RSA_SPKI_HEX)
+        val sig_original = hex_to_bytes(VALID_PSS_SIG_SHA256_HEX)
+        val sig_bad     = _flip_byte(sig_original, 10)
+        val msg         = PSS_MSG.to_bytes()
+        expect(rsa_pss_sha256_verify(spki, msg, sig_bad)).to_equal(false)
+
+    it "rejects a valid PSS-SHA256 signature with wrong message":
+        val spki = hex_to_bytes(RSA_SPKI_HEX)
+        val sig  = hex_to_bytes(VALID_PSS_SIG_SHA256_HEX)
+        val msg  = "Wrong message entirely".to_bytes()
+        expect(rsa_pss_sha256_verify(spki, msg, sig)).to_equal(false)
+
+    it "rejects a malformed SPKI for PSS-SHA256":
+        val bad_spki = [0x30u8, 0x01]
+        val sig      = hex_to_bytes(VALID_PSS_SIG_SHA256_HEX)
+        val msg      = PSS_MSG.to_bytes()
+        expect(rsa_pss_sha256_verify(bad_spki, msg, sig)).to_equal(false)
+
+describe "rsa_pss_sha384_verify":
+    it "accepts a valid PSS-SHA384 signature":
+        val spki = hex_to_bytes(RSA_SPKI_HEX)
+        val sig  = hex_to_bytes(VALID_PSS_SIG_SHA384_HEX)
+        val msg  = PSS_MSG.to_bytes()
+        expect(rsa_pss_sha384_verify(spki, msg, sig)).to_equal(true)
+
+    it "rejects a tampered PSS-SHA384 signature":
+        val spki         = hex_to_bytes(RSA_SPKI_HEX)
+        val sig_original = hex_to_bytes(VALID_PSS_SIG_SHA384_HEX)
+        val sig_bad      = _flip_byte(sig_original, 10)
+        val msg          = PSS_MSG.to_bytes()
+        expect(rsa_pss_sha384_verify(spki, msg, sig_bad)).to_equal(false)
+
+    it "rejects a valid PSS-SHA384 signature with wrong message":
+        val spki = hex_to_bytes(RSA_SPKI_HEX)
+        val sig  = hex_to_bytes(VALID_PSS_SIG_SHA384_HEX)
+        val msg  = "Wrong message entirely".to_bytes()
+        expect(rsa_pss_sha384_verify(spki, msg, sig)).to_equal(false)
+
+    it "rejects a malformed SPKI for PSS-SHA384":
+        val bad_spki = [0x30u8, 0x01]
+        val sig      = hex_to_bytes(VALID_PSS_SIG_SHA384_HEX)
+        val msg      = PSS_MSG.to_bytes()
+        expect(rsa_pss_sha384_verify(bad_spki, msg, sig)).to_equal(false)
+
+describe "rsa_pss_sha512_verify":
+    it "accepts a valid PSS-SHA512 signature":
+        val spki = hex_to_bytes(RSA_SPKI_HEX)
+        val sig  = hex_to_bytes(VALID_PSS_SIG_SHA512_HEX)
+        val msg  = PSS_MSG.to_bytes()
+        expect(rsa_pss_sha512_verify(spki, msg, sig)).to_equal(true)
+
+    it "rejects a tampered PSS-SHA512 signature":
+        val spki         = hex_to_bytes(RSA_SPKI_HEX)
+        val sig_original = hex_to_bytes(VALID_PSS_SIG_SHA512_HEX)
+        val sig_bad      = _flip_byte(sig_original, 10)
+        val msg          = PSS_MSG.to_bytes()
+        expect(rsa_pss_sha512_verify(spki, msg, sig_bad)).to_equal(false)
+
+    it "rejects a valid PSS-SHA512 signature with wrong message":
+        val spki = hex_to_bytes(RSA_SPKI_HEX)
+        val sig  = hex_to_bytes(VALID_PSS_SIG_SHA512_HEX)
+        val msg  = "Wrong message entirely".to_bytes()
+        expect(rsa_pss_sha512_verify(spki, msg, sig)).to_equal(false)
+
+    it "rejects a malformed SPKI for PSS-SHA512":
+        val bad_spki = [0x30u8, 0x01]
+        val sig      = hex_to_bytes(VALID_PSS_SIG_SHA512_HEX)
+        val msg      = PSS_MSG.to_bytes()
+        expect(rsa_pss_sha512_verify(bad_spki, msg, sig)).to_equal(false)
