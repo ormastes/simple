@@ -46,32 +46,32 @@ use test.qemu.os.common.qemu_os_harness.{
     spawn_guest_with_qmp_scenario, stop_guest, wait_for_serial_marker}
 
 # ===========================================================================
+# Helpers
+# ===========================================================================
+
+fn ensure_disk_image_or_skip() -> bool:
+    dir_create_all("build/os")
+    val ok = ensure_desktop_disk_image()
+    if not ok:
+        print "[simpleos_desktop_disk_boot_spec] disk image unavailable (missing mkfs.fat/mformat?), skipping"
+        expect(true).to_equal(true)
+        return false
+    true
+
+# ===========================================================================
 # Spec
 # ===========================================================================
 
 describe "SimpleOS desktop boot with FAT32 disk (SYS-GUI-007)":
 
     it "materializes the selected desktop disk artifact":
-        # Make sure build/os/ exists so the recipe can drop the image.
-        dir_create_all("build/os")
-        val ok = ensure_desktop_disk_image()
-        if not ok:
-            # On hosts without mkfs.fat / mformat the recipe intentionally
-            # bails with a warning and a non-zero exit. That is an
-            # environment skip, not a regression — mirror the pattern
-            # used by can_run_target() elsewhere in the system suite.
-            print "[simpleos_desktop_disk_boot_spec] disk image unavailable (missing mkfs.fat/mformat?), skipping"
-            expect(true).to_equal(true)
+        if not ensure_disk_image_or_skip():
             return
         val img_path = desktop_disk_image_path()
         expect(file_exists(img_path)).to_equal(true)
 
     it "boots the desktop disk lane and proves editor save/readback":
-        dir_create_all("build/os")
-        val disk_ok = ensure_desktop_disk_image()
-        if not disk_ok:
-            print "[simpleos_desktop_disk_boot_spec] disk image unavailable (missing mkfs.fat/mformat?), skipping"
-            expect(true).to_equal(true)
+        if not ensure_disk_image_or_skip():
             return
 
         val target = get_desktop_browser_target()
@@ -89,23 +89,17 @@ describe "SimpleOS desktop boot with FAT32 disk (SYS-GUI-007)":
 
         match spawn_guest_with_qmp_scenario(target, scenario, qmp_socket, serial_log):
             Ok(handle):
-                val saw_mount = wait_for_serial_marker(handle, "[vfs] mounted fat32", 30000)
-                val saw_desktop = wait_for_serial_marker(handle, "[desktop-e2e] desktop-ready", 30000)
-                val saw_grouping = wait_for_serial_marker(handle, "[desktop-e2e] remote-grouping:ok", 60000)
-                val saw_editor_shortcut = wait_for_serial_marker(handle, "[desktop-e2e] editor-shortcut:ok", 60000)
-                val saw_editor_save = wait_for_serial_marker(handle, "[desktop-e2e] editor-save:ok", 60000)
-                val saw_cli_verify = wait_for_serial_marker(handle, "[desktop-e2e] cli-verify:ok", 60000)
                 val saw_pass = wait_for_serial_marker(handle, "TEST PASSED", 60000)
                 val output = read_serial_log(handle)
                 stop_guest(handle)
 
-                expect(saw_mount).to_equal(true)
-                expect(saw_desktop).to_equal(true)
-                expect(saw_grouping).to_equal(true)
-                expect(saw_editor_shortcut).to_equal(true)
-                expect(saw_editor_save).to_equal(true)
-                expect(saw_cli_verify).to_equal(true)
                 expect(saw_pass).to_equal(true)
+                expect(output.contains("[vfs] mounted fat32")).to_equal(true)
+                expect(output.contains("[desktop-e2e] desktop-ready")).to_equal(true)
+                expect(output.contains("[desktop-e2e] remote-grouping:ok")).to_equal(true)
+                expect(output.contains("[desktop-e2e] editor-shortcut:ok")).to_equal(true)
+                expect(output.contains("[desktop-e2e] editor-save:ok")).to_equal(true)
+                expect(output.contains("[desktop-e2e] cli-verify:ok")).to_equal(true)
                 expect(output.contains("[desktop-e2e] editor-save:fail")).to_equal(false)
                 expect(output.contains("[desktop-e2e] editor-launch:fail")).to_equal(false)
                 expect(output.contains("[desktop-e2e] cli-verify:fail")).to_equal(false)

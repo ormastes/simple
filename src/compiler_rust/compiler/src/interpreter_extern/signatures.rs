@@ -23,6 +23,7 @@ use ring::signature::{
     EcdsaKeyPair, KeyPair, RsaKeyPair, UnparsedPublicKey, ECDSA_P256_SHA256_FIXED,
     ECDSA_P256_SHA256_FIXED_SIGNING, ED25519, RSA_PKCS1_2048_8192_SHA256,
     RSA_PKCS1_2048_8192_SHA512, RSA_PKCS1_SHA256, RSA_PKCS1_SHA512,
+    RSA_PSS_2048_8192_SHA256, RSA_PSS_2048_8192_SHA384, RSA_PSS_2048_8192_SHA512,
 };
 use std::sync::Arc;
 
@@ -131,6 +132,67 @@ pub fn rt_rsa_sha512_verify(args: &[Value]) -> Result<Value, CompileError> {
         return Ok(Value::Int(0));
     };
     let key = UnparsedPublicKey::new(&RSA_PKCS1_2048_8192_SHA512, pk);
+    Ok(Value::Int(if key.verify(&msg, &sig).is_ok() {
+        1
+    } else {
+        0
+    }))
+}
+
+// ---------------------------------------------------------------------------
+// RSA-PSS verify
+// ---------------------------------------------------------------------------
+
+/// `rt_rsa_pss_sha256_verify(spki: [u8], message: [u8], signature: [u8]) -> i64`
+pub fn rt_rsa_pss_sha256_verify(args: &[Value]) -> Result<Value, CompileError> {
+    let Some(pk) = extract_bytes(args, 0) else {
+        return Ok(Value::Int(0));
+    };
+    let Some(msg) = extract_bytes(args, 1) else {
+        return Ok(Value::Int(0));
+    };
+    let Some(sig) = extract_bytes(args, 2) else {
+        return Ok(Value::Int(0));
+    };
+    let key = UnparsedPublicKey::new(&RSA_PSS_2048_8192_SHA256, pk);
+    Ok(Value::Int(if key.verify(&msg, &sig).is_ok() {
+        1
+    } else {
+        0
+    }))
+}
+
+/// `rt_rsa_pss_sha384_verify(spki: [u8], message: [u8], signature: [u8]) -> i64`
+pub fn rt_rsa_pss_sha384_verify(args: &[Value]) -> Result<Value, CompileError> {
+    let Some(pk) = extract_bytes(args, 0) else {
+        return Ok(Value::Int(0));
+    };
+    let Some(msg) = extract_bytes(args, 1) else {
+        return Ok(Value::Int(0));
+    };
+    let Some(sig) = extract_bytes(args, 2) else {
+        return Ok(Value::Int(0));
+    };
+    let key = UnparsedPublicKey::new(&RSA_PSS_2048_8192_SHA384, pk);
+    Ok(Value::Int(if key.verify(&msg, &sig).is_ok() {
+        1
+    } else {
+        0
+    }))
+}
+
+/// `rt_rsa_pss_sha512_verify(spki: [u8], message: [u8], signature: [u8]) -> i64`
+pub fn rt_rsa_pss_sha512_verify(args: &[Value]) -> Result<Value, CompileError> {
+    let Some(pk) = extract_bytes(args, 0) else {
+        return Ok(Value::Int(0));
+    };
+    let Some(msg) = extract_bytes(args, 1) else {
+        return Ok(Value::Int(0));
+    };
+    let Some(sig) = extract_bytes(args, 2) else {
+        return Ok(Value::Int(0));
+    };
+    let key = UnparsedPublicKey::new(&RSA_PSS_2048_8192_SHA512, pk);
     Ok(Value::Int(if key.verify(&msg, &sig).is_ok() {
         1
     } else {

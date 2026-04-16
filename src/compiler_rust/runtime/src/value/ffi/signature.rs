@@ -13,6 +13,7 @@ use ring::signature::{
     EcdsaKeyPair, KeyPair, RsaKeyPair, UnparsedPublicKey, ECDSA_P256_SHA256_FIXED,
     ECDSA_P256_SHA256_FIXED_SIGNING, ED25519, RSA_PKCS1_2048_8192_SHA256,
     RSA_PKCS1_2048_8192_SHA512, RSA_PKCS1_SHA256, RSA_PKCS1_SHA512,
+    RSA_PSS_2048_8192_SHA256, RSA_PSS_2048_8192_SHA384, RSA_PSS_2048_8192_SHA512,
 };
 
 // ---------------------------------------------------------------------------
@@ -127,6 +128,96 @@ pub extern "C" fn rt_rsa_sha512_verify(
     };
 
     let key = UnparsedPublicKey::new(&RSA_PKCS1_2048_8192_SHA512, pk_bytes);
+    match key.verify(&msg_bytes, &sig_bytes) {
+        Ok(()) => 1,
+        Err(_) => 0,
+    }
+}
+
+// === RSA-PSS Verify ===
+//
+// Three functions for RSA-PSS (RSASSA-PSS) used in TLS 1.3 certificate
+// verification.  The pubkey is SPKI DER (same format as the PKCS#1 verify
+// functions above).  Each returns 1 on valid, 0 on any error.
+
+/// Verify an RSA-PSS SHA-256 signature (TLS 1.3 `rsa_pss_rsae_sha256`).
+///
+/// # Arguments
+/// * `pubkey`    — `[u8]` DER-encoded RSA public key (SubjectPublicKeyInfo)
+/// * `message`   — `[u8]` message bytes that were signed
+/// * `signature` — `[u8]` raw RSA-PSS signature bytes
+///
+/// # Returns
+/// `1` if the signature is valid, `0` otherwise (including on any error).
+#[no_mangle]
+pub extern "C" fn rt_rsa_pss_sha256_verify(
+    pubkey: RuntimeValue,
+    message: RuntimeValue,
+    signature: RuntimeValue,
+) -> i64 {
+    let Some(pk_bytes) = runtime_byte_array_to_vec(pubkey) else {
+        return 0;
+    };
+    let Some(msg_bytes) = runtime_byte_array_to_vec(message) else {
+        return 0;
+    };
+    let Some(sig_bytes) = runtime_byte_array_to_vec(signature) else {
+        return 0;
+    };
+
+    let key = UnparsedPublicKey::new(&RSA_PSS_2048_8192_SHA256, pk_bytes);
+    match key.verify(&msg_bytes, &sig_bytes) {
+        Ok(()) => 1,
+        Err(_) => 0,
+    }
+}
+
+/// Verify an RSA-PSS SHA-384 signature (TLS 1.3 `rsa_pss_rsae_sha384`).
+///
+/// Mirror of `rt_rsa_pss_sha256_verify`; see that function's docs.
+#[no_mangle]
+pub extern "C" fn rt_rsa_pss_sha384_verify(
+    pubkey: RuntimeValue,
+    message: RuntimeValue,
+    signature: RuntimeValue,
+) -> i64 {
+    let Some(pk_bytes) = runtime_byte_array_to_vec(pubkey) else {
+        return 0;
+    };
+    let Some(msg_bytes) = runtime_byte_array_to_vec(message) else {
+        return 0;
+    };
+    let Some(sig_bytes) = runtime_byte_array_to_vec(signature) else {
+        return 0;
+    };
+
+    let key = UnparsedPublicKey::new(&RSA_PSS_2048_8192_SHA384, pk_bytes);
+    match key.verify(&msg_bytes, &sig_bytes) {
+        Ok(()) => 1,
+        Err(_) => 0,
+    }
+}
+
+/// Verify an RSA-PSS SHA-512 signature (TLS 1.3 `rsa_pss_rsae_sha512`).
+///
+/// Mirror of `rt_rsa_pss_sha256_verify`; see that function's docs.
+#[no_mangle]
+pub extern "C" fn rt_rsa_pss_sha512_verify(
+    pubkey: RuntimeValue,
+    message: RuntimeValue,
+    signature: RuntimeValue,
+) -> i64 {
+    let Some(pk_bytes) = runtime_byte_array_to_vec(pubkey) else {
+        return 0;
+    };
+    let Some(msg_bytes) = runtime_byte_array_to_vec(message) else {
+        return 0;
+    };
+    let Some(sig_bytes) = runtime_byte_array_to_vec(signature) else {
+        return 0;
+    };
+
+    let key = UnparsedPublicKey::new(&RSA_PSS_2048_8192_SHA512, pk_bytes);
     match key.verify(&msg_bytes, &sig_bytes) {
         Ok(()) => 1,
         Err(_) => 0,

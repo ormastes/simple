@@ -431,6 +431,9 @@ pub(crate) fn call_extern_function(
         "rt_ed25519_sign" => signatures::rt_ed25519_sign(&evaluated),
         "rt_ecdsa_p256_sign" => signatures::rt_ecdsa_p256_sign(&evaluated),
         "rt_ecdsa_p256_verify" => signatures::rt_ecdsa_p256_verify(&evaluated),
+        "rt_rsa_pss_sha256_verify" => signatures::rt_rsa_pss_sha256_verify(&evaluated),
+        "rt_rsa_pss_sha384_verify" => signatures::rt_rsa_pss_sha384_verify(&evaluated),
+        "rt_rsa_pss_sha512_verify" => signatures::rt_rsa_pss_sha512_verify(&evaluated),
 
         // ====================================================================
         // Process Control (3 functions)

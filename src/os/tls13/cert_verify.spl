@@ -1,17 +1,27 @@
 #![allow(unnamed_duplicate_typed_args)]
-# TLS 1.3 Certificate Verification — DER parse + Ed25519 signature verify
+# TLS 1.3 Certificate Verification — DER parse + Ed25519 + RSA-PSS signature verify
 #
 # Implements:
 #   - DER TLV helpers (tag, length, TLV, skip)
 #   - extract_ed25519_pubkey_from_cert: navigate X.509 DER to extract Ed25519 public key
-#   - verify_certificate_verify_msg: RFC 8446 §4.4.3 CertificateVerify message verify
+#   - extract_rsa_pubkey_spki_from_cert: navigate X.509 DER to extract RSA SPKI TLV bytes
+#   - verify_certificate_verify_msg: RFC 8446 §4.4.3 CertificateVerify verify (Ed25519 shim)
+#   - verify_certificate_verify_msg_scheme: dispatch on SignatureScheme (Ed25519 + RSA-PSS)
 #   - verify_cert_signature_ed25519: verify a certificate's self/issuer signature
+#
+# Signature schemes (RFC 8446 §4.2.3):
+#   ed25519:             0x0807
+#   rsa_pss_rsae_sha256: 0x0804
+#   rsa_pss_rsae_sha384: 0x0805
+#   rsa_pss_rsae_sha512: 0x0806
 #
 # Reference: RFC 8446 §4.4.3 (CertificateVerify)
 # Reference: RFC 5280 (X.509 DER encoding)
 # Reference: RFC 8410 (Ed25519 in X.509, OID 1.3.101.112)
+# Reference: RFC 8017 (RSA-PSS)
 
 use os.crypto.ed25519.{ed25519_verify}
+use std.nogc_sync_mut.io.signature_ffi.{rsa_pss_sha256_verify, rsa_pss_sha384_verify, rsa_pss_sha512_verify}
 
 # ============================================================================
 # Result Type
@@ -179,20 +189,97 @@ fn extract_ed25519_pubkey_from_cert(cert_der: [u8]) -> [u8]:
         i = i + 1
     pubkey
 
-fn verify_certificate_verify_msg(server_pubkey: [u8], transcript_hash: [u8], sig: [u8]) -> CertVerifyResult:
-    """Verify a TLS 1.3 CertificateVerify message per RFC 8446 §4.4.3.
+fn extract_rsa_pubkey_spki_from_cert(cert_der: [u8]) -> [u8]:
+    """Extract the SubjectPublicKeyInfo SEQUENCE TLV from a DER-encoded X.509 certificate.
 
-    The signed content is:
-      64 x 0x20 || "TLS 1.3, server CertificateVerify" || 0x00 || transcript_hash
+    Returns the full SPKI TLV bytes (outer SEQUENCE including AlgorithmIdentifier and BIT STRING)
+    suitable for passing directly to rsa_pss_sha*_verify functions.
+
+    Navigation:
+      Certificate  SEQUENCE
+        TBSCertificate  SEQUENCE
+          [0] CONTEXT optional (version)  — skip if present (tag 0xA0)
+          INTEGER  (serialNumber)          — skip
+          SEQUENCE (signatureAlgorithm)    — skip
+          SEQUENCE (issuer)                — skip
+          SEQUENCE (validity)              — skip
+          SEQUENCE (subject)               — skip
+          SEQUENCE (subjectPublicKeyInfo)  — return TLV bytes wholesale
+
+    On parse failure, returns empty [u8].
+    """
+    # Outer Certificate SEQUENCE
+    val cert_tlv = _der_read_tlv(cert_der, 0)
+    val tbs_start = cert_tlv.value_offset
+
+    # TBSCertificate SEQUENCE
+    val tbs_tlv = _der_read_tlv(cert_der, tbs_start)
+    var pos = tbs_tlv.value_offset
+
+    # Optional version [0] CONTEXT (tag 0xA0)
+    if cert_der[pos] == 0xA0:
+        pos = _der_skip(cert_der, pos)
+
+    # serialNumber INTEGER (tag 0x02)
+    pos = _der_skip(cert_der, pos)
+
+    # signatureAlgorithm SEQUENCE (tag 0x30)
+    pos = _der_skip(cert_der, pos)
+
+    # issuer SEQUENCE (tag 0x30)
+    pos = _der_skip(cert_der, pos)
+
+    # validity SEQUENCE (tag 0x30)
+    pos = _der_skip(cert_der, pos)
+
+    # subject SEQUENCE (tag 0x30)
+    pos = _der_skip(cert_der, pos)
+
+    # subjectPublicKeyInfo SEQUENCE (tag 0x30) — return the whole TLV
+    val spki_tlv = _der_read_tlv(cert_der, pos)
+    var spki_bytes: [u8] = []
+    var i: u64 = 0
+    while i < spki_tlv.total_length:
+        spki_bytes.push(cert_der[pos + i])
+        i = i + 1
+    spki_bytes
+
+fn verify_certificate_verify_msg(server_pubkey: [u8], transcript_hash: [u8], sig: [u8]) -> CertVerifyResult:
+    """Verify a TLS 1.3 CertificateVerify message assuming Ed25519 (sig_scheme 0x0807).
+
+    Shim for backward compatibility. New callers should use
+    verify_certificate_verify_msg_scheme and pass the actual SignatureScheme.
 
     Args:
         server_pubkey:   32-byte Ed25519 public key from the server's certificate.
-        transcript_hash: 32-byte SHA-256 transcript hash at CertificateVerify.
+        transcript_hash: transcript hash at CertificateVerify.
         sig:             64-byte Ed25519 signature from the CertificateVerify message.
 
     Returns CertVerifyResult.Ok on success, CertVerifyResult.Err on failure.
     """
-    # Build the content buffer
+    verify_certificate_verify_msg_scheme(server_pubkey, 0x0807, transcript_hash, sig)
+
+fn verify_certificate_verify_msg_scheme(pubkey: [u8], sig_scheme: u16, transcript_hash: [u8], sig: [u8]) -> CertVerifyResult:
+    """Verify a TLS 1.3 CertificateVerify message dispatching on SignatureScheme.
+
+    The signed content is:
+      64 x 0x20 || "TLS 1.3, server CertificateVerify" || 0x00 || transcript_hash
+
+    Supported sig_scheme values (RFC 8446 §4.2.3):
+      0x0807  ed25519              — pubkey is 32-byte raw Ed25519 key
+      0x0804  rsa_pss_rsae_sha256  — pubkey is DER SubjectPublicKeyInfo bytes
+      0x0805  rsa_pss_rsae_sha384  — pubkey is DER SubjectPublicKeyInfo bytes
+      0x0806  rsa_pss_rsae_sha512  — pubkey is DER SubjectPublicKeyInfo bytes
+
+    Args:
+        pubkey:          Public key bytes (format depends on sig_scheme — see above).
+        sig_scheme:      2-byte SignatureScheme from the CertificateVerify wire message.
+        transcript_hash: transcript hash at CertificateVerify.
+        sig:             Signature bytes from the CertificateVerify message.
+
+    Returns CertVerifyResult.Ok on success, CertVerifyResult.Err on failure.
+    """
+    # Build the content buffer per RFC 8446 §4.4.3
     var content: [u8] = []
 
     # 64 spaces (0x20)
@@ -245,12 +332,37 @@ fn verify_certificate_verify_msg(server_pubkey: [u8], transcript_hash: [u8], sig
         content.push(transcript_hash[i])
         i = i + 1
 
-    # Verify using Ed25519
-    val ok = ed25519_verify(server_pubkey, content, sig)
-    if ok:
-        CertVerifyResult.Ok
+    # Dispatch on SignatureScheme
+    if sig_scheme == 0x0807:
+        # ed25519
+        val ok = ed25519_verify(pubkey, content, sig)
+        if ok:
+            CertVerifyResult.Ok
+        else:
+            CertVerifyResult.Err(msg: "CertificateVerify signature invalid (ed25519)")
+    elif sig_scheme == 0x0804:
+        # rsa_pss_rsae_sha256
+        val ok = rsa_pss_sha256_verify(pubkey, content, sig)
+        if ok:
+            CertVerifyResult.Ok
+        else:
+            CertVerifyResult.Err(msg: "CertificateVerify signature invalid (rsa_pss_sha256)")
+    elif sig_scheme == 0x0805:
+        # rsa_pss_rsae_sha384
+        val ok = rsa_pss_sha384_verify(pubkey, content, sig)
+        if ok:
+            CertVerifyResult.Ok
+        else:
+            CertVerifyResult.Err(msg: "CertificateVerify signature invalid (rsa_pss_sha384)")
+    elif sig_scheme == 0x0806:
+        # rsa_pss_rsae_sha512
+        val ok = rsa_pss_sha512_verify(pubkey, content, sig)
+        if ok:
+            CertVerifyResult.Ok
+        else:
+            CertVerifyResult.Err(msg: "CertificateVerify signature invalid (rsa_pss_sha512)")
     else:
-        CertVerifyResult.Err(msg: "CertificateVerify signature invalid")
+        CertVerifyResult.Err(msg: "unsupported signature scheme")
 
 fn verify_cert_signature_ed25519(cert_der: [u8], issuer_pubkey: [u8]) -> CertVerifyResult:
     """Verify the Ed25519 signature on a DER-encoded X.509 certificate.
