@@ -1461,6 +1461,30 @@ static int _nvme_read_sector_impl(uint64_t lba, void *buf)
     return 0;
 }
 
+/* Write one sector to NVMe namespace 1.
+ * lba     = logical block address
+ * buf     = source buffer containing one sector
+ * Returns 0 on success, negative on error. */
+static int _nvme_write_sector_impl(uint64_t lba, const void *buf)
+{
+    if (!_nvme.initialized) {
+        int rc = _nvme_init_controller();
+        if (rc < 0) return rc;
+    }
+
+    void *dma_buf = nvme_alloc_aligned(4096, 4096);
+    if (!dma_buf) return -12;
+    __builtin_memcpy(dma_buf, buf, _nvme.sector_size);
+
+    uint32_t cdw10 = (uint32_t)(lba & 0xFFFFFFFF);
+    uint32_t cdw11 = (uint32_t)(lba >> 32);
+    uint32_t cdw12 = 0; /* 1 sector (0-based) */
+
+    return nvme_io_cmd(0x01, 1,
+                       (uint64_t)(uintptr_t)dma_buf, 0,
+                       cdw10, cdw11, cdw12);
+}
+
 /* Syscall 85 handler: NvmeReadSector
  * a0 = device index (ignored, only one NVMe device supported)
  * a1 = LBA
@@ -1472,6 +1496,19 @@ static int64_t _nvme_read_sector(uint64_t device_idx, uint64_t lba, uint64_t buf
     void *buf = (void *)(uintptr_t)buf_addr;
     if (!buf) return -14; /* EFAULT */
     return (int64_t)_nvme_read_sector_impl(lba, buf);
+}
+
+/* Syscall 94 handler: NvmeWriteSector
+ * a0 = device index (ignored, only one NVMe device supported)
+ * a1 = LBA
+ * a2 = source buffer address (caller-provided, must contain one sector)
+ * Returns 0 on success, negative errno on failure. */
+static int64_t _nvme_write_sector(uint64_t device_idx, uint64_t lba, uint64_t buf_addr)
+{
+    (void)device_idx;
+    const void *buf = (const void *)(uintptr_t)buf_addr;
+    if (!buf) return -14; /* EFAULT */
+    return (int64_t)_nvme_write_sector_impl(lba, buf);
 }
 
 /* _nvme_init_and_read_sector0 — callable from Simple code or early boot
@@ -3567,6 +3604,8 @@ int64_t userlib__syscall_raw__syscall(uint64_t id, uint64_t a0, uint64_t a1,
             return _nvme_read_sector(a0, a1, a2);
         case 86: /* NvmeInit: initialize NVMe controller + read sector 0 for diag */
             return (int64_t)_nvme_init_and_read_sector0();
+        case 94: /* NvmeWriteSector: a0=device_idx, a1=lba, a2=buf_addr */
+            return _nvme_write_sector(a0, a1, a2);
         case 87: /* Fat32Init: parse BPB and initialize FAT32 state */
             return (int64_t)_fat32_init();
         case 88: /* Fat32ReadFile: a0=name_ptr, a1=buf_ptr, a2=max_size */

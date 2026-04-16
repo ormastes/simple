@@ -1,0 +1,224 @@
+#![allow(unnamed_duplicate_typed_args)]
+# TLS 1.3 AEAD Record Layer
+#
+# Implements TLS 1.3 record encrypt/decrypt per RFC 8446 §5.2.
+# Uses AES-128-GCM for AEAD. No Rust FFI — pure Simple, baremetal-safe.
+#
+# Reference: RFC 8446 §5.2 (TLSInnerPlaintext, TLSCiphertext)
+
+use os.crypto.aes128_gcm.{aes128_gcm_encrypt, aes128_gcm_decrypt, Aes128GcmResult}
+
+# ============================================================================
+# Constants
+# ============================================================================
+
+val TLS_CONTENT_APPLICATION: u8 = 0x17
+val TLS_LEGACY_VERSION_HI: u8 = 0x03
+val TLS_LEGACY_VERSION_LO: u8 = 0x03
+val TLS_MAX_FRAGMENT: u64 = 16384
+val AEAD_TAG_SIZE: u64 = 16
+
+# ============================================================================
+# Types
+# ============================================================================
+
+class RecordKey:
+    key: [u8]    # 16 bytes — AES-128 key
+    iv: [u8]     # 12 bytes — base IV (XOR'd with seq_num to form nonce)
+
+enum RecordResult:
+    Ok(content_type: u8, data: [u8])
+    Err(msg: text)
+
+# ============================================================================
+# record13_make_nonce
+# ============================================================================
+
+fn record13_make_nonce(iv: [u8], seq_num: u64) -> [u8]:
+    """Build per-record nonce per RFC 8446 §5.3.
+
+    Pad seq_num to 12 bytes (4 zero bytes + 8 big-endian bytes),
+    then XOR each byte with the base IV.
+    """
+    # Build 12-byte padded seq_num: 4 zero bytes + 8 big-endian bytes
+    var padded: [u8] = []
+    padded.push(0x00)
+    padded.push(0x00)
+    padded.push(0x00)
+    padded.push(0x00)
+    padded.push(((seq_num >> 56) & 0xFF).to_u8())
+    padded.push(((seq_num >> 48) & 0xFF).to_u8())
+    padded.push(((seq_num >> 40) & 0xFF).to_u8())
+    padded.push(((seq_num >> 32) & 0xFF).to_u8())
+    padded.push(((seq_num >> 24) & 0xFF).to_u8())
+    padded.push(((seq_num >> 16) & 0xFF).to_u8())
+    padded.push(((seq_num >> 8) & 0xFF).to_u8())
+    padded.push((seq_num & 0xFF).to_u8())
+
+    # XOR with IV
+    var nonce: [u8] = []
+    var i: u64 = 0
+    while i < 12:
+        nonce.push(padded[i] ^ iv[i])
+        i = i + 1
+
+    nonce
+
+# ============================================================================
+# record13_build_header
+# ============================================================================
+
+fn record13_build_header(payload_length: u64) -> [u8]:
+    """Build the 5-byte TLS record header.
+
+    Format: content_type(1) || legacy_version(2) || length(2 big-endian)
+    For TLS 1.3, content_type is always 0x17 (application_data),
+    legacy_version is always 0x0303.
+    """
+    var header: [u8] = []
+    header.push(0x17)
+    header.push(0x03)
+    header.push(0x03)
+    header.push(((payload_length >> 8) & 0xFF).to_u8())
+    header.push((payload_length & 0xFF).to_u8())
+    header
+
+# ============================================================================
+# record13_encrypt
+# ============================================================================
+
+fn record13_encrypt(rk: RecordKey, seq_num: u64, content_type: u8, plaintext: [u8]) -> [u8]:
+    """Encrypt a TLS 1.3 record.
+
+    Builds TLSInnerPlaintext = plaintext || content_type, then AEAD-encrypts
+    with the record header as AAD. Returns the full TLSCiphertext wire bytes.
+
+    Args:
+        rk: RecordKey with 16-byte key and 12-byte IV.
+        seq_num: Sequence number for nonce derivation.
+        content_type: Real content type (e.g. 0x17 for application data).
+        plaintext: Data to encrypt.
+
+    Returns: 5-byte header || ciphertext || 16-byte tag.
+    """
+    # TLSInnerPlaintext = plaintext || content_type byte
+    var inner: [u8] = []
+    var i: u64 = 0
+    while i < plaintext.len():
+        inner.push(plaintext[i])
+        i = i + 1
+    inner.push(content_type)
+
+    # payload_length = len(inner) + AEAD tag size
+    val payload_length = inner.len() + AEAD_TAG_SIZE
+
+    # Build header (used as AAD)
+    val header = record13_build_header(payload_length)
+
+    # Derive per-record nonce
+    val nonce = record13_make_nonce(rk.iv, seq_num)
+
+    # AEAD encrypt: returns ciphertext || tag
+    val aead_output = aes128_gcm_encrypt(rk.key, nonce, inner, header)
+
+    # Assemble: header || ciphertext || tag
+    var result: [u8] = []
+    i = 0
+    while i < header.len():
+        result.push(header[i])
+        i = i + 1
+    i = 0
+    while i < aead_output.len():
+        result.push(aead_output[i])
+        i = i + 1
+
+    result
+
+# ============================================================================
+# record13_decrypt
+# ============================================================================
+
+fn record13_decrypt(rk: RecordKey, seq_num: u64, raw_record: [u8]) -> RecordResult:
+    """Decrypt and authenticate a TLS 1.3 record.
+
+    Validates header, extracts ciphertext and tag, AEAD-decrypts,
+    then strips the inner content_type byte from the plaintext.
+
+    Args:
+        rk: RecordKey with 16-byte key and 12-byte IV.
+        seq_num: Sequence number for nonce derivation.
+        raw_record: Full TLSCiphertext wire bytes (header + payload).
+
+    Returns: RecordResult.Ok(content_type, data) on success,
+             RecordResult.Err(msg) on validation or authentication failure.
+    """
+    # Validate minimum length for header
+    if raw_record.len() < 5:
+        return RecordResult.Err("record too short: missing header")
+
+    # Validate TLS 1.3 header fields
+    if raw_record[0] != 0x17:
+        return RecordResult.Err("record header: expected content_type 0x17")
+    if raw_record[1] != 0x03:
+        return RecordResult.Err("record header: expected legacy_version_hi 0x03")
+    if raw_record[2] != 0x03:
+        return RecordResult.Err("record header: expected legacy_version_lo 0x03")
+
+    # Read payload_length from header[3..4] big-endian
+    val payload_length = (raw_record[3].to_u64() << 8) | raw_record[4].to_u64()
+
+    # Validate total record length
+    if raw_record.len() < (5 + payload_length):
+        return RecordResult.Err("record too short: payload truncated")
+
+    # Payload must be at least the tag size (16 bytes)
+    if payload_length < AEAD_TAG_SIZE:
+        return RecordResult.Err("record payload too short: less than tag size")
+
+    val ct_len = payload_length - AEAD_TAG_SIZE
+
+    # Extract ciphertext: raw_record[5 .. 5+ct_len]
+    var ciphertext: [u8] = []
+    var i: u64 = 0
+    while i < ct_len:
+        ciphertext.push(raw_record[5 + i])
+        i = i + 1
+
+    # Extract tag: raw_record[5+ct_len .. 5+payload_length]
+    var tag: [u8] = []
+    i = 0
+    while i < AEAD_TAG_SIZE:
+        tag.push(raw_record[5 + ct_len + i])
+        i = i + 1
+
+    # AAD = header (5 bytes)
+    var aad: [u8] = []
+    i = 0
+    while i < 5:
+        aad.push(raw_record[i])
+        i = i + 1
+
+    # Derive per-record nonce
+    val nonce = record13_make_nonce(rk.iv, seq_num)
+
+    # AEAD decrypt
+    val dec_result = aes128_gcm_decrypt(rk.key, nonce, ciphertext, aad, tag)
+
+    if val Aes128GcmResult.Ok(data: inner) = dec_result:
+        # TLSInnerPlaintext: data bytes are plaintext || content_type
+        # The last byte is the real content_type; strip it
+        if inner.len() == 0:
+            return RecordResult.Err("decrypted inner plaintext is empty")
+        val last_idx = inner.len() - 1
+        val real_content_type = inner[last_idx]
+        var data: [u8] = []
+        var j: u64 = 0
+        while j < last_idx:
+            data.push(inner[j])
+            j = j + 1
+        return RecordResult.Ok(content_type: real_content_type, data: data)
+
+    if val Aes128GcmResult.Err(msg: err_msg) = dec_result:
+        return RecordResult.Err(err_msg)
+
+    RecordResult.Err("aes128_gcm_decrypt returned unexpected result")

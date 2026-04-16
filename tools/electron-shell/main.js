@@ -104,22 +104,28 @@ function sendToSimple(msg) {
 }
 
 // Fetch a URL via Electron's net module and ship the body back to Simple as
-// a `fetch_result` message. Handles redirects automatically. Body is capped
-// at 256 KB to keep the IPC payload under the 64 KB-per-message limit
-// enforced by parse_ipc_message (we'll truncate; for v1 that's fine).
+// a `fetch_result` message. Handles redirects automatically. Supports the
+// hosted browser's minimal GET/POST path. Body is capped at 256 KB to keep
+// the IPC payload under the parse_ipc_message ceiling (we'll truncate; for
+// v1 that's fine).
 const FETCH_BODY_CAP = 256 * 1024;
-function handleFetchRequest(url, requestId) {
-    debugLog(`request_fetch url=${url} requestId=${requestId}`);
+function handleFetchRequest(url, requestId, method = 'GET', body = '', contentType = '') {
+    const normalizedMethod = String(method || 'GET').toUpperCase();
+    debugLog(`request_fetch method=${normalizedMethod} url=${url} requestId=${requestId} bodyBytes=${Buffer.byteLength(String(body || ''), 'utf8')}`);
     if (!url) {
         sendToSimple({ type: 'fetch_result', requestId, url: '', status: 0, body: '', error: 'empty url' });
         return;
     }
     let request;
     try {
-        request = net.request({ method: 'GET', url, redirect: 'follow' });
+        request = net.request({ method: normalizedMethod, url, redirect: 'follow' });
     } catch (err) {
         sendToSimple({ type: 'fetch_result', requestId, url, status: 0, body: '', error: String(err.message || err) });
         return;
+    }
+    const bodyText = String(body || '');
+    if (bodyText && contentType) {
+        request.setHeader('Content-Type', contentType);
     }
     let chunks = [];
     let total = 0;
@@ -151,9 +157,12 @@ function handleFetchRequest(url, requestId) {
         });
     });
     request.on('error', (err) => {
-        debugLog(`request_fetch error url=${url} err=${err.message}`);
+        debugLog(`request_fetch error method=${normalizedMethod} url=${url} err=${err.message}`);
         sendToSimple({ type: 'fetch_result', requestId, url, status: 0, body: '', error: String(err.message || err) });
     });
+    if (bodyText) {
+        request.write(bodyText);
+    }
     request.end();
 }
 
@@ -190,7 +199,13 @@ function handleSimpleMessage(line) {
             // Result is shipped back to Simple's stdin as a `fetch_result`
             // message that parse_ipc_message decodes into UIEvent.FetchResult.
             case 'request_fetch':
-                handleFetchRequest(msg.url || '', msg.requestId || '');
+                handleFetchRequest(
+                    msg.url || '',
+                    msg.requestId || '',
+                    msg.method || 'GET',
+                    msg.body || '',
+                    msg.contentType || ''
+                );
                 break;
 
             case 'notification':

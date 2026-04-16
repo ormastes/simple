@@ -26,6 +26,7 @@ use os.services.launcher.launcher.{
     launcher_get_process_state, launcher_get_process_window_count, launcher_get_process_is_headless,
     launcher_note_window_opened, launcher_note_window_closed, launcher_poll_processes, MOD_META
 }
+use os.services.vfs.vfs_init.{vfs_get_manager, vfs_is_ready}
 
 extern fn serial_println(msg: text)
 
@@ -33,7 +34,7 @@ use os.apps.calculator.calculator.{Calculator}
 use os.apps.clock.clock.{ClockApp}
 use os.apps.terminal.terminal.{Terminal}
 use os.apps.hello_world.hello_world.{HelloWorldApp}
-use os.apps.browser_demo.browser_demo.{BrowserDemoApp, render_demo_stats}
+use os.apps.browser_demo.browser_demo.{BrowserDemoApp}
 use os.apps.editor.editor.{TextEditor}
 use os.apps.memo.memo.{MemoApp}
 use os.apps.paint.paint.{PaintApp}
@@ -82,21 +83,19 @@ struct EditorResidentLaunch:
     saved_path: text
     content: text
 
-extern fn rt_fat32_read_file_text(name: text) -> text
-extern fn rt_fat32_write_file_text(name: text, content: text) -> bool
-
 fn _build_editor_resident_launch() -> Result<EditorResidentLaunch, text>:
-    var editor = TextEditor.new()
+    if not vfs_is_ready():
+        return Err("vfs not ready")
+    val vfs = vfs_get_manager()
+    var editor = TextEditor.with_vfs(vfs)
     editor.lines = [EDITOR_SMOKE_CONTENT]
-    editor.file_path = EDITOR_SMOKE_PATH
-    if not rt_fat32_write_file_text("EDITOR.TXT", EDITOR_SMOKE_CONTENT):
-        return Err("runtime fat32 write failed")
-    editor.modified = false
-    editor.status_message = "Saved {EDITOR_SMOKE_PATH}"
-
-    var cli_output = rt_fat32_read_file_text("EDITOR.TXT")
-    if cli_output == "":
-        cli_output = EDITOR_SMOKE_CONTENT
+    val save_result = editor.save_as(EDITOR_SMOKE_PATH)
+    if save_result.is_err():
+        return Err(save_result.unwrap_err())
+    val read_result = vfs.read_text(EDITOR_SMOKE_PATH)
+    if read_result.is_err():
+        return Err("cli read failed: {read_result.unwrap_err()}")
+    val cli_output = read_result.unwrap()
     if cli_output != EDITOR_SMOKE_CONTENT:
         return Err("cli output mismatch: {cli_output}")
 
@@ -132,8 +131,6 @@ fn _materialize_resident_manifest_launch(shell: DesktopShell, name: text, pid: u
 
     match name:
         case "Browser Demo":
-            val (node_count, pixel_count) = render_demo_stats(600, 400)
-            serial_println("[browser_demo] render stats nodes={node_count} pixels={pixel_count} mode=resident-manifest pid={pid}")
             val main_tree = build_tree_with_title(column("browser_demo_resident_main", [
                 text_widget("browser_demo_title", "Browser Demo"),
                 text_widget("browser_demo_body", "packaged resident-manifest launch")

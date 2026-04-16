@@ -110,6 +110,8 @@ struct Fat32OpenFile:
     current_cluster: u32
     current_offset: u64
     file_size: u64
+    dir_cluster: u32
+    name: text
     flags: FileFlags
 
 impl Fat32Driver:
@@ -457,12 +459,22 @@ impl Filesystem for Fat32Driver:
                     current_cluster: new_cluster,
                     current_offset: 0,
                     file_size: 0,
+                    dir_cluster: parent_cluster,
+                    name: file_name,
                     flags: flags
                 )
                 self.open_files.push(open_file)
                 return Result.Ok(handle)
             return Result.Err("file not found: {path}")
         val entry = entry_opt.unwrap()
+        val parent_and_name = _split_path_parent(path)
+        val parent_result = me resolve_path(parent_and_name.parent)
+        if parent_result.is_err():
+            return Result.Err(parent_result.unwrap_err())
+        val parent_opt = parent_result.unwrap()
+        if not parent_opt.?:
+            return Result.Err("parent directory not found: {parent_and_name.parent}")
+        val parent_cluster = self.entry_first_cluster(parent_opt.unwrap())
         val cluster = self.entry_first_cluster(entry)
         val handle = self.next_handle
         self.next_handle = self.next_handle + 1
@@ -472,6 +484,8 @@ impl Filesystem for Fat32Driver:
             current_cluster: cluster,
             current_offset: 0,
             file_size: entry.file_size.to_u64(),
+            dir_cluster: parent_cluster,
+            name: parent_and_name.name,
             flags: flags
         )
         self.open_files.push(open_file)
@@ -554,6 +568,8 @@ impl Filesystem for Fat32Driver:
                     current_cluster: f.current_cluster,
                     current_offset: new_offset,
                     file_size: new_size,
+                    dir_cluster: f.dir_cluster,
+                    name: f.name,
                     flags: f.flags
                 )
                 break
@@ -571,6 +587,13 @@ impl Filesystem for Fat32Driver:
         var i = 0
         while i < self.open_files.len():
             if self.open_files[i].handle == handle:
+                val file = self.open_files[i]
+                if file.flags.write:
+                    use os.services.fat32.fat32_write.{Fat32WriteContext}
+                    var ctx = Fat32WriteContext.new(self)
+                    val update_result = ctx.update_file_size(file.dir_cluster, file.name, file.file_size.to_u32())
+                    if update_result.is_err():
+                        return Result.Err(update_result.unwrap_err())
                 self.open_files.remove(i)
                 return Result.Ok(true)
             i = i + 1

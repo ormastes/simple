@@ -182,6 +182,41 @@ describe "BrowserSession script bridge":
             Err(e) =>
                 expect(false).to_equal(true)
 
+    it "persists storage objects and cookie jar state":
+        var session = BrowserSession.new()
+        val open_result = session.open_html(
+            "https://example.com/app",
+            "<html><body><script>localStorage.theme = 'dark'; sessionStorage.tab = 'welcome'; document.cookie = 'sid=abc123; Path=/';</script></body></html>"
+        )
+        match open_result:
+            Ok(_) =>
+                expect(session.local_storage_item("theme") ?? "").to_equal("dark")
+                expect(session.session_storage_item("tab") ?? "").to_equal("welcome")
+                expect(session.document_cookie()).to_contain("sid=abc123")
+            Err(e) =>
+                expect(false).to_equal(true)
+
+        val reload_result = session.open_html(
+            "https://example.com/dashboard",
+            "<html><body><script>document.body.textContent = localStorage.theme + ':' + sessionStorage.tab + ':' + document.cookie;</script></body></html>"
+        )
+        match reload_result:
+            Ok(_) =>
+                expect(session.current_body_html).to_contain("dark:welcome:sid=abc123")
+            Err(e) =>
+                expect(false).to_equal(true)
+
+    it "exposes cookie jar update points for future network integration":
+        var session = BrowserSession.new()
+        session.open_html("https://example.com/path/page", "<html><body>Cookies</body></html>")
+        session.apply_set_cookie_header("theme=light; Path=/path")
+        session.apply_set_cookie_header("global=yes; Domain=example.com; Path=/")
+
+        expect(session.document_cookie()).to_contain("theme=light")
+        expect(session.document_cookie()).to_contain("global=yes")
+        expect(session.cookie_header_for_request("https://example.com/path/next")).to_contain("theme=light")
+        expect(session.cookie_header_for_request("https://example.com/other")).to_equal("global=yes")
+
 describe "BrowserSession history and rendering":
 
     it "supports back forward and reload":

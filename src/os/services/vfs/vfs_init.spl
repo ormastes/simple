@@ -229,24 +229,24 @@ fn vfs_boot_init() -> bool:
         return false
     serial_println("[vfs-init] Found NVMe device at index {nvme_idx}")
 
-    # Step 2: Initialize NVMe via C driver (syscall 86)
-    # This does the full NVMe init sequence in C with real volatile MMIO,
-    # avoiding the auto-stubbed Simple MMIO wrappers.
-    serial_println("[vfs-init] Initializing NVMe via C driver (syscall 86)...")
-    val init_result = syscall(SYS_NVME_INIT, 0, 0, 0, 0, 0)
-    if init_result < 0:
-        serial_println("[vfs-init] C NVMe init failed")
+    g_vfs_initialized = false
+    g_vfs = VfsManager.new()
+
+    serial_println("[vfs-init] Initializing C NVMe block adapter...")
+    val adapter_result = g_c_adapter.init()
+    if adapter_result.is_err():
+        serial_println("[vfs-init] C NVMe adapter init failed: {adapter_result.unwrap_err()}")
         return false
     serial_println("[vfs-init] C NVMe controller initialized!")
 
-    # The Simple Fat32Driver and VfsManager use auto-stubbed operators (>>)
-    # and methods that crash on baremetal. The C driver in baremetal_stubs.c
-    # already has a working FAT32 implementation accessible via syscall 88
-    # (Fat32ReadFile). Skip the Simple FAT32/VFS stack entirely and just
-    # mark VFS as initialized so the shell can use C-backed file I/O.
-    serial_println("[vfs-init] C NVMe + FAT32 verified (via C driver)")
+    var root_fs = Fat32Driver.new(g_c_adapter)
+    val mount_result = g_vfs.mount("/", "fat32", "/dev/nvme0n1", false, root_fs)
+    if mount_result.is_err():
+        serial_println("[vfs-init] FAT32 mount failed: {mount_result.unwrap_err()}")
+        return false
+
     g_vfs_initialized = true
-    serial_println("[vfs-init] VFS ready (C-backed)")
+    serial_println("[vfs-init] VFS ready (mounted FAT32 root)")
     return true
 
 # ============================================================================
