@@ -1,0 +1,408 @@
+#![allow(unnamed_duplicate_typed_args)]
+# TLS 1.3 Unit Tests — baremetal entry for QEMU
+
+use os.tls13.hkdf.{hkdf_extract, hkdf_expand, hkdf_expand_label}
+use os.tls13.transcript.{Transcript, transcript_new, transcript_add, transcript_hash, transcript_empty_hash}
+use os.tls13.key_schedule.{Tls13Secrets, TrafficKeys, derive_secret, tls13_early_secret, tls13_handshake_secret, tls13_master_secret, tls13_traffic_keys, tls13_finished_key, tls13_compute_handshake_secrets, tls13_compute_app_secrets}
+use os.tls13.record13.{RecordKey, RecordResult, record13_encrypt, record13_decrypt, record13_make_nonce}
+
+extern fn serial_println(msg: text)
+extern fn rt_port_outb(port: u16, value: u8)
+
+var _pass_count: u32 = 0
+var _fail_count: u32 = 0
+
+fn _serial(s: text):
+    serial_println(s)
+
+fn _assert(condition: bool, name: text):
+    if condition:
+        _serial("[TEST PASS] {name}")
+        _pass_count = _pass_count + 1
+    else:
+        _serial("[TEST FAIL: {name}]")
+        _fail_count = _fail_count + 1
+
+fn _bytes_eq(a: [u8], b: [u8]) -> bool:
+    if a.len() != b.len():
+        return false
+    var i: u64 = 0
+    while i < a.len():
+        if a[i] != b[i]:
+            return false
+        i = i + 1
+    return true
+
+fn _byte_eq_at(a: [u8], idx: u64, expected: u8) -> bool:
+    if idx >= a.len():
+        return false
+    return a[idx] == expected
+
+# Parse hex string into bytes (2 hex chars per byte, no separators)
+fn _hex(hex_text: text) -> [u8]:
+    var result: [u8] = []
+    var i: u64 = 0
+    val hex_len = hex_text.len()
+    while i + 1 < hex_len:
+        val hi_char = hex_text[i]
+        val lo_char = hex_text[i + 1]
+        var hi_val: u8 = 0u8
+        var lo_val: u8 = 0u8
+        if hi_char >= 48 and hi_char <= 57:
+            hi_val = (hi_char - 48).to_u8()
+        else:
+            if hi_char >= 97 and hi_char <= 102:
+                hi_val = (hi_char - 87).to_u8()
+            else:
+                if hi_char >= 65 and hi_char <= 70:
+                    hi_val = (hi_char - 55).to_u8()
+        if lo_char >= 48 and lo_char <= 57:
+            lo_val = (lo_char - 48).to_u8()
+        else:
+            if lo_char >= 97 and lo_char <= 102:
+                lo_val = (lo_char - 87).to_u8()
+            else:
+                if lo_char >= 65 and lo_char <= 70:
+                    lo_val = (lo_char - 55).to_u8()
+        result.push((hi_val << 4) | lo_val)
+        i = i + 2
+    result
+
+# ============================================================================
+# Section A: HKDF (RFC 5869 Appendix A) — 12 tests
+# ============================================================================
+
+fn section_a_hkdf():
+    _serial("--- A. HKDF ---")
+
+    # RFC 5869 Test Case 1 vectors
+    # IKM: 0x0b * 22 bytes
+    var ikm_a: [u8] = []
+    var a_i: u64 = 0
+    while a_i < 22:
+        ikm_a.push(0x0Bu8)
+        a_i = a_i + 1
+
+    # salt: 000102030405060708090a0b0c (13 bytes)
+    var salt_a: [u8] = _hex("000102030405060708090a0b0c")
+
+    # PRK expected: 077709362c2e32df0ddc3f0dc47bba6390b6c73bb50f9c3122ec844ad7c2b3e5
+    var prk_expected: [u8] = _hex("077709362c2e32df0ddc3f0dc47bba6390b6c73bb50f9c3122ec844ad7c2b3e5")
+
+    # info: f0f1f2f3f4f5f6f7f8f9 (10 bytes)
+    var info_a: [u8] = _hex("f0f1f2f3f4f5f6f7f8f9")
+
+    # OKM expected (42 bytes): 3cb25f25faacd57a90434f64d0362f2a2d2d0a90cf1a5a4c5db02d56ecc4c5bf34007208d5b887185865
+    var okm_expected: [u8] = _hex("3cb25f25faacd57a90434f64d0362f2a2d2d0a90cf1a5a4c5db02d56ecc4c5bf34007208d5b887185865")
+
+    # A1: HKDF-Extract matches PRK (check first 4 and last 4 bytes)
+    var prk_a: [u8] = hkdf_extract(salt_a, ikm_a)
+    var a1_ok: bool = true
+    if prk_a.len() != 32:
+        a1_ok = false
+    else:
+        if prk_a[0] != prk_expected[0]:
+            a1_ok = false
+        if prk_a[1] != prk_expected[1]:
+            a1_ok = false
+        if prk_a[2] != prk_expected[2]:
+            a1_ok = false
+        if prk_a[3] != prk_expected[3]:
+            a1_ok = false
+        if prk_a[28] != prk_expected[28]:
+            a1_ok = false
+        if prk_a[29] != prk_expected[29]:
+            a1_ok = false
+        if prk_a[30] != prk_expected[30]:
+            a1_ok = false
+        if prk_a[31] != prk_expected[31]:
+            a1_ok = false
+    _assert(a1_ok, "A1: HKDF-Extract PRK first+last 4 bytes match RFC 5869 TC1")
+
+    # A2: HKDF-Expand matches OKM first 2 bytes and total length
+    var okm_a: [u8] = hkdf_expand(prk_a, info_a, 42)
+    var a2_len_ok: bool = okm_a.len() == 42
+    var a2_bytes_ok: bool = false
+    if okm_a.len() >= 2:
+        a2_bytes_ok = (okm_a[0] == okm_expected[0]) and (okm_a[1] == okm_expected[1])
+    _assert(a2_len_ok and a2_bytes_ok, "A2: HKDF-Expand OKM length=42 and first 2 bytes match")
+
+    # A3: HKDF-Extract with empty salt works (32-byte PRK)
+    var empty_salt: [u8] = []
+    var prk_nosalt: [u8] = hkdf_extract(empty_salt, ikm_a)
+    _assert(prk_nosalt.len() == 32, "A3: HKDF-Extract with empty salt returns 32-byte PRK")
+
+    # A4: HKDF-Expand with empty info returns some bytes
+    var empty_info: [u8] = []
+    var okm_noinfo: [u8] = hkdf_expand(prk_a, empty_info, 16)
+    _assert(okm_noinfo.len() == 16, "A4: HKDF-Expand with empty info returns 16 bytes")
+
+    # A5: Same IKM gives same PRK (deterministic)
+    var prk_a2: [u8] = hkdf_extract(salt_a, ikm_a)
+    _assert(_bytes_eq(prk_a, prk_a2), "A5: Same IKM gives same PRK (deterministic)")
+
+    # A6: Different IKM gives different PRK
+    var ikm_diff: [u8] = []
+    var a6_i: u64 = 0
+    while a6_i < 22:
+        ikm_diff.push(0xAAu8)
+        a6_i = a6_i + 1
+    var prk_diff: [u8] = hkdf_extract(salt_a, ikm_diff)
+    _assert(not _bytes_eq(prk_a, prk_diff), "A6: Different IKM gives different PRK")
+
+    # A7: HKDF-Expand with length=1 returns 1 byte
+    var okm_1: [u8] = hkdf_expand(prk_a, info_a, 1)
+    _assert(okm_1.len() == 1, "A7: HKDF-Expand length=1 returns 1 byte")
+
+    # A8: HKDF-Expand with length=64 returns 64 bytes (2 blocks)
+    var okm_64: [u8] = hkdf_expand(prk_a, info_a, 64)
+    _assert(okm_64.len() == 64, "A8: HKDF-Expand length=64 returns 64 bytes (2 blocks)")
+
+    # A9: HKDF-Expand-Label builds correct HkdfLabel structure
+    # The encoded HkdfLabel starts with 2-byte length field; for length=32 that is [0x00, 0x20]
+    # We verify by checking that the output is 32 bytes (the length param is respected)
+    var empty_ctx: [u8] = []
+    var label_out: [u8] = hkdf_expand_label(prk_a, "key", empty_ctx, 32)
+    _assert(label_out.len() == 32, "A9: HKDF-Expand-Label with length=32 returns 32 bytes")
+
+    # A10: HKDF-Expand-Label with "tls13 " prefix produces different output than a raw expand
+    var raw_expand: [u8] = hkdf_expand(prk_a, empty_ctx, 32)
+    _assert(not _bytes_eq(label_out, raw_expand), "A10: HKDF-Expand-Label differs from raw HKDF-Expand (prefix effect)")
+
+    # A11: HKDF-Expand-Label context empty works (already tested above, verify non-crash + length)
+    var label_out2: [u8] = hkdf_expand_label(prk_a, "iv", empty_ctx, 12)
+    _assert(label_out2.len() == 12, "A11: HKDF-Expand-Label empty context returns correct length")
+
+    # A12: HKDF-Expand-Label length field matches parameter
+    var label_out3: [u8] = hkdf_expand_label(prk_a, "finished", empty_ctx, 32)
+    _assert(label_out3.len() == 32, "A12: HKDF-Expand-Label length field matches parameter")
+
+# ============================================================================
+# Section B: Transcript — 6 tests
+# ============================================================================
+
+fn section_b_transcript():
+    _serial("--- B. Transcript ---")
+
+    # SHA-256 of empty string (known constant)
+    # e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
+    var empty_hash_expected: [u8] = _hex("e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855")
+
+    # B1: empty transcript hash = SHA-256("")
+    var t0: Transcript = transcript_new()
+    var h0: [u8] = transcript_hash(t0)
+    _assert(_bytes_eq(h0, empty_hash_expected), "B1: empty transcript hash == SHA-256(empty)")
+
+    # B2: transcript with one message hashes that message
+    var msg1: [u8] = [0x01u8, 0x02u8, 0x03u8]
+    var t1: Transcript = transcript_add(t0, msg1)
+    var h1: [u8] = transcript_hash(t1)
+    _assert(h1.len() == 32, "B2: transcript with one message returns 32-byte hash")
+
+    # B3: transcript with two messages hashes concatenation
+    var msg2: [u8] = [0x04u8, 0x05u8, 0x06u8]
+    var t2: Transcript = transcript_add(t1, msg2)
+    var h2: [u8] = transcript_hash(t2)
+    _assert(h2.len() == 32, "B3: transcript with two messages returns 32-byte hash")
+
+    # B4: transcript_empty_hash() returns 32 bytes
+    var eh: [u8] = transcript_empty_hash()
+    _assert(eh.len() == 32, "B4: transcript_empty_hash returns 32 bytes")
+
+    # B5: transcript_hash length = 32
+    var t3: Transcript = transcript_new()
+    var msg3: [u8] = [0xAAu8, 0xBBu8]
+    var t4: Transcript = transcript_add(t3, msg3)
+    var h4: [u8] = transcript_hash(t4)
+    _assert(h4.len() == 32, "B5: transcript_hash always returns 32 bytes")
+
+    # B6: different messages give different hashes
+    var msg_alt: [u8] = [0xCCu8, 0xDDu8]
+    var t5: Transcript = transcript_add(t3, msg_alt)
+    var h5: [u8] = transcript_hash(t5)
+    _assert(not _bytes_eq(h4, h5), "B6: different messages give different transcript hashes")
+
+# ============================================================================
+# Section C: Key Schedule — 8 tests
+# ============================================================================
+
+fn section_c_key_schedule():
+    _serial("--- C. Key Schedule ---")
+
+    # C1: early_secret is 32 bytes
+    var early: [u8] = tls13_early_secret()
+    _assert(early.len() == 32, "C1: early_secret is 32 bytes")
+
+    # C2: handshake_secret is 32 bytes
+    var dhe: [u8] = []
+    var c2_i: u64 = 0
+    while c2_i < 32:
+        dhe.push(0x00u8)
+        c2_i = c2_i + 1
+    var hs: [u8] = tls13_handshake_secret(early, dhe)
+    _assert(hs.len() == 32, "C2: handshake_secret is 32 bytes")
+
+    # C3: traffic_keys key is 16 bytes, iv is 12 bytes
+    var tk: TrafficKeys = tls13_traffic_keys(hs)
+    var tk_key_len: u64 = tk.key.len()
+    var tk_iv_len: u64 = tk.iv.len()
+    _assert(tk_key_len == 16 and tk_iv_len == 12, "C3: traffic_keys key=16 bytes, iv=12 bytes")
+
+    # C4: finished_key is 32 bytes
+    var fk: [u8] = tls13_finished_key(hs)
+    _assert(fk.len() == 32, "C4: finished_key is 32 bytes")
+
+    # C5: derive_secret with different labels gives different secrets
+    var t_empty: Transcript = transcript_new()
+    var secret_c: [u8] = derive_secret(hs, "c hs traffic", t_empty)
+    var secret_s: [u8] = derive_secret(hs, "s hs traffic", t_empty)
+    _assert(not _bytes_eq(secret_c, secret_s), "C5: derive_secret with different labels gives different secrets")
+
+    # C6: same inputs give same secrets (deterministic)
+    var secret_c2: [u8] = derive_secret(hs, "c hs traffic", t_empty)
+    _assert(_bytes_eq(secret_c, secret_c2), "C6: same inputs give same secrets (deterministic)")
+
+    # C7: tls13_compute_handshake_secrets populates early/handshake/client_hs/server_hs (non-empty)
+    var dhe2: [u8] = []
+    var c7_i: u64 = 0
+    while c7_i < 32:
+        dhe2.push(0x42u8)
+        c7_i = c7_i + 1
+    var t_sh: Transcript = transcript_new()
+    var hs_sec: Tls13Secrets = tls13_compute_handshake_secrets(dhe2, t_sh)
+    var c7_ok: bool = true
+    if hs_sec.early_secret.len() != 32:
+        c7_ok = false
+    if hs_sec.handshake_secret.len() != 32:
+        c7_ok = false
+    if hs_sec.client_hs_traffic.len() != 32:
+        c7_ok = false
+    if hs_sec.server_hs_traffic.len() != 32:
+        c7_ok = false
+    _assert(c7_ok, "C7: tls13_compute_handshake_secrets populates early/hs/client_hs/server_hs (32 bytes each)")
+
+    # C8: tls13_compute_app_secrets populates master/client_app/server_app
+    var t_sf: Transcript = transcript_new()
+    var app_sec: Tls13Secrets = tls13_compute_app_secrets(hs_sec, t_sf)
+    var c8_ok: bool = true
+    if app_sec.master_secret.len() != 32:
+        c8_ok = false
+    if app_sec.client_app_traffic.len() != 32:
+        c8_ok = false
+    if app_sec.server_app_traffic.len() != 32:
+        c8_ok = false
+    _assert(c8_ok, "C8: tls13_compute_app_secrets populates master/client_app/server_app (32 bytes each)")
+
+# ============================================================================
+# Section D: Record Layer — 10 tests
+# ============================================================================
+
+fn section_d_record():
+    _serial("--- D. Record Layer ---")
+
+    # Build a test RecordKey: 16-byte key, 12-byte IV
+    var rk_key: [u8] = _hex("000102030405060708090a0b0c0d0e0f")
+    var rk_iv: [u8] = _hex("000102030405060708090a0b")
+    var rk: RecordKey = RecordKey(key: rk_key, iv: rk_iv)
+
+    # D1: record13_make_nonce with seq=0 returns IV XOR [00...00] = IV itself
+    var nonce0: [u8] = record13_make_nonce(rk_iv, 0)
+    _assert(_bytes_eq(nonce0, rk_iv), "D1: record13_make_nonce seq=0 returns IV XOR zeros == IV")
+
+    # D2: record13_make_nonce with seq=1 differs from seq=0 (last byte flips)
+    var nonce1: [u8] = record13_make_nonce(rk_iv, 1)
+    var d2_differs: bool = not _bytes_eq(nonce0, nonce1)
+    _assert(d2_differs, "D2: record13_make_nonce seq=1 differs from seq=0")
+
+    # D3: encrypt+decrypt round trip recovers plaintext
+    var pt: [u8] = [0x48u8, 0x65u8, 0x6cu8, 0x6cu8, 0x6fu8]  # "Hello"
+    var enc: [u8] = record13_encrypt(rk, 0, 0x17u8, pt)
+    var dec_res: RecordResult = record13_decrypt(rk, 0, enc)
+    var d3_ok: bool = false
+    if val RecordResult.Ok(content_type: ct3, data: dt3) = dec_res:
+        d3_ok = _bytes_eq(dt3, pt)
+    _assert(d3_ok, "D3: encrypt+decrypt round trip recovers plaintext")
+
+    # D4: encrypt+decrypt round trip recovers content type
+    var d4_ok: bool = false
+    var enc4: [u8] = record13_encrypt(rk, 1, 0x16u8, pt)
+    var dec4: RecordResult = record13_decrypt(rk, 1, enc4)
+    if val RecordResult.Ok(content_type: ct4, data: dt4) = dec4:
+        d4_ok = (ct4 == 0x16u8)
+    _assert(d4_ok, "D4: encrypt+decrypt round trip recovers content type")
+
+    # D5: decrypt wrong record (too short) returns Err
+    var short_rec: [u8] = [0x17u8, 0x03u8, 0x03u8]
+    var dec5: RecordResult = record13_decrypt(rk, 0, short_rec)
+    var d5_ok: bool = false
+    if val RecordResult.Err(msg: _) = dec5:
+        d5_ok = true
+    _assert(d5_ok, "D5: decrypt too-short record returns Err")
+
+    # D6: decrypt wrong content_type header returns Err
+    var bad_hdr: [u8] = [0x14u8, 0x03u8, 0x03u8, 0x00u8, 0x10u8]
+    var d6_i: u64 = 0
+    while d6_i < 16:
+        bad_hdr.push(0x00u8)
+        d6_i = d6_i + 1
+    var dec6: RecordResult = record13_decrypt(rk, 0, bad_hdr)
+    var d6_ok: bool = false
+    if val RecordResult.Err(msg: _) = dec6:
+        d6_ok = true
+    _assert(d6_ok, "D6: decrypt wrong content_type header returns Err")
+
+    # D7: decrypt tampered ciphertext returns Err (flip 1 byte)
+    var enc7: [u8] = record13_encrypt(rk, 2, 0x17u8, pt)
+    # Flip byte at index 5 (first ciphertext byte after 5-byte header)
+    if enc7.len() > 5:
+        var flipped: u8 = enc7[5] ^ 0xFFu8
+        enc7[5] = flipped
+    var dec7: RecordResult = record13_decrypt(rk, 2, enc7)
+    var d7_ok: bool = false
+    if val RecordResult.Err(msg: _) = dec7:
+        d7_ok = true
+    _assert(d7_ok, "D7: decrypt tampered ciphertext returns Err")
+
+    # D8: encrypt produces record with header [0x17, 0x03, 0x03, ...]
+    var enc8: [u8] = record13_encrypt(rk, 3, 0x17u8, pt)
+    var d8_ok: bool = false
+    if enc8.len() >= 5:
+        d8_ok = (enc8[0] == 0x17u8) and (enc8[1] == 0x03u8) and (enc8[2] == 0x03u8)
+    _assert(d8_ok, "D8: encrypt produces record with header [0x17, 0x03, 0x03, ...]")
+
+    # D9: encrypt with empty plaintext still produces valid AEAD (round trip works)
+    var empty_pt: [u8] = []
+    var enc9: [u8] = record13_encrypt(rk, 4, 0x17u8, empty_pt)
+    var dec9: RecordResult = record13_decrypt(rk, 4, enc9)
+    var d9_ok: bool = false
+    if val RecordResult.Ok(content_type: ct9, data: dt9) = dec9:
+        d9_ok = (dt9.len() == 0) and (ct9 == 0x17u8)
+    _assert(d9_ok, "D9: encrypt with empty plaintext still produces valid AEAD round trip")
+
+    # D10: decrypt recovers content type as last-byte-of-inner
+    # Verify that a record encrypted with content_type=0x16 decrypts to ct==0x16
+    var enc10: [u8] = record13_encrypt(rk, 5, 0x16u8, pt)
+    var dec10: RecordResult = record13_decrypt(rk, 5, enc10)
+    var d10_ok: bool = false
+    if val RecordResult.Ok(content_type: ct10, data: dt10) = dec10:
+        d10_ok = (ct10 == 0x16u8) and _bytes_eq(dt10, pt)
+    _assert(d10_ok, "D10: decrypt recovers content type as last-byte-of-inner")
+
+# ============================================================================
+# Entry point
+# ============================================================================
+
+fn _start():
+    _serial("[TLS_UNIT_ENTRY] starting TLS 1.3 unit tests")
+
+    section_a_hkdf()
+    section_b_transcript()
+    section_c_key_schedule()
+    section_d_record()
+
+    _serial("TLS unit tests: {_pass_count} passed, {_fail_count} failed")
+    if _fail_count == 0:
+        _serial("[ALL TESTS PASSED]")
+    else:
+        _serial("[TESTS FAILED: {_fail_count}]")
+    rt_port_outb(0xf4, 0u8)

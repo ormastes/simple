@@ -1576,11 +1576,6 @@ int fat32_read_file(const char *name, uint8_t *buf, uint32_t max_size, uint32_t 
 int fat32_write_file(const char *name, const uint8_t *buf, uint32_t size);
 int fat32_list_dir(void);
 
-static char _fat32_overlay_name[64];
-static uint8_t _fat32_overlay_buf[8192];
-static uint32_t _fat32_overlay_name_len = 0;
-static uint32_t _fat32_overlay_len = 0;
-
 /* RuntimeValue wrappers — Simple passes text as tagged heap pointers.
  * These extract the C string from RuntimeValue and call the real functions. */
 RuntimeValue spl_fat32_find_file(RuntimeValue name_rv, RuntimeValue out_cluster, RuntimeValue out_size) {
@@ -1616,10 +1611,6 @@ RuntimeValue rt_fat32_read_file_text(RuntimeValue name_rv)
     if (IS_HEAP(name_rv)) {
         RuntimeString *s = (RuntimeString *)DECODE_PTR(name_rv);
         if (s) name = s->data;
-    }
-    if (_fat32_overlay_len > 0) {
-        _fat32_overlay_buf[_fat32_overlay_len] = '\0';
-        return rt_string_from_cstr((const char *)_fat32_overlay_buf);
     }
     static uint8_t _read_buf[8192];
     uint32_t bytes_read = 0;
@@ -1674,15 +1665,9 @@ RuntimeValue rt_fat32_write_file_text(RuntimeValue name_rv, RuntimeValue content
             content_len = s->len;
         }
     }
-    if (!name || name_len == 0 || content_len >= sizeof(_fat32_overlay_buf) || name_len >= sizeof(_fat32_overlay_name))
+    if (!name || name_len == 0)
         return FALSE_VALUE;
-    __builtin_memcpy(_fat32_overlay_name, name, name_len);
-    _fat32_overlay_name[name_len] = '\0';
-    _fat32_overlay_name_len = name_len;
-    __builtin_memcpy(_fat32_overlay_buf, content, content_len);
-    _fat32_overlay_len = content_len;
-    _fat32_overlay_buf[_fat32_overlay_len] = '\0';
-    return TRUE_VALUE;
+    return fat32_write_file(name, content, content_len) == 0 ? TRUE_VALUE : FALSE_VALUE;
 }
 
 static struct {
@@ -1737,6 +1722,10 @@ static int _fat32_init(void) {
                                | ((uint32_t)bpb[46] << 16) | ((uint32_t)bpb[47] << 24);
     _fat32.data_start_sector   = _fat32.reserved_sectors
                                + (_fat32.num_fats * _fat32.fat_size);
+    uint32_t total_sectors     = (uint32_t)bpb[32] | ((uint32_t)bpb[33] << 8)
+                               | ((uint32_t)bpb[34] << 16) | ((uint32_t)bpb[35] << 24);
+    uint32_t data_sectors      = total_sectors - _fat32.data_start_sector;
+    _fat32.total_clusters      = data_sectors / _fat32.sectors_per_cluster;
 
     /* Print BPB info for diagnostics */
     serial_puts("[fat32-c] BPS=");    _fat32_puthex(_fat32.bytes_per_sector);
@@ -1768,6 +1757,15 @@ static int _fat32_read_cluster(uint32_t cluster, uint8_t *buf) {
     return 0;
 }
 
+static int _fat32_write_cluster(uint32_t cluster, const uint8_t *buf) {
+    uint32_t sector = _fat32_cluster_to_sector(cluster);
+    for (uint32_t i = 0; i < _fat32.sectors_per_cluster; i++) {
+        if (_nvme_write_sector_impl(sector + i, buf + i * 512) != 0)
+            return -1;
+    }
+    return 0;
+}
+
 /* Follow the FAT chain: return the next cluster number, or >= 0x0FFFFFF8 for EOC. */
 static uint32_t _fat32_next_cluster(uint32_t cluster) {
     /* Each FAT entry is 4 bytes, located in the reserved area */
@@ -1788,6 +1786,135 @@ static uint32_t _fat32_next_cluster(uint32_t cluster) {
                    | ((uint32_t)sector_buf[fat_offset_in_sector + 3] << 24);
     entry &= 0x0FFFFFFF; /* mask upper 4 bits (reserved in FAT32) */
     return entry;
+}
+
+static int _fat32_write_fat_entry(uint32_t cluster, uint32_t value) {
+    uint32_t fat_offset = cluster * 4;
+    uint32_t fat_sector_offset = fat_offset / 512;
+    uint32_t fat_offset_in_sector = fat_offset % 512;
+
+    uint8_t *sector_buf = (uint8_t *)nvme_alloc_aligned(512, 512);
+    if (!sector_buf) return -1;
+
+    for (uint32_t fat_index = 0; fat_index < _fat32.num_fats; fat_index++) {
+        uint32_t fat_sector = _fat32.reserved_sectors + (fat_index * _fat32.fat_size) + fat_sector_offset;
+        __builtin_memset(sector_buf, 0, 512);
+        if (_nvme_read_sector_impl(fat_sector, sector_buf) != 0)
+            return -1;
+        value &= 0x0FFFFFFF;
+        sector_buf[fat_offset_in_sector] = (uint8_t)(value & 0xFF);
+        sector_buf[fat_offset_in_sector + 1] = (uint8_t)((value >> 8) & 0xFF);
+        sector_buf[fat_offset_in_sector + 2] = (uint8_t)((value >> 16) & 0xFF);
+        sector_buf[fat_offset_in_sector + 3] = (uint8_t)((sector_buf[fat_offset_in_sector + 3] & 0xF0) | ((value >> 24) & 0x0F));
+        if (_nvme_write_sector_impl(fat_sector, sector_buf) != 0)
+            return -1;
+    }
+    return 0;
+}
+
+static uint32_t _fat32_find_free_cluster(void) {
+    uint32_t max_cluster = _fat32.total_clusters + 2;
+    for (uint32_t cluster = 2; cluster < max_cluster; cluster++) {
+        if (_fat32_next_cluster(cluster) == 0)
+            return cluster;
+    }
+    return 0;
+}
+
+static void _fat32_free_chain(uint32_t cluster) {
+    uint32_t current = cluster;
+    while (current >= 2 && current < 0x0FFFFFF8) {
+        uint32_t next = _fat32_next_cluster(current);
+        if (_fat32_write_fat_entry(current, 0) != 0)
+            return;
+        if (next < 2 || next >= 0x0FFFFFF8)
+            return;
+        current = next;
+    }
+}
+
+static int _fat32_find_root_dir_slot(const char name83[11], uint32_t *out_cluster,
+                                     uint32_t *out_entry_index, int *out_found,
+                                     uint32_t *out_old_cluster) {
+    uint32_t cluster_bytes = _fat32.sectors_per_cluster * 512;
+    uint8_t *dir_buf = (uint8_t *)nvme_alloc_aligned(cluster_bytes, 512);
+    if (!dir_buf) return -1;
+
+    uint32_t cluster = _fat32.root_cluster;
+    uint32_t free_cluster = 0;
+    uint32_t free_index = 0;
+    int have_free = 0;
+
+    while (cluster >= 2 && cluster < 0x0FFFFFF8) {
+        if (_fat32_read_cluster(cluster, dir_buf) != 0)
+            return -1;
+
+        uint32_t entries_per_cluster = cluster_bytes / 32;
+        for (uint32_t i = 0; i < entries_per_cluster; i++) {
+            uint8_t *entry = dir_buf + i * 32;
+            if (entry[0] == 0x00) {
+                *out_cluster = have_free ? free_cluster : cluster;
+                *out_entry_index = have_free ? free_index : i;
+                *out_found = 0;
+                *out_old_cluster = 0;
+                return 0;
+            }
+            if (entry[0] == 0xE5) {
+                if (!have_free) {
+                    free_cluster = cluster;
+                    free_index = i;
+                    have_free = 1;
+                }
+                continue;
+            }
+            if ((entry[11] & 0x0F) == 0x0F)
+                continue;
+            if (memcmp(entry, name83, 11) == 0) {
+                uint32_t lo = (uint32_t)entry[26] | ((uint32_t)entry[27] << 8);
+                uint32_t hi = (uint32_t)entry[20] | ((uint32_t)entry[21] << 8);
+                *out_cluster = cluster;
+                *out_entry_index = i;
+                *out_found = 1;
+                *out_old_cluster = lo | (hi << 16);
+                return 0;
+            }
+        }
+
+        uint32_t next = _fat32_next_cluster(cluster);
+        if (next < 2 || next >= 0x0FFFFFF8)
+            break;
+        cluster = next;
+    }
+
+    if (have_free) {
+        *out_cluster = free_cluster;
+        *out_entry_index = free_index;
+        *out_found = 0;
+        *out_old_cluster = 0;
+        return 0;
+    }
+    return -1;
+}
+
+static void _fat32_write_dir_entry(uint8_t *entry, const char name83[11],
+                                   uint32_t first_cluster, uint32_t size) {
+    __builtin_memset(entry, 0, 32);
+    __builtin_memcpy(entry, name83, 11);
+    entry[11] = 0x20; /* archive */
+    entry[20] = (uint8_t)((first_cluster >> 16) & 0xFF);
+    entry[21] = (uint8_t)((first_cluster >> 24) & 0xFF);
+    entry[26] = (uint8_t)(first_cluster & 0xFF);
+    entry[27] = (uint8_t)((first_cluster >> 8) & 0xFF);
+    entry[28] = (uint8_t)(size & 0xFF);
+    entry[29] = (uint8_t)((size >> 8) & 0xFF);
+    entry[30] = (uint8_t)((size >> 16) & 0xFF);
+    entry[31] = (uint8_t)((size >> 24) & 0xFF);
+}
+
+static const char *_fat32_root_name(const char *name) {
+    if (!name) return "";
+    while (*name == '/') name++;
+    return name;
 }
 
 /* Convert a filename like "hello.txt" to FAT32 8.3 format (uppercase, space-padded).
@@ -1886,10 +2013,81 @@ int fat32_read_file(const char *name, uint8_t *buf, uint32_t max_size,
 }
 
 int fat32_write_file(const char *name, const uint8_t *buf, uint32_t size) {
-    (void)name;
-    (void)buf;
-    (void)size;
-    return -1;
+    if (!_fat32.initialized) {
+        if (_fat32_init() != 0) return -1;
+    }
+
+    const char *root_name = _fat32_root_name(name);
+    if (!root_name || !*root_name) return -1;
+
+    char name83[11];
+    _fat32_make_8_3_name(root_name, name83);
+
+    uint32_t dir_cluster = 0;
+    uint32_t entry_index = 0;
+    uint32_t old_cluster = 0;
+    int found = 0;
+    if (_fat32_find_root_dir_slot(name83, &dir_cluster, &entry_index, &found, &old_cluster) != 0)
+        return -1;
+
+    uint32_t cluster_bytes = _fat32.sectors_per_cluster * 512;
+    uint32_t clusters_needed = size == 0 ? 0 : (size + cluster_bytes - 1) / cluster_bytes;
+    uint32_t first_cluster = 0;
+    uint32_t prev_cluster = 0;
+    uint32_t remaining = size;
+    uint32_t written = 0;
+    uint8_t *cluster_buf = (uint8_t *)nvme_alloc_aligned(cluster_bytes, 512);
+    if (!cluster_buf) return -1;
+
+    for (uint32_t i = 0; i < clusters_needed; i++) {
+        uint32_t cluster = _fat32_find_free_cluster();
+        if (cluster < 2) {
+            if (first_cluster >= 2) _fat32_free_chain(first_cluster);
+            return -1;
+        }
+        if (_fat32_write_fat_entry(cluster, 0x0FFFFFFF) != 0) {
+            if (first_cluster >= 2) _fat32_free_chain(first_cluster);
+            return -1;
+        }
+        if (prev_cluster >= 2 && _fat32_write_fat_entry(prev_cluster, cluster) != 0) {
+            _fat32_free_chain(first_cluster);
+            return -1;
+        }
+        if (first_cluster < 2)
+            first_cluster = cluster;
+        prev_cluster = cluster;
+
+        __builtin_memset(cluster_buf, 0, cluster_bytes);
+        uint32_t chunk = remaining < cluster_bytes ? remaining : cluster_bytes;
+        if (chunk > 0)
+            __builtin_memcpy(cluster_buf, buf + written, chunk);
+        if (_fat32_write_cluster(cluster, cluster_buf) != 0) {
+            _fat32_free_chain(first_cluster);
+            return -1;
+        }
+        written += chunk;
+        remaining -= chunk;
+    }
+
+    uint8_t *dir_buf = (uint8_t *)nvme_alloc_aligned(cluster_bytes, 512);
+    if (!dir_buf) {
+        if (first_cluster >= 2) _fat32_free_chain(first_cluster);
+        return -1;
+    }
+    if (_fat32_read_cluster(dir_cluster, dir_buf) != 0) {
+        if (first_cluster >= 2) _fat32_free_chain(first_cluster);
+        return -1;
+    }
+
+    _fat32_write_dir_entry(dir_buf + entry_index * 32, name83, first_cluster, size);
+    if (_fat32_write_cluster(dir_cluster, dir_buf) != 0) {
+        if (first_cluster >= 2) _fat32_free_chain(first_cluster);
+        return -1;
+    }
+
+    if (found && old_cluster >= 2)
+        _fat32_free_chain(old_cluster);
+    return 0;
 }
 
 /* List root directory entries to serial (for diagnostics). */

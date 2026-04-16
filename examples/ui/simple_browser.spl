@@ -40,8 +40,10 @@
 # * Image decoding is handled by the Canvas2D <img> cache on the shell side.
 # * Hosted navigation supports direct URL fetches plus minimal HTML form
 #   submission for GET and POST.
-# * Bidi, tables, flex, complex CSS, JS, video, web fonts, cookies, and
-#   session storage: NOT supported here.
+# * Inline JS, cookies, sessionStorage, and localStorage are routed through
+#   BrowserSession for the hosted shell.
+# * Bidi, tables, flex, complex CSS, external JS, video, and web fonts are
+#   still not supported here.
 # ---------------------------------------------------------------------------
 
 use app.ui.ipc.protocol.{parse_ipc_message, build_ipc_paint_canvas, build_ipc_request_fetch,
@@ -49,6 +51,7 @@ use app.ui.ipc.protocol.{parse_ipc_message, build_ipc_paint_canvas, build_ipc_re
 use common.ui.widget.{UIEvent}
 use common.render_scene.scene_to_canvas2d_json.{display_list_to_canvas2d_ops,
     render_scene_to_canvas2d_ops_with_offset}
+use std.common.web.browser_session.{BrowserSession}
 use std.common.web.simple_browser_page.{SimpleBrowserPageState,
     simple_browser_blank_page, simple_browser_loading_page,
     simple_browser_error_page, simple_browser_render_remote_page,
@@ -273,18 +276,41 @@ fn _hit_button(x: f64, y: f64, vw: f64) -> bool:
     val by = _input_y()
     x >= bx and x <= bx + BUTTON_W and y >= by and y <= by + BUTTON_H
 
+fn _session_document_html(session: BrowserSession) -> text:
+    "<html><head><title>{session.current_title}</title></head><body>{session.current_body_html}</body></html>"
+
+fn _page_from_session(session: BrowserSession, viewport_w: i32, viewport_h: i32) -> SimpleBrowserPageState:
+    simple_browser_render_remote_page(
+        session.current_url,
+        _session_document_html(session),
+        viewport_w,
+        viewport_h
+    )
+
+fn _request_headers_for_session(session: BrowserSession, url: text) -> text:
+    val cookie_header = session.cookie_header_for_request(url)
+    if cookie_header != "":
+        return "Cookie: " + cookie_header
+    ""
+
+fn _apply_response_headers(session: BrowserSession, headers: text):
+    for line in headers.split("\n"):
+        val trimmed = line.trim()
+        if trimmed.to_lower().starts_with("set-cookie:"):
+            session.apply_set_cookie_header(trimmed.substring(11).trim())
+
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
-fn _trigger_fetch(url: text, request_seq: i32, method: text, body: text, content_type: text) -> i32:
+fn _trigger_fetch(url: text, request_seq: i32, method: text, headers: text, body: text, content_type: text) -> i32:
     """Emit a request_fetch IPC and bump the sequence number used to
     correlate the eventual fetch_result back to the in-flight request."""
     val req_id = "req-{request_seq}"
-    if method == "" or (method == "GET" and body == "" and content_type == ""):
+    if headers == "" and (method == "" or (method == "GET" and body == "" and content_type == "")):
         print build_ipc_request_fetch(url, req_id)
     else:
-        print build_ipc_request_http(url, req_id, method, body, content_type)
+        print build_ipc_request_http(url, req_id, method, headers, body, content_type)
     request_seq + 1
 
 fn main() -> i64:
@@ -299,8 +325,10 @@ fn main() -> i64:
     var pending_request_id: text = ""
     var request_seq: i32 = 1
     var pending_method: text = "GET"
+    var pending_headers: text = ""
     var pending_body: text = ""
     var pending_content_type: text = ""
+    var session = BrowserSession.new()
 
     var page = simple_browser_blank_page(url, viewport_w, _content_viewport_h(viewport_h))
     val chrome0 = _build_chrome_ops(url, pal, viewport_w.to_f64(), focused_input)
@@ -315,6 +343,7 @@ fn main() -> i64:
                 var dirty = false
                 var trigger_fetch = false
                 var fetch_method = "GET"
+                var fetch_headers = ""
                 var fetch_body = ""
                 var fetch_content_type = ""
                 match event:
@@ -333,6 +362,7 @@ fn main() -> i64:
                                     focused_input = true
                                     dirty = true
                             elif _hit_button(x, y, vw2):
+                                fetch_headers = _request_headers_for_session(session, url)
                                 trigger_fetch = true
                                 focused_input = false
                                 focused_field_key = ""
@@ -349,6 +379,7 @@ fn main() -> i64:
                                     if val Some(target) = simple_browser_hit_target(page, page_x, page_y):
                                         if target.kind == "anchor":
                                             url = target.action
+                                            fetch_headers = _request_headers_for_session(session, target.action)
                                             trigger_fetch = true
                                             dirty = true
                                         elif target.kind == "field":
@@ -359,6 +390,7 @@ fn main() -> i64:
                                             if request.url != "":
                                                 url = request.url
                                                 fetch_method = request.method
+                                                fetch_headers = _request_headers_for_session(session, request.url)
                                                 fetch_body = request.body
                                                 fetch_content_type = request.content_type
                                                 trigger_fetch = true
@@ -366,6 +398,7 @@ fn main() -> i64:
                     UIEvent.KeyPress(key):
                         if focused_input:
                             if key == "Enter":
+                                fetch_headers = _request_headers_for_session(session, url)
                                 trigger_fetch = true
                                 focused_input = false
                                 dirty = true
@@ -384,6 +417,7 @@ fn main() -> i64:
                                 if request.url != "":
                                     url = request.url
                                     fetch_method = request.method
+                                    fetch_headers = _request_headers_for_session(session, request.url)
                                     fetch_body = request.body
                                     fetch_content_type = request.content_type
                                     trigger_fetch = true
@@ -419,21 +453,36 @@ fn main() -> i64:
                             new_scroll = max_scroll
                         scroll_y = new_scroll
                         dirty = true
-                    UIEvent.FetchResult(req_id, fr_url, status, body, err):
+                    UIEvent.FetchResult(req_id, fr_url, status, headers, body, err):
                         eprint "[fetch_result] req={req_id} status={status} body_len={body.len()} err={err}"
                         # Accept any in-flight result (our model is single-flight).
                         if pending_request_id == "" or pending_request_id == req_id:
                             pending_request_id = ""
                             pending_method = "GET"
+                            pending_headers = ""
                             pending_body = ""
                             pending_content_type = ""
-                            url = fr_url
                             scroll_y = 0.0
                             focused_field_key = ""
                             if err != "":
                                 page = simple_browser_error_page(fr_url, err, viewport_w, _content_viewport_h(viewport_h))
                             else:
-                                page = simple_browser_render_remote_page(fr_url, body, viewport_w, _content_viewport_h(viewport_h))
+                                _apply_response_headers(session, headers)
+                                match session.open_html(fr_url, body):
+                                    Ok(_) =>
+                                        url = session.current_url
+                                        if session.current_url != "" and session.current_url != fr_url:
+                                            fetch_method = "GET"
+                                            fetch_headers = _request_headers_for_session(session, session.current_url)
+                                            fetch_body = ""
+                                            fetch_content_type = ""
+                                            trigger_fetch = true
+                                            page = simple_browser_loading_page(session.current_url, viewport_w, _content_viewport_h(viewport_h))
+                                        else:
+                                            page = _page_from_session(session, viewport_w, _content_viewport_h(viewport_h))
+                                    Err(e) =>
+                                        url = fr_url
+                                        page = simple_browser_error_page(fr_url, e, viewport_w, _content_viewport_h(viewport_h))
                             dirty = true
                     _:
                         pass_dn
@@ -441,11 +490,12 @@ fn main() -> i64:
                     scroll_y = 0.0
                     focused_field_key = ""
                     pending_method = fetch_method
+                    pending_headers = fetch_headers
                     pending_body = fetch_body
                     pending_content_type = fetch_content_type
                     pending_request_id = "req-{request_seq}"
                     page = simple_browser_loading_page(url, viewport_w, _content_viewport_h(viewport_h))
-                    request_seq = _trigger_fetch(url, request_seq, pending_method, pending_body, pending_content_type)
+                    request_seq = _trigger_fetch(url, request_seq, pending_method, pending_headers, pending_body, pending_content_type)
                 if dirty:
                     val chrome_ops = _build_chrome_ops(url, pal, viewport_w.to_f64(), focused_input)
                     _emit_paint(chrome_ops, page, theme, viewport_w, viewport_h, scroll_y)

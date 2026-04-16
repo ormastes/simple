@@ -109,19 +109,48 @@ function sendToSimple(msg) {
 // the IPC payload under the parse_ipc_message ceiling (we'll truncate; for
 // v1 that's fine).
 const FETCH_BODY_CAP = 256 * 1024;
-function handleFetchRequest(url, requestId, method = 'GET', body = '', contentType = '') {
+function parseHeaderBlock(headerText) {
+    const out = [];
+    for (const rawLine of String(headerText || '').split('\n')) {
+        const line = rawLine.trim();
+        if (!line) continue;
+        const idx = line.indexOf(':');
+        if (idx <= 0) continue;
+        out.push([line.slice(0, idx).trim(), line.slice(idx + 1).trim()]);
+    }
+    return out;
+}
+
+function serializeResponseHeaders(headers) {
+    const lines = [];
+    for (const [name, value] of Object.entries(headers || {})) {
+        if (Array.isArray(value)) {
+            for (const item of value) {
+                lines.push(`${name}: ${item}`);
+            }
+        } else if (value !== undefined && value !== null) {
+            lines.push(`${name}: ${String(value)}`);
+        }
+    }
+    return lines.join('\n');
+}
+
+function handleFetchRequest(url, requestId, method = 'GET', headers = '', body = '', contentType = '') {
     const normalizedMethod = String(method || 'GET').toUpperCase();
     debugLog(`request_fetch method=${normalizedMethod} url=${url} requestId=${requestId} bodyBytes=${Buffer.byteLength(String(body || ''), 'utf8')}`);
     if (!url) {
-        sendToSimple({ type: 'fetch_result', requestId, url: '', status: 0, body: '', error: 'empty url' });
+        sendToSimple({ type: 'fetch_result', requestId, url: '', status: 0, headers: '', body: '', error: 'empty url' });
         return;
     }
     let request;
     try {
         request = net.request({ method: normalizedMethod, url, redirect: 'follow' });
     } catch (err) {
-        sendToSimple({ type: 'fetch_result', requestId, url, status: 0, body: '', error: String(err.message || err) });
+        sendToSimple({ type: 'fetch_result', requestId, url, status: 0, headers: '', body: '', error: String(err.message || err) });
         return;
+    }
+    for (const [name, value] of parseHeaderBlock(headers)) {
+        request.setHeader(name, value);
     }
     const bodyText = String(body || '');
     if (bodyText && contentType) {
@@ -146,11 +175,13 @@ function handleFetchRequest(url, requestId, method = 'GET', body = '', contentTy
         });
         response.on('end', () => {
             const body = Buffer.concat(chunks).toString('utf8');
+            const responseHeaders = serializeResponseHeaders(response.headers);
             sendToSimple({
                 type: 'fetch_result',
                 requestId,
                 url,
                 status: String(status),
+                headers: responseHeaders,
                 body,
                 error: truncated ? `truncated at ${FETCH_BODY_CAP} bytes` : ''
             });
@@ -158,7 +189,7 @@ function handleFetchRequest(url, requestId, method = 'GET', body = '', contentTy
     });
     request.on('error', (err) => {
         debugLog(`request_fetch error method=${normalizedMethod} url=${url} err=${err.message}`);
-        sendToSimple({ type: 'fetch_result', requestId, url, status: 0, body: '', error: String(err.message || err) });
+        sendToSimple({ type: 'fetch_result', requestId, url, status: 0, headers: '', body: '', error: String(err.message || err) });
     });
     if (bodyText) {
         request.write(bodyText);
@@ -203,6 +234,7 @@ function handleSimpleMessage(line) {
                     msg.url || '',
                     msg.requestId || '',
                     msg.method || 'GET',
+                    msg.headers || '',
                     msg.body || '',
                     msg.contentType || ''
                 );
