@@ -1,0 +1,90 @@
+#![allow(unnamed_duplicate_typed_args)]
+# @tag:system
+#
+# System spec — TLS 1.3 Unit Tests inside QEMU Simple OS guest
+#
+# Builds tls_unit_entry.spl into a baremetal x86_64 kernel, boots it
+# under QEMU, and verifies that serial output contains [ALL TESTS PASSED]
+# with no [TEST FAIL] markers.
+#
+# Covers: HKDF-SHA-256 key derivation, TLS 1.3 key schedule (handshake +
+# application secrets), record layer framing, and transcript hashing.
+#
+# The test self-spawns QEMU via a synchronous timeout run and captures the
+# combined serial output in one shot — no QMP socket needed for a pure serial
+# test. QEMU is allowed 60 s before a hard kill.
+#
+# Baseline management: none required — pass/fail is determined solely by
+# the presence of [ALL TESTS PASSED] and the absence of [TEST FAIL in the
+# serial output.
+
+use std.spec.*
+
+use os.qemu_runner.{OsTarget, build_os}
+use os.kernel.arch.arch_context.{Architecture}
+
+use test.qemu.os.common.qemu_os_harness.{
+    can_run_target, file_exists, run_os_qemu_with_target_via_timeout}
+
+# ===========================================================================
+# Helpers
+# ===========================================================================
+
+fn _tls_unit_target() -> OsTarget:
+    OsTarget(
+        arch: Architecture.X86_64,
+        entry: "examples/simple_os/arch/x86_64/tls_unit_entry.spl",
+        linker_script: "examples/simple_os/arch/x86_64/linker.ld",
+        target_triple: "x86_64-unknown-none",
+        output: "build/os/simpleos_tls_unit_x86_64.elf",
+        qemu_system: "qemu-system-x86_64",
+        qemu_machine: "q35",
+        qemu_cpu: "qemu64",
+        qemu_memory: "2G",
+        qemu_bios: "",
+        qemu_extra: ["-vga", "std", "-device", "isa-debug-exit,iobase=0xf4,iosize=0x04"],
+        gui_mode: false
+    )
+
+# ===========================================================================
+# Spec
+# ===========================================================================
+
+describe "TLS 1.3 Unit Tests":
+
+    it "builds tls_unit_entry.spl into a baremetal kernel":
+        val target = _tls_unit_target()
+        val ok = build_os(target)
+        expect(ok).to_equal(true)
+        expect(file_exists(target.output)).to_equal(true)
+
+    it "boots guest and all TLS 1.3 unit tests pass":
+        val target = _tls_unit_target()
+        if not file_exists(target.output):
+            expect(build_os(target)).to_equal(true)
+        expect(file_exists(target.output)).to_equal(true)
+
+        # Host may not have qemu-system-x86_64 — skip the live run but
+        # leave the build assertion as the hard gate.
+        if not can_run_target(target):
+            print "[os_tls_spec] qemu-system-x86_64 not available, skipping live run"
+            expect(true).to_equal(true)
+            return
+
+        # Synchronous run — captures serial output directly.  60 s host wall
+        # clock, 30 s guest timeout (passed through shell timeout wrapper).
+        val result = run_os_qemu_with_target_via_timeout(target, "30", 60000)
+        val output = result[0] + result[1]
+
+        val passed = output.contains("[ALL TESTS PASSED]")
+        val failed = output.contains("[TEST FAIL")
+
+        if not passed:
+            print "[os_tls_spec] [ALL TESTS PASSED] marker not found in serial output"
+        if failed:
+            print "[os_tls_spec] [TEST FAIL] marker found in serial output"
+
+        print "[os_tls_spec] serial output length: {output.len()}"
+
+        expect(passed).to_equal(true)
+        expect(failed).to_equal(false)

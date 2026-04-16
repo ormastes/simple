@@ -538,3 +538,120 @@ are deliberately not assigned to any milestone:
   `devtools_panel.spl`, `smoke_test.spl` — existing app-side scaffolding
   M1 will mirror under `src/app/ui.chromium/`.
 
+---
+
+## 9. Polish wave (post-M12) — 2026-04-16
+
+> M1–M12 landed on `main` 2026-04-14. This section catalogues the loose
+> ends that surfaced while closing the 12 gates. Every item has a concrete
+> origin: an unchecked acceptance line above, an §7 open question, or a
+> direct follow-up on a landed milestone. None of P1–P12 is a V3 gate
+> (V3 shipped at M5); they are the polish wave.
+
+### P1 — Backfill canonical-engine ADR
+- **Origin.** M4 acceptance `[ ] ADR file (doc/02_adr/NNN-canonical-browser-engine.md)` never flipped.
+- **Acceptance.**
+  - [ ] `doc/02_adr/NNN-canonical-browser-engine.md` committed, dated, linked from §8.
+  - [ ] M4 ADR checkbox flipped to `[x]` in this file.
+- **Effort.** **S.**
+
+### P2 — Re-measure WPT numeric gates
+- **Origin.** M3 acceptance `[ ] WPT score ≥80% on Flexbox / ≥60% on Colors` was deferred to "re-measured by M5"; no evidence the re-measure landed.
+- **Acceptance.**
+  - [ ] Fresh `examples/browser/test/compat/external/wpt_compatibility_report.md` with a 2026-04-1? timestamp.
+  - [ ] Flexbox ≥80%, Colors ≥60% — or a ticket explaining the miss.
+  - [ ] M3 numeric checkboxes replaced with measured numbers.
+- **Effort.** **S.**
+
+### P3 — Shutdown-clean regression spec
+- **Origin.** M1 acceptance "Window close is clean (no orphan threads)" — no test named.
+- **Acceptance.**
+  - [ ] `test/sys/ui.chromium/shutdown_spec.spl` in the standard pass.
+  - [ ] Fails deterministically if a `BrowserEngine` task is leaked on close.
+- **Effort.** **S.**
+
+### P4 — Startup budget + CI guard
+- **Origin.** V3 "ships" at M5 with no cold-start metric.
+- **Acceptance.**
+  - [ ] Cold-start → first-frame budget for `DesktopShell --backend chromium` in `doc/10_metrics/v3_budgets.md` (target <400 ms on the standard test box).
+  - [ ] `wm_compare` sub-mode measures and fails on regression.
+- **Effort.** **M.**
+
+### P5 — Memory budget for DesktopShell
+- **Origin.** §5 implies RSS is not gated today.
+- **Acceptance.**
+  - [ ] Peak RSS budget for single-window DesktopShell in `v3_budgets.md`.
+  - [ ] Regression detector in the standard test pass.
+- **Effort.** **S.**
+
+### P6 — Resolve `ui.browser` vs `ui.chromium` overlap
+- **Origin.** §7 open question #6 — "Decide before M5 or live with two adapters forever."
+- **Acceptance.**
+  - [ ] `doc/02_adr/NNN-ui-browser-vs-ui-chromium.md` with the decision.
+  - [ ] If merged: one app remains with a `--backend {chromium,hosted,…}` switch.
+- **Effort.** **M.**
+
+### P7 — WPT regression policy
+- **Origin.** §7 open question #5.
+- **Acceptance.**
+  - [ ] `doc/05_design/wpt_regression_policy.md` — one page, "out-of-subset WPT break = revert / accept / flag".
+  - [ ] Linked from M3.
+- **Effort.** **S.**
+
+### P8 — Reconcile the "12-milestone" memory note
+- **Origin.** §7 open question #4 — note has no on-disk counterpart.
+- **Acceptance.**
+  - [ ] Memory note rewritten to point at this file as the single source of truth.
+  - [ ] §7 q#4 closed.
+- **Effort.** **S.**
+
+### P9 — DevTools live-update polish
+- **Origin.** M10 shipped "renders the live DOM tree" but not CSS-edit → live repaint.
+- **Acceptance.**
+  - [ ] `devtools_panel` writes through `dom.set_style` and triggers damage.
+  - [ ] Scripted test under `test/sys/devtools/`.
+- **Effort.** **M.**
+
+### P10 — Record/replay format versioning
+- **Origin.** M11 shipped `--record session.bin` with no version header.
+- **Acceptance.**
+  - [ ] Version byte written on record, checked on replay.
+  - [ ] Old-format trace produces a clear error, not a silent desync.
+- **Effort.** **S.**
+
+### P11 — Acid2 golden freeze + diff viz
+- **Origin.** M12 flipped Acid2 to SUPPORTED with no canonical golden pinned.
+- **Acceptance.**
+  - [ ] `examples/browser/test/reftest/acid2_golden.png` frozen in-tree.
+  - [ ] `wm_compare --mode acid2` fails loudly on drift, emits a 3-up diff image.
+- **Effort.** **S.**
+
+### P12 — Sandbox-boundary decision for V4-class apps
+- **Origin.** §7 open question #2; §5 out-of-scope "site isolation / multi-process".
+- **Acceptance.**
+  - [ ] `doc/02_adr/NNN-browser-sandbox-model.md` — *decision* only.
+  - [ ] §7 q#2 closed. Implementation is a separate XL track, not part of P12.
+- **Effort.** **S** (doc only).
+
+### 9.1 Summary
+
+| # | Origin | Effort |
+|---|--------|--------|
+| P1  | M4 unchecked ADR            | S |
+| P2  | M3 deferred WPT re-measure  | S |
+| P3  | M1 shutdown untested        | S |
+| P4  | new — startup budget        | M |
+| P5  | new — RSS budget            | S |
+| P6  | §7 q#6                      | M |
+| P7  | §7 q#5                      | S |
+| P8  | §7 q#4                      | S |
+| P9  | M10 follow-up               | M |
+| P10 | M11 follow-up               | S |
+| P11 | M12 follow-up               | S |
+| P12 | §7 q#2                      | S |
+
+Four items close M1/M3/M4 acceptance boxes that landed unchecked (P1–P3,
+partial P4); four address §7 open questions (P6, P7, P8, P12); the
+remaining four are concrete follow-ups on post-V3 milestones
+(P9–P11) plus one new budget (P5).
+
