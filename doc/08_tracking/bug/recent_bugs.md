@@ -2,11 +2,13 @@
 
 **Generated:** 2026-04-14
 **Database:** `doc/08_tracking/bug/bug_db.sdn`
-**Open:** 0 | **Closed:** 24
+**Open:** 1 | **Closed:** 24
 
 ## Open Bugs
 
-No open bugs.
+| ID | Severity | Status | Title |
+|----|----------|--------|-------|
+| js_runtime_guest_001 | P1 | open | Generic x86_64 bare-metal JS runtime bootstrap faults in object/env storage |
 
 ## Closed Bugs
 
