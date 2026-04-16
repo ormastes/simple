@@ -465,6 +465,8 @@ fn launcher_launch(name: text) -> i64:
     serial_println("[launcher] Launching: {name}")
     val slot = idx.to_u64()
     val path = app_path[slot]
+    if _manifest_present_for_path(path):
+        return _try_resident_manifest_launch(slot, name, path, -38)
     val pid_result = posix_spawn(path, APP_PRIORITY)
     if pid_result < 0:
         val resident_pid = _try_resident_manifest_launch(slot, name, path, pid_result)
@@ -474,7 +476,7 @@ fn launcher_launch(name: text) -> i64:
         app_exit_code[slot] = pid_result.to_i32()
         serial_println("[launcher] Failed to launch {name}: {pid_result}")
         return pid_result
-    _finalize_launch(slot, name, pid_result.to_u64())
+    _finalize_launch(slot, name, pid_result.to_u64(), path)
 
 fn launcher_launch_by_index(idx: u64) -> i64:
     """Launch an app by registry index. Returns PID or -1."""
@@ -482,12 +484,11 @@ fn launcher_launch_by_index(idx: u64) -> i64:
         return -1
     return launcher_launch(_app_name(idx))
 
-fn _finalize_launch(slot: u64, name: text, pid: u64) -> i64:
+fn _finalize_launch(slot: u64, name: text, pid: u64, app_id: text) -> i64:
     app_launch_count[slot] = app_launch_count[slot] + 1
     app_last_pid[slot] = pid
     _sync_app_slot(slot, pid, "running", 0, 0, true)
     launcher_record_process(pid, slot.to_i64(), "running", 0, 0, true)
-    val app_id = _default_app_identity(slot)
     serial_println("[launcher] Started {name} (PID {pid})")
     serial_println("[launcher] spawned app_id={app_id} pid={pid} name={name}")
     pid.to_i64()
@@ -497,7 +498,7 @@ fn _try_resident_manifest_launch(slot: u64, name: text, path: text, spawn_error:
     if not _manifest_present_for_path(path):
         return -1
     serial_println("[launcher] posix_spawn unavailable for {name}: {spawn_error}; using disk manifest resident launch")
-    val launch_pid = _finalize_launch(slot, name, pid)
+    val launch_pid = _finalize_launch(slot, name, pid, path)
     app_launch_state[slot] = "resident-manifest"
     app_exit_code[slot] = 0
     val process_idx = _process_index_by_pid(pid)
@@ -526,6 +527,8 @@ fn _launch_seeded_app(slot: u64, name: text, path: text, icon: text, key: u32, m
     if slot >= app_count:
         app_count = slot + 1
 
+    if _manifest_present_for_path(path):
+        return _try_resident_manifest_launch(slot, name, path, -38)
     val pid_result = posix_spawn(path, APP_PRIORITY)
     if pid_result < 0:
         val resident_pid = _try_resident_manifest_launch(slot, name, path, pid_result)
@@ -535,7 +538,7 @@ fn _launch_seeded_app(slot: u64, name: text, path: text, icon: text, key: u32, m
         app_exit_code[slot] = pid_result.to_i32()
         serial_println("[launcher] Failed to launch {name}: {pid_result}")
         return pid_result
-    _finalize_launch(slot, name, pid_result.to_u64())
+    _finalize_launch(slot, name, pid_result.to_u64(), path)
 
 fn _dispatch_seeded_shortcut(key: u32, modifiers: u32) -> bool:
     """Fallback for the canonical desktop shortcuts on baremetal.

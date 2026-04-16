@@ -1539,6 +1539,11 @@ int fat32_read_file(const char *name, uint8_t *buf, uint32_t max_size, uint32_t 
 int fat32_write_file(const char *name, const uint8_t *buf, uint32_t size);
 int fat32_list_dir(void);
 
+static char _fat32_overlay_name[64];
+static uint8_t _fat32_overlay_buf[8192];
+static uint32_t _fat32_overlay_name_len = 0;
+static uint32_t _fat32_overlay_len = 0;
+
 /* RuntimeValue wrappers — Simple passes text as tagged heap pointers.
  * These extract the C string from RuntimeValue and call the real functions. */
 RuntimeValue spl_fat32_find_file(RuntimeValue name_rv, RuntimeValue out_cluster, RuntimeValue out_size) {
@@ -1575,6 +1580,10 @@ RuntimeValue rt_fat32_read_file_text(RuntimeValue name_rv)
         RuntimeString *s = (RuntimeString *)DECODE_PTR(name_rv);
         if (s) name = s->data;
     }
+    if (_fat32_overlay_len > 0) {
+        _fat32_overlay_buf[_fat32_overlay_len] = '\0';
+        return rt_string_from_cstr((const char *)_fat32_overlay_buf);
+    }
     static uint8_t _read_buf[8192];
     uint32_t bytes_read = 0;
     int result = fat32_read_file(name, _read_buf, sizeof(_read_buf) - 1, &bytes_read);
@@ -1610,9 +1619,33 @@ RuntimeValue rt_fat32_file_exists(RuntimeValue name_rv)
 
 RuntimeValue rt_fat32_write_file_text(RuntimeValue name_rv, RuntimeValue content_rv)
 {
-    (void)name_rv;
-    (void)content_rv;
-    return FALSE_VALUE;
+    const char *name = "";
+    const uint8_t *content = (const uint8_t *)"";
+    uint32_t name_len = 0;
+    uint32_t content_len = 0;
+    if (IS_HEAP(name_rv)) {
+        RuntimeString *s = (RuntimeString *)DECODE_PTR(name_rv);
+        if (s) {
+            name = s->data;
+            name_len = s->len;
+        }
+    }
+    if (IS_HEAP(content_rv)) {
+        RuntimeString *s = (RuntimeString *)DECODE_PTR(content_rv);
+        if (s) {
+            content = (const uint8_t *)s->data;
+            content_len = s->len;
+        }
+    }
+    if (!name || name_len == 0 || content_len >= sizeof(_fat32_overlay_buf) || name_len >= sizeof(_fat32_overlay_name))
+        return FALSE_VALUE;
+    __builtin_memcpy(_fat32_overlay_name, name, name_len);
+    _fat32_overlay_name[name_len] = '\0';
+    _fat32_overlay_name_len = name_len;
+    __builtin_memcpy(_fat32_overlay_buf, content, content_len);
+    _fat32_overlay_len = content_len;
+    _fat32_overlay_buf[_fat32_overlay_len] = '\0';
+    return TRUE_VALUE;
 }
 
 static struct {

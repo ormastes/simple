@@ -4,8 +4,9 @@
 # instead of hand-drawing rectangles through Engine2D, routes a real
 # HTML page through the browser_engine pipeline:
 #
-#   HTML -> DOM (html_string_to_dom)
-#        -> BrowserRenderer.render_dom_to_pixels
+#   HTML -> simple_browser_page adapter
+#        -> canonical browser_engine scene
+#        -> software rasterizer
 #        -> layout -> paint -> scene -> software rasterizer
 #        -> framebuffer blit
 #        -> BGA framebuffer
@@ -19,9 +20,8 @@
 #   2. Install bootstrap trap + syscall shim exports
 #   3. BGA framebuffer init (1024x768x32)
 #   4. Create FramebufferDriver from boot info
-#   5. Create BrowserRenderer
-#   6. html_string_to_dom(welcome_html())
-#   7. renderer.render_dom_to_pixels(dom)
+#   5. Build shared Simple browser page state
+#   6. Rasterize the page scene to pixels
 #   8. Blit pixels to FramebufferDriver
 #   9. Halt loop (no Compositor, no DesktopShell)
 
@@ -34,9 +34,9 @@ use os.kernel.ipc.ipc.{IpcManager}
 use os.kernel.log.klog.{KernelLog}
 use os.drivers.framebuffer.bga_init.{bga_init_framebuffer}
 use os.drivers.framebuffer.fb_driver.{FramebufferDriver}
-use std.gc_async_mut.gpu.browser_engine.browser_renderer.{BrowserRenderer}
-use std.gc_async_mut.gpu.browser_engine.widget_to_dom.{html_string_to_dom}
 use examples.simple_os.assets.welcome.{welcome_html}
+use std.common.web.simple_browser_page.{simple_browser_render_remote_page}
+use common.render_scene.executor.{execute_scene_to_buffer}
 
 extern fn serial_println(msg: text)
 extern fn rt_gui_set_fb(addr: u64, width: u64)
@@ -82,24 +82,26 @@ fn spl_start():
     serial_println("[GUI] FramebufferDriver created")
 
     # ---- Browser engine pipeline ----
-    serial_println("[BE] Creating BrowserRenderer...")
-    var renderer = BrowserRenderer.create(RENDER_W, RENDER_H)
-    serial_println("[BE] BrowserRenderer created")
-
     serial_println("[BE] Loading welcome HTML...")
     val html = welcome_html()
     serial_println("[BE] Welcome HTML loaded")
 
-    serial_println("[BE] Parsing HTML to DOM...")
-    val dom = html_string_to_dom(html)
-    serial_println("[BE] DOM parsed")
+    serial_println("[BE] Building shared browser page...")
+    val page = simple_browser_render_remote_page("about:simpleos", html, RENDER_W, RENDER_H)
+    serial_println("[BE] Browser page built")
 
-    serial_println("[BE] Rendering DOM to pixels...")
-    val result = renderer.render_dom_to_pixels(dom)
+    serial_println("[BE] Rendering page scene to pixels...")
+    val scene = page.to_scene()
+    var pixels: [u32] = []
+    val pixel_count = RENDER_W * RENDER_H
+    var idx = 0
+    while idx < pixel_count:
+        pixels.push(0xFFFFFFFF)
+        idx = idx + 1
+    pixels = execute_scene_to_buffer(scene, pixels, RENDER_W, RENDER_H)
     serial_println("[BE] Pixel buffer generated")
 
     serial_println("[BE] Blitting pixels to framebuffer...")
-    val pixels = result.pixel_data
     val render_w_u = RENDER_W.to_u32()
     val render_h_u = RENDER_H.to_u32()
     val copy_w = if fb.width < render_w_u: fb.width else: render_w_u

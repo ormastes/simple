@@ -18,6 +18,12 @@
 
 use std.common.color.convert.{to_css}
 use examples.browser.entity.dom.paint_types.{PaintOp, DisplayList}
+use common.render_scene.scene.{RenderScene, SceneCommand,
+    render_scene_get_commands,
+    scene_command_get_kind, scene_command_get_x, scene_command_get_y,
+    scene_command_get_width, scene_command_get_height, scene_command_get_color,
+    scene_command_get_text, scene_command_get_font_size,
+    scene_command_get_stroke_width, scene_command_get_color2}
 
 # JSON braces — written via raw strings so Simple's `{var}` interpolation
 # doesn't try to evaluate them.
@@ -32,6 +38,16 @@ fn _esc(s: text) -> text:
     r = r.replace("\r", "\\r")
     r = r.replace("\t", "\\t")
     return r
+
+fn _argb_to_css(color: u32) -> text:
+    val a = (color >> 24) & 0xFF
+    val r = (color >> 16) & 0xFF
+    val g = (color >> 8) & 0xFF
+    val b = color & 0xFF
+    if a >= 255:
+        return "rgb({r},{g},{b})"
+    val alpha = a.to_f64() / 255.0
+    "rgba({r},{g},{b},{alpha})"
 
 fn _border_side(x: f64, y: f64, w: f64, h: f64, side_widths: [f64], side_colors: [Color], idx: i32) -> text:
     """Emit one of four border edges as a fillRect (top=0, right=1, bottom=2, left=3).
@@ -111,6 +127,47 @@ fn _op_to_json(op: PaintOp) -> text:
         PaintOp.PopFilter:
             return _LB + "\"op\":\"popFilter\"" + _RB
 
+fn _scene_cmd_to_json(cmd: SceneCommand, offset_x: i32, offset_y: i32) -> text:
+    val x = scene_command_get_x(cmd) + offset_x
+    val y = scene_command_get_y(cmd) + offset_y
+    val w = scene_command_get_width(cmd)
+    val h = scene_command_get_height(cmd)
+    match scene_command_get_kind(cmd):
+        "fill_rect" =>
+            return _LB + "\"op\":\"fillRect\",\"x\":{x},\"y\":{y},\"w\":{w},\"h\":{h},\"color\":\"" + _argb_to_css(scene_command_get_color(cmd)) + "\"" + _RB
+        "stroke_rect" =>
+            val stroke_w = scene_command_get_stroke_width(cmd)
+            return _LB + "\"op\":\"strokeRect\",\"x\":{x},\"y\":{y},\"w\":{w},\"h\":{h},\"width\":{stroke_w},\"color\":\"" + _argb_to_css(scene_command_get_color(cmd)) + "\"" + _RB
+        "text" =>
+            val font_size = scene_command_get_font_size(cmd)
+            val font = "{font_size}px -apple-system, BlinkMacSystemFont, 'Inter', 'Space Grotesk', 'Manrope', sans-serif"
+            return _LB + "\"op\":\"fillText\",\"x\":{x},\"y\":{y},\"text\":\"" + _esc(scene_command_get_text(cmd)) + "\",\"font\":\"" + font + "\",\"color\":\"" + _argb_to_css(scene_command_get_color(cmd)) + "\"" + _RB
+        "line" =>
+            return _LB + "\"op\":\"drawLine\",\"x1\":{x},\"y1\":{y},\"x2\":{w + offset_x},\"y2\":{h + offset_y},\"width\":{scene_command_get_stroke_width(cmd)},\"color\":\"" + _argb_to_css(scene_command_get_color(cmd)) + "\"" + _RB
+        "rounded_rect" =>
+            return _LB + "\"op\":\"fillRect\",\"x\":{x},\"y\":{y},\"w\":{w},\"h\":{h},\"color\":\"" + _argb_to_css(scene_command_get_color(cmd)) + "\"" + _RB
+        "gradient_rect" =>
+            return _LB + "\"op\":\"fillRect\",\"x\":{x},\"y\":{y},\"w\":{w},\"h\":{h},\"color\":\"" + _argb_to_css(scene_command_get_color(cmd)) + "\"" + _RB
+        "clip_push" =>
+            return _LB + "\"op\":\"pushClip\",\"x\":{x},\"y\":{y},\"w\":{w},\"h\":{h}" + _RB
+        "clip_pop" =>
+            return _LB + "\"op\":\"popClip\"" + _RB
+        "blur_rect" =>
+            val amount = scene_command_get_font_size(cmd)
+            val clip = _LB + "\"op\":\"pushClip\",\"x\":{x},\"y\":{y},\"w\":{w},\"h\":{h}" + _RB
+            val push = _LB + "\"op\":\"pushFilter\",\"kind\":\"blur\",\"amount\":{amount}" + _RB
+            val pop = _LB + "\"op\":\"popFilter\"" + _RB
+            val unclip = _LB + "\"op\":\"popClip\"" + _RB
+            return clip + "," + push + "," + pop + "," + unclip
+        "circle" =>
+            return ""
+        "circle_filled" =>
+            return ""
+        "image" =>
+            return ""
+        _ =>
+            return ""
+
 fn display_list_to_canvas2d_ops(list: DisplayList) -> text:
     """Walk a DisplayList and return a JSON array of Canvas2D ops as text."""
     var entries: [text] = []
@@ -120,4 +177,21 @@ fn display_list_to_canvas2d_ops(list: DisplayList) -> text:
             entries = entries.push(piece)
     return "[" + entries.join(",") + "]"
 
+fn render_scene_to_canvas2d_ops_with_offset(scene: RenderScene, offset_x: i32, offset_y: i32) -> text:
+    """Serialize a RenderScene into Canvas2D JSON ops with a fixed translation."""
+    var entries: [text] = []
+    val commands = render_scene_get_commands(scene)
+    var idx = 0
+    while idx < commands.len():
+        val piece = _scene_cmd_to_json(commands[idx], offset_x, offset_y)
+        if piece != "":
+            entries = entries.push(piece)
+        idx = idx + 1
+    "[" + entries.join(",") + "]"
+
+fn render_scene_to_canvas2d_ops(scene: RenderScene) -> text:
+    render_scene_to_canvas2d_ops_with_offset(scene, 0, 0)
+
 export display_list_to_canvas2d_ops
+export render_scene_to_canvas2d_ops
+export render_scene_to_canvas2d_ops_with_offset

@@ -10,7 +10,15 @@
 # See os.kernel.arch.arch_context.Riscv32Context for the register layout.
 
 use os.kernel.arch.arch_context.{ArchContext, Riscv32Context}
-use os.kernel.arch.riscv32.cpu.{SSTATUS_SPIE, SSTATUS_SPP}
+use os.kernel.arch.riscv32.cpu.{SSTATUS_SPIE, SSTATUS_SPP, csrr_sepc, csrr_sstatus, csrw_sepc, csrw_sstatus}
+
+# ============================================================================
+# Extern Declarations (implemented in assembly or native runtime)
+# ============================================================================
+
+extern fn rt_rv32_context_save(ctx_ptr: u32)
+extern fn rt_rv32_context_restore(ctx_ptr: u32)
+extern fn rt_rv32_context_switch(from_ptr: u32, to_ptr: u32)
 
 # ============================================================================
 # Rv32ContextSwitch
@@ -88,9 +96,24 @@ impl Rv32ContextSwitch:
         pass_todo("assembly: save regs to from_ctx, load regs from to_ctx, sret")
 
     fn save() -> ArchContext:
-        """Save the current CPU register state."""
-        pass_todo("assembly: read all registers into Riscv32Context")
+        """Save the current CPU callee-saved register state."""
+        var ctx = _zero_context()
+        ctx.sepc = csrr_sepc()
+        ctx.sstatus = csrr_sstatus()
+        # Save callee-saved registers via extern assembly helper into ctx
+        unsafe:
+            val ctx_ptr = &ctx as u32
+            rt_rv32_context_save(ctx_ptr)
+        ArchContext.Riscv32(ctx: ctx)
 
     fn restore(ctx: ArchContext):
         """Restore a previously saved CPU register state."""
-        pass_todo("assembly: write all registers from Riscv32Context, sret")
+        match ctx:
+            ArchContext.Riscv32(rv32_ctx):
+                csrw_sepc(rv32_ctx.sepc)
+                csrw_sstatus(rv32_ctx.sstatus)
+                unsafe:
+                    val ctx_ptr = &rv32_ctx as u32
+                    rt_rv32_context_restore(ctx_ptr)
+            _:
+                pass_do_nothing     # Wrong architecture — should not happen

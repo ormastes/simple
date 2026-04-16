@@ -1,0 +1,500 @@
+#![allow(unnamed_duplicate_typed_args)]
+# Shared page adapter for the Simple browser shells.
+#
+# Converts fetched HTML into the canonical browser_engine RenderScene and
+# derives a small interaction model for anchors and GET forms so the hosted
+# shell and the QEMU guest can share one document/render path.
+
+use std.gc_async_mut.gpu.browser_engine.browser_renderer.{BrowserRenderer}
+use std.gc_async_mut.gpu.browser_engine.widget_to_dom.{html_string_to_dom}
+use std.gc_async_mut.gpu.browser_engine.dom.{BeDomNode,
+    be_dom_get_tag, be_dom_get_children, be_dom_get_is_text, be_dom_get_text,
+    be_dom_get_attr, be_dom_set_attr, be_dom_set_style, be_dom_set_children}
+use std.gc_async_mut.gpu.browser_engine.layout.{BeLayoutBox, layout_tree,
+    layout_get_x, layout_get_y, layout_get_width, layout_get_height,
+    layout_get_node, layout_get_children}
+use common.render_scene.scene.{RenderScene, SceneCommand, render_scene}
+
+class SimpleBrowserTarget:
+    kind: text
+    action: text
+    field_key: text
+    form_key: text
+    x: i32
+    y: i32
+    width: i32
+    height: i32
+
+class SimpleBrowserField:
+    key: text
+    form_key: text
+    name: text
+    tag: text
+    input_type: text
+    value: text
+    placeholder: text
+    x: i32
+    y: i32
+    width: i32
+    height: i32
+    unsupported: bool
+
+class SimpleBrowserPageState:
+    current_url: text
+    source_html: text
+    scene_commands: [SceneCommand]
+    scene_width: i32
+    scene_height: i32
+    doc_height: i32
+    warnings: [text]
+    fields: [SimpleBrowserField]
+    targets: [SimpleBrowserTarget]
+
+    fn to_scene() -> RenderScene:
+        render_scene(self.scene_commands, self.scene_width, self.scene_height)
+
+class SimpleBrowserBuildContext:
+    next_form_idx: i32
+    next_field_idx: i32
+    warnings: [text]
+
+    static fn create() -> SimpleBrowserBuildContext:
+        SimpleBrowserBuildContext(next_form_idx: 1, next_field_idx: 1, warnings: [])
+
+class SimpleBrowserCollection:
+    fields: [SimpleBrowserField]
+    targets: [SimpleBrowserTarget]
+
+    static fn create() -> SimpleBrowserCollection:
+        SimpleBrowserCollection(fields: [], targets: [])
+
+fn _contains_folded(haystack: text, needle: text) -> bool:
+    match haystack.to_lower().index_of(needle.to_lower()):
+        Some(_): true
+        nil: false
+
+fn _field_override(overrides: [text], key: text) -> text:
+    var idx = 0
+    while idx + 1 < overrides.len():
+        if overrides[idx] == key:
+            return overrides[idx + 1]
+        idx = idx + 2
+    ""
+
+fn _push_warning(ctx: SimpleBrowserBuildContext, msg: text):
+    ctx.warnings.push(msg)
+
+fn _text_content(node: BeDomNode) -> text:
+    if be_dom_get_is_text(node):
+        return be_dom_get_text(node)
+    var out = ""
+    val children = be_dom_get_children(node)
+    var idx = 0
+    while idx < children.len():
+        out = out + _text_content(children[idx])
+        idx = idx + 1
+    out.trim()
+
+fn _scheme(url: text) -> text:
+    match url.index_of("://"):
+        Some(idx): url.substring(0, idx)
+        nil: "https"
+
+fn _origin(url: text) -> text:
+    val scheme_end_opt = url.index_of("://")
+    match scheme_end_opt:
+        Some(scheme_end):
+            val after_scheme = scheme_end + 3
+            match url.substring(after_scheme).index_of("/"):
+                Some(rel_idx): url.substring(0, after_scheme + rel_idx)
+                nil: url
+        nil:
+            ""
+
+fn _without_fragment(url: text) -> text:
+    match url.index_of("#"):
+        Some(idx): url.substring(0, idx)
+        nil: url
+
+fn _without_query(url: text) -> text:
+    val clean = _without_fragment(url)
+    match clean.index_of("?"):
+        Some(idx): clean.substring(0, idx)
+        nil: clean
+
+fn _base_dir(url: text) -> text:
+    val clean = _without_query(url)
+    val origin = _origin(clean)
+    if origin == "":
+        return ""
+    if clean == origin:
+        return origin + "/"
+    val after_origin = clean.substring(origin.len())
+    match after_origin.last_index_of("/"):
+        Some(rel_idx): origin + after_origin.substring(0, rel_idx + 1)
+        nil: origin + "/"
+
+fn _resolve_relative_url(base_url: text, href: text) -> text:
+    if href == "":
+        return base_url
+    if href.starts_with("http://") or href.starts_with("https://") or href.starts_with("file://") or href.starts_with("about:"):
+        return href
+    if href.starts_with("//"):
+        return _scheme(base_url) + ":" + href
+    if href.starts_with("#"):
+        return _without_fragment(base_url) + href
+    if href.starts_with("?"):
+        return _without_query(base_url) + href
+    if href.starts_with("/"):
+        val origin = _origin(base_url)
+        if origin != "":
+            return origin + href
+        return href
+    _base_dir(base_url) + href
+
+fn _needs_default_style(node: BeDomNode, prop: text) -> bool:
+    not _contains_folded(be_dom_get_attr(node, "style"), prop)
+
+fn _ensure_text_child(node: BeDomNode, text_val: text):
+    be_dom_set_children(node, [BeDomNode.text(text_val)])
+
+fn _decorate_anchor(node: BeDomNode, base_url: text):
+    val href = be_dom_get_attr(node, "href")
+    if href == "":
+        return
+    be_dom_set_attr(node, "data-simple-kind", "anchor")
+    be_dom_set_attr(node, "data-simple-action", _resolve_relative_url(base_url, href))
+    if _needs_default_style(node, "color"):
+        be_dom_set_style(node, "color", "#0b57d0")
+    if _needs_default_style(node, "text-decoration"):
+        be_dom_set_style(node, "text-decoration", "underline")
+
+fn _form_key(node: BeDomNode, ctx: SimpleBrowserBuildContext) -> text:
+    val existing = be_dom_get_attr(node, "data-simple-form-key")
+    if existing != "":
+        return existing
+    val explicit = be_dom_get_attr(node, "id")
+    if explicit != "":
+        val key = "form:" + explicit
+        be_dom_set_attr(node, "data-simple-form-key", key)
+        return key
+    val key = "form-{ctx.next_form_idx}"
+    ctx.next_form_idx = ctx.next_form_idx + 1
+    be_dom_set_attr(node, "data-simple-form-key", key)
+    key
+
+fn _field_key(node: BeDomNode, form_key: text, ctx: SimpleBrowserBuildContext) -> text:
+    val name = be_dom_get_attr(node, "name")
+    if name != "":
+        return form_key + ":" + name + ":{ctx.next_field_idx}"
+    val node_id = be_dom_get_attr(node, "id")
+    if node_id != "":
+        return form_key + ":" + node_id + ":{ctx.next_field_idx}"
+    form_key + ":" + be_dom_get_tag(node) + ":{ctx.next_field_idx}"
+
+fn _decorate_form_control(node: BeDomNode, form_key: text, overrides: [text], ctx: SimpleBrowserBuildContext):
+    val tag = be_dom_get_tag(node)
+    var input_type = be_dom_get_attr(node, "type").to_lower()
+    if tag == "textarea":
+        input_type = "textarea"
+    elif tag == "button" and input_type == "":
+        input_type = "submit"
+    elif input_type == "":
+        input_type = "text"
+
+    val key = _field_key(node, form_key, ctx)
+    ctx.next_field_idx = ctx.next_field_idx + 1
+    val name = be_dom_get_attr(node, "name")
+    val placeholder = be_dom_get_attr(node, "placeholder")
+    var value = _field_override(overrides, key)
+    if value == "":
+        if tag == "textarea" or tag == "button":
+            value = _text_content(node)
+        else:
+            value = be_dom_get_attr(node, "value")
+
+    var unsupported = false
+    if tag == "input" and input_type != "text" and input_type != "search" and input_type != "url" and input_type != "email" and input_type != "submit":
+        unsupported = true
+    if tag != "input" and tag != "textarea" and tag != "button":
+        unsupported = true
+
+    be_dom_set_attr(node, "data-simple-form-key", form_key)
+    be_dom_set_attr(node, "data-simple-field-key", key)
+    be_dom_set_attr(node, "data-simple-name", name)
+    be_dom_set_attr(node, "data-simple-tag", tag)
+    be_dom_set_attr(node, "data-simple-input-type", input_type)
+    if unsupported:
+        be_dom_set_attr(node, "data-simple-unsupported", "true")
+        _push_warning(ctx, "Unsupported form control: {tag}[type={input_type}]")
+    else:
+        be_dom_set_attr(node, "data-simple-unsupported", "false")
+
+    if tag == "button" or input_type == "submit":
+        be_dom_set_attr(node, "data-simple-kind", "submit")
+        val label = if value != "": value else: "Submit"
+        if _needs_default_style(node, "display"):
+            be_dom_set_style(node, "display", "block")
+        if _needs_default_style(node, "width"):
+            be_dom_set_style(node, "width", "120px")
+        if _needs_default_style(node, "height"):
+            be_dom_set_style(node, "height", "36px")
+        if _needs_default_style(node, "background-color"):
+            be_dom_set_style(node, "background-color", "#0b57d0")
+        if _needs_default_style(node, "color"):
+            be_dom_set_style(node, "color", "#ffffff")
+        if _needs_default_style(node, "padding"):
+            be_dom_set_style(node, "padding", "8px")
+        if _needs_default_style(node, "border"):
+            be_dom_set_style(node, "border", "1px solid #0b57d0")
+        _ensure_text_child(node, label)
+        return
+
+    be_dom_set_attr(node, "data-simple-kind", "field")
+    if _needs_default_style(node, "display"):
+        be_dom_set_style(node, "display", "block")
+    if _needs_default_style(node, "width"):
+        be_dom_set_style(node, "width", "240px")
+    if _needs_default_style(node, "padding"):
+        be_dom_set_style(node, "padding", "8px")
+    if _needs_default_style(node, "border"):
+        be_dom_set_style(node, "border", "1px solid #c7c7c7")
+    if _needs_default_style(node, "background-color"):
+        be_dom_set_style(node, "background-color", "#ffffff")
+    if _needs_default_style(node, "color"):
+        if value == "" and placeholder != "":
+            be_dom_set_style(node, "color", "#6b7280")
+        else:
+            be_dom_set_style(node, "color", "#111827")
+    if tag == "textarea":
+        if _needs_default_style(node, "height"):
+            be_dom_set_style(node, "height", "96px")
+    else:
+        if _needs_default_style(node, "height"):
+            be_dom_set_style(node, "height", "28px")
+
+    val shown = if value != "": value else: placeholder
+    _ensure_text_child(node, shown)
+
+fn _decorate_dom(node: BeDomNode, base_url: text, current_form_key: text, overrides: [text], ctx: SimpleBrowserBuildContext):
+    if be_dom_get_is_text(node):
+        return
+
+    val tag = be_dom_get_tag(node)
+    var next_form_key = current_form_key
+    if tag == "a":
+        _decorate_anchor(node, base_url)
+    elif tag == "form":
+        next_form_key = _form_key(node, ctx)
+        if _needs_default_style(node, "display"):
+            be_dom_set_style(node, "display", "block")
+        val method = be_dom_get_attr(node, "method").to_lower()
+        if method != "" and method != "get":
+            _push_warning(ctx, "Unsupported form method '{method}' — GET only")
+            be_dom_set_attr(node, "data-simple-unsupported", "true")
+    elif tag == "input" or tag == "textarea" or tag == "button":
+        if next_form_key == "":
+            next_form_key = "form:document"
+        _decorate_form_control(node, next_form_key, overrides, ctx)
+
+    val children = be_dom_get_children(node)
+    var idx = 0
+    while idx < children.len():
+        _decorate_dom(children[idx], base_url, next_form_key, overrides, ctx)
+        idx = idx + 1
+
+fn _collect_interactions(box: BeLayoutBox, collection: SimpleBrowserCollection):
+    val node = layout_get_node(box)
+    val kind = be_dom_get_attr(node, "data-simple-kind")
+    val x = layout_get_x(box)
+    val y = layout_get_y(box)
+    val width = layout_get_width(box)
+    val height = layout_get_height(box)
+    if kind == "anchor":
+        collection.targets.push(SimpleBrowserTarget(
+            kind: "anchor",
+            action: be_dom_get_attr(node, "data-simple-action"),
+            field_key: "",
+            form_key: "",
+            x: x, y: y, width: width, height: height
+        ))
+    elif kind == "submit":
+        collection.targets.push(SimpleBrowserTarget(
+            kind: "submit",
+            action: be_dom_get_attr(node, "formaction"),
+            field_key: be_dom_get_attr(node, "data-simple-field-key"),
+            form_key: be_dom_get_attr(node, "data-simple-form-key"),
+            x: x, y: y, width: width, height: height
+        ))
+    elif kind == "field":
+        val unsupported = be_dom_get_attr(node, "data-simple-unsupported") == "true"
+        val field = SimpleBrowserField(
+            key: be_dom_get_attr(node, "data-simple-field-key"),
+            form_key: be_dom_get_attr(node, "data-simple-form-key"),
+            name: be_dom_get_attr(node, "data-simple-name"),
+            tag: be_dom_get_attr(node, "data-simple-tag"),
+            input_type: be_dom_get_attr(node, "data-simple-input-type"),
+            value: if _text_content(node) == be_dom_get_attr(node, "placeholder"): "" else: _text_content(node),
+            placeholder: be_dom_get_attr(node, "placeholder"),
+            x: x, y: y, width: width, height: height,
+            unsupported: unsupported
+        )
+        collection.fields.push(field)
+        collection.targets.push(SimpleBrowserTarget(
+            kind: "field",
+            action: "",
+            field_key: field.key,
+            form_key: field.form_key,
+            x: x, y: y, width: width, height: height
+        ))
+
+    val children = layout_get_children(box)
+    var idx = 0
+    while idx < children.len():
+        _collect_interactions(children[idx], collection)
+        idx = idx + 1
+
+fn _page_html(title: text, body: text) -> text:
+    "<html><head><title>{title}</title><style>body { margin: 0; padding: 24px; font-family: Arial, sans-serif; background: #ffffff; color: #111827; } h1 { font-size: 24px; margin: 0 0 12px 0; } p { margin: 0 0 10px 0; } code { background: #f3f4f6; padding: 2px 4px; }</style></head><body>{body}</body></html>"
+
+fn _render_page(url: text, html: text, viewport_w: i32, viewport_h: i32, overrides: [text]) -> SimpleBrowserPageState:
+    val dom = html_string_to_dom(html)
+    var ctx = SimpleBrowserBuildContext.create()
+    _decorate_dom(dom, url, "", overrides, ctx)
+    val layout = layout_tree(dom, viewport_w, viewport_h)
+    var renderer = BrowserRenderer.create(viewport_w, viewport_h)
+    val result = renderer.render_dom(dom)
+    var collection = SimpleBrowserCollection.create()
+    _collect_interactions(layout, collection)
+    SimpleBrowserPageState(
+        current_url: url,
+        source_html: html,
+        scene_commands: result.scene_commands,
+        scene_width: result.scene_width,
+        scene_height: result.scene_height,
+        doc_height: layout_get_height(layout),
+        warnings: ctx.warnings,
+        fields: collection.fields,
+        targets: collection.targets
+    )
+
+fn simple_browser_blank_page(url: text, viewport_w: i32, viewport_h: i32) -> SimpleBrowserPageState:
+    val body = "<h1>Simple Browser</h1><p>Type a URL and press Enter or click Go.</p><p>The page content below is rendered by the in-repo Simple web engine.</p>"
+    _render_page(url, _page_html("Simple Browser", body), viewport_w, viewport_h, [])
+
+fn simple_browser_loading_page(url: text, viewport_w: i32, viewport_h: i32) -> SimpleBrowserPageState:
+    val body = "<h1>Loading</h1><p>Fetching <code>{url}</code></p>"
+    _render_page(url, _page_html("Loading", body), viewport_w, viewport_h, [])
+
+fn simple_browser_error_page(url: text, message: text, viewport_w: i32, viewport_h: i32) -> SimpleBrowserPageState:
+    val body = "<h1>Navigation Failed</h1><p><code>{url}</code></p><p>{message}</p>"
+    _render_page(url, _page_html("Navigation Failed", body), viewport_w, viewport_h, [])
+
+fn simple_browser_render_remote_page(url: text, html: text, viewport_w: i32, viewport_h: i32) -> SimpleBrowserPageState:
+    _render_page(url, html, viewport_w, viewport_h, [])
+
+fn _flatten_field_overrides(fields: [SimpleBrowserField]) -> [text]:
+    var out: [text] = []
+    var idx = 0
+    while idx < fields.len():
+        out.push(fields[idx].key)
+        out.push(fields[idx].value)
+        idx = idx + 1
+    out
+
+fn simple_browser_rerender(page: SimpleBrowserPageState, viewport_w: i32, viewport_h: i32) -> SimpleBrowserPageState:
+    _render_page(page.current_url, page.source_html, viewport_w, viewport_h, _flatten_field_overrides(page.fields))
+
+fn simple_browser_hit_target(page: SimpleBrowserPageState, x: i32, y: i32) -> SimpleBrowserTarget?:
+    var idx = 0
+    while idx < page.targets.len():
+        val target = page.targets[idx]
+        if x >= target.x and x <= target.x + target.width and y >= target.y and y <= target.y + target.height:
+            return Some(target)
+        idx = idx + 1
+    nil
+
+fn simple_browser_set_field_value(page: SimpleBrowserPageState, field_key: text, value: text) -> SimpleBrowserPageState:
+    var next_fields: [SimpleBrowserField] = []
+    var idx = 0
+    while idx < page.fields.len():
+        var field = page.fields[idx]
+        if field.key == field_key:
+            field.value = value
+        next_fields.push(field)
+        idx = idx + 1
+    val updated = SimpleBrowserPageState(
+        current_url: page.current_url,
+        source_html: page.source_html,
+        scene_commands: page.scene_commands,
+        scene_width: page.scene_width,
+        scene_height: page.scene_height,
+        doc_height: page.doc_height,
+        warnings: page.warnings,
+        fields: next_fields,
+        targets: page.targets
+    )
+    simple_browser_rerender(updated, page.scene_width, page.scene_height)
+
+fn simple_browser_field_value(page: SimpleBrowserPageState, field_key: text) -> text:
+    var idx = 0
+    while idx < page.fields.len():
+        if page.fields[idx].key == field_key:
+            return page.fields[idx].value
+        idx = idx + 1
+    ""
+
+fn simple_browser_field_form_key(page: SimpleBrowserPageState, field_key: text) -> text:
+    var idx = 0
+    while idx < page.fields.len():
+        if page.fields[idx].key == field_key:
+            return page.fields[idx].form_key
+        idx = idx + 1
+    ""
+
+fn _url_encode(text_val: text) -> text:
+    var out = ""
+    for ch in text_val:
+        val cp = ch.char_code_at(0)
+        if (cp >= 48 and cp <= 57) or (cp >= 65 and cp <= 90) or (cp >= 97 and cp <= 122) or ch == "-" or ch == "_" or ch == "." or ch == "~":
+            out = out + ch
+        elif ch == " ":
+            out = out + "+"
+        else:
+            val hex = cp.to_hex().to_upper()
+            if hex.len() == 1:
+                out = out + "%0" + hex
+            else:
+                out = out + "%" + hex
+    out
+
+fn simple_browser_submit_get_url(page: SimpleBrowserPageState, form_key: text, submit_action: text) -> text:
+    var action = submit_action
+    if action == "":
+        action = page.current_url
+    action = _resolve_relative_url(page.current_url, action)
+    var pairs: [text] = []
+    var idx = 0
+    while idx < page.fields.len():
+        val field = page.fields[idx]
+        if field.form_key == form_key and not field.unsupported and field.name != "":
+            pairs.push(_url_encode(field.name) + "=" + _url_encode(field.value))
+        idx = idx + 1
+    if pairs.len() == 0:
+        return action
+    val joiner = if _contains_folded(action, "?"): "&" else: "?"
+    action + joiner + pairs.join("&")
+
+export SimpleBrowserPageState
+export SimpleBrowserTarget
+export SimpleBrowserField
+export simple_browser_blank_page
+export simple_browser_loading_page
+export simple_browser_error_page
+export simple_browser_render_remote_page
+export simple_browser_rerender
+export simple_browser_hit_target
+export simple_browser_set_field_value
+export simple_browser_field_value
+export simple_browser_field_form_key
+export simple_browser_submit_get_url
