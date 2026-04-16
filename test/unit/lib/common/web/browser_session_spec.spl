@@ -100,33 +100,240 @@ describe "BrowserSession page loading":
             Err(e) =>
                 expect(false).to_equal(true)
 
-    it "records style and external script limitations as warnings":
+    it "preserves inline style blocks in the rendered session document":
         var session = BrowserSession.new()
         val result = session.open_html(
-            "about:warnings",
-            "<html><head><style>body { color: red; }</style></head><body><script src='app.js'></script></body></html>"
+            "about:styles",
+            "<html><head><style>body { color: red; }</style></head><body>styled</body></html>"
         )
         match result:
             Ok(_) =>
-                expect(session.warnings.len()).to_be_greater_than(1)
-                expect(session.warnings[0]).to_contain("external script")
+                expect(session.current_style_html).to_contain("body { color: red; }")
+                expect(session.render_html_document()).to_contain("<style>body { color: red; }</style>")
+                expect(session.warnings.len()).to_equal(0)
             Err(e) =>
                 expect(false).to_equal(true)
 
-    it "executes module and deferred scripts in compatibility mode":
+    it "loads linked stylesheets through the session request pump":
         var session = BrowserSession.new()
-        session.register_resource("https://example.com/module.js", "document.title = 'ModuleLoaded';")
+        session.register_resource("https://example.com/site.css", "body { background: rgb(1, 2, 3); }")
         val result = session.open_html(
             "https://example.com/index.html",
-            "<html><head><title>Before</title><script type='module' src='/module.js' defer></script></head><body><script type='module'>document.body.textContent = 'module body';</script></body></html>"
+            "<html><head><link rel='stylesheet' href='/site.css'></head><body>styled</body></html>"
+        )
+        match result:
+            Ok(_) =>
+                expect(session.current_style_html).to_contain("background: rgb(1, 2, 3);")
+                expect(session.warnings.len()).to_equal(0)
+            Err(e) =>
+                expect(false).to_equal(true)
+
+    it "expands stylesheet imports before rendering":
+        var session = BrowserSession.new()
+        session.register_resource("https://example.com/base.css", "@import '/theme.css'; body { color: red; }")
+        session.register_resource("https://example.com/theme.css", ".theme { background: blue; }")
+        val result = session.open_html(
+            "https://example.com/index.html",
+            "<html><head><link rel='stylesheet' href='/base.css'></head><body class='theme'>styled</body></html>"
+        )
+        match result:
+            Ok(_) =>
+                expect(session.current_style_html).to_contain(".theme { background: blue; }")
+                expect(session.current_style_html).to_contain("body { color: red; }")
+            Err(e) =>
+                expect(false).to_equal(true)
+
+    it "loads external module graphs with named imports":
+        var session = BrowserSession.new()
+        session.register_resource("https://example.com/dep.js", "export const label = 'dep';")
+        session.register_resource("https://example.com/module.js", "import { label } from '/dep.js'; document.title = 'ModuleLoaded'; document.body.textContent = label;")
+        val result = session.open_html(
+            "https://example.com/index.html",
+            "<html><head><title>Before</title><script type='module' src='/module.js' defer></script></head><body>start</body></html>"
         )
         match result:
             Ok(_) =>
                 expect(session.current_title).to_equal("ModuleLoaded")
-                expect(session.current_body_html).to_equal("module body")
-                expect(session.warnings.len()).to_equal(2)
-                expect(session.warnings[0]).to_contain("module scripts execute in compatibility mode")
-                expect(session.warnings[1]).to_contain("defer script loading is not implemented")
+                expect(session.current_body_html).to_equal("dep")
+                expect(session.warnings.len()).to_equal(0)
+            Err(e) =>
+                expect(false).to_equal(true)
+
+    it "supports inline module default and namespace imports":
+        var session = BrowserSession.new()
+        session.register_resource("https://example.com/lib.js", "export default function greet(name) { return 'hi ' + name; } export const suffix = '!';")
+        val result = session.open_html(
+            "https://example.com/index.html",
+            "<html><body><script type='module'>import greet, * as lib from '/lib.js'; document.body.textContent = greet('browser') + lib.suffix;</script></body></html>"
+        )
+        match result:
+            Ok(_) =>
+                expect(session.current_body_html).to_equal("hi browser!")
+                expect(session.warnings.len()).to_equal(0)
+            Err(e) =>
+                expect(false).to_equal(true)
+
+    it "supports module default class exports and named re-exports":
+        var session = BrowserSession.new()
+        session.register_resource("https://example.com/dep.js", "export const value = 'v';")
+        session.register_resource("https://example.com/bridge.js", "export { value as bridged } from '/dep.js'; export default class Bridge { constructor() { this.kind = 'Bridge'; } }")
+        val result = session.open_html(
+            "https://example.com/index.html",
+            "<html><body><script type='module'>import Bridge, { bridged } from '/bridge.js'; document.body.textContent = (new Bridge()).kind + ':' + bridged;</script></body></html>"
+        )
+        match result:
+            Ok(_) =>
+                expect(session.current_body_html).to_equal("Bridge:v")
+                expect(session.warnings.len()).to_equal(0)
+            Err(e) =>
+                expect(false).to_equal(true)
+
+    it "supports anonymous default function and class exports":
+        var session = BrowserSession.new()
+        session.register_resource("https://example.com/anon-fn.js", "export default function(name) { return 'anon ' + name; }")
+        session.register_resource("https://example.com/anon-class.js", "export default class { constructor() { this.kind = 'Anon'; } }")
+        val result = session.open_html(
+            "https://example.com/index.html",
+            "<html><body><script type='module'>import anonFn from '/anon-fn.js'; import AnonClass from '/anon-class.js'; document.body.textContent = anonFn('module') + ':' + (new AnonClass()).kind;</script></body></html>"
+        )
+        match result:
+            Ok(_) =>
+                expect(session.current_body_html).to_equal("anon module:Anon")
+                expect(session.warnings.len()).to_equal(0)
+            Err(e) =>
+                expect(false).to_equal(true)
+
+    it "supports export star re-exports":
+        var session = BrowserSession.new()
+        session.register_resource("https://example.com/dep.js", "export const a = 'A'; export const b = 'B';")
+        session.register_resource("https://example.com/bridge.js", "export * from '/dep.js';")
+        val result = session.open_html(
+            "https://example.com/index.html",
+            "<html><body><script type='module'>import { a, b } from '/bridge.js'; document.body.textContent = a + ':' + b;</script></body></html>"
+        )
+        match result:
+            Ok(_) =>
+                expect(session.current_body_html).to_equal("A:B")
+                expect(session.warnings.len()).to_equal(0)
+            Err(e) =>
+                expect(false).to_equal(true)
+
+    it "does not forward default through export star re-exports":
+        var session = BrowserSession.new()
+        session.register_resource("https://example.com/dep.js", "export default 'D'; export const named = 'N';")
+        session.register_resource("https://example.com/bridge.js", "export * from '/dep.js';")
+        val result = session.open_html(
+            "https://example.com/index.html",
+            "<html><body><script type='module'>import { named } from '/bridge.js'; document.body.textContent = named;</script></body></html>"
+        )
+        match result:
+            Ok(_) =>
+                expect(session.current_body_html).to_equal("N")
+                expect(session.warnings.len()).to_equal(0)
+            Err(e) =>
+                expect(false).to_equal(true)
+
+    it "keeps explicit local exports ahead of export star re-exports":
+        var session = BrowserSession.new()
+        session.register_resource("https://example.com/dep.js", "export const value = 'dep';")
+        session.register_resource("https://example.com/bridge.js", "export const value = 'bridge'; export * from '/dep.js';")
+        val result = session.open_html(
+            "https://example.com/index.html",
+            "<html><body><script type='module'>import { value } from '/bridge.js'; document.body.textContent = value;</script></body></html>"
+        )
+        match result:
+            Ok(_) =>
+                expect(session.current_body_html).to_equal("bridge")
+                expect(session.warnings.len()).to_equal(0)
+            Err(e) =>
+                expect(false).to_equal(true)
+
+    it "supports export star as namespace re-exports":
+        var session = BrowserSession.new()
+        session.register_resource("https://example.com/dep.js", "export const value = 'dep'; export const other = 'x';")
+        session.register_resource("https://example.com/bridge.js", "export * as ns from '/dep.js';")
+        val result = session.open_html(
+            "https://example.com/index.html",
+            "<html><body><script type='module'>import { ns } from '/bridge.js'; document.body.textContent = ns.value + ':' + ns.other;</script></body></html>"
+        )
+        match result:
+            Ok(_) =>
+                expect(session.current_body_html).to_equal("dep:x")
+                expect(session.warnings.len()).to_equal(0)
+            Err(e) =>
+                expect(false).to_equal(true)
+
+    it "supports multi-declarator variable exports from a single module statement":
+        var session = BrowserSession.new()
+        session.register_resource("https://example.com/dep.js", "export const a = 'A', b = 'B'; export let c = 'C', d = 'D';")
+        val result = session.open_html(
+            "https://example.com/index.html",
+            "<html><body><script type='module'>import { a, b, c, d } from '/dep.js'; document.body.textContent = a + ':' + b + ':' + c + ':' + d;</script></body></html>"
+        )
+        match result:
+            Ok(_) =>
+                expect(session.current_body_html).to_equal("A:B:C:D")
+                expect(session.warnings.len()).to_equal(0)
+            Err(e) =>
+                expect(false).to_equal(true)
+
+    it "keeps default on export star as namespace re-exports":
+        var session = BrowserSession.new()
+        session.register_resource("https://example.com/dep.js", "export default 'D'; export const named = 'N';")
+        session.register_resource("https://example.com/bridge.js", "export * as ns from '/dep.js';")
+        val result = session.open_html(
+            "https://example.com/index.html",
+            "<html><body><script type='module'>import { ns } from '/bridge.js'; document.body.textContent = ns.default + ':' + ns.named;</script></body></html>"
+        )
+        match result:
+            Ok(_) =>
+                expect(session.current_body_html).to_equal("D:N")
+                expect(session.warnings.len()).to_equal(0)
+            Err(e) =>
+                expect(false).to_equal(true)
+
+    it "supports default re-export aliases from dependency modules":
+        var session = BrowserSession.new()
+        session.register_resource("https://example.com/dep.js", "export default 'D'; export const named = 'N';")
+        session.register_resource("https://example.com/bridge.js", "export { default as depDefault, named } from '/dep.js';")
+        val result = session.open_html(
+            "https://example.com/index.html",
+            "<html><body><script type='module'>import { depDefault, named } from '/bridge.js'; document.body.textContent = depDefault + ':' + named;</script></body></html>"
+        )
+        match result:
+            Ok(_) =>
+                expect(session.current_body_html).to_equal("D:N")
+                expect(session.warnings.len()).to_equal(0)
+            Err(e) =>
+                expect(false).to_equal(true)
+
+    it "keeps default on export star as namespace re-exports":
+        var session = BrowserSession.new()
+        session.register_resource("https://example.com/dep.js", "export default 'D'; export const named = 'N';")
+        session.register_resource("https://example.com/bridge.js", "export * as ns from '/dep.js';")
+        val result = session.open_html(
+            "https://example.com/index.html",
+            "<html><body><script type='module'>import { ns } from '/bridge.js'; document.body.textContent = ns.default + ':' + ns.named;</script></body></html>"
+        )
+        match result:
+            Ok(_) =>
+                expect(session.current_body_html).to_equal("D:N")
+                expect(session.warnings.len()).to_equal(0)
+            Err(e) =>
+                expect(false).to_equal(true)
+
+    it "supports default re-export aliases from dependency modules":
+        var session = BrowserSession.new()
+        session.register_resource("https://example.com/dep.js", "export default 'D'; export const named = 'N';")
+        session.register_resource("https://example.com/bridge.js", "export { default as depDefault, named } from '/dep.js';")
+        val result = session.open_html(
+            "https://example.com/index.html",
+            "<html><body><script type='module'>import { depDefault, named } from '/bridge.js'; document.body.textContent = depDefault + ':' + named;</script></body></html>"
+        )
+        match result:
+            Ok(_) =>
+                expect(session.current_body_html).to_equal("D:N")
+                expect(session.warnings.len()).to_equal(0)
             Err(e) =>
                 expect(false).to_equal(true)
 
@@ -327,6 +534,16 @@ describe "BrowserSession script bridge":
         session.apply_set_cookie_header("theme=gone; Path=/path; Expires=Thu, 01 Jan 1970 00:00:00 GMT")
         expect(session.document_cookie()).to_equal("")
         expect(session.cookie_header_for_request("https://example.com/path/next")).to_equal("")
+
+    it "matches Set-Cookie domain attributes that include a leading dot":
+        var session = BrowserSession.new()
+        session.open_html("https://example.com/path/page", "<html><body>Cookies</body></html>")
+        session.apply_set_cookie_header("theme=light; Domain=.example.com; Path=/")
+
+        expect(session.document_cookie()).to_equal("theme=light")
+        expect(session.cookie_header_for_request("https://example.com/path/next")).to_equal("theme=light")
+        expect(session.cookie_header_for_request("https://sub.example.com/path/next")).to_equal("theme=light")
+        expect(session.cookie_header_for_request("https://other.com/path/next")).to_equal("")
 
     it "installs promise globals and settles async fetch after response commit":
         var session = BrowserSession.new()

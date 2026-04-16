@@ -10,7 +10,7 @@ use std.js.types.js_types.JsProperty
 use std.js.types.ast_types.Expression
 use std.js.types.ast_types.Statement
 use std.js.types.ast_types.SwitchCase
-use std.js.engine.runtime.{dispatch_native, NATIVE_FETCH, NATIVE_PROMISE_CATCH, NATIVE_PROMISE_FINALLY, NATIVE_PROMISE_REJECT, NATIVE_PROMISE_RESOLVE, NATIVE_PROMISE_THEN, NATIVE_RESPONSE_TEXT}
+use std.js.engine.runtime.{dispatch_native, NATIVE_FETCH, NATIVE_JSON_PARSE, NATIVE_PROMISE_CATCH, NATIVE_PROMISE_FINALLY, NATIVE_PROMISE_REJECT, NATIVE_PROMISE_RESOLVE, NATIVE_PROMISE_THEN, NATIVE_RESPONSE_JSON, NATIVE_RESPONSE_TEXT}
 use std.js.builtins.array.{array_map, array_filter, array_reduce, array_forEach, array_find, array_findIndex, array_some, array_every, array_sort_with, array_isArray, array_from_values}
 
 extern fn rt_file_read_text(path: text) -> text
@@ -418,8 +418,10 @@ class JsInterpreter:
         self.object_store.set_property(response_id, "ok", JsValue.Boolean(v: status >= 200 and status < 300 and error == ""))
         self.object_store.set_property(response_id, "headersText", JsValue.String(v: headers))
         self.object_store.set_property(response_id, "body", JsValue.String(v: body))
+        self.object_store.set_property(response_id, "bodyUsed", JsValue.Boolean(v: false))
         self.object_store.set_property(response_id, "error", JsValue.String(v: error))
         self._define_method_on(response_id, "text", NATIVE_RESPONSE_TEXT)
+        self._define_method_on(response_id, "json", NATIVE_RESPONSE_JSON)
         response_id
 
     fn _create_promise_handler(on_fulfilled: i64, on_rejected: i64, next_promise_id: i64, kind: text) -> i64:
@@ -2260,6 +2262,8 @@ class JsInterpreter:
             return self._native_promise_reject(arg_vals)
         if native_id == NATIVE_RESPONSE_TEXT:
             return self._native_response_text(this_val)
+        if native_id == NATIVE_RESPONSE_JSON:
+            return self._native_response_json(this_val)
         dispatch_native(native_id, arg_vals, self.logger)
 
     fn _native_fetch(this_val: JsValue, arg_vals: [JsValue], env: i64) -> JsValue:
@@ -2399,8 +2403,18 @@ class JsInterpreter:
         val response_id = _get_obj_id(this_val)
         if response_id < 0:
             return JsValue.Undefined
+        self.object_store.set_property(response_id, "bodyUsed", JsValue.Boolean(v: true))
         match self.object_store.get_property(response_id, "body"):
             JsValue.String(v): JsValue.String(v: v)
+            _: JsValue.Undefined
+
+    fn _native_response_json(this_val: JsValue) -> JsValue:
+        val response_id = _get_obj_id(this_val)
+        if response_id < 0:
+            return JsValue.Undefined
+        self.object_store.set_property(response_id, "bodyUsed", JsValue.Boolean(v: true))
+        match self.object_store.get_property(response_id, "body"):
+            JsValue.String(v): dispatch_native(NATIVE_JSON_PARSE, [JsValue.String(v: v)], self.logger)
             _: JsValue.Undefined
 
     # ── String method dispatch ───────────────────────────────────────────

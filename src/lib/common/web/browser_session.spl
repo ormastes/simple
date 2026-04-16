@@ -8,9 +8,9 @@
 # - minimal browser-like host globals: window/document/location/navigator/chrome
 #
 # Non-goals:
-# - network-backed HTTP/HTTPS navigation
+# - network-backed HTTP/HTTPS navigation beyond the request/response pump
 # - full DOM API parity
-# - CSS stylesheet parsing (<style> / linked CSS)
+# - full CSS/browser parity beyond inline/link/@import preservation
 
 use std.gc_async_mut.gpu.browser_engine.browser_renderer.{BrowserRenderer, BeRenderResult}
 use std.js.engine.runtime.{JsRuntime}
@@ -69,6 +69,23 @@ class BrowserResponse:
             error: error
         )
 
+class BrowserPendingModuleEval:
+    root_url: text
+    source: text
+
+    static fn create(root_url: text, source: text) -> BrowserPendingModuleEval:
+        BrowserPendingModuleEval(root_url: root_url, source: source)
+
+class BrowserStylesheetSource:
+    kind: text
+    source: text
+
+    static fn inline(source: text) -> BrowserStylesheetSource:
+        BrowserStylesheetSource(kind: "inline", source: source)
+
+    static fn external(source: text) -> BrowserStylesheetSource:
+        BrowserStylesheetSource(kind: "external", source: source)
+
 class BrowserLoadState:
     document_url: text
     source_html: text
@@ -77,9 +94,12 @@ class BrowserLoadState:
     script_blocks: [BrowserScriptBlock]
     next_script_idx: i32
     warnings: [text]
-    style_warning: bool
+    style_sources: [BrowserStylesheetSource]
+    next_style_idx: i32
+    current_style_html: text
+    pending_module: BrowserPendingModuleEval?
 
-    static fn create(document_url: text, source_html: text, target_index: i32, push_history: bool, script_blocks: [BrowserScriptBlock], style_warning: bool) -> BrowserLoadState:
+    static fn create(document_url: text, source_html: text, target_index: i32, push_history: bool, script_blocks: [BrowserScriptBlock], style_sources: [BrowserStylesheetSource]) -> BrowserLoadState:
         BrowserLoadState(
             document_url: document_url,
             source_html: source_html,
@@ -88,7 +108,10 @@ class BrowserLoadState:
             script_blocks: script_blocks,
             next_script_idx: 0,
             warnings: [],
-            style_warning: style_warning
+            style_sources: style_sources,
+            next_style_idx: 0,
+            current_style_html: "",
+            pending_module: nil
         )
 
 class BrowserRuntimeState:
@@ -151,6 +174,8 @@ class BrowserRuntimeState:
         runtime.interpreter.object_store.set_property(chrome_id, "__simple_fetch_host", JsValue.Boolean(v: true))
         runtime.interpreter.object_store.set_property(chrome_id, "__simple_base_url", JsValue.String(v: url))
         runtime.interpreter.object_store.set_property(chrome_id, "__simple_cookie_header", JsValue.String(v: cookie_text))
+        val modules_id = runtime.interpreter.object_store.create_object()
+        runtime.interpreter.object_store.set_property(chrome_id, "__simple_modules", JsValue.Object(id: modules_id))
 
         val session_storage_id = storage_object_from_pairs(runtime, session_storage)
         val local_storage_id = storage_object_from_pairs(runtime, local_storage)
@@ -176,6 +201,7 @@ class BrowserRuntimeState:
         runtime.interpreter.object_store.set_property(window_id, "__simple_fetch_host", JsValue.Boolean(v: true))
         runtime.interpreter.object_store.set_property(window_id, "__simple_base_url", JsValue.String(v: url))
         runtime.interpreter.object_store.set_property(window_id, "__simple_cookie_header", JsValue.String(v: cookie_text))
+        runtime.interpreter.object_store.set_property(window_id, "__simple_modules", JsValue.Object(id: modules_id))
 
         if val Some(console_val) = runtime.interpreter.env_stack.get_var(global_env, "console"):
             runtime.interpreter.object_store.set_property(window_id, "console", console_val)
@@ -200,6 +226,7 @@ class BrowserRuntimeState:
         runtime.interpreter.env_stack.define_var(global_env, "chrome", JsValue.Object(id: chrome_id))
         runtime.interpreter.env_stack.define_var(global_env, "sessionStorage", JsValue.Object(id: session_storage_id))
         runtime.interpreter.env_stack.define_var(global_env, "localStorage", JsValue.Object(id: local_storage_id))
+        runtime.interpreter.env_stack.define_var(global_env, "__simple_modules", JsValue.Object(id: modules_id))
 
         install_storage_api(runtime)
         sync_storage_runtime_state(runtime, session_storage_id, session_storage)
@@ -231,6 +258,7 @@ class BrowserSession:
     current_url: text
     current_title: text
     current_body_html: text
+    current_style_html: text
     source_html: text
     runtime_enabled: bool
     history: [BrowserHistoryEntry]
@@ -247,6 +275,9 @@ class BrowserSession:
     next_request_seq: i32
     active_load: BrowserLoadState?
     resource_overrides: [Pair<text, text>]
+    module_source_cache: [Pair<text, text>]
+    loaded_module_urls: [text]
+    module_eval_stack: [text]
 
     static fn new() -> BrowserSession:
         BrowserSession._create(true)
@@ -259,6 +290,7 @@ class BrowserSession:
             current_url: "about:blank",
             current_title: "about:blank",
             current_body_html: "",
+            current_style_html: "",
             source_html: blank_page_html(),
             runtime_enabled: runtime_enabled,
             history: [],
@@ -274,7 +306,10 @@ class BrowserSession:
             pending_requests: [],
             next_request_seq: 1,
             active_load: nil,
-            resource_overrides: []
+            resource_overrides: [],
+            module_source_cache: [],
+            loaded_module_urls: [],
+            module_eval_stack: []
         )
 
 impl BrowserSession:
@@ -391,8 +426,12 @@ impl BrowserSession:
                 return Err(response.error)
             self._apply_response_headers(response.headers)
             return self.commit_navigation_html(response.body)
+        if response.kind == "style":
+            return self._commit_style_response(response)
         if response.kind == "script":
             return self._commit_script_response(response)
+        if response.kind == "module":
+            return self._commit_module_response(response)
         if response.kind == "fetch":
             if val Some(state) = self.runtime_state:
                 self._apply_response_headers(response.headers)
@@ -409,6 +448,19 @@ impl BrowserSession:
                 return Err(response.error)
             return Ok(true)
         Err("unknown response kind: {response.kind}")
+
+    me _commit_style_response(response: BrowserResponse) -> Result<bool, text>:
+        if val Some(load) = self.active_load:
+            if response.error != "":
+                load.warnings = load.warnings + ["stylesheet load error: {response.error}"]
+            else:
+                self._apply_response_headers(response.headers)
+                val expanded = expand_stylesheet_text(load.document_url, response.url, response.body)
+                load.current_style_html = load.current_style_html + expanded.html
+                if expanded.sources.len() > 0:
+                    load.style_sources = insert_stylesheet_sources(load.style_sources, load.next_style_idx, expanded.sources)
+            return self._advance_stylesheet_loading()
+        Err("no active stylesheet load")
 
     me open_url(url: text) -> Result<bool, text>:
         val normalized = normalize_browser_url(url)
@@ -496,19 +548,17 @@ impl BrowserSession:
 
     fn render(width: i32, height: i32) -> BeRenderResult:
         var renderer = BrowserRenderer.create(width, height)
-        val body_html = if self.current_body_html.len() > 0:
-            self.current_body_html
-        else:
-            ""
-        renderer.render_html("<div>{body_html}</div>")
+        renderer.render_html(self.render_html_document())
 
     fn render_to_pixels(width: i32, height: i32) -> BeRenderResult:
         var renderer = BrowserRenderer.create(width, height)
-        val body_html = if self.current_body_html.len() > 0:
-            self.current_body_html
-        else:
-            ""
-        renderer.render_html_to_pixels("<div>{body_html}</div>")
+        renderer.render_html_to_pixels(self.render_html_document())
+
+    fn render_html_document() -> text:
+        val title = if self.current_title != "": self.current_title else: self.current_url
+        val body_html = if self.current_body_html.len() > 0: self.current_body_html else: ""
+        val style_html = self.current_style_html
+        "<!DOCTYPE html><html><head><title>{title}</title>{style_html}</head><body>{body_html}</body></html>"
 
     fn current_entry() -> BrowserHistoryEntry?:
         if self.current_index >= 0 and self.current_index < self.history.len():
@@ -521,7 +571,7 @@ impl BrowserSession:
         target_index: i32,
         push_history: bool
     ) -> Result<bool, text>:
-        val cleaned_html = strip_style_and_script_blocks(html)
+        val cleaned_html = strip_script_blocks(html)
         val initial_title = extract_title_text(html)
         val initial_body_html = extract_body_inner_html(cleaned_html)
         val body_html = if initial_body_html.len() > 0:
@@ -530,6 +580,7 @@ impl BrowserSession:
             cleaned_html
 
         val script_blocks = extract_script_blocks(html)
+        val style_sources = extract_stylesheet_sources(html)
 
         if self.runtime_enabled and script_blocks.len() > 0:
             val cookie_text = cookie_text_for_url(self.cookies, url)
@@ -547,6 +598,7 @@ impl BrowserSession:
         self.current_url = url
         self.current_title = if initial_title.len() > 0: initial_title else: url
         self.current_body_html = body_html
+        self.current_style_html = ""
         self.source_html = html
 
         self.active_load = Some(BrowserLoadState.create(
@@ -555,16 +607,9 @@ impl BrowserSession:
             target_index: target_index,
             push_history: push_history,
             script_blocks: script_blocks,
-            style_warning: contains_style_block(html)
+            style_sources: style_sources
         ))
-        if not self.runtime_enabled:
-            if val Some(load) = self.active_load:
-                if script_blocks.len() > 0:
-                    load.warnings = load.warnings + ["scripts are ignored when BrowserSession runtime is disabled"]
-                self._finalize_active_load(load)
-                self.active_load = nil
-            return Ok(true)
-        self._advance_script_loading()
+        self._advance_stylesheet_loading()
 
     me _ensure_runtime_state() -> BrowserRuntimeState?:
         if not self.runtime_enabled:
@@ -694,6 +739,52 @@ impl BrowserSession:
             return self._advance_script_loading()
         Err("no active script load")
 
+    me _commit_module_response(response: BrowserResponse) -> Result<bool, text>:
+        if val Some(load) = self.active_load:
+            if response.error != "":
+                load.warnings = load.warnings + ["module load error: {response.error}"]
+                load.pending_module = nil
+                return self._advance_script_loading()
+            self._apply_response_headers(response.headers)
+            self.module_source_cache = upsert_pair(self.module_source_cache, response.url, response.body)
+            return self._resume_pending_module_eval(load)
+        Err("no active module load")
+
+    me _resume_pending_module_eval(load: BrowserLoadState) -> Result<bool, text>:
+        if val Some(pending) = load.pending_module:
+            load.pending_module = nil
+            return self._execute_module_source(pending.root_url, pending.source, load)
+        self._advance_script_loading()
+
+    me _advance_stylesheet_loading() -> Result<bool, text>:
+        if val Some(load) = self.active_load:
+            while load.next_style_idx < load.style_sources.len():
+                val source = load.style_sources[load.next_style_idx]
+                load.next_style_idx = load.next_style_idx + 1
+                if source.kind == "inline":
+                    val expanded = expand_stylesheet_text(load.document_url, load.document_url, source.source)
+                    load.current_style_html = load.current_style_html + expanded.html
+                    if expanded.sources.len() > 0:
+                        load.style_sources = insert_stylesheet_sources(load.style_sources, load.next_style_idx, expanded.sources)
+                    continue
+                if source.kind == "external":
+                    val resolved = resolve_relative_url(load.document_url, source.source)
+                    if val Some(override_body) = pair_value(self.resource_overrides, resolved):
+                        val expanded = expand_stylesheet_text(load.document_url, resolved, override_body)
+                        load.current_style_html = load.current_style_html + expanded.html
+                        if expanded.sources.len() > 0:
+                            load.style_sources = insert_stylesheet_sources(load.style_sources, load.next_style_idx, expanded.sources)
+                        continue
+                    self.pending_requests = self.pending_requests + [self._build_request("style", resolved, "GET", "", "", "")]
+                    return Ok(true)
+            if not self.runtime_enabled:
+                if load.script_blocks.len() > 0:
+                    load.warnings = load.warnings + ["scripts are ignored when BrowserSession runtime is disabled"]
+                self._finalize_active_load(load)
+                self.active_load = nil
+                return Ok(true)
+        self._advance_script_loading()
+
     me _advance_script_loading() -> Result<bool, text>:
         if val Some(load) = self.active_load:
             while load.next_script_idx < load.script_blocks.len():
@@ -701,7 +792,15 @@ impl BrowserSession:
                 load.next_script_idx = load.next_script_idx + 1
                 load.warnings = _append_script_compat_warnings(load.warnings, block)
                 if block.kind == "inline":
-                    if val Some(state) = self.runtime_state:
+                    if block.script_type == "module":
+                        val result = self._execute_module_source(load.document_url, block.content, load)
+                        match result:
+                            Ok(done):
+                                if not done:
+                                    return Ok(true)
+                            Err(e):
+                                load.warnings = load.warnings + ["inline module error: {e}"]
+                    else if val Some(state) = self.runtime_state:
                         val eval_result = state.runtime.eval(block.content)
                         match eval_result:
                             Ok(_):
@@ -712,6 +811,15 @@ impl BrowserSession:
                     continue
                 if block.kind == "external":
                     val resolved = resolve_relative_url(load.document_url, block.src)
+                    if block.script_type == "module":
+                        val result = self._execute_external_module(resolved, load)
+                        match result:
+                            Ok(done):
+                                if not done:
+                                    return Ok(true)
+                            Err(e):
+                                load.warnings = load.warnings + ["module load error: {e}"]
+                        continue
                     if val Some(override_body) = pair_value(self.resource_overrides, resolved):
                         if val Some(state) = self.runtime_state:
                             val eval_result = state.runtime.eval(override_body)
@@ -729,6 +837,71 @@ impl BrowserSession:
             return Ok(true)
         Ok(true)
 
+    me _execute_external_module(module_url: text, load: BrowserLoadState) -> Result<bool, text>:
+        if self._module_is_loaded(module_url):
+            return Ok(true)
+        if val Some(source) = self._module_source_for_url(module_url):
+            return self._execute_module_source(module_url, source, load)
+        load.pending_module = Some(BrowserPendingModuleEval.create(module_url, ""))
+        self.pending_requests = self.pending_requests + [self._build_request("module", module_url, "GET", "", "", "")]
+        Ok(false)
+
+    me _execute_module_source(module_url: text, source: text, load: BrowserLoadState) -> Result<bool, text>:
+        if not self.runtime_enabled:
+            return Ok(true)
+        if self._module_is_loaded(module_url):
+            return Ok(true)
+        if text_in_list(self.module_eval_stack, module_url):
+            load.warnings = _append_unique_warning(load.warnings, "module cycle handling is limited for '{module_url}'")
+            return Ok(true)
+        val dependencies = extract_module_dependency_urls(module_url, source)
+        self.module_eval_stack = self.module_eval_stack + [module_url]
+        for dep_url in dependencies:
+            if self._module_is_loaded(dep_url):
+                continue
+            if val Some(dep_source) = self._module_source_for_url(dep_url):
+                val dep_result = self._execute_module_source(dep_url, dep_source, load)
+                match dep_result:
+                    Ok(done):
+                        if not done:
+                            self.module_eval_stack = remove_text_once(self.module_eval_stack, module_url)
+                            load.pending_module = Some(BrowserPendingModuleEval.create(module_url, source))
+                            return Ok(false)
+                    Err(e):
+                        self.module_eval_stack = remove_text_once(self.module_eval_stack, module_url)
+                        return Err(e)
+            else:
+                self.module_eval_stack = remove_text_once(self.module_eval_stack, module_url)
+                load.pending_module = Some(BrowserPendingModuleEval.create(module_url, source))
+                self.pending_requests = self.pending_requests + [self._build_request("module", dep_url, "GET", "", "", "")]
+                return Ok(false)
+        self.module_source_cache = upsert_pair(self.module_source_cache, module_url, source)
+        if val Some(state) = self.runtime_state:
+            val eval_result = state.runtime.eval(transform_module_source(module_url, source))
+            self.module_eval_stack = remove_text_once(self.module_eval_stack, module_url)
+            match eval_result:
+                Ok(_):
+                    self.loaded_module_urls = append_unique_text(self.loaded_module_urls, module_url)
+                    self._flush_runtime_side_effects()
+                    return Ok(true)
+                Err(e):
+                    return Err(e.message)
+        self.module_eval_stack = remove_text_once(self.module_eval_stack, module_url)
+        Ok(true)
+
+    fn _module_source_for_url(module_url: text) -> text?:
+        if val Some(cached) = pair_value(self.module_source_cache, module_url):
+            return Some(cached)
+        if val Some(override_body) = pair_value(self.resource_overrides, module_url):
+            return Some(override_body)
+        if module_url.starts_with("file://"):
+            val path = module_url.slice(7, module_url.len())
+            return Some(rt_file_read_text(path) ?? "")
+        nil
+
+    fn _module_is_loaded(module_url: text) -> bool:
+        text_in_list(self.loaded_module_urls, module_url)
+
     me _finalize_active_load(load: BrowserLoadState):
         if val Some(state) = self.runtime_state:
             self._sync_from_runtime(state)
@@ -737,11 +910,9 @@ impl BrowserSession:
             self.active_load = nil
             val _ = self.begin_network_navigation(redirected_url, "GET", "", "", "")
             return
+        self.current_style_html = load.current_style_html
         self._update_history(load.document_url, load.source_html, load.target_index, load.push_history)
-        var merged_warnings = load.warnings
-        if load.style_warning:
-            merged_warnings = merged_warnings + ["style tags are ignored by the software browser renderer"]
-        self.warnings = merged_warnings
+        self.warnings = load.warnings
 
     me _apply_response_headers(headers: text):
         for line in headers.split("\n"):
@@ -783,17 +954,12 @@ impl BrowserSession:
 
 fn _append_script_compat_warnings(warnings: [text], block: BrowserScriptBlock) -> [text]:
     var next = warnings
-    if block.script_type == "module":
-        next = _append_unique_warning(
-            next,
-            "module scripts execute in compatibility mode; import/export semantics are not implemented"
-        )
-    if block.is_async:
+    if block.is_async and block.script_type != "module":
         next = _append_unique_warning(
             next,
             "async script loading is not implemented; scripts execute in document order"
         )
-    if block.is_defer:
+    if block.is_defer and block.script_type != "module":
         next = _append_unique_warning(
             next,
             "defer script loading is not implemented; scripts execute in document order"
@@ -1261,12 +1427,15 @@ fn extract_body_inner_html(html: text) -> text:
         return html.slice(open_end + 1, html.len())
     html.slice(open_end + 1, body_close)
 
-fn strip_style_and_script_blocks(html: text) -> text:
-    val without_scripts = strip_tag_block(html, "script")
-    strip_tag_block(without_scripts, "style")
+class BrowserStylesheetExpansion:
+    html: text
+    sources: [BrowserStylesheetSource]
 
-fn contains_style_block(html: text) -> bool:
-    find_text(html, "<style", 0) >= 0
+    static fn create(html: text, sources: [BrowserStylesheetSource]) -> BrowserStylesheetExpansion:
+        BrowserStylesheetExpansion(html: html, sources: sources)
+
+fn strip_script_blocks(html: text) -> text:
+    strip_tag_block(html, "script")
 
 fn strip_tag_block(html: text, tag_name: text) -> text:
     var result = ""
@@ -1287,6 +1456,124 @@ fn strip_tag_block(html: text, tag_name: text) -> text:
             return result
         pos = end + close_tag.len()
     result
+
+fn extract_stylesheet_sources(html: text) -> [BrowserStylesheetSource]:
+    var sources: [BrowserStylesheetSource] = []
+    var style_pos = 0
+    while style_pos < html.len():
+        val start = find_text(html, "<style", style_pos)
+        if start < 0:
+            break
+        val tag_end = find_text(html, ">", start)
+        if tag_end < 0:
+            break
+        val close = find_text(html, "</style>", tag_end + 1)
+        if close < 0:
+            break
+        val content = html.slice(tag_end + 1, close).trim()
+        if content != "":
+            sources = sources + [BrowserStylesheetSource.inline(content)]
+        style_pos = close + 8
+    var link_pos = 0
+    while link_pos < html.len():
+        val start = find_text(html, "<link", link_pos)
+        if start < 0:
+            break
+        val tag_end = find_text(html, ">", start)
+        if tag_end < 0:
+            break
+        val tag_content = html.slice(start, tag_end + 1)
+        val rel_value = extract_attr_value(tag_content, "rel").to_lower()
+        val href_value = extract_attr_value(tag_content, "href")
+        if href_value != "" and rel_contains_stylesheet(rel_value):
+            sources = sources + [BrowserStylesheetSource.external(href_value)]
+        link_pos = tag_end + 1
+    sources
+
+fn rel_contains_stylesheet(rel_value: text) -> bool:
+    for part in rel_value.split(" "):
+        if part.trim() == "stylesheet":
+            return true
+    false
+
+fn expand_stylesheet_text(document_url: text, base_url: text, css_text: text) -> BrowserStylesheetExpansion:
+    val imports = extract_css_import_sources(base_url, css_text)
+    val cleaned = strip_css_imports(css_text).trim()
+    val html = if cleaned != "": "<style>{cleaned}</style>" else: ""
+    BrowserStylesheetExpansion.create(html, imports)
+
+fn extract_css_import_sources(base_url: text, css_text: text) -> [BrowserStylesheetSource]:
+    var sources: [BrowserStylesheetSource] = []
+    var pos = 0
+    while pos < css_text.len():
+        val at = find_text(css_text, "@import", pos)
+        if at < 0:
+            return sources
+        val semi = find_text(css_text, ";", at)
+        if semi < 0:
+            return sources
+        val stmt = css_text.slice(at, semi + 1)
+        val href = extract_css_import_href(stmt)
+        if href != "":
+            sources = sources + [BrowserStylesheetSource.external(resolve_relative_url(base_url, href))]
+        pos = semi + 1
+    sources
+
+fn strip_css_imports(css_text: text) -> text:
+    var out = ""
+    var pos = 0
+    while pos < css_text.len():
+        val at = find_text(css_text, "@import", pos)
+        if at < 0:
+            return out + css_text.slice(pos, css_text.len())
+        out = out + css_text.slice(pos, at)
+        val semi = find_text(css_text, ";", at)
+        if semi < 0:
+            return out
+        pos = semi + 1
+    out
+
+fn extract_css_import_href(stmt: text) -> text:
+    val url_idx = find_text(stmt.to_lower(), "url(", 0)
+    if url_idx >= 0:
+        val close = find_text(stmt, ")", url_idx + 4)
+        if close > url_idx:
+            return trim_css_import_url(stmt.slice(url_idx + 4, close))
+    val single = find_text(stmt, "'", 0)
+    if single >= 0:
+        val end = find_text(stmt, "'", single + 1)
+        if end > single:
+            return stmt.slice(single + 1, end)
+    val double = find_text(stmt, "\"", 0)
+    if double >= 0:
+        val end = find_text(stmt, "\"", double + 1)
+        if end > double:
+            return stmt.slice(double + 1, end)
+    ""
+
+fn trim_css_import_url(value: text) -> text:
+    var trimmed = value.trim()
+    if trimmed.starts_with("'") and trimmed.ends_with("'") and trimmed.len() >= 2:
+        trimmed = trimmed.slice(1, trimmed.len() - 1)
+    else if trimmed.starts_with("\"") and trimmed.ends_with("\"") and trimmed.len() >= 2:
+        trimmed = trimmed.slice(1, trimmed.len() - 1)
+    trimmed
+
+fn insert_stylesheet_sources(existing: [BrowserStylesheetSource], index: i32, additions: [BrowserStylesheetSource]) -> [BrowserStylesheetSource]:
+    if additions.len() == 0:
+        return existing
+    var out: [BrowserStylesheetSource] = []
+    var i = 0
+    while i < existing.len():
+        if i == index:
+            for addition in additions:
+                out = out + [addition]
+        out = out + [existing[i]]
+        i = i + 1
+    if index >= existing.len():
+        for addition in additions:
+            out = out + [addition]
+    out
 
 fn extract_script_blocks(html: text) -> [BrowserScriptBlock]:
     var blocks: [BrowserScriptBlock] = []
@@ -1314,6 +1601,434 @@ fn extract_script_blocks(html: text) -> [BrowserScriptBlock]:
             return blocks
         pos = close + 9
     blocks
+
+fn extract_module_dependency_urls(module_url: text, source: text) -> [text]:
+    var out: [text] = []
+    for stmt in split_module_statements(source):
+        val trimmed = stmt.trim()
+        if trimmed.starts_with("import "):
+            val dep = module_statement_source(trimmed)
+            if dep != "":
+                out = append_unique_text(out, resolve_relative_url(module_url, dep))
+        else if trimmed.starts_with("export "):
+            val dep = module_statement_source(trimmed)
+            if dep != "":
+                out = append_unique_text(out, resolve_relative_url(module_url, dep))
+    out
+
+fn transform_module_source(module_url: text, source: text) -> text:
+    val module_ref = "__simple_modules[\"{escape_js_string(module_url)}\"]"
+    var body = "var __simple_module = {module_ref} || ( {module_ref} = {} );\n"
+    for stmt in split_module_statements(source):
+        val trimmed = stmt.trim()
+        if trimmed == "":
+            continue
+        if trimmed.starts_with("import "):
+            body = body + transform_import_statement(module_url, trimmed)
+            continue
+        if trimmed.starts_with("export "):
+            body = body + transform_export_statement(module_url, trimmed)
+            continue
+        body = body + stmt + "\n"
+    "(function() {\n{body}})();"
+
+fn transform_import_statement(module_url: text, stmt: text) -> text:
+    val source = module_statement_source(stmt)
+    if source == "":
+        return ""
+    val resolved = resolve_relative_url(module_url, source)
+    val clause = module_import_clause(stmt)
+    if clause == "":
+        return ""
+    var out = ""
+    for binding in split_import_bindings(clause):
+        val trimmed = binding.trim()
+        if trimmed == "":
+            continue
+        if trimmed.starts_with("* as "):
+            val local = trimmed.slice(5, trimmed.len()).trim()
+            out = out + "const {local} = __simple_modules[\"{escape_js_string(resolved)}\"];\n"
+        else if trimmed.starts_with("{") and trimmed.ends_with("}"):
+            val inner = trimmed.slice(1, trimmed.len() - 1)
+            for named in inner.split(","):
+                val named_trimmed = named.trim()
+                if named_trimmed == "":
+                    continue
+                val alias_idx = find_text(named_trimmed, " as ", 0)
+                if alias_idx >= 0:
+                    val imported = named_trimmed.slice(0, alias_idx).trim()
+                    val local = named_trimmed.slice(alias_idx + 4, named_trimmed.len()).trim()
+                    out = out + "const {local} = __simple_modules[\"{escape_js_string(resolved)}\"][\"{escape_js_string(imported)}\"];\n"
+                else:
+                    out = out + "const {named_trimmed} = __simple_modules[\"{escape_js_string(resolved)}\"][\"{escape_js_string(named_trimmed)}\"];\n"
+        else:
+            out = out + "const {trimmed} = __simple_modules[\"{escape_js_string(resolved)}\"][\"default\"];\n"
+    out
+
+fn transform_export_statement(module_url: text, stmt: text) -> text:
+    val trimmed = strip_trailing_semicolon(stmt.trim())
+    if trimmed.starts_with("export default function "):
+        val decl = trimmed.slice(15, trimmed.len()).trim()
+        val name = declared_function_name(decl)
+        if name == "":
+            return "__simple_module[\"default\"] = " + decl + ";\n"
+        return decl + "\n__simple_module[\"default\"] = " + name + ";\n"
+    if trimmed.starts_with("export default class "):
+        val decl = trimmed.slice(15, trimmed.len()).trim()
+        val name = declared_class_name(decl)
+        if name == "":
+            return "__simple_module[\"default\"] = " + decl + ";\n"
+        return decl + "\n__simple_module[\"default\"] = " + name + ";\n"
+    if trimmed.starts_with("export default "):
+        val expr = trimmed.slice(15, trimmed.len()).trim()
+        return "__simple_module[\"default\"] = {expr};\n"
+    if trimmed.starts_with("export function "):
+        val decl = trimmed.slice(7, trimmed.len()).trim()
+        val name = declared_function_name(decl)
+        if name == "":
+            return decl + "\n"
+        return decl + "\n__simple_module[\"{name}\"] = {name};\n"
+    if trimmed.starts_with("export class "):
+        val decl = trimmed.slice(7, trimmed.len()).trim()
+        val name = declared_class_name(decl)
+        if name == "":
+            return decl + "\n"
+        return decl + "\n__simple_module[\"{name}\"] = {name};\n"
+    if trimmed.starts_with("export const ") or trimmed.starts_with("export let ") or trimmed.starts_with("export var "):
+        val decl = trimmed.slice(7, trimmed.len()).trim()
+        var out = decl + ";\n"
+        for declarator in split_export_binding_declarators(decl):
+            val name = declared_binding_name(declarator)
+            if name != "":
+                out = out + "__simple_module[\"{name}\"] = {name};\n"
+        return out
+    if trimmed.starts_with("export {") and trimmed.contains(" from "):
+        val source = module_statement_source(trimmed)
+        val resolved = resolve_relative_url(module_url, source)
+        val open = find_text(trimmed, "{", 0)
+        val close = find_text(trimmed, "}", open + 1)
+        if open < 0 or close < 0:
+            return ""
+        val inner = trimmed.slice(open + 1, close)
+        var out = ""
+        for named in inner.split(","):
+            val named_trimmed = named.trim()
+            if named_trimmed == "":
+                continue
+            val alias_idx = find_text(named_trimmed, " as ", 0)
+            if alias_idx >= 0:
+                val local = named_trimmed.slice(0, alias_idx).trim()
+                val exported = named_trimmed.slice(alias_idx + 4, named_trimmed.len()).trim()
+                out = out + "__simple_module[\"{exported}\"] = __simple_modules[\"{escape_js_string(resolved)}\"][\"{escape_js_string(local)}\"];\n"
+            else:
+                out = out + "__simple_module[\"{named_trimmed}\"] = __simple_modules[\"{escape_js_string(resolved)}\"][\"{escape_js_string(named_trimmed)}\"];\n"
+        return out
+    if trimmed.starts_with("export * as ") and trimmed.contains(" from "):
+        val source = module_statement_source(trimmed)
+        val resolved = resolve_relative_url(module_url, source)
+        val from_idx = find_text(trimmed, " from ", 0)
+        if from_idx < 0:
+            return ""
+        val exported = trimmed.slice(12, from_idx).trim()
+        if exported == "":
+            return ""
+        return "__simple_module[\"{exported}\"] = __simple_modules[\"{escape_js_string(resolved)}\"];\n"
+    if trimmed.starts_with("export * from "):
+        val source = module_statement_source(trimmed)
+        val resolved = resolve_relative_url(module_url, source)
+        return join_text([
+            "for (var __simple_export_key in __simple_modules[\"{escape_js_string(resolved)}\"]) {\n",
+            "  if (__simple_export_key !== 'default' && __simple_module[__simple_export_key] === undefined) {\n",
+            "    __simple_module[__simple_export_key] = __simple_modules[\"{escape_js_string(resolved)}\"][__simple_export_key];\n",
+            "  }\n",
+            "}\n"
+        ], "")
+    if trimmed.starts_with("export {"):
+        val open = find_text(trimmed, "{", 0)
+        val close = find_text(trimmed, "}", open + 1)
+        if open < 0 or close < 0:
+            return ""
+        val inner = trimmed.slice(open + 1, close)
+        var out = ""
+        for named in inner.split(","):
+            val named_trimmed = named.trim()
+            if named_trimmed == "":
+                continue
+            val alias_idx = find_text(named_trimmed, " as ", 0)
+            if alias_idx >= 0:
+                val local = named_trimmed.slice(0, alias_idx).trim()
+                val exported = named_trimmed.slice(alias_idx + 4, named_trimmed.len()).trim()
+                out = out + "__simple_module[\"{exported}\"] = {local};\n"
+            else:
+                out = out + "__simple_module[\"{named_trimmed}\"] = {named_trimmed};\n"
+        return out
+    trimmed + "\n"
+
+fn split_module_statements(source: text) -> [text]:
+    var items: [text] = []
+    var pos = 0
+    while pos < source.len():
+        while pos < source.len() and is_js_space(source.slice(pos, pos + 1)):
+            pos = pos + 1
+        if pos >= source.len():
+            break
+        val start = pos
+        val needs_block_scan =
+            starts_with_word(source, pos, "export default function") or
+            starts_with_word(source, pos, "export function") or
+            starts_with_word(source, pos, "export default class") or
+            starts_with_word(source, pos, "export class")
+        if needs_block_scan:
+            pos = scan_js_block_statement_end(source, pos)
+        else:
+            pos = scan_js_statement_end(source, pos)
+        items = items + [source.slice(start, pos)]
+    items
+
+fn scan_js_statement_end(source: text, start: i32) -> i32:
+    var i = start
+    var brace = 0
+    var paren = 0
+    var bracket = 0
+    var quote = ""
+    while i < source.len():
+        val ch = source.slice(i, i + 1)
+        if quote != "":
+            if ch == "\\":
+                i = i + 2
+                continue
+            if ch == quote:
+                quote = ""
+            i = i + 1
+            continue
+        if ch == "\"" or ch == "'" or ch == "`":
+            quote = ch
+            i = i + 1
+            continue
+        if ch == "{":
+            brace = brace + 1
+        else if ch == "}":
+            if brace > 0:
+                brace = brace - 1
+        else if ch == "(":
+            paren = paren + 1
+        else if ch == ")":
+            if paren > 0:
+                paren = paren - 1
+        else if ch == "[":
+            bracket = bracket + 1
+        else if ch == "]":
+            if bracket > 0:
+                bracket = bracket - 1
+        else if ch == ";" and brace == 0 and paren == 0 and bracket == 0:
+            return i + 1
+        i = i + 1
+    source.len()
+
+fn scan_js_block_statement_end(source: text, start: i32) -> i32:
+    val open = find_text(source, "{", start)
+    if open < 0:
+        return scan_js_statement_end(source, start)
+    var i = open
+    var brace = 0
+    var quote = ""
+    while i < source.len():
+        val ch = source.slice(i, i + 1)
+        if quote != "":
+            if ch == "\\":
+                i = i + 2
+                continue
+            if ch == quote:
+                quote = ""
+            i = i + 1
+            continue
+        if ch == "\"" or ch == "'" or ch == "`":
+            quote = ch
+            i = i + 1
+            continue
+        if ch == "{":
+            brace = brace + 1
+        else if ch == "}":
+            brace = brace - 1
+            if brace == 0:
+                i = i + 1
+                while i < source.len() and is_js_space(source.slice(i, i + 1)):
+                    i = i + 1
+                if i < source.len() and source.slice(i, i + 1) == ";":
+                    i = i + 1
+                return i
+        i = i + 1
+    source.len()
+
+fn module_statement_source(stmt: text) -> text:
+    val single_quote = find_text(stmt, "'", 0)
+    if single_quote >= 0:
+        val end = find_text(stmt, "'", single_quote + 1)
+        if end > single_quote:
+            return stmt.slice(single_quote + 1, end)
+    val double_quote = find_text(stmt, "\"", 0)
+    if double_quote >= 0:
+        val end = find_text(stmt, "\"", double_quote + 1)
+        if end > double_quote:
+            return stmt.slice(double_quote + 1, end)
+    ""
+
+fn module_import_clause(stmt: text) -> text:
+    val source = module_statement_source(stmt)
+    if source == "":
+        return ""
+    val import_start = find_text(stmt, "import", 0)
+    if import_start < 0:
+        return ""
+    val from_idx = find_text(stmt, " from ", import_start)
+    if from_idx < 0:
+        return ""
+    stmt.slice(import_start + 6, from_idx).trim()
+
+fn split_import_bindings(clause: text) -> [text]:
+    var items: [text] = []
+    val trimmed = clause.trim()
+    if trimmed == "":
+        return items
+    if trimmed.contains(","):
+        var depth = 0
+        var start = 0
+        var i = 0
+        while i < trimmed.len():
+            val ch = trimmed.slice(i, i + 1)
+            if ch == "{":
+                depth = depth + 1
+            else if ch == "}":
+                depth = depth - 1
+            else if ch == "," and depth == 0:
+                items = items + [trimmed.slice(start, i)]
+                start = i + 1
+            i = i + 1
+        items = items + [trimmed.slice(start, trimmed.len())]
+        return items
+    items + [trimmed]
+
+fn split_export_binding_declarators(decl: text) -> [text]:
+    var items: [text] = []
+    val trimmed = decl.trim()
+    if trimmed == "":
+        return items
+    var brace = 0
+    var paren = 0
+    var bracket = 0
+    var quote = ""
+    var start = 0
+    var i = 0
+    while i < trimmed.len():
+        val ch = trimmed.slice(i, i + 1)
+        if quote != "":
+            if ch == "\\":
+                i = i + 2
+                continue
+            if ch == quote:
+                quote = ""
+        else if ch == "\"" or ch == "'" or ch == "`":
+            quote = ch
+        else if ch == "{":
+            brace = brace + 1
+        else if ch == "}":
+            if brace > 0:
+                brace = brace - 1
+        else if ch == "(":
+            paren = paren + 1
+        else if ch == ")":
+            if paren > 0:
+                paren = paren - 1
+        else if ch == "[":
+            bracket = bracket + 1
+        else if ch == "]":
+            if bracket > 0:
+                bracket = bracket - 1
+        else if ch == "," and brace == 0 and paren == 0 and bracket == 0:
+            items = items + [trimmed.slice(start, i)]
+            start = i + 1
+        i = i + 1
+    items + [trimmed.slice(start, trimmed.len())]
+
+fn declared_function_name(stmt: text) -> text:
+    val open = find_text(stmt, "(", 0)
+    if open < 0:
+        return ""
+    val before = stmt.slice(0, open).trim()
+    val parts = before.split(" ")
+    if parts.len() == 0:
+        return ""
+    parts[parts.len() - 1].trim()
+
+fn declared_class_name(stmt: text) -> text:
+    val brace = find_text(stmt, "{", 0)
+    val before = if brace >= 0: stmt.slice(0, brace) else: stmt
+    val words = before.trim().split(" ")
+    if words.len() == 0:
+        return ""
+    var i = words.len() - 1
+    while i >= 0:
+        val word = words[i].trim()
+        if word != "" and word != "extends":
+            return word
+        i = i - 1
+    ""
+
+fn declared_binding_name(stmt: text) -> text:
+    val eq = find_text(stmt, "=", 0)
+    val before = if eq >= 0: stmt.slice(0, eq) else: stmt
+    val words = before.trim().split(" ")
+    if words.len() == 0:
+        return ""
+    words[words.len() - 1].trim()
+
+fn strip_trailing_semicolon(text_value: text) -> text:
+    if text_value.ends_with(";"):
+        return text_value.slice(0, text_value.len() - 1)
+    text_value
+
+fn starts_with_word(source: text, pos: i32, word: text) -> bool:
+    if pos + word.len() > source.len():
+        return false
+    source.slice(pos, pos + word.len()) == word
+
+fn is_js_space(ch: text) -> bool:
+    ch == " " or ch == "\n" or ch == "\t" or ch == "\r"
+
+fn append_unique_text(items: [text], value: text) -> [text]:
+    if text_in_list(items, value):
+        return items
+    items + [value]
+
+fn remove_text_once(items: [text], value: text) -> [text]:
+    var out: [text] = []
+    var removed = false
+    for item in items:
+        if not removed and item == value:
+            removed = true
+        else:
+            out = out + [item]
+    out
+
+fn text_in_list(items: [text], value: text) -> bool:
+    for item in items:
+        if item == value:
+            return true
+    false
+
+fn escape_js_string(value: text) -> text:
+    var out = ""
+    var i = 0
+    while i < value.len():
+        val ch = value.slice(i, i + 1)
+        if ch == "\\":
+            out = out + "\\\\"
+        else if ch == "\"":
+            out = out + "\\\""
+        else:
+            out = out + ch
+        i = i + 1
+    out
 
 fn extract_attr_value(tag_content: text, attr_name: text) -> text:
     val lower = tag_content.to_lower()

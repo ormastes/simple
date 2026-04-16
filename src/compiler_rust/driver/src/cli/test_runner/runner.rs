@@ -664,7 +664,7 @@ fn execute_test_files(
         if use_cache && !list_mode {
             if let Some(cached) = result_cache.check(path) {
                 // Only use cache if the test passed last time (re-run failures)
-                {
+                if cached.failed == 0 {
                     let result = TestFileResult {
                         path: path.to_path_buf(),
                         passed: cached.passed,

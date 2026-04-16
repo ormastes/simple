@@ -21,11 +21,13 @@ use std.nogc_sync_mut.ffi.io.{dir_create_all}
 use examples.simple_os.assets.browser_guest_session.{
     browser_guest_boot_url,
     browser_guest_expected_title,
-    browser_guest_final_url}
+    browser_guest_final_url,
+    browser_guest_live_probe_url,
+    browser_guest_live_transport_error}
 
 use test.qemu.os.common.qemu_os_harness.{
     QemuGuestHandle, can_run_target, file_exists, spawn_guest_with_qmp,
-    stop_guest, wait_for_serial_marker}
+    stop_guest, wait_for_serial_marker, read_serial_log}
 
 # ===========================================================================
 # Helpers
@@ -73,8 +75,8 @@ describe "Browser webrendering in QEMU Simple OS guest":
             expect(true).to_equal(true)
             return
 
-        val qmp_socket = "/tmp/simpleos_browser_qmp.sock"
-        val serial_log = "build/os/browser_qemu_serial.log"
+        val qmp_socket = "/tmp/simpleos_browser_spec_qmp.sock"
+        val serial_log = "build/os/browser_qemu_spec_serial.log"
         dir_create_all("build/os")
 
         # Self-spawn QEMU with a QMP server socket and stdout/stderr
@@ -85,11 +87,23 @@ describe "Browser webrendering in QEMU Simple OS guest":
             Ok(handle):
                 expect(wait_for_serial_marker(
                     handle,
-                    "[BE] Session request #1: document GET {browser_guest_boot_url()}",
+                    "[BE] Probing live browser transport...",
                     30000)).to_equal(true)
                 expect(wait_for_serial_marker(
                     handle,
-                    "[BE] Session request #2: document GET {browser_guest_final_url()}",
+                    "[BE] Live transport unavailable: {browser_guest_live_transport_error()}: {browser_guest_live_probe_url()}",
+                    30000)).to_equal(true)
+                expect(wait_for_serial_marker(
+                    handle,
+                    "[BE] Session request document-1: document GET {browser_guest_boot_url()}",
+                    30000)).to_equal(true)
+                expect(wait_for_serial_marker(
+                    handle,
+                    "[BE] Session request document-2: document GET {browser_guest_final_url()}",
+                    30000)).to_equal(true)
+                expect(wait_for_serial_marker(
+                    handle,
+                    "[BE] Session request style-",
                     30000)).to_equal(true)
                 expect(wait_for_serial_marker(
                     handle,
@@ -105,6 +119,8 @@ describe "Browser webrendering in QEMU Simple OS guest":
                     30000)
                 if not saw_painted:
                     print "[browser_in_qemu_spec] browser paint marker not seen within 30s"
+                    print "[browser_in_qemu_spec] serial log follows:"
+                    print read_serial_log(handle)
                     stop_guest(handle)
                     expect(false).to_equal(true)
                     return

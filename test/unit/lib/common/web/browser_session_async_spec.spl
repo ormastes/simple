@@ -155,6 +155,37 @@ describe "BrowserSession async fetch":
             nil:
                 expect(false).to_equal(true)
 
+    it "exposes response.statusText for resolved fetch responses":
+        var session = BrowserSession.new()
+        session.open_html(
+            "https://example.com/app",
+            "<html><body><script>var meta = 'start'; window.fetch('/missing.txt').then(function(r) { meta = r.status + ':' + r.statusText + ':' + r.ok; document.body.textContent = meta; });</script></body></html>"
+        )
+
+        match session.take_pending_request():
+            Some(request) =>
+                val commit_result = session.commit_network_response(BrowserResponse.create(
+                    request_id: request.id,
+                    kind: "fetch",
+                    url: request.url,
+                    status: 404,
+                    headers: "",
+                    body: "missing",
+                    error: ""
+                ))
+                match commit_result:
+                    Ok(_) =>
+                        val result = session.eval_script("meta + ':' + document.body.textContent")
+                        match result:
+                            Ok(value) =>
+                                expect(_display_js(value)).to_equal("404:Not Found:false:404:Not Found:false")
+                            Err(e) =>
+                                expect(false).to_equal(true)
+                    Err(e) =>
+                        expect(false).to_equal(true)
+            nil:
+                expect(false).to_equal(true)
+
     it "returns a promise from response.text and unwraps it through then chaining":
         var session = BrowserSession.new()
         session.open_html(
@@ -186,6 +217,68 @@ describe "BrowserSession async fetch":
             nil:
                 expect(false).to_equal(true)
 
+    it "marks response.bodyUsed after text consumption":
+        var session = BrowserSession.new()
+        session.open_html(
+            "https://example.com/app",
+            "<html><body><script>var meta = 'start'; window.fetch('/data.txt').then(function(r) { var before = r.bodyUsed; var text = r.text(); meta = before + ':' + r.bodyUsed + ':' + text; document.body.textContent = meta; });</script></body></html>"
+        )
+
+        match session.take_pending_request():
+            Some(request) =>
+                val commit_result = session.commit_network_response(BrowserResponse.create(
+                    request_id: request.id,
+                    kind: "fetch",
+                    url: request.url,
+                    status: 200,
+                    headers: "",
+                    body: "alpha",
+                    error: ""
+                ))
+                match commit_result:
+                    Ok(_) =>
+                        val result = session.eval_script("meta + ':' + document.body.textContent")
+                        match result:
+                            Ok(value) =>
+                                expect(_display_js(value)).to_equal("false:true:alpha:false:true:alpha")
+                            Err(e) =>
+                                expect(false).to_equal(true)
+                    Err(e) =>
+                        expect(false).to_equal(true)
+            nil:
+                expect(false).to_equal(true)
+
+    it "returns a promise from response.json for simple JSON bodies":
+        var session = BrowserSession.new()
+        session.open_html(
+            "https://example.com/app",
+            "<html><body><script>var meta = 'start'; window.fetch('/data.json').then(function(r) { meta = typeof r.json; return r.json(); }).then(function(v) { document.body.textContent = meta + ':' + v; });</script></body></html>"
+        )
+
+        match session.take_pending_request():
+            Some(request) =>
+                val commit_result = session.commit_network_response(BrowserResponse.create(
+                    request_id: request.id,
+                    kind: "fetch",
+                    url: request.url,
+                    status: 200,
+                    headers: "Content-Type: application/json\n",
+                    body: "42",
+                    error: ""
+                ))
+                match commit_result:
+                    Ok(_) =>
+                        val result = session.eval_script("document.body.textContent")
+                        match result:
+                            Ok(value) =>
+                                expect(_display_js(value)).to_equal("function:42")
+                            Err(e) =>
+                                expect(false).to_equal(true)
+                    Err(e) =>
+                        expect(false).to_equal(true)
+            nil:
+                expect(false).to_equal(true)
+
     it "serializes plain object fetch headers into the pending request":
         var session = BrowserSession.new()
         session.open_html(
@@ -200,6 +293,104 @@ describe "BrowserSession async fetch":
                 expect(request.body).to_equal("alpha")
                 expect(request.headers).to_contain("X-Test: 1")
                 expect(request.headers).to_contain("Accept: text/plain")
+            nil:
+                expect(false).to_equal(true)
+
+    it "ignores caller cookie headers and keeps the session cookie on fetch requests":
+        var session = BrowserSession.new()
+        session.open_html(
+            "https://example.com/app",
+            "<html><body><script>document.cookie = 'sid=abc123; Path=/'; window.fetch('/data.txt', { headers: { 'Cookie': 'manual=1', 'X-Test': '1' } });</script></body></html>"
+        )
+
+        match session.take_pending_request():
+            Some(request) =>
+                expect(request.kind).to_equal("fetch")
+                expect(request.headers).to_contain("X-Test: 1")
+                expect(request.headers).to_contain("Cookie: sid=abc123")
+                expect(request.headers.contains("manual=1")).to_equal(false)
+                expect(request.headers.split("\n").len()).to_equal(2)
+            nil:
+                expect(false).to_equal(true)
+
+    it "uses cookies set by one fetch response on the next fetch from the same page":
+        var session = BrowserSession.new()
+        session.open_html(
+            "https://example.com/app",
+            "<html><body><script>var first = ''; var second = ''; window.fetch('/first.txt').then(function(r) { return r.text(); }).then(function(t) { first = document.cookie; return window.fetch('/second.txt'); }).then(function(r) { return r.text(); }).then(function(t) { second = document.cookie; document.body.textContent = first + ':' + second + ':' + t; });</script></body></html>"
+        )
+
+        match session.take_pending_request():
+            Some(first_request) =>
+                expect(first_request.headers.contains("Cookie:")).to_equal(false)
+                val first_result = session.commit_network_response(BrowserResponse.create(
+                    request_id: first_request.id,
+                    kind: "fetch",
+                    url: first_request.url,
+                    status: 200,
+                    headers: "Set-Cookie: token=abc; Path=/\n",
+                    body: "one",
+                    error: ""
+                ))
+                match first_result:
+                    Ok(_) =>
+                        match session.take_pending_request():
+                            Some(second_request) =>
+                                expect(second_request.headers).to_contain("Cookie: token=abc")
+                                val second_result = session.commit_network_response(BrowserResponse.create(
+                                    request_id: second_request.id,
+                                    kind: "fetch",
+                                    url: second_request.url,
+                                    status: 200,
+                                    headers: "",
+                                    body: "two",
+                                    error: ""
+                                ))
+                                match second_result:
+                                    Ok(_) =>
+                                        val result = session.eval_script("document.body.textContent")
+                                        match result:
+                                            Ok(value) =>
+                                                expect(_display_js(value)).to_equal("token=abc:token=abc:two")
+                                            Err(e) =>
+                                                expect(false).to_equal(true)
+                                    Err(e) =>
+                                        expect(false).to_equal(true)
+                            nil:
+                                expect(false).to_equal(true)
+                    Err(e) =>
+                        expect(false).to_equal(true)
+            nil:
+                expect(false).to_equal(true)
+
+    it "applies Set-Cookie from fetch responses without exposing it in response headersText":
+        var session = BrowserSession.new()
+        session.open_html(
+            "https://example.com/app",
+            "<html><body><script>var meta = 'start'; window.fetch('/data.txt').then(function(r) { meta = r.headersText + ':' + document.cookie; document.body.textContent = meta; });</script></body></html>"
+        )
+
+        match session.take_pending_request():
+            Some(request) =>
+                val commit_result = session.commit_network_response(BrowserResponse.create(
+                    request_id: request.id,
+                    kind: "fetch",
+                    url: request.url,
+                    status: 200,
+                    headers: "Set-Cookie: token=abc; Path=/\nX-Test: ok\n",
+                    body: "alpha",
+                    error: ""
+                ))
+                match commit_result:
+                    Ok(_) =>
+                        val result = session.eval_script("meta + ':' + document.body.textContent")
+                        match result:
+                            Ok(value) =>
+                                expect(_display_js(value)).to_equal("X-Test: ok\\n:token=abc:X-Test: ok\\n:token=abc")
+                            Err(e) =>
+                                expect(false).to_equal(true)
+                    Err(e) =>
+                        expect(false).to_equal(true)
             nil:
                 expect(false).to_equal(true)
 
