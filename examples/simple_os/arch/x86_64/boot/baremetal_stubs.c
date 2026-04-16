@@ -121,6 +121,11 @@ static void serial_puts(const char *s)
     }
 }
 
+extern int64_t simple_log_c_init(int64_t level, int64_t targets) __attribute__((weak));
+extern int64_t simple_log_c_is_ready(void) __attribute__((weak));
+extern int64_t simple_log_c_enabled(int64_t level) __attribute__((weak));
+extern int64_t simple_log_c_write(int64_t level, int64_t msg_ptr, int64_t msg_len) __attribute__((weak));
+
 static void serial_put_hex(uint64_t v)
 {
     static const char hex[] = "0123456789abcdef";
@@ -157,6 +162,44 @@ static void serial_put_dec(int64_t v)
     while (pos > 0) {
         serial_putchar(buf[--pos]);
     }
+}
+
+static int64_t _simpleos_log_level = 2;
+static int64_t _simpleos_log_targets = 0;
+
+static int _simple_log_facade_ready(void)
+{
+    return simple_log_c_is_ready && simple_log_c_is_ready() != 0;
+}
+
+static int64_t _cstr_len(const char *s)
+{
+    int64_t len = 0;
+    if (!s) return 0;
+    while (s[len]) len++;
+    return len;
+}
+
+static void _simpleos_log_raw_emit(const char *ptr, int64_t len)
+{
+    if (!ptr || len <= 0) return;
+    for (int64_t i = 0; i < len; i++) serial_putchar(ptr[i]);
+    serial_puts("\r\n");
+}
+
+static int8_t _simpleos_log_write_bytes(int64_t level, const char *ptr, int64_t len)
+{
+    if (!ptr || len <= 0) return 0;
+    if ((_simpleos_log_targets & 1) == 0) return 0;
+    if (_simple_log_facade_ready() && simple_log_c_write)
+        return simple_log_c_write(level, (int64_t)(intptr_t)ptr, len) ? 1 : 0;
+    _simpleos_log_raw_emit(ptr, len);
+    return 1;
+}
+
+static int8_t _simpleos_log_write_cstr(int64_t level, const char *msg)
+{
+    return _simpleos_log_write_bytes(level, msg, _cstr_len(msg));
 }
 
 /* ===================================================================
@@ -1112,9 +1155,7 @@ static int nvme_admin_cmd(uint8_t opcode, uint32_t nsid,
             nvme_ring_cq_doorbell(0, _nvme.admin_cq_head);
             _nvme.admin_cid++;
             if (sc != 0) {
-                serial_puts("[nvme-c] admin cmd failed, status=0x");
-                serial_put_hex(sc);
-                serial_puts("\r\n");
+                _simpleos_log_write_cstr(4, "[nvme-c] admin cmd failed");
                 return -5; /* EIO */
             }
             return 0;
@@ -1122,7 +1163,7 @@ static int nvme_admin_cmd(uint8_t opcode, uint32_t nsid,
         /* Tiny delay to avoid hammering the bus */
         __asm__ volatile("pause" ::: "memory");
     }
-    serial_puts("[nvme-c] admin cmd timeout\r\n");
+    _simpleos_log_write_cstr(4, "[nvme-c] admin cmd timeout");
     return -110; /* ETIMEDOUT */
 }
 
@@ -1161,16 +1202,14 @@ static int nvme_io_cmd(uint8_t opcode, uint32_t nsid,
             nvme_ring_cq_doorbell(1, _nvme.io_cq_head);
             _nvme.io_cid++;
             if (sc != 0) {
-                serial_puts("[nvme-c] I/O cmd failed, status=0x");
-                serial_put_hex(sc);
-                serial_puts("\r\n");
+                _simpleos_log_write_cstr(4, "[nvme-c] I/O cmd failed");
                 return -5; /* EIO */
             }
             return 0;
         }
         __asm__ volatile("pause" ::: "memory");
     }
-    serial_puts("[nvme-c] I/O cmd timeout\r\n");
+    _simpleos_log_write_cstr(4, "[nvme-c] I/O cmd timeout");
     return -110;
 }
 
@@ -1193,7 +1232,7 @@ static int _nvme_init_controller(void)
         }
     }
     if (nvme_idx < 0) {
-        serial_puts("[nvme-c] No NVMe device found on PCI bus\r\n");
+        _simpleos_log_write_cstr(3, "[nvme-c] No NVMe device found on PCI bus");
         return -19; /* ENODEV */
     }
 
@@ -1251,15 +1290,15 @@ static int _nvme_init_controller(void)
         uint32_t csts = nvme_rd32(_nvme.bar0 + NVME_REG_CSTS);
         if (!(csts & NVME_CSTS_RDY)) goto disabled;
         if (csts & NVME_CSTS_CFS) {
-            serial_puts("[nvme-c] Controller fatal status during disable\r\n");
+            _simpleos_log_write_cstr(4, "[nvme-c] Controller fatal status during disable");
             return -5;
         }
         __asm__ volatile("pause" ::: "memory");
     }
-    serial_puts("[nvme-c] Timeout waiting for controller disable\r\n");
+    _simpleos_log_write_cstr(4, "[nvme-c] Timeout waiting for controller disable");
     return -110;
 disabled:
-    serial_puts("[nvme-c] Controller disabled\r\n");
+    _simpleos_log_write_cstr(2, "[nvme-c] Controller disabled");
 
     /* Step 4: Allocate admin queues (4KB-aligned for NVMe compliance) */
     size_t admin_sq_bytes = NVME_ADMIN_DEPTH * NVME_SQE_SIZE; /* 2048 */
@@ -1268,7 +1307,7 @@ disabled:
     _nvme.admin_sq = (struct nvme_sqe *)nvme_alloc_aligned(admin_sq_bytes, 4096);
     _nvme.admin_cq = (struct nvme_cqe *)nvme_alloc_aligned(admin_cq_bytes, 4096);
     if (!_nvme.admin_sq || !_nvme.admin_cq) {
-        serial_puts("[nvme-c] Failed to allocate admin queues\r\n");
+        _simpleos_log_write_cstr(4, "[nvme-c] Failed to allocate admin queues");
         return -12; /* ENOMEM */
     }
     __builtin_memset(_nvme.admin_sq, 0, admin_sq_bytes);
@@ -1301,15 +1340,15 @@ disabled:
         uint32_t csts = nvme_rd32(_nvme.bar0 + NVME_REG_CSTS);
         if (csts & NVME_CSTS_RDY) goto enabled;
         if (csts & NVME_CSTS_CFS) {
-            serial_puts("[nvme-c] Controller fatal status during enable\r\n");
+            _simpleos_log_write_cstr(4, "[nvme-c] Controller fatal status during enable");
             return -5;
         }
         __asm__ volatile("pause" ::: "memory");
     }
-    serial_puts("[nvme-c] Timeout waiting for CSTS.RDY\r\n");
+    _simpleos_log_write_cstr(4, "[nvme-c] Timeout waiting for CSTS.RDY");
     return -110;
 enabled:
-    serial_puts("[nvme-c] Controller enabled (CSTS.RDY=1)\r\n");
+    _simpleos_log_write_cstr(2, "[nvme-c] Controller enabled (CSTS.RDY=1)");
 
     /* Step 8: Identify Controller (admin opcode 0x06, CNS=1) */
     {
@@ -1320,10 +1359,10 @@ enabled:
                                 (uint64_t)(uintptr_t)id_buf, 0,
                                 1 /* CNS=1: controller */, 0, 0);
         if (rc < 0) {
-            serial_puts("[nvme-c] Identify Controller failed\r\n");
+            _simpleos_log_write_cstr(3, "[nvme-c] Identify Controller failed");
             /* Non-fatal: continue anyway */
         } else {
-            serial_puts("[nvme-c] Identify Controller OK\r\n");
+            _simpleos_log_write_cstr(2, "[nvme-c] Identify Controller OK");
         }
     }
 
@@ -1336,7 +1375,7 @@ enabled:
                                 (uint64_t)(uintptr_t)ns_buf, 0,
                                 0 /* CNS=0: namespace */, 0, 0);
         if (rc < 0) {
-            serial_puts("[nvme-c] Identify Namespace failed\r\n");
+            _simpleos_log_write_cstr(3, "[nvme-c] Identify Namespace failed");
             _nvme.sector_size = 512;
             _nvme.sector_count = 0;
         } else {
@@ -1371,7 +1410,7 @@ enabled:
                                 (0u << 16) | 0u /* 1 SQ, 1 CQ (0-based) */,
                                 0);
         if (rc < 0)
-            serial_puts("[nvme-c] Set Number of Queues failed (non-fatal)\r\n");
+            _simpleos_log_write_cstr(3, "[nvme-c] Set Number of Queues failed (non-fatal)");
     }
 
     /* Step 11: Create I/O Completion Queue (QID 1) */
@@ -1393,7 +1432,7 @@ enabled:
                                 (uint64_t)(uintptr_t)_nvme.io_cq, 0,
                                 cdw10, cdw11, 0);
         if (rc < 0) {
-            serial_puts("[nvme-c] Create I/O CQ failed\r\n");
+            _simpleos_log_write_cstr(4, "[nvme-c] Create I/O CQ failed");
             return rc;
         }
     }
@@ -1415,12 +1454,12 @@ enabled:
                                 (uint64_t)(uintptr_t)_nvme.io_sq, 0,
                                 cdw10, cdw11, 0);
         if (rc < 0) {
-            serial_puts("[nvme-c] Create I/O SQ failed\r\n");
+            _simpleos_log_write_cstr(4, "[nvme-c] Create I/O SQ failed");
             return rc;
         }
     }
 
-    serial_puts("[nvme-c] I/O queues created\r\n");
+    _simpleos_log_write_cstr(2, "[nvme-c] I/O queues created");
     _nvme.initialized = 1;
     return 0;
 }
@@ -1516,25 +1555,21 @@ static int64_t _nvme_write_sector(uint64_t device_idx, uint64_t lba, uint64_t bu
  * Returns 0 on success, prints diagnostics to serial. */
 static int _nvme_init_and_read_sector0(void)
 {
-    serial_puts("[nvme-c] === NVMe Init + Sector 0 Read ===\r\n");
+    _simpleos_log_write_cstr(2, "[nvme-c] === NVMe Init + Sector 0 Read ===");
 
     int rc = _nvme_init_controller();
     if (rc < 0) {
-        serial_puts("[nvme-c] Controller init failed, rc=");
-        serial_put_dec(rc);
-        serial_puts("\r\n");
+        _simpleos_log_write_cstr(4, "[nvme-c] Controller init failed");
         return rc;
     }
 
     /* Read sector 0 (FAT32 BPB / boot sector) */
-    serial_puts("[nvme-c] Reading sector 0...\r\n");
+    _simpleos_log_write_cstr(2, "[nvme-c] Reading sector 0...");
     uint8_t sector_buf[512];
     __builtin_memset(sector_buf, 0, sizeof(sector_buf));
     rc = _nvme_read_sector_impl(0, sector_buf);
     if (rc < 0) {
-        serial_puts("[nvme-c] Sector 0 read failed, rc=");
-        serial_put_dec(rc);
-        serial_puts("\r\n");
+        _simpleos_log_write_cstr(4, "[nvme-c] Sector 0 read failed");
         return rc;
     }
 
@@ -1554,9 +1589,9 @@ static int _nvme_init_and_read_sector0(void)
     serial_put_hex(sig);
     serial_puts("\r\n");
     if (sig == 0xAA55) {
-        serial_puts("[nvme-c] FAT32 BPB signature valid!\r\n");
+        _simpleos_log_write_cstr(2, "[nvme-c] FAT32 BPB signature valid!");
     } else {
-        serial_puts("[nvme-c] WARNING: invalid BPB signature (expected 0xAA55)\r\n");
+        _simpleos_log_write_cstr(3, "[nvme-c] WARNING: invalid BPB signature (expected 0xAA55)");
     }
 
     return 0;
@@ -1750,25 +1785,16 @@ static int8_t _fat32_write_text_impl(const char *name, int64_t name_len, const c
     uint32_t write_len = 0;
     int path_copy_len = _fat32_copy_path_arg(name, name_len, path_buf, sizeof(path_buf));
     if (path_copy_len <= 0) {
-        serial_puts("[fat32-c] write_text path-copy failed len=");
-        serial_put_dec(name_len);
-        serial_puts("\r\n");
+        _simpleos_log_write_cstr(4, "[fat32-c] write_text path-copy failed");
         return 0;
     }
     if (content && content_len > 0) {
         content_bytes = (const uint8_t *)content;
         write_len = (uint32_t)content_len;
     }
-    serial_puts("[fat32-c] write_text path=");
-    serial_puts(path_buf);
-    serial_puts(" bytes=");
-    serial_put_dec(write_len);
-    serial_puts("\r\n");
     int rc = fat32_write_file(path_buf, content_bytes, write_len);
     if (rc != 0) {
-        serial_puts("[fat32-c] write_text failed rc=");
-        serial_put_dec(rc);
-        serial_puts("\r\n");
+        _simpleos_log_write_cstr(4, "[fat32-c] write_text failed");
     }
     return rc == 0 ? 1 : 0;
 }
@@ -1804,13 +1830,13 @@ static int _fat32_init(void) {
     __builtin_memset(bpb, 0, 512);
 
     if (_nvme_read_sector_impl(0, bpb) != 0) {
-        serial_puts("[fat32-c] Failed to read sector 0\r\n");
+        _simpleos_log_write_cstr(4, "[fat32-c] Failed to read sector 0");
         return -1;
     }
 
     /* Check boot signature at bytes 510-511 */
     if (bpb[510] != 0x55 || bpb[511] != 0xAA) {
-        serial_puts("[fat32-c] Invalid BPB signature\r\n");
+        _simpleos_log_write_cstr(4, "[fat32-c] Invalid BPB signature");
         return -1;
     }
 
@@ -2127,7 +2153,7 @@ int fat32_write_file(const char *name, const uint8_t *buf, uint32_t size) {
 
     const char *root_name = _fat32_root_name(name);
     if (!root_name || !*root_name) {
-        serial_puts("[fat32-c] write_file empty root name\r\n");
+        _simpleos_log_write_cstr(4, "[fat32-c] write_file empty root name");
         return -1;
     }
     char name83[11];
@@ -2138,9 +2164,7 @@ int fat32_write_file(const char *name, const uint8_t *buf, uint32_t size) {
     uint32_t old_cluster = 0;
     int found = 0;
     if (_fat32_find_root_dir_slot(name83, &dir_cluster, &entry_index, &found, &old_cluster) != 0) {
-        serial_puts("[fat32-c] write_file root-dir slot failed name=");
-        serial_puts(root_name);
-        serial_puts("\r\n");
+        _simpleos_log_write_cstr(4, "[fat32-c] write_file root-dir slot failed");
         return -1;
     }
 
@@ -2152,30 +2176,24 @@ int fat32_write_file(const char *name, const uint8_t *buf, uint32_t size) {
     uint32_t written = 0;
     uint8_t *cluster_buf = (uint8_t *)nvme_alloc_aligned(cluster_bytes, 512);
     if (!cluster_buf) {
-        serial_puts("[fat32-c] write_file cluster_buf alloc failed\r\n");
+        _simpleos_log_write_cstr(4, "[fat32-c] write_file cluster_buf alloc failed");
         return -1;
     }
 
     for (uint32_t i = 0; i < clusters_needed; i++) {
         uint32_t cluster = _fat32_find_free_cluster();
         if (cluster < 2) {
-            serial_puts("[fat32-c] write_file no free cluster\r\n");
+            _simpleos_log_write_cstr(4, "[fat32-c] write_file no free cluster");
             if (first_cluster >= 2) _fat32_free_chain(first_cluster);
             return -1;
         }
         if (_fat32_write_fat_entry(cluster, 0x0FFFFFFF) != 0) {
-            serial_puts("[fat32-c] write_file mark-eoc failed cluster=");
-            serial_put_dec(cluster);
-            serial_puts("\r\n");
+            _simpleos_log_write_cstr(4, "[fat32-c] write_file mark-eoc failed");
             if (first_cluster >= 2) _fat32_free_chain(first_cluster);
             return -1;
         }
         if (prev_cluster >= 2 && _fat32_write_fat_entry(prev_cluster, cluster) != 0) {
-            serial_puts("[fat32-c] write_file link cluster failed prev=");
-            serial_put_dec(prev_cluster);
-            serial_puts(" next=");
-            serial_put_dec(cluster);
-            serial_puts("\r\n");
+            _simpleos_log_write_cstr(4, "[fat32-c] write_file link cluster failed");
             _fat32_free_chain(first_cluster);
             return -1;
         }
@@ -2188,9 +2206,7 @@ int fat32_write_file(const char *name, const uint8_t *buf, uint32_t size) {
         if (chunk > 0)
             __builtin_memcpy(cluster_buf, buf + written, chunk);
         if (_fat32_write_cluster(cluster, cluster_buf) != 0) {
-            serial_puts("[fat32-c] write_file cluster write failed cluster=");
-            serial_put_dec(cluster);
-            serial_puts("\r\n");
+            _simpleos_log_write_cstr(4, "[fat32-c] write_file cluster write failed");
             _fat32_free_chain(first_cluster);
             return -1;
         }
@@ -2200,25 +2216,19 @@ int fat32_write_file(const char *name, const uint8_t *buf, uint32_t size) {
 
     uint8_t *dir_buf = (uint8_t *)nvme_alloc_aligned(cluster_bytes, 512);
     if (!dir_buf) {
-        serial_puts("[fat32-c] write_file dir_buf alloc failed\r\n");
+        _simpleos_log_write_cstr(4, "[fat32-c] write_file dir_buf alloc failed");
         if (first_cluster >= 2) _fat32_free_chain(first_cluster);
         return -1;
     }
     if (_fat32_read_cluster(dir_cluster, dir_buf) != 0) {
-        serial_puts("[fat32-c] write_file dir read failed cluster=");
-        serial_put_dec(dir_cluster);
-        serial_puts("\r\n");
+        _simpleos_log_write_cstr(4, "[fat32-c] write_file dir read failed");
         if (first_cluster >= 2) _fat32_free_chain(first_cluster);
         return -1;
     }
 
     _fat32_write_dir_entry(dir_buf + entry_index * 32, name83, first_cluster, size);
     if (_fat32_write_cluster(dir_cluster, dir_buf) != 0) {
-        serial_puts("[fat32-c] write_file dir write failed cluster=");
-        serial_put_dec(dir_cluster);
-        serial_puts(" entry=");
-        serial_put_dec(entry_index);
-        serial_puts("\r\n");
+        _simpleos_log_write_cstr(4, "[fat32-c] write_file dir write failed");
         if (first_cluster >= 2) _fat32_free_chain(first_cluster);
         return -1;
     }
@@ -6274,23 +6284,20 @@ int8_t rt_log_target_semihost_write_bytes(const char *ptr, int64_t len) {
     (void)len;
     return 0;
 }
-static int64_t _simpleos_log_level = 2;
-static int64_t _simpleos_log_targets = 0;
 int8_t rt_simpleos_log_init(int64_t level, int64_t targets) {
     _simpleos_log_level = level;
     _simpleos_log_targets = targets;
+    if (simple_log_c_init)
+        return simple_log_c_init(level, targets) ? 1 : 0;
     return 1;
 }
 int8_t rt_simpleos_log_is_enabled(int64_t level) {
+    if (_simple_log_facade_ready() && simple_log_c_enabled)
+        return simple_log_c_enabled(level) ? 1 : 0;
     return level >= _simpleos_log_level ? 1 : 0;
 }
 int8_t rt_simpleos_log_emit(int64_t level, const char *ptr, int64_t len) {
-    (void)level;
-    if (!ptr || len <= 0) return 0;
-    if ((_simpleos_log_targets & 1) == 0) return 0;
-    for (int64_t i = 0; i < len; i++) serial_putchar(ptr[i]);
-    serial_puts("\r\n");
-    return 1;
+    return _simpleos_log_write_bytes(level, ptr, len);
 }
 RuntimeValue rt_cstring_to_text(RuntimeValue p) { (void)p; return NIL_VALUE; }
 RuntimeValue rt_profiler_is_active(void) { return ENCODE_INT(0); }
@@ -10412,6 +10419,102 @@ __attribute__((weak)) int64_t spl_handle_set_hostname(uint64_t a0, uint64_t a1, 
 }
 
 /* End of Wave 10B: spl_handle_* weak shims and rt_syscall_dispatch */
+
+/* ===================================================================
+ * === Test-only syscall shim stubs (kernel__abi__syscall_shim__*) ===
+ *
+ * These stubs allow TLS test kernels (tls_unit_entry.spl,
+ * tls_system_test_entry.spl) to link without dragging in the full OS
+ * syscall dispatch module.  They are no-ops — the test binaries never
+ * invoke the syscall shim, and the linker script assigns strong T
+ * aliases (spl_handle_X = kernel__abi__syscall_shim__spl_handle_X) so
+ * the real kernel overrides these with its own compiled symbols.
+ *
+ * Marked __attribute__((weak)) so the real kernel-compiled W symbols
+ * win when the full kernel is linked.  Return -38 (ENOSYS) to match
+ * the existing spl_handle_* stub convention in this file.
+ *
+ * Real implementations live in src/os/kernel/abi/syscall_shim.spl.
+ * =================================================================== */
+
+#define _SHIM_STUB(name) \
+    __attribute__((weak)) int64_t \
+    kernel__abi__syscall_shim__spl_handle_##name( \
+        uint64_t a0, uint64_t a1, uint64_t a2, \
+        uint64_t a3, uint64_t a4, uint64_t a5) { \
+        (void)a0; (void)a1; (void)a2; (void)a3; (void)a4; (void)a5; \
+        return -38; \
+    }
+
+_SHIM_STUB(debug_write)
+_SHIM_STUB(exit)
+_SHIM_STUB(yield)
+_SHIM_STUB(spawn)
+_SHIM_STUB(wait)
+_SHIM_STUB(getpid)
+_SHIM_STUB(list_tasks)
+_SHIM_STUB(get_task_info)
+_SHIM_STUB(signal)
+_SHIM_STUB(set_priority)
+_SHIM_STUB(get_parent_pid)
+_SHIM_STUB(mmap)
+_SHIM_STUB(munmap)
+_SHIM_STUB(mprotect)
+_SHIM_STUB(spawn_binary)
+_SHIM_STUB(ipc_send)
+_SHIM_STUB(ipc_recv)
+_SHIM_STUB(ipc_create_port)
+_SHIM_STUB(ipc_connect)
+_SHIM_STUB(notification_create)
+_SHIM_STUB(notification_signal)
+_SHIM_STUB(notification_wait)
+_SHIM_STUB(notification_poll)
+_SHIM_STUB(notification_destroy)
+_SHIM_STUB(notification_wait_any)
+_SHIM_STUB(file_open)
+_SHIM_STUB(file_read)
+_SHIM_STUB(file_write)
+_SHIM_STUB(file_close)
+_SHIM_STUB(file_stat)
+_SHIM_STUB(file_mkdir)
+_SHIM_STUB(file_readdir)
+_SHIM_STUB(mount)
+_SHIM_STUB(unmount)
+_SHIM_STUB(unlink)
+_SHIM_STUB(pledge)
+_SHIM_STUB(unveil)
+_SHIM_STUB(cap_grant)
+_SHIM_STUB(ftruncate)
+_SHIM_STUB(rename)
+_SHIM_STUB(rmdir)
+_SHIM_STUB(lseek)
+_SHIM_STUB(getcwd)
+_SHIM_STUB(chdir)
+_SHIM_STUB(clock_gettime)
+_SHIM_STUB(sleep)
+_SHIM_STUB(net_socket)
+_SHIM_STUB(net_bind)
+_SHIM_STUB(net_listen)
+_SHIM_STUB(net_connect)
+_SHIM_STUB(net_accept)
+_SHIM_STUB(net_send_to)
+_SHIM_STUB(net_recv_from)
+_SHIM_STUB(net_if_config)
+_SHIM_STUB(dev_enumerate)
+_SHIM_STUB(dev_get_info)
+_SHIM_STUB(device_grant)
+_SHIM_STUB(map_bar)
+_SHIM_STUB(alloc_dma)
+_SHIM_STUB(free_dma)
+_SHIM_STUB(log_write)
+_SHIM_STUB(log_read)
+_SHIM_STUB(sysinfo)
+_SHIM_STUB(get_hostname)
+_SHIM_STUB(set_hostname)
+
+#undef _SHIM_STUB
+
+/* End of TLS test-only syscall shim stubs */
 
 #endif /* __x86_64__ || __i386__ */
 
