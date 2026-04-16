@@ -227,6 +227,33 @@ pub extern "C" fn rt_rsa_sha512_sign(pkcs8: RuntimeValue, message: RuntimeValue)
     rsa_sign_impl(pkcs8, message, &RSA_PKCS1_SHA512)
 }
 
+/// Sign `message` with Ed25519 using a PKCS#8-v1 DER private key
+/// (RFC 8032 EdDSA, `ssh-ed25519`).
+///
+/// Output is the 64-byte raw Ed25519 signature.
+///
+/// Deterministic per RFC 8032 (no random nonce).
+///
+/// Hosted-only: requires `ring::signature::Ed25519KeyPair`.
+#[no_mangle]
+pub extern "C" fn rt_ed25519_sign(pkcs8: RuntimeValue, message: RuntimeValue) -> RuntimeValue {
+    let Some(key_bytes) = runtime_byte_array_to_vec(pkcs8) else {
+        return _empty_bytes();
+    };
+    let Some(msg_bytes) = runtime_byte_array_to_vec(message) else {
+        return _empty_bytes();
+    };
+
+    let keypair = match ring::signature::Ed25519KeyPair::from_pkcs8(&key_bytes) {
+        Ok(kp) => kp,
+        Err(_) => return _empty_bytes(),
+    };
+
+    let sig = keypair.sign(&msg_bytes);
+    let bytes = sig.as_ref();
+    unsafe { crate::value::collections::rt_string_new(bytes.as_ptr(), bytes.len() as u64) }
+}
+
 /// Sign `message` with ECDSA P-256 SHA-256 using a PKCS#8-v1 DER
 /// private key (RFC 5656 `ecdsa-sha2-nistp256`).
 ///

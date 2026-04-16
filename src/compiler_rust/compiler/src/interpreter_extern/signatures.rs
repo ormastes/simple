@@ -162,6 +162,26 @@ pub fn rt_ed25519_verify(args: &[Value]) -> Result<Value, CompileError> {
 }
 
 // ---------------------------------------------------------------------------
+// Ed25519 sign
+// ---------------------------------------------------------------------------
+
+/// `rt_ed25519_sign(pkcs8: [u8], message: [u8]) -> [u8]` (64-byte signature)
+pub fn rt_ed25519_sign(args: &[Value]) -> Result<Value, CompileError> {
+    let Some(pkcs8) = extract_bytes(args, 0) else {
+        return Ok(empty_bytes());
+    };
+    let Some(msg) = extract_bytes(args, 1) else {
+        return Ok(empty_bytes());
+    };
+    let keypair = match ring::signature::Ed25519KeyPair::from_pkcs8(&pkcs8) {
+        Ok(kp) => kp,
+        Err(_) => return Ok(empty_bytes()),
+    };
+    let sig = keypair.sign(&msg);
+    Ok(bytes_to_value(sig.as_ref()))
+}
+
+// ---------------------------------------------------------------------------
 // ECDSA P-256 sign / verify (fixed-width r‖s on the FFI boundary)
 // ---------------------------------------------------------------------------
 

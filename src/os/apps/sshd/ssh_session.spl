@@ -14,6 +14,7 @@ use os.apps.sshd.ssh_kex.{HostKeySet, SshKexState, SshSessionKeys, SSH_MSG_KEX_E
 use os.apps.sshd.ssh_cipher.{SshCipher}
 use os.apps.sshd.ssh_auth.{SshUserDb, SshAuthRequest, SSH_MSG_USERAUTH_REQUEST, SSH_MSG_USERAUTH_PK_OK, MAX_AUTH_ATTEMPTS, ssh_parse_auth_request, ssh_build_auth_success, ssh_build_auth_failure, ssh_build_auth_banner, ssh_build_userauth_pk_ok}
 use os.apps.sshd.ssh_channel.{ChannelTable, SshChannel, ChannelType, ChannelState, SSH_MSG_CHANNEL_OPEN, SSH_MSG_CHANNEL_DATA, SSH_MSG_CHANNEL_WINDOW_ADJUST, SSH_MSG_CHANNEL_EOF, SSH_MSG_CHANNEL_CLOSE, SSH_MSG_CHANNEL_REQUEST, DEFAULT_WINDOW_SIZE, DEFAULT_MAX_PACKET, ssh_parse_channel_open, ssh_parse_channel_data, ssh_parse_channel_request, ssh_parse_window_adjust, ssh_parse_channel_eof, ssh_parse_channel_close, ssh_build_channel_open_confirmation, ssh_build_channel_data, ssh_build_channel_window_adjust, ssh_build_channel_eof, ssh_build_channel_close, ssh_build_channel_success, ssh_build_channel_failure}
+use os.apps.sshd.rsa_pubkey.{ssh_rsa_blob_to_spki_der}
 use os.apps.sshd.ssh_pty.{SshPty}
 
 extern fn serial_println(msg: text)
@@ -347,7 +348,7 @@ impl SshSession:
                     val raw_sig = _unwrap_ssh_signature(req.signature)
                     var verified: bool = false
                     if req.key_algo == "rsa-sha2-256":
-                        val spki_der = _ssh_rsa_blob_to_spki_der(req.key_blob)
+                        val spki_der = ssh_rsa_blob_to_spki_der(req.key_blob)
                         val vr = rt_rsa_sha256_verify(spki_der, signed_data, raw_sig)
                         verified = vr == 1
                     elif req.key_algo == "ssh-ed25519":
@@ -929,153 +930,3 @@ fn _extract_ed25519_pubkey(key_blob: [u8]) -> [u8]:
             var key_pair = r_key.unwrap()
             return key_pair.data
     []
-
-fn _ssh_rsa_blob_to_spki_der(key_blob: [u8]) -> [u8]:
-    """Convert an SSH RSA public key blob to SPKI DER format.
-
-    SSH RSA blob format:
-      string  "ssh-rsa"
-      string  e (public exponent, big-endian MPI)
-      string  n (modulus, big-endian MPI)
-
-    SPKI DER format (RFC 5480 / RFC 3279):
-      SEQUENCE {
-        SEQUENCE {
-          OID 1.2.840.113549.1.1.1 (rsaEncryption)
-          NULL
-        }
-        BIT STRING {
-          SEQUENCE {
-            INTEGER n
-            INTEGER e
-          }
-        }
-      }
-    """
-    # Parse the SSH RSA blob
-    if key_blob.len() < 4:
-        return []
-
-    var off: u64 = 0
-
-    # Skip key type string ("ssh-rsa")
-    var r_type = ssh_get_string(key_blob, off)
-    if r_type.is_err():
-        return []
-    var type_pair = r_type.unwrap()
-    off = type_pair.next_offset
-
-    # Read e (public exponent)
-    var r_e = ssh_get_string(key_blob, off)
-    if r_e.is_err():
-        return []
-    var e_pair = r_e.unwrap()
-    var e_bytes = e_pair.data
-    off = e_pair.next_offset
-
-    # Read n (modulus)
-    var r_n = ssh_get_string(key_blob, off)
-    if r_n.is_err():
-        return []
-    var n_pair = r_n.unwrap()
-    var n_bytes = n_pair.data
-
-    # Build inner RSAPublicKey: SEQUENCE { INTEGER n, INTEGER e }
-    var inner: [u8] = []
-    _der_push_integer(inner, n_bytes)
-    _der_push_integer(inner, e_bytes)
-    var rsa_seq: [u8] = []
-    _der_push_sequence(rsa_seq, inner)
-
-    # Wrap in BIT STRING (prepend 0x00 unused-bits byte)
-    var bit_str_content: [u8] = []
-    bit_str_content.push(0)
-    var bi: u64 = 0
-    while bi < rsa_seq.len():
-        bit_str_content.push(rsa_seq[bi])
-        bi = bi + 1
-    var bit_str: [u8] = []
-    _der_push_tag_length(bit_str, 3, bit_str_content.len())
-    var bsi: u64 = 0
-    while bsi < bit_str_content.len():
-        bit_str.push(bit_str_content[bsi])
-        bsi = bsi + 1
-
-    # RSA OID: 1.2.840.113549.1.1.1 encoded
-    var rsa_oid: [u8] = [6, 9, 42, 134, 72, 134, 247, 13, 1, 1, 1, 5, 0]
-
-    # AlgorithmIdentifier: SEQUENCE { OID, NULL }
-    var alg_id: [u8] = []
-    _der_push_sequence(alg_id, rsa_oid)
-
-    # Combine AlgorithmIdentifier + BIT STRING
-    var spki_body: [u8] = []
-    var ai: u64 = 0
-    while ai < alg_id.len():
-        spki_body.push(alg_id[ai])
-        ai = ai + 1
-    var bsti: u64 = 0
-    while bsti < bit_str.len():
-        spki_body.push(bit_str[bsti])
-        bsti = bsti + 1
-
-    # Outer SEQUENCE
-    var spki: [u8] = []
-    _der_push_sequence(spki, spki_body)
-    spki
-
-fn _der_push_tag_length(buf: [u8], tag: u8, length: u64):
-    """Append a DER tag + length encoding to buf (modifies buf in place)."""
-    buf.push(tag)
-    if length < 128:
-        buf.push(length.to_u8())
-    elif length < 256:
-        buf.push(129)
-        buf.push(length.to_u8())
-    else:
-        buf.push(130)
-        buf.push(((length >> 8) & 0xFF).to_u8())
-        buf.push((length & 0xFF).to_u8())
-
-fn _der_push_sequence(buf: [u8], content: [u8]):
-    """Append a DER SEQUENCE wrapping content to buf."""
-    _der_push_tag_length(buf, 48, content.len())
-    var i: u64 = 0
-    while i < content.len():
-        buf.push(content[i])
-        i = i + 1
-
-fn _der_push_integer(buf: [u8], value: [u8]):
-    """Append a DER INTEGER from a big-endian byte array to buf.
-
-    Adds a leading 0x00 byte if the high bit is set (to keep sign positive).
-    Strips leading zero bytes that are not needed for sign.
-    """
-    # Strip leading zeros (except keep at least one byte)
-    var start: u64 = 0
-    while start + 1 < value.len() and value[start] == 0:
-        start = start + 1
-
-    # Collect the trimmed bytes
-    var trimmed: [u8] = []
-    var ti: u64 = start
-    while ti < value.len():
-        trimmed.push(value[ti])
-        ti = ti + 1
-
-    # If high bit set, prepend 0x00 to indicate positive
-    var needs_pad: bool = false
-    if trimmed.len() > 0:
-        needs_pad = trimmed[0] >= 128
-
-    var content_len: u64 = trimmed.len()
-    if needs_pad:
-        content_len = content_len + 1
-
-    _der_push_tag_length(buf, 2, content_len)
-    if needs_pad:
-        buf.push(0)
-    var ci: u64 = 0
-    while ci < trimmed.len():
-        buf.push(trimmed[ci])
-        ci = ci + 1

@@ -428,6 +428,7 @@ pub(crate) fn call_extern_function(
         "rt_rsa_sha512_sign" => signatures::rt_rsa_sha512_sign(&evaluated),
         "rt_rsa_sha512_verify" => signatures::rt_rsa_sha512_verify(&evaluated),
         "rt_ed25519_verify" => signatures::rt_ed25519_verify(&evaluated),
+        "rt_ed25519_sign" => signatures::rt_ed25519_sign(&evaluated),
         "rt_ecdsa_p256_sign" => signatures::rt_ecdsa_p256_sign(&evaluated),
         "rt_ecdsa_p256_verify" => signatures::rt_ecdsa_p256_verify(&evaluated),
 
