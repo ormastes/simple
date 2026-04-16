@@ -33,7 +33,7 @@ use os.kernel.scheduler.scheduler.{Scheduler}
 use os.kernel.ipc.ipc.{IpcManager}
 use os.kernel.log.klog.{KernelLog}
 use os.drivers.framebuffer.bga_init.{bga_init_framebuffer}
-use os.drivers.framebuffer.fb_driver.{FramebufferDriver, Color}
+use os.drivers.framebuffer.fb_driver.{FramebufferDriver}
 use std.gc_async_mut.gpu.browser_engine.browser_renderer.{BrowserRenderer}
 use std.gc_async_mut.gpu.browser_engine.widget_to_dom.{html_string_to_dom}
 use examples.simple_os.assets.welcome.{welcome_html}
@@ -41,17 +41,11 @@ use examples.simple_os.assets.welcome.{welcome_html}
 extern fn serial_println(msg: text)
 extern fn rt_gui_set_fb(addr: u64, width: u64)
 extern fn rt_hlt()
+extern fn rt_fb_blit_array32(dst_addr: u64, dst_stride_pixels: u64,
+    src_pixels: [u32], src_stride_pixels: u64, copy_w: u64, copy_h: u64)
 
 val RENDER_W: i32 = 320
 val RENDER_H: i32 = 240
-
-fn _argb_to_color(pixel: u32) -> Color:
-    Color(
-        r: ((pixel >> 16) & 0xFF) as u8,
-        g: ((pixel >> 8) & 0xFF) as u8,
-        b: (pixel & 0xFF) as u8,
-        a: ((pixel >> 24) & 0xFF) as u8
-    )
 
 fn spl_start():
     """x86_64 GUI entry -- browser_engine + software rasterizer + framebuffer.
@@ -108,15 +102,16 @@ fn spl_start():
     val pixels = result.pixel_data
     val render_w_u = RENDER_W.to_u32()
     val render_h_u = RENDER_H.to_u32()
-    var y: u32 = 0
-    while y < fb.height and y < render_h_u:
-        var x: u32 = 0
-        while x < fb.width and x < render_w_u:
-            val idx = (y * render_w_u + x).to_i64()
-            if idx < pixels.length().to_i64():
-                fb.put_pixel(x, y, _argb_to_color(pixels[idx]))
-            x = x + 1
-        y = y + 1
+    val copy_w = if fb.width < render_w_u: fb.width else: render_w_u
+    val copy_h = if fb.height < render_h_u: fb.height else: render_h_u
+    rt_fb_blit_array32(
+        fb.front_addr,
+        fb.width.to_u64(),
+        pixels,
+        render_w_u.to_u64(),
+        copy_w.to_u64(),
+        copy_h.to_u64()
+    )
     serial_println("[BE] Frame painted: HTML -> DOM -> layout -> paint -> scene -> software rasterizer -> framebuffer")
 
     serial_println("[GUI] Entering halt loop (rendered frame held for QMP capture)")

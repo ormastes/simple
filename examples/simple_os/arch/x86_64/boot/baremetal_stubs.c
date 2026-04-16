@@ -819,6 +819,39 @@ void rt_framebuffer_write(RuntimeValue addr, RuntimeValue offset, RuntimeValue v
     base[off] = (uint8_t)v;
 }
 
+void rt_fb_blit_array32(RuntimeValue dst_addr, RuntimeValue dst_stride_pixels,
+                        RuntimeValue src_pixels, RuntimeValue src_stride_pixels,
+                        RuntimeValue copy_w, RuntimeValue copy_h)
+{
+    if (!IS_HEAP(src_pixels)) return;
+    RuntimeArray *src = (RuntimeArray *)DECODE_PTR(src_pixels);
+    if (!src || src->hdr.type != HEAP_ARRAY) return;
+
+    volatile uint32_t *dst = (volatile uint32_t *)(uintptr_t)(uint64_t)dst_addr;
+    uint64_t dst_stride = (uint64_t)dst_stride_pixels;
+    uint64_t src_stride = (uint64_t)src_stride_pixels;
+    uint64_t w = (uint64_t)copy_w;
+    uint64_t h = (uint64_t)copy_h;
+
+    for (uint64_t y = 0; y < h; y++) {
+        uint64_t src_row = y * src_stride;
+        uint64_t dst_row = y * dst_stride;
+        if (src_row >= src->len) break;
+
+        uint64_t row_count = w;
+        if (src_row + row_count > src->len) {
+            row_count = src->len - src_row;
+        }
+
+        for (uint64_t x = 0; x < row_count; x++) {
+            RuntimeValue item = src->items[src_row + x];
+            uint32_t pixel = IS_INT(item) ? (uint32_t)DECODE_INT(item)
+                                          : (uint32_t)(uint64_t)item;
+            dst[dst_row + x] = pixel;
+        }
+    }
+}
+
 /* ===================================================================
  * 8b. Native comparison — Cranelift emits calls to these for == and !=.
  *     Receives raw i64 values (Cranelift ABI), returns 1 or 0.

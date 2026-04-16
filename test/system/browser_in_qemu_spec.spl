@@ -96,7 +96,7 @@ fn _write_ppm_local(pixels: [u32], width: i32, height: i32, path: text) -> bool:
 # Decode a PPM baseline from disk into an ARGB (CaptureResult-shaped)
 # pixel buffer. Returns a tuple (ok, pixels, width, height, error).
 fn _read_baseline_ppm(path: text) -> (bool, [u32], i32, i32, text):
-    val bytes = file_read_bytes(path)
+    val bytes = file_read_bytes(path) ?? []
     if bytes.len() == 0:
         return (false, [], 0, 0, "missing baseline: {path}")
     val decoded = decode_ppm_to_argb(bytes)
@@ -200,34 +200,42 @@ describe "Browser webrendering in QEMU Simple OS guest":
                     return
 
                 # Compare mode: read baseline, run tolerance profile compare.
-                val (ok, base_pixels, base_w, base_h, err) = _read_baseline_ppm(baseline_path)
-                if not ok:
-                    print "[browser_in_qemu_spec] baseline read failed: {err}"
+                val base_bytes = file_read_bytes(baseline_path) ?? []
+                if base_bytes.len() == 0:
+                    print "[browser_in_qemu_spec] baseline read failed: missing baseline: {baseline_path}"
                     stop_guest(handle)
                     expect(false).to_equal(true)
                     return
 
-                if base_w != result.width or base_h != result.height:
-                    print "[browser_in_qemu_spec] baseline dims {base_w}x{base_h} != capture dims {result.width}x{result.height}"
-                    stop_guest(handle)
-                    expect(false).to_equal(true)
-                    return
+                match decode_ppm_to_argb(base_bytes):
+                    Ok(base_img):
+                        if base_img.width != result.width or base_img.height != result.height:
+                            print "[browser_in_qemu_spec] baseline dims {base_img.width}x{base_img.height} != capture dims {result.width}x{result.height}"
+                            stop_guest(handle)
+                            expect(false).to_equal(true)
+                            return
 
-                val profile = profile_text_tolerant()
-                val cmp: ComparisonResult = compare_with_profile(
-                    result.pixels, base_pixels, result.width, result.height, profile)
-                val pct_whole = cmp.match_percentage / 100
-                val pct_frac = cmp.match_percentage % 100
-                print "[browser_in_qemu_spec] match: {pct_whole}.{pct_frac}% ({cmp.matching_pixels}/{cmp.total_pixels})"
+                        val profile = profile_text_tolerant()
+                        val cmp = compare_with_profile(
+                            result.pixels, base_img.pixels, result.width, result.height, profile)
+                        val match_pct = cmp.match_percentage
+                        val pct_whole = match_pct / 100
+                        val pct_frac = match_pct % 100
+                        print "[browser_in_qemu_spec] match: {pct_whole}.{pct_frac}% ({cmp.matching_pixels}/{cmp.total_pixels})"
 
-                # Always tear the guest down before asserting so a failed
-                # expect does not leave a zombie QEMU process behind.
-                stop_guest(handle)
+                        # Always tear the guest down before asserting so a failed
+                        # expect does not leave a zombie QEMU process behind.
+                        stop_guest(handle)
 
-                # Primary regression gates.
-                expect(nb > 0).to_equal(true)
-                # 9500 on the 0-10000 integer scale == 95.00%.
-                expect(cmp.match_percentage >= 9500).to_equal(true)
+                        # Primary regression gates.
+                        expect(nb > 0).to_equal(true)
+                        # 9500 on the 0-10000 integer scale == 95.00%.
+                        expect(match_pct >= 9500).to_equal(true)
+                    Err(err):
+                        print "[browser_in_qemu_spec] baseline read failed: ppm decode failed: {err}"
+                        stop_guest(handle)
+                        expect(false).to_equal(true)
+                        return
             Err(err) =>
                 print "[browser_in_qemu_spec] failed to spawn guest: {err}"
                 expect(false).to_equal(true)
