@@ -2049,9 +2049,14 @@ int fat32_find_file(const char *name, uint32_t *out_cluster, uint32_t *out_size)
         if (_fat32_init() != 0) return -1;
     }
 
+    const char *root_name = _fat32_root_name(name);
+    if (!root_name || !*root_name) {
+        return -1;
+    }
+
     /* Build 8.3 name for comparison */
     char name83[11];
-    _fat32_make_8_3_name(name, name83);
+    _fat32_make_8_3_name(root_name, name83);
 
     /* Allocate a cluster-sized buffer for reading directory entries */
     uint32_t cluster_bytes = _fat32.sectors_per_cluster * 512;
@@ -6368,6 +6373,7 @@ static void serial_puthex(uint32_t v) {
 }
 
 extern void spl_start(void) __attribute__((weak));
+extern void __simple_call_module_inits(void) __attribute__((weak));
 
 void _start(void)
 {
@@ -6384,6 +6390,9 @@ void _start(void)
      * long-mode handoff -> basic IRQ masking -> direct spl_start().
      * Skip the heavyweight C boot diagnostics/probing until the boot lane is stable.
      */
+    if (__simple_call_module_inits) {
+        __simple_call_module_inits();
+    }
     if (spl_start) {
         __asm__ volatile(
             "movw $0x3F8, %%dx\n"
@@ -6589,6 +6598,9 @@ void _start(void)
         }
     }
 
+    if (__simple_call_module_inits) {
+        __simple_call_module_inits();
+    }
     if (spl_start) {
         serial_puts("[BOOT] Calling spl_start()...\r\n");
         spl_start();

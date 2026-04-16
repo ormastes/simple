@@ -536,6 +536,7 @@ int main(int argc, char** argv) {
         };
 
         let cc = find_c_compiler();
+        let init_o = self.generate_init_caller(temp_dir, object_paths)?;
 
         let use_llvm = std::env::var("SIMPLE_BACKEND").as_deref() == Ok("llvm");
         let (march, mabi) = match cross_target.arch {
@@ -804,6 +805,9 @@ int main(int argc, char** argv) {
             for obj in &ordered_objects {
                 c.arg(obj.as_os_str());
             }
+            if let Some(ref init) = init_o {
+                c.arg(init);
+            }
             if let Some(ref stub_o) = freestanding_stub_obj {
                 c.arg(stub_o);
             }
@@ -826,6 +830,9 @@ int main(int argc, char** argv) {
             }
             for obj in &ordered_objects {
                 c.arg(obj.as_os_str());
+            }
+            if let Some(ref init) = init_o {
+                c.arg(init);
             }
             if let Some(ref stub_o) = freestanding_stub_obj {
                 c.arg(stub_o);
