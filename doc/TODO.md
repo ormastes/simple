@@ -24,12 +24,6 @@
 
 ## P1 High Priority TODOs
 
-### runtime
-
-- **#62** [runtime][P1] bootstrap-propagate the v2 Phase A rt_random_hex extern to bin/simple (self-hosted)
-  - File: `./tests/app/ui.web/live_smoke_test.spl:3`
-  - Status: open
-
 ### test
 
 - **#60** [test][P1] build the real compiled WSS e2e driver — _ws_client.spl + socket round trip

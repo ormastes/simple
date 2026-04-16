@@ -177,6 +177,7 @@ pub fn symbol_tier_of(name: &str) -> RuntimeSymbolTier {
         || name.starts_with("rt_context_")
         || name.starts_with("rt_test_")
         || name.starts_with("rt_ffi_")
+        || name.starts_with("rt_random_")
         || name.starts_with("doctest_")
         || name.starts_with("native_tcp_")
         || name.starts_with("native_udp_")
@@ -453,6 +454,8 @@ pub const RUNTIME_SYMBOL_NAMES: &[&str] = &[
     "rt_text_to_bytes",
     "rt_file_write_bytes",
     "rt_file_move",
+    // Random operations
+    "rt_random_hex",
     // Hash operations
     "rt_sha1_new",
     "rt_sha1_write",

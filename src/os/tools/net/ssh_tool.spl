@@ -1,26 +1,152 @@
 # ssh — SSH client
 # MDSOC: feature dimension, apps layer
 
-fn run_ssh(args: [text]) -> i32:
-    """SSH client (stub — delegates to sshd infrastructure).
+use os.userlib.net.{IpAddr, SockAddr, socket, connect, send, recv}
+use os.apps.sshd.ssh_transport.{
+    ssh_build_version_string,
+    ssh_parse_version_string,
+    ssh_build_kexinit,
+    ssh_parse_kexinit,
+    SSH_MSG_KEXINIT,
+    SSH_MSG_DISCONNECT,
+    SSH_MSG_NEWKEYS
+}
+use os.apps.sshd.ssh_packet.{ssh_packet_build}
 
-    Usage: ssh [user@]host [command]
+fn _ssh_build_packet(payload: [u8]) -> [u8]:
+    """Wrap payload in SSH binary packet format (RFC 4253 section 6).
+
+    Delegates to the canonical ssh_packet_build in sshd.ssh_packet.
+    Format: uint32 packet_length + uint8 padding_length + payload + padding + empty MAC.
+    """
+    ssh_packet_build(payload, 0)
+
+fn run_ssh(args: [text]) -> Result<bool, text>:
+    """SSH client skeleton — version exchange and KEXINIT.
+
+    Usage: ssh [user@]host [-p port]
+
+    Reaches SSH version exchange and KEXINIT with the server.
+    Crypto handshake (DH, auth, channels) is not yet implemented.
     """
     if args.len() == 0:
-        print "ssh: missing host"
-        print "Usage: ssh [user@]host [command]"
-        return 1
+        return Err("ssh: missing host\nUsage: ssh [user@]host [-p port]")
 
-    val target = args[0]
     var user = "root"
-    var host = target
+    var host = ""
+    var port: u64 = 22
 
-    # Parse user@host
-    val at_idx = target.find("@")
-    if at_idx >= 0:
-        user = target.slice(0, at_idx)
-        host = target.slice(at_idx + 1, target.len())
+    # Parse arguments: first non-flag is user@host, -p PORT follows
+    var i: u64 = 0
+    while i < args.len():
+        var arg: text = args[i]
+        if arg == "-p":
+            i = i + 1
+            if i >= args.len():
+                return Err("ssh: -p requires a port number")
+            var p_val: u64 = args[i].parse_u64()
+            if p_val == 0:
+                return Err("ssh: invalid port: {args[i]}")
+            port = p_val
+        else:
+            if host == "":
+                val at_idx = arg.find("@")
+                if at_idx >= 0:
+                    user = arg.slice(0, at_idx)
+                    host = arg.slice(at_idx + 1, arg.len())
+                else:
+                    host = arg
+        i = i + 1
 
-    print "ssh: connecting to {user}@{host}..."
-    print "ssh: client not yet implemented (sshd server exists at src/os/apps/sshd/)"
-    return 1
+    if host == "":
+        return Err("ssh: missing host\nUsage: ssh [user@]host [-p port]")
+
+    print "ssh: connecting to {user}@{host}:{port}..."
+
+    # Resolve host and open TCP socket
+    var ip_result = IpAddr.from_text(host)
+    if ip_result.is_err():
+        var ip_err: text = ip_result.unwrap_err()
+        return Err("ssh: {ip_err}")
+    var ip = ip_result.unwrap()
+
+    var sock_result = socket(2, 1)
+    if sock_result.is_err():
+        var sock_err: text = sock_result.unwrap_err()
+        return Err("ssh: socket: {sock_err}")
+    var sock = sock_result.unwrap()
+
+    var addr = SockAddr(ip: ip, port: port.to_u16())
+    var conn_result = connect(sock, addr)
+    if conn_result.is_err():
+        var conn_err: text = conn_result.unwrap_err()
+        return Err("ssh: connect: {conn_err}")
+
+    # --- Version exchange (RFC 4253 section 4.2) ---
+    # Send our version string: "SSH-2.0-SimpleOS_1.0\r\n"
+    var version_bytes: [u8] = ssh_build_version_string()
+    var send_ver_result = send(sock, version_bytes)
+    if send_ver_result.is_err():
+        var send_err: text = send_ver_result.unwrap_err()
+        return Err("ssh: send version: {send_err}")
+
+    # Read server version string
+    var recv_ver_result = recv(sock, 256)
+    if recv_ver_result.is_err():
+        var recv_err: text = recv_ver_result.unwrap_err()
+        return Err("ssh: recv version: {recv_err}")
+    var server_ver_bytes: [u8] = recv_ver_result.unwrap()
+
+    var parse_ver_result = ssh_parse_version_string(server_ver_bytes)
+    if parse_ver_result.is_err():
+        var parse_err: text = parse_ver_result.unwrap_err()
+        return Err("ssh: version parse: {parse_err}")
+    var server_version: text = parse_ver_result.unwrap()
+    print "ssh: server version: {server_version}"
+
+    # --- Key exchange init (RFC 4253 section 7.1) ---
+    # Build our KEXINIT payload and wrap in SSH packet framing
+    var kexinit_payload: [u8] = ssh_build_kexinit()
+    var kexinit_packet: [u8] = _ssh_build_packet(kexinit_payload)
+    var send_kex_result = send(sock, kexinit_packet)
+    if send_kex_result.is_err():
+        var kex_send_err: text = send_kex_result.unwrap_err()
+        return Err("ssh: send KEXINIT: {kex_send_err}")
+
+    # Read server KEXINIT packet
+    var recv_kex_result = recv(sock, 4096)
+    if recv_kex_result.is_err():
+        var kex_recv_err: text = recv_kex_result.unwrap_err()
+        return Err("ssh: recv KEXINIT: {kex_recv_err}")
+    var server_kex_bytes: [u8] = recv_kex_result.unwrap()
+
+    # The first byte of a binary packet payload is the message type;
+    # skip the 5-byte framing header (4 length + 1 padding_length) to reach payload.
+    if server_kex_bytes.len() < 6:
+        return Err("ssh: KEXINIT response too short")
+    if server_kex_bytes[5] != SSH_MSG_KEXINIT:
+        return Err("ssh: expected KEXINIT (20), got {server_kex_bytes[5]}")
+
+    # Extract payload: offset 5 onwards
+    var payload_offset: u64 = 5
+    var kex_payload_len: u64 = server_kex_bytes.len() - payload_offset
+    var kex_payload: [u8] = []
+    var pi: u64 = 0
+    while pi < kex_payload_len:
+        kex_payload.push(server_kex_bytes[payload_offset + pi])
+        pi = pi + 1
+
+    var parse_kex_result = ssh_parse_kexinit(kex_payload)
+    if parse_kex_result.is_err():
+        var parse_kex_err: text = parse_kex_result.unwrap_err()
+        return Err("ssh: parse server KEXINIT: {parse_kex_err}")
+    var server_kex = parse_kex_result.unwrap()
+
+    print "ssh: server kex algorithms:        {server_kex.kex_algorithms}"
+    print "ssh: server host key algorithms:   {server_kex.server_host_key_algorithms}"
+    print "ssh: server cipher (c2s):          {server_kex.encryption_client_to_server}"
+    print "ssh: server cipher (s2c):          {server_kex.encryption_server_to_client}"
+    print "ssh: server compression:           {server_kex.compression_client_to_server}"
+
+    print "SSH session initialized (crypto handshake not yet implemented)"
+    Ok(true)

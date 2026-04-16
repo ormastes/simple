@@ -4,6 +4,7 @@
 use os.tools.pkg.pkg_manifest.{PackageManifest, parse_manifest}
 use os.userlib.fs.{read_text, write_text}
 use os.userlib.net.{IpAddr, SockAddr, Socket, socket, connect, send, recv}
+use app.ui.web.tls_client.{TlsClient}
 
 struct Repository:
     name: text
@@ -61,6 +62,8 @@ fn parse_http_url(url: text) -> (text, i32, text):
 
     var host = host_port
     var port: i32 = 80
+    if url.starts_with("https://"):
+        port = 443
     val colon_idx = host_port.index_of(":")
     if colon_idx >= 0:
         host = host_port.slice(0, colon_idx)
@@ -102,6 +105,31 @@ fn _http_get(host: text, port: i32, path: text) -> Result<text, text>:
         return Result.Ok(raw.slice(sep_idx + 4, raw.len()))
     return Result.Ok(raw)
 
+fn _https_get(host: text, port: i32, path: text) -> Result<text, text>:
+    """Perform HTTPS GET via TlsClient and return the response body."""
+    val handle_result = TlsClient.connect(host, port)
+    if val Err(msg) = handle_result:
+        return Result.Err("TLS connect: {msg}")
+    val handle = handle_result.unwrap()
+
+    val request = "GET {path} HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n\r\n"
+    val write_result = TlsClient.write(handle, request)
+    if val Err(msg) = write_result:
+        TlsClient.close(handle)
+        return Result.Err("TLS write: {msg}")
+
+    val read_result = TlsClient.read(handle, 65536)
+    TlsClient.close(handle)
+    if val Err(msg) = read_result:
+        return Result.Err("TLS read: {msg}")
+    val raw = read_result.unwrap()
+
+    val separator = "\r\n\r\n"
+    val sep_idx = raw.index_of(separator)
+    if sep_idx >= 0:
+        return Result.Ok(raw.slice(sep_idx + 4, raw.len()))
+    return Result.Ok(raw)
+
 fn fetch_index(repo: Repository) -> Result<PackageIndex, text>:
     """Fetch package index from a repository.
 
@@ -117,7 +145,11 @@ fn fetch_index(repo: Repository) -> Result<PackageIndex, text>:
         if path == "/" or path == "":
             path = "/index.sdn"
 
-        val body_result = _http_get(host, port, path)
+        var body_result: Result<text, text>
+        if repo.url.starts_with("https://"):
+            body_result = _https_get(host, port, path)
+        else:
+            body_result = _http_get(host, port, path)
         if val Err(msg) = body_result:
             return Result.Err("fetch_index: {msg}")
         val body = body_result.unwrap()

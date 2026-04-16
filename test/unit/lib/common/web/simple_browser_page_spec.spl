@@ -1,0 +1,76 @@
+use std.spec.*
+
+use std.common.web.simple_browser_page.{SimpleBrowserPageState, SimpleBrowserTarget,
+    simple_browser_render_remote_page, simple_browser_hit_target,
+    simple_browser_set_field_value, simple_browser_submit_get_url}
+
+fn _find_target(page: SimpleBrowserPageState, kind: text) -> SimpleBrowserTarget?:
+    var idx = 0
+    while idx < page.targets.len():
+        if page.targets[idx].kind == kind:
+            return Some(page.targets[idx])
+        idx = idx + 1
+    nil
+
+describe "Simple browser page adapter":
+
+    it "collects anchor and form targets from rendered html":
+        val html = "<html><body><a href='/next'>Next</a><form action='/search' method='get'><input name='q' value='hello'><button>Go</button></form></body></html>"
+        val page = simple_browser_render_remote_page("https://example.com/start", html, 320, 240)
+
+        val anchor_target = _find_target(page, "anchor")
+        match anchor_target:
+            Some(target) =>
+                expect(target.action).to_equal("https://example.com/next")
+                expect(target.width).to_be_greater_than(0)
+            nil =>
+                expect(false).to_equal(true)
+
+        val field_target = _find_target(page, "field")
+        match field_target:
+            Some(target) =>
+                expect(target.field_key.len()).to_be_greater_than(0)
+            nil =>
+                expect(false).to_equal(true)
+
+        val submit_target = _find_target(page, "submit")
+        match submit_target:
+            Some(target) =>
+                expect(target.form_key.len()).to_be_greater_than(0)
+                expect(target.action).to_equal("https://example.com/search")
+            nil =>
+                expect(false).to_equal(true)
+
+    it "preserves field edits and builds GET submission urls":
+        val html = "<html><body><form action='/search' method='get'><input name='q' value='hello'><button>Go</button></form></body></html>"
+        val page = simple_browser_render_remote_page("https://example.com/start", html, 320, 240)
+
+        val field_target = _find_target(page, "field")
+        val submit_target = _find_target(page, "submit")
+        match field_target:
+            Some(field_hit) =>
+                match submit_target:
+                    Some(submit_hit) =>
+                        val edited = simple_browser_set_field_value(page, field_hit.field_key, "cats and dogs")
+                        val next_url = simple_browser_submit_get_url(edited, submit_hit.form_key, submit_hit.action)
+                        expect(next_url).to_equal("https://example.com/search?q=cats+and+dogs")
+                    nil =>
+                        expect(false).to_equal(true)
+            nil =>
+                expect(false).to_equal(true)
+
+    it "hit tests the rendered target rectangles":
+        val html = "<html><body><a href='/go'>Go</a></body></html>"
+        val page = simple_browser_render_remote_page("https://example.com/base", html, 320, 240)
+        val anchor_target = _find_target(page, "anchor")
+        match anchor_target:
+            Some(target) =>
+                val hit = simple_browser_hit_target(page, target.x + 1, target.y + 1)
+                match hit:
+                    Some(resolved) =>
+                        expect(resolved.kind).to_equal("anchor")
+                        expect(resolved.action).to_equal("https://example.com/go")
+                    nil =>
+                        expect(false).to_equal(true)
+            nil =>
+                expect(false).to_equal(true)

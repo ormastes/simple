@@ -1,0 +1,147 @@
+#!/bin/sh
+# SimpleOS QEMU Runner — RISC-V 32 (OpenSBI virt machine)
+#
+# Usage:
+#   sh scripts/qemu_riscv32.shs              # boot and validate serial output
+#   sh scripts/qemu_riscv32.shs --skip-build # use prebuilt kernel
+#
+# Exit codes:
+#   0 — boot markers found or QEMU/kernel unavailable (SKIP)
+#   1 — boot failed or marker missing
+
+REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+KERNEL="$REPO_ROOT/build/os/simpleos_riscv32.elf"
+SERIAL_LOG="$REPO_ROOT/build/os/serial_riscv32.log"
+TIMEOUT_SEC=30
+SKIP_BUILD=0
+
+# ---------------------------------------------------------------------------
+# Argument parsing
+# ---------------------------------------------------------------------------
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --skip-build) SKIP_BUILD=1 ;;
+        *)            echo "Unknown option: $1"; exit 1 ;;
+    esac
+    shift
+done
+
+# ---------------------------------------------------------------------------
+# Locate timeout command
+# ---------------------------------------------------------------------------
+TIMEOUT_CMD=""
+if command -v timeout >/dev/null 2>&1; then
+    TIMEOUT_CMD="timeout"
+elif command -v gtimeout >/dev/null 2>&1; then
+    TIMEOUT_CMD="gtimeout"
+fi
+
+# ---------------------------------------------------------------------------
+# Check QEMU availability
+# ---------------------------------------------------------------------------
+if ! command -v qemu-system-riscv32 >/dev/null 2>&1; then
+    echo "SKIP: qemu-system-riscv32 not found"
+    exit 0
+fi
+
+# ---------------------------------------------------------------------------
+# Build kernel (unless --skip-build or compiler absent)
+# ---------------------------------------------------------------------------
+if [ "$SKIP_BUILD" -eq 0 ] && [ -x "$REPO_ROOT/bin/simple" ]; then
+    echo "[build] Building SimpleOS riscv32 kernel..."
+    mkdir -p "$REPO_ROOT/build/os"
+    "$REPO_ROOT/bin/simple" native-build \
+        --entry examples/simple_os/arch/riscv32/os_entry.spl \
+        --target riscv32-unknown-none \
+        -o "$KERNEL" \
+        --linker-script examples/simple_os/arch/riscv32/linker.ld \
+        --source src/os 2>&1
+    BUILD_RC=$?
+    if [ "$BUILD_RC" -ne 0 ]; then
+        echo "FAIL: Kernel build failed (exit $BUILD_RC)"
+        exit 1
+    fi
+fi
+
+# ---------------------------------------------------------------------------
+# Check kernel binary
+# ---------------------------------------------------------------------------
+if [ ! -f "$KERNEL" ]; then
+    echo "SKIP: Kernel not found at $KERNEL"
+    echo "  Build with: bin/simple native-build --entry examples/simple_os/arch/riscv32/os_entry.spl \\"
+    echo "    --target riscv32-unknown-none -o $KERNEL \\"
+    echo "    --linker-script examples/simple_os/arch/riscv32/linker.ld"
+    exit 0
+fi
+
+# ---------------------------------------------------------------------------
+# Boot QEMU — OpenSBI virt machine, serial to log file
+# ---------------------------------------------------------------------------
+echo "[boot] Booting SimpleOS riscv32 in QEMU (timeout: ${TIMEOUT_SEC}s)..."
+rm -f "$SERIAL_LOG"
+
+QEMU_ARGS="-machine virt -cpu rv32 -m 128M \
+    -bios default \
+    -kernel $KERNEL \
+    -serial file:$SERIAL_LOG \
+    -display none \
+    -no-reboot"
+
+if [ -n "$TIMEOUT_CMD" ]; then
+    $TIMEOUT_CMD "$TIMEOUT_SEC" qemu-system-riscv32 $QEMU_ARGS 2>/dev/null
+    QEMU_EXIT=$?
+else
+    qemu-system-riscv32 $QEMU_ARGS 2>/dev/null &
+    QEMU_PID=$!
+    sleep "$TIMEOUT_SEC"
+    kill "$QEMU_PID" 2>/dev/null
+    wait "$QEMU_PID" 2>/dev/null
+    QEMU_EXIT=$?
+fi
+
+echo "[boot] QEMU exited with code: $QEMU_EXIT"
+
+# ---------------------------------------------------------------------------
+# Check serial output
+# ---------------------------------------------------------------------------
+if [ ! -f "$SERIAL_LOG" ]; then
+    echo "FAIL: No serial output captured"
+    exit 1
+fi
+
+echo "[boot] Serial output:"
+head -50 "$SERIAL_LOG"
+echo ""
+
+# ---------------------------------------------------------------------------
+# Marker checks
+# ---------------------------------------------------------------------------
+PASS=0
+FAIL=0
+
+check_marker() {
+    _name="$1"
+    _pattern="$2"
+    if grep -qiE "$_pattern" "$SERIAL_LOG"; then
+        echo "PASS: $_name"
+        PASS=$((PASS + 1))
+    else
+        echo "FAIL: $_name"
+        FAIL=$((FAIL + 1))
+    fi
+}
+
+check_marker "Boot banner"        "SimpleOS|simpleos|spl_start"
+check_marker "UART / SBI console" "UART|SBI|serial"
+check_marker "Boot complete"      "boot complete|SimpleOS ready|TEST PASSED"
+
+echo ""
+echo "=== Results: $PASS passed, $FAIL failed ==="
+
+if [ "$FAIL" -gt 0 ]; then
+    echo "TEST FAILED"
+    exit 1
+fi
+
+echo "TEST PASSED"
+exit 0
