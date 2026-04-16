@@ -117,6 +117,12 @@ pub mod resource_registry;
 // Phase 16: Package management operations
 pub mod package;
 
+// Phase 17: Cryptographic comparison
+pub mod crypto_compare;
+
+// Phase 18: WebSocket masking
+pub mod ws_mask;
+
 // Re-export all public FFI functions for backward compatibility
 // Phase 1
 #[cfg(unix)]
@@ -174,3 +180,9 @@ pub use resource_registry::*;
 
 // Phase 16
 pub use package::*;
+
+// Phase 17
+pub use crypto_compare::*;
+
+// Phase 18
+pub use ws_mask::*;

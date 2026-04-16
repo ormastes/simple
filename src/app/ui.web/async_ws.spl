@@ -10,6 +10,8 @@ use std.nogc_async_mut.concurrent.channel.{Channel}
 use common.ui.widget.{UIEvent}
 use app.ui.web.ws_handler.{send_ws_text}
 
+extern fn rt_ws_mask_bytes(data: [u8], mask_key: [u8]) -> [u8]
+
 # =========================================================================
 # WebSocket Reader (runs in client thread)
 # =========================================================================
@@ -37,14 +39,37 @@ fn read_ws_frame(stream: TcpStream) -> text?:
     """Read a single WebSocket text frame.
 
     Returns the decoded payload text, or nil on error/close.
-    Handles masking as required by RFC 6455 for client-to-server frames.
+    Handles masking, ping/pong, and close per RFC 6455.
+    Uses a loop for control frames to avoid stack overflow from recursive calls.
     """
-    # Read first 2 bytes: FIN+opcode and mask+length
+    loop:
+        val frame = _read_single_frame(stream)
+        if frame == nil:
+            return nil
+        val opcode = frame.opcode
+        if opcode == 0x08:
+            _send_close_response(stream, frame.payload)
+            return nil
+        if opcode == 0x09:
+            _send_pong_with_payload(stream, frame.payload)
+            pass_do_nothing
+        elif opcode == 0x0A:
+            pass_do_nothing
+        elif opcode == 0x01:
+            return bytes_to_text_simple(frame.payload)
+        else:
+            return nil
+
+class _WsFrame:
+    opcode: i64
+    payload: [u8]
+
+fn _read_single_frame(stream: TcpStream) -> _WsFrame?:
+    """Read and decode one complete WebSocket frame from the stream."""
     match stream.read(2):
         Err(_):
             return nil
         Ok(header):
-            # Extract bytes via iteration to avoid .len() + [index] interpreter bug
             var byte0: u8 = 0
             var byte1: u8 = 0
             var hdr_idx = 0
@@ -57,19 +82,10 @@ fn read_ws_frame(stream: TcpStream) -> text?:
             if hdr_idx < 2:
                 return nil
 
-            val opcode = byte0 & 0x0F
-            # Close frame
-            if opcode == 0x08:
-                return nil
-
-            # Only handle text frames (opcode 1)
-            if opcode != 0x01:
-                return nil
-
+            val opcode = (byte0 & 0x0F) as i64
             val masked = (byte1 & 0x80) != 0
             var payload_len = (byte1 & 0x7F) as i64
 
-            # Extended payload length
             if payload_len == 126:
                 match stream.read(2):
                     Ok(ext):
@@ -107,12 +123,10 @@ fn read_ws_frame(stream: TcpStream) -> text?:
                             ei = ei + 1
                         if ei < 8:
                             return nil
-                        # Simplified: only use lower 4 bytes
                         payload_len = e4 * 16777216 + e5 * 65536 + e6 * 256 + e7
                     Err(_):
                         return nil
 
-            # Read mask key (4 bytes) if masked
             var mask_key: [u8] = []
             if masked:
                 match stream.read(4):
@@ -126,33 +140,17 @@ fn read_ws_frame(stream: TcpStream) -> text?:
                     Err(_):
                         return nil
 
-            # Read payload
             if payload_len == 0:
-                return ""
+                return _WsFrame(opcode: opcode, payload: [])
 
             match stream.read_exact(payload_len):
                 Err(_):
                     return nil
                 Ok(payload):
-                    # Unmask payload
-                    var decoded: [u8] = []
-                    var chunk: [u8] = []
-                    var i = 0
-                    while i < payload.len():
-                        if masked:
-                            val unmasked = payload[i] ^ mask_key[i % 4]
-                            chunk = chunk.push(unmasked)
-                        else:
-                            chunk = chunk.push(payload[i])
-                        if chunk.len() >= 256:
-                            decoded = decoded + chunk
-                            chunk = []
-                        i = i + 1
-                    if chunk.len() > 0:
-                        decoded = decoded + chunk
-
-                    # Convert bytes to text
-                    return bytes_to_text_simple(decoded)
+                    var decoded: [u8] = payload
+                    if masked:
+                        decoded = rt_ws_mask_bytes(payload, mask_key)
+                    return _WsFrame(opcode: opcode, payload: decoded)
 
 fn bytes_to_text_simple(data: [u8]) -> text:
     """Convert byte array to text (ASCII subset)."""
@@ -247,6 +245,24 @@ fn extract_field(json: text, field: text) -> text:
         pos = pos + 1
 
     return value
+
+fn _send_close_response(stream: TcpStream, payload: [u8]):
+    """Send a close frame echoing the received close payload (status + reason)."""
+    val len = payload.len()
+    if len == 0:
+        stream.write_all([0x88u8, 0x00u8])
+    else:
+        var frame: [u8] = [0x88u8, len.to_u8()]
+        frame = frame + payload
+        stream.write_all(frame)
+
+fn _send_pong_with_payload(stream: TcpStream, payload: [u8]):
+    """Send a pong frame echoing the ping payload (RFC 6455 section 5.5.3)."""
+    val len = payload.len()
+    var frame: [u8] = [0x8Au8, len.to_u8()]
+    if len > 0:
+        frame = frame + payload
+    stream.write_all(frame)
 
 # =========================================================================
 # WebSocket Send

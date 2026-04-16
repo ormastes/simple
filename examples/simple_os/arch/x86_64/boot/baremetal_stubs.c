@@ -1474,41 +1474,6 @@ static int64_t _nvme_read_sector(uint64_t device_idx, uint64_t lba, uint64_t buf
     return (int64_t)_nvme_read_sector_impl(lba, buf);
 }
 
-/* Write one sector to NVMe namespace 1.
- * lba     = logical block address
- * buf     = source buffer (must contain one sector of data)
- * Returns 0 on success, negative on error. */
-static int _nvme_write_sector_impl(uint64_t lba, const void *buf)
-{
-    if (!_nvme.initialized) {
-        int rc = _nvme_init_controller();
-        if (rc < 0) return rc;
-    }
-    if (!buf) return -14; /* EFAULT */
-
-    /* NVMe I/O Write: opcode 0x01, one logical block. */
-    uint32_t cdw10 = (uint32_t)(lba & 0xFFFFFFFF);
-    uint32_t cdw11 = (uint32_t)(lba >> 32);
-    uint32_t cdw12 = 0; /* 1 sector (0-based) */
-
-    return nvme_io_cmd(0x01, 1,
-                       (uint64_t)(uintptr_t)buf, 0,
-                       cdw10, cdw11, cdw12);
-}
-
-/* Syscall 94 handler: NvmeWriteSector
- * a0 = device index (ignored, only one NVMe device supported)
- * a1 = LBA
- * a2 = source buffer address (caller-provided, must contain one sector)
- * Returns 0 on success, negative errno on failure. */
-static int64_t _nvme_write_sector(uint64_t device_idx, uint64_t lba, uint64_t buf_addr)
-{
-    (void)device_idx;
-    const void *buf = (const void *)(uintptr_t)buf_addr;
-    if (!buf) return -14; /* EFAULT */
-    return (int64_t)_nvme_write_sector_impl(lba, buf);
-}
-
 /* _nvme_init_and_read_sector0 — callable from Simple code or early boot
  * Initializes NVMe and reads sector 0 (FAT32 BPB).
  * Returns 0 on success, prints diagnostics to serial. */
@@ -1645,21 +1610,9 @@ RuntimeValue rt_fat32_file_exists(RuntimeValue name_rv)
 
 RuntimeValue rt_fat32_write_file_text(RuntimeValue name_rv, RuntimeValue content_rv)
 {
-    const char *name = "";
-    const uint8_t *content = (const uint8_t *)"";
-    uint32_t content_len = 0;
-    if (IS_HEAP(name_rv)) {
-        RuntimeString *s = (RuntimeString *)DECODE_PTR(name_rv);
-        if (s) name = s->data;
-    }
-    if (IS_HEAP(content_rv)) {
-        RuntimeString *s = (RuntimeString *)DECODE_PTR(content_rv);
-        if (s) {
-            content = (const uint8_t *)s->data;
-            content_len = s->len;
-        }
-    }
-    return fat32_write_file(name, content, content_len) == 0 ? TRUE_VALUE : FALSE_VALUE;
+    (void)name_rv;
+    (void)content_rv;
+    return FALSE_VALUE;
 }
 
 static struct {
@@ -1673,9 +1626,6 @@ static struct {
     uint32_t total_clusters;
     int initialized;
 } _fat32;
-
-#define FAT32_C_FREE 0x00000000u
-#define FAT32_C_EOC  0x0FFFFFFFu
 
 /* Helper: print a uint32_t in hex without 0x prefix (compact BPB dump) */
 static void _fat32_puthex(uint32_t v) {
@@ -1768,53 +1718,6 @@ static uint32_t _fat32_next_cluster(uint32_t cluster) {
                    | ((uint32_t)sector_buf[fat_offset_in_sector + 3] << 24);
     entry &= 0x0FFFFFFF; /* mask upper 4 bits (reserved in FAT32) */
     return entry;
-}
-
-static int _fat32_write_cluster(uint32_t cluster, const uint8_t *buf) {
-    uint32_t sector = _fat32_cluster_to_sector(cluster);
-    for (uint32_t i = 0; i < _fat32.sectors_per_cluster; i++) {
-        if (_nvme_write_sector_impl(sector + i, buf + i * 512) != 0)
-            return -1;
-    }
-    return 0;
-}
-
-static int _fat32_write_fat_entry(uint32_t cluster, uint32_t value) {
-    uint32_t fat_offset = cluster * 4;
-    uint32_t fat_sector = _fat32.reserved_sectors + (fat_offset / 512);
-    uint32_t fat_offset_in_sector = fat_offset % 512;
-    uint8_t *sector_buf = (uint8_t *)nvme_alloc_aligned(512, 512);
-    if (!sector_buf) return -1;
-
-    for (uint32_t fat_index = 0; fat_index < _fat32.num_fats; fat_index++) {
-        uint32_t sector_no = fat_sector + fat_index * _fat32.fat_size;
-        if (_nvme_read_sector_impl(sector_no, sector_buf) != 0)
-            return -1;
-        sector_buf[fat_offset_in_sector] = (uint8_t)(value & 0xFF);
-        sector_buf[fat_offset_in_sector + 1] = (uint8_t)((value >> 8) & 0xFF);
-        sector_buf[fat_offset_in_sector + 2] = (uint8_t)((value >> 16) & 0xFF);
-        sector_buf[fat_offset_in_sector + 3] = (uint8_t)((value >> 24) & 0x0F);
-        if (_nvme_write_sector_impl(sector_no, sector_buf) != 0)
-            return -1;
-    }
-    return 0;
-}
-
-static uint32_t _fat32_alloc_cluster(void) {
-    for (uint32_t cluster = 2; cluster < _fat32.total_clusters + 2; cluster++) {
-        if (_fat32_next_cluster(cluster) == FAT32_C_FREE) {
-            if (_fat32_write_fat_entry(cluster, FAT32_C_EOC) != 0)
-                return 0;
-            uint32_t cluster_bytes = _fat32.sectors_per_cluster * 512;
-            uint8_t *zero_buf = (uint8_t *)nvme_alloc_aligned(cluster_bytes, 512);
-            if (!zero_buf) return 0;
-            __builtin_memset(zero_buf, 0, cluster_bytes);
-            if (_fat32_write_cluster(cluster, zero_buf) != 0)
-                return 0;
-            return cluster;
-        }
-    }
-    return 0;
 }
 
 /* Convert a filename like "hello.txt" to FAT32 8.3 format (uppercase, space-padded).
@@ -1913,87 +1816,10 @@ int fat32_read_file(const char *name, uint8_t *buf, uint32_t max_size,
 }
 
 int fat32_write_file(const char *name, const uint8_t *buf, uint32_t size) {
-    if (!_fat32.initialized) {
-        if (_fat32_init() != 0) return -1;
-    }
-
-    uint32_t cluster_bytes = _fat32.sectors_per_cluster * 512;
-    if (size > cluster_bytes) return -1; /* smoke path only needs one cluster */
-
-    char name83[11];
-    _fat32_make_8_3_name(name, name83);
-
-    uint8_t *dir_buf = (uint8_t *)nvme_alloc_aligned(cluster_bytes, 512);
-    if (!dir_buf) return -1;
-
-    uint32_t dir_cluster = _fat32.root_cluster;
-    uint32_t entry_cluster = 0;
-    uint32_t entry_offset = 0;
-    uint32_t file_cluster = 0;
-    int found = 0;
-
-    while (dir_cluster >= 2 && dir_cluster < 0x0FFFFFF8) {
-        if (_fat32_read_cluster(dir_cluster, dir_buf) != 0)
-            return -1;
-
-        int entries_per_cluster = (int)(cluster_bytes / 32);
-        for (int i = 0; i < entries_per_cluster; i++) {
-            uint8_t *entry = dir_buf + i * 32;
-            if (entry[0] == 0x00 || entry[0] == 0xE5) {
-                entry_cluster = dir_cluster;
-                entry_offset = (uint32_t)(i * 32);
-                goto slot_ready;
-            }
-            if ((entry[11] & 0x0F) == 0x0F) continue;
-            if (memcmp(entry, name83, 11) == 0) {
-                uint32_t lo = (uint32_t)entry[26] | ((uint32_t)entry[27] << 8);
-                uint32_t hi = (uint32_t)entry[20] | ((uint32_t)entry[21] << 8);
-                file_cluster = lo | (hi << 16);
-                entry_cluster = dir_cluster;
-                entry_offset = (uint32_t)(i * 32);
-                found = 1;
-                goto slot_ready;
-            }
-        }
-        dir_cluster = _fat32_next_cluster(dir_cluster);
-    }
-
-slot_ready:
-    if (entry_cluster == 0)
-        return -1;
-
-    if (!found || file_cluster < 2) {
-        file_cluster = _fat32_alloc_cluster();
-        if (file_cluster < 2)
-            return -1;
-    }
-
-    uint8_t *file_buf = (uint8_t *)nvme_alloc_aligned(cluster_bytes, 512);
-    if (!file_buf) return -1;
-    __builtin_memset(file_buf, 0, cluster_bytes);
-    if (size > 0)
-        __builtin_memcpy(file_buf, buf, size);
-    if (_fat32_write_cluster(file_cluster, file_buf) != 0)
-        return -1;
-
-    if (_fat32_read_cluster(entry_cluster, dir_buf) != 0)
-        return -1;
-    uint8_t *entry = dir_buf + entry_offset;
-    __builtin_memset(entry, 0, 32);
-    __builtin_memcpy(entry, name83, 11);
-    entry[11] = ATTR_ARCHIVE;
-    entry[20] = (uint8_t)((file_cluster >> 16) & 0xFF);
-    entry[21] = (uint8_t)((file_cluster >> 24) & 0xFF);
-    entry[26] = (uint8_t)(file_cluster & 0xFF);
-    entry[27] = (uint8_t)((file_cluster >> 8) & 0xFF);
-    entry[28] = (uint8_t)(size & 0xFF);
-    entry[29] = (uint8_t)((size >> 8) & 0xFF);
-    entry[30] = (uint8_t)((size >> 16) & 0xFF);
-    entry[31] = (uint8_t)((size >> 24) & 0xFF);
-    if (_fat32_write_cluster(entry_cluster, dir_buf) != 0)
-        return -1;
-
-    return 0;
+    (void)name;
+    (void)buf;
+    (void)size;
+    return -1;
 }
 
 /* List root directory entries to serial (for diagnostics). */
@@ -3714,8 +3540,6 @@ int64_t userlib__syscall_raw__syscall(uint64_t id, uint64_t a0, uint64_t a1,
             return _fat32_read_file_syscall(a0, a1, a2);
         case 89: /* Fat32ListDir: list root directory entries to serial */
             return (int64_t)fat32_list_dir();
-        case 94: /* NvmeWriteSector: a0=device_idx, a1=lba, a2=buf_addr */
-            return _nvme_write_sector(a0, a1, a2);
         case 20: /* IPC_SEND: a0=port, a1=method, a2=flags, a3=buf, a4=len */
             return _ipc_send_handler(a0, a1, a2, a3, a4);
         case 21: /* IPC_RECV: a0=port, a1=reply_buf, a2=max_len */

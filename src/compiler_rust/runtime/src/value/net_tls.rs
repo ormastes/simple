@@ -1,17 +1,24 @@
 // ============================================================================
-// TLS transport FFI shims — rustls-backed server, TCP-shim client
+// TLS transport FFI — rustls-backed server + client
 // ============================================================================
 //
-// Server path: `rt_tls_server_create/accept/read/write/close/shutdown` run real
-// TLS via rustls 0.23 (ring crypto provider; aws-lc-rs is not vendored).
+// Both server and client paths use real TLS via rustls 0.23 (ring crypto
+// provider; aws-lc-rs is not vendored).
+//
+// Server: `rt_tls_server_create/accept/read/write/close/shutdown`.
 // Listeners own a `std::net::TcpListener` + an `Arc<rustls::ServerConfig>`;
 // per-connection state is a `(ServerConnection, TcpStream)` pair protected by
 // a fine-grained mutex so the per-connection thread_spawn2 pattern in
 // `src/app/ui.web/tls_serve_loop.spl` can serve multiple TLS clients in
-// parallel.  Handles live in a separate table from the TCP-native handles;
-// `is_valid_handle(h)` only checks `h != 0` so the two namespaces coexist.
+// parallel.
 //
-// Client path: still a thin shim over plain TCP — v3 roadmap.
+// Client: `rt_tls_client_connect/read/write/close`.
+// Uses a lazily-initialized `ClientConfig` with Mozilla CA roots (webpki-roots).
+// Per-connection state is a `(ClientConnection, TcpStream)` pair in a separate
+// handle table (`TLS_CLIENT_CONNS`).
+//
+// Handles live in a separate table from the TCP-native handles;
+// `is_valid_handle(h)` only checks `h != 0` so the two namespaces coexist.
 
 static NEXT_TLS_FAKE_HANDLE: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(1);
 
@@ -42,6 +49,27 @@ lazy_static::lazy_static! {
         std::sync::Mutex::new(HashMap::new());
     static ref TLS_CONNS: std::sync::Mutex<HashMap<i64, std::sync::Arc<std::sync::Mutex<TlsConnEntry>>>> =
         std::sync::Mutex::new(HashMap::new());
+}
+
+struct TlsClientConnEntry {
+    conn: rustls::ClientConnection,
+    stream: std::net::TcpStream,
+}
+
+lazy_static::lazy_static! {
+    static ref TLS_CLIENT_CONNS: std::sync::Mutex<HashMap<i64, std::sync::Arc<std::sync::Mutex<TlsClientConnEntry>>>> =
+        std::sync::Mutex::new(HashMap::new());
+    static ref TLS_CLIENT_CONFIG: std::sync::Arc<rustls::ClientConfig> = {
+        let mut root_store = rustls::RootCertStore::empty();
+        root_store.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+        let provider = std::sync::Arc::new(rustls::crypto::ring::default_provider());
+        let config = rustls::ClientConfig::builder_with_provider(provider)
+            .with_safe_default_protocol_versions()
+            .unwrap()
+            .with_root_certificates(root_store)
+            .with_no_client_auth();
+        std::sync::Arc::new(config)
+    };
 }
 
 const TLS_HANDLE_BIT: i64 = 0x4000_0000_0000_0000;
@@ -146,40 +174,120 @@ fn write_bytes_to_stream(handle: i64, data: crate::value::RuntimeValue) -> i64 {
     if err == NetError::Success as i64 { written } else { -err }
 }
 
+fn tls_client_connect_impl(host_str: &str, port: i64, sni_name: &str) -> i64 {
+    let server_name = match rustls::pki_types::ServerName::try_from(sni_name.to_string()) {
+        Ok(sn) => sn,
+        Err(e) => {
+            eprintln!("rt_tls_client_connect: invalid server name '{}': {}", sni_name, e);
+            return -1;
+        }
+    };
+    let conn = match rustls::ClientConnection::new(TLS_CLIENT_CONFIG.clone(), server_name) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("rt_tls_client_connect: ClientConnection::new: {}", e);
+            return -1;
+        }
+    };
+    let addr = format!("{}:{}", host_str, port);
+    let tcp_stream = match std::net::TcpStream::connect(&addr) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("rt_tls_client_connect: TCP connect {}: {}", addr, e);
+            return -1;
+        }
+    };
+    let handle = next_rustls_conn_handle();
+    TLS_CLIENT_CONNS.lock().unwrap().insert(
+        handle,
+        std::sync::Arc::new(std::sync::Mutex::new(TlsClientConnEntry { conn, stream: tcp_stream })),
+    );
+    // Complete the TLS handshake eagerly so callers can read/write immediately
+    {
+        let entry_arc = TLS_CLIENT_CONNS.lock().unwrap().get(&handle).cloned();
+        if let Some(arc) = entry_arc {
+            let mut entry_guard = arc.lock().unwrap();
+            let entry = &mut *entry_guard;
+            let mut tls_stream = rustls::Stream::new(&mut entry.conn, &mut entry.stream);
+            if let Err(e) = std::io::Write::flush(&mut tls_stream) {
+                eprintln!("rt_tls_client_connect: TLS handshake flush: {}", e);
+                drop(entry_guard);
+                TLS_CLIENT_CONNS.lock().unwrap().remove(&handle);
+                return -1;
+            }
+        }
+    }
+    handle
+}
+
 #[no_mangle]
-// TODO: [runtime][P2] rt_tls_client_* is still TCP shim — add real rustls::ClientConnection path
 pub extern "C" fn rt_tls_client_connect(host: crate::value::RuntimeValue, port: i64) -> i64 {
     let Some((ptr, len)) = runtime_text_ptr_len(host) else {
-        return -(NetError::InvalidAddress as i64);
+        return -1;
     };
     let host_str = unsafe { std::str::from_utf8_unchecked(std::slice::from_raw_parts(ptr as *const u8, len as usize)) };
-    let addr = format!("{host_str}:{port}");
-    let (handle, _local_addr, err) = unsafe { native_tcp_connect(addr.as_ptr() as i64, addr.len() as i64) };
-    if err == NetError::Success as i64 { handle } else { -err }
+    tls_client_connect_impl(host_str, port, host_str)
 }
 
 #[no_mangle]
 pub extern "C" fn rt_tls_client_connect_with_sni(
     host: crate::value::RuntimeValue,
     port: i64,
-    _server_name: crate::value::RuntimeValue,
+    server_name: crate::value::RuntimeValue,
 ) -> i64 {
-    rt_tls_client_connect(host, port)
+    let Some((h_ptr, h_len)) = runtime_text_ptr_len(host) else { return -1; };
+    let Some((s_ptr, s_len)) = runtime_text_ptr_len(server_name) else { return -1; };
+    let host_str = unsafe { std::str::from_utf8_unchecked(std::slice::from_raw_parts(h_ptr as *const u8, h_len as usize)) };
+    let sni_str = unsafe { std::str::from_utf8_unchecked(std::slice::from_raw_parts(s_ptr as *const u8, s_len as usize)) };
+    tls_client_connect_impl(host_str, port, sni_str)
 }
 
 #[no_mangle]
 pub extern "C" fn rt_tls_client_write(conn: i64, data: crate::value::RuntimeValue) -> i64 {
-    write_text_to_stream(conn, data)
+    let Some((ptr, len)) = runtime_text_ptr_len(data) else { return -1; };
+    if ptr == 0 || len < 0 { return -1; }
+    let slice = unsafe { std::slice::from_raw_parts(ptr as *const u8, len as usize) };
+    let entry_arc = {
+        let guard = TLS_CLIENT_CONNS.lock().unwrap();
+        match guard.get(&conn) { Some(a) => a.clone(), None => return -1 }
+    };
+    let mut entry_guard = entry_arc.lock().unwrap();
+    let entry = &mut *entry_guard;
+    let mut tls_stream = rustls::Stream::new(&mut entry.conn, &mut entry.stream);
+    match tls_stream.write_all(slice) {
+        Ok(()) => slice.len() as i64,
+        Err(_) => -1,
+    }
 }
 
 #[no_mangle]
 pub extern "C" fn rt_tls_client_read(conn: i64, max_bytes: i64) -> crate::value::RuntimeValue {
-    read_text_from_stream(conn, max_bytes)
+    if max_bytes <= 0 { return empty_text(); }
+    let entry_arc = {
+        let guard = TLS_CLIENT_CONNS.lock().unwrap();
+        match guard.get(&conn) { Some(a) => a.clone(), None => return empty_text() }
+    };
+    let size = max_bytes.min(65_536) as usize;
+    let mut buf = vec![0u8; size];
+    let n = {
+        let mut entry_guard = entry_arc.lock().unwrap();
+        let entry = &mut *entry_guard;
+        let mut tls_stream = rustls::Stream::new(&mut entry.conn, &mut entry.stream);
+        match tls_stream.read(&mut buf) { Ok(n) => n, Err(_) => return empty_text() }
+    };
+    if n == 0 { return empty_text(); }
+    unsafe { crate::value::collections::rt_string_new(buf.as_ptr(), n as u64) }
 }
 
 #[no_mangle]
 pub extern "C" fn rt_tls_client_close(conn: i64) -> bool {
-    native_tcp_close(conn) == NetError::Success as i64
+    let removed = TLS_CLIENT_CONNS.lock().unwrap().remove(&conn);
+    if let Some(arc) = removed {
+        let mut entry = arc.lock().unwrap();
+        entry.conn.send_close_notify();
+        let _ = entry.stream.shutdown(std::net::Shutdown::Both);
+        true
+    } else { false }
 }
 
 #[no_mangle]
@@ -418,7 +526,30 @@ pub extern "C" fn rt_tls_get_peer_cert(_conn: i64) -> i64 {
 }
 
 #[no_mangle]
-pub extern "C" fn rt_tls_get_protocol_version(_conn: i64) -> crate::value::RuntimeValue {
+pub extern "C" fn rt_tls_get_protocol_version(conn: i64) -> crate::value::RuntimeValue {
+    // Check server connections first, then client connections
+    if let Some(arc) = TLS_CONNS.lock().unwrap().get(&conn).cloned() {
+        let entry = arc.lock().unwrap();
+        if let Some(v) = entry.conn.protocol_version() {
+            let s = match v {
+                rustls::ProtocolVersion::TLSv1_2 => "TLSv1.2",
+                rustls::ProtocolVersion::TLSv1_3 => "TLSv1.3",
+                _ => "TLS",
+            };
+            return unsafe { crate::value::collections::rt_string_new(s.as_ptr(), s.len() as u64) };
+        }
+    }
+    if let Some(arc) = TLS_CLIENT_CONNS.lock().unwrap().get(&conn).cloned() {
+        let entry = arc.lock().unwrap();
+        if let Some(v) = entry.conn.protocol_version() {
+            let s = match v {
+                rustls::ProtocolVersion::TLSv1_2 => "TLSv1.2",
+                rustls::ProtocolVersion::TLSv1_3 => "TLSv1.3",
+                _ => "TLS",
+            };
+            return unsafe { crate::value::collections::rt_string_new(s.as_ptr(), s.len() as u64) };
+        }
+    }
     unsafe { crate::value::collections::rt_string_new(b"tcp".as_ptr(), 3) }
 }
 
