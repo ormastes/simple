@@ -1,0 +1,96 @@
+@allow(primitive_api)
+# game2d — TileMap
+#
+# Grid-based tile renderer.  Each cell holds a tile index into the tileset
+# texture.  -1 means empty (skipped).  The tileset is a horizontal strip
+# of equal-sized tiles.
+#
+# Usage:
+#   use std.game2d.tilemap.{TileMap}
+
+use std.gpu.engine2d.engine.{Engine2D}
+use std.game2d.camera.{Camera2D}
+
+# ============================================================================
+# TileMap
+# ============================================================================
+
+class TileMap:
+    """Grid-based tile map drawn from a tileset texture.
+
+    tileset_texture_id — opaque handle to a texture atlas.
+    tile_w, tile_h     — size of each tile in the tileset (pixels).
+    grid               — 2D array [row][col] of tile indices (-1 = empty).
+    cols, rows         — grid dimensions cached for bounds checks.
+    """
+
+    tileset_texture_id: u64
+    tile_w: i32
+    tile_h: i32
+    grid: [[i32]]
+    cols: i32
+    rows: i32
+
+    static fn create(tid: u64, tw: i32, th: i32, grid: [[i32]]) -> TileMap:
+        """Create a TileMap from a tile size and 2D grid of tile indices."""
+        val r = grid.len()
+        val c = if r > 0: grid[0].len() else: 0
+        TileMap(
+            tileset_texture_id: tid,
+            tile_w: tw,
+            tile_h: th,
+            grid: grid,
+            cols: c,
+            rows: r
+        )
+
+    fn tile_at(row: i32, col: i32) -> i32:
+        """Return the tile index at (row, col), or -1 if out of bounds."""
+        if row < 0 or row >= self.rows:
+            return -1
+        if col < 0 or col >= self.cols:
+            return -1
+        self.grid[row][col]
+
+    me render_tilemap(engine: Engine2D, camera: Camera2D, origin_x: f64, origin_y: f64):
+        """Draw all non-empty tiles onto engine, transformed through camera.
+
+        Each tile is drawn as a filled rectangle using a solid color derived
+        from the tile index (placeholder — real texture sampling would require
+        a TextureRegistry).  The tint encodes the tile index so tests can
+        distinguish tiles.
+        """
+        var row = 0
+        while row < self.rows:
+            var col = 0
+            while col < self.cols:
+                val idx = self.tile_at(row, col)
+                if idx >= 0:
+                    val world_x = origin_x + _i32_to_f64(col * self.tile_w)
+                    val world_y = origin_y + _i32_to_f64(row * self.tile_h)
+                    val (sx, sy) = camera.world_to_screen(world_x, world_y)
+                    val px = _f64_to_i32(sx)
+                    val py = _f64_to_i32(sy)
+                    val tw = self.tile_w
+                    val th = self.tile_h
+                    # Produce a recognizable per-tile color: pack tile index into blue channel
+                    val tile_color: u32 = _tile_color(idx)
+                    val total = tw * th
+                    var pixels: [u32] = [tile_color; total]
+                    engine.draw_image(px, py, tw, th, pixels)
+                col = col + 1
+            row = row + 1
+
+# ============================================================================
+# Helpers
+# ============================================================================
+
+fn _tile_color(idx: i32) -> u32:
+    """Produce a distinct ARGB color for each tile index (for testing)."""
+    val b: u32 = _i32_to_u32(idx & 0xFF)
+    val g: u32 = _i32_to_u32((idx >> 8) & 0xFF)
+    0xFF000000 | (g << 8) | b
+
+@extern fn _f64_to_i32(x: f64) -> i32
+@extern fn _i32_to_f64(x: i32) -> f64
+@extern fn _i32_to_u32(x: i32) -> u32

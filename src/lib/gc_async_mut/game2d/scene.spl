@@ -1,0 +1,190 @@
+@allow(primitive_api)
+# game2d — Scene (retained-mode scene graph)
+#
+# A Scene holds a heterogeneous list of child nodes.  Each node is one of:
+#   - Sprite
+#   - SpriteBatch
+#   - TileMap
+#   - Scene (nested sub-scene)
+#
+# update(dt_ms) recurses and calls tick on AnimatedSprites.
+# render(engine, camera) recurses and calls flush / draw_image.
+#
+# Usage:
+#   use std.game2d.scene.{Scene, SceneNode}
+
+use std.gpu.engine2d.engine.{Engine2D}
+use std.game2d.sprite.{Sprite, AnimatedSprite}
+use std.game2d.batch.{SpriteBatch}
+use std.game2d.camera.{Camera2D}
+use std.game2d.tilemap.{TileMap}
+
+# ============================================================================
+# SceneNode — tagged-union node type
+# ============================================================================
+
+class SceneNode:
+    """A node in the scene graph.  Exactly one of the optional fields is set."""
+
+    sprite: Sprite?
+    animated_sprite: AnimatedSprite?
+    batch: SpriteBatch?
+    tilemap: TileMap?
+    scene: Scene?
+
+    static fn from_sprite(s: Sprite) -> SceneNode:
+        SceneNode(
+            sprite: Some(s),
+            animated_sprite: nil,
+            batch: nil,
+            tilemap: nil,
+            scene: nil
+        )
+
+    static fn from_animated_sprite(s: AnimatedSprite) -> SceneNode:
+        SceneNode(
+            sprite: nil,
+            animated_sprite: Some(s),
+            batch: nil,
+            tilemap: nil,
+            scene: nil
+        )
+
+    static fn from_batch(b: SpriteBatch) -> SceneNode:
+        SceneNode(
+            sprite: nil,
+            animated_sprite: nil,
+            batch: Some(b),
+            tilemap: nil,
+            scene: nil
+        )
+
+    static fn from_tilemap(t: TileMap) -> SceneNode:
+        SceneNode(
+            sprite: nil,
+            animated_sprite: nil,
+            batch: nil,
+            tilemap: Some(t),
+            scene: nil
+        )
+
+    static fn from_scene(sc: Scene) -> SceneNode:
+        SceneNode(
+            sprite: nil,
+            animated_sprite: nil,
+            batch: nil,
+            tilemap: nil,
+            scene: Some(sc)
+        )
+
+# ============================================================================
+# Scene
+# ============================================================================
+
+class Scene:
+    """Root (or sub-root) of the retained-mode 2D scene graph.
+
+    Children are heterogeneous SceneNodes.  update() advances animation,
+    render() draws everything in insertion order (batches sort internally).
+    """
+
+    children: [SceneNode]
+    visible: bool
+    origin_x: f64
+    origin_y: f64
+
+    static fn create() -> Scene:
+        """Create an empty scene at world origin."""
+        Scene(children: [], visible: true, origin_x: 0.0, origin_y: 0.0)
+
+    static fn create_at(ox: f64, oy: f64) -> Scene:
+        """Create an empty scene with a world-space origin offset."""
+        Scene(children: [], visible: true, origin_x: ox, origin_y: oy)
+
+    # -------------------------------------------------------------------------
+    # Mutation helpers
+    # -------------------------------------------------------------------------
+
+    me add_sprite(s: Sprite):
+        self.children.push(SceneNode.from_sprite(s))
+
+    me add_animated_sprite(s: AnimatedSprite):
+        self.children.push(SceneNode.from_animated_sprite(s))
+
+    me add_batch(b: SpriteBatch):
+        self.children.push(SceneNode.from_batch(b))
+
+    me add_tilemap(t: TileMap):
+        self.children.push(SceneNode.from_tilemap(t))
+
+    me add_scene(sc: Scene):
+        self.children.push(SceneNode.from_scene(sc))
+
+    me add(node: SceneNode):
+        """Add a pre-built SceneNode."""
+        self.children.push(node)
+
+    fn child_count() -> i32:
+        self.children.len()
+
+    # -------------------------------------------------------------------------
+    # Update (advance animation)
+    # -------------------------------------------------------------------------
+
+    me update(dt_ms: f64):
+        """Recursively advance all animated nodes by dt_ms milliseconds."""
+        if not self.visible:
+            return
+        for node in self.children:
+            if val Some(anim) = node.animated_sprite:
+                anim.tick(dt_ms)
+            if val Some(sub) = node.scene:
+                sub.update(dt_ms)
+
+    # -------------------------------------------------------------------------
+    # Render
+    # -------------------------------------------------------------------------
+
+    me render(engine: Engine2D, camera: Camera2D):
+        """Recursively render all nodes onto engine using camera transform."""
+        if not self.visible:
+            return
+        for node in self.children:
+            if val Some(s) = node.sprite:
+                _draw_sprite(engine, camera, s)
+            if val Some(anim) = node.animated_sprite:
+                _draw_animated_sprite(engine, camera, anim)
+            if val Some(b) = node.batch:
+                b.flush(engine)
+            if val Some(t) = node.tilemap:
+                t.render_tilemap(engine, camera, self.origin_x, self.origin_y)
+            if val Some(sub) = node.scene:
+                sub.render(engine, camera)
+
+# ============================================================================
+# Private draw helpers
+# ============================================================================
+
+fn _draw_sprite(engine: Engine2D, camera: Camera2D, s: Sprite):
+    if not s.visible:
+        return
+    val (wx, wy) = s.transform.world_position()
+    val (sx, sy) = camera.world_to_screen(wx, wy)
+    val px = _f64_to_i32(sx)
+    val py = _f64_to_i32(sy)
+    val total = s.width * s.height
+    var pixels: [u32] = [s.tint_color; total]
+    engine.draw_image(px, py, s.width, s.height, pixels)
+
+fn _draw_animated_sprite(engine: Engine2D, camera: Camera2D, s: AnimatedSprite):
+    if not s.visible:
+        return
+    val (wx, wy) = s.transform.world_position()
+    val (sx, sy) = camera.world_to_screen(wx, wy)
+    val px = _f64_to_i32(sx)
+    val py = _f64_to_i32(sy)
+    val total = s.width * s.height
+    var pixels: [u32] = [s.tint_color; total]
+    engine.draw_image(px, py, s.width, s.height, pixels)
+
+@extern fn _f64_to_i32(x: f64) -> i32

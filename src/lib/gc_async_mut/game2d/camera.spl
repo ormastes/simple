@@ -1,0 +1,130 @@
+@allow(primitive_api)
+# game2d — Camera2D
+#
+# Defines a viewport into the game world.  Converts between world and screen
+# coordinates, optionally clamped to a world-space bounding rect.
+#
+# Usage:
+#   use std.game2d.camera.{Camera2D, Rect}
+
+use std.gpu.engine2d.engine.{Engine2D}
+use std.game2d.transform.{Transform2D}
+
+# ============================================================================
+# Rect — axis-aligned bounding rectangle (f64)
+# ============================================================================
+
+class Rect:
+    """Axis-aligned rectangle in f64 coordinates."""
+
+    x: f64
+    y: f64
+    w: f64
+    h: f64
+
+    static fn create(x: f64, y: f64, w: f64, h: f64) -> Rect:
+        Rect(x: x, y: y, w: w, h: h)
+
+# ============================================================================
+# Camera2D
+# ============================================================================
+
+class Camera2D:
+    """2D camera mapping world coordinates to screen coordinates.
+
+    viewport — screen-space rectangle that this camera renders into (pixels).
+    target   — Transform2D whose world_position() is the camera centre.
+    zoom     — scale factor applied after centering (>1 = zoom in).
+    bounds   — optional world-space clamp rect; nil means no clamping.
+
+    Coordinate convention:
+        screen origin is top-left.
+        world origin is wherever target says.
+    """
+
+    viewport_x: f64
+    viewport_y: f64
+    viewport_w: f64
+    viewport_h: f64
+    target: Transform2D
+    zoom: f64
+    bounds: Rect?
+
+    static fn create(vx: f64, vy: f64, vw: f64, vh: f64) -> Camera2D:
+        """Create a camera covering viewport (vx,vy,vw,vh) at origin, zoom=1."""
+        Camera2D(
+            viewport_x: vx,
+            viewport_y: vy,
+            viewport_w: vw,
+            viewport_h: vh,
+            target: Transform2D.create(0.0, 0.0),
+            zoom: 1.0,
+            bounds: nil
+        )
+
+    static fn create_with_target(vx: f64, vy: f64, vw: f64, vh: f64,
+                                  target: Transform2D, zoom: f64) -> Camera2D:
+        """Create a camera with an explicit target transform and zoom."""
+        Camera2D(
+            viewport_x: vx,
+            viewport_y: vy,
+            viewport_w: vw,
+            viewport_h: vh,
+            target: target,
+            zoom: zoom,
+            bounds: nil
+        )
+
+    me set_zoom(z: f64):
+        self.zoom = z
+
+    me set_bounds(b: Rect?):
+        self.bounds = b
+
+    # -------------------------------------------------------------------------
+    # Coordinate transforms
+    # -------------------------------------------------------------------------
+
+    fn _camera_world_x() -> f64:
+        val (wx, _wy) = self.target.world_position()
+        wx
+
+    fn _camera_world_y() -> f64:
+        val (_wx, wy) = self.target.world_position()
+        wy
+
+    fn world_to_screen(wx: f64, wy: f64) -> (f64, f64):
+        """Convert a world-space point to screen-space pixel coordinates.
+
+        screen = viewport_center + (world - camera_target) * zoom
+        """
+        val cx = self._camera_world_x()
+        val cy = self._camera_world_y()
+        val half_w = self.viewport_w / 2.0
+        val half_h = self.viewport_h / 2.0
+        val sx = self.viewport_x + half_w + (wx - cx) * self.zoom
+        val sy = self.viewport_y + half_h + (wy - cy) * self.zoom
+        (sx, sy)
+
+    fn screen_to_world(sx: f64, sy: f64) -> (f64, f64):
+        """Convert a screen-space pixel point to world-space coordinates.
+
+        world = camera_target + (screen - viewport_center) / zoom
+        """
+        val cx = self._camera_world_x()
+        val cy = self._camera_world_y()
+        val half_w = self.viewport_w / 2.0
+        val half_h = self.viewport_h / 2.0
+        val wx = cx + (sx - self.viewport_x - half_w) / self.zoom
+        val wy = cy + (sy - self.viewport_y - half_h) / self.zoom
+        (wx, wy)
+
+    me apply(engine: Engine2D):
+        """Apply the camera viewport as a clipping rect on the engine."""
+        val vx = _f64_to_i32(self.viewport_x)
+        val vy = _f64_to_i32(self.viewport_y)
+        val vw = _f64_to_i32(self.viewport_w)
+        val vh = _f64_to_i32(self.viewport_h)
+        engine.set_clip(vx, vy, vw, vh)
+
+@extern fn _f64_to_i32(x: f64) -> i32
