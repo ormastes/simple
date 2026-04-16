@@ -123,6 +123,12 @@ pub mod crypto_compare;
 // Phase 18: WebSocket masking
 pub mod ws_mask;
 
+// Phase 19: Signature verification (RSA-SHA256, Ed25519)
+pub mod signature;
+
+// Phase 20: Curve25519 DH key exchange
+pub mod dh;
+
 // Re-export all public FFI functions for backward compatibility
 // Phase 1
 #[cfg(unix)]
@@ -186,3 +192,9 @@ pub use crypto_compare::*;
 
 // Phase 18
 pub use ws_mask::*;
+
+// Phase 19
+pub use signature::*;
+
+// Phase 20
+pub use dh::*;

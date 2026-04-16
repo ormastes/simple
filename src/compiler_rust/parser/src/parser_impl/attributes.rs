@@ -64,6 +64,15 @@ pub const KNOWN_ATTRIBUTE_NAMES: &[&str] = &[
     "unsafe",
     "concurrency_mode",
     "no_auto_defer",
+    // SimpleOS / codegen
+    "entry",
+    "noreturn",
+    "naked",
+    "section",
+    "interrupt",
+    "boot",
+    "align",
+    "export",
 ];
 
 /// Check if a name is a known attribute (should produce Attribute, not Decorator)

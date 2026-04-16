@@ -16,6 +16,7 @@ use std.gc_async_mut.gpu.browser_engine.browser_renderer.{BrowserRenderer, BeRen
 use std.js.engine.runtime.{JsRuntime}
 use std.js.engine.js_error.{Logger, LogLevel}
 use std.js.types.js_types.{JsValue}
+use std.js.types.pair.{Pair}
 use std.platform.{get_host_os}
 
 extern fn rt_file_read_text(path: text) -> text
@@ -36,8 +37,17 @@ class BrowserRuntimeState:
     location_id: i64
     navigator_id: i64
     chrome_id: i64
+    session_storage_id: i64
+    local_storage_id: i64
 
-    static fn create(url: text, title: text, body_html: text) -> BrowserRuntimeState:
+    static fn create(
+        url: text,
+        title: text,
+        body_html: text,
+        session_storage: [Pair<text, text>],
+        local_storage: [Pair<text, text>],
+        cookie_text: text
+    ) -> BrowserRuntimeState:
         val logger = Logger.new("browser-session-js", LogLevel.Error)
         var runtime = JsRuntime.new(logger)
         val global_env = runtime.interpreter.global_env
@@ -77,12 +87,16 @@ class BrowserRuntimeState:
         val chrome_runtime_id = runtime.interpreter.object_store.create_object()
         runtime.interpreter.object_store.set_property(chrome_id, "runtime", JsValue.Object(id: chrome_runtime_id))
 
+        val session_storage_id = storage_object_from_pairs(runtime, session_storage)
+        val local_storage_id = storage_object_from_pairs(runtime, local_storage)
+
         val document_id = runtime.interpreter.object_store.create_object()
         runtime.interpreter.object_store.set_property(document_id, "title", JsValue.String(v: title))
         runtime.interpreter.object_store.set_property(document_id, "readyState", JsValue.String(v: "loading"))
         runtime.interpreter.object_store.set_property(document_id, "body", JsValue.Object(id: body_id))
         runtime.interpreter.object_store.set_property(document_id, "URL", JsValue.String(v: url))
         runtime.interpreter.object_store.set_property(document_id, "location", JsValue.Object(id: location_id))
+        runtime.interpreter.object_store.set_property(document_id, "cookie", JsValue.String(v: cookie_text))
 
         val window_id = runtime.interpreter.object_store.create_object()
         runtime.interpreter.object_store.set_property(window_id, "window", JsValue.Object(id: window_id))
@@ -92,6 +106,8 @@ class BrowserRuntimeState:
         runtime.interpreter.object_store.set_property(window_id, "location", JsValue.Object(id: location_id))
         runtime.interpreter.object_store.set_property(window_id, "navigator", JsValue.Object(id: navigator_id))
         runtime.interpreter.object_store.set_property(window_id, "chrome", JsValue.Object(id: chrome_id))
+        runtime.interpreter.object_store.set_property(window_id, "sessionStorage", JsValue.Object(id: session_storage_id))
+        runtime.interpreter.object_store.set_property(window_id, "localStorage", JsValue.Object(id: local_storage_id))
 
         if val Some(console_val) = runtime.interpreter.env_stack.get_var(global_env, "console"):
             runtime.interpreter.object_store.set_property(window_id, "console", console_val)
@@ -110,6 +126,8 @@ class BrowserRuntimeState:
         runtime.interpreter.env_stack.define_var(global_env, "location", JsValue.Object(id: location_id))
         runtime.interpreter.env_stack.define_var(global_env, "navigator", JsValue.Object(id: navigator_id))
         runtime.interpreter.env_stack.define_var(global_env, "chrome", JsValue.Object(id: chrome_id))
+        runtime.interpreter.env_stack.define_var(global_env, "sessionStorage", JsValue.Object(id: session_storage_id))
+        runtime.interpreter.env_stack.define_var(global_env, "localStorage", JsValue.Object(id: local_storage_id))
 
         BrowserRuntimeState(
             runtime: runtime,
@@ -118,8 +136,19 @@ class BrowserRuntimeState:
             body_id: body_id,
             location_id: location_id,
             navigator_id: navigator_id,
-            chrome_id: chrome_id
+            chrome_id: chrome_id,
+            session_storage_id: session_storage_id,
+            local_storage_id: local_storage_id
         )
+
+class BrowserCookie:
+    name: text
+    value: text
+    path: text
+    domain: text
+
+    static fn create(name: text, value: text, path: text, domain: text) -> BrowserCookie:
+        BrowserCookie(name: name, value: value, path: path, domain: domain)
 
 class BrowserSession:
     current_url: text
@@ -132,6 +161,9 @@ class BrowserSession:
     pending_url: text
     stop_requested: bool
     warnings: [text]
+    session_storage: [Pair<text, text>]
+    local_storage: [Pair<text, text>]
+    cookies: [BrowserCookie]
     runtime_state: BrowserRuntimeState?
 
     static fn new() -> BrowserSession:
@@ -146,6 +178,9 @@ class BrowserSession:
             pending_url: "",
             stop_requested: false,
             warnings: [],
+            session_storage: [],
+            local_storage: [],
+            cookies: [],
             runtime_state: nil
         )
 
@@ -219,6 +254,23 @@ impl BrowserSession:
     fn can_go_forward() -> bool:
         self.current_index >= 0 and self.current_index < self.history.len() - 1
 
+    fn session_storage_item(key: text) -> text?:
+        pair_value(self.session_storage, key)
+
+    fn local_storage_item(key: text) -> text?:
+        pair_value(self.local_storage, key)
+
+    fn document_cookie() -> text:
+        cookie_text_for_url(self.cookies, self.current_url)
+
+    fn cookie_header_for_request(url: text) -> text:
+        cookie_text_for_url(self.cookies, url)
+
+    me apply_set_cookie_header(header_value: text):
+        if val Some(cookie) = parse_cookie_line(header_value):
+            self.cookies = upsert_cookie(self.cookies, cookie)
+            self._sync_runtime_cookie_string()
+
     me eval_script(script: text) -> Result<JsValue, text>:
         if val Some(state) = self.runtime_state:
             val result = state.runtime.eval(script)
@@ -266,7 +318,15 @@ impl BrowserSession:
         else:
             cleaned_html
 
-        var state = BrowserRuntimeState.create(url, initial_title, body_html)
+        val cookie_text = cookie_text_for_url(self.cookies, url)
+        var state = BrowserRuntimeState.create(
+            url,
+            initial_title,
+            body_html,
+            self.session_storage,
+            self.local_storage,
+            cookie_text
+        )
         self.runtime_state = Some(state)
         self.current_url = url
         self.current_title = if initial_title.len() > 0: initial_title else: url
@@ -336,11 +396,36 @@ impl BrowserSession:
                 next_body_html = rendered_text
 
         self.current_body_html = next_body_html
+        self.session_storage = storage_pairs_from_object(state, state.session_storage_id)
+        self.local_storage = storage_pairs_from_object(state, state.local_storage_id)
+
+        val cookie_val = state.runtime.interpreter.object_store.get_property(
+            state.document_id,
+            "cookie"
+        )
+        if val JsValue.String(cookie_text) = cookie_val:
+            self.cookies = merge_cookie_text(self.cookies, cookie_text)
+
+        val visible_cookie_text = cookie_text_for_url(self.cookies, self.current_url)
+        state.runtime.interpreter.object_store.set_property(
+            state.document_id,
+            "cookie",
+            JsValue.String(v: visible_cookie_text)
+        )
         state.runtime.interpreter.object_store.set_property(
             state.document_id,
             "readyState",
             JsValue.String(v: "complete")
         )
+
+    me _sync_runtime_cookie_string():
+        if val Some(state) = self.runtime_state:
+            val visible_cookie_text = cookie_text_for_url(self.cookies, self.current_url)
+            state.runtime.interpreter.object_store.set_property(
+                state.document_id,
+                "cookie",
+                JsValue.String(v: visible_cookie_text)
+            )
 
     me _update_history(url: text, html: text, target_index: i32, push_history: bool):
         val entry = BrowserHistoryEntry.create(
@@ -386,6 +471,62 @@ class BrowserScriptBlock:
 
 fn blank_page_html() -> text:
     "<!DOCTYPE html><html><head><title>about:blank</title></head><body></body></html>"
+
+fn storage_object_from_pairs(runtime: JsRuntime, pairs: [Pair<text, text>]) -> i64:
+    val storage_id = runtime.interpreter.object_store.create_object()
+    for pair in pairs:
+        runtime.interpreter.object_store.set_property(
+            storage_id,
+            pair.first,
+            JsValue.String(v: pair.second)
+        )
+    storage_id
+
+fn storage_pairs_from_object(state: BrowserRuntimeState, object_id: i64) -> [Pair<text, text>]:
+    val obj = state.runtime.interpreter.object_store.get_object(object_id)
+    var out: [Pair<text, text>] = []
+    for prop in obj.properties:
+        if prop.key != "__proto__":
+            out = upsert_pair(out, prop.key, js_value_to_storage_text(prop.value))
+    out
+
+fn pair_value(pairs: [Pair<text, text>], key: text) -> text?:
+    var i = 0
+    while i < pairs.len():
+        val pair = pairs[i]
+        if pair.first == key:
+            return Some(pair.second)
+        i = i + 1
+    nil
+
+fn upsert_pair(pairs: [Pair<text, text>], key: text, value: text) -> [Pair<text, text>]:
+    var out: [Pair<text, text>] = []
+    var found = false
+    for pair in pairs:
+        if pair.first == key:
+            out = out + [Pair(first: key, second: value)]
+            found = true
+        else:
+            out = out + [pair]
+    if not found:
+        out = out + [Pair(first: key, second: value)]
+    out
+
+fn js_value_to_storage_text(value: JsValue) -> text:
+    match value:
+        JsValue.String(v): v
+        JsValue.Number(v):
+            var s = "{v}"
+            if s.ends_with(".0"):
+                return s.slice(0, s.len() - 2)
+            s
+        JsValue.Boolean(v): if v: "true" else: "false"
+        JsValue.Null: "null"
+        JsValue.Undefined: "undefined"
+        JsValue.Object(id): "[object Object]"
+        JsValue.Array(id): "[object Array]"
+        JsValue.Function(id): "[Function]"
+        JsValue.Symbol(id): "Symbol()"
 
 fn chrome_user_agent() -> text:
     val host_os = get_host_os()
@@ -440,6 +581,127 @@ fn url_pathname(url: text) -> text:
     if path_start < 0:
         return "/"
     url.slice(path_start, url.len())
+
+fn url_host(url: text) -> text:
+    val scheme_pos = find_text(url, "://", 0)
+    if scheme_pos < 0:
+        return ""
+    val host_start = scheme_pos + 3
+    val path_start = find_text(url, "/", host_start)
+    if path_start < 0:
+        return url.slice(host_start, url.len())
+    url.slice(host_start, path_start)
+
+fn merge_cookie_text(existing: [BrowserCookie], cookie_text: text) -> [BrowserCookie]:
+    var jar = existing
+    val cookie_lines = split_cookie_assignments(cookie_text)
+    for line in cookie_lines:
+        if val Some(cookie) = parse_cookie_line(line):
+            jar = upsert_cookie(jar, cookie)
+    jar
+
+fn split_cookie_assignments(cookie_text: text) -> [text]:
+    var parts: [text] = []
+    var current = ""
+    var i = 0
+    while i < cookie_text.len():
+        val ch = cookie_text.slice(i, i + 1)
+        if ch == ";":
+            val trimmed = current.trim()
+            if trimmed.len() > 0 and trimmed.contains("="):
+                parts = parts + [trimmed]
+            current = ""
+        else:
+            current = "{current}{ch}"
+        i = i + 1
+    val trimmed = current.trim()
+    if trimmed.len() > 0 and trimmed.contains("="):
+        parts = parts + [trimmed]
+    parts
+
+fn parse_cookie_line(cookie_line: text) -> BrowserCookie?:
+    val trimmed = cookie_line.trim()
+    if trimmed.len() == 0:
+        return nil
+    val segments = split_text(trimmed, ";")
+    if segments.len() == 0:
+        return nil
+    val base = segments[0].trim()
+    val eq = find_text(base, "=", 0)
+    if eq <= 0:
+        return nil
+    val name = base.slice(0, eq).trim()
+    val value = base.slice(eq + 1, base.len()).trim()
+    var path = ""
+    var domain = ""
+    var i = 1
+    while i < segments.len():
+        val seg = segments[i].trim()
+        val seg_eq = find_text(seg, "=", 0)
+        if seg_eq > 0:
+            val key = seg.slice(0, seg_eq).trim().to_lower()
+            val attr_value = seg.slice(seg_eq + 1, seg.len()).trim()
+            if key == "path":
+                path = attr_value
+            else if key == "domain":
+                domain = attr_value
+        i = i + 1
+    Some(BrowserCookie.create(name: name, value: value, path: path, domain: domain))
+
+fn upsert_cookie(existing: [BrowserCookie], cookie: BrowserCookie) -> [BrowserCookie]:
+    var out: [BrowserCookie] = []
+    var found = false
+    for current in existing:
+        if current.name == cookie.name and current.path == cookie.path and current.domain == cookie.domain:
+            out = out + [cookie]
+            found = true
+        else:
+            out = out + [current]
+    if not found:
+        out = out + [cookie]
+    out
+
+fn cookie_text_for_url(cookies: [BrowserCookie], url: text) -> text:
+    var parts: [text] = []
+    for cookie in cookies:
+        if cookie_matches_url(cookie, url):
+            parts = parts + ["{cookie.name}={cookie.value}"]
+    join_text(parts, "; ")
+
+fn cookie_matches_url(cookie: BrowserCookie, url: text) -> bool:
+    if cookie.domain.len() > 0:
+        val host = url_host(url)
+        if host != cookie.domain and not host.ends_with(".{cookie.domain}"):
+            return false
+    if cookie.path.len() > 0:
+        val pathname = url_pathname(url)
+        if not pathname.starts_with(cookie.path):
+            return false
+    true
+
+fn split_text(input: text, delimiter: text) -> [text]:
+    if delimiter.len() == 0:
+        return [input]
+    var out: [text] = []
+    var pos = 0
+    while pos <= input.len():
+        val next = find_text(input, delimiter, pos)
+        if next < 0:
+            out = out + [input.slice(pos, input.len())]
+            return out
+        out = out + [input.slice(pos, next)]
+        pos = next + delimiter.len()
+    out
+
+fn join_text(parts: [text], delimiter: text) -> text:
+    var out = ""
+    var i = 0
+    while i < parts.len():
+        if i > 0:
+            out = "{out}{delimiter}"
+        out = "{out}{parts[i]}"
+        i = i + 1
+    out
 
 fn extract_title_text(html: text) -> text:
     val start = find_text(html, "<title>", 0)

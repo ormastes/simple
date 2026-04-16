@@ -1,0 +1,68 @@
+@allow(primitive_api)
+# SSH Host Key Signature Verification FFI
+# Wraps rt_rsa_sha256_verify and rt_ed25519_verify from the runtime.
+
+# ============================================================================
+# Tier 1: Extern Function Declarations (Raw FFI)
+# ============================================================================
+
+# Verify an RSA-PKCS1-SHA256 signature.
+# Returns 1 if valid, 0 otherwise.
+extern fn rt_rsa_sha256_verify(pubkey: [u8], message: [u8], signature: [u8]) -> i64
+
+# Verify an Ed25519 signature.
+# Returns 1 if valid, 0 otherwise.
+extern fn rt_ed25519_verify(pubkey: [u8], message: [u8], signature: [u8]) -> i64
+
+# ============================================================================
+# Tier 2: Simple-Friendly Wrapper Functions
+# ============================================================================
+
+fn rsa_sha256_verify(pubkey: [u8], message: [u8], signature: [u8]) -> bool:
+    """Verify an RSA-PKCS1-SHA256 signature.
+
+    Args:
+        pubkey:    DER-encoded RSA public key (SubjectPublicKeyInfo)
+        message:   Message bytes that were signed
+        signature: Raw PKCS#1 v1.5 signature bytes
+
+    Returns: true if the signature is valid, false otherwise
+    """
+    val result = rt_rsa_sha256_verify(pubkey, message, signature)
+    result == 1
+
+fn ed25519_verify(pubkey: [u8], message: [u8], signature: [u8]) -> bool:
+    """Verify an Ed25519 signature.
+
+    Args:
+        pubkey:    32-byte Ed25519 public key
+        message:   Message bytes that were signed
+        signature: 64-byte Ed25519 signature
+
+    Returns: true if the signature is valid, false otherwise
+    """
+    val result = rt_ed25519_verify(pubkey, message, signature)
+    result == 1
+
+# ============================================================================
+# Tier 3: SSH Host Key Dispatcher
+# ============================================================================
+
+fn verify_host_key(key_type: text, pubkey: [u8], message: [u8], signature: [u8]) -> bool:
+    """Verify an SSH host key signature, dispatching on key type.
+
+    Args:
+        key_type:  SSH key type string, e.g. "ssh-rsa" or "ssh-ed25519"
+        pubkey:    Raw public key bytes (type-specific encoding)
+        message:   Signed message bytes (e.g. the SSH exchange hash)
+        signature: Signature bytes
+
+    Returns: true if the signature is valid for the given key type,
+             false for unknown key types or invalid signatures
+    """
+    if key_type == "ssh-rsa":
+        rsa_sha256_verify(pubkey, message, signature)
+    elif key_type == "ssh-ed25519":
+        ed25519_verify(pubkey, message, signature)
+    else:
+        false

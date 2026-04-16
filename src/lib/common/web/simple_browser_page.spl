@@ -18,6 +18,7 @@ use common.render_scene.scene.{RenderScene, SceneCommand, render_scene}
 class SimpleBrowserTarget:
     kind: text
     action: text
+    method: text
     field_key: text
     form_key: text
     x: i32
@@ -38,6 +39,12 @@ class SimpleBrowserField:
     width: i32
     height: i32
     unsupported: bool
+
+class SimpleBrowserRequest:
+    method: text
+    url: text
+    body: text
+    content_type: text
 
 class SimpleBrowserPageState:
     current_url: text
@@ -192,7 +199,7 @@ fn _field_key(node: BeDomNode, form_key: text, ctx: SimpleBrowserBuildContext) -
         return form_key + ":" + node_id + ":{ctx.next_field_idx}"
     form_key + ":" + be_dom_get_tag(node) + ":{ctx.next_field_idx}"
 
-fn _decorate_form_control(node: BeDomNode, form_key: text, form_action: text, overrides: [text], ctx: SimpleBrowserBuildContext):
+fn _decorate_form_control(node: BeDomNode, form_key: text, form_action: text, form_method: text, overrides: [text], ctx: SimpleBrowserBuildContext):
     val tag = be_dom_get_tag(node)
     var input_type = be_dom_get_attr(node, "type").to_lower()
     if tag == "textarea":
@@ -233,6 +240,7 @@ fn _decorate_form_control(node: BeDomNode, form_key: text, form_action: text, ov
     if tag == "button" or input_type == "submit":
         be_dom_set_attr(node, "data-simple-kind", "submit")
         be_dom_set_attr(node, "data-simple-action", form_action)
+        be_dom_set_attr(node, "data-simple-method", form_method)
         val label = if value != "": value else: "Submit"
         if _needs_default_style(node, "display"):
             be_dom_set_style(node, "display", "block")
@@ -277,13 +285,14 @@ fn _decorate_form_control(node: BeDomNode, form_key: text, form_action: text, ov
     val shown = if value != "": value else: placeholder
     _ensure_text_child(node, shown)
 
-fn _decorate_dom(node: BeDomNode, base_url: text, current_form_key: text, current_form_action: text, overrides: [text], ctx: SimpleBrowserBuildContext):
+fn _decorate_dom(node: BeDomNode, base_url: text, current_form_key: text, current_form_action: text, current_form_method: text, overrides: [text], ctx: SimpleBrowserBuildContext):
     if be_dom_get_is_text(node):
         return
 
     val tag = be_dom_get_tag(node)
     var next_form_key = current_form_key
     var next_form_action = current_form_action
+    var next_form_method = current_form_method
     if tag == "a":
         _decorate_anchor(node, base_url)
     elif tag == "form":
@@ -295,20 +304,23 @@ fn _decorate_dom(node: BeDomNode, base_url: text, current_form_key: text, curren
             next_form_action = base_url
         if _needs_default_style(node, "display"):
             be_dom_set_style(node, "display", "block")
-        val method = be_dom_get_attr(node, "method").to_lower()
-        if method != "" and method != "get":
-            _push_warning(ctx, "Unsupported form method '{method}' — GET only")
+        next_form_method = be_dom_get_attr(node, "method").to_lower()
+        if next_form_method == "":
+            next_form_method = "get"
+        if next_form_method != "get" and next_form_method != "post":
+            _push_warning(ctx, "Unsupported form method '{next_form_method}' — GET/POST only")
             be_dom_set_attr(node, "data-simple-unsupported", "true")
     elif tag == "input" or tag == "textarea" or tag == "button":
         if next_form_key == "":
             next_form_key = "form:document"
             next_form_action = base_url
-        _decorate_form_control(node, next_form_key, next_form_action, overrides, ctx)
+            next_form_method = "get"
+        _decorate_form_control(node, next_form_key, next_form_action, next_form_method, overrides, ctx)
 
     val children = be_dom_get_children(node)
     var idx = 0
     while idx < children.len():
-        _decorate_dom(children[idx], base_url, next_form_key, next_form_action, overrides, ctx)
+        _decorate_dom(children[idx], base_url, next_form_key, next_form_action, next_form_method, overrides, ctx)
         idx = idx + 1
 
 fn _collect_interactions(box: BeLayoutBox, collection: SimpleBrowserCollection):
@@ -322,6 +334,7 @@ fn _collect_interactions(box: BeLayoutBox, collection: SimpleBrowserCollection):
         collection.targets.push(SimpleBrowserTarget(
             kind: "anchor",
             action: be_dom_get_attr(node, "data-simple-action"),
+            method: "GET",
             field_key: "",
             form_key: "",
             x: x, y: y, width: width, height: height
@@ -330,6 +343,7 @@ fn _collect_interactions(box: BeLayoutBox, collection: SimpleBrowserCollection):
         collection.targets.push(SimpleBrowserTarget(
             kind: "submit",
             action: be_dom_get_attr(node, "data-simple-action"),
+            method: be_dom_get_attr(node, "data-simple-method").to_upper(),
             field_key: be_dom_get_attr(node, "data-simple-field-key"),
             form_key: be_dom_get_attr(node, "data-simple-form-key"),
             x: x, y: y, width: width, height: height
@@ -351,6 +365,7 @@ fn _collect_interactions(box: BeLayoutBox, collection: SimpleBrowserCollection):
         collection.targets.push(SimpleBrowserTarget(
             kind: "field",
             action: "",
+            method: "",
             field_key: field.key,
             form_key: field.form_key,
             x: x, y: y, width: width, height: height
@@ -368,7 +383,7 @@ fn _page_html(title: text, body: text) -> text:
 fn _render_page(url: text, html: text, viewport_w: i32, viewport_h: i32, overrides: [text]) -> SimpleBrowserPageState:
     val dom = html_string_to_dom(html)
     var ctx = SimpleBrowserBuildContext.create()
-    _decorate_dom(dom, url, "", url, overrides, ctx)
+    _decorate_dom(dom, url, "", url, "get", overrides, ctx)
     val layout = layout_tree(dom, viewport_w, viewport_h)
     var renderer = BrowserRenderer.create(viewport_w, viewport_h)
     val result = renderer.render_dom(dom)
@@ -476,11 +491,7 @@ fn _url_encode(text_val: text) -> text:
                 out = out + "%" + hex
     out
 
-fn simple_browser_submit_get_url(page: SimpleBrowserPageState, form_key: text, submit_action: text) -> text:
-    var action = submit_action
-    if action == "":
-        action = page.current_url
-    action = _resolve_relative_url(page.current_url, action)
+fn _serialize_form_pairs(page: SimpleBrowserPageState, form_key: text) -> [text]:
     var pairs: [text] = []
     var idx = 0
     while idx < page.fields.len():
@@ -488,14 +499,34 @@ fn simple_browser_submit_get_url(page: SimpleBrowserPageState, form_key: text, s
         if field.form_key == form_key and not field.unsupported and field.name != "":
             pairs.push(_url_encode(field.name) + "=" + _url_encode(field.value))
         idx = idx + 1
+    pairs
+
+fn simple_browser_submit_request(page: SimpleBrowserPageState, form_key: text, submit_action: text, submit_method: text) -> SimpleBrowserRequest:
+    var action = submit_action
+    if action == "":
+        action = page.current_url
+    action = _resolve_relative_url(page.current_url, action)
+    val method = if submit_method.trim() != "": submit_method.to_upper() else: "GET"
+    val pairs = _serialize_form_pairs(page, form_key)
+    if method == "POST":
+        return SimpleBrowserRequest(
+            method: "POST",
+            url: action,
+            body: pairs.join("&"),
+            content_type: "application/x-www-form-urlencoded"
+        )
     if pairs.len() == 0:
-        return action
+        return SimpleBrowserRequest(method: "GET", url: action, body: "", content_type: "")
     val joiner = if _contains_folded(action, "?"): "&" else: "?"
-    action + joiner + pairs.join("&")
+    SimpleBrowserRequest(method: "GET", url: action + joiner + pairs.join("&"), body: "", content_type: "")
+
+fn simple_browser_submit_get_url(page: SimpleBrowserPageState, form_key: text, submit_action: text) -> text:
+    simple_browser_submit_request(page, form_key, submit_action, "GET").url
 
 export SimpleBrowserPageState
 export SimpleBrowserTarget
 export SimpleBrowserField
+export SimpleBrowserRequest
 export simple_browser_blank_page
 export simple_browser_loading_page
 export simple_browser_error_page
@@ -505,4 +536,5 @@ export simple_browser_hit_target
 export simple_browser_set_field_value
 export simple_browser_field_value
 export simple_browser_field_form_key
+export simple_browser_submit_request
 export simple_browser_submit_get_url

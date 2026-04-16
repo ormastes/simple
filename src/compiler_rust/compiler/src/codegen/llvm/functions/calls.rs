@@ -381,6 +381,10 @@ impl LlvmBackend {
             })
             .or_else(|| {
                 // Split at underscores right-to-left: "tokens_push" → try ".push"
+                // A candidate is only accepted when its name contains the prefix part.
+                // This prevents extern fn names like "c_pcimgr_init" from matching a
+                // local method "CNvmeBlockAdapter.init" via the bare suffix "init" when
+                // no prefix relationship exists.
                 for (i, _) in func_name_raw.match_indices('_').rev() {
                     let method = &func_name_raw[i + 1..];
                     if method.is_empty() {
@@ -393,9 +397,14 @@ impl LlvmBackend {
                     while let Some(f) = func_opt {
                         let name = f.get_name().to_string_lossy();
                         if name.ends_with(&suffix) {
+                            let has_prefix = prefix_part.is_empty()
+                                || name.to_lowercase().contains(&prefix_part);
+                            if !has_prefix {
+                                func_opt = f.get_next_function();
+                                continue;
+                            }
                             let dominated = best.as_ref().map_or(true, |b| {
                                 let bname = b.get_name().to_string_lossy();
-                                let has_prefix = name.to_lowercase().contains(&prefix_part);
                                 let best_has = bname.to_lowercase().contains(&prefix_part);
                                 (has_prefix && !best_has) || (has_prefix == best_has && name.len() < bname.len())
                             });

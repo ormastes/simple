@@ -178,6 +178,9 @@ pub fn symbol_tier_of(name: &str) -> RuntimeSymbolTier {
         || name.starts_with("rt_test_")
         || name.starts_with("rt_ffi_")
         || name.starts_with("rt_random_")
+        || name.starts_with("rt_rsa_")
+        || name.starts_with("rt_ed25519_")
+        || name.starts_with("rt_dh_")
         || name.starts_with("doctest_")
         || name.starts_with("native_tcp_")
         || name.starts_with("native_udp_")
@@ -597,6 +600,14 @@ pub const RUNTIME_SYMBOL_NAMES: &[&str] = &[
     "rt_native_neq",
     "rt_value_compare",
     "rt_value_truthy",
+    // Signature verification (RSA-SHA256, Ed25519) for SSH host keys
+    "rt_rsa_sha256_verify",
+    "rt_ed25519_verify",
+    // Curve25519 DH key exchange for SSH KEX
+    "rt_dh_curve25519_keypair",
+    "rt_dh_curve25519_public_key",
+    "rt_dh_curve25519_shared_secret",
+    "rt_dh_curve25519_free",
 ];
 
 #[cfg(test)]

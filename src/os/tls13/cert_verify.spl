@@ -1,0 +1,306 @@
+#![allow(unnamed_duplicate_typed_args)]
+# TLS 1.3 Certificate Verification — DER parse + Ed25519 signature verify
+#
+# Implements:
+#   - DER TLV helpers (tag, length, TLV, skip)
+#   - extract_ed25519_pubkey_from_cert: navigate X.509 DER to extract Ed25519 public key
+#   - verify_certificate_verify_msg: RFC 8446 §4.4.3 CertificateVerify message verify
+#   - verify_cert_signature_ed25519: verify a certificate's self/issuer signature
+#
+# Reference: RFC 8446 §4.4.3 (CertificateVerify)
+# Reference: RFC 5280 (X.509 DER encoding)
+# Reference: RFC 8410 (Ed25519 in X.509, OID 1.3.101.112)
+
+use os.crypto.ed25519.{ed25519_verify}
+
+# ============================================================================
+# Result Type
+# ============================================================================
+
+enum CertVerifyResult:
+    Ok
+    Err(msg: text)
+
+# ============================================================================
+# DER Helper Classes
+# ============================================================================
+
+class DerLength:
+    length: u64
+    header_size: u64
+
+class DerTlv:
+    tag: u8
+    value_offset: u64
+    value_length: u64
+    total_length: u64
+
+# ============================================================================
+# Private DER Helpers
+# ============================================================================
+
+fn _der_read_tag(data: [u8], offset: u64) -> u8:
+    """Read the DER tag byte at the given offset."""
+    data[offset]
+
+fn _der_read_length(data: [u8], offset_after_tag: u64) -> DerLength:
+    """Read a DER length field starting at offset_after_tag.
+
+    Short form: byte < 0x80 — the byte itself is the length, header_size = 1.
+    Long form 0x81: next 1 byte is the length, header_size = 2.
+    Long form 0x82: next 2 bytes are the length (big-endian), header_size = 3.
+    """
+    val first = data[offset_after_tag]
+    if first < 0x80:
+        DerLength(length: first.to_u64(), header_size: 1)
+    elif first == 0x81:
+        val len_val = data[offset_after_tag + 1].to_u64()
+        DerLength(length: len_val, header_size: 2)
+    else:
+        # 0x82: two length bytes (big-endian)
+        val hi = data[offset_after_tag + 1].to_u64()
+        val lo = data[offset_after_tag + 2].to_u64()
+        val len_val = (hi << 8) | lo
+        DerLength(length: len_val, header_size: 3)
+
+fn _der_read_tlv(data: [u8], offset: u64) -> DerTlv:
+    """Read a DER TLV at offset.
+
+    Returns DerTlv with:
+      tag           = the tag byte
+      value_offset  = offset of first byte of value
+      value_length  = number of bytes in value
+      total_length  = tag + length-header + value bytes
+    """
+    val tag = _der_read_tag(data, offset)
+    val dl = _der_read_length(data, offset + 1)
+    val value_offset = offset + 1 + dl.header_size
+    val total_length = 1 + dl.header_size + dl.length
+    DerTlv(
+        tag: tag,
+        value_offset: value_offset,
+        value_length: dl.length,
+        total_length: total_length
+    )
+
+fn _der_skip(data: [u8], offset: u64) -> u64:
+    """Skip one TLV at offset, returning the offset immediately after it."""
+    val tlv = _der_read_tlv(data, offset)
+    offset + tlv.total_length
+
+# ============================================================================
+# Ed25519 OID check: 1.3.101.112 = 06 03 2B 65 70
+# ============================================================================
+
+fn _is_ed25519_oid(data: [u8], offset: u64) -> bool:
+    """Check that 5 bytes at offset match the Ed25519 OID tag+value: 06 03 2B 65 70."""
+    if data[offset] != 0x06:
+        return false
+    if data[offset + 1] != 0x03:
+        return false
+    if data[offset + 2] != 0x2B:
+        return false
+    if data[offset + 3] != 0x65:
+        return false
+    if data[offset + 4] != 0x70:
+        return false
+    true
+
+# ============================================================================
+# Public API
+# ============================================================================
+
+fn extract_ed25519_pubkey_from_cert(cert_der: [u8]) -> [u8]:
+    """Extract the 32-byte Ed25519 public key from a DER-encoded X.509 certificate.
+
+    Navigation:
+      Certificate  SEQUENCE
+        TBSCertificate  SEQUENCE
+          [0] CONTEXT optional (version)  — skip if present (tag 0xA0)
+          INTEGER  (serialNumber)          — skip
+          SEQUENCE (signatureAlgorithm)    — skip
+          SEQUENCE (issuer)                — skip
+          SEQUENCE (validity)              — skip
+          SEQUENCE (subject)               — skip
+          SEQUENCE (subjectPublicKeyInfo)  — parse
+            SEQUENCE (algorithm)
+              OID 1.3.101.112              — verify Ed25519
+            BIT STRING (subjectPublicKey)  — extract 32 bytes (skip unused-bits byte)
+    """
+    # Outer Certificate SEQUENCE
+    val cert_tlv = _der_read_tlv(cert_der, 0)
+    val tbs_start = cert_tlv.value_offset
+
+    # TBSCertificate SEQUENCE
+    val tbs_tlv = _der_read_tlv(cert_der, tbs_start)
+    var pos = tbs_tlv.value_offset
+
+    # Optional version [0] CONTEXT (tag 0xA0)
+    if cert_der[pos] == 0xA0:
+        pos = _der_skip(cert_der, pos)
+
+    # serialNumber INTEGER (tag 0x02)
+    pos = _der_skip(cert_der, pos)
+
+    # signatureAlgorithm SEQUENCE (tag 0x30)
+    pos = _der_skip(cert_der, pos)
+
+    # issuer SEQUENCE (tag 0x30)
+    pos = _der_skip(cert_der, pos)
+
+    # validity SEQUENCE (tag 0x30)
+    pos = _der_skip(cert_der, pos)
+
+    # subject SEQUENCE (tag 0x30)
+    pos = _der_skip(cert_der, pos)
+
+    # subjectPublicKeyInfo SEQUENCE (tag 0x30)
+    val spki_tlv = _der_read_tlv(cert_der, pos)
+    var spki_pos = spki_tlv.value_offset
+
+    # algorithm SEQUENCE (tag 0x30)
+    val alg_tlv = _der_read_tlv(cert_der, spki_pos)
+    # Verify Ed25519 OID at start of algorithm SEQUENCE value
+    _is_ed25519_oid(cert_der, alg_tlv.value_offset)
+
+    # Advance past algorithm SEQUENCE
+    spki_pos = spki_pos + alg_tlv.total_length
+
+    # subjectPublicKey BIT STRING (tag 0x03)
+    val bs_tlv = _der_read_tlv(cert_der, spki_pos)
+    # BIT STRING: first byte is unused_bits count (must be 0 for Ed25519)
+    val key_start = bs_tlv.value_offset + 1
+
+    # Extract 32 bytes
+    var pubkey: [u8] = []
+    var i: u64 = 0
+    while i < 32:
+        pubkey.push(cert_der[key_start + i])
+        i = i + 1
+    pubkey
+
+fn verify_certificate_verify_msg(server_pubkey: [u8], transcript_hash: [u8], sig: [u8]) -> CertVerifyResult:
+    """Verify a TLS 1.3 CertificateVerify message per RFC 8446 §4.4.3.
+
+    The signed content is:
+      64 x 0x20 || "TLS 1.3, server CertificateVerify" || 0x00 || transcript_hash
+
+    Args:
+        server_pubkey:   32-byte Ed25519 public key from the server's certificate.
+        transcript_hash: 32-byte SHA-256 transcript hash at CertificateVerify.
+        sig:             64-byte Ed25519 signature from the CertificateVerify message.
+
+    Returns CertVerifyResult.Ok on success, CertVerifyResult.Err on failure.
+    """
+    # Build the content buffer
+    var content: [u8] = []
+
+    # 64 spaces (0x20)
+    var i: u64 = 0
+    while i < 64:
+        content.push(0x20)
+        i = i + 1
+
+    # Context string "TLS 1.3, server CertificateVerify" as bytes
+    content.push(0x54)  # T
+    content.push(0x4C)  # L
+    content.push(0x53)  # S
+    content.push(0x20)  # (space)
+    content.push(0x31)  # 1
+    content.push(0x2E)  # .
+    content.push(0x33)  # 3
+    content.push(0x2C)  # ,
+    content.push(0x20)  # (space)
+    content.push(0x73)  # s
+    content.push(0x65)  # e
+    content.push(0x72)  # r
+    content.push(0x76)  # v
+    content.push(0x65)  # e
+    content.push(0x72)  # r
+    content.push(0x20)  # (space)
+    content.push(0x43)  # C
+    content.push(0x65)  # e
+    content.push(0x72)  # r
+    content.push(0x74)  # t
+    content.push(0x69)  # i
+    content.push(0x66)  # f
+    content.push(0x69)  # i
+    content.push(0x63)  # c
+    content.push(0x61)  # a
+    content.push(0x74)  # t
+    content.push(0x65)  # e
+    content.push(0x56)  # V
+    content.push(0x65)  # e
+    content.push(0x72)  # r
+    content.push(0x69)  # i
+    content.push(0x66)  # f
+    content.push(0x79)  # y
+
+    # Separator 0x00
+    content.push(0x00)
+
+    # Append transcript_hash
+    i = 0
+    while i < transcript_hash.len():
+        content.push(transcript_hash[i])
+        i = i + 1
+
+    # Verify using Ed25519
+    val ok = ed25519_verify(server_pubkey, content, sig)
+    if ok:
+        CertVerifyResult.Ok
+    else:
+        CertVerifyResult.Err(msg: "CertificateVerify signature invalid")
+
+fn verify_cert_signature_ed25519(cert_der: [u8], issuer_pubkey: [u8]) -> CertVerifyResult:
+    """Verify the Ed25519 signature on a DER-encoded X.509 certificate.
+
+    Extracts TBSCertificate bytes (the signed data), skips signatureAlgorithm,
+    reads the signature BIT STRING, then calls ed25519_verify.
+
+    Args:
+        cert_der:      DER-encoded X.509 certificate.
+        issuer_pubkey: 32-byte Ed25519 public key of the issuer (or self for self-signed).
+
+    Returns CertVerifyResult.Ok on success, CertVerifyResult.Err on failure.
+    """
+    # Outer Certificate SEQUENCE
+    val cert_tlv = _der_read_tlv(cert_der, 0)
+    val cert_body_start = cert_tlv.value_offset
+
+    # TBSCertificate SEQUENCE — this is what was signed
+    val tbs_tlv = _der_read_tlv(cert_der, cert_body_start)
+    val tbs_start = cert_body_start
+    val tbs_total = tbs_tlv.total_length
+
+    # Collect TBSCertificate bytes
+    var tbs_bytes: [u8] = []
+    var i: u64 = 0
+    while i < tbs_total:
+        tbs_bytes.push(cert_der[tbs_start + i])
+        i = i + 1
+
+    # Advance past TBSCertificate
+    var pos = cert_body_start + tbs_total
+
+    # signatureAlgorithm SEQUENCE — skip
+    pos = _der_skip(cert_der, pos)
+
+    # signature BIT STRING (tag 0x03)
+    val sig_tlv = _der_read_tlv(cert_der, pos)
+    # Skip the unused_bits byte (first byte of BIT STRING value)
+    val sig_start = sig_tlv.value_offset + 1
+    val sig_len = sig_tlv.value_length - 1
+
+    var signature: [u8] = []
+    i = 0
+    while i < sig_len:
+        signature.push(cert_der[sig_start + i])
+        i = i + 1
+
+    # Verify
+    val ok = ed25519_verify(issuer_pubkey, tbs_bytes, signature)
+    if ok:
+        CertVerifyResult.Ok
+    else:
+        CertVerifyResult.Err(msg: "certificate signature invalid")
