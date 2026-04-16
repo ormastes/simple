@@ -29,11 +29,11 @@ use std.nogc_sync_mut.io.signature_ffi.{
 use test.system.os_crypto_ref_helpers.{
     openssl_present, openssl_major_version,
     openssl_rsa_sign_sha256, openssl_rsa_sign_sha512,
-    openssl_ecdsa_p256_verify,
+    openssl_ecdsa_p256_verify_der,
     hex_to_bytes, bytes_to_hex
 }
 use std.nogc_sync_mut.ffi.system.{rt_process_run}
-use std.nogc_sync_mut.io.file_shell.{rt_file_write}
+use std.nogc_sync_mut.ffi.io.{rt_file_write_bytes}
 
 # ============================================================================
 # Fixtures — hardcoded DER key bytes (hex decoded at runtime)
@@ -113,6 +113,27 @@ fn _msg_hello() -> [u8]:
 
 fn _msg_empty() -> [u8]:
     []
+
+fn _sign_rsa256(pkcs8: [u8], msg: [u8]) -> [u8]:
+    """Unwrap Option-ish return from rsa_sha256_sign at function boundary."""
+    if val sig = rsa_sha256_sign(pkcs8, msg):
+        sig
+    else:
+        []
+
+fn _sign_rsa512(pkcs8: [u8], msg: [u8]) -> [u8]:
+    """Unwrap Option-ish return from rsa_sha512_sign at function boundary."""
+    if val sig = rsa_sha512_sign(pkcs8, msg):
+        sig
+    else:
+        []
+
+fn _sign_ecdsa_p256(pkcs8: [u8], msg: [u8]) -> [u8]:
+    """Unwrap Option-ish return from ecdsa_p256_sign at function boundary."""
+    if val sig = ecdsa_p256_sign(pkcs8, msg):
+        sig
+    else:
+        []
 
 # ============================================================================
 # DER encoding helpers for ECDSA r||s -> DER SEQUENCE { INTEGER r, INTEGER s }
@@ -195,9 +216,9 @@ fn _openssl_rsa_verify_sha256(spki: [u8], msg: [u8], sig: [u8]) -> bool:
     val key_path = "/tmp/spl_sig_spec_rsa_spki_" + seq + ".der"
     val msg_path = "/tmp/spl_sig_spec_rsa_msg_" + seq + ".bin"
     val sig_path = "/tmp/spl_sig_spec_rsa_sig_" + seq + ".bin"
-    rt_file_write(key_path, spki)
-    rt_file_write(msg_path, msg)
-    rt_file_write(sig_path, sig)
+    rt_file_write_bytes(key_path, spki)
+    rt_file_write_bytes(msg_path, msg)
+    rt_file_write_bytes(sig_path, sig)
     val result = rt_process_run(
         "openssl",
         ["dgst", "-sha256", "-verify", key_path, "-keyform", "DER",
@@ -210,9 +231,9 @@ fn _openssl_rsa_verify_sha512(spki: [u8], msg: [u8], sig: [u8]) -> bool:
     val key_path = "/tmp/spl_sig_spec_rsa_spki512_" + seq + ".der"
     val msg_path = "/tmp/spl_sig_spec_rsa_msg512_" + seq + ".bin"
     val sig_path = "/tmp/spl_sig_spec_rsa_sig512_" + seq + ".bin"
-    rt_file_write(key_path, spki)
-    rt_file_write(msg_path, msg)
-    rt_file_write(sig_path, sig)
+    rt_file_write_bytes(key_path, spki)
+    rt_file_write_bytes(msg_path, msg)
+    rt_file_write_bytes(sig_path, sig)
     val result = rt_process_run(
         "openssl",
         ["dgst", "-sha512", "-verify", key_path, "-keyform", "DER",
@@ -225,9 +246,9 @@ fn _openssl_ed25519_verify(spki: [u8], msg: [u8], sig: [u8]) -> bool:
     val key_path = "/tmp/spl_sig_spec_ed_spki_" + seq + ".der"
     val msg_path = "/tmp/spl_sig_spec_ed_msg_" + seq + ".bin"
     val sig_path = "/tmp/spl_sig_spec_ed_sig_" + seq + ".bin"
-    rt_file_write(key_path, spki)
-    rt_file_write(msg_path, msg)
-    rt_file_write(sig_path, sig)
+    rt_file_write_bytes(key_path, spki)
+    rt_file_write_bytes(msg_path, msg)
+    rt_file_write_bytes(sig_path, sig)
     val result = rt_process_run(
         "openssl",
         ["pkeyutl", "-verify", "-pubin", "-inkey", key_path,
@@ -257,7 +278,7 @@ describe "os_crypto_ref_signature: RSA-SHA2-256 byte-exact cross-check":
         else:
             val pkcs8 = hex_to_bytes(RSA_PKCS8_HEX)
             val msg = _msg_hello()
-            val simple_sig = rsa_sha256_sign(pkcs8, msg)
+            val simple_sig = _sign_rsa256(pkcs8, msg)
             val ossl_sig = openssl_rsa_sign_sha256(pkcs8, msg)
             expect(simple_sig.len() > 0).to_equal(true)
             expect(ossl_sig.len() > 0).to_equal(true)
@@ -269,7 +290,7 @@ describe "os_crypto_ref_signature: RSA-SHA2-256 byte-exact cross-check":
         else:
             val pkcs8 = hex_to_bytes(RSA_PKCS8_HEX)
             val msg = _msg_empty()
-            val simple_sig = rsa_sha256_sign(pkcs8, msg)
+            val simple_sig = _sign_rsa256(pkcs8, msg)
             val ossl_sig = openssl_rsa_sign_sha256(pkcs8, msg)
             expect(simple_sig.len() > 0).to_equal(true)
             expect(_bytes_eq(simple_sig, ossl_sig)).to_equal(true)
@@ -280,7 +301,7 @@ describe "os_crypto_ref_signature: RSA-SHA2-256 byte-exact cross-check":
         else:
             val pkcs8 = hex_to_bytes(RSA_PKCS8_HEX)
             val msg = _make_1kb()
-            val simple_sig = rsa_sha256_sign(pkcs8, msg)
+            val simple_sig = _sign_rsa256(pkcs8, msg)
             val ossl_sig = openssl_rsa_sign_sha256(pkcs8, msg)
             expect(simple_sig.len() > 0).to_equal(true)
             expect(_bytes_eq(simple_sig, ossl_sig)).to_equal(true)
@@ -292,7 +313,7 @@ describe "os_crypto_ref_signature: RSA-SHA2-256 byte-exact cross-check":
             val pkcs8 = hex_to_bytes(RSA_PKCS8_HEX)
             val spki = hex_to_bytes(RSA_SPKI_HEX)
             val msg = _msg_hello()
-            val sig = rsa_sha256_sign(pkcs8, msg)
+            val sig = _sign_rsa256(pkcs8, msg)
             expect(sig.len() > 0).to_equal(true)
             val ok = rsa_sha256_verify(spki, msg, sig)
             expect(ok).to_equal(true)
@@ -304,7 +325,7 @@ describe "os_crypto_ref_signature: RSA-SHA2-256 byte-exact cross-check":
             val pkcs8 = hex_to_bytes(RSA_PKCS8_HEX)
             val spki = hex_to_bytes(RSA_SPKI_HEX)
             val msg = _msg_hello()
-            val sig = rsa_sha256_sign(pkcs8, msg)
+            val sig = _sign_rsa256(pkcs8, msg)
             expect(sig.len() > 0).to_equal(true)
             val ok = _openssl_rsa_verify_sha256(spki, msg, sig)
             expect(ok).to_equal(true)
@@ -316,11 +337,11 @@ describe "os_crypto_ref_signature: RSA-SHA2-256 byte-exact cross-check":
             val pkcs8 = hex_to_bytes(RSA_PKCS8_HEX)
             val spki = hex_to_bytes(RSA_SPKI_HEX)
             val msg = _msg_hello()
-            val sig = rsa_sha256_sign(pkcs8, msg)
+            val sig = _sign_rsa256(pkcs8, msg)
             expect(sig.len() > 0).to_equal(true)
             # Flip first byte of signature
             var bad_sig: [u8] = []
-            bad_sig.push(sig[0] ^ 0xFF)
+            bad_sig.push((sig[0].to_i64() ^ 0xFF).to_u8())
             var i: u64 = 1
             while i < sig.len():
                 bad_sig.push(sig[i])
@@ -335,7 +356,7 @@ describe "os_crypto_ref_signature: RSA-SHA2-256 byte-exact cross-check":
             val pkcs8 = hex_to_bytes(RSA_PKCS8_HEX)
             val spki = hex_to_bytes(RSA_SPKI_HEX)
             val msg = _make_64kb()
-            val sig = rsa_sha256_sign(pkcs8, msg)
+            val sig = _sign_rsa256(pkcs8, msg)
             expect(sig.len() > 0).to_equal(true)
             val ok = rsa_sha256_verify(spki, msg, sig)
             expect(ok).to_equal(true)
@@ -354,7 +375,7 @@ describe "os_crypto_ref_signature: RSA-SHA2-512 byte-exact cross-check":
         else:
             val pkcs8 = hex_to_bytes(RSA_PKCS8_HEX)
             val msg = _msg_hello()
-            val simple_sig = rsa_sha512_sign(pkcs8, msg)
+            val simple_sig = _sign_rsa512(pkcs8, msg)
             val ossl_sig = openssl_rsa_sign_sha512(pkcs8, msg)
             expect(simple_sig.len() > 0).to_equal(true)
             expect(ossl_sig.len() > 0).to_equal(true)
@@ -366,7 +387,7 @@ describe "os_crypto_ref_signature: RSA-SHA2-512 byte-exact cross-check":
         else:
             val pkcs8 = hex_to_bytes(RSA_PKCS8_HEX)
             val msg = _msg_empty()
-            val simple_sig = rsa_sha512_sign(pkcs8, msg)
+            val simple_sig = _sign_rsa512(pkcs8, msg)
             val ossl_sig = openssl_rsa_sign_sha512(pkcs8, msg)
             expect(simple_sig.len() > 0).to_equal(true)
             expect(_bytes_eq(simple_sig, ossl_sig)).to_equal(true)
@@ -377,7 +398,7 @@ describe "os_crypto_ref_signature: RSA-SHA2-512 byte-exact cross-check":
         else:
             val pkcs8 = hex_to_bytes(RSA_PKCS8_HEX)
             val msg = _make_1kb()
-            val simple_sig = rsa_sha512_sign(pkcs8, msg)
+            val simple_sig = _sign_rsa512(pkcs8, msg)
             val ossl_sig = openssl_rsa_sign_sha512(pkcs8, msg)
             expect(simple_sig.len() > 0).to_equal(true)
             expect(_bytes_eq(simple_sig, ossl_sig)).to_equal(true)
@@ -389,7 +410,7 @@ describe "os_crypto_ref_signature: RSA-SHA2-512 byte-exact cross-check":
             val pkcs8 = hex_to_bytes(RSA_PKCS8_HEX)
             val spki = hex_to_bytes(RSA_SPKI_HEX)
             val msg = _msg_hello()
-            val sig = rsa_sha512_sign(pkcs8, msg)
+            val sig = _sign_rsa512(pkcs8, msg)
             expect(sig.len() > 0).to_equal(true)
             val ok = rsa_sha512_verify(spki, msg, sig)
             expect(ok).to_equal(true)
@@ -401,7 +422,7 @@ describe "os_crypto_ref_signature: RSA-SHA2-512 byte-exact cross-check":
             val pkcs8 = hex_to_bytes(RSA_PKCS8_HEX)
             val spki = hex_to_bytes(RSA_SPKI_HEX)
             val msg = _msg_hello()
-            val sig = rsa_sha512_sign(pkcs8, msg)
+            val sig = _sign_rsa512(pkcs8, msg)
             expect(sig.len() > 0).to_equal(true)
             val ok = _openssl_rsa_verify_sha512(spki, msg, sig)
             expect(ok).to_equal(true)
@@ -413,10 +434,10 @@ describe "os_crypto_ref_signature: RSA-SHA2-512 byte-exact cross-check":
             val pkcs8 = hex_to_bytes(RSA_PKCS8_HEX)
             val spki = hex_to_bytes(RSA_SPKI_HEX)
             val msg = _msg_hello()
-            val sig = rsa_sha512_sign(pkcs8, msg)
+            val sig = _sign_rsa512(pkcs8, msg)
             expect(sig.len() > 0).to_equal(true)
             var bad_sig: [u8] = []
-            bad_sig.push(sig[0] ^ 0xFF)
+            bad_sig.push((sig[0].to_i64() ^ 0xFF).to_u8())
             var i: u64 = 1
             while i < sig.len():
                 bad_sig.push(sig[i])
@@ -431,7 +452,7 @@ describe "os_crypto_ref_signature: RSA-SHA2-512 byte-exact cross-check":
             val pkcs8 = hex_to_bytes(RSA_PKCS8_HEX)
             val spki = hex_to_bytes(RSA_SPKI_HEX)
             val msg = _make_64kb()
-            val sig = rsa_sha512_sign(pkcs8, msg)
+            val sig = _sign_rsa512(pkcs8, msg)
             expect(sig.len() > 0).to_equal(true)
             val ok = rsa_sha512_verify(spki, msg, sig)
             expect(ok).to_equal(true)
@@ -455,8 +476,8 @@ describe "os_crypto_ref_signature: ECDSA-SHA2-NISTP256 cross-check":
         else:
             val pkcs8 = hex_to_bytes(EC_PKCS8_HEX)
             val msg = _msg_hello()
-            val sig1 = ecdsa_p256_sign(pkcs8, msg)
-            val sig2 = ecdsa_p256_sign(pkcs8, msg)
+            val sig1 = _sign_ecdsa_p256(pkcs8, msg)
+            val sig2 = _sign_ecdsa_p256(pkcs8, msg)
             expect(sig1.len()).to_equal(64)
             expect(sig2.len()).to_equal(64)
             # Non-deterministic: sigs should differ (astronomically unlikely to collide)
@@ -469,7 +490,7 @@ describe "os_crypto_ref_signature: ECDSA-SHA2-NISTP256 cross-check":
             val pkcs8 = hex_to_bytes(EC_PKCS8_HEX)
             val spki = hex_to_bytes(EC_SPKI_HEX)
             val msg = _msg_hello()
-            val sig = ecdsa_p256_sign(pkcs8, msg)
+            val sig = _sign_ecdsa_p256(pkcs8, msg)
             expect(sig.len()).to_equal(64)
             val ok = ecdsa_p256_verify(spki, msg, sig)
             expect(ok).to_equal(true)
@@ -481,8 +502,8 @@ describe "os_crypto_ref_signature: ECDSA-SHA2-NISTP256 cross-check":
             val pkcs8 = hex_to_bytes(EC_PKCS8_HEX)
             val spki = hex_to_bytes(EC_SPKI_HEX)
             val msg = _msg_hello()
-            val sig = ecdsa_p256_sign(pkcs8, msg)
-            val sig2 = ecdsa_p256_sign(pkcs8, msg)
+            val sig = _sign_ecdsa_p256(pkcs8, msg)
+            val sig2 = _sign_ecdsa_p256(pkcs8, msg)
             val ok1 = ecdsa_p256_verify(spki, msg, sig)
             val ok2 = ecdsa_p256_verify(spki, msg, sig2)
             expect(ok1).to_equal(true)
@@ -495,11 +516,11 @@ describe "os_crypto_ref_signature: ECDSA-SHA2-NISTP256 cross-check":
             val pkcs8 = hex_to_bytes(EC_PKCS8_HEX)
             val spki = hex_to_bytes(EC_SPKI_HEX)
             val msg = _msg_hello()
-            val sig_fixed = ecdsa_p256_sign(pkcs8, msg)
+            val sig_fixed = _sign_ecdsa_p256(pkcs8, msg)
             expect(sig_fixed.len()).to_equal(64)
             val sig_der = _fixed64_to_der(sig_fixed)
             expect(sig_der.len() > 8).to_equal(true)
-            val ok = openssl_ecdsa_p256_verify(spki, msg, sig_der)
+            val ok = openssl_ecdsa_p256_verify_der(spki, msg, sig_der)
             expect(ok).to_equal(true)
 
     it "DER-converted signature from 1 KB message verifies via openssl":
@@ -509,9 +530,9 @@ describe "os_crypto_ref_signature: ECDSA-SHA2-NISTP256 cross-check":
             val pkcs8 = hex_to_bytes(EC_PKCS8_HEX)
             val spki = hex_to_bytes(EC_SPKI_HEX)
             val msg = _make_1kb()
-            val sig_fixed = ecdsa_p256_sign(pkcs8, msg)
+            val sig_fixed = _sign_ecdsa_p256(pkcs8, msg)
             val sig_der = _fixed64_to_der(sig_fixed)
-            val ok = openssl_ecdsa_p256_verify(spki, msg, sig_der)
+            val ok = openssl_ecdsa_p256_verify_der(spki, msg, sig_der)
             expect(ok).to_equal(true)
 
     it "negative: flip bit in message -> Simple verify = false":
@@ -521,10 +542,10 @@ describe "os_crypto_ref_signature: ECDSA-SHA2-NISTP256 cross-check":
             val pkcs8 = hex_to_bytes(EC_PKCS8_HEX)
             val spki = hex_to_bytes(EC_SPKI_HEX)
             val msg = _msg_hello()
-            val sig = ecdsa_p256_sign(pkcs8, msg)
+            val sig = _sign_ecdsa_p256(pkcs8, msg)
             # Corrupt first byte of message
             var bad_msg: [u8] = []
-            bad_msg.push(msg[0] ^ 0x01)
+            bad_msg.push((msg[0].to_i64() ^ 0x01).to_u8())
             var i: u64 = 1
             while i < msg.len():
                 bad_msg.push(msg[i])
@@ -539,7 +560,7 @@ describe "os_crypto_ref_signature: ECDSA-SHA2-NISTP256 cross-check":
             val pkcs8 = hex_to_bytes(EC_PKCS8_HEX)
             val spki = hex_to_bytes(EC_SPKI_HEX)
             val msg = _msg_empty()
-            val sig = ecdsa_p256_sign(pkcs8, msg)
+            val sig = _sign_ecdsa_p256(pkcs8, msg)
             expect(sig.len()).to_equal(64)
             val ok = ecdsa_p256_verify(spki, msg, sig)
             expect(ok).to_equal(true)
@@ -551,7 +572,7 @@ describe "os_crypto_ref_signature: ECDSA-SHA2-NISTP256 cross-check":
             val pkcs8 = hex_to_bytes(EC_PKCS8_HEX)
             val spki = hex_to_bytes(EC_SPKI_HEX)
             val msg = _make_64kb()
-            val sig = ecdsa_p256_sign(pkcs8, msg)
+            val sig = _sign_ecdsa_p256(pkcs8, msg)
             expect(sig.len()).to_equal(64)
             val ok = ecdsa_p256_verify(spki, msg, sig)
             expect(ok).to_equal(true)
@@ -599,7 +620,7 @@ describe "os_crypto_ref_signature: Ed25519 verify cross-check":
         var bad_pk: [u8] = []
         var i: u64 = 0
         while i < 32:
-            bad_pk.push(pk[i] ^ 0xFF)
+            bad_pk.push((pk[i].to_i64() ^ 0xFF).to_u8())
             i = i + 1
         val ok = ed25519_verify(bad_pk, msg, sig)
         expect(ok).to_equal(false)
@@ -609,7 +630,7 @@ describe "os_crypto_ref_signature: Ed25519 verify cross-check":
         val msg = hex_to_bytes(ED25519_MSG_HEX)
         val sig = hex_to_bytes(ED25519_SIG_HEX)
         var bad_sig: [u8] = []
-        bad_sig.push(sig[0] ^ 0x01)
+        bad_sig.push((sig[0].to_i64() ^ 0x01).to_u8())
         var i: u64 = 1
         while i < sig.len():
             bad_sig.push(sig[i])
@@ -622,7 +643,7 @@ describe "os_crypto_ref_signature: Ed25519 verify cross-check":
         val msg = hex_to_bytes(ED25519_MSG_HEX)
         val sig = hex_to_bytes(ED25519_SIG_HEX)
         var bad_msg: [u8] = []
-        bad_msg.push(msg[0] ^ 0x01)
+        bad_msg.push((msg[0].to_i64() ^ 0x01).to_u8())
         val ok = ed25519_verify(pk, bad_msg, sig)
         expect(ok).to_equal(false)
 
@@ -638,43 +659,43 @@ describe "os_crypto_ref_signature: edge cases and negative coverage":
     it "malformed PKCS#8 -> rsa_sha256_sign returns empty":
         val bad = hex_to_bytes(BAD_PKCS8_HEX)
         val msg = _msg_hello()
-        val sig = rsa_sha256_sign(bad, msg)
+        val sig = _sign_rsa256(bad, msg)
         expect(sig.len()).to_equal(0)
 
     it "malformed PKCS#8 -> rsa_sha512_sign returns empty":
         val bad = hex_to_bytes(BAD_PKCS8_HEX)
         val msg = _msg_hello()
-        val sig = rsa_sha512_sign(bad, msg)
+        val sig = _sign_rsa512(bad, msg)
         expect(sig.len()).to_equal(0)
 
     it "malformed PKCS#8 -> ecdsa_p256_sign returns empty":
         val bad = hex_to_bytes(BAD_PKCS8_HEX)
         val msg = _msg_hello()
-        val sig = ecdsa_p256_sign(bad, msg)
+        val sig = _sign_ecdsa_p256(bad, msg)
         expect(sig.len()).to_equal(0)
 
     it "wrong-type PKCS#8 (ECDSA key) -> rsa_sha256_sign returns empty":
         val ec_pkcs8 = hex_to_bytes(WRONG_TYPE_PKCS8_HEX)
         val msg = _msg_hello()
-        val sig = rsa_sha256_sign(ec_pkcs8, msg)
+        val sig = _sign_rsa256(ec_pkcs8, msg)
         expect(sig.len()).to_equal(0)
 
     it "wrong-type PKCS#8 (ECDSA key) -> rsa_sha512_sign returns empty":
         val ec_pkcs8 = hex_to_bytes(WRONG_TYPE_PKCS8_HEX)
         val msg = _msg_hello()
-        val sig = rsa_sha512_sign(ec_pkcs8, msg)
+        val sig = _sign_rsa512(ec_pkcs8, msg)
         expect(sig.len()).to_equal(0)
 
     it "wrong-type PKCS#8 (RSA key) -> ecdsa_p256_sign returns empty":
         val rsa_pkcs8 = hex_to_bytes(RSA_PKCS8_HEX)
         val msg = _msg_hello()
-        val sig = ecdsa_p256_sign(rsa_pkcs8, msg)
+        val sig = _sign_ecdsa_p256(rsa_pkcs8, msg)
         expect(sig.len()).to_equal(0)
 
     it "RSA 1024-bit key -> rsa_sha256_sign returns empty (ring min-size check)":
         val small_pkcs8 = hex_to_bytes(RSA_1024_PKCS8_HEX)
         val msg = _msg_hello()
-        val sig = rsa_sha256_sign(small_pkcs8, msg)
+        val sig = _sign_rsa256(small_pkcs8, msg)
         expect(sig.len()).to_equal(0)
 
     it "RSA verify with empty signature -> false":
