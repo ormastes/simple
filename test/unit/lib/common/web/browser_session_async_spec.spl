@@ -20,6 +20,34 @@ fn _display_js(v: JsValue) -> text:
 
 describe "BrowserSession async fetch":
 
+    it "adopts promises returned from then callbacks":
+        var session = BrowserSession.new()
+        session.open_html(
+            "https://example.com/app",
+            "<html><body><script>var out = 'start'; Promise.resolve('seed').then(function() { return Promise.resolve('inner'); }).then(function(v) { out = v; });</script></body></html>"
+        )
+
+        val result = session.eval_script("out")
+        match result:
+            Ok(value) =>
+                expect(_display_js(value)).to_equal("inner")
+            Err(e) =>
+                expect(false).to_equal(true)
+
+    it "adopts rejected promises returned from then callbacks":
+        var session = BrowserSession.new()
+        session.open_html(
+            "https://example.com/app",
+            "<html><body><script>var out = 'start'; Promise.resolve('seed').then(function() { return Promise.reject('boom'); }).catch(function(err) { out = err; });</script></body></html>"
+        )
+
+        val result = session.eval_script("out")
+        match result:
+            Ok(value) =>
+                expect(_display_js(value)).to_equal("boom")
+            Err(e) =>
+                expect(false).to_equal(true)
+
     it "installs promise globals":
         var session = BrowserSession.new()
         session.open_html("https://example.com/app", "<html><body>Ready</body></html>")
@@ -89,6 +117,219 @@ describe "BrowserSession async fetch":
                         match result:
                             Ok(value) =>
                                 expect(_display_js(value)).to_equal("network down")
+                            Err(err) =>
+                                expect(false).to_equal(true)
+                    Ok(_) =>
+                        expect(false).to_equal(true)
+            nil:
+                expect(false).to_equal(true)
+
+    it "resolves http error responses with ok false and readable metadata":
+        var session = BrowserSession.new()
+        session.open_html(
+            "https://example.com/app",
+            "<html><body><script>var meta = 'start'; window.fetch('/missing.txt').then(function(r) { meta = r.status + ':' + r.ok + ':' + r.headersText + ':' + r.text() + ':' + r.text(); document.body.textContent = meta; });</script></body></html>"
+        )
+
+        match session.take_pending_request():
+            Some(request) =>
+                val commit_result = session.commit_network_response(BrowserResponse.create(
+                    request_id: request.id,
+                    kind: "fetch",
+                    url: request.url,
+                    status: 404,
+                    headers: "X-Test: missing\n",
+                    body: "missing",
+                    error: ""
+                ))
+                match commit_result:
+                    Ok(_) =>
+                        val result = session.eval_script("meta + ':' + document.body.textContent")
+                        match result:
+                            Ok(value) =>
+                                expect(_display_js(value)).to_equal("404:false:X-Test: missing\n:missing:missing:404:false:X-Test: missing\n:missing:missing")
+                            Err(e) =>
+                                expect(false).to_equal(true)
+                    Err(e) =>
+                        expect(false).to_equal(true)
+            nil:
+                expect(false).to_equal(true)
+
+    it "returns a promise from response.text and unwraps it through then chaining":
+        var session = BrowserSession.new()
+        session.open_html(
+            "https://example.com/app",
+            "<html><body><script>var meta = 'start'; window.fetch('/data.txt').then(function(r) { meta = typeof r.text().then; return r.text(); }).then(function(t) { document.body.textContent = meta + ':' + t; });</script></body></html>"
+        )
+
+        match session.take_pending_request():
+            Some(request) =>
+                val commit_result = session.commit_network_response(BrowserResponse.create(
+                    request_id: request.id,
+                    kind: "fetch",
+                    url: request.url,
+                    status: 200,
+                    headers: "",
+                    body: "alpha",
+                    error: ""
+                ))
+                match commit_result:
+                    Ok(_) =>
+                        val result = session.eval_script("document.body.textContent")
+                        match result:
+                            Ok(value) =>
+                                expect(_display_js(value)).to_equal("function:alpha")
+                            Err(e) =>
+                                expect(false).to_equal(true)
+                    Err(e) =>
+                        expect(false).to_equal(true)
+            nil:
+                expect(false).to_equal(true)
+
+    it "serializes plain object fetch headers into the pending request":
+        var session = BrowserSession.new()
+        session.open_html(
+            "https://example.com/app",
+            "<html><body><script>window.fetch('/data.txt', { method: 'POST', headers: { 'X-Test': '1', 'Accept': 'text/plain' }, body: 'alpha' });</script></body></html>"
+        )
+
+        match session.take_pending_request():
+            Some(request) =>
+                expect(request.kind).to_equal("fetch")
+                expect(request.method).to_equal("POST")
+                expect(request.body).to_equal("alpha")
+                expect(request.headers).to_contain("X-Test: 1")
+                expect(request.headers).to_contain("Accept: text/plain")
+            nil:
+                expect(false).to_equal(true)
+
+    it "settles multiple fetches by request id even when responses arrive out of order":
+        var session = BrowserSession.new()
+        session.open_html(
+            "https://example.com/app",
+            "<html><body><script>var first = ''; var second = ''; window.fetch('/a.txt').then(function(r) { return r.text(); }).then(function(t) { first = t; }); window.fetch('/b.txt').then(function(r) { return r.text(); }).then(function(t) { second = t; document.body.textContent = first + ':' + second; });</script></body></html>"
+        )
+
+        var req_a = nil
+        var req_b = nil
+        match session.take_pending_request():
+            Some(request) =>
+                req_a = Some(request)
+            nil =>
+                expect(false).to_equal(true)
+                return
+        match session.take_pending_request():
+            Some(request) =>
+                req_b = Some(request)
+            nil =>
+                expect(false).to_equal(true)
+                return
+
+        match req_a:
+            Some(first_request) =>
+                match req_b:
+                    Some(second_request) =>
+                        expect(first_request.url).to_equal("https://example.com/a.txt")
+                        expect(second_request.url).to_equal("https://example.com/b.txt")
+                        val second_result = session.commit_network_response(BrowserResponse.create(
+                            request_id: second_request.id,
+                            kind: "fetch",
+                            url: second_request.url,
+                            status: 200,
+                            headers: "",
+                            body: "B",
+                            error: ""
+                        ))
+                        match second_result:
+                            Ok(_) =>
+                                val mid = session.eval_script("first + ':' + second + ':' + document.body.textContent")
+                                match mid:
+                                    Ok(value) =>
+                                        expect(_display_js(value)).to_equal(":B::B")
+                                    Err(e) =>
+                                        expect(false).to_equal(true)
+                            Err(e) =>
+                                expect(false).to_equal(true)
+                        val first_result = session.commit_network_response(BrowserResponse.create(
+                            request_id: first_request.id,
+                            kind: "fetch",
+                            url: first_request.url,
+                            status: 200,
+                            headers: "",
+                            body: "A",
+                            error: ""
+                        ))
+                        match first_result:
+                            Ok(_) =>
+                                val final = session.eval_script("first + ':' + second")
+                                match final:
+                                    Ok(value) =>
+                                        expect(_display_js(value)).to_equal("A:B")
+                                    Err(e) =>
+                                        expect(false).to_equal(true)
+                            Err(e) =>
+                                expect(false).to_equal(true)
+                    nil =>
+                        expect(false).to_equal(true)
+            nil =>
+                expect(false).to_equal(true)
+
+    it "preserves fulfilled values through finally chains":
+        var session = BrowserSession.new()
+        session.open_html(
+            "https://example.com/app",
+            "<html><body><script>var out = 'start'; window.fetch('/data.txt').then(function(r) { return r.text(); }).finally(function() { document.body.textContent = 'cleanup'; return 'ignored'; }).then(function(t) { out = t + ':' + document.body.textContent; });</script></body></html>"
+        )
+
+        match session.take_pending_request():
+            Some(request) =>
+                val commit_result = session.commit_network_response(BrowserResponse.create(
+                    request_id: request.id,
+                    kind: "fetch",
+                    url: request.url,
+                    status: 200,
+                    headers: "",
+                    body: "alpha",
+                    error: ""
+                ))
+                match commit_result:
+                    Ok(_) =>
+                        val result = session.eval_script("out")
+                        match result:
+                            Ok(value) =>
+                                expect(_display_js(value)).to_equal("alpha:cleanup")
+                            Err(e) =>
+                                expect(false).to_equal(true)
+                    Err(e) =>
+                        expect(false).to_equal(true)
+            nil:
+                expect(false).to_equal(true)
+
+    it "preserves rejected values through finally chains":
+        var session = BrowserSession.new()
+        session.open_html(
+            "https://example.com/app",
+            "<html><body><script>var out = 'start'; window.fetch('/data.txt').finally(function() { document.body.textContent = 'cleanup'; return 'ignored'; }).catch(function(err) { out = err + ':' + document.body.textContent; });</script></body></html>"
+        )
+
+        match session.take_pending_request():
+            Some(request) =>
+                val commit_result = session.commit_network_response(BrowserResponse.create(
+                    request_id: request.id,
+                    kind: "fetch",
+                    url: request.url,
+                    status: 0,
+                    headers: "",
+                    body: "",
+                    error: "network down"
+                ))
+                match commit_result:
+                    Err(e) =>
+                        expect(e).to_equal("network down")
+                        val result = session.eval_script("out")
+                        match result:
+                            Ok(value) =>
+                                expect(_display_js(value)).to_equal("network down:cleanup")
                             Err(err) =>
                                 expect(false).to_equal(true)
                     Ok(_) =>

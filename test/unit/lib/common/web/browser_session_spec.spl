@@ -124,6 +124,24 @@ describe "BrowserSession page loading":
             Ok(_) =>
                 expect(session.current_title).to_equal("ModuleLoaded")
                 expect(session.current_body_html).to_equal("module body")
+                expect(session.warnings.len()).to_equal(2)
+                expect(session.warnings[0]).to_contain("module scripts execute in compatibility mode")
+                expect(session.warnings[1]).to_contain("defer script loading is not implemented")
+            Err(e) =>
+                expect(false).to_equal(true)
+
+    it "warns when async scripts fall back to document order":
+        var session = BrowserSession.new()
+        session.register_resource("https://example.com/async.js", "document.body.textContent = document.body.textContent + ':async';")
+        val result = session.open_html(
+            "https://example.com/index.html",
+            "<html><body>base<script async src='/async.js'></script></body></html>"
+        )
+        match result:
+            Ok(_) =>
+                expect(session.current_body_html).to_equal("base:async")
+                expect(session.warnings.len()).to_equal(1)
+                expect(session.warnings[0]).to_contain("async script loading is not implemented")
             Err(e) =>
                 expect(false).to_equal(true)
 
@@ -266,6 +284,19 @@ describe "BrowserSession script bridge":
             Err(e) =>
                 expect(false).to_equal(true)
 
+    it "removes cookies when Max-Age=0 is assigned":
+        var session = BrowserSession.new()
+        val open_result = session.open_html(
+            "https://example.com/app",
+            "<html><body><script>document.cookie = 'sid=abc123; Path=/app'; document.cookie = 'sid=gone; Path=/app; Max-Age=0';</script></body></html>"
+        )
+        match open_result:
+            Ok(_) =>
+                expect(session.document_cookie()).to_equal("")
+                expect(session.cookie_header_for_request("https://example.com/app/next")).to_equal("")
+            Err(e) =>
+                expect(false).to_equal(true)
+
     it "exposes cookie jar update points for future network integration":
         var session = BrowserSession.new()
         session.open_html("https://example.com/path/page", "<html><body>Cookies</body></html>")
@@ -276,6 +307,26 @@ describe "BrowserSession script bridge":
         expect(session.document_cookie()).to_contain("global=yes")
         expect(session.cookie_header_for_request("https://example.com/path/next")).to_contain("theme=light")
         expect(session.cookie_header_for_request("https://example.com/other")).to_equal("global=yes")
+
+    it "removes cookies from Set-Cookie updates when Max-Age=0":
+        var session = BrowserSession.new()
+        session.open_html("https://example.com/path/page", "<html><body>Cookies</body></html>")
+        session.apply_set_cookie_header("theme=light; Path=/path")
+        expect(session.document_cookie()).to_equal("theme=light")
+
+        session.apply_set_cookie_header("theme=gone; Path=/path; Max-Age=0")
+        expect(session.document_cookie()).to_equal("")
+        expect(session.cookie_header_for_request("https://example.com/path/next")).to_equal("")
+
+    it "removes cookies from Set-Cookie updates when Expires is in the past":
+        var session = BrowserSession.new()
+        session.open_html("https://example.com/path/page", "<html><body>Cookies</body></html>")
+        session.apply_set_cookie_header("theme=light; Path=/path")
+        expect(session.document_cookie()).to_equal("theme=light")
+
+        session.apply_set_cookie_header("theme=gone; Path=/path; Expires=Thu, 01 Jan 1970 00:00:00 GMT")
+        expect(session.document_cookie()).to_equal("")
+        expect(session.cookie_header_for_request("https://example.com/path/next")).to_equal("")
 
     it "installs promise globals and settles async fetch after response commit":
         var session = BrowserSession.new()

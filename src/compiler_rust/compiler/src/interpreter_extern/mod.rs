@@ -72,6 +72,7 @@ pub mod mock_policy;
 pub mod ffi_value;
 pub mod ffi_array;
 pub mod ffi_dict;
+pub mod signatures;
 pub mod ffi_string;
 pub mod collections;
 pub mod lexer_ffi;
@@ -417,6 +418,18 @@ pub(crate) fn call_extern_function(
         // Base64 encoding/decoding
         "rt_base64_encode" => crypto::rt_base64_encode(&evaluated),
         "rt_base64_decode" => crypto::rt_base64_decode(&evaluated),
+
+        // Signature sign / verify (RFC 8332 RSA + RFC 5656 ECDSA-P256).
+        // These must be dispatched here (not via dynamic_ffi) because the
+        // sign paths return [u8], and dynamic_ffi marshals all returns as
+        // i64 — it cannot round-trip byte arrays. See signatures.rs.
+        "rt_rsa_sha256_sign" => signatures::rt_rsa_sha256_sign(&evaluated),
+        "rt_rsa_sha256_verify" => signatures::rt_rsa_sha256_verify(&evaluated),
+        "rt_rsa_sha512_sign" => signatures::rt_rsa_sha512_sign(&evaluated),
+        "rt_rsa_sha512_verify" => signatures::rt_rsa_sha512_verify(&evaluated),
+        "rt_ed25519_verify" => signatures::rt_ed25519_verify(&evaluated),
+        "rt_ecdsa_p256_sign" => signatures::rt_ecdsa_p256_sign(&evaluated),
+        "rt_ecdsa_p256_verify" => signatures::rt_ecdsa_p256_verify(&evaluated),
 
         // ====================================================================
         // Process Control (3 functions)

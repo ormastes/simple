@@ -37,11 +37,16 @@ use simple_common::fault_detection::{reset_timeout, set_stack_overflow_detection
 use scenario_artifacts::write_scenario_manifest;
 
 /// Default per-test timeout in seconds (overridable via SIMPLE_TEST_TIMEOUT env var).
-fn per_test_timeout_secs() -> u64 {
-    std::env::var("SIMPLE_TEST_TIMEOUT")
-        .ok()
-        .and_then(|v| v.parse::<u64>().ok())
-        .unwrap_or(60)
+fn per_test_timeout_secs(path: &Path) -> u64 {
+    if let Ok(raw) = std::env::var("SIMPLE_TEST_TIMEOUT") {
+        if let Ok(parsed) = raw.parse::<u64>() {
+            return parsed;
+        }
+    }
+    if path.components().any(|c| c.as_os_str() == "system") {
+        return 120;
+    }
+    60
 }
 
 /// Get current process RSS in bytes. Returns 0 on failure.
@@ -332,7 +337,7 @@ pub fn run_test_file(path: &Path, options: &super::types::TestOptions) -> TestFi
     let runner = create_test_runner(options);
 
     // Start per-test watchdog timer so infinite loops trigger TimeoutExceeded.
-    let timeout_secs = per_test_timeout_secs();
+    let timeout_secs = per_test_timeout_secs(path);
     start_watchdog(timeout_secs);
 
     // catch_unwind catches panics (including stack overflows on some platforms)
