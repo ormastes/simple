@@ -56,6 +56,10 @@ extern fn rt_gui_set_fb(addr: u64, width: u64)
 extern fn rt_port_outb(port: u64, value: u64)
 
 val DEBUG_EXIT: u64 = 0xF4
+val COM1_LSR: u16 = 0x3FD
+val COM1_DATA: u16 = 0x3F8
+val HARNESS_MARKER: text = "[harness] screendump-complete"
+val HARNESS_WAIT_ITERS: u64 = 300000000   # ~30s at ~100ns per iter in QEMU
 val BROWSER_APP_ID: text = "/sys/apps/browser_demo"
 val KEY_B: u32 = 0x42
 val KEY_E: u32 = 0x45
@@ -257,6 +261,32 @@ fn try_mount_fat32_disk():
                 Ok(_):  serial_println("[disk-boot] fat32: mount OK")
                 Err(code): serial_println("[disk-boot] fat32: mount failed code={code}")
 
+fn _wait_for_harness_marker():
+    """Poll COM1 receive buffer for the harness screendump-complete marker.
+
+    The test harness sends "[harness] screendump-complete" via QMP
+    human-monitor-command after its QMP screendump finishes. Reads bytes
+    from COM1 DATA register (0x3F8) when LSR bit 0 (data ready) is set,
+    accumulates a rolling window, and checks for the marker substring.
+    Times out after HARNESS_WAIT_ITERS busy-wait iterations (~30s) so
+    the guest exits even if the harness never sends the marker.
+    """
+    var buf: text = ""
+    var iter: u64 = 0
+    while iter < HARNESS_WAIT_ITERS:
+        val lsr: u8 = rt_port_inb(COM1_LSR)
+        if (lsr & 0x01) != 0:
+            val ch: u8 = rt_port_inb(COM1_DATA)
+            buf = buf + text.from_char_code(ch as i64)
+            # Keep only last 64 bytes to bound memory use
+            if buf.len() > 64:
+                buf = buf[buf.len() - 64:]
+            if buf.contains(HARNESS_MARKER):
+                serial_println("[desktop-e2e] harness-marker:received")
+                return
+        iter = iter + 1
+    serial_println("[desktop-e2e] harness-marker:timeout")
+
 fn spl_start():
     serial_init()
     serial_writeln("SimpleOS x86_64 desktop E2E boot")
@@ -268,5 +298,10 @@ fn spl_start():
         serial_println("TEST PASSED")
     else:
         serial_println("TEST FAILED")
+
+    # Wait for the harness to finish its QMP screendump before exiting.
+    # Eliminates the ~244ms race where QEMU exits before the test harness
+    # completes the screendump. Times out after ~30s as a safety net.
+    _wait_for_harness_marker()
 
     rt_port_outb(DEBUG_EXIT, 0)

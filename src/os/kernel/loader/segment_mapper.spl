@@ -19,7 +19,7 @@
 use os.kernel.types.task_types.{UserLoadSegment, AddressSpace}
 use os.kernel.types.memory_types.{VirtAddr, PhysAddr, PageFrame, VmFlags}
 use os.kernel.memory.pmm.{pmm_alloc_page}
-use os.kernel.memory.vmm.{vmm_map_page}
+use os.kernel.memory.vmm.{vmm_map_page_in, vmm_write_byte_through_hhdm}
 
 # ============================================================================
 # ELF program-header permission bits (PF_*)
@@ -88,16 +88,8 @@ fn _copy_and_zero(dest_virt: u64, src: [u8], src_off: u64, file_size: u64, mem_s
         i = i + 1
 
 fn _write_u8(addr: u64, value: u8):
-    """Write one byte through a raw virtual address.
-
-    TODO: [os-kernel][P2] vmm.write_byte_through_hhdm — if/when Phase-1 exposes
-    a safe HHDM writer, use it instead of this raw pointer store.
-    """
-    unsafe:
-        asm volatile:
-            "mov byte ptr [{addr}], {val}"
-            in(reg) addr
-            in(reg_byte) value
+    """Write one byte through a physical address via the HHDM writer."""
+    vmm_write_byte_through_hhdm(addr, value)
 
 # ============================================================================
 # Public API
@@ -114,15 +106,6 @@ fn map_segment(as_handle: AddressSpace, seg: UserLoadSegment, file_bytes: [u8]) 
 
     `as_handle` is the Phase-1 AddressSpace wrapper; the underlying root
     is `as_handle.phys_root` (matches TCB.address_space for legacy code).
-
-    TODO: [os-kernel][P2] vmm.map_page_in(as_handle, virt, phys, flags) — the current
-    `vmm_map_page` mutates the *active* address space. Phase 1 must add
-    a variant that takes an explicit root so we can populate a process's
-    pages without switching CR3. For now we assume the caller has either
-    activated `as_handle` or that it is the kernel's own (safe because
-    the scheduler calls us immediately after assigning the AS, before
-    the user task is enqueued, and user va ranges don't collide with
-    kernel).
     """
     val _root = as_handle.phys_root
     if seg.file_size > seg.mem_size:
@@ -144,9 +127,9 @@ fn map_segment(as_handle: AddressSpace, seg: UserLoadSegment, file_bytes: [u8]) 
         val frame = opt_frame
         val phys = PhysAddr(addr: frame.pfn * PAGE_SIZE)
         val virt = VirtAddr(addr: va)
-        val ok = vmm_map_page(virt, phys, vm_flags)
+        val ok = vmm_map_page_in(as_handle, virt, phys, vm_flags)
         if not ok:
-            return Err("vmm_map_page failed for PT_LOAD page")
+            return Err("vmm_map_page_in failed for PT_LOAD page")
         va = va + PAGE_SIZE
 
     # Then copy+zero. `dest_virt` points at the in-page offset within the

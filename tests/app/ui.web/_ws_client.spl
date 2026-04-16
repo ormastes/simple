@@ -1,0 +1,127 @@
+# WSS Round-Trip E2E Driver
+#
+# Minimal happy-path WebSocket-over-TLS client for e2e testing of
+# TlsWebServer's /ui/ws endpoint. Uses TlsClient to open a TLS connection,
+# performs the HTTP/1.1 Upgrade handshake, then exchanges one WS text frame.
+#
+# This is a test helper — not a full WS implementation. Only the happy path
+# is covered: connect → 101 Switching Protocols → send frame → recv frame.
+
+use app.ui.web.tls_client.{TlsClient}
+use std.common.text.base64.{base64_encode}
+
+# =========================================================================
+# WS frame helpers (minimal — text frames only)
+# =========================================================================
+
+fn _ws_make_upgrade_request(host: text, port: i32, path: text, key: text) -> text:
+    """Build an HTTP/1.1 WebSocket upgrade request."""
+    var r = "GET {path} HTTP/1.1\r\n"
+    r = "{r}Host: {host}:{port}\r\n"
+    r = "{r}Upgrade: websocket\r\n"
+    r = "{r}Connection: Upgrade\r\n"
+    r = "{r}Sec-WebSocket-Key: {key}\r\n"
+    r = "{r}Sec-WebSocket-Version: 13\r\n"
+    r = "{r}\r\n"
+    r
+
+fn _ws_make_text_frame(payload: text) -> text:
+    """Encode a masked WebSocket text frame (client→server must be masked).
+
+    Minimal implementation: single frame, FIN=1, opcode=0x1 (text).
+    Masking key is fixed (0xDE, 0xAD, 0xBE, 0xEF) for test determinism.
+    """
+    val plen = payload.len()
+    val mask: [u8] = [0xDE, 0xAD, 0xBE, 0xEF]
+
+    # Header: FIN+opcode=0x81, MASK+len (7-bit, <=125 for test payloads)
+    var frame: [u8] = [0x81, (0x80 | (plen & 0x7F)) as u8]
+    # Masking key bytes
+    frame = frame + mask
+    # Masked payload
+    var i = 0
+    while i < plen:
+        val ch = payload.char_at(i) as u8
+        frame = frame + [(ch ^ mask[i % 4]) as u8]
+        i = i + 1
+
+    frame.to_text()
+
+fn _ws_is_text_frame(data: text) -> bool:
+    """Return true if the first byte of data is a FIN+text opcode (0x81)."""
+    if data.len() < 2:
+        return false
+    (data.char_at(0) as u8) == 0x81
+
+fn _ws_frame_payload(data: text) -> text:
+    """Extract unmasked payload from a server→client text frame."""
+    if data.len() < 2:
+        return ""
+    val len_byte = (data.char_at(1) as u8) & 0x7F
+    # For test payloads only 7-bit length is needed
+    val header_end = 2
+    if header_end + len_byte as i64 > data.len():
+        return ""
+    data[header_end : header_end + len_byte as i64]
+
+# =========================================================================
+# WssRoundTrip — the e2e driver
+# =========================================================================
+
+class WssRoundTrip:
+    host: text
+    port: i32
+    path: text
+
+    static fn new(host: text, port: i32, path: text) -> WssRoundTrip:
+        WssRoundTrip(host: host, port: port, path: path)
+
+    me run(send_payload: text) -> Result<text, text>:
+        """Connect via TLS, upgrade to WebSocket, send one text frame, receive reply.
+
+        Returns Ok(received_payload) on success, Err(reason) on any failure.
+        """
+        val handle_result = TlsClient.connect(self.host, self.port)
+        match handle_result:
+            Err(e):
+                return Err("connect failed: {e}")
+            Ok(handle):
+                # Send Upgrade request
+                val ws_key = "dGhlIHNhbXBsZSBub25jZQ=="  # fixed test key
+                val upgrade_req = _ws_make_upgrade_request(self.host, self.port, self.path, ws_key)
+                match TlsClient.write(handle, upgrade_req):
+                    Err(e):
+                        TlsClient.close(handle)
+                        return Err("upgrade write failed: {e}")
+                    Ok(_):
+                        pass_dn
+
+                # Read HTTP response — expect 101
+                match TlsClient.read(handle, 1024):
+                    Err(e):
+                        TlsClient.close(handle)
+                        return Err("upgrade read failed: {e}")
+                    Ok(response):
+                        if not response.contains("101"):
+                            TlsClient.close(handle)
+                            return Err("expected 101, got: {response[0:80]}")
+
+                # Send a WS text frame
+                val frame = _ws_make_text_frame(send_payload)
+                match TlsClient.write(handle, frame):
+                    Err(e):
+                        TlsClient.close(handle)
+                        return Err("frame write failed: {e}")
+                    Ok(_):
+                        pass_dn
+
+                # Receive the echo/reply frame
+                match TlsClient.read(handle, 4096):
+                    Err(e):
+                        TlsClient.close(handle)
+                        return Err("frame read failed: {e}")
+                    Ok(reply):
+                        TlsClient.close(handle)
+                        if not _ws_is_text_frame(reply):
+                            return Err("expected text frame, got opcode={reply.char_at(0) as u8}")
+                        return Ok(_ws_frame_payload(reply))

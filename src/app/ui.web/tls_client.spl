@@ -1,0 +1,59 @@
+# TLS Client — Result-based wrapper around rt_tls_client_* FFI
+#
+# Wraps the existing tls_ffi.spl externs in a TlsClient class that returns
+# Result<T, text> so callers can use the ? operator for error propagation.
+# The underlying rt_tls_client_* externs are TCP shims today (TODO #54);
+# the API surface is stable.
+
+use std.nogc_sync_mut.io.tls_ffi.{
+    rt_tls_client_connect,
+    rt_tls_client_read,
+    rt_tls_client_write,
+    rt_tls_client_close
+}
+
+# =========================================================================
+# TlsClient
+# =========================================================================
+
+class TlsClient:
+    pass_dn
+
+    static fn connect(host: text, port: i32) -> Result<i64, text>:
+        """Open a TLS connection to host:port.
+
+        Returns Ok(handle) on success. The handle is passed to read/write/close.
+        Returns Err if the underlying connect fails (handle <= 0).
+        """
+        val handle = rt_tls_client_connect(host, port as i64)
+        if handle <= 0:
+            return Err("TLS connect failed: {host}:{port}")
+        Ok(handle)
+
+    static fn read(handle: i64, size: i32) -> Result<text, text>:
+        """Read up to size bytes from an open TLS connection.
+
+        Returns Ok(data) where data may be empty on a clean EOF.
+        Returns Err on a closed or invalid handle.
+        """
+        if handle <= 0:
+            return Err("TLS read: invalid handle")
+        val data = rt_tls_client_read(handle, size as i64)
+        Ok(data)
+
+    static fn write(handle: i64, data: text) -> Result<i32, text>:
+        """Write data to an open TLS connection.
+
+        Returns Ok(bytes_written). Returns Err if the write fails.
+        """
+        if handle <= 0:
+            return Err("TLS write: invalid handle")
+        val n = rt_tls_client_write(handle, data)
+        if n < 0:
+            return Err("TLS write failed")
+        Ok(n as i32)
+
+    static fn close(handle: i64):
+        """Close an open TLS connection."""
+        if handle > 0:
+            rt_tls_client_close(handle)

@@ -10,8 +10,7 @@ use os.compositor.wm_scene.{WmSceneSpec, render_scene_to_backend}
 use os.compositor.electron_capture.{CaptureResult, capture_error}
 use std.common.image.ppm_decode.{decode_ppm_to_argb}
 use std.nogc_sync_mut.ffi.io.{file_read_bytes}
-
-extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+use std.nogc_sync_mut.qemu.qmp_client.{qmp_connect, qmp_screendump, qmp_disconnect, qmp_send_check}
 
 # ============================================================================
 # In-Process Capture
@@ -44,48 +43,33 @@ fn capture_qemu_inprocess(scene: WmSceneSpec) -> CaptureResult:
 # VM Capture via QMP
 # ============================================================================
 
-fn _qmp_screendump_via_python(qmp_socket: text, output_path: text) -> (bool, text):
-    """Issue a QMP screendump through a one-shot Python Unix-socket client.
+fn _qmp_screendump(socket_path: text, output_path: text) -> Result<bool, text>:
+    """Issue a QMP screendump using the pure-SPL QMP client.
 
-    The interpreter does not reliably expose the low-level Unix-socket
-    externs used by std.nogc_sync_mut.qemu.qmp_client during system-spec
-    execution. Use rt_process_run, which is already available in specs,
-    to perform the same greeting -> qmp_capabilities -> screendump flow.
+    Connects to the QMP Unix socket, sends greeting/qmp_capabilities
+    handshake, issues screendump, then disconnects.
     """
-    val script = """
-import json, socket, sys
-sock_path, out_path = sys.argv[1], sys.argv[2]
-try:
-    s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    s.connect(sock_path)
-    f = s.makefile("rwb", buffering=0)
-    greeting = f.readline()
-    if not greeting:
-        sys.stderr.write("no greeting")
-        sys.exit(2)
-    f.write(b'{"execute":"qmp_capabilities"}\n')
-    ack = f.readline()
-    if b"error" in ack:
-        sys.stderr.write(ack.decode("utf-8", "replace"))
-        sys.exit(3)
-    payload = json.dumps({
-        "execute": "screendump",
-        "arguments": {"filename": out_path, "format": "ppm"}
-    }).encode("utf-8") + b"\n"
-    f.write(payload)
-    resp = f.readline()
-    if b"error" in resp:
-        sys.stderr.write(resp.decode("utf-8", "replace"))
-        sys.exit(4)
-    s.close()
-except Exception as exc:
-    sys.stderr.write(str(exc))
-    sys.exit(1)
-"""
-    val result = rt_process_run("python3", ["-c", script, qmp_socket, output_path])
-    if result[2] != 0:
-        return (false, result[1])
-    (true, result[0])
+    val client = qmp_connect(socket_path)
+    if client.fd < 0:
+        return Err("QMP connect failed: {socket_path}")
+    val ok = qmp_screendump(client, output_path, "ppm")
+    qmp_disconnect(client)
+    if not ok:
+        return Err("QMP screendump command failed")
+    Ok(true)
+
+fn send_harness_marker(socket_path: text, marker: text):
+    """Send a marker string to QEMU's serial output via QMP human-monitor-command.
+
+    Uses `print <marker>` HMC so the guest can detect the marker on its
+    serial receive buffer, signalling that the harness screendump is done.
+    """
+    val client = qmp_connect(socket_path)
+    if client.fd < 0:
+        return
+    val json = "{\"execute\": \"human-monitor-command\", \"arguments\": {\"command-line\": \"print {marker}\"}}"
+    qmp_send_check(client, json, "harness-marker")
+    qmp_disconnect(client)
 
 fn capture_qemu_vm(qmp_socket: text, output_path: text) -> CaptureResult:
     """Capture QEMU framebuffer via QMP screendump command.
@@ -100,9 +84,12 @@ fn capture_qemu_vm(qmp_socket: text, output_path: text) -> CaptureResult:
     Returns:
         CaptureResult with ARGB pixel buffer or error
     """
-    val (success, err) = _qmp_screendump_via_python(qmp_socket, output_path)
-    if not success:
-        return capture_error("qemu_vm", 0, 0, "QMP screendump failed for socket: {qmp_socket} ({err})")
+    val screendump_result = _qmp_screendump(qmp_socket, output_path)
+    match screendump_result:
+        Err(err):
+            return capture_error("qemu_vm", 0, 0, "QMP screendump failed for socket: {qmp_socket} ({err})")
+        Ok(_):
+            pass_dn
 
     # Read and decode the screenshot file (rt_file_read_bytes returns Option<[u8]>)
     val ppm_data_opt = file_read_bytes(output_path)

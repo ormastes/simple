@@ -53,6 +53,7 @@ class TextEditor:
     mode: EditorMode
     command_buffer: text
     yank_buffer: [text]
+    undo_stack: [[text]]
     status_message: text
     visible_rows: i32
     visible_cols: i32
@@ -72,6 +73,7 @@ impl TextEditor:
             mode: EditorMode.Normal,
             command_buffer: "",
             yank_buffer: [],
+            undo_stack: [],
             status_message: "Ready",
             visible_rows: 20,
             visible_cols: 80,
@@ -124,12 +126,45 @@ impl TextEditor:
         self.file_path = path
         return self.save_file()
 
+    # -- Undo Support --------------------------------------------------------
+
+    me _push_undo():
+        """Save a snapshot of lines onto the undo stack (max 50 entries)."""
+        if self.undo_stack.len() >= 50:
+            var trimmed: [[text]] = []
+            var i = 1
+            while i < self.undo_stack.len():
+                trimmed = trimmed.push(self.undo_stack[i])
+                i = i + 1
+            self.undo_stack = trimmed
+        self.undo_stack = self.undo_stack.push(self.lines)
+
+    me undo():
+        """Restore the last saved line snapshot."""
+        if self.undo_stack.len() == 0:
+            self.status_message = "Already at oldest change"
+            return
+        val snapshot = self.undo_stack[self.undo_stack.len() - 1]
+        var trimmed: [[text]] = []
+        var i = 0
+        while i < self.undo_stack.len() - 1:
+            trimmed = trimmed.push(self.undo_stack[i])
+            i = i + 1
+        self.undo_stack = trimmed
+        self.lines = snapshot
+        self.modified = true
+        if self.cursor_row >= self.lines.len():
+            self.cursor_row = self.lines.len() - 1
+        self._clamp_col()
+        self.status_message = ""
+
     # -- Text Editing --------------------------------------------------------
 
     me insert_char(ch: text):
         """Insert a character at cursor position."""
         if self.cursor_row >= self.lines.len():
             return
+        self._push_undo()
         val line = self.lines[self.cursor_row]
         val before = line.slice(0, self.cursor_col)
         val after = line.slice(self.cursor_col, line.len())
@@ -141,6 +176,7 @@ impl TextEditor:
         """Delete the character at cursor position."""
         if self.cursor_row >= self.lines.len():
             return
+        self._push_undo()
         val line = self.lines[self.cursor_row]
         if self.cursor_col >= line.len():
             # Join with next line
@@ -157,6 +193,7 @@ impl TextEditor:
 
     me delete_char_before():
         """Delete the character before cursor (backspace)."""
+        self._push_undo()
         if self.cursor_col > 0:
             self.cursor_col = self.cursor_col - 1
             self.delete_char()
@@ -174,6 +211,7 @@ impl TextEditor:
         """Insert a newline at cursor, splitting the current line."""
         if self.cursor_row >= self.lines.len():
             return
+        self._push_undo()
         val line = self.lines[self.cursor_row]
         val before = line.slice(0, self.cursor_col)
         val after = line.slice(self.cursor_col, line.len())
@@ -273,7 +311,7 @@ impl TextEditor:
             "p":
                 self._paste_below()
             "u":
-                self.status_message = "undo not yet implemented"
+                self.undo()
             # Command mode
             ":":
                 self.mode = EditorMode.Command
@@ -373,6 +411,7 @@ impl TextEditor:
 
     me _delete_line():
         """Delete the current line (dd)."""
+        self._push_undo()
         if self.lines.len() <= 1:
             self.yank_buffer = [self.lines[0]]
             self.lines[0] = ""
@@ -396,6 +435,7 @@ impl TextEditor:
         """Paste yanked lines below cursor (p)."""
         if self.yank_buffer.len() == 0:
             return
+        self._push_undo()
         var insert_at = self.cursor_row + 1
         for line in self.yank_buffer:
             self._insert_line(insert_at, line)

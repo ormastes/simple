@@ -1,7 +1,7 @@
 # nc / netcat — Network utility
 # MDSOC: feature dimension, apps layer
-#
-# Stub — full implementation requires listen/accept API wiring.
+
+use os.userlib.net.{IpAddr, SockAddr, Socket, socket, connect, bind, listen, accept, send, recv}
 
 fn run_netcat(args: [text]) -> i32:
     """Netcat — read/write data across network connections.
@@ -13,5 +13,108 @@ fn run_netcat(args: [text]) -> i32:
         print "nc: missing host or port"
         print "Usage: nc HOST PORT | nc -l PORT"
         return 1
-    print "nc: not yet fully implemented (TCP listen/accept needs wiring)"
-    return 1
+
+    if args[0] == "-l":
+        return _netcat_listen(args)
+    return _netcat_connect(args)
+
+fn _netcat_connect(args: [text]) -> i32:
+    """Connect to HOST PORT and enter read/write loop."""
+    if args.len() < 2:
+        print "nc: connect mode requires HOST and PORT"
+        return 1
+    val host = args[0]
+    val port_val = args[1].parse_u64()
+    if port_val == 0:
+        print "nc: invalid port: {args[1]}"
+        return 1
+
+    val ip_result = IpAddr.from_text(host)
+    if ip_result.is_err():
+        print "nc: {ip_result.unwrap_err()}"
+        return 1
+    val ip = ip_result.unwrap()
+
+    val sock_result = socket(2, 1)
+    if sock_result.is_err():
+        print "nc: socket: {sock_result.unwrap_err()}"
+        return 1
+    val sock = sock_result.unwrap()
+
+    val addr = SockAddr(ip: ip, port: port_val as u16)
+    val conn_result = connect(sock, addr)
+    if conn_result.is_err():
+        print "nc: connect: {conn_result.unwrap_err()}"
+        return 1
+
+    # Read/write loop — receive until connection closed
+    var running = true
+    while running:
+        val data = recv(sock, 4096)
+        if data.is_err():
+            running = false
+        else:
+            val bytes = data.unwrap()
+            if bytes.len() == 0:
+                running = false
+            else:
+                print text.from_bytes(bytes, bytes.len().to_u64())
+    return 0
+
+fn _netcat_listen(args: [text]) -> i32:
+    """Listen on PORT and enter read/write loop on accepted connection."""
+    if args.len() < 2:
+        print "nc: listen mode requires PORT"
+        return 1
+    val port_val = args[1].parse_u64()
+    if port_val == 0:
+        print "nc: invalid port: {args[1]}"
+        return 1
+
+    val sock_result = socket(2, 1)
+    if sock_result.is_err():
+        print "nc: socket: {sock_result.unwrap_err()}"
+        return 1
+    val sock = sock_result.unwrap()
+
+    val loopback_result = IpAddr.from_text("0.0.0.0")
+    if loopback_result.is_err():
+        print "nc: internal error building bind address"
+        return 1
+    val bind_addr = SockAddr(ip: loopback_result.unwrap(), port: port_val as u16)
+
+    val bind_result = bind(sock, bind_addr)
+    if bind_result.is_err():
+        print "nc: bind: {bind_result.unwrap_err()}"
+        return 1
+
+    val listen_result = listen(sock, 1)
+    if listen_result.is_err():
+        print "nc: listen: {listen_result.unwrap_err()}"
+        return 1
+
+    # Poll accept until a connection arrives
+    var conn_sock_result = accept(sock)
+    var retries = 0
+    while conn_sock_result.is_err() and retries < 100:
+        conn_sock_result = accept(sock)
+        retries = retries + 1
+
+    if conn_sock_result.is_err():
+        print "nc: accept: {conn_sock_result.unwrap_err()}"
+        return 1
+    val conn_sock = conn_sock_result.unwrap()
+
+    # Read/write loop on accepted connection
+    var running = true
+    while running:
+        val data = recv(conn_sock, 4096)
+        if data.is_err():
+            running = false
+        else:
+            val bytes = data.unwrap()
+            if bytes.len() == 0:
+                running = false
+            else:
+                print text.from_bytes(bytes, bytes.len().to_u64())
+    return 0
