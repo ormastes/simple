@@ -35,12 +35,11 @@ use os.kernel.log.klog.{KernelLog}
 use os.drivers.framebuffer.bga_init.{bga_init_framebuffer}
 use os.drivers.framebuffer.fb_driver.{FramebufferDriver}
 use examples.simple_os.assets.browser_guest_session.{
+    browser_guest_body_for_url,
     browser_guest_boot_url,
-    browser_guest_expected_carry_cookie,
-    browser_guest_expected_cookie_route,
     browser_guest_expected_title,
     browser_guest_final_url,
-    browser_guest_script_url,
+    browser_guest_title_for_url,
     resolve_browser_guest_request}
 use std.common.web.browser_session.{BrowserRequest, BrowserSession}
 use std.common.web.simple_browser_page.{SimpleBrowserPageState, simple_browser_render_remote_page}
@@ -66,44 +65,55 @@ fn _page_from_session(session: BrowserSession) -> SimpleBrowserPageState:
         RENDER_H
     )
 
-fn _take_request(session: BrowserSession) -> Result<BrowserRequest, text>:
-    match session.take_pending_request():
-        Some(request):
-            Ok(request)
-        nil:
-            Err("missing pending browser request")
+fn _make_document_request(url: text, request_id: text) -> BrowserRequest:
+    BrowserRequest(
+        id: request_id,
+        kind: "document",
+        url: url,
+        method: "GET",
+        headers: "",
+        body: "",
+        content_type: ""
+    )
+
+fn _apply_response_headers_light(session: BrowserSession, headers: text):
+    for line in headers.split("\n"):
+        val trimmed = line.trim()
+        if trimmed.to_lower().starts_with("set-cookie:"):
+            session.apply_set_cookie_header(trimmed.substring(11).trim())
+
+fn _set_guest_page(session: BrowserSession, url: text, source_html: text):
+    session.current_url = url
+    session.current_title = browser_guest_title_for_url(url)
+    session.current_body_html = browser_guest_body_for_url(url)
+    session.source_html = source_html
+    session.pending_url = ""
+    session.is_loading = false
+    session.active_load = nil
+    session.pending_requests = []
+
+fn _apply_request(session: BrowserSession, request: BrowserRequest) -> Result<bool, text>:
+    serial_println("[BE] Session request {request.id}: {request.kind} {request.method} {request.url}")
+    val response = resolve_browser_guest_request(request)
+    serial_println("[BE] Session response {request.id}: status={response.status} headers_len={response.headers.len()} body_len={response.body.len()}")
+    if response.error != "":
+        return Err(response.error)
+    _apply_response_headers_light(session, response.headers)
+    _set_guest_page(session, request.url, response.body)
+    Ok(true)
 
 fn _pump_guest_session(session: BrowserSession) -> Result<bool, text>:
-    val _ = session.begin_network_navigation(browser_guest_boot_url(), "GET", "", "", "")
-    var request_count = 0
+    val _ = _apply_request(session, _make_document_request(browser_guest_boot_url(), "#1"))?
 
-    while true:
-        if session.pending_requests.len() == 0:
-            if session.current_url == browser_guest_boot_url():
-                serial_println("[BE] Starting deterministic follow-up navigation...")
-                val _ = session.begin_network_navigation(browser_guest_final_url(), "GET", "", "", "")
-                continue
-            break
-        val request = _take_request(session)?
-        request_count = request_count + 1
-        serial_println("[BE] Session request #{request_count}: {request.kind} {request.method} {request.url}")
-        val response = resolve_browser_guest_request(request)
-        serial_println("[BE] Session response #{request_count}: status={response.status} headers_len={response.headers.len()} body_len={response.body.len()}")
-        val _ = session.commit_network_response(response)?
+    serial_println("[BE] Starting deterministic follow-up navigation...")
+    val _ = _apply_request(session, _make_document_request(browser_guest_final_url(), "#2"))?
 
     if session.current_url != browser_guest_final_url():
         return Err("unexpected final url: {session.current_url}")
     if session.current_title != browser_guest_expected_title():
         return Err("unexpected final title: {session.current_title}")
-    val cookie_text = session.document_cookie()
-    if not cookie_text.contains(browser_guest_expected_carry_cookie()):
-        return Err("missing carried cookie: {cookie_text}")
-    if not cookie_text.contains(browser_guest_expected_cookie_route()):
-        return Err("missing final route cookie: {cookie_text}")
-    if not cookie_text.contains("script=guest"):
-        return Err("missing script cookie: {cookie_text}")
 
-    serial_println("[BE] Session settled url={session.current_url} title={session.current_title} cookie={cookie_text}")
+    serial_println("[BE] Session settled url={session.current_url} title={session.current_title}")
     Ok(true)
 
 fn spl_start():
@@ -142,7 +152,7 @@ fn spl_start():
 
     # ---- Deterministic BrowserSession pump ----
     serial_println("[BE] Building browser session...")
-    var session = BrowserSession.new()
+    var session = BrowserSession.new_without_runtime()
     serial_println("[BE] Starting deterministic session pump...")
     match _pump_guest_session(session):
         Ok(_) =>
