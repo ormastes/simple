@@ -35,6 +35,7 @@ use os.apps.terminal.terminal.{Terminal}
 use os.apps.hello_world.hello_world.{HelloWorldApp}
 use os.apps.browser_demo.browser_demo.{BrowserDemoApp, render_demo_stats}
 use os.apps.editor.editor.{TextEditor}
+use os.apps.shell.shell_app.{ShellApp}
 use os.apps.memo.memo.{MemoApp}
 use os.apps.paint.paint.{PaintApp}
 use os.apps.file_manager.file_manager.{FileManager}
@@ -59,6 +60,9 @@ use os.apps.color_picker.color_picker.{ColorPickerApp}
 use os.apps.font_viewer.font_viewer.{FontViewerApp}
 use os.apps.installer_gui.installer_gui.{InstallerGuiApp}
 use os.apps.installer_gui.upgrade_gui.{UpgradeGuiApp}
+use os.services.vfs.vfs.{VfsManager, vfs_mount}
+use os.services.vfs.vfs_init.{CNvmeBlockAdapter}
+use os.services.fat32.fat32.{Fat32Driver}
 
 # ============================================================================
 # Desktop Shell Constants
@@ -73,6 +77,50 @@ val APP_ID_BROWSER_DEMO: text = "/sys/apps/browser_demo"
 val APP_ID_HELLO_WORLD: text = "/sys/apps/hello_world"
 val APP_ID_FILE_MANAGER: text = "/sys/apps/file_manager"
 val APP_ID_SHELL: text = "/sys/apps/shell"
+val APP_ID_EDITOR: text = "/sys/apps/editor"
+val EDITOR_SMOKE_PATH: text = "/EDITOR.TXT"
+val EDITOR_SMOKE_CONTENT: text = "SimpleOS editor smoke saved from GUI"
+
+struct EditorResidentLaunch:
+    tree: UITree
+    saved_path: text
+    content: text
+
+fn _build_editor_resident_launch() -> Result<EditorResidentLaunch, text>:
+    var adapter = CNvmeBlockAdapter.new()
+    val init_result = adapter.init()
+    if init_result.is_err():
+        return Err(init_result.unwrap_err())
+
+    val fat32 = Fat32Driver.new(adapter)
+    var vfs = VfsManager.new()
+    val mount_result = vfs_mount(vfs, "/", fat32)
+    if mount_result.is_err():
+        return Err(mount_result.unwrap_err())
+
+    var editor = TextEditor.with_vfs(vfs)
+    editor.lines = [EDITOR_SMOKE_CONTENT]
+    val save_result = editor.save_as(EDITOR_SMOKE_PATH)
+    if save_result.is_err():
+        return Err(save_result.unwrap_err())
+
+    var shell = ShellApp.with_vfs(vfs)
+    shell.execute("cat {EDITOR_SMOKE_PATH}")
+    if shell.last_exit_code != 0:
+        return Err("shell cat failed for {EDITOR_SMOKE_PATH}")
+    if shell.output_lines.len() == 0:
+        return Err("shell produced no verification output")
+
+    val cli_output = shell.output_lines[shell.output_lines.len() - 1]
+    if cli_output != EDITOR_SMOKE_CONTENT:
+        return Err("cli output mismatch: {cli_output}")
+
+    val session = editor.build_ui()
+    Ok(EditorResidentLaunch(
+        tree: session.current_tree(),
+        saved_path: EDITOR_SMOKE_PATH,
+        content: cli_output
+    ))
 
 fn _resident_app_id(name: text) -> text:
     match name:
@@ -84,6 +132,8 @@ fn _resident_app_id(name: text) -> text:
             APP_ID_FILE_MANAGER
         case "Terminal":
             APP_ID_SHELL
+        case "Editor":
+            APP_ID_EDITOR
         case _:
             ""
 
@@ -153,6 +203,25 @@ fn _materialize_resident_manifest_launch(shell: DesktopShell, name: text, pid: u
             shell.wm.register_window_owner_with_identity(WindowId(value: wid), 0, pid, app_id)
             launcher_note_window_opened(pid)
             true
+        case "Editor":
+            serial_println("[desktop-e2e] editor-launch:start pid={pid} app={app_id}")
+            match _build_editor_resident_launch():
+                Ok(launch):
+                    val wid = shell.compositor.create_window_with_tree("Editor", 140, 100, 760, 420, launch.tree)
+                    if wid == 0:
+                        serial_println("[desktop-e2e] editor-launch:fail pid={pid} reason=create_window_failed")
+                        return false
+                    shell.compositor.set_window_identity(wid, pid, app_id)
+                    shell.wm.register_window_owner_with_identity(WindowId(value: wid), 0, pid, app_id)
+                    launcher_note_window_opened(pid)
+                    serial_println("[desktop-e2e] editor-save:ok pid={pid} path={launch.saved_path}")
+                    serial_println("[desktop-e2e] cli-verify:ok pid={pid} path={launch.saved_path} content={launch.content}")
+                    serial_println("[desktop-e2e] editor-launch:ok pid={pid} app={app_id} mode=resident-manifest")
+                    true
+                Err(err):
+                    serial_println("[desktop-e2e] editor-save:fail pid={pid} reason={err}")
+                    serial_println("[desktop-e2e] editor-launch:fail pid={pid} reason={err}")
+                    false
         case _:
             false
 

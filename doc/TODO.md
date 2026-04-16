@@ -26,17 +26,17 @@
 
 ### runtime
 
-- **#38** [runtime][P1] bootstrap-propagate the v2 Phase A rt_random_hex extern to bin/simple (self-hosted)
+- **#58** [runtime][P1] bootstrap-propagate the v2 Phase A rt_random_hex extern to bin/simple (self-hosted)
   - File: `./tests/app/ui.web/live_smoke_test.spl:3`
   - Status: open
 
 ### test
 
-- **#36** [test][P1] build the real compiled WSS e2e driver — _ws_client.spl + socket round trip
+- **#56** [test][P1] build the real compiled WSS e2e driver — _ws_client.spl + socket round trip
   - File: `./tests/app/ui.web/live_smoke_test.spl:1`
   - Status: open
 
-- **#37** [test][P1] add `bin/simple test --compile` so sspec `it` blocks actually execute
+- **#57** [test][P1] add `bin/simple test --compile` so sspec `it` blocks actually execute
   - File: `./tests/app/ui.web/live_smoke_test.spl:2`
   - Status: open
 
@@ -45,7 +45,7 @@
 
 ### runtime
 
-- **#34** [runtime][P2] rt_tls_client_* is still TCP shim — add real rustls::ClientConnection path
+- **#54** [runtime][P2] rt_tls_client_* is still TCP shim — add real rustls::ClientConnection path
   - File: `./src/compiler_rust/runtime/src/value/net_tls.rs:150`
   - Status: open
 
