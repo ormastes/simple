@@ -19,6 +19,7 @@ extern fn rt_process_spawn_async(cmd: text, args: [text]) -> i64
 extern fn rt_process_wait(pid: i64, timeout_ms: i64) -> i64
 extern fn rt_process_is_running(pid: i64) -> bool
 extern fn rt_process_kill(pid: i64) -> bool
+extern fn rt_process_spawn_async_redirect(cmd: text, args: [text], stdout_path: text, stderr_path: text) -> i64
 extern fn rt_file_read_text(path: text) -> text
 extern fn rt_file_delete(path: text) -> bool
 extern fn rt_file_exists(path: text) -> bool
@@ -173,8 +174,9 @@ fn _spawn_guest_with_qmp_extras(
     val target_with_qmp = _target_with_qmp(target_with_extras, qmp_socket)
     val cmd_parts = build_qemu_command(target_with_qmp)
     val qemu_bin = cmd_parts[0]
-    val shell_cmd = _shell_command_with_redirect(cmd_parts, serial_log)
-    val pid = rt_process_spawn_async("/bin/sh", ["-c", shell_cmd])
+    val qemu_args = _args_with_serial_file(cmd_parts.slice(1), serial_log)
+    val null_sink = "/dev/null"
+    val pid = rt_process_spawn_async_redirect(qemu_bin, qemu_args, null_sink, null_sink)
     if pid <= 0:
         return Err("failed to spawn {qemu_bin}")
     if not wait_for_qmp_socket(qmp_socket, 10000):
@@ -235,7 +237,23 @@ fn stop_guest(handle: QemuGuestHandle) -> bool:
         rt_process_wait(handle.pid, 2000)
     if rt_file_exists(handle.qmp_socket):
         rt_file_delete(handle.qmp_socket)
+    if rt_file_exists(handle.serial_log):
+        rt_file_delete(handle.serial_log)
     stopped
+
+fn _args_with_serial_file(args: [text], serial_log: text) -> [text]:
+    var rewritten: [text] = []
+    var idx = 0
+    while idx < args.len():
+        val arg = args[idx]
+        if arg == "-serial" and idx + 1 < args.len():
+            rewritten.push("-serial")
+            rewritten.push("file:{serial_log}")
+            idx = idx + 2
+            continue
+        rewritten.push(arg)
+        idx = idx + 1
+    rewritten
 
 # ===========================================================================
 # Output Parsing
@@ -343,6 +361,16 @@ fn _shell_command_with_redirect(cmd_parts: [text], serial_log: text) -> text:
         shell_cmd = shell_cmd + _shell_quote(cmd_parts[idx])
         idx = idx + 1
     "{shell_cmd} > {_shell_quote(serial_log)} 2>&1"
+
+fn _shell_command(cmd_parts: [text]) -> text:
+    var shell_cmd = ""
+    var idx = 0
+    while idx < cmd_parts.len():
+        if idx > 0:
+            shell_cmd = shell_cmd + " "
+        shell_cmd = shell_cmd + _shell_quote(cmd_parts[idx])
+        idx = idx + 1
+    shell_cmd
 
 fn _shell_quote(value: text) -> text:
     val escaped = value.replace("'", "'\"'\"'")
