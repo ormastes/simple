@@ -1,7 +1,7 @@
 # TODO List
 
 **Generated:** 2026-04-16
-**Total:** 5 items | **Open:** 5 | **Blocked:** 0 | **Stale:** 0
+**Total:** 4 items | **Open:** 4 | **Blocked:** 0 | **Stale:** 0
 **Database:** `doc/todo/todo_db.sdn`
 
 ## Statistics
@@ -10,7 +10,7 @@
 
 | Area | Count | P0 | P1 | P2 | P3 | Blocked |
 |------|-------|----|----|----|----|---------|
-| runtime | 3 | 0 | 1 | 1 | 1 | 0 |
+| runtime | 2 | 0 | 1 | 0 | 1 | 0 |
 | test | 2 | 0 | 2 | 0 | 0 | 0 |
 
 ### By Priority
@@ -19,34 +19,25 @@
 |----------|-------|------|---------|-------|
 | P0 (critical) | 0 | 0 | 0 | 0 |
 | P1 (high) | 3 | 3 | 0 | 0 |
-| P2 (medium) | 1 | 1 | 0 | 0 |
+| P2 (medium) | 0 | 0 | 0 | 0 |
 | P3 (low) | 1 | 1 | 0 | 0 |
 
 ## P1 High Priority TODOs
 
 ### runtime
 
-- **#58** [runtime][P1] bootstrap-propagate the v2 Phase A rt_random_hex extern to bin/simple (self-hosted)
+- **#62** [runtime][P1] bootstrap-propagate the v2 Phase A rt_random_hex extern to bin/simple (self-hosted)
   - File: `./tests/app/ui.web/live_smoke_test.spl:3`
   - Status: open
 
 ### test
 
-- **#56** [test][P1] build the real compiled WSS e2e driver — _ws_client.spl + socket round trip
+- **#60** [test][P1] build the real compiled WSS e2e driver — _ws_client.spl + socket round trip
   - File: `./tests/app/ui.web/live_smoke_test.spl:1`
   - Status: open
 
-- **#57** [test][P1] add `bin/simple test --compile` so sspec `it` blocks actually execute
+- **#61** [test][P1] add `bin/simple test --compile` so sspec `it` blocks actually execute
   - File: `./tests/app/ui.web/live_smoke_test.spl:2`
-  - Status: open
-
-
-## P2 Medium Priority TODOs (1)
-
-### runtime
-
-- **#54** [runtime][P2] rt_tls_client_* is still TCP shim — add real rustls::ClientConnection path
-  - File: `./src/compiler_rust/runtime/src/value/net_tls.rs:150`
   - Status: open
 
 
