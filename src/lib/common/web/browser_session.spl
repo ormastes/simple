@@ -183,6 +183,10 @@ class BrowserRuntimeState:
             runtime.interpreter.object_store.set_property(window_id, "Math", math_val)
         if val Some(json_val) = runtime.interpreter.env_stack.get_var(global_env, "JSON"):
             runtime.interpreter.object_store.set_property(window_id, "JSON", json_val)
+        if val Some(promise_val) = runtime.interpreter.env_stack.get_var(global_env, "Promise"):
+            runtime.interpreter.object_store.set_property(window_id, "Promise", promise_val)
+        if val Some(fetch_val) = runtime.interpreter.env_stack.get_var(global_env, "fetch"):
+            runtime.interpreter.object_store.set_property(window_id, "fetch", fetch_val)
         if val Some(timeout_val) = runtime.interpreter.env_stack.get_var(global_env, "setTimeout"):
             runtime.interpreter.object_store.set_property(window_id, "setTimeout", timeout_val)
         if val Some(interval_val) = runtime.interpreter.env_stack.get_var(global_env, "setInterval"):
@@ -198,7 +202,6 @@ class BrowserRuntimeState:
         runtime.interpreter.env_stack.define_var(global_env, "localStorage", JsValue.Object(id: local_storage_id))
 
         install_storage_api(runtime)
-        install_browser_fetch_api(runtime)
         sync_storage_runtime_state(runtime, session_storage_id, session_storage)
         sync_storage_runtime_state(runtime, local_storage_id, local_storage)
         sync_browser_runtime_state(runtime, window_id, chrome_id, url, cookie_text)
@@ -229,6 +232,7 @@ class BrowserSession:
     current_title: text
     current_body_html: text
     source_html: text
+    runtime_enabled: bool
     history: [BrowserHistoryEntry]
     current_index: i32
     is_loading: bool
@@ -245,11 +249,18 @@ class BrowserSession:
     resource_overrides: [Pair<text, text>]
 
     static fn new() -> BrowserSession:
+        BrowserSession._create(true)
+
+    static fn new_without_runtime() -> BrowserSession:
+        BrowserSession._create(false)
+
+    static fn _create(runtime_enabled: bool) -> BrowserSession:
         BrowserSession(
             current_url: "about:blank",
             current_title: "about:blank",
             current_body_html: "",
             source_html: blank_page_html(),
+            runtime_enabled: runtime_enabled,
             history: [],
             current_index: -1,
             is_loading: false,
@@ -313,6 +324,65 @@ impl BrowserSession:
         self.pending_requests = rest
         Some(req)
 
+    me _drain_runtime_async_requests() -> bool:
+        if val Some(state) = self.runtime_state:
+            var drained = false
+            while true:
+                match state.runtime.interpreter.take_pending_async_request():
+                    Some(req_obj_id):
+                        var request_id = ""
+                        var kind = "fetch"
+                        var url = ""
+                        var method = "GET"
+                        var headers = ""
+                        var body = ""
+                        var content_type = ""
+                        match state.runtime.interpreter.object_store.get_property(req_obj_id, "request_id"):
+                            JsValue.String(v): request_id = v
+                            _: pass_dn
+                        match state.runtime.interpreter.object_store.get_property(req_obj_id, "kind"):
+                            JsValue.String(v): kind = v
+                            _: pass_dn
+                        match state.runtime.interpreter.object_store.get_property(req_obj_id, "url"):
+                            JsValue.String(v): url = v
+                            _: pass_dn
+                        match state.runtime.interpreter.object_store.get_property(req_obj_id, "method"):
+                            JsValue.String(v): method = v
+                            _: pass_dn
+                        match state.runtime.interpreter.object_store.get_property(req_obj_id, "headers"):
+                            JsValue.String(v): headers = v
+                            _: pass_dn
+                        match state.runtime.interpreter.object_store.get_property(req_obj_id, "body"):
+                            JsValue.String(v): body = v
+                            _: pass_dn
+                        match state.runtime.interpreter.object_store.get_property(req_obj_id, "content_type"):
+                            JsValue.String(v): content_type = v
+                            _: pass_dn
+                        self.pending_requests = self.pending_requests + [BrowserRequest.create(
+                            id: request_id,
+                            kind: kind,
+                            url: url,
+                            method: method,
+                            headers: headers,
+                            body: body,
+                            content_type: content_type
+                        )]
+                        drained = true
+                    nil:
+                        return drained
+
+    me _flush_runtime_side_effects():
+        if val Some(state) = self.runtime_state:
+            var progress = true
+            while progress:
+                progress = false
+                if self._drain_runtime_async_requests():
+                    progress = true
+                if state.runtime.interpreter.drain_pending_microtasks():
+                    progress = true
+            self._sync_from_runtime(state)
+            self._refresh_current_history()
+
     me commit_network_response(response: BrowserResponse) -> Result<bool, text>:
         if response.kind == "document":
             if response.error != "":
@@ -323,6 +393,21 @@ impl BrowserSession:
             return self.commit_navigation_html(response.body)
         if response.kind == "script":
             return self._commit_script_response(response)
+        if response.kind == "fetch":
+            if val Some(state) = self.runtime_state:
+                self._apply_response_headers(response.headers)
+                val _ = state.runtime.interpreter.resolve_async_fetch_response(
+                    response.request_id,
+                    response.url,
+                    response.status,
+                    response.headers,
+                    response.body,
+                    response.error
+                )
+                self._flush_runtime_side_effects()
+            if response.error != "":
+                return Err(response.error)
+            return Ok(true)
         Err("unknown response kind: {response.kind}")
 
     me open_url(url: text) -> Result<bool, text>:
@@ -397,12 +482,13 @@ impl BrowserSession:
             self._sync_runtime_cookie_string()
 
     me eval_script(script: text) -> Result<JsValue, text>:
+        if self.runtime_state == nil:
+            val _ = self._ensure_runtime_state()
         if val Some(state) = self.runtime_state:
             val result = state.runtime.eval(script)
             match result:
                 Ok(value):
-                    self._sync_from_runtime(state)
-                    self._refresh_current_history()
+                    self._flush_runtime_side_effects()
                     return Ok(value)
                 Err(e):
                     return Err(e.message)
@@ -443,16 +529,21 @@ impl BrowserSession:
         else:
             cleaned_html
 
-        val cookie_text = cookie_text_for_url(self.cookies, url)
-        var state = BrowserRuntimeState.create(
-            url,
-            initial_title,
-            body_html,
-            self.session_storage,
-            self.local_storage,
-            cookie_text
-        )
-        self.runtime_state = Some(state)
+        val script_blocks = extract_script_blocks(html)
+
+        if self.runtime_enabled and script_blocks.len() > 0:
+            val cookie_text = cookie_text_for_url(self.cookies, url)
+            var state = BrowserRuntimeState.create(
+                url,
+                initial_title,
+                body_html,
+                self.session_storage,
+                self.local_storage,
+                cookie_text
+            )
+            self.runtime_state = Some(state)
+        else:
+            self.runtime_state = nil
         self.current_url = url
         self.current_title = if initial_title.len() > 0: initial_title else: url
         self.current_body_html = body_html
@@ -463,10 +554,34 @@ impl BrowserSession:
             source_html: html,
             target_index: target_index,
             push_history: push_history,
-            script_blocks: extract_script_blocks(html),
+            script_blocks: script_blocks,
             style_warning: contains_style_block(html)
         ))
+        if not self.runtime_enabled:
+            if val Some(load) = self.active_load:
+                if script_blocks.len() > 0:
+                    load.warnings = load.warnings + ["scripts are ignored when BrowserSession runtime is disabled"]
+                self._finalize_active_load(load)
+                self.active_load = nil
+            return Ok(true)
         self._advance_script_loading()
+
+    me _ensure_runtime_state() -> BrowserRuntimeState?:
+        if not self.runtime_enabled:
+            return nil
+        if val Some(state) = self.runtime_state:
+            return Some(state)
+        val cookie_text = cookie_text_for_url(self.cookies, self.current_url)
+        val state = BrowserRuntimeState.create(
+            self.current_url,
+            self.current_title,
+            self.current_body_html,
+            self.session_storage,
+            self.local_storage,
+            cookie_text
+        )
+        self.runtime_state = Some(state)
+        Some(state)
 
     me _sync_from_runtime(state: BrowserRuntimeState):
         val title_val = state.runtime.interpreter.object_store.get_property(
@@ -572,6 +687,7 @@ impl BrowserSession:
                 val eval_result = state.runtime.eval(response.body)
                 match eval_result:
                     Ok(_):
+                        self._flush_runtime_side_effects()
                         pass_dn
                     Err(e):
                         load.warnings = load.warnings + ["external script error: {e.message}"]
@@ -588,6 +704,7 @@ impl BrowserSession:
                         val eval_result = state.runtime.eval(block.content)
                         match eval_result:
                             Ok(_):
+                                self._flush_runtime_side_effects()
                                 pass_dn
                             Err(e):
                                 load.warnings = load.warnings + ["inline script error: {e.message}"]
@@ -599,6 +716,7 @@ impl BrowserSession:
                             val eval_result = state.runtime.eval(override_body)
                             match eval_result:
                                 Ok(_):
+                                    self._flush_runtime_side_effects()
                                     pass_dn
                                 Err(e):
                                     load.warnings = load.warnings + ["external script error: {e.message}"]
@@ -698,7 +816,7 @@ fn install_storage_api(runtime: JsRuntime):
     val _ = runtime.eval(storage_api_bootstrap_js())
 
 fn install_browser_fetch_api(runtime: JsRuntime):
-    val _ = runtime.eval(browser_fetch_bootstrap_js())
+    pass_dn
 
 fn sync_storage_runtime_state(runtime: JsRuntime, object_id: i64, pairs: [Pair<text, text>]):
     runtime.interpreter.object_store.set_property(
@@ -787,42 +905,7 @@ fn storage_api_bootstrap_js() -> text:
     ], "")
 
 fn browser_fetch_bootstrap_js() -> text:
-    join_text([
-        "function __simpleWrapResponse(raw) {\n",
-        "  raw.text = function() { return this.body; };\n",
-        "  raw.json = function() { return JSON.parse(this.body); };\n",
-        "  return raw;\n",
-        "}\n",
-        "function __simpleResolvedPromise(value) {\n",
-        "  return {\n",
-        "    then: function(onFulfilled) {\n",
-        "      if (onFulfilled === undefined || onFulfilled === null) {\n",
-        "        return __simpleResolvedPromise(value);\n",
-        "      }\n",
-        "      return __simpleResolvedPromise(onFulfilled(value));\n",
-        "    },\n",
-        "    catch: function(_onRejected) { return __simpleResolvedPromise(value); },\n",
-        "    finally: function(onFinally) {\n",
-        "      if (onFinally) { onFinally(); }\n",
-        "      return __simpleResolvedPromise(value);\n",
-        "    }\n",
-        "  };\n",
-        "}\n",
-        "window.fetchSync = function(url, method, headersText, body, contentType) {\n",
-        "  return __simpleWrapResponse(chrome.fetchSync(url, method, headersText, body, contentType));\n",
-        "};\n",
-        "window.fetch = function(url, options) {\n",
-        "  var method = 'GET';\n",
-        "  var headersText = '';\n",
-        "  var body = '';\n",
-        "  if (options) {\n",
-        "    if (options.method) { method = '' + options.method; }\n",
-        "    if (options.headers) { headersText = '' + options.headers; }\n",
-        "    if (options.body) { body = '' + options.body; }\n",
-        "  }\n",
-        "  return __simpleResolvedPromise(window.fetchSync(url, method, headersText, body, ''));\n",
-        "};\n"
-    ], "")
+    ""
 
 fn pair_value(pairs: [Pair<text, text>], key: text) -> text?:
     var i = 0

@@ -1,0 +1,277 @@
+@allow(primitive_api)
+# OpenSSL Cross-Check Helpers for Crypto Byte-Exact Comparison
+#
+# Used by os_crypto_ref_signature_spec.spl and os_crypto_ref_primitives_spec.spl
+# to byte-compare the repo's crypto implementations against `/usr/bin/openssl`
+# (the "existing module") so regressions show up as byte divergences.
+#
+# Design:
+#   - Shell out via rt_process_run(cmd, args) -> (stdout, stderr, exit_code).
+#   - Binary inputs/outputs go through tempfiles in /tmp because rt_process_run
+#     returns stdout as `text` which may not round-trip arbitrary bytes.
+#   - Use `openssl dgst ... -out <file>` / `-in <file>` to keep bytes pure.
+#   - Tests gate AEAD checks on `openssl_major_version() >= 3`.
+
+use std.nogc_sync_mut.ffi.io.{rt_file_read_bytes, rt_file_write_bytes}
+
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+
+# ============================================================================
+# Version gating
+# ============================================================================
+
+fn openssl_major_version() -> i64:
+    """Return the major version of /usr/bin/openssl, or -1 if not found.
+
+    OpenSSL 1.x lacks `openssl enc -aes-256-gcm` CLI; tests that exercise
+    AEAD mode must gate on major >= 3.
+    """
+    val result = rt_process_run("openssl", ["version"])
+    val stdout = result.0
+    val exit_code = result.2
+    if exit_code != 0:
+        return -1
+    # stdout looks like: "OpenSSL 3.0.13 30 Jan 2024 ..."
+    if stdout.len() < 10:
+        return -1
+    if not stdout.starts_with("OpenSSL "):
+        return -1
+    val digit_char = stdout[8]
+    if digit_char >= "0" and digit_char <= "9":
+        digit_char.to_i64() - "0".to_i64()
+    else:
+        -1
+
+fn openssl_present() -> bool:
+    """Quick check: is openssl on PATH?"""
+    openssl_major_version() > 0
+
+# ============================================================================
+# Hex <-> bytes
+# ============================================================================
+
+fn hex_to_bytes(s: text) -> [u8]:
+    """Parse a lowercase hex string (no '0x', no whitespace, even length)
+    into a byte array. Returns empty [u8] on malformed input."""
+    if (s.len() % 2) != 0:
+        return []
+    var out: [u8] = []
+    var i: u64 = 0
+    while i < s.len():
+        val hi = _hex_digit(s[i])
+        val lo = _hex_digit(s[i + 1])
+        if hi < 0 or lo < 0:
+            return []
+        out.push((hi * 16 + lo).to_u8())
+        i = i + 2
+    out
+
+fn bytes_to_hex(bytes: [u8]) -> text:
+    """Encode a byte array as a lowercase hex string."""
+    val digits = "0123456789abcdef"
+    var out: text = ""
+    var i: u64 = 0
+    while i < bytes.len():
+        val b = bytes[i].to_i64()
+        out = out + digits[b / 16] + digits[b % 16]
+        i = i + 1
+    out
+
+fn _hex_digit(c: text) -> i64:
+    """Parse a single hex digit; -1 on non-hex."""
+    if c >= "0" and c <= "9":
+        c.to_i64() - "0".to_i64()
+    elif c >= "a" and c <= "f":
+        10 + c.to_i64() - "a".to_i64()
+    elif c >= "A" and c <= "F":
+        10 + c.to_i64() - "A".to_i64()
+    else:
+        -1
+
+# ============================================================================
+# Tempfile plumbing
+# ============================================================================
+
+var _seq_counter: u64 = 0
+
+fn _seq_suffix() -> text:
+    """Monotonic sequence for tempfile uniqueness within a single test run."""
+    _seq_counter = _seq_counter + 1
+    _seq_counter.to_text()
+
+fn _tempfile(tag: text) -> text:
+    """Return a fresh path under /tmp tagged `tag`."""
+    "/tmp/spl_crypto_ref_" + tag + "_" + _seq_suffix() + ".bin"
+
+fn _write_tempfile(tag: text, bytes: [u8]) -> text:
+    """Write `bytes` to a fresh tempfile and return the path."""
+    val path = _tempfile(tag)
+    rt_file_write_bytes(path, bytes)
+    path
+
+# ============================================================================
+# Reference: SHA-256 / SHA-512 via openssl dgst
+# ============================================================================
+
+fn openssl_sha256(msg: [u8]) -> [u8]:
+    """Compute SHA-256 of `msg` via openssl; return 32-byte digest.
+    Empty [u8] on error.
+    """
+    val msg_path = _write_tempfile("sha256_in", msg)
+    val out_path = _tempfile("sha256_out")
+    val result = rt_process_run(
+        "openssl",
+        ["dgst", "-sha256", "-binary", "-out", out_path, msg_path]
+    )
+    if result.2 != 0:
+        return []
+    rt_file_read_bytes(out_path)
+
+fn openssl_sha512(msg: [u8]) -> [u8]:
+    """Compute SHA-512 of `msg` via openssl; return 64-byte digest."""
+    val msg_path = _write_tempfile("sha512_in", msg)
+    val out_path = _tempfile("sha512_out")
+    val result = rt_process_run(
+        "openssl",
+        ["dgst", "-sha512", "-binary", "-out", out_path, msg_path]
+    )
+    if result.2 != 0:
+        return []
+    rt_file_read_bytes(out_path)
+
+fn openssl_hmac_sha256(key: [u8], msg: [u8]) -> [u8]:
+    """Compute HMAC-SHA256 of `msg` under `key`; return 32 bytes."""
+    val key_hex = bytes_to_hex(key)
+    val msg_path = _write_tempfile("hmac_in", msg)
+    val out_path = _tempfile("hmac_out")
+    val result = rt_process_run(
+        "openssl",
+        ["dgst", "-sha256", "-mac", "HMAC", "-macopt", "hexkey:" + key_hex,
+         "-binary", "-out", out_path, msg_path]
+    )
+    if result.2 != 0:
+        return []
+    rt_file_read_bytes(out_path)
+
+# ============================================================================
+# Reference: RSA sign via openssl dgst -sign
+# ============================================================================
+
+fn openssl_rsa_sign_sha256(pkcs8_der: [u8], msg: [u8]) -> [u8]:
+    """Sign `msg` with RSA-PKCS1-SHA256 using `pkcs8_der`.
+    Returns signature bytes; empty on error.
+    """
+    _openssl_rsa_sign(pkcs8_der, msg, "sha256")
+
+fn openssl_rsa_sign_sha512(pkcs8_der: [u8], msg: [u8]) -> [u8]:
+    """Sign `msg` with RSA-PKCS1-SHA512 using `pkcs8_der`."""
+    _openssl_rsa_sign(pkcs8_der, msg, "sha512")
+
+fn _openssl_rsa_sign(pkcs8_der: [u8], msg: [u8], digest: text) -> [u8]:
+    val key_path = _write_tempfile("rsa_key", pkcs8_der)
+    val msg_path = _write_tempfile("rsa_msg", msg)
+    val sig_path = _tempfile("rsa_sig")
+    val result = rt_process_run(
+        "openssl",
+        ["dgst", "-" + digest, "-sign", key_path, "-keyform", "DER",
+         "-out", sig_path, msg_path]
+    )
+    if result.2 != 0:
+        return []
+    rt_file_read_bytes(sig_path)
+
+fn openssl_rsa_verify_sha256(spki_der: [u8], msg: [u8], sig: [u8]) -> bool:
+    """Verify an RSA-PKCS1-SHA256 sig; returns true iff openssl says OK."""
+    _openssl_rsa_verify(spki_der, msg, sig, "sha256")
+
+fn openssl_rsa_verify_sha512(spki_der: [u8], msg: [u8], sig: [u8]) -> bool:
+    _openssl_rsa_verify(spki_der, msg, sig, "sha512")
+
+fn _openssl_rsa_verify(spki_der: [u8], msg: [u8], sig: [u8], digest: text) -> bool:
+    val key_path = _write_tempfile("rsa_spki", spki_der)
+    val msg_path = _write_tempfile("rsa_vmsg", msg)
+    val sig_path = _write_tempfile("rsa_vsig", sig)
+    val result = rt_process_run(
+        "openssl",
+        ["dgst", "-" + digest, "-verify", key_path, "-keyform", "DER",
+         "-signature", sig_path, msg_path]
+    )
+    result.2 == 0
+
+# ============================================================================
+# Reference: ECDSA verify via openssl dgst -verify (DER-form signature)
+# ============================================================================
+
+fn openssl_ecdsa_p256_verify_der(spki_der: [u8], msg: [u8], sig_der: [u8]) -> bool:
+    """Verify an ECDSA P-256 SHA-256 sig in DER form via openssl.
+
+    Note: SSH wire-format is fixed-width r||s (64 bytes), NOT DER. Convert
+    with `fixed64_to_der_ecdsa_sig` (helper below) before calling this.
+    """
+    val key_path = _write_tempfile("ec_spki", spki_der)
+    val msg_path = _write_tempfile("ec_msg", msg)
+    val sig_path = _write_tempfile("ec_sig", sig_der)
+    val result = rt_process_run(
+        "openssl",
+        ["dgst", "-sha256", "-verify", key_path, "-keyform", "DER",
+         "-signature", sig_path, msg_path]
+    )
+    result.2 == 0
+
+fn fixed64_to_der_ecdsa_sig(fixed64: [u8]) -> [u8]:
+    """Convert a 64-byte ECDSA fixed r||s to ASN.1 DER (SEQUENCE { INTEGER r, INTEGER s }).
+    Returns empty [u8] if fixed64 is not 64 bytes.
+    """
+    if fixed64.len() != 64:
+        return []
+    var r: [u8] = []
+    var s: [u8] = []
+    var i: u64 = 0
+    while i < 32:
+        r.push(fixed64[i])
+        i = i + 1
+    while i < 64:
+        s.push(fixed64[i])
+        i = i + 1
+    # Strip leading zero bytes unless it would leave a high-bit-set result.
+    val r_trim = _trim_leading_zeros_asn1(r)
+    val s_trim = _trim_leading_zeros_asn1(s)
+    # INTEGER encoding: 0x02 <len> <bytes>
+    var body: [u8] = []
+    _emit_asn1_integer(body, r_trim)
+    _emit_asn1_integer(body, s_trim)
+    # SEQUENCE wrapping: 0x30 <len> <body>
+    var out: [u8] = []
+    out.push(0x30u8)
+    out.push(body.len().to_u8())
+    var j: u64 = 0
+    while j < body.len():
+        out.push(body[j])
+        j = j + 1
+    out
+
+fn _trim_leading_zeros_asn1(bytes: [u8]) -> [u8]:
+    """Strip leading 0x00 bytes per DER minimal-length rules, but leave
+    one 0x00 prefix if the high bit of the first non-zero byte is set."""
+    var i: u64 = 0
+    while i < bytes.len() and bytes[i] == 0u8:
+        i = i + 1
+    if i == bytes.len():
+        # All zeros — DER INTEGER of value 0 is a single 0x00.
+        return [0u8]
+    var out: [u8] = []
+    if (bytes[i].to_i64() and 0x80) != 0:
+        out.push(0u8)
+    while i < bytes.len():
+        out.push(bytes[i])
+        i = i + 1
+    out
+
+fn _emit_asn1_integer(body: [u8], int_bytes: [u8]):
+    """Append `0x02 <len> <int_bytes>` to `body` in place."""
+    body.push(0x02u8)
+    body.push(int_bytes.len().to_u8())
+    var i: u64 = 0
+    while i < int_bytes.len():
+        body.push(int_bytes[i])
+        i = i + 1

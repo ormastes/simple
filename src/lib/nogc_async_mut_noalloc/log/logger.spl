@@ -32,6 +32,13 @@ val LOG_OFF: i32   = 6
 var g_log_level: i32 = LOG_INFO      # Minimum level to output
 var g_log_targets: i32 = 0           # Bitmask of active targets
 
+@allow(primitive_api)
+extern fn rt_string_data(value: text) -> i64
+extern fn rt_string_len(value: text) -> i64
+extern fn rt_simpleos_log_init(level: i64, targets: i64) -> bool
+extern fn rt_simpleos_log_is_enabled(level: i64) -> bool
+extern fn rt_simpleos_log_emit(level: i64, msg_ptr: i64, msg_len: i64) -> bool
+
 # ============================================================================
 # Initialization
 # ============================================================================
@@ -44,6 +51,7 @@ fn log_init(level: i32, targets: i32):
     """
     g_log_level = level
     g_log_targets = targets
+    rt_simpleos_log_init(level.to_i64(), targets.to_i64())
 
 fn log_set_level(level: i32):
     """Change minimum log level at runtime."""
@@ -73,10 +81,12 @@ fn log_level_name(level: i32) -> text:
 
 fn log_at(level: i32, msg: text):
     """Log a message at the given level. Checks level filter first."""
-    if level < g_log_level:
+    if not rt_simpleos_log_is_enabled(level.to_i64()):
         return
     val prefix = log_level_name(level)
     val formatted = "[{prefix}] {msg}"
+    if rt_simpleos_log_emit(level.to_i64(), rt_string_data(formatted), rt_string_len(formatted)):
+        return
     log_dispatch(level, formatted)
 
 fn log_trace(msg: text):
@@ -102,6 +112,29 @@ fn log_error(msg: text):
 fn log_fatal(msg: text):
     """Log at FATAL level."""
     log_at(LOG_FATAL, msg)
+
+# Unique wrapper names for environments that also expose userlib.log symbols.
+@export("C", name: "noalloc_log_init")
+fn noalloc_log_init(level: i32, targets: i32):
+    g_log_level = level
+    g_log_targets = targets
+    rt_simpleos_log_init(level.to_i64(), targets.to_i64())
+
+@export("C", name: "noalloc_log_debug")
+fn noalloc_log_debug(msg: text):
+    val formatted = "[DEBUG] {msg}"
+    if rt_simpleos_log_is_enabled(LOG_DEBUG.to_i64()):
+        if rt_simpleos_log_emit(LOG_DEBUG.to_i64(), rt_string_data(formatted), rt_string_len(formatted)):
+            return
+    log_dispatch(LOG_DEBUG, formatted)
+
+@export("C", name: "noalloc_log_error")
+fn noalloc_log_error(msg: text):
+    val formatted = "[ERROR] {msg}"
+    if rt_simpleos_log_is_enabled(LOG_ERROR.to_i64()):
+        if rt_simpleos_log_emit(LOG_ERROR.to_i64(), rt_string_data(formatted), rt_string_len(formatted)):
+            return
+    log_dispatch(LOG_ERROR, formatted)
 
 # ============================================================================
 # Handle-Based Log Functions (Compressed — String Interning)

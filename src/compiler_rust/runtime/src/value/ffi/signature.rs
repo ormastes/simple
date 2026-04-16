@@ -1,11 +1,19 @@
-//! RSA-SHA256 and Ed25519 signature verification for SSH host keys.
+//! RSA / Ed25519 / ECDSA-P256 signature primitives for SSH host keys.
 //!
-//! Used by SimpleOS SSH to verify server host key signatures during
-//! the SSH handshake.  Both functions follow the same `[u8]` extraction
-//! pattern as `ws_mask.rs`.
+//! Used by SimpleOS SSH to verify peer signatures and to sign KEX
+//! exchange hashes with the server host key during the SSH handshake
+//! (RFC 4253, RFC 5656, RFC 8332).  Inputs are extracted from Simple
+//! `[u8]` arrays via `runtime_byte_array_to_vec`; byte-array outputs
+//! are returned through `rt_string_new` (Simple text and `[u8]` share
+//! the same internal representation).
 
 use crate::value::RuntimeValue;
-use ring::signature::{UnparsedPublicKey, ED25519, RSA_PKCS1_2048_8192_SHA256};
+use ring::rand::SystemRandom;
+use ring::signature::{
+    EcdsaKeyPair, KeyPair, RsaKeyPair, UnparsedPublicKey, ECDSA_P256_SHA256_FIXED,
+    ECDSA_P256_SHA256_FIXED_SIGNING, ED25519, RSA_PKCS1_2048_8192_SHA256,
+    RSA_PKCS1_2048_8192_SHA512, RSA_PKCS1_SHA256, RSA_PKCS1_SHA512,
+};
 
 // ---------------------------------------------------------------------------
 // Internal helpers
@@ -97,4 +105,149 @@ pub extern "C" fn rt_ed25519_verify(
         Ok(()) => 1,
         Err(_) => 0,
     }
+}
+
+/// Verify an RSA-PKCS1 SHA-512 signature (RFC 8332 `rsa-sha2-512`).
+///
+/// Mirror of `rt_rsa_sha256_verify`; see that function's docs.
+#[no_mangle]
+pub extern "C" fn rt_rsa_sha512_verify(
+    pubkey: RuntimeValue,
+    message: RuntimeValue,
+    signature: RuntimeValue,
+) -> i64 {
+    let Some(pk_bytes) = runtime_byte_array_to_vec(pubkey) else {
+        return 0;
+    };
+    let Some(msg_bytes) = runtime_byte_array_to_vec(message) else {
+        return 0;
+    };
+    let Some(sig_bytes) = runtime_byte_array_to_vec(signature) else {
+        return 0;
+    };
+
+    let key = UnparsedPublicKey::new(&RSA_PKCS1_2048_8192_SHA512, pk_bytes);
+    match key.verify(&msg_bytes, &sig_bytes) {
+        Ok(()) => 1,
+        Err(_) => 0,
+    }
+}
+
+/// Verify an ECDSA P-256 SHA-256 fixed-width signature (RFC 5656
+/// `ecdsa-sha2-nistp256` raw `r‖s`, 64 bytes).
+///
+/// The SSH wire format carries `mpint r + mpint s`; the Simple-side
+/// wrapper unpacks that to fixed-width 64-byte form before calling
+/// this extern.
+#[no_mangle]
+pub extern "C" fn rt_ecdsa_p256_verify(
+    pubkey: RuntimeValue,
+    message: RuntimeValue,
+    signature: RuntimeValue,
+) -> i64 {
+    let Some(pk_bytes) = runtime_byte_array_to_vec(pubkey) else {
+        return 0;
+    };
+    let Some(msg_bytes) = runtime_byte_array_to_vec(message) else {
+        return 0;
+    };
+    let Some(sig_bytes) = runtime_byte_array_to_vec(signature) else {
+        return 0;
+    };
+
+    let key = UnparsedPublicKey::new(&ECDSA_P256_SHA256_FIXED, pk_bytes);
+    match key.verify(&msg_bytes, &sig_bytes) {
+        Ok(()) => 1,
+        Err(_) => 0,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Signing
+//
+// All sign externs take PKCS#8 v1 DER private keys and return the raw
+// signature bytes as a Simple `[u8]`, or `RuntimeValue::NIL` on any
+// error (malformed key, message too big, ring error).  Hosted-only:
+// all three sign paths require `SystemRandom` and will error on
+// baremetal.
+// ---------------------------------------------------------------------------
+
+fn rsa_sign_impl(pkcs8: RuntimeValue, message: RuntimeValue, enc: &'static dyn ring::signature::RsaEncoding) -> RuntimeValue {
+    let Some(key_bytes) = runtime_byte_array_to_vec(pkcs8) else {
+        return RuntimeValue::NIL;
+    };
+    let Some(msg_bytes) = runtime_byte_array_to_vec(message) else {
+        return RuntimeValue::NIL;
+    };
+
+    let Ok(keypair) = RsaKeyPair::from_pkcs8(&key_bytes) else {
+        return RuntimeValue::NIL;
+    };
+
+    let rng = SystemRandom::new();
+    let mut signature = vec![0u8; keypair.public().modulus_len()];
+    if keypair.sign(enc, &rng, &msg_bytes, &mut signature).is_err() {
+        return RuntimeValue::NIL;
+    }
+    unsafe {
+        crate::value::collections::rt_string_new(signature.as_ptr(), signature.len() as u64)
+    }
+}
+
+/// Sign `message` with RSA-PKCS1 SHA-256 using a PKCS#8-v1 DER private
+/// key (RFC 8332 `rsa-sha2-256`).
+///
+/// # Returns
+/// Signature bytes (`key_modulus_len` bytes) on success; `NIL` on any
+/// error (malformed PKCS#8, non-RSA key, key below ring's 2048-bit
+/// minimum, RNG failure).
+///
+/// Determinism: PKCS#1 v1.5 produces byte-identical output for the
+/// same `(key, message)` pair.
+///
+/// Hosted-only: requires `ring::rand::SystemRandom`.
+#[no_mangle]
+pub extern "C" fn rt_rsa_sha256_sign(pkcs8: RuntimeValue, message: RuntimeValue) -> RuntimeValue {
+    rsa_sign_impl(pkcs8, message, &RSA_PKCS1_SHA256)
+}
+
+/// Sign `message` with RSA-PKCS1 SHA-512 using a PKCS#8-v1 DER private
+/// key (RFC 8332 `rsa-sha2-512`).
+///
+/// Mirror of `rt_rsa_sha256_sign`.
+#[no_mangle]
+pub extern "C" fn rt_rsa_sha512_sign(pkcs8: RuntimeValue, message: RuntimeValue) -> RuntimeValue {
+    rsa_sign_impl(pkcs8, message, &RSA_PKCS1_SHA512)
+}
+
+/// Sign `message` with ECDSA P-256 SHA-256 using a PKCS#8-v1 DER
+/// private key (RFC 5656 `ecdsa-sha2-nistp256`).
+///
+/// Output is fixed-width 64-byte `r‖s`; the SSH wire wrapper converts
+/// this to `mpint r + mpint s` format on the Simple side.
+///
+/// Non-deterministic: signature bytes differ per call by design.
+///
+/// Hosted-only: requires `ring::rand::SystemRandom`.
+#[no_mangle]
+pub extern "C" fn rt_ecdsa_p256_sign(pkcs8: RuntimeValue, message: RuntimeValue) -> RuntimeValue {
+    let Some(key_bytes) = runtime_byte_array_to_vec(pkcs8) else {
+        return RuntimeValue::NIL;
+    };
+    let Some(msg_bytes) = runtime_byte_array_to_vec(message) else {
+        return RuntimeValue::NIL;
+    };
+
+    let rng = SystemRandom::new();
+    let Ok(keypair) =
+        EcdsaKeyPair::from_pkcs8(&ECDSA_P256_SHA256_FIXED_SIGNING, &key_bytes, &rng)
+    else {
+        return RuntimeValue::NIL;
+    };
+
+    let Ok(sig) = keypair.sign(&rng, &msg_bytes) else {
+        return RuntimeValue::NIL;
+    };
+    let bytes = sig.as_ref();
+    unsafe { crate::value::collections::rt_string_new(bytes.as_ptr(), bytes.len() as u64) }
 }

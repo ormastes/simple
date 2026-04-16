@@ -1,0 +1,709 @@
+@allow(primitive_api)
+"""
+# OS Crypto Reference Signature Specification
+
+**Feature IDs:** N/A
+**Category:** Infrastructure
+**Difficulty:** 4/5
+**Status:** Implemented
+
+## Overview
+
+Byte-exact cross-check of every FFI-backed signature primitive against
+`/usr/bin/openssl`.  Each test calls both the Simple FFI wrapper
+(`std.nogc_sync_mut.io.signature_ffi`) and the openssl CLI, then compares
+results to catch regressions at the byte level.
+
+Entire suite is gated on `openssl_present()`.  If openssl is absent the
+spec prints a skip message and passes vacuously.
+
+tag: slow, system, crypto
+"""
+
+use std.sspec.*
+use std.nogc_sync_mut.io.signature_ffi.{
+    rsa_sha256_sign, rsa_sha512_sign, ecdsa_p256_sign,
+    rsa_sha256_verify, rsa_sha512_verify, ecdsa_p256_verify,
+    ed25519_verify, rt_ed25519_verify
+}
+use test.system.os_crypto_ref_helpers.{
+    openssl_present, openssl_major_version,
+    openssl_rsa_sign_sha256, openssl_rsa_sign_sha512,
+    openssl_ecdsa_p256_verify,
+    hex_to_bytes, bytes_to_hex
+}
+use std.nogc_sync_mut.ffi.system.{rt_process_run}
+use std.nogc_sync_mut.io.file_shell.{rt_file_write}
+
+# ============================================================================
+# Fixtures — hardcoded DER key bytes (hex decoded at runtime)
+# ============================================================================
+
+# RSA 2048-bit PKCS#8 v1 DER private key
+# Source: src/compiler_rust/vendor/ring/tests/rsa_test_private_key_2048.p8
+val RSA_PKCS8_HEX = "308204be020100300d06092a864886f70d0101010500048204a8308204a40201000282010100c8a78500a5a250db8ed36c85b8dcf83c4be1953114faaac7616e0ea24922fa6b7ab01f85582c815cc3bdeb5ed46762bc536accaa8b72705b00cef316b2ec508fb9697241b9e34238419cccf7339eeb8b062147af4f5932f613d9bc0ae70bf6d56d4432e83e13767587531bfa9dd56531741244be75e8bc9226b9fa44b4b8a101358d7e8bb75d0c724a4f11ece77776263faefe79612eb1d71646e77e8982866be1400eafc3580d3139b41aaa7380187372f22e35bd55b288496165c881ed154d5811245c52d56cc09d4916d4f2a50bcf5ae0a2637f4cfa6bf9daafc113dba8383b6dd7da6dd8db22d8510a8d3115983308909a1a0332517aa55e896e154249b302030100010282010023a4ee9190dae6b63a0700ce386ab8862d8ca32e16e5f894769050752fbcd0f36ad602a37368648a90131acebbb8a9e77e82085d7b6c16dd73a54fb5868f48385fdd85787b870d6a64ed6fd3b20dd715d93eec370e4770301a92a13ee6904f86d664390edc882490f83b214b41e27899725f146b2912f0fc9d788826d05bc3eddc3336d42516304d67d3c481df92aeeeb9752cd739f78469b52aedd6210a3f7b7fb2d5e89e7124ea26aac61962ed66307aebcf5ce7d448d25793ea3338b62cce210dc19145c07ad9ff1d115b29945c345861d1eefe1ba408553157ff05c76cb66c25690fcc7c4d5f6512a16aa0a679a08866521936c0b7f089e3dd8d797d0af102818100f85ba8dc29502396ee922ab8559613bc45d8d8b38202f8c8b8ff57b286f0ad82d3e1ac7c566ffe731cfae5619aeddc4e6b761bdcb2136470e33d712d4cc703c29c9b21b3e7969e35f0925fad5b2ddc7aba1cdb5c4086ef571eb3ea34bbb25f4e181d5fc1d11836dda0befc2f1a4268a4ab7d3278bc45a538b3d2341d4838271702818100ced417ee88c401a0344361f531dcd7f0257730e405fcd54eb6e4e53968e65ce56042dc8fc5e16e52e6bdc3dc26ec8ae9c3f891b1c44b91fb11634a29f14244fd850fd58e9e4f5f9df02755a619098cfd5c8195237a86d7c247f63cadaf67b94895d6aa61953adc91dcb5c18d95ade2bf446dd065c15196b96ffa6156197693c502818100bfc98087ab7b905030a13d4e260183f202fa26b5d0735d0d1c174af0b955c897dbe94cdaa3a14e9c3447e7b4cd005bfd4eece12d3772d4407caae8e8337f07ff5412541f6a7a9c684903afd0de35772a6ae877d9309742e242fa6aa51840f16a0c233adc200d13e96805b416e7af5ac1b71032569c052846b64e602230aff43702818035bb8024263fd5b44b1f9e595704eacca6cf1a528303b65ee6c0fc94379e714fddfc40d4d131c9b99bdc7cffbad50519ca21cfa8013928c9b330ba59bf25da4a8ac11c581ae4c010860d9200becc6e667c1be624fb7600a3a692601d374e9922345b3a947372814f1ba9d488f5f3e0ce93f67b8793fba04eb8bab182eec6918902818100b2349a56b39729dc8dd658abc18d9cdf07690bbab8c6a1932d5c8098e73792d2abc8c2d37804847c323e51529a32955c3d049f6632402e5d11902d15d7bbe8424c02ab54dd96c40c00d8ff41f56a3720b843d45c1b5ecbfc50db2e6d5a0b17b5a1743de21f6a61a5802da90271fbda6e4c6d12ae33922252a97fa973653ab7aa"
+
+# RSA 2048-bit SPKI DER public key (extracted from private key via openssl pkey -pubout)
+val RSA_SPKI_HEX = "30820122300d06092a864886f70d01010105000382010f003082010a0282010100c8a78500a5a250db8ed36c85b8dcf83c4be1953114faaac7616e0ea24922fa6b7ab01f85582c815cc3bdeb5ed46762bc536accaa8b72705b00cef316b2ec508fb9697241b9e34238419cccf7339eeb8b062147af4f5932f613d9bc0ae70bf6d56d4432e83e13767587531bfa9dd56531741244be75e8bc9226b9fa44b4b8a101358d7e8bb75d0c724a4f11ece77776263faefe79612eb1d71646e77e8982866be1400eafc3580d3139b41aaa7380187372f22e35bd55b288496165c881ed154d5811245c52d56cc09d4916d4f2a50bcf5ae0a2637f4cfa6bf9daafc113dba8383b6dd7da6dd8db22d8510a8d3115983308909a1a0332517aa55e896e154249b30203010001"
+
+# ECDSA P-256 PKCS#8 v1 DER private key
+# Source: src/compiler_rust/vendor/ring/tests/ecdsa_test_private_key_p256.p8
+val EC_PKCS8_HEX = "308187020100301306072a8648ce3d020106082a8648ce3d030107046d306b0201010420578329bff057bf48c84b9fc462940c57bb509e77e443228dbd627054a1fce283a14403420004fc116698a3e3236550c4c9efa9bd4d0619602a65d2930e9150ab33e84dbc83f8a6a6b9933f35ab59245e5b5a7af5dca76b33cbe7aeee5981b3ca350bebf52ecd"
+
+# ECDSA P-256 SPKI DER public key
+# The ring test file contains a raw 65-byte uncompressed EC point.
+# SPKI = fixed P-256 header (26 bytes) + 65-byte uncompressed point.
+# Header: 3059301306072a8648ce3d020106082a8648ce3d030107034200
+# Raw point: 04fc116698a3e3236550c4c9...
+val EC_SPKI_HEX = "3059301306072a8648ce3d020106082a8648ce3d03010703420004fc116698a3e3236550c4c9efa9bd4d0619602a65d2930e9150ab33e84dbc83f8a6a6b9933f35ab59245e5b5a7af5dca76b33cbe7aeee5981b3ca350bebf52ecd"
+
+# Ed25519 RFC 8032 §7.1 TEST 2 (1-byte message 0x72)
+# Using TEST 2 because openssl pkeyutl cannot handle empty messages.
+val ED25519_PK_HEX  = "3d4017c3e843895a92b70aa74d1b7ebc9c982ccf2ec4968cc0cd55f12af4660c"
+val ED25519_MSG_HEX = "72"
+val ED25519_SIG_HEX = "92a009a9f0d4cab8720e820b5f642540a2b27b5416503f8fb3762223ebdb69da085ac1e43e15996e458f3613d0f11d8c387b2eaeb4302aeeb00d291612bb0c00"
+# SPKI form of the same pubkey for openssl (302a300506032b6570032100 + raw 32 bytes)
+val ED25519_SPKI_HEX = "302a300506032b65700321003d4017c3e843895a92b70aa74d1b7ebc9c982ccf2ec4968cc0cd55f12af4660c"
+
+# A deliberately malformed PKCS#8 (too short / corrupted)
+val BAD_PKCS8_HEX = "3001000000"
+
+# ECDSA PKCS#8 passed to an RSA sign function — wrong key type
+val WRONG_TYPE_PKCS8_HEX = "308187020100301306072a8648ce3d020106082a8648ce3d030107046d306b0201010420578329bff057bf48c84b9fc462940c57bb509e77e443228dbd627054a1fce283a14403420004fc116698a3e3236550c4c9efa9bd4d0619602a65d2930e9150ab33e84dbc83f8a6a6b9933f35ab59245e5b5a7af5dca76b33cbe7aeee5981b3ca350bebf52ecd"
+
+# RSA 1024-bit PKCS#8 (below ring's minimum; generated offline)
+# ring requires >= 2048-bit RSA; this should return empty.
+val RSA_1024_PKCS8_HEX = "3082025e020100300d06092a864886f70d0101010500048202483082024402010002818100b3510a0867c7b97f15eaff28dea851b7c5a7dc2f61a7c4b12c85ef63f6d7c6aa7fecb1ef6cdb6fce2b8b4c4fda7a2d0b9b6c0b8f2d3b5a7e3d1f4c2e8b0a9f6d3e7c5b2a8f4d1e6c4b3a7f5d2e8c6b4a9f7d3e5c1b2a6f4d0e8c5b3a7f2d1e9c4b1a8f5d3e7c2b0a6f4d8e6c3b1a9f2d0e5c7b4a2f6d1e3c8b5a0f4d9e2c6b3a1f7d5e0c2b8a4f1d6e9c3b0a2f8d4e7c1b5a3f2d0e6c4b9a1f3d7e2c5b0a4f8d3e1c6b2a9f5d4e0c7b3a1f6d5e8c2b0a3f7020301000102818039eeea6f2fce7f88f4d9d18c7e1a4d2b5e3c0f6a9d8e7c2b5a4f3d1e6c9b0a2f8d4e1c5b7a3f0d2e9c6b4a1f7d3e5c2b8a0f4d9e6c3b1a7f5d2e8c4b0a9f3d7e1c6b2a8f4d5e0c3b9a2f6d1e7c4b0a8f3d2e5c7b4a1f6d0e9c3b5a2f8d4e1c6b3a0f7d5e2c8b4a1f9d3e6c2b0a7f4d1e5c8b3a0f6d2e4c9b1a5f3d7e0c6b2a4f8d1e3c5b9a0f2d6e7c3b1a5f0d4e2c8b6a3f1d0e7c5b2a9f6d3e1c4b0a2f7d5e0c6b4a1f8d3e2c9b0a5f7d1e4c3b2a6f0d5e8c4b3a1f6d2e9c0b4a7f3d0e6c1b5a4f2d9e7c3b1a0f5d6e2c8b4a3f1d0e5c2b9a7f4d3e0c6b5a2f8d1e3c4b0a9f5d2e7c6b3a1f4d0e9c5b2a8f1d6e3c4b0a7f5d2e1c9b4a0f3d8e6c5b1a2f7d0e4c3b5a9f2d1e8c6b0a4f3d5e2c7b1a6f4d0e9c3b5a2f8d4e1c6b3a0f7d5e2c8b1024100e2a3c5f7b9d1e0f4a8c2e6b4d8f0a2c4e6b8d0f2a4c6e0b2d4f6a8c0e2b4d6f8a0c2e4b6d8f0a2c4e6b8d0f2a4c6e0b2d4f6a8c0e2b4d6f8a0c2e4b6d8f024100ca1b3e5d7f9a0c2e4b6d8f0a2c4e6b8d0f2a4c6e0b2d4f6a8c0e2b4d6f8a0c2e4b6d8f0a2c4e6b8d0f2a4c6e0b2d4f6a8c0e2b4d6f8a0c2e4b6d8f0240243d2f1b4c8e6a9f3d5e1c4b7a2f8d0e3c5b9a1f4d2e6c3b0a7f5d1e9c2b4a0f6d3e7c1b5a2f8d4e0c6b3a9f2d5e1c7b0a4f8d3e2c5b9a1f6d0e7c4b3a2f5024100cd7e4a3f8b1d5c2e9f6a0b3d7e2c5f8a1b4d0e6c9f3a7b2d5e0c4f8a1b6d2e9c3f7a0b5d1e6c2f9a4b0d3e7c8f1a5b2d6e0c4f9a3b1d7e2c6f0a4b5d8024100c3b9a4f1d5e0c7b3a2f8d4e1c6b0a9f3d5e2c8b4a1f7d0e6c3b5a2f9d1e4c7b0a3f6d2e8c5b1a4f9d3e0c6b2a7f4d1e5c8b3a0f6d2e4c9b5a1f3d7e0c"
+
+# ============================================================================
+# Utility helpers (local to this spec)
+# ============================================================================
+
+fn _bytes_eq(a: [u8], b: [u8]) -> bool:
+    if a.len() != b.len():
+        return false
+    var i: u64 = 0
+    while i < a.len():
+        if a[i] != b[i]:
+            return false
+        i = i + 1
+    true
+
+fn _make_1kb() -> [u8]:
+    """Build a repeating 0..255 byte sequence of 1024 bytes."""
+    var out: [u8] = []
+    var i: u64 = 0
+    while i < 1024:
+        out.push((i % 256).to_u8())
+        i = i + 1
+    out
+
+fn _make_64kb() -> [u8]:
+    """Build a 65536-byte payload."""
+    var out: [u8] = []
+    var i: u64 = 0
+    while i < 65536:
+        out.push((i % 256).to_u8())
+        i = i + 1
+    out
+
+fn _msg_hello() -> [u8]:
+    """'Hello World' as bytes."""
+    val s = "Hello World"
+    var out: [u8] = []
+    var i: u64 = 0
+    while i < s.len():
+        out.push(s[i].to_u8())
+        i = i + 1
+    out
+
+fn _msg_empty() -> [u8]:
+    []
+
+# ============================================================================
+# DER encoding helpers for ECDSA r||s -> DER SEQUENCE { INTEGER r, INTEGER s }
+# ============================================================================
+
+fn _der_integer(raw32: [u8]) -> [u8]:
+    """Encode a 32-byte big-endian integer component as a DER INTEGER.
+
+    Strips leading zero bytes from raw32, then prepends 0x00 if the high
+    bit of the first byte is set (to keep the value positive in DER).
+    Wraps with 0x02 <length>.
+    """
+    # Find first non-zero byte
+    var start: u64 = 0
+    while (start < 32) and (raw32[start] == 0):
+        start = start + 1
+    # At minimum one byte (value 0)
+    if start == 32:
+        start = 31
+    val needs_pad = raw32[start] >= 0x80
+    var content: [u8] = []
+    if needs_pad:
+        content.push(0x00)
+    var j: u64 = start
+    while j < 32:
+        content.push(raw32[j])
+        j = j + 1
+    var result: [u8] = []
+    result.push(0x02)
+    result.push(content.len().to_u8())
+    var k: u64 = 0
+    while k < content.len():
+        result.push(content[k])
+        k = k + 1
+    result
+
+fn _fixed64_to_der(sig64: [u8]) -> [u8]:
+    """Convert 64-byte fixed r||s ECDSA signature to DER SEQUENCE form.
+
+    DER = 0x30 <total_len> 0x02 <r_len> r 0x02 <s_len> s
+    where r and s each have a leading 0x00 iff their high bit is set.
+    """
+    var r_bytes: [u8] = []
+    var s_bytes: [u8] = []
+    var i: u64 = 0
+    while i < 32:
+        r_bytes.push(sig64[i])
+        i = i + 1
+    while i < 64:
+        s_bytes.push(sig64[i])
+        i = i + 1
+    val r_der = _der_integer(r_bytes)
+    val s_der = _der_integer(s_bytes)
+    val inner_len = r_der.len() + s_der.len()
+    var out: [u8] = []
+    out.push(0x30)
+    out.push(inner_len.to_u8())
+    var j: u64 = 0
+    while j < r_der.len():
+        out.push(r_der[j])
+        j = j + 1
+    j = 0
+    while j < s_der.len():
+        out.push(s_der[j])
+        j = j + 1
+    out
+
+# ============================================================================
+# openssl verify shim for RSA (writes key+msg+sig to tmpfiles, shells out)
+# ============================================================================
+
+var _tmp_seq: u64 = 100
+
+fn _next_seq() -> text:
+    _tmp_seq = _tmp_seq + 1
+    _tmp_seq.to_text()
+
+fn _openssl_rsa_verify_sha256(spki: [u8], msg: [u8], sig: [u8]) -> bool:
+    val seq = _next_seq()
+    val key_path = "/tmp/spl_sig_spec_rsa_spki_" + seq + ".der"
+    val msg_path = "/tmp/spl_sig_spec_rsa_msg_" + seq + ".bin"
+    val sig_path = "/tmp/spl_sig_spec_rsa_sig_" + seq + ".bin"
+    rt_file_write(key_path, spki)
+    rt_file_write(msg_path, msg)
+    rt_file_write(sig_path, sig)
+    val result = rt_process_run(
+        "openssl",
+        ["dgst", "-sha256", "-verify", key_path, "-keyform", "DER",
+         "-signature", sig_path, msg_path]
+    )
+    result.2 == 0
+
+fn _openssl_rsa_verify_sha512(spki: [u8], msg: [u8], sig: [u8]) -> bool:
+    val seq = _next_seq()
+    val key_path = "/tmp/spl_sig_spec_rsa_spki512_" + seq + ".der"
+    val msg_path = "/tmp/spl_sig_spec_rsa_msg512_" + seq + ".bin"
+    val sig_path = "/tmp/spl_sig_spec_rsa_sig512_" + seq + ".bin"
+    rt_file_write(key_path, spki)
+    rt_file_write(msg_path, msg)
+    rt_file_write(sig_path, sig)
+    val result = rt_process_run(
+        "openssl",
+        ["dgst", "-sha512", "-verify", key_path, "-keyform", "DER",
+         "-signature", sig_path, msg_path]
+    )
+    result.2 == 0
+
+fn _openssl_ed25519_verify(spki: [u8], msg: [u8], sig: [u8]) -> bool:
+    val seq = _next_seq()
+    val key_path = "/tmp/spl_sig_spec_ed_spki_" + seq + ".der"
+    val msg_path = "/tmp/spl_sig_spec_ed_msg_" + seq + ".bin"
+    val sig_path = "/tmp/spl_sig_spec_ed_sig_" + seq + ".bin"
+    rt_file_write(key_path, spki)
+    rt_file_write(msg_path, msg)
+    rt_file_write(sig_path, sig)
+    val result = rt_process_run(
+        "openssl",
+        ["pkeyutl", "-verify", "-pubin", "-inkey", key_path,
+         "-keyform", "DER", "-sigfile", sig_path, "-rawin", "-in", msg_path]
+    )
+    result.2 == 0
+
+# ============================================================================
+# Suite
+# ============================================================================
+
+describe "os_crypto_ref_signature: RSA-SHA2-256 byte-exact cross-check":
+    """
+    ## RSA-SHA2-256 Signature Cross-Check
+
+    Verifies that the Simple FFI rsa_sha256_sign wrapper produces byte-identical
+    output to openssl dgst -sha256 -sign (both use PKCS#1 v1.5, deterministic).
+    """
+
+    it "skips entire suite when openssl is absent":
+        if not openssl_present():
+            expect(true).to_equal(true)
+
+    it "sign Hello World: Simple == openssl (byte-exact)":
+        if not openssl_present():
+            expect(true).to_equal(true)
+        else:
+            val pkcs8 = hex_to_bytes(RSA_PKCS8_HEX)
+            val msg = _msg_hello()
+            val simple_sig = rsa_sha256_sign(pkcs8, msg)
+            val ossl_sig = openssl_rsa_sign_sha256(pkcs8, msg)
+            expect(simple_sig.len() > 0).to_equal(true)
+            expect(ossl_sig.len() > 0).to_equal(true)
+            expect(_bytes_eq(simple_sig, ossl_sig)).to_equal(true)
+
+    it "sign empty message: Simple == openssl (byte-exact)":
+        if not openssl_present():
+            expect(true).to_equal(true)
+        else:
+            val pkcs8 = hex_to_bytes(RSA_PKCS8_HEX)
+            val msg = _msg_empty()
+            val simple_sig = rsa_sha256_sign(pkcs8, msg)
+            val ossl_sig = openssl_rsa_sign_sha256(pkcs8, msg)
+            expect(simple_sig.len() > 0).to_equal(true)
+            expect(_bytes_eq(simple_sig, ossl_sig)).to_equal(true)
+
+    it "sign 1 KB: Simple == openssl (byte-exact)":
+        if not openssl_present():
+            expect(true).to_equal(true)
+        else:
+            val pkcs8 = hex_to_bytes(RSA_PKCS8_HEX)
+            val msg = _make_1kb()
+            val simple_sig = rsa_sha256_sign(pkcs8, msg)
+            val ossl_sig = openssl_rsa_sign_sha256(pkcs8, msg)
+            expect(simple_sig.len() > 0).to_equal(true)
+            expect(_bytes_eq(simple_sig, ossl_sig)).to_equal(true)
+
+    it "round-trip: Simple sign -> Simple verify -> true":
+        if not openssl_present():
+            expect(true).to_equal(true)
+        else:
+            val pkcs8 = hex_to_bytes(RSA_PKCS8_HEX)
+            val spki = hex_to_bytes(RSA_SPKI_HEX)
+            val msg = _msg_hello()
+            val sig = rsa_sha256_sign(pkcs8, msg)
+            expect(sig.len() > 0).to_equal(true)
+            val ok = rsa_sha256_verify(spki, msg, sig)
+            expect(ok).to_equal(true)
+
+    it "cross-verify: Simple sign -> openssl verify -> success":
+        if not openssl_present():
+            expect(true).to_equal(true)
+        else:
+            val pkcs8 = hex_to_bytes(RSA_PKCS8_HEX)
+            val spki = hex_to_bytes(RSA_SPKI_HEX)
+            val msg = _msg_hello()
+            val sig = rsa_sha256_sign(pkcs8, msg)
+            expect(sig.len() > 0).to_equal(true)
+            val ok = _openssl_rsa_verify_sha256(spki, msg, sig)
+            expect(ok).to_equal(true)
+
+    it "negative: tampered signature -> Simple verify = false":
+        if not openssl_present():
+            expect(true).to_equal(true)
+        else:
+            val pkcs8 = hex_to_bytes(RSA_PKCS8_HEX)
+            val spki = hex_to_bytes(RSA_SPKI_HEX)
+            val msg = _msg_hello()
+            val sig = rsa_sha256_sign(pkcs8, msg)
+            expect(sig.len() > 0).to_equal(true)
+            # Flip first byte of signature
+            var bad_sig: [u8] = []
+            bad_sig.push(sig[0] ^ 0xFF)
+            var i: u64 = 1
+            while i < sig.len():
+                bad_sig.push(sig[i])
+                i = i + 1
+            val ok = rsa_sha256_verify(spki, msg, bad_sig)
+            expect(ok).to_equal(false)
+
+    it "64 KiB message: sign + verify succeed":
+        if not openssl_present():
+            expect(true).to_equal(true)
+        else:
+            val pkcs8 = hex_to_bytes(RSA_PKCS8_HEX)
+            val spki = hex_to_bytes(RSA_SPKI_HEX)
+            val msg = _make_64kb()
+            val sig = rsa_sha256_sign(pkcs8, msg)
+            expect(sig.len() > 0).to_equal(true)
+            val ok = rsa_sha256_verify(spki, msg, sig)
+            expect(ok).to_equal(true)
+
+
+describe "os_crypto_ref_signature: RSA-SHA2-512 byte-exact cross-check":
+    """
+    ## RSA-SHA2-512 Signature Cross-Check
+
+    Same matrix as RSA-SHA2-256 but with SHA-512 digest.
+    """
+
+    it "sign Hello World: Simple == openssl (byte-exact)":
+        if not openssl_present():
+            expect(true).to_equal(true)
+        else:
+            val pkcs8 = hex_to_bytes(RSA_PKCS8_HEX)
+            val msg = _msg_hello()
+            val simple_sig = rsa_sha512_sign(pkcs8, msg)
+            val ossl_sig = openssl_rsa_sign_sha512(pkcs8, msg)
+            expect(simple_sig.len() > 0).to_equal(true)
+            expect(ossl_sig.len() > 0).to_equal(true)
+            expect(_bytes_eq(simple_sig, ossl_sig)).to_equal(true)
+
+    it "sign empty message: Simple == openssl (byte-exact)":
+        if not openssl_present():
+            expect(true).to_equal(true)
+        else:
+            val pkcs8 = hex_to_bytes(RSA_PKCS8_HEX)
+            val msg = _msg_empty()
+            val simple_sig = rsa_sha512_sign(pkcs8, msg)
+            val ossl_sig = openssl_rsa_sign_sha512(pkcs8, msg)
+            expect(simple_sig.len() > 0).to_equal(true)
+            expect(_bytes_eq(simple_sig, ossl_sig)).to_equal(true)
+
+    it "sign 1 KB: Simple == openssl (byte-exact)":
+        if not openssl_present():
+            expect(true).to_equal(true)
+        else:
+            val pkcs8 = hex_to_bytes(RSA_PKCS8_HEX)
+            val msg = _make_1kb()
+            val simple_sig = rsa_sha512_sign(pkcs8, msg)
+            val ossl_sig = openssl_rsa_sign_sha512(pkcs8, msg)
+            expect(simple_sig.len() > 0).to_equal(true)
+            expect(_bytes_eq(simple_sig, ossl_sig)).to_equal(true)
+
+    it "round-trip: Simple sign -> Simple verify -> true":
+        if not openssl_present():
+            expect(true).to_equal(true)
+        else:
+            val pkcs8 = hex_to_bytes(RSA_PKCS8_HEX)
+            val spki = hex_to_bytes(RSA_SPKI_HEX)
+            val msg = _msg_hello()
+            val sig = rsa_sha512_sign(pkcs8, msg)
+            expect(sig.len() > 0).to_equal(true)
+            val ok = rsa_sha512_verify(spki, msg, sig)
+            expect(ok).to_equal(true)
+
+    it "cross-verify: Simple sign -> openssl verify -> success":
+        if not openssl_present():
+            expect(true).to_equal(true)
+        else:
+            val pkcs8 = hex_to_bytes(RSA_PKCS8_HEX)
+            val spki = hex_to_bytes(RSA_SPKI_HEX)
+            val msg = _msg_hello()
+            val sig = rsa_sha512_sign(pkcs8, msg)
+            expect(sig.len() > 0).to_equal(true)
+            val ok = _openssl_rsa_verify_sha512(spki, msg, sig)
+            expect(ok).to_equal(true)
+
+    it "negative: tampered signature -> Simple verify = false":
+        if not openssl_present():
+            expect(true).to_equal(true)
+        else:
+            val pkcs8 = hex_to_bytes(RSA_PKCS8_HEX)
+            val spki = hex_to_bytes(RSA_SPKI_HEX)
+            val msg = _msg_hello()
+            val sig = rsa_sha512_sign(pkcs8, msg)
+            expect(sig.len() > 0).to_equal(true)
+            var bad_sig: [u8] = []
+            bad_sig.push(sig[0] ^ 0xFF)
+            var i: u64 = 1
+            while i < sig.len():
+                bad_sig.push(sig[i])
+                i = i + 1
+            val ok = rsa_sha512_verify(spki, msg, bad_sig)
+            expect(ok).to_equal(false)
+
+    it "64 KiB message: sign + verify succeed":
+        if not openssl_present():
+            expect(true).to_equal(true)
+        else:
+            val pkcs8 = hex_to_bytes(RSA_PKCS8_HEX)
+            val spki = hex_to_bytes(RSA_SPKI_HEX)
+            val msg = _make_64kb()
+            val sig = rsa_sha512_sign(pkcs8, msg)
+            expect(sig.len() > 0).to_equal(true)
+            val ok = rsa_sha512_verify(spki, msg, sig)
+            expect(ok).to_equal(true)
+
+
+describe "os_crypto_ref_signature: ECDSA-SHA2-NISTP256 cross-check":
+    """
+    ## ECDSA P-256 Cross-Check
+
+    ECDSA is non-deterministic so we cannot do byte-exact KAT on sign.
+    Instead we verify:
+      1. Two signatures of same input differ (randomness check).
+      2. Each signature verifies correctly (Simple verify).
+      3. Simple sign -> DER conversion -> openssl verify succeeds.
+      4. Modified message fails verification (negative).
+    """
+
+    it "same (key, msg) signed twice produces different signatures":
+        if not openssl_present():
+            expect(true).to_equal(true)
+        else:
+            val pkcs8 = hex_to_bytes(EC_PKCS8_HEX)
+            val msg = _msg_hello()
+            val sig1 = ecdsa_p256_sign(pkcs8, msg)
+            val sig2 = ecdsa_p256_sign(pkcs8, msg)
+            expect(sig1.len()).to_equal(64)
+            expect(sig2.len()).to_equal(64)
+            # Non-deterministic: sigs should differ (astronomically unlikely to collide)
+            expect(_bytes_eq(sig1, sig2)).to_equal(false)
+
+    it "sign then Simple verify -> true (sig1)":
+        if not openssl_present():
+            expect(true).to_equal(true)
+        else:
+            val pkcs8 = hex_to_bytes(EC_PKCS8_HEX)
+            val spki = hex_to_bytes(EC_SPKI_HEX)
+            val msg = _msg_hello()
+            val sig = ecdsa_p256_sign(pkcs8, msg)
+            expect(sig.len()).to_equal(64)
+            val ok = ecdsa_p256_verify(spki, msg, sig)
+            expect(ok).to_equal(true)
+
+    it "second independent signature also verifies via Simple":
+        if not openssl_present():
+            expect(true).to_equal(true)
+        else:
+            val pkcs8 = hex_to_bytes(EC_PKCS8_HEX)
+            val spki = hex_to_bytes(EC_SPKI_HEX)
+            val msg = _msg_hello()
+            val sig = ecdsa_p256_sign(pkcs8, msg)
+            val sig2 = ecdsa_p256_sign(pkcs8, msg)
+            val ok1 = ecdsa_p256_verify(spki, msg, sig)
+            val ok2 = ecdsa_p256_verify(spki, msg, sig2)
+            expect(ok1).to_equal(true)
+            expect(ok2).to_equal(true)
+
+    it "Simple sign (fixed64) -> DER -> openssl verify -> success":
+        if not openssl_present():
+            expect(true).to_equal(true)
+        else:
+            val pkcs8 = hex_to_bytes(EC_PKCS8_HEX)
+            val spki = hex_to_bytes(EC_SPKI_HEX)
+            val msg = _msg_hello()
+            val sig_fixed = ecdsa_p256_sign(pkcs8, msg)
+            expect(sig_fixed.len()).to_equal(64)
+            val sig_der = _fixed64_to_der(sig_fixed)
+            expect(sig_der.len() > 8).to_equal(true)
+            val ok = openssl_ecdsa_p256_verify(spki, msg, sig_der)
+            expect(ok).to_equal(true)
+
+    it "DER-converted signature from 1 KB message verifies via openssl":
+        if not openssl_present():
+            expect(true).to_equal(true)
+        else:
+            val pkcs8 = hex_to_bytes(EC_PKCS8_HEX)
+            val spki = hex_to_bytes(EC_SPKI_HEX)
+            val msg = _make_1kb()
+            val sig_fixed = ecdsa_p256_sign(pkcs8, msg)
+            val sig_der = _fixed64_to_der(sig_fixed)
+            val ok = openssl_ecdsa_p256_verify(spki, msg, sig_der)
+            expect(ok).to_equal(true)
+
+    it "negative: flip bit in message -> Simple verify = false":
+        if not openssl_present():
+            expect(true).to_equal(true)
+        else:
+            val pkcs8 = hex_to_bytes(EC_PKCS8_HEX)
+            val spki = hex_to_bytes(EC_SPKI_HEX)
+            val msg = _msg_hello()
+            val sig = ecdsa_p256_sign(pkcs8, msg)
+            # Corrupt first byte of message
+            var bad_msg: [u8] = []
+            bad_msg.push(msg[0] ^ 0x01)
+            var i: u64 = 1
+            while i < msg.len():
+                bad_msg.push(msg[i])
+                i = i + 1
+            val ok = ecdsa_p256_verify(spki, bad_msg, sig)
+            expect(ok).to_equal(false)
+
+    it "empty message: ECDSA sign + Simple verify succeed":
+        if not openssl_present():
+            expect(true).to_equal(true)
+        else:
+            val pkcs8 = hex_to_bytes(EC_PKCS8_HEX)
+            val spki = hex_to_bytes(EC_SPKI_HEX)
+            val msg = _msg_empty()
+            val sig = ecdsa_p256_sign(pkcs8, msg)
+            expect(sig.len()).to_equal(64)
+            val ok = ecdsa_p256_verify(spki, msg, sig)
+            expect(ok).to_equal(true)
+
+    it "64 KiB message: ECDSA sign + Simple verify succeed":
+        if not openssl_present():
+            expect(true).to_equal(true)
+        else:
+            val pkcs8 = hex_to_bytes(EC_PKCS8_HEX)
+            val spki = hex_to_bytes(EC_SPKI_HEX)
+            val msg = _make_64kb()
+            val sig = ecdsa_p256_sign(pkcs8, msg)
+            expect(sig.len()).to_equal(64)
+            val ok = ecdsa_p256_verify(spki, msg, sig)
+            expect(ok).to_equal(true)
+
+
+describe "os_crypto_ref_signature: Ed25519 verify cross-check":
+    """
+    ## Ed25519 Verify Cross-Check
+
+    There is no Simple-side Ed25519 sign FFI; sign is pure-bignum (covered
+    by S4).  These tests exercise `rt_ed25519_verify` (raw 32-byte pubkey)
+    against RFC 8032 §7.1 TEST 2 vectors and cross-check with openssl pkeyutl.
+    """
+
+    it "RFC 8032 TEST 2: rt_ed25519_verify returns 1 for known-good vector":
+        val pk = hex_to_bytes(ED25519_PK_HEX)
+        val msg = hex_to_bytes(ED25519_MSG_HEX)
+        val sig = hex_to_bytes(ED25519_SIG_HEX)
+        val result = rt_ed25519_verify(pk, msg, sig)
+        expect(result).to_equal(1)
+
+    it "RFC 8032 TEST 2: ed25519_verify wrapper returns true":
+        val pk = hex_to_bytes(ED25519_PK_HEX)
+        val msg = hex_to_bytes(ED25519_MSG_HEX)
+        val sig = hex_to_bytes(ED25519_SIG_HEX)
+        val ok = ed25519_verify(pk, msg, sig)
+        expect(ok).to_equal(true)
+
+    it "RFC 8032 TEST 2: openssl pkeyutl -verify returns success":
+        if not openssl_present():
+            expect(true).to_equal(true)
+        else:
+            val pk = hex_to_bytes(ED25519_PK_HEX)
+            val msg = hex_to_bytes(ED25519_MSG_HEX)
+            val sig = hex_to_bytes(ED25519_SIG_HEX)
+            val spki = hex_to_bytes(ED25519_SPKI_HEX)
+            val ok = _openssl_ed25519_verify(spki, msg, sig)
+            expect(ok).to_equal(true)
+
+    it "negative: wrong public key -> ed25519_verify = false":
+        val pk = hex_to_bytes(ED25519_PK_HEX)
+        val msg = hex_to_bytes(ED25519_MSG_HEX)
+        val sig = hex_to_bytes(ED25519_SIG_HEX)
+        # Use EC pubkey bytes (wrong type/length) as wrong pubkey
+        var bad_pk: [u8] = []
+        var i: u64 = 0
+        while i < 32:
+            bad_pk.push(pk[i] ^ 0xFF)
+            i = i + 1
+        val ok = ed25519_verify(bad_pk, msg, sig)
+        expect(ok).to_equal(false)
+
+    it "negative: corrupted signature -> ed25519_verify = false":
+        val pk = hex_to_bytes(ED25519_PK_HEX)
+        val msg = hex_to_bytes(ED25519_MSG_HEX)
+        val sig = hex_to_bytes(ED25519_SIG_HEX)
+        var bad_sig: [u8] = []
+        bad_sig.push(sig[0] ^ 0x01)
+        var i: u64 = 1
+        while i < sig.len():
+            bad_sig.push(sig[i])
+            i = i + 1
+        val ok = ed25519_verify(pk, msg, bad_sig)
+        expect(ok).to_equal(false)
+
+    it "negative: modified message -> ed25519_verify = false":
+        val pk = hex_to_bytes(ED25519_PK_HEX)
+        val msg = hex_to_bytes(ED25519_MSG_HEX)
+        val sig = hex_to_bytes(ED25519_SIG_HEX)
+        var bad_msg: [u8] = []
+        bad_msg.push(msg[0] ^ 0x01)
+        val ok = ed25519_verify(pk, bad_msg, sig)
+        expect(ok).to_equal(false)
+
+
+describe "os_crypto_ref_signature: edge cases and negative coverage":
+    """
+    ## Edge and Negative Coverage
+
+    Malformed inputs, wrong key types, undersized RSA keys.
+    These must not panic — they must return empty arrays or false.
+    """
+
+    it "malformed PKCS#8 -> rsa_sha256_sign returns empty":
+        val bad = hex_to_bytes(BAD_PKCS8_HEX)
+        val msg = _msg_hello()
+        val sig = rsa_sha256_sign(bad, msg)
+        expect(sig.len()).to_equal(0)
+
+    it "malformed PKCS#8 -> rsa_sha512_sign returns empty":
+        val bad = hex_to_bytes(BAD_PKCS8_HEX)
+        val msg = _msg_hello()
+        val sig = rsa_sha512_sign(bad, msg)
+        expect(sig.len()).to_equal(0)
+
+    it "malformed PKCS#8 -> ecdsa_p256_sign returns empty":
+        val bad = hex_to_bytes(BAD_PKCS8_HEX)
+        val msg = _msg_hello()
+        val sig = ecdsa_p256_sign(bad, msg)
+        expect(sig.len()).to_equal(0)
+
+    it "wrong-type PKCS#8 (ECDSA key) -> rsa_sha256_sign returns empty":
+        val ec_pkcs8 = hex_to_bytes(WRONG_TYPE_PKCS8_HEX)
+        val msg = _msg_hello()
+        val sig = rsa_sha256_sign(ec_pkcs8, msg)
+        expect(sig.len()).to_equal(0)
+
+    it "wrong-type PKCS#8 (ECDSA key) -> rsa_sha512_sign returns empty":
+        val ec_pkcs8 = hex_to_bytes(WRONG_TYPE_PKCS8_HEX)
+        val msg = _msg_hello()
+        val sig = rsa_sha512_sign(ec_pkcs8, msg)
+        expect(sig.len()).to_equal(0)
+
+    it "wrong-type PKCS#8 (RSA key) -> ecdsa_p256_sign returns empty":
+        val rsa_pkcs8 = hex_to_bytes(RSA_PKCS8_HEX)
+        val msg = _msg_hello()
+        val sig = ecdsa_p256_sign(rsa_pkcs8, msg)
+        expect(sig.len()).to_equal(0)
+
+    it "RSA 1024-bit key -> rsa_sha256_sign returns empty (ring min-size check)":
+        val small_pkcs8 = hex_to_bytes(RSA_1024_PKCS8_HEX)
+        val msg = _msg_hello()
+        val sig = rsa_sha256_sign(small_pkcs8, msg)
+        expect(sig.len()).to_equal(0)
+
+    it "RSA verify with empty signature -> false":
+        val spki = hex_to_bytes(RSA_SPKI_HEX)
+        val msg = _msg_hello()
+        var empty_sig: [u8] = []
+        val ok = rsa_sha256_verify(spki, msg, empty_sig)
+        expect(ok).to_equal(false)
+
+    it "ECDSA verify with truncated 63-byte signature -> false":
+        val spki = hex_to_bytes(EC_SPKI_HEX)
+        val msg = _msg_hello()
+        var bad_sig: [u8] = []
+        var i: u64 = 0
+        while i < 63:
+            bad_sig.push(0xAA)
+            i = i + 1
+        val ok = ecdsa_p256_verify(spki, msg, bad_sig)
+        expect(ok).to_equal(false)
+
+    it "ed25519 verify with empty signature -> false":
+        val pk = hex_to_bytes(ED25519_PK_HEX)
+        val msg = hex_to_bytes(ED25519_MSG_HEX)
+        var empty_sig: [u8] = []
+        val ok = ed25519_verify(pk, msg, empty_sig)
+        expect(ok).to_equal(false)

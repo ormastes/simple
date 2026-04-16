@@ -1,18 +1,44 @@
 @allow(primitive_api)
-# SSH Host Key Signature Verification FFI
-# Wraps rt_rsa_sha256_verify and rt_ed25519_verify from the runtime.
+# SSH Host Key Signature Verification + Generation FFI
+# Wraps the rt_{rsa,ed25519,ecdsa_p256}_{verify,sign} runtime externs.
 
 # ============================================================================
 # Tier 1: Extern Function Declarations (Raw FFI)
 # ============================================================================
 
-# Verify an RSA-PKCS1-SHA256 signature.
+# --- verify ---
+
+# Verify an RSA-PKCS1-SHA256 signature (RFC 8332 rsa-sha2-256).
 # Returns 1 if valid, 0 otherwise.
 extern fn rt_rsa_sha256_verify(pubkey: [u8], message: [u8], signature: [u8]) -> i64
+
+# Verify an RSA-PKCS1-SHA512 signature (RFC 8332 rsa-sha2-512).
+# Returns 1 if valid, 0 otherwise.
+extern fn rt_rsa_sha512_verify(pubkey: [u8], message: [u8], signature: [u8]) -> i64
 
 # Verify an Ed25519 signature.
 # Returns 1 if valid, 0 otherwise.
 extern fn rt_ed25519_verify(pubkey: [u8], message: [u8], signature: [u8]) -> i64
+
+# Verify an ECDSA P-256 SHA-256 fixed-width (64-byte r||s) signature
+# (RFC 5656 ecdsa-sha2-nistp256 — the SSH-wire mpint form must be
+# converted to fixed-width by the caller).
+# Returns 1 if valid, 0 otherwise.
+extern fn rt_ecdsa_p256_verify(pubkey: [u8], message: [u8], signature: [u8]) -> i64
+
+# --- sign ---
+
+# Sign `message` with RSA-PKCS1-SHA256 using a PKCS#8-v1 DER private key.
+# Returns the signature bytes, or an empty array on any error.
+extern fn rt_rsa_sha256_sign(pkcs8: [u8], message: [u8]) -> [u8]
+
+# Sign `message` with RSA-PKCS1-SHA512 using a PKCS#8-v1 DER private key.
+# Returns the signature bytes, or an empty array on any error.
+extern fn rt_rsa_sha512_sign(pkcs8: [u8], message: [u8]) -> [u8]
+
+# Sign `message` with ECDSA P-256 SHA-256 using a PKCS#8-v1 DER private
+# key. Returns 64-byte fixed-width r||s, or an empty array on error.
+extern fn rt_ecdsa_p256_sign(pkcs8: [u8], message: [u8]) -> [u8]
 
 # ============================================================================
 # Tier 2: Simple-Friendly Wrapper Functions
@@ -31,6 +57,11 @@ fn rsa_sha256_verify(pubkey: [u8], message: [u8], signature: [u8]) -> bool:
     val result = rt_rsa_sha256_verify(pubkey, message, signature)
     result == 1
 
+fn rsa_sha512_verify(pubkey: [u8], message: [u8], signature: [u8]) -> bool:
+    """Verify an RSA-PKCS1-SHA512 signature (RFC 8332 rsa-sha2-512)."""
+    val result = rt_rsa_sha512_verify(pubkey, message, signature)
+    result == 1
+
 fn ed25519_verify(pubkey: [u8], message: [u8], signature: [u8]) -> bool:
     """Verify an Ed25519 signature.
 
@@ -44,6 +75,45 @@ fn ed25519_verify(pubkey: [u8], message: [u8], signature: [u8]) -> bool:
     val result = rt_ed25519_verify(pubkey, message, signature)
     result == 1
 
+fn ecdsa_p256_verify(pubkey: [u8], message: [u8], signature_fixed64: [u8]) -> bool:
+    """Verify an ECDSA P-256 fixed-width signature.
+
+    Args:
+        pubkey:           DER-encoded ECDSA P-256 public key (SPKI)
+        message:          Message bytes that were signed
+        signature_fixed64: 64-byte r||s form (NOT the SSH mpint pair)
+
+    Returns: true if valid, false otherwise
+    """
+    val result = rt_ecdsa_p256_verify(pubkey, message, signature_fixed64)
+    result == 1
+
+fn rsa_sha256_sign(pkcs8: [u8], message: [u8]) -> [u8]:
+    """Sign `message` with RSA-PKCS1-SHA256 (deterministic).
+
+    Args:
+        pkcs8:   PKCS#8 v1 DER-encoded RSA private key
+        message: Bytes to sign
+
+    Returns: signature bytes (modulus-size); empty array on error.
+             Caller must check `len(sig) > 0` before use.
+
+    Hosted-only: requires SystemRandom in the runtime.
+    """
+    rt_rsa_sha256_sign(pkcs8, message)
+
+fn rsa_sha512_sign(pkcs8: [u8], message: [u8]) -> [u8]:
+    """Sign `message` with RSA-PKCS1-SHA512 (deterministic)."""
+    rt_rsa_sha512_sign(pkcs8, message)
+
+fn ecdsa_p256_sign(pkcs8: [u8], message: [u8]) -> [u8]:
+    """Sign `message` with ECDSA P-256 (non-deterministic; 64-byte r||s).
+
+    Convert to SSH `mpint r + mpint s` via os.crypto.ecdsa_p256 for the
+    SSH wire format.
+    """
+    rt_ecdsa_p256_sign(pkcs8, message)
+
 # ============================================================================
 # Tier 3: SSH Host Key Dispatcher
 # ============================================================================
@@ -52,17 +122,27 @@ fn verify_host_key(key_type: text, pubkey: [u8], message: [u8], signature: [u8])
     """Verify an SSH host key signature, dispatching on key type.
 
     Args:
-        key_type:  SSH key type string, e.g. "ssh-rsa" or "ssh-ed25519"
+        key_type:  SSH key type / sig-algo, one of:
+                   "ssh-rsa"              — legacy SHA-1, not supported
+                   "rsa-sha2-256"         — RFC 8332
+                   "rsa-sha2-512"         — RFC 8332
+                   "ssh-ed25519"          — RFC 8709
+                   "ecdsa-sha2-nistp256"  — RFC 5656 (signature must
+                                            already be fixed-width r||s)
         pubkey:    Raw public key bytes (type-specific encoding)
         message:   Signed message bytes (e.g. the SSH exchange hash)
         signature: Signature bytes
 
     Returns: true if the signature is valid for the given key type,
-             false for unknown key types or invalid signatures
+             false for unknown key types or invalid signatures.
     """
-    if key_type == "ssh-rsa":
+    if key_type == "rsa-sha2-256":
         rsa_sha256_verify(pubkey, message, signature)
+    elif key_type == "rsa-sha2-512":
+        rsa_sha512_verify(pubkey, message, signature)
     elif key_type == "ssh-ed25519":
         ed25519_verify(pubkey, message, signature)
+    elif key_type == "ecdsa-sha2-nistp256":
+        ecdsa_p256_verify(pubkey, message, signature)
     else:
         false

@@ -19,6 +19,7 @@ use std.gc_async_mut.gpu.engine2d.engine.{Engine2D}
 use os.desktop.app_manifest.{AppManifest, load_app_manifests, search_apps, manifest_categories}
 use os.services.wm.wm_service.{WmService, WmAction}
 use common.window_protocol.geometry.{WindowId, ProcessId, AppId, Point, Size}
+use std.nogc_async_mut_noalloc.log.{noalloc_log_debug, noalloc_log_error}
 use os.services.launcher.launcher.{
     launcher_init, launcher_launch, launcher_shortcut_dispatch, launcher_register, launcher_terminate,
     launcher_get_app_name, launcher_get_process_app_index, launcher_get_process_app_id_for_pid,
@@ -28,8 +29,10 @@ use os.services.launcher.launcher.{
 }
 
 extern fn serial_println(msg: text)
-extern fn rt_file_read_text(path: text) -> text
+extern fn rt_file_read_text(path_ptr: i64, path_len: i64) -> text
 extern fn rt_file_write_text(path: text, content: text) -> bool
+@allow(primitive_api)
+extern fn rt_string_data(value: text) -> i64
 
 use os.apps.calculator.calculator.{Calculator}
 use os.apps.clock.clock.{ClockApp}
@@ -78,7 +81,6 @@ val APP_ID_SHELL: text = "/sys/apps/shell"
 val APP_ID_EDITOR: text = "/sys/apps/editor"
 val EDITOR_SMOKE_PATH: text = "/EDITOR.TXT"
 val EDITOR_SMOKE_CONTENT: text = "SimpleOS editor smoke saved from GUI"
-
 struct EditorResidentLaunch:
     tree: UITree
     saved_path: text
@@ -88,15 +90,18 @@ fn _build_editor_resident_launch() -> Result<EditorResidentLaunch, text>:
     var editor = TextEditor.new()
     editor.lines = [EDITOR_SMOKE_CONTENT]
     editor.file_path = EDITOR_SMOKE_PATH
-    val content = EDITOR_SMOKE_CONTENT
-    if not rt_file_write_text(EDITOR_SMOKE_PATH, content):
+    noalloc_log_debug("editor resident launch write path={EDITOR_SMOKE_PATH}")
+    if not rt_file_write_text(EDITOR_SMOKE_PATH, EDITOR_SMOKE_CONTENT):
+        noalloc_log_error("editor resident launch write failed path={EDITOR_SMOKE_PATH}")
         return Err("runtime file write failed")
     editor.modified = false
     editor.status_message = "Saved {EDITOR_SMOKE_PATH}"
 
-    val cli_output = rt_file_read_text(EDITOR_SMOKE_PATH)
-    if cli_output != content:
+    val cli_output = rt_file_read_text(rt_string_data(EDITOR_SMOKE_PATH), 11)
+    if cli_output != EDITOR_SMOKE_CONTENT:
+        noalloc_log_error("editor resident launch readback mismatch path={EDITOR_SMOKE_PATH}")
         return Err("cli output mismatch: {cli_output}")
+    noalloc_log_debug("editor resident launch readback ok path={EDITOR_SMOKE_PATH}")
 
     val session = editor.build_ui()
     Ok(EditorResidentLaunch(

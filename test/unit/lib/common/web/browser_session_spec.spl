@@ -1,6 +1,6 @@
 use std.spec.*
 
-use std.common.web.browser_session.{BrowserSession}
+use std.common.web.browser_session.{BrowserSession, BrowserResponse}
 use std.js.types.js_types.{JsValue}
 use std.platform.{get_host_os}
 
@@ -110,6 +110,23 @@ describe "BrowserSession page loading":
             Ok(_) =>
                 expect(session.warnings.len()).to_be_greater_than(1)
                 expect(session.warnings[0]).to_contain("external script")
+            Err(e) =>
+                expect(false).to_equal(true)
+
+    it "supports deterministic document loading without the js runtime":
+        var session = BrowserSession.new_without_runtime()
+        val result = session.open_html(
+            "about:deterministic",
+            "<html><head><title>Deterministic</title></head><body><p>Stable</p><script>document.title = 'Ignored';</script></body></html>"
+        )
+        match result:
+            Ok(_) =>
+                expect(session.current_url).to_equal("about:deterministic")
+                expect(session.current_title).to_equal("Deterministic")
+                expect(session.current_body_html).to_contain("<p>Stable</p>")
+                expect(session.runtime_state).to_be_nil()
+                expect(session.warnings.len()).to_equal(1)
+                expect(session.warnings[0]).to_contain("runtime is disabled")
             Err(e) =>
                 expect(false).to_equal(true)
 
@@ -232,27 +249,111 @@ describe "BrowserSession script bridge":
         expect(session.cookie_header_for_request("https://example.com/path/next")).to_contain("theme=light")
         expect(session.cookie_header_for_request("https://example.com/other")).to_equal("global=yes")
 
-    it "exposes a synchronous fetch shim to page scripts":
+    it "installs promise globals and settles async fetch after response commit":
         var session = BrowserSession.new()
-        session.open_html("https://example.com/app", "<html><body>Fetch</body></html>")
-
-        val result = session.eval_script("var r = window.fetchSync('file:///definitely-not-here/simple-browser-fetch.txt'); r.status + ':' + r.ok + ':' + r.error")
-        match result:
-            Ok(value) =>
-                expect(_display_js(value)).to_equal("404:false:file not found")
+        val open_result = session.open_html(
+            "https://example.com/app",
+            "<html><body><script>var out = ''; window.fetch('/data.txt').then(function(r) { return r.text(); }).then(function(t) { out = t; document.body.textContent = t; });</script></body></html>"
+        )
+        match open_result:
+            Ok(_) =>
+                val promise_result = session.eval_script("typeof Promise.resolve + ':' + typeof Promise.prototype.then")
+                match promise_result:
+                    Ok(value) =>
+                        expect(_display_js(value)).to_equal("function:function")
+                    Err(e) =>
+                        expect(false).to_equal(true)
             Err(e) =>
                 expect(false).to_equal(true)
 
-    it "supports fetch then chaining through the browser shim":
-        var session = BrowserSession.new()
-        session.register_resource("https://example.com/data.txt", "alpha")
-        session.open_html("https://example.com/app", "<html><body>Fetch</body></html>")
+        match session.take_pending_request():
+            Some(request) =>
+                expect(request.kind).to_equal("fetch")
+                expect(request.url).to_equal("https://example.com/data.txt")
+                val commit_result = session.commit_network_response(BrowserResponse.create(
+                    request_id: request.id,
+                    kind: "fetch",
+                    url: request.url,
+                    status: 200,
+                    headers: "Set-Cookie: token=abc; Path=/\n",
+                    body: "alpha",
+                    error: ""
+                ))
+                match commit_result:
+                    Ok(_) =>
+                        val out_result = session.eval_script("out + ':' + document.body.textContent + ':' + document.cookie")
+                        match out_result:
+                            Ok(value) =>
+                                expect(_display_js(value)).to_contain("alpha:alpha")
+                                expect(_display_js(value)).to_contain("token=abc")
+                            Err(e) =>
+                                expect(false).to_equal(true)
+                    Err(e) =>
+                        expect(false).to_equal(true)
+            nil:
+                expect(false).to_equal(true)
 
-        val result = session.eval_script("var out = ''; window.fetch('/data.txt').then(function(r) { return r.text(); }).then(function(t) { out = t; }); out")
-        match result:
-            Ok(value) =>
-                expect(_display_js(value)).to_equal("alpha")
-            Err(e) =>
+    it "supports fetch then chaining through the browser promise path":
+        var session = BrowserSession.new()
+        session.open_html(
+            "https://example.com/app",
+            "<html><body><script>var out = ''; window.fetch('/data.txt').then(function(r) { return r.text(); }).then(function(t) { out = t; });</script></body></html>"
+        )
+
+        match session.take_pending_request():
+            Some(request) =>
+                val commit_result = session.commit_network_response(BrowserResponse.create(
+                    request_id: request.id,
+                    kind: "fetch",
+                    url: request.url,
+                    status: 200,
+                    headers: "",
+                    body: "alpha",
+                    error: ""
+                ))
+                match commit_result:
+                    Ok(_) =>
+                        val result = session.eval_script("out")
+                        match result:
+                            Ok(value) =>
+                                expect(_display_js(value)).to_equal("alpha")
+                            Err(e) =>
+                                expect(false).to_equal(true)
+                    Err(e) =>
+                        expect(false).to_equal(true)
+            nil:
+                expect(false).to_equal(true)
+
+    it "supports fetch promise rejection on transport error":
+        var session = BrowserSession.new()
+        session.open_html(
+            "https://example.com/app",
+            "<html><body><script>var out = 'start'; window.fetch('/data.txt').catch(function(err) { out = err; });</script></body></html>"
+        )
+
+        match session.take_pending_request():
+            Some(request) =>
+                val commit_result = session.commit_network_response(BrowserResponse.create(
+                    request_id: request.id,
+                    kind: "fetch",
+                    url: request.url,
+                    status: 0,
+                    headers: "",
+                    body: "",
+                    error: "network down"
+                ))
+                match commit_result:
+                    Err(e) =>
+                        expect(e).to_equal("network down")
+                        val result = session.eval_script("out")
+                        match result:
+                            Ok(value) =>
+                                expect(_display_js(value)).to_equal("network down")
+                            Err(err) =>
+                                expect(false).to_equal(true)
+                    Ok(_) =>
+                        expect(false).to_equal(true)
+            nil:
                 expect(false).to_equal(true)
 
     it "follows location changes through session owned navigation":

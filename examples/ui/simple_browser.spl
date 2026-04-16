@@ -78,6 +78,8 @@ val INPUT_H: f64 = 32.0
 val BUTTON_W: f64 = 64.0
 val BUTTON_H: f64 = 32.0
 val BUTTON_MARGIN: f64 = 16.0
+val NAV_BUTTON_W: f64 = 34.0
+val NAV_BUTTON_GAP: f64 = 8.0
 
 # ---------------------------------------------------------------------------
 # Env-var resolution
@@ -160,11 +162,31 @@ fn _palette(theme: text) -> Palette:
 # <input>/<button> pair.
 # ---------------------------------------------------------------------------
 
-fn _input_x(vw: f64) -> f64: _left_inset()
-fn _input_w(vw: f64) -> f64: vw - _left_inset() - BUTTON_W - BUTTON_MARGIN - 8.0
+fn _nav_back_x() -> f64: _left_inset()
+fn _nav_forward_x() -> f64: _nav_back_x() + NAV_BUTTON_W + NAV_BUTTON_GAP
+fn _nav_reload_x() -> f64: _nav_forward_x() + NAV_BUTTON_W + NAV_BUTTON_GAP
+fn _input_x(vw: f64) -> f64: _nav_reload_x() + NAV_BUTTON_W + 12.0
+fn _input_w(vw: f64) -> f64: vw - _input_x(vw) - BUTTON_W - BUTTON_MARGIN - 8.0
 fn _button_x(vw: f64) -> f64: vw - BUTTON_W - BUTTON_MARGIN
 
-fn _build_chrome_ops(url: text, pal: Palette, vw: f64, focused_input: bool) -> [PaintOp]:
+fn _build_nav_button(ops: [PaintOp], x: f64, y: f64, label: text, pal: Palette, enabled: bool) -> [PaintOp]:
+    val bg = if enabled: pal.input_bg else: from_rgba(127, 127, 127, 22)
+    val fg = if enabled: pal.fg else: pal.placeholder
+    var out = ops.push(PaintOp.FillRect(x: x, y: y, w: NAV_BUTTON_W, h: BUTTON_H, color: bg))
+    out = out.push(PaintOp.DrawBorder(
+        x: x, y: y, w: NAV_BUTTON_W, h: BUTTON_H,
+        widths: [1.0, 1.0, 1.0, 1.0],
+        colors: [pal.input_border, pal.input_border, pal.input_border, pal.input_border]
+    ))
+    out.push(PaintOp.DrawText(
+        x: x + 12.0,
+        y: y + BUTTON_H / 2.0 + 5.0,
+        text_content: label,
+        font_size: 13.0,
+        color: fg
+    ))
+
+fn _build_chrome_ops(url: text, pal: Palette, vw: f64, focused_input: bool, can_go_back: bool, can_go_forward: bool) -> [PaintOp]:
     var ops: [PaintOp] = []
     val ch = _chrome_height()
     val ty = _top_inset()
@@ -174,9 +196,13 @@ fn _build_chrome_ops(url: text, pal: Palette, vw: f64, focused_input: bool) -> [
     ops = ops.push(PaintOp.FillRect(x: 0.0, y: ty, w: vw, h: ch - ty, color: pal.strip_bg))
     ops = ops.push(PaintOp.FillRect(x: 0.0, y: ch - 1.0, w: vw, h: 1.0, color: pal.strip_border))
 
+    val iy = _input_y()
+    ops = _build_nav_button(ops, _nav_back_x(), iy, "<", pal, can_go_back)
+    ops = _build_nav_button(ops, _nav_forward_x(), iy, ">", pal, can_go_forward)
+    ops = _build_nav_button(ops, _nav_reload_x(), iy, "R", pal, true)
+
     # input field background + border
     val ix = _input_x(vw)
-    val iy = _input_y()
     val iw = _input_w(vw)
     val ih = INPUT_H
     ops = ops.push(PaintOp.FillRect(x: ix, y: iy, w: iw, h: ih, color: pal.input_bg))
@@ -276,6 +302,14 @@ fn _hit_button(x: f64, y: f64, vw: f64) -> bool:
     val by = _input_y()
     x >= bx and x <= bx + BUTTON_W and y >= by and y <= by + BUTTON_H
 
+fn _hit_nav_button(x: f64, y: f64, left: f64) -> bool:
+    val by = _input_y()
+    x >= left and x <= left + NAV_BUTTON_W and y >= by and y <= by + BUTTON_H
+
+fn _hit_back(x: f64, y: f64) -> bool: _hit_nav_button(x, y, _nav_back_x())
+fn _hit_forward(x: f64, y: f64) -> bool: _hit_nav_button(x, y, _nav_forward_x())
+fn _hit_reload(x: f64, y: f64) -> bool: _hit_nav_button(x, y, _nav_reload_x())
+
 fn _session_document_html(session: BrowserSession) -> text:
     "<html><head><title>{session.current_title}</title></head><body>{session.current_body_html}</body></html>"
 
@@ -297,6 +331,37 @@ fn _send_request(request: BrowserRequest):
     else:
         print build_ipc_request_http(request.url, request.id, request.method, request.headers, request.body, request.content_type)
 
+fn _drain_session_requests(session: BrowserSession, pending_request_ids: [text]) -> [text]:
+    var next_ids = pending_request_ids
+    var draining = true
+    while draining:
+        if val Some(request) = session.take_pending_request():
+            _send_request(request)
+            next_ids = next_ids + [request.id]
+        else:
+            draining = false
+    next_ids
+
+fn _remove_pending_request(pending_request_ids: [text], request_id: text) -> [text]:
+    var next_ids: [text] = []
+    for current_id in pending_request_ids:
+        if current_id != request_id:
+            next_ids = next_ids + [current_id]
+    next_ids
+
+fn _response_kind(request_id: text) -> text:
+    if request_id.starts_with("script-"):
+        return "script"
+    if request_id.starts_with("fetch-"):
+        return "fetch"
+    "document"
+
+fn _has_loading_request(pending_request_ids: [text]) -> bool:
+    for request_id in pending_request_ids:
+        if request_id.starts_with("document-") or request_id.starts_with("script-"):
+            return true
+    false
+
 fn main() -> i64:
     val theme = _resolve_theme()
     val pal = _palette(theme)
@@ -306,11 +371,11 @@ fn main() -> i64:
     var scroll_y: f64 = 0.0
     var viewport_w: i32 = 1024
     var viewport_h: i32 = 768
-    var pending_request_id: text = ""
+    var pending_request_ids: [text] = []
     var session = BrowserSession.new()
 
     var page = simple_browser_blank_page(url, viewport_w, _content_viewport_h(viewport_h))
-    val chrome0 = _build_chrome_ops(url, pal, viewport_w.to_f64(), focused_input)
+    val chrome0 = _build_chrome_ops(url, pal, viewport_w.to_f64(), focused_input, session.can_go_back(), session.can_go_forward())
     _emit_paint(chrome0, page, theme, viewport_w, viewport_h, scroll_y)
 
     var running = true
@@ -336,6 +401,46 @@ fn main() -> i64:
                                 if not focused_input:
                                     focused_input = true
                                     dirty = true
+                            elif _hit_back(x, y):
+                                if session.can_go_back():
+                                    match session.go_back():
+                                        Ok(_) =>
+                                            url = session.current_url
+                                            page = _page_from_session(session, viewport_w, _content_viewport_h(viewport_h))
+                                        Err(e) =>
+                                            page = simple_browser_error_page(url, e, viewport_w, _content_viewport_h(viewport_h))
+                                focused_input = false
+                                focused_field_key = ""
+                                scroll_y = 0.0
+                                dirty = true
+                            elif _hit_forward(x, y):
+                                if session.can_go_forward():
+                                    match session.go_forward():
+                                        Ok(_) =>
+                                            url = session.current_url
+                                            page = _page_from_session(session, viewport_w, _content_viewport_h(viewport_h))
+                                        Err(e) =>
+                                            page = simple_browser_error_page(url, e, viewport_w, _content_viewport_h(viewport_h))
+                                focused_input = false
+                                focused_field_key = ""
+                                scroll_y = 0.0
+                                dirty = true
+                            elif _hit_reload(x, y):
+                                match session.reload():
+                                    Ok(_) =>
+                                        url = session.current_url
+                                        page = _page_from_session(session, viewport_w, _content_viewport_h(viewport_h))
+                                    Err(_e) =>
+                                        match session.begin_network_navigation(url, "GET", "", "", ""):
+                                            Ok(_) =>
+                                                trigger_fetch = true
+                                                page = simple_browser_loading_page(url, viewport_w, _content_viewport_h(viewport_h))
+                                            Err(e2) =>
+                                                page = simple_browser_error_page(url, e2, viewport_w, _content_viewport_h(viewport_h))
+                                focused_input = false
+                                focused_field_key = ""
+                                scroll_y = 0.0
+                                dirty = true
                             elif _hit_button(x, y, vw2):
                                 match session.begin_network_navigation(url, "GET", "", "", ""):
                                     Ok(_) =>
@@ -439,43 +544,39 @@ fn main() -> i64:
                         dirty = true
                     UIEvent.FetchResult(req_id, fr_url, status, headers, body, err):
                         eprint "[fetch_result] req={req_id} status={status} body_len={body.len()} err={err}"
-                        if pending_request_id == "" or pending_request_id == req_id:
-                            pending_request_id = ""
-                            scroll_y = 0.0
-                            focused_field_key = ""
-                            match session.commit_network_response(BrowserResponse.create(
-                                request_id: req_id,
-                                kind: if req_id.starts_with("script-"): "script" else: "document",
-                                url: fr_url,
-                                status: status,
-                                headers: headers,
-                                body: body,
-                                error: err
-                            )):
-                                Ok(_) =>
-                                    url = session.current_url
-                                    if val Some(next_request) = session.take_pending_request():
-                                        pending_request_id = next_request.id
-                                        _send_request(next_request)
-                                        page = simple_browser_loading_page(url, viewport_w, _content_viewport_h(viewport_h))
-                                    else:
-                                        page = _page_from_session(session, viewport_w, _content_viewport_h(viewport_h))
-                                Err(e) =>
-                                    url = fr_url
-                                    page = simple_browser_error_page(fr_url, e, viewport_w, _content_viewport_h(viewport_h))
-                            dirty = true
+                        pending_request_ids = _remove_pending_request(pending_request_ids, req_id)
+                        scroll_y = 0.0
+                        focused_field_key = ""
+                        match session.commit_network_response(BrowserResponse.create(
+                            request_id: req_id,
+                            kind: _response_kind(req_id),
+                            url: fr_url,
+                            status: status,
+                            headers: headers,
+                            body: body,
+                            error: err
+                        )):
+                            Ok(_) =>
+                                url = session.current_url
+                                pending_request_ids = _drain_session_requests(session, pending_request_ids)
+                                if _has_loading_request(pending_request_ids):
+                                    page = simple_browser_loading_page(url, viewport_w, _content_viewport_h(viewport_h))
+                                else:
+                                    page = _page_from_session(session, viewport_w, _content_viewport_h(viewport_h))
+                            Err(e) =>
+                                url = fr_url
+                                page = simple_browser_error_page(fr_url, e, viewport_w, _content_viewport_h(viewport_h))
+                        dirty = true
                     _:
                         pass_dn
                 if trigger_fetch:
                     scroll_y = 0.0
                     focused_field_key = ""
                     page = simple_browser_loading_page(url, viewport_w, _content_viewport_h(viewport_h))
-                    if val Some(next_request) = session.take_pending_request():
-                        pending_request_id = next_request.id
-                        _send_request(next_request)
-                    else:
+                    pending_request_ids = _drain_session_requests(session, pending_request_ids)
+                    if pending_request_ids.len() == 0:
                         page = _page_from_session(session, viewport_w, _content_viewport_h(viewport_h))
                 if dirty:
-                    val chrome_ops = _build_chrome_ops(url, pal, viewport_w.to_f64(), focused_input)
+                    val chrome_ops = _build_chrome_ops(url, pal, viewport_w.to_f64(), focused_input, session.can_go_back(), session.can_go_forward())
                     _emit_paint(chrome_ops, page, theme, viewport_w, viewport_h, scroll_y)
     return 0

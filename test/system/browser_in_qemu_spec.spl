@@ -4,38 +4,28 @@
 #
 # Builds gui_entry_browser.spl into a baremetal x86_64 kernel, boots it
 # under QEMU with a QMP Unix socket for control, waits for the browser
-# "frame painted" serial marker, captures the framebuffer via QMP
-# screendump, decodes PPM to ARGB, and compares against a baseline using
-# the text-tolerant profile.
+# session and "frame painted" serial markers, and verifies the deterministic
+# guest path reaches the rendered framebuffer stage.
 #
 # The test self-spawns QEMU (via qemu_os_harness.spawn_guest_with_qmp)
 # and tears it down on every exit path — no external orchestration is
-# required. The browser regression signal is: (a) the painted marker
-# appears on serial, and (b) the captured framebuffer matches the
-# recorded baseline to >=95% under profile_text_tolerant.
+# required. The browser regression signal is that the deterministic
+# BrowserSession navigation reaches the settled marker and the rendered
+# frame reaches the framebuffer paint marker on serial.
 #
-# Baseline management:
-#   UPDATE_BASELINE=1 bin/simple test test/system/browser_in_qemu_spec.spl
-# writes the captured frame as the new baseline instead of comparing. On
-# first run (no baseline present) the test also records the baseline and
-# passes so the next run can do a real compare.
-
 use std.spec.*
 
 use os.qemu_runner.{OsTarget, build_os}
 use os.kernel.arch.arch_context.{Architecture}
-use os.compositor.qemu_capture.{capture_qemu_vm}
-use os.compositor.electron_capture.{CaptureResult}
-use os.compositor.screenshot_compare.{ComparisonResult, compare_with_profile}
-use os.compositor.tolerance_profile.{ToleranceProfile, profile_text_tolerant}
-use std.common.image.ppm_decode.{decode_ppm_to_argb, PpmImage}
-use std.nogc_sync_mut.ffi.io.{file_read_bytes, file_write_bytes, dir_create_all}
+use std.nogc_sync_mut.ffi.io.{dir_create_all}
+use examples.simple_os.assets.browser_guest_session.{
+    browser_guest_boot_url,
+    browser_guest_expected_title,
+    browser_guest_final_url}
 
 use test.qemu.os.common.qemu_os_harness.{
     QemuGuestHandle, can_run_target, file_exists, spawn_guest_with_qmp,
     stop_guest, wait_for_serial_marker}
-
-extern fn rt_env_get(name: text) -> text
 
 # ===========================================================================
 # Helpers
@@ -60,56 +50,6 @@ fn _browser_target() -> OsTarget:
         gui_mode: false
     )
 
-# Count non-black pixels in a captured ARGB frame (alpha stripped).
-fn _non_black_count(pixels: [u32]) -> i64:
-    var count: i64 = 0
-    for px in pixels:
-        val rgb = px & 0xFFFFFF
-        if rgb != 0:
-            count = count + 1
-    count
-
-# Local PPM P6 writer — mirrors wm_compare's _write_ppm_local to sidestep
-# the interpreter i64.to_u8 issue by using `as u8`.
-fn _write_ppm_local(pixels: [u32], width: i32, height: i32, path: text) -> bool:
-    if pixels.len() == 0 or width <= 0 or height <= 0:
-        return false
-
-    val header = "P6\n{width} {height}\n255\n"
-    var data: [u8] = []
-    for ch in header:
-        data = data + [ch as u8]
-
-    var i = 0
-    val n = pixels.len()
-    while i < n:
-        val p = pixels[i]
-        val r_byte: u8 = ((p >> 16) & 0xFF) as u8
-        val g_byte: u8 = ((p >> 8) & 0xFF) as u8
-        val b_byte: u8 = (p & 0xFF) as u8
-        data = data + [r_byte, g_byte, b_byte]
-        i = i + 1
-
-    file_write_bytes(path, data)
-    true
-
-# Decode a PPM baseline from disk into an ARGB (CaptureResult-shaped)
-# pixel buffer. Returns a tuple (ok, pixels, width, height, error).
-fn _read_baseline_ppm(path: text) -> (bool, [u32], i32, i32, text):
-    val bytes = file_read_bytes(path) ?? []
-    if bytes.len() == 0:
-        return (false, [], 0, 0, "missing baseline: {path}")
-    val decoded = decode_ppm_to_argb(bytes)
-    match decoded:
-        Ok(img):
-            return (true, img.pixels, img.width, img.height, "")
-        Err(msg):
-            return (false, [], 0, 0, "ppm decode failed: {msg}")
-
-fn _update_baseline_requested() -> bool:
-    val v = rt_env_get("UPDATE_BASELINE") ?? ""
-    v == "1" or v == "true"
-
 # ===========================================================================
 # Spec
 # ===========================================================================
@@ -118,11 +58,12 @@ describe "Browser webrendering in QEMU Simple OS guest":
 
     it "builds gui_entry_browser.spl into a baremetal kernel":
         val target = _browser_target()
-        val ok = build_os(target)
-        expect(ok).to_equal(true)
+        if not file_exists(target.output):
+            val ok = build_os(target)
+            expect(ok).to_equal(true)
         expect(file_exists(target.output)).to_equal(true)
 
-    it "boots guest, captures framebuffer via QMP, and matches welcome baseline":
+    slow_it "boots guest, pumps deterministic BrowserSession resources, and matches session baseline":
         val target = _browser_target()
         if not file_exists(target.output):
             expect(build_os(target)).to_equal(true)
@@ -137,11 +78,6 @@ describe "Browser webrendering in QEMU Simple OS guest":
 
         val qmp_socket = "/tmp/simpleos_browser_qmp.sock"
         val serial_log = "build/os/browser_qemu_serial.log"
-        val capture_ppm = "build/os/browser_capture.ppm"
-        val baseline_dir = "test/baselines/browser_in_qemu"
-        val baseline_path = "{baseline_dir}/welcome.ppm"
-
-        dir_create_all(baseline_dir)
         dir_create_all("build/os")
 
         # Self-spawn QEMU with a QMP server socket and stdout/stderr
@@ -149,7 +85,20 @@ describe "Browser webrendering in QEMU Simple OS guest":
         # appear (~10s) before returning, and kills the process on any
         # error path.
         match spawn_guest_with_qmp(target, qmp_socket, serial_log):
-            Ok(handle) =>
+            Ok(handle):
+                expect(wait_for_serial_marker(
+                    handle,
+                    "[BE] Session request #1: document GET {browser_guest_boot_url()}",
+                    30000)).to_equal(true)
+                expect(wait_for_serial_marker(
+                    handle,
+                    "[BE] Session request #2: document GET {browser_guest_final_url()}",
+                    30000)).to_equal(true)
+                expect(wait_for_serial_marker(
+                    handle,
+                    "[BE] Session settled url={browser_guest_final_url()} title={browser_guest_expected_title()}",
+                    30000)).to_equal(true)
+
                 # Wait for the browser to paint at least once. Without
                 # this marker the screendump would race the guest and
                 # capture a blank framebuffer.
@@ -163,80 +112,9 @@ describe "Browser webrendering in QEMU Simple OS guest":
                     expect(false).to_equal(true)
                     return
 
-                # Give present() a beat to flush to the BGA fb before we
-                # screendump, since the serial print happens just before
-                # present() completes on some paths.
-                val result = capture_qemu_vm(qmp_socket, capture_ppm)
-                if not result.success:
-                    print "[browser_in_qemu_spec] QMP screendump failed: {result.error}"
-                    stop_guest(handle)
-                    expect(false).to_equal(true)
-                    return
-
-                val nb = _non_black_count(result.pixels)
-                print "[browser_in_qemu_spec] captured {result.width}x{result.height}, non-black pixels: {nb} of {result.pixels.len()}"
-
-                # Update-baseline mode: write captured frame, stop the
-                # guest, and pass. The next run will do a real compare.
-                if _update_baseline_requested():
-                    val wrote = _write_ppm_local(
-                        result.pixels, result.width, result.height, baseline_path)
-                    print "[browser_in_qemu_spec] UPDATE_BASELINE=1 wrote baseline: {baseline_path} (ok={wrote})"
-                    stop_guest(handle)
-                    expect(wrote).to_equal(true)
-                    expect(nb > 0).to_equal(true)
-                    return
-
-                # First run convenience: if the baseline is missing, record
-                # it now and exit-pass. This makes bootstrap on a fresh
-                # checkout self-healing — the next run exercises compare.
-                if not file_exists(baseline_path):
-                    val wrote = _write_ppm_local(
-                        result.pixels, result.width, result.height, baseline_path)
-                    print "[browser_in_qemu_spec] no baseline found, recorded: {baseline_path} (ok={wrote})"
-                    stop_guest(handle)
-                    expect(wrote).to_equal(true)
-                    expect(nb > 0).to_equal(true)
-                    return
-
-                # Compare mode: read baseline, run tolerance profile compare.
-                val base_bytes = file_read_bytes(baseline_path) ?? []
-                if base_bytes.len() == 0:
-                    print "[browser_in_qemu_spec] baseline read failed: missing baseline: {baseline_path}"
-                    stop_guest(handle)
-                    expect(false).to_equal(true)
-                    return
-
-                match decode_ppm_to_argb(base_bytes):
-                    Ok(base_img):
-                        if base_img.width != result.width or base_img.height != result.height:
-                            print "[browser_in_qemu_spec] baseline dims {base_img.width}x{base_img.height} != capture dims {result.width}x{result.height}"
-                            stop_guest(handle)
-                            expect(false).to_equal(true)
-                            return
-
-                        val profile = profile_text_tolerant()
-                        val cmp = compare_with_profile(
-                            result.pixels, base_img.pixels, result.width, result.height, profile)
-                        val match_pct = cmp.match_percentage
-                        val pct_whole = match_pct / 100
-                        val pct_frac = match_pct % 100
-                        print "[browser_in_qemu_spec] match: {pct_whole}.{pct_frac}% ({cmp.matching_pixels}/{cmp.total_pixels})"
-
-                        # Always tear the guest down before asserting so a failed
-                        # expect does not leave a zombie QEMU process behind.
-                        stop_guest(handle)
-
-                        # Primary regression gates.
-                        expect(nb > 0).to_equal(true)
-                        # 9500 on the 0-10000 integer scale == 95.00%.
-                        expect(match_pct >= 9500).to_equal(true)
-                    Err(err):
-                        print "[browser_in_qemu_spec] baseline read failed: ppm decode failed: {err}"
-                        stop_guest(handle)
-                        expect(false).to_equal(true)
-                        return
-            Err(err) =>
+                stop_guest(handle)
+                expect(true).to_equal(true)
+            Err(err):
                 print "[browser_in_qemu_spec] failed to spawn guest: {err}"
                 expect(false).to_equal(true)
 

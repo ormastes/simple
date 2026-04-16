@@ -10,7 +10,7 @@ use std.js.types.js_types.JsProperty
 use std.js.types.ast_types.Expression
 use std.js.types.ast_types.Statement
 use std.js.types.ast_types.SwitchCase
-use std.js.engine.runtime.{dispatch_native}
+use std.js.engine.runtime.{dispatch_native, NATIVE_FETCH, NATIVE_PROMISE_CATCH, NATIVE_PROMISE_FINALLY, NATIVE_PROMISE_REJECT, NATIVE_PROMISE_RESOLVE, NATIVE_PROMISE_THEN, NATIVE_RESPONSE_TEXT}
 use std.js.builtins.array.{array_map, array_filter, array_reduce, array_forEach, array_find, array_findIndex, array_some, array_every, array_sort_with, array_isArray, array_from_values}
 
 extern fn rt_file_read_text(path: text) -> text
@@ -46,6 +46,31 @@ fn _simple_fetch_cookie_header(obj_id: i64, store: ObjectStore) -> text:
         JsValue.String(v): v
         _:
             ""
+
+fn _simple_fetch_state(obj_id: i64, store: ObjectStore) -> text:
+    match store.get_property(obj_id, "__simple_state"):
+        JsValue.String(v): v
+        _:
+            ""
+
+fn _simple_fetch_value(obj_id: i64, store: ObjectStore) -> JsValue:
+    match store.get_property(obj_id, "__simple_value"):
+        JsValue.Undefined: JsValue.Undefined
+        JsValue.Null: JsValue.Null
+        JsValue.Boolean(v): JsValue.Boolean(v: v)
+        JsValue.Number(v): JsValue.Number(v: v)
+        JsValue.String(v): JsValue.String(v: v)
+        JsValue.Object(id): JsValue.Object(id: id)
+        JsValue.Array(id): JsValue.Array(id: id)
+        JsValue.Function(id): JsValue.Function(id: id)
+        JsValue.Symbol(id): JsValue.Symbol(id: id)
+
+fn _simple_fetch_handlers(obj_id: i64, store: ObjectStore) -> i64:
+    match store.get_property(obj_id, "__simple_handlers"):
+        JsValue.Object(id): id
+        JsValue.Array(id): id
+        _:
+            -1
 
 fn _scheme(url: text) -> text:
     match url.index_of("://"):
@@ -159,6 +184,18 @@ fn _simple_fetch_sync(store: ObjectStore, obj_id: i64, args: [JsValue]) -> JsVal
     store.set_property(response_id, "error", JsValue.String(v: error_text))
     JsValue.Object(id: response_id)
 
+class PendingAsyncRequest:
+    request_obj_id: i64
+
+    static fn create(request_obj_id: i64) -> PendingAsyncRequest:
+        PendingAsyncRequest(request_obj_id: request_obj_id)
+
+class PendingPromiseTask:
+    task_obj_id: i64
+
+    static fn create(task_obj_id: i64) -> PendingPromiseTask:
+        PendingPromiseTask(task_obj_id: task_obj_id)
+
 # ── Interpreter ──────────────────────────────────────────────────────────
 
 class JsInterpreter:
@@ -177,6 +214,13 @@ class JsInterpreter:
     native_id_map: [Pair<i64, i64>]
     class_proto_fns: [i64]
     class_proto_ids: [i64]
+    promise_ctor_id: i64
+    promise_proto_id: i64
+    response_proto_id: i64
+    next_async_request_seq: i64
+    pending_async_requests: [PendingAsyncRequest]
+    pending_async_request_registry: [PendingAsyncRequest]
+    pending_promise_tasks: [PendingPromiseTask]
 
     static fn new(logger: Logger) -> JsInterpreter:
         var env_stack = EnvironmentStack.new()
@@ -197,6 +241,13 @@ class JsInterpreter:
             native_id_map: [],
             class_proto_fns: [],
             class_proto_ids: [],
+            promise_ctor_id: -1,
+            promise_proto_id: -1,
+            response_proto_id: -1,
+            next_async_request_seq: 1,
+            pending_async_requests: [],
+            pending_async_request_registry: [],
+            pending_promise_tasks: [],
         )
 
     # Register a native function placeholder and return its index
@@ -276,6 +327,200 @@ class JsInterpreter:
         self.env_stack.define_var(self.global_env, "RangeError", JsValue.Function(id: error_fn_id))
         self.env_stack.define_var(self.global_env, "ReferenceError", JsValue.Function(id: error_fn_id))
         self.env_stack.define_var(self.global_env, "SyntaxError", JsValue.Function(id: error_fn_id))
+
+    me take_pending_async_request() -> i64?:
+        if self.pending_async_requests.len() == 0:
+            return nil
+        val req = self.pending_async_requests[0]
+        var rest: [PendingAsyncRequest] = []
+        var i = 1
+        while i < self.pending_async_requests.len():
+            rest = rest + [self.pending_async_requests[i]]
+            i = i + 1
+        self.pending_async_requests = rest
+        Some(req.request_obj_id)
+
+    me drain_pending_microtasks() -> bool:
+        var ran = false
+        while self.pending_promise_tasks.len() > 0:
+            val task = self.pending_promise_tasks[0]
+            var rest: [PendingPromiseTask] = []
+            var i = 1
+            while i < self.pending_promise_tasks.len():
+                rest = rest + [self.pending_promise_tasks[i]]
+                i = i + 1
+            self.pending_promise_tasks = rest
+            self._run_promise_task(task.task_obj_id)
+            ran = true
+        ran
+
+    me resolve_async_fetch_response(
+        request_id: text,
+        url: text,
+        status: i32,
+        headers: text,
+        body: text,
+        error: text
+    ) -> Result<bool, text>:
+        var idx = 0
+        while idx < self.pending_async_request_registry.len():
+            val req = self.pending_async_request_registry[idx]
+            val req_id_val = self.object_store.get_property(req.request_obj_id, "request_id")
+            if val JsValue.String(req_id) = req_id_val:
+                if req_id == request_id:
+                    var rest: [PendingAsyncRequest] = []
+                    var i = 0
+                    while i < self.pending_async_request_registry.len():
+                        if i != idx:
+                            rest = rest + [self.pending_async_request_registry[i]]
+                        i = i + 1
+                    self.pending_async_request_registry = rest
+                    val promise_id_val = self.object_store.get_property(req.request_obj_id, "promise_id")
+                    match promise_id_val:
+                        JsValue.Number(promise_id_num):
+                            val promise_id = f64_to_i64(promise_id_num)
+                            if error != "":
+                                self._settle_promise(promise_id, JsValue.String(v: error), true)
+                                return Ok(true)
+                            val response_id = self._create_response_object(url, status, headers, body, error)
+                            self._settle_promise(promise_id, JsValue.Object(id: response_id), false)
+                            return Ok(true)
+                        _:
+                            return Err("missing promise id for async fetch")
+            idx = idx + 1
+        Err("unknown async fetch request: {request_id}")
+
+    fn _create_pending_promise_object() -> i64:
+        val promise_id = self.object_store.create_object()
+        self.object_store.set_property(promise_id, "__proto__", JsValue.Object(id: self.promise_proto_id))
+        self.object_store.set_property(promise_id, "__simple_promise_host", JsValue.Boolean(v: true))
+        self.object_store.set_property(promise_id, "__simple_state", JsValue.String(v: "pending"))
+        self.object_store.set_property(promise_id, "__simple_value", JsValue.Undefined)
+        val handlers_id = self.object_store.create_object()
+        self.object_store.set_property(handlers_id, "length", JsValue.Number(v: 0.0))
+        self.object_store.set_property(promise_id, "__simple_handlers", JsValue.Array(id: handlers_id))
+        promise_id
+
+    fn _create_settled_promise_object(value: JsValue, rejected: bool) -> i64:
+        val promise_id = self._create_pending_promise_object()
+        if rejected:
+            self.object_store.set_property(promise_id, "__simple_state", JsValue.String(v: "rejected"))
+        else:
+            self.object_store.set_property(promise_id, "__simple_state", JsValue.String(v: "fulfilled"))
+        self.object_store.set_property(promise_id, "__simple_value", value)
+        promise_id
+
+    fn _create_response_object(url: text, status: i32, headers: text, body: text, error: text) -> i64:
+        val response_id = self.object_store.create_object()
+        self.object_store.set_property(response_id, "__simple_response_host", JsValue.Boolean(v: true))
+        self.object_store.set_property(response_id, "url", JsValue.String(v: url))
+        self.object_store.set_property(response_id, "status", JsValue.Number(v: status.to_f64()))
+        self.object_store.set_property(response_id, "ok", JsValue.Boolean(v: status >= 200 and status < 300 and error == ""))
+        self.object_store.set_property(response_id, "headersText", JsValue.String(v: headers))
+        self.object_store.set_property(response_id, "body", JsValue.String(v: body))
+        self.object_store.set_property(response_id, "error", JsValue.String(v: error))
+        self._define_method_on(response_id, "text", NATIVE_RESPONSE_TEXT)
+        response_id
+
+    fn _create_promise_handler(on_fulfilled: i64, on_rejected: i64, next_promise_id: i64, kind: text) -> i64:
+        val handler_id = self.object_store.create_object()
+        self.object_store.set_property(handler_id, "on_fulfilled", JsValue.Number(v: on_fulfilled.to_f64()))
+        self.object_store.set_property(handler_id, "on_rejected", JsValue.Number(v: on_rejected.to_f64()))
+        self.object_store.set_property(handler_id, "next_promise", JsValue.Number(v: next_promise_id.to_f64()))
+        self.object_store.set_property(handler_id, "kind", JsValue.String(v: kind))
+        handler_id
+
+    fn _append_handler(promise_id: i64, handler_id: i64):
+        val handlers_id = _simple_fetch_handlers(promise_id, self.object_store)
+        if handlers_id >= 0:
+            val next_index = self.object_store.array_length(handlers_id)
+            self.object_store.set_property(handlers_id, "{next_index}", JsValue.Object(id: handler_id))
+            self.object_store.set_property(handlers_id, "length", JsValue.Number(v: (next_index + 1).to_f64()))
+
+    fn _enqueue_promise_task(promise_id: i64, handler_id: i64):
+        val task_id = self.object_store.create_object()
+        self.object_store.set_property(task_id, "promise_id", JsValue.Number(v: promise_id.to_f64()))
+        self.object_store.set_property(task_id, "handler_id", JsValue.Number(v: handler_id.to_f64()))
+        self.pending_promise_tasks = self.pending_promise_tasks + [PendingPromiseTask.create(task_id)]
+
+    fn _settle_promise(promise_id: i64, value: JsValue, rejected: bool):
+        self.object_store.set_property(
+            promise_id,
+            "__simple_state",
+            JsValue.String(v: if rejected: "rejected" else: "fulfilled")
+        )
+        self.object_store.set_property(promise_id, "__simple_value", value)
+        val handlers_id = _simple_fetch_handlers(promise_id, self.object_store)
+        if handlers_id >= 0:
+            val count = self.object_store.array_length(handlers_id)
+            var i = 0
+            while i < count:
+                match self.object_store.get_by_index(handlers_id, i):
+                    JsValue.Object(handler_id):
+                        self._enqueue_promise_task(promise_id, handler_id)
+                    _:
+                        pass_dn
+                i = i + 1
+
+    fn _run_promise_task(task_id: i64):
+        val promise_id_val = self.object_store.get_property(task_id, "promise_id")
+        val handler_id_val = self.object_store.get_property(task_id, "handler_id")
+        match promise_id_val:
+            JsValue.Number(promise_id_num):
+                match handler_id_val:
+                    JsValue.Number(handler_id_num):
+                        val promise_id = f64_to_i64(promise_id_num)
+                        val handler_id = f64_to_i64(handler_id_num)
+                        val state = _simple_fetch_state(promise_id, self.object_store)
+                        val settled_value = _simple_fetch_value(promise_id, self.object_store)
+                        val handler_kind = match self.object_store.get_property(handler_id, "kind"):
+                            JsValue.String(v): v
+                            _: "then"
+                        val on_fulfilled = match self.object_store.get_property(handler_id, "on_fulfilled"):
+                            JsValue.Number(v): f64_to_i64(v)
+                            _: -1
+                        val on_rejected = match self.object_store.get_property(handler_id, "on_rejected"):
+                            JsValue.Number(v): f64_to_i64(v)
+                            _: -1
+                        val next_promise_id = match self.object_store.get_property(handler_id, "next_promise"):
+                            JsValue.Number(v): f64_to_i64(v)
+                            _: -1
+
+                        var callback_id = -1
+                        var propagate_rejection = false
+                        if state == "fulfilled":
+                            callback_id = on_fulfilled
+                        else:
+                            callback_id = on_rejected
+                            propagate_rejection = true
+
+                        var next_value = settled_value
+                        if handler_kind == "finally":
+                            callback_id = if state == "fulfilled": on_fulfilled else: on_rejected
+
+                        if callback_id >= 0:
+                            val result = self._invoke_function(callback_id, [settled_value], self.global_env)
+                            match result:
+                                Ok(callback_result):
+                                    if handler_kind == "finally":
+                                        next_value = settled_value
+                                        propagate_rejection = state == "rejected"
+                                    else:
+                                        next_value = callback_result
+                                        propagate_rejection = state == "rejected" and on_rejected < 0
+                                Err(e):
+                                    next_value = JsValue.String(v: e.message)
+                                    propagate_rejection = true
+                        else:
+                            if handler_kind == "finally":
+                                next_value = settled_value
+
+                        if next_promise_id >= 0:
+                            self._settle_promise(next_promise_id, next_value, propagate_rejection)
+                    _:
+                        pass_dn
+            _:
+                pass_dn
 
     # Find prototype id for a class constructor
     fn _find_class_proto(fn_id: i64) -> i64:
@@ -1354,17 +1599,6 @@ class JsInterpreter:
                         return Ok(JsValue.Array(id: new_id))
                 return Ok(JsValue.Array(id: self.object_store.create_object()))
 
-        if is_member and member_method == "fetchSync":
-            val host_val = self.eval_expression(member_obj_expr, env)?
-            val host_id = _get_obj_id(host_val)
-            if host_id >= 0 and _simple_fetch_marker(host_id, self.object_store):
-                var arg_vals: [JsValue] = []
-                var fi = 0
-                while fi < args.len():
-                    arg_vals.push(self.eval_expression(args.get(fi), env)?)
-                    fi = fi + 1
-                return Ok(_simple_fetch_sync(self.object_store, host_id, arg_vals))
-
         val callee_val = self.eval_expression(callee, env)?
 
         # Evaluate arguments
@@ -1385,7 +1619,10 @@ class JsInterpreter:
                     while ni < self.native_id_map.len():
                         val mapping = self.native_id_map.get(ni)
                         if mapping.first == fn_id:
-                            return Ok(dispatch_native(mapping.second, arg_vals, self.logger))
+                            var this_val = JsValue.Undefined
+                            if is_member:
+                                this_val = self.eval_expression(member_obj_expr, env)?
+                            return Ok(self._dispatch_native_with_receiver(mapping.second, this_val, arg_vals, env))
                         ni = ni + 1
                     val js_fn = self.functions.get(fn_id)
                     # Create function scope from closure env
@@ -2007,6 +2244,164 @@ class JsInterpreter:
 
         self.logger.warn("Unknown array method: {method}")
         Ok(JsValue.Undefined)
+
+    me _dispatch_native_with_receiver(native_id: i64, this_val: JsValue, arg_vals: [JsValue], env: i64) -> JsValue:
+        if native_id == NATIVE_FETCH:
+            return self._native_fetch(this_val, arg_vals, env)
+        if native_id == NATIVE_PROMISE_THEN:
+            return self._native_promise_then(this_val, arg_vals)
+        if native_id == NATIVE_PROMISE_CATCH:
+            return self._native_promise_catch(this_val, arg_vals)
+        if native_id == NATIVE_PROMISE_FINALLY:
+            return self._native_promise_finally(this_val, arg_vals)
+        if native_id == NATIVE_PROMISE_RESOLVE:
+            return self._native_promise_resolve(arg_vals)
+        if native_id == NATIVE_PROMISE_REJECT:
+            return self._native_promise_reject(arg_vals)
+        if native_id == NATIVE_RESPONSE_TEXT:
+            return self._native_response_text(this_val)
+        dispatch_native(native_id, arg_vals, self.logger)
+
+    fn _native_fetch(this_val: JsValue, arg_vals: [JsValue], env: i64) -> JsValue:
+        var host_obj_id = _get_obj_id(this_val)
+        if host_obj_id < 0:
+            match self.env_stack.get_var(self.global_env, "window"):
+                Some(window_val):
+                    host_obj_id = _get_obj_id(window_val)
+                _:
+                    pass_dn
+        if host_obj_id < 0:
+            return JsValue.Undefined
+        if not _simple_fetch_marker(host_obj_id, self.object_store):
+            return JsValue.Undefined
+
+        var request_url = _simple_fetch_base_url(host_obj_id, self.object_store)
+        if arg_vals.len() > 0:
+            request_url = _resolve_fetch_url(request_url, js_to_string(arg_vals.get(0)))
+
+        var method = "GET"
+        var headers_text = ""
+        var body = ""
+        var content_type = ""
+        if arg_vals.len() > 1:
+            match arg_vals.get(1):
+                JsValue.Object(opts_id):
+                    match self.object_store.get_property(opts_id, "method"):
+                        JsValue.String(v):
+                            if v.trim() != "":
+                                method = v.trim().to_upper()
+                        JsValue.Number(v):
+                            method = "{v}".to_upper()
+                        _: pass_dn
+                    match self.object_store.get_property(opts_id, "headers"):
+                        JsValue.String(v): headers_text = v
+                        _: pass_dn
+                    match self.object_store.get_property(opts_id, "body"):
+                        JsValue.String(v): body = v
+                        JsValue.Number(v): body = "{v}"
+                        JsValue.Boolean(v): body = if v: "true" else: "false"
+                        _: pass_dn
+                    match self.object_store.get_property(opts_id, "contentType"):
+                        JsValue.String(v): content_type = v
+                        _: pass_dn
+                JsValue.String(v):
+                    headers_text = v
+                _:
+                    pass_dn
+
+        val cookie_header = _simple_fetch_cookie_header(host_obj_id, self.object_store)
+        if cookie_header != "":
+            if headers_text != "":
+                headers_text = headers_text + "\n"
+            headers_text = headers_text + "Cookie: " + cookie_header
+        if content_type != "":
+            if headers_text != "":
+                headers_text = headers_text + "\n"
+            headers_text = headers_text + "Content-Type: " + content_type
+
+        val promise_id = self._create_pending_promise_object()
+        val request_obj_id = self.object_store.create_object()
+        val request_id = "fetch-{self.next_async_request_seq}"
+        self.next_async_request_seq = self.next_async_request_seq + 1
+        self.object_store.set_property(request_obj_id, "request_id", JsValue.String(v: request_id))
+        self.object_store.set_property(request_obj_id, "kind", JsValue.String(v: "fetch"))
+        self.object_store.set_property(request_obj_id, "url", JsValue.String(v: request_url))
+        self.object_store.set_property(request_obj_id, "method", JsValue.String(v: if method.trim() != "": method else: "GET"))
+        self.object_store.set_property(request_obj_id, "headers", JsValue.String(v: headers_text))
+        self.object_store.set_property(request_obj_id, "body", JsValue.String(v: body))
+        self.object_store.set_property(request_obj_id, "content_type", JsValue.String(v: content_type))
+        self.object_store.set_property(request_obj_id, "promise_id", JsValue.Number(v: promise_id.to_f64()))
+        val request_record = PendingAsyncRequest.create(request_obj_id)
+        self.pending_async_requests = self.pending_async_requests + [request_record]
+        self.pending_async_request_registry = self.pending_async_request_registry + [request_record]
+        JsValue.Object(id: promise_id)
+
+    fn _native_promise_then(this_val: JsValue, arg_vals: [JsValue]) -> JsValue:
+        val promise_id = _get_obj_id(this_val)
+        if promise_id < 0:
+            return JsValue.Undefined
+        var on_fulfilled = -1
+        var on_rejected = -1
+        if arg_vals.len() > 0:
+            on_fulfilled = _get_fn_id(arg_vals.get(0))
+        if arg_vals.len() > 1:
+            on_rejected = _get_fn_id(arg_vals.get(1))
+        val next_promise_id = self._create_pending_promise_object()
+        val handler_id = self._create_promise_handler(on_fulfilled, on_rejected, next_promise_id, "then")
+        self._append_handler(promise_id, handler_id)
+        match _simple_fetch_state(promise_id, self.object_store):
+            "pending": JsValue.Object(id: next_promise_id)
+            _:
+                self._enqueue_promise_task(promise_id, handler_id)
+                JsValue.Object(id: next_promise_id)
+
+    fn _native_promise_catch(this_val: JsValue, arg_vals: [JsValue]) -> JsValue:
+        val promise_id = _get_obj_id(this_val)
+        if promise_id < 0:
+            return JsValue.Undefined
+        var on_rejected = -1
+        if arg_vals.len() > 0:
+            on_rejected = _get_fn_id(arg_vals.get(0))
+        val next_promise_id = self._create_pending_promise_object()
+        val handler_id = self._create_promise_handler(-1, on_rejected, next_promise_id, "then")
+        self._append_handler(promise_id, handler_id)
+        match _simple_fetch_state(promise_id, self.object_store):
+            "pending": JsValue.Object(id: next_promise_id)
+            _:
+                self._enqueue_promise_task(promise_id, handler_id)
+                JsValue.Object(id: next_promise_id)
+
+    fn _native_promise_finally(this_val: JsValue, arg_vals: [JsValue]) -> JsValue:
+        val promise_id = _get_obj_id(this_val)
+        if promise_id < 0:
+            return JsValue.Undefined
+        var on_finally = -1
+        if arg_vals.len() > 0:
+            on_finally = _get_fn_id(arg_vals.get(0))
+        val next_promise_id = self._create_pending_promise_object()
+        val handler_id = self._create_promise_handler(on_finally, on_finally, next_promise_id, "finally")
+        self._append_handler(promise_id, handler_id)
+        match _simple_fetch_state(promise_id, self.object_store):
+            "pending": JsValue.Object(id: next_promise_id)
+            _:
+                self._enqueue_promise_task(promise_id, handler_id)
+                JsValue.Object(id: next_promise_id)
+
+    fn _native_promise_resolve(arg_vals: [JsValue]) -> JsValue:
+        val value = if arg_vals.len() > 0: arg_vals.get(0) else: JsValue.Undefined
+        JsValue.Object(id: self._create_settled_promise_object(value, false))
+
+    fn _native_promise_reject(arg_vals: [JsValue]) -> JsValue:
+        val value = if arg_vals.len() > 0: arg_vals.get(0) else: JsValue.Undefined
+        JsValue.Object(id: self._create_settled_promise_object(value, true))
+
+    fn _native_response_text(this_val: JsValue) -> JsValue:
+        val response_id = _get_obj_id(this_val)
+        if response_id < 0:
+            return JsValue.Undefined
+        match self.object_store.get_property(response_id, "body"):
+            JsValue.String(v): JsValue.String(v: v)
+            _: JsValue.Undefined
 
     # ── String method dispatch ───────────────────────────────────────────
     me _dispatch_string_method(str_val: text, method: text, args: [Expression], env: i64) -> BrowserResult<JsValue>:

@@ -1,0 +1,97 @@
+use std.spec.*
+use std.common.web.browser_session.{BrowserSession, BrowserResponse}
+use std.js.types.js_types.{JsValue}
+
+fn _display_js(v: JsValue) -> text:
+    match v:
+        JsValue.Undefined: "undefined"
+        JsValue.Null: "null"
+        JsValue.Boolean(b): if b: "true" else: "false"
+        JsValue.Number(n):
+            var s = "{n}"
+            if s.ends_with(".0"):
+                s = s.slice(0, s.len() - 2)
+            s
+        JsValue.String(s): s
+        JsValue.Object(id): "[object Object]"
+        JsValue.Array(id): "[object Array]"
+        JsValue.Function(id): "[Function]"
+        JsValue.Symbol(id): "Symbol()"
+
+describe "BrowserSession async fetch":
+
+    it "installs promise globals":
+        var session = BrowserSession.new()
+        session.open_html("https://example.com/app", "<html><body>Ready</body></html>")
+        val result = session.eval_script("typeof Promise.resolve + ':' + typeof Promise.prototype.then")
+        match result:
+            Ok(value) =>
+                expect(_display_js(value)).to_equal("function:function")
+            Err(e) =>
+                expect(false).to_equal(true)
+
+    it "queues a pending fetch and settles it later":
+        var session = BrowserSession.new()
+        session.open_html(
+            "https://example.com/app",
+            "<html><body><script>var out = ''; window.fetch('/data.txt').then(function(r) { return r.text(); }).then(function(t) { out = t; document.body.textContent = t; });</script></body></html>"
+        )
+
+        match session.take_pending_request():
+            Some(request) =>
+                expect(request.kind).to_equal("fetch")
+                expect(request.url).to_equal("https://example.com/data.txt")
+                val commit_result = session.commit_network_response(BrowserResponse.create(
+                    request_id: request.id,
+                    kind: "fetch",
+                    url: request.url,
+                    status: 200,
+                    headers: "Set-Cookie: token=abc; Path=/\n",
+                    body: "alpha",
+                    error: ""
+                ))
+                match commit_result:
+                    Ok(_) =>
+                        val out_result = session.eval_script("out + ':' + document.body.textContent + ':' + document.cookie")
+                        match out_result:
+                            Ok(value) =>
+                                expect(_display_js(value)).to_contain("alpha:alpha")
+                                expect(_display_js(value)).to_contain("token=abc")
+                            Err(e) =>
+                                expect(false).to_equal(true)
+                    Err(e) =>
+                        expect(false).to_equal(true)
+            nil:
+                expect(false).to_equal(true)
+
+    it "rejects promise callbacks on transport error":
+        var session = BrowserSession.new()
+        session.open_html(
+            "https://example.com/app",
+            "<html><body><script>var out = 'start'; window.fetch('/data.txt').catch(function(err) { out = err; });</script></body></html>"
+        )
+
+        match session.take_pending_request():
+            Some(request) =>
+                val commit_result = session.commit_network_response(BrowserResponse.create(
+                    request_id: request.id,
+                    kind: "fetch",
+                    url: request.url,
+                    status: 0,
+                    headers: "",
+                    body: "",
+                    error: "network down"
+                ))
+                match commit_result:
+                    Err(e) =>
+                        expect(e).to_equal("network down")
+                        val result = session.eval_script("out")
+                        match result:
+                            Ok(value) =>
+                                expect(_display_js(value)).to_equal("network down")
+                            Err(err) =>
+                                expect(false).to_equal(true)
+                    Ok(_) =>
+                        expect(false).to_equal(true)
+            nil:
+                expect(false).to_equal(true)

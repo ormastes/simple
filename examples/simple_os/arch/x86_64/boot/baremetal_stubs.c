@@ -1749,23 +1749,27 @@ static int8_t _fat32_write_text_impl(const char *name, int64_t name_len, const c
     const uint8_t *content_bytes = (const uint8_t *)"";
     uint32_t write_len = 0;
     int path_copy_len = _fat32_copy_path_arg(name, name_len, path_buf, sizeof(path_buf));
-    if (path_copy_len <= 0)
+    if (path_copy_len <= 0) {
+        serial_puts("[fat32-c] write_text path-copy failed len=");
+        serial_put_dec(name_len);
+        serial_puts("\r\n");
         return 0;
+    }
     if (content && content_len > 0) {
         content_bytes = (const uint8_t *)content;
         write_len = (uint32_t)content_len;
     }
-    serial_puts("[fat32-c] rt_file_write_text path=");
+    serial_puts("[fat32-c] write_text path=");
     serial_puts(path_buf);
-    serial_puts(" path_len=");
-    serial_put_dec((int64_t)path_copy_len);
-    serial_puts(" content_len=");
-    serial_put_dec((int64_t)write_len);
+    serial_puts(" bytes=");
+    serial_put_dec(write_len);
     serial_puts("\r\n");
     int rc = fat32_write_file(path_buf, content_bytes, write_len);
-    serial_puts("[fat32-c] rt_file_write_text rc=");
-    serial_put_dec((int64_t)rc);
-    serial_puts("\r\n");
+    if (rc != 0) {
+        serial_puts("[fat32-c] write_text failed rc=");
+        serial_put_dec(rc);
+        serial_puts("\r\n");
+    }
     return rc == 0 ? 1 : 0;
 }
 
@@ -2117,7 +2121,10 @@ int fat32_write_file(const char *name, const uint8_t *buf, uint32_t size) {
     }
 
     const char *root_name = _fat32_root_name(name);
-    if (!root_name || !*root_name) return -1;
+    if (!root_name || !*root_name) {
+        serial_puts("[fat32-c] write_file empty root name\r\n");
+        return -1;
+    }
     char name83[11];
     _fat32_make_8_3_name(root_name, name83);
 
@@ -2125,8 +2132,12 @@ int fat32_write_file(const char *name, const uint8_t *buf, uint32_t size) {
     uint32_t entry_index = 0;
     uint32_t old_cluster = 0;
     int found = 0;
-    if (_fat32_find_root_dir_slot(name83, &dir_cluster, &entry_index, &found, &old_cluster) != 0)
+    if (_fat32_find_root_dir_slot(name83, &dir_cluster, &entry_index, &found, &old_cluster) != 0) {
+        serial_puts("[fat32-c] write_file root-dir slot failed name=");
+        serial_puts(root_name);
+        serial_puts("\r\n");
         return -1;
+    }
 
     uint32_t cluster_bytes = _fat32.sectors_per_cluster * 512;
     uint32_t clusters_needed = size == 0 ? 0 : (size + cluster_bytes - 1) / cluster_bytes;
@@ -2135,19 +2146,31 @@ int fat32_write_file(const char *name, const uint8_t *buf, uint32_t size) {
     uint32_t remaining = size;
     uint32_t written = 0;
     uint8_t *cluster_buf = (uint8_t *)nvme_alloc_aligned(cluster_bytes, 512);
-    if (!cluster_buf) return -1;
+    if (!cluster_buf) {
+        serial_puts("[fat32-c] write_file cluster_buf alloc failed\r\n");
+        return -1;
+    }
 
     for (uint32_t i = 0; i < clusters_needed; i++) {
         uint32_t cluster = _fat32_find_free_cluster();
         if (cluster < 2) {
+            serial_puts("[fat32-c] write_file no free cluster\r\n");
             if (first_cluster >= 2) _fat32_free_chain(first_cluster);
             return -1;
         }
         if (_fat32_write_fat_entry(cluster, 0x0FFFFFFF) != 0) {
+            serial_puts("[fat32-c] write_file mark-eoc failed cluster=");
+            serial_put_dec(cluster);
+            serial_puts("\r\n");
             if (first_cluster >= 2) _fat32_free_chain(first_cluster);
             return -1;
         }
         if (prev_cluster >= 2 && _fat32_write_fat_entry(prev_cluster, cluster) != 0) {
+            serial_puts("[fat32-c] write_file link cluster failed prev=");
+            serial_put_dec(prev_cluster);
+            serial_puts(" next=");
+            serial_put_dec(cluster);
+            serial_puts("\r\n");
             _fat32_free_chain(first_cluster);
             return -1;
         }
@@ -2160,6 +2183,9 @@ int fat32_write_file(const char *name, const uint8_t *buf, uint32_t size) {
         if (chunk > 0)
             __builtin_memcpy(cluster_buf, buf + written, chunk);
         if (_fat32_write_cluster(cluster, cluster_buf) != 0) {
+            serial_puts("[fat32-c] write_file cluster write failed cluster=");
+            serial_put_dec(cluster);
+            serial_puts("\r\n");
             _fat32_free_chain(first_cluster);
             return -1;
         }
@@ -2169,16 +2195,25 @@ int fat32_write_file(const char *name, const uint8_t *buf, uint32_t size) {
 
     uint8_t *dir_buf = (uint8_t *)nvme_alloc_aligned(cluster_bytes, 512);
     if (!dir_buf) {
+        serial_puts("[fat32-c] write_file dir_buf alloc failed\r\n");
         if (first_cluster >= 2) _fat32_free_chain(first_cluster);
         return -1;
     }
     if (_fat32_read_cluster(dir_cluster, dir_buf) != 0) {
+        serial_puts("[fat32-c] write_file dir read failed cluster=");
+        serial_put_dec(dir_cluster);
+        serial_puts("\r\n");
         if (first_cluster >= 2) _fat32_free_chain(first_cluster);
         return -1;
     }
 
     _fat32_write_dir_entry(dir_buf + entry_index * 32, name83, first_cluster, size);
     if (_fat32_write_cluster(dir_cluster, dir_buf) != 0) {
+        serial_puts("[fat32-c] write_file dir write failed cluster=");
+        serial_put_dec(dir_cluster);
+        serial_puts(" entry=");
+        serial_put_dec(entry_index);
+        serial_puts("\r\n");
         if (first_cluster >= 2) _fat32_free_chain(first_cluster);
         return -1;
     }
@@ -6223,6 +6258,35 @@ RuntimeValue rt_eprint_str(RuntimeValue v) { rt_print(v); return NIL_VALUE; }
 RuntimeValue rt_eprint_value(RuntimeValue v) { rt_print(v); return NIL_VALUE; }
 RuntimeValue rt_eprintln_str(RuntimeValue v) { rt_print(v); serial_puts("\r\n"); return NIL_VALUE; }
 RuntimeValue rt_eprintln_value(RuntimeValue v) { rt_print(v); serial_puts("\r\n"); return NIL_VALUE; }
+int8_t rt_log_target_device_write_bytes(const char *ptr, int64_t len) {
+    if (!ptr || len <= 0) return 0;
+    for (int64_t i = 0; i < len; i++) serial_putchar(ptr[i]);
+    serial_puts("\r\n");
+    return 1;
+}
+int8_t rt_log_target_semihost_write_bytes(const char *ptr, int64_t len) {
+    (void)ptr;
+    (void)len;
+    return 0;
+}
+static int64_t _simpleos_log_level = 2;
+static int64_t _simpleos_log_targets = 0;
+int8_t rt_simpleos_log_init(int64_t level, int64_t targets) {
+    _simpleos_log_level = level;
+    _simpleos_log_targets = targets;
+    return 1;
+}
+int8_t rt_simpleos_log_is_enabled(int64_t level) {
+    return level >= _simpleos_log_level ? 1 : 0;
+}
+int8_t rt_simpleos_log_emit(int64_t level, const char *ptr, int64_t len) {
+    (void)level;
+    if (!ptr || len <= 0) return 0;
+    if ((_simpleos_log_targets & 1) == 0) return 0;
+    for (int64_t i = 0; i < len; i++) serial_putchar(ptr[i]);
+    serial_puts("\r\n");
+    return 1;
+}
 RuntimeValue rt_cstring_to_text(RuntimeValue p) { (void)p; return NIL_VALUE; }
 RuntimeValue rt_profiler_is_active(void) { return ENCODE_INT(0); }
 

@@ -7,11 +7,10 @@
 # The session reads/writes via socket FDs using the POSIX socket API.
 
 use os.posix.socket_compat.{posix_send_bytes, posix_recv_bytes, posix_close_socket}
-use os.crypto.ed25519.{ed25519_sign}
-use os.crypto.random.{random_bytes}
+use os.crypto.ed25519.{ed25519_keypair_from_seed}
 use os.apps.sshd.ssh_packet.{SshPacket, SshPacketResult, SshTextResult, SshStringResult, ssh_packet_read, ssh_packet_build, ssh_put_u32, ssh_put_string, ssh_put_text, ssh_put_byte, ssh_put_bool, ssh_get_u32, ssh_get_string, ssh_get_text}
-use os.apps.sshd.ssh_transport.{SshKexInit, SshAlgorithms, SSH_VERSION_STRING, SSH_MSG_KEXINIT, SSH_MSG_NEWKEYS, SSH_MSG_DISCONNECT, SSH_MSG_IGNORE, SSH_MSG_SERVICE_REQUEST, SSH_MSG_SERVICE_ACCEPT, SSH_DISCONNECT_PROTOCOL_ERROR, ssh_build_version_string, ssh_parse_version_string, ssh_build_kexinit, ssh_parse_kexinit, ssh_negotiate_algorithms, ssh_build_service_accept, ssh_parse_service_request, ssh_build_disconnect}
-use os.apps.sshd.ssh_kex.{SshKexState, SshSessionKeys, SSH_MSG_KEX_ECDH_INIT, SSH_MSG_KEX_ECDH_REPLY, ssh_kex_generate_keypair, ssh_kex_compute_shared, ssh_kex_compute_exchange_hash, ssh_derive_keys, ssh_build_kex_ecdh_reply, ssh_parse_kex_ecdh_init, ssh_build_newkeys}
+use os.apps.sshd.ssh_transport.{SshKexInit, SshAlgorithms, SSH_VERSION_STRING, SSH_MSG_KEXINIT, SSH_MSG_NEWKEYS, SSH_MSG_DISCONNECT, SSH_MSG_IGNORE, SSH_MSG_SERVICE_REQUEST, SSH_MSG_SERVICE_ACCEPT, SSH_DISCONNECT_PROTOCOL_ERROR, ssh_build_version_string, ssh_parse_version_string, ssh_parse_kexinit, ssh_negotiate_algorithms, ssh_build_service_accept, ssh_parse_service_request, ssh_build_disconnect}
+use os.apps.sshd.ssh_kex.{HostKeySet, SshKexState, SshSessionKeys, SSH_MSG_KEX_ECDH_INIT, SSH_MSG_KEX_ECDH_REPLY, ssh_kex_generate_keypair, ssh_kex_compute_shared, ssh_kex_compute_exchange_hash, ssh_derive_keys, ssh_build_kex_ecdh_reply, ssh_parse_kex_ecdh_init, ssh_build_newkeys, ssh_build_kexinit_for_host_keys, ssh_sign_exchange_hash, ssh_build_ed25519_host_key_blob}
 use os.apps.sshd.ssh_cipher.{SshCipher}
 use os.apps.sshd.ssh_auth.{SshUserDb, SshAuthRequest, SSH_MSG_USERAUTH_REQUEST, SSH_MSG_USERAUTH_PK_OK, MAX_AUTH_ATTEMPTS, ssh_parse_auth_request, ssh_build_auth_success, ssh_build_auth_failure, ssh_build_auth_banner, ssh_build_userauth_pk_ok}
 use os.apps.sshd.ssh_channel.{ChannelTable, SshChannel, ChannelType, ChannelState, SSH_MSG_CHANNEL_OPEN, SSH_MSG_CHANNEL_DATA, SSH_MSG_CHANNEL_WINDOW_ADJUST, SSH_MSG_CHANNEL_EOF, SSH_MSG_CHANNEL_CLOSE, SSH_MSG_CHANNEL_REQUEST, DEFAULT_WINDOW_SIZE, DEFAULT_MAX_PACKET, ssh_parse_channel_open, ssh_parse_channel_data, ssh_parse_channel_request, ssh_parse_window_adjust, ssh_parse_channel_eof, ssh_parse_channel_close, ssh_build_channel_open_confirmation, ssh_build_channel_data, ssh_build_channel_window_adjust, ssh_build_channel_eof, ssh_build_channel_close, ssh_build_channel_success, ssh_build_channel_failure}
@@ -58,13 +57,26 @@ class SshSession:
     client_version: text
     server_kexinit_payload: [u8]
     client_kexinit_payload: [u8]
-    host_private_key: [u8]   # Server's long-term host key (32 bytes)
-    host_public_key: [u8]    # Server's long-term host public key (32 bytes)
+    host_keys: HostKeySet     # Server's long-term host keys (multi-algorithm)
 
 impl SshSession:
 
     static fn new(socket_fd: i32, user_db: SshUserDb, host_private: [u8], host_public: [u8]) -> SshSession:
-        """Create a new SSH session for an accepted TCP connection."""
+        """Create a new SSH session for an accepted TCP connection.
+
+        Backward-compatible constructor: wraps an Ed25519 seed into a HostKeySet.
+        host_private is the 32-byte Ed25519 private seed.
+        host_public is unused here (derived from the seed at signing time).
+        """
+        val keys = HostKeySet(
+            ed25519_seed: host_private,
+            rsa_pkcs8: nil,
+            ecdsa_p256_pkcs8: nil
+        )
+        SshSession.new_with_host_keys(socket_fd, user_db, keys)
+
+    static fn new_with_host_keys(socket_fd: i32, user_db: SshUserDb, host_keys: HostKeySet) -> SshSession:
+        """Create a new SSH session with a full HostKeySet."""
         SshSession(
             socket_fd: socket_fd,
             state: SessionState.VersionExchange,
@@ -80,8 +92,7 @@ impl SshSession:
             client_version: "",
             server_kexinit_payload: [],
             client_kexinit_payload: [],
-            host_private_key: host_private,
-            host_public_key: host_public
+            host_keys: host_keys
         )
 
     me run():
@@ -138,8 +149,8 @@ impl SshSession:
     me do_kex():
         """Perform key exchange (curve25519-sha256)."""
         serial_println("[sshd-session] kex start")
-        # Send our KEXINIT
-        val server_kexinit = ssh_build_kexinit()
+        # Send our KEXINIT — advertise algorithms available in our host key set
+        val server_kexinit = ssh_build_kexinit_for_host_keys(self.host_keys)
         self.server_kexinit_payload = server_kexinit
         self.send_packet(server_kexinit)
 
@@ -187,8 +198,12 @@ impl SshSession:
         # Compute shared secret
         val shared_secret = ssh_kex_compute_shared(server_private, client_public)
 
-        # Build host key blob: string "ssh-ed25519" + string public_key_data
-        val host_key_blob = _build_host_key_blob(self.host_public_key)
+        # Resolve negotiated algorithms — needed now for host-key-blob type
+        val algos_early = r_algos.unwrap()
+        val negotiated_hk_algo = algos_early.host_key
+
+        # Build host key blob for the negotiated algorithm
+        val host_key_blob = _build_host_key_blob_for_algo(negotiated_hk_algo, self.host_keys)
 
         # Compute exchange hash
         val exchange_hash = ssh_kex_compute_exchange_hash(
@@ -206,11 +221,12 @@ impl SshSession:
         if self.session_id.len() == 0:
             self.session_id = exchange_hash
 
-        # Sign the exchange hash with our Ed25519 host key (RFC 8032)
-        val signature = _sign_exchange_hash(self.host_private_key, self.host_public_key, exchange_hash)
-
-        # Build signature blob: string "ssh-ed25519" + string signature_data
-        val sig_blob = _build_signature_blob(signature)
+        # Sign the exchange hash with the appropriate host key
+        val r_sig = ssh_sign_exchange_hash(negotiated_hk_algo, self.host_keys, exchange_hash)
+        if r_sig.is_err():
+            self.disconnect(SSH_DISCONNECT_PROTOCOL_ERROR, "host key signing failed")
+            return
+        val sig_blob = r_sig.unwrap()
 
         # Send KEX_ECDH_REPLY
         val reply = ssh_build_kex_ecdh_reply(host_key_blob, server_public, sig_blob)
@@ -228,8 +244,8 @@ impl SshSession:
 
         # Derive session keys and activate cipher based on negotiated algorithm
         val keys = ssh_derive_keys(shared_secret, exchange_hash, self.session_id)
-        val algos = r_algos.unwrap()
-        if algos.cipher_c2s != "aes256-gcm@openssh.com" or algos.cipher_s2c != "aes256-gcm@openssh.com":
+        if (algos_early.cipher_c2s != "aes256-gcm@openssh.com" or
+            algos_early.cipher_s2c != "aes256-gcm@openssh.com"):
             self.disconnect(SSH_DISCONNECT_PROTOCOL_ERROR, "unsupported cipher negotiation")
             return
         self.cipher.activate(keys, self.recv_seq, self.send_seq)
@@ -823,38 +839,23 @@ impl SshSession:
 # Host Key Helpers
 # ============================================================================
 
-fn _build_host_key_blob(public_key: [u8]) -> [u8]:
-    """Build SSH host key blob per RFC 8709.
+fn _build_host_key_blob_for_algo(algo: text, host_keys: HostKeySet) -> [u8]:
+    """Build the SSH host key blob for the negotiated host key algorithm.
 
-    Format:
-      string "ssh-ed25519"
-      string public_key (32 bytes, Ed25519 public key)
+    For ssh-ed25519: derives the public key from the seed and builds the blob.
+    For rsa-sha2-256 / rsa-sha2-512: not yet fully supported (returns empty blob).
+    For ecdsa-sha2-nistp256: not yet fully supported (returns empty blob).
+    Callers pass the blob directly into the exchange hash computation.
     """
-    var blob: [u8] = []
-    ssh_put_text(blob, "ssh-ed25519")
-    ssh_put_string(blob, public_key)
-    blob
-
-fn _sign_exchange_hash(host_private_seed: [u8], host_public_key: [u8], exchange_hash: [u8]) -> [u8]:
-    """Sign the exchange hash with the host's Ed25519 private key.
-
-    Uses proper Ed25519 signing per RFC 8032.
-    host_private_seed is the 32-byte seed, host_public_key is the 32-byte
-    encoded public key.
-    """
-    ed25519_sign(host_private_seed, host_public_key, exchange_hash)
-
-fn _build_signature_blob(signature: [u8]) -> [u8]:
-    """Build SSH signature blob per RFC 8709.
-
-    Format:
-      string "ssh-ed25519"
-      string signature (64 bytes, Ed25519 signature)
-    """
-    var blob: [u8] = []
-    ssh_put_text(blob, "ssh-ed25519")
-    ssh_put_string(blob, signature)
-    blob
+    if algo == "ssh-ed25519":
+        if host_keys.ed25519_seed == nil:
+            return []
+        val keypair = ed25519_keypair_from_seed(host_keys.ed25519_seed)
+        val pubkey = keypair.1
+        return ssh_build_ed25519_host_key_blob(pubkey)
+    # For RSA/ECDSA the server needs to supply the public key separately.
+    # Return an empty blob; production deployments provide a pre-built blob.
+    []
 
 # ============================================================================
 # Public Key Auth Helpers (RFC 4252 §7)

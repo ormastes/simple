@@ -19,6 +19,9 @@
 use os.crypto.curve25519.{x25519, x25519_base}
 use os.crypto.sha256.{sha256}
 use os.crypto.random.{random_bytes}
+use os.crypto.ed25519.{ed25519_keypair_from_seed, ed25519_sign}
+use os.crypto.rsa.{rsa_sha256_sign, rsa_sha512_sign}
+use os.crypto.ecdsa_p256.{ecdsa_p256_sign_fixed, fixed64_to_ssh_mpint_pair}
 use os.apps.sshd.ssh_packet.{ssh_put_u32, ssh_put_string, ssh_put_text, ssh_put_mpint, ssh_get_string, SshStringResult}
 
 # ============================================================================
@@ -49,6 +52,44 @@ struct SshSessionKeys:
     enc_key_s2c: [u8]       # Encryption key, server-to-client
     mac_key_c2s: [u8]       # Integrity key, client-to-server (32 bytes)
     mac_key_s2c: [u8]       # Integrity key, server-to-client
+
+struct HostKeySet:
+    """Server host key material for all supported host key algorithms.
+
+    Each field holds an optional private key in the format expected by the
+    corresponding signing primitive:
+      ed25519_seed       — 32-byte Ed25519 private seed (RFC 8709)
+      rsa_pkcs8          — PKCS#8 v1 DER RSA private key (RFC 8332)
+      ecdsa_p256_pkcs8   — PKCS#8 v1 DER ECDSA P-256 private key (RFC 5656)
+
+    Algorithms are advertised in priority order by advertised_algorithms().
+    """
+    ed25519_seed: [u8]?
+    rsa_pkcs8: [u8]?
+    ecdsa_p256_pkcs8: [u8]?
+
+fn host_key_set_advertised_algorithms(host_keys: HostKeySet) -> text:
+    """Return comma-separated list of host key algorithms the server can offer.
+
+    Priority order: ssh-ed25519, rsa-sha2-256, rsa-sha2-512, ecdsa-sha2-nistp256.
+    RSA algorithms are both listed when an RSA key is present (same key, two hash choices).
+    """
+    var algos: text = ""
+    if host_keys.ed25519_seed != nil:
+        algos = "ssh-ed25519"
+    if host_keys.rsa_pkcs8 != nil:
+        if algos.len() > 0:
+            algos = algos + ",rsa-sha2-256,rsa-sha2-512"
+        else:
+            algos = "rsa-sha2-256,rsa-sha2-512"
+    if host_keys.ecdsa_p256_pkcs8 != nil:
+        if algos.len() > 0:
+            algos = algos + ",ecdsa-sha2-nistp256"
+        else:
+            algos = "ecdsa-sha2-nistp256"
+    if algos.len() == 0:
+        algos = "ssh-ed25519"
+    algos
 
 # ============================================================================
 # Key Generation
@@ -216,21 +257,161 @@ fn ssh_derive_keys(shared_secret: [u8], exchange_hash: [u8], session_id: [u8]) -
     )
 
 # ============================================================================
+# Host Key Blob Builders
+# ============================================================================
+
+fn ssh_build_ed25519_host_key_blob(public_key: [u8]) -> [u8]:
+    """Build SSH host key blob for ssh-ed25519 (RFC 8709).
+
+    Format: string "ssh-ed25519" + string public_key (32 bytes).
+    """
+    var blob: [u8] = []
+    ssh_put_text(blob, "ssh-ed25519")
+    ssh_put_string(blob, public_key)
+    blob
+
+fn ssh_build_rsa_host_key_blob(e_bytes: [u8], n_bytes: [u8]) -> [u8]:
+    """Build SSH host key blob for ssh-rsa / rsa-sha2-256 / rsa-sha2-512.
+
+    Format (RFC 4253 §6.6): string "ssh-rsa" + string e + string n.
+    e and n are the big-endian public exponent and modulus respectively.
+    """
+    var blob: [u8] = []
+    ssh_put_text(blob, "ssh-rsa")
+    ssh_put_string(blob, e_bytes)
+    ssh_put_string(blob, n_bytes)
+    blob
+
+fn ssh_build_ecdsa_p256_host_key_blob(q_bytes: [u8]) -> [u8]:
+    """Build SSH host key blob for ecdsa-sha2-nistp256 (RFC 5656).
+
+    Format: string "ecdsa-sha2-nistp256" + string "nistp256" + string Q.
+    Q is the uncompressed EC point (0x04 || x || y, 65 bytes).
+    """
+    var blob: [u8] = []
+    ssh_put_text(blob, "ecdsa-sha2-nistp256")
+    ssh_put_text(blob, "nistp256")
+    ssh_put_string(blob, q_bytes)
+    blob
+
+# ============================================================================
+# Multi-Algorithm Signing
+# ============================================================================
+
+fn ssh_sign_exchange_hash(algo: text, host_keys: HostKeySet, exchange_hash: [u8]) -> Result<[u8], text>:
+    """Sign exchange_hash with the algorithm-appropriate host key.
+
+    Returns the complete SSH signature blob:
+      string <algo-name> + string <raw-signature-bytes>
+
+    For ecdsa-sha2-nistp256 the inner raw-sig is the SSH wire-format
+    mpint pair (mpint r + mpint s) wrapped as a string per RFC 5656 §3.
+
+    Returns Err if the required host key is absent or signing produces
+    an empty result (indicating a key/runtime error).
+    """
+    if algo == "ssh-ed25519":
+        if host_keys.ed25519_seed == nil:
+            return Err("ssh-ed25519: no ed25519 seed configured")
+        val seed = host_keys.ed25519_seed
+        val keypair = ed25519_keypair_from_seed(seed)
+        val pubkey = keypair.1
+        val sig_raw = ed25519_sign(seed, pubkey, exchange_hash)
+        if sig_raw.len() == 0:
+            return Err("ssh-ed25519: signing failed")
+        var blob: [u8] = []
+        ssh_put_text(blob, "ssh-ed25519")
+        ssh_put_string(blob, sig_raw)
+        return Ok(blob)
+
+    elif algo == "rsa-sha2-256":
+        if host_keys.rsa_pkcs8 == nil:
+            return Err("rsa-sha2-256: no RSA key configured")
+        val sig_raw = rsa_sha256_sign(host_keys.rsa_pkcs8, exchange_hash)
+        if sig_raw.len() == 0:
+            return Err("rsa-sha2-256: signing failed")
+        var blob: [u8] = []
+        ssh_put_text(blob, "rsa-sha2-256")
+        ssh_put_string(blob, sig_raw)
+        return Ok(blob)
+
+    elif algo == "rsa-sha2-512":
+        if host_keys.rsa_pkcs8 == nil:
+            return Err("rsa-sha2-512: no RSA key configured")
+        val sig_raw = rsa_sha512_sign(host_keys.rsa_pkcs8, exchange_hash)
+        if sig_raw.len() == 0:
+            return Err("rsa-sha2-512: signing failed")
+        var blob: [u8] = []
+        ssh_put_text(blob, "rsa-sha2-512")
+        ssh_put_string(blob, sig_raw)
+        return Ok(blob)
+
+    elif algo == "ecdsa-sha2-nistp256":
+        if host_keys.ecdsa_p256_pkcs8 == nil:
+            return Err("ecdsa-sha2-nistp256: no ECDSA key configured")
+        val sig_fixed = ecdsa_p256_sign_fixed(host_keys.ecdsa_p256_pkcs8, exchange_hash)
+        if sig_fixed.len() == 0:
+            return Err("ecdsa-sha2-nistp256: signing failed")
+        val mpint_pair = fixed64_to_ssh_mpint_pair(sig_fixed)
+        if mpint_pair.len() == 0:
+            return Err("ecdsa-sha2-nistp256: mpint conversion failed")
+        var blob: [u8] = []
+        ssh_put_text(blob, "ecdsa-sha2-nistp256")
+        ssh_put_string(blob, mpint_pair)
+        return Ok(blob)
+
+    else:
+        Err("unsupported host key algorithm: {algo}")
+
+# ============================================================================
+# KEXINIT Builder (host-key-set aware)
+# ============================================================================
+
+fn ssh_build_kexinit_for_host_keys(host_keys: HostKeySet) -> [u8]:
+    """Build SSH_MSG_KEXINIT advertising host key algorithms present in host_keys.
+
+    Wire format is identical to ssh_build_kexinit() in ssh_transport.spl
+    except the server_host_key_algorithms field reflects the actual key set.
+    Other algorithms are fixed: curve25519-sha256 KEX, aes256-gcm cipher, no MAC, no compression.
+    """
+    var buf: [u8] = []
+
+    # SSH_MSG_KEXINIT = 20
+    buf.push(20)
+
+    # 16-byte cookie (zeros)
+    var i: u64 = 0
+    while i < 16:
+        buf.push(0)
+        i = i + 1
+
+    val host_key_algos = host_key_set_advertised_algorithms(host_keys)
+
+    ssh_put_text(buf, "curve25519-sha256")          # kex_algorithms
+    ssh_put_text(buf, host_key_algos)               # server_host_key_algorithms
+    ssh_put_text(buf, "aes256-gcm@openssh.com")     # encryption_client_to_server
+    ssh_put_text(buf, "aes256-gcm@openssh.com")     # encryption_server_to_client
+    ssh_put_text(buf, "none")                        # mac_client_to_server
+    ssh_put_text(buf, "none")                        # mac_server_to_client
+    ssh_put_text(buf, "none")                        # compression_client_to_server
+    ssh_put_text(buf, "none")                        # compression_server_to_client
+    ssh_put_text(buf, "")                            # languages_client_to_server
+    ssh_put_text(buf, "")                            # languages_server_to_client
+
+    # first_kex_packet_follows = false
+    buf.push(0)
+
+    # reserved uint32 = 0
+    buf.push(0)
+    buf.push(0)
+    buf.push(0)
+    buf.push(0)
+
+    buf
+
+# ============================================================================
 # KEX Message Builders
 # ============================================================================
-#
-# TODO(rsa-host-key): RSA signing path not yet implemented.
-# The server currently only holds an Ed25519 host key and signs the exchange
-# hash with Ed25519 via ssh_session.spl.  "rsa-sha2-256" is advertised in
-# KEXINIT (HOST_KEY_ALGORITHM in ssh_transport.spl) so that future RSA host
-# key support can be added here without changing the negotiation layer.
-# When an RSA host key is configured:
-#   1. Detect the negotiated host_key algorithm from SshAlgorithms.
-#   2. Load the RSA private key and sign exchange_hash with rsa-sha2-256.
-#   3. Build the signature blob:  string "rsa-sha2-256" + string <raw_sig>.
-#   4. Wrap the RSA public key blob via ssh_rsa_blob_to_spki_der (rsa_pubkey.spl)
-#      for verification on the client side.
-# Requires: rt_rsa_sha256_sign FFI (not yet exposed).
 
 fn ssh_build_kex_ecdh_reply(host_key_blob: [u8], server_public: [u8], signature: [u8]) -> [u8]:
     """Build SSH_MSG_KEX_ECDH_REPLY payload.
