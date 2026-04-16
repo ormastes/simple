@@ -30,6 +30,27 @@ enum RecordResult:
     Ok(content_type: u8, data: [u8])
     Err(msg: text)
 
+fn _copy_range(src: [u8], start: u64, count: u64) -> [u8]:
+    var out: [u8] = []
+    var i: u64 = 0
+    while i < count:
+        out.push(src[start + i])
+        i = i + 1
+    out
+
+fn _append_bytes(a: [u8], b: [u8]) -> [u8]:
+    """Append two byte arrays without relying on array concatenation."""
+    var out: [u8] = []
+    var i: u64 = 0
+    while i < a.len():
+        out.push(a[i])
+        i = i + 1
+    i = 0
+    while i < b.len():
+        out.push(b[i])
+        i = i + 1
+    out
+
 # ============================================================================
 # record13_make_nonce
 # ============================================================================
@@ -40,28 +61,19 @@ fn record13_make_nonce(iv: [u8], seq_num: u64) -> [u8]:
     Pad seq_num to 12 bytes (4 zero bytes + 8 big-endian bytes),
     then XOR each byte with the base IV.
     """
-    # Build 12-byte padded seq_num: 4 zero bytes + 8 big-endian bytes
-    var padded: [u8] = []
-    padded.push(0x00)
-    padded.push(0x00)
-    padded.push(0x00)
-    padded.push(0x00)
-    padded.push(((seq_num >> 56) & 0xFF).to_u8())
-    padded.push(((seq_num >> 48) & 0xFF).to_u8())
-    padded.push(((seq_num >> 40) & 0xFF).to_u8())
-    padded.push(((seq_num >> 32) & 0xFF).to_u8())
-    padded.push(((seq_num >> 24) & 0xFF).to_u8())
-    padded.push(((seq_num >> 16) & 0xFF).to_u8())
-    padded.push(((seq_num >> 8) & 0xFF).to_u8())
-    padded.push((seq_num & 0xFF).to_u8())
-
-    # XOR with IV
     var nonce: [u8] = []
-    var i: u64 = 0
-    while i < 12:
-        nonce.push(padded[i] ^ iv[i])
-        i = i + 1
-
+    nonce.push(iv[0] ^ 0x00)
+    nonce.push(iv[1] ^ 0x00)
+    nonce.push(iv[2] ^ 0x00)
+    nonce.push(iv[3] ^ 0x00)
+    nonce.push(iv[4] ^ ((seq_num >> 56) & 0xFF).to_u8())
+    nonce.push(iv[5] ^ ((seq_num >> 48) & 0xFF).to_u8())
+    nonce.push(iv[6] ^ ((seq_num >> 40) & 0xFF).to_u8())
+    nonce.push(iv[7] ^ ((seq_num >> 32) & 0xFF).to_u8())
+    nonce.push(iv[8] ^ ((seq_num >> 24) & 0xFF).to_u8())
+    nonce.push(iv[9] ^ ((seq_num >> 16) & 0xFF).to_u8())
+    nonce.push(iv[10] ^ ((seq_num >> 8) & 0xFF).to_u8())
+    nonce.push(iv[11] ^ (seq_num & 0xFF).to_u8())
     nonce
 
 # ============================================================================
@@ -76,9 +88,9 @@ fn record13_build_header(payload_length: u64) -> [u8]:
     legacy_version is always 0x0303.
     """
     var header: [u8] = []
-    header.push(0x17)
-    header.push(0x03)
-    header.push(0x03)
+    header.push(0x17u8)
+    header.push(0x03u8)
+    header.push(0x03u8)
     header.push(((payload_length >> 8) & 0xFF).to_u8())
     header.push((payload_length & 0xFF).to_u8())
     header
@@ -111,28 +123,25 @@ fn record13_encrypt(rk: RecordKey, seq_num: u64, content_type: u8, plaintext: [u
 
     # payload_length = len(inner) + AEAD tag size
     val payload_length = inner.len() + AEAD_TAG_SIZE
-
-    # Build header (used as AAD)
-    val header = record13_build_header(payload_length)
+    val header_hi = ((payload_length >> 8) & 0xFF).to_u8()
+    val header_lo = (payload_length & 0xFF).to_u8()
 
     # Derive per-record nonce
     val nonce = record13_make_nonce(rk.iv, seq_num)
 
     # AEAD encrypt: returns ciphertext || tag
-    val aead_output = aes128_gcm_encrypt(rk.key, nonce, inner, header)
+    val aead_output = aes128_gcm_encrypt(
+        rk.key,
+        nonce,
+        inner,
+        [0x17u8, 0x03u8, 0x03u8, header_hi, header_lo]
+    )
 
     # Assemble: header || ciphertext || tag
-    var result: [u8] = []
-    i = 0
-    while i < header.len():
-        result.push(header[i])
-        i = i + 1
-    i = 0
-    while i < aead_output.len():
-        result.push(aead_output[i])
-        i = i + 1
-
-    result
+    _append_bytes(
+        [0x17u8, 0x03u8, 0x03u8, header_hi, header_lo],
+        aead_output
+    )
 
 # ============================================================================
 # record13_decrypt
@@ -178,25 +187,13 @@ fn record13_decrypt(rk: RecordKey, seq_num: u64, raw_record: [u8]) -> RecordResu
     val ct_len = payload_length - AEAD_TAG_SIZE
 
     # Extract ciphertext: raw_record[5 .. 5+ct_len]
-    var ciphertext: [u8] = []
-    var i: u64 = 0
-    while i < ct_len:
-        ciphertext.push(raw_record[5 + i])
-        i = i + 1
+    val ciphertext = _copy_range(raw_record, 5, ct_len)
 
     # Extract tag: raw_record[5+ct_len .. 5+payload_length]
-    var tag: [u8] = []
-    i = 0
-    while i < AEAD_TAG_SIZE:
-        tag.push(raw_record[5 + ct_len + i])
-        i = i + 1
+    val tag = _copy_range(raw_record, 5 + ct_len, AEAD_TAG_SIZE)
 
     # AAD = header (5 bytes)
-    var aad: [u8] = []
-    i = 0
-    while i < 5:
-        aad.push(raw_record[i])
-        i = i + 1
+    val aad = _copy_range(raw_record, 0, 5)
 
     # Derive per-record nonce
     val nonce = record13_make_nonce(rk.iv, seq_num)
@@ -205,15 +202,23 @@ fn record13_decrypt(rk: RecordKey, seq_num: u64, raw_record: [u8]) -> RecordResu
     val dec_result = aes128_gcm_decrypt(rk.key, nonce, ciphertext, aad, tag)
 
     if val Aes128GcmResult.Ok(inner) = dec_result:
-        # TLSInnerPlaintext: data bytes are plaintext || content_type
-        # The last byte is the real content_type; strip it
+        # TLSInnerPlaintext = content || zeros* || content_type.
+        # Strip the final content_type and any zero padding that precedes it.
         if inner.len() == 0:
             return RecordResult.Err("decrypted inner plaintext is empty")
-        val last_idx = inner.len() - 1
-        val real_content_type = inner[last_idx]
+        var cursor = inner.len()
+        while cursor > 0:
+            val idx = cursor - 1
+            if inner[idx] != 0x00:
+                cursor = idx
+                break
+            cursor = idx
+        if cursor >= inner.len():
+            return RecordResult.Err("decrypted inner plaintext missing content type")
+        val real_content_type = inner[cursor]
         var data: [u8] = []
         var j: u64 = 0
-        while j < last_idx:
+        while j < cursor:
             data.push(inner[j])
             j = j + 1
         return RecordResult.Ok(content_type: real_content_type, data: data)

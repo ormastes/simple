@@ -27,17 +27,17 @@ possible against `/usr/bin/openssl`.
 - ChaCha20 stream cipher (RFC 7539 §2.4.2) — pure Simple, fully testable
 - Poly1305 MAC (RFC 7539 §2.5.2) — pure Simple, fully testable
 - ChaCha20-Poly1305 AEAD (RFC 7539 §2.8.2) — pure Simple, fully testable
+- X25519 scalar multiplication (RFC 7748) — pure Simple, interpreter-safe
 
 **Excluded from this file** (all wrap OS-level rt_* externs, not pure Simple;
 tested in other suites that run under native compile or baremetal):
 - SHA-256, SHA-512, HMAC-SHA-256 (use rt_sha256_H / rt_sha512_H)
 - AES-256-GCM, AES-128-GCM (use rt_aes*)
 - Ed25519 (uses rt_ed25519_keypair / rt_ed25519_sign)
-- X25519 (pure Simple bignum — scalar field arithmetic overflows i64 in
-  interpreter mode; only passes under native compile)
 """
 
 use std.sspec.*
+use os.crypto.curve25519.{x25519, x25519_base}
 use os.crypto.chacha20.{chacha20_encrypt}
 use os.crypto.poly1305.{poly1305_mac}
 use os.crypto.chacha20_poly1305.{chacha20_poly1305_encrypt, chacha20_poly1305_decrypt, Chacha20Poly1305Result}
@@ -448,3 +448,43 @@ describe "OS Crypto Ref: ChaCha20-Poly1305 AEAD":
         var pt: [u8] = []
         val out = chacha20_poly1305_encrypt(key, nonce, pt, aad)
         expect(out.len()).to_equal(16)
+
+# ============================================================================
+# X25519 / Curve25519 -- RFC 7748
+# ============================================================================
+
+val X25519_A_HEX = "77076d0a7318a57d3c16c17251b26645df4c2f87ebc0992ab177fba51db92c2a"
+val X25519_A_PUBLIC_HEX = "8520f0098930a754748b7ddcb43ef75a0dbf3a0d26381af4eba4a98eaa9b4e6a"
+val X25519_B_HEX = "5dab087e624a8a4b79e17f8b83800ee66f3bb1292618b6fd1c2f8b27ff88e0eb"
+val X25519_B_PUBLIC_HEX = "de9edb7d7b7dc1b4d35b61c2ece435373f8343c85b78674dadfc7e146f882b4f"
+val X25519_SHARED_HEX = "4a5d9d5ba4ce2de1728e3bf480350f25e07e21c947d19e3376f09b3c1e161742"
+val X25519_ITER_HEX = "0900000000000000000000000000000000000000000000000000000000000000"
+val X25519_ITER_ONE_HEX = "422c8e7a6227d7bca1350b3e2bb7279f7897b87bb6854b783c60e80311ae3079"
+
+describe "OS Crypto Ref: X25519 RFC 7748":
+    """
+    ## X25519 RFC 7748 known-answer coverage
+
+    These tests exercise the exact limb arithmetic that previously overflowed in
+    interpreter mode.
+    """
+
+    it "RFC 7748: x25519_base matches Alice public key":
+        val a = hex_to_bytes(X25519_A_HEX)
+        val expected = hex_to_bytes(X25519_A_PUBLIC_HEX)
+        val public_key = x25519_base(a)
+        expect(_bytes_eq(public_key, expected)).to_equal(true)
+
+    it "RFC 7748: x25519 shared secret matches the RFC vector":
+        val a = hex_to_bytes(X25519_A_HEX)
+        val b_pub = hex_to_bytes(X25519_B_PUBLIC_HEX)
+        val expected = hex_to_bytes(X25519_SHARED_HEX)
+        val shared = x25519(a, b_pub)
+        expect(_bytes_eq(shared, expected)).to_equal(true)
+
+    it "RFC 7748: iterative x25519(9, 9) matches the one-step vector":
+        val scalar = hex_to_bytes(X25519_ITER_HEX)
+        val u = hex_to_bytes(X25519_ITER_HEX)
+        val expected = hex_to_bytes(X25519_ITER_ONE_HEX)
+        val out = x25519(scalar, u)
+        expect(_bytes_eq(out, expected)).to_equal(true)

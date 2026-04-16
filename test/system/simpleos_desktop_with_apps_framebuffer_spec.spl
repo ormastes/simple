@@ -27,13 +27,15 @@ use os.compositor.electron_capture.{CaptureResult}
 use os.compositor.screenshot_compare.{ComparisonResult, compare_with_profile}
 use os.compositor.tolerance_profile.{ToleranceProfile, profile_wm_default}
 use std.common.image.ppm_decode.{decode_ppm_to_argb, PpmImage}
-use std.nogc_sync_mut.ffi.io.{file_read_bytes, file_write_bytes, dir_create_all}
+use std.nogc_sync_mut.ffi.io.{file_read_bytes, file_write_bytes, file_write_text, file_copy, dir_create_all}
 
 use test.qemu.os.common.qemu_os_harness.{
     QemuGuestHandle, can_run_target, file_exists, spawn_guest_with_qmp,
-    stop_guest, wait_for_serial_marker}
+    stop_guest, read_serial_log, wait_for_serial_marker}
 
 extern fn rt_env_get(name: text) -> text
+extern fn rt_thread_sleep(ms: i64)
+extern fn rt_process_run_timeout(cmd: text, args: [text], timeout_ms: i64) -> (text, text, i32)
 
 # ===========================================================================
 # Helpers (mirrored from simpleos_desktop_framebuffer_spec.spl — kept local
@@ -88,20 +90,91 @@ fn _write_ppm_local(pixels: [u32], width: i32, height: i32, path: text) -> bool:
     file_write_bytes(path, data)
     true
 
-fn _read_baseline_ppm(path: text) -> (bool, [u32], i32, i32, text):
-    val bytes = file_read_bytes(path)
-    if bytes.len() == 0:
-        return (false, [], 0, 0, "missing baseline: {path}")
-    val decoded = decode_ppm_to_argb(bytes)
-    match decoded:
-        Ok(img):
-            return (true, img.pixels, img.width, img.height, "")
-        Err(msg):
-            return (false, [], 0, 0, "ppm decode failed: {msg}")
-
 fn _update_baseline_requested() -> bool:
     val v = rt_env_get("UPDATE_BASELINE") ?? ""
     v == "1" or v == "true"
+
+fn _compare_ppm_exact(capture_ppm: text, baseline_path: text) -> (bool, text):
+    val result = rt_process_run_timeout("cmp", ["-s", capture_ppm, baseline_path], 5000)
+    if result[2] == 0:
+        return (true, "")
+    (false, "ppm bytes differ")
+
+fn _run_compare(handle: QemuGuestHandle, result: CaptureResult, capture_ppm: text, baseline_path: text, nb: i64) -> bool:
+    val exact = _compare_ppm_exact(capture_ppm, baseline_path)
+    if not exact[0]:
+        print "[simpleos_desktop_with_apps_fb_spec] baseline mismatch: {exact[1]}"
+        stop_guest(handle)
+        expect(false).to_equal(true)
+        return false
+
+    stop_guest(handle)
+
+    expect(nb > 0).to_equal(true)
+    expect(true).to_equal(true)
+    true
+
+fn _persist_failure_artifacts(handle: QemuGuestHandle, capture_ppm: text, label: text, reason: text):
+    dir_create_all("build/os")
+    val serial_snapshot = "build/os/{label}_failure_serial.log"
+    val summary_path = "build/os/{label}_failure_summary.txt"
+    val serial_output = read_serial_log(handle)
+    file_write_text(serial_snapshot, serial_output)
+    var summary = "reason={reason}\nserial_log={serial_snapshot}\ncapture_src={capture_ppm}\n"
+    if file_exists(capture_ppm):
+        val capture_snapshot = "build/os/{label}_failure_capture.ppm"
+        val copied = file_copy(capture_ppm, capture_snapshot)
+        summary = summary + "capture_copy={capture_snapshot}\ncopy_ok={copied}\n"
+    file_write_text(summary_path, summary)
+
+fn _run_live_capture(target: OsTarget, qmp_socket: text, serial_log: text, capture_ppm: text, baseline_path: text) -> bool:
+    match spawn_guest_with_qmp(target, qmp_socket, serial_log):
+        Ok(handle):
+            val ready = wait_for_serial_marker(handle, "[desktop-e2e] remote-grouping:ok", 60000)
+            if not ready:
+                _persist_failure_artifacts(
+                    handle,
+                    capture_ppm,
+                    "simpleos_desktop_with_apps_fb_spec",
+                    "remote-grouping:ok marker not observed before capture")
+                stop_guest(handle)
+                return false
+
+            val result = capture_qemu_vm(qmp_socket, capture_ppm)
+            send_harness_marker(qmp_socket, "[harness] screendump-complete")
+            if not result.success:
+                print "[simpleos_desktop_with_apps_fb_spec] QMP screendump failed: {result.error}"
+                _persist_failure_artifacts(handle, capture_ppm, "simpleos_desktop_with_apps_fb_spec", result.error)
+                stop_guest(handle)
+                return false
+
+            val nb = _non_black_count(result.pixels)
+            print "[simpleos_desktop_with_apps_fb_spec] captured {result.width}x{result.height}, non-black pixels: {nb} of {result.pixels.len()}"
+
+            if _update_baseline_requested():
+                val wrote = _write_ppm_local(
+                    result.pixels, result.width, result.height, baseline_path)
+                print "[simpleos_desktop_with_apps_fb_spec] UPDATE_BASELINE=1 wrote baseline: {baseline_path} (ok={wrote})"
+                stop_guest(handle)
+                return wrote and nb > 0
+
+            if not file_exists(baseline_path):
+                val wrote = _write_ppm_local(
+                    result.pixels, result.width, result.height, baseline_path)
+                print "[simpleos_desktop_with_apps_fb_spec] no baseline found, recorded: {baseline_path} (ok={wrote})"
+                stop_guest(handle)
+                return wrote and nb > 0
+
+            _run_compare(handle, result, capture_ppm, baseline_path, nb)
+        Err(err):
+            print "[simpleos_desktop_with_apps_fb_spec] failed to spawn guest: {err}"
+            false
+
+fn _build_once(target: OsTarget) -> bool:
+    if file_exists(target.output):
+        true
+    else:
+        build_os(target)
 
 # ===========================================================================
 # Spec
@@ -117,9 +190,8 @@ describe "SimpleOS desktop framebuffer with apps (SYS-GUI-006)":
 
     it "boots desktop, waits for remote-grouping:ok, captures with-apps baseline":
         val target = _desktop_target()
-        expect(build_os(target)).to_equal(true)
+        expect(_build_once(target)).to_equal(true)
         expect(file_exists(target.output)).to_equal(true)
-
         if not can_run_target(target):
             print "[simpleos_desktop_with_apps_fb_spec] qemu-system-x86_64 not available, skipping live capture"
             expect(true).to_equal(true)
@@ -127,84 +199,14 @@ describe "SimpleOS desktop framebuffer with apps (SYS-GUI-006)":
 
         val qmp_socket = "/tmp/simpleos_desktop_with_apps_qmp.sock"
         val serial_log = "build/os/simpleos_desktop_with_apps_qemu_serial.log"
-        val capture_ppm = "build/os/simpleos_desktop_with_apps_capture.ppm"
+        val capture_ppm = "/tmp/simpleos_desktop_with_apps_capture.ppm"
         val baseline_dir = "test/baselines/simpleos_desktop_with_apps_framebuffer"
         val baseline_path = "{baseline_dir}/desktop_with_apps_scene.ppm"
 
         dir_create_all(baseline_dir)
         dir_create_all("build/os")
 
-        match spawn_guest_with_qmp(target, qmp_socket, serial_log):
-            Ok(handle):
-                # Wait on remote-grouping:ok — the full-desktop paint marker
-                # emitted after the shell has launched the default apps and
-                # the compositor has drawn the browser-demo + hello_world
-                # remote windows on the BGA framebuffer.
-                val saw_ready = wait_for_serial_marker(
-                    handle, "[desktop-e2e] remote-grouping:ok", 60000)
-                if not saw_ready:
-                    print "[simpleos_desktop_with_apps_fb_spec] remote-grouping:ok not reached"
-                    stop_guest(handle)
-                    expect(false).to_equal(true)
-                    return
-
-                val result = capture_qemu_vm(qmp_socket, capture_ppm)
-                send_harness_marker(qmp_socket, "[harness] screendump-complete")
-                if not result.success:
-                    print "[simpleos_desktop_with_apps_fb_spec] QMP screendump failed: {result.error}"
-                    stop_guest(handle)
-                    expect(false).to_equal(true)
-                    return
-
-                val nb = _non_black_count(result.pixels)
-                print "[simpleos_desktop_with_apps_fb_spec] captured {result.width}x{result.height}, non-black pixels: {nb} of {result.pixels.len()}"
-
-                if _update_baseline_requested():
-                    val wrote = _write_ppm_local(
-                        result.pixels, result.width, result.height, baseline_path)
-                    print "[simpleos_desktop_with_apps_fb_spec] UPDATE_BASELINE=1 wrote baseline: {baseline_path} (ok={wrote})"
-                    stop_guest(handle)
-                    expect(wrote).to_equal(true)
-                    expect(nb > 0).to_equal(true)
-                    return
-
-                val baseline_bytes = file_read_bytes(baseline_path)
-                if (not file_exists(baseline_path)) or baseline_bytes.len() == 0:
-                    val wrote = _write_ppm_local(
-                        result.pixels, result.width, result.height, baseline_path)
-                    print "[simpleos_desktop_with_apps_fb_spec] no baseline found, recorded: {baseline_path} (ok={wrote})"
-                    stop_guest(handle)
-                    expect(wrote).to_equal(true)
-                    expect(nb > 0).to_equal(true)
-                    return
-
-                val (ok, base_pixels, base_w, base_h, err) = _read_baseline_ppm(baseline_path)
-                if not ok:
-                    print "[simpleos_desktop_with_apps_fb_spec] baseline read failed: {err}"
-                    stop_guest(handle)
-                    expect(false).to_equal(true)
-                    return
-
-                if base_w != result.width or base_h != result.height:
-                    print "[simpleos_desktop_with_apps_fb_spec] baseline dims {base_w}x{base_h} != capture dims {result.width}x{result.height}"
-                    stop_guest(handle)
-                    expect(false).to_equal(true)
-                    return
-
-                val profile = profile_wm_default()
-                val cmp: ComparisonResult = compare_with_profile(
-                    result.pixels, base_pixels, result.width, result.height, profile)
-                val pct_whole = cmp.match_percentage / 100
-                val pct_frac = cmp.match_percentage % 100
-                print "[simpleos_desktop_with_apps_fb_spec] match: {pct_whole}.{pct_frac}% ({cmp.matching_pixels}/{cmp.total_pixels}) profile={profile.name}"
-
-                stop_guest(handle)
-
-                expect(nb > 0).to_equal(true)
-                expect(cmp.match_percentage >= 9500).to_equal(true)
-            Err(err):
-                print "[simpleos_desktop_with_apps_fb_spec] failed to spawn guest: {err}"
-                expect(false).to_equal(true)
+        expect(_run_live_capture(target, qmp_socket, serial_log, capture_ppm, baseline_path)).to_equal(true)
 
     it "has a baseline directory for simpleos_desktop_with_apps_framebuffer captures":
         val baseline_dir = "test/baselines/simpleos_desktop_with_apps_framebuffer"

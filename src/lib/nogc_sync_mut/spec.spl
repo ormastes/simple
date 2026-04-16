@@ -17,9 +17,6 @@
 #
 # NOTE: No static fn, no try/catch/throw - runs on bootstrap runtime.
 
-# Import platform detection from std.platform
-use nogc_sync_mut.platform.{is_windows, is_linux, is_macos, is_unix}
-
 # ================================================================
 # Global Test State
 # ================================================================
@@ -202,6 +199,51 @@ fn skip_context(reason: text):
 
 extern fn rt_env_get(key: text) -> text
 extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+
+fn _shell_output_trim(command: text) -> text:
+    val result = rt_process_run("/bin/sh", ["-c", command])
+    val stdout = result[0]
+    val code = result[2]
+    if code == 0:
+        stdout.trim()
+    else:
+        ""
+
+fn _is_windows_env() -> bool:
+    val os_env = rt_env_get("OS")
+    if os_env == nil:
+        false
+    else:
+        os_env.lower().contains("windows")
+
+fn _get_host_os() -> text:
+    if _is_windows_env():
+        "windows"
+    else:
+        val os = _shell_output_trim("uname -s")
+        if os.len() == 0:
+            "linux"
+        else:
+            match os:
+                case "Linux": "linux"
+                case "Darwin": "macos"
+                case "FreeBSD": "freebsd"
+                case "OpenBSD": "openbsd"
+                case "NetBSD": "netbsd"
+                case _: os.lower()
+
+fn is_windows() -> bool:
+    _get_host_os() == "windows"
+
+fn is_unix() -> bool:
+    val os = _get_host_os()
+    os == "linux" or os == "macos" or os == "freebsd" or os == "openbsd" or os == "netbsd"
+
+fn is_macos() -> bool:
+    _get_host_os() == "macos"
+
+fn is_linux() -> bool:
+    _get_host_os() == "linux"
 
 fn skip_on_windows(name: text, block: fn()):
     """Skip test if running on Windows."""
@@ -573,37 +615,39 @@ class ExpectHelper:
 # ================================================================
 
 # Assertion Helpers
-# These use the built-in expect() mechanism so they work when imported.
-# The built-in it() catches assertion failures from expect().
-
 fn fail_assertion(message: text):
-    # Use expect to trigger a failure that the built-in it() will catch
-    expect(message).to_equal("")
+    current_test_error = message
 
 fn fail_test(message: text):
     fail_assertion(message)
 
 fn check(condition: bool):
-    expect(condition).to_equal(true)
+    if not condition:
+        fail_assertion("expected true to equal true")
 
 fn check_msg(condition: bool, message: text):
     if not condition:
         fail_assertion(message)
 
 fn assert_eq(a, b):
-    expect(a).to_equal(b)
+    if a != b:
+        fail_assertion("Expected values to be equal")
 
 fn assert_ne(a, b):
-    expect(a).to_not_equal(b)
+    if a == b:
+        fail_assertion("Expected values to differ")
 
 fn assert_true(value):
-    expect(value).to_equal(true)
+    if not value:
+        fail_assertion("Expected true")
 
 fn assert_false(value):
-    expect(value).to_equal(false)
+    if value:
+        fail_assertion("Expected false")
 
 fn assert_nil(value):
-    expect(value).to_be_nil()
+    if value != nil:
+        fail_assertion("Expected nil")
 
 fn assert_not_nil(value):
     if value == nil:

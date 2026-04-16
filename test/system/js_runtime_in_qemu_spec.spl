@@ -1,0 +1,66 @@
+# @tag:system
+#
+# System spec — minimal JsRuntime inside QEMU Simple OS guest
+#
+# Builds js_runtime_probe_entry.spl into a baremetal x86_64 kernel, boots it
+# under QEMU, and verifies the guest reaches the serial success marker. This
+# isolates the bare-metal JS engine from BrowserSession host-object wiring.
+#
+use std.spec.*
+
+use os.qemu_runner.{OsTarget, build_os}
+use os.kernel.arch.arch_context.{Architecture}
+use std.nogc_sync_mut.ffi.io.{dir_create_all}
+
+use test.qemu.os.common.qemu_os_harness.{
+    can_run_target, file_exists, spawn_guest_with_qmp,
+    stop_guest, wait_for_serial_marker}
+
+fn _js_runtime_target() -> OsTarget:
+    OsTarget(
+        arch: Architecture.X86_64,
+        entry: "examples/simple_os/arch/x86_64/js_runtime_probe_entry.spl",
+        linker_script: "examples/simple_os/arch/x86_64/linker.ld",
+        target_triple: "x86_64-unknown-none",
+        output: "build/os/simpleos_js_runtime_probe_x86_64.elf",
+        qemu_system: "qemu-system-x86_64",
+        qemu_machine: "q35",
+        qemu_cpu: "qemu64",
+        qemu_memory: "2G",
+        qemu_bios: "",
+        qemu_extra: ["-vga", "std", "-device", "isa-debug-exit,iobase=0xf4,iosize=0x04"],
+        gui_mode: false
+    )
+
+describe "Minimal JsRuntime in QEMU Simple OS guest":
+
+    it "builds js_runtime_probe_entry.spl into a baremetal kernel":
+        val target = _js_runtime_target()
+        val ok = build_os(target)
+        expect(ok).to_equal(true)
+        expect(file_exists(target.output)).to_equal(true)
+
+    slow_it "boots guest and reaches the runtime probe success marker":
+        val target = _js_runtime_target()
+        expect(file_exists(target.output)).to_equal(true)
+
+        if not can_run_target(target):
+            print "[js_runtime_in_qemu_spec] qemu-system-x86_64 not available, skipping live run"
+            expect(true).to_equal(true)
+            return
+
+        val qmp_socket = "/tmp/simpleos_js_runtime_spec_qmp.sock"
+        val serial_log = "build/os/js_runtime_qemu_spec_serial.log"
+        dir_create_all("build/os")
+
+        match spawn_guest_with_qmp(target, qmp_socket, serial_log):
+            Ok(handle):
+                expect(wait_for_serial_marker(
+                    handle,
+                    "[JSR] Runtime probe passed",
+                    30000)).to_equal(true)
+                stop_guest(handle)
+                expect(true).to_equal(true)
+            Err(err):
+                print "[js_runtime_in_qemu_spec] failed to spawn guest: {err}"
+                expect(false).to_equal(true)

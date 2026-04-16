@@ -15,6 +15,8 @@
 # Constants stored in C static const arrays (baremetal_stubs.c section 8d).
 extern fn rt_sha256_K(index: i64) -> u32
 extern fn rt_sha256_H(index: i64) -> u32
+extern fn rt_array_new_with_cap(cap: i64) -> [u8]
+extern fn serial_println(msg: text)
 
 # ============================================================================
 # Bit Manipulation Helpers (u32)
@@ -62,7 +64,7 @@ fn _sha256_compute_padded_len(data_len: u64) -> u64:
     Standalone function to avoid depending on .len() which is unreliable
     in baremetal Cranelift.
     """
-    val min_padded = data_len + 1 + 8   # data + 0x80 + 8 bytes length
+    val min_padded = data_len + 1 + 8
     val rem = min_padded % 64
     if rem == 0:
         min_padded
@@ -70,19 +72,12 @@ fn _sha256_compute_padded_len(data_len: u64) -> u64:
         min_padded + (64 - rem)
 
 fn sha256_pad(data: [u8]) -> [u8]:
-    """Pad message to a multiple of 64 bytes per FIPS 180-4 section 5.1.1.
-
-    Appends bit '1' (0x80 byte), then zeros, then 64-bit big-endian
-    bit length, such that the total length is a multiple of 512 bits (64 bytes).
-
-    WORKAROUND: Uses manual length counter because .len() is unreliable
-    in baremetal Cranelift (returns wrong values after many pushes).
-    """
+    """Pad message to a multiple of 64 bytes per FIPS 180-4 section 5.1.1."""
     val data_len = data.len()
     val bit_len: u64 = data_len.to_u64() * 8
 
-    # Start with copy of original data
-    var padded: [u8] = []
+    val padded_target = _sha256_compute_padded_len(data_len.to_u64())
+    var padded: [u8] = rt_array_new_with_cap(padded_target.to_i64())
     var i: u64 = 0
     var padded_count: u64 = 0
     while i < data_len:
@@ -90,17 +85,44 @@ fn sha256_pad(data: [u8]) -> [u8]:
         padded_count = padded_count + 1
         i = i + 1
 
-    # Append 0x80 byte (the '1' bit followed by zeros)
     padded.push(0x80)
     padded_count = padded_count + 1
 
-    # Pad with zeros until length is 56 mod 64
-    # (leaving 8 bytes for the 64-bit length)
     while (padded_count % 64) != 56:
         padded.push(0x00)
         padded_count = padded_count + 1
 
-    # Append 64-bit big-endian bit length
+    padded.push(((bit_len >> 56) & 0xFF).to_u8())
+    padded.push(((bit_len >> 48) & 0xFF).to_u8())
+    padded.push(((bit_len >> 40) & 0xFF).to_u8())
+    padded.push(((bit_len >> 32) & 0xFF).to_u8())
+    padded.push(((bit_len >> 24) & 0xFF).to_u8())
+    padded.push(((bit_len >> 16) & 0xFF).to_u8())
+    padded.push(((bit_len >> 8) & 0xFF).to_u8())
+    padded.push((bit_len & 0xFF).to_u8())
+
+    padded
+
+fn sha256_pad_with_len(data: [u8], data_len: u64) -> [u8]:
+    """Pad the first data_len bytes without depending on data.len()."""
+    val bit_len: u64 = data_len * 8
+
+    val padded_target = _sha256_compute_padded_len(data_len)
+    var padded: [u8] = rt_array_new_with_cap(padded_target.to_i64())
+    var i: u64 = 0
+    var padded_count: u64 = 0
+    while i < data_len:
+        padded.push(data[i])
+        padded_count = padded_count + 1
+        i = i + 1
+
+    padded.push(0x80)
+    padded_count = padded_count + 1
+
+    while (padded_count % 64) != 56:
+        padded.push(0x00)
+        padded_count = padded_count + 1
+
     padded.push(((bit_len >> 56) & 0xFF).to_u8())
     padded.push(((bit_len >> 48) & 0xFF).to_u8())
     padded.push(((bit_len >> 40) & 0xFF).to_u8())
@@ -117,19 +139,9 @@ fn sha256_pad(data: [u8]) -> [u8]:
 # ============================================================================
 
 fn sha256_process_block(block: [u8], offset: u64, h: [u32]) -> [u32]:
-    """Process one 512-bit (64-byte) block of padded message.
-
-    Args:
-        block: The padded message bytes.
-        offset: Byte offset into block where this 64-byte chunk starts.
-        h: Current hash state [8 x u32].
-
-    Returns: Updated hash state [8 x u32].
-    """
-    # 1. Prepare the message schedule W[0..63]
+    """Process one 512-bit (64-byte) block of padded message."""
     var w: [u32] = []
 
-    # W[0..15]: big-endian decode from block
     var t: u64 = 0
     while t < 16:
         val base = offset + t * 4
@@ -142,7 +154,6 @@ fn sha256_process_block(block: [u8], offset: u64, h: [u32]) -> [u32]:
         w.push(w_t)
         t = t + 1
 
-    # W[16..63]: extended via small sigma functions
     while t < 64:
         val s0 = small_sigma0(w[t - 15])
         val s1 = small_sigma1(w[t - 2])
@@ -150,7 +161,6 @@ fn sha256_process_block(block: [u8], offset: u64, h: [u32]) -> [u32]:
         w.push(w_t)
         t = t + 1
 
-    # 2. Initialize working variables
     var a = h[0]
     var b = h[1]
     var c = h[2]
@@ -160,7 +170,6 @@ fn sha256_process_block(block: [u8], offset: u64, h: [u32]) -> [u32]:
     var g = h[6]
     var hh = h[7]
 
-    # 3. Compression loop (64 rounds)
     var round: u64 = 0
     while round < 64:
         val s1 = big_sigma1(e)
@@ -181,7 +190,6 @@ fn sha256_process_block(block: [u8], offset: u64, h: [u32]) -> [u32]:
 
         round = round + 1
 
-    # 4. Compute new hash values
     var result: [u32] = []
     result.push(_u32_mask(h[0] + a))
     result.push(_u32_mask(h[1] + b))
@@ -198,37 +206,24 @@ fn sha256_process_block(block: [u8], offset: u64, h: [u32]) -> [u32]:
 # ============================================================================
 
 fn sha256(data: [u8]) -> [u8]:
-    """Compute SHA-256 hash of data.
-
-    Args:
-        data: Input bytes.
-
-    Returns: 32-byte (256-bit) digest.
-    """
-    # Compute padded length BEFORE padding (data.len() is reliable here,
-    # before any push operations that could confuse the baremetal runtime)
     val original_len = data.len().to_u64()
     val padded_len = _sha256_compute_padded_len(original_len)
     val num_blocks = padded_len / 64
 
-    # Pad the message
     val padded = sha256_pad(data)
 
-    # Initialize hash state
     var h: [u32] = []
     var i: u64 = 0
     while i < 8:
         h.push(rt_sha256_H(i))
         i = i + 1
 
-    # Process each 64-byte block
     var block_idx: u64 = 0
     while block_idx < num_blocks:
         h = sha256_process_block(padded, block_idx * 64, h)
         block_idx = block_idx + 1
 
-    # Convert hash state to big-endian bytes
-    var digest: [u8] = []
+    var digest: [u8] = rt_array_new_with_cap(32)
     i = 0
     while i < 8:
         val word = h[i]
@@ -240,73 +235,119 @@ fn sha256(data: [u8]) -> [u8]:
 
     digest
 
+fn _array_prefix_to_list(data: [u8], data_len: u64) -> list:
+    var out = []
+    var i: u64 = 0
+    while i < data_len:
+        out.push(data[i].to_i64())
+        i = i + 1
+    out
+
+fn _list_to_array(bytes: list) -> [u8]:
+    var out: [u8] = rt_array_new_with_cap(bytes.len())
+    var i = 0
+    while i < bytes.len():
+        out.push(bytes.get(i).to_u8())
+        i = i + 1
+    out
+
+fn sha256_with_len(data: [u8], data_len: u64) -> [u8]:
+    val padded_len = _sha256_compute_padded_len(data_len)
+    val num_blocks = padded_len / 64
+    val padded = sha256_pad_with_len(data, data_len)
+
+    var h: [u32] = []
+    var i: u64 = 0
+    while i < 8:
+        h.push(rt_sha256_H(i))
+        i = i + 1
+
+    var block_idx: u64 = 0
+    while block_idx < num_blocks:
+        h = sha256_process_block(padded, block_idx * 64, h)
+        block_idx = block_idx + 1
+
+    var digest: [u8] = rt_array_new_with_cap(32)
+    i = 0
+    while i < 8:
+        val word = h[i]
+        digest.push(((word >> 24) & 0xFF).to_u8())
+        digest.push(((word >> 16) & 0xFF).to_u8())
+        digest.push(((word >> 8) & 0xFF).to_u8())
+        digest.push((word & 0xFF).to_u8())
+        i = i + 1
+
+    digest
+
+fn _normalize_hmac_key(key: [u8], key_len: u64) -> [u8]:
+    val block_size: u64 = 64
+    var k_prime: [u8] = rt_array_new_with_cap(64)
+    if key_len > block_size:
+        val hashed_key = sha256_with_len(key, key_len)
+        var j: u64 = 0
+        while j < 32:
+            k_prime.push(hashed_key[j])
+            j = j + 1
+    else:
+        var j: u64 = 0
+        while j < key_len:
+            k_prime.push(key[j])
+            j = j + 1
+
+    while k_prime.len() < block_size:
+        k_prime.push(0x00)
+
+    k_prime
+
+fn _sha256_hmac_with_norm_key(k_prime: [u8], data: [u8], data_len: u64) -> [u8]:
+    val block_size: u64 = 64
+    var inner_input: [u8] = rt_array_new_with_cap((block_size + data_len).to_i64())
+    var i: u64 = 0
+    while i < block_size:
+        inner_input.push((k_prime[i] ^ 0x36).to_u8())
+        i = i + 1
+    i = 0
+    while i < data_len:
+        inner_input.push(data[i])
+        i = i + 1
+
+    val inner_hash = sha256_with_len(inner_input, block_size + data_len)
+
+    var outer_input: [u8] = rt_array_new_with_cap((block_size + 32).to_i64())
+    i = 0
+    while i < block_size:
+        outer_input.push((k_prime[i] ^ 0x5c).to_u8())
+        i = i + 1
+    i = 0
+    while i < 32:
+        outer_input.push(inner_hash[i])
+        i = i + 1
+
+    sha256_with_len(outer_input, block_size + 32)
+
 # ============================================================================
 # HMAC-SHA-256 (RFC 2104)
 # ============================================================================
 
 fn sha256_hmac(key: [u8], data: [u8]) -> [u8]:
-    """Compute HMAC-SHA-256.
+    val k_prime = _normalize_hmac_key(key, key.len().to_u64())
+    _sha256_hmac_with_norm_key(k_prime, data, data.len().to_u64())
 
-    HMAC(K, m) = H((K' XOR opad) || H((K' XOR ipad) || m))
+fn sha256_hmac_with_len(key: [u8], key_len: u64, data: [u8], data_len: u64) -> [u8]:
+    val k_prime = _normalize_hmac_key(key, key_len)
+    _sha256_hmac_with_norm_key(k_prime, data, data_len)
 
-    Where:
-        K' = key padded/hashed to block size (64 bytes)
-        ipad = 0x36 repeated 64 times
-        opad = 0x5c repeated 64 times
-
-    Args:
-        key: HMAC key (any length).
-        data: Message bytes.
-
-    Returns: 32-byte HMAC digest.
-    """
-    val block_size: u64 = 64
-
-    # Step 1: Derive K' (block-size key)
-    # If key > block_size, hash it first
-    var k_prime: [u8] = []
-    if key.len() > block_size:
-        val hashed_key = sha256(key)
-        var j: u64 = 0
-        while j < hashed_key.len():
-            k_prime.push(hashed_key[j])
-            j = j + 1
-    else:
-        var j: u64 = 0
-        while j < key.len():
-            k_prime.push(key[j])
-            j = j + 1
-
-    # Pad K' with zeros to block_size
-    while k_prime.len() < block_size:
-        k_prime.push(0x00)
-
-    # Step 2: Compute inner hash: H((K' XOR ipad) || message)
-    var inner_input: [u8] = []
-    var i: u64 = 0
-    while i < block_size:
-        inner_input.push((k_prime[i] ^ 0x36).to_u8())
+fn sha256_hmac_from_list(key: list, data: list) -> [u8]:
+    var key_bytes: [u8] = rt_array_new_with_cap(key.len())
+    var i = 0
+    while i < key.len():
+        key_bytes.push(key.get(i).to_u8())
         i = i + 1
 
-    # Append message
+    var data_bytes: [u8] = rt_array_new_with_cap(data.len())
     i = 0
     while i < data.len():
-        inner_input.push(data[i])
+        data_bytes.push(data.get(i).to_u8())
         i = i + 1
 
-    val inner_hash = sha256(inner_input)
-
-    # Step 3: Compute outer hash: H((K' XOR opad) || inner_hash)
-    var outer_input: [u8] = []
-    i = 0
-    while i < block_size:
-        outer_input.push((k_prime[i] ^ 0x5c).to_u8())
-        i = i + 1
-
-    # Append inner hash
-    i = 0
-    while i < inner_hash.len():
-        outer_input.push(inner_hash[i])
-        i = i + 1
-
-    sha256(outer_input)
+    sha256_hmac(key_bytes, data_bytes)

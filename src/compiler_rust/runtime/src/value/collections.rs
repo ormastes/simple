@@ -319,6 +319,26 @@ pub extern "C" fn rt_array_push_no_grow(array: RuntimeValue, value: RuntimeValue
     }
 }
 
+#[no_mangle]
+pub extern "C" fn rt_array_new_with_cap_i64(cap: i64) -> RuntimeValue {
+    rt_array_new(cap as u64)
+}
+
+#[no_mangle]
+pub extern "C" fn rt_array_new_with_cap_text(cap: i64) -> RuntimeValue {
+    rt_array_new(cap as u64)
+}
+
+#[no_mangle]
+pub extern "C" fn rt_array_new_with_cap_js_value(cap: i64) -> RuntimeValue {
+    rt_array_new(cap as u64)
+}
+
+#[no_mangle]
+pub extern "C" fn rt_array_new_with_cap_bool(cap: i64) -> RuntimeValue {
+    rt_array_new(cap as u64)
+}
+
 /// Pop an element from an array
 #[no_mangle]
 pub extern "C" fn rt_array_pop(array: RuntimeValue) -> RuntimeValue {
@@ -701,6 +721,42 @@ pub extern "C" fn rt_string_char_at(string: RuntimeValue, index: i64) -> Runtime
             RuntimeValue::NIL
         }
     }
+}
+
+#[no_mangle]
+pub extern "C" fn rt_text_find(haystack: RuntimeValue, needle: RuntimeValue, start: i64) -> i64 {
+    if start < 0 {
+        return -1;
+    }
+    let hay_len = rt_string_len(haystack);
+    let needle_len = rt_string_len(needle);
+    if needle_len < 0 || hay_len < 0 {
+        return -1;
+    }
+    if needle_len == 0 {
+        return start.min(hay_len);
+    }
+    if start >= hay_len || needle_len > hay_len {
+        return -1;
+    }
+    let hay_ptr = rt_string_data(haystack);
+    let needle_ptr = rt_string_data(needle);
+    if hay_ptr.is_null() || needle_ptr.is_null() {
+        return -1;
+    }
+
+    unsafe {
+        let hay = std::slice::from_raw_parts(hay_ptr, hay_len as usize);
+        let needle_bytes = std::slice::from_raw_parts(needle_ptr, needle_len as usize);
+        let limit = (hay_len - needle_len) as usize;
+        let start_idx = start as usize;
+        for i in start_idx..=limit {
+            if &hay[i..i + needle_len as usize] == needle_bytes {
+                return i as i64;
+            }
+        }
+    }
+    -1
 }
 
 /// Create a string from a null-terminated C string

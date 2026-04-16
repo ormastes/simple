@@ -6,7 +6,55 @@
 #   hkdf_expand     — OKM via iterative HMAC chain
 #   hkdf_expand_label — RFC 8446 §7.1 HkdfLabel encoding
 
-use os.crypto.sha256.{sha256_hmac}
+extern fn rt_array_new_with_cap(cap: i64) -> [u8]
+
+use os.crypto.sha256.{sha256_hmac, sha256_hmac_with_len, sha256_hmac_from_list}
+
+fn _text_to_bytes(s: text) -> [u8]:
+    var out: [u8] = []
+    var i: u64 = 0
+    while i < s.len():
+        out.push(s[i].to_u8())
+        i = i + 1
+    out
+
+fn _label_bytes(label: text) -> [u8]:
+    if label == "key":
+        return [0x6bu8, 0x65u8, 0x79u8]
+    if label == "iv":
+        return [0x69u8, 0x76u8]
+    if label == "finished":
+        return [0x66u8, 0x69u8, 0x6eu8, 0x69u8, 0x73u8, 0x68u8, 0x65u8, 0x64u8]
+    if label == "c hs traffic":
+        return [0x63u8, 0x20u8, 0x68u8, 0x73u8, 0x20u8, 0x74u8, 0x72u8, 0x61u8, 0x66u8, 0x66u8, 0x69u8, 0x63u8]
+    if label == "s hs traffic":
+        return [0x73u8, 0x20u8, 0x68u8, 0x73u8, 0x20u8, 0x74u8, 0x72u8, 0x61u8, 0x66u8, 0x66u8, 0x69u8, 0x63u8]
+    if label == "derived":
+        return [0x64u8, 0x65u8, 0x72u8, 0x69u8, 0x76u8, 0x65u8, 0x64u8]
+    return _text_to_bytes(label)
+
+fn _label_len(label: text) -> u64:
+    if label == "key":
+        return 3
+    if label == "iv":
+        return 2
+    if label == "finished":
+        return 8
+    if label == "c hs traffic":
+        return 12
+    if label == "s hs traffic":
+        return 12
+    if label == "derived":
+        return 7
+    return label.len().to_u64()
+
+fn _copy_prefix(src: [u8], n: u64) -> [u8]:
+    var out: [u8] = []
+    var i: u64 = 0
+    while i < n:
+        out.push(src[i].to_u8())
+        i = i + 1
+    out
 
 # ============================================================================
 # hkdf_extract
@@ -19,24 +67,38 @@ fn hkdf_extract(salt: [u8], ikm: [u8]) -> [u8]:
 
     If salt is empty, a string of HashLen zero bytes is used as salt.
     """
-    var effective_salt: [u8] = []
-    if salt.len() == 0:
+    hkdf_extract_with_len(salt, salt.len().to_u64(), ikm, ikm.len().to_u64())
+
+fn hkdf_extract_with_len(salt: [u8], salt_len: u64, ikm: [u8], ikm_len: u64) -> [u8]:
+    if salt_len == 0:
+        var effective_salt: [u8] = []
         var i: u64 = 0
         while i < 32:
             effective_salt.push(0x00)
             i = i + 1
+        return _copy_prefix(sha256_hmac_with_len(effective_salt, 32, ikm, ikm_len), 32)
     else:
+        return _copy_prefix(sha256_hmac_with_len(salt, salt_len, ikm, ikm_len), 32)
+
+fn hkdf_extract_from_list(salt: list, ikm: list) -> [u8]:
+    if salt.len() == 0:
+        var effective_salt: [u8] = []
         var i: u64 = 0
-        while i < salt.len():
-            effective_salt.push(salt[i])
+        while i < 32:
+            effective_salt.push(0x00)
             i = i + 1
-    sha256_hmac(effective_salt, ikm)
+        return _copy_prefix(sha256_hmac_from_list(effective_salt, ikm), 32)
+    else:
+        return _copy_prefix(sha256_hmac_from_list(salt, ikm), 32)
 
 # ============================================================================
 # hkdf_expand
 # ============================================================================
 
 fn hkdf_expand(prk: [u8], info: [u8], length: u64) -> [u8]:
+    hkdf_expand_with_info_len(prk, info, info.len().to_u64(), length)
+
+fn hkdf_expand_with_info_len(prk: [u8], info: [u8], info_len: u64, length: u64) -> [u8]:
     """HKDF-Expand (RFC 5869 §2.3).
 
     OKM = T(1) || T(2) || ... || T(N)  (truncated to length bytes)
@@ -44,38 +106,49 @@ fn hkdf_expand(prk: [u8], info: [u8], length: u64) -> [u8]:
     T(0) = empty string
     T(i) = HMAC-Hash(PRK, T(i-1) || info || i)
     """
+    val digest_len: u64 = 32
+    val block_count = if length == 0 { 0u64 } else { ((length + digest_len - 1) / digest_len) }
     var okm: [u8] = []
+    var okm_len: u64 = 0
     var t_prev: [u8] = []
+    var t_prev_len: u64 = 0
+    val prk_len: u64 = 32
     var counter: u64 = 1
 
-    while okm.len() < length:
+    while okm_len < length:
         # Build input: T(i-1) || info || counter_byte
         var input: [u8] = []
+        var input_len: u64 = 0
 
         # Append T(i-1)
         var j: u64 = 0
-        while j < t_prev.len():
-            input.push(t_prev[j])
+        while j < t_prev_len:
+            input.push(t_prev[j].to_u8())
+            input_len = input_len + 1
             j = j + 1
 
         # Append info
         j = 0
-        while j < info.len():
-            input.push(info[j])
+        while j < info_len:
+            input.push(info[j].to_u8())
+            input_len = input_len + 1
             j = j + 1
 
         # Append counter as single byte
         input.push(counter.to_u8())
+        input_len = input_len + 1
 
-        val t_i = sha256_hmac(prk, input)
+        val t_i = _copy_prefix(sha256_hmac_with_len(prk, prk_len, input, input_len), digest_len)
 
         # Append T(i) to OKM
         j = 0
-        while j < t_i.len():
+        while j < digest_len:
             okm.push(t_i[j])
+            okm_len = okm_len + 1
             j = j + 1
 
         t_prev = t_i
+        t_prev_len = digest_len
         counter = counter + 1
 
     # Truncate to requested length
@@ -84,7 +157,7 @@ fn hkdf_expand(prk: [u8], info: [u8], length: u64) -> [u8]:
     while k < length:
         result.push(okm[k])
         k = k + 1
-    result
+    _copy_prefix(result, length)
 
 # ============================================================================
 # hkdf_expand_label
@@ -100,27 +173,47 @@ fn hkdf_expand_label(secret: [u8], label: text, context: [u8], length: u64) -> [
 
     Then calls hkdf_expand(secret, encoded_label, length).
     """
-    val tls13_prefix = "tls13 "
+    if context.len() == 0:
+        if label == "key" and length == 32:
+            val encoded_key_empty: [u8] = [
+                0x00u8, 0x20u8, 0x09u8,
+                0x74u8, 0x6cu8, 0x73u8, 0x31u8, 0x33u8, 0x20u8, 0x6bu8, 0x65u8, 0x79u8,
+                0x00u8
+            ]
+            return hkdf_expand_with_info_len(secret, encoded_key_empty, 13, length)
+        if label == "iv" and length == 12:
+            val encoded_iv_empty: [u8] = [
+                0x00u8, 0x0cu8, 0x08u8,
+                0x74u8, 0x6cu8, 0x73u8, 0x31u8, 0x33u8, 0x20u8, 0x69u8, 0x76u8,
+                0x00u8
+            ]
+            return hkdf_expand_with_info_len(secret, encoded_iv_empty, 12, length)
+        if label == "finished" and length == 32:
+            val encoded_finished_empty: [u8] = [
+                0x00u8, 0x20u8, 0x0eu8,
+                0x74u8, 0x6cu8, 0x73u8, 0x31u8, 0x33u8, 0x20u8,
+                0x66u8, 0x69u8, 0x6eu8, 0x69u8, 0x73u8, 0x68u8, 0x65u8, 0x64u8,
+                0x00u8
+            ]
+            return hkdf_expand_with_info_len(secret, encoded_finished_empty, 18, length)
 
-    # Compute label bytes: "tls13 " + label
-    var label_bytes: [u8] = []
-
-    # Push "tls13 " prefix (ASCII)
-    label_bytes.push(0x74) # t
-    label_bytes.push(0x6c) # l
-    label_bytes.push(0x73) # s
-    label_bytes.push(0x31) # 1
-    label_bytes.push(0x33) # 3
-    label_bytes.push(0x20) # space
-
-    # Push label string as UTF-8 bytes
-    val label_len = label.len()
+    val label_tail = _label_bytes(label)
+    val label_tail_len = _label_len(label)
+    var label_bytes: [u8] = rt_array_new_with_cap((6 + label_tail_len).to_i64())
+    label_bytes.push(0x74u8)
+    label_bytes.push(0x6cu8)
+    label_bytes.push(0x73u8)
+    label_bytes.push(0x31u8)
+    label_bytes.push(0x33u8)
+    label_bytes.push(0x20u8)
+    var label_bytes_len = 6u64
     var li: u64 = 0
-    while li < label_len:
-        label_bytes.push(label[li].to_u8())
+    while li < label_tail_len:
+        label_bytes.push(label_tail[li])
+        label_bytes_len = label_bytes_len + 1
         li = li + 1
 
-    val full_label_len = label_bytes.len()
+    val context_len = context.len().to_u64()
 
     # Encode HkdfLabel:
     #   2 bytes: length (big-endian u16)
@@ -128,28 +221,36 @@ fn hkdf_expand_label(secret: [u8], label: text, context: [u8], length: u64) -> [
     #   N bytes: label
     #   1 byte:  context length
     #   M bytes: context
-    var encoded: [u8] = []
+    val encoded_cap = (2u64 + 1u64 + label_bytes_len + 1u64 + context_len).to_i64()
+    var encoded: [u8] = rt_array_new_with_cap(encoded_cap)
+    var encoded_len: u64 = 0
 
     # length field (u16 big-endian)
     encoded.push(((length >> 8) & 0xFF).to_u8())
+    encoded_len = encoded_len + 1
     encoded.push((length & 0xFF).to_u8())
+    encoded_len = encoded_len + 1
 
     # label_length
-    encoded.push(full_label_len.to_u8())
+    encoded.push(label_bytes_len.to_u8())
+    encoded_len = encoded_len + 1
 
     # label bytes
     var i: u64 = 0
-    while i < full_label_len:
-        encoded.push(label_bytes[i])
+    while i < label_bytes_len:
+        encoded.push(label_bytes[i].to_u8())
+        encoded_len = encoded_len + 1
         i = i + 1
 
     # context_length
-    encoded.push(context.len().to_u8())
+    encoded.push(context_len.to_u8())
+    encoded_len = encoded_len + 1
 
     # context bytes
     i = 0
-    while i < context.len():
-        encoded.push(context[i])
+    while i < context_len:
+        encoded.push(context[i].to_u8())
+        encoded_len = encoded_len + 1
         i = i + 1
 
-    hkdf_expand(secret, encoded, length)
+    hkdf_expand_with_info_len(secret, encoded, encoded_len, length)

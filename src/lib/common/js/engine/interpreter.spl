@@ -29,6 +29,30 @@ fn _ident_name(expr: Expression) -> text:
         Expression.Identifier(name): name
         _: ""
 
+fn _statement_name(stmt: Statement) -> text:
+    match stmt:
+        Statement.VarDecl(_, _): "VarDecl"
+        Statement.ExprStmt(_): "ExprStmt"
+        Statement.Return(_): "Return"
+        Statement.If(_, _, _): "If"
+        Statement.While(_, _): "While"
+        Statement.For(_, _, _, _): "For"
+        Statement.Block(_): "Block"
+        Statement.FnDecl(_, _, _): "FnDecl"
+        Statement.TryCatch(_, _, _, _): "TryCatch"
+        Statement.Switch(_, _): "Switch"
+        Statement.ForIn(_, _, _): "ForIn"
+        Statement.ForOf(_, _, _): "ForOf"
+        Statement.ThrowStmt(_): "ThrowStmt"
+        Statement.BreakStmt: "BreakStmt"
+        Statement.ContinueStmt: "ContinueStmt"
+        Statement.ClassDecl(_, _, _, _): "ClassDecl"
+        Statement.LetDecl(_, _): "LetDecl"
+        Statement.ConstDecl(_, _): "ConstDecl"
+        Statement.DestructVarDecl(_, _, _): "DestructVarDecl"
+        Statement.DoWhile(_, _): "DoWhile"
+        Statement.LabeledStmt(_, _): "LabeledStmt"
+
 fn _simple_fetch_marker(obj_id: i64, store: ObjectStore) -> bool:
     match store.get_property(obj_id, "__simple_fetch_host"):
         JsValue.Boolean(v): v
@@ -221,6 +245,20 @@ class JsInterpreter:
     pending_async_requests: [PendingAsyncRequest]
     pending_async_request_registry: [PendingAsyncRequest]
     pending_promise_tasks: [PendingPromiseTask]
+    global_var_names: [text]
+    global_var_values: [JsValue]
+    host_window_id: i64
+    host_document_id: i64
+    host_body_id: i64
+    host_location_id: i64
+    host_navigator_id: i64
+    host_chrome_id: i64
+    host_session_storage_id: i64
+    host_local_storage_id: i64
+    host_document_title_value: JsValue
+    host_document_cookie_value: JsValue
+    host_body_inner_html_value: JsValue
+    host_body_text_content_value: JsValue
 
     static fn new(logger: Logger) -> JsInterpreter:
         var env_stack = EnvironmentStack.new()
@@ -248,6 +286,20 @@ class JsInterpreter:
             pending_async_requests: [],
             pending_async_request_registry: [],
             pending_promise_tasks: [],
+            global_var_names: [],
+            global_var_values: [],
+            host_window_id: -1,
+            host_document_id: -1,
+            host_body_id: -1,
+            host_location_id: -1,
+            host_navigator_id: -1,
+            host_chrome_id: -1,
+            host_session_storage_id: -1,
+            host_local_storage_id: -1,
+            host_document_title_value: JsValue.Undefined,
+            host_document_cookie_value: JsValue.Undefined,
+            host_body_inner_html_value: JsValue.Undefined,
+            host_body_text_content_value: JsValue.Undefined,
         )
 
     # Register a native function placeholder and return its index
@@ -261,7 +313,27 @@ class JsInterpreter:
     # Define a native function in the global scope
     me _define_global_native(name: text, native_id: i64):
         val fn_idx = self._register_native(name, native_id)
-        self.env_stack.define_var(self.global_env, name, JsValue.Function(id: fn_idx))
+        self.define_global_value(name, JsValue.Function(id: fn_idx))
+
+    me define_global_value(name: text, value: JsValue):
+        self.env_stack.define_var(self.global_env, name, value)
+
+    me set_object_property_direct(obj_id: i64, key: text, value: JsValue):
+        self.object_store.prop_obj_ids.push(obj_id)
+        self.object_store.prop_keys.push(key)
+        self.object_store.prop_values.push(value)
+        self.object_store.prop_enumerables.push(true)
+        self.object_store.prop_configurables.push(true)
+
+    me lookup_global_value(name: text) -> Option<JsValue>:
+        if val Some(found) = self.env_stack.get_var(self.global_env, name):
+            return Some(found)
+        var i = self.global_var_names.len() - 1
+        while i >= 0:
+            if self.global_var_names.get(i) == name:
+                return Some(self.global_var_values.get(i))
+            i = i - 1
+        nil
 
     # Define a native method on an object
     me _define_method_on(obj_id: i64, method_name: text, native_id: i64):
@@ -272,9 +344,9 @@ class JsInterpreter:
     # Must be a `me` method on JsInterpreter — JsRuntime wrapper hits copy-semantics bug.
     me setup_globals():
         # Global values
-        self.env_stack.define_var(self.global_env, "undefined", JsValue.Undefined)
-        self.env_stack.define_var(self.global_env, "NaN", JsValue.Number(v: js_nan()))
-        self.env_stack.define_var(self.global_env, "Infinity", JsValue.Number(v: js_infinity()))
+        self.define_global_value("undefined", JsValue.Undefined)
+        self.define_global_value("NaN", JsValue.Number(v: js_nan()))
+        self.define_global_value("Infinity", JsValue.Number(v: js_infinity()))
 
         # Global functions (native IDs from runtime.spl)
         self._define_global_native("parseInt", -10)
@@ -288,7 +360,7 @@ class JsInterpreter:
         self._define_method_on(console_id, "log", -1)
         self._define_method_on(console_id, "error", -2)
         self._define_method_on(console_id, "warn", -3)
-        self.env_stack.define_var(self.global_env, "console", JsValue.Object(id: console_id))
+        self.define_global_value("console", JsValue.Object(id: console_id))
 
         # Math object
         val math_id = self.object_store.create_object()
@@ -304,13 +376,13 @@ class JsInterpreter:
         self._define_method_on(math_id, "min", -26)
         self._define_method_on(math_id, "sqrt", -27)
         self._define_method_on(math_id, "pow", -28)
-        self.env_stack.define_var(self.global_env, "Math", JsValue.Object(id: math_id))
+        self.define_global_value("Math", JsValue.Object(id: math_id))
 
         # JSON object
         val json_id = self.object_store.create_object()
         self._define_method_on(json_id, "parse", -30)
         self._define_method_on(json_id, "stringify", -31)
-        self.env_stack.define_var(self.global_env, "JSON", JsValue.Object(id: json_id))
+        self.define_global_value("JSON", JsValue.Object(id: json_id))
 
         # Timer stubs
         self._define_global_native("setTimeout", -40)
@@ -322,11 +394,11 @@ class JsInterpreter:
         val error_fn_id = self.functions.len()
         val error_fn = JsFunction(name: "Error", params: ["message"], body: [], closure_env: -1)
         self.functions.push(error_fn)
-        self.env_stack.define_var(self.global_env, "Error", JsValue.Function(id: error_fn_id))
-        self.env_stack.define_var(self.global_env, "TypeError", JsValue.Function(id: error_fn_id))
-        self.env_stack.define_var(self.global_env, "RangeError", JsValue.Function(id: error_fn_id))
-        self.env_stack.define_var(self.global_env, "ReferenceError", JsValue.Function(id: error_fn_id))
-        self.env_stack.define_var(self.global_env, "SyntaxError", JsValue.Function(id: error_fn_id))
+        self.define_global_value("Error", JsValue.Function(id: error_fn_id))
+        self.define_global_value("TypeError", JsValue.Function(id: error_fn_id))
+        self.define_global_value("RangeError", JsValue.Function(id: error_fn_id))
+        self.define_global_value("ReferenceError", JsValue.Function(id: error_fn_id))
+        self.define_global_value("SyntaxError", JsValue.Function(id: error_fn_id))
 
     me take_pending_async_request() -> i64?:
         if self.pending_async_requests.len() == 0:
@@ -609,6 +681,8 @@ class JsInterpreter:
         val len = program.len()
         while i < len:
             val stmt = program.get(i)
+            if len <= 4:
+                print "[INTDBG] stmt[{i}]={_statement_name(stmt)}"
             result = self.exec_statement(stmt, self.global_env)?
             if self.control_return:
                 break
@@ -1056,11 +1130,39 @@ class JsInterpreter:
                         val frame = self.call_stack.get(self.call_stack.len() - 1)
                         return Ok(frame.this_value)
                     return Ok(JsValue.Undefined)
+                if name == "document":
+                    print "[INTDBG] ident=document env={env} global={self.global_env}"
+                    print "[INTDBG] globals-len={self.global_var_names.len()}"
+                if env == self.global_env:
+                    if name == "window" and self.host_window_id >= 0:
+                        return Ok(JsValue.Object(id: self.host_window_id))
+                    if name == "self" and self.host_window_id >= 0:
+                        return Ok(JsValue.Object(id: self.host_window_id))
+                    if name == "document" and self.host_document_id >= 0:
+                        return Ok(JsValue.Object(id: self.host_document_id))
+                    if name == "location" and self.host_location_id >= 0:
+                        return Ok(JsValue.Object(id: self.host_location_id))
+                    if name == "navigator" and self.host_navigator_id >= 0:
+                        return Ok(JsValue.Object(id: self.host_navigator_id))
+                    if name == "chrome" and self.host_chrome_id >= 0:
+                        return Ok(JsValue.Object(id: self.host_chrome_id))
+                    if name == "sessionStorage" and self.host_session_storage_id >= 0:
+                        return Ok(JsValue.Object(id: self.host_session_storage_id))
+                    if name == "localStorage" and self.host_local_storage_id >= 0:
+                        return Ok(JsValue.Object(id: self.host_local_storage_id))
+                    val cached = self.lookup_global_value(name)
+                    if name == "document":
+                        if cached is Some:
+                            print "[INTDBG] ident=document cache-hit"
+                        else:
+                            print "[INTDBG] ident=document cache-miss"
+                    if val Some(v) = cached:
+                        return Ok(v)
                 val lookup = self.env_stack.get_var(env, name)
                 if val Some(v) = lookup:
                     return Ok(v)
                 # Check global
-                val global_lookup = self.env_stack.get_var(self.global_env, name)
+                val global_lookup = self.lookup_global_value(name)
                 if val Some(v) = global_lookup:
                     return Ok(v)
                 self.logger.warn("ReferenceError: {name} is not defined")
@@ -1300,6 +1402,11 @@ class JsInterpreter:
         if op == "typeof":
             match operand:
                 Expression.Identifier(name):
+                    if env == self.global_env:
+                        val cached = self.lookup_global_value(name)
+                        if val Some(v) = cached:
+                            return Ok(JsValue.String(v: typeof_value(v)))
+                        return Ok(JsValue.String(v: "undefined"))
                     val lookup = self.env_stack.get_var(env, name)
                     if val Some(v) = lookup:
                         return Ok(JsValue.String(v: typeof_value(v)))
@@ -1704,6 +1811,20 @@ class JsInterpreter:
         val obj_val = self.eval_expression(object, env)?
         val obj_id = _get_obj_id(obj_val)
         if obj_id >= 0:
+            if obj_id == self.host_document_id:
+                if property == "title" and not strict_equals(self.host_document_title_value, JsValue.Undefined):
+                    return Ok(self.host_document_title_value)
+                if property == "cookie" and not strict_equals(self.host_document_cookie_value, JsValue.Undefined):
+                    return Ok(self.host_document_cookie_value)
+                if property == "body" and self.host_body_id >= 0:
+                    return Ok(JsValue.Object(id: self.host_body_id))
+                if property == "location" and self.host_location_id >= 0:
+                    return Ok(JsValue.Object(id: self.host_location_id))
+            if obj_id == self.host_body_id:
+                if property == "innerHTML" and not strict_equals(self.host_body_inner_html_value, JsValue.Undefined):
+                    return Ok(self.host_body_inner_html_value)
+                if property == "textContent" and not strict_equals(self.host_body_text_content_value, JsValue.Undefined):
+                    return Ok(self.host_body_text_content_value)
             # Object or Array — check array length first
             if property == "length":
                 val len_val = self.object_store.get_property(obj_id, "length")
@@ -1734,8 +1855,26 @@ class JsInterpreter:
             Expression.Member(object, property):
                 val obj_val = self.eval_expression(object, env)?
                 val obj_id = _get_obj_id(obj_val)
+                print "[INTDBG] assign obj_id={obj_id} property={property}"
                 if obj_id >= 0:
-                    self.object_store.set_property(obj_id, property, rhs)
+                    if obj_id == self.host_document_id:
+                        print "[INTDBG] assign host=document property={property}"
+                        if property == "title":
+                            self.host_document_title_value = rhs
+                            return Ok(rhs)
+                        if property == "cookie":
+                            self.host_document_cookie_value = rhs
+                            return Ok(rhs)
+                    if obj_id == self.host_body_id:
+                        print "[INTDBG] assign host=body property={property}"
+                        if property == "innerHTML":
+                            self.host_body_inner_html_value = rhs
+                            return Ok(rhs)
+                        if property == "textContent":
+                            self.host_body_text_content_value = rhs
+                            return Ok(rhs)
+                    print "[INTDBG] assign direct-store obj_id={obj_id} property={property}"
+                    self.set_object_property_direct(obj_id, property, rhs)
                 return Ok(rhs)
             _:
                 self.logger.warn("Invalid assignment target")
@@ -2264,6 +2403,16 @@ class JsInterpreter:
             return self._native_response_text(this_val)
         if native_id == NATIVE_RESPONSE_JSON:
             return self._native_response_json(this_val)
+        if native_id == NATIVE_STORAGE_GET_ITEM:
+            return self._native_storage_get_item(this_val, arg_vals)
+        if native_id == NATIVE_STORAGE_SET_ITEM:
+            return self._native_storage_set_item(this_val, arg_vals)
+        if native_id == NATIVE_STORAGE_REMOVE_ITEM:
+            return self._native_storage_remove_item(this_val, arg_vals)
+        if native_id == NATIVE_STORAGE_CLEAR:
+            return self._native_storage_clear(this_val)
+        if native_id == NATIVE_STORAGE_KEY:
+            return self._native_storage_key(this_val, arg_vals)
         dispatch_native(native_id, arg_vals, self.logger)
 
     fn _native_fetch(this_val: JsValue, arg_vals: [JsValue], env: i64) -> JsValue:
@@ -2416,6 +2565,75 @@ class JsInterpreter:
         match self.object_store.get_property(response_id, "body"):
             JsValue.String(v): dispatch_native(NATIVE_JSON_PARSE, [JsValue.String(v: v)], self.logger)
             _: JsValue.Undefined
+
+    fn _storage_api_property(key: text) -> bool:
+        key == "__proto__" or
+        key == "getItem" or
+        key == "setItem" or
+        key == "removeItem" or
+        key == "clear" or
+        key == "key" or
+        key == "length"
+
+    fn _storage_keys(storage_id: i64) -> [text]:
+        val obj = self.object_store.get_object(storage_id)
+        var keys: [text] = []
+        for prop in obj.properties:
+            if not self._storage_api_property(prop.key):
+                keys.push(prop.key)
+        keys
+
+    fn _sync_storage_length(storage_id: i64):
+        val keys = self._storage_keys(storage_id)
+        self.object_store.set_property(storage_id, "length", JsValue.Number(v: keys.len().to_f64()))
+
+    fn _native_storage_get_item(this_val: JsValue, arg_vals: [JsValue]) -> JsValue:
+        val storage_id = _get_obj_id(this_val)
+        if storage_id < 0:
+            return JsValue.Undefined
+        val key = if arg_vals.len() > 0: js_to_string(arg_vals.get(0)) else: ""
+        match self.object_store.get_property(storage_id, key):
+            JsValue.Undefined: JsValue.Null
+            JsValue.String(v): JsValue.String(v: v)
+            other: JsValue.String(v: js_to_string(other))
+
+    fn _native_storage_set_item(this_val: JsValue, arg_vals: [JsValue]) -> JsValue:
+        val storage_id = _get_obj_id(this_val)
+        if storage_id < 0:
+            return JsValue.Undefined
+        val key = if arg_vals.len() > 0: js_to_string(arg_vals.get(0)) else: ""
+        val value = if arg_vals.len() > 1: js_to_string(arg_vals.get(1)) else: ""
+        self.object_store.set_property(storage_id, key, JsValue.String(v: value))
+        self._sync_storage_length(storage_id)
+        JsValue.Undefined
+
+    fn _native_storage_remove_item(this_val: JsValue, arg_vals: [JsValue]) -> JsValue:
+        val storage_id = _get_obj_id(this_val)
+        if storage_id < 0:
+            return JsValue.Undefined
+        val key = if arg_vals.len() > 0: js_to_string(arg_vals.get(0)) else: ""
+        self.object_store.remove_property(storage_id, key)
+        self._sync_storage_length(storage_id)
+        JsValue.Undefined
+
+    fn _native_storage_clear(this_val: JsValue) -> JsValue:
+        val storage_id = _get_obj_id(this_val)
+        if storage_id < 0:
+            return JsValue.Undefined
+        for key in self._storage_keys(storage_id):
+            self.object_store.remove_property(storage_id, key)
+        self._sync_storage_length(storage_id)
+        JsValue.Undefined
+
+    fn _native_storage_key(this_val: JsValue, arg_vals: [JsValue]) -> JsValue:
+        val storage_id = _get_obj_id(this_val)
+        if storage_id < 0:
+            return JsValue.Undefined
+        val idx = if arg_vals.len() > 0: f64_to_i64(to_number(arg_vals.get(0))) else: -1
+        val keys = self._storage_keys(storage_id)
+        if idx < 0 or idx >= keys.len():
+            return JsValue.Null
+        JsValue.String(v: keys.get(idx))
 
     # ── String method dispatch ───────────────────────────────────────────
     me _dispatch_string_method(str_val: text, method: text, args: [Expression], env: i64) -> BrowserResult<JsValue>:

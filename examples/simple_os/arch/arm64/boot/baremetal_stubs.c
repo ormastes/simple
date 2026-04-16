@@ -1116,6 +1116,9 @@ RuntimeValue rt_string_split(RuntimeValue str, RuntimeValue delim) {
             arr = rt_array_push(arr, ch);
         } return arr;
     }
+    if (d->len > s->len) {
+        return rt_array_push(arr, str);
+    }
     uint32_t start = 0;
     for (uint32_t i = 0; i <= s->len - d->len; ) {
         uint32_t j; for (j = 0; j < d->len; j++) { if (s->data[i+j] != d->data[j]) break; }

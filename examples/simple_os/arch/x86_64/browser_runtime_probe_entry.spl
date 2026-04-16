@@ -1,0 +1,70 @@
+#![allow(unnamed_duplicate_typed_args)]
+
+use os.kernel.arch.x86_64.console.{serial_init, serial_writeln}
+use os.kernel.arch.x86_64.interrupt.{X86Interrupt}
+use os.kernel.arch.x86_64.arch_init.{arch_x86_64_early_init}
+use os.kernel.abi.syscall_shim.{shim_init}
+use os.kernel.scheduler.scheduler.{Scheduler}
+use os.kernel.ipc.ipc.{IpcManager}
+use os.kernel.log.klog.{KernelLog}
+use examples.simple_os.assets.browser_guest_runtime.{
+    browser_runtime_guest_boot_url,
+    browser_runtime_guest_expected_body,
+    browser_runtime_guest_expected_cookie,
+    browser_runtime_guest_expected_title,
+    resolve_browser_runtime_guest_request}
+use std.common.web.browser_session.{BrowserRequest, BrowserSession}
+
+extern fn serial_println(msg: text)
+extern fn rt_port_outb(port: u16, value: u8)
+
+fn _apply_request(session: BrowserSession, request: BrowserRequest) -> Result<bool, text>:
+    serial_println("[BR] Session request {request.id}: {request.kind} {request.method} {request.url}")
+    val response = resolve_browser_runtime_guest_request(request)
+    serial_println("[BR] Session response {request.id}: status={response.status} body_len={response.body.len()}")
+    if response.error != "":
+        return Err(response.error)
+    session.commit_network_response(response)
+
+fn _pump_runtime_session(session: BrowserSession) -> Result<bool, text>:
+    session.begin_navigation(browser_runtime_guest_boot_url())
+    val _ = _apply_request(
+        session,
+        BrowserRequest.create(
+            id: "document-1",
+            kind: "document",
+            url: browser_runtime_guest_boot_url(),
+            method: "GET",
+            headers: "",
+            body: "",
+            content_type: ""
+        )
+    )?
+
+    if session.current_title != browser_runtime_guest_expected_title():
+        return Err("unexpected runtime title: {session.current_title}")
+    if session.current_body_html != browser_runtime_guest_expected_body():
+        return Err("unexpected runtime body: {session.current_body_html}")
+    if not session.document_cookie().contains(browser_runtime_guest_expected_cookie()):
+        return Err("unexpected runtime cookie: {session.document_cookie()}")
+
+    serial_println("[BR] Runtime settled title={session.current_title} body={session.current_body_html} cookie={session.document_cookie()}")
+    Ok(true)
+
+fn _start():
+    serial_init()
+    serial_writeln("SimpleOS x86_64 browser runtime probe")
+
+    arch_x86_64_early_init()
+    shim_init(Scheduler.new(), IpcManager.new(), KernelLog.new(128))
+    if not X86Interrupt.runtime_installed():
+        X86Interrupt.install_bootstrap_runtime(64)
+
+    var session = BrowserSession.new()
+    match _pump_runtime_session(session):
+        Ok(_) =>
+            serial_println("[BR] Runtime probe passed")
+        Err(e) =>
+            serial_println("[BR] Runtime probe failed: {e}")
+
+    rt_port_outb(0xf4, 0u8)

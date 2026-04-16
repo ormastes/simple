@@ -469,7 +469,7 @@ RuntimeValue string_byte_at(RuntimeValue s, RuntimeValue i)
     if (!IS_HEAP(s)) return ENCODE_INT(0);
     RuntimeString *str = (RuntimeString *)DECODE_PTR(s);
     if (!str || str->hdr.type != HEAP_STRING) return ENCODE_INT(0);
-    int64_t idx = DECODE_INT(i);
+    int64_t idx = (int64_t)i;
     if (idx < 0 || (uint32_t)idx >= str->len) return ENCODE_INT(0);
     return ENCODE_INT((unsigned char)str->data[idx]);
 }
@@ -480,7 +480,7 @@ RuntimeValue string_char_at(RuntimeValue s, RuntimeValue i)
     if (!IS_HEAP(s)) return NIL_VALUE;
     RuntimeString *str = (RuntimeString *)DECODE_PTR(s);
     if (!str || str->hdr.type != HEAP_STRING) return NIL_VALUE;
-    int64_t idx = DECODE_INT(i);
+    int64_t idx = (int64_t)i;
     if (idx < 0 || (uint32_t)idx >= str->len) return NIL_VALUE;
 
     char buf[2];
@@ -494,9 +494,31 @@ RuntimeValue string_char_code(RuntimeValue s, RuntimeValue i)
     if (!IS_HEAP(s)) return ENCODE_INT(0);
     RuntimeString *str = (RuntimeString *)DECODE_PTR(s);
     if (!str || str->hdr.type != HEAP_STRING) return ENCODE_INT(0);
-    int64_t idx = DECODE_INT(i);
+    int64_t idx = (int64_t)i;
     if (idx < 0 || (uint32_t)idx >= str->len) return ENCODE_INT(0);
     return ENCODE_INT((unsigned char)str->data[idx]);
+}
+
+int64_t rt_text_find(RuntimeValue haystack, RuntimeValue needle, int64_t start)
+{
+    if (!IS_HEAP(haystack) || !IS_HEAP(needle)) return -1;
+    RuntimeString *hs = (RuntimeString *)DECODE_PTR(haystack);
+    RuntimeString *nd = (RuntimeString *)DECODE_PTR(needle);
+    if (!hs || hs->hdr.type != HEAP_STRING || !nd || nd->hdr.type != HEAP_STRING) return -1;
+    int64_t start_idx = start;
+    if (start_idx < 0) return -1;
+    if (nd->len == 0) return start_idx;
+    if ((uint32_t)start_idx >= hs->len || nd->len > hs->len) return -1;
+    uint32_t start_u = (uint32_t)start_idx;
+    uint32_t limit = hs->len - nd->len;
+    for (uint32_t i = start_u; i <= limit; i++) {
+        uint32_t j = 0;
+        for (; j < nd->len; j++) {
+            if (hs->data[i + j] != nd->data[j]) break;
+        }
+        if (j == nd->len) return (int64_t)i;
+    }
+    return -1;
 }
 
 RuntimeValue string_from_byte(RuntimeValue b)
@@ -520,14 +542,23 @@ RuntimeValue from_char_code(RuntimeValue code)
     return string_from_char_code(code);
 }
 
+static int64_t _rv_to_index_compat(RuntimeValue v)
+{
+    /* Bare-metal string helpers receive a mix of raw and boxed indices depending
+     * on which lowering/runtime path reached them. Prefer raw values for the
+     * browser/runtime lane, but still accept classic boxed ints. */
+    if (IS_INT(v)) return DECODE_INT(v);
+    return (int64_t)v;
+}
+
 RuntimeValue substring(RuntimeValue s, RuntimeValue start, RuntimeValue end)
 {
     if (!IS_HEAP(s)) return NIL_VALUE;
     RuntimeString *str = (RuntimeString *)DECODE_PTR(s);
     if (!str || str->hdr.type != HEAP_STRING) return NIL_VALUE;
 
-    int64_t a = DECODE_INT(start);
-    int64_t b = DECODE_INT(end);
+    int64_t a = _rv_to_index_compat(start);
+    int64_t b = _rv_to_index_compat(end);
     if (a < 0) a = 0;
     if (b > (int64_t)str->len) b = (int64_t)str->len;
     if (a >= b) return rt_string_from_cstr("");
@@ -612,7 +643,7 @@ RuntimeValue array_get(RuntimeValue arr, RuntimeValue i)
     if (!IS_HEAP(arr)) return NIL_VALUE;
     RuntimeArray *a = (RuntimeArray *)DECODE_PTR(arr);
     if (!a || a->hdr.type != HEAP_ARRAY) return NIL_VALUE;
-    int64_t idx = DECODE_INT(i);
+    int64_t idx = (int64_t)i;
     if (idx < 0 || (uint32_t)idx >= a->len) return NIL_VALUE;
     return a->items[idx];
 }
@@ -622,7 +653,7 @@ RuntimeValue array_set(RuntimeValue arr, RuntimeValue i, RuntimeValue v)
     if (!IS_HEAP(arr)) return NIL_VALUE;
     RuntimeArray *a = (RuntimeArray *)DECODE_PTR(arr);
     if (!a || a->hdr.type != HEAP_ARRAY) return NIL_VALUE;
-    int64_t idx = DECODE_INT(i);
+    int64_t idx = (int64_t)i;
     if (idx < 0 || (uint32_t)idx >= a->len) return NIL_VALUE;
     a->items[idx] = v;
     return v;

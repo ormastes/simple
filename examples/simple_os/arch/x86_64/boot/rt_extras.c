@@ -1246,18 +1246,50 @@ RuntimeValue rt_range(RuntimeValue start, RuntimeValue end) {
     return arr;
 }
 
-RuntimeValue rt_slice(RuntimeValue arr, RuntimeValue start, RuntimeValue end) {
-    RuntimeArray *a = _decode_arr(arr);
-    if (!a) return rt_array_new(ENCODE_INT(0));
-    int64_t s = DECODE_INT(start);
-    int64_t e = DECODE_INT(end);
-    if (s < 0) s = 0;
-    if (e > (int64_t)a->len) e = (int64_t)a->len;
-    RuntimeValue result = rt_array_new(ENCODE_INT(e > s ? e - s : 0));
-    for (int64_t i = s; i < e; i++) {
-        result = rt_array_push(result, a->items[i]);
+static int64_t _rv_to_index(RuntimeValue v) {
+    /* Cranelift bare-metal slice lowering passes raw indices, not boxed ints. */
+    return (int64_t)v;
+}
+
+RuntimeValue rt_slice(RuntimeValue collection, RuntimeValue start, RuntimeValue end, RuntimeValue step) {
+    int64_t s = _rv_to_index(start);
+    int64_t e = _rv_to_index(end);
+    int64_t stride = _rv_to_index(step);
+    if (stride == 0) return NIL_VALUE;
+
+    RuntimeArray *a = _decode_arr(collection);
+    if (a) {
+        int64_t len = (int64_t)a->len;
+        if (s < 0) s = 0;
+        if (e > len) e = len;
+        if (stride != 1) {
+            if (stride > 0 && s >= e) return rt_array_new(ENCODE_INT(0));
+            if (stride < 0 && s <= e) return rt_array_new(ENCODE_INT(0));
+        } else if (s >= e) {
+            return rt_array_new(ENCODE_INT(0));
+        }
+        RuntimeValue result = rt_array_new(ENCODE_INT(e > s ? e - s : 0));
+        for (int64_t i = s; (stride > 0) ? (i < e) : (i > e); i += stride) {
+            result = rt_array_push(result, a->items[i]);
+        }
+        return result;
     }
-    return result;
+
+    RuntimeString *str = _decode_str(collection);
+    if (str) {
+        int64_t len = (int64_t)str->len;
+        if (s < 0) s = 0;
+        if (e > len) e = len;
+        if (stride != 1) {
+            return rt_string_from_cstr("");
+        }
+        if (s >= e) {
+            return rt_string_from_cstr("");
+        }
+        return rt_string_new((RuntimeValue)(uintptr_t)(str->data + s), (RuntimeValue)(e - s));
+    }
+
+    return NIL_VALUE;
 }
 
 

@@ -9,6 +9,14 @@ use os.tls13.hkdf.{hkdf_extract, hkdf_expand_label}
 use os.tls13.transcript.{Transcript, transcript_hash, transcript_empty_hash}
 use os.crypto.sha256.{sha256_hmac}
 
+fn _copy_prefix(src: [u8], n: u64) -> [u8]:
+    var out: [u8] = []
+    var i: u64 = 0
+    while i < n:
+        out.push(src[i].to_u8())
+        i = i + 1
+    out
+
 # ============================================================================
 # Data classes
 # ============================================================================
@@ -49,7 +57,7 @@ fn derive_secret(secret: [u8], label: text, t: Transcript) -> [u8]:
     HKDF-Expand-Label(secret, label, transcript_hash(messages), 32)
     """
     val context = transcript_hash(t)
-    hkdf_expand_label(secret, label, context, 32)
+    _copy_prefix(hkdf_expand_label(secret, label, context, 32), 32)
 
 # ============================================================================
 # tls13_early_secret — first step of the key schedule
@@ -59,7 +67,7 @@ fn tls13_early_secret() -> [u8]:
     """Compute the early secret: HKDF-Extract(0^32, 0^32)."""
     val salt = _zeros(32)
     val ikm = _zeros(32)
-    hkdf_extract(salt, ikm)
+    _copy_prefix(hkdf_extract(salt, ikm), 32)
 
 # ============================================================================
 # tls13_handshake_secret — second step of the key schedule
@@ -72,7 +80,7 @@ fn tls13_handshake_secret(early_secret: [u8], dhe_shared: [u8]) -> [u8]:
     return HKDF-Extract(salt=derived, IKM=dhe_shared)
     """
     val derived = hkdf_expand_label(early_secret, "derived", transcript_empty_hash(), 32)
-    hkdf_extract(derived, dhe_shared)
+    _copy_prefix(hkdf_extract(derived, dhe_shared), 32)
 
 # ============================================================================
 # tls13_master_secret — third step of the key schedule
@@ -86,7 +94,7 @@ fn tls13_master_secret(handshake_secret: [u8]) -> [u8]:
     """
     val derived = hkdf_expand_label(handshake_secret, "derived", transcript_empty_hash(), 32)
     val ikm = _zeros(32)
-    hkdf_extract(derived, ikm)
+    _copy_prefix(hkdf_extract(derived, ikm), 32)
 
 # ============================================================================
 # tls13_traffic_keys — derive AES-128 key and IV from a traffic secret
@@ -99,8 +107,8 @@ fn tls13_traffic_keys(traffic_secret: [u8]) -> TrafficKeys:
     iv  = HKDF-Expand-Label(traffic_secret, "iv",  "", 12)
     """
     val empty: [u8] = []
-    val key = hkdf_expand_label(traffic_secret, "key", empty, 16)
-    val iv = hkdf_expand_label(traffic_secret, "iv", empty, 12)
+    val key = _copy_prefix(hkdf_expand_label(traffic_secret, "key", empty, 16), 16)
+    val iv = _copy_prefix(hkdf_expand_label(traffic_secret, "iv", empty, 12), 12)
     TrafficKeys(key: key, iv: iv)
 
 # ============================================================================
@@ -110,7 +118,7 @@ fn tls13_traffic_keys(traffic_secret: [u8]) -> TrafficKeys:
 fn tls13_finished_key(traffic_secret: [u8]) -> [u8]:
     """Derive the Finished key: HKDF-Expand-Label(traffic_secret, "finished", "", 32)."""
     val empty: [u8] = []
-    hkdf_expand_label(traffic_secret, "finished", empty, 32)
+    _copy_prefix(hkdf_expand_label(traffic_secret, "finished", empty, 32), 32)
 
 # ============================================================================
 # tls13_verify_data — compute Finished verify_data
@@ -119,7 +127,7 @@ fn tls13_finished_key(traffic_secret: [u8]) -> [u8]:
 fn tls13_verify_data(finished_key: [u8], t: Transcript) -> [u8]:
     """Compute verify_data = HMAC-SHA-256(finished_key, transcript_hash(t))."""
     val h = transcript_hash(t)
-    sha256_hmac(finished_key, h)
+    _copy_prefix(sha256_hmac(finished_key, h), 32)
 
 # ============================================================================
 # tls13_compute_handshake_secrets — derive handshake traffic secrets

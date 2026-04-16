@@ -13,6 +13,7 @@ use std.js.types.ast_types.Expression
 use std.js.types.ast_types.Statement
 use std.js.engine.lexer.JsLexer
 use std.js.engine.parser.JsParser
+use std.js.engine.lexer.JsTokenKind
 use std.js.engine.interpreter.JsInterpreter
 use std.js.engine.interpreter_types.JsFunction
 use std.js.engine.interpreter_types.to_number
@@ -21,6 +22,7 @@ use std.js.engine.interpreter_types.to_boolean
 use std.js.engine.interpreter_types.is_truthy
 use std.js.engine.interpreter_types.f64_to_i64
 use std.js.engine.interpreter_types._digit_val
+use std.common.string_core.{char_code}
 
 # ── Prototype chain ──────────────────────────────────────────────────────
 
@@ -407,7 +409,7 @@ class JsRuntime:
     me _define_global_fn(name: text, native_id: i64):
         val fn_idx = self._register_native(name, native_id)
         val fn_val = JsValue.Function(id: fn_idx)
-        self.interpreter.env_stack.define_var(self.interpreter.global_env, name, fn_val)
+        self.interpreter.define_global_value(name, fn_val)
 
     # Define a native method on an object
     me _define_method_on(obj_id: i64, method_name: text, native_id: i64):
@@ -437,8 +439,7 @@ class JsRuntime:
         self._define_method_on(console_id, "log", NATIVE_CONSOLE_LOG)
         self._define_method_on(console_id, "error", NATIVE_CONSOLE_ERROR)
         self._define_method_on(console_id, "warn", NATIVE_CONSOLE_WARN)
-        self.interpreter.env_stack.define_var(
-            self.interpreter.global_env, "console", JsValue.Object(id: console_id))
+        self.interpreter.define_global_value("console", JsValue.Object(id: console_id))
 
         # ── Math object ──────────────────────────────────────────────
         val math_id = self.interpreter.object_store.create_object()
@@ -456,15 +457,13 @@ class JsRuntime:
         self._define_method_on(math_id, "min", NATIVE_MATH_MIN)
         self._define_method_on(math_id, "sqrt", NATIVE_MATH_SQRT)
         self._define_method_on(math_id, "pow", NATIVE_MATH_POW)
-        self.interpreter.env_stack.define_var(
-            self.interpreter.global_env, "Math", JsValue.Object(id: math_id))
+        self.interpreter.define_global_value("Math", JsValue.Object(id: math_id))
 
         # ── JSON object ──────────────────────────────────────────────
         val json_id = self.interpreter.object_store.create_object()
         self._define_method_on(json_id, "parse", NATIVE_JSON_PARSE)
         self._define_method_on(json_id, "stringify", NATIVE_JSON_STRINGIFY)
-        self.interpreter.env_stack.define_var(
-            self.interpreter.global_env, "JSON", JsValue.Object(id: json_id))
+        self.interpreter.define_global_value("JSON", JsValue.Object(id: json_id))
 
         # Promise namespace object
         val promise_ctor_id = self.interpreter.object_store.create_object()
@@ -477,8 +476,7 @@ class JsRuntime:
         self._define_method_on(promise_proto_id, "finally", NATIVE_PROMISE_FINALLY)
         self.interpreter.promise_ctor_id = promise_ctor_id
         self.interpreter.promise_proto_id = promise_proto_id
-        self.interpreter.env_stack.define_var(
-            self.interpreter.global_env, "Promise", JsValue.Object(id: promise_ctor_id))
+        self.interpreter.define_global_value("Promise", JsValue.Object(id: promise_ctor_id))
 
         # ── Timer stubs ──────────────────────────────────────────────
         self._define_global_fn("setTimeout", NATIVE_SET_TIMEOUT)
@@ -501,6 +499,23 @@ class JsRuntime:
     # Evaluate a string of JavaScript source code
     me eval(source: text) -> BrowserResult<JsValue>:
         self.logger.debug("Evaluating JS source ({source.len()} chars)")
+        if source.contains("Runtime Ready"):
+            val ix0 = source[0]
+            val ix1 = source[1]
+            val sl0 = source[0:1]
+            val sl1 = source[1:2]
+            print "[JSDBG] src[0]={ix0} code={char_code(ix0)} src[1]={ix1} code={char_code(ix1)}"
+            print "[JSDBG] src[0:1]={sl0} code={char_code(sl0)} src[1:2]={sl1} code={char_code(sl1)}"
+            var debug_lexer = JsLexer.new(source, self.logger)
+            print "[JSDBG] peek0={debug_lexer.peek()} code={char_code(debug_lexer.peek())} peek1={debug_lexer.peek_at(1)} code={char_code(debug_lexer.peek_at(1))}"
+            var di = 0
+            while di < 12:
+                val _ = debug_lexer.next_token()
+                print "[JSDBG] tok[{di}] kind={debug_lexer.current_kind} value={debug_lexer.current_value}"
+                if debug_lexer.current_kind == "Eof":
+                    di = 12
+                else:
+                    di = di + 1
 
         # Lex + parse
         var parser = JsParser.new(source, self.logger)

@@ -219,7 +219,7 @@ pub fn run_tests(options: TestOptions) -> TestRunResult {
     };
 
     // Create build cache for SMF/native modes
-    let build_cache = if matches!(options.execution_mode, TestExecutionMode::Native) {
+    let build_cache = if matches!(options.execution_mode, TestExecutionMode::Native | TestExecutionMode::Smf) {
         Some(BuildCache::new(options.force_rebuild))
     } else {
         None
@@ -705,10 +705,20 @@ fn execute_test_files(
 
         let result = match options.execution_mode {
             TestExecutionMode::Smf => {
-                // SMF mode doesn't support SSpec DSL compilation
-                // Fall back to safe mode (subprocess with "test" command)
-                eprintln!("[INFO] SMF mode for tests not supported, using safe mode");
-                super::execution::run_test_file_safe_mode(path, options)
+                if let Some(cache) = build_cache {
+                    super::execution::run_test_file_smf_mode(path, cache, options)
+                } else {
+                    TestFileResult {
+                        path: path.to_path_buf(),
+                        passed: 0,
+                        failed: 1,
+                        skipped: 0,
+                        ignored: 0,
+                        duration_ms: 0,
+                        error: Some("Build cache not initialized for SMF mode".to_string()),
+                        individual_results: vec![],
+                    }
+                }
             }
             TestExecutionMode::Native => {
                 if let Some(cache) = build_cache {

@@ -148,49 +148,9 @@ fn run_test_file_smf(file_path: text, options: TestOptions) -> TestFileResult:
             stderr = strip_coverage_blocks(stderr)
         return make_result_from_output(file_path, stdout, stderr, exit_code, duration_ms, options.timeout)
 
-    # No .smf file found - run .spl source directly (interpreter fallback)
-    # Use file_path directly instead of "test" command to avoid infinite recursion
-    var run_args: [text] = [file_path]
-    if options.gc_log:
-        run_args.push("--gc-log")
-    if options.gc_off:
-        run_args.push("--gc=off")
-
-    # Debug: Check if binary exists
-    if not file_exists(binary):
-        print "ERROR: Binary not found: {binary}"
-
-    var stdout = ""
-    var stderr = ""
-    var exit_code = 0
-    if options.max_mem_gb > 0 and not options.no_limits:
-        val memory_bytes = options.max_mem_gb * 1024 * 1024 * 1024
-        val result = process_run_with_limits(binary, run_args, timeout_ms, memory_bytes, 0, 0, 0)
-        stdout = result.stdout
-        stderr = result.stderr
-        exit_code = result.exit_code
-        if result.limit_exceeded:
-            val end2 = time_now_unix_micros()
-            val dur = (end2 - start) / 1000
-            return TestFileResult(path: file_path, passed: 0, failed: 1, skipped: 0, pending: 0,
-                duration_ms: dur, setup_ms: 0, error: "Memory limit exceeded ({options.max_mem_gb}GB)", timed_out: false, cached: false)
-    else:
-        val (out, err, code) = process_run_timeout(binary, run_args, timeout_ms)
-        stdout = out
-        stderr = err
-        exit_code = code
-    val end = time_now_unix_micros()
-    val duration_ms = (end - start) / 1000
-
-    if options.coverage:
-        val combined = stdout + "\n" + stderr
-        val sdn = extract_coverage_sdn(combined)
-        # MEMORY DEBUG: record_coverage_sdn commented out (GROUP 3 isolation)
-        # record_coverage_sdn(sdn)
-        stdout = strip_coverage_blocks(stdout)
-        stderr = strip_coverage_blocks(stderr)
-
-    make_result_from_output(file_path, stdout, stderr, exit_code, duration_ms, options.timeout)
+    # No precompiled artifact exists. Compile to SMF instead of silently
+    # falling back to source execution.
+    run_test_file_native(file_path, options)
 
 fn run_test_file_native_old(file_path: text, options: TestOptions) -> TestFileResult:
     val binary = find_simple_binary()

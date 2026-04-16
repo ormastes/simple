@@ -43,14 +43,12 @@
 # drift. The whole-scene regression gate stays at >=95% match to match the
 # Baseline policy in doc/03_plan/simpleos_small_complete_gui_status_2026-04-13.md.
 #
-# Paint-ready marker (Agent T / Round 5):
-#   We wait on "[desktop-e2e] desktop-ready" as the bare-desktop paint
-#   proxy — the earliest stable marker after the compositor has drawn
-#   wallpaper + dock + shell chrome on the BGA framebuffer, but BEFORE
-#   the browser-demo and hello_world apps are launched and grouped.
-#   Capturing here gives us a deterministic regression target for
-#   compositor / shell / wallpaper / dock changes even while the
-#   downstream shortcut/launcher chain is still being stabilised.
+# Paint-ready markers:
+#   We first wait on "[desktop-e2e] launcher-ready apps=5" to prove the
+#   boot/launcher path reached the canonical ready point, then advance to
+#   "[desktop-e2e] desktop-ready" before capturing. This mirrors the
+#   known-good SYS-GUI-001 lane exactly and avoids the black-frame race that
+#   shows up when this spec waits later on paint-settle.
 #
 #   The "with apps" variant — waiting on remote-grouping:ok to capture
 #   the full desktop including the two default apps — lives in the
@@ -65,20 +63,20 @@
 use std.spec.*
 
 use os.qemu_runner.{OsTarget, get_desktop_browser_target, build_os}
-use os.compositor.qemu_capture.{capture_qemu_vm}
+use os.compositor.qemu_capture.{capture_qemu_vm, send_harness_marker}
 use os.compositor.electron_capture.{CaptureResult}
 use os.compositor.screenshot_compare.{ComparisonResult, compare_with_profile}
 use os.compositor.tolerance_profile.{ToleranceProfile, profile_wm_default}
 use std.common.image.ppm_decode.{decode_ppm_to_argb, PpmImage}
-use std.nogc_sync_mut.ffi.io.{file_read_bytes, file_write_bytes, dir_create_all}
+use std.nogc_sync_mut.ffi.io.{file_read_bytes, file_write_bytes, file_write_text, file_copy, dir_create_all}
 
 use test.qemu.os.common.qemu_os_harness.{
     QemuGuestHandle, can_run_target, file_exists, spawn_guest_with_qmp,
-    stop_guest, wait_for_serial_marker}
+    stop_guest, read_serial_log, wait_for_serial_marker}
 
 extern fn rt_env_get(name: text) -> text
 extern fn rt_thread_sleep(ms: i64)
-extern fn rt_get_cwd() -> text
+extern fn rt_process_run_timeout(cmd: text, args: [text], timeout_ms: i64) -> (text, text, i32)
 
 # ===========================================================================
 # Helpers
@@ -89,10 +87,8 @@ extern fn rt_get_cwd() -> text
 # than redefining an OsTarget here — SYS-GUI-006 must capture exactly the
 # pixels the serial integration lane already proved, not a parallel build.
 #
-# We wrap the call so this spec owns the "+QMP-aware, +gui_mode" tweaks in
-# one place if they diverge from the serial lane later. gui_mode stays off
-# because the harness talks to QEMU via QMP socket and captures via
-# screendump — it does not need the SDL/GTK display window.
+# We wrap the call so this spec owns the scenario-backed machine shape in one
+# place if it diverges from the serial lane later.
 fn _desktop_target() -> OsTarget:
     val base = get_desktop_browser_target()
     OsTarget(
@@ -106,8 +102,6 @@ fn _desktop_target() -> OsTarget:
         qemu_cpu: base.qemu_cpu,
         qemu_memory: base.qemu_memory,
         qemu_bios: base.qemu_bios,
-        # Append -vga std so the guest has a BGA-compatible framebuffer
-        # device QMP screendump can read from. Matches scenario_x64_desktop_test.
         qemu_extra: base.qemu_extra + ["-vga", "std"],
         gui_mode: false
     )
@@ -162,18 +156,30 @@ fn _read_baseline_ppm(path: text) -> (bool, [u32], i32, i32, text):
                     return (true, img.pixels, img.width, img.height, "")
                 Err(msg):
                     return (false, [], 0, 0, "ppm decode failed: {msg}")
-        None:
+        nil:
             return (false, [], 0, 0, "missing baseline: {path}")
 
 fn _update_baseline_requested() -> bool:
     val v = rt_env_get("UPDATE_BASELINE") ?? ""
     v == "1" or v == "true"
 
+fn _compare_ppm_exact(capture_ppm: text, baseline_path: text) -> (bool, text):
+    val result = rt_process_run_timeout("cmp", ["-s", capture_ppm, baseline_path], 5000)
+    if result[2] == 0:
+        return (true, "")
+    (false, "ppm bytes differ")
+
 # Extract the compare-mode branch into a standalone function so the
 # semantic pass on the it{} block never sees base_w / base_h / cmp etc.
 # (the interpreter performs a full semantic pass over all statements in
 # an it{} block before execution, even those after an early return).
-fn _run_compare(handle: QemuGuestHandle, result: CaptureResult, baseline_path: text, nb: i64) -> bool:
+fn _run_compare(handle: QemuGuestHandle, result: CaptureResult, capture_ppm: text, baseline_path: text, nb: i64) -> bool:
+    if nb <= 0:
+        print "[simpleos_desktop_fb_spec] captured blank framebuffer"
+        stop_guest(handle)
+        expect(false).to_equal(true)
+        return false
+
     val (ok, base_pixels, base_w, base_h, err) = _read_baseline_ppm(baseline_path)
     if not ok:
         print "[simpleos_desktop_fb_spec] baseline read failed: {err}"
@@ -187,18 +193,84 @@ fn _run_compare(handle: QemuGuestHandle, result: CaptureResult, baseline_path: t
         expect(false).to_equal(true)
         return false
 
-    val profile = profile_wm_default()
-    val cmp: ComparisonResult = compare_with_profile(
-        result.pixels, base_pixels, result.width, result.height, profile)
-    val pct_whole = cmp.match_percentage / 100
-    val pct_frac = cmp.match_percentage % 100
-    print "[simpleos_desktop_fb_spec] match: {pct_whole}.{pct_frac}% ({cmp.matching_pixels}/{cmp.total_pixels}) profile={profile.name}"
+    val exact = _compare_ppm_exact(capture_ppm, baseline_path)
+    if not exact[0]:
+        print "[simpleos_desktop_fb_spec] baseline mismatch: {exact[1]}"
+        stop_guest(handle)
+        expect(false).to_equal(true)
+        return false
 
     stop_guest(handle)
 
     expect(nb > 0).to_equal(true)
-    expect(cmp.match_percentage >= 9500).to_equal(true)
+    expect(true).to_equal(true)
     true
+
+fn _persist_failure_artifacts(handle: QemuGuestHandle, capture_ppm: text, label: text, reason: text):
+    dir_create_all("build/os")
+    val serial_snapshot = "build/os/{label}_failure_serial.log"
+    val summary_path = "build/os/{label}_failure_summary.txt"
+    val serial_output = read_serial_log(handle)
+    file_write_text(serial_snapshot, serial_output)
+    var summary = "reason={reason}\nserial_log={serial_snapshot}\ncapture_src={capture_ppm}\n"
+    if file_exists(capture_ppm):
+        val capture_snapshot = "build/os/{label}_failure_capture.ppm"
+        val copied = file_copy(capture_ppm, capture_snapshot)
+        summary = summary + "capture_copy={capture_snapshot}\ncopy_ok={copied}\n"
+    file_write_text(summary_path, summary)
+
+fn _run_live_capture(target: OsTarget, qmp_socket: text, serial_log: text, capture_ppm: text, baseline_path: text) -> bool:
+    match spawn_guest_with_qmp(target, qmp_socket, serial_log):
+        Ok(handle):
+            val saw_launcher = wait_for_serial_marker(handle, "[desktop-e2e] launcher-ready apps=5", 60000)
+            if not saw_launcher:
+                _persist_failure_artifacts(
+                    handle,
+                    capture_ppm,
+                    "simpleos_desktop_fb_spec",
+                    "launcher-ready apps=5 marker not observed before capture")
+                stop_guest(handle)
+                return false
+
+            val ready = wait_for_serial_marker(handle, "[desktop-e2e] desktop-ready", 30000)
+            if not ready:
+                _persist_failure_artifacts(
+                    handle,
+                    capture_ppm,
+                    "simpleos_desktop_fb_spec",
+                    "desktop-ready marker not observed before capture")
+                stop_guest(handle)
+                return false
+
+            val result = capture_qemu_vm(qmp_socket, capture_ppm)
+            send_harness_marker(qmp_socket, "[harness] screendump-complete")
+            if not result.success:
+                print "[simpleos_desktop_fb_spec] QMP screendump failed: {result.error}"
+                _persist_failure_artifacts(handle, capture_ppm, "simpleos_desktop_fb_spec", result.error)
+                stop_guest(handle)
+                return false
+
+            val nb = _non_black_count(result.pixels)
+            print "[simpleos_desktop_fb_spec] captured {result.width}x{result.height}, non-black pixels: {nb} of {result.pixels.len()}"
+
+            if _update_baseline_requested():
+                val wrote = _write_ppm_local(
+                    result.pixels, result.width, result.height, baseline_path)
+                print "[simpleos_desktop_fb_spec] UPDATE_BASELINE=1 wrote baseline: {baseline_path} (ok={wrote})"
+                stop_guest(handle)
+                return wrote and nb > 0
+
+            if not file_exists(baseline_path):
+                val wrote = _write_ppm_local(
+                    result.pixels, result.width, result.height, baseline_path)
+                print "[simpleos_desktop_fb_spec] no baseline found, recorded: {baseline_path} (ok={wrote})"
+                stop_guest(handle)
+                return wrote and nb > 0
+
+            _run_compare(handle, result, capture_ppm, baseline_path, nb)
+        Err(err):
+            print "[simpleos_desktop_fb_spec] failed to spawn guest: {err}"
+            false
 
 
 # Round-12 harness-race fix: build the kernel at most once per spec run.
@@ -235,6 +307,7 @@ describe "SimpleOS desktop framebuffer baseline (SYS-GUI-006)":
         # previous it{} was skipped for any reason.
         expect(_build_once(target)).to_equal(true)
         expect(file_exists(target.output)).to_equal(true)
+        expect(ensure_desktop_disk_image()).to_equal(true)
 
         # Host may not have qemu-system-x86_64 installed — skip the live
         # capture step but keep the build assertion as the hard gate so
@@ -249,128 +322,14 @@ describe "SimpleOS desktop framebuffer baseline (SYS-GUI-006)":
         # Round-15 fix: QEMU cwd is restricted — screendump with a relative
         # path returns "Permission denied". Use an absolute path so QEMU can
         # write the PPM regardless of its working directory.
-        val _cwd = rt_get_cwd()
-        val capture_ppm = "{_cwd}/build/os/simpleos_desktop_capture.ppm"
+        val capture_ppm = "/tmp/simpleos_desktop_capture.ppm"
         val baseline_dir = "test/baselines/simpleos_desktop_framebuffer"
         val baseline_path = "{baseline_dir}/desktop_scene.ppm"
 
         dir_create_all(baseline_dir)
         dir_create_all("build/os")
 
-        # Self-spawn QEMU with a QMP server socket and stdout/stderr piped
-        # to serial_log. The harness polls for the socket to appear (~10s)
-        # before returning, and kills the process on any error path.
-        match spawn_guest_with_qmp(target, qmp_socket, serial_log):
-            Ok(handle):
-                # SYS-GUI-006 Round-13 harness-race mitigation:
-                # `rt_process_is_running` currently returns false for live
-                # children spawned via rt_process_spawn_async (measured in
-                # Round-13 — dedicated runtime bug, out of scope for this
-                # round). wait_for_serial_marker reads the log BEFORE it
-                # checks is_running, so if the serial log contains the
-                # desktop-ready marker on the FIRST iteration of its 100ms
-                # poll, the function still returns true even with the
-                # broken is_running probe.
-                print "[simpleos_desktop_fb_spec] R13 pre-wait sleep for serial-log flush"
-                rt_thread_sleep(2000)
-                # Wait for the bare-desktop paint marker — compositor has
-                # painted wallpaper + dock + shell chrome at least once.
-                # This captures the deterministic "bare desktop" scene
-                # BEFORE the default apps are launched, which is a valid
-                # regression target for compositor / shell / wallpaper /
-                # dock changes even while the downstream app-launch chain
-                # (shortcut:ok / remote-grouping:ok) is still unstable.
-                # The "with apps" variant lives in the sibling spec and
-                # waits on remote-grouping:ok instead.
-                # Round-12: raised from 60000 → 180000ms. Combined with the
-                # _build_once() fix above this is overkill (build no longer
-                # burns the budget), but it also covers slower CI hardware
-                # where QEMU cold-boot + desktop paint may exceed 60s.
-                val saw_ready = wait_for_serial_marker(
-                    handle, "[desktop-e2e] desktop-ready", 180000)
-                if not saw_ready:
-                    # Round-12 analysis: wait_for_serial_marker polls every
-                    # 100ms, and on this spec QEMU exits only ~244ms after
-                    # emitting desktop-ready (kernel crashes on the
-                    # subsequent launcher_shortcut_dispatch → shortcut:fail
-                    # → return false → isa-debug-exit path in the baremetal
-                    # kernel with no NVMe). The harness's inner early-exit
-                    # branch reads a stale pre-flush serial_output and
-                    # returns false even when the post-exit flushed log
-                    # contains the marker. See
-                    # doc/08_tracking/todo/sys_gui_006_round12_status_2026-04-14.md
-                    # for the full race analysis and measured window.
-                    # LIVE-GREEN via QMP screendump is architecturally
-                    # impossible without an OS-side fix: the kernel must
-                    # stop crashing after desktop-ready so QEMU stays
-                    # alive long enough for screendump. That OS change
-                    # is out of scope for this spec-only round.
-                    print "[simpleos_desktop_fb_spec] desktop paint-ready marker not seen within 180s (harness race + early QEMU exit — see Round-12 status)"
-                    stop_guest(handle)
-                    expect(false).to_equal(true)
-                    return
-
-                # Capture framebuffer via QMP screendump.
-                # Round-13 note: `capture_qemu_vm` transitively calls
-                # `shell(cmd)` from src/lib/nogc_sync_mut/qemu/qmp_client.spl
-                # (qmp_send → shell(cmd) via `use std.io.{shell}`). `std.io`
-                # does NOT export a `shell` function — the name resolves to
-                # the class `shell` in src/compiler_rust/lib/std/src/shell.spl
-                # which only has static methods. The interpreter therefore
-                # raises "too many arguments for class `shell` constructor"
-                # and the spec body aborts silently with a failing expect.
-                # This is a pre-existing qmp_client.spl bug, blocks LIVE-
-                # GREEN, and requires a std.io/qmp_client fix in a dedicated
-                # round (Round-14+). Paint-settle + pre-wait in this round
-                # do clear the harness-race portion of the blocker (saw_ready
-                # now returns true on the first iteration).
-                val result = capture_qemu_vm(qmp_socket, capture_ppm)
-                if not result.success:
-                    print "[simpleos_desktop_fb_spec] QMP screendump failed: {result.error}"
-                    stop_guest(handle)
-                    expect(false).to_equal(true)
-                    return
-
-                val nb = _non_black_count(result.pixels)
-                print "[simpleos_desktop_fb_spec] captured {result.width}x{result.height}, non-black pixels: {nb} of {result.pixels.len()}"
-
-                # Update-baseline mode: intentional visual review path.
-                # Writes the captured frame as the new baseline, tears
-                # down the guest, and passes. Operator is expected to
-                # eyeball test/baselines/simpleos_desktop_framebuffer
-                # before committing the updated PPM.
-                if _update_baseline_requested():
-                    val wrote = _write_ppm_local(
-                        result.pixels, result.width, result.height, baseline_path)
-                    print "[simpleos_desktop_fb_spec] UPDATE_BASELINE=1 wrote baseline: {baseline_path} (ok={wrote})"
-                    stop_guest(handle)
-                    expect(wrote).to_equal(true)
-                    expect(nb > 0).to_equal(true)
-                    return
-
-                # First run convenience: if the baseline is missing or
-                # still a zero-byte placeholder, record it now and pass.
-                # Self-healing bootstrap on a fresh checkout — the next
-                # run exercises real compare.
-                # Round-15: check file_exists first to avoid calling
-                # file_read_bytes on a missing file — the interpreter-level
-                # rt_file_read_bytes returns Option<[u8]> for missing files,
-                # causing .len() to fail on the enum value.
-                if not file_exists(baseline_path):
-                    val wrote = _write_ppm_local(
-                        result.pixels, result.width, result.height, baseline_path)
-                    print "[simpleos_desktop_fb_spec] no baseline found, recorded: {baseline_path} (ok={wrote})"
-                    stop_guest(handle)
-                    expect(wrote).to_equal(true)
-                    expect(nb > 0).to_equal(true)
-                    return
-
-                # Compare mode: delegated to _run_compare to keep base_w /
-                # base_h / cmp etc. out of the it{} block's semantic pass.
-                _run_compare(handle, result, baseline_path, nb)
-            Err(err):
-                print "[simpleos_desktop_fb_spec] failed to spawn guest: {err}"
-                expect(false).to_equal(true)
+        expect(_run_live_capture(target, qmp_socket, serial_log, capture_ppm, baseline_path)).to_equal(true)
 
     it "has a baseline directory for simpleos_desktop_framebuffer captures":
         val baseline_dir = "test/baselines/simpleos_desktop_framebuffer"

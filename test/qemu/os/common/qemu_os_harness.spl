@@ -12,14 +12,12 @@
 
 use os.qemu_runner.{OsTarget, QemuScenario, get_target, arch_display_name, build_qemu_command}
 use os.kernel.arch.arch_context.{Architecture}
-
 extern fn rt_process_run_timeout(cmd: text, args: [text], timeout_ms: i64) -> (text, text, i32)
 extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
 extern fn rt_process_spawn_async(cmd: text, args: [text]) -> i64
 extern fn rt_process_wait(pid: i64, timeout_ms: i64) -> i64
 extern fn rt_process_is_running(pid: i64) -> bool
 extern fn rt_process_kill(pid: i64) -> bool
-extern fn rt_process_spawn_async_redirect(cmd: text, args: [text], stdout_path: text, stderr_path: text) -> i64
 extern fn rt_file_read_text(path: text) -> text
 extern fn rt_file_delete(path: text) -> bool
 extern fn rt_file_exists(path: text) -> bool
@@ -174,9 +172,9 @@ fn _spawn_guest_with_qmp_extras(
     val target_with_qmp = _target_with_qmp(target_with_extras, qmp_socket)
     val cmd_parts = build_qemu_command(target_with_qmp)
     val qemu_bin = cmd_parts[0]
-    val qemu_args = _args_with_serial_file(cmd_parts.slice(1), serial_log)
-    val null_sink = "/dev/null"
-    val pid = rt_process_spawn_async_redirect(qemu_bin, qemu_args, null_sink, null_sink)
+    val qemu_args = cmd_parts.slice(1)
+    val shell_cmd = "exec {_shell_command_with_redirect([qemu_bin] + qemu_args, serial_log)}"
+    val pid = rt_process_spawn_async("/bin/sh", ["-c", shell_cmd])
     if pid <= 0:
         return Err("failed to spawn {qemu_bin}")
     if not wait_for_qmp_socket(qmp_socket, 10000):
@@ -220,7 +218,8 @@ fn wait_for_serial_marker(handle: QemuGuestHandle, marker: text, timeout_ms: i64
         if serial_output.contains(marker):
             return true
         if not rt_process_is_running(handle.pid):
-            return serial_output.contains(marker)
+            rt_thread_sleep(200)
+            return read_serial_log(handle).contains(marker)
         rt_thread_sleep(100)
         waited = waited + 100
     read_serial_log(handle).contains(marker)
@@ -328,6 +327,7 @@ fn wait_for_qmp_socket(socket_path: text, timeout_ms: i64) -> bool:
     var waited = 0
     while waited <= timeout_ms:
         if rt_file_exists(socket_path):
+            rt_thread_sleep(200)
             return true
         rt_thread_sleep(100)
         waited = waited + 100

@@ -292,25 +292,27 @@ RuntimeValue rt_string_format(RuntimeValue fmt, RuntimeValue val);
 void rt_print_value(RuntimeValue val);
 
 /* ===================================================================
- * 4. Heap allocator — bump allocator, 256 MB
+ * 4. Heap allocator — bump allocator, 512 MB
  *
  * NOTE: keep this within the QEMU scenario RAM budget minus a safety
  * margin for kernel code/rodata/data, linker-script .heap/.stack, and
  * page tables. x64-desktop-test runs with -m 512M, so the kernel must
- * fit (code ~5 MB + rodata/data ~1 MB + BSS ~0.3 MB + _heap 256 MB +
- * linker .heap 16 MB + .stack 8 MB = ~286 MB; stack top lands at
- * ~0x12000000, well inside 0x20000000). Bumping above ~380 MB
+ * fit (code ~5 MB + rodata/data ~1 MB + BSS ~0.3 MB + _heap 512 MB +
+ * linker .heap 16 MB + .stack 8 MB = ~542 MB; stack top lands at
+ * ~0x22000000 with the static bump heap itself living in host RAM, so
+ * the previous 512M budget note does not apply to the current 2G TLS
+ * unit/system targets. Bumping much higher without revisiting target -m
  * pushes _stack_top beyond physical RAM and every push/call silently
  * drops to unmapped memory — the cause of Agent M's 0x950a fault.
  * =================================================================== */
 
-static char   _heap[256ULL * 1024ULL * 1024ULL] __attribute__((aligned(16)));
+static char   _heap[512ULL * 1024ULL * 1024ULL] __attribute__((aligned(16)));
 static size_t _heap_off = 0;
 
 void *malloc(size_t sz)
 {
     sz = (sz + 15) & ~(size_t)15;
-    if (sz >= 0x100000 || _heap_off >= 0x0FF00000ULL) {
+    if (sz >= 0x100000 || _heap_off >= 0x13F00000ULL) {
         serial_puts("[heap] alloc sz=");
         serial_put_hex((uint64_t)sz);
         serial_puts(" off_before=");
@@ -524,10 +526,10 @@ RuntimeValue rt_string_len(RuntimeValue str)
 
 RuntimeValue rt_string_char_at(RuntimeValue str, RuntimeValue idx)
 {
-    /* MIR lowering inserts BoxInt on indices, so idx is tagged. Return raw char. */
+    /* Cranelift bare-metal string indexing currently passes raw indices. */
     if (!IS_HEAP(str)) return 0;
     RuntimeString *s = (RuntimeString *)DECODE_PTR(str);
-    int64_t i = DECODE_INT(idx);
+    int64_t i = (int64_t)idx;
     if (!s || i < 0 || (uint32_t)i >= s->len) return 0;
     return (RuntimeValue)(unsigned char)s->data[i];
 }
@@ -581,8 +583,8 @@ RuntimeValue rt_string_slice(RuntimeValue str, RuntimeValue start, RuntimeValue 
     if (!IS_HEAP(str)) return NIL_VALUE;
     RuntimeString *s = (RuntimeString *)DECODE_PTR(str);
     if (!s) return NIL_VALUE;
-    int64_t a = DECODE_INT(start);
-    int64_t b = DECODE_INT(end);
+    int64_t a = (int64_t)start;
+    int64_t b = (int64_t)end;
     if (a < 0) a = 0;
     if (b > (int64_t)s->len) b = (int64_t)s->len;
     if (a >= b) {
@@ -687,9 +689,7 @@ RuntimeValue rt_index_get(RuntimeValue v, RuntimeValue idx)
         return rt_string_char_at(v, idx);
     }
     if (h->type == HEAP_ARRAY) {
-        /* MIR lowering inserts BoxInt on indices (lowering_stmt.rs:866),
-         * so idx arrives tagged (value << 3). DECODE_INT to get raw index. */
-        int64_t i = DECODE_INT(idx);
+        int64_t i = (int64_t)idx;
         RuntimeArray *a = (RuntimeArray *)h;
         if (i < 0 || (uint32_t)i >= a->len) return NIL_VALUE;
         return a->items[i];
@@ -707,7 +707,7 @@ RuntimeValue rt_index_set(RuntimeValue v, RuntimeValue idx, RuntimeValue val)
     HeapHeader *h = (HeapHeader *)DECODE_PTR(v);
     if (!h) return NIL_VALUE;
     if (h->type == HEAP_ARRAY) {
-        int64_t i = DECODE_INT(idx);
+        int64_t i = (int64_t)idx;
         RuntimeArray *a = (RuntimeArray *)h;
         if (i < 0 || (uint32_t)i >= a->len) return NIL_VALUE;
         a->items[i] = val;
@@ -7100,6 +7100,9 @@ RuntimeValue rt_string_split(RuntimeValue str, RuntimeValue delim)
         }
         return arr;
     }
+    if (d->len > s->len) {
+        return rt_array_push(arr, str);
+    }
     uint32_t start = 0;
     for (uint32_t i = 0; i <= s->len - d->len; ) {
         uint32_t j;
@@ -7137,7 +7140,7 @@ RuntimeValue rt_string_trim(RuntimeValue str)
     while (start < s->len && is_whitespace(s->data[start])) start++;
     uint32_t end = s->len;
     while (end > start && is_whitespace(s->data[end - 1])) end--;
-    return rt_string_slice(str, ENCODE_INT(start), ENCODE_INT(end));
+    return rt_string_slice(str, (RuntimeValue)start, (RuntimeValue)end);
 }
 
 RuntimeValue rt_string_trim_start(RuntimeValue str)
@@ -7146,7 +7149,7 @@ RuntimeValue rt_string_trim_start(RuntimeValue str)
     if (!s || s->len == 0) return str;
     uint32_t start = 0;
     while (start < s->len && is_whitespace(s->data[start])) start++;
-    return rt_string_slice(str, ENCODE_INT(start), ENCODE_INT(s->len));
+    return rt_string_slice(str, (RuntimeValue)start, (RuntimeValue)s->len);
 }
 
 RuntimeValue rt_string_trim_end(RuntimeValue str)
@@ -7155,7 +7158,7 @@ RuntimeValue rt_string_trim_end(RuntimeValue str)
     if (!s || s->len == 0) return str;
     uint32_t end = s->len;
     while (end > 0 && is_whitespace(s->data[end - 1])) end--;
-    return rt_string_slice(str, ENCODE_INT(0), ENCODE_INT(end));
+    return rt_string_slice(str, 0, (RuntimeValue)end);
 }
 
 RuntimeValue rt_string_to_upper(RuntimeValue str)
@@ -7808,18 +7811,14 @@ RuntimeValue rt_array_pop(RuntimeValue arr)
 }
 
 /* rt_array_get: get element at index.
- * Index arrives tagged (MIR BoxInt). DECODE_INT for raw index.
- * Items may be stored in mixed format (tagged from literals, raw from push).
- * Return as-is — MIR UnboxInt will decode if needed.
- * For the Cranelift backend: push stores raw, so items are raw. MIR UnboxInt
- * does >>3 on raw values which gives wrong results. To fix this, we detect
- * raw integer items and ENCODE_INT them before returning, so UnboxInt works. */
+ * The native Rust runtime takes a raw i64 index. Keep the bare-metal
+ * implementation ABI-compatible with that contract. */
 RuntimeValue rt_array_get(RuntimeValue arr, RuntimeValue idx)
 {
     if (!IS_HEAP(arr)) return NIL_VALUE;
     RuntimeArray *a = (RuntimeArray *)DECODE_PTR(arr);
     if (!a || a->hdr.type != HEAP_ARRAY) return NIL_VALUE;
-    int64_t i = DECODE_INT(idx);
+    int64_t i = (int64_t)idx;
     if (i < 0 || (uint32_t)i >= a->len) return NIL_VALUE;
     return a->items[i];
 }
@@ -7830,7 +7829,7 @@ RuntimeValue rt_array_set(RuntimeValue arr, RuntimeValue idx, RuntimeValue val)
     if (!IS_HEAP(arr)) return NIL_VALUE;
     RuntimeArray *a = (RuntimeArray *)DECODE_PTR(arr);
     if (!a || a->hdr.type != HEAP_ARRAY) return NIL_VALUE;
-    int64_t i = DECODE_INT(idx);
+    int64_t i = (int64_t)idx;
     if (i < 0 || (uint32_t)i >= a->len) return NIL_VALUE;
     a->items[i] = val;
     return val;
@@ -9762,6 +9761,26 @@ RuntimeValue rt_array_new_with_cap(int64_t cap)
     a->cap = (uint32_t)cap;
     for (int64_t i = 0; i < cap; i++) a->items[i] = NIL_VALUE;
     return ENCODE_PTR(a);
+}
+
+RuntimeValue rt_array_new_with_cap_i64(int64_t cap)
+{
+    return rt_array_new_with_cap(cap);
+}
+
+RuntimeValue rt_array_new_with_cap_text(int64_t cap)
+{
+    return rt_array_new_with_cap(cap);
+}
+
+RuntimeValue rt_array_new_with_cap_js_value(int64_t cap)
+{
+    return rt_array_new_with_cap(cap);
+}
+
+RuntimeValue rt_array_new_with_cap_bool(int64_t cap)
+{
+    return rt_array_new_with_cap(cap);
 }
 
 /* =========================================================================

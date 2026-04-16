@@ -6,8 +6,7 @@ use std.js.engine.js_error.{JsError, script_error, Logger, LogLevel, BrowserResu
 use std.js.types.pair.{Pair}
 use std.js.types.js_types.JsValue
 use std.js.types.ast_types.{Expression, Statement, SwitchCase, FnParam, DestructProp, ImportSpec, ExportSpec}
-use std.js.engine.lexer.JsLexer
-use std.js.engine.lexer.JsToken
+use std.js.engine.lexer.{JsLexer, token_kind_name}
 use std.js.engine.lexer.JsTokenKind
 
 # ── Helpers ──────────────────────────────────────────────────────────────
@@ -17,56 +16,80 @@ fn _get_ident_name(expr: Expression) -> text:
         Expression.Identifier(name): name
         _: ""
 
+fn _is_token(kind_name: text, kind: JsTokenKind) -> bool:
+    kind_name == token_kind_name(kind)
+
+fn _clone_text(value: text) -> text:
+    value.substring(0, value.len())
+
 # ── Parser ───────────────────────────────────────────────────────────────
 
 class JsParser:
     lexer: JsLexer
-    current: JsToken
-    previous: JsToken
+    current_kind: text
+    current_value: text
+    current_line: i64
+    current_col: i64
+    previous_kind: text
+    previous_value: text
+    previous_line: i64
+    previous_col: i64
     logger: Logger
 
     static fn new(input: text, logger: Logger) -> JsParser:
         var lex = JsLexer.new(input, logger)
-        val first_token = lex.next_token()
-        val prev = JsToken.eof(1, 1)
+        val _ = lex.next_token()
         JsParser(
             lexer: lex,
-            current: first_token,
-            previous: prev,
+            current_kind: lex.current_kind,
+            current_value: _clone_text(lex.current_value),
+            current_line: lex.current_line,
+            current_col: lex.current_col,
+            previous_kind: "Eof",
+            previous_value: "",
+            previous_line: 1,
+            previous_col: 1,
             logger: logger,
         )
 
     # ── Helpers ──────────────────────────────────────────────────────────
 
     # Advance to the next token, returning the consumed one
-    me advance() -> JsToken:
-        self.previous = self.current
-        self.current = self.lexer.next_token()
-        self.previous
+    me advance():
+        self.previous_kind = self.current_kind
+        self.previous_value = _clone_text(self.current_value)
+        self.previous_line = self.current_line
+        self.previous_col = self.current_col
+        val _ = self.lexer.next_token()
+        self.current_kind = self.lexer.current_kind
+        self.current_value = _clone_text(self.lexer.current_value)
+        self.current_line = self.lexer.current_line
+        self.current_col = self.lexer.current_col
 
     # Check if the current token matches a given kind
     fn check(kind: JsTokenKind) -> bool:
-        self.current.kind == kind
+        self.current_kind == token_kind_name(kind)
 
     # Consume the current token if it matches, return true; otherwise false
     me match_token(kind: JsTokenKind) -> bool:
-        if self.current.kind == kind:
+        if self.current_kind == token_kind_name(kind):
             self.advance()
             return true
         false
 
     # Expect the current token to be a given kind; consume and return it, or error
-    me expect(kind: JsTokenKind) -> BrowserResult<JsToken>:
-        if self.current.kind == kind:
-            val tok = self.advance()
-            return Ok(tok)
-        val msg = "Expected token kind {kind} but got {self.current.kind} ('{self.current.value}') at line {self.current.line}:{self.current.col}"
+    me expect(kind: JsTokenKind) -> BrowserResult<text>:
+        if self.current_kind == token_kind_name(kind):
+            val value = _clone_text(self.current_value)
+            self.advance()
+            return Ok(value)
+        val msg = "Expected token kind {kind} but got {self.current_kind} ('{self.current_value}') at line {self.current_line}:{self.current_col}"
         self.logger.error(msg)
         Err(script_error(msg))
 
     # Check if we've reached end-of-file
     fn is_at_end() -> bool:
-        self.current.kind == JsTokenKind.Eof
+        self.current_kind == "Eof"
 
     # ── Program ──────────────────────────────────────────────────────────
 
@@ -80,53 +103,53 @@ class JsParser:
     # ── Statements ───────────────────────────────────────────────────────
 
     me parse_statement() -> BrowserResult<Statement>:
-        val kind = self.current.kind
+        val kind = self.current_kind
 
-        if kind == JsTokenKind.Var or kind == JsTokenKind.Let or kind == JsTokenKind.Const:
-            return self.parse_var_declaration(self.current.value)
+        if _is_token(kind, JsTokenKind.Var) or _is_token(kind, JsTokenKind.Let) or _is_token(kind, JsTokenKind.Const):
+            return self.parse_var_declaration(self.current_value)
 
-        if kind == JsTokenKind.Function:
+        if _is_token(kind, JsTokenKind.Function):
             return self.parse_function_declaration()
 
-        if kind == JsTokenKind.Return:
+        if _is_token(kind, JsTokenKind.Return):
             return self.parse_return_statement()
 
-        if kind == JsTokenKind.If:
+        if _is_token(kind, JsTokenKind.If):
             return self.parse_if_statement()
 
-        if kind == JsTokenKind.While:
+        if _is_token(kind, JsTokenKind.While):
             return self.parse_while_statement()
 
-        if kind == JsTokenKind.For:
+        if _is_token(kind, JsTokenKind.For):
             return self.parse_for_statement()
 
-        if kind == JsTokenKind.OpenBrace:
+        if _is_token(kind, JsTokenKind.OpenBrace):
             val block = self.parse_block()?
             return Ok(Statement.Block(stmts: block))
 
-        if kind == JsTokenKind.Try:
+        if _is_token(kind, JsTokenKind.Try):
             return self.parse_try_statement()
 
-        if kind == JsTokenKind.Switch:
+        if _is_token(kind, JsTokenKind.Switch):
             return self.parse_switch_statement()
 
-        if kind == JsTokenKind.Throw:
+        if _is_token(kind, JsTokenKind.Throw):
             return self.parse_throw_statement()
 
-        if kind == JsTokenKind.Class:
+        if _is_token(kind, JsTokenKind.Class):
             return self.parse_class_declaration()
 
-        if kind == JsTokenKind.Break:
+        if _is_token(kind, JsTokenKind.Break):
             self.advance()
             self.match_token(JsTokenKind.Semicolon)
             return Ok(Statement.BreakStmt)
 
-        if kind == JsTokenKind.Continue:
+        if _is_token(kind, JsTokenKind.Continue):
             self.advance()
             self.match_token(JsTokenKind.Semicolon)
             return Ok(Statement.ContinueStmt)
 
-        if kind == JsTokenKind.Do:
+        if _is_token(kind, JsTokenKind.Do):
             return self.parse_do_while_statement()
 
         self.parse_expression_statement()
@@ -143,8 +166,7 @@ class JsParser:
             self.match_token(JsTokenKind.Semicolon)
             return Ok(Statement.DestructVarDecl(pattern: pattern, init: init_expr, kind: kind))
 
-        val name_tok = self.expect(JsTokenKind.Identifier)?
-        val name = name_tok.value
+        val name = self.expect(JsTokenKind.Identifier)?
 
         var init_expr = Expression.Literal(value: JsValue.Undefined)
         if self.match_token(JsTokenKind.Eq):
@@ -180,8 +202,8 @@ class JsParser:
                 # Check for rest element
                 if self.check(JsTokenKind.DotDotDot):
                     self.advance()
-                    val name_tok = self.expect(JsTokenKind.Identifier)?
-                    elements.push(Expression.SpreadElement(argument: Expression.Identifier(name: name_tok.value)))
+                    val name = self.expect(JsTokenKind.Identifier)?
+                    elements.push(Expression.SpreadElement(argument: Expression.Identifier(name: name)))
                 else:
                     val first = self.parse_assignment()?
                     elements.push(first)
@@ -190,8 +212,8 @@ class JsParser:
                         break
                     if self.check(JsTokenKind.DotDotDot):
                         self.advance()
-                        val name_tok = self.expect(JsTokenKind.Identifier)?
-                        elements.push(Expression.SpreadElement(argument: Expression.Identifier(name: name_tok.value)))
+                        val name = self.expect(JsTokenKind.Identifier)?
+                        elements.push(Expression.SpreadElement(argument: Expression.Identifier(name: name)))
                     else:
                         val elem = self.parse_assignment()?
                         elements.push(elem)
@@ -199,16 +221,15 @@ class JsParser:
             return Ok(Expression.ArrayPattern(elements: elements))
 
     me _parse_destruct_prop() -> BrowserResult<DestructProp>:
-        val key_tok = self.expect(JsTokenKind.Identifier)?
-        val key = key_tok.value
+        val key = self.expect(JsTokenKind.Identifier)?
         # Check for rename: { key: local_name }
         if self.match_token(JsTokenKind.Colon):
-            val local_tok = self.expect(JsTokenKind.Identifier)?
+            val local_name = self.expect(JsTokenKind.Identifier)?
             var rename_default: Expression? = nil
             if self.match_token(JsTokenKind.Eq):
                 val dv = self.parse_assignment()?
                 rename_default = Some(dv)
-            return Ok(DestructProp(key: key, value: Expression.Identifier(name: local_tok.value), default_value: rename_default, is_computed: false))
+            return Ok(DestructProp(key: key, value: Expression.Identifier(name: local_name), default_value: rename_default, is_computed: false))
         # Check for default value: { key = default }
         var default_val: Expression? = nil
         if self.match_token(JsTokenKind.Eq):
@@ -219,17 +240,16 @@ class JsParser:
     # function declaration
     me parse_function_declaration() -> BrowserResult<Statement>:
         self.advance()  # consume 'function'
-        val name_tok = self.expect(JsTokenKind.Identifier)?
-        val name = name_tok.value
+        val name = self.expect(JsTokenKind.Identifier)?
         self.expect(JsTokenKind.OpenParen)?
 
         var params: [text] = []
         if not self.check(JsTokenKind.CloseParen):
             val first = self.expect(JsTokenKind.Identifier)?
-            params.push(first.value)
+            params.push(first)
             while self.match_token(JsTokenKind.Comma):
                 val param = self.expect(JsTokenKind.Identifier)?
-                params.push(param.value)
+                params.push(param)
 
         self.expect(JsTokenKind.CloseParen)?
         val body = self.parse_block()?
@@ -309,12 +329,11 @@ class JsParser:
         self.expect(JsTokenKind.OpenParen)?
 
         # Check for for-in / for-of
-        val kind = self.current.kind
-        if kind == JsTokenKind.Var or kind == JsTokenKind.Let or kind == JsTokenKind.Const:
-            val decl_kind = self.current.value
+        val kind = self.current_kind
+        if _is_token(kind, JsTokenKind.Var) or _is_token(kind, JsTokenKind.Let) or _is_token(kind, JsTokenKind.Const):
+            val decl_kind = self.current_value
             self.advance()  # consume var/let/const
-            val binding_tok = self.expect(JsTokenKind.Identifier)?
-            val binding = binding_tok.value
+            val binding = self.expect(JsTokenKind.Identifier)?
 
             if self.check(JsTokenKind.In):
                 # for (var k in obj) { ... }
@@ -425,7 +444,7 @@ class JsParser:
         if self.match_token(JsTokenKind.Catch):
             if self.match_token(JsTokenKind.OpenParen):
                 val param = self.expect(JsTokenKind.Identifier)?
-                catch_param = param.value
+                catch_param = param
                 self.expect(JsTokenKind.CloseParen)?
             catch_body = self.parse_block()?
 
@@ -478,12 +497,14 @@ class JsParser:
         self.advance()  # consume 'class'
         var class_name = ""
         if self.check(JsTokenKind.Identifier):
-            class_name = self.advance().value
+            class_name = self.current_value
+            self.advance()
 
         var parent_name = ""
         if self.match_token(JsTokenKind.Extends):
             if self.check(JsTokenKind.Identifier):
-                parent_name = self.advance().value
+                parent_name = self.current_value
+                self.advance()
 
         self.expect(JsTokenKind.OpenBrace)?
 
@@ -496,7 +517,8 @@ class JsParser:
             # Parse method name
             var method_name = ""
             if self.check(JsTokenKind.Identifier):
-                method_name = self.advance().value
+                method_name = self.current_value
+                self.advance()
             else:
                 self.advance()
                 continue
@@ -506,10 +528,10 @@ class JsParser:
             var params: [text] = []
             if not self.check(JsTokenKind.CloseParen):
                 val first = self.expect(JsTokenKind.Identifier)?
-                params.push(first.value)
+                params.push(first)
                 while self.match_token(JsTokenKind.Comma):
                     val param = self.expect(JsTokenKind.Identifier)?
-                    params.push(param.value)
+                    params.push(param)
             self.expect(JsTokenKind.CloseParen)?
 
             # Parse method body
@@ -533,31 +555,31 @@ class JsParser:
     me parse_assignment() -> BrowserResult<Expression>:
         val left = self.parse_ternary()?
 
-        val kind = self.current.kind
-        if kind == JsTokenKind.Eq:
+        val kind = self.current_kind
+        if _is_token(kind, JsTokenKind.Eq):
             self.advance()
             val right = self.parse_assignment()?
             return Ok(Expression.Assignment(target: left, value: right))
 
-        if kind == JsTokenKind.PlusEq:
+        if _is_token(kind, JsTokenKind.PlusEq):
             self.advance()
             val right = self.parse_assignment()?
             val sum = Expression.Binary(op: "+", left: left, right: right)
             return Ok(Expression.Assignment(target: left, value: sum))
 
-        if kind == JsTokenKind.MinusEq:
+        if _is_token(kind, JsTokenKind.MinusEq):
             self.advance()
             val right = self.parse_assignment()?
             val diff = Expression.Binary(op: "-", left: left, right: right)
             return Ok(Expression.Assignment(target: left, value: diff))
 
-        if kind == JsTokenKind.StarEq:
+        if _is_token(kind, JsTokenKind.StarEq):
             self.advance()
             val right = self.parse_assignment()?
             val prod = Expression.Binary(op: "*", left: left, right: right)
             return Ok(Expression.Assignment(target: left, value: prod))
 
-        if kind == JsTokenKind.SlashEq:
+        if _is_token(kind, JsTokenKind.SlashEq):
             self.advance()
             val right = self.parse_assignment()?
             val quot = Expression.Binary(op: "/", left: left, right: right)
@@ -629,20 +651,20 @@ class JsParser:
     me parse_equality() -> BrowserResult<Expression>:
         var left = self.parse_comparison()?
         while true:
-            val kind = self.current.kind
-            if kind == JsTokenKind.EqEq:
+            val kind = self.current_kind
+            if _is_token(kind, JsTokenKind.EqEq):
                 self.advance()
                 val right = self.parse_comparison()?
                 left = Expression.Binary(op: "==", left: left, right: right)
-            else if kind == JsTokenKind.EqEqEq:
+            else if _is_token(kind, JsTokenKind.EqEqEq):
                 self.advance()
                 val right = self.parse_comparison()?
                 left = Expression.Binary(op: "===", left: left, right: right)
-            else if kind == JsTokenKind.BangEq:
+            else if _is_token(kind, JsTokenKind.BangEq):
                 self.advance()
                 val right = self.parse_comparison()?
                 left = Expression.Binary(op: "!=", left: left, right: right)
-            else if kind == JsTokenKind.BangEqEq:
+            else if _is_token(kind, JsTokenKind.BangEqEq):
                 self.advance()
                 val right = self.parse_comparison()?
                 left = Expression.Binary(op: "!==", left: left, right: right)
@@ -654,28 +676,28 @@ class JsParser:
     me parse_comparison() -> BrowserResult<Expression>:
         var left = self.parse_addition()?
         while true:
-            val kind = self.current.kind
-            if kind == JsTokenKind.Lt:
+            val kind = self.current_kind
+            if _is_token(kind, JsTokenKind.Lt):
                 self.advance()
                 val right = self.parse_addition()?
                 left = Expression.Binary(op: "<", left: left, right: right)
-            else if kind == JsTokenKind.Gt:
+            else if _is_token(kind, JsTokenKind.Gt):
                 self.advance()
                 val right = self.parse_addition()?
                 left = Expression.Binary(op: ">", left: left, right: right)
-            else if kind == JsTokenKind.LtEq:
+            else if _is_token(kind, JsTokenKind.LtEq):
                 self.advance()
                 val right = self.parse_addition()?
                 left = Expression.Binary(op: "<=", left: left, right: right)
-            else if kind == JsTokenKind.GtEq:
+            else if _is_token(kind, JsTokenKind.GtEq):
                 self.advance()
                 val right = self.parse_addition()?
                 left = Expression.Binary(op: ">=", left: left, right: right)
-            else if kind == JsTokenKind.Instanceof:
+            else if _is_token(kind, JsTokenKind.Instanceof):
                 self.advance()
                 val right = self.parse_addition()?
                 left = Expression.InstanceOf(left: left, right: right)
-            else if kind == JsTokenKind.In:
+            else if _is_token(kind, JsTokenKind.In):
                 self.advance()
                 val right = self.parse_addition()?
                 left = Expression.InExpr(left: left, right: right)
@@ -687,12 +709,12 @@ class JsParser:
     me parse_addition() -> BrowserResult<Expression>:
         var left = self.parse_multiplication()?
         while true:
-            val kind = self.current.kind
-            if kind == JsTokenKind.Plus:
+            val kind = self.current_kind
+            if _is_token(kind, JsTokenKind.Plus):
                 self.advance()
                 val right = self.parse_multiplication()?
                 left = Expression.Binary(op: "+", left: left, right: right)
-            else if kind == JsTokenKind.Minus:
+            else if _is_token(kind, JsTokenKind.Minus):
                 self.advance()
                 val right = self.parse_multiplication()?
                 left = Expression.Binary(op: "-", left: left, right: right)
@@ -704,16 +726,16 @@ class JsParser:
     me parse_multiplication() -> BrowserResult<Expression>:
         var left = self.parse_exponentiation()?
         while true:
-            val kind = self.current.kind
-            if kind == JsTokenKind.Star:
+            val kind = self.current_kind
+            if _is_token(kind, JsTokenKind.Star):
                 self.advance()
                 val right = self.parse_exponentiation()?
                 left = Expression.Binary(op: "*", left: left, right: right)
-            else if kind == JsTokenKind.Slash:
+            else if _is_token(kind, JsTokenKind.Slash):
                 self.advance()
                 val right = self.parse_exponentiation()?
                 left = Expression.Binary(op: "/", left: left, right: right)
-            else if kind == JsTokenKind.Percent:
+            else if _is_token(kind, JsTokenKind.Percent):
                 self.advance()
                 val right = self.parse_exponentiation()?
                 left = Expression.Binary(op: "%", left: left, right: right)
@@ -731,49 +753,49 @@ class JsParser:
 
     # Unary: ! - + typeof void delete ~ ++x --x
     me parse_unary() -> BrowserResult<Expression>:
-        val kind = self.current.kind
+        val kind = self.current_kind
 
-        if kind == JsTokenKind.Bang:
+        if _is_token(kind, JsTokenKind.Bang):
             self.advance()
             val operand = self.parse_unary()?
             return Ok(Expression.Unary(op: "!", operand: operand))
 
-        if kind == JsTokenKind.Minus:
+        if _is_token(kind, JsTokenKind.Minus):
             self.advance()
             val operand = self.parse_unary()?
             return Ok(Expression.Unary(op: "-", operand: operand))
 
-        if kind == JsTokenKind.Plus:
+        if _is_token(kind, JsTokenKind.Plus):
             self.advance()
             val operand = self.parse_unary()?
             return Ok(Expression.Unary(op: "+", operand: operand))
 
-        if kind == JsTokenKind.Typeof:
+        if _is_token(kind, JsTokenKind.Typeof):
             self.advance()
             val operand = self.parse_unary()?
             return Ok(Expression.Unary(op: "typeof", operand: operand))
 
-        if kind == JsTokenKind.Void:
+        if _is_token(kind, JsTokenKind.Void):
             self.advance()
             val operand = self.parse_unary()?
             return Ok(Expression.Unary(op: "void", operand: operand))
 
-        if kind == JsTokenKind.Delete:
+        if _is_token(kind, JsTokenKind.Delete):
             self.advance()
             val operand = self.parse_unary()?
             return Ok(Expression.Delete(expr: operand))
 
-        if kind == JsTokenKind.Tilde:
+        if _is_token(kind, JsTokenKind.Tilde):
             self.advance()
             val operand = self.parse_unary()?
             return Ok(Expression.Unary(op: "~", operand: operand))
 
-        if kind == JsTokenKind.PlusPlus:
+        if _is_token(kind, JsTokenKind.PlusPlus):
             self.advance()
             val operand = self.parse_unary()?
             return Ok(Expression.Unary(op: "++pre", operand: operand))
 
-        if kind == JsTokenKind.MinusMinus:
+        if _is_token(kind, JsTokenKind.MinusMinus):
             self.advance()
             val operand = self.parse_unary()?
             return Ok(Expression.Unary(op: "--pre", operand: operand))
@@ -784,11 +806,11 @@ class JsParser:
     me parse_postfix() -> BrowserResult<Expression>:
         var expr = self.parse_call_expression()?
 
-        if self.current.kind == JsTokenKind.PlusPlus:
+        if _is_token(self.current_kind, JsTokenKind.PlusPlus):
             self.advance()
             expr = Expression.Unary(op: "++post", operand: expr)
 
-        if self.current.kind == JsTokenKind.MinusMinus:
+        if _is_token(self.current_kind, JsTokenKind.MinusMinus):
             self.advance()
             expr = Expression.Unary(op: "--post", operand: expr)
 
@@ -799,9 +821,9 @@ class JsParser:
         var expr = self.parse_primary()?
 
         while true:
-            val kind = self.current.kind
+            val kind = self.current_kind
 
-            if kind == JsTokenKind.OpenParen:
+            if _is_token(kind, JsTokenKind.OpenParen):
                 # Function call
                 self.advance()
                 var args: [Expression] = []
@@ -814,19 +836,19 @@ class JsParser:
                 self.expect(JsTokenKind.CloseParen)?
                 expr = Expression.Call(callee: expr, args: args)
 
-            else if kind == JsTokenKind.Dot:
+            else if _is_token(kind, JsTokenKind.Dot):
                 # Member access
                 self.advance()
                 val prop = self.expect(JsTokenKind.Identifier)?
-                expr = Expression.Member(object: expr, property: prop.value)
+                expr = Expression.Member(object: expr, property: prop)
 
-            else if kind == JsTokenKind.QuestionDot:
+            else if _is_token(kind, JsTokenKind.QuestionDot):
                 # Optional chaining
                 self.advance()
                 val prop = self.expect(JsTokenKind.Identifier)?
-                expr = Expression.Member(object: expr, property: prop.value)
+                expr = Expression.Member(object: expr, property: prop)
 
-            else if kind == JsTokenKind.OpenBracket:
+            else if _is_token(kind, JsTokenKind.OpenBracket):
                 # Index access: obj[expr]
                 self.advance()
                 val index_expr = self.parse_expression()?
@@ -841,86 +863,91 @@ class JsParser:
 
     # Primary: literals, identifiers, grouped, arrays, objects, arrow functions
     me parse_primary() -> BrowserResult<Expression>:
-        val kind = self.current.kind
+        val kind = self.current_kind
 
         # Number literal
-        if kind == JsTokenKind.Number:
-            val tok = self.advance()
-            val num = tok.value.parse_float() ?? 0.0
+        if _is_token(kind, JsTokenKind.Number):
+            val value = self.current_value
+            self.advance()
+            val num = value.parse_float() ?? 0.0
             return Ok(Expression.Literal(value: JsValue.Number(v: num)))
 
         # String literal
-        if kind == JsTokenKind.String:
-            val tok = self.advance()
-            return Ok(Expression.Literal(value: JsValue.String(v: tok.value)))
+        if _is_token(kind, JsTokenKind.String):
+            val value = self.current_value
+            self.advance()
+            return Ok(Expression.Literal(value: JsValue.String(v: value)))
 
         # Template literal
-        if kind == JsTokenKind.TemplateLiteral:
-            val tok = self.advance()
-            return self._parse_template_parts(tok.value)
+        if _is_token(kind, JsTokenKind.TemplateLiteral):
+            val value = self.current_value
+            self.advance()
+            return self._parse_template_parts(value)
 
         # Boolean true
-        if kind == JsTokenKind.TrueKw:
+        if _is_token(kind, JsTokenKind.TrueKw):
             self.advance()
             return Ok(Expression.Literal(value: JsValue.Boolean(v: true)))
 
         # Boolean false
-        if kind == JsTokenKind.FalseKw:
+        if _is_token(kind, JsTokenKind.FalseKw):
             self.advance()
             return Ok(Expression.Literal(value: JsValue.Boolean(v: false)))
 
         # null
-        if kind == JsTokenKind.NullKw:
+        if _is_token(kind, JsTokenKind.NullKw):
             self.advance()
             return Ok(Expression.Literal(value: JsValue.Null))
 
         # undefined
-        if kind == JsTokenKind.Undefined:
+        if _is_token(kind, JsTokenKind.Undefined):
             self.advance()
             return Ok(Expression.Literal(value: JsValue.Undefined))
 
         # this
-        if kind == JsTokenKind.This:
+        if _is_token(kind, JsTokenKind.This):
             self.advance()
             return Ok(Expression.Identifier(name: "this"))
 
         # new — e.g., new Foo(args)
-        if kind == JsTokenKind.New:
+        if _is_token(kind, JsTokenKind.New):
             self.advance()
             val callee = self.parse_call_expression()?
             return Ok(Expression.Unary(op: "new", operand: callee))
 
         # Identifier (or arrow function)
-        if kind == JsTokenKind.Identifier:
+        if _is_token(kind, JsTokenKind.Identifier):
             # Check for single-param arrow: ident => expr
-            val ident_tok = self.advance()
+            val ident_name = self.current_value
+            self.advance()
             if self.check(JsTokenKind.Arrow):
                 var single_param: [text] = []
-                single_param.push(ident_tok.value)
+                single_param.push(ident_name)
                 return self.parse_arrow_body(single_param)
-            return Ok(Expression.Identifier(name: ident_tok.value))
+            return Ok(Expression.Identifier(name: ident_name))
 
         # Grouped expression or arrow function params
-        if kind == JsTokenKind.OpenParen:
+        if _is_token(kind, JsTokenKind.OpenParen):
             return self.parse_grouped_or_arrow()
 
         # Array literal [...]
-        if kind == JsTokenKind.OpenBracket:
+        if _is_token(kind, JsTokenKind.OpenBracket):
             return self.parse_array_literal()
 
         # Object literal {...}
-        if kind == JsTokenKind.OpenBrace:
+        if _is_token(kind, JsTokenKind.OpenBrace):
             return self.parse_object_literal()
 
         # function expression
-        if kind == JsTokenKind.Function:
+        if _is_token(kind, JsTokenKind.Function):
             return self.parse_function_expression()
 
         # Fallthrough — unexpected token
-        val tok = self.advance()
-        val msg = "Unexpected token '{tok.value}' at line {tok.line}:{tok.col}"
+        val bad_value = self.current_value
+        self.advance()
+        val msg = "Unexpected token '{bad_value}'"
         self.logger.warn(msg)
-        Ok(Expression.Literal(value: JsValue.Undefined))
+        Err(script_error(msg))
 
     # Grouped expression (a + b) or arrow function (a, b) => ...
     me parse_grouped_or_arrow() -> BrowserResult<Expression>:
@@ -1071,16 +1098,19 @@ class JsParser:
     # Parse a single object property: key: value
     me _parse_object_property() -> BrowserResult<Pair<text, Expression>>:
         var key = ""
-        val kind = self.current.kind
-        if kind == JsTokenKind.Identifier:
-            key = self.advance().value
-        else if kind == JsTokenKind.String:
-            key = self.advance().value
-        else if kind == JsTokenKind.Number:
-            key = self.advance().value
+        val kind = self.current_kind
+        if _is_token(kind, JsTokenKind.Identifier):
+            key = self.current_value
+            self.advance()
+        else if _is_token(kind, JsTokenKind.String):
+            key = self.current_value
+            self.advance()
+        else if _is_token(kind, JsTokenKind.Number):
+            key = self.current_value
+            self.advance()
         else:
-            val tok = self.advance()
-            key = tok.value
+            key = self.current_value
+            self.advance()
 
         # Shorthand: { x } means { x: x }
         if not self.check(JsTokenKind.Colon):
@@ -1098,16 +1128,17 @@ class JsParser:
 
         var name = ""
         if self.check(JsTokenKind.Identifier):
-            name = self.advance().value
+            name = self.current_value
+            self.advance()
 
         self.expect(JsTokenKind.OpenParen)?
         var params: [text] = []
         if not self.check(JsTokenKind.CloseParen):
             val first = self.expect(JsTokenKind.Identifier)?
-            params.push(first.value)
+            params.push(first)
             while self.match_token(JsTokenKind.Comma):
                 val param = self.expect(JsTokenKind.Identifier)?
-                params.push(param.value)
+                params.push(param)
         self.expect(JsTokenKind.CloseParen)?
 
         val body = self.parse_block()?

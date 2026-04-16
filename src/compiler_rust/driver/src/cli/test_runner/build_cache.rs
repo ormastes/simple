@@ -84,6 +84,12 @@ impl BuildCache {
         }
     }
 
+    /// Compute the cached SMF artifact path for a source file.
+    pub fn smf_artifact_path(&self, source: &Path) -> Result<PathBuf, String> {
+        self.artifact_path(source, "smf")
+            .ok_or_else(|| format!("Failed to compute hash for {}", source.display()))
+    }
+
     /// Compile a test file to SMF format. Returns the path to the SMF artifact.
     pub fn compile_test_to_smf(&self, source: &Path) -> Result<PathBuf, String> {
         let output = self

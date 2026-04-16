@@ -543,6 +543,216 @@ pub fn load_module_with_imports_validated(
     load_module_with_imports_internal(path, visited, importing_capabilities, true)
 }
 
+/// Collect resolved imported module file paths in dependency-first order.
+///
+/// This is used by SMF execution paths that must preload imported modules before
+/// loading the entry artifact. The returned paths exclude the entry file itself.
+pub fn collect_imported_module_paths(path: &Path) -> Result<Vec<PathBuf>, CompileError> {
+    let mut visited = HashSet::new();
+    let mut collected = Vec::new();
+    collect_imported_module_paths_internal(path, &mut visited, &mut collected)?;
+    Ok(collected)
+}
+
+pub fn collect_direct_imported_module_paths(path: &Path) -> Result<Vec<PathBuf>, CompileError> {
+    let path = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    let mut source = fs::read_to_string(&path).map_err(|e| CompileError::Io(format!("Cannot read {:?}: {e}", path)))?;
+    if source.contains('\r') {
+        source = source.replace('\r', "");
+    }
+
+    let mut parser = simple_parser::Parser::new(&source);
+    let module = parser
+        .parse()
+        .map_err(|e| CompileError::Parse(format!("in {:?}: {e}", path)))?;
+    display_parser_hints(&parser, &source, &path);
+
+    let base_dir = path.parent().unwrap_or(Path::new("."));
+    let mut collected = Vec::new();
+
+    for item in module.items {
+        match item {
+            Node::UseStmt(use_stmt) => {
+                collect_use_stmt_direct_paths(&use_stmt, base_dir, &mut collected)?;
+            }
+            Node::ExportUseStmt(export_use) => {
+                if export_use.path.segments.is_empty() {
+                    continue;
+                }
+                let temp_use = UseStmt {
+                    span: export_use.span,
+                    path: export_use.path,
+                    target: export_use.target,
+                    is_type_only: false,
+                    is_lazy: false,
+                };
+                collect_use_stmt_direct_paths(&temp_use, base_dir, &mut collected)?;
+            }
+            _ => {}
+        }
+    }
+
+    Ok(collected)
+}
+
+fn collect_imported_module_paths_internal(
+    path: &Path,
+    visited: &mut HashSet<PathBuf>,
+    collected: &mut Vec<PathBuf>,
+) -> Result<(), CompileError> {
+    let path = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    if !visited.insert(path.clone()) {
+        return Ok(());
+    }
+
+    let mut source = fs::read_to_string(&path).map_err(|e| CompileError::Io(format!("Cannot read {:?}: {e}", path)))?;
+    if source.contains('\r') {
+        source = source.replace('\r', "");
+    }
+
+    let mut parser = simple_parser::Parser::new(&source);
+    let module = parser
+        .parse()
+        .map_err(|e| CompileError::Parse(format!("in {:?}: {e}", path)))?;
+    display_parser_hints(&parser, &source, &path);
+
+    let base_dir = path.parent().unwrap_or(Path::new("."));
+
+    for item in module.items {
+        match item {
+            Node::UseStmt(use_stmt) => {
+                collect_use_stmt_paths(&use_stmt, base_dir, visited, collected)?;
+            }
+            Node::ExportUseStmt(export_use) => {
+                if export_use.path.segments.is_empty() {
+                    continue;
+                }
+                let temp_use = UseStmt {
+                    span: export_use.span,
+                    path: export_use.path,
+                    target: export_use.target,
+                    is_type_only: false,
+                    is_lazy: false,
+                };
+                collect_use_stmt_paths(&temp_use, base_dir, visited, collected)?;
+            }
+            _ => {}
+        }
+    }
+
+    Ok(())
+}
+
+fn collect_use_stmt_paths(
+    use_stmt: &UseStmt,
+    base_dir: &Path,
+    visited: &mut HashSet<PathBuf>,
+    collected: &mut Vec<PathBuf>,
+) -> Result<(), CompileError> {
+    let Some(resolved) = resolve_use_to_path(use_stmt, base_dir) else {
+        return Ok(());
+    };
+
+    let mut preload_path = resolved.clone();
+    if let Some(package_module) = sibling_package_module_path(&resolved) {
+        preload_path = package_module;
+    }
+
+    collect_imported_module_paths_internal(&preload_path, visited, collected)?;
+    if !collected.contains(&preload_path) {
+        collected.push(preload_path.clone());
+    }
+
+    if resolved.file_name().is_some_and(|name| name == "__init__.spl") {
+        for sibling in collect_matching_package_sibling_paths(&resolved, use_stmt)? {
+            collect_imported_module_paths_internal(&sibling, visited, collected)?;
+            if !collected.contains(&sibling) {
+                collected.push(sibling);
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn collect_use_stmt_direct_paths(
+    use_stmt: &UseStmt,
+    base_dir: &Path,
+    collected: &mut Vec<PathBuf>,
+) -> Result<(), CompileError> {
+    let Some(resolved) = resolve_use_to_path(use_stmt, base_dir) else {
+        return Ok(());
+    };
+
+    let mut preload_path = resolved.clone();
+    if let Some(package_module) = sibling_package_module_path(&resolved) {
+        preload_path = package_module;
+    }
+
+    if !collected.contains(&preload_path) {
+        collected.push(preload_path);
+    }
+
+    if resolved.file_name().is_some_and(|name| name == "__init__.spl") {
+        for sibling in collect_matching_package_sibling_paths(&resolved, use_stmt)? {
+            if !collected.contains(&sibling) {
+                collected.push(sibling);
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn sibling_package_module_path(resolved: &Path) -> Option<PathBuf> {
+    if resolved.file_name().is_none_or(|name| name != "__init__.spl") {
+        return None;
+    }
+    let package_dir = resolved.parent()?;
+    let package_name = package_dir.file_name()?.to_str()?;
+    let candidate = package_dir.with_file_name(format!("{package_name}.spl"));
+    if candidate.exists() && candidate.is_file() {
+        Some(candidate)
+    } else {
+        None
+    }
+}
+
+fn collect_matching_package_sibling_paths(
+    package_init_path: &Path,
+    use_stmt: &UseStmt,
+) -> Result<Vec<PathBuf>, CompileError> {
+    let Some(package_dir) = package_init_path.parent() else {
+        return Ok(Vec::new());
+    };
+
+    let mut requested_names = Vec::new();
+    requested_import_names(&use_stmt.target, &mut requested_names);
+
+    let mut sibling_files: Vec<PathBuf> = match fs::read_dir(package_dir) {
+        Ok(entries) => entries
+            .filter_map(|entry| entry.ok().map(|e| e.path()))
+            .filter(|path| {
+                path.extension().is_some_and(|ext| ext == "spl")
+                    && path
+                        .file_name()
+                        .is_some_and(|name| name != "__init__.spl" && name != "mod_stub.spl")
+                    && path.is_file()
+                    && file_might_define_requested_symbol(path, &requested_names)
+            })
+            .collect(),
+        Err(e) => {
+            return Err(CompileError::Io(format!(
+                "Cannot read package directory {:?}: {}",
+                package_dir, e
+            )))
+        }
+    };
+
+    sibling_files.sort();
+    Ok(sibling_files)
+}
+
 fn load_module_with_imports_internal(
     path: &Path,
     visited: &mut HashSet<PathBuf>,

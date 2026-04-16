@@ -25,6 +25,19 @@ impl ModuleRegistry {
         self.inner.load_with_resolver(path, |name| self.resolve_symbol(name))
     }
 
+    /// Load or get cached module with cross-module resolution plus a fallback resolver.
+    pub fn load_with_fallback<F>(
+        &self,
+        path: &std::path::Path,
+        fallback: F,
+    ) -> Result<Arc<LoadedModule>, super::loader::LoadError>
+    where
+        F: Fn(&str) -> Option<usize>,
+    {
+        self.inner
+            .load_with_resolver(path, |name| self.resolve_symbol(name).or_else(|| fallback(name)))
+    }
+
     /// Unload a module
     pub fn unload(&self, path: &std::path::Path) -> bool {
         self.inner.unload(path)

@@ -14,11 +14,13 @@
 use os.drivers.virtio.virtio_net.{VirtioNetDriver}
 use os.services.netstack.netstack_service.{NetstackService}
 use os.services.netstack.ipv4.{Ipv4Address}
-use os.services.pcimgr.pcimgr.{pcimgr_init, pcimgr_find_by_class, pcimgr_find_by_vendor, pcimgr_grant_device, pcimgr_get_device_vendor}
+use os.services.pcimgr.pcimgr.{pcimgr_init, pcimgr_find_by_class, pcimgr_find_by_vendor, pcimgr_grant_device, pcimgr_get_device_vendor, pcimgr_get_device_class, pcimgr_get_device_subclass, pcimgr_device_count}
 use os.services.pcimgr.driver_match.{PCI_CLASS_NETWORK, PCI_SUBCLASS_ETHERNET, VIRTIO_VENDOR, VIRTIO_DEV_NET}
 use os.kernel.types.device_mem_types.{DeviceGrant}
 
 extern fn serial_println(msg: text)
+extern fn rt_pci_device_count() -> i64
+extern fn rt_pci_get_field(index: i64, field: i64) -> i64
 
 # ============================================================================
 # QEMU User-Mode Networking Defaults
@@ -80,13 +82,29 @@ fn net_boot_init() -> bool:
     var dev_idx = pcimgr_find_by_vendor(VIRTIO_VENDOR, VIRTIO_DEV_NET)
 
     if dev_idx < 0:
-        # Fallback: find network controller by class, then verify vendor
+        # Fallback: find the first network controller, then verify vendor.
+        # Compare the vendor in i64 space so we don't trip on narrow-type
+        # equality behavior in the baremetal backend.
         dev_idx = pcimgr_find_by_class(PCI_CLASS_NETWORK, PCI_SUBCLASS_ETHERNET)
         if dev_idx >= 0:
             val vendor = pcimgr_get_device_vendor(dev_idx.to_u64())
-            if vendor != VIRTIO_VENDOR:
+            val virtio_vendor = VIRTIO_VENDOR.to_i64()
+            if vendor != virtio_vendor:
                 serial_println("[net-init] Found NIC at index {dev_idx} but not VirtIO (vendor=0x{vendor})")
                 dev_idx = -1
+
+    if dev_idx < 0:
+        # Last-resort raw PCI cache scan. This bypasses all wrapper code and
+        # matches the same C cache that printed the correct device table at boot.
+        val count = rt_pci_device_count()
+        var scan_idx: i64 = 0
+        while scan_idx < count:
+            val cls = rt_pci_get_field(scan_idx, 3)
+            val sub = rt_pci_get_field(scan_idx, 4)
+            if cls == 2 and sub == 0:
+                dev_idx = scan_idx
+                break
+            scan_idx = scan_idx + 1
 
     if dev_idx < 0:
         serial_println("[net-init] No VirtIO-net device found -- network unavailable")

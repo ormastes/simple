@@ -9,8 +9,11 @@
 use os.compositor.wm_scene.{WmSceneSpec, render_scene_to_backend}
 use os.compositor.electron_capture.{CaptureResult, capture_error}
 use std.common.image.ppm_decode.{decode_ppm_to_argb}
-use std.nogc_sync_mut.ffi.io.{file_read_bytes}
-use std.nogc_sync_mut.qemu.qmp_client.{qmp_connect, qmp_screendump, qmp_disconnect, qmp_send_check}
+use std.nogc_sync_mut.ffi.io.{file_read_bytes, file_exists, file_delete, file_size}
+use std.nogc_sync_mut.qemu.qmp_client.{QmpClient, qmp_connect, qmp_screendump, qmp_disconnect, qmp_send_check}
+
+extern fn rt_thread_sleep(ms: i64)
+extern fn rt_process_run_timeout(cmd: text, args: [text], timeout_ms: i64) -> (text, text, i32)
 
 # ============================================================================
 # In-Process Capture
@@ -43,20 +46,47 @@ fn capture_qemu_inprocess(scene: WmSceneSpec) -> CaptureResult:
 # VM Capture via QMP
 # ============================================================================
 
-fn _qmp_screendump(socket_path: text, output_path: text) -> Result<bool, text>:
-    """Issue a QMP screendump using the pure-SPL QMP client.
-
-    Connects to the QMP Unix socket, sends greeting/qmp_capabilities
-    handshake, issues screendump, then disconnects.
-    """
-    val client = qmp_connect(socket_path)
-    if client.fd < 0:
-        return Err("QMP connect failed: {socket_path}")
+fn _qmp_screendump_client(client: QmpClient, output_path: text) -> Result<bool, text>:
+    """Issue a QMP screendump on an existing QMP session."""
     val ok = qmp_screendump(client, output_path, "ppm")
-    qmp_disconnect(client)
     if not ok:
         return Err("QMP screendump command failed")
     Ok(true)
+
+fn _qmp_hmp_screendump_client(client: QmpClient, output_path: text) -> Result<bool, text>:
+    val json = "{\"execute\": \"human-monitor-command\", \"arguments\": {\"command-line\": \"screendump {output_path}\"}}"
+    val ok = qmp_send_check(client, json, "hmp screendump")
+    if not ok:
+        return Err("QMP HMP screendump command failed")
+    Ok(true)
+
+fn _wait_for_capture_file(output_path: text, timeout_ms: i64) -> bool:
+    var waited = 0
+    while waited <= timeout_ms:
+        if file_exists(output_path) and file_size(output_path) > 0:
+            return true
+        rt_thread_sleep(100)
+        waited = waited + 100
+    file_exists(output_path) and file_size(output_path) > 0
+
+fn _capture_qmp_ppm_with_python(qmp_socket: text, output_path: text) -> bool:
+    val script = "import json, os, socket, sys;" +
+        "s=socket.socket(socket.AF_UNIX);" +
+        "s.settimeout(10);" +
+        "s.connect(sys.argv[1]);" +
+        "f=s.makefile('rwb', buffering=0);" +
+        "f.readline();" +
+        "cap=json.dumps(dict(execute='qmp_capabilities')).encode()+b'\\n';" +
+        "f.write(cap);" +
+        "f.flush();" +
+        "f.readline();" +
+        "cmd=json.dumps(dict(execute='screendump', arguments=dict(filename=sys.argv[2], format='ppm'))).encode()+b'\\n';" +
+        "f.write(cmd);" +
+        "f.flush();" +
+        "f.readline();" +
+        "sys.exit(0 if os.path.exists(sys.argv[2]) and os.path.getsize(sys.argv[2]) > 0 else 3)"
+    val result = rt_process_run_timeout("python3", ["-c", script, qmp_socket, output_path], 12000)
+    result[2] == 0 and file_exists(output_path) and file_size(output_path) > 0
 
 fn send_harness_marker(socket_path: text, marker: text):
     """Send a marker string to QEMU's serial output via QMP human-monitor-command.
@@ -84,12 +114,44 @@ fn capture_qemu_vm(qmp_socket: text, output_path: text) -> CaptureResult:
     Returns:
         CaptureResult with ARGB pixel buffer or error
     """
-    val screendump_result = _qmp_screendump(qmp_socket, output_path)
-    match screendump_result:
-        Err(err):
-            return capture_error("qemu_vm", 0, 0, "QMP screendump failed for socket: {qmp_socket} ({err})")
-        Ok(_):
-            pass_dn
+    if file_exists(output_path):
+        file_delete(output_path)
+
+    if not _capture_qmp_ppm_with_python(qmp_socket, output_path):
+        if file_exists(output_path):
+            file_delete(output_path)
+    else:
+        # Python path succeeded; decode below.
+        pass_dn
+
+    if not file_exists(output_path) or file_size(output_path) == 0:
+        val client = qmp_connect(qmp_socket)
+        if client.fd < 0:
+            return capture_error("qemu_vm", 0, 0, "QMP connect failed: {qmp_socket}")
+
+        var initial_err = ""
+        val screendump_result = _qmp_screendump_client(client, output_path)
+        match screendump_result:
+            Err(err):
+                initial_err = err
+            Ok(_):
+                pass_dn
+
+        if not _wait_for_capture_file(output_path, 8000):
+            val fallback = _qmp_hmp_screendump_client(client, output_path)
+            match fallback:
+                Err(err):
+                    qmp_disconnect(client)
+                    val reason = if initial_err != "": "{initial_err}; fallback={err}" else: err
+                    return capture_error("qemu_vm", 0, 0, "QMP screendump file missing after fallback: {output_path} ({reason})")
+                Ok(_):
+                    pass_dn
+            if not _wait_for_capture_file(output_path, 8000):
+                qmp_disconnect(client)
+                val reason = if initial_err != "": initial_err else: "missing screendump file"
+                return capture_error("qemu_vm", 0, 0, "QMP screendump file never materialized: {output_path} ({reason})")
+
+        qmp_disconnect(client)
 
     # Read and decode the screenshot file (rt_file_read_bytes returns Option<[u8]>)
     val ppm_data_opt = file_read_bytes(output_path)

@@ -383,12 +383,7 @@ impl CompilerPipeline {
         // not function declarations.
         let has_main_function = mir_module.functions.iter().any(|f| f.name == FUNC_MAIN);
 
-        if !has_main_function {
-            if source_file.is_some() {
-                return Err(CompileError::Semantic(
-                    "no native-compilable `fn main()` was found after lowering".to_string(),
-                ));
-            }
+        if !has_main_function && source_file.is_none() {
             // Fallback: evaluate via interpreter and wrap result
             let main_value = self.evaluate_module_with_project(&ast_module.items)?;
             return Ok(generate_smf_bytes(main_value, self.gc.as_ref()));
@@ -519,15 +514,10 @@ impl CompilerPipeline {
         // Check if we have a main function. If not, fall back to interpreter mode.
         let has_main_function = mir_module.functions.iter().any(|f| f.name == FUNC_MAIN);
 
-        if !has_main_function {
+        if !has_main_function && source_path.is_none() {
             if target.is_wasm() {
                 return Err(wasm_target_fallback_error(
                     "no native-compilable `fn main()` was found after lowering",
-                ));
-            }
-            if source_path.is_some() {
-                return Err(CompileError::Semantic(
-                    "no native-compilable `fn main()` was found after lowering".to_string(),
                 ));
             }
             // Fallback: evaluate via interpreter and wrap result

@@ -33,8 +33,15 @@ use simple_compiler::interpreter::clear_concurrency_registries;
 use simple_compiler::codegen::clear_cranelift_registries;
 use simple_compiler::interpreter_ffi::clear_compiled_functions;
 use simple_compiler::{start_watchdog, stop_watchdog};
+use simple_compiler::import_loader::collect_imported_module_paths;
 use simple_common::fault_detection::{reset_timeout, set_stack_overflow_detection_enabled, reset_recursion_depth};
+use simple_native_loader::default_runtime_provider;
+use simple_runtime::loader::registry::ModuleRegistry;
+use simple_runtime::value::{
+    rt_capture_stderr_start, rt_capture_stderr_stop, rt_capture_stdout_start, rt_capture_stdout_stop, rt_set_args_vec,
+};
 use scenario_artifacts::write_scenario_manifest;
+use crate::exec_core::run_main;
 
 /// Default per-test timeout in seconds (overridable via SIMPLE_TEST_TIMEOUT env var).
 fn per_test_timeout_secs(path: &Path) -> u64 {
@@ -646,6 +653,107 @@ fn emit_scenario_artifacts(path: &Path, result: &TestFileResult) {
     }
 }
 
+fn preprocess_sspec_for_smf(path: &Path) -> Result<PathBuf, String> {
+    let path_str = path.to_string_lossy();
+    if !path_str.ends_with("_spec.spl") {
+        return Ok(path.to_path_buf());
+    }
+
+    let content = fs::read_to_string(path)
+        .map_err(|e| format!("Failed to read {}: {}", path.display(), e))?;
+
+    let mut import_parts = Vec::<String>::new();
+    let mut top_level_parts = Vec::<String>::new();
+    let mut body_parts = Vec::<String>::new();
+    let mut in_docstring = false;
+    let mut in_top_fn = false;
+    let mut top_fn_indent = 0usize;
+
+    for line in content.lines() {
+        let trimmed = line.trim();
+
+        if trimmed.starts_with("\"\"\"") {
+            in_docstring = !in_docstring;
+            if in_top_fn {
+                top_level_parts.push(line.to_string());
+            } else {
+                body_parts.push(format!("    {}", line));
+            }
+            continue;
+        }
+
+        if in_docstring {
+            if in_top_fn {
+                top_level_parts.push(line.to_string());
+            } else {
+                body_parts.push(format!("    {}", line));
+            }
+            continue;
+        }
+
+        if trimmed.starts_with("import ") || trimmed.starts_with("use ") {
+            import_parts.push(line.to_string());
+            continue;
+        }
+
+        if !in_top_fn {
+            let line_indent = line.len().saturating_sub(trimmed.len());
+            if line_indent == 0
+                && (trimmed.starts_with("fn ")
+                    || trimmed.starts_with("async fn ")
+                    || trimmed.starts_with("static fn "))
+            {
+                in_top_fn = true;
+                top_fn_indent = 0;
+                top_level_parts.push(line.to_string());
+                continue;
+            }
+        }
+
+        if in_top_fn {
+            if trimmed.is_empty() {
+                top_level_parts.push(String::new());
+                continue;
+            }
+            let current_indent = line.len().saturating_sub(trimmed.len());
+            if current_indent > top_fn_indent {
+                top_level_parts.push(line.to_string());
+                continue;
+            }
+            in_top_fn = false;
+        }
+
+        if trimmed.is_empty() {
+            body_parts.push(String::new());
+        } else {
+            body_parts.push(format!("    {}", line));
+        }
+    }
+
+    let wrapped = format!(
+        "#![allow(sspec_empty_examples)]\n#![allow(sspec_boolean_wrapper_assertions)]\n@allow(sspec_empty_examples)\n@allow(sspec_boolean_wrapper_assertions)\n{}\n\n{}\nfn main():\n{}",
+        import_parts.join("\n"),
+        top_level_parts.join("\n"),
+        body_parts.join("\n")
+    );
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("wrapped_spec.spl");
+    let tmp_path = path
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .join(format!(".sspec_wrapped_entry_{}", file_name));
+    fs::write(&tmp_path, wrapped)
+        .map_err(|e| format!("Failed to write {}: {}", tmp_path.display(), e))?;
+    Ok(tmp_path)
+}
+
+fn existing_dependency_smf_path(dep_source: &Path) -> Option<PathBuf> {
+    let _ = dep_source;
+    None
+}
+
 /// Find the simple binary path.
 ///
 /// Prefers the current executable so child subprocesses use the same binary
@@ -818,19 +926,203 @@ fn wait_with_timeout(mut child: std::process::Child, timeout: Duration) -> Resul
 
 /// Run a single test file in SMF loader mode.
 ///
-/// For test files, we use safe mode (subprocess with "test" command) because
-/// test files require SSpec DSL activation which isn't available when directly
-/// compiling to SMF. The "test" command handles this automatically.
-pub fn run_test_file_smf_mode(path: &Path, _cache: &BuildCache) -> TestFileResult {
-    eprintln!("[DEBUG] run_test_file_smf_mode called for: {}", path.display());
-    // Use safe mode with test command to properly handle SSpec DSL
-    let options = super::types::TestOptions {
-        safe_mode: true,
-        safe_mode_timeout: 120,
-        ..Default::default()
+/// This is a real SMF path: preprocess spec files into an executable wrapper,
+/// compile that source to a cached `.smf` artifact through the CLI, then
+/// execute the resulting artifact directly.
+pub fn run_test_file_smf_mode(
+    path: &Path,
+    cache: &BuildCache,
+    options: &super::types::TestOptions,
+) -> TestFileResult {
+    let start = Instant::now();
+    let source_path = match preprocess_sspec_for_smf(path) {
+        Ok(path) => path,
+        Err(err) => {
+            return TestFileResult {
+                path: path.to_path_buf(),
+                passed: 0,
+                failed: 1,
+                skipped: 0,
+                ignored: 0,
+                duration_ms: start.elapsed().as_millis() as u64,
+                error: Some(err),
+                individual_results: vec![],
+            };
+        }
     };
-    eprintln!("[DEBUG] Calling run_test_file_safe_mode");
-    run_test_file_safe_mode(path, &options)
+
+    let smf_path = match cache.smf_artifact_path(&source_path) {
+        Ok(path) => path,
+        Err(err) => {
+            return TestFileResult {
+                path: path.to_path_buf(),
+                passed: 0,
+                failed: 1,
+                skipped: 0,
+                ignored: 0,
+                duration_ms: start.elapsed().as_millis() as u64,
+                error: Some(err),
+                individual_results: vec![],
+            };
+        }
+    };
+
+    let dependency_sources = match collect_imported_module_paths(&source_path) {
+        Ok(paths) => paths,
+        Err(err) => {
+            return TestFileResult {
+                path: path.to_path_buf(),
+                passed: 0,
+                failed: 1,
+                skipped: 0,
+                ignored: 0,
+                duration_ms: start.elapsed().as_millis() as u64,
+                error: Some(format!("Failed to resolve SMF dependencies: {}", err)),
+                individual_results: vec![],
+            };
+        }
+    };
+
+    let compile_runner = create_test_runner(options);
+    let compile_options = crate::CompileOptions::default();
+    let mut dependency_artifacts = Vec::new();
+
+    for dep_source in &dependency_sources {
+        if let Some(existing_smf) = existing_dependency_smf_path(dep_source) {
+            dependency_artifacts.push(existing_smf);
+            continue;
+        }
+        let dep_smf = match cache.smf_artifact_path(dep_source) {
+            Ok(path) => path,
+            Err(err) => {
+                return TestFileResult {
+                    path: path.to_path_buf(),
+                    passed: 0,
+                    failed: 1,
+                    skipped: 0,
+                    ignored: 0,
+                    duration_ms: start.elapsed().as_millis() as u64,
+                    error: Some(err),
+                    individual_results: vec![],
+                };
+            }
+        };
+        if cache.needs_rebuild(dep_source, "smf") {
+            if let Err(err) = compile_runner.compile_file_to_smf_with_options(dep_source, &dep_smf, &compile_options) {
+                return TestFileResult {
+                    path: path.to_path_buf(),
+                    passed: 0,
+                    failed: 1,
+                    skipped: 0,
+                    ignored: 0,
+                    duration_ms: start.elapsed().as_millis() as u64,
+                    error: Some(format!("Failed to compile dependency {} to SMF: {}", dep_source.display(), err)),
+                    individual_results: vec![],
+                };
+            }
+        }
+        dependency_artifacts.push(dep_smf);
+    }
+
+    if cache.needs_rebuild(&source_path, "smf") {
+        if let Err(err) = compile_runner.compile_file_to_smf_with_options(&source_path, &smf_path, &compile_options) {
+            return TestFileResult {
+                path: path.to_path_buf(),
+                passed: 0,
+                failed: 1,
+                skipped: 0,
+                ignored: 0,
+                duration_ms: start.elapsed().as_millis() as u64,
+                error: Some(format!("Failed to compile {} to SMF: {}", source_path.display(), err)),
+                individual_results: vec![],
+            };
+        }
+    }
+
+    rt_capture_stdout_start();
+    rt_capture_stderr_start();
+    rt_set_args_vec(&[]);
+
+    let provider = default_runtime_provider();
+    let registry = ModuleRegistry::new();
+    let run_result: Result<i32, String> = (|| {
+        for dep in &dependency_artifacts {
+            registry
+                .load_with_fallback(dep, |name| provider.get_symbol(name).map(|ptr| ptr as usize))
+                .map_err(|e| format!("SMF dependency load failed ({}): {}", dep.display(), e))?;
+        }
+        let module = registry
+            .load_with_fallback(&smf_path, |name| provider.get_symbol(name).map(|ptr| ptr as usize))
+            .map_err(|e| format!("SMF load failed ({}): {}", smf_path.display(), e))?;
+        run_main(&module)
+    })();
+    let captured_stdout = rt_capture_stdout_stop();
+    let captured_stderr = rt_capture_stderr_stop();
+    let wait_result: Result<(i32, String, String), String> =
+        run_result.map(|exit_code| (exit_code, captured_stdout, captured_stderr));
+    let duration_ms = start.elapsed().as_millis() as u64;
+
+    match wait_result {
+        Ok((exit_code, stdout, stderr)) => {
+            let combined_output = format!("{}\n{}", stdout, stderr);
+            let individual_results = parse_individual_results(&combined_output);
+            let (passed, failed, skipped) = if !individual_results.is_empty() {
+                let p = individual_results.iter().filter(|r| r.passed && !r.skipped).count();
+                let f = individual_results.iter().filter(|r| !r.passed).count();
+                let s = individual_results.iter().filter(|r| r.skipped).count();
+                (p, f, s)
+            } else {
+                let (p, f) = parse_test_output(&combined_output);
+                if p == 0 && f == 0 {
+                    if exit_code == 0 { (1, 0, 0) } else { (0, 1, 0) }
+                } else {
+                    (p, f, 0)
+                }
+            };
+
+            let result = TestFileResult {
+                path: path.to_path_buf(),
+                passed,
+                failed,
+                skipped,
+                ignored: 0,
+                duration_ms,
+                error: if exit_code != 0 && failed == 0 {
+                    Some(format!("Process exited with code {}", exit_code))
+                } else {
+                    None
+                },
+                individual_results,
+            };
+            emit_scenario_artifacts(path, &result);
+            emit_test_artifacts(
+                path,
+                &result,
+                ExecutionArtifacts {
+                    stdout: Some(&stdout),
+                    stderr: Some(&stderr),
+                    combined: Some(&combined_output),
+                    log_note: Some("Executed via SMF artifact"),
+                },
+            );
+            result
+        }
+        Err(e) => {
+            let result = TestFileResult {
+                path: path.to_path_buf(),
+                passed: 0,
+                failed: 1,
+                skipped: 0,
+                ignored: 0,
+                duration_ms,
+                error: Some(e),
+                individual_results: vec![],
+            };
+            emit_scenario_artifacts(path, &result);
+            emit_test_artifacts(path, &result, ExecutionArtifacts::none());
+            result
+        }
+    }
 }
 
 /// Run a single test file in native binary mode.

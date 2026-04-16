@@ -1,0 +1,503 @@
+#![allow(unnamed_duplicate_typed_args)]
+# Curve25519 / X25519 small-limb backend for interpreter safety.
+#
+# This implementation avoids the interpreter's checked-overflow paths by using
+# a self-contained 10-limb radix-2^25/2^26 representation and u64 carries.
+
+val MASK26: u64 = 0x3FFFFFF
+val MASK25: u64 = 0x1FFFFFF
+val BASE26: u64 = 0x4000000
+val BASE25: u64 = 0x2000000
+
+fn _x25519_fe_zero() -> [u64]:
+    [0,0,0,0,0,0,0,0,0,0]
+
+fn _x25519_fe_one() -> [u64]:
+    [1,0,0,0,0,0,0,0,0,0]
+
+fn _x25519_fe_p() -> [u64]:
+    [67108845,33554431,67108863,33554431,67108863,33554431,67108863,33554431,67108863,33554431]
+
+fn _load3(b: [u8], off: i64) -> u64:
+    b[off].to_u64() | (b[off + 1].to_u64() << 8) | (b[off + 2].to_u64() << 16)
+
+fn _load4(b: [u8], off: i64) -> u64:
+    b[off].to_u64() | (b[off + 1].to_u64() << 8) | (b[off + 2].to_u64() << 16) | (b[off + 3].to_u64() << 24)
+
+fn _x25519_fe_carry(a: [u64]) -> [u64]:
+    var h0 = a[0]
+    var h1 = a[1]
+    var h2 = a[2]
+    var h3 = a[3]
+    var h4 = a[4]
+    var h5 = a[5]
+    var h6 = a[6]
+    var h7 = a[7]
+    var h8 = a[8]
+    var h9 = a[9]
+
+    var c: u64 = 0
+    c = h0 >> 26
+    h0 = h0 & MASK26
+    h1 = h1 + c
+
+    c = h1 >> 25
+    h1 = h1 & MASK25
+    h2 = h2 + c
+
+    c = h2 >> 26
+    h2 = h2 & MASK26
+    h3 = h3 + c
+
+    c = h3 >> 25
+    h3 = h3 & MASK25
+    h4 = h4 + c
+
+    c = h4 >> 26
+    h4 = h4 & MASK26
+    h5 = h5 + c
+
+    c = h5 >> 25
+    h5 = h5 & MASK25
+    h6 = h6 + c
+
+    c = h6 >> 26
+    h6 = h6 & MASK26
+    h7 = h7 + c
+
+    c = h7 >> 25
+    h7 = h7 & MASK25
+    h8 = h8 + c
+
+    c = h8 >> 26
+    h8 = h8 & MASK26
+    h9 = h9 + c
+
+    c = h9 >> 25
+    h9 = h9 & MASK25
+    h0 = h0 + c * 19
+
+    c = h0 >> 26
+    h0 = h0 & MASK26
+    h1 = h1 + c
+
+    c = h1 >> 25
+    h1 = h1 & MASK25
+    h2 = h2 + c
+
+    c = h2 >> 26
+    h2 = h2 & MASK26
+    h3 = h3 + c
+
+    c = h3 >> 25
+    h3 = h3 & MASK25
+    h4 = h4 + c
+
+    c = h4 >> 26
+    h4 = h4 & MASK26
+    h5 = h5 + c
+
+    c = h5 >> 25
+    h5 = h5 & MASK25
+    h6 = h6 + c
+
+    c = h6 >> 26
+    h6 = h6 & MASK26
+    h7 = h7 + c
+
+    c = h7 >> 25
+    h7 = h7 & MASK25
+    h8 = h8 + c
+
+    c = h8 >> 26
+    h8 = h8 & MASK26
+    h9 = h9 + c
+
+    c = h9 >> 25
+    h9 = h9 & MASK25
+    h0 = h0 + c * 19
+
+    c = h0 >> 26
+    h0 = h0 & MASK26
+    h1 = h1 + c
+
+    [h0, h1, h2, h3, h4, h5, h6, h7, h8, h9]
+
+fn _x25519_fe_add(a: [u64], b: [u64]) -> [u64]:
+    _x25519_fe_carry([
+        a[0] + b[0], a[1] + b[1], a[2] + b[2], a[3] + b[3], a[4] + b[4],
+        a[5] + b[5], a[6] + b[6], a[7] + b[7], a[8] + b[8], a[9] + b[9]
+    ])
+
+fn _x25519_fe_neg(a: [u64]) -> [u64]:
+    _x25519_fe_sub(_x25519_fe_zero(), a)
+
+fn _x25519_fe_sub(a: [u64], b: [u64]) -> [u64]:
+    _x25519_fe_carry([
+        a[0] + 134217690 - b[0],
+        a[1] + 67108862 - b[1],
+        a[2] + 134217726 - b[2],
+        a[3] + 67108862 - b[3],
+        a[4] + 134217726 - b[4],
+        a[5] + 67108862 - b[5],
+        a[6] + 134217726 - b[6],
+        a[7] + 67108862 - b[7],
+        a[8] + 134217726 - b[8],
+        a[9] + 67108862 - b[9]
+    ])
+
+fn _x25519_fe_mul_scalar(a: [u64], s: u64) -> [u64]:
+    _x25519_fe_carry([
+        a[0] * s, a[1] * s, a[2] * s, a[3] * s, a[4] * s,
+        a[5] * s, a[6] * s, a[7] * s, a[8] * s, a[9] * s
+    ])
+
+fn _x25519_fe_mul(a: [u64], b: [u64]) -> [u64]:
+    val f0 = a[0]
+    val f1 = a[1]
+    val f2 = a[2]
+    val f3 = a[3]
+    val f4 = a[4]
+    val f5 = a[5]
+    val f6 = a[6]
+    val f7 = a[7]
+    val f8 = a[8]
+    val f9 = a[9]
+
+    val g0 = b[0]
+    val g1 = b[1]
+    val g2 = b[2]
+    val g3 = b[3]
+    val g4 = b[4]
+    val g5 = b[5]
+    val g6 = b[6]
+    val g7 = b[7]
+    val g8 = b[8]
+    val g9 = b[9]
+
+    val f1_2 = f1 * 2
+    val f3_2 = f3 * 2
+    val f5_2 = f5 * 2
+    val f7_2 = f7 * 2
+    val f9_2 = f9 * 2
+
+    val g1_19 = g1 * 19
+    val g2_19 = g2 * 19
+    val g3_19 = g3 * 19
+    val g4_19 = g4 * 19
+    val g5_19 = g5 * 19
+    val g6_19 = g6 * 19
+    val g7_19 = g7 * 19
+    val g8_19 = g8 * 19
+    val g9_19 = g9 * 19
+
+    val h0 = f0 * g0 + f1_2 * g9_19 + f2 * g8_19 + f3_2 * g7_19 + f4 * g6_19 + f5_2 * g5_19 + f6 * g4_19 + f7_2 * g3_19 + f8 * g2_19 + f9_2 * g1_19
+    val h1 = f0 * g1 + f1 * g0 + f2 * g9_19 + f3 * g8_19 + f4 * g7_19 + f5 * g6_19 + f6 * g5_19 + f7 * g4_19 + f8 * g3_19 + f9 * g2_19
+    val h2 = f0 * g2 + f1_2 * g1 + f2 * g0 + f3_2 * g9_19 + f4 * g8_19 + f5_2 * g7_19 + f6 * g6_19 + f7_2 * g5_19 + f8 * g4_19 + f9_2 * g3_19
+    val h3 = f0 * g3 + f1 * g2 + f2 * g1 + f3 * g0 + f4 * g9_19 + f5 * g8_19 + f6 * g7_19 + f7 * g6_19 + f8 * g5_19 + f9 * g4_19
+    val h4 = f0 * g4 + f1_2 * g3 + f2 * g2 + f3_2 * g1 + f4 * g0 + f5_2 * g9_19 + f6 * g8_19 + f7_2 * g7_19 + f8 * g6_19 + f9_2 * g5_19
+    val h5 = f0 * g5 + f1 * g4 + f2 * g3 + f3 * g2 + f4 * g1 + f5 * g0 + f6 * g9_19 + f7 * g8_19 + f8 * g7_19 + f9 * g6_19
+    val h6 = f0 * g6 + f1_2 * g5 + f2 * g4 + f3_2 * g3 + f4 * g2 + f5_2 * g1 + f6 * g0 + f7_2 * g9_19 + f8 * g8_19 + f9_2 * g7_19
+    val h7 = f0 * g7 + f1 * g6 + f2 * g5 + f3 * g4 + f4 * g3 + f5 * g2 + f6 * g1 + f7 * g0 + f8 * g9_19 + f9 * g8_19
+    val h8 = f0 * g8 + f1_2 * g7 + f2 * g6 + f3_2 * g5 + f4 * g4 + f5_2 * g3 + f6 * g2 + f7_2 * g1 + f8 * g0 + f9_2 * g9_19
+    val h9 = f0 * g9 + f1 * g8 + f2 * g7 + f3 * g6 + f4 * g5 + f5 * g4 + f6 * g3 + f7 * g2 + f8 * g1 + f9 * g0
+
+    _x25519_fe_carry([h0, h1, h2, h3, h4, h5, h6, h7, h8, h9])
+
+fn _x25519_fe_sq(a: [u64]) -> [u64]:
+    _x25519_fe_mul(a, a)
+
+fn _x25519_fe_from_bytes(b: [u8]) -> [u64]:
+    var h = _x25519_fe_carry([
+        _load4(b, 0) & MASK26,
+        (_load3(b, 3) >> 2) & MASK25,
+        (_load3(b, 6) >> 3) & MASK26,
+        (_load3(b, 9) >> 5) & MASK25,
+        (_load4(b, 12) >> 6) & MASK26,
+        _load4(b, 16) & MASK25,
+        (_load3(b, 19) >> 1) & MASK26,
+        (_load3(b, 22) >> 3) & MASK25,
+        (_load3(b, 25) >> 4) & MASK26,
+        (_load4(b, 28) >> 6) & MASK25
+    ])
+    if h[9] > 33554431:
+        return _x25519_fe_sub(h, _x25519_fe_p())
+    if h[9] < 33554431:
+        return h
+    if h[8] > 67108863:
+        return _x25519_fe_sub(h, _x25519_fe_p())
+    if h[8] < 67108863:
+        return h
+    if h[7] > 33554431:
+        return _x25519_fe_sub(h, _x25519_fe_p())
+    if h[7] < 33554431:
+        return h
+    if h[6] > 67108863:
+        return _x25519_fe_sub(h, _x25519_fe_p())
+    if h[6] < 67108863:
+        return h
+    if h[5] > 33554431:
+        return _x25519_fe_sub(h, _x25519_fe_p())
+    if h[5] < 33554431:
+        return h
+    if h[4] > 67108863:
+        return _x25519_fe_sub(h, _x25519_fe_p())
+    if h[4] < 67108863:
+        return h
+    if h[3] > 33554431:
+        return _x25519_fe_sub(h, _x25519_fe_p())
+    if h[3] < 33554431:
+        return h
+    if h[2] > 67108863:
+        return _x25519_fe_sub(h, _x25519_fe_p())
+    if h[2] < 67108863:
+        return h
+    if h[1] > 33554431:
+        return _x25519_fe_sub(h, _x25519_fe_p())
+    if h[1] < 33554431:
+        return h
+    if h[0] >= 67108845:
+        return _x25519_fe_sub(h, _x25519_fe_p())
+    h
+
+fn _x25519_fe_to_bytes(a: [u64]) -> [u8]:
+    var h = _x25519_fe_carry(a)
+    var q = (((19 * h[9]) + (1 << 24)) >> 25)
+    q = (h[0] + q) >> 26
+    q = (h[1] + q) >> 25
+    q = (h[2] + q) >> 26
+    q = (h[3] + q) >> 25
+    q = (h[4] + q) >> 26
+    q = (h[5] + q) >> 25
+    q = (h[6] + q) >> 26
+    q = (h[7] + q) >> 25
+    q = (h[8] + q) >> 26
+    q = (h[9] + q) >> 25
+    h[0] = h[0] + 19 * q
+    h[1] = h[1] + (h[0] >> 26)
+    h[0] = h[0] & MASK26
+    h[2] = h[2] + (h[1] >> 25)
+    h[1] = h[1] & MASK25
+    h[3] = h[3] + (h[2] >> 26)
+    h[2] = h[2] & MASK26
+    h[4] = h[4] + (h[3] >> 25)
+    h[3] = h[3] & MASK25
+    h[5] = h[5] + (h[4] >> 26)
+    h[4] = h[4] & MASK26
+    h[6] = h[6] + (h[5] >> 25)
+    h[5] = h[5] & MASK25
+    h[7] = h[7] + (h[6] >> 26)
+    h[6] = h[6] & MASK26
+    h[8] = h[8] + (h[7] >> 25)
+    h[7] = h[7] & MASK25
+    h[9] = h[9] + (h[8] >> 26)
+    h[8] = h[8] & MASK26
+    h[9] = h[9] & MASK25
+    var s: [u8] = [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0]
+
+    s[0] = (h[0] >> 0).to_u8()
+    s[1] = (h[0] >> 8).to_u8()
+    s[2] = (h[0] >> 16).to_u8()
+    s[3] = ((h[0] >> 24) | (h[1] << 2)).to_u8()
+    s[4] = (h[1] >> 6).to_u8()
+    s[5] = (h[1] >> 14).to_u8()
+    s[6] = ((h[1] >> 22) | (h[2] << 3)).to_u8()
+    s[7] = (h[2] >> 5).to_u8()
+    s[8] = (h[2] >> 13).to_u8()
+    s[9] = ((h[2] >> 21) | (h[3] << 5)).to_u8()
+    s[10] = (h[3] >> 3).to_u8()
+    s[11] = (h[3] >> 11).to_u8()
+    s[12] = ((h[3] >> 19) | (h[4] << 6)).to_u8()
+    s[13] = (h[4] >> 2).to_u8()
+    s[14] = (h[4] >> 10).to_u8()
+    s[15] = (h[4] >> 18).to_u8()
+    s[16] = (h[5] >> 0).to_u8()
+    s[17] = (h[5] >> 8).to_u8()
+    s[18] = (h[5] >> 16).to_u8()
+    s[19] = ((h[5] >> 24) | (h[6] << 1)).to_u8()
+    s[20] = (h[6] >> 7).to_u8()
+    s[21] = (h[6] >> 15).to_u8()
+    s[22] = ((h[6] >> 23) | (h[7] << 3)).to_u8()
+    s[23] = (h[7] >> 5).to_u8()
+    s[24] = (h[7] >> 13).to_u8()
+    s[25] = ((h[7] >> 21) | (h[8] << 4)).to_u8()
+    s[26] = (h[8] >> 4).to_u8()
+    s[27] = (h[8] >> 12).to_u8()
+    s[28] = ((h[8] >> 20) | (h[9] << 6)).to_u8()
+    s[29] = (h[9] >> 2).to_u8()
+    s[30] = (h[9] >> 10).to_u8()
+    s[31] = (h[9] >> 18).to_u8()
+    s
+
+fn _x25519_fe_invert(z: [u64]) -> [u64]:
+    var z2 = _x25519_fe_sq(z)
+    var t = _x25519_fe_sq(z2)
+    t = _x25519_fe_sq(t)
+
+    var z9 = _x25519_fe_mul(t, z)
+    var z11 = _x25519_fe_mul(z9, z2)
+
+    t = _x25519_fe_sq(z11)
+    var z_2_5_0 = _x25519_fe_mul(t, z9)
+
+    t = _x25519_fe_sq(z_2_5_0)
+    var i: i64 = 1
+    while i < 5:
+        t = _x25519_fe_sq(t)
+        i = i + 1
+    var z_2_10_0 = _x25519_fe_mul(t, z_2_5_0)
+
+    t = _x25519_fe_sq(z_2_10_0)
+    i = 1
+    while i < 10:
+        t = _x25519_fe_sq(t)
+        i = i + 1
+    var z_2_20_0 = _x25519_fe_mul(t, z_2_10_0)
+
+    t = _x25519_fe_sq(z_2_20_0)
+    i = 1
+    while i < 20:
+        t = _x25519_fe_sq(t)
+        i = i + 1
+    t = _x25519_fe_mul(t, z_2_20_0)
+
+    i = 0
+    while i < 10:
+        t = _x25519_fe_sq(t)
+        i = i + 1
+    var z_2_50_0 = _x25519_fe_mul(t, z_2_10_0)
+
+    t = _x25519_fe_sq(z_2_50_0)
+    i = 1
+    while i < 50:
+        t = _x25519_fe_sq(t)
+        i = i + 1
+    var z_2_100_0 = _x25519_fe_mul(t, z_2_50_0)
+
+    t = _x25519_fe_sq(z_2_100_0)
+    i = 1
+    while i < 100:
+        t = _x25519_fe_sq(t)
+        i = i + 1
+    t = _x25519_fe_mul(t, z_2_100_0)
+
+    i = 0
+    while i < 50:
+        t = _x25519_fe_sq(t)
+        i = i + 1
+    t = _x25519_fe_mul(t, z_2_50_0)
+
+    t = _x25519_fe_sq(t)
+    t = _x25519_fe_sq(t)
+    t = _x25519_fe_sq(t)
+    t = _x25519_fe_sq(t)
+    t = _x25519_fe_sq(t)
+
+    _x25519_fe_mul(t, z11)
+
+fn fe_cswap(a: [u64], b: [u64], swap: i64) -> [list]:
+    if swap == 0:
+        return [a, b]
+    [b, a]
+
+fn _cswap_pair(x1: [u64], x2: [u64], z1: [u64], z2: [u64], swap: i64) -> [list]:
+    if swap == 0:
+        return [x1, x2, z1, z2]
+    [x2, x1, z2, z1]
+
+fn _ladder_step(x2: [u64], z2: [u64], x3: [u64], z3: [u64], x1: [u64]) -> [list]:
+    val a = _x25519_fe_add(x2, z2)
+    val aa = _x25519_fe_sq(a)
+    val b = _x25519_fe_sub(x2, z2)
+    val bb = _x25519_fe_sq(b)
+    val e = _x25519_fe_sub(aa, bb)
+    val c = _x25519_fe_add(x3, z3)
+    val d = _x25519_fe_sub(x3, z3)
+    val da = _x25519_fe_mul(d, a)
+    val cb = _x25519_fe_mul(c, b)
+
+    val sum_dc = _x25519_fe_add(da, cb)
+    val new_x3 = _x25519_fe_sq(sum_dc)
+
+    val diff_dc = _x25519_fe_sub(da, cb)
+    val diff_sq = _x25519_fe_sq(diff_dc)
+    val new_z3 = _x25519_fe_mul(x1, diff_sq)
+
+    val new_x2 = _x25519_fe_mul(aa, bb)
+    val a24_e = _x25519_fe_mul_scalar(e, 121665)
+    val aa_plus = _x25519_fe_add(aa, a24_e)
+    val new_z2 = _x25519_fe_mul(e, aa_plus)
+
+    [new_x2, new_z2, new_x3, new_z3]
+
+fn _clamp_scalar(scalar: [u8]) -> [u8]:
+    var clamped: [u8] = []
+    var i: i64 = 0
+    while i < 32:
+        clamped.push(scalar[i])
+        i = i + 1
+
+    clamped[0] = clamped[0] & 0xF8
+    clamped[31] = clamped[31] & 0x7F
+    clamped[31] = clamped[31] | 0x40
+    clamped
+
+fn _mask_u_coord(u_coord: [u8]) -> [u8]:
+    var masked: [u8] = []
+    var i: i64 = 0
+    while i < 32:
+        masked.push(u_coord[i])
+        i = i + 1
+    masked[31] = masked[31] & 0x7F
+    masked
+
+fn x25519_smalllimb(scalar: [u8], u_coord: [u8]) -> [u8]:
+    val k = _clamp_scalar(scalar)
+    val u = _x25519_fe_from_bytes(_mask_u_coord(u_coord))
+
+    var x_2 = _x25519_fe_one()
+    var z_2 = _x25519_fe_zero()
+    var x_3 = u
+    var z_3 = _x25519_fe_one()
+
+    var prev_bit: i64 = 0
+    var bit_pos: i64 = 254
+    while bit_pos >= 0:
+        val byte_idx = bit_pos / 8
+        val bit_idx = bit_pos % 8
+        val k_bit: i64 = (k[byte_idx].to_i64() >> bit_idx) & 1
+        val swap_bit = k_bit ^ prev_bit
+        prev_bit = k_bit
+
+        val swapped = _cswap_pair(x_2, x_3, z_2, z_3, swap_bit)
+        x_2 = swapped[0]
+        x_3 = swapped[1]
+        z_2 = swapped[2]
+        z_3 = swapped[3]
+
+        val step = _ladder_step(x_2, z_2, x_3, z_3, u)
+        x_2 = step[0]
+        z_2 = step[1]
+        x_3 = step[2]
+        z_3 = step[3]
+
+        if bit_pos == 0:
+            val final_swapped = _cswap_pair(x_2, x_3, z_2, z_3, prev_bit)
+            x_2 = final_swapped[0]
+            x_3 = final_swapped[1]
+            z_2 = final_swapped[2]
+            z_3 = final_swapped[3]
+
+            val z_inv = _x25519_fe_invert(z_2)
+            val result = _x25519_fe_mul(x_2, z_inv)
+            return _x25519_fe_to_bytes(result)
+
+        bit_pos = bit_pos - 1
+
+    val z_inv = _x25519_fe_invert(z_2)
+    val result = _x25519_fe_mul(x_2, z_inv)
+    _x25519_fe_to_bytes(result)
+
+fn x25519_base_smalllimb(scalar: [u8]) -> [u8]:
+    var base_point: [u8] = [9,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0]
+    x25519_smalllimb(scalar, base_point)

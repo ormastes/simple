@@ -1,0 +1,51 @@
+#![allow(unnamed_duplicate_typed_args)]
+# @tag:system
+
+use std.spec.*
+
+use os.tls13.hkdf.{hkdf_extract, hkdf_expand, hkdf_expand_label}
+use os.tls13.transcript.{transcript_new, transcript_add, transcript_hash}
+
+fn _bytes_eq(a: [u8], b: [u8]) -> bool:
+    if a.len() != b.len():
+        return false
+    var i: u64 = 0
+    while i < a.len():
+        if a[i] != b[i]:
+            return false
+        i = i + 1
+    true
+
+describe "TLS diag":
+
+    it "host hkdf and transcript produce distinct outputs":
+        var ikm_a: [u8] = []
+        var i: u64 = 0
+        while i < 22:
+            ikm_a.push(0x0Bu8)
+            i = i + 1
+
+        var ikm_diff: [u8] = []
+        i = 0
+        while i < 22:
+            ikm_diff.push(0xAAu8)
+            i = i + 1
+
+        val salt_a: [u8] = [
+            0x00u8, 0x01u8, 0x02u8, 0x03u8, 0x04u8, 0x05u8, 0x06u8,
+            0x07u8, 0x08u8, 0x09u8, 0x0au8, 0x0bu8, 0x0cu8
+        ]
+
+        val prk_a = hkdf_extract(salt_a, ikm_a)
+        val prk_diff = hkdf_extract(salt_a, ikm_diff)
+        expect(_bytes_eq(prk_a, prk_diff)).to_equal(false)
+
+        val empty_ctx: [u8] = []
+        val label_out = hkdf_expand_label(prk_a, "key", empty_ctx, 32)
+        val raw_expand = hkdf_expand(prk_a, empty_ctx, 32)
+        expect(_bytes_eq(label_out, raw_expand)).to_equal(false)
+
+        val t0 = transcript_new()
+        val h4 = transcript_hash(transcript_add(t0, [0xAAu8, 0xBBu8]))
+        val h5 = transcript_hash(transcript_add(t0, [0xCCu8, 0xDDu8]))
+        expect(_bytes_eq(h4, h5)).to_equal(false)

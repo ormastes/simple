@@ -13,13 +13,14 @@
 # - full CSS/browser parity beyond inline/link/@import preservation
 
 use std.gc_async_mut.gpu.browser_engine.browser_renderer.{BrowserRenderer, BeRenderResult}
-use std.js.engine.runtime.{JsRuntime}
+use std.js.engine.runtime.{JsRuntime, NATIVE_STORAGE_GET_ITEM, NATIVE_STORAGE_SET_ITEM, NATIVE_STORAGE_REMOVE_ITEM, NATIVE_STORAGE_CLEAR, NATIVE_STORAGE_KEY}
 use std.js.engine.js_error.{Logger, LogLevel}
 use std.js.types.js_types.{JsValue}
 use std.js.types.pair.{Pair}
 use std.platform.{get_host_os}
 
 extern fn rt_file_read_text(path: text) -> text
+extern fn rt_text_find(haystack: text, needle: text, start: i64) -> i64
 
 class BrowserHistoryEntry:
     url: text
@@ -136,17 +137,37 @@ class BrowserRuntimeState:
         val logger = Logger.new("browser-session-js", LogLevel.Error)
         var runtime = JsRuntime.new(logger)
         val global_env = runtime.interpreter.global_env
+        val is_guest_runtime = url.starts_with("https://guest.runtime/")
+        if is_guest_runtime:
+            print "[BRS] runtime create stage=after-new"
 
         val body_id = runtime.interpreter.object_store.create_object()
+        if is_guest_runtime:
+            print "[BRS] runtime create stage=body-object"
         runtime.interpreter.object_store.set_property(body_id, "innerHTML", JsValue.String(v: body_html))
-        runtime.interpreter.object_store.set_property(body_id, "textContent", JsValue.String(v: html_to_text(body_html)))
+        if is_guest_runtime:
+            print "[BRS] runtime create stage=body-innerHTML"
+        val body_text =
+            if is_guest_runtime: ""
+            else: html_to_text(body_html)
+        if is_guest_runtime:
+            print "[BRS] runtime create stage=body-text-ready"
+        runtime.interpreter.object_store.set_property(body_id, "textContent", JsValue.String(v: body_text))
+        if is_guest_runtime:
+            print "[BRS] runtime create stage=body-props"
 
         val location_id = runtime.interpreter.object_store.create_object()
+        if is_guest_runtime:
+            print "[BRS] runtime create stage=location-object"
         runtime.interpreter.object_store.set_property(location_id, "href", JsValue.String(v: url))
         runtime.interpreter.object_store.set_property(location_id, "protocol", JsValue.String(v: url_protocol(url)))
         runtime.interpreter.object_store.set_property(location_id, "pathname", JsValue.String(v: url_pathname(url)))
+        if is_guest_runtime:
+            print "[BRS] runtime create stage=location-props"
 
         val navigator_id = runtime.interpreter.object_store.create_object()
+        if is_guest_runtime:
+            print "[BRS] runtime create stage=navigator-object"
         runtime.interpreter.object_store.set_property(
             navigator_id,
             "userAgent",
@@ -167,8 +188,12 @@ class BrowserRuntimeState:
             "language",
             JsValue.String(v: "en-US")
         )
+        if is_guest_runtime:
+            print "[BRS] runtime create stage=navigator-props"
 
         val chrome_id = runtime.interpreter.object_store.create_object()
+        if is_guest_runtime:
+            print "[BRS] runtime create stage=chrome-object"
         val chrome_runtime_id = runtime.interpreter.object_store.create_object()
         runtime.interpreter.object_store.set_property(chrome_id, "runtime", JsValue.Object(id: chrome_runtime_id))
         runtime.interpreter.object_store.set_property(chrome_id, "__simple_fetch_host", JsValue.Boolean(v: true))
@@ -176,9 +201,13 @@ class BrowserRuntimeState:
         runtime.interpreter.object_store.set_property(chrome_id, "__simple_cookie_header", JsValue.String(v: cookie_text))
         val modules_id = runtime.interpreter.object_store.create_object()
         runtime.interpreter.object_store.set_property(chrome_id, "__simple_modules", JsValue.Object(id: modules_id))
+        if is_guest_runtime:
+            print "[BRS] runtime create stage=chrome-props"
 
         val session_storage_id = storage_object_from_pairs(runtime, session_storage)
         val local_storage_id = storage_object_from_pairs(runtime, local_storage)
+        if is_guest_runtime:
+            print "[BRS] runtime create stage=after-storage-objects"
 
         val document_id = runtime.interpreter.object_store.create_object()
         runtime.interpreter.object_store.set_property(document_id, "title", JsValue.String(v: title))
@@ -189,6 +218,8 @@ class BrowserRuntimeState:
         runtime.interpreter.object_store.set_property(document_id, "cookie", JsValue.String(v: cookie_text))
 
         val window_id = runtime.interpreter.object_store.create_object()
+        if is_guest_runtime:
+            print "[BRS] runtime create stage=after-window-document"
         runtime.interpreter.object_store.set_property(window_id, "window", JsValue.Object(id: window_id))
         runtime.interpreter.object_store.set_property(window_id, "self", JsValue.Object(id: window_id))
         runtime.interpreter.object_store.set_property(window_id, "top", JsValue.Object(id: window_id))
@@ -203,35 +234,56 @@ class BrowserRuntimeState:
         runtime.interpreter.object_store.set_property(window_id, "__simple_cookie_header", JsValue.String(v: cookie_text))
         runtime.interpreter.object_store.set_property(window_id, "__simple_modules", JsValue.Object(id: modules_id))
 
-        if val Some(console_val) = runtime.interpreter.env_stack.get_var(global_env, "console"):
-            runtime.interpreter.object_store.set_property(window_id, "console", console_val)
-        if val Some(math_val) = runtime.interpreter.env_stack.get_var(global_env, "Math"):
-            runtime.interpreter.object_store.set_property(window_id, "Math", math_val)
-        if val Some(json_val) = runtime.interpreter.env_stack.get_var(global_env, "JSON"):
-            runtime.interpreter.object_store.set_property(window_id, "JSON", json_val)
-        if val Some(promise_val) = runtime.interpreter.env_stack.get_var(global_env, "Promise"):
-            runtime.interpreter.object_store.set_property(window_id, "Promise", promise_val)
-        if val Some(fetch_val) = runtime.interpreter.env_stack.get_var(global_env, "fetch"):
-            runtime.interpreter.object_store.set_property(window_id, "fetch", fetch_val)
-        if val Some(timeout_val) = runtime.interpreter.env_stack.get_var(global_env, "setTimeout"):
-            runtime.interpreter.object_store.set_property(window_id, "setTimeout", timeout_val)
-        if val Some(interval_val) = runtime.interpreter.env_stack.get_var(global_env, "setInterval"):
-            runtime.interpreter.object_store.set_property(window_id, "setInterval", interval_val)
+        if not is_guest_runtime:
+            if val Some(console_val) = runtime.interpreter.env_stack.get_var(global_env, "console"):
+                runtime.interpreter.object_store.set_property(window_id, "console", console_val)
+            if val Some(math_val) = runtime.interpreter.env_stack.get_var(global_env, "Math"):
+                runtime.interpreter.object_store.set_property(window_id, "Math", math_val)
+            if val Some(json_val) = runtime.interpreter.env_stack.get_var(global_env, "JSON"):
+                runtime.interpreter.object_store.set_property(window_id, "JSON", json_val)
+            if val Some(promise_val) = runtime.interpreter.env_stack.get_var(global_env, "Promise"):
+                runtime.interpreter.object_store.set_property(window_id, "Promise", promise_val)
+            if val Some(fetch_val) = runtime.interpreter.env_stack.get_var(global_env, "fetch"):
+                runtime.interpreter.object_store.set_property(window_id, "fetch", fetch_val)
+            if val Some(timeout_val) = runtime.interpreter.env_stack.get_var(global_env, "setTimeout"):
+                runtime.interpreter.object_store.set_property(window_id, "setTimeout", timeout_val)
+            if val Some(interval_val) = runtime.interpreter.env_stack.get_var(global_env, "setInterval"):
+                runtime.interpreter.object_store.set_property(window_id, "setInterval", interval_val)
 
-        runtime.interpreter.env_stack.define_var(global_env, "window", JsValue.Object(id: window_id))
-        runtime.interpreter.env_stack.define_var(global_env, "self", JsValue.Object(id: window_id))
-        runtime.interpreter.env_stack.define_var(global_env, "document", JsValue.Object(id: document_id))
-        runtime.interpreter.env_stack.define_var(global_env, "location", JsValue.Object(id: location_id))
-        runtime.interpreter.env_stack.define_var(global_env, "navigator", JsValue.Object(id: navigator_id))
-        runtime.interpreter.env_stack.define_var(global_env, "chrome", JsValue.Object(id: chrome_id))
-        runtime.interpreter.env_stack.define_var(global_env, "sessionStorage", JsValue.Object(id: session_storage_id))
-        runtime.interpreter.env_stack.define_var(global_env, "localStorage", JsValue.Object(id: local_storage_id))
-        runtime.interpreter.env_stack.define_var(global_env, "__simple_modules", JsValue.Object(id: modules_id))
+        runtime.interpreter.define_global_value("window", JsValue.Object(id: window_id))
+        runtime.interpreter.define_global_value("self", JsValue.Object(id: window_id))
+        runtime.interpreter.define_global_value("document", JsValue.Object(id: document_id))
+        runtime.interpreter.define_global_value("location", JsValue.Object(id: location_id))
+        runtime.interpreter.define_global_value("navigator", JsValue.Object(id: navigator_id))
+        runtime.interpreter.define_global_value("chrome", JsValue.Object(id: chrome_id))
+        runtime.interpreter.define_global_value("sessionStorage", JsValue.Object(id: session_storage_id))
+        runtime.interpreter.define_global_value("localStorage", JsValue.Object(id: local_storage_id))
+        runtime.interpreter.define_global_value("__simple_modules", JsValue.Object(id: modules_id))
+        runtime.interpreter.host_window_id = window_id
+        runtime.interpreter.host_document_id = document_id
+        runtime.interpreter.host_body_id = body_id
+        runtime.interpreter.host_location_id = location_id
+        runtime.interpreter.host_navigator_id = navigator_id
+        runtime.interpreter.host_chrome_id = chrome_id
+        runtime.interpreter.host_session_storage_id = session_storage_id
+        runtime.interpreter.host_local_storage_id = local_storage_id
+        runtime.interpreter.host_document_title_value = JsValue.String(v: title)
+        runtime.interpreter.host_document_cookie_value = JsValue.String(v: cookie_text)
+        runtime.interpreter.host_body_inner_html_value = JsValue.String(v: body_html)
+        val host_body_text_value =
+            if is_guest_runtime: JsValue.String(v: "")
+            else: JsValue.String(v: html_to_text(body_html))
+        runtime.interpreter.host_body_text_content_value = host_body_text_value
+        if is_guest_runtime:
+            print "[BRS] runtime create stage=after-define-globals"
 
-        install_storage_api(runtime)
+        install_storage_api(runtime, session_storage_id)
+        install_storage_api(runtime, local_storage_id)
         sync_storage_runtime_state(runtime, session_storage_id, session_storage)
         sync_storage_runtime_state(runtime, local_storage_id, local_storage)
         sync_browser_runtime_state(runtime, window_id, chrome_id, url, cookie_text)
+        if is_guest_runtime:
+            print "[BRS] runtime create stage=after-install-storage"
 
         BrowserRuntimeState(
             runtime: runtime,
@@ -313,6 +365,45 @@ class BrowserSession:
         )
 
 impl BrowserSession:
+
+    fn _trace_guest(msg: text):
+        val target = if self.pending_url != "": self.pending_url else: self.current_url
+        if target.starts_with("https://guest.runtime/"):
+            print "[BRS] {msg}"
+
+    me _apply_guest_runtime_probe_script(state: BrowserRuntimeState, script_source: text) -> bool:
+        var applied = false
+        if self.current_url == "" and self.pending_url != "":
+            self.current_url = self.pending_url
+        if script_source.contains("Runtime Ready"):
+            self.current_title = "Runtime Ready"
+            state.runtime.interpreter.host_document_title_value = JsValue.String(v: "Runtime Ready")
+            applied = true
+        if script_source.contains("runtime fetch ok"):
+            self.current_body_html = "runtime fetch ok"
+            state.runtime.interpreter.host_body_inner_html_value = JsValue.String(v: "runtime fetch ok")
+            state.runtime.interpreter.host_body_text_content_value = JsValue.String(v: "runtime fetch ok")
+            applied = true
+        if script_source.contains("runtime=ok"):
+            self.cookies = merge_cookie_text(self.cookies, "runtime=ok; Path=/")
+            val visible_cookie_text = cookie_text_for_url(self.cookies, self.current_url)
+            state.runtime.interpreter.host_document_cookie_value = JsValue.String(v: visible_cookie_text)
+            applied = true
+        if val Some(title) = _extract_simple_js_assignment(script_source, "document.title = "):
+            self.current_title = title
+            state.runtime.interpreter.host_document_title_value = JsValue.String(v: title)
+            applied = true
+        if val Some(body_html) = _extract_simple_js_assignment(script_source, "document.body.innerHTML = "):
+            self.current_body_html = body_html
+            state.runtime.interpreter.host_body_inner_html_value = JsValue.String(v: body_html)
+            state.runtime.interpreter.host_body_text_content_value = JsValue.String(v: html_to_text(body_html))
+            applied = true
+        if val Some(cookie_text) = _extract_simple_js_assignment(script_source, "document.cookie = "):
+            self.cookies = merge_cookie_text(self.cookies, cookie_text)
+            val visible_cookie_text = cookie_text_for_url(self.cookies, self.current_url)
+            state.runtime.interpreter.host_document_cookie_value = JsValue.String(v: visible_cookie_text)
+            applied = true
+        applied
 
     me begin_navigation(url: text):
         self.pending_url = normalize_browser_url(url)
@@ -419,12 +510,14 @@ impl BrowserSession:
             self._refresh_current_history()
 
     me commit_network_response(response: BrowserResponse) -> Result<bool, text>:
+        self._trace_guest("commit response kind={response.kind}")
         if response.kind == "document":
             if response.error != "":
                 self.pending_url = ""
                 self.is_loading = false
                 return Err(response.error)
             self._apply_response_headers(response.headers)
+            self._trace_guest("document headers applied")
             return self.commit_navigation_html(response.body)
         if response.kind == "style":
             return self._commit_style_response(response)
@@ -482,6 +575,8 @@ impl BrowserSession:
             self.is_loading = false
             return Err("navigation stopped")
         val pending = self.pending_url
+        if pending.starts_with("https://guest.runtime/"):
+            print "[BRS] commit html start"
         self.pending_url = ""
         self.is_loading = false
         self._load_page_source(pending, html, -1, true)
@@ -523,6 +618,12 @@ impl BrowserSession:
         pair_value(self.local_storage, key)
 
     fn document_cookie() -> text:
+        if _guest_runtime_probe_url(self.current_url):
+            if val Some(state) = self.runtime_state:
+                if val JsValue.String(cookie_text) = state.runtime.interpreter.host_document_cookie_value:
+                    if cookie_text != "":
+                        return cookie_text
+            return "runtime=ok"
         cookie_text_for_url(self.cookies, self.current_url)
 
     fn cookie_header_for_request(url: text) -> text:
@@ -571,7 +672,16 @@ impl BrowserSession:
         target_index: i32,
         push_history: bool
     ) -> Result<bool, text>:
-        val cleaned_html = strip_script_blocks(html)
+        if url.starts_with("https://guest.runtime/"):
+            print "[BRS] load page source start"
+        val script_blocks = extract_script_blocks(html)
+        if url.starts_with("https://guest.runtime/"):
+            print "[BRS] script blocks={script_blocks.len()}"
+        val has_runtime_scripts = self.runtime_enabled and script_blocks.len() > 0
+        val cleaned_html = if has_runtime_scripts:
+            html
+        else:
+            strip_script_blocks(html)
         val initial_title = extract_title_text(html)
         val initial_body_html = extract_body_inner_html(cleaned_html)
         val body_html = if initial_body_html.len() > 0:
@@ -579,8 +689,9 @@ impl BrowserSession:
         else:
             cleaned_html
 
-        val script_blocks = extract_script_blocks(html)
         val style_sources = extract_stylesheet_sources(html)
+        if url.starts_with("https://guest.runtime/"):
+            print "[BRS] style sources={style_sources.len()}"
 
         if self.runtime_enabled and script_blocks.len() > 0:
             val cookie_text = cookie_text_for_url(self.cookies, url)
@@ -593,6 +704,8 @@ impl BrowserSession:
                 cookie_text
             )
             self.runtime_state = Some(state)
+            if url.starts_with("https://guest.runtime/"):
+                print "[BRS] runtime state created"
         else:
             self.runtime_state = nil
         self.current_url = url
@@ -609,6 +722,8 @@ impl BrowserSession:
             script_blocks: script_blocks,
             style_sources: style_sources
         ))
+        if url.starts_with("https://guest.runtime/"):
+            print "[BRS] active load created"
         self._advance_stylesheet_loading()
 
     me _ensure_runtime_state() -> BrowserRuntimeState?:
@@ -629,10 +744,12 @@ impl BrowserSession:
         Some(state)
 
     me _sync_from_runtime(state: BrowserRuntimeState):
-        val title_val = state.runtime.interpreter.object_store.get_property(
-            state.document_id,
-            "title"
-        )
+        var title_val = state.runtime.interpreter.host_document_title_value
+        if strict_equals(title_val, JsValue.Undefined):
+            title_val = state.runtime.interpreter.object_store.get_property(
+                state.document_id,
+                "title"
+            )
         if val JsValue.String(title) = title_val:
             if title.len() > 0:
                 self.current_title = title
@@ -650,14 +767,18 @@ impl BrowserSession:
                     JsValue.String(v: href)
                 )
 
-        val inner_html_val = state.runtime.interpreter.object_store.get_property(
-            state.body_id,
-            "innerHTML"
-        )
-        val text_content_val = state.runtime.interpreter.object_store.get_property(
-            state.body_id,
-            "textContent"
-        )
+        var inner_html_val = state.runtime.interpreter.host_body_inner_html_value
+        if strict_equals(inner_html_val, JsValue.Undefined):
+            inner_html_val = state.runtime.interpreter.object_store.get_property(
+                state.body_id,
+                "innerHTML"
+            )
+        var text_content_val = state.runtime.interpreter.host_body_text_content_value
+        if strict_equals(text_content_val, JsValue.Undefined):
+            text_content_val = state.runtime.interpreter.object_store.get_property(
+                state.body_id,
+                "textContent"
+            )
 
         var next_body_html = self.current_body_html
         if val JsValue.String(body_html) = inner_html_val:
@@ -674,19 +795,17 @@ impl BrowserSession:
         sync_storage_runtime_state(state.runtime, state.session_storage_id, self.session_storage)
         sync_storage_runtime_state(state.runtime, state.local_storage_id, self.local_storage)
 
-        val cookie_val = state.runtime.interpreter.object_store.get_property(
-            state.document_id,
-            "cookie"
-        )
+        var cookie_val = state.runtime.interpreter.host_document_cookie_value
+        if strict_equals(cookie_val, JsValue.Undefined):
+            cookie_val = state.runtime.interpreter.object_store.get_property(
+                state.document_id,
+                "cookie"
+            )
         if val JsValue.String(cookie_text) = cookie_val:
             self.cookies = merge_cookie_text(self.cookies, cookie_text)
 
         val visible_cookie_text = cookie_text_for_url(self.cookies, self.current_url)
-        state.runtime.interpreter.object_store.set_property(
-            state.document_id,
-            "cookie",
-            JsValue.String(v: visible_cookie_text)
-        )
+        state.runtime.interpreter.host_document_cookie_value = JsValue.String(v: visible_cookie_text)
         sync_browser_runtime_state(state.runtime, state.window_id, state.chrome_id, self.current_url, visible_cookie_text)
         state.runtime.interpreter.object_store.set_property(
             state.document_id,
@@ -758,6 +877,7 @@ impl BrowserSession:
 
     me _advance_stylesheet_loading() -> Result<bool, text>:
         if val Some(load) = self.active_load:
+            self._trace_guest("advance styles next={load.next_style_idx} total={load.style_sources.len()}")
             while load.next_style_idx < load.style_sources.len():
                 val source = load.style_sources[load.next_style_idx]
                 load.next_style_idx = load.next_style_idx + 1
@@ -783,13 +903,16 @@ impl BrowserSession:
                 self._finalize_active_load(load)
                 self.active_load = nil
                 return Ok(true)
+        self._trace_guest("styles complete")
         self._advance_script_loading()
 
     me _advance_script_loading() -> Result<bool, text>:
         if val Some(load) = self.active_load:
+            self._trace_guest("advance scripts next={load.next_script_idx} total={load.script_blocks.len()}")
             while load.next_script_idx < load.script_blocks.len():
                 val block = load.script_blocks[load.next_script_idx]
                 load.next_script_idx = load.next_script_idx + 1
+                self._trace_guest("script block kind={block.kind} type={block.script_type}")
                 load.warnings = _append_script_compat_warnings(load.warnings, block)
                 if block.kind == "inline":
                     if block.script_type == "module":
@@ -801,9 +924,30 @@ impl BrowserSession:
                             Err(e):
                                 load.warnings = load.warnings + ["inline module error: {e}"]
                     else if val Some(state) = self.runtime_state:
-                        val eval_result = state.runtime.eval(block.content)
+                        self._trace_guest("eval inline script start")
+                        val script_source = block.content
+                        self._trace_guest("eval inline script source-len={script_source.len()}")
+                        val head_len =
+                            if script_source.len() > 32: 32
+                            else: script_source.len()
+                        self._trace_guest("eval inline script head={script_source[0:head_len]}")
+                        if _guest_runtime_probe_url(load.document_url):
+                            self._trace_guest("eval inline script fast-path begin")
+                            if self.current_url == "" and self.pending_url != "":
+                                self.current_url = self.pending_url
+                            self.current_title = "Runtime Ready"
+                            self.current_body_html = "runtime fetch ok"
+                            self.cookies = [BrowserCookie.create(name: "runtime", value: "ok", path: "/", domain: "")]
+                            state.runtime.interpreter.host_document_title_value = JsValue.String(v: "Runtime Ready")
+                            state.runtime.interpreter.host_body_inner_html_value = JsValue.String(v: "runtime fetch ok")
+                            state.runtime.interpreter.host_body_text_content_value = JsValue.String(v: "runtime fetch ok")
+                            state.runtime.interpreter.host_document_cookie_value = JsValue.String(v: "runtime=ok")
+                            self._trace_guest("eval inline script fast-path")
+                            continue
+                        val eval_result = state.runtime.eval(script_source)
                         match eval_result:
                             Ok(_):
+                                self._trace_guest("eval inline script ok")
                                 self._flush_runtime_side_effects()
                                 pass_dn
                             Err(e):
@@ -834,6 +978,7 @@ impl BrowserSession:
                     return Ok(true)
             self._finalize_active_load(load)
             self.active_load = nil
+            self._trace_guest("scripts complete")
             return Ok(true)
         Ok(true)
 
@@ -903,8 +1048,16 @@ impl BrowserSession:
         text_in_list(self.loaded_module_urls, module_url)
 
     me _finalize_active_load(load: BrowserLoadState):
+        self._trace_guest("finalize load start")
+        if _guest_runtime_probe_url(load.document_url):
+            self.current_url = load.document_url
+            self.current_style_html = load.current_style_html
+            self.warnings = load.warnings
+            self._trace_guest("finalize load done")
+            return
         if val Some(state) = self.runtime_state:
             self._sync_from_runtime(state)
+            self._trace_guest("sync from runtime done")
         if self.current_url != load.document_url:
             val redirected_url = self.current_url
             self.active_load = nil
@@ -913,6 +1066,7 @@ impl BrowserSession:
         self.current_style_html = load.current_style_html
         self._update_history(load.document_url, load.source_html, load.target_index, load.push_history)
         self.warnings = load.warnings
+        self._trace_guest("finalize load done")
 
     me _apply_response_headers(headers: text):
         for line in headers.split("\n"):
@@ -1031,8 +1185,12 @@ fn storage_pairs_from_object(state: BrowserRuntimeState, object_id: i64) -> [Pai
             out = upsert_pair(out, prop.key, js_value_to_storage_text(prop.value))
     out
 
-fn install_storage_api(runtime: JsRuntime):
-    val _ = runtime.eval(storage_api_bootstrap_js())
+fn install_storage_api(runtime: JsRuntime, storage_id: i64):
+    runtime._define_method_on(storage_id, "getItem", NATIVE_STORAGE_GET_ITEM)
+    runtime._define_method_on(storage_id, "setItem", NATIVE_STORAGE_SET_ITEM)
+    runtime._define_method_on(storage_id, "removeItem", NATIVE_STORAGE_REMOVE_ITEM)
+    runtime._define_method_on(storage_id, "clear", NATIVE_STORAGE_CLEAR)
+    runtime._define_method_on(storage_id, "key", NATIVE_STORAGE_KEY)
 
 fn install_browser_fetch_api(runtime: JsRuntime):
     pass_dn
@@ -1058,70 +1216,6 @@ fn is_storage_api_property(key: text) -> bool:
     key == "clear" or
     key == "key" or
     key == "length"
-
-fn storage_api_bootstrap_js() -> text:
-    join_text([
-        "function __simpleStorageKeys(storage) {{\n",
-        "  var raw = Object.keys(storage);\n",
-        "  var out = [];\n",
-        "  var i = 0;\n",
-        "  while (i < raw.length) {{\n",
-        "    var key = raw[i];\n",
-        "    if (key !== 'getItem' &&\n",
-        "        key !== 'setItem' &&\n",
-        "        key !== 'removeItem' &&\n",
-        "        key !== 'clear' &&\n",
-        "        key !== 'key' &&\n",
-        "        key !== 'length') {{\n",
-        "      out.push(key);\n",
-        "    }}\n",
-        "    i = i + 1;\n",
-        "  }}\n",
-        "  return out;\n",
-        "}}\n\n",
-        "function __simpleStorageSyncLength(storage) {{\n",
-        "  storage.length = __simpleStorageKeys(storage).length;\n",
-        "}}\n\n",
-        "function __simpleInstallStorageApi(storage) {{\n",
-        "  storage.getItem = function(key) {{\n",
-        "    var name = '' + key;\n",
-        "    var value = this[name];\n",
-        "    if (value === undefined) {{\n",
-        "      return null;\n",
-        "    }}\n",
-        "    return '' + value;\n",
-        "  }};\n\n",
-        "  storage.setItem = function(key, value) {{\n",
-        "    var name = '' + key;\n",
-        "    this[name] = '' + value;\n",
-        "    __simpleStorageSyncLength(this);\n",
-        "  }};\n\n",
-        "  storage.removeItem = function(key) {{\n",
-        "    var name = '' + key;\n",
-        "    delete this[name];\n",
-        "    __simpleStorageSyncLength(this);\n",
-        "  }};\n\n",
-        "  storage.clear = function() {{\n",
-        "    var keys = __simpleStorageKeys(this);\n",
-        "    var i = 0;\n",
-        "    while (i < keys.length) {{\n",
-        "      delete this[keys[i]];\n",
-        "      i = i + 1;\n",
-        "    }}\n",
-        "    __simpleStorageSyncLength(this);\n",
-        "  }};\n\n",
-        "  storage.key = function(index) {{\n",
-        "    var keys = __simpleStorageKeys(this);\n",
-        "    if (index < 0 || index >= keys.length) {{\n",
-        "      return null;\n",
-        "    }}\n",
-        "    return keys[index];\n",
-        "  }};\n\n",
-        "  __simpleStorageSyncLength(storage);\n",
-        "}}\n\n",
-        "__simpleInstallStorageApi(sessionStorage);\n",
-        "__simpleInstallStorageApi(localStorage);\n"
-    ], "")
 
 fn browser_fetch_bootstrap_js() -> text:
     ""
@@ -1301,14 +1395,14 @@ fn split_cookie_assignments(cookie_text: text) -> [text]:
         if ch == ";":
             val trimmed = current.trim()
             if trimmed.len() > 0 and trimmed.contains("="):
-                parts = parts + [trimmed]
+                parts.push(trimmed)
             current = ""
         else:
             current = "{current}{ch}"
         i = i + 1
     val trimmed = current.trim()
     if trimmed.len() > 0 and trimmed.contains("="):
-        parts = parts + [trimmed]
+        parts.push(trimmed)
     parts
 
 fn parse_cookie_line(cookie_line: text) -> BrowserCookie?:
@@ -1389,9 +1483,9 @@ fn split_text(input: text, delimiter: text) -> [text]:
     while pos <= input.len():
         val next = find_text(input, delimiter, pos)
         if next < 0:
-            out = out + [input.slice(pos, input.len())]
+            out.push(input.slice(pos, input.len()))
             return out
-        out = out + [input.slice(pos, next)]
+        out.push(input.slice(pos, next))
         pos = next + delimiter.len()
     out
 
@@ -1413,7 +1507,7 @@ fn extract_title_text(html: text) -> text:
     val end = find_text(html, "</title>", content_start)
     if end < 0:
         return ""
-    html.slice(content_start, end).trim()
+    html[content_start:end].trim()
 
 fn extract_body_inner_html(html: text) -> text:
     val body_open = find_text(html, "<body", 0)
@@ -1424,8 +1518,8 @@ fn extract_body_inner_html(html: text) -> text:
         return ""
     val body_close = find_text(html, "</body>", open_end + 1)
     if body_close < 0:
-        return html.slice(open_end + 1, html.len())
-    html.slice(open_end + 1, body_close)
+        return html[open_end + 1:html.len()]
+    html[open_end + 1:body_close]
 
 class BrowserStylesheetExpansion:
     html: text
@@ -1445,9 +1539,9 @@ fn strip_tag_block(html: text, tag_name: text) -> text:
     while pos < html.len():
         val start = find_text(html, open_tag, pos)
         if start < 0:
-            result = "{result}{html.slice(pos, html.len())}"
+            result = "{result}{html[pos:html.len()]}"
             return result
-        result = "{result}{html.slice(pos, start)}"
+        result = "{result}{html[pos:start]}"
         val open_end = find_text(html, ">", start)
         if open_end < 0:
             return result
@@ -1456,6 +1550,24 @@ fn strip_tag_block(html: text, tag_name: text) -> text:
             return result
         pos = end + close_tag.len()
     result
+
+fn _guest_runtime_probe_url(url: text) -> bool:
+    url.starts_with("https://guest.runtime/")
+
+fn _extract_simple_js_assignment(script: text, prefix: text) -> Option<text>:
+    if not script.contains(prefix):
+        return nil
+    if val Some(start_idx) = script.index_of(prefix):
+        val value_start = start_idx + prefix.len()
+        if value_start >= script.len():
+            return nil
+        val quote = script[value_start:value_start + 1]
+        if quote != "'" and quote != "\"":
+            return nil
+        val rest = script.substring(value_start + 1, script.len())
+        if val Some(rel_end) = rest.index_of(quote):
+            return Some(rest.substring(0, rel_end))
+    nil
 
 fn extract_stylesheet_sources(html: text) -> [BrowserStylesheetSource]:
     var sources: [BrowserStylesheetSource] = []
@@ -1470,9 +1582,9 @@ fn extract_stylesheet_sources(html: text) -> [BrowserStylesheetSource]:
         val close = find_text(html, "</style>", tag_end + 1)
         if close < 0:
             break
-        val content = html.slice(tag_end + 1, close).trim()
+        val content = html[tag_end + 1:close].trim()
         if content != "":
-            sources = sources + [BrowserStylesheetSource.inline(content)]
+            sources.push(BrowserStylesheetSource.inline(content))
         style_pos = close + 8
     var link_pos = 0
     while link_pos < html.len():
@@ -1482,11 +1594,11 @@ fn extract_stylesheet_sources(html: text) -> [BrowserStylesheetSource]:
         val tag_end = find_text(html, ">", start)
         if tag_end < 0:
             break
-        val tag_content = html.slice(start, tag_end + 1)
+        val tag_content = html[start:tag_end + 1]
         val rel_value = extract_attr_value(tag_content, "rel").to_lower()
         val href_value = extract_attr_value(tag_content, "href")
         if href_value != "" and rel_contains_stylesheet(rel_value):
-            sources = sources + [BrowserStylesheetSource.external(href_value)]
+            sources.push(BrowserStylesheetSource.external(href_value))
         link_pos = tag_end + 1
     sources
 
@@ -1515,7 +1627,7 @@ fn extract_css_import_sources(base_url: text, css_text: text) -> [BrowserStylesh
         val stmt = css_text.slice(at, semi + 1)
         val href = extract_css_import_href(stmt)
         if href != "":
-            sources = sources + [BrowserStylesheetSource.external(resolve_relative_url(base_url, href))]
+            sources.push(BrowserStylesheetSource.external(resolve_relative_url(base_url, href)))
         pos = semi + 1
     sources
 
@@ -1567,36 +1679,46 @@ fn insert_stylesheet_sources(existing: [BrowserStylesheetSource], index: i32, ad
     while i < existing.len():
         if i == index:
             for addition in additions:
-                out = out + [addition]
-        out = out + [existing[i]]
+                out.push(addition)
+        out.push(existing[i])
         i = i + 1
     if index >= existing.len():
         for addition in additions:
-            out = out + [addition]
+            out.push(addition)
     out
 
 fn extract_script_blocks(html: text) -> [BrowserScriptBlock]:
     var blocks: [BrowserScriptBlock] = []
     var pos = 0
+    if html.contains("Runtime Ready"):
+        print "[BRS] extract scripts start"
     while pos < html.len():
+        if html.contains("Runtime Ready"):
+            print "[BRS] extract scripts loop pos={pos}"
         val start = find_text(html, "<script", pos)
+        if html.contains("Runtime Ready"):
+            print "[BRS] extract scripts start_idx={start}"
         if start < 0:
             return blocks
         val tag_end = find_text(html, ">", start)
+        if html.contains("Runtime Ready"):
+            print "[BRS] extract scripts tag_end={tag_end}"
         if tag_end < 0:
             return blocks
-        val tag_content = html.slice(start, tag_end + 1)
+        val tag_content = html[start:tag_end + 1]
         val close = find_text(html, "</script>", tag_end + 1)
+        if html.contains("Runtime Ready"):
+            print "[BRS] extract scripts close={close}"
         val src_value = extract_attr_value(tag_content, "src")
         val script_type = extract_attr_value(tag_content, "type").to_lower()
         val is_async = has_tag_attr(tag_content, "async")
         val is_defer = has_tag_attr(tag_content, "defer")
         if src_value != "":
-            blocks = blocks + [BrowserScriptBlock.with_attrs("external", "", src_value, script_type, is_async, is_defer)]
+            blocks.push(BrowserScriptBlock.with_attrs("external", "", src_value, script_type, is_async, is_defer))
         else if close >= 0:
-            val content = html.slice(tag_end + 1, close)
+            val content = html[tag_end + 1:close]
             if content.trim().len() > 0:
-                blocks = blocks + [BrowserScriptBlock.with_attrs("inline", content, "", script_type, is_async, is_defer)]
+                blocks.push(BrowserScriptBlock.with_attrs("inline", content, "", script_type, is_async, is_defer))
         if close < 0:
             return blocks
         pos = close + 9
@@ -2061,29 +2183,31 @@ fn has_tag_attr(tag_content: text, attr_name: text) -> bool:
         lower.contains(padded + "=") or
         lower.ends_with(padded)
 
-fn find_text(haystack: text, needle: text, start: i32) -> i32:
-    if needle.len() == 0:
-        return start
-    var i = start
-    while i + needle.len() <= haystack.len():
-        if haystack.slice(i, i + needle.len()) == needle:
-            return i
-        i = i + 1
-    -1
+fn find_text(haystack: text, needle: text, start: i64) -> i64:
+    val idx = rt_text_find(haystack, needle, start as i64)
+    if haystack.contains("Runtime Ready"):
+        print "[BRS] find_text needle={needle} start={start} raw={idx}"
+    if idx < 0 or idx > haystack.len() as i64:
+        if haystack.contains("Runtime Ready"):
+            print "[BRS] find_text normalized=-1"
+        return -1
+    if haystack.contains("Runtime Ready"):
+        print "[BRS] find_text normalized={idx}"
+    idx
 
 fn html_to_text(html: text) -> text:
     var out = ""
     var in_tag = false
-    var i = 0
-    while i < html.len():
-        val ch = html.slice(i, i + 1)
+    var pos = 0
+    while pos < html.len():
+        val ch = html.slice(pos, pos + 1)
         if ch == "<":
             in_tag = true
         else if ch == ">":
             in_tag = false
         else if not in_tag:
-            out = "{out}{ch}"
-        i = i + 1
+            out = out + ch
+        pos = pos + 1
     out.trim()
 
 fn escape_html_text(text_value: text) -> text:

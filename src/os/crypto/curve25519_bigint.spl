@@ -1,0 +1,320 @@
+#![allow(unnamed_duplicate_typed_args)]
+# Curve25519 / X25519 bigint-backed field arithmetic for interpreter safety.
+#
+# This helper keeps every intermediate inside the existing pure-Simple bigint
+# helpers, avoiding checked-overflow paths in the interpreter.
+
+use std.rsa.types as bigint
+
+val FIELD_P = [1073741805, 1073741823, 1073741823, 1073741823, 1073741823, 1073741823, 1073741823, 1073741823, 32767]
+val FIELD_BYTES: i64 = 32
+val BIGINT_BASE: i64 = 1073741824
+val BIGINT_BITS_PER_LIMB: i64 = 30
+
+fn _bigint_bit_length(a: list) -> i64:
+    val norm = bigint.bigint_normalize(a)
+    val len = norm.len()
+    if len == 0:
+        return 0
+    if bigint.bigint_is_zero(norm):
+        return 0
+
+    val top_limb = norm[len - 1]
+    val base_bits = (len - 1) * BIGINT_BITS_PER_LIMB
+    var bits = 0
+    var temp = top_limb
+    while temp > 0:
+        bits = bits + 1
+        temp = temp / 2
+    base_bits + bits
+
+fn _bigint_get_bit(a: list, n: i64) -> i64:
+    val limb_idx = n / BIGINT_BITS_PER_LIMB
+    val bit_idx = n % BIGINT_BITS_PER_LIMB
+    val len = a.len()
+    if limb_idx >= len:
+        return 0
+
+    val limb = a[limb_idx]
+    val mask = 1 << bit_idx
+    (limb / mask) % 2
+
+fn _bigint_shift_left_one(a: list) -> list:
+    if bigint.bigint_is_zero(a):
+        return a
+
+    val len = a.len()
+    var result = []
+    var carry = 0
+    var i: i64 = 0
+
+    while i < len:
+        val limb = a[i]
+        val shifted = limb * 2 + carry
+        result.push(shifted % BIGINT_BASE)
+        carry = shifted / BIGINT_BASE
+        i = i + 1
+
+    if carry > 0:
+        result.push(carry)
+
+    bigint.bigint_normalize(result)
+
+fn _bigint_mod_safe(a: list, b: list) -> list:
+    if bigint.bigint_compare(a, b) < 0:
+        return a
+    if bigint.bigint_compare(a, b) == 0:
+        return bigint.bigint_zero()
+
+    var remainder = bigint.bigint_zero()
+    val bit_len = _bigint_bit_length(a)
+    var i = bit_len - 1
+
+    while i >= 0:
+        remainder = _bigint_shift_left_one(remainder)
+        if _bigint_get_bit(a, i) == 1:
+            remainder = bigint.bigint_add(remainder, bigint.bigint_one())
+        if bigint.bigint_compare(remainder, b) >= 0:
+            remainder = bigint.bigint_sub(remainder, b)
+        i = i - 1
+
+    remainder
+
+fn _field_reduce(a: list) -> list:
+    _bigint_mod_safe(a, FIELD_P)
+
+fn _bytes_to_bigint_le(b: [u8]) -> list:
+    var result = bigint.bigint_zero()
+    var i = b.len().to_i64()
+    while i > 0:
+        i = i - 1
+        result = bigint.bigint_mul_i64(result, 256)
+        result = bigint.bigint_add(result, bigint.bigint_from_i64(b[i].to_i64()))
+    result
+
+fn _bigint_to_bytes_le(n: list, byte_count: i64) -> [u8]:
+    var result: [u8] = []
+    var i: i64 = 0
+    while i < byte_count:
+        result.push(0)
+        i = i + 1
+
+    var temp = _field_reduce(n)
+    i = 0
+    while i < byte_count:
+        val divmod = bigint.bigint_divmod_i64(temp, 256)
+        val remainder = divmod[1]
+        result[i] = remainder[0].to_u8()
+        temp = divmod[0]
+        i = i + 1
+
+    result
+
+fn fe_zero() -> list:
+    bigint.bigint_zero()
+
+fn fe_one() -> list:
+    bigint.bigint_one()
+
+fn fe_add(a: list, b: list) -> list:
+    _field_reduce(bigint.bigint_add(a, b))
+
+fn fe_sub(a: list, b: list) -> list:
+    if bigint.bigint_compare(a, b) >= 0:
+        return bigint.bigint_sub(a, b)
+    bigint.bigint_sub(bigint.bigint_add(a, FIELD_P), b)
+
+fn fe_mul(a: list, b: list) -> list:
+    _field_reduce(bigint.bigint_mul(a, b))
+
+fn fe_sq(a: list) -> list:
+    fe_mul(a, a)
+
+fn fe_mul_scalar(a: list, s: i64) -> list:
+    _field_reduce(bigint.bigint_mul_i64(a, s))
+
+fn fe_from_bytes(b: [u8]) -> list:
+    _field_reduce(_bytes_to_bigint_le(b))
+
+fn fe_to_bytes(a: list) -> [u8]:
+    _bigint_to_bytes_le(a, FIELD_BYTES)
+
+fn fe_invert(z: list) -> list:
+    # z^(p-2) using the standard addition chain.
+    var z2 = fe_sq(z)
+    var t = fe_sq(z2)
+    t = fe_sq(t)
+
+    var z9 = fe_mul(t, z)
+    var z11 = fe_mul(z9, z2)
+
+    t = fe_sq(z11)
+    var z_2_5_0 = fe_mul(t, z9)
+
+    t = fe_sq(z_2_5_0)
+    var i: i64 = 1
+    while i < 5:
+        t = fe_sq(t)
+        i = i + 1
+    var z_2_10_0 = fe_mul(t, z_2_5_0)
+
+    t = fe_sq(z_2_10_0)
+    i = 1
+    while i < 10:
+        t = fe_sq(t)
+        i = i + 1
+    var z_2_20_0 = fe_mul(t, z_2_10_0)
+
+    t = fe_sq(z_2_20_0)
+    i = 1
+    while i < 20:
+        t = fe_sq(t)
+        i = i + 1
+    t = fe_mul(t, z_2_20_0)
+
+    i = 0
+    while i < 10:
+        t = fe_sq(t)
+        i = i + 1
+    var z_2_50_0 = fe_mul(t, z_2_10_0)
+
+    t = fe_sq(z_2_50_0)
+    i = 1
+    while i < 50:
+        t = fe_sq(t)
+        i = i + 1
+    var z_2_100_0 = fe_mul(t, z_2_50_0)
+
+    t = fe_sq(z_2_100_0)
+    i = 1
+    while i < 100:
+        t = fe_sq(t)
+        i = i + 1
+    t = fe_mul(t, z_2_100_0)
+
+    i = 0
+    while i < 50:
+        t = fe_sq(t)
+        i = i + 1
+    t = fe_mul(t, z_2_50_0)
+
+    t = fe_sq(t)
+    t = fe_sq(t)
+    t = fe_sq(t)
+    t = fe_sq(t)
+    t = fe_sq(t)
+
+    fe_mul(t, z11)
+
+fn fe_cswap(a: list, b: list, swap: i64) -> list:
+    if swap == 0:
+        return [a, b]
+    [b, a]
+
+fn _cswap_pair(x1: list, x2: list, z1: list, z2: list, swap: i64) -> list:
+    if swap == 0:
+        return [x1, x2, z1, z2]
+    [x2, x1, z2, z1]
+
+fn _ladder_step(x2: list, z2: list, x3: list, z3: list, x1: list) -> list:
+    val a = fe_add(x2, z2)
+    val aa = fe_sq(a)
+    val b = fe_sub(x2, z2)
+    val bb = fe_sq(b)
+    val e = fe_sub(aa, bb)
+    val c = fe_add(x3, z3)
+    val d = fe_sub(x3, z3)
+    val da = fe_mul(d, a)
+    val cb = fe_mul(c, b)
+
+    val sum_dc = fe_add(da, cb)
+    val new_x3 = fe_sq(sum_dc)
+
+    val diff_dc = fe_sub(da, cb)
+    val diff_sq = fe_sq(diff_dc)
+    val new_z3 = fe_mul(x1, diff_sq)
+
+    val new_x2 = fe_mul(aa, bb)
+    val a24_e = fe_mul_scalar(e, 121665)
+    val aa_plus = fe_add(aa, a24_e)
+    val new_z2 = fe_mul(e, aa_plus)
+
+    [new_x2, new_z2, new_x3, new_z3]
+
+fn _clamp_scalar(scalar: [u8]) -> [u8]:
+    var clamped: [u8] = []
+    var i: i64 = 0
+    while i < 32:
+        clamped.push(scalar[i])
+        i = i + 1
+
+    clamped[0] = clamped[0] & 0xF8
+    clamped[31] = clamped[31] & 0x7F
+    clamped[31] = clamped[31] | 0x40
+    clamped
+
+fn _mask_u_coord(u_coord: [u8]) -> [u8]:
+    var masked: [u8] = []
+    var i: i64 = 0
+    while i < 32:
+        masked.push(u_coord[i])
+        i = i + 1
+    masked[31] = masked[31] & 0x7F
+    masked
+
+fn x25519_safe(scalar: [u8], u_coord: [u8]) -> [u8]:
+    val k = _clamp_scalar(scalar)
+    val u = fe_from_bytes(_mask_u_coord(u_coord))
+
+    var x_2 = fe_one()
+    var z_2 = fe_zero()
+    var x_3 = u
+    var z_3 = fe_one()
+
+    var prev_bit: i64 = 0
+    var bit_pos: i64 = 254
+    while bit_pos >= 0:
+        val byte_idx = bit_pos / 8
+        val bit_idx = bit_pos % 8
+        val k_bit: i64 = (k[byte_idx].to_i64() >> bit_idx) & 1
+        val swap_bit = k_bit ^ prev_bit
+        prev_bit = k_bit
+
+        val swapped = _cswap_pair(x_2, x_3, z_2, z_3, swap_bit)
+        x_2 = swapped[0]
+        x_3 = swapped[1]
+        z_2 = swapped[2]
+        z_3 = swapped[3]
+
+        val step = _ladder_step(x_2, z_2, x_3, z_3, u)
+        x_2 = step[0]
+        z_2 = step[1]
+        x_3 = step[2]
+        z_3 = step[3]
+
+        if bit_pos == 0:
+            val final_swapped = _cswap_pair(x_2, x_3, z_2, z_3, prev_bit)
+            x_2 = final_swapped[0]
+            x_3 = final_swapped[1]
+            z_2 = final_swapped[2]
+            z_3 = final_swapped[3]
+
+            val z_inv = fe_invert(z_2)
+            val result = fe_mul(x_2, z_inv)
+            return fe_to_bytes(result)
+
+        bit_pos = bit_pos - 1
+
+    val z_inv = fe_invert(z_2)
+    val result = fe_mul(x_2, z_inv)
+    fe_to_bytes(result)
+
+fn x25519_base_safe(scalar: [u8]) -> [u8]:
+    var base_point: [u8] = []
+    base_point.push(9)
+    var i: i64 = 1
+    while i < 32:
+        base_point.push(0)
+        i = i + 1
+
+    x25519_safe(scalar, base_point)
