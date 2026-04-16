@@ -1578,6 +1578,9 @@ int fat32_list_dir(void);
 
 /* RuntimeValue wrappers — Simple passes text as tagged heap pointers.
  * These extract the C string from RuntimeValue and call the real functions. */
+static char _fat32_selected_name[64];
+static uint32_t _fat32_selected_name_len = 0;
+
 RuntimeValue spl_fat32_find_file(RuntimeValue name_rv, RuntimeValue out_cluster, RuntimeValue out_size) {
     const char *name = "";
     if (IS_HEAP(name_rv)) {
@@ -1667,7 +1670,43 @@ RuntimeValue rt_fat32_write_file_text(RuntimeValue name_rv, RuntimeValue content
     }
     if (!name || name_len == 0)
         return FALSE_VALUE;
-    return fat32_write_file(name, content, content_len) == 0 ? TRUE_VALUE : FALSE_VALUE;
+    int rc = fat32_write_file(name, content, content_len);
+    return rc == 0 ? TRUE_VALUE : FALSE_VALUE;
+}
+
+RuntimeValue rt_fat32_select_file(RuntimeValue name_rv)
+{
+    const char *name = "";
+    uint32_t name_len = 0;
+    if (IS_HEAP(name_rv)) {
+        RuntimeString *s = (RuntimeString *)DECODE_PTR(name_rv);
+        if (s) {
+            name = s->data;
+            name_len = s->len;
+        }
+    }
+    if (!name || name_len == 0 || name_len >= sizeof(_fat32_selected_name))
+        return FALSE_VALUE;
+    __builtin_memcpy(_fat32_selected_name, name, name_len);
+    _fat32_selected_name[name_len] = '\0';
+    _fat32_selected_name_len = name_len;
+    return TRUE_VALUE;
+}
+
+RuntimeValue rt_fat32_write_selected_file_text(RuntimeValue content_rv)
+{
+    const uint8_t *content = (const uint8_t *)"";
+    uint32_t content_len = 0;
+    if (_fat32_selected_name_len == 0)
+        return FALSE_VALUE;
+    if (IS_HEAP(content_rv)) {
+        RuntimeString *s = (RuntimeString *)DECODE_PTR(content_rv);
+        if (s) {
+            content = (const uint8_t *)s->data;
+            content_len = s->len;
+        }
+    }
+    return fat32_write_file(_fat32_selected_name, content, content_len) == 0 ? TRUE_VALUE : FALSE_VALUE;
 }
 
 static struct {
@@ -2019,7 +2058,6 @@ int fat32_write_file(const char *name, const uint8_t *buf, uint32_t size) {
 
     const char *root_name = _fat32_root_name(name);
     if (!root_name || !*root_name) return -1;
-
     char name83[11];
     _fat32_make_8_3_name(root_name, name83);
 

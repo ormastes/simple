@@ -217,6 +217,68 @@ describe "BrowserSession script bridge":
         expect(session.cookie_header_for_request("https://example.com/path/next")).to_contain("theme=light")
         expect(session.cookie_header_for_request("https://example.com/other")).to_equal("global=yes")
 
+    it "implements storage method surface while keeping property access compatible":
+        var session = BrowserSession.new()
+        session.open_html("about:storage", "<html><body>Storage</body></html>")
+
+        val method_result = session.eval_script(
+            "typeof sessionStorage.getItem + ':' + typeof sessionStorage.setItem + ':' + typeof sessionStorage.removeItem + ':' + typeof sessionStorage.clear + ':' + typeof sessionStorage.key"
+        )
+        match method_result:
+            Ok(value) =>
+                expect(_display_js(value)).to_equal("function:function:function:function:function")
+            Err(e) =>
+                expect(false).to_equal(true)
+
+        val set_result = session.eval_script(
+            "sessionStorage.setItem('tab', 7); sessionStorage.setItem('mode', 'reader'); sessionStorage.getItem('tab') + ':' + sessionStorage.length + ':' + sessionStorage.key(0) + ':' + sessionStorage.key(1)"
+        )
+        match set_result:
+            Ok(value) =>
+                expect(_display_js(value)).to_equal("7:2:tab:mode")
+                expect(session.session_storage_item("tab") ?? "").to_equal("7")
+                expect(session.session_storage_item("mode") ?? "").to_equal("reader")
+            Err(e) =>
+                expect(false).to_equal(true)
+
+        val remove_result = session.eval_script(
+            "sessionStorage.removeItem('tab'); (sessionStorage.getItem('tab') === null) + ':' + sessionStorage.length + ':' + sessionStorage.key(0)"
+        )
+        match remove_result:
+            Ok(value) =>
+                expect(_display_js(value)).to_equal("true:1:mode")
+                expect(session.session_storage_item("tab")).to_be_nil()
+            Err(e) =>
+                expect(false).to_equal(true)
+
+        val property_result = session.eval_script(
+            "localStorage.theme = 'dark'; localStorage.getItem('theme') + ':' + localStorage.length"
+        )
+        match property_result:
+            Ok(value) =>
+                expect(_display_js(value)).to_equal("dark:0")
+            Err(e) =>
+                expect(false).to_equal(true)
+
+        val synced_length_result = session.eval_script("localStorage.length + ':' + localStorage.key(0)")
+        match synced_length_result:
+            Ok(value) =>
+                expect(_display_js(value)).to_equal("1:theme")
+                expect(session.local_storage_item("theme") ?? "").to_equal("dark")
+            Err(e) =>
+                expect(false).to_equal(true)
+
+        val clear_result = session.eval_script(
+            "localStorage.clear(); sessionStorage.clear(); localStorage.length + ':' + sessionStorage.length + ':' + (localStorage.getItem('theme') === null)"
+        )
+        match clear_result:
+            Ok(value) =>
+                expect(_display_js(value)).to_equal("0:0:true")
+                expect(session.local_storage_item("theme")).to_be_nil()
+                expect(session.session_storage_item("mode")).to_be_nil()
+            Err(e) =>
+                expect(false).to_equal(true)
+
 describe "BrowserSession history and rendering":
 
     it "supports back forward and reload":

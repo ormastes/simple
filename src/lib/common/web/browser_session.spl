@@ -129,6 +129,10 @@ class BrowserRuntimeState:
         runtime.interpreter.env_stack.define_var(global_env, "sessionStorage", JsValue.Object(id: session_storage_id))
         runtime.interpreter.env_stack.define_var(global_env, "localStorage", JsValue.Object(id: local_storage_id))
 
+        install_storage_api(runtime)
+        sync_storage_runtime_state(runtime, session_storage_id, session_storage)
+        sync_storage_runtime_state(runtime, local_storage_id, local_storage)
+
         BrowserRuntimeState(
             runtime: runtime,
             window_id: window_id,
@@ -398,6 +402,8 @@ impl BrowserSession:
         self.current_body_html = next_body_html
         self.session_storage = storage_pairs_from_object(state, state.session_storage_id)
         self.local_storage = storage_pairs_from_object(state, state.local_storage_id)
+        sync_storage_runtime_state(state.runtime, state.session_storage_id, self.session_storage)
+        sync_storage_runtime_state(state.runtime, state.local_storage_id, self.local_storage)
 
         val cookie_val = state.runtime.interpreter.object_store.get_property(
             state.document_id,
@@ -486,9 +492,100 @@ fn storage_pairs_from_object(state: BrowserRuntimeState, object_id: i64) -> [Pai
     val obj = state.runtime.interpreter.object_store.get_object(object_id)
     var out: [Pair<text, text>] = []
     for prop in obj.properties:
-        if prop.key != "__proto__":
+        if not is_storage_api_property(prop.key):
             out = upsert_pair(out, prop.key, js_value_to_storage_text(prop.value))
     out
+
+fn install_storage_api(runtime: JsRuntime):
+    val _ = runtime.eval(storage_api_bootstrap_js())
+
+fn sync_storage_runtime_state(runtime: JsRuntime, object_id: i64, pairs: [Pair<text, text>]):
+    runtime.interpreter.object_store.set_property(
+        object_id,
+        "length",
+        JsValue.Number(v: pairs.len().to_f64())
+    )
+
+fn is_storage_api_property(key: text) -> bool:
+    key == "__proto__" or
+    key == "getItem" or
+    key == "setItem" or
+    key == "removeItem" or
+    key == "clear" or
+    key == "key" or
+    key == "length"
+
+fn storage_api_bootstrap_js() -> text:
+    "
+function __simpleStorageKeys(storage) {
+  var raw = Object.keys(storage);
+  var out = [];
+  var i = 0;
+  while (i < raw.length) {
+    var key = raw[i];
+    if (key !== 'getItem' &&
+        key !== 'setItem' &&
+        key !== 'removeItem' &&
+        key !== 'clear' &&
+        key !== 'key' &&
+        key !== 'length') {
+      out.push(key);
+    }
+    i = i + 1;
+  }
+  return out;
+}
+
+function __simpleStorageSyncLength(storage) {
+  storage.length = __simpleStorageKeys(storage).length;
+}
+
+function __simpleInstallStorageApi(storage) {
+  storage.getItem = function(key) {
+    var name = '' + key;
+    var value = this[name];
+    if (value === undefined) {
+      return null;
+    }
+    return '' + value;
+  };
+
+  storage.setItem = function(key, value) {
+    var name = '' + key;
+    this[name] = '' + value;
+    __simpleStorageSyncLength(this);
+  };
+
+  storage.removeItem = function(key) {
+    var name = '' + key;
+    delete this[name];
+    __simpleStorageSyncLength(this);
+  };
+
+  storage.clear = function() {
+    var keys = __simpleStorageKeys(this);
+    var i = 0;
+    while (i < keys.length) {
+      delete this[keys[i]];
+      i = i + 1;
+    }
+    __simpleStorageSyncLength(this);
+  };
+
+  storage.key = function(index) {
+    var keys = __simpleStorageKeys(this);
+    if (index < 0 || index >= keys.length) {
+      return null;
+    }
+    return keys[index];
+  };
+
+  __simpleStorageSyncLength(storage);
+}
+
+__simpleInstallStorageApi(sessionStorage);
+__simpleInstallStorageApi(localStorage);
+"
 
 fn pair_value(pairs: [Pair<text, text>], key: text) -> text?:
     var i = 0
