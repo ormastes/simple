@@ -1,24 +1,15 @@
 # Kernel Executable Source — Path-to-Bytes Lookup
 #
-# Resolves binary paths to executable bytes. Phase 4 wires this through the
-# in-kernel initramfs reader so SimpleOS can load arbitrary toolchain binaries
-# (clang, rust-lld, simple, ...) from the packed initramfs instead of a
-# hardcoded whitelist of minimal RV64 proof-of-concept stubs.
-#
-# Resolution order:
-#   1. If the path starts with `/` and an initramfs is mounted, ask the
-#      in-kernel initramfs reader for the file bytes.
-#   2. On ENOENT from the reader, fall back to the LEGACY_BOOT_STUBS allowlist
-#      which maps to minimal inlined RV32/RV64 ELF stubs used for boot-time
-#      smoke tests before full ELF-backed exec lands.
+# Resolves binary paths to executable bytes. Resolution order:
+#   1. If the path starts with `/` and an initramfs blob is set, decompress
+#      the zstd+cpio archive and look up the file.
+#   2. On ENOENT from the initramfs, fall back to the two inlined RV32/RV64
+#      proof-of-concept ELF stubs used for early boot smoke tests.
 #   3. Everything else: return Err("ENOENT: ...") so callers surface -2.
-#
-# TODO (Phase 4.5): the kernel currently has no zstd/cpio decompressor wired,
-# so _initramfs_read_file below always reports ENOENT for real archive paths
-# and prints a one-time TODO notice. When decompression is wired, replace the
-# body of _initramfs_read_file with a call into the kernel initramfs module.
 
 use os.kernel.arch.arch_context.{Architecture}
+use os.kernel.loader.zstd_decompress.{zstd_decompress}
+use os.kernel.loader.cpio_newc.{CpioEntry, cpio_parse, cpio_lookup}
 
 val RV64_PROOF_BINARY_PATH: text = "/sys/apps/rv64_user_proof"
 val RV32_PROOF_BINARY_PATH: text = "/sys/apps/rv32_user_proof"
@@ -30,36 +21,6 @@ val ERR_ENOENT: text = "ENOENT: -2"
 val ERR_EINVAL: text = "EINVAL: -22"
 val ERR_EBADF: text = "EBADF: -9"
 val ERR_ENOSPC: text = "ENOSPC: -28"
-
-# Legacy boot-test fallback: minimal inlined RV32/RV64 ELF stubs used by early
-# smoke tests. Everything else MUST come from the initramfs.
-val LEGACY_BOOT_STUBS: [text] = [
-    RV64_PROOF_BINARY_PATH,
-    RV32_PROOF_BINARY_PATH,
-    "/sbin/init_min",
-    "/sys/services/vfs",
-    "/sys/services/net",
-    "/sys/services/compositor",
-    "/sys/services/llm_mcp",
-    "/sys/apps/desktop",
-    "/sys/apps/terminal",
-    "/sys/apps/shell",
-    "/sys/apps/editor",
-    "/sys/apps/file_manager",
-    "/sys/apps/sysmon",
-    "/sys/apps/settings",
-    "/sys/apps/calculator",
-    "/sys/apps/memo",
-    "/sys/apps/file_explorer",
-    "/sys/apps/paint",
-    "/sys/apps/clock",
-    "/sys/apps/calendar",
-    "/sys/apps/screenshot",
-    "/sys/apps/image_viewer",
-    "/sys/apps/disk_manager",
-    "/sys/apps/log_viewer",
-    "/sys/apps/pkg",
-]
 
 # ----------------------------------------------------------------------------
 # Synthetic initramfs override — test-only injection point.
@@ -75,7 +36,13 @@ struct SyntheticEntry:
     bytes: [u8]
 
 var g_synthetic_entries: [SyntheticEntry] = []
-var g_initramfs_todo_warned: bool = false
+
+# Real initramfs blob, set by the boot chain via set_initramfs_blob().
+var g_initramfs_blob: [u8]? = nil
+
+# Cached parsed cpio entries — populated on first lookup from a real blob.
+var g_cpio_entries: [CpioEntry] = []
+var g_cpio_decoded: bool = false
 
 fn _set_synthetic_initramfs_for_test(path: text, bytes: [u8]):
     """Test hook: register a synthetic initramfs entry resolvable by path."""
@@ -84,6 +51,13 @@ fn _set_synthetic_initramfs_for_test(path: text, bytes: [u8]):
 fn _clear_synthetic_initramfs_for_test():
     """Test hook: drop all synthetic entries installed during the test."""
     g_synthetic_entries = []
+
+fn set_initramfs_blob(blob: [u8]):
+    """Set the raw initramfs image (zstd-compressed cpio) from the boot chain."""
+    g_initramfs_blob = blob
+    # Reset cache so it is re-decoded from the new blob on next lookup.
+    g_cpio_decoded = false
+    g_cpio_entries = []
 
 fn _lookup_synthetic(path: text) -> Result<[u8], text>:
     for entry in g_synthetic_entries:
@@ -95,32 +69,34 @@ fn _lookup_synthetic(path: text) -> Result<[u8], text>:
 # In-kernel initramfs reader.
 #
 # Production signature: `_initramfs_read_file(path) -> Result<[u8], text>`.
-# On ENOENT the error message begins with "ENOENT:"; callers match on that
-# prefix to decide whether to fall back to LEGACY_BOOT_STUBS.
-#
-# Today the kernel does not yet have zstd+cpio-newc decode wired, so this
-# function always reports ENOENT and prints a one-time TODO notice. Phase 4.5
-# replaces this body with a real initramfs lookup.
+# Consults the synthetic test map first; falls back to the real initramfs blob
+# (zstd-decompressed and cpio-parsed) if one has been installed via
+# set_initramfs_blob(). Returns ENOENT when the file is not found.
 # ----------------------------------------------------------------------------
 
 fn _initramfs_read_file(path: text) -> Result<[u8], text>:
     # First consult the synthetic test map — this is the injection point used
-    # by `executable_source_vfs_spec.spl` and is a no-op in production.
+    # by specs and is a no-op in production.
     val synthetic = _lookup_synthetic(path)
     if synthetic.is_ok():
         return synthetic
 
-    # Production path — not yet wired. Warn once so Phase 4.5 is obvious.
-    if not g_initramfs_todo_warned:
-        g_initramfs_todo_warned = true
-        print "[loader] TODO: initramfs decompression not yet wired"
-    Err(ERR_ENOENT)
+    # Real initramfs path: decompress + parse on first access, then cache.
+    val blob = g_initramfs_blob
+    if blob == nil:
+        return Err(ERR_ENOENT)
 
-fn _is_legacy_stub(path: text) -> bool:
-    for p in LEGACY_BOOT_STUBS:
-        if p == path:
-            return true
-    false
+    if not g_cpio_decoded:
+        val decomp = zstd_decompress(blob.unwrap())
+        if decomp.is_err():
+            return Err(decomp.err().unwrap())
+        g_cpio_entries = cpio_parse(decomp.unwrap())
+        g_cpio_decoded = true
+
+    val found = cpio_lookup(g_cpio_entries, path)
+    if found == nil:
+        return Err(ERR_ENOENT)
+    Ok(found.unwrap())
 
 fn _push_u16_le(buf: [u8], value: i64) -> [u8]:
     buf.push((value & 0xFF).to_u8())
@@ -280,7 +256,7 @@ fn _minimal_rv32_exec() -> [u8]:
     bytes
 
 fn _legacy_stub_bytes(path: text, arch: Architecture) -> Result<[u8], text>:
-    if not _is_legacy_stub(path):
+    if path != RV64_PROOF_BINARY_PATH and path != RV32_PROOF_BINARY_PATH:
         return Err(ERR_ENOENT)
     match arch:
         case Architecture.Riscv64:
@@ -295,8 +271,8 @@ fn resolve_executable_bytes(path: text, arch: Architecture) -> Result<[u8], text
 
     1. Paths beginning with '/' are first looked up via the in-kernel
        initramfs reader (`_initramfs_read_file`).
-    2. If the initramfs reports ENOENT, fall back to the LEGACY_BOOT_STUBS
-       allowlist with inlined RV32/RV64 proof stubs used for early boot tests.
+    2. If the initramfs reports ENOENT, fall back to the two inlined RV32/RV64
+       proof-of-concept stubs used for early boot smoke tests.
     3. Otherwise return ENOENT.
     """
     if path.len() == 0:

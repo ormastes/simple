@@ -211,6 +211,12 @@ class Fat32Seeder:
         if dir_cluster is None:
             dir_cluster = self.root_cluster
         for entry in sorted(src_dir.iterdir(), key=lambda path: path.name.upper()):
+            try:
+                to_short_name(entry.name)
+            except ValueError as exc:
+                print(f"[fat32_seed] skipping incompatible path: {entry.relative_to(src_dir.parent)} ({exc})", file=sys.stderr)
+                continue
+
             if entry.is_dir():
                 child_cluster = self.create_directory(dir_cluster, entry.name)
                 self.seed_tree(entry, child_cluster)

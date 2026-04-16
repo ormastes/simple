@@ -5,7 +5,9 @@
 # implementations via @cfg conditional compilation.
 #
 # x86_64: fully implemented, delegates to x86_64/ submodules.
-# arm64, arm32, riscv64, riscv32: pass_todo — awaiting arch implementations.
+# arm64: Phase A+B implemented (console, cpu, boot, paging, interrupts, timer). Context (Phase C) pending.
+# riscv64: Phase A+B implemented (console, cpu, boot, paging, interrupts, timer). Context (Phase C) pending.
+# arm32, riscv32: pass_todo — awaiting arch implementations.
 #
 # Compile-time arch selection: @cfg(x86_64), @cfg(arm64), etc.
 # Only the active arch's function body is compiled into the final binary.
@@ -28,11 +30,17 @@ use os.kernel.arch.x86_64.context.{X86ContextSwitch}
 use os.kernel.arch.arm64.console.{uart_init, uart_write_byte, uart_write, uart_writeln}
 use os.kernel.arch.arm64.boot.{Arm64Boot}
 use os.kernel.arch.arm64.cpu.{daif_set, daif_clr, wfi, tlbi_vae1, tlbi_alle1, dsb, isb, mrs_mpidr_el1, DAIF_ALL, DAIF_I, DAIF_F}
+use os.kernel.arch.arm64.paging.{Arm64Paging}
+use os.kernel.arch.arm64.interrupt.{Arm64Interrupt}
+use os.kernel.arch.arm64.timer.{Arm64Timer}
 
 # riscv64 arch imports
 use os.kernel.arch.riscv64.console.{serial_init as rv64_serial_init, serial_write_byte as rv64_serial_write_byte, serial_write as rv64_serial_write, serial_writeln as rv64_serial_writeln}
 use os.kernel.arch.riscv64.boot.{Rv64Boot}
 use os.kernel.arch.riscv64.cpu.{csrc_sstatus, csrs_sstatus, wfi as rv64_wfi, sfence_vma, sfence_vma_addr, read_tp, SSTATUS_SIE}
+use os.kernel.arch.riscv64.paging.{Rv64Paging, vmm_init as rv64_vmm_init, vmm_map_page as rv64_vmm_map_page, vmm_unmap_page as rv64_vmm_unmap_page, vmm_translate as rv64_vmm_translate, vmm_create_address_space as rv64_vmm_create_address_space, vmm_switch_address_space as rv64_vmm_switch_address_space}
+use os.kernel.arch.riscv64.interrupt.{Rv64Interrupt}
+use os.kernel.arch.riscv64.timer.{Rv64Timer}
 
 # ============================================================================
 # Traits (interface definitions)
@@ -457,7 +465,8 @@ fn hal_paging_init(boot_info: BootOutputPort):
 @cfg(arm64)
 fn hal_paging_init(boot_info: BootOutputPort):
     """Initialize paging — arch: arm64 TTBR0/TTBR1 page tables."""
-    pass_todo("arch: arm64 paging init not yet implemented")
+    var paging = Arm64Paging()
+    paging.init(boot_info)
 
 @cfg(arm32)
 fn hal_paging_init(boot_info: BootOutputPort):
@@ -466,8 +475,8 @@ fn hal_paging_init(boot_info: BootOutputPort):
 
 @cfg(riscv64)
 fn hal_paging_init(boot_info: BootOutputPort):
-    """Initialize paging — arch: riscv64 Sv39/Sv48 page tables."""
-    pass_todo("arch: riscv64 paging init not yet implemented")
+    """Initialize paging — arch: riscv64 Sv39 page tables."""
+    rv64_vmm_init()
 
 @cfg(riscv32)
 fn hal_paging_init(boot_info: BootOutputPort):
@@ -482,7 +491,8 @@ fn hal_paging_map(virt: VirtAddr, phys: PhysAddr, flags: VmFlags) -> bool:
 @cfg(arm64)
 fn hal_paging_map(virt: VirtAddr, phys: PhysAddr, flags: VmFlags) -> bool:
     """Map page — arch: arm64 translation table walk."""
-    pass_todo("arch: arm64 paging map not yet implemented")
+    var paging = Arm64Paging()
+    paging.map_page(virt, phys, flags)
 
 @cfg(arm32)
 fn hal_paging_map(virt: VirtAddr, phys: PhysAddr, flags: VmFlags) -> bool:
@@ -491,8 +501,8 @@ fn hal_paging_map(virt: VirtAddr, phys: PhysAddr, flags: VmFlags) -> bool:
 
 @cfg(riscv64)
 fn hal_paging_map(virt: VirtAddr, phys: PhysAddr, flags: VmFlags) -> bool:
-    """Map page — arch: riscv64 Sv39/Sv48 walk."""
-    pass_todo("arch: riscv64 paging map not yet implemented")
+    """Map page — arch: riscv64 Sv39 walk."""
+    rv64_vmm_map_page(virt, phys, flags)
 
 @cfg(riscv32)
 fn hal_paging_map(virt: VirtAddr, phys: PhysAddr, flags: VmFlags) -> bool:
@@ -507,7 +517,8 @@ fn hal_paging_unmap(virt: VirtAddr) -> bool:
 @cfg(arm64)
 fn hal_paging_unmap(virt: VirtAddr) -> bool:
     """Unmap page — arch: arm64."""
-    pass_todo("arch: arm64 paging unmap not yet implemented")
+    var paging = Arm64Paging()
+    paging.unmap_page(virt)
 
 @cfg(arm32)
 fn hal_paging_unmap(virt: VirtAddr) -> bool:
@@ -517,7 +528,7 @@ fn hal_paging_unmap(virt: VirtAddr) -> bool:
 @cfg(riscv64)
 fn hal_paging_unmap(virt: VirtAddr) -> bool:
     """Unmap page — arch: riscv64."""
-    pass_todo("arch: riscv64 paging unmap not yet implemented")
+    rv64_vmm_unmap_page(virt)
 
 @cfg(riscv32)
 fn hal_paging_unmap(virt: VirtAddr) -> bool:
@@ -532,7 +543,8 @@ fn hal_paging_translate(virt: VirtAddr) -> PhysAddr?:
 @cfg(arm64)
 fn hal_paging_translate(virt: VirtAddr) -> PhysAddr?:
     """Translate address — arch: arm64."""
-    pass_todo("arch: arm64 paging translate not yet implemented")
+    var paging = Arm64Paging()
+    paging.translate(virt)
 
 @cfg(arm32)
 fn hal_paging_translate(virt: VirtAddr) -> PhysAddr?:
@@ -542,7 +554,7 @@ fn hal_paging_translate(virt: VirtAddr) -> PhysAddr?:
 @cfg(riscv64)
 fn hal_paging_translate(virt: VirtAddr) -> PhysAddr?:
     """Translate address — arch: riscv64."""
-    pass_todo("arch: riscv64 paging translate not yet implemented")
+    rv64_vmm_translate(virt)
 
 @cfg(riscv32)
 fn hal_paging_translate(virt: VirtAddr) -> PhysAddr?:
@@ -557,7 +569,8 @@ fn hal_paging_create_address_space() -> u64:
 @cfg(arm64)
 fn hal_paging_create_address_space() -> u64:
     """Create address space — arch: arm64 new TTBR0 table."""
-    pass_todo("arch: arm64 paging create_address_space not yet implemented")
+    var paging = Arm64Paging()
+    paging.create_address_space()
 
 @cfg(arm32)
 fn hal_paging_create_address_space() -> u64:
@@ -567,7 +580,7 @@ fn hal_paging_create_address_space() -> u64:
 @cfg(riscv64)
 fn hal_paging_create_address_space() -> u64:
     """Create address space — arch: riscv64 new satp root."""
-    pass_todo("arch: riscv64 paging create_address_space not yet implemented")
+    rv64_vmm_create_address_space()
 
 @cfg(riscv32)
 fn hal_paging_create_address_space() -> u64:
@@ -582,7 +595,8 @@ fn hal_paging_switch_address_space(root_phys: u64):
 @cfg(arm64)
 fn hal_paging_switch_address_space(root_phys: u64):
     """Switch address space — arch: arm64 write TTBR0_EL1."""
-    pass_todo("arch: arm64 paging switch_address_space not yet implemented")
+    var paging = Arm64Paging()
+    paging.switch_address_space(root_phys)
 
 @cfg(arm32)
 fn hal_paging_switch_address_space(root_phys: u64):
@@ -592,7 +606,7 @@ fn hal_paging_switch_address_space(root_phys: u64):
 @cfg(riscv64)
 fn hal_paging_switch_address_space(root_phys: u64):
     """Switch address space — arch: riscv64 write satp CSR."""
-    pass_todo("arch: riscv64 paging switch_address_space not yet implemented")
+    rv64_vmm_switch_address_space(root_phys)
 
 @cfg(riscv32)
 fn hal_paging_switch_address_space(root_phys: u64):
@@ -606,8 +620,9 @@ fn hal_paging_levels() -> u32:
 
 @cfg(arm64)
 fn hal_paging_levels() -> u32:
-    """Return page table levels — arch: arm64 (3 or 4 depending on granule)."""
-    pass_todo("arch: arm64 paging levels not yet implemented")
+    """Return page table levels — arch: arm64 (4-level 4KB granule)."""
+    var paging = Arm64Paging()
+    paging.address_levels() as u32
 
 @cfg(arm32)
 fn hal_paging_levels() -> u32:
@@ -616,8 +631,9 @@ fn hal_paging_levels() -> u32:
 
 @cfg(riscv64)
 fn hal_paging_levels() -> u32:
-    """Return page table levels — arch: riscv64 Sv39=3, Sv48=4, Sv57=5."""
-    pass_todo("arch: riscv64 paging levels not yet implemented")
+    """Return page table levels — arch: riscv64 Sv39=3."""
+    var paging = Rv64Paging()
+    paging.paging_levels()
 
 @cfg(riscv32)
 fn hal_paging_levels() -> u32:
@@ -636,8 +652,9 @@ fn hal_interrupt_init():
 
 @cfg(arm64)
 fn hal_interrupt_init():
-    """Initialize interrupts — arch: arm64 GICv2/GICv3."""
-    pass_todo("arch: arm64 GIC interrupt init not yet implemented")
+    """Initialize interrupts — arch: arm64 GICv2 distributor + CPU interface."""
+    var intr = Arm64Interrupt()
+    intr.init()
 
 @cfg(arm32)
 fn hal_interrupt_init():
@@ -646,8 +663,9 @@ fn hal_interrupt_init():
 
 @cfg(riscv64)
 fn hal_interrupt_init():
-    """Initialize interrupts — arch: riscv64 PLIC + sstatus.SIE."""
-    pass_todo("arch: riscv64 PLIC interrupt init not yet implemented")
+    """Initialize interrupts — arch: riscv64 PLIC + stvec + sie."""
+    var intr = Rv64Interrupt()
+    intr.init()
 
 @cfg(riscv32)
 fn hal_interrupt_init():
@@ -663,7 +681,8 @@ fn hal_interrupt_enable_irq(irq: u32):
 @cfg(arm64)
 fn hal_interrupt_enable_irq(irq: u32):
     """Enable IRQ — arch: arm64 GIC ISENABLER."""
-    pass_todo("arch: arm64 interrupt enable_irq not yet implemented")
+    var intr = Arm64Interrupt()
+    intr.enable_irq(irq)
 
 @cfg(arm32)
 fn hal_interrupt_enable_irq(irq: u32):
@@ -673,7 +692,8 @@ fn hal_interrupt_enable_irq(irq: u32):
 @cfg(riscv64)
 fn hal_interrupt_enable_irq(irq: u32):
     """Enable IRQ — arch: riscv64 PLIC enable."""
-    pass_todo("arch: riscv64 interrupt enable_irq not yet implemented")
+    var intr = Rv64Interrupt()
+    intr.enable_irq(irq)
 
 @cfg(riscv32)
 fn hal_interrupt_enable_irq(irq: u32):
@@ -689,7 +709,8 @@ fn hal_interrupt_disable_irq(irq: u32):
 @cfg(arm64)
 fn hal_interrupt_disable_irq(irq: u32):
     """Disable IRQ — arch: arm64 GIC ICENABLER."""
-    pass_todo("arch: arm64 interrupt disable_irq not yet implemented")
+    var intr = Arm64Interrupt()
+    intr.disable_irq(irq)
 
 @cfg(arm32)
 fn hal_interrupt_disable_irq(irq: u32):
@@ -699,7 +720,8 @@ fn hal_interrupt_disable_irq(irq: u32):
 @cfg(riscv64)
 fn hal_interrupt_disable_irq(irq: u32):
     """Disable IRQ — arch: riscv64 PLIC disable."""
-    pass_todo("arch: riscv64 interrupt disable_irq not yet implemented")
+    var intr = Rv64Interrupt()
+    intr.disable_irq(irq)
 
 @cfg(riscv32)
 fn hal_interrupt_disable_irq(irq: u32):
@@ -714,8 +736,9 @@ fn hal_interrupt_acknowledge(irq: u32):
 
 @cfg(arm64)
 fn hal_interrupt_acknowledge(irq: u32):
-    """Acknowledge IRQ — arch: arm64 GIC EOIR."""
-    pass_todo("arch: arm64 interrupt acknowledge not yet implemented")
+    """Acknowledge IRQ — arch: arm64 GIC EOIR (end-of-interrupt)."""
+    var intr = Arm64Interrupt()
+    intr.end_of_interrupt(irq)
 
 @cfg(arm32)
 fn hal_interrupt_acknowledge(irq: u32):
@@ -724,8 +747,9 @@ fn hal_interrupt_acknowledge(irq: u32):
 
 @cfg(riscv64)
 fn hal_interrupt_acknowledge(irq: u32):
-    """Acknowledge IRQ — arch: riscv64 PLIC claim/complete."""
-    pass_todo("arch: riscv64 interrupt acknowledge not yet implemented")
+    """Acknowledge IRQ — arch: riscv64 PLIC complete."""
+    var intr = Rv64Interrupt()
+    intr.acknowledge(irq)
 
 @cfg(riscv32)
 fn hal_interrupt_acknowledge(irq: u32):
@@ -741,7 +765,8 @@ fn hal_interrupt_set_handler(irq: u32, handler: u64):
 @cfg(arm64)
 fn hal_interrupt_set_handler(irq: u32, handler: u64):
     """Set IRQ handler — arch: arm64 GIC handler table."""
-    pass_todo("arch: arm64 interrupt set_handler not yet implemented")
+    var intr = Arm64Interrupt()
+    intr.set_handler(irq, handler)
 
 @cfg(arm32)
 fn hal_interrupt_set_handler(irq: u32, handler: u64):
@@ -750,8 +775,9 @@ fn hal_interrupt_set_handler(irq: u32, handler: u64):
 
 @cfg(riscv64)
 fn hal_interrupt_set_handler(irq: u32, handler: u64):
-    """Set IRQ handler — arch: riscv64 stvec/handler table."""
-    pass_todo("arch: riscv64 interrupt set_handler not yet implemented")
+    """Set IRQ handler — arch: riscv64 handler table."""
+    var intr = Rv64Interrupt()
+    intr.set_handler(irq, handler)
 
 @cfg(riscv32)
 fn hal_interrupt_set_handler(irq: u32, handler: u64):
@@ -768,7 +794,8 @@ fn hal_interrupt_set_priority(irq: u32, priority: u32):
 @cfg(arm64)
 fn hal_interrupt_set_priority(irq: u32, priority: u32):
     """Set IRQ priority — arch: arm64 GIC IPRIORITYR."""
-    pass_todo("arch: arm64 interrupt set_priority not yet implemented")
+    var intr = Arm64Interrupt()
+    intr.set_priority(irq, priority)
 
 @cfg(arm32)
 fn hal_interrupt_set_priority(irq: u32, priority: u32):
@@ -778,7 +805,8 @@ fn hal_interrupt_set_priority(irq: u32, priority: u32):
 @cfg(riscv64)
 fn hal_interrupt_set_priority(irq: u32, priority: u32):
     """Set IRQ priority — arch: riscv64 PLIC priority register."""
-    pass_todo("arch: riscv64 interrupt set_priority not yet implemented")
+    var intr = Rv64Interrupt()
+    intr.set_priority(irq, priority)
 
 @cfg(riscv32)
 fn hal_interrupt_set_priority(irq: u32, priority: u32):
@@ -797,8 +825,9 @@ fn hal_timer_init(frequency_hz: u64):
 
 @cfg(arm64)
 fn hal_timer_init(frequency_hz: u64):
-    """Initialize timer — arch: arm64 Generic Timer (CNTV)."""
-    pass_todo("arch: arm64 Generic Timer init not yet implemented")
+    """Initialize timer — arch: arm64 Generic Timer (CNTFRQ_EL0)."""
+    var timer = Arm64Timer()
+    timer.init(frequency_hz)
 
 @cfg(arm32)
 fn hal_timer_init(frequency_hz: u64):
@@ -807,8 +836,9 @@ fn hal_timer_init(frequency_hz: u64):
 
 @cfg(riscv64)
 fn hal_timer_init(frequency_hz: u64):
-    """Initialize timer — arch: riscv64 mtime/mtimecmp via SBI."""
-    pass_todo("arch: riscv64 timer init not yet implemented")
+    """Initialize timer — arch: riscv64 SBI set_timer + sie.STIE."""
+    var timer = Rv64Timer()
+    timer.init(frequency_hz)
 
 @cfg(riscv32)
 fn hal_timer_init(frequency_hz: u64):
@@ -827,8 +857,9 @@ fn hal_timer_set_deadline(delay_us: u64):
 
 @cfg(arm64)
 fn hal_timer_set_deadline(delay_us: u64):
-    """Set timer deadline — arch: arm64 CNTV_CVAL_EL0."""
-    pass_todo("arch: arm64 timer set_deadline not yet implemented")
+    """Set timer deadline — arch: arm64 CNTP_TVAL_EL0 countdown."""
+    var timer = Arm64Timer()
+    timer.set_deadline(delay_us)
 
 @cfg(arm32)
 fn hal_timer_set_deadline(delay_us: u64):
@@ -837,8 +868,9 @@ fn hal_timer_set_deadline(delay_us: u64):
 
 @cfg(riscv64)
 fn hal_timer_set_deadline(delay_us: u64):
-    """Set timer deadline — arch: riscv64 mtimecmp via SBI."""
-    pass_todo("arch: riscv64 timer set_deadline not yet implemented")
+    """Set timer deadline — arch: riscv64 SBI set_timer absolute ticks."""
+    var timer = Rv64Timer()
+    timer.set_deadline(delay_us)
 
 @cfg(riscv32)
 fn hal_timer_set_deadline(delay_us: u64):
@@ -853,8 +885,9 @@ fn hal_timer_current_ticks() -> u64:
 
 @cfg(arm64)
 fn hal_timer_current_ticks() -> u64:
-    """Read ticks — arch: arm64 CNTVCT_EL0."""
-    pass_todo("arch: arm64 timer current_ticks not yet implemented")
+    """Read ticks — arch: arm64 CNTPCT_EL0."""
+    var timer = Arm64Timer()
+    timer.current_ticks()
 
 @cfg(arm32)
 fn hal_timer_current_ticks() -> u64:
@@ -863,8 +896,9 @@ fn hal_timer_current_ticks() -> u64:
 
 @cfg(riscv64)
 fn hal_timer_current_ticks() -> u64:
-    """Read ticks — arch: riscv64 rdtime CSR."""
-    pass_todo("arch: riscv64 timer current_ticks not yet implemented")
+    """Read ticks — arch: riscv64 time CSR."""
+    var timer = Rv64Timer()
+    timer.current_ticks()
 
 @cfg(riscv32)
 fn hal_timer_current_ticks() -> u64:
@@ -880,7 +914,8 @@ fn hal_timer_ticks_per_second() -> u64:
 @cfg(arm64)
 fn hal_timer_ticks_per_second() -> u64:
     """Return timer frequency — arch: arm64 CNTFRQ_EL0."""
-    pass_todo("arch: arm64 timer ticks_per_second not yet implemented")
+    var timer = Arm64Timer()
+    timer.ticks_per_second()
 
 @cfg(arm32)
 fn hal_timer_ticks_per_second() -> u64:
@@ -889,8 +924,9 @@ fn hal_timer_ticks_per_second() -> u64:
 
 @cfg(riscv64)
 fn hal_timer_ticks_per_second() -> u64:
-    """Return timer frequency — arch: riscv64 timebase-frequency from DTB."""
-    pass_todo("arch: riscv64 timer ticks_per_second not yet implemented")
+    """Return timer frequency — arch: riscv64 10 MHz hardware constant."""
+    var timer = Rv64Timer()
+    timer.ticks_per_second()
 
 @cfg(riscv32)
 fn hal_timer_ticks_per_second() -> u64:

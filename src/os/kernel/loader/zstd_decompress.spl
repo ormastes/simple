@@ -1,0 +1,120 @@
+# Minimal single-frame zstd decompressor (Raw and RLE blocks only).
+#
+# Supports enough of the zstd frame format to decode archives packed with
+# raw/uncompressed blocks. Compressed blocks (type 2) are not implemented;
+# callers that need them should use raw-block packing at the compressor side.
+#
+# Reference: https://github.com/facebook/zstd/blob/dev/doc/zstd_compression_format.md
+
+# zstd magic number (little-endian: bytes 28 B5 2F FD)
+val ZSTD_MAGIC: i64 = 0xFD2FB528
+
+fn _read_u32_le(data: [u8], pos: i64) -> i64:
+    val b0 = data[pos].to_i64()
+    val b1 = data[pos + 1].to_i64()
+    val b2 = data[pos + 2].to_i64()
+    val b3 = data[pos + 3].to_i64()
+    b0 | (b1 << 8) | (b2 << 16) | (b3 << 24)
+
+fn _read_u24_le(data: [u8], pos: i64) -> i64:
+    val b0 = data[pos].to_i64()
+    val b1 = data[pos + 1].to_i64()
+    val b2 = data[pos + 2].to_i64()
+    b0 | (b1 << 8) | (b2 << 16)
+
+fn zstd_decompress(compressed: [u8]) -> Result<[u8], text>:
+    """Decompress a single zstd frame containing only Raw and RLE blocks.
+
+    Returns Err(...) for compressed blocks (type 2) or malformed input.
+    """
+    if compressed.len() < 4:
+        return Err("zstd: input too short")
+
+    val magic = _read_u32_le(compressed, 0)
+    if magic != ZSTD_MAGIC:
+        return Err("zstd: bad magic")
+
+    # Frame Header Descriptor (byte 4)
+    val fhd = compressed[4].to_i64()
+    val fcs_field_size_id = (fhd >> 6) & 0x03   # bits 7-6
+    val single_segment = (fhd >> 5) & 0x01        # bit 5
+    val checksum_flag = (fhd >> 2) & 0x01          # bit 2
+    val did_field_size = fhd & 0x03                # bits 1-0
+
+    var pos = 5
+
+    # Window Descriptor: present only when single_segment == 0
+    if single_segment == 0:
+        pos = pos + 1
+
+    # Dictionary ID field (skip)
+    if did_field_size == 1:
+        pos = pos + 1
+    else if did_field_size == 2:
+        pos = pos + 2
+    else if did_field_size == 3:
+        pos = pos + 4
+
+    # Frame Content Size field
+    var expected_size: i64 = -1
+    if fcs_field_size_id == 0:
+        if single_segment == 1:
+            expected_size = compressed[pos].to_i64()
+            pos = pos + 1
+        # else: no FCS field
+    else if fcs_field_size_id == 1:
+        val lo = compressed[pos].to_i64()
+        val hi = compressed[pos + 1].to_i64()
+        expected_size = lo | (hi << 8)
+        expected_size = expected_size + 256
+        pos = pos + 2
+    else if fcs_field_size_id == 2:
+        expected_size = _read_u32_le(compressed, pos)
+        pos = pos + 4
+    else if fcs_field_size_id == 3:
+        # 8-byte FCS; read low 4 bytes (sufficient for kernel-sized images)
+        expected_size = _read_u32_le(compressed, pos)
+        pos = pos + 8
+
+    # Decode blocks
+    var out: [u8] = []
+    var done = false
+    while not done:
+        if pos + 3 > compressed.len():
+            return Err("zstd: truncated block header")
+
+        val blk_hdr = _read_u24_le(compressed, pos)
+        pos = pos + 3
+
+        val last_block = blk_hdr & 0x01
+        val block_type = (blk_hdr >> 1) & 0x03
+        val block_size = (blk_hdr >> 3) & 0x1FFFFF
+
+        if block_type == 0:
+            # Raw block: copy bytes verbatim
+            if pos + block_size > compressed.len():
+                return Err("zstd: raw block truncated")
+            var i = 0
+            while i < block_size:
+                out.push(compressed[pos + i])
+                i = i + 1
+            pos = pos + block_size
+        else if block_type == 1:
+            # RLE block: repeat single byte block_size times
+            if pos >= compressed.len():
+                return Err("zstd: RLE block missing byte")
+            val rle_byte = compressed[pos]
+            pos = pos + 1
+            var i = 0
+            while i < block_size:
+                out.push(rle_byte)
+                i = i + 1
+        else if block_type == 2:
+            return Err("zstd: compressed blocks not yet supported")
+        else:
+            return Err("zstd: reserved block type")
+
+        if last_block == 1:
+            done = true
+
+    Ok(out)

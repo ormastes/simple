@@ -3,6 +3,7 @@
 
 use os.tools.pkg.pkg_manifest.{PackageManifest, parse_manifest}
 use os.userlib.fs.{read_text, write_text}
+use os.userlib.net.{IpAddr, SockAddr, Socket, socket, connect, send, recv}
 
 struct Repository:
     name: text
@@ -37,6 +38,70 @@ fn load_repositories() -> Result<[Repository], text>:
 
     return Result.Ok(repos)
 
+fn parse_http_url(url: text) -> (text, i32, text):
+    """Parse an HTTP URL into (host, port, path).
+
+    Examples:
+      "http://repo.example.com/index.sdn"      -> ("repo.example.com", 80, "/index.sdn")
+      "http://repo.example.com:8080/index.sdn" -> ("repo.example.com", 8080, "/index.sdn")
+      "http://repo.example.com"                -> ("repo.example.com", 80, "/")
+    """
+    var rest = url
+    if rest.starts_with("http://"):
+        rest = rest.slice(7, rest.len())
+    elif rest.starts_with("https://"):
+        rest = rest.slice(8, rest.len())
+
+    var host_port = rest
+    var path = "/"
+    val slash_idx = rest.index_of("/")
+    if slash_idx >= 0:
+        host_port = rest.slice(0, slash_idx)
+        path = rest.slice(slash_idx, rest.len())
+
+    var host = host_port
+    var port: i32 = 80
+    val colon_idx = host_port.index_of(":")
+    if colon_idx >= 0:
+        host = host_port.slice(0, colon_idx)
+        val port_text = host_port.slice(colon_idx + 1, host_port.len())
+        port = port_text.parse_i32()
+
+    return (host, port, path)
+
+fn _http_get(host: text, port: i32, path: text) -> Result<text, text>:
+    """Perform HTTP GET and return the response body."""
+    val ip_result = IpAddr.from_text(host)
+    if val Err(msg) = ip_result:
+        return Result.Err("Cannot resolve host '{host}': {msg}")
+    val ip = ip_result.unwrap()
+
+    val sock_result = socket(2, 1)
+    if val Err(msg) = sock_result:
+        return Result.Err("socket: {msg}")
+    val sock = sock_result.unwrap()
+
+    val addr = SockAddr(ip: ip, port: port as u16)
+    val conn_result = connect(sock, addr)
+    if val Err(msg) = conn_result:
+        return Result.Err("connect: {msg}")
+
+    val request = "GET {path} HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n\r\n"
+    val send_result = send(sock, request.as_bytes())
+    if val Err(msg) = send_result:
+        return Result.Err("send: {msg}")
+
+    val recv_result = recv(sock, 65536)
+    if val Err(msg) = recv_result:
+        return Result.Err("recv: {msg}")
+    val raw = recv_result.unwrap().as_text()
+
+    val separator = "\r\n\r\n"
+    val sep_idx = raw.index_of(separator)
+    if sep_idx >= 0:
+        return Result.Ok(raw.slice(sep_idx + 4, raw.len()))
+    return Result.Ok(raw)
+
 fn fetch_index(repo: Repository) -> Result<PackageIndex, text>:
     """Fetch package index from a repository.
 
@@ -44,8 +109,21 @@ fn fetch_index(repo: Repository) -> Result<PackageIndex, text>:
     For remote repos: HTTP GET <url>/index.sdn
     """
     if repo.url.starts_with("http://") or repo.url.starts_with("https://"):
-        pass_todo("HTTP fetch for remote package repositories")
-        return Result.Err("Remote repositories not yet supported")
+        val parsed = parse_http_url(repo.url)
+        val host = parsed.0
+        val port = parsed.1
+        var path = parsed.2
+        # Append /index.sdn if path is just "/"
+        if path == "/" or path == "":
+            path = "/index.sdn"
+
+        val body_result = _http_get(host, port, path)
+        if val Err(msg) = body_result:
+            return Result.Err("fetch_index: {msg}")
+        val body = body_result.unwrap()
+        if body == "":
+            return Result.Ok(PackageIndex(packages: []))
+        return _parse_index(body)
 
     # Local repository
     val index_path = "{repo.url}/index.sdn"
