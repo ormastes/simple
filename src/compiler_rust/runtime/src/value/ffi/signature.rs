@@ -162,6 +162,13 @@ pub extern "C" fn rt_ecdsa_p256_verify(
     }
 }
 
+fn _empty_bytes() -> RuntimeValue {
+    // Return an empty `[u8]` so Simple callers can uniformly check
+    // `len() == 0` for errors (returning NIL would surface as an i64
+    // and break `.len()` dispatch in the interpreter).
+    unsafe { crate::value::collections::rt_string_new(std::ptr::null(), 0) }
+}
+
 // ---------------------------------------------------------------------------
 // Signing
 //
@@ -174,20 +181,20 @@ pub extern "C" fn rt_ecdsa_p256_verify(
 
 fn rsa_sign_impl(pkcs8: RuntimeValue, message: RuntimeValue, enc: &'static dyn ring::signature::RsaEncoding) -> RuntimeValue {
     let Some(key_bytes) = runtime_byte_array_to_vec(pkcs8) else {
-        return RuntimeValue::NIL;
+        return _empty_bytes();
     };
     let Some(msg_bytes) = runtime_byte_array_to_vec(message) else {
-        return RuntimeValue::NIL;
+        return _empty_bytes();
     };
 
     let Ok(keypair) = RsaKeyPair::from_pkcs8(&key_bytes) else {
-        return RuntimeValue::NIL;
+        return _empty_bytes();
     };
 
     let rng = SystemRandom::new();
     let mut signature = vec![0u8; keypair.public().modulus_len()];
     if keypair.sign(enc, &rng, &msg_bytes, &mut signature).is_err() {
-        return RuntimeValue::NIL;
+        return _empty_bytes();
     }
     unsafe {
         crate::value::collections::rt_string_new(signature.as_ptr(), signature.len() as u64)
@@ -232,21 +239,21 @@ pub extern "C" fn rt_rsa_sha512_sign(pkcs8: RuntimeValue, message: RuntimeValue)
 #[no_mangle]
 pub extern "C" fn rt_ecdsa_p256_sign(pkcs8: RuntimeValue, message: RuntimeValue) -> RuntimeValue {
     let Some(key_bytes) = runtime_byte_array_to_vec(pkcs8) else {
-        return RuntimeValue::NIL;
+        return _empty_bytes();
     };
     let Some(msg_bytes) = runtime_byte_array_to_vec(message) else {
-        return RuntimeValue::NIL;
+        return _empty_bytes();
     };
 
     let rng = SystemRandom::new();
     let Ok(keypair) =
         EcdsaKeyPair::from_pkcs8(&ECDSA_P256_SHA256_FIXED_SIGNING, &key_bytes, &rng)
     else {
-        return RuntimeValue::NIL;
+        return _empty_bytes();
     };
 
     let Ok(sig) = keypair.sign(&rng, &msg_bytes) else {
-        return RuntimeValue::NIL;
+        return _empty_bytes();
     };
     let bytes = sig.as_ref();
     unsafe { crate::value::collections::rt_string_new(bytes.as_ptr(), bytes.len() as u64) }
