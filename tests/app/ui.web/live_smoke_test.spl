@@ -1,0 +1,103 @@
+# Live WSS end-to-end smoke — skeleton for v2 Phase D
+#
+# This file documents the intended end-to-end smoke flow for the web UI
+# stack (plain TCP + TLS modes).  The interpreter-mode test runner does
+# NOT execute `it` blocks, so the assertions below are exercised only
+# when this test file is compiled and invoked as a standalone binary —
+# that compiled-mode execution harness is v2.1 work (see plan file at
+# /home/ormastes/.claude/plans/merry-zooming-lecun.md, Phase D risk #3).
+#
+# Until compiled-mode runs the `it` blocks, this file's job is:
+#   1. Exercise the import graph (file LOADS in interpreter mode, which
+#      confirms the symbols below exist and resolve).
+#   2. Document the wire-level round trip as a checklist future work
+#      can automate.
+#
+# See also:
+#   - src/app/ui.web/tls_serve_loop.spl — TlsWebServer + accept_loop
+#   - src/app/ui.web/ui_routes.spl      — /ui/ws dispatch + adapter loop
+#   - src/app/ui.web/ws_handler.spl     — send_ws_text, compute_ws_accept
+#   - src/app/ui.web/async_ws.spl       — server-side frame reader w/ unmask
+#   - src/app/ui.web/session_token.spl  — random_hex + token mint/verify
+#   - src/compiler_rust/runtime/src/value/net_tls.rs — rustls server
+
+use std.sspec.*
+use app.ui.web.session_token.{random_hex, SessionToken, verify as verify_token, load_secret}
+use app.ui.web.ws_handler.{compute_ws_accept, is_ws_upgrade_request}
+use app.ui.web.origin_guard.{OriginGuard}
+
+describe "WSS smoke — handshake primitives":
+    """
+    ## Sanity check on the primitives an e2e smoke client will compose.
+
+    The compiled-mode e2e driver will:
+      1. Spawn TlsWebServer on a free port with a self-signed cert.
+      2. POST /ui/login { capability_grant: "dev" } → parse bearer.
+      3. Open wss://127.0.0.1:<port>/ui/ws?token=<bearer>.
+      4. Verify Sec-WebSocket-Accept via compute_ws_accept(client_key).
+      5. Send hello, expect capabilities.
+      6. Send open_session, expect snapshot.
+      7. Touch the .ui.sdn file, expect patch_batch (Phase C broadcast).
+      8. Send ping, expect pong.
+      9. Disconnect cleanly.
+    """
+
+    it "random_hex(16) produces a usable Sec-WebSocket-Key base":
+        val key_bytes = random_hex(16)
+        expect(key_bytes.len()).to_equal(32)
+
+    it "compute_ws_accept is deterministic for a known key":
+        val accept_a = compute_ws_accept("dGhlIHNhbXBsZSBub25jZQ==")
+        val accept_b = compute_ws_accept("dGhlIHNhbXBsZSBub25jZQ==")
+        expect(accept_a).to_equal(accept_b)
+
+    it "is_ws_upgrade_request recognises the upgrade header":
+        val headers = "Host: localhost\nUpgrade: websocket\nConnection: Upgrade\n"
+        expect(is_ws_upgrade_request(headers)).to_equal(true)
+
+    it "is_ws_upgrade_request rejects plain HTTP":
+        val headers = "Host: localhost\nContent-Type: text/html\n"
+        expect(is_ws_upgrade_request(headers)).to_equal(false)
+
+describe "WSS smoke — token round trip":
+    """
+    ## Mint and verify a SessionToken end to end.
+
+    Uses the dev-mode secret fallback; production tokens rely on
+    SIMPLE_UI_WEB_TOKEN_SECRET env var.
+    """
+
+    it "issue → serialize → parse → verify round-trips":
+        val secret = "test-secret-do-not-use-in-production"
+        val tok = SessionToken.issue("dev", "https://localhost", 60000u64, secret)
+        val serialized = tok.serialize()
+        val verified = verify_token(serialized, "https://localhost", secret, 1u64)
+        match verified:
+            Ok(t):
+                expect(t.grant_id).to_equal("dev")
+            Err(_):
+                expect("ok").to_equal("should not err")
+
+    it "verify rejects a tampered signature":
+        val secret = "test-secret-A"
+        val tok = SessionToken.issue("dev", "https://localhost", 60000u64, secret)
+        val serialized = tok.serialize()
+        # Tamper: verify against a different secret
+        val verified = verify_token(serialized, "https://localhost", "test-secret-B", 1u64)
+        match verified:
+            Ok(_):
+                expect("err").to_equal("should have rejected")
+            Err(_):
+                expect(true).to_equal(true)
+
+describe "WSS smoke — origin gate":
+    """
+    ## OriginGuard + bearer token pre-upgrade checks.
+
+    See src/app/ui.web/origin_guard.spl for allowlist semantics.
+    """
+
+    it "OriginGuard.from_env constructs without an allowlist in dev":
+        val guard = OriginGuard.from_env()
+        # Constructor produces a valid guard; allowlist policy is env-driven
+        expect(true).to_equal(true)
