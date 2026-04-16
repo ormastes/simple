@@ -28,6 +28,8 @@ use os.services.launcher.launcher.{
 }
 
 extern fn serial_println(msg: text)
+extern fn rt_file_read_text(path: text) -> text
+extern fn rt_file_write_text(path: text, content: text) -> bool
 
 use os.apps.calculator.calculator.{Calculator}
 use os.apps.clock.clock.{ClockApp}
@@ -82,20 +84,18 @@ struct EditorResidentLaunch:
     saved_path: text
     content: text
 
-extern fn rt_fat32_read_file_text(name: text) -> text
-extern fn rt_fat32_write_editor_smoke() -> bool
-
 fn _build_editor_resident_launch() -> Result<EditorResidentLaunch, text>:
     var editor = TextEditor.new()
     editor.lines = [EDITOR_SMOKE_CONTENT]
     editor.file_path = EDITOR_SMOKE_PATH
-    if not rt_fat32_write_editor_smoke():
-        return Err("runtime fat32 write failed")
+    val content = EDITOR_SMOKE_CONTENT
+    if not rt_file_write_text(EDITOR_SMOKE_PATH, content):
+        return Err("runtime file write failed")
     editor.modified = false
     editor.status_message = "Saved {EDITOR_SMOKE_PATH}"
 
-    val cli_output = rt_fat32_read_file_text("EDITOR.TXT")
-    if cli_output == "":
+    val cli_output = rt_file_read_text(EDITOR_SMOKE_PATH)
+    if cli_output != content:
         return Err("cli output mismatch: {cli_output}")
 
     val session = editor.build_ui()
@@ -187,7 +187,7 @@ fn _materialize_resident_manifest_launch(shell: DesktopShell, name: text, pid: u
             launcher_note_window_opened(pid)
             true
         case "Editor":
-            serial_println("[desktop-e2e] editor-launch:start pid={pid} app={app_id}")
+            serial_println("[desktop-e2e] editor-launch:start pid={pid} app=editor")
             match _build_editor_resident_launch():
                 Ok(launch):
                     val wid = shell.compositor.create_window_with_tree("Editor", 140, 100, 760, 420, launch.tree)
@@ -199,7 +199,7 @@ fn _materialize_resident_manifest_launch(shell: DesktopShell, name: text, pid: u
                     launcher_note_window_opened(pid)
                     serial_println("[desktop-e2e] editor-save:ok pid={pid} path={launch.saved_path}")
                     serial_println("[desktop-e2e] cli-verify:ok pid={pid} path={launch.saved_path} content={launch.content}")
-                    serial_println("[desktop-e2e] editor-launch:ok pid={pid} app={app_id} mode=resident-manifest")
+                    serial_println("[desktop-e2e] editor-launch:ok pid={pid} app=editor mode=resident-manifest")
                     true
                 Err(err):
                     serial_println("[desktop-e2e] editor-save:fail pid={pid} reason={err}")

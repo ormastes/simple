@@ -9,15 +9,17 @@
 use os.posix.socket_compat.{posix_send_bytes, posix_recv_bytes, posix_close_socket}
 use os.crypto.ed25519.{ed25519_sign}
 use os.crypto.random.{random_bytes}
-use os.apps.sshd.ssh_packet.{SshPacket, SshPacketResult, SshTextResult, SshStringResult, ssh_packet_read, ssh_packet_build, ssh_put_u32, ssh_put_string, ssh_put_text, ssh_get_u32, ssh_get_string, ssh_get_text}
+use os.apps.sshd.ssh_packet.{SshPacket, SshPacketResult, SshTextResult, SshStringResult, ssh_packet_read, ssh_packet_build, ssh_put_u32, ssh_put_string, ssh_put_text, ssh_put_byte, ssh_put_bool, ssh_get_u32, ssh_get_string, ssh_get_text}
 use os.apps.sshd.ssh_transport.{SshKexInit, SshAlgorithms, SSH_VERSION_STRING, SSH_MSG_KEXINIT, SSH_MSG_NEWKEYS, SSH_MSG_DISCONNECT, SSH_MSG_IGNORE, SSH_MSG_SERVICE_REQUEST, SSH_MSG_SERVICE_ACCEPT, SSH_DISCONNECT_PROTOCOL_ERROR, ssh_build_version_string, ssh_parse_version_string, ssh_build_kexinit, ssh_parse_kexinit, ssh_negotiate_algorithms, ssh_build_service_accept, ssh_parse_service_request, ssh_build_disconnect}
 use os.apps.sshd.ssh_kex.{SshKexState, SshSessionKeys, SSH_MSG_KEX_ECDH_INIT, SSH_MSG_KEX_ECDH_REPLY, ssh_kex_generate_keypair, ssh_kex_compute_shared, ssh_kex_compute_exchange_hash, ssh_derive_keys, ssh_build_kex_ecdh_reply, ssh_parse_kex_ecdh_init, ssh_build_newkeys}
 use os.apps.sshd.ssh_cipher.{SshCipher}
-use os.apps.sshd.ssh_auth.{SshUserDb, SshAuthRequest, SSH_MSG_USERAUTH_REQUEST, MAX_AUTH_ATTEMPTS, ssh_parse_auth_request, ssh_build_auth_success, ssh_build_auth_failure, ssh_build_auth_banner}
+use os.apps.sshd.ssh_auth.{SshUserDb, SshAuthRequest, SSH_MSG_USERAUTH_REQUEST, SSH_MSG_USERAUTH_PK_OK, MAX_AUTH_ATTEMPTS, ssh_parse_auth_request, ssh_build_auth_success, ssh_build_auth_failure, ssh_build_auth_banner, ssh_build_userauth_pk_ok}
 use os.apps.sshd.ssh_channel.{ChannelTable, SshChannel, ChannelType, ChannelState, SSH_MSG_CHANNEL_OPEN, SSH_MSG_CHANNEL_DATA, SSH_MSG_CHANNEL_WINDOW_ADJUST, SSH_MSG_CHANNEL_EOF, SSH_MSG_CHANNEL_CLOSE, SSH_MSG_CHANNEL_REQUEST, DEFAULT_WINDOW_SIZE, DEFAULT_MAX_PACKET, ssh_parse_channel_open, ssh_parse_channel_data, ssh_parse_channel_request, ssh_parse_window_adjust, ssh_parse_channel_eof, ssh_parse_channel_close, ssh_build_channel_open_confirmation, ssh_build_channel_data, ssh_build_channel_window_adjust, ssh_build_channel_eof, ssh_build_channel_close, ssh_build_channel_success, ssh_build_channel_failure}
 use os.apps.sshd.ssh_pty.{SshPty}
 
 extern fn serial_println(msg: text)
+extern fn rt_rsa_sha256_verify(pubkey: [u8], message: [u8], signature: [u8]) -> i64
+extern fn rt_ed25519_verify(pubkey: [u8], message: [u8], signature: [u8]) -> i64
 
 # ============================================================================
 # Constants
@@ -289,7 +291,7 @@ impl SshSession:
             val r = ssh_parse_auth_request(payload)
             if r.is_err():
                 attempts = attempts + 1
-                val fail = ssh_build_auth_failure(["password"], false)
+                val fail = ssh_build_auth_failure(["publickey", "password"], false)
                 self.send_packet(fail)
                 continue
 
@@ -297,8 +299,7 @@ impl SshSession:
 
             if req.method == "none":
                 # "none" method: always fail, but tell client which methods are available
-                # Only password is offered (publickey disabled — no signature scheme)
-                val fail = ssh_build_auth_failure(["password"], false)
+                val fail = ssh_build_auth_failure(["publickey", "password"], false)
                 self.send_packet(fail)
                 attempts = attempts + 1
 
@@ -312,30 +313,57 @@ impl SshSession:
                     return
                 else:
                     attempts = attempts + 1
-                    val fail = ssh_build_auth_failure(["password"], false)
+                    val fail = ssh_build_auth_failure(["publickey", "password"], false)
                     self.send_packet(fail)
 
             elif req.method == "publickey":
-                # Public key authentication is DISABLED.
-                #
-                # Reason: SimpleOS has Curve25519 (DH key agreement) but NOT
-                # Ed25519 (digital signatures). Without a signature scheme,
-                # there is no way to verify that the client possesses the
-                # private key corresponding to the offered public key.
-                # Accepting publickey auth without proper signature verification
-                # would be an authentication bypass — anyone who knows a user's
-                # public key (which is public by definition) could authenticate.
-                #
-                # To enable publickey auth, implement Ed25519 signing/verification
-                # (requires Edwards-form Curve25519 arithmetic + SHA-512).
-                attempts = attempts + 1
-                val fail = ssh_build_auth_failure(["password"], false)
-                self.send_packet(fail)
+                if not req.has_signature:
+                    # Probe: client asks if the key is acceptable — respond PK_OK
+                    val pk_ok = ssh_build_userauth_pk_ok(req.key_algo, req.key_blob)
+                    self.send_packet(pk_ok)
+                    # Don't increment attempts — probe is not a failure
+                else:
+                    # Verify: build signed_data per RFC 4252 §7 and verify signature
+                    val signed_data = _build_publickey_signed_data(
+                        self.session_id, req.username, req.key_algo, req.key_blob
+                    )
+                    # Unwrap the SSH signature envelope: string algo_name + string raw_sig
+                    val raw_sig = _unwrap_ssh_signature(req.signature)
+                    var verified: bool = false
+                    if req.key_algo == "rsa-sha2-256":
+                        val spki_der = _ssh_rsa_blob_to_spki_der(req.key_blob)
+                        val vr = rt_rsa_sha256_verify(spki_der, signed_data, raw_sig)
+                        verified = vr == 1
+                    elif req.key_algo == "ssh-ed25519":
+                        # Ed25519 blob: string "ssh-ed25519" + string raw_pubkey (32 bytes)
+                        val raw_pubkey = _extract_ed25519_pubkey(req.key_blob)
+                        val vr = rt_ed25519_verify(raw_pubkey, signed_data, raw_sig)
+                        verified = vr == 1
+                    else:
+                        verified = false
+
+                    if verified:
+                        val user_exists = self.user_db.find_user(req.username)
+                        if user_exists != nil:
+                            self.authenticated_user = req.username
+                            val success = ssh_build_auth_success()
+                            self.send_packet(success)
+                            serial_println("[sshd-session] auth ok (publickey)")
+                            self.state = SessionState.Interactive
+                            return
+                        else:
+                            attempts = attempts + 1
+                            val fail = ssh_build_auth_failure(["publickey", "password"], false)
+                            self.send_packet(fail)
+                    else:
+                        attempts = attempts + 1
+                        val fail = ssh_build_auth_failure(["publickey", "password"], false)
+                        self.send_packet(fail)
 
             else:
                 # Unknown method
                 attempts = attempts + 1
-                val fail = ssh_build_auth_failure(["password"], false)
+                val fail = ssh_build_auth_failure(["publickey", "password"], false)
                 self.send_packet(fail)
 
         # Too many failed attempts
@@ -827,3 +855,226 @@ fn _build_signature_blob(signature: [u8]) -> [u8]:
     ssh_put_text(blob, "ssh-ed25519")
     ssh_put_string(blob, signature)
     blob
+
+# ============================================================================
+# Public Key Auth Helpers (RFC 4252 §7)
+# ============================================================================
+
+fn _build_publickey_signed_data(session_id: [u8], username: text, algo: text, key_blob: [u8]) -> [u8]:
+    """Build the signed_data blob for publickey auth per RFC 4252 §7.
+
+    Format:
+      string  session_id
+      byte    SSH_MSG_USERAUTH_REQUEST (50)
+      string  username
+      string  "ssh-connection"
+      string  "publickey"
+      bool    true
+      string  algorithm name
+      string  public_key_blob
+    """
+    var data: [u8] = []
+    ssh_put_string(data, session_id)
+    ssh_put_byte(data, 50)
+    ssh_put_text(data, username)
+    ssh_put_text(data, "ssh-connection")
+    ssh_put_text(data, "publickey")
+    ssh_put_bool(data, true)
+    ssh_put_text(data, algo)
+    ssh_put_string(data, key_blob)
+    data
+
+fn _unwrap_ssh_signature(sig_envelope: [u8]) -> [u8]:
+    """Unwrap the SSH signature envelope to extract the raw signature bytes.
+
+    SSH signature field format:
+      string  algorithm name (e.g. "rsa-sha2-256" or "ssh-ed25519")
+      string  raw signature bytes
+
+    Returns the raw signature bytes, or the envelope unchanged if parsing fails.
+    """
+    if sig_envelope.len() < 4:
+        return sig_envelope
+    # Skip the algorithm name string
+    var r_algo = ssh_get_string(sig_envelope, 0)
+    if r_algo.is_ok():
+        var algo_pair = r_algo.unwrap()
+        var off = algo_pair.next_offset
+        # Read the raw signature bytes
+        var r_raw = ssh_get_string(sig_envelope, off)
+        if r_raw.is_ok():
+            var raw_pair = r_raw.unwrap()
+            return raw_pair.data
+    sig_envelope
+
+fn _extract_ed25519_pubkey(key_blob: [u8]) -> [u8]:
+    """Extract the raw 32-byte Ed25519 public key from an SSH key blob.
+
+    SSH ed25519 blob format:
+      string  "ssh-ed25519"
+      string  public key (32 bytes)
+
+    Returns the 32-byte key, or empty array on failure.
+    """
+    if key_blob.len() < 4:
+        return []
+    # Skip the key type string ("ssh-ed25519")
+    var r_type = ssh_get_string(key_blob, 0)
+    if r_type.is_ok():
+        var type_pair = r_type.unwrap()
+        var off = type_pair.next_offset
+        var r_key = ssh_get_string(key_blob, off)
+        if r_key.is_ok():
+            var key_pair = r_key.unwrap()
+            return key_pair.data
+    []
+
+fn _ssh_rsa_blob_to_spki_der(key_blob: [u8]) -> [u8]:
+    """Convert an SSH RSA public key blob to SPKI DER format.
+
+    SSH RSA blob format:
+      string  "ssh-rsa"
+      string  e (public exponent, big-endian MPI)
+      string  n (modulus, big-endian MPI)
+
+    SPKI DER format (RFC 5480 / RFC 3279):
+      SEQUENCE {
+        SEQUENCE {
+          OID 1.2.840.113549.1.1.1 (rsaEncryption)
+          NULL
+        }
+        BIT STRING {
+          SEQUENCE {
+            INTEGER n
+            INTEGER e
+          }
+        }
+      }
+    """
+    # Parse the SSH RSA blob
+    if key_blob.len() < 4:
+        return []
+
+    var off: u64 = 0
+
+    # Skip key type string ("ssh-rsa")
+    var r_type = ssh_get_string(key_blob, off)
+    if r_type.is_err():
+        return []
+    var type_pair = r_type.unwrap()
+    off = type_pair.next_offset
+
+    # Read e (public exponent)
+    var r_e = ssh_get_string(key_blob, off)
+    if r_e.is_err():
+        return []
+    var e_pair = r_e.unwrap()
+    var e_bytes = e_pair.data
+    off = e_pair.next_offset
+
+    # Read n (modulus)
+    var r_n = ssh_get_string(key_blob, off)
+    if r_n.is_err():
+        return []
+    var n_pair = r_n.unwrap()
+    var n_bytes = n_pair.data
+
+    # Build inner RSAPublicKey: SEQUENCE { INTEGER n, INTEGER e }
+    var inner: [u8] = []
+    _der_push_integer(inner, n_bytes)
+    _der_push_integer(inner, e_bytes)
+    var rsa_seq: [u8] = []
+    _der_push_sequence(rsa_seq, inner)
+
+    # Wrap in BIT STRING (prepend 0x00 unused-bits byte)
+    var bit_str_content: [u8] = []
+    bit_str_content.push(0)
+    var bi: u64 = 0
+    while bi < rsa_seq.len():
+        bit_str_content.push(rsa_seq[bi])
+        bi = bi + 1
+    var bit_str: [u8] = []
+    _der_push_tag_length(bit_str, 3, bit_str_content.len())
+    var bsi: u64 = 0
+    while bsi < bit_str_content.len():
+        bit_str.push(bit_str_content[bsi])
+        bsi = bsi + 1
+
+    # RSA OID: 1.2.840.113549.1.1.1 encoded
+    var rsa_oid: [u8] = [6, 9, 42, 134, 72, 134, 247, 13, 1, 1, 1, 5, 0]
+
+    # AlgorithmIdentifier: SEQUENCE { OID, NULL }
+    var alg_id: [u8] = []
+    _der_push_sequence(alg_id, rsa_oid)
+
+    # Combine AlgorithmIdentifier + BIT STRING
+    var spki_body: [u8] = []
+    var ai: u64 = 0
+    while ai < alg_id.len():
+        spki_body.push(alg_id[ai])
+        ai = ai + 1
+    var bsti: u64 = 0
+    while bsti < bit_str.len():
+        spki_body.push(bit_str[bsti])
+        bsti = bsti + 1
+
+    # Outer SEQUENCE
+    var spki: [u8] = []
+    _der_push_sequence(spki, spki_body)
+    spki
+
+fn _der_push_tag_length(buf: [u8], tag: u8, length: u64):
+    """Append a DER tag + length encoding to buf (modifies buf in place)."""
+    buf.push(tag)
+    if length < 128:
+        buf.push(length.to_u8())
+    elif length < 256:
+        buf.push(129)
+        buf.push(length.to_u8())
+    else:
+        buf.push(130)
+        buf.push(((length >> 8) & 0xFF).to_u8())
+        buf.push((length & 0xFF).to_u8())
+
+fn _der_push_sequence(buf: [u8], content: [u8]):
+    """Append a DER SEQUENCE wrapping content to buf."""
+    _der_push_tag_length(buf, 48, content.len())
+    var i: u64 = 0
+    while i < content.len():
+        buf.push(content[i])
+        i = i + 1
+
+fn _der_push_integer(buf: [u8], value: [u8]):
+    """Append a DER INTEGER from a big-endian byte array to buf.
+
+    Adds a leading 0x00 byte if the high bit is set (to keep sign positive).
+    Strips leading zero bytes that are not needed for sign.
+    """
+    # Strip leading zeros (except keep at least one byte)
+    var start: u64 = 0
+    while start + 1 < value.len() and value[start] == 0:
+        start = start + 1
+
+    # Collect the trimmed bytes
+    var trimmed: [u8] = []
+    var ti: u64 = start
+    while ti < value.len():
+        trimmed.push(value[ti])
+        ti = ti + 1
+
+    # If high bit set, prepend 0x00 to indicate positive
+    var needs_pad: bool = false
+    if trimmed.len() > 0:
+        needs_pad = trimmed[0] >= 128
+
+    var content_len: u64 = trimmed.len()
+    if needs_pad:
+        content_len = content_len + 1
+
+    _der_push_tag_length(buf, 2, content_len)
+    if needs_pad:
+        buf.push(0)
+    var ci: u64 = 0
+    while ci < trimmed.len():
+        buf.push(trimmed[ci])
+        ci = ci + 1

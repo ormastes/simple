@@ -29,6 +29,68 @@ class BrowserHistoryEntry:
     static fn create(url: text, title: text, source_html: text) -> BrowserHistoryEntry:
         BrowserHistoryEntry(url: url, title: title, source_html: source_html)
 
+class BrowserRequest:
+    id: text
+    kind: text
+    url: text
+    method: text
+    headers: text
+    body: text
+    content_type: text
+
+    static fn create(id: text, kind: text, url: text, method: text, headers: text, body: text, content_type: text) -> BrowserRequest:
+        BrowserRequest(
+            id: id,
+            kind: kind,
+            url: url,
+            method: method,
+            headers: headers,
+            body: body,
+            content_type: content_type
+        )
+
+class BrowserResponse:
+    request_id: text
+    kind: text
+    url: text
+    status: i32
+    headers: text
+    body: text
+    error: text
+
+    static fn create(request_id: text, kind: text, url: text, status: i32, headers: text, body: text, error: text) -> BrowserResponse:
+        BrowserResponse(
+            request_id: request_id,
+            kind: kind,
+            url: url,
+            status: status,
+            headers: headers,
+            body: body,
+            error: error
+        )
+
+class BrowserLoadState:
+    document_url: text
+    source_html: text
+    target_index: i32
+    push_history: bool
+    script_blocks: [BrowserScriptBlock]
+    next_script_idx: i32
+    warnings: [text]
+    style_warning: bool
+
+    static fn create(document_url: text, source_html: text, target_index: i32, push_history: bool, script_blocks: [BrowserScriptBlock], style_warning: bool) -> BrowserLoadState:
+        BrowserLoadState(
+            document_url: document_url,
+            source_html: source_html,
+            target_index: target_index,
+            push_history: push_history,
+            script_blocks: script_blocks,
+            next_script_idx: 0,
+            warnings: [],
+            style_warning: style_warning
+        )
+
 class BrowserRuntimeState:
     runtime: JsRuntime
     window_id: i64
@@ -177,6 +239,10 @@ class BrowserSession:
     local_storage: [Pair<text, text>]
     cookies: [BrowserCookie]
     runtime_state: BrowserRuntimeState?
+    pending_requests: [BrowserRequest]
+    next_request_seq: i32
+    active_load: BrowserLoadState?
+    resource_overrides: [Pair<text, text>]
 
     static fn new() -> BrowserSession:
         BrowserSession(
@@ -193,7 +259,11 @@ class BrowserSession:
             session_storage: [],
             local_storage: [],
             cookies: [],
-            runtime_state: nil
+            runtime_state: nil,
+            pending_requests: [],
+            next_request_seq: 1,
+            active_load: nil,
+            resource_overrides: []
         )
 
 impl BrowserSession:
@@ -214,6 +284,47 @@ impl BrowserSession:
         self.begin_navigation(url)
         self.commit_navigation_html(html)
 
+    me register_resource(url: text, body: text):
+        self.resource_overrides = upsert_pair(self.resource_overrides, normalize_browser_url(url), body)
+
+    me begin_network_navigation(url: text, method: text, headers: text, body: text, content_type: text) -> Result<bool, text>:
+        val normalized = normalize_browser_url(url)
+        if normalized == "about:blank":
+            return self.open_html(normalized, blank_page_html())
+        if normalized.starts_with("file://"):
+            val path = normalized.slice(7, normalized.len())
+            val html = rt_file_read_text(path) ?? ""
+            return self.open_html(normalized, html)
+        if val Some(override_body) = pair_value(self.resource_overrides, normalized):
+            return self.open_html(normalized, override_body)
+        self.begin_navigation(normalized)
+        self.pending_requests = self.pending_requests + [self._build_request("document", normalized, method, headers, body, content_type)]
+        Ok(true)
+
+    fn take_pending_request() -> BrowserRequest?:
+        if self.pending_requests.len() == 0:
+            return nil
+        val req = self.pending_requests[0]
+        var rest: [BrowserRequest] = []
+        var idx = 1
+        while idx < self.pending_requests.len():
+            rest = rest + [self.pending_requests[idx]]
+            idx = idx + 1
+        self.pending_requests = rest
+        Some(req)
+
+    me commit_network_response(response: BrowserResponse) -> Result<bool, text>:
+        if response.kind == "document":
+            if response.error != "":
+                self.pending_url = ""
+                self.is_loading = false
+                return Err(response.error)
+            self._apply_response_headers(response.headers)
+            return self.commit_navigation_html(response.body)
+        if response.kind == "script":
+            return self._commit_script_response(response)
+        Err("unknown response kind: {response.kind}")
+
     me open_url(url: text) -> Result<bool, text>:
         val normalized = normalize_browser_url(url)
         if normalized == "about:blank":
@@ -222,7 +333,9 @@ impl BrowserSession:
             val path = normalized.slice(7, normalized.len())
             val html = rt_file_read_text(path) ?? ""
             return self.open_html(normalized, html)
-        return Err("network navigation is not implemented for '{normalized}'")
+        if val Some(override_body) = pair_value(self.resource_overrides, normalized):
+            return self.open_html(normalized, override_body)
+        return Err("network navigation requires begin_network_navigation for '{normalized}'")
 
     me commit_navigation_html(html: text) -> Result<bool, text>:
         if not self.is_loading:
@@ -345,27 +458,15 @@ impl BrowserSession:
         self.current_body_html = body_html
         self.source_html = html
 
-        val script_blocks = extract_script_blocks(html)
-        var script_warnings: [text] = []
-        for block in script_blocks:
-            if block.kind == "external":
-                script_warnings = script_warnings + ["external script loading is not implemented"]
-            else if block.kind == "inline":
-                val eval_result = state.runtime.eval(block.content)
-                match eval_result:
-                    Ok(_):
-                        pass_dn
-                    Err(e):
-                        script_warnings = script_warnings + ["inline script error: {e.message}"]
-
-        self._sync_from_runtime(state)
-        self._update_history(url, html, target_index, push_history)
-
-        var merged_warnings = script_warnings
-        if contains_style_block(html):
-            merged_warnings = merged_warnings + ["style tags are ignored by the software browser renderer"]
-        self.warnings = merged_warnings
-        Ok(true)
+        self.active_load = Some(BrowserLoadState.create(
+            document_url: url,
+            source_html: html,
+            target_index: target_index,
+            push_history: push_history,
+            script_blocks: extract_script_blocks(html),
+            style_warning: contains_style_block(html)
+        ))
+        self._advance_script_loading()
 
     me _sync_from_runtime(state: BrowserRuntimeState):
         val title_val = state.runtime.interpreter.object_store.get_property(
@@ -442,6 +543,93 @@ impl BrowserSession:
                 JsValue.String(v: visible_cookie_text)
             )
 
+    fn _build_request(kind: text, url: text, method: text, headers: text, body: text, content_type: text) -> BrowserRequest:
+        val normalized_method = if method.trim() != "": method.to_upper() else: "GET"
+        var request_headers = headers
+        val cookie_header = self.cookie_header_for_request(url)
+        if cookie_header != "":
+            if request_headers != "":
+                request_headers = request_headers + "\n"
+            request_headers = request_headers + "Cookie: " + cookie_header
+        val request_id = "{kind}-{self.next_request_seq}"
+        self.next_request_seq = self.next_request_seq + 1
+        BrowserRequest.create(
+            id: request_id,
+            kind: kind,
+            url: url,
+            method: normalized_method,
+            headers: request_headers,
+            body: body,
+            content_type: content_type
+        )
+
+    me _commit_script_response(response: BrowserResponse) -> Result<bool, text>:
+        if val Some(load) = self.active_load:
+            if response.error != "":
+                load.warnings = load.warnings + ["external script error: {response.error}"]
+            else if val Some(state) = self.runtime_state:
+                self._apply_response_headers(response.headers)
+                val eval_result = state.runtime.eval(response.body)
+                match eval_result:
+                    Ok(_):
+                        pass_dn
+                    Err(e):
+                        load.warnings = load.warnings + ["external script error: {e.message}"]
+            return self._advance_script_loading()
+        Err("no active script load")
+
+    me _advance_script_loading() -> Result<bool, text>:
+        if val Some(load) = self.active_load:
+            while load.next_script_idx < load.script_blocks.len():
+                val block = load.script_blocks[load.next_script_idx]
+                load.next_script_idx = load.next_script_idx + 1
+                if block.kind == "inline":
+                    if val Some(state) = self.runtime_state:
+                        val eval_result = state.runtime.eval(block.content)
+                        match eval_result:
+                            Ok(_):
+                                pass_dn
+                            Err(e):
+                                load.warnings = load.warnings + ["inline script error: {e.message}"]
+                    continue
+                if block.kind == "external":
+                    val resolved = resolve_relative_url(load.document_url, block.src)
+                    if val Some(override_body) = pair_value(self.resource_overrides, resolved):
+                        if val Some(state) = self.runtime_state:
+                            val eval_result = state.runtime.eval(override_body)
+                            match eval_result:
+                                Ok(_):
+                                    pass_dn
+                                Err(e):
+                                    load.warnings = load.warnings + ["external script error: {e.message}"]
+                        continue
+                    self.pending_requests = self.pending_requests + [self._build_request("script", resolved, "GET", "", "", "")]
+                    return Ok(true)
+            self._finalize_active_load(load)
+            self.active_load = nil
+            return Ok(true)
+        Ok(true)
+
+    me _finalize_active_load(load: BrowserLoadState):
+        if val Some(state) = self.runtime_state:
+            self._sync_from_runtime(state)
+        if self.current_url != load.document_url:
+            val redirected_url = self.current_url
+            self.active_load = nil
+            val _ = self.begin_network_navigation(redirected_url, "GET", "", "", "")
+            return
+        self._update_history(load.document_url, load.source_html, load.target_index, load.push_history)
+        var merged_warnings = load.warnings
+        if load.style_warning:
+            merged_warnings = merged_warnings + ["style tags are ignored by the software browser renderer"]
+        self.warnings = merged_warnings
+
+    me _apply_response_headers(headers: text):
+        for line in headers.split("\n"):
+            val trimmed = line.trim()
+            if trimmed.to_lower().starts_with("set-cookie:"):
+                self.apply_set_cookie_header(trimmed.substring(11).trim())
+
     me _update_history(url: text, html: text, target_index: i32, push_history: bool):
         val entry = BrowserHistoryEntry.create(
             url: self.current_url,
@@ -477,12 +665,13 @@ impl BrowserSession:
 class BrowserScriptBlock:
     kind: text
     content: text
+    src: text
 
     static fn inline(content: text) -> BrowserScriptBlock:
-        BrowserScriptBlock(kind: "inline", content: content)
+        BrowserScriptBlock(kind: "inline", content: content, src: "")
 
-    static fn external() -> BrowserScriptBlock:
-        BrowserScriptBlock(kind: "external", content: "")
+    static fn external(src: text) -> BrowserScriptBlock:
+        BrowserScriptBlock(kind: "external", content: "", src: src)
 
 fn blank_page_html() -> text:
     "<!DOCTYPE html><html><head><title>about:blank</title></head><body></body></html>"
@@ -599,10 +788,40 @@ fn storage_api_bootstrap_js() -> text:
 
 fn browser_fetch_bootstrap_js() -> text:
     join_text([
+        "function __simpleWrapResponse(raw) {\n",
+        "  raw.text = function() { return this.body; };\n",
+        "  raw.json = function() { return JSON.parse(this.body); };\n",
+        "  return raw;\n",
+        "}\n",
+        "function __simpleResolvedPromise(value) {\n",
+        "  return {\n",
+        "    then: function(onFulfilled) {\n",
+        "      if (onFulfilled === undefined || onFulfilled === null) {\n",
+        "        return __simpleResolvedPromise(value);\n",
+        "      }\n",
+        "      return __simpleResolvedPromise(onFulfilled(value));\n",
+        "    },\n",
+        "    catch: function(_onRejected) { return __simpleResolvedPromise(value); },\n",
+        "    finally: function(onFinally) {\n",
+        "      if (onFinally) { onFinally(); }\n",
+        "      return __simpleResolvedPromise(value);\n",
+        "    }\n",
+        "  };\n",
+        "}\n",
         "window.fetchSync = function(url, method, headersText, body, contentType) {\n",
-        "  return chrome.fetchSync(url, method, headersText, body, contentType);\n",
+        "  return __simpleWrapResponse(chrome.fetchSync(url, method, headersText, body, contentType));\n",
         "};\n",
-        "window.fetch = window.fetchSync;\n"
+        "window.fetch = function(url, options) {\n",
+        "  var method = 'GET';\n",
+        "  var headersText = '';\n",
+        "  var body = '';\n",
+        "  if (options) {\n",
+        "    if (options.method) { method = '' + options.method; }\n",
+        "    if (options.headers) { headersText = '' + options.headers; }\n",
+        "    if (options.body) { body = '' + options.body; }\n",
+        "  }\n",
+        "  return __simpleResolvedPromise(window.fetchSync(url, method, headersText, body, ''));\n",
+        "};\n"
     ], "")
 
 fn pair_value(pairs: [Pair<text, text>], key: text) -> text?:
@@ -673,6 +892,24 @@ fn normalize_browser_url(input: text) -> text:
         return "https://{input}"
     "https://search.example.com/?q={input}"
 
+fn resolve_relative_url(base_url: text, href: text) -> text:
+    if href == "":
+        return base_url
+    if href.starts_with("http://") or href.starts_with("https://") or href.starts_with("file://") or href.starts_with("about:"):
+        return href
+    if href.starts_with("//"):
+        return url_protocol(base_url).slice(0, url_protocol(base_url).len() - 1) + href
+    if href.starts_with("#"):
+        return without_fragment(base_url) + href
+    if href.starts_with("?"):
+        return without_query(base_url) + href
+    if href.starts_with("/"):
+        val origin = url_origin(base_url)
+        if origin != "":
+            return origin + href
+        return href
+    base_dir(base_url) + href
+
 fn url_protocol(url: text) -> text:
     if url.starts_with("https://"):
         return "https:"
@@ -696,6 +933,44 @@ fn url_pathname(url: text) -> text:
     if path_start < 0:
         return "/"
     url.slice(path_start, url.len())
+
+fn url_origin(url: text) -> text:
+    val scheme_pos = find_text(url, "://", 0)
+    if scheme_pos < 0:
+        return ""
+    val host_start = scheme_pos + 3
+    val path_start = find_text(url, "/", host_start)
+    if path_start < 0:
+        return url
+    url.slice(0, path_start)
+
+fn without_fragment(url: text) -> text:
+    val idx = find_text(url, "#", 0)
+    if idx < 0:
+        return url
+    url.slice(0, idx)
+
+fn without_query(url: text) -> text:
+    val clean = without_fragment(url)
+    val idx = find_text(clean, "?", 0)
+    if idx < 0:
+        return clean
+    clean.slice(0, idx)
+
+fn base_dir(url: text) -> text:
+    val clean = without_query(url)
+    val origin = url_origin(clean)
+    if origin == "":
+        return ""
+    if clean == origin:
+        return origin + "/"
+    val rel = clean.slice(origin.len(), clean.len())
+    var idx = rel.len() - 1
+    while idx >= 0:
+        if rel.slice(idx, idx + 1) == "/":
+            return origin + rel.slice(0, idx + 1)
+        idx = idx - 1
+    origin + "/"
 
 fn url_host(url: text) -> text:
     val scheme_pos = find_text(url, "://", 0)
@@ -879,8 +1154,9 @@ fn extract_script_blocks(html: text) -> [BrowserScriptBlock]:
             return blocks
         val tag_content = html.slice(start, tag_end + 1)
         val close = find_text(html, "</script>", tag_end + 1)
-        if tag_content.contains("src="):
-            blocks = blocks + [BrowserScriptBlock.external()]
+        val src_value = extract_attr_value(tag_content, "src")
+        if src_value != "":
+            blocks = blocks + [BrowserScriptBlock.external(src_value)]
         else if close >= 0:
             val content = html.slice(tag_end + 1, close)
             if content.trim().len() > 0:
@@ -889,6 +1165,29 @@ fn extract_script_blocks(html: text) -> [BrowserScriptBlock]:
             return blocks
         pos = close + 9
     blocks
+
+fn extract_attr_value(tag_content: text, attr_name: text) -> text:
+    val lower = tag_content.to_lower()
+    val needle = attr_name.to_lower() + "="
+    val idx = find_text(lower, needle, 0)
+    if idx < 0:
+        return ""
+    val start = idx + needle.len()
+    if start >= tag_content.len():
+        return ""
+    val quote = tag_content.slice(start, start + 1)
+    if quote == "\"" or quote == "'":
+        val end = find_text(tag_content, quote, start + 1)
+        if end < 0:
+            return ""
+        return tag_content.slice(start + 1, end)
+    var end = start
+    while end < tag_content.len():
+        val ch = tag_content.slice(end, end + 1)
+        if ch == " " or ch == ">" or ch == "\n" or ch == "\t":
+            return tag_content.slice(start, end)
+        end = end + 1
+    tag_content.slice(start, tag_content.len())
 
 fn find_text(haystack: text, needle: text, start: i32) -> i32:
     if needle.len() == 0:

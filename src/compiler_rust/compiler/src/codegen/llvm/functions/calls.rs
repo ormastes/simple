@@ -40,7 +40,6 @@ fn text_arg_indices(func_name: &str) -> Option<&'static [usize]> {
         "rt_file_exists"
         | "rt_file_canonicalize"
         | "rt_file_read_text"
-        | "rt_file_read_text_rv"
         | "rt_file_remove"
         | "rt_file_read_lines"
         | "rt_file_read_bytes" => Some(&[0]),

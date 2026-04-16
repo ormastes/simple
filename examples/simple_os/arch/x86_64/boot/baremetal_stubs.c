@@ -1717,10 +1717,44 @@ RuntimeValue rt_fat32_write_selected_file_text(RuntimeValue content_rv)
     return fat32_write_file(_fat32_selected_name, content, content_len) == 0 ? TRUE_VALUE : FALSE_VALUE;
 }
 
-RuntimeValue rt_fat32_write_editor_smoke(void)
+static int _fat32_copy_path_arg(const char *src, int64_t src_len, char *dst, uint32_t dst_cap)
 {
-    static const uint8_t content[] = "SimpleOS editor smoke saved from GUI";
-    return fat32_write_file("EDITOR.TXT", content, (uint32_t)(sizeof(content) - 1)) == 0 ? TRUE_VALUE : FALSE_VALUE;
+    if (!src || src_len <= 0 || !dst || dst_cap == 0)
+        return -1;
+    uint32_t len = (uint32_t)src_len;
+    if (len >= dst_cap)
+        len = dst_cap - 1;
+    __builtin_memcpy(dst, src, len);
+    dst[len] = '\0';
+    return (int)len;
+}
+
+static RuntimeValue _fat32_read_file_text_value(const char *name, int64_t name_len)
+{
+    char path_buf[128];
+    static uint8_t _read_buf[8192];
+    uint32_t bytes_read = 0;
+    if (_fat32_copy_path_arg(name, (int64_t)name_len, path_buf, sizeof(path_buf)) <= 0)
+        return rt_string_from_cstr("");
+    int result = fat32_read_file(path_buf, _read_buf, sizeof(_read_buf) - 1, &bytes_read);
+    if (result != 0 || bytes_read == 0)
+        return rt_string_from_cstr("");
+    _read_buf[bytes_read] = '\0';
+    return rt_string_from_cstr((const char *)_read_buf);
+}
+
+static int8_t _fat32_write_text_impl(const char *name, int64_t name_len, const char *content, int64_t content_len)
+{
+    char path_buf[128];
+    const uint8_t *content_bytes = (const uint8_t *)"";
+    uint32_t write_len = 0;
+    if (_fat32_copy_path_arg(name, name_len, path_buf, sizeof(path_buf)) <= 0)
+        return 0;
+    if (content && content_len > 0) {
+        content_bytes = (const uint8_t *)content;
+        write_len = (uint32_t)content_len;
+    }
+    return fat32_write_file(path_buf, content_bytes, write_len) == 0 ? 1 : 0;
 }
 
 static struct {
@@ -6111,10 +6145,49 @@ RuntimeValue rt_string_rfind(RuntimeValue s, RuntimeValue sub) { (void)s; (void)
 RuntimeValue rt_string_join(RuntimeValue a, RuntimeValue sep) { (void)a; (void)sep; return NIL_VALUE; }
 RuntimeValue rt_string_to_int(RuntimeValue s) { (void)s; return ENCODE_INT(0); }
 RuntimeValue rt_option_map(RuntimeValue o, RuntimeValue f) { (void)o; (void)f; return NIL_VALUE; }
-RuntimeValue rt_file_read_text(RuntimeValue p) { (void)p; return NIL_VALUE; }
-RuntimeValue rt_file_read_text_rv(RuntimeValue p) { (void)p; return NIL_VALUE; }
-RuntimeValue rt_file_write_text(RuntimeValue a, RuntimeValue b) { (void)a;(void)b; return NIL_VALUE; }
-RuntimeValue rt_file_append_text(RuntimeValue a, RuntimeValue b) { (void)a;(void)b; return NIL_VALUE; }
+RuntimeValue rt_file_read_text(const char *path, int64_t path_len) {
+    return _fat32_read_file_text_value(path, path_len);
+}
+RuntimeValue rt_file_read_text_rv(RuntimeValue path_rv) {
+    if (!IS_HEAP(path_rv))
+        return rt_string_from_cstr("");
+    RuntimeString *s = (RuntimeString *)DECODE_PTR(path_rv);
+    if (!s)
+        return rt_string_from_cstr("");
+    return _fat32_read_file_text_value(s->data, s->len);
+}
+int8_t rt_file_write_text(const char *path, int64_t path_len, const char *content, int64_t content_len) {
+    return _fat32_write_text_impl(path, path_len, content, content_len);
+}
+int8_t rt_file_append_text(const char *path, int64_t path_len, const char *content, int64_t content_len) {
+    char path_buf[128];
+    uint32_t existing_size = 0;
+    uint32_t existing_cluster = 0;
+    uint8_t *combined = (uint8_t *)0;
+    uint32_t total_len = 0;
+    int8_t ok = 0;
+
+    if (_fat32_copy_path_arg(path, path_len, path_buf, sizeof(path_buf)) <= 0)
+        return 0;
+
+    if (fat32_find_file(path_buf, &existing_cluster, &existing_size) != 0 || existing_size == 0) {
+        return _fat32_write_text_impl(path, path_len, content, content_len);
+    }
+
+    total_len = existing_size + (content_len > 0 ? (uint32_t)content_len : 0);
+    combined = (uint8_t *)malloc(total_len == 0 ? 1 : total_len);
+    if (!combined)
+        return 0;
+    if (fat32_read_file(path_buf, combined, existing_size, &existing_size) != 0) {
+        free(combined);
+        return 0;
+    }
+    if (content && content_len > 0)
+        __builtin_memcpy(combined + existing_size, content, (uint32_t)content_len);
+    ok = fat32_write_file(path_buf, combined, total_len) == 0 ? 1 : 0;
+    free(combined);
+    return ok;
+}
 RuntimeValue rt_file_open(RuntimeValue a, RuntimeValue b) { (void)a;(void)b; return NIL_VALUE; }
 RuntimeValue rt_file_close(RuntimeValue a) { (void)a; return NIL_VALUE; }
 RuntimeValue rt_file_remove(RuntimeValue a) { (void)a; return NIL_VALUE; }

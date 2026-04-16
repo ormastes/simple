@@ -1,0 +1,331 @@
+#![allow(unnamed_duplicate_typed_args)]
+# SSH RSA Public Key → DER SubjectPublicKeyInfo Converter
+#
+# Converts an SSH-wire RSA public key (string "ssh-rsa" + mpint e + mpint n)
+# into ASN.1 DER SubjectPublicKeyInfo format suitable for rt_rsa_sha256_verify.
+#
+# DER SPKI structure (RFC 3279):
+#   SEQUENCE {
+#     SEQUENCE {
+#       OID 1.2.840.113549.1.1.1 (rsaEncryption)
+#       NULL
+#     }
+#     BIT STRING (wrapping)
+#       SEQUENCE {
+#         INTEGER n
+#         INTEGER e
+#       }
+#   }
+
+# ============================================================================
+# Result Type
+# ============================================================================
+
+enum RsaParseResult:
+    Ok(n: [u8], e: [u8])
+    Err(msg: text)
+
+# ============================================================================
+# SSH Blob Parser
+# ============================================================================
+
+fn parse_ssh_rsa_blob(blob: [u8]) -> RsaParseResult:
+    """Parse SSH RSA public key blob: string "ssh-rsa" + mpint e + mpint n.
+
+    Returns RsaParseResult.Ok(n, e) on success, RsaParseResult.Err on failure.
+    Leading zero byte is stripped from n if present (mpint high-bit padding).
+    """
+    var pos: u64 = 0
+
+    # Read 4-byte BE length for the type string
+    if pos + 4 > blob.len():
+        return RsaParseResult.Err(msg: "parse_ssh_rsa_blob: truncated type length")
+    var b0: u32 = blob[pos].to_u32()
+    var b1: u32 = blob[pos + 1].to_u32()
+    var b2: u32 = blob[pos + 2].to_u32()
+    var b3: u32 = blob[pos + 3].to_u32()
+    var type_len: u64 = ((b0 << 24) | (b1 << 16) | (b2 << 8) | b3).to_u64()
+    pos = pos + 4
+
+    # Expect exactly 7 bytes for "ssh-rsa"
+    if type_len != 7:
+        return RsaParseResult.Err(msg: "parse_ssh_rsa_blob: type is not ssh-rsa")
+    if pos + 7 > blob.len():
+        return RsaParseResult.Err(msg: "parse_ssh_rsa_blob: truncated type string")
+
+    # Verify "ssh-rsa" bytes: s=0x73 s=0x73 h=0x68 -=0x2D r=0x72 s=0x73 a=0x61
+    if blob[pos] != 0x73:
+        return RsaParseResult.Err(msg: "parse_ssh_rsa_blob: not ssh-rsa (byte 0)")
+    if blob[pos + 1] != 0x73:
+        return RsaParseResult.Err(msg: "parse_ssh_rsa_blob: not ssh-rsa (byte 1)")
+    if blob[pos + 2] != 0x68:
+        return RsaParseResult.Err(msg: "parse_ssh_rsa_blob: not ssh-rsa (byte 2)")
+    if blob[pos + 3] != 0x2D:
+        return RsaParseResult.Err(msg: "parse_ssh_rsa_blob: not ssh-rsa (byte 3)")
+    if blob[pos + 4] != 0x72:
+        return RsaParseResult.Err(msg: "parse_ssh_rsa_blob: not ssh-rsa (byte 4)")
+    if blob[pos + 5] != 0x73:
+        return RsaParseResult.Err(msg: "parse_ssh_rsa_blob: not ssh-rsa (byte 5)")
+    if blob[pos + 6] != 0x61:
+        return RsaParseResult.Err(msg: "parse_ssh_rsa_blob: not ssh-rsa (byte 6)")
+    pos = pos + 7
+
+    # Read 4-byte BE length for e (mpint)
+    if pos + 4 > blob.len():
+        return RsaParseResult.Err(msg: "parse_ssh_rsa_blob: truncated e length")
+    var e0: u32 = blob[pos].to_u32()
+    var e1: u32 = blob[pos + 1].to_u32()
+    var e2: u32 = blob[pos + 2].to_u32()
+    var e3: u32 = blob[pos + 3].to_u32()
+    var e_len: u64 = ((e0 << 24) | (e1 << 16) | (e2 << 8) | e3).to_u64()
+    pos = pos + 4
+
+    if pos + e_len > blob.len():
+        return RsaParseResult.Err(msg: "parse_ssh_rsa_blob: truncated e data")
+    var e_bytes: [u8] = []
+    var i: u64 = 0
+    while i < e_len:
+        e_bytes.push(blob[pos + i])
+        i = i + 1
+    pos = pos + e_len
+
+    # Read 4-byte BE length for n (mpint)
+    if pos + 4 > blob.len():
+        return RsaParseResult.Err(msg: "parse_ssh_rsa_blob: truncated n length")
+    var n0: u32 = blob[pos].to_u32()
+    var n1: u32 = blob[pos + 1].to_u32()
+    var n2: u32 = blob[pos + 2].to_u32()
+    var n3: u32 = blob[pos + 3].to_u32()
+    var n_len: u64 = ((n0 << 24) | (n1 << 16) | (n2 << 8) | n3).to_u64()
+    pos = pos + 4
+
+    if pos + n_len > blob.len():
+        return RsaParseResult.Err(msg: "parse_ssh_rsa_blob: truncated n data")
+
+    # Strip leading zero byte from n if present (mpint high-bit padding rule)
+    var n_start: u64 = 0
+    if n_len > 0 and blob[pos] == 0x00:
+        n_start = 1
+    var n_actual_len: u64 = n_len - n_start
+    var n_bytes: [u8] = []
+    var j: u64 = 0
+    while j < n_actual_len:
+        n_bytes.push(blob[pos + n_start + j])
+        j = j + 1
+
+    RsaParseResult.Ok(n: n_bytes, e: e_bytes)
+
+# ============================================================================
+# DER Encoding Helpers
+# ============================================================================
+
+fn _der_encode_length(length: u64) -> [u8]:
+    """Encode DER length octets.
+
+    length < 128:      single byte
+    length < 256:      [0x81, length]
+    length < 65536:    [0x82, hi, lo]
+    length < 16777216: [0x83, b2, b1, b0]
+    """
+    var result: [u8] = []
+    if length < 128:
+        result.push(length.to_u8())
+    elif length < 256:
+        result.push(0x81)
+        result.push(length.to_u8())
+    elif length < 65536:
+        result.push(0x82)
+        result.push(((length >> 8) & 0xFF).to_u8())
+        result.push((length & 0xFF).to_u8())
+    else:
+        result.push(0x83)
+        result.push(((length >> 16) & 0xFF).to_u8())
+        result.push(((length >> 8) & 0xFF).to_u8())
+        result.push((length & 0xFF).to_u8())
+    result
+
+fn _der_encode_integer(value: [u8]) -> [u8]:
+    """Encode an ASN.1 INTEGER TLV.
+
+    Strips leading zeros (keeping at least one byte).
+    Prepends 0x00 if the high bit of the first byte is set (positive integer).
+    Returns [0x02, <length>, <bytes>].
+    """
+    # Strip leading zeros
+    var start: u64 = 0
+    while start + 1 < value.len() and value[start] == 0x00:
+        start = start + 1
+
+    # Check if high bit requires padding
+    var needs_pad: bool = (value[start] & 0x80) != 0
+
+    var body_len: u64 = value.len() - start
+    var total_len: u64 = body_len
+    if needs_pad:
+        total_len = total_len + 1
+
+    var result: [u8] = []
+    result.push(0x02)   # INTEGER tag
+
+    var len_bytes: [u8] = _der_encode_length(total_len)
+    var li: u64 = 0
+    while li < len_bytes.len():
+        result.push(len_bytes[li])
+        li = li + 1
+
+    if needs_pad:
+        result.push(0x00)
+
+    var vi: u64 = start
+    while vi < value.len():
+        result.push(value[vi])
+        vi = vi + 1
+
+    result
+
+fn _der_encode_sequence(contents: [u8]) -> [u8]:
+    """Encode an ASN.1 SEQUENCE TLV wrapping the given contents.
+
+    Returns [0x30, <length>, contents...].
+    """
+    var result: [u8] = []
+    result.push(0x30)   # SEQUENCE tag
+
+    var len_bytes: [u8] = _der_encode_length(contents.len())
+    var li: u64 = 0
+    while li < len_bytes.len():
+        result.push(len_bytes[li])
+        li = li + 1
+
+    var ci: u64 = 0
+    while ci < contents.len():
+        result.push(contents[ci])
+        ci = ci + 1
+
+    result
+
+fn _der_encode_null() -> [u8]:
+    """Return DER NULL: [0x05, 0x00]."""
+    var result: [u8] = []
+    result.push(0x05)
+    result.push(0x00)
+    result
+
+fn _der_encode_oid_rsa() -> [u8]:
+    """Return rsaEncryption OID in DER form: OID 1.2.840.113549.1.1.1.
+
+    Encoding: [0x06, 0x09, 0x2A, 0x86, 0x48, 0x86, 0xF7, 0x0D, 0x01, 0x01, 0x01]
+    """
+    var result: [u8] = []
+    result.push(0x06)
+    result.push(0x09)
+    result.push(0x2A)
+    result.push(0x86)
+    result.push(0x48)
+    result.push(0x86)
+    result.push(0xF7)
+    result.push(0x0D)
+    result.push(0x01)
+    result.push(0x01)
+    result.push(0x01)
+    result
+
+fn _der_encode_bit_string(content: [u8]) -> [u8]:
+    """Encode an ASN.1 BIT STRING wrapping the given content.
+
+    Returns [0x03, <length>, 0x00, content...] where 0x00 = no unused bits.
+    """
+    var result: [u8] = []
+    result.push(0x03)   # BIT STRING tag
+
+    # Length includes the leading 0x00 unused-bits byte
+    var total_len: u64 = content.len() + 1
+    var len_bytes: [u8] = _der_encode_length(total_len)
+    var li: u64 = 0
+    while li < len_bytes.len():
+        result.push(len_bytes[li])
+        li = li + 1
+
+    result.push(0x00)   # unused bits = 0
+
+    var ci: u64 = 0
+    while ci < content.len():
+        result.push(content[ci])
+        ci = ci + 1
+
+    result
+
+# ============================================================================
+# SPKI Builder
+# ============================================================================
+
+fn build_rsa_spki_der(n: [u8], e: [u8]) -> [u8]:
+    """Build an ASN.1 DER SubjectPublicKeyInfo for an RSA public key.
+
+    Structure (RFC 3279):
+      SEQUENCE {
+        SEQUENCE {
+          OID 1.2.840.113549.1.1.1
+          NULL
+        }
+        BIT STRING {
+          SEQUENCE {
+            INTEGER n
+            INTEGER e
+          }
+        }
+      }
+    """
+    # AlgorithmIdentifier: SEQUENCE { OID NULL }
+    var oid_bytes: [u8] = _der_encode_oid_rsa()
+    var null_bytes: [u8] = _der_encode_null()
+    var alg_contents: [u8] = []
+    var i: u64 = 0
+    while i < oid_bytes.len():
+        alg_contents.push(oid_bytes[i])
+        i = i + 1
+    i = 0
+    while i < null_bytes.len():
+        alg_contents.push(null_bytes[i])
+        i = i + 1
+    var algo: [u8] = _der_encode_sequence(alg_contents)
+
+    # RSAPublicKey: SEQUENCE { INTEGER n, INTEGER e }
+    var n_der: [u8] = _der_encode_integer(n)
+    var e_der: [u8] = _der_encode_integer(e)
+    var rsa_contents: [u8] = []
+    i = 0
+    while i < n_der.len():
+        rsa_contents.push(n_der[i])
+        i = i + 1
+    i = 0
+    while i < e_der.len():
+        rsa_contents.push(e_der[i])
+        i = i + 1
+    var rsa_pubkey: [u8] = _der_encode_sequence(rsa_contents)
+
+    # BIT STRING wrapping RSAPublicKey
+    var bit_str: [u8] = _der_encode_bit_string(rsa_pubkey)
+
+    # Outer SEQUENCE { AlgorithmIdentifier, BIT STRING }
+    var spki_contents: [u8] = []
+    i = 0
+    while i < algo.len():
+        spki_contents.push(algo[i])
+        i = i + 1
+    i = 0
+    while i < bit_str.len():
+        spki_contents.push(bit_str[i])
+        i = i + 1
+
+    _der_encode_sequence(spki_contents)
+
+fn ssh_rsa_blob_to_spki_der(blob: [u8]) -> [u8]:
+    """One-shot: parse SSH RSA blob and return DER SubjectPublicKeyInfo.
+
+    Returns empty array on parse error.
+    """
+    var result = parse_ssh_rsa_blob(blob)
+    if val RsaParseResult.Ok(n, e) = result:
+        return build_rsa_spki_der(n, e)
+    return []
