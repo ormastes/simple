@@ -183,26 +183,82 @@ mcp_native_health_check() {
 # Call: mcp_compile_cached "$source" "$cache_file" "$simple_lib"
 # Reads: MCP_RUNTIME, MCP_DEBUG_ENABLED, MCP_ERROR_LOG, MCP_WRAPPER_LOG
 # Returns: 0 on success, 1 on failure
+#
+# On success, also writes a `<cache>.smf.ok` sentinel ONLY when:
+#   - bin/simple compile exited 0
+#   - the captured compile log has no `^warning: type check: Undefined` lines
+#   - a short stdin-EOF probe of the SMF doesn't immediately error
+# Without `.smf.ok`, mcp_exec_cached refuses to use the cached SMF.
 
 mcp_compile_cached() {
   _mcp_source="$1"
   _mcp_cache="$2"
   _mcp_lib="$3"
+  _mcp_ok="${_mcp_cache}.ok"
   mkdir -p "$(dirname "$_mcp_cache")"
-  if [ -f "$_mcp_cache" ] && [ ! "$_mcp_source" -nt "$_mcp_cache" ] && [ ! "$MCP_RUNTIME" -nt "$_mcp_cache" ]; then
+  if [ -f "$_mcp_cache" ] && [ -f "$_mcp_ok" ] \
+     && [ ! "$_mcp_source" -nt "$_mcp_cache" ] && [ ! "$MCP_RUNTIME" -nt "$_mcp_cache" ]; then
     return 0
   fi
-  rm -f "$_mcp_cache"
+  rm -f "$_mcp_cache" "$_mcp_ok"
+
+  # Capture compile output to a tempfile so we can grep before promoting to .ok,
+  # then append the same content to the persistent stderr log.
+  _mcp_tmp_log="$(mktemp "${TMPDIR:-/tmp}/${MCP_SERVER}_compile.XXXXXX")" || return 1
+  _mcp_persistent_log=""
   if [ "$MCP_DEBUG_ENABLED" = "1" ]; then
+    _mcp_persistent_log="$MCP_ERROR_LOG"
     mcp_log_line "$MCP_WRAPPER_LOG" "compile_cache source=$_mcp_source cache=$_mcp_cache lib=$_mcp_lib"
-    SIMPLE_LIB="$_mcp_lib" SIMPLE_BINARY="$MCP_RUNTIME" SIMPLE_MEMORY_LIMIT_MB=512 SIMPLE_TIMEOUT_SECONDS=120 \
-      "$MCP_RUNTIME" compile "$_mcp_source" -o "$_mcp_cache" </dev/null >>"$MCP_ERROR_LOG" 2>&1 || return 1
   else
-    _mcp_stderr="${REPO_ROOT}/.simple/logs/${MCP_SERVER}_stderr.log"
-    mkdir -p "$(dirname "$_mcp_stderr")"
-    SIMPLE_LIB="$_mcp_lib" SIMPLE_BINARY="$MCP_RUNTIME" SIMPLE_MEMORY_LIMIT_MB=512 SIMPLE_TIMEOUT_SECONDS=120 \
-      "$MCP_RUNTIME" compile "$_mcp_source" -o "$_mcp_cache" </dev/null >>"$_mcp_stderr" 2>&1 || return 1
+    _mcp_persistent_log="${REPO_ROOT}/.simple/logs/${MCP_SERVER}_stderr.log"
+    mkdir -p "$(dirname "$_mcp_persistent_log")"
   fi
+
+  SIMPLE_LIB="$_mcp_lib" SIMPLE_BINARY="$MCP_RUNTIME" SIMPLE_MEMORY_LIMIT_MB=512 SIMPLE_TIMEOUT_SECONDS=120 \
+    "$MCP_RUNTIME" compile "$_mcp_source" -o "$_mcp_cache" </dev/null >"$_mcp_tmp_log" 2>&1
+  _mcp_compile_rc=$?
+  cat "$_mcp_tmp_log" >>"$_mcp_persistent_log" 2>/dev/null || true
+
+  if [ "$_mcp_compile_rc" -ne 0 ]; then
+    rm -f "$_mcp_tmp_log"
+    return 1
+  fi
+
+  # Guard 1: refuse to promote on Undefined symbol warnings.
+  if grep -E '^warning: type check: Undefined' "$_mcp_tmp_log" >/dev/null 2>&1; then
+    if [ "$MCP_DEBUG_ENABLED" = "1" ] && [ -n "$MCP_WRAPPER_LOG" ]; then
+      mcp_log_line "$MCP_WRAPPER_LOG" "compile_cache reject reason=undefined_symbol_warning cache=$_mcp_cache"
+    fi
+    rm -f "$_mcp_tmp_log"
+    return 0
+  fi
+
+  # Guard 2: short startup probe — feed empty stdin under timeout. Reject if
+  # the SMF immediately errors out (rt_interp_call / relocation failures).
+  _mcp_probe_out="$(printf '' | timeout 3 "$MCP_RUNTIME" "$_mcp_cache" 2>&1)"
+  _mcp_probe_rc=$?
+  case "$_mcp_probe_out" in
+    *"relocation failed"*|*"rt_interp_call: invalid"*|*"Undefined symbol"*|*"load failed"*)
+      if [ "$MCP_DEBUG_ENABLED" = "1" ] && [ -n "$MCP_WRAPPER_LOG" ]; then
+        mcp_log_line "$MCP_WRAPPER_LOG" "compile_cache reject reason=probe_runtime_error cache=$_mcp_cache rc=$_mcp_probe_rc"
+      fi
+      rm -f "$_mcp_tmp_log"
+      return 0
+      ;;
+  esac
+  # rc 0 (clean exit) or 124 (timeout while serving) are both acceptable;
+  # anything else where probe_out is empty also acceptable.
+  if [ "$_mcp_probe_rc" -ne 0 ] && [ "$_mcp_probe_rc" -ne 124 ] && [ -n "$_mcp_probe_out" ]; then
+    if [ "$MCP_DEBUG_ENABLED" = "1" ] && [ -n "$MCP_WRAPPER_LOG" ]; then
+      mcp_log_line "$MCP_WRAPPER_LOG" "compile_cache reject reason=probe_nonzero rc=$_mcp_probe_rc cache=$_mcp_cache"
+    fi
+    rm -f "$_mcp_tmp_log"
+    return 0
+  fi
+
+  : > "$_mcp_ok"
+  rm -f "$_mcp_tmp_log"
+  return 0
 }
 
 # --- Exec with Cache ---
@@ -218,6 +274,7 @@ mcp_exec_cached() {
 
   _mcp_cache_root="${REPO_ROOT}/.simple/cache/${MCP_SERVER}"
   _mcp_cache_file="${_mcp_cache_root}/main.smf"
+  _mcp_cache_ok="${_mcp_cache_file}.ok"
   _mcp_stderr="${REPO_ROOT}/.simple/logs/${MCP_SERVER}_stderr.log"
   mkdir -p "$_mcp_cache_root" "$(dirname "$_mcp_stderr")"
 
@@ -227,10 +284,21 @@ mcp_exec_cached() {
   export SIMPLE_MEMORY_LIMIT_MB="${SIMPLE_MEMORY_LIMIT_MB:-${SIMPLE_TEST_MEMORY_LIMIT_MB:-100}}"
   export SIMPLE_LOG="${SIMPLE_LOG:-error}"
 
-  # Use cached artifact if it exists, is fresh, and is not corrupt (>1KB)
+  # Opt-out: SIMPLE_MCP_DISABLE_CACHE=1 forces interpret-mode and skips
+  # background compile entirely (avoids disk churn from repeated failed compiles).
+  _mcp_disable_cache="${SIMPLE_MCP_DISABLE_CACHE:-0}"
+  case "$_mcp_disable_cache" in
+    1|true|TRUE|yes|YES|on|ON) _mcp_disable_cache=1 ;;
+    *) _mcp_disable_cache=0 ;;
+  esac
+
+  # Use cached artifact ONLY if: exists, fresh, >1KB, AND has a `.smf.ok` sentinel
+  # written by mcp_compile_cached (which gates on warnings + a startup probe).
   _mcp_artifact="$_mcp_entry"
   _mcp_cache_valid=0
-  if [ -f "$_mcp_cache_file" ] && [ ! "$_mcp_entry" -nt "$_mcp_cache_file" ] && [ ! "$MCP_RUNTIME" -nt "$_mcp_cache_file" ]; then
+  if [ "$_mcp_disable_cache" = "0" ] \
+     && [ -f "$_mcp_cache_file" ] && [ -f "$_mcp_cache_ok" ] \
+     && [ ! "$_mcp_entry" -nt "$_mcp_cache_file" ] && [ ! "$MCP_RUNTIME" -nt "$_mcp_cache_file" ]; then
     _mcp_cache_size=0
     if stat -c '%s' "$_mcp_cache_file" >/dev/null 2>&1; then
       _mcp_cache_size=$(stat -c '%s' "$_mcp_cache_file")
@@ -241,11 +309,11 @@ mcp_exec_cached() {
       _mcp_cache_valid=1
       _mcp_artifact="$_mcp_cache_file"
     else
-      rm -f "$_mcp_cache_file"
+      rm -f "$_mcp_cache_file" "$_mcp_cache_ok"
     fi
   fi
-  if [ "$_mcp_cache_valid" = "0" ]; then
-    # Cache stale, missing, or corrupt — background compile for next startup
+  if [ "$_mcp_cache_valid" = "0" ] && [ "$_mcp_disable_cache" = "0" ]; then
+    # Cache stale, missing, unverified, or corrupt — background compile for next startup
     (
       mcp_compile_cached "$_mcp_entry" "$_mcp_cache_file" "$_mcp_lib" || true
     ) &
