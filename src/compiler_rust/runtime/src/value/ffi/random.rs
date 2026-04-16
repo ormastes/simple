@@ -107,6 +107,26 @@ pub extern "C" fn rt_random_uniform(min: f64, max: f64) -> f64 {
     min + r * (max - min)
 }
 
+/// Generate `len` cryptographically-secure random bytes, hex-encoded.
+/// Returns a RuntimeValue text of length `2 * len` using `[0-9a-f]`.
+/// Backed by `rand::rngs::OsRng` (reads from the OS CSPRNG).
+///
+/// Used by the Web UI session token mint path (src/app/ui.web/session_token.spl).
+#[no_mangle]
+pub extern "C" fn rt_random_hex(len: i64) -> crate::value::RuntimeValue {
+    use rand::RngCore;
+    let n = len.max(0) as usize;
+    let mut bytes = vec![0u8; n];
+    rand::rngs::OsRng.fill_bytes(&mut bytes);
+    let mut hex = String::with_capacity(n * 2);
+    for b in &bytes {
+        use std::fmt::Write;
+        let _ = write!(&mut hex, "{:02x}", b);
+    }
+    let hex_bytes = hex.as_bytes();
+    crate::value::collections::rt_string_new(hex_bytes.as_ptr(), hex_bytes.len() as u64)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

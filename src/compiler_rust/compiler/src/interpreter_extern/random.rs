@@ -101,3 +101,27 @@ pub fn rt_random_uniform_fn(args: &[Value]) -> Result<Value, CompileError> {
         .as_float()?;
     Ok(Value::Float(rt_random_uniform(min, max)))
 }
+
+/// rt_random_hex - N cryptographically-secure random bytes, hex-encoded.
+/// Returns a 2*N-char text drawn from [0-9a-f]. Backed by OS CSPRNG (OsRng).
+pub fn rt_random_hex_fn(args: &[Value]) -> Result<Value, CompileError> {
+    use rand::RngCore;
+    use std::fmt::Write;
+    let len = args
+        .first()
+        .ok_or_else(|| {
+            CompileError::semantic_with_context(
+                "rt_random_hex expects 1 argument".to_string(),
+                ErrorContext::new().with_code(codes::ARGUMENT_COUNT_MISMATCH),
+            )
+        })?
+        .as_int()?;
+    let n = len.max(0) as usize;
+    let mut bytes = vec![0u8; n];
+    rand::rngs::OsRng.fill_bytes(&mut bytes);
+    let mut hex = String::with_capacity(n * 2);
+    for b in &bytes {
+        let _ = write!(&mut hex, "{:02x}", b);
+    }
+    Ok(Value::Str(hex))
+}

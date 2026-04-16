@@ -326,7 +326,7 @@ pub(crate) fn call_extern_function(
         "rt_progress_get_elapsed_seconds" => time::rt_progress_get_elapsed_seconds(&evaluated),
 
         // ====================================================================
-        // Random Number Generation (7 functions)
+        // Random Number Generation (8 functions)
         // ====================================================================
         "rt_random_seed" => random::rt_random_seed_fn(&evaluated),
         "rt_random_getstate" => random::rt_random_getstate_fn(&evaluated),
@@ -335,6 +335,7 @@ pub(crate) fn call_extern_function(
         "rt_random_randint" => random::rt_random_randint_fn(&evaluated),
         "rt_random_random" => random::rt_random_random_fn(&evaluated),
         "rt_random_uniform" => random::rt_random_uniform_fn(&evaluated),
+        "rt_random_hex" => random::rt_random_hex_fn(&evaluated),
 
         // ====================================================================
         // Atomic Operations (15 functions)
