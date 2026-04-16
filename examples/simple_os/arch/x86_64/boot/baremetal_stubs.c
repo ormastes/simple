@@ -1441,6 +1441,41 @@ static int64_t _nvme_read_sector(uint64_t device_idx, uint64_t lba, uint64_t buf
     return (int64_t)_nvme_read_sector_impl(lba, buf);
 }
 
+/* Write one sector to NVMe namespace 1.
+ * lba     = logical block address
+ * buf     = source buffer (must contain one sector of data)
+ * Returns 0 on success, negative on error. */
+static int _nvme_write_sector_impl(uint64_t lba, const void *buf)
+{
+    if (!_nvme.initialized) {
+        int rc = _nvme_init_controller();
+        if (rc < 0) return rc;
+    }
+    if (!buf) return -14; /* EFAULT */
+
+    /* NVMe I/O Write: opcode 0x01, one logical block. */
+    uint32_t cdw10 = (uint32_t)(lba & 0xFFFFFFFF);
+    uint32_t cdw11 = (uint32_t)(lba >> 32);
+    uint32_t cdw12 = 0; /* 1 sector (0-based) */
+
+    return nvme_io_cmd(0x01, 1,
+                       (uint64_t)(uintptr_t)buf, 0,
+                       cdw10, cdw11, cdw12);
+}
+
+/* Syscall 94 handler: NvmeWriteSector
+ * a0 = device index (ignored, only one NVMe device supported)
+ * a1 = LBA
+ * a2 = source buffer address (caller-provided, must contain one sector)
+ * Returns 0 on success, negative errno on failure. */
+static int64_t _nvme_write_sector(uint64_t device_idx, uint64_t lba, uint64_t buf_addr)
+{
+    (void)device_idx;
+    const void *buf = (const void *)(uintptr_t)buf_addr;
+    if (!buf) return -14; /* EFAULT */
+    return (int64_t)_nvme_write_sector_impl(lba, buf);
+}
+
 /* _nvme_init_and_read_sector0 — callable from Simple code or early boot
  * Initializes NVMe and reads sector 0 (FAT32 BPB).
  * Returns 0 on success, prints diagnostics to serial. */
@@ -3492,6 +3527,8 @@ int64_t userlib__syscall_raw__syscall(uint64_t id, uint64_t a0, uint64_t a1,
             return _fat32_read_file_syscall(a0, a1, a2);
         case 89: /* Fat32ListDir: list root directory entries to serial */
             return (int64_t)fat32_list_dir();
+        case 94: /* NvmeWriteSector: a0=device_idx, a1=lba, a2=buf_addr */
+            return _nvme_write_sector(a0, a1, a2);
         case 20: /* IPC_SEND: a0=port, a1=method, a2=flags, a3=buf, a4=len */
             return _ipc_send_handler(a0, a1, a2, a3, a4);
         case 21: /* IPC_RECV: a0=port, a1=reply_buf, a2=max_len */

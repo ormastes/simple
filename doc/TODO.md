@@ -1,7 +1,7 @@
 # TODO List
 
-**Generated:** 2026-04-15
-**Total:** 4 items | **Open:** 4 | **Blocked:** 0 | **Stale:** 0
+**Generated:** 2026-04-16
+**Total:** 5 items | **Open:** 5 | **Blocked:** 0 | **Stale:** 0
 **Database:** `doc/todo/todo_db.sdn`
 
 ## Statistics
@@ -10,28 +10,47 @@
 
 | Area | Count | P0 | P1 | P2 | P3 | Blocked |
 |------|-------|----|----|----|----|---------|
-| gpu | 2 | 0 | 0 | 0 | 2 | 0 |
-| parser | 2 | 0 | 0 | 1 | 1 | 0 |
+| runtime | 3 | 0 | 1 | 1 | 1 | 0 |
+| test | 2 | 0 | 2 | 0 | 0 | 0 |
 
 ### By Priority
 
 | Priority | Count | Open | Blocked | Stale |
 |----------|-------|------|---------|-------|
 | P0 (critical) | 0 | 0 | 0 | 0 |
-| P1 (high) | 0 | 0 | 0 | 0 |
+| P1 (high) | 3 | 3 | 0 | 0 |
 | P2 (medium) | 1 | 1 | 0 | 0 |
-| P3 (low) | 3 | 3 | 0 | 0 |
+| P3 (low) | 1 | 1 | 0 | 0 |
 
-## P2 Medium Priority TODOs (1)
+## P1 High Priority TODOs
 
-### parser
+### runtime
 
-- **#26** [parser][P2] deferred: explicit re-export list below is maintained manually until
-  - File: `./src/compiler_rust/lib/std/src/mcp/lsp/__init__.spl:4`
+- **#38** [runtime][P1] bootstrap-propagate the v2 Phase A rt_random_hex extern to bin/simple (self-hosted)
+  - File: `./tests/app/ui.web/live_smoke_test.spl:3`
+  - Status: open
+
+### test
+
+- **#36** [test][P1] build the real compiled WSS e2e driver — _ws_client.spl + socket round trip
+  - File: `./tests/app/ui.web/live_smoke_test.spl:1`
+  - Status: open
+
+- **#37** [test][P1] add `bin/simple test --compile` so sspec `it` blocks actually execute
+  - File: `./tests/app/ui.web/live_smoke_test.spl:2`
   - Status: open
 
 
-## P3 Low Priority TODOs (3)
+## P2 Medium Priority TODOs (1)
+
+### runtime
+
+- **#34** [runtime][P2] rt_tls_client_* is still TCP shim — add real rustls::ClientConnection path
+  - File: `./src/compiler_rust/runtime/src/value/net_tls.rs:150`
+  - Status: open
+
+
+## P3 Low Priority TODOs (1)
 
 *See database for details.*
 

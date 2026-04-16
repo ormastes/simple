@@ -65,6 +65,7 @@ fn runtime_value_to_path_string(v: crate::value::RuntimeValue) -> Option<String>
     std::str::from_utf8(slice).ok().map(|s| s.to_string())
 }
 
+// TODO: [runtime][P3] replace this inline PEM parser with rustls-pemfile 2 once vendored
 fn parse_pem_blocks(data: &str) -> Vec<(String, Vec<u8>)> {
     use base64::Engine;
     let engine = base64::engine::general_purpose::STANDARD;
@@ -146,6 +147,7 @@ fn write_bytes_to_stream(handle: i64, data: crate::value::RuntimeValue) -> i64 {
 }
 
 #[no_mangle]
+// TODO: [runtime][P2] rt_tls_client_* is still TCP shim — add real rustls::ClientConnection path
 pub extern "C" fn rt_tls_client_connect(host: crate::value::RuntimeValue, port: i64) -> i64 {
     let Some((ptr, len)) = runtime_text_ptr_len(host) else {
         return -(NetError::InvalidAddress as i64);

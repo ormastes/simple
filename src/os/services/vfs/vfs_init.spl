@@ -27,6 +27,7 @@ extern fn c_pcimgr_init()
 val SYS_ALLOC_DMA: u64 = 84
 val SYS_NVME_READ_SECTOR: u64 = 85
 val SYS_NVME_INIT: u64 = 86
+val SYS_NVME_WRITE_SECTOR: u64 = 94
 
 # DMA page size for sector I/O buffers
 val DMA_PAGE_SIZE: u64 = 4096
@@ -87,8 +88,21 @@ impl BlockDevice for CNvmeBlockAdapter:
         Result.Ok(true)
 
     me write_sector(lba: u64, data: [u8]) -> Result<bool, text>:
-        """Write not yet supported via C NVMe driver."""
-        Result.Err("CNvmeBlockAdapter: write not implemented")
+        """Write one sector to NVMe via the C driver."""
+        if not self.ready:
+            return Result.Err("CNvmeBlockAdapter: not initialized")
+
+        var i: u64 = 0
+        val ss: u64 = 512
+        while i < ss:
+            val byte_val = if i.to_i32() < data.len(): data[i.to_i32()].to_u32() else: 0
+            mmio_write32(self.sector_buf_addr + i, byte_val)
+            i = i + 1
+
+        val result = syscall(SYS_NVME_WRITE_SECTOR, 0, lba, self.sector_buf_addr, 0, 0)
+        if result < 0:
+            return Result.Err("CNvmeBlockAdapter: write_sector failed")
+        Result.Ok(true)
 
     fn sector_size() -> u32:
         512

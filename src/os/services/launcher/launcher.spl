@@ -107,6 +107,8 @@ fn _manifest_name_for_path(path: text) -> text:
             "FILEMAN.APP"
         case "/sys/apps/shell":
             "SHELL.APP"
+        case "/sys/apps/editor":
+            "EDITOR.APP"
         case _:
             ""
 
@@ -377,6 +379,7 @@ fn launcher_init():
     launcher_register("File Manager", "/sys/apps/file_manager", "F", 0x46, MOD_META)  # Meta+F
     launcher_register("Terminal", "/sys/apps/shell", ">", 0x54, MOD_META)             # Meta+T
     launcher_register("Browser Demo", "/sys/apps/browser_demo", "B", 0x42, MOD_META)  # Meta+B
+    launcher_register("Editor", "/sys/apps/editor", "E", 0x45, MOD_META)              # Meta+E
 
     serial_println("[launcher] Registered {app_count} default apps")
 
@@ -503,13 +506,13 @@ fn _try_resident_manifest_launch(slot: u64, name: text, path: text, spawn_error:
     launch_pid
 
 fn _launch_seeded_app(slot: u64, name: text, path: text, icon: text, key: u32, modifiers: u32) -> i64:
-    """Launch one of the four seeded desktop apps using canonical metadata.
+    """Launch one of the seeded desktop apps using canonical metadata.
 
     On the x86_64 baremetal Cranelift desktop lane, `app_count` currently
     survives across module boundaries while parts of the seeded array-backed
     registry can read back as zeroed inside the shortcut dispatch path. When
     that happens, re-seed the canonical slot metadata locally before spawning
-    so Meta+{H,F,T,B} still drives the real launcher flow.
+    so Meta+{H,F,T,B,E} still drives the real launcher flow.
     """
     if slot >= MAX_APPS:
         return -1
@@ -535,16 +538,16 @@ fn _launch_seeded_app(slot: u64, name: text, path: text, icon: text, key: u32, m
     _finalize_launch(slot, name, pid_result.to_u64())
 
 fn _dispatch_seeded_shortcut(key: u32, modifiers: u32) -> bool:
-    """Fallback for the four canonical desktop shortcuts on baremetal.
+    """Fallback for the canonical desktop shortcuts on baremetal.
 
-    Returns true when the key/modifier pair matches one of the four
+    Returns true when the key/modifier pair matches one of the seeded
     canonical seeded apps — the shortcut WAS recognized and the seed
     slot metadata was re-populated. The spawn itself may still fail
     under the baremetal Cranelift lane (no posix_spawn, no NVMe /
     FAT32 manifest); the caller is expected to materialize a resident
     launch in that case. Reporting "dispatched=true" here mirrors the
     main-loop path which also returns true regardless of spawn errno,
-    so Meta+H / Meta+F / Meta+T / Meta+B all drive the shell
+    so Meta+H / Meta+F / Meta+T / Meta+B / Meta+E all drive the shell
     materialize path when `app_count` reads back as 0 in the dispatch
     scope (cross-module sized-array global staleness, see
     doc/08_tracking/todo/shortcut_fail_downstream_2026-04-14.md).
@@ -563,6 +566,9 @@ fn _dispatch_seeded_shortcut(key: u32, modifiers: u32) -> bool:
             true
         0x42:
             _launch_seeded_app(3, "Browser Demo", "/sys/apps/browser_demo", "B", 0x42, MOD_META)
+            true
+        0x45:
+            _launch_seeded_app(4, "Editor", "/sys/apps/editor", "E", 0x45, MOD_META)
             true
         _:
             false
