@@ -1,0 +1,113 @@
+@allow(primitive_api)
+"""
+# SSH RSA-SHA2-512 Host Key Signing Specification
+
+**Feature IDs:** N/A
+**Category:** Infrastructure
+**Difficulty:** 3/5
+**Status:** Implemented
+
+## Overview
+
+End-to-end test of `ssh_sign_exchange_hash` for the `"rsa-sha2-512"` algorithm.
+Verifies that the function correctly:
+- Produces a well-formed SSH signature blob when an RSA PKCS#8 key is present.
+- Returns an error when the RSA key is absent.
+- Encodes the algorithm name `"rsa-sha2-512"` (not `"rsa-sha2-256"` or `"ssh-rsa"`)
+  as the first SSH string in the signature blob.
+- Produces a raw signature that round-trips through `rsa_sha512_verify`.
+
+tag: system, ssh, crypto
+"""
+
+use std.sspec.*
+use os.apps.sshd.ssh_kex.{HostKeySet, ssh_sign_exchange_hash}
+use os.apps.sshd.ssh_packet.{ssh_get_text, ssh_get_string, SshTextResult, SshStringResult}
+use std.nogc_sync_mut.io.signature_ffi.{rsa_sha512_verify}
+use test.system.os_crypto_ref_signature_spec.{RSA_PKCS8_HEX, RSA_SPKI_HEX}
+use test.system.os_crypto_ref_helpers.{hex_to_bytes}
+
+# ============================================================================
+# Fixture helpers
+# ============================================================================
+
+fn _make_exchange_hash() -> [u8]:
+    """32-byte synthetic exchange hash (deterministic, non-empty)."""
+    var h: [u8] = []
+    var i: u64 = 0
+    while i < 32:
+        h.push((i + 1).to_u8())
+        i = i + 1
+    h
+
+# ============================================================================
+# Suite
+# ============================================================================
+
+describe "os_ssh_rsa_sha512_hostkey: rsa-sha2-512 host key signing":
+    """
+    ## rsa-sha2-512 Host Key Signing
+
+    Exercises `ssh_sign_exchange_hash("rsa-sha2-512", ...)` end-to-end.
+    Uses the same RSA 2048-bit PKCS#8 / SPKI fixtures from
+    `os_crypto_ref_signature_spec`.
+    """
+
+    it "rsa-sha2-512 signs and the raw signature verifies with rsa_sha512_verify":
+        val pkcs8 = hex_to_bytes(RSA_PKCS8_HEX)
+        val spki = hex_to_bytes(RSA_SPKI_HEX)
+        val exchange_hash = _make_exchange_hash()
+        val host_keys = HostKeySet(
+            ed25519_seed: nil,
+            rsa_pkcs8: pkcs8,
+            ecdsa_p256_pkcs8: nil
+        )
+        val result = ssh_sign_exchange_hash("rsa-sha2-512", host_keys, exchange_hash)
+        expect(result.is_ok()).to_equal(true)
+        val blob = result.unwrap()
+        expect(blob.len() > 0).to_equal(true)
+        # Parse the SSH blob: first string is the algo name
+        val r_algo = ssh_get_text(blob, 0)
+        expect(r_algo.is_ok()).to_equal(true)
+        val algo_result = r_algo.unwrap()
+        expect(algo_result.value).to_equal("rsa-sha2-512")
+        # Second string is the raw signature bytes
+        val r_sig = ssh_get_string(blob, algo_result.next_offset)
+        expect(r_sig.is_ok()).to_equal(true)
+        val sig_result = r_sig.unwrap()
+        val raw_sig = sig_result.data
+        expect(raw_sig.len() > 0).to_equal(true)
+        # Round-trip verify: raw_sig must verify against exchange_hash with SPKI
+        val verified = rsa_sha512_verify(spki, exchange_hash, raw_sig)
+        expect(verified).to_equal(true)
+
+    it "rsa-sha2-512 signing fails when rsa_pkcs8 is nil":
+        val exchange_hash = _make_exchange_hash()
+        val host_keys = HostKeySet(
+            ed25519_seed: nil,
+            rsa_pkcs8: nil,
+            ecdsa_p256_pkcs8: nil
+        )
+        val result = ssh_sign_exchange_hash("rsa-sha2-512", host_keys, exchange_hash)
+        expect(result.is_err()).to_equal(true)
+        val msg = result.unwrap_err()
+        expect(msg).to_contain("no RSA key")
+
+    it "rsa-sha2-512 algo-header is correct in signature blob":
+        val pkcs8 = hex_to_bytes(RSA_PKCS8_HEX)
+        val exchange_hash = _make_exchange_hash()
+        val host_keys = HostKeySet(
+            ed25519_seed: nil,
+            rsa_pkcs8: pkcs8,
+            ecdsa_p256_pkcs8: nil
+        )
+        val result = ssh_sign_exchange_hash("rsa-sha2-512", host_keys, exchange_hash)
+        expect(result.is_ok()).to_equal(true)
+        val blob = result.unwrap()
+        val r_algo = ssh_get_text(blob, 0)
+        expect(r_algo.is_ok()).to_equal(true)
+        val algo_result = r_algo.unwrap()
+        # Must be exactly "rsa-sha2-512" — not "rsa-sha2-256" or "ssh-rsa"
+        expect(algo_result.value).to_equal("rsa-sha2-512")
+        expect(algo_result.value == "rsa-sha2-256").to_equal(false)
+        expect(algo_result.value == "ssh-rsa").to_equal(false)

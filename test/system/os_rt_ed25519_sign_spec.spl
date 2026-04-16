@@ -1,0 +1,227 @@
+@allow(primitive_api)
+"""
+# OS rt_ed25519_sign Specification
+
+**Feature IDs:** N/A
+**Category:** Infrastructure
+**Difficulty:** 3/5
+**Status:** Implemented
+
+## Overview
+
+Tests the freshly-added `rt_ed25519_sign` FFI and its `ed25519_sign` Tier-2
+wrapper (RFC 8032 / EdDSA over Curve25519).
+
+Covers:
+  1. Round-trip: sign -> verify (64-byte sig, verify = true)
+  2. Determinism: same key+msg signed twice gives byte-identical results
+  3. Malformed PKCS#8 returns empty array
+  4. One-bit flip in signature fails verification
+  5. (Optional, openssl-gated) Simple sign -> openssl pkeyutl verify
+
+tag: slow, system, crypto
+"""
+
+use std.sspec.*
+use std.nogc_sync_mut.io.signature_ffi.{ed25519_sign, ed25519_verify}
+use test.system.os_crypto_ref_helpers.{
+    openssl_present,
+    hex_to_bytes
+}
+use std.nogc_sync_mut.ffi.system.{rt_process_run}
+use std.nogc_sync_mut.io.file_shell.{rt_file_write}
+
+# ============================================================================
+# Fixtures — generated offline
+# ============================================================================
+
+# Ed25519 PKCS#8 v1 DER private key (generated with:
+#   openssl genpkey -algorithm ED25519 -outform DER | xxd -p | tr -d '\n')
+val ED25519_PKCS8_HEX = "302e020100300506032b6570042204201f80192e224a71dddf8c082c7690db9fdf583f3d4e02a19b77d0f8692f2ea40c"
+
+# Raw 32-byte Ed25519 public key (last 32 bytes of SPKI; extracted with:
+#   openssl pkey -in <the.der> -inform DER -pubout -outform DER | xxd -p
+#   then strip the 12-byte SPKI header 302a300506032b6570032100)
+val ED25519_PUBKEY_HEX = "eb4141cdcf61de82b4369e60b82b74ad2c7a21c619b9d4a06ccd769e66a954e6"
+
+# SPKI DER form of same pubkey (for openssl pkeyutl -pubin -keyform DER)
+# = 12-byte header (302a300506032b6570032100) + raw 32-byte pubkey
+val ED25519_SPKI_HEX = "302a300506032b6570032100eb4141cdcf61de82b4369e60b82b74ad2c7a21c619b9d4a06ccd769e66a954e6"
+
+# A deliberately malformed PKCS#8 (too short / corrupted)
+val BAD_PKCS8_HEX = "3001000000"
+
+# ============================================================================
+# Utility helpers (local to this spec)
+# ============================================================================
+
+fn _bytes_eq(a: [u8], b: [u8]) -> bool:
+    if a.len() != b.len():
+        return false
+    var i: u64 = 0
+    while i < a.len():
+        if a[i] != b[i]:
+            return false
+        i = i + 1
+    true
+
+fn _msg_hello() -> [u8]:
+    """'Hello, Ed25519!' as ASCII bytes."""
+    [0x48u8, 0x65, 0x6c, 0x6c, 0x6f, 0x2c, 0x20,
+     0x45, 0x64, 0x32, 0x35, 0x35, 0x31, 0x39, 0x21]
+
+var _tmp_seq: u64 = 200
+
+fn _next_seq() -> text:
+    _tmp_seq = _tmp_seq + 1
+    _tmp_seq.to_text()
+
+fn _openssl_ed25519_verify(spki: [u8], msg: [u8], sig: [u8]) -> bool:
+    """Shell out to openssl pkeyutl -verify for an Ed25519 signature."""
+    val seq = _next_seq()
+    val key_path = "/tmp/spl_ed_sign_spec_spki_" + seq + ".der"
+    val msg_path = "/tmp/spl_ed_sign_spec_msg_" + seq + ".bin"
+    val sig_path = "/tmp/spl_ed_sign_spec_sig_" + seq + ".bin"
+    rt_file_write(key_path, spki)
+    rt_file_write(msg_path, msg)
+    rt_file_write(sig_path, sig)
+    val result = rt_process_run(
+        "openssl",
+        ["pkeyutl", "-verify", "-pubin", "-inkey", key_path,
+         "-keyform", "DER", "-sigfile", sig_path, "-rawin", "-in", msg_path]
+    )
+    result.2 == 0
+
+# ============================================================================
+# Suite: round-trip, determinism, negative, openssl cross-check
+# ============================================================================
+
+describe "os_rt_ed25519_sign: round-trip sign -> verify":
+    """
+    ## Round-Trip: ed25519_sign -> ed25519_verify
+
+    Signs a message with the test PKCS#8 key and immediately verifies
+    with the corresponding raw 32-byte public key.
+    Asserts: sig is exactly 64 bytes, and verify returns true.
+    """
+
+    it "ed25519_sign round-trips through ed25519_verify":
+        val pkcs8  = hex_to_bytes(ED25519_PKCS8_HEX)
+        val pubkey = hex_to_bytes(ED25519_PUBKEY_HEX)
+        val msg    = _msg_hello()
+        val sig    = ed25519_sign(pkcs8, msg)
+        expect(sig.len()).to_equal(64)
+        val ok = ed25519_verify(pubkey, msg, sig)
+        expect(ok).to_equal(true)
+
+    it "ed25519_sign round-trips for empty message":
+        val pkcs8  = hex_to_bytes(ED25519_PKCS8_HEX)
+        val pubkey = hex_to_bytes(ED25519_PUBKEY_HEX)
+        var msg: [u8] = []
+        val sig = ed25519_sign(pkcs8, msg)
+        expect(sig.len()).to_equal(64)
+        val ok = ed25519_verify(pubkey, msg, sig)
+        expect(ok).to_equal(true)
+
+
+describe "os_rt_ed25519_sign: determinism (RFC 8032)":
+    """
+    ## Determinism
+
+    RFC 8032 §5.1.6 mandates that Ed25519 signing is fully deterministic
+    (nonce derived from private key + message via SHA-512; no random nonce).
+    Signing the same key+message twice must yield byte-identical output.
+    """
+
+    it "ed25519_sign is deterministic for same key + message":
+        val pkcs8 = hex_to_bytes(ED25519_PKCS8_HEX)
+        val msg   = _msg_hello()
+        val sig1  = ed25519_sign(pkcs8, msg)
+        val sig2  = ed25519_sign(pkcs8, msg)
+        expect(sig1.len()).to_equal(64)
+        expect(sig2.len()).to_equal(64)
+        expect(_bytes_eq(sig1, sig2)).to_equal(true)
+
+
+describe "os_rt_ed25519_sign: malformed input contract":
+    """
+    ## Malformed Input
+
+    ed25519_sign must return an empty [u8] (not panic) on any error:
+    bad PKCS#8 DER, wrong key type, etc.
+    """
+
+    it "ed25519_sign returns empty [u8] on malformed pkcs8":
+        val bad_pkcs8 = hex_to_bytes(BAD_PKCS8_HEX)
+        val msg       = _msg_hello()
+        val bad_sig   = ed25519_sign(bad_pkcs8, msg)
+        expect(bad_sig.len()).to_equal(0)
+
+    it "ed25519_sign returns empty [u8] on junk raw bytes":
+        val junk: [u8] = [0x30u8, 0x01, 0x00]
+        val msg = _msg_hello()
+        val bad_sig = ed25519_sign(junk, msg)
+        expect(bad_sig.len()).to_equal(0)
+
+
+describe "os_rt_ed25519_sign: signature integrity (one-bit flip)":
+    """
+    ## One-Bit Flip Rejection
+
+    Flipping a single byte in a valid Ed25519 signature must cause
+    ed25519_verify to return false.
+    """
+
+    it "ed25519_verify rejects signature with one-byte flip (first byte)":
+        val pkcs8  = hex_to_bytes(ED25519_PKCS8_HEX)
+        val pubkey = hex_to_bytes(ED25519_PUBKEY_HEX)
+        val msg    = _msg_hello()
+        val sig    = ed25519_sign(pkcs8, msg)
+        expect(sig.len()).to_equal(64)
+        # Build corrupted signature: flip first byte
+        var bad_sig: [u8] = []
+        bad_sig.push(sig[0] ^ 0xFF)
+        var i: u64 = 1
+        while i < sig.len():
+            bad_sig.push(sig[i])
+            i = i + 1
+        val ok = ed25519_verify(pubkey, msg, bad_sig)
+        expect(ok).to_equal(false)
+
+    it "ed25519_verify rejects signature with one-byte flip (last byte)":
+        val pkcs8  = hex_to_bytes(ED25519_PKCS8_HEX)
+        val pubkey = hex_to_bytes(ED25519_PUBKEY_HEX)
+        val msg    = _msg_hello()
+        val sig    = ed25519_sign(pkcs8, msg)
+        expect(sig.len()).to_equal(64)
+        # Build corrupted signature: flip last byte
+        var bad_sig: [u8] = []
+        var i: u64 = 0
+        while i < 63:
+            bad_sig.push(sig[i])
+            i = i + 1
+        bad_sig.push(sig[63] ^ 0x01)
+        val ok = ed25519_verify(pubkey, msg, bad_sig)
+        expect(ok).to_equal(false)
+
+
+describe "os_rt_ed25519_sign: openssl cross-check":
+    """
+    ## OpenSSL Cross-Check
+
+    Gate on openssl_present(). When openssl is available, verify that the
+    signature produced by ed25519_sign passes `openssl pkeyutl -verify`,
+    proving interoperability with RFC 8032 / standard tooling.
+    """
+
+    it "Simple ed25519_sign -> openssl pkeyutl -verify -> success":
+        if not openssl_present():
+            expect(true).to_equal(true)
+        else:
+            val pkcs8 = hex_to_bytes(ED25519_PKCS8_HEX)
+            val spki  = hex_to_bytes(ED25519_SPKI_HEX)
+            val msg   = _msg_hello()
+            val sig   = ed25519_sign(pkcs8, msg)
+            expect(sig.len()).to_equal(64)
+            val ok = _openssl_ed25519_verify(spki, msg, sig)
+            expect(ok).to_equal(true)

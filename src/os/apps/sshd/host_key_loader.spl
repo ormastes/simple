@@ -1,0 +1,127 @@
+#![allow(unnamed_duplicate_typed_args)]
+# host_key_loader — Load RSA PKCS#8 private key from disk
+#
+# Supports both PEM (-----BEGIN PRIVATE KEY-----) and raw DER formats.
+# Autodetect: PEM if file text starts with "-----BEGIN", DER otherwise.
+# Returns raw PKCS#8 DER bytes; structural validation is the caller's job.
+
+# File I/O externs (same pattern as disk_image_bake.spl / ffi/io.spl)
+extern fn rt_file_exists(path: text) -> bool
+extern fn rt_file_read_text(path: text) -> text
+extern fn rt_file_read_bytes(path: text) -> [u8]
+
+# ============================================================================
+# Base64 decode (inline, baremetal-safe — no std import needed)
+# Decodes standard Base64 (with or without padding, ignores whitespace).
+# Returns decoded bytes as [u8].
+# ============================================================================
+
+val _B64_ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
+
+fn _b64_val(ch: text) -> i32:
+    """Return 6-bit value for a Base64 character, or -1 if not a Base64 char."""
+    var i: i32 = 0
+    for c in _B64_ALPHABET:
+        if c == ch:
+            return i
+        i = i + 1
+    return -1
+
+fn _base64_decode_to_bytes(encoded: text) -> [u8]:
+    """Decode Base64-encoded text to raw [u8] bytes.
+
+    Ignores whitespace (\\n, \\r, spaces) and padding ('=').
+    Returns empty array on empty input.
+    """
+    var result: [u8] = []
+    var buf: i32 = 0
+    var bits: i32 = 0
+
+    for ch in encoded:
+        # Skip whitespace and padding
+        if ch == "\n" or ch == "\r" or ch == " " or ch == "=":
+            pass_dn
+        else:
+            val v = _b64_val(ch)
+            if v >= 0:
+                buf = (buf << 6) | v
+                bits = bits + 6
+                if bits >= 8:
+                    bits = bits - 8
+                    val byte_val = (buf >> bits) & 0xFF
+                    result.push(byte_val.to_u8())
+    result
+
+# ============================================================================
+# PEM stripper
+# ============================================================================
+
+fn _strip_pem_framing(pem_text: text) -> Result<text, text>:
+    """Strip -----BEGIN...-----/-----END...-----  and return the raw base64 body.
+
+    Accepts both LF and CRLF line endings.
+    """
+    val lines = pem_text.split("\n")
+    var in_body = false
+    var found_end = false
+    var body = ""
+
+    for line in lines:
+        val trimmed = line.trim()
+        if trimmed.starts_with("-----BEGIN"):
+            in_body = true
+        elif trimmed.starts_with("-----END"):
+            found_end = true
+            in_body = false
+        elif in_body:
+            body = "{body}{trimmed}"
+
+    if body == "" and not found_end:
+        return Err("malformed PEM: missing BEGIN/END markers")
+    if body == "":
+        return Err("malformed PEM: empty body between markers")
+    Ok(body)
+
+# ============================================================================
+# Public API
+# ============================================================================
+
+pub fn load_rsa_pkcs8_from_file(path: text) -> Result<[u8], text>:
+    """Load an RSA PKCS#8 private key from a PEM or DER file.
+
+    Autodetects format:
+      - PEM: file text starts with \"-----BEGIN\" — strips framing,
+             base64-decodes the body, returns raw DER bytes.
+      - DER: any other content — returns bytes as-is.
+
+    Returns:
+      Ok([u8])   — raw PKCS#8 DER bytes (not validated structurally)
+      Err(text)  — file not found, empty file, or malformed PEM
+    """
+    if not rt_file_exists(path):
+        return Err("host key file not found: {path}")
+
+    # Read as text first to check for PEM framing
+    val text_content = rt_file_read_text(path)
+    val trimmed_content = text_content.trim()
+
+    if trimmed_content == "":
+        return Err("host key file is empty: {path}")
+
+    if trimmed_content.starts_with("-----BEGIN"):
+        # PEM path: strip framing, base64-decode body
+        val body_result = _strip_pem_framing(trimmed_content)
+        match body_result:
+            Err(msg) =>
+                return Err("{msg} in {path}")
+            Ok(body):
+                val decoded = _base64_decode_to_bytes(body)
+                if decoded.len() == 0:
+                    return Err("base64 decode produced empty result for PEM key: {path}")
+                return Ok(decoded)
+    else:
+        # DER path: read raw bytes
+        val raw: [u8] = rt_file_read_bytes(path) ?? []
+        if raw.len() == 0:
+            return Err("host key DER file is empty or unreadable: {path}")
+        return Ok(raw)

@@ -1,0 +1,136 @@
+@allow(primitive_api)
+"""
+# SSH RSA Host-Key Signing Specification
+
+**Feature IDs:** N/A
+**Category:** Infrastructure
+**Difficulty:** 3/5
+**Status:** Implemented
+
+## Overview
+
+End-to-end test for the `rsa-sha2-256` path in `ssh_sign_exchange_hash`.
+Verifies that:
+  1. The function produces a correctly-framed SSH signature blob
+     (algo string + raw-sig string) and that the raw signature
+     verifies against the known SPKI public key.
+  2. The function returns `Err` when `rsa_pkcs8` is `nil`.
+  3. The algo-name header embedded in the blob is exactly `"rsa-sha2-256"`.
+
+tag: system, crypto, ssh
+"""
+
+use std.sspec.*
+use std.nogc_sync_mut.io.signature_ffi.{rsa_sha256_verify}
+use os.apps.sshd.ssh_kex.{HostKeySet, ssh_sign_exchange_hash}
+use os.apps.sshd.ssh_packet.{ssh_get_text, ssh_get_string, SshTextResult, SshStringResult}
+use test.system.os_crypto_ref_helpers.{hex_to_bytes}
+
+# ============================================================================
+# Fixtures
+# Duplicated from os_crypto_ref_signature_spec.spl — cross-spec val imports
+# are not idiomatic in this repo; each spec is self-contained.
+# ============================================================================
+
+# RSA 2048-bit PKCS#8 v1 DER private key
+# Source: src/compiler_rust/vendor/ring/tests/rsa_test_private_key_2048.p8
+val RSA_PKCS8_HEX = "308204be020100300d06092a864886f70d0101010500048204a8308204a40201000282010100c8a78500a5a250db8ed36c85b8dcf83c4be1953114faaac7616e0ea24922fa6b7ab01f85582c815cc3bdeb5ed46762bc536accaa8b72705b00cef316b2ec508fb9697241b9e34238419cccf7339eeb8b062147af4f5932f613d9bc0ae70bf6d56d4432e83e13767587531bfa9dd56531741244be75e8bc9226b9fa44b4b8a101358d7e8bb75d0c724a4f11ece77776263faefe79612eb1d71646e77e8982866be1400eafc3580d3139b41aaa7380187372f22e35bd55b288496165c881ed154d5811245c52d56cc09d4916d4f2a50bcf5ae0a2637f4cfa6bf9daafc113dba8383b6dd7da6dd8db22d8510a8d3115983308909a1a0332517aa55e896e154249b302030100010282010023a4ee9190dae6b63a0700ce386ab8862d8ca32e16e5f894769050752fbcd0f36ad602a37368648a90131acebbb8a9e77e82085d7b6c16dd73a54fb5868f48385fdd85787b870d6a64ed6fd3b20dd715d93eec370e4770301a92a13ee6904f86d664390edc882490f83b214b41e27899725f146b2912f0fc9d788826d05bc3eddc3336d42516304d67d3c481df92aeeeb9752cd739f78469b52aedd6210a3f7b7fb2d5e89e7124ea26aac61962ed66307aebcf5ce7d448d25793ea3338b62cce210dc19145c07ad9ff1d115b29945c345861d1eefe1ba408553157ff05c76cb66c25690fcc7c4d5f6512a16aa0a679a08866521936c0b7f089e3dd8d797d0af102818100f85ba8dc29502396ee922ab8559613bc45d8d8b38202f8c8b8ff57b286f0ad82d3e1ac7c566ffe731cfae5619aeddc4e6b761bdcb2136470e33d712d4cc703c29c9b21b3e7969e35f0925fad5b2ddc7aba1cdb5c4086ef571eb3ea34bbb25f4e181d5fc1d11836dda0befc2f1a4268a4ab7d3278bc45a538b3d2341d4838271702818100ced417ee88c401a0344361f531dcd7f0257730e405fcd54eb6e4e53968e65ce56042dc8fc5e16e52e6bdc3dc26ec8ae9c3f891b1c44b91fb11634a29f14244fd850fd58e9e4f5f9df02755a619098cfd5c8195237a86d7c247f63cadaf67b94895d6aa61953adc91dcb5c18d95ade2bf446dd065c15196b96ffa6156197693c502818100bfc98087ab7b905030a13d4e260183f202fa26b5d0735d0d1c174af0b955c897dbe94cdaa3a14e9c3447e7b4cd005bfd4eece12d3772d4407caae8e8337f07ff5412541f6a7a9c684903afd0de35772a6ae877d9309742e242fa6aa51840f16a0c233adc200d13e96805b416e7af5ac1b71032569c052846b64e602230aff43702818035bb8024263fd5b44b1f9e595704eacca6cf1a528303b65ee6c0fc94379e714fddfc40d4d131c9b99bdc7cffbad50519ca21cfa8013928c9b330ba59bf25da4a8ac11c581ae4c010860d9200becc6e667c1be624fb7600a3a692601d374e9922345b3a947372814f1ba9d488f5f3e0ce93f67b8793fba04eb8bab182eec6918902818100b2349a56b39729dc8dd658abc18d9cdf07690bbab8c6a1932d5c8098e73792d2abc8c2d37804847c323e51529a32955c3d049f6632402e5d11902d15d7bbe8424c02ab54dd96c40c00d8ff41f56a3720b843d45c1b5ecbfc50db2e6d5a0b17b5a1743de21f6a61a5802da90271fbda6e4c6d12ae33922252a97fa973653ab7aa"
+
+# RSA 2048-bit SPKI DER public key (extracted from private key via openssl pkey -pubout)
+# Paired with RSA_PKCS8_HEX above; source: os_crypto_ref_signature_spec.spl.
+val RSA_SPKI_HEX = "30820122300d06092a864886f70d01010105000382010f003082010a0282010100c8a78500a5a250db8ed36c85b8dcf83c4be1953114faaac7616e0ea24922fa6b7ab01f85582c815cc3bdeb5ed46762bc536accaa8b72705b00cef316b2ec508fb9697241b9e34238419cccf7339eeb8b062147af4f5932f613d9bc0ae70bf6d56d4432e83e13767587531bfa9dd56531741244be75e8bc9226b9fa44b4b8a101358d7e8bb75d0c724a4f11ece77776263faefe79612eb1d71646e77e8982866be1400eafc3580d3139b41aaa7380187372f22e35bd55b288496165c881ed154d5811245c52d56cc09d4916d4f2a50bcf5ae0a2637f4cfa6bf9daafc113dba8383b6dd7da6dd8db22d8510a8d3115983308909a1a0332517aa55e896e154249b30203010001"
+
+# A 32-byte exchange hash used as the message to sign in all tests.
+# Arbitrary bytes — signing does not require a real SHA-256 digest.
+fn _make_exchange_hash() -> [u8]:
+    var h: [u8] = []
+    var i: u64 = 0
+    while i < 32:
+        h.push((i + 1).to_u8())
+        i = i + 1
+    h
+
+# ============================================================================
+# Test Group: rsa-sha2-256 host-key signing via ssh_sign_exchange_hash
+# ============================================================================
+
+describe "ssh_sign_exchange_hash rsa-sha2-256":
+    """
+    ## rsa-sha2-256 Host-Key Signing
+
+    Validates the end-to-end rsa-sha2-256 path in `ssh_sign_exchange_hash`:
+    the function signs an exchange hash with an RSA PKCS#8 key,
+    wraps the result in an SSH wire-format blob (algo string + raw-sig string),
+    and returns Ok.  The raw signature is verified against the matching SPKI
+    public key.  Absence of the key must return Err.
+    """
+
+    it "rsa-sha2-256 signs and the raw signature verifies with rsa_sha256_verify":
+        # Arrange
+        val pkcs8 = hex_to_bytes(RSA_PKCS8_HEX)
+        val spki  = hex_to_bytes(RSA_SPKI_HEX)
+        val exchange_hash = _make_exchange_hash()
+        val host_keys = HostKeySet(
+            ed25519_seed: nil,
+            rsa_pkcs8: pkcs8,
+            ecdsa_p256_pkcs8: nil
+        )
+
+        # Act
+        val result = ssh_sign_exchange_hash("rsa-sha2-256", host_keys, exchange_hash)
+
+        # Assert — signing succeeded
+        expect(result.is_ok()).to_equal(true)
+        var blob = result.unwrap()
+
+        # Parse algo-name field (offset 0)
+        var r_algo = ssh_get_text(blob, 0)
+        expect(r_algo.is_ok()).to_equal(true)
+        var algo_res = r_algo.unwrap()
+
+        # Parse raw-signature field (immediately after algo-name)
+        var r_sig = ssh_get_string(blob, algo_res.next_offset)
+        expect(r_sig.is_ok()).to_equal(true)
+        var sig_res = r_sig.unwrap()
+        var raw_sig = sig_res.data
+
+        # Verify raw signature against SPKI public key
+        val verified = rsa_sha256_verify(spki, exchange_hash, raw_sig)
+        expect(verified).to_equal(true)
+
+    it "rsa-sha2-256 signing fails when rsa_pkcs8 is nil":
+        # Arrange
+        val exchange_hash = _make_exchange_hash()
+        val host_keys = HostKeySet(
+            ed25519_seed: nil,
+            rsa_pkcs8: nil,
+            ecdsa_p256_pkcs8: nil
+        )
+
+        # Act
+        val result = ssh_sign_exchange_hash("rsa-sha2-256", host_keys, exchange_hash)
+
+        # Assert — must return Err
+        expect(result.is_ok()).to_equal(false)
+
+    it "rsa-sha2-256 signature blob has correct algorithm name header":
+        # Arrange
+        val pkcs8 = hex_to_bytes(RSA_PKCS8_HEX)
+        val exchange_hash = _make_exchange_hash()
+        val host_keys = HostKeySet(
+            ed25519_seed: nil,
+            rsa_pkcs8: pkcs8,
+            ecdsa_p256_pkcs8: nil
+        )
+
+        # Act
+        val result = ssh_sign_exchange_hash("rsa-sha2-256", host_keys, exchange_hash)
+        expect(result.is_ok()).to_equal(true)
+        var blob = result.unwrap()
+
+        # Parse and assert algo-name field
+        var r_algo = ssh_get_text(blob, 0)
+        expect(r_algo.is_ok()).to_equal(true)
+        var algo_res = r_algo.unwrap()
+        var algo_name = algo_res.value
+        expect(algo_name).to_equal("rsa-sha2-256")
