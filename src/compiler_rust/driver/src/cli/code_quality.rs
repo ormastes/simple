@@ -14,6 +14,7 @@ use crate::cli::interactive_fix;
 
 const QUALITY_CODES: &[&str] = &[
     "STUB001", "STUB003", "SSPEC001", "SSPEC002", "SSPEC003", "SSPEC004", "SSPEC005", "SSPEC006",
+    "UI001", "UI002", "UI003",
 ];
 
 fn is_test_like_path(path: &Path) -> bool {
@@ -467,9 +468,156 @@ fn collect_stub_diagnostics(path: &Path, items: &[Node]) -> Vec<Diagnostic> {
     diagnostics
 }
 
+fn make_quality_warn_diag(
+    file: &Path,
+    code: &str,
+    line_index: usize,
+    message: impl Into<String>,
+    help: impl Into<String>,
+) -> Diagnostic {
+    Diagnostic::warning(message.into())
+        .with_code(code.to_string())
+        .with_file(file.display().to_string())
+        .with_label(line_span(&fs::read_to_string(file).unwrap_or_default(), line_index), "")
+        .with_help(help.into())
+}
+
+/// Allowlisted paths for UI001 (raw widget kind).
+fn is_ui001_allowlisted(path: &Path) -> bool {
+    let text = path.to_string_lossy();
+    text.contains("common/ui/parse/")
+        || text.contains("os/services/llm/widget_eval")
+        || text.ends_with("common/ui/builder.spl")
+        || text.ends_with("common/ui/ios/builder.spl")
+        || text.ends_with("common/ui/glass/builder.spl")
+}
+
+/// Allowlisted paths for UI002 (raw variant).
+fn is_ui002_allowlisted(path: &Path) -> bool {
+    let text = path.to_string_lossy();
+    text.ends_with("common/ui/builder.spl") || text.ends_with("common/ui/glass/builder.spl")
+}
+
+/// Allowlisted paths for UI003 (raw theme name).
+fn is_ui003_allowlisted(path: &Path) -> bool {
+    let text = path.to_string_lossy();
+    text.ends_with("common/ui/style.spl") || is_test_like_path(path)
+}
+
+/// UI001 — flag raw string literal as WidgetNode kind arg.
+/// UI002 — flag raw string literal in with_on_typed_action action position or toast variant.
+/// UI003 — flag raw theme-name string literals.
+fn collect_ui_typed_api_diagnostics(path: &Path, source: &str) -> Vec<Diagnostic> {
+    let ui001_ok = is_ui001_allowlisted(path);
+    let ui002_ok = is_ui002_allowlisted(path);
+    let ui003_ok = is_ui003_allowlisted(path);
+
+    if ui001_ok && ui002_ok && ui003_ok {
+        return Vec::new();
+    }
+
+    let theme_names = [
+        "ios_light", "ios_dark", "glass_light", "glass_dark",
+        "glass_obsidian_dark", "simple_dark", "simple_light",
+    ];
+
+    let mut diagnostics = Vec::new();
+
+    for (idx, line) in source.lines().enumerate() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+
+        // UI001: WidgetNode.new(<id>, "<literal>")
+        if !ui001_ok {
+            if let Some(call_pos) = trimmed.find("WidgetNode.new(") {
+                let after_paren = &trimmed[call_pos + 15..];
+                if let Some(comma) = after_paren.find(',') {
+                    let kind_part = after_paren[comma + 1..].trim_start();
+                    if kind_part.starts_with('"') {
+                        diagnostics.push(make_quality_warn_diag(
+                            path,
+                            "UI001",
+                            idx,
+                            "Raw string literal as WidgetNode kind — use WidgetKind.X.to_wire()",
+                            "Replace the string literal with WidgetKind.<Variant>.to_wire(), e.g. WidgetKind.Panel.to_wire()",
+                        ));
+                    }
+                }
+            }
+        }
+
+        // UI002: with_on_typed_action(<node>, "<literal>") or toast(<id>, <msg>, "<literal>")
+        if !ui002_ok {
+            if let Some(call_pos) = trimmed.find("with_on_typed_action(") {
+                let after_paren = &trimmed[call_pos + 21..];
+                if let Some(comma) = after_paren.find(',') {
+                    let action_part = after_paren[comma + 1..].trim_start();
+                    if action_part.starts_with('"') {
+                        diagnostics.push(make_quality_warn_diag(
+                            path,
+                            "UI002",
+                            idx,
+                            "Raw string literal in action position — use Action or CommonAction",
+                            "Replace the string literal with CommonAction.Save.into_action() or Action.Custom(name: \"...\")",
+                        ));
+                    }
+                }
+            }
+            if let Some(call_pos) = trimmed.find("toast(") {
+                // Only flag "toast(" not "show_toast(" etc.
+                let before = &trimmed[..call_pos];
+                let is_method_call = before.ends_with('.') || before.ends_with("self.");
+                let is_standalone = call_pos == 0
+                    || !before.chars().last().map_or(false, |c| c.is_alphanumeric() || c == '_');
+                if is_method_call || is_standalone {
+                    let after_paren = &trimmed[call_pos + 6..];
+                    // Find third arg (skip two commas)
+                    if let Some(c1) = after_paren.find(',') {
+                        let after_first = &after_paren[c1 + 1..];
+                        if let Some(c2) = after_first.find(',') {
+                            let variant_part = after_first[c2 + 1..].trim_start();
+                            if variant_part.starts_with('"') {
+                                diagnostics.push(make_quality_warn_diag(
+                                    path,
+                                    "UI002",
+                                    idx,
+                                    "Raw string literal as toast variant — use a typed constant when StatusVariant is available",
+                                    "Replace the string literal variant with a typed constant once StatusVariant lands",
+                                ));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // UI003: raw theme-name string literals
+        if !ui003_ok {
+            for theme_name in &theme_names {
+                let quoted = format!("\"{}\"", theme_name);
+                if trimmed.contains(&quoted) {
+                    diagnostics.push(make_quality_warn_diag(
+                        path,
+                        "UI003",
+                        idx,
+                        format!("Raw theme-name string \"{}\" — use ThemeId enum variant", theme_name),
+                        format!("Replace \"{}\" with the ThemeId variant, e.g. ThemeId.IOSLight", theme_name),
+                    ));
+                    break; // one diagnostic per line
+                }
+            }
+        }
+    }
+
+    diagnostics
+}
+
 fn collect_extra_quality_diagnostics(path: &Path, source: &str, items: &[Node]) -> Vec<Diagnostic> {
     let mut diagnostics = collect_sspec_quality_diagnostics(path, source);
     diagnostics.extend(collect_stub_diagnostics(path, items));
+    diagnostics.extend(collect_ui_typed_api_diagnostics(path, source));
     diagnostics
 }
 

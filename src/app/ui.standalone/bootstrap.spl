@@ -1,0 +1,109 @@
+#![allow(unnamed_duplicate_typed_args)]
+# Standalone UI App Bootstrap
+#
+# Minimal HTTP server that mounts the shared test_api surface over a
+# user-provided UISession.  A single .spl file gets an LLM-friendly GUI
+# control surface — the same verbs as the host WM (src/app/ui.web) and
+# SimpleOS compositor (src/os/compositor) — without running SimpleOS or
+# an Electron host.
+#
+# Scope: the access surface IS the deliverable. Pixel rendering (SDL2,
+# TUI, Canvas2D) is layered by the caller if desired; it is not baked
+# in here. This keeps the common architecture thin: one UISession,
+# one test_api handler, one route helper, three embeddings.
+
+use std.nogc_sync_mut.io.tcp.{TcpListener, TcpStream}
+use common.ui.session.{UISession}
+use common.ui.widget.{UIEvent}
+use app.ui.test_api.mount.{test_api_matches, dispatch_and_format, format_http_response}
+
+class StandaloneOptions:
+    bind_addr: text
+    title: text
+
+    static fn new(bind_addr: text) -> StandaloneOptions:
+        return StandaloneOptions(bind_addr: bind_addr, title: "Simple standalone app")
+
+    static fn new_with_title(bind_addr: text, title: text) -> StandaloneOptions:
+        return StandaloneOptions(bind_addr: bind_addr, title: title)
+
+fn run_test_api_server(session: UISession, opts: StandaloneOptions):
+    """Serve /api/test/* against the given session; dispatch events
+    through UISession.dispatch.  Blocks until bind failure."""
+    val inject_event_fn = \event:
+        session.dispatch(event)
+    run_test_api_server_with_inject(session, opts, inject_event_fn)
+
+fn run_test_api_server_with_inject(session: UISession, opts: StandaloneOptions, inject_event: fn(UIEvent)):
+    """Variant that accepts a caller-provided event injector — use this
+    when a render pipeline (SDL2, TUI) needs to observe events before
+    they hit the session."""
+    print "[standalone] binding {opts.bind_addr}"
+    match TcpListener.bind(opts.bind_addr):
+        Err(e):
+            print "[standalone] bind failed: {e}"
+            return
+        Ok(listener):
+            print "[standalone] {opts.title} — ready on http://{opts.bind_addr}"
+            print "[standalone] LLM control: GET http://{opts.bind_addr}/api/test/ready"
+            _accept_loop(listener, session, inject_event, opts)
+
+fn _accept_loop(listener: TcpListener, session: UISession, inject_event: fn(UIEvent), opts: StandaloneOptions):
+    loop:
+        match listener.accept():
+            Err(e):
+                print "[standalone] accept error: {e}"
+            Ok(stream):
+                _handle_one(stream, session, inject_event, opts)
+
+fn _handle_one(stream: TcpStream, session: UISession, inject_event: fn(UIEvent), opts: StandaloneOptions):
+    match stream.read_line():
+        Err(_):
+            return
+        Ok(request_line):
+            val parts = request_line.split(" ")
+            if parts.len() < 2:
+                return
+            val method = parts[0]
+            val path = parts[1]
+
+            var content_length = 0
+            loop:
+                match stream.read_line():
+                    Err(_):
+                        break
+                    Ok(header_line):
+                        if header_line.trim() == "":
+                            break
+                        if header_line.starts_with("Content-Length:"):
+                            val len_str = header_line.slice(15, header_line.len())
+                            content_length = len_str.trim().to_int()
+
+            var body = ""
+            if method == "POST" and content_length > 0:
+                match stream.read_bytes(content_length):
+                    Ok(data):
+                        body = data
+                    Err(_):
+                        pass_dn
+
+            if test_api_matches(path):
+                stream.write_all(dispatch_and_format(path, method, body, session, inject_event))
+                return
+            if path == "/" and method == "GET":
+                stream.write_all(format_http_response(200, "text/html", _index_html(opts)))
+                return
+            stream.write_all(format_http_response(404, "text/plain", "Not Found"))
+
+fn _index_html(opts: StandaloneOptions) -> text:
+    return "<!doctype html><html><head><meta charset=\"utf-8\"><title>{opts.title}</title>" +
+           "<style>body{font-family:monospace;padding:24px;background:#0b0f1a;color:#e4eefc;}" +
+           "code{background:#1a2030;padding:2px 6px;border-radius:3px;}</style>" +
+           "</head><body><h1>{opts.title}</h1>" +
+           "<p>LLM-friendly test API mounted at <code>/api/test/*</code>.</p>" +
+           "<ul>" +
+           "<li><code>GET  /api/test/ready</code></li>" +
+           "<li><code>GET  /api/test/ui/snapshot</code></li>" +
+           "<li><code>GET  /api/test/ui/query?kind=button</code></li>" +
+           "<li><code>POST /api/test/ui/act {\"canonical_id\":\"&hellip;\",\"action\":\"invoke\"}</code></li>" +
+           "</ul></body></html>"

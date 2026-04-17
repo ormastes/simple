@@ -17,6 +17,7 @@ use app.ui.tui_web.html.{generate_tui_html_page}
 use app.ui.tui_web.screen_to_html.{screen_to_html}
 use app.ui.web.ws_handler.{extract_ws_key, compute_ws_accept, send_ws_text, escape_json_string}
 use app.ui.test_api.handler.{handle_test_request}
+use app.ui.test_api.mount.{test_api_matches, dispatch_and_format}
 
 extern fn rt_file_read_text(path: text) -> text
 extern fn rt_file_exists(path: text) -> bool
@@ -161,15 +162,13 @@ class TuiWebServer:
                     val widgets_json = _widgets_to_json(self.session.current_state())
                     val response = http_response(200, "application/json", widgets_json)
                     stream.write_all(response)
-                elif path.starts_with("/api/test/"):
-                    # Delegate to test API handler
+                elif test_api_matches(path):
+                    # Delegate to shared test API mount (dedups route + encoder).
                     val inject_fn = \event:
                         self.backend.push_event(event)
                         self.session.dispatch(event)
                         self._render_current_state()
-                    val result = handle_test_request(path, method, body, self.session.current_state(), inject_fn, self.session)
-                    val response = http_response(result.0, result.1, result.2)
-                    stream.write_all(response)
+                    stream.write_all(dispatch_and_format(path, method, body, self.session, inject_fn))
                 else:
                     val response = http_response(404, "text/plain", "Not Found")
                     stream.write_all(response)

@@ -84,6 +84,11 @@ fn print_help():
     print "  simple play sdl2-screenshot <sid> [-o]  Screenshot SDL2 app"
     print "  simple play sdl2-elements <sid>         List SDL2 widgets"
     print "  simple play sdl2-state <sid>            Get SDL2 app state"
+    print "  simple play ui-connect <url>            Connect to any /api/test/* endpoint"
+    print "  simple play ui-snapshot <sid>           Canonical UI snapshot"
+    print "  simple play ui-query <sid> [flags]      Query canonical nodes"
+    print "  simple play ui-ensure <sid> [flags]     Await semantic goal state"
+    print "  simple play ui-act <sid> <cid> <act>    Dispatch a canonical action"
     print "  simple play last-trace <sid>           Dump CDP trace log"
     print ""
     print "All subcommands write single-line JSON results to stdout."
@@ -542,6 +547,114 @@ fn handle_wm_press(rest: [text]) -> i64:
             1
 
 # ============================================================================
+# ui-* — semantic /api/test/ui/* surface, shared by host WM, TUI web,
+# standalone Simple apps, and the SimpleOS compositor bridge.
+# ============================================================================
+
+fn _ui_opt(rest: [text], flag: text) -> text:
+    var i = 0
+    while i + 1 < rest.length():
+        if rest[i] == flag:
+            return rest[i + 1]
+        i = i + 1
+    ""
+
+fn _ui_flag(rest: [text], flag: text) -> text:
+    for a in rest:
+        if a == flag:
+            return "true"
+    ""
+
+fn handle_ui_snapshot(rest: [text]) -> i64:
+    if rest.length() < 1:
+        err_json("INVALID_ARGUMENT", "ui-snapshot <session_id>")
+        return 1
+    val sid = rest[0]
+    match _sdl2_client(sid):
+        case Ok(client):
+            match client.ui_snapshot():
+                case Ok(body):
+                    ok_json("\"session_id\":\"{sid}\",\"snapshot\":{body}")
+                    0
+                case Err(e):
+                    err_json(e.code, e.message)
+                    1
+        case Err(e):
+            err_json(e.code, e.message)
+            1
+
+fn handle_ui_query(rest: [text]) -> i64:
+    if rest.length() < 1:
+        err_json("INVALID_ARGUMENT", "ui-query <session_id> [--surface-id S] [--canonical-id C] [--kind K] [--text T] [--focused-only] [--limit N]")
+        return 1
+    val sid = rest[0]
+    val surface_id = _ui_opt(rest, "--surface-id")
+    val canonical_id = _ui_opt(rest, "--canonical-id")
+    val kind = _ui_opt(rest, "--kind")
+    val text_query = _ui_opt(rest, "--text")
+    val focused_only = _ui_flag(rest, "--focused-only")
+    val limit = _ui_opt(rest, "--limit")
+    match _sdl2_client(sid):
+        case Ok(client):
+            match client.ui_query(surface_id, canonical_id, kind, text_query, focused_only, limit):
+                case Ok(body):
+                    ok_json("\"session_id\":\"{sid}\",\"result\":{body}")
+                    0
+                case Err(e):
+                    err_json(e.code, e.message)
+                    1
+        case Err(e):
+            err_json(e.code, e.message)
+            1
+
+fn handle_ui_ensure(rest: [text]) -> i64:
+    if rest.length() < 1:
+        err_json("INVALID_ARGUMENT", "ui-ensure <session_id> [--surface-id S] [--canonical-id C] [--expectation E] [--expected-value V] [--timeout-ms N] [--kind K] [--text T] [--focused-only]")
+        return 1
+    val sid = rest[0]
+    val surface_id = _ui_opt(rest, "--surface-id")
+    val canonical_id = _ui_opt(rest, "--canonical-id")
+    val kind = _ui_opt(rest, "--kind")
+    val text_query = _ui_opt(rest, "--text")
+    val focused_only = _ui_flag(rest, "--focused-only")
+    val expectation = _ui_opt(rest, "--expectation")
+    val expected_value = _ui_opt(rest, "--expected-value")
+    val timeout_ms = _ui_opt(rest, "--timeout-ms")
+    match _sdl2_client(sid):
+        case Ok(client):
+            match client.ui_ensure(surface_id, canonical_id, kind, text_query, focused_only, expectation, expected_value, timeout_ms):
+                case Ok(body):
+                    ok_json("\"session_id\":\"{sid}\",\"result\":{body}")
+                    0
+                case Err(e):
+                    err_json(e.code, e.message)
+                    1
+        case Err(e):
+            err_json(e.code, e.message)
+            1
+
+fn handle_ui_act(rest: [text]) -> i64:
+    if rest.length() < 3:
+        err_json("INVALID_ARGUMENT", "ui-act <session_id> <canonical_id> <action> [--surface-id S]")
+        return 1
+    val sid = rest[0]
+    val canonical_id = rest[1]
+    val action = rest[2]
+    val surface_id = _ui_opt(rest, "--surface-id")
+    match _sdl2_client(sid):
+        case Ok(client):
+            match client.ui_act(surface_id, canonical_id, action):
+                case Ok(body):
+                    ok_json("\"session_id\":\"{sid}\",\"result\":{body}")
+                    0
+                case Err(e):
+                    err_json(e.code, e.message)
+                    1
+        case Err(e):
+            err_json(e.code, e.message)
+            1
+
+# ============================================================================
 # Main dispatcher
 # ============================================================================
 
@@ -598,6 +711,16 @@ fn main() -> i64:
             handle_sdl2_elements(rest)
         case "sdl2-state":
             handle_sdl2_state(rest)
+        case "ui-connect":
+            handle_sdl2_connect(rest)
+        case "ui-snapshot":
+            handle_ui_snapshot(rest)
+        case "ui-query":
+            handle_ui_query(rest)
+        case "ui-ensure":
+            handle_ui_ensure(rest)
+        case "ui-act":
+            handle_ui_act(rest)
         case "-h" | "--help" | "help":
             print_help()
             0

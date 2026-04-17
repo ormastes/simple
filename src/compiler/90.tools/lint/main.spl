@@ -38,7 +38,8 @@ fn all_lint_names() -> [text]:
      "export_outside_init", "init_boundary_violation",
      "bypass_with_code_files", "unknown_decorator", "stub_impl",
      "unknown_attribute", "too_many_arguments",
-     "required_comment"]
+     "required_comment",
+     "ui_no_raw_widget_kind", "ui_no_raw_variant", "ui_no_raw_theme_name"]
 
 # Build the default levels dict for all configurable lint names.
 # Most are Warn; exceptions: sspec_no_print_based_tests=Deny,
@@ -70,6 +71,9 @@ fn build_default_levels() -> Dict<String, String>:
     levels["unknown_attribute"] = "warn"
     levels["too_many_arguments"] = "warn"
     levels["required_comment"] = "warn"
+    levels["ui_no_raw_widget_kind"] = "warn"
+    levels["ui_no_raw_variant"] = "warn"
+    levels["ui_no_raw_theme_name"] = "warn"
     levels
 
 # Parse a level string ("allow", "warn", "deny") into LintLevel.
@@ -322,6 +326,12 @@ fn map_lint_code_to_config_name(code: String) -> String:
         return ""  # safety — no config mapping
     if code == "W0401" or code == "W0402" or code == "W0403":
         return ""  # visibility — no config mapping
+    if code == "UI001":
+        return "ui_no_raw_widget_kind"
+    if code == "UI002":
+        return "ui_no_raw_variant"
+    if code == "UI003":
+        return "ui_no_raw_theme_name"
     ""
 
 # Try to find simple.sdn by walking up from a file path.
@@ -549,6 +559,14 @@ class Linter:
         lints.push(Lint.new("REQC002", LintLevel.Warn, LintCategory.Warning,
             "Dangerous keyword used without a comment string"))
 
+        # UI typed-API lints (UI00x rules)
+        lints.push(Lint.new("UI001", LintLevel.Warn, LintCategory.Style,
+            "Raw string literal passed as WidgetNode kind — use WidgetKind.X.to_wire()"))
+        lints.push(Lint.new("UI002", LintLevel.Warn, LintCategory.Style,
+            "Raw string literal in action position — use with_on_typed_action with Action or CommonAction"))
+        lints.push(Lint.new("UI003", LintLevel.Warn, LintCategory.Style,
+            "Raw theme-name string literal — use ThemeId enum variant"))
+
         # Try to load project-level lint config from simple.sdn
         # Search in common project root locations
         var config = LintConfig.new()
@@ -584,6 +602,9 @@ class Linter:
             line_num = line_num + 1
 
         self.check_sspec_quality(path, content)
+        self.check_ui_raw_widget_kind(path, content)
+        self.check_ui_raw_variant(path, content)
+        self.check_ui_raw_theme_name(path, content)
 
         # Run shared EasyFix rules and attach as lint results
         val shared_fixes = check_all_rules(content, path)
@@ -1020,6 +1041,142 @@ class Linter:
                 self.results.push(LintResult.new(path, line_num, 0, lint))
 
             i = j
+
+    # -----------------------------------------------------------------------
+    # UI typed-API lint helpers
+    # -----------------------------------------------------------------------
+
+    # Rule UI001 — ui_no_raw_widget_kind
+    # Flag string literals in the kind arg of WidgetNode.new(id, "<literal>").
+    #
+    # Allowlisted paths (legitimate bridge points where text kind is required):
+    #   common/ui/parse/       — SDN/HTML parsers receive kind from user input
+    #   common/ui/builder.spl  — top-level builder wraps WidgetNode.new
+    #   common/ui/ios/builder.spl, common/ui/glass/builder.spl — typed already
+    #   os/services/llm/widget_eval.spl — runtime eval from user input
+    me check_ui_raw_widget_kind(path: String, content: String):
+        val is_allowlisted = (
+            path.contains("common/ui/parse/") or
+            path.contains("os/services/llm/widget_eval") or
+            path.ends_with("common/ui/builder.spl") or
+            path.ends_with("common/ui/ios/builder.spl") or
+            path.ends_with("common/ui/glass/builder.spl")
+        )
+        if is_allowlisted:
+            return
+
+        val lines = content.split("\n")
+        var line_num = 0
+        for line in lines:
+            line_num = line_num + 1
+            val trimmed = line.trim()
+            if not trimmed.contains("WidgetNode.new("):
+                continue
+            # Only flag when the second argument is a string literal (starts with `"`)
+            # Pattern: WidgetNode.new(<expr>, "<literal>")
+            # Find the second comma after the opening paren, then check for `"`
+            val call_start = trimmed.find("WidgetNode.new(")
+            if call_start < 0:
+                continue
+            val after_paren = trimmed.slice(call_start + 15)
+            # Find first comma (separates id from kind)
+            val comma = after_paren.find(",")
+            if comma < 0:
+                continue
+            val kind_part = after_paren.slice(comma + 1).trim()
+            if kind_part.starts_with("\""):
+                val lint = Lint.new("UI001", LintLevel.Warn, LintCategory.Style,
+                    "Raw string literal as WidgetNode kind — use WidgetKind.X.to_wire()")
+                    .with_fix("Replace string literal with WidgetKind.<Variant>.to_wire(), e.g. WidgetKind.Panel.to_wire()")
+                self.results.push(LintResult.new(path, line_num, 0, lint))
+
+    # Rule UI002 — ui_no_raw_variant
+    # Flag string literals in the action position of with_on_typed_action calls
+    # and in the variant position of toast().
+    #
+    # Allowlisted paths:
+    #   common/ui/builder.spl  — defines with_on_action (the legacy wrapper fn)
+    #   common/ui/glass/builder.spl — defines toast()
+    me check_ui_raw_variant(path: String, content: String):
+        val is_allowlisted = (
+            path.ends_with("common/ui/builder.spl") or
+            path.ends_with("common/ui/glass/builder.spl")
+        )
+        if is_allowlisted:
+            return
+
+        val lines = content.split("\n")
+        var line_num = 0
+        for line in lines:
+            line_num = line_num + 1
+            val trimmed = line.trim()
+
+            # with_on_typed_action(node, "<literal>") — second arg is a string
+            if trimmed.contains("with_on_typed_action("):
+                val call_start = trimmed.find("with_on_typed_action(")
+                if call_start >= 0:
+                    val after_paren = trimmed.slice(call_start + 21)
+                    val comma = after_paren.find(",")
+                    if comma >= 0:
+                        val action_part = after_paren.slice(comma + 1).trim()
+                        if action_part.starts_with("\""):
+                            val lint = Lint.new("UI002", LintLevel.Warn, LintCategory.Style,
+                                "Raw string literal in action position of with_on_typed_action — use Action or CommonAction")
+                                .with_fix("Use with_on_typed_action(node, CommonAction.Save.into_action()) or Action.Custom(name: \"...\")")
+                            self.results.push(LintResult.new(path, line_num, 0, lint))
+
+            # toast(id, message, "<variant_literal>") — third arg is a string literal
+            if trimmed.contains("toast("):
+                val call_start = trimmed.find("toast(")
+                if call_start >= 0:
+                    val after_paren = trimmed.slice(call_start + 6)
+                    # Find second comma (skip id and message)
+                    val first_comma = after_paren.find(",")
+                    if first_comma >= 0:
+                        val after_first = after_paren.slice(first_comma + 1)
+                        val second_comma = after_first.find(",")
+                        if second_comma >= 0:
+                            val variant_part = after_first.slice(second_comma + 1).trim()
+                            if variant_part.starts_with("\""):
+                                val lint = Lint.new("UI002", LintLevel.Warn, LintCategory.Style,
+                                    "Raw string variant in toast() — use a typed variant constant")
+                                    .with_fix("Replace string variant with a typed constant, e.g. StatusVariant.Success.to_wire() once available")
+                                self.results.push(LintResult.new(path, line_num, 0, lint))
+
+    # Rule UI003 — ui_no_raw_theme_name
+    # Flag raw theme-name string literals passed to theme_by_name() or stored
+    # in theme-name fields.
+    #
+    # Allowlisted paths:
+    #   common/ui/style.spl    — from_name() match arm dispatches on runtime text
+    #   test files             — may verify theme-name parsing
+    me check_ui_raw_theme_name(path: String, content: String):
+        val is_allowlisted = (
+            path.ends_with("common/ui/style.spl") or
+            is_test_like_file(path)
+        )
+        if is_allowlisted:
+            return
+
+        val theme_names = ["ios_light", "ios_dark", "glass_light", "glass_dark",
+                           "glass_obsidian_dark", "simple_dark", "simple_light"]
+
+        val lines = content.split("\n")
+        var line_num = 0
+        for line in lines:
+            line_num = line_num + 1
+            val trimmed = line.trim()
+            if trimmed == "" or trimmed.starts_with("#"):
+                continue
+            # Only flag string literals (content inside double-quotes)
+            for theme_name in theme_names:
+                val quoted = "\"{theme_name}\""
+                if trimmed.contains(quoted):
+                    val lint = Lint.new("UI003", LintLevel.Warn, LintCategory.Style,
+                        "Raw theme-name string \"{theme_name}\" — use ThemeId enum variant")
+                        .with_fix("Replace \"{theme_name}\" with the ThemeId variant, e.g. ThemeId.IOSLight")
+                    self.results.push(LintResult.new(path, line_num, 0, lint))
+                    break  # one diagnostic per line is enough
 
 
 # Helper: Get parent directory from file path

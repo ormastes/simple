@@ -142,7 +142,7 @@ Wire strings are *frozen* — exactly the strings emitted today. Adding a new en
 | 5 | Phase 2 gates + new `typed_action_spec.spl`; `ipc_protocol_spec.spl` byte-identical |
 | 6 | New `responsive_widget_spec.spl` covers each branch on each backend |
 | 7 | **COMPLETE (2026-04-17)** — 6 platform files moved to `common.ui.ios.*` / `common.ui.glass.*` subdirs; 29 consumer files updated; 6 `pub use` shims left at old paths for one release; `examples/` and SimpleOS were already clean (no old-path references found) |
-| 8 | `bin/simple build lint` flags violations with no false positives on stdlib + `examples/` |
+| 8 | **COMPLETE (2026-04-17)** — 3 lint rules (UI001 `ui_no_raw_widget_kind`, UI002 `ui_no_raw_variant`, UI003 `ui_no_raw_theme_name`) wired into `src/compiler/90.tools/lint/main.spl`; documented under `src/lib/lint/ui/`; 5 true-positive call sites in `examples/ui/` fixed to typed form; allowlists cover `common/ui/parse/`, `style.spl:from_name()`, `builder.spl`, `ios/builder.spl`, `glass/builder.spl`, `widget_eval.spl` |
 | 9 | UFCS RFC, bare-enum-literal RFC, and chained-methods-fix RFC published under `doc/05_design/` |
 | 10 | UI skill, stitch skill, theme_sync skill, syntax docs, shared_ui_contract, mdsoc+ doc all updated and cross-linked |
 

@@ -17,6 +17,7 @@ use app.ui.web.html.{generate_html_page}
 use app.ui.web.async_ws.{start_ws_reader, ws_send_render}
 use app.ui.web.ws_handler.{extract_ws_key, compute_ws_accept, send_ws_text}
 use app.ui.test_api.handler.{handle_test_request}
+use app.ui.test_api.mount.{test_api_matches, dispatch_and_format}
 use app.ui.web.web_runtime_adapter.{WebRuntimeAdapter}
 use app.ui.web.ui_routes.{dispatch_ui_route}
 use app.ui.web.tls_serve_loop.{ConnStream}
@@ -179,8 +180,10 @@ class AsyncWebServer:
                     if handled:
                         return
 
-                # Route test API requests (before normal routing)
-                if path.starts_with("/api/test/"):
+                # Route test API requests (before normal routing) — shared
+                # across host WM, TUI web, standalone apps, and SimpleOS
+                # compositor bridge. See src/app/ui.test_api/mount.spl.
+                if test_api_matches(path):
                     val method = parts[0]
                     var body = ""
                     if method == "POST":
@@ -188,9 +191,7 @@ class AsyncWebServer:
                     val event_ch = self.event_channel
                     val inject_event_fn = \event:
                         event_ch.send(event)
-                    val result = handle_test_request(path, method, body, self.session.current_state(), inject_event_fn, self.session)
-                    val test_response = http_response(result.0, result.1, result.2)
-                    stream.write_all(test_response)
+                    stream.write_all(dispatch_and_format(path, method, body, self.session, inject_event_fn))
                     return
 
                 # Route HTTP requests

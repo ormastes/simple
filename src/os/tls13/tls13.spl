@@ -54,6 +54,8 @@ extern fn rt_tls13_serverhello_x25519_pub(body: [u8]) -> [u8]
 extern fn rt_tls13_build_client_hello(host: text) -> [u8]
 extern fn rt_tls13_build_client_hello_record(host: text) -> [u8]
 extern fn rt_tls13_x25519_shared_secret(scalar: [u8], point: [u8]) -> [u8]
+extern fn rt_tls13_hkdf_extract(salt: [u8], ikm: [u8]) -> [u8]
+extern fn rt_tls13_hkdf_expand_label(secret: [u8], label: [u8], context: [u8], length: i64) -> [u8]
 
 # RFC 8446 record payloads are bounded; reject clearly invalid lengths
 # before trying to allocate or read them from the transport.
@@ -124,6 +126,25 @@ fn _push_byte(buf: [u8], byte_val: i64) -> [u8]:
 
 fn _u8_at(buf: [u8], idx: u64) -> u8:
     rt_bytes_u8_at(buf, idx.to_i64()).to_u8()
+
+fn _tls_label_bytes(label: text) -> [u8]:
+    if label == "derived":
+        return [0x64u8, 0x65u8, 0x72u8, 0x69u8, 0x76u8, 0x65u8, 0x64u8]
+    if label == "key":
+        return [0x6bu8, 0x65u8, 0x79u8]
+    if label == "iv":
+        return [0x69u8, 0x76u8]
+    if label == "c hs traffic":
+        return [0x63u8, 0x20u8, 0x68u8, 0x73u8, 0x20u8, 0x74u8, 0x72u8, 0x61u8, 0x66u8, 0x66u8, 0x69u8, 0x63u8]
+    if label == "s hs traffic":
+        return [0x73u8, 0x20u8, 0x68u8, 0x73u8, 0x20u8, 0x74u8, 0x72u8, 0x61u8, 0x66u8, 0x66u8, 0x69u8, 0x63u8]
+    []
+
+fn _tls13_traffic_keys_fd(traffic_secret: [u8]) -> TrafficKeys:
+    val empty: [u8] = []
+    val key = rt_tls13_hkdf_expand_label(traffic_secret, _tls_label_bytes("key"), empty, 16)
+    val iv = rt_tls13_hkdf_expand_label(traffic_secret, _tls_label_bytes("iv"), empty, 12)
+    TrafficKeys(key: key, iv: iv)
 
 # ============================================================================
 # TCP I/O helpers
@@ -274,8 +295,6 @@ fn _io_recv(io: Tls13Io, length: u64) -> [u8]:
         # can overshoot length and the next remaining computation underflows
         # into a giant allocation request.
         val copy_len = if chunk.len() < remaining { chunk.len() } else { remaining }
-        if io.kind == "fd" and result.len() == 0 and copy_len == remaining:
-            return if copy_len == chunk.len() { chunk } else { rt_bytes_slice(chunk, 0, copy_len.to_i64()) }
         var i: u64 = 0
         while i < copy_len:
             result = _push_byte(result, _u8_at(chunk, i).to_u64().to_i64())
@@ -299,10 +318,8 @@ fn _io_recv_record(io: Tls13Io) -> [u8]:
     val payload = _io_recv(io, pay_len)
     if payload.len() < pay_len:
         return []
-    if io.kind == "fd":
-        _tls_debug("_io_recv_record concat header={header.len()} payload={payload.len()}")
-        return rt_bytes_concat(header, payload)
     var result: [u8] = _byte_buf(header.len() + payload.len())
+    _tls_debug("_io_recv_record concat header={header.len()} payload={payload.len()}")
     var i: u64 = 0
     while i < header.len():
         result = _push_byte(result, _u8_at(header, i).to_u64().to_i64())
@@ -495,15 +512,31 @@ fn tls13_connect_io_with_config(io: Tls13Io, hostname: text, config: Tls13Client
     _tls_debug("after tls13_early_secret len={early_secret.len()}")
     val empty_thash = transcript_empty_hash()
     _tls_debug("after transcript_empty_hash len={empty_thash.len()}")
-    val hs_derived = hkdf_expand_label(early_secret, "derived", empty_thash, 32)
+    val hs_derived = if fd_mode {
+        rt_tls13_hkdf_expand_label(early_secret, _tls_label_bytes("derived"), empty_thash, 32)
+    } else {
+        hkdf_expand_label(early_secret, "derived", empty_thash, 32)
+    }
     _tls_debug("after hs_derived len={hs_derived.len()}")
-    val handshake_secret = hkdf_extract(hs_derived, dhe_shared)
+    val handshake_secret = if fd_mode {
+        rt_tls13_hkdf_extract(hs_derived, dhe_shared)
+    } else {
+        hkdf_extract(hs_derived, dhe_shared)
+    }
     _tls_debug("after tls13_handshake_secret len={handshake_secret.len()}")
     val transcript_sh_hash = transcript_hash(transcript)
     _tls_debug("after transcript_hash len={transcript_sh_hash.len()}")
-    val client_hs_secret = derive_secret(handshake_secret, "c hs traffic", transcript)
+    val client_hs_secret = if fd_mode {
+        rt_tls13_hkdf_expand_label(handshake_secret, _tls_label_bytes("c hs traffic"), transcript_sh_hash, 32)
+    } else {
+        derive_secret(handshake_secret, "c hs traffic", transcript)
+    }
     _tls_debug("after client_hs_derive len={client_hs_secret.len()}")
-    val server_hs_secret = derive_secret(handshake_secret, "s hs traffic", transcript)
+    val server_hs_secret = if fd_mode {
+        rt_tls13_hkdf_expand_label(handshake_secret, _tls_label_bytes("s hs traffic"), transcript_sh_hash, 32)
+    } else {
+        derive_secret(handshake_secret, "s hs traffic", transcript)
+    }
     _tls_debug("after server_hs_derive len={server_hs_secret.len()}")
     val empty_secret: [u8] = []
     val secrets = Tls13Secrets(
@@ -518,8 +551,18 @@ fn tls13_connect_io_with_config(io: Tls13Io, hostname: text, config: Tls13Client
     _tls_debug("after tls13_compute_handshake_secrets")
 
     # Derive traffic keys
-    val server_hs_tk = tls13_traffic_keys(secrets.server_hs_traffic)
-    val client_hs_tk = tls13_traffic_keys(secrets.client_hs_traffic)
+    val server_hs_tk = if fd_mode {
+        _tls13_traffic_keys_fd(secrets.server_hs_traffic)
+    } else {
+        tls13_traffic_keys(secrets.server_hs_traffic)
+    }
+    _tls_debug("after server_hs_tk key_len={server_hs_tk.key.len()} iv_len={server_hs_tk.iv.len()}")
+    val client_hs_tk = if fd_mode {
+        _tls13_traffic_keys_fd(secrets.client_hs_traffic)
+    } else {
+        tls13_traffic_keys(secrets.client_hs_traffic)
+    }
+    _tls_debug("after client_hs_tk key_len={client_hs_tk.key.len()} iv_len={client_hs_tk.iv.len()}")
     val server_hs_rk = RecordKey(key: server_hs_tk.key, iv: server_hs_tk.iv)
     val client_hs_rk = RecordKey(key: client_hs_tk.key, iv: client_hs_tk.iv)
 

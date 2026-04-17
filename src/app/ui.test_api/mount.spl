@@ -1,0 +1,55 @@
+#![allow(unnamed_duplicate_typed_args)]
+# UI Test API — Transport-neutral mount helpers.
+#
+# The test_api handler is a complete LLM-friendly GUI access surface over
+# UISession (verbs: act, observe, query, ensure, value, snapshot, history,
+# visual_probe, adapter_snapshot, screenshot). This module deduplicates the
+# glue that each embedding needs so the same verbs are spoken uniformly across:
+#   - host WM web backend        (src/app/ui.web/async_server.spl)
+#   - TUI web backend            (src/app/ui.tui_web/server.spl)
+#   - standalone Simple app      (src/app/ui.standalone/bootstrap.spl)
+#   - SimpleOS compositor bridge (src/os/compositor/compositor.spl via opcode)
+#
+# No new verbs, no new state — only the route-match + HTTP response encoder.
+
+use common.ui.session.{UISession}
+use common.ui.widget.{UIEvent}
+use app.ui.test_api.handler.{handle_test_request}
+
+val TEST_API_PREFIX = "/api/test/"
+val PROTOCOL_VERSION_HEADER = "X-UI-Protocol-Version: 1"
+
+fn test_api_matches(path: text) -> bool:
+    """True when the request path targets the shared test API surface."""
+    return path.starts_with(TEST_API_PREFIX)
+
+fn dispatch_test_api(path: text, method: text, body: text, session: UISession, inject_event: fn(UIEvent)) -> (i32, text, text):
+    """Route a request to the shared handler with session-backed state.
+
+    Returns (status_code, content_type, response_body)."""
+    return handle_test_request(path, method, body, session.current_state(), inject_event, session)
+
+fn format_http_response(status: i32, content_type: text, body: text) -> text:
+    """Encode a handler triple as a complete HTTP/1.1 response."""
+    val status_text = match status:
+        200: "OK"
+        400: "Bad Request"
+        404: "Not Found"
+        405: "Method Not Allowed"
+        410: "Gone"
+        500: "Internal Server Error"
+        _: "OK"
+    var response = "HTTP/1.1 {status} {status_text}\r\n"
+    response = "{response}Content-Type: {content_type}\r\n"
+    response = "{response}{PROTOCOL_VERSION_HEADER}\r\n"
+    response = "{response}Content-Length: {body.len()}\r\n"
+    response = "{response}Access-Control-Allow-Origin: *\r\n"
+    response = "{response}Connection: close\r\n"
+    response = "{response}\r\n"
+    response = "{response}{body}"
+    return response
+
+fn dispatch_and_format(path: text, method: text, body: text, session: UISession, inject_event: fn(UIEvent)) -> text:
+    """One-shot: dispatch + format. Returns a ready-to-write HTTP response."""
+    val result = dispatch_test_api(path, method, body, session, inject_event)
+    return format_http_response(result.0, result.1, result.2)

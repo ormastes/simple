@@ -1,22 +1,20 @@
-# Bug Report: Baremetal TLS recv/parse path still mishandles boxed `[u8]` values after `ServerHello`
+# Bug Report: Baremetal TLS encrypted-handshake record is still truncated on x86_64 after CCS
 
 **ID:** `tls_baremetal_004`  
 **Severity:** P1  
 **Status:** open  
 **Discovered:** 2026-04-17  
-**Area:** x86_64 baremetal runtime / Cranelift compiled array layout / TLS recv/parser boundaries
+**Area:** x86_64 baremetal runtime / Cranelift compiled array layout / TLS encrypted record recv/decrypt boundary
 
 ## Summary
 
-The remaining `test/system/os_tls_system_spec.spl` failure is no longer in TCP bring-up, and it is no longer at the first TLS record boundary either. The guest now:
+The remaining `test/system/os_tls_system_spec.spl` failure is no longer in transport, `ServerHello` framing, or X25519. The guest now:
 
 - initializes VirtIO-net
-- resolves ARP
-- completes the TCP 3-way handshake to `10.0.2.2:4433`
-- builds a `ClientHello` of plausible size (`162` bytes)
-- sends `167` bytes on the established socket
-- receives a valid first TLS record header from the rustls server
-- parses the outer `ServerHello` handshake envelope as `type=2 body_len=118`
+- completes TCP connect to `10.0.2.2:4433`
+- sends a plausible `ClientHello`
+- receives and parses the first `ServerHello` record
+- extracts the server key share and computes a `32`-byte shared secret
 
 The host rustls fixture still closes with:
 
@@ -24,28 +22,19 @@ The host rustls fixture still closes with:
 [SERVER FAIL: unexpected end of file]
 ```
 
-Serial evidence from the guest now shows two distinct facts:
-
-1. The send-path copy bug and the recv-header boxed-byte bug were both real and are now fixed. The guest now decodes the first inbound TLS record header correctly:
+The newest serial trace shows the post-DH key schedule now succeeds, and the failure has moved to the first encrypted handshake record after the plaintext CCS:
 
 ```text
-[tcp-send] first-bytes=0x16 0x3 0x1 0x0 0xa2 0x1 0x0 0x0
-[tls13] _io_recv_record header type=22 pay_len=122
-[tls13] after parse_handshake_header type=2 body_len=118
+[tls13] after parse_server_hello cipher=4865 key_len=32
+[tls13] after x25519 shared_len=32
+[tls13] after server_hs_tk key_len=16 iv_len=12
+[tls13] after client_hs_tk key_len=16 iv_len=12
+[tls13] _io_recv_record header type=20 pay_len=<object>
+[tls13] _io_recv_record header type=23 pay_len=420
+[TLS FAIL: handshake failed: record too short: payload truncated]
 ```
 
-2. The crash has moved deeper, into `parse_server_hello(...)` or immediately after it. The guest now dies after the outer handshake envelope is parsed:
-
-```text
-[tls13] before sh slice pay_len=122 raw_len=127
-[tls13] after sh slice hs_len=122
-[tls13] before parse_handshake_header
-[tls13] after parse_handshake_header type=2 body_len=118
-[PANIC] heap exhausted
-[PANIC] heap_off=0x138780 req=0xf000ff60 limit=0x10000000
-```
-
-The current strongest diagnosis is that variable-length fields in the baremetal recv/parser path are still being mishandled through boxed `[u8]` values or bad ABI/lowering around helper calls, causing a bogus large allocation request once `parse_server_hello(...)` starts walking the body.
+That means the remaining corruption is no longer in HKDF. The guest now reaches the first encrypted handshake record, but the record presented to `record13_decrypt(...)` is still malformed or length-corrupted on the baremetal fd-mode path.
 
 ## Reproduction
 
@@ -57,6 +46,7 @@ Manual repro:
 
 ```bash
 src/compiler_rust/target/debug/simple native-build \
+  --clean \
   --source src --source examples \
   --backend cranelift \
   --entry-closure \
@@ -81,16 +71,16 @@ qemu-system-x86_64 \
 
 ## Expected
 
-- Plaintext TLS record should start with a valid ClientHello record prefix such as:
-  - `16 03 01 00 ...`
-- Host rustls fixture should continue the handshake and the guest should parse `ServerHello` fully.
+- Guest should derive the TLS 1.3 handshake secret and traffic secrets after X25519.
+- Guest should accept the plaintext CCS and then decrypt the first encrypted handshake record.
+- Host rustls fixture should continue past `ServerHello`.
 - Guest should reach `[TLS HANDSHAKE COMPLETE]`.
 
 ## Actual
 
-- Guest sends a `167`-byte record on an established TCP socket.
-- Guest receives a valid `ServerHello`-sized TLS record and parses the outer handshake envelope.
-- The guest then panics on a giant heap allocation while walking the `ServerHello` body.
+- Guest completes TCP, `ServerHello`, X25519, handshake-secret derivation, and handshake traffic key/IV derivation.
+- The guest receives the plaintext CCS and then the first encrypted handshake record (`type=23 pay_len=420`).
+- `record13_decrypt(...)` still fails with `record too short: payload truncated`.
 
 ## Technical Notes
 
@@ -99,32 +89,32 @@ qemu-system-x86_64 \
 - VirtIO-net init and TX submission
 - ARP and gateway MAC learning
 - TCP active open / SYN-SYN+ACK-ACK
-- fd vs socket object callsite confusion
 - direct socket send/recv return-value encoding
-- obvious TLS ClientHello size truncation at the old `64`-byte array cap
+- `ClientHello` truncation on the send path
 - first TLS record header parse on the recv path
-- outer handshake envelope parse (`type=2`, `body_len=118`)
+- `ServerHello` envelope parse (`type=2`, `body_len=118`)
+- X25519 shared-secret derivation itself (`shared_len=32`)
+- handshake secret / handshake traffic secret derivation
+- handshake traffic key/IV derivation
 
 ### Strongest current diagnosis
 
-The remaining corruption is now inside `parse_server_hello(...)` or the immediate `ServerHello` post-parse path, not the TCP send bridge and not the outer record/header parser.
+The remaining corruption is now in the fd-mode encrypted-record boundary after CCS. The strongest surviving suspects are:
 
-The strongest surviving suspects are:
-
-1. boxed-byte or helper-ABI corruption while reading variable-length fields in `parse_server_hello(...)`
-2. bad lowering around baremetal helper calls such as `rt_bytes_slice(...)` / `rt_bytes_u8_at(...)` when the sliced `ServerHello` body is reused by later parsers
-3. a remaining compiled `[u8]` layout bug on C-originated arrays once deeper parser code starts copying or length-walking them
+1. small-array corruption in the fd recv path around the 1-byte CCS record
+2. record assembly / length preservation bug between `_io_recv_record(...)` and `record13_decrypt(...)`
+3. remaining direct-index or boxed-byte ABI problems on C-originated arrays in the record layer
 
 ### Files involved
 
-- `src/os/tls13/handshake13.spl`
 - `src/os/tls13/tls13.spl`
+- `src/os/tls13/record13.spl`
 - `examples/simple_os/arch/x86_64/boot/baremetal_stubs.c`
 - `examples/simple_os/arch/x86_64/tls_system_test_entry.spl`
 - `test/system/os_tls_system_spec.spl`
 
 ## Recommended Next Steps
 
-1. Instrument `parse_server_hello(...)` field-by-field: `session_id_len`, `cipher_suite`, `exts_len`, `ext_type`, `ext_len`, `key_len`.
-2. If the panic comes from the key-share walker, move full `ServerHello` extraction/parsing for the baremetal lane into C as a temporary containment step.
-3. Inspect Cranelift lowering for C-originated `[u8]` arrays reused across helper boundaries in the x86_64 baremetal target.
+1. Instrument `_io_recv_record(...)` and `record13_decrypt(...)` with explicit `raw_record.len()` and header-byte dumps on the first `type=23` record.
+2. Inspect the fd recv bridge for small-array anomalies, especially the 1-byte CCS path that still logs as `pay_len=<object>`.
+3. If needed, bypass the generic record-layer parse for fd-mode by copying the raw record into a known-good C-owned or Simple-owned buffer before decrypt.
