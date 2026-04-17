@@ -499,6 +499,31 @@ impl DesktopShell:
                 # Send reply with window_id back to the app
                 self.wm.send_create_reply(action.src_port, wid)
                 serial_println("[shell] Created window {wid} for port {action.src_port}: '{action.title}'")
+            "create_web_window":
+                # Wave 3 apply-side: treat a web-window exactly like a
+                # regular window for placement / ownership; the rect is
+                # painted by render_into on the next repaint in a Wave 7
+                # follow-up. Landing the branch now closes the IPC contract
+                # end-to-end so COMP_CREATE_WEB_WINDOW doesn't drop silently.
+                var web_app_id = action.app_id
+                if action.process_id > 0:
+                    val l_app_id = launcher_get_process_app_id_for_pid(action.process_id)
+                    if l_app_id != "":
+                        web_app_id = l_app_id
+                val web_wid = self.compositor.create_remote_window(
+                    action.title, action.x, action.y,
+                    action.width, action.height, action.owner_port)
+                self.compositor.set_window_identity(web_wid, action.process_id, web_app_id)
+                self.wm.register_window_owner_with_identity(
+                    web_wid,
+                    action.owner_port,
+                    action.process_id,
+                    web_app_id
+                )
+                if action.process_id > 0:
+                    launcher_note_window_opened(action.process_id)
+                self.wm.send_create_reply(action.src_port, web_wid)
+                serial_println("[shell] Created web window {web_wid} for port {action.src_port}: url='{action.content}'")
             "destroy_window":
                 val process_id = self.wm.window_owner_process_id(action.window_id)
                 self.compositor.destroy_window(action.window_id)

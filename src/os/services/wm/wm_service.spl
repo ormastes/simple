@@ -27,7 +27,7 @@
 # Response for COMP_CREATE_WINDOW:
 #   status(i32) | window_id(u64)
 
-use os.userlib.ipc_protocol.{COMP_CREATE_WINDOW, COMP_DESTROY_WINDOW, COMP_UPDATE_TREE, COMP_FOCUS, COMP_RESIZE, COMP_MOVE, COMP_SET_TITLE, COMP_MINIMIZE, COMP_MAXIMIZE, COMP_RESTORE, COMP_INPUT_EVENT, COMP_CLOSE_REQUEST, COMP_FOCUS_CHANGED}
+use os.userlib.ipc_protocol.{COMP_CREATE_WINDOW, COMP_CREATE_WEB_WINDOW, COMP_DESTROY_WINDOW, COMP_UPDATE_TREE, COMP_FOCUS, COMP_RESIZE, COMP_MOVE, COMP_SET_TITLE, COMP_MINIMIZE, COMP_MAXIMIZE, COMP_RESTORE, COMP_INPUT_EVENT, COMP_CLOSE_REQUEST, COMP_FOCUS_CHANGED}
 use os.userlib.syscall_raw.{syscall}
 use common.window_protocol.window_protocol.{WmCreateRequest, WmCreateResponse, WmInputEvent, WmCloseRequest, WmResizeRequest, WmMoveRequest, WmFocusEvent, WM_STATUS_OK, WM_STATUS_ERROR, WM_STATUS_NO_SPACE, WM_EVENT_CLOSE, WM_EVENT_FOCUS, wm_input_event, wm_focus_event}
 use os.services.launcher.launcher.{launcher_get_process_app_id_for_pid}
@@ -459,6 +459,8 @@ impl WmService:
         match method:
             COMP_CREATE_WINDOW:
                 return self.parse_create_window(src_port, payload_addr, payload_len)
+            COMP_CREATE_WEB_WINDOW:
+                return self.parse_create_web_window(src_port, payload_addr, payload_len)
             COMP_DESTROY_WINDOW:
                 return self.parse_destroy_window(src_port, payload_addr, payload_len)
             COMP_UPDATE_TREE:
@@ -525,6 +527,36 @@ impl WmService:
 
         serial_println("[wm-service] Parsed create_window from port {src_port}: '{title}' ({w}x{h}) pid={process_id} app_id='{app_id}'")
         WmAction(kind: "create_window", window_id: 0, title: title, x: x, y: y, width: w, height: h, content: "", process_id: process_id, app_id: app_id, owner_port: src_port, src_port: src_port)
+
+    me parse_create_web_window(src_port: u64, payload_addr: u64, payload_len: u32) -> WmAction:
+        """Parse COMP_CREATE_WEB_WINDOW into a WmAction.
+
+        Payload: url_len(u32) | url(bytes) | x(i32) | y(i32) | w(i32) | h(i32)
+
+        The URL is stashed in WmAction.content so the apply side can route
+        the window to the Simple Web Engine rect renderer; title defaults
+        to the URL, app_id falls back to the launcher's record for src_port.
+        """
+        if self.world.win_ids.len() >= self.max_windows:
+            serial_println("[wm-service] Max windows reached, rejecting create_web")
+            self.send_create_response(src_port, WindowId(value: 0), WM_STATUS_NO_SPACE)
+            return wm_action_none()
+
+        val url_len = _read_u32(payload_addr)
+        val url = _read_text(payload_addr + 4, url_len)
+        val fields_offset = 4 + url_len.to_u64()
+        val x = _read_i32(payload_addr + fields_offset)
+        val y = _read_i32(payload_addr + fields_offset + 4)
+        val w = _read_i32(payload_addr + fields_offset + 8)
+        val h = _read_i32(payload_addr + fields_offset + 12)
+
+        var process_id = src_port
+        var app_id = launcher_get_process_app_id_for_pid(process_id)
+        if app_id == "":
+            app_id = url
+
+        serial_println("[wm-service] Parsed create_web_window from port {src_port}: '{url}' ({w}x{h}) pid={process_id}")
+        WmAction(kind: "create_web_window", window_id: 0, title: url, x: x, y: y, width: w, height: h, content: url, process_id: process_id, app_id: app_id, owner_port: src_port, src_port: src_port)
 
     me parse_destroy_window(src_port: u64, payload_addr: u64, payload_len: u32) -> WmAction:
         """Parse COMP_DESTROY_WINDOW into a WmAction.

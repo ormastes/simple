@@ -1,0 +1,58 @@
+## Spec for Wave 3 plumbing: COMP_CREATE_WEB_WINDOW opcode +
+## src/app/ui.browser/renderer.spl::render_into().
+##
+## Verifies:
+##   * COMP_CREATE_WEB_WINDOW is present and distinct from COMP_CREATE_WINDOW.
+##   * render_into() returns a Framebuffer of the requested size.
+##   * render_into() with a URL produces a non-uniform framebuffer (chrome
+##     band + body), so a golden pixel test can detect the rect content.
+##
+## The in-kernel apply-side (converting a "create_web_window" WmAction into
+## an actual compositor surface) is parked as a Wave 6 follow-up — the
+## parser + opcode + render entry landing here is the contract both sides
+## agree on.
+##
+## Run:
+##   bin/simple test test/os/compositor/web_surface_blit_test.spl
+
+use std.spec
+use os.userlib.ipc_protocol.{COMP_CREATE_WINDOW, COMP_CREATE_WEB_WINDOW}
+use app.ui.browser.renderer.{Framebuffer, render_into}
+
+describe "ipc_protocol.COMP_CREATE_WEB_WINDOW":
+    """New opcode must be distinct from the legacy create opcode."""
+
+    it "is a non-zero u32":
+        expect(COMP_CREATE_WEB_WINDOW > (0 as u32)).to_equal(true)
+
+    it "is distinct from COMP_CREATE_WINDOW":
+        expect(COMP_CREATE_WEB_WINDOW == COMP_CREATE_WINDOW).to_equal(false)
+
+describe "renderer.render_into":
+    """Rect-scoped framebuffer for a simple-web window."""
+
+    it "returns a framebuffer of the requested width":
+        val fb = render_into(320, 240, "about:blank")
+        expect(fb.width).to_equal(320)
+
+    it "returns a framebuffer of the requested height":
+        val fb = render_into(320, 240, "about:blank")
+        expect(fb.height).to_equal(240)
+
+    it "paints chrome + body when the URL is non-empty":
+        val fb = render_into(100, 100, "https://example.com")
+        # Pixel at (0, 0) is chrome (distinct from body).
+        val chrome_px = fb.pixels[0]
+        # Pixel near the bottom of the body is the body color.
+        val body_px = fb.pixels[99 * 100 + 50]
+        expect(chrome_px == body_px).to_equal(false)
+
+    it "still returns a full-size framebuffer for an empty URL":
+        val fb = render_into(64, 48, "")
+        expect(fb.width).to_equal(64)
+        expect(fb.height).to_equal(48)
+
+    it "has a body pixel that is the opaque white placeholder":
+        val fb = render_into(40, 40, "about:blank")
+        val body_px = fb.pixels[30 * 40 + 20]
+        expect(body_px).to_equal(0x00FFFFFF as i64)
