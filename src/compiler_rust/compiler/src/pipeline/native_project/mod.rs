@@ -330,7 +330,29 @@ impl NativeProjectBuilder {
     /// Build the project.
     pub fn build(self) -> Result<NativeBuildResult, String> {
         // 1. Discover files
-        let files = self.discover_files()?;
+        let (files, file_sources) = if self.config.entry_closure {
+            let entry_file = self
+                .entry_file
+                .as_ref()
+                .ok_or_else(|| "entry-closure requires --entry".to_string())?;
+            let file_sources = self.discover_reachable_files_with_sources(entry_file)?;
+            let files = file_sources.iter().map(|(path, _)| path.clone()).collect();
+            (files, file_sources)
+        } else {
+            let files = self.discover_files()?;
+            let mut file_sources = Vec::with_capacity(files.len());
+            for path in &files {
+                let mut source = std::fs::read_to_string(path)
+                    .map_err(|e| (path.clone(), format!("read: {e}")))
+                    .map_err(|(p, m)| format!("{}: {}", p.display(), m))?;
+                // Normalize CRLF -> LF for cross-platform compatibility
+                if source.contains('\r') {
+                    source = source.replace('\r', "");
+                }
+                file_sources.push((path.clone(), source));
+            }
+            (files, file_sources)
+        };
         if files.is_empty() {
             return Err("No .spl files found in source directories".to_string());
         }
@@ -360,22 +382,15 @@ impl NativeProjectBuilder {
 
         // 4. Read all source files and determine dirty set
         let compile_start = Instant::now();
-        let mut file_sources: Vec<(PathBuf, String)> = Vec::new();
-        for path in &files {
-            let mut source = std::fs::read_to_string(path)
-                .map_err(|e| (path.clone(), format!("read: {e}")))
-                .map_err(|(p, m)| format!("{}: {}", p.display(), m))?;
-            // Normalize CRLF -> LF for cross-platform compatibility
-            if source.contains('\r') {
-                source = source.replace('\r', "");
-            }
-            file_sources.push((path.clone(), source));
-        }
-
         // Deduplicate files for compilation (symlink aliases compile once, but
         // all paths remain in file_sources for import map indexing).
-        let compile_indices: std::collections::HashSet<usize> =
-            Self::deduplicate_for_compilation(&files).into_iter().collect();
+        let compile_indices: std::collections::HashSet<usize> = if self.config.entry_closure {
+            // Entry-closure discovery already canonicalizes and deduplicates the
+            // reachable file set, so we can compile every discovered file directly.
+            (0..files.len()).collect()
+        } else {
+            Self::deduplicate_for_compilation(&files).into_iter().collect()
+        };
 
         // Determine which files need recompilation via content hash
         let mut to_compile: Vec<(usize, PathBuf, String)> = Vec::new();

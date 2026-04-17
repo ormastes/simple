@@ -1,0 +1,267 @@
+@allow(primitive_api)
+# Crypto Reference Harness — cross-vendor byte-level dispatch.
+#
+# Dispatches a uniform API (ref_sha256_via, ref_hmac_sha256_via, ref_x25519_via, ...)
+# to multiple reference crypto implementations on the host so pure-Simple primitives
+# in src/os/crypto/* and src/lib/common/crypto/* can be byte-compared against them.
+#
+# Vendors are installed by scripts/install_ref_crypto.shs and recorded in
+# tools/ref_crypto/manifest.json. This module invokes their CLIs via rt_process_run
+# and decodes hex-lowercase stdout back into [u8].
+#
+# Currently wired: OPENSSL, PYTHON, NODE.
+# Declared but dispatch-pending (returns Skipped): GO, RING, BORINGSSL, MBEDTLS,
+# WOLFSSL, LIBRESSL — installer/CLI for each is in tools/ref_crypto/<vendor>/.
+#
+# Negative path: every call returns Result<[u8], RefErr>. RefErr.Skipped is
+# NOT a failure — it lets the caller gracefully exclude vendors that lack the
+# primitive (e.g., Node has no raw Poly1305 export; Ring lacks raw X25519).
+
+use std.nogc_sync_mut.ffi.io.{rt_file_read_bytes, rt_file_write_bytes}
+use test.system.os_crypto_ref_helpers.{hex_to_bytes, bytes_to_hex}
+
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+
+# ============================================================================
+# Types
+# ============================================================================
+
+enum Vendor:
+    """Reference crypto vendors recognized by the harness."""
+    OPENSSL
+    BORINGSSL
+    MBEDTLS
+    WOLFSSL
+    LIBRESSL
+    GO
+    PYTHON
+    NODE
+    RING
+
+enum RefErr:
+    """Why a reference call did not return bytes.
+    Skipped is not a test failure — it means the vendor declared it does not
+    implement the requested primitive (per manifest.supported_primitives)."""
+    Skipped(reason: text)
+    NotInstalled(vendor_name: text)
+    Timeout(seconds: i64)
+    ProcessErr(code: i64, stderr: text)
+    ParseErr(message: text)
+
+# ============================================================================
+# Input Matrix — 8 byte-shapes every primitive must be tested against.
+# ============================================================================
+
+fn crypto_input_matrix(block_size: u64) -> [[u8]]:
+    """Return the 8-input byte-shape matrix for a primitive with the given
+    block size. Order:
+      0: empty
+      1: single byte 0x00
+      2: short ASCII b"abc"
+      3: binary 0x00, 0xff, 0x55, 0xaa
+      4: exact block size (filled with 0x42)
+      5: block size + 1
+      6: block size - 1
+      7: 3 * block size (rolling 0..255)
+    """
+    var matrix: [[u8]] = []
+    matrix.push([])
+    matrix.push([0u8])
+    matrix.push([0x61u8, 0x62u8, 0x63u8])
+    matrix.push([0x00u8, 0xffu8, 0x55u8, 0xaau8])
+    matrix.push(_filled(n: block_size, b: 0x42u8))
+    matrix.push(_filled(n: block_size + 1, b: 0x42u8))
+    if block_size > 0:
+        matrix.push(_filled(n: block_size - 1, b: 0x42u8))
+    else:
+        matrix.push([])
+    matrix.push(_rolling(n: block_size * 3))
+    matrix
+
+fn _filled(n: u64, b: u8) -> [u8]:
+    var out: [u8] = []
+    var i: u64 = 0
+    while i < n:
+        out.push(b)
+        i = i + 1
+    out
+
+fn _rolling(n: u64) -> [u8]:
+    var out: [u8] = []
+    var i: u64 = 0
+    while i < n:
+        out.push((i % 256).to_u8())
+        i = i + 1
+    out
+
+# ============================================================================
+# Vendor name
+# ============================================================================
+
+fn vendor_name(v: Vendor) -> text:
+    if val _ = v as Vendor.OPENSSL:   return "openssl"
+    if val _ = v as Vendor.BORINGSSL: return "boringssl"
+    if val _ = v as Vendor.MBEDTLS:   return "mbedtls"
+    if val _ = v as Vendor.WOLFSSL:   return "wolfssl"
+    if val _ = v as Vendor.LIBRESSL:  return "libressl"
+    if val _ = v as Vendor.GO:        return "go"
+    if val _ = v as Vendor.PYTHON:    return "python"
+    if val _ = v as Vendor.NODE:      return "node"
+    if val _ = v as Vendor.RING:      return "ring"
+    "unknown"
+
+# ============================================================================
+# Dispatch — per primitive
+# ============================================================================
+
+fn ref_sha256_via(v: Vendor, input: [u8]) -> Result<[u8], RefErr>:
+    """Compute SHA-256 via the named vendor.
+    Returns Err(Skipped) if dispatch for that vendor is not yet wired."""
+    if val _ = v as Vendor.OPENSSL:
+        return _openssl_digest(name: "sha256", input: input)
+    if val _ = v as Vendor.PYTHON:
+        return _hexcli_two_arg(vendor_tag: "python", primitive: "sha256", a: bytes_to_hex(input), b: "")
+    if val _ = v as Vendor.NODE:
+        return _hexcli_two_arg(vendor_tag: "node", primitive: "sha256", a: bytes_to_hex(input), b: "")
+    if val _ = v as Vendor.GO:
+        return Err(RefErr.Skipped("go dispatch pending (build tools/ref_crypto/go)"))
+    if val _ = v as Vendor.RING:
+        return Err(RefErr.Skipped("ring dispatch pending (cargo-build tools/ref_crypto/ring)"))
+    Err(RefErr.Skipped(vendor_name(v) + " dispatch pending"))
+
+fn ref_sha512_via(v: Vendor, input: [u8]) -> Result<[u8], RefErr>:
+    if val _ = v as Vendor.OPENSSL:
+        return _openssl_digest(name: "sha512", input: input)
+    if val _ = v as Vendor.PYTHON:
+        return _hexcli_two_arg(vendor_tag: "python", primitive: "sha512", a: bytes_to_hex(input), b: "")
+    if val _ = v as Vendor.NODE:
+        return _hexcli_two_arg(vendor_tag: "node", primitive: "sha512", a: bytes_to_hex(input), b: "")
+    Err(RefErr.Skipped(vendor_name(v) + " sha512 dispatch pending"))
+
+fn ref_hmac_sha256_via(v: Vendor, key: [u8], msg: [u8]) -> Result<[u8], RefErr>:
+    if val _ = v as Vendor.OPENSSL:
+        return _openssl_hmac_sha256(key: key, msg: msg)
+    if val _ = v as Vendor.PYTHON:
+        return _hexcli_two_arg(vendor_tag: "python", primitive: "hmac_sha256", a: bytes_to_hex(key), b: bytes_to_hex(msg))
+    if val _ = v as Vendor.NODE:
+        return _hexcli_two_arg(vendor_tag: "node", primitive: "hmac_sha256", a: bytes_to_hex(key), b: bytes_to_hex(msg))
+    Err(RefErr.Skipped(vendor_name(v) + " hmac_sha256 dispatch pending"))
+
+fn ref_x25519_via(v: Vendor, scalar: [u8], peer: [u8]) -> Result<[u8], RefErr>:
+    if val _ = v as Vendor.OPENSSL:
+        return Err(RefErr.Skipped("openssl x25519 dispatch pending (pkeyutl raw-key PEM)"))
+    if val _ = v as Vendor.PYTHON:
+        return _hexcli_two_arg(vendor_tag: "python", primitive: "x25519", a: bytes_to_hex(scalar), b: bytes_to_hex(peer))
+    if val _ = v as Vendor.NODE:
+        return _hexcli_two_arg(vendor_tag: "node", primitive: "x25519", a: bytes_to_hex(scalar), b: bytes_to_hex(peer))
+    if val _ = v as Vendor.RING:
+        return Err(RefErr.Skipped("ring x25519 raw-scalar not in public API"))
+    Err(RefErr.Skipped(vendor_name(v) + " x25519 dispatch pending"))
+
+fn ref_ed25519_sign_via(v: Vendor, sk: [u8], msg: [u8]) -> Result<[u8], RefErr>:
+    if val _ = v as Vendor.PYTHON:
+        return _hexcli_two_arg(vendor_tag: "python", primitive: "ed25519_sign", a: bytes_to_hex(sk), b: bytes_to_hex(msg))
+    if val _ = v as Vendor.NODE:
+        return _hexcli_two_arg(vendor_tag: "node", primitive: "ed25519_sign", a: bytes_to_hex(sk), b: bytes_to_hex(msg))
+    Err(RefErr.Skipped(vendor_name(v) + " ed25519_sign dispatch pending"))
+
+# ============================================================================
+# OpenSSL direct — binary I/O via tempfiles
+# ============================================================================
+
+fn _openssl_digest(name: text, input: [u8]) -> Result<[u8], RefErr>:
+    val in_path = _tempfile("oss_" + name + "_in")
+    rt_file_write_bytes(in_path, input)
+    val out_path = _tempfile("oss_" + name + "_out")
+    val r = rt_process_run(
+        "openssl",
+        ["dgst", "-" + name, "-binary", "-out", out_path, in_path]
+    )
+    if r.2 != 0:
+        return Err(RefErr.ProcessErr(r.2, r.1))
+    Ok(_read_bytes(out_path))
+
+fn _openssl_hmac_sha256(key: [u8], msg: [u8]) -> Result<[u8], RefErr>:
+    val key_hex = bytes_to_hex(key)
+    val in_path = _tempfile("oss_hmac_in")
+    rt_file_write_bytes(in_path, msg)
+    val out_path = _tempfile("oss_hmac_out")
+    val r = rt_process_run(
+        "openssl",
+        ["dgst", "-sha256", "-mac", "HMAC", "-macopt", "hexkey:" + key_hex,
+         "-binary", "-out", out_path, in_path]
+    )
+    if r.2 != 0:
+        return Err(RefErr.ProcessErr(r.2, r.1))
+    Ok(_read_bytes(out_path))
+
+# ============================================================================
+# Hex-in / hex-out CLI dispatch (python, node; go/ring ready)
+# ============================================================================
+
+fn _hexcli_two_arg(vendor_tag: text, primitive: text, a: text, b: text) -> Result<[u8], RefErr>:
+    """Invoke a vendor CLI with argv = [<primitive>, a, b] (b omitted if empty)
+    and parse a single-line hex stdout."""
+    val plan = _cli_plan(vendor_tag: vendor_tag, primitive: primitive, a: a, b: b)
+    val r = rt_process_run(plan.0, plan.1)
+    if r.2 != 0:
+        return Err(RefErr.ProcessErr(r.2, r.1))
+    _parse_hex_line(r.0)
+
+fn _cli_plan(vendor_tag: text, primitive: text, a: text, b: text) -> (text, [text]):
+    """Return (program, argv) for the given vendor and 2-argument primitive."""
+    if vendor_tag == "python":
+        var args: [text] = ["tools/ref_crypto/python/cli.py", primitive, a]
+        if b.len() > 0:
+            args.push(b)
+        return ("python3", args)
+    if vendor_tag == "node":
+        var args: [text] = ["tools/ref_crypto/node/cli.mjs", primitive, a]
+        if b.len() > 0:
+            args.push(b)
+        return ("node", args)
+    if vendor_tag == "go":
+        var args: [text] = ["run", "tools/ref_crypto/go/cmd/hash.go", primitive, a]
+        if b.len() > 0:
+            args.push(b)
+        return ("go", args)
+    if vendor_tag == "ring":
+        var args: [text] = [primitive, a]
+        if b.len() > 0:
+            args.push(b)
+        return ("tools/ref_crypto/ring/target/release/ref_ring", args)
+    ("false", ["unknown-vendor:" + vendor_tag])
+
+# ============================================================================
+# Output parsing
+# ============================================================================
+
+fn _parse_hex_line(stdout: text) -> Result<[u8], RefErr>:
+    """Strip a trailing newline (and optional carriage return) from stdout and
+    hex-decode the rest. Returns ParseErr if the payload is not valid hex."""
+    var line: text = stdout
+    if line.ends_with("\n"):
+        line = line[0..line.len() - 1]
+    if line.ends_with("\r"):
+        line = line[0..line.len() - 1]
+    val bytes = hex_to_bytes(line)
+    if bytes.len() == 0 and line.len() > 0:
+        return Err(RefErr.ParseErr("non-hex stdout: " + line))
+    Ok(bytes)
+
+# ============================================================================
+# Tempfile helpers
+# ============================================================================
+
+var _seq: u64 = 0
+
+fn _tempfile(tag: text) -> text:
+    _seq = _seq + 1
+    "/tmp/spl_ref_harness_" + tag + "_" + _seq.to_text() + ".bin"
+
+fn _read_bytes(path: text) -> [u8]:
+    val r = rt_file_read_bytes(path)
+    if val bytes = r:
+        bytes
+    else:
+        []

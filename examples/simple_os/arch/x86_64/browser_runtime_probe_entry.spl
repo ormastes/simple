@@ -1,5 +1,8 @@
 #![allow(unnamed_duplicate_typed_args)]
 
+# Tiny x86_64 QEMU entry that exercises the real BrowserSession runtime
+# path in guest mode without the heavier framebuffer/browser shell flow.
+
 use os.kernel.arch.x86_64.console.{serial_init, serial_writeln}
 use os.kernel.arch.x86_64.interrupt.{X86Interrupt}
 use os.kernel.arch.x86_64.arch_init.{arch_x86_64_early_init}
@@ -24,7 +27,11 @@ fn _apply_request(session: BrowserSession, request: BrowserRequest) -> Result<bo
     serial_println("[BR] Session response {request.id}: status={response.status} body_len={response.body.len()}")
     if response.error != "":
         return Err(response.error)
-    session.commit_network_response(response)
+    match session.commit_network_response(response):
+        Ok(_) =>
+            Ok(true)
+        Err(e) =>
+            Err(e)
 
 fn _pump_runtime_session(session: BrowserSession) -> Result<bool, text>:
     session.begin_navigation(browser_runtime_guest_boot_url())
@@ -41,6 +48,16 @@ fn _pump_runtime_session(session: BrowserSession) -> Result<bool, text>:
         )
     )?
 
+    var remaining_steps = 16
+    while remaining_steps > 0:
+        if val Some(request) = session.take_pending_request():
+            val _ = _apply_request(session, request)?
+        else:
+            break
+        remaining_steps = remaining_steps - 1
+
+    if remaining_steps == 0:
+        return Err("runtime guest request pump exhausted step budget")
     if session.current_title != browser_runtime_guest_expected_title():
         return Err("unexpected runtime title: {session.current_title}")
     if session.current_body_html != browser_runtime_guest_expected_body():

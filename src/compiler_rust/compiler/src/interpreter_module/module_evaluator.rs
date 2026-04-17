@@ -120,7 +120,7 @@ pub fn evaluate_module_exports_with_preloaded(
     let local_functions_arc = export_functions(&local_functions, &filtered_env, &mut exports, &mut env);
 
     // Process bare export statements
-    process_bare_exports(&bare_exports, &env, &mut exports);
+    process_bare_exports(&bare_exports, &env, &mut exports, module_path);
 
     // Return env, exports, and the local definitions for caching
     Ok((env, exports, local_functions_arc, local_classes, local_enums))

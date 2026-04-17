@@ -1129,6 +1129,12 @@ pub fn public_api() -> text: "hello"
 # Friend-visible — accessible by declared friend packages only
 pub(friend) fn internal_helper() -> text: "internal"
 
+# Peer-visible — accessible from same-path sibling layers only
+pub(peer) fn sibling_helper() -> text: "peer"
+
+# Parent-visible — accessible from the immediate parent facade only
+pub(up) fn parent_helper() -> text: "up"
+
 # Package-visible — accessible within the same package only
 pub(package) fn package_util() -> text: "package"
 
@@ -1156,6 +1162,9 @@ internal_export HirLowering, HirBuilder
 - **Non-transitive:** A's friend seeing B's friend's internals is NOT allowed
 - **Unidirectional:** `friend X` means X can see our internals, not vice versa
 - **Non-inherited:** Friend status does not extend to subpackages
+- **Scoped sibling access:** `pub(peer)` is for same-path modules in different numbered layers
+- **Scoped parent access:** `pub(up)` is for the nearest parent `__init__.spl`
+- **Compatibility mode:** sibling access to a private symbol still warns until it is migrated to `pub(peer)`
 
 See [Friend Access Control](../design/friend_access_control.md) and [Layered Compiler Architecture](../design/layered_compiler_architecture.md).
 

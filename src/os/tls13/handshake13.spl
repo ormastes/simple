@@ -15,6 +15,7 @@ val HS_CLIENT_HELLO: u8         = 1
 val HS_SERVER_HELLO: u8         = 2
 val HS_ENCRYPTED_EXTENSIONS: u8 = 8
 val HS_CERTIFICATE: u8          = 11
+val HS_CERTIFICATE_REQUEST: u8  = 13
 val HS_CERTIFICATE_VERIFY: u8   = 15
 val HS_FINISHED: u8             = 20
 
@@ -55,6 +56,11 @@ class CertVerifyFields:
     """Fields from a CertificateVerify message (Simple lacks tuple returns)."""
     algorithm: u16
     signature: [u8]
+
+class CertificateRequest13:
+    """Decoded TLS 1.3 CertificateRequest subset used by the client."""
+    request_context: [u8]
+    sig_algs: [u16]
 
 # ============================================================================
 # Private Byte Helpers
@@ -418,6 +424,70 @@ fn parse_certificate_body(body: [u8]) -> [u8]:
         i = i + 1
     cert
 
+fn parse_certificate_chain_body(body: [u8]) -> [[u8]]:
+    """Extract the full certificate chain from a Certificate message body."""
+    val ctx_len = body[0].to_u64()
+    var offset: u64 = 1 + ctx_len
+    val cert_list_len = _u24_be(body, offset)
+    offset = offset + 3
+    val cert_list_end = offset + cert_list_len
+
+    var chain: [[u8]] = []
+    while offset + 3 <= cert_list_end:
+        val cert_len = _u24_be(body, offset)
+        offset = offset + 3
+
+        var cert: [u8] = []
+        var i: u64 = 0
+        while i < cert_len:
+            cert.push(body[offset + i])
+            i = i + 1
+        chain.push(cert)
+        offset = offset + cert_len
+
+        if offset + 2 > cert_list_end:
+            return chain
+        val ext_len = _u16_be(body, offset).to_u64()
+        offset = offset + 2 + ext_len
+    chain
+
+fn parse_certificate_request(body: [u8]) -> CertificateRequest13:
+    """Parse a TLS 1.3 CertificateRequest body.
+
+    Extracts the request context and any signature_algorithms extension values.
+    Unknown extensions are ignored.
+    """
+    val ctx_len = body[0].to_u64()
+    var request_context: [u8] = []
+    var i: u64 = 0
+    while i < ctx_len:
+        request_context.push(body[1 + i])
+        i = i + 1
+
+    var sig_algs: [u16] = []
+    var offset: u64 = 1 + ctx_len
+    val exts_len = _u16_be(body, offset).to_u64()
+    offset = offset + 2
+    val exts_end = offset + exts_len
+
+    while offset + 4 <= exts_end:
+        val ext_type = _u16_be(body, offset)
+        offset = offset + 2
+        val ext_len = _u16_be(body, offset).to_u64()
+        offset = offset + 2
+
+        if ext_type == EXT_SIG_ALGS and ext_len >= 2:
+            val list_len = _u16_be(body, offset).to_u64()
+            var list_pos: u64 = offset + 2
+            val list_end = list_pos + list_len
+            while list_pos + 2 <= list_end:
+                sig_algs.push(_u16_be(body, list_pos))
+                list_pos = list_pos + 2
+
+        offset = offset + ext_len
+
+    CertificateRequest13(request_context: request_context, sig_algs: sig_algs)
+
 # ============================================================================
 # Public: Parse CertificateVerify
 # ============================================================================
@@ -482,4 +552,44 @@ fn build_finished_bytes(verify_data: [u8]) -> [u8]:
     out.push(HS_FINISHED)
     out = _append_bytes(out, body_len)
     out = _append_bytes(out, verify_data)
+    out
+
+fn build_certificate_bytes(request_context: [u8], cert_chain: [[u8]]) -> [u8]:
+    """Build a TLS 1.3 Certificate handshake message."""
+    var body: [u8] = []
+    body.push(request_context.len().to_u8())
+    body = _append_bytes(body, request_context)
+
+    var cert_list: [u8] = []
+    var cert_idx: u64 = 0
+    while cert_idx < cert_chain.len():
+        val cert_der = cert_chain[cert_idx]
+        cert_list = _append_bytes(cert_list, _put_u24_be(cert_der.len().to_u64()))
+        cert_list = _append_bytes(cert_list, cert_der)
+        cert_list.push(0x00)
+        cert_list.push(0x00)
+        cert_idx = cert_idx + 1
+
+    body = _append_bytes(body, _put_u24_be(cert_list.len().to_u64()))
+    body = _append_bytes(body, cert_list)
+
+    val body_len = _put_u24_be(body.len().to_u64())
+    var out: [u8] = []
+    out.push(HS_CERTIFICATE)
+    out = _append_bytes(out, body_len)
+    out = _append_bytes(out, body)
+    out
+
+fn build_certificate_verify_bytes(algorithm: u16, signature: [u8]) -> [u8]:
+    """Build a TLS 1.3 CertificateVerify handshake message."""
+    var body: [u8] = []
+    body = _append_bytes(body, _put_u16_be(algorithm))
+    body = _append_bytes(body, _put_u16_be(signature.len().to_u16()))
+    body = _append_bytes(body, signature)
+
+    val body_len = _put_u24_be(body.len().to_u64())
+    var out: [u8] = []
+    out.push(HS_CERTIFICATE_VERIFY)
+    out = _append_bytes(out, body_len)
+    out = _append_bytes(out, body)
     out

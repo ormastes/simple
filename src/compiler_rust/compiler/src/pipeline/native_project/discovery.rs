@@ -38,6 +38,16 @@ impl NativeProjectBuilder {
     }
 
     fn discover_reachable_files(&self, entry_file: &Path) -> Result<Vec<PathBuf>, String> {
+        self.discover_reachable_files_with_sources(entry_file)
+            .map(|files| files.into_iter().map(|(path, _)| path).collect())
+    }
+
+    /// Discover reachable files and retain their source text so the build
+    /// phase can reuse the already-read contents.
+    pub(crate) fn discover_reachable_files_with_sources(
+        &self,
+        entry_file: &Path,
+    ) -> Result<Vec<(PathBuf, String)>, String> {
         let canonical_entry = safe_canonicalize(entry_file);
 
         // Build one resolver per source dir so imports can cross source boundaries.
@@ -64,7 +74,7 @@ impl NativeProjectBuilder {
 
         let mut queue = VecDeque::from([canonical_entry.clone()]);
         let mut seen = HashSet::new();
-        let mut files = Vec::new();
+        let mut files: Vec<(PathBuf, String)> = Vec::new();
 
         while let Some(path) = queue.pop_front() {
             let canonical = safe_canonicalize(&path);
@@ -85,16 +95,11 @@ impl NativeProjectBuilder {
                 .map_err(|e| format!("failed to parse {} during discovery: {}", canonical.display(), e))?;
 
             // Try each resolver -- the first hit wins for each dependency.
-            let mut found_deps: Vec<PathBuf> = Vec::new();
+            let mut found_deps: HashSet<PathBuf> = HashSet::new();
             for resolver in &mut resolvers {
                 for dep in extract_reachable_module_paths(&module, &canonical, resolver) {
                     let dep_canonical = safe_canonicalize(&dep);
-                    if !found_deps
-                        .iter()
-                        .any(|existing| same_file_path(existing, &dep_canonical))
-                    {
-                        found_deps.push(dep_canonical);
-                    }
+                    found_deps.insert(dep_canonical);
                 }
             }
 
@@ -166,25 +171,19 @@ impl NativeProjectBuilder {
                             let spl_path = src_dir.join(&rel_path).with_extension("spl");
                             if spl_path.is_file() {
                                 let dep_canonical = safe_canonicalize(&spl_path);
-                                if !found_deps.iter().any(|e| same_file_path(e, &dep_canonical)) {
-                                    found_deps.push(dep_canonical);
-                                }
+                                found_deps.insert(dep_canonical);
                                 break;
                             }
                             let mod_path = src_dir.join(&rel_path).join("mod.spl");
                             if mod_path.is_file() {
                                 let dep_canonical = safe_canonicalize(&mod_path);
-                                if !found_deps.iter().any(|e| same_file_path(e, &dep_canonical)) {
-                                    found_deps.push(dep_canonical);
-                                }
+                                found_deps.insert(dep_canonical);
                                 break;
                             }
                             let init_path = src_dir.join(&rel_path).join("__init__.spl");
                             if init_path.is_file() {
                                 let dep_canonical = safe_canonicalize(&init_path);
-                                if !found_deps.iter().any(|e| same_file_path(e, &dep_canonical)) {
-                                    found_deps.push(dep_canonical);
-                                }
+                                found_deps.insert(dep_canonical);
                                 break;
                             }
                         }
@@ -197,10 +196,12 @@ impl NativeProjectBuilder {
                     queue.push_back(dep);
                 }
             }
+
+            files.push((canonical.clone(), source));
         }
 
-        files.sort();
-        files.dedup_by(|a, b| same_file_path(a, b));
+        files.sort_by(|a, b| a.0.cmp(&b.0));
+        files.dedup_by(|a, b| same_file_path(&a.0, &b.0));
         Ok(files)
     }
 

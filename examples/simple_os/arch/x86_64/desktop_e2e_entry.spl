@@ -54,13 +54,12 @@ extern fn serial_println(msg: text)
 extern fn rt_gui_set_fb(addr: u64, width: u64)
 extern fn rt_gui_fill4(xy: u64, wh: u64, color: u64, unused: u64) -> u64
 extern fn rt_port_outb(port: u64, value: u64)
-extern fn rt_env_get(key: text) -> text?
 
 val DEBUG_EXIT: u64 = 0xF4
 val COM1_LSR: u16 = 0x3FD
 val COM1_DATA: u16 = 0x3F8
 val HARNESS_MARKER: text = "[harness] screendump-complete"
-val HARNESS_WAIT_ITERS: u64 = 300000000   # ~30s at ~100ns per iter in QEMU
+val HARNESS_WAIT_ITERS: u64 = 20000000   # short best-effort post-pass settle window
 val BROWSER_APP_ID: text = "/sys/apps/browser_demo"
 val KEY_B: u32 = 0x42
 val KEY_E: u32 = 0x45
@@ -193,7 +192,15 @@ fn desktop_e2e_main() -> bool:
     # beyond a ~2s delay between desktop-ready and shortcut:ok.
     _paint_settle()
     serial_println("[desktop-e2e] paint-settle:done")
-    _framebuffer_capture_window()
+<<<<<<< Conflict 1 of 2
+%%%%%%% Changes from base to side #1
++    _framebuffer_capture_window()
++++++++ Contents of side #2
+    # Hold the guest on the exact bare-desktop capture marker so the
+    # framebuffer QMP lane can attach and screendump before the shortcut
+    # chain advances into later launcher/editor work.
+    _paint_settle()
+>>>>>>> Conflict 1 of 2 ends
 
     # ---- SYS-GUI-002: launcher shortcut + wm join ----
     # Dispatch Meta+B through the real launcher shortcut path. This is the
@@ -245,7 +252,16 @@ fn desktop_e2e_main() -> bool:
     # ---- Multi-window remote-grouping proof (deeper SYS-GUI-004 preview) ----
     _paint_probe_scene(true)
     serial_println("[desktop-e2e] remote-grouping:ok pid={browser_pid} windows=2 mode=resident-manifest")
-    _framebuffer_capture_window()
+<<<<<<< Conflict 2 of 2
+%%%%%%% Changes from base to side #1
++    _framebuffer_capture_window()
++++++++ Contents of side #2
+    # Same idea as the bare-desktop capture window above, but for the
+    # with-apps framebuffer lane: keep the fully composed browser/hello
+    # scene stable long enough for QMP screendump before the editor proof
+    # mutates the desktop further.
+    _paint_settle()
+>>>>>>> Conflict 2 of 2 ends
 
     # ---- Editor persistence proof: GUI save + CLI readback on FAT32 ----
     val editor_dispatched = launcher_shortcut_dispatch(KEY_E, META_MODIFIER)
@@ -293,11 +309,11 @@ fn _wait_for_harness_marker():
     human-monitor-command after its QMP screendump finishes. Reads bytes
     from COM1 DATA register (0x3F8) when LSR bit 0 (data ready) is set,
     accumulates a rolling window, and checks for the marker substring.
-    Times out after HARNESS_WAIT_ITERS busy-wait iterations (~30s) so
-    the guest exits even if the harness never sends the marker.
+    Uses a short, silent best-effort wait window after TEST PASSED so the
+    framebuffer QMP harness can finish a screendump before isa-debug-exit
+    tears QEMU down. On non-harness lanes no marker arrives and the guest
+    exits after the short settle period without emitting timeout noise.
     """
-    if (rt_env_get("SIMPLEOS_WAIT_FOR_HARNESS") ?? "") != "1":
-        return
     var buf: text = ""
     var iter: u64 = 0
     while iter < HARNESS_WAIT_ITERS:
@@ -309,10 +325,8 @@ fn _wait_for_harness_marker():
             if buf.len() > 64:
                 buf = buf[buf.len() - 64:]
             if buf.contains(HARNESS_MARKER):
-                serial_println("[desktop-e2e] harness-marker:received")
                 return
         iter = iter + 1
-    serial_println("[desktop-e2e] harness-marker:timeout")
 
 fn _wait_for_harness_marker_brief():
     var buf: text = ""

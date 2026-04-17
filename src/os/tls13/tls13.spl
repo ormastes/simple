@@ -17,16 +17,25 @@ use os.tls13.key_schedule.{
 use os.tls13.record13.{RecordKey, RecordResult, record13_encrypt, record13_decrypt}
 use os.tls13.handshake13.{
     build_client_hello_bytes, parse_server_hello, parse_handshake_header,
-    parse_certificate_body, parse_certificate_verify, parse_finished_body,
-    build_finished_bytes, ServerHello13, ParsedHandshake, CertVerifyFields
+    parse_certificate_body, parse_certificate_chain_body, parse_certificate_request, parse_certificate_verify, parse_finished_body,
+    build_finished_bytes, build_certificate_bytes, build_certificate_verify_bytes,
+    ServerHello13, ParsedHandshake, CertVerifyFields, CertificateRequest13
 }
 use os.tls13.cert_verify.{
     extract_ed25519_pubkey_from_cert, extract_rsa_pubkey_spki_from_cert,
-    verify_certificate_verify_msg_scheme,
-    CertVerifyResult
+    verify_certificate_verify_msg_scheme, verify_cert_chain,
+    CertVerifyResult, CertChainResult
 }
 use os.userlib.net.{Socket, send, recv}
 use os.crypto.curve25519.{x25519, x25519_base}
+<<<<<<< Conflict 1 of 20
+%%%%%%% Changes from base to side #1
+-use os.crypto.random.{random_bytes}
++++++++ Contents of side #2
+use os.crypto.random.{random_bytes}
+use std.nogc_sync_mut.io.signature_ffi.{ed25519_sign}
+use std.nogc_sync_mut.io.tcp.{TcpStream}
+>>>>>>> Conflict 1 of 20 ends
 
 # ============================================================================
 # TCP I/O externs
@@ -45,6 +54,7 @@ val _TLS_MAX_RECORD_PAYLOAD: u64 = 18432
 
 val _HS_ENCRYPTED_EXTENSIONS: u8 = 8
 val _HS_CERTIFICATE: u8          = 11
+val _HS_CERTIFICATE_REQUEST: u8  = 13
 val _HS_CERTIFICATE_VERIFY: u8   = 15
 val _HS_FINISHED: u8             = 20
 
@@ -53,7 +63,13 @@ val _HS_FINISHED: u8             = 20
 # ============================================================================
 
 class Tls13Context:
+<<<<<<< Conflict 2 of 20
++++++++ Contents of side #1
     tcp_sock: Socket
+%%%%%%% Changes from base to side #2
+-    tcp_fd: i64
++    io: Tls13Io
+>>>>>>> Conflict 2 of 20 ends
     server_key: RecordKey
     client_key: RecordKey
     server_seq: u64
@@ -67,10 +83,23 @@ enum Tls13ConnectResult:
     Connected(ctx: Tls13Context)
     Failed(reason: text)
 
+class Tls13ClientConfig:
+    client_cert_chain: [[u8]]
+    client_pkcs8: [u8]
+    client_sig_scheme: u16
+    root_store: [[u8]]
+
+class Tls13Io:
+    kind: text
+    tcp_fd: i64
+    host_stream: TcpStream
+
 # ============================================================================
 # TCP I/O helpers
 # ============================================================================
 
+<<<<<<< Conflict 3 of 20
++++++++ Contents of side #1
 fn _tcp_send(sock: Socket, data: [u8]) -> bool:
     """Send all bytes over TCP. Returns false if the socket write fails."""
     var sent: u64 = 0
@@ -87,13 +116,39 @@ fn _tcp_send(sock: Socket, data: [u8]) -> bool:
         if wrote > remaining:
             return false
     true
+%%%%%%% Changes from base to side #2
+-fn _tcp_send(fd: i64, data: [u8]):
++fn _fd_io(fd: i64) -> Tls13Io:
++    Tls13Io(kind: "fd", tcp_fd: fd, host_stream: TcpStream(fd: -1, open: false))
++
++fn _host_stream_io(stream: TcpStream) -> Tls13Io:
++    Tls13Io(kind: "host_stream", tcp_fd: -1, host_stream: stream)
++
++fn _io_send(io: Tls13Io, data: [u8]):
+     """Send all bytes over TCP. Fire and forget — no return value."""
+-    rt_net_send_bytes(fd, data)
++    if io.kind == "host_stream":
++        match io.host_stream.write_all(data):
++            Ok(()): pass_dn
++            Err(_): pass_dn
++    else:
++        rt_net_send_bytes(io.tcp_fd, data)
+>>>>>>> Conflict 3 of 20 ends
 
+<<<<<<< Conflict 4 of 20
++++++++ Contents of side #1
 fn _tcp_recv(sock: Socket, length: u64) -> [u8]:
+%%%%%%% Changes from base to side #2
+-fn _tcp_recv(fd: i64, length: u64) -> [u8]:
++fn _io_recv(io: Tls13Io, length: u64) -> [u8]:
+>>>>>>> Conflict 4 of 20 ends
     """Read exactly length bytes from TCP. Returns partial data on close."""
     var result: [u8] = []
     var empty_spins: u64 = 0
     while result.len() < length:
         val remaining = length - result.len()
+<<<<<<< Conflict 5 of 20
++++++++ Contents of side #1
         val chunk_result = recv(sock, remaining)
         if chunk_result.is_err():
             empty_spins = empty_spins + 1
@@ -102,6 +157,15 @@ fn _tcp_recv(sock: Socket, length: u64) -> [u8]:
             rt_thread_sleep(1)
             continue
         val chunk = chunk_result.unwrap()
+%%%%%%% Changes from base to side #2
+-        val chunk = rt_net_recv_bytes(fd, remaining.to_i64())
++        val chunk = if io.kind == "host_stream":
++            match io.host_stream.read(remaining.to_i64()):
++                Ok(data): data
++                Err(_): []
++        else:
++            rt_net_recv_bytes(io.tcp_fd, remaining.to_i64())
+>>>>>>> Conflict 5 of 20 ends
         if chunk.len() == 0:
             empty_spins = empty_spins + 1
             if empty_spins > 100000:
@@ -121,17 +185,35 @@ fn _tcp_recv(sock: Socket, length: u64) -> [u8]:
             i = i + 1
     result
 
+<<<<<<< Conflict 6 of 20
++++++++ Contents of side #1
 fn _tcp_recv_record(sock: Socket) -> [u8]:
+%%%%%%% Changes from base to side #2
+-fn _tcp_recv_record(fd: i64) -> [u8]:
++fn _io_recv_record(io: Tls13Io) -> [u8]:
+>>>>>>> Conflict 6 of 20 ends
     """Read one complete TLS record: 5-byte header + payload."""
+<<<<<<< Conflict 7 of 20
++++++++ Contents of side #1
     val header = _tcp_recv(sock, 5)
+%%%%%%% Changes from base to side #2
+-    val header = _tcp_recv(fd, 5)
++    val header = _io_recv(io, 5)
+>>>>>>> Conflict 7 of 20 ends
     if header.len() < 5:
         return header
     val pay_len = (header[3].to_u64() << 8) | header[4].to_u64()
+<<<<<<< Conflict 8 of 20
++++++++ Contents of side #1
     if pay_len == 0 or pay_len > _TLS_MAX_RECORD_PAYLOAD:
         return []
     val payload = _tcp_recv(sock, pay_len)
     if payload.len() < pay_len:
         return []
+%%%%%%% Changes from base to side #2
+-    val payload = _tcp_recv(fd, pay_len)
++    val payload = _io_recv(io, pay_len)
+>>>>>>> Conflict 8 of 20 ends
     var result: [u8] = []
     var i: u64 = 0
     while i < header.len():
@@ -162,11 +244,68 @@ fn _build_plaintext_record(content_type: u8, payload: [u8]) -> [u8]:
         i = i + 1
     rec
 
+fn _sig_algs_contains(sig_algs: [u16], scheme: u16) -> bool:
+    if sig_algs.len() == 0:
+        return true
+    var i: u64 = 0
+    while i < sig_algs.len():
+        if sig_algs[i] == scheme:
+            return true
+        i = i + 1
+    false
+
+fn _build_client_cert_verify_content(thash: [u8]) -> [u8]:
+    """Build the client-side RFC 8446 CertificateVerify signed content."""
+    var content: [u8] = []
+    var i: u64 = 0
+    while i < 64:
+        content.push(0x20)
+        i = i + 1
+
+    val prefix = [
+        0x54u8, 0x4C, 0x53, 0x20, 0x31, 0x2E, 0x33, 0x2C, 0x20,
+        0x63, 0x6C, 0x69, 0x65, 0x6E, 0x74, 0x20,
+        0x43, 0x65, 0x72, 0x74, 0x69, 0x66, 0x69, 0x63, 0x61,
+        0x74, 0x65, 0x56, 0x65, 0x72, 0x69, 0x66, 0x79
+    ]
+    i = 0
+    while i < prefix.len():
+        content.push(prefix[i])
+        i = i + 1
+    content.push(0x00)
+
+    i = 0
+    while i < thash.len():
+        content.push(thash[i])
+        i = i + 1
+    content
+
+fn tls13_default_client_config() -> Tls13ClientConfig:
+    Tls13ClientConfig(client_cert_chain: [], client_pkcs8: [], client_sig_scheme: 0x0807, root_store: [])
+
 # ============================================================================
 # Main: tls13_connect
 # ============================================================================
 
-fn tls13_connect(tcp_sock: Socket, hostname: text) -> Tls13ConnectResult:
+<<<<<<< Conflict 9 of 20
+%%%%%%% Changes from base to side #1
+-fn tls13_connect(tcp_fd: i64, hostname: text) -> Tls13ConnectResult:
++fn tls13_connect(tcp_sock: Socket, hostname: text) -> Tls13ConnectResult:
++++++++ Contents of side #2
+fn tls13_connect(tcp_fd: i64, hostname: text) -> Tls13ConnectResult:
+    tls13_connect_with_config(tcp_fd, hostname, tls13_default_client_config())
+
+fn tls13_connect_with_config(tcp_fd: i64, hostname: text, config: Tls13ClientConfig) -> Tls13ConnectResult:
+    tls13_connect_io_with_config(_fd_io(tcp_fd), hostname, config)
+
+fn tls13_connect_host_stream(stream: TcpStream, hostname: text) -> Tls13ConnectResult:
+    tls13_connect_host_stream_with_config(stream, hostname, tls13_default_client_config())
+
+fn tls13_connect_host_stream_with_config(stream: TcpStream, hostname: text, config: Tls13ClientConfig) -> Tls13ConnectResult:
+    tls13_connect_io_with_config(_host_stream_io(stream), hostname, config)
+
+fn tls13_connect_io_with_config(io: Tls13Io, hostname: text, config: Tls13ClientConfig) -> Tls13ConnectResult:
+>>>>>>> Conflict 9 of 20 ends
     """Perform a full TLS 1.3 client handshake over an existing TCP connection.
 
     Steps:
@@ -177,7 +316,7 @@ fn tls13_connect(tcp_sock: Socket, hostname: text) -> Tls13ConnectResult:
       5. Read encrypted records, accumulate handshake bytes.
       6. Process: EncryptedExtensions, Certificate, CertificateVerify, Finished.
       7. Verify CertificateVerify + server Finished.
-      8. Compute app secrets. Send client Finished.
+      8. Compute app secrets. Optionally send client auth. Send client Finished.
       9. Return Tls13Context with app traffic keys.
     """
     # The current C-backed guest networking profile completes connect()
@@ -207,8 +346,14 @@ fn tls13_connect(tcp_sock: Socket, hostname: text) -> Tls13ConnectResult:
     ]
     val ch_bytes = build_client_hello_bytes(ch_random, pub_key, hostname)
     val ch_record = _build_plaintext_record(0x16, ch_bytes)
+<<<<<<< Conflict 10 of 20
++++++++ Contents of side #1
     if not _tcp_send(tcp_sock, ch_record):
         return Tls13ConnectResult.Failed(reason: "ClientHello send failed")
+%%%%%%% Changes from base to side #2
+-    _tcp_send(tcp_fd, ch_record)
++    _io_send(io, ch_record)
+>>>>>>> Conflict 10 of 20 ends
 
     var transcript = transcript_new()
     transcript = transcript_add(transcript, ch_bytes)
@@ -216,7 +361,13 @@ fn tls13_connect(tcp_sock: Socket, hostname: text) -> Tls13ConnectResult:
     # ------------------------------------------------------------------
     # Step 3: Read and parse ServerHello
     # ------------------------------------------------------------------
+<<<<<<< Conflict 11 of 20
++++++++ Contents of side #1
     val sh_raw = _tcp_recv_record(tcp_sock)
+%%%%%%% Changes from base to side #2
+-    val sh_raw = _tcp_recv_record(tcp_fd)
++    val sh_raw = _io_recv_record(io)
+>>>>>>> Conflict 11 of 20 ends
     if sh_raw.len() < 5:
         return Tls13ConnectResult.Failed(reason: "ServerHello: short read")
 
@@ -266,9 +417,12 @@ fn tls13_connect(tcp_sock: Socket, hostname: text) -> Tls13ConnectResult:
     var have_fin: bool = false
 
     var cert_der: [u8] = []
+    var cert_chain: [[u8]] = []
     var cert_verify_sig: [u8] = []
     var cert_verify_algo: u16 = 0
     var server_verify_data: [u8] = []
+    var cert_request = CertificateRequest13(request_context: [], sig_algs: [])
+    var server_requested_client_auth: bool = false
 
     # Saved transcript snapshots for verification
     var transcript_before_cv: Transcript = transcript_new()
@@ -276,7 +430,13 @@ fn tls13_connect(tcp_sock: Socket, hostname: text) -> Tls13ConnectResult:
 
     while (not have_ee) or (not have_cert) or (not have_cv) or (not have_fin):
         # Read one TLS record (may be plaintext CCS or encrypted handshake)
+<<<<<<< Conflict 12 of 20
++++++++ Contents of side #1
         val raw = _tcp_recv_record(tcp_sock)
+%%%%%%% Changes from base to side #2
+-        val raw = _tcp_recv_record(tcp_fd)
++        val raw = _io_recv_record(io)
+>>>>>>> Conflict 12 of 20 ends
         if raw.len() < 5:
             return Tls13ConnectResult.Failed(reason: "encrypted record: short read")
 
@@ -330,8 +490,19 @@ fn tls13_connect(tcp_sock: Socket, hostname: text) -> Tls13ConnectResult:
                                 transcript = transcript_add_with_len(transcript, msg_bytes, msg_total)
                                 have_ee = true
 
+                            elif ph.msg_type == _HS_CERTIFICATE_REQUEST:
+                                transcript = transcript_add(transcript, msg_bytes)
+                                cert_request = parse_certificate_request(ph.body)
+                                server_requested_client_auth = true
+
                             elif ph.msg_type == _HS_CERTIFICATE:
+<<<<<<< Conflict 13 of 20
++++++++ Contents of side #1
                                 transcript = transcript_add_with_len(transcript, msg_bytes, msg_total)
+%%%%%%% Changes from base to side #2
+                                 transcript = transcript_add(transcript, msg_bytes)
++                                cert_chain = parse_certificate_chain_body(ph.body)
+>>>>>>> Conflict 13 of 20 ends
                                 cert_der = parse_certificate_body(ph.body)
                                 have_cert = true
 
@@ -377,6 +548,13 @@ fn tls13_connect(tcp_sock: Socket, hostname: text) -> Tls13ConnectResult:
     if val CertVerifyResult.Err(cv_err) = cv_result:
         return Tls13ConnectResult.Failed(reason: cv_err)
 
+    if config.root_store.len() > 0:
+        if cert_chain.len() == 0:
+            return Tls13ConnectResult.Failed(reason: "server certificate chain is empty")
+        val chain_result = verify_cert_chain(cert_chain, config.root_store)
+        if val CertChainResult.Err(chain_err) = chain_result:
+            return Tls13ConnectResult.Failed(reason: chain_err)
+
     # ------------------------------------------------------------------
     # Step 10: Verify server Finished
     # ------------------------------------------------------------------
@@ -411,22 +589,65 @@ fn tls13_connect(tcp_sock: Socket, hostname: text) -> Tls13ConnectResult:
     val client_app_rk = RecordKey(key: client_app_tk.key, iv: client_app_tk.iv)
 
     # ------------------------------------------------------------------
-    # Step 13: Send client Finished (encrypted with client_hs_key, seq=0)
+    # Step 13: Optional client auth, then client Finished
     # ------------------------------------------------------------------
+    var client_hs_seq: u64 = 0
+    if server_requested_client_auth:
+        var client_cert_msg = build_certificate_bytes(cert_request.request_context, [])
+        var should_send_cert_verify: bool = false
+
+        if (config.client_cert_chain.len() > 0) and
+           (config.client_pkcs8.len() > 0) and
+           _sig_algs_contains(cert_request.sig_algs, config.client_sig_scheme):
+            client_cert_msg = build_certificate_bytes(cert_request.request_context, config.client_cert_chain)
+            if config.client_sig_scheme == 0x0807:
+                should_send_cert_verify = true
+
+        transcript = transcript_add(transcript, client_cert_msg)
+        val client_cert_record = record13_encrypt(client_hs_rk, client_hs_seq, 0x16, client_cert_msg)
+        _io_send(io, client_cert_record)
+        client_hs_seq = client_hs_seq + 1
+
+        if should_send_cert_verify:
+            val client_cv_hash = transcript_hash(transcript)
+            val client_cv_content = _build_client_cert_verify_content(client_cv_hash)
+            val client_cv_sig = ed25519_sign(config.client_pkcs8, client_cv_content)
+            if client_cv_sig.len() == 0:
+                return Tls13ConnectResult.Failed(reason: "client CertificateVerify signing failed")
+            val client_cv_msg = build_certificate_verify_bytes(config.client_sig_scheme, client_cv_sig)
+            transcript = transcript_add(transcript, client_cv_msg)
+            val client_cv_record = record13_encrypt(client_hs_rk, client_hs_seq, 0x16, client_cv_msg)
+            _io_send(io, client_cv_record)
+            client_hs_seq = client_hs_seq + 1
+
     val client_fin_key = tls13_finished_key(secrets.client_hs_traffic)
     val client_fin_data = tls13_verify_data(client_fin_key, transcript)
     val client_fin_bytes = build_finished_bytes(client_fin_data)
 
-    # Encrypt with handshake key, seq=0, content_type=0x16 (handshake)
-    val client_fin_record = record13_encrypt(client_hs_rk, 0, 0x16, client_fin_bytes)
-    if not _tcp_send(tcp_sock, client_fin_record):
-        return Tls13ConnectResult.Failed(reason: "client Finished send failed")
+<<<<<<< Conflict 14 of 20
+%%%%%%% Changes from base to side #1
+     # Encrypt with handshake key, seq=0, content_type=0x16 (handshake)
+     val client_fin_record = record13_encrypt(client_hs_rk, 0, 0x16, client_fin_bytes)
+-    _tcp_send(tcp_fd, client_fin_record)
++    if not _tcp_send(tcp_sock, client_fin_record):
++        return Tls13ConnectResult.Failed(reason: "client Finished send failed")
++++++++ Contents of side #2
+    # Encrypt with handshake key at the next client handshake sequence number.
+    val client_fin_record = record13_encrypt(client_hs_rk, client_hs_seq, 0x16, client_fin_bytes)
+    _io_send(io, client_fin_record)
+>>>>>>> Conflict 14 of 20 ends
 
     # ------------------------------------------------------------------
     # Step 14-15: Reset seq numbers, return context with app keys
     # ------------------------------------------------------------------
     val ctx = Tls13Context(
+<<<<<<< Conflict 15 of 20
++++++++ Contents of side #1
         tcp_sock: tcp_sock,
+%%%%%%% Changes from base to side #2
+-        tcp_fd: tcp_fd,
++        io: io,
+>>>>>>> Conflict 15 of 20 ends
         server_key: server_app_rk,
         client_key: client_app_rk,
         server_seq: 0,
@@ -441,9 +662,21 @@ fn tls13_connect(tcp_sock: Socket, hostname: text) -> Tls13ConnectResult:
 fn tls13_send(ctx: Tls13Context, data: [u8]) -> Tls13Context:
     """Encrypt data with client_key at client_seq, send over TCP, return updated context."""
     val record = record13_encrypt(ctx.client_key, ctx.client_seq, 0x17, data)
+<<<<<<< Conflict 16 of 20
++++++++ Contents of side #1
     _tcp_send(ctx.tcp_sock, record)
+%%%%%%% Changes from base to side #2
+-    _tcp_send(ctx.tcp_fd, record)
++    _io_send(ctx.io, record)
+>>>>>>> Conflict 16 of 20 ends
     Tls13Context(
+<<<<<<< Conflict 17 of 20
++++++++ Contents of side #1
         tcp_sock: ctx.tcp_sock,
+%%%%%%% Changes from base to side #2
+-        tcp_fd: ctx.tcp_fd,
++        io: ctx.io,
+>>>>>>> Conflict 17 of 20 ends
         server_key: ctx.server_key,
         client_key: ctx.client_key,
         server_seq: ctx.server_seq,
@@ -456,7 +689,13 @@ fn tls13_send(ctx: Tls13Context, data: [u8]) -> Tls13Context:
 
 fn tls13_recv(ctx: Tls13Context) -> Tls13RecvData:
     """Read and decrypt one TLS record. Returns updated context and plaintext."""
+<<<<<<< Conflict 18 of 20
++++++++ Contents of side #1
     val raw = _tcp_recv_record(ctx.tcp_sock)
+%%%%%%% Changes from base to side #2
+-    val raw = _tcp_recv_record(ctx.tcp_fd)
++    val raw = _io_recv_record(ctx.io)
+>>>>>>> Conflict 18 of 20 ends
     val dec = record13_decrypt(ctx.server_key, ctx.server_seq, raw)
 
     var plain: [u8] = []
@@ -464,7 +703,13 @@ fn tls13_recv(ctx: Tls13Context) -> Tls13RecvData:
         plain = dec_data
 
     val new_ctx = Tls13Context(
+<<<<<<< Conflict 19 of 20
++++++++ Contents of side #1
         tcp_sock: ctx.tcp_sock,
+%%%%%%% Changes from base to side #2
+-        tcp_fd: ctx.tcp_fd,
++        io: ctx.io,
+>>>>>>> Conflict 19 of 20 ends
         server_key: ctx.server_key,
         client_key: ctx.client_key,
         server_seq: ctx.server_seq + 1,
@@ -484,5 +729,18 @@ fn tls13_close(ctx: Tls13Context):
     alert.push(0x00)  # close_notify
     # content_type 0x15 = alert
     val alert_record = record13_encrypt(ctx.client_key, ctx.client_seq, 0x15, alert)
-    _tcp_send(ctx.tcp_sock, alert_record)
-    rt_net_close(ctx.tcp_sock.fd.to_i64())
+<<<<<<< Conflict 20 of 20
+%%%%%%% Changes from base to side #1
+-    _tcp_send(ctx.tcp_fd, alert_record)
+-    rt_net_close(ctx.tcp_fd)
++    _tcp_send(ctx.tcp_sock, alert_record)
++    rt_net_close(ctx.tcp_sock.fd.to_i64())
++++++++ Contents of side #2
+    _io_send(ctx.io, alert_record)
+    if ctx.io.kind == "host_stream":
+        match ctx.io.host_stream.close():
+            Ok(()): pass_dn
+            Err(_): pass_dn
+    else:
+        rt_net_close(ctx.io.tcp_fd)
+>>>>>>> Conflict 20 of 20 ends

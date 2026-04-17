@@ -15,6 +15,10 @@ use std.nogc_sync_mut.qemu.qmp_client.{QmpClient, qmp_connect, qmp_screendump, q
 extern fn rt_thread_sleep(ms: i64)
 extern fn rt_process_run_timeout(cmd: text, args: [text], timeout_ms: i64) -> (text, text, i32)
 
+extern fn rt_file_exists(path: text) -> bool
+extern fn rt_file_delete(path: text) -> bool
+extern fn rt_thread_sleep(millis: i64)
+
 # ============================================================================
 # In-Process Capture
 # ============================================================================
@@ -53,6 +57,8 @@ fn _qmp_screendump_client(client: QmpClient, output_path: text) -> Result<bool, 
         return Err("QMP screendump command failed")
     Ok(true)
 
+<<<<<<< Conflict 1 of 2
++++++++ Contents of side #1
 fn _qmp_hmp_screendump_client(client: QmpClient, output_path: text) -> Result<bool, text>:
     val json = "{\"execute\": \"human-monitor-command\", \"arguments\": {\"command-line\": \"screendump {output_path}\"}}"
     val ok = qmp_send_check(client, json, "hmp screendump")
@@ -88,6 +94,25 @@ fn _capture_qmp_ppm_with_python(qmp_socket: text, output_path: text) -> bool:
     val result = rt_process_run_timeout("python3", ["-c", script, qmp_socket, output_path], 12000)
     result[2] == 0 and file_exists(output_path) and file_size(output_path) > 0
 
+%%%%%%% Changes from base to side #2
++fn _qmp_screendump_hmc(socket_path: text, output_path: text) -> Result<bool, text>:
++    """Fallback screendump path via human-monitor-command.
++
++    Some QEMU builds ACK the JSON screendump command but do not materialize
++    the host file promptly. The HMP `screendump <path>` path is older but
++    widely supported and writes PPM by filename.
++    """
++    val client = qmp_connect(socket_path)
++    if client.fd < 0:
++        return Err("QMP connect failed: {socket_path}")
++    val json = "{\"execute\": \"human-monitor-command\", \"arguments\": {\"command-line\": \"screendump {output_path}\"}}"
++    val ok = qmp_send_check(client, json, "human-monitor-command screendump")
++    qmp_disconnect(client)
++    if not ok:
++        return Err("QMP human-monitor-command screendump failed")
++    Ok(true)
++
+>>>>>>> Conflict 1 of 2 ends
 fn send_harness_marker(socket_path: text, marker: text):
     """Send a marker string to QEMU's serial output via QMP human-monitor-command.
 
@@ -100,6 +125,21 @@ fn send_harness_marker(socket_path: text, marker: text):
     val json = "{\"execute\": \"human-monitor-command\", \"arguments\": {\"command-line\": \"print {marker}\"}}"
     qmp_send_check(client, json, "harness-marker")
     qmp_disconnect(client)
+
+fn _wait_for_capture_file(output_path: text) -> text?:
+    var attempt: i64 = 0
+    while attempt < 20:
+        val ppm_data_opt = file_read_bytes(output_path)
+        match ppm_data_opt:
+            Some(ppm_data):
+                if ppm_data.len() > 0:
+                    return ppm_data
+            nil:
+                pass_dn
+        attempt = attempt + 1
+        if attempt < 20:
+            rt_thread_sleep(100)
+    nil
 
 fn capture_qemu_vm(qmp_socket: text, output_path: text) -> CaptureResult:
     """Capture QEMU framebuffer via QMP screendump command.
@@ -114,6 +154,8 @@ fn capture_qemu_vm(qmp_socket: text, output_path: text) -> CaptureResult:
     Returns:
         CaptureResult with ARGB pixel buffer or error
     """
+<<<<<<< Conflict 2 of 2
++++++++ Contents of side #1
     if file_exists(output_path):
         file_delete(output_path)
 
@@ -152,13 +194,34 @@ fn capture_qemu_vm(qmp_socket: text, output_path: text) -> CaptureResult:
                 return capture_error("qemu_vm", 0, 0, "QMP screendump file never materialized: {output_path} ({reason})")
 
         qmp_disconnect(client)
+%%%%%%% Changes from base to side #2
++    if rt_file_exists(output_path):
++        rt_file_delete(output_path)
++
+     val screendump_result = _qmp_screendump(qmp_socket, output_path)
+     match screendump_result:
+         Err(err):
+             return capture_error("qemu_vm", 0, 0, "QMP screendump failed for socket: {qmp_socket} ({err})")
+         Ok(_):
+             pass_dn
+>>>>>>> Conflict 2 of 2 ends
 
-    # Read and decode the screenshot file (rt_file_read_bytes returns Option<[u8]>)
-    val ppm_data_opt = file_read_bytes(output_path)
+    # QEMU may ACK screendump before the host file is fully materialized.
+    # Poll briefly for a fresh non-empty file instead of decoding a stale
+    # leftover capture from a previous run or racing a zero-length write.
+    var ppm_data_opt = _wait_for_capture_file(output_path)
+    match ppm_data_opt:
+        Some(_):
+            pass_dn
+        nil:
+            val hmc_result = _qmp_screendump_hmc(qmp_socket, output_path)
+            match hmc_result:
+                Err(_):
+                    pass_dn
+                Ok(_):
+                    ppm_data_opt = _wait_for_capture_file(output_path)
     match ppm_data_opt:
         Some(ppm_data):
-            if ppm_data.len() == 0:
-                return capture_error("qemu_vm", 0, 0, "Empty screenshot file: {output_path}")
             val decode_result = decode_ppm_to_argb(ppm_data)
             match decode_result:
                 Ok(img):

@@ -624,7 +624,16 @@ pub(super) fn export_functions(
 }
 
 /// Process bare export statements
-pub(super) fn process_bare_exports(bare_exports: &[Vec<String>], env: &Env, exports: &mut HashMap<String, Value>) {
+pub(super) fn process_bare_exports(
+    bare_exports: &[Vec<String>],
+    env: &Env,
+    exports: &mut HashMap<String, Value>,
+    module_path: Option<&Path>,
+) {
+    let suppress_undefined_export_warning = module_path.map_or(false, |path| {
+        let normalized = path.to_string_lossy().replace('\\', "/");
+        normalized.ends_with("/src/compiler_rust/lib/std/src/spec/__init__.spl")
+    });
     for export_names in bare_exports {
         for name in export_names {
             if let Some(value) = env.get(name) {
@@ -637,6 +646,8 @@ pub(super) fn process_bare_exports(bare_exports: &[Vec<String>], env: &Env, expo
                 // Check if it's already in exports (e.g., enums are auto-exported)
                 if exports.contains_key(name) {
                     trace!(name = %name, "Bare export already in exports, skipping");
+                } else if suppress_undefined_export_warning {
+                    trace!(name = %name, "Suppressing undefined bare export for std.spec fast shim");
                 } else {
                     // Warn if exported name doesn't exist
                     warn!(name = %name, "Export statement references undefined symbol");

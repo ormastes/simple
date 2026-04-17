@@ -1,5 +1,6 @@
 //! Linker selection, linking, system symbols, stub generation.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use super::{effective_target, safe_canonicalize, ModuleImports, NativeProjectBuilder};
@@ -10,6 +11,42 @@ use super::tools::{
 };
 
 impl NativeProjectBuilder {
+    fn read_global_symbols(obj: &Path) -> Result<Vec<String>, String> {
+        let output = std::process::Command::new("nm")
+            .arg("-g")
+            .arg(obj)
+            .output()
+            .map_err(|e| format!("nm: {e}"))?;
+        if !output.status.success() {
+            return Ok(Vec::new());
+        }
+        Ok(String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .filter_map(|line| line.split_whitespace().last())
+            .map(|raw_name| {
+                if cfg!(target_os = "macos") {
+                    raw_name.strip_prefix('_').unwrap_or(raw_name).to_string()
+                } else {
+                    raw_name.to_string()
+                }
+            })
+            .collect())
+    }
+
+    fn cached_global_symbols<'a>(
+        cache: &'a mut HashMap<PathBuf, Vec<String>>,
+        obj: &Path,
+    ) -> Result<&'a Vec<String>, String> {
+        let key = safe_canonicalize(obj);
+        if !cache.contains_key(&key) {
+            let symbols = Self::read_global_symbols(obj)?;
+            cache.insert(key.clone(), symbols);
+        }
+        cache
+            .get(&key)
+            .ok_or_else(|| format!("missing symbol cache entry for {}", obj.display()))
+    }
+
     /// Compile the C++ main stub to an object file.
     pub(crate) fn compile_main_stub(&self, temp_dir: &Path) -> Result<PathBuf, String> {
         let main_cpp = temp_dir.join("_main_stub.cpp");
@@ -91,31 +128,19 @@ int main(int argc, char** argv) {
         &self,
         temp_dir: &Path,
         object_paths: &[PathBuf],
+        symbol_cache: Option<&mut HashMap<PathBuf, Vec<String>>>,
     ) -> Result<Option<PathBuf>, String> {
         let mut init_names = Vec::new();
+        let mut local_cache = HashMap::new();
+        let cache = match symbol_cache {
+            Some(cache) => cache,
+            None => &mut local_cache,
+        };
         for obj in object_paths {
-            let output = std::process::Command::new("nm")
-                .arg("-g")
-                .arg(obj)
-                .output()
-                .map_err(|e| format!("nm: {e}"))?;
-            if output.status.success() {
-                let stdout = String::from_utf8_lossy(&output.stdout);
-                for line in stdout.lines() {
-                    if let Some(raw_name) = line.split_whitespace().last() {
-                        // Mach-O prefixes external C symbols with one extra leading
-                        // underscore. ELF/COFF do not, so stripping unconditionally
-                        // breaks discovery of real `__module_init_*` symbols on Linux.
-                        let normalized = if cfg!(target_os = "macos") {
-                            raw_name.strip_prefix('_').unwrap_or(raw_name)
-                        } else {
-                            raw_name
-                        };
-                        if normalized.starts_with("__module_init_") {
-                            let sanitized = normalized.replace('.', "_dot_");
-                            init_names.push(sanitized);
-                        }
-                    }
+            for normalized in Self::cached_global_symbols(cache, obj)? {
+                if normalized.starts_with("__module_init_") {
+                    let sanitized = normalized.replace('.', "_dot_");
+                    init_names.push(sanitized);
                 }
             }
         }
@@ -210,7 +235,7 @@ int main(int argc, char** argv) {
         }
 
         let main_o = self.compile_main_stub(temp_dir)?;
-        let init_o = self.generate_init_caller(temp_dir, object_paths)?;
+        let init_o = self.generate_init_caller(temp_dir, object_paths, None)?;
 
         let selected_runtime = self.selected_runtime_library(temp_dir);
         self.reject_unexpected_native_all(selected_runtime.as_ref())?;
@@ -536,7 +561,8 @@ int main(int argc, char** argv) {
         };
 
         let cc = find_c_compiler();
-        let init_o = self.generate_init_caller(temp_dir, object_paths)?;
+        let mut symbol_cache = HashMap::new();
+        let init_o = self.generate_init_caller(temp_dir, object_paths, Some(&mut symbol_cache))?;
 
         let use_llvm = std::env::var("SIMPLE_BACKEND").as_deref() == Ok("llvm");
         let (march, mabi) = match cross_target.arch {
@@ -716,7 +742,7 @@ int main(int argc, char** argv) {
             _ => &[],
         };
 
-        #[cfg(target_os = "macos")]
+        #[cfg(any(target_os = "macos", target_os = "linux", target_os = "freebsd"))]
         let use_direct_lld = {
             ["ld.lld", "/opt/homebrew/bin/ld.lld", "/usr/local/bin/ld.lld"]
                 .iter()
@@ -728,27 +754,22 @@ int main(int argc, char** argv) {
                 })
                 .map(|s| s.to_string())
         };
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "freebsd")))]
         let use_direct_lld: Option<String> = None;
 
         let ordered_objects = {
             let mut start_obj_idx: Option<usize> = None;
             for (i, obj) in object_paths.iter().enumerate() {
-                if let Ok(out) = std::process::Command::new("nm").arg("-g").arg(obj).output() {
-                    let stdout = String::from_utf8_lossy(&out.stdout);
-                    if stdout.lines().any(|l| {
-                        let parts: Vec<&str> = l.split_whitespace().collect();
-                        parts.len() >= 3
-                            && (parts[2].ends_with("___start") || parts[2].ends_with("__spl_start"))
-                            && parts[2] != "_start"
-                            && parts[2] != "spl_start"
-                            && !parts[2].contains("_starts_with")
-                            && arch_filters.iter().any(|f| parts[2].contains(f))
-                            && !arch_neg_filters.iter().any(|f| parts[2].contains(f))
-                    }) {
+                if Self::cached_global_symbols(&mut symbol_cache, obj)?.iter().any(|sym| {
+                    (sym.ends_with("___start") || sym.ends_with("__spl_start"))
+                        && sym != "_start"
+                        && sym != "spl_start"
+                        && !sym.contains("_starts_with")
+                        && arch_filters.iter().any(|f| sym.contains(f))
+                        && !arch_neg_filters.iter().any(|f| sym.contains(f))
+                }) {
                         start_obj_idx = Some(i);
                         break;
-                    }
                 }
             }
             let mut ordered: Vec<&PathBuf> = Vec::with_capacity(object_paths.len());
@@ -842,12 +863,9 @@ int main(int argc, char** argv) {
 
         if !boot_objects.is_empty() {
             let has_entry32 = boot_objects.iter().any(|obj| {
-                std::process::Command::new("nm")
-                    .arg("-g")
-                    .arg(obj)
-                    .output()
-                    .ok()
-                    .map_or(false, |out| String::from_utf8_lossy(&out.stdout).contains(" _entry32"))
+                Self::cached_global_symbols(&mut symbol_cache, obj)
+                    .map(|symbols| symbols.iter().any(|sym| sym == "_entry32"))
+                    .unwrap_or(false)
             });
             if has_entry32 {
                 let entry_flag = if use_direct_lld.is_some() {
@@ -874,14 +892,10 @@ int main(int argc, char** argv) {
                     format!("{}__spl_start", mangled_stem),
                 ];
                 'entry_search: for obj in object_paths {
-                    if let Ok(out) = std::process::Command::new("nm").arg("-g").arg(obj).output() {
-                        let stdout = String::from_utf8_lossy(&out.stdout);
-                        for line in stdout.lines() {
-                            let parts: Vec<&str> = line.split_whitespace().collect();
-                            if parts.len() >= 3 && candidates.contains(&parts[2].to_string()) {
-                                best_start = Some(parts[2].to_string());
-                                break 'entry_search;
-                            }
+                    for sym in Self::cached_global_symbols(&mut symbol_cache, obj)? {
+                        if candidates.iter().any(|candidate| candidate == sym) {
+                            best_start = Some(sym.to_string());
+                            break 'entry_search;
                         }
                     }
                 }
@@ -889,27 +903,20 @@ int main(int argc, char** argv) {
 
             if best_start.is_none() {
                 for obj in object_paths {
-                    if let Ok(out) = std::process::Command::new("nm").arg("-g").arg(obj).output() {
-                        let stdout = String::from_utf8_lossy(&out.stdout);
-                        for line in stdout.lines() {
-                            let parts: Vec<&str> = line.split_whitespace().collect();
-                            if parts.len() >= 3 {
-                                let sym = parts[2];
-                                if (sym.ends_with("___start") || sym.ends_with("__spl_start"))
-                                    && sym != "_start"
-                                    && sym != "spl_start"
-                                {
-                                    let neg_match = arch_neg_filters.iter().any(|f| sym.contains(f));
-                                    if neg_match {
-                                        continue;
-                                    }
-                                    let pos_match = arch_filters.iter().any(|f| sym.contains(f));
-                                    if pos_match {
-                                        best_start = Some(sym.to_string());
-                                    } else if fallback_start.is_none() {
-                                        fallback_start = Some(sym.to_string());
-                                    }
-                                }
+                    for sym in Self::cached_global_symbols(&mut symbol_cache, obj)? {
+                        if (sym.ends_with("___start") || sym.ends_with("__spl_start"))
+                            && sym != "_start"
+                            && sym != "spl_start"
+                        {
+                            let neg_match = arch_neg_filters.iter().any(|f| sym.contains(f));
+                            if neg_match {
+                                continue;
+                            }
+                            let pos_match = arch_filters.iter().any(|f| sym.contains(f));
+                            if pos_match {
+                                best_start = Some(sym.to_string());
+                            } else if fallback_start.is_none() {
+                                fallback_start = Some(sym.to_string());
                             }
                         }
                     }

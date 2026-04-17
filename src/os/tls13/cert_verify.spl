@@ -31,6 +31,10 @@ enum CertVerifyResult:
     Ok
     Err(msg: text)
 
+enum CertChainResult:
+    Ok
+    Err(msg: text)
+
 # ============================================================================
 # DER Helper Classes
 # ============================================================================
@@ -44,6 +48,15 @@ class DerTlv:
     value_offset: u64
     value_length: u64
     total_length: u64
+
+class ParsedCert:
+    tbs_bytes: [u8]
+    issuer_tlv: [u8]
+    subject_tlv: [u8]
+    spki_tlv: [u8]
+    signature: [u8]
+    sig_scheme: u16
+    is_ca: bool
 
 # ============================================================================
 # Private DER Helpers
@@ -98,6 +111,26 @@ fn _der_skip(data: [u8], offset: u64) -> u64:
     val tlv = _der_read_tlv(data, offset)
     offset + tlv.total_length
 
+fn _copy_slice(data: [u8], offset: u64, length: u64) -> [u8]:
+    """Copy a contiguous byte slice into a new array."""
+    var out: [u8] = []
+    var i: u64 = 0
+    while i < length:
+        out.push(data[offset + i])
+        i = i + 1
+    out
+
+fn _bytes_eq(a: [u8], b: [u8]) -> bool:
+    """Compare two byte arrays for exact equality."""
+    if a.len() != b.len():
+        return false
+    var i: u64 = 0
+    while i < a.len():
+        if a[i] != b[i]:
+            return false
+        i = i + 1
+    true
+
 # ============================================================================
 # Ed25519 OID check: 1.3.101.112 = 06 03 2B 65 70
 # ============================================================================
@@ -115,6 +148,171 @@ fn _is_ed25519_oid(data: [u8], offset: u64) -> bool:
     if data[offset + 4] != 0x70:
         return false
     true
+
+fn _is_rsa_pss_oid(data: [u8], offset: u64) -> bool:
+    """Check for the RSASSA-PSS OID tag+value: 06 09 2A 86 48 86 F7 0D 01 01 0A."""
+    if data[offset] != 0x06:
+        return false
+    if data[offset + 1] != 0x09:
+        return false
+    if data[offset + 2] != 0x2A:
+        return false
+    if data[offset + 3] != 0x86:
+        return false
+    if data[offset + 4] != 0x48:
+        return false
+    if data[offset + 5] != 0x86:
+        return false
+    if data[offset + 6] != 0xF7:
+        return false
+    if data[offset + 7] != 0x0D:
+        return false
+    if data[offset + 8] != 0x01:
+        return false
+    if data[offset + 9] != 0x01:
+        return false
+    if data[offset + 10] != 0x0A:
+        return false
+    true
+
+fn _oid_present_in_range(data: [u8], start: u64, end: u64, oid: [u8]) -> bool:
+    """Return true when the exact tag+value OID bytes occur anywhere in [start, end)."""
+    if oid.len() == 0:
+        return false
+    if end < start:
+        return false
+    var i: u64 = start
+    while i + oid.len() <= end:
+        var matched: bool = true
+        var j: u64 = 0
+        while j < oid.len():
+            if data[i + j] != oid[j]:
+                matched = false
+            j = j + 1
+        if matched:
+            return true
+        i = i + 1
+    false
+
+fn _sig_scheme_from_algorithm_tlv(data: [u8], alg_tlv: DerTlv) -> u16:
+    """Map a certificate signatureAlgorithm TLV to a TLS SignatureScheme."""
+    val start = alg_tlv.value_offset
+    val end = alg_tlv.value_offset + alg_tlv.value_length
+    if _is_ed25519_oid(data, start):
+        return 0x0807
+    if _is_rsa_pss_oid(data, start):
+        val sha256_oid = [0x06u8, 0x09, 0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02, 0x01]
+        val sha384_oid = [0x06u8, 0x09, 0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02, 0x02]
+        val sha512_oid = [0x06u8, 0x09, 0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02, 0x03]
+        if _oid_present_in_range(data, start, end, sha256_oid):
+            return 0x0804
+        if _oid_present_in_range(data, start, end, sha384_oid):
+            return 0x0805
+        if _oid_present_in_range(data, start, end, sha512_oid):
+            return 0x0806
+    0
+
+fn _extract_is_ca(cert_der: [u8], tbs_value_offset: u64, tbs_value_length: u64) -> bool:
+    """Extract BasicConstraints.cA from TBSCertificate extensions. Missing => false."""
+    val end = tbs_value_offset + tbs_value_length
+    val bc_oid = [0x06u8, 0x03, 0x55, 0x1D, 0x13]
+    var pos: u64 = tbs_value_offset
+
+    while pos + bc_oid.len() <= end:
+        if _bytes_eq(_copy_slice(cert_der, pos, bc_oid.len()), bc_oid):
+            var field_pos = pos + bc_oid.len()
+            if field_pos < end and cert_der[field_pos] == 0x01:
+                field_pos = _der_skip(cert_der, field_pos)
+            if field_pos >= end:
+                return false
+            val extn_value = _der_read_tlv(cert_der, field_pos)
+            if extn_value.tag != 0x04 or extn_value.value_length == 0:
+                return false
+            val inner = _der_read_tlv(cert_der, extn_value.value_offset)
+            if inner.tag != 0x30:
+                return false
+            if inner.value_length == 0:
+                return false
+            val inner_pos = inner.value_offset
+            if cert_der[inner_pos] != 0x01:
+                return false
+            val bool_tlv = _der_read_tlv(cert_der, inner_pos)
+            if bool_tlv.value_length == 0:
+                return false
+            return cert_der[bool_tlv.value_offset] != 0x00
+        pos = pos + 1
+    false
+
+fn _parse_cert_for_chain(cert_der: [u8]) -> ParsedCert:
+    """Parse the certificate fields needed for issuer-chain verification."""
+    val cert_tlv = _der_read_tlv(cert_der, 0)
+    val cert_body_start = cert_tlv.value_offset
+
+    val tbs_tlv = _der_read_tlv(cert_der, cert_body_start)
+    val tbs_bytes = _copy_slice(cert_der, cert_body_start, tbs_tlv.total_length)
+
+    var pos = tbs_tlv.value_offset
+    if cert_der[pos] == 0xA0:
+        pos = _der_skip(cert_der, pos)
+    pos = _der_skip(cert_der, pos)
+    pos = _der_skip(cert_der, pos)
+
+    val issuer_tlv = _der_read_tlv(cert_der, pos)
+    val issuer_bytes = _copy_slice(cert_der, pos, issuer_tlv.total_length)
+    pos = pos + issuer_tlv.total_length
+
+    pos = _der_skip(cert_der, pos)
+
+    val subject_tlv = _der_read_tlv(cert_der, pos)
+    val subject_bytes = _copy_slice(cert_der, pos, subject_tlv.total_length)
+    pos = pos + subject_tlv.total_length
+
+    val spki_tlv = _der_read_tlv(cert_der, pos)
+    val spki_bytes = _copy_slice(cert_der, pos, spki_tlv.total_length)
+
+    val sig_alg_offset = cert_body_start + tbs_tlv.total_length
+    val sig_alg_tlv = _der_read_tlv(cert_der, sig_alg_offset)
+    val sig_scheme = _sig_scheme_from_algorithm_tlv(cert_der, sig_alg_tlv)
+
+    val sig_tlv = _der_read_tlv(cert_der, sig_alg_offset + sig_alg_tlv.total_length)
+    val signature = _copy_slice(cert_der, sig_tlv.value_offset + 1, sig_tlv.value_length - 1)
+
+    ParsedCert(
+        tbs_bytes: tbs_bytes,
+        issuer_tlv: issuer_bytes,
+        subject_tlv: subject_bytes,
+        spki_tlv: spki_bytes,
+        signature: signature,
+        sig_scheme: sig_scheme,
+        is_ca: _extract_is_ca(cert_der, tbs_tlv.value_offset, tbs_tlv.value_length)
+    )
+
+fn _verify_cert_signature_with_issuer(parsed: ParsedCert, issuer_cert_der: [u8]) -> CertVerifyResult:
+    """Verify one certificate's signature against its issuer certificate."""
+    if parsed.sig_scheme == 0x0807:
+        val issuer_pubkey = extract_ed25519_pubkey_from_cert(issuer_cert_der)
+        if issuer_pubkey.len() != 32:
+            return CertVerifyResult.Err(msg: "issuer Ed25519 public key extraction failed")
+        val ok = ed25519_verify(issuer_pubkey, parsed.tbs_bytes, parsed.signature)
+        if ok:
+            return CertVerifyResult.Ok
+        return CertVerifyResult.Err(msg: "certificate signature invalid (ed25519)")
+    elif parsed.sig_scheme == 0x0804:
+        val issuer_spki = extract_rsa_pubkey_spki_from_cert(issuer_cert_der)
+        if rsa_pss_sha256_verify(issuer_spki, parsed.tbs_bytes, parsed.signature):
+            return CertVerifyResult.Ok
+        return CertVerifyResult.Err(msg: "certificate signature invalid (rsa_pss_sha256)")
+    elif parsed.sig_scheme == 0x0805:
+        val issuer_spki = extract_rsa_pubkey_spki_from_cert(issuer_cert_der)
+        if rsa_pss_sha384_verify(issuer_spki, parsed.tbs_bytes, parsed.signature):
+            return CertVerifyResult.Ok
+        return CertVerifyResult.Err(msg: "certificate signature invalid (rsa_pss_sha384)")
+    elif parsed.sig_scheme == 0x0806:
+        val issuer_spki = extract_rsa_pubkey_spki_from_cert(issuer_cert_der)
+        if rsa_pss_sha512_verify(issuer_spki, parsed.tbs_bytes, parsed.signature):
+            return CertVerifyResult.Ok
+        return CertVerifyResult.Err(msg: "certificate signature invalid (rsa_pss_sha512)")
+    CertVerifyResult.Err(msg: "unsupported certificate signature algorithm")
 
 # ============================================================================
 # Public API
@@ -416,3 +614,74 @@ fn verify_cert_signature_ed25519(cert_der: [u8], issuer_pubkey: [u8]) -> CertVer
         CertVerifyResult.Ok
     else:
         CertVerifyResult.Err(msg: "certificate signature invalid")
+
+fn extract_tbs_certificate_bytes(cert_der: [u8]) -> [u8]:
+    """Extract the DER-encoded TBSCertificate bytes (including SEQUENCE TLV)."""
+    val cert_tlv = _der_read_tlv(cert_der, 0)
+    val cert_body_start = cert_tlv.value_offset
+    val tbs_tlv = _der_read_tlv(cert_der, cert_body_start)
+    _copy_slice(cert_der, cert_body_start, tbs_tlv.total_length)
+
+fn extract_certificate_signature_bytes(cert_der: [u8]) -> [u8]:
+    """Extract the raw signature bytes from the outer certificate BIT STRING."""
+    val cert_tlv = _der_read_tlv(cert_der, 0)
+    val cert_body_start = cert_tlv.value_offset
+    val tbs_tlv = _der_read_tlv(cert_der, cert_body_start)
+    val sig_alg_offset = cert_body_start + tbs_tlv.total_length
+    val sig_alg_tlv = _der_read_tlv(cert_der, sig_alg_offset)
+    val sig_tlv = _der_read_tlv(cert_der, sig_alg_offset + sig_alg_tlv.total_length)
+    _copy_slice(cert_der, sig_tlv.value_offset + 1, sig_tlv.value_length - 1)
+
+fn extract_certificate_signature_scheme(cert_der: [u8]) -> u16:
+    """Extract the TLS SignatureScheme-equivalent for the outer certificate signature."""
+    val cert_tlv = _der_read_tlv(cert_der, 0)
+    val cert_body_start = cert_tlv.value_offset
+    val tbs_tlv = _der_read_tlv(cert_der, cert_body_start)
+    val sig_alg_offset = cert_body_start + tbs_tlv.total_length
+    val sig_alg_tlv = _der_read_tlv(cert_der, sig_alg_offset)
+    _sig_scheme_from_algorithm_tlv(cert_der, sig_alg_tlv)
+
+fn verify_cert_chain(chain: [[u8]], root_store: [[u8]]) -> CertChainResult:
+    """Verify a leaf-first certificate chain against a trust-anchor store.
+
+    `chain` must be ordered leaf -> intermediates. The final issuer may be
+    absent from `chain` if it is present in `root_store`.
+    """
+    if chain.len() == 0:
+        return CertChainResult.Err(msg: "certificate chain is empty")
+
+    var i: u64 = 0
+    while i < chain.len():
+        val current_cert = chain[i]
+        val current = _parse_cert_for_chain(current_cert)
+
+        if i + 1 < chain.len():
+            val issuer_cert = chain[i + 1]
+            val issuer = _parse_cert_for_chain(issuer_cert)
+            if not _bytes_eq(current.issuer_tlv, issuer.subject_tlv):
+                return CertChainResult.Err(msg: "issuer/subject mismatch inside chain")
+            if not issuer.is_ca:
+                return CertChainResult.Err(msg: "intermediate certificate is not a CA")
+            val verify_result = _verify_cert_signature_with_issuer(current, issuer_cert)
+            if val CertVerifyResult.Err(msg) = verify_result:
+                return CertChainResult.Err(msg: msg)
+        else:
+            var matched_root: bool = false
+            var root_idx: u64 = 0
+            while root_idx < root_store.len():
+                val root_cert = root_store[root_idx]
+                val root = _parse_cert_for_chain(root_cert)
+                if _bytes_eq(current.issuer_tlv, root.subject_tlv):
+                    if not root.is_ca:
+                        return CertChainResult.Err(msg: "matched trust anchor is not a CA")
+                    val verify_result = _verify_cert_signature_with_issuer(current, root_cert)
+                    if val CertVerifyResult.Ok = verify_result:
+                        matched_root = true
+                    root_idx = root_store.len()
+                else:
+                    root_idx = root_idx + 1
+            if not matched_root:
+                return CertChainResult.Err(msg: "no trust anchor matched the chain issuer")
+        i = i + 1
+
+    CertChainResult.Ok

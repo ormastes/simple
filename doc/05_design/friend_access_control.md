@@ -1,13 +1,13 @@
 # Friend Access Control
 
 **Status:** Design
-**Last Updated:** 2026-02-20
+**Last Updated:** 2026-04-17
 
 ---
 
 ## Overview
 
-Friend access control extends the visibility system beyond the binary Public/Private model. It introduces `Internal` and `Package` visibility levels, along with `friend` declarations that grant cross-package access to internal symbols.
+Friend access control now sits alongside the scoped visibility model used by MDSOC. In addition to friend/package visibility, the system supports `pub(peer)` for same-path sibling layers and `pub(up)` for the immediate parent facade.
 
 ---
 
@@ -16,12 +16,14 @@ Friend access control extends the visibility system beyond the binary Public/Pri
 ```simple
 enum Visibility:
     Public       # Visible everywhere
+    Peer         # Visible to sibling layers on the same logical path
+    Up           # Visible to the immediate parent facade
     Internal     # Visible to same package + declared friends
     Package      # Visible to same package only
     Private      # Visible to same file only
 ```
 
-Ordering: `Public > Internal > Package > Private`
+Ordering: `Public > Peer > Up > Internal > Package > Private`
 
 The `visibility_meet` operation returns the more restrictive of two levels.
 
@@ -50,14 +52,22 @@ internal_export HirLowering, HirBuilder
 - **Non-inherited:** Friend status is not inherited by subpackages
 - **Scope:** Friend declarations apply to the declaring package and its immediate submodules
 
-### What Friends Can Access
+### What Friends and Scoped Callers Can Access
 
 A friend package can access symbols marked with:
 - `pub` (Public) — accessible by everyone
 - `internal_export` — accessible by friends only
 - `pub(friend)` — accessible by friends only (inline modifier)
 
-A friend package still cannot access:
+A same-path sibling layer can access symbols marked with:
+- `pub` (Public) — accessible by everyone
+- `pub(peer)` — accessible only across sibling layers on the same logical path
+
+The immediate parent facade (`__init__.spl`) can access symbols marked with:
+- `pub` (Public) — accessible by everyone
+- `pub(up)` — accessible only from the nearest parent facade
+
+These callers still cannot access:
 - `pub(package)` — package-internal only
 - Private symbols (no modifier)
 
@@ -72,6 +82,28 @@ Makes a symbol visible to the declaring module's friends:
 ```simple
 pub(friend) fn lower_hir_to_mir(module: HirModule) -> MirModule:
     # Only accessible from friend packages (types, traits, mir)
+    ...
+```
+
+### `pub(peer)`
+
+Makes a symbol visible to sibling layers that share the same logical path:
+
+```simple
+pub(peer) fn normalize_scope_id(path: text) -> text:
+    # Accessible from the same path in a different numbered layer
+    ...
+```
+
+Here "sibling" means different numbered layer, same path suffix under the same boundary root.
+
+### `pub(up)`
+
+Makes a symbol visible only to the immediate parent facade:
+
+```simple
+pub(up) fn collect_local_exports() -> [text]:
+    # Accessible from the nearest parent __init__.spl only
     ...
 ```
 
@@ -158,12 +190,20 @@ struct DirManifest:
 
 The `VisibilityChecker` (in `visibility_checker.spl`) is extended to:
 
-1. Look up the caller's package
-2. Look up the target symbol's visibility level
-3. If `Internal`: check if the caller's package is in the target's friend list
-4. If `Package`: check if the caller is in the same package
-5. If `Private`: check if the caller is in the same file
-6. If `Public`: always allow
+1. Look up the caller's package and structural relation to the target
+2. Look up the target symbol's declared visibility level
+3. If `Peer`: allow only same-path sibling-layer access
+4. If `Up`: allow only the immediate parent facade
+5. If `Internal`: check if the caller's package is in the target's friend list
+6. If `Package`: check if the caller is in the same package
+7. If `Private`: allow only same-file access
+8. If `Public`: always allow
+
+### Compatibility Warning
+
+Current behavior keeps sibling-private access in warning mode for compatibility:
+- Accessing a private symbol from a same-path sibling layer without `pub(peer)` emits `W0405`
+- The warning documents a migration path toward explicit scoped visibility instead of silently relying on cross-layer private access
 
 ---
 

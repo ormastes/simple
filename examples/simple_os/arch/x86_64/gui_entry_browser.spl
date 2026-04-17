@@ -35,16 +35,13 @@ use os.kernel.log.klog.{KernelLog}
 use os.drivers.framebuffer.bga_init.{bga_init_framebuffer}
 use os.drivers.framebuffer.fb_driver.{FramebufferDriver}
 use examples.simple_os.assets.browser_guest_session.{
-    browser_guest_body_for_url,
     browser_guest_boot_url,
     browser_guest_expected_title,
     browser_guest_final_url,
     browser_guest_live_probe_url,
     browser_guest_live_transport_error,
-    browser_guest_style_url,
-    browser_guest_title_for_url,
     resolve_browser_guest_request}
-use std.common.web.browser_session.{BrowserRequest, BrowserSession}
+use std.common.web.browser_session.{BrowserRequest, BrowserResponse, BrowserSession}
 use std.common.web.simple_browser_page.{SimpleBrowserPageState, simple_browser_render_remote_page}
 use common.render_scene.executor.{execute_scene_to_buffer}
 
@@ -53,6 +50,7 @@ extern fn rt_gui_set_fb(addr: u64, width: u64)
 extern fn rt_hlt()
 extern fn rt_fb_blit_array32(dst_addr: u64, dst_stride_pixels: u64,
     src_pixels: [u32], src_stride_pixels: u64, copy_w: u64, copy_h: u64)
+extern fn rt_http_request(method: text, url: text, headers: text, body: text) -> (i64, text, text)
 
 val RENDER_W: i32 = 320
 val RENDER_H: i32 = 240
@@ -65,24 +63,30 @@ fn _page_from_session(session: BrowserSession) -> SimpleBrowserPageState:
         RENDER_H
     )
 
+fn _resolve_guest_transport(request: BrowserRequest) -> BrowserResponse:
+    if request.url.starts_with("https://guest.simple/"):
+        return resolve_browser_guest_request(request)
+    val live = rt_http_request(request.method, request.url, request.headers, request.body)
+    BrowserResponse.create(
+        request_id: request.id,
+        kind: request.kind,
+        url: request.url,
+        status: live.0.to_i32() ?? 0,
+        headers: "",
+        body: live.1,
+        error: live.2
+    )
+
 fn _apply_request(session: BrowserSession, request: BrowserRequest) -> Result<bool, text>:
     serial_println("[BE] Session request {request.id}: {request.kind} {request.method} {request.url}")
-    val response = resolve_browser_guest_request(request)
+    val response = _resolve_guest_transport(request)
     serial_println("[BE] Session response {request.id}: status={response.status} headers_len={response.headers.len()} body_len={response.body.len()}")
-    if response.error != "":
-        return Err(response.error)
-    if request.kind == "document":
-        session.current_url = request.url
-        session.current_title = browser_guest_title_for_url(request.url)
-        session.current_body_html = browser_guest_body_for_url(request.url)
-        session.source_html = response.body
-        serial_println("[BE] Session commit complete: url={session.current_url} title={session.current_title}")
-        return Ok(true)
-    if request.kind == "style":
-        session.current_style_html = "<style>{response.body}</style>"
-        serial_println("[BE] Session style applied")
-        return Ok(true)
-    Ok(true)
+    match session.commit_network_response(response):
+        Ok(_) =>
+            serial_println("[BE] Session commit complete: url={session.current_url} title={session.current_title}")
+            Ok(true)
+        Err(e) =>
+            Err(e)
 
 fn _make_request(id: text, kind: text, url: text) -> BrowserRequest:
     BrowserRequest.create(
@@ -98,25 +102,37 @@ fn _make_request(id: text, kind: text, url: text) -> BrowserRequest:
 fn _probe_live_transport():
     serial_println("[BE] Probing live browser transport...")
     val request = _make_request("document-live-probe", "document", browser_guest_live_probe_url())
-    val response = resolve_browser_guest_request(request)
+    val response = _resolve_guest_transport(request)
     if response.error.contains(browser_guest_live_transport_error()):
         serial_println("[BE] Live transport unavailable: {response.error}")
     else:
         serial_println("[BE] Live transport unexpectedly resolved status={response.status} url={response.url}")
 
+fn _drain_guest_requests(session: BrowserSession) -> Result<bool, text>:
+    while true:
+        match session.take_pending_request():
+            Some(request) =>
+                val _ = _apply_request(session, request)?
+            nil =>
+                return Ok(true)
+
 fn _pump_guest_session(session: BrowserSession) -> Result<bool, text>:
     _probe_live_transport()
 
-    session.begin_navigation(browser_guest_boot_url())
-    serial_println("[BE] Applying deterministic request 1...")
-    val _ = _apply_request(session, _make_request("document-1", "document", browser_guest_boot_url()))?
+    match session.begin_network_navigation(browser_guest_boot_url(), "GET", "", "", ""):
+        Ok(_) =>
+            serial_println("[BE] Applying deterministic request 1...")
+        Err(e) =>
+            return Err(e)
+    val _ = _drain_guest_requests(session)?
 
     serial_println("[BE] Starting deterministic follow-up navigation...")
-    session.begin_navigation(browser_guest_final_url())
-    serial_println("[BE] Applying deterministic request 2...")
-    val _ = _apply_request(session, _make_request("document-2", "document", browser_guest_final_url()))?
-    serial_println("[BE] Applying deterministic stylesheet request...")
-    val _ = _apply_request(session, _make_request("style-3", "style", browser_guest_style_url()))?
+    match session.begin_network_navigation(browser_guest_final_url(), "GET", "", "", ""):
+        Ok(_) =>
+            serial_println("[BE] Applying deterministic request 2...")
+        Err(e) =>
+            return Err(e)
+    val _ = _drain_guest_requests(session)?
 
     if session.current_url != browser_guest_final_url():
         return Err("unexpected final url: {session.current_url}")

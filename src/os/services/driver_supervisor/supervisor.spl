@@ -11,8 +11,7 @@
 
 use os.userlib.syscall_raw.{syscall}
 use os.services.pcimgr.pcimgr.{pcimgr_release_device, pcimgr_grant_device}
-
-extern fn serial_println(msg: text)
+use os.userlib.log.{log_info, log_error}
 
 # ============================================================================
 # Constants
@@ -64,7 +63,7 @@ fn supervisor_register(name: text, task_id: u64, device_idx: u64, entry_point: u
     Returns true on success, false if table is full.
     """
     if supervised_count >= MAX_SUPERVISED:
-        serial_println("[supervisor] ERROR: supervision table full ({supervised_count}/{MAX_SUPERVISED})")
+        log_error("[supervisor] ERROR: supervision table full ({supervised_count}/{MAX_SUPERVISED})")
         return false
 
     val idx = supervised_count
@@ -76,7 +75,7 @@ fn supervisor_register(name: text, task_id: u64, device_idx: u64, entry_point: u
     drv_restart_count[idx] = 0
     supervised_count = supervised_count + 1
 
-    serial_println("[supervisor] Registered driver '{name}' (task={task_id}, dev={device_idx})")
+    log_info("[supervisor] Registered driver '{name}' (task={task_id}, dev={device_idx})")
     true
 
 # ============================================================================
@@ -95,7 +94,7 @@ fn supervisor_check_health():
         if drv_state[i] == DRIVER_STATE_RUNNING:
             val alive = _ping_driver(drv_task_id[i])
             if not alive:
-                serial_println("[supervisor] Driver '{drv_name[i]}' (task={drv_task_id[i]}) not responding")
+                log_error("[supervisor] Driver '{drv_name[i]}' (task={drv_task_id[i]}) not responding")
                 drv_state[i] = DRIVER_STATE_FAILED
                 _handle_failed_driver(i)
         i = i + 1
@@ -122,35 +121,35 @@ fn supervisor_restart_driver(idx: u64) -> bool:
     val dev_idx = drv_device_idx[idx]
     val old_task = drv_task_id[idx]
 
-    serial_println("[supervisor] Restarting driver '{name}' (attempt {drv_restart_count[idx] + 1})...")
+    log_info("[supervisor] Restarting driver '{name}' (attempt {drv_restart_count[idx] + 1})...")
 
     # Step 1: Release old device grant
     val release_result = pcimgr_release_device(dev_idx, old_task)
     match release_result:
         Ok(_):
-            serial_println("[supervisor]   Released device {dev_idx} from old task {old_task}")
+            log_info("[supervisor]   Released device {dev_idx} from old task {old_task}")
         Err(msg):
             # Device may already have been cleaned up by kernel task_cleanup
-            serial_println("[supervisor]   Device release note: {msg}")
+            log_info("[supervisor]   Device release note: {msg}")
 
     # Step 2: Spawn new driver task
     # syscall 2 (Spawn): arg0 = entry point, arg1 = priority (2 = Normal)
     val spawn_result = syscall(SYS_SPAWN, drv_entry_point[idx], 2, 0, 0, 0)
     if spawn_result < 0:
-        serial_println("[supervisor]   FAILED to spawn new task: error {spawn_result}")
+        log_error("[supervisor]   FAILED to spawn new task: error {spawn_result}")
         drv_state[idx] = DRIVER_STATE_FAILED
         return false
 
     val new_task_id = spawn_result as u64
-    serial_println("[supervisor]   Spawned new task {new_task_id}")
+    log_info("[supervisor]   Spawned new task {new_task_id}")
 
     # Step 3: Re-grant device to the new task
     val grant_result = pcimgr_grant_device(dev_idx, new_task_id)
     match grant_result:
         Ok(grant):
-            serial_println("[supervisor]   Granted device {dev_idx} to task {new_task_id}")
+            log_info("[supervisor]   Granted device {dev_idx} to task {new_task_id}")
         Err(msg):
-            serial_println("[supervisor]   FAILED to grant device: {msg}")
+            log_error("[supervisor]   FAILED to grant device: {msg}")
             drv_state[idx] = DRIVER_STATE_FAILED
             return false
 
@@ -158,7 +157,7 @@ fn supervisor_restart_driver(idx: u64) -> bool:
     drv_task_id[idx] = new_task_id
     drv_state[idx] = DRIVER_STATE_RUNNING
     drv_restart_count[idx] = drv_restart_count[idx] + 1
-    serial_println("[supervisor] Driver '{name}' restarted successfully (task={new_task_id}, restarts={drv_restart_count[idx]})")
+    log_info("[supervisor] Driver '{name}' restarted successfully (task={new_task_id}, restarts={drv_restart_count[idx]})")
     true
 
 # ============================================================================
@@ -171,16 +170,16 @@ fn supervisor_start():
     Creates an IPC port, then enters a loop that periodically checks
     driver health and handles incoming supervision requests.
     """
-    serial_println("[supervisor] Starting driver supervisor service...")
+    log_info("[supervisor] Starting driver supervisor service...")
 
     # Create IPC port for supervisor commands
     val port_result = syscall(SYS_IPC_CREATE_PORT, 0, 0, 0, 0, 0)
     if port_result < 0:
-        serial_println("[supervisor] FATAL: Failed to create IPC port (error {port_result})")
+        log_error("[supervisor] FATAL: Failed to create IPC port (error {port_result})")
         return
 
     val port_handle = port_result as u64
-    serial_println("[supervisor] Service ready on IPC port (handle={port_handle})")
+    log_info("[supervisor] Service ready on IPC port (handle={port_handle})")
 
     # Main supervision loop
     while true:
@@ -224,14 +223,14 @@ fn _handle_failed_driver(idx: u64):
     Otherwise, mark the driver as permanently stopped.
     """
     if drv_restart_count[idx] >= MAX_RESTART_ATTEMPTS:
-        serial_println("[supervisor] Driver '{drv_name[idx]}' exceeded max restarts ({MAX_RESTART_ATTEMPTS}), giving up")
+        log_error("[supervisor] Driver '{drv_name[idx]}' exceeded max restarts ({MAX_RESTART_ATTEMPTS}), giving up")
         drv_state[idx] = DRIVER_STATE_STOPPED
         return
 
     drv_state[idx] = DRIVER_STATE_RESTARTING
     val ok = supervisor_restart_driver(idx)
     if not ok:
-        serial_println("[supervisor] Driver '{drv_name[idx]}' restart failed")
+        log_error("[supervisor] Driver '{drv_name[idx]}' restart failed")
         drv_state[idx] = DRIVER_STATE_FAILED
 
 fn supervisor_get_driver_state(idx: u64) -> u8:

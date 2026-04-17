@@ -23,8 +23,7 @@ extern fn rt_rndr() -> u64
 @cfg(riscv64)
 extern fn rt_riscv_seed() -> u64
 
-extern fn rt_array_new_with_cap(cap: i64) -> [u8]
-extern fn rt_random_bytes_c(count: u64) -> [u8]
+extern fn rt_time_now_unix_micros() -> i64
 
 # ============================================================================
 # ChaCha20 Quarter Round
@@ -72,7 +71,7 @@ fn _chacha20_block(key: [u32], counter: u32, nonce: [u32]) -> [u32]:
       [13..15] = 96-bit nonce (3 words)
     """
     # Initialize state
-    var state: [u32] = rt_array_new_with_cap(16)
+    var state: [u32] = []
 
     # Constants: "expand 32-byte k" in little-endian
     state.push(0x61707865)    # "expa"
@@ -96,7 +95,7 @@ fn _chacha20_block(key: [u32], counter: u32, nonce: [u32]) -> [u32]:
         i = i + 1
 
     # Working copy
-    var working: [u32] = rt_array_new_with_cap(16)
+    var working: [u32] = []
     i = 0
     while i < 16:
         working.push(state[i])
@@ -120,7 +119,7 @@ fn _chacha20_block(key: [u32], counter: u32, nonce: [u32]) -> [u32]:
         round = round + 1
 
     # Add initial state to working state
-    var result: [u32] = rt_array_new_with_cap(16)
+    var result: [u32] = []
     i = 0
     while i < 16:
         result.push(_u32_mask(working[i] + state[i]))
@@ -158,6 +157,7 @@ var g_csprng: CsprngState = CsprngState(
     buffer: [],
     buf_pos: 0
 )
+var g_soft_rng_state: u64 = 0
 
 # ============================================================================
 # Hardware Entropy Collection
@@ -167,12 +167,22 @@ fn _hw_random_u64() -> u64:
     """Get a 64-bit hardware random value."""
     rt_rdrand()
 
+fn _soft_random_u64() -> u64:
+    if g_soft_rng_state == 0:
+        g_soft_rng_state = rt_time_now_unix_micros().to_u64() ^ 0x9E3779B97F4A7C15
+        if g_soft_rng_state == 0:
+            g_soft_rng_state = 0xA5A5A5A5A5A5A5A5
+    g_soft_rng_state = g_soft_rng_state ^ (g_soft_rng_state << 13)
+    g_soft_rng_state = g_soft_rng_state ^ (g_soft_rng_state >> 7)
+    g_soft_rng_state = g_soft_rng_state ^ (g_soft_rng_state << 17)
+    g_soft_rng_state
+
 fn csprng_seed() -> [u8]:
     """Collect 32 bytes of hardware entropy for seeding.
 
     Uses RDRAND (x86_64) or platform equivalent.
     """
-    var seed: [u8] = rt_array_new_with_cap(32)
+    var seed: [u8] = []
     var i: u64 = 0
     while i < 4:
         val r = _hw_random_u64()
@@ -192,7 +202,7 @@ fn _csprng_init():
     val seed = csprng_seed()
 
     # Use first 32 bytes as key (8 x u32, little-endian)
-    var key: [u32] = rt_array_new_with_cap(8)
+    var key: [u32] = []
     var i: u64 = 0
     while i < 8:
         val base = i * 4
@@ -205,7 +215,7 @@ fn _csprng_init():
 
     # Get 12 more bytes for nonce
     val nonce_seed = csprng_seed()
-    var nonce: [u32] = rt_array_new_with_cap(3)
+    var nonce: [u32] = []
     i = 0
     while i < 3:
         val base = i * 4
@@ -250,7 +260,7 @@ fn _csprng_fill_buffer():
     g_csprng.counter = _u32_mask(g_csprng.counter + 1)
 
     # Convert u32 words to bytes (little-endian)
-    var buf: [u8] = rt_array_new_with_cap(64)
+    var buf: [u8] = []
     var i: u64 = 0
     while i < 16:
         val word = block[i]
@@ -278,6 +288,18 @@ fn random_bytes(count: u64) -> [u8]:
 
     Returns: Array of random bytes.
     """
+    var host_bytes: [u8] = []
+    var remaining_host = count
+    while remaining_host > 0:
+        val word = _soft_random_u64()
+        var j: u64 = 0
+        while j < 8 and remaining_host > 0:
+            host_bytes.push(((word >> (j * 8)) & 0xFF).to_u8())
+            remaining_host = remaining_host - 1
+            j = j + 1
+    if host_bytes.len() == count:
+        return host_bytes
+
     if not g_csprng.initialized:
         _csprng_init()
 
@@ -285,7 +307,7 @@ fn random_bytes(count: u64) -> [u8]:
     if g_csprng.bytes_generated > RESEED_INTERVAL:
         _csprng_reseed()
 
-    var result: [u8] = rt_array_new_with_cap(count.to_i64())
+    var result: [u8] = []
     var remaining = count
 
     while remaining > 0:

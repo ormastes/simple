@@ -27,20 +27,13 @@ pub(crate) fn generate_stub_object_freestanding(
 ) -> Result<PathBuf, String> {
     use std::collections::{BTreeSet, HashSet};
 
-    let mut defined: HashSet<String> = HashSet::new();
-    let mut undefined: BTreeSet<String> = BTreeSet::new();
-
-    // Scan both Simple object_paths AND any boot_objects (boot .c/.s may define
-    // or reference symbols that must not be stubbed over).
-    let scan_iter = object_paths.iter().chain(boot_objects.iter());
-    for path in scan_iter {
-        let output = match std::process::Command::new("nm").arg("-g").arg("-p").arg(path).output() {
-            Ok(o) => o,
-            Err(_) => continue,
-        };
+    fn scan_nm_defined_undefined(path: &Path) -> Option<(HashSet<String>, BTreeSet<String>)> {
+        let output = std::process::Command::new("nm").arg("-g").arg("-p").arg(path).output().ok()?;
         if !output.status.success() {
-            continue;
+            return None;
         }
+        let mut defined = HashSet::new();
+        let mut undefined = BTreeSet::new();
         let stdout = String::from_utf8_lossy(&output.stdout);
         for line in stdout.lines() {
             let parts: Vec<&str> = line.split_whitespace().collect();
@@ -52,6 +45,50 @@ pub(crate) fn generate_stub_object_freestanding(
                     defined.insert((*name).to_string());
                 }
                 _ => {}
+            }
+        }
+        Some((defined, undefined))
+    }
+
+    let mut defined: HashSet<String> = HashSet::new();
+    let mut undefined: BTreeSet<String> = BTreeSet::new();
+
+    // Scan both Simple object_paths AND any boot_objects (boot .c/.s may define
+    // or reference symbols that must not be stubbed over).
+    let scan_paths: Vec<PathBuf> = object_paths
+        .iter()
+        .chain(boot_objects.iter())
+        .cloned()
+        .collect();
+    let worker_count = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1);
+    if worker_count <= 1 || scan_paths.len() < 16 {
+        for path in &scan_paths {
+            if let Some((local_defined, local_undefined)) = scan_nm_defined_undefined(path) {
+                defined.extend(local_defined);
+                undefined.extend(local_undefined);
+            }
+        }
+    } else {
+        let chunk_size = scan_paths.len().div_ceil(worker_count);
+        let mut handles = Vec::new();
+        for chunk in scan_paths.chunks(chunk_size.max(1)) {
+            let chunk_paths = chunk.to_vec();
+            handles.push(std::thread::spawn(move || {
+                let mut local_defined = HashSet::new();
+                let mut local_undefined = BTreeSet::new();
+                for path in &chunk_paths {
+                    if let Some((defined, undefined)) = scan_nm_defined_undefined(path) {
+                        local_defined.extend(defined);
+                        local_undefined.extend(undefined);
+                    }
+                }
+                (local_defined, local_undefined)
+            }));
+        }
+        for handle in handles {
+            if let Ok((local_defined, local_undefined)) = handle.join() {
+                defined.extend(local_defined);
+                undefined.extend(local_undefined);
             }
         }
     }

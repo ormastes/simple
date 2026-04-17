@@ -40,6 +40,85 @@ fn runtime_byte_array_to_vec(data: RuntimeValue) -> Option<Vec<u8>> {
     Some(out)
 }
 
+fn der_read_length(data: &[u8], offset: usize) -> Option<(usize, usize)> {
+    let first = *data.get(offset)?;
+    if first < 0x80 {
+        return Some((first as usize, 1));
+    }
+    match first {
+        0x81 => Some((*data.get(offset + 1)? as usize, 2)),
+        0x82 => {
+            let hi = *data.get(offset + 1)? as usize;
+            let lo = *data.get(offset + 2)? as usize;
+            Some(((hi << 8) | lo, 3))
+        }
+        _ => None,
+    }
+}
+
+fn der_read_tlv(data: &[u8], offset: usize) -> Option<(u8, usize, usize, usize)> {
+    let tag = *data.get(offset)?;
+    let (value_len, len_header_size) = der_read_length(data, offset + 1)?;
+    let value_offset = offset + 1 + len_header_size;
+    let total_len = 1 + len_header_size + value_len;
+    if value_offset + value_len > data.len() {
+        return None;
+    }
+    Some((tag, value_offset, value_len, total_len))
+}
+
+fn is_pkcs1_rsa_public_key_der(data: &[u8]) -> bool {
+    let Some((tag, value_offset, value_len, total_len)) = der_read_tlv(data, 0) else {
+        return false;
+    };
+    if tag != 0x30 || total_len != data.len() {
+        return false;
+    }
+    let seq_end = value_offset + value_len;
+    let Some((n_tag, _, _, n_total_len)) = der_read_tlv(data, value_offset) else {
+        return false;
+    };
+    if n_tag != 0x02 {
+        return false;
+    }
+    let e_offset = value_offset + n_total_len;
+    let Some((e_tag, _, _, e_total_len)) = der_read_tlv(data, e_offset) else {
+        return false;
+    };
+    if e_tag != 0x02 {
+        return false;
+    }
+    e_offset + e_total_len == seq_end
+}
+
+fn normalize_rsa_public_key(pubkey: &[u8]) -> Option<Vec<u8>> {
+    if is_pkcs1_rsa_public_key_der(pubkey) {
+        return Some(pubkey.to_vec());
+    }
+
+    let (outer_tag, outer_value_offset, outer_value_len, outer_total_len) = der_read_tlv(pubkey, 0)?;
+    if outer_tag != 0x30 || outer_total_len != pubkey.len() {
+        return None;
+    }
+
+    let outer_end = outer_value_offset + outer_value_len;
+    let (_, _, _, alg_total_len) = der_read_tlv(pubkey, outer_value_offset)?;
+    let bit_string_offset = outer_value_offset + alg_total_len;
+    let (bit_tag, bit_value_offset, bit_value_len, bit_total_len) = der_read_tlv(pubkey, bit_string_offset)?;
+    if bit_tag != 0x03 || bit_string_offset + bit_total_len != outer_end || bit_value_len < 1 {
+        return None;
+    }
+    if pubkey[bit_value_offset] != 0 {
+        return None;
+    }
+
+    let inner = &pubkey[(bit_value_offset + 1)..(bit_value_offset + bit_value_len)];
+    if !is_pkcs1_rsa_public_key_der(inner) {
+        return None;
+    }
+    Some(inner.to_vec())
+}
+
 // ---------------------------------------------------------------------------
 // Public FFI exports
 // ---------------------------------------------------------------------------
@@ -60,6 +139,9 @@ pub extern "C" fn rt_rsa_sha256_verify(
     signature: RuntimeValue,
 ) -> i64 {
     let Some(pk_bytes) = runtime_byte_array_to_vec(pubkey) else {
+        return 0;
+    };
+    let Some(pk_bytes) = normalize_rsa_public_key(&pk_bytes) else {
         return 0;
     };
     let Some(msg_bytes) = runtime_byte_array_to_vec(message) else {
@@ -120,6 +202,9 @@ pub extern "C" fn rt_rsa_sha512_verify(
     let Some(pk_bytes) = runtime_byte_array_to_vec(pubkey) else {
         return 0;
     };
+    let Some(pk_bytes) = normalize_rsa_public_key(&pk_bytes) else {
+        return 0;
+    };
     let Some(msg_bytes) = runtime_byte_array_to_vec(message) else {
         return 0;
     };
@@ -158,6 +243,9 @@ pub extern "C" fn rt_rsa_pss_sha256_verify(
     let Some(pk_bytes) = runtime_byte_array_to_vec(pubkey) else {
         return 0;
     };
+    let Some(pk_bytes) = normalize_rsa_public_key(&pk_bytes) else {
+        return 0;
+    };
     let Some(msg_bytes) = runtime_byte_array_to_vec(message) else {
         return 0;
     };
@@ -184,6 +272,9 @@ pub extern "C" fn rt_rsa_pss_sha384_verify(
     let Some(pk_bytes) = runtime_byte_array_to_vec(pubkey) else {
         return 0;
     };
+    let Some(pk_bytes) = normalize_rsa_public_key(&pk_bytes) else {
+        return 0;
+    };
     let Some(msg_bytes) = runtime_byte_array_to_vec(message) else {
         return 0;
     };
@@ -208,6 +299,9 @@ pub extern "C" fn rt_rsa_pss_sha512_verify(
     signature: RuntimeValue,
 ) -> i64 {
     let Some(pk_bytes) = runtime_byte_array_to_vec(pubkey) else {
+        return 0;
+    };
+    let Some(pk_bytes) = normalize_rsa_public_key(&pk_bytes) else {
         return 0;
     };
     let Some(msg_bytes) = runtime_byte_array_to_vec(message) else {

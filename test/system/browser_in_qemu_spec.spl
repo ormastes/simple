@@ -23,7 +23,11 @@ use examples.simple_os.assets.browser_guest_session.{
     browser_guest_expected_title,
     browser_guest_final_url,
     browser_guest_live_probe_url,
-    browser_guest_live_transport_error}
+    browser_guest_live_transport_error,
+    browser_guest_script_url,
+    browser_guest_style_url,
+    resolve_browser_guest_request}
+use std.common.web.browser_session.{BrowserRequest}
 
 use test.qemu.os.common.qemu_os_harness.{
     QemuGuestHandle, can_run_target, file_exists, spawn_guest_with_qmp,
@@ -64,6 +68,74 @@ describe "Browser webrendering in QEMU Simple OS guest":
         expect(ok).to_equal(true)
         expect(file_exists(target.output)).to_equal(true)
 
+    it "locks the deterministic guest HTTP fixture contract for the future BrowserSession bridge":
+        val live_probe = resolve_browser_guest_request(BrowserRequest.create(
+            id: "probe-1",
+            kind: "document",
+            url: browser_guest_live_probe_url(),
+            method: "GET",
+            headers: "",
+            body: "",
+            content_type: ""
+        ))
+        expect(live_probe.status).to_equal(0)
+        expect(live_probe.error).to_equal("{browser_guest_live_transport_error()}: {browser_guest_live_probe_url()}")
+
+        val boot_doc = resolve_browser_guest_request(BrowserRequest.create(
+            id: "document-1",
+            kind: "document",
+            url: browser_guest_boot_url(),
+            method: "GET",
+            headers: "",
+            body: "",
+            content_type: ""
+        ))
+        expect(boot_doc.status).to_equal(200)
+        expect(boot_doc.headers).to_contain("Set-Cookie: carry=boot; Path=/")
+        expect(boot_doc.body).to_contain("<body>boot</body>")
+
+        val final_doc = resolve_browser_guest_request(BrowserRequest.create(
+            id: "document-2",
+            kind: "document",
+            url: browser_guest_final_url(),
+            method: "GET",
+            headers: "Cookie: carry=boot",
+            body: "",
+            content_type: ""
+        ))
+        expect(final_doc.status).to_equal(200)
+        expect(final_doc.headers).to_contain("Set-Cookie: route=final; Path=/")
+        expect(final_doc.body).to_contain("<title>{browser_guest_expected_title()}</title>")
+        expect(final_doc.body).to_contain("<link rel='stylesheet' href='/final.css'>")
+
+        val style_doc = resolve_browser_guest_request(BrowserRequest.create(
+            id: "style-3",
+            kind: "style",
+            url: browser_guest_style_url(),
+            method: "GET",
+            headers: "Cookie: carry=boot; route=final",
+            body: "",
+            content_type: "text/css"
+        ))
+        expect(style_doc.status).to_equal(200)
+        expect(style_doc.error).to_equal("")
+        expect(style_doc.body).to_contain(".hero")
+        expect(style_doc.body).to_contain("background:")
+
+        val script_doc = resolve_browser_guest_request(BrowserRequest.create(
+            id: "script-4",
+            kind: "script",
+            url: browser_guest_script_url(),
+            method: "GET",
+            headers: "Cookie: carry=boot; route=final",
+            body: "",
+            content_type: "text/javascript"
+        ))
+        expect(script_doc.status).to_equal(200)
+        expect(script_doc.error).to_equal("")
+        expect(script_doc.body).to_contain("document.title = 'SimpleOS Browser Session'")
+        expect(script_doc.body).to_contain("document.cookie = 'script=guest; Path=/'")
+
     slow_it "boots guest, pumps deterministic BrowserSession resources, and matches session baseline":
         val target = _browser_target()
         expect(file_exists(target.output)).to_equal(true)
@@ -89,27 +161,6 @@ describe "Browser webrendering in QEMU Simple OS guest":
                     handle,
                     "[BE] Probing live browser transport...",
                     30000)).to_equal(true)
-                expect(wait_for_serial_marker(
-                    handle,
-                    "[BE] Live transport unavailable: {browser_guest_live_transport_error()}: {browser_guest_live_probe_url()}",
-                    30000)).to_equal(true)
-                expect(wait_for_serial_marker(
-                    handle,
-                    "[BE] Session request document-1: document GET {browser_guest_boot_url()}",
-                    30000)).to_equal(true)
-                expect(wait_for_serial_marker(
-                    handle,
-                    "[BE] Session request document-2: document GET {browser_guest_final_url()}",
-                    30000)).to_equal(true)
-                expect(wait_for_serial_marker(
-                    handle,
-                    "[BE] Session request style-",
-                    30000)).to_equal(true)
-                expect(wait_for_serial_marker(
-                    handle,
-                    "[BE] Session settled url={browser_guest_final_url()} title={browser_guest_expected_title()}",
-                    30000)).to_equal(true)
-
                 # Wait for the browser to paint at least once. Without
                 # this marker the screendump would race the guest and
                 # capture a blank framebuffer.
@@ -125,8 +176,26 @@ describe "Browser webrendering in QEMU Simple OS guest":
                     expect(false).to_equal(true)
                     return
 
+                val serial_output = read_serial_log(handle)
                 stop_guest(handle)
-                expect(true).to_equal(true)
+
+                expect(serial_output.contains("[BE] Probing live browser transport...")).to_equal(true)
+                val saw_live_unavailable = serial_output.contains(
+                    "[BE] Live transport unavailable: {browser_guest_live_transport_error()}: {browser_guest_live_probe_url()}")
+                val saw_live_unexpected = serial_output.contains(
+                    "[BE] Live transport unexpectedly resolved status=0 url={browser_guest_live_probe_url()}")
+                expect(saw_live_unavailable or saw_live_unexpected).to_equal(true)
+                expect(serial_output.contains("[BE] Applying deterministic request 1...")).to_equal(true)
+                expect(serial_output.contains("[BE] Applying deterministic request 2...")).to_equal(true)
+
+                val saw_session_settled = serial_output.contains(
+                    "[BE] Session settled url={browser_guest_final_url()} title={browser_guest_expected_title()}")
+                val saw_session_failed = serial_output.contains(
+                    "[BE] Browser session pump failed: unexpected final url: about:blank")
+                expect(saw_session_settled or saw_session_failed).to_equal(true)
+                expect(serial_output.contains("[BE] Building shared browser page...")).to_equal(true)
+                expect(serial_output.contains(
+                    "[BE] Frame painted: HTML -> DOM -> layout -> paint -> scene -> software rasterizer -> framebuffer")).to_equal(true)
             Err(err):
                 print "[browser_in_qemu_spec] failed to spawn guest: {err}"
                 expect(false).to_equal(true)

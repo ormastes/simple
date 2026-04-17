@@ -54,6 +54,32 @@ fn find_dotted_dir(current: &Path, segment: &str) -> Option<PathBuf> {
     }
 }
 
+fn domain_to_dir(domain: &str) -> String {
+    domain.replace('-', "_")
+}
+
+fn normalize_type_segments(resolver: &ModuleResolver, segments: &[String]) -> Option<Vec<String>> {
+    if segments.is_empty() || segments[0] == "crate" {
+        return None;
+    }
+
+    if segments.len() >= 2 && segments[0].contains('-') {
+        let mut normalized = vec!["type".to_string(), domain_to_dir(&segments[0])];
+        normalized.extend(segments[1..].iter().cloned());
+        return Some(normalized);
+    }
+
+    if segments.len() == 1 {
+        return Some(vec![
+            "type".to_string(),
+            domain_to_dir(&resolver.default_type_domain),
+            segments[0].clone(),
+        ]);
+    }
+
+    None
+}
+
 fn resolve_stdlib_from_root(
     resolver: &ModuleResolver,
     root: &Path,
@@ -118,6 +144,12 @@ impl ModuleResolver {
         match self.resolve_from_base(&base_dir, remaining, path) {
             Ok(resolved) => Ok(resolved),
             Err(err) => {
+                if let Some(type_segments) = normalize_type_segments(self, segments) {
+                    if let Ok(resolved) = self.resolve_from_base(&self.type_root, &type_segments[1..], path) {
+                        return Ok(resolved);
+                    }
+                }
+
                 // If relative resolution failed, try alternative resolution strategies
 
                 // Strategy 1: Try stdlib
