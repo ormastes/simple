@@ -123,6 +123,82 @@ Emit an explicit temporary `let _t = ...` for each intermediate call result in a
 
 ---
 
+### Root cause (Phase 9 investigation 2026-04-17)
+
+#### 1. Minimal reproducer
+
+```simple
+class Box:
+    val x: i32
+
+fn wrap(self: Box) -> Box:
+    Box(x: self.x + 1)
+
+fn double(self: Box) -> Box:
+    Box(x: self.x * 2)
+
+fn main():
+    val result = Box(x: 1).wrap().double()
+    print result.x
+```
+
+```
+bin/simple run /tmp/chain_repro.spl
+# error: semantic: method `wrap` not found on type `Box`
+```
+
+The same error fires on a single-link call `Box(x:1).wrap()` — the chain is a
+symptom, not the cause. Non-chained `val a = Box(x:1); a.wrap()` works.
+
+#### 2. Layer
+
+**Rust seed interpreter** — not the parser or typechecker. `bin/simple check`
+passes; `bin/simple run` fails. The `.spl` Core interpreter is not involved.
+
+#### 3. Specific file:line
+
+`src/compiler_rust/compiler/src/interpreter_method/mod.rs`
+
+- **`evaluate_method_call`** (line 38): dispatches on `Value::Object` at **line 671**.
+  After `find_and_exec_method` + `try_method_missing` fail, it calls
+  `bail_unknown_method!` at **line 749**. A UFCS fallback (`functions.get(method)`)
+  does exist further down at **line 982**, but it is unreachable for `Value::Object`
+  because the Object arm exits via `bail_unknown_method!` at line 749 before the
+  code reaches line 982.
+- **`evaluate_method_call_with_self_update`** (line 1061): **does** have the UFCS
+  fallback for `Value::Object` at **line 1105** (`functions.get(method)`).
+- The dispatch split is in
+  `src/compiler_rust/compiler/src/interpreter/expr/calls.rs` **line 6**:
+  if the receiver AST node is `Expr::Identifier`, the `_with_self_update` path
+  is taken (UFCS present); any other receiver expression (constructor literal,
+  chained call result) falls to plain `evaluate_method_call` (UFCS unreachable
+  for `Value::Object`).
+
+#### 4. Fix sketch
+
+In `evaluate_method_call` (`interpreter_method/mod.rs`), add the UFCS fallback
+inside the `Value::Object` arm, mirroring the one already in
+`evaluate_method_call_with_self_update`:
+
+```rust
+// After find_and_exec_method + try_method_missing fail, before bail_unknown_method!:
+if let Some(func) = functions.get(method).cloned() {
+    let mut arg_values = vec![recv_val.clone()];
+    for arg in args {
+        let val = evaluate_expr(&arg.value, env, functions, classes, enums, impl_methods)?;
+        arg_values.push(val);
+    }
+    return exec_function_with_values(&func, &arg_values, env, functions, classes, enums, impl_methods);
+}
+```
+
+This is ~8 lines duplicated from `_with_self_update`. Alternatively, extract a
+shared `try_ufcs_fallback(recv_val, method, ...)` helper and call it from both
+functions. Complexity: **small** (single-site Rust change, no grammar or type
+system changes needed).
+
+---
+
 ## 7. Post-Landing Updates
 
 Once this RFC is implemented and the acceptance criteria pass:

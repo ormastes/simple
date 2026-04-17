@@ -122,3 +122,117 @@ No required migration. Existing qualified literals keep working. Teams can adopt
 - Ambiguity diagnostic fires when two in-scope enums share a case name and the expected type is unresolved.
 - No existing test regresses.
 - Bare identifier in an untyped position (no expected type) resolves as before — no silent enum injection.
+
+---
+
+### Audit findings (Phase 9 investigation 2026-04-17)
+
+#### 1. What exists today
+
+**Parser:** No distinction between a bare `Success` reference and `StatusVariant.Success` at parse time.
+Both become `Ident("Success")` nodes. The AST node `EnumLit(type_, variant, payload)` only appears
+after a pass has already resolved the qualified form; the parser never emits it for bare identifiers.
+Confirmed: `src/compiler_rust/compiler/src/hir/lower/type_resolver.rs` and
+`src/compiler/35.semantics/resolve.spl:475-490` — `EnumLit` is handled in resolution, not parsing.
+
+**Bidirectional checker (`src/compiler/30.types/type_system/bidirectional.spl`):**
+`InferMode` / `check_expr` infrastructure exists (lines ~60-280). `check_expr` propagates expected
+types for Integer, Float, Lambda, Call arguments, Tuple, Array, Dict. The `Call` arm (line ~200)
+already passes each argument through `check_expr(args[i], param_types[i])` — i.e., expected-type
+flow into call arguments is implemented. **However, there is no `case Ident(name):` arm in
+`check_expr`.** Bare identifier resolution falls through to the default `case _:` which calls
+`synthesize_expr` then unifies — it never checks whether the expected type is an enum and `name`
+is one of its cases.
+
+`bidirectional_inferencer.spl:109` has `case Var(_): HirType.Int  # Placeholder` — a placeholder,
+not a stubbed-out real implementation.
+
+**`src/compiler/30.types/__init__.spl:6`** exports `TypeInferencer`, so the bidirectional engine
+*is* wired into the compiler pipeline (unlike the UFCS `resolve_methods()` stub). But the missing
+`Ident` arm means enum inference never fires.
+
+**`src/compiler/35.semantics/resolve.spl:475-490`:** Handles already-qualified `EnumLit` nodes —
+resolves payload sub-expressions. Has no logic to rewrite a bare `Ident` into an `EnumLit` when
+the expected type is an enum.
+
+**Existing enum tests** (`test/feature/usage/enums_spec.spl`, `test/unit/compiler/mir/mir_enum_access_spec.spl`, etc.):
+zero use of bare enum forms — every test uses fully qualified `EnumName.Variant` syntax.
+
+#### 2. Stub vs. fully implemented
+
+This is **not** the UFCS pattern (impl written, entry point stubbed). The bidirectional
+infrastructure (InferMode, check_expr dispatch, expected-type propagation through Call args) is
+genuinely wired and running. The missing piece is a single rule that was never written: no code
+anywhere checks "is this `Ident` in a position where the expected type is an enum, and if so, is
+the name one of that enum's cases?" The fix requires new logic, not unstubbing an existing function.
+
+#### 3. Concrete reproducer
+
+```simple
+# /tmp/bare_enum_repro3.spl
+enum StatusVariant:
+    Success
+    Warning
+    Error
+
+fn show(v: StatusVariant) -> text:
+    match v:
+        Success: "ok"
+        Warning: "warn"
+        Error:   "err"
+
+fn test():
+    val s = show(Success)
+    print s
+
+test()
+```
+
+`bin/simple check /tmp/bare_enum_repro3.spl` → **`OK`** (parse-only; the Rust seed `check_file`
+at `src/compiler_rust/driver/src/cli/check.rs:137-180` does parse + validate_imports only — no
+type checking — so "OK" is not evidence of correctness).
+
+`bin/simple run /tmp/bare_enum_repro3.spl` → **`error: semantic: variable 'Success' not found`**
+
+This is the ground-truth result: bare enum literals fail at interpreter resolution time.
+
+#### 4. Where the fix would go
+
+Primary: `src/compiler/30.types/type_system/bidirectional.spl` — add a `case Ident(name):`
+arm to `check_expr`:
+
+```
+case Ident(name):
+    match expected:
+        case Enum(enum_name, cases):
+            if cases.contains(name):
+                # Rewrite: treat as if user wrote EnumLit(enum_name, name, None)
+                Ok(expected)
+            else:
+                # Fall through to normal synthesis + unify
+                val inferred = synthesize_expr(engine, expr, env)?
+                engine_unify(engine, inferred, expected)?
+                Ok(expected)
+        case _:
+            val inferred = synthesize_expr(engine, expr, env)?
+            engine_unify(engine, inferred, expected)?
+            Ok(expected)
+```
+
+Secondary: `src/compiler/35.semantics/resolve.spl` — when `check_expr` rewrites an `Ident` to
+an `EnumLit` node, the resolver's existing `EnumLit` arm (line 475) handles downstream resolution
+already. No parser changes needed (confirmed by this RFC §4).
+
+Size: **small-to-medium** — the bidirectional arm is ~15 lines; the secondary concern is whether
+`check_expr` result feeds back into the HIR being lowered (needs verification that the rewritten
+node is emitted, not just type-checked against).
+
+#### 5. Status correction
+
+**Recommended status: "Proposed (partial — bidirectional infrastructure exists, enum-literal
+inference rule missing)"**
+
+The `InferMode.Check` / `check_expr` machinery is real and wired. Expected-type flow through
+`Call` arguments already runs. The single missing piece is the `case Ident` arm in `check_expr`
+that recognises an enum context. This is substantively smaller than greenfield but not a one-line
+unstub — the rewrite from `Ident` to `EnumLit` in the HIR must be threaded through correctly.

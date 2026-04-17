@@ -101,3 +101,89 @@ Risk 7 from `ui_typed_core_rfc.md` ("two API styles confuse users") is fully res
 - No existing test regresses.
 - "method not found" errors still emit correctly when neither a method nor a compatible free function exists.
 - Ambiguity diagnostic fires when two free functions match the first-arg type.
+
+---
+
+### Audit findings (Phase 9 investigation 2026-04-17)
+
+#### 1. What `ufcs_dot_operator_design.md` claimed shipped
+
+The design (Status: "Complete") describes resolution-time UFCS: `x.method(args)` tries (1) instance method, (2) trait method, (3) free function where first param matches receiver type. The `MethodResolution` enum with `FreeFunction(func_id)` variant was added to HIR; a `MethodResolver` class with `try_ufcs` was written; the interpreter at `src/compiler/70.backend/backend/interpreter.spl:186-187` handles `FreeFunction`. The pipeline step at `src/compiler/80.driver/driver.spl:459-460` calls `resolve_methods(hir_module)` labeled "Step 2: Method resolution (UFCS)".
+
+#### 2. What is actually implemented
+
+**`src/compiler/35.semantics/resolve.spl:572-595`** — the public entry point `resolve_methods()` (and `resolve_methods_with_solver()`) is a two-line stub:
+
+```
+fn resolve_methods(module: HirModule) -> (HirModule, [ResolveError]):
+    # Bootstrap fallback: skip UFCS resolution until self-host runtime
+    # supports the full MethodResolver method surface.
+    (module, [])
+```
+
+Every `MethodCall` node stays at `MethodResolution.Unresolved` (set by HIR lowering at `src/compiler/20.hir/hir_lowering/expressions.spl:105`). The `MethodResolver` class and `try_ufcs` strategy in `resolve_strategies.spl` are fully written but never called.
+
+The **Rust seed compiler** (`src/compiler_rust/`) has its own independent method-call path in `src/compiler_rust/compiler/src/hir/lower/expr/mod.rs:lower_method_call`. Its codegen (`src/compiler_rust/compiler/src/codegen/instr/closures_structs.rs:compile_method_call_static`) resolves method names by suffix search over `func_ids` — finding any registered function whose mangled name ends with `_dot_<method>`. This is a weaker, name-only heuristic: it finds `foo.bar()` → `SomeType_dot_bar` regardless of first-parameter type. It does NOT perform the `try_ufcs` type-compatibility check.
+
+#### 3. Concrete counterexample
+
+```simple
+# test/ufcs_audit_repro.spl  (runs inside project tree)
+use common.ui.widget.{WidgetNode}
+use common.ui.builder.{with_padding_token}
+use common.ui.design_tokens.{Spacing}
+use common.ui.theme_registry.{ThemeId}
+
+fn test_ufcs_cross_module():
+    val n = WidgetNode(id: "x")
+    # padding_token is NOT a method on WidgetNode.
+    # True UFCS would resolve to: with_padding_token(n, ThemeId.IOSLight, Spacing.Md)
+    val n2 = n.padding_token(ThemeId.IOSLight, Spacing.Md)
+```
+
+**Result:** `bin/simple compile test/ufcs_audit_repro.spl` succeeds, but NOT via UFCS. The Rust seed suffix-search finds any function whose mangled name ends with `_dot_padding_token`. Since `with_padding_token` does NOT end in `_dot_padding_token`, no suffix match is found — the compile may emit an unresolved call or silently produce incorrect codegen (not verified at runtime). The self-hosted Simple compiler path will emit `MethodResolution.Unresolved` and produce a runtime/codegen error once the stub is removed.
+
+The method duplicates (`fn padding`, `fn width`, `fn height`, `fn accent` on `WidgetNode`) are needed specifically because:
+- The Rust seed suffix heuristic cannot correctly resolve `n.padding_token(...)` → `with_padding_token(...)` (different prefix).
+- The self-hosted path stubs out `resolve_methods` entirely.
+- `WidgetNode.padding` at `widget.spl:700` is itself a wrapper that calls `with_padding_token(self, theme, s)`.
+
+#### 4. Hypothesis — why UFCS is skipped
+
+Root cause: **bootstrap deadlock stub**. The comment in `resolve.spl:578` says "skip UFCS resolution until self-host runtime supports the full MethodResolver method surface." The `MethodResolver` calls into `SymbolTable`, `TypeChecker`, `TraitSolver` — types that may not yet be bootstrappable. Rather than risk a broken self-hosted build, the pass was stubbed out. The design doc was marked "Complete" when the infrastructure (enum, class, strategies) was written, before the entry point was un-stubbed and tested end-to-end.
+
+The `infer_method_call` in `src/compiler/30.types/type_system/expr_infer_calls.spl` also lacks UFCS: it returns a fresh type variable for all method calls (`Ok(engine_fresh_var(engine))`), so type inference never errors on `n.padding_token(...)` either — it defers resolution downstream to the stubbed pass.
+
+#### 5. Concrete fix
+
+**File:** `src/compiler/35.semantics/resolve.spl`, lines 572–581.
+
+Replace the stub body with the actual resolver call:
+
+```
+fn resolve_methods(module: HirModule) -> (HirModule, [ResolveError]):
+    val resolver = create_method_resolver(module.symbols)
+    resolver.build_trait_impls(module.impls)
+    val resolved = resolver.resolve_module(module)
+    (resolved, resolver.errors)
+```
+
+Secondary: `infer_method_call` in `src/compiler/30.types/type_system/expr_infer_calls.spl` returns a fresh var for all method calls; after un-stubbing `resolve_methods`, UFCS errors will surface only at the resolve pass, not at type-inference time. That is acceptable for now.
+
+**Fix complexity: small** — the resolver is fully implemented. The only change is replacing the two stub bodies in `resolve.spl:572-595`. The bootstrap concern needs a smoke test: compile the Simple compiler itself after un-stubbing to verify `MethodResolver` is bootstrappable.
+
+#### 6. Status verdict
+
+`ufcs_dot_operator_design.md` should be marked **"Partial — infrastructure complete, entry point stubbed (bootstrap blocker)"**. The "Complete" status is incorrect: the design was implemented as data structures and algorithms but was never activated in the compilation pipeline.
+
+### Plumbing correction (Phase 9 follow-up 2026-04-18)
+
+A first attempt at the un-stub revealed the fix is larger than "4 lines". `resolve_methods(module: HirModule)` (resolve.spl:572) does not currently receive a `SymbolTable`, but `MethodResolver.new(symbols: SymbolTable)` (resolve.spl:118) and `create_method_resolver(symbols: SymbolTable)` (resolve.spl:151) require one. To wire it correctly:
+
+1. **Change `resolve_methods` signature** to `fn resolve_methods(module: HirModule, symbols: SymbolTable) -> (HirModule, [ResolveError])` — same for `resolve_methods_with_solver`.
+2. **Update both call sites in `src/compiler/80.driver/driver.spl:460,591`** to pass a `SymbolTable`. The natural source is `self.ctx.symbols` (or whatever the context type's symbol-table accessor is named — needs verification).
+3. **Confirm the populated `SymbolTable` actually contains the receiver type's methods** at the point `resolve_methods` is called, so the `try_method` strategy in `MethodResolver` returns hits instead of falling through to `try_ufcs`. If symbols aren't populated yet at that pass, the fix needs a different injection point.
+
+Realistic scope: 20–30 line plumbing change touching `resolve.spl` (function signatures + body), `driver.spl` (two call sites), and any other internal callers of `resolve_methods`. Verification cost includes a Stage 4 self-host build (~16s) and confirming `bin/simple lint`, `bin/simple check`, and `bin/simple format` all stop emitting `Function 'X' not found` runtime errors from the 2419 stubbed-method paths.
+
+**Empirical evidence**: Stage 4 succeeds in 16.3s with `EXIT=0` and produces a 27.5MB binary, but every command path that traverses methods (`lint`, `check`, `format`) fails with `Runtime error: Function 'level' not found` / `'line' not found`. The `test` command works because its hot path doesn't traverse the diagnostic-formatter's method calls. This confirms: the resolver stub is what's breaking — un-stubbing it (with the SymbolTable plumbed correctly) should fix all three commands in one shot.
