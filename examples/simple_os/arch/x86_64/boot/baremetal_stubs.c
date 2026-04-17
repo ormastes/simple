@@ -292,27 +292,28 @@ RuntimeValue rt_string_format(RuntimeValue fmt, RuntimeValue val);
 void rt_print_value(RuntimeValue val);
 
 /* ===================================================================
- * 4. Heap allocator — bump allocator, 512 MB
+ * 4. Heap allocator — bump allocator, 64 MB
  *
  * NOTE: keep this within the QEMU scenario RAM budget minus a safety
  * margin for kernel code/rodata/data, linker-script .heap/.stack, and
- * page tables. x64-desktop-test runs with -m 512M, so the kernel must
- * fit (code ~5 MB + rodata/data ~1 MB + BSS ~0.3 MB + _heap 512 MB +
- * linker .heap 16 MB + .stack 8 MB = ~542 MB; stack top lands at
- * ~0x22000000 with the static bump heap itself living in host RAM, so
- * the previous 512M budget note does not apply to the current 2G TLS
- * unit/system targets. Bumping much higher without revisiting target -m
- * pushes _stack_top beyond physical RAM and every push/call silently
- * drops to unmapped memory — the cause of Agent M's 0x950a fault.
+ * page tables. The desktop import/probe and desktop integration kernels
+ * boot before `spl_start` and must survive the crt0 `.bss` clear under
+ * 128M/512M QEMU guests. A 512MB static bump heap inflates `.bss` enough
+ * to overrun guest RAM during `_entry32` zeroing, faulting before serial
+ * boot markers appear. Keep the stub heap modest here; the linker-script
+ * `.heap` region and later kernel allocators still exist for larger flows.
  * =================================================================== */
 
-static char   _heap[512ULL * 1024ULL * 1024ULL] __attribute__((aligned(16)));
+static const size_t BAREMETAL_HEAP_SIZE = 64ULL * 1024ULL * 1024ULL;
+static const size_t BAREMETAL_HEAP_WARN_SIZE = 48ULL * 1024ULL * 1024ULL;
+
+static char   _heap[64ULL * 1024ULL * 1024ULL] __attribute__((aligned(16)));
 static size_t _heap_off = 0;
 
 void *malloc(size_t sz)
 {
     sz = (sz + 15) & ~(size_t)15;
-    if (sz >= 0x100000 || _heap_off >= 0x13F00000ULL) {
+    if (sz >= 0x100000 || _heap_off >= BAREMETAL_HEAP_WARN_SIZE) {
         serial_puts("[heap] alloc sz=");
         serial_put_hex((uint64_t)sz);
         serial_puts(" off_before=");
@@ -332,7 +333,7 @@ void *malloc(size_t sz)
     }
     void *p = &_heap[_heap_off];
     _heap_off += sz;
-    if (sz >= 0x100000 || _heap_off >= 0x0FF00000ULL) {
+    if (sz >= 0x100000 || _heap_off >= BAREMETAL_HEAP_WARN_SIZE) {
         serial_puts("[heap] alloc off_after=");
         serial_put_hex((uint64_t)_heap_off);
         serial_puts("\r\n");

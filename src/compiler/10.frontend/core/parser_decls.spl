@@ -28,6 +28,7 @@ use compiler.core.tokens.{TOK_KW_LAZY, TOK_KW_EXTEND, TOK_KW_NEWTYPE}
 use compiler.core.tokens.{TOK_KW_CE}
 use compiler.core.tokens.{TOK_KW_CLI}
 use compiler.core.tokens.{TOK_KW_BITFIELD}
+use compiler.core.tokens.{TOK_KW_PUB}
 use compiler.core.tokens.{TOK_UNDERSCORE, TOK_TILDE, TOK_AT}
 use compiler.core.tokens.{TOK_KW_AND}
 use compiler.core.ast.{expr_ident, expr_call, expr_unit, expr_block, expr_binary, expr_field_access}
@@ -41,6 +42,7 @@ use compiler.core.ast.{decl_val_binding, decl_lazy_val_binding, decl_var_binding
 use compiler.core.ast.{decl_use_import, decl_export_names, decl_enum_def, decl_set_lazy}
 use compiler.core.ast.{decl_impl_block}
 use compiler.core.ast.{decl_set_comptime}
+use compiler.core.ast.{decl_set_visibility_text}
 use compiler.core.ast.{decl_is_gpu_kernel, decl_is_simd, decl_derives}
 use compiler.core.ast.{decl_get_name, decl_get_fields, decl_get_derives, decl_set_derives}
 use compiler.core.ast.{module_set_path, module_add_decl}
@@ -630,11 +632,92 @@ fn parse_enum_decl() -> i64:
 
 # ===== Top-Level Module Parsing =====
 
+fn parse_top_level_visibility() -> text:
+    if par_kind_get() == TOK_KW_PUB:
+        parser_advance()
+        if par_kind_get() == TOK_LPAREN:
+            parser_advance()
+            var modifier_name = ""
+            if par_kind_get() == TOK_IDENT:
+                modifier_name = par_text_get()
+                parser_advance()
+            parser_expect(TOK_RPAREN)
+            if modifier_name == "peer":
+                return "peer"
+            if modifier_name == "up":
+                return "up"
+            if modifier_name == "friend":
+                return "internal"
+            if modifier_name == "package":
+                return "package"
+            if modifier_name != "" and modifier_name != "public":
+                parser_warn("unknown visibility modifier `pub(" + modifier_name + ")`; using public")
+            return "public"
+        return "public"
+    if par_kind_get() == TOK_IDENT and par_text_get() == "pri":
+        parser_advance()
+        return "private"
+    "private"
+
+fn finalize_decl_visibility(decl_id: i64, visibility: text) -> i64:
+    decl_set_visibility_text(decl_id, visibility)
+    decl_id
+
+fn parse_module_decl_with_visibility(loop_index: i64, visibility: text) -> i64:
+    if par_kind_get() == TOK_KW_ASYNC:
+        parser_advance()
+        if par_kind_get() == TOK_KW_FN:
+            return finalize_decl_visibility(parse_fn_decl(1), visibility)
+        parser_error("expected 'fn' after 'async'")
+        return -1
+    if par_kind_get() == TOK_KW_FN:
+        return finalize_decl_visibility(parse_fn_decl(0), visibility)
+    if par_kind_get() == TOK_KW_EXTERN:
+        parser_advance()
+        return finalize_decl_visibility(parse_extern_fn_decl(), visibility)
+    if par_kind_get() == TOK_KW_STRUCT:
+        return finalize_decl_visibility(parse_struct_decl(), visibility)
+    if par_kind_get() == TOK_KW_ENUM:
+        return finalize_decl_visibility(parse_enum_decl(), visibility)
+    if par_kind_get() == TOK_KW_CLASS:
+        return finalize_decl_visibility(parse_struct_decl(), visibility)
+    if par_kind_get() == TOK_KW_VAL:
+        return finalize_decl_visibility(parse_val_decl(), visibility)
+    if par_kind_get() == TOK_KW_LAZY:
+        parser_advance()
+        return finalize_decl_visibility(parse_lazy_val_decl(), visibility)
+    if par_kind_get() == TOK_KW_VAR:
+        return finalize_decl_visibility(parse_var_decl(), visibility)
+    if par_kind_get() == TOK_KW_CONST:
+        parser_advance()
+        if par_kind_get() == TOK_KW_FN:
+            val cfd = parse_fn_decl(0)
+            decl_set_comptime(cfd)
+            return finalize_decl_visibility(cfd, visibility)
+        val const_name = par_text_get()
+        parser_expect(TOK_IDENT)
+        var const_type = 0
+        if par_kind_get() == TOK_COLON:
+            parser_advance()
+            const_type = parser_parse_type_with_union()
+        parser_expect(TOK_ASSIGN)
+        val const_init = parse_expr()
+        return finalize_decl_visibility(decl_val_binding(const_name, const_type, const_init, 0), visibility)
+    parser_error("expected declaration after visibility modifier")
+    -1
+
 fn parse_module_body():
     for i in 0..100000:
         parser_skip_newlines_and_semicolons()
         if par_kind_get() == TOK_EOF:
             break
+        val parsed_visibility = parse_top_level_visibility()
+        if parsed_visibility != "private":
+            parser_skip_newlines_and_semicolons()
+            val visible_decl = parse_module_decl_with_visibility(i, parsed_visibility)
+            if visible_decl >= 0:
+                module_add_decl(visible_decl)
+            continue
         if par_kind_get() == TOK_DEDENT:
             # Stray dedent at module level -- skip it
             parser_advance()

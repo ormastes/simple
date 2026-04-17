@@ -15,12 +15,7 @@ extern fn rt_unix_socket_connect(path: text) -> i64
 extern fn rt_fd_write(fd: i64, data: text, len: i64) -> i64
 extern fn rt_fd_read_until(fd: i64, stop_byte: i64, max: i64) -> text
 extern fn rt_fd_close(fd: i64) -> bool
-<<<<<<< Conflict 1 of 4
-%%%%%%% Changes from base to side #1
-+extern fn rt_thread_sleep(ms: i64)
-+++++++ Contents of side #2
 extern fn rt_thread_sleep(millis: i64)
->>>>>>> Conflict 1 of 4 ends
 
 # ============================================================================
 # QMP Client
@@ -45,24 +40,6 @@ fn qmp_read_line(fd: i64) -> text:
     # stop_byte = 10 = '\n'
     rt_fd_read_until(fd, 10, 65536)
 
-<<<<<<< Conflict 2 of 4
-%%%%%%% Changes from base to side #1
-+fn qmp_read_reply(fd: i64) -> text:
-+    """Read until a concrete reply arrives, skipping async event lines."""
-+    var attempts = 0
-+    while attempts < 400:
-+        val line = qmp_read_line(fd)
-+        if line.len() == 0:
-+            rt_thread_sleep(25)
-+            attempts = attempts + 1
-+            continue
-+        if line.contains("\"return\"") or line.contains("\"error\""):
-+            return line
-+        rt_thread_sleep(10)
-+        attempts = attempts + 1
-+    ""
-+
-+++++++ Contents of side #2
 fn qmp_read_reply(fd: i64) -> text:
     """Read until a concrete QMP reply is seen.
 
@@ -70,16 +47,17 @@ fn qmp_read_reply(fd: i64) -> text:
     `return` / `error` line. Skip those so callers observe the real reply.
     """
     var attempt: i64 = 0
-    while attempt < 64:
+    while attempt < 400:
         val line = qmp_read_line(fd)
         if line.len() == 0:
-            return line
+            rt_thread_sleep(25)
+            attempt = attempt + 1
+            continue
         if line.contains("\"return\"") or line.contains("\"error\""):
             return line
+        rt_thread_sleep(10)
         attempt = attempt + 1
     ""
-
->>>>>>> Conflict 2 of 4 ends
 # ============================================================================
 # Connection
 # ============================================================================
@@ -91,72 +69,21 @@ fn qmp_connect(socket_path: text) -> QmpClient:
     qmp_capabilities so the session enters command mode.
     Returns a QmpClient with fd >= 0 on success, fd == -1 on failure.
     """
-<<<<<<< Conflict 3 of 4
-%%%%%%% Changes from base to side #1
--    val fd = rt_unix_socket_connect(socket_path)
--    if fd < 0:
--        print "[qmp] connect failed: {socket_path}"
--        return QmpClient(socket_path: socket_path, fd: -1)
--
--    # Read greeting (e.g. {"QMP": {"version": {...}, "capabilities": [...]}})
--    val greeting = qmp_read_line(fd)
--    if greeting.len() == 0:
--        print "[qmp] no greeting from {socket_path}"
--        rt_fd_close(fd)
--        return QmpClient(socket_path: socket_path, fd: -1)
--
--    # Send capabilities handshake
--    val ok = qmp_write_line(fd, "{\"execute\": \"qmp_capabilities\"}")
--    if not ok:
--        print "[qmp] failed to send qmp_capabilities to {socket_path}"
--        rt_fd_close(fd)
--        return QmpClient(socket_path: socket_path, fd: -1)
--
--    # Read capabilities ACK ({"return": {}})
--    val ack = qmp_read_line(fd)
--    if ack.contains("error"):
--        print "[qmp] qmp_capabilities error: {ack}"
--        rt_fd_close(fd)
--        return QmpClient(socket_path: socket_path, fd: -1)
--
--    QmpClient(socket_path: socket_path, fd: fd)
-+    var attempts = 0
-+    while attempts < 25:
-+        val fd = rt_unix_socket_connect(socket_path)
-+        if fd >= 0:
-+            var greeting = ""
-+            var greet_tries = 0
-+            while greet_tries < 80:
-+                greeting = qmp_read_line(fd)
-+                if greeting.len() > 0:
-+                    break
-+                rt_thread_sleep(25)
-+                greet_tries = greet_tries + 1
-+            if greeting.len() > 0 and greeting.contains("\"QMP\""):
-+                val ok = qmp_write_line(fd, "{\"execute\": \"qmp_capabilities\"}")
-+                if ok:
-+                    val ack = qmp_read_reply(fd)
-+                    if ack.contains("\"return\"") and not ack.contains("\"error\""):
-+                        return QmpClient(socket_path: socket_path, fd: fd)
-+                    print "[qmp] qmp_capabilities error: {ack}"
-+                else:
-+                    print "[qmp] failed to send qmp_capabilities to {socket_path}"
-+            else:
-+                print "[qmp] no greeting from {socket_path}"
-+            rt_fd_close(fd)
-+        attempts = attempts + 1
-+        rt_thread_sleep(100)
-+    print "[qmp] connect failed: {socket_path}"
-+    QmpClient(socket_path: socket_path, fd: -1)
-+++++++ Contents of side #2
     var attempt: i64 = 0
     var last_error = "connect failed"
-    while attempt < 20:
+    while attempt < 25:
         val fd = rt_unix_socket_connect(socket_path)
         if fd >= 0:
             # Read greeting (e.g. {"QMP": {"version": {...}, "capabilities": [...]}})
-            val greeting = qmp_read_line(fd)
-            if greeting.len() > 0:
+            var greeting = ""
+            var greet_try: i64 = 0
+            while greet_try < 80:
+                greeting = qmp_read_line(fd)
+                if greeting.len() > 0:
+                    break
+                rt_thread_sleep(25)
+                greet_try = greet_try + 1
+            if greeting.len() > 0 and greeting.contains("\"QMP\""):
                 # Send capabilities handshake
                 val ok = qmp_write_line(fd, "{\"execute\": \"qmp_capabilities\"}")
                 if not ok:
@@ -177,12 +104,11 @@ fn qmp_connect(socket_path: text) -> QmpClient:
         else:
             last_error = "connect failed"
         attempt = attempt + 1
-        if attempt < 20:
+        if attempt < 25:
             rt_thread_sleep(100)
 
     print "[qmp] {last_error}: {socket_path}"
     QmpClient(socket_path: socket_path, fd: -1)
->>>>>>> Conflict 3 of 4 ends
 
 fn qmp_disconnect(client: QmpClient) -> bool:
     """Close the persistent QMP socket fd."""
@@ -204,15 +130,9 @@ fn qmp_send(client: QmpClient, json_payload: text) -> (text, text, i64):
     val ok = qmp_write_line(client.fd, json_payload)
     if not ok:
         return ("", "write failed", 1)
-<<<<<<< Conflict 4 of 4
-+++++++ Contents of side #1
     val resp = qmp_read_reply(client.fd)
     if resp.len() == 0:
         return ("", "empty qmp reply", 1)
-%%%%%%% Changes from base to side #2
--    val resp = qmp_read_line(client.fd)
-+    val resp = qmp_read_reply(client.fd)
->>>>>>> Conflict 4 of 4 ends
     (resp, "", 0)
 
 fn qmp_send_check(client: QmpClient, json_payload: text, label: text) -> bool:

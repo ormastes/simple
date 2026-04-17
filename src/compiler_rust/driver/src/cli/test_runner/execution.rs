@@ -668,6 +668,64 @@ fn preprocess_sspec_for_smf(path: &Path) -> Result<PathBuf, String> {
     let mut in_top_fn = false;
     let mut top_fn_indent = 0usize;
 
+    // Hoisting state: when we encounter a nested `class`/`impl`/`enum`/`type`
+    // at indent > 0 inside what would otherwise be body content, we lift the
+    // entire definition (dedented to column 0) up to module scope. This
+    // works around the HIR's rule that classes/enums/types cannot appear as
+    // statements in a function body.
+    let mut in_hoisted_def = false;
+    let mut hoist_indent = 0usize;
+    let mut hoisted_buf: Vec<String> = Vec::new();
+    // Names already hoisted (to detect collisions between two specs that
+    // define the same class name in different `it` blocks). On collision we
+    // skip hoisting the second occurrence and emit a warning comment.
+    let mut hoisted_names: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+    fn extract_def_name(trimmed: &str) -> Option<String> {
+        // "class Foo", "class Foo<T>", "class Foo(", "enum Bar:" etc.
+        // Also "impl Foo" / "impl Trait for Foo" — for impl we use the
+        // whole signature as the key so two `impl Trait for Foo` don't
+        // false-positive collide with two distinct `impl Foo` blocks; the
+        // detector is best-effort.
+        let rest = trimmed
+            .split_once(' ')
+            .map(|(_, r)| r)
+            .unwrap_or(trimmed);
+        let name: String = rest
+            .chars()
+            .take_while(|c| c.is_alphanumeric() || *c == '_')
+            .collect();
+        if name.is_empty() { None } else { Some(name) }
+    }
+    fn is_hoistable_keyword(trimmed: &str) -> bool {
+        trimmed.starts_with("class ")
+            || trimmed.starts_with("impl ")
+            || trimmed.starts_with("enum ")
+            || trimmed.starts_with("type ")
+    }
+
+    let flush_hoisted =
+        |buf: &mut Vec<String>, top: &mut Vec<String>, indent: usize| {
+            if buf.is_empty() {
+                return;
+            }
+            for raw in buf.drain(..) {
+                if raw.trim().is_empty() {
+                    top.push(String::new());
+                    continue;
+                }
+                // Strip up to `indent` leading spaces so the hoisted block
+                // sits at column 0 at module scope.
+                let mut stripped = 0usize;
+                let bytes = raw.as_bytes();
+                while stripped < indent && stripped < bytes.len() && bytes[stripped] == b' ' {
+                    stripped += 1;
+                }
+                top.push(raw[stripped..].to_string());
+            }
+            top.push(String::new());
+        };
+
     for line in content.lines() {
         let trimmed = line.trim();
 
@@ -675,6 +733,8 @@ fn preprocess_sspec_for_smf(path: &Path) -> Result<PathBuf, String> {
             in_docstring = !in_docstring;
             if in_top_fn {
                 top_level_parts.push(line.to_string());
+            } else if in_hoisted_def {
+                hoisted_buf.push(line.to_string());
             } else {
                 body_parts.push(format!("    {}", line));
             }
@@ -684,6 +744,8 @@ fn preprocess_sspec_for_smf(path: &Path) -> Result<PathBuf, String> {
         if in_docstring {
             if in_top_fn {
                 top_level_parts.push(line.to_string());
+            } else if in_hoisted_def {
+                hoisted_buf.push(line.to_string());
             } else {
                 body_parts.push(format!("    {}", line));
             }
@@ -727,6 +789,25 @@ fn preprocess_sspec_for_smf(path: &Path) -> Result<PathBuf, String> {
             // Fall through so this line gets classified for itself.
         }
 
+        // If we are currently accumulating a hoisted nested def, keep
+        // consuming lines until indentation drops back to <= hoist_indent
+        // (and is non-empty). Blank lines are kept inside the hoisted block.
+        if in_hoisted_def {
+            if trimmed.is_empty() {
+                hoisted_buf.push(line.to_string());
+                continue;
+            }
+            let cur = line.len().saturating_sub(trimmed.len());
+            if cur > hoist_indent {
+                hoisted_buf.push(line.to_string());
+                continue;
+            }
+            // End of nested def — flush and fall through to classify the
+            // current line normally.
+            flush_hoisted(&mut hoisted_buf, &mut top_level_parts, hoist_indent);
+            in_hoisted_def = false;
+        }
+
         if starts_top_level {
             in_top_fn = true;
             top_fn_indent = 0;
@@ -734,11 +815,44 @@ fn preprocess_sspec_for_smf(path: &Path) -> Result<PathBuf, String> {
             continue;
         }
 
+        // Detect a nested hoistable definition: `class `/`impl `/`enum `/`type `
+        // at indent > 0. If the name was already hoisted, leave the block
+        // in the body (prefixed with a warning comment) — this will still
+        // fail compile, but matches option (b) in the spec.
+        if line_indent > 0 && is_hoistable_keyword(trimmed) {
+            let name = extract_def_name(trimmed).unwrap_or_default();
+            let key = format!("{}::{}", trimmed.split_whitespace().next().unwrap_or(""), name);
+            if !name.is_empty() && hoisted_names.insert(key) {
+                in_hoisted_def = true;
+                hoist_indent = line_indent;
+                hoisted_buf.clear();
+                hoisted_buf.push(line.to_string());
+                // Leave a placeholder comment in the body so the reader can
+                // still see where the class was defined originally.
+                body_parts.push(format!(
+                    "    # (hoisted nested def `{}` to module scope)",
+                    trimmed
+                ));
+                continue;
+            } else {
+                body_parts.push(format!(
+                    "    # WARNING: duplicate nested def `{}` not hoisted (name collision)",
+                    trimmed
+                ));
+                // Fall through and keep line in body as-is.
+            }
+        }
+
         if trimmed.is_empty() {
             body_parts.push(String::new());
         } else {
             body_parts.push(format!("    {}", line));
         }
+    }
+
+    // Flush any trailing hoisted block (file ends inside a nested def).
+    if in_hoisted_def {
+        flush_hoisted(&mut hoisted_buf, &mut top_level_parts, hoist_indent);
     }
 
     // Specs usually rely on the `describe`/`it`/`context`/`skip`/`expect` DSL

@@ -653,7 +653,7 @@ pub(super) fn eval_bdd_builtin(
                 }
             }
         }
-        "skip" | "skip_it" => {
+        "pending" | "pending_it" => {
             let name = eval_arg(
                 args,
                 0,

@@ -176,10 +176,10 @@ fn query_visibility_semantic_tokens(file: text, start_line: i64, end_line: i64) 
         val display = visibility_display(parsed.name, clean_file)
         if display == "public":
             public_names = public_names.push(parsed.name)
-        elif display == "boundary":
-            boundary_names = boundary_names.push(parsed.name)
-        else:
+        elif display == "private":
             private_names = private_names.push(parsed.name)
+        else:
+            boundary_names = boundary_names.push(parsed.name)
     val lines = scan_semantic_tokens(clean_file, start_line, end_line)
     var data: [text] = []
     var prev_line = 0
@@ -261,7 +261,7 @@ fn visibility_json(symbol: text, owner_file: text, requester_file: text) -> text
     "{" + parts.join(",") + "}"
 
 fn grep_workspace_symbol_candidates(root: text, query: text) -> [ParsedSymbol]:
-    val pattern = "^(pub\\(friend\\)|pub\\(package\\)|pub|pri)?[[:space:]]*(fn|me|class|struct|enum|trait|val|var)[[:space:]]+.*" + query
+    val pattern = "^(pub\\(peer\\)|pub\\(up\\)|pub\\(friend\\)|pub\\(package\\)|pub|pri)?[[:space:]]*(fn|me|class|struct|enum|trait|val|var)[[:space:]]+.*" + query
     val (stdout, stderr, code) = query_process_run("grep", ["-RInE", pattern, root, "--include=*.spl"])
     if stdout.trim() == "":
         return []
@@ -343,6 +343,10 @@ fn sort_workspace_symbol_candidates(items: [ParsedSymbol], query: text, requeste
 fn visibility_rank_for_display(display: text) -> i64:
     if display == "public":
         return 0
+    if display == "peer":
+        return 6
+    if display == "up":
+        return 8
     if display == "boundary":
         return 10
     20
@@ -356,6 +360,10 @@ fn kind_rank(kind: text) -> i64:
 
 fn visibility_display(symbol: text, owner_file: text) -> text:
     val declared = declared_visibility(symbol, owner_file)
+    if declared == "peer":
+        return "peer"
+    if declared == "up":
+        return "up"
     val boundary = boundary_kind(owner_file)
     if declared == "private":
         return "private"
@@ -370,6 +378,11 @@ fn visibility_display(symbol: text, owner_file: text) -> text:
 fn visibility_reachable(symbol: text, owner_file: text, requester_file: text) -> bool:
     if requester_file == "" or requester_file == owner_file:
         return true
+    val declared = declared_visibility(symbol, owner_file)
+    if declared == "peer":
+        return same_peer_path(requester_file, owner_file)
+    if declared == "up":
+        return is_parent_facade_requester(requester_file, owner_file)
     val display = visibility_display(symbol, owner_file)
     if display == "public":
         return true
@@ -377,7 +390,6 @@ fn visibility_reachable(symbol: text, owner_file: text, requester_file: text) ->
         return false
     if same_boundary(requester_file, owner_file):
         return true
-    val declared = declared_visibility(symbol, owner_file)
     val owner_pkg = package_name(owner_file)
     val requester_pkg = package_name(requester_file)
     if declared == "package":
@@ -390,6 +402,10 @@ fn visibility_reachable(symbol: text, owner_file: text, requester_file: text) ->
 
 fn declared_visibility(symbol: text, owner_file: text) -> text:
     val line = declaration_line(symbol, owner_file).trim()
+    if line.starts_with("pub(peer)") or line.contains(" pub(peer) "):
+        return "peer"
+    if line.starts_with("pub(up)") or line.contains(" pub(up) "):
+        return "up"
     if line.starts_with("pub(friend)") or line.contains(" pub(friend) "):
         return "internal"
     if line.starts_with("pub(package)") or line.contains(" pub(package) "):
@@ -456,6 +472,10 @@ fn declaration_name(line: text) -> text:
 
 fn strip_visibility_prefix(line: text) -> text:
     var trimmed = line
+    if trimmed.starts_with("pub(peer)"):
+        return trimmed.substring(9).trim()
+    if trimmed.starts_with("pub(up)"):
+        return trimmed.substring(7).trim()
     if trimmed.starts_with("pub(friend)"):
         return trimmed.substring(11).trim()
     if trimmed.starts_with("pub(package)"):
@@ -477,6 +497,53 @@ fn boundary_kind(owner_file: text) -> text:
     if content.contains("#[bypass]"):
         return "bypass"
     "boundary"
+
+fn same_peer_path(requester_file: text, owner_file: text) -> bool:
+    if requester_file == "" or owner_file == "":
+        return false
+    if not same_boundary(requester_file, owner_file):
+        return false
+    val owner_tail = peer_path_tail(owner_file)
+    val requester_tail = peer_path_tail(requester_file)
+    if owner_tail == "" or requester_tail == "":
+        return false
+    if owner_tail != requester_tail:
+        return false
+    val owner_layer = layer_dir_name(owner_file)
+    val requester_layer = layer_dir_name(requester_file)
+    if owner_layer == "" or requester_layer == "":
+        return false
+    owner_layer != requester_layer
+
+fn is_parent_facade_requester(requester_file: text, owner_file: text) -> bool:
+    if requester_file == "" or owner_file == "":
+        return false
+    val owner_dir = parent_dir(owner_file)
+    if owner_dir == "":
+        return false
+    requester_file == owner_dir + "/__init__.spl"
+
+fn peer_path_tail(file_path: text) -> text:
+    val rel = relative_to_src(file_path)
+    if rel == "":
+        return ""
+    val parts = rel.split("/")
+    if parts.len() >= 3 and parts[0] == "compiler":
+        return parts[2..].join("/")
+    if parts.len() >= 2:
+        return parts[1..].join("/")
+    rel
+
+fn layer_dir_name(file_path: text) -> text:
+    val rel = relative_to_src(file_path)
+    if rel == "":
+        return ""
+    val parts = rel.split("/")
+    if parts.len() >= 2 and parts[0] == "compiler":
+        return parts[1]
+    if parts.len() >= 1:
+        return parts[0]
+    ""
 
 fn boundary_module(owner_file: text) -> text:
     val dir = nearest_boundary_dir(owner_file)

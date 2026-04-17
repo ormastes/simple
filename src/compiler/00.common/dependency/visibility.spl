@@ -22,15 +22,19 @@
 
 # Visibility of a declaration or module
 #
-# Extends Lean: `inductive Visibility | pub | priv` with Internal and Package levels.
+# Extends Lean: `inductive Visibility | pub | priv` with scoped variants.
 #
-# Ordering: Public > Internal > Package > Private
+# Ordering: Public > Peer > Up > Internal > Package > Private
 # - Public:   Visible everywhere
+# - Peer:     Visible to same logical path in a different compiler layer
+# - Up:       Visible to the immediate parent facade (__init__.spl)
 # - Internal: Visible to same package + declared friends
 # - Package:  Visible to same package only
 # - Private:  Visible to same file only
 enum Visibility:
     Public
+    Peer
+    Up
     Internal
     Package
     Private
@@ -40,6 +44,20 @@ impl Visibility:
     fn is_public() -> bool:
         match self:
             case Visibility.Public:
+                true
+            case _:
+                false
+
+    fn is_peer() -> bool:
+        match self:
+            case Visibility.Peer:
+                true
+            case _:
+                false
+
+    fn is_up() -> bool:
+        match self:
+            case Visibility.Up:
                 true
             case _:
                 false
@@ -72,6 +90,10 @@ impl Visibility:
     fn rank() -> i64:
         match self:
             case Visibility.Public:
+                5
+            case Visibility.Peer:
+                4
+            case Visibility.Up:
                 3
             case Visibility.Internal:
                 2
@@ -85,6 +107,10 @@ impl Visibility:
         match self:
             case Visibility.Public:
                 "Public"
+            case Visibility.Peer:
+                "Peer"
+            case Visibility.Up:
+                "Up"
             case Visibility.Internal:
                 "Internal"
             case Visibility.Package:
@@ -97,6 +123,10 @@ impl Visibility:
         match self:
             case Visibility.Public:
                 "P"
+            case Visibility.Peer:
+                "S"
+            case Visibility.Up:
+                "U"
             case Visibility.Internal:
                 "F"
             case Visibility.Package:
@@ -287,6 +317,14 @@ fn effective_visibility(
         case Some(Visibility.Private):
             # Declaration is private
             Visibility.Private
+        case Some(Visibility.Package):
+            Visibility.Private
+        case Some(Visibility.Internal):
+            Visibility.Private
+        case Some(Visibility.Up):
+            Visibility.Private
+        case Some(Visibility.Peer):
+            Visibility.Private
         case Some(Visibility.Public):
             # Symbol is declared public; check if directory allows export
             if manifest.is_child_public(module_name):
@@ -420,6 +458,10 @@ fn check_friend_access(
         case Visibility.Public:
             # Public symbols are always accessible
             true
+        case Visibility.Peer:
+            false
+        case Visibility.Up:
+            false
         case Visibility.Internal:
             # Internal symbols are accessible by same package or friends
             if caller_package == target_manifest.name:
