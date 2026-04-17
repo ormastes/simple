@@ -1,0 +1,68 @@
+# coreutils/mkdir — create directories
+#
+# Pure library module. Entry point: main_mkdir(args).
+# Filesystem access via VFS extern shims resolved at link time.
+#
+# MDSOC: feature dimension, apps/coreutils layer
+
+use os.userlib.log.{log_info, log_error}
+
+extern fn vfs_mkdir(path: text, mode: u32) -> i32
+
+val _EEXIST_NEG: i32 = 0 - 17
+val _DEFAULT_MODE: u32 = 0o755u32
+
+fn mkdir_one(path: text, mode: u32) -> i32:
+    """Create a single directory. Returns 0 on success, -errno on failure."""
+    vfs_mkdir(path, mode)
+
+fn mkdir_p(path: text) -> i32:
+    """Create a directory and any needed parents (like `mkdir -p`).
+    Ignores EEXIST for intermediate components."""
+    var prefix: text = ""
+    var i: i32 = 0
+    var n: i32 = path.len() as i32
+    while i < n:
+        val ch = path[i as u64]
+        prefix = prefix + ch.to_text()
+        if ch == "/" and prefix.len() > 1u64:
+            val r = mkdir_one(prefix, _DEFAULT_MODE)
+            if r != 0 and r != _EEXIST_NEG:
+                return r
+        i = i + 1
+    if prefix.len() > 0u64:
+        val r = mkdir_one(prefix, _DEFAULT_MODE)
+        if r != 0 and r != _EEXIST_NEG:
+            return r
+    0
+
+fn main_mkdir(args: [text]) -> i32:
+    """Create one or more directories.
+
+    Usage: mkdir [-p] path [path...]
+    """
+    var parents: bool = false
+    var paths: [text] = []
+    var i: i32 = 0
+    while i < args.len() as i32:
+        val arg = args[i as u64]
+        if arg == "--help":
+            log_info("usage: mkdir [-p] path [path...]")
+            return 0
+        elif arg == "-p":
+            parents = true
+        else:
+            paths.push(arg)
+        i = i + 1
+
+    if paths.len() == 0:
+        log_error("mkdir: missing operand")
+        return 1
+
+    var j: i32 = 0
+    while j < paths.len() as i32:
+        val r = if parents: mkdir_p(paths[j as u64]) else: mkdir_one(paths[j as u64], _DEFAULT_MODE)
+        if r != 0:
+            return r
+        j = j + 1
+    0
