@@ -1127,15 +1127,145 @@ pub fn run_test_file_smf_mode(path: &Path, cache: &BuildCache, options: &super::
 
 /// Run a single test file in native binary mode.
 ///
-/// Native mode doesn't support SSpec DSL compilation.
-/// Falls back to safe mode (subprocess with "test" command).
+/// Preprocesses `*_spec.spl` into a wrapped `fn main()` source, compiles to
+/// a cached native ELF, and runs the ELF as a subprocess. `it` block bodies
+/// actually execute (unlike interpreter-in-subprocess safe mode).
 pub fn run_test_file_native_mode(
     path: &Path,
-    _cache: &BuildCache,
+    cache: &BuildCache,
     options: &super::types::TestOptions,
 ) -> TestFileResult {
-    eprintln!("[INFO] Native mode for tests not supported, using safe mode");
-    run_test_file_safe_mode(path, options)
+    let start = Instant::now();
+
+    let source_path = match preprocess_sspec_for_smf(path) {
+        Ok(p) => p,
+        Err(err) => {
+            return TestFileResult {
+                path: path.to_path_buf(),
+                passed: 0,
+                failed: 1,
+                skipped: 0,
+                ignored: 0,
+                duration_ms: start.elapsed().as_millis() as u64,
+                error: Some(err),
+                individual_results: vec![],
+            };
+        }
+    };
+
+    let elf_path = match cache.compile_test_to_native(&source_path) {
+        Ok(p) => p,
+        Err(err) => {
+            let duration_ms = start.elapsed().as_millis() as u64;
+            return TestFileResult {
+                path: path.to_path_buf(),
+                passed: 0,
+                failed: 1,
+                skipped: 0,
+                ignored: 0,
+                duration_ms,
+                error: Some(format!(
+                    "Failed to compile {} to native ELF: {}",
+                    source_path.display(),
+                    err
+                )),
+                individual_results: vec![],
+            };
+        }
+    };
+
+    let mut cmd = Command::new(&elf_path);
+    cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
+
+    let child = match cmd.spawn() {
+        Ok(c) => c,
+        Err(e) => {
+            return TestFileResult {
+                path: path.to_path_buf(),
+                passed: 0,
+                failed: 1,
+                skipped: 0,
+                ignored: 0,
+                duration_ms: start.elapsed().as_millis() as u64,
+                error: Some(format!(
+                    "Failed to spawn native test ELF {}: {}",
+                    elf_path.display(),
+                    e
+                )),
+                individual_results: vec![],
+            };
+        }
+    };
+
+    let timeout_duration = Duration::from_secs(options.safe_mode_timeout);
+    let wait_result = wait_with_timeout(child, timeout_duration);
+    let duration_ms = start.elapsed().as_millis() as u64;
+
+    match wait_result {
+        Ok((exit_code, stdout, stderr)) => {
+            let combined_output = format!("{}\n{}", stdout, stderr);
+            let individual_results = parse_individual_results(&combined_output);
+            let (passed, failed, skipped) = if !individual_results.is_empty() {
+                let p = individual_results.iter().filter(|r| r.passed && !r.skipped).count();
+                let f = individual_results.iter().filter(|r| !r.passed).count();
+                let s = individual_results.iter().filter(|r| r.skipped).count();
+                (p, f, s)
+            } else {
+                let (p, f) = parse_test_output(&combined_output);
+                if p == 0 && f == 0 {
+                    if exit_code == 0 {
+                        (1, 0, 0)
+                    } else {
+                        (0, 1, 0)
+                    }
+                } else {
+                    (p, f, 0)
+                }
+            };
+
+            let result = TestFileResult {
+                path: path.to_path_buf(),
+                passed,
+                failed,
+                skipped,
+                ignored: 0,
+                duration_ms,
+                error: if exit_code != 0 && failed == 0 {
+                    Some(format!("Process exited with code {}", exit_code))
+                } else {
+                    None
+                },
+                individual_results,
+            };
+            emit_scenario_artifacts(path, &result);
+            emit_test_artifacts(
+                path,
+                &result,
+                ExecutionArtifacts {
+                    stdout: Some(&stdout),
+                    stderr: Some(&stderr),
+                    combined: Some(&combined_output),
+                    log_note: Some("Executed via native ELF"),
+                },
+            );
+            result
+        }
+        Err(e) => {
+            let result = TestFileResult {
+                path: path.to_path_buf(),
+                passed: 0,
+                failed: 1,
+                skipped: 0,
+                ignored: 0,
+                duration_ms,
+                error: Some(e),
+                individual_results: vec![],
+            };
+            emit_scenario_artifacts(path, &result);
+            emit_test_artifacts(path, &result, ExecutionArtifacts::none());
+            result
+        }
+    }
 }
 
 /// Create a Runner for test execution with appropriate GC settings.
