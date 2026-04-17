@@ -1572,11 +1572,14 @@ impl LlvmBackend {
                         .get(func_name)
                         .or_else(|| self.import_map.get(func_name))
                         .map(|s| s.as_str());
+                    let dotted_name = func_name.replace("_dot_", ".");
                     let called_func = resolved
                         .and_then(|n| module.get_function(n))
+                        .or_else(|| resolved.and_then(|n| module.get_function(&n.replace("_dot_", "."))))
                         .or_else(|| module.get_function(func_name))
+                        .or_else(|| module.get_function(&dotted_name))
                         .or_else(|| {
-                            let suffix = format!(".{}", func_name);
+                            let suffix = format!(".{}", dotted_name);
                             let mut func_opt = module.get_first_function();
                             let mut best: Option<inkwell::values::FunctionValue> = None;
                             while let Some(f) = func_opt {
@@ -1594,63 +1597,36 @@ impl LlvmBackend {
                             best
                         });
 
-                    if let Some(func) = called_func {
-                        let mut arg_vals: Vec<inkwell::values::BasicMetadataValueEnum> = Vec::new();
-                        for arg in &all_args {
-                            let val = self.get_vreg(arg, vreg_map)?;
-                            let casted = self.coerce_value_to_type(val, Some(i64_type.into()), builder)?;
-                            arg_vals.push(casted.into());
-                        }
-                        let declared_params = func.get_type().get_param_types().len();
-                        let call_site = if declared_params != all_args.len() {
-                            let param_types: Vec<inkwell::types::BasicMetadataTypeEnum> =
-                                all_args.iter().map(|_| i64_type.into()).collect();
-                            let fn_type = i64_type.fn_type(&param_types, false);
-                            let fn_ptr = func.as_global_value().as_pointer_value();
-                            builder
-                                .build_indirect_call(fn_type, fn_ptr, &arg_vals, "mcall")
-                                .map_err(|e| crate::error::factory::llvm_build_failed("method call", &e))?
-                        } else {
-                            builder
-                                .build_call(func, &arg_vals, "mcall")
-                                .map_err(|e| crate::error::factory::llvm_build_failed("method call", &e))?
-                        };
-                        if let Some(d) = dest {
-                            if let Some(ret_val) = call_site.try_as_basic_value().left() {
-                                vreg_map.insert(*d, ret_val);
-                            } else {
-                                vreg_map.insert(*d, i64_type.const_int(0, false).into());
-                            }
-                        }
+                    let param_types: Vec<inkwell::types::BasicMetadataTypeEnum> =
+                        all_args.iter().map(|_| i64_type.into()).collect();
+                    let fn_type = i64_type.fn_type(&param_types, false);
+                    let fallback_name = resolved
+                        .map(|n| n.replace("_dot_", "."))
+                        .unwrap_or_else(|| dotted_name.clone());
+                    let func = called_func
+                        .unwrap_or_else(|| module.add_function(&fallback_name, fn_type, None));
+                    let mut arg_vals: Vec<inkwell::values::BasicMetadataValueEnum> = Vec::new();
+                    for arg in &all_args {
+                        let val = self.get_vreg(arg, vreg_map)?;
+                        let casted = self.coerce_value_to_type(val, Some(i64_type.into()), builder)?;
+                        arg_vals.push(casted.into());
+                    }
+                    let declared_params = func.get_type().get_param_types().len();
+                    let call_site = if declared_params != all_args.len() {
+                        let fn_ptr = func.as_global_value().as_pointer_value();
+                        builder
+                            .build_indirect_call(fn_type, fn_ptr, &arg_vals, "mcall")
+                            .map_err(|e| crate::error::factory::llvm_build_failed("method call", &e))?
                     } else {
-                        // Call rt_function_not_found for a useful runtime error
-                        let name_bytes = func_name.as_bytes();
-                        let name_const = self.context.const_string(name_bytes, false);
-                        let name_global = module.add_global(
-                            name_const.get_type(),
-                            None,
-                            &format!("notfound_name_{}", func_name.replace('.', "_")),
-                        );
-                        name_global.set_initializer(&name_const);
-                        name_global.set_constant(true);
-                        name_global.set_linkage(inkwell::module::Linkage::Private);
-                        let name_ptr = builder
-                            .build_ptr_to_int(name_global.as_pointer_value(), i64_type, "nf_ptr")
-                            .map_err(|e| crate::error::factory::llvm_build_failed("ptr_to_int", &e))?;
-                        let name_len = i64_type.const_int(name_bytes.len() as u64, false);
-                        let not_found_func = module.get_function("rt_function_not_found").unwrap_or_else(|| {
-                            let fn_type = i64_type.fn_type(&[i64_type.into(), i64_type.into()], false);
-                            module.add_function("rt_function_not_found", fn_type, None)
-                        });
-                        let call_site = builder
-                            .build_call(not_found_func, &[name_ptr.into(), name_len.into()], "nf_call")
-                            .map_err(|e| crate::error::factory::llvm_build_failed("rt_function_not_found", &e))?;
-                        if let Some(d) = dest {
-                            if let Some(ret_val) = call_site.try_as_basic_value().left() {
-                                vreg_map.insert(*d, ret_val);
-                            } else {
-                                vreg_map.insert(*d, i64_type.const_int(0, false).into());
-                            }
+                        builder
+                            .build_call(func, &arg_vals, "mcall")
+                            .map_err(|e| crate::error::factory::llvm_build_failed("method call", &e))?
+                    };
+                    if let Some(d) = dest {
+                        if let Some(ret_val) = call_site.try_as_basic_value().left() {
+                            vreg_map.insert(*d, ret_val);
+                        } else {
+                            vreg_map.insert(*d, i64_type.const_int(0, false).into());
                         }
                     }
                 }
@@ -1836,72 +1812,47 @@ impl LlvmBackend {
                     .use_map
                     .get(method_name.as_str())
                     .or_else(|| self.import_map.get(method_name.as_str()));
+                let dotted_full = full_name.replace("_dot_", ".");
+                let dotted_method = method_name.replace("_dot_", ".");
                 let func = resolved_full
                     .and_then(|n| module.get_function(n))
+                    .or_else(|| resolved_full.and_then(|n| module.get_function(&n.replace("_dot_", "."))))
                     .or_else(|| module.get_function(&full_name))
+                    .or_else(|| module.get_function(&dotted_full))
                     .or_else(|| resolved_method.and_then(|n| module.get_function(n)))
-                    .or_else(|| module.get_function(method_name));
-                if let Some(func) = func {
-                    let mut arg_vals: Vec<inkwell::values::BasicMetadataValueEnum> = Vec::new();
-                    for arg in &all_args {
-                        let val = self.get_vreg(arg, vreg_map)?;
-                        let casted = self.coerce_value_to_type(val, Some(i64_type.into()), builder)?;
-                        arg_vals.push(casted.into());
-                    }
-                    let declared_params = func.get_type().get_param_types().len();
-                    let call_site = if declared_params != all_args.len() {
-                        let param_types: Vec<inkwell::types::BasicMetadataTypeEnum> =
-                            all_args.iter().map(|_| i64_type.into()).collect();
-                        let fn_type = i64_type.fn_type(&param_types, false);
-                        let fn_ptr = func.as_global_value().as_pointer_value();
-                        builder
-                            .build_indirect_call(fn_type, fn_ptr, &arg_vals, "ecall")
-                            .map_err(|e| crate::error::factory::llvm_build_failed("extern call", &e))?
-                    } else {
-                        builder
-                            .build_call(func, &arg_vals, "ecall")
-                            .map_err(|e| crate::error::factory::llvm_build_failed("extern call", &e))?
-                    };
-                    if let Some(d) = dest {
-                        if let Some(ret_val) = call_site.try_as_basic_value().left() {
-                            vreg_map.insert(*d, ret_val);
-                        } else {
-                            vreg_map.insert(*d, i64_type.const_int(0, false).into());
-                        }
-                    }
+                    .or_else(|| resolved_method.and_then(|n| module.get_function(&n.replace("_dot_", "."))))
+                    .or_else(|| module.get_function(method_name))
+                    .or_else(|| module.get_function(&dotted_method));
+                let param_types: Vec<inkwell::types::BasicMetadataTypeEnum> =
+                    all_args.iter().map(|_| i64_type.into()).collect();
+                let fn_type = i64_type.fn_type(&param_types, false);
+                let fallback_name = resolved_full
+                    .map(|n| n.replace("_dot_", "."))
+                    .or_else(|| resolved_method.map(|n| n.replace("_dot_", ".")))
+                    .unwrap_or_else(|| dotted_full.clone());
+                let func = func.unwrap_or_else(|| module.add_function(&fallback_name, fn_type, None));
+                let mut arg_vals: Vec<inkwell::values::BasicMetadataValueEnum> = Vec::new();
+                for arg in &all_args {
+                    let val = self.get_vreg(arg, vreg_map)?;
+                    let casted = self.coerce_value_to_type(val, Some(i64_type.into()), builder)?;
+                    arg_vals.push(casted.into());
+                }
+                let declared_params = func.get_type().get_param_types().len();
+                let call_site = if declared_params != all_args.len() {
+                    let fn_ptr = func.as_global_value().as_pointer_value();
+                    builder
+                        .build_indirect_call(fn_type, fn_ptr, &arg_vals, "ecall")
+                        .map_err(|e| crate::error::factory::llvm_build_failed("extern call", &e))?
                 } else {
-                    // Call rt_function_not_found for a useful runtime error
-                    let name_bytes = full_name.as_bytes();
-                    let name_const = self.context.const_string(name_bytes, false);
-                    let name_global = module.add_global(
-                        name_const.get_type(),
-                        None,
-                        &format!(
-                            "notfound_extern_{}_{}",
-                            class_name.replace('.', "_"),
-                            method_name.replace('.', "_")
-                        ),
-                    );
-                    name_global.set_initializer(&name_const);
-                    name_global.set_constant(true);
-                    name_global.set_linkage(inkwell::module::Linkage::Private);
-                    let name_ptr = builder
-                        .build_ptr_to_int(name_global.as_pointer_value(), i64_type, "nf_ptr")
-                        .map_err(|e| crate::error::factory::llvm_build_failed("ptr_to_int", &e))?;
-                    let name_len = i64_type.const_int(name_bytes.len() as u64, false);
-                    let not_found_func = module.get_function("rt_function_not_found").unwrap_or_else(|| {
-                        let fn_type = i64_type.fn_type(&[i64_type.into(), i64_type.into()], false);
-                        module.add_function("rt_function_not_found", fn_type, None)
-                    });
-                    let call_site = builder
-                        .build_call(not_found_func, &[name_ptr.into(), name_len.into()], "nf_call")
-                        .map_err(|e| crate::error::factory::llvm_build_failed("rt_function_not_found", &e))?;
-                    if let Some(d) = dest {
-                        if let Some(ret_val) = call_site.try_as_basic_value().left() {
-                            vreg_map.insert(*d, ret_val);
-                        } else {
-                            vreg_map.insert(*d, i64_type.const_int(0, false).into());
-                        }
+                    builder
+                        .build_call(func, &arg_vals, "ecall")
+                        .map_err(|e| crate::error::factory::llvm_build_failed("extern call", &e))?
+                };
+                if let Some(d) = dest {
+                    if let Some(ret_val) = call_site.try_as_basic_value().left() {
+                        vreg_map.insert(*d, ret_val);
+                    } else {
+                        vreg_map.insert(*d, i64_type.const_int(0, false).into());
                     }
                 }
             }

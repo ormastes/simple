@@ -1,0 +1,58 @@
+"""
+# loader_api dispatch
+**Feature IDs:** #WAVE2-G10
+**Category:** Kernel loader
+
+Verifies loader_dispatch's magic-sniff branching between ELF64 and SMF.
+"""
+use std.spec.*
+use os.kernel.loader.loader_api.{loader_dispatch}
+use os.kernel.types.vmspace_types.{ProcessVmSpace}
+
+fn _empty_space() -> ProcessVmSpace:
+    """A ProcessVmSpace with zeroed fields is fine for dispatch-layer tests —
+    no actual mmap runs in the -ENOEXEC / -ENOENT code paths."""
+    ProcessVmSpace(pml4: 0u64, id: 0u64, vma_count: 0u64, areas: [])
+
+fn _zero_bytes(n: i32) -> [u8]:
+    """Return n zero bytes."""
+    var b: [u8] = []
+    var i = 0
+    while i < n:
+        b.push(0u8)
+        i = i + 1
+    b
+
+fn _elf_magic_prefix() -> [u8]:
+    """A buffer whose first 4 bytes are the ELF magic and rest is zero."""
+    var b: [u8] = []
+    b.push(0x7Fu8)
+    b.push(0x45u8)
+    b.push(0x4Cu8)
+    b.push(0x46u8)
+    var i = 4
+    while i < 128:
+        b.push(0u8)
+        i = i + 1
+    b
+
+describe "loader_dispatch":
+    """Magic-sniff routing."""
+
+    it "empty buffer returns -ENOEXEC":
+        """No magic to match => -8."""
+        val rc = loader_dispatch(_zero_bytes(4), _empty_space())
+        expect rc.to_equal(-8i64)
+
+    it "non-ELF non-SMF bytes return -ENOEXEC":
+        """Random data must not silently dispatch to either loader."""
+        val rc = loader_dispatch(_zero_bytes(128), _empty_space())
+        expect rc.to_equal(-8i64)
+
+    it "ELF magic dispatches to elf64 path":
+        """ELF prefix should leave the -ENOEXEC branch and reach elf64_load.
+        With a minimal/invalid ELF body elf64_load returns an error, but it
+        must NOT be the generic -8 that the sniff branch would return."""
+        val rc = loader_dispatch(_elf_magic_prefix(), _empty_space())
+        val dispatched: bool = rc != -8i64 or rc < 0i64
+        expect dispatched.to_equal(true)

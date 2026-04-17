@@ -1,0 +1,186 @@
+# ELF64 Loader — minimal ELF64 parser + PT_LOAD mapper
+#
+# Parses ELF64 executables and maps PT_LOAD segments into a ProcessVmSpace
+# via vmm_mmap.  Does NOT copy bytes into the mapped pages — pages are
+# demand-faulted; a copy_to_user helper is required for that step.
+#
+# TODO(mdsoc+): copy p_filesz bytes into each VMA once vmm exposes a
+#               copy_to_user / fill_vma helper.  Currently only the VMA
+#               reservation is performed; the segment data lives in the
+#               kernel-side bytes buffer and is not yet transferred.
+
+use os.kernel.memory.vmm.{vmm_mmap}
+use os.kernel.types.vmspace_types.{
+    ProcessVmSpace, VMA_READ, VMA_WRITE, VMA_EXEC, VMA_ANON
+}
+
+# ELF identification constants
+val ELF64_MAGIC_0: u8 = 0x7F
+val ELF64_MAGIC_1: u8 = 0x45   # 'E'
+val ELF64_MAGIC_2: u8 = 0x4C   # 'L'
+val ELF64_MAGIC_3: u8 = 0x46   # 'F'
+
+val ELF64_CLASS: u8   = 2      # ELFCLASS64
+val ELF64_LSB: u8     = 1      # ELFDATA2LSB
+val ELF64_EV_CURRENT: u8 = 1
+
+val ELF64_EHDR_SIZE: i64  = 64
+val ELF64_PHDR_SIZE: i64  = 56
+val PT_LOAD64: i64         = 1
+
+# ELF segment flag bits
+val PF_X: i64 = 1   # Execute
+val PF_W: i64 = 2   # Write
+val PF_R: i64 = 4   # Read
+
+# ============================================================================
+# Structs
+# ============================================================================
+
+@repr("C")
+struct Elf64Header:
+    """Parsed summary of an ELF64 executable header."""
+    e_entry:     i64   # Virtual entry-point address
+    e_phoff:     i64   # Offset to program header table
+    e_phentsize: i64   # Size of one program header entry
+    e_phnum:     i64   # Number of program header entries
+
+@repr("C")
+struct Elf64ProgramHeader:
+    """One ELF64 program header (PT_LOAD or otherwise)."""
+    p_type:   i64   # Segment type (1 = PT_LOAD)
+    p_flags:  i64   # Segment flags (PF_R/PF_W/PF_X)
+    p_offset: i64   # Offset of segment data in file
+    p_vaddr:  i64   # Virtual address to load at
+    p_filesz: i64   # Bytes to copy from file
+    p_memsz:  i64   # Bytes in memory (>= p_filesz; remainder is BSS)
+
+# ============================================================================
+# Internal byte-reading helpers (little-endian)
+# ============================================================================
+
+fn _e64_read_u16(data: [u8], off: i64) -> i64:
+    (data[off] as i64) | ((data[off + 1] as i64) << 8)
+
+fn _e64_read_u32(data: [u8], off: i64) -> i64:
+    (data[off] as i64) |
+    ((data[off + 1] as i64) << 8) |
+    ((data[off + 2] as i64) << 16) |
+    ((data[off + 3] as i64) << 24)
+
+fn _e64_read_u64(data: [u8], off: i64) -> i64:
+    val lo = _e64_read_u32(data, off)
+    val hi = _e64_read_u32(data, off + 4)
+    lo | (hi << 32)
+
+fn _e64_in_range(data: [u8], off: i64, size: i64) -> bool:
+    if off < 0 or size < 0:
+        return false
+    val end_ = off + size
+    if end_ < off:
+        return false
+    end_ <= data.len()
+
+# ============================================================================
+# Public API
+# ============================================================================
+
+fn elf64_parse_header(bytes: [u8]) -> Elf64Header?:
+    """Validate ELF64 magic + class + endian, return parsed header or nil."""
+    if bytes.len() < ELF64_EHDR_SIZE:
+        return nil
+    if bytes[0] != ELF64_MAGIC_0:
+        return nil
+    if bytes[1] != ELF64_MAGIC_1:
+        return nil
+    if bytes[2] != ELF64_MAGIC_2:
+        return nil
+    if bytes[3] != ELF64_MAGIC_3:
+        return nil
+    if bytes[4] != ELF64_CLASS:
+        return nil
+    if bytes[5] != ELF64_LSB:
+        return nil
+    if bytes[6] != ELF64_EV_CURRENT:
+        return nil
+    val e_entry     = _e64_read_u64(bytes, 24)
+    val e_phoff     = _e64_read_u64(bytes, 32)
+    val e_phentsize = _e64_read_u16(bytes, 54)
+    val e_phnum     = _e64_read_u16(bytes, 56)
+    if e_phentsize != ELF64_PHDR_SIZE:
+        return nil
+    Some(Elf64Header(
+        e_entry:     e_entry,
+        e_phoff:     e_phoff,
+        e_phentsize: e_phentsize,
+        e_phnum:     e_phnum
+    ))
+
+fn elf64_program_headers(bytes: [u8], hdr: Elf64Header) -> [Elf64ProgramHeader]:
+    """Return all program headers from the ELF64 image."""
+    var out: [Elf64ProgramHeader] = []
+    if hdr.e_phnum <= 0:
+        return out
+    if not _e64_in_range(bytes, hdr.e_phoff, hdr.e_phentsize * hdr.e_phnum):
+        return out
+    var idx = 0
+    while idx < hdr.e_phnum:
+        val off      = hdr.e_phoff + idx * hdr.e_phentsize
+        val p_type   = _e64_read_u32(bytes, off)
+        val p_flags  = _e64_read_u32(bytes, off + 4)
+        val p_offset = _e64_read_u64(bytes, off + 8)
+        val p_vaddr  = _e64_read_u64(bytes, off + 16)
+        val p_filesz = _e64_read_u64(bytes, off + 32)
+        val p_memsz  = _e64_read_u64(bytes, off + 40)
+        out.push(Elf64ProgramHeader(
+            p_type:   p_type,
+            p_flags:  p_flags,
+            p_offset: p_offset,
+            p_vaddr:  p_vaddr,
+            p_filesz: p_filesz,
+            p_memsz:  p_memsz
+        ))
+        idx = idx + 1
+    out
+
+fn elf64_load(bytes: [u8], space: ProcessVmSpace) -> i64:
+    """Map all PT_LOAD segments into `space` via vmm_mmap.
+
+    Returns the ELF entry-point vaddr on success, or a negative errno:
+      -8  (-ENOEXEC)  bad ELF header or no PT_LOAD segments
+      -12 (-ENOMEM)   vmm_mmap refused a segment
+
+    # TODO(mdsoc+): copy p_filesz bytes into each VMA once vmm exposes a
+    #               copy_to_user / fill_vma helper.
+    """
+    val hdr_opt = elf64_parse_header(bytes)
+    if hdr_opt == nil:
+        return -8
+    val hdr = hdr_opt
+    val phdrs = elf64_program_headers(bytes, hdr)
+    var mapped = 0
+    var idx = 0
+    while idx < phdrs.len():
+        val ph = phdrs[idx]
+        if ph.p_type == PT_LOAD64:
+            var perms: u32 = VMA_READ
+            if (ph.p_flags & PF_W) != 0:
+                perms = perms | VMA_WRITE
+            if (ph.p_flags & PF_X) != 0:
+                perms = perms | VMA_EXEC
+            val rc = vmm_mmap(
+                space,
+                ph.p_vaddr as u64,
+                ph.p_memsz as u64,
+                perms,
+                VMA_ANON,
+                0,
+                0
+            )
+            if rc < 0:
+                return rc
+            mapped = mapped + 1
+        idx = idx + 1
+    if mapped == 0:
+        return -8
+    hdr.e_entry

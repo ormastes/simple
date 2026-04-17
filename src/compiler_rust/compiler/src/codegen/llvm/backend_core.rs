@@ -16,7 +16,7 @@ use inkwell::targets::{CodeModel, FileType, InitializationConfig, RelocMode, Tar
 #[cfg(feature = "llvm")]
 use inkwell::types::BasicTypeEnum;
 #[cfg(feature = "llvm")]
-use inkwell::values::FunctionValue;
+use inkwell::values::{BasicMetadataValueEnum, FunctionValue};
 #[cfg(feature = "llvm")]
 use inkwell::OptimizationLevel;
 #[cfg(feature = "llvm")]
@@ -102,6 +102,97 @@ impl LlvmBackend {
     /// Get the target for this backend
     pub fn target(&self) -> &Target {
         &self.target
+    }
+
+    #[cfg(feature = "llvm")]
+    fn declare_dot_aliases_for_methods(&self) {
+        let m = self.module.borrow();
+        let Some(m) = m.as_ref() else {
+            return;
+        };
+        let mut originals: Vec<FunctionValue<'static>> = Vec::new();
+        let mut func_opt = m.get_first_function();
+        while let Some(f) = func_opt {
+            originals.push(f);
+            func_opt = f.get_next_function();
+        }
+        drop(m);
+
+        let m = self.module.borrow();
+        let Some(m) = m.as_ref() else {
+            return;
+        };
+        for f in originals {
+            let Ok(name) = f.get_name().to_str() else {
+                continue;
+            };
+            if !name.contains('.') || name.contains("_dot_") {
+                continue;
+            }
+            let alias_name = name.replace('.', "_dot_");
+            if m.get_function(&alias_name).is_none() {
+                let alias = m.add_function(&alias_name, f.get_type(), None);
+                alias.set_linkage(inkwell::module::Linkage::Private);
+            }
+        }
+    }
+
+    #[cfg(feature = "llvm")]
+    fn define_dot_alias_bodies(&self) -> Result<(), CompileError> {
+        let m = self.module.borrow();
+        let Some(m) = m.as_ref() else {
+            return Ok(());
+        };
+        let mut aliases: Vec<FunctionValue<'static>> = Vec::new();
+        let mut func_opt = m.get_first_function();
+        while let Some(f) = func_opt {
+            if f.count_basic_blocks() == 0 {
+                if let Ok(name) = f.get_name().to_str() {
+                    if name.contains("_dot_") {
+                        aliases.push(f);
+                    }
+                }
+            }
+            func_opt = f.get_next_function();
+        }
+        drop(m);
+
+        let m = self.module.borrow();
+        let Some(m) = m.as_ref() else {
+            return Ok(());
+        };
+        for alias in aliases {
+            let alias_name = alias
+                .get_name()
+                .to_str()
+                .map_err(|_| CompileError::semantic("invalid alias function name"))?;
+            let target_name = alias_name.replace("_dot_", ".");
+            let Some(target) = m.get_function(&target_name) else {
+                continue;
+            };
+            let builder = self.context.create_builder();
+            let entry = self.context.append_basic_block(alias, "entry");
+            builder.position_at_end(entry);
+            let args: Vec<BasicMetadataValueEnum<'static>> =
+                alias.get_param_iter().map(Into::into).collect();
+            let call = builder
+                .build_call(target, &args, "dot_alias")
+                .map_err(|e| crate::error::factory::llvm_build_failed("dot alias call", &e))?;
+            if alias.get_type().get_return_type().is_some() {
+                let ret = call
+                    .try_as_basic_value()
+                    .left()
+                    .ok_or_else(|| CompileError::semantic(format!("alias `{alias_name}` missing return value")))?;
+                builder
+                    .build_return(Some(&ret))
+                    .map_err(|e| crate::error::factory::llvm_build_failed("dot alias return", &e))?;
+            } else {
+                builder
+                    .build_return(None)
+                    .map_err(|e| crate::error::factory::llvm_build_failed("dot alias return", &e))?;
+            }
+        }
+        Ok(())
     }
 
     /// Get the LLVM target triple string for this target
@@ -487,11 +578,13 @@ impl NativeBackend for LlvmBackend {
                 !func.blocks.is_empty(),
             )?;
         }
+        self.declare_dot_aliases_for_methods();
 
         // Second pass: compile all function bodies
         for func in &module.functions {
             self.compile_function(func)?;
         }
+        self.define_dot_alias_bodies()?;
 
         // Fix linkage after compilation:
         // 1. Declarations (no body) must have External linkage, not WeakAny.

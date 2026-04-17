@@ -354,14 +354,23 @@ impl LlvmBackend {
             .or_else(|| self.import_map.get(func_name_raw))
             .map(|s| s.as_str())
             .unwrap_or(func_name_raw);
+        let resolved_dotted = resolved_name.replace("_dot_", ".");
+        let raw_dotted = func_name_raw.replace("_dot_", ".");
 
         // Get or declare the called function (with suffix matching safety net)
         let called_func = module
             .get_function(resolved_name)
+            .or_else(|| module.get_function(&resolved_dotted))
             .or_else(|| module.get_function(func_name_raw))
+            .or_else(|| module.get_function(&raw_dotted))
             .or_else(|| {
                 // Suffix matching: scan module for functions ending with ".{func_name}"
-                let suffix = format!(".{}", func_name_raw);
+                let suffix_name = if raw_dotted != func_name_raw {
+                    raw_dotted.as_str()
+                } else {
+                    func_name_raw
+                };
+                let suffix = format!(".{}", suffix_name);
                 let mut func_opt = module.get_first_function();
                 let mut best: Option<inkwell::values::FunctionValue> = None;
                 while let Some(f) = func_opt {
@@ -422,7 +431,7 @@ impl LlvmBackend {
                 let param_types: Vec<inkwell::types::BasicMetadataTypeEnum> =
                     args.iter().map(|_| i64_type.into()).collect();
                 let fn_type = i64_type.fn_type(&param_types, false);
-                module.add_function(resolved_name, fn_type, None)
+                module.add_function(&resolved_dotted, fn_type, None)
             });
 
         // Collect argument values as i64

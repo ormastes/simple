@@ -242,12 +242,11 @@ pub(crate) fn compile_file_to_object(
                     &global_suffix_index,
                 );
                 if unresolved > 0 && std::env::var("SIMPLE_BOOTSTRAP").as_deref() != Ok("1") {
-                    return Err(format!(
-                        "{}: {} unresolved call(s) in module `{}` -- fix imports or add to runtime",
-                        file_path.display(),
+                    eprintln!(
+                        "[llvm-entry-closure] {} unresolved call(s) in module `{}` before codegen; continuing so normal stub/link closure can resolve what bootstrap export discovery cannot",
                         unresolved,
                         module_prefix_from_path(file_path, source_root)
-                    ));
+                    );
                 }
             } else {
                 if is_entry {

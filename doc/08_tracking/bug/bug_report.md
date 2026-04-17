@@ -54,8 +54,9 @@
 | Test runner single-file 56s startup | ✅ FIXED | Low |
 | Baremetal TLS handshake panics in `x25519_base` on x86_64 QEMU | 🔍 OPEN | High |
 | Baremetal TLS guest reports TCP connect success but never sends `ClientHello` | 🔍 OPEN | High |
+| Generic x86_64 bare-metal JS runtime bootstrap faults in object/env storage | 🔍 OPEN | High |
 
-**Summary:** 46 fixed, 3 open, 0 investigating, 0 workaround, 5 invalid (Updated 2026-04-17)
+**Summary:** 42 fixed, 3 open, 1 closed, 5 invalid (Updated 2026-04-17)
 
 ---
 

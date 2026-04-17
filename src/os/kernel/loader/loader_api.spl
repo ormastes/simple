@@ -1,0 +1,61 @@
+# Kernel Loader API — single public entry-point for process image loading
+#
+# Services-layer PM calls loader_exec() with a path, argv, envp, and a
+# ProcessVmSpace prepared by the memory manager.  loader_exec sniffs the
+# binary magic and dispatches to elf64_load or smf_load.
+#
+# argv/envp are accepted but not yet used.
+# TODO(mdsoc+): set up initial stack with argv/envp once PM has a
+#               stack-init helper.
+
+use os.kernel.loader.elf64.{elf64_parse_header, elf64_load}
+use os.kernel.loader.smf.{smf_check_magic, smf_load}
+use os.kernel.types.vmspace_types.{ProcessVmSpace}
+
+extern fn rt_file_read_bytes(path: text) -> [u8]
+
+# ============================================================================
+# Internal dispatch (testable without file I/O)
+# ============================================================================
+
+fn loader_dispatch(bytes: [u8], space: ProcessVmSpace) -> i64:
+    """Sniff magic and dispatch to the appropriate loader.
+
+    Returns entry-point vaddr on success, or negative errno:
+      -2  (-ENOENT)   empty byte slice (caller should check before calling)
+      -8  (-ENOEXEC)  unknown format
+    """
+    if bytes.len() == 0:
+        return -2
+    # ELF64 magic: 0x7F 'E' 'L' 'F'
+    if (bytes.len() >= 4 and
+        bytes[0] == 0x7F.to_u8() and
+        bytes[1] == 0x45.to_u8() and
+        bytes[2] == 0x4C.to_u8() and
+        bytes[3] == 0x46.to_u8()):
+        val hdr_opt = elf64_parse_header(bytes)
+        if hdr_opt == nil:
+            return -8
+        return elf64_load(bytes, space)
+    # SMF magic: 'S' 'M' 'F' '\0'
+    if smf_check_magic(bytes):
+        return smf_load(bytes, space)
+    -8  # -ENOEXEC — unknown format
+
+# ============================================================================
+# Exported C-ABI entry-point
+# ============================================================================
+
+@export("C")
+fn loader_exec(path: text, argv: [text], envp: [text], space: ProcessVmSpace) -> i64:
+    """Load the binary at `path` into `space` and return its entry-point vaddr.
+
+    Returns negative errno on failure:
+      -2  (-ENOENT)   file not found or empty
+      -8  (-ENOEXEC)  not a recognised binary format
+      -38 (-ENOSYS)   format recognised but loader not yet fully implemented
+    """
+    val bytes = rt_file_read_bytes(path)
+    if bytes.len() == 0:
+        return -2
+    loader_dispatch(bytes, space)

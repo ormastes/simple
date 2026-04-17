@@ -1,0 +1,87 @@
+# SMF Loader — minimal Simple Module Format loader for kernel use
+#
+# SMF v1.1 places a 128-byte header trailer at EOF-128.
+# Magic bytes: [83, 77, 70, 0]  ("SMF\0") at bytes[len-128..len-124].
+# Entry-point is a u64 LE at offset 80 within that 128-byte trailer.
+#
+# Wave 2 implementation returns -ENOSYS; real layout parsing is deferred.
+# TODO(mdsoc+): real SMF layout lookup — parse 128-byte trailer at EOF-128,
+#               read entry_point u64 at trailer[80], map code section via
+#               vmm_mmap(space, 0, section_size, VMA_READ|VMA_EXEC, VMA_FILE, ...).
+
+use os.kernel.types.vmspace_types.{ProcessVmSpace}
+
+# SMF magic "SMF\0"
+val SMF64_MAGIC_0: u8 = 83    # 'S'
+val SMF64_MAGIC_1: u8 = 77    # 'M'
+val SMF64_MAGIC_2: u8 = 70    # 'F'
+val SMF64_MAGIC_3: u8 = 0     # '\0'
+
+val SMF_HEADER_TRAILER_SIZE: i64 = 128
+val SMF_ENTRY_POINT_OFFSET: i64  = 80  # offset within trailer
+
+# ============================================================================
+# Structs
+# ============================================================================
+
+struct SmfHeader:
+    """Parsed fields from the 128-byte SMF trailer."""
+    magic_ok:    bool   # True if magic validated
+    entry_point: i64    # Entry-point vaddr (from trailer offset 80)
+
+# ============================================================================
+# Internal helpers
+# ============================================================================
+
+fn _smf_read_u64_le(data: [u8], off: i64) -> i64:
+    val b0 = data[off]     as i64
+    val b1 = data[off + 1] as i64
+    val b2 = data[off + 2] as i64
+    val b3 = data[off + 3] as i64
+    val b4 = data[off + 4] as i64
+    val b5 = data[off + 5] as i64
+    val b6 = data[off + 6] as i64
+    val b7 = data[off + 7] as i64
+    b0 | (b1 << 8) | (b2 << 16) | (b3 << 24) | (b4 << 32) | (b5 << 40) | (b6 << 48) | (b7 << 56)
+
+# ============================================================================
+# Public API
+# ============================================================================
+
+fn smf_check_magic(bytes: [u8]) -> bool:
+    """Return true if `bytes` starts with the SMF magic 'SMF\\0'."""
+    if bytes.len() < 4:
+        return false
+    (bytes[0] == SMF64_MAGIC_0 and
+     bytes[1] == SMF64_MAGIC_1 and
+     bytes[2] == SMF64_MAGIC_2 and
+     bytes[3] == SMF64_MAGIC_3)
+
+fn smf_parse_header(bytes: [u8]) -> SmfHeader?:
+    """Validate SMF magic (at start of bytes) and return a parsed header.
+
+    NOTE: Full SMF v1.1 files carry the 128-byte trailer at EOF-128.
+    This function checks magic at offset 0 (bare header for testing).
+    TODO(mdsoc+): handle v1.1 trailer-at-EOF layout in production path.
+    """
+    if bytes.len() < 4:
+        return nil
+    if not smf_check_magic(bytes):
+        return nil
+    # If we have the full trailer, read entry_point; else default to 0.
+    var entry: i64 = 0
+    if bytes.len() >= SMF_HEADER_TRAILER_SIZE:
+        entry = _smf_read_u64_le(bytes, SMF_ENTRY_POINT_OFFSET)
+    Some(SmfHeader(magic_ok: true, entry_point: entry))
+
+fn smf_load(bytes: [u8], space: ProcessVmSpace) -> i64:
+    """Map an SMF image into `space` and return its entry-point.
+
+    Wave 2 stub: returns -ENOSYS.
+    TODO(mdsoc+): real SMF layout lookup — parse trailer, map code section,
+                  return entry_point once vmm copy_to_user / VMA_FILE infra lands.
+    """
+    val hdr_opt = smf_parse_header(bytes)
+    if hdr_opt == nil:
+        return -8   # -ENOEXEC
+    -38             # -ENOSYS — real load deferred to Wave 3

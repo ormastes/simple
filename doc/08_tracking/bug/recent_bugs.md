@@ -2,7 +2,7 @@
 
 **Generated:** 2026-04-17
 **Database:** `doc/08_tracking/bug/bug_db.sdn`
-**Open:** 3 | **Closed:** 25
+**Open:** 3 | **Non-open:** 25
 
 ## Open Bugs
 

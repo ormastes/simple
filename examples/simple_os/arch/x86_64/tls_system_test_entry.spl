@@ -19,7 +19,7 @@ extern fn rt_net_close(sock_fd: i64) -> i64
 use os.posix.fd_table.{fd_table_init}
 use os.posix.async_io.{async_io_init}
 use os.posix.signal_compat.{signal_init}
-use os.userlib.net.{IpAddr, SockAddr, Socket, socket, connect}
+use os.posix.socket_compat.{posix_socket, posix_connect, sockaddr_in, AF_INET, SOCK_STREAM}
 
 # Services
 use os.kernel.boot.init_services.{init_all_services, services_network_ready}
@@ -99,32 +99,25 @@ fn _start():
     # Test 1: Open TCP socket
     # ----------------------------------------------------------------
     _serial("--- Test 1: TCP socket ---")
-    val sock_result = socket(2u32, 1u32)
-    if sock_result.is_err():
-        _serial("  socket failed: {sock_result.unwrap_err()}")
+    val tcp_fd = posix_socket(AF_INET, SOCK_STREAM, 0)
+    if tcp_fd < 0:
+        _serial("  socket failed: {tcp_fd}")
         _serial("[TLS FAIL: socket creation failed]")
         _serial("TLS system test: {_pass_count} passed, {_fail_count} failed")
         rt_port_outb(0xf4, 0u8)
         return
-    val tcp_sock = sock_result.unwrap()
-    _serial("  socket fd returned: {tcp_sock.fd}")
-    _assert(tcp_sock.fd >= 0, "TCP socket created (fd >= 0)")
+    _serial("  socket fd returned: {tcp_fd}")
+    _assert(tcp_fd >= 0, "TCP socket created (fd >= 0)")
     # ----------------------------------------------------------------
     # Test 2: Connect TCP to 10.0.2.2:4433 (QEMU gateway)
     # ----------------------------------------------------------------
     _serial("--- Test 2: TCP connect to 10.0.2.2:4433 ---")
-    val server_ip_result = IpAddr.from_text("10.0.2.2")
-    if server_ip_result.is_err():
-        _serial("[TLS FAIL: invalid gateway address]")
-        _serial("TLS system test: {_pass_count} passed, {_fail_count} failed")
-        rt_port_outb(0xf4, 0u8)
-        return
-    val server_addr = SockAddr(ip: server_ip_result.unwrap(), port: 4433u16)
-    val connect_result = connect(tcp_sock, server_addr)
-    if connect_result.is_err():
-        _serial("  connect failed: {connect_result.unwrap_err()}")
+    val server_addr = sockaddr_in(4433u16, 10u8, 0u8, 2u8, 2u8)
+    val connect_result = posix_connect(tcp_fd.to_i32(), server_addr)
+    if connect_result < 0:
+        _serial("  connect failed: {connect_result}")
         _assert(false, "TCP connect to 10.0.2.2:4433 succeeded")
-        rt_net_close(tcp_sock.fd.to_i64())
+        rt_net_close(tcp_fd)
         _serial("[TLS FAIL: TCP connect failed]")
         _serial("TLS system test: {_pass_count} passed, {_fail_count} failed")
         rt_port_outb(0xf4, 0u8)
@@ -138,12 +131,12 @@ fn _start():
     # Test 3: TLS 1.3 handshake
     # ----------------------------------------------------------------
     _serial("--- Test 3: TLS 1.3 handshake ---")
-    val tls_result = tls13_connect(tcp_sock, "localhost")
+    val tls_result = tls13_connect(tcp_fd, "localhost")
 
     if val Tls13ConnectResult.Failed(reason) = tls_result:
         _serial("[TLS FAIL: handshake failed: {reason}]")
         _assert(false, "TLS 1.3 handshake completed")
-        rt_net_close(tcp_sock.fd.to_i64())
+        rt_net_close(tcp_fd)
         _serial("TLS system test: {_pass_count} passed, {_fail_count} failed")
         rt_port_outb(0xf4, 0u8)
         return

@@ -1,0 +1,260 @@
+# @cover src/os/services/pm_service.spl 80%
+"""
+# Process Manager Service Specification
+
+**Feature IDs:** #G3
+**Category:** Infrastructure
+**Difficulty:** 3/5
+**Status:** Implemented
+
+## Overview
+
+Validates PmService process lifecycle management: init, fork, exec, exit,
+waitpid, kill, and entity-pid round-trip queries.
+
+## Behavior
+
+- pm_init creates the pid-1 init entity
+- pm_fork allocates a child entity cloning parent creds; COW-clones vmspace
+- pm_exec calls loader_exec and updates ExecImage on success
+- pm_exit marks zombie and notifies parent via signal_deliver
+- pm_waitpid is one-shot: reaping twice returns -ECHILD
+- pm_kill delivers signal via signal_deliver; -ESRCH for unknown pid
+- pm_find_entity round-trips pid -> entity -> pid
+"""
+
+use std.sspec.*
+use os.services.pm_service.{PmService, PS_ZOMBIE, PS_RUNNING, ECHILD, EAGAIN, ESRCH}
+
+# ============================================================================
+# Test-local extern stubs
+#
+# These are declared as Simple functions with the same symbol name.
+# They shadow the extern declarations from pm_service.spl for unit-test
+# purposes (no linker, no actual kernel/sibling-agent present).
+# ============================================================================
+
+# Counter for observing signal_deliver calls
+var test_signal_deliver_calls: i32 = 0
+var test_signal_deliver_last_pid: u64 = 0
+var test_signal_deliver_last_signo: i32 = 0
+
+fn signal_deliver(target_pid: u64, signo: i32) -> i32:
+    test_signal_deliver_calls = test_signal_deliver_calls + 1
+    test_signal_deliver_last_pid = target_pid
+    test_signal_deliver_last_signo = signo
+    0
+
+fn signal_queue_has_pending(pid: u64) -> bool:
+    false
+
+# loader_exec stub: succeeds (returns entry=0x1000) for any non-empty path
+var test_loader_exec_calls: i32 = 0
+var test_loader_exec_should_fail: bool = false
+
+fn loader_exec(path: str, argv: [str], envp: [str], vmspace: ProcessVmSpace) -> i64:
+    test_loader_exec_calls = test_loader_exec_calls + 1
+    if test_loader_exec_should_fail:
+        return -2   # -ENOENT
+    0x1000
+
+# vmm_cow_clone stub: returns a child vmspace with pml4=0xDEAD, id=parent.id+1
+fn vmm_cow_clone(parent: ProcessVmSpace) -> ProcessVmSpace:
+    ProcessVmSpace(pml4: 0xDEAD, id: parent.id + 1, vma_count: 0, areas: [])
+
+# ProcessVmSpace is imported transitively via pm_service; declare here for stubs
+use os.kernel.types.vmspace_types.{ProcessVmSpace}
+
+# ============================================================================
+# Helper: reset signal counters before each test group
+# ============================================================================
+
+fn reset_signal_counters():
+    test_signal_deliver_calls = 0
+    test_signal_deliver_last_pid = 0
+    test_signal_deliver_last_signo = 0
+    test_loader_exec_calls = 0
+    test_loader_exec_should_fail = false
+
+# ============================================================================
+# Test Group 1: Initialization
+# ============================================================================
+
+describe "PmService init":
+    """
+    ## Initialization
+
+    Validates that pm_init creates the pid-1 init entity exactly once
+    and that subsequent calls are idempotent.
+    """
+
+    it "pm_init creates the init process with pid 1":
+        val pm = PmService.new()
+        val ok = pm.pm_init()
+        expect(ok).to_equal(true)
+        expect(pm.pm_process_count()).to_equal(1)
+        val e = pm.pm_find_entity(1)
+        expect(e.is_null()).to_equal(false)
+        val pid_back = pm.pm_get_pid(e.id)
+        expect(pid_back).to_equal(1)
+
+    it "pm_init is idempotent (second call returns true without duplicating)":
+        val pm = PmService.new()
+        pm.pm_init()
+        val ok2 = pm.pm_init()
+        expect(ok2).to_equal(true)
+        expect(pm.pm_process_count()).to_equal(1)
+
+# ============================================================================
+# Test Group 2: Fork
+# ============================================================================
+
+describe "PmService fork":
+    """
+    ## Fork
+
+    Validates pid allocation, parent lookup, and that each fork
+    produces a distinct monotonically increasing pid.
+    """
+
+    it "pm_fork returns a new pid and increments process_count":
+        val pm = PmService.new()
+        pm.pm_init()
+        val child_pid = pm.pm_fork(1)
+        expect(child_pid).to_be_greater_than(0)
+        expect(pm.pm_process_count()).to_equal(2)
+
+    it "pm_fork with unknown parent returns -ECHILD":
+        val pm = PmService.new()
+        pm.pm_init()
+        val result = pm.pm_fork(999)
+        expect(result).to_equal(-ECHILD)
+
+    it "two successive forks produce distinct pids":
+        val pm = PmService.new()
+        pm.pm_init()
+        val pid1 = pm.pm_fork(1)
+        val pid2 = pm.pm_fork(1)
+        expect(pid1).to_be_greater_than(0)
+        expect(pid2).to_be_greater_than(0)
+        expect(pid2).to_be_greater_than(pid1)
+        expect(pm.pm_process_count()).to_equal(3)
+
+# ============================================================================
+# Test Group 3: Exec
+# ============================================================================
+
+describe "PmService exec":
+
+    it "pm_exec on unknown pid returns negative errno":
+        val pm = PmService.new()
+        pm.pm_init()
+        val result = pm.pm_exec(999, "/bin/sh", [], [])
+        expect(result).to_be_less_than(0)
+
+    it "pm_exec on valid pid calls loader and returns 0":
+        reset_signal_counters()
+        val pm = PmService.new()
+        pm.pm_init()
+        val child_pid = pm.pm_fork(1)
+        val result = pm.pm_exec(child_pid.to_u32(), "/bin/init", [], [])
+        expect(result).to_equal(0)
+        expect(test_loader_exec_calls).to_equal(1)
+
+    it "pm_exec propagates loader failure as negative errno":
+        reset_signal_counters()
+        test_loader_exec_should_fail = true
+        val pm = PmService.new()
+        pm.pm_init()
+        val child_pid = pm.pm_fork(1)
+        val result = pm.pm_exec(child_pid.to_u32(), "/missing", [], [])
+        expect(result).to_be_less_than(0)
+        test_loader_exec_should_fail = false
+
+# ============================================================================
+# Test Group 4: Exit and Waitpid
+# ============================================================================
+
+describe "PmService exit and waitpid":
+
+    it "pm_exit marks process as zombie; parent can pm_waitpid successfully":
+        reset_signal_counters()
+        val pm = PmService.new()
+        pm.pm_init()
+        val child_pid = pm.pm_fork(1)
+        pm.pm_exit(child_pid.to_u32(), 42)
+        val result = pm.pm_waitpid(1, child_pid.to_u32())
+        expect(result).to_equal(42)
+
+    it "pm_waitpid on non-zombie child returns -EAGAIN":
+        val pm = PmService.new()
+        pm.pm_init()
+        val child_pid = pm.pm_fork(1)
+        val result = pm.pm_waitpid(1, child_pid.to_u32())
+        expect(result).to_equal(-EAGAIN)
+
+    it "pm_waitpid on already-reaped child returns -ECHILD (one-shot)":
+        reset_signal_counters()
+        val pm = PmService.new()
+        pm.pm_init()
+        val child_pid = pm.pm_fork(1)
+        pm.pm_exit(child_pid.to_u32(), 0)
+        pm.pm_waitpid(1, child_pid.to_u32())    # first reap
+        val result2 = pm.pm_waitpid(1, child_pid.to_u32())
+        expect(result2).to_equal(-ECHILD)
+
+    it "pm_waitpid with wrong parent returns -ECHILD":
+        val pm = PmService.new()
+        pm.pm_init()
+        val child_pid = pm.pm_fork(1)
+        pm.pm_exit(child_pid.to_u32(), 7)
+        # pid 2 is not the parent of child (parent is 1)
+        val result = pm.pm_waitpid(2, child_pid.to_u32())
+        expect(result).to_equal(-ECHILD)
+
+    it "pm_exit notifies parent via signal_deliver(SIGCHLD)":
+        reset_signal_counters()
+        val pm = PmService.new()
+        pm.pm_init()
+        val child_pid = pm.pm_fork(1)
+        pm.pm_exit(child_pid.to_u32(), 0)
+        expect(test_signal_deliver_calls).to_be_greater_than(0)
+        expect(test_signal_deliver_last_signo).to_equal(17)   # SIGCHLD
+
+# ============================================================================
+# Test Group 5: Kill and find
+# ============================================================================
+
+describe "PmService kill and find":
+
+    it "pm_kill on unknown pid returns -ESRCH":
+        reset_signal_counters()
+        val pm = PmService.new()
+        pm.pm_init()
+        val result = pm.pm_kill(9999, 9)
+        expect(result).to_equal(-ESRCH)
+
+    it "pm_kill on valid pid returns 0 and invokes signal_deliver":
+        reset_signal_counters()
+        val pm = PmService.new()
+        pm.pm_init()
+        val result = pm.pm_kill(1, 9)
+        expect(result).to_equal(0)
+        expect(test_signal_deliver_calls).to_equal(1)
+        expect(test_signal_deliver_last_pid).to_equal(1)
+        expect(test_signal_deliver_last_signo).to_equal(9)
+
+    it "pm_find_entity round-trips pid to entity to pid":
+        val pm = PmService.new()
+        pm.pm_init()
+        val child_pid = pm.pm_fork(1)
+        val e = pm.pm_find_entity(child_pid.to_u32())
+        expect(e.is_null()).to_equal(false)
+        val pid_back = pm.pm_get_pid(e.id)
+        expect(pid_back).to_equal(child_pid.to_u32())
+
+    it "pm_find_entity for unknown pid returns null entity":
+        val pm = PmService.new()
+        pm.pm_init()
+        val e = pm.pm_find_entity(9999)
+        expect(e.is_null()).to_equal(true)

@@ -26,7 +26,7 @@ use os.tls13.cert_verify.{
     verify_certificate_verify_msg_scheme, verify_cert_chain,
     CertVerifyResult, CertChainResult
 }
-use os.userlib.net.{Socket, send, recv}
+use os.posix.socket_compat.{posix_send_bytes, posix_recv_bytes}
 use os.crypto.curve25519.{x25519}
 use os.crypto.random.{random_bytes}
 use std.nogc_sync_mut.io.signature_ffi.{ed25519_sign}
@@ -116,7 +116,6 @@ fn _io_send(io: Tls13Io, data: [u8]) -> bool:
             Ok(()): true
             Err(_): false
     else:
-        val sock = Socket(fd: io.tcp_fd.to_i32())
         var sent: u64 = 0
         var zero_writes: u64 = 0
         while sent < data.len():
@@ -127,11 +126,11 @@ fn _io_send(io: Tls13Io, data: [u8]) -> bool:
                 chunk.push(data[idx])
                 idx = idx + 1
             _tls_debug("_io_send chunk_len={chunk.len()}")
-            val result = send(sock, chunk)
-            if result.is_err():
+            val wrote_i64 = posix_send_bytes(io.tcp_fd.to_i32(), chunk, 0)
+            if wrote_i64 < 0:
                 _tls_debug("_io_send send err")
                 return false
-            val wrote = result.unwrap()
+            val wrote = wrote_i64.to_u64()
             _tls_debug("_io_send wrote={wrote}")
             if wrote == 0:
                 zero_writes = zero_writes + 1
@@ -172,8 +171,7 @@ fn _io_recv(io: Tls13Io, length: u64) -> [u8]:
                 Ok(data): data
                 Err(_): []
         else:
-            val sock = Socket(fd: io.tcp_fd.to_i32())
-            val chunk_result = recv(sock, remaining)
+            val chunk_result = posix_recv_bytes(io.tcp_fd.to_i32(), remaining, 0)
             if chunk_result.is_err():
                 []
             else:

@@ -1,0 +1,366 @@
+# Process Manager Service — ECS-based process lifecycle management
+#
+# Owns the process table via ECS components. Handles fork/exec/exit/wait
+# for SimpleOS userland processes. IPC handlers are intentionally absent
+# from this module (G3 scope); they will be wired by the init service.
+#
+# Extern contracts expected at link time:
+#   loader_exec      — ELF/SMF loader (sibling agent)
+#   signal_deliver   — signal trampoline (sibling agent)
+#   signal_queue_has_pending — signal trampoline query (sibling agent)
+#   vmm_cow_clone    — kernel VMM COW fork (kernel/memory/vmm.spl)
+
+use std.ecs.entity.{Entity, EntityAllocator}
+use std.ecs.component_store.{ComponentStore}
+use std.ecs.change_detection.{ChangeTracker}
+use std.ecs.world.{WorldBase}
+use os.kernel.types.vmspace_types.{ProcessVmSpace}
+
+# ============================================================================
+# Errno constants (negative POSIX-ish values)
+# ============================================================================
+
+val ESRCH:  i32 = 3    # No such process
+val ECHILD: i32 = 10   # No child process
+val EAGAIN: i32 = 11   # Try again
+
+# ============================================================================
+# Signal constants
+# ============================================================================
+
+val SIGCHLD: i32 = 17
+
+# ============================================================================
+# Process state constants
+# ============================================================================
+
+val PS_RUNNING: u32 = 0
+val PS_ZOMBIE:  u32 = 1
+val PS_STOPPED: u32 = 2
+
+# ============================================================================
+# Extern contracts (resolved at link time by sibling agents / kernel)
+# ============================================================================
+
+extern fn loader_exec(path: str, argv: [str], envp: [str], vmspace: ProcessVmSpace) -> i64
+extern fn signal_deliver(target_pid: u64, signo: i32) -> i32
+extern fn signal_queue_has_pending(pid: u64) -> bool
+extern fn vmm_cow_clone(parent: ProcessVmSpace) -> ProcessVmSpace
+
+# ============================================================================
+# ECS Component types (POD)
+# ============================================================================
+
+struct Pid:
+    """ECS component: the process identifier."""
+    value: u32
+
+struct ParentPid:
+    """ECS component: the parent process identifier (0 for init)."""
+    value: u32
+
+struct ExecImage:
+    """ECS component: the loaded executable path and entry-point vaddr."""
+    path: str
+    entry: u64
+
+struct Creds:
+    """ECS component: process credentials."""
+    uid: u32
+    gid: u32
+
+struct ExitStatus:
+    """ECS component: exit code and whether the zombie was reaped."""
+    code: i32
+    reaped: bool
+
+struct ProcessState:
+    """ECS component: current lifecycle state."""
+    state: u32
+
+struct SigState:
+    """ECS component: fast-path signal mask shadow (authoritative in signal subsystem)."""
+    pending_mask: u64
+    blocked_mask: u64
+
+struct Endpoint:
+    """ECS component: IPC port for the process."""
+    port_id: u64
+
+struct VmSpaceRef:
+    """ECS component: handle to the kernel-owned address space (PM does not own it)."""
+    pml4: u64
+    id: u64
+
+# ============================================================================
+# PmWorld — ECS container for all process components
+# ============================================================================
+
+class PmWorld:
+    """ECS world owning all process component stores."""
+    base: WorldBase
+    pids: ComponentStore<Pid>
+    parents: ComponentStore<ParentPid>
+    exec_images: ComponentStore<ExecImage>
+    creds: ComponentStore<Creds>
+    exit_statuses: ComponentStore<ExitStatus>
+    states: ComponentStore<ProcessState>
+    sig_states: ComponentStore<SigState>
+    endpoints: ComponentStore<Endpoint>
+    vmspaces: ComponentStore<VmSpaceRef>
+
+impl PmWorld:
+    static fn new() -> PmWorld:
+        PmWorld(
+            base: WorldBase.new(),
+            pids: ComponentStore.new(),
+            parents: ComponentStore.new(),
+            exec_images: ComponentStore.new(),
+            creds: ComponentStore.new(),
+            exit_statuses: ComponentStore.new(),
+            states: ComponentStore.new(),
+            sig_states: ComponentStore.new(),
+            endpoints: ComponentStore.new(),
+            vmspaces: ComponentStore.new()
+        )
+
+    me spawn_process(pid: u32, parent_pid: u32, uid: u32, gid: u32, pml4: u64, vmspace_id: u64) -> Entity:
+        """Spawn a new entity and insert all initial process components."""
+        val e = self.base.spawn()
+        val tick = self.base.now()
+        self.pids.insert(e, Pid(value: pid), tick)
+        self.parents.insert(e, ParentPid(value: parent_pid), tick)
+        self.creds.insert(e, Creds(uid: uid, gid: gid), tick)
+        self.exit_statuses.insert(e, ExitStatus(code: 0, reaped: false), tick)
+        self.states.insert(e, ProcessState(state: PS_RUNNING), tick)
+        self.sig_states.insert(e, SigState(pending_mask: 0, blocked_mask: 0), tick)
+        self.endpoints.insert(e, Endpoint(port_id: 0), tick)
+        self.vmspaces.insert(e, VmSpaceRef(pml4: pml4, id: vmspace_id), tick)
+        e
+
+    fn find_entity_for_pid(self, pid: u32) -> Entity:
+        """Linear scan of pids store. Returns Entity.null() if not found."""
+        var i: i32 = 0
+        while i < self.pids.len():
+            if self.pids.dense[i].value == pid:
+                val ent_id = self.pids.entity_at(i)
+                return Entity(id: ent_id, generation: 0)
+            i = i + 1
+        Entity.null()
+
+    fn pid_for_entity(self, e: Entity) -> u32:
+        """Return the Pid component value for entity e. Returns 0 if not found."""
+        val slot = self.pids.get_slot(e)
+        if slot < 0:
+            return 0
+        self.pids.dense[slot].value
+
+    fn parent_pid_for_entity(self, e: Entity) -> u32:
+        """Return the ParentPid component value for entity e. Returns 0 if not found."""
+        val slot = self.parents.get_slot(e)
+        if slot < 0:
+            return 0
+        self.parents.dense[slot].value
+
+    fn state_for_entity(self, e: Entity) -> u32:
+        val slot = self.states.get_slot(e)
+        if slot < 0:
+            return PS_RUNNING
+        self.states.dense[slot].state
+
+    fn exit_status_for_entity(self, e: Entity) -> ExitStatus:
+        val slot = self.exit_statuses.get_slot(e)
+        if slot < 0:
+            return ExitStatus(code: 0, reaped: false)
+        self.exit_statuses.dense[slot]
+
+    fn creds_for_entity(self, e: Entity) -> Creds:
+        val slot = self.creds.get_slot(e)
+        if slot < 0:
+            return Creds(uid: 0, gid: 0)
+        self.creds.dense[slot]
+
+    fn vmspace_for_entity(self, e: Entity) -> VmSpaceRef:
+        val slot = self.vmspaces.get_slot(e)
+        if slot < 0:
+            return VmSpaceRef(pml4: 0, id: 0)
+        self.vmspaces.dense[slot]
+
+    fn endpoint_for_entity(self, e: Entity) -> u64:
+        val slot = self.endpoints.get_slot(e)
+        if slot < 0:
+            return 0
+        self.endpoints.dense[slot].port_id
+
+# ============================================================================
+# PmService — outer process manager
+# ============================================================================
+
+class PmService:
+    """Process manager: lifecycle + table for SimpleOS userland processes."""
+    world: PmWorld
+    next_pid: u32     # monotonic counter; pid 1 is init, starts at 2
+    initialized: bool
+
+impl PmService:
+    static fn new() -> PmService:
+        PmService(
+            world: PmWorld.new(),
+            next_pid: 2,
+            initialized: false
+        )
+
+    me pm_init() -> bool:
+        """Initialize the PM: create the pid-1 init entity with ParentPid=0."""
+        if self.initialized:
+            return true
+        # Spawn init: pid=1, parent=0, uid=0, gid=0, pml4=0, vmspace_id=0
+        self.world.spawn_process(1, 0, 0, 0, 0, 0)
+        self.initialized = true
+        true
+
+    me pm_fork(self, parent_pid: u32) -> i32:
+        """Fork a child from parent_pid. Returns new pid or negative errno.
+
+        Allocates a child entity cloning parent's creds/endpoint,
+        COW-clones the address space via vmm_cow_clone, assigns next_pid.
+        Returns -ECHILD if parent not found.
+        """
+        val parent_e = self.world.find_entity_for_pid(parent_pid)
+        if parent_e.is_null():
+            return -ECHILD
+
+        val parent_creds = self.world.creds_for_entity(parent_e)
+        val parent_vmref = self.world.vmspace_for_entity(parent_e)
+        val parent_endpoint = self.world.endpoint_for_entity(parent_e)
+
+        # COW-clone the address space via kernel VMM
+        val parent_vmspace = ProcessVmSpace(
+            pml4: parent_vmref.pml4,
+            id: parent_vmref.id,
+            vma_count: 0,
+            areas: []
+        )
+        val child_vmspace = vmm_cow_clone(parent_vmspace)
+
+        val child_pid = self.next_pid
+        self.next_pid = self.next_pid + 1
+
+        val tick = self.world.base.now()
+        val child_e = self.world.base.spawn()
+        self.world.pids.insert(child_e, Pid(value: child_pid), tick)
+        self.world.parents.insert(child_e, ParentPid(value: parent_pid), tick)
+        self.world.creds.insert(child_e, Creds(uid: parent_creds.uid, gid: parent_creds.gid), tick)
+        self.world.exit_statuses.insert(child_e, ExitStatus(code: 0, reaped: false), tick)
+        self.world.states.insert(child_e, ProcessState(state: PS_RUNNING), tick)
+        self.world.sig_states.insert(child_e, SigState(pending_mask: 0, blocked_mask: 0), tick)
+        self.world.endpoints.insert(child_e, Endpoint(port_id: parent_endpoint), tick)
+        self.world.vmspaces.insert(child_e, VmSpaceRef(pml4: child_vmspace.pml4, id: child_vmspace.id), tick)
+
+        child_pid.to_i32()
+
+    me pm_exec(self, pid: u32, path: str, argv: [str], envp: [str]) -> i32:
+        """Load and execute a new image into pid's address space.
+
+        Calls loader_exec. On success, updates ExecImage + resets state to
+        PS_RUNNING. Returns 0 on success or negative errno on failure.
+        """
+        val e = self.world.find_entity_for_pid(pid)
+        if e.is_null():
+            return -ESRCH
+
+        val vmref = self.world.vmspace_for_entity(e)
+        val vmspace = ProcessVmSpace(
+            pml4: vmref.pml4,
+            id: vmref.id,
+            vma_count: 0,
+            areas: []
+        )
+        val entry = loader_exec(path, argv, envp, vmspace)
+        if entry < 0:
+            return entry.to_i32()
+
+        val tick = self.world.base.now()
+        self.world.exec_images.insert(e, ExecImage(path: path, entry: entry.to_u64()), tick)
+        self.world.states.insert(e, ProcessState(state: PS_RUNNING), tick)
+        0
+
+    me pm_waitpid(self, parent_pid: u32, child_pid: u32) -> i32:
+        """Wait for child_pid (must be a child of parent_pid) to exit.
+
+        Returns exit code if zombie, -EAGAIN if still running,
+        -ECHILD if not a child of parent_pid or already reaped.
+
+        Marks reaped=true on first successful wait (one-shot).
+        """
+        val child_e = self.world.find_entity_for_pid(child_pid)
+        if child_e.is_null():
+            return -ECHILD
+
+        # Verify child's parent is parent_pid
+        val actual_parent = self.world.parent_pid_for_entity(child_e)
+        if actual_parent != parent_pid:
+            return -ECHILD
+
+        val status = self.world.exit_status_for_entity(child_e)
+
+        # Already reaped?
+        if status.reaped:
+            return -ECHILD
+
+        val state = self.world.state_for_entity(child_e)
+        if state != PS_ZOMBIE:
+            return -EAGAIN
+
+        # Reap it
+        val tick = self.world.base.now()
+        self.world.exit_statuses.insert(child_e, ExitStatus(code: status.code, reaped: true), tick)
+        status.code
+
+    me pm_exit(self, pid: u32, code: i32):
+        """Mark process as zombie with exit code; notify parent via SIGCHLD.
+
+        If parent exists (parent_pid > 0), calls signal_deliver with SIGCHLD.
+        """
+        val e = self.world.find_entity_for_pid(pid)
+        if e.is_null():
+            return
+
+        val tick = self.world.base.now()
+        self.world.exit_statuses.insert(e, ExitStatus(code: code, reaped: false), tick)
+        self.world.states.insert(e, ProcessState(state: PS_ZOMBIE), tick)
+
+        # Notify parent
+        val parent_pid = self.world.parent_pid_for_entity(e)
+        if parent_pid > 0:
+            signal_deliver(parent_pid.to_u64(), SIGCHLD)
+
+    me pm_kill(self, target_pid: u32, signo: i32) -> i32:
+        """Send signo to target_pid. Returns 0 on success or -ESRCH if not found."""
+        val e = self.world.find_entity_for_pid(target_pid)
+        if e.is_null():
+            return -ESRCH
+
+        # Bump local pending_mask shadow for fast-path checks
+        val tick = self.world.base.now()
+        val ss_slot = self.world.sig_states.get_slot(e)
+        if ss_slot >= 0:
+            val cur = self.world.sig_states.dense[ss_slot]
+            val bit = 1.to_u64() << signo.to_u64()
+            self.world.sig_states.insert(e, SigState(pending_mask: cur.pending_mask | bit, blocked_mask: cur.blocked_mask), tick)
+
+        signal_deliver(target_pid.to_u64(), signo)
+        0
+
+    fn pm_get_pid(self, entity_id: i32) -> u32:
+        """Return the pid for an entity by raw id. Returns 0 if not found."""
+        val e = Entity(id: entity_id, generation: 0)
+        self.world.pid_for_entity(e)
+
+    fn pm_find_entity(self, pid: u32) -> Entity:
+        """Find entity by pid. Returns Entity.null() if not found."""
+        self.world.find_entity_for_pid(pid)
+
+    fn pm_process_count(self) -> i32:
+        """Return the total number of tracked processes."""
+        self.world.pids.len()
