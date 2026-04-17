@@ -211,6 +211,35 @@ auto import router.route
     }
 
     #[test]
+    fn test_manifest_glob_export_exposes_public_child_modules() {
+        let dir = create_test_project();
+        let type_dir = dir.path().join("type").join("simple_lang");
+        fs::create_dir_all(&type_dir).unwrap();
+
+        let manifest_source = r#"
+mod simple_lang
+pub mod I64
+pub mod Text
+mod internal
+
+export use type.simple_lang.*
+"#;
+        fs::write(type_dir.join("__init__.spl"), manifest_source).unwrap();
+        fs::write(type_dir.join("I64.spl"), "type I64 = i64\nexport I64\n").unwrap();
+        fs::write(type_dir.join("Text.spl"), "type Text = text\nexport Text\n").unwrap();
+        fs::write(type_dir.join("internal.spl"), "type Hidden = i64\nexport Hidden\n").unwrap();
+
+        let mut resolver = ModuleResolver::new(dir.path().to_path_buf(), dir.path().join("src"));
+        let path = ModulePath::new(vec!["type".into(), "simple_lang".into()]);
+        let resolved = resolver.resolve(&path, &dir.path().join("src").join("main.spl")).unwrap();
+        let exports = resolver.get_exports(&resolved).unwrap();
+
+        assert!(exports.iter().any(|name| name == "I64"));
+        assert!(exports.iter().any(|name| name == "Text"));
+        assert!(!exports.iter().any(|name| name == "internal"));
+    }
+
+    #[test]
     fn test_features() {
         let dir = create_test_project();
         let mut features = std::collections::HashSet::new();

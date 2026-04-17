@@ -17,6 +17,7 @@
 
 use compiler.frontend.core.lexer.*
 use treesitter_types.*
+use compiler.common.dependency.visibility.{Visibility}
 use compiler.frontend.block_types.{PreLexInfo, BlockSkipPolicy, BlockOutlineInfo}
 use compiler.frontend.treesitter.outline_lexer.{TreeSitter}
 use compiler.frontend.treesitter.outline_types.*
@@ -99,24 +100,7 @@ fn treesitter_parse_top_level_item(self: TreeSitter) -> TopLevelItem:
         val attrs = self.parse_attributes()
 
         val doc = self.take_doc_comment()
-        var is_public = false
-
-        # Parse visibility modifiers (pub, pub(friend), pub(package), pri)
-        var visibility_modifier = ""  # "", "friend", "package"
-        if self.match_token(TokenKind.KwPub):
-            is_public = true
-            # Check for pub(friend) or pub(package)
-            if self.check(TokenKind.LParen):
-                self.advance()  # consume (
-                val mod_text = self.parse_identifier()
-                if mod_text == "friend":
-                    visibility_modifier = "friend"
-                elif mod_text == "package":
-                    visibility_modifier = "package"
-                self.expect(TokenKind.RParen, "expected ')' after visibility modifier")
-        elif self.match_token(TokenKind.KwPri):
-            # Explicit private marker (same, )
-            is_public = false
+        val visibility = self.parse_visibility()
 
         # Check for `friend <package>` declaration (top-level in __init__.spl)
         if self.check(TokenKind.Ident) and self.current.text == "friend":
@@ -148,14 +132,14 @@ fn treesitter_parse_top_level_item(self: TreeSitter) -> TopLevelItem:
             case KwExport:
                 toplevelitem_Export(self.parse_export())
             case KwFn:
-                val f = self.parse_function_outline(is_public, false, doc)
+                val f = self.parse_function_outline(visibility, false, doc)
                 # Check for @gpu or @gpu_kernel attribute
                 for attr in attrs:
                     if attr.name == "gpu" or attr.name == "gpu_kernel":
                         f.is_kernel = true
                 toplevelitem_Function(f)
             case KwMe:
-                val f = self.parse_function_outline(is_public, true, doc)
+                val f = self.parse_function_outline(visibility, true, doc)
                 # Check for @gpu or @gpu_kernel attribute
                 for attr in attrs:
                     if attr.name == "gpu" or attr.name == "gpu_kernel":
@@ -164,7 +148,7 @@ fn treesitter_parse_top_level_item(self: TreeSitter) -> TopLevelItem:
             case KwStatic:
                 self.advance()
                 if self.check(TokenKind.KwFn):
-                    val f = self.parse_function_outline(is_public, false, doc)
+                    val f = self.parse_function_outline(visibility, false, doc)
                     f.is_static = true
                     toplevelitem_Function(f)
                 elif self.check(TokenKind.Ident):
@@ -181,7 +165,7 @@ fn treesitter_parse_top_level_item(self: TreeSitter) -> TopLevelItem:
             case KwAsync:
                 self.advance()
                 if self.check(TokenKind.KwFn):
-                    val f = self.parse_function_outline(is_public, false, doc)
+                    val f = self.parse_function_outline(visibility, false, doc)
                     f.is_async = true
                     toplevelitem_Function(f)
                 else:
@@ -193,29 +177,29 @@ fn treesitter_parse_top_level_item(self: TreeSitter) -> TopLevelItem:
                         severity: ErrorSeverity.Error
                     ))
             case KwClass:
-                toplevelitem_Class(self.parse_class_outline(is_public, doc, attrs))
+                toplevelitem_Class(self.parse_class_outline(visibility, doc, attrs))
             case KwActor:
-                toplevelitem_ActorItem(self.parse_actor_outline(is_public, doc, attrs))
+                toplevelitem_ActorItem(self.parse_actor_outline(visibility, doc, attrs))
             case KwStruct:
-                toplevelitem_Struct(self.parse_struct_outline(is_public, doc, attrs))
+                toplevelitem_Struct(self.parse_struct_outline(visibility, doc, attrs))
             case KwEnum:
-                toplevelitem_Enum(self.parse_enum_outline(is_public, doc))
+                toplevelitem_Enum(self.parse_enum_outline(visibility, doc))
             case KwBitfield:
-                toplevelitem_Bitfield(self.parse_bitfield_outline(is_public, doc, attrs))
+                toplevelitem_Bitfield(self.parse_bitfield_outline(visibility, doc, attrs))
             case KwTrait:
-                toplevelitem_Trait(self.parse_trait_outline(is_public, doc))
+                toplevelitem_Trait(self.parse_trait_outline(visibility, doc))
             case KwImpl:
                 toplevelitem_Impl(self.parse_impl_outline())
             case KwType:
-                toplevelitem_TypeAlias(self.parse_type_alias_outline(is_public))
+                toplevelitem_TypeAlias(self.parse_type_alias_outline(visibility))
             case KwVal:
-                toplevelitem_Const(self.parse_const_outline(is_public, attrs))
+                toplevelitem_Const(self.parse_const_outline(visibility, attrs))
             case KwVar:
-                toplevelitem_Const(self.parse_const_outline(is_public, attrs))
+                toplevelitem_Const(self.parse_const_outline(visibility, attrs))
             case KwExtern:
                 self.advance()
                 if self.check(TokenKind.KwFn):
-                    val f = self.parse_extern_function_outline(is_public, doc)
+                    val f = self.parse_extern_function_outline(visibility, doc)
                     toplevelitem_Function(f)
                 else:
                     self.error("expected 'fn' after 'extern'")
@@ -228,7 +212,7 @@ fn treesitter_parse_top_level_item(self: TreeSitter) -> TopLevelItem:
             case KwConst:
                 self.advance()
                 if self.check(TokenKind.KwFn):
-                    val f = self.parse_function_outline(is_public, false, doc)
+                    val f = self.parse_function_outline(visibility, false, doc)
                     f.is_const = true
                     toplevelitem_Function(f)
                 else:
@@ -242,7 +226,7 @@ fn treesitter_parse_top_level_item(self: TreeSitter) -> TopLevelItem:
             case KwKernel:
                 self.advance()
                 if self.check(TokenKind.KwFn):
-                    val f = self.parse_function_outline(is_public, false, doc)
+                    val f = self.parse_function_outline(visibility, false, doc)
                     f.is_kernel = true
                     toplevelitem_Function(f)
                 else:
@@ -557,4 +541,3 @@ enum TopLevelItem:
 # ============================================================================
 # Exports
 # ============================================================================
-

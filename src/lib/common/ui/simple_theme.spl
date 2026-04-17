@@ -4,35 +4,58 @@
 
 use common.ui.glass_tokens.{GlassDesignTokens, StitchMetadata, GlassColorTokens, StitchMd3Colors}
 use common.ui.style.{UITheme, ThemeColors, Spacing, BorderStyle, FontStyle}
-
 class SimpleTheme:
     name: text
     metadata: StitchMetadata
     tokens: GlassDesignTokens
+    custom_tokens: Dict<text, text>
 
     static fn from_css(name: text, css: text) -> SimpleTheme:
         """Parse a .simple-theme CSS file into a SimpleTheme object."""
         val lines = css.split("\n")
-        
+
         var metadata = StitchMetadata.obsidian()
         var tokens = GlassDesignTokens.obsidian_dark()
-        
+        var custom: Dict<text, text> = {}
+
         for line in lines:
             val trimmed = line.trim()
-            if trimmed.starts_with("--ui-bg:"):
-                tokens.colors.surface_level_0 = parse_css_var(trimmed, "--ui-bg")
-            elif trimmed.starts_with("--ui-fg:"):
-                tokens.colors.text_primary = parse_css_var(trimmed, "--ui-fg")
-            elif trimmed.starts_with("--ui-accent:"):
-                tokens.colors.accent = parse_css_var(trimmed, "--ui-accent")
-            elif trimmed.starts_with("--glass-surface:"):
-                tokens.colors.surface_level_1 = parse_css_var(trimmed, "--glass-surface")
-            elif trimmed.starts_with("--glass-blur:"):
-                val val_text = parse_css_var(trimmed, "--glass-blur")
-                # Basic numeric extraction: "20px" -> 20
+            if trimmed.starts_with("--ui-bg:") or trimmed.starts_with("--app-background:"):
+                val var_name = if trimmed.starts_with("--ui-bg"): "--ui-bg" else: "--app-background"
+                val val_text = parse_css_var(trimmed, var_name)
+                tokens.colors.surface_level_0 = val_text
+                custom[var_name.slice(2)] = val_text
+            elif trimmed.starts_with("--ui-fg:") or trimmed.starts_with("--text-primary:"):
+                val var_name = if trimmed.starts_with("--ui-fg"): "--ui-fg" else: "--text-primary"
+                val val_text = parse_css_var(trimmed, var_name)
+                tokens.colors.text_primary = val_text
+                custom[var_name.slice(2)] = val_text
+            elif trimmed.starts_with("--ui-accent:") or trimmed.starts_with("--accent-color:"):
+                val var_name = if trimmed.starts_with("--ui-accent"): "--ui-accent" else: "--accent-color"
+                val val_text = parse_css_var(trimmed, var_name)
+                tokens.colors.accent = val_text
+                custom[var_name.slice(2)] = val_text
+            elif trimmed.starts_with("--glass-surface:") or trimmed.starts_with("--app-surface:"):
+                val var_name = if trimmed.starts_with("--glass-surface"): "--glass-surface" else: "--app-surface"
+                val val_text = parse_css_var(trimmed, var_name)
+                tokens.colors.surface_level_1 = val_text
+                custom[var_name.slice(2)] = val_text
+            elif trimmed.starts_with("--widget-radius:"):
+                val val_text = parse_css_var(trimmed, "--widget-radius")
+                custom["widget-radius"] = val_text
+                # Also try to update tokens if it's numeric
                 if val_text.ends_with("px"):
-                    # For Phase 1, we keep it as 20 for the compositor
-                    tokens.blur.surface_blur = 20
+                    # keep it simple for now, just store in custom
+                    pass_dn
+            elif trimmed.starts_with("--"):
+                # Generic CSS variable capture
+                val cp = trimmed.index_of(":")
+                match cp:
+                    case Some(idx):
+                        val key = trimmed[2:idx].trim()
+                        val val_text = parse_css_var(trimmed, "--" + key)
+                        custom[key] = val_text
+                    case _: pass_dn
             elif trimmed.contains("@stitch.display_name:"):
                 metadata.display_name = parse_metadata_val(trimmed, "@stitch.display_name")
             elif trimmed.contains("@stitch.color_mode:"):
@@ -40,12 +63,32 @@ class SimpleTheme:
             elif trimmed.contains("@stitch.project:"):
                 # metadata projection extraction
                 pass_dn
-        
+
         return SimpleTheme(
             name: name,
             metadata: metadata,
-            tokens: tokens
+            tokens: tokens,
+            custom_tokens: custom
         )
+
+    me resolve_token(key: text) -> text:
+        """Resolve a semantic token to its value (hex/rgba/pixel)."""
+        # 1. Check custom tokens from CSS
+        match self.custom_tokens.get(key):
+            case Some(v): return v
+            case _: pass_dn
+
+        # 2. Check hardcoded token mappings
+        match key:
+            "app-background" => return self.tokens.colors.surface_level_0
+            "app-surface" => return self.tokens.colors.surface_level_1
+            "text-primary" => return self.tokens.colors.text_primary
+            "accent-color" => return self.tokens.colors.accent
+            "widget-radius" => return "{self.tokens.radius.md}px"
+            _ => return ""
+
+    me to_css() -> text:
+        """Generate a .simple-theme CSS file from this theme."""
 
 fn parse_metadata_val(line: text, key: text) -> text:
     """Helper to extract @stitch metadata values from comments."""

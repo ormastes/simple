@@ -2,7 +2,10 @@
 # Type Domain Resolver Normalization Specification
 """
 
-use compiler.module_resolver.types.{ModuleResolver}
+use std.sspec.*
+use parser.ast.{ModulePath}
+use compiler.module_resolver.types.{ModuleResolver, ResolvedModule}
+use compiler.module_resolver.manifest
 use compiler.module_resolver.resolution.{normalize_type_segments}
 
 describe "type domain resolver normalization":
@@ -29,3 +32,25 @@ describe "type domain resolver normalization":
         expect(segments[0]).to_equal("crate")
         expect(segments[1]).to_equal("compiler")
         expect(segments[2]).to_equal("core")
+
+    it "exposes public child modules through domain facade glob exports":
+        val resolver = ModuleResolver.new("/workspace", "/workspace/src")
+        val manifest_source = "mod simple_lang\npub mod I64\npub mod Text\nmod internal\nexport use type.simple_lang.*\n"
+        val manifest_result = resolver.parse_manifest(manifest_source, "/workspace/type/simple_lang")
+        match manifest_result:
+            Ok(manifest):
+                val resolved = ResolvedModule.directory(
+                    "/workspace/type/simple_lang/__init__.spl",
+                    ModulePath(segments: ["type", "simple_lang"]),
+                    manifest
+                )
+                val exports_result = resolver.get_exports(resolved)
+                match exports_result:
+                    Ok(exports):
+                        expect(exports.contains("I64")).to_equal(true)
+                        expect(exports.contains("Text")).to_equal(true)
+                        expect(exports.contains("internal")).to_equal(false)
+                    Err(_):
+                        expect(false).to_equal(true)
+            Err(_):
+                expect(false).to_equal(true)

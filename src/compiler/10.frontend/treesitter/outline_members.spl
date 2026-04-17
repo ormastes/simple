@@ -14,6 +14,7 @@
 
 use compiler.frontend.core.lexer.*
 use treesitter_types.*
+use compiler.common.dependency.visibility.{Visibility}
 use compiler.frontend.treesitter.outline_lexer.{TreeSitter}
 use compiler.frontend.treesitter.outline_types.{merge_spans}
 
@@ -44,7 +45,7 @@ use compiler.frontend.treesitter.outline_decls.*
 # Enum Parsing
 # ============================================================================
 
-fn treesitter_parse_enum_outline(self: TreeSitter, is_public: bool, doc: text?) -> EnumOutline:
+fn treesitter_parse_enum_outline(self: TreeSitter, visibility: Visibility, doc: text?) -> EnumOutline:
         """Parse enum outline."""
         val start = self.current.span
         self.advance()  # Consume 'enum'
@@ -81,7 +82,8 @@ fn treesitter_parse_enum_outline(self: TreeSitter, is_public: bool, doc: text?) 
             name: name,
             type_params: type_params,
             variants: variants,
-            is_public: is_public,
+            visibility: visibility,
+            is_public: visibility.is_public(),
             doc_comment: final_doc,
             span: merge_spans(start, self.previous.span)
         )
@@ -109,11 +111,11 @@ fn treesitter_parse_variant_outline(self: TreeSitter) -> VariantOutline:
             # Struct variant
             var fields: [FieldOutline] = []
             if not self.check(TokenKind.RBrace):
-                fields = fields_push(fields, self.parse_field_outline(false))
+                fields = fields_push(fields, self.parse_field_outline(Visibility.Private))
                 while self.match_token(TokenKind.Comma):
                     if self.check(TokenKind.RBrace):
                         break
-                    fields = fields_push(fields, self.parse_field_outline(false))
+                    fields = fields_push(fields, self.parse_field_outline(Visibility.Private))
             self.expect(TokenKind.RBrace, "expected '}' after variant fields")
             payload = variantpayload_Struct(fields)
 
@@ -130,7 +132,7 @@ fn treesitter_parse_variant_outline(self: TreeSitter) -> VariantOutline:
 # Bitfield Parsing
 # ============================================================================
 
-fn treesitter_parse_bitfield_outline(self: TreeSitter, is_public: bool, doc: text, attrs: [AttributeOutline]) -> BitfieldOutline:
+fn treesitter_parse_bitfield_outline(self: TreeSitter, visibility: Visibility, doc: text, attrs: [AttributeOutline]) -> BitfieldOutline:
         """Parse bitfield outline.
 
         Syntax: bitfield Name(BackingType):
@@ -178,7 +180,8 @@ fn treesitter_parse_bitfield_outline(self: TreeSitter, is_public: bool, doc: tex
             name: name,
             backing_type: backing_type,
             fields: fields,
-            is_public: is_public,
+            visibility: visibility,
+            is_public: visibility.is_public(),
             doc_comment: final_doc,
             attributes: attrs,
             span: merge_spans(start, self.previous.span)
@@ -252,7 +255,7 @@ fn treesitter_parse_int_literal(self: TreeSitter) -> i64:
 # Trait / Impl Parsing
 # ============================================================================
 
-fn treesitter_parse_trait_outline(self: TreeSitter, is_public: bool, doc: text?) -> TraitOutline:
+fn treesitter_parse_trait_outline(self: TreeSitter, visibility: Visibility, doc: text?) -> TraitOutline:
         """Parse trait outline."""
         val start = self.current.span
         self.advance()  # Consume 'trait'
@@ -280,18 +283,19 @@ fn treesitter_parse_trait_outline(self: TreeSitter, is_public: bool, doc: text?)
                 break
 
             val method_doc = self.take_doc_comment()
+            val method_visibility = self.parse_visibility()
 
             match self.peek():
                 case KwFn:
-                    methods = methods_push(methods, self.parse_function_outline(false, false, method_doc))
+                    methods = methods_push(methods, self.parse_function_outline(method_visibility, false, method_doc))
                 case KwMe:
-                    methods = methods_push(methods, self.parse_function_outline(false, true, method_doc))
+                    methods = methods_push(methods, self.parse_function_outline(method_visibility, true, method_doc))
                 case KwVar:
                     # Check for deprecated 'var fn' syntax
                     if self.peek_next() == TokenKind.KwFn:
                         self.warning("Deprecated: Replace `var fn method()` with `me method()`")
                         self.advance()  # consume 'var'
-                        methods = methods_push(methods, self.parse_function_outline(false, true, method_doc))
+                        methods = methods_push(methods, self.parse_function_outline(method_visibility, true, method_doc))
                     else:
                         self.error("expected method or type in trait")
                         self.synchronize()
@@ -308,7 +312,8 @@ fn treesitter_parse_trait_outline(self: TreeSitter, is_public: bool, doc: text?)
             type_params: type_params,
             methods: methods,
             assoc_types: assoc_types,
-            is_public: is_public,
+            visibility: visibility,
+            is_public: visibility.is_public(),
             doc_comment: final_doc,
             span: merge_spans(start, self.previous.span)
         )
@@ -346,18 +351,15 @@ fn treesitter_parse_impl_outline(self: TreeSitter) -> ImplOutline:
                 break
 
             val method_doc = self.take_doc_comment()
-            var method_public = false
-
-            if self.match_token(TokenKind.KwPub):
-                method_public = true
+            val method_visibility = self.parse_visibility()
 
             match self.peek():
                 case KwFn:
-                    val m = self.parse_function_outline(method_public, false, method_doc)
+                    val m = self.parse_function_outline(method_visibility, false, method_doc)
                     m.is_method = true
                     methods = methods_push(methods, m)
                 case KwMe:
-                    val m = self.parse_function_outline(method_public, true, method_doc)
+                    val m = self.parse_function_outline(method_visibility, true, method_doc)
                     m.is_method = true
                     methods = methods_push(methods, m)
                 case KwVar:
@@ -365,7 +367,7 @@ fn treesitter_parse_impl_outline(self: TreeSitter) -> ImplOutline:
                     if self.peek_next() == TokenKind.KwFn:
                         self.warning("Deprecated: Replace `var fn method()` with `me method()`")
                         self.advance()  # consume 'var'
-                        val m = self.parse_function_outline(method_public, true, method_doc)
+                        val m = self.parse_function_outline(method_visibility, true, method_doc)
                         m.is_method = true
                         methods = methods_push(methods, m)
                     else:
@@ -373,7 +375,7 @@ fn treesitter_parse_impl_outline(self: TreeSitter) -> ImplOutline:
                         self.synchronize()
                 case KwStatic:
                     self.advance()
-                    val m = self.parse_function_outline(method_public, false, method_doc)
+                    val m = self.parse_function_outline(method_visibility, false, method_doc)
                     m.is_static = true
                     methods = methods_push(methods, m)
                 case KwType:
@@ -443,7 +445,7 @@ fn treesitter_parse_assoc_type_outline(self: TreeSitter) -> AssocTypeDeclOutline
 # Type Alias / Const / Static Assert
 # ============================================================================
 
-fn treesitter_parse_type_alias_outline(self: TreeSitter, is_public: bool) -> TypeAliasOutline:
+fn treesitter_parse_type_alias_outline(self: TreeSitter, visibility: Visibility) -> TypeAliasOutline:
         """Parse type alias."""
         val start = self.current.span
         self.advance()  # Consume 'type'
@@ -459,12 +461,13 @@ fn treesitter_parse_type_alias_outline(self: TreeSitter, is_public: bool) -> Typ
             name: name,
             type_params: type_params,
             type_: type_,
-            is_public: is_public,
+            visibility: visibility,
+            is_public: visibility.is_public(),
             span: merge_spans(start, self.previous.span)
         )
 
 
-fn treesitter_parse_const_outline(self: TreeSitter, is_public: bool, attrs: [AttributeOutline]) -> ConstOutline:
+fn treesitter_parse_const_outline(self: TreeSitter, visibility: Visibility, attrs: [AttributeOutline]) -> ConstOutline:
         """Parse module-level constant.
 
         Supports:
@@ -511,7 +514,8 @@ fn treesitter_parse_const_outline(self: TreeSitter, is_public: bool, attrs: [Att
             name: name,
             type_: type_,
             is_mutable: is_mutable,
-            is_public: is_public,
+            visibility: visibility,
+            is_public: visibility.is_public(),
             is_volatile: is_volatile,
             address_span: address_span,
             value_span: value_span,
@@ -553,4 +557,3 @@ fn treesitter_parse_static_assert_outline(self: TreeSitter) -> StaticAssertOutli
 # ============================================================================
 # Exports
 # ============================================================================
-
