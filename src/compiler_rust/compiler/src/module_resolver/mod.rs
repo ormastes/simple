@@ -139,6 +139,40 @@ mod tests {
     }
 
     #[test]
+    fn test_resolve_bare_type_import_from_project_type_root() {
+        let dir = create_test_project();
+        let src = dir.path().join("src");
+        let type_dir = dir.path().join("type").join("simple_lang");
+        fs::create_dir_all(&type_dir).unwrap();
+        fs::write(type_dir.join("I64.spl"), "type I64 = i64\nexport I64\n").unwrap();
+
+        let resolver = ModuleResolver::new(dir.path().to_path_buf(), src.clone());
+
+        let path = ModulePath::new(vec!["I64".into()]);
+        let resolved = resolver.resolve(&path, &src.join("main.spl")).unwrap();
+
+        assert_eq!(resolved.path, type_dir.join("I64.spl"));
+        assert!(!resolved.is_directory);
+    }
+
+    #[test]
+    fn test_resolve_owned_domain_type_import_from_project_type_root() {
+        let dir = create_test_project();
+        let src = dir.path().join("src");
+        let type_dir = dir.path().join("type").join("simple_lang");
+        fs::create_dir_all(&type_dir).unwrap();
+        fs::write(type_dir.join("I64.spl"), "type I64 = i64\nexport I64\n").unwrap();
+
+        let resolver = ModuleResolver::new(dir.path().to_path_buf(), src.clone());
+
+        let path = ModulePath::new(vec!["simple-lang".into(), "I64".into()]);
+        let resolved = resolver.resolve(&path, &src.join("main.spl")).unwrap();
+
+        assert_eq!(resolved.path, type_dir.join("I64.spl"));
+        assert!(!resolved.is_directory);
+    }
+
+    #[test]
     fn test_parse_manifest() {
         let dir = create_test_project();
         let src = dir.path().join("src");
