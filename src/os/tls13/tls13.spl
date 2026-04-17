@@ -8,12 +8,14 @@
 # Uses AES-128-GCM cipher suite (TLS_AES_128_GCM_SHA256, 0x1301).
 # Ed25519-only certificates (Phase 1).
 
-use os.tls13.transcript.{Transcript, transcript_new, transcript_add, transcript_add_with_len, transcript_hash}
+use os.tls13.transcript.{Transcript, transcript_new, transcript_add, transcript_add_with_len, transcript_hash, transcript_empty_hash}
 use os.tls13.key_schedule.{
     Tls13Secrets, TrafficKeys,
+    derive_secret, tls13_early_secret,
     tls13_compute_handshake_secrets, tls13_compute_app_secrets,
     tls13_traffic_keys, tls13_finished_key, tls13_verify_data
 }
+use os.tls13.hkdf.{hkdf_extract, hkdf_expand_label}
 use os.tls13.record13.{RecordKey, RecordResult, record13_encrypt, record13_decrypt}
 use os.tls13.handshake13.{
     build_client_hello_bytes, parse_server_hello, parse_handshake_header,
@@ -26,7 +28,6 @@ use os.tls13.cert_verify.{
     verify_certificate_verify_msg_scheme, verify_cert_chain,
     CertVerifyResult, CertChainResult
 }
-use os.posix.socket_compat.{posix_send_bytes, posix_recv_bytes}
 use os.crypto.curve25519.{x25519}
 use os.crypto.random.{random_bytes}
 use std.nogc_sync_mut.io.signature_ffi.{ed25519_sign}
@@ -37,12 +38,29 @@ use std.nogc_sync_mut.io.tcp.{TcpStream}
 # ============================================================================
 
 extern fn rt_net_close(sock_fd: i64) -> i64
+extern fn rt_net_send_bytes(sock_fd: i64, data: [u8]) -> i64
+extern fn rt_net_recv_bytes(sock_fd: i64, max_len: i64) -> [u8]
 extern fn rt_thread_sleep(ms: i64)
 extern fn serial_println(msg: text)
+extern fn rt_ipc_send_bytes(port: u64, method: u64, data: [u8]) -> i64
+extern fn rt_ipc_recv_bytes(port: u64, max_len: i64) -> [u8]
+extern fn rt_array_new_with_cap(cap: i64) -> [u8]
+extern fn rt_push_byte(arr: [u8], byte_val: i64) -> [u8]
+extern fn rt_bytes_concat(a: [u8], b: [u8]) -> [u8]
+extern fn rt_bytes_slice(arr: [u8], start: i64, length: i64) -> [u8]
+extern fn rt_bytes_u8_at(arr: [u8], idx: i64) -> i64
+extern fn rt_tls13_serverhello_cipher_suite(body: [u8]) -> i64
+extern fn rt_tls13_serverhello_x25519_pub(body: [u8]) -> [u8]
+extern fn rt_tls13_build_client_hello(host: text) -> [u8]
+extern fn rt_tls13_build_client_hello_record(host: text) -> [u8]
+extern fn rt_tls13_x25519_shared_secret(scalar: [u8], point: [u8]) -> [u8]
 
 # RFC 8446 record payloads are bounded; reject clearly invalid lengths
 # before trying to allocate or read them from the transport.
 val _TLS_MAX_RECORD_PAYLOAD: u64 = 18432
+val _NETSTACK_PORT: u64 = 2
+val _NET_SEND: u64 = 6
+val _NET_RECV: u64 = 7
 
 # ============================================================================
 # Handshake message type constants (local copies from handshake13)
@@ -98,6 +116,15 @@ class Tls13Io:
 fn _tls_debug(msg: text):
     serial_println("[tls13] {msg}")
 
+fn _byte_buf(cap: u64) -> [u8]:
+    rt_array_new_with_cap(cap.to_i64())
+
+fn _push_byte(buf: [u8], byte_val: i64) -> [u8]:
+    rt_push_byte(buf, byte_val)
+
+fn _u8_at(buf: [u8], idx: u64) -> u8:
+    rt_bytes_u8_at(buf, idx.to_i64()).to_u8()
+
 # ============================================================================
 # TCP I/O helpers
 # ============================================================================
@@ -107,6 +134,73 @@ fn _fd_io(fd: i64) -> Tls13Io:
 
 fn _host_stream_io(stream: TcpStream) -> Tls13Io:
     Tls13Io(kind: "host_stream", tcp_fd: -1, host_stream: stream)
+
+fn _net_push_i32(out: [u8], value: i32):
+    val raw = value as u32
+    out = _push_byte(out, (raw & 0xFF).to_i64())
+    out = _push_byte(out, ((raw >> 8) & 0xFF).to_i64())
+    out = _push_byte(out, ((raw >> 16) & 0xFF).to_i64())
+    out = _push_byte(out, ((raw >> 24) & 0xFF).to_i64())
+
+fn _net_push_u32(out: [u8], value: u32):
+    val raw = value
+    out = _push_byte(out, (raw & 0xFF).to_i64())
+    out = _push_byte(out, ((raw >> 8) & 0xFF).to_i64())
+    out = _push_byte(out, ((raw >> 16) & 0xFF).to_i64())
+    out = _push_byte(out, ((raw >> 24) & 0xFF).to_i64())
+
+fn _net_read_i32(buf: [u8], offset: u64) -> i32:
+    val b0 = buf[offset] as u32
+    val b1 = buf[offset + 1] as u32
+    val b2 = buf[offset + 2] as u32
+    val b3 = buf[offset + 3] as u32
+    (b0 | (b1 << 8) | (b2 << 16) | (b3 << 24)) as i32
+
+fn _net_send_direct(fd: i32, data: [u8]) -> Result<u64, text>:
+    var payload: [u8] = _byte_buf(data.len() + 4)
+    _net_push_i32(payload, fd)
+    var i: u64 = 0
+    while i < data.len():
+        payload = _push_byte(payload, data[i].to_u64().to_i64())
+        i = i + 1
+    val send_rc = rt_ipc_send_bytes(_NETSTACK_PORT, _NET_SEND, payload)
+    if send_rc < 0:
+        return Err("ipc send failed")
+    val reply = rt_ipc_recv_bytes(_NETSTACK_PORT, 64)
+    _tls_debug("_net_send_direct reply_len={reply.len()}")
+    if reply.len() < 4:
+        return Err("short send reply")
+    val status = _net_read_i32(reply, 0)
+    _tls_debug("_net_send_direct status={status}")
+    if status < 0:
+        return Err("send failed status {status}")
+    val wrote = if reply.len() >= 8: _net_read_i32(reply, 4) else: status
+    _tls_debug("_net_send_direct wrote={wrote}")
+    if wrote < 0:
+        return Err("send failed value {wrote}")
+    Ok(wrote.to_u64())
+
+fn _net_recv_direct(fd: i32, max_len: u64) -> Result<[u8], text>:
+    var payload: [u8] = _byte_buf(8)
+    _net_push_i32(payload, fd)
+    _net_push_u32(payload, max_len.to_u32())
+    val send_rc = rt_ipc_send_bytes(_NETSTACK_PORT, _NET_RECV, payload)
+    if send_rc < 0:
+        return Err("ipc recv request failed")
+    val reply = rt_ipc_recv_bytes(_NETSTACK_PORT, (max_len + 16).to_i64())
+    _tls_debug("_net_recv_direct reply_len={reply.len()}")
+    if reply.len() < 4:
+        return Err("short recv reply")
+    val status = _net_read_i32(reply, 0)
+    _tls_debug("_net_recv_direct status={status}")
+    if status < 0:
+        return Err("recv failed status {status}")
+    var data: [u8] = _byte_buf(reply.len())
+    var i: u64 = 4
+    while i < reply.len():
+        data = _push_byte(data, reply[i].to_u64().to_i64())
+        i = i + 1
+    Ok(data)
 
 fn _io_send(io: Tls13Io, data: [u8]) -> bool:
     """Send all bytes over TCP. Returns false if the write fails."""
@@ -120,17 +214,11 @@ fn _io_send(io: Tls13Io, data: [u8]) -> bool:
         var zero_writes: u64 = 0
         while sent < data.len():
             _tls_debug("_io_send loop sent={sent} total={data.len()}")
-            var chunk: [u8] = []
-            var idx: u64 = sent
-            while idx < data.len():
-                chunk.push(data[idx])
-                idx = idx + 1
-            _tls_debug("_io_send chunk_len={chunk.len()}")
-            val wrote_i64 = posix_send_bytes(io.tcp_fd.to_i32(), chunk, 0)
-            if wrote_i64 < 0:
-                _tls_debug("_io_send send err")
+            val wrote_i = rt_net_send_bytes(io.tcp_fd, data)
+            if wrote_i < 0:
+                _tls_debug("_io_send send err status={wrote_i}")
                 return false
-            val wrote = wrote_i64.to_u64()
+            val wrote = wrote_i.to_u64()
             _tls_debug("_io_send wrote={wrote}")
             if wrote == 0:
                 zero_writes = zero_writes + 1
@@ -150,14 +238,14 @@ fn _io_recv(io: Tls13Io, length: u64) -> [u8]:
         return []
     if length > _TLS_MAX_RECORD_PAYLOAD and length != 5:
         return []
-    var result: [u8] = []
+    var result: [u8] = _byte_buf(length)
     var empty_spins: u64 = 0
     while result.len() < length:
         if result.len() > length:
-            var trimmed: [u8] = []
+            var trimmed: [u8] = _byte_buf(length)
             var trim_idx: u64 = 0
             while trim_idx < length:
-                trimmed.push(result[trim_idx])
+                trimmed = _push_byte(trimmed, result[trim_idx].to_u64().to_i64())
                 trim_idx = trim_idx + 1
             return trimmed
         val remaining = length - result.len()
@@ -171,11 +259,7 @@ fn _io_recv(io: Tls13Io, length: u64) -> [u8]:
                 Ok(data): data
                 Err(_): []
         else:
-            val chunk_result = posix_recv_bytes(io.tcp_fd.to_i32(), remaining, 0)
-            if chunk_result.is_err():
-                []
-            else:
-                chunk_result.unwrap()
+            rt_net_recv_bytes(io.tcp_fd, remaining.to_i64())
         _tls_debug("_io_recv chunk_len={chunk.len()}")
         if chunk.len() == 0:
             empty_spins = empty_spins + 1
@@ -190,9 +274,11 @@ fn _io_recv(io: Tls13Io, length: u64) -> [u8]:
         # can overshoot length and the next remaining computation underflows
         # into a giant allocation request.
         val copy_len = if chunk.len() < remaining { chunk.len() } else { remaining }
+        if io.kind == "fd" and result.len() == 0 and copy_len == remaining:
+            return if copy_len == chunk.len() { chunk } else { rt_bytes_slice(chunk, 0, copy_len.to_i64()) }
         var i: u64 = 0
         while i < copy_len:
-            result.push(chunk[i])
+            result = _push_byte(result, _u8_at(chunk, i).to_u64().to_i64())
             i = i + 1
     result
 
@@ -203,21 +289,27 @@ fn _io_recv_record(io: Tls13Io) -> [u8]:
     if header.len() < 5:
         _tls_debug("_io_recv_record short_header={header.len()}")
         return header
-    val pay_len = (header[3].to_u64() << 8) | header[4].to_u64()
-    _tls_debug("_io_recv_record header type={header[0]} pay_len={pay_len}")
+    val h0 = _u8_at(header, 0)
+    val h3 = _u8_at(header, 3)
+    val h4 = _u8_at(header, 4)
+    val pay_len = (h3.to_u64() << 8) | h4.to_u64()
+    _tls_debug("_io_recv_record header type={h0} pay_len={pay_len}")
     if pay_len == 0 or pay_len > _TLS_MAX_RECORD_PAYLOAD:
         return []
     val payload = _io_recv(io, pay_len)
     if payload.len() < pay_len:
         return []
-    var result: [u8] = []
+    if io.kind == "fd":
+        _tls_debug("_io_recv_record concat header={header.len()} payload={payload.len()}")
+        return rt_bytes_concat(header, payload)
+    var result: [u8] = _byte_buf(header.len() + payload.len())
     var i: u64 = 0
     while i < header.len():
-        result.push(header[i])
+        result = _push_byte(result, _u8_at(header, i).to_u64().to_i64())
         i = i + 1
     i = 0
     while i < payload.len():
-        result.push(payload[i])
+        result = _push_byte(result, _u8_at(payload, i).to_u64().to_i64())
         i = i + 1
     result
 
@@ -228,15 +320,15 @@ fn _io_recv_record(io: Tls13Io) -> [u8]:
 fn _build_plaintext_record(content_type: u8, payload: [u8]) -> [u8]:
     """Build a plaintext TLS record. Uses 0x0301 legacy version for ClientHello."""
     val pay_len = payload.len()
-    var rec: [u8] = []
-    rec.push(content_type)
-    rec.push(0x03)
-    rec.push(0x01)
-    rec.push(((pay_len >> 8) & 0xFF).to_u8())
-    rec.push((pay_len & 0xFF).to_u8())
+    var rec: [u8] = _byte_buf(pay_len + 5)
+    rec = _push_byte(rec, content_type.to_u64().to_i64())
+    rec = _push_byte(rec, 0x03)
+    rec = _push_byte(rec, 0x01)
+    rec = _push_byte(rec, ((pay_len >> 8) & 0xFF).to_i64())
+    rec = _push_byte(rec, (pay_len & 0xFF).to_i64())
     var i: u64 = 0
     while i < pay_len:
-        rec.push(payload[i])
+        rec = _push_byte(rec, payload[i].to_u64().to_i64())
         i = i + 1
     rec
 
@@ -255,7 +347,7 @@ fn _build_client_cert_verify_content(thash: [u8]) -> [u8]:
     var content: [u8] = []
     var i: u64 = 0
     while i < 64:
-        content.push(0x20)
+        content = _push_byte(content, 0x20)
         i = i + 1
 
     val prefix = [
@@ -266,13 +358,13 @@ fn _build_client_cert_verify_content(thash: [u8]) -> [u8]:
     ]
     i = 0
     while i < prefix.len():
-        content.push(prefix[i])
+        content = _push_byte(content, prefix[i].to_u64().to_i64())
         i = i + 1
-    content.push(0x00)
+    content = _push_byte(content, 0x00)
 
     i = 0
     while i < thash.len():
-        content.push(thash[i])
+        content = _push_byte(content, thash[i].to_u64().to_i64())
         i = i + 1
     content
 
@@ -343,9 +435,10 @@ fn tls13_connect_io_with_config(io: Tls13Io, hostname: text, config: Tls13Client
         0xb8, 0xb9, 0xba, 0xbb, 0xbc, 0xbd, 0xbe, 0xbf
     ]
     _tls_debug("before build_client_hello")
-    val ch_bytes = build_client_hello_bytes(ch_random, pub_key, hostname)
+    val fd_mode = io.kind == "fd"
+    val ch_bytes = if fd_mode { rt_tls13_build_client_hello(hostname) } else { build_client_hello_bytes(ch_random, pub_key, hostname) }
     _tls_debug("after build_client_hello len={ch_bytes.len()}")
-    val ch_record = _build_plaintext_record(0x16, ch_bytes)
+    val ch_record = if fd_mode { rt_tls13_build_client_hello_record(hostname) } else { _build_plaintext_record(0x16, ch_bytes) }
     _tls_debug("after build_plaintext_record len={ch_record.len()}")
     if not _io_send(io, ch_record):
         return Tls13ConnectResult.Failed(reason: "ClientHello send failed")
@@ -362,25 +455,67 @@ fn tls13_connect_io_with_config(io: Tls13Io, hostname: text, config: Tls13Client
         return Tls13ConnectResult.Failed(reason: "ServerHello: short read")
 
     # Extract the handshake-layer bytes (the record payload)
-    val sh_pay_len = (sh_raw[3].to_u64() << 8) | sh_raw[4].to_u64()
+    val sh_pay_len = (_u8_at(sh_raw, 3).to_u64() << 8) | _u8_at(sh_raw, 4).to_u64()
+    _tls_debug("before sh slice pay_len={sh_pay_len} raw_len={sh_raw.len()}")
     var sh_hs_bytes: [u8] = []
-    var idx: u64 = 0
-    while idx < sh_pay_len:
-        sh_hs_bytes.push(sh_raw[5 + idx])
-        idx = idx + 1
+    if fd_mode:
+        sh_hs_bytes = rt_bytes_slice(sh_raw, 5, sh_pay_len.to_i64())
+    if not fd_mode:
+        var idx: u64 = 0
+        while idx < sh_pay_len:
+            sh_hs_bytes = _push_byte(sh_hs_bytes, _u8_at(sh_raw, 5 + idx).to_u64().to_i64())
+            idx = idx + 1
+    _tls_debug("after sh slice hs_len={sh_hs_bytes.len()}")
 
     # parse_handshake_header parses type(1) + length(3) → body
+    _tls_debug("before parse_handshake_header")
     val sh_parsed = parse_handshake_header(sh_hs_bytes)
-    val sh = parse_server_hello(sh_parsed.body)
+    _tls_debug("after parse_handshake_header type={sh_parsed.msg_type} body_len={sh_parsed.body.len()}")
+    val sh = ServerHello13(
+        random: [],
+        cipher_suite: rt_tls13_serverhello_cipher_suite(sh_parsed.body).to_u16(),
+        x25519_pub: rt_tls13_serverhello_x25519_pub(sh_parsed.body))
+    _tls_debug("after parse_server_hello cipher={sh.cipher_suite} key_len={sh.x25519_pub.len()}")
 
     # Add full ServerHello handshake bytes (including 4-byte header) to transcript
     transcript = transcript_add_with_len(transcript, sh_hs_bytes, sh_pay_len)
+    _tls_debug("after transcript_add serverhello")
 
     # ------------------------------------------------------------------
     # Step 4: X25519 DH + handshake secrets
     # ------------------------------------------------------------------
-    val dhe_shared = x25519(priv_key, sh.x25519_pub)
-    val secrets = tls13_compute_handshake_secrets(dhe_shared, transcript)
+    val dhe_shared = if fd_mode {
+        rt_tls13_x25519_shared_secret(priv_key, sh.x25519_pub)
+    } else {
+        x25519(priv_key, sh.x25519_pub)
+    }
+    _tls_debug("after x25519 shared_len={dhe_shared.len()}")
+    _tls_debug("before tls13_early_secret transcript_len={transcript.buf_len}")
+    val early_secret = tls13_early_secret()
+    _tls_debug("after tls13_early_secret len={early_secret.len()}")
+    val empty_thash = transcript_empty_hash()
+    _tls_debug("after transcript_empty_hash len={empty_thash.len()}")
+    val hs_derived = hkdf_expand_label(early_secret, "derived", empty_thash, 32)
+    _tls_debug("after hs_derived len={hs_derived.len()}")
+    val handshake_secret = hkdf_extract(hs_derived, dhe_shared)
+    _tls_debug("after tls13_handshake_secret len={handshake_secret.len()}")
+    val transcript_sh_hash = transcript_hash(transcript)
+    _tls_debug("after transcript_hash len={transcript_sh_hash.len()}")
+    val client_hs_secret = derive_secret(handshake_secret, "c hs traffic", transcript)
+    _tls_debug("after client_hs_derive len={client_hs_secret.len()}")
+    val server_hs_secret = derive_secret(handshake_secret, "s hs traffic", transcript)
+    _tls_debug("after server_hs_derive len={server_hs_secret.len()}")
+    val empty_secret: [u8] = []
+    val secrets = Tls13Secrets(
+        early_secret: early_secret,
+        handshake_secret: handshake_secret,
+        master_secret: empty_secret,
+        client_hs_traffic: client_hs_secret,
+        server_hs_traffic: server_hs_secret,
+        client_app_traffic: empty_secret,
+        server_app_traffic: empty_secret,
+    )
+    _tls_debug("after tls13_compute_handshake_secrets")
 
     # Derive traffic keys
     val server_hs_tk = tls13_traffic_keys(secrets.server_hs_traffic)
@@ -425,10 +560,10 @@ fn tls13_connect_io_with_config(io: Tls13Io, hostname: text, config: Tls13Client
             return Tls13ConnectResult.Failed(reason: "encrypted record: short read")
 
         # Skip plaintext ChangeCipherSpec (0x14) — middlebox compat per RFC 8446 §D.4
-        if raw[0] == 0x14:
+        if _u8_at(raw, 0) == 0x14:
             pass_dn
 
-        if raw[0] != 0x14:
+        if _u8_at(raw, 0) != 0x14:
             val dec_result = record13_decrypt(server_hs_rk, server_seq, raw)
             server_seq = server_seq + 1
 
@@ -441,7 +576,7 @@ fn tls13_connect_io_with_config(io: Tls13Io, hostname: text, config: Tls13Client
                     # Append decrypted handshake bytes to buffer
                     var di: u64 = 0
                     while di < dec_data.len():
-                        hs_buf.push(dec_data[di])
+                        hs_buf = _push_byte(hs_buf, _u8_at(dec_data, di).to_u64().to_i64())
                         di = di + 1
 
                     # Walk hs_buf parsing complete messages.
@@ -465,7 +600,7 @@ fn tls13_connect_io_with_config(io: Tls13Io, hostname: text, config: Tls13Client
                             var msg_bytes: [u8] = []
                             var mi: u64 = 0
                             while mi < msg_total:
-                                msg_bytes.push(hs_buf[buf_offset + mi])
+                                msg_bytes = _push_byte(msg_bytes, _u8_at(hs_buf, buf_offset + mi).to_u64().to_i64())
                                 mi = mi + 1
 
                             val ph = parse_handshake_header(msg_bytes)
@@ -508,7 +643,7 @@ fn tls13_connect_io_with_config(io: Tls13Io, hostname: text, config: Tls13Client
                     var new_buf: [u8] = []
                     var ti: u64 = consumed
                     while ti < hs_buf.len():
-                        new_buf.push(hs_buf[ti])
+                        new_buf = _push_byte(new_buf, _u8_at(hs_buf, ti).to_u64().to_i64())
                         ti = ti + 1
                     hs_buf = new_buf
 
@@ -700,8 +835,8 @@ fn tls13_close(ctx: Tls13Context) -> Tls13CloseResult:
     """Send close_notify alert (encrypted), then close the TCP connection."""
     # Alert: level=1 (warning), description=0 (close_notify)
     var alert: [u8] = []
-    alert.push(0x01)  # warning
-    alert.push(0x00)  # close_notify
+    alert = _push_byte(alert, 0x01)  # warning
+    alert = _push_byte(alert, 0x00)  # close_notify
     # content_type 0x15 = alert
     val alert_record = record13_encrypt(ctx.client_key, ctx.client_seq, 0x15, alert)
     if not _io_send(ctx.io, alert_record):

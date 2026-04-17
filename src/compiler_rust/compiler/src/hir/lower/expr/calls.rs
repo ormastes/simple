@@ -32,6 +32,30 @@ impl Lowerer {
     ) -> LowerResult<HirExpr> {
         // Check for special builtins: generator, future, spawn, await, print, etc.
         if let Expr::Identifier(name) = callee {
+            // Short enum-constructor grammar: Some(x), None(), Ok(x), Err(x).
+            // Lower these as regular calls to the bare constructor symbol so MIR
+            // can canonicalize them into Option*/Result* instructions.
+            match (name.as_str(), args.len()) {
+                ("Some", 1) | ("Ok", 1) | ("Err", 1) | ("None", 0) => {
+                    let func_hir = Box::new(HirExpr {
+                        kind: HirExprKind::Global(name.clone()),
+                        ty: TypeId::ANY,
+                    });
+                    let mut args_hir = Vec::new();
+                    for arg in args {
+                        args_hir.push(self.lower_expr(&arg.value, ctx)?);
+                    }
+                    return Ok(HirExpr {
+                        kind: HirExprKind::Call {
+                            func: func_hir,
+                            args: args_hir,
+                        },
+                        ty: TypeId::ANY,
+                    });
+                }
+                _ => {}
+            }
+
             // Check if this is a class/struct constructor call: ClassName(args)
             // Python-style construction: Service() calls the class constructor
             if let Some(struct_ty) = self.module.types.lookup(name) {

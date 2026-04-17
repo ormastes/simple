@@ -12,6 +12,27 @@ use crate::hir::lower::lowerer::Lowerer;
 use crate::hir::types::*;
 
 impl Lowerer {
+    fn result_like_payload_type(&self, ty: TypeId) -> Option<TypeId> {
+        match self.module.types.get(ty) {
+            Some(HirType::Enum { name, variants, .. }) if name == "Result" => variants.iter().find_map(|(variant, payload)| {
+                if variant == "Ok" {
+                    payload.as_ref().and_then(|fields| fields.first()).copied()
+                } else {
+                    None
+                }
+            }),
+            Some(HirType::Enum { name, variants, .. }) if name == "Option" => variants.iter().find_map(|(variant, payload)| {
+                if variant == "Some" {
+                    payload.as_ref().and_then(|fields| fields.first()).copied()
+                } else {
+                    None
+                }
+            }),
+            Some(HirType::Pointer { inner, .. }) => self.result_like_payload_type(*inner),
+            _ => None,
+        }
+    }
+
     /// Lower an if expression to HIR
     ///
     /// Result type is taken from the then branch.
@@ -861,21 +882,20 @@ impl Lowerer {
     /// The actual error propagation would require more complex control flow
     /// (generating early returns), which we'll implement in a future phase.
     ///
-    /// For now, this is equivalent to calling .unwrap() on the result.
+    /// For now, this extracts the enum payload directly, which keeps both
+    /// backends on the Result/Option family instead of suffix-resolving a
+    /// generic `.unwrap()` call to an unrelated builtin enum like Poll.
     pub(super) fn lower_try(&mut self, inner: &Expr, ctx: &mut FunctionContext) -> LowerResult<HirExpr> {
         // Lower the inner expression
         let inner_hir = self.lower_expr(inner, ctx)?;
+        let payload_ty = self.result_like_payload_type(inner_hir.ty).unwrap_or(TypeId::ANY);
 
-        // Generate an unwrap call on the result
-        // This uses the MethodCall HIR node with dynamic dispatch
         Ok(HirExpr {
-            kind: HirExprKind::MethodCall {
-                receiver: Box::new(inner_hir),
-                method: "unwrap".to_string(),
-                args: vec![],
-                dispatch: DispatchMode::Dynamic,
+            kind: HirExprKind::BuiltinCall {
+                name: "rt_enum_payload".to_string(),
+                args: vec![inner_hir],
             },
-            ty: TypeId::ANY, // The unwrapped type is dynamically determined
+            ty: payload_ty,
         })
     }
 

@@ -578,12 +578,14 @@ impl NativeBackend for LlvmBackend {
                 !func.blocks.is_empty(),
             )?;
         }
+        #[cfg(feature = "llvm")]
         self.declare_dot_aliases_for_methods();
 
         // Second pass: compile all function bodies
         for func in &module.functions {
             self.compile_function(func)?;
         }
+        #[cfg(feature = "llvm")]
         self.define_dot_alias_bodies()?;
 
         // Fix linkage after compilation:

@@ -1,4 +1,4 @@
-# Bug Report: Baremetal TLS Handshake Panics in `x25519_base` on x86_64 QEMU
+# Bug Report: Baremetal TLS Handshake Panics During X25519 Shared Secret on x86_64 QEMU
 
 **Date:** 2026-04-17
 **Bug ID:** `tls_baremetal_001`
@@ -7,7 +7,7 @@
 
 ## Summary
 
-The remaining TLS system-test blocker is no longer in hosted TLS, record decrypt, or post-handshake app-data flow. The x86_64 baremetal guest now fails earlier: during `tls13_connect`, inside the `x25519_base` step, before `ClientHello` construction completes.
+The remaining TLS system-test blocker is now narrowed past TCP, `ClientHello`, `ServerHello`, and `ServerHello` key-share extraction. The x86_64 baremetal guest now fails during `tls13_connect` at the X25519 shared-secret step, immediately after `ServerHello` is added to the transcript.
 
 ## Reproducers
 
@@ -33,32 +33,37 @@ Current serial trace on the x86_64 guest:
 [boot] TCP connection established
 --- Test 3: TLS 1.3 handshake ---
 [tls13] connect start host=localhost kind=fd
-[tls13] before x25519_base
-[heap] alloc sz=0xf000ff60 off_before=0x7080
+[tls13] after parse_handshake_header type=2 body_len=118
+[tls13] after parse_server_hello cipher=4865 key_len=32
+[tls13] after transcript_add serverhello
+[heap] alloc sz=0xf000ff60 off_before=0x137ff0
 [PANIC] heap exhausted
 ```
 
-That narrows the crash to the pre-read handshake path, specifically before:
+That narrows the crash to the next line after transcript update:
 
-- `build_client_hello_bytes(...)`
-- `_build_plaintext_record(...)`
+- `x25519(priv_key, sh.x25519_pub)`
+
+The panic no longer occurs during:
+
+- `ClientHello` construction
 - `_io_send(...)`
 - `_io_recv_record(...)`
-
-The panic therefore occurs before any ServerHello parsing or fd receive logic can execute.
+- `parse_handshake_header(...)`
+- `ServerHello` key-share extraction
 
 ## Narrowed Scope
 
 Most likely fault domain:
 
-- baremetal-only runtime / array allocation behavior exercised by X25519 on the guest
-- or a baremetal-specific implementation path reached by `x25519_base(...)`
+- baremetal-only runtime / array allocation behavior exercised by `x25519(...)` / `x25519_smalllimb(...)`
+- or a baremetal-specific implementation path reached by the shared-secret computation with the server's 32-byte X25519 key share
 
 Less likely at this point:
 
 - TLS record receive path
-- ServerHello parsing
-- transcript hashing
+- `ServerHello` parsing
+- transcript accumulation through `ServerHello`
 - hosted TLS implementation
 
 ## Key File References
@@ -77,18 +82,18 @@ Less likely at this point:
 Earlier TLS work fixed or narrowed:
 
 - hosted TLS interop correctness
-- hosted TLS perf split
-- transport-result handling for `tls13_send`, `tls13_recv`, `tls13_close`
-- several parser and length-trust hazards in TLS helpers
+- baremetal TCP active open and send path
+- `ServerHello` receive/header parsing
+- baremetal `ServerHello` field extraction by moving the hot parser boundary to C helpers
 
-Those changes did not clear the system-test lane because the remaining fault happens before the first network read and before `ClientHello` send completion. This is now a baremetal/runtime/X25519 bug, not a general TLS state-machine bug.
+Those changes did not clear the system-test lane because the remaining fault is now after `ServerHello` parse success and before handshake-secret derivation completes. This is a baremetal/runtime/X25519 shared-secret bug, not a general TLS parser or transport bug.
 
 ## Recommended Next Work
 
-1. Instrument `x25519_base(...)` and the selected backend with serial markers at function entry/exit and around any array allocations or conversions.
-2. Instrument the baremetal runtime allocation helpers in `baremetal_stubs.c` for array growth / array creation call sites used by crypto code.
-3. Confirm whether the guest is entering `x25519_base_smalllimb(...)` and identify the exact first allocation above `0x100000`.
-4. If the fault is in the runtime rather than crypto math, create a minimized x86_64 baremetal probe that calls only `x25519_base(...)`.
+1. Instrument `x25519(...)` / `x25519_smalllimb(...)` with serial markers around the first few limb/array allocations.
+2. Identify the exact allocation site that requests `0xf000ff60` in the baremetal runtime.
+3. If the allocation is caused by compiled Simple crypto code, move the shared-secret step to a C helper or a baremetal-safe FFI path.
+4. Add a minimized x86_64 baremetal repro that only performs X25519 shared-secret computation against a fixed 32-byte peer public key.
 
 ## Blocking Impact
 

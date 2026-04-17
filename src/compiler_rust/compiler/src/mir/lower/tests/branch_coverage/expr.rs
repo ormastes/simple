@@ -162,14 +162,14 @@ fn enum_payload_as_call() {
 }
 
 // =============================================================================
-// Option/Result as Call
+// Option/Result short constructors
 // =============================================================================
 
 #[test]
 fn option_some_as_call() {
     let mir = compile_to_mir("fn test():\n    val x = Some(42)\n").unwrap();
     assert!(has_inst(&mir, |i| {
-        matches!(i, MirInst::Call { target, .. } if target == &CallTarget::from_name("Some"))
+        matches!(i, MirInst::OptionSome { .. })
     }));
 }
 
@@ -177,7 +177,7 @@ fn option_some_as_call() {
 fn result_ok_as_call() {
     let mir = compile_to_mir("fn test():\n    val x = Ok(42)\n").unwrap();
     assert!(has_inst(&mir, |i| {
-        matches!(i, MirInst::Call { target, .. } if target == &CallTarget::from_name("Ok"))
+        matches!(i, MirInst::ResultOk { .. })
     }));
 }
 
@@ -185,8 +185,69 @@ fn result_ok_as_call() {
 fn result_err_as_call() {
     let mir = compile_to_mir("fn test():\n    val x = Err(-1)\n").unwrap();
     assert!(has_inst(&mir, |i| {
-        matches!(i, MirInst::Call { target, .. } if target == &CallTarget::from_name("Err"))
+        matches!(i, MirInst::ResultErr { .. })
     }));
+}
+
+#[test]
+fn result_ok_as_qualified_constructor() {
+    let mir = compile_to_mir("fn test():\n    val x = Result.Ok(42)\n").unwrap();
+    assert!(has_inst(&mir, |i| {
+        matches!(i, MirInst::ResultOk { .. })
+    }));
+}
+
+#[test]
+fn try_on_result_lowers_to_enum_payload_not_generic_unwrap() {
+    let mir =
+        compile_to_mir("fn mk() -> Result<i64, text>:\n    return Ok(7)\n\nfn test() -> i64:\n    return mk()?\n")
+            .unwrap();
+    assert!(has_inst(&mir, |i| {
+        matches!(i, MirInst::Call { target, .. } if target == &CallTarget::from_name("rt_enum_payload"))
+    }));
+    assert!(!has_inst(&mir, |i| {
+        matches!(i, MirInst::MethodCallStatic { func_name, .. } if func_name == "unwrap" || func_name.ends_with(".unwrap"))
+    }));
+}
+
+#[test]
+fn try_on_result_alias_lowers_to_enum_payload_not_generic_unwrap() {
+    let mir = compile_to_mir(
+        "enum Result<T, E>:\n    Ok(T)\n    Err(E)\n\ntype BrowserResult = Result\n\nfn mk() -> BrowserResult<i64, text>:\n    return Ok(7)\n\nfn test() -> i64:\n    return mk()?\n",
+    )
+    .unwrap();
+    assert!(has_inst(&mir, |i| {
+        matches!(i, MirInst::Call { target, .. } if target == &CallTarget::from_name("rt_enum_payload"))
+    }));
+    assert!(!has_inst(&mir, |i| {
+        matches!(i, MirInst::MethodCallStatic { func_name, .. } if func_name == "unwrap" || func_name.ends_with(".unwrap"))
+    }));
+}
+
+#[test]
+fn try_on_imported_result_alias_lowers_to_enum_payload_not_generic_unwrap() {
+    let src = r#"
+use std.js.engine.js_error.{BrowserResult}
+
+fn parse_statement() -> BrowserResult<i64>:
+    Ok(7)
+
+fn parse_program() -> BrowserResult<i64>:
+    val stmt = parse_statement()?
+    Ok(stmt)
+"#;
+
+    let mir = compile_to_mir(src).unwrap();
+    let body = format!("{mir:#?}");
+
+    assert!(
+        body.contains("rt_enum_payload"),
+        "expected imported BrowserResult try to lower via rt_enum_payload:\n{body}"
+    );
+    assert!(
+        !body.contains("func_name: \"unwrap\"") && !body.contains(".unwrap"),
+        "imported BrowserResult try should not lower to unwrap dispatch:\n{body}"
+    );
 }
 
 // =============================================================================

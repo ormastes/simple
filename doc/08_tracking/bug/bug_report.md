@@ -52,11 +52,13 @@
 | `bin/simple bug-add` fails: LOG_ERROR not found + build help shown | ✅ FIXED | Medium |
 | MCP jj_commit/describe/new/squash shell quoting bug | ✅ FIXED | Medium |
 | Test runner single-file 56s startup | ✅ FIXED | Low |
-| Baremetal TLS handshake panics in `x25519_base` on x86_64 QEMU | 🔍 OPEN | High |
+| Baremetal TLS handshake panics during X25519 shared secret on x86_64 QEMU | 🔍 OPEN | High |
 | Baremetal TLS guest reports TCP connect success but never sends `ClientHello` | 🔍 OPEN | High |
+| Baremetal TLS guest enters `TCP_SYN_SENT` but never completes active open to slirp host | 🔍 OPEN | High |
+| Baremetal compiled `[u8]` arrays lose byte values across TLS builder boundaries | 🔍 OPEN | High |
 | Generic x86_64 bare-metal JS runtime bootstrap faults in object/env storage | 🔍 OPEN | High |
 
-**Summary:** 42 fixed, 3 open, 1 closed, 5 invalid (Updated 2026-04-17)
+**Summary:** 42 fixed, 5 open, 1 closed, 5 invalid (Updated 2026-04-17)
 
 ---
 

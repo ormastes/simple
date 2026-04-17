@@ -180,4 +180,22 @@ mod llvm_jit_tests {
         let em = LocalExecutionManager::new(JitBackend::Llvm).expect("llvm init");
         assert_eq!(em.backend_name(), "llvm-jit");
     }
+
+    #[test]
+    fn test_llvm_jit_logical_not_branch() {
+        let mut em = LocalExecutionManager::new(JitBackend::Llvm).expect("llvm init");
+        let mir = source_to_mir(
+            r#"
+fn test() -> i64:
+    val flag = true
+    if not flag:
+        return 0
+    return 1
+"#,
+        );
+
+        em.compile_module(&mir).expect("compile");
+        let result = em.execute("test", &[]).expect("execute");
+        assert_eq!(result, 1);
+    }
 }

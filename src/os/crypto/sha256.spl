@@ -14,8 +14,7 @@
 # WORKAROUND: global val arrays not supported in baremetal Cranelift.
 # Keep constants in local lookup helpers so hosted and baremetal builds share
 # the same implementation without depending on runtime-provided tables.
-fn rt_array_new_with_cap(cap: i64) -> [u8]:
-    []
+extern fn rt_array_new_with_cap(cap: i64) -> [u8]
 extern fn serial_println(msg: text)
 
 fn _sha256_k(index: u64) -> u32:
@@ -292,7 +291,7 @@ fn _copy_block64(src: [u8], offset: u64) -> [u8]:
 # ============================================================================
 
 fn sha256(data: [u8]) -> [u8]:
-    _list_to_array(_list_sha256_bytes(_array_prefix_to_list(data, data.len().to_u64())))
+    sha256_with_len(data, data.len().to_u64())
 
 fn _array_prefix_to_list(data: [u8], data_len: u64) -> list:
     var out = []
@@ -529,7 +528,30 @@ fn _list_hmac_sha256_bytes(key_bytes: list, message_bytes: list) -> list:
     _list_sha256_bytes(outer_input)
 
 fn sha256_with_len(data: [u8], data_len: u64) -> [u8]:
-    _list_to_array(_list_sha256_bytes(_array_prefix_to_list(data, data_len)))
+    val padded = sha256_pad_with_len(data, data_len)
+
+    var h: [u32] = []
+    var hi: u64 = 0
+    while hi < 8:
+        h.push(_sha256_h(hi))
+        hi = hi + 1
+
+    var offset: u64 = 0
+    while offset < padded.len():
+        val block = _copy_block64(padded, offset)
+        h = sha256_process_block(block, 0, h)
+        offset = offset + 64
+
+    var out: [u8] = rt_array_new_with_cap(32)
+    hi = 0
+    while hi < 8:
+        val word = h[hi]
+        out.push(((word >> 24) & 0xFF).to_u8())
+        out.push(((word >> 16) & 0xFF).to_u8())
+        out.push(((word >> 8) & 0xFF).to_u8())
+        out.push((word & 0xFF).to_u8())
+        hi = hi + 1
+    out
 
 fn _normalize_hmac_key(key: [u8], key_len: u64) -> [u8]:
     val block_size: u64 = 64

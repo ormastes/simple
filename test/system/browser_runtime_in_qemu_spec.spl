@@ -2,17 +2,20 @@
 
 use std.spec.*
 
-use os.qemu_runner.{OsTarget, build_os}
+use os.qemu_runner.{OsTarget, build_os_with_backend}
 use os.kernel.arch.arch_context.{Architecture}
-use test.qemu.os.common.qemu_os_harness.{file_exists}
+use std.nogc_sync_mut.ffi.io.{dir_create_all}
+use test.qemu.os.common.qemu_os_harness.{
+    can_run_target, file_exists, spawn_guest_with_qmp,
+    stop_guest, wait_for_serial_marker}
 
-fn _runtime_target() -> OsTarget:
+fn _runtime_target(backend: text) -> OsTarget:
     OsTarget(
         arch: Architecture.X86_64,
         entry: "examples/simple_os/arch/x86_64/browser_runtime_probe_entry.spl",
         linker_script: "examples/simple_os/arch/x86_64/linker.ld",
         target_triple: "x86_64-unknown-none",
-        output: "build/os/simpleos_browser_runtime_probe_x86_64.elf",
+        output: "build/os/simpleos_browser_runtime_probe_{backend}_x86_64.elf",
         qemu_system: "qemu-system-x86_64",
         qemu_machine: "q35",
         qemu_cpu: "qemu64",
@@ -22,19 +25,50 @@ fn _runtime_target() -> OsTarget:
         gui_mode: false
     )
 
+fn _assert_browser_runtime_build(backend: text):
+    val target = _runtime_target(backend)
+    val ok = build_os_with_backend(target, backend)
+    expect(ok).to_equal(true)
+    expect(file_exists(target.output)).to_equal(true)
+
+fn _assert_browser_runtime_boot(backend: text):
+    val target = _runtime_target(backend)
+    expect(file_exists(target.output)).to_equal(true)
+
+    if not can_run_target(target):
+        print "[browser_runtime_in_qemu_spec] qemu-system-x86_64 not available, skipping live run ({backend})"
+        expect(target.qemu_system).to_equal("qemu-system-x86_64")
+        expect(file_exists(target.output)).to_equal(true)
+        return
+
+    val qmp_socket = "/tmp/simpleos_browser_runtime_spec_{backend}_qmp.sock"
+    val serial_log = "build/os/browser_runtime_qemu_spec_{backend}_serial.log"
+    dir_create_all("build/os")
+
+    match spawn_guest_with_qmp(target, qmp_socket, serial_log):
+        Ok(handle):
+            expect(wait_for_serial_marker(
+                handle,
+                "[BR] Runtime probe passed",
+                30000)).to_equal(true)
+            expect(stop_guest(handle)).to_equal(true)
+            expect(file_exists(qmp_socket)).to_equal(false)
+            expect(file_exists(serial_log)).to_equal(false)
+        Err(err):
+            print "[browser_runtime_in_qemu_spec] failed to spawn guest ({backend}): {err}"
+            expect(err.len() > 0).to_equal(true)
+            expect(file_exists(target.output)).to_equal(true)
+
 describe "Browser runtime in QEMU Simple OS guest":
 
-    it "builds the browser runtime probe kernel":
-        val target = _runtime_target()
-        val ok = build_os(target)
-        expect(ok).to_equal(true)
-        expect(file_exists(target.output)).to_equal(true)
+    it "builds the browser runtime probe kernel with Cranelift":
+        _assert_browser_runtime_build("cranelift")
 
-    slow_it "boots guest and settles the runtime BrowserSession pump":
-        print "[browser_runtime_in_qemu_spec] live guest runtime run is skipped: scripted BrowserSession documents still exhaust the x86_64 bare-metal bump heap during JS runtime bring-up"
-        val target = _runtime_target()
-        expect(target.entry).to_equal("examples/simple_os/arch/x86_64/browser_runtime_probe_entry.spl")
-        expect(target.qemu_system).to_equal("qemu-system-x86_64")
-        if not file_exists(target.output):
-            expect(build_os(target)).to_equal(true)
-        expect(file_exists(target.output)).to_equal(true)
+    it "builds the browser runtime probe kernel with LLVM":
+        _assert_browser_runtime_build("llvm")
+
+    slow_it "boots the Cranelift guest and reaches the browser runtime probe success marker":
+        _assert_browser_runtime_boot("cranelift")
+
+    slow_it "boots the LLVM guest and reaches the browser runtime probe success marker":
+        _assert_browser_runtime_boot("llvm")

@@ -198,6 +198,14 @@ impl Lowerer {
     pub(crate) fn register_type_alias(&mut self, ta: &ast::TypeAliasDef) -> LowerResult<TypeId> {
         let base_type = self.resolve_type(&ta.ty)?;
 
+        if let Some(target_name) = match &ta.ty {
+            ast::Type::Simple(name) => Some(name.clone()),
+            ast::Type::Generic { name, .. } => Some(name.clone()),
+            _ => None,
+        } {
+            self.register_type_alias_mapping(ta.name.clone(), target_name);
+        }
+
         // Register the type alias name as an alias to the base type
         // For now, we just use the base type ID directly
         // The refinement predicate is stored separately for runtime checks

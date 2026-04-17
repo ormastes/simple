@@ -36,8 +36,15 @@ impl LlvmBackend {
         use std::collections::HashMap;
         use std::collections::HashSet;
 
-        // Debug: dump MIR for specific functions when SIMPLE_DUMP_IR env var is set
-        if std::env::var("SIMPLE_DUMP_IR").is_ok() && func.name.contains("native_build") {
+        let dump_filter = std::env::var("SIMPLE_DUMP_IR_FILTER").ok();
+        let should_dump = std::env::var("SIMPLE_DUMP_IR").is_ok()
+            && dump_filter
+                .as_deref()
+                .map(|needle| func.name.contains(needle))
+                .unwrap_or_else(|| func.name.contains("native_build"));
+
+        // Debug: dump MIR for selected functions when SIMPLE_DUMP_IR is set.
+        if should_dump {
             eprintln!("=== MIR for {} ===", func.name);
             eprintln!(
                 "  params: {:?}",
@@ -195,37 +202,47 @@ impl LlvmBackend {
             let bb = llvm_blocks[&block.id];
             builder.position_at_end(bb);
 
-            // At the start of each non-entry block, reload only the vregs that are
-            // used in this block but not defined in it (live-in set).
-            // This fixes SSA dominance without the O(num_vregs) penalty per block.
-            if Some(block.id) != is_entry_block_id {
-                vreg_map.clear();
+            // Rebuild the visible SSA state from allocas at every block boundary.
+            // Leaving stale non-live values from a previous block in vreg_map can
+            // feed the wrong receiver/operand into later calls.
+            vreg_map.clear();
 
-                // Compute vregs defined in this block
-                let mut block_defs = HashSet::new();
-                for inst in &block.instructions {
-                    if let Some(d) = inst.dest() {
-                        block_defs.insert(d);
+            // At the start of each block, reload the vregs that are live-in to
+            // that block. For the entry block, seed parameter vregs.
+            if Some(block.id) == is_entry_block_id {
+                let i64_type = self.runtime_int_type();
+                for (i, _param) in func.params.iter().enumerate() {
+                    let vreg = crate::mir::VReg(i as u32);
+                    if let Some(&alloca) = vreg_allocas.get(&vreg) {
+                        if let Ok(val) = builder.build_load(i64_type, alloca, &format!("v{}", vreg.0)) {
+                            vreg_map.insert(vreg, val);
+                        }
                     }
                 }
+            } else {
+                vreg_map.clear();
 
-                // Compute vregs used in this block but not defined here (live-in)
+                // Compute vregs used before their first local definition.
+                let mut seen_defs = HashSet::new();
                 let mut live_in = HashSet::new();
                 for inst in &block.instructions {
                     for u in inst.uses() {
-                        if !block_defs.contains(&u) {
+                        if !seen_defs.contains(&u) {
                             live_in.insert(u);
                         }
+                    }
+                    if let Some(d) = inst.dest() {
+                        seen_defs.insert(d);
                     }
                 }
                 match &block.terminator {
                     crate::mir::Terminator::Return(Some(v)) => {
-                        if !block_defs.contains(v) {
+                        if !seen_defs.contains(v) {
                             live_in.insert(*v);
                         }
                     }
                     crate::mir::Terminator::Branch { cond, .. } => {
-                        if !block_defs.contains(cond) {
+                        if !seen_defs.contains(cond) {
                             live_in.insert(*cond);
                         }
                     }
@@ -250,6 +267,18 @@ impl LlvmBackend {
 
             // Compile each instruction by dispatching to helper methods
             for inst in &block.instructions {
+                let i64_type = self.runtime_int_type();
+                for used in inst.uses() {
+                    if vreg_map.contains_key(&used) {
+                        continue;
+                    }
+                    if let Some(&alloca) = vreg_allocas.get(&used) {
+                        if let Ok(val) = builder.build_load(i64_type, alloca, &format!("v{}", used.0)) {
+                            vreg_map.insert(used, val);
+                        }
+                    }
+                }
+
                 self.compile_instruction(inst, &mut vreg_map, &local_allocas, builder, module)?;
 
                 // Store any newly defined vreg to its alloca (for cross-block access)
@@ -288,14 +317,38 @@ impl LlvmBackend {
                         let _ = builder.build_store(alloca, i64_val);
                     }
                 }
+
+                vreg_map.clear();
             }
 
             // Compile terminator
+            let i64_type = self.runtime_int_type();
+            match &block.terminator {
+                crate::mir::Terminator::Return(Some(v)) => {
+                    if !vreg_map.contains_key(v) {
+                        if let Some(&alloca) = vreg_allocas.get(v) {
+                            if let Ok(val) = builder.build_load(i64_type, alloca, &format!("v{}", v.0)) {
+                                vreg_map.insert(*v, val);
+                            }
+                        }
+                    }
+                }
+                crate::mir::Terminator::Branch { cond, .. } => {
+                    if !vreg_map.contains_key(cond) {
+                        if let Some(&alloca) = vreg_allocas.get(cond) {
+                            if let Ok(val) = builder.build_load(i64_type, alloca, &format!("v{}", cond.0)) {
+                                vreg_map.insert(*cond, val);
+                            }
+                        }
+                    }
+                }
+                _ => {}
+            }
             self.compile_terminator(&block.terminator, &llvm_blocks, &vreg_map, builder)?;
         }
 
-        // Debug: dump LLVM IR to file for specific functions
-        if std::env::var("SIMPLE_DUMP_IR").is_ok() && func.name.contains("native_build") {
+        // Debug: dump LLVM IR to file for selected functions.
+        if should_dump {
             let ir_path = format!(
                 "/tmp/llvm_ir_{}.ll",
                 func.name.replace(|c: char| !c.is_alphanumeric(), "_")
@@ -1536,7 +1589,24 @@ impl LlvmBackend {
                     }
                     let param_types: Vec<inkwell::types::BasicMetadataTypeEnum> =
                         all_args_vregs.iter().map(|_| i64_type.into()).collect();
-                    let fn_type = i64_type.fn_type(&param_types, false);
+                    let returns_bool = matches!(
+                        rt_name,
+                        "rt_array_push"
+                            | "rt_array_clear"
+                            | "rt_array_reverse"
+                            | "rt_array_sort"
+                            | "rt_contains"
+                            | "rt_dict_contains_key"
+                            | "rt_is_none"
+                            | "rt_is_some"
+                            | "rt_array_any"
+                            | "rt_array_all"
+                    );
+                    let fn_type = if returns_bool {
+                        self.context.bool_type().fn_type(&param_types, false)
+                    } else {
+                        i64_type.fn_type(&param_types, false)
+                    };
                     let rt_func = module
                         .get_function(rt_name)
                         .unwrap_or_else(|| module.add_function(rt_name, fn_type, None));
@@ -1558,6 +1628,11 @@ impl LlvmBackend {
                             let recv_val = self.get_vreg(receiver, vreg_map)?;
                             vreg_map.insert(*d, recv_val);
                         } else if let Some(ret_val) = call_site.try_as_basic_value().left() {
+                            let ret_val = if returns_bool {
+                                self.coerce_value_to_type(ret_val, Some(i64_type.into()), builder)?
+                            } else {
+                                ret_val
+                            };
                             vreg_map.insert(*d, ret_val);
                         } else {
                             vreg_map.insert(*d, i64_type.const_int(0, false).into());
@@ -1573,29 +1648,39 @@ impl LlvmBackend {
                         .or_else(|| self.import_map.get(func_name))
                         .map(|s| s.as_str());
                     let dotted_name = func_name.replace("_dot_", ".");
+                    let suffix_match = || -> Result<Option<inkwell::values::FunctionValue<'static>>, CompileError> {
+                        let suffix = format!(".{}", dotted_name);
+                        let mut func_opt = module.get_first_function();
+                        let mut matches: Vec<(String, inkwell::values::FunctionValue)> = Vec::new();
+                        while let Some(f) = func_opt {
+                            let name = f.get_name().to_string_lossy().to_string();
+                            if name.ends_with(&suffix) {
+                                matches.push((name, f));
+                            }
+                            func_opt = f.get_next_function();
+                        }
+                        match matches.len() {
+                            0 => Ok(None),
+                            1 => Ok(matches.pop().map(|(_, f)| f)),
+                            _ => {
+                                matches.sort_by(|a, b| a.0.cmp(&b.0));
+                                let names = matches.into_iter().map(|(name, _)| name).collect::<Vec<_>>().join(", ");
+                                Err(CompileError::semantic(format!(
+                                    "ambiguous LLVM method resolution for `{func_name}` via suffix `{suffix}`: {names}"
+                                )))
+                            }
+                        }
+                    };
                     let called_func = resolved
                         .and_then(|n| module.get_function(n))
                         .or_else(|| resolved.and_then(|n| module.get_function(&n.replace("_dot_", "."))))
                         .or_else(|| module.get_function(func_name))
-                        .or_else(|| module.get_function(&dotted_name))
-                        .or_else(|| {
-                            let suffix = format!(".{}", dotted_name);
-                            let mut func_opt = module.get_first_function();
-                            let mut best: Option<inkwell::values::FunctionValue> = None;
-                            while let Some(f) = func_opt {
-                                let name = f.get_name().to_string_lossy().to_string();
-                                if name.ends_with(&suffix) {
-                                    if best
-                                        .as_ref()
-                                        .map_or(true, |b| name.len() < b.get_name().to_bytes().len())
-                                    {
-                                        best = Some(f);
-                                    }
-                                }
-                                func_opt = f.get_next_function();
-                            }
-                            best
-                        });
+                        .or_else(|| module.get_function(&dotted_name));
+                    let called_func = if let Some(func) = called_func {
+                        Some(func)
+                    } else {
+                        suffix_match()?
+                    };
 
                     let param_types: Vec<inkwell::types::BasicMetadataTypeEnum> =
                         all_args.iter().map(|_| i64_type.into()).collect();

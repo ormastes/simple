@@ -316,7 +316,8 @@ class JsInterpreter:
         self.define_global_value(name, JsValue.Function(id: fn_idx))
 
     me define_global_value(name: text, value: JsValue):
-        self.env_stack.define_var(self.global_env, name, value)
+        val env_stack = self.env_stack
+        env_stack.define_var(self.global_env, name, value)
 
     me set_object_property_direct(obj_id: i64, key: text, value: JsValue):
         self.object_store.prop_obj_ids.push(obj_id)
@@ -749,7 +750,8 @@ class JsInterpreter:
     # Variable declaration
     me exec_var_decl(name: text, init: Expression, env: i64) -> BrowserResult<JsValue>:
         val value = self.eval_expression(init, env)?
-        self.env_stack.define_var(env, name, value)
+        val env_stack = self.env_stack
+        env_stack.define_var(env, name, value)
         Ok(value)
 
     # Destructuring declaration: const {a, b} = obj; const [x, y] = arr
@@ -759,6 +761,7 @@ class JsInterpreter:
         Ok(value)
 
     me _bind_pattern(pattern: Expression, value: JsValue, env: i64):
+        val env_stack = self.env_stack
         match pattern:
             Expression.ObjectPattern(props):
                 match value:
@@ -769,7 +772,7 @@ class JsInterpreter:
                             val bound_val = self.object_store.get_property(id, dp.key)
                             match dp.value:
                                 Expression.Identifier(name):
-                                    self.env_stack.define_var(env, name, bound_val)
+                                    env_stack.define_var(env, name, bound_val)
                                 _: pass_dn
                             i = i + 1
                     _: pass_dn
@@ -790,11 +793,11 @@ class JsInterpreter:
                                                 rest.push(self.object_store.get_by_index(id, ri))
                                                 ri = ri + 1
                                             val rest_id = self.object_store.create_array_from(rest)
-                                            self.env_stack.define_var(env, name, JsValue.Array(id: rest_id))
+                                            env_stack.define_var(env, name, JsValue.Array(id: rest_id))
                                         _: pass_dn
                                 Expression.Identifier(name):
                                     val elem_val = self.object_store.get_by_index(id, i)
-                                    self.env_stack.define_var(env, name, elem_val)
+                                    env_stack.define_var(env, name, elem_val)
                                 _: pass_dn
                             i = i + 1
                     _: pass_dn
@@ -936,7 +939,8 @@ class JsInterpreter:
         val js_fn = JsFunction(name: name, params: params, body: body, closure_env: env)
         self.functions.push(js_fn)
         val fn_val = JsValue.Function(id: fn_id)
-        self.env_stack.define_var(env, name, fn_val)
+        val env_stack = self.env_stack
+        env_stack.define_var(env, name, fn_val)
         Ok(fn_val)
 
     # Try/catch/finally
@@ -960,9 +964,10 @@ class JsInterpreter:
             self.control_thrown = false
             val caught_value = self.thrown_value
             self.thrown_value = JsValue.Undefined
-            val catch_env = self.env_stack.create_env(env)
+            val env_stack = self.env_stack
+            val catch_env = env_stack.create_env(env)
             if catch_param != "":
-                self.env_stack.define_var(catch_env, catch_param, caught_value)
+                env_stack.define_var(catch_env, catch_param, caught_value)
             var ci = 0
             val clen = catch_body.len()
             while ci < clen:
@@ -1040,8 +1045,9 @@ class JsInterpreter:
                 while i < len:
                     val prop = obj.properties.get(i)
                     if prop.enumerable:
-                        val iter_env = self.env_stack.create_env(env)
-                        self.env_stack.define_var(iter_env, binding, JsValue.String(v: prop.key))
+                        val env_stack = self.env_stack
+                        val iter_env = env_stack.create_env(env)
+                        env_stack.define_var(iter_env, binding, JsValue.String(v: prop.key))
                         var bi = 0
                         val blen = body.len()
                         while bi < blen:
@@ -1077,8 +1083,9 @@ class JsInterpreter:
                 var i = 0
                 while i < arr_len:
                     val elem_val = self.object_store.get_by_index(id, i)
-                    val iter_env = self.env_stack.create_env(env)
-                    self.env_stack.define_var(iter_env, binding, elem_val)
+                    val env_stack = self.env_stack
+                    val iter_env = env_stack.create_env(env)
+                    env_stack.define_var(iter_env, binding, elem_val)
                     var bi = 0
                     val blen = body.len()
                     while bi < blen:
@@ -1149,7 +1156,8 @@ class JsInterpreter:
                 self.class_proto_fns.push(ctor_id)
                 self.class_proto_ids.push(proto_id)
                 val class_val = JsValue.Function(id: ctor_id)
-                self.env_stack.define_var(env, name, class_val)
+                val env_stack = self.env_stack
+                env_stack.define_var(env, name, class_val)
                 return Ok(class_val)
             _: pass_dn
         Ok(JsValue.Undefined)
@@ -1297,15 +1305,17 @@ class JsInterpreter:
                     self.object_store.set_property(obj_id, "__proto__", JsValue.Object(id: proto_id))
                 if fn_id >= 0 and fn_id < self.functions.len():
                     val js_fn = self.functions.get(fn_id)
-                    val fn_env = self.env_stack.create_env(js_fn.closure_env)
+                    val env_stack = self.env_stack
+                    val params = js_fn.params
+                    val fn_env = env_stack.create_env(js_fn.closure_env)
                     var pi = 0
-                    while pi < js_fn.params.len():
+                    while pi < params.len():
                         var pv = JsValue.Undefined
                         if pi < arg_vals.len():
                             pv = arg_vals.get(pi)
-                        self.env_stack.define_var(fn_env, js_fn.params.get(pi), pv)
+                        env_stack.define_var(fn_env, params.get(pi), pv)
                         pi = pi + 1
-                    self.env_stack.define_var(fn_env, "this", this_val)
+                    env_stack.define_var(fn_env, "this", this_val)
                     val frame = CallFrame(function_name: js_fn.name, env_id: fn_env, line: 0, this_value: this_val)
                     self.call_stack.push(frame)
                     val saved = self.control_return
@@ -1519,14 +1529,15 @@ class JsInterpreter:
                                 # Bind parameters
                                 var pi = 0
                                 val plen = js_fn.params.len()
+                                val env_stack = self.env_stack
                                 while pi < plen:
                                     val pname = js_fn.params.get(pi)
                                     var pval = JsValue.Undefined
                                     if pi < arg_vals.len():
                                         pval = arg_vals.get(pi)
-                                    self.env_stack.define_var(fn_env, pname, pval)
+                                    env_stack.define_var(fn_env, pname, pval)
                                     pi = pi + 1
-                                self.env_stack.define_var(fn_env, "this", new_obj)
+                                env_stack.define_var(fn_env, "this", new_obj)
                                 val frame = CallFrame(function_name: js_fn.name, env_id: fn_env, line: 0, this_value: new_obj)
                                 self.call_stack.push(frame)
                                 val saved = self.control_return
@@ -1777,12 +1788,13 @@ class JsInterpreter:
                     # Bind parameters
                     var pi = 0
                     val plen = js_fn.params.len()
+                    val env_stack = self.env_stack
                     while pi < plen:
                         val param_name = js_fn.params.get(pi)
                         var param_val = JsValue.Undefined
                         if pi < arg_vals.len():
                             param_val = arg_vals.get(pi)
-                        self.env_stack.define_var(fn_env, param_name, param_val)
+                        env_stack.define_var(fn_env, param_name, param_val)
                         pi = pi + 1
 
                     # Bind 'arguments' object
@@ -1792,7 +1804,7 @@ class JsInterpreter:
                         self.object_store.set_property(args_obj_id, "{ai}", arg_vals.get(ai))
                         ai = ai + 1
                     self.object_store.set_property(args_obj_id, "length", JsValue.Number(v: arg_vals.len().to_f64()))
-                    self.env_stack.define_var(fn_env, "arguments", JsValue.Object(id: args_obj_id))
+                    env_stack.define_var(fn_env, "arguments", JsValue.Object(id: args_obj_id))
 
                     # Bind 'this' — for method calls, the receiver is tracked via callee
                     var this_val = JsValue.Undefined
@@ -1801,7 +1813,7 @@ class JsInterpreter:
                             val obj_val = self.eval_expression(obj_expr, env)?
                             this_val = obj_val
                         _: pass_dn
-                    self.env_stack.define_var(fn_env, "this", this_val)
+                    env_stack.define_var(fn_env, "this", this_val)
 
                     # Push call frame
                     val frame = CallFrame(function_name: js_fn.name, env_id: fn_env, line: 0, this_value: this_val)
@@ -3121,15 +3133,17 @@ class JsInterpreter:
         if fn_id < 0 or fn_id >= self.functions.len():
             return Ok(JsValue.Undefined)
         val js_fn = self.functions.get(fn_id)
-        val fn_env = self.env_stack.create_env(js_fn.closure_env)
+        val env_stack = self.env_stack
+        val params = js_fn.params
+        val fn_env = env_stack.create_env(js_fn.closure_env)
         var pi = 0
-        while pi < js_fn.params.len():
+        while pi < params.len():
             var pv = JsValue.Undefined
             if pi < arg_vals.len():
                 pv = arg_vals.get(pi)
-            self.env_stack.define_var(fn_env, js_fn.params.get(pi), pv)
+            env_stack.define_var(fn_env, params.get(pi), pv)
             pi = pi + 1
-        self.env_stack.define_var(fn_env, "this", JsValue.Undefined)
+        env_stack.define_var(fn_env, "this", JsValue.Undefined)
         val frame = CallFrame(function_name: js_fn.name, env_id: fn_env, line: 0, this_value: JsValue.Undefined)
         self.call_stack.push(frame)
         val saved = self.control_return

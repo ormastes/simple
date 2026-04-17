@@ -8,9 +8,25 @@
 # Reference: RFC 8446 (TLS 1.3)
 
 extern fn serial_println(msg: text)
+extern fn rt_text_to_bytes(s: text) -> [u8]
+extern fn rt_array_new_with_cap(cap: i64) -> [u8]
+extern fn rt_push_byte(arr: [u8], byte_val: i64) -> [u8]
+extern fn rt_bytes_u8_at(arr: [u8], idx: i64) -> i64
+extern fn rt_bytes_u16_be_at(arr: [u8], idx: i64) -> i64
+extern fn rt_bytes_u24_be_at(arr: [u8], idx: i64) -> i64
+extern fn rt_tls13_serverhello_x25519_pub(body: [u8]) -> [u8]
 
 fn _tls_hs_debug(msg: text):
     serial_println("[tls13.hs] {msg}")
+
+fn _byte_buf(cap: u64) -> [u8]:
+    rt_array_new_with_cap(cap.to_i64())
+
+fn _push_byte(buf: [u8], byte_val: i64) -> [u8]:
+    rt_push_byte(buf, byte_val)
+
+fn _u8_at(data: [u8], offset: u64) -> u8:
+    rt_bytes_u8_at(data, offset.to_i64()).to_u8()
 
 # ============================================================================
 # Handshake Message Types
@@ -73,53 +89,44 @@ class CertificateRequest13:
 
 fn _u16_be(data: [u8], offset: u64) -> u16:
     """Read a big-endian u16 from data at offset."""
-    val hi = data[offset].to_u32()
-    val lo = data[offset + 1].to_u32()
-    ((hi << 8) | lo).to_u16()
+    rt_bytes_u16_be_at(data, offset.to_i64()).to_u16()
 
 fn _u24_be(data: [u8], offset: u64) -> u64:
     """Read a big-endian 24-bit value from data at offset."""
-    val b0 = data[offset].to_u64()
-    val b1 = data[offset + 1].to_u64()
-    val b2 = data[offset + 2].to_u64()
-    (b0 << 16) | (b1 << 8) | b2
+    rt_bytes_u24_be_at(data, offset.to_i64()).to_u64()
 
 fn _put_u16_be(val: u16) -> [u8]:
     """Encode a u16 as 2 big-endian bytes."""
-    var out: [u8] = []
-    out.push(((val.to_u32() >> 8) & 0xFF).to_u8())
-    out.push((val.to_u32() & 0xFF).to_u8())
+    var out: [u8] = _byte_buf(2)
+    out = _push_byte(out, ((val.to_u32() >> 8) & 0xFF).to_i64())
+    out = _push_byte(out, (val.to_u32() & 0xFF).to_i64())
     out
 
 fn _put_u24_be(val: u64) -> [u8]:
     """Encode a u64 value (low 24 bits) as 3 big-endian bytes."""
-    var out: [u8] = []
-    out.push(((val >> 16) & 0xFF).to_u8())
-    out.push(((val >> 8) & 0xFF).to_u8())
-    out.push((val & 0xFF).to_u8())
+    var out: [u8] = _byte_buf(3)
+    out = _push_byte(out, ((val >> 16) & 0xFF).to_i64())
+    out = _push_byte(out, ((val >> 8) & 0xFF).to_i64())
+    out = _push_byte(out, (val & 0xFF).to_i64())
     out
 
 fn _text_to_bytes(s: text) -> [u8]:
     """Convert a text string to a UTF-8 byte array."""
-    var out: [u8] = []
-    var i = 0
-    while i < s.len():
-        out.push(s.char_code_at(i).to_u8())
+    rt_text_to_bytes(s)
+
+fn _append_into(out: [u8], src: [u8]):
+    """Append src bytes into out in place."""
+    _tls_hs_debug("_append_into out={out.len()} src={src.len()}")
+    var i: u64 = 0
+    while i < src.len():
+        out = _push_byte(out, _u8_at(src, i).to_u64().to_i64())
         i = i + 1
-    out
 
 fn _append_bytes(a: [u8], b: [u8]) -> [u8]:
     """Concatenate two byte arrays."""
-    _tls_hs_debug("_append_bytes a={a.len()} b={b.len()}")
-    var out: [u8] = []
-    var i: u64 = 0
-    while i < a.len():
-        out.push(a[i])
-        i = i + 1
-    i = 0
-    while i < b.len():
-        out.push(b[i])
-        i = i + 1
+    var out: [u8] = _byte_buf(a.len() + b.len())
+    _append_into(out, a)
+    _append_into(out, b)
     out
 
 # ============================================================================
@@ -131,16 +138,16 @@ fn _build_ext_supported_versions() -> [u8]:
     # Extension type: 43 (0x002B)
     val ext_type = _put_u16_be(EXT_SUPPORTED_VERSIONS)
     # versions list: 1 version = 2 bytes, prefixed with 1-byte count
-    var versions: [u8] = []
-    versions.push(0x02)  # 2 bytes follow
-    versions.push(0x03)  # TLS 1.3 major
-    versions.push(0x04)  # TLS 1.3 minor
+    var versions: [u8] = _byte_buf(3)
+    versions = _push_byte(versions, 0x02)  # 2 bytes follow
+    versions = _push_byte(versions, 0x03)  # TLS 1.3 major
+    versions = _push_byte(versions, 0x04)  # TLS 1.3 minor
     # extension data length = 3 bytes
     val ext_len = _put_u16_be(versions.len().to_u16())
-    var out: [u8] = []
-    out = _append_bytes(out, ext_type)
-    out = _append_bytes(out, ext_len)
-    out = _append_bytes(out, versions)
+    var out: [u8] = _byte_buf(7)
+    _append_into(out, ext_type)
+    _append_into(out, ext_len)
+    _append_into(out, versions)
     out
 
 fn _build_ext_key_share(x25519_pub: [u8]) -> [u8]:
@@ -148,22 +155,22 @@ fn _build_ext_key_share(x25519_pub: [u8]) -> [u8]:
     # key_share entry: group(2) + key_len(2) + key(32)
     val group_bytes = _put_u16_be(GROUP_X25519)
     val key_len_bytes = _put_u16_be(x25519_pub.len().to_u16())
-    var entry: [u8] = []
-    entry = _append_bytes(entry, group_bytes)
-    entry = _append_bytes(entry, key_len_bytes)
-    entry = _append_bytes(entry, x25519_pub)
+    var entry: [u8] = _byte_buf(x25519_pub.len() + 4)
+    _append_into(entry, group_bytes)
+    _append_into(entry, key_len_bytes)
+    _append_into(entry, x25519_pub)
     # client_shares list length (2 bytes)
     val list_len = _put_u16_be(entry.len().to_u16())
-    var client_shares: [u8] = []
-    client_shares = _append_bytes(client_shares, list_len)
-    client_shares = _append_bytes(client_shares, entry)
+    var client_shares: [u8] = _byte_buf(entry.len() + 2)
+    _append_into(client_shares, list_len)
+    _append_into(client_shares, entry)
     # extension type + length
     val ext_type = _put_u16_be(EXT_KEY_SHARE)
     val ext_len = _put_u16_be(client_shares.len().to_u16())
-    var out: [u8] = []
-    out = _append_bytes(out, ext_type)
-    out = _append_bytes(out, ext_len)
-    out = _append_bytes(out, client_shares)
+    var out: [u8] = _byte_buf(client_shares.len() + 4)
+    _append_into(out, ext_type)
+    _append_into(out, ext_len)
+    _append_into(out, client_shares)
     out
 
 fn _build_ext_sni(host: text) -> [u8]:
@@ -171,22 +178,22 @@ fn _build_ext_sni(host: text) -> [u8]:
     val host_bytes = _text_to_bytes(host)
     val host_len = _put_u16_be(host_bytes.len().to_u16())
     # server_name entry: type(1=host_name) + length(2) + name
-    var sn_entry: [u8] = []
-    sn_entry.push(0x00)  # name_type = host_name
-    sn_entry = _append_bytes(sn_entry, host_len)
-    sn_entry = _append_bytes(sn_entry, host_bytes)
+    var sn_entry: [u8] = _byte_buf(host_bytes.len() + 3)
+    sn_entry = _push_byte(sn_entry, 0x00)  # name_type = host_name
+    _append_into(sn_entry, host_len)
+    _append_into(sn_entry, host_bytes)
     # server_name_list length
     val list_len = _put_u16_be(sn_entry.len().to_u16())
-    var sn_list: [u8] = []
-    sn_list = _append_bytes(sn_list, list_len)
-    sn_list = _append_bytes(sn_list, sn_entry)
+    var sn_list: [u8] = _byte_buf(sn_entry.len() + 2)
+    _append_into(sn_list, list_len)
+    _append_into(sn_list, sn_entry)
     # extension type + length
     val ext_type = _put_u16_be(EXT_SNI)
     val ext_len = _put_u16_be(sn_list.len().to_u16())
-    var out: [u8] = []
-    out = _append_bytes(out, ext_type)
-    out = _append_bytes(out, ext_len)
-    out = _append_bytes(out, sn_list)
+    var out: [u8] = _byte_buf(sn_list.len() + 4)
+    _append_into(out, ext_type)
+    _append_into(out, ext_len)
+    _append_into(out, sn_list)
     out
 
 fn _build_ext_sig_algs() -> [u8]:
@@ -194,30 +201,30 @@ fn _build_ext_sig_algs() -> [u8]:
     # algorithms list: 1 algorithm = 2 bytes, prefixed with 2-byte list length
     val alg_bytes = _put_u16_be(SIG_ED25519)
     val list_len = _put_u16_be(alg_bytes.len().to_u16())
-    var alg_list: [u8] = []
-    alg_list = _append_bytes(alg_list, list_len)
-    alg_list = _append_bytes(alg_list, alg_bytes)
+    var alg_list: [u8] = _byte_buf(4)
+    _append_into(alg_list, list_len)
+    _append_into(alg_list, alg_bytes)
     val ext_type = _put_u16_be(EXT_SIG_ALGS)
     val ext_len = _put_u16_be(alg_list.len().to_u16())
-    var out: [u8] = []
-    out = _append_bytes(out, ext_type)
-    out = _append_bytes(out, ext_len)
-    out = _append_bytes(out, alg_list)
+    var out: [u8] = _byte_buf(8)
+    _append_into(out, ext_type)
+    _append_into(out, ext_len)
+    _append_into(out, alg_list)
     out
 
 fn _build_ext_supported_groups() -> [u8]:
     """Build supported_groups extension: X25519 only."""
     val group_bytes = _put_u16_be(GROUP_X25519)
     val list_len = _put_u16_be(group_bytes.len().to_u16())
-    var group_list: [u8] = []
-    group_list = _append_bytes(group_list, list_len)
-    group_list = _append_bytes(group_list, group_bytes)
+    var group_list: [u8] = _byte_buf(4)
+    _append_into(group_list, list_len)
+    _append_into(group_list, group_bytes)
     val ext_type = _put_u16_be(EXT_SUPPORTED_GROUPS)
     val ext_len = _put_u16_be(group_list.len().to_u16())
-    var out: [u8] = []
-    out = _append_bytes(out, ext_type)
-    out = _append_bytes(out, ext_len)
-    out = _append_bytes(out, group_list)
+    var out: [u8] = _byte_buf(8)
+    _append_into(out, ext_type)
+    _append_into(out, ext_len)
+    _append_into(out, group_list)
     out
 
 # ============================================================================
@@ -243,32 +250,32 @@ fn build_client_hello_bytes(random: [u8], x25519_pub: [u8], sni_host: text) -> [
     """
     _tls_hs_debug("build_client_hello_bytes random={random.len()} key={x25519_pub.len()} host={sni_host} host_len={sni_host.len()}")
     # Legacy version: TLS 1.2 for compatibility
-    var body: [u8] = []
-    body.push(0x03)  # legacy_version high
-    body.push(0x03)  # legacy_version low
+    var body: [u8] = _byte_buf(192)
+    body = _push_byte(body, 0x03)  # legacy_version high
+    body = _push_byte(body, 0x03)  # legacy_version low
 
     # random (32 bytes)
-    body = _append_bytes(body, random)
+    _append_into(body, random)
 
     # legacy_session_id: 32 zero bytes (length-prefixed)
-    body.push(0x20)  # session_id length = 32
+    body = _push_byte(body, 0x20)  # session_id length = 32
     var i: u64 = 0
     while i < 32:
-        body.push(0x00)
+        body = _push_byte(body, 0x00)
         i = i + 1
 
     # cipher_suites: only TLS_AES_128_GCM_SHA256 (0x1301)
-    body.push(0x00)  # cipher_suites length high = 0
-    body.push(0x02)  # cipher_suites length low  = 2
-    body.push(0x13)  # TLS_AES_128_GCM_SHA256 high
-    body.push(0x01)  # TLS_AES_128_GCM_SHA256 low
+    body = _push_byte(body, 0x00)  # cipher_suites length high = 0
+    body = _push_byte(body, 0x02)  # cipher_suites length low  = 2
+    body = _push_byte(body, 0x13)  # TLS_AES_128_GCM_SHA256 high
+    body = _push_byte(body, 0x01)  # TLS_AES_128_GCM_SHA256 low
 
     # legacy compression methods: one method = null (0x00)
-    body.push(0x01)  # length = 1
-    body.push(0x00)  # null compression
+    body = _push_byte(body, 0x01)  # length = 1
+    body = _push_byte(body, 0x00)  # null compression
 
     # Build extensions
-    var exts: [u8] = []
+    var exts: [u8] = _byte_buf(96)
     val ext_sv = _build_ext_supported_versions()
     _tls_hs_debug("ext_sv={ext_sv.len()}")
     val ext_ks = _build_ext_key_share(x25519_pub)
@@ -279,23 +286,23 @@ fn build_client_hello_bytes(random: [u8], x25519_pub: [u8], sni_host: text) -> [
     _tls_hs_debug("ext_sa={ext_sa.len()}")
     val ext_sg = _build_ext_supported_groups()
     _tls_hs_debug("ext_sg={ext_sg.len()}")
-    exts = _append_bytes(exts, ext_sv)
-    exts = _append_bytes(exts, ext_ks)
-    exts = _append_bytes(exts, ext_sni)
-    exts = _append_bytes(exts, ext_sa)
-    exts = _append_bytes(exts, ext_sg)
+    _append_into(exts, ext_sv)
+    _append_into(exts, ext_ks)
+    _append_into(exts, ext_sni)
+    _append_into(exts, ext_sa)
+    _append_into(exts, ext_sg)
 
     # extensions length prefix (2 bytes)
     val exts_len_bytes = _put_u16_be(exts.len().to_u16())
-    body = _append_bytes(body, exts_len_bytes)
-    body = _append_bytes(body, exts)
+    _append_into(body, exts_len_bytes)
+    _append_into(body, exts)
 
     # Handshake header: type(1) + length(3)
     val body_len = _put_u24_be(body.len().to_u64())
-    var out: [u8] = []
-    out.push(HS_CLIENT_HELLO)
-    out = _append_bytes(out, body_len)
-    out = _append_bytes(out, body)
+    var out: [u8] = _byte_buf(body.len() + 4)
+    out = _push_byte(out, HS_CLIENT_HELLO)
+    _append_into(out, body_len)
+    _append_into(out, body)
     out
 
 # ============================================================================
@@ -312,14 +319,14 @@ fn parse_handshake_header(data: [u8]) -> ParsedHandshake:
     """
     if data.len() < 4:
         return ParsedHandshake(msg_type: 0u8, body: [])
-    val msg_type = data[0]
+    val msg_type = _u8_at(data, 0)
     val raw_body_len = _u24_be(data, 1)
     val available_body_len = data.len() - 4
     val body_len = if raw_body_len < available_body_len { raw_body_len } else { available_body_len }
-    var body: [u8] = []
+    var body: [u8] = _byte_buf(body_len)
     var i: u64 = 0
     while i < body_len:
-        body.push(data[4 + i])
+        body = _push_byte(body, _u8_at(data, 4 + i).to_u64().to_i64())
         i = i + 1
     ParsedHandshake(msg_type: msg_type, body: body)
 
@@ -338,55 +345,22 @@ fn parse_server_hello(data: [u8]) -> ServerHello13:
 
     Returns: ServerHello13 with random, cipher_suite, and x25519_pub.
     """
-    # Skip legacy_version (2 bytes)
-    var offset: u64 = 2
+    _tls_hs_debug("parse_server_hello len={data.len()}")
+    if data.len() < 38:
+        return ServerHello13(random: _byte_buf(0), cipher_suite: 0u16, x25519_pub: _byte_buf(0))
 
-    # Copy random (32 bytes)
-    var random: [u8] = []
+    var random: [u8] = _byte_buf(32)
     var i: u64 = 0
     while i < 32:
-        random.push(data[offset + i])
+        _push_byte(random, _u8_at(data, 2 + i).to_u64().to_i64())
         i = i + 1
-    offset = offset + 32
 
-    # Skip legacy_session_id
-    val session_id_len = data[offset].to_u64()
-    offset = offset + 1 + session_id_len
-
-    # Read cipher_suite (2 bytes)
-    val cipher_suite = _u16_be(data, offset)
-    offset = offset + 2
-
-    # Skip compression method (1 byte)
-    offset = offset + 1
-
-    # Extensions length (2 bytes)
-    val exts_len = _u16_be(data, offset).to_u64()
-    offset = offset + 2
-
-    # Walk extensions to find key_share
-    val exts_end = offset + exts_len
-    var x25519_pub: [u8] = []
-
-    while offset < exts_end:
-        val ext_type = _u16_be(data, offset)
-        offset = offset + 2
-        val ext_len = _u16_be(data, offset).to_u64()
-        offset = offset + 2
-
-        if ext_type == EXT_KEY_SHARE:
-            # key_share ServerHello: group(2) + key_len(2) + key(...)
-            val group = _u16_be(data, offset)
-            val key_len = _u16_be(data, offset + 2).to_u64()
-            if group == GROUP_X25519:
-                var j: u64 = 0
-                while j < key_len:
-                    x25519_pub.push(data[offset + 4 + j])
-                    j = j + 1
-
-        offset = offset + ext_len
-
-    ServerHello13(random: random, cipher_suite: cipher_suite, x25519_pub: x25519_pub)
+    val session_id_len = _u8_at(data, 34).to_u64()
+    _tls_hs_debug("serverhello session_id_len={session_id_len} offset=34")
+    ServerHello13(
+        random: random,
+        cipher_suite: rt_bytes_u16_be_at(data, (35u64 + session_id_len).to_i64()).to_u16(),
+        x25519_pub: rt_tls13_serverhello_x25519_pub(data))
 
 # ============================================================================
 # Public: Parse EncryptedExtensions
@@ -422,7 +396,7 @@ fn parse_certificate_body(body: [u8]) -> [u8]:
     Returns: First certificate DER bytes.
     """
     # Skip request_context
-    val ctx_len = body[0].to_u64()
+    val ctx_len = _u8_at(body, 0).to_u64()
     var offset: u64 = 1 + ctx_len
 
     # cert_list length (3 bytes, but we only need the first entry)
@@ -433,10 +407,10 @@ fn parse_certificate_body(body: [u8]) -> [u8]:
     offset = offset + 3
 
     # Copy cert DER
-    var cert: [u8] = []
+    var cert: [u8] = _byte_buf(cert_len)
     var i: u64 = 0
     while i < cert_len:
-        cert.push(body[offset + i])
+        cert = _push_byte(cert, body[offset + i].to_u64().to_i64())
         i = i + 1
     cert
 
@@ -448,15 +422,15 @@ fn parse_certificate_chain_body(body: [u8]) -> [[u8]]:
     offset = offset + 3
     val cert_list_end = offset + cert_list_len
 
-    var chain: [[u8]] = []
+    var chain: [[u8]] = rt_array_new_with_cap(4)
     while offset + 3 <= cert_list_end:
         val cert_len = _u24_be(body, offset)
         offset = offset + 3
 
-        var cert: [u8] = []
+        var cert: [u8] = _byte_buf(cert_len)
         var i: u64 = 0
         while i < cert_len:
-            cert.push(body[offset + i])
+            cert = _push_byte(cert, body[offset + i].to_u64().to_i64())
             i = i + 1
         chain.push(cert)
         offset = offset + cert_len
@@ -474,13 +448,13 @@ fn parse_certificate_request(body: [u8]) -> CertificateRequest13:
     Unknown extensions are ignored.
     """
     val ctx_len = body[0].to_u64()
-    var request_context: [u8] = []
+    var request_context: [u8] = _byte_buf(ctx_len)
     var i: u64 = 0
     while i < ctx_len:
-        request_context.push(body[1 + i])
+        request_context = _push_byte(request_context, body[1 + i].to_u64().to_i64())
         i = i + 1
 
-    var sig_algs: [u16] = []
+    var sig_algs: [u16] = rt_array_new_with_cap(8)
     var offset: u64 = 1 + ctx_len
     val exts_len = _u16_be(body, offset).to_u64()
     offset = offset + 2
@@ -521,10 +495,10 @@ fn parse_certificate_verify(body: [u8]) -> CertVerifyFields:
     """
     val algorithm = _u16_be(body, 0)
     val sig_len = _u16_be(body, 2).to_u64()
-    var signature: [u8] = []
+    var signature: [u8] = _byte_buf(sig_len)
     var i: u64 = 0
     while i < sig_len:
-        signature.push(body[4 + i])
+        signature = _push_byte(signature, body[4 + i].to_u64().to_i64())
         i = i + 1
     CertVerifyFields(algorithm: algorithm, signature: signature)
 
@@ -542,10 +516,10 @@ fn parse_finished_body(body: [u8]) -> [u8]:
 
     Returns: verify_data bytes.
     """
-    var out: [u8] = []
+    var out: [u8] = _byte_buf(body.len())
     var i: u64 = 0
     while i < body.len():
-        out.push(body[i])
+        out = _push_byte(out, body[i].to_u64().to_i64())
         i = i + 1
     out
 
@@ -564,48 +538,48 @@ fn build_finished_bytes(verify_data: [u8]) -> [u8]:
     Returns: Complete handshake-layer Finished bytes.
     """
     val body_len = _put_u24_be(verify_data.len().to_u64())
-    var out: [u8] = []
-    out.push(HS_FINISHED)
-    out = _append_bytes(out, body_len)
-    out = _append_bytes(out, verify_data)
+    var out: [u8] = _byte_buf(verify_data.len() + 4)
+    out = _push_byte(out, HS_FINISHED)
+    _append_into(out, body_len)
+    _append_into(out, verify_data)
     out
 
 fn build_certificate_bytes(request_context: [u8], cert_chain: [[u8]]) -> [u8]:
     """Build a TLS 1.3 Certificate handshake message."""
-    var body: [u8] = []
-    body.push(request_context.len().to_u8())
-    body = _append_bytes(body, request_context)
+    var body: [u8] = _byte_buf(256)
+    body = _push_byte(body, request_context.len().to_i64())
+    _append_into(body, request_context)
 
-    var cert_list: [u8] = []
+    var cert_list: [u8] = _byte_buf(512)
     var cert_idx: u64 = 0
     while cert_idx < cert_chain.len():
         val cert_der = cert_chain[cert_idx]
-        cert_list = _append_bytes(cert_list, _put_u24_be(cert_der.len().to_u64()))
-        cert_list = _append_bytes(cert_list, cert_der)
-        cert_list.push(0x00)
-        cert_list.push(0x00)
+        _append_into(cert_list, _put_u24_be(cert_der.len().to_u64()))
+        _append_into(cert_list, cert_der)
+        cert_list = _push_byte(cert_list, 0x00)
+        cert_list = _push_byte(cert_list, 0x00)
         cert_idx = cert_idx + 1
 
-    body = _append_bytes(body, _put_u24_be(cert_list.len().to_u64()))
-    body = _append_bytes(body, cert_list)
+    _append_into(body, _put_u24_be(cert_list.len().to_u64()))
+    _append_into(body, cert_list)
 
     val body_len = _put_u24_be(body.len().to_u64())
-    var out: [u8] = []
-    out.push(HS_CERTIFICATE)
-    out = _append_bytes(out, body_len)
-    out = _append_bytes(out, body)
+    var out: [u8] = _byte_buf(body.len() + 4)
+    out = _push_byte(out, HS_CERTIFICATE)
+    _append_into(out, body_len)
+    _append_into(out, body)
     out
 
 fn build_certificate_verify_bytes(algorithm: u16, signature: [u8]) -> [u8]:
     """Build a TLS 1.3 CertificateVerify handshake message."""
-    var body: [u8] = []
-    body = _append_bytes(body, _put_u16_be(algorithm))
-    body = _append_bytes(body, _put_u16_be(signature.len().to_u16()))
-    body = _append_bytes(body, signature)
+    var body: [u8] = _byte_buf(signature.len() + 4)
+    _append_into(body, _put_u16_be(algorithm))
+    _append_into(body, _put_u16_be(signature.len().to_u16()))
+    _append_into(body, signature)
 
     val body_len = _put_u24_be(body.len().to_u64())
-    var out: [u8] = []
-    out.push(HS_CERTIFICATE_VERIFY)
-    out = _append_bytes(out, body_len)
-    out = _append_bytes(out, body)
+    var out: [u8] = _byte_buf(body.len() + 4)
+    out = _push_byte(out, HS_CERTIFICATE_VERIFY)
+    _append_into(out, body_len)
+    _append_into(out, body)
     out

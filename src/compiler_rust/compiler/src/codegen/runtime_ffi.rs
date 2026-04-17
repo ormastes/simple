@@ -222,7 +222,7 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     // Array operations
     // =========================================================================
     RuntimeFuncSpec::new("rt_array_new", &[I64], &[I64]),
-    RuntimeFuncSpec::new("rt_array_push", &[I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_array_push", &[I64, I64], &[I8]),
     RuntimeFuncSpec::new("rt_array_get", &[I64, I64], &[I64]),
     RuntimeFuncSpec::new("rt_array_set", &[I64, I64, I64], &[I8]),
     RuntimeFuncSpec::new("rt_array_pop", &[I64], &[I64]),

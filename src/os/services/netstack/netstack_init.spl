@@ -21,6 +21,8 @@ use os.kernel.types.device_mem_types.{DeviceGrant}
 extern fn serial_println(msg: text)
 extern fn rt_pci_device_count() -> i64
 extern fn rt_pci_get_field(index: i64, field: i64) -> i64
+extern fn rt_net_init() -> i64
+extern fn rt_net_stats() -> i64
 
 # ============================================================================
 # QEMU User-Mode Networking Defaults
@@ -113,11 +115,18 @@ fn net_boot_init() -> bool:
         return false
     serial_println("[net-init] Found VirtIO-net device at index {dev_idx}")
 
-    # On baremetal, the C VirtIO-net driver (syscall 90) handles everything.
-    # The C driver was already initialized during C boot phase.
-    # Just check if it's alive via syscall 93 (NetStats).
-    serial_println("[net-init] Using C VirtIO-net driver (initialized during C boot)")
-    val stats = syscall(93, 0, 0, 0, 0, 0)
+    # On baremetal, the C VirtIO-net driver (syscall 90) handles the NIC.
+    # Do not assume C boot already did this for every entrypoint.
+    serial_println("[net-init] Initializing C VirtIO-net driver via rt_net_init")
+    val init_rc = rt_net_init()
+    if init_rc < 0:
+        serial_println("[net-init] C network init failed rc={init_rc}")
+        return false
+
+    val stats = rt_net_stats()
+    if stats < 0:
+        serial_println("[net-init] C network stats probe failed rc={stats}")
+        return false
     serial_println("[net-init] C network driver active")
 
     g_net_initialized = true

@@ -53,6 +53,20 @@ fn _os_build_timeout_ms() -> i64:
     val raw = rt_env_get("SIMPLE_OS_BUILD_TIMEOUT_MS") ?? ""
     _parse_timeout_ms(raw, _OS_BUILD_DEFAULT_TIMEOUT_MS)
 
+fn _os_build_backend() -> text:
+    """Resolve the active native-build backend for OS wrapper lanes.
+
+    SIMPLE_OS_BUILD_BACKEND may be set to `llvm` or `cranelift`.
+    Any other value falls back to `cranelift` so existing callers keep the
+    current behavior.
+    """
+    val raw = rt_env_get("SIMPLE_OS_BUILD_BACKEND") ?? ""
+    if raw == "llvm":
+        return "llvm"
+    if raw == "cranelift":
+        return "cranelift"
+    "cranelift"
+
 fn _now_ms() -> i64:
     rt_time_now_unix_micros() / 1000
 
@@ -378,6 +392,9 @@ fn arch_display_name(arch: Architecture) -> text:
 # ===========================================================================
 
 fn build_os(target: OsTarget) -> bool:
+    build_os_with_backend(target, _os_build_backend())
+
+fn build_os_with_backend(target: OsTarget, backend: text) -> bool:
     """Builds the OS kernel for the given target.
 
     Runs the native-build command via rt_process_run_timeout. Returns true on success.
@@ -389,13 +406,14 @@ fn build_os(target: OsTarget) -> bool:
     val arch_label = arch_display_name(target.arch)
     val timeout_ms = _os_build_timeout_ms()
 
-    print "[build][{arch_label}] phase=plan entry={target.entry} target={target.target_triple}"
+    val backend_name = if backend == "llvm": "llvm" else: "cranelift"
+    print "[build][{arch_label}] phase=plan entry={target.entry} target={target.target_triple} backend={backend_name}"
     var args: [text] = ["native-build"]
     for source in _build_sources(target):
         args.push("--source")
         args.push(source)
     args.push("--backend")
-    args.push("cranelift")
+    args.push(backend_name)
     args.push("--entry-closure")
     args.push("--entry")
     args.push(target.entry)

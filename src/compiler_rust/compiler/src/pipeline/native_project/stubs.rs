@@ -337,6 +337,19 @@ pub(crate) fn generate_stub_object(
         "Generating {} stub functions for unresolved symbols...",
         needs_stub.len()
     );
+
+    let forbidden_enum_ctors: Vec<&str> = needs_stub
+        .iter()
+        .map(|s| s.as_str())
+        .filter(|s| matches!(*s, "Some" | "None" | "Ok" | "Err"))
+        .collect();
+    if !forbidden_enum_ctors.is_empty() {
+        return Err(format!(
+            "refusing to weak-stub enum short constructors: {}",
+            forbidden_enum_ctors.join(", ")
+        ));
+    }
+
     if std::env::var("SIMPLE_TRACE_STUBS").is_ok() {
         for s in &needs_stub {
             eprintln!("  STUB: {}", s);

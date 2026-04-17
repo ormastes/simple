@@ -37,6 +37,7 @@ impl Lowerer {
         requested_names.iter().any(|name| {
             let fn_pat = format!("fn {}(", name);
             let extern_pat = format!("extern fn {}(", name);
+            let type_pat = format!("type {}", name);
             let class_pat = format!("class {}", name);
             let struct_pat = format!("struct {}", name);
             let enum_pat = format!("enum {}", name);
@@ -45,6 +46,7 @@ impl Lowerer {
             let const_pat = format!("const {}", name);
             source.contains(&fn_pat)
                 || source.contains(&extern_pat)
+                || source.contains(&type_pat)
                 || source.contains(&class_pat)
                 || source.contains(&struct_pat)
                 || source.contains(&enum_pat)

@@ -5,9 +5,55 @@ use super::error::{LowerError, LowerResult};
 use super::lowerer::Lowerer;
 
 impl Lowerer {
+    fn instantiate_builtin_generic_enum(&mut self, family: &str, args: &[Type]) -> Option<LowerResult<TypeId>> {
+        match (family, args.len()) {
+            ("Option", 1) => {
+                let inner = match self.resolve_type(&args[0]) {
+                    Ok(inner) => inner,
+                    Err(err) => return Some(Err(err)),
+                };
+                Some(Ok(self.module.types.register(HirType::Enum {
+                    name: "Option".to_string(),
+                    variants: vec![
+                        ("Some".to_string(), Some(vec![inner])),
+                        ("None".to_string(), None),
+                    ],
+                    generic_params: vec!["T".to_string()],
+                    is_generic_template: false,
+                    type_bindings: std::collections::HashMap::from([("T".to_string(), inner)]),
+                })))
+            }
+            ("Result", 2) => {
+                let ok_ty = match self.resolve_type(&args[0]) {
+                    Ok(ok_ty) => ok_ty,
+                    Err(err) => return Some(Err(err)),
+                };
+                let err_ty = match self.resolve_type(&args[1]) {
+                    Ok(err_ty) => err_ty,
+                    Err(err) => return Some(Err(err)),
+                };
+                Some(Ok(self.module.types.register(HirType::Enum {
+                    name: "Result".to_string(),
+                    variants: vec![
+                        ("Ok".to_string(), Some(vec![ok_ty])),
+                        ("Err".to_string(), Some(vec![err_ty])),
+                    ],
+                    generic_params: vec!["T".to_string(), "E".to_string()],
+                    is_generic_template: false,
+                    type_bindings: std::collections::HashMap::from([
+                        ("T".to_string(), ok_ty),
+                        ("E".to_string(), err_ty),
+                    ]),
+                })))
+            }
+            _ => None,
+        }
+    }
+
     pub(super) fn resolve_type(&mut self, ty: &Type) -> LowerResult<TypeId> {
         match ty {
             Type::Simple(name) => {
+                let name = self.resolve_type_alias(name).unwrap_or(name);
                 // Handle "name?" pattern — some code paths produce Type::Simple("text?")
                 // instead of Type::Optional(Type::Simple("text")). Normalize here.
                 if let Some(base) = name.strip_suffix('?') {
@@ -47,14 +93,14 @@ impl Lowerer {
                             .map(|(fname, _ftype)| (fname.clone(), TypeId::ANY))
                             .collect();
                         let struct_ty = HirType::Struct {
-                            name: name.clone(),
+                            name: name.to_string(),
                             fields: hir_fields,
                             has_snapshot: false,
                             generic_params: vec![],
                             is_generic_template: false,
                             type_bindings: std::collections::HashMap::new(),
                         };
-                        let id = self.module.types.register_named(name.clone(), struct_ty);
+                        let id = self.module.types.register_named(name.to_string(), struct_ty);
                         return Ok(id);
                     }
                 }
@@ -64,7 +110,7 @@ impl Lowerer {
                 }
                 let available_types = self.module.types.all_type_names();
                 Err(LowerError::UnknownType {
-                    type_name: name.clone(),
+                    type_name: name.to_string(),
                     available_types,
                 })
             }
@@ -228,21 +274,32 @@ impl Lowerer {
                 }
             }
             Type::Generic { name, args } => {
+                let family_name = self.resolve_type_alias(name).unwrap_or(name).to_string();
+                if let Some(family_ty) = self.module.types.lookup(&family_name) {
+                    let family_name = match self.module.types.get(family_ty) {
+                        Some(HirType::Enum { name, .. }) => Some(name.clone()),
+                        _ => None,
+                    };
+                    if let Some(family) = family_name {
+                        if let Some(instantiated) = self.instantiate_builtin_generic_enum(&family, args) {
+                            return instantiated;
+                        }
+                    }
+                }
                 // Handle common generic types used in stdlib
-                match name.as_str() {
+                match family_name.as_str() {
                     // Dict<K, V> - dictionary type, represented as Any at native level
                     "Dict" => Ok(TypeId::ANY),
-                    // Option<T> - optional type
-                    "Option" if args.len() == 1 => {
-                        let inner = self.resolve_type(&args[0])?;
-                        Ok(self.module.types.register(HirType::Pointer {
-                            kind: PointerKind::Shared,
-                            capability: ReferenceCapability::Shared,
-                            inner,
-                        }))
-                    }
-                    // Result<T, E> - result type, represented as Any at native level
-                    "Result" => Ok(TypeId::ANY),
+                    // Option<T> - preserve enum identity so builtin methods and
+                    // payload extraction stay on the Option family.
+                    "Option" if args.len() == 1 => self
+                        .instantiate_builtin_generic_enum("Option", args)
+                        .expect("Option arity checked above"),
+                    // Result<T, E> - preserve enum identity so `expr?` and
+                    // result helpers do not fall through to unrelated unwrap families.
+                    "Result" if args.len() == 2 => self
+                        .instantiate_builtin_generic_enum("Result", args)
+                        .expect("Result arity checked above"),
                     // List<T> - same as array
                     "List" if args.len() == 1 => {
                         let elem = self.resolve_type(&args[0])?;

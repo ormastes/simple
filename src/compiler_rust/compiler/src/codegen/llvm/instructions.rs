@@ -392,9 +392,15 @@ impl LlvmBackend {
                     UnaryOp::Neg => builder
                         .build_int_neg(val, "neg")
                         .map_err(|e| crate::error::factory::llvm_build_failed("build_int_neg", &e))?,
-                    UnaryOp::Not => builder
-                        .build_not(val, "not")
-                        .map_err(|e| crate::error::factory::llvm_build_failed("build_not", &e))?,
+                    UnaryOp::Not => {
+                        let zero = val.get_type().const_int(0, false);
+                        let cmp = builder
+                            .build_int_compare(IntPredicate::EQ, val, zero, "not_cmp")
+                            .map_err(|e| crate::error::factory::llvm_build_failed("build_int_compare", &e))?;
+                        builder
+                            .build_int_z_extend(cmp, self.runtime_int_type(), "not_i64")
+                            .map_err(|e| crate::error::factory::llvm_build_failed("zext", &e))?
+                    }
                     UnaryOp::BitNot => builder
                         .build_not(val, "bitnot")
                         .map_err(|e| crate::error::factory::llvm_build_failed("build_not", &e))?,

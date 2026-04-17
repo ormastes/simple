@@ -668,7 +668,20 @@ int main(int argc, char** argv) {
                                 .arg(&path)
                                 .arg(format!("--target={}", triple));
                             if triple.contains("x86_64") {
-                                c_cmd.arg("-mno-red-zone");
+                                let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+                                let ring_include = cwd.join("src/compiler_rust/vendor/ring/include");
+                                let ring_root = cwd.join("src/compiler_rust/vendor/ring");
+                                let ring_pregenerated = cwd.join("src/compiler_rust/vendor/ring/pregenerated");
+                                c_cmd
+                                    .arg("-mno-red-zone")
+                                    .arg("-DOPENSSL_NO_ASM")
+                                    .arg("-DRING_CORE_NOSTDLIBINC")
+                                    .arg("-I")
+                                    .arg(ring_include)
+                                    .arg("-I")
+                                    .arg(ring_root)
+                                    .arg("-I")
+                                    .arg(ring_pregenerated);
                             }
                             if !march.is_empty() {
                                 c_cmd.args([march, mabi, "-mcmodel=medany"]);

@@ -352,8 +352,98 @@ impl<'a> MirLowerer<'a> {
 
                 // Direct call or indirect call?
                 if let HirExprKind::Global(name) = &callee.kind {
+                    match (name.as_str(), arg_regs.as_slice()) {
+                        ("Some", [value]) => {
+                            return self.with_func(|func, current_block| {
+                                let dest = func.new_vreg();
+                                let block = func.block_mut(current_block).unwrap();
+                                block.instructions.push(MirInst::OptionSome {
+                                    dest,
+                                    value: *value,
+                                });
+                                dest
+                            });
+                        }
+                        ("Ok", [value]) => {
+                            return self.with_func(|func, current_block| {
+                                let dest = func.new_vreg();
+                                let block = func.block_mut(current_block).unwrap();
+                                block.instructions.push(MirInst::ResultOk {
+                                    dest,
+                                    value: *value,
+                                });
+                                dest
+                            });
+                        }
+                        ("Err", [value]) => {
+                            return self.with_func(|func, current_block| {
+                                let dest = func.new_vreg();
+                                let block = func.block_mut(current_block).unwrap();
+                                block.instructions.push(MirInst::ResultErr {
+                                    dest,
+                                    value: *value,
+                                });
+                                dest
+                            });
+                        }
+                        ("None", []) => {
+                            return self.with_func(|func, current_block| {
+                                let dest = func.new_vreg();
+                                let block = func.block_mut(current_block).unwrap();
+                                block.instructions.push(MirInst::OptionNone { dest });
+                                dest
+                            });
+                        }
+                        _ => {}
+                    }
+
                     // Check if this is an enum variant constructor (e.g., "Color::Blue" or "Color.Blue")
                     if let Some((enum_name, variant_name)) = name.split_once("::").or_else(|| name.split_once('.')) {
+                        match (enum_name, variant_name, arg_regs.as_slice()) {
+                            ("Option", "Some", [value]) => {
+                                return self.with_func(|func, current_block| {
+                                    let dest = func.new_vreg();
+                                    let block = func.block_mut(current_block).unwrap();
+                                    block.instructions.push(MirInst::OptionSome {
+                                        dest,
+                                        value: *value,
+                                    });
+                                    dest
+                                });
+                            }
+                            ("Option", "None", []) => {
+                                return self.with_func(|func, current_block| {
+                                    let dest = func.new_vreg();
+                                    let block = func.block_mut(current_block).unwrap();
+                                    block.instructions.push(MirInst::OptionNone { dest });
+                                    dest
+                                });
+                            }
+                            ("Result", "Ok", [value]) => {
+                                return self.with_func(|func, current_block| {
+                                    let dest = func.new_vreg();
+                                    let block = func.block_mut(current_block).unwrap();
+                                    block.instructions.push(MirInst::ResultOk {
+                                        dest,
+                                        value: *value,
+                                    });
+                                    dest
+                                });
+                            }
+                            ("Result", "Err", [value]) => {
+                                return self.with_func(|func, current_block| {
+                                    let dest = func.new_vreg();
+                                    let block = func.block_mut(current_block).unwrap();
+                                    block.instructions.push(MirInst::ResultErr {
+                                        dest,
+                                        value: *value,
+                                    });
+                                    dest
+                                });
+                            }
+                            _ => {}
+                        }
+
                         // Check if this is an enum type via the type registry or callee type
                         let is_enum = if let Some(registry) = self.type_registry {
                             if let Some(type_id) = registry.lookup(enum_name) {

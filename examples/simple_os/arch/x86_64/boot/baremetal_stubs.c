@@ -31,6 +31,7 @@
 
 typedef int64_t RuntimeValue;
 
+
 /* ===================================================================
  * 2. Serial I/O — COM1 at 0x3F8 via x86 outb / inb
  *
@@ -435,6 +436,7 @@ int memcmp(const void *a, const void *b, size_t n)
     return 0;
 }
 
+
 size_t strlen(const char *s)
 {
     size_t len = 0;
@@ -534,6 +536,11 @@ RuntimeValue rt_string_char_at(RuntimeValue str, RuntimeValue idx)
     int64_t i = (int64_t)idx;
     if (!s || i < 0 || (uint32_t)i >= s->len) return 0;
     return (RuntimeValue)(unsigned char)s->data[i];
+}
+
+RuntimeValue char_code_at(RuntimeValue str, RuntimeValue idx)
+{
+    return rt_string_char_at(str, idx);
 }
 
 RuntimeValue rt_string_concat(RuntimeValue a, RuntimeValue b)
@@ -2512,6 +2519,8 @@ static struct {
     uint8_t  mac[6];
     uint8_t  our_ip[4];     /* 10.0.2.15 */
     uint8_t  gateway_ip[4]; /* 10.0.2.2  */
+    uint8_t  gateway_mac[6];
+    int      gateway_mac_valid;
 
     /* RX queue (queue 0) */
     uint16_t rx_qsize;
@@ -2678,6 +2687,42 @@ static void _vnet_rx_fill(void)
 }
 
 /* -----------------------------------------------------------
+ * _vnet_reclaim_tx — drain TX used ring completions
+ *
+ * Legacy virtio-net still reports TX completion through the used
+ * ring. Reclaim those entries so the driver never wraps descriptors
+ * blindly back to zero while the device may still own them.
+ * ----------------------------------------------------------- */
+static int _vnet_reclaim_tx(void)
+{
+    if (!_vnet.initialized) return -19;
+
+    int reclaimed = 0;
+    __asm__ volatile("mfence" ::: "memory");
+    uint16_t used_idx = _vnet.tx_used->idx;
+
+    while (_vnet.tx_last_used != used_idx) {
+        uint16_t slot = _vnet.tx_last_used % _vnet.tx_qsize;
+        uint32_t desc_id = _vnet.tx_used->ring[slot].id;
+        uint32_t used_len = _vnet.tx_used->ring[slot].len;
+        _vnet.tx_last_used++;
+        reclaimed++;
+
+        serial_puts("[net-tx] complete desc=");
+        serial_put_dec(desc_id);
+        serial_puts(" len=");
+        serial_put_dec(used_len);
+        serial_puts(" used.idx=");
+        serial_put_dec(used_idx);
+        serial_puts(" last_used=");
+        serial_put_dec(_vnet.tx_last_used);
+        serial_puts("\r\n");
+    }
+
+    return reclaimed;
+}
+
+/* -----------------------------------------------------------
  * _vnet_send_frame — transmit one Ethernet frame
  *
  * Prepends a 10-byte virtio-net header (all zeros = no offload).
@@ -2691,12 +2736,15 @@ static int _vnet_send_frame(const void *frame, uint16_t frame_len)
     if (!_vnet.initialized) return -19; /* ENODEV */
     if (frame_len + VIRTIO_NET_HDR_SIZE > VIRTIO_NET_BUF_SIZE) return -90;
 
-    uint16_t di = _vnet.tx_next_desc;
-    if (di >= _vnet.tx_qsize) {
-        /* Wrap around — in a real driver we'd track free descs properly */
-        di = 0;
+    _vnet_reclaim_tx();
+
+    uint16_t pending = (uint16_t)(_vnet.tx_next_desc - _vnet.tx_last_used);
+    if (pending >= _vnet.tx_qsize) {
+        serial_puts("[net-tx] queue full\r\n");
+        return -11;
     }
-    _vnet.tx_next_desc = di + 1;
+    uint16_t di = (uint16_t)(_vnet.tx_next_desc % _vnet.tx_qsize);
+    _vnet.tx_next_desc++;
 
     uint8_t *buf = _vnet.tx_buffers + (size_t)di * VIRTIO_NET_BUF_SIZE;
 
@@ -2723,6 +2771,16 @@ static int _vnet_send_frame(const void *frame, uint16_t frame_len)
     _vnet_wr16(0x10, 1);
     _vnet.tx_count++;
 
+    serial_puts("[net-tx] submit desc=");
+    serial_put_dec(di);
+    serial_puts(" len=");
+    serial_put_dec(total_len);
+    serial_puts(" avail.idx=");
+    serial_put_dec(_vnet.tx_avail->idx);
+    serial_puts(" used.idx=");
+    serial_put_dec(_vnet.tx_used->idx);
+    serial_puts("\r\n");
+
     return 0;
 }
 
@@ -2734,6 +2792,19 @@ static void _vnet_handle_arp(const uint8_t *frame, uint16_t frame_len)
     if (frame_len < (uint16_t)(ETH_HLEN + sizeof(struct arp_pkt))) return;
 
     const struct arp_pkt *arp = (const struct arp_pkt *)(frame + ETH_HLEN);
+
+    /* Learn the gateway MAC from ARP replies. */
+    if (_net_ntohs(arp->hw_type) == ARP_HW_ETHER &&
+        _net_ntohs(arp->proto_type) == ETH_P_IP &&
+        _net_ntohs(arp->opcode) == ARP_OP_REPLY &&
+        __builtin_memcmp(arp->sender_ip, _vnet.gateway_ip, 4) == 0) {
+        __builtin_memcpy(_vnet.gateway_mac, arp->sender_mac, ETH_ALEN);
+        _vnet.gateway_mac_valid = 1;
+        serial_puts("[net] Learned gateway MAC ");
+        _net_print_mac(_vnet.gateway_mac);
+        serial_puts("\r\n");
+        return;
+    }
 
     /* Only handle Ethernet/IPv4 ARP requests */
     if (_net_ntohs(arp->hw_type) != ARP_HW_ETHER) return;
@@ -2902,6 +2973,7 @@ static int _virtio_net_poll(void)
     if (!_vnet.initialized) return -19;
 
     int processed = 0;
+    _vnet_reclaim_tx();
 
     /* Periodic diagnostic: dump RX queue state every 10000 calls */
     static int _poll_count = 0;
@@ -2995,8 +3067,11 @@ static void _vnet_send_gratuitous_arp(void)
     __builtin_memset(arp->target_mac, 0x00, ETH_ALEN);
     __builtin_memcpy(arp->target_ip, _vnet.our_ip, 4);
 
-    _vnet_send_frame(frame, sizeof(frame));
+    int arp_rc = _vnet_send_frame(frame, sizeof(frame));
     serial_puts("[net] Gratuitous ARP sent\r\n");
+    serial_puts("[net] Gratuitous ARP rc=");
+    serial_put_dec(arp_rc);
+    serial_puts("\r\n");
 }
 
 /* -----------------------------------------------------------
@@ -3022,9 +3097,11 @@ static void _vnet_send_arp_request(const uint8_t *target_ip)
     __builtin_memset(arp->target_mac, 0x00, ETH_ALEN);
     __builtin_memcpy(arp->target_ip, target_ip, 4);
 
-    _vnet_send_frame(frame, sizeof(frame));
+    int arp_rc = _vnet_send_frame(frame, sizeof(frame));
     serial_puts("[net] ARP request sent for ");
     _net_print_ip(target_ip);
+    serial_puts(" rc=");
+    serial_put_dec(arp_rc);
     serial_puts("\r\n");
 }
 
@@ -3295,6 +3372,7 @@ struct tcp_hdr {
 enum tcp_state {
     TCP_CLOSED = 0,
     TCP_LISTEN,
+    TCP_SYN_SENT,
     TCP_SYN_RECEIVED,
     TCP_ESTABLISHED,
     TCP_FIN_WAIT_1,
@@ -3340,6 +3418,7 @@ struct tcp_socket {
 
 static struct tcp_socket _sockets[MAX_SOCKETS];
 static uint32_t _tcp_isn = 0x10000;  /* initial sequence number counter */
+static uint16_t _tcp_ephemeral_port = 49152;
 
 /* TCP pseudo-header checksum */
 static uint16_t _tcp_checksum(const uint8_t *src_ip, const uint8_t *dst_ip,
@@ -3414,7 +3493,23 @@ static void _tcp_send_segment(int sid, uint8_t flags, const void *data, uint16_t
     tcp->checksum = _tcp_checksum(_vnet.our_ip, s->remote_ip, tcp, tcp_len);
 
     /* Send */
-    _vnet_send_frame(pkt, ETH_HLEN + ip_len);
+    serial_puts("[tcp-tx] sid=");
+    serial_put_dec(sid);
+    serial_puts(" flags=0x");
+    serial_put_hex(flags);
+    serial_puts(" src=");
+    serial_put_dec(s->local_port);
+    serial_puts(" dst=");
+    serial_put_dec(s->remote_port);
+    serial_puts(" ip=");
+    _net_print_ip(s->remote_ip);
+    serial_puts(" mac=");
+    _net_print_mac(s->remote_mac);
+    serial_puts("\r\n");
+    int tx_rc = _vnet_send_frame(pkt, ETH_HLEN + ip_len);
+    serial_puts("[tcp-tx] frame rc=");
+    serial_put_dec(tx_rc);
+    serial_puts("\r\n");
 
     /* Advance sequence number */
     s->snd_nxt += data_len;
@@ -3447,7 +3542,7 @@ static void _tcp_handle_segment(const uint8_t *frame, uint16_t frame_len)
     /* First: look for established connection */
     for (int i = 0; i < MAX_SOCKETS; i++) {
         if (!_sockets[i].in_use) continue;
-        if (_sockets[i].state >= TCP_SYN_RECEIVED &&
+        if (_sockets[i].state >= TCP_SYN_SENT &&
             _sockets[i].local_port == dst_port &&
             _sockets[i].remote_port == src_port) {
             sid = i;
@@ -3510,8 +3605,32 @@ static void _tcp_handle_segment(const uint8_t *frame, uint16_t frame_len)
 
     if (sid < 0) return;
     struct tcp_socket *s = &_sockets[sid];
+    serial_puts("[tcp] rx sid=");
+    serial_put_dec(sid);
+    serial_puts(" state=");
+    serial_put_dec(s->state);
+    serial_puts(" flags=0x");
+    serial_put_hex(flags);
+    serial_puts(" src_port=");
+    serial_put_dec(src_port);
+    serial_puts(" dst_port=");
+    serial_put_dec(dst_port);
+    serial_puts("\r\n");
 
     switch (s->state) {
+    case TCP_SYN_SENT:
+        if ((flags & TCP_SYN) && (flags & TCP_ACK)) {
+            __builtin_memcpy(s->remote_mac, eth->src, ETH_ALEN);
+            s->rcv_nxt = seg_seq + 1;
+            s->snd_una = seg_ack;
+            s->state = TCP_ESTABLISHED;
+            _tcp_send_segment(sid, TCP_ACK, NULL, 0);
+            serial_puts("[tcp] Client connection established on port ");
+            serial_put_dec(s->local_port);
+            serial_puts("\r\n");
+        }
+        break;
+
     case TCP_SYN_RECEIVED:
         if (flags & TCP_ACK) {
             s->snd_una = seg_ack;
@@ -5335,6 +5454,12 @@ static uint8_t *_ed_rv_to_bytes(int64_t rv, uint32_t *out_len)
     return buf;
 }
 
+static inline uint8_t _rv_byte(RuntimeValue v)
+{
+    int64_t byte_val = IS_INT(v) ? DECODE_INT(v) : (int64_t)v;
+    return (uint8_t)(byte_val & 0xFF);
+}
+
 static int _ed_bytes_to_rv(const uint8_t *src, uint32_t src_len, int64_t rv)
 {
     if (!IS_HEAP(rv)) return -1;
@@ -5511,6 +5636,137 @@ RuntimeValue rt_string_to_byte_array(RuntimeValue str)
     return ENCODE_PTR(a);
 }
 
+static inline void _tls_put_u16(uint8_t *buf, uint32_t *off, uint16_t v)
+{
+    buf[(*off)++] = (uint8_t)((v >> 8) & 0xFF);
+    buf[(*off)++] = (uint8_t)(v & 0xFF);
+}
+
+static inline void _tls_put_u24(uint8_t *buf, uint32_t *off, uint32_t v)
+{
+    buf[(*off)++] = (uint8_t)((v >> 16) & 0xFF);
+    buf[(*off)++] = (uint8_t)((v >> 8) & 0xFF);
+    buf[(*off)++] = (uint8_t)(v & 0xFF);
+}
+
+RuntimeValue rt_tls13_build_client_hello(RuntimeValue host_rv)
+{
+    const uint8_t ch_random[32] = {
+        0xa0, 0xa1, 0xa2, 0xa3, 0xa4, 0xa5, 0xa6, 0xa7,
+        0xa8, 0xa9, 0xaa, 0xab, 0xac, 0xad, 0xae, 0xaf,
+        0xb0, 0xb1, 0xb2, 0xb3, 0xb4, 0xb5, 0xb6, 0xb7,
+        0xb8, 0xb9, 0xba, 0xbb, 0xbc, 0xbd, 0xbe, 0xbf
+    };
+    const uint8_t pub_key[32] = {
+        0x4d, 0x27, 0xbc, 0xee, 0x31, 0x35, 0xc4, 0x94,
+        0x4b, 0x28, 0xd2, 0x7d, 0xd8, 0x09, 0xb0, 0x7b,
+        0xe1, 0x0c, 0x35, 0x16, 0x0d, 0x20, 0x13, 0x1c,
+        0xaa, 0x7e, 0x85, 0x57, 0x54, 0x98, 0xd0, 0x7c
+    };
+    const char *host = "localhost";
+    uint32_t host_len = 9;
+    if (IS_HEAP(host_rv)) {
+        RuntimeString *s = (RuntimeString *)DECODE_PTR(host_rv);
+        if (s && s->hdr.type == HEAP_STRING) {
+            host = s->data;
+            host_len = s->len;
+        }
+    }
+
+    uint8_t body[256];
+    uint32_t boff = 0;
+    body[boff++] = 0x03;
+    body[boff++] = 0x03;
+    for (uint32_t i = 0; i < 32; i++) body[boff++] = ch_random[i];
+    body[boff++] = 0x20;
+    for (uint32_t i = 0; i < 32; i++) body[boff++] = 0x00;
+    body[boff++] = 0x00;
+    body[boff++] = 0x02;
+    body[boff++] = 0x13;
+    body[boff++] = 0x01;
+    body[boff++] = 0x01;
+    body[boff++] = 0x00;
+
+    uint8_t exts[160];
+    uint32_t eoff = 0;
+
+    /* supported_versions */
+    _tls_put_u16(exts, &eoff, 43);
+    _tls_put_u16(exts, &eoff, 3);
+    exts[eoff++] = 2;
+    exts[eoff++] = 3;
+    exts[eoff++] = 4;
+
+    /* key_share */
+    _tls_put_u16(exts, &eoff, 51);
+    _tls_put_u16(exts, &eoff, 38);
+    _tls_put_u16(exts, &eoff, 36);
+    _tls_put_u16(exts, &eoff, 29);
+    _tls_put_u16(exts, &eoff, 32);
+    for (uint32_t i = 0; i < 32; i++) exts[eoff++] = pub_key[i];
+
+    /* server_name */
+    _tls_put_u16(exts, &eoff, 0);
+    _tls_put_u16(exts, &eoff, (uint16_t)(host_len + 5));
+    _tls_put_u16(exts, &eoff, (uint16_t)(host_len + 3));
+    exts[eoff++] = 0;
+    _tls_put_u16(exts, &eoff, (uint16_t)host_len);
+    for (uint32_t i = 0; i < host_len; i++) exts[eoff++] = (uint8_t)host[i];
+
+    /* signature_algorithms */
+    _tls_put_u16(exts, &eoff, 13);
+    _tls_put_u16(exts, &eoff, 4);
+    _tls_put_u16(exts, &eoff, 2);
+    _tls_put_u16(exts, &eoff, 0x0807);
+
+    /* supported_groups */
+    _tls_put_u16(exts, &eoff, 10);
+    _tls_put_u16(exts, &eoff, 4);
+    _tls_put_u16(exts, &eoff, 2);
+    _tls_put_u16(exts, &eoff, 29);
+
+    _tls_put_u16(body, &boff, (uint16_t)eoff);
+    for (uint32_t i = 0; i < eoff; i++) body[boff++] = exts[i];
+
+    uint8_t hs[260];
+    uint32_t hoff = 0;
+    hs[hoff++] = 1;
+    _tls_put_u24(hs, &hoff, boff);
+    for (uint32_t i = 0; i < boff; i++) hs[hoff++] = body[i];
+
+    RuntimeArray *a = (RuntimeArray *)malloc(sizeof(RuntimeArray) + (size_t)hoff * sizeof(RuntimeValue));
+    if (!a) return NIL_VALUE;
+    a->hdr.type = HEAP_ARRAY;
+    a->hdr.size = (uint32_t)(sizeof(RuntimeArray) + (size_t)hoff * sizeof(RuntimeValue));
+    a->len = hoff;
+    a->cap = hoff;
+    for (uint32_t i = 0; i < hoff; i++) a->items[i] = ENCODE_INT(hs[i]);
+    return ENCODE_PTR(a);
+}
+
+RuntimeValue rt_tls13_build_client_hello_record(RuntimeValue host_rv)
+{
+    RuntimeValue hs_rv = rt_tls13_build_client_hello(host_rv);
+    if (!IS_HEAP(hs_rv)) return hs_rv;
+    RuntimeArray *hs = (RuntimeArray *)DECODE_PTR(hs_rv);
+    if (!hs || hs->hdr.type != HEAP_ARRAY) return NIL_VALUE;
+
+    uint32_t rec_len = hs->len + 5;
+    RuntimeArray *rec = (RuntimeArray *)malloc(sizeof(RuntimeArray) + (size_t)rec_len * sizeof(RuntimeValue));
+    if (!rec) return NIL_VALUE;
+    rec->hdr.type = HEAP_ARRAY;
+    rec->hdr.size = (uint32_t)(sizeof(RuntimeArray) + (size_t)rec_len * sizeof(RuntimeValue));
+    rec->len = rec_len;
+    rec->cap = rec_len;
+    rec->items[0] = ENCODE_INT(0x16);
+    rec->items[1] = ENCODE_INT(0x03);
+    rec->items[2] = ENCODE_INT(0x01);
+    rec->items[3] = ENCODE_INT((hs->len >> 8) & 0xFF);
+    rec->items[4] = ENCODE_INT(hs->len & 0xFF);
+    for (uint32_t i = 0; i < hs->len; i++) rec->items[5 + i] = hs->items[i];
+    return ENCODE_PTR(rec);
+}
+
 /* C-side tuple test — bypasses Simple codegen to verify rt_tuple_* works */
 int64_t rt_test_tuple(void)
 {
@@ -5671,6 +5927,75 @@ int64_t rt_ipc_recv(uint64_t port, uint64_t buf_addr, uint64_t max_len)
     return _ipc_recv_handler(port, buf_addr, max_len);
 }
 
+/* rt_ipc_send_bytes: send a Simple [u8] payload over IPC by packing tagged
+ * RuntimeArray elements into a contiguous raw byte buffer first. */
+int64_t rt_ipc_send_bytes(uint64_t port, uint64_t method, RuntimeValue data_rv)
+{
+    if (!IS_HEAP(data_rv)) return -22;
+    RuntimeArray *arr = (RuntimeArray *)(uintptr_t)DECODE_PTR(data_rv);
+    if (!arr) return -22;
+    uint32_t payload_len = arr->len;
+    uint32_t len = payload_len + 4;
+    uint8_t *buf = NULL;
+    if (len > 0) {
+        buf = (uint8_t *)malloc(len);
+        if (!buf) return -12;
+        buf[0] = (uint8_t)(method & 0xFF);
+        buf[1] = (uint8_t)((method >> 8) & 0xFF);
+        buf[2] = (uint8_t)((method >> 16) & 0xFF);
+        buf[3] = (uint8_t)((method >> 24) & 0xFF);
+        for (uint32_t i = 0; i < payload_len; i++) {
+            buf[i + 4] = _rv_byte(arr->items[i]);
+        }
+    }
+    int64_t rc = _ipc_send_handler(port, method, 0, (uint64_t)(uintptr_t)buf, len);
+    if (buf) free(buf);
+    return rc;
+}
+
+/* rt_ipc_recv_bytes: receive a raw IPC reply and materialize it as a Simple
+ * [u8] RuntimeArray. Returns empty array on timeout/error. */
+RuntimeValue rt_ipc_recv_bytes(uint64_t port, int64_t max_len)
+{
+    if (max_len <= 0) {
+        RuntimeArray *a = (RuntimeArray *)malloc(sizeof(RuntimeArray));
+        if (!a) return NIL_VALUE;
+        a->hdr.type = HEAP_ARRAY;
+        a->hdr.size = sizeof(RuntimeArray);
+        a->len = 0;
+        a->cap = 0;
+        return ENCODE_PTR(a);
+    }
+    uint8_t *buf = (uint8_t *)malloc((size_t)max_len);
+    if (!buf) return NIL_VALUE;
+    int64_t rc = _ipc_recv_handler(port, (uint64_t)(uintptr_t)buf, (uint64_t)max_len);
+    if (rc < 0) {
+        free(buf);
+        RuntimeArray *a = (RuntimeArray *)malloc(sizeof(RuntimeArray));
+        if (!a) return NIL_VALUE;
+        a->hdr.type = HEAP_ARRAY;
+        a->hdr.size = sizeof(RuntimeArray);
+        a->len = 0;
+        a->cap = 0;
+        return ENCODE_PTR(a);
+    }
+    uint32_t len = (uint32_t)rc;
+    RuntimeArray *a = (RuntimeArray *)malloc(sizeof(RuntimeArray) + len * sizeof(RuntimeValue));
+    if (!a) {
+        free(buf);
+        return NIL_VALUE;
+    }
+    a->hdr.type = HEAP_ARRAY;
+    a->hdr.size = sizeof(RuntimeArray) + len * sizeof(RuntimeValue);
+    a->len = len;
+    a->cap = len;
+    for (uint32_t i = 0; i < len; i++) {
+        a->items[i] = ENCODE_INT(buf[i]);
+    }
+    free(buf);
+    return ENCODE_PTR(a);
+}
+
 /* ===================================================================
  * Direct socket API — bypasses IPC payload encoding entirely.
  *
@@ -5688,7 +6013,7 @@ int64_t rt_net_socket(int64_t proto)
     for (int i = 0; i < MAX_SOCKETS; i++) {
         if (!_sockets[i].in_use) { sid = i; break; }
     }
-    if (sid < 0) return -24; /* EMFILE */
+    if (sid < 0) return ENCODE_INT(-24); /* EMFILE */
     __builtin_memset(&_sockets[sid], 0, sizeof(_sockets[sid]));
     _sockets[sid].in_use = 1;
     _sockets[sid].state = TCP_CLOSED;
@@ -5696,26 +6021,37 @@ int64_t rt_net_socket(int64_t proto)
     serial_puts("[tcp] Created socket ");
     serial_put_dec(sid);
     serial_puts("\r\n");
-    return (int64_t)sid;
+    return ENCODE_INT((int64_t)sid);
+}
+
+int64_t rt_net_init(void)
+{
+    return ENCODE_INT((int64_t)_virtio_net_init());
+}
+
+int64_t rt_net_stats(void)
+{
+    _virtio_net_get_stats();
+    return ENCODE_INT(_vnet.initialized ? 0 : -19);
 }
 
 int64_t rt_net_bind(int64_t sock_fd, int64_t port_num)
 {
     int fd = (int)sock_fd;
-    if (fd < 0 || fd >= MAX_SOCKETS || !_sockets[fd].in_use) return -9;
+    if (fd < 0 || fd >= MAX_SOCKETS || !_sockets[fd].in_use) return ENCODE_INT(-9);
     _sockets[fd].local_port = (uint16_t)port_num;
     serial_puts("[tcp] Bound socket ");
     serial_put_dec(fd);
     serial_puts(" to port ");
     serial_put_dec((int)port_num);
     serial_puts("\r\n");
-    return 0;
+    return ENCODE_INT(0);
 }
 
 int64_t rt_net_listen(int64_t sock_fd, int64_t backlog)
 {
     int fd = (int)sock_fd;
-    if (fd < 0 || fd >= MAX_SOCKETS || !_sockets[fd].in_use) return -9;
+    if (fd < 0 || fd >= MAX_SOCKETS || !_sockets[fd].in_use) return ENCODE_INT(-9);
     _sockets[fd].state = TCP_LISTEN;
     _sockets[fd].backlog = (int)backlog;
     serial_puts("[tcp] Socket ");
@@ -5723,7 +6059,72 @@ int64_t rt_net_listen(int64_t sock_fd, int64_t backlog)
     serial_puts(" listening on port ");
     serial_put_dec(_sockets[fd].local_port);
     serial_puts("\r\n");
-    return 0;
+    return ENCODE_INT(0);
+}
+
+int64_t rt_net_connect(int64_t sock_fd, int64_t ip_addr_raw, int64_t port_num)
+{
+    int fd = (int)sock_fd;
+    (void)ip_addr_raw;
+    static const uint8_t qemu_gateway_ip[4] = {10, 0, 2, 2};
+    static const uint8_t qemu_gateway_mac[6] = {0x52, 0x55, 0x0a, 0x00, 0x02, 0x02};
+    serial_puts("[tcp-connect] fd=");
+    serial_put_dec(fd);
+    serial_puts(" port=");
+    serial_put_dec((int)port_num);
+    serial_puts("\r\n");
+    if (fd < 0 || fd >= MAX_SOCKETS || !_sockets[fd].in_use) return ENCODE_INT(-9);
+
+    struct tcp_socket *s = &_sockets[fd];
+    if (s->state != TCP_CLOSED) return ENCODE_INT(-106); /* EISCONN / invalid state */
+
+    if (s->local_port == 0) {
+        s->local_port = _tcp_ephemeral_port++;
+        if (_tcp_ephemeral_port < 49152) _tcp_ephemeral_port = 49152;
+    }
+
+    __builtin_memcpy(s->remote_ip, qemu_gateway_ip, 4);
+    s->remote_port = (uint16_t)port_num;
+    s->rcv_wnd = TCP_RXBUF_SIZE;
+
+    if (!_vnet.gateway_mac_valid) {
+        _vnet_send_arp_request(qemu_gateway_ip);
+        for (int i = 0; i < 20000 && !_vnet.gateway_mac_valid; i++) {
+            _virtio_net_poll();
+            for (volatile int d = 0; d < 1000; d++) {}
+        }
+    }
+    if (!_vnet.gateway_mac_valid) {
+        __builtin_memcpy(_vnet.gateway_mac, qemu_gateway_mac, ETH_ALEN);
+        _vnet.gateway_mac_valid = 1;
+        serial_puts("[tcp-connect] using slirp gateway MAC fallback\r\n");
+    }
+
+    __builtin_memcpy(s->remote_mac, _vnet.gateway_mac, ETH_ALEN);
+    s->snd_nxt = _tcp_isn++;
+    s->snd_una = s->snd_nxt;
+    s->rcv_nxt = 0;
+    s->state = TCP_SYN_SENT;
+
+    _tcp_send_segment(fd, TCP_SYN, NULL, 0);
+
+    for (int i = 0; i < 50000; i++) {
+        _virtio_net_poll();
+        if (s->state == TCP_ESTABLISHED) {
+            serial_puts("[tcp-connect] established\r\n");
+            return ENCODE_INT(0);
+        }
+        for (volatile int d = 0; d < 1000; d++) {}
+    }
+    serial_puts("[tcp-connect] handshake timeout state=");
+    serial_put_dec(s->state);
+    serial_puts("\r\n");
+    return ENCODE_INT(-110); /* ETIMEDOUT */
+}
+
+int64_t rt_net_connect_host_tls(int64_t sock_fd)
+{
+    return rt_net_connect(sock_fd, 0, 4433);
 }
 
 int64_t rt_net_accept(int64_t sock_fd)
@@ -5734,7 +6135,7 @@ int64_t rt_net_accept(int64_t sock_fd)
         serial_puts("[tcp-accept] EBADF fd=");
         serial_put_dec(fd);
         serial_puts("\r\n");
-        return -9;
+        return ENCODE_INT(-9);
     }
     struct tcp_socket *ls = &_sockets[fd];
     serial_puts("[tcp-accept] fd=");
@@ -5777,26 +6178,26 @@ int64_t rt_net_accept(int64_t sock_fd)
         serial_puts("[tcp-accept] EAGAIN (timeout=");
         serial_put_dec(timeout);
         serial_puts(")\r\n");
-        return -11; /* EAGAIN */
+        return ENCODE_INT(-11); /* EAGAIN */
     }
     int accepted_sid = ls->accept_queue[ls->aq_head];
     ls->aq_head = (ls->aq_head + 1) % TCP_ACCEPT_QUEUE;
     serial_puts("[tcp-accept] accepted socket ");
     serial_put_dec(accepted_sid);
     serial_puts("\r\n");
-    return (int64_t)accepted_sid;
+    return ENCODE_INT((int64_t)accepted_sid);
 }
 
 int64_t rt_net_close(int64_t sock_fd)
 {
     int fd = (int)sock_fd;
-    if (fd < 0 || fd >= MAX_SOCKETS || !_sockets[fd].in_use) return -9;
+    if (fd < 0 || fd >= MAX_SOCKETS || !_sockets[fd].in_use) return ENCODE_INT(-9);
     if (_sockets[fd].state == TCP_ESTABLISHED) {
         _tcp_send_segment(fd, TCP_FIN | TCP_ACK, NULL, 0);
     }
     _sockets[fd].in_use = 0;
     _sockets[fd].state = TCP_CLOSED;
-    return 0;
+    return ENCODE_INT(0);
 }
 
 /* rt_net_send_bytes: send byte array data on an established socket.
@@ -5812,23 +6213,30 @@ int64_t rt_net_send_bytes(int64_t sock_fd, RuntimeValue data_rv)
         serial_puts(" state=");
         serial_put_dec(_sockets[fd].state);
         serial_puts("\r\n");
-        return -9;
+        return ENCODE_INT(-9);
     }
     /* Extract byte array from RuntimeValue */
     if (!IS_HEAP(data_rv)) {
         serial_puts("[tcp-send] data not heap ptr\r\n");
-        return -22;
+        return ENCODE_INT(-22);
     }
     RuntimeArray *arr = (RuntimeArray *)(uintptr_t)DECODE_PTR(data_rv);
-    if (!arr || arr->len == 0) return 0;
+    if (!arr || arr->len == 0) return ENCODE_INT(0);
 
     /* Copy items to contiguous buffer (items are tagged RuntimeValues) */
     uint32_t data_len = (uint32_t)arr->len;
     uint8_t *buf = (uint8_t *)malloc(data_len);
-    if (!buf) return -12;
+    if (!buf) return ENCODE_INT(-12);
+    uint32_t preview = data_len < 8 ? data_len : 8;
     for (uint32_t i = 0; i < data_len; i++) {
-        buf[i] = (uint8_t)DECODE_INT(arr->items[i]);
+        buf[i] = _rv_byte(arr->items[i]);
     }
+    serial_puts("[tcp-send] first-bytes=");
+    for (uint32_t i = 0; i < preview; i++) {
+        if (i) serial_puts(" ");
+        serial_put_hex(buf[i]);
+    }
+    serial_puts("\r\n");
 
     /* Send in chunks */
     uint32_t sent = 0;
@@ -5843,7 +6251,7 @@ int64_t rt_net_send_bytes(int64_t sock_fd, RuntimeValue data_rv)
     serial_puts(" bytes on fd=");
     serial_put_dec(fd);
     serial_puts("\r\n");
-    return (int64_t)sent;
+    return ENCODE_INT((int64_t)sent);
 }
 
 /* rt_net_recv_bytes: receive data from a socket as a byte array RuntimeValue.
@@ -7750,8 +8158,8 @@ RuntimeValue rt_value_format_string(RuntimeValue val, RuntimeValue fmt_ptr_rv, R
 RuntimeValue rt_array_new(RuntimeValue cap_val)
 {
     int64_t cap = (int64_t)cap_val;  /* RAW — not DECODE_INT */
-    if (cap <= 0) cap = 64; /* default capacity */
-    if (cap < 64) cap = 64;
+    if (cap <= 0) cap = 256; /* default capacity */
+    if (cap < 256) cap = 256;
     if (cap > 0x100000) cap = 0x100000; /* safety limit */
     size_t alloc_size = sizeof(RuntimeArray) + (size_t)cap * sizeof(RuntimeValue);
     RuntimeArray *a = (RuntimeArray *)malloc(alloc_size);
@@ -7798,6 +8206,382 @@ RuntimeValue rt_array_push(RuntimeValue arr, RuntimeValue val)
     a->items[a->len] = val;
     a->len++;
     return ENCODE_PTR(a);
+}
+
+RuntimeValue rt_push_byte(RuntimeValue arr, int64_t byte_val)
+{
+    return rt_array_push(arr, ENCODE_INT(byte_val & 0xFF));
+}
+
+RuntimeValue rt_bytes_concat(RuntimeValue a_rv, RuntimeValue b_rv)
+{
+    if (!IS_HEAP(a_rv) || !IS_HEAP(b_rv)) return NIL_VALUE;
+    RuntimeArray *a = (RuntimeArray *)DECODE_PTR(a_rv);
+    RuntimeArray *b = (RuntimeArray *)DECODE_PTR(b_rv);
+    if (!a || !b || a->hdr.type != HEAP_ARRAY || b->hdr.type != HEAP_ARRAY) return NIL_VALUE;
+    uint32_t len = a->len + b->len;
+    RuntimeArray *out = (RuntimeArray *)malloc(sizeof(RuntimeArray) + (size_t)len * sizeof(RuntimeValue));
+    if (!out) return NIL_VALUE;
+    out->hdr.type = HEAP_ARRAY;
+    out->hdr.size = (uint32_t)(sizeof(RuntimeArray) + (size_t)len * sizeof(RuntimeValue));
+    out->len = len;
+    out->cap = len;
+    for (uint32_t i = 0; i < a->len; i++) out->items[i] = a->items[i];
+    for (uint32_t i = 0; i < b->len; i++) out->items[a->len + i] = b->items[i];
+    return ENCODE_PTR(out);
+}
+
+RuntimeValue rt_bytes_slice(RuntimeValue arr_rv, int64_t start, int64_t length)
+{
+    if (!IS_HEAP(arr_rv)) return NIL_VALUE;
+    RuntimeArray *arr = (RuntimeArray *)DECODE_PTR(arr_rv);
+    if (!arr || arr->hdr.type != HEAP_ARRAY) return NIL_VALUE;
+    if (start < 0) start = 0;
+    if (length < 0) length = 0;
+    uint32_t ustart = (uint32_t)start;
+    uint32_t ulen = (uint32_t)length;
+    if (ustart > arr->len) ustart = arr->len;
+    if (ulen > arr->len - ustart) ulen = arr->len - ustart;
+    RuntimeArray *out = (RuntimeArray *)malloc(sizeof(RuntimeArray) + (size_t)ulen * sizeof(RuntimeValue));
+    if (!out) return NIL_VALUE;
+    out->hdr.type = HEAP_ARRAY;
+    out->hdr.size = (uint32_t)(sizeof(RuntimeArray) + (size_t)ulen * sizeof(RuntimeValue));
+    out->len = ulen;
+    out->cap = ulen;
+    for (uint32_t i = 0; i < ulen; i++) out->items[i] = arr->items[ustart + i];
+    return ENCODE_PTR(out);
+}
+
+int64_t rt_bytes_u8_at(RuntimeValue arr_rv, int64_t idx)
+{
+    if (!IS_HEAP(arr_rv)) return 0;
+    RuntimeArray *arr = (RuntimeArray *)DECODE_PTR(arr_rv);
+    if (!arr || arr->hdr.type != HEAP_ARRAY) return 0;
+    if (idx < 0 || (uint32_t)idx >= arr->len) return 0;
+    return (int64_t)_rv_byte(arr->items[idx]);
+}
+
+int64_t rt_bytes_u16_be_at(RuntimeValue arr_rv, int64_t idx)
+{
+    if (!IS_HEAP(arr_rv)) return 0;
+    RuntimeArray *arr = (RuntimeArray *)DECODE_PTR(arr_rv);
+    if (!arr || arr->hdr.type != HEAP_ARRAY) return 0;
+    if (idx < 0 || (uint32_t)(idx + 1) >= arr->len) return 0;
+    uint8_t hi = _rv_byte(arr->items[(uint32_t)idx]);
+    uint8_t lo = _rv_byte(arr->items[(uint32_t)idx + 1]);
+    return (int64_t)(((uint16_t)hi << 8) | (uint16_t)lo);
+}
+
+int64_t rt_bytes_u24_be_at(RuntimeValue arr_rv, int64_t idx)
+{
+    if (!IS_HEAP(arr_rv)) return 0;
+    RuntimeArray *arr = (RuntimeArray *)DECODE_PTR(arr_rv);
+    if (!arr || arr->hdr.type != HEAP_ARRAY) return 0;
+    if (idx < 0 || (uint32_t)(idx + 2) >= arr->len) return 0;
+    uint8_t b0 = _rv_byte(arr->items[(uint32_t)idx]);
+    uint8_t b1 = _rv_byte(arr->items[(uint32_t)idx + 1]);
+    uint8_t b2 = _rv_byte(arr->items[(uint32_t)idx + 2]);
+    return (int64_t)(((uint32_t)b0 << 16) | ((uint32_t)b1 << 8) | (uint32_t)b2);
+}
+
+int64_t rt_tls13_serverhello_cipher_suite(RuntimeValue body_rv)
+{
+    if (!IS_HEAP(body_rv)) return 0;
+    RuntimeArray *body = (RuntimeArray *)DECODE_PTR(body_rv);
+    if (!body || body->hdr.type != HEAP_ARRAY) return 0;
+    if (body->len < 38) return 0;
+
+    uint32_t offset = 34; /* after legacy_version + random */
+    uint32_t session_id_len = _rv_byte(body->items[offset]);
+    if (offset + 1u + session_id_len + 2u > body->len) return 0;
+    offset = offset + 1u + session_id_len;
+
+    uint8_t hi = _rv_byte(body->items[offset]);
+    uint8_t lo = _rv_byte(body->items[offset + 1]);
+    return (int64_t)(((uint16_t)hi << 8) | (uint16_t)lo);
+}
+
+RuntimeValue rt_tls13_serverhello_x25519_pub(RuntimeValue body_rv)
+{
+    if (!IS_HEAP(body_rv)) return NIL_VALUE;
+    RuntimeArray *body = (RuntimeArray *)DECODE_PTR(body_rv);
+    if (!body || body->hdr.type != HEAP_ARRAY) return NIL_VALUE;
+    if (body->len < 38) return NIL_VALUE;
+
+    uint32_t offset = 34; /* after legacy_version + random */
+    uint32_t session_id_len = _rv_byte(body->items[offset]);
+    if (offset + 1u + session_id_len + 2u + 1u + 2u > body->len) return NIL_VALUE;
+    offset = offset + 1u + session_id_len;
+
+    /* skip cipher_suite + compression */
+    offset += 2u;
+    offset += 1u;
+
+    uint16_t exts_len = ((uint16_t)_rv_byte(body->items[offset]) << 8) |
+                        (uint16_t)_rv_byte(body->items[offset + 1]);
+    offset += 2u;
+    uint32_t exts_end = offset + exts_len;
+    if (exts_end > body->len) exts_end = body->len;
+
+    while (offset + 4u <= exts_end) {
+        uint16_t ext_type = ((uint16_t)_rv_byte(body->items[offset]) << 8) |
+                            (uint16_t)_rv_byte(body->items[offset + 1]);
+        uint16_t ext_len = ((uint16_t)_rv_byte(body->items[offset + 2]) << 8) |
+                           (uint16_t)_rv_byte(body->items[offset + 3]);
+        offset += 4u;
+        uint32_t ext_data_end = offset + ext_len;
+        if (ext_data_end > exts_end) ext_data_end = exts_end;
+
+        if (ext_type == 51 && offset + 4u <= ext_data_end) {
+            uint16_t group = ((uint16_t)_rv_byte(body->items[offset]) << 8) |
+                             (uint16_t)_rv_byte(body->items[offset + 1]);
+            uint16_t key_len = ((uint16_t)_rv_byte(body->items[offset + 2]) << 8) |
+                               (uint16_t)_rv_byte(body->items[offset + 3]);
+            uint32_t key_off = offset + 4u;
+            uint32_t key_end = key_off + key_len;
+            if (key_end > ext_data_end) key_end = ext_data_end;
+            if (group == 0x001d && key_end >= key_off) {
+                uint32_t out_len = key_end - key_off;
+                RuntimeArray *out = (RuntimeArray *)malloc(sizeof(RuntimeArray) + (size_t)out_len * sizeof(RuntimeValue));
+                if (!out) return NIL_VALUE;
+                out->hdr.type = HEAP_ARRAY;
+                out->hdr.size = (uint32_t)(sizeof(RuntimeArray) + (size_t)out_len * sizeof(RuntimeValue));
+                out->len = out_len;
+                out->cap = out_len;
+                for (uint32_t i = 0; i < out_len; i++) {
+                    out->items[i] = ENCODE_INT(_rv_byte(body->items[key_off + i]));
+                }
+                return ENCODE_PTR(out);
+            }
+        }
+
+        offset = ext_data_end;
+    }
+
+    RuntimeArray *empty = (RuntimeArray *)malloc(sizeof(RuntimeArray));
+    if (!empty) return NIL_VALUE;
+    empty->hdr.type = HEAP_ARRAY;
+    empty->hdr.size = (uint32_t)sizeof(RuntimeArray);
+    empty->len = 0;
+    empty->cap = 0;
+    return ENCODE_PTR(empty);
+}
+
+static inline uint32_t _tls_sha256_rotr(uint32_t x, int n) { return (x >> n) | (x << (32 - n)); }
+static inline uint32_t _tls_sha256_ch(uint32_t x, uint32_t y, uint32_t z) { return (x & y) ^ (~x & z); }
+static inline uint32_t _tls_sha256_maj(uint32_t x, uint32_t y, uint32_t z) { return (x & y) ^ (x & z) ^ (y & z); }
+static inline uint32_t _tls_sha256_S0(uint32_t x) { return _tls_sha256_rotr(x, 2) ^ _tls_sha256_rotr(x, 13) ^ _tls_sha256_rotr(x, 22); }
+static inline uint32_t _tls_sha256_S1(uint32_t x) { return _tls_sha256_rotr(x, 6) ^ _tls_sha256_rotr(x, 11) ^ _tls_sha256_rotr(x, 25); }
+static inline uint32_t _tls_sha256_s0(uint32_t x) { return _tls_sha256_rotr(x, 7) ^ _tls_sha256_rotr(x, 18) ^ (x >> 3); }
+static inline uint32_t _tls_sha256_s1(uint32_t x) { return _tls_sha256_rotr(x, 17) ^ _tls_sha256_rotr(x, 19) ^ (x >> 10); }
+
+static void _tls_sha256_process_block(const uint8_t *block, uint32_t h[8])
+{
+    uint32_t w[64];
+    for (int t = 0; t < 16; t++) {
+        w[t] = ((uint32_t)block[t * 4] << 24) |
+               ((uint32_t)block[t * 4 + 1] << 16) |
+               ((uint32_t)block[t * 4 + 2] << 8) |
+               (uint32_t)block[t * 4 + 3];
+    }
+    for (int t = 16; t < 64; t++)
+        w[t] = _tls_sha256_s1(w[t - 2]) + w[t - 7] + _tls_sha256_s0(w[t - 15]) + w[t - 16];
+
+    uint32_t a = h[0], b = h[1], c = h[2], d = h[3];
+    uint32_t e = h[4], f = h[5], g = h[6], hh = h[7];
+    for (int t = 0; t < 64; t++) {
+        uint32_t t1 = hh + _tls_sha256_S1(e) + _tls_sha256_ch(e, f, g) + _sha256_K[t] + w[t];
+        uint32_t t2 = _tls_sha256_S0(a) + _tls_sha256_maj(a, b, c);
+        hh = g; g = f; f = e; e = d + t1; d = c; c = b; b = a; a = t1 + t2;
+    }
+    h[0] += a; h[1] += b; h[2] += c; h[3] += d;
+    h[4] += e; h[5] += f; h[6] += g; h[7] += hh;
+}
+
+static void _tls_sha256_digest(const uint8_t *msg, uint32_t msg_len, uint8_t out[32])
+{
+    uint64_t bit_len = (uint64_t)msg_len * 8ULL;
+    uint32_t padded_len = msg_len + 1;
+    while ((padded_len % 64U) != 56U) padded_len++;
+    padded_len += 8U;
+
+    uint8_t *padded = (uint8_t *)malloc((size_t)padded_len);
+    if (!padded) {
+        for (int i = 0; i < 32; i++) out[i] = 0;
+        return;
+    }
+    memset(padded, 0, padded_len);
+    if (msg_len > 0) memcpy(padded, msg, msg_len);
+    padded[msg_len] = 0x80;
+    for (int i = 0; i < 8; i++)
+        padded[padded_len - 8 + i] = (uint8_t)(bit_len >> (56 - i * 8));
+
+    uint32_t h[8];
+    for (int i = 0; i < 8; i++) h[i] = _sha256_H[i];
+    for (uint32_t off = 0; off < padded_len; off += 64U)
+        _tls_sha256_process_block(padded + off, h);
+    free(padded);
+
+    for (int i = 0; i < 8; i++) {
+        out[i * 4] = (uint8_t)(h[i] >> 24);
+        out[i * 4 + 1] = (uint8_t)(h[i] >> 16);
+        out[i * 4 + 2] = (uint8_t)(h[i] >> 8);
+        out[i * 4 + 3] = (uint8_t)h[i];
+    }
+}
+
+static void _tls_hmac_sha256(const uint8_t *key, uint32_t key_len, const uint8_t *data, uint32_t data_len, uint8_t out[32])
+{
+    uint8_t k0[64];
+    uint8_t ipad[64];
+    uint8_t opad[64];
+    uint8_t inner_hash[32];
+    memset(k0, 0, sizeof(k0));
+    if (key_len > 64U) {
+        _tls_sha256_digest(key, key_len, k0);
+    } else if (key_len > 0) {
+        memcpy(k0, key, key_len);
+    }
+    for (int i = 0; i < 64; i++) {
+        ipad[i] = (uint8_t)(k0[i] ^ 0x36U);
+        opad[i] = (uint8_t)(k0[i] ^ 0x5cU);
+    }
+
+    uint8_t *inner = (uint8_t *)malloc((size_t)64U + data_len);
+    uint8_t *outer = (uint8_t *)malloc((size_t)64U + 32U);
+    if (!inner || !outer) {
+        if (inner) free(inner);
+        if (outer) free(outer);
+        memset(out, 0, 32);
+        return;
+    }
+    memcpy(inner, ipad, 64);
+    if (data_len > 0) memcpy(inner + 64, data, data_len);
+    _tls_sha256_digest(inner, 64U + data_len, inner_hash);
+
+    memcpy(outer, opad, 64);
+    memcpy(outer + 64, inner_hash, 32);
+    _tls_sha256_digest(outer, 96, out);
+    free(inner);
+    free(outer);
+}
+
+static uint8_t *_tls_copy_runtime_bytes(RuntimeValue rv, uint32_t *out_len)
+{
+    *out_len = 0;
+    if (!IS_HEAP(rv)) return NULL;
+    RuntimeArray *arr = (RuntimeArray *)DECODE_PTR(rv);
+    if (!arr || arr->hdr.type != HEAP_ARRAY) return NULL;
+    uint32_t len = arr->len;
+    uint8_t *buf = (uint8_t *)malloc(len > 0 ? len : 1);
+    if (!buf) return NULL;
+    for (uint32_t i = 0; i < len; i++) buf[i] = _rv_byte(arr->items[i]);
+    *out_len = len;
+    return buf;
+}
+
+static RuntimeValue _tls_runtime_array_from_bytes(const uint8_t *buf, uint32_t len)
+{
+    RuntimeArray *out = (RuntimeArray *)malloc(sizeof(RuntimeArray) + (size_t)len * sizeof(RuntimeValue));
+    if (!out) return NIL_VALUE;
+    out->hdr.type = HEAP_ARRAY;
+    out->hdr.size = (uint32_t)(sizeof(RuntimeArray) + (size_t)len * sizeof(RuntimeValue));
+    out->len = len;
+    out->cap = len;
+    for (uint32_t i = 0; i < len; i++) out->items[i] = ENCODE_INT(buf[i]);
+    return ENCODE_PTR(out);
+}
+
+RuntimeValue rt_tls13_hkdf_extract(RuntimeValue salt_rv, RuntimeValue ikm_rv)
+{
+    uint32_t salt_len = 0, ikm_len = 0;
+    uint8_t *salt = _tls_copy_runtime_bytes(salt_rv, &salt_len);
+    uint8_t *ikm = _tls_copy_runtime_bytes(ikm_rv, &ikm_len);
+    uint8_t zero_salt[32];
+    uint8_t out[32];
+    if (!ikm && ikm_len != 0) {
+        if (salt) free(salt);
+        return NIL_VALUE;
+    }
+    if (salt_len == 0) {
+        memset(zero_salt, 0, sizeof(zero_salt));
+        _tls_hmac_sha256(zero_salt, 32, ikm, ikm_len, out);
+    } else {
+        _tls_hmac_sha256(salt, salt_len, ikm, ikm_len, out);
+    }
+    if (salt) free(salt);
+    if (ikm) free(ikm);
+    return _tls_runtime_array_from_bytes(out, 32);
+}
+
+RuntimeValue rt_tls13_hkdf_expand_label(RuntimeValue secret_rv, RuntimeValue label_rv, RuntimeValue context_rv, int64_t length_i64)
+{
+    if (length_i64 < 0 || length_i64 > 255) return NIL_VALUE;
+    uint32_t secret_len = 0, label_len = 0, context_len = 0;
+    uint8_t *secret = _tls_copy_runtime_bytes(secret_rv, &secret_len);
+    uint8_t *label = _tls_copy_runtime_bytes(label_rv, &label_len);
+    uint8_t *context = _tls_copy_runtime_bytes(context_rv, &context_len);
+    if (!secret || !label || !context) {
+        if (secret) free(secret);
+        if (label) free(label);
+        if (context) free(context);
+        return NIL_VALUE;
+    }
+
+    const uint8_t prefix[] = { 't', 'l', 's', '1', '3', ' ' };
+    uint32_t full_label_len = (uint32_t)sizeof(prefix) + label_len;
+    uint8_t *full_label = (uint8_t *)malloc(full_label_len > 0 ? full_label_len : 1);
+    uint32_t encoded_len = 2U + 1U + full_label_len + 1U + context_len;
+    uint8_t *encoded = (uint8_t *)malloc(encoded_len > 0 ? encoded_len : 1);
+    if (!full_label || !encoded) {
+        if (full_label) free(full_label);
+        if (encoded) free(encoded);
+        free(secret); free(label); free(context);
+        return NIL_VALUE;
+    }
+    memcpy(full_label, prefix, sizeof(prefix));
+    if (label_len > 0) memcpy(full_label + sizeof(prefix), label, label_len);
+
+    uint32_t pos = 0;
+    uint32_t out_len = (uint32_t)length_i64;
+    encoded[pos++] = (uint8_t)((out_len >> 8) & 0xffU);
+    encoded[pos++] = (uint8_t)(out_len & 0xffU);
+    encoded[pos++] = (uint8_t)full_label_len;
+    memcpy(encoded + pos, full_label, full_label_len);
+    pos += full_label_len;
+    encoded[pos++] = (uint8_t)context_len;
+    if (context_len > 0) memcpy(encoded + pos, context, context_len);
+
+    uint8_t okm[255];
+    uint8_t t_prev[32];
+    uint32_t okm_len = 0;
+    uint32_t t_prev_len = 0;
+    uint8_t counter = 1;
+    while (okm_len < out_len) {
+        uint8_t input[32 + 512];
+        uint32_t input_len = 0;
+        if (t_prev_len > 0) {
+            memcpy(input + input_len, t_prev, t_prev_len);
+            input_len += t_prev_len;
+        }
+        memcpy(input + input_len, encoded, encoded_len);
+        input_len += encoded_len;
+        input[input_len++] = counter;
+
+        _tls_hmac_sha256(secret, secret_len, input, input_len, t_prev);
+        t_prev_len = 32;
+        uint32_t take = (out_len - okm_len) < 32U ? (out_len - okm_len) : 32U;
+        memcpy(okm + okm_len, t_prev, take);
+        okm_len += take;
+        counter++;
+    }
+
+    free(secret);
+    free(label);
+    free(context);
+    free(full_label);
+    free(encoded);
+    return _tls_runtime_array_from_bytes(okm, out_len);
 }
 
 /* rt_array_pop: remove and return last element */
@@ -8432,7 +9216,6 @@ S1(rt_timer_create)
 S1(rt_timer_cancel)
 
 /* --- Network: socket/bind/listen/accept/close now have real impls above --- */
-TRAP_STUB_RET(rt_net_connect, 2)
 TRAP_STUB_RET(rt_net_send, 2)
 TRAP_STUB_RET(rt_net_recv, 1)
 /* rt_net_socket, rt_net_bind, rt_net_listen, rt_net_accept, rt_net_close

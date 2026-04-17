@@ -330,7 +330,19 @@ impl LlvmBackend {
             }
             let param_types: Vec<inkwell::types::BasicMetadataTypeEnum> =
                 arg_vals.iter().map(|_| i64_type.into()).collect();
-            let fn_type = i64_type.fn_type(&param_types, false);
+            let returns_bool = matches!(
+                rt_fn_name,
+                "rt_array_push"
+                    | "rt_array_clear"
+                    | "rt_array_reverse"
+                    | "rt_array_sort"
+                    | "rt_index_set"
+            );
+            let fn_type = if returns_bool {
+                self.context.bool_type().fn_type(&param_types, false)
+            } else {
+                i64_type.fn_type(&param_types, false)
+            };
             let rt_func = module
                 .get_function(rt_fn_name)
                 .unwrap_or_else(|| module.add_function(rt_fn_name, fn_type, None));
@@ -339,6 +351,11 @@ impl LlvmBackend {
                 .map_err(|e| crate::error::factory::llvm_build_failed("rt redirect call", &e))?;
             if let Some(d) = dest {
                 if let Some(ret_val) = call_site.try_as_basic_value().left() {
+                    let ret_val = if returns_bool {
+                        self.coerce_value_to_type(ret_val, Some(i64_type.into()), builder)?
+                    } else {
+                        ret_val
+                    };
                     vreg_map.insert(d, ret_val);
                 } else {
                     vreg_map.insert(d, i64_type.const_int(0, false).into());

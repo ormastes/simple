@@ -48,7 +48,7 @@ impl LlvmBackend {
         &self,
         addr: crate::mir::VReg,
         value: crate::mir::VReg,
-        _ty: &crate::hir::TypeId,
+        ty: &crate::hir::TypeId,
         vreg_map: &VRegMap,
         builder: &Builder<'static>,
     ) -> Result<(), CompileError> {
@@ -67,8 +67,9 @@ impl LlvmBackend {
             _ => return Ok(()), // Fallback: no-op
         };
 
+        let stored = self.coerce_value_to_type(value_val, Some(self.llvm_type(ty)?), builder)?;
         builder
-            .build_store(ptr, value_val)
+            .build_store(ptr, stored)
             .map_err(|e| crate::error::factory::llvm_build_failed("store", &e))?;
         Ok(())
     }

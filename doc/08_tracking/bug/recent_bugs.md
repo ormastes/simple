@@ -2,14 +2,16 @@
 
 **Generated:** 2026-04-17
 **Database:** `doc/08_tracking/bug/bug_db.sdn`
-**Open:** 3 | **Non-open:** 25
+**Open:** 5 | **Non-open:** 25
 
 ## Open Bugs
 
 | ID | Severity | Status | Title |
 |----|----------|--------|-------|
+| tls_baremetal_003 | P1 | open | Baremetal TLS guest enters `TCP_SYN_SENT` but never completes active open to slirp host |
 | tls_baremetal_002 | P1 | open | Baremetal TLS guest reports TCP connect success but never sends `ClientHello` |
-| tls_baremetal_001 | P1 | open | Baremetal TLS handshake panics in `x25519_base` on x86_64 QEMU |
+| tls_baremetal_001 | P1 | open | Baremetal TLS handshake panics during X25519 shared secret on x86_64 QEMU |
+| tls_baremetal_004 | P1 | open | Baremetal compiled `[u8]` arrays lose byte values across TLS builder boundaries |
 | js_runtime_guest_001 | P1 | open | Generic x86_64 bare-metal JS runtime bootstrap faults in object/env storage |
 ## Closed Bugs
 

@@ -13,13 +13,16 @@
 
 extern fn serial_println(msg: text)
 extern fn rt_port_outb(port: u16, value: u8)
+extern fn rt_net_socket(proto: i64) -> i64
+extern fn rt_net_connect_host_tls(sock_fd: i64) -> i64
 extern fn rt_net_close(sock_fd: i64) -> i64
+extern fn rt_ipc_send_bytes(port: u64, method: u64, data: [u8]) -> i64
+extern fn rt_ipc_recv_bytes(port: u64, max_len: i64) -> [u8]
 
 # POSIX layer
 use os.posix.fd_table.{fd_table_init}
 use os.posix.async_io.{async_io_init}
 use os.posix.signal_compat.{signal_init}
-use os.posix.socket_compat.{posix_socket, posix_connect, sockaddr_in, AF_INET, SOCK_STREAM}
 
 # Services
 use os.kernel.boot.init_services.{init_all_services, services_network_ready}
@@ -29,6 +32,9 @@ use os.tls13.mod.{tls13_connect, tls13_send, tls13_recv, tls13_close, Tls13Conne
 
 var _pass_count: u32 = 0
 var _fail_count: u32 = 0
+val _NETSTACK_PORT: u64 = 2
+val _NET_SOCKET: u64 = 1
+val _NET_CONNECT: u64 = 4
 
 fn _serial(s: text):
     serial_println(s)
@@ -40,6 +46,46 @@ fn _assert(condition: bool, name: text):
     else:
         _serial("[TEST FAIL: {name}]")
         _fail_count = _fail_count + 1
+
+fn _push_i32(out: [u8], value: i32):
+    val raw = value as u32
+    out.push((raw & 0xFF).to_u8())
+    out.push(((raw >> 8) & 0xFF).to_u8())
+    out.push(((raw >> 16) & 0xFF).to_u8())
+    out.push(((raw >> 24) & 0xFF).to_u8())
+
+fn _push_u32(out: [u8], value: u32):
+    val raw = value
+    out.push((raw & 0xFF).to_u8())
+    out.push(((raw >> 8) & 0xFF).to_u8())
+    out.push(((raw >> 16) & 0xFF).to_u8())
+    out.push(((raw >> 24) & 0xFF).to_u8())
+
+fn _push_u16(out: [u8], value: u16):
+    val raw = value as u32
+    out.push((raw & 0xFF).to_u8())
+    out.push(((raw >> 8) & 0xFF).to_u8())
+
+fn _read_i32(buf: [u8], offset: u64) -> i32:
+    val b0 = buf[offset] as u32
+    val b1 = buf[offset + 1] as u32
+    val b2 = buf[offset + 2] as u32
+    val b3 = buf[offset + 3] as u32
+    (b0 | (b1 << 8) | (b2 << 16) | (b3 << 24)) as i32
+
+fn _net_socket_tcp() -> Result<i64, text>:
+    val fd = rt_net_socket(1)
+    if fd < 0:
+        return Err("socket status {fd}")
+    Ok(fd)
+
+fn _net_connect(fd: i64, a: u8, b: u8, c: u8, d: u8, port: u16) -> Result<bool, text>:
+    val _ip = (a as u32) | ((b as u32) << 8) | ((c as u32) << 16) | ((d as u32) << 24)
+    val _port = port
+    val status = rt_net_connect_host_tls(fd)
+    if status < 0:
+        return Err("connect status {status}")
+    Ok(true)
 
 fn _text_to_bytes(s: text) -> [u8]:
     var out: [u8] = []
@@ -99,29 +145,31 @@ fn _start():
     # Test 1: Open TCP socket
     # ----------------------------------------------------------------
     _serial("--- Test 1: TCP socket ---")
-    val tcp_fd = posix_socket(AF_INET, SOCK_STREAM, 0)
-    if tcp_fd < 0:
-        _serial("  socket failed: {tcp_fd}")
+    val sock_result = _net_socket_tcp()
+    if sock_result.is_err():
+        _serial("  socket failed: {sock_result.unwrap_err()}")
         _serial("[TLS FAIL: socket creation failed]")
         _serial("TLS system test: {_pass_count} passed, {_fail_count} failed")
         rt_port_outb(0xf4, 0u8)
         return
+    val tcp_fd = sock_result.unwrap()
     _serial("  socket fd returned: {tcp_fd}")
     _assert(tcp_fd >= 0, "TCP socket created (fd >= 0)")
     # ----------------------------------------------------------------
     # Test 2: Connect TCP to 10.0.2.2:4433 (QEMU gateway)
     # ----------------------------------------------------------------
     _serial("--- Test 2: TCP connect to 10.0.2.2:4433 ---")
-    val server_addr = sockaddr_in(4433u16, 10u8, 0u8, 2u8, 2u8)
-    val connect_result = posix_connect(tcp_fd.to_i32(), server_addr)
-    if connect_result < 0:
-        _serial("  connect failed: {connect_result}")
+    val connect_result = _net_connect(tcp_fd, 10u8, 0u8, 2u8, 2u8, 4433u16)
+    if val Err(connect_err) = connect_result:
+        _serial("  connect failed: {connect_err}")
         _assert(false, "TCP connect to 10.0.2.2:4433 succeeded")
         rt_net_close(tcp_fd)
         _serial("[TLS FAIL: TCP connect failed]")
         _serial("TLS system test: {_pass_count} passed, {_fail_count} failed")
         rt_port_outb(0xf4, 0u8)
         return
+    if val Ok(_) = connect_result:
+        pass
     _serial("  connect returned: ok")
     _assert(true, "TCP connect to 10.0.2.2:4433 succeeded")
 

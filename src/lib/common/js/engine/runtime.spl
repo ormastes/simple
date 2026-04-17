@@ -421,11 +421,14 @@ class JsRuntime:
     # Initialize the global environment with all built-in objects and functions
     me initialize():
         self.logger.debug("Initializing JS runtime globals")
+        val interpreter = self.interpreter
+        val env_stack = interpreter.env_stack
+        val global_env = interpreter.global_env
 
         # ── Global values ────────────────────────────────────────────
-        self.interpreter.env_stack.define_var(self.interpreter.global_env, "undefined", JsValue.Undefined)
-        self.interpreter.env_stack.define_var(self.interpreter.global_env, "NaN", JsValue.Number(v: js_nan()))
-        self.interpreter.env_stack.define_var(self.interpreter.global_env, "Infinity", JsValue.Number(v: js_infinity()))
+        env_stack.define_var(global_env, "undefined", JsValue.Undefined)
+        env_stack.define_var(global_env, "NaN", JsValue.Number(v: js_nan()))
+        env_stack.define_var(global_env, "Infinity", JsValue.Number(v: js_infinity()))
 
         # ── Global functions ─────────────────────────────────────────
         self._define_global_fn("parseInt", NATIVE_PARSE_INT)
@@ -534,6 +537,7 @@ class JsRuntime:
     me call(function_id: i64, args: [JsValue]) -> BrowserResult<JsValue>:
         var call_result = JsValue.Undefined
         var call_ok = false
+        val interpreter = self.interpreter
 
         # Check if it's a native function
         var i = 0
@@ -552,32 +556,34 @@ class JsRuntime:
             call_ok = true
 
         # User-defined function
-        if not call_ok and function_id >= 0 and function_id < self.interpreter.functions.len():
-            val js_fn = self.interpreter.functions.get(function_id)
-            val fn_env = self.interpreter.env_stack.create_env(js_fn.closure_env)
+        if not call_ok and function_id >= 0 and function_id < interpreter.functions.len():
+            val js_fn = interpreter.functions.get(function_id)
+            val env_stack = interpreter.env_stack
+            val params = js_fn.params
+            val fn_env = env_stack.create_env(js_fn.closure_env)
 
             var pi = 0
-            val plen = js_fn.params.len()
+            val plen = params.len()
             while pi < plen:
-                val param_name = js_fn.params.get(pi)
+                val param_name = params.get(pi)
                 var param_val = JsValue.Undefined
                 if pi < args.len():
                     param_val = args.get(pi)
-                self.interpreter.env_stack.define_var(fn_env, param_name, param_val)
+                env_stack.define_var(fn_env, param_name, param_val)
                 pi = pi + 1
 
-            val saved = self.interpreter.control_return
-            self.interpreter.control_return = false
+            val saved = interpreter.control_return
+            interpreter.control_return = false
             var result = JsValue.Undefined
             var bi = 0
             val blen = js_fn.body.len()
             while bi < blen:
-                result = self.interpreter.exec_statement(js_fn.body.get(bi), fn_env)?
-                if self.interpreter.control_return:
-                    result = self.interpreter.return_value
+                result = interpreter.exec_statement(js_fn.body.get(bi), fn_env)?
+                if interpreter.control_return:
+                    result = interpreter.return_value
                     break
                 bi = bi + 1
-            self.interpreter.control_return = saved
+            interpreter.control_return = saved
             call_result = result
             call_ok = true
 

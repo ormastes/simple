@@ -63,6 +63,7 @@ impl LlvmBackend {
             let field_ptr = unsafe { builder.build_gep(i8_type, struct_ptr, &[offset_val], "field_ptr") }
                 .map_err(|e| crate::error::factory::llvm_build_failed("gep", &e))?;
             let llvm_field_ty = self.llvm_type(field_type)?;
+            let coerced_field_val = self.coerce_value_to_type(field_val, Some(llvm_field_ty), builder)?;
             let typed_ptr = builder
                 .build_pointer_cast(
                     field_ptr,
@@ -71,7 +72,7 @@ impl LlvmBackend {
                 )
                 .map_err(|e| crate::error::factory::llvm_cast_failed("cast field ptr", &e))?;
             builder
-                .build_store(typed_ptr, field_val)
+                .build_store(typed_ptr, coerced_field_val)
                 .map_err(|e| crate::error::factory::llvm_build_failed("store", &e))?;
         }
 
@@ -169,6 +170,8 @@ impl LlvmBackend {
         let offset_val = self.context.i32_type().const_int(byte_offset as u64, false);
         let field_ptr = unsafe { builder.build_gep(i8_type, base_ptr, &[offset_val], "field_ptr") }
             .map_err(|e| crate::error::factory::llvm_build_failed("gep", &e))?;
+        let llvm_field_ty = self.llvm_type(field_type)?;
+        let coerced_val = self.coerce_value_to_type(val, Some(llvm_field_ty), builder)?;
         let typed_ptr = builder
             .build_pointer_cast(
                 field_ptr,
@@ -177,7 +180,7 @@ impl LlvmBackend {
             )
             .map_err(|e| crate::error::factory::llvm_cast_failed("cast field ptr", &e))?;
         builder
-            .build_store(typed_ptr, val)
+            .build_store(typed_ptr, coerced_val)
             .map_err(|e| crate::error::factory::llvm_build_failed("store", &e))?;
         Ok(())
     }
@@ -229,6 +232,7 @@ impl LlvmBackend {
             let field_ptr = unsafe { builder.build_gep(i8_type, closure_ptr, &[offset_val], "cap_ptr") }
                 .map_err(|e| crate::error::factory::llvm_build_failed("gep", &e))?;
             let llvm_field_ty = self.llvm_type(field_type)?;
+            let coerced_capture_val = self.coerce_value_to_type(capture_val, Some(llvm_field_ty), builder)?;
             let typed_ptr = builder
                 .build_pointer_cast(
                     field_ptr,
@@ -237,7 +241,7 @@ impl LlvmBackend {
                 )
                 .map_err(|e| crate::error::factory::llvm_cast_failed("cast cap ptr", &e))?;
             builder
-                .build_store(typed_ptr, capture_val)
+                .build_store(typed_ptr, coerced_capture_val)
                 .map_err(|e| crate::error::factory::llvm_build_failed("store", &e))?;
         }
 

@@ -43,7 +43,10 @@ impl LlvmBackend {
 
         // Push each element via rt_array_push(array, element)
         let array_push = module.get_function("rt_array_push").unwrap_or_else(|| {
-            let fn_type = i64_type.fn_type(&[i64_type.into(), i64_type.into()], false);
+            let fn_type = self
+                .context
+                .bool_type()
+                .fn_type(&[i64_type.into(), i64_type.into()], false);
             module.add_function("rt_array_push", fn_type, None)
         });
         for elem in elements.iter() {
@@ -216,7 +219,7 @@ impl LlvmBackend {
         let rt_func = module.get_function("rt_index_set").unwrap_or_else(|| {
             let fn_type = self
                 .context
-                .void_type()
+                .bool_type()
                 .fn_type(&[i64_type.into(), i64_type.into(), i64_type.into()], false);
             module.add_function("rt_index_set", fn_type, None)
         });

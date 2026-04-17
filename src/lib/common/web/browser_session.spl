@@ -168,10 +168,20 @@ class BrowserRuntimeState:
         val navigator_id = runtime.interpreter.object_store.create_object()
         if is_guest_runtime:
             print "[BRS] runtime create stage=navigator-object"
+        val navigator_user_agent =
+            if is_guest_runtime:
+                guest_runtime_user_agent()
+            else:
+                chrome_user_agent()
+        val navigator_platform_name =
+            if is_guest_runtime:
+                guest_runtime_platform()
+            else:
+                navigator_platform()
         runtime.interpreter.object_store.set_property(
             navigator_id,
             "userAgent",
-            JsValue.String(v: chrome_user_agent())
+            JsValue.String(v: navigator_user_agent)
         )
         runtime.interpreter.object_store.set_property(
             navigator_id,
@@ -181,7 +191,7 @@ class BrowserRuntimeState:
         runtime.interpreter.object_store.set_property(
             navigator_id,
             "platform",
-            JsValue.String(v: navigator_platform())
+            JsValue.String(v: navigator_platform_name)
         )
         runtime.interpreter.object_store.set_property(
             navigator_id,
@@ -377,31 +387,19 @@ impl BrowserSession:
             self.current_url = self.pending_url
         if script_source.contains("Runtime Ready"):
             self.current_title = "Runtime Ready"
-            state.runtime.interpreter.host_document_title_value = JsValue.String(v: "Runtime Ready")
             applied = true
         if script_source.contains("runtime fetch ok"):
             self.current_body_html = "runtime fetch ok"
-            state.runtime.interpreter.host_body_inner_html_value = JsValue.String(v: "runtime fetch ok")
-            state.runtime.interpreter.host_body_text_content_value = JsValue.String(v: "runtime fetch ok")
             applied = true
         if script_source.contains("runtime=ok"):
-            self.cookies = merge_cookie_text(self.cookies, "runtime=ok; Path=/")
-            val visible_cookie_text = cookie_text_for_url(self.cookies, self.current_url)
-            state.runtime.interpreter.host_document_cookie_value = JsValue.String(v: visible_cookie_text)
             applied = true
         if val Some(title) = _extract_simple_js_assignment(script_source, "document.title = "):
             self.current_title = title
-            state.runtime.interpreter.host_document_title_value = JsValue.String(v: title)
             applied = true
         if val Some(body_html) = _extract_simple_js_assignment(script_source, "document.body.innerHTML = "):
             self.current_body_html = body_html
-            state.runtime.interpreter.host_body_inner_html_value = JsValue.String(v: body_html)
-            state.runtime.interpreter.host_body_text_content_value = JsValue.String(v: html_to_text(body_html))
             applied = true
         if val Some(cookie_text) = _extract_simple_js_assignment(script_source, "document.cookie = "):
-            self.cookies = merge_cookie_text(self.cookies, cookie_text)
-            val visible_cookie_text = cookie_text_for_url(self.cookies, self.current_url)
-            state.runtime.interpreter.host_document_cookie_value = JsValue.String(v: visible_cookie_text)
             applied = true
         applied
 
@@ -937,11 +935,6 @@ impl BrowserSession:
                                 self.current_url = self.pending_url
                             self.current_title = "Runtime Ready"
                             self.current_body_html = "runtime fetch ok"
-                            self.cookies = [BrowserCookie.create(name: "runtime", value: "ok", path: "/", domain: "")]
-                            state.runtime.interpreter.host_document_title_value = JsValue.String(v: "Runtime Ready")
-                            state.runtime.interpreter.host_body_inner_html_value = JsValue.String(v: "runtime fetch ok")
-                            state.runtime.interpreter.host_body_text_content_value = JsValue.String(v: "runtime fetch ok")
-                            state.runtime.interpreter.host_document_cookie_value = JsValue.String(v: "runtime=ok")
                             self._trace_guest("eval inline script fast-path")
                             continue
                         val eval_result = state.runtime.eval(script_source)
@@ -1266,12 +1259,18 @@ fn chrome_user_agent() -> text:
         return "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
     "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
 
+fn guest_runtime_user_agent() -> text:
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+
 fn navigator_platform() -> text:
     val host_os = get_host_os()
     if host_os == "macos":
         return "MacIntel"
     if host_os == "windows":
         return "Win32"
+    "Linux x86_64"
+
+fn guest_runtime_platform() -> text:
     "Linux x86_64"
 
 fn normalize_browser_url(input: text) -> text:
