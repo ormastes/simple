@@ -24,11 +24,14 @@ val SOCK_DGRAM: i32 = 2    # UDP
 val AF_INET: i32 = 2
 
 extern fn unsafe_addr_of(ref: any) -> u64
+extern fn serial_println(msg: text)
 
 # Direct IPC functions — bypasses Cranelift-stubbed syscall
 # (inline asm in syscall_raw.spl not supported by Cranelift)
 extern fn rt_ipc_send(port: u64, method: u64, flags: u64, buf_addr: u64, buf_len: u64) -> i64
 extern fn rt_ipc_recv(port: u64, buf_addr: u64, max_len: u64) -> i64
+extern fn rt_ipc_send_bytes(port: u64, method: u64, data: [u8]) -> i64
+extern fn rt_ipc_recv_bytes(port: u64, max_len: i64) -> [u8]
 
 # ============================================================================
 # Socket Address
@@ -76,10 +79,12 @@ fn posix_socket(domain: i32, type_: i32, protocol: i32) -> i64:
     var payload: [u8] = []
     payload.push(proto.to_u8())
     val reply = _net_ipc_request(NET_SOCKET, payload)
+    serial_println("[socket_compat] socket proto={proto} status={reply.status} value={reply.value_i32}")
     if reply.status < 0:
         return reply.status as i64
 
     val fd = fd_alloc()
+    serial_println("[socket_compat] fd_alloc -> {fd}")
     if fd < 0:
         _net_close_remote(reply.value_i32)
         return fd as i64
@@ -238,40 +243,28 @@ fn _array_data_ptr(data: [u8]) -> u64:
 
 fn _net_ipc_request(method: u32, payload: [u8]) -> _NetIpcReply:
     """Send IPC request to netstack and receive i32 reply."""
-    val payload_ptr = _array_data_ptr(payload)
-    val payload_len = payload.len()
-
-    # Use direct rt_ipc_send/recv (bypasses Cranelift-stubbed syscall)
-    val send_result = rt_ipc_send(_NET_PORT, method as u64, 0, payload_ptr, payload_len)
+    val send_result = rt_ipc_send_bytes(_NET_PORT, method as u64, payload)
     if send_result < 0:
         return _NetIpcReply(status: 0 - EIO, value_i32: 0)
 
     # Receive reply: status(i32) | value(i32)
-    var reply_buf: [u8; 64] = [0; 64]
-    val reply_ptr = _array_data_ptr(reply_buf)
-    val recv_result = rt_ipc_recv(_NET_PORT, reply_ptr, 64)
-    if recv_result < 0:
+    val reply_buf = rt_ipc_recv_bytes(_NET_PORT, 64)
+    if reply_buf.len() < 4:
         return _NetIpcReply(status: 0 - EIO, value_i32: 0)
 
     val status = _sock_read_i32(reply_buf, 0)
-    val value = _sock_read_i32(reply_buf, 4)
+    val value = if reply_buf.len() >= 8: _sock_read_i32(reply_buf, 4) else: 0
     _NetIpcReply(status: status, value_i32: value)
 
 fn _net_ipc_request_bytes(method: u32, payload: [u8]) -> _NetIpcReplyBytes:
     """Send IPC request to netstack and receive byte array reply."""
-    val payload_ptr = _array_data_ptr(payload)
-    val payload_len = payload.len()
-
-    # Use direct rt_ipc_send/recv (bypasses Cranelift-stubbed syscall)
-    val send_result = rt_ipc_send(_NET_PORT, method as u64, 0, payload_ptr, payload_len)
+    val send_result = rt_ipc_send_bytes(_NET_PORT, method as u64, payload)
     if send_result < 0:
         return _NetIpcReplyBytes(status: 0 - EIO, data: [])
 
     # Receive reply: status(i32) | data(bytes)
-    var reply_buf: [u8; 4096] = [0; 4096]
-    val reply_ptr = _array_data_ptr(reply_buf)
-    val recv_result = rt_ipc_recv(_NET_PORT, reply_ptr, 4096)
-    if recv_result < 0:
+    val reply_buf = rt_ipc_recv_bytes(_NET_PORT, 4096)
+    if reply_buf.len() < 4:
         return _NetIpcReplyBytes(status: 0 - EIO, data: [])
 
     val status = _sock_read_i32(reply_buf, 0)
@@ -279,7 +272,7 @@ fn _net_ipc_request_bytes(method: u32, payload: [u8]) -> _NetIpcReplyBytes:
         return _NetIpcReplyBytes(status: status, data: [])
 
     # Extract data bytes (after 4-byte status)
-    val data_len = if recv_result > 4: (recv_result - 4) as u64 else: 0
+    val data_len = if reply_buf.len() > 4: reply_buf.len() - 4 else: 0
     var data: [u8] = []
     var i: u64 = 0
     while i < data_len:
@@ -292,8 +285,7 @@ fn _net_close_remote(net_fd: i32):
     """Send NET_CLOSE to netstack for a netstack-side fd."""
     var payload: [u8] = []
     _sock_push_i32(payload, net_fd)
-    val payload_ptr = _array_data_ptr(payload)
-    rt_ipc_send(_NET_PORT, NET_CLOSE as u64, 0, payload_ptr, payload.len())
+    rt_ipc_send_bytes(_NET_PORT, NET_CLOSE as u64, payload)
     # Best-effort close: ignore IPC errors
 
 # ============================================================================
