@@ -42,6 +42,22 @@ try {
       const tag = c.getAuthTag();
       out(Buffer.concat([ct, tag])); break;
     }
+    case "aes_128_gcm_decrypt":
+    case "aes_256_gcm_decrypt": {
+      const [key, nonce, aad, ctTag] = [hx(a[0]), hx(a[1]), hx(a[2]), hx(a[3])];
+      const algo = prim === "aes_128_gcm_decrypt" ? "aes-128-gcm" : "aes-256-gcm";
+      const ct = ctTag.subarray(0, ctTag.length - 16);
+      const tag = ctTag.subarray(ctTag.length - 16);
+      const d = crypto.createDecipheriv(algo, key, nonce);
+      d.setAuthTag(tag);
+      if (aad.length) d.setAAD(aad);
+      try {
+        out(Buffer.concat([d.update(ct), d.final()]));
+      } catch (e) {
+        err("auth tag mismatch");
+      }
+      break;
+    }
     case "chacha20_poly1305_encrypt": {
       const [key, nonce, aad, plain] = [hx(a[0]), hx(a[1]), hx(a[2]), hx(a[3])];
       const c = crypto.createCipheriv("chacha20-poly1305", key, nonce, { authTagLength: 16 });
@@ -49,6 +65,20 @@ try {
       const ct = Buffer.concat([c.update(plain), c.final()]);
       const tag = c.getAuthTag();
       out(Buffer.concat([ct, tag])); break;
+    }
+    case "chacha20_poly1305_decrypt": {
+      const [key, nonce, aad, ctTag] = [hx(a[0]), hx(a[1]), hx(a[2]), hx(a[3])];
+      const ct = ctTag.subarray(0, ctTag.length - 16);
+      const tag = ctTag.subarray(ctTag.length - 16);
+      const d = crypto.createDecipheriv("chacha20-poly1305", key, nonce, { authTagLength: 16 });
+      d.setAuthTag(tag);
+      if (aad.length) d.setAAD(aad);
+      try {
+        out(Buffer.concat([d.update(ct), d.final()]));
+      } catch (e) {
+        err("auth tag mismatch");
+      }
+      break;
     }
     case "x25519": {
       // Node needs DER-wrapped raw keys. Construct SPKI/PKCS8 wrappers.

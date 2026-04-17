@@ -70,10 +70,31 @@ def main(argv):
     elif prim == "poly1305":
         from cryptography.hazmat.primitives import poly1305 as p1305
         p = p1305.Poly1305(_hx(a[0])); p.update(_hx(a[1])); _out(p.finalize())
+    elif prim in ("aes_128_gcm_decrypt", "aes_256_gcm_decrypt"):
+        from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+        from cryptography.exceptions import InvalidTag
+        key, nonce, aad, ct_tag = _hx(a[0]), _hx(a[1]), _hx(a[2]), _hx(a[3])
+        expected_key_len = 16 if prim == "aes_128_gcm_decrypt" else 32
+        if len(key) != expected_key_len:
+            _err(f"key length mismatch: got {len(key)} want {expected_key_len}")
+        try:
+            pt = AESGCM(key).decrypt(nonce, ct_tag, aad if aad else None)
+            _out(pt)
+        except InvalidTag:
+            _err("auth tag mismatch")
     elif prim == "chacha20_poly1305_encrypt":
         from cryptography.hazmat.primitives.ciphers.aead import ChaCha20Poly1305
         key, nonce, aad, plain = _hx(a[0]), _hx(a[1]), _hx(a[2]), _hx(a[3])
         _out(ChaCha20Poly1305(key).encrypt(nonce, plain, aad if aad else None))
+    elif prim == "chacha20_poly1305_decrypt":
+        from cryptography.hazmat.primitives.ciphers.aead import ChaCha20Poly1305
+        from cryptography.exceptions import InvalidTag
+        key, nonce, aad, ct_tag = _hx(a[0]), _hx(a[1]), _hx(a[2]), _hx(a[3])
+        try:
+            pt = ChaCha20Poly1305(key).decrypt(nonce, ct_tag, aad if aad else None)
+            _out(pt)
+        except InvalidTag:
+            _err("auth tag mismatch")
     elif prim == "x25519":
         from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey, X25519PublicKey
         scalar, peer = _hx(a[0]), _hx(a[1])

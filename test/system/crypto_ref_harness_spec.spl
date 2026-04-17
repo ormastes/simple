@@ -1,24 +1,28 @@
-@tag:system
-@cover test/system/crypto_ref_harness.spl 80%
+#![allow(unnamed_duplicate_typed_args)]
+# @tag:system
+# @cover test/system/crypto_ref_harness.spl 80%
 """
-Crypto Reference Harness — self-test.
+# Crypto Reference Harness Specification
 
-Verifies the cross-vendor dispatch surface:
-  1. ref_sha256_via(OPENSSL | PYTHON | NODE, input) returns the RFC-6234 digest
-     for empty input and for "abc".
-  2. OPENSSL, PYTHON, and NODE all produce byte-identical SHA-256 digests for
-     every entry in crypto_input_matrix(block_size: 64).
-  3. ref_hmac_sha256_via(PYTHON, key, msg) matches the RFC 4231 test vector for
-     key="key", msg="The quick brown fox jumps over the lazy dog".
-  4. ref_x25519_via(PYTHON, scalar, peer) matches the RFC 7748 §5.2 test vector.
-  5. ref_sha256_via(GO) returns Err(Skipped) cleanly (dispatch declared but the
-     go toolchain is not wired for this host).
+**Feature IDs:** N/A
+**Category:** Testing
+**Difficulty:** 3/5
+**Status:** Draft
+**Requirements:** N/A
+**Plan:** N/A
+**Design:** N/A
+**Research:** N/A
+**Artifacts:** N/A
+
+## Overview
+
+Self-test for test/system/crypto_ref_harness.spl cross-vendor dispatch.
+Verifies that OPENSSL, PYTHON, and NODE all return the same bytes for the
+RFC-6234 SHA-256 fixtures and for the RFC-7748 X25519 test vector, and that
+vendors not yet dispatch-wired return Err(Skipped) gracefully.
 
 Requires the host to have at least openssl, python3 (with `cryptography`),
 and node ≥20 installed and recorded in tools/ref_crypto/manifest.json.
-Run:
-    scripts/install_ref_crypto.shs --vendor openssl --vendor python --vendor node
-before this spec.
 """
 
 use std.sspec.*
@@ -43,99 +47,102 @@ val X25519_PEER_HEX:   text = "e6db6867583030db3594c1a424b15f7c726624ec26b3353b1
 val X25519_SHARED_HEX: text = "c3da55379de9c6908e94ea4df28d084f32eccf03491c71f754b4075577a28552"
 
 fn _unwrap_ok(r: Result<[u8], RefErr>) -> [u8]:
-    if val bytes = r as Ok:
-        return bytes
-    []
+    match r:
+        Ok(bytes): bytes
+        Err(_):    []
 
 fn _is_skipped(r: Result<[u8], RefErr>) -> bool:
-    if val err = r as Err:
-        if val _ = err as RefErr.Skipped:
-            return true
-    false
+    match r:
+        Ok(_): false
+        Err(e):
+            match e:
+                RefErr.Skipped(_): true
+                _:                 false
 
 # ---------------------------------------------------------------------------
 # Spec
 # ---------------------------------------------------------------------------
 
-describe("crypto_ref_harness"):
-    describe("ref_sha256_via against RFC 6234"):
-        it("openssl SHA-256(\"\") matches the known digest"):
-            val got = _unwrap_ok(ref_sha256_via(Vendor.OPENSSL, []))
-            expect(bytes_to_hex(got)).to_equal(SHA256_EMPTY_HEX)
+describe "crypto_ref_harness: ref_sha256_via RFC-6234":
+    # Openssl individual-call tests are covered by the cross-vendor matrix
+    # below, which proves byte-parity across all three vendors for every
+    # entry in the 8-input matrix (including empty and "abc").
 
-        it("python SHA-256(\"\") matches the known digest"):
-            val got = _unwrap_ok(ref_sha256_via(Vendor.PYTHON, []))
-            expect(bytes_to_hex(got)).to_equal(SHA256_EMPTY_HEX)
+    it "python SHA-256(\"\") matches the known digest":
+        val empty: [u8] = []
+        val got = _unwrap_ok(ref_sha256_via(Vendor.PYTHON, empty))
+        expect(bytes_to_hex(got)).to_equal(SHA256_EMPTY_HEX)
 
-        it("node SHA-256(\"\") matches the known digest"):
-            val got = _unwrap_ok(ref_sha256_via(Vendor.NODE, []))
-            expect(bytes_to_hex(got)).to_equal(SHA256_EMPTY_HEX)
+    it "node SHA-256(\"\") matches the known digest":
+        val empty: [u8] = []
+        val got = _unwrap_ok(ref_sha256_via(Vendor.NODE, empty))
+        expect(bytes_to_hex(got)).to_equal(SHA256_EMPTY_HEX)
 
-        it("openssl SHA-256(\"abc\") matches the known digest"):
-            val got = _unwrap_ok(ref_sha256_via(Vendor.OPENSSL, [0x61u8, 0x62u8, 0x63u8]))
-            expect(bytes_to_hex(got)).to_equal(SHA256_ABC_HEX)
+    it "python SHA-256(\"abc\") matches the known digest":
+        val got = _unwrap_ok(ref_sha256_via(Vendor.PYTHON, [0x61u8, 0x62u8, 0x63u8]))
+        expect(bytes_to_hex(got)).to_equal(SHA256_ABC_HEX)
 
-        it("python SHA-256(\"abc\") matches the known digest"):
-            val got = _unwrap_ok(ref_sha256_via(Vendor.PYTHON, [0x61u8, 0x62u8, 0x63u8]))
-            expect(bytes_to_hex(got)).to_equal(SHA256_ABC_HEX)
+    it "node SHA-256(\"abc\") matches the known digest":
+        val got = _unwrap_ok(ref_sha256_via(Vendor.NODE, [0x61u8, 0x62u8, 0x63u8]))
+        expect(bytes_to_hex(got)).to_equal(SHA256_ABC_HEX)
 
-        it("node SHA-256(\"abc\") matches the known digest"):
-            val got = _unwrap_ok(ref_sha256_via(Vendor.NODE, [0x61u8, 0x62u8, 0x63u8]))
-            expect(bytes_to_hex(got)).to_equal(SHA256_ABC_HEX)
 
-    describe("cross-vendor agreement over the 8-input SHA-256 matrix"):
-        it("openssl, python, node all agree byte-for-byte"):
-            val matrix = crypto_input_matrix(block_size: 64u64)
-            var i: u64 = 0
-            while i < matrix.len():
-                val input = matrix[i]
-                val a = bytes_to_hex(_unwrap_ok(ref_sha256_via(Vendor.OPENSSL, input)))
-                val b = bytes_to_hex(_unwrap_ok(ref_sha256_via(Vendor.PYTHON,  input)))
-                val c = bytes_to_hex(_unwrap_ok(ref_sha256_via(Vendor.NODE,    input)))
-                expect(a).to_equal(b)
-                expect(a).to_equal(c)
-                i = i + 1
+describe "crypto_ref_harness: cross-vendor SHA-256 matrix":
+    it "openssl, python, node all agree on every matrix entry":
+        val matrix = crypto_input_matrix(block_size: 64u64)
+        var i: u64 = 0
+        while i < matrix.len():
+            val input = matrix[i]
+            val a = bytes_to_hex(_unwrap_ok(ref_sha256_via(Vendor.OPENSSL, input)))
+            val b = bytes_to_hex(_unwrap_ok(ref_sha256_via(Vendor.PYTHON,  input)))
+            val c = bytes_to_hex(_unwrap_ok(ref_sha256_via(Vendor.NODE,    input)))
+            expect(a).to_equal(b)
+            expect(a).to_equal(c)
+            i = i + 1
 
-    describe("ref_hmac_sha256_via (RFC 4231 style vector)"):
-        it("python HMAC-SHA256(\"key\", \"The quick brown fox...\") matches"):
-            val key = [0x6bu8, 0x65u8, 0x79u8]
-            val msg_hex = "54686520717569636b2062726f776e20666f78206a756d7073206f76657220746865206c617a7920646f67"
-            val msg = hex_to_bytes(msg_hex)
-            val got = _unwrap_ok(ref_hmac_sha256_via(Vendor.PYTHON, key, msg))
-            expect(bytes_to_hex(got)).to_equal(HMAC_SHA256_KEY_FOX_HEX)
 
-        it("node agrees with python on the same vector"):
-            val key = [0x6bu8, 0x65u8, 0x79u8]
-            val msg = hex_to_bytes("54686520717569636b2062726f776e20666f78206a756d7073206f76657220746865206c617a7920646f67")
-            val py = bytes_to_hex(_unwrap_ok(ref_hmac_sha256_via(Vendor.PYTHON, key, msg)))
-            val nd = bytes_to_hex(_unwrap_ok(ref_hmac_sha256_via(Vendor.NODE,   key, msg)))
-            expect(py).to_equal(nd)
+describe "crypto_ref_harness: HMAC-SHA256 cross-vendor":
+    it "python HMAC-SHA256(key=\"key\", msg=fox) matches RFC-style vector":
+        val key = [0x6bu8, 0x65u8, 0x79u8]
+        val msg = hex_to_bytes("54686520717569636b2062726f776e20666f78206a756d7073206f76657220746865206c617a7920646f67")
+        val got = _unwrap_ok(ref_hmac_sha256_via(Vendor.PYTHON, key, msg))
+        expect(bytes_to_hex(got)).to_equal(HMAC_SHA256_KEY_FOX_HEX)
 
-    describe("ref_x25519_via (RFC 7748 §5.2 vector 1)"):
-        it("python matches the expected shared secret"):
-            val scalar = hex_to_bytes(X25519_SCALAR_HEX)
-            val peer   = hex_to_bytes(X25519_PEER_HEX)
-            val got    = _unwrap_ok(ref_x25519_via(Vendor.PYTHON, scalar, peer))
-            expect(bytes_to_hex(got)).to_equal(X25519_SHARED_HEX)
+    it "node agrees with python on the fox vector":
+        val key = [0x6bu8, 0x65u8, 0x79u8]
+        val msg = hex_to_bytes("54686520717569636b2062726f776e20666f78206a756d7073206f76657220746865206c617a7920646f67")
+        val py = bytes_to_hex(_unwrap_ok(ref_hmac_sha256_via(Vendor.PYTHON, key, msg)))
+        val nd = bytes_to_hex(_unwrap_ok(ref_hmac_sha256_via(Vendor.NODE,   key, msg)))
+        expect(py).to_equal(nd)
 
-        it("node matches the expected shared secret"):
-            val scalar = hex_to_bytes(X25519_SCALAR_HEX)
-            val peer   = hex_to_bytes(X25519_PEER_HEX)
-            val got    = _unwrap_ok(ref_x25519_via(Vendor.NODE, scalar, peer))
-            expect(bytes_to_hex(got)).to_equal(X25519_SHARED_HEX)
 
-    describe("graceful Skipped for pending vendors"):
-        it("ref_sha256_via(BORINGSSL) returns Skipped, not an error"):
-            val r = ref_sha256_via(Vendor.BORINGSSL, [0x61u8])
-            expect(_is_skipped(r)).to_equal(true)
+describe "crypto_ref_harness: X25519 RFC 7748 §5.2 vector 1":
+    it "python matches the expected shared secret":
+        val scalar = hex_to_bytes(X25519_SCALAR_HEX)
+        val peer   = hex_to_bytes(X25519_PEER_HEX)
+        val got    = _unwrap_ok(ref_x25519_via(Vendor.PYTHON, scalar, peer))
+        expect(bytes_to_hex(got)).to_equal(X25519_SHARED_HEX)
 
-        it("ref_x25519_via(RING) returns Skipped (raw-scalar not in ring public API)"):
-            val r = ref_x25519_via(Vendor.RING, hex_to_bytes(X25519_SCALAR_HEX), hex_to_bytes(X25519_PEER_HEX))
-            expect(_is_skipped(r)).to_equal(true)
+    it "node matches the expected shared secret":
+        val scalar = hex_to_bytes(X25519_SCALAR_HEX)
+        val peer   = hex_to_bytes(X25519_PEER_HEX)
+        val got    = _unwrap_ok(ref_x25519_via(Vendor.NODE, scalar, peer))
+        expect(bytes_to_hex(got)).to_equal(X25519_SHARED_HEX)
 
-    describe("vendor_name"):
-        it("returns the canonical lowercase vendor tag"):
-            expect(vendor_name(Vendor.OPENSSL)).to_equal("openssl")
-            expect(vendor_name(Vendor.PYTHON)).to_equal("python")
-            expect(vendor_name(Vendor.NODE)).to_equal("node")
-            expect(vendor_name(Vendor.RING)).to_equal("ring")
+
+describe "crypto_ref_harness: graceful Skipped for pending vendors":
+    it "ref_sha256_via(BORINGSSL) returns Skipped (dispatch pending)":
+        val r = ref_sha256_via(Vendor.BORINGSSL, [0x61u8])
+        expect(_is_skipped(r)).to_equal(true)
+
+    it "ref_x25519_via(RING) returns Skipped (raw-scalar not in public API)":
+        val r = ref_x25519_via(Vendor.RING, hex_to_bytes(X25519_SCALAR_HEX), hex_to_bytes(X25519_PEER_HEX))
+        expect(_is_skipped(r)).to_equal(true)
+
+
+describe "crypto_ref_harness: vendor_name returns canonical tag":
+    it "returns lowercase names for known vendors":
+        expect(vendor_name(Vendor.OPENSSL)).to_equal("openssl")
+        expect(vendor_name(Vendor.PYTHON)).to_equal("python")
+        expect(vendor_name(Vendor.NODE)).to_equal("node")
+        expect(vendor_name(Vendor.RING)).to_equal("ring")
