@@ -1,0 +1,51 @@
+#![allow(unnamed_duplicate_typed_args)]
+# @tag:system
+
+use std.spec.*
+use test.system.os_tls_hosted_interop_helpers.{
+    file_exists, server_bin, simple_bin, ensure_server_bin, cleanup_server_processes,
+    write_server_config, spawn_server, run_openssl_client, run_simple_client, kill_server, seed_fixture_dir, process_run, sleep_ms
+}
+
+describe "Hosted TLS interop mTLS":
+
+    it "requires a client certificate when the shared SDN config enables mTLS":
+        val build = ensure_server_bin()
+        expect(build.2).to_equal(0)
+        expect(file_exists(server_bin())).to_equal(true)
+        expect(file_exists(simple_bin())).to_equal(true)
+
+        val fixture_dir = "build/tls_hosted_interop/mtls"
+        val openssl_listen = "127.0.0.1:34435"
+        val simple_listen = "127.0.0.1:34436"
+        val openssl_config_path = "build/tls_hosted_interop/mtls_openssl.sdn"
+        val simple_config_path = "build/tls_hosted_interop/mtls_simple.sdn"
+        seed_fixture_dir(fixture_dir)
+        cleanup_server_processes()
+        write_server_config(openssl_config_path, openssl_listen, fixture_dir, true, 1)
+        write_server_config(simple_config_path, simple_listen, fixture_dir, true, 1)
+
+        val openssl_server_pid = spawn_server(openssl_config_path)
+        expect(openssl_server_pid > 0).to_equal(true)
+        if openssl_server_pid <= 0:
+            return
+
+        sleep_ms(1000)
+        val missing_cert = run_openssl_client(openssl_listen, fixture_dir, false)
+        kill_server(openssl_server_pid)
+        cleanup_server_processes()
+
+        val simple_server_pid = spawn_server(simple_config_path)
+        expect(simple_server_pid > 0).to_equal(true)
+        if simple_server_pid <= 0:
+            return
+
+        sleep_ms(1000)
+        val simple_result = run_simple_client(simple_config_path)
+        kill_server(simple_server_pid)
+        cleanup_server_processes()
+
+        expect(missing_cert.2 == 0).to_equal(false)
+        expect(simple_result.2).to_equal(0)
+        expect(simple_result.0 + simple_result.1).to_contain("[simple-client] handshake ok")
+        process_run("/bin/sh", ["-c", "rm -rf build/tls_hosted_interop"])

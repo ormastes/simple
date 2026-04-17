@@ -1,0 +1,161 @@
+"""
+# Syscall mmap / munmap Specification (G13)
+
+**Feature IDs:** #OS-G13
+**Category:** Runtime
+**Difficulty:** 3/5
+**Status:** Implemented
+**Requirements:** N/A
+**Plan:** N/A
+**Design:** N/A
+**Research:** N/A
+
+## Overview
+
+Unit tests for syscall 103 (sys_mmap) and syscall 104 (sys_munmap).
+Tests operate at the handler level by setting g_current_vmspace directly and
+calling _handle_sys_mmap / _handle_sys_munmap, avoiding a full Scheduler.
+"""
+
+use std.spec.{describe, it, expect}
+use os.kernel.types.syscall_types.{SyscallArgs}
+use os.kernel.types.vmspace_types.{ProcessVmSpace, VmArea, VMA_READ, VMA_WRITE, VMA_ANON}
+use os.kernel.memory.vmm.{vmm_new_process_space, vma_find}
+use os.kernel.ipc.syscall.{_handle_sys_mmap, _handle_sys_munmap, g_current_vmspace}
+
+# ============================================================================
+# Helpers
+# ============================================================================
+
+fn _make_mmap_args(req_vaddr: u64, req_len: u64, req_flags: u32, req_kind: u32, req_backing: u64, req_backing_offset: u64) -> SyscallArgs:
+    SyscallArgs(
+        id: 103,
+        arg0: req_vaddr,
+        arg1: req_len,
+        arg2: req_flags as u64,
+        arg3: req_kind as u64,
+        arg4: req_backing,
+        arg5: req_backing_offset
+    )
+
+fn _make_munmap_args(req_vaddr: u64, req_len: u64) -> SyscallArgs:
+    SyscallArgs(
+        id: 104,
+        arg0: req_vaddr,
+        arg1: req_len,
+        arg2: 0,
+        arg3: 0,
+        arg4: 0,
+        arg5: 0
+    )
+
+fn _fresh_space() -> ProcessVmSpace:
+    vmm_new_process_space(0, 1)
+
+# ============================================================================
+# Test Group 1: sys_mmap happy path
+# ============================================================================
+
+describe "sys_mmap happy path":
+    """Tests for successful anonymous mmap via the syscall handler."""
+
+    it "returns a positive address for a valid anon mmap":
+        """Kernel-chosen address (vaddr=0) returns a positive mapped address."""
+        g_current_vmspace = _fresh_space()
+        val args = _make_mmap_args(
+            req_vaddr: 0, req_len: 4096,
+            req_flags: VMA_READ | VMA_WRITE, req_kind: VMA_ANON,
+            req_backing: 0, req_backing_offset: 0)
+        val result = _handle_sys_mmap(args)
+        expect(result.value).to_be_greater_than(0)
+
+    it "VMA is findable after successful mmap":
+        """After mmap returns an address, vma_find locates the VMA with correct start."""
+        g_current_vmspace = _fresh_space()
+        val args = _make_mmap_args(
+            req_vaddr: 0, req_len: 4096,
+            req_flags: VMA_READ | VMA_WRITE, req_kind: VMA_ANON,
+            req_backing: 0, req_backing_offset: 0)
+        val result = _handle_sys_mmap(args)
+        val mapped_addr = result.value as u64
+        val found = vma_find(g_current_vmspace, mapped_addr)
+        expect(found.start).to_equal(mapped_addr)
+
+    it "mmap at an explicit vaddr returns that address":
+        """Caller-supplied vaddr is honoured when the range is free."""
+        g_current_vmspace = _fresh_space()
+        val target: u64 = 0x400000
+        val args = _make_mmap_args(
+            req_vaddr: target, req_len: 4096,
+            req_flags: VMA_READ, req_kind: VMA_ANON,
+            req_backing: 0, req_backing_offset: 0)
+        val result = _handle_sys_mmap(args)
+        expect(result.value).to_equal(target as i64)
+
+
+# ============================================================================
+# Test Group 2: sys_mmap error cases
+# ============================================================================
+
+describe "sys_mmap error cases":
+    """Tests for invalid arguments that must return negative errno."""
+
+    it "zero-length mmap returns -22 (EINVAL)":
+        """len=0 must be rejected with -EINVAL."""
+        g_current_vmspace = _fresh_space()
+        val args = _make_mmap_args(
+            req_vaddr: 0, req_len: 0,
+            req_flags: VMA_READ | VMA_WRITE, req_kind: VMA_ANON,
+            req_backing: 0, req_backing_offset: 0)
+        val result = _handle_sys_mmap(args)
+        expect(result.value).to_equal(-22)
+
+
+# ============================================================================
+# Test Group 3: sys_munmap happy path
+# ============================================================================
+
+describe "sys_munmap happy path":
+    """Tests for successful munmap via the syscall handler."""
+
+    it "munmap returns 0 after a preceding mmap":
+        """Unmapping an existing region returns 0."""
+        g_current_vmspace = _fresh_space()
+        val mmap_args = _make_mmap_args(
+            req_vaddr: 0, req_len: 4096,
+            req_flags: VMA_READ | VMA_WRITE, req_kind: VMA_ANON,
+            req_backing: 0, req_backing_offset: 0)
+        val mmap_result = _handle_sys_mmap(mmap_args)
+        val mapped_addr = mmap_result.value as u64
+        val munmap_args = _make_munmap_args(req_vaddr: mapped_addr, req_len: 4096)
+        val munmap_result = _handle_sys_munmap(munmap_args)
+        expect(munmap_result.value).to_equal(0)
+
+    it "VMA is gone after successful munmap":
+        """After munmap, vma_find returns nil for the unmapped address."""
+        g_current_vmspace = _fresh_space()
+        val mmap_args = _make_mmap_args(
+            req_vaddr: 0, req_len: 4096,
+            req_flags: VMA_READ | VMA_WRITE, req_kind: VMA_ANON,
+            req_backing: 0, req_backing_offset: 0)
+        val mmap_result = _handle_sys_mmap(mmap_args)
+        val mapped_addr = mmap_result.value as u64
+        val munmap_args = _make_munmap_args(req_vaddr: mapped_addr, req_len: 4096)
+        _handle_sys_munmap(munmap_args)
+        val found = vma_find(g_current_vmspace, mapped_addr)
+        expect(found).to_be_nil()
+
+
+# ============================================================================
+# Test Group 4: sys_munmap error cases
+# ============================================================================
+
+describe "sys_munmap error cases":
+    """Tests for invalid arguments that must return negative errno."""
+
+    it "zero-length munmap returns -22 (EINVAL)":
+        """len=0 must be rejected with -EINVAL."""
+        g_current_vmspace = _fresh_space()
+        val args = _make_munmap_args(req_vaddr: 0x400000, req_len: 0)
+        val result = _handle_sys_munmap(args)
+        expect(result.value).to_equal(-22)

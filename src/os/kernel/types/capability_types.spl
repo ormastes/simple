@@ -40,6 +40,7 @@ enum CapabilityKind:
     SystemReboot
     SystemMount
     SystemTime
+    SystemPrivilege         # Gate for sys_privctl — only SYSTEM tasks may call
 
 struct CapabilitySet:
     """Set of capabilities held by a task.
@@ -76,3 +77,74 @@ impl CapabilitySet:
                     new_caps.push(cap)
         self.caps = new_caps
         self.is_pledged = true
+
+# ============================================================================
+# G11 — Privilege Mask (per-task kernel privilege table)
+# ============================================================================
+
+# Op codes for sys_privctl
+val PRIVCTL_SET_MASK: u32    = 0
+val PRIVCTL_GET_MASK: u32    = 1
+val PRIVCTL_ADD_PEER: u32    = 2
+val PRIVCTL_REMOVE_PEER: u32 = 3
+
+struct PrivilegeMask:
+    """Per-task kernel privilege record.
+
+    Holds bitmaps for allowed kernel calls and IRQs, an I/O port range,
+    and the set of endpoint IDs this task may send IPC to.
+    """
+    kernel_calls: u64           # Bitmask: bit N set => task may invoke kernel call N
+    irqs: u64                   # Bitmask: bit N set => task may handle IRQ N
+    io_port_base: u16           # Base of allowed I/O port range
+    io_port_len: u16            # Length of allowed I/O port range (0 = none)
+    allowed_peers: [u32]        # Endpoint IDs this task may IPC-send to
+
+fn priv_allows_kernel_call(mask: PrivilegeMask, call_id: u32) -> bool:
+    """Return true if `mask` permits kernel call `call_id` (bit-test)."""
+    if call_id >= 64:
+        return false
+    val bit: u64 = 1
+    # TODO(mdsoc+): >> broken in Cranelift seed; use division as workaround
+    val shifted = bit / _pow2_u64(call_id)
+    (mask.kernel_calls / shifted) % 2 != 0
+
+fn priv_allows_send_to(mask: PrivilegeMask, peer: u32) -> bool:
+    """Return true if `mask` permits sending IPC to `peer` endpoint."""
+    for p in mask.allowed_peers:
+        if p == peer:
+            return true
+    false
+
+fn _pow2_u64(exp: u32) -> u64:
+    """Compute 2^exp for 0 <= exp < 64 (workaround for >> Cranelift bug)."""
+    var result: u64 = 1
+    var i: u32 = 0
+    while i < exp:
+        result = result * 2
+        i = i + 1
+    result
+
+# ============================================================================
+# G12 — Memory Grant (temporary cross-task memory region sharing)
+# ============================================================================
+
+# Grant flags
+val GRANT_R: u32  = 1   # Read access
+val GRANT_W: u32  = 2   # Write access
+val GRANT_RW: u32 = 3   # Read+Write access
+
+struct Grant:
+    """Temporary cross-task memory region share.
+
+    A grantor task creates a Grant to let a grantee task access a virtual
+    address range. Unlike capability transfer, the grant does not move
+    the underlying memory — it is a scoped permission, revocable at any time.
+    """
+    id: u32
+    grantor: u32        # Task ID of the granting task
+    grantee: u32        # Task ID of the receiving task
+    vaddr: u64          # Base virtual address in grantor's address space
+    len: u64            # Length of the region in bytes
+    flags: u32          # GRANT_R / GRANT_W / GRANT_RW
+    valid: bool         # false after cap_revoke()

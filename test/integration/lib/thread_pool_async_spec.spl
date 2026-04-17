@@ -1,155 +1,163 @@
-# Thread Pool and Async Runtime Integration Tests
+# Thread Pool and Async Runtime Integration Smoke Tests
 #
-# **Feature ID:** #THREAD-400
-# **Category:** Concurrency
-# **Status:** Integration Testing
+# Honest, bounded coverage for the host-side queue/runtime APIs that this spec
+# can directly observe in-process. This suite verifies:
+# - thread-pool construction, queueing, shutdown, and callback registration
+# - host runtime mode/worker configuration
+# - ready/pending future transformations
+# - work-stealing queue LIFO/FIFO behavior
 #
-# Integration tests for thread pool with async runtime:
-# - Thread pool task submission and execution
-# - Integration with async/await runtime
-# - Work stealing and load balancing
-# - Synchronization and coordination
-# - Error handling across thread boundaries
-#
-# NOTE: Tests verify thread pool works correctly with async runtime
+# It intentionally does not claim proof of real OS-thread execution, race
+# freedom, or cross-thread work stealing under load.
 
+use std.spec
+use std.{ThreadPool, HostFuture, HostRuntime, WorkStealingQueue, register_task_callback, get_task_callback}
 
-# ============================================================================
-# Test Group 1: Thread Pool Basic Integration (5 tests)
-# ============================================================================
+var GLOBAL_CALLBACK_HITS: usize = 0
+
+fn note_callback_hit():
+    GLOBAL_CALLBACK_HITS = GLOBAL_CALLBACK_HITS + 1
+
+fn reset_callback_hits():
+    GLOBAL_CALLBACK_HITS = 0
 
 describe "Thread Pool Basic Integration":
-    # Tests basic thread pool integration with async runtime.
-    # Verifies task submission and execution.
+    context "when observing queue-facing thread pool behavior":
+        it "constructs a pool with the requested worker count":
+            val pool = ThreadPool.new(2)
+            expect(pool.num_workers).to_equal(2)
+            expect(pool.pending_tasks()).to_equal(0)
+            expect(pool.is_idle()).to_equal(true)
+            expect(pool.is_shutdown()).to_equal(false)
 
-    context "when submitting tasks to thread pool":
-        it "executes simple task on worker thread", fn():
-            # Test basic task submission
-            expect(true).to_equal(true)
+        it "uses a non-zero worker count in the default pool":
+            val pool = ThreadPool.default()
+            expect(pool.num_workers > 0).to_equal(true)
+            expect(pool.pending_tasks()).to_equal(0)
 
-        it "handles multiple concurrent tasks", fn():
-            # Verify parallel task execution
-            expect(true).to_equal(true)
+        it "tracks submitted tasks in the pending queue":
+            var pool = ThreadPool.new(1)
+            pool.submit(task_id: 11)
+            expect(pool.pending_tasks()).to_equal(1)
+            expect(pool.is_idle()).to_equal(false)
+            pool.shutdown_now()
 
-        it "returns task results correctly", fn():
-            # Check that task results are returned
-            expect(true).to_equal(true)
+        it "queues batch submissions in order":
+            var pool = ThreadPool.new(1)
+            pool.submit_batch(task_ids: [3, 5, 8])
+            expect(pool.pending_tasks()).to_equal(3)
+            expect(pool.task_queue.pop()).to_equal(3)
+            expect(pool.task_queue.pop()).to_equal(5)
+            expect(pool.task_queue.pop()).to_equal(8)
+            expect(pool.pending_tasks()).to_equal(0)
+            pool.shutdown_now()
 
-        it "respects thread pool size limits", fn():
-            # Verify pool doesn't exceed max threads
-            expect(true).to_equal(true)
+        it "clears pending work and rejects new submissions after shutdown":
+            var pool = ThreadPool.new(1)
+            pool.submit_batch(task_ids: [1, 2, 3])
+            pool.shutdown_now()
+            pool.submit(task_id: 99)
+            expect(pool.is_shutdown()).to_equal(true)
+            expect(pool.pending_tasks()).to_equal(0)
+            expect(pool.is_idle()).to_equal(true)
 
-        it "shuts down gracefully", fn():
-            # Test clean shutdown of thread pool
-            expect(true).to_equal(true)
+        it "waits successfully when the pool is already idle":
+            var pool = ThreadPool.new(1)
+            expect(pool.wait_until_idle(timeout_ms: 10)).to_equal(true)
+            pool.shutdown_now()
 
+        it "registers callbacks by task id":
+            reset_callback_hits()
+            register_task_callback(task_id: 42, callback: note_callback_hit)
+            val callback = get_task_callback(task_id: 42)
+            expect(callback.?).to_equal(true)
 
-# ============================================================================
-# Test Group 2: Async Runtime Integration (5 tests)
-# ============================================================================
+            match callback:
+                case Some(cb):
+                    cb()
+                case nil:
+                    pass
+
+            expect(GLOBAL_CALLBACK_HITS).to_equal(1)
+
 
 describe "Thread Pool with Async Runtime":
-    # Tests thread pool integration with async/await.
-    # Verifies futures execute on thread pool workers.
+    context "when composing host runtime and futures":
+        it "creates a single-threaded runtime by default":
+            val runtime = HostRuntime.new()
+            expect(runtime.is_multi_threaded()).to_equal(false)
+            expect(runtime.num_threads).to_equal(1)
 
-    context "when using thread pool with async":
-        it "executes async tasks on thread pool", fn():
-            # Test async task runs on worker thread
-            expect(true).to_equal(true)
+        it "keeps single-threaded mode when configured with extra work queues":
+            val runtime = HostRuntime.with_workers(3)
+            expect(runtime.is_multi_threaded()).to_equal(false)
+            expect(runtime.num_threads).to_equal(1)
+            expect(runtime.scheduler.worker_count).to_equal(3)
 
-        it "handles async/await across thread boundaries", fn():
-            # Verify await works when task moves threads
-            expect(true).to_equal(true)
+        it "creates a multi-threaded runtime when explicitly requested":
+            val runtime = HostRuntime.multi_threaded(2)
+            expect(runtime.is_multi_threaded()).to_equal(true)
+            expect(runtime.num_threads).to_equal(2)
+            expect(runtime.scheduler.worker_count).to_equal(2)
 
-        it "supports async task spawning from pool", fn():
-            # Check that pool tasks can spawn more async tasks
-            expect(true).to_equal(true)
+        it "blocks on an already-ready future":
+            var runtime = HostRuntime.new()
+            val result = runtime.block_on(HostFuture.ready(42))
+            expect(result).to_equal(42)
 
-        it "coordinates with async scheduler", fn():
-            # Test integration with async runtime scheduler
-            expect(true).to_equal(true)
+        it "maps ready futures before blocking on them":
+            var runtime = HostRuntime.new()
+            val result = runtime.block_on(HostFuture.ready(7).map(\x: x * 6))
+            expect(result).to_equal(42)
 
-        it "handles async cancellation in pool", fn():
-            # Verify cancelled async tasks clean up
-            expect(true).to_equal(true)
+        it "chains ready futures with then":
+            var runtime = HostRuntime.new()
+            val future = HostFuture.ready(5).then(\x: HostFuture.ready(x + 8))
+            val result = runtime.block_on(future)
+            expect(result).to_equal(13)
 
+        it "preserves pending state through map without fabricating completion":
+            val future = HostFuture.pending()
+            val mapped = future.map(\x: x + 1)
+            expect(mapped.is_ready()).to_equal(false)
 
-# ============================================================================
-# Test Group 3: Work Stealing and Load Balancing (5 tests)
-# ============================================================================
 
 describe "Work Stealing and Load Balancing":
-    # Tests work stealing implementation and load balancing.
-    # Verifies efficient distribution of tasks.
+    context "when observing local versus steal-end queue semantics":
+        it "pops from the local end in LIFO order":
+            var queue = WorkStealingQueue.new()
+            queue.push(1)
+            queue.push(2)
+            queue.push(3)
+            expect(queue.pop()).to_equal(3)
+            expect(queue.pop()).to_equal(2)
+            expect(queue.pop()).to_equal(1)
 
-    context "when load balancing tasks":
-        it "distributes tasks evenly across workers", fn():
-            # Test that workers get similar workloads
-            expect(true).to_equal(true)
+        it "steals from the opposite end in FIFO order":
+            var queue = WorkStealingQueue.new()
+            queue.push(1)
+            queue.push(2)
+            queue.push(3)
+            expect(queue.steal()).to_equal(1)
+            expect(queue.steal()).to_equal(2)
+            expect(queue.steal()).to_equal(3)
 
-        it "steals work from busy threads", fn():
-            # Verify work stealing when imbalanced
-            expect(true).to_equal(true)
+        it "updates remaining length after mixed pop and steal operations":
+            var queue = WorkStealingQueue.new()
+            queue.push(10)
+            queue.push(20)
+            queue.push(30)
+            queue.push(40)
+            expect(queue.len()).to_equal(4)
+            expect(queue.steal()).to_equal(10)
+            expect(queue.pop()).to_equal(40)
+            expect(queue.len()).to_equal(2)
+            expect(queue.is_empty()).to_equal(false)
 
-        it "handles empty queue gracefully", fn():
-            # Check behavior when no work available
-            expect(true).to_equal(true)
-
-        it "prioritizes local queue over stealing", fn():
-            # Verify local queue is preferred
-            expect(true).to_equal(true)
-
-        it "prevents work stealing race conditions", fn():
-            # Test thread-safe work stealing
-            expect(true).to_equal(true)
-
-
-# ============================================================================
-# Test Group 4: Synchronization and Coordination (5 tests)
-# ============================================================================
-
-describe "Thread Pool Synchronization":
-    # Tests synchronization primitives and coordination.
-    # Verifies thread-safe operations and data sharing.
-
-    context "when coordinating between threads":
-        it "synchronizes shared state access", fn():
-            # Test mutex/lock usage in pool
-            expect(true).to_equal(true)
-
-        it "handles condition variables correctly", fn():
-            # Verify condition variable signaling
-            expect(true).to_equal(true)
-
-        it "supports atomic operations", fn():
-            # Test atomic counters and flags
-            expect(true).to_equal(true)
-
-        it "prevents data races", fn():
-            # Verify no data races in concurrent access
-            expect(true).to_equal(true)
-
-        it "ensures memory ordering", fn():
-            # Check proper memory barriers
-            expect(true).to_equal(true)
-
-
-# ============================================================================
-# Helper Functions
-# ============================================================================
-
-fn create_simple_task() -> fn():
-    # Create a simple task for thread pool testing.
-    fn():
-        # Simple computation
-        var sum = 0
-        var i = 0
-        while i < 100:
-            sum = sum + i
-            i = i + 1
-        sum
-
-fn verify_thread_safety(iterations: i64) -> bool:
-    # Verify thread-safe operations over multiple iterations.
-    # This would run concurrent operations and check for races
-    true
+        it "reports empty once all work is drained":
+            var queue = WorkStealingQueue.new()
+            queue.push(99)
+            expect(queue.is_empty()).to_equal(false)
+            expect(queue.pop()).to_equal(99)
+            expect(queue.is_empty()).to_equal(true)
+            expect(queue.len()).to_equal(0)

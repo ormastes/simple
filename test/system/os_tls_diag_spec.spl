@@ -3,8 +3,8 @@
 
 use std.spec.*
 
-use os.crypto.sha256.{sha256_with_len, sha256_hmac_with_len}
-use os.tls13.hkdf.{hkdf_extract, hkdf_expand, hkdf_expand_label}
+use os.crypto.sha256.{sha256_with_len, sha256_hmac_with_len, sha256_hmac_from_list}
+use os.tls13.hkdf.{hkdf_extract, hkdf_extract_from_list, hkdf_expand, hkdf_expand_label}
 use os.tls13.transcript.{transcript_new, transcript_add, transcript_hash}
 
 fn _bytes_eq(a: [u8], b: [u8]) -> bool:
@@ -20,17 +20,17 @@ fn _bytes_eq(a: [u8], b: [u8]) -> bool:
 describe "TLS diag":
 
     it "hkdf_extract changes when IKM changes":
-        var ikm_a: [u8] = []
-        var i: u64 = 0
-        while i < 22:
-            ikm_a.push(0x0Bu8)
-            i = i + 1
+        val ikm_a: [u8] = [
+            0x0Bu8, 0x0Bu8, 0x0Bu8, 0x0Bu8, 0x0Bu8, 0x0Bu8, 0x0Bu8, 0x0Bu8,
+            0x0Bu8, 0x0Bu8, 0x0Bu8, 0x0Bu8, 0x0Bu8, 0x0Bu8, 0x0Bu8, 0x0Bu8,
+            0x0Bu8, 0x0Bu8, 0x0Bu8, 0x0Bu8, 0x0Bu8, 0x0Bu8
+        ]
 
-        var ikm_diff: [u8] = []
-        i = 0
-        while i < 22:
-            ikm_diff.push(0xAAu8)
-            i = i + 1
+        val ikm_diff: [u8] = [
+            0xAAu8, 0xAAu8, 0xAAu8, 0xAAu8, 0xAAu8, 0xAAu8, 0xAAu8, 0xAAu8,
+            0xAAu8, 0xAAu8, 0xAAu8, 0xAAu8, 0xAAu8, 0xAAu8, 0xAAu8, 0xAAu8,
+            0xAAu8, 0xAAu8, 0xAAu8, 0xAAu8, 0xAAu8, 0xAAu8
+        ]
 
         val salt_a: [u8] = [
             0x00u8, 0x01u8, 0x02u8, 0x03u8, 0x04u8, 0x05u8, 0x06u8,
@@ -39,6 +39,28 @@ describe "TLS diag":
 
         val prk_a = hkdf_extract(salt_a, ikm_a)
         val prk_diff = hkdf_extract(salt_a, ikm_diff)
+        expect(_bytes_eq(prk_a, prk_diff)).to_equal(false)
+
+    it "hkdf_extract_from_list changes when IKM changes":
+        var ikm_a = []
+        var i = 0
+        while i < 22:
+            ikm_a.push(0x0B)
+            i = i + 1
+
+        var ikm_diff = []
+        i = 0
+        while i < 22:
+            ikm_diff.push(0xAA)
+            i = i + 1
+
+        val salt_a = [
+            0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06,
+            0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c
+        ]
+
+        val prk_a = hkdf_extract_from_list(salt_a, ikm_a)
+        val prk_diff = hkdf_extract_from_list(salt_a, ikm_diff)
         expect(_bytes_eq(prk_a, prk_diff)).to_equal(false)
 
     it "hkdf_expand_label encodes a different info block than raw expand":
@@ -59,24 +81,21 @@ describe "TLS diag":
         val h5 = transcript_hash(transcript_add(t0, [0xCCu8, 0xDDu8]))
         expect(_bytes_eq(h4, h5)).to_equal(false)
 
-    it "sha256 and hmac differ when second-block bytes change":
-        var msg_a: [u8] = []
-        var msg_b: [u8] = []
-        var i: u64 = 0
-        while i < 80:
-            msg_a.push(0x41u8)
-            msg_b.push(0x41u8)
+    it "hmac_from_list differs when second-block bytes change":
+        var msg_a = []
+        var msg_b = []
+        var i = 0
+        while i < 79:
+            msg_a.push(0x41)
+            msg_b.push(0x41)
             i = i + 1
-        msg_b[79] = 0x42u8
+        msg_a.push(0x41)
+        msg_b.push(0x42)
 
-        val sha_a = sha256_with_len(msg_a, msg_a.len().to_u64())
-        val sha_b = sha256_with_len(msg_b, msg_b.len().to_u64())
-        expect(_bytes_eq(sha_a, sha_b)).to_equal(false)
-
-        val key: [u8] = [
-            0x00u8, 0x01u8, 0x02u8, 0x03u8, 0x04u8, 0x05u8, 0x06u8,
-            0x07u8, 0x08u8, 0x09u8, 0x0au8, 0x0bu8, 0x0cu8
+        val key = [
+            0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06,
+            0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c
         ]
-        val hmac_a = sha256_hmac_with_len(key, key.len().to_u64(), msg_a, msg_a.len().to_u64())
-        val hmac_b = sha256_hmac_with_len(key, key.len().to_u64(), msg_b, msg_b.len().to_u64())
+        val hmac_a = sha256_hmac_from_list(key, msg_a)
+        val hmac_b = sha256_hmac_from_list(key, msg_b)
         expect(_bytes_eq(hmac_a, hmac_b)).to_equal(false)

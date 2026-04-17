@@ -1,0 +1,65 @@
+#![allow(unnamed_duplicate_typed_args)]
+# @tag:system
+
+use std.spec.*
+use os.tls13.mod.{load_tls_test_server_config}
+use test.system.os_tls_hosted_interop_helpers.{
+    file_exists, server_bin, simple_bin, ensure_server_bin, cleanup_server_processes,
+    write_server_config, spawn_server, run_openssl_client, run_simple_client, kill_server, seed_fixture_dir, sleep_ms
+}
+
+describe "Hosted TLS interop basic":
+
+    it "loads the shared tls test server SDN config":
+        val result = load_tls_test_server_config("tools/tls_test_server/server.sdn")
+        expect(result.err.?).to_equal(false)
+        val config = result.unwrap()
+        expect(config.listen).to_equal("127.0.0.1:4433")
+        expect(config.accept_count).to_equal(1)
+        expect(config.require_client_auth).to_equal(false)
+        expect(config.fixture_dir).to_equal("build/tls_test_server")
+
+    it "validates exported fixtures with openssl and completes a hosted Simple client handshake":
+        val build = ensure_server_bin()
+        expect(build.2).to_equal(0)
+        expect(file_exists(server_bin())).to_equal(true)
+        expect(file_exists(simple_bin())).to_equal(true)
+
+        val fixture_dir = "build/tls_hosted_interop/basic"
+        val openssl_listen = "127.0.0.1:34433"
+        val simple_listen = "127.0.0.1:34434"
+        val openssl_config_path = "build/tls_hosted_interop/basic_openssl.sdn"
+        val simple_config_path = "build/tls_hosted_interop/basic_simple.sdn"
+        seed_fixture_dir(fixture_dir)
+        cleanup_server_processes()
+        write_server_config(openssl_config_path, openssl_listen, fixture_dir, false, 1)
+        write_server_config(simple_config_path, simple_listen, fixture_dir, false, 1)
+
+        val openssl_server_pid = spawn_server(openssl_config_path)
+        expect(openssl_server_pid > 0).to_equal(true)
+        if openssl_server_pid <= 0:
+            return
+
+        sleep_ms(1000)
+        val openssl_result = run_openssl_client(openssl_listen, fixture_dir, false)
+        val openssl_output = openssl_result.0 + openssl_result.1
+        kill_server(openssl_server_pid)
+        cleanup_server_processes()
+
+        val simple_server_pid = spawn_server(simple_config_path)
+        expect(simple_server_pid > 0).to_equal(true)
+        if simple_server_pid <= 0:
+            return
+
+        sleep_ms(1000)
+        val simple_result = run_simple_client(simple_config_path)
+        val simple_output = simple_result.0 + simple_result.1
+        kill_server(simple_server_pid)
+        cleanup_server_processes()
+
+        expect(file_exists(fixture_dir + "/ca.pem")).to_equal(true)
+        expect(file_exists(fixture_dir + "/server.pem")).to_equal(true)
+        expect(openssl_output).to_contain("Hello from rustls TLS 1.3")
+        expect(openssl_output).to_contain("server_ack")
+        expect(simple_result.2).to_equal(0)
+        expect(simple_output).to_contain("[simple-client] handshake ok")

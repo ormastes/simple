@@ -645,3 +645,45 @@ VIOLATION: src/feature/Checkout/app/CheckoutUseCase.spl
 - `doc/07_guide/dimension_transform_examples.md` — Practical transform examples
 - `doc/07_guide/transform_init_examples.md` — `__init__.spl` config hierarchy examples
 - `src/app/cli/arch_check.spl` — CLI architecture checker
+
+---
+
+## Addendum — MDSOC+ (ECS Business Layer), 2026-04-17
+
+**Motivation.** MDSOC organises *composition axes* (modules, features, dimensions, capsules) but says nothing about how a single capsule models its *mutable domain state*. For userland OS services (PM with N processes, VFS with N open files, netstack with N sockets, WM with N windows) and apps (browser tabs, editor buffers), this state is inherently a collection of related records. Modelling it as nested structs produces inheritance-shaped hierarchies — which CLAUDE.md forbids (no inheritance; composition via components).
+
+**Decision.** Adopt **MDSOC+** = MDSOC outer + Entity-Component-System (ECS) inner, as the default architecture for userland services and apps. Kernel and drivers stay MDSOC-only.
+
+### ECS industry prior art consulted
+
+| System | Language | Storage | Relevant lesson for Simple |
+|---|---|---|---|
+| Bevy | Rust | Archetype + SoA | Type-safe queries via tuple generics; change-detection ticks; system scheduler with parallel execution |
+| EnTT | C++ | Sparse set (SoA columns) | Fast add/remove, cache-friendly iteration; chosen as the SimpleOS layout model |
+| flecs | C | Archetype + relations | Entity relationships as first-class components — worth stealing for PM parent/child |
+| Unity DOTS / Burst | C# | Chunk/archetype | Data-oriented transforms; not applicable — we don't have the Burst compiler |
+| specs (Rust) | Rust | SoA per component | Dispatcher with system dependencies; inspired our `system.spl` scheduler |
+
+**Why sparse-set over archetype** for SimpleOS:
+- SimpleOS services have small (≤10K) entity counts; iteration cost difference is negligible.
+- Sparse-set supports cheap add/remove, which matters when processes, sockets, and windows come and go frequently.
+- Simpler storage → easier RS state-transfer snapshot.
+- Matches `nogc_sync_mut` allocator (linear dense arrays + index maps; no per-archetype allocator churn).
+
+### Allocator fit
+
+- Primary target `src/lib/nogc_sync_mut/ecs/` uses the sync-mut allocator: Vec-like dense columns, grow-only within a World, freed only at capsule teardown.
+- Async/GC-friendly variant `src/lib/gc_async_mut/ecs/` rides on the GC heap for apps that accept GC pauses (editor, browser shell).
+
+### Interaction with MDSOC axes
+
+- **Module axis (MDSOC)** still defines the capsule. A service exports one module with its port contracts.
+- **Feature axis (MDSOC)** still adds cross-cutting features (logging, perf, tracing) at capsule level.
+- **ECS inside** is orthogonal to both — it's the capsule's internal state shape, not a new composition axis.
+
+### Canonical binding
+
+- Spec authority: `doc/04_architecture/mdsoc_architecture_tobe.md` §Part 3.
+- Glossary: `doc/04_architecture/glossary.md` (MDSOC+, ECS, Entity, Component, System, World, Query, ComponentStore, Change Detection).
+- Stdlib: `src/lib/nogc_sync_mut/ecs/`, `src/lib/gc_async_mut/ecs/`.
+- Reference port: `src/os/services/wm/`.

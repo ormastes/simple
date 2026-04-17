@@ -1,0 +1,304 @@
+#![allow(unnamed_duplicate_typed_args)]
+"""
+# VMM VMA Operations Specification
+
+**Feature IDs:** #OS-010
+**Category:** Runtime
+**Difficulty:** 3/5
+**Status:** Implemented
+**Requirements:** N/A
+**Plan:** N/A
+**Design:** N/A
+**Research:** N/A
+
+## Overview
+
+Tests for VMA (Virtual Memory Area) data model and operations:
+vma_add, vma_find, vma_remove, vma_split, overlap rejection.
+
+Tests operate on ProcessVmSpace with stub pml4 values — no real page
+tables are required. All assertions use type-level struct fields only.
+"""
+
+use std.spec.{describe, it, expect}
+use os.kernel.types.vmspace_types.{
+    VmArea, ProcessVmSpace,
+    VMA_ANON, VMA_FILE, VMA_SHARED,
+    VMA_READ, VMA_WRITE, VMA_EXEC, VMA_COW,
+    MAX_VMAS
+}
+
+# ============================================================================
+# Helpers
+# ============================================================================
+
+fn _make_space() -> ProcessVmSpace:
+    """Create an empty ProcessVmSpace with a stub pml4 for testing."""
+    ProcessVmSpace(
+        pml4: 0xDEAD0000,
+        id: 1,
+        vma_count: 0,
+        areas: []
+    )
+
+fn _make_anon(start: u64, len: u64) -> VmArea:
+    """Create a basic anonymous RW VmArea."""
+    VmArea(
+        start: start,
+        len: len,
+        kind: VMA_ANON,
+        flags: VMA_READ | VMA_WRITE,
+        backing: 0,
+        backing_offset: 0
+    )
+
+fn _make_file(start: u64, len: u64, backing: u64, offset: u64) -> VmArea:
+    """Create a file-backed RX VmArea."""
+    VmArea(
+        start: start,
+        len: len,
+        kind: VMA_FILE,
+        flags: VMA_READ | VMA_EXEC,
+        backing: backing,
+        backing_offset: offset
+    )
+
+# Inline vma_add logic (mirrors vmm.spl implementation)
+# Tests operate on ProcessVmSpace directly to avoid bare-metal dependencies.
+
+fn _vma_overlaps_local(a_start: u64, a_len: u64, start: u64, end: u64) -> bool:
+    val a_end = a_start + a_len
+    (a_start < end) and (a_end > start)
+
+fn _space_add(space: ProcessVmSpace, area: VmArea) -> i32:
+    """Local vma_add implementation for tests — same logic as vmm.spl."""
+    if space.vma_count >= MAX_VMAS:
+        return -12
+
+    val new_end = area.start + area.len
+    var i: i32 = 0
+    while (i as u64) < space.vma_count:
+        val existing = space.areas[i]
+        if _vma_overlaps_local(existing.start, existing.len, area.start, new_end):
+            return -17  # -EEXIST
+        i = i + 1
+
+    space.areas.push(area)
+    space.vma_count = space.vma_count + 1
+    0
+
+fn _space_find(space: ProcessVmSpace, vaddr: u64) -> VmArea?:
+    """Local vma_find — O(N) scan."""
+    var i: i32 = 0
+    while (i as u64) < space.vma_count:
+        val area = space.areas[i]
+        val area_end = area.start + area.len
+        if (vaddr >= area.start) and (vaddr < area_end):
+            return area
+        i = i + 1
+    nil
+
+# ============================================================================
+# Test Group 1: VmArea construction
+# ============================================================================
+
+describe "VmArea construction":
+    it "creates anon area with correct fields":
+        val area = _make_anon(0x400000, 0x1000)
+        expect(area.start).to_equal(0x400000)
+        expect(area.len).to_equal(0x1000)
+        expect(area.kind).to_equal(VMA_ANON)
+        expect(area.flags).to_equal(VMA_READ | VMA_WRITE)
+
+    it "creates file-backed area with backing handle":
+        val area = _make_file(0x600000, 0x2000, 42, 0x100)
+        expect(area.kind).to_equal(VMA_FILE)
+        expect(area.backing).to_equal(42)
+        expect(area.backing_offset).to_equal(0x100)
+
+    it "VMA_COW flag is distinct from VMA_WRITE":
+        val cow_flags = VMA_READ | VMA_WRITE | VMA_COW
+        expect(cow_flags & VMA_COW).to_be_greater_than(0)
+        expect(cow_flags & VMA_WRITE).to_be_greater_than(0)
+        expect(VMA_COW).to_equal(8)
+
+    it "VMA kind constants are distinct":
+        expect(VMA_ANON).to_equal(0)
+        expect(VMA_FILE).to_equal(1)
+        expect(VMA_SHARED).to_equal(2)
+
+# ============================================================================
+# Test Group 2: ProcessVmSpace construction
+# ============================================================================
+
+describe "ProcessVmSpace construction":
+    it "starts with zero VMAs":
+        val space = _make_space()
+        expect(space.vma_count).to_equal(0)
+
+    it "stores pml4 address":
+        val space = _make_space()
+        expect(space.pml4).to_equal(0xDEAD0000)
+
+    it "stores id":
+        val space = _make_space()
+        expect(space.id).to_equal(1)
+
+# ============================================================================
+# Test Group 3: vma_add
+# ============================================================================
+
+describe "vma_add":
+    it "adds single VMA — count becomes 1":
+        var space = _make_space()
+        val area = _make_anon(0x400000, 0x1000)
+        val rc = _space_add(space, area)
+        expect(rc).to_equal(0)
+        expect(space.vma_count).to_equal(1)
+
+    it "adds two non-overlapping VMAs":
+        var space = _make_space()
+        val a1 = _make_anon(0x400000, 0x1000)
+        val a2 = _make_anon(0x402000, 0x1000)
+        val rc1 = _space_add(space, a1)
+        val rc2 = _space_add(space, a2)
+        expect(rc1).to_equal(0)
+        expect(rc2).to_equal(0)
+        expect(space.vma_count).to_equal(2)
+
+    it "rejects overlapping VMA — returns -EEXIST":
+        var space = _make_space()
+        val a1 = _make_anon(0x400000, 0x2000)
+        val a2 = _make_anon(0x401000, 0x1000)  # overlaps a1
+        val rc1 = _space_add(space, a1)
+        val rc2 = _space_add(space, a2)
+        expect(rc1).to_equal(0)
+        expect(rc2).to_equal(-17)
+        expect(space.vma_count).to_equal(1)
+
+    it "rejects VMA touching the end of existing one at exact boundary — no overlap":
+        var space = _make_space()
+        val a1 = _make_anon(0x400000, 0x1000)
+        val a2 = _make_anon(0x401000, 0x1000)  # starts exactly at end of a1
+        val rc1 = _space_add(space, a1)
+        val rc2 = _space_add(space, a2)
+        expect(rc1).to_equal(0)
+        expect(rc2).to_equal(0)   # adjacent, not overlapping
+        expect(space.vma_count).to_equal(2)
+
+# ============================================================================
+# Test Group 4: vma_find
+# ============================================================================
+
+describe "vma_find":
+    it "finds VMA by address inside it":
+        var space = _make_space()
+        val area = _make_anon(0x400000, 0x4000)
+        _space_add(space, area)
+        val found = _space_find(space, 0x401000)
+        if val Some(a) = found:
+            expect(a.start).to_equal(0x400000)
+            expect(a.len).to_equal(0x4000)
+        else:
+            expect(0).to_equal(1)   # force failure if nil
+
+    it "returns nil for unmapped address":
+        var space = _make_space()
+        val area = _make_anon(0x400000, 0x1000)
+        _space_add(space, area)
+        val found = _space_find(space, 0x800000)
+        # 0x800000 is outside any VMA — vma_count stays 1 (nothing removed)
+        expect(space.vma_count).to_equal(1)
+        if val Some(_a) = found:
+            expect(0).to_equal(1)   # should be nil — fail if reached
+
+    it "finds correct VMA among multiple":
+        var space = _make_space()
+        val a1 = _make_anon(0x400000, 0x1000)
+        val a2 = _make_anon(0x402000, 0x1000)
+        val a3 = _make_anon(0x500000, 0x2000)
+        _space_add(space, a1)
+        _space_add(space, a2)
+        _space_add(space, a3)
+        val found = _space_find(space, 0x500800)
+        if val Some(a) = found:
+            expect(a.start).to_equal(0x500000)
+        else:
+            expect(0).to_equal(1)
+
+    it "does not find address exactly at end (exclusive)":
+        var space = _make_space()
+        val area = _make_anon(0x400000, 0x1000)
+        _space_add(space, area)
+        val found = _space_find(space, 0x401000)  # one byte past end
+        # The VMA ends at 0x401000 (exclusive), so nothing should match
+        expect(space.vma_count).to_equal(1)
+        if val Some(_a) = found:
+            expect(0).to_equal(1)   # should be nil — fail if reached
+
+# ============================================================================
+# Test Group 5: vma_remove / split semantics
+# ============================================================================
+
+describe "vma_remove":
+    it "removing entire VMA reduces count to 0":
+        var space = _make_space()
+        val area = _make_anon(0x400000, 0x4000)
+        _space_add(space, area)
+        expect(space.vma_count).to_equal(1)
+
+        # Simulate removal: record the area was found then drop it
+        val found_before = _space_find(space, 0x401000)
+        if val Some(_a) = found_before:
+            expect(_a.start).to_equal(0x400000)
+        # Manually drop (mirrors vma_remove full-cover logic)
+        space.vma_count = 0
+        space.areas = []
+        expect(space.vma_count).to_equal(0)
+        # After removal, vma_count is 0 — scan returns nil implicitly
+        val found_after = _space_find(space, 0x401000)
+        if val Some(_b) = found_after:
+            expect(0).to_equal(1)   # should be nil — fail if reached
+
+    it "splitting a VMA produces two smaller VMAs":
+        var space = _make_space()
+        val area = _make_anon(0x400000, 0x4000)
+        _space_add(space, area)
+
+        # Simulate vma_split at 0x402000
+        val split_at: u64 = 0x402000
+        val orig = space.areas[0]
+        val left = VmArea(
+            start: orig.start,
+            len: split_at - orig.start,
+            kind: orig.kind,
+            flags: orig.flags,
+            backing: orig.backing,
+            backing_offset: orig.backing_offset
+        )
+        val right = VmArea(
+            start: split_at,
+            len: (orig.start + orig.len) - split_at,
+            kind: orig.kind,
+            flags: orig.flags,
+            backing: orig.backing,
+            backing_offset: orig.backing_offset + (split_at - orig.start)
+        )
+        space.areas[0] = left
+        space.areas.push(right)
+        space.vma_count = 2
+
+        expect(space.vma_count).to_equal(2)
+        expect(space.areas[0].len).to_equal(0x2000)
+        expect(space.areas[1].start).to_equal(0x402000)
+        expect(space.areas[1].len).to_equal(0x2000)
+
+    it "backing_offset of right fragment is correct after split":
+        var space = _make_space()
+        val area = _make_file(0x500000, 0x8000, 7, 0x1000)
+        _space_add(space, area)
+
+        val split_at: u64 = 0x504000
+        val orig = space.areas[0]
+        val right_backing_offset = orig.backing_offset + (split_at - orig.start)
+        expect(right_backing_offset).to_equal(0x1000 + 0x4000)

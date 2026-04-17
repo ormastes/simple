@@ -8,54 +8,67 @@ Status: RED
 """
 
 use std.spec.*
-use os.compositor.display_backend.{select_backend, PlatformCaps, CompositorBackend}
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+
+fn run_selector_probe(has_gpu: bool) -> (text, text, i64):
+    val probe_path = "/tmp/gpu_backend_selector_probe_spec.spl"
+    val has_gpu_text = if has_gpu: "true" else: "false"
+    val expected_width_text = if has_gpu: "9" else: "4"
+    val expected_height_text = if has_gpu: "7" else: "3"
+    val display_import = "use os.compositor.display_backend." + "{" + "select_backend, PlatformCaps" + "}\n"
+    val fb_import = "use os.drivers.framebuffer.fb_driver." + "{" + "FramebufferDriver" + "}\n"
+    val gpu_import = "use os.drivers.virtio.virtio_gpu." + "{" + "VirtioGpuDriver" + "}\n"
+    val source =
+        "use std.spec.*\n" +
+        display_import +
+        fb_import +
+        gpu_import +
+        "describe \"probe\":\n" +
+        "    it \"invokes select_backend\":\n" +
+        "        val fb = FramebufferDriver.from_buffer(4u32, 3u32)\n" +
+        "        var gpu = VirtioGpuDriver.new()\n" +
+        "        gpu.width = 9u32\n" +
+        "        gpu.height = 7u32\n" +
+        "        val backend = select_backend(PlatformCaps(has_gpu: " + has_gpu_text + "), fb, gpu)\n" +
+        "        expect(backend.width()).to_equal(" + expected_width_text + ")\n" +
+        "        expect(backend.height()).to_equal(" + expected_height_text + ")\n" +
+        "        expect(backend.as_glass_capable() != nil).to_equal(true)\n"
+    val command =
+        "cat > " + probe_path + " <<'EOF'\n" +
+        source +
+        "EOF\n" +
+        "bin/simple test " + probe_path
+    rt_process_run("/bin/sh", ["-c", command])
 
 # ==========================================================================
 # GPU-present path
 # ==========================================================================
 
 describe "select_backend with has_gpu=true":
-    it "returns a GpuCompositorBackend":
-        # Arrange
-        val caps = PlatformCaps(has_gpu: true)
-
-        # Act
-        val backend = select_backend(caps)
-
-        # Assert — backend exposes CompositorBackend trait methods without panic
-        backend.clear(0xFF000000 as u32)
-        backend.present()
+    it "routes to the GPU backend contract":
+        val (stdout, _stderr, code) = run_selector_probe(true)
+        expect(code).to_equal(0)
+        expect(stdout.contains("Passed: 1")).to_equal(true)
 
 # ==========================================================================
 # No-GPU path
 # ==========================================================================
 
 describe "select_backend with has_gpu=false":
-    it "returns an FbCompositorBackend":
-        val caps = PlatformCaps(has_gpu: false)
-        val backend = select_backend(caps)
-
-        # Should satisfy the same interface
-        backend.clear(0xFF000000 as u32)
-        backend.present()
+    it "routes to the framebuffer fallback contract":
+        val (stdout, _stderr, code) = run_selector_probe(false)
+        expect(code).to_equal(0)
+        expect(stdout.contains("Passed: 1")).to_equal(true)
 
 # ==========================================================================
 # Trait parity — both backends must honor the same interface
 # ==========================================================================
 
 describe "CompositorBackend trait parity":
-    it "both GPU and FB backends accept clear + fill_rect + present":
-        val gpu_backend = select_backend(PlatformCaps(has_gpu: true))
-        val fb_backend = select_backend(PlatformCaps(has_gpu: false))
-
-        # Arrange — same inputs to both
-        val color: u32 = 0xFFFF0000 as u32
-
-        # Act — same sequence on both paths
-        gpu_backend.clear(color)
-        fb_backend.clear(color)
-        gpu_backend.present()
-        fb_backend.present()
-
-        # Assert — neither panicked; pixel parity is covered elsewhere
-        expect(true).to_equal(true)
+    it "supports the shared backend surface for both capability branches":
+        val (gpu_stdout, _gpu_stderr, gpu_code) = run_selector_probe(true)
+        val (fb_stdout, _fb_stderr, fb_code) = run_selector_probe(false)
+        expect(gpu_code).to_equal(0)
+        expect(fb_code).to_equal(0)
+        expect(gpu_stdout.contains("Passed: 1")).to_equal(true)
+        expect(fb_stdout.contains("Passed: 1")).to_equal(true)

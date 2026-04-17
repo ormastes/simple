@@ -609,6 +609,7 @@ pub const RUNTIME_SYMBOL_NAMES: &[&str] = &[
     // Signature generation (RFC 8332 RSA + RFC 5656 ECDSA-P256) for SSH host keys
     "rt_rsa_sha256_sign",
     "rt_rsa_sha512_sign",
+    "rt_ed25519_sign",
     "rt_ecdsa_p256_sign",
     // Curve25519 DH key exchange for SSH KEX
     "rt_dh_curve25519_keypair",

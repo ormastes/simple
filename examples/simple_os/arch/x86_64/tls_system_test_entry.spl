@@ -25,7 +25,7 @@ use os.userlib.net.{IpAddr, SockAddr, Socket, socket, connect}
 use os.kernel.boot.init_services.{init_all_services, services_network_ready}
 
 # TLS 1.3
-use os.tls13.mod.{tls13_connect, tls13_send, tls13_recv, tls13_close, Tls13Context, Tls13ConnectResult, Tls13RecvData}
+use os.tls13.mod.{tls13_connect, tls13_send, tls13_recv, tls13_close, Tls13ConnectResult}
 
 var _pass_count: u32 = 0
 var _fail_count: u32 = 0
@@ -157,6 +157,13 @@ fn _start():
         # ------------------------------------------------------------
         _serial("--- Test 4: Receive server greeting ---")
         val recv_result = tls13_recv(ctx)
+        if not recv_result.ok:
+            _serial("[TLS FAIL: recv failed: {recv_result.reason}]")
+            _assert(false, "Server greeting receive succeeded")
+            tls13_close(ctx)
+            _serial("TLS system test: {_pass_count} passed, {_fail_count} failed")
+            rt_port_outb(0xf4, 0u8)
+            return
         val greeting_data = recv_result.data
         val ctx2 = recv_result.ctx
         _serial("  Received {greeting_data.len()} bytes from server")
@@ -172,7 +179,15 @@ fn _start():
         # ------------------------------------------------------------
         _serial("--- Test 5: Send client greeting ---")
         val send_bytes = _text_to_bytes("Hello from SimpleOS TLS 1.3")
-        val ctx3 = tls13_send(ctx2, send_bytes)
+        val send_result = tls13_send(ctx2, send_bytes)
+        if not send_result.ok:
+            _serial("[TLS FAIL: send failed: {send_result.reason}]")
+            _assert(false, "Client greeting sent")
+            tls13_close(ctx2)
+            _serial("TLS system test: {_pass_count} passed, {_fail_count} failed")
+            rt_port_outb(0xf4, 0u8)
+            return
+        val ctx3 = send_result.ctx
         _serial("  Sent {send_bytes.len()} bytes")
         _assert(send_bytes.len() > 0, "Client greeting sent")
 
@@ -180,9 +195,12 @@ fn _start():
         # Test 6: Close TLS connection
         # ------------------------------------------------------------
         _serial("--- Test 6: TLS close ---")
-        tls13_close(ctx3)
-        _assert(true, "TLS connection closed cleanly")
-        _serial("  TLS close_notify sent, TCP closed")
+        val close_result = tls13_close(ctx3)
+        _assert(close_result.ok, "TLS connection closed cleanly")
+        if close_result.ok:
+            _serial("  TLS close_notify sent, TCP closed")
+        else:
+            _serial("  TLS close failed: {close_result.reason}")
 
     # ----------------------------------------------------------------
     # Results

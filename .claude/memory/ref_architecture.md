@@ -82,3 +82,25 @@ fallback ladder: `build/bootstrap/stage2_full/simple` → `target/release/simple
 When `bin/simple` reports `PASSED (0ms)` on a system spec while the Rust seed
 does not, the production binary is simply stale. Rebuild the Rust seed with
 cargo and copy it over `bin/simple` (NOT over `bin/release/<triple>/simple`).
+
+## MDSOC+ (OS Userland Architecture, 2026-04-17)
+
+For **SimpleOS userland services and apps** (not the compiler, not the kernel, not drivers), use **MDSOC+** = MDSOC outer + **ECS business layer** inside.
+
+Rules:
+- Kernel (`src/os/kernel/`): MDSOC only, no ECS.
+- Drivers (`src/os/drivers/`): MDSOC only, no ECS.
+- Services (`src/os/services/`): MDSOC capsule + ECS World inside.
+- Apps (`src/os/apps/`): MDSOC capsule + ECS World inside.
+- libc/POSIX shim (`src/os/libc/`, `src/os/posix/`): neither (thin ABI veneer).
+
+Canonical ECS:
+- Entity = opaque `u64` id (generational).
+- Component = POD struct in `ComponentStore<T>` SoA column.
+- System = free fn `fn sys_name(world: &mut World, dt: Duration)`.
+- World = per-service container; one per capsule.
+- Import: `use std.ecs` → re-exports `{World, Entity, ComponentStore, Query, System, Added, Changed, Removed}`.
+
+Stdlib location: `src/lib/nogc_sync_mut/ecs/` (default) and `src/lib/gc_async_mut/ecs/` (GC variant for apps).
+
+Doc authority: `doc/04_architecture/mdsoc_architecture_tobe.md` §Part 3 and `doc/04_architecture/glossary.md` (MDSOC+ / ECS terms).

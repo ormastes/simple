@@ -1,6 +1,6 @@
 # Bug Reports
 
-## Summary (Updated 2026-01-05)
+## Summary (Updated 2026-04-17)
 
 | Bug | Status | Priority |
 |-----|--------|----------|
@@ -52,8 +52,9 @@
 | `bin/simple bug-add` fails: LOG_ERROR not found + build help shown | ✅ FIXED | Medium |
 | MCP jj_commit/describe/new/squash shell quoting bug | ✅ FIXED | Medium |
 | Test runner single-file 56s startup | ✅ FIXED | Low |
+| Baremetal TLS handshake panics in `x25519_base` on x86_64 QEMU | 🔍 OPEN | High |
 
-**Summary:** 46 fixed, 0 open, 0 investigating, 0 workaround, 5 invalid (Updated 2026-02-20)
+**Summary:** 46 fixed, 1 open, 0 investigating, 0 workaround, 5 invalid (Updated 2026-04-17)
 
 ---
 

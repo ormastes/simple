@@ -5,6 +5,7 @@
 - [Architecture Overview](overview.md) - High-level architecture and module dependencies
 - [File & Class Structure](file_class_structure.md) - Comprehensive codebase inventory (5,644 files, 1.1M lines)
 - [MDSOC Architecture](mdsoc_architecture_tobe.md) - Layered MDSOC view, shared tree nodes, layer violation fixes
+- [MDSOC+ (ECS Business Layer)](mdsoc_architecture_tobe.md#mdsoc-plus-ecs-business-layer) - Default for userland services/apps: MDSOC outer + ECS inner
 - [Architecture Details](architecture.md) - Overview, Structure, Dependencies
 - [Module Details](architecture_modules.md) - Module Details, Type/Struct Listing
 - [Data Flows](architecture_flows.md) - Data Flow, Execution, Memory Management

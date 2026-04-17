@@ -1,0 +1,65 @@
+#![allow(unnamed_duplicate_typed_args)]
+
+extern fn rt_file_exists(path: text) -> bool
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+extern fn rt_process_spawn_async(cmd: text, args: [text]) -> i64
+extern fn rt_process_kill(pid: i64) -> bool
+extern fn rt_process_wait(pid: i64, timeout_ms: i64) -> i64
+extern fn rt_thread_sleep(ms: i64)
+
+fn file_exists(path: text) -> bool:
+    rt_file_exists(path)
+
+fn process_run(cmd: text, args: [text]) -> (text, text, i64):
+    rt_process_run(cmd, args)
+
+fn server_bin() -> text:
+    "tools/tls_test_server/target/debug/tls_test_server"
+
+fn simple_bin() -> text:
+    "src/compiler_rust/target/debug/simple"
+
+fn ensure_server_bin() -> (text, text, i64):
+    process_run("/bin/sh", ["-c", "cargo build --manifest-path tools/tls_test_server/Cargo.toml"])
+
+fn kill_server(server_pid: i64):
+    if server_pid > 0:
+        rt_process_kill(server_pid)
+        rt_process_wait(server_pid, 2000)
+
+fn cleanup_server_processes():
+    process_run("/bin/sh", ["-c", "pkill -f 'tools/tls_test_server/target/debug/tls_test_server' >/dev/null 2>&1 || true"])
+    rt_thread_sleep(200)
+
+fn sleep_ms(ms: i64):
+    rt_thread_sleep(ms)
+
+fn write_server_config(path: text, listen: text, fixture_dir: text, require_client_auth: bool, accept_count: i64):
+    val auth_text = if require_client_auth: "true" else: "false"
+    val content =
+        "server:\n" +
+        "  listen: \"" + listen + "\"\n" +
+        "  accept_count: " + accept_count.to_text() + "\n" +
+        "  require_client_auth: " + auth_text + "\n" +
+        "  fixture_dir: \"" + fixture_dir + "\"\n" +
+        "  greeting: \"Hello from rustls TLS 1.3\"\n"
+    val cmd = "mkdir -p \"$(dirname '" + path + "')\" && cat > '" + path + "' <<'EOF'\n" + content + "EOF\n"
+    process_run("/bin/sh", ["-c", cmd])
+
+fn spawn_server(config_path: text) -> i64:
+    rt_process_spawn_async(server_bin(), ["--config", config_path])
+
+fn run_openssl_client(listen: text, fixture_dir: text, with_client_auth: bool) -> (text, text, i64):
+    val auth_args = if with_client_auth:
+        " -cert " + fixture_dir + "/client.pem -key " + fixture_dir + "/client.key.pem"
+    else:
+        ""
+    val cmd = "printf 'pong\\n' | openssl s_client -quiet -connect " + listen + " -CAfile " + fixture_dir + "/ca.pem" + auth_args
+    process_run("/bin/sh", ["-c", cmd])
+
+fn run_simple_client(config_path: text) -> (text, text, i64):
+    val cmd = "SIMPLE_TIMEOUT_SECONDS=90 TLS_TEST_SERVER_CONFIG='" + config_path + "' '" + simple_bin() + "' run examples/tls_hosted_client/main.spl"
+    process_run("/bin/sh", ["-c", cmd])
+
+fn seed_fixture_dir(fixture_dir: text):
+    process_run("/bin/sh", ["-c", "mkdir -p '" + fixture_dir + "' && cp -f build/tls_test_server/* '" + fixture_dir + "/' 2>/dev/null || true"])

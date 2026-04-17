@@ -272,3 +272,37 @@ describe "Parser deplyomeent coverage":
 
 
 ```
+
+---
+
+## MDSOC+ (Architecture)
+
+**MDSOC outer + ECS business layer.** Default architecture for SimpleOS userland services and apps since 2026-04-17. The MDSOC capsule boundary (manifest, ports, capabilities, lifecycle) stays unchanged; inside a capsule, mutable domain state is modelled with an ECS `World`. Kernel (`src/os/kernel/`) and drivers (`src/os/drivers/`) stay MDSOC-only and do **not** use ECS. See `mdsoc_architecture_tobe.md#mdsoc-plus-ecs-business-layer`.
+
+## ECS (Entity-Component-System)
+
+The internal business-state model used inside every MDSOC+ capsule. Three elements:
+
+- **Entity** — opaque `u64` identifier with a generational index; stable for its lifetime. Holds no data itself.
+- **Component** — POD struct stored in a `ComponentStore<T>` column (struct-of-arrays layout). A process, socket, or window is the *union* of components attached to its entity; there is no "Process class".
+- **System** — free function `fn sys_name(world: &mut World, dt: Duration)` that runs typed queries over the world and mutates matching entities.
+
+ECS replaces inheritance-style struct nesting. Composition via components is the whole point (and CLAUDE.md forbids inheritance anyway).
+
+## World (ECS)
+
+The per-capsule container of entities, component stores, and a system schedule. Each userland service owns exactly one `World`. Imports via `use std.ecs`. Defined in `src/lib/nogc_sync_mut/ecs/world.spl` (sync-mutable variant) and `src/lib/gc_async_mut/ecs/world.spl` (GC-friendly variant).
+
+## Query (ECS)
+
+Compile-time typed iterator over entities that carry a given component tuple. Example: `world.query::<(Pid, ExitStatus)>()` yields every process entity that has both `Pid` and `ExitStatus` components. Filters include `With<T>`, `Without<T>`, and change-detection markers `Added<T>`, `Changed<T>`, `Removed<T>`.
+
+## ComponentStore (ECS)
+
+The per-component dense column that backs a `World`. Struct-of-arrays layout for cache efficiency: `ComponentStore<T>` holds a `dense: [T]` array + sparse entity→slot index. Adding a component appends; removing swaps-with-last. Defined in `src/lib/nogc_sync_mut/ecs/component_store.spl`.
+
+## Change Detection (ECS)
+
+`Added<T>`, `Changed<T>`, `Removed<T>` tick flags on components, used by the Reincarnation Server (RS) to snapshot only the modified slice of a capsule's World during state transfer across a restart. Defined in `src/lib/nogc_sync_mut/ecs/change_detection.spl`.
+
+Cross-ref: MDSOC capsules in `src/os/services/**` and `src/os/apps/**` use ECS for internals; kernel capsules in `src/os/kernel/**` and driver capsules in `src/os/drivers/**` do not.

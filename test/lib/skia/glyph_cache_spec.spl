@@ -16,10 +16,11 @@ SkStrikeCache.
 
 use std.sspec.*
 use std.skia.feature.glyph_cache.cache.{
-    GlyphCacheKey, GlyphCacheEntry, GlyphCache,
+    GlyphCacheKey,
     glyph_cache_new, glyph_cache_key_equal, hash_font
 }
 use std.skia.feature.glyph.rasterize.{GlyphBitmap}
+use std.skia.entity.font.{sk_font_new, sk_font_style_normal, sk_typeface_from_name}
 
 # ============================================================================
 # Helpers
@@ -48,6 +49,23 @@ describe "glyph_cache":
         expect(cache.size()).to_equal(0)
         expect(cache.capacity).to_equal(16)
 
+    it "glyph_cache_key_equal: compares all key fields":
+        val base = _key(1001, 42, 12 * 256)
+        expect(glyph_cache_key_equal(base, _key(1001, 42, 12 * 256))).to_equal(true)
+        expect(glyph_cache_key_equal(base, _key(1002, 42, 12 * 256))).to_equal(false)
+        expect(glyph_cache_key_equal(base, _key(1001, 43, 12 * 256))).to_equal(false)
+        expect(glyph_cache_key_equal(base, _key(1001, 42, 13 * 256))).to_equal(false)
+
+    it "hash_font: stays stable for same font and changes across family or size":
+        val style = sk_font_style_normal()
+        val alpha_12 = sk_font_new(sk_typeface_from_name("Alpha Sans", style), 12.0)
+        val alpha_12_again = sk_font_new(sk_typeface_from_name("Alpha Sans", style), 12.0)
+        val alpha_14 = sk_font_new(sk_typeface_from_name("Alpha Sans", style), 14.0)
+        val beta_12 = sk_font_new(sk_typeface_from_name("Beta Sans", style), 12.0)
+        expect(hash_font(alpha_12)).to_equal(hash_font(alpha_12_again))
+        expect(hash_font(alpha_12) == hash_font(alpha_14)).to_equal(false)
+        expect(hash_font(alpha_12) == hash_font(beta_12)).to_equal(false)
+
     it "insert then lookup: returns Some(bitmap)":
         val cache = glyph_cache_new(4)
         val k = _key(1001, 42, 12 * 256)
@@ -59,8 +77,9 @@ describe "glyph_cache":
                 expect(found.width).to_equal(2)
                 expect(found.height).to_equal(2)
                 expect(found.pixels.length()).to_equal(4)
+                expect(found.pixels[0] as i64).to_equal(7)
             None:
-                expect(false).to_equal(true)
+                fail("Expected cache hit for inserted glyph")
 
     it "lookup: missing key returns None":
         val cache = glyph_cache_new(4)
@@ -86,8 +105,9 @@ describe "glyph_cache":
         match got_k3:
             Some(b):
                 expect(b.width).to_equal(1)
+                expect(b.pixels[0] as i64).to_equal(3)
             None:
-                expect(false).to_equal(true)
+                fail("Expected most recently inserted glyph to remain cached")
 
     it "lookup updates last_used (most recent key survives eviction)":
         val cache = glyph_cache_new(2)
@@ -99,25 +119,29 @@ describe "glyph_cache":
         # Touch k1 so it becomes MRU; k2 is now the LRU candidate.
         val touch = cache.lookup(k1)
         match touch:
-            Some(_):
-                expect(true).to_equal(true)
+            Some(hit):
+                expect(hit.pixels[0] as i64).to_equal(10)
             None:
-                expect(false).to_equal(true)
+                fail("Expected lookup to refresh k1 before eviction")
         cache.insert(k3, _make_bitmap(1, 1, 30))
         # k1 should still be present, k2 should have been evicted.
         val got_k1 = cache.lookup(k1)
         match got_k1:
             Some(b1):
                 expect(b1.pixels.length()).to_be_greater_than(0)
+                expect(b1.pixels[0] as i64).to_equal(10)
             None:
-                expect(false).to_equal(true)
+                fail("Expected refreshed key to survive eviction")
         val got_k2 = cache.lookup(k2)
         expect(got_k2).to_be_nil()
 
-    it "clear: resets size to 0":
+    it "clear: resets size and tick to 0 and drops old entries":
         val cache = glyph_cache_new(4)
         cache.insert(_key(5, 1, 8 * 256), _make_bitmap(1, 1, 1))
         cache.insert(_key(5, 2, 8 * 256), _make_bitmap(1, 1, 2))
         expect(cache.size()).to_be_greater_than(0)
+        expect(cache.tick).to_be_greater_than(0)
         cache.clear()
         expect(cache.size()).to_equal(0)
+        expect(cache.tick).to_equal(0)
+        expect(cache.lookup(_key(5, 1, 8 * 256))).to_be_nil()

@@ -80,6 +80,13 @@ use os.kernel.ipc.syscall.{_handle_log_read}
 use os.kernel.ipc.syscall.{_handle_sysinfo}
 use os.kernel.ipc.syscall.{_handle_get_hostname}
 use os.kernel.ipc.syscall.{_handle_set_hostname}
+use os.kernel.ipc.syscall.{_handle_privctl}
+use os.kernel.ipc.syscall.{_handle_mem_grant}
+use os.kernel.ipc.syscall.{_handle_mem_revoke}
+use os.kernel.ipc.syscall.{_handle_safecopy_from}
+use os.kernel.ipc.syscall.{_handle_safecopy_to}
+use os.kernel.ipc.syscall.{_handle_sys_mmap}
+use os.kernel.ipc.syscall.{_handle_sys_munmap}
 use os.kernel.scheduler.scheduler.{Scheduler}
 use os.kernel.ipc.ipc.{IpcManager}
 use os.kernel.log.klog.{KernelLog}
@@ -170,6 +177,13 @@ fn _shim_keepalive() -> u64:
     total = total + (spl_handle_get_hostname as u64)
     total = total + (spl_handle_set_hostname as u64)
     total = total + (spl_handle_device_grant as u64)
+    total = total + (spl_handle_privctl as u64)
+    total = total + (spl_handle_mem_grant as u64)
+    total = total + (spl_handle_mem_revoke as u64)
+    total = total + (spl_handle_safecopy_from as u64)
+    total = total + (spl_handle_safecopy_to as u64)
+    total = total + (spl_handle_sys_mmap as u64)
+    total = total + (spl_handle_sys_munmap as u64)
     total
 
 @export("C", name: "shim_init")
@@ -1493,3 +1507,152 @@ fn spl_handle_dup2(a0: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64) -> i64:
     """
     val _a = _make_args(33, a0, a1, a2, a3, a4, a5)
     -38
+
+# ============================================================================
+# IF-01 Wave 1 — G11/G12 syscalls (2026-04-17)
+# ============================================================================
+
+# ===========================================================================
+# syscall 98 — privctl   [IMPLEMENTED — G11]
+#
+# a0 = target_task (u32 task ID)
+# a1 = op: PRIVCTL_SET_MASK(0)/GET_MASK(1)/ADD_PEER(2)/REMOVE_PEER(3)
+# a2 = data (op-specific: peer id or kernel_calls bitmap)
+# a3..a5 unused
+# returns 0 or kernel_calls bitmap on success, negative errno on failure
+# ===========================================================================
+@export("C", name: "spl_handle_privctl")
+fn spl_handle_privctl(a0: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64) -> i64:
+    """Strong override for the weak spl_handle_privctl stub.
+
+    Forwards to _handle_privctl() in syscall.spl.
+    Syscall number 98: read/write per-task kernel privilege mask.
+    Requires SystemPrivilege capability.
+    """
+    val args = _make_args(98, a0, a1, a2, a3, a4, a5)
+    val result = _handle_privctl(args, g_shim_scheduler)
+    result.value
+
+# ===========================================================================
+# syscall 99 — mem_grant   [IMPLEMENTED — G12]
+#
+# a0 = grantee task ID (u32)
+# a1 = vaddr — base virtual address in caller's space
+# a2 = len — length in bytes
+# a3 = flags — GRANT_R(1)/GRANT_W(2)/GRANT_RW(3)
+# a4..a5 unused
+# returns grant_id >= 0 on success, negative errno on failure
+# ===========================================================================
+@export("C", name: "spl_handle_mem_grant")
+fn spl_handle_mem_grant(a0: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64) -> i64:
+    """Strong override for the weak spl_handle_mem_grant stub.
+
+    Forwards to _handle_mem_grant() in syscall.spl.
+    Syscall number 99: create a temporary cross-task memory region grant.
+    """
+    val args = _make_args(99, a0, a1, a2, a3, a4, a5)
+    val result = _handle_mem_grant(args, g_shim_scheduler)
+    result.value
+
+# ===========================================================================
+# syscall 100 — mem_revoke   [IMPLEMENTED — G12]
+#
+# a0 = grant_id to revoke
+# a1..a5 unused
+# returns 0 on success, negative errno on failure
+# ===========================================================================
+@export("C", name: "spl_handle_mem_revoke")
+fn spl_handle_mem_revoke(a0: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64) -> i64:
+    """Strong override for the weak spl_handle_mem_revoke stub.
+
+    Forwards to _handle_mem_revoke() in syscall.spl.
+    Syscall number 100: revoke a previously issued memory grant.
+    """
+    val args = _make_args(100, a0, a1, a2, a3, a4, a5)
+    val result = _handle_mem_revoke(args, g_shim_scheduler)
+    result.value
+
+# ===========================================================================
+# syscall 101 — safecopy_from   [IMPLEMENTED — G12]
+#
+# a0 = src_task — grantor task ID (u32)
+# a1 = grant_id
+# a2 = src_off — byte offset within the granted region
+# a3 = dst_vaddr — destination VA in caller's address space
+# a4 = len — number of bytes to copy
+# a5 unused
+# returns 0 on success, negative errno on failure
+# ===========================================================================
+@export("C", name: "spl_handle_safecopy_from")
+fn spl_handle_safecopy_from(a0: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64) -> i64:
+    """Strong override for the weak spl_handle_safecopy_from stub.
+
+    Forwards to _handle_safecopy_from() in syscall.spl.
+    Syscall number 101: bounds-checked copy from grantor's region.
+    """
+    val args = _make_args(101, a0, a1, a2, a3, a4, a5)
+    val result = _handle_safecopy_from(args, g_shim_scheduler)
+    result.value
+
+# ===========================================================================
+# syscall 102 — safecopy_to   [IMPLEMENTED — G12]
+#
+# a0 = dst_task — grantee task ID (u32)
+# a1 = grant_id
+# a2 = dst_off — byte offset within the granted region
+# a3 = src_vaddr — source VA in caller's address space
+# a4 = len — number of bytes to copy
+# a5 unused
+# returns 0 on success, negative errno on failure
+# ===========================================================================
+@export("C", name: "spl_handle_safecopy_to")
+fn spl_handle_safecopy_to(a0: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64) -> i64:
+    """Strong override for the weak spl_handle_safecopy_to stub.
+
+    Forwards to _handle_safecopy_to() in syscall.spl.
+    Syscall number 102: bounds-checked copy to grantee's region.
+    """
+    val args = _make_args(102, a0, a1, a2, a3, a4, a5)
+    val result = _handle_safecopy_to(args, g_shim_scheduler)
+    result.value
+
+# ===========================================================================
+# syscall 103 — sys_mmap   [IMPLEMENTED — G13]
+#
+# a0 = vaddr          — requested virtual address (0 = kernel picks)
+# a1 = len            — length in bytes
+# a2 = flags          — VMA_READ | VMA_WRITE | VMA_EXEC | VMA_COW (u32)
+# a3 = kind           — VMA_ANON | VMA_FILE | VMA_SHARED (u32)
+# a4 = backing        — file handle or 0 for anonymous
+# a5 = backing_offset — byte offset into backing file
+# returns mapped vaddr >= 0 on success, negative errno on failure
+# ===========================================================================
+@export("C", name: "spl_handle_sys_mmap")
+fn spl_handle_sys_mmap(a0: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64) -> i64:
+    """Strong override for the weak spl_handle_sys_mmap stub.
+
+    Forwards to _handle_sys_mmap() in syscall.spl.
+    Syscall number 103: map a virtual address range into the current task's space.
+    """
+    val args = _make_args(103, a0, a1, a2, a3, a4, a5)
+    val result = _handle_sys_mmap(args)
+    result.value
+
+# ===========================================================================
+# syscall 104 — sys_munmap   [IMPLEMENTED — G13]
+#
+# a0 = vaddr — start of region to unmap (page-aligned)
+# a1 = len   — length in bytes
+# a2..a5 unused
+# returns 0 on success, negative errno on failure
+# ===========================================================================
+@export("C", name: "spl_handle_sys_munmap")
+fn spl_handle_sys_munmap(a0: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64) -> i64:
+    """Strong override for the weak spl_handle_sys_munmap stub.
+
+    Forwards to _handle_sys_munmap() in syscall.spl.
+    Syscall number 104: unmap a virtual address range from the current task's space.
+    """
+    val args = _make_args(104, a0, a1, a2, a3, a4, a5)
+    val result = _handle_sys_munmap(args)
+    result.value

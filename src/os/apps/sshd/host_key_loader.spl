@@ -7,8 +7,8 @@
 
 # File I/O externs (same pattern as disk_image_bake.spl / ffi/io.spl)
 extern fn rt_file_exists(path: text) -> bool
-extern fn rt_file_read_text(path: text) -> text
 extern fn rt_file_read_bytes(path: text) -> [u8]
+extern fn rt_bytes_to_text(data: [u8]) -> text
 
 # ============================================================================
 # Base64 decode (inline, baremetal-safe — no std import needed)
@@ -101,12 +101,14 @@ pub fn load_rsa_pkcs8_from_file(path: text) -> Result<[u8], text>:
     if not rt_file_exists(path):
         return Err("host key file not found: {path}")
 
-    # Read as text first to check for PEM framing
-    val text_content = rt_file_read_text(path)
-    val trimmed_content = text_content.trim()
-
-    if trimmed_content == "":
+    # Read as bytes first so binary DER keys do not get misclassified as empty
+    # when the hosted runtime refuses to decode them as UTF-8 text.
+    val raw: [u8] = rt_file_read_bytes(path) ?? []
+    if raw.len() == 0:
         return Err("host key file is empty: {path}")
+
+    val text_content = rt_bytes_to_text(raw)
+    val trimmed_content = text_content.trim()
 
     if trimmed_content.starts_with("-----BEGIN"):
         # PEM path: strip framing, base64-decode body
@@ -120,8 +122,5 @@ pub fn load_rsa_pkcs8_from_file(path: text) -> Result<[u8], text>:
                     return Err("base64 decode produced empty result for PEM key: {path}")
                 return Ok(decoded)
     else:
-        # DER path: read raw bytes
-        val raw: [u8] = rt_file_read_bytes(path) ?? []
-        if raw.len() == 0:
-            return Err("host key DER file is empty or unreadable: {path}")
+        # DER path: return raw bytes as-is.
         return Ok(raw)

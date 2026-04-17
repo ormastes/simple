@@ -92,3 +92,14 @@ annotations accordingly.
 - [bare_metal_integration.md](bare_metal_integration.md) — baremetal runtime notes
 - [simpleos_launch_modes.md](simpleos_launch_modes.md) — QEMU launch modes
 - [libc_coverage_audit.md](libc_coverage_audit.md) — POSIX surface audit
+- [mdsoc_architecture_tobe.md#mdsoc-plus-ecs-business-layer](mdsoc_architecture_tobe.md#mdsoc-plus-ecs-business-layer) — **MDSOC+** arch: userland services/apps adopt ECS for internal domain state
+
+---
+
+## MDSOC+ Note (Userland ECS)
+
+**Applies to `src/os/` userland only.** Since 2026-04-17, every userland service and app under `src/os/services/` and `src/os/apps/` uses **MDSOC+**: the outer capsule boundary stays MDSOC (manifests, ports, capabilities), but internal business state is modelled as an ECS `World` (entities + components + systems) from `src/lib/nogc_sync_mut/ecs/`.
+
+**Kernel (`src/os/kernel/`) and drivers (`src/os/drivers/`) stay MDSOC-only** — no ECS in ring 0, no ECS in IO state machines. See the MDSOC+ layer rules table in the main arch doc for the rationale.
+
+When adding a new service under `src/os/services/`, its spec must enumerate: World owner, component types, systems, and any `Added/Changed/Removed` subscriptions used for RS state transfer.

@@ -59,6 +59,29 @@ fn empty_bytes() -> Value {
     Value::Array(Arc::new(Vec::new()))
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const ED25519_PKCS8_V1: &[u8] = &[
+        0x30, 0x2e, 0x02, 0x01, 0x00, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70,
+        0x04, 0x22, 0x04, 0x20, 0x1f, 0x80, 0x19, 0x2e, 0x22, 0x4a, 0x71, 0xdd,
+        0xdf, 0x8c, 0x08, 0x2c, 0x76, 0x90, 0xdb, 0x9f, 0xdf, 0x58, 0x3f, 0x3d,
+        0x4e, 0x02, 0xa1, 0x9b, 0x77, 0xd0, 0xf8, 0x69, 0x2f, 0x2e, 0xa4, 0x0c,
+    ];
+    const MSG: &[u8] = b"Hello, Ed25519!";
+
+    #[test]
+    fn ed25519_sign_accepts_pkcs8_v1_fixture() {
+        let args = [bytes_to_value(ED25519_PKCS8_V1), bytes_to_value(MSG)];
+        let result = rt_ed25519_sign(&args).expect("signing should not error");
+        match result {
+            Value::Array(bytes) => assert_eq!(bytes.len(), 64),
+            other => panic!("unexpected result: {other:?}"),
+        }
+    }
+}
+
 fn der_read_length(data: &[u8], offset: usize) -> Option<(usize, usize)> {
     let first = *data.get(offset)?;
     if first < 0x80 {
@@ -299,7 +322,9 @@ pub fn rt_ed25519_sign(args: &[Value]) -> Result<Value, CompileError> {
     let Some(msg) = extract_bytes(args, 1) else {
         return Ok(empty_bytes());
     };
-    let keypair = match ring::signature::Ed25519KeyPair::from_pkcs8(&pkcs8) {
+    // Accept the repo's PKCS#8 v1 Ed25519 fixtures, which may omit the
+    // embedded public key and need ring's compatibility parser.
+    let keypair = match ring::signature::Ed25519KeyPair::from_pkcs8_maybe_unchecked(&pkcs8) {
         Ok(kp) => kp,
         Err(_) => return Ok(empty_bytes()),
     };

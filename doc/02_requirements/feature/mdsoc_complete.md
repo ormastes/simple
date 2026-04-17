@@ -296,5 +296,27 @@ Old unnumbered directories (`core/`, `linker/`) have been deleted or emptied; th
 
 ---
 
-**Document Version:** 3.1
-**Last Updated:** 2026-03-02
+**Document Version:** 3.2
+**Last Updated:** 2026-04-17
+
+---
+
+## MDSOC+ Acceptance Criteria (added 2026-04-17)
+
+Layered on top of MDSOC. SimpleOS userland and apps must also satisfy:
+
+| # | Criterion | Evidence |
+|---|-----------|----------|
+| + 1 | ECS stdlib present at `src/lib/nogc_sync_mut/ecs/` with `entity`, `component_store`, `world`, `query`, `system`, `change_detection` modules | `ls src/lib/nogc_sync_mut/ecs/` |
+| + 2 | ECS specs pass | `bin/simple test test/lib/ecs/` green |
+| + 3 | ≥1 userland service reference-ported to ECS | `src/os/services/wm/` uses `use std.ecs`; existing WM specs still pass |
+| + 4 | Glossary terms defined | `grep -E "^## (MDSOC\+|ECS|World|Query|ComponentStore|Change Detection)" doc/04_architecture/glossary.md` |
+| + 5 | Arch doc MDSOC+ section present | `grep "mdsoc-plus-ecs-business-layer" doc/04_architecture/mdsoc_architecture_tobe.md` |
+| + 6 | CLAUDE.md rule present | `grep "MDSOC+ by default" CLAUDE.md` |
+| + 7 | Kernel/drivers untouched by ECS | `grep -R "use std.ecs" src/os/kernel src/os/drivers` returns no matches |
+| + 8 | Lint advisory flag for monolithic service state | `bin/simple lint` reports advisory on large services missing ECS |
+
+**Non-goals (explicitly not required):**
+- Porting the compiler itself to ECS.
+- Porting the kernel, drivers, or libc to ECS.
+- Dynamic/runtime component registration.

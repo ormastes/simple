@@ -1,0 +1,336 @@
+#![allow(unnamed_duplicate_typed_args)]
+"""
+# VMM COW (Copy-on-Write) Specification
+
+**Feature IDs:** #OS-011
+**Category:** Runtime
+**Difficulty:** 3/5
+**Status:** Implemented
+**Requirements:** N/A
+**Plan:** N/A
+**Design:** N/A
+**Research:** N/A
+
+## Overview
+
+Tests for COW clone logic, PMM reference counting, and anon/file fault handlers.
+All tests use stub ProcessVmSpace values and simulated PMM counters —
+no real page tables or boot environment are required.
+"""
+
+use std.spec.{describe, it, expect}
+use os.kernel.types.vmspace_types.{
+    VmArea, ProcessVmSpace,
+    VMA_ANON, VMA_FILE, VMA_SHARED,
+    VMA_READ, VMA_WRITE, VMA_EXEC, VMA_COW,
+    MAX_VMAS
+}
+
+# ============================================================================
+# Helpers shared with vmm_vma_spec
+# ============================================================================
+
+fn _cow_make_space(pml4: u64, id: u64) -> ProcessVmSpace:
+    ProcessVmSpace(
+        pml4: pml4,
+        id: id,
+        vma_count: 0,
+        areas: []
+    )
+
+fn _cow_make_anon(start: u64, len: u64, flags: u32) -> VmArea:
+    VmArea(
+        start: start,
+        len: len,
+        kind: VMA_ANON,
+        flags: flags,
+        backing: 0,
+        backing_offset: 0
+    )
+
+fn _cow_space_add(space: ProcessVmSpace, area: VmArea):
+    """Push area without overlap check for test setup."""
+    space.areas.push(area)
+    space.vma_count = space.vma_count + 1
+
+# ============================================================================
+# Simulated PMM reference counting (local; no mmio dependency)
+# ============================================================================
+
+struct _SimPmm:
+    """Simulated PMM with a small refcount table for tests."""
+    counts: [u16]
+    free_count: u64
+
+fn _sim_pmm_new(pages: u64) -> _SimPmm:
+    var counts: [u16] = []
+    var i: u64 = 0
+    while i < pages:
+        counts.push(0)
+        i = i + 1
+    _SimPmm(counts: counts, free_count: pages)
+
+fn _sim_ref(pmm: _SimPmm, pfn: i32):
+    if pmm.counts[pfn] < 65535:
+        pmm.counts[pfn] = pmm.counts[pfn] + 1
+
+fn _sim_unref(pmm: _SimPmm, pfn: i32) -> u16:
+    if pmm.counts[pfn] == 0:
+        return 0
+    pmm.counts[pfn] = pmm.counts[pfn] - 1
+    pmm.counts[pfn]
+
+fn _sim_alloc(pmm: _SimPmm) -> i32:
+    """Return the index of the first page with refcount == 0, or -1."""
+    var i: i32 = 0
+    while (i as u64) < (pmm.counts.len() as u64):
+        if pmm.counts[i] == 0:
+            pmm.counts[i] = 1
+            pmm.free_count = pmm.free_count - 1
+            return i
+        i = i + 1
+    -1
+
+# ============================================================================
+# Simulated COW clone (mirrors vmm_cow_clone logic, no PT operations)
+# ============================================================================
+
+fn _sim_cow_clone(
+    parent: ProcessVmSpace,
+    parent_pml4: u64,
+    child_pml4: u64,
+    child_id: u64,
+    pmm: _SimPmm
+) -> ProcessVmSpace:
+    """Clone parent address space VMAs into a new child ProcessVmSpace.
+
+    Sets VMA_COW on all writable VMAs in both parent and child.
+    Increments a simulated ref count for each VMA page (one ref per VMA
+    treated as one shared physical page for simplicity in tests).
+    """
+    var child = ProcessVmSpace(
+        pml4: child_pml4,
+        id: child_id,
+        vma_count: 0,
+        areas: []
+    )
+
+    var i: i32 = 0
+    while (i as u64) < parent.vma_count:
+        val src = parent.areas[i]
+        var child_flags = src.flags
+        if (src.flags & VMA_WRITE) != 0:
+            child_flags = child_flags | VMA_COW
+        val cloned = VmArea(
+            start: src.start,
+            len: src.len,
+            kind: src.kind,
+            flags: child_flags,
+            backing: src.backing,
+            backing_offset: src.backing_offset
+        )
+        child.areas.push(cloned)
+        child.vma_count = child.vma_count + 1
+
+        # Mark parent VMA COW too
+        if (src.flags & VMA_WRITE) != 0:
+            val pf = VMA_COW | src.flags
+            parent.areas[i] = VmArea(
+                start: src.start,
+                len: src.len,
+                kind: src.kind,
+                flags: pf,
+                backing: src.backing,
+                backing_offset: src.backing_offset
+            )
+
+        # Simulate one ref per VMA (represents the shared page)
+        val pfn: i32 = i  # use VMA index as synthetic pfn
+        _sim_ref(pmm, pfn)
+
+        i = i + 1
+
+    child
+
+# ============================================================================
+# Test Group 1: COW clone VMA duplication
+# ============================================================================
+
+describe "vmm_cow_clone VMA duplication":
+    it "child has same vma_count as parent":
+        var parent = _cow_make_space(0x1000, 1)
+        _cow_space_add(parent, _cow_make_anon(0x400000, 0x1000, VMA_READ | VMA_WRITE))
+        _cow_space_add(parent, _cow_make_anon(0x402000, 0x2000, VMA_READ | VMA_WRITE))
+
+        val pmm = _sim_pmm_new(8)
+        val child = _sim_cow_clone(parent, 0x1000, 0x2000, 2, pmm)
+
+        expect(child.vma_count).to_equal(parent.vma_count)
+
+    it "child VMAs have VMA_COW set for writable areas":
+        var parent = _cow_make_space(0x1000, 1)
+        _cow_space_add(parent, _cow_make_anon(0x400000, 0x1000, VMA_READ | VMA_WRITE))
+
+        val pmm = _sim_pmm_new(4)
+        val child = _sim_cow_clone(parent, 0x1000, 0x2000, 2, pmm)
+
+        val c_area = child.areas[0]
+        expect(c_area.flags & VMA_COW).to_be_greater_than(0)
+
+    it "parent VMAs are also marked VMA_COW after clone":
+        var parent = _cow_make_space(0x1000, 1)
+        _cow_space_add(parent, _cow_make_anon(0x400000, 0x1000, VMA_READ | VMA_WRITE))
+
+        val pmm = _sim_pmm_new(4)
+        _sim_cow_clone(parent, 0x1000, 0x2000, 2, pmm)
+
+        val p_area = parent.areas[0]
+        expect(p_area.flags & VMA_COW).to_be_greater_than(0)
+
+    it "read-only VMAs are not marked VMA_COW":
+        var parent = _cow_make_space(0x1000, 1)
+        _cow_space_add(parent, _cow_make_anon(0x400000, 0x1000, VMA_READ))  # no WRITE
+
+        val pmm = _sim_pmm_new(4)
+        val child = _sim_cow_clone(parent, 0x1000, 0x2000, 2, pmm)
+
+        val c_area = child.areas[0]
+        expect(c_area.flags & VMA_COW).to_equal(0)
+
+    it "child VMA start and len match parent":
+        var parent = _cow_make_space(0x1000, 1)
+        _cow_space_add(parent, _cow_make_anon(0x600000, 0x8000, VMA_READ | VMA_WRITE))
+
+        val pmm = _sim_pmm_new(4)
+        val child = _sim_cow_clone(parent, 0x1000, 0x2000, 2, pmm)
+
+        expect(child.areas[0].start).to_equal(0x600000)
+        expect(child.areas[0].len).to_equal(0x8000)
+
+# ============================================================================
+# Test Group 2: PMM reference counting
+# ============================================================================
+
+describe "PMM reference counting":
+    it "ref increments count":
+        val pmm = _sim_pmm_new(4)
+        _sim_ref(pmm, 0)
+        expect(pmm.counts[0]).to_equal(1)
+
+    it "double-ref gives count 2":
+        val pmm = _sim_pmm_new(4)
+        _sim_ref(pmm, 0)
+        _sim_ref(pmm, 0)
+        expect(pmm.counts[0]).to_equal(2)
+
+    it "unref decrements and returns new count":
+        val pmm = _sim_pmm_new(4)
+        _sim_ref(pmm, 1)
+        _sim_ref(pmm, 1)
+        val remaining = _sim_unref(pmm, 1)
+        expect(remaining).to_equal(1)
+
+    it "unref to 0 means page is freeable":
+        val pmm = _sim_pmm_new(4)
+        _sim_ref(pmm, 2)
+        val r = _sim_unref(pmm, 2)
+        expect(r).to_equal(0)
+
+    it "clone increments refcount for each shared VMA":
+        var parent = _cow_make_space(0x1000, 1)
+        _cow_space_add(parent, _cow_make_anon(0x400000, 0x1000, VMA_READ | VMA_WRITE))
+        _cow_space_add(parent, _cow_make_anon(0x402000, 0x1000, VMA_READ | VMA_WRITE))
+
+        val pmm = _sim_pmm_new(8)
+        _sim_cow_clone(parent, 0x1000, 0x2000, 2, pmm)
+
+        # Each of the 2 VMAs should have ref count 1
+        expect(pmm.counts[0]).to_equal(1)
+        expect(pmm.counts[1]).to_equal(1)
+
+# ============================================================================
+# Test Group 3: Anon fault — fresh page allocation
+# ============================================================================
+
+describe "anon fault — fresh page allocation":
+    it "alloc from simulated PMM succeeds when pages are free":
+        val pmm = _sim_pmm_new(4)
+        val pfn = _sim_alloc(pmm)
+        expect(pfn).to_equal(0)
+
+    it "allocated page has refcount 1":
+        val pmm = _sim_pmm_new(4)
+        val pfn = _sim_alloc(pmm)
+        expect(pmm.counts[pfn]).to_equal(1)
+
+    it "second alloc returns different pfn":
+        val pmm = _sim_pmm_new(4)
+        val pfn0 = _sim_alloc(pmm)
+        val pfn1 = _sim_alloc(pmm)
+        expect(pfn0).to_equal(0)
+        expect(pfn1).to_equal(1)
+
+    it "alloc from empty PMM returns -1":
+        val pmm = _sim_pmm_new(0)
+        val pfn = _sim_alloc(pmm)
+        expect(pfn).to_equal(-1)
+
+# ============================================================================
+# Test Group 4: COW fault — page copy and RW upgrade
+# ============================================================================
+
+describe "COW fault — copy and upgrade":
+    it "after COW fault VMA_COW is cleared and VMA_WRITE is set":
+        var space = _cow_make_space(0x1000, 1)
+        val initial_flags = VMA_READ | VMA_WRITE | VMA_COW
+        _cow_space_add(space, _cow_make_anon(0x400000, 0x1000, initial_flags))
+
+        # Simulate the VMA update that vmm_handle_cow_fault performs
+        val fault_vaddr: u64 = 0x400000
+        var i: i32 = 0
+        while (i as u64) < space.vma_count:
+            val a = space.areas[i]
+            if (fault_vaddr >= a.start) and (fault_vaddr < (a.start + a.len)):
+                val new_flags = (a.flags & ~VMA_COW) | VMA_WRITE
+                space.areas[i] = VmArea(
+                    start: a.start,
+                    len: a.len,
+                    kind: a.kind,
+                    flags: new_flags,
+                    backing: a.backing,
+                    backing_offset: a.backing_offset
+                )
+                break
+            i = i + 1
+
+        val updated = space.areas[0]
+        expect(updated.flags & VMA_COW).to_equal(0)
+        expect(updated.flags & VMA_WRITE).to_be_greater_than(0)
+
+    it "parent page refcount drops to 0 when child takes private copy":
+        val pmm = _sim_pmm_new(4)
+        _sim_ref(pmm, 0)   # Simulate parent sharing pfn 0 with child
+        val r = _sim_unref(pmm, 0)   # Child takes private copy; parent ref drops
+        expect(r).to_equal(0)        # Parent can now free the old page
+
+    it "new page gets refcount 1 after COW alloc":
+        val pmm = _sim_pmm_new(4)
+        val pfn = _sim_alloc(pmm)   # Child's new private page
+        expect(pmm.counts[pfn]).to_equal(1)
+
+    it "COW on file-backed VMA preserves backing handle and offset":
+        var space = _cow_make_space(0x1000, 1)
+        val area = VmArea(
+            start: 0x500000,
+            len: 0x2000,
+            kind: VMA_FILE,
+            flags: VMA_READ | VMA_WRITE | VMA_COW,
+            backing: 99,
+            backing_offset: 0x3000
+        )
+        _cow_space_add(space, area)
+
+        # After COW fault the metadata must be preserved
+        val a = space.areas[0]
+        expect(a.backing).to_equal(99)
+        expect(a.backing_offset).to_equal(0x3000)

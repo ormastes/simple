@@ -16,7 +16,10 @@ scripts/bootstrap/bootstrap-from-scratch.sh --deploy  # Full bootstrap
 - **ALL code in `.spl`/`.shs`** — no Python/Bash (except 3 bootstrap scripts)
 - **NO inheritance** — use composition, traits, mixins. **Generics:** `<>` not `[]`
 - **NEVER skip** failing tests without approval. **NEVER convert TODO to NOTE** — implement or delete
+- When a short, safe grammar or compact expression form fails, compiles too slowly, or forces a workaround, fix it or record a concrete bug/feature request instead of silently normalizing the workaround
+- When you hit a meaningful perf regression during implementation or verification, either fix it in the same change or record it as a concrete bug/todo before moving on
 - **NEVER over-engineer.** **DO NOT ADD REPORT TO GIT** unless requested
+- **MDSOC+ by default** — use MDSOC outer + ECS business layer for userland services/apps; kernel/drivers stay MDSOC-only. See `doc/04_architecture/mdsoc_architecture_tobe.md` (MDSOC+ section)
 
 ## Detailed Rules & Reference
 - **Rules:** `.claude/rules/` — `language.md`, `testing.md`, `bootstrap.md`, `commands.md`, `structure.md`, `code-style.md`, `vcs.md`

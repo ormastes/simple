@@ -17,8 +17,6 @@
 fn rt_array_new_with_cap(cap: i64) -> [u8]:
     []
 extern fn serial_println(msg: text)
-use lib.common.crypto.hmac.{hmac_sha256_bytes as common_hmac_sha256_bytes}
-use lib.common.crypto.sha256.{sha256_bytes as common_sha256_bytes}
 
 fn _sha256_k(index: u64) -> u32:
     if index == 0: 0x428A2F98
@@ -294,14 +292,16 @@ fn _copy_block64(src: [u8], offset: u64) -> [u8]:
 # ============================================================================
 
 fn sha256(data: [u8]) -> [u8]:
-    _list_to_array(common_sha256_bytes(_array_prefix_to_list(data, data.len().to_u64())))
+    _list_to_array(_list_sha256_bytes(_array_prefix_to_list(data, data.len().to_u64())))
 
 fn _array_prefix_to_list(data: [u8], data_len: u64) -> list:
     var out = []
-    var i: u64 = 0
-    while i < data_len:
-        out.push(data[i].to_i64())
-        i = i + 1
+    var copied: u64 = 0
+    for byte in data:
+        if copied >= data_len:
+            break
+        out.push(byte.to_i64())
+        copied = copied + 1
     out
 
 fn _list_to_array(bytes: list) -> [u8]:
@@ -312,8 +312,224 @@ fn _list_to_array(bytes: list) -> [u8]:
         i = i + 1
     out
 
+fn _list_rotr32(x: i64, n: i64) -> i64:
+    val mask = 0xFFFFFFFF
+    val x_masked = x & mask
+    val shifted = (x_masked >> n) | ((x_masked << (32 - n)) & mask)
+    shifted & mask
+
+fn _list_shr32(x: i64, n: i64) -> i64:
+    val mask = 0xFFFFFFFF
+    ((x & mask) >> n) & mask
+
+fn _list_add_mod32(a: i64, b: i64) -> i64:
+    (a + b) & 0xFFFFFFFF
+
+fn _list_sha256_k_constants() -> list:
+    [
+        0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5,
+        0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
+        0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3,
+        0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
+        0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc,
+        0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
+        0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7,
+        0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
+        0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13,
+        0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
+        0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3,
+        0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
+        0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5,
+        0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
+        0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208,
+        0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2
+    ]
+
+fn _list_sha256_initial_hash() -> list:
+    [
+        0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a,
+        0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19
+    ]
+
+fn _list_sha256_ch(x: i64, y: i64, z: i64) -> i64:
+    (x & y) ^ ((~x) & z)
+
+fn _list_sha256_maj(x: i64, y: i64, z: i64) -> i64:
+    (x & y) ^ (x & z) ^ (y & z)
+
+fn _list_sha256_sigma0(x: i64) -> i64:
+    _list_rotr32(x, 2) ^ _list_rotr32(x, 13) ^ _list_rotr32(x, 22)
+
+fn _list_sha256_sigma1(x: i64) -> i64:
+    _list_rotr32(x, 6) ^ _list_rotr32(x, 11) ^ _list_rotr32(x, 25)
+
+fn _list_sha256_little_sigma0(x: i64) -> i64:
+    _list_rotr32(x, 7) ^ _list_rotr32(x, 18) ^ _list_shr32(x, 3)
+
+fn _list_sha256_little_sigma1(x: i64) -> i64:
+    _list_rotr32(x, 17) ^ _list_rotr32(x, 19) ^ _list_shr32(x, 10)
+
+fn _list_sha256_pad_message(bytes: list) -> list:
+    var padded = []
+    var i = 0
+    while i < bytes.len():
+        padded.push(bytes.get(i))
+        i = i + 1
+
+    val original_len = bytes.len()
+    val original_bit_len = original_len * 8
+    padded.push(0x80)
+    val target_len = ((original_len + 8) / 64 + 1) * 64
+    while padded.len() < target_len - 8:
+        padded.push(0)
+
+    padded.push(0)
+    padded.push(0)
+    padded.push(0)
+    padded.push(0)
+    padded.push((original_bit_len >> 24) & 0xFF)
+    padded.push((original_bit_len >> 16) & 0xFF)
+    padded.push((original_bit_len >> 8) & 0xFF)
+    padded.push(original_bit_len & 0xFF)
+    padded
+
+fn _list_sha256_process_block(h: list, block: list) -> list:
+    var w = []
+    var i = 0
+    while i < 16:
+        val idx = i * 4
+        val b0 = block.get(idx)
+        val b1 = block.get(idx + 1)
+        val b2 = block.get(idx + 2)
+        val b3 = block.get(idx + 3)
+        val word = (b0 << 24) | (b1 << 16) | (b2 << 8) | b3
+        w.push(word)
+        i = i + 1
+
+    while i < 64:
+        val w15 = w.get(i - 15)
+        val w2 = w.get(i - 2)
+        val w16 = w.get(i - 16)
+        val w7 = w.get(i - 7)
+        val s0 = _list_sha256_little_sigma0(w15)
+        val s1 = _list_sha256_little_sigma1(w2)
+        val word = _list_add_mod32(_list_add_mod32(_list_add_mod32(s1, w7), s0), w16)
+        w.push(word)
+        i = i + 1
+
+    var a = h.get(0)
+    var b = h.get(1)
+    var c = h.get(2)
+    var d = h.get(3)
+    var e = h.get(4)
+    var f = h.get(5)
+    var g = h.get(6)
+    var h_var = h.get(7)
+    val k = _list_sha256_k_constants()
+
+    i = 0
+    while i < 64:
+        val S1 = _list_sha256_sigma1(e)
+        val ch = _list_sha256_ch(e, f, g)
+        val temp1_part1 = _list_add_mod32(h_var, S1)
+        val temp1_part2 = _list_add_mod32(ch, k.get(i))
+        val temp1_part3 = _list_add_mod32(temp1_part2, w.get(i))
+        val temp1 = _list_add_mod32(temp1_part1, temp1_part3)
+        val S0 = _list_sha256_sigma0(a)
+        val maj = _list_sha256_maj(a, b, c)
+        val temp2 = _list_add_mod32(S0, maj)
+
+        h_var = g
+        g = f
+        f = e
+        e = _list_add_mod32(d, temp1)
+        d = c
+        c = b
+        b = a
+        a = _list_add_mod32(temp1, temp2)
+        i = i + 1
+
+    var new_h = []
+    new_h.push(_list_add_mod32(h.get(0), a))
+    new_h.push(_list_add_mod32(h.get(1), b))
+    new_h.push(_list_add_mod32(h.get(2), c))
+    new_h.push(_list_add_mod32(h.get(3), d))
+    new_h.push(_list_add_mod32(h.get(4), e))
+    new_h.push(_list_add_mod32(h.get(5), f))
+    new_h.push(_list_add_mod32(h.get(6), g))
+    new_h.push(_list_add_mod32(h.get(7), h_var))
+    new_h
+
+fn _list_sha256_bytes(bytes: list) -> list:
+    val padded = _list_sha256_pad_message(bytes)
+    var current_h = _list_sha256_initial_hash()
+    var i = 0
+    while i < padded.len():
+        var block = []
+        var j = 0
+        while j < 64:
+            block.push(padded.get(i + j))
+            j = j + 1
+        current_h = _list_sha256_process_block(current_h, block)
+        i = i + 64
+
+    var result = []
+    i = 0
+    while i < 8:
+        val h_val = current_h.get(i)
+        result.push((h_val >> 24) & 0xFF)
+        result.push((h_val >> 16) & 0xFF)
+        result.push((h_val >> 8) & 0xFF)
+        result.push(h_val & 0xFF)
+        i = i + 1
+    result
+
+fn _list_hmac_sha256_bytes(key_bytes: list, message_bytes: list) -> list:
+    val block_size = 64
+    var k = []
+    if key_bytes.len() > block_size:
+        k = _list_sha256_bytes(key_bytes)
+    else:
+        var i = 0
+        while i < key_bytes.len():
+            k.push(key_bytes.get(i))
+            i = i + 1
+    while k.len() < block_size:
+        k.push(0)
+
+    var i_key_pad = []
+    var o_key_pad = []
+    var i = 0
+    while i < block_size:
+        val k_byte = k.get(i)
+        i_key_pad.push(k_byte ^ 0x36)
+        o_key_pad.push(k_byte ^ 0x5c)
+        i = i + 1
+
+    var inner_input = []
+    i = 0
+    while i < i_key_pad.len():
+        inner_input.push(i_key_pad.get(i))
+        i = i + 1
+    i = 0
+    while i < message_bytes.len():
+        inner_input.push(message_bytes.get(i))
+        i = i + 1
+    val inner_hash = _list_sha256_bytes(inner_input)
+
+    var outer_input = []
+    i = 0
+    while i < o_key_pad.len():
+        outer_input.push(o_key_pad.get(i))
+        i = i + 1
+    i = 0
+    while i < inner_hash.len():
+        outer_input.push(inner_hash.get(i))
+        i = i + 1
+    _list_sha256_bytes(outer_input)
+
 fn sha256_with_len(data: [u8], data_len: u64) -> [u8]:
-    _list_to_array(common_sha256_bytes(_array_prefix_to_list(data, data_len)))
+    _list_to_array(_list_sha256_bytes(_array_prefix_to_list(data, data_len)))
 
 fn _normalize_hmac_key(key: [u8], key_len: u64) -> [u8]:
     val block_size: u64 = 64
@@ -369,9 +585,10 @@ fn sha256_hmac(key: [u8], data: [u8]) -> [u8]:
     sha256_hmac_with_len(key, key.len().to_u64(), data, data.len().to_u64())
 
 fn sha256_hmac_with_len(key: [u8], key_len: u64, data: [u8], data_len: u64) -> [u8]:
-    val key_list = _array_prefix_to_list(key, key_len)
-    val data_list = _array_prefix_to_list(data, data_len)
-    _list_to_array(common_hmac_sha256_bytes(key_list, data_list))
+    _list_to_array(_list_hmac_sha256_bytes(
+        _array_prefix_to_list(key, key_len),
+        _array_prefix_to_list(data, data_len)
+    ))
 
 fn sha256_hmac_from_list(key: list, data: list) -> [u8]:
-    _list_to_array(common_hmac_sha256_bytes(key, data))
+    _list_to_array(_list_hmac_sha256_bytes(key, data))

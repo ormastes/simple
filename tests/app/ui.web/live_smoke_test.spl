@@ -28,7 +28,7 @@
 use std.sspec.*
 use app.ui.web.session_token.{random_hex, SessionToken, verify as verify_token, load_secret}
 use app.ui.web.ws_handler.{compute_ws_accept, is_ws_upgrade_request}
-use app.ui.web.origin_guard.{OriginGuard}
+use app.ui.web.origin_guard.{OriginGuard, AuthError}
 
 describe "WSS smoke — handshake primitives":
     """
@@ -79,8 +79,9 @@ describe "WSS smoke — token round trip":
         match verified:
             Ok(t):
                 expect(t.grant_id).to_equal("dev")
+                expect(t.origin).to_equal("https://localhost")
             Err(_):
-                expect("ok").to_equal("should not err")
+                expect(verified.is_ok()).to_equal(true)
 
     it "verify rejects a tampered signature":
         val secret = "test-secret-A"
@@ -90,9 +91,9 @@ describe "WSS smoke — token round trip":
         val verified = verify_token(serialized, "https://localhost", "test-secret-B", 1u64)
         match verified:
             Ok(_):
-                expect("err").to_equal("should have rejected")
+                expect(verified.is_err()).to_equal(true)
             Err(_):
-                expect(true).to_equal(true)
+                expect(verified.unwrap_err()).to_equal(AuthError.InvalidToken)
 
 describe "WSS smoke — origin gate":
     """
@@ -103,5 +104,8 @@ describe "WSS smoke — origin gate":
 
     it "OriginGuard.from_env constructs without an allowlist in dev":
         val guard = OriginGuard.from_env()
-        # Constructor produces a valid guard; allowlist policy is env-driven
-        expect(true).to_equal(true)
+        # Constructor produces the localhost fallback when no allowlist is set.
+        expect(guard.allowed.len()).to_equal(2i64)
+        val result = guard.check("Origin: https://localhost\r\nHost: localhost\r\n")
+        expect(result.is_ok()).to_equal(true)
+        expect(result.unwrap()).to_equal("https://localhost")

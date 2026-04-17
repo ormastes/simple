@@ -1,228 +1,199 @@
-# Advanced Type System Integration Tests
+# @cover src/compiler/80.driver/ 80%
+# Advanced Types Integration Tests
 #
-# **Feature ID:** #TYPE-100
-# **Category:** Advanced Types
-# **Status:** Integration Testing
-#
-# Integration tests for advanced type system features including:
-# - Generic functions with SIMD vectors
-# - Union types in async runtime
-# - Intersection types with stdlib
-# - Refinement types for validation
-#
-# NOTE: NO generics in test code (runtime limitation)
-# Tests verify that implementations work without using generic syntax
+# This spec intentionally avoids placeholder claims about full generic,
+# intersection, or refinement support. It covers the bounded "advanced type"
+# behavior that the public compiler facade can honestly verify today:
+# - union definitions and pattern matching
+# - Result/Option-style propagation with `?`
+# - SIMD type annotations (`vec[...]`)
+# - parser rejection for currently unsupported intersection/refinement syntax
 
+use std.spec
 
-# ============================================================================
-# Test Group 1: Generic Functions with SIMD (10 tests)
-# ============================================================================
+use compiler.driver.driver_api.{check_file, compile_to_smf}
 
-describe "Generic Functions with SIMD Integration":
-    # Tests generic function implementations that work with SIMD types.
-    # Verifies type erasure and monomorphization with vector types.
+val NL = "\n"
 
-    context "when using SIMD vector types":
-        it "handles Vec4f with generic-style operations", fn():
-            # Test that type system can handle SIMD vectors
-            # even though we can't use actual generic syntax in runtime
-            expect(true).to_equal(true)
+extern fn rt_file_write_text(path: text, content: text) -> bool
+extern fn rt_file_delete(path: text) -> bool
+extern fn rt_file_exists(path: text) -> bool
 
-        it "supports type checking for SIMD operations", fn():
-            # Verify type checking works for SIMD arithmetic
-            expect(true).to_equal(true)
+fn write_file(path: text, content: text) -> bool:
+    rt_file_write_text(path, content)
 
-        it "validates SIMD load/store type safety", fn():
-            # Check that SIMD memory operations are type-safe
-            expect(true).to_equal(true)
+fn delete_file(path: text) -> bool:
+    rt_file_delete(path)
 
-        it "ensures Vec4f arithmetic type consistency", fn():
-            # Verify SIMD arithmetic preserves types
-            expect(true).to_equal(true)
+fn union_program() -> text:
+    "union MyResult:" + NL +
+    "    Ok(value: i32)" + NL +
+    "    Err(msg: text)" + NL + NL +
+    "fn unwrap_or_zero(r: MyResult) -> i32:" + NL +
+    "    match r:" + NL +
+    "        case MyResult.Ok(v):" + NL +
+    "            v" + NL +
+    "        case MyResult.Err(_):" + NL +
+    "            0" + NL + NL +
+    "fn main() -> i32:" + NL +
+    "    unwrap_or_zero(MyResult.Ok(42))"
 
-        it "handles Vec8f type operations", fn():
-            # Test 256-bit vector type handling
-            expect(true).to_equal(true)
+fn try_operator_program() -> text:
+    "fn divide(a: i64, b: i64) -> Result<i64, text>:" + NL +
+    "    if b == 0:" + NL +
+    "        return Err(\"division by zero\")" + NL +
+    "    return Ok(a / b)" + NL + NL +
+    "fn compute() -> Result<i64, text>:" + NL +
+    "    val x = divide(a=84, b=2)?" + NL +
+    "    Ok(x / 2)" + NL + NL +
+    "fn main() -> i64:" + NL +
+    "    match compute():" + NL +
+    "        case Ok(v):" + NL +
+    "            v" + NL +
+    "        case Err(_):" + NL +
+    "            0"
 
-    context "when using type erasure patterns":
-        it "monomorphizes vector operations correctly", fn():
-            # Verify type erasure for SIMD works
-            expect(true).to_equal(true)
+fn simd_annotation_program() -> text:
+    "fn add_vectors(a: vec[4, f32], b: vec[4, f32]) -> vec[4, f32]:" + NL +
+    "    a" + NL + NL +
+    "fn main() -> i64:" + NL +
+    "    0"
 
-        it "caches monomorphic instances", fn():
-            # Check that type instances are cached
-            expect(true).to_equal(true)
+fn intersection_syntax_program() -> text:
+    "fn takes_both(x: Read & Write) -> i64:" + NL +
+    "    1"
 
-        it "handles multiple SIMD type instantiations", fn():
-            # Test multiple vector types simultaneously
-            expect(true).to_equal(true)
+fn refinement_syntax_program() -> text:
+    "fn positive(x: i64 where x > 0) -> i64:" + NL +
+    "    x"
 
-        it "optimizes away type checks in hot paths", fn():
-            # Verify type checks eliminated in optimized code
-            expect(true).to_equal(true)
+describe "Advanced Type Integration via Compiler Facade":
 
-        it "generates efficient machine code", fn():
-            # Check that type-erased SIMD generates good code
-            expect(true).to_equal(true)
+    context "when checking supported advanced type forms":
+        it "accepts unions with payloads and pattern matching":
+            val src_path = "/tmp/sml_advanced_types_union_ok.spl"
+            val out_path = "/tmp/sml_advanced_types_union_ok.smf"
+            delete_file(out_path)
+            write_file(src_path, union_program())
 
+            val result = check_file(src_path)
 
-# ============================================================================
-# Test Group 2: Union Types in Async Runtime (10 tests)
-# ============================================================================
+            expect(result.is_success()).to_equal(true)
+            delete_file(src_path)
+            delete_file(out_path)
 
-describe "Union Types in Async Runtime Integration":
-    # Tests union type support within async/await context.
-    # Verifies type checking across async boundaries.
+        it "compiles union-based control flow into an smf artifact":
+            val src_path = "/tmp/sml_advanced_types_union_compile.spl"
+            val out_path = "/tmp/sml_advanced_types_union_compile.smf"
+            delete_file(out_path)
+            write_file(src_path, union_program())
 
-    context "when using union types with async":
-        it "handles Result union in async functions", fn():
-            # Test Result type (success | error union) in async
-            expect(true).to_equal(true)
+            val result = compile_to_smf(src_path, out_path)
 
-        it "supports Option union in async context", fn():
-            # Test Option type (Some | nil union) in async
-            expect(true).to_equal(true)
+            expect(result.is_ok()).to_equal(true)
+            expect(rt_file_exists(out_path)).to_equal(true)
+            delete_file(src_path)
+            delete_file(out_path)
 
-        it "validates union type across await points", fn():
-            # Verify union types preserved across suspensions
-            expect(true).to_equal(true)
+        it "accepts result propagation with the try operator":
+            val src_path = "/tmp/sml_advanced_types_try_ok.spl"
+            val out_path = "/tmp/sml_advanced_types_try_ok.smf"
+            delete_file(out_path)
+            write_file(src_path, try_operator_program())
 
-        it "handles complex union types in futures", fn():
-            # Test multi-variant unions in async code
-            expect(true).to_equal(true)
+            val result = check_file(src_path)
 
-        it "supports union type narrowing in async", fn():
-            # Check type narrowing after pattern match
-            expect(true).to_equal(true)
+            expect(result.is_success()).to_equal(true)
+            delete_file(src_path)
+            delete_file(out_path)
 
-    context "when using union types with async runtime":
-        it "integrates union types with scheduler", fn():
-            # Test union types in scheduler task queue
-            expect(true).to_equal(true)
+        it "compiles a try-operator program into an smf artifact":
+            val src_path = "/tmp/sml_advanced_types_try_compile.spl"
+            val out_path = "/tmp/sml_advanced_types_try_compile.smf"
+            delete_file(out_path)
+            write_file(src_path, try_operator_program())
 
-        it "handles union types in channel messages", fn():
-            # Verify union types work in async channels
-            expect(true).to_equal(true)
+            val result = compile_to_smf(src_path, out_path)
 
-        it "supports union types in async error handling", fn():
-            # Test union-based error propagation
-            expect(true).to_equal(true)
+            expect(result.is_ok()).to_equal(true)
+            expect(rt_file_exists(out_path)).to_equal(true)
+            delete_file(src_path)
+            delete_file(out_path)
 
-        it "validates union types in future combinators", fn():
-            # Check union types with map/flatMap/etc
-            expect(true).to_equal(true)
+        it "accepts SIMD vector annotations in function signatures":
+            val src_path = "/tmp/sml_advanced_types_simd_ok.spl"
+            val out_path = "/tmp/sml_advanced_types_simd_ok.smf"
+            delete_file(out_path)
+            write_file(src_path, simd_annotation_program())
 
-        it "ensures thread-safe union type checks", fn():
-            # Verify union type checking is thread-safe
-            expect(true).to_equal(true)
+            val result = check_file(src_path)
 
+            expect(result.is_success()).to_equal(true)
+            delete_file(src_path)
+            delete_file(out_path)
 
-# ============================================================================
-# Test Group 3: Intersection Types with Stdlib (10 tests)
-# ============================================================================
+        it "compiles a program with SIMD-typed signatures":
+            val src_path = "/tmp/sml_advanced_types_simd_compile.spl"
+            val out_path = "/tmp/sml_advanced_types_simd_compile.smf"
+            delete_file(out_path)
+            write_file(src_path, simd_annotation_program())
 
-describe "Intersection Types with Stdlib Integration":
-    # Tests intersection type support in standard library functions.
-    # Verifies multiple trait/interface satisfaction.
+            val result = compile_to_smf(src_path, out_path)
 
-    context "when using intersection types":
-        it "handles Comparable and Hashable intersection", fn():
-            # Test type satisfying multiple interfaces
-            expect(true).to_equal(true)
+            expect(result.is_ok()).to_equal(true)
+            expect(rt_file_exists(out_path)).to_equal(true)
+            delete_file(src_path)
+            delete_file(out_path)
 
-        it "supports Iterator and Reversible intersection", fn():
-            # Verify multiple trait composition
-            expect(true).to_equal(true)
+    context "when checking unsupported advanced type syntax":
+        it "rejects intersection type syntax with a concrete parser error":
+            val src_path = "/tmp/sml_advanced_types_intersection_bad.spl"
+            val out_path = "/tmp/sml_advanced_types_intersection_bad.smf"
+            delete_file(out_path)
+            write_file(src_path, intersection_syntax_program())
 
-        it "validates Read and Write intersection", fn():
-            # Test I/O types with multiple capabilities
-            expect(true).to_equal(true)
+            val result = check_file(src_path)
 
-        it "handles Serializable and Comparable intersection", fn():
-            # Check combined serialization and comparison
-            expect(true).to_equal(true)
+            expect(result.is_success()).to_equal(false)
+            expect(result.get_errors().join("\n")).to_contain("Ampersand")
+            delete_file(src_path)
+            delete_file(out_path)
 
-        it "supports Numeric and Ordered intersection", fn():
-            # Verify numeric types with ordering
-            expect(true).to_equal(true)
+        it "rejects refinement-style where clauses with a concrete parser error":
+            val src_path = "/tmp/sml_advanced_types_refinement_bad.spl"
+            val out_path = "/tmp/sml_advanced_types_refinement_bad.smf"
+            delete_file(out_path)
+            write_file(src_path, refinement_syntax_program())
 
-    context "when using intersection types in stdlib":
-        it "integrates with array operations", fn():
-            # Test intersection types in array methods
-            expect(true).to_equal(true)
+            val result = check_file(src_path)
 
-        it "handles intersection types in string methods", fn():
-            # Verify string operations with intersections
-            expect(true).to_equal(true)
+            expect(result.is_success()).to_equal(false)
+            expect(result.get_errors().join("\n")).to_contain("Where")
+            delete_file(src_path)
+            delete_file(out_path)
 
-        it "supports intersection types in path utilities", fn():
-            # Check path operations with multiple traits
-            expect(true).to_equal(true)
+        it "does not emit an artifact for rejected intersection syntax":
+            val src_path = "/tmp/sml_advanced_types_intersection_compile_bad.spl"
+            val out_path = "/tmp/sml_advanced_types_intersection_compile_bad.smf"
+            delete_file(out_path)
+            write_file(src_path, intersection_syntax_program())
 
-        it "validates intersection types in math functions", fn():
-            # Test math operations with type intersections
-            expect(true).to_equal(true)
+            val result = compile_to_smf(src_path, out_path)
 
-        it "ensures intersection types in collections", fn():
-            # Verify collections with intersection constraints
-            expect(true).to_equal(true)
+            expect(result.is_ok()).to_equal(false)
+            expect(rt_file_exists(out_path)).to_equal(false)
+            delete_file(src_path)
+            delete_file(out_path)
 
+        it "does not emit an artifact for rejected refinement syntax":
+            val src_path = "/tmp/sml_advanced_types_refinement_compile_bad.spl"
+            val out_path = "/tmp/sml_advanced_types_refinement_compile_bad.smf"
+            delete_file(out_path)
+            write_file(src_path, refinement_syntax_program())
 
-# ============================================================================
-# Test Group 4: Refinement Types for Validation (10 tests)
-# ============================================================================
+            val result = compile_to_smf(src_path, out_path)
 
-describe "Refinement Types for Validation Integration":
-    # Tests refinement type support for runtime validation.
-    # Verifies constraint checking and predicate evaluation.
-
-    context "when using refinement types":
-        it "validates positive integer refinement", fn():
-            # Test refinement: i64 where x > 0
-            expect(true).to_equal(true)
-
-        it "handles non-empty string refinement", fn():
-            # Test refinement: text where len > 0
-            expect(true).to_equal(true)
-
-        it "supports bounded numeric refinement", fn():
-            # Test refinement: i64 where 0 <= x <= 100
-            expect(true).to_equal(true)
-
-        it "validates email format refinement", fn():
-            # Test refinement: text where matches pattern
-            expect(true).to_equal(true)
-
-        it "handles array length refinement", fn():
-            # Test refinement: array where len == N
-            expect(true).to_equal(true)
-
-    context "when using refinement types in validation":
-        it "integrates with input validation", fn():
-            # Test refinement types in user input
-            expect(true).to_equal(true)
-
-        it "handles refinement type errors gracefully", fn():
-            # Verify error handling for failed refinements
-            expect(true).to_equal(true)
-
-        it "supports refinement types in API contracts", fn():
-            # Check API boundary validation
-            expect(true).to_equal(true)
-
-        it "validates refinement types in database queries", fn():
-            # Test refinements in query parameters
-            expect(true).to_equal(true)
-
-        it "ensures refinement types in configuration", fn():
-            # Verify config validation with refinements
-            expect(true).to_equal(true)
-
-
-# ============================================================================
-# Helper Functions
-# ============================================================================
-
-fn placeholder_helper() -> bool:
-    # Placeholder for future helper functions.
-    true
+            expect(result.is_ok()).to_equal(false)
+            expect(rt_file_exists(out_path)).to_equal(false)
+            delete_file(src_path)
+            delete_file(out_path)

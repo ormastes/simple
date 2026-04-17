@@ -38,6 +38,7 @@ use std.nogc_sync_mut.io.tcp.{TcpStream}
 
 extern fn rt_net_close(sock_fd: i64) -> i64
 extern fn rt_thread_sleep(ms: i64)
+extern fn serial_println(msg: text)
 
 # RFC 8446 record payloads are bounded; reject clearly invalid lengths
 # before trying to allocate or read them from the transport.
@@ -67,6 +68,17 @@ class Tls13Context:
 class Tls13RecvData:
     ctx: Tls13Context
     data: [u8]
+    ok: bool
+    reason: text
+
+class Tls13SendResult:
+    ctx: Tls13Context
+    ok: bool
+    reason: text
+
+class Tls13CloseResult:
+    ok: bool
+    reason: text
 
 enum Tls13ConnectResult:
     Connected(ctx: Tls13Context)
@@ -83,6 +95,9 @@ class Tls13Io:
     tcp_fd: i64
     host_stream: TcpStream
 
+fn _tls_debug(msg: text):
+    serial_println("[tls13] {msg}")
+
 # ============================================================================
 # TCP I/O helpers
 # ============================================================================
@@ -95,6 +110,7 @@ fn _host_stream_io(stream: TcpStream) -> Tls13Io:
 
 fn _io_send(io: Tls13Io, data: [u8]) -> bool:
     """Send all bytes over TCP. Returns false if the write fails."""
+    _tls_debug("_io_send start kind={io.kind} len={data.len()}")
     if io.kind == "host_stream":
         match io.host_stream.write_all(data):
             Ok(()): true
@@ -103,11 +119,19 @@ fn _io_send(io: Tls13Io, data: [u8]) -> bool:
         val sock = Socket(fd: io.tcp_fd.to_i32())
         var sent: u64 = 0
         while sent < data.len():
-            val chunk = data.slice(sent, data.len())
+            _tls_debug("_io_send loop sent={sent} total={data.len()}")
+            var chunk: [u8] = []
+            var idx: u64 = sent
+            while idx < data.len():
+                chunk.push(data[idx])
+                idx = idx + 1
+            _tls_debug("_io_send chunk_len={chunk.len()}")
             val result = send(sock, chunk)
             if result.is_err():
+                _tls_debug("_io_send send err")
                 return false
             val wrote = result.unwrap()
+            _tls_debug("_io_send wrote={wrote}")
             if wrote == 0:
                 return false
             sent = sent + wrote
@@ -115,10 +139,27 @@ fn _io_send(io: Tls13Io, data: [u8]) -> bool:
 
 fn _io_recv(io: Tls13Io, length: u64) -> [u8]:
     """Read exactly length bytes from TCP. Returns partial data on close."""
+    _tls_debug("_io_recv request len={length} kind={io.kind}")
+    if length == 0:
+        return []
+    if length > _TLS_MAX_RECORD_PAYLOAD and length != 5:
+        return []
     var result: [u8] = []
     var empty_spins: u64 = 0
     while result.len() < length:
+        if result.len() > length:
+            var trimmed: [u8] = []
+            var trim_idx: u64 = 0
+            while trim_idx < length:
+                trimmed.push(result[trim_idx])
+                trim_idx = trim_idx + 1
+            return trimmed
         val remaining = length - result.len()
+        if remaining == 0:
+            return result
+        if remaining > _TLS_MAX_RECORD_PAYLOAD and remaining != 5:
+            return result
+        _tls_debug("_io_recv remaining={remaining} have={result.len()}")
         val chunk = if io.kind == "host_stream":
             match io.host_stream.read(remaining.to_i64()):
                 Ok(data): data
@@ -130,6 +171,7 @@ fn _io_recv(io: Tls13Io, length: u64) -> [u8]:
                 []
             else:
                 chunk_result.unwrap()
+        _tls_debug("_io_recv chunk_len={chunk.len()}")
         if chunk.len() == 0:
             empty_spins = empty_spins + 1
             if empty_spins > 100000:
@@ -151,10 +193,13 @@ fn _io_recv(io: Tls13Io, length: u64) -> [u8]:
 
 fn _io_recv_record(io: Tls13Io) -> [u8]:
     """Read one complete TLS record: 5-byte header + payload."""
+    _tls_debug("_io_recv_record start")
     val header = _io_recv(io, 5)
     if header.len() < 5:
+        _tls_debug("_io_recv_record short_header={header.len()}")
         return header
     val pay_len = (header[3].to_u64() << 8) | header[4].to_u64()
+    _tls_debug("_io_recv_record header type={header[0]} pay_len={pay_len}")
     if pay_len == 0 or pay_len > _TLS_MAX_RECORD_PAYLOAD:
         return []
     val payload = _io_recv(io, pay_len)
@@ -262,6 +307,7 @@ fn tls13_connect_io_with_config(io: Tls13Io, hostname: text, config: Tls13Client
     # The current C-backed guest networking profile completes connect()
     # asynchronously. Give the TCP state machine one short tick so the
     # SYN/SYN-ACK/ACK path settles before we send the first TLS record.
+    _tls_debug("connect start host={hostname} kind={io.kind}")
     rt_thread_sleep(10)
 
     # ------------------------------------------------------------------
@@ -273,7 +319,9 @@ fn tls13_connect_io_with_config(io: Tls13Io, hostname: text, config: Tls13Client
         0x21, 0x22, 0x23, 0x24, 0x25, 0x26, 0x27, 0x28,
         0x29, 0x2a, 0x2b, 0x2c, 0x2d, 0x2e, 0x2f, 0x30
     ]
+    _tls_debug("before x25519_base")
     val pub_key = x25519_base(priv_key)
+    _tls_debug("after x25519_base pub={pub_key.len()}")
 
     # ------------------------------------------------------------------
     # Step 2: Build and send ClientHello
@@ -284,13 +332,17 @@ fn tls13_connect_io_with_config(io: Tls13Io, hostname: text, config: Tls13Client
         0xb0, 0xb1, 0xb2, 0xb3, 0xb4, 0xb5, 0xb6, 0xb7,
         0xb8, 0xb9, 0xba, 0xbb, 0xbc, 0xbd, 0xbe, 0xbf
     ]
+    _tls_debug("before build_client_hello")
     val ch_bytes = build_client_hello_bytes(ch_random, pub_key, hostname)
+    _tls_debug("after build_client_hello len={ch_bytes.len()}")
     val ch_record = _build_plaintext_record(0x16, ch_bytes)
+    _tls_debug("after build_plaintext_record len={ch_record.len()}")
     if not _io_send(io, ch_record):
         return Tls13ConnectResult.Failed(reason: "ClientHello send failed")
 
     var transcript = transcript_new()
     transcript = transcript_add(transcript, ch_bytes)
+    _tls_debug("after transcript_add clienthello")
 
     # ------------------------------------------------------------------
     # Step 3: Read and parse ServerHello
@@ -562,16 +614,26 @@ fn tls13_connect_io_with_config(io: Tls13Io, hostname: text, config: Tls13Client
 # tls13_send — encrypt and send application data
 # ============================================================================
 
-fn tls13_send(ctx: Tls13Context, data: [u8]) -> Tls13Context:
-    """Encrypt data with client_key at client_seq, send over TCP, return updated context."""
+fn tls13_send(ctx: Tls13Context, data: [u8]) -> Tls13SendResult:
+    """Encrypt application data and report whether the transport write succeeded."""
     val record = record13_encrypt(ctx.client_key, ctx.client_seq, 0x17, data)
-    _io_send(ctx.io, record)
-    Tls13Context(
+    if not _io_send(ctx.io, record):
+        return Tls13SendResult(
+            ctx: ctx,
+            ok: false,
+            reason: "application data send failed",
+        )
+    val new_ctx = Tls13Context(
         io: ctx.io,
         server_key: ctx.server_key,
         client_key: ctx.client_key,
         server_seq: ctx.server_seq,
         client_seq: ctx.client_seq + 1,
+    )
+    Tls13SendResult(
+        ctx: new_ctx,
+        ok: true,
+        reason: "",
     )
 
 # ============================================================================
@@ -581,26 +643,50 @@ fn tls13_send(ctx: Tls13Context, data: [u8]) -> Tls13Context:
 fn tls13_recv(ctx: Tls13Context) -> Tls13RecvData:
     """Read and decrypt one TLS record. Returns updated context and plaintext."""
     val raw = _io_recv_record(ctx.io)
+    if raw.len() < 5:
+        return Tls13RecvData(
+            ctx: ctx,
+            data: [],
+            ok: false,
+            reason: "application data read failed",
+        )
     val dec = record13_decrypt(ctx.server_key, ctx.server_seq, raw)
 
-    var plain: [u8] = []
-    if val RecordResult.Ok(_ct, dec_data) = dec:
-        plain = dec_data
+    if val RecordResult.Err(err_msg) = dec:
+        return Tls13RecvData(
+            ctx: ctx,
+            data: [],
+            ok: false,
+            reason: err_msg,
+        )
 
-    val new_ctx = Tls13Context(
-        io: ctx.io,
-        server_key: ctx.server_key,
-        client_key: ctx.client_key,
-        server_seq: ctx.server_seq + 1,
-        client_seq: ctx.client_seq,
+    if val RecordResult.Ok(_ct, dec_data) = dec:
+        val new_ctx = Tls13Context(
+            io: ctx.io,
+            server_key: ctx.server_key,
+            client_key: ctx.client_key,
+            server_seq: ctx.server_seq + 1,
+            client_seq: ctx.client_seq,
+        )
+        return Tls13RecvData(
+            ctx: new_ctx,
+            data: dec_data,
+            ok: true,
+            reason: "",
+        )
+
+    Tls13RecvData(
+        ctx: ctx,
+        data: [],
+        ok: false,
+        reason: "application data decrypt failed",
     )
-    Tls13RecvData(ctx: new_ctx, data: plain)
 
 # ============================================================================
 # tls13_close — send close_notify alert and close TCP
 # ============================================================================
 
-fn tls13_close(ctx: Tls13Context):
+fn tls13_close(ctx: Tls13Context) -> Tls13CloseResult:
     """Send close_notify alert (encrypted), then close the TCP connection."""
     # Alert: level=1 (warning), description=0 (close_notify)
     var alert: [u8] = []
@@ -608,10 +694,19 @@ fn tls13_close(ctx: Tls13Context):
     alert.push(0x00)  # close_notify
     # content_type 0x15 = alert
     val alert_record = record13_encrypt(ctx.client_key, ctx.client_seq, 0x15, alert)
-    _io_send(ctx.io, alert_record)
+    if not _io_send(ctx.io, alert_record):
+        return Tls13CloseResult(
+            ok: false,
+            reason: "close_notify send failed",
+        )
     if ctx.io.kind == "host_stream":
         match ctx.io.host_stream.close():
-            Ok(()): pass_dn
-            Err(_): pass_dn
+            Ok(()):
+                Tls13CloseResult(ok: true, reason: "")
+            Err(_):
+                Tls13CloseResult(ok: false, reason: "transport close failed")
     else:
-        rt_net_close(ctx.io.tcp_fd)
+        if rt_net_close(ctx.io.tcp_fd) < 0:
+            Tls13CloseResult(ok: false, reason: "transport close failed")
+        else:
+            Tls13CloseResult(ok: true, reason: "")

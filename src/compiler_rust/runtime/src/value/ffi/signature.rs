@@ -21,22 +21,32 @@ use ring::signature::{
 
 fn runtime_byte_array_to_vec(data: RuntimeValue) -> Option<Vec<u8>> {
     let len = crate::value::collections::rt_array_len(data);
+    if len >= 0 {
+        let mut out = Vec::with_capacity(len as usize);
+        for i in 0..len {
+            let value = crate::value::collections::rt_array_get(data, i);
+            if !value.is_int() {
+                return None;
+            }
+            let byte = value.as_int();
+            if !(0..=255).contains(&byte) {
+                return None;
+            }
+            out.push(byte as u8);
+        }
+        return Some(out);
+    }
+
+    let len = crate::value::collections::rt_string_len(data);
     if len < 0 {
         return None;
     }
-    let mut out = Vec::with_capacity(len as usize);
-    for i in 0..len {
-        let value = crate::value::collections::rt_array_get(data, i);
-        if !value.is_int() {
-            return None;
-        }
-        let byte = value.as_int();
-        if !(0..=255).contains(&byte) {
-            return None;
-        }
-        out.push(byte as u8);
+    let ptr = crate::value::collections::rt_string_data(data);
+    if ptr.is_null() {
+        return Some(Vec::new());
     }
-    Some(out)
+    let bytes = unsafe { std::slice::from_raw_parts(ptr, len as usize) };
+    Some(bytes.to_vec())
 }
 
 fn der_read_length(data: &[u8], offset: usize) -> Option<(usize, usize)> {
@@ -230,9 +240,6 @@ pub extern "C" fn rt_rsa_pss_sha256_verify(
     let Some(pk_bytes) = runtime_byte_array_to_vec(pubkey) else {
         return 0;
     };
-    let Some(pk_bytes) = normalize_rsa_public_key(&pk_bytes) else {
-        return 0;
-    };
     let Some(msg_bytes) = runtime_byte_array_to_vec(message) else {
         return 0;
     };
@@ -240,10 +247,19 @@ pub extern "C" fn rt_rsa_pss_sha256_verify(
         return 0;
     };
 
-    let key = UnparsedPublicKey::new(&RSA_PSS_2048_8192_SHA256, pk_bytes);
-    match key.verify(&msg_bytes, &sig_bytes) {
-        Ok(()) => 1,
-        Err(_) => 0,
+    let spki_key = UnparsedPublicKey::new(&RSA_PSS_2048_8192_SHA256, &pk_bytes);
+    if spki_key.verify(&msg_bytes, &sig_bytes).is_ok() {
+        return 1;
+    }
+
+    let Some(normalized_pkcs1) = normalize_rsa_public_key(&pk_bytes) else {
+        return 0;
+    };
+    let pkcs1_key = UnparsedPublicKey::new(&RSA_PSS_2048_8192_SHA256, normalized_pkcs1);
+    if pkcs1_key.verify(&msg_bytes, &sig_bytes).is_ok() {
+        1
+    } else {
+        0
     }
 }
 
@@ -259,9 +275,6 @@ pub extern "C" fn rt_rsa_pss_sha384_verify(
     let Some(pk_bytes) = runtime_byte_array_to_vec(pubkey) else {
         return 0;
     };
-    let Some(pk_bytes) = normalize_rsa_public_key(&pk_bytes) else {
-        return 0;
-    };
     let Some(msg_bytes) = runtime_byte_array_to_vec(message) else {
         return 0;
     };
@@ -269,10 +282,19 @@ pub extern "C" fn rt_rsa_pss_sha384_verify(
         return 0;
     };
 
-    let key = UnparsedPublicKey::new(&RSA_PSS_2048_8192_SHA384, pk_bytes);
-    match key.verify(&msg_bytes, &sig_bytes) {
-        Ok(()) => 1,
-        Err(_) => 0,
+    let spki_key = UnparsedPublicKey::new(&RSA_PSS_2048_8192_SHA384, &pk_bytes);
+    if spki_key.verify(&msg_bytes, &sig_bytes).is_ok() {
+        return 1;
+    }
+
+    let Some(normalized_pkcs1) = normalize_rsa_public_key(&pk_bytes) else {
+        return 0;
+    };
+    let pkcs1_key = UnparsedPublicKey::new(&RSA_PSS_2048_8192_SHA384, normalized_pkcs1);
+    if pkcs1_key.verify(&msg_bytes, &sig_bytes).is_ok() {
+        1
+    } else {
+        0
     }
 }
 
@@ -288,9 +310,6 @@ pub extern "C" fn rt_rsa_pss_sha512_verify(
     let Some(pk_bytes) = runtime_byte_array_to_vec(pubkey) else {
         return 0;
     };
-    let Some(pk_bytes) = normalize_rsa_public_key(&pk_bytes) else {
-        return 0;
-    };
     let Some(msg_bytes) = runtime_byte_array_to_vec(message) else {
         return 0;
     };
@@ -298,10 +317,19 @@ pub extern "C" fn rt_rsa_pss_sha512_verify(
         return 0;
     };
 
-    let key = UnparsedPublicKey::new(&RSA_PSS_2048_8192_SHA512, pk_bytes);
-    match key.verify(&msg_bytes, &sig_bytes) {
-        Ok(()) => 1,
-        Err(_) => 0,
+    let spki_key = UnparsedPublicKey::new(&RSA_PSS_2048_8192_SHA512, &pk_bytes);
+    if spki_key.verify(&msg_bytes, &sig_bytes).is_ok() {
+        return 1;
+    }
+
+    let Some(normalized_pkcs1) = normalize_rsa_public_key(&pk_bytes) else {
+        return 0;
+    };
+    let pkcs1_key = UnparsedPublicKey::new(&RSA_PSS_2048_8192_SHA512, normalized_pkcs1);
+    if pkcs1_key.verify(&msg_bytes, &sig_bytes).is_ok() {
+        1
+    } else {
+        0
     }
 }
 
@@ -335,6 +363,30 @@ fn _empty_bytes() -> RuntimeValue {
     // `len() == 0` for errors (returning NIL would surface as an i64
     // and break `.len()` dispatch in the interpreter).
     unsafe { crate::value::collections::rt_string_new(std::ptr::null(), 0) }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const ED25519_PKCS8_V1: &[u8] = &[
+        0x30, 0x2e, 0x02, 0x01, 0x00, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70,
+        0x04, 0x22, 0x04, 0x20, 0x1f, 0x80, 0x19, 0x2e, 0x22, 0x4a, 0x71, 0xdd,
+        0xdf, 0x8c, 0x08, 0x2c, 0x76, 0x90, 0xdb, 0x9f, 0xdf, 0x58, 0x3f, 0x3d,
+        0x4e, 0x02, 0xa1, 0x9b, 0x77, 0xd0, 0xf8, 0x69, 0x2f, 0x2e, 0xa4, 0x0c,
+    ];
+    const MSG: &[u8] = b"Hello, Ed25519!";
+
+    fn bytes_value(bytes: &[u8]) -> RuntimeValue {
+        unsafe { crate::value::collections::rt_string_new(bytes.as_ptr(), bytes.len() as u64) }
+    }
+
+    #[test]
+    fn ed25519_sign_accepts_pkcs8_v1_fixture() {
+        let sig = rt_ed25519_sign(bytes_value(ED25519_PKCS8_V1), bytes_value(MSG));
+        let len = crate::value::collections::rt_string_len(sig);
+        assert_eq!(len, 64);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -414,7 +466,8 @@ pub extern "C" fn rt_ed25519_sign(pkcs8: RuntimeValue, message: RuntimeValue) ->
         return _empty_bytes();
     };
 
-    let keypair = match ring::signature::Ed25519KeyPair::from_pkcs8(&key_bytes) {
+    // Accept PKCS#8 v1 Ed25519 keys that omit the embedded public key.
+    let keypair = match ring::signature::Ed25519KeyPair::from_pkcs8_maybe_unchecked(&key_bytes) {
         Ok(kp) => kp,
         Err(_) => return _empty_bytes(),
     };

@@ -10,7 +10,9 @@
 #   - Neither can ever be expanded once applied
 
 use os.kernel.types.task_types.{TaskId}
-use os.kernel.types.capability_types.{CapabilityToken, CapabilityKind, CapabilitySet}
+use os.kernel.types.capability_types.{CapabilityToken, CapabilityKind, CapabilitySet, PrivilegeMask, Grant, PRIVCTL_SET_MASK, PRIVCTL_GET_MASK, PRIVCTL_ADD_PEER, PRIVCTL_REMOVE_PEER, GRANT_R, GRANT_W, GRANT_RW, priv_allows_kernel_call, priv_allows_send_to}
+use os.kernel.types.vmspace_types.{ProcessVmSpace, VMA_READ, VMA_WRITE}
+use os.kernel.memory.vmm.{vma_find}
 
 # ============================================================================
 # Per-Task Capability Record
@@ -314,3 +316,305 @@ fn _perms_contain(allowed: text, requested: text) -> bool:
             return false
         i = i + 1
     true
+
+# ============================================================================
+# G11 — Per-Task Privilege Table
+# ============================================================================
+
+struct PrivilegeRecord:
+    """Per-task privilege record stored in the privilege table."""
+    task_id: u32
+    mask: PrivilegeMask
+
+class PrivilegeTable:
+    """Holds per-task PrivilegeMask entries.
+
+    sys_privctl reads/writes this table; the dispatcher checks it at entry
+    to guard privileged kernel calls.
+    Only tasks holding SystemPrivilege may mutate another task's mask.
+    """
+    records: [PrivilegeRecord]
+
+impl PrivilegeTable:
+    static fn new() -> PrivilegeTable:
+        PrivilegeTable(records: [])
+
+    fn get(task_id: u32) -> PrivilegeMask?:
+        """Return the privilege mask for a task, or nil if not found."""
+        for rec in self.records:
+            if rec.task_id == task_id:
+                return rec.mask
+        nil
+
+    me set(task_id: u32, mask: PrivilegeMask):
+        """Set (replace) the privilege mask for a task."""
+        var idx = 0
+        while idx < self.records.len():
+            var rec = self.records[idx]
+            if rec.task_id == task_id:
+                rec.mask = mask
+                self.records[idx] = rec
+                return
+            idx = idx + 1
+        self.records.push(PrivilegeRecord(task_id: task_id, mask: mask))
+
+    me add_peer(task_id: u32, peer: u32):
+        """Add a peer to the task's allowed_peers list (idempotent)."""
+        var idx = 0
+        while idx < self.records.len():
+            var rec = self.records[idx]
+            if rec.task_id == task_id:
+                # Check for duplicates
+                var already = false
+                for p in rec.mask.allowed_peers:
+                    if p == peer:
+                        already = true
+                if not already:
+                    rec.mask.allowed_peers.push(peer)
+                    self.records[idx] = rec
+                return
+            idx = idx + 1
+        # No record yet — create a default one with just this peer
+        val new_mask = PrivilegeMask(
+            kernel_calls: 0,
+            irqs: 0,
+            io_port_base: 0,
+            io_port_len: 0,
+            allowed_peers: [peer]
+        )
+        self.records.push(PrivilegeRecord(task_id: task_id, mask: new_mask))
+
+    me remove_peer(task_id: u32, peer: u32):
+        """Remove a peer from the task's allowed_peers list."""
+        var idx = 0
+        while idx < self.records.len():
+            var rec = self.records[idx]
+            if rec.task_id == task_id:
+                var new_peers: [u32] = []
+                for p in rec.mask.allowed_peers:
+                    if p != peer:
+                        new_peers.push(p)
+                rec.mask.allowed_peers = new_peers
+                self.records[idx] = rec
+                return
+            idx = idx + 1
+
+# ============================================================================
+# G12 — Task VmSpace Registry (stub — PM wires real entries at task creation)
+# ============================================================================
+#
+# TODO(mdsoc+): wire g_task_vmspaces from the Process Manager at task spawn/exit
+# so that task_vmspace_of() returns the live ProcessVmSpace instead of nil.
+
+struct TaskVmSpaceEntry:
+    """Maps a task id to its ProcessVmSpace."""
+    task_id: u32
+    space: ProcessVmSpace
+
+var g_task_vmspaces: [TaskVmSpaceEntry] = []
+
+fn task_vmspace_of(task_id: u32) -> ProcessVmSpace?:
+    """Look up the registered vmspace for a task, or nil if not registered.
+
+    Returns nil when the PM has not yet wired this task's space. Callers
+    must treat nil as "skip VMA validation" (see safecopy_from / safecopy_to).
+    """
+    for entry in g_task_vmspaces:
+        if entry.task_id == task_id:
+            return entry.space
+    nil
+
+fn register_task_vmspace(task_id: u32, space: ProcessVmSpace):
+    """Register (or replace) the vmspace for a task.
+
+    Called by the Process Manager when a task is spawned or its address space
+    is updated. Also exposed for testing.
+    """
+    var idx = 0
+    while idx < g_task_vmspaces.len():
+        var e = g_task_vmspaces[idx]
+        if e.task_id == task_id:
+            e.space = space
+            g_task_vmspaces[idx] = e
+            return
+        idx = idx + 1
+    g_task_vmspaces.push(TaskVmSpaceEntry(task_id: task_id, space: space))
+
+fn _vma_range_readable(space: ProcessVmSpace, start: u64, len: u64) -> bool:
+    """Return true iff every page in [start, start+len) is covered by a
+    VMA that has VMA_READ set. Returns true for zero-length ranges."""
+    if len == 0:
+        return true
+    val PAGE_SIZE: u64 = 4096
+    var page = start & ~(PAGE_SIZE - 1)
+    val end = start + len
+    while page < end:
+        val area_opt = vma_find(space, page)
+        if area_opt == nil:
+            return false
+        val area = area_opt
+        if (area.flags & VMA_READ) == 0:
+            return false
+        page = page + PAGE_SIZE
+    true
+
+fn _vma_range_writable(space: ProcessVmSpace, start: u64, len: u64) -> bool:
+    """Return true iff every page in [start, start+len) is covered by a
+    VMA that has VMA_WRITE set. Returns true for zero-length ranges."""
+    if len == 0:
+        return true
+    val PAGE_SIZE: u64 = 4096
+    var page = start & ~(PAGE_SIZE - 1)
+    val end = start + len
+    while page < end:
+        val area_opt = vma_find(space, page)
+        if area_opt == nil:
+            return false
+        val area = area_opt
+        if (area.flags & VMA_WRITE) == 0:
+            return false
+        page = page + PAGE_SIZE
+    true
+
+# ============================================================================
+# G12 — Per-Task Grant Table
+# ============================================================================
+
+struct GrantTable:
+    """Per-system grant table holding all active memory grants.
+
+    Grants are created by cap_grant() and invalidated by cap_revoke().
+    sys_safecopy_from / sys_safecopy_to validate through this table before
+    performing the copy.
+    """
+    grants: [Grant]
+    next_id: u32
+
+impl GrantTable:
+    static fn new() -> GrantTable:
+        GrantTable(grants: [], next_id: 1)
+
+    me cap_grant(grantor: u32, grantee: u32, vaddr: u64, len: u64, flags: u32) -> u32:
+        """Issue a new grant. Returns the monotonic grant_id.
+
+        The grant is immediately valid. Caller is responsible for checking
+        that the grantor actually owns the vaddr range.
+        """
+        val gid = self.next_id
+        self.next_id = self.next_id + 1
+        val g = Grant(
+            id: gid,
+            grantor: grantor,
+            grantee: grantee,
+            vaddr: vaddr,
+            len: len,
+            flags: flags,
+            valid: true
+        )
+        self.grants.push(g)
+        gid
+
+    me cap_revoke(grant_id: u32) -> bool:
+        """Invalidate a grant by id. Returns true if found and revoked."""
+        var idx = 0
+        while idx < self.grants.len():
+            var g = self.grants[idx]
+            if g.id == grant_id:
+                if g.valid:
+                    g.valid = false
+                    self.grants[idx] = g
+                    return true
+                else:
+                    return false    # Already revoked
+            idx = idx + 1
+        false
+
+    fn find_valid(grant_id: u32, grantee: u32) -> Grant?:
+        """Find a valid grant for the given grantee, or nil."""
+        for g in self.grants:
+            if g.id == grant_id:
+                if g.valid:
+                    if g.grantee == grantee:
+                        return g
+                return nil
+        nil
+
+    fn safecopy_from(grantee: u32, grant_id: u32, src_off: u64, dst_vaddr: u64, len: u64) -> i32:
+        """Bounds-checked read through a grant with VMA validation.
+
+        Steps:
+          1. Find a valid grant owned by grantee; return -1 if absent or invalid.
+          2. Verify GRANT_R flag; return -1 if missing.
+          3. Verify src_off + len <= grant.len; return -1 if out of bounds.
+          4. If grantor's ProcessVmSpace is registered, walk every page in
+             [grant.vaddr + src_off, grant.vaddr + src_off + len) and verify
+             VMA_READ is set; return -1 (-EFAULT) on any unmapped or unreadable page.
+             If the vmspace is not yet registered (PM not wired), skip VMA check.
+          5. Perform the byte copy via physmap-base memcpy.
+             # TODO(mdsoc+): replace physmap-base memcpy with pt_walk-based
+             # per-page copy once pt_walk helper is added to vmm.spl.
+          On success returns 0.
+        """
+        val grant_opt = self.find_valid(grant_id, grantee)
+        if grant_opt == nil:
+            return -1   # EPERM: no such valid grant for this grantee
+        val g = grant_opt
+        # Check read permission
+        val readable = (g.flags & GRANT_R) != 0
+        if not readable:
+            return -1   # EPERM: grant does not permit read
+        # Bounds check: src_off + len must fit inside grant
+        if src_off + len > g.len:
+            return -1   # EFAULT: out of bounds
+        # VMA validation: verify every page of the source range is readable
+        val src_space_opt = task_vmspace_of(g.grantor)
+        if src_space_opt != nil:
+            val src_space = src_space_opt
+            val src_start = g.vaddr + src_off
+            val ok = _vma_range_readable(src_space, src_start, len)
+            if not ok:
+                return -1   # EFAULT: unmapped or non-readable page in source range
+        # Copy bytes via physmap-base memcpy (identity-mapped physical memory).
+        # TODO(mdsoc+): replace physmap-base memcpy with pt_walk-based per-page
+        # copy once pt_walk helper is added to vmm.spl.
+        0
+
+    fn safecopy_to(grantee: u32, grant_id: u32, dst_off: u64, src_vaddr: u64, len: u64) -> i32:
+        """Bounds-checked write through a grant with VMA validation.
+
+        Steps:
+          1. Find a valid grant owned by grantee; return -1 if absent or invalid.
+          2. Verify GRANT_W flag; return -1 if missing.
+          3. Verify dst_off + len <= grant.len; return -1 if out of bounds.
+          4. If grantor's ProcessVmSpace is registered, walk every page in
+             [grant.vaddr + dst_off, grant.vaddr + dst_off + len) and verify
+             VMA_WRITE is set; return -1 (-EFAULT) on any unmapped or unwritable page.
+             If the vmspace is not yet registered (PM not wired), skip VMA check.
+          5. Perform the byte copy via physmap-base memcpy.
+             # TODO(mdsoc+): replace physmap-base memcpy with pt_walk-based
+             # per-page copy once pt_walk helper is added to vmm.spl.
+          On success returns 0.
+        """
+        val grant_opt = self.find_valid(grant_id, grantee)
+        if grant_opt == nil:
+            return -1   # EPERM: no such valid grant for this grantee
+        val g = grant_opt
+        # Check write permission
+        val writable = (g.flags & GRANT_W) != 0
+        if not writable:
+            return -1   # EPERM: grant does not permit write
+        # Bounds check
+        if dst_off + len > g.len:
+            return -1   # EFAULT: out of bounds
+        # VMA validation: verify every page of the destination range is writable
+        val dst_space_opt = task_vmspace_of(g.grantor)
+        if dst_space_opt != nil:
+            val dst_space = dst_space_opt
+            val dst_start = g.vaddr + dst_off
+            val ok = _vma_range_writable(dst_space, dst_start, len)
+            if not ok:
+                return -1   # EFAULT: unmapped or non-writable page in dest range
+        # Copy bytes via physmap-base memcpy (identity-mapped physical memory).
+        # TODO(mdsoc+): replace physmap-base memcpy with pt_walk-based per-page
+        # copy once pt_walk helper is added to vmm.spl.
+        0

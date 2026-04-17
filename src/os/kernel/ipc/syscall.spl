@@ -10,6 +10,8 @@ use os.kernel.types.task_types.{TaskId, TaskState, TaskPriority, BlockReason}
 use os.kernel.types.ipc_types.{IpcPort, IpcMessage}
 use os.kernel.types.capability_types.{CapabilityToken, CapabilityKind, CapabilitySet}
 use os.kernel.types.notification_types.{Notification}
+use os.kernel.types.vmspace_types.{ProcessVmSpace, VmArea}
+use os.kernel.memory.vmm.{vmm_mmap, vmm_munmap, vmm_new_process_space}
 use os.kernel.scheduler.scheduler.{Scheduler}
 use os.kernel.ipc.ipc.{IpcManager}
 use os.kernel.ipc.notification.{NotificationTable, notification_create, notification_signal, notification_wait, notification_poll, notification_destroy, notification_wait_any, notification_register_multi_waiter}
@@ -28,7 +30,8 @@ use os.kernel.boot.mmio.{mmio_write8, mmio_write16, mmio_write32, mmio_write64}
 use os.kernel.interrupts.irq_routing.{irq_route_register}
 use os.kernel.interrupts.idt.{VEC_IRQ_BASE}
 use os.kernel.lifecycle.task_cleanup.{task_cleanup, task_register_resource, RES_NOTIFICATION, RES_IRQ_ROUTE}
-use os.kernel.ipc.capability.{CapabilityManager}
+use os.kernel.ipc.capability.{CapabilityManager, PrivilegeTable, GrantTable}
+use os.kernel.types.capability_types.{PrivilegeMask, Grant, PRIVCTL_SET_MASK, PRIVCTL_GET_MASK, PRIVCTL_ADD_PEER, PRIVCTL_REMOVE_PEER, GRANT_R, GRANT_W, GRANT_RW}
 use os.drivers.rtc.rtc.{rtc_get_seconds, rtc_get_minutes, rtc_get_hours}
 
 val MAX_BINARY_PATH_LEN: u64 = 256
@@ -56,6 +59,12 @@ var _pci_dev_irq: [u8; 256]
 
 # Bump allocator for anonymous mmap when address hint is 0
 var _next_mmap_addr: u64 = 0x10000000
+
+# G11 — per-task privilege tables (Wave 1)
+var _priv_table: PrivilegeTable = PrivilegeTable.new()
+
+# G12 — per-task grant table (Wave 1)
+var _grant_table: GrantTable = GrantTable.new()
 
 # ============================================================================
 # Architecture-Aware Security Boundaries
@@ -422,6 +431,29 @@ fn syscall_handler(args: SyscallArgs, scheduler: Scheduler, ipc: IpcManager, klo
             _handle_clock_get_time(args, scheduler)
         case 51:    # Sleep (always allowed)
             _handle_sleep(args, scheduler)
+
+        # -- Privilege Control (G11) -----------------------------------------
+        case 98:    # sys_privctl
+            if not _cap_check(ipc, caller, CapabilityKind.SystemPrivilege):
+                return SyscallResult(value: SYSCALL_EPERM)
+            _handle_privctl(args, scheduler)
+
+        # -- Memory Grants (G12) ---------------------------------------------
+        case 99:    # sys_grant
+            _handle_mem_grant(args, scheduler)
+        case 100:   # sys_revoke
+            _handle_mem_revoke(args, scheduler)
+        case 101:   # sys_safecopy_from
+            _handle_safecopy_from(args, scheduler)
+        case 102:   # sys_safecopy_to
+            _handle_safecopy_to(args, scheduler)
+
+        # -- VM mmap / munmap (Wave 1 G13) -----------------------------------
+        # TODO(mdsoc+): gate with VM capability once capability registry lands
+        case 103:   # sys_mmap
+            _handle_sys_mmap(args)
+        case 104:   # sys_munmap
+            _handle_sys_munmap(args)
 
         # -- Unknown ---------------------------------------------------------
         case _:
@@ -2322,3 +2354,208 @@ fn _u64_to_priority(val_: u64) -> TaskPriority:
         case 3: TaskPriority.Low
         case 4: TaskPriority.Idle
         case _: TaskPriority.Normal
+
+# ============================================================================
+# G11 — sys_privctl handler
+# ============================================================================
+
+fn _handle_privctl(args: SyscallArgs, scheduler: Scheduler) -> SyscallResult:
+    """sys_privctl — read/write per-task privilege mask.
+
+    Args:
+      arg0: target_task (u32 task ID)
+      arg1: op — PRIVCTL_SET_MASK / GET_MASK / ADD_PEER / REMOVE_PEER
+      arg2: data — op-specific (peer id for ADD/REMOVE; ignored for GET)
+
+    For SET_MASK: builds a mask with kernel_calls=data, all other fields 0.
+    Full struct marshal deferred until user-copy helpers land.
+    # TODO(mdsoc+): full PrivilegeMask marshal via user-copy once vmm_copy lands
+    """
+    val target_id = args.arg0.to_u32()
+    val op = args.arg1.to_u32()
+    val data = args.arg2
+
+    if op == PRIVCTL_SET_MASK:
+        val mask = PrivilegeMask(
+            kernel_calls: data,
+            irqs: 0,
+            io_port_base: 0,
+            io_port_len: 0,
+            allowed_peers: []
+        )
+        _priv_table.set(target_id, mask)
+        SyscallResult(value: 0)
+    else:
+        if op == PRIVCTL_GET_MASK:
+            val found = _priv_table.get(target_id)
+            if found == nil:
+                SyscallResult(value: -1)
+            else:
+                val m = found
+                # Return kernel_calls bitmap as the result value
+                SyscallResult(value: m.kernel_calls.to_i64())
+        else:
+            if op == PRIVCTL_ADD_PEER:
+                _priv_table.add_peer(target_id, data.to_u32())
+                SyscallResult(value: 0)
+            else:
+                if op == PRIVCTL_REMOVE_PEER:
+                    _priv_table.remove_peer(target_id, data.to_u32())
+                    SyscallResult(value: 0)
+                else:
+                    SyscallResult(value: -1)    # Unknown op
+
+# ============================================================================
+# G12 — sys_grant / sys_revoke / sys_safecopy_from / sys_safecopy_to handlers
+# ============================================================================
+
+fn _handle_mem_grant(args: SyscallArgs, scheduler: Scheduler) -> SyscallResult:
+    """sys_grant — create a memory region grant from caller to grantee.
+
+    Args:
+      arg0: grantee task ID (u32)
+      arg1: vaddr — base virtual address in caller's space
+      arg2: len — length in bytes
+      arg3: flags — GRANT_R / GRANT_W / GRANT_RW
+
+    Returns grant_id >= 0 on success, negative on error.
+    """
+    var sched = scheduler
+    val caller = sched.get_current()
+    val grantee = args.arg0.to_u32()
+    val vaddr = args.arg1
+    val len = args.arg2
+    val flags = args.arg3.to_u32()
+
+    if len == 0:
+        return SyscallResult(value: -1)     # Zero-length grant is invalid
+
+    val gid = _grant_table.cap_grant(caller.id.to_u32(), grantee, vaddr, len, flags)
+    SyscallResult(value: gid.to_i64())
+
+fn _handle_mem_revoke(args: SyscallArgs, scheduler: Scheduler) -> SyscallResult:
+    """sys_revoke — revoke a previously issued grant.
+
+    Args:
+      arg0: grant_id to revoke
+
+    Returns 0 on success, -1 if not found or already revoked.
+    """
+    var sched = scheduler
+    val caller = sched.get_current()
+    val grant_id = args.arg0.to_u32()
+
+    # Verify the grant belongs to the caller before revoking
+    val found = _grant_table.find_valid(grant_id, caller.id.to_u32())
+    # find_valid checks grantee — we need to check grantor instead
+    # Search directly for grantor match
+    val ok = _grant_revoke_by_grantor(grant_id, caller.id.to_u32())
+    if ok:
+        SyscallResult(value: 0)
+    else:
+        SyscallResult(value: -1)
+
+fn _grant_revoke_by_grantor(grant_id: u32, grantor: u32) -> bool:
+    """Revoke a grant only if it belongs to the given grantor."""
+    var idx = 0
+    while idx < _grant_table.grants.len():
+        var g = _grant_table.grants[idx]
+        if g.id == grant_id:
+            if g.grantor == grantor:
+                if g.valid:
+                    g.valid = false
+                    _grant_table.grants[idx] = g
+                    return true
+            return false
+        idx = idx + 1
+    false
+
+fn _handle_safecopy_from(args: SyscallArgs, scheduler: Scheduler) -> SyscallResult:
+    """sys_safecopy_from — bounds-checked copy from grantor's region to caller.
+
+    Args:
+      arg0: src_task  — grantor task ID (u32)
+      arg1: grant_id  — the grant to read through
+      arg2: src_off   — byte offset within the granted region
+      arg3: dst_vaddr — destination VA in the caller's address space
+      arg4: len       — number of bytes to copy
+
+    Returns 0 on success, negative errno on failure.
+    # TODO(mdsoc+): integrate MMU walk once G2 lands
+    """
+    var sched = scheduler
+    val caller = sched.get_current()
+    val grant_id = args.arg1.to_u32()
+    val src_off = args.arg2
+    val dst_vaddr = args.arg3
+    val len = args.arg4
+
+    val rc = _grant_table.safecopy_from(caller.id.to_u32(), grant_id, src_off, dst_vaddr, len)
+    SyscallResult(value: rc.to_i64())
+
+fn _handle_safecopy_to(args: SyscallArgs, scheduler: Scheduler) -> SyscallResult:
+    """sys_safecopy_to — bounds-checked copy from caller's buffer to grantee's region.
+
+    Args:
+      arg0: dst_task  — grantee task ID (u32)
+      arg1: grant_id  — the grant to write through
+      arg2: dst_off   — byte offset within the granted region
+      arg3: src_vaddr — source VA in the caller's address space
+      arg4: len       — number of bytes to copy
+
+    Returns 0 on success, negative errno on failure.
+    # TODO(mdsoc+): integrate MMU walk once G2 lands
+    """
+    var sched = scheduler
+    val caller = sched.get_current()
+    val grant_id = args.arg1.to_u32()
+    val dst_off = args.arg2
+    val src_vaddr = args.arg3
+    val len = args.arg4
+
+    val rc = _grant_table.safecopy_to(caller.id.to_u32(), grant_id, dst_off, src_vaddr, len)
+    SyscallResult(value: rc.to_i64())
+
+# ============================================================================
+# VM mmap / munmap handlers (Wave 1 G13 — syscall IDs 103 / 104)
+# ============================================================================
+
+# TODO(mdsoc+): replace g_current_vmspace with sched.get_current().vmspace
+# once PM Wave 2 lands and Task carries a ProcessVmSpace field.
+var g_current_vmspace: ProcessVmSpace = vmm_new_process_space(0, 0)
+
+fn _handle_sys_mmap(args: SyscallArgs) -> SyscallResult:
+    """sys_mmap — map a virtual address range into the current task's space.
+
+    Args:
+      arg0: vaddr          — requested virtual address (0 = kernel picks)
+      arg1: len            — length in bytes
+      arg2: flags          — VMA_READ | VMA_WRITE | VMA_EXEC | VMA_COW (u32)
+      arg3: kind           — VMA_ANON | VMA_FILE | VMA_SHARED (u32)
+      arg4: backing        — file handle or 0 for anonymous
+      arg5: backing_offset — byte offset into backing file
+
+    Returns mapped vaddr (>= 0) on success, negative errno on failure.
+    """
+    val vaddr          = args.arg0
+    val len            = args.arg1
+    val flags          = args.arg2.to_u32()
+    val kind           = args.arg3.to_u32()
+    val backing        = args.arg4
+    val backing_offset = args.arg5
+    val rc = vmm_mmap(g_current_vmspace, vaddr, len, flags, kind, backing, backing_offset)
+    SyscallResult(value: rc)
+
+fn _handle_sys_munmap(args: SyscallArgs) -> SyscallResult:
+    """sys_munmap — unmap a virtual address range from the current task's space.
+
+    Args:
+      arg0: vaddr — start of region to unmap (page-aligned)
+      arg1: len   — length in bytes
+
+    Returns 0 on success, negative errno on failure.
+    """
+    val vaddr = args.arg0
+    val len   = args.arg1
+    val rc = vmm_munmap(g_current_vmspace, vaddr, len)
+    SyscallResult(value: rc.to_i64())

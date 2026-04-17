@@ -4,6 +4,11 @@
 # This implementation avoids the interpreter's checked-overflow paths by using
 # a self-contained 10-limb radix-2^25/2^26 representation and u64 carries.
 
+extern fn serial_println(msg: text)
+
+fn _curve_debug(msg: text):
+    serial_println("[curve25519] {msg}")
+
 val MASK26: u64 = 0x3FFFFFF
 val MASK25: u64 = 0x1FFFFFF
 val BASE26: u64 = 0x4000000
@@ -208,57 +213,58 @@ fn _x25519_fe_sq(a: [u64]) -> [u64]:
     _x25519_fe_mul(a, a)
 
 fn _x25519_fe_from_bytes(b: [u8]) -> [u64]:
-    var h = _x25519_fe_carry([
-        _load4(b, 0) & MASK26,
-        (_load3(b, 3) >> 2) & MASK25,
-        (_load3(b, 6) >> 3) & MASK26,
-        (_load3(b, 9) >> 5) & MASK25,
-        (_load4(b, 12) >> 6) & MASK26,
-        _load4(b, 16) & MASK25,
-        (_load3(b, 19) >> 1) & MASK26,
-        (_load3(b, 22) >> 3) & MASK25,
-        (_load3(b, 25) >> 4) & MASK26,
-        (_load4(b, 28) >> 6) & MASK25
-    ])
-    if h[9] > 33554431:
-        return _x25519_fe_sub(h, _x25519_fe_p())
-    if h[9] < 33554431:
-        return h
-    if h[8] > 67108863:
-        return _x25519_fe_sub(h, _x25519_fe_p())
-    if h[8] < 67108863:
-        return h
-    if h[7] > 33554431:
-        return _x25519_fe_sub(h, _x25519_fe_p())
-    if h[7] < 33554431:
-        return h
-    if h[6] > 67108863:
-        return _x25519_fe_sub(h, _x25519_fe_p())
-    if h[6] < 67108863:
-        return h
-    if h[5] > 33554431:
-        return _x25519_fe_sub(h, _x25519_fe_p())
-    if h[5] < 33554431:
-        return h
-    if h[4] > 67108863:
-        return _x25519_fe_sub(h, _x25519_fe_p())
-    if h[4] < 67108863:
-        return h
-    if h[3] > 33554431:
-        return _x25519_fe_sub(h, _x25519_fe_p())
-    if h[3] < 33554431:
-        return h
-    if h[2] > 67108863:
-        return _x25519_fe_sub(h, _x25519_fe_p())
-    if h[2] < 67108863:
-        return h
-    if h[1] > 33554431:
-        return _x25519_fe_sub(h, _x25519_fe_p())
-    if h[1] < 33554431:
-        return h
-    if h[0] >= 67108845:
-        return _x25519_fe_sub(h, _x25519_fe_p())
-    h
+    var h0 = _load4(b, 0)
+    var h1 = _load3(b, 4) << 6
+    var h2 = _load3(b, 7) << 5
+    var h3 = _load3(b, 10) << 3
+    var h4 = _load3(b, 13) << 2
+    var h5 = _load4(b, 16)
+    var h6 = _load3(b, 20) << 7
+    var h7 = _load3(b, 23) << 5
+    var h8 = _load3(b, 26) << 4
+    var h9 = (_load3(b, 29) & 0x7FFFFF) << 2
+
+    var carry9 = (h9 + (1 << 24)) >> 25
+    h0 = h0 + carry9 * 19
+    h9 = h9 - (carry9 << 25)
+
+    var carry1 = (h1 + (1 << 24)) >> 25
+    h2 = h2 + carry1
+    h1 = h1 - (carry1 << 25)
+
+    var carry3 = (h3 + (1 << 24)) >> 25
+    h4 = h4 + carry3
+    h3 = h3 - (carry3 << 25)
+
+    var carry5 = (h5 + (1 << 24)) >> 25
+    h6 = h6 + carry5
+    h5 = h5 - (carry5 << 25)
+
+    var carry7 = (h7 + (1 << 24)) >> 25
+    h8 = h8 + carry7
+    h7 = h7 - (carry7 << 25)
+
+    var carry0 = (h0 + (1 << 25)) >> 26
+    h1 = h1 + carry0
+    h0 = h0 - (carry0 << 26)
+
+    var carry2 = (h2 + (1 << 25)) >> 26
+    h3 = h3 + carry2
+    h2 = h2 - (carry2 << 26)
+
+    var carry4 = (h4 + (1 << 25)) >> 26
+    h5 = h5 + carry4
+    h4 = h4 - (carry4 << 26)
+
+    var carry6 = (h6 + (1 << 25)) >> 26
+    h7 = h7 + carry6
+    h6 = h6 - (carry6 << 26)
+
+    var carry8 = (h8 + (1 << 25)) >> 26
+    h9 = h9 + carry8
+    h8 = h8 - (carry8 << 26)
+
+    [h0, h1, h2, h3, h4, h5, h6, h7, h8, h9]
 
 fn _x25519_fe_to_bytes(a: [u64]) -> [u8]:
     var h = _x25519_fe_carry(a)
@@ -431,6 +437,7 @@ fn _ladder_step(x2: [u64], z2: [u64], x3: [u64], z3: [u64], x1: [u64]) -> [list]
     [new_x2, new_z2, new_x3, new_z3]
 
 fn _clamp_scalar(scalar: [u8]) -> [u8]:
+    _curve_debug("_clamp_scalar start len={scalar.len()}")
     var clamped: [u8] = []
     var i: i64 = 0
     while i < 32:
@@ -440,20 +447,26 @@ fn _clamp_scalar(scalar: [u8]) -> [u8]:
     clamped[0] = clamped[0] & 0xF8
     clamped[31] = clamped[31] & 0x7F
     clamped[31] = clamped[31] | 0x40
+    _curve_debug("_clamp_scalar done")
     clamped
 
 fn _mask_u_coord(u_coord: [u8]) -> [u8]:
+    _curve_debug("_mask_u_coord start len={u_coord.len()}")
     var masked: [u8] = []
     var i: i64 = 0
     while i < 32:
         masked.push(u_coord[i])
         i = i + 1
     masked[31] = masked[31] & 0x7F
+    _curve_debug("_mask_u_coord done")
     masked
 
 fn x25519_smalllimb(scalar: [u8], u_coord: [u8]) -> [u8]:
+    _curve_debug("x25519_smalllimb start")
     val k = _clamp_scalar(scalar)
+    _curve_debug("after clamp")
     val u = _x25519_fe_from_bytes(_mask_u_coord(u_coord))
+    _curve_debug("after fe_from_bytes")
 
     var x_2 = _x25519_fe_one()
     var z_2 = _x25519_fe_zero()
@@ -499,5 +512,7 @@ fn x25519_smalllimb(scalar: [u8], u_coord: [u8]) -> [u8]:
     _x25519_fe_to_bytes(result)
 
 fn x25519_base_smalllimb(scalar: [u8]) -> [u8]:
+    _curve_debug("x25519_base_smalllimb start")
     var base_point: [u8] = [9,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0]
+    _curve_debug("x25519_base_smalllimb base point ready")
     x25519_smalllimb(scalar, base_point)

@@ -347,3 +347,62 @@ common/src/platform/
 3. Redirect compiler imports to `common`.
 4. Keep interpreter/frontend grammar single-source.
 5. If a future sibling-friend rule is still needed, add it as manifest/module metadata first, not syntax.
+
+---
+
+# Part 3 — MDSOC+ (ECS Business Layer) {#mdsoc-plus-ecs-business-layer}
+
+**Adopted:** 2026-04-17. **Scope:** default architecture for all userland services and apps; kernel and drivers stay MDSOC-only.
+
+## Motivation
+
+MDSOC organises **composition** (capsules, ports, dimensions) but does not prescribe how a service models its **mutable domain state**. In practice, services like PM, VFS, netstack, WM, and apps like the browser and editor accumulate long-lived collections of related records (processes, sockets, windows, tabs, documents). Modelling those as nested structs produces rigid inheritance-like hierarchies, which CLAUDE.md forbids anyway (no inheritance — composition via components).
+
+**MDSOC+** adds **Entity-Component-System (ECS)** as the canonical way to model business state *inside* a capsule, while leaving the outer MDSOC boundary unchanged.
+
+## Layer Rules
+
+| Layer | Pattern | Why |
+|---|---|---|
+| Kernel (ring 0) | **MDSOC only** — ports, dispatch, capsule stages | ECS overhead + dynamic composition unsafe in kernel |
+| Drivers | **MDSOC capsule per device, no ECS** | Drivers are IO-bound state machines, not entity graphs |
+| Userland services (PM, VM, VFS, netstack, WM, DS, RS, clock, TTY, …) | **MDSOC capsule outside, ECS inside** for domain state | Processes, sockets, windows, files, FDs, connections are entities |
+| Apps (shell, editor, browser, file mgr, …) | **MDSOC capsule outside, ECS inside** for domain/UI state | Scene graphs, documents, tabs, panes = entities |
+| libc / POSIX shim | Neither (thin ABI veneer) | No state of its own |
+
+## Canonical ECS Shape
+
+- **Entity** = opaque `u64` id with generational index; stable for its lifetime.
+- **Component** = POD struct stored in a `ComponentStore<T>` column (struct-of-arrays).
+- **System** = free function `fn sys_name(world: &mut World, dt: Duration)` that queries component sets and mutates.
+- **World** = the per-service container of entities + component stores + system schedule.
+- **Query** = compile-time typed iterator over entities having a given component tuple.
+- **Change detection** = `Added<T> / Changed<T> / Removed<T>` flags used by RS for state transfer across capsule restarts.
+
+## Stdlib Target
+
+- `src/lib/nogc_sync_mut/ecs/` — default ECS for sync-mutable services (kernel-adjacent userland).
+- `src/lib/gc_async_mut/ecs/` — GC-friendly variant for async/high-allocator apps.
+- Import surface: `use std.ecs` — re-exports `{World, Entity, ComponentStore, Query, System, Added, Changed, Removed}`.
+
+## What ECS Does NOT Replace
+
+- MDSOC capsule boundaries, manifests, and lifecycle.
+- Capability tokens and IPC endpoints.
+- Port contracts and typed dispatch.
+
+ECS is strictly the **internal business-state model** of one capsule. Inter-capsule communication stays on MDSOC ports + capabilities.
+
+## Acceptance Criteria
+
+1. `src/lib/nogc_sync_mut/ecs/` landed with `entity / component_store / world / query / system / change_detection`.
+2. ≥1 reference port (`src/os/services/wm/`) uses ECS internally and passes existing WM specs.
+3. Every new userland service/app spec in `doc/06_spec/` states its World + components + systems.
+4. Glossary entries for MDSOC+, ECS, Entity, Component, System, World, Query, ComponentStore exist and cross-link from MDSOC/Capsule/Port.
+5. `bin/simple lint` advisory rule flags monolithic struct state in new services (advisory only, not blocking).
+
+## Out of Scope
+
+- Porting the kernel or drivers to ECS — explicitly disallowed.
+- Dynamic component registration at runtime — Simple's type system wants static queries.
+- Scripting-language reflection of ECS state — revisit when a scripting need arises.

@@ -7,6 +7,11 @@
 #
 # Reference: RFC 8446 (TLS 1.3)
 
+extern fn serial_println(msg: text)
+
+fn _tls_hs_debug(msg: text):
+    serial_println("[tls13.hs] {msg}")
+
 # ============================================================================
 # Handshake Message Types
 # ============================================================================
@@ -105,6 +110,7 @@ fn _text_to_bytes(s: text) -> [u8]:
 
 fn _append_bytes(a: [u8], b: [u8]) -> [u8]:
     """Concatenate two byte arrays."""
+    _tls_hs_debug("_append_bytes a={a.len()} b={b.len()}")
     var out: [u8] = []
     var i: u64 = 0
     while i < a.len():
@@ -235,6 +241,7 @@ fn build_client_hello_bytes(random: [u8], x25519_pub: [u8], sni_host: text) -> [
 
     Returns: Complete handshake-layer bytes (type + 3-byte length + body).
     """
+    _tls_hs_debug("build_client_hello_bytes random={random.len()} key={x25519_pub.len()} host={sni_host} host_len={sni_host.len()}")
     # Legacy version: TLS 1.2 for compatibility
     var body: [u8] = []
     body.push(0x03)  # legacy_version high
@@ -263,10 +270,15 @@ fn build_client_hello_bytes(random: [u8], x25519_pub: [u8], sni_host: text) -> [
     # Build extensions
     var exts: [u8] = []
     val ext_sv = _build_ext_supported_versions()
+    _tls_hs_debug("ext_sv={ext_sv.len()}")
     val ext_ks = _build_ext_key_share(x25519_pub)
+    _tls_hs_debug("ext_ks={ext_ks.len()}")
     val ext_sni = _build_ext_sni(sni_host)
+    _tls_hs_debug("ext_sni={ext_sni.len()}")
     val ext_sa = _build_ext_sig_algs()
+    _tls_hs_debug("ext_sa={ext_sa.len()}")
     val ext_sg = _build_ext_supported_groups()
+    _tls_hs_debug("ext_sg={ext_sg.len()}")
     exts = _append_bytes(exts, ext_sv)
     exts = _append_bytes(exts, ext_ks)
     exts = _append_bytes(exts, ext_sni)
@@ -298,8 +310,12 @@ fn parse_handshake_header(data: [u8]) -> ParsedHandshake:
 
     Returns: ParsedHandshake with msg_type and body slice.
     """
+    if data.len() < 4:
+        return ParsedHandshake(msg_type: 0u8, body: [])
     val msg_type = data[0]
-    val body_len = _u24_be(data, 1)
+    val raw_body_len = _u24_be(data, 1)
+    val available_body_len = data.len() - 4
+    val body_len = if raw_body_len < available_body_len { raw_body_len } else { available_body_len }
     var body: [u8] = []
     var i: u64 = 0
     while i < body_len:

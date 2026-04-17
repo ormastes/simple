@@ -152,6 +152,8 @@ MCP server available via npm: `@simple-lang/mcp-server`
 ## Critical Rules
 
 - **Self-sufficient**: never fail because another LLM didn't do its step — do it yourself
+- When a short, safe grammar or compact expression form fails, compiles too slowly, or forces a workaround, fix it or record a concrete bug/feature request instead of silently normalizing the workaround
+- When you hit a meaningful perf regression during implementation or verification, either fix it in the same change or record it as a concrete bug/todo before moving on
 - NEVER overwrite another LLM's research — append and annotate
 - All requirement options must include pros, cons, and effort estimate
 - User MUST select requirements — never auto-select

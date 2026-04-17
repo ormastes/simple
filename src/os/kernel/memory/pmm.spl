@@ -313,3 +313,79 @@ fn pmm_total_memory() -> u64:
 fn pmm_free_memory() -> u64:
     """Free physical memory in bytes."""
     g_pmm.free_memory()
+
+# ============================================================================
+# Page Reference Counting (COW support)
+# ============================================================================
+#
+# A parallel array of u16 reference counts, one per physical page frame.
+# Index into the array is the page frame number (pfn).
+# Managed independently of the alloc bitmap: a page with refcount > 1 is
+# shared; the bitmap still tracks whether it is allocated at all.
+#
+# Limits: MAX_PHYS_PAGES entries × 2 bytes = 2MB of BSS. Acceptable.
+
+# TODO(mdsoc+): replace with a dynamically-sized slab once heap is stable.
+var g_page_refcounts: [u16] = []
+
+fn pmm_ref_page(pa: u64):
+    """Increment reference count for the page containing physical address `pa`.
+
+    Safe to call multiple times (COW clone increments parent page refs so both
+    parent and child share the same physical frame until a write fault occurs).
+    No-op if the pfn is out of range.
+    """
+    val pfn = pa / PAGE_SIZE
+    if pfn >= g_pmm.total_pages:
+        return
+    # Grow refcount array lazily to total_pages length if needed.
+    # In baremetal this is only called after pmm_init so total_pages is stable.
+    while (g_page_refcounts.len() as u64) <= pfn:
+        g_page_refcounts.push(0)
+    val cur = g_page_refcounts[pfn as i32]
+    if cur < 65535:
+        g_page_refcounts[pfn as i32] = cur + 1
+
+fn pmm_unref_page(pa: u64) -> u16:
+    """Decrement reference count for the page containing physical address `pa`.
+
+    Returns the new reference count. When the count reaches 0 the caller
+    should call `pmm_free_page` to return the frame to the allocator.
+    No-op (returns 0) if the pfn is out of range or refcount is already 0.
+    """
+    val pfn = pa / PAGE_SIZE
+    if pfn >= g_pmm.total_pages:
+        return 0
+    if (g_page_refcounts.len() as u64) <= pfn:
+        return 0
+    val cur = g_page_refcounts[pfn as i32]
+    if cur == 0:
+        return 0
+    val next = cur - 1
+    g_page_refcounts[pfn as i32] = next
+    next
+
+fn pmm_get_refcount(pa: u64) -> u16:
+    """Read the current reference count for the page at physical address `pa`."""
+    val pfn = pa / PAGE_SIZE
+    if pfn >= g_pmm.total_pages:
+        return 0
+    if (g_page_refcounts.len() as u64) <= pfn:
+        return 0
+    g_page_refcounts[pfn as i32]
+
+fn pmm_alloc_page_raw() -> u64:
+    """Allocate a page and return its physical address (u64), or 0 on failure.
+
+    Convenience wrapper over `pmm_alloc_page` for callers that need a raw
+    physical address rather than a `PageFrame` handle.
+    """
+    val frame = pmm_alloc_page()
+    if val Some(f) = frame:
+        return f.pfn * PAGE_SIZE
+    0
+
+fn pmm_free_page_raw(pa: u64):
+    """Free a page by physical address. Counterpart to `pmm_alloc_page_raw`."""
+    val frame = PageFrame(pfn: pa / PAGE_SIZE)
+    pmm_free_page(frame)

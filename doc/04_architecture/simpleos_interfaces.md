@@ -140,6 +140,36 @@ fn spl_handle_dup2(oldfd: i32, newfd: i32) -> i64
 **Consumers:** `src/os/libc/simpleos_process.c`, `src/os/libc/simpleos_process_wait.c`,
 `src/os/port/init/`
 
+### Wave 1 — Minix gap-fill syscalls (2026-04-17)
+
+N = 98 (max existing = 97, SetHostname).
+
+Implemented (dispatcher + shim wired):
+
+```
+sys_privctl       = 98   # G11: per-task kernel privilege table (SET/GET mask, ADD/REMOVE peer)
+sys_grant         = 99   # G12: issue cross-task memory region grant → grant_id
+sys_revoke        = 100  # G12: revoke a grant by id
+sys_safecopy_from = 101  # G12: bounds-checked read through a grant
+sys_safecopy_to   = 102  # G12: bounds-checked write through a grant
+sys_mmap          = 103  # G13: map virtual address range into current task's space
+sys_munmap        = 104  # G13: unmap virtual address range from current task's space
+```
+
+Reserved (documented only — no dispatcher entry; wired by owning agent):
+
+```
+sys_clock_get     = 105  # service agent
+sys_schedule      = 106  # service agent
+sys_schedctl      = 107  # service agent
+```
+
+**Files changed:** `src/os/kernel/types/capability_types.spl` (PrivilegeMask, Grant, SystemPrivilege),
+`src/os/kernel/ipc/capability.spl` (PrivilegeTable, GrantTable),
+`src/os/kernel/ipc/syscall.spl` (dispatcher cases + handlers),
+`src/os/kernel/abi/syscall_shim.spl` (5 new @export shims + 2 G13 shims),
+`src/os/kernel/types/vmspace_types.spl`, `src/os/kernel/memory/vmm.spl` (called, not modified).
+
 ---
 
 ## IF-02 Fork/exec kernel contract
