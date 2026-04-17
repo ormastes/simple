@@ -14,7 +14,6 @@ use common.window_protocol.window_protocol.{WM_EVENT_CLOSE}
 use os.kernel.types.fs_types.{DirEntry, FsNode, FsNodeKind}
 use os.services.launcher.launcher.{launcher_open_path}
 use os.services.vfs.vfs.{VfsManager}
-use os.userlib.fs.{stat}
 use os.userlib.window.{WindowClient}
 use os.userlib.process.{exit_}
 use os.userlib.log.{log_info, log_error}
@@ -151,15 +150,13 @@ impl FileManager:
         if self.selected_index < 0 or self.selected_index >= self.entries.len():
             return
         val entry = self.entries[self.selected_index]
-        match entry.kind:
-            FsNodeKind.Directory:
-                val new_path = _join_path(self.current_path, entry.name)
-                self.navigate_to(new_path)
-            _:
-                val selected_path = _join_path(self.current_path, entry.name)
-                val launch_result = launcher_open_path(selected_path, self.current_path)
-                if launch_result < 0:
-                    pass_dn
+        val selected_path = _resolve_open_path(self.current_path, entry.name)
+        if _should_navigate_in_place(entry.name, entry.kind, selected_path, self.vfs):
+            self.navigate_to(selected_path)
+            return
+        val launch_result = launcher_open_path(selected_path, self.current_path)
+        if launch_result < 0:
+            pass_dn
 
     me select_next():
         """Move selection down."""
@@ -495,6 +492,29 @@ fn _join_path(base: text, name: text) -> text:
     if base == "/":
         return "/{name}"
     return "{base}/{name}"
+
+fn _resolve_open_path(base: text, name: text) -> text:
+    """Resolve the selected entry name to the path that should be opened."""
+    if name == "" or name == ".":
+        if base == "":
+            return "/"
+        return base
+    if name == "..":
+        return _parent_dir(base)
+    return _join_path(base, name)
+
+fn _should_navigate_in_place(name: text, entry_kind: FsNodeKind, path: text, vfs: VfsManager?) -> bool:
+    """Prefer in-app navigation for directories, including stat-resolved targets."""
+    if name == "." or name == "..":
+        return true
+    if entry_kind == FsNodeKind.Directory:
+        return true
+    if vfs == nil:
+        return false
+    val stat_result = vfs.stat(path)
+    if stat_result.is_err():
+        return false
+    stat_result.unwrap().kind == FsNodeKind.Directory
 
 fn _basename(path: text) -> text:
     """Get the last component of a path."""

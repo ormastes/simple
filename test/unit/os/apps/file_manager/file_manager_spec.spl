@@ -2,6 +2,81 @@
 #
 # Tests for FileManager: construction, sorting, navigation, and show_hidden toggle.
 
+use std.spec
+use os.services.vfs.vfs.{VfsManager, Filesystem, SeekWhence}
+use os.kernel.types.fs_types.{FileFlags, FsNode, FsNodeKind, DirEntry}
+
+# ============================================================================
+# Mock Filesystem
+# ============================================================================
+
+class FileManagerOpenStatFs:
+    """Mock filesystem with configurable stat results for open_selected tests."""
+    stat_kind: FsNodeKind
+    last_stat_path: text
+
+impl FileManagerOpenStatFs:
+    static fn new(stat_kind: FsNodeKind) -> FileManagerOpenStatFs:
+        FileManagerOpenStatFs(stat_kind: stat_kind, last_stat_path: "")
+
+impl Filesystem for FileManagerOpenStatFs:
+    fn fs_name() -> text: "file-manager-open-stat"
+
+    me mount(device: text, options: text) -> Result<bool, text>:
+        Result.Ok(true)
+
+    me unmount() -> Result<bool, text>:
+        Result.Ok(true)
+
+    me open(path: text, flags: FileFlags) -> Result<u64, text>:
+        Result.Ok(0)
+
+    me read(handle: u64, size: u64) -> Result<[u8], text>:
+        Result.Ok([])
+
+    me write(handle: u64, data: [u8]) -> Result<u64, text>:
+        Result.Ok(0)
+
+    me close(handle: u64) -> Result<bool, text>:
+        Result.Ok(true)
+
+    me seek(handle: u64, offset: i64, whence: SeekWhence) -> Result<u64, text>:
+        Result.Ok(0)
+
+    fn stat(path: text) -> Result<FsNode, text>:
+        self.last_stat_path = path
+        Result.Ok(FsNode(
+            id: 1,
+            kind: self.stat_kind,
+            size: 0,
+            permissions: 0o755,
+            owner: 0,
+            group: 0,
+            created_ns: 0,
+            modified_ns: 0
+        ))
+
+    fn chmod(path: text, mode: u16) -> Result<bool, text>:
+        Result.Ok(true)
+
+    me mkdir(path: text) -> Result<bool, text>:
+        Result.Ok(true)
+
+    me rmdir(path: text) -> Result<bool, text>:
+        Result.Ok(true)
+
+    fn readdir(path: text) -> Result<[DirEntry], text>:
+        Result.Ok([])
+
+    me unlink(path: text) -> Result<bool, text>:
+        Result.Ok(true)
+
+    me rename(old_path: text, new_path: text) -> Result<bool, text>:
+        Result.Ok(true)
+
+    me symlink(target: text, link_path: text) -> Result<bool, text>:
+        Result.Ok(true)
+
 # ============================================================================
 # Enums
 # ============================================================================
@@ -183,6 +258,27 @@ describe "FileManager navigation":
         fm.navigate_up()
         expect(fm.current_path).to_equal("/")
 
+    it "open_selected resolves parent entries in-place":
+        var fm = FileManager.new("/home/user")
+        fm.entries = [
+            FileEntry(name: "..", kind: FsNodeKind.File, size: 0, modified_ns: 0, permissions: 0)
+        ]
+        fm.open_selected()
+        expect(fm.current_path).to_equal("/home")
+
+    it "open_selected navigates when stat resolves a non-directory entry to a directory":
+        var vfs = VfsManager.new()
+        val fs = FileManagerOpenStatFs.new(FsNodeKind.Directory)
+        val mounted = vfs.mount("/", "mock", "", false, fs)
+        expect(mounted.is_ok()).to_equal(true)
+        var fm = FileManager.with_vfs("/home", vfs)
+        fm.entries = [
+            FileEntry(name: "docs", kind: FsNodeKind.Symlink, size: 0, modified_ns: 0, permissions: 0)
+        ]
+        fm.open_selected()
+        expect(fm.current_path).to_equal("/home/docs")
+        expect(fs.last_stat_path).to_equal("/home/docs")
+
 # ============================================================================
 # Selection
 # ============================================================================
@@ -281,3 +377,20 @@ describe "FileManager format helpers":
     it "kind_icon returns [D] for directory":
         val result = kind_icon(FsNodeKind.Directory)
         expect(result).to_contain("D")
+
+describe "FileManager open path helpers":
+    it "_resolve_open_path keeps current directory for dot entries":
+        expect(_resolve_open_path("/home/user", ".")).to_equal("/home/user")
+
+    it "_resolve_open_path resolves parent for dot-dot entries":
+        expect(_resolve_open_path("/home/user", "..")).to_equal("/home")
+
+    it "_should_navigate_in_place prefers stat-resolved directories":
+        var vfs = VfsManager.new()
+        val fs = FileManagerOpenStatFs.new(FsNodeKind.Directory)
+        val mounted = vfs.mount("/", "mock", "", false, fs)
+        expect(mounted.is_ok()).to_equal(true)
+        expect(_should_navigate_in_place("docs", FsNodeKind.Symlink, "/home/docs", vfs)).to_equal(true)
+
+    it "_should_navigate_in_place leaves regular files to the launcher":
+        expect(_should_navigate_in_place("notes.txt", FsNodeKind.File, "/home/notes.txt", nil)).to_equal(false)

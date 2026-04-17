@@ -695,17 +695,23 @@ fn preprocess_sspec_for_smf(path: &Path) -> Result<PathBuf, String> {
             continue;
         }
 
-        if !in_top_fn {
-            let line_indent = line.len().saturating_sub(trimmed.len());
-            if line_indent == 0
-                && (trimmed.starts_with("fn ") || trimmed.starts_with("async fn ") || trimmed.starts_with("static fn "))
-            {
-                in_top_fn = true;
-                top_fn_indent = 0;
-                top_level_parts.push(line.to_string());
-                continue;
-            }
-        }
+        // Check if this line starts a new top-level def at indent 0.
+        // Includes fn/async fn/static fn AND class/impl/enum/trait/type/val/let/mod
+        // so their (indented) bodies are preserved at module scope rather than
+        // swept into `fn main()`.
+        let line_indent = line.len().saturating_sub(trimmed.len());
+        let starts_top_level = line_indent == 0
+            && (trimmed.starts_with("fn ")
+                || trimmed.starts_with("async fn ")
+                || trimmed.starts_with("static fn ")
+                || trimmed.starts_with("class ")
+                || trimmed.starts_with("impl ")
+                || trimmed.starts_with("enum ")
+                || trimmed.starts_with("trait ")
+                || trimmed.starts_with("type ")
+                || trimmed.starts_with("val ")
+                || trimmed.starts_with("let ")
+                || trimmed.starts_with("mod "));
 
         if in_top_fn {
             if trimmed.is_empty() {
@@ -718,6 +724,14 @@ fn preprocess_sspec_for_smf(path: &Path) -> Result<PathBuf, String> {
                 continue;
             }
             in_top_fn = false;
+            // Fall through so this line gets classified for itself.
+        }
+
+        if starts_top_level {
+            in_top_fn = true;
+            top_fn_indent = 0;
+            top_level_parts.push(line.to_string());
+            continue;
         }
 
         if trimmed.is_empty() {
@@ -725,6 +739,17 @@ fn preprocess_sspec_for_smf(path: &Path) -> Result<PathBuf, String> {
         } else {
             body_parts.push(format!("    {}", line));
         }
+    }
+
+    // Specs usually rely on the `describe`/`it`/`context`/`skip`/`expect` DSL
+    // being implicitly in scope (interpreter mode makes them builtins). For
+    // compile modes the symbols must be imported explicitly, so inject
+    // `use std.spec` unless the user already imported it.
+    let needs_spec_import = !import_parts
+        .iter()
+        .any(|line| line.trim_start().starts_with("use std.spec"));
+    if needs_spec_import {
+        import_parts.insert(0, "use std.spec".to_string());
     }
 
     let wrapped = format!(

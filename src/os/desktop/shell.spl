@@ -108,26 +108,31 @@ fn _build_editor_resident_launch() -> Result<EditorResidentLaunch, text>:
         content: cli_output
     ))
 
-fn _resident_app_id(name: text) -> text:
-    match name:
-        case "Browser Demo":
-            APP_ID_BROWSER_DEMO
-        case "Hello World":
-            APP_ID_HELLO_WORLD
-        case "File Manager":
-            APP_ID_FILE_MANAGER
-        case "Terminal":
-            APP_ID_SHELL
-        case "Editor":
-            APP_ID_EDITOR
-        case _:
-            ""
+fn _register_materialized_window(shell: DesktopShell, window_id: u64, pid: u64, app_id: text):
+    shell.compositor.set_window_identity(window_id, pid, app_id)
+    shell.wm.register_window_owner_with_identity(WindowId(value: window_id), 0, pid, app_id)
+    launcher_note_window_opened(pid)
 
-fn _materialize_resident_manifest_launch(shell: DesktopShell, name: text, pid: u64) -> bool:
-    """Create packaged app windows in the shell/compositor for resident launches."""
-    var app_id = _resident_app_id(name)
-    if app_id == "":
-        app_id = launcher_get_process_app_id_for_pid(pid)
+fn _create_materialized_window(
+    shell: DesktopShell,
+    title: text,
+    x: i32,
+    y: i32,
+    width: i32,
+    height: i32,
+    tree: UITree,
+    pid: u64,
+    app_id: text
+) -> bool:
+    val window_id = shell.compositor.create_window_with_tree(title, x, y, width, height, tree)
+    if window_id == 0:
+        return false
+    _register_materialized_window(shell, window_id, pid, app_id)
+    true
+
+fn _materialize_launch_fallback(shell: DesktopShell, name: text, pid: u64) -> bool:
+    """Create compositor-owned fallback windows for launcher-owned processes."""
+    val app_id = launcher_get_process_app_id_for_pid(pid)
     if app_id == "":
         return false
 
@@ -141,65 +146,19 @@ fn _materialize_resident_manifest_launch(shell: DesktopShell, name: text, pid: u
                 text_widget("browser_demo_inspector_title", "Browser Demo Inspector"),
                 text_widget("browser_demo_inspector_body", "resident-manifest")
             ]), "Browser Demo Inspector", "dark")
-            val main_wid = shell.compositor.create_window_with_tree("Browser Demo", 120, 90, 460, 260, main_tree)
-            if main_wid == 0:
+            if not _create_materialized_window(shell, "Browser Demo", 120, 90, 460, 260, main_tree, pid, app_id):
                 return false
-            val inspector_wid = shell.compositor.create_window_with_tree(
-                "Browser Demo Inspector", 620, 120, 320, 220, inspector_tree)
-            if inspector_wid == 0:
+            if not _create_materialized_window(
+                shell, "Browser Demo Inspector", 620, 120, 320, 220, inspector_tree, pid, app_id):
                 return false
-            shell.compositor.set_window_identity(main_wid, pid, app_id)
-            shell.compositor.set_window_identity(inspector_wid, pid, app_id)
-            shell.wm.register_window_owner_with_identity(WindowId(value: main_wid), 0, pid, app_id)
-            shell.wm.register_window_owner_with_identity(WindowId(value: inspector_wid), 0, pid, app_id)
-            launcher_note_window_opened(pid)
-            launcher_note_window_opened(pid)
-            true
-        case "Hello World":
-            val tree = build_tree_with_title(column("hello_world_resident", [
-                text_widget("hello_world_title", "Hello World"),
-                text_widget("hello_world_body", "packaged resident-manifest launch")
-            ]), "Hello World", "dark")
-            val wid = shell.compositor.create_window_with_tree("Hello World", 80, 80, 420, 220, tree)
-            if wid == 0:
-                return false
-            shell.compositor.set_window_identity(wid, pid, app_id)
-            shell.wm.register_window_owner_with_identity(WindowId(value: wid), 0, pid, app_id)
-            launcher_note_window_opened(pid)
-            true
-        case "File Manager":
-            val wid = shell.compositor.create_window_with_tree("File Manager", 100, 100, 640, 400, build_tree_with_title(column("file_manager_resident", [
-                text_widget("file_manager_title", "File Manager"),
-                text_widget("file_manager_body", "packaged resident-manifest launch")
-            ]), "File Manager", "dark"))
-            if wid == 0:
-                return false
-            shell.compositor.set_window_identity(wid, pid, app_id)
-            shell.wm.register_window_owner_with_identity(WindowId(value: wid), 0, pid, app_id)
-            launcher_note_window_opened(pid)
-            true
-        case "Terminal":
-            val wid = shell.compositor.create_window_with_tree("Terminal", 80, 80, 600, 360, build_tree_with_title(column("terminal_resident", [
-                text_widget("terminal_title", "SimpleOS Shell"),
-                text_widget("terminal_body", "$ ")
-            ]), "Terminal", "dark"))
-            if wid == 0:
-                return false
-            shell.compositor.set_window_identity(wid, pid, app_id)
-            shell.wm.register_window_owner_with_identity(WindowId(value: wid), 0, pid, app_id)
-            launcher_note_window_opened(pid)
             true
         case "Editor":
             serial_println("[desktop-e2e] editor-launch:start pid={pid} app=editor")
             match _build_editor_resident_launch():
                 Ok(launch):
-                    val wid = shell.compositor.create_window_with_tree("Editor", 140, 100, 760, 420, launch.tree)
-                    if wid == 0:
+                    if not _create_materialized_window(shell, "Editor", 140, 100, 760, 420, launch.tree, pid, app_id):
                         serial_println("[desktop-e2e] editor-launch:fail pid={pid} reason=create_window_failed")
                         return false
-                    shell.compositor.set_window_identity(wid, pid, app_id)
-                    shell.wm.register_window_owner_with_identity(WindowId(value: wid), 0, pid, app_id)
-                    launcher_note_window_opened(pid)
                     serial_println("[desktop-e2e] editor-save:ok pid={pid} path={launch.saved_path}")
                     serial_println("[desktop-e2e] cli-verify:ok pid={pid} path={launch.saved_path} content={launch.content}")
                     serial_println("[desktop-e2e] editor-launch:ok pid={pid} app=editor mode=resident-manifest")
@@ -209,7 +168,8 @@ fn _materialize_resident_manifest_launch(shell: DesktopShell, name: text, pid: u
                     serial_println("[desktop-e2e] editor-launch:fail pid={pid} reason={err}")
                     false
         case _:
-            false
+            val tree = _build_app_tree(name)
+            _create_materialized_window(shell, name, 80, 80, 640, 400, tree, pid, app_id)
 
 # ============================================================================
 # Keyboard Shortcut
@@ -436,12 +396,12 @@ impl DesktopShell:
         self.update_taskbar()
 
     me materialize_resident_launch(name: text, pid: u64) -> bool:
-        """Materialize a packaged resident app into compositor-owned windows."""
-        val app_id = _resident_app_id(name)
+        """Materialize a launcher-owned process into compositor fallback windows."""
+        val app_id = launcher_get_process_app_id_for_pid(pid)
         if app_id == "" or pid == 0:
             serial_println("[shell] resident-launch missing app={name} pid={pid}")
             return false
-        val launched = _materialize_resident_manifest_launch(self, name, pid)
+        val launched = _materialize_launch_fallback(self, name, pid)
         if launched:
             serial_println("[shell] resident-launch materialized app={name} pid={pid}")
         launched

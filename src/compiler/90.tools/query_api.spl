@@ -171,6 +171,30 @@ class CompilerQueryContext:
 
         all_refs
 
+    fn find_references_v2(file_path: text, symbol: SymbolV2) -> [Location]:
+        val candidate_files = match symbol.kind:
+            case SymbolKind.Variable, SymbolKind.Parameter:
+                [file_path]
+
+            case SymbolKind.Function, SymbolKind.Method:
+                find_files_that_might_import(file_path, self.project_root)
+
+            case SymbolKind.Class, SymbolKind.Struct, SymbolKind.Enum, SymbolKind.Trait:
+                find_source_files(self.project_root)
+
+            case _:
+                find_source_files(self.project_root)
+
+        var all_refs: [Location] = []
+        for file in candidate_files:
+            val symbol_table_result = self.get_symbol_table(file)
+            if symbol_table_result.ok.?:
+                val table = symbol_table_result.unwrap()
+                val refs = find_symbol_references(table, symbol.name)
+                all_refs.extend(refs)
+
+        all_refs
+
     # Find definition of symbol at position
     fn find_definition(file_path: text, pos: Position) -> Option<DefinitionResult>:
         val symbol_opt = self.symbol_at(file_path, pos)
@@ -436,15 +460,7 @@ class CompilerQueryContext:
             return nil
 
         val symbol = symbol_opt.unwrap()
-        val refs = self.find_references(file_path, Symbol(
-            name: symbol.name,
-            kind: symbol.kind,
-            location: symbol.location,
-            type_info: symbol.type_info,
-            doc_comment: symbol.doc_comment,
-            is_public: symbol.visibility.is_reachable,
-            is_mutable: symbol.is_mutable,
-        ))
+        val refs = self.find_references_v2(file_path, symbol)
 
         var edits: [RenameEdit] = []
         for loc in refs:

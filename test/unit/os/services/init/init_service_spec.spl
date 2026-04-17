@@ -17,6 +17,7 @@ use os.services.init.init_service.{
     InitService, ServiceDef, ServiceInstance, ServiceState,
     RestartPolicy, default_services
 }
+use os.crash_policy.{AppExitDisposition, CrashReason}
 
 fn _launcher_ok(binary: text, priority: u8) -> Result<u64, text>:
     if binary == "/sys/services/vfs":
@@ -295,7 +296,7 @@ describe "InitService launch path":
             priority: "high"
         ))
         init.start_service("vfs")
-        expect(init.services[0].state).to_equal(ServiceState.Failed(reason: "spawn failed"))
+        expect(init.services[0].state).to_equal(ServiceState.Failed(reason: "launch failed"))
 
     it "does not launch a service until dependencies are running":
         var init = InitService.with_launcher(_launcher_ok)
@@ -309,3 +310,106 @@ describe "InitService launch path":
         ))
         init.start_service("compositor")
         expect(init.services[0].state).to_equal(ServiceState.Stopped)
+
+describe "InitService supervision":
+    it "can start a stopped service with satisfied dependencies":
+        var init = InitService.with_launcher(_launcher_ok)
+        init.register(ServiceDef(
+            name: "vfs",
+            binary: "/sys/services/vfs",
+            dependencies: [],
+            capabilities: [],
+            restart: RestartPolicy.Always,
+            priority: "high"
+        ))
+        expect(init.can_start_service("vfs")).to_equal(true)
+
+    it "does not start a running service again":
+        var init = InitService.with_launcher(_launcher_ok)
+        init.register(ServiceDef(
+            name: "vfs",
+            binary: "/sys/services/vfs",
+            dependencies: [],
+            capabilities: [],
+            restart: RestartPolicy.Always,
+            priority: "high"
+        ))
+        init.start_service("vfs")
+        expect(init.can_start_service("vfs")).to_equal(false)
+
+    it "restarts an Always service after clean exit":
+        var init = InitService.with_launcher(_launcher_ok)
+        init.register(ServiceDef(
+            name: "vfs",
+            binary: "/sys/services/vfs",
+            dependencies: [],
+            capabilities: [],
+            restart: RestartPolicy.Always,
+            priority: "high"
+        ))
+        init.start_service("vfs")
+        val disposition = init.handle_service_exit("vfs", 0)
+        expect(disposition).to_equal(AppExitDisposition.Restart)
+        expect(init.services[0].restart_count).to_equal(1)
+        expect(init.services[0].state).to_equal(ServiceState.Running(pid: 41))
+
+    it "stops an OnFailure service after clean exit":
+        var init = InitService.with_launcher(_launcher_ok)
+        init.register(ServiceDef(
+            name: "vfs",
+            binary: "/sys/services/vfs",
+            dependencies: [],
+            capabilities: [],
+            restart: RestartPolicy.OnFailure,
+            priority: "high"
+        ))
+        init.start_service("vfs")
+        val disposition = init.handle_service_exit("vfs", 0)
+        expect(disposition).to_equal(AppExitDisposition.Stop)
+        expect(init.services[0].restart_count).to_equal(0)
+        expect(init.services[0].state).to_equal(ServiceState.Stopped)
+
+    it "restarts an OnFailure service after failure exit":
+        var init = InitService.with_launcher(_launcher_ok)
+        init.register(ServiceDef(
+            name: "vfs",
+            binary: "/sys/services/vfs",
+            dependencies: [],
+            capabilities: [],
+            restart: RestartPolicy.OnFailure,
+            priority: "high"
+        ))
+        init.start_service("vfs")
+        val disposition = init.handle_service_exit("vfs", 101)
+        expect(disposition).to_equal(AppExitDisposition.Restart)
+        expect(init.services[0].restart_count).to_equal(1)
+        expect(init.services[0].state).to_equal(ServiceState.Running(pid: 41))
+
+    it "quarantines a service after hitting restart limit":
+        var init = InitService.with_launcher(_launcher_ok)
+        init.register(ServiceDef(
+            name: "vfs",
+            binary: "/sys/services/vfs",
+            dependencies: [],
+            capabilities: [],
+            restart: RestartPolicy.Always,
+            priority: "high"
+        ))
+        init.services[0].restart_count = 5
+        val disposition = init.handle_service_exit("vfs", 101)
+        expect(disposition).to_equal(AppExitDisposition.Quarantine)
+        expect(init.services[0].state).to_equal(ServiceState.Quarantined(reason: "panic"))
+
+    it "escalates invariant violations for system services":
+        var init = InitService.with_launcher(_launcher_ok)
+        init.register(ServiceDef(
+            name: "vfs",
+            binary: "/sys/services/vfs",
+            dependencies: [],
+            capabilities: [],
+            restart: RestartPolicy.Always,
+            priority: "high"
+        ))
+        val disposition = init.handle_service_crash("vfs", CrashReason.InvariantViolation)
+        expect(disposition).to_equal(AppExitDisposition.Escalate)
+        expect(init.services[0].state).to_equal(ServiceState.Failed(reason: "invariant_violation"))

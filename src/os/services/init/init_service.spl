@@ -7,6 +7,12 @@
 # above the driver-specific supervisor.
 
 use os.userlib.process.{spawn_binary}
+use os.crash_policy.{
+    AppClass, AppExitDisposition, CrashReason, SupervisorPolicy,
+    classify_exit_code, crash_reason_text, default_invariant_violation_disposition,
+    default_supervisor_policy, is_failure_reason, restart_limit_disposition,
+    supervisor_restart_limit_reached
+}
 
 enum RestartPolicy:
     Never
@@ -18,6 +24,7 @@ enum ServiceState:
     Starting
     Running(pid: u64)
     Failed(reason: text)
+    Quarantined(reason: text)
 
 struct ServiceDef:
     name: text
@@ -56,6 +63,17 @@ fn _is_running(state: ServiceState) -> bool:
             true
         case _:
             false
+
+fn _is_launchable(state: ServiceState) -> bool:
+    match state:
+        case ServiceState.Starting:
+            false
+        case ServiceState.Running(_):
+            false
+        case ServiceState.Quarantined(_):
+            false
+        case _:
+            true
 
 class InitService:
     services: [ServiceInstance]
@@ -112,12 +130,21 @@ impl InitService:
                 return false
         true
 
+    me can_start_service(name: text) -> bool:
+        val idx = self._find_service_index(name)
+        if idx < 0:
+            return false
+        val svc = self.services[idx]
+        if not _is_launchable(svc.state):
+            return false
+        self.check_deps(svc.definition.dependencies)
+
     me start_service(name: text):
         val idx = self._find_service_index(name)
         if idx < 0:
             return
         val svc = self.services[idx]
-        if not self.check_deps(svc.definition.dependencies):
+        if not self.can_start_service(name):
             return
         self.services[idx].state = ServiceState.Starting
         val priority = _priority_to_u8(svc.definition.priority)
@@ -127,6 +154,19 @@ impl InitService:
                 self.services[idx].state = ServiceState.Running(pid: pid)
             case Err(msg):
                 self.services[idx].state = ServiceState.Failed(reason: msg)
+
+    me handle_service_exit(name: text, exit_code: i32) -> AppExitDisposition:
+        self.handle_service_crash(name, classify_exit_code(exit_code))
+
+    me handle_service_crash(name: text, reason: CrashReason) -> AppExitDisposition:
+        val idx = self._find_service_index(name)
+        if idx < 0:
+            return AppExitDisposition.Stop
+
+        val svc = self.services[idx]
+        val disposition = self._exit_disposition(svc, reason)
+        self._apply_exit_disposition(idx, disposition, crash_reason_text(reason))
+        disposition
 
     fn _find_service_index(name: text) -> i64:
         var i = 0
@@ -146,6 +186,49 @@ impl InitService:
             if not found:
                 return false
         true
+
+    fn _exit_disposition(svc: ServiceInstance, reason: CrashReason) -> AppExitDisposition:
+        match reason:
+            case CrashReason.InvariantViolation:
+                return default_invariant_violation_disposition(AppClass.SystemService)
+            case _:
+                pass
+
+        val policy = self._supervisor_policy_for(svc)
+        if self._restart_requested(svc.definition.restart, reason):
+            if supervisor_restart_limit_reached(policy, svc.restart_count):
+                return restart_limit_disposition(policy)
+            return AppExitDisposition.Restart
+        AppExitDisposition.Stop
+
+    fn _supervisor_policy_for(svc: ServiceInstance) -> SupervisorPolicy:
+        default_supervisor_policy(AppClass.SystemService)
+
+    fn _restart_requested(restart: RestartPolicy, reason: CrashReason) -> bool:
+        match restart:
+            case RestartPolicy.Never:
+                false
+            case RestartPolicy.OnFailure:
+                is_failure_reason(reason)
+            case RestartPolicy.Always:
+                true
+
+    me _apply_exit_disposition(idx: i64, disposition: AppExitDisposition, reason_text: text):
+        match disposition:
+            case AppExitDisposition.Restart:
+                self.services[idx].restart_count = self.services[idx].restart_count + 1
+                self.services[idx].state = ServiceState.Stopped
+                self.start_service(self.services[idx].definition.name)
+            case AppExitDisposition.Stop:
+                self.services[idx].state = ServiceState.Stopped
+            case AppExitDisposition.Quarantine:
+                self.services[idx].state = ServiceState.Quarantined(reason: reason_text)
+            case AppExitDisposition.Escalate:
+                self.services[idx].state = ServiceState.Failed(reason: reason_text)
+            case AppExitDisposition.Reboot:
+                self.services[idx].state = ServiceState.Failed(reason: reason_text)
+            case AppExitDisposition.Halt:
+                self.services[idx].state = ServiceState.Failed(reason: reason_text)
 
 fn default_services() -> [ServiceDef]:
     [

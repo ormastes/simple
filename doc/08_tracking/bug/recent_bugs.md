@@ -1,14 +1,15 @@
 # Recent Bugs
 
-**Generated:** 2026-04-14
+**Generated:** 2026-04-17
 **Database:** `doc/08_tracking/bug/bug_db.sdn`
-**Open:** 1 | **Closed:** 24
+**Open:** 2 | **Closed:** 24
 
 ## Open Bugs
 
 | ID | Severity | Status | Title |
 |----|----------|--------|-------|
 | js_runtime_guest_001 | P1 | open | Generic x86_64 bare-metal JS runtime bootstrap faults in object/env storage |
+| parser_005 | P1 | open | Scoped visibility lost in flat AST bridge |
 
 ## Closed Bugs
 

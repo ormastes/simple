@@ -1,0 +1,86 @@
+# Desktop Shell Launch Fallback Spec
+#
+# Verifies that shell-side fallback materialization derives identity from
+# launcher-owned process rows instead of a shell-local resident manifest map.
+
+use std.spec
+use os.desktop.shell.{DesktopShell}
+use os.compositor.compositor.{Compositor}
+use os.compositor.browser_compositor_backend.{BrowserCompositorBackend}
+use os.compositor.input_backend.{InputBackend}
+use os.drivers.input.ps2_keyboard.{KeyEvent, Key}
+use os.drivers.input.ps2_mouse.{MouseEvent}
+use os.services.launcher.launcher.{
+    launcher_init, launcher_record_process, launcher_get_process_window_count
+}
+
+class SilentInputBackend:
+    _unused: bool
+
+impl InputBackend for SilentInputBackend:
+    me poll_key() -> KeyEvent?:
+        nil
+
+    me poll_mouse() -> MouseEvent?:
+        nil
+
+    fn alt_held() -> bool:
+        false
+
+    fn shift_held() -> bool:
+        false
+
+    fn ctrl_held() -> bool:
+        false
+
+    fn key_to_char(key: Key) -> text?:
+        nil
+
+impl SilentInputBackend:
+    static fn new() -> SilentInputBackend:
+        SilentInputBackend(_unused: false)
+
+describe "DesktopShell launch fallback":
+    it "materializes generic fallback windows using launcher process identity":
+        launcher_init()
+        val pid: u64 = 7501
+        expect(launcher_record_process(pid, 0, "resident-manifest", 0, 0, true)).to_be(true)
+
+        var shell = _make_test_shell()
+        expect(shell.materialize_resident_launch("Hello World", pid)).to_be(true)
+
+        expect(shell.compositor.window_count()).to_equal(1)
+        val ids = shell.compositor.windows_for_process(pid)
+        expect(ids.len()).to_equal(1)
+        val wid = ids[0]
+        expect(shell.compositor.window_app_id(wid)).to_equal("/sys/apps/hello_world")
+        expect(shell.wm.window_owner_app_id(wid)).to_equal("/sys/apps/hello_world")
+        expect(launcher_get_process_window_count(0)).to_equal(1)
+
+    it "keeps Browser Demo multi-window fallback while using launcher identity":
+        launcher_init()
+        val pid: u64 = 7502
+        expect(launcher_record_process(pid, 3, "resident-manifest", 0, 0, true)).to_be(true)
+
+        var shell = _make_test_shell()
+        expect(shell.materialize_resident_launch("Browser Demo", pid)).to_be(true)
+
+        expect(shell.compositor.window_count_for_process(pid)).to_equal(2)
+        expect(shell.compositor.window_count_for_app("/sys/apps/browser_demo")).to_equal(2)
+        expect(shell.wm.window_count_for_app("/sys/apps/browser_demo")).to_equal(2)
+        expect(launcher_get_process_window_count(0)).to_equal(2)
+
+    it "refuses fallback materialization when launcher has no process identity":
+        launcher_init()
+
+        var shell = _make_test_shell()
+        expect(shell.materialize_resident_launch("Hello World", 0x44000001)).to_be(false)
+        expect(shell.compositor.window_count()).to_equal(0)
+
+fn _make_test_shell() -> DesktopShell:
+    val backend = BrowserCompositorBackend.new(1024, 768)
+    val input = SilentInputBackend.new()
+    val compositor = Compositor.with_backends(backend, input, 1024, 768)
+    var shell = DesktopShell.new(compositor)
+    shell.set_task_reaper_enabled(false)
+    shell
