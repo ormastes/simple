@@ -39,32 +39,6 @@ fn dotted_dir_from(current: &Path, segment: &str) -> Option<PathBuf> {
     }
 }
 
-fn domain_to_dir(domain: &str) -> String {
-    domain.replace('-', "_")
-}
-
-fn normalize_type_parts(parts: &[String]) -> Option<Vec<String>> {
-    if parts.is_empty() {
-        return None;
-    }
-
-    if parts.len() >= 2 && parts[0].contains('-') {
-        let mut normalized = vec!["type".to_string(), domain_to_dir(&parts[0])];
-        normalized.extend(parts[1..].iter().cloned());
-        return Some(normalized);
-    }
-
-    if parts.len() == 1 {
-        return Some(vec![
-            "type".to_string(),
-            "simple_lang".to_string(),
-            parts[0].clone(),
-        ]);
-    }
-
-    None
-}
-
 fn resolve_parts_from_root(root: &Path, parts: &[String], use_stmt: &UseStmt) -> Option<PathBuf> {
     let mut resolved = root.to_path_buf();
     for part in parts {
@@ -114,83 +88,6 @@ fn resolve_parts_from_root(root: &Path, parts: &[String], use_stmt: &UseStmt) ->
         let nested_file = dotted_dir.join(format!("{}.spl", last));
         if nested_file.exists() && nested_file.is_file() {
             return Some(prefer_package_init_for_member_import(nested_file, use_stmt));
-        }
-    }
-
-    None
-}
-
-fn resolve_parts_with_search_roots(base: &Path, parts: &[String], use_stmt: &UseStmt) -> Option<PathBuf> {
-    if let Some(resolved) = resolve_parts_from_root(base, parts, use_stmt) {
-        return Some(resolved);
-    }
-
-    let mut init_resolved = base.to_path_buf();
-    for part in parts {
-        init_resolved = init_resolved.join(part);
-    }
-    init_resolved = init_resolved.join("__init__");
-    init_resolved.set_extension("spl");
-    if init_resolved.exists() && init_resolved.is_file() {
-        return Some(init_resolved);
-    }
-
-    let mut mod_resolved = base.to_path_buf();
-    for part in parts {
-        mod_resolved = mod_resolved.join(part);
-    }
-    mod_resolved = mod_resolved.join("mod");
-    mod_resolved.set_extension("spl");
-    if mod_resolved.exists() && mod_resolved.is_file() {
-        return Some(mod_resolved);
-    }
-
-    let mut parent_dir = base.to_path_buf();
-    for _ in 0..10 {
-        if let Some(parent) = parent_dir.parent() {
-            parent_dir = parent.to_path_buf();
-
-            let mut parent_resolved = parent_dir.clone();
-            for part in parts {
-                parent_resolved = parent_resolved.join(part);
-            }
-            parent_resolved.set_extension("spl");
-            if parent_resolved.exists() && parent_resolved.is_file() {
-                return Some(prefer_package_init_for_member_import(parent_resolved, use_stmt));
-            }
-
-            if let Some(parent_resolved) = resolve_parts_from_root(&parent_dir, parts, use_stmt) {
-                return Some(parent_resolved);
-            }
-
-            let parent_src = parent_dir.join("src");
-            if parent_src.is_dir() {
-                if let Some(src_resolved) = resolve_parts_from_root(&parent_src, parts, use_stmt) {
-                    return Some(src_resolved);
-                }
-            }
-
-            let mut parent_init_resolved = parent_dir.clone();
-            for part in parts {
-                parent_init_resolved = parent_init_resolved.join(part);
-            }
-            parent_init_resolved = parent_init_resolved.join("__init__");
-            parent_init_resolved.set_extension("spl");
-            if parent_init_resolved.exists() && parent_init_resolved.is_file() {
-                return Some(parent_init_resolved);
-            }
-
-            let mut parent_mod_resolved = parent_dir.clone();
-            for part in parts {
-                parent_mod_resolved = parent_mod_resolved.join(part);
-            }
-            parent_mod_resolved = parent_mod_resolved.join("mod");
-            parent_mod_resolved.set_extension("spl");
-            if parent_mod_resolved.exists() && parent_mod_resolved.is_file() {
-                return Some(parent_mod_resolved);
-            }
-        } else {
-            break;
         }
     }
 
@@ -1139,13 +1036,85 @@ fn resolve_use_to_path(use_stmt: &UseStmt, base: &Path) -> Option<PathBuf> {
         }
     }
 
-    if let Some(resolved) = resolve_parts_with_search_roots(base, &parts, use_stmt) {
+    // Try resolving from base directory first (sibling files)
+    if let Some(resolved) = resolve_parts_from_root(base, &parts, use_stmt) {
         return Some(resolved);
     }
 
-    if let Some(type_parts) = normalize_type_parts(&parts) {
-        if let Some(resolved) = resolve_parts_with_search_roots(base, &type_parts, use_stmt) {
-            return Some(resolved);
+    // Try __init__.spl in directory (Python-style package imports)
+    let mut init_resolved = base.to_path_buf();
+    for part in &parts {
+        init_resolved = init_resolved.join(part);
+    }
+    init_resolved = init_resolved.join("__init__");
+    init_resolved.set_extension("spl");
+    if init_resolved.exists() && init_resolved.is_file() {
+        return Some(init_resolved);
+    }
+
+    // Try mod.spl in directory (Rust-style package imports)
+    let mut mod_resolved = base.to_path_buf();
+    for part in &parts {
+        mod_resolved = mod_resolved.join(part);
+    }
+    mod_resolved = mod_resolved.join("mod");
+    mod_resolved.set_extension("spl");
+    if mod_resolved.exists() && mod_resolved.is_file() {
+        return Some(mod_resolved);
+    }
+
+    // Try resolving from parent directories (for project-root-relative imports)
+    // This handles cases like importing "blocks.modes" from within "blocks/builtin.spl"
+    // where we need to go up to find the "blocks/" root
+    let mut parent_dir = base.to_path_buf();
+    for _ in 0..10 {
+        if let Some(parent) = parent_dir.parent() {
+            parent_dir = parent.to_path_buf();
+
+            // Try module.spl
+            let mut parent_resolved = parent_dir.clone();
+            for part in &parts {
+                parent_resolved = parent_resolved.join(part);
+            }
+            parent_resolved.set_extension("spl");
+            if parent_resolved.exists() && parent_resolved.is_file() {
+                return Some(prefer_package_init_for_member_import(parent_resolved, use_stmt));
+            }
+
+            if let Some(parent_resolved) = resolve_parts_from_root(&parent_dir, &parts, use_stmt) {
+                return Some(parent_resolved);
+            }
+
+            let parent_src = parent_dir.join("src");
+            if parent_src.is_dir() {
+                if let Some(src_resolved) = resolve_parts_from_root(&parent_src, &parts, use_stmt) {
+                    return Some(src_resolved);
+                }
+            }
+
+            // Try __init__.spl
+            let mut parent_init_resolved = parent_dir.clone();
+            for part in &parts {
+                parent_init_resolved = parent_init_resolved.join(part);
+            }
+            parent_init_resolved = parent_init_resolved.join("__init__");
+            parent_init_resolved.set_extension("spl");
+            if parent_init_resolved.exists() && parent_init_resolved.is_file() {
+                return Some(parent_init_resolved);
+            }
+
+            // Try mod.spl
+            let mut parent_mod_resolved = parent_dir.clone();
+            for part in &parts {
+                parent_mod_resolved = parent_mod_resolved.join(part);
+            }
+            parent_mod_resolved = parent_mod_resolved.join("mod");
+            parent_mod_resolved.set_extension("spl");
+            if parent_mod_resolved.exists() && parent_mod_resolved.is_file() {
+                return Some(parent_mod_resolved);
+            }
+        } else {
+            break;
         }
     }
 
@@ -1399,44 +1368,6 @@ mod tests {
             .any(|item| matches!(item, Node::Function(func) if func.name == "run_web"));
 
         assert!(has_run_web);
-    }
-
-    #[test]
-    fn resolves_bare_type_imports_from_project_type_root() {
-        let temp = tempfile::tempdir().unwrap();
-        let src = temp.path().join("src");
-        let nested = src.join("app");
-        let type_dir = temp.path().join("type").join("simple_lang");
-        fs::create_dir_all(&nested).unwrap();
-        fs::create_dir_all(&type_dir).unwrap();
-        fs::write(type_dir.join("I64.spl"), "type I64 = i64\nexport I64\n").unwrap();
-
-        let resolved = resolve_use_to_path(
-            &use_stmt(&["I64"], ImportTarget::Glob),
-            &nested,
-        )
-        .unwrap();
-
-        assert_eq!(resolved, type_dir.join("I64.spl"));
-    }
-
-    #[test]
-    fn resolves_owned_domain_type_imports_from_project_type_root() {
-        let temp = tempfile::tempdir().unwrap();
-        let src = temp.path().join("src");
-        let nested = src.join("app");
-        let type_dir = temp.path().join("type").join("simple_lang");
-        fs::create_dir_all(&nested).unwrap();
-        fs::create_dir_all(&type_dir).unwrap();
-        fs::write(type_dir.join("I64.spl"), "type I64 = i64\nexport I64\n").unwrap();
-
-        let resolved = resolve_use_to_path(
-            &use_stmt(&["simple-lang", "I64"], ImportTarget::Glob),
-            &nested,
-        )
-        .unwrap();
-
-        assert_eq!(resolved, type_dir.join("I64.spl"));
     }
 
     #[test]

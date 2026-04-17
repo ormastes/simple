@@ -442,7 +442,6 @@ impl RuntimeSymbolProvider for StaticSymbolProvider {
             rt_platform_name,
             rt_term_enable_ansi,
             rt_term_get_size,
-            rt_sleep_ms,
             rt_cli_get_args,
             rt_cli_print_help,
             rt_cli_print_version,

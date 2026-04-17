@@ -155,10 +155,6 @@ pub struct ModuleResolver {
     pub(super) project_root: PathBuf,
     /// Source root directory (from simple.toml [project].root)
     pub(super) source_root: PathBuf,
-    /// Project-scoped logical type root (project_root/type)
-    pub(super) type_root: PathBuf,
-    /// Default owned domain used for bare type imports
-    pub(super) default_type_domain: String,
     /// Standard library root directory (src/lib/std/src)
     pub(super) stdlib_root: Option<PathBuf>,
     /// Cached directory manifests
@@ -181,10 +177,8 @@ impl ModuleResolver {
         let stdlib_root = if stdlib_root.exists() { Some(stdlib_root) } else { None };
 
         Self {
-            type_root: project_root.join("type"),
             project_root,
             source_root,
-            default_type_domain: "simple-lang".to_string(),
             stdlib_root,
             manifests: HashMap::new(),
             features: HashSet::new(),
@@ -267,10 +261,8 @@ impl ModuleResolver {
         };
 
         Self {
-            type_root: project_root.join("type"),
             project_root,
             source_root,
-            default_type_domain: "simple-lang".to_string(),
             stdlib_root,
             manifests: HashMap::new(),
             features: HashSet::new(),
