@@ -259,6 +259,72 @@ class SimpleWindowManager {
     });
   }
 
+  _sendLaunch(appId) {
+    this._sendWindowCmd('launch', { app_id: appId });
+  }
+
+  // Install one persistent click listener on the taskbar that dispatches
+  // by data-action. Idempotent — rendering can clear innerHTML without
+  // losing the handler. Call once after this.taskbar is bound.
+  _installTaskbarDelegation() {
+    if (!this.taskbar || this._taskbarDelegationInstalled) return;
+    this._taskbarDelegationInstalled = true;
+    this.taskbar.addEventListener('click', (ev) => {
+      const el = ev.target.closest('[data-action]');
+      if (!el || !this.taskbar.contains(el)) return;
+      const action = el.dataset.action;
+      if (action === 'launch' && el.dataset.appId) {
+        this._sendLaunch(el.dataset.appId);
+      } else if (action === 'focus' && el.dataset.surfaceId) {
+        this._sendWindowCmd('focus', { surface_id: el.dataset.surfaceId });
+      }
+    });
+  }
+
+  // Render a TaskbarModel { pinned, running, tray } into the taskbar
+  // element. Click handling is via the delegated listener above, so
+  // replacing innerHTML does not lose dispatch.
+  renderTaskbarModel(model) {
+    if (!this.taskbar) return;
+    this._installTaskbarDelegation();
+    this.taskbar.innerHTML = '';
+
+    const pinned = document.createElement('div');
+    pinned.className = 'wm-taskbar-section pinned';
+    for (const a of (model.pinned || [])) {
+      const item = document.createElement('div');
+      item.className = 'wm-taskbar-item pinned';
+      item.textContent = a.display_name || a.app_id;
+      item.dataset.action = 'launch';
+      item.dataset.appId = a.app_id;
+      pinned.appendChild(item);
+    }
+    this.taskbar.appendChild(pinned);
+
+    const running = document.createElement('div');
+    running.className = 'wm-taskbar-section running';
+    for (const w of (model.running || [])) {
+      const item = document.createElement('div');
+      item.className = 'wm-taskbar-item running'
+        + (w.minimized ? ' minimized' : '');
+      item.textContent = (w.minimized ? '[-] ' : '') + (w.title || w.window_id);
+      item.dataset.action = 'focus';
+      item.dataset.surfaceId = w.window_id;
+      running.appendChild(item);
+    }
+    this.taskbar.appendChild(running);
+
+    const tray = document.createElement('div');
+    tray.className = 'wm-taskbar-section tray';
+    for (const t of (model.tray || [])) {
+      const item = document.createElement('div');
+      item.className = 'wm-taskbar-tray';
+      item.textContent = t.label;
+      tray.appendChild(item);
+    }
+    this.taskbar.appendChild(tray);
+  }
+
   // -------------------------------------------------------------------------
   // Ack timer
   // -------------------------------------------------------------------------

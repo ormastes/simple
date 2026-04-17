@@ -1,0 +1,58 @@
+# Host Taskbar Shell — Server-Side Model Builder
+#
+# Converts the authoritative UiWindowSurfaceRegistry + a list of pinned
+# AppRefs into a TaskbarModel (src/lib/common/ui/taskbar_model.spl) that
+# the browser client consumes via the existing WebSocket renderer.
+#
+# This file is the host counterpart to src/os/desktop/taskbar_shell.spl
+# — both produce the same schema, so Classic/Taskbar rendering on either
+# side is portable.
+
+use common.ui.taskbar_model.{TaskbarModel, AppRef, WindowRef, TrayItem, empty_taskbar_model}
+use common.ui.window_surface_registry.{UiWindowSurfaceRegistry, UiWindowSurfaceBinding}
+
+# =========================================================================
+# WindowSnapshot — small record including surface_kind for smoke tests
+# =========================================================================
+
+struct WindowSnapshot:
+    """Minimal per-window projection used by tests and the taskbar builder."""
+    surface_id: text
+    window_id: text
+    app_id: text
+    title: text
+    surface_kind: text   # "Legacy" | "Electron" | "SimpleWeb"
+
+fn snapshot_windows(registry: UiWindowSurfaceRegistry) -> [WindowSnapshot]:
+    """Project the registry into a kind-aware list for introspection."""
+    var out: [WindowSnapshot] = []
+    for b in registry.bindings:
+        out = out.push(WindowSnapshot(
+            surface_id: b.surface_id,
+            window_id: b.window_id,
+            app_id: b.app_id,
+            title: b.title,
+            surface_kind: b.surface_kind
+        ))
+    out
+
+# =========================================================================
+# Taskbar Model Builder
+# =========================================================================
+
+fn build_taskbar_model(registry: UiWindowSurfaceRegistry, pinned: [AppRef], tray: [TrayItem]) -> TaskbarModel:
+    """Build a TaskbarModel from the live registry + caller-supplied pinned + tray.
+
+    Running-window entries are materialised from every registry binding;
+    the caller decides pinning (persisted elsewhere — out of scope for
+    Wave 4) and tray items.
+    """
+    var running: [WindowRef] = []
+    for b in registry.bindings:
+        running = running.push(WindowRef(
+            window_id: b.window_id,
+            app_id: b.app_id,
+            title: b.title,
+            minimized: false
+        ))
+    TaskbarModel(pinned: pinned, running: running, tray: tray)

@@ -1,0 +1,95 @@
+## Spec for Wave 4 host-side taskbar helper:
+##   src/app/ui.web/taskbar_shell.spl — snapshot_windows + build_taskbar_model
+##
+## Verifies:
+##   * snapshot_windows projects each UiWindowSurfaceBinding into a
+##     kind-aware WindowSnapshot.
+##   * bind_with_kind flows surface_kind all the way through.
+##   * build_taskbar_model combines registry + pinned + tray into a
+##     TaskbarModel matching the shared schema.
+##
+## The "launch" branch of wm_bridge.spl is validated via its own session
+## wiring tests in a later wave — this spec stays runtime-free so it
+## passes in the existing test harness.
+##
+## Run:
+##   bin/simple test test/app/ui.web/host_taskbar_launch_test.spl
+
+use std.spec
+use common.ui.window_surface_registry.{new_ui_window_surface_registry}
+use common.ui.taskbar_model.{AppRef, TrayItem}
+use app.ui.web.taskbar_shell.{
+    WindowSnapshot, snapshot_windows, build_taskbar_model
+}
+
+fn _registry_with_two():
+    val reg = new_ui_window_surface_registry()
+    reg.bind_with_kind("s1", "1", 100 as u64, "terminal", "Term 1", "Legacy")
+    reg.bind_with_kind("s2", "2", 200 as u64, "browser", "Web 1", "SimpleWeb")
+    reg
+
+describe "taskbar_shell.snapshot_windows":
+    """Registry bindings project into kind-aware snapshots."""
+
+    it "is empty for an empty registry":
+        val reg = new_ui_window_surface_registry()
+        val snaps = snapshot_windows(reg)
+        expect(snaps.len()).to_equal(0)
+
+    it "yields one snapshot per binding":
+        val reg = _registry_with_two()
+        val snaps = snapshot_windows(reg)
+        expect(snaps.len()).to_equal(2)
+
+    it "carries surface_kind through":
+        val reg = _registry_with_two()
+        val snaps = snapshot_windows(reg)
+        # snaps are in insertion order; check both kinds are represented.
+        var saw_legacy = false
+        var saw_simple_web = false
+        for s in snaps:
+            if s.surface_kind == "Legacy":
+                saw_legacy = true
+            if s.surface_kind == "SimpleWeb":
+                saw_simple_web = true
+        expect(saw_legacy).to_equal(true)
+        expect(saw_simple_web).to_equal(true)
+
+    it "preserves app_id and title":
+        val reg = _registry_with_two()
+        val snaps = snapshot_windows(reg)
+        var saw_terminal = false
+        for s in snaps:
+            if s.app_id == "terminal" and s.title == "Term 1":
+                saw_terminal = true
+        expect(saw_terminal).to_equal(true)
+
+describe "taskbar_shell.build_taskbar_model":
+    """Combines registry + pinned + tray into the shared schema."""
+
+    it "returns an empty model for empty inputs":
+        val reg = new_ui_window_surface_registry()
+        val m = build_taskbar_model(reg, [], [])
+        expect(m.pinned.len()).to_equal(0)
+        expect(m.running.len()).to_equal(0)
+        expect(m.tray.len()).to_equal(0)
+
+    it "materialises one WindowRef per registry binding":
+        val reg = _registry_with_two()
+        val m = build_taskbar_model(reg, [], [])
+        expect(m.running.len()).to_equal(2)
+
+    it "passes pinned apps through verbatim":
+        val reg = new_ui_window_surface_registry()
+        val pinned = [
+            AppRef(app_id: "term", display_name: "Terminal", icon: "t"),
+            AppRef(app_id: "edit", display_name: "Editor",   icon: "e")
+        ]
+        val m = build_taskbar_model(reg, pinned, [])
+        expect(m.pinned.len()).to_equal(2)
+
+    it "passes tray items through verbatim":
+        val reg = new_ui_window_surface_registry()
+        val tray = [TrayItem(item_id: "clk", label: "12:00", icon: "clk")]
+        val m = build_taskbar_model(reg, [], tray)
+        expect(m.tray.len()).to_equal(1)
