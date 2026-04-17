@@ -310,12 +310,15 @@ pub(crate) fn compile_binop<M: Module>(
                 let zero = builder.ins().iconst(types::I64, 0);
                 let cond = builder.ins().icmp(IntCC::SignedGreaterThan, exp_param, zero);
                 builder.ins().brif(cond, loop_body, &[], loop_exit, &[result_param]);
+                builder.seal_block(loop_body);
+                builder.seal_block(loop_exit);
 
                 builder.switch_to_block(loop_body);
                 let new_result = builder.ins().fmul(result_param, lhs);
                 let one_i = builder.ins().iconst(types::I64, 1);
                 let new_exp = builder.ins().isub(exp_param, one_i);
                 builder.ins().jump(loop_header, &[new_result, new_exp]);
+                builder.seal_block(loop_header);
 
                 builder.switch_to_block(loop_exit);
                 builder.block_params(loop_exit)[0]
@@ -337,11 +340,14 @@ pub(crate) fn compile_binop<M: Module>(
                 let zero = builder.ins().iconst(types::I64, 0);
                 let cond = builder.ins().icmp(IntCC::SignedGreaterThan, exp_param, zero);
                 builder.ins().brif(cond, loop_body, &[], loop_exit, &[result_param]);
+                builder.seal_block(loop_body);
+                builder.seal_block(loop_exit);
 
                 builder.switch_to_block(loop_body);
                 let new_result = builder.ins().imul(result_param, lhs);
                 let new_exp = builder.ins().isub(exp_param, one);
                 builder.ins().jump(loop_header, &[new_result, new_exp]);
+                builder.seal_block(loop_header);
 
                 builder.switch_to_block(loop_exit);
                 builder.block_params(loop_exit)[0]

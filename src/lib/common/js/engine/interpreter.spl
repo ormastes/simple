@@ -804,20 +804,25 @@ class JsInterpreter:
     me exec_do_while(cond: Expression, body: [Statement], env: i64) -> BrowserResult<JsValue>:
         var result = JsValue.Undefined
         var cont = true
+        var should_exit = false
         while cont:
             val loop_env = self.env_stack.create_env(env)
             var bi = 0
             while bi < body.len():
                 result = self.exec_statement(body.get(bi), loop_env)?
                 if self.control_return or self.control_thrown:
-                    return Ok(result)
+                    should_exit = true
+                    break
                 if self.control_break:
                     self.control_break = false
-                    return Ok(result)
+                    should_exit = true
+                    break
                 if self.control_continue:
                     self.control_continue = false
                     break
                 bi = bi + 1
+            if should_exit:
+                break
             val cond_val = self.eval_expression(cond, env)?
             cont = is_truthy(cond_val)
         Ok(result)
@@ -2036,6 +2041,7 @@ class JsInterpreter:
 
         if method == "find":
             val cb_val = self.eval_expression(args.get(0), env)?
+            var final_result = JsValue.Undefined
             match cb_val:
                 JsValue.Function(fn_id):
                     var i = 0
@@ -2050,12 +2056,13 @@ class JsInterpreter:
                             break
                         i = i + 1
                     if found:
-                        return Ok(found_value)
+                        final_result = found_value
                 _: pass_dn
-            return Ok(JsValue.Undefined)
+            return Ok(final_result)
 
         if method == "findIndex":
             val cb_val = self.eval_expression(args.get(0), env)?
+            var final_index = -1
             match cb_val:
                 JsValue.Function(fn_id):
                     var i = 0
@@ -2070,16 +2077,16 @@ class JsInterpreter:
                             break
                         i = i + 1
                     if found:
-                        return Ok(JsValue.Number(v: found_index.to_f64()))
+                        final_index = found_index
                 _: pass_dn
-            return Ok(JsValue.Number(v: -1.0))
+            return Ok(JsValue.Number(v: final_index.to_f64()))
 
         if method == "some":
             val cb_val = self.eval_expression(args.get(0), env)?
+            var matched = false
             match cb_val:
                 JsValue.Function(fn_id):
                     var i = 0
-                    var matched = false
                     while i < arr_len:
                         val elem = self.object_store.get_by_index(arr_id, i)
                         val result = self._invoke_function(fn_id, [elem, JsValue.Number(v: i.to_f64()), JsValue.Array(id: arr_id)], env)?
@@ -2087,17 +2094,15 @@ class JsInterpreter:
                             matched = true
                             break
                         i = i + 1
-                    if matched:
-                        return Ok(JsValue.Boolean(v: true))
                 _: pass_dn
-            return Ok(JsValue.Boolean(v: false))
+            return Ok(JsValue.Boolean(v: matched))
 
         if method == "every":
             val cb_val = self.eval_expression(args.get(0), env)?
+            var all_match = true
             match cb_val:
                 JsValue.Function(fn_id):
                     var i = 0
-                    var all_match = true
                     while i < arr_len:
                         val elem = self.object_store.get_by_index(arr_id, i)
                         val result = self._invoke_function(fn_id, [elem, JsValue.Number(v: i.to_f64()), JsValue.Array(id: arr_id)], env)?
@@ -2105,10 +2110,8 @@ class JsInterpreter:
                             all_match = false
                             break
                         i = i + 1
-                    if not all_match:
-                        return Ok(JsValue.Boolean(v: false))
                 _: pass_dn
-            return Ok(JsValue.Boolean(v: true))
+            return Ok(JsValue.Boolean(v: all_match))
 
         if method == "reduce":
             val cb_val = self.eval_expression(args.get(0), env)?

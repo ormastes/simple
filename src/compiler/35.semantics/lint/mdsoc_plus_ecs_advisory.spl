@@ -1,0 +1,352 @@
+#![allow(export_outside_init)]
+# MDSOC+ ECS Advisory Lint
+#
+# Advisory lint rule that flags userland services and apps that carry
+# monolithic-struct domain state without importing the ECS stdlib.
+#
+# MDSOC_PLUS_001: Struct with >= 7 fields in os/services or os/apps without ECS import
+#
+# Does NOT flag:
+# - Paths containing /kernel/, /drivers/, /libc/, or /posix/
+# - Files that already import std.ecs.* or lib.gc_async_mut.ecs.*
+# - Structs annotated with @repr("C")
+# - Struct names ending in Action, Message, Request, Reply, or Event (transient DTOs)
+# - Paths containing /test/ or ending in _spec.spl
+#
+# Severity: advisory (WARNING) — does NOT fail the build
+#
+# ============================================================================
+
+use std.io_runtime
+
+
+# ============================================================================
+# Warning Struct
+# ============================================================================
+
+struct MdsocPlusEcsWarning:
+    code: text
+    severity: text
+    message: text
+    hint: text
+    line_num: i64
+    file_path: text
+
+    fn fmt() -> text:
+        "warning: {self.code}: {self.message}\n  help: {self.hint}"
+
+
+# ============================================================================
+# Entry Point
+# ============================================================================
+
+fn check_mdsoc_plus_001(source: text, path: text) -> [MdsocPlusEcsWarning]:
+    """Check a file for monolithic-struct domain state in MDSOC+ userland.
+
+    Returns advisory warnings for structs with >= 7 fields in
+    src/os/services/** or src/os/apps/** that do not import any ECS module.
+    """
+    var warnings: [MdsocPlusEcsWarning] = []
+
+    # Skip test files
+    if _is_test_path(path):
+        return warnings
+
+    # Skip kernel/driver/libc/posix paths
+    if _is_excluded_path(path):
+        return warnings
+
+    # Only check MDSOC+ userland (services and apps)
+    if not _is_mdsoc_plus_path(path):
+        return warnings
+
+    # Skip files that already import ECS
+    if _has_ecs_import(source):
+        return warnings
+
+    # Scan for large structs
+    val struct_hits = _find_large_structs(source)
+
+    var i = 0
+    while i < struct_hits.len():
+        val hit = struct_hits[i]
+        val struct_name = hit[0]
+        val field_count_str = hit[1]
+        val line_num_str = hit[2]
+        val field_count = _parse_i64(field_count_str)
+        val line_num = _parse_i64(line_num_str)
+        warnings.push(MdsocPlusEcsWarning(
+            code: "MDSOC_PLUS_001",
+            severity: "WARNING",
+            message: "MDSOC+ advisory: {struct_name} in {path} has {field_count_str} fields but no ECS import [MDSOC_PLUS_001]",
+            hint: "Consider decomposing into components and using std.ecs.world.WorldBase + ComponentStore<T>. See doc/04_architecture/mdsoc_architecture_tobe.md §Part 3. (advisory only)",
+            line_num: line_num,
+            file_path: path
+        ))
+        i = i + 1
+
+    warnings
+
+
+# ============================================================================
+# Path Predicates
+# ============================================================================
+
+fn _is_test_path(path: text) -> bool:
+    """Return true if the path is a test file that should be skipped."""
+    if path.contains("/test/"):
+        return true
+    if path.ends_with("_spec.spl"):
+        return true
+    false
+
+fn _is_excluded_path(path: text) -> bool:
+    """Return true if path is in kernel/drivers/libc/posix (MDSOC-only zones)."""
+    if path.contains("/kernel/"):
+        return true
+    if path.contains("/drivers/"):
+        return true
+    if path.contains("/libc/"):
+        return true
+    if path.contains("/posix/"):
+        return true
+    false
+
+fn _is_mdsoc_plus_path(path: text) -> bool:
+    """Return true if path is in the MDSOC+ userland zone."""
+    if path.contains("/os/services/"):
+        return true
+    if path.contains("/os/apps/"):
+        return true
+    false
+
+fn _has_ecs_import(source: text) -> bool:
+    """Return true if source imports any ECS module."""
+    val lines = source.split("\n")
+    var i = 0
+    while i < lines.len():
+        val trimmed = lines[i].trim()
+        if trimmed.starts_with("use std.ecs."):
+            return true
+        if trimmed.starts_with("use lib.gc_async_mut.ecs."):
+            return true
+        i = i + 1
+    false
+
+
+# ============================================================================
+# Struct Field Counting
+# ============================================================================
+
+fn _find_large_structs(source: text) -> [[text]]:
+    """Scan source text for struct declarations with >= 7 fields.
+
+    Returns a list of [struct_name, field_count_str, line_num_str] triples
+    for each struct that exceeds the threshold.
+
+    Algorithm:
+    1. Find lines matching 'struct <Name>:' (possibly indented)
+    2. Check the line immediately before for @repr("C")
+    3. Collect subsequent lines that are deeper-indented, non-blank, non-comment
+       and contain ':' (field syntax); stop at blank or dedent
+    4. Skip structs with DTO-suffix names or @repr("C")
+    5. Return hits with field_count >= 7
+    """
+    var result: [[text]] = []
+    val lines = source.split("\n")
+    val total = lines.len()
+
+    var li = 0
+    while li < total:
+        val line = lines[li]
+        val trimmed = line.trim()
+
+        # Check for struct declaration
+        if _is_struct_decl(trimmed):
+            val struct_name = _extract_struct_name(trimmed)
+            val struct_indent = _indent_width(line)
+
+            # Skip DTO suffix names
+            if not _is_dto_name(struct_name):
+                # Check preceding line for @repr("C")
+                var has_repr_c = false
+                if li > 0:
+                    val prev_trimmed = lines[li - 1].trim()
+                    if prev_trimmed.contains("@repr(\"C\")"):
+                        has_repr_c = true
+
+                if not has_repr_c:
+                    # Count fields in the struct body
+                    var field_count = 0
+                    var body_li = li + 1
+                    while body_li < total:
+                        val body_line = lines[body_li]
+                        val body_trimmed = body_line.trim()
+
+                        # Stop at blank line
+                        if body_trimmed == "":
+                            break
+
+                        val body_indent = _indent_width(body_line)
+
+                        # Stop if indent is not deeper than struct
+                        if body_indent <= struct_indent:
+                            break
+
+                        # Skip comment lines and method declarations
+                        if body_trimmed.starts_with("#"):
+                            body_li = body_li + 1
+                            continue
+
+                        if body_trimmed.starts_with("fn "):
+                            body_li = body_li + 1
+                            continue
+
+                        if body_trimmed.starts_with("me "):
+                            body_li = body_li + 1
+                            continue
+
+                        # Count lines with colon that are not type annotations for fns
+                        if body_trimmed.contains(":"):
+                            field_count = field_count + 1
+
+                        body_li = body_li + 1
+
+                    if field_count >= 7:
+                        result.push([struct_name, _i64_to_text(field_count), _i64_to_text(li + 1)])
+
+        li = li + 1
+
+    result
+
+
+# ============================================================================
+# Struct Name & Indent Helpers
+# ============================================================================
+
+fn _is_struct_decl(trimmed: text) -> bool:
+    """Return true if line is a struct declaration."""
+    if trimmed.starts_with("struct "):
+        if trimmed.contains(":"):
+            return true
+    false
+
+fn _extract_struct_name(trimmed: text) -> text:
+    """Extract struct name from 'struct Name:' or 'struct Name<T>:'."""
+    # trimmed starts with "struct "
+    val rest = trimmed.slice(7)
+    var end = 0
+    while end < rest.len():
+        val ch = rest.slice(end, end + 1)
+        if ch == ":" or ch == "<" or ch == " ":
+            break
+        end = end + 1
+    if end == 0:
+        return ""
+    rest.slice(0, end)
+
+fn _indent_width(line: text) -> i64:
+    """Count leading spaces/tabs (tabs count as 1)."""
+    var count = 0
+    var i = 0
+    while i < line.len():
+        val ch = line.slice(i, i + 1)
+        if ch == " " or ch == "\t":
+            count = count + 1
+            i = i + 1
+        else:
+            break
+    count
+
+fn _is_dto_name(name: text) -> bool:
+    """Return true if struct name ends in a DTO suffix."""
+    if name.ends_with("Action"):
+        return true
+    if name.ends_with("Message"):
+        return true
+    if name.ends_with("Request"):
+        return true
+    if name.ends_with("Reply"):
+        return true
+    if name.ends_with("Event"):
+        return true
+    false
+
+
+# ============================================================================
+# Numeric Conversion Helpers
+# ============================================================================
+
+fn _parse_i64(s: text) -> i64:
+    """Parse a non-negative integer text to i64."""
+    var result: i64 = 0
+    var i = 0
+    while i < s.len():
+        val ch = s.slice(i, i + 1)
+        if ch == "0":
+            result = result * 10
+        elif ch == "1":
+            result = result * 10 + 1
+        elif ch == "2":
+            result = result * 10 + 2
+        elif ch == "3":
+            result = result * 10 + 3
+        elif ch == "4":
+            result = result * 10 + 4
+        elif ch == "5":
+            result = result * 10 + 5
+        elif ch == "6":
+            result = result * 10 + 6
+        elif ch == "7":
+            result = result * 10 + 7
+        elif ch == "8":
+            result = result * 10 + 8
+        elif ch == "9":
+            result = result * 10 + 9
+        i = i + 1
+    result
+
+fn _i64_to_text(n: i64) -> text:
+    """Convert a non-negative i64 to its decimal text representation."""
+    if n == 0:
+        return "0"
+    var digits: [text] = []
+    var remaining = n
+    while remaining > 0:
+        val d = remaining - (remaining / 10) * 10
+        if d == 0:
+            digits.push("0")
+        elif d == 1:
+            digits.push("1")
+        elif d == 2:
+            digits.push("2")
+        elif d == 3:
+            digits.push("3")
+        elif d == 4:
+            digits.push("4")
+        elif d == 5:
+            digits.push("5")
+        elif d == 6:
+            digits.push("6")
+        elif d == 7:
+            digits.push("7")
+        elif d == 8:
+            digits.push("8")
+        elif d == 9:
+            digits.push("9")
+        remaining = remaining / 10
+    # digits are in reverse order
+    var result = ""
+    var i = digits.len() - 1
+    while i >= 0:
+        result = result + digits[i]
+        i = i - 1
+    result
+
+
+# ============================================================================
+# Exports
+# ============================================================================
+
+export MdsocPlusEcsWarning
+export check_mdsoc_plus_001

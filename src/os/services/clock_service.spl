@@ -3,12 +3,12 @@
 # Provides monotonic tick-based timekeeping, one-shot alarms, periodic
 # timers, and timerfd-style primitives for SimpleOS user-space.
 #
-# ECS-style internals: entities are alarms; components are stored as
-# fields on AlarmEntry. When std.ecs lands, migrate to WorldBase +
-# ComponentStore.
-#
-# TODO(mdsoc+): migrate to std.ecs.{WorldBase, ComponentStore, EntityAllocator,
-#               Scheduler, ChangeTracker, for_each} when stdlib lands.
+# ECS internals: entities are alarms; components live in per-type
+# ComponentStore<T> columns owned by ClockWorld.
+
+use std.ecs.entity.{Entity, EntityAllocator}
+use std.ecs.component_store.{ComponentStore}
+use std.ecs.world.{WorldBase}
 
 # ============================================================================
 # Alarm kind constants
@@ -17,14 +17,6 @@
 val ALARM_ONESHOT: u32 = 0
 val ALARM_PERIODIC: u32 = 1
 val ALARM_TIMERFD: u32 = 2
-
-# ============================================================================
-# Entity — minimal ECS entity handle
-# ============================================================================
-
-struct Entity:
-    """Opaque handle for an alarm entity in the ClockWorld."""
-    id: u64
 
 # ============================================================================
 # Components (per MDSOC+ ECS spec)
@@ -47,30 +39,16 @@ struct AlarmKind:
     kind: u32
 
 # ============================================================================
-# AlarmEntry — aggregated ECS row (one entity = one row)
-# ============================================================================
-
-struct AlarmEntry:
-    """One alarm entity with all component values inlined."""
-    entity: Entity
-    deadline: Deadline
-    period: Period
-    subscriber: Subscriber
-    kind: AlarmKind
-    active: bool
-
-# ============================================================================
 # ClockWorld — ECS world for clock/alarm state
 # ============================================================================
 
 struct ClockWorld:
-    """ECS world that owns all alarm entities and their component data.
-
-    TODO(mdsoc+): split into WorldBase + per-component ComponentStore<T>
-    when std.ecs lands.
-    """
-    alarms: [AlarmEntry]
-    next_id: u64
+    """ECS world that owns all alarm entities and their component data."""
+    base: WorldBase
+    deadlines:   ComponentStore<Deadline>
+    periods:     ComponentStore<Period>
+    subscribers: ComponentStore<Subscriber>
+    kinds:       ComponentStore<AlarmKind>
 
 # ============================================================================
 # Extern — kernel will wire this later
@@ -81,37 +59,54 @@ extern fn clock_notify(endpoint_id: u64)
 # ============================================================================
 # System: sys_fire_due_alarms
 #
-# Iterates over Deadline components, fires subscribers whose deadline
-# has been reached, re-arms periodic alarms, removes one-shots.
+# Two-pass: first collect entities to fire, then mutate stores.
+# Periodic/timerfd alarms have their deadline advanced; one-shots are removed.
 # ============================================================================
 
-fn sys_fire_due_alarms(world: ClockWorld, tick: u64) -> ClockWorld:
+fn sys_fire_due_alarms(world: ClockWorld, tick: u64):
     """ECS system: fire all alarms whose deadline <= tick.
 
-    One-shots are removed after firing.
+    One-shots are removed after firing (despawned from all stores).
     Periodic/timerfd alarms have their deadline advanced by Period.ticks.
+    Uses two-pass iteration to avoid swap-with-last aliasing during removal.
     """
-    var kept: [AlarmEntry] = []
-    for alarm in world.alarms:
-        if not alarm.active:
-            kept = kept.push(alarm)
-        elif tick >= alarm.deadline.ticks:
-            clock_notify(alarm.subscriber.endpoint_id)
-            if alarm.period.ticks > 0:
-                val new_deadline = Deadline(ticks: alarm.deadline.ticks + alarm.period.ticks)
-                val updated = AlarmEntry(
-                    entity: alarm.entity,
-                    deadline: new_deadline,
-                    period: alarm.period,
-                    subscriber: alarm.subscriber,
-                    kind: alarm.kind,
-                    active: true
-                )
-                kept = kept.push(updated)
-            # one-shots drop out (not pushed to kept)
+    val count = world.deadlines.len()
+
+    # Pass 1: collect entity ids and their deadline data
+    var to_fire: [i32] = []
+    var i = 0
+    while i < count:
+        val eid_raw = world.deadlines.entity_at(i)
+        val e = Entity(id: eid_raw, generation: 1)
+        val slot = world.deadlines.get_slot(e)
+        if slot >= 0:
+            val dl = world.deadlines.dense[slot]
+            if tick >= dl.ticks:
+                to_fire = to_fire.push(eid_raw)
+        i = i + 1
+
+    # Pass 2: notify and update/remove
+    for eid_raw in to_fire:
+        val e = Entity(id: eid_raw, generation: 1)
+        val sub_slot = world.subscribers.get_slot(e)
+        if sub_slot >= 0:
+            clock_notify(world.subscribers.dense[sub_slot].endpoint_id)
+        val period_slot = world.periods.get_slot(e)
+        val is_periodic = period_slot >= 0 and world.periods.dense[period_slot].ticks > 0
+        if is_periodic:
+            # Advance deadline; keep entity alive
+            val dl_slot = world.deadlines.get_slot(e)
+            if dl_slot >= 0:
+                val old_ticks = world.deadlines.dense[dl_slot].ticks
+                val period_ticks = world.periods.dense[period_slot].ticks
+                world.deadlines.insert(e, Deadline(ticks: old_ticks + period_ticks), world.base.now())
         else:
-            kept = kept.push(alarm)
-    ClockWorld(alarms: kept, next_id: world.next_id)
+            # One-shot: remove from all stores and despawn
+            world.deadlines.remove(e)
+            world.periods.remove(e)
+            world.subscribers.remove(e)
+            world.kinds.remove(e)
+            world.base.despawn(e)
 
 # ============================================================================
 # ClockService — public API
@@ -131,7 +126,13 @@ impl ClockService:
     static fn new() -> ClockService:
         """Create a fresh ClockService with now=0."""
         ClockService(
-            world: ClockWorld(alarms: [], next_id: 1),
+            world: ClockWorld(
+                base:        WorldBase.new(),
+                deadlines:   ComponentStore.new(),
+                periods:     ComponentStore.new(),
+                subscribers: ComponentStore.new(),
+                kinds:       ComponentStore.new()
+            ),
             now: 0,
             started: false
         )
@@ -139,7 +140,8 @@ impl ClockService:
     me clock_service_tick() -> u64:
         """Advance now by 1, run sys_fire_due_alarms, return new now."""
         self.now = self.now + 1
-        self.world = sys_fire_due_alarms(self.world, self.now)
+        self.world.base.advance()
+        sys_fire_due_alarms(self.world, self.now)
         self.started = true
         self.now
 
@@ -149,80 +151,46 @@ impl ClockService:
 
     me clock_arm_oneshot(deadline: u64, subscriber: u64) -> Entity:
         """Arm a one-shot alarm that fires once at the given deadline tick."""
-        val eid = Entity(id: self.world.next_id)
-        val entry = AlarmEntry(
-            entity: eid,
-            deadline: Deadline(ticks: deadline),
-            period: Period(ticks: 0),
-            subscriber: Subscriber(endpoint_id: subscriber),
-            kind: AlarmKind(kind: ALARM_ONESHOT),
-            active: true
-        )
-        self.world = ClockWorld(
-            alarms: self.world.alarms.push(entry),
-            next_id: self.world.next_id + 1
-        )
-        eid
+        val e = self.world.base.spawn()
+        val ecs_tick = self.world.base.now()
+        self.world.deadlines.insert(e,   Deadline(ticks: deadline),           ecs_tick)
+        self.world.periods.insert(e,     Period(ticks: 0),                    ecs_tick)
+        self.world.subscribers.insert(e, Subscriber(endpoint_id: subscriber), ecs_tick)
+        self.world.kinds.insert(e,       AlarmKind(kind: ALARM_ONESHOT),      ecs_tick)
+        e
 
     me clock_arm_periodic(period: u64, first_deadline: u64, subscriber: u64) -> Entity:
         """Arm a periodic alarm that fires every `period` ticks starting at first_deadline."""
-        val eid = Entity(id: self.world.next_id)
-        val entry = AlarmEntry(
-            entity: eid,
-            deadline: Deadline(ticks: first_deadline),
-            period: Period(ticks: period),
-            subscriber: Subscriber(endpoint_id: subscriber),
-            kind: AlarmKind(kind: ALARM_PERIODIC),
-            active: true
-        )
-        self.world = ClockWorld(
-            alarms: self.world.alarms.push(entry),
-            next_id: self.world.next_id + 1
-        )
-        eid
+        val e = self.world.base.spawn()
+        val ecs_tick = self.world.base.now()
+        self.world.deadlines.insert(e,   Deadline(ticks: first_deadline),     ecs_tick)
+        self.world.periods.insert(e,     Period(ticks: period),               ecs_tick)
+        self.world.subscribers.insert(e, Subscriber(endpoint_id: subscriber), ecs_tick)
+        self.world.kinds.insert(e,       AlarmKind(kind: ALARM_PERIODIC),     ecs_tick)
+        e
 
     me clock_arm_timerfd(period: u64, first_deadline: u64, subscriber: u64) -> Entity:
         """Arm a timerfd-style alarm (periodic, distinguishable by AlarmKind.TIMERFD)."""
-        val eid = Entity(id: self.world.next_id)
-        val entry = AlarmEntry(
-            entity: eid,
-            deadline: Deadline(ticks: first_deadline),
-            period: Period(ticks: period),
-            subscriber: Subscriber(endpoint_id: subscriber),
-            kind: AlarmKind(kind: ALARM_TIMERFD),
-            active: true
-        )
-        self.world = ClockWorld(
-            alarms: self.world.alarms.push(entry),
-            next_id: self.world.next_id + 1
-        )
-        eid
+        val e = self.world.base.spawn()
+        val ecs_tick = self.world.base.now()
+        self.world.deadlines.insert(e,   Deadline(ticks: first_deadline),     ecs_tick)
+        self.world.periods.insert(e,     Period(ticks: period),               ecs_tick)
+        self.world.subscribers.insert(e, Subscriber(endpoint_id: subscriber), ecs_tick)
+        self.world.kinds.insert(e,       AlarmKind(kind: ALARM_TIMERFD),      ecs_tick)
+        e
 
     me clock_cancel(alarm: Entity) -> bool:
-        """Deactivate an alarm by entity id. Returns true if found."""
-        var found = false
-        var updated: [AlarmEntry] = []
-        for entry in self.world.alarms:
-            if entry.entity.id == alarm.id:
-                found = true
-                val cancelled = AlarmEntry(
-                    entity: entry.entity,
-                    deadline: entry.deadline,
-                    period: entry.period,
-                    subscriber: entry.subscriber,
-                    kind: entry.kind,
-                    active: false
-                )
-                updated = updated.push(cancelled)
-            else:
-                updated = updated.push(entry)
-        self.world = ClockWorld(alarms: updated, next_id: self.world.next_id)
-        found
+        """Remove an alarm from all component stores and despawn its entity.
+        Returns true if the entity was live (found in deadlines store)."""
+        if not self.world.deadlines.contains(alarm):
+            return false
+        self.world.deadlines.remove(alarm)
+        self.world.periods.remove(alarm)
+        self.world.subscribers.remove(alarm)
+        self.world.kinds.remove(alarm)
+        self.world.base.despawn(alarm)
+        true
 
     fn clock_pending_count() -> i32:
         """Return the count of active (not yet cancelled) alarms."""
-        var count: i32 = 0
-        for entry in self.world.alarms:
-            if entry.active:
-                count = count + 1
-        count
+        self.world.deadlines.len()

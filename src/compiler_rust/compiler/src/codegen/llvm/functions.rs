@@ -901,6 +901,7 @@ impl LlvmBackend {
                     .get(payload)
                     .copied()
                     .unwrap_or_else(|| i64_t.const_int(3, false).into());
+                let payload_val = self.coerce_value_to_type(payload_val, Some(i64_t.into()), builder)?;
                 let result = builder
                     .build_call(
                         rt_fn,
@@ -1006,6 +1007,7 @@ impl LlvmBackend {
                     module.add_function("rt_enum_new", fn_type, None)
                 });
                 let val = self.get_vreg(value, vreg_map)?;
+                let val = self.coerce_value_to_type(val, Some(i64_t.into()), builder)?;
                 let result = builder
                     .build_call(
                         rt_fn,
@@ -1068,6 +1070,7 @@ impl LlvmBackend {
                     module.add_function("rt_enum_new", fn_type, None)
                 });
                 let val = self.get_vreg(value, vreg_map)?;
+                let val = self.coerce_value_to_type(val, Some(i64_t.into()), builder)?;
                 let result = builder
                     .build_call(
                         rt_fn,
@@ -1099,6 +1102,7 @@ impl LlvmBackend {
                     module.add_function("rt_enum_new", fn_type, None)
                 });
                 let val = self.get_vreg(value, vreg_map)?;
+                let val = self.coerce_value_to_type(val, Some(i64_t.into()), builder)?;
                 let result = builder
                     .build_call(
                         rt_fn,

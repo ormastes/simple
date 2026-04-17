@@ -95,6 +95,14 @@ impl LlvmBackend {
                             .unwrap_or_else(|| i64_type.const_int(0, false).into())
                             .into_int_value()
                     }
+                    BinOp::Is => {
+                        let cmp = builder
+                            .build_int_compare(IntPredicate::EQ, l, r, "is")
+                            .map_err(|e| crate::error::factory::llvm_build_failed("build_int_compare", &e))?;
+                        builder
+                            .build_int_z_extend(cmp, i64_type, "is_i64")
+                            .map_err(|e| crate::error::factory::llvm_build_failed("zext", &e))?
+                    }
                     BinOp::Lt => {
                         let cmp = builder
                             .build_int_compare(IntPredicate::SLT, l, r, "lt")
@@ -182,10 +190,11 @@ impl LlvmBackend {
                         .build_float_div(l, r, "fdiv")
                         .map_err(|e| crate::error::factory::llvm_build_failed("build_float_div", &e))?
                         .into()),
-                    BinOp::Eq | BinOp::NotEq | BinOp::Lt | BinOp::Gt | BinOp::LtEq | BinOp::GtEq => {
+                    BinOp::Eq | BinOp::NotEq | BinOp::Is | BinOp::Lt | BinOp::Gt | BinOp::LtEq | BinOp::GtEq => {
                         let pred = match op {
                             BinOp::Eq => FloatPredicate::OEQ,
                             BinOp::NotEq => FloatPredicate::ONE,
+                            BinOp::Is => FloatPredicate::OEQ,
                             BinOp::Lt => FloatPredicate::OLT,
                             BinOp::Gt => FloatPredicate::OGT,
                             BinOp::LtEq => FloatPredicate::OLE,
@@ -214,7 +223,7 @@ impl LlvmBackend {
                     .build_ptr_to_int(r, i64_type, "ptrtoint_r")
                     .map_err(|e| crate::error::factory::llvm_build_failed("build_ptr_to_int", &e))?;
                 let result = match op {
-                    BinOp::Eq => {
+                    BinOp::Eq | BinOp::Is => {
                         let rt_func = module.get_function("rt_native_eq").unwrap_or_else(|| {
                             let fn_type = self
                                 .context
@@ -277,7 +286,7 @@ impl LlvmBackend {
                 let r_int = self.coerce_to_int(right, i64_type, builder, "coerce_r")?;
 
                 // Eq/NotEq use rt_native_eq/neq for safe mixed-representation equality
-                if matches!(op, BinOp::Eq) {
+                if matches!(op, BinOp::Eq | BinOp::Is) {
                     let rt_func = module.get_function("rt_native_eq").unwrap_or_else(|| {
                         let fn_type = i64_type.fn_type(&[i64_type.into(), i64_type.into()], false);
                         module.add_function("rt_native_eq", fn_type, None)

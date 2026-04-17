@@ -2,12 +2,13 @@
 
 **Generated:** 2026-04-17
 **Database:** `doc/08_tracking/bug/bug_db.sdn`
-**Open:** 2 | **Closed:** 25
+**Open:** 3 | **Closed:** 25
 
 ## Open Bugs
 
 | ID | Severity | Status | Title |
 |----|----------|--------|-------|
+| tls_baremetal_002 | P1 | open | Baremetal TLS guest reports TCP connect success but never sends `ClientHello` |
 | tls_baremetal_001 | P1 | open | Baremetal TLS handshake panics in `x25519_base` on x86_64 QEMU |
 | js_runtime_guest_001 | P1 | open | Generic x86_64 bare-metal JS runtime bootstrap faults in object/env storage |
 ## Closed Bugs

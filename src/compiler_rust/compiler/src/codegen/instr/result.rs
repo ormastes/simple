@@ -70,6 +70,7 @@ pub(crate) fn compile_try_unwrap<M: Module>(
     let err_block = *ctx.blocks.get(&error_block).unwrap();
 
     builder.ins().brif(is_error, err_block, &[], success_block, &[]);
+    builder.seal_block(success_block);
 
     builder.switch_to_block(success_block);
     // Use rt_enum_payload to extract the payload

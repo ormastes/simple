@@ -4,6 +4,7 @@
 //! shared functionality between AOT (ObjectModule) and JIT (JITModule) backends.
 
 use std::collections::{BTreeMap, HashMap};
+use std::panic::{catch_unwind, AssertUnwindSafe};
 
 use cranelift_codegen::ir::{types, InstBuilder, UserFuncName};
 use cranelift_codegen::isa::{CallConv, OwnedTargetIsa};
@@ -654,22 +655,44 @@ impl<M: Module> CodegenBackend<M> {
         self.ctx.func.name = UserFuncName::user(0, func_id.as_u32());
 
         // Use the shared function body compilation
-        compile_function_body(
-            &mut self.module,
-            &mut self.ctx.func,
-            func,
-            &mut self.func_ids,
-            &self.runtime_funcs,
-            &self.global_ids,
-            &self.import_map,
-            &self.use_map,
-            &self.vtable_data_ids,
-            &self.vtable_type_ids,
-        )
-        .map_err(|e| {
-            eprintln!("[CODEGEN BODY] Function '{}' body compilation failed: {}", func.name, e);
-            BackendError::ModuleError(e)
-        })?;
+        let body_result = catch_unwind(AssertUnwindSafe(|| {
+            compile_function_body(
+                &mut self.module,
+                &mut self.ctx.func,
+                func,
+                &mut self.func_ids,
+                &self.runtime_funcs,
+                &self.global_ids,
+                &self.import_map,
+                &self.use_map,
+                &self.vtable_data_ids,
+                &self.vtable_type_ids,
+            )
+        }));
+        match body_result {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => {
+                eprintln!("[CODEGEN BODY] Function '{}' body compilation failed: {}", func.name, e);
+                return Err(BackendError::ModuleError(e));
+            }
+            Err(payload) => {
+                let panic_msg = if let Some(msg) = payload.downcast_ref::<&str>() {
+                    (*msg).to_string()
+                } else if let Some(msg) = payload.downcast_ref::<String>() {
+                    msg.clone()
+                } else {
+                    "unknown panic payload".to_string()
+                };
+                eprintln!(
+                    "[CODEGEN PANIC] Function '{}' panicked during body compilation/finalize: {}",
+                    func.name, panic_msg
+                );
+                return Err(BackendError::ModuleError(format!(
+                    "panic while compiling function '{}': {}",
+                    func.name, panic_msg
+                )));
+            }
+        }
 
         // Verify the function before defining - log errors but try to compile anyway
         if let Err(errors) = cranelift_codegen::verify_function(&self.ctx.func, self.module.isa()) {

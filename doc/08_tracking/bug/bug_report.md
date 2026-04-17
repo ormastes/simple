@@ -53,8 +53,9 @@
 | MCP jj_commit/describe/new/squash shell quoting bug | ✅ FIXED | Medium |
 | Test runner single-file 56s startup | ✅ FIXED | Low |
 | Baremetal TLS handshake panics in `x25519_base` on x86_64 QEMU | 🔍 OPEN | High |
+| Baremetal TLS guest reports TCP connect success but never sends `ClientHello` | 🔍 OPEN | High |
 
-**Summary:** 46 fixed, 1 open, 0 investigating, 0 workaround, 5 invalid (Updated 2026-04-17)
+**Summary:** 46 fixed, 2 open, 0 investigating, 0 workaround, 5 invalid (Updated 2026-04-17)
 
 ---
 
