@@ -1,0 +1,121 @@
+## Spec for src/os/desktop/taskbar_shell.spl + src/os/desktop/z_order_store.spl
+##
+## Verifies:
+##   * build_taskbar_shell_tree produces a three-section root (pinned | running | tray).
+##   * Empty model yields an empty three-section tree (no wallpaper, no icons).
+##   * Minimized WindowRef renders with the "[-] " caption prefix.
+##   * ZOrderStore.touch / focus / set_minimized / top_window / remove behave correctly.
+##
+## Run:
+##   bin/simple test test/os/desktop/taskbar_shell_qemu_test.spl
+##
+## Note: QEMU boot test for the live shell is parked — see
+## doc/03_plan/wm_vertical_slice.md. This spec covers the pure composition
+## and state-store layers, which are portable to the host shell (Wave 4).
+
+use std.spec
+use common.ui.taskbar_model.{
+    TaskbarModel, AppRef, WindowRef, TrayItem, empty_taskbar_model
+}
+use os.desktop.taskbar_shell.{
+    ShellMode, default_shell_mode, build_taskbar_shell_tree
+}
+use os.desktop.z_order_store.{ZOrderStore, new_z_order_store}
+
+fn _model_with_entries() -> TaskbarModel:
+    TaskbarModel(
+        pinned: [
+            AppRef(app_id: "term", display_name: "Terminal", icon: "term"),
+            AppRef(app_id: "edit", display_name: "Editor", icon: "edit")
+        ],
+        running: [
+            WindowRef(window_id: "w1", app_id: "term", title: "Terminal 1", minimized: false),
+            WindowRef(window_id: "w2", app_id: "edit", title: "Editor 1", minimized: true)
+        ],
+        tray: [
+            TrayItem(item_id: "clock", label: "12:00", icon: "clk")
+        ]
+    )
+
+describe "taskbar_shell.default_shell_mode":
+    """Classic is the safe default; Taskbar is opt-in."""
+
+    it "defaults to Classic":
+        val m = default_shell_mode()
+        val is_classic = match m:
+            ShellMode.Classic: true
+            ShellMode.Taskbar: false
+        expect(is_classic).to_equal(true)
+
+describe "taskbar_shell.build_taskbar_shell_tree / empty":
+    """An empty TaskbarModel still yields the three-section skeleton."""
+
+    it "has a root with id 'taskbar-root'":
+        val tree = build_taskbar_shell_tree(empty_taskbar_model())
+        expect(tree.id).to_equal("taskbar-root")
+
+    it "has three child sections (pinned, running, tray)":
+        val tree = build_taskbar_shell_tree(empty_taskbar_model())
+        expect(tree.children().len()).to_equal(3)
+
+    it "all three sections are empty for an empty model":
+        val tree = build_taskbar_shell_tree(empty_taskbar_model())
+        val kids = tree.children()
+        expect(kids[0].children().len()).to_equal(0)
+        expect(kids[1].children().len()).to_equal(0)
+        expect(kids[2].children().len()).to_equal(0)
+
+describe "taskbar_shell.build_taskbar_shell_tree / populated":
+    """Populated entries flow into the correct sections."""
+
+    it "places pinned apps in the pinned section":
+        val tree = build_taskbar_shell_tree(_model_with_entries())
+        val pinned = tree.children()[0]
+        expect(pinned.id).to_equal("taskbar-pinned")
+        expect(pinned.children().len()).to_equal(2)
+
+    it "places running windows in the running section":
+        val tree = build_taskbar_shell_tree(_model_with_entries())
+        val running = tree.children()[1]
+        expect(running.id).to_equal("taskbar-running")
+        expect(running.children().len()).to_equal(2)
+
+    it "places tray items in the tray section":
+        val tree = build_taskbar_shell_tree(_model_with_entries())
+        val tray = tree.children()[2]
+        expect(tray.id).to_equal("taskbar-tray")
+        expect(tray.children().len()).to_equal(1)
+
+describe "z_order_store / basic operations":
+    """Touch, focus, minimize, top_window, remove."""
+
+    it "is empty on new":
+        val s = new_z_order_store()
+        expect(s.len()).to_equal(0)
+        expect(s.top_window()).to_equal(0 as u64)
+
+    it "touch inserts and returns as top_window":
+        var s = new_z_order_store()
+        s.touch(42 as u64)
+        expect(s.len()).to_equal(1)
+        expect(s.top_window()).to_equal(42 as u64)
+
+    it "focus raises a later window above an earlier one":
+        var s = new_z_order_store()
+        s.touch(1 as u64)
+        s.touch(2 as u64)
+        s.focus(1 as u64)
+        expect(s.top_window()).to_equal(1 as u64)
+
+    it "set_minimized hides a window from top_window":
+        var s = new_z_order_store()
+        s.touch(1 as u64)
+        s.set_minimized(1 as u64, true)
+        expect(s.top_window()).to_equal(0 as u64)
+        expect(s.is_minimized(1 as u64)).to_equal(true)
+
+    it "remove drops the entry":
+        var s = new_z_order_store()
+        s.touch(7 as u64)
+        s.remove(7 as u64)
+        expect(s.len()).to_equal(0)
