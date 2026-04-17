@@ -298,16 +298,17 @@ void rt_print_value(RuntimeValue val);
  * margin for kernel code/rodata/data, linker-script .heap/.stack, and
  * page tables. The desktop import/probe and desktop integration kernels
  * boot before `spl_start` and must survive the crt0 `.bss` clear under
- * 128M/512M QEMU guests. A 512MB static bump heap inflates `.bss` enough
- * to overrun guest RAM during `_entry32` zeroing, faulting before serial
- * boot markers appear. Keep the stub heap modest here; the linker-script
- * `.heap` region and later kernel allocators still exist for larger flows.
+ * 512M/2G QEMU guests used by the desktop/TLS system lanes can afford a
+ * larger stub heap, while 512MB remains small enough to avoid the earlier
+ * pre-boot `.bss` overrun caused by a 512MB arena. The pure-Simple TLS
+ * X25519 path currently allocates heavily during baremetal system tests, so
+ * keep this arena large enough for those flows.
  * =================================================================== */
 
-static const size_t BAREMETAL_HEAP_SIZE = 64ULL * 1024ULL * 1024ULL;
-static const size_t BAREMETAL_HEAP_WARN_SIZE = 48ULL * 1024ULL * 1024ULL;
+static const size_t BAREMETAL_HEAP_SIZE = 256ULL * 1024ULL * 1024ULL;
+static const size_t BAREMETAL_HEAP_WARN_SIZE = 192ULL * 1024ULL * 1024ULL;
 
-static char   _heap[64ULL * 1024ULL * 1024ULL] __attribute__((aligned(16)));
+static char   _heap[256ULL * 1024ULL * 1024ULL] __attribute__((aligned(16)));
 static size_t _heap_off = 0;
 
 void *malloc(size_t sz)

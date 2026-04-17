@@ -852,6 +852,7 @@ class JsInterpreter:
         var result = JsValue.Undefined
         var iteration = 0
         val max_iterations = 100000
+        var should_exit = false
         while iteration < max_iterations:
             val cond_val = self.eval_expression(cond, env)?
             if not is_truthy(cond_val):
@@ -862,14 +863,18 @@ class JsInterpreter:
             while i < len:
                 result = self.exec_statement(body.get(i), loop_env)?
                 if self.control_return or self.control_thrown:
-                    return Ok(result)
+                    should_exit = true
+                    break
                 if self.control_break:
                     self.control_break = false
-                    return Ok(result)
+                    should_exit = true
+                    break
                 if self.control_continue:
                     self.control_continue = false
                     break
                 i = i + 1
+            if should_exit:
+                break
             iteration = iteration + 1
         if iteration >= max_iterations:
             self.logger.warn("While loop exceeded maximum iterations")
@@ -884,6 +889,7 @@ class JsInterpreter:
         var result = JsValue.Undefined
         var iteration = 0
         val max_iterations = 100000
+        var should_exit = false
         while iteration < max_iterations:
             val cond_val = self.eval_expression(cond, for_env)?
             if not is_truthy(cond_val):
@@ -894,14 +900,18 @@ class JsInterpreter:
             while i < len:
                 result = self.exec_statement(body.get(i), iter_env)?
                 if self.control_return or self.control_thrown:
-                    return Ok(result)
+                    should_exit = true
+                    break
                 if self.control_break:
                     self.control_break = false
-                    return Ok(result)
+                    should_exit = true
+                    break
                 if self.control_continue:
                     self.control_continue = false
                     break
                 i = i + 1
+            if should_exit:
+                break
             self.eval_expression(update, for_env)?
             iteration = iteration + 1
         if iteration >= max_iterations:
@@ -974,6 +984,7 @@ class JsInterpreter:
         val disc_val = self.eval_expression(discriminant, env)?
         var result = JsValue.Undefined
         var matched = false
+        var should_exit = false
         var ci = 0
         val case_count = cases.len()
         while ci < case_count:
@@ -994,20 +1005,28 @@ class JsInterpreter:
                     val stmt_result = self.exec_statement(sc.consequent.get(si), case_env)?
                     if self.control_break:
                         self.control_break = false
-                        return Ok(result)
+                        should_exit = true
+                        break
                     result = stmt_result
                     if self.control_return or self.control_thrown:
-                        return Ok(result)
+                        should_exit = true
+                        break
                     if self.control_continue:
-                        return Ok(result)
+                        should_exit = true
+                        break
                     si = si + 1
+                if should_exit:
+                    break
             ci = ci + 1
+            if should_exit:
+                break
         Ok(result)
 
     # For-in loop: iterate object keys
     me exec_for_in(binding: text, object: Expression, body: [Statement], env: i64) -> BrowserResult<JsValue>:
         val obj_val = self.eval_expression(object, env)?
         var result = JsValue.Undefined
+        var should_exit = false
         match obj_val:
             JsValue.Object(id):
                 val obj = self.object_store.get_object(id)
@@ -1023,15 +1042,21 @@ class JsInterpreter:
                         while bi < blen:
                             result = self.exec_statement(body.get(bi), iter_env)?
                             if self.control_return or self.control_thrown:
-                                return Ok(result)
+                                should_exit = true
+                                break
                             if self.control_break:
                                 self.control_break = false
-                                return Ok(result)
+                                should_exit = true
+                                break
                             if self.control_continue:
                                 self.control_continue = false
                                 break
                             bi = bi + 1
+                        if should_exit:
+                            break
                     i = i + 1
+                    if should_exit:
+                        break
             _:
                 self.logger.warn("for...in requires an object")
         Ok(result)
@@ -1040,6 +1065,7 @@ class JsInterpreter:
     me exec_for_of(binding: text, iterable: Expression, body: [Statement], env: i64) -> BrowserResult<JsValue>:
         val iter_val = self.eval_expression(iterable, env)?
         var result = JsValue.Undefined
+        var should_exit = false
         match iter_val:
             JsValue.Array(id):
                 val arr_len = self.object_store.array_length(id)
@@ -1053,15 +1079,21 @@ class JsInterpreter:
                     while bi < blen:
                         result = self.exec_statement(body.get(bi), iter_env)?
                         if self.control_return or self.control_thrown:
-                            return Ok(result)
+                            should_exit = true
+                            break
                         if self.control_break:
                             self.control_break = false
-                            return Ok(result)
+                            should_exit = true
+                            break
                         if self.control_continue:
                             self.control_continue = false
                             break
                         bi = bi + 1
+                    if should_exit:
+                        break
                     i = i + 1
+                    if should_exit:
+                        break
             _:
                 self.logger.warn("for...of requires an iterable")
         Ok(result)
@@ -2007,12 +2039,18 @@ class JsInterpreter:
             match cb_val:
                 JsValue.Function(fn_id):
                     var i = 0
+                    var found = false
+                    var found_value = JsValue.Undefined
                     while i < arr_len:
                         val elem = self.object_store.get_by_index(arr_id, i)
                         val result = self._invoke_function(fn_id, [elem, JsValue.Number(v: i.to_f64()), JsValue.Array(id: arr_id)], env)?
                         if is_truthy(result):
-                            return Ok(elem)
+                            found = true
+                            found_value = elem
+                            break
                         i = i + 1
+                    if found:
+                        return Ok(found_value)
                 _: pass_dn
             return Ok(JsValue.Undefined)
 
@@ -2021,12 +2059,18 @@ class JsInterpreter:
             match cb_val:
                 JsValue.Function(fn_id):
                     var i = 0
+                    var found = false
+                    var found_index = -1
                     while i < arr_len:
                         val elem = self.object_store.get_by_index(arr_id, i)
                         val result = self._invoke_function(fn_id, [elem, JsValue.Number(v: i.to_f64()), JsValue.Array(id: arr_id)], env)?
                         if is_truthy(result):
-                            return Ok(JsValue.Number(v: i.to_f64()))
+                            found = true
+                            found_index = i
+                            break
                         i = i + 1
+                    if found:
+                        return Ok(JsValue.Number(v: found_index.to_f64()))
                 _: pass_dn
             return Ok(JsValue.Number(v: -1.0))
 
@@ -2035,12 +2079,16 @@ class JsInterpreter:
             match cb_val:
                 JsValue.Function(fn_id):
                     var i = 0
+                    var matched = false
                     while i < arr_len:
                         val elem = self.object_store.get_by_index(arr_id, i)
                         val result = self._invoke_function(fn_id, [elem, JsValue.Number(v: i.to_f64()), JsValue.Array(id: arr_id)], env)?
                         if is_truthy(result):
-                            return Ok(JsValue.Boolean(v: true))
+                            matched = true
+                            break
                         i = i + 1
+                    if matched:
+                        return Ok(JsValue.Boolean(v: true))
                 _: pass_dn
             return Ok(JsValue.Boolean(v: false))
 
@@ -2049,12 +2097,16 @@ class JsInterpreter:
             match cb_val:
                 JsValue.Function(fn_id):
                     var i = 0
+                    var all_match = true
                     while i < arr_len:
                         val elem = self.object_store.get_by_index(arr_id, i)
                         val result = self._invoke_function(fn_id, [elem, JsValue.Number(v: i.to_f64()), JsValue.Array(id: arr_id)], env)?
                         if not is_truthy(result):
-                            return Ok(JsValue.Boolean(v: false))
+                            all_match = false
+                            break
                         i = i + 1
+                    if not all_match:
+                        return Ok(JsValue.Boolean(v: false))
                 _: pass_dn
             return Ok(JsValue.Boolean(v: true))
 

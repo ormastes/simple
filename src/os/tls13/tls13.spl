@@ -27,7 +27,7 @@ use os.tls13.cert_verify.{
     CertVerifyResult, CertChainResult
 }
 use os.userlib.net.{Socket, send, recv}
-use os.crypto.curve25519.{x25519, x25519_base}
+use os.crypto.curve25519.{x25519}
 use os.crypto.random.{random_bytes}
 use std.nogc_sync_mut.io.signature_ffi.{ed25519_sign}
 use std.nogc_sync_mut.io.tcp.{TcpStream}
@@ -118,6 +118,7 @@ fn _io_send(io: Tls13Io, data: [u8]) -> bool:
     else:
         val sock = Socket(fd: io.tcp_fd.to_i32())
         var sent: u64 = 0
+        var zero_writes: u64 = 0
         while sent < data.len():
             _tls_debug("_io_send loop sent={sent} total={data.len()}")
             var chunk: [u8] = []
@@ -133,7 +134,13 @@ fn _io_send(io: Tls13Io, data: [u8]) -> bool:
             val wrote = result.unwrap()
             _tls_debug("_io_send wrote={wrote}")
             if wrote == 0:
-                return false
+                zero_writes = zero_writes + 1
+                if zero_writes > 100000:
+                    return false
+                rt_thread_sleep(1)
+                pass_dn
+            else:
+                zero_writes = 0
             sent = sent + wrote
         true
 
@@ -319,9 +326,14 @@ fn tls13_connect_io_with_config(io: Tls13Io, hostname: text, config: Tls13Client
         0x21, 0x22, 0x23, 0x24, 0x25, 0x26, 0x27, 0x28,
         0x29, 0x2a, 0x2b, 0x2c, 0x2d, 0x2e, 0x2f, 0x30
     ]
-    _tls_debug("before x25519_base")
-    val pub_key = x25519_base(priv_key)
-    _tls_debug("after x25519_base pub={pub_key.len()}")
+    # priv_key is fixed in this bootstrap client, so its public share can be
+    # precomputed once and reused to avoid an expensive baremetal basepoint multiply.
+    val pub_key: [u8] = [
+        0x4d, 0x27, 0xbc, 0xee, 0x31, 0x35, 0xc4, 0x94,
+        0x4b, 0x28, 0xd2, 0x7d, 0xd8, 0x09, 0xb0, 0x7b,
+        0xe1, 0x0c, 0x35, 0x16, 0x0d, 0x20, 0x13, 0x1c,
+        0xaa, 0x7e, 0x85, 0x57, 0x54, 0x98, 0xd0, 0x7c
+    ]
 
     # ------------------------------------------------------------------
     # Step 2: Build and send ClientHello

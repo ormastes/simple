@@ -529,6 +529,8 @@ impl NativeProjectBuilder {
             eprintln!(); // spacer
         }
 
+        let strict_entry_failure = self.entry_file.is_some();
+
         if failed > 0 {
             // Only abort if compiler-critical files failed (src/compiler/, src/app/)
             // Exclude non-essential app modules (dashboards, examples)
@@ -546,6 +548,23 @@ impl NativeProjectBuilder {
                         || p.contains("\\src\\app\\")
                 })
                 .collect();
+
+            if strict_entry_failure {
+                let summary = failures
+                    .iter()
+                    .map(|(path, msg)| format!("{}: {}", path.display(), msg))
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                return Err(format!(
+                    "native-build aborted: {} file(s) failed while building explicit entry {}\n{}",
+                    failed,
+                    self.entry_file
+                        .as_ref()
+                        .map(|p| p.display().to_string())
+                        .unwrap_or_else(|| "<unknown>".to_string()),
+                    summary
+                ));
+            }
 
             if !critical_failures.is_empty() {
                 let summary = critical_failures
@@ -592,6 +611,23 @@ impl NativeProjectBuilder {
                         || p.contains("\\src\\app\\")
                 })
                 .collect();
+
+            if strict_entry_failure {
+                let summary = failures
+                    .iter()
+                    .map(|(path, msg)| format!("{}: {}", path.display(), msg))
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                return Err(format!(
+                    "native-build aborted: {} file(s) failed while building explicit entry {}\n{}",
+                    failed,
+                    self.entry_file
+                        .as_ref()
+                        .map(|p| p.display().to_string())
+                        .unwrap_or_else(|| "<unknown>".to_string()),
+                    summary
+                ));
+            }
 
             if !critical_failures.is_empty() {
                 let summary = critical_failures
