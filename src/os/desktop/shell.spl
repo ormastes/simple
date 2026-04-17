@@ -89,10 +89,17 @@ fn _build_editor_resident_launch() -> Result<EditorResidentLaunch, text>:
     editor.lines = [EDITOR_SMOKE_CONTENT]
     editor.file_path = EDITOR_SMOKE_PATH
     noalloc_log_debug("editor resident launch write path={EDITOR_SMOKE_PATH}")
-    if not rt_file_write_text(EDITOR_SMOKE_PATH, EDITOR_SMOKE_CONTENT):
-        noalloc_log_error("editor resident launch write failed path={EDITOR_SMOKE_PATH}")
-        return Err("runtime file write failed")
+    val wrote = rt_file_write_text(EDITOR_SMOKE_PATH, EDITOR_SMOKE_CONTENT)
     editor.modified = false
+    if not wrote:
+        noalloc_log_debug("editor resident launch using preview fallback path={EDITOR_SMOKE_PATH}")
+        editor.status_message = "Preview {EDITOR_SMOKE_PATH} (disk unavailable)"
+        val preview_session = editor.build_ui()
+        return Ok(EditorResidentLaunch(
+            tree: preview_session.current_tree(),
+            saved_path: EDITOR_SMOKE_PATH,
+            content: EDITOR_SMOKE_CONTENT
+        ))
     editor.status_message = "Saved {EDITOR_SMOKE_PATH}"
 
     val cli_output = rt_fat32_read_file_text(EDITOR_SMOKE_PATH)
@@ -130,9 +137,21 @@ fn _create_materialized_window(
     _register_materialized_window(shell, window_id, pid, app_id)
     true
 
+fn _fallback_app_id_for_name(name: text) -> text:
+    match name:
+        case "Browser Demo": APP_ID_BROWSER_DEMO
+        case "Hello World": APP_ID_HELLO_WORLD
+        case "File Manager": APP_ID_FILE_MANAGER
+        case "Terminal": APP_ID_SHELL
+        case "Editor": APP_ID_EDITOR
+        case _:
+            ""
+
 fn _materialize_launch_fallback(shell: DesktopShell, name: text, pid: u64) -> bool:
     """Create compositor-owned fallback windows for launcher-owned processes."""
-    val app_id = launcher_get_process_app_id_for_pid(pid)
+    var app_id = launcher_get_process_app_id_for_pid(pid)
+    if app_id == "":
+        app_id = _fallback_app_id_for_name(name)
     if app_id == "":
         return false
 
@@ -397,7 +416,9 @@ impl DesktopShell:
 
     me materialize_resident_launch(name: text, pid: u64) -> bool:
         """Materialize a launcher-owned process into compositor fallback windows."""
-        val app_id = launcher_get_process_app_id_for_pid(pid)
+        var app_id = launcher_get_process_app_id_for_pid(pid)
+        if app_id == "":
+            app_id = _fallback_app_id_for_name(name)
         if app_id == "" or pid == 0:
             serial_println("[shell] resident-launch missing app={name} pid={pid}")
             return false

@@ -17,6 +17,8 @@
 fn rt_array_new_with_cap(cap: i64) -> [u8]:
     []
 extern fn serial_println(msg: text)
+use lib.common.crypto.hmac.{hmac_sha256_bytes as common_hmac_sha256_bytes}
+use lib.common.crypto.sha256.{sha256_bytes as common_sha256_bytes}
 
 fn _sha256_k(index: u64) -> u32:
     if index == 0: 0x428A2F98
@@ -279,39 +281,20 @@ fn sha256_process_block(block: [u8], offset: u64, h: [u32]) -> [u32]:
     result.push(_u32_mask(h[7] + hh))
     result
 
+fn _copy_block64(src: [u8], offset: u64) -> [u8]:
+    var block: [u8] = rt_array_new_with_cap(64)
+    var i: u64 = 0
+    while i < 64:
+        block.push(src[offset + i].to_u8())
+        i = i + 1
+    block
+
 # ============================================================================
 # SHA-256 Hash
 # ============================================================================
 
 fn sha256(data: [u8]) -> [u8]:
-    val original_len = data.len().to_u64()
-    val padded_len = _sha256_compute_padded_len(original_len)
-    val num_blocks = padded_len / 64
-
-    val padded = sha256_pad(data)
-
-    var h: [u32] = []
-    var i: u64 = 0
-    while i < 8:
-        h.push(_sha256_h(i))
-        i = i + 1
-
-    var block_idx: u64 = 0
-    while block_idx < num_blocks:
-        h = sha256_process_block(padded, block_idx * 64, h)
-        block_idx = block_idx + 1
-
-    var digest: [u8] = rt_array_new_with_cap(32)
-    i = 0
-    while i < 8:
-        val word = h[i]
-        digest.push(((word >> 24) & 0xFF).to_u8())
-        digest.push(((word >> 16) & 0xFF).to_u8())
-        digest.push(((word >> 8) & 0xFF).to_u8())
-        digest.push((word & 0xFF).to_u8())
-        i = i + 1
-
-    digest
+    _list_to_array(common_sha256_bytes(_array_prefix_to_list(data, data.len().to_u64())))
 
 fn _array_prefix_to_list(data: [u8], data_len: u64) -> list:
     var out = []
@@ -330,32 +313,7 @@ fn _list_to_array(bytes: list) -> [u8]:
     out
 
 fn sha256_with_len(data: [u8], data_len: u64) -> [u8]:
-    val padded_len = _sha256_compute_padded_len(data_len)
-    val num_blocks = padded_len / 64
-    val padded = sha256_pad_with_len(data, data_len)
-
-    var h: [u32] = []
-    var i: u64 = 0
-    while i < 8:
-        h.push(_sha256_h(i))
-        i = i + 1
-
-    var block_idx: u64 = 0
-    while block_idx < num_blocks:
-        h = sha256_process_block(padded, block_idx * 64, h)
-        block_idx = block_idx + 1
-
-    var digest: [u8] = rt_array_new_with_cap(32)
-    i = 0
-    while i < 8:
-        val word = h[i]
-        digest.push(((word >> 24) & 0xFF).to_u8())
-        digest.push(((word >> 16) & 0xFF).to_u8())
-        digest.push(((word >> 8) & 0xFF).to_u8())
-        digest.push((word & 0xFF).to_u8())
-        i = i + 1
-
-    digest
+    _list_to_array(common_sha256_bytes(_array_prefix_to_list(data, data_len)))
 
 fn _normalize_hmac_key(key: [u8], key_len: u64) -> [u8]:
     val block_size: u64 = 64
@@ -408,25 +366,12 @@ fn _sha256_hmac_with_norm_key(k_prime: [u8], data: [u8], data_len: u64) -> [u8]:
 # ============================================================================
 
 fn sha256_hmac(key: [u8], data: [u8]) -> [u8]:
-    # val k_prime = _normalize_hmac_key(key, rt_array_len(key as i64).to_u64())
-    # _sha256_hmac_with_norm_key(k_prime, data, rt_array_len(data as i64).to_u64())
-    pass_todo("HMAC needs array len helper")
+    sha256_hmac_with_len(key, key.len().to_u64(), data, data.len().to_u64())
 
 fn sha256_hmac_with_len(key: [u8], key_len: u64, data: [u8], data_len: u64) -> [u8]:
-    val k_prime = _normalize_hmac_key(key, key_len)
-    _sha256_hmac_with_norm_key(k_prime, data, data_len)
+    val key_list = _array_prefix_to_list(key, key_len)
+    val data_list = _array_prefix_to_list(data, data_len)
+    _list_to_array(common_hmac_sha256_bytes(key_list, data_list))
 
 fn sha256_hmac_from_list(key: list, data: list) -> [u8]:
-    var key_bytes: [u8] = rt_array_new_with_cap(key.len())
-    var i = 0
-    while i < key.len():
-        key_bytes.push(key.get(i).to_u8())
-        i = i + 1
-
-    var data_bytes: [u8] = rt_array_new_with_cap(data.len())
-    i = 0
-    while i < data.len():
-        data_bytes.push(data.get(i).to_u8())
-        i = i + 1
-
-    sha256_hmac_with_len(key_bytes, key_bytes.len().to_u64(), data_bytes, data_bytes.len().to_u64())
+    _list_to_array(common_hmac_sha256_bytes(key, data))

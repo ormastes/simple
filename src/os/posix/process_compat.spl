@@ -25,6 +25,15 @@ val WNOHANG: u32 = 1
 
 extern fn unsafe_addr_of(ref: any) -> u64
 
+val _HEAP_TAG_MASK: u64 = 0x7
+val _RUNTIME_STRING_DATA_OFFSET: u64 = 12
+
+fn _text_data_ptr(s: text) -> u64:
+    """Return the raw RuntimeString.data pointer for a baremetal text value."""
+    val rv_bits = unsafe_addr_of(s)
+    val heap_base = rv_bits & (0xFFFFFFFFFFFFFFFF - _HEAP_TAG_MASK)
+    heap_base + _RUNTIME_STRING_DATA_OFFSET
+
 fn posix_spawn(path: text, priority: u8) -> i64:
     """Spawn a new process from an ELF binary path.
 
@@ -40,10 +49,9 @@ fn posix_spawn(path: text, priority: u8) -> i64:
     if path.len() == 0:
         return 0 - EINVAL as i64
 
-    # Pass raw path bytes as pointer + length to kernel.
-    val payload = path.to_bytes()
-    val path_ptr = unsafe_addr_of(payload)
-    val path_len = payload.len()
+    # SpawnBinary expects a raw byte span for the underlying text storage.
+    val path_ptr = _text_data_ptr(path)
+    val path_len = path.len()
     val result = syscall(_SYS_SPAWN_BINARY, path_ptr, path_len, priority as u64, 0, 0)
 
     # Kernel returns PID on success (>= 0), -errno on failure
@@ -52,8 +60,9 @@ fn posix_spawn(path: text, priority: u8) -> i64:
 fn posix_spawn_with_args(path: text, args: [text], priority: u8) -> i64:
     """Spawn a new process with command-line arguments.
 
-    Encodes arguments as a null-separated byte string appended to the path.
-    Uses kernel syscall 13 (SpawnBinary).
+    Current kernel SpawnBinary ABI accepts only a plain executable path.
+    Argument vectors are not yet passed through syscall 13, so this wrapper
+    launches by path and ignores `args` until argv/envp support lands.
 
     Returns:
       >= 0: PID of the new process
@@ -62,26 +71,9 @@ fn posix_spawn_with_args(path: text, args: [text], priority: u8) -> i64:
     if path.len() == 0:
         return 0 - EINVAL as i64
 
-    # Encode: path\0arg0\0arg1\0...argN\0
-    var payload: [u8] = []
-    var pi: u64 = 0
-    while pi < path.len():
-        payload.push(path.char_code_at(pi).to_u8())
-        pi = pi + 1
-    payload.push(0)  # null separator
-
-    var ai: u64 = 0
-    while ai < args.len():
-        val arg = args[ai]
-        var ci: u64 = 0
-        while ci < arg.len():
-            payload.push(arg.char_code_at(ci).to_u8())
-            ci = ci + 1
-        payload.push(0)
-        ai = ai + 1
-
-    val payload_ptr = unsafe_addr_of(payload)
-    val payload_len = payload.len()
+    val _ignored_args = args
+    val payload_ptr = _text_data_ptr(path)
+    val payload_len = path.len()
     val result = syscall(_SYS_SPAWN_BINARY, payload_ptr, payload_len, priority as u64, 0, 0)
     result
 
