@@ -456,3 +456,66 @@ alias Optional = Option               # Class alias
 ```
 
 Note: Simple does **not** support inheritance. Use composition, traits, or mixins instead.
+
+---
+
+## Fluent Widget Methods (WidgetNode API)
+
+Phase 3 of the typed-core RFC (`doc/05_design/ui_typed_core_rfc.md`) adds 26 fluent methods on `WidgetNode`. Because chained method calls are currently broken (see `.claude/rules/language.md`), use the intermediate-var pattern — each call on its own line.
+
+### Panel construction example
+
+```simple
+use std.ui.{WidgetNode, WidgetKind, LayoutKind, Spacing, SurfaceRole, ThemeRegistry, ThemeId}
+
+fn build_settings_panel(theme: ThemeRegistry) -> WidgetNode:
+    val th = theme.get(ThemeId.Obsidian)
+
+    var header = WidgetNode(kind: WidgetKind.Label, layout: LayoutKind.None)
+    header = header.label("Settings")
+
+    var body = WidgetNode(kind: WidgetKind.Panel, layout: LayoutKind.Column)
+    body = body.padding(th, Spacing.Md)
+    body = body.surface_role(th, SurfaceRole.Card)
+    body = body.child(header)
+
+    var root = WidgetNode(kind: WidgetKind.Panel, layout: LayoutKind.Column)
+    root = root.width(400)
+    root = root.height(600)
+    root = root.padding(th, Spacing.Lg)
+    root = root.child(body)
+    return root
+```
+
+Each `node = node.method(...)` line reassigns the local `var` — the pattern is identical to the `with_*` free-function helpers but expressed as methods.
+
+### Responsive layout (Phase 6)
+
+```simple
+use std.ui.{SizeClass, Orientation}
+
+var node = WidgetNode(kind: WidgetKind.Panel, layout: LayoutKind.Row)
+node = node.responsive_layout(SizeClass.Compact, LayoutKind.Column)
+node = node.responsive_layout(SizeClass.Regular, LayoutKind.Row)
+node = node.show_when_at_least(SizeClass.Compact)
+```
+
+### Future chain form (conditional on chain-fix RFC)
+
+Once `doc/05_design/compiler_rfc_method_chain_fix.md` lands, the following will compile:
+
+```simple
+# Future only — not available yet
+val node = WidgetNode(kind: WidgetKind.Panel, layout: LayoutKind.Column)
+    .width(400)
+    .padding(th, Spacing.Lg)
+    .child(body)
+```
+
+The intermediate-var form above will remain valid after the RFC lands.
+
+---
+
+## Enum Literals
+
+Enum variants are qualified today: `WidgetKind.Panel`, `Spacing.Md`, `SurfaceRole.Card`. The compiler does not yet infer the enum type from context. Once `doc/05_design/compiler_rfc_bare_enum_literals.md` lands, bare names will work where the type is unambiguous. Until then, always use the fully-qualified form.

@@ -401,6 +401,30 @@ ECS is strictly the **internal business-state model** of one capsule. Inter-caps
 4. Glossary entries for MDSOC+, ECS, Entity, Component, System, World, Query, ComponentStore exist and cross-link from MDSOC/Capsule/Port.
 5. `bin/simple lint` advisory rule flags monolithic struct state in new services (advisory only, not blocking).
 
+## UI Worked Example (WidgetNode + UISession)
+
+The typed-core API (`doc/05_design/ui_typed_core_rfc.md`, Phases 1-6) maps directly onto the MDSOC+ shape.
+
+| MDSOC+ concept | UI equivalent | Notes |
+|---|---|---|
+| **Component** | `WidgetNode` / `WidgetRecord` | Immutable description of a single widget; pure POD struct |
+| **Entity** | node ID (`u64`) | Stable within a UISession; identity separate from data |
+| **World** | `UISession` | Owns the entity registry + all component stores (props, style, lifecycle state) |
+| **System** | `UIEventBus`, layout engine, lifecycle dispatcher | Free functions operating on the world each frame |
+| **Query** | typed iterator over nodes having a prop/style component | e.g. "all nodes with `SurfaceRole.Card` and `visible=true`" |
+| **Change detection** | `Added<WidgetNode>` / `Changed<WidgetRecord>` | Used to diff between frames for incremental re-render |
+
+Lifecycle example:
+
+```
+frame N:
+  UIEventBus system  →  dispatches UIEvent to matching entity
+  layout system      →  queries (WidgetNode, SizeClass) → writes layout props
+  render system      →  queries (WidgetNode, StyleProps) → emits draw calls
+```
+
+`WidgetNode` is the component (data). `UISession` is the world (container). Layout and event dispatch are systems (operate on the world per frame). This is the same ECS shape used by `src/os/services/wm/` and any other MDSOC+ userland service.
+
 ## Out of Scope
 
 - Porting the kernel or drivers to ECS — explicitly disallowed.

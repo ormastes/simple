@@ -1,0 +1,316 @@
+# @cover src/lib/common/ui/design_tokens.spl 80%
+# @cover src/lib/common/ui/theme_registry.spl 80%
+"""
+# Token Resolution Specification
+
+**Feature IDs:** N/A
+**Category:** Stdlib
+**Difficulty:** 2/5
+**Status:** Implemented
+**Design:** doc/05_design/ui_typed_core_rfc.md
+
+## Overview
+
+Verifies that typed design-token enums (Spacing, Radius, Elevation, SurfaceRole,
+TextRole) resolve to the correct raw values through ThemeRegistry resolver methods,
+and that to_wire() codecs produce stable lowercase canonical strings.
+
+## Key Concepts
+
+| Concept        | Description                                              |
+|----------------|----------------------------------------------------------|
+| Spacing        | 5-step spacing scale (Xs=4 .. Xl=32)                     |
+| Radius         | Border-radius tokens (None=0 .. Pill=999)                |
+| Elevation      | Elevation level integers (Flat=0 .. High=8)              |
+| SurfaceRole    | Semantic surface color tokens mapped to GlassColorTokens |
+| TextRole       | Semantic text color tokens mapped to GlassColorTokens    |
+| to_wire()      | Stable lowercase snake_case canonical string per token   |
+"""
+
+use std.sspec.*
+
+use common.ui.design_tokens.{
+    Spacing, Radius, Elevation, SurfaceRole, TextRole
+}
+use common.ui.theme_registry.{ThemeId, theme_registry}
+use common.ui.glass_tokens.{GlassDesignTokens}
+
+
+# ============================================================================
+# Spacing resolver — default scale
+# ============================================================================
+
+describe "ThemeRegistry resolve_spacing defaults":
+    """
+    ## Spacing defaults
+
+    With no per-theme override registered, the resolver returns the
+    common design system scale: Xs=4, Sm=8, Md=16, Lg=24, Xl=32.
+    These are verified against a Custom theme that has no registered scale.
+    """
+
+    it "resolves Spacing.Xs to 4":
+        val r = theme_registry()
+        val px = r.resolve_spacing(ThemeId.Custom("token_test"), Spacing.Xs)
+        expect(px).to_equal(4)
+
+    it "resolves Spacing.Sm to 8":
+        val r = theme_registry()
+        val px = r.resolve_spacing(ThemeId.Custom("token_test"), Spacing.Sm)
+        expect(px).to_equal(8)
+
+    it "resolves Spacing.Md to 16":
+        val r = theme_registry()
+        val px = r.resolve_spacing(ThemeId.Custom("token_test"), Spacing.Md)
+        expect(px).to_equal(16)
+
+    it "resolves Spacing.Lg to 24":
+        val r = theme_registry()
+        val px = r.resolve_spacing(ThemeId.Custom("token_test"), Spacing.Lg)
+        expect(px).to_equal(24)
+
+    it "resolves Spacing.Xl to 32":
+        val r = theme_registry()
+        val px = r.resolve_spacing(ThemeId.Custom("token_test"), Spacing.Xl)
+        expect(px).to_equal(32)
+
+
+# ============================================================================
+# Spacing resolver — per-theme override
+# ============================================================================
+
+describe "ThemeRegistry resolve_spacing with registered scale":
+    """
+    ## Per-theme spacing override
+
+    When register_spacing_scale is called for a theme, the resolver uses
+    the provided [xs, sm, md, lg, xl] array instead of the defaults.
+    """
+
+    it "uses the registered scale when present":
+        val r = theme_registry()
+        r.register_spacing_scale(ThemeId.Custom("scale_override"), [2, 4, 8, 12, 16])
+        val px = r.resolve_spacing(ThemeId.Custom("scale_override"), Spacing.Md)
+        expect(px).to_equal(8)
+
+    it "does not affect other themes after override":
+        val r = theme_registry()
+        val px = r.resolve_spacing(ThemeId.Custom("other_theme"), Spacing.Md)
+        expect(px).to_equal(16)
+
+
+# ============================================================================
+# Radius resolver — default values
+# ============================================================================
+
+describe "ThemeRegistry resolve_radius defaults":
+    """
+    ## Radius defaults
+
+    Default: None=0, Sm=4, Md=8, Lg=16, Pill=999.
+    """
+
+    it "resolves Radius.None to 0":
+        val r = theme_registry()
+        val px = r.resolve_radius(ThemeId.Custom("token_test"), Radius.None)
+        expect(px).to_equal(0)
+
+    it "resolves Radius.Sm to 4":
+        val r = theme_registry()
+        val px = r.resolve_radius(ThemeId.Custom("token_test"), Radius.Sm)
+        expect(px).to_equal(4)
+
+    it "resolves Radius.Md to 8":
+        val r = theme_registry()
+        val px = r.resolve_radius(ThemeId.Custom("token_test"), Radius.Md)
+        expect(px).to_equal(8)
+
+    it "resolves Radius.Lg to 16":
+        val r = theme_registry()
+        val px = r.resolve_radius(ThemeId.Custom("token_test"), Radius.Lg)
+        expect(px).to_equal(16)
+
+    it "resolves Radius.Pill to 999":
+        val r = theme_registry()
+        val px = r.resolve_radius(ThemeId.Custom("token_test"), Radius.Pill)
+        expect(px).to_equal(999)
+
+
+# ============================================================================
+# Elevation resolver — default values
+# ============================================================================
+
+describe "ThemeRegistry resolve_elevation defaults":
+    """
+    ## Elevation defaults
+
+    Default: Flat=0, Low=1, Mid=4, High=8.
+    """
+
+    it "resolves Elevation.Flat to 0":
+        val r = theme_registry()
+        val px = r.resolve_elevation(ThemeId.Custom("token_test"), Elevation.Flat)
+        expect(px).to_equal(0)
+
+    it "resolves Elevation.Low to 1":
+        val r = theme_registry()
+        val px = r.resolve_elevation(ThemeId.Custom("token_test"), Elevation.Low)
+        expect(px).to_equal(1)
+
+    it "resolves Elevation.Mid to 4":
+        val r = theme_registry()
+        val px = r.resolve_elevation(ThemeId.Custom("token_test"), Elevation.Mid)
+        expect(px).to_equal(4)
+
+    it "resolves Elevation.High to 8":
+        val r = theme_registry()
+        val px = r.resolve_elevation(ThemeId.Custom("token_test"), Elevation.High)
+        expect(px).to_equal(8)
+
+
+# ============================================================================
+# SurfaceRole resolver — fallback and registered path
+# ============================================================================
+
+describe "ThemeRegistry resolve_surface":
+    """
+    ## SurfaceRole resolution
+
+    With no registered tokens: returns '#000000' fallback.
+    With registered GlassDesignTokens (GlassDark is registered at module load
+    by glass_tokens.spl): returns the corresponding GlassColorTokens field.
+    """
+
+    it "returns fallback for unregistered theme":
+        val r = theme_registry()
+        val color = r.resolve_surface(ThemeId.Custom("no_such_theme_xyz"), SurfaceRole.Background)
+        expect(color).to_equal("#000000")
+
+    it "returns fallback for unregistered overlay role":
+        val r = theme_registry()
+        val color = r.resolve_surface(ThemeId.Custom("no_such_theme_xyz"), SurfaceRole.Overlay)
+        expect(color).to_equal("#000000")
+
+    it "resolves SurfaceRole.Surface from GlassDark tokens":
+        val r = theme_registry()
+        r.register_tokens(ThemeId.Custom("test_glass"), GlassDesignTokens.dark())
+        val color = r.resolve_surface(ThemeId.Custom("test_glass"), SurfaceRole.Surface)
+        expect(color).to_equal("rgba(30,30,35,0.72)")
+
+    it "resolves SurfaceRole.Background from GlassDark tokens":
+        val r = theme_registry()
+        r.register_tokens(ThemeId.Custom("test_glass"), GlassDesignTokens.dark())
+        val color = r.resolve_surface(ThemeId.Custom("test_glass"), SurfaceRole.Background)
+        expect(color).to_equal("#0b0d10")
+
+
+# ============================================================================
+# TextRole resolver — fallback and registered path
+# ============================================================================
+
+describe "ThemeRegistry resolve_text_role":
+    """
+    ## TextRole resolution
+
+    With no registered tokens: returns '#000000' fallback.
+    With registered GlassDesignTokens: returns the matching text color field.
+    """
+
+    it "returns fallback for unregistered theme":
+        val r = theme_registry()
+        val color = r.resolve_text_role(ThemeId.Custom("no_such_theme_xyz"), TextRole.Primary)
+        expect(color).to_equal("#000000")
+
+    it "resolves TextRole.Primary from GlassDark tokens":
+        val r = theme_registry()
+        r.register_tokens(ThemeId.Custom("test_glass_text"), GlassDesignTokens.dark())
+        val color = r.resolve_text_role(ThemeId.Custom("test_glass_text"), TextRole.Primary)
+        expect(color).to_equal("#F5F5F7")
+
+    it "resolves TextRole.Danger from GlassDark tokens":
+        val r = theme_registry()
+        r.register_tokens(ThemeId.Custom("test_glass_text"), GlassDesignTokens.dark())
+        val color = r.resolve_text_role(ThemeId.Custom("test_glass_text"), TextRole.Danger)
+        expect(color).to_equal("#FF453A")
+
+
+# ============================================================================
+# to_wire() codec — stable canonical strings
+# ============================================================================
+
+describe "Spacing to_wire codecs":
+    """Wire strings are frozen: changing them breaks serializers/lints."""
+
+    it "Spacing.Xs wire is 'xs'":
+        expect(Spacing.Xs.to_wire()).to_equal("xs")
+
+    it "Spacing.Sm wire is 'sm'":
+        expect(Spacing.Sm.to_wire()).to_equal("sm")
+
+    it "Spacing.Md wire is 'md'":
+        expect(Spacing.Md.to_wire()).to_equal("md")
+
+    it "Spacing.Lg wire is 'lg'":
+        expect(Spacing.Lg.to_wire()).to_equal("lg")
+
+    it "Spacing.Xl wire is 'xl'":
+        expect(Spacing.Xl.to_wire()).to_equal("xl")
+
+
+describe "Radius to_wire codecs":
+    it "Radius.None wire is 'none'":
+        expect(Radius.None.to_wire()).to_equal("none")
+
+    it "Radius.Sm wire is 'sm'":
+        expect(Radius.Sm.to_wire()).to_equal("sm")
+
+    it "Radius.Md wire is 'md'":
+        expect(Radius.Md.to_wire()).to_equal("md")
+
+    it "Radius.Lg wire is 'lg'":
+        expect(Radius.Lg.to_wire()).to_equal("lg")
+
+    it "Radius.Pill wire is 'pill'":
+        expect(Radius.Pill.to_wire()).to_equal("pill")
+
+
+describe "Elevation to_wire codecs":
+    it "Elevation.Flat wire is 'flat'":
+        expect(Elevation.Flat.to_wire()).to_equal("flat")
+
+    it "Elevation.Low wire is 'low'":
+        expect(Elevation.Low.to_wire()).to_equal("low")
+
+    it "Elevation.Mid wire is 'mid'":
+        expect(Elevation.Mid.to_wire()).to_equal("mid")
+
+    it "Elevation.High wire is 'high'":
+        expect(Elevation.High.to_wire()).to_equal("high")
+
+
+describe "SurfaceRole to_wire codecs":
+    it "SurfaceRole.Background wire is 'background'":
+        expect(SurfaceRole.Background.to_wire()).to_equal("background")
+
+    it "SurfaceRole.Surface wire is 'surface'":
+        expect(SurfaceRole.Surface.to_wire()).to_equal("surface")
+
+    it "SurfaceRole.Card wire is 'card'":
+        expect(SurfaceRole.Card.to_wire()).to_equal("card")
+
+    it "SurfaceRole.Overlay wire is 'overlay'":
+        expect(SurfaceRole.Overlay.to_wire()).to_equal("overlay")
+
+
+describe "TextRole to_wire codecs":
+    it "TextRole.Primary wire is 'primary'":
+        expect(TextRole.Primary.to_wire()).to_equal("primary")
+
+    it "TextRole.Secondary wire is 'secondary'":
+        expect(TextRole.Secondary.to_wire()).to_equal("secondary")
+
+    it "TextRole.Muted wire is 'muted'":
+        expect(TextRole.Muted.to_wire()).to_equal("muted")
+
+    it "TextRole.Danger wire is 'danger'":
+        expect(TextRole.Danger.to_wire()).to_equal("danger")

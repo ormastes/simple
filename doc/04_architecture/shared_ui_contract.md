@@ -184,6 +184,26 @@ Canonical widget kind values (used in `ElementInfo.kind`):
 | `divider` | no | (none) | none |
 | `tooltip` | no | tooltip text | none |
 
+### 4.4 Wire vs Internal Types
+
+The internal model (`WidgetRecord`, `WidgetNode`, and their helpers) uses typed enums — `WidgetKind`, `LayoutKind`, `ThemeId`, `Spacing`, `Radius`, `Elevation`, `SurfaceRole`, `TextRole` — delivered in Phases 2-4 of `doc/05_design/ui_typed_core_rfc.md`.
+
+The wire protocol (UiAccessSnapshot JSON, IPC v1) uses canonical **text strings** for interoperability and backwards compatibility. The codec boundary sits on each enum via `to_wire()` / `from_wire()` co-located methods.
+
+```
+Internal model                    Wire / IPC
+──────────────────────────────    ──────────────────────────────
+WidgetKind.Panel        ──►  "panel"      (ElementInfo.kind)
+LayoutKind.Column       ──►  "column"     (props map)
+ThemeId.Obsidian        ──►  "obsidian"   (UIStateInfo.theme)
+Spacing.Md              ──►  "12"         (resolved px value)
+SurfaceRole.Card        ──►  "card"       (props map)
+
+                        ◄──  from_wire()  (deserialization path)
+```
+
+Application code works exclusively with the typed enums. Only the serialisation layer (`to_wire()` / `from_wire()`) touches the string form. Tests MUST assert on `ElementInfo.kind` string values (per §7), not on internal enum identities.
+
 ## 5. Interaction Semantics
 
 ### 5.1 Mandatory Interactions (All Shared Surfaces)

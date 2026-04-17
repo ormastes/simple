@@ -59,6 +59,8 @@ overrideNeutralColor: "#1E1E23"
 { "xs": "4px", "sm": "8px", "md": "12px", "lg": "20px", "xl": "32px" }
 ```
 
+**Token enums (typed-core Phase 4):** The spacing values above map directly to the `Spacing` enum (`Spacing.Xs`/`Sm`/`Md`/`Lg`/`Xl`). Co-located token enums `Radius`, `Elevation`, `SurfaceRole`, and `TextRole` live in `src/lib/common/ui/design_tokens.spl`. When authoring widget code, pass `Spacing.Md` (etc.) to fluent helpers instead of raw pixel strings — the `ThemeRegistry` resolver converts them. See `doc/05_design/ui_typed_core_rfc.md` Phase 4 for the full mapping.
+
 ## designMd (Glassmorphism CSS Rules)
 
 This markdown is passed as the `designMd` field in `create_design_system`. It teaches the model the full glassmorphism design language:

@@ -168,3 +168,4 @@ To flip: edit `doc/05_design/stitch_snapshots/sync_mode.sdn` and change `mode: r
 - **Sync mode flag:** `doc/05_design/stitch_snapshots/sync_mode.sdn`
 - **Stitch skill:** `.claude/skills/stitch.md` — screen generation; contains the canonical `designMd` injected at push time
 - **UI skill:** `.claude/skills/ui.md` — mockup workflow; includes theme-sync diff pre-check
+- **Typed-core token enums:** `src/lib/common/ui/design_tokens.spl` — `Spacing`, `Radius`, `Elevation`, `SurfaceRole`, `TextRole` enums (Phase 4 of `doc/05_design/ui_typed_core_rfc.md`). When diffing tokens, these enum references are the canonical local source; the Stitch snapshot stores the resolved raw values they map to.

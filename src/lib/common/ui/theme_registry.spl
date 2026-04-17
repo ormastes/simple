@@ -1,0 +1,244 @@
+# Theme Registry — Inversion-of-control hub for platform themes
+#
+# Phase 1 of UI Typed Core RFC (doc/05_design/ui_typed_core_rfc.md).
+#
+# Breaks four core→platform import cycles:
+#   style.spl:150-159   imports ios_theme / glass_theme
+#   simple_theme.spl:5  imports glass_tokens types
+#   theme_sync_sdn.spl:19 imports glass_tokens types
+#   icon_registry.spl:6 imports glass_numeric_tokens constants
+#
+# Solution: platform modules call register_theme/register_tokens/
+# register_design_system/register_icons at startup. Core consumers
+# call theme_registry().get(ThemeId.X) instead of importing platform modules.
+#
+# Singleton pattern: module-level var (same as widget.spl _widget_registry).
+# No module-init idiom exists in Simple; registration is explicit.
+# Platform files each expose a _register_*() function that must be called
+# once at application startup (or lazily via theme_registry() getter).
+#
+# Types returned by this registry:
+#   UITheme         — from common.ui.style
+#   GlassDesignTokens, StitchDesignSystem — from common.ui.glass_tokens
+#   IconSet         — defined below (wrapper around numeric icon data)
+#
+# API contract: Agents 2-4 depend on this exact surface.
+# Any deviation is marked with "# API change:" comments.
+
+use common.ui.style.{UITheme}
+use common.ui.glass_tokens.{GlassDesignTokens, StitchDesignSystem}
+use common.ui.design_tokens.{Spacing, Radius, Elevation, SurfaceRole, TextRole}
+
+# =========================================================================
+# ThemeId — canonical identifier for all platform themes
+# =========================================================================
+
+enum ThemeId:
+    IOSLight
+    IOSDark
+    GlassLight
+    GlassDark
+    GlassObsidianDark
+    Custom(name: text)
+
+# =========================================================================
+# IconSet — numeric icon color/size constants for a theme
+# =========================================================================
+# Wraps the u64 constants from glass_numeric_tokens so icon_registry.spl
+# can get them via the registry instead of importing the platform module.
+# API change: IconSet is new (not in RFC draft) — added to break
+# icon_registry.spl:6 dead import of glass_numeric_tokens.
+
+class IconSet:
+    icon_term: u64
+    icon_files: u64
+    icon_calc: u64
+    icon_clock: u64
+    icon_settings: u64
+    icon_browser: u64
+    icon_editor: u64
+
+# =========================================================================
+# ThemeRegistry — stores registered platform themes/tokens/icons
+# =========================================================================
+
+class ThemeRegistry:
+    themes: Dict<text, fn() -> UITheme>
+    tokens_map: Dict<text, GlassDesignTokens>
+    design_systems: Dict<text, StitchDesignSystem>
+    icons_map: Dict<text, IconSet>
+    # Per-theme spacing scale overrides: key → [xs, sm, md, lg, xl]
+    spacing_scales: Dict<text, [i32]>
+
+# =========================================================================
+# ThemeId key helper (avoids chained-method issue per language.md)
+# =========================================================================
+
+fn _theme_id_key(theme_id: ThemeId) -> text:
+    match theme_id:
+        IOSLight => "ios_light"
+        IOSDark => "ios_dark"
+        GlassLight => "glass_light"
+        GlassDark => "glass_dark"
+        GlassObsidianDark => "glass_obsidian_dark"
+        Custom(name) => name
+
+# =========================================================================
+# Singleton storage (module-level var, same pattern as widget.spl)
+# =========================================================================
+
+var _registry_instance: ThemeRegistry? = nil
+
+fn _ensure_registry() -> ThemeRegistry:
+    match _registry_instance:
+        Some(r) => return r
+        _ =>
+            val r = ThemeRegistry(
+                themes: {},
+                tokens_map: {},
+                design_systems: {},
+                icons_map: {},
+                spacing_scales: {}
+            )
+            _registry_instance = Some(r)
+            return r
+
+# =========================================================================
+# Singleton accessor
+# =========================================================================
+
+fn theme_registry() -> ThemeRegistry:
+    """Return the process-wide ThemeRegistry singleton."""
+    return _ensure_registry()
+
+# =========================================================================
+# Registry methods — lookup
+# =========================================================================
+
+impl ThemeRegistry:
+    fn get(self, theme_id: ThemeId) -> UITheme?:
+        """Lookup an installed theme by id. Returns nil if not registered."""
+        val key = _theme_id_key(theme_id)
+        match self.themes.get(key):
+            Some(factory) => Some(factory())
+            _ => nil
+
+    fn tokens(self, theme_id: ThemeId) -> GlassDesignTokens?:
+        """Lookup design tokens for a theme (used by simple_theme.spl)."""
+        val key = _theme_id_key(theme_id)
+        self.tokens_map.get(key)
+
+    fn design_system(self, theme_id: ThemeId) -> StitchDesignSystem?:
+        """Lookup the design system for a theme (used by theme_sync_sdn.spl)."""
+        val key = _theme_id_key(theme_id)
+        self.design_systems.get(key)
+
+    fn icons(self, theme_id: ThemeId) -> IconSet?:
+        """Lookup icon constants/data (used by icon_registry.spl)."""
+        val key = _theme_id_key(theme_id)
+        self.icons_map.get(key)
+
+    # =====================================================================
+    # Registry methods — registration (called at startup by platform files)
+    # =====================================================================
+
+    fn register_theme(self, theme_id: ThemeId, factory: fn() -> UITheme):
+        """Platform modules call this at module-init time."""
+        val key = _theme_id_key(theme_id)
+        self.themes[key] = factory
+
+    fn register_tokens(self, theme_id: ThemeId, tokens: GlassDesignTokens):
+        """Platform modules call this to register design tokens."""
+        val key = _theme_id_key(theme_id)
+        self.tokens_map[key] = tokens
+
+    fn register_design_system(self, theme_id: ThemeId, ds: StitchDesignSystem):
+        """Platform modules call this to register a full design system."""
+        val key = _theme_id_key(theme_id)
+        self.design_systems[key] = ds
+
+    fn register_icons(self, theme_id: ThemeId, icons: IconSet):
+        """Platform modules call this to register icon color constants."""
+        val key = _theme_id_key(theme_id)
+        self.icons_map[key] = icons
+
+    fn register_spacing_scale(self, theme_id: ThemeId, scale: [i32]):
+        """Register a per-theme spacing scale [xs, sm, md, lg, xl]. Falls back to defaults."""
+        val key = _theme_id_key(theme_id)
+        self.spacing_scales[key] = scale
+
+    # =========================================================================
+    # Token resolvers (Phase 4 UI Typed Core RFC)
+    # Default scales match common design systems; per-theme overrides via
+    # register_spacing_scale. Color resolvers use registered GlassDesignTokens
+    # and fall back to sensible defaults when no theme is registered.
+    # =========================================================================
+
+    fn resolve_spacing(self, theme_id: ThemeId, s: Spacing) -> i32:
+        """Return the pixel value for a spacing token in this theme.
+        Default: Xs=4, Sm=8, Md=16, Lg=24, Xl=32."""
+        val key = _theme_id_key(theme_id)
+        match self.spacing_scales.get(key):
+            Some(scale) =>
+                match s:
+                    Spacing.Xs => return scale[0]
+                    Spacing.Sm => return scale[1]
+                    Spacing.Md => return scale[2]
+                    Spacing.Lg => return scale[3]
+                    Spacing.Xl => return scale[4]
+            _ => pass_dn
+        match s:
+            Spacing.Xs => return 4
+            Spacing.Sm => return 8
+            Spacing.Md => return 16
+            Spacing.Lg => return 24
+            Spacing.Xl => return 32
+
+    fn resolve_radius(self, theme_id: ThemeId, r: Radius) -> i32:
+        """Return the pixel value for a radius token.
+        Default: None=0, Sm=4, Md=8, Lg=16, Pill=999."""
+        match r:
+            Radius.None => return 0
+            Radius.Sm => return 4
+            Radius.Md => return 8
+            Radius.Lg => return 16
+            Radius.Pill => return 999
+
+    fn resolve_elevation(self, theme_id: ThemeId, e: Elevation) -> i32:
+        """Return the elevation level integer for an elevation token.
+        Default: Flat=0, Low=1, Mid=4, High=8."""
+        match e:
+            Elevation.Flat => return 0
+            Elevation.Low => return 1
+            Elevation.Mid => return 4
+            Elevation.High => return 8
+
+    fn resolve_surface(self, theme_id: ThemeId, role: SurfaceRole) -> text:
+        """Return the hex/rgba color for a surface role from registered GlassDesignTokens.
+        Falls back to '#000000' if the theme is not registered."""
+        val key = _theme_id_key(theme_id)
+        match self.tokens_map.get(key):
+            Some(dt) =>
+                val colors = dt.colors
+                match role:
+                    SurfaceRole.Background => return colors.surface_level_0
+                    SurfaceRole.Surface => return colors.surface_primary
+                    SurfaceRole.Card => return colors.surface_elevated
+                    SurfaceRole.Overlay => return colors.surface_secondary
+            _ => pass_dn
+        return "#000000"
+
+    fn resolve_text_role(self, theme_id: ThemeId, role: TextRole) -> text:
+        """Return the hex/rgba color for a text role from registered GlassDesignTokens.
+        Falls back to '#000000' if the theme is not registered."""
+        val key = _theme_id_key(theme_id)
+        match self.tokens_map.get(key):
+            Some(dt) =>
+                val colors = dt.colors
+                match role:
+                    TextRole.Primary => return colors.text_primary
+                    TextRole.Secondary => return colors.text_secondary
+                    TextRole.Muted => return colors.text_tertiary
+                    TextRole.Danger => return colors.error
+            _ => pass_dn
+        return "#000000"

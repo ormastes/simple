@@ -1170,6 +1170,57 @@ See [Friend Access Control](../design/friend_access_control.md) and [Layered Com
 
 ---
 
+## Method Chaining / Fluent API
+
+Methods exist on classes and can be called as `receiver.method(args)`. However, the `.claude/rules/language.md` runtime rule states:
+
+> **Chained methods broken — use intermediate `var`**
+
+Until `doc/05_design/compiler_rfc_method_chain_fix.md` lands, write each call as a separate assignment:
+
+```simple
+# Correct — intermediate var pattern
+var node = WidgetNode(kind: WidgetKind.Panel, layout: LayoutKind.Column)
+node = node.width(320)
+node = node.label("Settings")
+node = node.padding(theme, Spacing.Lg)
+node = node.child(body_node)
+
+# NOT YET WORKING — chained form (conditional on chain-fix RFC)
+# val node = WidgetNode(...).width(320).label("Settings").padding(theme, Spacing.Lg)
+```
+
+The intermediate-var form will continue to compile correctly after the chain-fix RFC lands.
+
+See also: `doc/05_design/ui_typed_core_rfc.md` Phase 3 for the full list of fluent methods on `WidgetNode`.
+
+---
+
+## Enum Construction & Inference
+
+Today, enum variants must be fully qualified:
+
+```simple
+use std.ui.{WidgetKind, LayoutKind, Spacing, SurfaceRole}
+
+val kind = WidgetKind.Panel          # qualified — works today
+val layout = LayoutKind.Column       # qualified — works today
+val space = Spacing.Md               # qualified — works today
+val role = SurfaceRole.Card          # qualified — works today
+```
+
+**Future — bare enum literals** (pending `doc/05_design/compiler_rfc_bare_enum_literals.md`): once that RFC lands, the compiler will infer the enum type from context and bare names will work:
+
+```simple
+# Future only — not available yet
+val node = WidgetNode(kind: Panel, layout: Column)
+node = node.padding(theme, Md)
+```
+
+Until the RFC ships, always write the fully-qualified `Foo.Bar` form.
+
+---
+
 ## Not Yet Implemented
 
 These features are **not available**:

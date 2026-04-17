@@ -69,3 +69,126 @@ Full coverage (10 screens) documented in `stitch_design_system.md` Section 9.
 | UI design (TUI) | `doc/05_design/<feature>_tui.md` |
 | UI design (GUI) | `doc/05_design/<feature>_gui.md` |
 | Design system ref | `doc/05_design/stitch_design_system.md` |
+
+---
+
+## Typed Widget Authoring
+
+Phases 1-6 of the typed-core RFC (`doc/05_design/ui_typed_core_rfc.md`) replaced stringly-typed fields with enums and fluent helpers. Use these when constructing `WidgetNode` in Simple code.
+
+### WidgetKind and LayoutKind (Phase 2)
+
+`WidgetRecord.kind` and `WidgetRecord.layout` are now typed enums instead of `text`:
+
+```simple
+# Before (Phase 0 — string literals)
+val node = WidgetNode(kind: "panel", layout: "column")
+
+# After (Phase 2 — typed enums)
+use std.ui.{WidgetNode, WidgetKind, LayoutKind}
+
+val node = WidgetNode(kind: WidgetKind.Panel, layout: LayoutKind.Column)
+```
+
+`WidgetNode.kind_name()` and `.layout_name()` still return `text` for backwards-compatible wire serialisation. The codec boundary (`to_wire()` / `from_wire()`) on each enum handles conversion — application code never calls these directly.
+
+### Design-Token Enums (Phase 4)
+
+Five token enums live in `src/lib/common/ui/design_tokens.spl`:
+
+| Enum | Example values |
+|------|----------------|
+| `Spacing` | `Xs`, `Sm`, `Md`, `Lg`, `Xl` |
+| `Radius` | `None`, `Sm`, `Md`, `Lg`, `Full` |
+| `Elevation` | `Flat`, `Raised`, `Floating`, `Overlay` |
+| `SurfaceRole` | `Background`, `Card`, `Sheet`, `Overlay` |
+| `TextRole` | `Body`, `Label`, `Heading`, `Caption` |
+
+Pass them through the `ThemeRegistry` resolver:
+
+```simple
+use std.ui.{WidgetNode, Spacing, Radius, SurfaceRole, ThemeRegistry}
+
+val theme = theme_registry().get(ThemeId.Obsidian)
+var node = WidgetNode(kind: WidgetKind.Panel, layout: LayoutKind.Column)
+node = node.padding(theme, Spacing.Md)
+node = node.radius_token(theme, Radius.Lg)
+node = node.surface_role(theme, SurfaceRole.Card)
+```
+
+### Typed Actions (Phase 5)
+
+Define app-specific actions as enums implementing `IntoAction`:
+
+```simple
+use std.ui.action.{IntoAction, CommonAction}
+
+enum AppAction:
+    Save
+    Discard
+    OpenSettings
+
+impl IntoAction for AppAction:
+    fn into_action(self) -> text:
+        match self:
+            | AppAction.Save -> "save"
+            | AppAction.Discard -> "discard"
+            | AppAction.OpenSettings -> "open_settings"
+
+var node = WidgetNode(kind: WidgetKind.Button, layout: LayoutKind.None)
+node = node.on_typed_action(AppAction.Save)
+```
+
+The wire event `UIEvent.Action(name: text)` is preserved verbatim — `IntoAction` only affects the author side.
+
+---
+
+## Fluent Chain Patterns
+
+Phase 3 of the typed-core RFC (`doc/05_design/ui_typed_core_rfc.md`) adds 26 fluent methods on `WidgetNode`. These mirror the existing `with_*` free-function helpers.
+
+### Available Methods (representative sample)
+
+| Method | Purpose |
+|--------|---------|
+| `.width(i64)` | Set fixed width in logical pixels |
+| `.height(i64)` | Set fixed height in logical pixels |
+| `.accent(text)` | Set accent colour (hex string) |
+| `.label(text)` | Set widget label / display text |
+| `.child(WidgetNode)` | Append a child node |
+| `.on_typed_action(IntoAction)` | Attach typed action handler |
+| `.padding(theme, Spacing)` | Apply spacing token as padding |
+| `.radius_token(theme, Radius)` | Apply radius token |
+| `.surface_role(theme, SurfaceRole)` | Apply surface role token |
+| `.show_when_at_most(SizeClass)` | Responsive visibility (Phase 6) |
+| `.responsive_layout(...)` | Switch layout per breakpoint (Phase 6) |
+
+### Intermediate-var Pattern (required today)
+
+`.claude/rules/language.md` states: **"Chained methods broken — use intermediate `var`"**
+
+Write each method call on its own assignment:
+
+```simple
+var node = WidgetNode(kind: WidgetKind.Panel, layout: LayoutKind.Column)
+node = node.width(320)
+node = node.label("Settings")
+node = node.surface_role(theme, SurfaceRole.Card)
+node = node.padding(theme, Spacing.Lg)
+node = node.child(header_node)
+node = node.child(body_node)
+```
+
+Do NOT write chained form (currently broken at the compiler level):
+
+```simple
+# NOT YET WORKING — do not use
+val node = WidgetNode(...)
+    .width(320)
+    .label("Settings")
+    .surface_role(theme, SurfaceRole.Card)
+```
+
+### Migration Path
+
+Once `doc/05_design/compiler_rfc_method_chain_fix.md` lands, the chain form above will compile. The intermediate-var form will continue to work unchanged — no migration needed when the fix ships.
