@@ -1,0 +1,46 @@
+# SMP bring-up scaffolding + IPI enums.
+# Does NOT call INIT/SIPI yet — that's platform glue added when the x86_64 AP
+# trampoline lands. This module exposes the kernel-level surface.
+
+use os.kernel.smp.percpu.{percpu_init, percpu_mark_online, percpu_online_count, percpu_is_online, MAX_CPUS, g_percpu, g_num_cpus}
+
+# IPI reason bitmask — each bit means "please do X on the target CPU".
+val IPI_RESCHED: u32 = 0x1        # wake the target to re-pick a task
+val IPI_TLB_FLUSH: u32 = 0x2      # shoot down stale TLB entries
+val IPI_HALT: u32 = 0x4           # shutdown
+val IPI_CALL_FUNC: u32 = 0x8      # cross-CPU function call
+
+fn smp_init():
+    """Call once from BSP boot. Initializes per-CPU table; BSP is CPU 0."""
+    percpu_init()
+
+fn smp_bringup_ap(cpu_id: u32) -> bool:
+    """Mark an application processor as online. Real hw bring-up
+    (INIT IPI / SIPI / trampoline) lives in arch/x86_64/cpu.spl — this
+    call just flips the online flag after the arch layer has the AP running."""
+    if cpu_id == 0u32 or cpu_id >= MAX_CPUS:
+        return false
+    percpu_mark_online(cpu_id)
+
+fn smp_online_count() -> u32:
+    percpu_online_count()
+
+fn smp_num_cpus() -> u32:
+    g_num_cpus
+
+fn smp_send_ipi(cpu_id: u32, reason: u32) -> bool:
+    """Queue an IPI on the target CPU's pending mask. Actual APIC write
+    happens in arch/x86_64/cpu.spl::apic_send_ipi — here we just record
+    the intent, which is safe to test without hardware."""
+    if cpu_id >= MAX_CPUS or not percpu_is_online(cpu_id):
+        return false
+    g_percpu[cpu_id].ipi_pending = g_percpu[cpu_id].ipi_pending | reason
+    true
+
+fn smp_take_ipi(cpu_id: u32) -> u32:
+    """Read and clear pending IPIs on a CPU (called from the IPI vector)."""
+    if cpu_id >= MAX_CPUS:
+        return 0u32
+    val pending = g_percpu[cpu_id].ipi_pending
+    g_percpu[cpu_id].ipi_pending = 0u32
+    pending

@@ -1,0 +1,70 @@
+# Per-CPU state descriptor — one entry per logical CPU.
+# Kept in a fixed-size array (no heap alloc in kernel).
+# Scheduler will attach its runqueue pointer here in a later pass.
+
+val MAX_CPUS: u32 = 32
+
+struct PerCpu:
+    cpu_id: u32
+    online: bool
+    idle_task_id: u32   # task id reserved for idle loop; 0 if unset
+    current_task_id: u32
+    runqueue_len: u32   # how many tasks this CPU currently runs (filled in later pass)
+    ipi_pending: u32    # bitmask of IPI reasons queued for this CPU
+    preempt_disable: u32  # nesting counter; 0 = preemption enabled
+
+var g_percpu: [PerCpu; 32]
+var g_num_cpus: u32 = 1   # BSP only until smp_bringup runs
+
+fn percpu_init():
+    """Reset all per-CPU entries to a known state. Called once by BSP at boot."""
+    var i: u32 = 0
+    while i < MAX_CPUS:
+        g_percpu[i] = PerCpu(
+            cpu_id: i,
+            online: false,
+            idle_task_id: 0u32,
+            current_task_id: 0u32,
+            runqueue_len: 0u32,
+            ipi_pending: 0u32,
+            preempt_disable: 0u32,
+        )
+        i = i + 1
+    # BSP is online by definition
+    g_percpu[0].online = true
+    g_num_cpus = 1
+
+fn percpu_online_count() -> u32:
+    var c: u32 = 0
+    var i: u32 = 0
+    while i < MAX_CPUS:
+        if g_percpu[i].online:
+            c = c + 1
+        i = i + 1
+    c
+
+fn percpu_mark_online(cpu_id: u32) -> bool:
+    if cpu_id >= MAX_CPUS:
+        return false
+    g_percpu[cpu_id].online = true
+    if cpu_id + 1 > g_num_cpus:
+        g_num_cpus = cpu_id + 1
+    true
+
+fn percpu_is_online(cpu_id: u32) -> bool:
+    if cpu_id >= MAX_CPUS:
+        return false
+    g_percpu[cpu_id].online
+
+fn percpu_preempt_disable(cpu_id: u32):
+    if cpu_id < MAX_CPUS:
+        g_percpu[cpu_id].preempt_disable = g_percpu[cpu_id].preempt_disable + 1
+
+fn percpu_preempt_enable(cpu_id: u32):
+    if cpu_id < MAX_CPUS and g_percpu[cpu_id].preempt_disable > 0:
+        g_percpu[cpu_id].preempt_disable = g_percpu[cpu_id].preempt_disable - 1
+
+fn percpu_preempt_enabled(cpu_id: u32) -> bool:
+    if cpu_id >= MAX_CPUS:
+        return false
+    g_percpu[cpu_id].preempt_disable == 0
