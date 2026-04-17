@@ -4,12 +4,12 @@
 # mechanism. Does NOT re-implement scheduling mechanism (that lives in
 # src/os/kernel/scheduler/scheduler.spl).
 #
-# ECS-style internals: entities are managed tasks; components are stored
-# as fields on TaskEntry. When std.ecs lands, migrate to WorldBase +
-# ComponentStore.
-#
-# TODO(mdsoc+): migrate to std.ecs.{WorldBase, ComponentStore, EntityAllocator,
-#               Scheduler, ChangeTracker, for_each, for_each_pair} when stdlib lands.
+# ECS internals: entities are managed tasks; components live in per-type
+# ComponentStore<T> columns owned by SchedWorld.
+
+use std.ecs.entity.{Entity, EntityAllocator}
+use std.ecs.component_store.{ComponentStore}
+use std.ecs.world.{WorldBase}
 
 # ============================================================================
 # Scheduler class constants (match kernel scheduler.spl)
@@ -38,15 +38,7 @@ val NICE_MIN: i32 = -20
 val NICE_MAX: i32 = 19
 
 # ============================================================================
-# Entity — minimal ECS entity handle
-# ============================================================================
-
-struct SchedEntity:
-    """Opaque handle for a task entity in the SchedWorld."""
-    id: u64
-
-# ============================================================================
-# Components
+# Components (per MDSOC+ ECS spec)
 # ============================================================================
 
 struct TaskId:
@@ -70,31 +62,17 @@ struct SchedClass:
     kind: u32
 
 # ============================================================================
-# TaskEntry — aggregated ECS row
-# ============================================================================
-
-struct TaskEntry:
-    """One task entity with all component values inlined."""
-    entity: SchedEntity
-    task_id: TaskId
-    priority: Priority
-    cpu_usage: CpuUsage
-    nice: Nice
-    sched_class: SchedClass
-    active: bool
-
-# ============================================================================
 # SchedWorld — ECS world for scheduler policy state
 # ============================================================================
 
 struct SchedWorld:
-    """ECS world that owns all task entities and their component data.
-
-    TODO(mdsoc+): split into WorldBase + per-component ComponentStore<T>
-    when std.ecs lands.
-    """
-    tasks: [TaskEntry]
-    next_id: u64
+    """ECS world that owns all task entities and their component data."""
+    base: WorldBase
+    task_ids:    ComponentStore<TaskId>
+    priorities:  ComponentStore<Priority>
+    cpu_usages:  ComponentStore<CpuUsage>
+    nices:       ComponentStore<Nice>
+    classes:     ComponentStore<SchedClass>
 
 # ============================================================================
 # Extern — kernel dispatcher will wire this later
@@ -103,46 +81,79 @@ struct SchedWorld:
 extern fn sched_mechanism_set_priority(task: u32, priority: i32)
 
 # ============================================================================
+# Helper: find entity for a task_id by scanning task_ids store
+# Returns Entity(id: 0, generation: 0) if not found (id==0 sentinel)
+# ============================================================================
+
+fn find_entity_for_task(world: SchedWorld, task: u32) -> Entity:
+    """Scan task_ids store to find the Entity for a given kernel task id."""
+    val count = world.task_ids.len()
+    var i = 0
+    while i < count:
+        val eid_raw = world.task_ids.entity_at(i)
+        val e = Entity(id: eid_raw, generation: 1)
+        val slot = world.task_ids.get_slot(e)
+        if slot >= 0:
+            if world.task_ids.dense[slot].value == task:
+                return e
+        i = i + 1
+    Entity(id: 0, generation: 0)
+
+# ============================================================================
 # System: sys_demote_runaway_drivers
 #
 # For each SCHED_DRIVER task whose ticks_consumed > threshold,
 # demote priority by one level (clamp to PRIO_MAX) and reset counter.
 # ============================================================================
 
-fn sys_demote_runaway_drivers(world: SchedWorld) -> SchedWorld:
+fn sys_demote_runaway_drivers(world: SchedWorld):
     """ECS system: demote runaway driver tasks and reset their usage counters."""
-    var updated: [TaskEntry] = []
-    for task in world.tasks:
-        if not task.active:
-            updated = updated.push(task)
-        elif task.sched_class.kind == SCHED_DRIVER and task.cpu_usage.ticks_consumed > DRIVER_RUNAWAY_THRESHOLD and task.priority.level > PRIO_REALTIME:
-            val new_level = task.priority.level + 1
+    val count = world.classes.len()
+    var to_demote: [i32] = []
+    var i = 0
+    while i < count:
+        val eid_raw = world.classes.entity_at(i)
+        val e = Entity(id: eid_raw, generation: 1)
+        val cls_slot = world.classes.get_slot(e)
+        if cls_slot >= 0:
+            if world.classes.dense[cls_slot].kind == SCHED_DRIVER:
+                val usage_slot = world.cpu_usages.get_slot(e)
+                if usage_slot >= 0:
+                    if world.cpu_usages.dense[usage_slot].ticks_consumed > DRIVER_RUNAWAY_THRESHOLD:
+                        val prio_slot = world.priorities.get_slot(e)
+                        if prio_slot >= 0:
+                            if world.priorities.dense[prio_slot].level > PRIO_REALTIME:
+                                to_demote = to_demote.push(eid_raw)
+        i = i + 1
+
+    val ecs_tick = world.base.now()
+    for eid_raw in to_demote:
+        val e = Entity(id: eid_raw, generation: 1)
+        val prio_slot = world.priorities.get_slot(e)
+        if prio_slot >= 0:
+            val cur_level = world.priorities.dense[prio_slot].level
+            val new_level = cur_level + 1
             val clamped = if new_level > PRIO_MAX: PRIO_MAX else: new_level
-            sched_mechanism_set_priority(task.task_id.value, clamped)
-            val demoted = TaskEntry(
-                entity: task.entity,
-                task_id: task.task_id,
-                priority: Priority(level: clamped),
-                cpu_usage: CpuUsage(ticks_consumed: 0),
-                nice: task.nice,
-                sched_class: task.sched_class,
-                active: true
-            )
-            updated = updated.push(demoted)
-        elif task.sched_class.kind == SCHED_DRIVER:
-            val reset = TaskEntry(
-                entity: task.entity,
-                task_id: task.task_id,
-                priority: task.priority,
-                cpu_usage: CpuUsage(ticks_consumed: 0),
-                nice: task.nice,
-                sched_class: task.sched_class,
-                active: true
-            )
-            updated = updated.push(reset)
-        else:
-            updated = updated.push(task)
-    SchedWorld(tasks: updated, next_id: world.next_id)
+            val tid_slot = world.task_ids.get_slot(e)
+            if tid_slot >= 0:
+                sched_mechanism_set_priority(world.task_ids.dense[tid_slot].value, clamped)
+            world.priorities.insert(e, Priority(level: clamped), ecs_tick)
+        world.cpu_usages.insert(e, CpuUsage(ticks_consumed: 0), ecs_tick)
+
+    # Reset counters for non-demoted DRIVER tasks too
+    val count2 = world.classes.len()
+    var j = 0
+    while j < count2:
+        val eid_raw = world.classes.entity_at(j)
+        val e = Entity(id: eid_raw, generation: 1)
+        val cls_slot = world.classes.get_slot(e)
+        if cls_slot >= 0:
+            if world.classes.dense[cls_slot].kind == SCHED_DRIVER:
+                val usage_slot = world.cpu_usages.get_slot(e)
+                if usage_slot >= 0:
+                    if world.cpu_usages.dense[usage_slot].ticks_consumed <= DRIVER_RUNAWAY_THRESHOLD:
+                        world.cpu_usages.insert(e, CpuUsage(ticks_consumed: 0), ecs_tick)
+        j = j + 1
 
 # ============================================================================
 # System: sys_age_priorities
@@ -151,27 +162,33 @@ fn sys_demote_runaway_drivers(world: SchedWorld) -> SchedWorld:
 # a long time up by one level to prevent starvation.
 # ============================================================================
 
-fn sys_age_priorities(world: SchedWorld) -> SchedWorld:
+fn sys_age_priorities(world: SchedWorld):
     """ECS system: age stale Normal tasks upward to prevent starvation."""
-    var updated: [TaskEntry] = []
-    for task in world.tasks:
-        if not task.active:
-            updated = updated.push(task)
-        elif task.sched_class.kind == SCHED_NORMAL and task.priority.level > PRIO_HIGH and task.cpu_usage.ticks_consumed == 0:
-            val aged_level = task.priority.level - 1
-            val aged = TaskEntry(
-                entity: task.entity,
-                task_id: task.task_id,
-                priority: Priority(level: aged_level),
-                cpu_usage: task.cpu_usage,
-                nice: task.nice,
-                sched_class: task.sched_class,
-                active: true
-            )
-            updated = updated.push(aged)
-        else:
-            updated = updated.push(task)
-    SchedWorld(tasks: updated, next_id: world.next_id)
+    val count = world.classes.len()
+    var to_age: [i32] = []
+    var i = 0
+    while i < count:
+        val eid_raw = world.classes.entity_at(i)
+        val e = Entity(id: eid_raw, generation: 1)
+        val cls_slot = world.classes.get_slot(e)
+        if cls_slot >= 0:
+            if world.classes.dense[cls_slot].kind == SCHED_NORMAL:
+                val prio_slot = world.priorities.get_slot(e)
+                if prio_slot >= 0:
+                    if world.priorities.dense[prio_slot].level > PRIO_HIGH:
+                        val usage_slot = world.cpu_usages.get_slot(e)
+                        if usage_slot >= 0:
+                            if world.cpu_usages.dense[usage_slot].ticks_consumed == 0:
+                                to_age = to_age.push(eid_raw)
+        i = i + 1
+
+    val ecs_tick = world.base.now()
+    for eid_raw in to_age:
+        val e = Entity(id: eid_raw, generation: 1)
+        val prio_slot = world.priorities.get_slot(e)
+        if prio_slot >= 0:
+            val aged_level = world.priorities.dense[prio_slot].level - 1
+            world.priorities.insert(e, Priority(level: aged_level), ecs_tick)
 
 # ============================================================================
 # SchedService — public API
@@ -191,110 +208,84 @@ impl SchedService:
     static fn new() -> SchedService:
         """Create a fresh SchedService."""
         SchedService(
-            world: SchedWorld(tasks: [], next_id: 1),
+            world: SchedWorld(
+                base:       WorldBase.new(),
+                task_ids:   ComponentStore.new(),
+                priorities: ComponentStore.new(),
+                cpu_usages: ComponentStore.new(),
+                nices:      ComponentStore.new(),
+                classes:    ComponentStore.new()
+            ),
             policy_tick: 0,
             started: false
         )
 
-    me sched_register_task(task: u32, sched_kind: u32, priority: i32, nice: i32) -> SchedEntity:
+    me sched_register_task(task: u32, sched_kind: u32, priority: i32, nice: i32) -> Entity:
         """Register a new task with the policy service. Returns its entity handle."""
         val clamped_nice = if nice < NICE_MIN: NICE_MIN else: if nice > NICE_MAX: NICE_MAX else: nice
         val clamped_prio = if priority < PRIO_MIN: PRIO_MIN else: if priority > PRIO_MAX: PRIO_MAX else: priority
-        val eid = SchedEntity(id: self.world.next_id)
-        val entry = TaskEntry(
-            entity: eid,
-            task_id: TaskId(value: task),
-            priority: Priority(level: clamped_prio),
-            cpu_usage: CpuUsage(ticks_consumed: 0),
-            nice: Nice(value: clamped_nice),
-            sched_class: SchedClass(kind: sched_kind),
-            active: true
-        )
-        self.world = SchedWorld(
-            tasks: self.world.tasks.push(entry),
-            next_id: self.world.next_id + 1
-        )
-        eid
+        val e = self.world.base.spawn()
+        val ecs_tick = self.world.base.now()
+        self.world.task_ids.insert(e,   TaskId(value: task),                    ecs_tick)
+        self.world.priorities.insert(e, Priority(level: clamped_prio),          ecs_tick)
+        self.world.cpu_usages.insert(e, CpuUsage(ticks_consumed: 0),           ecs_tick)
+        self.world.nices.insert(e,      Nice(value: clamped_nice),              ecs_tick)
+        self.world.classes.insert(e,    SchedClass(kind: sched_kind),           ecs_tick)
+        e
 
     me sched_unregister_task(task: u32) -> bool:
         """Mark a task as inactive (removed from policy). Returns true if found."""
-        var found = false
-        var updated: [TaskEntry] = []
-        for entry in self.world.tasks:
-            if entry.task_id.value == task and entry.active:
-                found = true
-                val removed = TaskEntry(
-                    entity: entry.entity,
-                    task_id: entry.task_id,
-                    priority: entry.priority,
-                    cpu_usage: entry.cpu_usage,
-                    nice: entry.nice,
-                    sched_class: entry.sched_class,
-                    active: false
-                )
-                updated = updated.push(removed)
-            else:
-                updated = updated.push(entry)
-        self.world = SchedWorld(tasks: updated, next_id: self.world.next_id)
-        found
+        val e = find_entity_for_task(self.world, task)
+        if e.id == 0:
+            return false
+        if not self.world.task_ids.contains(e):
+            return false
+        self.world.task_ids.remove(e)
+        self.world.priorities.remove(e)
+        self.world.cpu_usages.remove(e)
+        self.world.nices.remove(e)
+        self.world.classes.remove(e)
+        self.world.base.despawn(e)
+        true
 
     me sched_record_usage(task: u32, ticks: u64) -> bool:
         """Add ticks to a task's CpuUsage component. Returns true if task found."""
-        var found = false
-        var updated: [TaskEntry] = []
-        for entry in self.world.tasks:
-            if entry.task_id.value == task and entry.active:
-                found = true
-                val new_usage = CpuUsage(ticks_consumed: entry.cpu_usage.ticks_consumed + ticks)
-                val updated_entry = TaskEntry(
-                    entity: entry.entity,
-                    task_id: entry.task_id,
-                    priority: entry.priority,
-                    cpu_usage: new_usage,
-                    nice: entry.nice,
-                    sched_class: entry.sched_class,
-                    active: true
-                )
-                updated = updated.push(updated_entry)
-            else:
-                updated = updated.push(entry)
-        self.world = SchedWorld(tasks: updated, next_id: self.world.next_id)
-        found
+        val e = find_entity_for_task(self.world, task)
+        if e.id == 0:
+            return false
+        val slot = self.world.cpu_usages.get_slot(e)
+        if slot < 0:
+            return false
+        val cur = self.world.cpu_usages.dense[slot].ticks_consumed
+        self.world.cpu_usages.insert(e, CpuUsage(ticks_consumed: cur + ticks), self.world.base.now())
+        true
 
     fn sched_recommend_priority(task: u32) -> i32:
         """Return the current Priority.level for a task. Returns -1 if not found."""
-        for entry in self.world.tasks:
-            if entry.task_id.value == task and entry.active:
-                return entry.priority.level
-        -1
+        val e = find_entity_for_task(self.world, task)
+        if e.id == 0:
+            return -1
+        val slot = self.world.priorities.get_slot(e)
+        if slot < 0:
+            return -1
+        self.world.priorities.dense[slot].level
 
     me sched_set_nice(task: u32, nice: i32) -> bool:
         """Update a task's Nice component. Clamps to [-20, 19]. Returns true if found."""
         val clamped = if nice < NICE_MIN: NICE_MIN else: if nice > NICE_MAX: NICE_MAX else: nice
-        var found = false
-        var updated: [TaskEntry] = []
-        for entry in self.world.tasks:
-            if entry.task_id.value == task and entry.active:
-                found = true
-                val nicened = TaskEntry(
-                    entity: entry.entity,
-                    task_id: entry.task_id,
-                    priority: entry.priority,
-                    cpu_usage: entry.cpu_usage,
-                    nice: Nice(value: clamped),
-                    sched_class: entry.sched_class,
-                    active: true
-                )
-                updated = updated.push(nicened)
-            else:
-                updated = updated.push(entry)
-        self.world = SchedWorld(tasks: updated, next_id: self.world.next_id)
-        found
+        val e = find_entity_for_task(self.world, task)
+        if e.id == 0:
+            return false
+        if not self.world.nices.contains(e):
+            return false
+        self.world.nices.insert(e, Nice(value: clamped), self.world.base.now())
+        true
 
     me sched_tick() -> u64:
         """Run policy systems once, advance policy_tick, return it."""
-        self.world = sys_demote_runaway_drivers(self.world)
-        self.world = sys_age_priorities(self.world)
+        self.world.base.advance()
+        sys_demote_runaway_drivers(self.world)
+        sys_age_priorities(self.world)
         self.policy_tick = self.policy_tick + 1
         self.started = true
         self.policy_tick
