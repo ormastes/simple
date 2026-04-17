@@ -1,0 +1,192 @@
+#![allow(unnamed_duplicate_typed_args)]
+# Init Service — dependency-aware userspace service manager
+#
+# Provides a minimal service manager that can register service definitions,
+# resolve dependency order, and launch services through an injected binary
+# launcher. This gives SimpleOS a service-level supervision surface that sits
+# above the driver-specific supervisor.
+
+use os.userlib.process.{spawn_binary}
+
+enum RestartPolicy:
+    Never
+    OnFailure
+    Always
+
+enum ServiceState:
+    Stopped
+    Starting
+    Running(pid: u64)
+    Failed(reason: text)
+
+struct ServiceDef:
+    name: text
+    binary: text
+    dependencies: [text]
+    capabilities: [text]
+    restart: RestartPolicy
+    priority: text
+
+struct ServiceInstance:
+    definition: ServiceDef
+    state: ServiceState
+    restart_count: i32
+
+fn _default_launcher(binary: text, priority: u8) -> Result<u64, text>:
+    spawn_binary(binary, priority)
+
+fn _priority_to_u8(priority: text) -> u8:
+    match priority:
+        case "realtime":
+            0
+        case "high":
+            1
+        case "normal":
+            2
+        case "low":
+            3
+        case "idle":
+            4
+        case _:
+            2
+
+fn _is_running(state: ServiceState) -> bool:
+    match state:
+        case ServiceState.Running(_):
+            true
+        case _:
+            false
+
+class InitService:
+    services: [ServiceInstance]
+    boot_complete: bool
+    launcher: fn(text, u8) -> Result<u64, text>
+
+impl InitService:
+    static fn new() -> InitService:
+        InitService(services: [], boot_complete: false, launcher: _default_launcher)
+
+    static fn with_launcher(launcher: fn(text, u8) -> Result<u64, text>) -> InitService:
+        InitService(services: [], boot_complete: false, launcher: launcher)
+
+    me register(def_: ServiceDef):
+        self.services = self.services.push(ServiceInstance(
+            definition: def_,
+            state: ServiceState.Stopped,
+            restart_count: 0
+        ))
+
+    me resolve_start_order() -> [text]:
+        var remaining: [text] = []
+        for svc in self.services:
+            remaining = remaining.push(svc.definition.name)
+
+        var resolved: [text] = []
+        var guard = 0
+        while remaining.len() > 0 and guard < 128:
+            var next_remaining: [text] = []
+            var progressed = false
+            for name in remaining:
+                val idx = self._find_service_index(name)
+                if idx < 0:
+                    next_remaining = next_remaining.push(name)
+                    continue
+                val deps = self.services[idx].definition.dependencies
+                if self._deps_in_order(deps, resolved):
+                    resolved = resolved.push(name)
+                    progressed = true
+                else:
+                    next_remaining = next_remaining.push(name)
+            if not progressed:
+                return resolved + next_remaining
+            remaining = next_remaining
+            guard = guard + 1
+        resolved
+
+    me check_deps(deps: [text]) -> bool:
+        for dep in deps:
+            val idx = self._find_service_index(dep)
+            if idx < 0:
+                return false
+            if not _is_running(self.services[idx].state):
+                return false
+        true
+
+    me start_service(name: text):
+        val idx = self._find_service_index(name)
+        if idx < 0:
+            return
+        val svc = self.services[idx]
+        if not self.check_deps(svc.definition.dependencies):
+            return
+        self.services[idx].state = ServiceState.Starting
+        val priority = _priority_to_u8(svc.definition.priority)
+        val launch_result = self.launcher(svc.definition.binary, priority)
+        match launch_result:
+            case Ok(pid):
+                self.services[idx].state = ServiceState.Running(pid: pid)
+            case Err(msg):
+                self.services[idx].state = ServiceState.Failed(reason: msg)
+
+    fn _find_service_index(name: text) -> i64:
+        var i = 0
+        while i < self.services.len():
+            if self.services[i].definition.name == name:
+                return i
+            i = i + 1
+        -1
+
+    fn _deps_in_order(deps: [text], resolved: [text]) -> bool:
+        for dep in deps:
+            var found = false
+            for ready in resolved:
+                if dep == ready:
+                    found = true
+                    break
+            if not found:
+                return false
+        true
+
+fn default_services() -> [ServiceDef]:
+    [
+        ServiceDef(
+            name: "vfs",
+            binary: "/sys/services/vfs",
+            dependencies: [],
+            capabilities: ["FileRead(/)", "FileWrite(/)"],
+            restart: RestartPolicy.Always,
+            priority: "high"
+        ),
+        ServiceDef(
+            name: "net",
+            binary: "/sys/services/net",
+            dependencies: [],
+            capabilities: ["NetAdmin", "NetRaw"],
+            restart: RestartPolicy.Always,
+            priority: "high"
+        ),
+        ServiceDef(
+            name: "compositor",
+            binary: "/sys/services/compositor",
+            dependencies: ["vfs"],
+            capabilities: ["Display", "Input"],
+            restart: RestartPolicy.Always,
+            priority: "high"
+        ),
+        ServiceDef(
+            name: "desktop",
+            binary: "/sys/apps/desktop",
+            dependencies: ["compositor", "vfs"],
+            capabilities: ["WindowManage", "FileRead(/home)"],
+            restart: RestartPolicy.OnFailure,
+            priority: "normal"
+        ),
+        ServiceDef(
+            name: "llm_mcp",
+            binary: "/sys/services/llm_mcp",
+            dependencies: ["compositor", "vfs", "net"],
+            capabilities: ["NetClient", "UiAccess", "FileRead(/)"],
+            restart: RestartPolicy.OnFailure,
+            priority: "normal"
+        )
+    ]

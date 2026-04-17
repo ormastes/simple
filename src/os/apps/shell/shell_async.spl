@@ -11,9 +11,10 @@ use os.async.os_executor.{OsExecutor}
 use os.async.os_future.{OsFuture}
 use os.async.os_poll.{OsPoll}
 use os.async.os_waker.{OsWaker}
-use os.posix.process_compat.{posix_spawn_with_args, posix_waitpid, WNOHANG}
+use os.posix.process_compat.{posix_waitpid, WNOHANG}
 use os.posix.fd_io.{posix_open, posix_read, posix_close}
 use os.posix.fd_table.{O_RDONLY}
+use os.services.launcher.launcher.{launcher_launch_path_with_args, launcher_resolve_command_path}
 use os.services.vfs.vfs_async.{AsyncFilesystem}
 
 extern fn unsafe_addr_of(ref: any) -> u64
@@ -83,27 +84,32 @@ impl CommandFuture:
 # Spawn Helpers
 # ============================================================================
 
-fn spawn_command_async(path: text, args: [text]) -> Result<CommandFuture, text>:
+fn spawn_command_async(path: text, args: [text], cwd: text, path_env: text) -> Result<CommandFuture, text>:
     """Spawn an external command and return a future for its completion.
 
-    Uses posix_spawn_with_args to create a child process at Normal
-    priority (2). Returns a CommandFuture that can be polled or
-    submitted to an OsExecutor.
+    Resolves the command using the shared launcher path so shell
+    execution uses the same binary lookup rules as desktop launch.
     """
-    val pid = posix_spawn_with_args(path, args, 2)
+    val resolved = launcher_resolve_command_path(path, cwd, path_env)
+    if resolved == "":
+        return Err("Failed to resolve: {path}")
+    val pid = launcher_launch_path_with_args(resolved, args)
     if pid < 0:
-        return Err("Failed to spawn: {path}")
+        return Err("Failed to spawn: {resolved}")
     Ok(CommandFuture.new(pid as u64))
 
-fn spawn_command_bg(path: text, args: [text]) -> Result<u64, text>:
+fn spawn_command_bg(path: text, args: [text], cwd: text, path_env: text) -> Result<u64, text>:
     """Spawn an external command in the background. Returns PID.
 
     The caller is responsible for tracking the PID (e.g., in a JobTable)
     and eventually calling waitpid to reap the child.
     """
-    val pid = posix_spawn_with_args(path, args, 2)
+    val resolved = launcher_resolve_command_path(path, cwd, path_env)
+    if resolved == "":
+        return Err("Failed to resolve: {path}")
+    val pid = launcher_launch_path_with_args(resolved, args)
     if pid < 0:
-        return Err("Failed to spawn: {path}")
+        return Err("Failed to spawn: {resolved}")
     Ok(pid as u64)
 
 # ============================================================================

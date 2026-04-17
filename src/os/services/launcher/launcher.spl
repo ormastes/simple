@@ -21,11 +21,12 @@
 #   23 (IpcSend)       — send IPC reply
 
 use os.userlib.syscall_raw.{syscall}
-use os.posix.process_compat.{posix_spawn, posix_kill}
+use os.posix.process_compat.{posix_spawn_with_args, posix_kill}
 use os.userlib.process.{spawn, get_task_info}
 
 extern fn serial_println(msg: text)
 extern fn rt_fat32_read_file_text(name: text) -> text
+extern fn rt_file_exists(path: text) -> bool
 
 # ============================================================================
 # IPC Method IDs
@@ -162,6 +163,152 @@ fn _app_index_by_name(name: text) -> i64:
             return i.to_i64()
         i = i + 1
     -1
+
+fn _app_index_by_path(path: text) -> i64:
+    var i: u64 = 0
+    while i < app_count:
+        if app_path[i] == path:
+            return i.to_i64()
+        i = i + 1
+    -1
+
+fn _path_basename(path: text) -> text:
+    val last_slash = path.last_index_of("/")
+    match last_slash:
+        case Some(idx):
+            if idx + 1 >= path.len():
+                return ""
+            path.slice(idx + 1, path.len())
+        case _:
+            path
+
+fn _resolve_against_cwd(path: text, cwd: text) -> text:
+    if path == "":
+        return ""
+    if path.starts_with("/"):
+        return path
+    if cwd == "" or cwd == "/":
+        return "/{path}"
+    "{cwd}/{path}"
+
+fn _record_detached_process(pid: u64, path: text):
+    var existing = _process_index_by_pid(pid)
+    val name = _path_basename(path)
+    if existing >= 0:
+        val slot = existing.to_u64()
+        process_app_index[slot] = -1
+        process_name[slot] = name
+        process_path[slot] = path
+        process_icon[slot] = ""
+        process_state[slot] = "running"
+        process_exit_code[slot] = 0
+        process_window_count[slot] = 0
+        process_is_headless[slot] = true
+        process_active[slot] = true
+        return
+    if process_count >= MAX_PROCESSES:
+        serial_println("[launcher] Process registry full ({MAX_PROCESSES} slots)")
+        return
+    process_pid[process_count] = pid
+    process_app_index[process_count] = -1
+    process_name[process_count] = name
+    process_path[process_count] = path
+    process_icon[process_count] = ""
+    process_state[process_count] = "running"
+    process_exit_code[process_count] = 0
+    process_window_count[process_count] = 0
+    process_is_headless[process_count] = true
+    process_launch_seq[process_count] = process_sequence
+    process_active[process_count] = true
+    process_sequence = process_sequence + 1
+    process_count = process_count + 1
+
+fn _looks_like_executable_path(path: text) -> bool:
+    if path == "":
+        return false
+    if path.starts_with("/sys/apps/"):
+        return true
+    if path.starts_with("/bin/") or path.starts_with("/usr/bin/") or path.starts_with("/usr/local/bin/"):
+        return true
+    if path.ends_with(".elf") or path.ends_with(".bin") or path.ends_with(".app"):
+        return true
+    false
+
+fn launcher_associated_app_for_path(path: text) -> text:
+    """Return the default GUI app path for a regular file, or empty when none."""
+    if path.ends_with(".txt") or path.ends_with(".md") or path.ends_with(".log") or path.ends_with(".sdn") or path.ends_with(".spl"):
+        return "/sys/apps/editor"
+    if path.ends_with(".png") or path.ends_with(".jpg") or path.ends_with(".jpeg") or path.ends_with(".bmp") or path.ends_with(".gif") or path.ends_with(".ppm"):
+        return "/sys/apps/image_viewer"
+    ""
+
+fn launcher_resolve_command_path(command: text, cwd: text, path_env: text) -> text:
+    """Resolve a command name or relative path into a filesystem path."""
+    if command == "":
+        return ""
+    if command.contains("/"):
+        val direct = _resolve_against_cwd(command, cwd)
+        if rt_file_exists(direct):
+            return direct
+        return ""
+    val path_parts = path_env.split(":")
+    var i: u64 = 0
+    while i < path_parts.len().to_u64():
+        val dir = path_parts[i as i64].trim()
+        if dir != "":
+            val candidate = if dir == "/": "/{command}" else: "{dir}/{command}"
+            if rt_file_exists(candidate):
+                return candidate
+        i = i + 1
+    val sys_app = "/sys/apps/{command}"
+    if rt_file_exists(sys_app):
+        return sys_app
+    ""
+
+fn launcher_launch_path_with_args(path: text, args: [text]) -> i64:
+    """Launch a binary by canonical filesystem path and track it in the registry."""
+    if path == "":
+        return -1
+    val app_index = _app_index_by_path(path)
+    if app_index >= 0:
+        val slot = app_index.to_u64()
+        val name = app_name[slot]
+        if _manifest_present_for_path(path):
+            return _try_resident_manifest_launch(slot, name, path, -38)
+        val pid_result = posix_spawn_with_args(path, args, APP_PRIORITY)
+        if pid_result < 0:
+            val resident_pid = _try_resident_manifest_launch(slot, name, path, pid_result)
+            if resident_pid >= 0:
+                return resident_pid
+            app_launch_state[slot] = "failed"
+            app_exit_code[slot] = pid_result.to_i32()
+            serial_println("[launcher] Failed to launch {name}: {pid_result}")
+            return pid_result
+        return _finalize_launch(slot, name, pid_result.to_u64(), path)
+
+    val pid_result = posix_spawn_with_args(path, args, APP_PRIORITY)
+    if pid_result < 0:
+        serial_println("[launcher] Failed to launch path={path}: {pid_result}")
+        return pid_result
+    _record_detached_process(pid_result.to_u64(), path)
+    serial_println("[launcher] Started detached path={path} pid={pid_result}")
+    pid_result
+
+fn launcher_open_path(path: text, cwd: text) -> i64:
+    """Open a filesystem path via the shared launcher path.
+
+    Executables launch directly. Non-executable files use the default
+    app association table when one exists.
+    """
+    val resolved = _resolve_against_cwd(path, cwd)
+    if resolved == "":
+        return -1
+    if _looks_like_executable_path(resolved):
+        return launcher_launch_path_with_args(resolved, [])
+    val associated_app = launcher_associated_app_for_path(resolved)
+    if associated_app == "":
+        return -1
+    launcher_launch_path_with_args(associated_app, [resolved])
 
 fn _app_index_by_pid(pid: u64) -> i64:
     var i: u64 = 0
@@ -465,18 +612,7 @@ fn launcher_launch(name: text) -> i64:
     serial_println("[launcher] Launching: {name}")
     val slot = idx.to_u64()
     val path = app_path[slot]
-    if _manifest_present_for_path(path):
-        return _try_resident_manifest_launch(slot, name, path, -38)
-    val pid_result = posix_spawn(path, APP_PRIORITY)
-    if pid_result < 0:
-        val resident_pid = _try_resident_manifest_launch(slot, name, path, pid_result)
-        if resident_pid >= 0:
-            return resident_pid
-        app_launch_state[slot] = "failed"
-        app_exit_code[slot] = pid_result.to_i32()
-        serial_println("[launcher] Failed to launch {name}: {pid_result}")
-        return pid_result
-    _finalize_launch(slot, name, pid_result.to_u64(), path)
+    launcher_launch_path_with_args(path, [])
 
 fn launcher_launch_by_index(idx: u64) -> i64:
     """Launch an app by registry index. Returns PID or -1."""

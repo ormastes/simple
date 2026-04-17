@@ -21,6 +21,16 @@ Remaining coordinated work:
 - Review `src/compiler/90.tools/api_surface.spl`, `src/compiler/90.tools/symbol_analyzer.spl`, and ranking/filtering helpers so scoped visibilities stop being reduced to `is_public`.
 - Add executable end-to-end coverage for the Rust-side scoped parser tests currently placed under `src/compiler_rust/test/`; that crate is not a workspace member yet, so those tests are not reachable from the normal Cargo workspace runs.
 
+Implementation notes for the remaining bridge:
+- The current Rust export pattern already supports string/JSON-returning compiler helpers in `src/compiler_rust/compiler/src/ffi_bridge.rs` via `RuntimeValue` string conversion helpers. Existing examples: `rt_parse_simple_file`, `rt_api_surface_extract`, `rt_symbol_usage_find`.
+- A JSON-only shortcut is not sufficient for the declared `compiler_query` ABI. The current Simple-side contract expects typed `AST`, `SymbolTable`, `Scope`, `Symbol`, and `TypeError` values, not just ad hoc JSON strings.
+- If an interim bridge is desired, it should be introduced as an explicit alternate JSON query surface rather than pretending to satisfy `rt_parse_source` / `rt_build_symbol_table` / `rt_find_symbol_at_position` with incompatible payloads.
+- Recommended implementation order:
+  1. Add real Rust exports for query primitives in `src/compiler_rust/compiler/src/ffi_bridge.rs` or a dedicated compiler-query bridge module.
+  2. Decide whether `AST` / `SymbolTable` stay opaque-handle based or whether the ABI is redesigned around serialized query responses.
+  3. Wire the chosen ABI through `src/compiler/90.tools/ffi_gen/specs/compiler_query.spl` and generated/app.io bindings.
+  4. Replace compatibility-upgrade paths in `src/compiler/90.tools/query_helpers.spl` with true v2-backed exports.
+
 Acceptance for the ABI slice:
 - Hover/completion/document-symbol/workspace-symbol surfaces can distinguish `public`, `peer`, `up`, `internal`, `package`, and `private`.
 - No Rust/FFI caller depends on `is_public` as the sole visibility signal.

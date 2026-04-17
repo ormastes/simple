@@ -53,7 +53,7 @@ fn schema_simple_diagnostics() -> text:
 fn schema_simple_symbols() -> text:
     val path_prop = jo2(jp("type", js("string")), jp("description", js("Path to .spl file")))
     val props = jo1(jp("path", path_prop))
-    make_tool_schema_multi("simple_symbols", "List symbols (functions, classes, structs, enums) in a Simple source file with line numbers", props, "[" + js("path") + "]", true, false, true)
+    make_tool_schema_multi("simple_symbols", "List symbols in a Simple source file with structured visibility metadata", props, "[" + js("path") + "]", true, false, true)
 
 fn schema_simple_status() -> text:
     val dir_prop = jo2(jp("type", js("string")), jp("description", js("Directory to scan (default: src/)")))
@@ -201,77 +201,11 @@ fn handle_simple_symbols(id: text, body: text) -> text:
     val path = extract_arg(body, "path")
     if path == "":
         return make_error_response(id, -32602, "Missing required parameter: path")
-
-    val content = file_read(path)
-    if content == "":
-        return make_error_response(id, -32602, "Could not read file: " + path)
-
-    val lines = content.split(NL)
-    var symbols = "["
-    var first = true
-    var line_num = 0
-
-    for line in lines:
-        line_num = line_num + 1
-        val trimmed = line.trim()
-
-        var kind = ""
-        var name = ""
-        var signature = ""
-
-        # Functions
-        if trimmed.starts_with("fn "):
-            kind = "function"
-            val fn_rest = trimmed.substring(3)
-            name = extract_symbol_name(fn_rest)
-            signature = extract_signature(trimmed)
-        elif trimmed.starts_with("me "):
-            kind = "method"
-            val me_rest = trimmed.substring(3)
-            name = extract_symbol_name(me_rest)
-            signature = extract_signature(trimmed)
-        elif trimmed.starts_with("static fn "):
-            kind = "static_method"
-            val sf_rest = trimmed.substring(10)
-            name = extract_symbol_name(sf_rest)
-            signature = extract_signature(trimmed)
-        # Classes and structs
-        elif trimmed.starts_with("class "):
-            kind = "class"
-            val c_rest = trimmed.substring(6)
-            name = extract_symbol_name(c_rest)
-            signature = trimmed
-        elif trimmed.starts_with("struct "):
-            kind = "struct"
-            val s_rest = trimmed.substring(7)
-            name = extract_symbol_name(s_rest)
-            signature = trimmed
-        # Enums
-        elif trimmed.starts_with("enum "):
-            kind = "enum"
-            val e_rest = trimmed.substring(5)
-            name = extract_symbol_name(e_rest)
-            signature = trimmed
-        # Exports
-        elif trimmed.starts_with("export "):
-            kind = "export"
-            name = trimmed.substring(7)
-            signature = trimmed
-
-        if kind != "" and name != "":
-            if not first:
-                symbols = symbols + ","
-            first = false
-            var sym_obj = LB()
-            sym_obj = sym_obj + jp("name", js(escape_json(name)))
-            sym_obj = sym_obj + "," + jp("kind", js(kind))
-            sym_obj = sym_obj + "," + jp("line", line_num.to_string())
-            sym_obj = sym_obj + "," + jp("signature", js(escape_json(signature)))
-            sym_obj = sym_obj + RB()
-            symbols = symbols + sym_obj
-
-    symbols = symbols + "]"
-    make_tool_result(id, symbols)
+    val result = shell("timeout 30 " + cwd() + "/bin/simple run src/app/cli/query_visibility.spl symbols " + path + " --requester " + path)
+    val out = result.stdout ?? ""
+    if result.exit_code != 0:
+        return make_error_response(id, -32602, "Could not list symbols for: " + path)
+    make_tool_result(id, out)
 
 fn handle_simple_status(id: text, body: text) -> text:
     val paths_str = extract_arg(body, "paths")
@@ -403,4 +337,3 @@ fn extract_signature(line: text) -> text:
 # ============================================================================
 # Exports
 # ============================================================================
-

@@ -13,7 +13,7 @@ use os.apps.terminal.terminal.{Terminal}
 use os.kernel.types.fs_types.{DirEntry, FsNode, FsNodeKind}
 use os.services.vfs.vfs.{VfsManager}
 use os.services.vfs.vfs_async.{AsyncFilesystem}
-use os.tools.tool_registry.{ToolRegistry, ToolEntry}
+use os.tools.tool_registry.{ToolRegistry}
 use os.userlib.process.{ProcessEntry, list_tasks, signal, kill, exit_}
 use os.userlib.fs.{mount, unmount, mount_list}
 use os.userlib.window.{WindowClient}
@@ -235,8 +235,11 @@ impl ShellApp:
                 restore_redirects(saved_fds)
             return
 
-        # Dispatch built-in commands
-        self._dispatch_builtin(command, args)
+        # Built-ins stay in-process; everything else routes through launcher.
+        if self._is_builtin_command(command):
+            self._dispatch_builtin(command, args)
+        else:
+            self._try_external(command, args)
 
         # Restore file redirections
         if saved_fds.len() > 0:
@@ -312,37 +315,89 @@ impl ShellApp:
             "git":      self.cmd_git(args)
             "jj":       self.cmd_jj(args)
             _:
-                # Try tool registry for external commands
-                if self.tool_registry != nil:
-                    val tool = self.tool_registry.lookup(command)
-                    if tool != nil:
-                        self.last_exit_code = tool.run_fn(args)
-                        return
-                # Try spawning as external command
-                self._try_external(command, args)
+                self.last_exit_code = 127
+
+    fn _is_builtin_command(command: text) -> bool:
+        """Return true when the shell should handle the command in-process."""
+        match command:
+            "cd": true
+            "ls": true
+            "pwd": true
+            "echo": true
+            "cat": true
+            "mkdir": true
+            "rm": true
+            "cp": true
+            "mv": true
+            "grep": true
+            "find": true
+            "ps": true
+            "kill": true
+            "mount": true
+            "clear": true
+            "help": true
+            "exit": true
+            "env": true
+            "export": true
+            "history": true
+            "hostname": true
+            "uptime": true
+            "dmesg": true
+            "jobs": true
+            "fg": true
+            "bg": true
+            "readf": true
+            "touch": true
+            "head": true
+            "tail": true
+            "wc": true
+            "sort": true
+            "uniq": true
+            "which": true
+            "date": true
+            "true": true
+            "false": true
+            "tee": true
+            "ln": true
+            "chmod": true
+            "stat": true
+            "cut": true
+            "tr": true
+            "sed": true
+            "basename": true
+            "dirname": true
+            "sleep": true
+            "seq": true
+            "expr": true
+            "test": true
+            "[": true
+            "xargs": true
+            "yes": true
+            "printenv": true
+            "readlink": true
+            "mktemp": true
+            "diff": true
+            "patch": true
+            "file": true
+            "strings": true
+            "hexdump": true
+            "base64": true
+            "md5sum": true
+            "sha256sum": true
+            "git": true
+            "jj": true
+            _: false
 
     me _execute_background(command: text, args: [text]):
         """Execute a command in the background. Adds to job table."""
-        # Check built-ins first — they cannot be backgrounded
-        val builtins = ["cd", "ls", "pwd", "echo", "cat", "mkdir", "rm", "cp",
-            "mv", "grep", "find", "ps", "kill", "mount", "clear", "help",
-            "exit", "env", "export", "history", "hostname", "uptime", "dmesg",
-            "jobs", "fg", "bg", "readf", "touch", "head", "tail", "wc",
-            "sort", "uniq", "which", "date", "true", "false", "tee", "ln",
-            "chmod", "stat", "cut", "tr", "sed", "basename", "dirname",
-            "sleep", "seq", "expr", "test", "[", "xargs", "yes", "printenv",
-            "readlink", "mktemp", "diff", "patch", "file", "strings",
-            "hexdump", "base64", "md5sum", "sha256sum", "git", "jj"]
-        var i = 0
-        while i < builtins.len():
-            if command == builtins[i]:
-                self._write_error("sosh: cannot background built-in: {command}")
-                self.last_exit_code = 1
-                return
-            i = i + 1
+        # Built-ins cannot be backgrounded because they mutate shell state.
+        if self._is_builtin_command(command):
+            self._write_error("sosh: cannot background built-in: {command}")
+            self.last_exit_code = 1
+            return
 
         # Spawn in background
-        val result = spawn_command_bg(command, args)
+        val result = spawn_command_bg(command, args, self.cwd, self._get_env("PATH"))
         match result:
             Ok(pid):
                 val job_id = self.jobs.add(pid, "{command}", 0)
@@ -354,7 +409,7 @@ impl ShellApp:
 
     me _try_external(command: text, args: [text]):
         """Try to run an external command synchronously."""
-        val result = spawn_command_async(command, args)
+        val result = spawn_command_async(command, args, self.cwd, self._get_env("PATH"))
         match result:
             Ok(future):
                 # Block until command completes
