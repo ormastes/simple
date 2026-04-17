@@ -23,9 +23,7 @@ pub extern "C" fn rt_fonts_init(path_ptr: i64, path_len: i64) -> i64 {
     if path_ptr == 0 || path_len <= 0 {
         return 0;
     }
-    let slice = unsafe {
-        std::slice::from_raw_parts(path_ptr as *const u8, path_len as usize)
-    };
+    let slice = unsafe { std::slice::from_raw_parts(path_ptr as *const u8, path_len as usize) };
     let path = match std::str::from_utf8(slice) {
         Ok(s) => s,
         Err(_) => return 0,

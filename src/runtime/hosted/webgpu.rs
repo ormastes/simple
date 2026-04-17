@@ -163,16 +163,15 @@ mod imp {
             gles_minor_version: wgpu::Gles3MinorVersion::Automatic,
         });
 
-        let adapter = match pollster::block_on(instance.request_adapter(
-            &wgpu::RequestAdapterOptions {
+        let adapter =
+            match pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
                 power_preference: wgpu::PowerPreference::default(),
                 force_fallback_adapter: false,
                 compatible_surface: None,
-            },
-        )) {
-            Some(a) => a,
-            None => return None,
-        };
+            })) {
+                Some(a) => a,
+                None => return None,
+            };
 
         let (device, queue) = match pollster::block_on(adapter.request_device(
             &wgpu::DeviceDescriptor {
@@ -317,9 +316,7 @@ mod imp {
         }
         // SAFETY: caller promises `pixels` points to `pixel_count` valid
         // `u32`s for the duration of this call. We only read.
-        let bytes: &[u8] = unsafe {
-            std::slice::from_raw_parts(pixels as *const u8, need * 4)
-        };
+        let bytes: &[u8] = unsafe { std::slice::from_raw_parts(pixels as *const u8, need * 4) };
         s.queue.write_texture(
             wgpu::ImageCopyTexture {
                 texture: &surf.texture,
@@ -359,9 +356,11 @@ mod imp {
         // Copy the texture into the staging buffer. Downstream code can
         // map_async the staging buffer if it wants to verify pixels — we
         // don't force a readback here (keeps present() cheap).
-        let mut encoder = s.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("spl_webgpu_present_encoder"),
-        });
+        let mut encoder = s
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("spl_webgpu_present_encoder"),
+            });
         encoder.copy_texture_to_buffer(
             wgpu::ImageCopyTexture {
                 texture: &surf.texture,
@@ -467,13 +466,7 @@ mod tests {
         // Null / zero-sized: the stub returns false, the real path also
         // short-circuits before touching wgpu. Either way, no UB.
         unsafe {
-            assert!(!rt_webgpu_upload_pixels(
-                1,
-                std::ptr::null(),
-                0,
-                0,
-                0,
-            ));
+            assert!(!rt_webgpu_upload_pixels(1, std::ptr::null(), 0, 0, 0,));
         }
     }
 }

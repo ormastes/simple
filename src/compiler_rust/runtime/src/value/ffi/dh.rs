@@ -49,7 +49,13 @@ pub extern "C" fn rt_dh_curve25519_keypair() -> i64 {
     arr.copy_from_slice(pub_bytes);
 
     let handle = DH_COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-    DH_MAP.lock().unwrap().insert(handle, Keypair { private_key, public_key_bytes: arr });
+    DH_MAP.lock().unwrap().insert(
+        handle,
+        Keypair {
+            private_key,
+            public_key_bytes: arr,
+        },
+    );
     handle
 }
 

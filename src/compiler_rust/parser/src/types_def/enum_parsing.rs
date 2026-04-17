@@ -122,7 +122,7 @@ impl<'a> Parser<'a> {
                 || self.check(&TokenKind::Async)
                 || self.check(&TokenKind::At)
                 || self.check(&TokenKind::Hash)
-                || (self.check(&TokenKind::Pub) && (self.peek_is(&TokenKind::Fn) || self.peek_is(&TokenKind::Async)))
+                || self.peek_visibility_target_is(&[TokenKind::Fn, TokenKind::Async])
             {
                 // Parse method
                 let item = self.parse_item()?;

@@ -566,12 +566,12 @@ impl<'a> Parser<'a> {
             return self.parse_impl_with_attrs(impl_attributes);
         }
 
-        // Handle optional `pub` keyword before function
-        let _is_pub = if self.check(&TokenKind::Pub) {
+        // Handle optional `pub(...)` visibility before decorated functions/items.
+        let visibility = if self.check(&TokenKind::Pub) {
             self.advance();
-            true
+            self.parse_visibility_modifier_after_pub()?
         } else {
-            false
+            Visibility::Private
         };
 
         // Decorators can apply to extern, class, struct, enum etc. not just functions
@@ -653,9 +653,10 @@ impl<'a> Parser<'a> {
         // Now parse the function with the collected decorators and effects
         let mut node = self.parse_function_with_decorators(decorators)?;
 
-        // Set the effects on the function
+        // Preserve both effect annotations and declared visibility.
         if let Node::Function(ref mut f) = node {
             f.effects = effects;
+            f.visibility = visibility;
         }
 
         Ok(node)

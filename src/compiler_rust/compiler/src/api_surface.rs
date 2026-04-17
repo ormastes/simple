@@ -29,6 +29,8 @@ pub struct ApiSurface {
 pub struct FunctionSignature {
     /// Function name
     pub name: String,
+    /// Declared visibility keyword
+    pub visibility: String,
     /// Parameter types
     pub params: Vec<ParamSignature>,
     /// Return type
@@ -50,6 +52,7 @@ pub struct ParamSignature {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StructSignature {
     pub name: String,
+    pub visibility: String,
     pub fields: Vec<FieldSignature>,
 }
 
@@ -58,6 +61,7 @@ pub struct StructSignature {
 pub struct FieldSignature {
     pub name: String,
     pub type_name: Option<String>,
+    pub visibility: String,
     pub is_public: bool,
 }
 
@@ -65,6 +69,7 @@ pub struct FieldSignature {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ClassSignature {
     pub name: String,
+    pub visibility: String,
     pub fields: Vec<FieldSignature>,
     pub methods: Vec<String>,
 }
@@ -73,6 +78,7 @@ pub struct ClassSignature {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EnumSignature {
     pub name: String,
+    pub visibility: String,
     pub variants: Vec<String>,
 }
 
@@ -80,6 +86,7 @@ pub struct EnumSignature {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TraitSignature {
     pub name: String,
+    pub visibility: String,
     pub methods: Vec<String>,
 }
 
@@ -131,6 +138,7 @@ impl ApiSurface {
 
         let sig = FunctionSignature {
             name: func.name.clone(),
+            visibility: func.visibility.as_keyword().to_string(),
             params: func
                 .params
                 .iter()
@@ -149,12 +157,14 @@ impl ApiSurface {
     fn add_struct(&mut self, s: &StructDef) {
         let sig = StructSignature {
             name: s.name.clone(),
+            visibility: s.visibility.as_keyword().to_string(),
             fields: s
                 .fields
                 .iter()
                 .map(|f| FieldSignature {
                     name: f.name.clone(),
                     type_name: Some(type_to_string(&f.ty)),
+                    visibility: f.visibility.as_keyword().to_string(),
                     is_public: f.visibility.is_public(),
                 })
                 .collect(),
@@ -165,12 +175,14 @@ impl ApiSurface {
     fn add_class(&mut self, c: &ClassDef) {
         let sig = ClassSignature {
             name: c.name.clone(),
+            visibility: c.visibility.as_keyword().to_string(),
             fields: c
                 .fields
                 .iter()
                 .map(|f| FieldSignature {
                     name: f.name.clone(),
                     type_name: Some(type_to_string(&f.ty)),
+                    visibility: f.visibility.as_keyword().to_string(),
                     is_public: f.visibility.is_public(),
                 })
                 .collect(),
@@ -182,6 +194,7 @@ impl ApiSurface {
     fn add_enum(&mut self, e: &EnumDef) {
         let sig = EnumSignature {
             name: e.name.clone(),
+            visibility: e.visibility.as_keyword().to_string(),
             variants: e.variants.iter().map(|v| v.name.clone()).collect(),
         };
         self.enums.insert(e.name.clone(), sig);
@@ -190,6 +203,7 @@ impl ApiSurface {
     fn add_trait(&mut self, t: &TraitDef) {
         let sig = TraitSignature {
             name: t.name.clone(),
+            visibility: t.visibility.as_keyword().to_string(),
             methods: t.methods.iter().map(|m| m.name.clone()).collect(),
         };
         self.traits.insert(t.name.clone(), sig);

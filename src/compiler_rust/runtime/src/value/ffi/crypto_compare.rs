@@ -18,12 +18,13 @@ fn runtime_text_ptr_len(v: RuntimeValue) -> Option<(i64, i64)> {
 /// Returns 1 if equal, 0 if not equal or on error.
 /// Uses XOR accumulator — no early exit, always processes all bytes.
 #[no_mangle]
-pub extern "C" fn rt_constant_time_compare(
-    a: RuntimeValue,
-    b: RuntimeValue,
-) -> i64 {
-    let Some((a_ptr, a_len)) = runtime_text_ptr_len(a) else { return 0; };
-    let Some((b_ptr, b_len)) = runtime_text_ptr_len(b) else { return 0; };
+pub extern "C" fn rt_constant_time_compare(a: RuntimeValue, b: RuntimeValue) -> i64 {
+    let Some((a_ptr, a_len)) = runtime_text_ptr_len(a) else {
+        return 0;
+    };
+    let Some((b_ptr, b_len)) = runtime_text_ptr_len(b) else {
+        return 0;
+    };
 
     if a_len != b_len {
         return 0;
@@ -40,5 +41,9 @@ pub extern "C" fn rt_constant_time_compare(
         acc |= a_slice[i] ^ b_slice[i];
     }
 
-    if acc == 0 { 1 } else { 0 }
+    if acc == 0 {
+        1
+    } else {
+        0
+    }
 }

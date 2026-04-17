@@ -296,10 +296,7 @@ impl<M: Module> CodegenBackend<M> {
     /// Set the set of mangled names that correspond to cross-module DATA
     /// globals (val/var/const/static), so `declare_globals` does not misroute
     /// them through the function-import fast path.
-    pub fn set_data_exports(
-        &mut self,
-        exports: std::sync::Arc<std::collections::HashSet<String>>,
-    ) {
+    pub fn set_data_exports(&mut self, exports: std::sync::Arc<std::collections::HashSet<String>>) {
         self.data_exports = exports;
     }
 
@@ -557,16 +554,15 @@ impl<M: Module> CodegenBackend<M> {
                     // data export, fall through to the data-import path below so
                     // `GlobalLoad` reads the value from memory instead of treating
                     // the symbol as a function pointer.
-                    let is_data_export = self.data_exports.contains(resolved)
-                        || self.data_exports.contains(&sanitized);
+                    let is_data_export = self.data_exports.contains(resolved) || self.data_exports.contains(&sanitized);
                     if !is_data_export {
                         let call_conv = super::shared::platform_call_conv();
                         let mut sig = cranelift_codegen::ir::Signature::new(call_conv);
                         sig.params.push(cranelift_codegen::ir::AbiParam::new(types::I64));
                         sig.returns.push(cranelift_codegen::ir::AbiParam::new(types::I64));
-                        if let Ok(fid) = self
-                            .module
-                            .declare_function(&sanitized, cranelift_module::Linkage::Import, &sig)
+                        if let Ok(fid) =
+                            self.module
+                                .declare_function(&sanitized, cranelift_module::Linkage::Import, &sig)
                         {
                             self.func_ids.entry(name.clone()).or_insert(fid);
                             continue;
@@ -749,15 +745,11 @@ impl<M: Module> CodegenBackend<M> {
             // For each method slot, write a relocation pointing to the implementing function.
             for (slot, fn_name) in method_fns.iter().enumerate() {
                 // Look up the func_id — try both mangled and unmangled names.
-                let func_id_opt = self
-                    .func_ids
-                    .get(fn_name)
-                    .copied()
-                    .or_else(|| {
-                        // Try with _dot_ mangling (StructName_dot_methodName)
-                        let mangled = fn_name.replace('.', "_dot_");
-                        self.func_ids.get(&mangled).copied()
-                    });
+                let func_id_opt = self.func_ids.get(fn_name).copied().or_else(|| {
+                    // Try with _dot_ mangling (StructName_dot_methodName)
+                    let mangled = fn_name.replace('.', "_dot_");
+                    self.func_ids.get(&mangled).copied()
+                });
 
                 if let Some(func_id) = func_id_opt {
                     let func_ref = self.module.declare_func_in_data(func_id, &mut data_desc);

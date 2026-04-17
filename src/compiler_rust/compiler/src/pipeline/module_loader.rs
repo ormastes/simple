@@ -55,11 +55,7 @@ fn normalize_type_parts(parts: &[String]) -> Option<Vec<String>> {
     }
 
     if parts.len() == 1 {
-        return Some(vec![
-            "type".to_string(),
-            "simple_lang".to_string(),
-            parts[0].clone(),
-        ]);
+        return Some(vec!["type".to_string(), "simple_lang".to_string(), parts[0].clone()]);
     }
 
     None
@@ -1411,11 +1407,7 @@ mod tests {
         fs::create_dir_all(&type_dir).unwrap();
         fs::write(type_dir.join("I64.spl"), "type I64 = i64\nexport I64\n").unwrap();
 
-        let resolved = resolve_use_to_path(
-            &use_stmt(&["I64"], ImportTarget::Glob),
-            &nested,
-        )
-        .unwrap();
+        let resolved = resolve_use_to_path(&use_stmt(&["I64"], ImportTarget::Glob), &nested).unwrap();
 
         assert_eq!(resolved, type_dir.join("I64.spl"));
     }
@@ -1430,11 +1422,7 @@ mod tests {
         fs::create_dir_all(&type_dir).unwrap();
         fs::write(type_dir.join("I64.spl"), "type I64 = i64\nexport I64\n").unwrap();
 
-        let resolved = resolve_use_to_path(
-            &use_stmt(&["simple-lang", "I64"], ImportTarget::Glob),
-            &nested,
-        )
-        .unwrap();
+        let resolved = resolve_use_to_path(&use_stmt(&["simple-lang", "I64"], ImportTarget::Glob), &nested).unwrap();
 
         assert_eq!(resolved, type_dir.join("I64.spl"));
     }
@@ -1475,12 +1463,12 @@ mod tests {
         let wrapper = temp.path().join("wrapper.spl");
         let helper = temp.path().join("helper.spl");
 
+        fs::write(&entry, "use wrapper.{run}\nfn main() -> int:\n    run()\n").unwrap();
         fs::write(
-            &entry,
-            "use wrapper.{run}\nfn main() -> int:\n    run()\n",
+            &wrapper,
+            "use helper.{helper_fn}\n\nfn run() -> int:\n    helper_fn()\n",
         )
         .unwrap();
-        fs::write(&wrapper, "use helper.{helper_fn}\n\nfn run() -> int:\n    helper_fn()\n").unwrap();
         fs::write(&helper, "fn helper_fn() -> int:\n    1\n").unwrap();
 
         let loaded = load_module_with_imports(&entry, &mut HashSet::new()).unwrap();

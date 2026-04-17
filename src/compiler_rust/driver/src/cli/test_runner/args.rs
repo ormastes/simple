@@ -165,6 +165,23 @@ pub fn parse_test_args(args: &[String]) -> TestOptions {
                     eprintln!("Warning: Unknown execution mode '{}', using interpreter", mode_str);
                 }
             }
+            // --compile: user-friendly alias for --mode=native (SMF is opt-in via --compile=smf)
+            "--compile" => {
+                options.execution_mode = TestExecutionMode::Native;
+                options.safe_mode = true;
+            }
+            arg if arg.starts_with("--compile=") => {
+                let mode_str = arg.trim_start_matches("--compile=");
+                if let Some(mode) = TestExecutionMode::parse_str(mode_str) {
+                    let needs_safe_mode = mode != TestExecutionMode::Interpreter;
+                    options.execution_mode = mode;
+                    if needs_safe_mode {
+                        options.safe_mode = true;
+                    }
+                } else {
+                    eprintln!("Warning: Unknown compile mode '{}', using interpreter", mode_str);
+                }
+            }
             "--force-rebuild" => options.force_rebuild = true,
             "--keep-artifacts" => options.keep_artifacts = true,
             "--safe-mode" | "--safe" => options.safe_mode = true,
@@ -461,5 +478,53 @@ mod tests {
         assert_eq!(opts.doctest_md_dir, Some(PathBuf::from("guides")));
         assert!(opts.doctest_doc);
         assert!(opts.doctest_md);
+    }
+
+    #[test]
+    fn test_parse_compile_defaults_to_native() {
+        let args = vec!["--compile".to_string()];
+        let opts = parse_test_args(&args);
+        assert_eq!(opts.execution_mode, TestExecutionMode::Native);
+        assert!(opts.safe_mode);
+    }
+
+    #[test]
+    fn test_parse_compile_eq_native() {
+        let args = vec!["--compile=native".to_string()];
+        let opts = parse_test_args(&args);
+        assert_eq!(opts.execution_mode, TestExecutionMode::Native);
+        assert!(opts.safe_mode);
+    }
+
+    #[test]
+    fn test_parse_compile_eq_smf() {
+        let args = vec!["--compile=smf".to_string()];
+        let opts = parse_test_args(&args);
+        assert_eq!(opts.execution_mode, TestExecutionMode::Smf);
+        assert!(opts.safe_mode);
+    }
+
+    #[test]
+    fn test_parse_compile_eq_interpreter_no_upgrade() {
+        let args = vec!["--compile=interpreter".to_string()];
+        let opts = parse_test_args(&args);
+        assert_eq!(opts.execution_mode, TestExecutionMode::Interpreter);
+        assert!(!opts.safe_mode);
+    }
+
+    #[test]
+    fn test_parse_compile_with_force_rebuild() {
+        let args = vec!["--compile".to_string(), "--force-rebuild".to_string()];
+        let opts = parse_test_args(&args);
+        assert_eq!(opts.execution_mode, TestExecutionMode::Native);
+        assert!(opts.safe_mode);
+        assert!(opts.force_rebuild);
+    }
+
+    #[test]
+    fn test_parse_compile_unknown_suffix_warns_keeps_interpreter() {
+        let args = vec!["--compile=bogus".to_string()];
+        let opts = parse_test_args(&args);
+        assert_eq!(opts.execution_mode, TestExecutionMode::Interpreter);
     }
 }

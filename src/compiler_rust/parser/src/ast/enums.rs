@@ -10,12 +10,24 @@
 /// ```lean
 /// inductive Visibility
 ///   | public
+///   | peer
+///   | up
+///   | internal
+///   | package
 ///   | private
 /// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Visibility {
     /// Publicly accessible
     Public,
+    /// Accessible to sibling/peer modules in the same logical path
+    Peer,
+    /// Accessible to the immediate parent boundary/module
+    Up,
+    /// Accessible to same package and declared friends
+    Internal,
+    /// Accessible only within the same package
+    Package,
     /// Private to the module (default)
     #[default]
     Private,
@@ -25,6 +37,18 @@ impl Visibility {
     /// Check if this is public visibility
     pub fn is_public(&self) -> bool {
         matches!(self, Visibility::Public)
+    }
+
+    /// Render the declaration keyword form used in source.
+    pub fn as_keyword(&self) -> &'static str {
+        match self {
+            Visibility::Public => "pub",
+            Visibility::Peer => "pub(peer)",
+            Visibility::Up => "pub(up)",
+            Visibility::Internal => "pub(friend)",
+            Visibility::Package => "pub(package)",
+            Visibility::Private => "priv",
+        }
     }
 }
 

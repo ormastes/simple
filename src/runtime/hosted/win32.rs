@@ -67,14 +67,7 @@ mod imp {
         WIN32_INVALID_HANDLE
     }
     #[inline]
-    pub fn dib_fill_rect(
-        _dib: i64,
-        _x: i64,
-        _y: i64,
-        _w: i64,
-        _h: i64,
-        _color: i64,
-    ) -> bool {
+    pub fn dib_fill_rect(_dib: i64, _x: i64, _y: i64, _w: i64, _h: i64, _color: i64) -> bool {
         false
     }
     #[inline]
@@ -82,14 +75,7 @@ mod imp {
         false
     }
     #[inline]
-    pub fn dib_present_rect(
-        _hwnd: i64,
-        _dib: i64,
-        _x: i64,
-        _y: i64,
-        _w: i64,
-        _h: i64,
-    ) -> bool {
+    pub fn dib_present_rect(_hwnd: i64, _dib: i64, _x: i64, _y: i64, _w: i64, _h: i64) -> bool {
         false
     }
     #[inline]
@@ -117,14 +103,7 @@ mod imp {
         false
     }
     #[inline]
-    pub fn dib_blur(
-        _dib: i64,
-        _x: i64,
-        _y: i64,
-        _w: i64,
-        _h: i64,
-        _radius: i64,
-    ) -> bool {
+    pub fn dib_blur(_dib: i64, _x: i64, _y: i64, _w: i64, _h: i64, _radius: i64) -> bool {
         false
     }
     #[inline]
@@ -179,19 +158,34 @@ mod imp {
     use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
     use windows_sys::Win32::UI::WindowsAndMessaging::{
         AdjustWindowRectEx, CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW,
-        LoadCursorW, PeekMessageW, PostQuitMessage, RegisterClassExW, ShowWindow,
-        TranslateMessage, CS_HREDRAW, CS_OWNDC, CS_VREDRAW, CW_USEDEFAULT, IDC_ARROW, MSG,
-        PM_REMOVE, SW_SHOW, WM_CLOSE, WM_DESTROY, WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDOWN,
-        WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MBUTTONUP, WM_MOUSEMOVE, WM_QUIT, WM_RBUTTONDOWN,
-        WM_RBUTTONUP, WNDCLASSEXW, WS_EX_APPWINDOW, WS_OVERLAPPEDWINDOW,
+        LoadCursorW, PeekMessageW, PostQuitMessage, RegisterClassExW, ShowWindow, TranslateMessage,
+        CS_HREDRAW, CS_OWNDC, CS_VREDRAW, CW_USEDEFAULT, IDC_ARROW, MSG, PM_REMOVE, SW_SHOW,
+        WM_CLOSE, WM_DESTROY, WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN,
+        WM_MBUTTONUP, WM_MOUSEMOVE, WM_QUIT, WM_RBUTTONDOWN, WM_RBUTTONUP, WNDCLASSEXW,
+        WS_EX_APPWINDOW, WS_OVERLAPPEDWINDOW,
     };
 
     /// Window class name, registered lazily on the first `window_new`.
     /// UTF-16 + NUL terminator.
     const CLASS_NAME: &[u16] = &[
-        b'S' as u16, b'i' as u16, b'm' as u16, b'p' as u16, b'l' as u16, b'e' as u16,
-        b'H' as u16, b'o' as u16, b's' as u16, b't' as u16, b'e' as u16, b'd' as u16,
-        b'W' as u16, b'i' as u16, b'n' as u16, b'3' as u16, b'2' as u16, 0,
+        b'S' as u16,
+        b'i' as u16,
+        b'm' as u16,
+        b'p' as u16,
+        b'l' as u16,
+        b'e' as u16,
+        b'H' as u16,
+        b'o' as u16,
+        b's' as u16,
+        b't' as u16,
+        b'e' as u16,
+        b'd' as u16,
+        b'W' as u16,
+        b'i' as u16,
+        b'n' as u16,
+        b'3' as u16,
+        b'2' as u16,
+        0,
     ];
 
     struct Hwnd {
@@ -489,9 +483,7 @@ mod imp {
         let mut s = state().lock().unwrap();
         if let Some(wnd) = s.hwnds.get_mut(&hwnd_id) {
             // Resize the HWND's backing DIB if requested dimensions differ.
-            if (wnd.w != w || wnd.h != h)
-                && !resize_hwnd_locked(wnd, w, h)
-            {
+            if (wnd.w != w || wnd.h != h) && !resize_hwnd_locked(wnd, w, h) {
                 return WIN32_INVALID_HANDLE;
             }
             // Optional fill (treat 0 as "no fill" — Simple typically passes
@@ -587,14 +579,7 @@ mod imp {
         miss
     }
 
-    pub fn dib_fill_rect(
-        dib: i64,
-        x: i64,
-        y: i64,
-        w: i64,
-        h: i64,
-        color: i64,
-    ) -> bool {
+    pub fn dib_fill_rect(dib: i64, x: i64, y: i64, w: i64, h: i64, color: i64) -> bool {
         let mut s = state().lock().unwrap();
         with_pixels_mut(
             &mut s,
@@ -651,14 +636,7 @@ mod imp {
         }
     }
 
-    pub fn dib_present_rect(
-        hwnd_id: i64,
-        dib: i64,
-        x: i64,
-        y: i64,
-        w: i64,
-        h: i64,
-    ) -> bool {
+    pub fn dib_present_rect(hwnd_id: i64, dib: i64, x: i64, y: i64, w: i64, h: i64) -> bool {
         let s = state().lock().unwrap();
         let Some(wnd) = s.hwnds.get(&hwnd_id) else {
             return false;
@@ -682,8 +660,7 @@ mod imp {
                 return false;
             }
             let ok = BitBlt(
-                screen_dc, x0 as i32, y0 as i32, bw, bh, wnd.mem_dc, x0 as i32, y0 as i32,
-                SRCCOPY,
+                screen_dc, x0 as i32, y0 as i32, bw, bh, wnd.mem_dc, x0 as i32, y0 as i32, SRCCOPY,
             );
             ReleaseDC(wnd.hwnd, screen_dc);
             ok != 0
@@ -776,27 +753,12 @@ mod imp {
         )
     }
 
-    pub fn dib_blur(
-        _dib: i64,
-        _x: i64,
-        _y: i64,
-        _w: i64,
-        _h: i64,
-        _radius: i64,
-    ) -> bool {
+    pub fn dib_blur(_dib: i64, _x: i64, _y: i64, _w: i64, _h: i64, _radius: i64) -> bool {
         // TODO(win32): real separable box-blur. Phase C no-ops.
         true
     }
 
-    pub fn dib_gradient_v(
-        dib: i64,
-        x: i64,
-        y: i64,
-        w: i64,
-        h: i64,
-        c1: i64,
-        c2: i64,
-    ) -> bool {
+    pub fn dib_gradient_v(dib: i64, x: i64, y: i64, w: i64, h: i64, c1: i64, c2: i64) -> bool {
         let mut s = state().lock().unwrap();
         with_pixels_mut(
             &mut s,
@@ -819,10 +781,8 @@ mod imp {
                         let r = (r1 * (span - t) + r2 * t) / span;
                         let g = (g1 * (span - t) + g2 * t) / span;
                         let b = (b1 * (span - t) + b2 * t) / span;
-                        let color = 0xff00_0000u32
-                            | ((r as u32) << 16)
-                            | ((g as u32) << 8)
-                            | (b as u32);
+                        let color =
+                            0xff00_0000u32 | ((r as u32) << 16) | ((g as u32) << 8) | (b as u32);
                         let row = (yy * lw) as usize;
                         for xx in x0..x1 {
                             *ptr.add(row + xx as usize) = color;
@@ -858,9 +818,9 @@ mod imp {
             let mut msg: MSG = std::mem::zeroed();
             while PeekMessageW(&mut msg, hwnd_handle, 0, 0, PM_REMOVE) != 0 {
                 match msg.message {
-                    WM_KEYDOWN | WM_KEYUP | WM_LBUTTONDOWN | WM_LBUTTONUP
-                    | WM_RBUTTONDOWN | WM_RBUTTONUP | WM_MBUTTONDOWN | WM_MBUTTONUP
-                    | WM_MOUSEMOVE | WM_CLOSE | WM_DESTROY | WM_QUIT => {
+                    WM_KEYDOWN | WM_KEYUP | WM_LBUTTONDOWN | WM_LBUTTONUP | WM_RBUTTONDOWN
+                    | WM_RBUTTONUP | WM_MBUTTONDOWN | WM_MBUTTONUP | WM_MOUSEMOVE | WM_CLOSE
+                    | WM_DESTROY | WM_QUIT => {
                         last = msg.message as i64;
                     }
                     _ => {}
@@ -885,11 +845,7 @@ mod imp {
 // ---------------------------------------------------------------------------
 
 #[no_mangle]
-pub unsafe extern "C" fn rt_win32_window_new(
-    w: i64,
-    h: i64,
-    title: *const c_char,
-) -> i64 {
+pub unsafe extern "C" fn rt_win32_window_new(w: i64, h: i64, title: *const c_char) -> i64 {
     imp::window_new(w, h, title)
 }
 
@@ -904,12 +860,7 @@ pub unsafe extern "C" fn rt_win32_window_close(hwnd: i64) -> bool {
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn rt_win32_dib_create(
-    hwnd: i64,
-    w: i64,
-    h: i64,
-    fill_color: i64,
-) -> i64 {
+pub unsafe extern "C" fn rt_win32_dib_create(hwnd: i64, w: i64, h: i64, fill_color: i64) -> i64 {
     imp::dib_create(hwnd, w, h, fill_color)
 }
 

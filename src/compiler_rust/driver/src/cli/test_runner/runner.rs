@@ -219,7 +219,10 @@ pub fn run_tests(options: TestOptions) -> TestRunResult {
     };
 
     // Create build cache for SMF/native modes
-    let build_cache = if matches!(options.execution_mode, TestExecutionMode::Native | TestExecutionMode::Smf) {
+    let build_cache = if matches!(
+        options.execution_mode,
+        TestExecutionMode::Native | TestExecutionMode::Smf
+    ) {
         Some(BuildCache::new(options.force_rebuild))
     } else {
         None
@@ -756,12 +759,8 @@ fn execute_test_files(
                 // would silently report them as PASSED (0ms) without running
                 // anything, hiding real regressions. Route system specs through
                 // the real interpreter path instead.
-                let is_system_spec = path
-                    .components()
-                    .any(|c| c.as_os_str() == "system")
-                    && path
-                        .components()
-                        .any(|c| c.as_os_str() == "test");
+                let is_system_spec = path.components().any(|c| c.as_os_str() == "system")
+                    && path.components().any(|c| c.as_os_str() == "test");
                 if !options.safe_mode && !is_system_spec {
                     let mut static_reg = StaticTestRegistry::new();
                     match static_reg.add_file(path) {

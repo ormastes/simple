@@ -408,10 +408,7 @@ impl NativeProjectBuilder {
                 let is_entry = is_entry_file(path, &canon_entry_for_cache);
                 if !is_entry {
                     let per_file_root = self.effective_source_root_for(path);
-                    let module_prefix = crate::codegen::common_backend::module_prefix_from_path(
-                        path,
-                        &per_file_root,
-                    );
+                    let module_prefix = crate::codegen::common_backend::module_prefix_from_path(path, &per_file_root);
                     let hash = object_cache_key(
                         source,
                         is_entry,
@@ -622,10 +619,7 @@ impl NativeProjectBuilder {
                 if let Some((path, source)) = file_sources.get(*idx) {
                     let is_entry = is_entry_file(path, &canonical_entry);
                     let per_file_root = self.effective_source_root_for(path);
-                    let module_prefix = crate::codegen::common_backend::module_prefix_from_path(
-                        path,
-                        &per_file_root,
-                    );
+                    let module_prefix = crate::codegen::common_backend::module_prefix_from_path(path, &per_file_root);
                     let hash = object_cache_key(
                         source,
                         is_entry,

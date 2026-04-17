@@ -231,7 +231,9 @@ export use type.simple_lang.*
 
         let mut resolver = ModuleResolver::new(dir.path().to_path_buf(), dir.path().join("src"));
         let path = ModulePath::new(vec!["type".into(), "simple_lang".into()]);
-        let resolved = resolver.resolve(&path, &dir.path().join("src").join("main.spl")).unwrap();
+        let resolved = resolver
+            .resolve(&path, &dir.path().join("src").join("main.spl"))
+            .unwrap();
         let exports = resolver.get_exports(&resolved).unwrap();
 
         assert!(exports.iter().any(|name| name == "I64"));

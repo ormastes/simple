@@ -81,7 +81,6 @@ impl NativeProjectBuilder {
             if !seen.insert(canonical.clone()) {
                 continue;
             }
-            files.push(canonical.clone());
 
             let mut source = std::fs::read_to_string(&canonical)
                 .map_err(|e| format!("failed to read {}: {}", canonical.display(), e))?;

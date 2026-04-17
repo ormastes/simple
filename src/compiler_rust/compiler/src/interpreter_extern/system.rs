@@ -11,10 +11,7 @@ fn clear_simple_child_stack_env(command: &mut std::process::Command) {
     command.env_remove("_SIMPLE_STACK_SET");
 }
 
-fn finish_child_output_with_timeout(
-    mut child: Child,
-    timeout_ms: i64,
-) -> Result<(String, String, i64), ()> {
+fn finish_child_output_with_timeout(mut child: Child, timeout_ms: i64) -> Result<(String, String, i64), ()> {
     let stdout_handle = child.stdout.take().map(|mut pipe| {
         std::thread::spawn(move || {
             let mut buf = String::new();
@@ -635,10 +632,10 @@ pub fn rt_process_is_running(args: &[Value]) -> Result<Value, CompileError> {
     let mut processes = SPAWNED_PROCESSES.lock().unwrap();
     match processes.get_mut(&pid) {
         Some(child) => match child.try_wait() {
-            Ok(None) => Ok(Value::Bool(true)),   // still running
-            _ => Ok(Value::Bool(false)),          // exited or error
+            Ok(None) => Ok(Value::Bool(true)), // still running
+            _ => Ok(Value::Bool(false)),       // exited or error
         },
-        None => Ok(Value::Bool(false)),           // not tracked
+        None => Ok(Value::Bool(false)), // not tracked
     }
 }
 

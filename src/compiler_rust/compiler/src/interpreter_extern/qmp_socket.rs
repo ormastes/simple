@@ -26,7 +26,10 @@ struct ConnTable {
 #[cfg(unix)]
 impl ConnTable {
     fn new() -> Self {
-        ConnTable { next_fd: 100, streams: HashMap::new() }
+        ConnTable {
+            next_fd: 100,
+            streams: HashMap::new(),
+        }
     }
 }
 

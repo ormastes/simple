@@ -1135,20 +1135,47 @@ pub(crate) fn evaluate_method_call_with_self_update(
     // a small fixed set of mutators, listed below.
     const MUTATING_METHODS: &[&str] = &[
         // Array / Vec / List in-place mutators
-        "push", "push_back", "push_front", "pop", "pop_back", "pop_front",
-        "append", "prepend", "insert", "remove", "remove_at", "remove_first",
-        "remove_last", "clear", "extend", "sort", "sort_by", "sort_by_key",
-        "reverse", "shuffle", "dedup", "retain", "resize", "fill", "swap",
-        "rotate_left", "rotate_right", "truncate", "drain",
+        "push",
+        "push_back",
+        "push_front",
+        "pop",
+        "pop_back",
+        "pop_front",
+        "append",
+        "prepend",
+        "insert",
+        "remove",
+        "remove_at",
+        "remove_first",
+        "remove_last",
+        "clear",
+        "extend",
+        "sort",
+        "sort_by",
+        "sort_by_key",
+        "reverse",
+        "shuffle",
+        "dedup",
+        "retain",
+        "resize",
+        "fill",
+        "swap",
+        "rotate_left",
+        "rotate_right",
+        "truncate",
+        "drain",
         // Dict / Map in-place mutators
-        "update", "set", "set_default", "merge", "delete",
+        "update",
+        "set",
+        "set_default",
+        "merge",
+        "delete",
     ];
-    let updated_self = if MUTATING_METHODS.contains(&method)
-        && std::mem::discriminant(&result) == std::mem::discriminant(&recv_val)
-    {
-        Some(result.clone())
-    } else {
-        None
-    };
+    let updated_self =
+        if MUTATING_METHODS.contains(&method) && std::mem::discriminant(&result) == std::mem::discriminant(&recv_val) {
+            Some(result.clone())
+        } else {
+            None
+        };
     Ok((result, updated_self))
 }

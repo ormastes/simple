@@ -4,7 +4,9 @@ use simple_parser::{self as ast, Expr, Module, Node};
 
 use crate::hir::lower::error::{LowerError, LowerResult};
 use crate::hir::lower::lowerer::Lowerer;
-use crate::hir::types::{HirAopAdvice, HirArchRule, HirDiBinding, HirImpl, HirLeanBlock, HirMockDecl, HirModule, HirType, TypeId};
+use crate::hir::types::{
+    HirAopAdvice, HirArchRule, HirDiBinding, HirImpl, HirLeanBlock, HirMockDecl, HirModule, HirType, TypeId,
+};
 
 impl Lowerer {
     /// Helper: Register type and function declarations from an AST node
@@ -573,10 +575,9 @@ impl Lowerer {
 
                         // Record trait impl metadata for vtable emission
                         if impl_block.trait_name.is_some() {
-                            let type_id = self.resolve_type(
-                                &simple_parser::ast::Type::Simple(type_name.clone()),
-                            )
-                            .unwrap_or(TypeId::ANY);
+                            let type_id = self
+                                .resolve_type(&simple_parser::ast::Type::Simple(type_name.clone()))
+                                .unwrap_or(TypeId::ANY);
                             let mut methods_map = HashMap::new();
                             for method in &impl_block.methods {
                                 let fn_name = format!("{}.{}", type_name, method.name);

@@ -28,7 +28,12 @@ pub(crate) fn generate_stub_object_freestanding(
     use std::collections::{BTreeSet, HashSet};
 
     fn scan_nm_defined_undefined(path: &Path) -> Option<(HashSet<String>, BTreeSet<String>)> {
-        let output = std::process::Command::new("nm").arg("-g").arg("-p").arg(path).output().ok()?;
+        let output = std::process::Command::new("nm")
+            .arg("-g")
+            .arg("-p")
+            .arg(path)
+            .output()
+            .ok()?;
         if !output.status.success() {
             return None;
         }
@@ -55,11 +60,7 @@ pub(crate) fn generate_stub_object_freestanding(
 
     // Scan both Simple object_paths AND any boot_objects (boot .c/.s may define
     // or reference symbols that must not be stubbed over).
-    let scan_paths: Vec<PathBuf> = object_paths
-        .iter()
-        .chain(boot_objects.iter())
-        .cloned()
-        .collect();
+    let scan_paths: Vec<PathBuf> = object_paths.iter().chain(boot_objects.iter()).cloned().collect();
     let worker_count = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1);
     if worker_count <= 1 || scan_paths.len() < 16 {
         for path in &scan_paths {
@@ -99,7 +100,10 @@ pub(crate) fn generate_stub_object_freestanding(
         .into_iter()
         .filter(|s| !defined.contains(s))
         .filter(|s| !s.is_empty())
-        .filter(|s| s.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '$' || c == '.'))
+        .filter(|s| {
+            s.chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '$' || c == '.')
+        })
         .filter(|s| !s.starts_with("_dyld_"))
         .filter(|s| !s.starts_with("_ZSt") && !s.starts_with("_ZNSt"))
         .filter(|s| !is_system_symbol(s))
@@ -121,8 +125,7 @@ pub(crate) fn generate_stub_object_freestanding(
 
     // Always emit the stubs.c file even if empty — callers still link it.
     let stub_c = temp_dir.join("_stubs_freestanding.c");
-    let mut code =
-        String::from("/* Auto-generated freestanding stubs — weak definitions return 0 */\n");
+    let mut code = String::from("/* Auto-generated freestanding stubs — weak definitions return 0 */\n");
     code.push_str("typedef long long __stub_i64;\n\n");
     for (i, sym) in needs_stub.iter().enumerate() {
         // Sanitize C identifier for the wrapper name; keep the external symbol
@@ -167,10 +170,7 @@ pub(crate) fn generate_stub_object_freestanding(
         .map_err(|e| format!("compile freestanding stubs ({cc}): {e}"))?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(format!(
-            "failed to compile freestanding stubs ({}): {}",
-            cc, stderr
-        ));
+        return Err(format!("failed to compile freestanding stubs ({}): {}", cc, stderr));
     }
     Ok(stub_o)
 }

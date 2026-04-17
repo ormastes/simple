@@ -205,10 +205,7 @@ impl ModuleDocs {
 fn format_item_markdown(item: &DocItem) -> String {
     let mut out = String::new();
 
-    let vis = match item.visibility {
-        Visibility::Public => "pub ",
-        Visibility::Private => "",
-    };
+    let vis = visibility_prefix_markdown(item.visibility);
 
     out.push_str(&format!("### `{}{}`\n\n", vis, item.name));
     out.push_str(&format!("```\n{}\n```\n\n", item.signature));
@@ -224,10 +221,7 @@ fn format_item_markdown(item: &DocItem) -> String {
 fn format_item_html(item: &DocItem) -> String {
     let mut out = String::new();
 
-    let vis = match item.visibility {
-        Visibility::Public => "<span class=\"visibility\">pub</span> ",
-        Visibility::Private => "",
-    };
+    let vis = visibility_prefix_html(item.visibility);
 
     out.push_str("<div class=\"item\">\n");
     out.push_str(&format!("<h3>{}<code>{}</code></h3>\n", vis, html_escape(&item.name)));
@@ -239,6 +233,23 @@ fn format_item_html(item: &DocItem) -> String {
 
     out.push_str("</div>\n");
     out
+}
+
+fn visibility_prefix_markdown(visibility: Visibility) -> String {
+    match visibility {
+        Visibility::Private => String::new(),
+        _ => format!("{} ", visibility.as_keyword()),
+    }
+}
+
+fn visibility_prefix_html(visibility: Visibility) -> String {
+    match visibility {
+        Visibility::Private => String::new(),
+        _ => format!(
+            "<span class=\"visibility\">{}</span> ",
+            html_escape(visibility.as_keyword())
+        ),
+    }
 }
 
 fn html_escape(s: &str) -> String {

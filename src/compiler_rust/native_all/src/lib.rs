@@ -1518,12 +1518,7 @@ pub extern "C" fn rt_run_tests(args: RuntimeValue, gc_log: i64, gc_off: i64) -> 
 /// Simple-side declaration:
 ///   extern fn rt_cli_run_file(path: text, args: [text], gc_log: bool, gc_off: bool) -> i64
 #[no_mangle]
-pub extern "C" fn rt_cli_run_file(
-    path: RuntimeValue,
-    args: RuntimeValue,
-    gc_log: u8,
-    gc_off: u8,
-) -> i64 {
+pub extern "C" fn rt_cli_run_file(path: RuntimeValue, args: RuntimeValue, gc_log: u8, gc_off: u8) -> i64 {
     let path_str = match extract_rt_string(path) {
         Some(s) => s,
         None => {

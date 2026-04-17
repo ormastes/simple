@@ -59,13 +59,31 @@ pub fn generate_linked_smf_with_templates(
     }
 
     if !template_bytes.is_empty() {
-        writer.add_custom_section("template_code", SectionType::TemplateCode, SECTION_FLAG_READ, template_bytes, 8);
+        writer.add_custom_section(
+            "template_code",
+            SectionType::TemplateCode,
+            SECTION_FLAG_READ,
+            template_bytes,
+            8,
+        );
     }
     if !metadata_bytes.is_empty() {
-        writer.add_custom_section("template_meta", SectionType::TemplateMeta, SECTION_FLAG_READ, metadata_bytes, 8);
+        writer.add_custom_section(
+            "template_meta",
+            SectionType::TemplateMeta,
+            SECTION_FLAG_READ,
+            metadata_bytes,
+            8,
+        );
     }
     if !note_sdn_bytes.is_empty() {
-        writer.add_custom_section("note.sdn", SectionType::TemplateMeta, SECTION_FLAG_READ, note_sdn_bytes, 1);
+        writer.add_custom_section(
+            "note.sdn",
+            SectionType::TemplateMeta,
+            SECTION_FLAG_READ,
+            note_sdn_bytes,
+            1,
+        );
     }
 
     let mut buf = Vec::new();

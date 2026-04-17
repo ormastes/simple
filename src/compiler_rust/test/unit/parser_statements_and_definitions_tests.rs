@@ -127,6 +127,29 @@ fn test_parse_pub_function() {
     }
 }
 
+#[test]
+fn test_parse_scoped_pub_function() {
+    let source = "pub(peer) fn exported():\n    pass";
+    let module = parse(source).unwrap();
+    if let Node::Function(func) = &module.items[0] {
+        assert_eq!(func.visibility, Visibility::Peer);
+    } else {
+        panic!("Expected scoped public function");
+    }
+}
+
+#[test]
+fn test_parse_scoped_member_visibility() {
+    let source = "class Widget:\n    pub(up) fn parent_only():\n        pass\n    pub(package) field: i64\n";
+    let module = parse(source).unwrap();
+    if let Node::Class(class) = &module.items[0] {
+        assert_eq!(class.methods[0].visibility, Visibility::Up);
+        assert_eq!(class.fields[0].visibility, Visibility::Package);
+    } else {
+        panic!("Expected class definition");
+    }
+}
+
 // === Generic Function Parsing ===
 
 #[test]

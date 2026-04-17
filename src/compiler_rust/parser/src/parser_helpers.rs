@@ -3,11 +3,50 @@
 use std::collections::HashMap;
 
 use super::*;
-use crate::ast::{BinOp, UnaryOp};
+use crate::ast::{BinOp, UnaryOp, Visibility};
 use crate::error_recovery::{detect_common_mistake, ErrorHint, ErrorHintLevel};
 use crate::macro_registry::ConstValue;
 
 impl<'a> Parser<'a> {
+    pub(crate) fn parse_visibility_modifier_after_pub(&mut self) -> Result<Visibility, crate::error::ParseError> {
+        if !self.check(&TokenKind::LParen) {
+            return Ok(Visibility::Public);
+        }
+
+        self.advance(); // consume '('
+        let modifier = self.expect_identifier()?;
+        self.expect(&TokenKind::RParen)?;
+
+        Ok(match modifier.as_str() {
+            "peer" => Visibility::Peer,
+            "up" => Visibility::Up,
+            "friend" => Visibility::Internal,
+            "package" => Visibility::Package,
+            _ => {
+                self.error_hints.push(ErrorHint {
+                    level: ErrorHintLevel::Warning,
+                    message: format!("Unknown visibility modifier `{}`; treating as public", modifier),
+                    span: self.previous.span,
+                    suggestion: Some("Use peer, up, friend, or package".to_string()),
+                    help: None,
+                });
+                Visibility::Public
+            }
+        })
+    }
+
+    pub(crate) fn parse_optional_visibility(&mut self) -> Result<Visibility, crate::error::ParseError> {
+        if self.check(&TokenKind::Pub) {
+            self.advance();
+            self.parse_visibility_modifier_after_pub()
+        } else if self.check(&TokenKind::Priv) {
+            self.advance();
+            Ok(Visibility::Private)
+        } else {
+            Ok(Visibility::Private)
+        }
+    }
+
     pub(crate) fn advance(&mut self) {
         // Detect common mistakes before advancing
         // Skip check if this is the very first advance (previous == EOF) because
@@ -137,6 +176,36 @@ impl<'a> Parser<'a> {
         self.current = saved_current;
         self.previous = saved_previous;
 
+        result
+    }
+
+    /// Check whether a visibility-prefixed declaration targets one of the provided kinds.
+    /// Supports `pub`, `pub(peer)`, `pub(up)`, `pub(friend)`, `pub(package)`, and `priv`.
+    pub(crate) fn peek_visibility_target_is(&mut self, kinds: &[TokenKind]) -> bool {
+        if !self.check(&TokenKind::Pub) && !self.check(&TokenKind::Priv) {
+            return false;
+        }
+
+        let saved_current = self.current.clone();
+        let saved_previous = self.previous.clone();
+        let saved_pending = self.pending_tokens.clone();
+
+        self.advance();
+        if self.check(&TokenKind::LParen) {
+            self.advance();
+            while !self.check(&TokenKind::RParen) && !self.is_at_end() {
+                self.advance();
+            }
+            if self.check(&TokenKind::RParen) {
+                self.advance();
+            }
+        }
+
+        let result = kinds.iter().any(|kind| self.check(kind));
+
+        self.current = saved_current;
+        self.previous = saved_previous;
+        self.pending_tokens = saved_pending;
         result
     }
 

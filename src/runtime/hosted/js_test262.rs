@@ -24,10 +24,7 @@ static EMPTY: &[u8] = b"\0";
 /// Evaluate a JS `source` snippet via QuickJS.
 /// Returns 0 on success, -1 on any error (null pointer, eval exception, etc.).
 #[no_mangle]
-pub unsafe extern "C" fn rt_test262_eval(
-    _backend: *const c_char,
-    source: *const c_char,
-) -> i64 {
+pub unsafe extern "C" fn rt_test262_eval(_backend: *const c_char, source: *const c_char) -> i64 {
     use rquickjs::{Context, Runtime};
     use std::ffi::CStr;
 
@@ -46,11 +43,9 @@ pub unsafe extern "C" fn rt_test262_eval(
         Ok(c) => c,
         Err(_) => return -1,
     };
-    ctx.with(|ctx| {
-        match ctx.eval::<(), _>(src) {
-            Ok(_) => 0i64,
-            Err(_) => -1i64,
-        }
+    ctx.with(|ctx| match ctx.eval::<(), _>(src) {
+        Ok(_) => 0i64,
+        Err(_) => -1i64,
     })
 }
 
@@ -62,10 +57,7 @@ pub unsafe extern "C" fn rt_test262_eval(
 /// Evaluate a JS `source` snippet against a named `backend`.
 /// Stub: always returns -1 (eval not available).
 #[no_mangle]
-pub unsafe extern "C" fn rt_test262_eval(
-    _backend: *const c_char,
-    _source: *const c_char,
-) -> i64 {
+pub unsafe extern "C" fn rt_test262_eval(_backend: *const c_char, _source: *const c_char) -> i64 {
     -1
 }
 
@@ -79,10 +71,7 @@ pub unsafe extern "C" fn rt_test262_load_corpus(_subset: *const c_char) -> i64 {
 /// Return the JS source text of case `index` in corpus `handle`.
 /// Stub: always returns pointer to empty string.
 #[no_mangle]
-pub unsafe extern "C" fn rt_test262_case_source(
-    _handle: i64,
-    _index: i64,
-) -> *const c_char {
+pub unsafe extern "C" fn rt_test262_case_source(_handle: i64, _index: i64) -> *const c_char {
     EMPTY.as_ptr() as *const c_char
 }
 

@@ -238,12 +238,7 @@ impl<'a> Parser<'a> {
                     self.skip_newlines();
                 }
                 // Handle optional `pub` visibility prefix for methods
-                let visibility = if self.check(&TokenKind::Pub) {
-                    self.advance();
-                    crate::ast::Visibility::Public
-                } else {
-                    crate::ast::Visibility::Private
-                };
+                let visibility = self.parse_optional_visibility()?;
                 // Handle optional `static` keyword for static methods
                 let mut is_static = if self.check(&TokenKind::Static) {
                     self.advance();

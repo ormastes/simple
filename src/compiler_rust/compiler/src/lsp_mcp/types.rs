@@ -4,6 +4,7 @@
 //! Based on LSP specification with JSON serialization support.
 
 use serde::{Deserialize, Serialize};
+use simple_parser::ast::Visibility;
 
 /// Position in a text document (0-based)
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -140,6 +141,50 @@ impl SymbolKind {
     }
 }
 
+/// Additive structured visibility transport for scoped visibility.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ScopedVisibilityKind {
+    Public,
+    Peer,
+    Up,
+    Internal,
+    Package,
+    Private,
+}
+
+impl From<Visibility> for ScopedVisibilityKind {
+    fn from(value: Visibility) -> Self {
+        match value {
+            Visibility::Public => ScopedVisibilityKind::Public,
+            Visibility::Peer => ScopedVisibilityKind::Peer,
+            Visibility::Up => ScopedVisibilityKind::Up,
+            Visibility::Internal => ScopedVisibilityKind::Internal,
+            Visibility::Package => ScopedVisibilityKind::Package,
+            Visibility::Private => ScopedVisibilityKind::Private,
+        }
+    }
+}
+
+/// Structured scoped-visibility metadata kept additive to the legacy string field.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VisibilityInfoV2 {
+    pub kind: ScopedVisibilityKind,
+    pub keyword: String,
+    pub legacy_public: bool,
+}
+
+impl VisibilityInfoV2 {
+    pub fn from_visibility(visibility: Visibility) -> Self {
+        Self {
+            kind: visibility.into(),
+            keyword: visibility.as_keyword().to_string(),
+            legacy_public: visibility.is_public(),
+        }
+    }
+}
+
 /// Information about a symbol in a document
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -155,6 +200,12 @@ pub struct SymbolInfo {
     /// Optional container name (e.g., class name for a method)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub container_name: Option<String>,
+    /// Declared visibility keyword when available
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub declared_visibility: Option<String>,
+    /// Additive structured visibility metadata
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub visibility_v2: Option<VisibilityInfoV2>,
     /// Child symbols (for hierarchical structure)
     #[serde(skip_serializing_if = "Vec::is_empty", default)]
     pub children: Vec<SymbolInfo>,
@@ -168,6 +219,8 @@ impl SymbolInfo {
             range,
             selection_range: range,
             container_name: None,
+            declared_visibility: None,
+            visibility_v2: None,
             children: Vec::new(),
         }
     }
@@ -179,6 +232,16 @@ impl SymbolInfo {
 
     pub fn with_container(mut self, container: impl Into<String>) -> Self {
         self.container_name = Some(container.into());
+        self
+    }
+
+    pub fn with_visibility(mut self, visibility: impl Into<String>) -> Self {
+        self.declared_visibility = Some(visibility.into());
+        self
+    }
+
+    pub fn with_visibility_v2(mut self, visibility: VisibilityInfoV2) -> Self {
+        self.visibility_v2 = Some(visibility);
         self
     }
 
@@ -221,15 +284,27 @@ pub struct HoverInfo {
     /// Optional range for the hover
     #[serde(skip_serializing_if = "Option::is_none")]
     pub range: Option<Range>,
+    /// Additive structured visibility metadata
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub visibility_v2: Option<VisibilityInfoV2>,
 }
 
 impl HoverInfo {
     pub fn new(contents: HoverContents) -> Self {
-        Self { contents, range: None }
+        Self {
+            contents,
+            range: None,
+            visibility_v2: None,
+        }
     }
 
     pub fn with_range(mut self, range: Range) -> Self {
         self.range = Some(range);
+        self
+    }
+
+    pub fn with_visibility_v2(mut self, visibility: VisibilityInfoV2) -> Self {
+        self.visibility_v2 = Some(visibility);
         self
     }
 }
@@ -376,6 +451,23 @@ mod tests {
         assert_eq!(symbol.name, "test_function");
         assert_eq!(symbol.kind, SymbolKind::Function);
         assert_eq!(symbol.container_name, Some("TestClass".to_string()));
+    }
+
+    #[test]
+    fn test_visibility_v2_builder() {
+        let symbol = SymbolInfo::new("helper", SymbolKind::Function, Range::single_line(0, 0, 6))
+            .with_visibility("pub(peer)")
+            .with_visibility_v2(VisibilityInfoV2::from_visibility(Visibility::Peer));
+
+        assert_eq!(symbol.declared_visibility.as_deref(), Some("pub(peer)"));
+        assert_eq!(
+            symbol.visibility_v2,
+            Some(VisibilityInfoV2 {
+                kind: ScopedVisibilityKind::Peer,
+                keyword: "pub(peer)".to_string(),
+                legacy_public: false,
+            })
+        );
     }
 
     #[test]

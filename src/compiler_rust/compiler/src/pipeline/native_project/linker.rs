@@ -625,8 +625,7 @@ int main(int argc, char** argv) {
                                                 break;
                                             } else {
                                                 last_code = r.status.code();
-                                                last_stderr =
-                                                    String::from_utf8_lossy(&r.stderr).into_owned();
+                                                last_stderr = String::from_utf8_lossy(&r.stderr).into_owned();
                                             }
                                         }
                                         Err(e) => {
@@ -680,8 +679,7 @@ int main(int argc, char** argv) {
                                         boot_objects.push(out);
                                     } else {
                                         boot_compile_failures += 1;
-                                        let stderr_str =
-                                            String::from_utf8_lossy(&r.stderr).into_owned();
+                                        let stderr_str = String::from_utf8_lossy(&r.stderr).into_owned();
                                         let tail: String = stderr_str
                                             .lines()
                                             .rev()
@@ -701,11 +699,7 @@ int main(int argc, char** argv) {
                                 }
                                 Err(e) => {
                                     boot_compile_failures += 1;
-                                    eprintln!(
-                                        "  ERROR: failed to spawn clang for {}: {}",
-                                        path.display(),
-                                        e
-                                    );
+                                    eprintln!("  ERROR: failed to spawn clang for {}: {}", path.display(), e);
                                 }
                             }
                         }
@@ -768,8 +762,8 @@ int main(int argc, char** argv) {
                         && arch_filters.iter().any(|f| sym.contains(f))
                         && !arch_neg_filters.iter().any(|f| sym.contains(f))
                 }) {
-                        start_obj_idx = Some(i);
-                        break;
+                    start_obj_idx = Some(i);
+                    break;
                 }
             }
             let mut ordered: Vec<&PathBuf> = Vec::with_capacity(object_paths.len());
@@ -796,23 +790,17 @@ int main(int argc, char** argv) {
         // ref lands on a harmless no-op instead of null. We KEEP --unresolved-symbols=
         // ignore-all as a belt-and-suspenders safety net for this commit; removing it
         // can be a follow-up slice once stub coverage is proven across arches.
-        let freestanding_stub_obj = match generate_stub_object_freestanding(
-            temp_dir,
-            object_paths,
-            &boot_objects,
-            triple,
-            march,
-            mabi,
-        ) {
-            Ok(p) => Some(p),
-            Err(e) => {
-                eprintln!(
+        let freestanding_stub_obj =
+            match generate_stub_object_freestanding(temp_dir, object_paths, &boot_objects, triple, march, mabi) {
+                Ok(p) => Some(p),
+                Err(e) => {
+                    eprintln!(
                     "  WARNING: freestanding stub generation failed: {} (link will proceed with ignore-all fallback)",
                     e
                 );
-                None
-            }
-        };
+                    None
+                }
+            };
 
         let mut cmd = if let Some(ref lld_path) = use_direct_lld {
             let mut c = std::process::Command::new(lld_path);

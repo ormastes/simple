@@ -10,9 +10,8 @@
 use crate::value::RuntimeValue;
 use ring::rand::SystemRandom;
 use ring::signature::{
-    EcdsaKeyPair, KeyPair, RsaKeyPair, UnparsedPublicKey, ECDSA_P256_SHA256_FIXED,
-    ECDSA_P256_SHA256_FIXED_SIGNING, ED25519, RSA_PKCS1_2048_8192_SHA256,
-    RSA_PKCS1_2048_8192_SHA512, RSA_PKCS1_SHA256, RSA_PKCS1_SHA512,
+    EcdsaKeyPair, KeyPair, RsaKeyPair, UnparsedPublicKey, ECDSA_P256_SHA256_FIXED, ECDSA_P256_SHA256_FIXED_SIGNING,
+    ED25519, RSA_PKCS1_2048_8192_SHA256, RSA_PKCS1_2048_8192_SHA512, RSA_PKCS1_SHA256, RSA_PKCS1_SHA512,
     RSA_PSS_2048_8192_SHA256, RSA_PSS_2048_8192_SHA384, RSA_PSS_2048_8192_SHA512,
 };
 
@@ -133,11 +132,7 @@ fn normalize_rsa_public_key(pubkey: &[u8]) -> Option<Vec<u8>> {
 /// # Returns
 /// `1` if the signature is valid, `0` otherwise (including on any error).
 #[no_mangle]
-pub extern "C" fn rt_rsa_sha256_verify(
-    pubkey: RuntimeValue,
-    message: RuntimeValue,
-    signature: RuntimeValue,
-) -> i64 {
+pub extern "C" fn rt_rsa_sha256_verify(pubkey: RuntimeValue, message: RuntimeValue, signature: RuntimeValue) -> i64 {
     let Some(pk_bytes) = runtime_byte_array_to_vec(pubkey) else {
         return 0;
     };
@@ -168,11 +163,7 @@ pub extern "C" fn rt_rsa_sha256_verify(
 /// # Returns
 /// `1` if the signature is valid, `0` otherwise (including on any error).
 #[no_mangle]
-pub extern "C" fn rt_ed25519_verify(
-    pubkey: RuntimeValue,
-    message: RuntimeValue,
-    signature: RuntimeValue,
-) -> i64 {
+pub extern "C" fn rt_ed25519_verify(pubkey: RuntimeValue, message: RuntimeValue, signature: RuntimeValue) -> i64 {
     let Some(pk_bytes) = runtime_byte_array_to_vec(pubkey) else {
         return 0;
     };
@@ -194,11 +185,7 @@ pub extern "C" fn rt_ed25519_verify(
 ///
 /// Mirror of `rt_rsa_sha256_verify`; see that function's docs.
 #[no_mangle]
-pub extern "C" fn rt_rsa_sha512_verify(
-    pubkey: RuntimeValue,
-    message: RuntimeValue,
-    signature: RuntimeValue,
-) -> i64 {
+pub extern "C" fn rt_rsa_sha512_verify(pubkey: RuntimeValue, message: RuntimeValue, signature: RuntimeValue) -> i64 {
     let Some(pk_bytes) = runtime_byte_array_to_vec(pubkey) else {
         return 0;
     };
@@ -325,11 +312,7 @@ pub extern "C" fn rt_rsa_pss_sha512_verify(
 /// wrapper unpacks that to fixed-width 64-byte form before calling
 /// this extern.
 #[no_mangle]
-pub extern "C" fn rt_ecdsa_p256_verify(
-    pubkey: RuntimeValue,
-    message: RuntimeValue,
-    signature: RuntimeValue,
-) -> i64 {
+pub extern "C" fn rt_ecdsa_p256_verify(pubkey: RuntimeValue, message: RuntimeValue, signature: RuntimeValue) -> i64 {
     let Some(pk_bytes) = runtime_byte_array_to_vec(pubkey) else {
         return 0;
     };
@@ -364,7 +347,11 @@ fn _empty_bytes() -> RuntimeValue {
 // baremetal.
 // ---------------------------------------------------------------------------
 
-fn rsa_sign_impl(pkcs8: RuntimeValue, message: RuntimeValue, enc: &'static dyn ring::signature::RsaEncoding) -> RuntimeValue {
+fn rsa_sign_impl(
+    pkcs8: RuntimeValue,
+    message: RuntimeValue,
+    enc: &'static dyn ring::signature::RsaEncoding,
+) -> RuntimeValue {
     let Some(key_bytes) = runtime_byte_array_to_vec(pkcs8) else {
         return _empty_bytes();
     };
@@ -381,9 +368,7 @@ fn rsa_sign_impl(pkcs8: RuntimeValue, message: RuntimeValue, enc: &'static dyn r
     if keypair.sign(enc, &rng, &msg_bytes, &mut signature).is_err() {
         return _empty_bytes();
     }
-    unsafe {
-        crate::value::collections::rt_string_new(signature.as_ptr(), signature.len() as u64)
-    }
+    unsafe { crate::value::collections::rt_string_new(signature.as_ptr(), signature.len() as u64) }
 }
 
 /// Sign `message` with RSA-PKCS1 SHA-256 using a PKCS#8-v1 DER private
@@ -458,9 +443,7 @@ pub extern "C" fn rt_ecdsa_p256_sign(pkcs8: RuntimeValue, message: RuntimeValue)
     };
 
     let rng = SystemRandom::new();
-    let Ok(keypair) =
-        EcdsaKeyPair::from_pkcs8(&ECDSA_P256_SHA256_FIXED_SIGNING, &key_bytes, &rng)
-    else {
+    let Ok(keypair) = EcdsaKeyPair::from_pkcs8(&ECDSA_P256_SHA256_FIXED_SIGNING, &key_bytes, &rng) else {
         return _empty_bytes();
     };
 

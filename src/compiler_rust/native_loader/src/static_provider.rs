@@ -40,31 +40,29 @@ impl RuntimeSymbolProvider for StaticSymbolProvider {
     fn get_symbol(&self, name: &str) -> Option<*const u8> {
         let normalized = name.strip_prefix('_').unwrap_or(name);
         use simple_runtime::value::{
-            rt_array_clear, rt_array_first, rt_capture_stderr_start, rt_capture_stdout_start, rt_cli_get_args, rt_cli_print_help,
-            rt_cli_print_version, rt_cli_version, rt_condition_probe, rt_contains, rt_decision_probe, rt_dict_clear,
-            rt_dict_keys, rt_dict_remove, rt_dict_values, rt_env_all, rt_env_cwd, rt_env_exists, rt_env_get,
-            rt_env_home, rt_env_remove, rt_env_set, rt_env_temp, rt_env_vars, rt_eprint_str, rt_eprint_value,
-            rt_eprintln_str, rt_eprintln_value, rt_exit, rt_function_not_found, rt_get_env, rt_interp_call,
-            rt_interp_eval, rt_is_debug_mode_enabled, rt_is_macro_trace_enabled, rt_is_some, rt_method_not_found,
-            rt_len, rt_path_probe, rt_platform_name, rt_print_str, rt_print_value, rt_println_str, rt_println_value,
-            rt_range, rt_range_inclusive,
-            rt_string_char_at, rt_string_ends_with, rt_string_eq, rt_string_find, rt_string_index_of, rt_string_join,
-            rt_string_replace, rt_string_rfind, rt_string_split, rt_string_starts_with, rt_string_to_int,
-            rt_string_to_lower, rt_string_to_upper, rt_string_trim, rt_term_enable_ansi, rt_term_get_size,
-            rt_process_execute, rt_process_is_running, rt_process_kill, rt_process_run, rt_process_spawn,
-            rt_process_spawn_async, rt_process_wait, rt_set_debug_mode, rt_set_env, rt_set_macro_trace, rt_to_string,
-            rt_unwrap_or_self, rt_value_compare, rt_value_eq, rt_value_to_string,
+            rt_array_clear, rt_array_first, rt_capture_stderr_start, rt_capture_stdout_start, rt_cli_get_args,
+            rt_cli_print_help, rt_cli_print_version, rt_cli_version, rt_condition_probe, rt_contains,
+            rt_decision_probe, rt_dict_clear, rt_dict_keys, rt_dict_remove, rt_dict_values, rt_env_all, rt_env_cwd,
+            rt_env_exists, rt_env_get, rt_env_home, rt_env_remove, rt_env_set, rt_env_temp, rt_env_vars, rt_eprint_str,
+            rt_eprint_value, rt_eprintln_str, rt_eprintln_value, rt_exit, rt_function_not_found, rt_get_env,
+            rt_interp_call, rt_interp_eval, rt_is_debug_mode_enabled, rt_is_macro_trace_enabled, rt_is_some,
+            rt_method_not_found, rt_len, rt_path_probe, rt_platform_name, rt_print_str, rt_print_value, rt_println_str,
+            rt_println_value, rt_range, rt_range_inclusive, rt_string_char_at, rt_string_ends_with, rt_string_eq,
+            rt_string_find, rt_string_index_of, rt_string_join, rt_string_replace, rt_string_rfind, rt_string_split,
+            rt_string_starts_with, rt_string_to_int, rt_string_to_lower, rt_string_to_upper, rt_string_trim,
+            rt_term_enable_ansi, rt_term_get_size, rt_process_execute, rt_process_is_running, rt_process_kill,
+            rt_process_run, rt_process_spawn, rt_process_spawn_async, rt_process_wait, rt_set_debug_mode, rt_set_env,
+            rt_set_macro_trace, rt_to_string, rt_unwrap_or_self, rt_value_compare, rt_value_eq, rt_value_to_string,
         };
         // File I/O operations
         use simple_runtime::value::{
             rt_file_exists, rt_file_stat, rt_file_canonicalize, rt_file_read_text, rt_file_read_text_rv,
             rt_file_write_text, rt_file_copy, rt_file_remove, rt_file_rename, rt_file_read_lines, rt_file_append_text,
-            rt_file_read_bytes, rt_bytes_from_raw, rt_bytes_to_text, rt_text_to_bytes, rt_file_write_bytes, rt_file_move, rt_dir_create,
-            rt_dir_list,
-            rt_dir_remove, rt_file_find, rt_dir_glob, rt_dir_create_all, rt_dir_walk, rt_current_dir,
-            rt_set_current_dir, rt_dir_remove_all, rt_file_open, rt_file_get_size, rt_file_close, rt_path_basename,
-            rt_path_dirname, rt_path_ext, rt_path_absolute, rt_path_separator, rt_path_stem, rt_path_relative,
-            rt_path_join,
+            rt_file_read_bytes, rt_bytes_from_raw, rt_bytes_to_text, rt_text_to_bytes, rt_file_write_bytes,
+            rt_file_move, rt_dir_create, rt_dir_list, rt_dir_remove, rt_file_find, rt_dir_glob, rt_dir_create_all,
+            rt_dir_walk, rt_current_dir, rt_set_current_dir, rt_dir_remove_all, rt_file_open, rt_file_get_size,
+            rt_file_close, rt_path_basename, rt_path_dirname, rt_path_ext, rt_path_absolute, rt_path_separator,
+            rt_path_stem, rt_path_relative, rt_path_join,
         };
         use simple_runtime::value::{
             rt_io_tcp_accept, rt_io_tcp_accept_timeout, rt_io_tcp_bind, rt_io_tcp_close, rt_io_tcp_connect,
@@ -84,9 +82,9 @@ impl RuntimeSymbolProvider for StaticSymbolProvider {
         };
         use simple_runtime::value::{
             rt_sha1_finish, rt_sha1_finish_base64, rt_sha1_finish_bytes, rt_sha1_free, rt_sha1_new, rt_sha1_reset,
-            rt_sha1_write,
-            rt_sha256_finish, rt_sha256_finish_bytes, rt_sha256_free, rt_sha256_new, rt_sha256_reset, rt_sha256_write,
-            rt_xxhash_finish, rt_xxhash_free, rt_xxhash_new, rt_xxhash_new_with_seed, rt_xxhash_reset, rt_xxhash_write,
+            rt_sha1_write, rt_sha256_finish, rt_sha256_finish_bytes, rt_sha256_free, rt_sha256_new, rt_sha256_reset,
+            rt_sha256_write, rt_xxhash_finish, rt_xxhash_free, rt_xxhash_new, rt_xxhash_new_with_seed, rt_xxhash_reset,
+            rt_xxhash_write,
         };
         // Regex operations
         use simple_runtime::value::{

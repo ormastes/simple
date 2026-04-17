@@ -335,9 +335,7 @@ pub(super) fn eval_call_expr(
                             let enum_def = enums
                                 .get(class_name)
                                 .cloned()
-                                .or_else(|| {
-                                    BLOCK_SCOPED_ENUMS.with(|cell| cell.borrow().get(class_name).cloned())
-                                })
+                                .or_else(|| BLOCK_SCOPED_ENUMS.with(|cell| cell.borrow().get(class_name).cloned()))
                                 .or_else(|| GLOBAL_ENUMS.with(|cell| cell.borrow().get(class_name).cloned()));
                             if let Some(enum_def) = enum_def {
                                 if let Some(variant) = enum_def.variants.iter().find(|v| v.name == *field) {

@@ -131,6 +131,15 @@ class CompilerQueryContext:
         val symbol_table = symbol_table_result.unwrap()
         find_symbol_at_position(symbol_table, pos)
 
+    # Find symbol at a specific position with scoped visibility metadata
+    fn symbol_at_v2(file_path: text, pos: Position) -> Option<SymbolV2>:
+        val symbol_table_result = self.get_symbol_table(file_path)
+        if not symbol_table_result.is_ok():
+            return nil
+
+        val symbol_table = symbol_table_result.unwrap()
+        find_symbol_at_position_v2(symbol_table, pos)
+
     # Find all references to a symbol
     fn find_references(file_path: text, symbol: Symbol) -> [Location]:
         # Determine which files to search based on symbol kind
@@ -172,6 +181,19 @@ class CompilerQueryContext:
 
         # Return the definition location
         Some(DefinitionResult(
+            locations: [symbol.location],
+            symbol: Some(symbol),
+        ))
+
+    # Find definition of symbol at position with scoped visibility metadata
+    fn find_definition_v2(file_path: text, pos: Position) -> Option<DefinitionResultV2>:
+        val symbol_opt = self.symbol_at_v2(file_path, pos)
+        if not symbol_opt.?:
+            return nil
+
+        val symbol = symbol_opt.unwrap()
+
+        Some(DefinitionResultV2(
             locations: [symbol.location],
             symbol: Some(symbol),
         ))
@@ -308,6 +330,15 @@ class CompilerQueryContext:
         val symbol_table = symbol_table_result.unwrap()
         extract_all_symbols(symbol_table)
 
+    # Get all symbols in a document with scoped visibility metadata
+    fn document_symbols_v2(file_path: text) -> [SymbolV2]:
+        val symbol_table_result = self.get_symbol_table(file_path)
+        if not symbol_table_result.is_ok():
+            return []
+
+        val symbol_table = symbol_table_result.unwrap()
+        extract_all_symbols_v2(symbol_table)
+
     # --- Workspace Symbols ---
 
     # Search for symbols across the workspace
@@ -327,6 +358,35 @@ class CompilerQueryContext:
         matches.sort_by(\s: rank_symbol_match(s, query))
 
         # Limit to top 100 results
+        if matches.len() > 100:
+            matches[0:100]
+        else:
+            matches
+
+    # Search for symbols across the workspace with scoped visibility metadata
+    fn workspace_symbols_v2(query: text) -> [SymbolV2]:
+        val files = find_source_files(self.project_root)
+
+        var matches: [SymbolV2] = []
+        for file in files:
+            val symbols = self.document_symbols_v2(file)
+            for symbol in symbols:
+                if symbol_matches_query(symbol.name, query):
+                    matches.push(symbol)
+
+        matches.sort_by(\s: rank_symbol_match(
+            Symbol(
+                name: s.name,
+                kind: s.kind,
+                location: s.location,
+                type_info: s.type_info,
+                doc_comment: s.doc_comment,
+                is_public: s.visibility.is_reachable,
+                is_mutable: s.is_mutable,
+            ),
+            query
+        ))
+
         if matches.len() > 100:
             matches[0:100]
         else:

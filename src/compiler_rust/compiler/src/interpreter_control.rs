@@ -228,7 +228,15 @@ pub(super) fn exec_while(
     // against the cached integer each iteration. See `try_hoist_loop_invariant_len`
     // and `body_may_mutate_var` below.
     let hoist = if !while_stmt.is_suspend {
-        try_hoist_loop_invariant_len(&while_stmt.condition, &while_stmt.body, env, functions, classes, enums, impl_methods)?
+        try_hoist_loop_invariant_len(
+            &while_stmt.condition,
+            &while_stmt.body,
+            env,
+            functions,
+            classes,
+            enums,
+            impl_methods,
+        )?
     } else {
         None
     };
@@ -250,8 +258,15 @@ pub(super) fn exec_while(
                     // This should be very rare; fall through to a full condition eval.
                     let cond_val = evaluate_expr(&while_stmt.condition, env, functions, classes, enums, impl_methods)?;
                     let decision_result = cond_val.truthy();
-                    record_decision_coverage_ffi("<source>", while_stmt.span.line, while_stmt.span.column, decision_result);
-                    if !decision_result { break; }
+                    record_decision_coverage_ffi(
+                        "<source>",
+                        while_stmt.span.line,
+                        while_stmt.span.column,
+                        decision_result,
+                    );
+                    if !decision_result {
+                        break;
+                    }
                     let ctrl = exec_block(&while_stmt.body, env, functions, classes, enums, impl_methods)?;
                     if let Some(result) = handle_loop_control_labeled(ctrl, &while_stmt.label) {
                         return result;
@@ -398,7 +413,13 @@ fn try_hoist_loop_invariant_len<'a>(
 
     // Check if either side is a hoistable method call and capture the receiver name.
     fn as_hoistable_len_call(e: &Expr) -> Option<&str> {
-        if let Expr::MethodCall { receiver, method, args, generic_args } = e {
+        if let Expr::MethodCall {
+            receiver,
+            method,
+            args,
+            generic_args,
+        } = e
+        {
             if !args.is_empty() || !generic_args.is_empty() {
                 return None;
             }
@@ -412,14 +433,13 @@ fn try_hoist_loop_invariant_len<'a>(
         None
     }
 
-    let (recv_name, other_expr, cached_on_right) =
-        if let Some(name) = as_hoistable_len_call(right) {
-            (name, left, true)
-        } else if let Some(name) = as_hoistable_len_call(left) {
-            (name, right, false)
-        } else {
-            return Ok(None);
-        };
+    let (recv_name, other_expr, cached_on_right) = if let Some(name) = as_hoistable_len_call(right) {
+        (name, left, true)
+    } else if let Some(name) = as_hoistable_len_call(left) {
+        (name, right, false)
+    } else {
+        return Ok(None);
+    };
 
     // Conservative body scan: bail on any mutation of `recv_name` or any function call.
     if body_may_mutate_var(&body.statements, recv_name) {
@@ -473,7 +493,9 @@ fn node_may_mutate_var(node: &simple_parser::ast::Node, var: &str) -> bool {
                 return true;
             }
             if let Some(v) = &l.value {
-                if expr_may_mutate_var(v, var) { return true; }
+                if expr_may_mutate_var(v, var) {
+                    return true;
+                }
             }
             false
         }
@@ -487,39 +509,67 @@ fn node_may_mutate_var(node: &simple_parser::ast::Node, var: &str) -> bool {
             if !matches!(a.op, AssignOp::Assign) && assign_target_touches_var(&a.target, var) {
                 return true;
             }
-            if expr_may_mutate_var(&a.value, var) { return true; }
+            if expr_may_mutate_var(&a.value, var) {
+                return true;
+            }
             false
         }
         Node::Expression(e) => expr_may_mutate_var(e, var),
         Node::Return(r) => {
-            if let Some(v) = &r.value { expr_may_mutate_var(v, var) } else { false }
+            if let Some(v) = &r.value {
+                expr_may_mutate_var(v, var)
+            } else {
+                false
+            }
         }
         Node::If(iff) => {
-            if expr_may_mutate_var(&iff.condition, var) { return true; }
-            if body_may_mutate_var(&iff.then_block.statements, var) { return true; }
+            if expr_may_mutate_var(&iff.condition, var) {
+                return true;
+            }
+            if body_may_mutate_var(&iff.then_block.statements, var) {
+                return true;
+            }
             for (_pat, cond, blk) in &iff.elif_branches {
-                if expr_may_mutate_var(cond, var) { return true; }
-                if body_may_mutate_var(&blk.statements, var) { return true; }
+                if expr_may_mutate_var(cond, var) {
+                    return true;
+                }
+                if body_may_mutate_var(&blk.statements, var) {
+                    return true;
+                }
             }
             if let Some(eb) = &iff.else_block {
-                if body_may_mutate_var(&eb.statements, var) { return true; }
+                if body_may_mutate_var(&eb.statements, var) {
+                    return true;
+                }
             }
             false
         }
         Node::While(w) => {
-            if expr_may_mutate_var(&w.condition, var) { return true; }
+            if expr_may_mutate_var(&w.condition, var) {
+                return true;
+            }
             body_may_mutate_var(&w.body.statements, var)
         }
         Node::For(f) => {
-            if expr_may_mutate_var(&f.iterable, var) { return true; }
+            if expr_may_mutate_var(&f.iterable, var) {
+                return true;
+            }
             body_may_mutate_var(&f.body.statements, var)
         }
         Node::Loop(l) => body_may_mutate_var(&l.body.statements, var),
         Node::Match(m) => {
-            if expr_may_mutate_var(&m.subject, var) { return true; }
+            if expr_may_mutate_var(&m.subject, var) {
+                return true;
+            }
             for arm in &m.arms {
-                if let Some(g) = &arm.guard { if expr_may_mutate_var(g, var) { return true; } }
-                if body_may_mutate_var(&arm.body.statements, var) { return true; }
+                if let Some(g) = &arm.guard {
+                    if expr_may_mutate_var(g, var) {
+                        return true;
+                    }
+                }
+                if body_may_mutate_var(&arm.body.statements, var) {
+                    return true;
+                }
             }
             false
         }
@@ -533,9 +583,7 @@ fn pattern_binds_var(pat: &simple_parser::ast::Pattern, var: &str) -> bool {
     use simple_parser::ast::Pattern;
     match pat {
         Pattern::Identifier(n) | Pattern::MutIdentifier(n) | Pattern::MoveIdentifier(n) => n == var,
-        Pattern::Tuple(ps) | Pattern::Array(ps) | Pattern::Or(ps) => {
-            ps.iter().any(|p| pattern_binds_var(p, var))
-        }
+        Pattern::Tuple(ps) | Pattern::Array(ps) | Pattern::Or(ps) => ps.iter().any(|p| pattern_binds_var(p, var)),
         Pattern::Struct { fields, .. } => fields.iter().any(|(_, p)| pattern_binds_var(p, var)),
         Pattern::Enum { payload: Some(ps), .. } => ps.iter().any(|p| pattern_binds_var(p, var)),
         Pattern::Typed { pattern, .. } => pattern_binds_var(pattern, var),
@@ -564,19 +612,24 @@ fn assign_target_touches_var(target: &Expr, var: &str) -> bool {
 fn expr_may_mutate_var(e: &Expr, var: &str) -> bool {
     match e {
         // Plain reads.
-        Expr::Integer(_) | Expr::Float(_) | Expr::TypedInteger(_, _) | Expr::TypedFloat(_, _)
-        | Expr::String(_) | Expr::TypedString(_, _) | Expr::Bool(_) | Expr::Nil
-        | Expr::Symbol(_) | Expr::Atom(_) | Expr::Identifier(_) | Expr::Path(_)
+        Expr::Integer(_)
+        | Expr::Float(_)
+        | Expr::TypedInteger(_, _)
+        | Expr::TypedFloat(_, _)
+        | Expr::String(_)
+        | Expr::TypedString(_, _)
+        | Expr::Bool(_)
+        | Expr::Nil
+        | Expr::Symbol(_)
+        | Expr::Atom(_)
+        | Expr::Identifier(_)
+        | Expr::Path(_)
         | Expr::ContractResult => false,
 
-        Expr::Binary { left, right, .. } => {
-            expr_may_mutate_var(left, var) || expr_may_mutate_var(right, var)
-        }
+        Expr::Binary { left, right, .. } => expr_may_mutate_var(left, var) || expr_may_mutate_var(right, var),
         Expr::Unary { operand, .. } => expr_may_mutate_var(operand, var),
 
-        Expr::Index { receiver, index } => {
-            expr_may_mutate_var(receiver, var) || expr_may_mutate_var(index, var)
-        }
+        Expr::Index { receiver, index } => expr_may_mutate_var(receiver, var) || expr_may_mutate_var(index, var),
         Expr::FieldAccess { receiver, .. } => expr_may_mutate_var(receiver, var),
         Expr::TupleIndex { receiver, .. } => expr_may_mutate_var(receiver, var),
 
@@ -587,7 +640,9 @@ fn expr_may_mutate_var(e: &Expr, var: &str) -> bool {
 
         // Method calls: only allow-list read-only methods on our tracked var;
         // any other method call is assumed unsafe.
-        Expr::MethodCall { receiver, method, args, .. } => {
+        Expr::MethodCall {
+            receiver, method, args, ..
+        } => {
             // Read-only methods on the tracked var that we know cannot mutate it.
             const RO: &[&str] = &["len", "size", "count", "is_empty"];
             let receiver_is_var_ident = matches!(receiver.as_ref(), Expr::Identifier(n) if n == var);
@@ -602,12 +657,17 @@ fn expr_may_mutate_var(e: &Expr, var: &str) -> bool {
         Expr::Array(items) | Expr::Tuple(items) | Expr::VecLiteral(items) => {
             items.iter().any(|x| expr_may_mutate_var(x, var))
         }
-        Expr::ArrayRepeat { value, count } => {
-            expr_may_mutate_var(value, var) || expr_may_mutate_var(count, var)
-        }
-        Expr::Dict(pairs) => pairs.iter().any(|(k, v)| expr_may_mutate_var(k, var) || expr_may_mutate_var(v, var)),
+        Expr::ArrayRepeat { value, count } => expr_may_mutate_var(value, var) || expr_may_mutate_var(count, var),
+        Expr::Dict(pairs) => pairs
+            .iter()
+            .any(|(k, v)| expr_may_mutate_var(k, var) || expr_may_mutate_var(v, var)),
 
-        Expr::If { condition, then_branch, else_branch, .. } => {
+        Expr::If {
+            condition,
+            then_branch,
+            else_branch,
+            ..
+        } => {
             expr_may_mutate_var(condition, var)
                 || expr_may_mutate_var(then_branch, var)
                 || else_branch.as_ref().map_or(false, |e| expr_may_mutate_var(e, var))

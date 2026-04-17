@@ -2,7 +2,6 @@
 ///
 /// Provides rt_sha1_* hasher functions and rt_base64_encode for
 /// WebSocket handshake support in the web UI server.
-
 use crate::value::Value;
 use crate::error::CompileError;
 use base64::Engine;
@@ -87,9 +86,7 @@ pub fn rt_sha1_finish_bytes(args: &[Value]) -> Result<Value, CompileError> {
         let result = hasher.finalize();
         // Return raw bytes as a string (byte-transparent)
         let bytes: Vec<u8> = result.to_vec();
-        Ok(Value::Str(
-            String::from_utf8_lossy(&bytes).into_owned(),
-        ))
+        Ok(Value::Str(String::from_utf8_lossy(&bytes).into_owned()))
     } else {
         Ok(Value::Nil)
     }
@@ -157,9 +154,7 @@ pub fn rt_base64_decode(args: &[Value]) -> Result<Value, CompileError> {
         _ => return Ok(Value::Nil),
     };
     match base64::engine::general_purpose::STANDARD.decode(&input) {
-        Ok(bytes) => Ok(Value::Str(
-            String::from_utf8_lossy(&bytes).into_owned(),
-        )),
+        Ok(bytes) => Ok(Value::Str(String::from_utf8_lossy(&bytes).into_owned())),
         Err(_) => Ok(Value::Nil),
     }
 }

@@ -72,9 +72,7 @@ impl ParsedObject {
                     SECTION_FLAG_READ | SECTION_FLAG_WRITE,
                     Some(DataSectionKind::Mutable),
                 ),
-                SectionKind::ReadOnlyData
-                | SectionKind::ReadOnlyDataWithRel
-                | SectionKind::ReadOnlyString => {
+                SectionKind::ReadOnlyData | SectionKind::ReadOnlyDataWithRel | SectionKind::ReadOnlyString => {
                     (SectionType::RoData, SECTION_FLAG_READ, Some(DataSectionKind::ReadOnly))
                 }
                 SectionKind::UninitializedData => {
@@ -241,7 +239,7 @@ fn map_relocation_type(
                 // Default to none for unknown types
                 Ok(RelocationType::None)
             }
-        }
+        },
     }
 }
 
@@ -264,11 +262,29 @@ mod tests {
         use object::RelocationKind::*;
 
         assert_eq!(
-            map_relocation_type(Absolute, Generic, RelocationFlags::Generic { kind: Absolute, encoding: Generic, size: 64 }).unwrap(),
+            map_relocation_type(
+                Absolute,
+                Generic,
+                RelocationFlags::Generic {
+                    kind: Absolute,
+                    encoding: Generic,
+                    size: 64
+                }
+            )
+            .unwrap(),
             RelocationType::Abs64
         );
         assert_eq!(
-            map_relocation_type(Relative, Generic, RelocationFlags::Generic { kind: Relative, encoding: Generic, size: 32 }).unwrap(),
+            map_relocation_type(
+                Relative,
+                Generic,
+                RelocationFlags::Generic {
+                    kind: Relative,
+                    encoding: Generic,
+                    size: 32
+                }
+            )
+            .unwrap(),
             RelocationType::Pc32
         );
         assert_eq!(

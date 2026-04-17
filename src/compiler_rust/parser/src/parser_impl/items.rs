@@ -10,175 +10,181 @@ use super::core::Parser;
 
 impl<'a> Parser<'a> {
     pub(super) fn parse_pub_item_with_doc(&mut self, doc_comment: Option<DocComment>) -> Result<Node, ParseError> {
+        let visibility = self.parse_visibility_modifier_after_pub()?;
         match &self.current.kind {
             TokenKind::Fn | TokenKind::Kernel | TokenKind::Gen => {
                 let mut node = self.parse_function_with_doc(doc_comment)?;
                 if let Node::Function(ref mut f) = node {
-                    f.visibility = Visibility::Public;
+                    f.visibility = visibility;
                 }
                 Ok(node)
             }
             TokenKind::Async => {
                 let mut node = self.parse_async_function_with_doc(doc_comment)?;
                 if let Node::Function(ref mut f) = node {
-                    f.visibility = Visibility::Public;
+                    f.visibility = visibility;
                 }
                 Ok(node)
             }
             TokenKind::Sync => {
                 let mut node = self.parse_sync_function_with_doc(doc_comment)?;
                 if let Node::Function(ref mut f) = node {
-                    f.visibility = Visibility::Public;
+                    f.visibility = visibility;
                 }
                 Ok(node)
             }
             TokenKind::Struct => {
                 let mut node = self.parse_struct_with_doc(doc_comment)?;
                 if let Node::Struct(ref mut s) = node {
-                    s.visibility = Visibility::Public;
+                    s.visibility = visibility;
                 }
                 Ok(node)
             }
             TokenKind::Class => {
                 let mut node = self.parse_class_with_doc(doc_comment)?;
                 if let Node::Class(ref mut c) = node {
-                    c.visibility = Visibility::Public;
+                    c.visibility = visibility;
                 }
                 Ok(node)
             }
             TokenKind::Enum => {
                 let mut node = self.parse_enum_with_doc(doc_comment)?;
                 if let Node::Enum(ref mut e) = node {
-                    e.visibility = Visibility::Public;
+                    e.visibility = visibility;
                 }
                 Ok(node)
             }
             TokenKind::Union => {
                 let mut node = self.parse_union_with_doc(doc_comment)?;
                 if let Node::Enum(ref mut e) = node {
-                    e.visibility = Visibility::Public;
+                    e.visibility = visibility;
                 }
                 Ok(node)
             }
             TokenKind::Trait => {
                 let mut node = self.parse_trait_with_doc(doc_comment)?;
                 if let Node::Trait(ref mut t) = node {
-                    t.visibility = Visibility::Public;
+                    t.visibility = visibility;
                 }
                 Ok(node)
             }
-            _ => self.parse_pub_item(),
+            _ => self.parse_pub_item_with_visibility(visibility),
         }
     }
 
     pub(super) fn parse_pub_item(&mut self) -> Result<Node, ParseError> {
+        let visibility = self.parse_visibility_modifier_after_pub()?;
+        self.parse_pub_item_with_visibility(visibility)
+    }
+
+    fn parse_pub_item_with_visibility(&mut self, visibility: Visibility) -> Result<Node, ParseError> {
         match &self.current.kind {
             TokenKind::Fn | TokenKind::Kernel | TokenKind::Gen => {
                 let mut node = self.parse_function()?;
                 if let Node::Function(ref mut f) = node {
-                    f.visibility = Visibility::Public;
+                    f.visibility = visibility;
                 }
                 Ok(node)
             }
             TokenKind::Async => {
                 let mut node = self.parse_async_function()?;
                 if let Node::Function(ref mut f) = node {
-                    f.visibility = Visibility::Public;
+                    f.visibility = visibility;
                 }
                 Ok(node)
             }
             TokenKind::Sync => {
                 let mut node = self.parse_sync_function()?;
                 if let Node::Function(ref mut f) = node {
-                    f.visibility = Visibility::Public;
+                    f.visibility = visibility;
                 }
                 Ok(node)
             }
             TokenKind::Struct => {
                 let mut node = self.parse_struct()?;
                 if let Node::Struct(ref mut s) = node {
-                    s.visibility = Visibility::Public;
+                    s.visibility = visibility;
                 }
                 Ok(node)
             }
             TokenKind::Class => {
                 let mut node = self.parse_class()?;
                 if let Node::Class(ref mut c) = node {
-                    c.visibility = Visibility::Public;
+                    c.visibility = visibility;
                 }
                 Ok(node)
             }
             TokenKind::Enum => {
                 let mut node = self.parse_enum()?;
                 if let Node::Enum(ref mut e) = node {
-                    e.visibility = Visibility::Public;
+                    e.visibility = visibility;
                 }
                 Ok(node)
             }
             TokenKind::Union => {
                 let mut node = self.parse_union()?;
                 if let Node::Enum(ref mut e) = node {
-                    e.visibility = Visibility::Public;
+                    e.visibility = visibility;
                 }
                 Ok(node)
             }
             TokenKind::Trait => {
                 let mut node = self.parse_trait()?;
                 if let Node::Trait(ref mut t) = node {
-                    t.visibility = Visibility::Public;
+                    t.visibility = visibility;
                 }
                 Ok(node)
             }
             TokenKind::Actor => {
                 let mut node = self.parse_actor()?;
                 if let Node::Actor(ref mut a) = node {
-                    a.visibility = Visibility::Public;
+                    a.visibility = visibility;
                 }
                 Ok(node)
             }
             TokenKind::Const => {
                 let mut node = self.parse_const()?;
                 if let Node::Const(ref mut c) = node {
-                    c.visibility = Visibility::Public;
+                    c.visibility = visibility;
                 }
                 Ok(node)
             }
             TokenKind::Static => {
                 let mut node = self.parse_static()?;
                 if let Node::Static(ref mut s) = node {
-                    s.visibility = Visibility::Public;
+                    s.visibility = visibility;
                 }
                 Ok(node)
             }
             TokenKind::Type => {
                 let mut node = self.parse_type_alias()?;
                 if let Node::TypeAlias(ref mut t) = node {
-                    t.visibility = Visibility::Public;
+                    t.visibility = visibility;
                 }
                 Ok(node)
             }
             TokenKind::Unit => {
                 let mut node = self.parse_unit()?;
                 if let Node::Unit(ref mut u) = node {
-                    u.visibility = Visibility::Public;
+                    u.visibility = visibility;
                 }
                 Ok(node)
             }
             TokenKind::Extern => {
                 let mut node = self.parse_extern()?;
                 if let Node::Extern(ref mut e) = node {
-                    e.visibility = Visibility::Public;
+                    e.visibility = visibility;
                 }
                 Ok(node)
             }
             TokenKind::Macro => {
                 let mut node = self.parse_macro_def()?;
                 if let Node::Macro(ref mut m) = node {
-                    m.visibility = Visibility::Public;
+                    m.visibility = visibility;
                 }
                 Ok(node)
             }
-            TokenKind::Mod => self.parse_mod(Visibility::Public, vec![]),
+            TokenKind::Mod => self.parse_mod(visibility, vec![]),
             TokenKind::Use => {
                 // pub use is equivalent to export use (re-export)
                 let start_span = self.current.span;
@@ -234,7 +240,7 @@ impl<'a> Parser<'a> {
                 self.advance(); // consume 'effect'
                 let mut node = self.parse_enum_body_after_keyword()?;
                 if let Node::Enum(ref mut e) = node {
-                    e.visibility = Visibility::Public;
+                    e.visibility = visibility;
                 }
                 Ok(node)
             }
@@ -242,7 +248,7 @@ impl<'a> Parser<'a> {
             TokenKind::Me => {
                 let mut node = self.parse_function()?;
                 if let Node::Function(ref mut f) = node {
-                    f.visibility = Visibility::Public;
+                    f.visibility = visibility;
                 }
                 Ok(node)
             }
@@ -351,18 +357,50 @@ impl<'a> Parser<'a> {
                     return self.parse_impl_with_attrs(attributes);
                 }
 
+                let visibility = if self.check(&TokenKind::Pub) {
+                    self.advance();
+                    self.parse_visibility_modifier_after_pub()?
+                } else {
+                    Visibility::Private
+                };
+
                 // After decorators, could be fn, class, struct, extern, etc.
                 match &self.current.kind {
-                    TokenKind::Class => return self.parse_class_with_attrs(attributes),
-                    TokenKind::Struct => return self.parse_struct_with_attrs(attributes),
-                    TokenKind::Enum => return self.parse_enum_with_attrs(attributes),
-                    TokenKind::Extern => return self.parse_extern_with_attrs(attributes),
+                    TokenKind::Class => {
+                        let mut node = self.parse_class_with_attrs(attributes)?;
+                        if let Node::Class(ref mut c) = node {
+                            c.visibility = visibility;
+                        }
+                        return Ok(node);
+                    }
+                    TokenKind::Struct => {
+                        let mut node = self.parse_struct_with_attrs(attributes)?;
+                        if let Node::Struct(ref mut s) = node {
+                            s.visibility = visibility;
+                        }
+                        return Ok(node);
+                    }
+                    TokenKind::Enum => {
+                        let mut node = self.parse_enum_with_attrs(attributes)?;
+                        if let Node::Enum(ref mut e) = node {
+                            e.visibility = visibility;
+                        }
+                        return Ok(node);
+                    }
+                    TokenKind::Extern => {
+                        let mut node = self.parse_extern_with_attrs(attributes)?;
+                        if let Node::Extern(ref mut e) = node {
+                            e.visibility = visibility;
+                        }
+                        return Ok(node);
+                    }
                     TokenKind::Mixin => return self.parse_mixin_with_attrs(attributes),
                     _ => {}
                 }
                 let mut node = self.parse_function_with_attrs(decorators, attributes)?;
                 if let Node::Function(ref mut f) = node {
                     f.effects = effects;
+                    f.visibility = visibility;
                 }
                 Ok(node)
             }

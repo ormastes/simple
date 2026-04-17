@@ -238,19 +238,14 @@ impl Lowerer {
     /// `get_field_info`, which falls back to a method call instead. See the
     /// comment on `global_struct_defs` and the `native_project/compiler.rs`
     /// setup site for background.
-    pub fn set_ambiguous_field_names(
-        &mut self,
-        names: std::sync::Arc<std::collections::HashSet<String>>,
-    ) {
+    pub fn set_ambiguous_field_names(&mut self, names: std::sync::Arc<std::collections::HashSet<String>>) {
         self.ambiguous_field_names = Some(names);
     }
 
     /// Check whether a field name is globally ambiguous (defined in more
     /// than one known struct).
     pub(super) fn is_ambiguous_global_field(&self, name: &str) -> bool {
-        self.ambiguous_field_names
-            .as_ref()
-            .is_some_and(|s| s.contains(name))
+        self.ambiguous_field_names.as_ref().is_some_and(|s| s.contains(name))
     }
 
     /// Take ownership of the memory warnings

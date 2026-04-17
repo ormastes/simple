@@ -75,6 +75,24 @@ fn symbol_to_completion(symbol: Symbol) -> Completion:
         sort_priority: 5,
     )
 
+fn visibility_metadata_from_symbol(symbol: Symbol) -> VisibilityMetadata:
+    VisibilityMetadata(
+        surface: if symbol.is_public: VisibilitySurface.Public else: VisibilitySurface.Unknown,
+        declared: if symbol.is_public: DeclaredVisibility.Public else: DeclaredVisibility.Unknown,
+        is_reachable: symbol.is_public,
+    )
+
+fn symbol_upgrade_v2(symbol: Symbol) -> SymbolV2:
+    SymbolV2(
+        name: symbol.name,
+        kind: symbol.kind,
+        location: symbol.location,
+        type_info: symbol.type_info,
+        doc_comment: symbol.doc_comment,
+        visibility: visibility_metadata_from_symbol(symbol),
+        is_mutable: symbol.is_mutable,
+    )
+
 # --- FFI Functions (imported from app.io) ---
 
 # These functions are implemented in rust/compiler/src/query_ffi.rs
@@ -92,11 +110,24 @@ fn build_symbol_table(ast: AST) -> SymbolTable:
 fn find_symbol_at_position(table: SymbolTable, pos: Position) -> Option<Symbol>:
     io.rt_find_symbol_at_position(table, pos)
 
+fn find_symbol_at_position_v2(table: SymbolTable, pos: Position) -> Option<SymbolV2>:
+    val legacy = io.rt_find_symbol_at_position(table, pos)
+    if legacy.?:
+        return Some(symbol_upgrade_v2(legacy.unwrap()))
+    nil
+
 fn find_symbol_references(table: SymbolTable, name: text) -> [Location]:
     io.rt_find_symbol_references(table, name)
 
 fn get_scope_at_position(table: SymbolTable, pos: Position) -> Scope:
     io.rt_get_scope_at_position(table, pos)
+
+fn get_scope_at_position_v2(table: SymbolTable, pos: Position) -> ScopeV2:
+    val legacy = io.rt_get_scope_at_position(table, pos)
+    var upgraded: [SymbolV2] = []
+    for symbol in legacy.visible_symbols:
+        upgraded.push(symbol_upgrade_v2(symbol))
+    ScopeV2(visible_symbols: upgraded)
 
 fn get_context_keywords(pos: Position, scope: Scope) -> [text]:
     io.rt_get_context_keywords(pos, scope)
@@ -106,6 +137,12 @@ fn type_check_ast(ast: AST) -> [TypeError]:
 
 fn extract_all_symbols(table: SymbolTable) -> [Symbol]:
     io.rt_extract_all_symbols(table)
+
+fn extract_all_symbols_v2(table: SymbolTable) -> [SymbolV2]:
+    var upgraded: [SymbolV2] = []
+    for symbol in io.rt_extract_all_symbols(table):
+        upgraded.push(symbol_upgrade_v2(symbol))
+    upgraded
 
 # --- Workspace Symbol Search Helpers ---
 

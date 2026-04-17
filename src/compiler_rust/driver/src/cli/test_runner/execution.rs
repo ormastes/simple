@@ -659,8 +659,7 @@ fn preprocess_sspec_for_smf(path: &Path) -> Result<PathBuf, String> {
         return Ok(path.to_path_buf());
     }
 
-    let content = fs::read_to_string(path)
-        .map_err(|e| format!("Failed to read {}: {}", path.display(), e))?;
+    let content = fs::read_to_string(path).map_err(|e| format!("Failed to read {}: {}", path.display(), e))?;
 
     let mut import_parts = Vec::<String>::new();
     let mut top_level_parts = Vec::<String>::new();
@@ -699,9 +698,7 @@ fn preprocess_sspec_for_smf(path: &Path) -> Result<PathBuf, String> {
         if !in_top_fn {
             let line_indent = line.len().saturating_sub(trimmed.len());
             if line_indent == 0
-                && (trimmed.starts_with("fn ")
-                    || trimmed.starts_with("async fn ")
-                    || trimmed.starts_with("static fn "))
+                && (trimmed.starts_with("fn ") || trimmed.starts_with("async fn ") || trimmed.starts_with("static fn "))
             {
                 in_top_fn = true;
                 top_fn_indent = 0;
@@ -744,8 +741,7 @@ fn preprocess_sspec_for_smf(path: &Path) -> Result<PathBuf, String> {
         .parent()
         .unwrap_or_else(|| Path::new("."))
         .join(format!(".sspec_wrapped_entry_{}", file_name));
-    fs::write(&tmp_path, wrapped)
-        .map_err(|e| format!("Failed to write {}: {}", tmp_path.display(), e))?;
+    fs::write(&tmp_path, wrapped).map_err(|e| format!("Failed to write {}: {}", tmp_path.display(), e))?;
     Ok(tmp_path)
 }
 
@@ -929,11 +925,7 @@ fn wait_with_timeout(mut child: std::process::Child, timeout: Duration) -> Resul
 /// This is a real SMF path: preprocess spec files into an executable wrapper,
 /// compile that source to a cached `.smf` artifact through the CLI, then
 /// execute the resulting artifact directly.
-pub fn run_test_file_smf_mode(
-    path: &Path,
-    cache: &BuildCache,
-    options: &super::types::TestOptions,
-) -> TestFileResult {
+pub fn run_test_file_smf_mode(path: &Path, cache: &BuildCache, options: &super::types::TestOptions) -> TestFileResult {
     let start = Instant::now();
     let source_path = match preprocess_sspec_for_smf(path) {
         Ok(path) => path,
@@ -1016,7 +1008,11 @@ pub fn run_test_file_smf_mode(
                     skipped: 0,
                     ignored: 0,
                     duration_ms: start.elapsed().as_millis() as u64,
-                    error: Some(format!("Failed to compile dependency {} to SMF: {}", dep_source.display(), err)),
+                    error: Some(format!(
+                        "Failed to compile dependency {} to SMF: {}",
+                        dep_source.display(),
+                        err
+                    )),
                     individual_results: vec![],
                 };
             }
@@ -1074,7 +1070,11 @@ pub fn run_test_file_smf_mode(
             } else {
                 let (p, f) = parse_test_output(&combined_output);
                 if p == 0 && f == 0 {
-                    if exit_code == 0 { (1, 0, 0) } else { (0, 1, 0) }
+                    if exit_code == 0 {
+                        (1, 0, 0)
+                    } else {
+                        (0, 1, 0)
+                    }
                 } else {
                     (p, f, 0)
                 }

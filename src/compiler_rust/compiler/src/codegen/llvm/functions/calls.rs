@@ -396,8 +396,7 @@ impl LlvmBackend {
                     while let Some(f) = func_opt {
                         let name = f.get_name().to_string_lossy();
                         if name.ends_with(&suffix) {
-                            let has_prefix = prefix_part.is_empty()
-                                || name.to_lowercase().contains(&prefix_part);
+                            let has_prefix = prefix_part.is_empty() || name.to_lowercase().contains(&prefix_part);
                             if !has_prefix {
                                 func_opt = f.get_next_function();
                                 continue;

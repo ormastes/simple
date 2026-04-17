@@ -96,14 +96,7 @@ mod imp {
         COCOA_INVALID_HANDLE
     }
     #[inline]
-    pub fn layer_fill_rect(
-        _layer: i64,
-        _x: i64,
-        _y: i64,
-        _w: i64,
-        _h: i64,
-        _color: i64,
-    ) -> bool {
+    pub fn layer_fill_rect(_layer: i64, _x: i64, _y: i64, _w: i64, _h: i64, _color: i64) -> bool {
         false
     }
     #[inline]
@@ -131,14 +124,7 @@ mod imp {
         false
     }
     #[inline]
-    pub fn layer_blur(
-        _layer: i64,
-        _x: i64,
-        _y: i64,
-        _w: i64,
-        _h: i64,
-        _radius: i64,
-    ) -> bool {
+    pub fn layer_blur(_layer: i64, _x: i64, _y: i64, _w: i64, _h: i64, _radius: i64) -> bool {
         false
     }
     #[inline]
@@ -173,12 +159,11 @@ mod imp {
 
     use objc2::rc::Retained;
     use objc2_app_kit::{
-        NSApplication, NSApplicationActivationPolicy, NSBackingStoreType,
-        NSEventMask, NSImage, NSImageView, NSWindow, NSWindowStyleMask,
+        NSApplication, NSApplicationActivationPolicy, NSBackingStoreType, NSEventMask, NSImage,
+        NSImageView, NSWindow, NSWindowStyleMask,
     };
     use objc2_foundation::{
-        MainThreadMarker, NSData, NSDate, NSDefaultRunLoopMode, NSPoint, NSRect, NSSize,
-        NSString,
+        MainThreadMarker, NSData, NSDate, NSDefaultRunLoopMode, NSPoint, NSRect, NSSize, NSString,
     };
 
     /// Wrapper around the live AppKit window. We keep retained handles so the
@@ -248,10 +233,7 @@ mod imp {
         let title_str = unsafe { super::text_rv_to_string(title_rv) };
         let _app = ensure_app(mtm);
 
-        let frame = NSRect::new(
-            NSPoint::new(0.0, 0.0),
-            NSSize::new(w as f64, h as f64),
-        );
+        let frame = NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(w as f64, h as f64));
         let style = NSWindowStyleMask::Titled
             | NSWindowStyleMask::Closable
             | NSWindowStyleMask::Resizable
@@ -303,10 +285,7 @@ mod imp {
         };
         wnd.w = w;
         wnd.h = h;
-        let new_frame = NSRect::new(
-            NSPoint::new(0.0, 0.0),
-            NSSize::new(w as f64, h as f64),
-        );
+        let new_frame = NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(w as f64, h as f64));
         unsafe {
             wnd.ns_window.setContentSize(new_frame.size);
             wnd.ns_view.setFrame(new_frame);
@@ -341,14 +320,7 @@ mod imp {
         id
     }
 
-    pub fn layer_fill_rect(
-        layer: i64,
-        x: i64,
-        y: i64,
-        w: i64,
-        h: i64,
-        color: i64,
-    ) -> bool {
+    pub fn layer_fill_rect(layer: i64, x: i64, y: i64, w: i64, h: i64, color: i64) -> bool {
         let mut s = state().lock().unwrap();
         let Some(l) = s.layers.get_mut(&layer) else {
             return false;
@@ -470,28 +442,13 @@ mod imp {
         true
     }
 
-    pub fn layer_blur(
-        _layer: i64,
-        _x: i64,
-        _y: i64,
-        _w: i64,
-        _h: i64,
-        _radius: i64,
-    ) -> bool {
+    pub fn layer_blur(_layer: i64, _x: i64, _y: i64, _w: i64, _h: i64, _radius: i64) -> bool {
         // TODO(metal): CIFilter-based blur. Phase C no-ops but returns true so
         // the Simple-side glass path does not fall back.
         true
     }
 
-    pub fn layer_gradient_v(
-        layer: i64,
-        x: i64,
-        y: i64,
-        w: i64,
-        h: i64,
-        c1: i64,
-        c2: i64,
-    ) -> bool {
+    pub fn layer_gradient_v(layer: i64, x: i64, y: i64, w: i64, h: i64, c1: i64, c2: i64) -> bool {
         let mut s = state().lock().unwrap();
         let Some(l) = s.layers.get_mut(&layer) else {
             return false;
@@ -517,10 +474,7 @@ mod imp {
             let r = (r1 * (span - t) + r2 * t) / span;
             let g = (g1 * (span - t) + g2 * t) / span;
             let b = (b1 * (span - t) + b2 * t) / span;
-            let color = 0xff00_0000u32
-                | ((r as u32) << 16)
-                | ((g as u32) << 8)
-                | (b as u32);
+            let color = 0xff00_0000u32 | ((r as u32) << 16) | ((g as u32) << 8) | (b as u32);
             let row = (yy * lw) as usize;
             for xx in x0..x1 {
                 l.pixels[row + xx as usize] = color;
@@ -550,12 +504,7 @@ mod imp {
         let mode = unsafe { NSDefaultRunLoopMode };
         let mask = NSEventMask::Any;
         let evt = unsafe {
-            app.nextEventMatchingMask_untilDate_inMode_dequeue(
-                mask,
-                Some(&until),
-                mode,
-                true,
-            )
+            app.nextEventMatchingMask_untilDate_inMode_dequeue(mask, Some(&until), mode, true)
         };
         let Some(evt) = evt else {
             return 0;
@@ -590,12 +539,7 @@ pub unsafe extern "C" fn rt_cocoa_window_close(win: i64) -> bool {
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn rt_cocoa_layer_create(
-    win: i64,
-    w: i64,
-    h: i64,
-    fill_color: i64,
-) -> i64 {
+pub unsafe extern "C" fn rt_cocoa_layer_create(win: i64, w: i64, h: i64, fill_color: i64) -> i64 {
     imp::layer_create(win, w, h, fill_color)
 }
 

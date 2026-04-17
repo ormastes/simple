@@ -286,6 +286,10 @@ Doctests:\n\
 \n\
 Execution:\n\
   --mode <interpreter|smf|native>\n\
+  --compile               Shorthand for --mode=native (compile specs and run as subprocess)\n\
+  --compile=<mode>        Explicit form: --compile=native|smf|interpreter\n\
+  --force-rebuild         Rebuild cached compile artifacts\n\
+  --keep-artifacts        Preserve compile artifacts after run\n\
   --parallel, -p          Enable parallel execution\n\
   --sequential            Force sequential execution\n\
   --threads, -j <N>       Set worker threads\n\

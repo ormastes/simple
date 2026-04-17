@@ -395,8 +395,7 @@ pub extern "C" fn rt_array_free(array: RuntimeValue) {
             std::alloc::dealloc((*ptr).data as *mut u8, data_layout);
             (*ptr).data = std::ptr::null_mut();
         }
-        let header_layout =
-            std::alloc::Layout::from_size_align(std::mem::size_of::<RuntimeArray>(), 8).unwrap();
+        let header_layout = std::alloc::Layout::from_size_align(std::mem::size_of::<RuntimeArray>(), 8).unwrap();
         std::alloc::dealloc(ptr as *mut u8, header_layout);
     }
 }

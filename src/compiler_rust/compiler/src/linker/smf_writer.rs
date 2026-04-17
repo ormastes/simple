@@ -293,7 +293,11 @@ impl SmfWriter {
             .symbols
             .iter()
             .find(|symbol| matches!(symbol.name.as_str(), "spl_main" | "_spl_main"))
-            .or_else(|| self.symbols.iter().find(|symbol| matches!(symbol.name.as_str(), "main" | "_main")))
+            .or_else(|| {
+                self.symbols
+                    .iter()
+                    .find(|symbol| matches!(symbol.name.as_str(), "main" | "_main"))
+            })
             .map(|symbol| symbol.value)
             .unwrap_or(0);
         let exported_count = self

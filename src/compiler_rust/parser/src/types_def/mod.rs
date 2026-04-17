@@ -300,12 +300,7 @@ impl<'a> Parser<'a> {
     pub(crate) fn parse_field(&mut self) -> Result<Field, ParseError> {
         let start_span = self.current.span;
 
-        let visibility = if self.check(&TokenKind::Pub) {
-            self.advance();
-            Visibility::Public
-        } else {
-            Visibility::Private
-        };
+        let visibility = self.parse_optional_visibility()?;
 
         let mutability = if self.check(&TokenKind::Mut) {
             self.advance();
@@ -500,7 +495,7 @@ impl<'a> Parser<'a> {
                 || self.check(&TokenKind::At)
                 || self.check(&TokenKind::Hash)
                 || self.check(&TokenKind::Static)
-                || (self.check(&TokenKind::Pub) && (self.peek_is(&TokenKind::Fn) || self.peek_is(&TokenKind::Async) || self.peek_is(&TokenKind::Me)))
+                || self.peek_visibility_target_is(&[TokenKind::Fn, TokenKind::Async, TokenKind::Me])
             {
                 // Method (optionally async/decorated/attributed/pub/static).
                 let start_span = self.current.span;
@@ -517,12 +512,7 @@ impl<'a> Parser<'a> {
                 }
 
                 // Handle optional `pub` keyword after decorators
-                let _is_pub2 = if self.check(&TokenKind::Pub) {
-                    self.advance();
-                    true
-                } else {
-                    false
-                };
+                let method_visibility = self.parse_optional_visibility()?;
 
                 // Handle optional `static` keyword for static methods
                 let is_static = if self.check(&TokenKind::Static) {
@@ -544,13 +534,14 @@ impl<'a> Parser<'a> {
                 }
 
                 // Parse the function (with decorators already parsed)
-                let item = if decorators.is_empty() && !_is_pub2 {
+                let item = if decorators.is_empty() && method_visibility == Visibility::Private {
                     self.parse_item()?
                 } else {
                     // Parse function directly with decorators
                     self.parse_function_with_decorators(decorators)?
                 };
                 if let Node::Function(mut f) = item {
+                    f.visibility = method_visibility;
                     // Set the is_static flag on the function
                     f.is_static = is_static;
 
@@ -691,7 +682,7 @@ impl<'a> Parser<'a> {
                 || self.check(&TokenKind::At)
                 || self.check(&TokenKind::Hash)
                 || self.check(&TokenKind::Static)
-                || (self.check(&TokenKind::Pub) && (self.peek_is(&TokenKind::Fn) || self.peek_is(&TokenKind::Async) || self.peek_is(&TokenKind::Me) || self.peek_is(&TokenKind::Static)))
+                || self.peek_visibility_target_is(&[TokenKind::Fn, TokenKind::Async, TokenKind::Me, TokenKind::Static])
             {
                 let start_span = self.current.span;
 
@@ -707,12 +698,7 @@ impl<'a> Parser<'a> {
                 }
 
                 // Handle optional `pub` keyword after decorators
-                let _is_pub = if self.check(&TokenKind::Pub) {
-                    self.advance();
-                    true
-                } else {
-                    false
-                };
+                let method_visibility = self.parse_optional_visibility()?;
 
                 // Handle optional `static` keyword for static methods
                 let is_static = if self.check(&TokenKind::Static) {
@@ -743,7 +729,7 @@ impl<'a> Parser<'a> {
 
                 // Parse the function (with decorators already parsed)
                 // Only use parse_item() for non-static, non-decorated methods
-                let mut item = if decorators.is_empty() && !_is_pub && !is_static {
+                let mut item = if decorators.is_empty() && method_visibility == Visibility::Private && !is_static {
                     self.parse_item()?
                 } else {
                     // Parse function directly with decorators or for static methods
@@ -756,6 +742,7 @@ impl<'a> Parser<'a> {
                     }
                 }
                 if let Node::Function(mut f) = item {
+                    f.visibility = method_visibility;
                     // Set the is_static flag on the function
                     f.is_static = is_static;
 

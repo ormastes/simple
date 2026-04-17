@@ -58,11 +58,7 @@ impl<'a> MirLowerer<'a> {
             } => {
                 // Base's own ty is preferred; if unnamed, walk through
                 // another structural hop.
-                let base_ty = if self
-                    .type_registry
-                    .and_then(|r| r.get_type_name(base.ty))
-                    .is_some()
-                {
+                let base_ty = if self.type_registry.and_then(|r| r.get_type_name(base.ty)).is_some() {
                     Some(base.ty)
                 } else {
                     self.recover_receiver_type(base)
@@ -75,22 +71,13 @@ impl<'a> MirLowerer<'a> {
                     ty = registry.get(*inner)?;
                 }
                 match ty {
-                    HirType::Struct { fields, .. } => {
-                        fields.get(*field_index).map(|(_, fty)| *fty)
-                    }
+                    HirType::Struct { fields, .. } => fields.get(*field_index).map(|(_, fty)| *fty),
                     HirType::Tuple(elems) => elems.get(*field_index).copied(),
                     _ => None,
                 }
             }
-            HirExprKind::Index {
-                receiver: base,
-                ..
-            } => {
-                let base_ty = if self
-                    .type_registry
-                    .and_then(|r| r.get_type_name(base.ty))
-                    .is_some()
-                {
+            HirExprKind::Index { receiver: base, .. } => {
+                let base_ty = if self.type_registry.and_then(|r| r.get_type_name(base.ty)).is_some() {
                     Some(base.ty)
                 } else {
                     self.recover_receiver_type(base)
@@ -134,11 +121,7 @@ impl<'a> MirLowerer<'a> {
             // chains like `(*(*pp)).init()` still resolve. Mirrors the
             // pointer-strip pattern used by FieldAccess / Index.
             HirExprKind::Deref(inner) => {
-                let inner_ty = if self
-                    .type_registry
-                    .and_then(|r| r.get_type_name(inner.ty))
-                    .is_some()
-                {
+                let inner_ty = if self.type_registry.and_then(|r| r.get_type_name(inner.ty)).is_some() {
                     Some(inner.ty)
                 } else {
                     self.recover_receiver_type(inner)
@@ -1555,8 +1538,7 @@ impl<'a> MirLowerer<'a> {
                 // from `TypeRegistry` — no synthesis — and the recursion
                 // terminates at a Local (or an expression whose own `ty`
                 // is already named).
-                let receiver_local_ty: Option<TypeId> =
-                    self.recover_receiver_type(receiver);
+                let receiver_local_ty: Option<TypeId> = self.recover_receiver_type(receiver);
 
                 let func_name = if let Some(registry) = self.type_registry {
                     if let Some(type_name) = registry.get_type_name(receiver.ty) {
@@ -1604,9 +1586,7 @@ impl<'a> MirLowerer<'a> {
                 match dispatch {
                     DispatchMode::Dynamic => {
                         // Try to find the method in a registered trait (vtable dispatch)
-                        if let Some((vtable_slot, param_types, return_type)) =
-                            self.find_trait_for_method(&method)
-                        {
+                        if let Some((vtable_slot, param_types, return_type)) = self.find_trait_for_method(&method) {
                             let dest = self.with_func(|func, current_block| {
                                 let dest = func.new_vreg();
                                 let block = func.block_mut(current_block).unwrap();

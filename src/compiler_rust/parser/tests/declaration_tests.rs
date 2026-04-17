@@ -140,6 +140,44 @@ fn test_pub_mod_declaration() {
 }
 
 #[test]
+fn test_pub_peer_mod_declaration() {
+    let module = parse("pub(peer) mod router").unwrap();
+    if let Node::ModDecl(decl) = &module.items[0] {
+        assert_eq!(decl.name, "router");
+        assert_eq!(decl.visibility, Visibility::Peer);
+    } else {
+        panic!("Expected mod declaration");
+    }
+}
+
+#[test]
+fn test_pub_up_function_declaration() {
+    let module = parse("pub(up) fn build():\n    pass").unwrap();
+    if let Node::Function(func) = &module.items[0] {
+        assert_eq!(func.name, "build");
+        assert_eq!(func.visibility, Visibility::Up);
+    } else {
+        panic!("Expected function definition");
+    }
+}
+
+#[test]
+fn test_decorated_pub_peer_function_declaration() {
+    let src = r#"@simd
+pub(peer) fn add(data: f32[], dst: f32[]):
+    dst[0] = data[0]
+"#;
+    let module = parse(src).unwrap();
+    if let Node::Function(func) = &module.items[0] {
+        assert_eq!(func.name, "add");
+        assert!(func.has_simd_decorator());
+        assert_eq!(func.visibility, Visibility::Peer);
+    } else {
+        panic!("Expected function");
+    }
+}
+
+#[test]
 fn test_common_use() {
     let module = parse("common use crate.core.base.*").unwrap();
     if let Node::CommonUseStmt(stmt) = &module.items[0] {

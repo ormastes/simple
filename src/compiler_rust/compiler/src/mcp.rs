@@ -216,7 +216,7 @@ impl McpGenerator {
             McpMode::Expanded => "F▼",
         };
 
-        let vis = if func.visibility.is_public() { "pub " } else { "" };
+        let vis = visibility_prefix(&func.visibility);
         let name = &func.name;
 
         match mode {
@@ -251,7 +251,7 @@ impl McpGenerator {
             McpMode::Expanded => "C▼",
         };
 
-        let vis = if class.visibility.is_public() { "pub " } else { "" };
+        let vis = visibility_prefix(&class.visibility);
         let name = &class.name;
 
         match mode {
@@ -285,7 +285,11 @@ impl McpGenerator {
                 // Show methods (collapsed)
                 for method in &class.methods {
                     if self.should_show(&method.visibility) {
-                        lines.push(format!("    pub fn {} {{ … }}", method.name));
+                        lines.push(format!(
+                            "    {}fn {} {{ … }}",
+                            visibility_prefix(&method.visibility),
+                            method.name
+                        ));
                     }
                 }
 
@@ -377,6 +381,14 @@ impl McpGenerator {
             }
             _ => "…".to_string(),
         }
+    }
+}
+
+fn visibility_prefix(visibility: &Visibility) -> String {
+    if matches!(visibility, Visibility::Private) {
+        String::new()
+    } else {
+        format!("{} ", visibility.as_keyword())
     }
 }
 

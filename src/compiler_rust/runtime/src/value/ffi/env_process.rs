@@ -265,10 +265,7 @@ where
     })
 }
 
-fn finish_child_output(
-    mut child: std::process::Child,
-    timeout_ms: i64,
-) -> std::io::Result<(Vec<u8>, Vec<u8>, i64)> {
+fn finish_child_output(mut child: std::process::Child, timeout_ms: i64) -> std::io::Result<(Vec<u8>, Vec<u8>, i64)> {
     use std::time::{Duration, Instant};
 
     let stdout_handle = spawn_output_reader(child.stdout.take());
@@ -1033,10 +1030,7 @@ mod tests {
     fn test_process_run_timeout_drains_large_stderr() {
         unsafe {
             let cmd = "/bin/sh";
-            let args = runtime_args(&[
-                "-c",
-                "python3 - <<'PY'\nimport sys\nsys.stderr.write('x' * 200000)\nPY",
-            ]);
+            let args = runtime_args(&["-c", "python3 - <<'PY'\nimport sys\nsys.stderr.write('x' * 200000)\nPY"]);
             let result = rt_process_run_timeout(cmd.as_ptr(), cmd.len() as u64, args, 5_000);
             let stderr = extract_string_test(rt_tuple_get(result, 1));
             let exit_code = rt_tuple_get(result, 2).as_int();

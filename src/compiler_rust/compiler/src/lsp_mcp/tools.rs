@@ -1,7 +1,7 @@
 //! LSP MCP Tool Implementations
 
 use crate::lsp_mcp::types::*;
-use simple_parser::ast::{Block, ClassDef, EnumDef, Expr, FunctionDef, Node, StructDef, TraitDef, Type};
+use simple_parser::ast::{Block, ClassDef, EnumDef, Expr, FunctionDef, Node, StructDef, TraitDef, Type, Visibility};
 use simple_parser::token::Span;
 use simple_parser::Parser;
 use std::collections::HashMap;
@@ -325,34 +325,52 @@ fn generate_hover_info(nodes: &[Node], name: &str) -> Option<HoverInfo> {
             Node::Function(func) if func.name == name => {
                 let sig = format_function_signature(func);
                 let markdown = format!("```simple\n{}\n```", sig);
-                return Some(HoverInfo::new(HoverContents::markdown(markdown)));
+                return Some(
+                    HoverInfo::new(HoverContents::markdown(markdown))
+                        .with_visibility_v2(VisibilityInfoV2::from_visibility(func.visibility)),
+                );
             }
             Node::Class(class) if class.name == name => {
                 let sig = format_class_signature(class);
                 let markdown = format!("```simple\n{}\n```", sig);
-                return Some(HoverInfo::new(HoverContents::markdown(markdown)));
+                return Some(
+                    HoverInfo::new(HoverContents::markdown(markdown))
+                        .with_visibility_v2(VisibilityInfoV2::from_visibility(class.visibility)),
+                );
             }
             Node::Struct(s) if s.name == name => {
                 let sig = format_struct_signature(s);
                 let markdown = format!("```simple\n{}\n```", sig);
-                return Some(HoverInfo::new(HoverContents::markdown(markdown)));
+                return Some(
+                    HoverInfo::new(HoverContents::markdown(markdown))
+                        .with_visibility_v2(VisibilityInfoV2::from_visibility(s.visibility)),
+                );
             }
             Node::Enum(e) if e.name == name => {
                 let sig = format_enum_signature(e);
                 let markdown = format!("```simple\n{}\n```", sig);
-                return Some(HoverInfo::new(HoverContents::markdown(markdown)));
+                return Some(
+                    HoverInfo::new(HoverContents::markdown(markdown))
+                        .with_visibility_v2(VisibilityInfoV2::from_visibility(e.visibility)),
+                );
             }
             Node::Trait(t) if t.name == name => {
                 let sig = format_trait_signature(t);
                 let markdown = format!("```simple\n{}\n```", sig);
-                return Some(HoverInfo::new(HoverContents::markdown(markdown)));
+                return Some(
+                    HoverInfo::new(HoverContents::markdown(markdown))
+                        .with_visibility_v2(VisibilityInfoV2::from_visibility(t.visibility)),
+                );
             }
             Node::Class(class) => {
                 for method in &class.methods {
                     if method.name == name {
                         let sig = format_function_signature(method);
                         let markdown = format!("```simple\n{}\n```\n\nMethod of `{}`", sig, class.name);
-                        return Some(HoverInfo::new(HoverContents::markdown(markdown)));
+                        return Some(
+                            HoverInfo::new(HoverContents::markdown(markdown))
+                                .with_visibility_v2(VisibilityInfoV2::from_visibility(method.visibility)),
+                        );
                     }
                 }
             }
@@ -367,24 +385,30 @@ fn extract_symbols_from_nodes(nodes: &[Node]) -> Vec<SymbolInfo> {
     for node in nodes {
         match node {
             Node::Function(func) => {
-                symbols.push(SymbolInfo::new(
-                    &func.name,
-                    SymbolKind::Function,
-                    span_to_range(&func.span),
-                ));
+                symbols.push(
+                    SymbolInfo::new(&func.name, SymbolKind::Function, span_to_range(&func.span))
+                        .with_visibility(func.visibility.as_keyword())
+                        .with_visibility_v2(VisibilityInfoV2::from_visibility(func.visibility)),
+                );
             }
             Node::Class(class) => {
-                let mut class_symbol = SymbolInfo::new(&class.name, SymbolKind::Class, span_to_range(&class.span));
+                let mut class_symbol = SymbolInfo::new(&class.name, SymbolKind::Class, span_to_range(&class.span))
+                    .with_visibility(class.visibility.as_keyword())
+                    .with_visibility_v2(VisibilityInfoV2::from_visibility(class.visibility));
                 let mut children = Vec::new();
                 for method in &class.methods {
                     children.push(
                         SymbolInfo::new(&method.name, SymbolKind::Method, span_to_range(&method.span))
+                            .with_visibility(method.visibility.as_keyword())
+                            .with_visibility_v2(VisibilityInfoV2::from_visibility(method.visibility))
                             .with_container(&class.name),
                     );
                 }
                 for field in &class.fields {
                     children.push(
                         SymbolInfo::new(&field.name, SymbolKind::Field, span_to_range(&field.span))
+                            .with_visibility(field.visibility.as_keyword())
+                            .with_visibility_v2(VisibilityInfoV2::from_visibility(field.visibility))
                             .with_container(&class.name),
                     );
                 }
@@ -392,11 +416,15 @@ fn extract_symbols_from_nodes(nodes: &[Node]) -> Vec<SymbolInfo> {
                 symbols.push(class_symbol);
             }
             Node::Struct(s) => {
-                let mut struct_symbol = SymbolInfo::new(&s.name, SymbolKind::Struct, span_to_range(&s.span));
+                let mut struct_symbol = SymbolInfo::new(&s.name, SymbolKind::Struct, span_to_range(&s.span))
+                    .with_visibility(s.visibility.as_keyword())
+                    .with_visibility_v2(VisibilityInfoV2::from_visibility(s.visibility));
                 let mut fields = Vec::new();
                 for field in &s.fields {
                     fields.push(
                         SymbolInfo::new(&field.name, SymbolKind::Field, span_to_range(&field.span))
+                            .with_visibility(field.visibility.as_keyword())
+                            .with_visibility_v2(VisibilityInfoV2::from_visibility(field.visibility))
                             .with_container(&s.name),
                     );
                 }
@@ -404,7 +432,9 @@ fn extract_symbols_from_nodes(nodes: &[Node]) -> Vec<SymbolInfo> {
                 symbols.push(struct_symbol);
             }
             Node::Enum(e) => {
-                let mut enum_symbol = SymbolInfo::new(&e.name, SymbolKind::Enum, span_to_range(&e.span));
+                let mut enum_symbol = SymbolInfo::new(&e.name, SymbolKind::Enum, span_to_range(&e.span))
+                    .with_visibility(e.visibility.as_keyword())
+                    .with_visibility_v2(VisibilityInfoV2::from_visibility(e.visibility));
                 let mut variants = Vec::new();
                 for variant in &e.variants {
                     variants.push(
@@ -416,11 +446,15 @@ fn extract_symbols_from_nodes(nodes: &[Node]) -> Vec<SymbolInfo> {
                 symbols.push(enum_symbol);
             }
             Node::Trait(t) => {
-                let mut trait_symbol = SymbolInfo::new(&t.name, SymbolKind::Interface, span_to_range(&t.span));
+                let mut trait_symbol = SymbolInfo::new(&t.name, SymbolKind::Interface, span_to_range(&t.span))
+                    .with_visibility(t.visibility.as_keyword())
+                    .with_visibility_v2(VisibilityInfoV2::from_visibility(t.visibility));
                 let mut methods = Vec::new();
                 for method in &t.methods {
                     methods.push(
                         SymbolInfo::new(&method.name, SymbolKind::Method, span_to_range(&method.span))
+                            .with_visibility(method.visibility.as_keyword())
+                            .with_visibility_v2(VisibilityInfoV2::from_visibility(method.visibility))
                             .with_container(&t.name),
                     );
                 }
@@ -496,8 +530,16 @@ fn extract_pattern_name(pattern: &simple_parser::ast::Pattern) -> Option<&str> {
     }
 }
 
+fn visibility_prefix(visibility: &Visibility) -> String {
+    if matches!(visibility, Visibility::Private) {
+        String::new()
+    } else {
+        format!("{} ", visibility.as_keyword())
+    }
+}
+
 fn format_function_signature(func: &FunctionDef) -> String {
-    let vis = if func.visibility.is_public() { "pub " } else { "" };
+    let vis = visibility_prefix(&func.visibility);
     let async_kw = if func
         .effects
         .iter()
@@ -527,7 +569,7 @@ fn format_function_signature(func: &FunctionDef) -> String {
 }
 
 fn format_class_signature(class: &ClassDef) -> String {
-    let vis = if class.visibility.is_public() { "pub " } else { "" };
+    let vis = visibility_prefix(&class.visibility);
     let fields: Vec<String> = class
         .fields
         .iter()
@@ -548,7 +590,7 @@ fn format_class_signature(class: &ClassDef) -> String {
 }
 
 fn format_struct_signature(s: &StructDef) -> String {
-    let vis = if s.visibility.is_public() { "pub " } else { "" };
+    let vis = visibility_prefix(&s.visibility);
     let fields: Vec<String> = s
         .fields
         .iter()
@@ -558,13 +600,13 @@ fn format_struct_signature(s: &StructDef) -> String {
 }
 
 fn format_enum_signature(e: &EnumDef) -> String {
-    let vis = if e.visibility.is_public() { "pub " } else { "" };
+    let vis = visibility_prefix(&e.visibility);
     let variants: Vec<String> = e.variants.iter().map(|v| format!("    {}", v.name)).collect();
     format!("{}enum {}:\n{}", vis, e.name, variants.join("\n"))
 }
 
 fn format_trait_signature(t: &TraitDef) -> String {
-    let vis = if t.visibility.is_public() { "pub " } else { "" };
+    let vis = visibility_prefix(&t.visibility);
     let methods: Vec<String> = t.methods.iter().map(|m| format!("    fn {}(...)", m.name)).collect();
     format!("{}trait {}:\n{}", vis, t.name, methods.join("\n"))
 }
@@ -599,5 +641,40 @@ fn type_to_string(ty: &Type) -> String {
         Type::DynTrait(name) => format!("dyn {}", name),
         Type::Capability { inner, .. } => type_to_string(inner),
         _ => "unknown".to_string(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use simple_parser::Parser;
+
+    fn parse_nodes(source: &str) -> Vec<Node> {
+        Parser::new(source).parse().unwrap().items
+    }
+
+    #[test]
+    fn document_symbols_include_scoped_visibility_v2() {
+        let nodes = parse_nodes("pub(peer) fn helper():\n    pass");
+        let symbols = extract_symbols_from_nodes(&nodes);
+
+        assert_eq!(symbols.len(), 1);
+        assert_eq!(symbols[0].declared_visibility.as_deref(), Some("pub(peer)"));
+        assert_eq!(
+            symbols[0].visibility_v2.as_ref().map(|v| v.kind),
+            Some(ScopedVisibilityKind::Peer)
+        );
+    }
+
+    #[test]
+    fn hover_includes_scoped_visibility_v2() {
+        let nodes = parse_nodes("pub(up) fn build():\n    pass");
+        let hover = generate_hover_info(&nodes, "build").expect("hover");
+
+        assert!(hover.contents.value.contains("pub(up) fn build()"));
+        assert_eq!(
+            hover.visibility_v2.as_ref().map(|v| v.kind),
+            Some(ScopedVisibilityKind::Up)
+        );
     }
 }

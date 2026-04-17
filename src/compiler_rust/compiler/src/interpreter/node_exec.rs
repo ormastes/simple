@@ -490,7 +490,12 @@ fn exec_assignment(
         // Mirrors the `arr += [..]` AugAssign fast path so the plain-assign form
         // has the same amortized O(N) behavior. See `try_array_append_in_place`.
         // Also handles `s = s + rhs` on Value::Str via try_string_append_in_place.
-        if let Expr::Binary { op: BinOp::Add, left, right } = &assign.value {
+        if let Expr::Binary {
+            op: BinOp::Add,
+            left,
+            right,
+        } = &assign.value
+        {
             if let Expr::Identifier(lname) = left.as_ref() {
                 if lname == name {
                     let items: Option<&[Expr]> = match right.as_ref() {
@@ -519,7 +524,13 @@ fn exec_assignment(
                     // value to preserve side-effect ordering with the slow path.
                     if matches!(env.get(name), Some(Value::Str(_))) {
                         match try_string_append_in_place(
-                            name, right.as_ref(), env, functions, classes, enums, impl_methods,
+                            name,
+                            right.as_ref(),
+                            env,
+                            functions,
+                            classes,
+                            enums,
+                            impl_methods,
                         )? {
                             None => {
                                 MODULE_GLOBALS.with(|cell| {

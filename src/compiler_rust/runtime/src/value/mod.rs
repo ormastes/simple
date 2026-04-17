@@ -105,12 +105,12 @@ pub use channels::RuntimeChannel;
 
 // Re-export collection FFI functions
 pub use collections::{
-    rt_array_clear, rt_array_first, rt_array_get, rt_array_len, rt_array_new, rt_array_pop, rt_array_push, rt_array_set, rt_contains,
-    rt_cstring_to_text, rt_index_get, rt_index_set, rt_len, rt_slice, rt_string_char_at, rt_string_concat,
-    rt_range, rt_range_inclusive, rt_string_data, rt_string_ends_with, rt_string_eq, rt_string_find, rt_string_index_of, rt_string_join,
-    rt_string_len, rt_string_new, rt_string_replace, rt_string_rfind, rt_string_split, rt_string_starts_with,
-    rt_string_to_float, rt_string_to_int, rt_string_to_lower, rt_string_to_upper, rt_string_trim, rt_to_string,
-    rt_tuple_get, rt_tuple_len, rt_tuple_new, rt_tuple_set,
+    rt_array_clear, rt_array_first, rt_array_get, rt_array_len, rt_array_new, rt_array_pop, rt_array_push,
+    rt_array_set, rt_contains, rt_cstring_to_text, rt_index_get, rt_index_set, rt_len, rt_slice, rt_string_char_at,
+    rt_string_concat, rt_range, rt_range_inclusive, rt_string_data, rt_string_ends_with, rt_string_eq, rt_string_find,
+    rt_string_index_of, rt_string_join, rt_string_len, rt_string_new, rt_string_replace, rt_string_rfind,
+    rt_string_split, rt_string_starts_with, rt_string_to_float, rt_string_to_int, rt_string_to_lower,
+    rt_string_to_upper, rt_string_trim, rt_to_string, rt_tuple_get, rt_tuple_len, rt_tuple_new, rt_tuple_set,
 };
 
 // Re-export dict FFI functions
@@ -366,24 +366,9 @@ pub use ffi::{
 
 // Re-export hash FFI functions
 pub use ffi::{
-    rt_sha1_finish,
-    rt_sha1_finish_base64,
-    rt_sha1_finish_bytes,
-    rt_sha1_free,
-    rt_sha1_new,
-    rt_sha1_reset,
-    rt_sha1_write,
-    rt_sha256_finish,
-    rt_sha256_finish_bytes,
-    rt_sha256_free,
-    rt_sha256_new,
-    rt_sha256_reset,
-    rt_sha256_write,
-    rt_xxhash_finish,
-    rt_xxhash_free,
-    rt_xxhash_new,
-    rt_xxhash_new_with_seed,
-    rt_xxhash_reset,
+    rt_sha1_finish, rt_sha1_finish_base64, rt_sha1_finish_bytes, rt_sha1_free, rt_sha1_new, rt_sha1_reset,
+    rt_sha1_write, rt_sha256_finish, rt_sha256_finish_bytes, rt_sha256_free, rt_sha256_new, rt_sha256_reset,
+    rt_sha256_write, rt_xxhash_finish, rt_xxhash_free, rt_xxhash_new, rt_xxhash_new_with_seed, rt_xxhash_reset,
     rt_xxhash_write,
 };
 

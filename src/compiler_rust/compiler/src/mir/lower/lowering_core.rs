@@ -716,10 +716,7 @@ impl<'a> MirLowerer<'a> {
             for hir_impl in &hir.impls {
                 if let Some(ref trait_name) = hir_impl.trait_name {
                     if let Some(trait_info) = trait_infos.get(trait_name) {
-                        let vtable_sym = format!(
-                            "__vtable__{}__for__{}",
-                            hir_impl.type_name, trait_name
-                        );
+                        let vtable_sym = format!("__vtable__{}__for__{}", hir_impl.type_name, trait_name);
                         // Build method function names in vtable slot order
                         let mut slot_fns: Vec<(u32, String)> = trait_info
                             .methods
@@ -732,8 +729,7 @@ impl<'a> MirLowerer<'a> {
                             })
                             .collect();
                         slot_fns.sort_by_key(|(slot, _)| *slot);
-                        let method_fns: Vec<String> =
-                            slot_fns.into_iter().map(|(_, fn_name)| fn_name).collect();
+                        let method_fns: Vec<String> = slot_fns.into_iter().map(|(_, fn_name)| fn_name).collect();
                         module.vtable_impls.push((
                             hir_impl.type_id,
                             hir_impl.type_name.clone(),

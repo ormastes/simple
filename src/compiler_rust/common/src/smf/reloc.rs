@@ -63,7 +63,8 @@ pub fn apply_relocations(
             "Processing relocation"
         );
 
-        let sym_addr = if sym.visibility != 0 || sym.binding == SymbolBinding::Local || sym.value != 0 || sym.size != 0 {
+        let sym_addr = if sym.visibility != 0 || sym.binding == SymbolBinding::Local || sym.value != 0 || sym.size != 0
+        {
             base_address.wrapping_add(sym.value as usize)
         } else {
             match imports(sym_name) {
@@ -308,10 +309,17 @@ mod tests {
         let base_address = 0x1000usize;
         let import_lookups = Cell::new(0);
 
-        apply_relocations(&mut code, &relocs, &symbols, base_address, &|_| {
-            import_lookups.set(import_lookups.get() + 1);
-            None
-        }, &mut |_sym, _addr| Err("unexpected GOT relocation".to_string()))
+        apply_relocations(
+            &mut code,
+            &relocs,
+            &symbols,
+            base_address,
+            &|_| {
+                import_lookups.set(import_lookups.get() + 1);
+                None
+            },
+            &mut |_sym, _addr| Err("unexpected GOT relocation".to_string()),
+        )
         .expect("defined globals should relocate from the module body");
 
         assert_eq!(import_lookups.get(), 0);
@@ -347,10 +355,17 @@ mod tests {
         let base_address = 0x2000usize;
         let import_lookups = Cell::new(0);
 
-        apply_relocations(&mut code, &relocs, &symbols, base_address, &|_| {
-            import_lookups.set(import_lookups.get() + 1);
-            None
-        }, &mut |_sym, _addr| Err("unexpected GOT relocation".to_string()))
+        apply_relocations(
+            &mut code,
+            &relocs,
+            &symbols,
+            base_address,
+            &|_| {
+                import_lookups.set(import_lookups.get() + 1);
+                None
+            },
+            &mut |_sym, _addr| Err("unexpected GOT relocation".to_string()),
+        )
         .expect("defined globals at offset zero should relocate from the module body");
 
         assert_eq!(import_lookups.get(), 0);

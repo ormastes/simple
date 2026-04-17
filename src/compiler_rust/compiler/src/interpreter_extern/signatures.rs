@@ -20,9 +20,8 @@ use crate::error::CompileError;
 use crate::value::Value;
 use ring::rand::SystemRandom;
 use ring::signature::{
-    EcdsaKeyPair, KeyPair, RsaKeyPair, UnparsedPublicKey, ECDSA_P256_SHA256_FIXED,
-    ECDSA_P256_SHA256_FIXED_SIGNING, ED25519, RSA_PKCS1_2048_8192_SHA256,
-    RSA_PKCS1_2048_8192_SHA512, RSA_PKCS1_SHA256, RSA_PKCS1_SHA512,
+    EcdsaKeyPair, KeyPair, RsaKeyPair, UnparsedPublicKey, ECDSA_P256_SHA256_FIXED, ECDSA_P256_SHA256_FIXED_SIGNING,
+    ED25519, RSA_PKCS1_2048_8192_SHA256, RSA_PKCS1_2048_8192_SHA512, RSA_PKCS1_SHA256, RSA_PKCS1_SHA512,
     RSA_PSS_2048_8192_SHA256, RSA_PSS_2048_8192_SHA384, RSA_PSS_2048_8192_SHA512,
 };
 use std::sync::Arc;
@@ -53,9 +52,7 @@ fn extract_bytes(args: &[Value], index: usize) -> Option<Vec<u8>> {
 /// Wrap raw bytes in a `Value::Array(Arc<Vec<Value::Int(byte)>>)` shape
 /// so Simple code sees a genuine `[u8]`.
 fn bytes_to_value(bytes: &[u8]) -> Value {
-    Value::Array(Arc::new(
-        bytes.iter().map(|b| Value::Int(*b as i64)).collect(),
-    ))
+    Value::Array(Arc::new(bytes.iter().map(|b| Value::Int(*b as i64)).collect()))
 }
 
 fn empty_bytes() -> Value {
@@ -145,10 +142,7 @@ fn normalize_rsa_public_key(pubkey: &[u8]) -> Option<Vec<u8>> {
 // RSA sign
 // ---------------------------------------------------------------------------
 
-fn rsa_sign_impl(
-    args: &[Value],
-    enc: &'static dyn ring::signature::RsaEncoding,
-) -> Result<Value, CompileError> {
+fn rsa_sign_impl(args: &[Value], enc: &'static dyn ring::signature::RsaEncoding) -> Result<Value, CompileError> {
     let Some(pkcs8) = extract_bytes(args, 0) else {
         return Ok(empty_bytes());
     };
@@ -195,11 +189,7 @@ pub fn rt_rsa_sha256_verify(args: &[Value]) -> Result<Value, CompileError> {
         return Ok(Value::Int(0));
     };
     let key = UnparsedPublicKey::new(&RSA_PKCS1_2048_8192_SHA256, pk);
-    Ok(Value::Int(if key.verify(&msg, &sig).is_ok() {
-        1
-    } else {
-        0
-    }))
+    Ok(Value::Int(if key.verify(&msg, &sig).is_ok() { 1 } else { 0 }))
 }
 
 /// `rt_rsa_sha512_verify(spki: [u8], message: [u8], signature: [u8]) -> i64`
@@ -217,11 +207,7 @@ pub fn rt_rsa_sha512_verify(args: &[Value]) -> Result<Value, CompileError> {
         return Ok(Value::Int(0));
     };
     let key = UnparsedPublicKey::new(&RSA_PKCS1_2048_8192_SHA512, pk);
-    Ok(Value::Int(if key.verify(&msg, &sig).is_ok() {
-        1
-    } else {
-        0
-    }))
+    Ok(Value::Int(if key.verify(&msg, &sig).is_ok() { 1 } else { 0 }))
 }
 
 // ---------------------------------------------------------------------------
@@ -243,11 +229,7 @@ pub fn rt_rsa_pss_sha256_verify(args: &[Value]) -> Result<Value, CompileError> {
         return Ok(Value::Int(0));
     };
     let key = UnparsedPublicKey::new(&RSA_PSS_2048_8192_SHA256, pk);
-    Ok(Value::Int(if key.verify(&msg, &sig).is_ok() {
-        1
-    } else {
-        0
-    }))
+    Ok(Value::Int(if key.verify(&msg, &sig).is_ok() { 1 } else { 0 }))
 }
 
 /// `rt_rsa_pss_sha384_verify(spki: [u8], message: [u8], signature: [u8]) -> i64`
@@ -265,11 +247,7 @@ pub fn rt_rsa_pss_sha384_verify(args: &[Value]) -> Result<Value, CompileError> {
         return Ok(Value::Int(0));
     };
     let key = UnparsedPublicKey::new(&RSA_PSS_2048_8192_SHA384, pk);
-    Ok(Value::Int(if key.verify(&msg, &sig).is_ok() {
-        1
-    } else {
-        0
-    }))
+    Ok(Value::Int(if key.verify(&msg, &sig).is_ok() { 1 } else { 0 }))
 }
 
 /// `rt_rsa_pss_sha512_verify(spki: [u8], message: [u8], signature: [u8]) -> i64`
@@ -287,11 +265,7 @@ pub fn rt_rsa_pss_sha512_verify(args: &[Value]) -> Result<Value, CompileError> {
         return Ok(Value::Int(0));
     };
     let key = UnparsedPublicKey::new(&RSA_PSS_2048_8192_SHA512, pk);
-    Ok(Value::Int(if key.verify(&msg, &sig).is_ok() {
-        1
-    } else {
-        0
-    }))
+    Ok(Value::Int(if key.verify(&msg, &sig).is_ok() { 1 } else { 0 }))
 }
 
 // ---------------------------------------------------------------------------
@@ -310,11 +284,7 @@ pub fn rt_ed25519_verify(args: &[Value]) -> Result<Value, CompileError> {
         return Ok(Value::Int(0));
     };
     let key = UnparsedPublicKey::new(&ED25519, pk);
-    Ok(Value::Int(if key.verify(&msg, &sig).is_ok() {
-        1
-    } else {
-        0
-    }))
+    Ok(Value::Int(if key.verify(&msg, &sig).is_ok() { 1 } else { 0 }))
 }
 
 // ---------------------------------------------------------------------------
@@ -350,8 +320,7 @@ pub fn rt_ecdsa_p256_sign(args: &[Value]) -> Result<Value, CompileError> {
         return Ok(empty_bytes());
     };
     let rng = SystemRandom::new();
-    let Ok(keypair) = EcdsaKeyPair::from_pkcs8(&ECDSA_P256_SHA256_FIXED_SIGNING, &pkcs8, &rng)
-    else {
+    let Ok(keypair) = EcdsaKeyPair::from_pkcs8(&ECDSA_P256_SHA256_FIXED_SIGNING, &pkcs8, &rng) else {
         return Ok(empty_bytes());
     };
     let Ok(sig) = keypair.sign(&rng, &msg) else {
@@ -372,9 +341,5 @@ pub fn rt_ecdsa_p256_verify(args: &[Value]) -> Result<Value, CompileError> {
         return Ok(Value::Int(0));
     };
     let key = UnparsedPublicKey::new(&ECDSA_P256_SHA256_FIXED, pk);
-    Ok(Value::Int(if key.verify(&msg, &sig).is_ok() {
-        1
-    } else {
-        0
-    }))
+    Ok(Value::Int(if key.verify(&msg, &sig).is_ok() { 1 } else { 0 }))
 }

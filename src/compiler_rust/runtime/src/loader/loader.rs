@@ -388,7 +388,8 @@ impl ModuleLoader {
             code_mem.as_ptr() as usize,
             &resolver,
             &mut got_slot_resolver,
-        ).map_err(|e| {
+        )
+        .map_err(|e| {
             error!(error = %e, "Failed to apply relocations");
             LoadError::RelocationFailed(e)
         })?;
