@@ -280,6 +280,41 @@ function handleSimpleMessage(line) {
                 }
                 break;
 
+            // Wave 5: spawn a real top-level BrowserWindow and load a URL.
+            // Contract paired with src/app/ui.electron/backend.spl:
+            //   new_browser_window(window_id, url, w, h).
+            // Windows are tracked in `simpleBrowserWindows` keyed by windowId
+            // so close_browser_window can later destroy them.
+            case 'new_browser_window':
+                try {
+                    if (!global.simpleBrowserWindows) global.simpleBrowserWindows = new Map();
+                    const bw = new BrowserWindow({
+                        width:  msg.width  || 800,
+                        height: msg.height || 600,
+                        show: true,
+                        webPreferences: { nodeIntegration: false, contextIsolation: true }
+                    });
+                    bw.loadURL(msg.url || 'about:blank');
+                    global.simpleBrowserWindows.set(msg.windowId, bw);
+                    debugLog(`spawned BrowserWindow windowId=${msg.windowId} url=${msg.url}`);
+                } catch (err) {
+                    debugLog(`new_browser_window failed: ${err.message}`);
+                }
+                break;
+            case 'close_browser_window':
+                try {
+                    const map = global.simpleBrowserWindows;
+                    if (map && map.has(msg.windowId)) {
+                        const bw = map.get(msg.windowId);
+                        if (bw && !bw.isDestroyed()) bw.close();
+                        map.delete(msg.windowId);
+                        debugLog(`closed BrowserWindow windowId=${msg.windowId}`);
+                    }
+                } catch (err) {
+                    debugLog(`close_browser_window failed: ${err.message}`);
+                }
+                break;
+
             case 'windowControl':
             case 'window_control':
                 if (mainWindow) {
