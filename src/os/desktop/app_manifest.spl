@@ -9,6 +9,59 @@
 use os.crash_policy.{AppClass, AppFaultDomain, SupervisorPolicy, default_fault_domain, default_supervisor_policy}
 
 # =========================================================================
+# UI Backend Selection
+# =========================================================================
+#
+# Per-app choice of rendering backend for an app's native window content.
+# Resolved at spawn time by resolve_backend() given the current host's caps.
+# SimpleOS rejects Electron at manifest-load time — no Node / no Chromium
+# in kernel.
+
+enum UiBackendKind:
+    Electron
+    SimpleWeb
+    Auto
+
+struct HostCaps:
+    """Runtime-detected capabilities relevant to backend selection."""
+    is_simpleos: bool
+    electron_available: bool
+
+enum ManifestError:
+    ElectronNotAvailable
+
+fn resolve_backend(requested: UiBackendKind, host: HostCaps) -> Result<UiBackendKind, ManifestError>:
+    """Resolve a requested backend against the host's capabilities.
+
+    * Auto       -> SimpleWeb on SimpleOS / hosts without Electron,
+                    else Electron.
+    * Electron   -> Err(ElectronNotAvailable) on SimpleOS or hosts
+                    without Electron; Ok(Electron) otherwise.
+    * SimpleWeb  -> Ok(SimpleWeb) everywhere.
+    """
+    match requested:
+        UiBackendKind.Auto:
+            if host.is_simpleos or not host.electron_available:
+                Ok(UiBackendKind.SimpleWeb)
+            else:
+                Ok(UiBackendKind.Electron)
+        UiBackendKind.Electron:
+            if host.is_simpleos or not host.electron_available:
+                Err(ManifestError.ElectronNotAvailable)
+            else:
+                Ok(UiBackendKind.Electron)
+        UiBackendKind.SimpleWeb:
+            Ok(UiBackendKind.SimpleWeb)
+
+fn host_caps_simpleos() -> HostCaps:
+    """Default host caps for SimpleOS — Electron is never available."""
+    HostCaps(is_simpleos: true, electron_available: false)
+
+fn host_caps_host(electron_available: bool) -> HostCaps:
+    """Default host caps for a non-SimpleOS host."""
+    HostCaps(is_simpleos: false, electron_available: electron_available)
+
+# =========================================================================
 # App Manifest
 # =========================================================================
 
