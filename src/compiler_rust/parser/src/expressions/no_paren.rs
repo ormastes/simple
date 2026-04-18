@@ -49,6 +49,39 @@ impl<'a> Parser<'a> {
 
     /// Parse no-paren calls on an expression
     pub(crate) fn parse_with_no_paren_calls(&mut self, expr: Expr) -> Result<Expr, ParseError> {
+        // Handle trailing colon-block on an already-parenthesized call:
+        //     describe("x"):
+        //         ...
+        // becomes describe("x", fn(): ...). The existing `is_callable_expr`
+        // branches only cover bare Identifier/FieldAccess/Path; without this
+        // branch, Call/MethodCall followed by `:\n<indent>` leaks the colon
+        // back to the statement-level parser which then errors with
+        // "expected expression, found Colon".
+        if matches!(expr, Expr::Call { .. } | Expr::MethodCall { .. }) && self.is_at_colon_block() {
+            if let Some(block_lambda) = self.try_parse_colon_block()? {
+                return Ok(match expr {
+                    Expr::Call { callee, mut args } => {
+                        args.push(Argument::new(None, block_lambda));
+                        Expr::Call { callee, args }
+                    }
+                    Expr::MethodCall {
+                        receiver,
+                        method,
+                        mut args,
+                        generic_args,
+                    } => {
+                        args.push(Argument::new(None, block_lambda));
+                        Expr::MethodCall {
+                            receiver,
+                            method,
+                            args,
+                            generic_args,
+                        }
+                    }
+                    _ => unreachable!(),
+                });
+            }
+        }
         // Check for colon-block on plain identifier FIRST
         // e.g., `given:` or `describe:` without arguments
         // This must come before can_start_argument() check because colon is in that list
