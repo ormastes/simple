@@ -1,0 +1,41 @@
+# Storage Class — virtual tier tag attached to every arena.
+#
+# The six classes are the load-bearing axis of NVFS: they map arenas to
+# backend policies (band layout, ZNS zones, FDP PIDs, flush discipline).
+# spostgre uses them to pick the right arena per fork (rel.main / rel.wal /
+# rel.temp / rel.blob / rel.pmap / rel.vmap / rel.fmap).
+#
+# Source of truth: doc/05_design/nvfs_design.md §3, doc/05_design/spostgre_design.md §11.
+
+enum StorageClass:
+    """Six virtual storage classes.
+
+    META_DURABLE        — filesystem metadata, small writes, sync-flushed.
+    DB_WAL              — append-only log, fsync critical, ZNS-friendly.
+    DB_TEMP             — scratch / spill, discard on seal failure.
+    MODEL_IMMUTABLE     — write-once large blobs (ML weights, checkpoints).
+    GENERAL_MUTABLE     — default class for user data, no special policy.
+    CHECKPOINT_SNAPSHOT — CoW snapshot family, shared with checkpoint ring.
+    """
+    META_DURABLE
+    DB_WAL
+    DB_TEMP
+    MODEL_IMMUTABLE
+    GENERAL_MUTABLE
+    CHECKPOINT_SNAPSHOT
+
+impl StorageClass:
+    fn to_string() -> text:
+        match self:
+            case META_DURABLE: "META_DURABLE"
+            case DB_WAL: "DB_WAL"
+            case DB_TEMP: "DB_TEMP"
+            case MODEL_IMMUTABLE: "MODEL_IMMUTABLE"
+            case GENERAL_MUTABLE: "GENERAL_MUTABLE"
+            case CHECKPOINT_SNAPSHOT: "CHECKPOINT_SNAPSHOT"
+
+    fn is_append_only() -> bool:
+        """True for classes whose arenas forbid in-place overwrite."""
+        match self:
+            case DB_WAL | MODEL_IMMUTABLE | CHECKPOINT_SNAPSHOT: true
+            case _: false

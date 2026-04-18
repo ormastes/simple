@@ -385,6 +385,14 @@ MDSOC organises **composition** (capsules, ports, dimensions) but does not presc
 - `src/lib/gc_async_mut/ecs/` — GC-friendly variant for async/high-allocator apps.
 - Import surface: `use std.ecs` — re-exports `{World, Entity, ComponentStore, Query, System, Added, Changed, Removed}`.
 
+## Userland MDSOC+ Tracks
+
+Design docs under `doc/05_design/` applying this architecture:
+
+- **spostgre** (PostgreSQL-like DB engine) — `doc/05_design/spostgre_design.md`. MDSOC outer at `src/lib/nogc_sync_mut/spostgre_if/` (trait contracts) + submodule `examples/spostgre/src/engine/*` (impl). Inner ECS components: `Relation / PageDescriptor / Tuple / WalRecord / Txn / Checkpoint / BufferFrame / PageMapEntry / SegmentSummary / TempSpill / BlobRef`. Systems: `sys_commit / sys_wal_flush / sys_buffer_manager / sys_checkpoint / sys_vacuum / sys_page_compact / sys_temp_sweep / sys_stats_collector`.
+- **NVFS** (NVMe-aware filesystem) — `doc/05_design/nvfs_design.md`. **MDSOC-only, no ECS** (kernel-adjacent per the Layer Rules table above). Trait contracts at `src/lib/nogc_sync_mut/fs/nvfs/`; impl at submodule `examples/nvfs/src/core/*`.
+- **Upfront fs-API contribution from spostgre → NVFS** — `doc/05_design/nvfs/from_spostgre.md`. Companion to the existing `doc/05_design/nvfs/svllm_requirements.md`. Primary channel per memory note `feedback_svllm_drives_nvfs_design.md`.
+
 ## What ECS Does NOT Replace
 
 - MDSOC capsule boundaries, manifests, and lifecycle.

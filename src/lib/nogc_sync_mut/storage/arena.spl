@@ -1,0 +1,54 @@
+# Arena — the fundamental NVFS unit of storage.
+#
+# An arena is a typed append / seal / discard region tagged with a
+# StorageClass. spostgre opens one arena per fork (main / wal / temp / pmap /
+# vmap / fmap / blob). NVFS gives each class a policy-appropriate backing
+# (ZNS zones, FDP streams, plain bands).
+#
+# Source: doc/05_design/nvfs_design.md §4.1..§4.3,
+#         doc/05_design/nvfs/from_spostgre.md §S1..§S7.
+
+use std.storage.storage_class.{StorageClass}
+use std.storage.durability.{DurabilityClass}
+
+struct ArenaHandle:
+    """Opaque arena identifier.
+
+    Treat as an i64 handle; do not dereference fields from outside NVFS.
+    """
+    id: i64
+    generation: i64
+
+    static fn null() -> ArenaHandle:
+        ArenaHandle(id: -1, generation: 0)
+
+    fn is_null(self) -> bool:
+        self.id < 0
+
+struct ArenaAppendResult:
+    """Bytes-written + the generation stamp produced by this append."""
+    bytes_written: i64
+    generation: i64
+
+trait Arena:
+    """NVFS arena API — seven load-bearing verbs plus one query.
+
+    - arena_create(class, hint_bytes) — provision and return a handle.
+    - arena_append(h, data, durability) — append bytes, return gen+count.
+    - arena_readv(h, off, buf) — read `buf.len()` bytes at `off`.
+    - arena_seal(h, gen) — freeze up to `gen`; subsequent appends fail.
+    - arena_discard(h) — drop the arena (honors DSM trim where probed).
+    - arena_clone_range(src, src_off, dst, dst_off, len) — byte-range copy
+      (backend uses Simple Copy Command where probed, fallback otherwise).
+    - arena_preferred_granule(h) — preferred I/O unit for the arena's class.
+
+    All signatures are surface-only. Concrete impls live in
+    examples/nvfs/src/core/arena.spl.
+    """
+    fn arena_create(class: StorageClass, hint_bytes: i64) -> ArenaHandle
+    fn arena_append(h: ArenaHandle, data: [u8], durability: DurabilityClass) -> ArenaAppendResult
+    fn arena_readv(h: ArenaHandle, off: i64, buf: [u8]) -> i64
+    fn arena_seal(h: ArenaHandle, gen: i64) -> bool
+    fn arena_discard(h: ArenaHandle) -> bool
+    fn arena_clone_range(src: ArenaHandle, src_off: i64, dst: ArenaHandle, dst_off: i64, len: i64) -> bool
+    fn arena_preferred_granule(h: ArenaHandle) -> i64
