@@ -113,3 +113,102 @@ fn class_from_byte(b: i32) -> DriverClass:
         13 -> return DriverClass.Power
         14 -> return DriverClass.Virt
         _  -> return DriverClass.Misc
+
+# FR-DRIVER-0004: encoder — the producer side of the .drv_manifest
+# section. The compiler's codegen glue calls this to convert a
+# DriverManifest (synthesized from @driver / @native_lib HIR attributes)
+# into the DRVS byte record described in manifest.spl. The resulting
+# bytes feed `SmfWriter.add_section(SectionType.DrvManifest, bytes)`.
+#
+# Kept in the same file as `decode_manifest` so the two sides of the
+# wire contract live side-by-side; any future layout change must update
+# both in one commit.
+fn encode_manifest(m: DriverManifest) -> [u8]:
+    val total: i32 = m.byte_size()
+    var buf: [u8] = []
+    var i: i32 = 0
+    while i < total:
+        buf.append(0 as u8)
+        i = i + 1
+
+    # offset 0 — magic (u32 LE)
+    write_u32_le(buf, 0, DRVS_MAGIC)
+    # offset 4 — kind (u8)
+    buf[4] = kind_to_byte(m.kind) as u8
+    # offset 5 — class (u8)
+    buf[5] = class_to_byte(m.dclass) as u8
+    # offset 6 — abi_rev (u16 LE)
+    write_u16_le(buf, 6, m.abi_rev)
+    # offset 8 — vendor (u32 LE)
+    write_u32_le(buf, 8, m.vendor)
+    # offset 12 — device_count (u32 LE)
+    val device_count: i32 = m.device_ids.len() as i32
+    write_u32_le(buf, 12, device_count)
+    # offset 16 — version (16 ASCII bytes, zero-padded)
+    write_ascii(buf, 16, DRVS_VERSION_LEN, m.version)
+    # offset 32 — name (32 ASCII bytes, zero-padded)
+    write_ascii(buf, 32, DRVS_NAME_LEN, m.name)
+
+    # offset 64 — device_id pairs (u32 reserved, u32 id), N = device_count
+    var j: i32 = 0
+    while j < device_count:
+        val base: i32 = DRVS_HEADER_BYTES + j * 8
+        # reserved u32 stays zero (no-op)
+        write_u32_le(buf, base + 4, m.device_ids[j])
+        j = j + 1
+
+    return buf
+
+# --- Little-endian byte writers — mirror of the readers above ---
+
+fn write_u16_le(buf: [u8], at: i32, value: i32):
+    buf[at]     = (value        & 0xff) as u8
+    buf[at + 1] = ((value >> 8)  & 0xff) as u8
+
+fn write_u32_le(buf: [u8], at: i32, value: i32):
+    buf[at]     = (value         & 0xff) as u8
+    buf[at + 1] = ((value >> 8)  & 0xff) as u8
+    buf[at + 2] = ((value >> 16) & 0xff) as u8
+    buf[at + 3] = ((value >> 24) & 0xff) as u8
+
+# Write an ASCII string into `buf[at .. at+max_len]`, zero-padding the
+# tail. Truncates silently if `s` is longer than `max_len` (decoder
+# reads at most `max_len` bytes regardless).
+fn write_ascii(buf: [u8], at: i32, max_len: i32, s: text):
+    val src: [u8] = utf8_bytes_of(s)
+    var i: i32 = 0
+    var n: i32 = src.len() as i32
+    if n > max_len:
+        n = max_len
+    while i < n:
+        buf[at + i] = src[i]
+        i = i + 1
+    # remaining bytes already zero from allocation
+
+# Must be provided by the lower-level text module; paired with
+# `text_from_utf8_slice` used by the decoder.
+extern fn utf8_bytes_of(s: text) -> [u8]
+
+fn kind_to_byte(k: ManifestKind) -> i32:
+    match k:
+        case Driver:    return 0
+        case NativeLib: return 1
+
+fn class_to_byte(c: DriverClass) -> i32:
+    match c:
+        case Block:   return 0
+        case Char:    return 1
+        case Net:     return 2
+        case Input:   return 3
+        case Display: return 4
+        case Storage: return 5
+        case Bus:     return 6
+        case Fs:      return 7
+        case Gpu:     return 8
+        case Audio:   return 9
+        case Sensor:  return 10
+        case Timer:   return 11
+        case Irq:     return 12
+        case Power:   return 13
+        case Virt:    return 14
+        case Misc:    return 15
