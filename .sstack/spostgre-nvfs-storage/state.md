@@ -1614,3 +1614,11 @@ FR-NVFS-N5b-001 (delete rebalancing) filed as Open, P2.
 ##### Lint delta
 
 `bin/simple build lint` exits clean (no output = 0 warnings/errors).
+
+#### 9-ship-5
+
+- **Parent SHA:** `44f1a386848a`
+- **File count delta:** 70576 → 70567 (−9, ambient concurrent-agent churn; no allowlist files dropped)
+- **Denylist leak check:** CLEAN — `jj diff --name-only -r <ship_commit>` showed exactly 12 files, all in allowlist; no denylist paths present
+- **Push status:** SUCCESS — `origin/main` advanced from `5570891e72bb` to `44f1a386848a`
+- **Notes:** FR-HOT-001 added to `doc/08_tracking/feature_request/nvfs_requests.md` (agent had not filed it); submodule HEADs verified: spostgre=`c83a460`, nvfs=`d43c1f0`
