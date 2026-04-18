@@ -20,8 +20,9 @@ use os.kernel.types.device_mem_types.{DeviceGrant}
 use os.kernel.boot.mmio.{mmio_read32, mmio_write32, mmio_read64, mmio_read16, mmio_write8}
 use std.fs_driver.mount_table.{MountTable}
 use std.fs_driver.instance.{DriverInstance}
-use std.fs_driver.types.{Path, MountOptions}
+use std.fs_driver.types.{Path, MountOptions, OpenFlags}
 use std.fs_driver.fat32_stub.{Fat32Driver}
+use common.string_core.{str_char_at}
 
 extern fn serial_println(msg: text)
 extern fn unsafe_addr_of(ref: any) -> u64
@@ -312,3 +313,155 @@ fn vfs_is_ready() -> bool:
 fn vfs_get_manager() -> VfsManager:
     """Return the global VFS manager instance."""
     g_vfs
+
+# ============================================================================
+# VFS Public Helpers (M2 retrofit) — route callers through g_mount_table
+# ============================================================================
+#
+# These replace direct rt_fat32_* extern calls in entry-point files.
+# rt_fat32_* externs remain callable as deprecated fallbacks; full removal is M3.
+#
+# Path convention: bare FAT32 names (e.g. "HELLO.TXT") are accepted; a leading
+# '/' is prepended when the name does not start with '/'.
+
+fn g_vfs_abs_path(name: text) -> Path:
+    """Return an absolute Path for name, prepending '/' if bare."""
+    if name.starts_with("/"):
+        Path(raw: name)
+    else:
+        Path(raw: "/" + name)
+
+fn g_vfs_dispatch_read_file_text(driver: DriverInstance, relpath: Path) -> text:
+    """Dispatch read-whole-file-as-text to the correct concrete driver.
+
+    Reads up to 65536 bytes. Returns empty string on any error.
+    All four DriverInstance arms are covered to satisfy exhaustive match.
+    """
+    match driver:
+        case Fat32(d):
+            val flags = OpenFlags.read_only()
+            val open_r = d.open(relpath, flags)
+            if open_r.is_err():
+                return ""
+            val handle = open_r.unwrap()
+            var buf: [u8] = []
+            var i: i32 = 0
+            while i < 65536:
+                buf.push(0)
+                i = i + 1
+            val read_r = d.read(handle, 0, buf)
+            d.close(handle)
+            if read_r.is_err():
+                return ""
+            val n = read_r.unwrap()
+            if n <= 0:
+                return ""
+            # Build text from byte array (UTF-8 assumption, ASCII path in FAT32)
+            var result: text = ""
+            var j: i32 = 0
+            while j < n.to_i32():
+                result = result + buf[j].to_char()
+                j = j + 1
+            result
+        case Nvfs(_):
+            ""
+        case NvfsPosix(_):
+            ""
+        case RamFs(_):
+            ""
+
+fn g_vfs_dispatch_file_size(driver: DriverInstance, relpath: Path) -> i64:
+    """Dispatch stat → size to the concrete driver. Returns -1 on error."""
+    match driver:
+        case Fat32(d):
+            val r = d.stat(relpath)
+            if r.is_err():
+                return -1
+            r.unwrap().size.to_i64()
+        case Nvfs(_):
+            -1
+        case NvfsPosix(_):
+            -1
+        case RamFs(_):
+            -1
+
+fn g_vfs_dispatch_file_exists(driver: DriverInstance, relpath: Path) -> bool:
+    """Dispatch stat → exists to the concrete driver."""
+    match driver:
+        case Fat32(d):
+            d.stat(relpath).is_ok()
+        case Nvfs(_):
+            false
+        case NvfsPosix(_):
+            false
+        case RamFs(_):
+            false
+
+pub fn g_vfs_read_file_text(name: text) -> text:
+    """Read an entire file as text via the mount table.
+
+    Accepts bare FAT32 names ("HELLO.TXT") or absolute paths ("/HELLO.TXT").
+    Returns empty string on any error (mirrors rt_fat32_read_file_text semantics).
+    Deprecated fallback: rt_fat32_read_file_text.
+    """
+    val abs = g_vfs_abs_path(name)
+    val entry_opt = g_mount_table.lookup(abs)
+    if not entry_opt.?:
+        return ""
+    val entry = entry_opt.unwrap()
+    # Build relpath by stripping the mount point prefix
+    val mp_len = entry.mount_point.len()
+    var rel_raw: text = ""
+    var ci: i64 = mp_len
+    while ci < abs.raw.len():
+        rel_raw = rel_raw + str_char_at(abs.raw, ci)
+        ci = ci + 1
+    # If relpath is empty (mount root was requested), use the name directly
+    if rel_raw == "":
+        rel_raw = abs.raw
+    val relpath = Path(raw: rel_raw)
+    g_vfs_dispatch_read_file_text(entry.driver, relpath)
+
+pub fn g_vfs_file_size(name: text) -> i64:
+    """Return file size in bytes via the mount table, or -1 on error.
+
+    Accepts bare FAT32 names or absolute paths.
+    Deprecated fallback: rt_fat32_file_size.
+    """
+    val abs = g_vfs_abs_path(name)
+    val entry_opt = g_mount_table.lookup(abs)
+    if not entry_opt.?:
+        return -1
+    val entry = entry_opt.unwrap()
+    val mp_len = entry.mount_point.len()
+    var rel_raw: text = ""
+    var ci: i64 = mp_len
+    while ci < abs.raw.len():
+        rel_raw = rel_raw + str_char_at(abs.raw, ci)
+        ci = ci + 1
+    if rel_raw == "":
+        rel_raw = abs.raw
+    val relpath = Path(raw: rel_raw)
+    g_vfs_dispatch_file_size(entry.driver, relpath)
+
+pub fn g_vfs_file_exists(name: text) -> bool:
+    """Check file existence via the mount table.
+
+    Accepts bare FAT32 names or absolute paths.
+    Deprecated fallback: rt_fat32_file_exists.
+    """
+    val abs = g_vfs_abs_path(name)
+    val entry_opt = g_mount_table.lookup(abs)
+    if not entry_opt.?:
+        return false
+    val entry = entry_opt.unwrap()
+    val mp_len = entry.mount_point.len()
+    var rel_raw: text = ""
+    var ci: i64 = mp_len
+    while ci < abs.raw.len():
+        rel_raw = rel_raw + str_char_at(abs.raw, ci)
+        ci = ci + 1
+    if rel_raw == "":
+        rel_raw = abs.raw
+    val relpath = Path(raw: rel_raw)
+    g_vfs_dispatch_file_exists(entry.driver, relpath)

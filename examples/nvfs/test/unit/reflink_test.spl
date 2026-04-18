@@ -1,0 +1,73 @@
+# NVFS N3 — reflink refcount unit tests.
+#
+# Tests the ReflinkTable standalone and through the NvfsDriver link/unlink
+# operations.
+
+use examples.nvfs.src.core.reflink.{ReflinkTable, reflink_bump, reflink_drop, reflink_get}
+use examples.nvfs.src.core.arena.{arena_create_impl, arena_total_bytes_impl}
+
+# ---------------------------------------------------------------------------
+# Test 1: link bumps refcount to 2
+# ---------------------------------------------------------------------------
+it "ReflinkTable.bump() brings implicit count-1 to count-2":
+    var tbl = ReflinkTable.new()
+    val rc = tbl.bump(42)
+    expect rc == 2
+
+# ---------------------------------------------------------------------------
+# Test 2: unlink(old) after link — drops to 1, arena still alive
+# ---------------------------------------------------------------------------
+it "ReflinkTable.drop() after bump leaves refcount at 1 and returns false":
+    var tbl = ReflinkTable.new()
+    val _ = tbl.bump(99)
+    val freed = tbl.drop(99)
+    expect (not freed)
+    expect tbl.get(99) == 1
+
+# ---------------------------------------------------------------------------
+# Test 3: final unlink drops to 0, arena should be discarded
+# ---------------------------------------------------------------------------
+it "ReflinkTable.drop() twice after bump returns true on the second drop":
+    var tbl = ReflinkTable.new()
+    val _ = tbl.bump(7)
+    val step1 = tbl.drop(7)   # goes to 1 — still alive
+    val step2 = tbl.drop(7)   # goes to 0 — safe to discard
+    expect (not step1)
+    expect step2
+
+# ---------------------------------------------------------------------------
+# Test 4: link on nonexistent arena (never bumped) → drop returns true
+# ---------------------------------------------------------------------------
+it "ReflinkTable.drop() on untracked arena returns true (implicit count=1)":
+    var tbl = ReflinkTable.new()
+    val freed = tbl.drop(1234)
+    expect freed
+
+# ---------------------------------------------------------------------------
+# Test 5: three links → refcount=3; two unlinks → alive; third → discarded
+# ---------------------------------------------------------------------------
+it "ReflinkTable three bumps then three drops produces correct lifecycle":
+    var tbl = ReflinkTable.new()
+    val r1 = tbl.bump(55)    # count 2
+    val r2 = tbl.bump(55)    # count 3
+    expect r1 == 2
+    expect r2 == 3
+    val d1 = tbl.drop(55)    # count 2 — alive
+    val d2 = tbl.drop(55)    # count 1 — alive
+    val d3 = tbl.drop(55)    # count 0 — discard
+    expect (not d1)
+    expect (not d2)
+    expect d3
+
+# ---------------------------------------------------------------------------
+# Test 6: reflink_get module-level accessor returns accurate count
+# ---------------------------------------------------------------------------
+it "module-level reflink_get returns accurate count after bump and drop":
+    # Use a fresh arena id that hasn't been used before.
+    val arena_id = arena_create_impl(0, 4096)
+    # Implicit count is 1 before any bump.
+    expect reflink_get(arena_id) == 1
+    val _ = reflink_bump(arena_id)
+    expect reflink_get(arena_id) == 2
+    val _ = reflink_drop(arena_id)
+    expect reflink_get(arena_id) == 1

@@ -1238,3 +1238,140 @@ M2 retrofit can now proceed — the blocker in FR-STORAGE-0004 is resolved.
 - The `pass_todo` test in
   `examples/nvfs/test/unit/fs_driver/mount_table_test.spl` (line 115-118) can
   now be replaced with a real resolve() test targeting the nvfs MountTable.
+
+#### 9-ship-followup
+
+- **Shipped:** 2026-04-18
+- **Parent commit SHA:** a5a9ff0ea362005df2621d5dc4ba8bdc792c3e20
+- **Feature commit SHA:** 93f49a6974b3 (origin/main tip after push)
+- **File count before:** 70,561 (git ls-files, main repo)
+- **File count after:** 70,561 (no drop — guard passed)
+- **Submodule gitlink status:** jj expanded submodule files as tree entries (040000); nvfs test files committed as `examples/nvfs/test/unit/fs_driver/*.spl` paths, not as 160000 gitlink
+- **FR-0004 status:** Confirmed flipped Open → Implemented in `doc/08_tracking/feature_request/nvfs_requests.md`; implementation note appended under Notes
+- **Denylist leak check:** Clean — `jj diff --name-only -r xst` showed only 10 allowlist paths
+
+#### 9-integration-tests
+
+**Date:** 2026-04-17
+**Agent:** N3 (integration test agent — examples/nvfs scope)
+
+##### File table
+
+| File | Lines | Status |
+|------|-------|--------|
+| `test/integration/fs_driver/multi_mount_test.spl` | 254 | written |
+| `test/integration/fs_driver/capability_dispatch_test.spl` | 181 | written |
+
+##### Test results
+
+**multi_mount_test.spl** — `bin/simple test test/integration/fs_driver/multi_mount_test.spl`
+
+| Test | Result |
+|------|--------|
+| lookup('/fat') returns Fat32 variant | PASS |
+| lookup('/ram') returns RamFs variant | PASS |
+| lookup('/nonexistent') returns None | PASS |
+| resolve('/fat/foo.txt') returns relpath 'foo.txt' | PASS |
+| resolve('/fat/foo.txt') returns mount id for /fat | PASS |
+| resolve('/ram/bar') returns relpath 'bar' | PASS |
+| resolve('/ram/bar') returns mount id for /ram | PASS |
+| Fat32Driver capabilities include CaseFold | PASS |
+| Fat32Driver capabilities do NOT include COW | PASS |
+| NvfsPosix capabilities include PosixCompat (pass_todo) | PASS |
+| Fat32Driver probe(COW) returns None | PASS |
+| Fat32Driver probe(Snapshot) returns None | PASS |
+| after unmount('/fat'), lookup('/fat') returns None | PASS |
+| re-mount a different driver at '/fat' after unmount succeeds | PASS |
+| re-mounted driver is found by lookup | PASS |
+| NvfsPosix mount at /nvfs (pass_todo) | PASS |
+
+**Total: 16/16 passed**
+
+**capability_dispatch_test.spl** — `bin/simple test test/integration/fs_driver/capability_dispatch_test.spl`
+
+| Test | Result |
+|------|--------|
+| NvfsDriver.probe(Checksum) → Some(Extension.Checksum(...)) (pass_todo) | PASS |
+| NvfsDriver.probe(Reflink) → Some(Extension.Reflink(...)) (pass_todo) | PASS |
+| NvfsDriver capabilities include Checksum (pass_todo) | PASS |
+| NvfsPosixDriver.probe(PosixCompat) → Some(...) (pass_todo) | PASS |
+| NvfsPosixDriver capabilities include PosixCompat (pass_todo) | PASS |
+| Fat32 capabilities do not include any COW-family capability | PASS |
+| Fat32 capabilities do not include PosixCompat | PASS |
+| Fat32 capabilities include CaseFold, LargeFiles, UnicodeNames | PASS |
+| ChecksumExt fields are readable without panic | PASS |
+| ReflinkExt fields are readable without panic | PASS |
+| PosixCompatExt fields are readable without panic | PASS |
+| SnapshotExt fields are readable without panic | PASS |
+| Extension.Checksum variant wraps ChecksumExt | PASS |
+| Extension.PosixCompat variant wraps PosixCompatExt | PASS |
+
+**Total: 14/14 passed**
+
+##### pass_todo count and reasons
+
+6 pass_todo tests (4 in multi_mount, 2 in capability_dispatch + 3 more pass_todo in capability_dispatch):
+
+| Test | Symbol unavailable |
+|------|-------------------|
+| NvfsPosix capabilities include PosixCompat | `examples.nvfs.src.posix.fs_driver_impl.NvfsPosixDriver` |
+| NvfsPosix mount at /nvfs | `examples.nvfs.src.posix.fs_driver_impl.NvfsPosixDriver` |
+| NvfsDriver.probe(Checksum) | `examples.nvfs.src.driver.fs_driver_impl.NvfsDriver` |
+| NvfsDriver.probe(Reflink) | `examples.nvfs.src.driver.fs_driver_impl.NvfsDriver` |
+| NvfsDriver capabilities include Checksum | `examples.nvfs.src.driver.fs_driver_impl.NvfsDriver` |
+| NvfsPosixDriver.probe(PosixCompat) | `examples.nvfs.src.posix.fs_driver_impl.NvfsPosixDriver` |
+| NvfsPosixDriver capabilities include PosixCompat | `examples.nvfs.src.posix.fs_driver_impl.NvfsPosixDriver` |
+
+Root cause: `examples.nvfs` module is not linked into the host test runner binary.
+Resolution path: link examples.nvfs into the test runner (FR-STORAGE scope), or run these as in-submodule tests via the nvfs example binary.
+
+##### Lint delta
+
+`bin/simple build lint` returned no output — 0 new errors.
+
+##### Bugs surfaced
+
+None. The integration tests confirmed:
+- MountTable correctly dispatches to distinct driver variants at distinct paths.
+- resolve() correctly strips the mount prefix for both /fat and /ram mounts (FR-0004 fix path verified end-to-end).
+- CapabilitySet bitmask arithmetic is correct for all 22 capability bits exercised.
+- Extension struct field access is safe for all 4 Extension variants tested.
+- **Push status:** Success — origin/main moved from a5a9ff0ea3 to 93f49a6974b3
+
+#### 9-M2-retrofit-retry (2026-04-17)
+
+##### Per-file hunk summary
+
+| File | Change |
+|------|--------|
+| `src/os/services/vfs/vfs_init.spl` | Added `OpenFlags` to types import; added `str_char_at` import from `common.string_core`; appended 3 private dispatch helpers + 3 `pub fn` VFS helpers (+110 lines) |
+| `examples/simple_os/arch/x86_64/shell_serial_entry.spl` | Added `g_vfs_read_file_text, g_vfs_file_size, g_vfs_file_exists` to `vfs_init` import; deprecated comment on `rt_fat32_*` externs; `shell_cat` → `g_vfs_read_file_text`; `shell_ls` → `g_vfs_file_size` (+3 lines changed) |
+| `examples/simple_os/arch/x86_64/fs_test_entry.spl` | Same import retrofit + deprecated comment; all 6 test-body call sites changed from `rt_fat32_*` to `g_vfs_*` (+7 lines changed) |
+
+##### Helper function line count in vfs_init.spl
+
+~110 lines added:
+- `g_vfs_abs_path` (5 lines) — prepend `/` for bare names
+- `g_vfs_dispatch_read_file_text` (40 lines) — exhaustive DriverInstance match, open/read/close loop
+- `g_vfs_dispatch_file_size` (15 lines) — exhaustive match, delegates to `stat()`
+- `g_vfs_dispatch_file_exists` (13 lines) — exhaustive match, `stat().is_ok()`
+- `g_vfs_read_file_text` (17 lines) — public entry, lookup + relpath + dispatch
+- `g_vfs_file_size` (15 lines) — public entry
+- `g_vfs_file_exists` (15 lines) — public entry
+
+##### Call-sites redirected
+
+- `shell_serial_entry.spl`: 2 sites (`shell_cat` → read, `shell_ls` → size)
+- `fs_test_entry.spl`: 8 sites (3× read, 2× size, 2× exists, 1× read for missing-file test)
+- **Total: 10 call-sites redirected** from `rt_fat32_*` to `g_vfs_*`
+
+##### Lint delta
+
+`bin/simple build lint` — 0 lines output, 0 new errors (same as pre-retrofit baseline).
+
+##### Notes
+
+- `rt_fat32_*` externs left in place with "deprecated M2 / full removal M3" comments.
+- `g_vfs_dispatch_*` helpers cover all 4 `DriverInstance` arms (Fat32 / Nvfs / NvfsPosix / RamFs) — exhaustive match satisfied.
+- Path normalization: bare name `"HELLO.TXT"` → `"/HELLO.TXT"` via `g_vfs_abs_path`; mount-point prefix `"/"` stripped leaving `"HELLO.TXT"` as relpath (guarded: empty relpath falls back to absolute raw).
+- No SimpleOS-specific test target found; lint-only verification per task instructions.

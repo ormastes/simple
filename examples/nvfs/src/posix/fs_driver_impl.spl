@@ -17,6 +17,7 @@ use std.fs_driver.extension.{Extension, PosixCompatExt}
 use std.fs_driver.ops.{FsDriver}
 use examples.nvfs.src.core.arena.{arena_create_impl, arena_append_impl, arena_readv_impl, arena_total_bytes_impl, arena_discard_impl, arena_clone_range_impl}
 use examples.nvfs.src.core.namespace.{Namespace, NsInodeKind}
+use examples.nvfs.src.core.reflink.{reflink_bump, reflink_drop}
 use examples.nvfs.src.posix.fd_table.{FdEntry, FdTable}
 use examples.nvfs.src.posix.cow_engine.{CowShadow}
 use examples.nvfs.src.posix.capabilities.{nvfs_posix_capabilities}
@@ -311,22 +312,28 @@ impl FsDriver for NvfsPosixDriver:
         self.namespace.rmdir(parent_ino, leaf)
 
     fn unlink(path: Path) -> Result<(), FsError>:
-        """Unlink: drop path mapping; mark every open fd for that arena dead."""
+        """Unlink: drop path mapping; mark every open fd for that arena dead.
+
+        Decrements the ReflinkTable refcount; discards the arena only when
+        count drops to zero and no fds remain open.
+        """
         val idx = self._find_name(path)
         if idx < 0:
             return Err(FsError.NotFound)
         val arena_id = self.names[idx].arena_id
         self._remove_name(idx)
-        var any_open = false
-        var i = 0
-        while i < self.fd_table.entries.len() as i64:
-            val e = self.fd_table.entries[i]
-            if e.arena_id == arena_id and e.refcount > 0:
-                self.fd_table.mark_dead(i as u32)
-                any_open = true
-            i = i + 1
-        if not any_open:
-            val _ = arena_discard_impl(arena_id)
+        val should_discard = reflink_drop(arena_id)
+        if should_discard:
+            var any_open = false
+            var i = 0
+            while i < self.fd_table.entries.len() as i64:
+                val e = self.fd_table.entries[i]
+                if e.arena_id == arena_id and e.refcount > 0:
+                    self.fd_table.mark_dead(i as u32)
+                    any_open = true
+                i = i + 1
+            if not any_open:
+                val _ = arena_discard_impl(arena_id)
         Ok(())
 
     fn rename(old: Path, new: Path) -> Result<(), FsError>:
@@ -362,13 +369,17 @@ impl FsDriver for NvfsPosixDriver:
         Ok(Path(raw: target))
 
     fn link(target: Path, link: Path) -> Result<(), FsError>:
-        """Hard link: alias the name table entry to the same arena_id."""
+        """Hard link (reflink): alias the name table entry to the same arena_id.
+
+        Bumps the ReflinkTable refcount so unlink() knows when to discard.
+        """
         val idx = self._find_name(target)
         if idx < 0:
             return Err(FsError.NotFound)
         if self._find_name(link) >= 0:
             return Err(FsError.InvalidArg)
         val arena_id = self.names[idx].arena_id
+        val _ = reflink_bump(arena_id)
         self.names.push(NameEntry(path: link.raw, arena_id: arena_id))
         Ok(())
 

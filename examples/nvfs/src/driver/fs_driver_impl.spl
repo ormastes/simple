@@ -13,7 +13,69 @@ use std.fs_driver.extension.{Extension, SnapshotExt, DedupExt, ChecksumExt, Send
 use std.fs_driver.ops.{FsDriver}
 use examples.nvfs.src.core.arena.{arena_create_impl, arena_append_impl, arena_readv_impl, arena_total_bytes_impl, arena_discard_impl}
 use examples.nvfs.src.core.namespace.{Namespace, NsInodeKind}
+use examples.nvfs.src.core.pmap.{PmapEntry, pmap_entry_verify, pmap_entry_checksum_for}
+use examples.nvfs.src.core.reflink.{reflink_bump, reflink_drop, reflink_get}
 use examples.nvfs.src.driver.capabilities.{nvfs_native_capabilities}
+
+# ---------------------------------------------------------------------------
+# Module-level: verify-on-read toggle (shared with extensions.spl)
+# ---------------------------------------------------------------------------
+
+var _verify_on_read: bool = true
+
+fn nvfs_set_verify_on_read(enabled: bool):
+    """Enable or disable checksum verification on every read."""
+    _verify_on_read = enabled
+
+fn nvfs_get_verify_on_read() -> bool:
+    """Return current verify-on-read setting."""
+    _verify_on_read
+
+# ---------------------------------------------------------------------------
+# Module-level: pmap sidecar (arena_id + offset -> PmapEntry)
+# N3: flat list; B-tree-backed lookup is N4+.
+# FR-N3-001: Replace flat pmap sidecar with B-tree keyed lookup (N4+).
+# ---------------------------------------------------------------------------
+
+struct PmapSidecarEntry:
+    """Associates a written byte range with its pmap entry."""
+    arena_id: i64
+    offset:   i64
+    length:   i64
+    entry:    PmapEntry
+
+var _pmap_sidecar: [PmapSidecarEntry] = []
+
+fn _pmap_sidecar_put(arena_id: i64, offset: i64, length: i64, entry: PmapEntry):
+    """Store a PmapEntry for a range; replaces existing entry if found."""
+    var i = 0
+    while i < _pmap_sidecar.len() as i64:
+        val e = _pmap_sidecar[i]
+        if e.arena_id == arena_id and e.offset == offset:
+            _pmap_sidecar[i] = PmapSidecarEntry(
+                arena_id: arena_id,
+                offset:   offset,
+                length:   length,
+                entry:    entry
+            )
+            return
+        i = i + 1
+    _pmap_sidecar.push(PmapSidecarEntry(
+        arena_id: arena_id,
+        offset:   offset,
+        length:   length,
+        entry:    entry
+    ))
+
+fn _pmap_sidecar_get(arena_id: i64, offset: i64) -> Option<PmapEntry>:
+    """Look up the PmapEntry for a given arena_id + offset, or None."""
+    var i = 0
+    while i < _pmap_sidecar.len() as i64:
+        val e = _pmap_sidecar[i]
+        if e.arena_id == arena_id and e.offset == offset:
+            return Some(e.entry)
+        i = i + 1
+    None
 
 # ---------------------------------------------------------------------------
 # NvfsOpenHandle — internal record for an open file
@@ -160,18 +222,32 @@ impl FsDriver for NvfsDriver:
         Ok(())
 
     fn read(handle: FileHandle, offset: i64, buf: [u8]) -> Result<i64, FsError>:
-        """Read from the arena backing handle at offset."""
+        """Read from the arena backing handle at offset.
+
+        When verify_on_read is true, fetches the pmap entry for the range
+        and verifies the checksum of the returned bytes.  Returns
+        Err(Corrupt) on mismatch.
+        """
         val idx = _find_handle(handle.id)
         if idx < 0:
             return Err(FsError.InvalidArg)
         val h = _open_handles[idx]
         val data = arena_readv_impl(h.arena_id, offset, buf.len() as i64)
+        if _verify_on_read and data.len() as i64 > 0:
+            val entry_opt = _pmap_sidecar_get(h.arena_id, offset)
+            match entry_opt:
+                case Some(entry):
+                    if not pmap_entry_verify(entry, data):
+                        return Err(FsError.Corrupt)
+                case None:
+                    pass_do_nothing
         Ok(data.len() as i64)
 
     fn write(handle: FileHandle, offset: i64, buf: [u8]) -> Result<i64, FsError>:
         """Append-only write. If offset != current length, return Err(Unsupported).
 
         Callers requiring random-write must use NvfsPosixDriver (agent B2).
+        Records a pmap sidecar entry (checksum) for verify-on-read.
         """
         val idx = _find_handle(handle.id)
         if idx < 0:
@@ -185,6 +261,18 @@ impl FsDriver for NvfsDriver:
         val written = arena_append_impl(h.arena_id, buf, 0)
         if written < 0:
             return Err(FsError.IoError(0))
+        # Record pmap entry for this written range.
+        val cksum = pmap_entry_checksum_for(buf)
+        val pentry = PmapEntry(
+            logical:       offset as u64,
+            phys:          h.arena_id,
+            offset:        offset as u64,
+            len:           written as u64,
+            birth_gen:     0,
+            checksum_algo: 0,
+            checksum:      cksum
+        )
+        _pmap_sidecar_put(h.arena_id, offset, written, pentry)
         Ok(written)
 
     fn pread(handle: FileHandle, offset: i64, buf: [u8]) -> Result<i64, FsError>:
@@ -284,13 +372,19 @@ impl FsDriver for NvfsDriver:
         self.namespace.rmdir(parent_ino, leaf)
 
     fn unlink(path: Path) -> Result<(), FsError>:
-        """unlink — remove a file or symlink via namespace."""
+        """unlink — remove a file or symlink via namespace.
+
+        Decrements the reflink refcount for the arena.  Discards the arena
+        only when the refcount drops to zero.
+        """
         val pair = self.namespace.resolve_parent(path.raw)?
         val parent_ino = pair.0
         val leaf = pair.1
         val removed = self.namespace.unlink(parent_ino, leaf)?
         if removed.arena_id >= 0:
-            val _ = arena_discard_impl(removed.arena_id)
+            val should_discard = reflink_drop(removed.arena_id)
+            if should_discard:
+                val _ = arena_discard_impl(removed.arena_id)
         Ok(())
 
     fn rename(old: Path, new: Path) -> Result<(), FsError>:
@@ -318,8 +412,18 @@ impl FsDriver for NvfsDriver:
         Ok(Path(raw: target))
 
     fn link(target: Path, link: Path) -> Result<(), FsError>:
-        """Hard link — namespace not yet implemented."""
-        Err(FsError.Unsupported)
+        """Hard link (reflink) — resolve target to arena_id; bump refcount;
+        create a namespace alias at link pointing to the same inode.
+
+        Returns Err(NotFound) if target does not exist in the namespace.
+        """
+        val ns_inode = self.namespace.resolve_path(target.raw)?
+        val arena_id = ns_inode.arena_id
+        val _ = reflink_bump(arena_id)
+        val pair = self.namespace.resolve_parent(link.raw)?
+        val parent_ino = pair.0
+        val leaf = pair.1
+        self.namespace.link(parent_ino, leaf, ns_inode.ino)
 
     # --- Extension probe ---
 

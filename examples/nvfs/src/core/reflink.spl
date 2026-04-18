@@ -1,0 +1,133 @@
+# NVFS core — reflink refcount table (N3).
+#
+# Tracks how many namespace entries (hard-links / reflinks) share a given
+# arena_id.  When the refcount drops to zero the arena is safe to discard.
+#
+# ArenaId is i64 (opaque value from arena_create_impl).
+# ReflinkTable is intentionally standalone — the driver owns a module-level
+# instance; extensions.spl accesses the same instance via the accessor below.
+
+use std.fs_driver.error.{FsError}
+
+# ---------------------------------------------------------------------------
+# ArenaRef — one entry in the refcount table
+# ---------------------------------------------------------------------------
+
+struct ArenaRef:
+    """Refcount record for a single arena shared by one or more namespace entries.
+
+    arena_id  — opaque arena identifier (i64 from arena_create_impl).
+    refcount  — number of active namespace entries pointing to this arena.
+    """
+    arena_id: i64
+    refcount: u32
+
+# ---------------------------------------------------------------------------
+# ReflinkTable — flat list of ArenaRef entries
+# ---------------------------------------------------------------------------
+
+struct ReflinkTable:
+    """Per-driver refcount table for COW-shared arenas.
+
+    refs — flat list of ArenaRef; one entry per tracked arena.
+    New arenas not in the table are implicitly at refcount 1 (the creator).
+    """
+    refs: [ArenaRef]
+
+impl ReflinkTable:
+
+    static fn new() -> ReflinkTable:
+        """Return an empty refcount table."""
+        ReflinkTable(refs: [])
+
+    fn _find(arena_id: i64) -> i64:
+        """Return index of arena_id in self.refs, or -1 if not tracked."""
+        var i = 0
+        while i < self.refs.len() as i64:
+            if self.refs[i].arena_id == arena_id:
+                return i
+            i = i + 1
+        -1
+
+    fn get(arena_id: i64) -> u32:
+        """Return the current refcount for arena_id.
+
+        Returns 1 for arenas that were never explicitly tracked (they are
+        implicitly referenced by their creator), and 0 for absent entries
+        that were dropped to zero and removed.
+        """
+        val idx = self._find(arena_id)
+        if idx < 0:
+            return 1
+        self.refs[idx].refcount
+
+    fn bump(arena_id: i64) -> u32:
+        """Increment refcount for arena_id; insert with count 2 if first bump.
+
+        When an arena is first created it has an implicit count of 1 (the
+        creator's namespace entry).  The first call to bump() represents
+        creating a second reference, so the initial stored value is 2.
+
+        Returns the new refcount.
+        """
+        val idx = self._find(arena_id)
+        if idx < 0:
+            # First explicit bump: creator has count 1; add a second reference.
+            self.refs.push(ArenaRef(arena_id: arena_id, refcount: 2))
+            return 2
+        val old_rc = self.refs[idx].refcount
+        val new_rc = old_rc + 1
+        self.refs[idx] = ArenaRef(arena_id: arena_id, refcount: new_rc)
+        new_rc
+
+    fn drop(arena_id: i64) -> bool:
+        """Decrement refcount for arena_id.
+
+        Returns true if the count reached 0 (arena is safe to discard),
+        false if it is still referenced.
+
+        If the arena is not in the table it is implicitly at count 1; one
+        drop brings it to 0 and we return true without inserting a row.
+        """
+        val idx = self._find(arena_id)
+        if idx < 0:
+            # Implicit count was 1; one drop brings it to 0.
+            return true
+        val old_rc = self.refs[idx].refcount
+        if old_rc <= 1:
+            # Remove row (swap-remove for O(1)).
+            val last = self.refs.len() as i64 - 1
+            if idx != last:
+                self.refs[idx] = self.refs[last]
+            var new_list: [ArenaRef] = []
+            var i = 0
+            while i < last:
+                new_list.push(self.refs[i])
+                i = i + 1
+            self.refs = new_list
+            return true
+        val new_rc = old_rc - 1
+        self.refs[idx] = ArenaRef(arena_id: arena_id, refcount: new_rc)
+        false
+
+# ---------------------------------------------------------------------------
+# Module-level singleton accessed by both fs_driver_impl and extensions
+# ---------------------------------------------------------------------------
+
+var _reflink_table: ReflinkTable = ReflinkTable(refs: [])
+
+fn reflink_table_get() -> ReflinkTable:
+    """Return a reference to the module-level ReflinkTable."""
+    _reflink_table
+
+fn reflink_bump(arena_id: i64) -> u32:
+    """Module-level bump; updates the singleton table."""
+    _reflink_table.bump(arena_id)
+
+fn reflink_drop(arena_id: i64) -> bool:
+    """Module-level drop; returns true when arena reaches count 0."""
+    _reflink_table.drop(arena_id)
+
+fn reflink_get(arena_id: i64) -> u32:
+    """Module-level get; returns current refcount for arena_id."""
+    _reflink_table.get(arena_id)

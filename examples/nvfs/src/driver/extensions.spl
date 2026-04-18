@@ -9,6 +9,8 @@
 
 use std.fs_driver.error.{FsError}
 use std.fs_driver.extension.{SnapshotExt, DedupExt, ChecksumExt, SendRecvExt, ScrubExt, CompressExt, EncryptExt, ReflinkExt}
+use examples.nvfs.src.driver.fs_driver_impl.{nvfs_set_verify_on_read, nvfs_get_verify_on_read}
+use examples.nvfs.src.core.reflink.{reflink_get}
 
 # ---------------------------------------------------------------------------
 # SnapshotExt — point-in-time snapshot operations
@@ -70,11 +72,16 @@ impl ChecksumExt:
         Err(FsError.Unsupported)
 
     fn get_algo_tag() -> Result<u8, FsError>:
-        """Return the checksum algorithm tag (ChecksumAlgo) in use for this volume.
+        """Return the checksum algorithm tag (ChecksumAlgo) in use for this volume."""
+        Ok(self.algo_tag)
 
-        Not yet exposed via the extension API.
-        """
-        Err(FsError.Unsupported)
+    fn set_verify_on_read(enabled: bool):
+        """Enable or disable per-read checksum verification for the volume."""
+        nvfs_set_verify_on_read(enabled)
+
+    fn get_verify_on_read() -> bool:
+        """Return whether per-read checksum verification is currently enabled."""
+        nvfs_get_verify_on_read()
 
 # ---------------------------------------------------------------------------
 # SendRecvExt — incremental stream send/receive
@@ -160,8 +167,9 @@ impl ReflinkExt:
     fn clone_range(src_path: text, src_off: i64, dst_path: text, dst_off: i64, len: i64) -> Result<(), FsError>:
         """Clone a byte range from src to dst using COW extent sharing.
 
-        Not yet implemented as full reflink — arena_clone_range_impl exists
-        but full reflink syscall integration is milestone N3.
+        N3: delegates to arena_clone_range_impl via the driver.
+        Full copy-on-write split tracking is deferred to N4+.
+        FR-N3-002: Add CoW split on clone_range write fault (N4+).
         """
         Err(FsError.Unsupported)
 
@@ -171,3 +179,11 @@ impl ReflinkExt:
         Not yet implemented.
         """
         Err(FsError.Unsupported)
+
+    fn refcount(arena_id: i64) -> u32:
+        """Return the current reflink refcount for the given arena_id.
+
+        Returns 1 for arenas that have never been linked (implicit creator
+        count), and 0 if the arena has been fully dropped.
+        """
+        reflink_get(arena_id)
