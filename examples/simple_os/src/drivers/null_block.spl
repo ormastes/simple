@@ -1,0 +1,78 @@
+# null_block — minimal example driver.
+#
+# Exercises the full std.driver framework: manifest, DriverOps record,
+# register_static_driver registration, DriverError return type. Reads
+# and writes are no-ops that always succeed; a real block driver would
+# forward to a disk controller here.
+#
+# Run it: call register_null_block_driver() from kernel boot, then the
+# registry reports 1 driver and the driver can be matched against any
+# (vendor=0, device=0) block device lookup.
+#
+# This is the reference shape every example OS driver should follow.
+
+use std.driver.error.{DriverError}
+use std.driver.manifest.{DriverManifest, DRVS_ABI_REV}
+use std.driver.registry.{DriverOps}
+use std.driver.static_table.{register_static_driver, static_driver_count}
+use std.driver.types.{DriverClass, DriverHandle, DriverContext, DeviceId,
+                      IoctlCmd, PowerState, ProbeResult}
+
+# --- Driver entry points ---
+
+fn null_block_abi_rev() -> i32:
+    return DRVS_ABI_REV
+
+fn null_block_init(ctx: DriverContext) -> Result<(), DriverError>:
+    return Result.Ok(())
+
+fn null_block_probe(dev: DeviceId) -> Result<ProbeResult, DriverError>:
+    # null_block claims any (0, 0) slot so kernel smoke tests can bind it.
+    if dev.value == 0:
+        return Result.Ok(ProbeResult.Accept)
+    return Result.Ok(ProbeResult.Reject)
+
+fn null_block_attach(dev: DeviceId) -> Result<DriverHandle, DriverError>:
+    # Handle value 1 so detach can verify it came from attach.
+    return Result.Ok(DriverHandle(value: 1))
+
+fn null_block_detach(h: DriverHandle) -> Result<(), DriverError>:
+    if h.value != 1:
+        return Result.Err(DriverError.BadArg)
+    return Result.Ok(())
+
+fn null_block_suspend(h: DriverHandle, s: PowerState) -> Result<(), DriverError>:
+    return Result.Ok(())
+
+fn null_block_resume(h: DriverHandle) -> Result<(), DriverError>:
+    return Result.Ok(())
+
+fn null_block_ioctl(h: DriverHandle, cmd: IoctlCmd) -> Result<i64, DriverError>:
+    # Echo the command code so tests can verify the ioctl path.
+    return Result.Ok(cmd.code as i64)
+
+# --- Registration (called from boot, or from unit tests) ---
+
+fn register_null_block_driver() -> Result<i32, DriverError>:
+    val m: DriverManifest = DriverManifest.for_driver(
+        "null_block", "0.1", DriverClass.Block, 0, [0])
+    val ops: DriverOps = DriverOps(
+        self_ptr: 0,
+        manifest_abi: null_block_abi_rev,
+        init_fn:   null_block_init,
+        probe_fn:  null_block_probe,
+        attach_fn: null_block_attach,
+        detach_fn: null_block_detach,
+        suspend_fn: null_block_suspend,
+        resume_fn:  null_block_resume,
+        ioctl_fn:   null_block_ioctl,
+    )
+    return register_static_driver(m, ops)
+
+fn null_block_smoke() -> i32:
+    # Convenience for hosts without a full kernel: run it and return the
+    # registry count after registering. Matches the shape of the other
+    # examples/simple_os/src/*.spl demos.
+    match register_null_block_driver():
+        Result.Ok(_)  -> return static_driver_count()
+        Result.Err(_) -> return -1
