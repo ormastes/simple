@@ -1,0 +1,183 @@
+# @cover src/lib/nogc_sync_mut/fs_driver/mount_table.spl 80%
+"""
+# MountTable Unit Tests
+
+**Feature IDs:** #FS-DRIVER-MOUNT
+**Category:** Infrastructure
+**Difficulty:** 2/5
+**Status:** In Progress
+**Design:** doc/05_design/fs_driver_interface.md §3, §8
+
+## Overview
+
+Tests for MountTable lifecycle:
+  - new() creates an empty table
+  - mount() registers a driver at a path
+  - lookup() finds the entry for an exact or prefix path
+  - unmount() removes the entry
+  - resolve() strips the mount prefix and returns (MountId, relpath)
+  - error on unmount of non-existent path
+  - error on duplicate mount of same path
+"""
+
+use std.sspec.*
+use std.fs_driver.mount_table.{MountTable, MountId}
+use std.fs_driver.types.{Path, MountOptions}
+use std.fs_driver.instance.{DriverInstance, RamFsStub}
+use std.fs_driver.error.{FsError}
+
+
+fn make_driver() -> DriverInstance:
+    DriverInstance.RamFs(driver: RamFsStub(name: "test_ramfs"))
+
+fn make_opts() -> MountOptions:
+    MountOptions.default()
+
+fn root_path() -> Path:
+    Path(raw: "/")
+
+fn foo_path() -> Path:
+    Path(raw: "/foo")
+
+fn foo_bar_path() -> Path:
+    Path(raw: "/foo/bar")
+
+
+# ============================================================================
+# MountTable.new()
+# ============================================================================
+
+describe "MountTable — new()":
+    """
+    ## Empty table
+
+    new() must produce a table with no mounts and next_id == 1.
+    """
+
+    it "new table has zero mounts":
+        val mt = MountTable.new()
+        expect(mt.mounts.len()).to_equal(0)
+
+    it "new table next_id starts at 1":
+        val mt = MountTable.new()
+        expect(mt.next_id).to_equal(1)
+
+    it "lookup on empty table returns nil":
+        val mt = MountTable.new()
+        val result = mt.lookup(root_path())
+        expect(result.?).to_equal(false)
+
+
+# ============================================================================
+# MountTable.mount() + lookup()
+# ============================================================================
+
+describe "MountTable — mount() + lookup()":
+    """
+    ## Mount and lookup
+
+    mount() adds an entry; lookup() returns it for exact and prefix matches.
+    """
+
+    it "mount returns Ok with a non-null MountId":
+        var mt = MountTable.new()
+        val r = mt.mount(root_path(), make_driver(), make_opts())
+        expect(r.is_ok()).to_equal(true)
+        val id = r.unwrap()
+        expect(id.id).to_equal(1)
+
+    it "lookup finds the mounted entry":
+        var mt = MountTable.new()
+        mt.mount(root_path(), make_driver(), make_opts())
+        val entry_opt = mt.lookup(root_path())
+        expect(entry_opt.?).to_equal(true)
+
+    it "lookup with child path finds root mount":
+        var mt = MountTable.new()
+        mt.mount(root_path(), make_driver(), make_opts())
+        val entry_opt = mt.lookup(foo_bar_path())
+        expect(entry_opt.?).to_equal(true)
+
+    it "duplicate mount returns AlreadyExists error":
+        var mt = MountTable.new()
+        mt.mount(root_path(), make_driver(), make_opts())
+        val r2 = mt.mount(root_path(), make_driver(), make_opts())
+        expect(r2.is_err()).to_equal(true)
+        match r2.unwrap_err():
+            case AlreadyExists: expect(true).to_equal(true)
+            case _:             expect(false).to_equal(true)
+
+
+# ============================================================================
+# MountTable.unmount()
+# ============================================================================
+
+describe "MountTable — unmount()":
+    """
+    ## Unmount
+
+    unmount() removes the entry; subsequent lookup returns nil.
+    unmount of non-existent path returns NotFound.
+    """
+
+    it "unmount of mounted path returns Ok":
+        var mt = MountTable.new()
+        mt.mount(root_path(), make_driver(), make_opts())
+        val r = mt.unmount(root_path())
+        expect(r.is_ok()).to_equal(true)
+
+    it "after unmount, lookup returns nil":
+        var mt = MountTable.new()
+        mt.mount(root_path(), make_driver(), make_opts())
+        mt.unmount(root_path())
+        val entry_opt = mt.lookup(root_path())
+        expect(entry_opt.?).to_equal(false)
+
+    it "unmount of non-existent path returns NotFound":
+        var mt = MountTable.new()
+        val r = mt.unmount(root_path())
+        expect(r.is_err()).to_equal(true)
+        match r.unwrap_err():
+            case NotFound: expect(true).to_equal(true)
+            case _:        expect(false).to_equal(true)
+
+
+# ============================================================================
+# MountTable.resolve()
+# ============================================================================
+
+describe "MountTable — resolve()":
+    """
+    ## Path resolution
+
+    resolve() strips the mount-point prefix and returns (MountId, relpath).
+    Fails with NotFound when no mount covers the path.
+    """
+
+    it "resolve('/') returns (id, '')":
+        var mt = MountTable.new()
+        mt.mount(root_path(), make_driver(), make_opts())
+        val r = mt.resolve(root_path())
+        expect(r.is_ok()).to_equal(true)
+        val pair = r.unwrap()
+        val mid = pair.0
+        val rel = pair.1
+        expect(mid.id).to_equal(1)
+        expect(rel.raw).to_equal("")
+
+    it "resolve('/foo/bar') under '/' returns relpath 'foo/bar'":
+        var mt = MountTable.new()
+        mt.mount(root_path(), make_driver(), make_opts())
+        val r = mt.resolve(foo_bar_path())
+        expect(r.is_ok()).to_equal(true)
+        val pair = r.unwrap()
+        val rel = pair.1
+        expect(rel.raw).to_equal("foo/bar")
+
+    it "resolve on empty table returns NotFound":
+        val mt = MountTable.new()
+        val r = mt.resolve(foo_path())
+        expect(r.is_err()).to_equal(true)
+        match r.unwrap_err():
+            case NotFound: expect(true).to_equal(true)
+            case _:        expect(false).to_equal(true)

@@ -1,0 +1,318 @@
+#![allow(unnamed_duplicate_typed_args)]
+"""win_vfs_driver — kernel VFS driver for the `/win` mount.
+
+Implements the existing `trait Filesystem` from `src/os/services/vfs/vfs.spl`.
+Every operation delegates to shared-library `fs_encoder` + `acl` from
+`src/lib/common/win_fs/` — there is NO inlined path-tree encoding here.
+
+MDSOC note: the driver names `AuthorityToken` in its method signatures so
+the spec's `drv.test_set_current_token(token)` can resolve. The token is
+never evaluated inside the kernel — it is handed opaquely to `acl_check`
+(a wave 5a shared lib), which owns all clearance semantics. No privilege
+semantics live in the kernel. Matches AC-4 grep sentinels.
+
+Feature: spm-winfs-llm-suite AC-4.
+"""
+
+use os.services.vfs.vfs.{Filesystem, SeekWhence}
+use os.kernel.types.fs_types.{FileFlags, FsNode, FsNodeKind, DirEntry}
+use lib.common.win_fs.window_record.{WindowRecord, WindowState, FsOp, window_state_name}
+use lib.common.win_fs.fs_encoder.{FsTree, FsEntry, encode_record, tree_has_path, tree_read, tree_readdir}
+use lib.common.win_fs.acl.{acl_check}
+use lib.common.privilege.authority_token.{AuthorityToken}
+
+# ---------------------------------------------------------------------------
+# Open-handle table + sized results
+# ---------------------------------------------------------------------------
+
+class OpenHandle:
+    """One open file — points at a specific wid + path suffix."""
+    handle_id: u64
+    wid: u64
+    path: text
+
+class OpenResult:
+    """Spec-compatible sized result for `open`."""
+    ok: bool
+    value: u64
+    error: text
+
+    static fn success(h: u64) -> OpenResult:
+        OpenResult(ok: true, value: h, error: "")
+
+    static fn failure(reason: text) -> OpenResult:
+        OpenResult(ok: false, value: 0 as u64, error: reason)
+
+class ReaddirResult:
+    """Spec-compatible sized result for `readdir`."""
+    ok: bool
+    value: [DirEntry]
+    error: text
+
+class DriverMountResult:
+    """Spec-compatible sized result for `mount`."""
+    ok: bool
+    error: text
+
+class _LocateResult:
+    """Records list (empty = not found, 1-element = hit).
+
+    Using a list instead of `found + record` avoids having to synthesize a
+    blank `WindowRecord` when the record is absent — which would otherwise
+    need `id_path_intern` (a privilege import we want to avoid carrying
+    around in the kernel for fallback paths).
+    """
+    records: [WindowRecord]
+
+# ---------------------------------------------------------------------------
+# Driver
+# ---------------------------------------------------------------------------
+
+class WinVfsDriver:
+    """In-kernel driver — holds the window records published by SPM."""
+    var records: [WindowRecord]
+    var current_token: AuthorityToken
+    var open_handles: [OpenHandle]
+    var next_handle: u64
+    var is_mounted: bool
+
+    static fn new() -> WinVfsDriver:
+        WinVfsDriver(
+            records: [],
+            current_token: AuthorityToken.public(),
+            open_handles: [],
+            next_handle: 1 as u64,
+            is_mounted: false)
+
+    # -- Test helpers (spec-visible) -----------------------------------------
+
+    me test_insert(rec: WindowRecord):
+        var i = 0
+        while i < self.records.len():
+            if self.records[i].wid == rec.wid:
+                self.records[i] = rec
+                return
+            i = i + 1
+        self.records = self.records + [rec]
+
+    me test_destroy(wid: u64):
+        var new_records: [WindowRecord] = []
+        var i = 0
+        val n = self.records.len()
+        while i < n:
+            if self.records[i].wid != wid:
+                new_records = new_records + [self.records[i]]
+            i = i + 1
+        self.records = new_records
+
+    me test_set_current_token(token: AuthorityToken):
+        self.current_token = token
+
+    me test_entry_names(entries: [DirEntry]) -> [text]:
+        var out: [text] = []
+        for e in entries:
+            out = out + [e.name]
+        out
+
+    # -- Spec-compatible facade over the trait methods -----------------------
+
+    me mount(device: text, options: text) -> DriverMountResult:
+        self.is_mounted = true
+        DriverMountResult(ok: true, error: "")
+
+    me open(path: text, flags: FileFlags) -> OpenResult:
+        val located = self._locate(path)
+        if located.records.len() == 0 as i64:
+            return OpenResult.failure("ENOENT: {path}")
+        val rec = located.records[0]
+        if not acl_check(rec, self.current_token, FsOp.Open):
+            return OpenResult.failure("EACCES: {path}")
+        val h = self.next_handle
+        self.next_handle = self.next_handle + (1 as u64)
+        self.open_handles = self.open_handles + [OpenHandle(handle_id: h, wid: rec.wid, path: path)]
+        OpenResult.success(h)
+
+    me readdir(path: text) -> ReaddirResult:
+        if path == "/" or path == "":
+            return ReaddirResult(ok: true, value: self._app_entries(), error: "")
+        val located = self._locate(path)
+        if located.records.len() == 0 as i64:
+            return ReaddirResult(ok: false, value: [], error: "ENOENT: {path}")
+        val rec = located.records[0]
+        if not acl_check(rec, self.current_token, FsOp.Readdir):
+            return ReaddirResult(ok: false, value: [], error: "EACCES: {path}")
+        val tree = encode_record(rec)
+        var entries: [DirEntry] = []
+        for name in tree_readdir(tree, path):
+            entries = entries + [_make_dir_entry(name)]
+        ReaddirResult(ok: true, value: entries, error: "")
+
+    me read_bytes(path: text) -> [u8]:
+        val located = self._locate(path)
+        if located.records.len() == 0 as i64:
+            return []
+        val rec = located.records[0]
+        if not acl_check(rec, self.current_token, FsOp.Read):
+            return []
+        val tree = encode_record(rec)
+        tree_read(tree, path)
+
+    # -- internals -----------------------------------------------------------
+
+    me _locate(path: text) -> _LocateResult:
+        val parts = path.split("/")
+        if parts.len() < 3:
+            return _LocateResult(records: [])
+        val app = parts[1]
+        val wid_text = parts[2]
+        val wid = _parse_u64(wid_text)
+        var i = 0
+        while i < self.records.len():
+            val r = self.records[i]
+            if r.app == app and r.wid == wid:
+                if r.state == WindowState.Destroyed:
+                    return _LocateResult(records: [])
+                return _LocateResult(records: [r])
+            i = i + 1
+        _LocateResult(records: [])
+
+    me _app_entries() -> [DirEntry]:
+        var seen: [text] = []
+        var out: [DirEntry] = []
+        for r in self.records:
+            if r.state == WindowState.Destroyed:
+                continue
+            var found = false
+            for existing in seen:
+                if existing == r.app:
+                    found = true
+            if not found:
+                seen = seen + [r.app]
+                out = out + [_make_dir_entry(r.app)]
+        out
+
+# ---------------------------------------------------------------------------
+# Filesystem trait impl (kernel-side VfsManager entry point)
+# ---------------------------------------------------------------------------
+
+impl Filesystem for WinVfsDriver:
+    fn fs_name() -> text:
+        "win"
+
+    fn mount(device: text, options: text) -> Result<bool, text>:
+        self.is_mounted = true
+        Result.Ok(true)
+
+    fn unmount() -> Result<bool, text>:
+        self.is_mounted = false
+        self.open_handles = []
+        Result.Ok(true)
+
+    fn open(path: text, flags: FileFlags) -> Result<u64, text>:
+        val r = self.open(path, flags)
+        if r.ok:
+            return Result.Ok(r.value)
+        Result.Err(r.error)
+
+    fn read(handle: u64, size: u64) -> Result<[u8], text>:
+        for h in self.open_handles:
+            if h.handle_id == handle:
+                return Result.Ok(self.read_bytes(h.path))
+        Result.Err("EBADF")
+
+    fn write(handle: u64, data: [u8]) -> Result<u64, text>:
+        Result.Err("EROFS: win_vfs is read-only")
+
+    fn close(handle: u64) -> Result<bool, text>:
+        var new_handles: [OpenHandle] = []
+        var removed = false
+        for h in self.open_handles:
+            if h.handle_id != handle:
+                new_handles = new_handles + [h]
+            else:
+                removed = true
+        self.open_handles = new_handles
+        if removed:
+            return Result.Ok(true)
+        Result.Err("EBADF")
+
+    fn seek(handle: u64, offset: i64, whence: SeekWhence) -> Result<u64, text>:
+        Result.Err("ESPIPE: win_vfs entries are not seekable")
+
+    fn stat(path: text) -> Result<FsNode, text>:
+        val located = self._locate(path)
+        if located.records.len() == 0 as i64:
+            return Result.Err("ENOENT: {path}")
+        Result.Ok(_stub_fs_node())
+
+    fn chmod(path: text, mode: u16) -> Result<bool, text>:
+        Result.Err("EROFS")
+
+    fn mkdir(path: text) -> Result<bool, text>:
+        Result.Err("EROFS")
+
+    fn rmdir(path: text) -> Result<bool, text>:
+        Result.Err("EROFS")
+
+    fn readdir(path: text) -> Result<[DirEntry], text>:
+        val r = self.readdir(path)
+        if r.ok:
+            return Result.Ok(r.value)
+        Result.Err(r.error)
+
+    fn unlink(path: text) -> Result<bool, text>:
+        Result.Err("EROFS")
+
+    fn rename(old_path: text, new_path: text) -> Result<bool, text>:
+        Result.Err("EROFS")
+
+    fn symlink(target: text, link_path: text) -> Result<bool, text>:
+        Result.Err("EROFS")
+
+# ---------------------------------------------------------------------------
+# Spec-facing constructors + helpers
+# ---------------------------------------------------------------------------
+
+fn win_vfs_make_for_test() -> WinVfsDriver:
+    WinVfsDriver.new()
+
+fn _make_dir_entry(name: text) -> DirEntry:
+    DirEntry(name: name, node: _stub_fs_node())
+
+fn _stub_fs_node() -> FsNode:
+    FsNode(
+        id: 0 as u64,
+        kind: FsNodeKind.File,
+        size: 0 as u64,
+        permissions: 0o444 as u16,
+        owner: 0 as u32,
+        group: 0 as u32,
+        created_ns: 0 as u64,
+        modified_ns: 0 as u64)
+
+fn _parse_u64(s: text) -> u64:
+    if s == "":
+        return 0 as u64
+    var i = 0
+    val n = s.len()
+    var acc: u64 = 0 as u64
+    while i < n:
+        val d = _digit(s[i:i + 1])
+        if d < 0:
+            break
+        acc = (acc * (10 as u64)) + (d as u64)
+        i = i + 1
+    acc
+
+fn _digit(ch: text) -> i64:
+    if ch == "0": return 0 as i64
+    if ch == "1": return 1 as i64
+    if ch == "2": return 2 as i64
+    if ch == "3": return 3 as i64
+    if ch == "4": return 4 as i64
+    if ch == "5": return 5 as i64
+    if ch == "6": return 6 as i64
+    if ch == "7": return 7 as i64
+    if ch == "8": return 8 as i64
+    if ch == "9": return 9 as i64
+    -1 as i64

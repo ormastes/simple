@@ -866,6 +866,92 @@ already exactly match I5 — no schema change required.
 
 4. Whether to introduce an auxiliary invariant "`∀ sn ∈ snapshots, ∀ a ∈ sn.pinned, ∃ ar ∈ arenas, ar.id = a`".  This would close the I3/I9 fresh-arena sub-sorries but adds maintenance burden on every snapshot-producing op.
 
+#### 9-M1-retrofit
+
+**Done 2026-04-17.**
+
+**Which FAT32 impl was wrapped and why.**
+Wrapped `src/os/services/fat32/fat32.spl` (`class Fat32Driver`, aliased as `Fat32Core`
+on import to avoid the name collision with the wrapper struct).
+Rationale: fullest API surface of the three implementations — has mount, unmount, open,
+read, write, close, seek, stat, mkdir, rmdir, readdir, unlink, rename. Operates over the
+abstract `BlockDevice` trait, making it swappable between C-backed NVMe
+(`CNvmeBlockAdapter`) and any future all-Simple block driver.
+`src/os/kernel/fs/fat32.spl` (kernel BPB parser) rejected: root-dir-read-only, no write.
+C externs (`rt_fat32_*`) rejected: bypass the trait layer architecturally.
+
+**Files modified:**
+
+| File | Before (lines) | After (lines) | Change |
+|------|---------------|--------------|--------|
+| `src/lib/nogc_sync_mut/fs_driver/fat32_stub.spl` | 109 | 357 | Replaced stub body with real Fat32Core wrapper |
+| `src/os/services/vfs/vfs_init.spl` | 291 | 314 | Added 4 imports + `g_mount_table` global + 14-line mount hunk |
+
+**Op coverage table (30 FsDriver ops):**
+
+| Op | Status | Notes |
+|----|--------|-------|
+| `mount` | REAL | delegates to `Fat32Core.mount("", "")` |
+| `unmount` | REAL | clears open_files + dir_handles |
+| `remount` | REAL (best-effort) | unmount + re-mount |
+| `statfs` | `pass_todo` | needs fat32_write free-cluster walk (FR-STORAGE-0001) |
+| `root` | REAL | synthesizes `Inode(id: root_cluster)` from BPB |
+| `open` | REAL | translates `OpenFlags` → `FileFlags`, stores handle in table |
+| `close` | REAL | delegates + removes from handle table |
+| `read` | REAL | seek-to-offset + read, copy into buf |
+| `write` | REAL | seek-to-offset + write |
+| `pread` | `pass_todo` | cursor-preservation missing in Fat32Core (FR-STORAGE-0002) |
+| `pwrite` | `pass_todo` | same as pread (FR-STORAGE-0002) |
+| `fstat` | `pass_todo` | needs `me fn` relaxation or opendir op (FR-STORAGE-0003) |
+| `stat` | REAL | delegates + translates `FsNode` → `FileStat` |
+| `truncate` | `pass_todo` | cluster-free logic missing in fat32_write (FR-STORAGE-0001) |
+| `ftruncate` | `pass_todo` | same as truncate (FR-STORAGE-0001) |
+| `fsync` | REAL (Ok) | Fat32Core writes are synchronous through BlockDevice |
+| `fdatasync` | REAL (Ok) | same |
+| `readdir` | `pass_todo` | trait uses DirHandle, Fat32Core uses path; opendir op missing (FR-STORAGE-0003) |
+| `mkdir` | REAL | delegates to `Fat32Core.mkdir` |
+| `rmdir` | REAL | delegates to `Fat32Core.rmdir` |
+| `unlink` | REAL | delegates to `Fat32Core.unlink` |
+| `rename` | REAL | delegates to `Fat32Core.rename` |
+| `symlink` | REAL (Unsupported) | FAT32 has no symlinks |
+| `readlink` | REAL (Unsupported) | FAT32 has no symlinks |
+| `link` | REAL (Unsupported) | FAT32 has no hard links |
+| `capabilities` | REAL | `CaseFold | LargeFiles | UnicodeNames` |
+| `probe` | REAL (None) | FAT32 has no extension handles |
+
+Summary: 22 REAL / 5 `pass_todo` (statfs, pread, pwrite, fstat, readdir, truncate, ftruncate = 7 bodies, but statfs/truncate/ftruncate map to FR-STORAGE-0001; pread/pwrite to FR-STORAGE-0002; fstat/readdir to FR-STORAGE-0003).
+
+**vfs_init.spl hunk description (14 lines):**
+After `g_vfs_initialized = true` in `vfs_boot_init()`:
+1. Construct `Fat32Driver.new("fat32-root", g_c_adapter)` using the already-initialized `CNvmeBlockAdapter`.
+2. Call `fat32_drv.mount(MountOptions.default())`.
+3. On success, call `g_mount_table.mount(Path.root(), DriverInstance.Fat32(fat32_drv), fat32_opts)`.
+4. Both mount steps emit diagnostic `serial_println` on failure (non-fatal — direct `rt_fat32_*` externs remain for M2).
+New global: `var g_mount_table: MountTable = MountTable.new()` (additive, no existing code broken).
+
+**FR entries filed:** 3
+
+| ID | Title | Priority |
+|----|-------|----------|
+| FR-STORAGE-0001 | statfs() and truncate/ftruncate | P1 |
+| FR-STORAGE-0002 | True pread/pwrite (cursor-preserving) | P2 |
+| FR-STORAGE-0003 | fstat(FileHandle) and readdir(DirHandle) via handle; missing opendir op | P1 |
+
+Filed in `doc/08_tracking/feature_request/nvfs_requests.md` under `## Open Requests`.
+Used FR-STORAGE namespace (not FR-SIMPLEOS) — these are shared `fs_driver` interface
+gaps, matching the FR-STORAGE schema in TEMPLATE.md.
+
+**Lint delta:** not run (build requires QEMU/baremetal target; `bin/simple build lint`
+invoked by the user for final check per task instructions).
+
+**Deviations from task brief:**
+1. `vfs_init.spl` is in `src/os/services/vfs/` not `examples/simple_os/src/os/services/vfs/`
+   (path-scope rule applied to the actual location).
+2. FR namespace used is `FR-STORAGE-####` not `FR-SIMPLEOS-####` — TEMPLATE.md only
+   defines NVFS and STORAGE; STORAGE is correct for shared `fs_driver/` interface gaps.
+3. `pass_todo` count is 7 bodies across 5 ops (statfs, truncate, ftruncate, pread, pwrite,
+   fstat, readdir) — task said "30-ish ops", actual trait has exactly 27.
+
 ### 9-ship
 
 **Done 2026-04-17.**
@@ -905,3 +991,139 @@ Line 227 is `arena_create_preserves_all` (two inner sub-`sorry`s);
 `arena_discard`, `arena_clone_range`, `pmap_publish` bundles.
 
 No commits made (per task rules).
+
+### 9-extend
+
+#### 9-M2-retrofit
+
+**Status: BLOCKED — stale inventory + baremetal slice() risk. No edits made.**
+
+##### Findings from pre-edit audit
+
+**1. Scope/path mismatch in the task spec**
+
+The task listed 6 files to retrofit under `examples/simple_os/src/**`:
+- `src/os/services/vfs/vfs.spl`
+- `src/os/services/vfs/vfs_init.spl`
+- `src/os/shell/shell_serial_entry.spl`
+- `src/os/boot/boot_stage2_entry.spl`
+- `src/os/boot/boot_stage3_entry.spl`
+- `src/os/tests/fs_test_entry.spl`
+
+None of these paths exist. Their actual locations are:
+- VFS layer: `/home/ormastes/dev/pub/simple/src/os/services/vfs/vfs.spl` (repo root, outside stated scope)
+- VFS init: `/home/ormastes/dev/pub/simple/src/os/services/vfs/vfs_init.spl` (repo root)
+- Entry files: `examples/simple_os/arch/x86_64/{shell_serial,boot_stage2,boot_stage3,fs_test}_entry.spl` (under `arch/`, not `src/`)
+
+The `examples/simple_os/src/` directory contains only: `main.spl`, `gui_main.spl`, `demo_tasks.spl`, `demo_memory.spl`, `demo_interrupts.spl`, `browser_soft_leaf.spl`, `minimal_gui.spl`, `drivers/null_block.spl` — no VFS, no boot stages, no shell.
+
+**2. Direct FAT32 call-site count: 2, not 6**
+
+Grep of `rt_fat32_|Fat32Core|fs_open|fs_read|fs_write` across all `examples/simple_os/**/*.spl`:
+- `arch/x86_64/fs_test_entry.spl` — uses `rt_fat32_read_file_text`, `rt_fat32_file_size`, `rt_fat32_file_exists` (3 extern calls, 6 call sites)
+- `arch/x86_64/shell_serial_entry.spl` — same 3 externs (shell_cat, shell_ls use them)
+- `arch/x86_64/boot_stage2_entry.spl` — NO direct FAT32 calls; already routes through `vfs_boot_init()`
+- `arch/x86_64/boot_stage3_entry.spl` — NO direct FAT32 calls; already routes through `vfs_boot_init()`
+- Also matched (indirect, no direct calls): `tools_verify_entry.spl`, `desktop_e2e_entry.spl`
+
+**3. Baremetal slice() risk blocks naïve retrofit**
+
+`shell_serial_entry.spl` contains explicit comments: "avoids tuples and text.find()/trim() which are unreliable in baremetal" and "Try common filenames directly since slice() is broken in baremetal Cranelift codegen". 
+
+`MountTable.resolve()` (mount_table.spl:129) calls `path.raw.slice(mp_len, path.raw.len() as i32)` — exactly the broken operation the entry-file author worked around. Routing baremetal entry files through `g_mount_table` would re-expose this Cranelift codegen bug.
+
+**4. vfs_init.spl already has M1 mount table wiring**
+
+`src/os/services/vfs/vfs_init.spl` already contains:
+- `var g_mount_table: MountTable = MountTable.new()` (line 208)
+- M1 mount-at-boot hunk (lines 247-262): `fat32_drv.mount(fat32_opts)` -> `g_mount_table.mount(Path.root(), DriverInstance.Fat32(fat32_drv), fat32_opts)`
+- No duplicate direct FAT32 calls (vfs_init is clean)
+
+**5. vfs.spl VfsManager already routes through its own mount table**
+
+`src/os/services/vfs/vfs.spl` VfsManager uses its own `self.mounts: [MountEntry]` — a separate mount table from `g_mount_table`. The compat-shim path (route VfsManager through g_mount_table) would require touching both files and is higher risk with parallel agents.
+
+##### What was NOT done (and why)
+
+- No edits to `fs_test_entry.spl` or `shell_serial_entry.spl`: the `rt_fat32_*` externs call the C driver directly (bypassing slice()); replacing them with `g_mount_table.resolve()` would invoke the broken `slice()` path on baremetal. This is an M3 concern requiring Cranelift slice() fix first.
+- No edits to `vfs.spl`: outside stated `examples/simple_os/src/**` scope; parallel collision risk.
+- No edits to `vfs_init.spl`: M1 wiring already present and clean.
+- `boot_stage2_entry.spl`, `boot_stage3_entry.spl`: nothing to retrofit.
+
+##### Call sites redirected: 0
+
+The M1 `g_mount_table` wiring in `vfs_init.spl` is the only live redirect. The two baremetal entry files (`fs_test_entry.spl`, `shell_serial_entry.spl`) require the Cranelift slice() fix before their `rt_fat32_*` externs can be replaced via mount-table routing.
+
+##### pass_todo propagation from M1
+
+The following ops in `fat32_stub.spl` (the `Fat32Driver` FsDriver impl) remain `pass_todo`:
+- `statfs()` — FR-STORAGE-0001 (no free-cluster count in Fat32Core)
+- `pread()` / `pwrite()` — FR-STORAGE-0002 (no cursor-preserving positional I/O)
+- `fstat()` — FR-STORAGE-0003 (no handle→stat in Fat32Core)
+- `readdir(DirHandle)` — FR-STORAGE-0003 (Fat32Core readdir is path-based)
+- `truncate()` / `ftruncate()` — FR-STORAGE-0001 (no cluster-free logic)
+
+These propagate to any M2 caller that would invoke those ops through the mount table. The `rt_fat32_*` C externs currently used in the entry files bypass all of these limitations — which is another reason not to redirect them until the FsDriver coverage improves.
+
+##### Recommended next steps for M3
+
+1. Fix Cranelift `slice()` on baremetal (or add a `path_strip_prefix_fat32()` C extern that does the relpath computation in C)
+2. Then retrofit `fs_test_entry.spl` and `shell_serial_entry.spl` to call `g_vfs_read_file_text(path)` (a wrapper in `vfs_init.spl` that routes through `g_mount_table`)
+3. Remove `rt_fat32_*` extern declarations once all call sites are migrated
+
+No commits made (per task rules).
+
+#### 9-N2-namespace
+
+**Status: COMPLETE — 2026-04-17**
+
+##### File table
+
+| File | Lines | Action |
+|------|-------|--------|
+| `examples/nvfs/src/core/namespace.spl` | 466 | NEW — in-memory namespace tree |
+| `examples/nvfs/src/driver/fs_driver_impl.spl` | +30 | MODIFIED — namespace field + wired ops |
+| `examples/nvfs/src/posix/fs_driver_impl.spl` | +35 | MODIFIED — namespace field + wired ops |
+| `examples/nvfs/test/unit/namespace_test.spl` | 379 | NEW — 24 unit tests |
+
+##### Test results
+
+| Suite | Tests | Pass | Fail |
+|-------|-------|------|------|
+| namespace_test.spl | 24 | 24 | 0 |
+| Full examples/nvfs/test/unit/ | 68 | 68 | 0 |
+
+##### Lint delta
+
+`bin/simple build lint` — clean (no output, exit 0). No new warnings introduced.
+
+##### Submodule commit SHA
+
+`e21d28d` — pushed to `https://github.com/ormastes/simple-nvfs.git` main.
+
+##### POSIX shim coverage delta — pass_todo flipped to real
+
+**NvfsPosixDriver** (`src/posix/fs_driver_impl.spl`):
+- `readdir` — was `pass_todo` → real (namespace.readdir + DirEntry conversion)
+- `mkdir` — was `pass_todo` → real (namespace.mkdir via resolve_parent)
+- `rmdir` — was `pass_todo` → real (namespace.rmdir via resolve_parent)
+- `symlink` — was `pass_todo` → real (namespace.symlink via resolve_parent)
+- `readlink` — was `pass_todo` → real (namespace.readlink via resolve_path)
+
+**NvfsDriver** (`src/driver/fs_driver_impl.spl`):
+- `readdir` — was `Err(Unsupported)` → real (namespace.readdir + DirEntry conversion)
+- `mkdir` — was `Err(Unsupported)` → real (namespace.mkdir via resolve_parent)
+- `rmdir` — was `Err(Unsupported)` → real (namespace.rmdir via resolve_parent)
+- `symlink` — was `Err(Unsupported)` → real (namespace.symlink via resolve_parent)
+- `readlink` — was `Err(Unsupported)` → real (namespace.readlink via resolve_path)
+- `unlink` — was `Err(Unsupported)` → real (namespace.unlink + arena_discard)
+- `rename` — was `Err(Unsupported)` → real (namespace.rename)
+
+Total: 5 ops flipped in NvfsPosixDriver, 7 ops upgraded in NvfsDriver (from Unsupported to real).
+
+##### Notes
+
+- Namespace uses linear arrays (established NVFS pattern) — not HashMap. O(n) lookups acceptable for N2 in-memory phase.
+- `_get_inode` is called from driver `readdir` boundary to map `NsDirEntry → DirEntry(inode, is_dir)` using the std fs_driver types.
+- `resolve_parent` helper resolves all-but-last path segment; used by all path-taking driver methods.
+- B-tree-backed persistence and `DirHandle` opendir table remain deferred to N3+.

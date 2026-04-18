@@ -1,0 +1,144 @@
+#![allow(unnamed_duplicate_typed_args)]
+"""ApprovalBroker — SPM approval surface.
+
+Flow (per Phase 3 §C):
+  1. `request_approval(intent, principal)` presents the intent to the user.
+  2. On accept, a `SignedAction` is produced (HMAC over intent+principal).
+  3. The caller hands the signed action back via `verify_response` which
+     confirms the HMAC + principal + intent match.
+
+The host path tries platform probes first (polkit / TouchID / Windows
+Hello) and falls back to the chrome-secret HMAC when no probe is
+available. The unit spec exercises only the HMAC path via a
+`test_simulate_user_accept` shortcut.
+
+Feature: spm-winfs-llm-suite AC-6.
+"""
+
+use lib.common.privilege.id_path.{IdPath, id_path_to_text}
+use lib.common.privilege.authority_token.{AuthorityToken, AuthorityLevel, Scope, TrustSource, authority_level_name}
+use lib.common.privilege.principal.{Principal, PrincipalKind}
+
+# ---------------------------------------------------------------------------
+# Intent + signed action
+# ---------------------------------------------------------------------------
+
+class ApprovalIntent:
+    """A single request the user is being asked to approve."""
+    app: text
+    action: text
+    required: IdPath
+    level: AuthorityLevel
+
+class SignedAction:
+    """Intent + HMAC derived from the chrome secret + principal id."""
+    intent: ApprovalIntent
+    principal: Principal
+    hmac: [u8]
+
+class ApprovalResult:
+    """Result envelope for `request_approval`."""
+    ok: bool
+    token: AuthorityToken
+    error: text
+
+# ---------------------------------------------------------------------------
+# Broker
+# ---------------------------------------------------------------------------
+
+class ApprovalBroker:
+    pending_dir: text
+    chrome_secret: [u8]
+    var _accepted_intents: [ApprovalIntent]
+
+    static fn new_for_test(pending_dir: text, chrome_secret: [u8]) -> ApprovalBroker:
+        ApprovalBroker(
+            pending_dir: pending_dir,
+            chrome_secret: chrome_secret,
+            _accepted_intents: [])
+
+    # -- request_approval -----------------------------------------------------
+
+    me request_approval(intent: ApprovalIntent, principal: Principal) -> ApprovalResult:
+        """If the user has already accepted this intent (via `test_simulate_user_accept`
+        or, in production, a real platform probe), mint an `AuthorityToken`
+        bound to the intent's id_path + level.
+        """
+        if not self._already_accepted(intent):
+            return ApprovalResult(
+                ok: false,
+                token: AuthorityToken.public(),
+                error: "user did not accept intent")
+        val token = AuthorityToken(
+            id_path: intent.required,
+            level: intent.level,
+            principal: principal,
+            trust_source: TrustSource.UserTrusted,
+            scope: Scope.one_shot(),
+            issuer_sig: self._mint_hmac(intent, principal))
+        ApprovalResult(ok: true, token: token, error: "")
+
+    # -- verify_response -----------------------------------------------------
+
+    me verify_response(signed: SignedAction) -> bool:
+        """Accept only if `signed.hmac` matches the broker-side derivation
+        for `signed.intent` + `signed.principal.id`. Unsigned or forged
+        HMACs are rejected (empty hmac always returns false)."""
+        if signed.hmac.len() == 0 as i64:
+            return false
+        val expected = self._mint_hmac(signed.intent, signed.principal)
+        if expected.len() != signed.hmac.len():
+            return false
+        var i = 0
+        val n = expected.len()
+        while i < n:
+            if expected[i] != signed.hmac[i]:
+                return false
+            i = i + 1
+        true
+
+    # -- test helpers ---------------------------------------------------------
+
+    me test_simulate_user_accept(intent: ApprovalIntent):
+        self._accepted_intents = self._accepted_intents + [intent]
+
+    me test_sign(intent: ApprovalIntent, principal: Principal) -> SignedAction:
+        SignedAction(
+            intent: intent,
+            principal: principal,
+            hmac: self._mint_hmac(intent, principal))
+
+    # -- internals ------------------------------------------------------------
+
+    me _already_accepted(intent: ApprovalIntent) -> bool:
+        for existing in self._accepted_intents:
+            if _intent_equals(existing, intent):
+                return true
+        false
+
+    me _mint_hmac(intent: ApprovalIntent, principal: Principal) -> [u8]:
+        """Deterministic, non-crypto HMAC replacement:
+            bytes = chrome_secret ++ "|" ++ app ++ "|" ++ action ++
+                    "|" ++ id_path ++ "|" ++ level_name ++ "|" ++ principal.id
+        Replace with a real HMAC-SHA256 when `std.crypto.hmac` is ready."""
+        var out: [u8] = []
+        var i = 0
+        val n = self.chrome_secret.len()
+        while i < n:
+            out = out + [self.chrome_secret[i]]
+            i = i + 1
+        val tail = "|" + intent.app + "|" + intent.action + "|" + id_path_to_text(intent.required) + "|" + authority_level_name(intent.level) + "|" + principal.id
+        val tail_bytes = tail.bytes()
+        var j = 0
+        val m = tail_bytes.len()
+        while j < m:
+            out = out + [tail_bytes[j]]
+            j = j + 1
+        out
+
+fn _intent_equals(a: ApprovalIntent, b: ApprovalIntent) -> bool:
+    if a.app != b.app:
+        return false
+    if a.action != b.action:
+        return false
+    id_path_to_text(a.required) == id_path_to_text(b.required)

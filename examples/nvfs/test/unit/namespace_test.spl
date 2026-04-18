@@ -1,0 +1,379 @@
+# @cover examples/nvfs/src/core/namespace.spl 80%
+"""
+# NVFS Namespace Unit Tests
+
+**Feature IDs:** #NVFS-N2-NAMESPACE
+**Category:** Infrastructure
+**Difficulty:** 3/5
+**Status:** In Progress
+**Design:** doc/05_design/nvfs_design_v2.md §4
+
+## Overview
+
+Tests for the in-memory namespace tree:
+  - Root inode is a Dir with ino=1.
+  - mkdir creates a Dir child; lookup succeeds.
+  - Nested mkdir: two levels deep.
+  - rmdir on empty dir succeeds.
+  - rmdir on non-empty dir returns Busy.
+  - create_file + readdir lists the file entry.
+  - symlink + readlink round-trip.
+  - unlink removes entry; subsequent lookup returns None.
+  - rename within same directory.
+  - rename across different directories.
+  - resolve_path with multi-segment path /a/b/c.
+"""
+
+use std.sspec.*
+use examples.nvfs.src.core.namespace.{Namespace, NsInodeKind}
+use std.fs_driver.error.{FsError}
+
+
+describe "NVFS Namespace — root":
+    """
+    ## Root inode
+
+    After Namespace.new(), the root inode must exist at ino=1 and be a Dir.
+    """
+
+    it "root inode exists at ino=1":
+        val ns = Namespace.new()
+        val opt = ns._get_inode(1)
+        match opt:
+            case None: expect(false).to_equal(true)
+            case Some(n): expect(n.ino).to_equal(1)
+
+    it "root inode is a Dir":
+        val ns = Namespace.new()
+        val opt = ns._get_inode(1)
+        match opt:
+            case None: expect(false).to_equal(true)
+            case Some(n):
+                val is_dir = match n.kind:
+                    case NsInodeKind.Dir: true
+                    case _: false
+                expect(is_dir).to_equal(true)
+
+    it "root readdir returns empty list":
+        val ns = Namespace.new()
+        val r = ns.readdir(1)
+        match r:
+            case Err(_): expect(false).to_equal(true)
+            case Ok(entries): expect(entries.len()).to_equal(0)
+
+
+describe "NVFS Namespace — mkdir + lookup":
+    """
+    ## mkdir and lookup
+
+    mkdir creates a Dir child; lookup returns the same inode.
+    """
+
+    it "mkdir creates a child under root":
+        var ns = Namespace.new()
+        val r = ns.mkdir(1, "alpha", 0o755)
+        match r:
+            case Err(_): expect(false).to_equal(true)
+            case Ok(n):
+                expect(n.ino > 1).to_equal(true)
+                val is_dir = match n.kind:
+                    case NsInodeKind.Dir: true
+                    case _: false
+                expect(is_dir).to_equal(true)
+
+    it "lookup finds child after mkdir":
+        var ns = Namespace.new()
+        val r = ns.mkdir(1, "beta", 0o755)
+        val child_ino = match r:
+            case Err(_): 0
+            case Ok(n): n.ino
+        val found = ns.lookup(1, "beta")
+        match found:
+            case None: expect(false).to_equal(true)
+            case Some(n): expect(n.ino).to_equal(child_ino)
+
+    it "mkdir on duplicate name returns AlreadyExists":
+        var ns = Namespace.new()
+        val _ = ns.mkdir(1, "dup", 0o755)
+        val r2 = ns.mkdir(1, "dup", 0o755)
+        val is_exists = match r2:
+            case Err(FsError.AlreadyExists): true
+            case _: false
+        expect(is_exists).to_equal(true)
+
+
+describe "NVFS Namespace — nested mkdir":
+    """
+    ## Nested directories
+
+    mkdir into a child directory creates a grandchild inode.
+    """
+
+    it "two-level mkdir creates nested dirs":
+        var ns = Namespace.new()
+        val r1 = ns.mkdir(1, "parent", 0o755)
+        val parent_ino = match r1:
+            case Err(_): 0
+            case Ok(n): n.ino
+        val r2 = ns.mkdir(parent_ino, "child", 0o755)
+        match r2:
+            case Err(_): expect(false).to_equal(true)
+            case Ok(n):
+                val found = ns.lookup(parent_ino, "child")
+                match found:
+                    case None: expect(false).to_equal(true)
+                    case Some(m): expect(m.ino).to_equal(n.ino)
+
+
+describe "NVFS Namespace — rmdir":
+    """
+    ## rmdir
+
+    rmdir on an empty Dir succeeds; rmdir on non-empty returns Busy.
+    """
+
+    it "rmdir empty dir returns Ok":
+        var ns = Namespace.new()
+        val _ = ns.mkdir(1, "empty_dir", 0o755)
+        val r = ns.rmdir(1, "empty_dir")
+        val ok = match r:
+            case Ok(_): true
+            case Err(_): false
+        expect(ok).to_equal(true)
+
+    it "rmdir empty dir removes the inode from lookup":
+        var ns = Namespace.new()
+        val _ = ns.mkdir(1, "gone", 0o755)
+        val _ = ns.rmdir(1, "gone")
+        val found = ns.lookup(1, "gone")
+        val is_none = match found:
+            case None: true
+            case Some(_): false
+        expect(is_none).to_equal(true)
+
+    it "rmdir non-empty dir returns Busy":
+        var ns = Namespace.new()
+        val r1 = ns.mkdir(1, "outer", 0o755)
+        val outer_ino = match r1:
+            case Err(_): 0
+            case Ok(n): n.ino
+        val _ = ns.mkdir(outer_ino, "inner", 0o755)
+        val r = ns.rmdir(1, "outer")
+        val is_busy = match r:
+            case Err(FsError.Busy): true
+            case _: false
+        expect(is_busy).to_equal(true)
+
+    it "rmdir missing name returns NotFound":
+        var ns = Namespace.new()
+        val r = ns.rmdir(1, "no_such")
+        val is_nf = match r:
+            case Err(FsError.NotFound): true
+            case _: false
+        expect(is_nf).to_equal(true)
+
+
+describe "NVFS Namespace — create_file + readdir":
+    """
+    ## Files in directories
+
+    create_file under root appears in readdir.
+    """
+
+    it "create_file is visible in readdir":
+        var ns = Namespace.new()
+        val _ = ns.create_file(1, "foo.txt", 42, 0o644)
+        val r = ns.readdir(1)
+        match r:
+            case Err(_): expect(false).to_equal(true)
+            case Ok(entries):
+                expect(entries.len()).to_equal(1)
+                expect(entries[0].name).to_equal("foo.txt")
+
+    it "readdir on a file ino returns InvalidArg":
+        var ns = Namespace.new()
+        val fr = ns.create_file(1, "bar.txt", 43, 0o644)
+        val file_ino = match fr:
+            case Err(_): 0
+            case Ok(n): n.ino
+        val r = ns.readdir(file_ino)
+        val is_bad = match r:
+            case Err(FsError.InvalidArg): true
+            case _: false
+        expect(is_bad).to_equal(true)
+
+
+describe "NVFS Namespace — symlink + readlink":
+    """
+    ## Symlinks
+
+    symlink creates a Symlink inode; readlink returns the target.
+    """
+
+    it "symlink + readlink round-trip":
+        var ns = Namespace.new()
+        val _ = ns.symlink(1, "link", "/target/path")
+        val sl = ns.lookup(1, "link")
+        val ino = match sl:
+            case None: 0
+            case Some(n): n.ino
+        val r = ns.readlink(ino)
+        match r:
+            case Err(_): expect(false).to_equal(true)
+            case Ok(t): expect(t).to_equal("/target/path")
+
+    it "readlink on a Dir returns InvalidArg":
+        var ns = Namespace.new()
+        val r = ns.readlink(1)
+        val is_bad = match r:
+            case Err(FsError.InvalidArg): true
+            case _: false
+        expect(is_bad).to_equal(true)
+
+    it "duplicate symlink name returns AlreadyExists":
+        var ns = Namespace.new()
+        val _ = ns.symlink(1, "sl", "/a")
+        val r2 = ns.symlink(1, "sl", "/b")
+        val is_exists = match r2:
+            case Err(FsError.AlreadyExists): true
+            case _: false
+        expect(is_exists).to_equal(true)
+
+
+describe "NVFS Namespace — unlink":
+    """
+    ## unlink
+
+    unlink removes a file or symlink; subsequent lookup returns None.
+    """
+
+    it "unlink file removes entry":
+        var ns = Namespace.new()
+        val _ = ns.create_file(1, "del.txt", 44, 0o644)
+        val r = ns.unlink(1, "del.txt")
+        val ok = match r:
+            case Ok(_): true
+            case Err(_): false
+        expect(ok).to_equal(true)
+        val found = ns.lookup(1, "del.txt")
+        val is_none = match found:
+            case None: true
+            case Some(_): false
+        expect(is_none).to_equal(true)
+
+    it "unlink on a Dir returns InvalidArg":
+        var ns = Namespace.new()
+        val _ = ns.mkdir(1, "mydir", 0o755)
+        val r = ns.unlink(1, "mydir")
+        val is_bad = match r:
+            case Err(FsError.InvalidArg): true
+            case _: false
+        expect(is_bad).to_equal(true)
+
+    it "unlink missing entry returns NotFound":
+        var ns = Namespace.new()
+        val r = ns.unlink(1, "missing")
+        val is_nf = match r:
+            case Err(FsError.NotFound): true
+            case _: false
+        expect(is_nf).to_equal(true)
+
+
+describe "NVFS Namespace — rename":
+    """
+    ## rename
+
+    rename within a directory and across directories.
+    """
+
+    it "rename within same directory":
+        var ns = Namespace.new()
+        val fr = ns.create_file(1, "old_name.txt", 45, 0o644)
+        val file_ino = match fr:
+            case Err(_): 0
+            case Ok(n): n.ino
+        val r = ns.rename(1, "old_name.txt", 1, "new_name.txt")
+        val ok = match r:
+            case Ok(_): true
+            case Err(_): false
+        expect(ok).to_equal(true)
+        val old_found = ns.lookup(1, "old_name.txt")
+        val old_is_none = match old_found:
+            case None: true
+            case Some(_): false
+        expect(old_is_none).to_equal(true)
+        val new_found = ns.lookup(1, "new_name.txt")
+        match new_found:
+            case None: expect(false).to_equal(true)
+            case Some(n): expect(n.ino).to_equal(file_ino)
+
+    it "rename across directories":
+        var ns = Namespace.new()
+        val dr = ns.mkdir(1, "src_dir", 0o755)
+        val src_ino = match dr:
+            case Err(_): 0
+            case Ok(n): n.ino
+        val dr2 = ns.mkdir(1, "dst_dir", 0o755)
+        val dst_ino = match dr2:
+            case Err(_): 0
+            case Ok(n): n.ino
+        val fr = ns.create_file(src_ino, "file.txt", 46, 0o644)
+        val file_ino = match fr:
+            case Err(_): 0
+            case Ok(n): n.ino
+        val r = ns.rename(src_ino, "file.txt", dst_ino, "moved.txt")
+        val ok = match r:
+            case Ok(_): true
+            case Err(_): false
+        expect(ok).to_equal(true)
+        val src_found = ns.lookup(src_ino, "file.txt")
+        val src_none = match src_found:
+            case None: true
+            case Some(_): false
+        expect(src_none).to_equal(true)
+        val dst_found = ns.lookup(dst_ino, "moved.txt")
+        match dst_found:
+            case None: expect(false).to_equal(true)
+            case Some(n): expect(n.ino).to_equal(file_ino)
+
+
+describe "NVFS Namespace — resolve_path":
+    """
+    ## resolve_path
+
+    Multi-segment path resolution walks from root.
+    """
+
+    it "resolve_path /a/b/c finds nested inode":
+        var ns = Namespace.new()
+        val ra = ns.mkdir(1, "a", 0o755)
+        val a_ino = match ra:
+            case Err(_): 0
+            case Ok(n): n.ino
+        val rb = ns.mkdir(a_ino, "b", 0o755)
+        val b_ino = match rb:
+            case Err(_): 0
+            case Ok(n): n.ino
+        val rc = ns.mkdir(b_ino, "c", 0o755)
+        val c_ino = match rc:
+            case Err(_): 0
+            case Ok(n): n.ino
+        val found = ns.resolve_path("/a/b/c")
+        match found:
+            case Err(_): expect(false).to_equal(true)
+            case Ok(n): expect(n.ino).to_equal(c_ino)
+
+    it "resolve_path missing segment returns NotFound":
+        var ns = Namespace.new()
+        val r = ns.resolve_path("/no/such/path")
+        val is_nf = match r:
+            case Err(FsError.NotFound): true
+            case _: false
+        expect(is_nf).to_equal(true)
+
+    it "resolve_path of root (empty or /) returns root inode":
+        var ns = Namespace.new()
+        val r = ns.resolve_path("/")
+        match r:
+            case Err(_): expect(false).to_equal(true)
+            case Ok(n): expect(n.ino).to_equal(1)

@@ -1,0 +1,110 @@
+#![allow(unnamed_duplicate_typed_args)]
+"""MCP wiki_keyword / wiki.lookup tool.
+
+Minimal keyword → entry lookup backed by an in-memory seed of 3-5
+test entries. Real corpus population is deferred per plan. Every
+returned entry is tagged with `ContentAuthority{level, source_trust}`
+so downstream callers can run `release_gate(...)` against their reader
+clearance.
+
+Feature: spm-winfs-llm-suite AC-6.
+"""
+
+use lib.common.privilege.authority_token.{AuthorityLevel, TrustSource}
+use lib.common.llm.content_authority.{ContentAuthority}
+
+# ---------------------------------------------------------------------------
+# Tool content + result shapes
+# ---------------------------------------------------------------------------
+
+class WikiContent:
+    body: [u8]
+    authority: ContentAuthority
+
+    static fn new(body: [u8], authority: ContentAuthority) -> WikiContent:
+        WikiContent(body: body, authority: authority)
+
+class WikiLookupResult:
+    ok: bool
+    value: WikiContent
+    error: text
+
+    static fn hit(c: WikiContent) -> WikiLookupResult:
+        WikiLookupResult(ok: true, value: c, error: "")
+
+    static fn miss(keyword: text) -> WikiLookupResult:
+        WikiLookupResult(
+            ok: false,
+            value: WikiContent.new([], _default_authority()),
+            error: "no entry for: " + keyword)
+
+# ---------------------------------------------------------------------------
+# In-memory seed corpus (3-5 entries)
+# ---------------------------------------------------------------------------
+
+class WikiEntry:
+    keyword: text
+    body: text
+    level: AuthorityLevel
+    trust: TrustSource
+
+fn _seed() -> [WikiEntry]:
+    [
+        WikiEntry(
+            keyword: "simple language",
+            body: "Simple is a self-hosted language with MDSOC+ architecture.",
+            level: AuthorityLevel.Internal,
+            trust: TrustSource.RegistryTrusted),
+        WikiEntry(
+            keyword: "mdsoc",
+            body: "MDSOC = Module-Driven Separation of Concerns; MDSOC+ adds ECS.",
+            level: AuthorityLevel.Internal,
+            trust: TrustSource.RegistryTrusted),
+        WikiEntry(
+            keyword: "spm",
+            body: "SPM = Simple Process Manager, mediates kernel↔WM↔LLM flows.",
+            level: AuthorityLevel.Internal,
+            trust: TrustSource.RegistryTrusted),
+        WikiEntry(
+            keyword: "win-fs",
+            body: "/win is the FS view of live windows; one tree per app/wid.",
+            level: AuthorityLevel.Internal,
+            trust: TrustSource.RegistryTrusted),
+    ]
+
+# ---------------------------------------------------------------------------
+# Lookup
+# ---------------------------------------------------------------------------
+
+fn wiki_lookup(keyword: text) -> WikiLookupResult:
+    """Case-insensitive exact-match lookup against the seed corpus."""
+    val needle = keyword.to_lower()
+    for e in _seed():
+        if e.keyword.to_lower() == needle:
+            val auth = ContentAuthority(
+                level: e.level,
+                source_trust: e.trust)
+            return WikiLookupResult.hit(WikiContent.new(e.body.bytes(), auth))
+    WikiLookupResult.miss(keyword)
+
+# ---------------------------------------------------------------------------
+# Handler (byte-returning for dispatch_wrap)
+# ---------------------------------------------------------------------------
+
+fn wiki_handler(args: [text]) -> [u8]:
+    """MCP handler shape: arg[0] is the keyword."""
+    if args.len() == 0 as i64:
+        return "error: missing keyword".bytes()
+    val res = wiki_lookup(args[0])
+    if not res.ok:
+        return res.error.bytes()
+    res.value.body
+
+# ---------------------------------------------------------------------------
+# Internal
+# ---------------------------------------------------------------------------
+
+fn _default_authority() -> ContentAuthority:
+    ContentAuthority(
+        level: AuthorityLevel.Public,
+        source_trust: TrustSource.Untrusted)

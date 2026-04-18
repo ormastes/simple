@@ -112,6 +112,17 @@ class CapabilityReport:
             probe_duration_ms: 0
         )
 
+class ExternalFormalToolchainStatus:
+    yosys: bool
+    sby: bool
+    solver: bool
+    ghdl: bool
+    yosys_ghdl_plugin: bool
+    detail: text
+
+    fn is_runnable() -> bool:
+        self.yosys and self.sby and self.solver and self.ghdl and self.yosys_ghdl_plugin
+
 # ============================================================================
 # Shared Probe Functions
 # ============================================================================
@@ -182,8 +193,7 @@ fn probe_ghdl_mailbox() -> CapabilityReport:
         return CapabilityReport.skip_tool("ghdl_rv32_mailbox", "llvm-objcopy")
     CapabilityReport.ready("ghdl_rv32_mailbox", "ghdl")
 
-fn probe_external_formal() -> CapabilityReport:
-    """Probe for the external RTL formal toolchain (yosys + sby + SMT solver + VHDL bridge)."""
+fn probe_external_formal_tools() -> ExternalFormalToolchainStatus:
     val has_yosys = probe_command("yosys")
     val has_sby = probe_command("sby") or probe_command("symbiyosys")
     val has_solver = probe_command("boolector") or probe_command("z3") or probe_command("cvc5")
@@ -192,14 +202,6 @@ fn probe_external_formal() -> CapabilityReport:
         shell("yosys -m ghdl -p 'help' >/dev/null 2>&1").exit_code == 0
     else:
         false
-    if has_yosys and has_sby and has_solver and has_ghdl and has_yosys_ghdl_plugin:
-        return CapabilityReport(
-            lane_id: "riscv_external_formal",
-            status: CapabilityStatus.ready,
-            tool_name: "yosys+ghdl",
-            detail: "external formal toolchain available: yosys, sby|symbiyosys, solver(boolector|z3|cvc5), ghdl, yosys-ghdl-plugin",
-            probe_duration_ms: 0
-        )
     var missing: [text] = []
     if not has_yosys:
         missing.push("yosys")
@@ -211,11 +213,35 @@ fn probe_external_formal() -> CapabilityReport:
         missing.push("ghdl")
     if not has_yosys_ghdl_plugin:
         missing.push("yosys-ghdl-plugin")
+    val detail = if missing.len() == 0:
+        "external formal toolchain available: yosys, sby|symbiyosys, solver(boolector|z3|cvc5), ghdl, yosys-ghdl-plugin"
+    else:
+        "missing external formal tools: {missing.join(', ')}"
+    ExternalFormalToolchainStatus(
+        yosys: has_yosys,
+        sby: has_sby,
+        solver: has_solver,
+        ghdl: has_ghdl,
+        yosys_ghdl_plugin: has_yosys_ghdl_plugin,
+        detail: detail
+    )
+
+fn probe_external_formal() -> CapabilityReport:
+    """Probe for the external RTL formal toolchain (yosys + sby + SMT solver + VHDL bridge)."""
+    val tools = probe_external_formal_tools()
+    if tools.is_runnable():
+        return CapabilityReport(
+            lane_id: "riscv_external_formal",
+            status: CapabilityStatus.ready,
+            tool_name: "yosys+ghdl",
+            detail: tools.detail,
+            probe_duration_ms: 0
+        )
     CapabilityReport(
         lane_id: "riscv_external_formal",
         status: CapabilityStatus.skip_missing_tool,
         tool_name: "yosys+ghdl",
-        detail: "missing external formal tools: {missing.join(', ')}",
+        detail: tools.detail,
         probe_duration_ms: 0
     )
 
@@ -233,4 +259,6 @@ export probe_openocd
 export probe_trace32
 export probe_ghdl
 export probe_ghdl_mailbox
+export ExternalFormalToolchainStatus
+export probe_external_formal_tools
 export probe_external_formal

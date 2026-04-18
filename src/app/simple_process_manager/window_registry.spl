@@ -1,0 +1,141 @@
+#![allow(unnamed_duplicate_typed_args)]
+"""WindowRegistry — in-memory `[WindowRecord]` + publish sink.
+
+`register(rec)` stores a window (generation bumped if it already exists)
+and calls `sink.publish(encoded_tree)` so the kernel `/win` VFS or the
+host shim can surface the updated tree. `destroy(wid)` bumps generation
+and marks the record Destroyed.
+
+Feature: spm-winfs-llm-suite AC-3 / AC-4.
+"""
+
+use lib.common.win_fs.window_record.{WindowRecord, WindowState, window_mark_destroyed}
+use lib.common.win_fs.fs_encoder.{FsTree, FsEncoder, DefaultFsEncoder, encode_record}
+
+class PublishOutcome:
+    """Per-publish status so callers can propagate failures."""
+    ok: bool
+    error: text
+
+    static fn success() -> PublishOutcome:
+        PublishOutcome(ok: true, error: "")
+
+    static fn failure(reason: text) -> PublishOutcome:
+        PublishOutcome(ok: false, error: reason)
+
+trait PublishSink:
+    """Sink into which the registry pushes every encoded window update.
+    Kernel path: backed by VFS publish. Host path: backed by
+    `winfs_shim_host.publish`."""
+    fn publish(tree: FsTree) -> PublishOutcome
+
+class NullPublishSink:
+    """Spec-default sink that discards publishes."""
+
+impl PublishSink for NullPublishSink:
+    fn publish(tree: FsTree) -> PublishOutcome:
+        PublishOutcome.success()
+
+# ---------------------------------------------------------------------------
+# Registry
+# ---------------------------------------------------------------------------
+
+class WindowRegistry:
+    """Holds window records and drives a publish sink on each mutation."""
+    var records: [WindowRecord]
+    encoder: DefaultFsEncoder
+    sink: PublishSink
+
+    static fn new_for_test() -> WindowRegistry:
+        WindowRegistry(
+            records: [],
+            encoder: DefaultFsEncoder(),
+            sink: NullPublishSink())
+
+    static fn with_sink(sink: PublishSink) -> WindowRegistry:
+        WindowRegistry(
+            records: [],
+            encoder: DefaultFsEncoder(),
+            sink: sink)
+
+    # -- mutation ---------------------------------------------------------
+
+    me register(rec: WindowRecord) -> PublishOutcome:
+        """Insert (or replace + bump generation) then publish."""
+        var found = false
+        var i = 0
+        while i < self.records.len():
+            if self.records[i].wid == rec.wid:
+                val updated = WindowRecord(
+                    wid: rec.wid,
+                    generation: self.records[i].generation + (1 as u32),
+                    app: rec.app,
+                    title: rec.title,
+                    state: rec.state,
+                    geometry: rec.geometry,
+                    buffer_ref: rec.buffer_ref,
+                    acl_id_path: rec.acl_id_path)
+                self.records[i] = updated
+                found = true
+            i = i + 1
+        if not found:
+            self.records = self.records + [rec]
+        self._publish_index(rec.wid)
+
+    me destroy(wid: u64) -> PublishOutcome:
+        var i = 0
+        while i < self.records.len():
+            if self.records[i].wid == wid:
+                val destroyed = window_mark_destroyed(self.records[i])
+                self.records[i] = destroyed
+                return self._publish_index(wid)
+            i = i + 1
+        PublishOutcome.failure("unknown wid")
+
+    # -- read -------------------------------------------------------------
+
+    me find(wid: u64) -> WindowRecord:
+        var i = 0
+        while i < self.records.len():
+            if self.records[i].wid == wid:
+                return self.records[i]
+            i = i + 1
+        # Return an empty placeholder — callers must check `state == Destroyed`
+        # if they care about liveness.
+        WindowRecord(
+            wid: 0 as u64,
+            generation: 0 as u32,
+            app: "",
+            title: "",
+            state: WindowState.Destroyed,
+            geometry: self.records[0].geometry if self.records.len() > 0 else _zero_rect(),
+            buffer_ref: _zero_buffer(),
+            acl_id_path: lib.common.privilege.id_path.id_path_intern(""))
+
+    me generation_of(wid: u64) -> u32:
+        var i = 0
+        while i < self.records.len():
+            if self.records[i].wid == wid:
+                return self.records[i].generation
+            i = i + 1
+        0 as u32
+
+    me all_records() -> [WindowRecord]:
+        self.records
+
+    # -- helpers ----------------------------------------------------------
+
+    me _publish_index(wid: u64) -> PublishOutcome:
+        var i = 0
+        while i < self.records.len():
+            if self.records[i].wid == wid:
+                val tree = encode_record(self.records[i])
+                return self.sink.publish(tree)
+            i = i + 1
+        PublishOutcome.failure("wid disappeared during publish")
+
+fn _zero_rect() -> lib.common.win_fs.window_record.Rect:
+    lib.common.win_fs.window_record.Rect(x: 0 as i32, y: 0 as i32, w: 0 as u32, h: 0 as u32)
+
+fn _zero_buffer() -> lib.common.win_fs.window_record.BufferRef:
+    lib.common.win_fs.window_record.BufferRef(kind: "", handle: 0 as u64, bytes: 0 as u64)

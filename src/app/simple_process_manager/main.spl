@@ -1,0 +1,44 @@
+#![allow(unnamed_duplicate_typed_args)]
+"""Simple Process Manager (SPM) — daemon entry point.
+
+At startup the binary reads `SIMPLE_SPM_TRANSPORT` from the environment
+(values: `simpleos` or `host`) and — if unset — auto-detects by probing
+for SimpleOS kernel-specific markers. Once a transport is chosen, it is
+bound to a freshly constructed `SpmService` and the `listen()` loop takes
+over.
+
+Feature: spm-winfs-llm-suite AC-3.
+"""
+
+use lib.nogc_sync_mut.io.env_ops.{env_get}
+use app.simple_process_manager.spm_service.{SpmService}
+use app.simple_process_manager.transport.spm_transport.{SpmTransport, TransportStatus, SpmRequest, SpmResponse}
+use app.simple_process_manager.transport.spm_transport_host.{SpmTransportHost}
+use app.simple_process_manager.transport.spm_transport_simpleos.{SpmTransportSimpleos}
+
+fn main() -> i32:
+    val service = SpmService.new_for_test()
+    val transport_kind = _select_transport_kind()
+    if transport_kind == "simpleos":
+        val t = SpmTransportSimpleos.new()
+        val status = t.listen("spm")
+        return _status_to_exit(status)
+    val t = SpmTransportHost.new()
+    val status = t.listen(t.sock_path)
+    _status_to_exit(status)
+
+fn _select_transport_kind() -> text:
+    val explicit = env_get("SIMPLE_SPM_TRANSPORT")
+    if explicit == "simpleos":
+        return "simpleos"
+    if explicit == "host":
+        return "host"
+    # Auto-detect: SimpleOS sets `SIMPLE_OS=1` during boot.
+    if env_get("SIMPLE_OS") == "1":
+        return "simpleos"
+    "host"
+
+fn _status_to_exit(status: TransportStatus) -> i32:
+    if status.ok:
+        return 0 as i32
+    1 as i32

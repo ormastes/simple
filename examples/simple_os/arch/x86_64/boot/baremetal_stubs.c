@@ -8525,6 +8525,66 @@ RuntimeValue rt_tls13_transcript_hash_2(RuntimeValue a_rv, RuntimeValue b_rv)
     return _tls_runtime_array_from_bytes(out, 32);
 }
 
+RuntimeValue rt_tls13_transcript_hash_6(RuntimeValue a_rv, RuntimeValue b_rv, RuntimeValue c_rv,
+                                        RuntimeValue d_rv, RuntimeValue e_rv, RuntimeValue f_rv)
+{
+    uint32_t a_len = 0, b_len = 0, c_len = 0, d_len = 0, e_len = 0, f_len = 0;
+    uint8_t *a = _tls_copy_runtime_bytes(a_rv, &a_len);
+    uint8_t *b = _tls_copy_runtime_bytes(b_rv, &b_len);
+    uint8_t *c = _tls_copy_runtime_bytes(c_rv, &c_len);
+    uint8_t *d = _tls_copy_runtime_bytes(d_rv, &d_len);
+    uint8_t *e = _tls_copy_runtime_bytes(e_rv, &e_len);
+    uint8_t *f = _tls_copy_runtime_bytes(f_rv, &f_len);
+    uint8_t out[32];
+    uint32_t total = a_len + b_len + c_len + d_len + e_len + f_len;
+    uint8_t *merged = (uint8_t *)malloc(total > 0 ? total : 1U);
+    if ((!a && a_len != 0) || (!b && b_len != 0) || (!c && c_len != 0) ||
+        (!d && d_len != 0) || (!e && e_len != 0) || (!f && f_len != 0) ||
+        (!merged && total != 0)) {
+        if (a) free(a); if (b) free(b); if (c) free(c);
+        if (d) free(d); if (e) free(e); if (f) free(f);
+        if (merged) free(merged);
+        return NIL_VALUE;
+    }
+    uint32_t off = 0;
+    if (a_len) { memcpy(merged + off, a, a_len); off += a_len; }
+    if (b_len) { memcpy(merged + off, b, b_len); off += b_len; }
+    if (c_len) { memcpy(merged + off, c, c_len); off += c_len; }
+    if (d_len) { memcpy(merged + off, d, d_len); off += d_len; }
+    if (e_len) { memcpy(merged + off, e, e_len); off += e_len; }
+    if (f_len) { memcpy(merged + off, f, f_len); off += f_len; }
+    _tls_sha256_digest(merged, total, out);
+    if (a) free(a); if (b) free(b); if (c) free(c);
+    if (d) free(d); if (e) free(e); if (f) free(f);
+    free(merged);
+    return _tls_runtime_array_from_bytes(out, 32);
+}
+
+RuntimeValue rt_tls13_find_handshake_message(RuntimeValue buf_rv, int64_t msg_type_i64)
+{
+    uint32_t buf_len = 0;
+    uint8_t *buf = _tls_copy_runtime_bytes(buf_rv, &buf_len);
+    uint8_t target = (uint8_t)(msg_type_i64 & 0xff);
+    RuntimeValue rv = _tls_runtime_array_from_bytes((const uint8_t *)"", 0);
+    if (!buf) return rv;
+    uint32_t off = 0;
+    while (off + 4U <= buf_len) {
+        uint32_t body_len = ((uint32_t)buf[off + 1U] << 16) |
+                            ((uint32_t)buf[off + 2U] << 8) |
+                            (uint32_t)buf[off + 3U];
+        uint32_t total = body_len + 4U;
+        if (off + total > buf_len) break;
+        if (buf[off] == target) {
+            rv = _tls_runtime_array_from_bytes(buf + off, total);
+            free(buf);
+            return rv;
+        }
+        off += total;
+    }
+    free(buf);
+    return rv;
+}
+
 RuntimeValue rt_tls13_hkdf_extract(RuntimeValue salt_rv, RuntimeValue ikm_rv)
 {
     uint32_t salt_len = 0, ikm_len = 0;
@@ -9122,6 +9182,174 @@ RuntimeValue rt_tls13_verify_data_hmac(RuntimeValue finished_key_rv, RuntimeValu
     free(key);
     free(hash);
     return rv;
+}
+
+int64_t rt_tls13_certificate_verify_algorithm(RuntimeValue body_rv)
+{
+    uint32_t body_len = 0;
+    uint8_t *body = _tls_copy_runtime_bytes(body_rv, &body_len);
+    int64_t out = -1;
+    if (!body || body_len < 4U) {
+        if (body) free(body);
+        return -1;
+    }
+    out = (int64_t)(((uint16_t)body[0] << 8) | (uint16_t)body[1]);
+    free(body);
+    return out;
+}
+
+RuntimeValue rt_tls13_certificate_verify_signature(RuntimeValue body_rv)
+{
+    uint32_t body_len = 0;
+    uint8_t *body = _tls_copy_runtime_bytes(body_rv, &body_len);
+    RuntimeValue rv = NIL_VALUE;
+    if (!body || body_len < 4U) {
+        if (body) free(body);
+        return NIL_VALUE;
+    }
+    uint32_t sig_len = ((uint32_t)body[2] << 8) | (uint32_t)body[3];
+    if (4U + sig_len > body_len) {
+        free(body);
+        return NIL_VALUE;
+    }
+    rv = _tls_runtime_array_from_bytes(body + 4U, sig_len);
+    free(body);
+    return rv;
+}
+
+static RuntimeValue _tls_runtime_empty_bytes(void)
+{
+    return _tls_runtime_array_from_bytes((const uint8_t *)"", 0);
+}
+
+typedef struct {
+    uint8_t tag;
+    uint32_t value_off;
+    uint32_t value_len;
+    uint32_t total_len;
+    int ok;
+} tls_der_tlv_t;
+
+static tls_der_tlv_t _tls_der_read_tlv(const uint8_t *data, uint32_t data_len, uint32_t off)
+{
+    tls_der_tlv_t out = {0, 0, 0, 0, 0};
+    if (!data || off + 2U > data_len) return out;
+    uint8_t tag = data[off];
+    uint8_t first = data[off + 1U];
+    uint32_t hdr_len = 0;
+    uint32_t len = 0;
+    if (first < 0x80U) {
+        hdr_len = 1U;
+        len = first;
+    } else if (first == 0x81U) {
+        if (off + 3U > data_len) return out;
+        hdr_len = 2U;
+        len = data[off + 2U];
+    } else if (first == 0x82U) {
+        if (off + 4U > data_len) return out;
+        hdr_len = 3U;
+        len = ((uint32_t)data[off + 2U] << 8) | (uint32_t)data[off + 3U];
+    } else {
+        return out;
+    }
+    uint32_t value_off = off + 1U + hdr_len;
+    uint32_t total_len = 1U + hdr_len + len;
+    if (value_off > data_len || off + total_len > data_len) return out;
+    out.tag = tag;
+    out.value_off = value_off;
+    out.value_len = len;
+    out.total_len = total_len;
+    out.ok = 1;
+    return out;
+}
+
+RuntimeValue rt_tls13_certificate_body_ed25519_pubkey(RuntimeValue body_rv)
+{
+    uint32_t body_len = 0;
+    uint8_t *body = _tls_copy_runtime_bytes(body_rv, &body_len);
+    RuntimeValue rv = NIL_VALUE;
+    if (!body || body_len < 7U) {
+        if (body) free(body);
+        return _tls_runtime_empty_bytes();
+    }
+
+    uint32_t off = 0;
+    uint8_t ctx_len = body[off++];
+    if (off + ctx_len + 3U > body_len) {
+        free(body);
+        return _tls_runtime_empty_bytes();
+    }
+    off += ctx_len;
+    uint32_t cert_list_len = ((uint32_t)body[off] << 16) | ((uint32_t)body[off + 1] << 8) | (uint32_t)body[off + 2];
+    off += 3U;
+    if (off + cert_list_len > body_len || cert_list_len < 3U) {
+        free(body);
+        return _tls_runtime_empty_bytes();
+    }
+    uint32_t cert_len = ((uint32_t)body[off] << 16) | ((uint32_t)body[off + 1] << 8) | (uint32_t)body[off + 2];
+    off += 3U;
+    if (off + cert_len > body_len || cert_len == 0U) {
+        free(body);
+        return _tls_runtime_empty_bytes();
+    }
+    uint8_t *cert = body + off;
+    uint32_t cert_sz = cert_len;
+
+    tls_der_tlv_t cert_seq = _tls_der_read_tlv(cert, cert_sz, 0);
+    if (!cert_seq.ok || cert_seq.tag != 0x30U) {
+        free(body);
+        return _tls_runtime_empty_bytes();
+    }
+    tls_der_tlv_t tbs = _tls_der_read_tlv(cert, cert_sz, cert_seq.value_off);
+    if (!tbs.ok || tbs.tag != 0x30U) {
+        free(body);
+        return _tls_runtime_empty_bytes();
+    }
+    uint32_t p = tbs.value_off;
+    uint32_t tbs_end = tbs.value_off + tbs.value_len;
+    if (p < tbs_end && cert[p] == 0xa0U) {
+        tls_der_tlv_t version = _tls_der_read_tlv(cert, cert_sz, p);
+        if (!version.ok) {
+            free(body);
+            return _tls_runtime_empty_bytes();
+        }
+        p += version.total_len;
+    }
+    for (int i = 0; i < 5; i++) {
+        tls_der_tlv_t field = _tls_der_read_tlv(cert, cert_sz, p);
+        if (!field.ok) {
+            free(body);
+            return _tls_runtime_empty_bytes();
+        }
+        p += field.total_len;
+    }
+    tls_der_tlv_t spki = _tls_der_read_tlv(cert, cert_sz, p);
+    if (!spki.ok || spki.tag != 0x30U) {
+        free(body);
+        return _tls_runtime_empty_bytes();
+    }
+    tls_der_tlv_t alg = _tls_der_read_tlv(cert, cert_sz, spki.value_off);
+    if (!alg.ok || alg.tag != 0x30U) {
+        free(body);
+        return _tls_runtime_empty_bytes();
+    }
+    tls_der_tlv_t oid = _tls_der_read_tlv(cert, cert_sz, alg.value_off);
+    if (!oid.ok || oid.tag != 0x06U || oid.value_len != 3U ||
+        cert[oid.value_off] != 0x2bU || cert[oid.value_off + 1U] != 0x65U || cert[oid.value_off + 2U] != 0x70U) {
+        free(body);
+        return _tls_runtime_empty_bytes();
+    }
+    tls_der_tlv_t bitstr = _tls_der_read_tlv(cert, cert_sz, spki.value_off + alg.total_len);
+    if (!bitstr.ok || bitstr.tag != 0x03U || bitstr.value_len != 33U || cert[bitstr.value_off] != 0x00U) {
+        free(body);
+        return _tls_runtime_empty_bytes();
+    }
+    rv = _tls_runtime_array_from_bytes(cert + bitstr.value_off + 1U, 32U);
+    free(body);
+    return rv;
+
+    free(body);
+    return _tls_runtime_empty_bytes();
 }
 
 RuntimeValue rt_tls13_hkdf_expand_label_client_hs(RuntimeValue secret_rv, RuntimeValue context_rv)

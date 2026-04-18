@@ -8,8 +8,28 @@ use app.web_dashboard.server.{DashboardServer}
 use std.text.{to_int_or}
 use std.cli.cli_util (get_cli_args)
 use app.dashboard.framework_policy.{strip_framework_flags}
+use lib.common.llm.output_gate.{OutputGate, filter_response_body}
+use lib.common.llm.content_authority.{ContentAuthority, release_gate}
+use lib.common.privilege.authority_token.{AuthorityToken}
 
 extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+
+# =========================================================================
+# LLM output gate helper (spm-winfs-llm-suite AC-5)
+# =========================================================================
+#
+# Every LLM-produced byte stream that leaves this process — web HTTP
+# body, websocket frame, TUI activity feed — must flow through the
+# pre-release gate. Each sink calls `gate_llm_emit` and writes the
+# returned (possibly redacted) bytes. See `src/app/web_dashboard/server.spl`
+# for the HTTP sink.
+
+fn gate_llm_emit(body: [u8], token: AuthorityToken) -> [u8]:
+    """Run the default OutputGate over `body` for caller `token`.
+    Pass-through on clean bodies; redacted bytes on Hold/Deny."""
+    val gate = OutputGate.default()
+    val filtered = filter_response_body(gate, body, token)
+    filtered.bytes
 
 # =========================================================================
 # Entry Point

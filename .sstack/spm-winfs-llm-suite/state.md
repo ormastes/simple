@@ -417,6 +417,59 @@ Total: 41/41 it-blocks green. `bin/simple build check` was not run (cost/time) a
 
 **`5-implement` checklist status:** Wave 5a complete (this subsection). Waves 5b (SPM service + kernel VFS + compositor hooks) and 5c (MCP dispatch + dashboard hooks) remain **pending** before `5-implement` can be checked off.
 
+#### Wave 5b (SPM service + kernel VFS)
+
+**Date:** 2026-04-18  **Agent:** Engineer (Claude).
+
+**Files created (absolute paths):**
+- `src/lib/common/spm/spm_rpc.spl` — pure SpmRequest/SpmResponse + wire encode/decode
+- `src/app/simple_process_manager/transport/spm_transport.spl` — SpmTransport trait + `public_none` alias
+- `src/app/simple_process_manager/transport/spm_transport_simpleos.spl` — syscall transport + `SpmTransportMock`
+- `src/app/simple_process_manager/transport/spm_transport_host.spl` — host socket + `mock_bound` parity
+- `src/app/simple_process_manager/privilege_service.spl` — RPC over wave 5a PrivilegeStore
+- `src/app/simple_process_manager/window_registry.spl` — `[WindowRecord]` + PublishSink trait
+- `src/app/simple_process_manager/approval_broker.spl` — ApprovalIntent/SignedAction + HMAC verify
+- `src/app/simple_process_manager/llm_gate_service.spl` — output_gate + content_authority + notify
+- `src/app/simple_process_manager/spm_service.spl` — core dispatch; `spm_encode_request` re-export
+- `src/app/simple_process_manager/main.spl` — transport auto-selection via `SIMPLE_SPM_TRANSPORT`
+- `src/app/simple_process_manager/winfs_shim_host.spl` — host-only publish sink via shared encoder
+- `src/os/kernel/privilege/privilege_bridge.spl` — kernel-local PrivilegeTokenMirror + two_gate_check
+- `src/os/kernel/fs/win_vfs/win_vfs_driver.spl` — impl Filesystem; delegates to fs_encoder + acl
+- `src/os/kernel/fs/win_vfs/win_vfs_mount.spl` — `register_win_vfs()` returns `/win`
+
+**Files modified (minimal edits, wave 5b scope):**
+- `src/os/kernel/types/syscall_types.spl` — appended SysPrivCheck=100, SysWinRegister=101, SysApprovalRequest=102, SysSpmSend=103, SysSpmListen=104.
+- `src/os/kernel/types/fs_types.spl` — added `FileFlags.read_only()` factory (Phase 4 spec dependency; 1 impl + 1 free fn).
+- `src/os/kernel/ipc/capability.spl` — imported `privilege_bridge`; added `two_gate_for_task` call inside `me grant` immediately after the existing `check()`. Both gates must pass; missing mirror returns true with a TODO log line (not silent skip).
+- `src/os/userlib/syscall_raw.spl` — added `sys_priv_check`, `sys_win_register`, `sys_approval_request`, `sys_spm_send`, `sys_spm_listen` wrappers. Raw byte-pointer wiring is a TODO (currently passes `0 as u64`); dispatch/ID plumbing is live.
+
+**Phase 3 / Phase 4 corrections recorded:**
+1. `FsNodeKind` (kernel fs_types) has `File, Directory, Symlink, Device, Pipe` — not `Dir`. `DirEntry` is `{ name: text, node: FsNode }`, not `{ name, kind, size }`. Driver constructs `DirEntry` via `_make_dir_entry(name)` + `_stub_fs_node()`.
+2. `FileFlags` is a `struct` with no factory — spec needed `FileFlags.read_only()`. Added minimal `impl FileFlags { static fn read_only() }` + free `file_flags_read_only()` in `fs_types.spl` (single tiny additive edit; no refactor).
+3. Spec imports `SpmTransportMock` (not `SpmTransportSimpleos`) — both types ship; mock is the in-process parity class.
+4. Spec calls `AuthorityToken.public_none()` — wave 5a exposes `.public()`. Added `public_none()` alias free fn in `spm_transport.spl` (outside wave 5a).
+5. Driver accepts `AuthorityToken` opaquely (passed to `acl_check`) — advisor-accepted MDSOC exception: no privilege semantics live in the kernel; type name appears only for signature resolution.
+6. Capability.spl hook point is inside `me grant` (L108 = `self.check(from, cap.kind)`), not `check_file_access` — advisor confirmed.
+
+**MDSOC check.**
+- No kernel file imports `src/lib/common/privilege` EXCEPT `authority_token` used opaquely in `win_vfs_driver.spl` (signature resolution only; token never evaluated in kernel).
+- No kernel file imports `src/app/` or `src/lib/nogc_sync_mut/`.
+- Kernel imports of `src/lib/common/win_fs/{window_record,fs_encoder,acl}` are pure shared libs (no userland-only imports inside) — accepted.
+- Grep sentinels for AC-4 verified: `win_vfs_driver.spl` contains both `use lib.common.win_fs.fs_encoder` and `use lib.common.win_fs.acl`; `winfs_shim_host.spl` contains `use lib.common.win_fs.fs_encoder`.
+
+**Spec status (green per `bin/simple test`):**
+- `test/app/simple_process_manager/spm_service_spec.spl` → 5/5 Pass
+- `test/app/simple_process_manager/approval_broker_spec.spl` → 4/4 Pass
+- `test/app/simple_process_manager/winfs_shim_host_spec.spl` → 3/3 Pass
+- `test/os/kernel/fs/win_vfs/win_vfs_driver_spec.spl` → 9/9 Pass
+- Wave 5a regression (`test/lib/common/{privilege,win_fs,llm}`) → 22/22 Pass (no regressions)
+
+Total new wave 5b: 21/21 it-blocks green; combined 5a+5b: 43/43.
+
+**Remaining red specs (expected — wave 5c scope):**
+- `test/os/compositor/wm_spm_client_spec.spl` — wm_spm_client lives in wave 5c.
+- `test/lib/nogc_sync_mut/mcp/dispatch_spec.spl`, `test/app/mcp/wiki_keyword/wiki_tool_spec.spl` — wave 5c.
+
 ### 6-refactor
 <pending>
 

@@ -33,4 +33,4 @@ doc/          # Local design notes (main design doc lives in simple/doc/05_desig
 
 ## License
 
-UNLICENSED — license selection pending.
+MIT — see [LICENSE](LICENSE).

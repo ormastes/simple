@@ -1,0 +1,168 @@
+#![allow(unnamed_duplicate_typed_args)]
+"""WmSpmClient — thin RPC client used by compositor backends (hosted + baremetal).
+
+Exposes the three lifecycle calls the compositor needs to talk to SPM:
+  * register_window(rec) -> Result<u64, Error>
+  * destroy_window(wid)  -> Result<(), Error>
+  * request_approval(intent_bytes, principal) -> Result<AuthorityToken, Error>
+
+The client is transport-agnostic: it holds any `SpmTransport` and encodes
+requests via `spm_rpc.spm_encode_request`, so the exact same byte stream
+flows over SimpleOS syscall transport and host unix-socket transport
+(AC-3 parity). The baremetal path inside SimpleOS uses the syscall
+transport (`sys_spm_send` in `syscall_raw.spl`); the host path uses
+`$XDG_RUNTIME_DIR/simple-spm.sock`.
+
+Feature: spm-winfs-llm-suite AC-3.
+"""
+
+use lib.common.privilege.id_path.{IdPath, id_path_to_text}
+use lib.common.privilege.principal.{Principal}
+use lib.common.privilege.authority_token.{AuthorityToken}
+use lib.common.win_fs.window_record.{WindowRecord}
+use lib.common.spm.spm_rpc.{SpmRequest, SpmResponse, spm_encode_request}
+use app.simple_process_manager.transport.spm_transport.{SpmTransport}
+
+# ---------------------------------------------------------------------------
+# Error shape (text-bodied; wave 5a/5b pattern)
+# ---------------------------------------------------------------------------
+
+class WmSpmError:
+    kind: text
+    message: text
+
+    static fn transport(reason: text) -> WmSpmError:
+        WmSpmError(kind: "transport", message: reason)
+
+    static fn denied(reason: text) -> WmSpmError:
+        WmSpmError(kind: "denied", message: reason)
+
+# ---------------------------------------------------------------------------
+# Registration / destruction results (sized so callers can match on `.ok`)
+# ---------------------------------------------------------------------------
+
+class RegisterResult:
+    ok: bool
+    wid: u64
+    error: WmSpmError
+
+    static fn success(wid: u64) -> RegisterResult:
+        RegisterResult(ok: true, wid: wid, error: WmSpmError(kind: "", message: ""))
+
+    static fn failure(err: WmSpmError) -> RegisterResult:
+        RegisterResult(ok: false, wid: 0 as u64, error: err)
+
+class DestroyResult:
+    ok: bool
+    error: WmSpmError
+
+    static fn success() -> DestroyResult:
+        DestroyResult(ok: true, error: WmSpmError(kind: "", message: ""))
+
+    static fn failure(err: WmSpmError) -> DestroyResult:
+        DestroyResult(ok: false, error: err)
+
+class ApprovalResult:
+    ok: bool
+    token: AuthorityToken
+    error: WmSpmError
+
+    static fn granted(tok: AuthorityToken) -> ApprovalResult:
+        ApprovalResult(ok: true, token: tok, error: WmSpmError(kind: "", message: ""))
+
+    static fn rejected(err: WmSpmError) -> ApprovalResult:
+        ApprovalResult(ok: false, token: AuthorityToken.public(), error: err)
+
+# ---------------------------------------------------------------------------
+# Client
+# ---------------------------------------------------------------------------
+
+class WmSpmClient:
+    """Wraps an `SpmTransport` with window-lifecycle semantics."""
+    transport: SpmTransport
+
+    static fn new(transport: SpmTransport) -> WmSpmClient:
+        WmSpmClient(transport: transport)
+
+impl WmSpmClient:
+
+    me register_window(rec: WindowRecord) -> RegisterResult:
+        """Publish `rec` to SPM; returns the assigned (or echoed) wid."""
+        val req = _build_register_request(rec)
+        val resp = self.transport.send(req)
+        if not resp.ok:
+            return RegisterResult.failure(WmSpmError.transport(resp.error))
+        RegisterResult.success(rec.wid)
+
+    me destroy_window(wid: u64) -> DestroyResult:
+        """Tell SPM the window is gone; SPM revokes the FS entry + token."""
+        val req = SpmRequest(
+            kind: "win_destroy",
+            body: _u64_to_bytes(wid),
+            token_hint: AuthorityToken.public())
+        val resp = self.transport.send(req)
+        if not resp.ok:
+            return DestroyResult.failure(WmSpmError.transport(resp.error))
+        DestroyResult.success()
+
+    me request_approval(intent_bytes: [u8], principal: Principal) -> ApprovalResult:
+        """Forward an approval intent; SPM signs + returns a bounded token."""
+        val req = SpmRequest(
+            kind: "approval_request",
+            body: intent_bytes,
+            token_hint: AuthorityToken.public())
+        val resp = self.transport.send(req)
+        if not resp.ok:
+            return ApprovalResult.rejected(WmSpmError.denied(resp.error))
+        # SPM returns a minted token in body; in wave 5c we accept the
+        # serialized bytes opaquely — decoder lives in spm_rpc for future
+        # waves. For now a public token signals "happy path".
+        ApprovalResult.granted(AuthorityToken.public())
+
+    # Test / parity helpers ---------------------------------------------------
+
+    fn test_encode_register(rec: WindowRecord) -> [u8]:
+        """Return the wire bytes for a register_window call (parity spec)."""
+        val req = _build_register_request(rec)
+        spm_encode_request(req)
+
+# ---------------------------------------------------------------------------
+# Free encoders — used by the spec and by compositor backends
+# ---------------------------------------------------------------------------
+
+fn encode_register_window(rec: WindowRecord) -> [u8]:
+    """Stand-alone encoder: produces the same bytes WmSpmClient would send."""
+    spm_encode_request(_build_register_request(rec))
+
+# ---------------------------------------------------------------------------
+# Path derivation for the /win/<app>/<wid> tree (used by wm_bridge resolver)
+# ---------------------------------------------------------------------------
+
+fn encode_minimum_path(rec: WindowRecord) -> text:
+    """Minimum FS path for this window record.
+
+    Matches the kernel `/win` mount prefix + `<app>/<wid>/` base so userland
+    viewers (ui.web `wm_bridge`) can hand the path to any std.fs reader.
+    """
+    "/win/{rec.app}/{rec.wid}/"
+
+# ---------------------------------------------------------------------------
+# Internal helpers
+# ---------------------------------------------------------------------------
+
+fn _build_register_request(rec: WindowRecord) -> SpmRequest:
+    SpmRequest(
+        kind: "win_register",
+        body: _encode_record_meta(rec),
+        token_hint: AuthorityToken.public())
+
+fn _encode_record_meta(rec: WindowRecord) -> [u8]:
+    """A single-line SDN-ish meta form of the record; full FS tree is
+    reconstructed server-side via `lib.common.win_fs.fs_encoder`."""
+    val acl = id_path_to_text(rec.acl_id_path)
+    val line = "wid={rec.wid} gen={rec.generation} app={rec.app} title={rec.title} acl={acl}"
+    line.bytes()
+
+fn _u64_to_bytes(v: u64) -> [u8]:
+    val s = "{v}"
+    s.bytes()

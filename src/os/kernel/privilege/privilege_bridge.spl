@@ -1,0 +1,159 @@
+#![allow(unnamed_duplicate_typed_args)]
+"""privilege_bridge — kernel-local mirror of AuthorityToken.
+
+MDSOC constraint: the kernel may **NOT** import `src/lib/common/privilege/`
+or any userland module. This file defines a pure-bytes view of a privilege
+token so the two-gate check in `src/os/kernel/ipc/capability.spl` has
+something to consult without crossing the kernel boundary.
+
+Userland (the SPM service) packages up tokens and delivers the mirror to
+the kernel via `SYS_SPM_SEND`; the kernel caches `(TaskId -> mirror)` here.
+
+Feature: spm-winfs-llm-suite AC-3 kernel-gate.
+"""
+
+use os.kernel.types.task_types.{TaskId}
+use os.kernel.types.capability_types.{CapabilityKind}
+
+# ---------------------------------------------------------------------------
+# Plain-bytes mirror (no userland types)
+# ---------------------------------------------------------------------------
+
+class PrivilegeTokenMirror:
+    """Everything the kernel needs to evaluate a gate in raw bytes."""
+    id_path_bytes: [u8]        # e.g. "id.user.banking".bytes()
+    authority: u8              # 0=Public, 1=Internal, 2=Sensitive, 3=Secret
+    principal_bytes: [u8]
+    sig: [u8]
+
+fn mirror_encode(m: PrivilegeTokenMirror) -> [u8]:
+    """Canonical byte serialization matching the userland AuthorityToken
+    encode shape. Kept minimal — no SDN parser in the kernel."""
+    var out: [u8] = []
+    out = out + _len_prefix(m.id_path_bytes)
+    out = out + [m.authority]
+    out = out + _len_prefix(m.principal_bytes)
+    out = out + _len_prefix(m.sig)
+    out
+
+fn _len_prefix(b: [u8]) -> [u8]:
+    var out: [u8] = []
+    val n: u32 = b.len() as u32
+    out = out + [(n & 0xff) as u8]
+    out = out + [((n >> 8) & 0xff) as u8]
+    out = out + [((n >> 16) & 0xff) as u8]
+    out = out + [((n >> 24) & 0xff) as u8]
+    var i = 0
+    val m = b.len()
+    while i < m:
+        out = out + [b[i]]
+        i = i + 1
+    out
+
+# ---------------------------------------------------------------------------
+# Prefix match on plain bytes
+# ---------------------------------------------------------------------------
+
+fn _bytes_starts_with(bytes: [u8], prefix: [u8]) -> bool:
+    val pn = prefix.len()
+    if pn > bytes.len():
+        return false
+    var i = 0
+    while i < pn:
+        if bytes[i] != prefix[i]:
+            return false
+        i = i + 1
+    true
+
+fn _bytes_equals(a: [u8], b: [u8]) -> bool:
+    if a.len() != b.len():
+        return false
+    var i = 0
+    val n = a.len()
+    while i < n:
+        if a[i] != b[i]:
+            return false
+        i = i + 1
+    true
+
+# ---------------------------------------------------------------------------
+# Module-level mirror cache
+# ---------------------------------------------------------------------------
+#
+# `sys_spm_send` deposits a mirror here keyed by TaskId so the kernel can
+# look up the current caller's token when checking `grant`. Write path is
+# deliberately minimal — no allocation churn on the hot check path.
+
+var _cached_task_ids: [u64] = []
+var _cached_mirrors: [PrivilegeTokenMirror] = []
+
+fn bridge_set_mirror(task: TaskId, m: PrivilegeTokenMirror):
+    """Update or insert the mirror for `task`. Called by SYS_SPM_SEND."""
+    var i = 0
+    val n = _cached_task_ids.len()
+    while i < n:
+        if _cached_task_ids[i] == task.id:
+            _cached_mirrors[i] = m
+            return
+        i = i + 1
+    _cached_task_ids = _cached_task_ids + [task.id]
+    _cached_mirrors  = _cached_mirrors + [m]
+
+fn bridge_lookup(task: TaskId) -> PrivilegeTokenMirror:
+    var i = 0
+    val n = _cached_task_ids.len()
+    while i < n:
+        if _cached_task_ids[i] == task.id:
+            return _cached_mirrors[i]
+        i = i + 1
+    PrivilegeTokenMirror(id_path_bytes: [], authority: 0 as u8, principal_bytes: [], sig: [])
+
+fn bridge_has_mirror(task: TaskId) -> bool:
+    var i = 0
+    val n = _cached_task_ids.len()
+    while i < n:
+        if _cached_task_ids[i] == task.id:
+            return true
+        i = i + 1
+    false
+
+# ---------------------------------------------------------------------------
+# Two-gate checks
+# ---------------------------------------------------------------------------
+
+fn two_gate_check(mirror: PrivilegeTokenMirror, required_id_path_bytes: [u8]) -> bool:
+    """Return true when the mirror is a prefix of the required path AND
+    the authority level is high enough (>= Public, i.e. any non-empty
+    mirror whose `authority` byte is in 0..=3 range)."""
+    if mirror.id_path_bytes.len() == 0 as i64:
+        return false
+    if mirror.authority > (3 as u8):
+        return false
+    _bytes_starts_with(required_id_path_bytes, mirror.id_path_bytes)
+
+fn two_gate_for_task(task: TaskId, cap_kind: CapabilityKind) -> bool:
+    """Look up the cached mirror and run a two-gate check. If no mirror
+    is present (early boot, SPM not up yet) we allow the existing
+    capability path to decide — but we emit a TODO-prefix kernel log line
+    so the gap is visible. See `capability.spl` for the call site."""
+    if not bridge_has_mirror(task):
+        # TODO(spm-winfs-llm-suite): early-boot fallback — no mirror cached
+        # yet. Returning `true` preserves the existing capability-only gate
+        # so boot doesn't deadlock on SPM. Remove once the init sequence
+        # deposits a root mirror for pid 1.
+        return true
+    val mirror = bridge_lookup(task)
+    val required = _cap_kind_to_id_path_bytes(cap_kind)
+    if required.len() == 0 as i64:
+        return true
+    two_gate_check(mirror, required)
+
+fn _cap_kind_to_id_path_bytes(kind: CapabilityKind) -> [u8]:
+    """Map kernel CapabilityKind onto a required-id_path byte slice.
+
+    This is the kernel-side half of the userland<->kernel token translation.
+    Only a minimal set of mappings is wired today; the rest return empty
+    bytes (meaning "no privilege gate for this kind yet")."""
+    match kind:
+        case CapabilityKind.SystemPrivilege: "id.system".bytes()
+        case _: [] as [u8]

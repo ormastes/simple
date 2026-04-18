@@ -1,0 +1,129 @@
+#![allow(unnamed_duplicate_typed_args)]
+"""SpmService — core dispatch loop.
+
+One request in, one response out. Routes by `req.kind` to the sub-service
+that owns the operation: privilege / window_registry / approval /
+llm_gate / notify.
+
+Feature: spm-winfs-llm-suite AC-3.
+"""
+
+use lib.common.privilege.authority_token.{AuthorityToken, AuthorityLevel, is_revoked}
+use lib.common.privilege.principal.{Principal, PrincipalKind}
+use lib.common.privilege.id_path.{id_path_intern, id_path_prefix_match}
+use lib.common.win_fs.window_record.{WindowRecord, WindowState, Rect, BufferRef}
+use lib.common.spm.spm_rpc.{SpmRequest, SpmResponse, rpc_kind_priv_check, rpc_kind_win_register, rpc_kind_win_destroy, rpc_kind_ping}
+pub use lib.common.spm.spm_rpc.{spm_encode_request, spm_encode_response, spm_decode_request, spm_decode_response}
+
+use app.simple_process_manager.privilege_service.{PrivilegeService}
+use app.simple_process_manager.window_registry.{WindowRegistry, PublishOutcome}
+
+class SpmService:
+    """Dispatch root."""
+    var privilege: PrivilegeService
+    var windows: WindowRegistry
+
+    static fn new_for_test() -> SpmService:
+        SpmService(
+            privilege: PrivilegeService.new_for_test(),
+            windows: WindowRegistry.new_for_test())
+
+    static fn with_components(priv: PrivilegeService, windows: WindowRegistry) -> SpmService:
+        SpmService(privilege: priv, windows: windows)
+
+    me handle(req: SpmRequest) -> SpmResponse:
+        if req.kind == rpc_kind_ping():
+            return SpmResponse.ok_with("pong".bytes())
+        if req.kind == rpc_kind_priv_check():
+            return self.privilege.check(req)
+        if req.kind == rpc_kind_win_register():
+            return self._handle_win_register(req)
+        if req.kind == rpc_kind_win_destroy():
+            return self._handle_win_destroy(req)
+        SpmResponse.denied("unknown rpc kind: " + req.kind)
+
+    # -- window RPCs ----------------------------------------------------------
+
+    me _handle_win_register(req: SpmRequest) -> SpmResponse:
+        if is_revoked(req.token_hint):
+            return SpmResponse.denied("token revoked")
+        val rec = _decode_meta_line(text.from_bytes(req.body))
+        if rec.app == "":
+            return SpmResponse.denied("missing app in win_register body")
+        if not id_path_prefix_match(req.token_hint.id_path, rec.acl_id_path):
+            return SpmResponse.denied("token id_path does not cover record ACL")
+        val outcome = self.windows.register(rec)
+        if outcome.ok:
+            val gen_text = "{self.windows.generation_of(rec.wid)}"
+            return SpmResponse.ok_with(gen_text.bytes())
+        SpmResponse.denied(outcome.error)
+
+    me _handle_win_destroy(req: SpmRequest) -> SpmResponse:
+        val wid_text = text.from_bytes(req.body)
+        val wid = _parse_u64(wid_text)
+        val outcome = self.windows.destroy(wid)
+        if outcome.ok:
+            return SpmResponse.ok_with("destroyed".bytes())
+        SpmResponse.denied(outcome.error)
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+fn _decode_meta_line(line: text) -> WindowRecord:
+    """Inverse of the `win_register` body encoder used by `wm_spm_client`.
+
+    Format:
+      `wid=<u64>;app=<text>;title=<text>;acl=<id_path>`
+    """
+    var wid: u64 = 0 as u64
+    var app = ""
+    var title = ""
+    var acl = ""
+    val parts = line.split(";")
+    for p in parts:
+        val eq = p.find("=")
+        if eq < 0:
+            continue
+        val key = p[0:eq]
+        val v = p[eq + 1:]
+        if key == "wid":        wid = _parse_u64(v)
+        elif key == "app":      app = v
+        elif key == "title":    title = v
+        elif key == "acl":      acl = v
+    WindowRecord(
+        wid: wid,
+        generation: 1 as u32,
+        app: app,
+        title: title,
+        state: WindowState.Normal,
+        geometry: Rect(x: 0 as i32, y: 0 as i32, w: 0 as u32, h: 0 as u32),
+        buffer_ref: BufferRef(kind: "stub", handle: 0 as u64, bytes: 0 as u64),
+        acl_id_path: id_path_intern(acl))
+
+fn _parse_u64(s: text) -> u64:
+    if s == "":
+        return 0 as u64
+    var i = 0
+    val n = s.len()
+    var acc: u64 = 0 as u64
+    while i < n:
+        val d = _digit(s[i:i + 1])
+        if d < 0:
+            break
+        acc = (acc * (10 as u64)) + (d as u64)
+        i = i + 1
+    acc
+
+fn _digit(ch: text) -> i64:
+    if ch == "0": return 0 as i64
+    if ch == "1": return 1 as i64
+    if ch == "2": return 2 as i64
+    if ch == "3": return 3 as i64
+    if ch == "4": return 4 as i64
+    if ch == "5": return 5 as i64
+    if ch == "6": return 6 as i64
+    if ch == "7": return 7 as i64
+    if ch == "8": return 8 as i64
+    if ch == "9": return 9 as i64
+    -1 as i64

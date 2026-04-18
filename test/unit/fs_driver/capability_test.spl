@@ -1,0 +1,184 @@
+# @cover src/lib/nogc_sync_mut/fs_driver/capability.spl 80%
+"""
+# FsDriver Capability Unit Tests
+
+**Feature IDs:** #FS-DRIVER-CAP
+**Category:** Infrastructure
+**Difficulty:** 1/5
+**Status:** In Progress
+**Design:** doc/05_design/fs_driver_interface.md §5, §9
+
+## Overview
+
+Tests for the Capability enum and CapabilitySet bitmask:
+  - CapabilitySet.empty() starts with no bits
+  - with(cap) sets the correct bit
+  - has(cap) returns correct value
+  - union(other) merges two sets
+  - 22-capability roster sanity (bit positions 0..21)
+  - of(cap) produces single-bit mask
+"""
+
+use std.sspec.*
+use std.fs_driver.capability.{Capability, CapabilitySet}
+
+
+# ============================================================================
+# CapabilitySet.empty()
+# ============================================================================
+
+describe "CapabilitySet — empty":
+    """
+    ## Empty set
+
+    CapabilitySet.empty() must have bits == 0 and has() == false for all caps.
+    """
+
+    it "empty has bits == 0":
+        val cs = CapabilitySet.empty()
+        expect(cs.bits).to_equal(0)
+
+    it "empty.is_empty() returns true":
+        val cs = CapabilitySet.empty()
+        expect(cs.is_empty()).to_equal(true)
+
+    it "empty.has(COW) returns false":
+        val cs = CapabilitySet.empty()
+        expect(cs.has(Capability.COW)).to_equal(false)
+
+    it "empty.has(AsyncIo) returns false":
+        val cs = CapabilitySet.empty()
+        expect(cs.has(Capability.AsyncIo)).to_equal(false)
+
+
+# ============================================================================
+# CapabilitySet.with(cap) and has(cap)
+# ============================================================================
+
+describe "CapabilitySet — with() + has()":
+    """
+    ## Single-capability set
+
+    with(cap) must return a new set that has(cap) == true.
+    Original set is unchanged (value semantics).
+    """
+
+    it "with(COW) sets bit 0":
+        val cs = CapabilitySet.empty().with(Capability.COW)
+        expect(cs.bits).to_equal(1)
+
+    it "with(COW).has(COW) is true":
+        val cs = CapabilitySet.empty().with(Capability.COW)
+        expect(cs.has(Capability.COW)).to_equal(true)
+
+    it "with(COW).has(Snapshot) is false":
+        val cs = CapabilitySet.empty().with(Capability.COW)
+        expect(cs.has(Capability.Snapshot)).to_equal(false)
+
+    it "with(AsyncIo) sets bit 21 (highest)":
+        val cs = CapabilitySet.empty().with(Capability.AsyncIo)
+        expect(cs.bits).to_equal(1 << 21)
+
+    it "with(COW).with(AsyncIo) has both capabilities":
+        val cs = CapabilitySet.empty().with(Capability.COW).with(Capability.AsyncIo)
+        expect(cs.has(Capability.COW)).to_equal(true)
+        expect(cs.has(Capability.AsyncIo)).to_equal(true)
+        expect(cs.has(Capability.Snapshot)).to_equal(false)
+
+
+# ============================================================================
+# CapabilitySet.of(cap)
+# ============================================================================
+
+describe "CapabilitySet — of()":
+    """
+    ## of() single-cap constructor
+
+    of(cap) must produce exactly one bit set corresponding to cap.bit_index().
+    """
+
+    it "of(COW).bits == 1":
+        val cs = CapabilitySet.of(Capability.COW)
+        expect(cs.bits).to_equal(1)
+
+    it "of(AsyncIo).bits == (1 << 21)":
+        val cs = CapabilitySet.of(Capability.AsyncIo)
+        expect(cs.bits).to_equal(1 << 21)
+
+    it "of(PosixCompat).bits == (1 << 20)":
+        val cs = CapabilitySet.of(Capability.PosixCompat)
+        expect(cs.bits).to_equal(1 << 20)
+
+
+# ============================================================================
+# CapabilitySet.union()
+# ============================================================================
+
+describe "CapabilitySet — union()":
+    """
+    ## Set union
+
+    union(other) must produce a set containing bits from both sides.
+    """
+
+    it "union of two disjoint sets contains both":
+        val a = CapabilitySet.of(Capability.COW)
+        val b = CapabilitySet.of(Capability.Snapshot)
+        val c = a.union(b)
+        expect(c.has(Capability.COW)).to_equal(true)
+        expect(c.has(Capability.Snapshot)).to_equal(true)
+
+    it "union with empty is identity":
+        val a = CapabilitySet.of(Capability.Checksum)
+        val b = CapabilitySet.empty()
+        val c = a.union(b)
+        expect(c.bits).to_equal(a.bits)
+
+    it "union with self is idempotent":
+        val a = CapabilitySet.of(Capability.Xattr)
+        val c = a.union(a)
+        expect(c.bits).to_equal(a.bits)
+
+
+# ============================================================================
+# 22-capability roster sanity
+# ============================================================================
+
+describe "CapabilitySet — 22-capability roster":
+    """
+    ## Bit-index roster sanity
+
+    Verifies that bit positions are distinct and span [0, 21].
+    A fully-loaded set must have exactly the 22 low bits set.
+    """
+
+    it "all 22 capabilities produce distinct bits":
+        val full = CapabilitySet.empty()
+            .with(Capability.COW)
+            .with(Capability.Snapshot)
+            .with(Capability.Clone)
+            .with(Capability.Dedup)
+            .with(Capability.Checksum)
+            .with(Capability.SelfHeal)
+            .with(Capability.SendReceive)
+            .with(Capability.Compress)
+            .with(Capability.Encrypt)
+            .with(Capability.Quota)
+            .with(Capability.Reflink)
+            .with(Capability.Atime)
+            .with(Capability.Xattr)
+            .with(Capability.Acl)
+            .with(Capability.CaseFold)
+            .with(Capability.Hardlinks)
+            .with(Capability.SparseFiles)
+            .with(Capability.LargeFiles)
+            .with(Capability.UnicodeNames)
+            .with(Capability.CaseSensitive)
+            .with(Capability.PosixCompat)
+            .with(Capability.AsyncIo)
+        # 22 bits set → mask is (1<<22)-1 = 4194303
+        expect(full.bits).to_equal(4194303)
+
+    it "full set is not empty":
+        val full = CapabilitySet.empty().with(Capability.COW).with(Capability.AsyncIo)
+        expect(full.is_empty()).to_equal(false)

@@ -1,0 +1,67 @@
+#![allow(unnamed_duplicate_typed_args)]
+"""PrivilegeService — RPC wrapper over wave 5a's `PrivilegeStore`.
+
+Translates `SpmRequest` (kind `priv_check`) into store-level lookups and
+returns a `SpmResponse`. The store is loaded from `~/.simple/privileges.sdn`
+at startup via `store_fs.load_sdn`.
+
+Feature: spm-winfs-llm-suite AC-3.
+"""
+
+use lib.common.privilege.id_path.{IdPath, id_path_intern, id_path_prefix_match, id_path_to_text}
+use lib.common.privilege.authority_token.{AuthorityToken, AuthorityLevel, authority_level_rank, is_revoked}
+use lib.common.privilege.principal.{Principal}
+use lib.common.privilege.store.{PrivilegeStore}
+use lib.nogc_sync_mut.privilege.store_fs.{load_sdn}
+use lib.common.spm.spm_rpc.{SpmRequest, SpmResponse}
+
+class PrivilegeService:
+    """Owns a `PrivilegeStore` and answers priv_check / lookup RPCs."""
+    store: PrivilegeStore
+
+    static fn new_for_test() -> PrivilegeService:
+        PrivilegeService(store: PrivilegeStore.new())
+
+    static fn from_disk(path: text) -> PrivilegeService:
+        val loaded = load_sdn(path)
+        if loaded.ok:
+            return PrivilegeService(store: loaded.value)
+        PrivilegeService(store: PrivilegeStore.new())
+
+    static fn default() -> PrivilegeService:
+        """Production factory — loads from `~/.simple/privileges.sdn`."""
+        PrivilegeService.from_disk(_default_store_path())
+
+    # -- RPC surface ---------------------------------------------------------
+
+    me check(req: SpmRequest) -> SpmResponse:
+        """`priv_check` RPC: does `req.token_hint` grant access to the
+        id_path carried in `req.body` (as ASCII bytes)?"""
+        val token = req.token_hint
+        if is_revoked(token):
+            return SpmResponse.denied("token revoked")
+        val required_text = text.from_bytes(req.body)
+        if required_text == "":
+            return SpmResponse.denied("empty id_path")
+        val required = id_path_intern(required_text)
+        if id_path_prefix_match(token.id_path, required):
+            return SpmResponse.ok_with("granted".bytes())
+        SpmResponse.denied("id_path not granted by token")
+
+    me lookup(principal: Principal, id_path: IdPath) -> bool:
+        """Thin predicate used by higher-level services."""
+        var i = 0
+        while i < self.store.tokens.len():
+            val t = self.store.tokens[i]
+            if t.principal.id == principal.id:
+                if id_path_prefix_match(t.id_path, id_path):
+                    if not is_revoked(t):
+                        return true
+            i = i + 1
+        false
+
+fn _default_store_path() -> text:
+    val home = lib.nogc_sync_mut.io.env_ops.home()
+    if home == "":
+        return "/tmp/.simple/privileges.sdn"
+    home + "/.simple/privileges.sdn"

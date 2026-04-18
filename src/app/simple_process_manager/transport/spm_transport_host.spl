@@ -1,0 +1,80 @@
+#![allow(unnamed_duplicate_typed_args)]
+"""SpmTransportHost — host-OS transport (UNIX socket / named pipe).
+
+The default socket path is resolved from `$XDG_RUNTIME_DIR/simple-spm.sock`
+on Linux/mac and `%LOCALAPPDATA%\\simple-spm.pipe` on Windows. For unit
+specs we expose `mock_bound(service)` so the round trip can be driven
+entirely in-process without any real socket.
+
+Feature: spm-winfs-llm-suite AC-3.
+"""
+
+use lib.nogc_sync_mut.io.env_ops.{env_get}
+use app.simple_process_manager.transport.spm_transport.{SpmTransport, TransportStatus, SpmRequest, SpmResponse, spm_encode_request, spm_decode_response}
+
+# ---------------------------------------------------------------------------
+# Production impl
+# ---------------------------------------------------------------------------
+
+class SpmTransportHost:
+    """Production-shape host transport. The spec-visible `mock_bound`
+    factory routes calls directly to a service handler so parity specs
+    don't need a real socket — the wire-format encode/decode still runs."""
+    sock_path: text
+    handler: fn(SpmRequest) -> SpmResponse
+
+    static fn new() -> SpmTransportHost:
+        SpmTransportHost(sock_path: _default_sock_path(), handler: _unbound_handler)
+
+    static fn with_path(path: text) -> SpmTransportHost:
+        SpmTransportHost(sock_path: path, handler: _unbound_handler)
+
+    static fn mock_bound(handler: fn(SpmRequest) -> SpmResponse) -> SpmTransportHost:
+        """In-process parity mock: encode → handler → encode → decode."""
+        SpmTransportHost(sock_path: ":memory:", handler: handler)
+
+    static fn mock_loopback() -> SpmTransportHost:
+        """Handler-less loopback used by wm_spm_client_spec parity tests.
+        Requests are still encoded+decoded through the wire layer so byte
+        parity with `SpmTransportMock` is guaranteed; responses fall back
+        to the `_unbound_handler` which returns a clean error envelope."""
+        SpmTransportHost(sock_path: ":memory:", handler: _unbound_handler)
+
+impl SpmTransport for SpmTransportHost:
+    fn send(req: SpmRequest) -> SpmResponse:
+        if self.sock_path == ":memory:":
+            # In-process parity round trip — run the full wire encode/decode
+            # so the spec sees the same bytes the kernel transport would.
+            val wire_req = spm_encode_request(req)
+            val resp = self.handler(req)
+            # Encode+decode the response to exercise the wire layer.
+            val wire_resp = lib.common.spm.spm_rpc.spm_encode_response(resp)
+            return spm_decode_response(wire_resp)
+        # TODO: real socket send (Linux/mac unix socket, Windows named pipe)
+        SpmResponse(
+            ok: false,
+            body: [],
+            error: "host socket transport not wired (I/O stub)")
+
+    fn listen(bind: text) -> TransportStatus:
+        # TODO: bind+accept loop on `self.sock_path` using nogc_sync_mut.net
+        TransportStatus.failure("host listen not wired")
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+fn _default_sock_path() -> text:
+    val xdg = env_get("XDG_RUNTIME_DIR")
+    if xdg != "":
+        return xdg + "/simple-spm.sock"
+    val tmp = env_get("TMPDIR")
+    if tmp != "":
+        return tmp + "/simple-spm.sock"
+    val lad = env_get("LOCALAPPDATA")
+    if lad != "":
+        return lad + "\\simple-spm.pipe"
+    "/tmp/simple-spm.sock"
+
+fn _unbound_handler(req: SpmRequest) -> SpmResponse:
+    SpmResponse(ok: false, body: [], error: "transport has no handler bound")

@@ -1,0 +1,165 @@
+#![allow(unnamed_duplicate_typed_args)]
+"""MCP dispatch_wrap — explicit-registration tool dispatcher.
+
+Per Phase 3 §F, every tool that wants privilege + output-gate coverage
+opts in by registering a `DispatchEntry` with `DispatchRegistry.register`.
+Legacy tools that have not registered keep their existing `main()` entry
+points and dispatch unchanged — the wrapper refuses to route unknown
+tool names so a registry-using caller gets a clean EACCES/unregistered
+envelope rather than silent bypass.
+
+Wrapper hot path (per registered call):
+    1. lookup handler by tool name
+    2. `privilege_service`-style check (id_path + level)
+    3. call handler(args)
+    4. `output_gate.filter_response_body` on the handler's bytes
+    5. audit row logged (test-mode observable via `test_audit_sink_size`)
+
+Feature: spm-winfs-llm-suite AC-5, AC-6.
+"""
+
+use lib.common.privilege.id_path.{IdPath, id_path_prefix_match, id_path_intern}
+use lib.common.privilege.authority_token.{AuthorityToken, AuthorityLevel, authority_level_rank, is_revoked}
+use lib.common.llm.output_gate.{OutputGate, FilteredBody, filter_response_body}
+
+# ---------------------------------------------------------------------------
+# Dispatch entry
+# ---------------------------------------------------------------------------
+
+class DispatchEntry:
+    """One tool registration. `handler` is a pure fn over args."""
+    tool_name: text
+    required: IdPath
+    level: AuthorityLevel
+    handler: fn([text]) -> [u8]
+
+    static fn echo(required: IdPath, level: AuthorityLevel) -> DispatchEntry:
+        """Spec-facing echo tool: joins args with spaces, returns as bytes."""
+        DispatchEntry(
+            tool_name: "echo",
+            required: required,
+            level: level,
+            handler: _echo_handler)
+
+    static fn leak_aws(required: IdPath, level: AuthorityLevel) -> DispatchEntry:
+        """Spec-facing tool that emits a fake AWS key so output_gate can redact."""
+        DispatchEntry(
+            tool_name: "leak_aws",
+            required: required,
+            level: level,
+            handler: _leak_aws_handler)
+
+# ---------------------------------------------------------------------------
+# Registry
+# ---------------------------------------------------------------------------
+
+class LookupResult:
+    """Sized optional for `reg.find(name)`."""
+    present: bool
+    entry: DispatchEntry
+
+    static fn miss() -> LookupResult:
+        LookupResult(present: false, entry: _placeholder_entry())
+
+    static fn hit(e: DispatchEntry) -> LookupResult:
+        LookupResult(present: true, entry: e)
+
+class DispatchRegistry:
+    """Holds registered tool entries + gate/audit sink counters."""
+    var entries: [DispatchEntry]
+    gate: OutputGate
+    var audit_sink_count: i64
+
+    static fn new() -> DispatchRegistry:
+        DispatchRegistry(
+            entries: [],
+            gate: OutputGate.default(),
+            audit_sink_count: 0 as i64)
+
+    static fn new_for_test() -> DispatchRegistry:
+        """Registry with test-mode gate + observable audit counter."""
+        DispatchRegistry(
+            entries: [],
+            gate: OutputGate.default_for_test(),
+            audit_sink_count: 0 as i64)
+
+    me register(entry: DispatchEntry) -> ():
+        self.entries = self.entries + [entry]
+
+    me find(tool_name: text) -> LookupResult:
+        for e in self.entries:
+            if e.tool_name == tool_name:
+                return LookupResult.hit(e)
+        LookupResult.miss()
+
+# ---------------------------------------------------------------------------
+# Wrapper
+# ---------------------------------------------------------------------------
+
+fn dispatch_wrap(reg: DispatchRegistry, tool_name: text, args: [text], token: AuthorityToken) -> text:
+    """Dispatch `tool_name` through the registry with privilege + gate."""
+    val lookup = reg.find(tool_name)
+    if not lookup.present:
+        return _error_envelope("unregistered_tool", "no handler for: " + tool_name)
+    val entry = lookup.entry
+
+    if is_revoked(token):
+        return _error_envelope("EACCES", "token_trust_revoked")
+    if not id_path_prefix_match(token.id_path, entry.required):
+        return _error_envelope("EACCES", "id_path prefix mismatch")
+    if authority_level_rank(token.level) < authority_level_rank(entry.level):
+        return _error_envelope("EACCES", "authority level too low")
+
+    val raw_bytes = entry.handler(args)
+    val filtered = filter_response_body(reg.gate, raw_bytes, token)
+    reg.audit_sink_count = reg.audit_sink_count + (1 as i64)
+    _ok_envelope(filtered)
+
+# ---------------------------------------------------------------------------
+# Test observer
+# ---------------------------------------------------------------------------
+
+fn test_audit_sink_size(reg: DispatchRegistry) -> i64:
+    reg.audit_sink_count
+
+# ---------------------------------------------------------------------------
+# Internal helpers
+# ---------------------------------------------------------------------------
+
+fn _ok_envelope(f: FilteredBody) -> text:
+    val body_text = _bytes_text(f.bytes)
+    val status = if f.decision.kind == "Pass": "ok" else: "gated"
+    "{\"status\":\"{status}\",\"body\":\"{body_text}\"}"
+
+fn _error_envelope(code: text, reason: text) -> text:
+    "{\"status\":\"error\",\"code\":\"{code}\",\"reason\":\"{reason}\"}"
+
+fn _bytes_text(b: [u8]) -> text:
+    text.from_bytes(b)
+
+fn _placeholder_entry() -> DispatchEntry:
+    DispatchEntry(
+        tool_name: "",
+        required: _placeholder_id_path(),
+        level: AuthorityLevel.Public,
+        handler: _null_handler)
+
+fn _placeholder_id_path() -> IdPath:
+    # Empty path; lookup misses never call through it.
+    id_path_intern("")
+
+fn _null_handler(args: [text]) -> [u8]:
+    []
+
+fn _echo_handler(args: [text]) -> [u8]:
+    var s = ""
+    var first = true
+    for a in args:
+        if not first:
+            s = s + " "
+        s = s + a
+        first = false
+    s.bytes()
+
+fn _leak_aws_handler(args: [text]) -> [u8]:
+    "AKIAIOSFODNN7EXAMPLE_fake_aws_key_for_test_only".bytes()

@@ -1,0 +1,91 @@
+#![allow(unnamed_duplicate_typed_args)]
+"""LlmGateService — composes output_gate + content_authority + notify.
+
+One entry point:
+
+    release(content_bytes, content_auth, reader_principal) -> ReleaseOutcome
+
+On `Release`, the body flows through `output_gate.filter_response_body`
+and either passes through or is redacted+held. On any Hold path this
+service invokes `notify.notify_user` so SPM raises the toast/audit row.
+
+Feature: spm-winfs-llm-suite AC-5 / AC-6.
+"""
+
+use lib.common.privilege.authority_token.{AuthorityToken, AuthorityLevel}
+use lib.common.privilege.principal.{Principal, PrincipalKind}
+use lib.common.llm.content_authority.{ContentAuthority, ReleaseDecision, release_gate}
+use lib.common.llm.output_gate.{OutputGate, FilteredBody, GateDecision}
+use lib.nogc_sync_mut.llm.notify.{NotifySink, notify_user}
+
+class ReleaseOutcome:
+    """Envelope for `release()`."""
+    ok: bool
+    bytes: [u8]
+    decision_kind: text        # "Release" | "Scrub" | "Block" | "Hold" | "Deny"
+    reasons: [text]
+    error: text
+
+class LlmGateService:
+    """Composes the pure gates with the side-effecting notify sink."""
+    gate: OutputGate
+    sink: NotifySink
+
+    static fn default_with(sink: NotifySink) -> LlmGateService:
+        LlmGateService(gate: OutputGate.default(), sink: sink)
+
+    static fn for_test(sink: NotifySink) -> LlmGateService:
+        LlmGateService(gate: OutputGate.default_for_test(), sink: sink)
+
+    me release(content_bytes: [u8], content_auth: ContentAuthority, reader_principal: Principal) -> ReleaseOutcome:
+        """Apply the reader-clearance gate first; then the output gate.
+
+        `reader_principal` is carried only for the notify audit row."""
+        val reader_clearance = self._clearance_for(reader_principal)
+        val rel = release_gate(content_auth, reader_clearance)
+        if rel.kind != "Release":
+            self._fire_notify("release_" + rel.kind, reader_principal)
+            return ReleaseOutcome(
+                ok: false,
+                bytes: [],
+                decision_kind: rel.kind,
+                reasons: rel.reasons,
+                error: rel.kind)
+        # Reader clearance is high enough — run the output gate on the bytes.
+        val token = _token_for_reader(reader_principal, reader_clearance)
+        val filtered = self.gate.filter_response_body(content_bytes, token)
+        val kind = filtered.decision.kind
+        if kind == "Pass":
+            return ReleaseOutcome(
+                ok: true,
+                bytes: filtered.bytes,
+                decision_kind: "Release",
+                reasons: [],
+                error: "")
+        # Hold or Deny — redacted bytes + notify.
+        self._fire_notify("gate_" + kind, reader_principal)
+        ReleaseOutcome(
+            ok: false,
+            bytes: filtered.bytes,
+            decision_kind: kind,
+            reasons: filtered.redactions,
+            error: kind)
+
+    # -- helpers -----------------------------------------------------------
+
+    me _clearance_for(principal: Principal) -> AuthorityLevel:
+        """Minimum implementation: everyone gets `Internal` by default.
+        Production wires this into `privilege_service.lookup` to read the
+        principal's persisted clearance. Keeping it local keeps the
+        service dependency graph acyclic."""
+        AuthorityLevel.Internal
+
+    me _fire_notify(reason: text, principal: Principal):
+        val token = _token_for_reader(principal, AuthorityLevel.Internal)
+        val _ = notify_user(self.sink, reason, token)
+
+fn _token_for_reader(principal: Principal, level: AuthorityLevel) -> AuthorityToken:
+    AuthorityToken.mock(
+        id_path: lib.common.privilege.id_path.id_path_intern("id.user." + principal.id),
+        level: level,
+        principal: principal)

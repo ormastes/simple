@@ -28,4 +28,4 @@ doc/          # Local design notes (main design lives in simple/doc/05_design/nv
 
 ## License
 
-UNLICENSED — license selection pending.
+MIT — see [LICENSE](LICENSE).

@@ -11,13 +11,17 @@
 
 use os.services.vfs.vfs.{VfsManager, Filesystem}
 use os.services.vfs.vfs_service.{VfsService}
-use os.services.fat32.fat32.{Fat32Driver, BlockDevice}
+use os.services.fat32.fat32.{Fat32Driver as Fat32Core, BlockDevice}
 use os.drivers.nvme.nvme_driver.{NvmeDriver, DmaAddrs}
 use os.services.pcimgr.pcimgr.{pcimgr_init, pcimgr_find_by_class, pcimgr_find_by_class_i64, pcimgr_grant_device}
 use os.services.pcimgr.driver_match.{PCI_CLASS_STORAGE, PCI_SUBCLASS_NVME}
 use os.userlib.syscall_raw.{syscall}
 use os.kernel.types.device_mem_types.{DeviceGrant}
 use os.kernel.boot.mmio.{mmio_read32, mmio_write32, mmio_read64, mmio_read16, mmio_write8}
+use std.fs_driver.mount_table.{MountTable}
+use std.fs_driver.instance.{DriverInstance}
+use std.fs_driver.types.{Path, MountOptions}
+use std.fs_driver.fat32_stub.{Fat32Driver}
 
 extern fn serial_println(msg: text)
 extern fn unsafe_addr_of(ref: any) -> u64
@@ -200,6 +204,8 @@ var g_nvme: NvmeDriver = NvmeDriver.new()
 var g_adapter: NvmeBlockAdapter = NvmeBlockAdapter.new(g_nvme)
 var g_c_adapter: CNvmeBlockAdapter = CNvmeBlockAdapter.new()
 var g_vfs_initialized: bool = false
+# M1 mount table — wired at boot after NVMe init succeeds (see vfs_boot_init).
+var g_mount_table: MountTable = MountTable.new()
 
 # ============================================================================
 # Boot Init
@@ -237,6 +243,24 @@ fn vfs_boot_init() -> bool:
     serial_println("[vfs-init] C NVMe controller initialized!")
     serial_println("[vfs-init] C NVMe + FAT32 verified (via C driver)")
     g_vfs_initialized = true
+
+    # M1 retrofit — wire Fat32Driver into g_mount_table at "/".
+    # Uses CNvmeBlockAdapter (C-backed, syscall 85) as the BlockDevice.
+    # The pure-Simple Fat32Core (os.services.fat32.fat32) is layered on top.
+    # Direct rt_fat32_* externs in entry-point files remain unchanged (M2 removes them).
+    serial_println("[vfs-init] Mounting FAT32 at / via FsDriver interface...")
+    var fat32_drv = Fat32Driver.new("fat32-root", g_c_adapter)
+    val fat32_opts = MountOptions.default()
+    val mount_result = fat32_drv.mount(fat32_opts)
+    if mount_result.is_err():
+        serial_println("[vfs-init] Warning: FAT32 FsDriver mount failed -- g_mount_table at / unavailable")
+    else:
+        val tbl_result = g_mount_table.mount(Path.root(), DriverInstance.Fat32(fat32_drv), fat32_opts)
+        if tbl_result.is_err():
+            serial_println("[vfs-init] Warning: MountTable.mount('/') failed -- table entry not added")
+        else:
+            serial_println("[vfs-init] FAT32 mounted at / in g_mount_table (M1 retrofit)")
+
     serial_println("[vfs-init] VFS ready (C-backed)")
     return true
 

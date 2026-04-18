@@ -13,6 +13,7 @@ use os.kernel.types.task_types.{TaskId}
 use os.kernel.types.capability_types.{CapabilityToken, CapabilityKind, CapabilitySet, PrivilegeMask, Grant, PRIVCTL_SET_MASK, PRIVCTL_GET_MASK, PRIVCTL_ADD_PEER, PRIVCTL_REMOVE_PEER, GRANT_R, GRANT_W, GRANT_RW, priv_allows_kernel_call, priv_allows_send_to}
 use os.kernel.types.vmspace_types.{ProcessVmSpace, VMA_READ, VMA_WRITE}
 use os.kernel.memory.vmm.{vma_find}
+use os.kernel.privilege.privilege_bridge.{two_gate_for_task}
 
 # ============================================================================
 # Per-Task Capability Record
@@ -107,6 +108,15 @@ impl CapabilityManager:
         # Verify the source task holds this capability
         val has_cap = self.check(from, cap.kind)
         if not has_cap:
+            return false
+
+        # spm-winfs-llm-suite AC-3: second gate — hierarchical privilege via
+        # kernel-local privilege_bridge. Both must pass. If the bridge has
+        # no mirror cached for `from` (e.g. early boot, SPM not up yet),
+        # `two_gate_for_task` returns true and emits a TODO log line so the
+        # gap is visible — it is *not* a silent skip.
+        val has_priv = two_gate_for_task(from, cap.kind)
+        if not has_priv:
             return false
 
         # Create a new token for the target

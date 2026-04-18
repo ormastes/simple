@@ -1,0 +1,186 @@
+# @cover src/lib/nogc_sync_mut/fs_driver/types.spl 80%
+"""
+# FsDriver Types Unit Tests
+
+**Feature IDs:** #FS-DRIVER-TYPES
+**Category:** Infrastructure
+**Difficulty:** 1/5
+**Status:** In Progress
+**Design:** doc/05_design/fs_driver_interface.md §2.2, §2.3
+
+## Overview
+
+Tests for shared primitive types:
+  - Inode, FileHandle, DirHandle opaque handle construction + null/is_null
+  - FileMode default_file/default_dir bit values
+  - Offset zero/is_valid
+  - FsStatfs field round-trip
+"""
+
+use std.sspec.*
+use std.fs_driver.types.{
+    Inode, FileHandle, DirHandle, FileMode, Offset, FsStatfs, Path, MountOptions
+}
+
+
+# ============================================================================
+# Inode
+# ============================================================================
+
+describe "Inode — opaque handle":
+    """
+    ## Inode construction
+
+    Inode is an opaque u64 wrapper. null() returns id==0, is_null() reflects that.
+    """
+
+    it "null() returns id == 0":
+        val n = Inode.null()
+        expect(n.id).to_equal(0)
+
+    it "null().is_null() is true":
+        expect(Inode.null().is_null()).to_equal(true)
+
+    it "non-zero id is not null":
+        val n = Inode(id: 42)
+        expect(n.is_null()).to_equal(false)
+
+    it "id field stores the given value":
+        val n = Inode(id: 99999)
+        expect(n.id).to_equal(99999)
+
+
+# ============================================================================
+# FileHandle
+# ============================================================================
+
+describe "FileHandle — opaque handle":
+    """
+    ## FileHandle construction
+
+    FileHandle is an opaque u64 wrapper. null() returns id==0.
+    """
+
+    it "null() returns id == 0":
+        val h = FileHandle.null()
+        expect(h.id).to_equal(0)
+
+    it "null().is_null() is true":
+        expect(FileHandle.null().is_null()).to_equal(true)
+
+    it "non-zero id is not null":
+        val h = FileHandle(id: 1)
+        expect(h.is_null()).to_equal(false)
+
+
+# ============================================================================
+# DirHandle
+# ============================================================================
+
+describe "DirHandle — opaque handle":
+    """
+    ## DirHandle construction
+
+    DirHandle is an opaque u64 wrapper. null() returns id==0.
+    """
+
+    it "null() returns id == 0":
+        val d = DirHandle.null()
+        expect(d.id).to_equal(0)
+
+    it "null().is_null() is true":
+        expect(DirHandle.null().is_null()).to_equal(true)
+
+    it "non-zero id is not null":
+        val d = DirHandle(id: 7)
+        expect(d.is_null()).to_equal(false)
+
+
+# ============================================================================
+# FileMode
+# ============================================================================
+
+describe "FileMode — permission bits":
+    """
+    ## FileMode defaults
+
+    default_file() should return 0o644, default_dir() should return 0o755.
+    """
+
+    it "default_file() bits == 0o644 (420)":
+        val m = FileMode.default_file()
+        expect(m.bits).to_equal(420)
+
+    it "default_dir() bits == 0o755 (493)":
+        val m = FileMode.default_dir()
+        expect(m.bits).to_equal(493)
+
+    it "custom mode preserves bits":
+        val m = FileMode(bits: 511)  # 0o777
+        expect(m.bits).to_equal(511)
+
+
+# ============================================================================
+# Offset
+# ============================================================================
+
+describe "Offset — signed byte offset":
+    """
+    ## Offset validity
+
+    zero() returns value==0; is_valid() is true for non-negative values only.
+    """
+
+    it "zero() returns value == 0":
+        val o = Offset.zero()
+        expect(o.value).to_equal(0)
+
+    it "zero().is_valid() is true":
+        expect(Offset.zero().is_valid()).to_equal(true)
+
+    it "positive offset is valid":
+        val o = Offset(value: 4096)
+        expect(o.is_valid()).to_equal(true)
+
+    it "negative offset is invalid":
+        val o = Offset(value: -1)
+        expect(o.is_valid()).to_equal(false)
+
+
+# ============================================================================
+# FsStatfs — field round-trip
+# ============================================================================
+
+describe "FsStatfs — field round-trip":
+    """
+    ## FsStatfs construction
+
+    All fields survive construction and can be read back without mutation.
+    """
+
+    it "all fields are stored and retrievable":
+        val s = FsStatfs(
+            total_bytes: 1000000,
+            free_bytes:  500000,
+            avail_bytes: 490000,
+            files_total: 65536,
+            files_free:  32768,
+            block_size:  4096
+        )
+        expect(s.total_bytes).to_equal(1000000)
+        expect(s.free_bytes).to_equal(500000)
+        expect(s.avail_bytes).to_equal(490000)
+        expect(s.files_total).to_equal(65536)
+        expect(s.files_free).to_equal(32768)
+        expect(s.block_size).to_equal(4096)
+
+    it "free_bytes <= total_bytes holds for a well-formed stat":
+        val s = FsStatfs(
+            total_bytes: 2048,
+            free_bytes:  1024,
+            avail_bytes: 1024,
+            files_total: 128,
+            files_free:  64,
+            block_size:  512
+        )
+        expect(s.free_bytes <= s.total_bytes).to_equal(true)

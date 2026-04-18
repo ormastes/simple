@@ -64,6 +64,8 @@ extern fn rt_tls13_hkdf_expand_label_client_hs(secret: [u8], context: [u8]) -> [
 extern fn rt_tls13_hkdf_expand_label_server_hs(secret: [u8], context: [u8]) -> [u8]
 extern fn rt_tls13_sha256(data: [u8]) -> [u8]
 extern fn rt_tls13_transcript_hash_2(a: [u8], b: [u8]) -> [u8]
+extern fn rt_tls13_transcript_hash_6(a: [u8], b: [u8], c: [u8], d: [u8], e: [u8], f: [u8]) -> [u8]
+extern fn rt_tls13_find_handshake_message(buf: [u8], msg_type: i64) -> [u8]
 extern fn rt_tls13_verify_data_hmac(finished_key: [u8], transcript_hash: [u8]) -> [u8]
 extern fn rt_tls13_certificate_body_ed25519_pubkey(body: [u8]) -> [u8]
 extern fn rt_tls13_certificate_verify_algorithm(body: [u8]) -> i64
@@ -524,6 +526,8 @@ fn tls13_connect_io_with_config(io: Tls13Io, hostname: text, config: Tls13Client
         ch_bytes
     }
     transcript = transcript_add(transcript, ch_transcript_bytes)
+    if fd_mode:
+        fd_transcript = rt_bytes_concat(fd_transcript, ch_transcript_bytes)
     _tls_debug("after transcript_add clienthello")
 
     # ------------------------------------------------------------------
@@ -553,6 +557,8 @@ fn tls13_connect_io_with_config(io: Tls13Io, hostname: text, config: Tls13Client
 
     # Add full ServerHello handshake bytes (including 4-byte header) to transcript
     transcript = transcript_add_with_len(transcript, sh_hs_bytes, sh_pay_len)
+    if fd_mode:
+        fd_transcript = rt_bytes_concat(fd_transcript, _copy_range(sh_hs_bytes, 0, sh_pay_len))
     _tls_debug("after transcript_add serverhello")
 
     # ------------------------------------------------------------------
@@ -691,6 +697,13 @@ fn tls13_connect_io_with_config(io: Tls13Io, hostname: text, config: Tls13Client
     # Saved transcript snapshots for verification
     var transcript_before_cv: Transcript = transcript_new()
     var transcript_before_fin: Transcript = transcript_new()
+    var fd_transcript: [u8] = rt_array_new_with_cap(0)
+    var fd_transcript_before_cv: [u8] = rt_array_new_with_cap(0)
+    var fd_transcript_before_fin: [u8] = rt_array_new_with_cap(0)
+    var fd_msg_ee: [u8] = rt_array_new_with_cap(0)
+    var fd_msg_cr: [u8] = rt_array_new_with_cap(0)
+    var fd_msg_cert: [u8] = rt_array_new_with_cap(0)
+    var fd_msg_cv: [u8] = rt_array_new_with_cap(0)
 
     while (not have_ee) or (not have_cert) or (not have_cv) or (not have_fin):
         # Read one TLS record (may be plaintext CCS or encrypted handshake)
@@ -745,91 +758,123 @@ fn tls13_connect_io_with_config(io: Tls13Io, hostname: text, config: Tls13Client
                     di = di + 1
                 _tls_debug("hs_buf len after append={hs_buf.len()}")
 
-                # Walk hs_buf parsing complete messages.
-                # Track consumed separately to avoid re-processing on incomplete read.
-                var consumed: u64 = 0
-                var buf_offset: u64 = 0
-                var keep_walking: bool = true
-
-                while (keep_walking) and (buf_offset + 4 <= hs_buf.len()):
-                    _tls_debug("hs hdr b0={_u8_at(hs_buf, buf_offset)} b1={_u8_at(hs_buf, buf_offset + 1)} b2={_u8_at(hs_buf, buf_offset + 2)} b3={_u8_at(hs_buf, buf_offset + 3)}")
-                    # Peek at the 3-byte length
-                    val msg_body_len: u64 = ((_u8_at(hs_buf, buf_offset + 1).to_u64() << 16) |
-                                             (_u8_at(hs_buf, buf_offset + 2).to_u64() << 8) |
-                                             _u8_at(hs_buf, buf_offset + 3).to_u64())
-                    var msg_total: u64 = msg_body_len
-                    msg_total = msg_total + 1
-                    msg_total = msg_total + 1
-                    msg_total = msg_total + 1
-                    msg_total = msg_total + 1
-                    _tls_debug("hs msg_body_len={msg_body_len} msg_total={msg_total} hs_len={hs_buf.len()}")
-
-                    if buf_offset + msg_total > hs_buf.len():
-                        # Incomplete message — stop walking, preserve hs_buf tail
-                        keep_walking = false
-                    else:
-                        # Extract full message bytes (including 4-byte header)
-                        var msg_bytes: [u8] = rt_array_new_with_cap(msg_total.to_i64())
-                        var mi: u64 = 0
-                        while mi < msg_total:
-                            msg_bytes = _push_byte(msg_bytes, _u8_at(hs_buf, buf_offset + mi).to_u64().to_i64())
-                            mi = mi + 1
-
-                        val ph = parse_handshake_header(msg_bytes)
-                        _tls_debug("hs msg type={ph.msg_type} total={msg_total} body_len={ph.body.len()}")
-
-                        if ph.msg_type == _HS_ENCRYPTED_EXTENSIONS:
-                            transcript = transcript_add_with_len(transcript, msg_bytes, msg_total)
+                if fd_mode:
+                    if not have_ee:
+                        val ee_msg = _clone_bytes(rt_tls13_find_handshake_message(hs_buf, _HS_ENCRYPTED_EXTENSIONS.to_i64()))
+                        if ee_msg.len() > 0:
+                            fd_msg_ee = ee_msg
                             have_ee = true
-
-                        elif ph.msg_type == _HS_CERTIFICATE_REQUEST:
-                            transcript = transcript_add(transcript, msg_bytes)
-                            cert_request = parse_certificate_request(ph.body)
-                            server_requested_client_auth = true
-
-                        elif ph.msg_type == _HS_CERTIFICATE:
-                            transcript = transcript_add(transcript, msg_bytes)
-                            cert_chain = parse_certificate_chain_body(ph.body)
-                            cert_der = parse_certificate_body(ph.body)
-                            if fd_mode:
-                                pubkey_for_verify = _clone_bytes(rt_tls13_certificate_body_ed25519_pubkey(ph.body))
+                    if not have_cert:
+                        val cert_msg = _clone_bytes(rt_tls13_find_handshake_message(hs_buf, _HS_CERTIFICATE.to_i64()))
+                        if cert_msg.len() > 0:
+                            fd_msg_cert = cert_msg
+                            val cert_body = _copy_range(cert_msg, 4, cert_msg.len() - 4)
+                            pubkey_for_verify = _clone_bytes(rt_tls13_certificate_body_ed25519_pubkey(cert_body))
                             have_cert = true
+                    if not have_cv:
+                        val cv_msg = _clone_bytes(rt_tls13_find_handshake_message(hs_buf, _HS_CERTIFICATE_VERIFY.to_i64()))
+                        if cv_msg.len() > 0:
+                            fd_msg_cv = cv_msg
+                            val cv_body = _copy_range(cv_msg, 4, cv_msg.len() - 4)
+                            cert_verify_sig = _clone_bytes(rt_tls13_certificate_verify_signature(cv_body))
+                            cert_verify_algo = rt_tls13_certificate_verify_algorithm(cv_body).to_u16()
+                            have_cv = true
+                    if not have_fin:
+                        val fin_msg = _clone_bytes(rt_tls13_find_handshake_message(hs_buf, _HS_FINISHED.to_i64()))
+                        if fin_msg.len() > 0:
+                            val fin_body = _copy_range(fin_msg, 4, fin_msg.len() - 4)
+                            server_verify_data = parse_finished_body(fin_body)
+                            have_fin = true
+                else:
 
-                        elif ph.msg_type == _HS_CERTIFICATE_VERIFY:
-                            # Snapshot transcript BEFORE adding CertVerify
-                            transcript_before_cv = transcript
-                            transcript = transcript_add_with_len(transcript, msg_bytes, msg_total)
-                            if fd_mode:
-                                cert_verify_sig = _clone_bytes(rt_tls13_certificate_verify_signature(ph.body))
-                                cert_verify_algo = rt_tls13_certificate_verify_algorithm(ph.body).to_u16()
-                            else:
+                    # Walk hs_buf parsing complete messages.
+                    # Track consumed separately to avoid re-processing on incomplete read.
+                    var consumed: u64 = 0
+                    var buf_offset: u64 = 0
+                    var keep_walking: bool = true
+
+                    while (keep_walking) and (buf_offset + 4 <= hs_buf.len()):
+                        _tls_debug("hs hdr b0={_u8_at(hs_buf, buf_offset)} b1={_u8_at(hs_buf, buf_offset + 1)} b2={_u8_at(hs_buf, buf_offset + 2)} b3={_u8_at(hs_buf, buf_offset + 3)}")
+                        # Peek at the 3-byte length
+                        val msg_body_len: u64 = ((_u8_at(hs_buf, buf_offset + 1).to_u64() << 16) |
+                                                 (_u8_at(hs_buf, buf_offset + 2).to_u64() << 8) |
+                                                 _u8_at(hs_buf, buf_offset + 3).to_u64())
+                        var msg_total: u64 = msg_body_len
+                        msg_total = msg_total + 1
+                        msg_total = msg_total + 1
+                        msg_total = msg_total + 1
+                        msg_total = msg_total + 1
+                        _tls_debug("hs msg_body_len={msg_body_len} msg_total={msg_total} hs_len={hs_buf.len()}")
+
+                        if buf_offset + msg_total > hs_buf.len():
+                            # Incomplete message — stop walking, preserve hs_buf tail
+                            keep_walking = false
+                        else:
+                            # Extract full message bytes (including 4-byte header)
+                            var msg_bytes: [u8] = rt_array_new_with_cap(msg_total.to_i64())
+                            var mi: u64 = 0
+                            while mi < msg_total:
+                                msg_bytes = _push_byte(msg_bytes, _u8_at(hs_buf, buf_offset + mi).to_u64().to_i64())
+                                mi = mi + 1
+
+                            val ph = parse_handshake_header(msg_bytes)
+                            _tls_debug("hs msg type={ph.msg_type} total={msg_total} body_len={ph.body.len()}")
+
+                            if ph.msg_type == _HS_ENCRYPTED_EXTENSIONS:
+                                transcript = transcript_add_with_len(transcript, msg_bytes, msg_total)
+                                have_ee = true
+
+                            elif ph.msg_type == _HS_CERTIFICATE_REQUEST:
+                                transcript = transcript_add(transcript, msg_bytes)
+                                cert_request = parse_certificate_request(ph.body)
+                                server_requested_client_auth = true
+
+                            elif ph.msg_type == _HS_CERTIFICATE:
+                                transcript = transcript_add(transcript, msg_bytes)
+                                cert_chain = parse_certificate_chain_body(ph.body)
+                                cert_der = parse_certificate_body(ph.body)
+                                have_cert = true
+
+                            elif ph.msg_type == _HS_CERTIFICATE_VERIFY:
+                                # Snapshot transcript BEFORE adding CertVerify
+                                transcript_before_cv = transcript
+                                transcript = transcript_add_with_len(transcript, msg_bytes, msg_total)
                                 val cv_fields = parse_certificate_verify(ph.body)
                                 cert_verify_sig = cv_fields.signature
                                 cert_verify_algo = cv_fields.algorithm
-                            have_cv = true
+                                have_cv = true
 
-                        elif ph.msg_type == _HS_FINISHED:
-                            # Snapshot transcript BEFORE adding server Finished
-                            transcript_before_fin = transcript
-                            transcript = transcript_add_with_len(transcript, msg_bytes, msg_total)
-                            server_verify_data = parse_finished_body(ph.body)
-                            have_fin = true
+                            elif ph.msg_type == _HS_FINISHED:
+                                # Snapshot transcript BEFORE adding server Finished
+                                transcript_before_fin = transcript
+                                transcript = transcript_add_with_len(transcript, msg_bytes, msg_total)
+                                server_verify_data = parse_finished_body(ph.body)
+                                have_fin = true
 
-                        buf_offset = buf_offset + msg_total
-                        consumed = buf_offset
+                            buf_offset = buf_offset + msg_total
+                            consumed = buf_offset
 
-                # Trim only successfully consumed bytes from hs_buf
-                var new_buf: [u8] = rt_array_new_with_cap((hs_buf.len() - consumed).to_i64())
-                var ti: u64 = consumed
-                while ti < hs_buf.len():
-                    new_buf = _push_byte(new_buf, _u8_at(hs_buf, ti).to_u64().to_i64())
-                    ti = ti + 1
-                hs_buf = new_buf
+                    # Trim only successfully consumed bytes from hs_buf
+                    var new_buf: [u8] = rt_array_new_with_cap((hs_buf.len() - consumed).to_i64())
+                    var ti: u64 = consumed
+                    while ti < hs_buf.len():
+                        new_buf = _push_byte(new_buf, _u8_at(hs_buf, ti).to_u64().to_i64())
+                        ti = ti + 1
+                    hs_buf = new_buf
 
     # ------------------------------------------------------------------
     # Step 9: Verify CertificateVerify
     # ------------------------------------------------------------------
-    val cv_hash = if fd_mode { _transcript_hash_fd(transcript_before_cv) } else { transcript_hash(transcript_before_cv) }
+    val cv_hash = if fd_mode {
+        _clone_bytes(rt_tls13_transcript_hash_6(
+            ch_transcript_bytes,
+            _copy_range(sh_hs_bytes, 0, sh_pay_len),
+            fd_msg_cr,
+            fd_msg_ee,
+            fd_msg_cert,
+            rt_array_new_with_cap(0)
+        ))
+    } else { transcript_hash(transcript_before_cv) }
     val sig_scheme = cert_verify_algo
     if pubkey_for_verify.len() == 0 and sig_scheme == 0x0807:
         pubkey_for_verify = extract_ed25519_pubkey_from_cert(cert_der)
@@ -868,7 +913,14 @@ fn tls13_connect_io_with_config(io: Tls13Io, hostname: text, config: Tls13Client
     }
     _tls_debug("after server_fin_key len={server_fin_key.len()}")
     val expected_fin = if io.kind == "fd" {
-        rt_tls13_verify_data_hmac(server_fin_key, _transcript_hash_fd(transcript_before_fin))
+        rt_tls13_verify_data_hmac(server_fin_key, _clone_bytes(rt_tls13_transcript_hash_6(
+            ch_transcript_bytes,
+            _copy_range(sh_hs_bytes, 0, sh_pay_len),
+            fd_msg_cr,
+            fd_msg_ee,
+            fd_msg_cert,
+            fd_msg_cv
+        )))
     } else {
         tls13_verify_data(server_fin_key, transcript_before_fin)
     }

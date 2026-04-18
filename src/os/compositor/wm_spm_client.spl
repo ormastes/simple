@@ -1,0 +1,66 @@
+#![allow(unnamed_duplicate_typed_args)]
+"""wm_spm_client (compositor-side facade).
+
+The real client logic lives in
+`src/app/simple_process_manager/wm_spm_client.spl` so specs can import it
+under `app.simple_process_manager.wm_spm_client`. This compositor-side
+facade wraps it with a single process-wide `default_client()` accessor
+plus two lifecycle helpers (`notify_window_created` / `notify_window_destroyed`)
+so the hosted + baremetal backends can call one-liners on window open/close.
+
+Transport is chosen via `SIMPLE_SPM_TRANSPORT` env var (mirrors
+`app.simple_process_manager.main`): `host` (default) picks
+`SpmTransportHost`; `simpleos` picks `SpmTransportMock` (syscall transport
+lives in the same module). The compositor never sees the syscall wrapper
+directly.
+
+Feature: spm-winfs-llm-suite AC-3.
+"""
+
+use lib.common.win_fs.window_record.{WindowRecord, WindowState, Rect, BufferRef, mark_destroyed}
+use lib.common.privilege.id_path.{id_path_intern}
+use lib.nogc_sync_mut.io.env_ops.{env_get}
+use app.simple_process_manager.wm_spm_client.{WmSpmClient, RegisterResult, DestroyResult}
+use app.simple_process_manager.transport.spm_transport_host.{SpmTransportHost}
+use app.simple_process_manager.transport.spm_transport_simpleos.{SpmTransportMock}
+
+# ---------------------------------------------------------------------------
+# Default client selection
+# ---------------------------------------------------------------------------
+
+fn default_client() -> WmSpmClient:
+    """Return a process-wide SPM client using the env-selected transport."""
+    val sel = env_get("SIMPLE_SPM_TRANSPORT")
+    if sel == "simpleos":
+        return WmSpmClient.new(SpmTransportMock.new())
+    # Host transport is the default for non-SimpleOS builds and for the
+    # smoke-test path on SimpleOS itself.
+    WmSpmClient.new(SpmTransportHost.mock_loopback())
+
+# ---------------------------------------------------------------------------
+# Backend-facing one-liners
+# ---------------------------------------------------------------------------
+
+fn notify_window_created(wid: u64, app: text, w: i32, h: i32) -> bool:
+    """Compositor hook: called immediately after a window is created.
+
+    We build a minimal WindowRecord on the fly (title/geometry come from
+    the backend; richer metadata flows once the UISession is wired). A
+    failed RPC is logged via the return value — callers fall through so
+    compositor liveness does not depend on SPM.
+    """
+    val rec = WindowRecord(
+        wid: wid, generation: 0 as u32, app: app, title: "",
+        state: WindowState.Normal,
+        geometry: Rect(x: 0 as i32, y: 0 as i32, w: w as u32, h: h as u32),
+        buffer_ref: BufferRef(kind: "winit", handle: 0 as u64, bytes: 0 as u64),
+        acl_id_path: id_path_intern("id.public"))
+    val client = default_client()
+    val res = client.register_window(rec)
+    res.ok
+
+fn notify_window_destroyed(wid: u64) -> bool:
+    """Compositor hook: called on window free()."""
+    val client = default_client()
+    val res = client.destroy_window(wid)
+    res.ok

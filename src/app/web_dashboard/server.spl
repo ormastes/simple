@@ -26,6 +26,8 @@ use app.llm_dashboard.data.store.{AgentDashboardStore}
 use app.llm_dashboard.gui.html_views.{generate_agents_html}
 use app.llm_dashboard.gui.ws_handler.{handle_agents_ws}
 use app.llm_dashboard.gui.tasks_api.{handle_tasks_api}
+use lib.common.llm.output_gate.{OutputGate, filter_response_body}
+use lib.common.privilege.authority_token.{AuthorityToken}
 
 fn parse_request_line(request_line: text) -> (text, text):
     var method = ""
@@ -456,7 +458,17 @@ class DashboardServer:
 fn http_response(status: i32, content_type: text, body: text) -> text:
     return http_response_with_headers(status, content_type, body, [])
 
+# spm-winfs-llm-suite AC-5: route every response body through the LLM
+# output gate before emitting it on the wire. Public token is used for
+# anonymous routes; authenticated routes can call the gate themselves
+# with their session token for tighter clearance.
+fn _gate_response_body(body: text) -> text:
+    val gate = OutputGate.default()
+    val filtered = filter_response_body(gate, body.bytes(), AuthorityToken.public())
+    text.from_bytes(filtered.bytes)
+
 fn http_response_with_headers(status: i32, content_type: text, body: text, extra_headers: [text]) -> text:
+    val gated_body = _gate_response_body(body)
     val status_text = match status:
         200: "OK"
         201: "Created"
@@ -472,13 +484,13 @@ fn http_response_with_headers(status: i32, content_type: text, body: text, extra
 
     var response = "HTTP/1.1 {status} {status_text}\r\n"
     response = "{response}Content-Type: {content_type}\r\n"
-    response = "{response}Content-Length: {body.len()}\r\n"
+    response = "{response}Content-Length: {gated_body.len()}\r\n"
     for header in extra_headers:
         response = "{response}{header}\r\n"
     response = "{response}Access-Control-Allow-Origin: *\r\n"
     response = "{response}Connection: close\r\n"
     response = "{response}\r\n"
-    response = "{response}{body}"
+    response = "{response}{gated_body}"
     return response
 
 fn http_redirect(location: text) -> text:

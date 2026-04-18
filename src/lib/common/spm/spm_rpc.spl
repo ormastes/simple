@@ -1,0 +1,212 @@
+#![allow(unnamed_duplicate_typed_args)]
+"""SPM RPC schema — pure request / response classes + byte encoders.
+
+Every message carries a `kind:` text discriminator and a `body:` byte
+payload. Encoders produce SDN-like plain-text bytes so the same message
+round-trips identically over the SimpleOS syscall transport and the host
+socket transport (AC-3 parity).
+
+Request kinds:
+  * `priv_check`        — body = id_path bytes
+  * `win_register`      — body = encoded WindowRecord meta line
+  * `win_destroy`       — body = wid as ASCII
+  * `approval_request`  — body = intent SDN line
+  * `llm_release_check` — body = content-authority SDN line
+  * `notify_user`       — body = reason text
+
+Pure module: no FS I/O, no syscalls.
+
+Feature: spm-winfs-llm-suite AC-3.
+"""
+
+use lib.common.privilege.id_path.{IdPath, id_path_to_text, id_path_intern}
+use lib.common.privilege.authority_token.{AuthorityToken, AuthorityLevel, authority_level_name, authority_level_from_name, trust_source_name, trust_source_from_name}
+use lib.common.privilege.principal.{Principal, PrincipalKind}
+
+# ---------------------------------------------------------------------------
+# Enums / kinds
+# ---------------------------------------------------------------------------
+
+fn rpc_kind_priv_check() -> text:        "priv_check"
+fn rpc_kind_win_register() -> text:      "win_register"
+fn rpc_kind_win_destroy() -> text:       "win_destroy"
+fn rpc_kind_approval() -> text:          "approval_request"
+fn rpc_kind_llm_release() -> text:       "llm_release_check"
+fn rpc_kind_notify() -> text:            "notify_user"
+fn rpc_kind_ping() -> text:              "ping"
+
+# ---------------------------------------------------------------------------
+# Request / Response classes (spec-compatible shape)
+# ---------------------------------------------------------------------------
+
+class SpmRequest:
+    """One RPC call. `token_hint` carries caller authority; may be public."""
+    kind: text
+    body: [u8]
+    token_hint: AuthorityToken
+
+class SpmResponse:
+    """One RPC reply. `body` and `error` are both bytes/text — consumers
+    inspect `ok` first."""
+    ok: bool
+    body: [u8]
+    error: text
+
+    static fn ok_with(bytes: [u8]) -> SpmResponse:
+        SpmResponse(ok: true, body: bytes, error: "")
+
+    static fn denied(reason: text) -> SpmResponse:
+        SpmResponse(ok: false, body: [], error: reason)
+
+# ---------------------------------------------------------------------------
+# Encoder / decoder (bytes ↔ wire line)
+# ---------------------------------------------------------------------------
+#
+# Wire format for requests (single line, trailing \n):
+#   `req kind=<k>;body_len=<n>;token_id=<id>;token_level=<lvl>;token_trust=<ts>;principal_kind=<pk>;principal=<pid>\n<body bytes>`
+#
+# For specs we just need round-trip equivalence of encode(decode(x)) and
+# encode(x1) == encode(x1) on the same input.
+
+fn spm_encode_request(req: SpmRequest) -> [u8]:
+    val header = "req kind={req.kind};body_len={req.body.len()};token_id=" + id_path_to_text(req.token_hint.id_path) + ";token_level=" + authority_level_name(req.token_hint.level) + ";token_trust=" + trust_source_name(req.token_hint.trust_source) + ";principal_kind=" + _principal_kind_name(req.token_hint.principal.kind) + ";principal=" + req.token_hint.principal.id + "\n"
+    var out: [u8] = header.bytes()
+    var i = 0
+    val n = req.body.len()
+    while i < n:
+        out = out + [req.body[i]]
+        i = i + 1
+    out
+
+fn spm_encode_response(resp: SpmResponse) -> [u8]:
+    val ok_flag = if resp.ok: "1" else: "0"
+    val header = "resp ok={ok_flag};body_len={resp.body.len()};error={resp.error}\n"
+    var out: [u8] = header.bytes()
+    var i = 0
+    val n = resp.body.len()
+    while i < n:
+        out = out + [resp.body[i]]
+        i = i + 1
+    out
+
+fn spm_decode_response(bytes: [u8]) -> SpmResponse:
+    """Parse the header of an encoded response. Body extraction is based
+    on the embedded `body_len=` count.
+    """
+    val text_form = text.from_bytes(bytes)
+    val nl = text_form.find("\n")
+    if nl < 0:
+        return SpmResponse.denied("malformed response: missing newline")
+    val header = text_form[0:nl]
+    var ok = false
+    var body_len = 0
+    var error = ""
+    val parts = header.split(";")
+    for p in parts:
+        val eq = p.find("=")
+        if eq < 0:
+            continue
+        val key = p[0:eq]
+        val v = p[eq + 1:]
+        if key == "resp ok":
+            ok = v == "1"
+        elif key == "ok":
+            ok = v == "1"
+        elif key == "body_len":
+            body_len = _parse_usize(v)
+        elif key == "error":
+            error = v
+    var body: [u8] = []
+    var i = nl + 1
+    var taken = 0
+    val total = bytes.len()
+    while i < total and taken < body_len:
+        body = body + [bytes[i]]
+        i = i + 1
+        taken = taken + 1
+    SpmResponse(ok: ok, body: body, error: error)
+
+fn spm_decode_request(bytes: [u8]) -> SpmRequest:
+    """Best-effort decoder used by the in-process SimpleOS transport mock
+    and by host-socket listen loops. Unknown fields are ignored."""
+    val text_form = text.from_bytes(bytes)
+    val nl = text_form.find("\n")
+    if nl < 0:
+        return SpmRequest(kind: "", body: [], token_hint: _public_token())
+    val header = text_form[0:nl]
+    var kind = ""
+    var body_len = 0
+    var token_id = ""
+    var token_level = "Public"
+    var token_trust = "Untrusted"
+    var principal_kind_txt = "Local"
+    var principal_id = "anonymous"
+    val parts = header.split(";")
+    for p in parts:
+        val eq = p.find("=")
+        if eq < 0:
+            continue
+        val key = p[0:eq]
+        val v = p[eq + 1:]
+        if key == "req kind":     kind = v
+        elif key == "kind":       kind = v
+        elif key == "body_len":   body_len = _parse_usize(v)
+        elif key == "token_id":   token_id = v
+        elif key == "token_level": token_level = v
+        elif key == "token_trust": token_trust = v
+        elif key == "principal_kind": principal_kind_txt = v
+        elif key == "principal":  principal_id = v
+    var body: [u8] = []
+    var i = nl + 1
+    var taken = 0
+    val total = bytes.len()
+    while i < total and taken < body_len:
+        body = body + [bytes[i]]
+        i = i + 1
+        taken = taken + 1
+    val pk = if principal_kind_txt == "Remote": PrincipalKind.Remote else: PrincipalKind.Local
+    val token = AuthorityToken.mock_with_trust(
+        id_path: id_path_intern(token_id),
+        level: authority_level_from_name(token_level),
+        principal: Principal(kind: pk, id: principal_id),
+        trust: trust_source_from_name(token_trust))
+    SpmRequest(kind: kind, body: body, token_hint: token)
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+fn _public_token() -> AuthorityToken:
+    AuthorityToken.public()
+
+fn _principal_kind_name(k: PrincipalKind) -> text:
+    match k:
+        case PrincipalKind.Local:  "Local"
+        case PrincipalKind.Remote: "Remote"
+
+fn _parse_usize(s: text) -> i64:
+    if s == "":
+        return 0 as i64
+    var i = 0
+    val n = s.len()
+    var acc: i64 = 0 as i64
+    while i < n:
+        val d = _digit(s[i:i + 1])
+        if d < 0:
+            break
+        acc = (acc * (10 as i64)) + d
+        i = i + 1
+    acc
+
+fn _digit(ch: text) -> i64:
+    if ch == "0": return 0 as i64
+    if ch == "1": return 1 as i64
+    if ch == "2": return 2 as i64
+    if ch == "3": return 3 as i64
+    if ch == "4": return 4 as i64
+    if ch == "5": return 5 as i64
+    if ch == "6": return 6 as i64
+    if ch == "7": return 7 as i64
+    if ch == "8": return 8 as i64
+    if ch == "9": return 9 as i64
+    -1 as i64

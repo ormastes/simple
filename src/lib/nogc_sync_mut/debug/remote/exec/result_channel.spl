@@ -18,6 +18,7 @@ class ResultPacket:
     or console — normalizes its output into a ResultPacket so that
     verification is uniform across all target adapters."""
     success: bool
+    skipped: bool
     return_code: i64
     output: text
     checksum: i64
@@ -27,11 +28,20 @@ class ResultPacket:
 
     fn is_pass() -> bool:
         """True when the execution succeeded with a zero return code."""
-        self.success == true and self.return_code == 0
+        self.skipped == false and self.success == true and self.return_code == 0
+
+    fn is_skip() -> bool:
+        """True when the lane did not run because prerequisites were unavailable."""
+        self.skipped == true
 
     fn to_text() -> text:
         """Formatted one-line summary of this result."""
-        val status = if self.is_pass(): "PASS" else: "FAIL"
+        val status = if self.is_skip():
+            "SKIP"
+        else if self.is_pass():
+            "PASS"
+        else:
+            "FAIL"
         "[{status}] lane={self.lane_id} ch={self.channel} rc={self.return_code} {self.duration_ms}ms"
 
     static fn from_semihost(lane_id: text, output: text, duration_ms: i64) -> ResultPacket:
@@ -40,6 +50,7 @@ class ResultPacket:
         val rc = if has_fail: 1 else: 0
         ResultPacket(
             success: has_fail == false,
+            skipped: false,
             return_code: rc,
             output: output,
             checksum: 0,
@@ -52,6 +63,7 @@ class ResultPacket:
         """Build a result from a process exit code."""
         ResultPacket(
             success: code == 0,
+            skipped: false,
             return_code: code,
             output: output,
             checksum: 0,
@@ -64,6 +76,7 @@ class ResultPacket:
         """Build a result from a register read. Success if value == 0."""
         ResultPacket(
             success: value == 0,
+            skipped: false,
             return_code: value,
             output: "",
             checksum: 0,
@@ -79,6 +92,7 @@ class ResultPacket:
         val out = "sentinel=0x{sentinel_value} expected=0x{expected}"
         ResultPacket(
             success: ok,
+            skipped: false,
             return_code: rc,
             output: out,
             checksum: sentinel_value,
@@ -91,11 +105,25 @@ class ResultPacket:
         """Create a failure packet with an explanatory reason."""
         ResultPacket(
             success: false,
+            skipped: false,
             return_code: -1,
             output: reason,
             checksum: 0,
             duration_ms: 0,
             channel: "console",
+            lane_id: lane_id
+        )
+
+    static fn skipped(lane_id: text, channel: text, reason: text, duration_ms: i64) -> ResultPacket:
+        """Create a skipped packet for lanes that are acceptable but not runnable."""
+        ResultPacket(
+            success: false,
+            skipped: true,
+            return_code: 0,
+            output: reason,
+            checksum: 0,
+            duration_ms: duration_ms,
+            channel: channel,
             lane_id: lane_id
         )
 
@@ -111,13 +139,15 @@ class ResultVerifier:
     expected_return_code: i64
     expected_output_contains: [text]
     expected_sentinel: i64
+    accept_skipped: bool
 
     static fn default_pass() -> ResultVerifier:
         """Expect return_code 0, no required output patterns."""
         ResultVerifier(
             expected_return_code: 0,
             expected_output_contains: [],
-            expected_sentinel: 0
+            expected_sentinel: 0,
+            accept_skipped: false
         )
 
     static fn with_output(patterns: [text]) -> ResultVerifier:
@@ -125,13 +155,27 @@ class ResultVerifier:
         ResultVerifier(
             expected_return_code: 0,
             expected_output_contains: patterns,
-            expected_sentinel: 0
+            expected_sentinel: 0,
+            accept_skipped: false
+        )
+
+    static fn allow_skip() -> ResultVerifier:
+        """Accept skipped packets as a successful verification outcome."""
+        ResultVerifier(
+            expected_return_code: 0,
+            expected_output_contains: [],
+            expected_sentinel: 0,
+            accept_skipped: true
         )
 
     fn verify(packet: ResultPacket) -> Result<text, text>:
         """Verify the packet against expectations.
 
         Returns Ok('pass') on success, Err('reason') on failure."""
+        if packet.is_skip():
+            if self.accept_skipped:
+                return Ok("skip")
+            return Err("packet skipped: {packet.output}")
         if packet.return_code != self.expected_return_code:
             return Err("expected return_code={self.expected_return_code}, got {packet.return_code}")
 

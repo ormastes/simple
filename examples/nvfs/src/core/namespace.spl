@@ -1,0 +1,466 @@
+# NVFS namespace tree — in-memory inode + directory tree.
+#
+# Provides a parent-ino keyed directory tree and inode table used by
+# NvfsDriver (N2 namespace ops). No B-tree persistence yet — that is
+# deferred to a later phase.
+#
+# Design: doc/05_design/nvfs_design_v2.md §4 (COW namespace tree).
+
+use std.fs_driver.error.{FsError}
+use examples.nvfs.src.core.arena.{arena_create_impl}
+
+# ---------------------------------------------------------------------------
+# InodeKind
+# ---------------------------------------------------------------------------
+
+enum NsInodeKind:
+    """Kind tag for a namespace inode."""
+    File
+    Dir
+    Symlink
+
+# ---------------------------------------------------------------------------
+# NsInode — one inode record
+# ---------------------------------------------------------------------------
+
+struct NsInode:
+    """Namespace inode record.
+
+    ino      — unique inode number (root = 1).
+    kind     — File | Dir | Symlink.
+    arena_id — backing arena for File inodes; -1 for Dir/Symlink.
+    sym_target — symlink target string; empty for File/Dir.
+    size     — logical byte size (informational).
+    mode     — POSIX permission bits.
+    ctime    — creation timestamp (ns, placeholder 0 in N2).
+    mtime    — modification timestamp (ns, placeholder 0 in N2).
+    """
+    ino:        u64
+    kind:       NsInodeKind
+    arena_id:   i64
+    sym_target: text
+    size:       u64
+    mode:       u32
+    ctime:      u64
+    mtime:      u64
+
+# ---------------------------------------------------------------------------
+# NsDirEntry — one directory entry
+# ---------------------------------------------------------------------------
+
+struct NsDirEntry:
+    """A single child entry inside a directory."""
+    name:      text
+    child_ino: u64
+
+# ---------------------------------------------------------------------------
+# NsDirNode — directory entry list keyed by parent inode
+# ---------------------------------------------------------------------------
+
+struct NsDirNode:
+    """Entries owned by a single directory inode."""
+    parent_ino: u64
+    entries:    [NsDirEntry]
+
+# ---------------------------------------------------------------------------
+# Namespace
+# ---------------------------------------------------------------------------
+
+struct Namespace:
+    """In-memory namespace tree over inode + directory tables.
+
+    inodes    — flat list of all NsInode records (searched by ino).
+    dirs      — flat list of NsDirNode (one per directory inode).
+    root_ino  — always 1.
+    next_ino  — monotonically increasing inode counter.
+    """
+    inodes:   [NsInode]
+    dirs:     [NsDirNode]
+    root_ino: u64
+    next_ino: u64
+
+impl Namespace:
+
+    static fn new() -> Namespace:
+        """Create a fresh namespace with a root directory (ino=1)."""
+        val root = NsInode(
+            ino:        1,
+            kind:       NsInodeKind.Dir,
+            arena_id:   -1,
+            sym_target: "",
+            size:       0,
+            mode:       0o755,
+            ctime:      0,
+            mtime:      0
+        )
+        val root_dir = NsDirNode(parent_ino: 1, entries: [])
+        Namespace(
+            inodes:   [root],
+            dirs:     [root_dir],
+            root_ino: 1,
+            next_ino: 2
+        )
+
+    # ---- inode table helpers -----------------------------------------------
+
+    fn _find_inode_idx(ino: u64) -> i64:
+        """Return index in self.inodes for ino, or -1."""
+        var i = 0
+        while i < self.inodes.len() as i64:
+            if self.inodes[i].ino == ino:
+                return i
+            i = i + 1
+        -1
+
+    fn _get_inode(ino: u64) -> Option<NsInode>:
+        val idx = self._find_inode_idx(ino)
+        if idx < 0:
+            None
+        else:
+            Some(self.inodes[idx])
+
+    fn _alloc_ino() -> u64:
+        val ino = self.next_ino
+        self.next_ino = self.next_ino + 1
+        ino
+
+    fn _insert_inode(n: NsInode):
+        self.inodes.push(n)
+
+    fn _remove_inode(ino: u64):
+        val idx = self._find_inode_idx(ino)
+        if idx < 0:
+            return
+        val last = self.inodes.len() as i64 - 1
+        if idx != last:
+            self.inodes[idx] = self.inodes[last]
+        var new_list: [NsInode] = []
+        var i = 0
+        while i < last:
+            new_list.push(self.inodes[i])
+            i = i + 1
+        self.inodes = new_list
+
+    # ---- dir node helpers --------------------------------------------------
+
+    fn _find_dir_idx(parent_ino: u64) -> i64:
+        """Return index in self.dirs for parent_ino, or -1."""
+        var i = 0
+        while i < self.dirs.len() as i64:
+            if self.dirs[i].parent_ino == parent_ino:
+                return i
+            i = i + 1
+        -1
+
+    fn _dir_entries(parent_ino: u64) -> [NsDirEntry]:
+        val idx = self._find_dir_idx(parent_ino)
+        if idx < 0:
+            return []
+        self.dirs[idx].entries
+
+    fn _dir_lookup(parent_ino: u64, name: text) -> Option<NsDirEntry>:
+        val entries = self._dir_entries(parent_ino)
+        var i = 0
+        while i < entries.len() as i64:
+            if entries[i].name == name:
+                return Some(entries[i])
+            i = i + 1
+        None
+
+    fn _dir_insert(parent_ino: u64, e: NsDirEntry):
+        val idx = self._find_dir_idx(parent_ino)
+        if idx < 0:
+            self.dirs.push(NsDirNode(parent_ino: parent_ino, entries: [e]))
+        else:
+            self.dirs[idx].entries.push(e)
+
+    fn _dir_remove(parent_ino: u64, name: text):
+        val idx = self._find_dir_idx(parent_ino)
+        if idx < 0:
+            return
+        val old_entries = self.dirs[idx].entries
+        var new_entries: [NsDirEntry] = []
+        var i = 0
+        while i < old_entries.len() as i64:
+            if old_entries[i].name != name:
+                new_entries.push(old_entries[i])
+            i = i + 1
+        self.dirs[idx] = NsDirNode(
+            parent_ino: parent_ino,
+            entries:    new_entries
+        )
+
+    fn _dir_count(parent_ino: u64) -> i64:
+        val idx = self._find_dir_idx(parent_ino)
+        if idx < 0:
+            return 0
+        self.dirs[idx].entries.len() as i64
+
+    fn _ensure_dir_node(ino: u64):
+        val idx = self._find_dir_idx(ino)
+        if idx < 0:
+            self.dirs.push(NsDirNode(parent_ino: ino, entries: []))
+
+    # ---- path helpers ------------------------------------------------------
+
+    fn _split_path(path: text) -> [text]:
+        """Split a '/' delimited path into non-empty segments."""
+        var segments: [text] = []
+        var cur = ""
+        var i = 0
+        while i < path.len() as i64:
+            val ch = path.char_at(i as u64)
+            if ch == "/":
+                if cur.len() as i64 > 0:
+                    segments.push(cur)
+                    cur = ""
+            else:
+                cur = cur + ch
+            i = i + 1
+        if cur.len() as i64 > 0:
+            segments.push(cur)
+        segments
+
+    # ---- Public API --------------------------------------------------------
+
+    fn lookup(parent_ino: u64, name: text) -> Option<NsInode>:
+        """Look up name in parent_ino's directory; return the child inode."""
+        val entry = self._dir_lookup(parent_ino, name)
+        match entry:
+            case None: None
+            case Some(e):
+                self._get_inode(e.child_ino)
+
+    fn resolve_path(path: text) -> Result<NsInode, FsError>:
+        """Walk path segments from root; return final inode or NotFound."""
+        val segments = self._split_path(path)
+        var cur_ino = self.root_ino
+        # Return root if no segments (bare "/" or empty).
+        if segments.len() as i64 == 0:
+            val ri = self._get_inode(cur_ino)
+            match ri:
+                case Some(n): return Ok(n)
+                case None:    return Err(FsError.NotFound)
+        var i = 0
+        while i < segments.len() as i64:
+            val seg = segments[i]
+            val found = self._dir_lookup(cur_ino, seg)
+            match found:
+                case None: return Err(FsError.NotFound)
+                case Some(e): cur_ino = e.child_ino
+            i = i + 1
+        val final_opt = self._get_inode(cur_ino)
+        match final_opt:
+            case Some(n): Ok(n)
+            case None:    Err(FsError.NotFound)
+
+    fn mkdir(parent_ino: u64, name: text, mode: u32) -> Result<NsInode, FsError>:
+        """Create a Dir inode named `name` under parent_ino."""
+        val existing = self._dir_lookup(parent_ino, name)
+        match existing:
+            case Some(_): return Err(FsError.AlreadyExists)
+            case None:    pass_do_nothing
+        # parent must be a Dir
+        val parent_opt = self._get_inode(parent_ino)
+        match parent_opt:
+            case None: return Err(FsError.NotFound)
+            case Some(p):
+                match p.kind:
+                    case NsInodeKind.Dir: pass_do_nothing
+                    case _: return Err(FsError.InvalidArg)
+        val ino = self._alloc_ino()
+        val n = NsInode(
+            ino:        ino,
+            kind:       NsInodeKind.Dir,
+            arena_id:   -1,
+            sym_target: "",
+            size:       0,
+            mode:       mode,
+            ctime:      0,
+            mtime:      0
+        )
+        self._insert_inode(n)
+        self._ensure_dir_node(ino)
+        self._dir_insert(parent_ino, NsDirEntry(name: name, child_ino: ino))
+        Ok(n)
+
+    fn rmdir(parent_ino: u64, name: text) -> Result<(), FsError>:
+        """Remove an empty Dir named `name` from parent_ino.
+
+        Returns InvalidArg if the target is not a Dir.
+        Returns Busy if the target is non-empty.
+        """
+        val entry_opt = self._dir_lookup(parent_ino, name)
+        val child_ino = match entry_opt:
+            case None:    return Err(FsError.NotFound)
+            case Some(e): e.child_ino
+        val inode_opt = self._get_inode(child_ino)
+        match inode_opt:
+            case None: return Err(FsError.NotFound)
+            case Some(n):
+                match n.kind:
+                    case NsInodeKind.Dir: pass_do_nothing
+                    case _: return Err(FsError.InvalidArg)
+        val count = self._dir_count(child_ino)
+        if count > 0:
+            return Err(FsError.Busy)
+        self._dir_remove(parent_ino, name)
+        self._remove_inode(child_ino)
+        Ok(())
+
+    fn create_file(parent_ino: u64, name: text, arena_id: i64, mode: u32) -> Result<NsInode, FsError>:
+        """Create a File inode backed by `arena_id` under parent_ino."""
+        val existing = self._dir_lookup(parent_ino, name)
+        match existing:
+            case Some(_): return Err(FsError.AlreadyExists)
+            case None:    pass_do_nothing
+        val parent_opt = self._get_inode(parent_ino)
+        match parent_opt:
+            case None: return Err(FsError.NotFound)
+            case Some(p):
+                match p.kind:
+                    case NsInodeKind.Dir: pass_do_nothing
+                    case _: return Err(FsError.InvalidArg)
+        val ino = self._alloc_ino()
+        val n = NsInode(
+            ino:        ino,
+            kind:       NsInodeKind.File,
+            arena_id:   arena_id,
+            sym_target: "",
+            size:       0,
+            mode:       mode,
+            ctime:      0,
+            mtime:      0
+        )
+        self._insert_inode(n)
+        self._dir_insert(parent_ino, NsDirEntry(name: name, child_ino: ino))
+        Ok(n)
+
+    fn unlink(parent_ino: u64, name: text) -> Result<NsInode, FsError>:
+        """Remove a non-Dir entry named `name` from parent_ino.
+
+        Returns the removed inode so the caller can decide what to do with
+        the backing arena.
+        """
+        val entry_opt = self._dir_lookup(parent_ino, name)
+        val child_ino = match entry_opt:
+            case None:    return Err(FsError.NotFound)
+            case Some(e): e.child_ino
+        val inode_opt = self._get_inode(child_ino)
+        val n = match inode_opt:
+            case None:    return Err(FsError.NotFound)
+            case Some(x): x
+        match n.kind:
+            case NsInodeKind.Dir: return Err(FsError.InvalidArg)
+            case _: pass_do_nothing
+        self._dir_remove(parent_ino, name)
+        self._remove_inode(child_ino)
+        Ok(n)
+
+    fn symlink(parent_ino: u64, name: text, target: text) -> Result<NsInode, FsError>:
+        """Create a Symlink inode named `name` pointing at `target`."""
+        val existing = self._dir_lookup(parent_ino, name)
+        match existing:
+            case Some(_): return Err(FsError.AlreadyExists)
+            case None:    pass_do_nothing
+        val parent_opt = self._get_inode(parent_ino)
+        match parent_opt:
+            case None: return Err(FsError.NotFound)
+            case Some(p):
+                match p.kind:
+                    case NsInodeKind.Dir: pass_do_nothing
+                    case _: return Err(FsError.InvalidArg)
+        val ino = self._alloc_ino()
+        val n = NsInode(
+            ino:        ino,
+            kind:       NsInodeKind.Symlink,
+            arena_id:   -1,
+            sym_target: target,
+            size:       target.len() as u64,
+            mode:       0o777,
+            ctime:      0,
+            mtime:      0
+        )
+        self._insert_inode(n)
+        self._dir_insert(parent_ino, NsDirEntry(name: name, child_ino: ino))
+        Ok(n)
+
+    fn readlink(ino: u64) -> Result<text, FsError>:
+        """Return symlink target for inode ino. Error if not a Symlink."""
+        val opt = self._get_inode(ino)
+        match opt:
+            case None: Err(FsError.NotFound)
+            case Some(n):
+                match n.kind:
+                    case NsInodeKind.Symlink: Ok(n.sym_target)
+                    case _: Err(FsError.InvalidArg)
+
+    fn readdir(ino: u64) -> Result<[NsDirEntry], FsError>:
+        """List children of directory inode ino. Error if not a Dir."""
+        val opt = self._get_inode(ino)
+        match opt:
+            case None: return Err(FsError.NotFound)
+            case Some(n):
+                match n.kind:
+                    case NsInodeKind.Dir: pass_do_nothing
+                    case _: return Err(FsError.InvalidArg)
+        Ok(self._dir_entries(ino))
+
+    fn rename(old_parent: u64, old_name: text, new_parent: u64, new_name: text) -> Result<(), FsError>:
+        """Atomically move old_parent/old_name to new_parent/new_name.
+
+        If new_parent/new_name exists and is an empty Dir, it is replaced.
+        If it exists and is a File/Symlink, it is replaced.
+        Cross-directory moves are supported.
+        """
+        val src_entry = match self._dir_lookup(old_parent, old_name):
+            case None:    return Err(FsError.NotFound)
+            case Some(e): e
+        val src_ino = src_entry.child_ino
+        # Handle destination conflict.
+        val dst_existing = self._dir_lookup(new_parent, new_name)
+        match dst_existing:
+            case Some(de):
+                val dst_opt = self._get_inode(de.child_ino)
+                match dst_opt:
+                    case None: pass_do_nothing
+                    case Some(dn):
+                        match dn.kind:
+                            case NsInodeKind.Dir:
+                                # Only allow replace of empty dir.
+                                val cnt = self._dir_count(de.child_ino)
+                                if cnt > 0:
+                                    return Err(FsError.Busy)
+                                self._remove_inode(de.child_ino)
+                            case _: self._remove_inode(de.child_ino)
+                self._dir_remove(new_parent, new_name)
+            case None: pass_do_nothing
+        # Move: remove from old parent, insert into new parent.
+        self._dir_remove(old_parent, old_name)
+        self._dir_insert(new_parent, NsDirEntry(name: new_name, child_ino: src_ino))
+        Ok(())
+
+    # ---- path-to-parent helper used by driver wrappers --------------------
+
+    fn resolve_parent(path: text) -> Result<(u64, text), FsError>:
+        """Return (parent_ino, leaf_name) for a path like '/a/b/c'.
+
+        Resolves all but the last segment; returns the leaf name.
+        For bare names (no '/'), parent is root_ino.
+        """
+        val segments = self._split_path(path)
+        if segments.len() as i64 == 0:
+            return Err(FsError.InvalidArg)
+        val leaf = segments[segments.len() as i64 - 1]
+        if segments.len() as i64 == 1:
+            return Ok((self.root_ino, leaf))
+        var cur_ino = self.root_ino
+        var i = 0
+        while i < segments.len() as i64 - 1:
+            val seg = segments[i]
+            val found = self._dir_lookup(cur_ino, seg)
+            match found:
+                case None:    return Err(FsError.NotFound)
+                case Some(e): cur_ino = e.child_ino
+            i = i + 1
+        Ok((cur_ino, leaf))

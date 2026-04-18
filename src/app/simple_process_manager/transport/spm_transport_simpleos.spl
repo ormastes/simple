@@ -1,0 +1,67 @@
+#![allow(unnamed_duplicate_typed_args)]
+"""SpmTransportSimpleos — SimpleOS-kernel syscall-backed transport.
+
+Uses `sys_spm_send` / `sys_spm_listen` from `src/os/userlib/syscall_raw.spl`.
+The real byte-slice pointer wiring is a TODO (marked inline) — for unit
+specs we expose `SpmTransportMock` which routes requests straight into a
+handler callback without touching the kernel.
+
+Feature: spm-winfs-llm-suite AC-3.
+"""
+
+use app.simple_process_manager.transport.spm_transport.{SpmTransport, TransportStatus, SpmRequest, SpmResponse, spm_encode_request, spm_decode_response, spm_encode_response, spm_decode_request}
+
+# ---------------------------------------------------------------------------
+# Production impl (syscall-backed)
+# ---------------------------------------------------------------------------
+
+class SpmTransportSimpleos:
+    """Routes SPM RPCs through the SimpleOS SYS_SPM_SEND / SYS_SPM_LISTEN
+    syscalls. Requires the kernel-side dispatch from wave 5b kernel mods."""
+    _placeholder: bool
+
+    static fn new() -> SpmTransportSimpleos:
+        SpmTransportSimpleos(_placeholder: true)
+
+impl SpmTransport for SpmTransportSimpleos:
+    fn send(req: SpmRequest) -> SpmResponse:
+        val encoded = spm_encode_request(req)
+        # TODO: wire raw pointer + length from `encoded` through
+        # `syscall_raw.sys_spm_send`. For now this stub returns an
+        # "unavailable" response so userland callers can detect that the
+        # kernel path is not wired yet.
+        SpmResponse(
+            ok: false,
+            body: [],
+            error: "simpleos transport not wired (kernel stub)")
+
+    fn listen(bind: text) -> TransportStatus:
+        # TODO: invoke `syscall_raw.sys_spm_listen` with a handler port.
+        TransportStatus.failure("simpleos listen not wired")
+
+# ---------------------------------------------------------------------------
+# Test / in-process mock (used by spm_service_spec)
+# ---------------------------------------------------------------------------
+
+class SpmTransportMock:
+    """Spec-visible transport that never touches the kernel. Holds a
+    direct reference to a `SpmService`-like handler so specs can drive the
+    full round trip in-process."""
+    handler: fn(SpmRequest) -> SpmResponse
+
+    static fn bound(handler: fn(SpmRequest) -> SpmResponse) -> SpmTransportMock:
+        SpmTransportMock(handler: handler)
+
+    static fn new() -> SpmTransportMock:
+        """Handler-less mock used by wm_spm_client_spec parity tests."""
+        SpmTransportMock(handler: _unbound_mock_handler)
+
+impl SpmTransport for SpmTransportMock:
+    fn send(req: SpmRequest) -> SpmResponse:
+        self.handler(req)
+
+    fn listen(bind: text) -> TransportStatus:
+        TransportStatus.success()
+
+fn _unbound_mock_handler(req: SpmRequest) -> SpmResponse:
+    SpmResponse(ok: false, body: [], error: "mock transport has no handler bound")
