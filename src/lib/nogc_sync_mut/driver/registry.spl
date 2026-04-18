@@ -50,19 +50,36 @@ impl DriverRegistry:
         return Result.Ok(idx)
 
     fn init_all(ctx: DriverContext) -> Result<i32, DriverError>:
+        # Policy: continue-on-error. A driver whose init_fn returns Err is left
+        # with loaded=false and skipped; the registry keeps going so one bad
+        # driver (e.g. GPU adapter on a CUDA-less host) cannot block unrelated
+        # drivers from coming up. Returns Ok(count) with count = number that
+        # successfully initialized. If every Driver-kind entry failed (and at
+        # least one was attempted), returns Err(Internal) so callers know the
+        # subsystem is unusable. NativeLib entries are counted the same way.
         var initialized: i32 = 0
+        var attempted:   i32 = 0
         var i: i32 = 0
         while i < (self.entries.len() as i32):
             var e: DriverEntry = self.entries[i]
             if not e.loaded and e.manifest.kind == ManifestKind.Driver:
+                attempted = attempted + 1
                 var rc = e.ops.init_fn(ctx)
                 match rc:
                     Result.Ok(_) ->
                         e.loaded = true
                         self.entries[i] = e
                         initialized = initialized + 1
-                    Result.Err(err) -> return Result.Err(err)
+                    Result.Err(_) ->
+                        # Soft-fail: mark not-loaded (already the default on
+                        # this entry) and move on. The specific error is
+                        # currently dropped; a future logging hook can wire
+                        # a per-arch writer here without changing the policy.
+                        e.loaded = false
+                        self.entries[i] = e
             i = i + 1
+        if attempted > 0 and initialized == 0:
+            return Result.Err(DriverError.Internal)
         return Result.Ok(initialized)
 
     fn find_for_device(vendor: i32, device: i32, cls: DriverClass) -> i32:

@@ -20,6 +20,13 @@ use std.driver.registry.{DriverOps}
 use std.driver.static_table.{register_static_driver}
 use std.driver.types.{DriverClass, DriverHandle, DriverContext, DeviceId,
                       IoctlCmd, PowerState, ProbeResult}
+# Layering note (FR-DRIVER-0006): the CUDA native-lib adapter routes its
+# init through the userland `gpu_driver` module, NOT the compiler-side
+# `src/compiler/70.backend/backend/cuda/cuda_ffi.spl`. `src/lib/*` is not
+# allowed to depend on `src/compiler/*` — doing so would break stdlib
+# bootstrap layering. `gpu_driver/mod.spl` already owns the `rt_cuda_*`
+# extern surface and re-exports a clean `GpuError`/`Result` API.
+use std.nogc_sync_mut.gpu_driver.mod.{gpu_init, GpuError}
 
 # --- Generic native-lib stubs (used by every NativeLib adapter) ---
 
@@ -50,11 +57,28 @@ fn nativelib_ioctl(h: DriverHandle, cmd: IoctlCmd) -> Result<i64, DriverError>:
 # lib's own startup. Keeping the adapters thin means changing a lib
 # later (e.g. CUDA runtime version bump) never touches the registry.
 
+fn __cuda_ffi_map_err(err: GpuError) -> DriverError:
+    # Mirrors gpu_driver/driver_adapter.spl::__gpu_map_err for consistency;
+    # kept local so a bump in CUDA error codes only touches one file per
+    # adapter.
+    val c: i64 = err.code
+    if c == -100:
+        return DriverError.NoDevice
+    if c == -200:
+        return DriverError.NotReady
+    if c == -2:
+        return DriverError.NoMemory
+    return DriverError.IoError
+
 fn cuda_ffi_init(ctx: DriverContext) -> Result<(), DriverError>:
-    # Real integration: call cuda_init() and translate GpuError.
-    # Current adapter succeeds without touching the CUDA runtime so the
-    # registry works on hosts without a GPU.
-    return Result.Ok(())
+    # Route through gpu_driver/mod.spl (NOT src/compiler/70.backend/...).
+    # On a CUDA-less host gpu_init returns Err; the registry's tolerant
+    # init_all policy then leaves this native-lib entry with loaded=false
+    # without blocking other drivers.
+    val rc = gpu_init()
+    match rc:
+        Result.Ok(_)   -> return Result.Ok(())
+        Result.Err(e)  -> return Result.Err(__cuda_ffi_map_err(e))
 
 fn lld_ffi_init(ctx: DriverContext) -> Result<(), DriverError>:
     # Real integration: call lld_init() / probe for simple_lld_elf_link.

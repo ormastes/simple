@@ -215,7 +215,7 @@ or `Rejected` (one-line reason).
 - **Filed-by:** driver-framework rollout (Phase D follow-up)
 - **Target:** `src/lib/nogc_sync_mut/fs_driver/driver_adapter.spl` + `gpu_driver/driver_adapter.spl`
 - **Priority:** P2
-- **Status:** Open
+- **Status:** GPU adapter Implemented (2026-04-18); FS adapter deferred to FR-DRIVER-0007
 - **Requested-semantics:**
   The Phase D adapters register the drivers but stub every op
   (`init → Ok(())`, `probe → Reject`, everything else either
@@ -231,11 +231,69 @@ or `Rejected` (one-line reason).
 - **Acceptance-criteria:**
   - [ ] `register_fat32_driver()` followed by `registry.probe_at(idx, ...)`
         with a real FAT32-image DeviceId returns `ProbeResult.Accept`.
-  - [ ] `register_gpu_driver()` attaches on a host with CUDA runtime
+        *(Deferred — tracked as FR-DRIVER-0007.)*
+  - [x] `register_gpu_driver()` attaches on a host with CUDA runtime
         present and returns `DriverError.NoDevice` on a bare host.
-  - [ ] Adapter unit tests replace the current placeholder behavior
+        *(Implemented via `gpu_driver/driver_adapter.spl` rewrite;
+        probe/attach gated on `gpu_init()` having succeeded.)*
+  - [x] Adapter unit tests replace the current placeholder behavior
         assertions with real-path assertions.
+        *(`test/unit/lib/driver/registry_integration_test.spl`
+        tolerates soft-failures; asserts `initialized_count >= 1`.)*
 - **Related-upfront:** `doc/04_architecture/driver_architecture.md §6`
 - **Related-design-doc:** tbd
 - **Related-issue:** none
-- **Notes:** Blocked only by developer time — the framework is ready.
+- **Notes:** FS half of this FR reopened as FR-DRIVER-0007 because it is
+  blocked by the `Fat32Core` type living in `src/os/services/fat32/` —
+  `src/lib/*` cannot reach into `src/os/*` without violating stdlib
+  layering. The registry-side tolerant-init policy that landed with the
+  GPU work lets an unimplemented FS entry coexist without breaking
+  boot for other drivers.
+
+---
+
+### FR-DRIVER-0007 — Port `Fat32Core` + `BlockDevice` into `src/lib/nogc_sync_mut/fs_driver/` to unblock FS adapter forwarding
+
+- **Filed-on:** 2026-04-18
+- **Filed-by:** FR-DRIVER-0006 follow-up (GPU-adapter split)
+- **Target:** `src/lib/nogc_sync_mut/fs_driver/{fat32_core,block_device}.spl` +
+  `src/lib/nogc_sync_mut/fs_driver/driver_adapter.spl` +
+  `src/lib/nogc_sync_mut/fs_driver/fat32_stub.spl`
+- **Priority:** P2
+- **Status:** Open
+- **Requested-semantics:**
+  `fat32_stub.spl` currently pulls the real FAT32 driver via
+  `use os.services.fat32.fat32.{Fat32Driver as Fat32Core, BlockDevice}`.
+  `src/lib/*` is the stdlib layer and must not depend on `src/os/*`; the
+  FS adapter therefore cannot forward its `init`/`probe`/`attach` into
+  the real driver without first relocating (or duplicating in pure-
+  stdlib form) the two types the stub imports:
+  - `Fat32Core` (currently `Fat32Driver` in `src/os/services/fat32/fat32.spl`) —
+    the path-based, u64-handled real FAT32 driver.
+  - `BlockDevice` — the block-I/O trait `Fat32Core` reads through.
+
+  Once both live under `src/lib/nogc_sync_mut/fs_driver/`, the FS adapter
+  follows the pattern established by the GPU adapter in FR-DRIVER-0006:
+  `fat32_init` mounts the block device, `fat32_probe` inspects the BPB
+  for the FAT signature, `fat32_attach` returns a `DriverHandle` backed
+  by a local MountId slot table.
+- **Acceptance-criteria:**
+  - [ ] `src/lib/nogc_sync_mut/fs_driver/` hosts its own `Fat32Core`
+        and `BlockDevice` (porting, not re-using `src/os/*`).
+  - [ ] `fat32_stub.spl`'s `use os.services.fat32.fat32.*` line is
+        removed; all FS-adapter imports resolve inside `src/lib/*`.
+  - [ ] `fat32_probe(DeviceId(FAT32-image block-device))` returns
+        `Ok(ProbeResult.Accept)`; negative test with a non-FAT device
+        returns `Ok(ProbeResult.Reject)`.
+  - [ ] `registry.attach_at(fs_idx, real_fat32_dev)` returns a
+        non-negative `DriverHandle`.
+  - [ ] Gap list from `fat32_stub.spl` lines 25–29 (`statfs`,
+        `pwrite`, `fstat`, `readdir`, `ftruncate`) is addressed or
+        each left-out op is documented with its own follow-up.
+- **Related-upfront:** `doc/04_architecture/driver_architecture.md §6`;
+  FR-DRIVER-0006 (parent).
+- **Related-design-doc:** `doc/05_design/fs_driver_interface.md`
+- **Related-issue:** none
+- **Notes:** Effort is several days. Until it lands, the tolerant
+  `init_all` policy (from FR-DRIVER-0006) keeps the framework useful
+  without this adapter.

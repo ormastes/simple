@@ -1,11 +1,29 @@
-# Driver-framework adapter for the GPU driver.
+# Driver-framework adapter for the GPU driver (FR-DRIVER-0006).
 #
-# Mirrors fs_driver/driver_adapter.spl but classed as DriverClass.Gpu.
-# The adapter registers the GPU driver into the shared registry so the
-# kernel can route gpu_* calls through the same lifecycle path as every
-# other device class. Class-specific GPU ops (gpu_alloc, gpu_launch,
-# gpu_sync) stay on the existing gpu_driver module surface — the
-# adapter only supplies the Driver-trait shell.
+# Replaces the Phase D stubs with real forwarding into gpu_driver/mod.spl:
+#
+#   init    → gpu_init()                      (maps GpuError → DriverError)
+#   probe   → accepts only if a CUDA device was found in init; rejects on
+#             bare hosts so the new tolerant registry policy can keep
+#             going without this adapter.
+#   attach  → allocates a slot in a local handle table keyed to a
+#             GpuDevice, returns the slot index as the DriverHandle value
+#             (opaque to the kernel per types.spl:DriverHandle contract).
+#   detach  → releases the slot.
+#   ioctl / suspend / resume → stubbed (NotSupported); real class-specific
+#             GPU ops still live on gpu_driver/mod.spl and are invoked
+#             outside the Driver-trait surface.
+#
+# Handle-table placement (see plan Track-7 advisor prompt):
+# kept as module-private parallel arrays inside this file rather than in
+# DriverOps.self_ptr. Rationale:
+#   - DriverOps.self_ptr is an i64 opaque; storing a GpuDevice struct in it
+#     requires pointer tricks that break bootstrap portability.
+#   - ptr/handle.spl is a singleton (module-level globals) shared across the
+#     process, so it cannot host multiple independent adapters. A local
+#     table keeps adapter state self-contained and matches mount_table.spl.
+#   - The kernel still sees only the opaque DriverHandle.value; the mapping
+#     from handle → GpuDevice is entirely adapter-local.
 
 use std.driver.error.{DriverError}
 use std.driver.manifest.{DriverManifest, DRVS_ABI_REV}
@@ -13,36 +31,128 @@ use std.driver.registry.{DriverOps}
 use std.driver.static_table.{register_static_driver}
 use std.driver.types.{DriverClass, DriverHandle, DriverContext, DeviceId,
                       IoctlCmd, PowerState, ProbeResult}
+use std.nogc_sync_mut.gpu_driver.mod.{GpuDevice, GpuError, gpu_init}
+
+# --- Init state ---------------------------------------------------------
+#
+# `__gpu_cuda_available` is set to true only after a successful gpu_init().
+# probe/attach gate their Accept path on this so a CUDA-less host ends up
+# with loaded=false in the registry (per new tolerant init_all policy).
+var __gpu_cuda_available: bool = false
+
+# --- Handle table -------------------------------------------------------
+#
+# Slot i is occupied when `__gpu_handle_occupied[i]` is true; in that case
+# `__gpu_handle_device_ids[i]` stores the GpuDevice.id the slot refers to.
+# DriverHandle.value == slot index (always >= 0 when valid).
+var __gpu_handle_device_ids: [i64] = []
+var __gpu_handle_occupied:   [bool] = []
+
+fn __gpu_alloc_slot(dev_id: i64) -> i32:
+    var i: i32 = 0
+    while i < (__gpu_handle_occupied.len() as i32):
+        if not __gpu_handle_occupied[i]:
+            __gpu_handle_occupied[i] = true
+            __gpu_handle_device_ids[i] = dev_id
+            return i
+        i = i + 1
+    __gpu_handle_device_ids.append(dev_id)
+    __gpu_handle_occupied.append(true)
+    return (__gpu_handle_occupied.len() as i32) - 1
+
+fn __gpu_free_slot(idx: i32) -> bool:
+    if idx < 0 or idx >= (__gpu_handle_occupied.len() as i32):
+        return false
+    if not __gpu_handle_occupied[idx]:
+        return false
+    __gpu_handle_occupied[idx] = false
+    __gpu_handle_device_ids[idx] = 0
+    return true
+
+# --- Error mapping ------------------------------------------------------
+#
+# GpuError carries a negative CUDA error code + string message. We map the
+# subset we care about back into the DriverError surface and fold the rest
+# into IoError. The mapping is conservative — NoDevice / NotReady / NoMemory
+# cover the common failure modes callers want to distinguish.
+fn __gpu_map_err(err: GpuError) -> DriverError:
+    # CUDA error codes (see CUDA driver API):
+    #   100 = cudaErrorNoDevice
+    #   200 = cudaErrorInvalidKernelImage / NotReady family
+    #     2 = cudaErrorMemoryAllocation (cuda_mem_alloc out of memory)
+    # We get codes as negative values from GpuError.from_code; compare abs.
+    val c: i64 = err.code
+    if c == -100:
+        return DriverError.NoDevice
+    if c == -200:
+        return DriverError.NotReady
+    if c == -2:
+        return DriverError.NoMemory
+    return DriverError.IoError
+
+# --- Driver-trait entry points -----------------------------------------
 
 fn gpu_abi_rev() -> i32:
     return DRVS_ABI_REV
 
 fn gpu_drv_init(ctx: DriverContext) -> Result<(), DriverError>:
-    # Real driver calls gpu_init() here. Stub adapter keeps it empty so
-    # registration succeeds even when CUDA / Vulkan runtime is absent.
-    return Result.Ok(())
+    val rc = gpu_init()
+    match rc:
+        Result.Ok(_) ->
+            __gpu_cuda_available = true
+            return Result.Ok(())
+        Result.Err(err) ->
+            __gpu_cuda_available = false
+            return Result.Err(__gpu_map_err(err))
 
 fn gpu_drv_probe(dev: DeviceId) -> Result<ProbeResult, DriverError>:
-    return Result.Ok(ProbeResult.Reject)
+    # Reject before CUDA init has succeeded — a probe on a CUDA-less host
+    # must not pretend to claim the device.
+    if not __gpu_cuda_available:
+        return Result.Ok(ProbeResult.Reject)
+    # With CUDA available, verify the requested logical device id exists by
+    # asking the CUDA runtime. GpuDevice.get maps driver value → device
+    # handle; Err here means the id is out of range for the current host.
+    val dev_rc = GpuDevice.get(dev.value)
+    match dev_rc:
+        Result.Ok(_)  -> return Result.Ok(ProbeResult.Accept)
+        Result.Err(_) -> return Result.Ok(ProbeResult.Reject)
 
 fn gpu_drv_attach(dev: DeviceId) -> Result<DriverHandle, DriverError>:
-    return Result.Err(DriverError.NotSupported)
+    if not __gpu_cuda_available:
+        return Result.Err(DriverError.NotReady)
+    val dev_rc = GpuDevice.get(dev.value)
+    match dev_rc:
+        Result.Ok(gpu_dev) ->
+            val slot: i32 = __gpu_alloc_slot(gpu_dev.id)
+            return Result.Ok(DriverHandle(value: slot as i64))
+        Result.Err(err) ->
+            return Result.Err(__gpu_map_err(err))
 
 fn gpu_drv_detach(h: DriverHandle) -> Result<(), DriverError>:
+    val ok: bool = __gpu_free_slot(h.value as i32)
+    if not ok:
+        return Result.Err(DriverError.BadArg)
     return Result.Ok(())
 
 fn gpu_drv_suspend(h: DriverHandle, s: PowerState) -> Result<(), DriverError>:
+    # CUDA has no generic per-device suspend contract available through the
+    # current extern surface; leave as a no-op rather than NotSupported so
+    # power transitions don't fail spuriously for GPU entries.
     return Result.Ok(())
 
 fn gpu_drv_resume(h: DriverHandle) -> Result<(), DriverError>:
     return Result.Ok(())
 
 fn gpu_drv_ioctl(h: DriverHandle, cmd: IoctlCmd) -> Result<i64, DriverError>:
+    # GPU command surface (launch / alloc / sync) intentionally stays on
+    # gpu_driver/mod.spl — routed via the class-specific API, not through
+    # the class-agnostic Driver-trait ioctl envelope.
     return Result.Err(DriverError.NotSupported)
 
 fn register_gpu_driver() -> Result<i32, DriverError>:
     val m: DriverManifest = DriverManifest.for_driver(
-        "gpu_stub", "0.1", DriverClass.Gpu, 0, [])
+        "gpu_cuda", "0.1", DriverClass.Gpu, 0, [])
     val ops: DriverOps = DriverOps(
         self_ptr: 0,
         manifest_abi: gpu_abi_rev,
@@ -55,3 +165,8 @@ fn register_gpu_driver() -> Result<i32, DriverError>:
         ioctl_fn:   gpu_drv_ioctl,
     )
     return register_static_driver(m, ops)
+
+# Test-only helper: expose the internal flag for unit tests so they can
+# assert the post-init_all state matches the host configuration.
+fn gpu_driver_is_cuda_available() -> bool:
+    return __gpu_cuda_available
