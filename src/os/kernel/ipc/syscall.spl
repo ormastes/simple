@@ -30,7 +30,7 @@ use os.kernel.boot.mmio.{mmio_write8, mmio_write16, mmio_write32, mmio_write64}
 use os.kernel.interrupts.irq_routing.{irq_route_register}
 use os.kernel.interrupts.idt.{VEC_IRQ_BASE}
 use os.kernel.lifecycle.task_cleanup.{task_cleanup, task_register_resource, RES_NOTIFICATION, RES_IRQ_ROUTE}
-use os.kernel.ipc.capability.{CapabilityManager, PrivilegeTable, GrantTable}
+use os.kernel.ipc.capability.{CapabilityManager, PrivilegeTable, GrantTable, _vma_range_readable}
 use os.kernel.types.capability_types.{PrivilegeMask, Grant, PRIVCTL_SET_MASK, PRIVCTL_GET_MASK, PRIVCTL_ADD_PEER, PRIVCTL_REMOVE_PEER, GRANT_R, GRANT_W, GRANT_RW}
 use os.drivers.rtc.rtc.{rtc_get_seconds, rtc_get_minutes, rtc_get_hours}
 use os.kernel.ipc.spm_port.{spm_port_send, spm_port_listen, spm_port_is_registered}
@@ -2580,13 +2580,45 @@ fn _handle_sys_munmap(args: SyscallArgs) -> SyscallResult:
 fn _copy_in_bytes(ptr: u64, len: u64) -> [u8]:
     """Copy `len` bytes from caller's user-VA `ptr` into a kernel-owned [u8].
 
-    Null-ptr / zero-len stub: returns []. Real VA walk is a deferred
-    follow-up (task_vmspace_of + _vma_range_readable + physmap copy;
-    see capability.spl:564-565 TODO).
+    Walks the caller's address space (g_current_vmspace) and copies bytes
+    from user VA `ptr` via identity-mapped user pointer. Mirrors the
+    safecopy_from contract in capability.spl: if the vmspace is wired
+    (vma_count > 0), every page in [ptr, ptr+len) must be covered by a
+    VMA with VMA_READ; on any unmapped/unreadable page, returns []. If
+    the vmspace has no VMAs yet (PM not wired, boot-time), the VMA check
+    is skipped — matching safecopy_from's "skip when not registered" rule.
+
+    Failure modes (return []):
+      - ptr == 0 or len == 0
+      - ptr + len overflows u64
+      - vmspace is wired and range is not fully VMA_READ
+
+    # TODO(mdsoc+): swap the identity-mapped user deref for a pt_walk-based
+    # per-page copy once vmm.spl exposes the walker (see capability.spl
+    # safecopy_from TODO). Cross-page handling on non-identity physmap is
+    # deferred behind the same helper.
     """
     if ptr == 0 as u64 or len == 0 as u64:
         return []
-    []
+    # Overflow guard: ptr + len must not wrap
+    if ptr + len < ptr:
+        return []
+    # VMA validation: skip when vmspace is not yet wired (vma_count == 0),
+    # otherwise every page in the range must be VMA_READ.
+    if g_current_vmspace.vma_count > 0 as u64:
+        if not _vma_range_readable(g_current_vmspace, ptr, len):
+            return []
+    # Bytewise copy through the identity-mapped user pointer. Mirrors the
+    # proven pattern in _copy_user_text above.
+    unsafe:
+        val base = ptr as *const u8
+        var bytes: [u8] = []
+        var i: u64 = 0
+        while i < len:
+            val byte_ptr = (base + (i as i64)) as *const u8
+            bytes.push(*byte_ptr)
+            i = i + 1
+        bytes
 
 fn _handle_spm_priv_check(args: SyscallArgs) -> SyscallResult:
     """sys_priv_check (110) — hierarchical privilege gate."""
