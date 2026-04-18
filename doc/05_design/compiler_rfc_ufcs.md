@@ -187,3 +187,20 @@ A first attempt at the un-stub revealed the fix is larger than "4 lines". `resol
 Realistic scope: 20–30 line plumbing change touching `resolve.spl` (function signatures + body), `driver.spl` (two call sites), and any other internal callers of `resolve_methods`. Verification cost includes a Stage 4 self-host build (~16s) and confirming `bin/simple lint`, `bin/simple check`, and `bin/simple format` all stop emitting `Function 'X' not found` runtime errors from the 2419 stubbed-method paths.
 
 **Empirical evidence**: Stage 4 succeeds in 16.3s with `EXIT=0` and produces a 27.5MB binary, but every command path that traverses methods (`lint`, `check`, `format`) fails with `Runtime error: Function 'level' not found` / `'line' not found`. The `test` command works because its hot path doesn't traverse the diagnostic-formatter's method calls. This confirms: the resolver stub is what's breaking — un-stubbing it (with the SymbolTable plumbed correctly) should fix all three commands in one shot.
+
+### Partial unstub applied 2026-04-18
+
+`resolve.spl:572` unstubbed with the minimal-risk variant: `val symbols = SymbolTable.new()` + `create_method_resolver(symbols)` + `resolver.resolve_module(module)`. Self-host build chain re-tested across two generations (Stage 4 → Stage 5):
+
+| Stage | Stubs | New diagnostic |
+|---|---|---|
+| Stage 4 (built by stale stage3 stub) | 2420 | unchanged |
+| Stage 5 (built by Stage 4 unstub) | **2419** ↓ | `[CODEGEN-AMBIGUOUS-METHOD] LintResult.format has 2 candidates: [LintResult.format, tools__lint__main__LintResult_dot_format] — refusing to pick shortest` |
+
+**Interpretation**: the resolver IS firing now — it's finding methods. But it surfaces a *new* blocker: every method has two candidates (the un-mangled name and the module-path-mangled name) registered in the symbol table. The resolver refuses to pick to avoid silent miscalls, so all method calls still degrade to runtime stubs.
+
+Result: `lint`/`check`/`format` still fail with `Function 'level' not found` / `'line' not found` in the new self-host, because the duplicate-symbol ambiguity prevents method binding.
+
+**Next blocker (unblocks the whole chain)**: locate the symbol-registration code that emits both `LintResult.format` and `tools__lint__main__LintResult_dot_format` for the same method definition. Pick one canonical form (likely the un-mangled `Type.method` for instance methods, mangled for free functions). De-dupe the registration. Estimated scope: medium — likely in `src/compiler/35.semantics/` symbol-build pass or `src/compiler/30.types/` declarative-type registration. Once de-duped, ambiguity disappears and methods bind correctly.
+
+**Self-host bootstrap chain note**: changes to `resolve.spl` only take effect on the THIRD generation (the binary that was built by a binary that was built with the change). Stage 5 still has 2419 stubs because its own internal method calls were resolved by Stage 4's resolver (which itself was built with the OLD stub). Need Stage 6 (built by Stage 5) to fully propagate.
