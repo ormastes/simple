@@ -1,0 +1,132 @@
+#![allow(unnamed_duplicate_typed_args)]
+"""WindowRecord — GUI-window metadata mirrored into the filesystem tree.
+
+Feature: spm-winfs-llm-suite AC-2. Pure module.
+
+Shape matches the Phase 3 architecture (§B) and the test double in
+`test/lib/common/win_fs/window_record_spec.spl`.
+
+A minimal local `Rect` is defined here. A richer `Rect` exists in
+`src/lib/common/window_protocol/geometry.spl`; we deliberately do not
+import it to keep `lib/common/win_fs` free of cross-subsystem coupling.
+"""
+
+use lib.common.privilege.id_path.{IdPath, id_path_intern}
+
+# ---------------------------------------------------------------------------
+# Enums + value types
+# ---------------------------------------------------------------------------
+
+enum WindowState:
+    Hidden
+    Normal
+    Minimized
+    Maximized
+    Destroyed
+
+class Rect:
+    """Axis-aligned integer rectangle (top-left anchor, unsigned size)."""
+    x: i32
+    y: i32
+    w: u32
+    h: u32
+
+class BufferRef:
+    """Opaque handle to a shared-memory surface (shm, gpu, stub, ...)."""
+    kind: text
+    handle: u64
+    bytes: u64
+
+enum FsOp:
+    Open
+    Read
+    Write
+    List
+    Exec
+    Readdir
+    Stat
+    Unlink
+
+# ---------------------------------------------------------------------------
+# WindowRecord
+# ---------------------------------------------------------------------------
+
+class WindowRecord:
+    """One mapped GUI window."""
+    wid: u64
+    generation: u32
+    app: text
+    title: text
+    state: WindowState
+    geometry: Rect
+    buffer_ref: BufferRef
+    acl_id_path: IdPath
+
+# ---------------------------------------------------------------------------
+# Lifecycle helpers (pure, return new records with bumped generation)
+# ---------------------------------------------------------------------------
+
+fn window_update_title(rec: WindowRecord, new_title: text) -> WindowRecord:
+    """Return a new record with the title updated and generation bumped."""
+    WindowRecord(
+        wid: rec.wid,
+        generation: rec.generation + (1 as u32),
+        app: rec.app,
+        title: new_title,
+        state: rec.state,
+        geometry: rec.geometry,
+        buffer_ref: rec.buffer_ref,
+        acl_id_path: rec.acl_id_path)
+
+fn window_update_geometry(rec: WindowRecord, geometry: Rect) -> WindowRecord:
+    WindowRecord(
+        wid: rec.wid,
+        generation: rec.generation + (1 as u32),
+        app: rec.app,
+        title: rec.title,
+        state: rec.state,
+        geometry: geometry,
+        buffer_ref: rec.buffer_ref,
+        acl_id_path: rec.acl_id_path)
+
+fn window_mark_destroyed(rec: WindowRecord) -> WindowRecord:
+    """Return a new record with state=Destroyed and generation bumped."""
+    WindowRecord(
+        wid: rec.wid,
+        generation: rec.generation + (1 as u32),
+        app: rec.app,
+        title: rec.title,
+        state: WindowState.Destroyed,
+        geometry: rec.geometry,
+        buffer_ref: rec.buffer_ref,
+        acl_id_path: rec.acl_id_path)
+
+# ---------------------------------------------------------------------------
+# Name helpers
+# ---------------------------------------------------------------------------
+
+fn window_state_name(s: WindowState) -> text:
+    match s:
+        case WindowState.Hidden:     "Hidden"
+        case WindowState.Normal:     "Normal"
+        case WindowState.Minimized:  "Minimized"
+        case WindowState.Maximized:  "Maximized"
+        case WindowState.Destroyed:  "Destroyed"
+
+fn window_state_from_name(name: text) -> WindowState:
+    if name == "Normal":     return WindowState.Normal
+    if name == "Minimized":  return WindowState.Minimized
+    if name == "Maximized":  return WindowState.Maximized
+    if name == "Destroyed":  return WindowState.Destroyed
+    WindowState.Hidden
+
+fn fs_op_name(op: FsOp) -> text:
+    match op:
+        case FsOp.Open:    "Open"
+        case FsOp.Read:    "Read"
+        case FsOp.Write:   "Write"
+        case FsOp.List:    "List"
+        case FsOp.Exec:    "Exec"
+        case FsOp.Readdir: "Readdir"
+        case FsOp.Stat:    "Stat"
+        case FsOp.Unlink:  "Unlink"

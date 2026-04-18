@@ -1,0 +1,88 @@
+# @cover src/lib/common/llm/output_gate.spl 80%
+# @cover src/lib/nogc_sync_mut/llm/notify.spl 60%
+"""
+# LLM Output Gate Specification
+
+**Feature:** spm-winfs-llm-suite / AC-5
+**Status:** Red (no impl yet)
+
+Clean text → Pass. AWS-key-shape text → Hold. PII (phone/email) → Hold.
+`filter_response_body` on Hold returns redacted bytes and emits notify +
+audit row (via reused audit_log).
+"""
+
+use std.sspec.*
+use lib.common.privilege.id_path.{id_path_intern}
+use lib.common.privilege.principal.{Principal, PrincipalKind}
+use lib.common.privilege.authority_token.{AuthorityToken, AuthorityLevel}
+use lib.common.llm.output_gate.{OutputGate, GateDecision, scan_and_gate, filter_response_body, test_notify_sink_size, test_audit_sink_size}
+
+describe "OutputGate":
+    describe "scan_and_gate":
+        it "AC-5: clean text passes":
+            val gate = OutputGate.default()
+            val principal = Principal(kind: PrincipalKind.Local, id: "alice")
+            val token = AuthorityToken.mock(
+                id_path: id_path_intern("id.user.public"),
+                level: AuthorityLevel.Public,
+                principal: principal)
+            val decision = gate.scan_and_gate("hello world".bytes(), token)
+            expect decision.kind to_equal "Pass"
+
+        it "AC-5: AWS key shape is Hold with non-empty reasons":
+            val gate = OutputGate.default()
+            val principal = Principal(kind: PrincipalKind.Local, id: "alice")
+            val token = AuthorityToken.mock(
+                id_path: id_path_intern("id.user.public"),
+                level: AuthorityLevel.Public,
+                principal: principal)
+            val body = "AKIA1234567890ABCDEF leaked".bytes()
+            val decision = gate.scan_and_gate(body, token)
+            expect decision.kind to_equal "Hold"
+            expect decision.reasons.len() to_be_greater_than 0
+
+        it "AC-5: phone-number PII triggers Hold":
+            val gate = OutputGate.default()
+            val principal = Principal(kind: PrincipalKind.Local, id: "alice")
+            val token = AuthorityToken.mock(
+                id_path: id_path_intern("id.user.public"),
+                level: AuthorityLevel.Public,
+                principal: principal)
+            val decision = gate.scan_and_gate("call me at 415-555-0123".bytes(), token)
+            expect decision.kind to_equal "Hold"
+
+        it "AC-5: email PII triggers Hold":
+            val gate = OutputGate.default()
+            val principal = Principal(kind: PrincipalKind.Local, id: "alice")
+            val token = AuthorityToken.mock(
+                id_path: id_path_intern("id.user.public"),
+                level: AuthorityLevel.Public,
+                principal: principal)
+            val decision = gate.scan_and_gate("contact bob@example.com".bytes(), token)
+            expect decision.kind to_equal "Hold"
+
+    describe "filter_response_body":
+        it "AC-5: Pass returns passthrough bytes":
+            val gate = OutputGate.default()
+            val principal = Principal(kind: PrincipalKind.Local, id: "alice")
+            val token = AuthorityToken.mock(
+                id_path: id_path_intern("id.user.public"),
+                level: AuthorityLevel.Public,
+                principal: principal)
+            val body = "no secrets here".bytes()
+            val out = gate.filter_response_body(body, token)
+            expect out.len() to_equal body.len()
+
+        it "AC-5: Hold returns redacted bytes, emits notify + audit":
+            val gate = OutputGate.default_for_test()
+            val principal = Principal(kind: PrincipalKind.Local, id: "alice")
+            val token = AuthorityToken.mock(
+                id_path: id_path_intern("id.user.public"),
+                level: AuthorityLevel.Public,
+                principal: principal)
+            val body = "AKIA1234567890ABCDEF leaked".bytes()
+            val out = gate.filter_response_body(body, token)
+            val equal = (out.len() == body.len())
+            expect equal to_equal false
+            expect test_notify_sink_size(gate) to_be_greater_than 0
+            expect test_audit_sink_size(gate) to_be_greater_than 0

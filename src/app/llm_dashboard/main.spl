@@ -4,11 +4,12 @@
 # Supports TUI mode (default) and web GUI mode.
 
 use app.llm_dashboard.data.store.{AgentDashboardStore}
-use app.llm_dashboard.tui.app.{run_tui_dashboard}
 use app.web_dashboard.server.{DashboardServer}
 use std.text.{to_int_or}
 use std.cli.cli_util (get_cli_args)
 use app.dashboard.framework_policy.{strip_framework_flags}
+
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
 
 # =========================================================================
 # Entry Point
@@ -66,32 +67,38 @@ fn run_llm_dashboard(args: [text]) -> i64:
     if enable_terminal or enable_tmux:
         mode = "gui"
 
-    # Create store
-    var store = if watch_dir != "":
-        AgentDashboardStore.with_dir(watch_dir)
-    else:
-        AgentDashboardStore.new()
-
     match mode:
         "tui":
-            run_tui_dashboard(store)
-            return 0
+            return run_tui_dashboard_subprocess(clean_args)
         "gui":
-            run_gui_dashboard(store, port)
+            val store = if watch_dir != "":
+                AgentDashboardStore.with_dir(watch_dir)
+            else:
+                AgentDashboardStore.new()
+            run_gui_dashboard(store, port, watch_dir)
             return 0
         _:
-            run_tui_dashboard(store)
-            return 0
+            return run_tui_dashboard_subprocess(clean_args)
 
-fn run_gui_dashboard(store: AgentDashboardStore, port: i32):
+fn run_gui_dashboard(store: AgentDashboardStore, port: i32, watch_dir: text):
     """Start the web-based GUI dashboard.
 
     The server routes /api/tmux/* and /ws/terminal through the
     terminal and tmux panels now living in llm_dashboard.gui.
     """
     val _ = store
-    val server = DashboardServer.new(port)
+    val server = if watch_dir != "":
+        DashboardServer.new_with_agent_dir(port, watch_dir)
+    else:
+        DashboardServer.new(port)
     server.start()
+
+fn run_tui_dashboard_subprocess(args: [text]) -> i64:
+    var cmd_args = ["run", "src/app/llm_dashboard/tui_main.spl"]
+    for arg in args:
+        cmd_args.push(arg)
+    val (_, _, code) = rt_process_run("bin/simple", cmd_args)
+    return code
 
 fn print_agents_help():
     """Print help for the agents subcommand."""

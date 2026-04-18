@@ -1577,6 +1577,20 @@ RuntimeValue rt_madvise(RuntimeValue a, RuntimeValue b, RuntimeValue c) { (void)
 #define VNOP1(n)  void n(RuntimeValue a) { (void)a; }
 #define VNOP2(n)  void n(RuntimeValue a, RuntimeValue b) { (void)a;(void)b; }
 
+/* --- std.sys.args FFI: present-but-empty on SimpleOS until Phase 2 wires
+ * argv through syscall 13. Returning 0 / "" / [] keeps std.sys.args.args()
+ * callable from baremetal code without unresolved-symbol link errors.
+ * Signatures match the Simple-side extern declarations at
+ *   src/compiler_rust/lib/std/src/sys/args.spl:6-8
+ *   rt_args_count() -> i32       (raw i32, not RuntimeValue)
+ *   rt_args_get(i32) -> text     (raw i32 index, heap-tagged text)
+ *   rt_args_all()  -> List<text> (heap-tagged array). */
+extern RuntimeValue rt_array_new(RuntimeValue cap_val);
+extern RuntimeValue rt_string_from_cstr(const char *cstr);
+int32_t       rt_args_count(void)             { return 0; }
+RuntimeValue  rt_args_get(int32_t index)      { (void)index; return rt_string_from_cstr(""); }
+RuntimeValue  rt_args_all(void)               { return rt_array_new((RuntimeValue)0); }
+
 /* --- Host CLI (process management, env, paths) --- */
 NOP1(rt_cli_args)
 NOP1(rt_cli_current_dir)
@@ -1717,9 +1731,27 @@ NOP1(rt_stdin_read)
 NOP2(rt_stdin_read_byte)
 NOP1(rt_stdin_read_char)
 NOP2(rt_stdin_read_line)
-NOP1(rt_stdout_write)
+/* rt_stdout_write / rt_stderr_write — emit Simple-string bytes to the
+ * COM1 serial port. On SimpleOS the UART is the shared stdout/stderr
+ * sink (no tty/pty layer yet); both names route to the same physical
+ * path. This replaces the old NOP1 stubs so std.io.Stdout / std.io.Stderr
+ * and host/sys_simple.rt_stdout_write callers actually produce output. */
+static RuntimeValue rt_serial_write_value(RuntimeValue data) {
+    if (IS_HEAP(data)) {
+        HeapHeader *h = (HeapHeader *)DECODE_PTR(data);
+        if (h && h->type == HEAP_STRING) {
+            RuntimeString *s = (RuntimeString *)h;
+            if (s->len < 0x100000) {
+                for (uint32_t i = 0; i < s->len; i++) serial_putchar(s->data[i]);
+                return ENCODE_INT((int64_t)s->len);
+            }
+        }
+    }
+    return ENCODE_INT(0);
+}
+RuntimeValue rt_stdout_write(RuntimeValue data) { return rt_serial_write_value(data); }
 NOP1(rt_stdout_flush)
-NOP1(rt_stderr_write)
+RuntimeValue rt_stderr_write(RuntimeValue data) { return rt_serial_write_value(data); }
 NOP1(rt_stderr_flush)
 NOP1(rt_terminal_clear)
 NOP3(rt_terminal_set_cursor)

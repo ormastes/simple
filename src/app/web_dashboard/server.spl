@@ -6,15 +6,22 @@
 
 use std.nogc_sync_mut.io.tcp.{TcpListener, TcpStream}
 use app.dashboard.cache.{get_cached_data}
-use tooling.dashboard.trends.{analyze_weekly_trends}
-use tooling.dashboard.alerts.{check_alerts_with_trends}
 use std.json.builder.{escape_json}
-use app.web_dashboard.tmux_api.{handle_tmux_api}
-use app.web_dashboard.terminal_ws.{handle_terminal_ws}
 use app.web_dashboard.dashboard_html.{generate_full_dashboard_html}
+use app.llm_dashboard.web_login.{
+    DashboardAuthSession,
+    auth_ensure_bootstrap,
+    auth_authenticate_form,
+    auth_session_from_headers,
+    auth_delete_session,
+    auth_has_capability,
+    auth_login_page,
+    auth_login_cookie_header,
+    auth_clear_cookie_header,
+    auth_identity_html
+}
 use std.text.{to_int_or}
 use dashboard.views.status.{render_status_html, render_vcs_state_html}
-use std.tmux.{tmux_available, tmux_server_running, tmux_list_sessions}
 use app.llm_dashboard.data.store.{AgentDashboardStore}
 use app.llm_dashboard.gui.html_views.{generate_agents_html}
 use app.llm_dashboard.gui.ws_handler.{handle_agents_ws}
@@ -86,7 +93,7 @@ class DashboardServer:
                 val method = request.0
                 val path = request.1
                 if method == "" or path == "":
-                    val _ = stream.write_all(http_error(400, "Bad Request"))
+                    val _ = stream.write_text(http_error(400, "Bad Request"))
                     val _ = stream.close()
                     return
 
@@ -115,21 +122,36 @@ class DashboardServer:
                         Err(_):
                             pass_dn
 
+                val session = auth_session_from_headers(headers)
+
                 if is_ws and path.starts_with("/ws/agents"):
-                    val store = self.agent_store()
-                    handle_agents_ws(stream, headers, store)
+                    if val active_session = session:
+                        if not auth_has_capability(active_session, "dashboard.agents.view"):
+                            val _ = stream.write_text(http_error(403, "Forbidden"))
+                            val _ = stream.close()
+                            return
+                        val store = self.agent_store()
+                        handle_agents_ws(stream, headers, store)
+                        return
+                    val _ = stream.write_text(http_error(401, "Authentication required"))
+                    val _ = stream.close()
                     return
 
                 if is_ws and path.starts_with("/ws/terminal"):
-                    val query = if path.contains("?"):
-                        path[path.index_of("?") ?? path.len():]
-                    else:
-                        ""
-                    handle_terminal_ws(stream, headers, query)
+                    if val active_session = session:
+                        if not auth_has_capability(active_session, "dashboard.terminal.use"):
+                            val _ = stream.write_text(http_error(403, "Forbidden"))
+                            val _ = stream.close()
+                            return
+                        val _ = stream.write_text(http_error(503, "Terminal websocket is unavailable in this runtime mode"))
+                        val _ = stream.close()
+                        return
+                    val _ = stream.write_text(http_error(401, "Authentication required"))
+                    val _ = stream.close()
                     return
 
-                val response = self.route_request(method, path, body)
-                match stream.write_all(response):
+                val response = self.route_request(method, path, body, headers)
+                match stream.write_text(response):
                     Err(e):
                         print "Error writing response: {e}"
                     Ok(_):
@@ -141,10 +163,34 @@ class DashboardServer:
                     Ok(_):
                         pass_dn
 
-    fn route_request(method: text, path: text, body: text) -> text:
+    fn route_request(method: text, path: text, body: text, headers: text) -> text:
+        val clean_path = _clean_path(path)
+        val session = auth_session_from_headers(headers)
+
+        if clean_path == "/login":
+            return self.handle_login(method, body, session)
+
+        if clean_path == "/logout":
+            return self.handle_logout(session)
+
+        if path.starts_with("/static/"):
+            return self.serve_static(path)
+
+        if session == nil:
+            if clean_path.starts_with("/api/"):
+                return http_error(401, "Authentication required")
+            return http_redirect("/login")
+
+        val required_capability = _required_capability(clean_path)
+        if required_capability != "":
+            if val active_session = session:
+                if not auth_has_capability(active_session, required_capability):
+                    if clean_path.starts_with("/api/"):
+                        return http_error(403, "Forbidden")
+                    return http_response(403, "text/html", "<h1>403 Forbidden</h1>")
+
         if path.starts_with("/api/tmux"):
-            val tmux_result = handle_tmux_api(method, path, body)
-            return http_response(tmux_result.0, tmux_result.1, tmux_result.2)
+            return http_error(503, "Tmux API is unavailable in this runtime mode")
 
         if path.starts_with("/api/tasks"):
             val tasks_result = handle_tasks_api(method, path, body)
@@ -153,13 +199,31 @@ class DashboardServer:
         if path.starts_with("/api/"):
             return self.handle_api(method, path)
 
-        if path == "/agents" or path.starts_with("/agents"):
+        if clean_path == "/agents" or clean_path.starts_with("/agents"):
             return self.serve_agents()
 
-        if path.starts_with("/static/"):
-            return self.serve_static(path)
+        if val active_session = session:
+            return self.serve_index(active_session)
+        http_redirect("/login")
 
-        return self.serve_index()
+    fn handle_login(method: text, body: text, session: DashboardAuthSession?) -> text:
+        if method == "GET":
+            if session != nil:
+                return http_redirect("/")
+            return http_response(200, "text/html", auth_login_page("", ""))
+
+        if method != "POST":
+            return http_error(405, "Method Not Allowed")
+
+        val auth_result = auth_authenticate_form(body)
+        if val auth_session = auth_result.0:
+            return http_redirect_with_headers("/", [auth_login_cookie_header(auth_session)])
+        return http_response(401, "text/html", auth_login_page(auth_result.1, auth_result.2))
+
+    fn handle_logout(session: DashboardAuthSession?) -> text:
+        if val active = session:
+            auth_delete_session(active.session_id)
+        return http_redirect_with_headers("/login", [auth_clear_cookie_header()])
 
     fn handle_api(method: text, path: text) -> text:
         if method != "GET":
@@ -192,7 +256,7 @@ class DashboardServer:
             _:
                 return http_error(404, "Not Found")
 
-    fn serve_index() -> text:
+    fn serve_index(session: DashboardAuthSession) -> text:
         var status_html = ""
         var vcs_html = "--"
         var tmux_card_html = ""
@@ -204,14 +268,7 @@ class DashboardServer:
             Err(_):
                 status_html = "<div class=\"empty-state\">No dashboard data. Run: simple dashboard collect</div>"
 
-        if tmux_available():
-            val running = tmux_server_running()
-            val sessions = tmux_list_sessions()
-            val count = sessions.len()
-            val sub = if running: "sessions active" else: "server stopped"
-            tmux_card_html = "<div class=\"card-grid\" style=\"margin-top:12px\"><div class=\"card\"><h3>Tmux</h3><div class=\"value\">{count}</div><div class=\"sub\">{sub}</div></div></div>"
-
-        val html = generate_full_dashboard_html(self.port, status_html, vcs_html, tmux_card_html)
+        val html = generate_full_dashboard_html(self.port, status_html, vcs_html, tmux_card_html, auth_identity_html(session))
         return http_response(200, "text/html", html)
 
     fn serve_agents() -> text:
@@ -338,51 +395,23 @@ class DashboardServer:
                 return http_error(500, e)
 
     fn api_trends() -> text:
-        match analyze_weekly_trends():
-            Ok(report):
-                var json = "{\n"
-                json = "{json}  \"days\": {report.days},\n"
-                json = "{json}  \"coverage\": {\n"
-                json = "{json}    \"current\": {report.coverage.current},\n"
-                json = "{json}    \"change\": {report.coverage.change_percent},\n"
-                json = "{json}    \"status\": \"{escape_json(report.coverage.status)}\"\n"
-                json = "{json}  },\n"
-                json = "{json}  \"features\": {\n"
-                json = "{json}    \"current\": {report.features.current},\n"
-                json = "{json}    \"change\": {report.features.change_percent},\n"
-                json = "{json}    \"status\": \"{escape_json(report.features.status)}\"\n"
-                json = "{json}  }\n"
-                json = "{json}}"
-                return http_response(200, "application/json", json)
-            Err(e):
-                return http_error(500, e)
+        var json = "{\n"
+        json = "{json}  \"days\": 0,\n"
+        json = "{json}  \"coverage\": {\n"
+        json = "{json}    \"current\": 0.0,\n"
+        json = "{json}    \"change\": 0.0,\n"
+        json = "{json}    \"status\": \"unavailable\"\n"
+        json = "{json}  },\n"
+        json = "{json}  \"features\": {\n"
+        json = "{json}    \"current\": 0.0,\n"
+        json = "{json}    \"change\": 0.0,\n"
+        json = "{json}    \"status\": \"unavailable\"\n"
+        json = "{json}  }\n"
+        json = "{json}}"
+        return http_response(200, "application/json", json)
 
     fn api_alerts() -> text:
-        match get_cached_data():
-            Ok(data):
-                match analyze_weekly_trends():
-                    Ok(trends):
-                        val alerts = check_alerts_with_trends(data, trends)
-                        var parts: [text] = []
-                        parts.push("[\n")
-                        var i = 0
-                        while i < alerts.len():
-                            val a = alerts[i]
-                            parts.push("  {\n")
-                            parts.push("    \"level\": \"{escape_json(a.level)}\",\n")
-                            parts.push("    \"metric\": \"{escape_json(a.metric)}\",\n")
-                            parts.push("    \"message\": \"{escape_json(a.message)}\"\n")
-                            parts.push("  }")
-                            if i < alerts.len() - 1:
-                                parts.push(",")
-                            parts.push("\n")
-                            i = i + 1
-                        parts.push("]")
-                        return http_response(200, "application/json", parts.join(""))
-                    Err(_):
-                        return http_response(200, "application/json", "[]")
-            Err(e):
-                return http_error(500, e)
+        return http_response(200, "application/json", "[]")
 
     fn api_vcs() -> text:
         match get_cached_data():
@@ -425,23 +454,60 @@ class DashboardServer:
 # =========================================================================
 
 fn http_response(status: i32, content_type: text, body: text) -> text:
+    return http_response_with_headers(status, content_type, body, [])
+
+fn http_response_with_headers(status: i32, content_type: text, body: text, extra_headers: [text]) -> text:
     val status_text = match status:
         200: "OK"
+        201: "Created"
+        302: "Found"
         400: "Bad Request"
+        401: "Unauthorized"
+        403: "Forbidden"
         404: "Not Found"
         405: "Method Not Allowed"
         500: "Internal Server Error"
+        503: "Service Unavailable"
         _: "Unknown"
 
     var response = "HTTP/1.1 {status} {status_text}\r\n"
     response = "{response}Content-Type: {content_type}\r\n"
     response = "{response}Content-Length: {body.len()}\r\n"
+    for header in extra_headers:
+        response = "{response}{header}\r\n"
     response = "{response}Access-Control-Allow-Origin: *\r\n"
     response = "{response}Connection: close\r\n"
     response = "{response}\r\n"
     response = "{response}{body}"
     return response
 
+fn http_redirect(location: text) -> text:
+    return http_redirect_with_headers(location, [])
+
+fn http_redirect_with_headers(location: text, extra_headers: [text]) -> text:
+    var headers = ["Location: {location}"]
+    for header in extra_headers:
+        headers.push(header)
+    return http_response_with_headers(302, "text/plain", "", headers)
+
 fn http_error(status: i32, message: text) -> text:
     val body = "{\"error\": \"{escape_json(message)}\"}"
     return http_response(status, "application/json", body)
+
+fn _clean_path(path: text) -> text:
+    if path.contains("?"):
+        return path[0:path.index_of("?") ?? path.len()]
+    path
+
+fn _required_capability(clean_path: text) -> text:
+    if clean_path == "/" or clean_path == "":
+        return "dashboard.view"
+    if clean_path == "/agents" or clean_path.starts_with("/agents/"):
+        return "dashboard.agents.view"
+    if clean_path.starts_with("/api/tasks"):
+        return "dashboard.tasks.view"
+    if clean_path.starts_with("/api/tmux"):
+        return "dashboard.tmux.use"
+    if clean_path.starts_with("/api/"):
+        return "dashboard.view"
+    "dashboard.view"

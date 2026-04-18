@@ -1,0 +1,179 @@
+"""
+# RISC-V External Formal Bundle Generator
+
+Generates a first-pass external-formal bundle for the RV32 RTL core.
+This is intentionally narrow: it emits a reproducible harness package that can
+be executed by Yosys/SymbiYosys when the host provides the toolchain, while
+remaining testable on hosts that only need generation and skip-aware probing.
+"""
+
+use hardware.riscv_common.core.riscv_formal.{probe_riscv_external_formal}
+use std.nogc_sync_mut.debug.remote.exec.result_channel.{ResultPacket}
+
+extern fn rt_file_write_text(path: text, content: text) -> bool
+extern fn rt_file_read_text(path: text) -> text
+extern fn rt_file_exists(path: text) -> bool
+extern fn rt_dir_create(path: text, recursive: bool) -> bool
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+
+class RiscvExternalFormalBundle:
+    root_dir: text
+    manifest_path: text
+    harness_path: text
+    sby_path: text
+    top_module: text
+
+fn rv32_external_formal_default_dir() -> text:
+    "/tmp/simple_rv32_external_formal"
+
+fn _bundle_manifest_text(root_dir: text) -> text:
+    "[external_formal]\n" +
+        "arch = \"riscv32\"\n" +
+        "top = \"rv32i_core_external_formal\"\n" +
+        "rtl_dir = \"examples/09_embedded/fpga_riscv/rtl\"\n" +
+        "core = \"examples/09_embedded/fpga_riscv/rtl/rv32i_core.vhd\"\n" +
+        "bundle_dir = \"{root_dir}\"\n" +
+        "proof_style = \"structural\"\n" +
+        "runner = \"sby -f rv32i_core_external.sby\"\n"
+
+fn _rv32_harness_text() -> text:
+    "library ieee;\n" +
+    "use ieee.std_logic_1164.all;\n" +
+    "use ieee.numeric_std.all;\n" +
+    "use work.rv32i_pkg.all;\n\n" +
+    "entity rv32i_core_external_formal is\n" +
+    "    port (\n" +
+    "        clk        : in std_logic;\n" +
+    "        reset_n    : in std_logic;\n" +
+    "        imem_data  : in std_logic_vector(31 downto 0);\n" +
+    "        dmem_rdata : in std_logic_vector(31 downto 0)\n" +
+    "    );\n" +
+    "end entity rv32i_core_external_formal;\n\n" +
+    "architecture formal of rv32i_core_external_formal is\n" +
+    "    signal imem_addr : std_logic_vector(31 downto 0);\n" +
+    "    signal dmem_addr  : std_logic_vector(31 downto 0);\n" +
+    "    signal dmem_wdata : std_logic_vector(31 downto 0);\n" +
+    "    signal dmem_we    : std_logic;\n" +
+    "    signal dmem_re    : std_logic;\n" +
+    "    signal dmem_width : std_logic_vector(1 downto 0);\n" +
+    "    signal halted     : std_logic;\n" +
+    "    signal semi_trigger : std_logic;\n" +
+    "    signal semi_op      : std_logic_vector(31 downto 0);\n" +
+    "    signal semi_param   : std_logic_vector(31 downto 0);\n" +
+    "    signal prev_halted  : std_logic := '0';\n" +
+    "begin\n" +
+    "    u_dut : entity work.rv32i_core\n" +
+    "        generic map (RESET_ADDR => x\"80000000\")\n" +
+    "        port map (\n" +
+    "            clk=>clk, reset_n=>reset_n,\n" +
+    "            imem_addr=>imem_addr, imem_data=>imem_data,\n" +
+    "            dmem_addr=>dmem_addr, dmem_wdata=>dmem_wdata,\n" +
+    "            dmem_rdata=>dmem_rdata, dmem_we=>dmem_we,\n" +
+    "            dmem_re=>dmem_re, dmem_width=>dmem_width,\n" +
+    "            halted=>halted,\n" +
+    "            semi_trigger=>semi_trigger, semi_op=>semi_op, semi_param=>semi_param\n" +
+    "        );\n\n" +
+    "    process(clk)\n" +
+    "    begin\n" +
+    "        if rising_edge(clk) then\n" +
+    "            assert imem_addr(0) = '0'\n" +
+    "                report \"instruction fetch address must stay halfword aligned\" severity failure;\n" +
+    "            if dmem_we = '1' or dmem_re = '1' then\n" +
+    "                if dmem_width = \"01\" then\n" +
+    "                    assert dmem_addr(0) = '0'\n" +
+    "                        report \"halfword memory accesses must stay halfword aligned\" severity failure;\n" +
+    "                elsif dmem_width /= \"00\" then\n" +
+    "                    assert dmem_addr(1 downto 0) = \"00\"\n" +
+    "                        report \"word memory accesses must stay word aligned\" severity failure;\n" +
+    "                end if;\n" +
+    "            end if;\n" +
+    "            assert not (dmem_we = '1' and dmem_re = '1')\n" +
+    "                report \"read and write cannot be active together\" severity failure;\n" +
+    "            if prev_halted = '1' then\n" +
+    "                assert halted = '1'\n" +
+    "                    report \"halted must be sticky once asserted\" severity failure;\n" +
+    "            end if;\n" +
+    "            if semi_trigger = '1' then\n" +
+    "                assert semi_op = SYS_WRITE0 or semi_op = SYS_WRITEC or semi_op = SYS_EXIT\n" +
+    "                    report \"unexpected semihost operation observed\" severity failure;\n" +
+    "            end if;\n" +
+    "            prev_halted <= halted;\n" +
+    "        end if;\n" +
+    "    end process;\n" +
+    "end architecture formal;\n"
+
+fn _rv32_sby_text() -> text:
+    "[options]\n" +
+        "mode prove\n" +
+        "depth 25\n" +
+        "expect pass\n\n" +
+        "[engines]\n" +
+        "smtbmc boolector\n\n" +
+        "[script]\n" +
+        "ghdl --std=08 rv32i_pkg.vhd regfile.vhd alu.vhd decoder.vhd rv32i_core.vhd rv32i_core_external_formal.vhd -e rv32i_core_external_formal\n" +
+        "prep -top rv32i_core_external_formal\n\n" +
+        "[files]\n" +
+        "examples/09_embedded/fpga_riscv/rtl/rv32i_pkg.vhd\n" +
+        "examples/09_embedded/fpga_riscv/rtl/regfile.vhd\n" +
+        "examples/09_embedded/fpga_riscv/rtl/alu.vhd\n" +
+        "examples/09_embedded/fpga_riscv/rtl/decoder.vhd\n" +
+        "examples/09_embedded/fpga_riscv/rtl/rv32i_core.vhd\n" +
+        "rv32i_core_external_formal.vhd\n"
+
+fn generate_rv32_external_formal_bundle(root_dir: text) -> Result<RiscvExternalFormalBundle, text>:
+    if not rt_dir_create(root_dir, true):
+        return Err("failed to create bundle dir: {root_dir}")
+
+    val harness_path = "{root_dir}/rv32i_core_external_formal.vhd"
+    val sby_path = "{root_dir}/rv32i_core_external.sby"
+    val manifest_path = "{root_dir}/bundle_manifest.sdn"
+
+    if not rt_file_write_text(harness_path, _rv32_harness_text()):
+        return Err("failed to write harness: {harness_path}")
+    if not rt_file_write_text(sby_path, _rv32_sby_text()):
+        return Err("failed to write sby file: {sby_path}")
+    if not rt_file_write_text(manifest_path, _bundle_manifest_text(root_dir)):
+        return Err("failed to write manifest: {manifest_path}")
+
+    Ok(RiscvExternalFormalBundle(
+        root_dir: root_dir,
+        manifest_path: manifest_path,
+        harness_path: harness_path,
+        sby_path: sby_path,
+        top_module: "rv32i_core_external_formal"
+    ))
+
+fn read_generated_bundle_file(path: text) -> text:
+    rt_file_read_text(path) ?? ""
+
+fn run_rv32_external_formal(bundle: RiscvExternalFormalBundle) -> Result<text, text>:
+    val report = probe_riscv_external_formal()
+    if not report.is_runnable():
+        return Err(report.detail)
+
+    val (stdout, stderr, code) = rt_process_run("/bin/sh", [
+        "-c",
+        "cd " + bundle.root_dir + " && sby -f " + bundle.sby_path
+    ])
+    if code != 0:
+        return Err("external formal failed: {stderr}{stdout}")
+    Ok(stdout + stderr)
+
+fn run_rv32_external_formal_packet(bundle: RiscvExternalFormalBundle) -> Result<ResultPacket, text>:
+    val report = probe_riscv_external_formal()
+    if not report.is_runnable():
+        return Err(report.detail)
+
+    val (stdout, stderr, code) = rt_process_run("/bin/sh", [
+        "-c",
+        "cd " + bundle.root_dir + " && sby -f " + bundle.sby_path
+    ])
+    val output = stdout + stderr
+    Ok(ResultPacket.from_exit_code("riscv_external_formal", code, output, 0))
+
+export RiscvExternalFormalBundle
+export rv32_external_formal_default_dir
+export generate_rv32_external_formal_bundle
+export read_generated_bundle_file
+export run_rv32_external_formal
+export run_rv32_external_formal_packet

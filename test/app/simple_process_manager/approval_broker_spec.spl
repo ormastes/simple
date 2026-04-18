@@ -1,0 +1,71 @@
+# @cover src/app/simple_process_manager/approval_broker.spl 80%
+"""
+# Approval Broker Specification
+
+**Feature:** spm-winfs-llm-suite / AC-6
+**Status:** Red (no impl yet)
+
+request_approval → SignedAction path; spoofed (unsigned / forged) action is
+rejected by verify_response. Chrome-secret / platform-probe flow documented
+in describe block; spec exercises the SPM-signed path only (simplification).
+"""
+
+use std.sspec.*
+use lib.common.privilege.id_path.{id_path_intern}
+use lib.common.privilege.principal.{Principal, PrincipalKind}
+use lib.common.privilege.authority_token.{AuthorityLevel}
+use app.simple_process_manager.approval_broker.{ApprovalBroker, ApprovalIntent, SignedAction}
+
+describe "Approval Broker":
+    """
+    Approval surface flow: SPM brokers approval. On host, platform-probe prefers
+    polkit / TouchID / Windows Hello, then peercred unix-socket dialog, then
+    chrome-secret HMAC as last resort. This spec covers the SPM-signed path
+    (HMAC); platform-probe is a Phase-5 thin adapter.
+    """
+    describe "request_approval":
+        it "AC-6: approved intent yields SignedAction carrying correct intent":
+            val broker = ApprovalBroker.new_for_test(pending_dir: "/tmp/spm_approval", chrome_secret: "secret".bytes())
+            val principal = Principal(kind: PrincipalKind.Local, id: "alice")
+            val intent = ApprovalIntent(
+                app: "banking",
+                action: "transfer",
+                required: id_path_intern("id.user.banking.act"),
+                level: AuthorityLevel.Sensitive)
+            broker.test_simulate_user_accept(intent)
+            val result = broker.request_approval(intent, principal)
+            expect result.ok to_equal true
+
+    describe "verify_response":
+        it "AC-6: legitimate SPM-signed action verifies":
+            val broker = ApprovalBroker.new_for_test(pending_dir: "/tmp/spm_approval", chrome_secret: "secret".bytes())
+            val principal = Principal(kind: PrincipalKind.Local, id: "alice")
+            val intent = ApprovalIntent(
+                app: "banking",
+                action: "transfer",
+                required: id_path_intern("id.user.banking.act"),
+                level: AuthorityLevel.Sensitive)
+            val signed = broker.test_sign(intent, principal)
+            expect broker.verify_response(signed) to_equal true
+
+        it "AC-6: unsigned action is rejected":
+            val broker = ApprovalBroker.new_for_test(pending_dir: "/tmp/spm_approval", chrome_secret: "secret".bytes())
+            val principal = Principal(kind: PrincipalKind.Local, id: "eve")
+            val intent = ApprovalIntent(
+                app: "banking",
+                action: "transfer",
+                required: id_path_intern("id.user.banking.act"),
+                level: AuthorityLevel.Sensitive)
+            val unsigned = SignedAction(intent: intent, principal: principal, hmac: [].bytes())
+            expect broker.verify_response(unsigned) to_equal false
+
+        it "AC-6: forged hmac is rejected":
+            val broker = ApprovalBroker.new_for_test(pending_dir: "/tmp/spm_approval", chrome_secret: "secret".bytes())
+            val principal = Principal(kind: PrincipalKind.Local, id: "eve")
+            val intent = ApprovalIntent(
+                app: "banking",
+                action: "transfer",
+                required: id_path_intern("id.user.banking.act"),
+                level: AuthorityLevel.Sensitive)
+            val forged = SignedAction(intent: intent, principal: principal, hmac: "wrong_bytes".bytes())
+            expect broker.verify_response(forged) to_equal false

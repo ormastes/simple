@@ -1,0 +1,72 @@
+#![allow(unnamed_duplicate_typed_args)]
+"""Group — named collection of IdPaths with nested expansion.
+
+A `GroupDecl` lists its own IdPath plus its members (which may themselves be
+groups). `group_expand_nested` flattens a group transitively to the set of
+leaf IdPaths, guarding against cycles.
+
+Feature: spm-winfs-llm-suite AC-1. Pure module.
+"""
+
+use lib.common.privilege.id_path.{IdPath, id_path_equals}
+
+class GroupDecl:
+    """One group declaration; members may be users or other group IdPaths."""
+    id_path: IdPath
+    members: [IdPath]
+
+# ---------------------------------------------------------------------------
+# Membership
+# ---------------------------------------------------------------------------
+
+fn group_has_member(g: GroupDecl, candidate: IdPath) -> bool:
+    """True when `candidate` is a direct member of `g`."""
+    for m in g.members:
+        if id_path_equals(m, candidate):
+            return true
+    false
+
+# ---------------------------------------------------------------------------
+# Nested expansion
+# ---------------------------------------------------------------------------
+
+fn _find_group(universe: [GroupDecl], id_path: IdPath) -> i64:
+    """Return index of a group with matching id_path, or -1."""
+    var i = 0
+    val n = universe.len()
+    while i < n:
+        if id_path_equals(universe[i].id_path, id_path):
+            return i
+        i = i + 1
+    -1 as i64
+
+fn _visited_contains(visited: [u32], id: u32) -> bool:
+    for v in visited:
+        if v == id:
+            return true
+    false
+
+fn _leaves_contains(leaves: [IdPath], p: IdPath) -> bool:
+    for l in leaves:
+        if id_path_equals(l, p):
+            return true
+    false
+
+fn _expand_step(g: GroupDecl, universe: [GroupDecl], visited: [u32], leaves: [IdPath]) -> [IdPath]:
+    """Recursive step; `visited` carries intern_ids of groups already expanded."""
+    if _visited_contains(visited, g.id_path.intern_id):
+        return leaves
+    val next_visited = visited + [g.id_path.intern_id]
+    var out = leaves
+    for m in g.members:
+        val idx = _find_group(universe, m)
+        if idx < 0:
+            if not _leaves_contains(out, m):
+                out = out + [m]
+        else:
+            out = _expand_step(universe[idx], universe, next_visited, out)
+    out
+
+fn group_expand_nested(g: GroupDecl, universe: [GroupDecl]) -> [IdPath]:
+    """Return leaf IdPaths reachable from `g` (transitive; cycle-safe)."""
+    _expand_step(g, universe, [], [])

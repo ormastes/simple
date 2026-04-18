@@ -866,6 +866,22 @@ already exactly match I5 — no schema change required.
 
 4. Whether to introduce an auxiliary invariant "`∀ sn ∈ snapshots, ∀ a ∈ sn.pinned, ∃ ar ∈ arenas, ar.id = a`".  This would close the I3/I9 fresh-arena sub-sorries but adds maintenance burden on every snapshot-producing op.
 
+### 9-ship
+
+**Done 2026-04-17.**
+
+- **Parent commit on origin/main before push:** `409a7e194483ade7114644a2d0b10d8eb5f61f05`
+- **Phase 9 commit SHA (pushed as main):** `6a5bc0299eaf` (jj change `tznmnvurqkyu`)
+- **Phase A commit SHA (also pushed):** `eccaa444ee` (jj change `wmoxyuwlwvyv`) — Phase A (driver trait) was local/unpushed and became an ancestor of Phase 9; both shipped together.
+- **Files committed count:** 54 files (all allowlist-only; verified via `jj diff --name-only -r t` before push)
+- **Denylist leak check:** PASS — no `doc/08_tracking/`, `src/os/`, `src/app/dashboard/`, `doc/07_guide/`, `src/app/llm_dashboard/`, or other denylist paths in the Phase 9 commit.
+- **File count guard:** pre-push 70515 → post-push 70516 (net +1, no drop)
+- **Submodule gitlink status:** jj snapshotted `examples/spostgre` and `examples/nvfs` as file trees (mode 100644) rather than gitlinks (160000). Individual files tracked at their tree-content state. Real submodule HEADs live in the submodule repos (spostgre → ce93431, nvfs → 63ebf00e).
+- **Deferred items:**
+  - `doc/04_architecture/mdsoc_architecture_tobe.md` excluded (no Phase-9 xref diff).
+  - Lean 4 proof closure: 6 remaining `sorry`s (4 in `arena_seal/append/discard/clone_range_preserves_all`, 2 inner sub-sorries in `arena_create_preserves_all` for I3/I9 fresh-arena branch). See section 9.5b for detail.
+  - I8 enforcement in `pmap_publish` / `arena_clone_range` — design decision pending (tighten op or reformulate I8 as post-compaction invariant).
+
 5. Whether the current `walStrictlyIncreasing` definition (pairwise
    strict on a 2-element recursion) is the right shape — the
    inductive helper proved here works, but a `List.Pairwise (· < ·)`

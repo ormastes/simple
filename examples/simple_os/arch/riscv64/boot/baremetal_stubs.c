@@ -2065,10 +2065,22 @@ TRAP_STUB_RET(rt_process_spawn, 1)
 TRAP_STUB_RET(rt_process_kill, 1)
 TRAP_STUB_RET(rt_process_wait, 1)
 TRAP_STUB_RET(rt_process_pid, 0)
-TRAP_STUB_RET(rt_cli_get_args, 1)
-TRAP_STUB_RET(rt_cli_args, 0)
-TRAP_STUB_RET(rt_exit_code, 0)
-TRAP_STUB_RET(rt_exit, 1)
+/* rt_cli_get_args / rt_cli_args: aliased to args stubs below */
+int32_t      rt_args_count(void)              { return 0; }
+RuntimeValue rt_args_get(int32_t index)       { (void)index; return rt_string_from_cstr(""); }
+RuntimeValue rt_args_all(void)                { return rt_array_new((RuntimeValue)0); }
+RuntimeValue rt_cli_get_args(RuntimeValue _a) { (void)_a; return rt_array_new((RuntimeValue)0); }
+RuntimeValue rt_cli_args(void)                { return rt_array_new((RuntimeValue)0); }
+RuntimeValue rt_exit_code(void)               { return ENCODE_INT(0); }
+/* rt_exit: noreturn — print exit marker then halt via wfi loop */
+__attribute__((noreturn)) void rt_exit(int32_t code)
+{
+    serial_puts("[exit] rt_exit(");
+    serial_put_dec((int64_t)code);
+    serial_puts(") -- halting\r\n");
+    __asm__ volatile("csrci mstatus, 0x8"); /* disable machine interrupts */
+    for (;;) { __asm__ volatile("wfi"); }
+}
 TRAP_STUB_RET(rt_env_get, 1)
 TRAP_STUB_RET(rt_env_set, 2)
 TRAP_STUB_RET(rt_env_all, 0)
@@ -2078,6 +2090,28 @@ RuntimeValue rt_cli_print(RuntimeValue v) { rt_print(v); return NIL_VALUE; }
 RuntimeValue rt_cli_println(RuntimeValue v) { rt_print(v); serial_puts("\r\n"); return NIL_VALUE; }
 RuntimeValue rt_cli_eprint(RuntimeValue v) { rt_print(v); return NIL_VALUE; }
 RuntimeValue rt_cli_eprintln(RuntimeValue v) { rt_print(v); serial_puts("\r\n"); return NIL_VALUE; }
+
+/* rt_stdout_write / rt_stderr_write — decode SimpleOS RuntimeString and
+ * emit each byte to the 16550 UART. Both stdout and stderr share the
+ * serial sink (no tty layer yet). Replaces a missing stub so
+ * std.io.Stdout / std.io.Stderr produce real output on riscv64. */
+static RuntimeValue rt_serial_write_value(RuntimeValue data) {
+    if (IS_HEAP(data)) {
+        HeapHeader *h = (HeapHeader *)DECODE_PTR(data);
+        if (h && h->type == HEAP_STRING) {
+            RuntimeString *s = (RuntimeString *)h;
+            if (s->len < 0x100000) {
+                for (uint32_t i = 0; i < s->len; i++) serial_putchar(s->data[i]);
+                return ENCODE_INT((int64_t)s->len);
+            }
+        }
+    }
+    return ENCODE_INT(0);
+}
+RuntimeValue rt_stdout_write(RuntimeValue data) { return rt_serial_write_value(data); }
+RuntimeValue rt_stdout_flush(RuntimeValue _a)   { (void)_a; return ENCODE_INT(0); }
+RuntimeValue rt_stderr_write(RuntimeValue data) { return rt_serial_write_value(data); }
+RuntimeValue rt_stderr_flush(RuntimeValue _a)   { (void)_a; return ENCODE_INT(0); }
 RuntimeValue rt_eprint_str(RuntimeValue v) { rt_print(v); return NIL_VALUE; }
 RuntimeValue rt_eprint_value(RuntimeValue v) { rt_print(v); return NIL_VALUE; }
 RuntimeValue rt_eprintln_str(RuntimeValue v) { rt_print(v); serial_puts("\r\n"); return NIL_VALUE; }

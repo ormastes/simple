@@ -40,6 +40,7 @@ User-facing guides for the Simple programming language. For specifications see `
 | [tooling/lsp_dap.md](tooling/lsp_dap.md) | LSP + DAP setup (VSCode, Neovim) |
 | [tooling/mcp.md](tooling/mcp.md) | MCP server setup and usage |
 | [tooling/ui_access.md](tooling/ui_access.md) | Canonical UI snapshot, act, and history workflow |
+| [tooling/llm_dashboard_web_login.md](tooling/llm_dashboard_web_login.md) | Web login, bootstrap admin credentials, and auth-session storage for `llm_dashboard` |
 | [tooling/treesitter.md](tooling/treesitter.md) | Tree-sitter integration |
 | [tooling/dashboard.md](tooling/dashboard.md) | Dashboard CLI, CI/CD |
 | [tooling/duplicate_check.md](tooling/duplicate_check.md) | Code duplication detection |

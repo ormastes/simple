@@ -1,0 +1,318 @@
+#![allow(unnamed_duplicate_typed_args)]
+"""OutputGate — pre-release filter for LLM-produced bytes.
+
+Pure module (`src/lib/common/`): scans a candidate response body for
+secret-shaped byte runs, prompt-leak canaries, and PII. Returns a
+`GateDecision` and/or a redacted `FilteredBody`.
+
+The Phase 3 plan said we would call `SecretScanner` from
+`src/app/tools/secret_scan.spl` directly. That scanner's API operates
+on `text` line-by-line, and the bootstrap `text`/`[u8]` boundary in
+pure common does not expose a bytes->text helper (only `text.bytes()`
+is available). To stay in `src/lib/common/` without pulling in a
+runtime extern, we do the scan over `[u8]` here with a small pattern
+table that mirrors `secret_scan.default_patterns()`. Phase 3 §A and
+§B are corrected accordingly in the state file.
+
+To satisfy the spec's `test_notify_sink_size` / `test_audit_sink_size`
+observers, the gate keeps in-memory sink counters that the
+`nogc_sync_mut/llm/notify` adapter drains to real delivery. This keeps
+`common/` pure while still letting the spec observe that a Hold would
+fire a notify + audit row. `GateDecision` is a class with a `kind: text`
+field (not an enum) — matches `decision.kind to_equal "..."` assertions
+in the spec.
+
+Feature: spm-winfs-llm-suite AC-5.
+"""
+
+use lib.common.privilege.authority_token.{AuthorityToken, AuthorityLevel, authority_level_name, is_revoked}
+
+# ---------------------------------------------------------------------------
+# Decisions
+# ---------------------------------------------------------------------------
+
+class GateDecision:
+    """Outcome of a scan. `kind` ∈ {"Pass", "Hold", "Deny"}."""
+    kind: text
+    reasons: [text]
+
+    static fn pass() -> GateDecision:
+        GateDecision(kind: "Pass", reasons: [])
+
+    static fn hold(reasons: [text]) -> GateDecision:
+        GateDecision(kind: "Hold", reasons: reasons)
+
+    static fn deny(reasons: [text]) -> GateDecision:
+        GateDecision(kind: "Deny", reasons: reasons)
+
+class FilteredBody:
+    """Result of `filter_response_body`: redacted bytes + decision."""
+    bytes: [u8]
+    decision: GateDecision
+    redactions: [text]
+
+# ---------------------------------------------------------------------------
+# Pattern table (byte-level shape checks; mirrors secret_scan intent)
+# ---------------------------------------------------------------------------
+
+class _BytePattern:
+    """Shape: `prefix` followed by at least `min_alnum` alphanumerics."""
+    name: text
+    prefix: [u8]
+    min_alnum: i64
+
+fn _default_patterns() -> [_BytePattern]:
+    [
+        _BytePattern(name: "aws_access_key",    prefix: "AKIA".bytes(),    min_alnum: 16 as i64),
+        _BytePattern(name: "github_token_ghp",  prefix: "ghp_".bytes(),    min_alnum: 36 as i64),
+        _BytePattern(name: "github_token_gho",  prefix: "gho_".bytes(),    min_alnum: 36 as i64),
+        _BytePattern(name: "github_token_ghs",  prefix: "ghs_".bytes(),    min_alnum: 36 as i64),
+        _BytePattern(name: "github_token_ghr",  prefix: "ghr_".bytes(),    min_alnum: 36 as i64),
+        _BytePattern(name: "anthropic_key",     prefix: "sk-ant-".bytes(), min_alnum: 20 as i64),
+        _BytePattern(name: "google_api_key",    prefix: "AIza".bytes(),    min_alnum: 35 as i64),
+        _BytePattern(name: "slack_token_xoxb",  prefix: "xoxb-".bytes(),   min_alnum: 10 as i64),
+        _BytePattern(name: "slack_token_xoxp",  prefix: "xoxp-".bytes(),   min_alnum: 10 as i64),
+        _BytePattern(name: "stripe_secret_key", prefix: "sk_live_".bytes(), min_alnum: 20 as i64),
+        _BytePattern(name: "private_key_pem",   prefix: "-----BEGIN ".bytes(), min_alnum: 0 as i64),
+    ]
+
+# ---------------------------------------------------------------------------
+# Gate
+# ---------------------------------------------------------------------------
+
+class OutputGate:
+    """Pre-release scanner with in-memory notify/audit counters.
+
+    `test_mode` flips the sink fields into observable counters so specs
+    can assert that a Hold would have fired notify + audit.
+    """
+    patterns: [_BytePattern]
+    canary: [u8]
+    test_mode: bool
+    var notify_sink_count: i64
+    var audit_sink_count: i64
+    var notify_sink_reasons: [text]
+
+    static fn default() -> OutputGate:
+        OutputGate(
+            patterns: _default_patterns(),
+            canary: "ZZZ-SPM-CANARY-1".bytes(),
+            test_mode: false,
+            notify_sink_count: 0 as i64,
+            audit_sink_count: 0 as i64,
+            notify_sink_reasons: [])
+
+    static fn default_for_test() -> OutputGate:
+        """Same as `default()` with test_mode on so sink counters move."""
+        OutputGate(
+            patterns: _default_patterns(),
+            canary: "ZZZ-SPM-CANARY-1".bytes(),
+            test_mode: true,
+            notify_sink_count: 0 as i64,
+            audit_sink_count: 0 as i64,
+            notify_sink_reasons: [])
+
+    # scan_and_gate --------------------------------------------------------
+    me scan_and_gate(body: [u8], token: AuthorityToken) -> GateDecision:
+        """Pure scan. Never touches sinks. Returns Deny / Hold / Pass."""
+        if is_revoked(token):
+            return GateDecision.deny(["token_trust_revoked"])
+        val reasons = _collect_reasons(self, body)
+        if reasons.len() == 0 as i64:
+            return GateDecision.pass()
+        GateDecision.hold(reasons)
+
+    # filter_response_body -------------------------------------------------
+    me filter_response_body(body: [u8], token: AuthorityToken) -> FilteredBody:
+        """Apply the gate. On Hold/Deny, return redacted bytes and (when
+        `test_mode`) bump in-memory notify + audit counters. Real delivery
+        is performed by `lib.nogc_sync_mut.llm.notify.notify_user`, which
+        drains these counters.
+        """
+        val decision = self.scan_and_gate(body, token)
+        match decision.kind:
+            "Pass":
+                FilteredBody(bytes: body, decision: decision, redactions: [])
+            _:
+                if self.test_mode:
+                    self.notify_sink_count = self.notify_sink_count + (1 as i64)
+                    self.audit_sink_count  = self.audit_sink_count + (1 as i64)
+                    for r in decision.reasons:
+                        self.notify_sink_reasons = self.notify_sink_reasons + [r]
+                val redacted = _redact_bytes()
+                FilteredBody(
+                    bytes: redacted,
+                    decision: decision,
+                    redactions: decision.reasons)
+
+# ---------------------------------------------------------------------------
+# Module-level convenience wrappers for spec-style `scan_and_gate(gate, …)`
+# ---------------------------------------------------------------------------
+
+fn scan_and_gate(gate: OutputGate, body: [u8], token: AuthorityToken) -> GateDecision:
+    gate.scan_and_gate(body, token)
+
+fn filter_response_body(gate: OutputGate, body: [u8], token: AuthorityToken) -> FilteredBody:
+    gate.filter_response_body(body, token)
+
+# ---------------------------------------------------------------------------
+# Test observer helpers (read back in-memory counters)
+# ---------------------------------------------------------------------------
+
+fn test_notify_sink_size(gate: OutputGate) -> i64:
+    gate.notify_sink_count
+
+fn test_audit_sink_size(gate: OutputGate) -> i64:
+    gate.audit_sink_count
+
+fn test_notify_sink_reasons(gate: OutputGate) -> [text]:
+    gate.notify_sink_reasons
+
+# ---------------------------------------------------------------------------
+# Internal — byte-level scanning
+# ---------------------------------------------------------------------------
+
+fn _collect_reasons(gate: OutputGate, body: [u8]) -> [text]:
+    var reasons: [text] = []
+
+    for pat in gate.patterns:
+        if _contains_pattern(body, pat):
+            reasons = _push_unique(reasons, pat.name)
+
+    if _contains_sequence(body, gate.canary):
+        reasons = _push_unique(reasons, "canary_leak")
+
+    if _has_email(body):
+        reasons = _push_unique(reasons, "email_address")
+    if _has_phone(body):
+        reasons = _push_unique(reasons, "phone_number")
+
+    reasons
+
+fn _contains_pattern(body: [u8], pat: _BytePattern) -> bool:
+    """True when `body` contains `pat.prefix` followed by `pat.min_alnum`
+    alphanumeric bytes."""
+    val plen = pat.prefix.len()
+    val blen = body.len()
+    if plen == 0 as i64:
+        return false
+    var i = 0 as i64
+    while i + plen <= blen:
+        if _matches_at(body, pat.prefix, i):
+            if pat.min_alnum <= 0 as i64:
+                return true
+            val tail_start = i + plen
+            if _alnum_run(body, tail_start) >= pat.min_alnum:
+                return true
+        i = i + (1 as i64)
+    false
+
+fn _contains_sequence(body: [u8], needle: [u8]) -> bool:
+    val plen = needle.len()
+    if plen == 0 as i64:
+        return false
+    val blen = body.len()
+    var i = 0 as i64
+    while i + plen <= blen:
+        if _matches_at(body, needle, i):
+            return true
+        i = i + (1 as i64)
+    false
+
+fn _matches_at(body: [u8], needle: [u8], offset: i64) -> bool:
+    val plen = needle.len()
+    var j = 0 as i64
+    while j < plen:
+        if body[offset + j] != needle[j]:
+            return false
+        j = j + (1 as i64)
+    true
+
+fn _alnum_run(body: [u8], start: i64) -> i64:
+    val n = body.len()
+    var i = start
+    var run = 0 as i64
+    while i < n:
+        if _is_alnum_byte(body[i]):
+            run = run + (1 as i64)
+        else:
+            return run
+        i = i + (1 as i64)
+    run
+
+fn _push_unique(xs: [text], v: text) -> [text]:
+    for x in xs:
+        if x == v:
+            return xs
+    xs + [v]
+
+fn _redact_bytes() -> [u8]:
+    """Replace the body with a fixed redacted marker; exact bytes of the
+    original are dropped to avoid leaking on the wire."""
+    "[REDACTED-BY-OUTPUT-GATE]".bytes()
+
+# --- PII detectors (byte-level, conservative) ---
+
+fn _has_email(body: [u8]) -> bool:
+    val n = body.len()
+    var i = 0 as i64
+    while i < n:
+        if body[i] == (64 as u8):  # '@'
+            if i > 0 as i64 and _is_alnum_byte(body[i - (1 as i64)]):
+                val after = _scan_domain(body, i + (1 as i64))
+                if after:
+                    return true
+        i = i + (1 as i64)
+    false
+
+fn _scan_domain(body: [u8], start: i64) -> bool:
+    """Past the '@', require: alnum+ '.' alnum+ — total host length >= 3."""
+    val n = body.len()
+    var i = start
+    var host_alnum_before_dot = 0 as i64
+    while i < n and _is_alnum_byte(body[i]):
+        host_alnum_before_dot = host_alnum_before_dot + (1 as i64)
+        i = i + (1 as i64)
+    if host_alnum_before_dot == 0 as i64:
+        return false
+    if i >= n or body[i] != (46 as u8):  # '.'
+        return false
+    i = i + (1 as i64)
+    var tld = 0 as i64
+    while i < n and _is_alnum_byte(body[i]):
+        tld = tld + (1 as i64)
+        i = i + (1 as i64)
+    tld >= 2 as i64
+
+fn _has_phone(body: [u8]) -> bool:
+    """True when `body` has a run of 10+ digits (allowing standard
+    separators '-', '.', ' ', '(', ')', '+')."""
+    val n = body.len()
+    var i = 0 as i64
+    var run = 0 as i64
+    while i < n:
+        val b = body[i]
+        if _is_digit_byte(b):
+            run = run + (1 as i64)
+            if run >= 10 as i64:
+                return true
+        elif _is_phone_sep(b):
+            # separators do not advance the run but do not reset it
+            i = i + (1 as i64)
+            continue
+        else:
+            run = 0 as i64
+        i = i + (1 as i64)
+    false
+
+fn _is_digit_byte(b: u8) -> bool:
+    b >= (48 as u8) and b <= (57 as u8)
+
+fn _is_alpha_byte(b: u8) -> bool:
+    (b >= (65 as u8) and b <= (90 as u8)) or (b >= (97 as u8) and b <= (122 as u8))
+
+fn _is_alnum_byte(b: u8) -> bool:
+    _is_digit_byte(b) or _is_alpha_byte(b)
+
+fn _is_phone_sep(b: u8) -> bool:
+    b == (32 as u8) or b == (45 as u8) or b == (46 as u8) or b == (40 as u8) or b == (41 as u8) or b == (43 as u8)

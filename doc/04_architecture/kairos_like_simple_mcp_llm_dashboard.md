@@ -49,6 +49,7 @@ Owns:
 - task tree panels
 - failure/blocker/notification views
 - replay/import mode from persisted records
+- web login surface and operator session handling for dashboard access
 
 Primary inputs:
 
@@ -154,6 +155,20 @@ Fields:
 2. Dashboard reconstructs session, event, task, and digest views.
 3. No live actions are available unless the bridge and assistant core are attached.
 
+### Web Login / PBP Bootstrap Flow
+
+1. Operator configures `SIMPLE_LLM_DASHBOARD_ADMIN_USER`.
+2. Operator configures `SIMPLE_LLM_DASHBOARD_ADMIN_PASSWORD`.
+3. Dashboard web login accepts the bootstrap admin credential to establish an operator session.
+4. Auth session state is stored under `.build/llm_dashboard/auth`.
+5. After bootstrap login, the operator proceeds into the dashboard UI and the broader PBP flow.
+
+Operational notes:
+
+- The bootstrap admin credential is environment-driven and should be rotated by changing the environment and restarting the dashboard process.
+- `.build/llm_dashboard/auth` is runtime state, not a source-controlled artifact.
+- Removing `.build/llm_dashboard/auth` invalidates active dashboard web sessions.
+
 ## Spawn-Agent Architecture
 
 ### Parent/Child Contract
@@ -257,6 +272,12 @@ This feature is a cross-cutting tooling capsule rather than a language/runtime f
 - bridge/adapter modules between them
 
 Do not smear assistant logic into dashboard render modules or generic MCP protocol helpers.
+
+## Operator Guidance
+
+Concise operator setup for the web login and PBP bootstrap path lives in:
+
+- [LLM Dashboard Web Login Guide](../07_guide/tooling/llm_dashboard_web_login.md)
 
 ## Key Risks
 

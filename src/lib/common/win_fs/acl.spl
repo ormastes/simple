@@ -1,0 +1,38 @@
+#![allow(unnamed_duplicate_typed_args)]
+"""Win-FS ACL — deny/allow policy for a WindowRecord + AuthorityToken.
+
+Pure policy: no store lookup, no IPC. The record carries its own
+`acl_id_path`; the token carries the caller's granted IdPath. We prefix-match
+them and then cross-check the authority ladder per operation.
+
+Feature: spm-winfs-llm-suite AC-2 / AC-4.
+"""
+
+use lib.common.privilege.id_path.{id_path_prefix_match}
+use lib.common.privilege.authority_token.{AuthorityToken, AuthorityLevel, TrustSource, authority_level_rank, is_revoked}
+use lib.common.win_fs.window_record.{WindowRecord, FsOp}
+
+fn acl_check(rec: WindowRecord, token: AuthorityToken, op: FsOp) -> bool:
+    """Return true when `token` may perform `op` on `rec`."""
+    if is_revoked(token):
+        return false
+    if not id_path_prefix_match(token.id_path, rec.acl_id_path):
+        return false
+    _op_level_ok(token.level, op)
+
+fn _op_level_ok(level: AuthorityLevel, op: FsOp) -> bool:
+    """Authority-ladder check per operation.
+
+    Open/Read/Readdir/Stat require >= Public (any non-revoked level).
+    Write/Unlink require >= Internal. Exec requires >= Sensitive.
+    """
+    val rank = authority_level_rank(level)
+    match op:
+        case FsOp.Open:    rank >= 0
+        case FsOp.Read:    rank >= 0
+        case FsOp.List:    rank >= 0
+        case FsOp.Readdir: rank >= 0
+        case FsOp.Stat:    rank >= 0
+        case FsOp.Write:   rank >= 1
+        case FsOp.Unlink:  rank >= 1
+        case FsOp.Exec:    rank >= 2

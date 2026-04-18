@@ -1,0 +1,386 @@
+#![allow(unnamed_duplicate_typed_args)]
+"""PrivilegeStore — in-memory table of tokens and group declarations.
+
+Pure module: holds tokens + groups, supports mint / lookup / revoke /
+expand_groups, and has a plain-text SDN encoder/decoder. FS I/O lives in
+`src/lib/nogc_sync_mut/privilege/store_fs.spl`.
+
+The spec (`test/lib/common/privilege/store_spec.spl`) uses mutating methods
+(`me revoke`, `me add_group`, `me mint`) so we follow that shape here. The
+Phase 3 architecture note claimed "pure returns new store" — this is the
+first correction Phase 5 records against Phase 3.
+
+Feature: spm-winfs-llm-suite AC-1.
+"""
+
+use lib.common.privilege.id_path.{IdPath, IdPathResult, id_path_intern, id_path_to_text, id_path_equals, id_path_subdivide, id_path_prefix_match}
+use lib.common.privilege.principal.{Principal, PrincipalKind}
+use lib.common.privilege.authority_token.{AuthorityToken, AuthorityLevel, TrustSource, Scope, authority_token_sig_equals, authority_level_name, authority_level_from_name, trust_source_name, trust_source_from_name}
+use lib.common.privilege.group.{GroupDecl, group_expand_nested}
+
+# ---------------------------------------------------------------------------
+# Result / Option shims used by the spec (`.ok`, `.value`, `.present`)
+# ---------------------------------------------------------------------------
+
+class MintResult:
+    """{ok, value, error}. Spec reads `.ok` and `.value.issuer_sig`."""
+    ok: bool
+    value: AuthorityToken
+    error: text
+
+class LookupResult:
+    """{present, value}. Spec reads `.present`."""
+    present: bool
+    value: AuthorityToken
+
+class DecodeResult:
+    """{ok, value, error}. Spec reads `.ok` and `.value.tokens`."""
+    ok: bool
+    value: PrivilegeStore
+    error: text
+
+# ---------------------------------------------------------------------------
+# Store
+# ---------------------------------------------------------------------------
+
+class PrivilegeStore:
+    """In-memory registry of minted tokens plus known group declarations."""
+    tokens: [AuthorityToken]
+    groups: [GroupDecl]
+
+    static fn new() -> PrivilegeStore:
+        PrivilegeStore(tokens: [], groups: [])
+
+    # ---- queries ----
+
+    fn lookup(principal: Principal, id_path: IdPath) -> LookupResult:
+        """Find a non-revoked token for `principal` whose IdPath prefix-matches."""
+        for t in self.tokens:
+            if t.principal.id == principal.id:
+                if id_path_prefix_match(t.id_path, id_path):
+                    return LookupResult(present: true, value: t)
+        LookupResult(present: false, value: AuthorityToken.public())
+
+    fn find_by_sig(sig: [u8]) -> LookupResult:
+        """Lookup helper used by the revocation path."""
+        for t in self.tokens:
+            if authority_token_sig_equals(t.issuer_sig, sig):
+                return LookupResult(present: true, value: t)
+        LookupResult(present: false, value: AuthorityToken.public())
+
+    # ---- mutations ----
+
+    me mint(parent: AuthorityToken, child: IdPath, level: AuthorityLevel) -> MintResult:
+        """Mint a child token from `parent`.
+
+        The child IdPath must extend the parent's IdPath (prefix match).
+        `level` cannot exceed the parent's level.
+        """
+        if not id_path_prefix_match(parent.id_path, child):
+            return MintResult(
+                ok: false,
+                value: AuthorityToken.public(),
+                error: "child id_path does not extend parent")
+        val token = AuthorityToken(
+            id_path: child,
+            level: level,
+            principal: parent.principal,
+            trust_source: parent.trust_source,
+            scope: parent.scope,
+            issuer_sig: _derive_sig(parent.issuer_sig, id_path_to_text(child)))
+        self.tokens = self.tokens + [token]
+        MintResult(ok: true, value: token, error: "")
+
+    me revoke(token_sig: [u8]) -> bool:
+        """Drop the token with matching issuer_sig. Returns true if removed."""
+        var kept: [AuthorityToken] = []
+        var found = false
+        for t in self.tokens:
+            if authority_token_sig_equals(t.issuer_sig, token_sig):
+                found = true
+            else:
+                kept = kept + [t]
+        self.tokens = kept
+        found
+
+    me add_group(decl: GroupDecl) -> ():
+        """Register a group declaration for later expansion."""
+        self.groups = self.groups + [decl]
+        ()
+
+    # ---- group expansion ----
+
+    fn expand_groups(id_path: IdPath) -> [IdPath]:
+        """If `id_path` refers to a group, return its expanded leaf members.
+
+        Returns an empty list when no matching group is registered.
+        """
+        for g in self.groups:
+            if id_path_equals(g.id_path, id_path):
+                return group_expand_nested(g, self.groups)
+        []
+
+# ---------------------------------------------------------------------------
+# Signature derivation (deterministic, non-crypto — wave 5a bootstrap)
+# ---------------------------------------------------------------------------
+
+fn _derive_sig(parent_sig: [u8], child_text: text) -> [u8]:
+    var out = parent_sig + [(0x7c) as u8]
+    val bytes = child_text.bytes()
+    var i = 0
+    val n = bytes.len()
+    while i < n:
+        out = out + [bytes[i]]
+        i = i + 1
+    out
+
+fn _sig_to_hex(sig: [u8]) -> text:
+    val hex_digits = "0123456789abcdef"
+    var out = ""
+    var i = 0
+    val n = sig.len()
+    while i < n:
+        val b = sig[i] as i64
+        val hi = (b / 16) as i64
+        val lo = (b % 16) as i64
+        out = out + hex_digits[hi:hi + 1] + hex_digits[lo:lo + 1]
+        i = i + 1
+    out
+
+fn _hex_to_sig(hex: text) -> [u8]:
+    var out: [u8] = []
+    val n = hex.len()
+    var i = 0
+    while i + 1 < n:
+        val hi = _hex_digit_value(hex[i:i + 1])
+        val lo = _hex_digit_value(hex[i + 1:i + 2])
+        out = out + [((hi * 16) + lo) as u8]
+        i = i + 2
+    out
+
+fn _hex_digit_value(ch: text) -> i64:
+    if ch == "0": return 0 as i64
+    if ch == "1": return 1 as i64
+    if ch == "2": return 2 as i64
+    if ch == "3": return 3 as i64
+    if ch == "4": return 4 as i64
+    if ch == "5": return 5 as i64
+    if ch == "6": return 6 as i64
+    if ch == "7": return 7 as i64
+    if ch == "8": return 8 as i64
+    if ch == "9": return 9 as i64
+    if ch == "a" or ch == "A": return 10 as i64
+    if ch == "b" or ch == "B": return 11 as i64
+    if ch == "c" or ch == "C": return 12 as i64
+    if ch == "d" or ch == "D": return 13 as i64
+    if ch == "e" or ch == "E": return 14 as i64
+    if ch == "f" or ch == "F": return 15 as i64
+    0 as i64
+
+fn _principal_kind_name(k: PrincipalKind) -> text:
+    match k:
+        case PrincipalKind.Local:  "Local"
+        case PrincipalKind.Remote: "Remote"
+
+fn _principal_kind_from_name(name: text) -> PrincipalKind:
+    if name == "Remote":
+        return PrincipalKind.Remote
+    PrincipalKind.Local
+
+# ---------------------------------------------------------------------------
+# SDN encode / decode (plain-text, stable)
+# ---------------------------------------------------------------------------
+#
+# Format (indent = 2 spaces):
+#
+#   # Simple Privilege Store
+#   tokens:
+#     -
+#       id_path: id.user.banking.view
+#       level: Sensitive
+#       principal_kind: Local
+#       principal_id: alice
+#       trust_source: RegistryTrusted
+#       ttl_ms: 0
+#       once: false
+#       bound_wid: 0
+#       issuer_sig: 69647c69642e75736572...
+#
+#   groups:
+#     -
+#       id_path: id.group.dev
+#       members:
+#         - id.user.claude
+#         - id.user.codex
+
+fn privilege_store_encode(store: PrivilegeStore) -> text:
+    var out = "# Simple Privilege Store\n"
+    if store.tokens.len() > 0:
+        out = out + "tokens:\n"
+        for t in store.tokens:
+            out = out + "  -\n"
+            out = out + "    id_path: " + id_path_to_text(t.id_path) + "\n"
+            out = out + "    level: " + authority_level_name(t.level) + "\n"
+            out = out + "    principal_kind: " + _principal_kind_name(t.principal.kind) + "\n"
+            out = out + "    principal_id: " + t.principal.id + "\n"
+            out = out + "    trust_source: " + trust_source_name(t.trust_source) + "\n"
+            out = out + "    ttl_ms: {t.scope.ttl_ms}\n"
+            if t.scope.once:
+                out = out + "    once: true\n"
+            else:
+                out = out + "    once: false\n"
+            out = out + "    bound_wid: {t.scope.bound_wid}\n"
+            out = out + "    issuer_sig: " + _sig_to_hex(t.issuer_sig) + "\n"
+    if store.groups.len() > 0:
+        out = out + "groups:\n"
+        for g in store.groups:
+            out = out + "  -\n"
+            out = out + "    id_path: " + id_path_to_text(g.id_path) + "\n"
+            if g.members.len() > 0:
+                out = out + "    members:\n"
+                for m in g.members:
+                    out = out + "      - " + id_path_to_text(m) + "\n"
+    out
+
+# ----- decode -----
+
+class _TokenBuf:
+    id_path: text
+    level: text
+    principal_kind: text
+    principal_id: text
+    trust_source: text
+    ttl_ms: u64
+    once: bool
+    bound_wid: u64
+    issuer_sig_hex: text
+
+class _GroupBuf:
+    id_path: text
+    members: [text]
+
+fn _buf_to_token(b: _TokenBuf) -> AuthorityToken:
+    AuthorityToken(
+        id_path: id_path_intern(b.id_path),
+        level: authority_level_from_name(b.level),
+        principal: Principal(kind: _principal_kind_from_name(b.principal_kind), id: b.principal_id),
+        trust_source: trust_source_from_name(b.trust_source),
+        scope: Scope(ttl_ms: b.ttl_ms, once: b.once, bound_wid: b.bound_wid),
+        issuer_sig: _hex_to_sig(b.issuer_sig_hex))
+
+fn _buf_to_group(g: _GroupBuf) -> GroupDecl:
+    var members: [IdPath] = []
+    for m in g.members:
+        members = members + [id_path_intern(m)]
+    GroupDecl(id_path: id_path_intern(g.id_path), members: members)
+
+fn _parse_u64(s: text) -> u64:
+    if s == "":
+        return 0 as u64
+    var i = 0
+    val n = s.len()
+    var acc: u64 = 0 as u64
+    while i < n:
+        val ch = s[i:i + 1]
+        val d = _hex_digit_value(ch)
+        acc = (acc * (10 as u64)) + (d as u64)
+        i = i + 1
+    acc
+
+fn privilege_store_decode(source: text) -> DecodeResult:
+    var tokens: [AuthorityToken] = []
+    var groups: [GroupDecl] = []
+    var section = ""
+    var in_token = false
+    var in_group = false
+    var in_members = false
+    var tbuf = _TokenBuf(
+        id_path: "", level: "Public",
+        principal_kind: "Local", principal_id: "",
+        trust_source: "Untrusted",
+        ttl_ms: 0 as u64, once: false, bound_wid: 0 as u64,
+        issuer_sig_hex: "")
+    var gbuf = _GroupBuf(id_path: "", members: [])
+
+    val lines = source.split("\n")
+    for raw in lines:
+        val trimmed = raw.trim()
+        if trimmed == "" or trimmed.starts_with("#"):
+            continue
+        if trimmed == "tokens:":
+            if in_token:
+                tokens = tokens + [_buf_to_token(tbuf)]
+                in_token = false
+            if in_group:
+                groups = groups + [_buf_to_group(gbuf)]
+                in_group = false
+            section = "tokens"
+            in_members = false
+            continue
+        if trimmed == "groups:":
+            if in_token:
+                tokens = tokens + [_buf_to_token(tbuf)]
+                in_token = false
+            if in_group:
+                groups = groups + [_buf_to_group(gbuf)]
+                in_group = false
+            section = "groups"
+            in_members = false
+            continue
+        if trimmed == "-":
+            if section == "tokens":
+                if in_token:
+                    tokens = tokens + [_buf_to_token(tbuf)]
+                tbuf = _TokenBuf(
+                    id_path: "", level: "Public",
+                    principal_kind: "Local", principal_id: "",
+                    trust_source: "Untrusted",
+                    ttl_ms: 0 as u64, once: false, bound_wid: 0 as u64,
+                    issuer_sig_hex: "")
+                in_token = true
+            elif section == "groups":
+                if in_group:
+                    groups = groups + [_buf_to_group(gbuf)]
+                gbuf = _GroupBuf(id_path: "", members: [])
+                in_group = true
+                in_members = false
+            continue
+        if section == "tokens" and in_token:
+            val cp = trimmed.find(":")
+            if cp < 0:
+                continue
+            val key = trimmed[0:cp].trim()
+            val after = trimmed[cp + 1:].trim()
+            if key == "id_path":           tbuf.id_path = after
+            elif key == "level":           tbuf.level = after
+            elif key == "principal_kind":  tbuf.principal_kind = after
+            elif key == "principal_id":    tbuf.principal_id = after
+            elif key == "trust_source":    tbuf.trust_source = after
+            elif key == "ttl_ms":          tbuf.ttl_ms = _parse_u64(after)
+            elif key == "once":            tbuf.once = (after == "true")
+            elif key == "bound_wid":       tbuf.bound_wid = _parse_u64(after)
+            elif key == "issuer_sig":      tbuf.issuer_sig_hex = after
+            continue
+        if section == "groups" and in_group:
+            if trimmed.starts_with("- "):
+                if in_members:
+                    gbuf.members = gbuf.members + [trimmed[2:].trim()]
+                continue
+            val cp = trimmed.find(":")
+            if cp < 0:
+                continue
+            val key = trimmed[0:cp].trim()
+            val after = trimmed[cp + 1:].trim()
+            if key == "id_path":
+                gbuf.id_path = after
+                in_members = false
+            elif key == "members":
+                in_members = true
+    if in_token:
+        tokens = tokens + [_buf_to_token(tbuf)]
+    if in_group:
+        groups = groups + [_buf_to_group(gbuf)]
+    DecodeResult(
+        ok: true,
+        value: PrivilegeStore(tokens: tokens, groups: groups),
+        error: "")

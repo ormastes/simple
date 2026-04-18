@@ -1,0 +1,115 @@
+# Driver loader — parses `.drv_manifest` section bytes and produces a
+# DriverManifest. Pure-byte decoding, so the same function works whether
+# the section was mmap'd from disk or embedded in a kernel image.
+#
+# The companion SMF reader (in `src/compiler/70.backend/linker/lib_smf.spl`)
+# will gain a `.drv_manifest` section kind; this file decodes those bytes.
+#
+# Binary layout — kept in one place, defined in manifest.spl. This file
+# only reads; writing is the compiler's job.
+
+use std.driver.error.{DriverError}
+use std.driver.manifest.{DriverManifest, ManifestKind,
+                         DRVS_MAGIC, DRVS_ABI_REV, DRVS_HEADER_BYTES,
+                         DRVS_NAME_LEN, DRVS_VERSION_LEN}
+use std.driver.registry.{DriverRegistry, DriverOps}
+use std.driver.types.{DriverClass}
+
+# Decode the first manifest record in `bytes`, starting at `offset`.
+# Returns the manifest and the byte-offset of the record end.
+fn decode_manifest(bytes: [u8], offset: i32) -> Result<DriverManifest, DriverError>:
+    if (bytes.len() as i32) - offset < DRVS_HEADER_BYTES:
+        return Result.Err(DriverError.BadConfig)
+
+    val magic: i32 = read_u32_le(bytes, offset + 0)
+    if magic != DRVS_MAGIC:
+        return Result.Err(DriverError.BadConfig)
+
+    val kind_raw: i32 = bytes[offset + 4] as i32
+    val class_raw: i32 = bytes[offset + 5] as i32
+    val abi_rev:   i32 = read_u16_le(bytes, offset + 6)
+    if abi_rev != DRVS_ABI_REV:
+        return Result.Err(DriverError.AbiMismatch)
+
+    val vendor:        i32 = read_u32_le(bytes, offset + 8)
+    val device_count:  i32 = read_u32_le(bytes, offset + 12)
+
+    val version: text = read_ascii(bytes, offset + 16, DRVS_VERSION_LEN)
+    val name:    text = read_ascii(bytes, offset + 32, DRVS_NAME_LEN)
+
+    var ids: [i32] = []
+    var i: i32 = 0
+    while i < device_count:
+        val id: i32 = read_u32_le(bytes, offset + DRVS_HEADER_BYTES + i * 8 + 4)
+        ids.append(id)
+        i = i + 1
+
+    val kind: ManifestKind = kind_from_byte(kind_raw)
+    val cls:  DriverClass  = class_from_byte(class_raw)
+
+    if kind == ManifestKind.Driver:
+        return Result.Ok(DriverManifest.for_driver(name, version, cls, vendor, ids))
+    return Result.Ok(DriverManifest.for_native_lib(name, version))
+
+# Register an already-loaded module with the given registry. The caller
+# supplies the `DriverOps` record — the loader cannot synthesize it
+# because the function-pointer targets live in the loaded module's
+# image. In static mode the driver itself calls `register_static_driver`
+# in its init; in dynamic mode this helper is invoked by the SMF loader
+# after resolving the entry-point symbols.
+fn register_loaded(reg: DriverRegistry, manifest: DriverManifest,
+                   ops: DriverOps) -> Result<i32, DriverError>:
+    return reg.register(ops, manifest)
+
+# --- Little-endian byte helpers (kept local; std has no bulk LE reader) ---
+
+fn read_u16_le(buf: [u8], at: i32) -> i32:
+    val lo: i32 = buf[at]     as i32
+    val hi: i32 = buf[at + 1] as i32
+    return lo | (hi << 8)
+
+fn read_u32_le(buf: [u8], at: i32) -> i32:
+    val b0: i32 = buf[at]     as i32
+    val b1: i32 = buf[at + 1] as i32
+    val b2: i32 = buf[at + 2] as i32
+    val b3: i32 = buf[at + 3] as i32
+    return b0 | (b1 << 8) | (b2 << 16) | (b3 << 24)
+
+fn read_ascii(buf: [u8], at: i32, max_len: i32) -> text:
+    # Stop at first NUL. Pure Simple, no stdlib text-builder dependency
+    # because the loader path may run before std text helpers are set up.
+    var end: i32 = at
+    var limit: i32 = at + max_len
+    while end < limit:
+        if buf[end] == 0:
+            break
+        end = end + 1
+    return text_from_utf8_slice(buf, at, end - at)
+
+# Must be provided by the lower-level text module; declared here so the
+# loader compiles before std.text is re-exported into baremetal mode.
+extern fn text_from_utf8_slice(buf: [u8], at: i32, len: i32) -> text
+
+fn kind_from_byte(b: i32) -> ManifestKind:
+    match b:
+        0 -> return ManifestKind.Driver
+        _ -> return ManifestKind.NativeLib
+
+fn class_from_byte(b: i32) -> DriverClass:
+    match b:
+        0  -> return DriverClass.Block
+        1  -> return DriverClass.Char
+        2  -> return DriverClass.Net
+        3  -> return DriverClass.Input
+        4  -> return DriverClass.Display
+        5  -> return DriverClass.Storage
+        6  -> return DriverClass.Bus
+        7  -> return DriverClass.Fs
+        8  -> return DriverClass.Gpu
+        9  -> return DriverClass.Audio
+        10 -> return DriverClass.Sensor
+        11 -> return DriverClass.Timer
+        12 -> return DriverClass.Irq
+        13 -> return DriverClass.Power
+        14 -> return DriverClass.Virt
+        _  -> return DriverClass.Misc

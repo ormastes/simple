@@ -1,0 +1,374 @@
+"""
+# RISC-V Shared Formal Contract
+
+Provides a small shared architectural contract used by both the RV32 RTL/VHDL
+lane and the RV64 execution/QEMU lane. This is intentionally narrower than a
+full ISA proof: it checks retire-step width/alignment rules plus trap/return
+privilege transitions using one common model.
+"""
+
+use std.io_runtime.{shell}
+use compiler.backend.vhdl_constraints.{VhdlConstraint, VhdlConstraintChecker__create}
+use compiler.common.diagnostics.span.{Span}
+use hardware.riscv_common.core.riscv_compressed.{is_compressed}
+
+val RISCV_FORMAL_STEP: i64 = 0
+val RISCV_FORMAL_TRAP: i64 = 1
+val RISCV_FORMAL_RETURN: i64 = 2
+
+val RISCV_PRIV_USER: i64 = 0
+val RISCV_PRIV_SUPERVISOR: i64 = 1
+val RISCV_PRIV_MACHINE: i64 = 2
+
+val RISCV_ECALL_INSTR: i64 = 0x00000073
+val RV64_PROOF_ENTRY: i64 = 0x400000
+val RV64_DEBUG_WRITE_ECALL_PC: i64 = RV64_PROOF_ENTRY + 8
+val RV64_DEBUG_WRITE_RESUME_PC: i64 = RV64_PROOF_ENTRY + 12
+val RV64_CAUSE_ECALL_FROM_U: i64 = 8
+
+class RiscvFormalContract:
+    lane: text
+    xlen: i64
+    allow_compressed: bool
+    trap_vector_alignment: i64
+
+    static fn rv32_ghdl() -> RiscvFormalContract:
+        RiscvFormalContract(
+            lane: "rv32-ghdl",
+            xlen: 32,
+            allow_compressed: true,
+            trap_vector_alignment: 4
+        )
+
+    static fn rv64_qemu() -> RiscvFormalContract:
+        RiscvFormalContract(
+            lane: "rv64-qemu",
+            xlen: 64,
+            allow_compressed: true,
+            trap_vector_alignment: 4
+        )
+
+class RiscvRetireEvent:
+    kind: i64
+    pc_before: i64
+    pc_after: i64
+    instr_bits: i64
+    instr_size: i64
+    rd_index: i64
+    rd_value: i64
+    x0_value: i64
+    privilege_before: i64
+    privilege_after: i64
+    trap_cause: i64
+    mem_write_width_bits: i64
+
+    static fn step(pc_before: i64, pc_after: i64, instr_bits: i64, rd_index: i64, rd_value: i64, x0_value: i64, privilege: i64) -> RiscvRetireEvent:
+        RiscvRetireEvent(
+            kind: RISCV_FORMAL_STEP,
+            pc_before: pc_before,
+            pc_after: pc_after,
+            instr_bits: instr_bits,
+            instr_size: 0,
+            rd_index: rd_index,
+            rd_value: rd_value,
+            x0_value: x0_value,
+            privilege_before: privilege,
+            privilege_after: privilege,
+            trap_cause: 0,
+            mem_write_width_bits: 0
+        )
+
+    static fn trap(pc_before: i64, trap_pc: i64, instr_bits: i64, privilege_before: i64, privilege_after: i64, trap_cause: i64) -> RiscvRetireEvent:
+        RiscvRetireEvent(
+            kind: RISCV_FORMAL_TRAP,
+            pc_before: pc_before,
+            pc_after: trap_pc,
+            instr_bits: instr_bits,
+            instr_size: 0,
+            rd_index: -1,
+            rd_value: 0,
+            x0_value: 0,
+            privilege_before: privilege_before,
+            privilege_after: privilege_after,
+            trap_cause: trap_cause,
+            mem_write_width_bits: 0
+        )
+
+    static fn return_transfer(pc_before: i64, resume_pc: i64, privilege_before: i64, privilege_after: i64) -> RiscvRetireEvent:
+        RiscvRetireEvent(
+            kind: RISCV_FORMAL_RETURN,
+            pc_before: pc_before,
+            pc_after: resume_pc,
+            instr_bits: 0,
+            instr_size: 4,
+            rd_index: -1,
+            rd_value: 0,
+            x0_value: 0,
+            privilege_before: privilege_before,
+            privilege_after: privilege_after,
+            trap_cause: 0,
+            mem_write_width_bits: 0
+        )
+
+class RiscvExternalFormalReport:
+    yosys: bool
+    sby: bool
+    solver: bool
+    ghdl: bool
+    yosys_ghdl_plugin: bool
+    detail: text
+
+    fn is_runnable() -> bool:
+        self.yosys and self.sby and self.solver and self.ghdl and self.yosys_ghdl_plugin
+
+fn _tool_exists(tool: text) -> bool:
+    shell("command -v {tool} >/dev/null 2>&1").exit_code == 0
+
+fn _yosys_ghdl_plugin_available(has_yosys: bool) -> bool:
+    if not has_yosys:
+        false
+    else:
+        shell("yosys -m ghdl -p 'help' >/dev/null 2>&1").exit_code == 0
+
+fn probe_riscv_external_formal() -> RiscvExternalFormalReport:
+    val yosys = _tool_exists("yosys")
+    val sby = _tool_exists("sby") or _tool_exists("symbiyosys")
+    val solver = _tool_exists("boolector") or _tool_exists("z3") or _tool_exists("cvc5")
+    val ghdl = _tool_exists("ghdl")
+    val yosys_ghdl_plugin = _yosys_ghdl_plugin_available(yosys)
+    var missing: [text] = []
+    if not yosys:
+        missing.push("yosys")
+    if not sby:
+        missing.push("sby|symbiyosys")
+    if not solver:
+        missing.push("solver(boolector|z3|cvc5)")
+    if not ghdl:
+        missing.push("ghdl")
+    if not yosys_ghdl_plugin:
+        missing.push("yosys-ghdl-plugin")
+    val detail = if missing.len() == 0:
+        "external formal toolchain available: yosys, sby|symbiyosys, solver(boolector|z3|cvc5), ghdl, yosys-ghdl-plugin"
+    else:
+        "missing external formal tools: {missing.join(', ')}"
+    RiscvExternalFormalReport(
+        yosys: yosys,
+        sby: sby,
+        solver: solver,
+        ghdl: ghdl,
+        yosys_ghdl_plugin: yosys_ghdl_plugin,
+        detail: detail
+    )
+
+fn riscv_mask_for_xlen(xlen: i64) -> i64:
+    if xlen == 32:
+        0xFFFFFFFF
+    else:
+        0xFFFFFFFFFFFFFFFF
+
+fn riscv_instruction_size(instr_bits: i64, allow_compressed: bool) -> i64:
+    if allow_compressed and is_compressed(instr_bits):
+        2
+    else:
+        4
+
+fn _fits_xlen(value: i64, xlen: i64) -> bool:
+    if xlen == 64:
+        true
+    else:
+        (value & riscv_mask_for_xlen(xlen)) == value
+
+fn _is_pc_aligned(pc: i64, size: i64) -> bool:
+    if size <= 0:
+        false
+    else:
+        (pc % size) == 0
+
+fn verify_riscv_event(contract: RiscvFormalContract, event: RiscvRetireEvent) -> Result<text, text>:
+    if contract.xlen != 32 and contract.xlen != 64:
+        return Err("[{contract.lane}] unsupported xlen {contract.xlen}")
+    if event.x0_value != 0:
+        return Err("[{contract.lane}] x0 must remain zero")
+    if event.mem_write_width_bits < 0:
+        return Err("[{contract.lane}] memory width cannot be negative")
+    if event.mem_write_width_bits > contract.xlen:
+        return Err("[{contract.lane}] memory width {event.mem_write_width_bits} exceeds xlen {contract.xlen}")
+
+    if event.kind == RISCV_FORMAL_STEP:
+        val expected = riscv_instruction_size(event.instr_bits, contract.allow_compressed)
+        if event.instr_size != 0 and event.instr_size != expected:
+            return Err("[{contract.lane}] step reported size {event.instr_size}, expected {expected}")
+        if not _is_pc_aligned(event.pc_before, expected):
+            return Err("[{contract.lane}] step pc_before 0x{event.pc_before} is not aligned to {expected}")
+        if event.pc_after != event.pc_before + expected:
+            return Err("[{contract.lane}] step pc_after 0x{event.pc_after} must equal pc_before + {expected}")
+        if event.privilege_before != event.privilege_after:
+            return Err("[{contract.lane}] retire step cannot change privilege")
+        if event.rd_index == 0 and event.rd_value != 0:
+            return Err("[{contract.lane}] rd=x0 must retire value 0")
+        if event.rd_index >= 0 and not _fits_xlen(event.rd_value, contract.xlen):
+            return Err("[{contract.lane}] retired value 0x{event.rd_value} exceeds xlen {contract.xlen}")
+        return Ok("[{contract.lane}] retire-step verified")
+
+    if event.kind == RISCV_FORMAL_TRAP:
+        val expected = riscv_instruction_size(event.instr_bits, contract.allow_compressed)
+        if event.instr_size != 0 and event.instr_size != expected:
+            return Err("[{contract.lane}] trap reported size {event.instr_size}, expected {expected}")
+        if event.trap_cause < 0:
+            return Err("[{contract.lane}] trap cause must be non-negative")
+        if event.privilege_after <= event.privilege_before:
+            return Err("[{contract.lane}] trap must raise privilege")
+        if not _is_pc_aligned(event.pc_after, contract.trap_vector_alignment):
+            return Err("[{contract.lane}] trap vector pc 0x{event.pc_after} is not aligned")
+        return Ok("[{contract.lane}] trap transfer verified")
+
+    if event.kind == RISCV_FORMAL_RETURN:
+        if event.privilege_after >= event.privilege_before:
+            return Err("[{contract.lane}] return must lower privilege")
+        if not _is_pc_aligned(event.pc_after, 2):
+            return Err("[{contract.lane}] return pc 0x{event.pc_after} is not instruction aligned")
+        return Ok("[{contract.lane}] return transfer verified")
+
+    Err("[{contract.lane}] unknown event kind {event.kind}")
+
+fn verify_riscv_events(contract: RiscvFormalContract, events: [RiscvRetireEvent]) -> Result<text, text>:
+    var checked = 0
+    for event in events:
+        val result = verify_riscv_event(contract, event)
+        if result.is_err():
+            return result
+        checked = checked + 1
+    Ok("[{contract.lane}] verified {checked} formal events")
+
+fn _dummy_span() -> Span:
+    Span(start: 0, end_pos: 0, line: 1, col: 1)
+
+fn rv32_default_vhdl_checker():
+    var checker = VhdlConstraintChecker__create()
+    val span = _dummy_span()
+    checker.add_constraint(VhdlConstraint.WidthEqual(
+        signal1: "pc",
+        signal2: "next_pc",
+        width1: 32,
+        width2: 32,
+        span: span
+    ))
+    checker.add_constraint(VhdlConstraint.WidthSafe(
+        operands: [32, 2],
+        operator: "+",
+        result_width: 33,
+        span: span
+    ))
+    checker.add_constraint(VhdlConstraint.SensitivityComplete(
+        process_label: "rv32_retire_commit",
+        used_signals: ["clk", "commit_valid", "pc"],
+        sensitivity: ["clk", "commit_valid", "pc"],
+        span: span
+    ))
+    checker.add_constraint(VhdlConstraint.NoCombLoop(
+        signals: ["pc", "next_pc", "commit_valid"],
+        dependencies: [("pc", "next_pc"), ("commit_valid", "next_pc")],
+        span: span
+    ))
+    checker.add_constraint(VhdlConstraint.NoLatchInference(
+        process_label: "rv32_retire_commit",
+        assigned_signals: ["next_pc"],
+        branch_coverage: [("next_pc", true)],
+        span: span
+    ))
+    checker.add_constraint(VhdlConstraint.LoopBounded(
+        bound_expr: "proof_steps",
+        max_iterations: 32,
+        span: span
+    ))
+    checker.add_constraint(VhdlConstraint.SingleDriver(
+        signal: "commit_result",
+        drivers: ["rv32_retire_commit"],
+        span: span
+    ))
+    checker
+
+fn verify_rv32_default_vhdl_constraints() -> Result<text, text>:
+    var checker = rv32_default_vhdl_checker()
+    val result = checker.check_all()
+    if result.is_err():
+        return Err(result.unwrap_err()[0].message)
+    Ok("rv32 default VHDL formal constraints verified")
+
+fn verify_rv32_ghdl_return_zero_contract(code_start: i64, exit_code: i64) -> Result<text, text>:
+    if exit_code != 0:
+        return Err("[rv32-ghdl] simulation exit code must be 0, got {exit_code}")
+    val event = RiscvRetireEvent.step(
+        pc_before: code_start,
+        pc_after: code_start + 4,
+        instr_bits: 0x00000513,
+        rd_index: 10,
+        rd_value: 0,
+        x0_value: 0,
+        privilege: RISCV_PRIV_MACHINE
+    )
+    verify_riscv_events(RiscvFormalContract.rv32_ghdl(), [event])
+
+fn verify_rv64_qemu_user_proof_contract(output: text) -> Result<text, text>:
+    val required = [
+        "trap vector installed",
+        "trap runtime installed",
+        "spawned user task",
+        "entering U-mode",
+        "P",
+        "boot complete"
+    ]
+    for marker in required:
+        if not output.contains(marker):
+            return Err("[rv64-qemu] missing proof marker: {marker}")
+
+    val events = [
+        RiscvRetireEvent.step(
+            pc_before: RV64_PROOF_ENTRY + 4,
+            pc_after: RV64_DEBUG_WRITE_ECALL_PC,
+            instr_bits: 0x05000513,
+            rd_index: 10,
+            rd_value: 0x50,
+            x0_value: 0,
+            privilege: RISCV_PRIV_USER
+        ),
+        RiscvRetireEvent.trap(
+            pc_before: RV64_DEBUG_WRITE_ECALL_PC,
+            trap_pc: 0x80200000,
+            instr_bits: RISCV_ECALL_INSTR,
+            privilege_before: RISCV_PRIV_USER,
+            privilege_after: RISCV_PRIV_SUPERVISOR,
+            trap_cause: RV64_CAUSE_ECALL_FROM_U
+        ),
+        RiscvRetireEvent.return_transfer(
+            pc_before: 0x80200000,
+            resume_pc: RV64_DEBUG_WRITE_RESUME_PC,
+            privilege_before: RISCV_PRIV_SUPERVISOR,
+            privilege_after: RISCV_PRIV_USER
+        )
+    ]
+    verify_riscv_events(RiscvFormalContract.rv64_qemu(), events)
+
+export RiscvFormalContract
+export RiscvRetireEvent
+export RiscvExternalFormalReport
+export RISCV_FORMAL_STEP
+export RISCV_FORMAL_TRAP
+export RISCV_FORMAL_RETURN
+export RISCV_PRIV_USER
+export RISCV_PRIV_SUPERVISOR
+export RISCV_PRIV_MACHINE
+export RISCV_ECALL_INSTR
+export RV64_PROOF_ENTRY
+export RV64_DEBUG_WRITE_ECALL_PC
+export RV64_DEBUG_WRITE_RESUME_PC
+export RV64_CAUSE_ECALL_FROM_U
+export probe_riscv_external_formal
+export riscv_mask_for_xlen
+export riscv_instruction_size
+export verify_riscv_event
+export verify_riscv_events
+export rv32_default_vhdl_checker
+export verify_rv32_default_vhdl_constraints
+export verify_rv32_ghdl_return_zero_contract
+export verify_rv64_qemu_user_proof_contract

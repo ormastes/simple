@@ -1,0 +1,75 @@
+# @cover src/lib/common/privilege/store.spl 80%
+# @cover src/lib/nogc_sync_mut/privilege/store_fs.spl 70%
+"""
+# PrivilegeStore Specification
+
+**Feature:** spm-winfs-llm-suite / AC-1
+**Status:** Red (no impl yet)
+
+Covers lookup/mint/revoke round-trip, group expansion, and SDN save/load
+round-trip via `store_fs` (see Phase 3 interfaces).
+"""
+
+use std.sspec.*
+use lib.common.privilege.id_path.{IdPath, id_path_intern}
+use lib.common.privilege.principal.{Principal, PrincipalKind}
+use lib.common.privilege.authority_token.{AuthorityToken, AuthorityLevel, Scope, TrustSource}
+use lib.common.privilege.store.{PrivilegeStore, privilege_store_decode, privilege_store_encode}
+use lib.common.privilege.group.{GroupDecl}
+use lib.nogc_sync_mut.privilege.store_fs.{load_sdn, save_sdn}
+
+describe "PrivilegeStore":
+    describe "lookup / mint / revoke":
+        it "AC-1: mint returns a token that lookup then finds":
+            val store = PrivilegeStore.new()
+            val principal = Principal(kind: PrincipalKind.Local, id: "alice")
+            val parent = AuthorityToken.root_for(principal)
+            val child_path = id_path_intern("id.user.banking.view")
+            val minted = store.mint(parent, child_path, AuthorityLevel.Sensitive)
+            expect minted.ok to_equal true
+            val found = store.lookup(principal, child_path)
+            expect found.present to_equal true
+
+        it "AC-1: revoke removes the token from subsequent lookup":
+            val store = PrivilegeStore.new()
+            val principal = Principal(kind: PrincipalKind.Local, id: "alice")
+            val parent = AuthorityToken.root_for(principal)
+            val path = id_path_intern("id.user.banking.view")
+            val minted = store.mint(parent, path, AuthorityLevel.Sensitive)
+            store.revoke(minted.value.issuer_sig)
+            val found = store.lookup(principal, path)
+            expect found.present to_equal false
+
+    describe "expand_groups":
+        it "AC-1: id.group.dev expands to member id_paths":
+            val store = PrivilegeStore.new()
+            val claude = id_path_intern("id.user.claude")
+            val codex = id_path_intern("id.user.codex")
+            val dev = id_path_intern("id.group.dev")
+            store.add_group(GroupDecl(id_path: dev, members: [claude, codex]))
+            val expanded = store.expand_groups(dev)
+            expect expanded to_contain claude
+            expect expanded to_contain codex
+
+    describe "SDN round-trip":
+        it "AC-1: encode then decode yields equal store":
+            val store = PrivilegeStore.new()
+            val principal = Principal(kind: PrincipalKind.Local, id: "alice")
+            val parent = AuthorityToken.root_for(principal)
+            store.mint(parent, id_path_intern("id.user.banking.view"), AuthorityLevel.Sensitive)
+            val text = privilege_store_encode(store)
+            val decoded = privilege_store_decode(text)
+            expect decoded.ok to_equal true
+            expect decoded.value.tokens.len() to_equal store.tokens.len()
+
+        it "AC-1: store_fs.save_sdn / load_sdn round-trip via filesystem":
+            val store = PrivilegeStore.new()
+            val principal = Principal(kind: PrincipalKind.Local, id: "alice")
+            val parent = AuthorityToken.root_for(principal)
+            store.mint(parent, id_path_intern("id.user.mail.read"), AuthorityLevel.Internal)
+            val tmp = "/tmp/spm_winfs_privstore_spec.sdn"
+            val save_result = save_sdn(store, tmp)
+            expect save_result.ok to_equal true
+            val loaded = load_sdn(tmp)
+            expect loaded.ok to_equal true
+            expect loaded.value.tokens.len() to_equal 1

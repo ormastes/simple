@@ -1,0 +1,122 @@
+#![allow(unnamed_duplicate_typed_args)]
+"""IdPath — hierarchical privilege identifiers.
+
+Dotted path (e.g. `id.user.banking.view`) split into ordered segments with
+a deduplicating intern table. Prefix match is the authorisation primitive:
+a grant `id.user.banking` satisfies any required path that extends it.
+
+Feature: spm-winfs-llm-suite AC-1. Pure module — no FS I/O, no syscalls.
+"""
+
+# ---------------------------------------------------------------------------
+# Data
+# ---------------------------------------------------------------------------
+
+class IdPath:
+    """A validated, interned hierarchical identifier."""
+    segments: [text]
+    intern_id: u32
+
+class IdPathResult:
+    """Sized result for IdPath operations (avoids Result<> at test boundary)."""
+    ok: bool
+    value: IdPath
+    error: text
+
+# ---------------------------------------------------------------------------
+# Intern table (module-scoped, stable across calls)
+# ---------------------------------------------------------------------------
+
+# Parallel arrays serve as the intern table; index == intern_id - 1.
+var _intern_strings: [text] = []
+
+fn _intern_lookup_or_insert(s: text) -> u32:
+    var i = 0
+    val count = _intern_strings.len()
+    while i < count:
+        if _intern_strings[i] == s:
+            return (i + 1) as u32
+        i = i + 1
+    _intern_strings = _intern_strings + [s]
+    (_intern_strings.len()) as u32
+
+# ---------------------------------------------------------------------------
+# Segment helpers
+# ---------------------------------------------------------------------------
+
+fn _split_segments(s: text) -> [text]:
+    if s == "":
+        return []
+    s.split(".")
+
+fn _join_segments(segments: [text]) -> text:
+    var out = ""
+    var i = 0
+    val count = segments.len()
+    while i < count:
+        if i > 0:
+            out = out + "."
+        out = out + segments[i]
+        i = i + 1
+    out
+
+fn _is_valid_child_segment(seg: text) -> bool:
+    if seg == "":
+        return false
+    if seg.contains("."):
+        return false
+    true
+
+# ---------------------------------------------------------------------------
+# Public API
+# ---------------------------------------------------------------------------
+
+fn id_path_intern(s: text) -> IdPath:
+    """Return a canonical IdPath for the dotted string `s`.
+
+    Equal strings always return records whose `intern_id` is identical.
+    """
+    val canonical = _join_segments(_split_segments(s))
+    val id = _intern_lookup_or_insert(canonical)
+    IdPath(segments: _split_segments(canonical), intern_id: id)
+
+fn id_path_prefix_match(granted: IdPath, required: IdPath) -> bool:
+    """True when `granted` is a prefix of `required` (segment-level)."""
+    val g = granted.segments
+    val r = required.segments
+    val gl = g.len()
+    val rl = r.len()
+    if gl > rl:
+        return false
+    var i = 0
+    while i < gl:
+        if g[i] != r[i]:
+            return false
+        i = i + 1
+    true
+
+fn id_path_subdivide(parent: IdPath, child: text) -> IdPathResult:
+    """Mint a child IdPath under `parent` by appending `child` segment.
+
+    `child` must be a single non-empty segment (no embedded dots).
+    """
+    if not _is_valid_child_segment(child):
+        return IdPathResult(
+            ok: false,
+            value: IdPath(segments: [], intern_id: 0 as u32),
+            error: "invalid child segment")
+    val new_segments = parent.segments + [child]
+    val canonical = _join_segments(new_segments)
+    val id = _intern_lookup_or_insert(canonical)
+    IdPathResult(
+        ok: true,
+        value: IdPath(segments: new_segments, intern_id: id),
+        error: "")
+
+fn id_path_to_text(p: IdPath) -> text:
+    """Canonical dotted-form text of an IdPath."""
+    _join_segments(p.segments)
+
+fn id_path_equals(a: IdPath, b: IdPath) -> bool:
+    """True if `a` and `b` refer to the same canonical path."""
+    a.intern_id == b.intern_id

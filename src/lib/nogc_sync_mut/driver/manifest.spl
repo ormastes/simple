@@ -1,0 +1,89 @@
+# Driver / Native-Lib manifest — runtime representation.
+#
+# A manifest describes a single loadable unit: what class of device it
+# drives (or that it is a native lib), its vendor/device ID match list,
+# its version, and its loader ABI revision.
+#
+# The manifest is the on-wire representation of the SMF `.drv_manifest`
+# section. For static-mode drivers the same struct is populated at
+# compile time and placed in the kernel's `__driver_table`.
+#
+# Binary layout (little-endian, packed, total = 64 + 8*device_count bytes):
+#
+#   offset size  field
+#   0      4     magic       = 0x44525653 ("DRVS")
+#   4      1     kind        0=Driver, 1=NativeLib
+#   5      1     class       DriverClass ordinal
+#   6      2     abi_rev     u16  (kernel refuses mismatch)
+#   8      4     vendor      u32
+#  12      4     device_count u32
+#  16     16     version     ASCII, zero-padded
+#  32     32     name        ASCII, zero-padded
+#  64    8*N     device_ids  u32 pairs (reserved, id) — one per entry
+#
+# Keep this in sync with `src/compiler/70.backend/linker/lib_smf.spl`
+# when the `.drv_manifest` section writer is added.
+
+use std.driver.types.{DriverClass}
+
+var DRVS_MAGIC: i32 = 0x44525653        # "DRVS"
+var DRVS_ABI_REV: i32 = 1
+var DRVS_NAME_LEN: i32 = 32
+var DRVS_VERSION_LEN: i32 = 16
+var DRVS_HEADER_BYTES: i32 = 64
+
+enum ManifestKind:
+    Driver
+    NativeLib
+
+struct DriverManifest:
+    kind:        ManifestKind
+    class:       DriverClass
+    abi_rev:     i32
+    vendor:      i32
+    device_ids:  [i32]      # concrete device IDs this driver matches
+    name:        text       # <= DRVS_NAME_LEN bytes
+    version:     text       # <= DRVS_VERSION_LEN bytes
+
+impl DriverManifest:
+    # Minimal constructor used by both static-table registration and the
+    # dynamic-SMF loader once it has parsed the section bytes.
+    static fn for_driver(name: text, version: text, class: DriverClass,
+                         vendor: i32, device_ids: [i32]) -> DriverManifest:
+        return DriverManifest(
+            kind:       ManifestKind.Driver,
+            class:      class,
+            abi_rev:    DRVS_ABI_REV,
+            vendor:     vendor,
+            device_ids: device_ids,
+            name:       name,
+            version:    version,
+        )
+
+    static fn for_native_lib(name: text, version: text) -> DriverManifest:
+        return DriverManifest(
+            kind:       ManifestKind.NativeLib,
+            class:      DriverClass.Misc,
+            abi_rev:    DRVS_ABI_REV,
+            vendor:     0,
+            device_ids: [],
+            name:       name,
+            version:    version,
+        )
+
+    # Size of the binary form for this manifest.
+    fn byte_size() -> i32:
+        return DRVS_HEADER_BYTES + (self.device_ids.len() as i32) * 8
+
+    # True if this driver claims a (vendor, device) pair.
+    fn matches(vendor: i32, device: i32) -> bool:
+        if self.kind != ManifestKind.Driver:
+            return false
+        if self.vendor != vendor:
+            return false
+        var i: i32 = 0
+        while i < (self.device_ids.len() as i32):
+            if self.device_ids[i] == device:
+                return true
+            i = i + 1
+        return false

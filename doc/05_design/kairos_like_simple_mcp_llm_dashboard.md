@@ -42,6 +42,7 @@ Responsibilities:
 - build overview aggregates
 - render session/timeline/task views
 - support replay/import mode
+- host the web login entrypoint and persist operator auth session state under `.build/llm_dashboard/auth`
 
 ### bridge side
 
@@ -74,6 +75,12 @@ Use derived summary caches for:
 - dashboard overview totals
 
 Do not require full timeline replay for common read paths.
+
+For the web login slice:
+
+- bootstrap admin credentials come from `SIMPLE_LLM_DASHBOARD_ADMIN_USER` and `SIMPLE_LLM_DASHBOARD_ADMIN_PASSWORD`
+- authenticated browser session state is stored under `.build/llm_dashboard/auth`
+- clearing `.build/llm_dashboard/auth` is a destructive operator action because it invalidates active sessions
 
 ## Control APIs
 
@@ -191,6 +198,12 @@ Use explicit result values and status transitions for:
 - notification delivery failure
 
 All such failures must leave timeline evidence.
+
+Web-login operator failures should surface concrete guidance for:
+
+- missing bootstrap admin environment variables
+- invalid bootstrap credentials
+- unwritable `.build/llm_dashboard/auth` session storage
 
 ## Verification Design
 

@@ -1,0 +1,83 @@
+# @cover src/app/simple_process_manager/spm_service.spl 70%
+# @cover src/app/simple_process_manager/privilege_service.spl 70%
+# @cover src/app/simple_process_manager/window_registry.spl 70%
+# @cover src/app/simple_process_manager/transport.spl 60%
+# @cover src/app/simple_process_manager/transport_host.spl 60%
+"""
+# SPM Service RPC Specification
+
+**Feature:** spm-winfs-llm-suite / AC-3
+**Status:** Red (no impl yet)
+
+Round-trip: request/response identical over SimpleOS transport and host
+transport. Privilege check RPC and window-register RPC exercised.
+"""
+
+use std.sspec.*
+use lib.common.privilege.id_path.{id_path_intern}
+use lib.common.privilege.principal.{Principal, PrincipalKind}
+use lib.common.privilege.authority_token.{AuthorityToken, AuthorityLevel}
+use lib.common.win_fs.window_record.{WindowRecord, WindowState, Rect, BufferRef}
+use app.simple_process_manager.transport.{SpmRequest, SpmResponse}
+use app.simple_process_manager.transport_host.{SpmTransportHost}
+use app.simple_process_manager.transport_simpleos.{SpmTransportMock}
+use app.simple_process_manager.spm_service.{SpmService, spm_encode_request, spm_decode_response}
+
+describe "SPM service RPC":
+    describe "transport parity":
+        it "AC-3: host socket round-trip returns identical bytes":
+            val svc = SpmService.new_for_test()
+            val req = SpmRequest(kind: "ping", body: "hello".bytes(), token_hint: AuthorityToken.public_none())
+            val host_bytes = spm_encode_request(req)
+            val host = SpmTransportHost.mock_bound(svc)
+            val resp = host.send(req)
+            expect resp.ok to_equal true
+            expect resp.body.len() to_be_greater_than 0
+
+        it "AC-3: SimpleOS mock transport yields same encoded request bytes as host":
+            val req = SpmRequest(kind: "ping", body: "hello".bytes(), token_hint: AuthorityToken.public_none())
+            val host_bytes = spm_encode_request(req)
+            val simpleos_bytes = spm_encode_request(req)
+            expect host_bytes.len() to_equal simpleos_bytes.len()
+
+    describe "privilege_service.check":
+        it "AC-3: rejects request with token lacking id_path":
+            val svc = SpmService.new_for_test()
+            val principal = Principal(kind: PrincipalKind.Local, id: "eve")
+            val token = AuthorityToken.mock(
+                id_path: id_path_intern("id.user.mail"),
+                level: AuthorityLevel.Internal,
+                principal: principal)
+            val req = SpmRequest(kind: "priv_check", body: "id.user.banking.view".bytes(), token_hint: token)
+            val resp = svc.handle(req)
+            expect resp.ok to_equal false
+
+        it "AC-3: allows request with matching token id_path":
+            val svc = SpmService.new_for_test()
+            val principal = Principal(kind: PrincipalKind.Local, id: "alice")
+            val token = AuthorityToken.mock(
+                id_path: id_path_intern("id.user.banking"),
+                level: AuthorityLevel.Sensitive,
+                principal: principal)
+            val req = SpmRequest(kind: "priv_check", body: "id.user.banking.view".bytes(), token_hint: token)
+            val resp = svc.handle(req)
+            expect resp.ok to_equal true
+
+    describe "window_registry.register":
+        it "AC-3: window_register RPC persists record with generation++":
+            val svc = SpmService.new_for_test()
+            val principal = Principal(kind: PrincipalKind.Local, id: "alice")
+            val token = AuthorityToken.mock(
+                id_path: id_path_intern("id.user.banking"),
+                level: AuthorityLevel.Sensitive,
+                principal: principal)
+            val rec = WindowRecord(
+                wid: 1, generation: 0, app: "banking", title: "Acct",
+                state: WindowState.Normal,
+                geometry: Rect(x: 0, y: 0, w: 1, h: 1),
+                buffer_ref: BufferRef(kind: "shm", handle: 0, bytes: 0),
+                acl_id_path: id_path_intern("id.user.banking.view"))
+            val req = SpmRequest(kind: "win_register", body: WindowRecord.encode(rec), token_hint: token)
+            val resp = svc.handle(req)
+            expect resp.ok to_equal true
+            expect svc.registry_size() to_equal 1

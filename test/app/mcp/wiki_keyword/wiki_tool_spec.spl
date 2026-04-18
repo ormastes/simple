@@ -1,0 +1,42 @@
+# @cover src/app/mcp/wiki_keyword/wiki_tool.spl 80%
+# @cover src/app/mcp/wiki_keyword/register.spl 60%
+"""
+# MCP Wiki Keyword Tool Specification
+
+**Feature:** spm-winfs-llm-suite / AC-6
+**Status:** Red (no impl yet)
+
+Tool returns `Content` tagged with `ContentAuthority{level, source_trust}`;
+lower-clearance reader gets Hold via `release_gate`; registration via
+`dispatch_wrap` boundary is exercised.
+"""
+
+use std.sspec.*
+use lib.common.privilege.id_path.{id_path_intern}
+use lib.common.privilege.authority_token.{AuthorityLevel, TrustSource}
+use lib.common.llm.content_authority.{ContentAuthority, release_gate}
+use app.mcp.wiki_keyword.wiki_tool.{wiki_lookup, WikiContent}
+use app.mcp.wiki_keyword.register.{register_wiki_tool}
+use lib.nogc_sync_mut.mcp.dispatch.{DispatchRegistry}
+
+describe "MCP wiki_keyword tool":
+    describe "wiki_lookup":
+        it "AC-6: returns Content tagged with ContentAuthority":
+            val result = wiki_lookup("simple language")
+            expect result.ok to_equal true
+            val authority = result.value.authority
+            expect authority.level to_equal AuthorityLevel.Internal
+            expect authority.source_trust to_equal TrustSource.RegistryTrusted
+
+        it "AC-6: release_gate returns Scrub/Block for lower-clearance reader":
+            val result = wiki_lookup("simple language")
+            val decision = release_gate(result.value.authority, AuthorityLevel.Public)
+            val held = (decision.kind == "Scrub") or (decision.kind == "Block")
+            expect held to_equal true
+
+    describe "registration via dispatch_wrap":
+        it "AC-6: register_wiki_tool adds tool entry to DispatchRegistry":
+            val reg = DispatchRegistry.new()
+            register_wiki_tool(reg)
+            val found = reg.find("wiki.lookup")
+            expect found.present to_equal true

@@ -1731,11 +1731,76 @@ S1(rt_process_wait)
 S0(rt_process_pid)
 S1(rt_cli_get_args)
 S0(rt_cli_args)
-S0(rt_exit_code)
-S1(rt_exit)
+/* rt_exit_code — no parent process yet, always reports 0 (no prior exit). */
+RuntimeValue rt_exit_code(void) { return ENCODE_INT(0); }
+/* rt_exit — matches hosted signature `extern "C" fn rt_exit(code: i32) -> !`
+ * (src/compiler_rust/runtime/src/value/ffi/env_process.rs). Simple code
+ * passes a raw i32 (not a tagged RuntimeValue). Disable all interrupts,
+ * print an exit marker to the PL011 UART, then spin on wfi so QEMU can
+ * detect the halt via its GIC idle-detection path. */
+__attribute__((noreturn))
+void rt_exit(int32_t code) {
+    __asm__ volatile("msr daifset, #0xf"); /* mask all DAIF interrupts */
+    int64_t c = (int64_t)code;
+    serial_puts("[exit] rt_exit(");
+    serial_put_dec(c);
+    serial_puts(") -- halting\r\n");
+    /* PSCI SYSTEM_OFF (SMC64 #0x84000008) — powers off the QEMU virt machine.
+     * If the firmware does not support PSCI the smc is a no-op and we fall
+     * through to the wfi loop, which is the correct safe-halt behaviour. */
+    __asm__ volatile(
+        "mov x0, #0x84000000\n"
+        "movk x0, #0x0008\n"
+        "smc #0\n"
+        ::: "x0", "memory"
+    );
+    for (;;) { __asm__ volatile("wfi"); }
+}
 S1(rt_env_get)
 S2(rt_env_set)
 S0(rt_env_all)
+
+/* --- std.sys.args FFI: present-but-empty on ARM64 until Phase 2 wires
+ * argv through syscall 13. Returning 0 / "" / [] keeps std.sys.args.args()
+ * callable from baremetal code without unresolved-symbol link errors.
+ * Signatures match the Simple-side extern declarations at
+ *   src/compiler_rust/lib/std/src/sys/args.spl:6-8
+ *   rt_args_count() -> i32       (raw i32, not RuntimeValue)
+ *   rt_args_get(i32) -> text     (raw i32 index, heap-tagged text)
+ *   rt_args_all()  -> List<text> (heap-tagged array). */
+int32_t      rt_args_count(void)          { return 0; }
+RuntimeValue rt_args_get(int32_t index)   { (void)index; return rt_string_from_cstr(""); }
+RuntimeValue rt_args_all(void)            { return rt_array_new(ENCODE_INT(0)); }
+
+/* --- std.io stdout/stderr: emit Simple-string bytes to PL011 UART.
+ * On SimpleOS the UART is the shared stdout/stderr sink (no tty/pty layer
+ * yet); both names route to the same physical path. This replaces the
+ * missing stubs so std.io.Stdout / std.io.Stderr and
+ * host/sys_simple.rt_stdout_write callers actually produce output.
+ * Signature matches hosted: RuntimeValue rt_stdout_write(RuntimeValue data). */
+static RuntimeValue rt_serial_write_value(RuntimeValue data) {
+    if (IS_HEAP(data)) {
+        HeapHeader *h = (HeapHeader *)DECODE_PTR(data);
+        if (h && h->type == HEAP_STRING) {
+            RuntimeString *s = (RuntimeString *)h;
+            if (s->len < 0x100000) {
+                for (uint32_t i = 0; i < s->len; i++) serial_putchar(s->data[i]);
+                return ENCODE_INT((int64_t)s->len);
+            }
+        }
+    }
+    return ENCODE_INT(0);
+}
+RuntimeValue rt_stdout_write(RuntimeValue data) { return rt_serial_write_value(data); }
+RuntimeValue rt_stdout_flush(RuntimeValue a)    { (void)a; return NIL_VALUE; }
+RuntimeValue rt_stderr_write(RuntimeValue data) { return rt_serial_write_value(data); }
+RuntimeValue rt_stderr_flush(RuntimeValue a)    { (void)a; return NIL_VALUE; }
+RuntimeValue rt_stdin_read(RuntimeValue a)      { (void)a; return rt_string_from_cstr(""); }
+RuntimeValue rt_stdin_read_byte(RuntimeValue a, RuntimeValue b) { (void)a; (void)b; return ENCODE_INT(-1); }
+RuntimeValue rt_stdin_read_char(RuntimeValue a) { (void)a; return rt_string_from_cstr(""); }
+RuntimeValue rt_stdin_read_line(RuntimeValue a, RuntimeValue b) { (void)a; (void)b; return rt_string_from_cstr(""); }
+RuntimeValue rt_terminal_clear(RuntimeValue a)  { (void)a; return NIL_VALUE; }
+RuntimeValue rt_terminal_set_cursor(RuntimeValue a, RuntimeValue b, RuntimeValue c) { (void)a; (void)b; (void)c; return NIL_VALUE; }
 
 /* --- Math --- */
 S1(rt_math_sqrt) S1(rt_math_sin) S1(rt_math_cos) S1(rt_math_tan)

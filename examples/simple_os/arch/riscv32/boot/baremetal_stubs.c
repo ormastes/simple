@@ -896,8 +896,22 @@ VSTUB1(rt_panic)
 VSTUB1(rt_abort)
 VSTUB2(rt_assert)
 VSTUB1(rt_unreachable)
-VSTUB0(rt_exit)
-VSTUB1(rt_exit_code)
+
+/* rt_exit — matches hosted signature `extern "C" fn rt_exit(code: i32) -> !`
+ * (src/compiler_rust/runtime/src/value/ffi/env_process.rs). Simple code
+ * passes a raw i32 (not a tagged RuntimeValue). On RV32 bare-metal there is
+ * no parent process; disable interrupts and spin on WFI to halt cleanly. */
+__attribute__((noreturn))
+void rt_exit(int32_t code) {
+    serial_puts("[exit] rt_exit(");
+    serial_put_dec(code);
+    serial_puts(") -- halting\r\n");
+    __asm__ volatile("csrci mstatus, 8"); /* clear MIE bit -- disable M-mode interrupts */
+    for (;;) { __asm__ volatile("wfi"); }
+}
+
+/* rt_exit_code — no parent process yet; always reports 0 (no prior exit). */
+RuntimeValue rt_exit_code(void) { return ENCODE_INT(0); }
 
 /* --- GC / memory management --- */
 VSTUB0(rt_gc_init)
@@ -1020,6 +1034,40 @@ STUB1(rt_set_len)
 STUB2(rt_set_union)
 STUB2(rt_set_intersect)
 STUB2(rt_set_diff)
+
+/* --- std.sys.args FFI: present-but-empty on SimpleOS until Phase 2 wires
+ * argv through the SBI/syscall path. Returning 0 / "" / [] keeps
+ * std.sys.args.args() callable from baremetal code without link errors.
+ * Signatures match the Simple-side extern declarations at
+ *   src/compiler_rust/lib/std/src/sys/args.spl:6-8
+ *   rt_args_count() -> i32       (raw i32, not RuntimeValue)
+ *   rt_args_get(i32) -> text     (raw i32 index, heap-tagged text)
+ *   rt_args_all()  -> List<text> (heap-tagged array). */
+extern RuntimeValue rt_array_new(RuntimeValue cap_val);
+extern RuntimeValue rt_string_from_cstr(const char *cstr);
+int32_t      rt_args_count(void)            { return 0; }
+RuntimeValue rt_args_get(int32_t index)     { (void)index; return rt_string_from_cstr(""); }
+RuntimeValue rt_args_all(void)              { return rt_array_new((RuntimeValue)0); }
+
+/* rt_stdout_write / rt_stderr_write — emit Simple-string bytes to the
+ * 16550 UART (shared stdout/stderr on SimpleOS; no tty layer yet).
+ * Replaces the absent stub so std.io.Stdout / std.io.Stderr callers
+ * actually produce serial output. */
+static RuntimeValue rt_serial_write_value(RuntimeValue data) {
+    if (IS_HEAP(data)) {
+        HeapHeader *h = (HeapHeader *)DECODE_PTR(data);
+        if (h && h->type == HEAP_TYPE_STRING) {
+            RuntimeString *s = (RuntimeString *)h;
+            if (s->len < 0x100000U) {
+                for (uint32_t i = 0; i < s->len; i++) serial_putchar(s->data[i]);
+                return ENCODE_INT((int32_t)s->len);
+            }
+        }
+    }
+    return ENCODE_INT(0);
+}
+RuntimeValue rt_stdout_write(RuntimeValue data) { return rt_serial_write_value(data); }
+RuntimeValue rt_stderr_write(RuntimeValue data) { return rt_serial_write_value(data); }
 
 /* --- I/O / filesystem --- */
 STUB1(rt_file_read_text)

@@ -292,6 +292,127 @@ static int _crypto_bytes_to_rv(const uint8_t *src, uint32_t src_len, RuntimeValu
 }
 
 /* ===================================================================
+ * AES-128 block encryption helper (portable)
+ * =================================================================== */
+
+static uint8_t _crypto_aes128_xtime(uint8_t b)
+{
+    uint32_t shifted = ((uint32_t)b << 1) & 0xffU;
+    return (b & 0x80U) ? (uint8_t)(shifted ^ 0x1bU) : (uint8_t)shifted;
+}
+
+static uint8_t _crypto_aes128_gf_mul(uint8_t a, uint8_t b)
+{
+    uint8_t result = 0;
+    uint8_t aa = a;
+    uint8_t bb = b;
+    for (int i = 0; i < 8; i++) {
+        if (bb & 1U) result ^= aa;
+        aa = _crypto_aes128_xtime(aa);
+        bb >>= 1;
+    }
+    return result;
+}
+
+static void _crypto_aes128_sub_bytes(uint8_t state[16])
+{
+    for (int i = 0; i < 16; i++) state[i] = _aes_sbox[state[i]];
+}
+
+static void _crypto_aes128_shift_rows(uint8_t state[16])
+{
+    uint8_t tmp[16];
+    tmp[0] = state[0];  tmp[1] = state[5];  tmp[2] = state[10]; tmp[3] = state[15];
+    tmp[4] = state[4];  tmp[5] = state[9];  tmp[6] = state[14]; tmp[7] = state[3];
+    tmp[8] = state[8];  tmp[9] = state[13]; tmp[10] = state[2]; tmp[11] = state[7];
+    tmp[12] = state[12]; tmp[13] = state[1]; tmp[14] = state[6]; tmp[15] = state[11];
+    memcpy(state, tmp, 16);
+}
+
+static void _crypto_aes128_mix_columns(uint8_t state[16])
+{
+    for (int c = 0; c < 4; c++) {
+        int base = c * 4;
+        uint8_t s0 = state[base];
+        uint8_t s1 = state[base + 1];
+        uint8_t s2 = state[base + 2];
+        uint8_t s3 = state[base + 3];
+        state[base]     = (uint8_t)(_crypto_aes128_gf_mul(0x02U, s0) ^ _crypto_aes128_gf_mul(0x03U, s1) ^ s2 ^ s3);
+        state[base + 1] = (uint8_t)(s0 ^ _crypto_aes128_gf_mul(0x02U, s1) ^ _crypto_aes128_gf_mul(0x03U, s2) ^ s3);
+        state[base + 2] = (uint8_t)(s0 ^ s1 ^ _crypto_aes128_gf_mul(0x02U, s2) ^ _crypto_aes128_gf_mul(0x03U, s3));
+        state[base + 3] = (uint8_t)(_crypto_aes128_gf_mul(0x03U, s0) ^ s1 ^ s2 ^ _crypto_aes128_gf_mul(0x02U, s3));
+    }
+}
+
+static void _crypto_aes128_add_round_key(uint8_t state[16], const uint8_t *round_keys, uint32_t round)
+{
+    const uint8_t *rk = round_keys + round * 16U;
+    for (int i = 0; i < 16; i++) state[i] ^= rk[i];
+}
+
+static void _crypto_aes128_key_expansion(const uint8_t key[16], uint8_t out[176])
+{
+    memcpy(out, key, 16);
+    uint32_t bytes = 16;
+    uint32_t rcon_idx = 0;
+    uint8_t temp[4];
+    while (bytes < 176U) {
+        temp[0] = out[bytes - 4];
+        temp[1] = out[bytes - 3];
+        temp[2] = out[bytes - 2];
+        temp[3] = out[bytes - 1];
+        if ((bytes % 16U) == 0U) {
+            uint8_t rot0 = temp[1], rot1 = temp[2], rot2 = temp[3], rot3 = temp[0];
+            temp[0] = (uint8_t)(_aes_sbox[rot0] ^ ((_aes_rcon[rcon_idx] >> 24) & 0xffU));
+            temp[1] = (uint8_t)(_aes_sbox[rot1] ^ ((_aes_rcon[rcon_idx] >> 16) & 0xffU));
+            temp[2] = (uint8_t)(_aes_sbox[rot2] ^ ((_aes_rcon[rcon_idx] >> 8) & 0xffU));
+            temp[3] = (uint8_t)(_aes_sbox[rot3] ^ (_aes_rcon[rcon_idx] & 0xffU));
+            rcon_idx++;
+        }
+        for (int i = 0; i < 4; i++) {
+            out[bytes] = (uint8_t)(out[bytes - 16U] ^ temp[i]);
+            bytes++;
+        }
+    }
+}
+
+static void _crypto_aes128_encrypt_block_raw(const uint8_t key[16], const uint8_t in[16], uint8_t out[16])
+{
+    uint8_t round_keys[176];
+    uint8_t state[16];
+    memcpy(state, in, 16);
+    _crypto_aes128_key_expansion(key, round_keys);
+    _crypto_aes128_add_round_key(state, round_keys, 0);
+    for (uint32_t round = 1; round < 10U; round++) {
+        _crypto_aes128_sub_bytes(state);
+        _crypto_aes128_shift_rows(state);
+        _crypto_aes128_mix_columns(state);
+        _crypto_aes128_add_round_key(state, round_keys, round);
+    }
+    _crypto_aes128_sub_bytes(state);
+    _crypto_aes128_shift_rows(state);
+    _crypto_aes128_add_round_key(state, round_keys, 10);
+    memcpy(out, state, 16);
+}
+
+RV_INT rt_aes128_encrypt_block_into(RV_INT key_rv, RV_INT block_rv, RV_INT out_rv)
+{
+    uint32_t key_len = 0, block_len = 0;
+    uint8_t *key = _crypto_rv_to_bytes(key_rv, &key_len);
+    uint8_t *block = _crypto_rv_to_bytes(block_rv, &block_len);
+    uint8_t out[16];
+    if (!key || !block || key_len != 16U || block_len != 16U) {
+        if (key) free(key);
+        if (block) free(block);
+        return -1;
+    }
+    _crypto_aes128_encrypt_block_raw(key, block, out);
+    free(key);
+    free(block);
+    return _crypto_bytes_to_rv(out, 16U, out_rv);
+}
+
+/* ===================================================================
  * Ed25519 — full portable implementation (RFC 8032)
  *
  * Extracted from x86_64/baremetal_stubs.c ref10-style implementation.

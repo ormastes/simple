@@ -1,0 +1,50 @@
+# @cover src/app/simple_process_manager/winfs_shim_host.spl 80%
+# @cover src/lib/common/win_fs/fs_encoder.spl 40%
+"""
+# Host Win-FS shim Specification
+
+**Feature:** spm-winfs-llm-suite / AC-4
+**Status:** Red (no impl yet)
+
+Host shim publishes same tree under a temp runtime dir via the same encoder.
+Verified by encoding the same record through the shared encoder and comparing
+path layout + bytes.
+"""
+
+use std.sspec.*
+use std.fs.{read_file}
+use lib.common.privilege.id_path.{id_path_intern}
+use lib.common.win_fs.window_record.{WindowRecord, WindowState, Rect, BufferRef}
+use lib.common.win_fs.fs_encoder.{encode_record, tree_has_path}
+use app.simple_process_manager.winfs_shim_host.{WinFsShimHost}
+
+describe "winfs_shim_host":
+    describe "publish via shared encoder":
+        it "AC-4: publish writes /<app>/<wid>/title under runtime dir":
+            val shim = WinFsShimHost.new_for_test(runtime_dir: "/tmp/spm_winfs_host")
+            val rec = WindowRecord(
+                wid: 42, generation: 1, app: "banking", title: "Acct",
+                state: WindowState.Normal,
+                geometry: Rect(x: 0, y: 0, w: 1, h: 1),
+                buffer_ref: BufferRef(kind: "shm", handle: 7, bytes: 4096),
+                acl_id_path: id_path_intern("id.user.banking.view"))
+            val result = shim.publish(rec)
+            expect result.ok to_equal true
+            val title = read_file("/tmp/spm_winfs_host/banking/42/title")
+            expect title to_equal "Acct"
+
+        it "AC-4: paths match the shared encoder schema (no drift)":
+            val rec = WindowRecord(
+                wid: 42, generation: 1, app: "banking", title: "Acct",
+                state: WindowState.Normal,
+                geometry: Rect(x: 0, y: 0, w: 1, h: 1),
+                buffer_ref: BufferRef(kind: "shm", handle: 7, bytes: 4096),
+                acl_id_path: id_path_intern("id.user.banking.view"))
+            val tree = encode_record(rec)
+            expect tree_has_path(tree, "/banking/42/title") to_equal true
+            expect tree_has_path(tree, "/banking/42/state") to_equal true
+
+    describe "grep sentinel":
+        it "AC-4: winfs_shim_host.spl imports from common/win_fs/fs_encoder":
+            val source = read_file("src/app/simple_process_manager/winfs_shim_host.spl")
+            expect source to_contain "use lib.common.win_fs.fs_encoder"

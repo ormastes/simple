@@ -1,0 +1,95 @@
+#![allow(unnamed_duplicate_typed_args)]
+"""ContentAuthority — reader-clearance gate for LLM-produced content.
+
+Pure module: classifies whether content tagged with an `AuthorityLevel`
+and a `TrustSource` may be released to a reader at a given clearance.
+
+Couples the privilege layer's `AuthorityLevel`/`TrustSource` enums (from
+`lib.common.privilege.authority_token`) with the LLM-content release
+decision — `Release`, `Scrub`, `Block`. The spec (AC-6) treats
+`decision.kind` as a text discriminator, so `ReleaseDecision` is a class
+with a `kind: text` field rather than an enum, matching the convention
+already established for `DecodeResult` / `PrincipalResult` in the
+privilege + win_fs modules. (Phase 3 correction recorded in state.)
+
+Feature: spm-winfs-llm-suite AC-6. No FS I/O, no notifications.
+"""
+
+use lib.common.privilege.authority_token.{AuthorityLevel, TrustSource, authority_level_rank}
+
+# ---------------------------------------------------------------------------
+# Content-side tag
+# ---------------------------------------------------------------------------
+
+class ContentAuthority:
+    """Classification applied to a chunk of produced content."""
+    level: AuthorityLevel
+    source_trust: TrustSource
+
+# ---------------------------------------------------------------------------
+# Release decision
+# ---------------------------------------------------------------------------
+
+class ReleaseDecision:
+    """Outcome of `release_gate`.
+
+    `kind` is one of "Release" / "Scrub" / "Block". `reasons` carries
+    human-readable justification when the decision is not `Release`.
+    """
+    kind: text
+    reasons: [text]
+
+    static fn release() -> ReleaseDecision:
+        ReleaseDecision(kind: "Release", reasons: [])
+
+    static fn scrub(reason: text) -> ReleaseDecision:
+        ReleaseDecision(kind: "Scrub", reasons: [reason])
+
+    static fn block(reason: text) -> ReleaseDecision:
+        ReleaseDecision(kind: "Block", reasons: [reason])
+
+# ---------------------------------------------------------------------------
+# Gate
+# ---------------------------------------------------------------------------
+
+fn release_gate(content: ContentAuthority, reader_clearance: AuthorityLevel) -> ReleaseDecision:
+    """Decide whether content at `content.level` may reach a reader at
+    `reader_clearance`.
+
+    Rules:
+      * `TrustSource.Revoked` on the content source => `Block`.
+      * reader_rank >= content_rank => `Release`.
+      * reader_rank < content_rank  => `Scrub` (one-step below) or `Block`
+                                       (two-or-more steps below).
+    """
+    if _trust_is_revoked(content.source_trust):
+        return ReleaseDecision.block("content source trust is Revoked")
+
+    val content_rank = authority_level_rank(content.level)
+    val reader_rank  = authority_level_rank(reader_clearance)
+
+    if reader_rank >= content_rank:
+        return ReleaseDecision.release()
+
+    val gap = content_rank - reader_rank
+    if gap >= 2 as i64:
+        return ReleaseDecision.block("reader clearance too low (gap >= 2)")
+    ReleaseDecision.scrub("reader clearance below content level (gap = 1)")
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+fn release_decision_is_release(d: ReleaseDecision) -> bool:
+    d.kind == "Release"
+
+fn release_decision_is_scrub(d: ReleaseDecision) -> bool:
+    d.kind == "Scrub"
+
+fn release_decision_is_block(d: ReleaseDecision) -> bool:
+    d.kind == "Block"
+
+fn _trust_is_revoked(t: TrustSource) -> bool:
+    match t:
+        case TrustSource.Revoked: true
+        case _: false

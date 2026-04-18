@@ -1,0 +1,71 @@
+# @cover src/lib/common/privilege/id_path.spl 80%
+"""
+# IdPath Specification
+
+**Feature:** spm-winfs-llm-suite / AC-1
+**Status:** Red (no impl yet)
+
+Exercises `IdPath` intern table, prefix match, subdivide, and segment validation
+defined in Phase 3 architecture (`src/lib/common/privilege/id_path.spl`).
+"""
+
+use std.sspec.*
+use lib.common.privilege.id_path.{IdPath, id_path_intern, id_path_prefix_match, id_path_subdivide}
+
+describe "IdPath":
+    describe "intern":
+        it "AC-1: returns identical intern_id for identical strings":
+            val a = id_path_intern("id.user.banking")
+            val b = id_path_intern("id.user.banking")
+            expect a.intern_id to_equal b.intern_id
+
+        it "AC-1: returns distinct intern_id for distinct strings":
+            val a = id_path_intern("id.user.banking")
+            val b = id_path_intern("id.user.mail")
+            val equal = (a.intern_id == b.intern_id)
+            expect equal to_equal false
+
+        it "AC-1: splits dotted path into ordered segments":
+            val p = id_path_intern("id.user.banking")
+            expect p.segments to_contain "id"
+            expect p.segments to_contain "user"
+            expect p.segments to_contain "banking"
+
+    describe "prefix_match":
+        it "AC-1: grant id.user.banking satisfies required id.user.banking.view":
+            val grant = id_path_intern("id.user.banking")
+            val required = id_path_intern("id.user.banking.view")
+            expect id_path_prefix_match(grant, required) to_equal true
+
+        it "AC-1: grant id.user.mail does NOT satisfy required id.user.banking":
+            val grant = id_path_intern("id.user.mail")
+            val required = id_path_intern("id.user.banking")
+            expect id_path_prefix_match(grant, required) to_equal false
+
+        it "AC-1: sibling prefix does not falsely match":
+            val grant = id_path_intern("id.user.bank")
+            val required = id_path_intern("id.user.banking")
+            expect id_path_prefix_match(grant, required) to_equal false
+
+    describe "subdivide":
+        it "AC-1: parent id.user.banking mints child id.user.banking.view":
+            val parent = id_path_intern("id.user.banking")
+            val result = id_path_subdivide(parent, "view")
+            expect result.ok to_equal true
+            expect result.value.segments to_contain "view"
+
+        it "AC-1: cannot mint unrelated id.user.mail from id.user.banking":
+            val parent = id_path_intern("id.user.banking")
+            val result = id_path_subdivide(parent, "id.user.mail")
+            expect result.ok to_equal false
+
+    describe "segment validation":
+        it "AC-1: segment containing literal dot is rejected":
+            val parent = id_path_intern("id.user")
+            val result = id_path_subdivide(parent, "bank.ing")
+            expect result.ok to_equal false
+
+        it "AC-1: empty segment is rejected":
+            val parent = id_path_intern("id.user")
+            val result = id_path_subdivide(parent, "")
+            expect result.ok to_equal false

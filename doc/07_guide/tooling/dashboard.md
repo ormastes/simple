@@ -2,6 +2,8 @@
 
 The Simple Dashboard CLI provides project monitoring and analytics: metrics collection, trend analysis, alerts, data export, and CI/CD integration.
 
+For the `llm_dashboard` web login and Peer Base Pack bootstrap flow, including `SIMPLE_LLM_DASHBOARD_ADMIN_USER`, `SIMPLE_LLM_DASHBOARD_ADMIN_PASSWORD`, and `.build/llm_dashboard/auth` session storage, see [llm_dashboard_web_login.md](llm_dashboard_web_login.md).
+
 ---
 
 ## Quick Start

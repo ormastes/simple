@@ -1,0 +1,335 @@
+#![allow(unnamed_duplicate_typed_args)]
+"""FsEncoder — WindowRecord ↔ path-tree round-trip.
+
+Schema (per Phase 3 §B, confirmed by fs_encoder_spec):
+
+    /<app>/<wid>/title
+    /<app>/<wid>/state
+    /<app>/<wid>/geometry
+    /<app>/<wid>/buffer
+    /<app>/<wid>/meta
+    /<app>/<wid>/actions
+    /<app>/<wid>/actions/close
+    /<app>/<wid>/actions/focus
+
+The spec imports free functions `encode_record`, `decode_tree`, `tree_has_path`
+plus the `FsTree` / `FsEntry` types. We provide all three as free functions
+plus a `trait FsEncoder` and a `DefaultFsEncoder` class so the kernel
+`win_vfs_driver` (wave 5b) can depend on the trait rather than free fns.
+
+Feature: spm-winfs-llm-suite AC-2. Pure module.
+"""
+
+use lib.common.privilege.id_path.{IdPath, id_path_intern, id_path_to_text}
+use lib.common.win_fs.window_record.{WindowRecord, Rect, BufferRef, WindowState, window_state_name, window_state_from_name}
+pub use lib.common.win_fs.window_record.{FsOp}   # re-export so specs can import FsOp from fs_encoder
+
+# ---------------------------------------------------------------------------
+# Tree model
+# ---------------------------------------------------------------------------
+#
+# `FsEntry` is the flat shape the spec consumes — one entry per leaf path
+# with its byte content. `FsNode`/`FsNodeKind` give the full tree view when
+# consumers want directory semantics (used by the kernel driver wave).
+
+enum FsNodeKind:
+    Dir
+    File
+
+class FsEntry:
+    """Flat path → bytes pair (one leaf per entry)."""
+    path: text
+    content: [u8]
+
+class FsNode:
+    """Tree node; `children` is empty when `kind == File`."""
+    name: text
+    kind: FsNodeKind
+    children: [FsNode]
+    content: [u8]
+
+class FsTree:
+    """Whole tree: one root `FsNode` plus a flat entry list for fast lookup."""
+    root: FsNode
+    entries: [FsEntry]
+
+class DecodeResult:
+    """{ok, value, error} for `decode_tree`."""
+    ok: bool
+    value: WindowRecord
+    error: text
+
+# ---------------------------------------------------------------------------
+# Encoder trait
+# ---------------------------------------------------------------------------
+
+trait FsEncoder:
+    """Reusable trait for wave 5b kernel driver and host shim."""
+    fn encode_record(rec: WindowRecord) -> FsTree
+    fn decode_tree(tree: FsTree) -> DecodeResult
+
+class DefaultFsEncoder:
+    """Canonical implementation of the `<app>/<wid>/...` schema."""
+
+impl FsEncoder for DefaultFsEncoder:
+    fn encode_record(rec: WindowRecord) -> FsTree:
+        encode_record(rec)
+
+    fn decode_tree(tree: FsTree) -> DecodeResult:
+        decode_tree(tree)
+
+# ---------------------------------------------------------------------------
+# Free-function API consumed by the spec
+# ---------------------------------------------------------------------------
+
+fn encode_record(rec: WindowRecord) -> FsTree:
+    val base = "/{rec.app}/{rec.wid}"
+    val title_entry    = FsEntry(path: base + "/title",    content: _text_bytes(rec.title))
+    val state_entry    = FsEntry(path: base + "/state",    content: _text_bytes(window_state_name(rec.state)))
+    val geometry_entry = FsEntry(path: base + "/geometry", content: _text_bytes(_encode_geometry(rec.geometry)))
+    val buffer_entry   = FsEntry(path: base + "/buffer",   content: _text_bytes(_encode_buffer(rec.buffer_ref)))
+    val meta_entry     = FsEntry(path: base + "/meta",     content: _text_bytes(_encode_meta(rec)))
+    val actions_entry  = FsEntry(path: base + "/actions",  content: _text_bytes("close,focus"))
+    val close_entry    = FsEntry(path: base + "/actions/close", content: _text_bytes(""))
+    val focus_entry    = FsEntry(path: base + "/actions/focus", content: _text_bytes(""))
+
+    val entries = [
+        title_entry, state_entry, geometry_entry, buffer_entry,
+        meta_entry, actions_entry, close_entry, focus_entry]
+
+    val actions_dir = FsNode(
+        name: "actions",
+        kind: FsNodeKind.Dir,
+        children: [
+            FsNode(name: "close", kind: FsNodeKind.File, children: [], content: _text_bytes("")),
+            FsNode(name: "focus", kind: FsNodeKind.File, children: [], content: _text_bytes(""))],
+        content: [])
+
+    val wid_dir = FsNode(
+        name: "{rec.wid}",
+        kind: FsNodeKind.Dir,
+        children: [
+            FsNode(name: "title",    kind: FsNodeKind.File, children: [], content: title_entry.content),
+            FsNode(name: "state",    kind: FsNodeKind.File, children: [], content: state_entry.content),
+            FsNode(name: "geometry", kind: FsNodeKind.File, children: [], content: geometry_entry.content),
+            FsNode(name: "buffer",   kind: FsNodeKind.File, children: [], content: buffer_entry.content),
+            FsNode(name: "meta",     kind: FsNodeKind.File, children: [], content: meta_entry.content),
+            actions_dir],
+        content: [])
+
+    val app_dir = FsNode(
+        name: rec.app,
+        kind: FsNodeKind.Dir,
+        children: [wid_dir],
+        content: [])
+
+    val root = FsNode(
+        name: "",
+        kind: FsNodeKind.Dir,
+        children: [app_dir],
+        content: [])
+
+    FsTree(root: root, entries: entries)
+
+fn decode_tree(tree: FsTree) -> DecodeResult:
+    val meta_entry = _lookup_entry_suffix(tree.entries, "/meta")
+    if meta_entry.path == "":
+        return DecodeResult(
+            ok: false,
+            value: _empty_record(),
+            error: "missing meta entry")
+    val meta = _decode_meta(_bytes_text(meta_entry.content))
+    val title = _bytes_text(_lookup_entry_suffix(tree.entries, "/title").content)
+    val state_text = _bytes_text(_lookup_entry_suffix(tree.entries, "/state").content)
+    val geometry = _decode_geometry(_bytes_text(_lookup_entry_suffix(tree.entries, "/geometry").content))
+    val buffer = _decode_buffer(_bytes_text(_lookup_entry_suffix(tree.entries, "/buffer").content))
+    DecodeResult(
+        ok: true,
+        value: WindowRecord(
+            wid: meta.wid,
+            generation: meta.generation,
+            app: meta.app,
+            title: title,
+            state: window_state_from_name(state_text),
+            geometry: geometry,
+            buffer_ref: buffer,
+            acl_id_path: id_path_intern(meta.acl_id_path_text)),
+        error: "")
+
+fn tree_has_path(tree: FsTree, path: text) -> bool:
+    for e in tree.entries:
+        if e.path == path:
+            return true
+    false
+
+fn tree_read(tree: FsTree, path: text) -> [u8]:
+    for e in tree.entries:
+        if e.path == path:
+            return e.content
+    []
+
+fn tree_readdir(tree: FsTree, path: text) -> [text]:
+    """Return the names of direct children of `path` (directories + files)."""
+    var out: [text] = []
+    val prefix = if path.ends_with("/"): path else: path + "/"
+    val plen = prefix.len()
+    for e in tree.entries:
+        if e.path.starts_with(prefix):
+            val rest = e.path[plen:]
+            val slash = rest.find("/")
+            val name = if slash < 0: rest else: rest[0:slash]
+            var seen = false
+            for existing in out:
+                if existing == name:
+                    seen = true
+            if not seen and name != "":
+                out = out + [name]
+    out
+
+# ---------------------------------------------------------------------------
+# Internal helpers
+# ---------------------------------------------------------------------------
+
+class _Meta:
+    wid: u64
+    generation: u32
+    app: text
+    acl_id_path_text: text
+
+fn _empty_record() -> WindowRecord:
+    WindowRecord(
+        wid: 0 as u64,
+        generation: 0 as u32,
+        app: "",
+        title: "",
+        state: WindowState.Hidden,
+        geometry: Rect(x: 0 as i32, y: 0 as i32, w: 0 as u32, h: 0 as u32),
+        buffer_ref: BufferRef(kind: "", handle: 0 as u64, bytes: 0 as u64),
+        acl_id_path: id_path_intern(""))
+
+fn _text_bytes(s: text) -> [u8]:
+    s.bytes()
+
+fn _bytes_text(b: [u8]) -> text:
+    text.from_bytes(b)
+
+fn _lookup_entry_suffix(entries: [FsEntry], suffix: text) -> FsEntry:
+    for e in entries:
+        if e.path.ends_with(suffix):
+            return e
+    FsEntry(path: "", content: [])
+
+fn _encode_geometry(r: Rect) -> text:
+    "x={r.x};y={r.y};w={r.w};h={r.h}"
+
+fn _decode_geometry(s: text) -> Rect:
+    var x: i32 = 0 as i32
+    var y: i32 = 0 as i32
+    var w: u32 = 0 as u32
+    var h: u32 = 0 as u32
+    val parts = s.split(";")
+    for p in parts:
+        val eq = p.find("=")
+        if eq < 0:
+            continue
+        val key = p[0:eq]
+        val v = p[eq + 1:]
+        if key == "x": x = _parse_i32(v)
+        elif key == "y": y = _parse_i32(v)
+        elif key == "w": w = _parse_u32(v)
+        elif key == "h": h = _parse_u32(v)
+    Rect(x: x, y: y, w: w, h: h)
+
+fn _encode_buffer(b: BufferRef) -> text:
+    "kind={b.kind};handle={b.handle};bytes={b.bytes}"
+
+fn _decode_buffer(s: text) -> BufferRef:
+    var kind = ""
+    var handle: u64 = 0 as u64
+    var bytes: u64 = 0 as u64
+    val parts = s.split(";")
+    for p in parts:
+        val eq = p.find("=")
+        if eq < 0:
+            continue
+        val key = p[0:eq]
+        val v = p[eq + 1:]
+        if key == "kind":        kind = v
+        elif key == "handle":    handle = _parse_u64(v)
+        elif key == "bytes":     bytes = _parse_u64(v)
+    BufferRef(kind: kind, handle: handle, bytes: bytes)
+
+fn _encode_meta(rec: WindowRecord) -> text:
+    "wid={rec.wid};gen={rec.generation};app={rec.app};acl=" + id_path_to_text(rec.acl_id_path)
+
+fn _decode_meta(s: text) -> _Meta:
+    var wid: u64 = 0 as u64
+    var gen: u32 = 0 as u32
+    var app = ""
+    var acl = ""
+    val parts = s.split(";")
+    for p in parts:
+        val eq = p.find("=")
+        if eq < 0:
+            continue
+        val key = p[0:eq]
+        val v = p[eq + 1:]
+        if key == "wid":     wid = _parse_u64(v)
+        elif key == "gen":   gen = _parse_u32(v)
+        elif key == "app":   app = v
+        elif key == "acl":   acl = v
+    _Meta(wid: wid, generation: gen, app: app, acl_id_path_text: acl)
+
+fn _parse_i32(s: text) -> i32:
+    (_parse_i64(s)) as i32
+
+fn _parse_u32(s: text) -> u32:
+    (_parse_u64(s)) as u32
+
+fn _parse_u64(s: text) -> u64:
+    if s == "":
+        return 0 as u64
+    var i = 0
+    val n = s.len()
+    var acc: u64 = 0 as u64
+    while i < n:
+        val d = _digit(s[i:i + 1])
+        if d < 0:
+            break
+        acc = (acc * (10 as u64)) + (d as u64)
+        i = i + 1
+    acc
+
+fn _parse_i64(s: text) -> i64:
+    if s == "":
+        return 0 as i64
+    var negate = false
+    var start = 0
+    if s.starts_with("-"):
+        negate = true
+        start = 1
+    var i = start
+    val n = s.len()
+    var acc: i64 = 0 as i64
+    while i < n:
+        val d = _digit(s[i:i + 1])
+        if d < 0:
+            break
+        acc = (acc * (10 as i64)) + d
+        i = i + 1
+    if negate:
+        return 0 as i64 - acc
+    acc
+
+fn _digit(ch: text) -> i64:
+    if ch == "0": return 0 as i64
+    if ch == "1": return 1 as i64
+    if ch == "2": return 2 as i64
+    if ch == "3": return 3 as i64
+    if ch == "4": return 4 as i64
+    if ch == "5": return 5 as i64
+    if ch == "6": return 6 as i64
+    if ch == "7": return 7 as i64
+    if ch == "8": return 8 as i64
+    if ch == "9": return 9 as i64
+    -1 as i64

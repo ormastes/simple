@@ -8695,10 +8695,347 @@ static RuntimeValue _tls13_hkdf_expand_label_const(RuntimeValue secret_rv, const
     return _tls_runtime_array_from_bytes(okm, out_len);
 }
 
+static RuntimeValue _tls13_hkdf_expand_label_const_padded(RuntimeValue secret_rv, const uint8_t *label, uint32_t label_len, uint32_t info_out_len)
+{
+    uint32_t secret_len = 0;
+    uint8_t *secret = _tls_copy_runtime_bytes(secret_rv, &secret_len);
+    if (!secret) return NIL_VALUE;
+
+    const uint8_t prefix[] = { 't', 'l', 's', '1', '3', ' ' };
+    uint32_t full_label_len = (uint32_t)sizeof(prefix) + label_len;
+    uint8_t full_label[16];
+    uint8_t encoded[32];
+    uint8_t okm[32];
+    uint8_t t_prev[32];
+    if (full_label_len > sizeof(full_label) || info_out_len > 32U) {
+        free(secret);
+        return NIL_VALUE;
+    }
+
+    memset(okm, 0, sizeof(okm));
+    memcpy(full_label, prefix, sizeof(prefix));
+    memcpy(full_label + sizeof(prefix), label, label_len);
+
+    uint32_t pos = 0;
+    encoded[pos++] = (uint8_t)((info_out_len >> 8) & 0xffU);
+    encoded[pos++] = (uint8_t)(info_out_len & 0xffU);
+    encoded[pos++] = (uint8_t)full_label_len;
+    memcpy(encoded + pos, full_label, full_label_len);
+    pos += full_label_len;
+    encoded[pos++] = 0; /* empty context */
+
+    uint32_t okm_len = 0;
+    uint32_t t_prev_len = 0;
+    uint8_t counter = 1;
+    while (okm_len < info_out_len) {
+        uint8_t input[96];
+        uint32_t input_len = 0;
+        if (t_prev_len > 0) {
+            memcpy(input + input_len, t_prev, t_prev_len);
+            input_len += t_prev_len;
+        }
+        memcpy(input + input_len, encoded, pos);
+        input_len += pos;
+        input[input_len++] = counter;
+
+        _tls_hmac_sha256(secret, secret_len, input, input_len, t_prev);
+        t_prev_len = 32;
+        uint32_t take = (info_out_len - okm_len) < 32U ? (info_out_len - okm_len) : 32U;
+        memcpy(okm + okm_len, t_prev, take);
+        okm_len += take;
+        counter++;
+    }
+
+    free(secret);
+    return _tls_runtime_array_from_bytes(okm, 32U);
+}
+
 RuntimeValue rt_tls13_hkdf_expand_label_key(RuntimeValue secret_rv)
 {
     static const uint8_t key_label[] = { 'k', 'e', 'y' };
-    return _tls13_hkdf_expand_label_const(secret_rv, key_label, 3U, 16U);
+    return _tls13_hkdf_expand_label_const_padded(secret_rv, key_label, 3U, 16U);
+}
+
+static uint8_t _tls_aes128_xtime(uint8_t b)
+{
+    uint32_t shifted = ((uint32_t)b << 1) & 0xffU;
+    return (b & 0x80U) ? (uint8_t)(shifted ^ 0x1bU) : (uint8_t)shifted;
+}
+
+static uint8_t _tls_aes128_gf_mul(uint8_t a, uint8_t b)
+{
+    uint8_t result = 0;
+    uint8_t aa = a;
+    uint8_t bb = b;
+    for (int i = 0; i < 8; i++) {
+        if (bb & 1U) result ^= aa;
+        aa = _tls_aes128_xtime(aa);
+        bb >>= 1;
+    }
+    return result;
+}
+
+static void _tls_aes128_sub_bytes(uint8_t state[16])
+{
+    for (int i = 0; i < 16; i++) state[i] = _aes_sbox[state[i]];
+}
+
+static void _tls_aes128_shift_rows(uint8_t state[16])
+{
+    uint8_t tmp[16];
+    tmp[0] = state[0];  tmp[1] = state[5];  tmp[2] = state[10]; tmp[3] = state[15];
+    tmp[4] = state[4];  tmp[5] = state[9];  tmp[6] = state[14]; tmp[7] = state[3];
+    tmp[8] = state[8];  tmp[9] = state[13]; tmp[10] = state[2]; tmp[11] = state[7];
+    tmp[12] = state[12]; tmp[13] = state[1]; tmp[14] = state[6]; tmp[15] = state[11];
+    memcpy(state, tmp, 16);
+}
+
+static void _tls_aes128_mix_columns(uint8_t state[16])
+{
+    for (int c = 0; c < 4; c++) {
+        int base = c * 4;
+        uint8_t s0 = state[base];
+        uint8_t s1 = state[base + 1];
+        uint8_t s2 = state[base + 2];
+        uint8_t s3 = state[base + 3];
+        state[base]     = (uint8_t)(_tls_aes128_gf_mul(0x02U, s0) ^ _tls_aes128_gf_mul(0x03U, s1) ^ s2 ^ s3);
+        state[base + 1] = (uint8_t)(s0 ^ _tls_aes128_gf_mul(0x02U, s1) ^ _tls_aes128_gf_mul(0x03U, s2) ^ s3);
+        state[base + 2] = (uint8_t)(s0 ^ s1 ^ _tls_aes128_gf_mul(0x02U, s2) ^ _tls_aes128_gf_mul(0x03U, s3));
+        state[base + 3] = (uint8_t)(_tls_aes128_gf_mul(0x03U, s0) ^ s1 ^ s2 ^ _tls_aes128_gf_mul(0x02U, s3));
+    }
+}
+
+static void _tls_aes128_add_round_key(uint8_t state[16], const uint8_t *round_keys, uint32_t round)
+{
+    const uint8_t *rk = round_keys + round * 16U;
+    for (int i = 0; i < 16; i++) state[i] ^= rk[i];
+}
+
+static void _tls_aes128_key_expansion(const uint8_t key[16], uint8_t out[176])
+{
+    memcpy(out, key, 16);
+    uint32_t bytes = 16;
+    uint8_t temp[4];
+    uint32_t rcon_idx = 0;
+    while (bytes < 176U) {
+        temp[0] = out[bytes - 4];
+        temp[1] = out[bytes - 3];
+        temp[2] = out[bytes - 2];
+        temp[3] = out[bytes - 1];
+        if ((bytes % 16U) == 0U) {
+            uint8_t rot0 = temp[1], rot1 = temp[2], rot2 = temp[3], rot3 = temp[0];
+            temp[0] = (uint8_t)(_aes_sbox[rot0] ^ ((_aes_rcon[rcon_idx] >> 24) & 0xffU));
+            temp[1] = (uint8_t)(_aes_sbox[rot1] ^ ((_aes_rcon[rcon_idx] >> 16) & 0xffU));
+            temp[2] = (uint8_t)(_aes_sbox[rot2] ^ ((_aes_rcon[rcon_idx] >> 8) & 0xffU));
+            temp[3] = (uint8_t)(_aes_sbox[rot3] ^ (_aes_rcon[rcon_idx] & 0xffU));
+            rcon_idx++;
+        }
+        for (int i = 0; i < 4; i++) {
+            out[bytes] = (uint8_t)(out[bytes - 16U] ^ temp[i]);
+            bytes++;
+        }
+    }
+}
+
+static void _tls_aes128_encrypt_block_raw(const uint8_t key[16], const uint8_t in[16], uint8_t out[16])
+{
+    uint8_t round_keys[176];
+    uint8_t state[16];
+    memcpy(state, in, 16);
+    _tls_aes128_key_expansion(key, round_keys);
+    _tls_aes128_add_round_key(state, round_keys, 0);
+    for (uint32_t round = 1; round < 10U; round++) {
+        _tls_aes128_sub_bytes(state);
+        _tls_aes128_shift_rows(state);
+        _tls_aes128_mix_columns(state);
+        _tls_aes128_add_round_key(state, round_keys, round);
+    }
+    _tls_aes128_sub_bytes(state);
+    _tls_aes128_shift_rows(state);
+    _tls_aes128_add_round_key(state, round_keys, 10);
+    memcpy(out, state, 16);
+}
+
+static void _tls_gcm_inc32(uint8_t counter[16])
+{
+    uint32_t c =
+        ((uint32_t)counter[12] << 24) |
+        ((uint32_t)counter[13] << 16) |
+        ((uint32_t)counter[14] << 8) |
+        (uint32_t)counter[15];
+    c = (uint32_t)(c + 1U);
+    counter[12] = (uint8_t)((c >> 24) & 0xffU);
+    counter[13] = (uint8_t)((c >> 16) & 0xffU);
+    counter[14] = (uint8_t)((c >> 8) & 0xffU);
+    counter[15] = (uint8_t)(c & 0xffU);
+}
+
+static void _tls_gcm_gf_mul(const uint8_t x[16], const uint8_t y[16], uint8_t out[16])
+{
+    uint8_t z[16];
+    uint8_t v[16];
+    memset(z, 0, sizeof(z));
+    memcpy(v, y, 16);
+
+    for (uint32_t i = 0; i < 128U; i++) {
+        uint32_t byte_idx = i >> 3;
+        uint32_t bit_idx = 7U - (i & 7U);
+        if (((x[byte_idx] >> bit_idx) & 1U) != 0U) {
+            for (uint32_t j = 0; j < 16U; j++) z[j] ^= v[j];
+        }
+
+        uint8_t lsb = (uint8_t)(v[15] & 1U);
+        uint8_t v_next[16];
+        v_next[0] = (uint8_t)((v[0] >> 1) & 0x7fU);
+        if (lsb) v_next[0] ^= 0xe1U;
+        for (uint32_t j = 1; j < 16U; j++) {
+            v_next[j] = (uint8_t)(((v[j] >> 1) | ((v[j - 1] & 1U) << 7)) & 0xffU);
+        }
+        memcpy(v, v_next, 16);
+    }
+
+    memcpy(out, z, 16);
+}
+
+static void _tls_gcm_ghash(const uint8_t h[16], const uint8_t *aad, uint32_t aad_len,
+                           const uint8_t *ciphertext, uint32_t ct_len, uint8_t out[16])
+{
+    uint8_t y[16];
+    memset(y, 0, sizeof(y));
+
+    for (uint32_t off = 0; off < aad_len; off += 16U) {
+        uint8_t block[16];
+        memset(block, 0, sizeof(block));
+        uint32_t take = (aad_len - off) < 16U ? (aad_len - off) : 16U;
+        memcpy(block, aad + off, take);
+        for (uint32_t i = 0; i < 16U; i++) block[i] ^= y[i];
+        _tls_gcm_gf_mul(block, h, y);
+    }
+
+    for (uint32_t off = 0; off < ct_len; off += 16U) {
+        uint8_t block[16];
+        memset(block, 0, sizeof(block));
+        uint32_t take = (ct_len - off) < 16U ? (ct_len - off) : 16U;
+        memcpy(block, ciphertext + off, take);
+        for (uint32_t i = 0; i < 16U; i++) block[i] ^= y[i];
+        _tls_gcm_gf_mul(block, h, y);
+    }
+
+    uint8_t len_block[16];
+    memset(len_block, 0, sizeof(len_block));
+    uint64_t aad_bits = (uint64_t)aad_len * 8ULL;
+    uint64_t ct_bits = (uint64_t)ct_len * 8ULL;
+    for (int i = 0; i < 8; i++) len_block[i] = (uint8_t)(aad_bits >> (56 - i * 8));
+    for (int i = 0; i < 8; i++) len_block[8 + i] = (uint8_t)(ct_bits >> (56 - i * 8));
+    for (uint32_t i = 0; i < 16U; i++) len_block[i] ^= y[i];
+    _tls_gcm_gf_mul(len_block, h, out);
+}
+
+static int _tls_aes128_gcm_decrypt_raw(const uint8_t key[16], const uint8_t nonce[12],
+                                       const uint8_t *ciphertext, uint32_t ct_len,
+                                       const uint8_t *aad, uint32_t aad_len,
+                                       const uint8_t tag[16], uint8_t *plaintext_out)
+{
+    uint8_t zero_block[16];
+    uint8_t h[16];
+    uint8_t j0[16];
+    uint8_t s[16];
+    uint8_t ej0[16];
+    uint8_t expected_tag[16];
+    memset(zero_block, 0, sizeof(zero_block));
+    _tls_aes128_encrypt_block_raw(key, zero_block, h);
+
+    memcpy(j0, nonce, 12);
+    j0[12] = 0; j0[13] = 0; j0[14] = 0; j0[15] = 1;
+
+    _tls_gcm_ghash(h, aad, aad_len, ciphertext, ct_len, s);
+    _tls_aes128_encrypt_block_raw(key, j0, ej0);
+    for (uint32_t i = 0; i < 16U; i++) expected_tag[i] = (uint8_t)(s[i] ^ ej0[i]);
+    if (memcmp(expected_tag, tag, 16) != 0) return -1;
+
+    uint8_t counter[16];
+    memcpy(counter, j0, 16);
+    _tls_gcm_inc32(counter);
+
+    uint32_t off = 0;
+    while (off < ct_len) {
+        uint8_t stream[16];
+        _tls_aes128_encrypt_block_raw(key, counter, stream);
+        uint32_t take = (ct_len - off) < 16U ? (ct_len - off) : 16U;
+        for (uint32_t i = 0; i < take; i++) plaintext_out[off + i] = (uint8_t)(ciphertext[off + i] ^ stream[i]);
+        _tls_gcm_inc32(counter);
+        off += take;
+    }
+    return 0;
+}
+
+RuntimeValue rt_tls13_aes128_encrypt_block(RuntimeValue key_rv, RuntimeValue block_rv)
+{
+    uint32_t key_len = 0, block_len = 0;
+    uint8_t *key = _tls_copy_runtime_bytes(key_rv, &key_len);
+    uint8_t *block = _tls_copy_runtime_bytes(block_rv, &block_len);
+    uint8_t out[16];
+    if (!key || !block || key_len != 16U || block_len != 16U) {
+        if (key) free(key);
+        if (block) free(block);
+        return NIL_VALUE;
+    }
+    _tls_aes128_encrypt_block_raw(key, block, out);
+    free(key);
+    free(block);
+    return _tls_runtime_array_from_bytes(out, 16);
+}
+
+int64_t rt_aes128_encrypt_block_into(int64_t key_rv, int64_t block_rv, int64_t out_rv)
+{
+    uint32_t key_len = 0, block_len = 0;
+    uint8_t *key = _tls_copy_runtime_bytes(key_rv, &key_len);
+    uint8_t *block = _tls_copy_runtime_bytes(block_rv, &block_len);
+    uint8_t out[16];
+    if (!key || !block || key_len != 16U || block_len != 16U) {
+        if (key) free(key);
+        if (block) free(block);
+        return -1;
+    }
+    _tls_aes128_encrypt_block_raw(key, block, out);
+    free(key);
+    free(block);
+    return _ed_bytes_to_rv(out, 16U, out_rv);
+}
+
+RuntimeValue rt_tls13_aes128_gcm_decrypt(RuntimeValue key_rv, RuntimeValue nonce_rv,
+                                         RuntimeValue ciphertext_rv, RuntimeValue aad_rv,
+                                         RuntimeValue tag_rv)
+{
+    uint32_t key_len = 0, nonce_len = 0, ct_len = 0, aad_len = 0, tag_len = 0;
+    uint8_t *key = _tls_copy_runtime_bytes(key_rv, &key_len);
+    uint8_t *nonce = _tls_copy_runtime_bytes(nonce_rv, &nonce_len);
+    uint8_t *ciphertext = _tls_copy_runtime_bytes(ciphertext_rv, &ct_len);
+    uint8_t *aad = _tls_copy_runtime_bytes(aad_rv, &aad_len);
+    uint8_t *tag = _tls_copy_runtime_bytes(tag_rv, &tag_len);
+    uint8_t *plaintext = NULL;
+    RuntimeValue out = NIL_VALUE;
+
+    if (!key || !nonce || !aad || !tag || (!ciphertext && ct_len != 0) ||
+        key_len != 16U || nonce_len != 12U || tag_len != 16U) {
+        goto cleanup;
+    }
+
+    plaintext = (uint8_t *)malloc(ct_len > 0 ? ct_len : 1U);
+    if (!plaintext) goto cleanup;
+    if (_tls_aes128_gcm_decrypt_raw(key, nonce, ciphertext, ct_len, aad, aad_len, tag, plaintext) != 0) {
+        goto cleanup;
+    }
+    out = _tls_runtime_array_from_bytes(plaintext, ct_len);
+
+cleanup:
+    if (key) free(key);
+    if (nonce) free(nonce);
+    if (ciphertext) free(ciphertext);
+    if (aad) free(aad);
+    if (tag) free(tag);
+    if (plaintext) free(plaintext);
+    return out;
 }
 
 RuntimeValue rt_tls13_hkdf_expand_label_derived(RuntimeValue secret_rv, RuntimeValue context_rv)
@@ -8758,7 +9095,33 @@ RuntimeValue rt_tls13_hkdf_expand_label_derived(RuntimeValue secret_rv, RuntimeV
 RuntimeValue rt_tls13_hkdf_expand_label_iv(RuntimeValue secret_rv)
 {
     static const uint8_t iv_label[] = { 'i', 'v' };
-    return _tls13_hkdf_expand_label_const(secret_rv, iv_label, 2U, 12U);
+    return _tls13_hkdf_expand_label_const_padded(secret_rv, iv_label, 2U, 12U);
+}
+
+RuntimeValue rt_tls13_hkdf_expand_label_finished(RuntimeValue secret_rv)
+{
+    static const uint8_t finished_label[] = { 'f', 'i', 'n', 'i', 's', 'h', 'e', 'd' };
+    return _tls13_hkdf_expand_label_const_padded(secret_rv, finished_label, 8U, 32U);
+}
+
+RuntimeValue rt_tls13_verify_data_hmac(RuntimeValue finished_key_rv, RuntimeValue transcript_hash_rv)
+{
+    uint32_t key_len = 0;
+    uint32_t hash_len = 0;
+    uint8_t *key = _tls_copy_runtime_bytes(finished_key_rv, &key_len);
+    uint8_t *hash = _tls_copy_runtime_bytes(transcript_hash_rv, &hash_len);
+    uint8_t out[32];
+    RuntimeValue rv = NIL_VALUE;
+    if (!key || !hash || hash_len != 32U) {
+        if (key) free(key);
+        if (hash) free(hash);
+        return NIL_VALUE;
+    }
+    _tls_hmac_sha256(key, key_len, hash, hash_len, out);
+    rv = _tls_runtime_array_from_bytes(out, 32U);
+    free(key);
+    free(hash);
+    return rv;
 }
 
 RuntimeValue rt_tls13_hkdf_expand_label_client_hs(RuntimeValue secret_rv, RuntimeValue context_rv)
@@ -9450,10 +9813,31 @@ TRAP_STUB_RET(rt_process_spawn, 1)
 TRAP_STUB_RET(rt_process_kill, 1)
 TRAP_STUB_RET(rt_process_wait, 1)
 TRAP_STUB_RET(rt_process_pid, 0)
-TRAP_STUB_RET(rt_cli_get_args, 1)
-TRAP_STUB_RET(rt_cli_args, 0)
-TRAP_STUB_RET(rt_exit_code, 0)
-TRAP_STUB_RET(rt_exit, 1)
+/* rt_cli_get_args / rt_cli_args / rt_exit_code / rt_exit — defined as
+ * NOP1 / NOP0 in rt_extras.c except rt_exit which we give a real impl
+ * here: halt cleanly instead of trapping. std.process.exit(code) on
+ * SimpleOS has no parent process yet; power-off is the most accurate
+ * baremetal behaviour. */
+/* Matches hosted signature `extern "C" fn rt_exit(code: i32) -> !`
+ * (src/compiler_rust/runtime/src/value/ffi/env_process.rs). Simple code
+ * declares this as `extern fn rt_exit(code: i32)` or `(code: i64)`;
+ * both pass a raw integer in the first register, not a tagged
+ * RuntimeValue. */
+__attribute__((noreturn))
+void rt_exit(int32_t code) {
+    int64_t c = (int64_t)code;
+    serial_puts("[exit] rt_exit(");
+    serial_put_dec(c);
+    serial_puts(") -- halting\r\n");
+    /* QEMU isa-debug-exit on port 0x501 — code is shifted left by 1
+     * and OR'd with 1 so QEMU reports (code<<1)|1 as the exit status.
+     * If isa-debug-exit is not present the write is ignored and we
+     * fall through to the hlt loop, which is the correct behaviour. */
+    __asm__ volatile("outb %%al, %%dx" : : "a"((uint8_t)(c & 0x7F)), "d"((uint16_t)0x501));
+    for (;;) { __asm__ volatile("cli; hlt"); }
+}
+/* rt_exit_code — no parent process yet, always reports 0 (no prior exit). */
+RuntimeValue rt_exit_code(void) { return ENCODE_INT(0); }
 TRAP_STUB_RET(rt_env_get, 1)
 TRAP_STUB_RET(rt_env_set, 2)
 TRAP_STUB_RET(rt_env_all, 0)

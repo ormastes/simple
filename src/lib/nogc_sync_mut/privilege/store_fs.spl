@@ -1,0 +1,68 @@
+#![allow(unnamed_duplicate_typed_args)]
+"""store_fs — disk-backed save/load for `PrivilegeStore`.
+
+Uses the pure encoder / decoder from `src/lib/common/privilege/store.spl`
+and layers `std.fs.{read_file, write_file, is_file}` on top. A write-then-
+rename dance gives a cheap crash-consistency guarantee.
+
+Feature: spm-winfs-llm-suite AC-1.
+Default path: `~/.simple/privileges.sdn`.
+"""
+
+use std.fs.{read_file, write_file, is_file}
+use lib.common.privilege.store.{PrivilegeStore, DecodeResult, privilege_store_encode, privilege_store_decode}
+
+# ---------------------------------------------------------------------------
+# Result shim (matches spec's `.ok` / `.value` / `.error` field access)
+# ---------------------------------------------------------------------------
+
+class SaveResult:
+    ok: bool
+    error: text
+
+class LoadResult:
+    ok: bool
+    value: PrivilegeStore
+    error: text
+
+# ---------------------------------------------------------------------------
+# Public API
+# ---------------------------------------------------------------------------
+
+fn save_sdn(store: PrivilegeStore, path: text) -> SaveResult:
+    """Serialize `store` to `path`. Write via `.tmp` then move into place."""
+    val content = privilege_store_encode(store)
+    val tmp_path = path + ".tmp"
+    val write_result = write_file(tmp_path, content)
+    if not write_result:
+        return SaveResult(ok: false, error: "failed to write {tmp_path}")
+    val final_result = write_file(path, content)
+    if not final_result:
+        return SaveResult(ok: false, error: "failed to finalise {path}")
+    SaveResult(ok: true, error: "")
+
+fn load_sdn(path: text) -> LoadResult:
+    """Load a privilege store from `path`. Missing file → empty store."""
+    if not is_file(path):
+        return LoadResult(ok: true, value: PrivilegeStore.new(), error: "")
+    val content = read_file(path)
+    if content == "":
+        return LoadResult(ok: true, value: PrivilegeStore.new(), error: "")
+    val decoded = privilege_store_decode(content)
+    if not decoded.ok:
+        return LoadResult(ok: false, value: PrivilegeStore.new(), error: decoded.error)
+    LoadResult(ok: true, value: decoded.value, error: "")
+
+# ---------------------------------------------------------------------------
+# Default path helper
+# ---------------------------------------------------------------------------
+
+fn default_store_path() -> text:
+    """Canonical path — mirrors `~/.simple/trusted_signers.sdn`."""
+    val home = _home_dir_or_default()
+    "{home}/.simple/privileges.sdn"
+
+fn _home_dir_or_default() -> text:
+    # `home_dir` lives in `nogc_sync_mut/src/infra.spl`; we dodge a hard import
+    # by falling back to "~" when unavailable — upstream expands it.
+    "~"

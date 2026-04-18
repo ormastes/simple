@@ -22,3 +22,7 @@
 ## Additional Resources
 
 See individual files in this directory for specialized topics (LLVM backend, memory model, etc.).
+
+Relevant current feature slices:
+
+- [KAIROS-Like Simple MCP + LLM Dashboard](kairos_like_simple_mcp_llm_dashboard.md) - Assistant/dashboard architecture, live bridge, and web-login/PBP bootstrap notes

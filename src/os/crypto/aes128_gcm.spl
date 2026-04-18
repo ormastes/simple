@@ -10,6 +10,9 @@
 extern fn rt_bytes_u8_at(arr: [u8], idx: i64) -> i64
 extern fn serial_println(msg: text)
 extern fn rt_array_new_with_cap(cap: i64) -> [u8]
+extern fn rt_aes_sbox(i: i64) -> i64
+extern fn rt_aes_rcon(i: i64) -> i64
+extern fn rt_aes128_encrypt_block_into(key: [u8], block: [u8], out: [u8]) -> i64
 
 fn _u8_at(buf: [u8], idx: u64) -> u8:
     rt_bytes_u8_at(buf, idx.to_i64()).to_u8()
@@ -23,57 +26,38 @@ fn _debug_bytes4(label: text, buf: [u8]):
     else:
         _gcm_debug("{label} short len={buf.len()}")
 
+fn _debug_bytes16(label: text, buf: [u8]):
+    if buf.len() >= 16:
+        _gcm_debug("{label} 0={_u8_at(buf, 0)} 1={_u8_at(buf, 1)} 2={_u8_at(buf, 2)} 3={_u8_at(buf, 3)}")
+        _gcm_debug("{label} 4={_u8_at(buf, 4)} 5={_u8_at(buf, 5)} 6={_u8_at(buf, 6)} 7={_u8_at(buf, 7)}")
+        _gcm_debug("{label} 8={_u8_at(buf, 8)} 9={_u8_at(buf, 9)} 10={_u8_at(buf, 10)} 11={_u8_at(buf, 11)}")
+        _gcm_debug("{label} 12={_u8_at(buf, 12)} 13={_u8_at(buf, 13)} 14={_u8_at(buf, 14)} 15={_u8_at(buf, 15)}")
+    else:
+        _gcm_debug("{label} short len={buf.len()}")
+
+fn _debug_bytes_all(label: text, buf: [u8]):
+    var i: u64 = 0
+    while i < buf.len():
+        val b0 = _u8_at(buf, i)
+        val b1 = if (i + 1) < buf.len(): _u8_at(buf, i + 1) else: 0
+        val b2 = if (i + 2) < buf.len(): _u8_at(buf, i + 2) else: 0
+        val b3 = if (i + 3) < buf.len(): _u8_at(buf, i + 3) else: 0
+        val b4 = if (i + 4) < buf.len(): _u8_at(buf, i + 4) else: 0
+        val b5 = if (i + 5) < buf.len(): _u8_at(buf, i + 5) else: 0
+        val b6 = if (i + 6) < buf.len(): _u8_at(buf, i + 6) else: 0
+        val b7 = if (i + 7) < buf.len(): _u8_at(buf, i + 7) else: 0
+        _gcm_debug("{label} off={i} 0={b0} 1={b1} 2={b2} 3={b3} 4={b4} 5={b5} 6={b6} 7={b7}")
+        i = i + 8
+
 # ============================================================================
 # AES S-Box (FIPS 197, Section 5.1.1)
 # ============================================================================
 
-# WORKAROUND: hosted TLS tests do not always link the baremetal crypto tables,
-# so keep local table helpers here instead of requiring runtime externs.
 fn _aes_sbox(index: i64) -> u8:
-    val row_idx = ((index >> 4) & 0x0F).to_i64()
-    val col_idx = (index & 0x0F).to_i64()
-    val row =
-        if row_idx == 0:
-            [0x63, 0x7c, 0x77, 0x7b, 0xf2, 0x6b, 0x6f, 0xc5, 0x30, 0x01, 0x67, 0x2b, 0xfe, 0xd7, 0xab, 0x76]
-        elif row_idx == 1:
-            [0xca, 0x82, 0xc9, 0x7d, 0xfa, 0x59, 0x47, 0xf0, 0xad, 0xd4, 0xa2, 0xaf, 0x9c, 0xa4, 0x72, 0xc0]
-        elif row_idx == 2:
-            [0xb7, 0xfd, 0x93, 0x26, 0x36, 0x3f, 0xf7, 0xcc, 0x34, 0xa5, 0xe5, 0xf1, 0x71, 0xd8, 0x31, 0x15]
-        elif row_idx == 3:
-            [0x04, 0xc7, 0x23, 0xc3, 0x18, 0x96, 0x05, 0x9a, 0x07, 0x12, 0x80, 0xe2, 0xeb, 0x27, 0xb2, 0x75]
-        elif row_idx == 4:
-            [0x09, 0x83, 0x2c, 0x1a, 0x1b, 0x6e, 0x5a, 0xa0, 0x52, 0x3b, 0xd6, 0xb3, 0x29, 0xe3, 0x2f, 0x84]
-        elif row_idx == 5:
-            [0x53, 0xd1, 0x00, 0xed, 0x20, 0xfc, 0xb1, 0x5b, 0x6a, 0xcb, 0xbe, 0x39, 0x4a, 0x4c, 0x58, 0xcf]
-        elif row_idx == 6:
-            [0xd0, 0xef, 0xaa, 0xfb, 0x43, 0x4d, 0x33, 0x85, 0x45, 0xf9, 0x02, 0x7f, 0x50, 0x3c, 0x9f, 0xa8]
-        elif row_idx == 7:
-            [0x51, 0xa3, 0x40, 0x8f, 0x92, 0x9d, 0x38, 0xf5, 0xbc, 0xb6, 0xda, 0x21, 0x10, 0xff, 0xf3, 0xd2]
-        elif row_idx == 8:
-            [0xcd, 0x0c, 0x13, 0xec, 0x5f, 0x97, 0x44, 0x17, 0xc4, 0xa7, 0x7e, 0x3d, 0x64, 0x5d, 0x19, 0x73]
-        elif row_idx == 9:
-            [0x60, 0x81, 0x4f, 0xdc, 0x22, 0x2a, 0x90, 0x88, 0x46, 0xee, 0xb8, 0x14, 0xde, 0x5e, 0x0b, 0xdb]
-        elif row_idx == 10:
-            [0xe0, 0x32, 0x3a, 0x0a, 0x49, 0x06, 0x24, 0x5c, 0xc2, 0xd3, 0xac, 0x62, 0x91, 0x95, 0xe4, 0x79]
-        elif row_idx == 11:
-            [0xe7, 0xc8, 0x37, 0x6d, 0x8d, 0xd5, 0x4e, 0xa9, 0x6c, 0x56, 0xf4, 0xea, 0x65, 0x7a, 0xae, 0x08]
-        elif row_idx == 12:
-            [0xba, 0x78, 0x25, 0x2e, 0x1c, 0xa6, 0xb4, 0xc6, 0xe8, 0xdd, 0x74, 0x1f, 0x4b, 0xbd, 0x8b, 0x8a]
-        elif row_idx == 13:
-            [0x70, 0x3e, 0xb5, 0x66, 0x48, 0x03, 0xf6, 0x0e, 0x61, 0x35, 0x57, 0xb9, 0x86, 0xc1, 0x1d, 0x9e]
-        elif row_idx == 14:
-            [0xe1, 0xf8, 0x98, 0x11, 0x69, 0xd9, 0x8e, 0x94, 0x9b, 0x1e, 0x87, 0xe9, 0xce, 0x55, 0x28, 0xdf]
-        else:
-            [0x8c, 0xa1, 0x89, 0x0d, 0xbf, 0xe6, 0x42, 0x68, 0x41, 0x99, 0x2d, 0x0f, 0xb0, 0x54, 0xbb, 0x16]
-    row[col_idx].to_u8()
+    rt_aes_sbox(index).to_u8()
 
 fn _aes_rcon(index: i64) -> u32:
-    val rcon = [
-        0x01000000u32, 0x02000000u32, 0x04000000u32, 0x08000000u32,
-        0x10000000u32, 0x20000000u32, 0x40000000u32, 0x80000000u32,
-        0x1b000000u32, 0x36000000u32
-    ]
-    rcon[index]
+    rt_aes_rcon(index).to_u32()
 
 # ============================================================================
 # Result Type for Decryption
@@ -103,38 +87,51 @@ fn _rot_word(w: u32) -> u32:
 # AES-128 Key Expansion (FIPS 197, Section 5.2)
 # ============================================================================
 
-fn aes128_key_expansion(key: [u8]) -> [u32]:
-    """Expand 16-byte AES-128 key into 44 round key words (176 bytes).
-
-    AES-128 has Nk=4 (key words), Nr=10 (rounds), Nb=4 (block words).
-    Total expanded key: 4 * (Nr + 1) = 44 words.
-    """
+fn aes128_key_expansion(key: [u8]) -> [u8]:
+    """Expand 16-byte AES-128 key into 176 round-key bytes."""
     val nk: u64 = 4
     val nr: u64 = 10
     val total_words: u64 = 4 * (nr + 1)  # 44
+    val total_bytes: u64 = total_words * 4
 
-    var w: [u32] = []
+    var expanded: [u8] = rt_array_new_with_cap(total_bytes.to_i64())
 
-    # First Nk words come directly from the key
     var i: u64 = 0
-    while i < nk:
-        val base = i * 4
-        val word = (key[base].to_u32() << 24) |
-                   (key[base + 1].to_u32() << 16) |
-                   (key[base + 2].to_u32() << 8) |
-                   key[base + 3].to_u32()
-        w.push(word)
+    while i < 16:
+        expanded.push(_u8_at(key, i))
         i = i + 1
 
-    # Generate remaining words
-    while i < total_words:
-        var temp = w[i - 1]
-        if (i % nk) == 0:
-            temp = _sub_word(_rot_word(temp)) ^ _aes_rcon(((i / nk) - 1).to_i64())
-        w.push(w[i - nk] ^ temp)
-        i = i + 1
+    var word_idx: u64 = nk
+    while word_idx < total_words:
+        val prev_base = (word_idx - 1) * 4
+        var t0 = _u8_at(expanded, prev_base)
+        var t1 = _u8_at(expanded, prev_base + 1)
+        var t2 = _u8_at(expanded, prev_base + 2)
+        var t3 = _u8_at(expanded, prev_base + 3)
 
-    w
+        if (word_idx % nk) == 0:
+            val rot0 = t1
+            val rot1 = t2
+            val rot2 = t3
+            val rot3 = t0
+            t0 = _aes_sbox(rot0.to_i64())
+            t1 = _aes_sbox(rot1.to_i64())
+            t2 = _aes_sbox(rot2.to_i64())
+            t3 = _aes_sbox(rot3.to_i64())
+            val rcon = _aes_rcon(((word_idx / nk) - 1).to_i64())
+            t0 = t0 ^ ((rcon >> 24) & 0xFF).to_u8()
+            t1 = t1 ^ ((rcon >> 16) & 0xFF).to_u8()
+            t2 = t2 ^ ((rcon >> 8) & 0xFF).to_u8()
+            t3 = t3 ^ (rcon & 0xFF).to_u8()
+
+        val prev_word_base = (word_idx - nk) * 4
+        expanded.push(_u8_at(expanded, prev_word_base) ^ t0)
+        expanded.push(_u8_at(expanded, prev_word_base + 1) ^ t1)
+        expanded.push(_u8_at(expanded, prev_word_base + 2) ^ t2)
+        expanded.push(_u8_at(expanded, prev_word_base + 3) ^ t3)
+        word_idx = word_idx + 1
+
+    expanded
 
 # ============================================================================
 # AES State Operations (4x4 byte matrix, column-major)
@@ -145,10 +142,10 @@ fn aes128_key_expansion(key: [u8]) -> [u32]:
 
 fn _sub_bytes(state: [u8]) -> [u8]:
     """Apply S-box substitution to each byte."""
-    var result: [u8] = []
+    var result: [u8] = rt_array_new_with_cap(16)
     var i: u64 = 0
     while i < 16:
-        result.push(_aes_sbox(state[i].to_i64()))
+        result.push(_aes_sbox(_u8_at(state, i).to_i64()))
         i = i + 1
     result
 
@@ -160,36 +157,23 @@ fn _shift_rows(state: [u8]) -> [u8]:
     Row 2: shift left 2
     Row 3: shift left 3
     """
-    var r: [u8] = []
-    var i: u64 = 0
-    while i < 16:
-        r.push(0x00)
-        i = i + 1
-
-    # Row 0: no shift
-    r[0] = state[0]
-    r[4] = state[4]
-    r[8] = state[8]
-    r[12] = state[12]
-
-    # Row 1: shift left 1
-    r[1] = state[5]
-    r[5] = state[9]
-    r[9] = state[13]
-    r[13] = state[1]
-
-    # Row 2: shift left 2
-    r[2] = state[10]
-    r[6] = state[14]
-    r[10] = state[2]
-    r[14] = state[6]
-
-    # Row 3: shift left 3
-    r[3] = state[15]
-    r[7] = state[3]
-    r[11] = state[7]
-    r[15] = state[11]
-
+    var r: [u8] = rt_array_new_with_cap(16)
+    r.push(_u8_at(state, 0))
+    r.push(_u8_at(state, 5))
+    r.push(_u8_at(state, 10))
+    r.push(_u8_at(state, 15))
+    r.push(_u8_at(state, 4))
+    r.push(_u8_at(state, 9))
+    r.push(_u8_at(state, 14))
+    r.push(_u8_at(state, 3))
+    r.push(_u8_at(state, 8))
+    r.push(_u8_at(state, 13))
+    r.push(_u8_at(state, 2))
+    r.push(_u8_at(state, 7))
+    r.push(_u8_at(state, 12))
+    r.push(_u8_at(state, 1))
+    r.push(_u8_at(state, 6))
+    r.push(_u8_at(state, 11))
     r
 
 fn _xtime(b: u8) -> u8:
@@ -223,94 +207,48 @@ fn _mix_columns(state: [u8]) -> [u8]:
     [1, 1, 2, 3]
     [3, 1, 1, 2]
     """
-    var r: [u8] = []
-    var i: u64 = 0
-    while i < 16:
-        r.push(0x00)
-        i = i + 1
-
+    var r: [u8] = rt_array_new_with_cap(16)
     var c: u64 = 0
     while c < 4:
         val base = c * 4
-        val s0 = state[base]
-        val s1 = state[base + 1]
-        val s2 = state[base + 2]
-        val s3 = state[base + 3]
+        val s0 = _u8_at(state, base)
+        val s1 = _u8_at(state, base + 1)
+        val s2 = _u8_at(state, base + 2)
+        val s3 = _u8_at(state, base + 3)
 
-        r[base]     = _gf_mul(0x02, s0) ^ _gf_mul(0x03, s1) ^ s2 ^ s3
-        r[base + 1] = s0 ^ _gf_mul(0x02, s1) ^ _gf_mul(0x03, s2) ^ s3
-        r[base + 2] = s0 ^ s1 ^ _gf_mul(0x02, s2) ^ _gf_mul(0x03, s3)
-        r[base + 3] = _gf_mul(0x03, s0) ^ s1 ^ s2 ^ _gf_mul(0x02, s3)
+        r.push(_gf_mul(0x02, s0) ^ _gf_mul(0x03, s1) ^ s2 ^ s3)
+        r.push(s0 ^ _gf_mul(0x02, s1) ^ _gf_mul(0x03, s2) ^ s3)
+        r.push(s0 ^ s1 ^ _gf_mul(0x02, s2) ^ _gf_mul(0x03, s3))
+        r.push(_gf_mul(0x03, s0) ^ s1 ^ s2 ^ _gf_mul(0x02, s3))
 
         c = c + 1
     r
 
-fn _add_round_key(state: [u8], round_keys: [u32], round: u64) -> [u8]:
-    """XOR state with round key (4 words starting at round * 4)."""
-    var result: [u8] = []
-    var c: u64 = 0
-    while c < 4:
-        val rk = round_keys[round * 4 + c]
-        val base = c * 4
-        result.push((state[base] ^ ((rk >> 24) & 0xFF).to_u8()))
-        result.push((state[base + 1] ^ ((rk >> 16) & 0xFF).to_u8()))
-        result.push((state[base + 2] ^ ((rk >> 8) & 0xFF).to_u8()))
-        result.push((state[base + 3] ^ (rk & 0xFF).to_u8()))
-        c = c + 1
+fn _add_round_key(state: [u8], round_keys: [u8], round: u64) -> [u8]:
+    """XOR state with the 16-byte round key for the given round."""
+    var result: [u8] = rt_array_new_with_cap(16)
+    val base = round * 16
+    var i: u64 = 0
+    while i < 16:
+        result.push(_u8_at(state, i) ^ _u8_at(round_keys, base + i))
+        i = i + 1
     result
 
 # ============================================================================
 # AES-128 Encryption (single block)
 # ============================================================================
 
-fn aes128_encrypt_block(plaintext: [u8], round_keys: [u32]) -> [u8]:
-    """Encrypt one 16-byte block with AES-128.
-
-    Args:
-        plaintext: 16 bytes of plaintext.
-        round_keys: 44 expanded key words from aes128_key_expansion.
-
-    Returns: 16 bytes of ciphertext.
-    """
-    val nr: u64 = 10
-
-    # Convert plaintext to column-major state
-    var state: [u8] = []
-    var c: u64 = 0
-    while c < 4:
-        var r: u64 = 0
-        while r < 4:
-            state.push(plaintext[r + c * 4])
-            r = r + 1
-        c = c + 1
-
-    # Initial round key addition
-    state = _add_round_key(state, round_keys, 0)
-
-    # Rounds 1 through Nr-1
-    var round: u64 = 1
-    while round < nr:
-        state = _sub_bytes(state)
-        state = _shift_rows(state)
-        state = _mix_columns(state)
-        state = _add_round_key(state, round_keys, round)
-        round = round + 1
-
-    # Final round (no MixColumns)
-    state = _sub_bytes(state)
-    state = _shift_rows(state)
-    state = _add_round_key(state, round_keys, nr)
-
-    # Convert column-major state back to row-major output
-    var output: [u8] = []
-    c = 0
-    while c < 4:
-        var r2: u64 = 0
-        while r2 < 4:
-            output.push(state[r2 + c * 4])
-            r2 = r2 + 1
-        c = c + 1
-
+fn aes128_encrypt_block(plaintext: [u8], round_keys: [u8]) -> [u8]:
+    """Encrypt one 16-byte block with AES-128 using the runtime helper."""
+    var output: [u8] = rt_array_new_with_cap(16)
+    var key: [u8] = rt_array_new_with_cap(16)
+    var i: u64 = 0
+    while i < 16:
+        key.push(_u8_at(round_keys, i))
+        output.push(0x00)
+        i = i + 1
+    if rt_aes128_encrypt_block_into(key, plaintext, output) != 0:
+        return []
     output
 
 # ============================================================================
@@ -329,47 +267,44 @@ fn gf128_mul(x: [u8], y: [u8]) -> [u8]:
 
     Returns: 16-byte product.
     """
-    # Initialize Z = 0 (16 bytes)
-    var z: [u8] = []
+    var z: [u8] = rt_array_new_with_cap(16)
     var i: u64 = 0
     while i < 16:
         z.push(0x00)
         i = i + 1
 
-    # V = Y (working copy)
-    var v: [u8] = []
+    var v: [u8] = rt_array_new_with_cap(16)
     i = 0
     while i < 16:
-        v.push(y[i])
+        v.push(_u8_at(y, i))
         i = i + 1
 
-    # For each bit of X (MSB first, 128 bits)
     i = 0
     while i < 128:
         val byte_idx = i / 8
         val bit_idx = 7 - (i % 8)
 
-        # If bit i of X is set, Z = Z XOR V
-        if ((x[byte_idx] >> bit_idx) & 0x01) != 0:
+        if ((_u8_at(x, byte_idx) >> bit_idx) & 0x01) != 0:
+            var z_next: [u8] = rt_array_new_with_cap(16)
             var j: u64 = 0
             while j < 16:
-                z[j] = z[j] ^ v[j]
+                z_next.push(_u8_at(z, j) ^ _u8_at(v, j))
                 j = j + 1
+            z = z_next
 
-        # Check if LSB of V is set (for reduction)
-        val lsb = v[15] & 0x01
-
-        # Right-shift V by 1 bit
-        var j: u64 = 15
-        while j > 0:
-            v[j] = (((v[j].to_u32() >> 1) | ((v[j - 1].to_u32() & 0x01) << 7)) & 0xFF).to_u8()
-            j = j - 1
-        v[0] = (v[0].to_u32() >> 1).to_u8()
-
-        # If LSB was set, XOR with R (0xE1 in first byte)
+        val lsb = _u8_at(v, 15) & 0x01
+        var v_next: [u8] = rt_array_new_with_cap(16)
+        var first = (_u8_at(v, 0).to_u32() >> 1).to_u8()
         if lsb != 0:
-            v[0] = v[0] ^ 0xE1
-
+            first = first ^ 0xE1
+        v_next.push(first)
+        var j: u64 = 1
+        while j < 16:
+            val cur = _u8_at(v, j).to_u32()
+            val prev = _u8_at(v, j - 1).to_u32()
+            v_next.push((((cur >> 1) | ((prev & 0x01) << 7)) & 0xFF).to_u8())
+            j = j + 1
+        v = v_next
         i = i + 1
 
     z
@@ -380,10 +315,10 @@ fn gf128_mul(x: [u8], y: [u8]) -> [u8]:
 
 fn _ghash_block(h: [u8], y: [u8], x_block: [u8]) -> [u8]:
     """Process one 16-byte block for GHASH: Y_i = (Y_{i-1} XOR X_i) * H."""
-    var xored: [u8] = []
+    var xored: [u8] = rt_array_new_with_cap(16)
     var i: u64 = 0
     while i < 16:
-        xored.push(y[i] ^ x_block[i])
+        xored.push(_u8_at(y, i) ^ _u8_at(x_block, i))
         i = i + 1
     gf128_mul(xored, h)
 
@@ -428,7 +363,7 @@ fn ghash(h: [u8], aad: [u8], ciphertext: [u8]) -> [u8]:
     Returns: 16-byte GHASH tag.
     """
     # Initialize Y = 0
-    var y: [u8] = []
+    var y: [u8] = rt_array_new_with_cap(16)
     var i: u64 = 0
     while i < 16:
         y.push(0x00)
@@ -438,7 +373,7 @@ fn ghash(h: [u8], aad: [u8], ciphertext: [u8]) -> [u8]:
     val padded_aad = _pad_to_16(aad)
     i = 0
     while i < padded_aad.len():
-        var block: [u8] = []
+        var block: [u8] = rt_array_new_with_cap(16)
         var j: u64 = 0
         while j < 16:
             block.push(_u8_at(padded_aad, i + j))
@@ -450,7 +385,7 @@ fn ghash(h: [u8], aad: [u8], ciphertext: [u8]) -> [u8]:
     val padded_ct = _pad_to_16(ciphertext)
     i = 0
     while i < padded_ct.len():
-        var block: [u8] = []
+        var block: [u8] = rt_array_new_with_cap(16)
         var j: u64 = 0
         while j < 16:
             block.push(_u8_at(padded_ct, i + j))
@@ -462,7 +397,7 @@ fn ghash(h: [u8], aad: [u8], ciphertext: [u8]) -> [u8]:
     val aad_bits: u64 = aad.len() * 8
     val ct_bits: u64 = ciphertext.len() * 8
 
-    var len_block: [u8] = []
+    var len_block: [u8] = rt_array_new_with_cap(16)
     len_block.push(((aad_bits >> 56) & 0xFF).to_u8())
     len_block.push(((aad_bits >> 48) & 0xFF).to_u8())
     len_block.push(((aad_bits >> 40) & 0xFF).to_u8())
@@ -489,25 +424,24 @@ fn ghash(h: [u8], aad: [u8], ciphertext: [u8]) -> [u8]:
 
 fn _inc32(counter: [u8]) -> [u8]:
     """Increment the rightmost 32 bits of a 16-byte counter block."""
-    var result: [u8] = []
+    val c = (_u8_at(counter, 12).to_u32() << 24) |
+            (_u8_at(counter, 13).to_u32() << 16) |
+            (_u8_at(counter, 14).to_u32() << 8) |
+            _u8_at(counter, 15).to_u32()
+    val c_inc = (c + 1) & 0xFFFFFFFF
+
+    var result: [u8] = rt_array_new_with_cap(16)
     var i: u64 = 0
-    while i < 16:
+    while i < 12:
         result.push(_u8_at(counter, i))
         i = i + 1
-
-    # Increment the last 4 bytes as a 32-bit big-endian integer
-    val c = (result[12].to_u32() << 24) |
-            (result[13].to_u32() << 16) |
-            (result[14].to_u32() << 8) |
-            result[15].to_u32()
-    val c_inc = (c + 1) & 0xFFFFFFFF
-    result[12] = ((c_inc >> 24) & 0xFF).to_u8()
-    result[13] = ((c_inc >> 16) & 0xFF).to_u8()
-    result[14] = ((c_inc >> 8) & 0xFF).to_u8()
-    result[15] = (c_inc & 0xFF).to_u8()
+    result.push(((c_inc >> 24) & 0xFF).to_u8())
+    result.push(((c_inc >> 16) & 0xFF).to_u8())
+    result.push(((c_inc >> 8) & 0xFF).to_u8())
+    result.push((c_inc & 0xFF).to_u8())
     result
 
-fn gctr(round_keys: [u32], icb: [u8], input: [u8]) -> [u8]:
+fn gctr(round_keys: [u8], icb: [u8], input: [u8]) -> [u8]:
     """AES-CTR mode encryption/decryption.
 
     Encrypts each block by XORing with AES(key, counter), then increments counter.
@@ -559,7 +493,7 @@ fn _make_j0(nonce: [u8]) -> [u8]:
 
     For 96-bit nonces: J0 = nonce || 0x00000001.
     """
-    var j0: [u8] = []
+    var j0: [u8] = rt_array_new_with_cap(16)
     var i: u64 = 0
     while i < 12:
         j0.push(_u8_at(nonce, i))
@@ -586,7 +520,7 @@ fn aes128_gcm_encrypt(key: [u8], nonce: [u8], plaintext: [u8], aad: [u8]) -> [u8
     val round_keys = aes128_key_expansion(key)
 
     # Compute hash subkey H = AES_K(0^128)
-    var zero_block: [u8] = []
+    var zero_block: [u8] = rt_array_new_with_cap(16)
     var i: u64 = 0
     while i < 16:
         zero_block.push(0x00)
@@ -632,30 +566,39 @@ fn aes128_gcm_decrypt(key: [u8], nonce: [u8], ciphertext: [u8], aad: [u8], tag: 
     _debug_bytes4("dec aad", aad)
     _debug_bytes4("dec ct", ciphertext)
     _debug_bytes4("dec tag", tag)
+    _debug_bytes_all("dec ctall", ciphertext)
 
     # Compute hash subkey H = AES_K(0^128)
-    var zero_block: [u8] = []
+    var zero_block: [u8] = rt_array_new_with_cap(16)
     var i: u64 = 0
     while i < 16:
         zero_block.push(0x00)
         i = i + 1
     val h = aes128_encrypt_block(zero_block, round_keys)
+    _debug_bytes4("dec h", h)
+    _debug_bytes16("dec h16", h)
 
     # Construct J0 from nonce
     val j0 = _make_j0(nonce)
+    _debug_bytes4("dec j0", j0)
+    _debug_bytes16("dec j016", j0)
 
     # Compute GHASH over AAD and ciphertext
     val s = ghash(h, aad, ciphertext)
+    _debug_bytes4("dec s", s)
+    _debug_bytes16("dec s16", s)
 
     # Compute expected tag: T' = MSBt(GCTR_K(J0, S))
     val expected_tag = gctr(round_keys, j0, s)
     _debug_bytes4("dec expected_tag", expected_tag)
+    _debug_bytes16("dec tag16", tag)
+    _debug_bytes16("dec expected16", expected_tag)
 
     # Constant-time tag comparison
     var diff: u8 = 0x00
     i = 0
     while i < 16:
-        diff = diff | (expected_tag[i] ^ tag[i])
+        diff = diff | (_u8_at(expected_tag, i) ^ _u8_at(tag, i))
         i = i + 1
 
     if diff != 0:

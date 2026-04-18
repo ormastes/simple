@@ -1,0 +1,60 @@
+# @cover src/lib/common/win_fs/fs_encoder.spl 80%
+# @cover src/lib/common/win_fs/window_record.spl 60%
+"""
+# FsEncoder Specification
+
+**Feature:** spm-winfs-llm-suite / AC-2
+**Status:** Red (no impl yet)
+
+Exercises round-trip `WindowRecord` → `FsTree` → `WindowRecord` and schema
+path layout `/<app>/<wid>/{title,state,geometry,buffer,meta,actions/*}`.
+"""
+
+use std.sspec.*
+use lib.common.privilege.id_path.{IdPath, id_path_intern}
+use lib.common.win_fs.window_record.{WindowRecord, WindowState, Rect, BufferRef}
+use lib.common.win_fs.fs_encoder.{FsTree, FsEntry, encode_record, decode_tree, tree_has_path}
+
+describe "FsEncoder":
+    describe "round-trip":
+        it "AC-2: encode then decode reproduces record identity":
+            val rec = WindowRecord(
+                wid: 42,
+                generation: 1,
+                app: "banking",
+                title: "Account",
+                state: WindowState.Normal,
+                geometry: Rect(x: 10, y: 20, w: 800, h: 600),
+                buffer_ref: BufferRef(kind: "shm", handle: 7, bytes: 4096),
+                acl_id_path: id_path_intern("id.user.banking.view"))
+            val tree = encode_record(rec)
+            val decoded = decode_tree(tree)
+            expect decoded.ok to_equal true
+            expect decoded.value.wid to_equal 42
+            expect decoded.value.app to_equal "banking"
+            expect decoded.value.title to_equal "Account"
+
+    describe "path schema":
+        it "AC-2: encodes /<app>/<wid>/title":
+            val rec = WindowRecord(
+                wid: 7, generation: 1, app: "mail", title: "Inbox",
+                state: WindowState.Normal,
+                geometry: Rect(x: 0, y: 0, w: 100, h: 100),
+                buffer_ref: BufferRef(kind: "shm", handle: 1, bytes: 1),
+                acl_id_path: id_path_intern("id.user.mail.view"))
+            val tree = encode_record(rec)
+            expect tree_has_path(tree, "/mail/7/title") to_equal true
+
+        it "AC-2: encodes state, geometry, buffer, meta, actions":
+            val rec = WindowRecord(
+                wid: 7, generation: 1, app: "mail", title: "Inbox",
+                state: WindowState.Normal,
+                geometry: Rect(x: 0, y: 0, w: 100, h: 100),
+                buffer_ref: BufferRef(kind: "shm", handle: 1, bytes: 1),
+                acl_id_path: id_path_intern("id.user.mail.view"))
+            val tree = encode_record(rec)
+            expect tree_has_path(tree, "/mail/7/state") to_equal true
+            expect tree_has_path(tree, "/mail/7/geometry") to_equal true
+            expect tree_has_path(tree, "/mail/7/buffer") to_equal true
+            expect tree_has_path(tree, "/mail/7/meta") to_equal true
+            expect tree_has_path(tree, "/mail/7/actions") to_equal true

@@ -1,0 +1,63 @@
+# @cover src/lib/nogc_sync_mut/mcp/dispatch.spl 80%
+"""
+# MCP dispatch_wrap Specification
+
+**Feature:** spm-winfs-llm-suite / AC-5, AC-6
+**Status:** Red (no impl yet)
+
+Registered tool: privilege check runs, output gate runs, audit row logged.
+Legacy unregistered tool: still dispatches (no break), emits unregistered-tool
+JSON error envelope (fail-closed for registry-using callers).
+"""
+
+use std.sspec.*
+use lib.common.privilege.id_path.{id_path_intern}
+use lib.common.privilege.principal.{Principal, PrincipalKind}
+use lib.common.privilege.authority_token.{AuthorityToken, AuthorityLevel}
+use lib.nogc_sync_mut.mcp.dispatch.{DispatchRegistry, DispatchEntry, dispatch_wrap, test_audit_sink_size}
+
+describe "mcp.dispatch":
+    describe "registered tool":
+        it "AC-5: privilege check runs — denied caller gets EACCES":
+            val reg = DispatchRegistry.new()
+            reg.register(DispatchEntry.echo(required: id_path_intern("id.user.banking"), level: AuthorityLevel.Sensitive))
+            val principal = Principal(kind: PrincipalKind.Local, id: "eve")
+            val token = AuthorityToken.mock(
+                id_path: id_path_intern("id.user.mail"),
+                level: AuthorityLevel.Internal,
+                principal: principal)
+            val reply = dispatch_wrap(reg, "echo", ["hi"], token)
+            expect reply to_contain "EACCES"
+
+        it "AC-5: output gate runs — secret in handler result is redacted":
+            val reg = DispatchRegistry.new()
+            reg.register(DispatchEntry.leak_aws(required: id_path_intern("id.user.public"), level: AuthorityLevel.Public))
+            val principal = Principal(kind: PrincipalKind.Local, id: "alice")
+            val token = AuthorityToken.mock(
+                id_path: id_path_intern("id.user.public"),
+                level: AuthorityLevel.Public,
+                principal: principal)
+            val reply = dispatch_wrap(reg, "leak_aws", [], token)
+            expect reply to_contain "REDACTED"
+
+        it "AC-5: audit row logged for every registered invocation":
+            val reg = DispatchRegistry.new_for_test()
+            reg.register(DispatchEntry.echo(required: id_path_intern("id.user.public"), level: AuthorityLevel.Public))
+            val principal = Principal(kind: PrincipalKind.Local, id: "alice")
+            val token = AuthorityToken.mock(
+                id_path: id_path_intern("id.user.public"),
+                level: AuthorityLevel.Public,
+                principal: principal)
+            dispatch_wrap(reg, "echo", ["hi"], token)
+            expect test_audit_sink_size(reg) to_be_greater_than 0
+
+    describe "unregistered tool":
+        it "AC-5: returns unregistered_tool error envelope (fail-closed)":
+            val reg = DispatchRegistry.new()
+            val principal = Principal(kind: PrincipalKind.Local, id: "alice")
+            val token = AuthorityToken.mock(
+                id_path: id_path_intern("id.user.public"),
+                level: AuthorityLevel.Public,
+                principal: principal)
+            val reply = dispatch_wrap(reg, "unknown_tool", [], token)
+            expect reply to_contain "unregistered_tool"

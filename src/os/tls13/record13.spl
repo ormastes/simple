@@ -10,6 +10,7 @@ use os.crypto.aes128_gcm.{aes128_gcm_encrypt, aes128_gcm_decrypt, Aes128GcmResul
 extern fn rt_bytes_u8_at(arr: [u8], idx: i64) -> i64
 extern fn serial_println(msg: text)
 extern fn rt_array_new_with_cap(cap: i64) -> [u8]
+extern fn rt_tls13_aes128_gcm_decrypt(key: [u8], nonce: [u8], ciphertext: [u8], aad: [u8], tag: [u8]) -> [u8]
 
 # ============================================================================
 # Constants
@@ -232,7 +233,7 @@ fn record13_decrypt(rk: RecordKey, seq_num: u64, raw_record: [u8]) -> RecordResu
         if cursor >= inner.len():
             return RecordResult.Err("decrypted inner plaintext missing content type")
         val real_content_type = _u8_at(inner, cursor)
-        var data: [u8] = []
+        var data: [u8] = rt_array_new_with_cap(cursor.to_i64())
         var j: u64 = 0
         while j < cursor:
             data.push(_u8_at(inner, j))
@@ -243,3 +244,84 @@ fn record13_decrypt(rk: RecordKey, seq_num: u64, raw_record: [u8]) -> RecordResu
         return RecordResult.Err(err_msg)
 
     RecordResult.Err("aes128_gcm_decrypt returned unexpected result")
+
+fn record13_decrypt_fd(rk: RecordKey, seq_num: u64, raw_record: [u8]) -> RecordResult:
+    _rec_debug("decrypt(fd) raw_len={raw_record.len()} seq={seq_num}")
+    if raw_record.len() < 5:
+        return RecordResult.Err("record too short: missing header")
+
+    if _u8_at(raw_record, 0) != 0x17:
+        return RecordResult.Err("record header: expected content_type 0x17")
+    if _u8_at(raw_record, 1) != 0x03:
+        return RecordResult.Err("record header: expected legacy_version_hi 0x03")
+    if _u8_at(raw_record, 2) != 0x03:
+        return RecordResult.Err("record header: expected legacy_version_lo 0x03")
+
+    val payload_length = (_u8_at(raw_record, 3).to_u64() << 8) | _u8_at(raw_record, 4).to_u64()
+    val header_len: u64 = 5
+    val available_payload = raw_record.len() - header_len
+    if available_payload < payload_length:
+        return RecordResult.Err("record too short: payload truncated")
+    if payload_length < AEAD_TAG_SIZE:
+        return RecordResult.Err("record payload too short: less than tag size")
+
+    val ct_len = payload_length - AEAD_TAG_SIZE
+    val ciphertext = _copy_range(raw_record, header_len, ct_len)
+    val tag_start = raw_record.len() - AEAD_TAG_SIZE
+    val tag = _copy_range(raw_record, tag_start, AEAD_TAG_SIZE)
+    val aad = _copy_range(raw_record, 0, 5)
+    val nonce = record13_make_nonce(rk.iv, seq_num)
+    val inner = rt_tls13_aes128_gcm_decrypt(rk.key, nonce, ciphertext, aad, tag)
+    if inner.len() == 0:
+        return RecordResult.Err("authentication tag mismatch")
+    _rec_debug("decrypt(fd) inner_len={inner.len()} b0={_u8_at(inner, 0)}")
+
+    var cursor = inner.len()
+    while cursor > 0:
+        val idx = cursor - 1
+        if _u8_at(inner, idx) != 0x00:
+            cursor = idx
+            break
+        cursor = idx
+    if cursor >= inner.len():
+        return RecordResult.Err("decrypted inner plaintext missing content type")
+    val real_content_type = _u8_at(inner, cursor)
+    _rec_debug("decrypt(fd) real_ct={real_content_type} data_len={cursor}")
+    var data: [u8] = rt_array_new_with_cap(cursor.to_i64())
+    var j: u64 = 0
+    while j < cursor:
+        data.push(_u8_at(inner, j))
+        j = j + 1
+    return RecordResult.Ok(content_type: real_content_type, data: data)
+
+fn record13_decrypt_fd_inner(rk: RecordKey, seq_num: u64, raw_record: [u8]) -> [u8]:
+    _rec_debug("decrypt(fd) raw_len={raw_record.len()} seq={seq_num}")
+    if raw_record.len() < 5:
+        return []
+
+    if _u8_at(raw_record, 0) != 0x17:
+        return []
+    if _u8_at(raw_record, 1) != 0x03:
+        return []
+    if _u8_at(raw_record, 2) != 0x03:
+        return []
+
+    val payload_length = (_u8_at(raw_record, 3).to_u64() << 8) | _u8_at(raw_record, 4).to_u64()
+    val header_len: u64 = 5
+    val available_payload = raw_record.len() - header_len
+    if available_payload < payload_length:
+        return []
+    if payload_length < AEAD_TAG_SIZE:
+        return []
+
+    val ct_len = payload_length - AEAD_TAG_SIZE
+    val ciphertext = _copy_range(raw_record, header_len, ct_len)
+    val tag_start = raw_record.len() - AEAD_TAG_SIZE
+    val tag = _copy_range(raw_record, tag_start, AEAD_TAG_SIZE)
+    val aad = _copy_range(raw_record, 0, 5)
+    val nonce = record13_make_nonce(rk.iv, seq_num)
+    val inner = rt_tls13_aes128_gcm_decrypt(rk.key, nonce, ciphertext, aad, tag)
+    if inner.len() == 0:
+        return []
+    _rec_debug("decrypt(fd) inner_len={inner.len()} b0={_u8_at(inner, 0)}")
+    inner

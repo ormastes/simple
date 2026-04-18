@@ -1,0 +1,184 @@
+#![allow(unnamed_duplicate_typed_args)]
+"""AuthorityToken — capability-like bearer of a privilege grant.
+
+Couples an `IdPath` with a clearance `AuthorityLevel`, the minting
+`Principal`, a `TrustSource`, and a `Scope`. Pure module — only constructors
+and accessors; persistence lives in `store.spl` / `store_fs.spl`.
+
+`TrustSource` mirrors `app.package.registry.trust.TrustLevel` as a
+privilege-layer enum so `src/lib/common/` stays free of `src/app/` imports.
+
+Feature: spm-winfs-llm-suite AC-1.
+"""
+
+use lib.common.privilege.id_path.{IdPath, id_path_intern}
+use lib.common.privilege.principal.{Principal, PrincipalKind}
+
+# ---------------------------------------------------------------------------
+# Enums
+# ---------------------------------------------------------------------------
+
+enum AuthorityLevel:
+    """Clearance ladder. Higher variants dominate lower ones."""
+    Public
+    Internal
+    Sensitive
+    Secret
+
+enum TrustSource:
+    """Provenance of the trust relation backing a token.
+
+    Mirrors `app.package.registry.trust.TrustLevel` variant-for-variant so the
+    privilege layer does not have to import the application layer.
+    """
+    RegistryTrusted
+    UserTrusted
+    Untrusted
+    Revoked
+
+# ---------------------------------------------------------------------------
+# Scope
+# ---------------------------------------------------------------------------
+
+class Scope:
+    """Lifetime envelope for a token."""
+    ttl_ms: u64
+    once: bool
+    bound_wid: u64
+
+    static fn process() -> Scope:
+        Scope(ttl_ms: 0 as u64, once: false, bound_wid: 0 as u64)
+
+    static fn one_shot() -> Scope:
+        Scope(ttl_ms: 0 as u64, once: true, bound_wid: 0 as u64)
+
+# ---------------------------------------------------------------------------
+# AuthorityToken
+# ---------------------------------------------------------------------------
+
+class AuthorityToken:
+    """A minted privilege bearer."""
+    id_path: IdPath
+    level: AuthorityLevel
+    principal: Principal
+    trust_source: TrustSource
+    scope: Scope
+    issuer_sig: [u8]
+
+    # Test + bootstrap factories --------------------------------------------
+
+    static fn mock(id_path: IdPath, level: AuthorityLevel, principal: Principal) -> AuthorityToken:
+        """Spec-facing factory; trust is RegistryTrusted, scope is process."""
+        AuthorityToken(
+            id_path: id_path,
+            level: level,
+            principal: principal,
+            trust_source: TrustSource.RegistryTrusted,
+            scope: Scope.process(),
+            issuer_sig: [])
+
+    static fn mock_with_trust(id_path: IdPath, level: AuthorityLevel, principal: Principal, trust: TrustSource) -> AuthorityToken:
+        """Like `mock` but with an explicit trust source (used for Revoked tests)."""
+        AuthorityToken(
+            id_path: id_path,
+            level: level,
+            principal: principal,
+            trust_source: trust,
+            scope: Scope.process(),
+            issuer_sig: [])
+
+    static fn root_for(principal: Principal) -> AuthorityToken:
+        """The root `id` token for a principal — can subdivide into anything."""
+        AuthorityToken(
+            id_path: id_path_intern("id"),
+            level: AuthorityLevel.Secret,
+            principal: principal,
+            trust_source: TrustSource.RegistryTrusted,
+            scope: Scope.process(),
+            issuer_sig: _root_signature(principal.id))
+
+    static fn public() -> AuthorityToken:
+        """Unauthenticated / default token used when no caller context exists."""
+        AuthorityToken(
+            id_path: id_path_intern("id.public"),
+            level: AuthorityLevel.Public,
+            principal: Principal(kind: PrincipalKind.Local, id: "anonymous"),
+            trust_source: TrustSource.Untrusted,
+            scope: Scope.process(),
+            issuer_sig: [])
+
+# ---------------------------------------------------------------------------
+# Accessors + comparisons
+# ---------------------------------------------------------------------------
+
+fn authority_level_rank(level: AuthorityLevel) -> i64:
+    """Numeric rank so clearance comparisons become <= / >=."""
+    match level:
+        case AuthorityLevel.Public:    0 as i64
+        case AuthorityLevel.Internal:  1 as i64
+        case AuthorityLevel.Sensitive: 2 as i64
+        case AuthorityLevel.Secret:    3 as i64
+
+fn authority_level_name(level: AuthorityLevel) -> text:
+    match level:
+        case AuthorityLevel.Public:    "Public"
+        case AuthorityLevel.Internal:  "Internal"
+        case AuthorityLevel.Sensitive: "Sensitive"
+        case AuthorityLevel.Secret:    "Secret"
+
+fn authority_level_from_name(name: text) -> AuthorityLevel:
+    if name == "Secret":
+        return AuthorityLevel.Secret
+    if name == "Sensitive":
+        return AuthorityLevel.Sensitive
+    if name == "Internal":
+        return AuthorityLevel.Internal
+    AuthorityLevel.Public
+
+fn trust_source_name(t: TrustSource) -> text:
+    match t:
+        case TrustSource.RegistryTrusted: "RegistryTrusted"
+        case TrustSource.UserTrusted:     "UserTrusted"
+        case TrustSource.Untrusted:       "Untrusted"
+        case TrustSource.Revoked:         "Revoked"
+
+fn trust_source_from_name(name: text) -> TrustSource:
+    if name == "RegistryTrusted":
+        return TrustSource.RegistryTrusted
+    if name == "UserTrusted":
+        return TrustSource.UserTrusted
+    if name == "Revoked":
+        return TrustSource.Revoked
+    TrustSource.Untrusted
+
+fn is_revoked(t: AuthorityToken) -> bool:
+    """True when the token's trust source has been revoked."""
+    match t.trust_source:
+        case TrustSource.Revoked: true
+        case _:                    false
+
+# ---------------------------------------------------------------------------
+# Minimal deterministic signature helper (no crypto in wave 5a)
+# ---------------------------------------------------------------------------
+
+fn _root_signature(id: text) -> [u8]:
+    var out: [u8] = []
+    val bytes = id.bytes()
+    var i = 0
+    val n = bytes.len()
+    while i < n:
+        out = out + [bytes[i]]
+        i = i + 1
+    out
+
+fn authority_token_sig_equals(a: [u8], b: [u8]) -> bool:
+    """Byte-wise compare of two issuer signatures."""
+    if a.len() != b.len():
+        return false
+    var i = 0
+    val n = a.len()
+    while i < n:
+        if a[i] != b[i]:
+            return false
+        i = i + 1
+    true

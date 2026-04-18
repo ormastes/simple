@@ -1,0 +1,121 @@
+#![allow(unnamed_duplicate_typed_args)]
+"""Notify — nogc_sync_mut adapter that drains OutputGate decisions to
+audit log + a notification SDN file.
+
+Lives in `src/lib/nogc_sync_mut/` because it touches the filesystem
+(`log_security_event` appends to the configured log file, and this
+module persists a notification record). The pure gate in
+`src/lib/common/llm/output_gate.spl` only maintains in-memory counters
+— delivery happens here.
+
+Feature: spm-winfs-llm-suite AC-5.
+
+The SPM service (wave 5b) will consume the emitted SDN records to drive
+the window-manager toast; this module's contract is just: "given a
+reason + token, emit one audit row and append one SDN record".
+"""
+
+use lib.common.security.types.{SecurityEvent, AuditEntry, AuditConfig, SecuritySeverity}
+use lib.common.security.audit_log.{log_security_event}
+use lib.nogc_sync_mut.io.file_ops.{file_append}
+use lib.nogc_sync_mut.io.env_ops.{env_get, home}
+use lib.common.privilege.authority_token.{AuthorityToken, authority_level_name, trust_source_name}
+use lib.common.privilege.id_path.{id_path_to_text}
+
+# ---------------------------------------------------------------------------
+# Sink
+# ---------------------------------------------------------------------------
+
+class NotifySink:
+    """Where notifications land.
+
+    `audit_path` is the file audit rows are appended to (defaulting to
+    `security_audit.log` when left blank — mirrors `AuditConfig.default`).
+    `record_path` is the SDN record file that SPM / WM consumes.
+    """
+    audit_path: text
+    record_path: text
+
+    static fn default() -> NotifySink:
+        NotifySink(
+            audit_path: "security_audit.log",
+            record_path: "{_home_dir_or_default()}/.simple/llm_notifications.sdn")
+
+    static fn with_paths(audit_path: text, record_path: text) -> NotifySink:
+        NotifySink(audit_path: audit_path, record_path: record_path)
+
+# ---------------------------------------------------------------------------
+# notify_user
+# ---------------------------------------------------------------------------
+
+fn notify_user(sink: NotifySink, reason: text, token: AuthorityToken) -> Result<(), text>:
+    """Emit one audit row + append one SDN notification record.
+
+    Uses `log_security_event` (existing module) for audit — the event is
+    `AccessDenied` tagged with `reason`. The notification SDN record
+    carries the reason, the token's id_path, level, and trust source
+    (everything SPM needs to decide how to surface the toast).
+    """
+    val audit_result = _emit_audit(sink, reason, token)
+    if not audit_result.ok:
+        return Err(audit_result.error)
+    val sdn_result = _append_record(sink, reason, token)
+    if not sdn_result.ok:
+        return Err(sdn_result.error)
+    Ok(())
+
+# ---------------------------------------------------------------------------
+# Internal — audit
+# ---------------------------------------------------------------------------
+
+class _IoOutcome:
+    ok: bool
+    error: text
+
+fn _emit_audit(sink: NotifySink, reason: text, token: AuthorityToken) -> _IoOutcome:
+    val event = SecurityEvent.AccessDenied(
+        resource: "llm_output",
+        capability: id_path_to_text(token.id_path),
+        peer: token.principal.id)
+    val entry = AuditEntry.new(
+        event: event,
+        correlation_id: _correlation_id_from(reason),
+        module_path: "lib.nogc_sync_mut.llm.notify")
+    val config = AuditConfig(
+        enabled: true,
+        log_file: sink.audit_path,
+        log_to_stdout: false,
+        min_severity: SecuritySeverity.Info,
+        mask_secrets: true)
+    log_security_event(entry, config)
+    _IoOutcome(ok: true, error: "")
+
+# ---------------------------------------------------------------------------
+# Internal — SDN record append
+# ---------------------------------------------------------------------------
+
+fn _append_record(sink: NotifySink, reason: text, token: AuthorityToken) -> _IoOutcome:
+    val line = _encode_record_line(reason, token)
+    val ok = file_append(sink.record_path, line)
+    if not ok:
+        return _IoOutcome(ok: false, error: "failed to append llm notification SDN record")
+    _IoOutcome(ok: true, error: "")
+
+fn _encode_record_line(reason: text, token: AuthorityToken) -> text:
+    """One record per line:
+       `notify reason=<r>;id=<id_path>;level=<lvl>;trust=<ts>;principal=<id>`
+    """
+    val id_text  = id_path_to_text(token.id_path)
+    val lvl_text = authority_level_name(token.level)
+    val ts_text  = trust_source_name(token.trust_source)
+    "notify reason={reason};id={id_text};level={lvl_text};trust={ts_text};principal={token.principal.id}\n"
+
+fn _correlation_id_from(reason: text) -> text:
+    "llm-notify:" + reason
+
+fn _home_dir_or_default() -> text:
+    """Best-effort home lookup — falls back to `.` when env is unavailable."""
+    val h = home()
+    if h == "":
+        return "."
+    h

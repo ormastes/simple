@@ -1,0 +1,46 @@
+# @cover src/app/simple_process_manager/wm_spm_client.spl 80%
+# @cover src/app/simple_process_manager/transport_host.spl 40%
+# @cover src/app/simple_process_manager/transport_simpleos.spl 40%
+"""
+# WM ↔ SPM client RPC parity Specification
+
+**Feature:** spm-winfs-llm-suite / AC-3
+**Status:** Red (no impl yet)
+
+Same encoded bytes for the same request on both transports.
+"""
+
+use std.sspec.*
+use lib.common.privilege.id_path.{id_path_intern}
+use lib.common.win_fs.window_record.{WindowRecord, WindowState, Rect, BufferRef}
+use app.simple_process_manager.wm_spm_client.{WmSpmClient, encode_register_window}
+use app.simple_process_manager.transport.{SpmRequest}
+use app.simple_process_manager.transport_host.{SpmTransportHost}
+use app.simple_process_manager.transport_simpleos.{SpmTransportMock}
+
+describe "wm_spm_client":
+    describe "RPC payload parity":
+        it "AC-3: register_window produces identical bytes on both transports":
+            val rec = WindowRecord(
+                wid: 42, generation: 1, app: "banking", title: "Acct",
+                state: WindowState.Normal,
+                geometry: Rect(x: 10, y: 20, w: 800, h: 600),
+                buffer_ref: BufferRef(kind: "shm", handle: 7, bytes: 4096),
+                acl_id_path: id_path_intern("id.user.banking.view"))
+            val client_host = WmSpmClient.new(SpmTransportHost.mock_loopback())
+            val client_os = WmSpmClient.new(SpmTransportMock.new())
+            val host_bytes = client_host.test_encode_register(rec)
+            val os_bytes = client_os.test_encode_register(rec)
+            expect host_bytes.len() to_equal os_bytes.len()
+
+        it "AC-3: free encoder matches client-encoded bytes":
+            val rec = WindowRecord(
+                wid: 42, generation: 1, app: "banking", title: "Acct",
+                state: WindowState.Normal,
+                geometry: Rect(x: 10, y: 20, w: 800, h: 600),
+                buffer_ref: BufferRef(kind: "shm", handle: 7, bytes: 4096),
+                acl_id_path: id_path_intern("id.user.banking.view"))
+            val direct = encode_register_window(rec)
+            val client = WmSpmClient.new(SpmTransportHost.mock_loopback())
+            val via_client = client.test_encode_register(rec)
+            expect direct.len() to_equal via_client.len()

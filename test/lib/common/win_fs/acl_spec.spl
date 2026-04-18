@@ -1,0 +1,63 @@
+# @cover src/lib/common/win_fs/acl.spl 80%
+"""
+# Win-FS ACL Specification
+
+**Feature:** spm-winfs-llm-suite / AC-2, AC-4
+**Status:** Red (no impl yet)
+
+Exercises `acl_check(rec, token, op)` — deny when token id_path lacks required
+prefix; allow when it matches.
+"""
+
+use std.sspec.*
+use lib.common.privilege.id_path.{IdPath, id_path_intern}
+use lib.common.privilege.principal.{Principal, PrincipalKind}
+use lib.common.privilege.authority_token.{AuthorityToken, AuthorityLevel, Scope, TrustSource}
+use lib.common.win_fs.window_record.{WindowRecord, WindowState, Rect, BufferRef}
+use lib.common.win_fs.fs_encoder.{FsOp}
+use lib.common.win_fs.acl.{acl_check}
+
+describe "Win-FS ACL":
+    describe "open()":
+        it "AC-2: allows open when token id_path matches required prefix":
+            val rec = WindowRecord(
+                wid: 1, generation: 1, app: "banking", title: "Acct",
+                state: WindowState.Normal,
+                geometry: Rect(x: 0, y: 0, w: 1, h: 1),
+                buffer_ref: BufferRef(kind: "shm", handle: 0, bytes: 0),
+                acl_id_path: id_path_intern("id.user.banking.view"))
+            val principal = Principal(kind: PrincipalKind.Local, id: "alice")
+            val token = AuthorityToken.mock(
+                id_path: id_path_intern("id.user.banking"),
+                level: AuthorityLevel.Sensitive,
+                principal: principal)
+            expect acl_check(rec, token, FsOp.Open) to_equal true
+
+        it "AC-2: denies open when token id_path lacks required prefix":
+            val rec = WindowRecord(
+                wid: 1, generation: 1, app: "banking", title: "Acct",
+                state: WindowState.Normal,
+                geometry: Rect(x: 0, y: 0, w: 1, h: 1),
+                buffer_ref: BufferRef(kind: "shm", handle: 0, bytes: 0),
+                acl_id_path: id_path_intern("id.user.banking.view"))
+            val principal = Principal(kind: PrincipalKind.Local, id: "eve")
+            val token = AuthorityToken.mock(
+                id_path: id_path_intern("id.user.mail"),
+                level: AuthorityLevel.Internal,
+                principal: principal)
+            expect acl_check(rec, token, FsOp.Open) to_equal false
+
+        it "AC-2: revoked token is denied":
+            val rec = WindowRecord(
+                wid: 1, generation: 1, app: "banking", title: "Acct",
+                state: WindowState.Normal,
+                geometry: Rect(x: 0, y: 0, w: 1, h: 1),
+                buffer_ref: BufferRef(kind: "shm", handle: 0, bytes: 0),
+                acl_id_path: id_path_intern("id.user.banking.view"))
+            val principal = Principal(kind: PrincipalKind.Local, id: "alice")
+            val token = AuthorityToken.mock_with_trust(
+                id_path: id_path_intern("id.user.banking.view"),
+                level: AuthorityLevel.Sensitive,
+                principal: principal,
+                trust: TrustSource.Revoked)
+            expect acl_check(rec, token, FsOp.Open) to_equal false

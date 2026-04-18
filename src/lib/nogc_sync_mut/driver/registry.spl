@@ -1,0 +1,102 @@
+# DriverRegistry — holds every registered driver and routes device
+# matches to the right one. Used by both static-linked and dynamically-
+# loaded drivers.
+#
+# Dispatch is by (vendor, device) lookup; no dyn, no vtable. Concrete
+# drivers register a DriverOps record — a bundle of function pointers
+# matching the `Driver` trait surface — plus their manifest. The
+# registry is the single place that knows about all drivers; everything
+# else (loader, kernel, tests) goes through it.
+
+use std.driver.error.{DriverError}
+use std.driver.manifest.{DriverManifest, ManifestKind}
+use std.driver.types.{DeviceId, DriverHandle, DriverContext, IoctlCmd,
+                      ProbeResult, PowerState, DriverClass}
+
+# Function-pointer record matching the Driver trait.
+# Drivers fill this in at registration; the registry calls through it.
+#
+# Opaque `self_ptr` is driver-owned state; the kernel passes it back on
+# every call. This is the same pattern Linux's `file_operations` uses.
+struct DriverOps:
+    self_ptr:        i64
+    manifest_abi:    fn() -> i32
+    init_fn:         fn(DriverContext) -> Result<(), DriverError>
+    probe_fn:        fn(DeviceId) -> Result<ProbeResult, DriverError>
+    attach_fn:       fn(DeviceId) -> Result<DriverHandle, DriverError>
+    detach_fn:       fn(DriverHandle) -> Result<(), DriverError>
+    suspend_fn:      fn(DriverHandle, PowerState) -> Result<(), DriverError>
+    resume_fn:       fn(DriverHandle) -> Result<(), DriverError>
+    ioctl_fn:        fn(DriverHandle, IoctlCmd) -> Result<i64, DriverError>
+
+# One entry in the registry.
+struct DriverEntry:
+    manifest:  DriverManifest
+    ops:       DriverOps
+    loaded:    bool        # true once init_fn returned Ok
+
+struct DriverRegistry:
+    entries: [DriverEntry]
+
+impl DriverRegistry:
+    static fn empty() -> DriverRegistry:
+        return DriverRegistry(entries: [])
+
+    fn register(ops: DriverOps, manifest: DriverManifest) -> Result<i32, DriverError>:
+        if manifest.abi_rev != ops.manifest_abi():
+            return Result.Err(DriverError.AbiMismatch)
+        var idx: i32 = self.entries.len() as i32
+        self.entries.append(DriverEntry(manifest: manifest, ops: ops, loaded: false))
+        return Result.Ok(idx)
+
+    fn init_all(ctx: DriverContext) -> Result<i32, DriverError>:
+        var initialized: i32 = 0
+        var i: i32 = 0
+        while i < (self.entries.len() as i32):
+            var e: DriverEntry = self.entries[i]
+            if not e.loaded and e.manifest.kind == ManifestKind.Driver:
+                var rc = e.ops.init_fn(ctx)
+                match rc:
+                    Result.Ok(_) ->
+                        e.loaded = true
+                        self.entries[i] = e
+                        initialized = initialized + 1
+                    Result.Err(err) -> return Result.Err(err)
+            i = i + 1
+        return Result.Ok(initialized)
+
+    fn find_for_device(vendor: i32, device: i32, class: DriverClass) -> i32:
+        var i: i32 = 0
+        while i < (self.entries.len() as i32):
+            var e: DriverEntry = self.entries[i]
+            if e.loaded and e.manifest.class == class and e.manifest.matches(vendor, device):
+                return i
+            i = i + 1
+        return -1
+
+    fn probe_at(idx: i32, dev: DeviceId) -> Result<ProbeResult, DriverError>:
+        if idx < 0 or idx >= (self.entries.len() as i32):
+            return Result.Err(DriverError.BadArg)
+        var e: DriverEntry = self.entries[idx]
+        if not e.loaded:
+            return Result.Err(DriverError.NotReady)
+        return e.ops.probe_fn(dev)
+
+    fn attach_at(idx: i32, dev: DeviceId) -> Result<DriverHandle, DriverError>:
+        if idx < 0 or idx >= (self.entries.len() as i32):
+            return Result.Err(DriverError.BadArg)
+        var e: DriverEntry = self.entries[idx]
+        if not e.loaded:
+            return Result.Err(DriverError.NotReady)
+        return e.ops.attach_fn(dev)
+
+    fn detach_at(idx: i32, h: DriverHandle) -> Result<(), DriverError>:
+        if idx < 0 or idx >= (self.entries.len() as i32):
+            return Result.Err(DriverError.BadArg)
+        var e: DriverEntry = self.entries[idx]
+        if not e.loaded:
+            return Result.Err(DriverError.NotReady)
+        return e.ops.detach_fn(h)
+
+    fn count() -> i32:
+        return self.entries.len() as i32

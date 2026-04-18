@@ -1,0 +1,101 @@
+# System-spec checks for the bounded SimpleOS desktop-core verification package.
+#
+# Requirements:
+# - doc/02_requirements/feature/simpleos_desktop_core_formal_verification.md
+# - doc/02_requirements/nfr/simpleos_desktop_core_formal_verification.md
+
+use std.spec.{describe, it, expect}
+use os.kernel.arch.riscv64.trap_model.{
+    RV64_CAUSE_ECALL_FROM_U,
+    RV64_CAUSE_INTERRUPT_BIT,
+    RV64_CAUSE_S_EXTERNAL_INTERRUPT,
+    RV64_SSTATUS_SPP,
+    Rv64TrapKind,
+    create_rv64_kernel_context,
+    create_rv64_user_context,
+    classify_rv64_trap,
+    rv64_syscall_args_from_context
+}
+use os.kernel.arch.arch_context.{Riscv64Context}
+use os.desktop.app_switcher.{AppSwitcher}
+use os.crash_policy.{
+    AppClass,
+    AppFaultDomain,
+    default_fault_domain,
+    default_supervisor_policy
+}
+use std.window_protocol.geometry.{WindowId, Px}
+
+describe "simpleos_desktop_core_formal_verification feature spec":
+    it "REQ-SODCFV-002 keeps kernel and user privilege return state distinct":
+        val kernel_ctx = create_rv64_kernel_context(0x80200000, 0x80400000, 0)
+        val user_ctx = create_rv64_user_context(0x400000, 0x410000, 0)
+        expect((kernel_ctx.sstatus & RV64_SSTATUS_SPP) != 0).to_equal(true)
+        expect((user_ctx.sstatus & RV64_SSTATUS_SPP) != 0).to_equal(false)
+
+    it "REQ-SODCFV-002 preserves user ecall and external interrupt as different kernel-core paths":
+        val syscall_kind = classify_rv64_trap(RV64_CAUSE_ECALL_FROM_U)
+        val irq_kind = classify_rv64_trap(RV64_CAUSE_INTERRUPT_BIT | RV64_CAUSE_S_EXTERNAL_INTERRUPT)
+        match syscall_kind:
+            case Rv64TrapKind.UserEcall:
+                expect(true).to_equal(true)
+            case _:
+                expect(false).to_equal(true)
+        match irq_kind:
+            case Rv64TrapKind.ExternalInterrupt:
+                expect(true).to_equal(true)
+            case _:
+                expect(false).to_equal(true)
+
+    it "REQ-SODCFV-002 keeps syscall register marshalling stable":
+        val ctx = Riscv64Context(
+            ra: 0, sp: 0, gp: 0, tp: 0,
+            t0: 0, t1: 0, t2: 0,
+            s0: 0, s1: 0,
+            a0: 11, a1: 22, a2: 33, a3: 44, a4: 55, a5: 66, a6: 0, a7: 77,
+            s2: 0, s3: 0, s4: 0, s5: 0, s6: 0, s7: 0, s8: 0, s9: 0, s10: 0, s11: 0,
+            t3: 0, t4: 0, t5: 0, t6: 0,
+            sepc: 0x1000,
+            sstatus: 0,
+            scause: RV64_CAUSE_ECALL_FROM_U
+        )
+        val args = rv64_syscall_args_from_context(ctx)
+        expect(args.id).to_equal(77)
+        expect(args.arg0).to_equal(11)
+        expect(args.arg5).to_equal(66)
+
+    it "REQ-SODCFV-003 keeps desktop selection unique and updates it after close":
+        var switcher = AppSwitcher.create(Px(value: 1280), Px(value: 720))
+        switcher.show(
+            [WindowId(value: 10), WindowId(value: 20)],
+            ["Terminal", "Browser"]
+        )
+        expect(switcher.is_visible()).to_equal(true)
+        expect(switcher.get_selected_window_id()?.value).to_equal(10)
+        switcher.select_next()
+        expect(switcher.get_selected_window_id()?.value).to_equal(20)
+        val closed = switcher.close_selected()
+        expect(closed?.value).to_equal(20)
+        expect(switcher.get_selected_window_id()?.value).to_equal(10)
+
+    it "REQ-SODCFV-003 and NFR-SODCFV-008 keep user apps and kernel components in different crash domains":
+        val user_domain = default_fault_domain(AppClass.UserApp)
+        val kernel_domain = default_fault_domain(AppClass.KernelComponent)
+        match user_domain:
+            case AppFaultDomain.Process:
+                expect(true).to_equal(true)
+            case _:
+                expect(false).to_equal(true)
+        match kernel_domain:
+            case AppFaultDomain.KernelResident:
+                expect(true).to_equal(true)
+            case _:
+                expect(false).to_equal(true)
+
+    it "REQ-SODCFV-003 keeps restart policy stricter for user apps than for kernel components":
+        val user_policy = default_supervisor_policy(AppClass.UserApp)
+        val kernel_policy = default_supervisor_policy(AppClass.KernelComponent)
+        expect(user_policy.max_restarts).to_equal(1)
+        expect(kernel_policy.max_restarts).to_equal(0)
+        expect(user_policy.quarantine_on_limit).to_equal(true)
+        expect(kernel_policy.quarantine_on_limit).to_equal(false)
