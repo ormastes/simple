@@ -231,16 +231,43 @@ These are valid struct fields; the existing self-host (`bin/simple`)
 handles them correctly. The new self-host's codegen treats them as
 function calls — a separate bug class from method dispatch ambiguity.
 
-Hypothesis: when codegen lowers `self.field` access inside an `fn`
-method (no explicit `me` keyword, but with implicit `self`), the
-expected struct type for `self` isn't propagated correctly, so field
-load lowers to a dynamic name lookup that falls through to the
-runtime "function not found" path.
+**Hypothesis falsified 2026-04-18.** Two experiments narrowed the bug:
 
-Estimated effort to fix: medium-large — requires tracing the codegen
-field-access lowering pass for methods with implicit-self in
-`fn name() -> ...` form. Fix likely lives in `src/compiler_rust/`
-codegen, similar layer to the dedup patch but on a different code path.
+1. Changed `fn` → `me` for `Lint.with_fix`, `Lint.with_easy_fix`,
+   `LintResult.format` in `src/compiler/90.tools/lint/main.spl`.
+   Re-ran Stage 4. Same `Function 'level' not found` errors.
+   So `fn` vs `me` keyword is NOT the discriminator.
+
+2. Built a minimal field-access repro in fresh self-host:
+   ```
+   class Box:
+       line: i32
+       name: text
+       fn show() -> text:
+           self.line.to_string() + ":" + self.name
+
+   fn main() -> i32:
+       val b = Box(line: 42, name: "hello")
+       println(b.show())
+       0
+   ```
+   Built fine (1 compiled, 0 stubs in user code). Ran and produced
+   output `0.000…0002:hello` — `self.name` read OK as text, but
+   `self.line.to_string()` returned a long-zero float string
+   instead of `"42"`.
+
+**Real bug class: wrong-typed field load.** The field is found and
+read, but bytes are interpreted as f64 instead of i32. Then
+`.to_string()` dispatches to f64's stringifier (producing the
+zeros) or fails entirely. The runtime `Function 'X' not found`
+error is downstream noise from the wrong-type call path, not the
+actual root cause.
+
+Estimated effort to fix: large — requires tracing struct-layout
+codegen for the new self-host. Likely involves alignment/offset
+computation in `src/compiler_rust/compiler/src/codegen/instr/` or
+the layout pass in `src/compiler_rust/compiler/src/types/`. Beyond
+reasonable single-session scope without compiler-internals expertise.
 
 ### Partial unstub applied 2026-04-18
 
