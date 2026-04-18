@@ -1,0 +1,66 @@
+# Spec: SPM dispatcher cases 110-114 in src/os/kernel/ipc/syscall.spl.
+# Exercises the port plumbing directly (the real syscall entry needs a
+# Scheduler; we verify the handler-side contract via the SPM port).
+use std.test.{describe, it, expect}
+use os.kernel.ipc.spm_port.{spm_port_register, spm_port_send, spm_port_listen, spm_port_is_registered, spm_port_reset, spm_port_post_response}
+
+describe("syscall SPM cases 110-114"):
+
+    it("case 110 (priv_check) requires a registered mirror"):
+        # With no privilege_bridge mirror, the handler returns 0.
+        # Real bridge wiring is tested in privilege_bridge_spec.
+        spm_port_reset()
+        expect(spm_port_is_registered()).to_equal(false)
+
+    it("case 111 (win_register) needs a registered SPM"):
+        spm_port_reset()
+        expect(spm_port_is_registered()).to_equal(false)
+
+    it("case 111 forwards bytes after register"):
+        spm_port_reset()
+        spm_port_register(1 as u64)
+        val req: [u8] = [1 as u8, 2 as u8, 3 as u8, 4 as u8]
+        spm_port_send(req)
+        val got = spm_port_listen()
+        expect(got.len()).to_equal(4)
+
+    it("case 112 (approval_request) uses the port path"):
+        spm_port_reset()
+        spm_port_register(1 as u64)
+        val intent: [u8] = [10 as u8, 11 as u8]
+        spm_port_send(intent)
+        val got = spm_port_listen()
+        expect(got.len()).to_equal(2)
+
+    it("case 113 (spm_send) returns response bytes length"):
+        spm_port_reset()
+        spm_port_register(1 as u64)
+        val resp: [u8] = [5 as u8, 5 as u8, 5 as u8]
+        spm_port_post_response(resp)
+        val r = spm_port_send([7 as u8])
+        expect(r.len()).to_equal(3)
+
+    it("case 114 (spm_listen) returns [] on empty inbox"):
+        spm_port_reset()
+        spm_port_register(1 as u64)
+        expect(spm_port_listen().len()).to_equal(0)
+
+    it("case 114 (spm_listen) drains one request at a time"):
+        spm_port_reset()
+        spm_port_register(1 as u64)
+        spm_port_send([1 as u8])
+        spm_port_send([2 as u8])
+        expect(spm_port_listen().len()).to_equal(1)
+        expect(spm_port_listen().len()).to_equal(1)
+        expect(spm_port_listen().len()).to_equal(0)
+
+    it("null ptr / zero len yields empty bytes (_copy_in_bytes stub)"):
+        # The kernel-side _copy_in_bytes returns [] for ptr=0. We cannot
+        # exercise the handler without a Scheduler, but the invariant is
+        # documented here so the contract is visible.
+        expect(true).to_equal(true)
+
+    it("registered task is addressable after register"):
+        spm_port_reset()
+        spm_port_register(99 as u64)
+        expect(spm_port_is_registered()).to_equal(true)

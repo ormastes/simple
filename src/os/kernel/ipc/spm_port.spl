@@ -1,0 +1,68 @@
+# SPM Port — kernel-side mailbox that the userland SPM service task
+# registers with. Userland syscalls 110-114 forward through this port.
+#
+# This is deliberately minimal — one registered receiver, one in-memory
+# queue. Full IpcPort / IpcMessage framing is reserved for the integration
+# follow-up; today's goal is making kernel dispatcher cases reachable.
+#
+# Feature: spm-winfs-llm-suite (AC-3 / AC-4).
+
+use os.kernel.types.task_types.{TaskId}
+
+# ---- State (module-level; single registered SPM task at a time) -------------
+
+var _spm_registered_task: u64 = 0
+var _spm_inbox: [[u8]] = []   # list of pending request payloads
+var _spm_last_response: [u8] = []
+
+# ---- Public API --------------------------------------------------------------
+
+fn spm_port_register(task_id: u64) -> bool:
+    """Register the SPM task as the port receiver. Returns false if another
+    task is already registered (last-writer-wins is disabled by design)."""
+    if _spm_registered_task != 0 and _spm_registered_task != task_id:
+        return false
+    _spm_registered_task = task_id
+    return true
+
+fn spm_port_is_registered() -> bool:
+    _spm_registered_task != 0
+
+fn spm_port_registered_task() -> u64:
+    _spm_registered_task
+
+fn spm_port_send(req_bytes: [u8]) -> [u8]:
+    """Userland → SPM request. Enqueues on the SPM inbox. Returns the
+    most-recent SPM response bytes (empty if none yet). The real
+    request/response correlation will come with IpcPort integration."""
+    var inbox = _spm_inbox
+    inbox = inbox + [req_bytes]
+    _spm_inbox = inbox
+    _spm_last_response
+
+fn spm_port_listen() -> [u8]:
+    """SPM-side: pop one request from the inbox. Returns [] if empty.
+
+    Non-blocking for now; full blocking semantics wait for scheduler
+    integration."""
+    var inbox = _spm_inbox
+    if inbox.len() == 0:
+        return []
+    val first = inbox[0]
+    var rest: [[u8]] = []
+    var i = 1
+    while i < inbox.len():
+        rest = rest + [inbox[i]]
+        i = i + 1
+    _spm_inbox = rest
+    first
+
+fn spm_port_post_response(resp_bytes: [u8]):
+    """SPM-side: stash the response for the next spm_port_send caller."""
+    _spm_last_response = resp_bytes
+
+fn spm_port_reset():
+    """Test helper — clear all port state."""
+    _spm_registered_task = 0
+    _spm_inbox = []
+    _spm_last_response = []
