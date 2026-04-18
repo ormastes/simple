@@ -1,5 +1,87 @@
-use std.driver.manifest.{DriverManifest, ManifestKind}
+use std.driver.manifest.{DriverManifest, ManifestKind,
+                         DRVS_MAGIC, DRVS_ABI_REV, DRVS_HEADER_BYTES,
+                         DRVS_NAME_LEN, DRVS_VERSION_LEN}
+use std.driver.loader.{decode_manifest}
 use std.driver.types.{DriverClass}
+
+# FR-DRIVER-0004 round-trip spec: encode a DriverManifest to DRVS bytes
+# in the test, then decode via std.driver.loader::decode_manifest and
+# assert every field survives. The encoder used here mirrors the shape
+# the compiler's .drv_manifest SMF section writer must produce.
+#
+# Keeping the encoder inline (not in loader.spl) while the producer
+# side is wired; a follow-up commit promotes it to a shared
+# `encode_manifest` next to `decode_manifest`.
+
+fn encode_manifest_test(m: DriverManifest) -> [u8]:
+    val total: i32 = m.byte_size()
+    var buf: [u8] = []
+    var i: i32 = 0
+    while i < total:
+        buf.append(0 as u8)
+        i = i + 1
+
+    write_u32_le_t(buf, 0, DRVS_MAGIC)
+    buf[4] = kind_byte_t(m.kind) as u8
+    buf[5] = class_byte_t(m.dclass) as u8
+    write_u16_le_t(buf, 6, m.abi_rev)
+    write_u32_le_t(buf, 8, m.vendor)
+    val device_count: i32 = m.device_ids.len() as i32
+    write_u32_le_t(buf, 12, device_count)
+    write_ascii_t(buf, 16, DRVS_VERSION_LEN, m.version)
+    write_ascii_t(buf, 32, DRVS_NAME_LEN, m.name)
+    var j: i32 = 0
+    while j < device_count:
+        val base: i32 = DRVS_HEADER_BYTES + j * 8
+        write_u32_le_t(buf, base + 4, m.device_ids[j])
+        j = j + 1
+    return buf
+
+fn write_u16_le_t(buf: [u8], at: i32, value: i32):
+    buf[at]     = (value        & 0xff) as u8
+    buf[at + 1] = ((value >> 8)  & 0xff) as u8
+
+fn write_u32_le_t(buf: [u8], at: i32, value: i32):
+    buf[at]     = (value         & 0xff) as u8
+    buf[at + 1] = ((value >> 8)  & 0xff) as u8
+    buf[at + 2] = ((value >> 16) & 0xff) as u8
+    buf[at + 3] = ((value >> 24) & 0xff) as u8
+
+fn write_ascii_t(buf: [u8], at: i32, max_len: i32, s: text):
+    val src: [u8] = utf8_bytes_of_t(s)
+    var i: i32 = 0
+    var n: i32 = src.len() as i32
+    if n > max_len:
+        n = max_len
+    while i < n:
+        buf[at + i] = src[i]
+        i = i + 1
+
+extern fn utf8_bytes_of_t(s: text) -> [u8]
+
+fn kind_byte_t(k: ManifestKind) -> i32:
+    match k:
+        case Driver:    return 0
+        case NativeLib: return 1
+
+fn class_byte_t(c: DriverClass) -> i32:
+    match c:
+        case Block:   return 0
+        case Char:    return 1
+        case Net:     return 2
+        case Input:   return 3
+        case Display: return 4
+        case Storage: return 5
+        case Bus:     return 6
+        case Fs:      return 7
+        case Gpu:     return 8
+        case Audio:   return 9
+        case Sensor:  return 10
+        case Timer:   return 11
+        case Irq:     return 12
+        case Power:   return 13
+        case Virt:    return 14
+        case Misc:    return 15
 
 fn test():
     describe "driver_manifest":
@@ -37,3 +119,30 @@ fn test():
             val m2: DriverManifest = DriverManifest.for_driver(
                 "two", "0.1", DriverClass.Misc, 0, [1, 2])
             expect(m2.byte_size()).to_equal(80)
+
+        # FR-DRIVER-0004: write -> decode round-trip
+        it "round-trip: encode then decode driver manifest preserves all fields":
+            val orig: DriverManifest = DriverManifest.for_driver(
+                "ahci", "1.0", DriverClass.Block, 0x8086, [0x2922, 0x2829])
+            val bytes: [u8] = encode_manifest_test(orig)
+            expect(bytes.len()).to_equal(80)
+            val dec: DriverManifest = decode_manifest(bytes, 0).unwrap()
+            expect(dec.kind).to_equal(ManifestKind.Driver)
+            expect(dec.dclass).to_equal(DriverClass.Block)
+            expect(dec.abi_rev).to_equal(DRVS_ABI_REV)
+            expect(dec.vendor).to_equal(0x8086)
+            expect(dec.device_ids.len()).to_equal(2)
+            expect(dec.device_ids[0]).to_equal(0x2922)
+            expect(dec.device_ids[1]).to_equal(0x2829)
+            expect(dec.name).to_equal("ahci")
+            expect(dec.version).to_equal("1.0")
+
+        it "round-trip: encode then decode native-lib manifest preserves name + version":
+            val orig: DriverManifest = DriverManifest.for_native_lib("cuda_ffi", "12.3")
+            val bytes: [u8] = encode_manifest_test(orig)
+            expect(bytes.len()).to_equal(64)
+            val dec: DriverManifest = decode_manifest(bytes, 0).unwrap()
+            expect(dec.kind).to_equal(ManifestKind.NativeLib)
+            expect(dec.name).to_equal("cuda_ffi")
+            expect(dec.version).to_equal("12.3")
+            expect(dec.device_ids.len()).to_equal(0)

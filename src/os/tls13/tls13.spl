@@ -907,7 +907,16 @@ fn tls13_connect_io_with_config(io: Tls13Io, hostname: text, config: Tls13Client
         val raw_cv_rc = rt_ed25519_verify(cv_content_dbg, pubkey_for_verify, cert_verify_sig)
         val tls_cv_rc = rt_tls13_ed25519_verify(cv_content_dbg, pubkey_for_verify, cert_verify_sig)
         _tls_debug("cv verify raw_rc={raw_cv_rc} tls_rc={tls_cv_rc} pk_len={pubkey_for_verify.len()} sig_len={cert_verify_sig.len()}")
-    val cv_result = verify_certificate_verify_msg_scheme(pubkey_for_verify, sig_scheme, cv_hash, cert_verify_sig)
+    val cv_result =
+        if fd_mode and sig_scheme == 0x0807:
+            val cv_fd_rc = rt_tls13_cert_verify_ed25519(cv_hash, pubkey_for_verify, cert_verify_sig)
+            _tls_debug("cv verify fd_rc={cv_fd_rc}")
+            if cv_fd_rc == 0:
+                CertVerifyResult.Ok
+            else:
+                CertVerifyResult.Err(msg: "CertificateVerify signature invalid (fd-cv-rc={cv_fd_rc})")
+        else:
+            verify_certificate_verify_msg_scheme(pubkey_for_verify, sig_scheme, cv_hash, cert_verify_sig)
 
     if val CertVerifyResult.Err(cv_err) = cv_result:
         return Tls13ConnectResult.Failed(reason: cv_err)
