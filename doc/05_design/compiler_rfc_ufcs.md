@@ -188,6 +188,60 @@ Realistic scope: 20–30 line plumbing change touching `resolve.spl` (function s
 
 **Empirical evidence**: Stage 4 succeeds in 16.3s with `EXIT=0` and produces a 27.5MB binary, but every command path that traverses methods (`lint`, `check`, `format`) fails with `Runtime error: Function 'level' not found` / `'line' not found`. The `test` command works because its hot path doesn't traverse the diagnostic-formatter's method calls. This confirms: the resolver stub is what's breaking — un-stubbing it (with the SymbolTable plumbed correctly) should fix all three commands in one shot.
 
+### Method-dispatch dedup applied 2026-04-18 (revised)
+
+Patch at `src/compiler_rust/compiler/src/codegen/instr/closures_structs.rs:340-348`
+adds a HashSet-by-FuncId check immediately before the
+`[CODEGEN-AMBIGUOUS-METHOD]` warning. When all surviving candidates
+resolve to the same FuncId (intentional dual-registration in
+`common_backend.rs:425-429` for raw + mangled forms), the warning is
+suppressed and the FuncId is returned directly.
+
+Empirical effect on Stage 4 self-host:
+
+| Metric | Before | After | Delta |
+|---|---|---|---|
+| Ambiguity warnings | 154 | 6 | **-96%** |
+| Stub functions | 2419 | 2420 | +1 (noise) |
+
+The 6 remaining ambiguities are TRUE conflicts (different FuncIds for
+the same method name across distinct types):
+- `check_expr` (HmInferContext / AwaitChecker / type_infer)
+- `emit_object` (Codegen / CompiledModule)
+- `to_sdn` (SdnTable / StringInterner)
+- `to_text` (ConstValue / LlvmTargetTriple)
+
+Each needs explicit type qualification at its call sites in compiler
+code — distinct from this RFC's UI scope.
+
+### Field-access bug — next blocker for UI001 verification
+
+After the dedup, the new self-host's `lint` command still fails:
+```
+$ /tmp/stage4 lint /tmp/test_ui001.spl
+Runtime error: Function 'level' not found
+Runtime error: Function 'line' not found
+```
+
+The failing references are **field accesses**, not method calls:
+- `LintResult.line: Int` (main.spl:401) — field read at `self.line.to_string()` (main.spl:423)
+- `Lint.level: LintLevel` (main.spl:363) — field read at `self.level` (main.spl:382, 392)
+
+These are valid struct fields; the existing self-host (`bin/simple`)
+handles them correctly. The new self-host's codegen treats them as
+function calls — a separate bug class from method dispatch ambiguity.
+
+Hypothesis: when codegen lowers `self.field` access inside an `fn`
+method (no explicit `me` keyword, but with implicit `self`), the
+expected struct type for `self` isn't propagated correctly, so field
+load lowers to a dynamic name lookup that falls through to the
+runtime "function not found" path.
+
+Estimated effort to fix: medium-large — requires tracing the codegen
+field-access lowering pass for methods with implicit-self in
+`fn name() -> ...` form. Fix likely lives in `src/compiler_rust/`
+codegen, similar layer to the dedup patch but on a different code path.
+
 ### Partial unstub applied 2026-04-18
 
 `resolve.spl:572` unstubbed with the minimal-risk variant: `val symbols = SymbolTable.new()` + `create_method_resolver(symbols)` + `resolver.resolve_module(module)`. Self-host build chain re-tested across two generations (Stage 4 → Stage 5):
