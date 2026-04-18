@@ -1,0 +1,29 @@
+use std.io.dma.{DmaBuffer, DmaDir, dma_alloc, dma_free,
+                dma_sync_for_device, dma_sync_for_cpu}
+use std.driver.error.{DriverError}
+
+fn test():
+    describe "dma":
+
+        it "fallback alloc returns NoMemory so drivers fail closed":
+            # Without a per-arch runtime linked, rt_dma_alloc__fallback
+            # returns -1 which dma_alloc maps to DriverError.NoMemory.
+            # Drivers that depend on DMA must then fail the whole probe —
+            # exactly the behavior we want on unsupported targets.
+            val r: Result<DmaBuffer, DriverError> = dma_alloc(4096, DmaDir.Bidirectional)
+            var err_kind: DriverError = DriverError.Internal
+            match r:
+                Result.Ok(_)  -> err_kind = DriverError.NotSupported  # sentinel — should not be reached
+                Result.Err(e) -> err_kind = e
+            expect(err_kind).to_equal(DriverError.NoMemory)
+
+        it "sync ops on a zero-handle buffer only issue barriers":
+            # When the runtime isn't present we can still drive the API
+            # with a caller-constructed descriptor; the fallback sync
+            # paths are barrier-only, which is safe on x86.
+            val b: DmaBuffer = DmaBuffer(
+                virt: 0, phys: 0, size: 0, handle: 0, dir: DmaDir.ToDevice)
+            dma_sync_for_device(b)
+            dma_sync_for_cpu(b)
+            # Reaching here without fault is the assertion.
+            expect(b.size).to_equal(0)
