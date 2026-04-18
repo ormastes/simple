@@ -1,0 +1,209 @@
+# spostgre engine — NVFS arena shim (M2).
+#
+# Mirrors the arena_* API from examples/nvfs/src/core/arena.spl using an
+# identical in-process byte-vector implementation. Spostgre and NVFS are
+# separate git submodules, so we cannot `use nvfs.*` directly at test time.
+# When NVFS becomes a proper package dependency this shim is swapped for a
+# real import without changing WalWriter or PmapWriter.
+#
+# Error codes (matching NVFS conventions):
+#   -1  InvalidArena
+#   -2  Sealed
+#   -3  Discarded
+#   -4  OutOfBounds
+
+# StorageClass ordinals (matching nvfs/src/core/arena.spl intent)
+val STORAGE_CLASS_DB_WAL:      i32 = 1
+val STORAGE_CLASS_META_DURABLE: i32 = 2
+
+# DurabilityClass ordinals
+val DURABILITY_DATA_DURABLE:   i32 = 1
+
+struct _ShimArenaMeta:
+    """Per-arena metadata for the in-process shim."""
+    arena_id:    i64
+    class_tag:   i32
+    sealed:      bool
+    discarded:   bool
+    total_bytes: i64
+
+# ---------------------------------------------------------------------------
+# Shim-internal store (module-level mutable state)
+# ---------------------------------------------------------------------------
+
+var _shim_ids:   [i64]           = []
+var _shim_metas: [_ShimArenaMeta] = []
+var _shim_bufs:  [[u8]]          = []
+var _shim_next:  i64             = 1
+
+fn _shim_find(arena_id: i64) -> i64:
+    """Return index of arena_id or -1 if not found."""
+    var i = 0
+    while i < _shim_ids.len():
+        if _shim_ids[i] == arena_id:
+            return i
+        i = i + 1
+    -1
+
+# ---------------------------------------------------------------------------
+# Public arena API (mirrors NVFS)
+# ---------------------------------------------------------------------------
+
+fn shim_arena_create(class_tag: i32, hint_bytes: i64) -> i64:
+    """Provision a new arena; return opaque arena_id > 0."""
+    val id = _shim_next
+    _shim_next = _shim_next + 1
+    val meta = _ShimArenaMeta(
+        arena_id:    id,
+        class_tag:   class_tag,
+        sealed:      false,
+        discarded:   false,
+        total_bytes: 0)
+    _shim_ids.push(id)
+    _shim_metas.push(meta)
+    _shim_bufs.push([])
+    id
+
+fn shim_arena_append(arena_id: i64, data: [u8]) -> i64:
+    """Append data; return bytes_written or negative error code."""
+    val idx = _shim_find(arena_id)
+    if idx < 0:
+        return -1
+    val meta = _shim_metas[idx]
+    if meta.discarded:
+        return -3
+    if meta.sealed:
+        return -2
+    val n = data.len() as i64
+    var buf = _shim_bufs[idx]
+    for byte in data:
+        buf.push(byte)
+    _shim_bufs[idx] = buf
+    val updated = _ShimArenaMeta(
+        arena_id:    meta.arena_id,
+        class_tag:   meta.class_tag,
+        sealed:      false,
+        discarded:   false,
+        total_bytes: meta.total_bytes + n)
+    _shim_metas[idx] = updated
+    n
+
+fn shim_arena_fua_append(arena_id: i64, data: [u8]) -> i64:
+    """Force-unit-access append (durable fence). At shim level: same as append.
+    In real NVFS this would issue an NVMe FUA write.
+    """
+    shim_arena_append(arena_id, data)
+
+fn shim_arena_readv(arena_id: i64, off: i64, buf_len: i64) -> [u8]:
+    """Read buf_len bytes at off; return slice or empty on error."""
+    val idx = _shim_find(arena_id)
+    if idx < 0:
+        return []
+    val meta = _shim_metas[idx]
+    if meta.discarded:
+        return []
+    val src = _shim_bufs[idx]
+    val src_len = src.len() as i64
+    if off < 0 or off >= src_len:
+        return []
+    var end = off + buf_len
+    if end > src_len:
+        end = src_len
+    var result: [u8] = []
+    var i = off
+    while i < end:
+        result.push(src[i])
+        i = i + 1
+    result
+
+fn shim_arena_total_bytes(arena_id: i64) -> i64:
+    """Return total bytes appended; -1 if invalid."""
+    val idx = _shim_find(arena_id)
+    if idx < 0:
+        return -1
+    val meta = _shim_metas[idx]
+    if meta.discarded:
+        return -1
+    meta.total_bytes
+
+fn shim_arena_seal(arena_id: i64) -> bool:
+    """Seal the arena (idempotent). Returns false if unknown."""
+    val idx = _shim_find(arena_id)
+    if idx < 0:
+        return false
+    val meta = _shim_metas[idx]
+    if meta.discarded:
+        return false
+    if meta.sealed:
+        return true
+    val updated = _ShimArenaMeta(
+        arena_id:    meta.arena_id,
+        class_tag:   meta.class_tag,
+        sealed:      true,
+        discarded:   false,
+        total_bytes: meta.total_bytes)
+    _shim_metas[idx] = updated
+    true
+
+fn shim_arena_discard(arena_id: i64) -> bool:
+    """Drop the arena. Returns false if arena_id unknown."""
+    val idx = _shim_find(arena_id)
+    if idx < 0:
+        return false
+    val meta = _shim_metas[idx]
+    val updated = _ShimArenaMeta(
+        arena_id:    meta.arena_id,
+        class_tag:   meta.class_tag,
+        sealed:      meta.sealed,
+        discarded:   true,
+        total_bytes: meta.total_bytes)
+    _shim_metas[idx] = updated
+    _shim_bufs[idx] = []
+    true
+
+fn shim_arena_truncate_for_test(arena_id: i64, new_len: i64) -> bool:
+    """TEST-ONLY: Truncate arena buffer to new_len bytes.
+    Used to simulate a crash mid-write (torn tail scenario).
+    Returns false if arena unknown or new_len > current length.
+    """
+    val idx = _shim_find(arena_id)
+    if idx < 0:
+        return false
+    val src = _shim_bufs[idx]
+    val cur_len = src.len() as i64
+    if new_len > cur_len:
+        return false
+    var trimmed: [u8] = []
+    var i = 0
+    while i < new_len:
+        trimmed.push(src[i])
+        i = i + 1
+    _shim_bufs[idx] = trimmed
+    val meta = _shim_metas[idx]
+    val updated = _ShimArenaMeta(
+        arena_id:    meta.arena_id,
+        class_tag:   meta.class_tag,
+        sealed:      meta.sealed,
+        discarded:   meta.discarded,
+        total_bytes: new_len)
+    _shim_metas[idx] = updated
+    true
+
+fn shim_arena_corrupt_byte_for_test(arena_id: i64, byte_off: i64, value: u8) -> bool:
+    """TEST-ONLY: Overwrite a single byte to simulate mid-stream corruption."""
+    val idx = _shim_find(arena_id)
+    if idx < 0:
+        return false
+    val buf = _shim_bufs[idx]
+    if byte_off < 0 or byte_off >= buf.len() as i64:
+        return false
+    var new_buf: [u8] = []
+    var i = 0
+    while i < buf.len() as i64:
+        if i == byte_off:
+            new_buf.push(value)
+        else:
+            new_buf.push(buf[i])
+        i = i + 1
+    _shim_bufs[idx] = new_buf
+    true

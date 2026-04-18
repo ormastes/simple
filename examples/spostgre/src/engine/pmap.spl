@@ -1,7 +1,8 @@
-# spostgre engine — page-indirection map (blk -> PhysPtr) (M1 implementation).
+# spostgre engine — page-indirection map (blk -> PhysPtr) (M1 + M2).
 #
-# Publishes new page versions. At M1 the pmap is an in-memory list of
-# PmapEntry values; no real NVFS atomic_pointer_record_publish is issued.
+# M1: PmapState — in-memory list of PmapEntry; test scaffolding.
+# M2: PmapWriter — arena-backed pmap using 80-byte v2 PmapEntry layout
+#     matching examples/nvfs/src/core/pmap.spl §17.2.
 #
 # Key invariant (spostgre_design.md §6.5, §9 step 4):
 #   pmap_publish MUST be called only after the WAL record for the change is
@@ -13,6 +14,8 @@ use std.spostgre_if.types.{Rel, BlkNo, PhysPtr, Lsn}
 
 # Import WAL state for the ordering guard.
 use engine.wal.{WalState}
+use engine.nvfs_shim.{shim_arena_create, shim_arena_append, shim_arena_readv,
+                      shim_arena_total_bytes, STORAGE_CLASS_META_DURABLE}
 
 struct PmapEntry:
     """One pmap row: (rel, blk) -> physptr at generation."""
@@ -81,3 +84,184 @@ fn publish_page(wal: WalState, pmap: PmapState, rel: Rel, blk: BlkNo, page_lsn: 
         (false, pmap)
     else:
         pmap_publish(pmap, rel, blk, phys, Lsn(value: page_lsn))
+
+# ---------------------------------------------------------------------------
+# M2 PmapEntry v2 — 80-byte on-disk layout (nvfs/src/core/pmap.spl §17.2).
+#
+# offset  size  field
+# 0x00    8     logical     (u64)
+# 0x08    8     phys        (i64 stored as u64)
+# 0x10    8     offset      (u64) byte offset within arena
+# 0x18    8     len         (u64) CoW generation / page_generation
+# 0x20    8     birth_gen   (u64) txg when pointer first written
+# 0x28    1     checksum_algo (u8) 0=CRC32C, 1=XXHash64, 2=SHA256, 3=Blake3
+# 0x29    3     reserved (zero)
+# 0x2C    4     flags (u32)  bit0=blob_pointer, bit1=evicted
+# 0x30    32    checksum ([u8;32]) Merkle checksum, left-padded
+# Total: 80 bytes
+# ---------------------------------------------------------------------------
+
+val PMAP_ENTRY_LEN: i64 = 80
+
+struct PmapEntryV2:
+    """v2 pmap entry — 80 bytes on disk (matching NVFS layout §17.2)."""
+    logical:       i64   # logical page number (stored as u64)
+    phys:          i64   # arena_id
+    offset:        i64   # byte offset in arena
+    len:           i64   # CoW generation
+    birth_gen:     i64   # txg of first write
+    checksum_algo: u8    # 0 = CRC32C
+    checksum:      [u8]  # exactly 32 bytes
+
+fn _pmap_put_u64_le(buf: [u8], off: i64, v: i64):
+    """Write v as 8 LE bytes into buf at off."""
+    var x = v
+    var i = 0
+    while i < 8:
+        buf[off + i] = (x and 255) as u8
+        x = x / 256
+        i = i + 1
+
+fn _pmap_get_u64_le(buf: [u8], off: i64) -> i64:
+    """Read 8 LE bytes from buf at off; return i64."""
+    var result: i64 = 0
+    var shift: i64 = 1
+    var i = 0
+    while i < 8:
+        result = result + (buf[off + i] as i64) * shift
+        shift = shift * 256
+        i = i + 1
+    result
+
+fn _pmap_put_u32_le(buf: [u8], off: i64, v: i32):
+    """Write v as 4 LE bytes into buf at off."""
+    var x = v
+    var i = 0
+    while i < 4:
+        buf[off + i] = (x and 255) as u8
+        x = x / 256
+        i = i + 1
+
+fn pmap_entry_v2_encode(entry: PmapEntryV2) -> [u8]:
+    """Serialize entry to an 80-byte LE buffer."""
+    var buf: [u8] = [0u8; 80]
+    _pmap_put_u64_le(buf, 0, entry.logical)
+    _pmap_put_u64_le(buf, 8, entry.phys)
+    _pmap_put_u64_le(buf, 16, entry.offset)
+    _pmap_put_u64_le(buf, 24, entry.len)
+    _pmap_put_u64_le(buf, 32, entry.birth_gen)
+    buf[40] = entry.checksum_algo
+    # bytes 41-43 reserved zero
+    _pmap_put_u32_le(buf, 44, 0)   # flags
+    var ci = 0
+    while ci < 32:
+        if ci < entry.checksum.len():
+            buf[48 + ci] = entry.checksum[ci]
+        ci = ci + 1
+    buf
+
+fn pmap_entry_v2_decode(bytes: [u8]) -> PmapEntryV2:
+    """Deserialize a PmapEntryV2 from an 80-byte buffer.
+    Caller must ensure bytes.len() >= 80.
+    """
+    val logical   = _pmap_get_u64_le(bytes, 0)
+    val phys      = _pmap_get_u64_le(bytes, 8)
+    val offset    = _pmap_get_u64_le(bytes, 16)
+    val len       = _pmap_get_u64_le(bytes, 24)
+    val birth_gen = _pmap_get_u64_le(bytes, 32)
+    val algo_tag  = bytes[40]
+    var checksum: [u8] = []
+    var ci = 0
+    while ci < 32:
+        checksum.push(bytes[48 + ci])
+        ci = ci + 1
+    PmapEntryV2(
+        logical:       logical,
+        phys:          phys,
+        offset:        offset,
+        len:           len,
+        birth_gen:     birth_gen,
+        checksum_algo: algo_tag,
+        checksum:      checksum)
+
+# ---------------------------------------------------------------------------
+# PmapWriter — M2 arena-backed pmap
+# ---------------------------------------------------------------------------
+
+struct PmapWriter:
+    """M2 arena-backed page-indirection map.
+
+    arena_id: shim arena holding serialised PmapEntryV2 records (80 bytes each).
+    Each pmap_writer_publish call appends one 80-byte record.
+    pmap_writer_lookup scans from the end (latest wins).
+    @coverage: spostgre_design.md §9 step 4, §12 M2
+    """
+    arena_id: i64
+
+    static fn new() -> PmapWriter:
+        """Allocate a fresh META_DURABLE arena and return an initialised PmapWriter."""
+        val aid = shim_arena_create(STORAGE_CLASS_META_DURABLE, 65536)
+        PmapWriter(arena_id: aid)
+
+    static fn new_with_arena(arena_id: i64) -> PmapWriter:
+        """Attach a PmapWriter to an existing arena."""
+        PmapWriter(arena_id: arena_id)
+
+fn pmap_writer_publish(writer: PmapWriter, logical: i64, phys: i64, offset: i64, page_lsn: i64) -> bool:
+    """Write a v2 PmapEntry to the arena.
+
+    logical   — logical page number.
+    phys      — arena_id of the data arena holding the page.
+    offset    — byte offset of the page in the data arena.
+    page_lsn  — birth_gen field (WAL LSN at which this version was written).
+    Returns true on success (bytes_written > 0).
+    @coverage: spostgre_design.md §9 step 4
+    """
+    var zero_checksum: [u8] = [0u8; 32]
+    val entry = PmapEntryV2(
+        logical:       logical,
+        phys:          phys,
+        offset:        offset,
+        len:           0,
+        birth_gen:     page_lsn,
+        checksum_algo: 0u8,
+        checksum:      zero_checksum)
+    val encoded = pmap_entry_v2_encode(entry)
+    val written = shim_arena_append(writer.arena_id, encoded)
+    written > 0
+
+fn pmap_writer_lookup(writer: PmapWriter, logical: i64) -> PmapEntryV2:
+    """Scan from the end of the arena; return the last entry matching logical.
+
+    Returns a zero entry (phys = -1) if not found.
+    @coverage: spostgre_design.md §4.5
+    """
+    val total = shim_arena_total_bytes(writer.arena_id)
+    var found = PmapEntryV2(
+        logical:       0,
+        phys:          -1,
+        offset:        0,
+        len:           0,
+        birth_gen:     0,
+        checksum_algo: 0u8,
+        checksum:      [0u8; 32])
+    if total < PMAP_ENTRY_LEN:
+        return found
+    # Scan backward (latest entry wins)
+    var off = total - PMAP_ENTRY_LEN
+    var keep_going = true
+    while keep_going:
+        val bytes = shim_arena_readv(writer.arena_id, off, PMAP_ENTRY_LEN)
+        if bytes.len() as i64 >= PMAP_ENTRY_LEN:
+            val entry = pmap_entry_v2_decode(bytes)
+            if entry.logical == logical and entry.phys != -1:
+                found = entry
+                keep_going = false
+            else:
+                if off < PMAP_ENTRY_LEN:
+                    keep_going = false
+                else:
+                    off = off - PMAP_ENTRY_LEN
+        else:
+            keep_going = false
+    found

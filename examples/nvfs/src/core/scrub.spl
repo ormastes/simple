@@ -1,0 +1,119 @@
+# NVFS core — N4a background scrub pass (detect-only).
+#
+# Walks every pmap sidecar entry, re-reads the arena bytes, recomputes the
+# checksum, and compares against the stored checksum.  Aggregates results into
+# a ScrubReport.  No self-heal — that arrives with N4b (RAID1/DUP).
+#
+# Design: doc/05_design/nvfs_design_v2.md §14; N4a milestone.
+# FR-NVFS-N4a-001: Expose a public arena mutation API for fault injection beyond test scope.
+
+use std.fs_driver.error.{FsError}
+use examples.nvfs.src.core.pmap.{pmap_entry_verify}
+use examples.nvfs.src.driver.fs_driver_impl.{PmapSidecarEntry, nvfs_pmap_sidecar_snapshot}
+use examples.nvfs.src.core.arena.{arena_readv_impl}
+
+# ---------------------------------------------------------------------------
+# Public types
+# ---------------------------------------------------------------------------
+
+struct ScrubReport:
+    """Results of one scrub pass over the pmap sidecar.
+
+    checked          — total entries examined.
+    good             — entries whose checksum matched the arena data.
+    corrupted        — entries whose checksum did NOT match.
+    corrupted_arenas — arena_ids of all corrupted entries (may contain
+                       duplicates if multiple ranges of the same arena fail).
+    """
+    checked:          u64
+    good:             u64
+    corrupted:        u64
+    corrupted_arenas: [i64]
+
+struct ScrubOptions:
+    """Tunables for a scrub pass.
+
+    throttle_ms          — milliseconds to pause between entry checks (N4b+;
+                           ignored in N4a synchronous mode).
+    stop_after_first_error — abort the pass as soon as the first corrupted
+                           entry is found and return a partial report.
+    """
+    throttle_ms:           u32
+    stop_after_first_error: bool
+
+# ---------------------------------------------------------------------------
+# Scrubber
+# ---------------------------------------------------------------------------
+
+struct Scrubber:
+    """Stateless scrub helper.  All state lives in the module-level sidecar."""
+    _unused: bool   # placeholder — no instance state needed for N4a
+
+impl Scrubber:
+    static fn new() -> Scrubber:
+        Scrubber(_unused: false)
+
+# ---------------------------------------------------------------------------
+# scrub_all — main entry point
+# ---------------------------------------------------------------------------
+
+fn scrub_all(opts: ScrubOptions) -> Result<ScrubReport, FsError>:
+    """Walk every pmap sidecar entry, verify its checksum, and return a report.
+
+    Algorithm:
+      1. Snapshot the current sidecar (avoids iterator invalidation).
+      2. For each entry, read its arena byte range via arena_readv_impl.
+      3. Re-verify the stored PmapEntry checksum against the live bytes.
+      4. Increment good or corrupted counters accordingly.
+      5. If stop_after_first_error and corrupted > 0, return early.
+
+    N4a: detect-only.  No repair.  Background-task mode is FR-NVFS-N4b-001.
+    """
+    val entries = nvfs_pmap_sidecar_snapshot()
+
+    var checked:          u64 = 0
+    var good:             u64 = 0
+    var corrupted:        u64 = 0
+    var corrupted_arenas: [i64] = []
+
+    var i = 0
+    while i < entries.len() as i64:
+        val sc = entries[i]
+        val data = arena_readv_impl(sc.arena_id, sc.offset, sc.length)
+
+        checked = checked + 1
+
+        # If the arena is gone or range is invalid, treat as corrupted.
+        if data.len() == 0:
+            corrupted = corrupted + 1
+            corrupted_arenas.push(sc.arena_id)
+            if opts.stop_after_first_error:
+                return Ok(ScrubReport(
+                    checked:          checked,
+                    good:             good,
+                    corrupted:        corrupted,
+                    corrupted_arenas: corrupted_arenas
+                ))
+        else:
+            val ok = pmap_entry_verify(sc.entry, data)
+            if ok:
+                good = good + 1
+            else:
+                corrupted = corrupted + 1
+                corrupted_arenas.push(sc.arena_id)
+                if opts.stop_after_first_error:
+                    return Ok(ScrubReport(
+                        checked:          checked,
+                        good:             good,
+                        corrupted:        corrupted,
+                        corrupted_arenas: corrupted_arenas
+                    ))
+
+        i = i + 1
+
+    Ok(ScrubReport(
+        checked:          checked,
+        good:             good,
+        corrupted:        corrupted,
+        corrupted_arenas: corrupted_arenas
+    ))

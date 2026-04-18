@@ -1,16 +1,22 @@
-# spostgre engine — WAL writer (M1 in-memory implementation).
+# spostgre engine — WAL writer (M1 in-memory + M2 arena-backed).
 #
-# Writes to an in-memory append-only byte buffer. The WalWriter trait contract
-# lives in std.spostgre_if.storage_api; this file provides the concrete impl.
+# M1: WalState — in-memory byte-vector arena (kept for test scaffolding).
+# M2: WalWriter — arena-backed via NVFS shim; real durable WAL.
 #
 # Design refs: spostgre_design.md §4.4 (WAL record layout), §6.3 (group-commit),
-#              §6.4 (durable-commit handshake), §6.5 (NVMe Flush/FUA).
+#              §6.4 (durable-commit handshake), §6.5 (NVMe Flush/FUA),
+#              §9 (out-of-place write pipeline), §12 (M2 acceptance criteria).
 #
-# M1 scope: in-memory arena only; real NVFS integration deferred to Phase 6+.
-# CRC32C: inlined (std.common.crypto has no crc32c at M1).
-# LE encoding: inlined (std.common.encoding is text-only at M1).
+# CRC32C: inlined (std.common.crypto has no crc32c at M1/M2).
+# LE encoding: inlined (std.common.encoding is text-only at M1/M2).
+#
+# LSN mapping (M2): LSN = byte_offset_after_append (monotonically increasing).
+# epoch_shift = 0 for M2 (single epoch). Offset is naturally unique per record.
 
 use std.spostgre_if.types.{Lsn, TxnId}
+use engine.nvfs_shim.{shim_arena_create, shim_arena_append, shim_arena_fua_append,
+                      shim_arena_readv, shim_arena_total_bytes,
+                      STORAGE_CLASS_DB_WAL, DURABILITY_DATA_DURABLE}
 
 # ---------------------------------------------------------------------------
 # CRC32C — Castagnoli polynomial, table-free software implementation.
@@ -237,3 +243,111 @@ fn wal_flush_to(state: WalState, target: Lsn) -> (bool, WalState):
         (true, new_state)
     else:
         (false, state)
+
+# ---------------------------------------------------------------------------
+# WalWriter — M2 arena-backed WAL writer (NVFS shim).
+#
+# Allocates a real arena via shim_arena_create; each wal_writer_append call
+# serialises the record via wal_record_encode and appends via shim_arena_append.
+# LSN is derived from the byte offset after the append (monotonic by append
+# ordering). wal_writer_commit_group issues a FUA fence.
+#
+# @coverage: spostgre_design.md §9, §12 (M2)
+# ---------------------------------------------------------------------------
+
+struct WalWriter:
+    """M2 arena-backed WAL writer.
+
+    arena_id:    opaque handle for the NVFS shim arena.
+    durable_lsn: last LSN made durable by wal_writer_commit_group / wal_writer_sync.
+    """
+    arena_id:    i64
+    durable_lsn: i64
+
+    static fn new() -> WalWriter:
+        """Allocate a fresh WAL arena and return an initialised WalWriter."""
+        val aid = shim_arena_create(STORAGE_CLASS_DB_WAL, 65536)
+        WalWriter(arena_id: aid, durable_lsn: 0)
+
+    static fn new_with_arena(arena_id: i64) -> WalWriter:
+        """Attach a WalWriter to an existing arena (used for recovery tests)."""
+        WalWriter(arena_id: arena_id, durable_lsn: 0)
+
+fn wal_writer_append(writer: WalWriter, txn: TxnId, payload: [u8]) -> (Lsn, WalWriter):
+    """Append one WAL record; return (assigned LSN, updated writer).
+
+    LSN is the byte offset of the end of the record (= total_bytes after append).
+    @coverage: spostgre_design.md §6.3, §9 step 2
+    """
+    val rec = WalRecord(lsn: 0, txn_id: txn.id, kind: 0, payload: payload, crc32: 0)
+    val encoded = wal_record_encode(rec)
+    val bytes_written = shim_arena_append(writer.arena_id, encoded)
+    # LSN = total bytes after this append = monotonically increasing offset
+    val lsn_val = shim_arena_total_bytes(writer.arena_id)
+    val new_writer = WalWriter(arena_id: writer.arena_id, durable_lsn: writer.durable_lsn)
+    (Lsn(value: lsn_val), new_writer)
+
+fn wal_writer_commit_group(writer: WalWriter, lsn_high: Lsn) -> WalWriter:
+    """Issue a durable fence (FUA) and advance durable_lsn.
+
+    The empty FUA append acts as a memory barrier ensuring all prior writes
+    are on durable storage before this function returns.
+    @coverage: spostgre_design.md §6.3, §6.4, §6.5
+    """
+    val empty: [u8] = []
+    val _ignored = shim_arena_fua_append(writer.arena_id, empty)
+    WalWriter(arena_id: writer.arena_id, durable_lsn: lsn_high.value)
+
+fn wal_writer_sync(writer: WalWriter) -> WalWriter:
+    """Sync to current total_bytes; equivalent to commit_group at current offset.
+
+    @coverage: spostgre_design.md §6.5
+    """
+    val cur = shim_arena_total_bytes(writer.arena_id)
+    val empty: [u8] = []
+    val _ignored = shim_arena_fua_append(writer.arena_id, empty)
+    WalWriter(arena_id: writer.arena_id, durable_lsn: cur)
+
+fn wal_recover_tail(arena_id: i64) -> [WalRecord]:
+    """Walk the arena from offset 0; return all valid records up to first bad CRC.
+
+    Stops at the first record whose CRC does not verify (torn tail) or when
+    the remaining bytes are insufficient for a full header.
+    @coverage: spostgre_design.md §6.6 (recovery), §12 (M2 recovery scenario)
+    """
+    var records: [WalRecord] = []
+    var off: i64 = 0
+    var keep_going = true
+    while keep_going:
+        # Need at least WAL_HDR_LEN bytes to read a header
+        val hdr_bytes = shim_arena_readv(arena_id, off, WAL_HDR_LEN)
+        if hdr_bytes.len() as i64 < WAL_HDR_LEN:
+            keep_going = false
+        else:
+            # Read tot_len from header
+            val tot_len = _le_get_u32(hdr_bytes, 0) as i64
+            if tot_len < WAL_HDR_LEN:
+                # Corrupt length field — stop
+                keep_going = false
+            else:
+                # Read the full record
+                val full_bytes = shim_arena_readv(arena_id, off, tot_len)
+                if full_bytes.len() as i64 < tot_len:
+                    # Torn record — stop
+                    keep_going = false
+                else:
+                    val ok = wal_record_verify_crc(full_bytes)
+                    if not ok:
+                        # Bad CRC — stop at this boundary
+                        keep_going = false
+                    else:
+                        var rec = wal_record_decode(full_bytes)
+                        rec = WalRecord(
+                            lsn:     off + tot_len,
+                            txn_id:  rec.txn_id,
+                            kind:    rec.kind,
+                            payload: rec.payload,
+                            crc32:   rec.crc32)
+                        records.push(rec)
+                        off = off + tot_len
+    records

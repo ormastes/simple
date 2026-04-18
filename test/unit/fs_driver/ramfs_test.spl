@@ -1,0 +1,439 @@
+# @cover src/lib/nogc_sync_mut/fs_driver/ramfs.spl 80%
+"""
+# RamFsDriver Unit Tests
+
+**Feature IDs:** #FS-DRIVER-RAMFS
+**Category:** Infrastructure
+**Difficulty:** 2/5
+**Status:** In Progress
+**Design:** doc/05_design/fs_driver_interface.md §3, Phase 9 ramfs agent
+
+## Overview
+
+Tests for the RamFsDriver volatile in-memory filesystem:
+  1.  new() has root dir
+  2.  mkdir creates dir; stat returns Dir
+  3.  open with O_CREAT creates file
+  4.  write + read round-trip
+  5.  pwrite at offset 10; pread(0, 20) covers before + written bytes
+  6.  ftruncate shrink and grow
+  7.  rename moves; old path 404, new path works
+  8.  unlink removes
+  9.  link: both paths read same content; unlink one keeps the other
+  10. symlink + readlink returns target
+  11. mkdir + readdir returns expected entries
+  12. capabilities: PosixCompat present; COW absent
+  13. probe(PosixCompat) returns Some; probe(COW) returns None
+"""
+
+use std.sspec.*
+use std.fs_driver.ramfs.{RamFsDriver}
+use std.fs_driver.ops.{FsDriver}
+use std.fs_driver.types.{Path, OpenFlags, MountOptions, FileHandle, DirHandle}
+use std.fs_driver.capability.{Capability, CapabilitySet}
+use std.fs_driver.error.{FsError}
+
+
+# ============================================================================
+# Helpers
+# ============================================================================
+
+fn make_driver() -> RamFsDriver:
+    var d = RamFsDriver.new()
+    d.mount(MountOptions.default())
+    d
+
+fn p(raw: text) -> Path:
+    Path(raw: raw)
+
+fn creat_flags() -> OpenFlags:
+    OpenFlags.read_write().with_create()
+
+
+# ============================================================================
+# Test 1 — new() has root dir
+# ============================================================================
+
+describe "RamFsDriver — new() root":
+    """new() must provide a root directory reachable via root()."""
+
+    it "root() returns Ok with non-null inode":
+        val d = make_driver()
+        val r = d.root()
+        expect(r.is_ok()).to_equal(true)
+        val ino = r.unwrap()
+        expect(ino.is_null()).to_equal(false)
+
+    it "stat('/') returns Ok (root is a dir)":
+        val d = make_driver()
+        val r = d.stat(p("/"))
+        expect(r.is_ok()).to_equal(true)
+
+
+# ============================================================================
+# Test 2 — mkdir creates dir; stat returns it
+# ============================================================================
+
+describe "RamFsDriver — mkdir + stat":
+    """mkdir('/foo') must create a directory visible via stat."""
+
+    it "mkdir('/foo') returns Ok":
+        var d = make_driver()
+        val r = d.mkdir(p("/foo"), 0o755)
+        expect(r.is_ok()).to_equal(true)
+
+    it "stat('/foo') returns Ok after mkdir":
+        var d = make_driver()
+        d.mkdir(p("/foo"), 0o755)
+        val r = d.stat(p("/foo"))
+        expect(r.is_ok()).to_equal(true)
+
+    it "stat('/foo') inode is non-zero after mkdir":
+        var d = make_driver()
+        d.mkdir(p("/foo"), 0o755)
+        val st = d.stat(p("/foo")).unwrap()
+        expect(st.inode > 0).to_equal(true)
+
+    it "mkdir on existing path returns AlreadyExists":
+        var d = make_driver()
+        d.mkdir(p("/foo"), 0o755)
+        val r2 = d.mkdir(p("/foo"), 0o755)
+        expect(r2.is_err()).to_equal(true)
+
+
+# ============================================================================
+# Test 3 — open with O_CREAT creates file
+# ============================================================================
+
+describe "RamFsDriver — open O_CREAT":
+    """open with O_CREAT flag must create a new file and return a valid handle."""
+
+    it "open('/foo/bar', O_CREAT) returns Ok after mkdir('/foo')":
+        var d = make_driver()
+        d.mkdir(p("/foo"), 0o755)
+        val r = d.open(p("/foo/bar"), creat_flags())
+        expect(r.is_ok()).to_equal(true)
+
+    it "stat('/foo/bar') returns Ok after open O_CREAT":
+        var d = make_driver()
+        d.mkdir(p("/foo"), 0o755)
+        d.open(p("/foo/bar"), creat_flags())
+        val r = d.stat(p("/foo/bar"))
+        expect(r.is_ok()).to_equal(true)
+
+    it "open on nonexistent parent without O_CREAT returns NotFound":
+        var d = make_driver()
+        val r = d.open(p("/nope/bar"), OpenFlags.read_write())
+        expect(r.is_err()).to_equal(true)
+
+
+# ============================================================================
+# Test 4 — write + read round-trip
+# ============================================================================
+
+describe "RamFsDriver — write + read round-trip":
+    """write then read must recover the same bytes."""
+
+    it "write 5 bytes then read recovers them":
+        var d = make_driver()
+        d.mkdir(p("/foo"), 0o755)
+        val fh = d.open(p("/foo/bar"), creat_flags()).unwrap()
+        val wbuf: [u8] = [72, 101, 108, 108, 111]   # "Hello"
+        val wn = d.write(fh, 0, wbuf).unwrap()
+        expect(wn).to_equal(5)
+        var rbuf: [u8] = [0, 0, 0, 0, 0]
+        val rn = d.read(fh, 0, rbuf).unwrap()
+        expect(rn).to_equal(5)
+        expect(rbuf[0]).to_equal(72)
+        expect(rbuf[4]).to_equal(111)
+
+    it "fstat after write shows correct size":
+        var d = make_driver()
+        d.mkdir(p("/foo"), 0o755)
+        val fh = d.open(p("/foo/bar"), creat_flags()).unwrap()
+        val wbuf: [u8] = [1, 2, 3]
+        d.write(fh, 0, wbuf)
+        val st = d.fstat(fh).unwrap()
+        expect(st.size).to_equal(3)
+
+
+# ============================================================================
+# Test 5 — pwrite at offset 10; pread(0, 20)
+# ============================================================================
+
+describe "RamFsDriver — pwrite + pread at offset":
+    """pwrite at offset 10 must be readable via pread from offset 0."""
+
+    it "pwrite at offset 10 then pread(0, 20) has zeros before offset":
+        var d = make_driver()
+        d.mkdir(p("/foo"), 0o755)
+        val fh = d.open(p("/foo/bar"), creat_flags()).unwrap()
+        val wbuf: [u8] = [65, 66, 67]  # "ABC"
+        d.pwrite(fh, 10, wbuf)
+        var rbuf: [u8] = [1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1]
+        d.pread(fh, 0, rbuf)
+        # Bytes 0..9 should be zero (sparse gap).
+        expect(rbuf[0]).to_equal(0)
+        expect(rbuf[9]).to_equal(0)
+
+    it "pwrite at offset 10 then pread(0, 20) has written data at offset 10":
+        var d = make_driver()
+        d.mkdir(p("/foo"), 0o755)
+        val fh = d.open(p("/foo/bar"), creat_flags()).unwrap()
+        val wbuf: [u8] = [65, 66, 67]
+        d.pwrite(fh, 10, wbuf)
+        var rbuf: [u8] = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+        d.pread(fh, 0, rbuf)
+        expect(rbuf[10]).to_equal(65)
+        expect(rbuf[11]).to_equal(66)
+        expect(rbuf[12]).to_equal(67)
+
+
+# ============================================================================
+# Test 6 — ftruncate shrink and grow
+# ============================================================================
+
+describe "RamFsDriver — ftruncate":
+    """ftruncate must correctly shrink and grow a file."""
+
+    it "ftruncate shrink: size decreases":
+        var d = make_driver()
+        d.mkdir(p("/foo"), 0o755)
+        val fh = d.open(p("/foo/bar"), creat_flags()).unwrap()
+        val wbuf: [u8] = [1, 2, 3, 4, 5]
+        d.write(fh, 0, wbuf)
+        val r = d.ftruncate(fh, 3)
+        expect(r.is_ok()).to_equal(true)
+        val st = d.fstat(fh).unwrap()
+        expect(st.size).to_equal(3)
+
+    it "ftruncate grow: size increases, new bytes are zero":
+        var d = make_driver()
+        d.mkdir(p("/foo"), 0o755)
+        val fh = d.open(p("/foo/bar"), creat_flags()).unwrap()
+        val wbuf: [u8] = [1, 2, 3]
+        d.write(fh, 0, wbuf)
+        d.ftruncate(fh, 6)
+        val st = d.fstat(fh).unwrap()
+        expect(st.size).to_equal(6)
+        var rbuf: [u8] = [9, 9, 9, 9, 9, 9]
+        d.read(fh, 0, rbuf)
+        expect(rbuf[3]).to_equal(0)
+        expect(rbuf[5]).to_equal(0)
+
+
+# ============================================================================
+# Test 7 — rename
+# ============================================================================
+
+describe "RamFsDriver — rename":
+    """rename('/foo/bar', '/foo/baz') moves the file; old path 404, new path works."""
+
+    it "rename returns Ok":
+        var d = make_driver()
+        d.mkdir(p("/foo"), 0o755)
+        d.open(p("/foo/bar"), creat_flags())
+        val r = d.rename(p("/foo/bar"), p("/foo/baz"))
+        expect(r.is_ok()).to_equal(true)
+
+    it "after rename, old path returns NotFound":
+        var d = make_driver()
+        d.mkdir(p("/foo"), 0o755)
+        d.open(p("/foo/bar"), creat_flags())
+        d.rename(p("/foo/bar"), p("/foo/baz"))
+        val r = d.stat(p("/foo/bar"))
+        expect(r.is_err()).to_equal(true)
+
+    it "after rename, new path is accessible":
+        var d = make_driver()
+        d.mkdir(p("/foo"), 0o755)
+        d.open(p("/foo/bar"), creat_flags())
+        d.rename(p("/foo/bar"), p("/foo/baz"))
+        val r = d.stat(p("/foo/baz"))
+        expect(r.is_ok()).to_equal(true)
+
+
+# ============================================================================
+# Test 8 — unlink
+# ============================================================================
+
+describe "RamFsDriver — unlink":
+    """unlink('/foo/baz') removes the file from the namespace."""
+
+    it "unlink returns Ok":
+        var d = make_driver()
+        d.mkdir(p("/foo"), 0o755)
+        d.open(p("/foo/baz"), creat_flags())
+        val r = d.unlink(p("/foo/baz"))
+        expect(r.is_ok()).to_equal(true)
+
+    it "stat after unlink returns err":
+        var d = make_driver()
+        d.mkdir(p("/foo"), 0o755)
+        d.open(p("/foo/baz"), creat_flags())
+        d.unlink(p("/foo/baz"))
+        val r = d.stat(p("/foo/baz"))
+        expect(r.is_err()).to_equal(true)
+
+    it "unlink nonexistent path returns err":
+        var d = make_driver()
+        val r = d.unlink(p("/nope"))
+        expect(r.is_err()).to_equal(true)
+
+
+# ============================================================================
+# Test 9 — link (hard link)
+# ============================================================================
+
+describe "RamFsDriver — link (hard link)":
+    """link creates a second name for same inode; unlink one keeps the other."""
+
+    it "link returns Ok":
+        var d = make_driver()
+        d.mkdir(p("/foo"), 0o755)
+        d.open(p("/foo/qux"), creat_flags())
+        val r = d.link(p("/foo/qux"), p("/foo/qux_alt"))
+        expect(r.is_ok()).to_equal(true)
+
+    it "both paths exist after link":
+        var d = make_driver()
+        d.mkdir(p("/foo"), 0o755)
+        d.open(p("/foo/qux"), creat_flags())
+        d.link(p("/foo/qux"), p("/foo/qux_alt"))
+        expect(d.stat(p("/foo/qux")).is_ok()).to_equal(true)
+        expect(d.stat(p("/foo/qux_alt")).is_ok()).to_equal(true)
+
+    it "both links share same inode id":
+        var d = make_driver()
+        d.mkdir(p("/foo"), 0o755)
+        d.open(p("/foo/qux"), creat_flags())
+        d.link(p("/foo/qux"), p("/foo/qux_alt"))
+        val st1 = d.stat(p("/foo/qux")).unwrap()
+        val st2 = d.stat(p("/foo/qux_alt")).unwrap()
+        expect(st1.inode).to_equal(st2.inode)
+
+    it "unlink one hard link keeps the other accessible":
+        var d = make_driver()
+        d.mkdir(p("/foo"), 0o755)
+        d.open(p("/foo/qux"), creat_flags())
+        d.link(p("/foo/qux"), p("/foo/qux_alt"))
+        d.unlink(p("/foo/qux"))
+        val r = d.stat(p("/foo/qux_alt"))
+        expect(r.is_ok()).to_equal(true)
+
+
+# ============================================================================
+# Test 10 — symlink + readlink
+# ============================================================================
+
+describe "RamFsDriver — symlink + readlink":
+    """symlink('/foo/link', '/foo/target') then readlink returns '/foo/target'."""
+
+    it "symlink returns Ok":
+        var d = make_driver()
+        d.mkdir(p("/foo"), 0o755)
+        d.open(p("/foo/target"), creat_flags())
+        val r = d.symlink(p("/foo/target"), p("/foo/link"))
+        expect(r.is_ok()).to_equal(true)
+
+    it "readlink returns the target path":
+        var d = make_driver()
+        d.mkdir(p("/foo"), 0o755)
+        d.open(p("/foo/target"), creat_flags())
+        d.symlink(p("/foo/target"), p("/foo/link"))
+        val r = d.readlink(p("/foo/link"))
+        expect(r.is_ok()).to_equal(true)
+        val got = r.unwrap()
+        expect(got.raw).to_equal("/foo/target")
+
+    it "readlink on non-symlink returns err":
+        var d = make_driver()
+        d.mkdir(p("/foo"), 0o755)
+        d.open(p("/foo/target"), creat_flags())
+        val r = d.readlink(p("/foo/target"))
+        expect(r.is_err()).to_equal(true)
+
+
+# ============================================================================
+# Test 11 — mkdir + readdir
+# ============================================================================
+
+describe "RamFsDriver — readdir":
+    """readdir on an open dir handle returns expected entries."""
+
+    it "readdir returns created child entries":
+        var d = make_driver()
+        d.mkdir(p("/foo"), 0o755)
+        d.open(p("/foo/a"), creat_flags())
+        d.open(p("/foo/b"), creat_flags())
+        # Open /foo as a dir handle (use open() to get a FileHandle id, reuse as DirHandle).
+        val fh = d.open(p("/foo"), OpenFlags.read_only()).unwrap()
+        val dh = DirHandle(id: fh.id)
+        val r = d.readdir(dh)
+        expect(r.is_ok()).to_equal(true)
+        val entries = r.unwrap()
+        expect(entries.len() >= 2).to_equal(true)
+
+    it "readdir returns entry named 'a'":
+        var d = make_driver()
+        d.mkdir(p("/foo"), 0o755)
+        d.open(p("/foo/a"), creat_flags())
+        val fh = d.open(p("/foo"), OpenFlags.read_only()).unwrap()
+        val dh = DirHandle(id: fh.id)
+        val entries = d.readdir(dh).unwrap()
+        var found_a: bool = false
+        for e in entries:
+            if e.name == "a":
+                found_a = true
+        expect(found_a).to_equal(true)
+
+
+# ============================================================================
+# Test 12 — capabilities
+# ============================================================================
+
+describe "RamFsDriver — capabilities":
+    """capabilities() must include PosixCompat; must NOT include COW."""
+
+    it "capabilities includes PosixCompat":
+        val d = make_driver()
+        val caps = d.capabilities()
+        expect(caps.has(Capability.PosixCompat)).to_equal(true)
+
+    it "capabilities includes CaseSensitive":
+        val d = make_driver()
+        val caps = d.capabilities()
+        expect(caps.has(Capability.CaseSensitive)).to_equal(true)
+
+    it "capabilities does NOT include COW":
+        val d = make_driver()
+        val caps = d.capabilities()
+        expect(caps.has(Capability.COW)).to_equal(false)
+
+    it "capabilities does NOT include Snapshot":
+        val d = make_driver()
+        val caps = d.capabilities()
+        expect(caps.has(Capability.Snapshot)).to_equal(false)
+
+
+# ============================================================================
+# Test 13 — probe
+# ============================================================================
+
+describe "RamFsDriver — probe":
+    """probe(PosixCompat) returns Some; probe(COW) returns None."""
+
+    it "probe(PosixCompat) returns Some":
+        val d = make_driver()
+        val r = d.probe(Capability.PosixCompat)
+        expect(r.?).to_equal(true)
+
+    it "probe(COW) returns None":
+        val d = make_driver()
+        val r = d.probe(Capability.COW)
+        expect(r.?).to_equal(false)
+
+    it "probe(Snapshot) returns None":
+        val d = make_driver()
+        val r = d.probe(Capability.Snapshot)
+        expect(r.?).to_equal(false)

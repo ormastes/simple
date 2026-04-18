@@ -1,0 +1,732 @@
+# RamFsDriver — volatile in-memory filesystem.
+#
+# A working /tmp-style filesystem for integration test scaffolding.
+# All data lives in process memory; nothing is persisted.
+#
+# Data model:
+#   - Inodes are stored as InodeEntry records (id, RamFsInode).
+#   - Directory entries are stored as DirEnt records (name, ino).
+#   - Open file/dir handles map fd-table slots to inode ids.
+#
+# Source: doc/05_design/fs_driver_interface.md §3, Phase 9 ramfs agent.
+
+use std.fs_driver.error.{FsError}
+use std.fs_driver.types.{FileHandle, DirHandle, Inode, Path, OpenFlags, MountOptions, FsStatfs, FileStat, DirEntry}
+use std.fs_driver.capability.{Capability, CapabilitySet}
+use std.fs_driver.extension.{Extension, PosixCompatExt}
+use std.fs_driver.ops.{FsDriver}
+use common.string_core.{str_char_at}
+
+# ============================================================================
+# Internal inode data structures
+# ============================================================================
+
+struct RamFsFile:
+    """In-memory file data."""
+    data:     [u8]
+    mode:     u32
+    refcount: u32
+
+struct DirEnt:
+    """Single directory entry (name → inode_id)."""
+    name: text
+    ino:  u64
+
+struct RamFsDir:
+    """In-memory directory: list of child entries."""
+    entries: [DirEnt]
+    mode:    u32
+
+enum RamFsKind:
+    """Discriminated union for an inode's content."""
+    File(f: RamFsFile)
+    Dir(d: RamFsDir)
+    Symlink(target: text)
+
+struct RamFsInode:
+    """Metadata + content for a single inode."""
+    kind:  RamFsKind
+    size:  u64
+    ctime: u64
+    mtime: u64
+    nlink: u32
+    mode:  u32
+
+struct InodeEntry:
+    """Association of inode_id to RamFsInode in the flat inode table."""
+    id:    u64
+    inode: RamFsInode
+
+# ============================================================================
+# File-descriptor table
+# ============================================================================
+
+struct FdEntry:
+    """Open file descriptor: maps a handle id to an inode id + path + flags."""
+    fd_id:  u64
+    ino_id: u64
+    path:   text
+    flags:  u32
+    is_dir: bool
+
+# ============================================================================
+# RamFsDriver
+# ============================================================================
+
+struct RamFsDriver:
+    """Volatile in-memory filesystem driver.
+
+    Lifecycle: call mount() before any I/O; unmount() at teardown.
+    root_ino is always 1 (created in new()).
+    next_ino starts at 2 and increments on each inode allocation.
+    """
+    name:     text
+    inodes:   [InodeEntry]
+    root_ino: u64
+    next_ino: u64
+    fd_table: [FdEntry]
+    next_fd:  u64
+    mounted:  bool
+
+impl RamFsDriver:
+    static fn new() -> RamFsDriver:
+        """Create driver with empty root directory at inode 1."""
+        val root_inode = RamFsInode(
+            kind:  RamFsKind.Dir(d: RamFsDir(entries: [], mode: 0o755)),
+            size:  0,
+            ctime: 0,
+            mtime: 0,
+            nlink: 2,
+            mode:  0o755
+        )
+        val root_entry = InodeEntry(id: 1, inode: root_inode)
+        RamFsDriver(
+            name:     "ramfs",
+            inodes:   [root_entry],
+            root_ino: 1,
+            next_ino: 2,
+            fd_table: [],
+            next_fd:  1,
+            mounted:  false
+        )
+
+    # --- Inode helpers ---
+
+    me fn alloc_ino() -> u64:
+        val n = self.next_ino
+        self.next_ino = self.next_ino + 1
+        n
+
+    me fn alloc_fd() -> u64:
+        val n = self.next_fd
+        self.next_fd = self.next_fd + 1
+        n
+
+    fn find_inode_idx(id: u64) -> i32:
+        var i: i32 = 0
+        while i < self.inodes.len() as i32:
+            if self.inodes[i].id == id:
+                return i
+            i = i + 1
+        -1
+
+    fn find_fd_idx(fd_id: u64) -> i32:
+        var i: i32 = 0
+        while i < self.fd_table.len() as i32:
+            if self.fd_table[i].fd_id == fd_id:
+                return i
+            i = i + 1
+        -1
+
+    # --- Path parsing ---
+    # Split "/foo/bar" into components ["foo", "bar"].
+    # We avoid path.raw.slice() due to FR-STORAGE-0004 (broken in Cranelift).
+
+    fn split_path_components(raw: text) -> [text]:
+        var parts: [text] = []
+        var cur: text = ""
+        var i: i64 = 0
+        while i < raw.len():
+            val ch = str_char_at(raw, i)
+            if ch == "/":
+                if cur.len() > 0:
+                    parts.push(cur)
+                    cur = ""
+            else:
+                cur = cur + ch
+            i = i + 1
+        if cur.len() > 0:
+            parts.push(cur)
+        parts
+
+    # Walk path components starting from root, return inode id or -1.
+    fn resolve_path(raw: text) -> i64:
+        val parts = self.split_path_components(raw)
+        var cur_ino: u64 = self.root_ino
+        for part in parts:
+            val idx = self.find_inode_idx(cur_ino)
+            if idx < 0:
+                return -1
+            val inode = self.inodes[idx as i32].inode
+            match inode.kind:
+                case Dir(d):
+                    var found: bool = false
+                    for ent in d.entries:
+                        if ent.name == part:
+                            cur_ino = ent.ino
+                            found = true
+                    if not found:
+                        return -1
+                case _:
+                    return -1
+        cur_ino as i64
+
+    # Return (parent_ino, basename) for a path like "/foo/bar".
+    fn parent_and_base(raw: text) -> (i64, text):
+        val parts = self.split_path_components(raw)
+        if parts.len() == 0:
+            return (-1, "")
+        val basename = parts[parts.len() as i32 - 1]
+        # Build parent path from all but last component.
+        var par_ino: u64 = self.root_ino
+        var pi: i32 = 0
+        while pi < parts.len() as i32 - 1:
+            val idx = self.find_inode_idx(par_ino)
+            if idx < 0:
+                return (-1, basename)
+            val inode = self.inodes[idx].inode
+            match inode.kind:
+                case Dir(d):
+                    var found: bool = false
+                    for ent in d.entries:
+                        if ent.name == parts[pi]:
+                            par_ino = ent.ino
+                            found = true
+                    if not found:
+                        return (-1, basename)
+                case _:
+                    return (-1, basename)
+            pi = pi + 1
+        (par_ino as i64, basename)
+
+    # Add a dir entry to the directory inode at `dir_ino`.
+    me fn add_dir_entry(dir_ino: u64, name: text, child_ino: u64) -> bool:
+        val idx = self.find_inode_idx(dir_ino)
+        if idx < 0:
+            return false
+        match self.inodes[idx].inode.kind:
+            case Dir(d):
+                d.entries.push(DirEnt(name: name, ino: child_ino))
+                self.inodes[idx].inode.kind = RamFsKind.Dir(d: d)
+                return true
+            case _:
+                return false
+
+    # Remove a named entry from the dir inode.
+    me fn remove_dir_entry(dir_ino: u64, name: text) -> bool:
+        val idx = self.find_inode_idx(dir_ino)
+        if idx < 0:
+            return false
+        match self.inodes[idx].inode.kind:
+            case Dir(d):
+                var new_entries: [DirEnt] = []
+                var removed: bool = false
+                for ent in d.entries:
+                    if ent.name == name:
+                        removed = true
+                    else:
+                        new_entries.push(ent)
+                d.entries = new_entries
+                self.inodes[idx].inode.kind = RamFsKind.Dir(d: d)
+                return removed
+            case _:
+                return false
+
+    # Compute total bytes used (sum of file data sizes).
+    fn total_used_bytes() -> u64:
+        var total: u64 = 0
+        var i: i32 = 0
+        while i < self.inodes.len() as i32:
+            match self.inodes[i].inode.kind:
+                case File(f): total = total + f.data.len() as u64
+                case _: pass_dn
+            i = i + 1
+        total
+
+# ============================================================================
+# FsDriver trait implementation
+# ============================================================================
+
+impl FsDriver for RamFsDriver:
+
+    # --- Lifecycle ---
+
+    me fn mount(opts: MountOptions) -> Result<(), FsError>:
+        self.mounted = true
+        Ok(())
+
+    me fn unmount() -> Result<(), FsError>:
+        if self.fd_table.len() > 0:
+            return Err(FsError.Busy)
+        self.mounted = false
+        Ok(())
+
+    me fn remount(opts: MountOptions) -> Result<(), FsError>:
+        Ok(())
+
+    fn statfs() -> Result<FsStatfs, FsError>:
+        val used = self.total_used_bytes()
+        # Report a 1 GiB virtual capacity.
+        val total: u64 = 1073741824
+        val free_bytes = if used < total: total - used else: 0
+        Ok(FsStatfs(
+            total_bytes: total,
+            free_bytes:  free_bytes,
+            avail_bytes: free_bytes,
+            files_total: 65536,
+            files_free:  65536 - self.inodes.len() as u64,
+            block_size:  4096
+        ))
+
+    # --- Root ---
+
+    fn root() -> Result<Inode, FsError>:
+        Ok(Inode(id: self.root_ino))
+
+    # --- File I/O ---
+
+    me fn open(path: Path, flags: OpenFlags) -> Result<FileHandle, FsError>:
+        if not self.mounted:
+            return Err(FsError.InvalidArg)
+        val raw = path.raw
+        val ino_i64 = self.resolve_path(raw)
+        val want_create = (flags.bits & 64) != 0
+        val want_excl   = (flags.bits & 128) != 0
+        val want_trunc  = (flags.bits & 512) != 0
+
+        if ino_i64 < 0:
+            # Path does not exist.
+            if not want_create:
+                return Err(FsError.NotFound)
+            # Create the file.
+            val (par_i64, basename) = self.parent_and_base(raw)
+            if par_i64 < 0:
+                return Err(FsError.NotFound)
+            val new_ino = self.alloc_ino()
+            val new_file = RamFsFile(data: [], mode: 0o644, refcount: 1)
+            val new_inode = RamFsInode(
+                kind:  RamFsKind.File(f: new_file),
+                size:  0,
+                ctime: 0,
+                mtime: 0,
+                nlink: 1,
+                mode:  0o644
+            )
+            self.inodes.push(InodeEntry(id: new_ino, inode: new_inode))
+            val ok = self.add_dir_entry(par_i64 as u64, basename, new_ino)
+            if not ok:
+                return Err(FsError.InvalidArg)
+            val fd_id = self.alloc_fd()
+            self.fd_table.push(FdEntry(fd_id: fd_id, ino_id: new_ino, path: raw, flags: flags.bits, is_dir: false))
+            return Ok(FileHandle(id: fd_id))
+        else:
+            val ino_id = ino_i64 as u64
+            if want_excl:
+                return Err(FsError.AlreadyExists)
+            # Truncate if requested.
+            if want_trunc:
+                val idx = self.find_inode_idx(ino_id)
+                if idx >= 0:
+                    match self.inodes[idx].inode.kind:
+                        case File(f):
+                            f.data = []
+                            self.inodes[idx].inode.kind = RamFsKind.File(f: f)
+                            self.inodes[idx].inode.size = 0
+                        case _: pass_dn
+            val fd_id = self.alloc_fd()
+            # Detect if it's a dir.
+            val idx2 = self.find_inode_idx(ino_id)
+            var is_dir: bool = false
+            if idx2 >= 0:
+                match self.inodes[idx2].inode.kind:
+                    case Dir(_): is_dir = true
+                    case _: is_dir = false
+            self.fd_table.push(FdEntry(fd_id: fd_id, ino_id: ino_id, path: raw, flags: flags.bits, is_dir: is_dir))
+            Ok(FileHandle(id: fd_id))
+
+    me fn close(handle: FileHandle) -> Result<(), FsError>:
+        val fd_idx = self.find_fd_idx(handle.id)
+        if fd_idx < 0:
+            return Err(FsError.InvalidArg)
+        var new_fds: [FdEntry] = []
+        for fd in self.fd_table:
+            if fd.fd_id != handle.id:
+                new_fds.push(fd)
+        self.fd_table = new_fds
+        Ok(())
+
+    me fn read(handle: FileHandle, offset: i64, buf: [u8]) -> Result<i64, FsError>:
+        val fd_idx = self.find_fd_idx(handle.id)
+        if fd_idx < 0:
+            return Err(FsError.InvalidArg)
+        val ino_id = self.fd_table[fd_idx].ino_id
+        val inode_idx = self.find_inode_idx(ino_id)
+        if inode_idx < 0:
+            return Err(FsError.NotFound)
+        match self.inodes[inode_idx].inode.kind:
+            case File(f):
+                val data_len = f.data.len() as i64
+                if offset >= data_len:
+                    return Ok(0)
+                var n: i64 = 0
+                var src: i64 = offset
+                while n < buf.len() as i64 and src < data_len:
+                    buf[n as i32] = f.data[src as i32]
+                    n = n + 1
+                    src = src + 1
+                Ok(n)
+            case _:
+                Err(FsError.InvalidArg)
+
+    me fn write(handle: FileHandle, offset: i64, buf: [u8]) -> Result<i64, FsError>:
+        val fd_idx = self.find_fd_idx(handle.id)
+        if fd_idx < 0:
+            return Err(FsError.InvalidArg)
+        val ino_id = self.fd_table[fd_idx].ino_id
+        val inode_idx = self.find_inode_idx(ino_id)
+        if inode_idx < 0:
+            return Err(FsError.NotFound)
+        match self.inodes[inode_idx].inode.kind:
+            case File(f):
+                # Extend if needed.
+                while f.data.len() < offset:
+                    f.data.push(0)
+                var n: i32 = 0
+                while n < buf.len():
+                    val pos = offset as i32 + n
+                    if pos < f.data.len():
+                        f.data[pos] = buf[n]
+                    else:
+                        f.data.push(buf[n])
+                    n = n + 1
+                self.inodes[inode_idx].inode.kind = RamFsKind.File(f: f)
+                self.inodes[inode_idx].inode.size = f.data.len() as u64
+                Ok(buf.len() as i64)
+            case _:
+                Err(FsError.InvalidArg)
+
+    me fn pread(handle: FileHandle, offset: i64, buf: [u8]) -> Result<i64, FsError>:
+        # Positional read — same as read since RamFs has no cursor state.
+        self.read(handle, offset, buf)
+
+    me fn pwrite(handle: FileHandle, offset: i64, buf: [u8]) -> Result<i64, FsError>:
+        # Positional write — same as write since RamFs has no cursor state.
+        self.write(handle, offset, buf)
+
+    fn fstat(handle: FileHandle) -> Result<FileStat, FsError>:
+        val fd_idx = self.find_fd_idx(handle.id)
+        if fd_idx < 0:
+            return Err(FsError.InvalidArg)
+        val ino_id = self.fd_table[fd_idx].ino_id
+        val inode_idx = self.find_inode_idx(ino_id)
+        if inode_idx < 0:
+            return Err(FsError.NotFound)
+        val inode = self.inodes[inode_idx].inode
+        Ok(FileStat(
+            inode:         ino_id,
+            size:          inode.size,
+            blocks:        (inode.size + 511) / 512,
+            block_size:    4096,
+            mode:          inode.mode,
+            uid:           0,
+            gid:           0,
+            nlinks:        inode.nlink,
+            atime_ns:      0,
+            mtime_ns:      inode.mtime,
+            ctime_ns:      inode.ctime,
+            birth_time_ns: inode.ctime
+        ))
+
+    fn stat(path: Path) -> Result<FileStat, FsError>:
+        val ino_i64 = self.resolve_path(path.raw)
+        if ino_i64 < 0:
+            return Err(FsError.NotFound)
+        val ino_id = ino_i64 as u64
+        val inode_idx = self.find_inode_idx(ino_id)
+        if inode_idx < 0:
+            return Err(FsError.NotFound)
+        val inode = self.inodes[inode_idx].inode
+        Ok(FileStat(
+            inode:         ino_id,
+            size:          inode.size,
+            blocks:        (inode.size + 511) / 512,
+            block_size:    4096,
+            mode:          inode.mode,
+            uid:           0,
+            gid:           0,
+            nlinks:        inode.nlink,
+            atime_ns:      0,
+            mtime_ns:      inode.mtime,
+            ctime_ns:      inode.ctime,
+            birth_time_ns: inode.ctime
+        ))
+
+    me fn truncate(path: Path, length: i64) -> Result<(), FsError>:
+        val ino_i64 = self.resolve_path(path.raw)
+        if ino_i64 < 0:
+            return Err(FsError.NotFound)
+        val ino_id = ino_i64 as u64
+        val inode_idx = self.find_inode_idx(ino_id)
+        if inode_idx < 0:
+            return Err(FsError.NotFound)
+        match self.inodes[inode_idx].inode.kind:
+            case File(f):
+                val cur_len = f.data.len() as i64
+                if length < cur_len:
+                    # Shrink.
+                    var new_data: [u8] = []
+                    var i: i32 = 0
+                    while i < length as i32:
+                        new_data.push(f.data[i])
+                        i = i + 1
+                    f.data = new_data
+                else:
+                    # Grow with zeros.
+                    while f.data.len() < length:
+                        f.data.push(0)
+                self.inodes[inode_idx].inode.kind = RamFsKind.File(f: f)
+                self.inodes[inode_idx].inode.size = f.data.len() as u64
+                Ok(())
+            case _:
+                Err(FsError.InvalidArg)
+
+    me fn ftruncate(handle: FileHandle, length: i64) -> Result<(), FsError>:
+        val fd_idx = self.find_fd_idx(handle.id)
+        if fd_idx < 0:
+            return Err(FsError.InvalidArg)
+        val ino_id = self.fd_table[fd_idx].ino_id
+        val inode_idx = self.find_inode_idx(ino_id)
+        if inode_idx < 0:
+            return Err(FsError.NotFound)
+        match self.inodes[inode_idx].inode.kind:
+            case File(f):
+                val cur_len = f.data.len() as i64
+                if length < cur_len:
+                    var new_data: [u8] = []
+                    var i: i32 = 0
+                    while i < length as i32:
+                        new_data.push(f.data[i])
+                        i = i + 1
+                    f.data = new_data
+                else:
+                    while f.data.len() < length:
+                        f.data.push(0)
+                self.inodes[inode_idx].inode.kind = RamFsKind.File(f: f)
+                self.inodes[inode_idx].inode.size = f.data.len() as u64
+                Ok(())
+            case _:
+                Err(FsError.InvalidArg)
+
+    fn fsync(handle: FileHandle) -> Result<(), FsError>:
+        # In-memory: no-op.
+        Ok(())
+
+    fn fdatasync(handle: FileHandle) -> Result<(), FsError>:
+        # In-memory: no-op.
+        Ok(())
+
+    # --- Namespace ---
+
+    fn readdir(handle: DirHandle) -> Result<[DirEntry], FsError>:
+        val fd_idx = self.find_fd_idx(handle.id)
+        if fd_idx < 0:
+            return Err(FsError.InvalidArg)
+        val ino_id = self.fd_table[fd_idx].ino_id
+        val inode_idx = self.find_inode_idx(ino_id)
+        if inode_idx < 0:
+            return Err(FsError.NotFound)
+        match self.inodes[inode_idx].inode.kind:
+            case Dir(d):
+                var result: [DirEntry] = []
+                for ent in d.entries:
+                    val child_idx = self.find_inode_idx(ent.ino)
+                    var is_dir: bool = false
+                    if child_idx >= 0:
+                        match self.inodes[child_idx].inode.kind:
+                            case Dir(_): is_dir = true
+                            case _: is_dir = false
+                    result.push(DirEntry(name: ent.name, inode: Inode(id: ent.ino), is_dir: is_dir))
+                Ok(result)
+            case _:
+                Err(FsError.InvalidArg)
+
+    me fn mkdir(path: Path, mode: u32) -> Result<(), FsError>:
+        val raw = path.raw
+        val existing = self.resolve_path(raw)
+        if existing >= 0:
+            return Err(FsError.AlreadyExists)
+        val (par_i64, basename) = self.parent_and_base(raw)
+        if par_i64 < 0:
+            return Err(FsError.NotFound)
+        val new_ino = self.alloc_ino()
+        val new_dir = RamFsDir(entries: [], mode: mode)
+        val new_inode = RamFsInode(
+            kind:  RamFsKind.Dir(d: new_dir),
+            size:  0,
+            ctime: 0,
+            mtime: 0,
+            nlink: 2,
+            mode:  mode
+        )
+        self.inodes.push(InodeEntry(id: new_ino, inode: new_inode))
+        val ok = self.add_dir_entry(par_i64 as u64, basename, new_ino)
+        if not ok:
+            return Err(FsError.InvalidArg)
+        Ok(())
+
+    me fn rmdir(path: Path) -> Result<(), FsError>:
+        val raw = path.raw
+        val ino_i64 = self.resolve_path(raw)
+        if ino_i64 < 0:
+            return Err(FsError.NotFound)
+        val ino_id = ino_i64 as u64
+        val inode_idx = self.find_inode_idx(ino_id)
+        if inode_idx < 0:
+            return Err(FsError.NotFound)
+        match self.inodes[inode_idx].inode.kind:
+            case Dir(d):
+                if d.entries.len() > 0:
+                    return Err(FsError.Busy)
+            case _:
+                return Err(FsError.InvalidArg)
+        # Remove from parent.
+        val (par_i64, basename) = self.parent_and_base(raw)
+        if par_i64 >= 0:
+            self.remove_dir_entry(par_i64 as u64, basename)
+        # Remove the inode.
+        var new_inodes: [InodeEntry] = []
+        for ie in self.inodes:
+            if ie.id != ino_id:
+                new_inodes.push(ie)
+        self.inodes = new_inodes
+        Ok(())
+
+    me fn unlink(path: Path) -> Result<(), FsError>:
+        val raw = path.raw
+        val ino_i64 = self.resolve_path(raw)
+        if ino_i64 < 0:
+            return Err(FsError.NotFound)
+        val ino_id = ino_i64 as u64
+        val (par_i64, basename) = self.parent_and_base(raw)
+        if par_i64 >= 0:
+            self.remove_dir_entry(par_i64 as u64, basename)
+        # Decrement nlink; remove inode only when nlink reaches 0.
+        val inode_idx = self.find_inode_idx(ino_id)
+        if inode_idx >= 0:
+            val cur_nlink = self.inodes[inode_idx].inode.nlink
+            if cur_nlink <= 1:
+                var new_inodes: [InodeEntry] = []
+                for ie in self.inodes:
+                    if ie.id != ino_id:
+                        new_inodes.push(ie)
+                self.inodes = new_inodes
+            else:
+                self.inodes[inode_idx].inode.nlink = cur_nlink - 1
+        Ok(())
+
+    me fn rename(old: Path, new: Path) -> Result<(), FsError>:
+        val old_raw = old.raw
+        val new_raw = new.raw
+        val ino_i64 = self.resolve_path(old_raw)
+        if ino_i64 < 0:
+            return Err(FsError.NotFound)
+        val ino_id = ino_i64 as u64
+        # Remove old dir entry.
+        val (old_par_i64, old_base) = self.parent_and_base(old_raw)
+        if old_par_i64 >= 0:
+            self.remove_dir_entry(old_par_i64 as u64, old_base)
+        # Remove existing target if any.
+        val existing_new = self.resolve_path(new_raw)
+        if existing_new >= 0:
+            val (new_par_i64_del, new_base_del) = self.parent_and_base(new_raw)
+            if new_par_i64_del >= 0:
+                self.remove_dir_entry(new_par_i64_del as u64, new_base_del)
+        # Add new dir entry.
+        val (new_par_i64, new_base) = self.parent_and_base(new_raw)
+        if new_par_i64 < 0:
+            return Err(FsError.NotFound)
+        self.add_dir_entry(new_par_i64 as u64, new_base, ino_id)
+        Ok(())
+
+    me fn symlink(target: Path, link: Path) -> Result<(), FsError>:
+        val link_raw = link.raw
+        val existing = self.resolve_path(link_raw)
+        if existing >= 0:
+            return Err(FsError.AlreadyExists)
+        val (par_i64, basename) = self.parent_and_base(link_raw)
+        if par_i64 < 0:
+            return Err(FsError.NotFound)
+        val new_ino = self.alloc_ino()
+        val new_inode = RamFsInode(
+            kind:  RamFsKind.Symlink(target: target.raw),
+            size:  target.raw.len() as u64,
+            ctime: 0,
+            mtime: 0,
+            nlink: 1,
+            mode:  0o777
+        )
+        self.inodes.push(InodeEntry(id: new_ino, inode: new_inode))
+        self.add_dir_entry(par_i64 as u64, basename, new_ino)
+        Ok(())
+
+    fn readlink(path: Path) -> Result<Path, FsError>:
+        val ino_i64 = self.resolve_path(path.raw)
+        if ino_i64 < 0:
+            return Err(FsError.NotFound)
+        val inode_idx = self.find_inode_idx(ino_i64 as u64)
+        if inode_idx < 0:
+            return Err(FsError.NotFound)
+        match self.inodes[inode_idx].inode.kind:
+            case Symlink(target):
+                Ok(Path(raw: target))
+            case _:
+                Err(FsError.InvalidArg)
+
+    me fn link(target: Path, link: Path) -> Result<(), FsError>:
+        val target_raw = target.raw
+        val link_raw = link.raw
+        val ino_i64 = self.resolve_path(target_raw)
+        if ino_i64 < 0:
+            return Err(FsError.NotFound)
+        val ino_id = ino_i64 as u64
+        val existing = self.resolve_path(link_raw)
+        if existing >= 0:
+            return Err(FsError.AlreadyExists)
+        val (par_i64, basename) = self.parent_and_base(link_raw)
+        if par_i64 < 0:
+            return Err(FsError.NotFound)
+        # Increment nlink on the inode.
+        val inode_idx = self.find_inode_idx(ino_id)
+        if inode_idx >= 0:
+            self.inodes[inode_idx].inode.nlink = self.inodes[inode_idx].inode.nlink + 1
+        self.add_dir_entry(par_i64 as u64, basename, ino_id)
+        Ok(())
+
+    # --- Extension probe ---
+
+    fn capabilities() -> CapabilitySet:
+        CapabilitySet.empty()
+            .with(Capability.PosixCompat)
+            .with(Capability.CaseSensitive)
+            .with(Capability.Hardlinks)
+            .with(Capability.SparseFiles)
+            .with(Capability.LargeFiles)
+            .with(Capability.UnicodeNames)
+            .with(Capability.AsyncIo)
+
+    fn probe(cap: Capability) -> Option<Extension>:
+        match cap:
+            case PosixCompat:
+                Some(Extension.PosixCompat(PosixCompatExt(flags: 0, mode: 0)))
+            case _:
+                None

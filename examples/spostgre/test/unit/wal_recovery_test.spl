@@ -1,0 +1,172 @@
+# spostgre engine — WAL recovery + arena-backed WalWriter tests (M2).
+#
+# Covers 5 crash-recovery scenarios using the NVFS shim:
+#   1. Write 3 records, sync, recover: all 3 returned.
+#   2. Write 3 + partial 4th (torn tail): recover returns 3.
+#   3. Group-commit: records before durable_lsn visible; LSNs monotonic.
+#   4. Empty WAL recovers to 0 records.
+#   5. Corruption in middle record: recover returns prefix up to corruption.
+#
+# Also tests PmapWriter M2: publish + lookup via arena.
+#
+# Design refs: spostgre_design.md §6.6, §9, §12 (M2 acceptance criteria).
+
+use std.sspec.*
+use engine.wal.{WalWriter, wal_writer_append, wal_writer_commit_group,
+                wal_writer_sync, wal_recover_tail, WalRecord, WAL_HDR_LEN,
+                wal_record_encode}
+use engine.pmap.{PmapWriter, pmap_writer_publish, pmap_writer_lookup}
+use engine.nvfs_shim.{shim_arena_create, shim_arena_truncate_for_test,
+                      shim_arena_corrupt_byte_for_test, shim_arena_total_bytes,
+                      STORAGE_CLASS_DB_WAL}
+use std.spostgre_if.types.{TxnId}
+
+# ---------------------------------------------------------------------------
+# Scenario 1: Write 3 records, sync, recover -> all 3 returned.
+# ---------------------------------------------------------------------------
+
+describe "WAL M2 recovery — scenario 1: 3 records sync then recover":
+    it "recover_tail returns all 3 written records after sync":
+        var writer = WalWriter.new()
+        val p1: [u8] = [1u8, 2u8]
+        val p2: [u8] = [3u8, 4u8]
+        val p3: [u8] = [5u8, 6u8]
+        val (lsn1, writer1) = wal_writer_append(writer, TxnId(id: 1), p1)
+        val (lsn2, writer2) = wal_writer_append(writer1, TxnId(id: 1), p2)
+        val (lsn3, writer3) = wal_writer_append(writer2, TxnId(id: 1), p3)
+        val writer4 = wal_writer_sync(writer3)
+        val records = wal_recover_tail(writer4.arena_id)
+        expect(records.len()).to_equal(3)
+
+    it "recovered LSNs are strictly increasing":
+        var writer = WalWriter.new()
+        val p: [u8] = [10u8]
+        val (lsn1, w1) = wal_writer_append(writer, TxnId(id: 1), p)
+        val (lsn2, w2) = wal_writer_append(w1, TxnId(id: 1), p)
+        val (lsn3, w3) = wal_writer_append(w2, TxnId(id: 1), p)
+        val _w4 = wal_writer_sync(w3)
+        val records = wal_recover_tail(w3.arena_id)
+        expect(records.len()).to_equal(3)
+        expect(records[0].lsn < records[1].lsn).to_equal(true)
+        expect(records[1].lsn < records[2].lsn).to_equal(true)
+
+# ---------------------------------------------------------------------------
+# Scenario 2: 3 records + torn 4th (truncate after partial write) -> 3 back.
+# ---------------------------------------------------------------------------
+
+describe "WAL M2 recovery — scenario 2: torn tail (crash mid 4th record)":
+    it "recover_tail returns only the 3 complete records, discards torn 4th":
+        var writer = WalWriter.new()
+        val p: [u8] = [7u8, 8u8, 9u8]
+        val (lsn1, w1) = wal_writer_append(writer, TxnId(id: 2), p)
+        val (lsn2, w2) = wal_writer_append(w1, TxnId(id: 2), p)
+        val (lsn3, w3) = wal_writer_append(w2, TxnId(id: 2), p)
+        val aid = w3.arena_id
+        # Simulate crash mid-4th record: append partial bytes (less than WAL_HDR_LEN)
+        val partial: [u8] = [0u8, 0u8, 0u8, 0u8]  # 4 bytes, not a full record
+        val _n = shim_arena_create(0, 0)  # unused, just to have a call
+        # Write partial 4th record directly
+        val _written = shim_arena_corrupt_byte_for_test(aid, 0, w3.arena_id as u8)
+        # Actually append partial bytes to the WAL arena
+        # Use shim_arena_total_bytes to measure, then truncate to simulate torn write.
+        # Step 1: append a real 4th record
+        val p4: [u8] = [20u8, 21u8, 22u8]
+        val (lsn4, w4) = wal_writer_append(w3, TxnId(id: 2), p4)
+        val total_after4 = shim_arena_total_bytes(w4.arena_id)
+        # Step 2: truncate to midway through the 4th record (lsn3 + 4 bytes)
+        val mid_point = lsn3 + 4
+        val _truncated = shim_arena_truncate_for_test(w4.arena_id, mid_point)
+        # Step 3: recover — should get 3 records
+        val records = wal_recover_tail(w4.arena_id)
+        expect(records.len()).to_equal(3)
+
+# ---------------------------------------------------------------------------
+# Scenario 3: Group commit — durable_lsn tracks committed LSNs correctly.
+# ---------------------------------------------------------------------------
+
+describe "WAL M2 recovery — scenario 3: group commit visibility":
+    it "durable_lsn is 0 for a fresh WalWriter":
+        val writer = WalWriter.new()
+        expect(writer.durable_lsn).to_equal(0)
+
+    it "wal_writer_commit_group advances durable_lsn to lsn_high":
+        var writer = WalWriter.new()
+        val p: [u8] = [1u8]
+        val (lsn1, w1) = wal_writer_append(writer, TxnId(id: 3), p)
+        val (lsn2, w2) = wal_writer_append(w1, TxnId(id: 3), p)
+        val w3 = wal_writer_commit_group(w2, lsn2)
+        expect(w3.durable_lsn).to_equal(lsn2.value)
+
+    it "records before durable_lsn are recoverable":
+        var writer = WalWriter.new()
+        val p: [u8] = [55u8]
+        val (lsn1, w1) = wal_writer_append(writer, TxnId(id: 3), p)
+        val (lsn2, w2) = wal_writer_append(w1, TxnId(id: 3), p)
+        val w3 = wal_writer_commit_group(w2, lsn1)
+        # Both records are physically present; recovery walks the full arena
+        val records = wal_recover_tail(w3.arena_id)
+        expect(records.len()).to_equal(2)
+
+# ---------------------------------------------------------------------------
+# Scenario 4: Empty WAL -> 0 records.
+# ---------------------------------------------------------------------------
+
+describe "WAL M2 recovery — scenario 4: empty WAL":
+    it "recover_tail on a fresh empty arena returns 0 records":
+        val aid = shim_arena_create(STORAGE_CLASS_DB_WAL, 0)
+        val records = wal_recover_tail(aid)
+        expect(records.len()).to_equal(0)
+
+# ---------------------------------------------------------------------------
+# Scenario 5: Corruption in middle record -> prefix only.
+# ---------------------------------------------------------------------------
+
+describe "WAL M2 recovery — scenario 5: corruption in middle record":
+    it "recover_tail stops at the corrupted record and returns only the prefix":
+        var writer = WalWriter.new()
+        val p: [u8] = [0u8, 1u8, 2u8]
+        val (lsn1, w1) = wal_writer_append(writer, TxnId(id: 5), p)
+        val (lsn2, w2) = wal_writer_append(w1, TxnId(id: 5), p)
+        val (lsn3, w3) = wal_writer_append(w2, TxnId(id: 5), p)
+        # Record 2 starts at lsn1 bytes in; corrupt a byte in its CRC field
+        # CRC is at offset 20 within the record; record 2 starts at lsn1.
+        val corrupt_offset = lsn1 + 20
+        val _ok = shim_arena_corrupt_byte_for_test(w3.arena_id, corrupt_offset, 0xDEu8)
+        val records = wal_recover_tail(w3.arena_id)
+        # Only record 1 should be returned (record 2's CRC is bad, stops there)
+        expect(records.len()).to_equal(1)
+
+# ---------------------------------------------------------------------------
+# M2 PmapWriter tests — arena-backed publish + lookup
+# ---------------------------------------------------------------------------
+
+describe "PmapWriter M2 — arena-backed publish and lookup":
+    it "publish then lookup returns the published entry":
+        var pw = PmapWriter.new()
+        val ok = pmap_writer_publish(pw, 100, 42, 0, 1)
+        expect(ok).to_equal(true)
+        val entry = pmap_writer_lookup(pw, 100)
+        expect(entry.logical).to_equal(100)
+        expect(entry.phys).to_equal(42)
+
+    it "lookup returns phys=-1 for unpublished logical":
+        var pw = PmapWriter.new()
+        val entry = pmap_writer_lookup(pw, 999)
+        expect(entry.phys).to_equal(-1)
+
+    it "latest publish wins on lookup":
+        var pw = PmapWriter.new()
+        val _ok1 = pmap_writer_publish(pw, 200, 10, 0, 1)
+        val _ok2 = pmap_writer_publish(pw, 200, 20, 4096, 2)
+        val entry = pmap_writer_lookup(pw, 200)
+        # Most recent publish for logical=200 should have phys=20
+        expect(entry.phys).to_equal(20)
+
+    it "multiple logical pages stored independently":
+        var pw = PmapWriter.new()
+        val _ok1 = pmap_writer_publish(pw, 1, 100, 0, 1)
+        val _ok2 = pmap_writer_publish(pw, 2, 200, 0, 1)
+        val e1 = pmap_writer_lookup(pw, 1)
+        val e2 = pmap_writer_lookup(pw, 2)
+        expect(e1.phys).to_equal(100)
+        expect(e2.phys).to_equal(200)

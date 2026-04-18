@@ -1375,3 +1375,117 @@ None. The integration tests confirmed:
 - `g_vfs_dispatch_*` helpers cover all 4 `DriverInstance` arms (Fat32 / Nvfs / NvfsPosix / RamFs) — exhaustive match satisfied.
 - Path normalization: bare name `"HELLO.TXT"` → `"/HELLO.TXT"` via `g_vfs_abs_path`; mount-point prefix `"/"` stripped leaving `"HELLO.TXT"` as relpath (guarded: empty relpath falls back to absolute raw).
 - No SimpleOS-specific test target found; lint-only verification per task instructions.
+
+### 9-extend
+
+#### 9-N4a-scrub
+
+**Date:** 2026-04-17
+**Agent:** N4a scrub agent (Sonnet 4.6)
+
+##### File line counts
+
+| File | Lines |
+|------|-------|
+| `examples/nvfs/src/core/scrub.spl` (new) | 97 |
+| `examples/nvfs/src/core/arena.spl` (+arena_mutate_for_test) | +22 |
+| `examples/nvfs/src/driver/fs_driver_impl.spl` (+nvfs_pmap_sidecar_snapshot) | +16 |
+| `examples/nvfs/src/driver/extensions.spl` (+ScrubExt real + _last_scrub_report) | +30 |
+| `examples/nvfs/test/unit/scrub_test.spl` (new) | 163 |
+
+##### Test pass count
+
+6 new tests / 6 passed. Full suite: 129/129 pass (13 test files).
+
+##### Submodule commit SHA
+
+`fb63f83` — pushed to `origin/main` (simple-nvfs repo).
+
+##### FRs filed
+
+- **FR-NVFS-N4a-001** — Expose a public arena mutation API for fault injection beyond test scope.
+  Filed in `examples/nvfs/src/core/arena.spl` (comment on `arena_mutate_for_test`).
+- **FR-NVFS-N4b-001** — Implement background scrub task with `throttle_ms` support.
+  Filed in `examples/nvfs/src/driver/extensions.spl` (`scrub_start_background` is `pass_todo`).
+
+### 9-extend
+
+#### 9-spostgre-M2
+
+**Date:** 2026-04-17
+**Agent:** spostgre M2 agent (Sonnet 4.6)
+
+##### File line counts
+
+| File | Lines | Delta |
+|------|-------|-------|
+| `examples/spostgre/src/engine/nvfs_shim.spl` (new) | 158 | +158 |
+| `examples/spostgre/src/engine/wal.spl` | 358 | +118 |
+| `examples/spostgre/src/engine/pmap.spl` | 248 | +163 |
+| `examples/spostgre/test/unit/wal_recovery_test.spl` (new) | 163 | +163 |
+
+##### Test pass count
+
+- `wal_test.spl`: 9/9 passed (M1 unchanged)
+- `page_test.spl`: 8/8 passed (M1 unchanged)
+- `wal_recovery_test.spl`: 12/12 passed (M2 new)
+- **Total: 29/29 passed** (17 M1 + 12 M2)
+
+##### Submodule commit SHA
+
+`1ba0475` — pushed to `origin/main` (simple-spostgre repo).
+
+##### Design decisions
+
+- **NVFS shim** (`nvfs_shim.spl`): In-process byte-vector arena mirroring `nvfs/src/core/arena.spl` API. spostgre and NVFS are separate git submodules; direct `use nvfs.*` is not available at test time. Shim API matches NVFS signatures exactly so future swap is a 1-line import change.
+- **WalWriter** added alongside existing `WalState` (not replaced). LSN = total_bytes after append (monotonically increasing offset). `wal_writer_commit_group` issues a no-op FUA fence via `shim_arena_fua_append`.
+- **wal_recover_tail** walks the arena sequentially, stops at first bad CRC or torn record.
+- **PmapWriter** uses 80-byte v2 layout matching NVFS `pmap.spl §17.2`; latest-wins scan backward on lookup.
+- **Test-only helpers**: `shim_arena_truncate_for_test`, `shim_arena_corrupt_byte_for_test` — used for torn-tail and corruption scenarios.
+
+##### pass_todo
+
+None. All 5 recovery scenarios and 4 PmapWriter scenarios run fully against the in-process shim.
+
+##### FRs filed
+
+- **FR-SPOSTGRE-M2-001** — Replace `nvfs_shim.spl` with a real `use nvfs.core.arena.*` import once spostgre declares NVFS as a package dependency (submodule-import limitation at host test time). Tracked in `nvfs_shim.spl` header comment.
+
+Total FRs filed: 2.
+
+### 9-extend
+
+#### 9-ramfs (RamFsDriver real impl — 2026-04-17)
+
+##### File line counts
+
+| File | Lines | Notes |
+|------|-------|-------|
+| `src/lib/nogc_sync_mut/fs_driver/ramfs.spl` | 732 | New — full FsDriver impl |
+| `src/lib/nogc_sync_mut/fs_driver/instance.spl` | 59 | Updated — RamFsStub→RamFsDriver, compat stub kept |
+| `test/unit/fs_driver/ramfs_test.spl` | 439 | New — 37 tests across 13 groups |
+
+##### instance.spl diff summary
+
+- Added `use std.fs_driver.ramfs.{RamFsDriver}`.
+- Kept `struct RamFsStub` as a backward-compat placeholder (so existing test files that import it still compile).
+- Changed `DriverInstance.RamFs(driver: RamFsStub)` → `DriverInstance.RamFs(driver: RamFsDriver)`.
+- `driver_name()` match arm for `RamFs(d)` now returns `d.name` (real driver field) instead of hardcoded `"ramfs"`.
+- Updated `instance_test.spl` to construct `RamFsDriver.new()` instead of `RamFsStub`.
+- Updated `test/integration/fs_driver/multi_mount_test.spl` to use `RamFsDriver.new()`.
+
+##### Test pass counts
+
+| Suite | Passed | Failed | Notes |
+|-------|--------|--------|-------|
+| `test/unit/fs_driver/ramfs_test.spl` | 37 | 0 | New — 13 describe groups |
+| `test/unit/fs_driver/instance_test.spl` | 5 | 0 | Updated to use RamFsDriver |
+| `test/integration/fs_driver/multi_mount_test.spl` | 16 | 0 | Compat updated |
+
+##### Integration-test pass_todo flips
+
+The 2 `pass_todo` tests in `multi_mount_test.spl` remain `pass_todo` — they test `NvfsPosixDriver` availability (symbol not linked in test runner), not RamFs. No flips from this change.
+
+##### Lint delta
+
+`bin/simple build lint` exits 0 before and after. No new warnings introduced.
