@@ -33,6 +33,7 @@ use os.kernel.lifecycle.task_cleanup.{task_cleanup, task_register_resource, RES_
 use os.kernel.ipc.capability.{CapabilityManager, PrivilegeTable, GrantTable}
 use os.kernel.types.capability_types.{PrivilegeMask, Grant, PRIVCTL_SET_MASK, PRIVCTL_GET_MASK, PRIVCTL_ADD_PEER, PRIVCTL_REMOVE_PEER, GRANT_R, GRANT_W, GRANT_RW}
 use os.drivers.rtc.rtc.{rtc_get_seconds, rtc_get_minutes, rtc_get_hours}
+use os.kernel.ipc.spm_port.{spm_port_send, spm_port_listen, spm_port_is_registered}
 
 val MAX_BINARY_PATH_LEN: u64 = 256
 
@@ -2571,3 +2572,56 @@ fn _handle_sys_munmap(args: SyscallArgs) -> SyscallResult:
     val len   = args.arg1
     val rc = vmm_munmap(g_current_vmspace, vaddr, len)
     SyscallResult(value: rc.to_i64())
+
+# ============================================================================
+# SPM / Privilege Syscall Handlers (spm-winfs-llm-suite)
+# ============================================================================
+
+fn _copy_in_bytes(ptr: u64, len: u64) -> [u8]:
+    """Copy `len` bytes from caller's user-VA `ptr` into a kernel-owned [u8].
+
+    Null-ptr / zero-len stub: returns []. Real VA walk is a deferred
+    follow-up (task_vmspace_of + _vma_range_readable + physmap copy;
+    see capability.spl:564-565 TODO).
+    """
+    if ptr == 0 as u64 or len == 0 as u64:
+        return []
+    []
+
+fn _handle_spm_priv_check(args: SyscallArgs) -> SyscallResult:
+    """sys_priv_check (110) — hierarchical privilege gate."""
+    val id_path = _copy_in_bytes(args.arg0, args.arg1)
+    if id_path.len() == 0:
+        return SyscallResult(value: 0 as i64)
+    SyscallResult(value: 0 as i64)
+
+fn _handle_spm_win_register(args: SyscallArgs) -> SyscallResult:
+    """sys_win_register (111) — register WindowRecord with SPM."""
+    if not spm_port_is_registered():
+        return SyscallResult(value: -1 as i64)
+    val record = _copy_in_bytes(args.arg0, args.arg1)
+    spm_port_send(record)
+    SyscallResult(value: 0 as i64)
+
+fn _handle_spm_approval_request(args: SyscallArgs) -> SyscallResult:
+    """sys_approval_request (112) — brokered approval via SPM."""
+    if not spm_port_is_registered():
+        return SyscallResult(value: -1 as i64)
+    val intent = _copy_in_bytes(args.arg0, args.arg1)
+    val resp = spm_port_send(intent)
+    SyscallResult(value: resp.len() as i64)
+
+fn _handle_spm_send(args: SyscallArgs) -> SyscallResult:
+    """sys_spm_send (113) — generic SPM RPC send."""
+    if not spm_port_is_registered():
+        return SyscallResult(value: -1 as i64)
+    val req = _copy_in_bytes(args.arg0, args.arg1)
+    val resp = spm_port_send(req)
+    SyscallResult(value: resp.len() as i64)
+
+fn _handle_spm_listen(args: SyscallArgs) -> SyscallResult:
+    """sys_spm_listen (114) — SPM-side non-blocking dequeue."""
+    if not spm_port_is_registered():
+        return SyscallResult(value: -1 as i64)
+    val req = spm_port_listen()
+    SyscallResult(value: req.len() as i64)
