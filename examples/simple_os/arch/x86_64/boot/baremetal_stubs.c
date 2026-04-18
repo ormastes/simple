@@ -8585,6 +8585,153 @@ RuntimeValue rt_tls13_find_handshake_message(RuntimeValue buf_rv, int64_t msg_ty
     return rv;
 }
 
+int64_t rt_tls13_inner_plaintext_type(RuntimeValue inner_rv)
+{
+    uint32_t inner_len = 0;
+    uint8_t *inner = _tls_copy_runtime_bytes(inner_rv, &inner_len);
+    if (!inner || inner_len == 0) return -1;
+    uint32_t cursor = inner_len;
+    while (cursor > 0) {
+        uint32_t idx = cursor - 1U;
+        if (inner[idx] != 0) {
+            int64_t ct = (int64_t)inner[idx];
+            free(inner);
+            return ct;
+        }
+        cursor = idx;
+    }
+    free(inner);
+    return -1;
+}
+
+RuntimeValue rt_tls13_inner_plaintext_content(RuntimeValue inner_rv)
+{
+    uint32_t inner_len = 0;
+    uint8_t *inner = _tls_copy_runtime_bytes(inner_rv, &inner_len);
+    if (!inner || inner_len == 0) return _tls_runtime_array_from_bytes((const uint8_t *)"", 0);
+    uint32_t cursor = inner_len;
+    while (cursor > 0) {
+        uint32_t idx = cursor - 1U;
+        if (inner[idx] != 0) {
+            RuntimeValue rv = _tls_runtime_array_from_bytes(inner, idx);
+            free(inner);
+            return rv;
+        }
+        cursor = idx;
+    }
+    free(inner);
+    return _tls_runtime_array_from_bytes((const uint8_t *)"", 0);
+}
+
+static RuntimeValue _tls_find_handshake_message_bytes(const uint8_t *buf, uint32_t buf_len, uint8_t target)
+{
+    uint32_t off = 0;
+    while (off + 4U <= buf_len) {
+        uint32_t body_len = ((uint32_t)buf[off + 1U] << 16) |
+                            ((uint32_t)buf[off + 2U] << 8) |
+                            (uint32_t)buf[off + 3U];
+        uint32_t total = body_len + 4U;
+        if (off + total > buf_len) break;
+        if (buf[off] == target) {
+            serial_puts("[tls-find-msg] hit type=");
+            serial_put_dec((int64_t)target);
+            serial_puts(" off=");
+            serial_put_dec((int64_t)off);
+            serial_puts(" total=");
+            serial_put_dec((int64_t)total);
+            serial_puts(" b0=");
+            serial_put_hex(buf[off]);
+            serial_puts(" b1=");
+            serial_put_hex(buf[off + 1U]);
+            serial_puts(" b2=");
+            serial_put_hex(buf[off + 2U]);
+            serial_puts(" b3=");
+            serial_put_hex(buf[off + 3U]);
+            serial_puts("\r\n");
+            return _tls_runtime_array_from_bytes(buf + off, total);
+        }
+        off += total;
+    }
+    return _tls_runtime_array_from_bytes((const uint8_t *)"", 0);
+}
+
+static int _tls_aes128_gcm_decrypt_raw(const uint8_t key[16], const uint8_t nonce[12],
+                                       const uint8_t *ciphertext, uint32_t ct_len,
+                                       const uint8_t *aad, uint32_t aad_len,
+                                       const uint8_t tag[16],
+                                       uint8_t *out_plaintext);
+
+RuntimeValue rt_tls13_record_find_handshake_message(RuntimeValue raw_rv, RuntimeValue key_rv, RuntimeValue iv_rv, int64_t seq_num_i64, int64_t msg_type_i64)
+{
+    uint32_t raw_len = 0, key_len = 0, iv_len = 0;
+    uint8_t *raw = _tls_copy_runtime_bytes(raw_rv, &raw_len);
+    uint8_t *key = _tls_copy_runtime_bytes(key_rv, &key_len);
+    uint8_t *iv = _tls_copy_runtime_bytes(iv_rv, &iv_len);
+    RuntimeValue empty = _tls_runtime_array_from_bytes((const uint8_t *)"", 0);
+    if (!raw || !key || !iv || key_len != 16U || iv_len != 12U || raw_len < 5U) {
+        if (raw) free(raw);
+        if (key) free(key);
+        if (iv) free(iv);
+        return empty;
+    }
+    if (raw[0] != 0x17 || raw[1] != 0x03 || raw[2] != 0x03) {
+        free(raw); free(key); free(iv);
+        return empty;
+    }
+    uint32_t payload_len = ((uint32_t)raw[3] << 8) | (uint32_t)raw[4];
+    if (payload_len < 16U || raw_len < 5U + payload_len) {
+        free(raw); free(key); free(iv);
+        return empty;
+    }
+    uint32_t ct_len = payload_len - 16U;
+    const uint8_t *ciphertext = raw + 5U;
+    const uint8_t *tag = raw + 5U + ct_len;
+    const uint8_t *aad = raw;
+    uint8_t nonce[12];
+    memcpy(nonce, iv, 12U);
+    uint64_t seq = (uint64_t)seq_num_i64;
+    for (uint32_t i = 0; i < 8U; i++) nonce[11U - i] ^= (uint8_t)((seq >> (8U * i)) & 0xffU);
+    uint8_t *inner = (uint8_t *)malloc(ct_len ? ct_len : 1U);
+    if (!inner) {
+        free(raw); free(key); free(iv);
+        return empty;
+    }
+    if (_tls_aes128_gcm_decrypt_raw(key, nonce, ciphertext, ct_len, aad, 5U, tag, inner) != 0) {
+        free(inner); free(raw); free(key); free(iv);
+        return empty;
+    }
+    serial_puts("[tls-record-find] inner0=");
+    serial_put_hex(inner[0]);
+    serial_puts(" inner1=");
+    serial_put_hex(inner[1]);
+    serial_puts(" inner2=");
+    serial_put_hex(inner[2]);
+    serial_puts(" inner3=");
+    serial_put_hex(inner[3]);
+    serial_puts(" inner4=");
+    serial_put_hex(inner[4]);
+    serial_puts(" ct_len=");
+    serial_put_dec((int64_t)ct_len);
+    serial_puts("\r\n");
+    uint32_t cursor = ct_len;
+    while (cursor > 0) {
+        uint32_t idx = cursor - 1U;
+        if (inner[idx] != 0) {
+            serial_puts("[tls-record-find] strip_idx=");
+            serial_put_dec((int64_t)idx);
+            serial_puts(" ct=");
+            serial_put_hex(inner[idx]);
+            serial_puts("\r\n");
+            RuntimeValue rv = _tls_find_handshake_message_bytes(inner, idx, (uint8_t)(msg_type_i64 & 0xff));
+            free(inner); free(raw); free(key); free(iv);
+            return rv;
+        }
+        cursor = idx;
+    }
+    free(inner); free(raw); free(key); free(iv);
+    return empty;
+}
+
 RuntimeValue rt_tls13_hkdf_extract(RuntimeValue salt_rv, RuntimeValue ikm_rv)
 {
     uint32_t salt_len = 0, ikm_len = 0;
@@ -9193,6 +9340,17 @@ int64_t rt_tls13_certificate_verify_algorithm(RuntimeValue body_rv)
         if (body) free(body);
         return -1;
     }
+    serial_puts("[tls-cv-algo] body_len=");
+    serial_put_dec((int64_t)body_len);
+    serial_puts(" b0=");
+    serial_put_hex(body[0]);
+    serial_puts(" b1=");
+    serial_put_hex(body[1]);
+    serial_puts(" b2=");
+    serial_put_hex(body[2]);
+    serial_puts(" b3=");
+    serial_put_hex(body[3]);
+    serial_puts("\r\n");
     out = (int64_t)(((uint16_t)body[0] << 8) | (uint16_t)body[1]);
     free(body);
     return out;
@@ -9208,9 +9366,33 @@ RuntimeValue rt_tls13_certificate_verify_signature(RuntimeValue body_rv)
         return NIL_VALUE;
     }
     uint32_t sig_len = ((uint32_t)body[2] << 8) | (uint32_t)body[3];
+    serial_puts("[tls-cv-sig] body_len=");
+    serial_put_dec((int64_t)body_len);
+    serial_puts(" sig_len=");
+    serial_put_dec((int64_t)sig_len);
+    serial_puts(" b0=");
+    serial_put_hex(body[0]);
+    serial_puts(" b1=");
+    serial_put_hex(body[1]);
+    serial_puts(" b2=");
+    serial_put_hex(body[2]);
+    serial_puts(" b3=");
+    serial_put_hex(body[3]);
+    serial_puts("\r\n");
     if (4U + sig_len > body_len) {
         free(body);
         return NIL_VALUE;
+    }
+    if (sig_len >= 4U) {
+        serial_puts("[tls-cv-sig] sig0=");
+        serial_put_hex(body[4]);
+        serial_puts(" sig1=");
+        serial_put_hex(body[5]);
+        serial_puts(" sig2=");
+        serial_put_hex(body[6]);
+        serial_puts(" sig3=");
+        serial_put_hex(body[7]);
+        serial_puts("\r\n");
     }
     rv = _tls_runtime_array_from_bytes(body + 4U, sig_len);
     free(body);
@@ -9282,12 +9464,30 @@ RuntimeValue rt_tls13_certificate_body_ed25519_pubkey(RuntimeValue body_rv)
     off += ctx_len;
     uint32_t cert_list_len = ((uint32_t)body[off] << 16) | ((uint32_t)body[off + 1] << 8) | (uint32_t)body[off + 2];
     off += 3U;
+    serial_puts("[tls-certpk] body_len=");
+    serial_put_dec((int64_t)body_len);
+    serial_puts(" ctx_len=");
+    serial_put_dec((int64_t)ctx_len);
+    serial_puts(" cert_list_len=");
+    serial_put_dec((int64_t)cert_list_len);
+    serial_puts("\r\n");
     if (off + cert_list_len > body_len || cert_list_len < 3U) {
         free(body);
         return _tls_runtime_empty_bytes();
     }
     uint32_t cert_len = ((uint32_t)body[off] << 16) | ((uint32_t)body[off + 1] << 8) | (uint32_t)body[off + 2];
     off += 3U;
+    serial_puts("[tls-certpk] cert_len=");
+    serial_put_dec((int64_t)cert_len);
+    serial_puts(" cert0=");
+    serial_put_hex(body[off]);
+    serial_puts(" cert1=");
+    serial_put_hex(body[off + 1U]);
+    serial_puts(" cert2=");
+    serial_put_hex(body[off + 2U]);
+    serial_puts(" cert3=");
+    serial_put_hex(body[off + 3U]);
+    serial_puts("\r\n");
     if (off + cert_len > body_len || cert_len == 0U) {
         free(body);
         return _tls_runtime_empty_bytes();
@@ -9334,16 +9534,43 @@ RuntimeValue rt_tls13_certificate_body_ed25519_pubkey(RuntimeValue body_rv)
         return _tls_runtime_empty_bytes();
     }
     tls_der_tlv_t oid = _tls_der_read_tlv(cert, cert_sz, alg.value_off);
+    serial_puts("[tls-certpk] spki_off=");
+    serial_put_dec((int64_t)spki.value_off);
+    serial_puts(" alg_off=");
+    serial_put_dec((int64_t)alg.value_off);
+    serial_puts(" oid=");
+    serial_put_hex(cert[oid.value_off]);
+    serial_puts(" ");
+    serial_put_hex(cert[oid.value_off + 1U]);
+    serial_puts(" ");
+    serial_put_hex(cert[oid.value_off + 2U]);
+    serial_puts("\r\n");
     if (!oid.ok || oid.tag != 0x06U || oid.value_len != 3U ||
         cert[oid.value_off] != 0x2bU || cert[oid.value_off + 1U] != 0x65U || cert[oid.value_off + 2U] != 0x70U) {
         free(body);
         return _tls_runtime_empty_bytes();
     }
     tls_der_tlv_t bitstr = _tls_der_read_tlv(cert, cert_sz, spki.value_off + alg.total_len);
+    serial_puts("[tls-certpk] bitstr_off=");
+    serial_put_dec((int64_t)bitstr.value_off);
+    serial_puts(" bitstr_len=");
+    serial_put_dec((int64_t)bitstr.value_len);
+    serial_puts(" unused=");
+    serial_put_hex(cert[bitstr.value_off]);
+    serial_puts("\r\n");
     if (!bitstr.ok || bitstr.tag != 0x03U || bitstr.value_len != 33U || cert[bitstr.value_off] != 0x00U) {
         free(body);
         return _tls_runtime_empty_bytes();
     }
+    serial_puts("[tls-certpk] pk0=");
+    serial_put_hex(cert[bitstr.value_off + 1U]);
+    serial_puts(" pk1=");
+    serial_put_hex(cert[bitstr.value_off + 2U]);
+    serial_puts(" pk2=");
+    serial_put_hex(cert[bitstr.value_off + 3U]);
+    serial_puts(" pk3=");
+    serial_put_hex(cert[bitstr.value_off + 4U]);
+    serial_puts("\r\n");
     rv = _tls_runtime_array_from_bytes(cert + bitstr.value_off + 1U, 32U);
     free(body);
     return rv;
