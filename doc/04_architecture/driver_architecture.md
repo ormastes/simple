@@ -175,15 +175,31 @@ sandboxing; that is a future MDSOC extension tracked separately. The
 manifest's `capability` field (Phase B) allows the kernel to refuse loading
 a driver whose declared capabilities exceed policy.
 
-## 9. Phased Rollout
+## 9. Phased Rollout & Open Follow-ups
 
-| Phase | Scope                                                                 | Commit |
-|-------|-----------------------------------------------------------------------|--------|
-| A     | This doc + author guide + `Driver` trait + types + error              | 1      |
-| B     | `@driver` / `@native_lib` parsing; `.drv_manifest` SMF section; kernel-side `driver/loader.spl`; `sffi_lint` shim rule; `__driver_table` aggregator | 1 |
-| C     | `io/dma.spl` + 6 arch impls; Cranelift `>>` fix; bitfield sugar        | 1      |
-| D     | Migrate `fs_driver`, `gpu_driver`, `lld_ffi`, `cuda_ffi`               | 1      |
-| E     | Migrate `examples/simple_os/drivers/*` — 1 driver per sub-commit       | N      |
+Landed 2026-04-18 (local `main`, not pushed):
+
+| Phase | Commit           | Scope                                                              |
+|-------|------------------|--------------------------------------------------------------------|
+| A     | `wmoxyuwlwvyv`   | Design + author guide + `Driver` trait + types + error             |
+| B     | `nvotmqstnuuz`   | `driver/{manifest,registry,static_table,loader}.spl` + test        |
+| C.1   | `kkxzmyptnswk`   | `io/dma.spl` API + barrier-only fallbacks + test                   |
+| D     | `ynpptnlkslxt`   | `fs_driver` + `gpu_driver` adapters + `driver/native_libs.spl`     |
+| E     | `wm 1a…`         | `examples/simple_os/src/drivers/null_block.spl` + 5-case test      |
+
+Open follow-ups are tracked in detail at
+`doc/08_tracking/feature_request/driver_framework_requests.md`:
+
+- `FR-DRIVER-0001` — compiler sugar for `@driver(...)` / `@native_lib(...)`
+  (procedural `register_static_driver(...)` works today).
+- `FR-DRIVER-0002` — Cranelift `>>` fix: parser disambiguation with
+  `BinOp::Compose` + signedness type-flow to codegen.
+- `FR-DRIVER-0003` — native bitfield syntax `struct Foo @packed { a: u16:4 }`
+  (shift+mask works today).
+- `FR-DRIVER-0004` — `.drv_manifest` SMF section writer (decoder ships in Phase B).
+- `FR-DRIVER-0005` — per-arch DMA cache-maintenance runtime for all 6 arches
+  (x86_64, x86, aarch64, arm32, riscv64, riscv32).
+- `FR-DRIVER-0006` — replace Phase D adapter stubs with real forwarding logic.
 
 ## 10. Comparison with Other OS Driver Models
 
