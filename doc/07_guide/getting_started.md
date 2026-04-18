@@ -89,7 +89,7 @@ $path = [Environment]::GetEnvironmentVariable("Path", "User")
 ```bash
 git clone https://github.com/simple-lang/simple.git
 cd simple
-scripts/setup.sh                    # Creates bin/simple → release binary
+scripts/setup.sh                    # Creates the bin/simple wrapper and runtime launchers
 ```
 
 On Windows (CMD/PowerShell):
@@ -97,7 +97,7 @@ On Windows (CMD/PowerShell):
 ```cmd
 git clone https://github.com/simple-lang/simple.git
 cd simple
-scripts\setup.cmd                   :: Creates bin\simple.exe → release binary
+scripts\setup.cmd                   :: Creates bin\simple / bin\simple.cmd wrappers and bin\simple.exe
 ```
 
 If no pre-built release binary exists yet, bootstrap first:

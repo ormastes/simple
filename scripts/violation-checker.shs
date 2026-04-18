@@ -1,7 +1,9 @@
 #!/bin/sh
 # check-bin-violations.shs — Detect bin/ binaries pointing to Rust instead of self-hosted Simple
 #
-# Rule: bin/simple must resolve to a self-hosted or deployed release binary.
+# Rule: bin/simple may be either a self-hosted/deployed binary or a checked-in
+# wrapper script that prefers deployed runtime and uses Rust bootstrap only as a
+# fallback for known-good commands such as lint.
 #       bin/release/<triple>/ is the canonical deployed layout.
 #       The flat release runtime path must not exist.
 #       Rust bootstrap goes to src/compiler_rust/target/bootstrap/simple only.
@@ -131,9 +133,9 @@ printf "Repo:       %s\n" "$REPO_ROOT"
 printf "Rust target: %s\n\n" "$RUST_TARGET_DIR"
 
 # ─────────────────────────────────────────────────────────
-# 1. Check bin/simple symlink
+# 1. Check bin/simple entrypoint
 # ─────────────────────────────────────────────────────────
-printf "${BOLD}--- 1. bin/simple symlink ---${NC}\n"
+printf "${BOLD}--- 1. bin/simple entrypoint ---${NC}\n"
 check
 BIN_SIMPLE="${REPO_ROOT}/bin/simple"
 if [ -L "$BIN_SIMPLE" ]; then
@@ -150,11 +152,15 @@ elif [ -f "$BIN_SIMPLE" ]; then
     FILE_INFO="$(file "$BIN_SIMPLE" 2>/dev/null)"
     info "bin/simple is a real binary: $FILE_INFO"
   else
-    info "bin/simple exists (not a symlink)"
+    if head -c 128 "$BIN_SIMPLE" 2>/dev/null | grep -q '^#!'; then
+      ok "bin/simple is a wrapper script"
+    else
+      info "bin/simple exists (not a symlink)"
+    fi
   fi
 else
   warning "bin/simple does not exist" \
-    "Expected symlink to bin/simple or platform binary"
+    "Expected wrapper or runtime entrypoint"
 fi
 echo
 
@@ -376,6 +382,8 @@ printf "${BOLD}--- 8. Cross-platform bin/ entry audit ---${NC}\n"
 # Every executable file/symlink directly under bin/ must work on all platforms.
 # Rules:
 #   - Symlinks (Unix native binaries) MUST have a matching .cmd wrapper for Windows
+#   - `bin/simple` wrapper scripts are valid when a sibling `bin/simple.cmd`
+#     exists for Windows
 #   - Shell scripts (#!/bin/sh or #!/usr/bin/env) are cross-platform via sh/bash
 #   - .js/.spl scripts are cross-platform via their runtimes
 #   - Non-executable files (FILE.md, .a, .spl data) are exempt
@@ -432,8 +440,12 @@ for entry in "${REPO_ROOT}"/bin/*; do
           *node*|*python*|*env\ node*|*env\ python*)
             ok "bin/${name} — script (cross-platform interpreter)" ;;
           *sh*|*bash*|*zsh*)
-            warning "bin/${name} — shell script (not native on Windows)" \
-              "Add bin/${name}.cmd wrapper or convert to .spl" ;;
+            if [ -f "${REPO_ROOT}/bin/${name}.cmd" ]; then
+              ok "bin/${name} — shell script + .cmd wrapper (cross-platform)"
+            else
+              warning "bin/${name} — shell script (not native on Windows)" \
+                "Add bin/${name}.cmd wrapper or convert to .spl"
+            fi ;;
           *)
             warning "bin/${name} — script with unknown interpreter" \
               "Verify cross-platform: ${first_line}" ;;

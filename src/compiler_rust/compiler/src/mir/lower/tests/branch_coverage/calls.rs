@@ -71,6 +71,19 @@ fn struct_field_get() {
     assert!(has_inst(&mir, |i| matches!(i, MirInst::FieldGet { .. })));
 }
 
+#[test]
+fn primitive_field_method_call_is_builtin_qualified() {
+    let mir = compile_to_mir(
+        "struct Box:\n    line: i32\n\nfn test() -> text:\n    val b = Box { line: 42 }\n    return b.line.to_string()\n",
+    )
+    .unwrap();
+    assert!(has_inst(&mir, |i| matches!(i, MirInst::BoxInt { .. })));
+    assert!(has_inst(&mir, |i| matches!(
+        i,
+        MirInst::MethodCallStatic { func_name, .. } if func_name == "i32.to_string"
+    )));
+}
+
 // =============================================================================
 // Pointer operations (lowering_expr.rs - PointerRef, PointerDeref)
 // =============================================================================

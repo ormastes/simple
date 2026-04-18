@@ -1026,6 +1026,41 @@ fn codegen_struct_init_field_get_set() {
     }));
 }
 
+#[test]
+fn codegen_struct_field_get_native_types() {
+    assert!(aot_compiles("struct_native_fields", |f| {
+        let int_val = f.new_vreg();
+        let float_val = f.new_vreg();
+        let obj = f.new_vreg();
+        let got_int = f.new_vreg();
+        let got_float = f.new_vreg();
+        let block = f.block_mut(BlockId(0)).unwrap();
+        block.instructions.push(MirInst::ConstInt { dest: int_val, value: 42 });
+        block.instructions.push(MirInst::ConstFloat { dest: float_val, value: 3.5 });
+        block.instructions.push(MirInst::StructInit {
+            dest: obj,
+            type_id: TypeId::I64,
+            struct_size: 16,
+            field_offsets: vec![0, 8],
+            field_types: vec![TypeId::I32, TypeId::F64],
+            field_values: vec![int_val, float_val],
+        });
+        block.instructions.push(MirInst::FieldGet {
+            dest: got_int,
+            object: obj,
+            byte_offset: 0,
+            field_type: TypeId::I32,
+        });
+        block.instructions.push(MirInst::FieldGet {
+            dest: got_float,
+            object: obj,
+            byte_offset: 8,
+            field_type: TypeId::F64,
+        });
+        got_int
+    }));
+}
+
 // =============================================================================
 // Closure / IndirectCall (closures_structs.rs)
 // =============================================================================

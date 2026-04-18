@@ -71,7 +71,11 @@ check_link() {
         ;;
       *)
         PASS=$((PASS + 1))
-        echo "  PASS: $label (self-hosted binary)"
+        if head -c 128 "$path" 2>/dev/null | grep -q '^#!\|^@echo off'; then
+          echo "  PASS: $label (wrapper script)"
+        else
+          echo "  PASS: $label (self-hosted binary)"
+        fi
         ;;
     esac
   fi
@@ -82,6 +86,7 @@ echo ""
 echo "Checking bin/ links:"
 
 check_link "bin/simple" "${REPO_ROOT}/bin/simple"
+check_link "bin/simple.cmd" "${REPO_ROOT}/bin/simple.cmd"
 check_link "bin/simple.exe" "${REPO_ROOT}/bin/simple.exe"
 check_link "bin/simple_mcp_server" "${REPO_ROOT}/bin/simple_mcp_server"
 check_link "bin/simple_lsp_mcp_server" "${REPO_ROOT}/bin/simple_lsp_mcp_server"

@@ -5,6 +5,7 @@
 //! actors, pointers, and collections.
 
 use super::lowering_core::{MirLowerError, MirLowerResult, MirLowerer};
+use super::lowering_di::builtin_type_name;
 use crate::hir::{BinOp, DispatchMode, HirExpr, HirExprKind, HirType, PointerKind, TypeId};
 use crate::mir::effects::CallTarget;
 use crate::mir::instructions::{MirInst, VReg};
@@ -1554,7 +1555,7 @@ impl<'a> MirLowerer<'a> {
                 // rt_array_push returns bool, not a new pointer — no store-back needed.
                 let _receiver_local_index: Option<usize> = None;
 
-                let receiver_reg = self.lower_expr(receiver)?;
+                let mut receiver_reg = self.lower_expr(receiver)?;
                 let mut arg_regs = Vec::new();
                 for arg in args {
                     arg_regs.push(self.lower_expr(arg)?);
@@ -1589,6 +1590,57 @@ impl<'a> MirLowerer<'a> {
                             boxed
                         })?;
                         arg_regs[0] = boxed_arg;
+                    }
+                }
+
+                // Builtin primitive .to_string()/.str() routes to rt_to_string,
+                // which expects a tagged RuntimeValue receiver rather than a
+                // raw native scalar.
+                if method == "to_string" || method == "str" {
+                    let needs_int_boxing = matches!(
+                        receiver.ty,
+                        TypeId::I8
+                            | TypeId::I16
+                            | TypeId::I32
+                            | TypeId::I64
+                            | TypeId::U8
+                            | TypeId::U16
+                            | TypeId::U32
+                            | TypeId::U64
+                    );
+                    let needs_float_boxing = matches!(receiver.ty, TypeId::F32 | TypeId::F64);
+                    let needs_bool_boxing = receiver.ty == TypeId::BOOL;
+                    if needs_bool_boxing {
+                        receiver_reg = self.with_func(|func, current_block| {
+                            let boxed = func.new_vreg();
+                            let block = func.block_mut(current_block).unwrap();
+                            block.instructions.push(MirInst::Call {
+                                dest: Some(boxed),
+                                target: CallTarget::from_name("rt_value_bool"),
+                                args: vec![receiver_reg],
+                            });
+                            boxed
+                        })?;
+                    } else if needs_float_boxing {
+                        receiver_reg = self.with_func(|func, current_block| {
+                            let boxed = func.new_vreg();
+                            let block = func.block_mut(current_block).unwrap();
+                            block.instructions.push(MirInst::BoxFloat {
+                                dest: boxed,
+                                value: receiver_reg,
+                            });
+                            boxed
+                        })?;
+                    } else if needs_int_boxing {
+                        receiver_reg = self.with_func(|func, current_block| {
+                            let boxed = func.new_vreg();
+                            let block = func.block_mut(current_block).unwrap();
+                            block.instructions.push(MirInst::BoxInt {
+                                dest: boxed,
+                                value: receiver_reg,
+                            });
+                            boxed
+                        })?;
                     }
                 }
 
@@ -1633,11 +1685,21 @@ impl<'a> MirLowerer<'a> {
                 let func_name = if let Some(registry) = self.type_registry {
                     if let Some(type_name) = registry.get_type_name(receiver.ty) {
                         format!("{}.{}", type_name, method)
+                    } else if let Some(type_name) = builtin_type_name(receiver.ty) {
+                        format!("{}.{}", type_name, method)
                     } else if let Some(local_ty) = receiver_local_ty {
                         if let Some(type_name) = registry.get_type_name(local_ty) {
                             if std::env::var("SIMPLE_DEBUG_METHOD_DISPATCH").is_ok() {
                                 eprintln!(
                                     "[MIR-METHOD-DISPATCH] '{}' qualified via local-table type '{}' (receiver.ty was unnamed)",
+                                    method, type_name
+                                );
+                            }
+                            format!("{}.{}", type_name, method)
+                        } else if let Some(type_name) = builtin_type_name(local_ty) {
+                            if std::env::var("SIMPLE_DEBUG_METHOD_DISPATCH").is_ok() {
+                                eprintln!(
+                                    "[MIR-METHOD-DISPATCH] '{}' qualified via builtin type '{}' (receiver.ty was unnamed)",
                                     method, type_name
                                 );
                             }

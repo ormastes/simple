@@ -169,7 +169,7 @@ scripts/bootstrap/bootstrap-windows.sh --deploy
 scripts/bootstrap/bootstrap-from-scratch.sh --output=build/bootstrap
 ```
 
-The `--deploy` flag copies the final binary to `bin/release/<triple>/simple` and runs `scripts/setup.sh` automatically to create the `bin/simple` symlink.
+The `--deploy` flag copies the final binary to `bin/release/<triple>/simple` and runs `scripts/setup.sh` automatically to regenerate the `bin/simple` wrapper and related launchers.
 
 Bootstrap output uses `<arch>-<vendor>-<os>-<abi>` target triples:
 

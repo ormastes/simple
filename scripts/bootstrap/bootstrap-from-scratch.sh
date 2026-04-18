@@ -421,7 +421,7 @@ if [ "${deploy}" -eq 1 ]; then
     done
   fi
 
-  # Recreate symlinks (bin/simple → release/<platform>/simple)
+  # Recreate wrapper/launcher entrypoints (bin/simple plus release links)
   "${repo_root}/scripts/setup.sh"
 fi
 

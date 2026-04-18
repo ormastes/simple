@@ -3,7 +3,7 @@ set -eu
 
 # Simple Language — Post-clone / post-bootstrap setup
 #
-# Creates symlink-only runtime entry points under bin/ and bin/release/
+# Creates canonical runtime entry points under bin/ and bin/release/
 # and sets up the development environment.
 #
 # Usage:
@@ -21,8 +21,9 @@ Usage: scripts/setup.sh [options]
 
 Post-clone / post-bootstrap setup for Simple Language.
 
-Creates symlink-only runtime entry points:
+Creates runtime entry points:
   bin/simple
+  bin/simple.cmd
   bin/release/<platform>/simple
   bin/release/<arch>-<vendor>-<os>-<abi>/simple(.exe)
 
@@ -266,19 +267,21 @@ if [ "${dry_run}" -eq 1 ]; then
   echo ""
   echo "[dry-run] would create:"
   if [ "${os}" = "windows" ]; then
-    [ -n "${mingw_bin}" ] && echo "  bin/simple → release/${mingw_bin}"
+    [ -n "${mingw_bin}" ] && echo "  bin/simple      (copied from scripts/setup/bin_scripts/)"
+    [ -n "${msvc_bin}" ]  && echo "  bin/simple.cmd  (copied from scripts/setup/bin_scripts/)"
     [ -n "${msvc_bin}" ]  && echo "  bin/simple.exe → release/${msvc_bin}"
   else
     if [ -n "${preferred_runtime}" ]; then
-      echo "  bin/simple → ${preferred_runtime}"
+      echo "  bin/simple                      (copied from scripts/setup/bin_scripts/)"
       echo "  bin/release/<platform>/simple → ${preferred_runtime}"
       echo "  bin/release/${PLATFORM}/simple → ${preferred_runtime}"
       echo "  bin/release/${os}-${arch}/simple → ${preferred_runtime}"
     else
-      echo "  bin/simple → release/${release_bin}"
+      echo "  bin/simple                      (copied from scripts/setup/bin_scripts/)"
       echo "  bin/release/<platform>/simple → ${release_bin}"
     fi
   fi
+  echo "  bin/simple.cmd                  (copied from scripts/setup/bin_scripts/ when present)"
   echo "  bin/codex_chrome_devtools_mcp.js (copied from scripts/setup/bin_scripts/)"
   echo "  bin/codex_stitch_mcp.js          (copied from scripts/setup/bin_scripts/)"
   echo "  bin/mcp_stdio_proxy.spl          (copied from scripts/setup/bin_scripts/)"
@@ -303,14 +306,18 @@ if [ "${os}" = "windows" ]; then
   fi
 else
   if [ -n "${release_bin}" ]; then
-    # Self-hosted binary found — use it (preferred)
-    create_link "release/${release_bin}" "simple"
+    if [ "${release_bin}" != "${PLATFORM}/simple" ]; then
+      create_release_link "../${release_bin}" "${release_dir}/${PLATFORM}/simple"
+    fi
   elif [ -n "${preferred_runtime}" ]; then
     # No self-hosted binary — fall back to Rust (temporary until bootstrap)
     echo "  (warning: using Rust fallback — run bootstrap to get self-hosted binary)"
-    create_link "${preferred_runtime}" "simple"
     create_release_link "${preferred_runtime}" "${release_dir}/${PLATFORM}/simple"
     create_release_link "${preferred_runtime}" "${release_dir}/${os}-${arch}/simple"
+  fi
+
+  if [ -n "${release_bin}" ] && [ "${release_bin}" != "${os}-${arch}/simple" ]; then
+    create_release_link "../${release_bin}" "${release_dir}/${os}-${arch}/simple"
   fi
 fi
 
@@ -845,6 +852,8 @@ echo "  Linked bin/*_mcp_server → release/${mcp_release_subdir}/*"
 bin_scripts_template_dir="${repo_root}/scripts/setup/bin_scripts"
 if [ -d "${bin_scripts_template_dir}" ]; then
   for bin_script_name in \
+      simple \
+      simple.cmd \
       codex_chrome_devtools_mcp.js \
       codex_stitch_mcp.js \
       mcp_stdio_proxy.spl \
@@ -855,6 +864,9 @@ if [ -d "${bin_scripts_template_dir}" ]; then
     src_bin_script="${bin_scripts_template_dir}/${bin_script_name}"
     dst_bin_script="${bin_dir}/${bin_script_name}"
     if [ -f "${src_bin_script}" ]; then
+      if [ -L "${dst_bin_script}" ]; then
+        rm -f "${dst_bin_script}"
+      fi
       cp -f "${src_bin_script}" "${dst_bin_script}"
       if [ -x "${src_bin_script}" ]; then
         chmod +x "${dst_bin_script}"

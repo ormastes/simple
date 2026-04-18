@@ -1,9 +1,10 @@
 @echo off
 REM Simple Language — Windows setup (CMD/PowerShell)
 REM
-REM Creates symlink-only runtime entries:
+REM Creates runtime entries:
 REM   bin\simple.exe
 REM   bin\simple
+REM   bin\simple.cmd
 REM   bin\release\simple.exe
 REM
 REM Usage:
@@ -72,8 +73,9 @@ if defined MINGW_BIN echo MinGW binary: bin\release\%MINGW_BIN%
 if "%DRY_RUN%"=="1" (
     echo.
     echo [dry-run] would create:
+    if defined MINGW_BIN echo   bin\simple     ^(copied from scripts\setup\bin_scripts\simple^)
+    if defined MSVC_BIN  echo   bin\simple.cmd ^(copied from scripts\setup\bin_scripts\simple.cmd^)
     if defined MSVC_BIN  echo   bin\simple.exe -^> release\%MSVC_BIN%
-    if defined MINGW_BIN echo   bin\simple     -^> release\%MINGW_BIN%
     if defined MSVC_BIN  echo   bin\release\simple.exe -^> %RELEASE_DIR%\%MSVC_BIN%
     if not defined MSVC_BIN if defined MINGW_BIN echo   bin\release\simple.exe -^> %RELEASE_DIR%\%MINGW_BIN%
     exit /b 0
@@ -91,19 +93,6 @@ if defined MSVC_BIN (
         exit /b 1
     ) else (
         echo Created: bin\simple.exe -^> release\%MSVC_BIN%
-    )
-)
-
-REM === Create bin\simple → MinGW binary (for Git Bash / MSYS2) ===
-if defined MINGW_BIN (
-    if exist "%REPO_ROOT%\bin\simple" del "%REPO_ROOT%\bin\simple"
-    mklink "%REPO_ROOT%\bin\simple" "release\%MINGW_BIN%" >nul 2>&1
-    if !errorlevel! neq 0 (
-        echo error: failed to create symlink bin\simple -^> release\%MINGW_BIN% >&2
-        echo Enable Developer Mode or run elevated so mklink can create symlinks. >&2
-        exit /b 1
-    ) else (
-        echo Created: bin\simple -^> release\%MINGW_BIN%
     )
 )
 
@@ -157,6 +146,18 @@ for %%M in (simple_mcp_server simple_lsp_mcp_server t32_mcp_server t32_lsp_mcp_s
     )
 )
 echo   Linked bin\*_mcp_server.cmd to release\%ACTIVE_MCP_TRIPLE%\
+
+REM === Copy hand-authored simple wrappers ===
+if exist "%REPO_ROOT%\scripts\setup\bin_scripts\simple" (
+    if exist "%REPO_ROOT%\bin\simple" del "%REPO_ROOT%\bin\simple"
+    copy /y "%REPO_ROOT%\scripts\setup\bin_scripts\simple" "%REPO_ROOT%\bin\simple" >nul
+    echo   Copied: bin\simple
+)
+if exist "%REPO_ROOT%\scripts\setup\bin_scripts\simple.cmd" (
+    if exist "%REPO_ROOT%\bin\simple.cmd" del "%REPO_ROOT%\bin\simple.cmd"
+    copy /y "%REPO_ROOT%\scripts\setup\bin_scripts\simple.cmd" "%REPO_ROOT%\bin\simple.cmd" >nul
+    echo   Copied: bin\simple.cmd
+)
 
 REM Codex MCP helper launchers for manual debug and startup parity
 (
@@ -239,9 +240,10 @@ exit /b 0
 :usage
 echo Usage: scripts\setup.cmd [--dry-run]
 echo.
-echo Creates symlink-only runtime entries for Windows:
+echo Creates runtime entries for Windows:
 echo   bin\simple.exe
 echo   bin\simple
+echo   bin\simple.cmd
 echo   bin\release\simple.exe
 echo.
 echo Options:

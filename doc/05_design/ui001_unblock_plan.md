@@ -6,6 +6,15 @@
 **Master plan:** `doc/01_research/ui_modernization_plan.md`
 **Sister RFC:** `doc/05_design/compiler_rfc_ufcs.md` (audit history + dedup patches)
 
+## Scope Boundary
+
+This document is only about the compiler/self-host field-load bug that blocks
+`UI001` verification.
+
+It does **not** track the assistant/dashboard child-task or spawn-agent work.
+That work is tracked separately in
+`doc/08_tracking/todo/kairos_like_simple_mcp_llm_dashboard_follow_up_2026-04-15.md`.
+
 ## 1. What we're trying to verify
 
 ```

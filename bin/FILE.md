@@ -21,11 +21,16 @@
 
 ## 🔧 Core Executables
 
-### `simple` (symlink)
-**Symlink to release binary for current platform**
+### `simple` / `simple.cmd` (wrapper)
+**Main CLI wrappers for the current platform runtime**
 
-Created by `scripts/setup.sh` — points to `release/<arch>-<vendor>-<os>-<abi>/simple(.exe)`.
-Run `scripts/setup.sh` after cloning or bootstrapping.
+Created by `scripts/setup.sh`. It normally dispatches to
+`release/<arch>-<vendor>-<os>-<abi>/simple(.exe)`, and can route selected
+commands such as `lint` through the bootstrap binary when that path is known-good.
+On Windows, `scripts/setup.cmd` installs `bin\\simple.cmd` for CMD/PowerShell
+and `bin\\simple` for Git Bash / MSYS2, while `bin\\simple.exe` remains the
+native runtime entrypoint when present.
+Run `scripts/setup.sh` or `scripts\\setup.cmd` after cloning or bootstrapping.
 
 **Features:**
 - Multi-platform support (9 architectures)

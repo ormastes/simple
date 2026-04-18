@@ -34,12 +34,13 @@ pub fn compile_field_get<M: Module>(
         );
     }
 
-    // Always load as I64 since all struct fields are stored in 8-byte slots
-    // (field_index * 8 layout). Loading a smaller type (e.g., I8 for bool)
-    // would truncate values like enum RuntimeValue pointers to their lowest byte.
+    // Field slots are 8-byte aligned, but each slot stores the field's native
+    // representation. Loading with a fixed I64 type corrupts native f32/f64
+    // fields and mis-types smaller integer fields for downstream dispatch.
+    let load_ty = type_id_to_cranelift(field_type);
     let val = builder
         .ins()
-        .load(types::I64, MemFlags::new(), obj_ptr, byte_offset as i32);
+        .load(load_ty, MemFlags::new(), obj_ptr, byte_offset as i32);
     ctx.vreg_values.insert(dest, val);
     Ok(())
 }
