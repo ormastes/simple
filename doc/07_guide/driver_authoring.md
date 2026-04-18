@@ -157,13 +157,26 @@ describe "null_block":
   a module that has `@driver(...)` without the trait impl.
 - Do not create branches (per repo VCS rule). Drivers land on `main`.
 
-## 6. Current limitations (Phase A status)
+## 6. Current limitations (Phase A–E status, FR follow-ups open)
 
-- The loader does not yet exist (Phase B). For now the trait compiles but
-  is reachable only from static-mode builds that call the driver struct
-  directly.
-- Native bitfield syntax is not in yet (Phase C) — use shift-and-mask.
-- DMA-coherent-alloc is not in yet (Phase C) — use barriers + manual
-  allocation.
-- Known issue: Cranelift `>>` backend bug (see `feedback_cranelift_shr_bug.md`).
-  Fixed in Phase C.
+- `@driver(...)` / `@native_lib(...)` with named args — class, vendor,
+  device, version, abi — now parses and attaches to the owning
+  declaration (FR-DRIVER-0001 landed). The compiler retains the attribute
+  args on the AST/HIR for FR-DRIVER-0004 to emit as the
+  `.drv_manifest` SMF section. Auto-synthesis of the
+  `register_<module>_driver()` body from the attribute lands once the
+  HIR-lowering pass for module-scope sugar is wired; until then keep the
+  hand-written `register_static_driver(m, ops)` call as in the null_block
+  example — the two paths are interchangeable.
+- Loader (Phase B) is in; static-mode registration via
+  `register_static_driver(...)` works today. Dynamic `.lsm` loading
+  depends on FR-DRIVER-0004 (SMF section writer).
+- Native bitfield syntax `struct Foo @packed { a: u16:4 }` is tracked
+  by FR-DRIVER-0003; shift-and-mask still works in the interim.
+- DMA-coherent-alloc runtime glue is tracked by FR-DRIVER-0005;
+  `std.io.dma` API + barrier-only fallbacks ship today.
+- `sffi_lint` now rejects modules that declare `extern fn` and carry
+  `@driver(...)` but do not provide a matching `impl Driver for X` —
+  enforcement ensures every C driver is wrapped by a pure-Simple shim.
+- Cranelift `>>` backend: interim signed fix landed; full sshr/ushr
+  dispatch tracked as FR-DRIVER-0002.

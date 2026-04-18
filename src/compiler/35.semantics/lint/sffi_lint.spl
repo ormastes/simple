@@ -600,6 +600,43 @@ fn lint_sffi_export_struct(struct_def: HirStruct, file_path: text) -> [SffiLintW
 
 
 # ============================================================================
+# SFFI007: Driver-shim conformance (FR-DRIVER-0001)
+# ============================================================================
+#
+# A module that declares one or more `extern fn` AND carries `@driver(...)`
+# must also provide a matching `impl Driver for <Type>`. The lint closes
+# the "C-only driver" escape hatch: every C driver is wrapped by a pure-
+# Simple shim whose trait impl maps C status codes to DriverError (see
+# doc/04_architecture/driver_architecture.md §5).
+#
+# Inputs are three shallow facts about the containing module:
+#   - has_extern_fn: any `extern fn` declared in the module
+#   - has_driver_attr: `@driver(...)` attached to any module-level decl
+#   - has_driver_impl: a trait-impl block whose trait name is "Driver"
+#
+# The rule fires when has_extern_fn AND has_driver_attr AND NOT has_driver_impl.
+
+fn check_sffi007_driver_shim(has_extern_fn: bool,
+                             has_driver_attr: bool,
+                             has_driver_impl: bool,
+                             module_name: text,
+                             file_path: text) -> [SffiLintWarning]:
+    """SFFI007 — a module that declares @driver(...) and has extern fn
+    declarations must also provide an `impl Driver for X` block."""
+    var warnings: [SffiLintWarning] = []
+    if has_extern_fn and has_driver_attr and not has_driver_impl:
+        warnings.push(SffiLintWarning(
+            code: "SFFI007",
+            severity: "ERROR",
+            message: "module '{module_name}' has @driver(...) and extern fn declarations but no `impl Driver for X` — every C driver needs a pure-Simple trait shim",
+            hint: "add `impl Driver for <YourDriverStruct>:` that wraps the extern calls and maps C status codes to DriverError (see doc/04_architecture/driver_architecture.md §5)",
+            line_num: 0,
+            file_path: file_path
+        ))
+    warnings
+
+
+# ============================================================================
 # Exports
 # ============================================================================
 
@@ -612,3 +649,4 @@ export check_sffi003_repr_required
 export check_sffi004_bitfield_width
 export check_sffi005_platform_dependent
 export check_sffi006_callback_ownership
+export check_sffi007_driver_shim

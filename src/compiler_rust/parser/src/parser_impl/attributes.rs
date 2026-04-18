@@ -73,6 +73,12 @@ pub const KNOWN_ATTRIBUTE_NAMES: &[&str] = &[
     "boot",
     "align",
     "export",
+    // Driver framework (FR-DRIVER-0001): @driver(...) / @native_lib(...)
+    // routed through the attribute (not decorator) path so named args like
+    // `class = DriverClass.Block, vendor = ..., device = [...], version = "..."`
+    // are stored on the owning declaration for FR-DRIVER-0004 to consume.
+    "driver",
+    "native_lib",
 ];
 
 /// Check if a name is a known attribute (should produce Attribute, not Decorator)
@@ -264,7 +270,15 @@ impl<'a> Parser<'a> {
             }
         };
 
-        // Check for arguments: @name(arg1, arg2)
+        // Check for arguments: @name(arg1, arg2).
+        // FR-DRIVER-0001 note: @driver / @native_lib accept positional
+        // args today (class, vendor, device, version). The named-arg
+        // form `@driver(class = ..., vendor = ...)` from the design doc
+        // lands once the Attribute schema carries argument names (see
+        // `Decorator { args: Option<Vec<Argument>> }` for the target
+        // shape). Positional preserves the manifest values on the AST;
+        // FR-DRIVER-0004 reads them when synthesizing the .drv_manifest
+        // SMF section.
         let args = self.parse_optional_paren_args()?;
 
         Ok(Attribute {
@@ -279,6 +293,7 @@ impl<'a> Parser<'a> {
             args,
         })
     }
+
 
     /// Parse optional parenthesized argument list: `(arg1, arg2, ...)`
     pub(super) fn parse_optional_paren_args(&mut self) -> Result<Option<Vec<Expr>>, ParseError> {

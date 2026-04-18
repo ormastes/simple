@@ -403,6 +403,9 @@ impl<'a> Parser<'a> {
                 TokenKind::Gen => Some("gen".to_string()),
                 TokenKind::Impl => Some("impl".to_string()),
                 TokenKind::Gpu => Some("gpu".to_string()),
+                // FR-DRIVER-0001: `class` is reserved but must work as a
+                // named-arg inside @driver(class = DriverClass.Block, ...).
+                TokenKind::Class => Some("class".to_string()),
                 TokenKind::Vec => Some("vec".to_string()),
                 TokenKind::Context => Some("context".to_string()),
                 TokenKind::Feature => Some("feature".to_string()),
