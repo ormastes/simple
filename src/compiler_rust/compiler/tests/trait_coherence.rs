@@ -358,6 +358,7 @@ fn test_specialization_with_default_attribute() {
         name: "default".to_string(),
         value: None,
         args: None,
+        named_args: None,
     };
 
     let blanket = make_impl_block_with_attrs(

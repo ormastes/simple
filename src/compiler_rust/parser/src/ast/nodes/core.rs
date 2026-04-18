@@ -114,12 +114,25 @@ pub struct Decorator {
 
 /// Attribute applied to an item: #[name] or #[name = "value"] or #[name(args)]
 /// Attributes provide compile-time metadata for items like functions and classes.
+///
+/// FR-DRIVER-0004: `named_args` preserves `name = value` pairs from the
+/// source. The existing `args` field keeps every positional *and* named
+/// arg as a flat `Expr` list for backward-compat with pre-FR-0004
+/// consumers (`@allow(lint)`, `@layout(...)`, `@concurrency_mode(...)`).
+/// Named args surface as `Expr::Identifier(name)` in `args` so legacy code
+/// that does `if let Expr::Identifier(x) = arg` keeps seeing the arg name,
+/// while new code (FR-DRIVER-0004 `.drv_manifest` section writer) reads
+/// the typed `named_args` list to recover the value.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Attribute {
     pub span: Span,
     pub name: String,            // The attribute name (e.g., "inline", "deprecated")
     pub value: Option<Expr>,     // Optional value: #[name = value]
     pub args: Option<Vec<Expr>>, // Optional arguments: #[name(arg1, arg2)]
+    /// FR-DRIVER-0004: typed named arguments recovered from `name = value`
+    /// syntax. None when the attribute carries no parens OR no named args.
+    /// Each entry is `(name, value)`. Positional args do NOT appear here.
+    pub named_args: Option<Vec<(String, Expr)>>,
 }
 
 /// Documentation comment parsed from block comments /** ... */ or line comments starting with ##

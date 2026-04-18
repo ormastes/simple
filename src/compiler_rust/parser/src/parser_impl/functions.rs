@@ -535,6 +535,7 @@ impl<'a> Parser<'a> {
                         name: "default".to_string(),
                         value: None,
                         args: None,
+                        named_args: None,
                     });
                     // Skip newlines after @default
                     while self.check(&TokenKind::Newline) {
@@ -595,6 +596,7 @@ impl<'a> Parser<'a> {
                         name,
                         value: None,
                         args: None,
+                        named_args: None,
                     }
                 })
                 .collect();

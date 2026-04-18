@@ -330,6 +330,7 @@ impl<'a> Parser<'a> {
                                 name: "default".to_string(),
                                 value: None,
                                 args: None,
+                                named_args: None,
                             });
                             return self.parse_impl_with_attrs(attributes);
                         }
@@ -351,6 +352,7 @@ impl<'a> Parser<'a> {
                                 name,
                                 value: None,
                                 args: None,
+                                named_args: None,
                             });
                         }
                     }

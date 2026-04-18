@@ -162,6 +162,7 @@ impl<'a> Parser<'a> {
             name,
             value,
             args,
+            named_args: None,
         })
     }
 
@@ -270,16 +271,40 @@ impl<'a> Parser<'a> {
             }
         };
 
-        // Check for arguments: @name(arg1, arg2).
-        // FR-DRIVER-0001 note: @driver / @native_lib accept positional
-        // args today (class, vendor, device, version). The named-arg
-        // form `@driver(class = ..., vendor = ...)` from the design doc
-        // lands once the Attribute schema carries argument names (see
-        // `Decorator { args: Option<Vec<Argument>> }` for the target
-        // shape). Positional preserves the manifest values on the AST;
-        // FR-DRIVER-0004 reads them when synthesizing the .drv_manifest
-        // SMF section.
-        let args = self.parse_optional_paren_args()?;
+        // Check for arguments: @name(arg1, arg2) OR @name(key = value, ...).
+        //
+        // FR-DRIVER-0004: parse via `parse_arguments()` (not the flat
+        // `parse_optional_paren_args`) so named arguments like
+        // `@driver(dclass = DriverClass.Block, vendor = 0x8086, ...)`
+        // survive parse with their names intact. `parse_arguments` already
+        // accepts keywords (`class`, `default`, ...) as named-arg keys.
+        //
+        // The typed `name = value` pairs land on `Attribute.named_args`;
+        // the `args` field keeps a flat `Vec<Expr>` (positional-first,
+        // then named-as-Identifier-placeholders) for backward-compat with
+        // pre-FR-0004 consumers that still expect raw `Expr`.
+        let (args, named_args) = if self.check(&TokenKind::LParen) {
+            let arguments = self.parse_arguments()?;
+            let mut positional: Vec<crate::ast::Expr> = Vec::new();
+            let mut named: Vec<(String, crate::ast::Expr)> = Vec::new();
+            for argument in arguments {
+                match argument.name {
+                    Some(nm) => {
+                        // Preserve the key as an Identifier in the flat
+                        // `args` list so legacy Identifier-matching code
+                        // still sees the name; the real value moves to
+                        // `named_args`.
+                        positional.push(crate::ast::Expr::Identifier(nm.clone()));
+                        named.push((nm, argument.value));
+                    }
+                    None => positional.push(argument.value),
+                }
+            }
+            let named_opt = if named.is_empty() { None } else { Some(named) };
+            (Some(positional), named_opt)
+        } else {
+            (None, None)
+        };
 
         Ok(Attribute {
             span: Span::new(
@@ -291,6 +316,7 @@ impl<'a> Parser<'a> {
             name,
             value: None,
             args,
+            named_args,
         })
     }
 
