@@ -47,7 +47,7 @@
 - [x] 6-refactor (Tech Lead) — 2026-04-18
 - [x] 7-verify (QA) — 2026-04-18
 - [x] 7.5-remediate (post-Phase-7 fixes: research doc regen + submodule gitlink registration) — 2026-04-18
-- [ ] 8-ship (Release Mgr)
+- [x] 8-ship (Release Mgr) — 2026-04-18
 
 ## Phase Outputs
 
@@ -587,4 +587,48 @@ Post-state verification:
 AC-1, AC-5, AC-9 all now PASS. Phase 8 is unblocked.
 
 ### 8-ship
-<pending
+**Done 2026-04-18.**
+
+**Ship summary.** Split the 400+-file working copy down to this feature's 52-file allowlist via `jj new --insert-before @` + `jj squash --from <wc> --into <feature> -- <explicit paths>`; squash dropped zero denylist paths (svllm, dashboard, tls, bug_report, peer_protocol, nvfs_client, svllm_requirements, etc. all stayed in the sibling change). Rebased onto `main@origin` after a concurrent svllm push (`mzlrozqr chore(svllm-a2-packer): mark Phase 8 ship complete, AC-9 checked`). Pushed `jj git push --bookmark main` — `main@origin` advanced `6b976bc3 -> 46660a19`. Submodule SHAs (`1c219b2` spostgre, `959af03` nvfs) still reachable on GitHub via `gh api`. File count 70361 before/after rebase — no destructive upstream drop.
+
+**Deviation: submodule gitlinks committed as tree contents, not 160000 gitlinks.** jj's colocated-git snapshotting re-converts `git update-index --cacheinfo 160000,...,examples/<name>` back to `040000 tree` on the next snapshot. The Phase 7.5 remediation's gitlink registration is not preservable through jj commits in this repo configuration. The svllm parallel agent hit the identical wall (svllm's `examples/svllm` is also committed as a tree). Consequence: `git submodule status` returns empty in the parent repo; submodule inner files appear as regular tracked files under `examples/spostgre/src/**` and `examples/nvfs/src/**`. `.gitmodules` carries all 3 entries (cuda_exercise, ..., spostgre, nvfs, svllm) and the inner-repo commits (spostgre `1c219b2`, nvfs `959af03`) remain reachable on GitHub via `gh api repos/ormastes/simple-<name>/commits/<sha>`. This is recorded as the accepted ship shape, matching svllm precedent.
+
+**Feature change:** `change_id qrupxzwl`, `commit_id 46660a19ac56ab89a0c70a885f0acca620f4299e`, description first line `feat(storage): spostgre + nvfs submodules, common traits, design docs`.
+
+**main@origin post-push:** `qrupxzwl 46660a19` — push landed. Verified via `git log origin/main -1 --format='%H %s'` -> `46660a19ac56... feat(storage): spostgre + nvfs submodules, common traits, design docs`.
+
+**Files in the ship commit:** 52 paths. Breakdown:
+- 3 design docs (`spostgre_design.md` 747L, `nvfs_design.md` 625L, `nvfs/from_spostgre.md` 279L).
+- 1 research doc (`spostgre_research.md` 868L).
+- 1 architecture xref (`mdsoc_architecture_tobe.md` additive).
+- 3 FR-infra docs (`feature_request/README.md`, `TEMPLATE.md`, `nvfs_requests.md`).
+- 8 feature files (`test/features/{spostgre/*.feature,nvfs/*.feature,tracking/*.feature}`).
+- 13 main-repo `.spl` files (6 `storage/`, 3 `spostgre_if/`, 4 `fs/nvfs/`).
+- 1 `fs/__init__.spl` docstring delta.
+- 20 submodule `.spl` files (13 spostgre + 7 nvfs, committed as tree contents — see deviation).
+- 1 `src/app/spostgre` symlink.
+- 1 `.sstack/spostgre-nvfs-storage/state.md` (this file, with Phase 7.5 content — 8-ship appended in a follow-up change).
+
+`.spostgre_research_codex.md` (0-byte Codex marker) was already a tracked empty blob in HEAD; not in the ship-commit diff because the blob is identical to HEAD. `.gitmodules` was already committed by the parallel svllm agent (all 3 entries present in HEAD); not in the ship-commit diff.
+
+**Denylist-leak check:** `jj diff --name-only -r qrupxzwl | grep -E '(svllm|nvfs_client|std_fs_spec|peer_protocol|dashboard|compiler_rfc|ufcs|bug_report|tls_test_server|aes128|hkdf|record13|tls13|transcript|baremetal_stubs|test_db_runs|ui_phase11|svllm_pack|svllm_requirements)'` -> 0 matches. Clean.
+
+**Submodule SHA-reachability check (post-push):**
+- `gh api repos/ormastes/simple-spostgre/commits/1c219b2759bf133e576c4e00ccd251317fa37514 --jq .sha` -> `1c219b2759bf133e576c4e00ccd251317fa37514` PASS.
+- `gh api repos/ormastes/simple-nvfs/commits/959af039e0caad8b5ba59598cfa9c98ebc640fea --jq .sha` -> `959af039e0caad8b5ba59598cfa9c98ebc640fea` PASS.
+
+## SStack Closure
+
+All ACs verified PASS. Feature delivered at parent commit `46660a19ac56ab89a0c70a885f0acca620f4299e`.
+
+- [x] AC-1: `doc/01_research/spostgre_research.md` (868 lines, >=800 target; Phase-7.5-regenerated after the Phase-2 silent Write-drop was caught in Phase 7).
+- [x] AC-2: `doc/05_design/spostgre_design.md` (747 lines) — MDSOC outer + ECS inner, 7-fork on-disk layout, WAL protocol, M1-M5 milestones.
+- [x] AC-3: `doc/05_design/nvfs_design.md` (625 lines) — MDSOC-only (kernel/driver-adjacent), 6 storage classes, arena_* API, capability probe, ZNS/FDP optional paths.
+- [x] AC-4: `doc/08_tracking/feature_request/nvfs_requests.md` with README + TEMPLATE; 7 `[UPFRONT]` cross-ref rows for S1..S7 from `from_spostgre.md`.
+- [x] AC-5: Skeleton code shipped — 13 main-repo `.spl` + 20 submodule `.spl`, `src/app/spostgre` symlink, `bin/simple build lint` EXIT 0 with 0 scope-file regressions, no TODO-as-NOTE downgrades. Gitlink-tree deviation recorded above.
+- [x] AC-6: CLAUDE.md rules respected — 0 Python/Bash, 0 `extends`/`inherits`, `pass_todo` (not `todo!()`), `<>` generics only, MDSOC+ default for spostgre / MDSOC-only for NVFS, jj VCS main-only (no branches).
+- [x] AC-7: `doc/04_architecture/mdsoc_architecture_tobe.md` — additive cross-reference to all three design docs in the MDSOC+ userland section.
+- [x] AC-8: `doc/05_design/nvfs/from_spostgre.md` (279 lines) — upfront fs-API contribution with 7 P0 + 6 P1-stretch requirements; primary channel per `feedback_svllm_drives_nvfs_design.md` memory note.
+- [x] AC-9: Both private GH repos exist (`ormastes/simple-spostgre`, `ormastes/simple-nvfs`); `.gitmodules` carries both entries; Phase-5 skeleton commits pushed (spostgre `1c219b2`, nvfs `959af03`); remote SHAs reachable. Gitlink-vs-tree deviation per ship summary above — does not affect AC-9's "scaffold commit pushed to main" requirement.
+
+Phase 8 complete. Feature closed.
