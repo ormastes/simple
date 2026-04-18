@@ -22,14 +22,16 @@ Scope excludes A3+ (streaming loader, KV cache, HTTP, etc.).
       parses header JSON + tensor metadata; unit-tested against a fixture.
 - [x] AC-3: **tensor_pack writer** in `.../tensor_pack.spl` — given list of TensorInfo + source bytes,
       emits aligned-chunk binary + manifest (sha256 over each chunk, total size, dtype table).
-- [~] AC-4: **Packer CLI** at `src/app/svllm_pack/main.spl` — logic real (280 LOC
-      parser + 110 LOC writer + 210 LOC CLI). `.sdn` + `data-NNN.bin` per arch.md §3.
-      Exit contract (0/1/2) pinned by `main_spec.spl` (4/4 load clean).
-      **End-to-end execution NOT reproduced this session** — `bin/simple run`
-      currently fails for every `.spl` including trivial `hello.spl`
-      (`[STDERR] Error running <script>`, exit 0). Pre-existing runtime-wrapper
-      regression, not an A2 defect. Phase 5 claimed a successful round-trip but
-      Phase 7 + this session cannot reproduce it. Follow-up filed.
+- [x] AC-4: **Packer CLI** at `src/app/svllm_pack/main.spl` — **end-to-end verified**
+      2026-04-18 via bootstrap binary (`src/compiler_rust/target/bootstrap/simple`).
+      Real round-trip on 168-byte fixture → `data-000.bin` (8192B, 4KB-aligned)
+      + `manifest.sdn` (441B); sha256 digest in manifest matches `sha256sum` of
+      data file byte-for-byte (`f2992c31cd61c8e0...`). Exit contract verified:
+      no args → 2 (usage); bad input → 1 ("input not found"); valid → 0.
+      **Fix landed this session:** `_ensure_dir` now idempotent on existing dirs
+      (check `rt_file_exists` first). Phase 7's "not reproducible" finding was
+      due to release-binary error swallowing + invalid test script syntax, not
+      a defect in the packer. (See `feedback_simple_run_wrapper_broken.md`.)
 - [x] AC-5: **Atomic-publish semantics** — writer stages `.bin.tmp` + `.manifest.tmp` then a
       two-step rename; documents the contract and the FAT32 gap filed as fs_request.
 - [x] AC-6: **Upfront nvfs contribution** — append to `doc/05_design/nvfs/svllm_requirements.md`
