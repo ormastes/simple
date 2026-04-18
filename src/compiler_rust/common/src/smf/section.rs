@@ -26,6 +26,12 @@ pub enum SectionType {
     SrcMap = 11,
     TemplateCode = 12,
     TemplateMeta = 13,
+    /// FR-DRIVER-0004: `.drv_manifest` section. Payload is a DRVS record
+    /// (magic 0x44525653, 64-byte header + 8 * device_count bytes)
+    /// produced by the compiler's @driver / @native_lib codegen glue and
+    /// decoded by `std.driver.loader::decode_manifest`. Kept in sync with
+    /// the spl `SectionType` in `70.backend/linker/smf_writer.spl`.
+    DrvManifest = 14,
 }
 
 impl SmfSection {
