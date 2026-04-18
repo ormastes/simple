@@ -268,6 +268,18 @@ pub(crate) fn compile_method_call_static<M: Module>(
                 })
                 .collect();
 
+            // 2026-04-18: same FuncId can appear under multiple keys
+            // (raw `Type.method` + mangled `module__Type_dot_method`
+            // both inserted in declare_functions at common_backend.rs).
+            // Dedupe by FuncId so true aliases of one function don't
+            // trigger spurious [CODEGEN-AMBIGUOUS-METHOD] warnings.
+            // See doc/05_design/compiler_rfc_ufcs.md
+            let mut seen_ids = std::collections::HashSet::new();
+            let candidates: Vec<_> = candidates
+                .into_iter()
+                .filter(|(_, id)| seen_ids.insert(**id))
+                .collect();
+
             if let Some(tq) = type_qualifier {
                 // Prefer candidate whose name contains the type qualifier
                 let tq_dot = format!("{}_dot_", tq);
