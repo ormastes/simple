@@ -268,18 +268,6 @@ pub(crate) fn compile_method_call_static<M: Module>(
                 })
                 .collect();
 
-            // 2026-04-18: same FuncId can appear under multiple keys
-            // (raw `Type.method` + mangled `module__Type_dot_method`
-            // both inserted in declare_functions at common_backend.rs).
-            // Dedupe by FuncId so true aliases of one function don't
-            // trigger spurious [CODEGEN-AMBIGUOUS-METHOD] warnings.
-            // See doc/05_design/compiler_rfc_ufcs.md
-            let mut seen_ids = std::collections::HashSet::new();
-            let candidates: Vec<_> = candidates
-                .into_iter()
-                .filter(|(_, id)| seen_ids.insert(**id))
-                .collect();
-
             if let Some(tq) = type_qualifier {
                 // Prefer candidate whose name contains the type qualifier
                 let tq_dot = format!("{}_dot_", tq);
@@ -348,6 +336,17 @@ pub(crate) fn compile_method_call_static<M: Module>(
             // keep the existing behaviour — the dot-prefix already picked
             // the right candidate above, and the tail here is only a
             // one-candidate fallthrough.
+            // 2026-04-18: same FuncId can appear under multiple keys (raw
+            // `Type.method` + mangled `module__Type_dot_method` both inserted
+            // by declare_functions in common_backend.rs:425-429 — intentional
+            // dual-registration for local-call resolution). When all surviving
+            // candidates point to the same FuncId, treat as one.
+            // See doc/05_design/compiler_rfc_ufcs.md.
+            let unique_ids: std::collections::HashSet<_> =
+                candidates.iter().map(|(_, id)| **id).collect();
+            if type_qualifier.is_none() && candidates.len() > 1 && unique_ids.len() == 1 {
+                return Some(*candidates[0].1);
+            }
             if type_qualifier.is_none() && candidates.len() > 1 {
                 let cand_names: Vec<&str> = candidates.iter().map(|(k, _)| k.as_str()).collect();
                 eprintln!(
